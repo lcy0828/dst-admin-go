@@ -2,15 +2,34 @@ package mod
 
 import (
 	"dont/models"
+	"flag"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/gocolly/colly"
+	"github.com/hpcloud/tail"
 	"log"
 	"net/http"
 	"os/exec"
+	"strings"
+	"sync"
 	"time"
 	"unsafe"
 )
+
+var wg sync.WaitGroup
+var mutex sync.Mutex
+
+var (
+	//fileName = flag.String("f", "/var/log/1.log", "日志文件")
+	fileName string
+)
+
+func init() {
+	//fileName := "/root/Steam/logs/workshop_log.txt"
+	flag.StringVar(&fileName, "f", "/root/Steam/logs/workshop_log.txt", "日志文件")
+	flag.Parse()
+
+}
 
 type Vote struct {
 	Num  string `form:"num" json:"num"`
@@ -18,17 +37,25 @@ type Vote struct {
 }
 
 type Searchmodinfo struct {
-	Auth string `form:"auth" json:"auth"`
-	Id   string `form:"id" json:"id"`
-	Img  string `form:"img" json:"img"`
-	Name string `form:"name" json:"name"`
-	Sub  int    `form:"sub" json:"sub"`
-	Time string `form:"time" json:"time"`
+	Auth    string `form:"auth" json:"auth"`
+	Id      string `form:"id" json:"id"`
+	Img     string `form:"img" json:"img"`
+	Name    string `form:"name" json:"name"`
+	Sub     int    `form:"sub" json:"sub"`
+	Time    string `form:"time" json:"time"`
+	Version string `form:"version" json:"version"`
+
 	Vote `form:"vote" json:"vote"`
+}
+type Modsearch struct {
+	//token string `form:"token" json:"token" uri:"token" xml:"token" binding:"required"`
+	Modname string `form:"modname" json:"modname" uri:"modname" xml:"modname" binding:"required"`
 }
 type Moddown struct {
 	//token string `form:"token" json:"token" uri:"token" xml:"token" binding:"required"`
-	Modid string `form:"modid" json:"modid" uri:"modid" xml:"modid" binding:"required"`
+	Modid   string `form:"modid" json:"modid" uri:"modid" xml:"modid" binding:"required"`
+	Refresh string `form:"refresh" json:"refresh" uri:"refresh" xml:"refresh" binding:"required"`
+	Version string `form:"version" json:"version" uri:"version" xml:"version" binding:"required"`
 }
 type modResult struct {
 	status  int    `json:"code"`
@@ -39,54 +66,37 @@ func BytesToString(b []byte) string {
 	return *(*string)(unsafe.Pointer(&b))
 }
 func SearchMod(g *gin.Context) {
+	var form Modsearch
+
+	if g.Bind(&form) == nil {
+		if form.Modname == "" {
+		}
+	}
 	var searchmodinfo [30]Searchmodinfo
 	// Instantiate default collector
 	c := colly.NewCollector(
 		colly.AllowedDomains("steamcommunity.com"),
 	)
 	c.Async = true
-	//c.Limit(&colly.LimitRule{
-	//	DomainGlob:  "*httpbin.*",
-	//	Parallelism: 4,
-	//	RandomDelay: 1 * time.Second, // 两次请求 随机延迟5s 内
-	//})
-	c.OnRequest(func(r *colly.Request) {
-		//r.Headers.Set("User-Agent", " Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36")
-		//r.Headers.Set("Host", "")
-		//r.Headers.Set("Origin", "")
-		//r.Headers.Set("Referer", "")
-		//r.Headers.Set("Cookie", " sessionid=557ef7d9e971b4fde1efd407; timezoneOffset=28800,0; _ga=GA1.2.1389503378.1669915073; _gid=GA1.2.262271622.1670247728; recentlyVisitedAppHubs=219740%2C322330; steamCountry=HK%7C08d71887c56ddb684406707b272fe261; workshopNumPerPage=9; arp_scroll_position=100; app_impressions=322330@2_9_100013_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|219740@2_9_100013_|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_9_100013_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_100101_100103|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_230_|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_")
-		r.Headers.Set("Accept-Language", " zh-CN,zh;q=0.9,en;q=0.8")
-		// 這幾行在這iT邦幫忙沒有起到作用，但有些網站會照這些資訊判斷、阻擋其他來源
+	c.Limit(&colly.LimitRule{
+
+		Parallelism: 10,
+		RandomDelay: 1 * time.Second, // 两次请求 随机延迟5s 内
 	})
-	//if p, err := proxy.RoundRobinProxySwitcher("socks5://127.0.0.1:1080", "http://127.0.0.1:1087"); err == nil {
-	//	c.SetProxyFunc(p)
-	//}
+	c.OnRequest(func(r *colly.Request) {
+		r.Headers.Set("Accept-Language", " zh-CN,zh;q=0.9,en;q=0.8")
+	})
+
 	q := 0
 	c.OnHTML("div[class=workshopItem]", func(e *colly.HTMLElement) {
 
 		searchmodinfo[q].Id = e.ChildAttr("a", "data-publishedfileid")
 		searchmodinfo[q].Img = e.ChildAttr("a>div>img", "src")
 		searchurl := e.ChildAttr("a[class=ugc]", "href")
-		//fileRating := e.ChildAttr("img[class=fileRating]", "src")
 		searchmodinfo[q].Name = e.ChildText("a[class=item_link]>div")
-		//modauthor := e.ChildText("div>a[class=workshop_author_link]")
-		//fmt.Println(modname)
-		//fmt.Println(modauthor)
-		//fmt.Println(modid)
-		//fmt.Println(imgurl)
-		//fmt.Println(searchurl)
 		if searchurl != "" {
 			c.Visit(searchurl)
 		}
-		//getmodextra(searchurl)
-		//fmt.Println(fileRating)
-		//link := e.Attr("href")
-		//// Print link
-		//fmt.Printf("Link found: %q -> %s\n", e.Text, link)
-		// Visit link found on page
-		// Only those links are visited which are in AllowedDomains
-		//c.Visit(e.Request.AbsoluteURL(link))
 		q++
 
 	})
@@ -114,26 +124,23 @@ func SearchMod(g *gin.Context) {
 		fmt.Println(modaddsub)
 
 	})
+	j := 0
+	c.OnHTML("div[class=workshopTags]", func(e *colly.HTMLElement) {
+		modversion := e.ChildText("a")
+		searchmodinfo[j].Version = modversion
+		j++
+		fmt.Println("modversion:")
+		fmt.Println(modversion)
+	})
 
 	c.OnRequest(func(r *colly.Request) {
 		fmt.Println("Visiting", r.URL.String())
 	})
-	// Start scraping on https://hackerspaces.org
-	c.Visit("https://steamcommunity.com/workshop/browse/?appid=322330&searchtext=棱镜&browsesort=trend&section=&actualsort=trend&p=1&days=-1&numperpage=30")
+	visurl := "https://steamcommunity.com/workshop/browse/?appid=322330&searchtext=" + form.Modname + "&browsesort=trend&section=&actualsort=trend&p=1&days=-1&numperpage=30"
+	c.Visit(visurl)
 	c.Wait()
 	fmt.Println(searchmodinfo)
 	g.JSON(http.StatusOK, searchmodinfo)
-}
-func AddMod(g *gin.Context) {
-	//
-	url := "https://workshop8.abcvg.info/archive/322330/1392778117.zip"
-	fileName := "1392778117.zip"
-	start := time.Now()
-	d := models.NewDownloader(url, fileName, "", 5)
-	if err := d.Download(); err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("下载%v 耗时：%v s", fileName, time.Since(start).Seconds())
 }
 
 func DownloadMod(g *gin.Context) {
@@ -143,25 +150,37 @@ func DownloadMod(g *gin.Context) {
 	if g.Bind(&form) == nil {
 		if form.Modid == "" {
 		}
+		if form.Refresh == "" {
+		}
 	}
-
-	//modinfo := jsonmod(form.Modid)
-	modinfo := DownloadMod2(form.Modid)
-	//modinfo = strings.Replace(modinfo, "\n", "\\n", -1)
-	//fmt.Printf(modinfo)
+	modinfo := DownloadMod2(form.Modid, form.Refresh, form.Version)
 	data := "{\"status\": 1, \"modinfo\": " + modinfo + "}"
 	fmt.Println(data)
 	g.String(http.StatusOK, data)
 
 }
+func checktemp(modid string) string {
+	ml := "cd /opt/go-dont/lua-sh/ && ls -l temp/" + modid
+	checkcmd := exec.Command("bash", "-c", ml)
+	_, cherr := checkcmd.CombinedOutput()
+	if cherr != nil {
+		//log.Fatalf("checkcmd.Run() failed with %s\n", cherr)
+		//return string(a1)
+		//fmt.Println(a1)
+		return "false"
+	}
+	//fmt.Println(a1)
+	//return string(a1)
+	return "ok"
+}
 func jsonmod(modid string) string {
-	ml := "rm -rf /opt/dont-sh/lua-sh/modinfo.lua && cp /root/Steam/steamapps/workshop/content/322330/" + modid + "/modinfo.lua /opt/dont-sh/lua-sh/modinfo.lua"
+	ml := "rm -rf /opt/go-dont/lua-sh/modinfo.lua && cp /root/Steam/steamapps/workshop/content/322330/" + modid + "/modinfo.lua /opt/go-dont/lua-sh/modinfo.lua"
 	checkcmd := exec.Command("bash", "-c", ml)
 	_, cherr := checkcmd.CombinedOutput()
 	if cherr != nil {
 		log.Fatalf("checkcmd.Run() failed with %s\n", cherr)
 	}
-	ml2 := "cd /opt/dont-sh/lua-sh/ && lua modgetinfo.lua"
+	ml2 := "cd /opt/go-dont/lua-sh/ && lua modgetinfo.lua"
 	checkcmd2 := exec.Command("bash", "-c", ml2)
 	check2, cherr2 := checkcmd2.CombinedOutput()
 	//fmt.Println(string(check2))
@@ -173,11 +192,22 @@ func jsonmod(modid string) string {
 
 }
 
-func DownloadMod2(modid string) string {
+func DownloadMod2(modid string, refresh string, version string) string {
 	var isrun bool
 	isrun = true
 	var form Moddown
-
+	fmt.Println("强制刷新:", refresh)
+	fmt.Println(checktemp(modid))
+	if checktemp(modid) == "ok" && refresh != "true" {
+		ml2 := "cd /opt/go-dont/lua-sh/temp/" + modid + "&& lua modgetinfo.lua"
+		checkcmd2 := exec.Command("bash", "-c", ml2)
+		check2, cherr2 := checkcmd2.CombinedOutput()
+		//fmt.Println(string(check2))
+		if cherr2 != nil {
+		}
+		fmt.Println("没有下载")
+		return string(check2)
+	}
 	checkcmd := exec.Command("bash", "-c", "tmux has-session -t DST_MODDOWN")
 	cheout, cherr := checkcmd.CombinedOutput()
 	fmt.Println("输出:", string(cheout), "错误信息", cherr)
@@ -189,7 +219,7 @@ func DownloadMod2(modid string) string {
 
 	fmt.Print(isrun)
 	if isrun == false {
-		cmd := exec.Command("bash", "-c", "cd /root && tmux new-session -s DST_MODDOWN -d \"./steamcmd.sh\"")
+		cmd := exec.Command("bash", "-c", "cd /opt/go-dont/steam && tmux new-session -s DST_MODDOWN -d \"./steamcmd.sh\"")
 
 		out, err := cmd.CombinedOutput()
 		fmt.Printf("combined out:\n%s\n", string(out))
@@ -214,50 +244,136 @@ func DownloadMod2(modid string) string {
 	if err2 != nil {
 		log.Fatalf("cmd2.Run() failed with %s\n", err2)
 	}
-	for i := 0; i < 10; i++ {
+	var chan1 = make(chan string, 10)
+	//wg.Add(1)
+	go readmod(modid, chan1)
+	//wg.Wait()
+	p1 := 0
+	errorresult := ""
+	for {
+		i, ok := <-chan1
 
+		if i == "接收到模组下载请求" && ok {
+			fmt.Println(i)
+			continue
+		} else if i == "模组正在下载" && ok {
+			fmt.Println(i)
+			continue
+		} else if i == "下载成功" && ok {
+			fmt.Println(i)
+			fmt.Println("开始写入数据库")
+			models.Updatemodversion(modid, version)
+			p1 = 1
+			break
+		} else if i == "下载失败" {
+			fmt.Println("下载失败")
+			break
+		} else if i == "接收到模组下载结果信息" {
+			fmt.Println(i)
+		} else {
+			fmt.Println(i)
+			errorresult = i
+			break
+		}
+		if p1 == 1 {
+			break
+		}
 	}
-
-	ml2 := "rm -rf /opt/dont-sh/lua-sh/modinfo.lua && cp /root/Steam/steamapps/workshop/content/322330/" + modid + "/modinfo.lua /opt/dont-sh/lua-sh/modinfo.lua && cd /opt/dont-sh/lua-sh/ && lua modgetinfo.lua"
+	length := len(modid) + 61
+	//fmt.Println(len(errorresult))
+	if p1 == 0 {
+		return errorresult[length : len(errorresult)-1]
+		//return "下载失败"
+	}
+	ml2 := "rm -rf /opt/go-dont/lua-sh/modinfo.lua && cp /root/Steam/steamapps/workshop/content/322330/" + modid + "/modinfo.lua /opt/go-dont/lua-sh/modinfo.lua && cd /opt/go-dont/lua-sh/ && mkdir -p temp/" + modid + " && cp -f modgetinfo.lua cjson.so modinfo.lua temp/" + modid + "/ && lua modgetinfo.lua"
 	checkcmd2 := exec.Command("bash", "-c", ml2)
 	check2, cherr2 := checkcmd2.CombinedOutput()
-	fmt.Println(string(check2))
-	fmt.Println(cherr2)
-	//if cherr2 != nil {
-	//	log.Fatalf("checkcmd123123.Run() failed with %s\n", cherr2)
-	//}
+	//fmt.Println(string(check2))
+	if cherr2 != nil {
+	}
+	//fmt.Println(cherr2)
+
 	return string(check2)
 }
-func getmodextra(url string) {
-	c := colly.NewCollector(
-		colly.AllowedDomains("steamcommunity.com"),
-	)
-	c.Async = true
-	//c.Limit(&colly.LimitRule{
-	//	DomainGlob:  "*httpbin.*",
-	//	Parallelism: 4,
-	//	RandomDelay: 1 * time.Second, // 两次请求 随机延迟5s 内
-	//})
-	c.OnRequest(func(r *colly.Request) {
-		//r.Headers.Set("User-Agent", " Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36")
-		//r.Headers.Set("Host", "")
-		//r.Headers.Set("Origin", "")
-		//r.Headers.Set("Referer", "")
-		//r.Headers.Set("Cookie", " sessionid=557ef7d9e971b4fde1efd407; timezoneOffset=28800,0; _ga=GA1.2.1389503378.1669915073; _gid=GA1.2.262271622.1670247728; recentlyVisitedAppHubs=219740%2C322330; steamCountry=HK%7C08d71887c56ddb684406707b272fe261; workshopNumPerPage=9; arp_scroll_position=100; app_impressions=322330@2_9_100013_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|219740@2_9_100013_|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_9_100013_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_100101_100103|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_230_|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_100101_100103|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_|322330@2_100100_230_")
-		r.Headers.Set("Accept-Language", " zh-CN,zh;q=0.9,en;q=0.8")
-		// 這幾行在這iT邦幫忙沒有起到作用，但有些網站會照這些資訊判斷、阻擋其他來源
-	})
-	//if p, err := proxy.RoundRobinProxySwitcher("socks5://127.0.0.1:1080", "http://127.0.0.1:1087"); err == nil {
-	//	c.SetProxyFunc(p)
-	//}
 
-	// Before making a request print "Visiting ..."
-	c.OnRequest(func(r *colly.Request) {
-		fmt.Println("Visiting", r.URL.String())
-	})
+// ////合并到search内部
+//
+//	func getmodextra(url string) {
+//		c := colly.NewCollector(
+//			colly.AllowedDomains("steamcommunity.com"),
+//		)
+//		c.Async = true
+//		c.OnRequest(func(r *colly.Request) {
+//			r.Headers.Set("Accept-Language", " zh-CN,zh;q=0.9,en;q=0.8")
+//		})
+//		//if p, err := proxy.RoundRobinProxySwitcher("socks5://127.0.0.1:1080", "http://127.0.0.1:1087"); err == nil {
+//		//	c.SetProxyFunc(p)
+//		//}
+//
+//		c.OnRequest(func(r *colly.Request) {
+//			fmt.Println("Visiting", r.URL.String())
+//		})
+//		c.Visit(url)
+//		c.Wait()
+//		return
+//	}
+func readmod(modid string, ch chan string) {
+	p := 0
+	mod1 := "Download item " + modid + " requested by app"
+	mod2 := "Starting Workshop download job (requested item " + modid + " )"
+	mod3 := "Download item " + modid + " result"
+	fmt.Println(mod1)
+	fmt.Println(mod2)
+	fmt.Println(mod3)
+	tailConfig := tail.Config{
+		ReOpen:    true,
+		Follow:    true,
+		Location:  &tail.SeekInfo{Offset: 0, Whence: 2},
+		MustExist: false,
+		Poll:      true,
+	}
 
-	// Start scraping on https://hackerspaces.org
-	c.Visit(url)
-	c.Wait()
-	return
+	tails, err := tail.TailFile(fileName, tailConfig)
+	if err != nil {
+		fmt.Println("tail.TailFile error", err)
+	}
+
+	for {
+		line, ok := <-tails.Lines
+		if !ok {
+			fmt.Printf("tail file close reopen, filename:%s\n", tails.Filename)
+			time.Sleep(time.Second)
+			continue
+		}
+		//fmt.Print("123:", line.Text)
+		if strings.Contains(line.Text, mod1) {
+			//fmt.Println("接收到模组下载请求")
+			ch <- "接收到模组下载请求"
+			//fmt.Println("发送mod1")
+		} else if strings.Contains(line.Text, mod2) {
+			//fmt.Println("模组正在下载")
+			ch <- "模组正在下载"
+			//fmt.Println("发送mod2")
+		} else if strings.Contains(line.Text, mod3) {
+			//fmt.Println("接收到模组下载结果信息")
+			ch <- "接收到模组下载结果信息"
+			if strings.Contains(line.Text, "result : OK") {
+				//fmt.Println("下载成功")
+				ch <- "下载成功"
+				fmt.Println("发送下载成功")
+				p = 1
+			} else {
+				//fmt.Println("下载失败")
+				ch <- line.Text
+				fmt.Println("发送", line.Text)
+				p = 1
+			}
+
+		}
+		if p == 1 {
+			//fmt.Println("结束了")
+			break
+		}
+	}
+
 }

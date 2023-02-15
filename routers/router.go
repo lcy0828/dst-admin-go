@@ -1,11 +1,14 @@
 package routers
 
 import (
+	"dont/controller"
 	"dont/middleware/jwt"
 	"dont/pkg/setting"
 	"dont/routers/api"
 	"dont/routers/api/v1"
 	"dont/routers/mod"
+	"dont/routers/status"
+	"dont/routers/user"
 	"github.com/gin-gonic/gin"
 )
 
@@ -15,6 +18,7 @@ func InitRouter() *gin.Engine {
 	r.Use(gin.Recovery())
 	gin.SetMode(setting.RunMode)
 	r.GET("/auth", api.GetAuth)
+
 	apiv1 := r.Group("/api/v1")
 	apiv1.Use(jwt.JWT())
 	{
@@ -30,17 +34,25 @@ func InitRouter() *gin.Engine {
 	apimod := r.Group("/mod")
 	//apimod.Use(jwt.JWT())
 	{
-		//获取标签列表
-		apimod.GET("/tags", mod.SearchMod)
-		apimod.GET("/add", mod.AddMod)
+		apimod.GET("/search", mod.SearchMod)
+		//apimod.GET("/add", mod.AddMod)
 		apimod.POST("/down", mod.DownloadMod)
 		apimod.GET("/down", mod.DownloadMod)
-		//新建标签
-		//apiv1.POST("/tags", v1.AddTag)
-		//更新指定标签
-		//apiv1.PUT("/tags/:id", v1.EditTag)
-		//删除指定标签
-		//apiv1.DELETE("/tags/:id", v1.DeleteTag)
+	}
+	apistatus := r.Group("/status")
+	//apimod.Use(jwt.JWT())
+	apistatus.Use(controller.AuthMiddleWare())
+	{
+
+		apistatus.GET("/systeminfo", status.Cpuinfo)
+	}
+	users := r.Group("/user")
+
+	{
+		users.GET("/login", user.Login)
+		users.GET("/changepasswd", user.ChangePass)
+		users.Use(controller.AuthMiddleWare())
+		users.GET("/systeminfo", status.Cpuinfo)
 	}
 	return r
 }
