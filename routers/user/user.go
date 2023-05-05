@@ -54,8 +54,8 @@ func Login(g *gin.Context) {
 					code = e.SUCCESS
 					mess = e.GetMsg(code)
 				}
-				g.SetCookie("login", "ok", 3600, "/", "", false, true)
-				g.SetCookie("token", token, 3600, "/", "", false, true)
+				g.SetCookie("login", "ok", 3600, "/", "*", false, false)
+				g.SetCookie("token", token, 3600, "/", "*", false, false)
 				models.Login_sent(form.Username)
 			} else {
 				code = e.ERROR_PASS

@@ -9,13 +9,20 @@ import (
 	"dont/routers/mod"
 	"dont/routers/status"
 	"dont/routers/user"
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
 func InitRouter() *gin.Engine {
 	r := gin.New()
+
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
+	config := cors.DefaultConfig()
+	config.AllowOrigins = []string{"http://192.168.40.9:8080"} // 允许来自指定域名的请求
+	config.AllowCredentials = true                             // 允许发送跨域凭据（例如 Cookie）
+	r.Use(cors.New(config))
+
 	gin.SetMode(setting.RunMode)
 	r.GET("/auth", api.GetAuth)
 
