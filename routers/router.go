@@ -49,7 +49,10 @@ func InitRouter() *gin.Engine {
 	users := r.Group("/user")
 
 	{
-		users.GET("/login", user.Login)
+		users.GET("/captcha/img", user.Img)
+		users.GET("/account/info", user.Info)
+		users.GET("/account/permmenu", user.Permmenu)
+		users.POST("/login", user.Login)
 		users.GET("/changepasswd", user.ChangePass)
 		users.Use(controller.AuthMiddleWare())
 		users.GET("/systeminfo", status.Cpuinfo)

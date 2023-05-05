@@ -12,8 +12,10 @@ import (
 )
 
 type user struct {
-	Username string `form:"username" json:"username" uri:"username" xml:"username" binding:"required"`
-	Password string `form:"password" json:"password" uri:"password" xml:"password" binding:"required"`
+	Username   string `form:"username" json:"username" uri:"username" xml:"username" binding:"required"`
+	Password   string `form:"password" json:"password" uri:"password" xml:"password" binding:"required"`
+	CaptchaId  string `form:"captchaId" json:"captchaId" uri:"captchaId" xml:"captchaId" binding:"required"`
+	VerifyCode string `form:"verifyCode" json:"verifyCode" uri:"verifyCode" xml:"verifyCode" binding:"required"`
 }
 type userchange struct {
 	Username  string `form:"username" json:"username" uri:"username" xml:"username" binding:"required"`
@@ -64,11 +66,23 @@ func Login(g *gin.Context) {
 				log.Println(err.Key, err.Message)
 			}
 		}
+		fmt.Println("验证码结果：", CaptVerify(form.CaptchaId, form.VerifyCode))
+		fmt.Println(form.CaptchaId)
+		fmt.Println(form.VerifyCode)
+		if CaptVerify(form.CaptchaId, form.VerifyCode) {
+			fmt.Println(form.CaptchaId, form.VerifyCode)
+			fmt.Println("验证码正确")
+		} else {
+			code = e.INVALID_PARAMS
+			mess = "验证码错误"
+			delete(data, "token")
+		}
 		g.JSON(http.StatusOK, gin.H{
-			"code": code,
-			"msg":  mess,
-			"data": data,
+			"code":    code,
+			"message": mess,
+			"data":    data,
 		})
+
 	}
 
 }

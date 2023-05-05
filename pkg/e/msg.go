@@ -1,7 +1,8 @@
 package e
 
 var MsgFlags = map[int]string{
-	SUCCESS:                        "ok",
+	//SUCCESS:                        "ok",
+	SUCCESS:                        "success",
 	ERROR:                          "fail",
 	INVALID_PARAMS:                 "请求参数错误",
 	ERROR_EXIST_TAG:                "已存在该标签名称",
