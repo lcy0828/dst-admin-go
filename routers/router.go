@@ -19,8 +19,8 @@ func InitRouter() *gin.Engine {
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
 	config := cors.DefaultConfig()
-	config.AllowOrigins = []string{"http://192.168.40.9:8080"} // 允许来自指定域名的请求
-	config.AllowCredentials = true                             // 允许发送跨域凭据（例如 Cookie）
+	config.AllowOrigins = []string{"http://192.168.3.33:5173/", "http://192.168.2.212:5173/", "http://10.12.254.139:5173", "http://1.12.251.70:5173"} // 允许来自指定域名的请求
+	config.AllowCredentials = true                                                                                                                    // 允许发送跨域凭据（例如 Cookie）
 	r.Use(cors.New(config))
 
 	gin.SetMode(setting.RunMode)
