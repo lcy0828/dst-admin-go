@@ -37,13 +37,13 @@ type Vote struct {
 }
 
 type Searchmodinfo struct {
-	Auth    string `form:"auth" json:"auth"`
-	Id      string `form:"id" json:"id"`
-	Img     string `form:"img" json:"img"`
-	Name    string `form:"name" json:"name"`
-	Sub     int    `form:"sub" json:"sub"`
-	Time    string `form:"time" json:"time"`
-	Version string `form:"version" json:"version"`
+	Auth    string `form:"auth" json:"auth"`       //作者
+	Id      string `form:"id" json:"id"`           //模组id
+	Img     string `form:"img" json:"img"`         //模组图片
+	Name    string `form:"name" json:"name"`       //模组名字
+	Sub     int    `form:"sub" json:"sub"`         //
+	Time    string `form:"time" json:"time"`       //更新时间
+	Version string `form:"version" json:"version"` //版本
 
 	Vote `form:"vote" json:"vote"`
 }
@@ -94,6 +94,11 @@ func SearchMod(g *gin.Context) {
 		searchmodinfo[q].Img = e.ChildAttr("a>div>img", "src")
 		searchurl := e.ChildAttr("a[class=ugc]", "href")
 		searchmodinfo[q].Name = e.ChildText("a[class=item_link]>div")
+		author := e.ChildText("div>a[class=workshop_author_link]")
+		fmt.Println("模组名字:", searchmodinfo[q].Name)
+		fmt.Println("模组作者:", author)
+		searchmodinfo[q].Auth = author
+
 		if searchurl != "" {
 			c.Visit(searchurl)
 		}
