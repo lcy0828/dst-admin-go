@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ var mutex sync.Mutex
 var (
 	//fileName = flag.String("f", "/var/log/1.log", "日志文件")
 	fileName string
+	p1       int
 )
 
 func init() {
@@ -37,13 +39,14 @@ type Vote struct {
 }
 
 type Searchmodinfo struct {
-	Auth    string `form:"auth" json:"auth"`       //作者
-	Id      string `form:"id" json:"id"`           //模组id
-	Img     string `form:"img" json:"img"`         //模组图片
-	Name    string `form:"name" json:"name"`       //模组名字
-	Sub     int    `form:"sub" json:"sub"`         //
-	Time    string `form:"time" json:"time"`       //更新时间
-	Version string `form:"version" json:"version"` //版本
+	Auth     string `form:"auth" json:"auth"`         //作者
+	Id       string `form:"id" json:"id"`             //模组id
+	Img      string `form:"img" json:"img"`           //模组图片
+	Name     string `form:"name" json:"name"`         //模组名字
+	Sub      string `form:"sub" json:"sub"`           //
+	Time     string `form:"time" json:"time"`         //更新时间
+	Version  string `form:"version" json:"version"`   //版本
+	Describe string `form:"describe" json:"describe"` //版本
 
 	Vote `form:"vote" json:"vote"`
 }
@@ -80,9 +83,10 @@ func SearchMod(g *gin.Context) {
 	c.Async = true
 	c.Limit(&colly.LimitRule{
 
-		Parallelism: 10,
+		Parallelism: 15,
 		RandomDelay: 1 * time.Second, // 两次请求 随机延迟5s 内
 	})
+
 	c.OnRequest(func(r *colly.Request) {
 		r.Headers.Set("Accept-Language", " zh-CN,zh;q=0.9,en;q=0.8")
 	})
@@ -98,15 +102,16 @@ func SearchMod(g *gin.Context) {
 		fmt.Println("模组名字:", searchmodinfo[q].Name)
 		fmt.Println("模组作者:", author)
 		searchmodinfo[q].Auth = author
-
+		q++
 		if searchurl != "" {
 			c.Visit(searchurl)
+			//que.AddURL(searchurl)
 		}
-		q++
 
 	})
 	w := 0
 	c.OnHTML("div[class=detailsStatsContainerRight]", func(e *colly.HTMLElement) {
+		fmt.Println("id1:", c.ID)
 		modsize := e.ChildText("div:nth-child(1)")
 		modaddtime := e.ChildText("div:nth-child(2)")
 		moduptime := e.ChildText("div:nth-child(3)")
@@ -119,10 +124,11 @@ func SearchMod(g *gin.Context) {
 	})
 	p := 0
 	c.OnHTML("table[class=stats_table]", func(e *colly.HTMLElement) {
+		fmt.Println("id2:", c.ID)
 		modnoresub := e.ChildText("tbody>tr:nth-child(1)>td:nth-child(1)")
 		modnowsub := e.ChildText("tbody>tr:nth-child(2)>td:nth-child(1)")
 		modaddsub := e.ChildText("tbody>tr:nth-child(3)>td:nth-child(1)")
-		searchmodinfo[p].Vote.Num = modnowsub
+		searchmodinfo[p].Sub = modnowsub
 		p++
 		fmt.Println(modnoresub)
 		fmt.Println(modnowsub)
@@ -137,6 +143,14 @@ func SearchMod(g *gin.Context) {
 		fmt.Println("modversion:")
 		fmt.Println(modversion)
 	})
+	//l := 0
+	//c.OnHTML("div[class=workshopItemDescription]", func(e *colly.HTMLElement) {
+	//	//describe := e.ChildText("div[class=workshopItemDescription]")
+	//	describe := e.Text
+	//	searchmodinfo[l].Describe = describe
+	//	l++
+	//	fmt.Println("描述:", describe)
+	//})
 
 	c.OnRequest(func(r *colly.Request) {
 		fmt.Println("Visiting", r.URL.String())
@@ -144,6 +158,7 @@ func SearchMod(g *gin.Context) {
 	visurl := "https://steamcommunity.com/workshop/browse/?appid=322330&searchtext=" + form.Modname + "&browsesort=trend&section=&actualsort=trend&p=1&days=-1&numperpage=30"
 	c.Visit(visurl)
 	c.Wait()
+	//que.Run(c)
 	fmt.Println(searchmodinfo)
 	g.JSON(http.StatusOK, searchmodinfo)
 }
@@ -158,8 +173,20 @@ func DownloadMod(g *gin.Context) {
 		if form.Refresh == "" {
 		}
 	}
+	p1 = 0
+	status := 401
+	fmt.Println("form:", form)
+	fmt.Println("refresh值:", form.Refresh)
 	modinfo := DownloadMod2(form.Modid, form.Refresh, form.Version)
-	data := "{\"status\": 1, \"modinfo\": " + modinfo + "}"
+	if p1 == 0 {
+		status = 400
+	} else if p1 == 1 {
+		status = 200
+	}
+	if status == 401 {
+		modinfo = "异常退出"
+	}
+	data := "{\"status\": " + strconv.Itoa(status) + ", \"modinfo\": " + modinfo + "}"
 	fmt.Println(data)
 	g.String(http.StatusOK, data)
 
@@ -211,6 +238,7 @@ func DownloadMod2(modid string, refresh string, version string) string {
 		if cherr2 != nil {
 		}
 		fmt.Println("没有下载")
+		p1 = 1
 		return string(check2)
 	}
 	checkcmd := exec.Command("bash", "-c", "tmux has-session -t DST_MODDOWN")
@@ -253,7 +281,7 @@ func DownloadMod2(modid string, refresh string, version string) string {
 	//wg.Add(1)
 	go readmod(modid, chan1)
 	//wg.Wait()
-	p1 := 0
+	p1 = 0
 	errorresult := ""
 	for {
 		i, ok := <-chan1
@@ -305,6 +333,7 @@ func DownloadMod2(modid string, refresh string, version string) string {
 //
 //	func getmodextra(url string) {
 //		c := colly.NewCollector(
+
 //			colly.AllowedDomains("steamcommunity.com"),
 //		)
 //		c.Async = true
