@@ -2,6 +2,7 @@ package routers
 
 import (
 	"dont/controller"
+	"dont/middleware/cors"
 	"dont/middleware/jwt"
 	"dont/pkg/setting"
 	"dont/routers/api"
@@ -9,7 +10,7 @@ import (
 	"dont/routers/mod"
 	"dont/routers/status"
 	"dont/routers/user"
-	"github.com/gin-contrib/cors"
+	"dont/routers/serverlog"
 	"github.com/gin-gonic/gin"
 )
 
@@ -18,10 +19,12 @@ func InitRouter() *gin.Engine {
 
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
-	config := cors.DefaultConfig()
-	config.AllowOrigins = []string{"http://192.168.2.12:5173"} // 允许来自指定域名的请求
-	config.AllowCredentials = true                                                                                                                    // 允许发送跨域凭据（例如 Cookie）
-	r.Use(cors.New(config))
+	//config := cors.DefaultConfig()
+	//config.AllowOrigins = []string{"*"} // 允许来自指定域名的请求
+	//config.AllowCredentials = true                                                                                                                    // 允许发送跨域凭据（例如 Cookie）
+	//config.AllowOrigins = []s // 允许来自指定域名的请求
+	//r.Use(cors.New(config))
+	r.Use(cors.Cors())
 
 	gin.SetMode(setting.RunMode)
 	r.GET("/auth", api.GetAuth)
@@ -54,7 +57,6 @@ func InitRouter() *gin.Engine {
 		apistatus.GET("/systeminfo", status.Cpuinfo)
 	}
 	users := r.Group("/user")
-
 	{
 		users.GET("/captcha/img", user.Img)
 		users.GET("/account/info", user.Info)
@@ -63,6 +65,11 @@ func InitRouter() *gin.Engine {
 		users.GET("/changepasswd", user.ChangePass)
 		users.Use(controller.AuthMiddleWare())
 		users.GET("/systeminfo", status.Cpuinfo)
+	}
+	ws := r.Group("/ws")
+	{
+		ws.GET("/serverlog",serverlog.Logtailf)
+		//ws.GET("/log",serverlog.Lslog)
 	}
 	return r
 }

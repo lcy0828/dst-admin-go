@@ -3,6 +3,7 @@ package controller
 import (
 	"dont/pkg/e"
 	"dont/pkg/util"
+	"fmt"
 	"github.com/gin-gonic/gin"
 	"net/http"
 	"time"
@@ -11,7 +12,8 @@ import (
 func AuthMiddleWare() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 获取客户端cookie并校验
-		//fmt.Println(c)
+		fmt.Println(c.GetHeader(c.GetHeader("Authorization")))
+		fmt.Println(c.Cookie("login"))
 		if cookie, err := c.Cookie("login"); err == nil {
 			if cookie == "ok" {
 				//c.Next()

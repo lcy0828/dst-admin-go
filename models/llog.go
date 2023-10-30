@@ -9,13 +9,13 @@ import (
 var wg sync.WaitGroup
 
 func SaverFiletest() {
-	//var logg = log.LogMes("")
+	//var logg = serverlog.LogMes("")
 	//logg = "现在呢"
 	//logg.INFO()
 
 	//并发买票和测试
-	//log.Pay()
-	//log.Paytest()
+	//serverlog.Pay()
+	//serverlog.Paytest()
 
 	//并发测试
 	wg.Add(4)

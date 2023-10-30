@@ -31,7 +31,7 @@ func Savefile(s string, mesg string) {
 	}()
 	mutexx.Lock()
 	var runtime = time.Now().Format("2006-01-02 15:04:05\r\n")
-	var runtimeCompare = time.Now().Format(s + "_2006_01_02_15.log")
+	var runtimeCompare = time.Now().Format(s + "_2006_01_02_15.serverlog")
 	//fmt.Println(nowtime_compare)
 	var filename = runtimeCompare
 	var file *os.File

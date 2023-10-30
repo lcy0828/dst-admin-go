@@ -21,7 +21,7 @@ var wg sync.WaitGroup
 var mutex sync.Mutex
 
 var (
-	//fileName = flag.String("f", "/var/log/1.log", "日志文件")
+	//fileName = flag.String("f", "/var/serverlog/1.serverlog", "日志文件")
 	fileName string
 	p1       int
 )
@@ -196,7 +196,7 @@ func checktemp(modid string) string {
 	checkcmd := exec.Command("bash", "-c", ml)
 	_, cherr := checkcmd.CombinedOutput()
 	if cherr != nil {
-		//log.Fatalf("checkcmd.Run() failed with %s\n", cherr)
+		//serverlog.Fatalf("checkcmd.Run() failed with %s\n", cherr)
 		//return string(a1)
 		//fmt.Println(a1)
 		return "false"
