@@ -8,9 +8,9 @@ import (
 	"dont/routers/api"
 	"dont/routers/api/v1"
 	"dont/routers/mod"
+	"dont/routers/serverlog"
 	"dont/routers/status"
 	"dont/routers/user"
-	"dont/routers/serverlog"
 	"github.com/gin-gonic/gin"
 )
 
@@ -51,7 +51,7 @@ func InitRouter() *gin.Engine {
 	}
 	apistatus := r.Group("/status")
 	//apimod.Use(jwt.JWT())
-	apistatus.Use(controller.AuthMiddleWare())
+	//apistatus.Use(controller.AuthMiddleWare())
 	{
 
 		apistatus.GET("/systeminfo", status.Cpuinfo)
@@ -68,7 +68,7 @@ func InitRouter() *gin.Engine {
 	}
 	ws := r.Group("/ws")
 	{
-		ws.GET("/serverlog",serverlog.Logtailf)
+		ws.GET("/serverlog", serverlog.Logtailf)
 		//ws.GET("/log",serverlog.Lslog)
 	}
 	return r
