@@ -2,6 +2,7 @@ package mod
 
 import (
 	"dont/models"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/gin-gonic/gin"
@@ -10,355 +11,431 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unsafe"
 )
 
+// 配置常量
+const (
+	appID           = "322330" // 饥荒联机版的AppID
+	steamCmdPath    = "/opt/go-dont/steam"
+	luaShPath       = "/opt/go-dont/lua-sh"
+	workshopContent = "/root/Steam/steamapps/workshop/content/322330"
+	tmuxSessionName = "DST_MODDOWN"
+)
+
 var wg sync.WaitGroup
 var mutex sync.Mutex
 
 var (
-	//fileName = flag.String("f", "/var/serverlog/1.serverlog", "日志文件")
 	fileName string
 	p1       int
 )
 
 func init() {
-	//fileName := "/root/Steam/logs/workshop_log.txt"
 	flag.StringVar(&fileName, "f", "/root/Steam/logs/workshop_log.txt", "日志文件")
 	flag.Parse()
-
 }
 
+// Vote 模组评分结构
 type Vote struct {
 	Num  string `form:"num" json:"num"`
-	Star int    `form:"star" json:"num"`
+	Star int    `form:"star" json:"star"`
 }
 
+// Searchmodinfo 模组搜索结果信息
 type Searchmodinfo struct {
-	Auth     string `form:"auth" json:"auth"`         //作者
-	Id       string `form:"id" json:"id"`             //模组id
-	Img      string `form:"img" json:"img"`           //模组图片
-	Name     string `form:"name" json:"name"`         //模组名字
-	Sub      string `form:"sub" json:"sub"`           //
-	Time     string `form:"time" json:"time"`         //更新时间
-	Version  string `form:"version" json:"version"`   //版本
-	Describe string `form:"describe" json:"describe"` //版本
+	Auth     string `form:"auth" json:"auth"`         // 作者
+	Id       string `form:"id" json:"id"`             // 模组id
+	Img      string `form:"img" json:"img"`           // 模组图片
+	Name     string `form:"name" json:"name"`         // 模组名字
+	Sub      string `form:"sub" json:"sub"`           // 订阅数
+	Time     string `form:"time" json:"time"`         // 更新时间
+	Version  string `form:"version" json:"version"`   // 版本
+	Describe string `form:"describe" json:"describe"` // 描述
 
 	Vote `form:"vote" json:"vote"`
 }
+
+// Modsearch 模组搜索请求参数
 type Modsearch struct {
-	//token string `form:"token" json:"token" uri:"token" xml:"token" binding:"required"`
 	Modname string `form:"modname" json:"modname" uri:"modname" xml:"modname" binding:"required"`
 }
+
+// Moddown 模组下载请求参数
 type Moddown struct {
-	//token string `form:"token" json:"token" uri:"token" xml:"token" binding:"required"`
 	Modid   string `form:"modid" json:"modid" uri:"modid" xml:"modid" binding:"required"`
 	Refresh string `form:"refresh" json:"refresh" uri:"refresh" xml:"refresh" binding:"required"`
 	Version string `form:"version" json:"version" uri:"version" xml:"version" binding:"required"`
 }
-type modResult struct {
-	status  int    `json:"code"`
-	modinfo string `json:"msg"`
+
+// APIResponse 标准API响应结构
+type APIResponse struct {
+	Status int    `json:"status"`
+	Info   string `json:"modinfo"`
 }
 
+// BytesToString 字节数组转字符串
 func BytesToString(b []byte) string {
 	return *(*string)(unsafe.Pointer(&b))
 }
+
+// SearchMod 搜索模组处理函数
 func SearchMod(g *gin.Context) {
 	var form Modsearch
 
-	if g.Bind(&form) == nil {
-		if form.Modname == "" {
-		}
+	if err := g.Bind(&form); err != nil {
+		g.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误"})
+		return
 	}
-	var searchmodinfo [30]Searchmodinfo
-	// Instantiate default collector
+
+	// 使用map存储模组信息，以模组ID为键
+	modInfoMap := make(map[string]*Searchmodinfo)
+	var modList []string // 保持模组顺序
+	
+	// 互斥锁用于保护map的并发访问
+	var mapMutex sync.Mutex
+
+	// 初始化爬虫
 	c := colly.NewCollector(
 		colly.AllowedDomains("steamcommunity.com"),
 	)
 	c.Async = true
 	c.Limit(&colly.LimitRule{
-
-		Parallelism: 1,
-		RandomDelay: 1 * time.Second, // 两次请求 随机延迟5s 内
+		Parallelism: 2, // 增加并行度提高爬取速度
+		RandomDelay: 1 * time.Second,
 	})
 
 	c.OnRequest(func(r *colly.Request) {
-		r.Headers.Set("Accept-Language", " zh-CN,zh;q=0.9,en;q=0.8")
+		r.Headers.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+		log.Println("正在访问:", r.URL.String())
 	})
 
-	q := 0
+	// 解析模组基础信息
 	c.OnHTML("div[class=workshopItem]", func(e *colly.HTMLElement) {
-
-		searchmodinfo[q].Id = e.ChildAttr("a", "data-publishedfileid")
-		searchmodinfo[q].Img = e.ChildAttr("a>div>img", "src")
-		searchurl := e.ChildAttr("a[class=ugc]", "href")
-		searchmodinfo[q].Name = e.ChildText("a[class=item_link]>div")
-		author := e.ChildText("div>a[class=workshop_author_link]")
-		fmt.Println("模组名字:", searchmodinfo[q].Name)
-		fmt.Println("模组作者:", author)
-		searchmodinfo[q].Auth = author
-		q++
-		if searchurl != "" {
-			c.Visit(searchurl)
-			//que.AddURL(searchurl)
+		modID := e.ChildAttr("a", "data-publishedfileid")
+		if modID == "" {
+			return
 		}
-
+		
+		mapMutex.Lock()
+		
+		// 检查是否已存在，如果不存在则创建新项
+		if _, exists := modInfoMap[modID]; !exists {
+			modInfoMap[modID] = &Searchmodinfo{Id: modID}
+			modList = append(modList, modID) // 保持顺序
+		}
+		
+		// 更新模组基本信息
+		modInfoMap[modID].Img = e.ChildAttr("a>div>img", "src")
+		modInfoMap[modID].Name = e.ChildText("a[class=item_link]>div")
+		modInfoMap[modID].Auth = e.ChildText("div>a[class=workshop_author_link]")
+		
+		mapMutex.Unlock()
+		
+		log.Printf("找到模组: %s (ID: %s, 作者: %s)", 
+			modInfoMap[modID].Name, modID, modInfoMap[modID].Auth)
+		
+		// 访问详情页获取更多信息
+		detailURL := e.ChildAttr("a[class=ugc]", "href")
+		if detailURL != "" {
+			// 将模组ID作为上下文传递给详情页爬取
+			detailCtx := colly.NewContext()
+			detailCtx.Put("modID", modID)
+			c.Request("GET", detailURL, nil, detailCtx, nil)
+		}
 	})
-	w := 0
+
+	// 解析模组详细统计信息
 	c.OnHTML("div[class=detailsStatsContainerRight]", func(e *colly.HTMLElement) {
-		fmt.Println("id1:", c.ID)
-		modsize := e.ChildText("div:nth-child(1)")
-		modaddtime := e.ChildText("div:nth-child(2)")
+		// 从上下文获取模组ID
+		modID := e.Request.Ctx.Get("modID")
+		if modID == "" {
+			return
+		}
+		
+		mapMutex.Lock()
+		defer mapMutex.Unlock()
+		
+		if _, exists := modInfoMap[modID]; !exists {
+			// 如果模组ID不存在，可能是爬虫直接访问了详情页
+			return
+		}
+		
+		// 获取并设置模组时间信息
 		moduptime := e.ChildText("div:nth-child(3)")
-		searchmodinfo[w].Time = moduptime
-		fmt.Println(modsize)
-		fmt.Println(modaddtime)
-		fmt.Println(moduptime)
-		w++
-
+		if moduptime != "" {
+			modInfoMap[modID].Time = moduptime
+			log.Printf("模组 %s 更新时间: %s", modID, moduptime)
+		}
 	})
-	p := 0
+
+	// 解析模组订阅信息
 	c.OnHTML("table[class=stats_table]", func(e *colly.HTMLElement) {
-		fmt.Println("id2:", c.ID)
-		modnoresub := e.ChildText("tbody>tr:nth-child(1)>td:nth-child(1)")
+		modID := e.Request.Ctx.Get("modID")
+		if modID == "" {
+			return
+		}
+		
+		mapMutex.Lock()
+		defer mapMutex.Unlock()
+		
+		if _, exists := modInfoMap[modID]; !exists {
+			return
+		}
+		
+		// 获取并设置订阅信息
 		modnowsub := e.ChildText("tbody>tr:nth-child(2)>td:nth-child(1)")
-		modaddsub := e.ChildText("tbody>tr:nth-child(3)>td:nth-child(1)")
-		searchmodinfo[p].Sub = modnowsub
-		p++
-		fmt.Println(modnoresub)
-		fmt.Println(modnowsub)
-		fmt.Println(modaddsub)
-
+		if modnowsub != "" {
+			modInfoMap[modID].Sub = modnowsub
+			log.Printf("模组 %s 订阅数: %s", modID, modnowsub)
+		}
 	})
-	j := 0
+
+	// 解析模组版本信息
 	c.OnHTML("div[class=workshopTags]", func(e *colly.HTMLElement) {
+		modID := e.Request.Ctx.Get("modID")
+		if modID == "" {
+			return
+		}
+		
+		mapMutex.Lock()
+		defer mapMutex.Unlock()
+		
+		if _, exists := modInfoMap[modID]; !exists {
+			return
+		}
+		
+		// 获取并设置版本信息
 		modversion := e.ChildText("a")
-		searchmodinfo[j].Version = modversion
-		j++
-		fmt.Println("modversion:")
-		fmt.Println(modversion)
+		if modversion != "" {
+			modInfoMap[modID].Version = modversion
+			log.Printf("模组 %s 版本: %s", modID, modversion)
+		}
 	})
-	//l := 0
-	//c.OnHTML("div[class=workshopItemDescription]", func(e *colly.HTMLElement) {
-	//	//describe := e.ChildText("div[class=workshopItemDescription]")
-	//	describe := e.Text
-	//	searchmodinfo[l].Describe = describe
-	//	l++
-	//	fmt.Println("描述:", describe)
-	//})
 
-	c.OnRequest(func(r *colly.Request) {
-		fmt.Println("Visiting", r.URL.String())
-	})
-	visurl := "https://steamcommunity.com/workshop/browse/?appid=322330&searchtext=" + form.Modname + "&browsesort=trend&section=&actualsort=trend&p=1&days=-1&numperpage=30"
-	c.Visit(visurl)
+	// 访问搜索页面
+	searchURL := fmt.Sprintf(
+		"https://steamcommunity.com/workshop/browse/?appid=%s&searchtext=%s&browsesort=trend&section=&actualsort=trend&p=1&days=-1&numperpage=30",
+		appID, form.Modname,
+	)
+
+	if err := c.Visit(searchURL); err != nil {
+		g.JSON(http.StatusInternalServerError, gin.H{"error": "搜索失败"})
+		return
+	}
+	
 	c.Wait()
-	//que.Run(c)
-	fmt.Println(searchmodinfo)
-	g.JSON(http.StatusOK, searchmodinfo)
+	
+	// 按原始顺序构建结果数组
+	var searchResults [30]Searchmodinfo
+	for i, modID := range modList {
+		if i >= 30 {
+			break // 最多返回30个结果
+		}
+		if info, exists := modInfoMap[modID]; exists {
+			searchResults[i] = *info
+		}
+	}
+	
+	g.JSON(http.StatusOK, searchResults)
 }
 
+// DownloadMod 下载模组处理函数
 func DownloadMod(g *gin.Context) {
-
 	var form Moddown
 
-	if g.Bind(&form) == nil {
-		if form.Modid == "" {
-		}
-		if form.Refresh == "" {
-		}
+	if err := g.Bind(&form); err != nil {
+		g.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误"})
+		return
 	}
+
 	p1 = 0
 	status := 401
-	fmt.Println("form:", form)
-	fmt.Println("refresh值:", form.Refresh)
+	log.Printf("收到模组下载请求: ID=%s, 刷新=%s, 版本=%s", form.Modid, form.Refresh, form.Version)
+
 	modinfo := DownloadMod2(form.Modid, form.Refresh, form.Version)
-	if p1 == 0 {
+
+	switch p1 {
+	case 0:
 		status = 400
-	} else if p1 == 1 {
+	case 1:
 		status = 200
-	}
-	if status == 401 {
+	default:
+		status = 401
 		modinfo = "异常退出"
 	}
-	data := "{\"status\": " + strconv.Itoa(status) + ", \"modinfo\": " + modinfo + "}"
-	fmt.Println(data)
-	g.String(http.StatusOK, data)
 
+	response := APIResponse{
+		Status: status,
+		Info:   modinfo,
+	}
+
+	jsonData, err := json.Marshal(response)
+	if err != nil {
+		g.String(http.StatusInternalServerError, "{\"status\": 500, \"modinfo\": \"服务器内部错误\"}")
+		return
+	}
+
+	g.Header("Content-Type", "application/json")
+	g.String(http.StatusOK, string(jsonData))
 }
+
 func checktemp(modid string) string {
-	ml := "cd /opt/go-dont/lua-sh/ && ls -l temp/" + modid
-	checkcmd := exec.Command("bash", "-c", ml)
-	_, cherr := checkcmd.CombinedOutput()
-	if cherr != nil {
-		//serverlog.Fatalf("checkcmd.Run() failed with %s\n", cherr)
-		//return string(a1)
-		//fmt.Println(a1)
+	cmd := fmt.Sprintf("cd %s && ls -l temp/%s", luaShPath, modid)
+	if _, err := exec.Command("bash", "-c", cmd).CombinedOutput(); err != nil {
 		return "false"
 	}
-	//fmt.Println(a1)
-	//return string(a1)
 	return "ok"
 }
-func jsonmod(modid string) string {
-	ml := "rm -rf /opt/go-dont/lua-sh/modinfo.lua && cp /root/Steam/steamapps/workshop/content/322330/" + modid + "/modinfo.lua /opt/go-dont/lua-sh/modinfo.lua"
-	checkcmd := exec.Command("bash", "-c", ml)
-	_, cherr := checkcmd.CombinedOutput()
-	if cherr != nil {
-		log.Fatalf("checkcmd.Run() failed with %s\n", cherr)
-	}
-	ml2 := "cd /opt/go-dont/lua-sh/ && lua modgetinfo.lua"
-	checkcmd2 := exec.Command("bash", "-c", ml2)
-	check2, cherr2 := checkcmd2.CombinedOutput()
-	//fmt.Println(string(check2))
-	//fmt.Println(cherr2)
-	if cherr2 != nil {
-		log.Fatalf("checkcmd123123.Run() failed with %s\n", cherr2)
-	}
-	return string(check2)
 
+func jsonmod(modid string) string {
+	// 复制模组信息到处理目录
+	copyCmd := fmt.Sprintf("rm -rf %s/modinfo.lua && cp %s/%s/modinfo.lua %s/modinfo.lua",
+		luaShPath, workshopContent, modid, luaShPath)
+
+	if _, err := exec.Command("bash", "-c", copyCmd).CombinedOutput(); err != nil {
+		log.Printf("复制模组信息失败: %v", err)
+		return "{\"error\": \"复制模组信息失败\"}"
+	}
+
+	// 使用Lua脚本解析模组信息
+	parseCmd := fmt.Sprintf("cd %s && lua modgetinfo.lua", luaShPath)
+	output, err := exec.Command("bash", "-c", parseCmd).CombinedOutput()
+
+	if err != nil {
+		log.Printf("解析模组信息失败: %v", err)
+		return "{\"error\": \"解析模组信息失败\"}"
+	}
+
+	return string(output)
 }
 
 func DownloadMod2(modid string, refresh string, version string) string {
-	var isrun bool
-	isrun = true
-	var form Moddown
-	fmt.Println("强制刷新:", refresh)
-	fmt.Println(checktemp(modid))
+	log.Printf("处理模组下载: ID=%s, 强制刷新=%s", modid, refresh)
+
+	// 检查缓存
 	if checktemp(modid) == "ok" && refresh != "true" {
-		ml2 := "cd /opt/go-dont/lua-sh/temp/" + modid + "&& lua modgetinfo.lua"
-		checkcmd2 := exec.Command("bash", "-c", ml2)
-		check2, cherr2 := checkcmd2.CombinedOutput()
-		//fmt.Println(string(check2))
-		if cherr2 != nil {
-		}
-		fmt.Println("没有下载")
-		p1 = 1
-		return string(check2)
-	}
-	checkcmd := exec.Command("bash", "-c", "tmux has-session -t DST_MODDOWN")
-	cheout, cherr := checkcmd.CombinedOutput()
-	fmt.Println("输出:", string(cheout), "错误信息", cherr)
-	//fmt.Println(cherr == nil)
-	if cherr != nil {
-		isrun = false
-	}
-	fmt.Println(cheout)
+		log.Println("使用缓存的模组信息")
+		cmd := fmt.Sprintf("cd %s/temp/%s && lua modgetinfo.lua", luaShPath, modid)
+		output, err := exec.Command("bash", "-c", cmd).CombinedOutput()
 
-	fmt.Print(isrun)
-	if isrun == false {
-		cmd := exec.Command("bash", "-c", "cd /opt/go-dont/steam && tmux new-session -s DST_MODDOWN -d \"./steamcmd.sh\"")
+		if err == nil {
+			p1 = 1
+			return string(output)
+		}
 
-		out, err := cmd.CombinedOutput()
-		fmt.Printf("combined out:\n%s\n", string(out))
-		if err != nil {
-			log.Fatalf("cmd.Run() failed with %s\n", err)
-		}
-		cmd1 := exec.Command("bash", "-c", "tmux send-keys -t DST_MODDOWN 'login anonymous' C-m")
-		out1, err1 := cmd1.CombinedOutput()
-		fmt.Printf("combined out1:\n%s\n", string(out1))
-		if err1 != nil {
-			log.Fatalf("cmd1.Run() failed with %s\n", err1)
-		}
+		log.Printf("读取缓存失败: %v", err)
+	}
+
+	// 检查tmux会话是否存在
+	var isSessionExists bool
+	checkCmd := exec.Command("bash", "-c", fmt.Sprintf("tmux has-session -t %s", tmuxSessionName))
+
+	if err := checkCmd.Run(); err != nil {
+		isSessionExists = false
 	} else {
-		fmt.Printf("已经存在tmux")
+		isSessionExists = true
+		log.Println("已存在tmux会话")
 	}
 
-	fmt.Println("Modid:", form.Modid)
-	ml := "tmux send-keys -t DST_MODDOWN 'workshop_download_item 322330 " + modid + "' C-m"
-	cmd2 := exec.Command("bash", "-c", ml)
-	out2, err2 := cmd2.CombinedOutput()
-	fmt.Printf("combined out2:\n%s\n", string(out2))
-	if err2 != nil {
-		log.Fatalf("cmd2.Run() failed with %s\n", err2)
+	// 如果会话不存在，创建新会话
+	if !isSessionExists {
+		initCmd := fmt.Sprintf("cd %s && tmux new-session -s %s -d \"./steamcmd.sh\"",
+			steamCmdPath, tmuxSessionName)
+
+		cmd := exec.Command("bash", "-c", initCmd)
+		if err := cmd.Run(); err != nil {
+			log.Printf("创建tmux会话失败: %v", err)
+			return "创建会话失败"
+		}
+
+		// 登录Steam
+		loginCmd := fmt.Sprintf("tmux send-keys -t %s 'login anonymous' C-m", tmuxSessionName)
+		cmd = exec.Command("bash", "-c", loginCmd)
+		if err := cmd.Run(); err != nil {
+			log.Printf("Steam登录失败: %v", err)
+			return "Steam登录失败"
+		}
 	}
-	var chan1 = make(chan string, 10)
-	//wg.Add(1)
-	go readmod(modid, chan1)
-	//wg.Wait()
+
+	// 发送下载命令
+	downloadCmd := fmt.Sprintf("tmux send-keys -t %s 'workshop_download_item %s %s' C-m",
+		tmuxSessionName, appID, modid)
+
+	cmd := exec.Command("bash", "-c", downloadCmd)
+	if err := cmd.Run(); err != nil {
+		log.Printf("发送下载命令失败: %v", err)
+		return "发送下载命令失败"
+	}
+
+	// 创建通道监听下载进度
+	downloadStatusChan := make(chan string, 10)
+	go readmod(modid, downloadStatusChan)
+
 	p1 = 0
-	errorresult := ""
-	for {
-		i, ok := <-chan1
+	errorResult := ""
 
-		if i == "接收到模组下载请求" && ok {
-			fmt.Println(i)
+	// 处理下载状态
+	for statusMsg := range downloadStatusChan {
+		log.Printf("下载状态: %s", statusMsg)
+
+		switch statusMsg {
+		case "接收到模组下载请求", "模组正在下载", "接收到模组下载结果信息":
 			continue
-		} else if i == "模组正在下载" && ok {
-			fmt.Println(i)
-			continue
-		} else if i == "下载成功" && ok {
-			fmt.Println(i)
-			fmt.Println("开始写入数据库")
+		case "下载成功":
+			log.Println("模组下载成功，开始更新数据库")
 			models.Updatemodversion(modid, version)
 			p1 = 1
+			close(downloadStatusChan)
 			break
-		} else if i == "下载失败" {
-			fmt.Println("下载失败")
+		case "下载失败":
+			log.Println("模组下载失败")
+			close(downloadStatusChan)
 			break
-		} else if i == "接收到模组下载结果信息" {
-			fmt.Println(i)
-		} else {
-			fmt.Println(i)
-			errorresult = i
+		default:
+			errorResult = statusMsg
+			close(downloadStatusChan)
 			break
 		}
+
 		if p1 == 1 {
 			break
 		}
 	}
-	length := len(modid) + 61
-	//fmt.Println(len(errorresult))
-	if p1 == 0 {
-		return errorresult[length : len(errorresult)-1]
-		//return "下载失败"
-	}
-	ml2 := "rm -rf /opt/go-dont/lua-sh/modinfo.lua && cp /root/Steam/steamapps/workshop/content/322330/" + modid + "/modinfo.lua /opt/go-dont/lua-sh/modinfo.lua && cd /opt/go-dont/lua-sh/ && mkdir -p temp/" + modid + " && cp -f modgetinfo.lua cjson.so modinfo.lua temp/" + modid + "/ && lua modgetinfo.lua"
-	checkcmd2 := exec.Command("bash", "-c", ml2)
-	check2, cherr2 := checkcmd2.CombinedOutput()
-	//fmt.Println(string(check2))
-	if cherr2 != nil {
-	}
-	//fmt.Println(cherr2)
 
-	return string(check2)
+	// 下载失败处理
+	if p1 == 0 && errorResult != "" {
+		length := len(modid) + 61
+		if len(errorResult) > length {
+			return errorResult[length : len(errorResult)-1]
+		}
+		return "下载失败"
+	}
+
+	// 处理下载成功的模组信息
+	createCacheCmd := fmt.Sprintf("rm -rf %s/modinfo.lua && cp %s/%s/modinfo.lua %s/modinfo.lua && cd %s && mkdir -p temp/%s && cp -f modgetinfo.lua cjson.so modinfo.lua temp/%s/ && lua modgetinfo.lua",
+		luaShPath, workshopContent, modid, luaShPath, luaShPath, modid, modid)
+
+	cmd = exec.Command("bash", "-c", createCacheCmd)
+	output, _ := cmd.CombinedOutput()
+
+	return string(output)
 }
 
-// ////合并到search内部
-//
-//	func getmodextra(url string) {
-//		c := colly.NewCollector(
-
-//			colly.AllowedDomains("steamcommunity.com"),
-//		)
-//		c.Async = true
-//		c.OnRequest(func(r *colly.Request) {
-//			r.Headers.Set("Accept-Language", " zh-CN,zh;q=0.9,en;q=0.8")
-//		})
-//		//if p, err := proxy.RoundRobinProxySwitcher("socks5://127.0.0.1:1080", "http://127.0.0.1:1087"); err == nil {
-//		//	c.SetProxyFunc(p)
-//		//}
-//
-//		c.OnRequest(func(r *colly.Request) {
-//			fmt.Println("Visiting", r.URL.String())
-//		})
-//		c.Visit(url)
-//		c.Wait()
-//		return
-//	}
 func readmod(modid string, ch chan string) {
-	p := 0
+	downloadComplete := false
+
+	// 定义需要监控的日志关键字
 	mod1 := "Download item " + modid + " requested by app"
 	mod2 := "Starting Workshop download job (requested item " + modid + " )"
 	mod3 := "Download item " + modid + " result"
-	fmt.Println(mod1)
-	fmt.Println(mod2)
-	fmt.Println(mod3)
+
+	log.Printf("开始监控模组 %s 的下载日志", modid)
+
+	// 配置tail
 	tailConfig := tail.Config{
 		ReOpen:    true,
 		Follow:    true,
@@ -369,45 +446,47 @@ func readmod(modid string, ch chan string) {
 
 	tails, err := tail.TailFile(fileName, tailConfig)
 	if err != nil {
-		fmt.Println("tail.TailFile error", err)
+		log.Printf("监控日志文件失败: %v", err)
+		ch <- "下载失败"
+		return
 	}
 
+	// 设置超时保护
+	timeout := time.After(5 * time.Minute)
+
+	// 监控日志
 	for {
-		line, ok := <-tails.Lines
-		if !ok {
-			fmt.Printf("tail file close reopen, filename:%s\n", tails.Filename)
-			time.Sleep(time.Second)
-			continue
-		}
-		//fmt.Print("123:", line.Text)
-		if strings.Contains(line.Text, mod1) {
-			//fmt.Println("接收到模组下载请求")
-			ch <- "接收到模组下载请求"
-			//fmt.Println("发送mod1")
-		} else if strings.Contains(line.Text, mod2) {
-			//fmt.Println("模组正在下载")
-			ch <- "模组正在下载"
-			//fmt.Println("发送mod2")
-		} else if strings.Contains(line.Text, mod3) {
-			//fmt.Println("接收到模组下载结果信息")
-			ch <- "接收到模组下载结果信息"
-			if strings.Contains(line.Text, "result : OK") {
-				//fmt.Println("下载成功")
-				ch <- "下载成功"
-				fmt.Println("发送下载成功")
-				p = 1
-			} else {
-				//fmt.Println("下载失败")
-				ch <- line.Text
-				fmt.Println("发送", line.Text)
-				p = 1
+		select {
+		case <-timeout:
+			log.Printf("下载模组 %s 超时", modid)
+			ch <- "下载失败，超时"
+			return
+		case line, ok := <-tails.Lines:
+			if !ok {
+				log.Printf("日志文件关闭，尝试重新打开: %s", tails.Filename)
+				time.Sleep(time.Second)
+				continue
 			}
 
-		}
-		if p == 1 {
-			//fmt.Println("结束了")
-			break
+			if strings.Contains(line.Text, mod1) {
+				ch <- "接收到模组下载请求"
+			} else if strings.Contains(line.Text, mod2) {
+				ch <- "模组正在下载"
+			} else if strings.Contains(line.Text, mod3) {
+				ch <- "接收到模组下载结果信息"
+				if strings.Contains(line.Text, "result : OK") {
+					ch <- "下载成功"
+					downloadComplete = true
+				} else {
+					ch <- line.Text
+					downloadComplete = true
+				}
+			}
+
+			if downloadComplete {
+				log.Printf("模组 %s 下载过程完成", modid)
+				return
+			}
 		}
 	}
-
 }
