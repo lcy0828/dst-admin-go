@@ -268,19 +268,11 @@ func DownloadMod(g *gin.Context) {
 		modinfo = "异常退出"
 	}
 
-	response := APIResponse{
-		Status: status,
-		Info:   modinfo,
-	}
-
-	jsonData, err := json.Marshal(response)
-	if err != nil {
-		g.String(http.StatusInternalServerError, "{\"status\": 500, \"modinfo\": \"服务器内部错误\"}")
-		return
-	}
-
+	// 直接构建JSON字符串，避免嵌套JSON被转义
+	data := fmt.Sprintf("{\"status\": %d, \"modinfo\": %s}", status, modinfo)
+	
 	g.Header("Content-Type", "application/json")
-	g.String(http.StatusOK, string(jsonData))
+	g.String(http.StatusOK, data)
 }
 
 func checktemp(modid string) string {
