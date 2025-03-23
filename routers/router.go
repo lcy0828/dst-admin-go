@@ -1,75 +1,88 @@
 package routers
 
 import (
-	"dont/controller"
-	"dont/middleware/cors"
-	"dont/middleware/jwt"
-	"dont/pkg/setting"
-	"dont/routers/api"
-	"dont/routers/api/v1"
+	"dont/middleware"
+	"dont/routers/auth"
+	"dont/routers/dashboard"
+	"dont/routers/dstserver"
 	"dont/routers/mod"
-	"dont/routers/serverlog"
-	"dont/routers/status"
+	"dont/routers/server"
+	"dont/routers/tag"
 	"dont/routers/user"
 	"github.com/gin-gonic/gin"
 )
 
+// InitRouter 初始化路由
 func InitRouter() *gin.Engine {
-	r := gin.New()
+	router := gin.New()
 
-	r.Use(gin.Logger())
-	r.Use(gin.Recovery())
-	//config := cors.DefaultConfig()
-	//config.AllowOrigins = []string{"*"} // 允许来自指定域名的请求
-	//config.AllowCredentials = true                                                                                                                    // 允许发送跨域凭据（例如 Cookie）
-	//config.AllowOrigins = []s // 允许来自指定域名的请求
-	//r.Use(cors.New(config))
-	r.Use(cors.Cors())
+	//use middleware
+	router.Use(
+		gin.Logger(),
+		gin.Recovery(),
+		middleware.CorsMiddleware(),
+	)
 
-	gin.SetMode(setting.RunMode)
-	r.GET("/auth", api.GetAuth)
+	api := router.Group("/api")
+	{
+		// Auth
+		auths := api.Group("/auth")
+		{
+			auths.POST("/login", auth.Login)
+			auths.POST("/register", auth.Register)
+			auths.GET("/status", auth.CheckToken)
+		}
 
-	apiv1 := r.Group("/api/v1")
-	apiv1.Use(jwt.JWT())
-	{
-		//获取标签列表
-		apiv1.GET("/tags", v1.GetTags)
-		//新建标签
-		apiv1.POST("/tags", v1.AddTag)
-		//更新指定标签
-		apiv1.PUT("/tags/:id", v1.EditTag)
-		//删除指定标签
-		apiv1.DELETE("/tags/:id", v1.DeleteTag)
-	}
-	apimod := r.Group("/mod")
-	//apimod.Use(jwt.JWT())
-	{
-		apimod.GET("/search", mod.SearchMod)
-		//apimod.GET("/add", mod.AddMod)
-		apimod.POST("/down", mod.DownloadMod)
-		apimod.GET("/down", mod.DownloadMod)
-	}
-	apistatus := r.Group("/status")
-	//apimod.Use(jwt.JWT())
-	//apistatus.Use(controller.AuthMiddleWare())
-	{
+		// Tags
+		tagss := api.Group("/tags")
+		{
+			tagss.POST("/", middleware.JWTAuth(), tag.AddTag)
+			tagss.DELETE("/:id", middleware.JWTAuth(), tag.DeleteTag)
+			tagss.PUT("/", middleware.JWTAuth(), tag.EditTag)
+			tagss.GET("/", tag.GetTags)
+		}
 
-		apistatus.GET("/systeminfo", status.Cpuinfo)
+		// Users
+		users := api.Group("/user")
+		{
+			users.GET("/info", middleware.JWTAuth(), user.GetUserInfo)
+			users.POST("/info", middleware.JWTAuth(), user.EditUserInfo)
+		}
+
+		// Server Logs
+		serlogs := api.Group("/server").Use(middleware.JWTAuth())
+		{
+			serlogs.GET("/log", server.ServerLog)
+			serlogs.POST("/log", server.ServerLog)
+			serlogs.GET("/status", server.Status)
+			serlogs.POST("/status", server.Status)
+			serlogs.GET("/log/download", server.DownloadLog)
+		}
+
+		// Dashboard
+		dashboard := api.Group("/dashboard")
+		{
+			dashboard.GET("/", dashboard.DashboardInfo)
+		}
+
+		// Mods
+		mods := api.Group("/mod")
+		{
+			mods.GET("/search/:keyword/:page", mod.SearchMod)
+			mods.GET("/download", mod.DownloadMod)
+			mods.GET("/log", mod.ModLog)
+			mods.GET("/local", mod.LocalModList)
+			mods.DELETE("/local", mod.DeleteLocalMod)
+		}
+		
+		// DST服务器配置管理
+		dstservers := api.Group("/dstserver")
+		{
+			dstservers.GET("/list", dstserver.GetServerList)
+			dstservers.GET("/config/:savename", dstserver.GetServerConfig)
+			dstservers.POST("/config/:savename", dstserver.UpdateServerConfig)
+		}
 	}
-	users := r.Group("/user")
-	{
-		users.GET("/captcha/img", user.Img)
-		users.GET("/account/info", user.Info)
-		users.GET("/account/permmenu", user.Permmenu)
-		users.POST("/login", user.Login)
-		users.GET("/changepasswd", user.ChangePass)
-		users.Use(controller.AuthMiddleWare())
-		users.GET("/systeminfo", status.Cpuinfo)
-	}
-	ws := r.Group("/ws")
-	{
-		ws.GET("/serverlog", serverlog.Logtailf)
-		//ws.GET("/log",serverlog.Lslog)
-	}
-	return r
+
+	return router
 }

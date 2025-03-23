@@ -2,7 +2,6 @@ package mod
 
 import (
 	"dont/models"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/gin-gonic/gin"
@@ -19,11 +18,11 @@ import (
 
 // 配置常量
 const (
-	appID           = "322330" // 饥荒联机版的AppID
-	steamCmdPath    = "/opt/go-dont/steam"
-	luaShPath       = "/opt/go-dont/lua-sh"
-	workshopContent = "/root/Steam/steamapps/workshop/content/322330"
-	tmuxSessionName = "DST_MODDOWN"
+	appID             = "322330" // 饥荒联机版的AppID
+	steamCmdPath      = "/opt/go-dont/steam"
+	luaShPath         = "/opt/go-dont/lua-sh"
+	workshopContent   = "/root/Steam/steamapps/workshop/content/322330"
+	tmuxSessionName   = "DST_MODDOWN"
 )
 
 var wg sync.WaitGroup
@@ -47,14 +46,15 @@ type Vote struct {
 
 // Searchmodinfo 模组搜索结果信息
 type Searchmodinfo struct {
-	Auth     string `form:"auth" json:"auth"`         // 作者
-	Id       string `form:"id" json:"id"`             // 模组id
-	Img      string `form:"img" json:"img"`           // 模组图片
-	Name     string `form:"name" json:"name"`         // 模组名字
-	Sub      string `form:"sub" json:"sub"`           // 订阅数
-	Time     string `form:"time" json:"time"`         // 更新时间
-	Version  string `form:"version" json:"version"`   // 版本
-	Describe string `form:"describe" json:"describe"` // 描述
+	Auth      string `form:"auth" json:"auth"`             // 作者
+	Id        string `form:"id" json:"id"`                 // 模组id
+	Img       string `form:"img" json:"img"`               // 模组图片
+	Name      string `form:"name" json:"name"`             // 模组名字
+	Sub       string `form:"sub" json:"sub"`               // 订阅数
+	Time      string `form:"time" json:"time"`             // 更新时间
+	Version   string `form:"version" json:"version"`       // 版本
+	Describe  string `form:"describe" json:"describe"`     // 描述
+	RatingImg string `form:"rating_img" json:"rating_img"` // 评分图片
 
 	Vote `form:"vote" json:"vote"`
 }
@@ -132,6 +132,25 @@ func SearchMod(g *gin.Context) {
 		modInfoMap[modID].Img = e.ChildAttr("a>div>img", "src")
 		modInfoMap[modID].Name = e.ChildText("a[class=item_link]>div")
 		modInfoMap[modID].Auth = e.ChildText("div>a[class=workshop_author_link]")
+		
+		// 提取评分图片
+		ratingImg := e.ChildAttr("img.fileRating", "src")
+		if ratingImg == "" {
+			// 尝试另一种选择器格式
+			ratingImg = e.ChildAttr("img[class=fileRating]", "src")
+		}
+		// 如果仍然找不到，尝试更宽泛的搜索
+		if ratingImg == "" {
+			e.ForEach("img", func(_ int, img *colly.HTMLElement) {
+				if img.Attr("class") == "fileRating" {
+					ratingImg = img.Attr("src")
+				}
+			})
+		}
+		if ratingImg != "" {
+			modInfoMap[modID].RatingImg = ratingImg
+			log.Printf("模组 %s 评分图片: %s", modID, ratingImg)
+		}
 		
 		mapMutex.Unlock()
 		
