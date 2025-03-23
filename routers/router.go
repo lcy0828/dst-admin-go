@@ -67,8 +67,9 @@ func InitRouter() *gin.Engine {
 		// Mods
 		mods := api.Group("/mod")
 		{
-			mods.GET("/search/:keyword/:page", mod.SearchMod)
+			mods.GET("/search", mod.SearchMod)
 			mods.GET("/download", mod.DownloadMod)
+			mods.POST("/download", mod.DownloadMod) // 添加POST方法支持
 			mods.GET("/log", server.ServerLog) // 临时使用server.ServerLog替代
 			mods.GET("/local", server.Status) // 临时使用server.Status替代
 			mods.DELETE("/local", server.Status) // 临时使用server.Status替代

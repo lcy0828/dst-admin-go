@@ -84,10 +84,20 @@ func BytesToString(b []byte) string {
 
 // SearchMod 搜索模组处理函数
 func SearchMod(g *gin.Context) {
-	var form Modsearch
+	keyword := g.Query("keyword")
+	page := g.DefaultQuery("page", "1")
 
-	if err := g.Bind(&form); err != nil {
-		g.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误"})
+	// 如果没有提供关键字，则尝试从表单或JSON中获取
+	if keyword == "" {
+		var form Modsearch
+		if err := g.Bind(&form); err == nil && form.Modname != "" {
+			keyword = form.Modname
+		}
+	}
+
+	// 检查是否有关键字
+	if keyword == "" {
+		g.JSON(http.StatusBadRequest, gin.H{"error": "请提供搜索关键字"})
 		return
 	}
 
@@ -237,8 +247,8 @@ func SearchMod(g *gin.Context) {
 
 	// 访问搜索页面
 	searchURL := fmt.Sprintf(
-		"https://steamcommunity.com/workshop/browse/?appid=%s&searchtext=%s&browsesort=trend&section=&actualsort=trend&p=1&days=-1&numperpage=30",
-		appID, form.Modname,
+		"https://steamcommunity.com/workshop/browse/?appid=%s&searchtext=%s&browsesort=trend&section=&actualsort=trend&p=%s&days=-1&numperpage=30",
+		appID, keyword, page,
 	)
 
 	if err := c.Visit(searchURL); err != nil {
@@ -264,18 +274,31 @@ func SearchMod(g *gin.Context) {
 
 // DownloadMod 下载模组处理函数
 func DownloadMod(g *gin.Context) {
-	var form Moddown
+	modid := g.Query("modid")
+	refresh := g.DefaultQuery("refresh", "false")
+	version := g.DefaultQuery("version", "")
 
-	if err := g.Bind(&form); err != nil {
-		g.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误"})
+	// 如果没有从查询参数获取到，则尝试从表单或JSON中获取
+	if modid == "" {
+		var form Moddown
+		if err := g.Bind(&form); err == nil && form.Modid != "" {
+			modid = form.Modid
+			refresh = form.Refresh
+			version = form.Version
+		}
+	}
+
+	// 检查是否有模组ID
+	if modid == "" {
+		g.JSON(http.StatusBadRequest, gin.H{"error": "请提供模组ID"})
 		return
 	}
 
 	p1 = 0
 	status := 401
-	log.Printf("收到模组下载请求: ID=%s, 刷新=%s, 版本=%s", form.Modid, form.Refresh, form.Version)
+	log.Printf("收到模组下载请求: ID=%s, 刷新=%s, 版本=%s", modid, refresh, version)
 
-	modinfo := DownloadMod2(form.Modid, form.Refresh, form.Version)
+	modinfo := DownloadMod2(modid, refresh, version)
 
 	switch p1 {
 	case 0:
