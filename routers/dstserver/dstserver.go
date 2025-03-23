@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // 配置常量
@@ -53,6 +54,18 @@ type DSTServerConfig struct {
 	BindIP        string `json:"bind_ip"`
 	MasterPort    int    `json:"master_port"`
 	ClusterKey    string `json:"cluster_key"`
+}
+
+// ListResponse 列表响应结构
+type ListResponse struct {
+	Status int      `json:"status"`
+	Data   []string `json:"data"`
+}
+
+// TokenResponse 服务器Token响应结构
+type TokenResponse struct {
+	Status int    `json:"status"`
+	Data   string `json:"data"`
 }
 
 // 服务器列表响应
@@ -117,7 +130,7 @@ func GetServerList(g *gin.Context) {
 
 // GetServerConfig 获取特定服务器的配置信息
 func GetServerConfig(g *gin.Context) {
-	saveName := g.Param("savename")
+	saveName := g.Query("savename")
 	if saveName == "" {
 		g.JSON(http.StatusOK, ServerDetailResponse{
 			Status: 400,
@@ -196,21 +209,28 @@ func GetServerConfig(g *gin.Context) {
 
 // UpdateServerConfig 更新服务器配置
 func UpdateServerConfig(g *gin.Context) {
-	saveName := g.Param("savename")
-	if saveName == "" {
+	// 请求参数结构
+	type updateConfigRequest struct {
+		SaveName string          `json:"savename" binding:"required"`
+		Config   DSTServerConfig `json:"config" binding:"required"`
+	}
+	
+	var req updateConfigRequest
+	if err := g.BindJSON(&req); err != nil {
 		g.JSON(http.StatusOK, gin.H{
 			"status": 400,
-			"msg":    "存档名称不能为空",
+			"msg":    "请求参数错误",
 		})
 		return
 	}
 	
-	// 服务器配置参数
-	var config DSTServerConfig
-	if err := g.BindJSON(&config); err != nil {
+	saveName := req.SaveName
+	config := req.Config
+	
+	if saveName == "" {
 		g.JSON(http.StatusOK, gin.H{
 			"status": 400,
-			"msg":    "请求参数错误",
+			"msg":    "存档名称不能为空",
 		})
 		return
 	}
@@ -292,5 +312,441 @@ func UpdateServerConfig(g *gin.Context) {
 	g.JSON(http.StatusOK, gin.H{
 		"status": 200,
 		"msg":    "更新配置成功",
+	})
+}
+
+// GetAdminList 获取管理员列表
+func GetAdminList(g *gin.Context) {
+	saveName := g.Query("savename")
+	if saveName == "" {
+		g.JSON(http.StatusOK, ListResponse{
+			Status: 400,
+			Data:   nil,
+		})
+		return
+	}
+	
+	// 构建管理员列表文件路径
+	adminListPath := filepath.Join(dstSavePath, saveName, "adminlist.txt")
+	
+	// 检查文件是否存在
+	if _, err := os.Stat(adminListPath); os.IsNotExist(err) {
+		// 如果文件不存在，返回空列表
+		g.JSON(http.StatusOK, ListResponse{
+			Status: 200,
+			Data:   []string{},
+		})
+		return
+	}
+	
+	// 读取管理员列表文件
+	content, err := ioutil.ReadFile(adminListPath)
+	if err != nil {
+		log.Printf("读取管理员列表失败: %v", err)
+		g.JSON(http.StatusOK, ListResponse{
+			Status: 500,
+			Data:   nil,
+		})
+		return
+	}
+	
+	// 解析管理员列表，过滤空行
+	adminList := []string{}
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			adminList = append(adminList, line)
+		}
+	}
+	
+	g.JSON(http.StatusOK, ListResponse{
+		Status: 200,
+		Data:   adminList,
+	})
+}
+
+// UpdateAdminList 更新管理员列表
+func UpdateAdminList(g *gin.Context) {
+	// 请求参数结构
+	type updateListRequest struct {
+		SaveName string   `json:"savename" binding:"required"`
+		List     []string `json:"list"`
+	}
+	
+	var req updateListRequest
+	if err := g.BindJSON(&req); err != nil {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 400,
+			"msg":    "请求参数错误",
+		})
+		return
+	}
+	
+	saveName := req.SaveName
+	if saveName == "" {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 400,
+			"msg":    "存档名称不能为空",
+		})
+		return
+	}
+	
+	// 构建管理员列表文件路径
+	adminListPath := filepath.Join(dstSavePath, saveName, "adminlist.txt")
+	
+	// 确保目录存在
+	saveDir := filepath.Join(dstSavePath, saveName)
+	if _, err := os.Stat(saveDir); os.IsNotExist(err) {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 404,
+			"msg":    "存档不存在",
+		})
+		return
+	}
+	
+	// 将列表转换为带换行符的字符串
+	content := strings.Join(req.List, "\n")
+	if content != "" {
+		content += "\n" // 确保最后有换行符
+	}
+	
+	// 写入管理员列表文件
+	if err := ioutil.WriteFile(adminListPath, []byte(content), 0644); err != nil {
+		log.Printf("保存管理员列表失败: %v", err)
+		g.JSON(http.StatusOK, gin.H{
+			"status": 500,
+			"msg":    "保存管理员列表失败",
+		})
+		return
+	}
+	
+	g.JSON(http.StatusOK, gin.H{
+		"status": 200,
+		"msg":    "更新管理员列表成功",
+	})
+}
+
+// GetBlockList 获取黑名单列表
+func GetBlockList(g *gin.Context) {
+	saveName := g.Query("savename")
+	if saveName == "" {
+		g.JSON(http.StatusOK, ListResponse{
+			Status: 400,
+			Data:   nil,
+		})
+		return
+	}
+	
+	// 构建黑名单文件路径
+	blockListPath := filepath.Join(dstSavePath, saveName, "blocklist.txt")
+	
+	// 检查文件是否存在
+	if _, err := os.Stat(blockListPath); os.IsNotExist(err) {
+		// 如果文件不存在，返回空列表
+		g.JSON(http.StatusOK, ListResponse{
+			Status: 200,
+			Data:   []string{},
+		})
+		return
+	}
+	
+	// 读取黑名单文件
+	content, err := ioutil.ReadFile(blockListPath)
+	if err != nil {
+		log.Printf("读取黑名单失败: %v", err)
+		g.JSON(http.StatusOK, ListResponse{
+			Status: 500,
+			Data:   nil,
+		})
+		return
+	}
+	
+	// 解析黑名单列表，过滤空行
+	blockList := []string{}
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			blockList = append(blockList, line)
+		}
+	}
+	
+	g.JSON(http.StatusOK, ListResponse{
+		Status: 200,
+		Data:   blockList,
+	})
+}
+
+// UpdateBlockList 更新黑名单列表
+func UpdateBlockList(g *gin.Context) {
+	// 请求参数结构
+	type updateListRequest struct {
+		SaveName string   `json:"savename" binding:"required"`
+		List     []string `json:"list"`
+	}
+	
+	var req updateListRequest
+	if err := g.BindJSON(&req); err != nil {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 400,
+			"msg":    "请求参数错误",
+		})
+		return
+	}
+	
+	saveName := req.SaveName
+	if saveName == "" {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 400,
+			"msg":    "存档名称不能为空",
+		})
+		return
+	}
+	
+	// 构建黑名单文件路径
+	blockListPath := filepath.Join(dstSavePath, saveName, "blocklist.txt")
+	
+	// 确保目录存在
+	saveDir := filepath.Join(dstSavePath, saveName)
+	if _, err := os.Stat(saveDir); os.IsNotExist(err) {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 404,
+			"msg":    "存档不存在",
+		})
+		return
+	}
+	
+	// 将列表转换为带换行符的字符串
+	content := strings.Join(req.List, "\n")
+	if content != "" {
+		content += "\n" // 确保最后有换行符
+	}
+	
+	// 写入黑名单文件
+	if err := ioutil.WriteFile(blockListPath, []byte(content), 0644); err != nil {
+		log.Printf("保存黑名单失败: %v", err)
+		g.JSON(http.StatusOK, gin.H{
+			"status": 500,
+			"msg":    "保存黑名单失败",
+		})
+		return
+	}
+	
+	g.JSON(http.StatusOK, gin.H{
+		"status": 200,
+		"msg":    "更新黑名单成功",
+	})
+}
+
+// GetWhiteList 获取白名单列表
+func GetWhiteList(g *gin.Context) {
+	saveName := g.Query("savename")
+	if saveName == "" {
+		g.JSON(http.StatusOK, ListResponse{
+			Status: 400,
+			Data:   nil,
+		})
+		return
+	}
+	
+	// 构建白名单文件路径
+	whiteListPath := filepath.Join(dstSavePath, saveName, "whitelist.txt")
+	
+	// 检查文件是否存在
+	if _, err := os.Stat(whiteListPath); os.IsNotExist(err) {
+		// 如果文件不存在，返回空列表
+		g.JSON(http.StatusOK, ListResponse{
+			Status: 200,
+			Data:   []string{},
+		})
+		return
+	}
+	
+	// 读取白名单文件
+	content, err := ioutil.ReadFile(whiteListPath)
+	if err != nil {
+		log.Printf("读取白名单失败: %v", err)
+		g.JSON(http.StatusOK, ListResponse{
+			Status: 500,
+			Data:   nil,
+		})
+		return
+	}
+	
+	// 解析白名单列表，过滤空行
+	whiteList := []string{}
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			whiteList = append(whiteList, line)
+		}
+	}
+	
+	g.JSON(http.StatusOK, ListResponse{
+		Status: 200,
+		Data:   whiteList,
+	})
+}
+
+// UpdateWhiteList 更新白名单列表
+func UpdateWhiteList(g *gin.Context) {
+	// 请求参数结构
+	type updateListRequest struct {
+		SaveName string   `json:"savename" binding:"required"`
+		List     []string `json:"list"`
+	}
+	
+	var req updateListRequest
+	if err := g.BindJSON(&req); err != nil {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 400,
+			"msg":    "请求参数错误",
+		})
+		return
+	}
+	
+	saveName := req.SaveName
+	if saveName == "" {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 400,
+			"msg":    "存档名称不能为空",
+		})
+		return
+	}
+	
+	// 构建白名单文件路径
+	whiteListPath := filepath.Join(dstSavePath, saveName, "whitelist.txt")
+	
+	// 确保目录存在
+	saveDir := filepath.Join(dstSavePath, saveName)
+	if _, err := os.Stat(saveDir); os.IsNotExist(err) {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 404,
+			"msg":    "存档不存在",
+		})
+		return
+	}
+	
+	// 将列表转换为带换行符的字符串
+	content := strings.Join(req.List, "\n")
+	if content != "" {
+		content += "\n" // 确保最后有换行符
+	}
+	
+	// 写入白名单文件
+	if err := ioutil.WriteFile(whiteListPath, []byte(content), 0644); err != nil {
+		log.Printf("保存白名单失败: %v", err)
+		g.JSON(http.StatusOK, gin.H{
+			"status": 500,
+			"msg":    "保存白名单失败",
+		})
+		return
+	}
+	
+	g.JSON(http.StatusOK, gin.H{
+		"status": 200,
+		"msg":    "更新白名单成功",
+	})
+}
+
+// GetClusterToken 获取服务器令牌
+func GetClusterToken(g *gin.Context) {
+	saveName := g.Query("savename")
+	if saveName == "" {
+		g.JSON(http.StatusOK, TokenResponse{
+			Status: 400,
+			Data:   "",
+		})
+		return
+	}
+	
+	// 构建令牌文件路径
+	tokenPath := filepath.Join(dstSavePath, saveName, "cluster_token.txt")
+	
+	// 检查文件是否存在
+	if _, err := os.Stat(tokenPath); os.IsNotExist(err) {
+		// 如果文件不存在，返回空字符串
+		g.JSON(http.StatusOK, TokenResponse{
+			Status: 200,
+			Data:   "",
+		})
+		return
+	}
+	
+	// 读取令牌文件
+	content, err := ioutil.ReadFile(tokenPath)
+	if err != nil {
+		log.Printf("读取服务器令牌失败: %v", err)
+		g.JSON(http.StatusOK, TokenResponse{
+			Status: 500,
+			Data:   "",
+		})
+		return
+	}
+	
+	// 返回去除空白字符的令牌
+	token := strings.TrimSpace(string(content))
+	
+	g.JSON(http.StatusOK, TokenResponse{
+		Status: 200,
+		Data:   token,
+	})
+}
+
+// UpdateClusterToken 更新服务器令牌
+func UpdateClusterToken(g *gin.Context) {
+	// 请求参数结构
+	type updateTokenRequest struct {
+		SaveName string `json:"savename" binding:"required"`
+		Token    string `json:"token"`
+	}
+	
+	var req updateTokenRequest
+	if err := g.BindJSON(&req); err != nil {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 400,
+			"msg":    "请求参数错误",
+		})
+		return
+	}
+	
+	saveName := req.SaveName
+	if saveName == "" {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 400,
+			"msg":    "存档名称不能为空",
+		})
+		return
+	}
+	
+	// 构建令牌文件路径
+	tokenPath := filepath.Join(dstSavePath, saveName, "cluster_token.txt")
+	
+	// 确保目录存在
+	saveDir := filepath.Join(dstSavePath, saveName)
+	if _, err := os.Stat(saveDir); os.IsNotExist(err) {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 404,
+			"msg":    "存档不存在",
+		})
+		return
+	}
+	
+	// 写入令牌文件
+	token := strings.TrimSpace(req.Token)
+	if err := ioutil.WriteFile(tokenPath, []byte(token), 0644); err != nil {
+		log.Printf("保存服务器令牌失败: %v", err)
+		g.JSON(http.StatusOK, gin.H{
+			"status": 500,
+			"msg":    "保存服务器令牌失败",
+		})
+		return
+	}
+	
+	g.JSON(http.StatusOK, gin.H{
+		"status": 200,
+		"msg":    "更新服务器令牌成功",
 	})
 } 

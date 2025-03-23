@@ -78,9 +78,28 @@ func InitRouter() *gin.Engine {
 		// DST服务器配置管理
 		dstservers := api.Group("/dstserver")
 		{
+			// 基本服务器管理
 			dstservers.GET("/list", dstserver.GetServerList)
-			dstservers.GET("/config/:savename", dstserver.GetServerConfig)
-			dstservers.POST("/config/:savename", dstserver.UpdateServerConfig)
+			
+			// cluster.ini管理
+			dstservers.GET("/config", dstserver.GetServerConfig)
+			dstservers.POST("/config", dstserver.UpdateServerConfig)
+			
+			// 管理员列表管理
+			dstservers.GET("/adminlist", dstserver.GetAdminList)
+			dstservers.POST("/adminlist", dstserver.UpdateAdminList)
+			
+			// 黑名单管理
+			dstservers.GET("/blocklist", dstserver.GetBlockList)
+			dstservers.POST("/blocklist", dstserver.UpdateBlockList)
+			
+			// 白名单管理
+			dstservers.GET("/whitelist", dstserver.GetWhiteList)
+			dstservers.POST("/whitelist", dstserver.UpdateWhiteList)
+			
+			// 服务器令牌管理
+			dstservers.GET("/token", dstserver.GetClusterToken)
+			dstservers.POST("/token", dstserver.UpdateClusterToken)
 		}
 	}
 
