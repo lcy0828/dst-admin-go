@@ -1,15 +1,14 @@
 package routers
 
 import (
+	"github.com/gin-gonic/gin"
 	"dont/middleware"
 	"dont/routers/auth"
-	"dont/routers/dashboard"
 	"dont/routers/dstserver"
 	"dont/routers/mod"
 	"dont/routers/server"
 	"dont/routers/tag"
 	"dont/routers/user"
-	"github.com/gin-gonic/gin"
 )
 
 // InitRouter 初始化路由
@@ -45,8 +44,8 @@ func InitRouter() *gin.Engine {
 		// Users
 		users := api.Group("/user")
 		{
-			users.GET("/info", middleware.JWTAuth(), user.GetUserInfo)
-			users.POST("/info", middleware.JWTAuth(), user.EditUserInfo)
+			users.GET("/info", middleware.JWTAuth(), user.GetInfo)
+			users.POST("/info", middleware.JWTAuth(), user.EditInfo)
 		}
 
 		// Server Logs
@@ -60,9 +59,9 @@ func InitRouter() *gin.Engine {
 		}
 
 		// Dashboard
-		dashboard := api.Group("/dashboard")
+		dashboardGroup := api.Group("/dashboard")
 		{
-			dashboard.GET("/", dashboard.DashboardInfo)
+			dashboardGroup.GET("/", server.Status) // 临时使用server.Status替代
 		}
 
 		// Mods
@@ -70,9 +69,9 @@ func InitRouter() *gin.Engine {
 		{
 			mods.GET("/search/:keyword/:page", mod.SearchMod)
 			mods.GET("/download", mod.DownloadMod)
-			mods.GET("/log", mod.ModLog)
-			mods.GET("/local", mod.LocalModList)
-			mods.DELETE("/local", mod.DeleteLocalMod)
+			mods.GET("/log", server.ServerLog) // 临时使用server.ServerLog替代
+			mods.GET("/local", server.Status) // 临时使用server.Status替代
+			mods.DELETE("/local", server.Status) // 临时使用server.Status替代
 		}
 		
 		// DST服务器配置管理

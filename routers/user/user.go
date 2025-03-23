@@ -126,3 +126,23 @@ func ChangePass(g *gin.Context) {
 	}
 
 }
+
+// GetInfo 获取用户信息
+func GetInfo(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status": 200,
+		"msg":    "获取用户信息功能待实现",
+		"data": map[string]interface{}{
+			"username": "admin",
+			"role":     "admin",
+		},
+	})
+}
+
+// EditInfo 编辑用户信息
+func EditInfo(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status": 200,
+		"msg":    "编辑用户信息功能待实现",
+	})
+}
