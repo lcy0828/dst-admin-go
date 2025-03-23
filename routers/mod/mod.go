@@ -83,7 +83,7 @@ func SearchMod(g *gin.Context) {
 	c.Async = true
 	c.Limit(&colly.LimitRule{
 
-		Parallelism: 15,
+		Parallelism: 1,
 		RandomDelay: 1 * time.Second, // 两次请求 随机延迟5s 内
 	})
 
