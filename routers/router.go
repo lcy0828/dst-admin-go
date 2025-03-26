@@ -4,6 +4,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"dont/middleware"
 	"dont/routers/auth"
+	"dont/routers/dstcustomize"
 	"dont/routers/dstserver"
 	"dont/routers/mod"
 	"dont/routers/server"
@@ -100,6 +101,12 @@ func InitRouter() *gin.Engine {
 			// 服务器令牌管理
 			dstservers.GET("/token", dstserver.GetClusterToken)
 			dstservers.POST("/token", dstserver.UpdateClusterToken)
+		}
+		
+		// DST游戏自定义配置管理
+		dstcustom := api.Group("/dstcustomize")
+		{
+			dstcustom.GET("/customize", dstcustomize.GetCustomizeLua)
 		}
 	}
 
