@@ -76,6 +76,8 @@ func StreamLog(c *gin.Context) {
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("Transfer-Encoding", "chunked")
+	c.Writer.Header().Set("X-Accel-Buffering", "no") // 禁用nginx缓冲
+	c.Writer.Flush()
 	
 	// 打开文件
 	file, err := os.Open(logPath)
@@ -149,10 +151,15 @@ func StreamLog(c *gin.Context) {
 		lines = allLines[len(allLines)-lastN:]
 	}
 	
+	// 发送一个初始事件，以确保连接建立
+	c.SSEvent("connected", "true")
+	c.Writer.Flush()
+	
 	// 发送历史日志
 	for _, line := range lines {
 		if line != "" {
 			c.SSEvent("log", line)
+			c.Writer.Flush() // 确保每条日志都被立即发送
 		}
 	}
 	
@@ -165,28 +172,87 @@ func StreamLog(c *gin.Context) {
 	// 创建通道检测客户端连接关闭
 	clientGone := c.Request.Context().Done()
 	
+	// 定期发送心跳以保持连接
+	heartbeatTicker := time.NewTicker(15 * time.Second)
+	defer heartbeatTicker.Stop()
+	
+	// 使用channel控制流循环
+	logChan := make(chan string)
+	errorChan := make(chan error)
+	stopChan := make(chan struct{})
+	
+	// 启动一个goroutine来读取日志
+	go func() {
+		defer func() {
+			close(logChan)
+			close(errorChan)
+		}()
+		
+		for {
+			select {
+			case <-stopChan:
+				// 收到停止信号，退出goroutine
+				return
+			default:
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					if err != io.EOF {
+						errorChan <- err
+						return
+					}
+					
+					// 如果是EOF，等待新内容
+					select {
+					case <-stopChan:
+						return
+					case <-time.After(500 * time.Millisecond):
+						continue
+					}
+				}
+				
+				// 发送日志行到channel
+				select {
+				case <-stopChan:
+					return
+				case logChan <- line:
+					// 成功发送
+				}
+			}
+		}
+	}()
+	
+	// 确保在函数返回时发送停止信号
+	defer close(stopChan)
+	
 	// 持续监听新的日志
 	c.Stream(func(w io.Writer) bool {
-		// 检测连接是否已关闭
 		select {
 		case <-clientGone:
+			// 客户端断开连接
 			return false
-		default:
-			// 继续处理
-		}
-		
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				// 等待新的日志写入
-				time.Sleep(500 * time.Millisecond)
-				return true
+			
+		case line, ok := <-logChan:
+			// 检查channel是否已关闭
+			if !ok {
+				return false
 			}
+			// 收到新的日志行
+			c.SSEvent("log", line)
+			return true
+			
+		case <-heartbeatTicker.C:
+			// 发送心跳
+			c.SSEvent("heartbeat", time.Now().String())
+			return true
+			
+		case err, ok := <-errorChan:
+			// 检查channel是否已关闭
+			if !ok {
+				return false
+			}
+			// 处理错误
+			c.SSEvent("error", "读取日志出错: "+err.Error())
 			return false
 		}
-		
-		// 发送数据
-		c.SSEvent("log", line)
-		return true
 	})
 } 
