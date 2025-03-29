@@ -10,7 +10,7 @@ import (
 func Cors() gin.HandlerFunc {
 	return cors.New(cors.Config{
 		//AllowAllOrigins:  true,
-		AllowOrigins:  []string{"http://dont.lcy.pub", "https://dont.lcy.pub", "http://dont.lcy.pub:5173", "http://192.168.2.25:8080", "http://192.168.2.22:8080", ""},
+		AllowOrigins:  []string{"http://dont.lcy.pub", "https://dont.lcy.pub", "http://dont.lcy.pub:5173", "http://192.168.2.25:8080", "http://192.168.2.22:8080"},
 		AllowMethods:  []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:  []string{"Origin", "X-Requested-With", "X-Extra-Header", "Content-Type", "Accept", "Authorization"},
 		ExposeHeaders: []string{"*"},

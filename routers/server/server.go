@@ -7,6 +7,7 @@ import (
 	"os"
 	"io"
 	"time"
+	"strings"
 )
 
 // ServerLog 获取服务器日志
@@ -47,6 +48,7 @@ func StreamLog(c *gin.Context) {
 	// 获取参数
 	archiveName := c.DefaultQuery("archive", "")
 	worldName := c.DefaultQuery("world", "")
+	lineCount := c.DefaultQuery("lines", "100") // 默认获取最近100行
 	
 	// 验证参数
 	if archiveName == "" || worldName == "" {
@@ -86,7 +88,75 @@ func StreamLog(c *gin.Context) {
 	}
 	defer file.Close()
 	
-	// 移动到文件末尾
+	// 首先读取文件的最后N行
+	// 获取文件大小
+	stat, err := file.Stat()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status": 500,
+			"msg":    "获取文件信息失败: " + err.Error(),
+		})
+		return
+	}
+	
+	fileSize := stat.Size()
+	
+	// 创建一个足够大的缓冲区，以容纳文件末尾的部分
+	// 我们最多读取文件的最后5MB内容
+	bufferSize := int64(5 * 1024 * 1024) // 5MB
+	if fileSize < bufferSize {
+		bufferSize = fileSize
+	}
+	
+	// 从文件末尾开始往回读取
+	offset := fileSize - bufferSize
+	if offset < 0 {
+		offset = 0
+	}
+	
+	// 设置文件指针位置
+	file.Seek(offset, io.SeekStart)
+	
+	// 读取缓冲区内容
+	buffer := make([]byte, bufferSize)
+	_, err = file.Read(buffer)
+	if err != nil && err != io.EOF {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status": 500,
+			"msg":    "读取文件内容失败: " + err.Error(),
+		})
+		return
+	}
+	
+	// 查找最后N行
+	lines := make([]string, 0)
+	lastN := 100 // 默认获取最后100行
+	
+	// 尝试将lines参数转换为整数
+	if lineCount == "300" {
+		lastN = 300
+	}
+	
+	// 从缓冲区中提取最后N行
+	content := string(buffer)
+	allLines := strings.Split(content, "\n")
+	
+	// 如果行数不足，直接使用所有行
+	if len(allLines) <= lastN {
+		lines = allLines
+	} else {
+		// 否则，取最后N行
+		lines = allLines[len(allLines)-lastN:]
+	}
+	
+	// 发送历史日志
+	for _, line := range lines {
+		if line != "" {
+			c.SSEvent("log", line)
+		}
+	}
+	
+	// 移动到文件末尾准备读取新内容
 	file.Seek(0, io.SeekEnd)
 	
 	// 创建一个reader
@@ -95,6 +165,7 @@ func StreamLog(c *gin.Context) {
 	// 创建通道检测客户端连接关闭
 	clientGone := c.Request.Context().Done()
 	
+	// 持续监听新的日志
 	c.Stream(func(w io.Writer) bool {
 		// 检测连接是否已关闭
 		select {
