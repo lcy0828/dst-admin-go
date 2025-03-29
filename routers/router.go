@@ -57,8 +57,10 @@ func InitRouter() *gin.Engine {
 			serlogs.GET("/status", server.Status)
 			serlogs.POST("/status", server.Status)
 			serlogs.GET("/log/download", server.DownloadLog)
-			serlogs.GET("/log/stream", server.StreamLog)
 		}
+
+		// 流式日志接口 - 不需要认证
+		api.GET("/server/log/stream", server.StreamLog)
 
 		// Dashboard
 		dashboardGroup := api.Group("/dashboard")
