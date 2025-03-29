@@ -76,8 +76,15 @@ type ServerListResponse struct {
 
 // 服务器简要信息
 type ServerShortInfo struct {
-	Name     string `json:"name"`     // 存档名称
-	SavePath string `json:"savepath"` // 存档路径
+	Name     string       `json:"name"`     // 存档名称
+	SavePath string       `json:"savepath"` // 存档路径
+	Worlds   []WorldInfo  `json:"worlds"`   // 世界列表
+}
+
+// 世界信息
+type WorldInfo struct {
+	Name     string `json:"name"`  // 世界名称
+	Type     string `json:"type"`  // 世界类型 (forest/cave)
 }
 
 // 服务器详细信息响应
@@ -114,10 +121,45 @@ func GetServerList(g *gin.Context) {
 		if file.IsDir() {
 			clusterPath := filepath.Join(dstSavePath, file.Name(), "cluster.ini")
 			if _, err := os.Stat(clusterPath); !os.IsNotExist(err) {
-				servers = append(servers, ServerShortInfo{
+				// 创建服务器信息
+				server := ServerShortInfo{
 					Name:     file.Name(),
 					SavePath: filepath.Join(dstSavePath, file.Name()),
-				})
+					Worlds:   []WorldInfo{},
+				}
+				
+				// 获取世界列表
+				worldFolders, err := ioutil.ReadDir(filepath.Join(dstSavePath, file.Name()))
+				if err == nil {
+					for _, worldFolder := range worldFolders {
+						// 检查是否是目录，且不是管理文件
+						if worldFolder.IsDir() && 
+						   worldFolder.Name() != "backup" && 
+						   !strings.HasSuffix(worldFolder.Name(), ".txt") &&
+						   !strings.HasSuffix(worldFolder.Name(), ".ini") {
+							
+							// 尝试确定世界类型
+							worldType := "unknown"
+							levelDataPath := filepath.Join(dstSavePath, file.Name(), worldFolder.Name(), "leveldataoverride.lua")
+							
+							if data, err := ioutil.ReadFile(levelDataPath); err == nil {
+								content := string(data)
+								if strings.Contains(content, "location=\"forest\"") || strings.Contains(content, "\"location\"]=\"forest\"") {
+									worldType = "forest"
+								} else if strings.Contains(content, "location=\"cave\"") || strings.Contains(content, "\"location\"]=\"cave\"") {
+									worldType = "cave"
+								}
+							}
+							
+							server.Worlds = append(server.Worlds, WorldInfo{
+								Name: worldFolder.Name(),
+								Type: worldType,
+							})
+						}
+					}
+				}
+				
+				servers = append(servers, server)
 			}
 		}
 	}

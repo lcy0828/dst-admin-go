@@ -57,6 +57,7 @@ func InitRouter() *gin.Engine {
 			serlogs.GET("/status", server.Status)
 			serlogs.POST("/status", server.Status)
 			serlogs.GET("/log/download", server.DownloadLog)
+			serlogs.GET("/log/stream", server.StreamLog)
 		}
 
 		// Dashboard
