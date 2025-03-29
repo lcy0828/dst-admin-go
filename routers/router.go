@@ -1,15 +1,16 @@
 package routers
 
 import (
-	"github.com/gin-gonic/gin"
 	"dont/middleware"
 	"dont/routers/auth"
 	"dont/routers/dstcustomize"
 	"dont/routers/dstserver"
 	"dont/routers/mod"
 	"dont/routers/server"
+	"dont/routers/status"
 	"dont/routers/tag"
 	"dont/routers/user"
+	"github.com/gin-gonic/gin"
 )
 
 // InitRouter 初始化路由
@@ -66,6 +67,7 @@ func InitRouter() *gin.Engine {
 		dashboardGroup := api.Group("/dashboard")
 		{
 			dashboardGroup.GET("/", server.Status) // 临时使用server.Status替代
+			dashboardGroup.GET("/status", status.Cpuinfo())
 		}
 
 		// Mods
@@ -74,38 +76,38 @@ func InitRouter() *gin.Engine {
 			mods.GET("/search", mod.SearchMod)
 			mods.GET("/download", mod.DownloadMod)
 			mods.POST("/download", mod.DownloadMod) // 添加POST方法支持
-			mods.GET("/log", server.ServerLog) // 临时使用server.ServerLog替代
-			mods.GET("/local", server.Status) // 临时使用server.Status替代
-			mods.DELETE("/local", server.Status) // 临时使用server.Status替代
+			mods.GET("/log", server.ServerLog)      // 临时使用server.ServerLog替代
+			mods.GET("/local", server.Status)       // 临时使用server.Status替代
+			mods.DELETE("/local", server.Status)    // 临时使用server.Status替代
 		}
-		
+
 		// DST服务器配置管理
 		dstservers := api.Group("/dstserver")
 		{
 			// 基本服务器管理
 			dstservers.GET("/list", dstserver.GetServerList)
-			
+
 			// cluster.ini管理
 			dstservers.GET("/config", dstserver.GetServerConfig)
 			dstservers.POST("/config", dstserver.UpdateServerConfig)
-			
+
 			// 管理员列表管理
 			dstservers.GET("/adminlist", dstserver.GetAdminList)
 			dstservers.POST("/adminlist", dstserver.UpdateAdminList)
-			
+
 			// 黑名单管理
 			dstservers.GET("/blocklist", dstserver.GetBlockList)
 			dstservers.POST("/blocklist", dstserver.UpdateBlockList)
-			
+
 			// 白名单管理
 			dstservers.GET("/whitelist", dstserver.GetWhiteList)
 			dstservers.POST("/whitelist", dstserver.UpdateWhiteList)
-			
+
 			// 服务器令牌管理
 			dstservers.GET("/token", dstserver.GetClusterToken)
 			dstservers.POST("/token", dstserver.UpdateClusterToken)
 		}
-		
+
 		// DST游戏自定义配置管理
 		dstcustom := api.Group("/dstcustomize")
 		{
