@@ -3,6 +3,7 @@ package routers
 import (
 	"dont/middleware"
 	"dont/routers/auth"
+	"dont/routers/backup"
 	"dont/routers/dstcustomize"
 	"dont/routers/dstserver"
 	"dont/routers/mod"
@@ -112,6 +113,19 @@ func InitRouter() *gin.Engine {
 		dstcustom := api.Group("/dstcustomize")
 		{
 			dstcustom.GET("/customize", dstcustomize.GetCustomizeLua)
+		}
+		
+		// 存档备份管理
+		archiveBackup := api.Group("/backup")
+		{
+			// 创建存档备份
+			archiveBackup.POST("/create", backup.CreateBackup())
+			
+			// 获取备份列表
+			archiveBackup.GET("/list", backup.ListBackups())
+			
+			// 下载备份文件
+			archiveBackup.GET("/download", backup.DownloadBackup())
 		}
 	}
 

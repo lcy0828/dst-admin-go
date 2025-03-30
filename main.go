@@ -2,6 +2,7 @@ package main
 
 import (
 	"dont/routers"
+	"dont/routers/backup"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,6 +15,12 @@ import (
 
 func main() {
 	//models.SaverFiletest()
+	
+	// 确保备份目录存在
+	if err := os.MkdirAll(backup.DstBackupPath, 0755); err != nil {
+		log.Printf("警告：无法创建备份目录: %v", err)
+	}
+	
 	router := routers.InitRouter()
 
 	s := &http.Server{

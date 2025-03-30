@@ -15,6 +15,20 @@
           </config>
         </ContributedStateBase>
       </target>
+      <target name="root@192.168.2.12:22" type="ssh/sftp" uuid="2459b025-4d8e-47c1-b356-eb595e4ccbd4">
+        <config>
+          <option name="projectRootOnTarget" value="/dont/dont" />
+          <option name="serverName" value="root@192.168.2.12:22 password" />
+          <option name="useRsync" value="true" />
+        </config>
+        <ContributedStateBase type="GoLanguageRuntime">
+          <config>
+            <option name="goPath" value="/root/go" />
+            <option name="goRoot" value="/usr/local/go/bin/go" />
+            <option name="goVersion" value="go1.19.3 linux/amd64" />
+          </config>
+        </ContributedStateBase>
+      </target>
     </targets>
   </component>
 </project>
