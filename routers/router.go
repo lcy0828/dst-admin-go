@@ -126,6 +126,9 @@ func InitRouter() *gin.Engine {
 			
 			// 下载备份文件
 			archiveBackup.GET("/download", backup.DownloadBackup())
+			
+			// 恢复备份
+			archiveBackup.POST("/restore", backup.RestoreBackup())
 		}
 	}
 

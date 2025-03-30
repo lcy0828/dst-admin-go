@@ -395,4 +395,213 @@ func formatFileSize(size int64) string {
 	} else {
 		return fmt.Sprintf("%.2f GB", float64(size)/float64(GB))
 	}
+}
+
+// RestoreBackup 恢复备份
+func RestoreBackup() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 定义请求参数结构体
+		type RestoreBackupRequest struct {
+			ArchiveName     string `json:"archive" binding:"required"`    // 源存档名称
+			BackupName      string `json:"backup" binding:"required"`     // 备份文件名
+			TargetName      string `json:"target_name,omitempty"`         // 目标存档名称（可选）
+			OverwriteTarget bool   `json:"overwrite_target,omitempty"`    // 是否覆盖目标目录（如果存在）
+		}
+		
+		var req RestoreBackupRequest
+		
+		// 从请求体中获取参数
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusOK, ArchiveBackupResponse{
+				Status: 400,
+				Msg:    "无效的请求参数: " + err.Error(),
+			})
+			return
+		}
+		
+		// 验证备份文件名
+		if !strings.HasSuffix(req.BackupName, ".zip") {
+			c.JSON(http.StatusOK, ArchiveBackupResponse{
+				Status: 400,
+				Msg:    "备份文件必须是.zip格式",
+			})
+			return
+		}
+		
+		// 防止路径遍历攻击
+		if strings.Contains(req.BackupName, "..") || strings.Contains(req.ArchiveName, "..") {
+			c.JSON(http.StatusOK, ArchiveBackupResponse{
+				Status: 403,
+				Msg:    "无效的文件路径",
+			})
+			return
+		}
+		
+		// 构建备份文件路径
+		backupFilePath := filepath.Join(DstBackupPath, req.ArchiveName, req.BackupName)
+		
+		// 检查备份文件是否存在
+		if _, err := os.Stat(backupFilePath); os.IsNotExist(err) {
+			c.JSON(http.StatusOK, ArchiveBackupResponse{
+				Status: 404,
+				Msg:    "备份文件不存在",
+			})
+			return
+		}
+		
+		// 确定目标目录
+		var targetPath string
+		if req.TargetName == "" {
+			// 目标为原存档目录
+			targetPath = filepath.Join(DstSavePath, req.ArchiveName)
+		} else {
+			// 目标为新指定的目录
+			targetPath = filepath.Join(DstSavePath, req.TargetName)
+		}
+		
+		// 检查目标目录是否存在
+		targetExists := false
+		if _, err := os.Stat(targetPath); err == nil {
+			targetExists = true
+			// 如果目标存在但不允许覆盖，则返回错误
+			if !req.OverwriteTarget {
+				c.JSON(http.StatusOK, ArchiveBackupResponse{
+					Status: 409, // Conflict
+					Msg:    "目标存档已存在，需要设置overwrite_target为true才能覆盖",
+				})
+				return
+			}
+			
+			// 如果允许覆盖，则清空目标目录（但保留目录本身）
+			if err := clearDirectory(targetPath); err != nil {
+				c.JSON(http.StatusOK, ArchiveBackupResponse{
+					Status: 500,
+					Msg:    "清空目标目录失败: " + err.Error(),
+				})
+				return
+			}
+		}
+		
+		// 如果目标目录不存在，创建它
+		if !targetExists {
+			if err := os.MkdirAll(targetPath, 0755); err != nil {
+				c.JSON(http.StatusOK, ArchiveBackupResponse{
+					Status: 500,
+					Msg:    "创建目标目录失败: " + err.Error(),
+				})
+				return
+			}
+		}
+		
+		// 打开zip文件
+		zipReader, err := zip.OpenReader(backupFilePath)
+		if err != nil {
+			c.JSON(http.StatusOK, ArchiveBackupResponse{
+				Status: 500,
+				Msg:    "打开备份文件失败: " + err.Error(),
+			})
+			return
+		}
+		defer zipReader.Close()
+		
+		// 解压文件
+		for _, file := range zipReader.File {
+			// 构建完整的目标路径
+			filePath := filepath.Join(targetPath, file.Name)
+			
+			// 跳过目录创建（我们会在需要时创建它们）
+			if file.FileInfo().IsDir() {
+				continue
+			}
+			
+			// 确保目标文件的目录存在
+			if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+				c.JSON(http.StatusOK, ArchiveBackupResponse{
+					Status: 500,
+					Msg:    "创建目录失败: " + err.Error(),
+				})
+				return
+			}
+			
+			// 创建目标文件
+			destFile, err := os.Create(filePath)
+			if err != nil {
+				c.JSON(http.StatusOK, ArchiveBackupResponse{
+					Status: 500,
+					Msg:    "创建文件失败: " + err.Error(),
+				})
+				return
+			}
+			
+			// 打开源文件
+			srcFile, err := file.Open()
+			if err != nil {
+				destFile.Close()
+				c.JSON(http.StatusOK, ArchiveBackupResponse{
+					Status: 500,
+					Msg:    "读取压缩文件内容失败: " + err.Error(),
+				})
+				return
+			}
+			
+			// 复制内容
+			if _, err := io.Copy(destFile, srcFile); err != nil {
+				destFile.Close()
+				srcFile.Close()
+				c.JSON(http.StatusOK, ArchiveBackupResponse{
+					Status: 500,
+					Msg:    "写入文件内容失败: " + err.Error(),
+				})
+				return
+			}
+			
+			// 关闭文件
+			destFile.Close()
+			srcFile.Close()
+		}
+		
+		// 构建响应信息
+		targetName := req.ArchiveName
+		if req.TargetName != "" {
+			targetName = req.TargetName
+		}
+		
+		c.JSON(http.StatusOK, ArchiveBackupResponse{
+			Status: 200,
+			Msg:    "备份恢复成功",
+			Data: map[string]interface{}{
+				"source_archive": req.ArchiveName,
+				"backup_file":    req.BackupName,
+				"target_archive": targetName,
+				"overwrite":      targetExists && req.OverwriteTarget,
+			},
+		})
+	}
+}
+
+// clearDirectory 清空目录内容但保留目录本身
+func clearDirectory(dir string) error {
+	// 读取目录内容
+	dirEntries, err := ioutil.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	
+	// 删除每个条目
+	for _, entry := range dirEntries {
+		entryPath := filepath.Join(dir, entry.Name())
+		if entry.IsDir() {
+			// 递归删除子目录
+			if err := os.RemoveAll(entryPath); err != nil {
+				return err
+			}
+		} else {
+			// 删除文件
+			if err := os.Remove(entryPath); err != nil {
+				return err
+			}
+		}
+	}
+	
+	return nil
 } 
