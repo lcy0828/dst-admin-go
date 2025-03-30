@@ -19,14 +19,15 @@ import (
 // SystemInfo 系统信息结构体
 type SystemInfo struct {
 	// CPU信息
-	CpuModel      string  `json:"cpu_model"`      // CPU型号
-	CpuMhz        float64 `json:"cpu_mhz"`        // CPU频率
-	CpuCores      int     `json:"cpu_cores"`      // CPU物理核心数
-	CpuThreads    int     `json:"cpu_threads"`    // CPU逻辑核心数
-	CpuUsage      float64 `json:"cpu_usage"`      // CPU使用率(%)
-	CpuLoad1      float64 `json:"cpu_load1"`      // 1分钟平均负载
-	CpuLoad5      float64 `json:"cpu_load5"`      // 5分钟平均负载
-	CpuLoad15     float64 `json:"cpu_load15"`     // 15分钟平均负载
+	CpuModel      string    `json:"cpu_model"`      // CPU型号
+	CpuMhz        float64   `json:"cpu_mhz"`        // CPU频率
+	CpuCores      int       `json:"cpu_cores"`      // CPU物理核心数
+	CpuThreads    int       `json:"cpu_threads"`    // CPU逻辑核心数
+	CpuUsage      float64   `json:"cpu_usage"`      // CPU使用率(%)
+	CpuCoreUsage  []float64 `json:"cpu_core_usage"` // 每个CPU核心的使用率(%)
+	CpuLoad1      float64   `json:"cpu_load1"`      // 1分钟平均负载
+	CpuLoad5      float64   `json:"cpu_load5"`      // 5分钟平均负载
+	CpuLoad15     float64   `json:"cpu_load15"`     // 15分钟平均负载
 	
 	// 内存信息
 	TotalMemory   uint64  `json:"total_memory"`   // 总内存(MB)
@@ -109,6 +110,10 @@ func getSystemInfo() SystemInfo {
 	if len(cpuPercent) > 0 {
 		info.CpuUsage = cpuPercent[0]
 	}
+	
+	// 获取每个CPU核心的使用率
+	perCpuPercent, _ := cpu.Percent(time.Second, true)
+	info.CpuCoreUsage = perCpuPercent
 	
 	// 获取系统负载
 	loadInfo, _ := load.Avg()
