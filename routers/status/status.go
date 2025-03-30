@@ -7,8 +7,11 @@ import (
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/load"
 	"github.com/shirou/gopsutil/v3/mem"
+	"github.com/shirou/gopsutil/v3/process"
 	"net/http"
+	"os"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"time"
 )
@@ -47,9 +50,32 @@ type SystemInfo struct {
 	GoVersion     string  `json:"go_version"`     // Go版本
 	GoRoutines    int     `json:"go_routines"`    // 当前goroutine数量
 	
+	// 程序自身信息
+	ProcessID        int       `json:"process_id"`           // 进程ID
+	ProcessUptime    uint64    `json:"process_uptime"`       // 程序运行时间(秒)
+	ProcessUptimeFmt string    `json:"process_uptime_fmt"`   // 格式化的程序运行时间
+	ProcessMemoryRSS uint64    `json:"process_memory_rss"`   // 程序物理内存使用(MB)
+	ProcessMemoryVMS uint64    `json:"process_memory_vms"`   // 程序虚拟内存使用(MB)
+	ProcessCPUUsage  float64   `json:"process_cpu_usage"`    // 程序CPU使用率(%)
+	ProcessThreads   int32     `json:"process_threads"`      // 程序线程数
+	
+	// Go内存信息
+	GoMemoryAlloc    uint64    `json:"go_memory_alloc"`      // Go堆分配内存(MB)
+	GoMemorySys      uint64    `json:"go_memory_sys"`        // Go系统获取的内存(MB)
+	GoMemoryHeapSys  uint64    `json:"go_memory_heap_sys"`   // Go堆系统获取的内存(MB)
+	GoMemoryHeapObjects uint64 `json:"go_memory_heap_objs"`  // Go堆中的对象数量
+	GoGCPause        uint64    `json:"go_gc_pause"`          // 最后一次GC暂停时间(ns)
+	GoGCRuns         uint32    `json:"go_gc_runs"`           // GC运行次数
+	
 	// 时间信息
 	CurrentTime   string  `json:"current_time"`   // 当前系统时间
+	StartTime     string  `json:"start_time"`     // 程序启动时间
 }
+
+// 程序启动时间
+var (
+	startTime = time.Now()
+)
 
 // Cpuinfo 获取系统信息接口
 func Cpuinfo() gin.HandlerFunc {
@@ -117,6 +143,55 @@ func getSystemInfo() SystemInfo {
 	
 	// 获取当前时间
 	info.CurrentTime = time.Now().Format("2006-01-02 15:04:05")
+	
+	// 获取程序自身信息
+	info.ProcessID = os.Getpid()
+	
+	// 计算程序运行时间
+	processUptime := time.Since(startTime).Seconds()
+	info.ProcessUptime = uint64(processUptime)
+	info.ProcessUptimeFmt = formatUptime(info.ProcessUptime)
+	info.StartTime = startTime.Format("2006-01-02 15:04:05")
+	
+	// 获取当前进程信息
+	proc, err := process.NewProcess(int32(info.ProcessID))
+	if err == nil {
+		// 获取进程内存信息
+		if memInfo, err := proc.MemoryInfo(); err == nil && memInfo != nil {
+			info.ProcessMemoryRSS = memInfo.RSS / 1024 / 1024  // 转为MB
+			info.ProcessMemoryVMS = memInfo.VMS / 1024 / 1024  // 转为MB
+		}
+		
+		// 获取进程CPU使用率
+		if cpuPercent, err := proc.CPUPercent(); err == nil {
+			info.ProcessCPUUsage = cpuPercent
+		}
+		
+		// 获取线程数
+		if numThreads, err := proc.NumThreads(); err == nil {
+			info.ProcessThreads = numThreads
+		}
+	}
+	
+	// 获取Go内存统计信息
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	
+	info.GoMemoryAlloc = memStats.Alloc / 1024 / 1024       // 转为MB
+	info.GoMemorySys = memStats.Sys / 1024 / 1024           // 转为MB
+	info.GoMemoryHeapSys = memStats.HeapSys / 1024 / 1024   // 转为MB
+	info.GoMemoryHeapObjects = memStats.HeapObjects
+	
+	// GC信息
+	info.GoGCPause = memStats.PauseNs[(memStats.NumGC+255)%256]  // 最近的GC暂停时间
+	info.GoGCRuns = memStats.NumGC
+	
+	// 手动触发一次GC(可选)
+	// debug.FreeOSMemory()
+	
+	// 获取最近GC统计信息
+	gcStats := debug.GCStats{}
+	debug.ReadGCStats(&gcStats)
 	
 	return info
 }
