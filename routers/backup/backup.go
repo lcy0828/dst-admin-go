@@ -40,12 +40,28 @@ type BackupInfo struct {
 // CreateBackup 创建存档备份
 func CreateBackup() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// 定义请求参数结构体
+		type CreateBackupRequest struct {
+			ArchiveName string `json:"archive" binding:"required"`
+		}
+		
+		var req CreateBackupRequest
+		
+		// 从请求体中获取参数
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusOK, ArchiveBackupResponse{
+				Status: 400,
+				Msg:    "无效的请求参数: " + err.Error(),
+			})
+			return
+		}
+		
 		// 获取存档名称
-		archiveName := c.Query("archive")
+		archiveName := req.ArchiveName
 		if archiveName == "" {
 			c.JSON(http.StatusOK, ArchiveBackupResponse{
 				Status: 400,
-				Msg:    "缺少存档名称参数",
+				Msg:    "存档名称不能为空",
 			})
 			return
 		}
@@ -313,6 +329,24 @@ func DownloadBackup() gin.HandlerFunc {
 			c.JSON(http.StatusOK, ArchiveBackupResponse{
 				Status: 400,
 				Msg:    "缺少存档名称或备份文件名参数",
+			})
+			return
+		}
+
+		// 验证备份文件名
+		if !strings.HasSuffix(backupName, ".zip") {
+			c.JSON(http.StatusOK, ArchiveBackupResponse{
+				Status: 400,
+				Msg:    "备份文件必须是.zip格式",
+			})
+			return
+		}
+		
+		// 防止路径遍历攻击
+		if strings.Contains(backupName, "..") || strings.Contains(archiveName, "..") {
+			c.JSON(http.StatusOK, ArchiveBackupResponse{
+				Status: 403,
+				Msg:    "无效的文件路径",
 			})
 			return
 		}
