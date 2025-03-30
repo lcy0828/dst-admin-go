@@ -129,6 +129,9 @@ func InitRouter() *gin.Engine {
 			
 			// 恢复备份
 			archiveBackup.POST("/restore", backup.RestoreBackup())
+			
+			// 删除备份
+			archiveBackup.POST("/delete", backup.DeleteBackup())
 		}
 	}
 

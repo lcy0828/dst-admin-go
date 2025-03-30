@@ -604,4 +604,87 @@ func clearDirectory(dir string) error {
 	}
 	
 	return nil
+}
+
+// DeleteBackup 删除存档备份
+func DeleteBackup() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 定义请求参数结构体
+		type DeleteBackupRequest struct {
+			ArchiveName string `json:"archive" binding:"required"` // 存档名称
+			BackupName  string `json:"backup" binding:"required"`  // 备份文件名
+		}
+
+		var req DeleteBackupRequest
+
+		// 从请求体中获取参数
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusOK, ArchiveBackupResponse{
+				Status: 400,
+				Msg:    "无效的请求参数: " + err.Error(),
+			})
+			return
+		}
+
+		// 验证备份文件名
+		if !strings.HasSuffix(req.BackupName, ".zip") {
+			c.JSON(http.StatusOK, ArchiveBackupResponse{
+				Status: 400,
+				Msg:    "备份文件必须是.zip格式",
+			})
+			return
+		}
+
+		// 防止路径遍历攻击
+		if strings.Contains(req.BackupName, "..") || strings.Contains(req.ArchiveName, "..") {
+			c.JSON(http.StatusOK, ArchiveBackupResponse{
+				Status: 403,
+				Msg:    "无效的文件路径",
+			})
+			return
+		}
+
+		// 构建备份文件路径
+		backupFilePath := filepath.Join(DstBackupPath, req.ArchiveName, req.BackupName)
+
+		// 检查文件是否存在
+		if _, err := os.Stat(backupFilePath); os.IsNotExist(err) {
+			c.JSON(http.StatusOK, ArchiveBackupResponse{
+				Status: 404,
+				Msg:    "备份文件不存在",
+			})
+			return
+		}
+
+		// 获取文件信息用于返回
+		fileInfo, err := os.Stat(backupFilePath)
+		var fileSize int64
+		var createTime string
+		if err == nil {
+			fileSize = fileInfo.Size()
+			createTime = fileInfo.ModTime().Format("2006-01-02 15:04:05")
+		}
+
+		// 删除文件
+		if err := os.Remove(backupFilePath); err != nil {
+			c.JSON(http.StatusOK, ArchiveBackupResponse{
+				Status: 500,
+				Msg:    "删除备份文件失败: " + err.Error(),
+			})
+			return
+		}
+
+		// 返回成功信息
+		c.JSON(http.StatusOK, ArchiveBackupResponse{
+			Status: 200,
+			Msg:    "备份文件删除成功",
+			Data: map[string]interface{}{
+				"archive":        req.ArchiveName,
+				"backup":         req.BackupName,
+				"size":           fileSize,
+				"size_formatted": formatFileSize(fileSize),
+				"create_time":    createTime,
+			},
+		})
+	}
 } 
