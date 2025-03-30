@@ -69,6 +69,7 @@ func InitRouter() *gin.Engine {
 		{
 			dashboardGroup.GET("/", server.Status) // 临时使用server.Status替代
 			dashboardGroup.GET("/status", status.Cpuinfo())
+			dashboardGroup.GET("/docker/containers", status.GetDstDockerContainers())
 		}
 
 		// Mods

@@ -1,6 +1,8 @@
 package status
 
 import (
+	"bufio"
+	"bytes"
 	"github.com/gin-gonic/gin"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
@@ -10,9 +12,11 @@ import (
 	"github.com/shirou/gopsutil/v3/process"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -71,6 +75,25 @@ type SystemInfo struct {
 	// 时间信息
 	CurrentTime   string  `json:"current_time"`   // 当前系统时间
 	StartTime     string  `json:"start_time"`     // 程序启动时间
+}
+
+// DockerContainer Docker容器信息结构体
+type DockerContainer struct {
+	ContainerId   string `json:"container_id"`   // 容器ID
+	Image         string `json:"image"`          // 镜像名称
+	Command       string `json:"command"`        // 运行命令
+	Created       string `json:"created"`        // 创建时间
+	Status        string `json:"status"`         // 容器状态
+	Ports         string `json:"ports"`          // 端口映射
+	Names         string `json:"names"`          // 容器名称
+	Running       bool   `json:"running"`        // 是否运行中
+}
+
+// DockerContainersResponse Docker容器列表响应
+type DockerContainersResponse struct {
+	Status int              `json:"status"`
+	Msg    string           `json:"msg"`
+	Data   []DockerContainer `json:"data"`
 }
 
 // 程序启动时间
@@ -212,4 +235,70 @@ func formatUptime(uptime uint64) string {
 		strconv.FormatUint(hours, 10) + "小时" + 
 		strconv.FormatUint(minutes, 10) + "分" + 
 		strconv.FormatUint(seconds, 10) + "秒"
+}
+
+// GetDstDockerContainers 获取DST相关Docker容器列表
+func GetDstDockerContainers() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		containers, err := getDstContainers()
+		if err != nil {
+			c.JSON(http.StatusOK, DockerContainersResponse{
+				Status: 500,
+				Msg:    "获取Docker容器列表失败: " + err.Error(),
+				Data:   []DockerContainer{},
+			})
+			return
+		}
+		
+		c.JSON(http.StatusOK, DockerContainersResponse{
+			Status: 200,
+			Msg:    "获取Docker容器列表成功",
+			Data:   containers,
+		})
+	}
+}
+
+// getDstContainers 获取DST相关的Docker容器列表
+func getDstContainers() ([]DockerContainer, error) {
+	// 执行docker ps -a命令
+	cmd := exec.Command("docker", "ps", "-a", "--format", "{{.ID}}|{{.Image}}|{{.Command}}|{{.CreatedAt}}|{{.Status}}|{{.Ports}}|{{.Names}}")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err := cmd.Run()
+	if err != nil {
+		return nil, err
+	}
+	
+	// 解析输出结果
+	var containers []DockerContainer
+	scanner := bufio.NewScanner(&out)
+	for scanner.Scan() {
+		line := scanner.Text()
+		// 只保留包含dstserver的行
+		if !strings.Contains(strings.ToLower(line), "dstserver") {
+			continue
+		}
+		
+		// 解析行内容
+		parts := strings.Split(line, "|")
+		if len(parts) < 7 {
+			continue
+		}
+		
+		// 判断容器是否正在运行
+		isRunning := strings.Contains(strings.ToLower(parts[4]), "up")
+		
+		containers = append(containers, DockerContainer{
+			ContainerId: parts[0],
+			Image:       parts[1],
+			Command:     parts[2],
+			Created:     parts[3],
+			Status:      parts[4],
+			Ports:       parts[5],
+			Names:       parts[6],
+			Running:     isRunning,
+		})
+	}
+	
+	return containers, nil
 }
