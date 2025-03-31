@@ -57,14 +57,14 @@ func main() {
 	if *enableAgentServer {
 		// 如果未指定密钥文件，使用默认路径
 		if *keyFile == "" {
-			// 获取可执行文件所在目录作为基础路径
-			execDir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+			// 获取当前工作目录作为基础路径
+			workDir, err := os.Getwd()
 			if err != nil {
-				log.Printf("警告：无法获取程序目录: %v，将使用当前目录", err)
-				execDir = "."
+				log.Printf("警告：无法获取当前工作目录: %v，将使用相对路径", err)
+				workDir = "."
 			}
 			
-			*keyFile = filepath.Join(execDir, "agent_server_key.json")
+			*keyFile = filepath.Join(workDir, "agent_server_key.json")
 			log.Printf("未指定通信密钥文件，使用默认路径: %s", *keyFile)
 		} else {
 			// 确保使用绝对路径

@@ -193,14 +193,60 @@ func (km *KeyManager) saveKey() error {
 	dir := filepath.Dir(absPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		log.Printf("创建目录失败: %v", err)
-		return err
+		
+		// 尝试回退到当前目录
+		currentDir, err := os.Getwd()
+		if err != nil {
+			log.Printf("无法获取当前工作目录: %v", err)
+			return err
+		}
+		
+		// 修改文件路径为当前目录中的文件
+		newPath := filepath.Join(currentDir, filepath.Base(absPath))
+		log.Printf("尝试使用当前目录作为替代: %s", newPath)
+		absPath = newPath
 	}
 	
-	// 写入文件
-	err = ioutil.WriteFile(absPath, data, 0600) // 只有所有者可读写
+	// 尝试先写入临时文件
+	tempFile := absPath + ".tmp"
+	err = ioutil.WriteFile(tempFile, data, 0600)
 	if err != nil {
-		log.Printf("写入密钥文件失败: %v", err)
-		return err
+		log.Printf("写入临时密钥文件失败: %v", err)
+		
+		// 尝试直接写入最终文件
+		err = ioutil.WriteFile(absPath, data, 0600)
+		if err != nil {
+			log.Printf("写入密钥文件失败: %v", err)
+			
+			// 最后尝试写入用户主目录
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				log.Printf("无法获取用户主目录: %v", err)
+				return err
+			}
+			
+			homeFilePath := filepath.Join(homeDir, "agent_server_key.json")
+			log.Printf("尝试写入到用户主目录: %s", homeFilePath)
+			err = ioutil.WriteFile(homeFilePath, data, 0600)
+			if err != nil {
+				log.Printf("写入到用户主目录也失败: %v", err)
+				return err
+			}
+			
+			// 更新文件路径
+			km.keyFile = homeFilePath
+			log.Printf("密钥文件已保存到用户主目录: %s", homeFilePath)
+			return nil
+		}
+	} else {
+		// 如果临时文件写入成功，重命名为最终文件
+		if err := os.Rename(tempFile, absPath); err != nil {
+			log.Printf("重命名临时文件失败: %v，尝试直接使用临时文件", err)
+			// 如果重命名失败，直接使用临时文件
+			km.keyFile = tempFile
+			log.Printf("使用临时文件作为密钥文件: %s", tempFile)
+			return nil
+		}
 	}
 	
 	log.Printf("密钥文件保存成功: %s", absPath)
