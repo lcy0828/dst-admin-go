@@ -7,7 +7,6 @@ import (
 	"dont/server"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
