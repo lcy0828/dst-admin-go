@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +57,8 @@ type Server struct {
 	upgrader          websocket.Upgrader
 	stopChan          chan struct{}
 	keyUpdateSessions *KeyUpdateSessionManager // 密钥更新会话管理器
+	commandResults    map[string]*CommandResult // 存储命令执行结果
+	commandMutex      sync.RWMutex             // 命令结果互斥锁
 }
 
 // Config 服务器配置
@@ -87,6 +90,21 @@ type KeyUpdateSessionManager struct {
 	CompletedSessions  int
 	FailedSessions     int
 	Mutex              sync.Mutex
+}
+
+// CommandResult 命令执行结果
+type CommandResult struct {
+	AgentID    string   `json:"agent_id"`    // 执行命令的Agent ID
+	CommandID  string   `json:"command_id"`  // 命令ID
+	Type       string   `json:"type"`        // 命令类型
+	Content    string   `json:"content"`     // 命令内容
+	Output     string   `json:"output"`      // 命令输出
+	ErrorMsg   string   `json:"error_msg"`   // 错误信息
+	ExitCode   int      `json:"exit_code"`   // 退出码
+	Success    bool     `json:"success"`     // 是否成功
+	StartTime  int64    `json:"start_time"`  // 开始时间
+	EndTime    int64    `json:"end_time"`    // 结束时间
+	Status     string   `json:"status"`      // 状态：pending, completed, failed
 }
 
 // NewKeyUpdateSessionManager 创建新的密钥更新会话管理器
@@ -133,6 +151,7 @@ func NewServer(config *Config) (*Server, error) {
 				return true // 允许所有来源的连接
 			},
 		},
+		commandResults: make(map[string]*CommandResult),
 	}
 	
 	// 设置密钥变更回调
@@ -173,6 +192,9 @@ func NewServer(config *Config) (*Server, error) {
 			log.Printf("没有已连接的客户端，无需广播密钥变更")
 		}
 	})
+
+	// 启动命令结果清理协程
+	go server.cleanupCommandResults()
 
 	return server, nil
 }
@@ -487,6 +509,10 @@ func (s *Server) processAgentMessage(agent *AgentConnection, msg *shared.Message
 	case shared.TypeCommandResp:
 		s.handleCommandResponse(agent, msg)
 		
+	case shared.TypeCommandAck:
+		// 处理命令确认
+		s.handleCommandAck(agent, msg)
+		
 	case "security_key_update_ack":
 		// 处理密钥更新确认
 		var payload struct {
@@ -524,6 +550,28 @@ func (s *Server) processAgentMessage(agent *AgentConnection, msg *shared.Message
 	default:
 		log.Printf("收到未知消息类型: %s, 来自: %s", msg.Type, agent.AgentID)
 	}
+}
+
+// 处理命令确认消息
+func (s *Server) handleCommandAck(agent *AgentConnection, msg *shared.Message) {
+	var ackPayload struct {
+		CommandID string `json:"command_id"`
+		Status    string `json:"status"`
+	}
+	
+	if err := json.Unmarshal(msg.Payload, &ackPayload); err != nil {
+		log.Printf("解析命令确认消息失败: %v", err)
+		return
+	}
+	
+	log.Printf("Agent(%s)已确认接收命令: %s, 状态: %s", agent.AgentID, ackPayload.CommandID, ackPayload.Status)
+	
+	// 更新命令状态
+	s.commandMutex.Lock()
+	if result, exists := s.commandResults[ackPayload.CommandID]; exists {
+		result.Status = "received"
+	}
+	s.commandMutex.Unlock()
 }
 
 // 处理主动上报
@@ -613,6 +661,38 @@ func (s *Server) handleCommandResponse(agent *AgentConnection, msg *shared.Messa
 	if respPayload.ErrorMsg != "" {
 		log.Printf("命令错误: %s", respPayload.ErrorMsg)
 	}
+	
+	// 保存命令执行结果
+	s.commandMutex.Lock()
+	cmdResult, exists := s.commandResults[respPayload.CommandID]
+	if exists {
+		// 更新现有结果
+		cmdResult.Output = respPayload.Output
+		cmdResult.ErrorMsg = respPayload.ErrorMsg
+		cmdResult.ExitCode = respPayload.ExitCode
+		cmdResult.Success = respPayload.Success
+		cmdResult.EndTime = time.Now().Unix()
+		cmdResult.Status = "completed"
+		if !respPayload.Success {
+			cmdResult.Status = "failed"
+		}
+	} else {
+		// 创建新的结果记录
+		s.commandResults[respPayload.CommandID] = &CommandResult{
+			AgentID:   agent.AgentID,
+			CommandID: respPayload.CommandID,
+			Output:    respPayload.Output,
+			ErrorMsg:  respPayload.ErrorMsg,
+			ExitCode:  respPayload.ExitCode,
+			Success:   respPayload.Success,
+			EndTime:   time.Now().Unix(),
+			Status:    "completed",
+		}
+		if !respPayload.Success {
+			s.commandResults[respPayload.CommandID].Status = "failed"
+		}
+	}
+	s.commandMutex.Unlock()
 }
 
 // 清理过期连接
@@ -681,9 +761,31 @@ func (s *Server) SendCommand(agentID, commandType, content string, timeout int) 
 		Timeout:   timeout,
 	}
 
+	// 在结果map中记录命令
+	s.commandMutex.Lock()
+	if s.commandResults == nil {
+		s.commandResults = make(map[string]*CommandResult)
+	}
+	s.commandResults[commandID] = &CommandResult{
+		AgentID:   agentID,
+		CommandID: commandID,
+		Type:      commandType,
+		Content:   content,
+		StartTime: time.Now().Unix(),
+		Status:    "pending",
+	}
+	s.commandMutex.Unlock()
+
 	// 创建命令消息
 	cmdMsg, err := shared.CreateMessage(shared.TypeCommand, "server", cmdPayload)
 	if err != nil {
+		// 更新命令状态为失败
+		s.commandMutex.Lock()
+		s.commandResults[commandID].Status = "failed"
+		s.commandResults[commandID].ErrorMsg = fmt.Sprintf("创建命令消息失败: %v", err)
+		s.commandResults[commandID].EndTime = time.Now().Unix()
+		s.commandMutex.Unlock()
+		
 		return "", fmt.Errorf("创建命令消息失败: %v", err)
 	}
 
@@ -691,6 +793,14 @@ func (s *Server) SendCommand(agentID, commandType, content string, timeout int) 
 	agent.Mutex.Lock()
 	if agent.Connection == nil {
 		agent.Mutex.Unlock()
+		
+		// 更新命令状态为失败
+		s.commandMutex.Lock()
+		s.commandResults[commandID].Status = "failed"
+		s.commandResults[commandID].ErrorMsg = fmt.Sprintf("Agent连接已关闭: %s", agentID)
+		s.commandResults[commandID].EndTime = time.Now().Unix()
+		s.commandMutex.Unlock()
+		
 		return "", fmt.Errorf("Agent连接已关闭: %s", agentID)
 	}
 	
@@ -698,6 +808,13 @@ func (s *Server) SendCommand(agentID, commandType, content string, timeout int) 
 	agent.Mutex.Unlock()
 	
 	if err != nil {
+		// 更新命令状态为失败
+		s.commandMutex.Lock()
+		s.commandResults[commandID].Status = "failed"
+		s.commandResults[commandID].ErrorMsg = fmt.Sprintf("发送命令失败: %v", err)
+		s.commandResults[commandID].EndTime = time.Now().Unix()
+		s.commandMutex.Unlock()
+		
 		return "", fmt.Errorf("发送命令失败: %v", err)
 	}
 
@@ -1465,4 +1582,70 @@ func (s *Server) loadSecurityKey(keyFile string) (string, error) {
 	}
 	
 	return securityKey.Key, nil
+}
+
+// 获取命令执行结果
+func (s *Server) GetCommandResult(commandID string) (*CommandResult, error) {
+	s.commandMutex.RLock()
+	defer s.commandMutex.RUnlock()
+	
+	result, exists := s.commandResults[commandID]
+	if !exists {
+		return nil, fmt.Errorf("未找到命令结果: %s", commandID)
+	}
+	
+	return result, nil
+}
+
+// 获取命令执行结果列表
+func (s *Server) GetCommandResults(agentID string, limit int) []*CommandResult {
+	s.commandMutex.RLock()
+	defer s.commandMutex.RUnlock()
+	
+	var results []*CommandResult
+	
+	// 复制结果到临时切片，如果指定了agentID则只返回该agent的结果
+	for _, result := range s.commandResults {
+		if agentID == "" || result.AgentID == agentID {
+			results = append(results, result)
+		}
+	}
+	
+	// 按时间倒序排序
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].StartTime > results[j].StartTime
+	})
+	
+	// 限制结果数量
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+	
+	return results
+}
+
+// 清理老旧命令结果
+func (s *Server) cleanupCommandResults() {
+	ticker := time.NewTicker(24 * time.Hour) // 每天清理一次
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-s.stopChan:
+			return
+		case <-ticker.C:
+			// 保留最近7天的记录
+			cutoffTime := time.Now().Add(-7 * 24 * time.Hour).Unix()
+			
+			s.commandMutex.Lock()
+			for id, result := range s.commandResults {
+				if result.EndTime < cutoffTime {
+					delete(s.commandResults, id)
+				}
+			}
+			s.commandMutex.Unlock()
+			
+			log.Printf("已清理老旧的命令执行结果")
+		}
+	}
 } 

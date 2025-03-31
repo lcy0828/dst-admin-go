@@ -16,6 +16,16 @@ func SendCommand(c *gin.Context) {
 	controller.SendCommand(c)
 }
 
+// GetCommandResult 获取命令执行结果
+func GetCommandResult(c *gin.Context) {
+	controller.GetCommandResult(c)
+}
+
+// GetCommandResults 获取命令执行结果列表
+func GetCommandResults(c *gin.Context) {
+	controller.GetCommandResults(c)
+}
+
 // RequestReport 请求Agent上报信息
 func RequestReport(c *gin.Context) {
 	controller.RequestReport(c)

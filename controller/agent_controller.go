@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 )
@@ -100,6 +101,80 @@ func SendCommand(c *gin.Context) {
 		"data": gin.H{
 			"command_id": commandID,
 		},
+	})
+}
+
+// GetCommandResult 获取命令执行结果
+func GetCommandResult(c *gin.Context) {
+	if AgentServer == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code": 500,
+			"msg":  "Agent服务器未启动",
+			"data": nil,
+		})
+		return
+	}
+
+	// 从URL获取命令ID
+	commandID := c.Param("command_id")
+	if commandID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code": 400,
+			"msg":  "缺少命令ID参数",
+			"data": nil,
+		})
+		return
+	}
+
+	// 查询命令结果
+	result, err := AgentServer.GetCommandResult(commandID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"code": 404,
+			"msg":  err.Error(),
+			"data": nil,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"msg":  "获取成功",
+		"data": result,
+	})
+}
+
+// GetCommandResults 获取命令执行结果列表
+func GetCommandResults(c *gin.Context) {
+	if AgentServer == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code": 500,
+			"msg":  "Agent服务器未启动",
+			"data": nil,
+		})
+		return
+	}
+
+	// 获取查询参数
+	agentID := c.Query("agent_id")
+	limitStr := c.Query("limit")
+	
+	limit := 20 // 默认限制20条
+	if limitStr != "" {
+		var err error
+		limit, err = strconv.Atoi(limitStr)
+		if err != nil || limit <= 0 {
+			limit = 20
+		}
+	}
+
+	// 获取结果列表
+	results := AgentServer.GetCommandResults(agentID, limit)
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"msg":  "获取成功",
+		"data": results,
 	})
 }
 

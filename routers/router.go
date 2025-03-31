@@ -152,6 +152,10 @@ func InitRouter() *gin.Engine {
 			agents.GET("/security/key", agent.GetSecurityKey)
 			agents.POST("/security/key/generate", agent.GenerateNewKey)
 			agents.POST("/security/key/update", agent.UpdateSecurityKey)
+
+			// 获取命令执行结果
+			agents.GET("/command/:command_id", agent.GetCommandResult)
+			agents.GET("/command", agent.GetCommandResults)
 		}
 	}
 
