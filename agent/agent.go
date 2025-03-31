@@ -175,8 +175,11 @@ func (a *Agent) Connect() error {
 	// 构建连接URL（添加密钥参数）
 	connectURL := a.Config.ServerURL
 	if a.Config.SecurityKey != "" {
-		// 对密钥进行URL编码，防止特殊字符（如+、/、=等）在URL中被改变
-		encodedKey := url.QueryEscape(a.Config.SecurityKey)
+		// 对密钥进行特殊字符替换和URL编码，确保+号不会被错误处理
+		// 将+替换为%2B，确保不会被误解为空格
+		encodedKey := strings.ReplaceAll(a.Config.SecurityKey, "+", "%2B")
+		encodedKey = strings.ReplaceAll(encodedKey, "/", "%2F")
+		encodedKey = strings.ReplaceAll(encodedKey, "=", "%3D")
 		
 		// 添加查询参数
 		if strings.Contains(connectURL, "?") {

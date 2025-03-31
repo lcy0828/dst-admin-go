@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -153,12 +154,23 @@ func (s *Server) handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 	// 获取查询参数中的密钥
 	authKey := r.URL.Query().Get("key")
 	
-	// URL解码密钥（因为agent端可能进行了URL编码）
-	decodedKey, err := url.QueryUnescape(authKey)
-	if err != nil {
-		log.Printf("解码密钥失败: %v，将使用原始密钥", err)
-		decodedKey = authKey
-	} else if decodedKey != authKey {
+	// 处理Base64编码中的特殊字符
+	decodedKey := authKey
+	// 检查是否包含%编码字符
+	if strings.Contains(authKey, "%") {
+		// 替换所有编码的Base64特殊字符
+		decodedKey = strings.ReplaceAll(authKey, "%2B", "+")
+		decodedKey = strings.ReplaceAll(decodedKey, "%2F", "/")
+		decodedKey = strings.ReplaceAll(decodedKey, "%3D", "=")
+		
+		// 如果还有其他编码字符，尝试URL解码
+		if strings.Contains(decodedKey, "%") {
+			unescaped, err := url.QueryUnescape(decodedKey)
+			if err == nil {
+				decodedKey = unescaped
+			}
+		}
+		
 		log.Printf("密钥已解码: %s -> %s", authKey, decodedKey)
 	}
 	
