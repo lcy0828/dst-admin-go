@@ -786,38 +786,73 @@ func (s *Server) createKeyUpdateSession(proposedKey string) (*KeyUpdateSession, 
 		Timeout:         time.Minute * 5, // 设置超时时间为5分钟
 		OnComplete: func(success bool, key string) {
 			if success {
+				// 标记会话状态为正在完成
 				s.keyUpdateSessions.Mutex.Lock()
-				currentSession := s.keyUpdateSessions.CurrentSession
-				var readyCount, totalCount int
-				if currentSession != nil {
-					currentSession.Mutex.Lock()
-					readyCount = len(currentSession.ReadyAgents)
-					totalCount = currentSession.TotalAgentCount
-					currentSession.Mutex.Unlock()
+				if s.keyUpdateSessions.CurrentSession != nil && 
+				   s.keyUpdateSessions.CurrentSession.ID == sessionID {
+					s.keyUpdateSessions.CurrentSession.Status = "completing"
 				}
 				s.keyUpdateSessions.Mutex.Unlock()
 				
-				log.Printf("所有Agent(%d/%d)都已准备好，应用新密钥: %s", 
-					readyCount, totalCount, key)
+				log.Printf("准备应用新密钥: %s", key)
 				
 				// 保存当前密钥用于回退
 				oldKey := s.keyManager.GetKey()
 				log.Printf("当前密钥: %s，将更新为: %s", oldKey, key)
 				
-				if err := s.keyManager.SetKey(key); err != nil {
-					log.Printf("应用新密钥失败: %v，将保持旧密钥: %s", err, oldKey)
-					return
+				// 设置一个最终超时，确保无论如何都会应用密钥
+				appliedChan := make(chan bool, 1)
+				go func() {
+					// 尝试设置新密钥
+					if err := s.keyManager.SetKey(key); err != nil {
+						log.Printf("应用新密钥失败: %v，将保持旧密钥: %s", err, oldKey)
+						appliedChan <- false
+						return
+					}
+					
+					// 验证密钥是否正确保存
+					newKey := s.keyManager.GetKey()
+					if newKey != key {
+						log.Printf("警告：密钥可能未正确应用，期望的密钥: %s, 当前密钥: %s", key, newKey)
+						appliedChan <- false
+					} else {
+						log.Printf("成功应用新密钥: %s", newKey)
+						appliedChan <- true
+					}
+				}()
+				
+				// 设置5秒超时
+				select {
+				case applied := <-appliedChan:
+					if applied {
+						log.Printf("密钥更新会话成功完成，新密钥已应用: %s", key)
+					} else {
+						log.Printf("密钥应用过程失败")
+					}
+				case <-time.After(5 * time.Second):
+					log.Printf("警告：密钥应用过程超时，无法确认新密钥是否已成功应用")
 				}
 				
-				// 验证密钥是否正确保存
-				newKey := s.keyManager.GetKey()
-				if newKey != key {
-					log.Printf("警告：密钥可能未正确应用，期望的密钥: %s, 当前密钥: %s", key, newKey)
-				} else {
-					log.Printf("密钥更新会话成功完成，新密钥已应用: %s", newKey)
+				// 标记会话为已完成
+				s.keyUpdateSessions.Mutex.Lock()
+				if s.keyUpdateSessions.CurrentSession != nil && 
+				   s.keyUpdateSessions.CurrentSession.ID == sessionID {
+					s.keyUpdateSessions.CurrentSession.Status = "completed"
+					s.keyUpdateSessions.CompletedSessions++
+					log.Printf("密钥更新会话 %s 已正式完成", sessionID)
 				}
+				s.keyUpdateSessions.Mutex.Unlock()
 			} else {
 				log.Printf("密钥更新会话失败或取消，密钥未更新")
+				
+				// 标记会话为失败
+				s.keyUpdateSessions.Mutex.Lock()
+				if s.keyUpdateSessions.CurrentSession != nil && 
+				   s.keyUpdateSessions.CurrentSession.ID == sessionID {
+					s.keyUpdateSessions.CurrentSession.Status = "failed"
+					s.keyUpdateSessions.FailedSessions++
+				}
+				s.keyUpdateSessions.Mutex.Unlock()
 			}
 			
 			// 清理会话
@@ -832,18 +867,43 @@ func (s *Server) createKeyUpdateSession(proposedKey string) (*KeyUpdateSession, 
 
 	// 设置超时定时器
 	session.TimeoutTimer = time.AfterFunc(session.Timeout, func() {
+		log.Printf("会话 %s 定时器触发", sessionID)
+		
+		// 获取会话的当前状态
 		s.keyUpdateSessions.Mutex.Lock()
-		defer s.keyUpdateSessions.Mutex.Unlock()
+		var currentSession *KeyUpdateSession
+		var shouldComplete bool
 		
 		if s.keyUpdateSessions.CurrentSession != nil && 
-		   s.keyUpdateSessions.CurrentSession.ID == sessionID && 
-		   s.keyUpdateSessions.CurrentSession.Status == "pending" {
-			log.Printf("密钥更新会话 %s 超时，当前已准备好的代理: %d/%d", 
-				sessionID, 
-				len(s.keyUpdateSessions.CurrentSession.ReadyAgents), 
-				s.keyUpdateSessions.CurrentSession.TotalAgentCount)
+		   s.keyUpdateSessions.CurrentSession.ID == sessionID {
+			currentSession = s.keyUpdateSessions.CurrentSession
+			// 只有会话处于pending状态时才需要取消
+			shouldComplete = currentSession.Status == "pending"
 			
-			s.keyUpdateSessions.CurrentSession.OnComplete(false, "")
+			// 记录准备好的代理数量
+			readyCount := len(currentSession.ReadyAgents)
+			totalCount := currentSession.TotalAgentCount
+			s.keyUpdateSessions.Mutex.Unlock()
+			
+			if shouldComplete {
+				if readyCount > 0 && readyCount == totalCount {
+					// 所有代理都已经准备好，但可能卡在某个环节，强制完成
+					log.Printf("所有代理已准备好但会话超时，强制完成更新: %d/%d", 
+						readyCount, totalCount)
+					currentSession.OnComplete(true, currentSession.ProposedKey)
+				} else {
+					// 部分代理未准备好，取消会话
+					log.Printf("密钥更新会话 %s 超时，当前已准备好的代理: %d/%d", 
+						sessionID, readyCount, totalCount)
+					currentSession.OnComplete(false, "")
+				}
+			} else {
+				log.Printf("会话 %s 已处于非pending状态 (%s)，不进行超时处理", 
+					sessionID, currentSession.Status)
+			}
+		} else {
+			s.keyUpdateSessions.Mutex.Unlock()
+			log.Printf("会话 %s 不再是当前会话，忽略超时", sessionID)
 		}
 	})
 
@@ -981,31 +1041,44 @@ func (s *Server) handleAgentKeyUpdateReady(agentID string, payload struct {
 	
 	// 更新Agent状态
 	currentSession.Mutex.Lock()
-	defer currentSession.Mutex.Unlock()
-	
-	// 标记该代理为就绪
 	currentSession.ReadyAgents[agentID] = true
+	readyCount := len(currentSession.ReadyAgents)
+	totalCount := currentSession.TotalAgentCount
+	currentSession.Mutex.Unlock()
 	
 	log.Printf("Agent(%s)已准备好在%d秒后更新密钥，当前进度: %d/%d", 
-		agentID, payload.ReadyIn, len(currentSession.ReadyAgents), currentSession.TotalAgentCount)
+		agentID, payload.ReadyIn, readyCount, totalCount)
 	
 	// 检查是否所有Agent都已准备好
-	if len(currentSession.ReadyAgents) == currentSession.TotalAgentCount {
+	if readyCount == totalCount {
 		log.Printf("所有Agent(%d/%d)都已准备好，准备完成密钥更新", 
-			len(currentSession.ReadyAgents), currentSession.TotalAgentCount)
+			readyCount, totalCount)
 		
-		// 设置一个延迟，给所有Agent足够的时间进行更新
+		// 设置一个定时器，给所有Agent足够的时间进行更新
+		gracePeriod := time.Duration(payload.ReadyIn + 2) * time.Second
+		log.Printf("设置%s的宽限期，等待所有Agent断开连接并应用新密钥", gracePeriod)
+		
+		// 使用goroutine避免阻塞当前处理流程
 		go func() {
-			// 等待最慢的Agent完成更新
-			time.Sleep(time.Duration(payload.ReadyIn+2) * time.Second)
+			// 等待Agent完成断开连接
+			time.Sleep(gracePeriod)
 			
-			// 完成会话
-			select {
-			case <-s.stopChan:
+			// 检查会话是否仍然有效
+			s.keyUpdateSessions.Mutex.Lock()
+			isValid := s.keyUpdateSessions.CurrentSession != nil && 
+				       s.keyUpdateSessions.CurrentSession.ID == payload.SessionID &&
+				       s.keyUpdateSessions.CurrentSession.Status == "pending"
+			s.keyUpdateSessions.Mutex.Unlock()
+			
+			if !isValid {
+				log.Printf("会话 %s 不再有效，取消密钥更新", payload.SessionID)
 				return
-			default:
-				currentSession.OnComplete(true, payload.NewKey)
 			}
+			
+			log.Printf("宽限期已结束，开始应用新密钥: %s", payload.NewKey)
+			
+			// 完成会话并应用新密钥
+			currentSession.OnComplete(true, payload.NewKey)
 		}()
 	}
 }
