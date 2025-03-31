@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	serverURL      = flag.String("server", "ws://localhost:8080/agent", "服务器WebSocket URL")
+	serverURL      = flag.String("server", "ws://localhost:8081/agent", "服务器WebSocket URL")
 	agentID        = flag.String("id", "", "代理唯一标识")
 	reportInterval = flag.Duration("report", 5*time.Minute, "主动上报间隔")
 	securityKey    = flag.String("key", "", "通信安全密钥")

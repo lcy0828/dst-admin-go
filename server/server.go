@@ -76,7 +76,7 @@ type KeyUpdateSession struct {
 	TotalAgentCount    int
 	Timeout            time.Duration
 	TimeoutTimer       *time.Timer
-	OnComplete         func(success bool)
+	OnComplete         func(success bool, key string)
 	Mutex              sync.Mutex
 }
 
@@ -784,49 +784,49 @@ func (s *Server) createKeyUpdateSession(proposedKey string) (*KeyUpdateSession, 
 		ReadyAgents:     make(map[string]bool),
 		TotalAgentCount: totalAgents,
 		Timeout:         time.Minute * 5, // 设置超时时间为5分钟
-		OnComplete: func(success bool) {
+		OnComplete: func(success bool, key string) {
 			if success {
-				// 所有代理都已准备好，可以应用新密钥
-				log.Printf("所有代理 (%d/%d) 都已准备好应用新密钥 %s", totalAgents, totalAgents, proposedKey)
+				s.keyUpdateSessions.Mutex.Lock()
+				currentSession := s.keyUpdateSessions.CurrentSession
+				var readyCount, totalCount int
+				if currentSession != nil {
+					currentSession.Mutex.Lock()
+					readyCount = len(currentSession.ReadyAgents)
+					totalCount = currentSession.TotalAgentCount
+					currentSession.Mutex.Unlock()
+				}
+				s.keyUpdateSessions.Mutex.Unlock()
 				
-				// 记录旧密钥用于日志
-				oldKey := s.Config.SecurityKey
+				log.Printf("所有Agent(%d/%d)都已准备好，应用新密钥: %s", 
+					readyCount, totalCount, key)
 				
-				// 更新服务器的密钥
-				s.Config.SecurityKey = proposedKey
-				err := s.saveSecurityKey(s.Config.KeyFile, proposedKey)
-				if err != nil {
-					log.Printf("保存新密钥失败: %v, 恢复使用旧密钥", err)
-					s.Config.SecurityKey = oldKey
+				// 保存当前密钥用于回退
+				oldKey := s.keyManager.GetKey()
+				log.Printf("当前密钥: %s，将更新为: %s", oldKey, key)
+				
+				if err := s.keyManager.SetKey(key); err != nil {
+					log.Printf("应用新密钥失败: %v，将保持旧密钥: %s", err, oldKey)
 					return
 				}
 				
 				// 验证密钥是否正确保存
-				savedKey, err := s.loadSecurityKey(s.Config.KeyFile)
-				if err != nil || savedKey != proposedKey {
-					log.Printf("警告：密钥可能未正确保存，读取的密钥: %s, 期望的密钥: %s", savedKey, proposedKey)
+				newKey := s.keyManager.GetKey()
+				if newKey != key {
+					log.Printf("警告：密钥可能未正确应用，期望的密钥: %s, 当前密钥: %s", key, newKey)
 				} else {
-					log.Printf("成功应用新密钥: 旧密钥 %s -> 新密钥 %s", oldKey, savedKey)
+					log.Printf("密钥更新会话成功完成，新密钥已应用: %s", newKey)
 				}
-
-				// 更新会话状态
-				s.keyUpdateSessions.Mutex.Lock()
-				s.keyUpdateSessions.CurrentSession.Status = "completed"
-				s.keyUpdateSessions.CompletedSessions++
-				s.keyUpdateSessions.CurrentSession = nil
-				s.keyUpdateSessions.Mutex.Unlock()
-				
-				log.Printf("密钥更新会话 %s 已完成", sessionID)
 			} else {
-				log.Printf("密钥更新会话 %s 失败", sessionID)
-				
-				// 更新会话状态
-				s.keyUpdateSessions.Mutex.Lock()
-				s.keyUpdateSessions.CurrentSession.Status = "failed"
-				s.keyUpdateSessions.FailedSessions++
-				s.keyUpdateSessions.CurrentSession = nil
-				s.keyUpdateSessions.Mutex.Unlock()
+				log.Printf("密钥更新会话失败或取消，密钥未更新")
 			}
+			
+			// 清理会话
+			s.keyUpdateSessions.Mutex.Lock()
+			if s.keyUpdateSessions.CurrentSession != nil && 
+			   s.keyUpdateSessions.CurrentSession.ID == sessionID {
+				s.keyUpdateSessions.CurrentSession = nil
+			}
+			s.keyUpdateSessions.Mutex.Unlock()
 		},
 	}
 
@@ -843,7 +843,7 @@ func (s *Server) createKeyUpdateSession(proposedKey string) (*KeyUpdateSession, 
 				len(s.keyUpdateSessions.CurrentSession.ReadyAgents), 
 				s.keyUpdateSessions.CurrentSession.TotalAgentCount)
 			
-			s.keyUpdateSessions.CurrentSession.OnComplete(false)
+			s.keyUpdateSessions.CurrentSession.OnComplete(false, "")
 		}
 	})
 
@@ -931,7 +931,7 @@ func (s *Server) broadcastKeyUpdateProposal(session *KeyUpdateSession, newKey st
 	msg, err := shared.CreateMessage("security_key_update_proposal", "server", payload)
 	if err != nil {
 		log.Printf("创建密钥更新提议消息失败: %v", err)
-		session.OnComplete(false)
+		session.OnComplete(false, "")
 		return
 	}
 	
@@ -958,7 +958,7 @@ func (s *Server) broadcastKeyUpdateProposal(session *KeyUpdateSession, newKey st
 	// 如果没有成功发送给任何Agent，取消会话
 	if successCount == 0 {
 		log.Printf("没有成功发送给任何Agent，取消密钥更新会话")
-		session.OnComplete(false)
+		session.OnComplete(false, "")
 	}
 }
 
@@ -1004,7 +1004,7 @@ func (s *Server) handleAgentKeyUpdateReady(agentID string, payload struct {
 			case <-s.stopChan:
 				return
 			default:
-				currentSession.OnComplete(true)
+				currentSession.OnComplete(true, payload.NewKey)
 			}
 		}()
 	}

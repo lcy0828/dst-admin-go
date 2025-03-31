@@ -901,7 +901,7 @@ func (a *Agent) saveSecurityKey(keyFile, key string) error {
 		log.Printf("保存密钥到配置文件: %s", keyFile)
 		
 		// 检查文件是否存在并检查格式
-		fileInfo, err := os.Stat(keyFile)
+		_, err := os.Stat(keyFile)
 		if err != nil {
 			if os.IsNotExist(err) {
 				// 文件不存在，创建一个新的INI格式配置文件
