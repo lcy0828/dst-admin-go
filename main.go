@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"dont/pkg/setting"
@@ -56,8 +57,29 @@ func main() {
 	if *enableAgentServer {
 		// 如果未指定密钥文件，使用默认路径
 		if *keyFile == "" {
-			*keyFile = "./agent_server_key.json"
+			// 获取可执行文件所在目录作为基础路径
+			execDir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+			if err != nil {
+				log.Printf("警告：无法获取程序目录: %v，将使用当前目录", err)
+				execDir = "."
+			}
+			
+			*keyFile = filepath.Join(execDir, "agent_server_key.json")
 			log.Printf("未指定通信密钥文件，使用默认路径: %s", *keyFile)
+		} else {
+			// 确保使用绝对路径
+			absPath, err := filepath.Abs(*keyFile)
+			if err != nil {
+				log.Printf("警告：无法获取密钥文件的绝对路径: %v，将使用原始路径", err)
+			} else {
+				*keyFile = absPath
+			}
+		}
+		
+		// 检查密钥文件所在目录是否存在，如果不存在则创建
+		keyDir := filepath.Dir(*keyFile)
+		if err := os.MkdirAll(keyDir, 0755); err != nil {
+			log.Printf("警告：无法创建密钥文件目录: %v", err)
 		}
 		
 		// 创建服务器配置

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -63,10 +65,32 @@ func NewServer(config *Config) (*Server, error) {
 	
 	// 设置默认密钥文件路径
 	if config.KeyFile == "" {
-		config.KeyFile = "agent_server_key.json"
+		execDir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+		if err != nil {
+			log.Printf("警告：无法获取程序目录: %v，将使用当前目录", err)
+			execDir = "."
+		}
+		config.KeyFile = filepath.Join(execDir, "agent_server_key.json")
+		log.Printf("未指定密钥文件路径，使用默认路径: %s", config.KeyFile)
+	}
+	
+	// 获取绝对路径
+	absKeyFile, err := filepath.Abs(config.KeyFile)
+	if err != nil {
+		log.Printf("警告：无法获取密钥文件的绝对路径: %v，将使用原始路径", err)
+	} else {
+		config.KeyFile = absKeyFile
+		log.Printf("使用密钥文件的绝对路径: %s", config.KeyFile)
+	}
+	
+	// 确保密钥文件目录存在
+	keyDir := filepath.Dir(config.KeyFile)
+	if err := os.MkdirAll(keyDir, 0755); err != nil {
+		log.Printf("警告：创建密钥文件目录失败: %v", err)
 	}
 	
 	// 初始化密钥管理器
+	log.Printf("正在初始化密钥管理器，使用文件: %s", config.KeyFile)
 	keyManager, err := shared.NewKeyManager(config.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("初始化密钥管理器失败: %v", err)

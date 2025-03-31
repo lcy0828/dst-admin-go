@@ -5,9 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -122,22 +124,48 @@ func (km *KeyManager) loadKey() error {
 	km.mutex.Lock()
 	defer km.mutex.Unlock()
 	
-	fileInfo, err := os.Stat(km.keyFile)
+	// 获取绝对路径
+	absPath, err := filepath.Abs(km.keyFile)
 	if err != nil {
+		log.Printf("无法获取密钥文件的绝对路径: %v，将使用原始路径", err)
+		absPath = km.keyFile
+	}
+	
+	log.Printf("尝试加载密钥文件: %s", absPath)
+	
+	// 检查文件是否存在
+	fileInfo, err := os.Stat(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("密钥文件不存在: %s", absPath)
+		} else {
+			log.Printf("检查密钥文件状态失败: %v", err)
+		}
 		return err
 	}
 	
-	data, err := ioutil.ReadFile(km.keyFile)
-	if err != nil {
+	if fileInfo.IsDir() {
+		err := fmt.Errorf("指定的密钥文件路径是一个目录: %s", absPath)
+		log.Print(err)
 		return err
 	}
 	
+	// 读取文件内容
+	data, err := ioutil.ReadFile(absPath)
+	if err != nil {
+		log.Printf("读取密钥文件失败: %v", err)
+		return err
+	}
+	
+	// 解析JSON
 	err = json.Unmarshal(data, &km.securityKey)
 	if err != nil {
+		log.Printf("解析密钥文件内容失败: %v", err)
 		return err
 	}
 	
 	km.lastModified = fileInfo.ModTime()
+	log.Printf("密钥文件成功加载: %s", absPath)
 	return nil
 }
 
@@ -146,12 +174,37 @@ func (km *KeyManager) saveKey() error {
 	km.mutex.RLock()
 	defer km.mutex.RUnlock()
 	
+	// 获取绝对路径
+	absPath, err := filepath.Abs(km.keyFile)
+	if err != nil {
+		log.Printf("无法获取密钥文件的绝对路径: %v", err)
+		absPath = km.keyFile // 如果获取失败，使用原始路径
+	}
+	
+	log.Printf("尝试保存密钥到文件: %s", absPath)
+	
 	data, err := json.MarshalIndent(km.securityKey, "", "  ")
 	if err != nil {
+		log.Printf("序列化密钥数据失败: %v", err)
 		return err
 	}
 	
-	return ioutil.WriteFile(km.keyFile, data, 0600) // 只有所有者可读写
+	// 确保目录存在
+	dir := filepath.Dir(absPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Printf("创建目录失败: %v", err)
+		return err
+	}
+	
+	// 写入文件
+	err = ioutil.WriteFile(absPath, data, 0600) // 只有所有者可读写
+	if err != nil {
+		log.Printf("写入密钥文件失败: %v", err)
+		return err
+	}
+	
+	log.Printf("密钥文件保存成功: %s", absPath)
+	return nil
 }
 
 // GenerateNewKey 生成新的随机密钥
