@@ -14,6 +14,7 @@ import (
 	"dont/shared"
 	"github.com/gorilla/websocket"
 	"encoding/base64"
+	"github.com/google/uuid"
 )
 
 // 常量
@@ -60,29 +61,31 @@ type Config struct {
 
 // KeyUpdateSession 表示一次密钥更新会话
 type KeyUpdateSession struct {
-	SessionID    string                      // 会话ID
-	NewKey       string                      // 新密钥
-	StartTime    time.Time                   // 会话开始时间
-	AgentStates  map[string]string           // 每个Agent的状态: "pending", "ready", "updated", "failed"
-	ReadyCount   int                         // 已准备好的Agent数量
-	TotalCount   int                         // 总Agent数量
-	Timeout      time.Duration               // 会话超时时间
-	MutexLock    sync.RWMutex                // 会话锁
-	CompleteChan chan bool                   // 会话完成通道
-	OnComplete   func(success bool, key string) // 会话完成回调函数
+	ID                 string
+	ProposedKey        string
+	StartTime          time.Time
+	Status             string // 'pending', 'completed', 'failed'
+	ReadyAgents        map[string]bool
+	TotalAgentCount    int
+	Timeout            time.Duration
+	TimeoutTimer       *time.Timer
+	OnComplete         func(success bool)
+	Mutex              sync.Mutex
 }
 
 // KeyUpdateSessionManager 管理所有密钥更新会话
 type KeyUpdateSessionManager struct {
-	Sessions     map[string]*KeyUpdateSession // 所有会话
-	CurrentSession string                     // 当前活动会话ID
-	Mutex        sync.RWMutex                 // 会话管理器锁
+	CurrentSession     *KeyUpdateSession
+	CompletedSessions  int
+	FailedSessions     int
+	Mutex              sync.Mutex
 }
 
 // NewKeyUpdateSessionManager 创建新的密钥更新会话管理器
 func NewKeyUpdateSessionManager() *KeyUpdateSessionManager {
 	return &KeyUpdateSessionManager{
-		Sessions: make(map[string]*KeyUpdateSession),
+		CompletedSessions: 0,
+		FailedSessions: 0,
 	}
 }
 
@@ -439,7 +442,7 @@ func (s *Server) processAgentMessage(agent *AgentConnection, msg *shared.Message
 		}
 		
 		// 处理Agent密钥更新准备确认
-		s.handleAgentKeyUpdateReady(agent.AgentID, &payload)
+		s.handleAgentKeyUpdateReady(agent.AgentID, payload)
 
 	default:
 		log.Printf("收到未知消息类型: %s, 来自: %s", msg.Type, agent.AgentID)
@@ -703,117 +706,115 @@ func (s *Server) GetSecurityKey() string {
 }
 
 // 创建新的密钥更新会话
-func (s *Server) createKeyUpdateSession(newKey string, timeout time.Duration) (*KeyUpdateSession, error) {
-	// 检查是否已有活动会话
+func (s *Server) createKeyUpdateSession(proposedKey string) (*KeyUpdateSession, error) {
 	s.keyUpdateSessions.Mutex.Lock()
 	defer s.keyUpdateSessions.Mutex.Unlock()
-	
-	if s.keyUpdateSessions.CurrentSession != "" {
-		// 如果有正在进行的会话，检查是否已超时
-		if session, exists := s.keyUpdateSessions.Sessions[s.keyUpdateSessions.CurrentSession]; exists {
-			if time.Since(session.StartTime) < session.Timeout {
-				return nil, fmt.Errorf("当前有正在进行的密钥更新会话，请等待完成")
-			}
-			// 会话已超时，标记为失败并删除
-			log.Printf("密钥更新会话 %s 已超时，将被终止", s.keyUpdateSessions.CurrentSession)
-			session.MutexLock.Lock()
-			session.CompleteChan <- false
-			close(session.CompleteChan)
-			session.MutexLock.Unlock()
-			delete(s.keyUpdateSessions.Sessions, s.keyUpdateSessions.CurrentSession)
-		}
+
+	// 检查是否有正在进行的会话
+	if s.keyUpdateSessions.CurrentSession != nil && 
+	   s.keyUpdateSessions.CurrentSession.Status == "pending" {
+		return nil, fmt.Errorf("已有正在进行的密钥更新会话")
 	}
-	
-	// 创建新会话
-	sessionID := shared.GenerateUUID()
-	
-	// 获取所有在线agent
+
+	// 计算当前连接的代理数量
 	s.agentMutex.RLock()
-	agentCount := len(s.agents)
-	agentStates := make(map[string]string, agentCount)
-	for agentID := range s.agents {
-		agentStates[agentID] = "pending"
-	}
+	totalAgents := len(s.agents)
 	s.agentMutex.RUnlock()
-	
-	if agentCount == 0 {
-		// 没有连接的agent，直接应用新密钥
-		log.Printf("没有连接的Agent，直接应用新密钥")
-		if err := s.keyManager.SetKey(newKey); err != nil {
-			return nil, fmt.Errorf("应用新密钥失败: %v", err)
+
+	if totalAgents == 0 {
+		log.Println("警告: 没有已连接的代理，将直接更新服务器密钥")
+		// 直接更新服务器密钥
+		oldKey := s.Config.SecurityKey
+		s.Config.SecurityKey = proposedKey
+		err := s.saveSecurityKey(s.Config.KeyFile, proposedKey)
+		if err != nil {
+			log.Printf("保存新密钥失败: %v, 恢复使用旧密钥", err)
+			s.Config.SecurityKey = oldKey
+			return nil, err
 		}
-		log.Printf("成功应用新密钥: %s", newKey)
+		log.Printf("已成功更新服务器密钥: 旧密钥 %s -> 新密钥 %s", oldKey, proposedKey)
 		return nil, nil
 	}
-	
+
+	log.Printf("创建新的密钥更新会话，当前连接的代理数量: %d", totalAgents)
+
+	// 创建会话
+	sessionID := uuid.New().String()
 	session := &KeyUpdateSession{
-		SessionID:    sessionID,
-		NewKey:       newKey,
-		StartTime:    time.Now(),
-		AgentStates:  agentStates,
-		ReadyCount:   0,
-		TotalCount:   agentCount,
-		Timeout:      timeout,
-		CompleteChan: make(chan bool, 1),
-	}
-	
-	// 设置完成回调
-	session.OnComplete = func(success bool, key string) {
-		if success {
-			log.Printf("所有Agent都已准备好，应用新密钥: %s", key)
-			if err := s.keyManager.SetKey(key); err != nil {
-				log.Printf("应用新密钥失败: %v", err)
-				return
-			}
-			log.Printf("密钥更新会话成功完成")
-		} else {
-			log.Printf("密钥更新会话已取消或失败")
-		}
-		
-		// 清理会话
-		s.keyUpdateSessions.Mutex.Lock()
-		delete(s.keyUpdateSessions.Sessions, sessionID)
-		if s.keyUpdateSessions.CurrentSession == sessionID {
-			s.keyUpdateSessions.CurrentSession = ""
-		}
-		s.keyUpdateSessions.Mutex.Unlock()
-	}
-	
-	// 保存会话
-	s.keyUpdateSessions.Sessions[sessionID] = session
-	s.keyUpdateSessions.CurrentSession = sessionID
-	
-	// 启动超时监控
-	go func() {
-		select {
-		case <-time.After(timeout):
-			// 会话超时
-			session.MutexLock.Lock()
-			defer session.MutexLock.Unlock()
-			
-			select {
-			case <-session.CompleteChan:
-				// 通道已关闭，会话已完成
-				return
-			default:
-				// 会话仍在进行，但已超时
-				log.Printf("密钥更新会话 %s 已超时", sessionID)
-				session.CompleteChan <- false
-				close(session.CompleteChan)
-				session.OnComplete(false, "")
-			}
-		case success := <-session.CompleteChan:
-			// 会话完成
-			if !success {
-				log.Printf("密钥更新会话 %s 已失败", sessionID)
-				session.OnComplete(false, "")
+		ID:              sessionID,
+		ProposedKey:     proposedKey,
+		StartTime:       time.Now(),
+		Status:          "pending",
+		ReadyAgents:     make(map[string]bool),
+		TotalAgentCount: totalAgents,
+		Timeout:         time.Minute * 5, // 设置超时时间为5分钟
+		OnComplete: func(success bool) {
+			if success {
+				// 所有代理都已准备好，可以应用新密钥
+				log.Printf("所有代理 (%d/%d) 都已准备好应用新密钥 %s", totalAgents, totalAgents, proposedKey)
+				
+				// 记录旧密钥用于日志
+				oldKey := s.Config.SecurityKey
+				
+				// 更新服务器的密钥
+				s.Config.SecurityKey = proposedKey
+				err := s.saveSecurityKey(s.Config.KeyFile, proposedKey)
+				if err != nil {
+					log.Printf("保存新密钥失败: %v, 恢复使用旧密钥", err)
+					s.Config.SecurityKey = oldKey
+					return
+				}
+				
+				// 验证密钥是否正确保存
+				savedKey, err := s.loadSecurityKey(s.Config.KeyFile)
+				if err != nil || savedKey != proposedKey {
+					log.Printf("警告：密钥可能未正确保存，读取的密钥: %s, 期望的密钥: %s", savedKey, proposedKey)
+				} else {
+					log.Printf("成功应用新密钥: 旧密钥 %s -> 新密钥 %s", oldKey, savedKey)
+				}
+
+				// 更新会话状态
+				s.keyUpdateSessions.Mutex.Lock()
+				s.keyUpdateSessions.CurrentSession.Status = "completed"
+				s.keyUpdateSessions.CompletedSessions++
+				s.keyUpdateSessions.CurrentSession = nil
+				s.keyUpdateSessions.Mutex.Unlock()
+				
+				log.Printf("密钥更新会话 %s 已完成", sessionID)
 			} else {
-				log.Printf("密钥更新会话 %s 已成功完成", sessionID)
-				session.OnComplete(true, session.NewKey)
+				log.Printf("密钥更新会话 %s 失败", sessionID)
+				
+				// 更新会话状态
+				s.keyUpdateSessions.Mutex.Lock()
+				s.keyUpdateSessions.CurrentSession.Status = "failed"
+				s.keyUpdateSessions.FailedSessions++
+				s.keyUpdateSessions.CurrentSession = nil
+				s.keyUpdateSessions.Mutex.Unlock()
 			}
+		},
+	}
+
+	// 设置超时定时器
+	session.TimeoutTimer = time.AfterFunc(session.Timeout, func() {
+		s.keyUpdateSessions.Mutex.Lock()
+		defer s.keyUpdateSessions.Mutex.Unlock()
+		
+		if s.keyUpdateSessions.CurrentSession != nil && 
+		   s.keyUpdateSessions.CurrentSession.ID == sessionID && 
+		   s.keyUpdateSessions.CurrentSession.Status == "pending" {
+			log.Printf("密钥更新会话 %s 超时，当前已准备好的代理: %d/%d", 
+				sessionID, 
+				len(s.keyUpdateSessions.CurrentSession.ReadyAgents), 
+				s.keyUpdateSessions.CurrentSession.TotalAgentCount)
+			
+			s.keyUpdateSessions.CurrentSession.OnComplete(false)
 		}
-	}()
+	})
+
+	// 设置为当前会话
+	s.keyUpdateSessions.CurrentSession = session
 	
+	log.Printf("已创建密钥更新会话 %s，等待 %d 个代理准备就绪", sessionID, totalAgents)
 	return session, nil
 }
 
@@ -835,7 +836,7 @@ func (s *Server) GenerateNewSecurityKey() error {
 	log.Printf("已成功生成新密钥: %s", newKey)
 	
 	// 创建密钥更新会话
-	session, err := s.createKeyUpdateSession(newKey, 30*time.Second)
+	session, err := s.createKeyUpdateSession(newKey)
 	if err != nil {
 		return err
 	}
@@ -846,7 +847,7 @@ func (s *Server) GenerateNewSecurityKey() error {
 	}
 	
 	// 推送新密钥给所有已连接的Agent
-	go s.broadcastKeyUpdateProposal(session)
+	go s.broadcastKeyUpdateProposal(session, newKey)
 	
 	return nil
 }
@@ -864,7 +865,7 @@ func (s *Server) UpdateSecurityKey(newKey string) error {
 	}
 	
 	// 创建密钥更新会话
-	session, err := s.createKeyUpdateSession(newKey, 30*time.Second)
+	session, err := s.createKeyUpdateSession(newKey)
 	if err != nil {
 		return err
 	}
@@ -875,136 +876,97 @@ func (s *Server) UpdateSecurityKey(newKey string) error {
 	}
 	
 	// 推送新密钥给所有已连接的Agent
-	go s.broadcastKeyUpdateProposal(session)
+	go s.broadcastKeyUpdateProposal(session, newKey)
 	
 	return nil
 }
 
 // broadcastKeyUpdateProposal 向所有已连接的Agent广播密钥更新提议
-func (s *Server) broadcastKeyUpdateProposal(session *KeyUpdateSession) {
-	// 创建密钥更新提议消息
+func (s *Server) broadcastKeyUpdateProposal(session *KeyUpdateSession, newKey string) {
+	// 准备消息负载
 	payload := struct {
 		NewKey    string `json:"new_key"`
 		SessionID string `json:"session_id"`
 	}{
-		NewKey:    session.NewKey,
-		SessionID: session.SessionID,
+		NewKey:    session.ProposedKey,
+		SessionID: session.ID,
 	}
 	
 	msg, err := shared.CreateMessage("security_key_update_proposal", "server", payload)
 	if err != nil {
 		log.Printf("创建密钥更新提议消息失败: %v", err)
-		session.MutexLock.Lock()
-		session.CompleteChan <- false
-		close(session.CompleteChan)
-		session.MutexLock.Unlock()
+		session.OnComplete(false)
 		return
 	}
 	
-	// 获取所有Agent
+	// 向所有连接的Agent广播
 	s.agentMutex.RLock()
-	agents := make([]*AgentConnection, 0, len(s.agents))
-	for _, agent := range s.agents {
-		agents = append(agents, agent)
-	}
-	s.agentMutex.RUnlock()
+	defer s.agentMutex.RUnlock()
 	
-	// 广播给所有Agent
 	successCount := 0
-	for _, agent := range agents {
-		agent.Mutex.Lock()
-		conn := agent.Connection
-		agent.Mutex.Unlock()
-		
-		if conn != nil {
-			// 发送密钥更新提议消息
-			if err := conn.SendEncrypted(msg); err != nil {
+	for _, agent := range s.agents {
+		if agent.Connection != nil {
+			if err := agent.Connection.SendEncrypted(msg); err != nil {
 				log.Printf("向Agent(%s)发送密钥更新提议失败: %v", agent.AgentID, err)
-				session.MutexLock.Lock()
-				session.AgentStates[agent.AgentID] = "failed"
-				session.MutexLock.Unlock()
+				session.Mutex.Lock()
+				session.ReadyAgents[agent.AgentID] = false
+				session.Mutex.Unlock()
 			} else {
 				successCount++
 			}
 		}
 	}
 	
-	log.Printf("已向%d个Agent推送密钥更新提议，会话ID: %s", successCount, session.SessionID)
+	log.Printf("已向%d个Agent推送密钥更新提议，会话ID: %s", successCount, session.ID)
 	
 	// 如果没有成功发送给任何Agent，取消会话
 	if successCount == 0 {
 		log.Printf("没有成功发送给任何Agent，取消密钥更新会话")
-		session.MutexLock.Lock()
-		session.CompleteChan <- false
-		close(session.CompleteChan)
-		session.MutexLock.Unlock()
+		session.OnComplete(false)
 	}
 }
 
 // handleAgentKeyUpdateReady 处理Agent密钥更新准备确认
-func (s *Server) handleAgentKeyUpdateReady(agentID string, payload *struct {
-	AgentID   string `json:"agent_id"`
-	NewKey    string `json:"new_key"`
-	ReadyIn   int    `json:"ready_in"`
+func (s *Server) handleAgentKeyUpdateReady(agentID string, payload struct {
 	SessionID string `json:"session_id"`
+	ReadyIn   int    `json:"ready_in"`
 }) {
-	// 获取当前活动会话
-	s.keyUpdateSessions.Mutex.RLock()
-	currentSessionID := s.keyUpdateSessions.CurrentSession
-	s.keyUpdateSessions.Mutex.RUnlock()
+	// 检查当前会话
+	s.keyUpdateSessions.Mutex.Lock()
+	currentSession := s.keyUpdateSessions.CurrentSession
+	s.keyUpdateSessions.Mutex.Unlock()
 	
-	if currentSessionID == "" || currentSessionID != payload.SessionID {
-		log.Printf("Agent(%s)响应了无效的会话ID: %s，当前会话: %s", 
-			agentID, payload.SessionID, currentSessionID)
-		return
-	}
-	
-	session, exists := s.keyUpdateSessions.Sessions[currentSessionID]
-	if !exists {
-		log.Printf("找不到密钥更新会话: %s", currentSessionID)
+	if currentSession == nil || currentSession.ID != payload.SessionID {
+		log.Printf("Agent(%s)响应了无效的会话ID: %s", agentID, payload.SessionID)
 		return
 	}
 	
 	// 更新Agent状态
-	session.MutexLock.Lock()
-	defer session.MutexLock.Unlock()
+	currentSession.Mutex.Lock()
+	defer currentSession.Mutex.Unlock()
 	
-	if _, exists := session.AgentStates[agentID]; !exists {
-		log.Printf("Agent(%s)不在当前会话的Agent列表中", agentID)
-		return
-	}
-	
-	// 更新状态为"ready"
-	session.AgentStates[agentID] = "ready"
-	session.ReadyCount++
+	// 标记该代理为就绪
+	currentSession.ReadyAgents[agentID] = true
 	
 	log.Printf("Agent(%s)已准备好在%d秒后更新密钥，当前进度: %d/%d", 
-		agentID, payload.ReadyIn, session.ReadyCount, session.TotalCount)
+		agentID, payload.ReadyIn, len(currentSession.ReadyAgents), currentSession.TotalAgentCount)
 	
 	// 检查是否所有Agent都已准备好
-	if session.ReadyCount == session.TotalCount {
+	if len(currentSession.ReadyAgents) == currentSession.TotalAgentCount {
 		log.Printf("所有Agent(%d/%d)都已准备好，准备完成密钥更新", 
-			session.ReadyCount, session.TotalCount)
+			len(currentSession.ReadyAgents), currentSession.TotalAgentCount)
 		
 		// 设置一个延迟，给所有Agent足够的时间进行更新
-		// 使用Agent报告的最大ReadyIn值或默认值
-		maxReadyIn := 3 // 默认3秒
-		if payload.ReadyIn > maxReadyIn {
-			maxReadyIn = payload.ReadyIn
-		}
-		
-		// 延迟应用新密钥，给所有Agent足够的时间
 		go func() {
-			log.Printf("将在%d秒后完成密钥更新", maxReadyIn)
-			time.Sleep(time.Duration(maxReadyIn) * time.Second)
+			// 等待最慢的Agent完成更新
+			time.Sleep(time.Duration(payload.ReadyIn+2) * time.Second)
 			
-			// 通知会话完成
+			// 完成会话
 			select {
-			case <-session.CompleteChan:
-				// 通道已关闭，会话已完成或失败
+			case <-s.stopChan:
 				return
 			default:
-				session.CompleteChan <- true
+				currentSession.OnComplete(true)
 			}
 		}()
 	}

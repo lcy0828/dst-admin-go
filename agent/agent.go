@@ -7,7 +7,6 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -327,7 +326,7 @@ func (a *Agent) Connect() error {
 	return nil
 }
 
-// 重连机制
+// 重连服务器
 func (a *Agent) reconnect() {
 	a.connMutex.Lock()
 	if a.reconnecting {
@@ -335,40 +334,62 @@ func (a *Agent) reconnect() {
 		return
 	}
 	a.reconnecting = true
-	a.connMutex.Unlock()
-
 	defer func() {
 		a.connMutex.Lock()
 		a.reconnecting = false
 		a.connMutex.Unlock()
 	}()
+	a.connMutex.Unlock()
 
-	for {
+	log.Printf("使用密钥 %s 尝试重新连接服务器...", a.Config.SecurityKey)
+	
+	// 确保先关闭现有连接
+	a.connMutex.Lock()
+	if a.conn != nil {
+		a.conn.Close()
+		a.conn = nil
+	}
+	a.isConnected = false
+	a.connMutex.Unlock()
+	
+	// 等待一段时间后尝试重连
+	var reconnectDelay = 5 * time.Second
+	var maxReconnectAttempts = 5
+	var reconnectAttempts = 0
+	
+	for reconnectAttempts < maxReconnectAttempts {
 		select {
 		case <-a.stopChan:
 			return
-		case <-time.After(ReconnectInterval):
-			log.Println("尝试重新连接服务器...")
+		default:
+			reconnectAttempts++
+			log.Printf("重连尝试 %d/%d", reconnectAttempts, maxReconnectAttempts)
+			
+			// 尝试连接
 			err := a.Connect()
-			if err != nil {
-				log.Printf("重连失败: %v, 将继续尝试", err)
-				continue
-			}
-
-			// 重连成功，启动消息处理
-			a.wg.Add(1)
-			go a.handleMessages()
-
-			// 如果需要主动上报，重启上报
-			if a.reportInterval > 0 {
-				a.reportMutex.Lock()
+			if err == nil {
+				log.Printf("重连成功，使用密钥: %s", a.Config.SecurityKey)
+				
+				// 重连成功，启动消息处理
 				a.wg.Add(1)
-				go a.startActiveReporting()
-				a.reportMutex.Unlock()
+				go a.handleMessages()
+				
+				// 如果需要主动上报，重启上报
+				if a.reportInterval > 0 {
+					a.reportMutex.Lock()
+					a.wg.Add(1)
+					go a.startActiveReporting()
+					a.reportMutex.Unlock()
+				}
+				return
 			}
-			return
+			
+			log.Printf("重连失败: %v，将在 %v 后重试", err, reconnectDelay)
+			time.Sleep(reconnectDelay)
 		}
 	}
+	
+	log.Printf("达到最大重连尝试次数 (%d)，将在下次心跳时尝试重连", maxReconnectAttempts)
 }
 
 // 处理从服务器接收的消息
@@ -1073,12 +1094,24 @@ func (a *Agent) handleSecurityKeyUpdateProposal(msg *shared.Message) {
 		log.Printf("将在%d秒后应用新密钥...", readyInSeconds)
 		time.Sleep(time.Duration(readyInSeconds) * time.Second)
 		
+		// 保存旧密钥以便恢复
+		oldKey := a.Config.SecurityKey
+		log.Printf("开始应用新密钥，旧密钥: %s, 新密钥: %s", oldKey, newKey)
+		
 		// 保存新密钥
 		a.Config.SecurityKey = newKey
 		if err := a.saveSecurityKey(a.Config.KeyFile, newKey); err != nil {
-			log.Printf("保存新密钥失败: %v", err)
+			log.Printf("保存新密钥失败: %v, 将恢复使用旧密钥", err)
+			a.Config.SecurityKey = oldKey
+			return
+		}
+		
+		// 验证密钥是否正确保存
+		savedKey, err := a.loadSecurityKey(a.Config.KeyFile)
+		if err != nil || savedKey != newKey {
+			log.Printf("警告：密钥可能未正确保存，读取的密钥: %s, 期望的密钥: %s", savedKey, newKey)
 		} else {
-			log.Printf("已成功保存新密钥")
+			log.Printf("已成功保存和验证新密钥: %s", savedKey)
 		}
 		
 		// 断开当前连接
@@ -1092,9 +1125,12 @@ func (a *Agent) handleSecurityKeyUpdateProposal(msg *shared.Message) {
 		a.connMutex.Unlock()
 		
 		// 等待一点时间再重连，确保服务端也已更新密钥
-		time.Sleep(1 * time.Second)
+		delay := 2 * time.Second
+		log.Printf("等待 %v 后尝试使用新密钥重连...", delay)
+		time.Sleep(delay)
 		
 		// 重新连接
+		log.Printf("开始使用新密钥 %s 重新连接", a.Config.SecurityKey)
 		a.reconnect()
 	}(keyUpdateProposalPayload.NewKey)
 } 
