@@ -35,7 +35,6 @@ var (
 
 func init() {
 	flag.StringVar(&fileName, "f", "/root/Steam/logs/workshop_log.txt", "日志文件")
-	flag.Parse()
 }
 
 // Vote 模组评分结构

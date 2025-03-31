@@ -38,6 +38,7 @@ type AgentConnection struct {
 type Server struct {
 	Config     *Config
 	keyPair    *shared.KeyPair
+	keyManager *shared.KeyManager
 	agents     map[string]*AgentConnection
 	agentMutex sync.RWMutex
 	upgrader   websocket.Upgrader
@@ -49,6 +50,7 @@ type Config struct {
 	ListenAddr string // 监听地址
 	TLSCert    string // TLS证书文件
 	TLSKey     string // TLS密钥文件
+	KeyFile    string // 通信密钥文件
 }
 
 // NewServer 创建新的服务器实例
@@ -58,12 +60,24 @@ func NewServer(config *Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("生成密钥对失败: %v", err)
 	}
+	
+	// 设置默认密钥文件路径
+	if config.KeyFile == "" {
+		config.KeyFile = "agent_server_key.json"
+	}
+	
+	// 初始化密钥管理器
+	keyManager, err := shared.NewKeyManager(config.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("初始化密钥管理器失败: %v", err)
+	}
 
 	server := &Server{
-		Config:   config,
-		keyPair:  keyPair,
-		agents:   make(map[string]*AgentConnection),
-		stopChan: make(chan struct{}),
+		Config:     config,
+		keyPair:    keyPair,
+		keyManager: keyManager,
+		agents:     make(map[string]*AgentConnection),
+		stopChan:   make(chan struct{}),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -72,6 +86,11 @@ func NewServer(config *Config) (*Server, error) {
 			},
 		},
 	}
+	
+	// 设置密钥变更回调
+	keyManager.SetKeyChangedCallback(func(newKey string) {
+		log.Println("检测到通信密钥变更，已更新服务器密钥")
+	})
 
 	return server, nil
 }
@@ -108,6 +127,11 @@ func (s *Server) Stop() {
 	log.Println("服务器正在停止...")
 	close(s.stopChan)
 
+	// 停止密钥文件监控
+	if s.keyManager != nil {
+		s.keyManager.StopWatching()
+	}
+
 	// 关闭所有agent连接
 	s.agentMutex.Lock()
 	for _, agent := range s.agents {
@@ -125,6 +149,24 @@ func (s *Server) Stop() {
 
 // 处理Agent连接
 func (s *Server) handleAgentConnection(w http.ResponseWriter, r *http.Request) {
+	// 获取查询参数中的密钥
+	authKey := r.URL.Query().Get("key")
+	
+	// 验证密钥（必须提供有效密钥）
+	if s.keyManager != nil {
+		if authKey == "" {
+			log.Printf("拒绝连接：未提供通信密钥")
+			http.Error(w, "必须提供通信密钥", http.StatusUnauthorized)
+			return
+		}
+		
+		if !s.keyManager.ValidateKey(authKey) {
+			log.Printf("拒绝连接：无效的通信密钥")
+			http.Error(w, "无效的通信密钥", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	// 升级HTTP连接为WebSocket
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -562,4 +604,28 @@ func (s *Server) GetAllAgentInfo() map[string]map[string]interface{} {
 	}
 
 	return result
+}
+
+// GetSecurityKey 获取当前的通信安全密钥
+func (s *Server) GetSecurityKey() string {
+	if s.keyManager == nil {
+		return ""
+	}
+	return s.keyManager.GetKey()
+}
+
+// GenerateNewSecurityKey 生成新的通信安全密钥
+func (s *Server) GenerateNewSecurityKey() error {
+	if s.keyManager == nil {
+		return fmt.Errorf("密钥管理器未初始化")
+	}
+	return s.keyManager.GenerateNewKey()
+}
+
+// UpdateSecurityKey 更新通信安全密钥
+func (s *Server) UpdateSecurityKey(newKey string) error {
+	if s.keyManager == nil {
+		return fmt.Errorf("密钥管理器未初始化")
+	}
+	return s.keyManager.SetKey(newKey)
 } 

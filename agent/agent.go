@@ -47,6 +47,7 @@ type Config struct {
 	ServerURL      string        // 服务器WebSocket URL
 	AgentID        string        // 代理唯一标识
 	ReportInterval time.Duration // 主动上报间隔
+	SecurityKey    string        // 通信安全密钥
 }
 
 // NewAgent 创建一个新的代理实例
@@ -117,11 +118,22 @@ func (a *Agent) connect() error {
 		return nil
 	}
 
+	// 构建连接URL（添加密钥参数如果有的话）
+	connectURL := a.Config.ServerURL
+	if a.Config.SecurityKey != "" {
+		// 添加查询参数
+		if strings.Contains(connectURL, "?") {
+			connectURL = connectURL + "&key=" + a.Config.SecurityKey
+		} else {
+			connectURL = connectURL + "?key=" + a.Config.SecurityKey
+		}
+	}
+
 	log.Printf("连接到服务器: %s", a.Config.ServerURL)
 	dialer := websocket.Dialer{
 		HandshakeTimeout: ConnectionTimeout,
 	}
-	conn, _, err := dialer.Dial(a.Config.ServerURL, nil)
+	conn, _, err := dialer.Dial(connectURL, nil)
 	if err != nil {
 		return fmt.Errorf("WebSocket连接失败: %v", err)
 	}

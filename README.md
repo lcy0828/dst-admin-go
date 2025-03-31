@@ -10,6 +10,7 @@
 
 - 基于WebSocket的实时通信
 - 端到端加密（使用NaCl Box密码学）
+- 通信安全密钥认证（支持多团队使用不同密钥）
 - 断线自动重连
 - 主动/被动数据上报
 - 远程命令执行（Shell命令和脚本）
@@ -23,6 +24,9 @@
 # 启用Agent Server功能
 ./dont-admin --agent-server --agent-listen :8081
 
+# 指定通信密钥文件
+./dont-admin --agent-server --agent-listen :8081 --key-file /path/to/keys.json
+
 # 指定TLS证书（推荐用于生产环境）
 ./dont-admin --agent-server --agent-listen :8081 --cert /path/to/cert.pem --key /path/to/key.pem
 ```
@@ -32,6 +36,9 @@
 ```bash
 # 连接到Agent Server
 ./agent --server ws://your-server-address:8081/agent
+
+# 使用通信密钥连接
+./agent --server ws://your-server-address:8081/agent --key YourSecurityKey
 
 # 指定Agent ID
 ./agent --id myserver1
@@ -49,6 +56,42 @@ Agent Server功能集成了以下API接口：
 - `POST /api/agent/report` - 请求Agent上报信息
 
 所有API接口都需要JWT认证。
+
+### 通信安全密钥管理
+
+安全密钥用于验证Agent与Server之间的通信，确保只有授权的Agent可以连接到Server。
+
+系统提供了以下API接口管理通信安全密钥：
+
+- `GET /api/agent/security/key` - 获取当前的通信安全密钥
+- `POST /api/agent/security/key/generate` - 生成新的随机通信安全密钥
+- `POST /api/agent/security/key/update` - 更新通信安全密钥
+
+#### 获取当前密钥示例
+
+```
+GET /api/agent/security/key
+Authorization: Bearer <your-jwt-token>
+```
+
+#### 生成新的随机密钥示例
+
+```
+POST /api/agent/security/key/generate
+Authorization: Bearer <your-jwt-token>
+```
+
+#### 更新通信密钥示例
+
+```
+POST /api/agent/security/key/update
+Authorization: Bearer <your-jwt-token>
+Content-Type: application/json
+
+{
+  "key": "YourNewSecurityKey"
+}
+```
 
 ### Agent Server API示例
 

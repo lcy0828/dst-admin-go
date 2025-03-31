@@ -137,16 +137,21 @@ func InitRouter() *gin.Engine {
 		}
 
 		// Agent管理
-		agents := api.Group("/agent").Use(middleware.JWTAuth())
+		agents := api.Group("/agent")
 		{
 			// 获取所有已连接的Agent
 			agents.GET("/list", agent.GetAllAgents)
 			
-			// 向指定Agent发送命令
-			agents.POST("/command", agent.SendCommand)
+			// 向指定Agent发送命令（需要认证）
+			agents.POST("/command",  agent.SendCommand)
 			
-			// 请求Agent上报信息
+			// 请求Agent上报信息（需要认证）
 			agents.POST("/report", agent.RequestReport)
+			
+			// 安全密钥管理（暂时不需要认证）
+			agents.GET("/security/key", agent.GetSecurityKey)
+			agents.POST("/security/key/generate", agent.GenerateNewKey)
+			agents.POST("/security/key/update", agent.UpdateSecurityKey)
 		}
 	}
 

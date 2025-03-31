@@ -21,6 +21,7 @@ var (
 	agentServerListen = flag.String("agent-listen", ":8081", "Agent-Server监听地址")
 	tlsCert           = flag.String("cert", "", "TLS证书文件路径")
 	tlsKey            = flag.String("key", "", "TLS密钥文件路径")
+	keyFile           = flag.String("key-file", "", "Agent通信密钥文件路径")
 )
 
 func main() {
@@ -53,11 +54,18 @@ func main() {
 	// 如果启用了Agent-Server功能，则启动Agent-Server服务器
 	var agentServer *server.Server
 	if *enableAgentServer {
+		// 如果未指定密钥文件，使用默认路径
+		if *keyFile == "" {
+			*keyFile = "./agent_server_key.json"
+			log.Printf("未指定通信密钥文件，使用默认路径: %s", *keyFile)
+		}
+		
 		// 创建服务器配置
 		config := &server.Config{
 			ListenAddr: *agentServerListen,
 			TLSCert:    *tlsCert,
 			TLSKey:     *tlsKey,
+			KeyFile:    *keyFile,
 		}
 
 		// 创建服务器
@@ -78,6 +86,7 @@ func main() {
 		}()
 
 		log.Printf("Agent服务器已启动，监听地址: %s", *agentServerListen)
+		log.Printf("使用通信密钥文件: %s", *keyFile)
 		if *tlsCert != "" && *tlsKey != "" {
 			log.Println("Agent服务器TLS已启用")
 		}

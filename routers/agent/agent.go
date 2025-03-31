@@ -19,4 +19,19 @@ func SendCommand(c *gin.Context) {
 // RequestReport 请求Agent上报信息
 func RequestReport(c *gin.Context) {
 	controller.RequestReport(c)
+}
+
+// GetSecurityKey 获取当前通信安全密钥
+func GetSecurityKey(c *gin.Context) {
+	controller.GetSecurityKey(c)
+}
+
+// GenerateNewKey 生成新的通信安全密钥
+func GenerateNewKey(c *gin.Context) {
+	controller.GenerateNewKey(c)
+}
+
+// UpdateSecurityKey 更新通信安全密钥
+func UpdateSecurityKey(c *gin.Context) {
+	controller.UpdateSecurityKey(c)
 } 

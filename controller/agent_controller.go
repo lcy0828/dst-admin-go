@@ -13,15 +13,21 @@ var AgentServer *server.Server
 // GetAllAgents 获取所有已连接的Agent
 func GetAllAgents(c *gin.Context) {
 	if AgentServer == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"code": 500,
-			"msg":  "Agent服务器未启动",
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"code": 503,
+			"msg":  "Agent服务器未启动，请使用--agent-server参数启动服务",
 			"data": nil,
 		})
 		return
 	}
 
 	agents := AgentServer.GetAllAgentInfo()
+	
+	// 当没有Agent连接时返回空数组而不是null
+	if agents == nil {
+		agents = make(map[string]map[string]interface{})
+	}
+	
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"msg":  "获取成功",
@@ -141,5 +147,106 @@ func RequestReport(c *gin.Context) {
 		"code": 200,
 		"msg":  "上报请求已发送",
 		"data": nil,
+	})
+}
+
+// GetSecurityKey 获取当前的通信安全密钥
+func GetSecurityKey(c *gin.Context) {
+	if AgentServer == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"code": 503,
+			"msg":  "Agent服务器未启动，请使用--agent-server参数启动服务",
+			"data": nil,
+		})
+		return
+	}
+
+	// 从服务器获取当前通信密钥
+	key := AgentServer.GetSecurityKey()
+	
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"msg":  "获取成功",
+		"data": gin.H{
+			"key": key,
+		},
+	})
+}
+
+// GenerateNewKey 生成新的通信安全密钥
+func GenerateNewKey(c *gin.Context) {
+	if AgentServer == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"code": 503,
+			"msg":  "Agent服务器未启动，请使用--agent-server参数启动服务",
+			"data": nil,
+		})
+		return
+	}
+
+	// 生成新的通信密钥
+	err := AgentServer.GenerateNewSecurityKey()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code": 500,
+			"msg":  "生成新密钥失败: " + err.Error(),
+			"data": nil,
+		})
+		return
+	}
+	
+	// 获取新生成的密钥
+	key := AgentServer.GetSecurityKey()
+	
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"msg":  "新密钥已生成",
+		"data": gin.H{
+			"key": key,
+		},
+	})
+}
+
+// UpdateSecurityKey 更新通信安全密钥
+func UpdateSecurityKey(c *gin.Context) {
+	if AgentServer == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"code": 503,
+			"msg":  "Agent服务器未启动，请使用--agent-server参数启动服务",
+			"data": nil,
+		})
+		return
+	}
+
+	var req struct {
+		Key string `json:"key" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code": 400,
+			"msg":  "参数错误: " + err.Error(),
+			"data": nil,
+		})
+		return
+	}
+
+	// 更新通信密钥
+	err := AgentServer.UpdateSecurityKey(req.Key)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code": 400,
+			"msg":  "更新密钥失败: " + err.Error(),
+			"data": nil,
+		})
+		return
+	}
+	
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"msg":  "密钥已更新",
+		"data": gin.H{
+			"key": req.Key,
+		},
 	})
 } 
