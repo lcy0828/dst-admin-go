@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/your-project/agent"
+	"dont/agent"
 )
 
 func main() {

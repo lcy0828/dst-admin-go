@@ -170,26 +170,51 @@ func (a *Agent) Connect() error {
 	dialer := websocket.DefaultDialer
 	dialer.HandshakeTimeout = ConnectionTimeout
 
-	c, _, err := dialer.Dial(a.Config.ServerURL, nil)
+	// 构建连接URL（添加密钥参数）
+	connectURL := a.Config.ServerURL
+	if a.Config.SecurityKey != "" {
+		// 添加查询参数
+		if strings.Contains(connectURL, "?") {
+			connectURL = connectURL + "&key=" + a.Config.SecurityKey
+		} else {
+			connectURL = connectURL + "?key=" + a.Config.SecurityKey
+		}
+	}
+
+	c, resp, err := dialer.Dial(connectURL, nil)
 	if err != nil {
+		// 检查HTTP响应以提供更详细的错误信息
+		if resp != nil {
+			if resp.StatusCode == http.StatusUnauthorized {
+				return fmt.Errorf("连接失败: 密钥无效或未提供，请检查密钥是否正确")
+			}
+			// 读取错误消息
+			if resp.Body != nil {
+				defer resp.Body.Close()
+				body, readErr := ioutil.ReadAll(resp.Body)
+				if readErr == nil && len(body) > 0 {
+					return fmt.Errorf("连接失败 (HTTP %d): %s", resp.StatusCode, string(body))
+				}
+			}
+		}
 		return fmt.Errorf("WebSocket连接失败: %v", err)
 	}
 
 	// 创建安全连接
-	conn := shared.NewSecureConnection(c)
-	conn.SetLocalKeyPair(a.keyPair)
+	conn := shared.NewSecureConnection(c, a.keyPair, false)
 
 	// 准备注册信息
-	pubKeyStr, err := shared.EncodePublicKey(a.keyPair.PublicKey)
-	if err != nil {
-		c.Close()
-		return fmt.Errorf("编码公钥失败: %v", err)
+	pubKeyStr := shared.EncodePublicKey(a.keyPair.PublicKey)
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "unknown"
 	}
 
 	registerPayload := shared.RegisterPayload{
-		AgentID:       a.Config.AgentID,
-		SecurityKey:   a.Config.SecurityKey,
-		AgentPublicKey: pubKeyStr,
+		PublicKey: pubKeyStr,
+		Hostname:  hostname,
+		OS:        runtime.GOOS,
+		Arch:      runtime.GOARCH,
 	}
 
 	// 创建注册消息
@@ -200,17 +225,28 @@ func (a *Agent) Connect() error {
 	}
 
 	// 发送注册消息
-	err = conn.Send(msg)
+	msgBytes, err := json.Marshal(msg)
 	if err != nil {
+		c.Close()
+		return fmt.Errorf("序列化注册消息失败: %v", err)
+	}
+
+	if err := c.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
 		c.Close()
 		return fmt.Errorf("发送注册消息失败: %v", err)
 	}
 
 	// 等待注册确认
-	respMsg, err := conn.Read()
+	_, respBytes, err := c.ReadMessage()
 	if err != nil {
 		c.Close()
 		return fmt.Errorf("读取注册响应失败: %v", err)
+	}
+
+	var respMsg shared.Message
+	if err := json.Unmarshal(respBytes, &respMsg); err != nil {
+		c.Close()
+		return fmt.Errorf("解析注册确认消息失败: %v", err)
 	}
 
 	// 检查响应类型
