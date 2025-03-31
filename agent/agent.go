@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
@@ -116,19 +117,33 @@ func (a *Agent) Start() error {
 	if err != nil {
 		log.Printf("连接服务器失败: %v, 将尝试重连", err)
 		go a.reconnect()
-		return nil
-	}
-
-	// 启动消息处理循环
-	a.wg.Add(1)
-	go a.handleMessages()
-
-	// 启动主动上报循环
-	if a.reportInterval > 0 {
+	} else {
+		// 连接成功，保存当前使用的密钥
+		if a.Config.SecurityKey != "" {
+			err := a.saveSecurityKey(a.Config.KeyFile, a.Config.SecurityKey)
+			if err != nil {
+				log.Printf("警告: 无法保存密钥到文件: %v", err)
+			} else {
+				log.Printf("密钥已成功保存到: %s", a.Config.KeyFile)
+			}
+		}
+		
+		// 启动心跳机制
 		a.wg.Add(1)
-		go a.startActiveReporting()
+		go a.startHeartbeat()
+		
+		// 启动消息处理循环
+		a.wg.Add(1)
+		go a.handleMessages()
+		
+		// 启动主动上报循环
+		if a.reportInterval > 0 {
+			a.wg.Add(1)
+			go a.startActiveReporting()
+		}
 	}
 
+	log.Printf("Agent已启动，ID: %s, 连接到服务器: %s", a.Config.AgentID, a.Config.ServerURL)
 	return nil
 }
 
@@ -197,96 +212,86 @@ func (a *Agent) Connect() error {
 		// 检查HTTP响应以提供更详细的错误信息
 		if resp != nil {
 			if resp.StatusCode == http.StatusUnauthorized {
-				return fmt.Errorf("连接失败: 密钥无效或未提供，请检查密钥是否正确。使用的密钥: %s", a.Config.SecurityKey)
+				return fmt.Errorf("连接被拒绝，认证失败 (401 Unauthorized)。请检查密钥是否正确: %s", a.Config.SecurityKey)
 			}
-			// 读取错误消息
-			if resp.Body != nil {
-				defer resp.Body.Close()
-				body, readErr := ioutil.ReadAll(resp.Body)
-				if readErr == nil && len(body) > 0 {
-					return fmt.Errorf("连接失败 (HTTP %d): %s。使用的密钥: %s", resp.StatusCode, string(body), a.Config.SecurityKey)
-				}
-			}
+			return fmt.Errorf("WebSocket连接失败，HTTP状态码: %d: %v。使用的密钥: %s", resp.StatusCode, err, a.Config.SecurityKey)
 		}
-		return fmt.Errorf("WebSocket连接失败: %v。使用的密钥: %s", err, a.Config.SecurityKey)
+		return fmt.Errorf("WebSocket连接失败: %v。使用的密钥: %s, 将尝试重连", err, a.Config.SecurityKey)
 	}
 
-	// 创建安全连接
-	conn := shared.NewSecureConnection(c, a.keyPair, false)
+	log.Println("WebSocket连接已建立，准备进行身份验证")
 
-	// 准备注册信息
-	pubKeyStr := shared.EncodePublicKey(a.keyPair.PublicKey)
-	hostname, _ := os.Hostname()
-	if hostname == "" {
+	// 生成客户端公钥
+	publicKey := shared.EncodePublicKey(a.keyPair.PublicKey)
+
+	// 准备主机名
+	hostname, err := os.Hostname()
+	if err != nil {
 		hostname = "unknown"
 	}
 
-	registerPayload := shared.RegisterPayload{
-		PublicKey: pubKeyStr,
+	// 构建注册负载
+	payload := shared.RegisterPayload{
 		Hostname:  hostname,
 		OS:        runtime.GOOS,
 		Arch:      runtime.GOARCH,
+		PublicKey: publicKey,
 	}
 
-	// 创建注册消息
-	msg, err := shared.CreateMessage(shared.TypeRegister, a.Config.AgentID, registerPayload)
+	// 创建并发送注册消息
+	regMsg, err := shared.CreateMessage(shared.TypeRegister, a.Config.AgentID, payload)
 	if err != nil {
 		c.Close()
 		return fmt.Errorf("创建注册消息失败: %v", err)
 	}
 
-	// 发送注册消息
-	msgBytes, err := json.Marshal(msg)
+	registrationData, err := json.Marshal(regMsg)
 	if err != nil {
 		c.Close()
 		return fmt.Errorf("序列化注册消息失败: %v", err)
 	}
 
-	if err := c.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
+	err = c.WriteMessage(websocket.TextMessage, registrationData)
+	if err != nil {
 		c.Close()
 		return fmt.Errorf("发送注册消息失败: %v", err)
 	}
 
+	log.Println("已发送注册信息，等待服务器响应")
+
 	// 等待注册确认
-	_, respBytes, err := c.ReadMessage()
+	_, ackData, err := c.ReadMessage()
 	if err != nil {
 		c.Close()
-		return fmt.Errorf("读取注册响应失败: %v", err)
+		return fmt.Errorf("接收注册响应失败: %v", err)
 	}
 
-	var respMsg shared.Message
-	if err := json.Unmarshal(respBytes, &respMsg); err != nil {
+	// 解析注册确认
+	var ackMsg shared.Message
+	if err := json.Unmarshal(ackData, &ackMsg); err != nil {
 		c.Close()
-		return fmt.Errorf("解析注册确认消息失败: %v", err)
+		return fmt.Errorf("解析注册响应失败: %v", err)
 	}
 
-	// 检查响应类型
-	if respMsg.Type != shared.TypeRegisterAck {
+	if ackMsg.Type != shared.TypeRegisterAck {
 		c.Close()
-		return fmt.Errorf("收到非预期的响应类型: %s", respMsg.Type)
+		return fmt.Errorf("接收到非预期的消息类型: %s，期望: %s", ackMsg.Type, shared.TypeRegisterAck)
 	}
 
-	// 处理注册确认
+	// 解析确认负载
 	var ackPayload shared.RegisterAckPayload
-	if err := json.Unmarshal(respMsg.Payload, &ackPayload); err != nil {
+	if err := json.Unmarshal(ackMsg.Payload, &ackPayload); err != nil {
 		c.Close()
-		return fmt.Errorf("解析注册确认失败: %v", err)
+		return fmt.Errorf("解析确认负载失败: %v", err)
 	}
 
 	// 检查注册是否成功
 	if !ackPayload.Success {
 		c.Close()
-		// 如果错误信息包含密钥错误的提示，提供明确的错误信息
-		if strings.Contains(strings.ToLower(ackPayload.Message), "security key") || 
-		   strings.Contains(strings.ToLower(ackPayload.Message), "密钥") {
-			// 删除本地存储的错误密钥
-			if err := os.Remove(a.Config.KeyFile); err == nil {
-				log.Printf("已删除无效的密钥文件: %s", a.Config.KeyFile)
-			}
-			return fmt.Errorf("通信密钥无效，请提供正确的密钥: %s", ackPayload.Message)
-		}
-		return fmt.Errorf("服务器拒绝注册: %s", ackPayload.Message)
+		return fmt.Errorf("注册失败: %s", ackPayload.Message)
 	}
+
+	log.Println("注册成功，正在设置加密通信")
 
 	// 解码服务器公钥
 	serverPubKey, err := shared.DecodePublicKey(ackPayload.ServerPublicKey)
@@ -295,34 +300,41 @@ func (a *Agent) Connect() error {
 		return fmt.Errorf("解码服务器公钥失败: %v", err)
 	}
 
-	// 设置服务器公钥
-	a.serverPubKey = serverPubKey
-	conn.SetRemotePublicKey(serverPubKey)
+	// 创建加密通信连接
+	secureConn := shared.NewSecureConnection(c, a.keyPair, false)
+	secureConn.SetRemotePublicKey(serverPubKey)
 
-	// 保存连接
-	a.conn = conn
-	a.isConnected = true
-
-	// 如果连接成功，保存当前使用的密钥
-	if a.Config.SecurityKey != "" {
-		err := a.saveSecurityKey(a.Config.KeyFile, a.Config.SecurityKey)
-		if err != nil {
-			log.Printf("警告: 无法保存密钥到文件: %v", err)
-		} else {
-			log.Printf("密钥已成功保存到: %s", a.Config.KeyFile)
-		}
+	// 测试连接是否真的可用，发送心跳消息
+	testMsg, err := shared.CreateMessage(shared.TypeHeartbeat, a.Config.AgentID, nil)
+	if err != nil {
+		c.Close()
+		return fmt.Errorf("创建测试心跳消息失败: %v", err)
 	}
 
-	log.Println("注册成功，已接收服务器公钥")
+	err = secureConn.SendEncrypted(testMsg)
+	if err != nil {
+		secureConn.Close()
+		return fmt.Errorf("发送测试心跳消息失败，连接可能不可用: %v", err)
+	}
 
-	// 启动心跳机制
-	a.wg.Add(1)
-	go a.startHeartbeat()
+	// 读取心跳响应，确保连接真正可用
+	responseMsg, err := secureConn.ReadEncrypted()
+	if err != nil {
+		secureConn.Close()
+		return fmt.Errorf("接收测试心跳响应失败，连接可能不可用: %v", err)
+	}
 
-	// 启动消息处理
-	a.wg.Add(1)
-	go a.handleMessages()
+	if responseMsg.Type != shared.TypeHeartbeatAck {
+		secureConn.Close()
+		return fmt.Errorf("收到非预期的响应类型: %s，期望: %s", responseMsg.Type, shared.TypeHeartbeatAck)
+	}
 
+	// 保存连接信息
+	a.conn = secureConn
+	a.isConnected = true
+	a.serverPubKey = serverPubKey
+	
+	log.Printf("连接已完全建立并验证可用，服务器已确认心跳")
 	return nil
 }
 
@@ -352,23 +364,49 @@ func (a *Agent) reconnect() {
 	a.isConnected = false
 	a.connMutex.Unlock()
 	
-	// 等待一段时间后尝试重连
-	var reconnectDelay = 5 * time.Second
-	var maxReconnectAttempts = 5
-	var reconnectAttempts = 0
+	// 使用指数退避策略进行重连
+	baseDelay := 5 * time.Second  // 初始延迟5秒
+	maxDelay := 5 * time.Minute   // 最大延迟5分钟
+	maxJitter := 1 * time.Second  // 随机抖动量
+	factor := 1.5                 // 指数因子
 	
-	for reconnectAttempts < maxReconnectAttempts {
+	delay := baseDelay
+	reconnectAttempts := 0
+	
+	for {
 		select {
 		case <-a.stopChan:
+			log.Println("收到停止信号，中止重连")
 			return
 		default:
 			reconnectAttempts++
-			log.Printf("重连尝试 %d/%d", reconnectAttempts, maxReconnectAttempts)
+			
+			// 添加随机抖动以避免多个客户端同时重连
+			jitter := time.Duration(rand.Int63n(int64(maxJitter)))
+			currentDelay := delay + jitter
+			
+			log.Printf("重连尝试 %d，将在 %v 后尝试", reconnectAttempts, currentDelay)
+			time.Sleep(currentDelay)
 			
 			// 尝试连接
+			log.Printf("正在进行第 %d 次重连尝试...", reconnectAttempts)
 			err := a.Connect()
 			if err == nil {
 				log.Printf("重连成功，使用密钥: %s", a.Config.SecurityKey)
+				// 验证连接是否真的成功
+				a.connMutex.Lock()
+				isConnected := a.isConnected
+				a.connMutex.Unlock()
+				
+				if !isConnected {
+					log.Printf("连接标记显示连接未成功建立，将继续重试")
+					// 增加重连延迟
+					delay = time.Duration(float64(delay) * factor)
+					if delay > maxDelay {
+						delay = maxDelay
+					}
+					continue
+				}
 				
 				// 重连成功，启动消息处理
 				a.wg.Add(1)
@@ -384,12 +422,15 @@ func (a *Agent) reconnect() {
 				return
 			}
 			
-			log.Printf("重连失败: %v，将在 %v 后重试", err, reconnectDelay)
-			time.Sleep(reconnectDelay)
+			log.Printf("重连失败: %v，将继续重试", err)
+			
+			// 增加重连延迟（指数退避）
+			delay = time.Duration(float64(delay) * factor)
+			if delay > maxDelay {
+				delay = maxDelay
+			}
 		}
 	}
-	
-	log.Printf("达到最大重连尝试次数 (%d)，将在下次心跳时尝试重连", maxReconnectAttempts)
 }
 
 // 处理从服务器接收的消息

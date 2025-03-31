@@ -10,6 +10,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 
 	"dont/shared"
 	"github.com/gorilla/websocket"
@@ -57,6 +60,7 @@ type Config struct {
 	TLSCert    string // TLS证书文件
 	TLSKey     string // TLS密钥文件
 	KeyFile    string // 通信密钥文件
+	SecurityKey string // 通信安全密钥
 }
 
 // KeyUpdateSession 表示一次密钥更新会话
@@ -928,8 +932,10 @@ func (s *Server) broadcastKeyUpdateProposal(session *KeyUpdateSession, newKey st
 
 // handleAgentKeyUpdateReady 处理Agent密钥更新准备确认
 func (s *Server) handleAgentKeyUpdateReady(agentID string, payload struct {
-	SessionID string `json:"session_id"`
+	AgentID   string `json:"agent_id"`
+	NewKey    string `json:"new_key"`
 	ReadyIn   int    `json:"ready_in"`
+	SessionID string `json:"session_id"`
 }) {
 	// 检查当前会话
 	s.keyUpdateSessions.Mutex.Lock()
@@ -970,4 +976,60 @@ func (s *Server) handleAgentKeyUpdateReady(agentID string, payload struct {
 			}
 		}()
 	}
+}
+
+// 保存安全密钥到文件
+func (s *Server) saveSecurityKey(keyFile, key string) error {
+	// 创建密钥数据
+	securityKey := struct {
+		Key string `json:"key"`
+	}{
+		Key: key,
+	}
+	
+	// 序列化为JSON
+	data, err := json.MarshalIndent(securityKey, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化密钥失败: %v", err)
+	}
+	
+	// 确保目录存在
+	dir := filepath.Dir(keyFile)
+	if dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("创建目录失败: %v", err)
+		}
+	}
+	
+	// 写入文件
+	if err := ioutil.WriteFile(keyFile, data, 0600); err != nil {
+		return fmt.Errorf("写入密钥文件失败: %v", err)
+	}
+	
+	log.Printf("密钥已保存到文件: %s", keyFile)
+	return nil
+}
+
+// 从文件加载安全密钥
+func (s *Server) loadSecurityKey(keyFile string) (string, error) {
+	// 检查文件是否存在
+	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
+		return "", fmt.Errorf("密钥文件不存在: %s", keyFile)
+	}
+	
+	// 读取文件
+	data, err := ioutil.ReadFile(keyFile)
+	if err != nil {
+		return "", fmt.Errorf("读取密钥文件失败: %v", err)
+	}
+	
+	// 解析JSON
+	var securityKey struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(data, &securityKey); err != nil {
+		return "", fmt.Errorf("解析密钥文件失败: %v", err)
+	}
+	
+	return securityKey.Key, nil
 } 
