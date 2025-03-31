@@ -33,6 +33,16 @@ type KeyManager struct {
 	keyChangedCb   func(string)
 }
 
+// KeyManagerInterface 密钥管理器接口
+type KeyManagerInterface interface {
+	GetKey() string
+	SetKey(string) error
+	ValidateKey(string) bool
+	GenerateNewKey() error
+	SetKeyChangedCallback(func(string))
+	StopWatching()
+}
+
 // NewKeyManager 创建一个新的密钥管理器
 func NewKeyManager(keyFile string) (*KeyManager, error) {
 	km := &KeyManager{
@@ -553,4 +563,9 @@ func (ckm *ConfigKeyManager) ValidateKey(key string) bool {
 // StopWatching 停止监控配置文件
 func (ckm *ConfigKeyManager) StopWatching() {
 	close(ckm.stopWatchChan)
+}
+
+// GenerateNewKey 生成新的随机密钥 (为了兼容接口)
+func (ckm *ConfigKeyManager) GenerateNewKey() error {
+	return ckm.GenerateNewKeyToConfig()
 } 

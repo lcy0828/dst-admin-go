@@ -3,11 +3,8 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -41,7 +38,7 @@ type AgentConnection struct {
 type Server struct {
 	Config     *Config
 	keyPair    *shared.KeyPair
-	keyManager *shared.KeyManager
+	keyManager shared.KeyManagerInterface
 	agents     map[string]*AgentConnection
 	agentMutex sync.RWMutex
 	upgrader   websocket.Upgrader
