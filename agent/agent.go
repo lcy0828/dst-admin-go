@@ -31,6 +31,10 @@ const (
 	ConnectionTimeout = 10 * time.Second
 	// 密钥更新消息类型
 	TypeSecurityKeyUpdate = "security_key_update"
+	// 密钥更新提议类型
+	TypeSecurityKeyUpdateProposal = "security_key_update_proposal"
+	// 密钥更新准备类型
+	TypeSecurityKeyUpdateReady = "security_key_update_ready"
 )
 
 // Agent 表示一个代理实例
@@ -417,6 +421,10 @@ func (a *Agent) processMessage(msg *shared.Message) {
 	case TypeSecurityKeyUpdate:
 		// 处理密钥更新消息
 		a.handleSecurityKeyUpdate(msg)
+		
+	case TypeSecurityKeyUpdateProposal:
+		// 处理密钥更新提议
+		a.handleSecurityKeyUpdateProposal(msg)
 		
 	default:
 		log.Printf("收到未知消息类型: %s", msg.Type)
@@ -903,17 +911,40 @@ func (a *Agent) handleSecurityKeyUpdate(msg *shared.Message) {
 	ackMsg, err := shared.CreateMessage("security_key_update_ack", a.Config.AgentID, ackPayload)
 	if err != nil {
 		log.Printf("创建密钥更新确认消息失败: %v", err)
-		return
-	}
-	
-	a.connMutex.Lock()
-	defer a.connMutex.Unlock()
-	
-	if a.conn != nil && a.isConnected {
-		if err := a.conn.SendEncrypted(ackMsg); err != nil {
-			log.Printf("发送密钥更新确认失败: %v", err)
+	} else {
+		a.connMutex.Lock()
+		if a.conn != nil && a.isConnected {
+			if sendErr := a.conn.SendEncrypted(ackMsg); sendErr != nil {
+				log.Printf("发送密钥更新确认失败: %v", sendErr)
+			}
 		}
+		a.connMutex.Unlock()
 	}
+	
+	// 密钥已更新，等待短暂时间后主动断开并重新连接
+	log.Printf("密钥已更新，将在2秒后断开连接并使用新密钥重连")
+	
+	// 启动一个goroutine在短时间后重连
+	go func() {
+		// 等待2秒，确保服务器接收到确认消息
+		time.Sleep(2 * time.Second)
+		
+		// 主动断开连接
+		a.connMutex.Lock()
+		if a.conn != nil {
+			log.Printf("主动断开与服务器的连接，准备使用新密钥重连")
+			a.conn.Close()
+			a.conn = nil
+		}
+		a.isConnected = false
+		a.connMutex.Unlock()
+		
+		// 延迟一点时间再重连，确保服务端也关闭了连接
+		time.Sleep(1 * time.Second)
+		
+		// 尝试重新连接
+		a.reconnect()
+	}()
 }
 
 // 处理断开连接
@@ -970,4 +1001,100 @@ func (a *Agent) sendHeartbeat() {
 		log.Printf("发送心跳失败: %v", err)
 		a.handleDisconnect()
 	}
+}
+
+// 处理密钥更新提议
+func (a *Agent) handleSecurityKeyUpdateProposal(msg *shared.Message) {
+	// 解析密钥更新提议
+	var keyUpdateProposalPayload struct {
+		NewKey    string `json:"new_key"`
+		SessionID string `json:"session_id"`
+	}
+	
+	if err := json.Unmarshal(msg.Payload, &keyUpdateProposalPayload); err != nil {
+		log.Printf("解析密钥更新提议失败: %v", err)
+		return
+	}
+	
+	if keyUpdateProposalPayload.NewKey == "" {
+		log.Printf("收到空的密钥更新提议")
+		return
+	}
+	
+	if keyUpdateProposalPayload.SessionID == "" {
+		log.Printf("收到的密钥更新提议缺少会话ID")
+		return
+	}
+	
+	log.Printf("收到服务器密钥更新提议，会话ID: %s, 新密钥: %s", 
+		keyUpdateProposalPayload.SessionID, keyUpdateProposalPayload.NewKey)
+	
+	// 设置准备更新的等待时间（秒）
+	const readyInSeconds = 3
+	
+	// 发送准备好更新密钥的消息
+	readyPayload := struct {
+		AgentID   string `json:"agent_id"`
+		NewKey    string `json:"new_key"`
+		ReadyIn   int    `json:"ready_in"`
+		SessionID string `json:"session_id"`
+	}{
+		AgentID:   a.Config.AgentID,
+		NewKey:    keyUpdateProposalPayload.NewKey,
+		ReadyIn:   readyInSeconds,
+		SessionID: keyUpdateProposalPayload.SessionID,
+	}
+	
+	readyMsg, err := shared.CreateMessage(TypeSecurityKeyUpdateReady, a.Config.AgentID, readyPayload)
+	if err != nil {
+		log.Printf("创建密钥更新准备消息失败: %v", err)
+		return
+	}
+	
+	// 发送准备好的消息
+	a.connMutex.Lock()
+	if a.conn != nil && a.isConnected {
+		if sendErr := a.conn.SendEncrypted(readyMsg); sendErr != nil {
+			log.Printf("发送密钥更新准备消息失败: %v", sendErr)
+			a.connMutex.Unlock()
+			return
+		}
+	} else {
+		a.connMutex.Unlock()
+		log.Printf("无法发送密钥更新准备消息：连接不可用")
+		return
+	}
+	a.connMutex.Unlock()
+	
+	log.Printf("已通知服务器准备在%d秒后更新密钥", readyInSeconds)
+	
+	// 在设定的时间后更新本地密钥并断开连接
+	go func(newKey string) {
+		log.Printf("将在%d秒后应用新密钥...", readyInSeconds)
+		time.Sleep(time.Duration(readyInSeconds) * time.Second)
+		
+		// 保存新密钥
+		a.Config.SecurityKey = newKey
+		if err := a.saveSecurityKey(a.Config.KeyFile, newKey); err != nil {
+			log.Printf("保存新密钥失败: %v", err)
+		} else {
+			log.Printf("已成功保存新密钥")
+		}
+		
+		// 断开当前连接
+		a.connMutex.Lock()
+		if a.conn != nil {
+			log.Printf("断开连接以应用新密钥")
+			a.conn.Close()
+			a.conn = nil
+		}
+		a.isConnected = false
+		a.connMutex.Unlock()
+		
+		// 等待一点时间再重连，确保服务端也已更新密钥
+		time.Sleep(1 * time.Second)
+		
+		// 重新连接
+		a.reconnect()
+	}(keyUpdateProposalPayload.NewKey)
 } 
