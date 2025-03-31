@@ -11,13 +11,16 @@ import (
 	"sync"
 	"time"
 	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
+	"bytes"
 
 	"dont/shared"
 	"github.com/gorilla/websocket"
 	"encoding/base64"
 	"github.com/google/uuid"
+	"gopkg.in/ini.v1"
 )
 
 // 常量
@@ -980,7 +983,96 @@ func (s *Server) handleAgentKeyUpdateReady(agentID string, payload struct {
 
 // 保存安全密钥到文件
 func (s *Server) saveSecurityKey(keyFile, key string) error {
-	// 创建密钥数据
+	// 检查文件是否是INI格式的配置文件
+	if strings.Contains(keyFile, "conf/app.conf") || strings.HasSuffix(keyFile, ".conf") || strings.HasSuffix(keyFile, ".ini") {
+		log.Printf("保存密钥到配置文件: %s", keyFile)
+		
+		// 检查文件是否存在
+		fileExists := true
+		fileInfo, err := os.Stat(keyFile)
+		if err != nil {
+			if os.IsNotExist(err) {
+				fileExists = false
+			} else {
+				return fmt.Errorf("检查配置文件状态失败: %v", err)
+			}
+		} else if fileInfo.IsDir() {
+			return fmt.Errorf("指定的配置文件路径是一个目录: %s", keyFile)
+		}
+		
+		// 如果文件已存在，检查是否是INI格式
+		var isJSON bool
+		if fileExists {
+			// 读取文件前几个字节来判断是JSON还是INI
+			f, err := os.Open(keyFile)
+			if err != nil {
+				return fmt.Errorf("无法打开配置文件: %v", err)
+			}
+			
+			// 读取前100个字节来判断格式
+			header := make([]byte, 100)
+			_, err = f.Read(header)
+			f.Close()
+			if err != nil && err != io.EOF {
+				return fmt.Errorf("读取配置文件头部失败: %v", err)
+			}
+			
+			// 判断是否是JSON格式
+			isJSON = bytes.HasPrefix(bytes.TrimSpace(header), []byte{'{'})
+		}
+		
+		if !fileExists || isJSON {
+			// 文件不存在或是JSON格式，创建/转换为INI格式
+			log.Printf("创建/转换为INI格式配置文件")
+			
+			// 创建一个新的INI配置
+			cfg := ini.Empty()
+			
+			// 添加基本节和密钥
+			section, _ := cfg.NewSection("server")
+			section.Key("SECURITY_KEY").SetValue(key)
+			
+			// 保存配置
+			if err := cfg.SaveTo(keyFile); err != nil {
+				return fmt.Errorf("保存INI配置文件失败: %v", err)
+			}
+			
+			log.Printf("成功创建/转换为INI格式并保存密钥")
+			return nil
+		}
+		
+		// 文件存在且是INI格式，更新文件
+		log.Printf("更新INI格式配置文件中的密钥")
+		
+		// 加载现有配置
+		cfg, err := ini.Load(keyFile)
+		if err != nil {
+			return fmt.Errorf("读取配置文件失败: %v", err)
+		}
+		
+		// 更新server段的密钥
+		section, err := cfg.GetSection("server")
+		if err != nil {
+			// 如果server段不存在，创建它
+			section, err = cfg.NewSection("server")
+			if err != nil {
+				return fmt.Errorf("创建配置段失败: %v", err)
+			}
+		}
+		
+		// 设置密钥
+		section.Key("SECURITY_KEY").SetValue(key)
+		
+		// 保存配置
+		if err := cfg.SaveTo(keyFile); err != nil {
+			return fmt.Errorf("保存配置文件失败: %v", err)
+		}
+		
+		log.Printf("密钥已保存到配置文件: %s [server].SECURITY_KEY", keyFile)
+		return nil
+	}
+	
+	// 默认使用JSON格式保存
 	securityKey := struct {
 		Key string `json:"key"`
 	}{
@@ -1012,6 +1104,87 @@ func (s *Server) saveSecurityKey(keyFile, key string) error {
 
 // 从文件加载安全密钥
 func (s *Server) loadSecurityKey(keyFile string) (string, error) {
+	// 检查文件是否是INI格式的配置文件
+	if strings.Contains(keyFile, "conf/app.conf") || strings.HasSuffix(keyFile, ".conf") || strings.HasSuffix(keyFile, ".ini") {
+		log.Printf("从配置文件加载密钥: %s", keyFile)
+		
+		// 检查文件是否存在
+		if _, err := os.Stat(keyFile); os.IsNotExist(err) {
+			return "", fmt.Errorf("配置文件不存在: %s", keyFile)
+		}
+		
+		// 尝试读取文件前几个字节来判断是JSON还是INI
+		f, err := os.Open(keyFile)
+		if err != nil {
+			return "", fmt.Errorf("无法打开配置文件: %v", err)
+		}
+		
+		// 读取前100个字节来判断格式
+		header := make([]byte, 100)
+		_, err = f.Read(header)
+		f.Close()
+		if err != nil && err != io.EOF {
+			return "", fmt.Errorf("读取配置文件头部失败: %v", err)
+		}
+		
+		// 判断是否是JSON格式
+		isJSON := bytes.HasPrefix(bytes.TrimSpace(header), []byte{'{'})
+		
+		if isJSON {
+			// 如果是JSON格式，按JSON方式读取
+			log.Printf("检测到JSON格式配置文件，将按JSON格式读取")
+			
+			// 读取文件
+			data, err := ioutil.ReadFile(keyFile)
+			if err != nil {
+				return "", fmt.Errorf("读取密钥文件失败: %v", err)
+			}
+			
+			// 解析JSON
+			var securityKey struct {
+				Key string `json:"key"`
+			}
+			if err := json.Unmarshal(data, &securityKey); err != nil {
+				return "", fmt.Errorf("解析密钥文件失败: %v", err)
+			}
+			
+			return securityKey.Key, nil
+		}
+		
+		// 按INI格式读取
+		log.Printf("按INI格式读取配置文件")
+		
+		// 加载配置
+		cfg, err := ini.Load(keyFile)
+		if err != nil {
+			return "", fmt.Errorf("读取配置文件失败: %v", err)
+		}
+		
+		// 尝试从[server]部分读取密钥
+		section := cfg.Section("server")
+		if section.HasKey("SECURITY_KEY") {
+			keyValue := section.Key("SECURITY_KEY").String()
+			if keyValue != "" {
+				log.Printf("从配置文件的[server]部分成功加载密钥")
+				return keyValue, nil
+			}
+		}
+		
+		// 如果在[server]部分找不到，尝试从[agent]部分读取
+		// 这是为了兼容性，因为agent可能会把密钥写入[agent]部分
+		section = cfg.Section("agent")
+		if section.HasKey("SECURITY_KEY") {
+			keyValue := section.Key("SECURITY_KEY").String()
+			if keyValue != "" {
+				log.Printf("从配置文件的[agent]部分成功加载密钥")
+				return keyValue, nil
+			}
+		}
+		
+		return "", fmt.Errorf("在配置文件中未找到有效的密钥设置")
+	}
+	
+	// 默认按JSON方式读取
 	// 检查文件是否存在
 	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
 		return "", fmt.Errorf("密钥文件不存在: %s", keyFile)
