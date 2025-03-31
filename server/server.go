@@ -64,15 +64,9 @@ func NewServer(config *Config) (*Server, error) {
 		return nil, fmt.Errorf("生成密钥对失败: %v", err)
 	}
 	
-	// 使用当前目录保存密钥文件
-	if config.KeyFile == "" {
-		config.KeyFile = "./agent_server_key.json"
-	}
-	log.Printf("使用密钥文件: %s", config.KeyFile)
-	
-	// 初始化密钥管理器
-	log.Printf("正在初始化密钥管理器，使用文件: %s", config.KeyFile)
-	keyManager, err := shared.NewKeyManager(config.KeyFile)
+	// 初始化密钥管理器，使用配置文件而不是独立的密钥文件
+	log.Printf("正在初始化密钥管理器，使用配置文件: conf/app.conf")
+	keyManager, err := shared.NewKeyManagerWithConfig("conf/app.conf", "server", "SECURITY_KEY")
 	if err != nil {
 		return nil, fmt.Errorf("初始化密钥管理器失败: %v", err)
 	}
@@ -624,7 +618,16 @@ func (s *Server) GenerateNewSecurityKey() error {
 	if s.keyManager == nil {
 		return fmt.Errorf("密钥管理器未初始化")
 	}
-	return s.keyManager.GenerateNewKey()
+	err := s.keyManager.GenerateNewKey()
+	if err != nil {
+		return err
+	}
+	
+	// 获取新生成的密钥，并推送给所有已连接的Agent
+	newKey := s.keyManager.GetKey()
+	go s.broadcastSecurityKeyUpdate(newKey)
+	
+	return nil
 }
 
 // UpdateSecurityKey 更新通信安全密钥
@@ -632,5 +635,55 @@ func (s *Server) UpdateSecurityKey(newKey string) error {
 	if s.keyManager == nil {
 		return fmt.Errorf("密钥管理器未初始化")
 	}
-	return s.keyManager.SetKey(newKey)
+	err := s.keyManager.SetKey(newKey)
+	if err != nil {
+		return err
+	}
+	
+	// 推送新密钥给所有已连接的Agent
+	go s.broadcastSecurityKeyUpdate(newKey)
+	
+	return nil
+}
+
+// broadcastSecurityKeyUpdate 向所有已连接的Agent广播密钥更新
+func (s *Server) broadcastSecurityKeyUpdate(newKey string) {
+	// 创建密钥更新消息
+	payload := struct {
+		NewKey string `json:"new_key"`
+	}{
+		NewKey: newKey,
+	}
+	
+	msg, err := shared.CreateMessage("security_key_update", "server", payload)
+	if err != nil {
+		log.Printf("创建密钥更新消息失败: %v", err)
+		return
+	}
+	
+	// 获取所有Agent
+	s.agentMutex.RLock()
+	agents := make([]*AgentConnection, 0, len(s.agents))
+	for _, agent := range s.agents {
+		agents = append(agents, agent)
+	}
+	s.agentMutex.RUnlock()
+	
+	// 广播给所有Agent
+	successCount := 0
+	for _, agent := range agents {
+		agent.Mutex.Lock()
+		conn := agent.Connection
+		agent.Mutex.Unlock()
+		
+		if conn != nil {
+			if err := conn.SendEncrypted(msg); err != nil {
+				log.Printf("向Agent(%s)发送密钥更新失败: %v", agent.AgentID, err)
+			} else {
+				successCount++
+			}
+		}
+	}
+	
+	log.Printf("已向%d个Agent推送新密钥更新", successCount)
 } 

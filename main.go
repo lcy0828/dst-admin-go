@@ -22,7 +22,7 @@ var (
 	agentServerListen = flag.String("agent-listen", ":8081", "Agent-Server监听地址")
 	tlsCert           = flag.String("cert", "", "TLS证书文件路径")
 	tlsKey            = flag.String("key", "", "TLS密钥文件路径")
-	keyFile           = flag.String("key-file", "", "Agent通信密钥文件路径")
+	keyFile           = flag.String("key-file", "./conf/app.conf", "Agent通信密钥配置文件路径，默认为conf/app.conf")
 )
 
 func main() {
@@ -55,20 +55,19 @@ func main() {
 	// 如果启用了Agent-Server功能，则启动Agent-Server服务器
 	var agentServer *server.Server
 	if *enableAgentServer {
-		// 设置密钥文件保存在当前目录
+		// 设置密钥文件路径
 		if *keyFile == "" {
-			*keyFile = "./agent_server_key.json"
+			*keyFile = "./conf/app.conf"
 		}
-		log.Printf("使用当前目录中的密钥文件: %s", *keyFile)
+		log.Printf("使用配置文件: %s", *keyFile)
 		
-		// 测试当前目录写入权限
-		testFile := "./agent_key_test"
-		testErr := ioutil.WriteFile(testFile, []byte("test"), 0600)
-		if testErr != nil {
-			log.Printf("警告: 无法在当前目录写入测试文件: %v", testErr)
-		} else {
-			os.Remove(testFile)
-			log.Printf("当前目录可写，测试成功")
+		// 确保conf目录存在
+		dir := "conf"
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			log.Printf("创建配置目录: %s", dir)
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				log.Printf("警告: 无法创建配置目录: %v", err)
+			}
 		}
 		
 		// 创建服务器配置
@@ -97,7 +96,7 @@ func main() {
 		}()
 
 		log.Printf("Agent服务器已启动，监听地址: %s", *agentServerListen)
-		log.Printf("使用通信密钥文件: %s", *keyFile)
+		log.Printf("使用配置文件保存通信密钥: %s", *keyFile)
 		if *tlsCert != "" && *tlsKey != "" {
 			log.Println("Agent服务器TLS已启用")
 		}

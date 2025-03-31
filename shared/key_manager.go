@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	
+	"github.com/go-ini/ini"
 )
 
 // SecurityKey 代表通信安全密钥
@@ -292,4 +294,263 @@ func (km *KeyManager) ValidateKey(key string) bool {
 	defer km.mutex.RUnlock()
 	
 	return km.securityKey.Key == key
+}
+
+// 新增一个基于配置文件的密钥管理器
+type ConfigKeyManager struct {
+	KeyManager
+	configFile  string
+	section     string
+	keyName     string
+}
+
+// NewKeyManagerWithConfig 创建一个基于配置文件的密钥管理器
+// configFile: 配置文件路径
+// section: 配置文件中的节名
+// keyName: 配置文件中的键名
+func NewKeyManagerWithConfig(configFile, section, keyName string) (*ConfigKeyManager, error) {
+	ckm := &ConfigKeyManager{
+		KeyManager: KeyManager{
+			stopWatchChan: make(chan struct{}),
+			watchInterval: 10 * time.Second, // 默认每10秒检查一次文件变化
+		},
+		configFile: configFile,
+		section:    section,
+		keyName:    keyName,
+	}
+	
+	// 尝试加载现有密钥
+	err := ckm.loadKeyFromConfig()
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+		
+		// 如果配置文件不存在或没有设置密钥，则生成新密钥
+		log.Printf("配置文件中未找到密钥设置 [%s].%s，将创建新密钥", section, keyName)
+		err = ckm.GenerateNewKeyToConfig()
+		if err != nil {
+			return nil, err
+		}
+	}
+	
+	// 启动文件监控，热加载密钥
+	go ckm.watchConfigFile()
+	
+	return ckm, nil
+}
+
+// 从配置文件加载密钥
+func (ckm *ConfigKeyManager) loadKeyFromConfig() error {
+	ckm.mutex.Lock()
+	defer ckm.mutex.Unlock()
+	
+	log.Printf("尝试从配置文件加载密钥: %s [%s].%s", ckm.configFile, ckm.section, ckm.keyName)
+	
+	// 检查配置文件是否存在
+	fileInfo, err := os.Stat(ckm.configFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("配置文件不存在: %s", ckm.configFile)
+		} else {
+			log.Printf("检查配置文件状态失败: %v", err)
+		}
+		return err
+	}
+	
+	if fileInfo.IsDir() {
+		err := fmt.Errorf("指定的配置文件路径是一个目录: %s", ckm.configFile)
+		log.Print(err)
+		return err
+	}
+	
+	// 读取配置文件
+	cfg, err := ini.Load(ckm.configFile)
+	if err != nil {
+		log.Printf("读取配置文件失败: %v", err)
+		return err
+	}
+	
+	// 获取密钥值
+	section := cfg.Section(ckm.section)
+	if !section.HasKey(ckm.keyName) {
+		err := fmt.Errorf("配置文件中未找到密钥项 [%s].%s", ckm.section, ckm.keyName)
+		log.Print(err)
+		return err
+	}
+	
+	keyValue := section.Key(ckm.keyName).String()
+	if keyValue == "" {
+		err := fmt.Errorf("配置文件中密钥项值为空 [%s].%s", ckm.section, ckm.keyName)
+		log.Print(err)
+		return err
+	}
+	
+	ckm.securityKey.Key = keyValue
+	ckm.lastModified = fileInfo.ModTime()
+	
+	log.Printf("从配置文件成功加载密钥: %s [%s].%s", ckm.configFile, ckm.section, ckm.keyName)
+	return nil
+}
+
+// 保存密钥到配置文件
+func (ckm *ConfigKeyManager) saveKeyToConfig() error {
+	ckm.mutex.RLock()
+	defer ckm.mutex.RUnlock()
+	
+	log.Printf("保存密钥到配置文件: %s [%s].%s", ckm.configFile, ckm.section, ckm.keyName)
+	
+	// 读取现有配置文件
+	var cfg *ini.File
+	var err error
+	
+	if _, err := os.Stat(ckm.configFile); os.IsNotExist(err) {
+		// 如果文件不存在，创建新的配置文件
+		cfg = ini.Empty()
+	} else {
+		// 如果文件存在，加载现有内容
+		cfg, err = ini.Load(ckm.configFile)
+		if err != nil {
+			log.Printf("读取配置文件失败: %v", err)
+			return err
+		}
+	}
+	
+	// 设置密钥值
+	section, err := cfg.GetSection(ckm.section)
+	if err != nil {
+		// 如果节不存在，创建新节
+		section, err = cfg.NewSection(ckm.section)
+		if err != nil {
+			log.Printf("创建配置节失败: %v", err)
+			return err
+		}
+	}
+	
+	section.Key(ckm.keyName).SetValue(ckm.securityKey.Key)
+	
+	// 保存到文件
+	err = cfg.SaveTo(ckm.configFile)
+	if err != nil {
+		log.Printf("保存配置文件失败: %v", err)
+		return err
+	}
+	
+	log.Printf("密钥已成功保存到配置文件: %s [%s].%s", ckm.configFile, ckm.section, ckm.keyName)
+	return nil
+}
+
+// 监控配置文件变化
+func (ckm *ConfigKeyManager) watchConfigFile() {
+	ticker := time.NewTicker(ckm.watchInterval)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ckm.stopWatchChan:
+			return
+		case <-ticker.C:
+			// 检查文件是否被修改
+			fileInfo, err := os.Stat(ckm.configFile)
+			if err != nil {
+				log.Printf("监控配置文件错误: %v", err)
+				continue
+			}
+			
+			modTime := fileInfo.ModTime()
+			
+			ckm.mutex.RLock()
+			lastMod := ckm.lastModified
+			ckm.mutex.RUnlock()
+			
+			// 如果文件被修改，重新加载
+			if modTime.After(lastMod) {
+				log.Println("检测到配置文件变更，重新加载密钥")
+				oldKey := ckm.GetKey()
+				err := ckm.loadKeyFromConfig()
+				if err != nil {
+					log.Printf("重新加载密钥失败: %v", err)
+				} else {
+					newKey := ckm.GetKey()
+					if oldKey != newKey {
+						log.Println("密钥已更新")
+						// 触发回调
+						ckm.mutex.RLock()
+						cb := ckm.keyChangedCb
+						ckm.mutex.RUnlock()
+						if cb != nil {
+							cb(newKey)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// GenerateNewKeyToConfig 生成新的随机密钥并保存到配置文件
+func (ckm *ConfigKeyManager) GenerateNewKeyToConfig() error {
+	ckm.mutex.Lock()
+	defer ckm.mutex.Unlock()
+	
+	// 生成32字节的随机密钥
+	keyBytes := make([]byte, 32)
+	_, err := rand.Read(keyBytes)
+	if err != nil {
+		log.Printf("生成随机密钥失败: %v", err)
+		return err
+	}
+	
+	// Base64编码密钥
+	ckm.securityKey.Key = base64.StdEncoding.EncodeToString(keyBytes)
+	log.Printf("已成功生成新密钥，长度为 %d 字符", len(ckm.securityKey.Key))
+	
+	// 保存到配置文件
+	err = ckm.saveKeyToConfig()
+	if err != nil {
+		return err
+	}
+	
+	return nil
+}
+
+// GetKey 获取当前密钥
+func (ckm *ConfigKeyManager) GetKey() string {
+	ckm.mutex.RLock()
+	defer ckm.mutex.RUnlock()
+	return ckm.securityKey.Key
+}
+
+// SetKey 设置新密钥
+func (ckm *ConfigKeyManager) SetKey(newKey string) error {
+	if newKey == "" {
+		return errors.New("密钥不能为空")
+	}
+	
+	ckm.mutex.Lock()
+	defer ckm.mutex.Unlock()
+	
+	// 检查密钥是否符合Base64格式
+	_, err := base64.StdEncoding.DecodeString(newKey)
+	if err != nil {
+		return fmt.Errorf("无效的密钥格式，应为Base64编码字符串: %v", err)
+	}
+	
+	// 更新密钥
+	ckm.securityKey.Key = newKey
+	
+	// 保存到配置文件
+	return ckm.saveKeyToConfig()
+}
+
+// ValidateKey 验证提供的密钥是否匹配
+func (ckm *ConfigKeyManager) ValidateKey(key string) bool {
+	ckm.mutex.RLock()
+	defer ckm.mutex.RUnlock()
+	return key == ckm.securityKey.Key
+}
+
+// StopWatching 停止监控配置文件
+func (ckm *ConfigKeyManager) StopWatching() {
+	close(ckm.stopWatchChan)
 } 
