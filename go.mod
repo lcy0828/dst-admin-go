@@ -16,6 +16,7 @@ require (
 	github.com/mojocn/base64Captcha v1.3.5
 	github.com/shirou/gopsutil/v3 v3.22.12
 	github.com/unknwon/com v1.0.1
+	golang.org/x/crypto v0.3.0
 )
 
 require (
@@ -53,7 +54,6 @@ require (
 	github.com/ugorji/go/codec v1.2.7 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.2 // indirect
-	golang.org/x/crypto v0.3.0 // indirect
 	golang.org/x/image v0.0.0-20190501045829-6d32002ffd75 // indirect
 	golang.org/x/net v0.2.0 // indirect
 	golang.org/x/sys v0.3.0 // indirect

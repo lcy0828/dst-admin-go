@@ -2,6 +2,7 @@ package routers
 
 import (
 	"dont/middleware"
+	"dont/routers/agent"
 	"dont/routers/auth"
 	"dont/routers/backup"
 	"dont/routers/dstcustomize"
@@ -133,6 +134,19 @@ func InitRouter() *gin.Engine {
 			
 			// 删除备份
 			archiveBackup.POST("/delete", backup.DeleteBackup())
+		}
+
+		// Agent管理
+		agents := api.Group("/agent").Use(middleware.JWTAuth())
+		{
+			// 获取所有已连接的Agent
+			agents.GET("/list", agent.GetAllAgents)
+			
+			// 向指定Agent发送命令
+			agents.POST("/command", agent.SendCommand)
+			
+			// 请求Agent上报信息
+			agents.POST("/report", agent.RequestReport)
 		}
 	}
 
