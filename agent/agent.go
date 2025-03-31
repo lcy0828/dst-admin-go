@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +23,7 @@ import (
 	"github.com/go-ini/ini"
 	"bytes"
 	"io"
+	"errors"
 )
 
 // 常量
@@ -42,6 +45,7 @@ const (
 // Agent 表示一个代理实例
 type Agent struct {
 	Config         *Config
+	ConfigPath     string               // 配置文件路径
 	keyPair        *shared.KeyPair
 	serverPubKey   [32]byte
 	conn           *shared.SecureConnection
@@ -53,12 +57,19 @@ type Agent struct {
 	reportInterval time.Duration
 	reportMutex    sync.Mutex
 	keyManager     *shared.KeyManager  // 添加密钥管理器
+	reconnectMutex sync.Mutex
+	isReconnecting bool
+	OnReconnected  func()              // 重连成功后的回调函数
 }
 
 // Config 代理配置
 type Config struct {
 	ServerURL      string        // 服务器WebSocket URL
+	ServerAddr     string        // 服务器地址（包含端口）
 	AgentID        string        // 代理唯一标识
+	AgentName      string        // 代理名称
+	AgentInfo      string        // 代理信息
+	ConfigPath     string        // 配置文件路径
 	ReportInterval time.Duration // 主动上报间隔
 	SecurityKey    string        // 通信安全密钥
 	KeyFile        string        // 密钥存储文件路径
@@ -167,446 +178,379 @@ func (a *Agent) Stop() {
 
 // Connect 连接到服务器
 func (a *Agent) Connect() error {
+	// 判断是否已连接
 	a.connMutex.Lock()
-	defer a.connMutex.Unlock()
-
-	// 如果已经连接，直接返回
-	if a.isConnected && a.conn != nil {
-		return nil
+	if a.isConnected {
+		a.connMutex.Unlock()
+		return errors.New("已经处于连接状态")
 	}
-
-	// 如果正在重连，直接返回
-	if a.reconnecting {
-		return nil
-	}
-
-	// 检查是否设置了通信密钥
-	if a.Config.SecurityKey == "" {
-		return fmt.Errorf("未提供通信密钥，请设置Config.SecurityKey或在密钥文件中提供")
-	}
-
-	log.Printf("正在连接到服务器: %s", a.Config.ServerURL)
-	log.Printf("使用通信密钥: %s", a.Config.SecurityKey)
-
-	// 创建WebSocket连接
-	dialer := websocket.DefaultDialer
-	dialer.HandshakeTimeout = ConnectionTimeout
-
-	// 构建连接URL（添加密钥参数）
-	connectURL := a.Config.ServerURL
-	if a.Config.SecurityKey != "" {
-		// 对密钥进行特殊字符替换和URL编码，确保特殊字符不会被错误处理
-		encodedKey := a.Config.SecurityKey
-		// 将+替换为%2B，确保不会被误解为空格
-		encodedKey = strings.ReplaceAll(encodedKey, "+", "%2B")
-		// 将/替换为%2F
-		encodedKey = strings.ReplaceAll(encodedKey, "/", "%2F")
-		// 将=替换为%3D
-		encodedKey = strings.ReplaceAll(encodedKey, "=", "%3D")
-		
-		log.Printf("已对密钥进行URL编码: %s -> %s", a.Config.SecurityKey, encodedKey)
-		
-		// 添加查询参数
-		if strings.Contains(connectURL, "?") {
-			connectURL = connectURL + "&key=" + encodedKey
-		} else {
-			connectURL = connectURL + "?key=" + encodedKey
-		}
-		
-		log.Printf("最终连接URL: %s", connectURL)
-	}
-
-	// 设置连接超时上下文
-	ctx, cancel := context.WithTimeout(context.Background(), ConnectionTimeout)
-	defer cancel()
+	a.connMutex.Unlock()
 	
-	// 使用上下文创建连接
-	c, resp, err := dialer.DialContext(ctx, connectURL, nil)
+	// 使用共享的连接方法建立连接
+	secureConn, err := a.connect()
 	if err != nil {
-		// 检查HTTP响应以提供更详细的错误信息
-		if resp != nil {
-			if resp.StatusCode == http.StatusUnauthorized {
-				return fmt.Errorf("连接被拒绝，认证失败 (401 Unauthorized)。请检查密钥是否正确: %s", a.Config.SecurityKey)
-			}
-			// 读取错误消息
-			errMsg := fmt.Sprintf("HTTP状态码: %d", resp.StatusCode)
-			if resp.Body != nil {
-				defer resp.Body.Close()
-				body, readErr := ioutil.ReadAll(resp.Body)
-				if readErr == nil && len(body) > 0 {
-					errMsg = string(body)
-				}
-			}
-			return fmt.Errorf("WebSocket连接失败: %s: %v。使用的密钥: %s", errMsg, err, a.Config.SecurityKey)
-		}
-		return fmt.Errorf("WebSocket连接失败: %v。使用的密钥: %s, URL: %s", err, a.Config.SecurityKey, connectURL)
-	}
-
-	log.Println("WebSocket连接已建立，准备进行身份验证")
-
-	// 设置消息读取超时
-	c.SetReadDeadline(time.Now().Add(ConnectionTimeout))
-	
-	// 生成客户端公钥
-	publicKey := shared.EncodePublicKey(a.keyPair.PublicKey)
-
-	// 准备主机名
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = "unknown"
-	}
-
-	// 构建注册负载
-	payload := shared.RegisterPayload{
-		Hostname:  hostname,
-		OS:        runtime.GOOS,
-		Arch:      runtime.GOARCH,
-		PublicKey: publicKey,
-	}
-
-	// 创建并发送注册消息
-	regMsg, err := shared.CreateMessage(shared.TypeRegister, a.Config.AgentID, payload)
-	if err != nil {
-		c.Close()
-		return fmt.Errorf("创建注册消息失败: %v", err)
-	}
-
-	registrationData, err := json.Marshal(regMsg)
-	if err != nil {
-		c.Close()
-		return fmt.Errorf("序列化注册消息失败: %v", err)
+		return err
 	}
 	
-	// 设置写入超时
-	c.SetWriteDeadline(time.Now().Add(ConnectionTimeout))
-	
-	err = c.WriteMessage(websocket.TextMessage, registrationData)
-	if err != nil {
-		c.Close()
-		return fmt.Errorf("发送注册消息失败: %v", err)
-	}
-
-	log.Println("已发送注册信息，等待服务器响应")
-
-	// 设置读取超时
-	c.SetReadDeadline(time.Now().Add(ConnectionTimeout))
-	
-	// 等待注册确认
-	_, ackData, err := c.ReadMessage()
-	if err != nil {
-		c.Close()
-		return fmt.Errorf("接收注册响应失败: %v", err)
-	}
-	
-	// 清除超时设置
-	c.SetReadDeadline(time.Time{})
-	c.SetWriteDeadline(time.Time{})
-
-	// 解析注册确认
-	var ackMsg shared.Message
-	if err := json.Unmarshal(ackData, &ackMsg); err != nil {
-		c.Close()
-		return fmt.Errorf("解析注册响应失败: %v", err)
-	}
-
-	if ackMsg.Type != shared.TypeRegisterAck {
-		c.Close()
-		return fmt.Errorf("接收到非预期的消息类型: %s，期望: %s", ackMsg.Type, shared.TypeRegisterAck)
-	}
-
-	// 解析确认负载
-	var ackPayload shared.RegisterAckPayload
-	if err := json.Unmarshal(ackMsg.Payload, &ackPayload); err != nil {
-		c.Close()
-		return fmt.Errorf("解析确认负载失败: %v", err)
-	}
-
-	// 检查注册是否成功
-	if !ackPayload.Success {
-		c.Close()
-		return fmt.Errorf("注册失败: %s", ackPayload.Message)
-	}
-
-	log.Println("注册成功，正在设置加密通信")
-
-	// 解码服务器公钥
-	serverPubKey, err := shared.DecodePublicKey(ackPayload.ServerPublicKey)
-	if err != nil {
-		c.Close()
-		return fmt.Errorf("解码服务器公钥失败: %v", err)
-	}
-
-	// 创建加密通信连接
-	secureConn := shared.NewSecureConnection(c, a.keyPair, false)
-	secureConn.SetRemotePublicKey(serverPubKey)
-
-	// 测试连接是否真的可用，发送心跳消息 (用超时控制)
-	testMsg, err := shared.CreateMessage(shared.TypeHeartbeat, a.Config.AgentID, nil)
-	if err != nil {
-		c.Close()
-		return fmt.Errorf("创建测试心跳消息失败: %v", err)
-	}
-
-	// 设置测试超时通道
-	sendDone := make(chan bool, 1)
-	sendErr := make(chan error, 1)
-	
-	go func() {
-		err := secureConn.SendEncrypted(testMsg)
-		if err != nil {
-			sendErr <- err
-			return
-		}
-		sendDone <- true
-	}()
-	
-	// 等待发送完成或超时
-	select {
-	case <-sendDone:
-		log.Printf("测试心跳消息发送成功")
-	case err := <-sendErr:
-		secureConn.Close()
-		return fmt.Errorf("发送测试心跳消息失败，连接可能不可用: %v", err)
-	case <-time.After(5 * time.Second):
-		secureConn.Close()
-		return fmt.Errorf("发送测试心跳消息超时，连接可能不可用")
-	}
-
-	// 等待心跳响应，确保连接真正可用
-	recvDone := make(chan *shared.Message, 1)
-	recvErr := make(chan error, 1)
-	
-	go func() {
-		responseMsg, err := secureConn.ReadEncrypted()
-		if err != nil {
-			recvErr <- err
-			return
-		}
-		recvDone <- responseMsg
-	}()
-	
-	// 等待接收完成或超时
-	var responseMsg *shared.Message
-	select {
-	case responseMsg = <-recvDone:
-		log.Printf("已接收到服务器响应")
-	case err := <-recvErr:
-		secureConn.Close()
-		return fmt.Errorf("接收测试心跳响应失败，连接可能不可用: %v", err)
-	case <-time.After(5 * time.Second):
-		secureConn.Close()
-		return fmt.Errorf("接收测试心跳响应超时，连接可能不可用")
-	}
-
-	if responseMsg.Type != shared.TypeHeartbeatAck {
-		secureConn.Close()
-		return fmt.Errorf("收到非预期的响应类型: %s，期望: %s", responseMsg.Type, shared.TypeHeartbeatAck)
-	}
-
-	// 保存连接信息
+	// 设置连接状态
+	a.connMutex.Lock()
 	a.conn = secureConn
 	a.isConnected = true
-	a.serverPubKey = serverPubKey
+	a.connMutex.Unlock()
 	
-	log.Printf("连接已完全建立并验证可用，服务器已确认心跳")
+	// 启动消息处理
+	a.wg.Add(1)
+	go a.handleMessages()
+	
+	// 如果配置了主动上报，启动上报
+	if a.reportInterval > 0 {
+		a.reportMutex.Lock()
+		a.wg.Add(1)
+		go a.startActiveReporting()
+		a.reportMutex.Unlock()
+	}
+	
+	// 启动心跳
+	a.wg.Add(1)
+	go a.startHeartbeat()
+	
+	log.Printf("连接成功建立，所有后台服务已启动")
 	return nil
 }
 
 // 重连服务器
 func (a *Agent) reconnect() {
-	a.connMutex.Lock()
-	if a.reconnecting {
-		a.connMutex.Unlock()
+	// 使用互斥锁防止并发重连
+	a.reconnectMutex.Lock()
+	defer a.reconnectMutex.Unlock()
+	
+	// 检查是否已经正在进行重连
+	if a.isReconnecting {
+		log.Println("已有重连过程正在进行，跳过此次重连请求")
 		return
 	}
-	a.reconnecting = true
-	defer func() {
-		a.connMutex.Lock()
-		a.reconnecting = false
-		a.connMutex.Unlock()
-	}()
-	a.connMutex.Unlock()
-
-	log.Printf("使用密钥 %s 尝试重新连接服务器...", a.Config.SecurityKey)
 	
-	// 确保先关闭现有连接
+	// 标记正在重连
+	a.isReconnecting = true
+	defer func() {
+		a.isReconnecting = false
+	}()
+	
+	// 关闭现有连接
 	a.connMutex.Lock()
 	if a.conn != nil {
+		log.Println("关闭现有连接以准备重连")
 		a.conn.Close()
 		a.conn = nil
 	}
 	a.isConnected = false
 	a.connMutex.Unlock()
 	
-	// 使用指数退避策略进行重连
-	baseDelay := 5 * time.Second  // 初始延迟5秒
-	maxDelay := 5 * time.Minute   // 最大延迟5分钟
-	maxJitter := 1 * time.Second  // 随机抖动量
-	factor := 1.5                 // 指数因子
+	// 指数退避重试策略
+	baseDelay := 5 * time.Second
+	maxDelay := 5 * time.Minute
+	maxRetries := 10
 	
-	delay := baseDelay
-	reconnectAttempts := 0
-	
-	for {
-		select {
-		case <-a.stopChan:
-			log.Println("收到停止信号，中止重连")
-			return
-		default:
-			reconnectAttempts++
-			
-			// 添加随机抖动以避免多个客户端同时重连
-			jitter := time.Duration(rand.Int63n(int64(maxJitter)))
-			currentDelay := delay + jitter
-			
-			log.Printf("重连尝试 %d，将在 %v 后尝试", reconnectAttempts, currentDelay)
-			time.Sleep(currentDelay)
-			
-			// 尝试连接
-			log.Printf("正在进行第 %d 次重连尝试，使用密钥: %s", reconnectAttempts, a.Config.SecurityKey)
-			err := a.Connect()
-			
-			// 检查连接是否真正成功
-			a.connMutex.Lock()
-			isReallyConnected := a.isConnected && a.conn != nil
-			a.connMutex.Unlock()
-			
-			if err == nil && isReallyConnected {
-				log.Printf("重连成功，使用密钥: %s", a.Config.SecurityKey)
-				
-				// 验证连接真的可用，尝试发送心跳
-				if a.testConnection() {
-					log.Printf("连接测试成功，恢复正常操作")
-					
-					// 重连成功，启动消息处理
-					a.wg.Add(1)
-					go a.handleMessages()
-					
-					// 如果需要主动上报，重启上报
-					if a.reportInterval > 0 {
-						a.reportMutex.Lock()
-						a.wg.Add(1)
-						go a.startActiveReporting()
-						a.reportMutex.Unlock()
-					}
-					
-					// 启动心跳机制
-					a.wg.Add(1)
-					go a.startHeartbeat()
-					
-					// 成功重连，重新设置密钥和连接状态
-					if err := a.saveSecurityKey(a.Config.KeyFile, a.Config.SecurityKey); err != nil {
-						log.Printf("警告: 无法保存密钥到文件: %v", err)
-					} else {
-						log.Printf("密钥已成功保存到: %s", a.Config.KeyFile)
-					}
-					
-					return
-				} else {
-					log.Printf("连接测试失败，连接可能不可用，将继续重试")
-					
-					// 关闭连接，下次重试
-					a.connMutex.Lock()
-					if a.conn != nil {
-						a.conn.Close()
-						a.conn = nil
-					}
-					a.isConnected = false
-					a.connMutex.Unlock()
-				}
-			} else {
-				if err != nil {
-					log.Printf("重连失败: %v，将继续重试", err)
-				} else {
-					log.Printf("连接建立但内部状态检查失败，将继续重试")
-				}
-			}
-			
-			// 增加重连延迟（指数退避）
-			delay = time.Duration(float64(delay) * factor)
-			if delay > maxDelay {
-				delay = maxDelay
-			}
+	var retryCount int
+	for retryCount < maxRetries {
+		// 计算本次重试的延迟时间（指数增长+随机抖动）
+		delay := time.Duration(float64(baseDelay) * math.Pow(1.5, float64(retryCount)))
+		if delay > maxDelay {
+			delay = maxDelay
 		}
+		// 添加0-1秒的随机抖动
+		jitter := time.Duration(rand.Int63n(int64(time.Second)))
+		delay += jitter
+		
+		log.Printf("尝试重连 (%d/%d)，等待 %v 后开始...", retryCount+1, maxRetries, delay)
+		time.Sleep(delay)
+		
+		// 重新加载配置，检查密钥是否已更新
+		config, err := LoadConfig(a.ConfigPath)
+		if err != nil {
+			log.Printf("重连时加载配置失败: %v", err)
+		} else if config.SecurityKey != a.Config.SecurityKey {
+			log.Printf("检测到新的安全密钥: %v (旧密钥: %v)，使用新密钥重连", 
+				config.SecurityKey, a.Config.SecurityKey)
+			a.Config.SecurityKey = config.SecurityKey
+		}
+		
+		// 尝试连接
+		log.Printf("使用密钥 %s 尝试连接服务器 %s", a.Config.SecurityKey, a.Config.ServerAddr)
+		
+		// 先创建一个临时连接变量，确保连接成功后再赋值给 a.conn
+		tempConn, err := a.connect()
+		if err != nil {
+			log.Printf("重连失败 (%d/%d): %v", retryCount+1, maxRetries, err)
+			retryCount++
+			continue
+		}
+		
+		// 连接成功，我们需要确保连接有效
+		a.connMutex.Lock()
+		a.conn = tempConn
+		a.isConnected = true
+		a.connMutex.Unlock()
+		
+		// 验证连接是否真的可用
+		if a.testConnection() {
+			log.Printf("重连成功！连接已验证可用")
+			
+			// 成功连接后，开启心跳线程
+			go a.startHeartbeat()
+			
+			// 如果有回调，通知连接已恢复
+			if a.OnReconnected != nil {
+				go a.OnReconnected()
+			}
+			
+			return
+		} else {
+			log.Printf("重连似乎成功但连接测试失败，将继续尝试")
+			a.connMutex.Lock()
+			if a.conn != nil {
+				a.conn.Close()
+				a.conn = nil
+			}
+			a.isConnected = false
+			a.connMutex.Unlock()
+		}
+		
+		retryCount++
 	}
+	
+	log.Printf("达到最大重试次数 (%d)，重连失败", maxRetries)
 }
 
-// 测试连接是否可用
-func (a *Agent) testConnection() bool {
-	a.connMutex.Lock()
-	conn := a.conn
-	isConnected := a.isConnected
-	a.connMutex.Unlock()
+// connect 建立到服务器的连接（不包含重连逻辑）
+func (a *Agent) connect() (*shared.SecureConnection, error) {
+	log.Printf("正在连接到服务器 %s, 使用密钥: %s", a.Config.ServerAddr, a.Config.SecurityKey)
 	
-	if !isConnected || conn == nil {
-		return false
+	// 检查参数
+	if a.Config.ServerAddr == "" {
+		return nil, errors.New("未设置服务器地址")
+	}
+	if a.Config.SecurityKey == "" {
+		return nil, errors.New("未设置安全密钥")
 	}
 	
-	log.Printf("开始测试连接是否可用...")
+	// 创建URL，添加时间戳和编码后的安全密钥，防止缓存和特殊字符问题
+	serverURL := a.Config.ServerAddr
+	if !strings.HasPrefix(serverURL, "ws://") && !strings.HasPrefix(serverURL, "wss://") {
+		serverURL = "ws://" + serverURL
+	}
 	
-	// 创建测试心跳消息
-	testMsg, err := shared.CreateMessage(shared.TypeHeartbeat, a.Config.AgentID, nil)
+	// URL编码安全密钥
+	encodedKey := url.QueryEscape(a.Config.SecurityKey)
+	
+	// 添加时间戳和密钥参数
+	separator := "?"
+	if strings.Contains(serverURL, "?") {
+		separator = "&"
+	}
+	serverURL = fmt.Sprintf("%s%skey=%s&ts=%d", serverURL, separator, encodedKey, time.Now().Unix())
+	
+	log.Printf("连接URL: %s", serverURL)
+	
+	// 设置连接超时
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	
+	// 设置WebSocket自定义的请求头
+	header := http.Header{}
+	header.Add("X-Agent-ID", a.Config.AgentID)
+	
+	// 建立WebSocket连接
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+		EnableCompression: true,
+	}
+	
+	conn, resp, err := dialer.DialContext(ctx, serverURL, header)
 	if err != nil {
-		log.Printf("创建测试心跳消息失败: %v", err)
-		return false
+		if resp != nil {
+			return nil, fmt.Errorf("WebSocket连接失败，HTTP状态: %d, 错误: %v", resp.StatusCode, err)
+		}
+		return nil, fmt.Errorf("WebSocket连接失败: %v", err)
 	}
 	
-	// 使用通道和超时控制发送操作
-	sendChan := make(chan bool, 1)
-	sendErrChan := make(chan error, 1)
+	// 设置自动ping/pong以保持连接活跃
+	conn.SetPingHandler(func(data string) error {
+		log.Printf("收到服务器ping: %s", data)
+		return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(5*time.Second))
+	})
 	
-	go func() {
-		err := conn.SendEncrypted(testMsg)
-		if err != nil {
-			sendErrChan <- err
-			return
-		}
-		sendChan <- true
-	}()
+	conn.SetPongHandler(func(data string) error {
+		log.Printf("收到服务器pong: %s", data)
+		return nil
+	})
 	
-	// 等待发送完成或超时
-	select {
-	case <-sendChan:
-		log.Printf("测试心跳消息发送成功")
-	case err := <-sendErrChan:
-		log.Printf("发送测试心跳失败: %v", err)
-		return false
-	case <-time.After(3 * time.Second):
-		log.Printf("发送测试心跳超时")
-		return false
+	// 生成密钥对
+	keyPair, err := shared.GenerateKeyPair()
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("生成密钥对失败: %v", err)
 	}
 	
-	// 使用通道和超时控制读取操作
-	responseChan := make(chan *shared.Message, 1)
-	errorChan := make(chan error, 1)
+	// 创建安全连接
+	secureConn := shared.NewSecureConnection(conn, keyPair, false)
+	
+	// 发送公钥
+	if err := conn.WriteMessage(websocket.BinaryMessage, keyPair.PublicKey[:]); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("发送公钥失败: %v", err)
+	}
+	
+	// 接收服务器公钥
+	_, serverPubKeyBytes, err := conn.ReadMessage()
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("接收服务器公钥失败: %v", err)
+	}
+	
+	// 验证服务器公钥长度
+	if len(serverPubKeyBytes) != 32 {
+		conn.Close()
+		return nil, fmt.Errorf("服务器公钥长度错误: %d", len(serverPubKeyBytes))
+	}
+	
+	// 设置服务器公钥
+	var serverPubKey [32]byte
+	copy(serverPubKey[:], serverPubKeyBytes)
+	secureConn.SetRemotePublicKey(serverPubKey)
+	
+	// 发送注册消息
+	regMsg, err := shared.CreateMessage(shared.TypeRegister, a.Config.AgentID, map[string]string{
+		"agent_id":   a.Config.AgentID,
+		"agent_name": a.Config.AgentName,
+		"agent_info": a.Config.AgentInfo,
+	})
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("创建注册消息失败: %v", err)
+	}
+	
+	// 发送注册消息
+	if err := secureConn.SendEncrypted(regMsg); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("发送注册消息失败: %v", err)
+	}
+	
+	// 等待注册确认
+	regAckChan := make(chan bool, 1)
+	regErrChan := make(chan error, 1)
 	
 	go func() {
-		resp, err := conn.ReadEncrypted()
+		regResponse, err := secureConn.ReadEncrypted()
 		if err != nil {
-			errorChan <- err
+			regErrChan <- fmt.Errorf("接收注册确认失败: %v", err)
 			return
 		}
-		responseChan <- resp
+		
+		if regResponse.Type != shared.TypeRegisterAck {
+			regErrChan <- fmt.Errorf("收到非预期的注册响应类型: %s", regResponse.Type)
+			return
+		}
+		
+		regAckChan <- true
 	}()
 	
-	// 等待响应或超时
+	// 等待注册确认或超时
 	select {
-	case resp := <-responseChan:
-		// 验证响应类型
-		if resp.Type != shared.TypeHeartbeatAck {
-			log.Printf("收到非预期的响应类型: %s，期望: %s", resp.Type, shared.TypeHeartbeatAck)
+	case <-regAckChan:
+		log.Printf("注册确认成功，连接已建立")
+	case err := <-regErrChan:
+		conn.Close()
+		return nil, err
+	case <-time.After(10 * time.Second):
+		conn.Close()
+		return nil, errors.New("等待注册确认超时")
+	}
+	
+	return secureConn, nil
+}
+
+// testConnection 测试连接是否正常
+func (a *Agent) testConnection() bool {
+	if a.conn == nil {
+		log.Println("测试连接失败：连接未初始化")
+		return false
+	}
+
+	// 首先尝试使用 WebSocket 的原生 ping/pong 机制
+	wsConn := a.conn.GetRawConnection()
+	if wsConn == nil {
+		log.Println("测试连接失败：无法获取 WebSocket 连接")
+		return false
+	}
+
+	// 设置一个短暂的读取超时
+	if err := wsConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		log.Printf("设置读取超时失败: %v", err)
+		return false
+	}
+
+	// 发送 ping 消息
+	if err := wsConn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(5*time.Second)); err != nil {
+		log.Printf("发送 ping 失败: %v", err)
+		// 重置读取超时
+		_ = wsConn.SetReadDeadline(time.Time{})
+		return false
+	}
+
+	// 重置读取超时
+	if err := wsConn.SetReadDeadline(time.Time{}); err != nil {
+		log.Printf("重置读取超时失败: %v", err)
+		return false
+	}
+
+	// 如果 WebSocket 的 ping 成功，再验证加密通道
+	// 创建心跳消息
+	heartbeat, err := shared.CreateMessage(shared.TypeHeartbeat, a.Config.AgentID, nil)
+	if err != nil {
+		log.Printf("创建心跳消息失败: %v", err)
+		return false
+	}
+
+	// 发送心跳
+	if err := a.conn.SendEncrypted(heartbeat); err != nil {
+		log.Printf("发送心跳失败: %v", err)
+		return false
+	}
+
+	// 等待响应
+	respChan := make(chan bool, 1)
+	errChan := make(chan error, 1)
+
+	go func() {
+		msg, err := a.conn.ReadEncrypted()
+		if err != nil {
+			errChan <- err
+			return
+		}
+
+		if msg.Type == shared.TypeHeartbeatAck {
+			respChan <- true
+		} else {
+			respChan <- false
+		}
+	}()
+
+	// 使用超时控制
+	select {
+	case success := <-respChan:
+		if success {
+			log.Println("连接测试成功：加密通道正常")
+			return true
+		} else {
+			log.Println("连接测试失败：收到非预期的响应类型")
 			return false
 		}
-		
-		log.Printf("连接测试成功，服务器已确认心跳")
-		return true
-		
-	case err := <-errorChan:
-		log.Printf("接收测试心跳响应失败: %v", err)
+	case err := <-errChan:
+		log.Printf("连接测试失败：读取响应时发生错误: %v", err)
 		return false
-		
 	case <-time.After(5 * time.Second):
-		log.Printf("等待测试心跳响应超时")
+		log.Println("连接测试失败：等待响应超时")
 		return false
 	}
 }
@@ -1417,4 +1361,76 @@ func (a *Agent) handleSecurityKeyUpdateProposal(msg *shared.Message) {
 			log.Printf("已有重连过程在进行中，跳过此次重连")
 		}
 	}(keyUpdateProposalPayload.NewKey)
+}
+
+// LoadConfig 从文件加载配置
+func LoadConfig(configPath string) (*Config, error) {
+	if configPath == "" {
+		return nil, fmt.Errorf("配置文件路径为空")
+	}
+	
+	// 检查文件是否存在
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("配置文件不存在: %s", configPath)
+	}
+	
+	// 尝试读取配置
+	cfg, err := ini.Load(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("读取配置文件失败: %v", err)
+	}
+	
+	// 读取 [agent] 部分
+	agentSection := cfg.Section("agent")
+	
+	config := &Config{
+		ConfigPath: configPath,
+	}
+	
+	// 读取各配置项
+	if agentSection.HasKey("SERVER_ADDR") {
+		config.ServerAddr = agentSection.Key("SERVER_ADDR").String()
+	}
+	
+	if agentSection.HasKey("SERVER_URL") {
+		config.ServerURL = agentSection.Key("SERVER_URL").String()
+	} else if config.ServerAddr != "" {
+		// 如果没有显式设置 ServerURL 但有 ServerAddr，构造 URL
+		config.ServerURL = "ws://" + config.ServerAddr + "/ws"
+	}
+	
+	if agentSection.HasKey("AGENT_ID") {
+		config.AgentID = agentSection.Key("AGENT_ID").String()
+	}
+	
+	if agentSection.HasKey("AGENT_NAME") {
+		config.AgentName = agentSection.Key("AGENT_NAME").String()
+	}
+	
+	if agentSection.HasKey("AGENT_INFO") {
+		config.AgentInfo = agentSection.Key("AGENT_INFO").String()
+	}
+	
+	if agentSection.HasKey("SECURITY_KEY") {
+		config.SecurityKey = agentSection.Key("SECURITY_KEY").String()
+	}
+	
+	if agentSection.HasKey("KEY_FILE") {
+		config.KeyFile = agentSection.Key("KEY_FILE").String()
+	} else {
+		// 默认使用配置文件自身作为密钥文件
+		config.KeyFile = configPath
+	}
+	
+	if agentSection.HasKey("REPORT_INTERVAL") {
+		intervalStr := agentSection.Key("REPORT_INTERVAL").String()
+		if intervalStr != "" {
+			interval, err := time.ParseDuration(intervalStr)
+			if err == nil {
+				config.ReportInterval = interval
+			}
+		}
+	}
+	
+	return config, nil
 } 
