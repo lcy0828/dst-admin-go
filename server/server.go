@@ -115,6 +115,9 @@ func NewServer(config *Config) (*Server, error) {
 	currentKey := keyManager.GetKey()
 	log.Printf("当前服务器通信密钥: %s", currentKey)
 	
+	// 同步服务器配置中的密钥
+	config.SecurityKey = currentKey
+	
 	server := &Server{
 		Config:            config,
 		keyPair:           keyPair,
@@ -134,6 +137,32 @@ func NewServer(config *Config) (*Server, error) {
 	// 设置密钥变更回调
 	keyManager.SetKeyChangedCallback(func(newKey string) {
 		log.Printf("检测到通信密钥变更，新密钥: %s", newKey)
+		
+		// 更新服务器使用的密钥
+		server.Config.SecurityKey = newKey
+		log.Printf("服务器已应用新的密钥: %s", newKey)
+		
+		// 向所有连接的客户端广播密钥变更通知
+		agentCount := 0
+		server.agentMutex.RLock()
+		agentCount = len(server.agents)
+		server.agentMutex.RUnlock()
+		
+		if agentCount > 0 {
+			log.Printf("检测到 %d 个已连接的客户端，将通知密钥变更", agentCount)
+			// 创建一个新的会话以推送密钥变更
+			go func() {
+				session, err := server.createKeyUpdateSession(newKey)
+				if err != nil {
+					log.Printf("无法创建密钥更新会话: %v", err)
+					return
+				}
+				
+				if session != nil {
+					server.broadcastKeyUpdateProposal(session, newKey)
+				}
+			}()
+		}
 	})
 
 	return server, nil
