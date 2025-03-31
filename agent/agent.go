@@ -371,7 +371,17 @@ func (a *Agent) reconnect() {
 	delay := baseDelay
 	maxAttempts := 10
 	
+	// 添加总重连时间限制（10分钟）
+	startTime := time.Now()
+	maxReconnectTime := 10 * time.Minute
+	
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// 检查是否超过了最大重连时间
+		if time.Since(startTime) > maxReconnectTime {
+			log.Printf("重连时间超过%v，停止重连", maxReconnectTime)
+			break
+		}
+		
 		// 检查是否应该停止重连
 		select {
 		case <-a.stopChan:
@@ -385,7 +395,18 @@ func (a *Agent) reconnect() {
 		}
 		
 		log.Printf("尝试重连 #%d，等待 %v...", attempt, delay)
-		time.Sleep(delay)
+		
+		// 使用带有超时的等待，允许提前退出
+		select {
+		case <-time.After(delay):
+			// 继续执行
+		case <-a.stopChan:
+			log.Printf("等待期间收到停止信号，终止重连")
+			a.connMutex.Lock()
+			a.reconnecting = false
+			a.connMutex.Unlock()
+			return
+		}
 		
 		// 尝试连接
 		log.Printf("执行第 %d 次连接尝试", attempt)
@@ -397,9 +418,24 @@ func (a *Agent) reconnect() {
 		a.connMutex.Unlock()
 		
 		if err == nil && isConnected {
+			// 快速测试连接
 			log.Printf("WebSocket连接已建立，测试连接...")
-			// 测试连接是否可用
-			if a.testConnection() {
+			connectSuccess := false
+			
+			// 进行不超过2次的连接测试
+			for testAttempt := 1; testAttempt <= 2; testAttempt++ {
+				if a.testConnection() {
+					connectSuccess = true
+					break
+				}
+				
+				if testAttempt < 2 {
+					log.Printf("连接测试失败，1秒后再次尝试测试")
+					time.Sleep(1 * time.Second)
+				}
+			}
+			
+			if connectSuccess {
 				log.Printf("重连成功，连接已恢复")
 				
 				// 启动所需的服务
@@ -446,7 +482,7 @@ func (a *Agent) reconnect() {
 		}
 	}
 	
-	log.Printf("达到最大重试次数 (%d)，停止重连", maxAttempts)
+	log.Printf("达到最大重试次数或超时，停止重连")
 	a.connMutex.Lock()
 	a.reconnecting = false
 	a.connMutex.Unlock()
@@ -465,6 +501,10 @@ func (a *Agent) testConnection() bool {
 	
 	log.Printf("开始测试连接是否可用...")
 	
+	// 设置更短的超时时间，避免长时间等待
+	conn.SetTimeout(3 * time.Second)
+	defer conn.SetTimeout(0) // 重置超时
+	
 	// 创建测试心跳消息
 	testMsg, err := shared.CreateMessage(shared.TypeHeartbeat, a.Config.AgentID, nil)
 	if err != nil {
@@ -479,9 +519,9 @@ func (a *Agent) testConnection() bool {
 		return false
 	}
 	
-	log.Printf("测试心跳消息已发送，等待服务器响应...")
+	log.Printf("测试心跳消息已发送，尝试读取响应(3秒超时)...")
 	
-	// 等待心跳响应
+	// 直接尝试读取响应，这里利用了SetTimeout设置的超时
 	resp, err := conn.ReadEncrypted()
 	if err != nil {
 		log.Printf("接收测试心跳响应失败: %v", err)
@@ -544,6 +584,10 @@ func (a *Agent) processMessage(msg *shared.Message) {
 	case shared.TypePassiveReport:
 		// 处理被动上报请求
 		a.handlePassiveReportRequest(msg)
+		
+	case shared.TypeReportAck:
+		// 处理上报确认
+		a.handleReportAck(msg)
 	
 	case TypeSecurityKeyUpdate:
 		// 处理密钥更新消息
@@ -1373,4 +1417,19 @@ func (a *Agent) handleSecurityKeyUpdateProposal(msg *shared.Message) {
 			}
 		}
 	}(keyUpdateProposalPayload.NewKey)
+}
+
+// 处理上报确认消息
+func (a *Agent) handleReportAck(msg *shared.Message) {
+	var ackPayload struct {
+		ReportID string `json:"report_id"`
+		Status   string `json:"status"`
+	}
+	
+	if err := json.Unmarshal(msg.Payload, &ackPayload); err != nil {
+		log.Printf("解析上报确认消息失败: %v", err)
+		return
+	}
+	
+	log.Printf("服务器已确认接收上报，报告ID: %s, 状态: %s", ackPayload.ReportID, ackPayload.Status)
 } 

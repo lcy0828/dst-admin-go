@@ -36,6 +36,15 @@ func (s *SecureConnection) SetRemotePublicKey(publicKey [32]byte) {
 	s.remotePublicKey = publicKey
 }
 
+// SetTimeout 设置连接的读取超时，传入0表示不超时
+func (s *SecureConnection) SetTimeout(timeout time.Duration) {
+	if timeout > 0 {
+		s.conn.SetReadDeadline(time.Now().Add(timeout))
+	} else {
+		s.conn.SetReadDeadline(time.Time{}) // 清除超时设置
+	}
+}
+
 // SendEncrypted 发送加密消息
 func (s *SecureConnection) SendEncrypted(msg *Message) error {
 	msgBytes, err := json.Marshal(msg)
