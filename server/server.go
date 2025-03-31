@@ -188,28 +188,28 @@ func (s *Server) Start() error {
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
-	
+
 	// 设置HTTP处理函数
 	http.HandleFunc("/agent", s.handleAgentConnection)
 
 	// 创建错误通道
 	errChan := make(chan error, 1)
-	
+
 	// 启动HTTP服务
 	go func() {
-		var err error
+	var err error
 		log.Printf("准备启动HTTP服务器，监听地址: %s", s.Config.ListenAddr)
 		
 		// 根据配置决定是否使用TLS
-		if s.Config.TLSCert != "" && s.Config.TLSKey != "" {
-			log.Printf("使用TLS启动服务器，监听: %s", s.Config.ListenAddr)
+	if s.Config.TLSCert != "" && s.Config.TLSKey != "" {
+		log.Printf("使用TLS启动服务器，监听: %s", s.Config.ListenAddr)
 			err = httpServer.ListenAndServeTLS(s.Config.TLSCert, s.Config.TLSKey)
-		} else {
-			log.Printf("以非TLS模式启动服务器，监听: %s", s.Config.ListenAddr)
+	} else {
+		log.Printf("以非TLS模式启动服务器，监听: %s", s.Config.ListenAddr)
 			err = httpServer.ListenAndServe()
-		}
-		
-		if err != nil && err != http.ErrServerClosed {
+	}
+
+	if err != nil && err != http.ErrServerClosed {
 			log.Printf("HTTP服务启动失败: %v", err)
 			errChan <- err
 		}
@@ -229,7 +229,7 @@ func (s *Server) Start() error {
 			log.Printf("HTTP服务关闭错误: %v", err)
 		}
 		log.Println("HTTP服务已关闭")
-		return nil
+	return nil
 	case err := <-errChan:
 		log.Printf("服务器发生错误: %v", err)
 		return err

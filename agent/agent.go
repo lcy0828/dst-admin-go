@@ -195,11 +195,16 @@ func (a *Agent) Connect() error {
 	// 构建连接URL（添加密钥参数）
 	connectURL := a.Config.ServerURL
 	if a.Config.SecurityKey != "" {
-		// 对密钥进行特殊字符替换和URL编码，确保+号不会被错误处理
+		// 对密钥进行特殊字符替换和URL编码，确保特殊字符不会被错误处理
+		encodedKey := a.Config.SecurityKey
 		// 将+替换为%2B，确保不会被误解为空格
-		encodedKey := strings.ReplaceAll(a.Config.SecurityKey, "+", "%2B")
+		encodedKey = strings.ReplaceAll(encodedKey, "+", "%2B")
+		// 将/替换为%2F
 		encodedKey = strings.ReplaceAll(encodedKey, "/", "%2F")
+		// 将=替换为%3D
 		encodedKey = strings.ReplaceAll(encodedKey, "=", "%3D")
+		
+		log.Printf("已对密钥进行URL编码: %s -> %s", a.Config.SecurityKey, encodedKey)
 		
 		// 添加查询参数
 		if strings.Contains(connectURL, "?") {
@@ -207,9 +212,16 @@ func (a *Agent) Connect() error {
 		} else {
 			connectURL = connectURL + "?key=" + encodedKey
 		}
+		
+		log.Printf("最终连接URL: %s", connectURL)
 	}
 
-	c, resp, err := dialer.Dial(connectURL, nil)
+	// 设置连接超时上下文
+	ctx, cancel := context.WithTimeout(context.Background(), ConnectionTimeout)
+	defer cancel()
+	
+	// 使用上下文创建连接
+	c, resp, err := dialer.DialContext(ctx, connectURL, nil)
 	if err != nil {
 		// 检查HTTP响应以提供更详细的错误信息
 		if resp != nil {
@@ -227,11 +239,14 @@ func (a *Agent) Connect() error {
 			}
 			return fmt.Errorf("WebSocket连接失败: %s: %v。使用的密钥: %s", errMsg, err, a.Config.SecurityKey)
 		}
-		return fmt.Errorf("WebSocket连接失败: %v。使用的密钥: %s, 将尝试重连", err, a.Config.SecurityKey)
+		return fmt.Errorf("WebSocket连接失败: %v。使用的密钥: %s, URL: %s", err, a.Config.SecurityKey, connectURL)
 	}
 
 	log.Println("WebSocket连接已建立，准备进行身份验证")
 
+	// 设置消息读取超时
+	c.SetReadDeadline(time.Now().Add(ConnectionTimeout))
+	
 	// 生成客户端公钥
 	publicKey := shared.EncodePublicKey(a.keyPair.PublicKey)
 
@@ -261,7 +276,10 @@ func (a *Agent) Connect() error {
 		c.Close()
 		return fmt.Errorf("序列化注册消息失败: %v", err)
 	}
-
+	
+	// 设置写入超时
+	c.SetWriteDeadline(time.Now().Add(ConnectionTimeout))
+	
 	err = c.WriteMessage(websocket.TextMessage, registrationData)
 	if err != nil {
 		c.Close()
@@ -270,12 +288,19 @@ func (a *Agent) Connect() error {
 
 	log.Println("已发送注册信息，等待服务器响应")
 
+	// 设置读取超时
+	c.SetReadDeadline(time.Now().Add(ConnectionTimeout))
+	
 	// 等待注册确认
 	_, ackData, err := c.ReadMessage()
 	if err != nil {
 		c.Close()
 		return fmt.Errorf("接收注册响应失败: %v", err)
 	}
+	
+	// 清除超时设置
+	c.SetReadDeadline(time.Time{})
+	c.SetWriteDeadline(time.Time{})
 
 	// 解析注册确认
 	var ackMsg shared.Message
@@ -315,24 +340,62 @@ func (a *Agent) Connect() error {
 	secureConn := shared.NewSecureConnection(c, a.keyPair, false)
 	secureConn.SetRemotePublicKey(serverPubKey)
 
-	// 测试连接是否真的可用，发送心跳消息
+	// 测试连接是否真的可用，发送心跳消息 (用超时控制)
 	testMsg, err := shared.CreateMessage(shared.TypeHeartbeat, a.Config.AgentID, nil)
 	if err != nil {
 		c.Close()
 		return fmt.Errorf("创建测试心跳消息失败: %v", err)
 	}
 
-	err = secureConn.SendEncrypted(testMsg)
-	if err != nil {
+	// 设置测试超时通道
+	sendDone := make(chan bool, 1)
+	sendErr := make(chan error, 1)
+	
+	go func() {
+		err := secureConn.SendEncrypted(testMsg)
+		if err != nil {
+			sendErr <- err
+			return
+		}
+		sendDone <- true
+	}()
+	
+	// 等待发送完成或超时
+	select {
+	case <-sendDone:
+		log.Printf("测试心跳消息发送成功")
+	case err := <-sendErr:
 		secureConn.Close()
 		return fmt.Errorf("发送测试心跳消息失败，连接可能不可用: %v", err)
+	case <-time.After(5 * time.Second):
+		secureConn.Close()
+		return fmt.Errorf("发送测试心跳消息超时，连接可能不可用")
 	}
 
-	// 读取心跳响应，确保连接真正可用
-	responseMsg, err := secureConn.ReadEncrypted()
-	if err != nil {
+	// 等待心跳响应，确保连接真正可用
+	recvDone := make(chan *shared.Message, 1)
+	recvErr := make(chan error, 1)
+	
+	go func() {
+		responseMsg, err := secureConn.ReadEncrypted()
+		if err != nil {
+			recvErr <- err
+			return
+		}
+		recvDone <- responseMsg
+	}()
+	
+	// 等待接收完成或超时
+	var responseMsg *shared.Message
+	select {
+	case responseMsg = <-recvDone:
+		log.Printf("已接收到服务器响应")
+	case err := <-recvErr:
 		secureConn.Close()
 		return fmt.Errorf("接收测试心跳响应失败，连接可能不可用: %v", err)
+	case <-time.After(5 * time.Second):
+		secureConn.Close()
+		return fmt.Errorf("接收测试心跳响应超时，连接可能不可用")
 	}
 
 	if responseMsg.Type != shared.TypeHeartbeatAck {
@@ -400,7 +463,7 @@ func (a *Agent) reconnect() {
 			time.Sleep(currentDelay)
 			
 			// 尝试连接
-			log.Printf("正在进行第 %d 次重连尝试...", reconnectAttempts)
+			log.Printf("正在进行第 %d 次重连尝试，使用密钥: %s", reconnectAttempts, a.Config.SecurityKey)
 			err := a.Connect()
 			
 			// 检查连接是否真正成功
@@ -413,6 +476,8 @@ func (a *Agent) reconnect() {
 				
 				// 验证连接真的可用，尝试发送心跳
 				if a.testConnection() {
+					log.Printf("连接测试成功，恢复正常操作")
+					
 					// 重连成功，启动消息处理
 					a.wg.Add(1)
 					go a.handleMessages()
@@ -428,6 +493,13 @@ func (a *Agent) reconnect() {
 					// 启动心跳机制
 					a.wg.Add(1)
 					go a.startHeartbeat()
+					
+					// 成功重连，重新设置密钥和连接状态
+					if err := a.saveSecurityKey(a.Config.KeyFile, a.Config.SecurityKey); err != nil {
+						log.Printf("警告: 无法保存密钥到文件: %v", err)
+					} else {
+						log.Printf("密钥已成功保存到: %s", a.Config.KeyFile)
+					}
 					
 					return
 				} else {
@@ -470,6 +542,8 @@ func (a *Agent) testConnection() bool {
 		return false
 	}
 	
+	log.Printf("开始测试连接是否可用...")
+	
 	// 创建测试心跳消息
 	testMsg, err := shared.CreateMessage(shared.TypeHeartbeat, a.Config.AgentID, nil)
 	if err != nil {
@@ -477,9 +551,28 @@ func (a *Agent) testConnection() bool {
 		return false
 	}
 	
-	// 发送测试心跳
-	if err := conn.SendEncrypted(testMsg); err != nil {
+	// 使用通道和超时控制发送操作
+	sendChan := make(chan bool, 1)
+	sendErrChan := make(chan error, 1)
+	
+	go func() {
+		err := conn.SendEncrypted(testMsg)
+		if err != nil {
+			sendErrChan <- err
+			return
+		}
+		sendChan <- true
+	}()
+	
+	// 等待发送完成或超时
+	select {
+	case <-sendChan:
+		log.Printf("测试心跳消息发送成功")
+	case err := <-sendErrChan:
 		log.Printf("发送测试心跳失败: %v", err)
+		return false
+	case <-time.After(3 * time.Second):
+		log.Printf("发送测试心跳超时")
 		return false
 	}
 	
@@ -501,11 +594,11 @@ func (a *Agent) testConnection() bool {
 	case resp := <-responseChan:
 		// 验证响应类型
 		if resp.Type != shared.TypeHeartbeatAck {
-			log.Printf("收到非预期的响应类型: %s", resp.Type)
+			log.Printf("收到非预期的响应类型: %s，期望: %s", resp.Type, shared.TypeHeartbeatAck)
 			return false
 		}
 		
-		log.Printf("连接测试成功，确认连接可用")
+		log.Printf("连接测试成功，服务器已确认心跳")
 		return true
 		
 	case err := <-errorChan:
@@ -1287,6 +1380,11 @@ func (a *Agent) handleSecurityKeyUpdateProposal(msg *shared.Message) {
 		savedKey, err := a.loadSecurityKey(a.Config.KeyFile)
 		if err != nil || savedKey != newKey {
 			log.Printf("警告：密钥可能未正确保存，读取的密钥: %s, 期望的密钥: %s", savedKey, newKey)
+			if savedKey != newKey {
+				log.Printf("密钥验证失败，将恢复使用旧密钥")
+				a.Config.SecurityKey = oldKey
+				return
+			}
 		} else {
 			log.Printf("已成功保存和验证新密钥: %s", savedKey)
 		}
@@ -1306,8 +1404,17 @@ func (a *Agent) handleSecurityKeyUpdateProposal(msg *shared.Message) {
 		log.Printf("等待 %v 后尝试使用新密钥重连...", delay)
 		time.Sleep(delay)
 		
-		// 重新连接
-		log.Printf("开始使用新密钥 %s 重新连接", a.Config.SecurityKey)
-		a.reconnect()
+		// 设置重连锁，防止多次重连
+		a.connMutex.Lock()
+		wasReconnecting := a.reconnecting
+		a.connMutex.Unlock()
+		
+		if !wasReconnecting {
+			// 重新连接
+			log.Printf("开始使用新密钥 %s 重新连接", a.Config.SecurityKey)
+			a.reconnect()
+		} else {
+			log.Printf("已有重连过程在进行中，跳过此次重连")
+		}
 	}(keyUpdateProposalPayload.NewKey)
 } 
