@@ -75,7 +75,7 @@ func NewAgent(config *Config) (*Agent, error) {
 	if config.KeyFile == "" {
 		// 使用默认的配置文件路径
 		config.KeyFile = "./conf/app.conf"
-		log.Printf("未指定密钥文件，使用默认路径: %s", config.KeyFile)
+		log.Printf("未指定配置文件，使用默认路径: %s", config.KeyFile)
 		
 		// 确保conf目录存在
 		dir := filepath.Dir(config.KeyFile)
@@ -97,11 +97,19 @@ func NewAgent(config *Config) (*Agent, error) {
 		reportInterval: config.ReportInterval,
 	}
 
-	// 尝试加载持久化的密钥
-	if config.SecurityKey == "" {
-		key, err := agent.loadSecurityKey(config.KeyFile)
-		if err == nil && key != "" {
-			log.Printf("已从文件加载密钥: %s", config.KeyFile)
+	// 从配置文件加载配置
+	serverURL, key, err := agent.loadConfig(config.KeyFile)
+	if err != nil {
+		log.Printf("警告: 从配置文件加载配置失败: %v", err)
+	} else {
+		// 设置服务器地址和密钥
+		if serverURL != "" {
+			log.Printf("从配置文件加载服务器地址: %s", serverURL)
+			config.ServerURL = serverURL
+		}
+		
+		if key != "" {
+			log.Printf("从配置文件加载密钥: %s", key)
 			config.SecurityKey = key
 		}
 	}
@@ -119,13 +127,13 @@ func (a *Agent) Start() error {
 		log.Printf("连接服务器失败: %v, 将尝试重连", err)
 		go a.reconnect()
 	} else {
-		// 连接成功，保存当前使用的密钥
+		// 连接成功，保存当前使用的配置
 		if a.Config.SecurityKey != "" {
-			err := a.saveSecurityKey(a.Config.KeyFile, a.Config.SecurityKey)
+			err := a.saveConfig(a.Config.KeyFile, a.Config.ServerURL, a.Config.SecurityKey)
 			if err != nil {
-				log.Printf("警告: 无法保存密钥到文件: %v", err)
+				log.Printf("警告: 无法保存配置到文件: %v", err)
 			} else {
-				log.Printf("密钥已成功保存到: %s", a.Config.KeyFile)
+				log.Printf("配置已成功保存到: %s", a.Config.KeyFile)
 			}
 		}
 		
@@ -406,9 +414,9 @@ func (a *Agent) reconnect() {
 				a.wg.Add(1)
 				go a.startHeartbeat()
 				
-				// 保存密钥
-				if err := a.saveSecurityKey(a.Config.KeyFile, a.Config.SecurityKey); err != nil {
-					log.Printf("保存密钥失败: %v", err)
+				// 保存配置
+				if err := a.saveConfig(a.Config.KeyFile, a.Config.ServerURL, a.Config.SecurityKey); err != nil {
+					log.Printf("保存配置失败: %v", err)
 				}
 				
 				// 重置重连状态
@@ -866,32 +874,115 @@ func (a *Agent) collectProcessList() map[string]interface{} {
 	}
 }
 
+// 加载配置文件，返回服务器地址和密钥
+func (a *Agent) loadConfig(configFile string) (string, string, error) {
+	// 如果路径中包含conf/app.conf，则从配置文件加载
+	if strings.Contains(configFile, "conf/app.conf") {
+		log.Printf("从配置文件加载配置: %s", configFile)
+		
+		// 检查文件是否存在
+		if _, err := os.Stat(configFile); os.IsNotExist(err) {
+			return "", "", fmt.Errorf("配置文件不存在: %s", configFile)
+		}
+		
+		// 加载配置
+		cfg, err := ini.Load(configFile)
+		if err != nil {
+			return "", "", fmt.Errorf("读取配置文件失败: %v", err)
+		}
+		
+		// 从[agent]部分读取配置
+		section := cfg.Section("agent")
+		
+		// 读取密钥
+		var key string
+		if section.HasKey("SECURITY_KEY") {
+			key = section.Key("SECURITY_KEY").String()
+			if key != "" {
+				log.Printf("从配置文件成功加载密钥")
+			}
+		}
+		
+		// 读取服务器地址
+		var serverURL string
+		if section.HasKey("SERVER_URL") {
+			serverURL = section.Key("SERVER_URL").String()
+			if serverURL != "" {
+				log.Printf("从配置文件成功加载服务器地址")
+			}
+		}
+		
+		return serverURL, key, nil
+	}
+	
+	// 否则使用原来的JSON方式加载
+	// 检查文件是否存在
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		return "", "", fmt.Errorf("配置文件不存在: %s", configFile)
+	}
+	
+	// 读取文件
+	data, err := ioutil.ReadFile(configFile)
+	if err != nil {
+		return "", "", fmt.Errorf("读取配置文件失败: %v", err)
+	}
+	
+	// 解析JSON
+	var config struct {
+		Key       string `json:"key"`
+		ServerURL string `json:"server_url"`
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return "", "", fmt.Errorf("解析配置文件失败: %v", err)
+	}
+	
+	return config.ServerURL, config.Key, nil
+}
+
+// 从文件加载安全密钥
+func (a *Agent) loadSecurityKey(keyFile string) (string, error) {
+	// 从配置文件加载
+	_, key, err := a.loadConfig(keyFile)
+	return key, err
+}
+
 // 保存安全密钥到文件
 func (a *Agent) saveSecurityKey(keyFile, key string) error {
+	// 同时保存服务器地址和密钥
+	return a.saveConfig(keyFile, a.Config.ServerURL, key)
+}
+
+// 保存配置到文件
+func (a *Agent) saveConfig(configFile, serverURL, key string) error {
 	// 如果路径中包含conf/app.conf，则保存到配置文件格式
-	if strings.Contains(keyFile, "conf/app.conf") {
-		log.Printf("保存密钥到配置文件: %s", keyFile)
+	if strings.Contains(configFile, "conf/app.conf") {
+		log.Printf("保存配置到配置文件: %s", configFile)
 		
 		// 检查文件是否存在并检查格式
-		_, err := os.Stat(keyFile)
+		_, err := os.Stat(configFile)
 		if err != nil {
 			if os.IsNotExist(err) {
 				// 文件不存在，创建一个新的INI格式配置文件
 				cfg := ini.Empty()
 				section, _ := cfg.NewSection("agent")
-				section.Key("SECURITY_KEY").SetValue(key)
+				if key != "" {
+					section.Key("SECURITY_KEY").SetValue(key)
+				}
+				if serverURL != "" {
+					section.Key("SERVER_URL").SetValue(serverURL)
+				}
 				
-				if err := cfg.SaveTo(keyFile); err != nil {
+				if err := cfg.SaveTo(configFile); err != nil {
 					return fmt.Errorf("创建新配置文件失败: %v", err)
 				}
-				log.Printf("已创建新的配置文件: %s", keyFile)
+				log.Printf("已创建新的配置文件: %s", configFile)
 				return nil
 			}
 			return fmt.Errorf("检查配置文件状态失败: %v", err)
 		}
 		
 		// 读取文件前几个字节来判断是JSON还是INI
-		f, err := os.Open(keyFile)
+		f, err := os.Open(configFile)
 		if err != nil {
 			return fmt.Errorf("无法打开配置文件: %v", err)
 		}
@@ -914,27 +1005,32 @@ func (a *Agent) saveSecurityKey(keyFile, key string) error {
 			// 创建一个新的INI配置
 			cfg := ini.Empty()
 			section, _ := cfg.NewSection("agent")
-			section.Key("SECURITY_KEY").SetValue(key)
+			if key != "" {
+				section.Key("SECURITY_KEY").SetValue(key)
+			}
+			if serverURL != "" {
+				section.Key("SERVER_URL").SetValue(serverURL)
+			}
 			
 			// 保存配置
-			if err := cfg.SaveTo(keyFile); err != nil {
+			if err := cfg.SaveTo(configFile); err != nil {
 				return fmt.Errorf("保存INI配置文件失败: %v", err)
 			}
 			
-			log.Printf("成功将JSON格式转换为INI格式并保存密钥")
+			log.Printf("成功将JSON格式转换为INI格式并保存配置")
 			return nil
 		}
 		
 		// 如果是INI格式，正常处理
-		log.Printf("正在更新INI格式配置文件中的密钥")
+		log.Printf("正在更新INI格式配置文件中的配置")
 		
 		// 加载现有配置
-		cfg, err := ini.Load(keyFile)
+		cfg, err := ini.Load(configFile)
 		if err != nil {
 			return fmt.Errorf("读取配置文件失败: %v", err)
 		}
 		
-		// 设置密钥值到[agent]部分
+		// 设置值到[agent]部分
 		section, err := cfg.GetSection("agent")
 		if err != nil {
 			// 如果节不存在，创建新节
@@ -944,32 +1040,39 @@ func (a *Agent) saveSecurityKey(keyFile, key string) error {
 			}
 		}
 		
-		section.Key("SECURITY_KEY").SetValue(key)
+		if key != "" {
+			section.Key("SECURITY_KEY").SetValue(key)
+		}
+		if serverURL != "" {
+			section.Key("SERVER_URL").SetValue(serverURL)
+		}
 		
 		// 保存配置
-		if err := cfg.SaveTo(keyFile); err != nil {
+		if err := cfg.SaveTo(configFile); err != nil {
 			return fmt.Errorf("保存配置文件失败: %v", err)
 		}
 		
-		log.Printf("密钥已保存到配置文件: %s [agent].SECURITY_KEY", keyFile)
+		log.Printf("配置已保存到文件: %s [agent]段", configFile)
 		return nil
 	}
 	
 	// 否则使用原来的JSON方式保存
-	securityKey := struct {
-		Key string `json:"key"`
+	config := struct {
+		Key       string `json:"key"`
+		ServerURL string `json:"server_url"`
 	}{
-		Key: key,
+		Key:       key,
+		ServerURL: serverURL,
 	}
 	
 	// 序列化为JSON
-	data, err := json.MarshalIndent(securityKey, "", "  ")
+	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return fmt.Errorf("序列化密钥失败: %v", err)
+		return fmt.Errorf("序列化配置失败: %v", err)
 	}
 	
 	// 确保目录存在
-	dir := filepath.Dir(keyFile)
+	dir := filepath.Dir(configFile)
 	if dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("创建目录失败: %v", err)
@@ -977,67 +1080,12 @@ func (a *Agent) saveSecurityKey(keyFile, key string) error {
 	}
 	
 	// 写入文件
-	if err := ioutil.WriteFile(keyFile, data, 0600); err != nil {
-		return fmt.Errorf("写入密钥文件失败: %v", err)
+	if err := ioutil.WriteFile(configFile, data, 0600); err != nil {
+		return fmt.Errorf("写入配置文件失败: %v", err)
 	}
 	
-	log.Printf("密钥已保存到文件: %s", keyFile)
+	log.Printf("配置已保存到文件: %s", configFile)
 	return nil
-}
-
-// 从文件加载安全密钥
-func (a *Agent) loadSecurityKey(keyFile string) (string, error) {
-	// 如果路径中包含conf/app.conf，则从配置文件加载
-	if strings.Contains(keyFile, "conf/app.conf") {
-		log.Printf("从配置文件加载密钥: %s", keyFile)
-		
-		// 检查文件是否存在
-		if _, err := os.Stat(keyFile); os.IsNotExist(err) {
-			return "", fmt.Errorf("配置文件不存在: %s", keyFile)
-		}
-		
-		// 加载配置
-		cfg, err := ini.Load(keyFile)
-		if err != nil {
-			return "", fmt.Errorf("读取配置文件失败: %v", err)
-		}
-		
-		// 从[agent]部分读取密钥
-		section := cfg.Section("agent")
-		if !section.HasKey("SECURITY_KEY") {
-			return "", fmt.Errorf("配置文件中未找到密钥项 [agent].SECURITY_KEY")
-		}
-		
-		keyValue := section.Key("SECURITY_KEY").String()
-		if keyValue == "" {
-			return "", fmt.Errorf("配置文件中密钥项值为空 [agent].SECURITY_KEY")
-		}
-		
-		log.Printf("从配置文件成功加载密钥")
-		return keyValue, nil
-	}
-	
-	// 否则使用原来的JSON方式加载
-	// 检查文件是否存在
-	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
-		return "", fmt.Errorf("密钥文件不存在: %s", keyFile)
-	}
-	
-	// 读取文件
-	data, err := ioutil.ReadFile(keyFile)
-	if err != nil {
-		return "", fmt.Errorf("读取密钥文件失败: %v", err)
-	}
-	
-	// 解析JSON
-	var securityKey struct {
-		Key string `json:"key"`
-	}
-	if err := json.Unmarshal(data, &securityKey); err != nil {
-		return "", fmt.Errorf("解析密钥文件失败: %v", err)
-	}
-	
-	return securityKey.Key, nil
 }
 
 // 处理密钥更新消息
@@ -1063,10 +1111,10 @@ func (a *Agent) handleSecurityKeyUpdate(msg *shared.Message) {
 	a.Config.SecurityKey = keyUpdatePayload.NewKey
 	
 	// 保存到文件
-	if err := a.saveSecurityKey(a.Config.KeyFile, keyUpdatePayload.NewKey); err != nil {
-		log.Printf("保存更新的密钥失败: %v", err)
+	if err := a.saveConfig(a.Config.KeyFile, a.Config.ServerURL, keyUpdatePayload.NewKey); err != nil {
+		log.Printf("保存更新的配置失败: %v", err)
 	} else {
-		log.Printf("已成功更新并保存密钥")
+		log.Printf("已成功更新并保存配置")
 	}
 	
 	// 发送确认消息
@@ -1249,14 +1297,14 @@ func (a *Agent) handleSecurityKeyUpdateProposal(msg *shared.Message) {
 		
 		// 保存新密钥
 		a.Config.SecurityKey = newKey
-		if err := a.saveSecurityKey(a.Config.KeyFile, newKey); err != nil {
-			log.Printf("保存新密钥失败: %v, 将恢复使用旧密钥", err)
+		if err := a.saveConfig(a.Config.KeyFile, a.Config.ServerURL, newKey); err != nil {
+			log.Printf("保存新配置失败: %v, 将恢复使用旧密钥", err)
 			a.Config.SecurityKey = oldKey
 			return
 		}
 		
 		// 验证密钥是否正确保存
-		savedKey, err := a.loadSecurityKey(a.Config.KeyFile)
+		_, savedKey, err := a.loadConfig(a.Config.KeyFile)
 		if err != nil || savedKey != newKey {
 			log.Printf("警告：密钥可能未正确保存，读取的密钥: %s, 期望的密钥: %s", savedKey, newKey)
 			if savedKey != newKey {
