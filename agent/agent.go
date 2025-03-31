@@ -165,6 +165,7 @@ func (a *Agent) Connect() error {
 	}
 
 	log.Printf("正在连接到服务器: %s", a.Config.ServerURL)
+	log.Printf("使用通信密钥: %s", a.Config.SecurityKey)
 
 	// 创建WebSocket连接
 	dialer := websocket.DefaultDialer
@@ -186,18 +187,18 @@ func (a *Agent) Connect() error {
 		// 检查HTTP响应以提供更详细的错误信息
 		if resp != nil {
 			if resp.StatusCode == http.StatusUnauthorized {
-				return fmt.Errorf("连接失败: 密钥无效或未提供，请检查密钥是否正确")
+				return fmt.Errorf("连接失败: 密钥无效或未提供，请检查密钥是否正确。使用的密钥: %s", a.Config.SecurityKey)
 			}
 			// 读取错误消息
 			if resp.Body != nil {
 				defer resp.Body.Close()
 				body, readErr := ioutil.ReadAll(resp.Body)
 				if readErr == nil && len(body) > 0 {
-					return fmt.Errorf("连接失败 (HTTP %d): %s", resp.StatusCode, string(body))
+					return fmt.Errorf("连接失败 (HTTP %d): %s。使用的密钥: %s", resp.StatusCode, string(body), a.Config.SecurityKey)
 				}
 			}
 		}
-		return fmt.Errorf("WebSocket连接失败: %v", err)
+		return fmt.Errorf("WebSocket连接失败: %v。使用的密钥: %s", err, a.Config.SecurityKey)
 	}
 
 	// 创建安全连接

@@ -639,45 +639,79 @@ func (ckm *ConfigKeyManager) watchConfigFile() {
 	ticker := time.NewTicker(ckm.watchInterval)
 	defer ticker.Stop()
 	
+	log.Printf("开始监控配置文件变化: %s", ckm.configFile)
+	lastCheckTime := time.Now()
+	
 	for {
 		select {
 		case <-ckm.stopWatchChan:
+			log.Printf("停止监控配置文件: %s", ckm.configFile)
 			return
 		case <-ticker.C:
-			// 检查文件是否被修改
-			fileInfo, err := os.Stat(ckm.configFile)
-			if err != nil {
-				log.Printf("监控配置文件错误: %v", err)
-				continue
-			}
-			
-			modTime := fileInfo.ModTime()
-			
-			ckm.mutex.RLock()
-			lastMod := ckm.lastModified
-			ckm.mutex.RUnlock()
-			
-			// 如果文件被修改，重新加载
-			if modTime.After(lastMod) {
-				log.Println("检测到配置文件变更，重新加载密钥")
-				oldKey := ckm.GetKey()
-				err := ckm.loadKeyFromConfig()
+			// 在独立goroutine中执行文件检查，避免阻塞心跳定时器
+			go func() {
+				// 检查文件是否被修改
+				fileInfo, err := os.Stat(ckm.configFile)
 				if err != nil {
-					log.Printf("重新加载密钥失败: %v", err)
-				} else {
-					newKey := ckm.GetKey()
-					if oldKey != newKey {
-						log.Println("密钥已更新")
-						// 触发回调
+					log.Printf("监控配置文件错误: %v", err)
+					return
+				}
+				
+				modTime := fileInfo.ModTime()
+				
+				// 如果文件被修改，重新加载
+				if modTime.After(lastCheckTime) {
+					lastCheckTime = modTime
+					log.Println("检测到配置文件变更，尝试重新加载密钥")
+					oldKey := ckm.GetKey()
+					
+					// 使用读锁避免长时间持有锁
+					err := func() error {
 						ckm.mutex.RLock()
-						cb := ckm.keyChangedCb
-						ckm.mutex.RUnlock()
-						if cb != nil {
-							cb(newKey)
+						defer ckm.mutex.RUnlock()
+						
+						// 读取配置文件
+						cfg, err := ini.Load(ckm.configFile)
+						if err != nil {
+							return fmt.Errorf("读取配置文件失败: %v", err)
 						}
+						
+						// 获取密钥值
+						section := cfg.Section(ckm.section)
+						if !section.HasKey(ckm.keyName) {
+							return fmt.Errorf("配置文件中未找到密钥项 [%s].%s", ckm.section, ckm.keyName)
+						}
+						
+						keyValue := section.Key(ckm.keyName).String()
+						if keyValue == "" {
+							return fmt.Errorf("配置文件中密钥项值为空 [%s].%s", ckm.section, ckm.keyName)
+						}
+						
+						// 如果密钥没变，不做处理
+						if keyValue == oldKey {
+							return nil
+						}
+						
+						// 更新密钥需要写锁
+						ckm.mutex.Lock()
+						defer ckm.mutex.Unlock()
+						
+						ckm.securityKey.Key = keyValue
+						log.Printf("成功重新加载密钥，新密钥: %s", keyValue)
+						
+						// 触发回调
+						if ckm.keyChangedCb != nil {
+							go ckm.keyChangedCb(keyValue)
+						}
+						
+						return nil
+					}()
+					
+					if err != nil {
+						log.Printf("重新加载密钥失败: %v", err)
 					}
 				}
-			}
+			}()
 		}
 	}
 }

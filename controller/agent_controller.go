@@ -2,6 +2,8 @@ package controller
 
 import (
 	"dont/server"
+	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -176,77 +178,68 @@ func GetSecurityKey(c *gin.Context) {
 // GenerateNewKey 生成新的通信安全密钥
 func GenerateNewKey(c *gin.Context) {
 	if AgentServer == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"code": 503,
-			"msg":  "Agent服务器未启动，请使用--agent-server参数启动服务",
-			"data": nil,
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Agent Server未启动",
 		})
 		return
 	}
 
-	// 生成新的通信密钥
 	err := AgentServer.GenerateNewSecurityKey()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"code": 500,
-			"msg":  "生成新密钥失败: " + err.Error(),
-			"data": nil,
+			"success": false,
+			"message": fmt.Sprintf("生成新密钥失败: %v", err),
 		})
 		return
 	}
-	
+
 	// 获取新生成的密钥
 	key := AgentServer.GetSecurityKey()
-	
+	log.Printf("已生成新的通信密钥: %s", key)
+
 	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"msg":  "新密钥已生成",
-		"data": gin.H{
-			"key": key,
-		},
+		"success": true,
+		"message": "已成功生成新密钥",
+		"key":     key,
 	})
 }
 
 // UpdateSecurityKey 更新通信安全密钥
 func UpdateSecurityKey(c *gin.Context) {
 	if AgentServer == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"code": 503,
-			"msg":  "Agent服务器未启动，请使用--agent-server参数启动服务",
-			"data": nil,
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Agent Server未启动",
 		})
 		return
 	}
 
-	var req struct {
+	var request struct {
 		Key string `json:"key" binding:"required"`
 	}
 
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := c.BindJSON(&request); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"code": 400,
-			"msg":  "参数错误: " + err.Error(),
-			"data": nil,
+			"success": false,
+			"message": "无效的请求参数",
 		})
 		return
 	}
 
-	// 更新通信密钥
-	err := AgentServer.UpdateSecurityKey(req.Key)
+	err := AgentServer.UpdateSecurityKey(request.Key)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"code": 400,
-			"msg":  "更新密钥失败: " + err.Error(),
-			"data": nil,
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": fmt.Sprintf("更新密钥失败: %v", err),
 		})
 		return
 	}
-	
+
+	log.Printf("已更新通信密钥: %s", request.Key)
+
 	c.JSON(http.StatusOK, gin.H{
-		"code": 200,
-		"msg":  "密钥已更新",
-		"data": gin.H{
-			"key": req.Key,
-		},
+		"success": true,
+		"message": "已成功更新密钥",
 	})
 } 

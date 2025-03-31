@@ -68,6 +68,10 @@ func NewServer(config *Config) (*Server, error) {
 		return nil, fmt.Errorf("初始化密钥管理器失败: %v", err)
 	}
 
+	// 输出当前使用的密钥
+	currentKey := keyManager.GetKey()
+	log.Printf("当前服务器通信密钥: %s", currentKey)
+	
 	server := &Server{
 		Config:     config,
 		keyPair:    keyPair,
@@ -85,7 +89,7 @@ func NewServer(config *Config) (*Server, error) {
 	
 	// 设置密钥变更回调
 	keyManager.SetKeyChangedCallback(func(newKey string) {
-		log.Println("检测到通信密钥变更，已更新服务器密钥")
+		log.Printf("检测到通信密钥变更，新密钥: %s", newKey)
 	})
 
 	return server, nil
