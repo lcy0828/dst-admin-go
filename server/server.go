@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -152,15 +153,24 @@ func (s *Server) handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 	// 获取查询参数中的密钥
 	authKey := r.URL.Query().Get("key")
 	
+	// URL解码密钥（因为agent端可能进行了URL编码）
+	decodedKey, err := url.QueryUnescape(authKey)
+	if err != nil {
+		log.Printf("解码密钥失败: %v，将使用原始密钥", err)
+		decodedKey = authKey
+	} else if decodedKey != authKey {
+		log.Printf("密钥已解码: %s -> %s", authKey, decodedKey)
+	}
+	
 	// 验证密钥（必须提供有效密钥）
 	if s.keyManager != nil {
-		if authKey == "" {
+		if decodedKey == "" {
 			log.Printf("拒绝连接：未提供通信密钥")
 			http.Error(w, "必须提供通信密钥", http.StatusUnauthorized)
 			return
 		}
 		
-		if !s.keyManager.ValidateKey(authKey) {
+		if !s.keyManager.ValidateKey(decodedKey) {
 			log.Printf("拒绝连接：无效的通信密钥")
 			http.Error(w, "无效的通信密钥", http.StatusUnauthorized)
 			return

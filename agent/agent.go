@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -174,11 +175,14 @@ func (a *Agent) Connect() error {
 	// 构建连接URL（添加密钥参数）
 	connectURL := a.Config.ServerURL
 	if a.Config.SecurityKey != "" {
+		// 对密钥进行URL编码，防止特殊字符（如+、/、=等）在URL中被改变
+		encodedKey := url.QueryEscape(a.Config.SecurityKey)
+		
 		// 添加查询参数
 		if strings.Contains(connectURL, "?") {
-			connectURL = connectURL + "&key=" + a.Config.SecurityKey
+			connectURL = connectURL + "&key=" + encodedKey
 		} else {
-			connectURL = connectURL + "?key=" + a.Config.SecurityKey
+			connectURL = connectURL + "?key=" + encodedKey
 		}
 	}
 
