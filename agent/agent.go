@@ -214,7 +214,16 @@ func (a *Agent) Connect() error {
 			if resp.StatusCode == http.StatusUnauthorized {
 				return fmt.Errorf("连接被拒绝，认证失败 (401 Unauthorized)。请检查密钥是否正确: %s", a.Config.SecurityKey)
 			}
-			return fmt.Errorf("WebSocket连接失败，HTTP状态码: %d: %v。使用的密钥: %s", resp.StatusCode, err, a.Config.SecurityKey)
+			// 读取错误消息
+			errMsg := fmt.Sprintf("HTTP状态码: %d", resp.StatusCode)
+			if resp.Body != nil {
+				defer resp.Body.Close()
+				body, readErr := ioutil.ReadAll(resp.Body)
+				if readErr == nil && len(body) > 0 {
+					errMsg = string(body)
+				}
+			}
+			return fmt.Errorf("WebSocket连接失败: %s: %v。使用的密钥: %s", errMsg, err, a.Config.SecurityKey)
 		}
 		return fmt.Errorf("WebSocket连接失败: %v。使用的密钥: %s, 将尝试重连", err, a.Config.SecurityKey)
 	}
@@ -391,38 +400,53 @@ func (a *Agent) reconnect() {
 			// 尝试连接
 			log.Printf("正在进行第 %d 次重连尝试...", reconnectAttempts)
 			err := a.Connect()
-			if err == nil {
-				log.Printf("重连成功，使用密钥: %s", a.Config.SecurityKey)
-				// 验证连接是否真的成功
-				a.connMutex.Lock()
-				isConnected := a.isConnected
-				a.connMutex.Unlock()
-				
-				if !isConnected {
-					log.Printf("连接标记显示连接未成功建立，将继续重试")
-					// 增加重连延迟
-					delay = time.Duration(float64(delay) * factor)
-					if delay > maxDelay {
-						delay = maxDelay
-					}
-					continue
-				}
-				
-				// 重连成功，启动消息处理
-				a.wg.Add(1)
-				go a.handleMessages()
-				
-				// 如果需要主动上报，重启上报
-				if a.reportInterval > 0 {
-					a.reportMutex.Lock()
-					a.wg.Add(1)
-					go a.startActiveReporting()
-					a.reportMutex.Unlock()
-				}
-				return
-			}
 			
-			log.Printf("重连失败: %v，将继续重试", err)
+			// 检查连接是否真正成功
+			a.connMutex.Lock()
+			isReallyConnected := a.isConnected && a.conn != nil
+			a.connMutex.Unlock()
+			
+			if err == nil && isReallyConnected {
+				log.Printf("重连成功，使用密钥: %s", a.Config.SecurityKey)
+				
+				// 验证连接真的可用，尝试发送心跳
+				if a.testConnection() {
+					// 重连成功，启动消息处理
+					a.wg.Add(1)
+					go a.handleMessages()
+					
+					// 如果需要主动上报，重启上报
+					if a.reportInterval > 0 {
+						a.reportMutex.Lock()
+						a.wg.Add(1)
+						go a.startActiveReporting()
+						a.reportMutex.Unlock()
+					}
+					
+					// 启动心跳机制
+					a.wg.Add(1)
+					go a.startHeartbeat()
+					
+					return
+				} else {
+					log.Printf("连接测试失败，连接可能不可用，将继续重试")
+					
+					// 关闭连接，下次重试
+					a.connMutex.Lock()
+					if a.conn != nil {
+						a.conn.Close()
+						a.conn = nil
+					}
+					a.isConnected = false
+					a.connMutex.Unlock()
+				}
+			} else {
+				if err != nil {
+					log.Printf("重连失败: %v，将继续重试", err)
+				} else {
+					log.Printf("连接建立但内部状态检查失败，将继续重试")
+				}
+			}
 			
 			// 增加重连延迟（指数退避）
 			delay = time.Duration(float64(delay) * factor)
@@ -430,6 +454,65 @@ func (a *Agent) reconnect() {
 				delay = maxDelay
 			}
 		}
+	}
+}
+
+// 测试连接是否可用
+func (a *Agent) testConnection() bool {
+	a.connMutex.Lock()
+	conn := a.conn
+	isConnected := a.isConnected
+	a.connMutex.Unlock()
+	
+	if !isConnected || conn == nil {
+		return false
+	}
+	
+	// 创建测试心跳消息
+	testMsg, err := shared.CreateMessage(shared.TypeHeartbeat, a.Config.AgentID, nil)
+	if err != nil {
+		log.Printf("创建测试心跳消息失败: %v", err)
+		return false
+	}
+	
+	// 发送测试心跳
+	if err := conn.SendEncrypted(testMsg); err != nil {
+		log.Printf("发送测试心跳失败: %v", err)
+		return false
+	}
+	
+	// 使用通道和超时控制读取操作
+	responseChan := make(chan *shared.Message, 1)
+	errorChan := make(chan error, 1)
+	
+	go func() {
+		resp, err := conn.ReadEncrypted()
+		if err != nil {
+			errorChan <- err
+			return
+		}
+		responseChan <- resp
+	}()
+	
+	// 等待响应或超时
+	select {
+	case resp := <-responseChan:
+		// 验证响应类型
+		if resp.Type != shared.TypeHeartbeatAck {
+			log.Printf("收到非预期的响应类型: %s", resp.Type)
+			return false
+		}
+		
+		log.Printf("连接测试成功，确认连接可用")
+		return true
+		
+	case err := <-errorChan:
+		log.Printf("接收测试心跳响应失败: %v", err)
+		return false
+		
+	case <-time.After(5 * time.Second):
+		log.Printf("等待测试心跳响应超时")
+		return false
 	}
 }
 
@@ -815,14 +898,27 @@ func (a *Agent) saveSecurityKey(keyFile, key string) error {
 	if strings.Contains(keyFile, "conf/app.conf") {
 		log.Printf("保存密钥到配置文件: %s", keyFile)
 		
-		// 加载现有配置
-		cfg, err := ini.Load(keyFile)
-		if err != nil {
-			if os.IsNotExist(err) {
-				// 如果文件不存在，创建新的配置文件
+		// 检查文件是否存在
+		var cfg *ini.File
+		var err error
+		
+		if _, fileErr := os.Stat(keyFile); os.IsNotExist(fileErr) {
+			// 如果文件不存在，创建新的配置文件
+			log.Printf("配置文件不存在，创建新文件")
+			cfg = ini.Empty()
+		} else {
+			// 加载现有配置
+			cfg, err = ini.Load(keyFile)
+			if err != nil {
+				log.Printf("警告: 加载现有配置文件失败: %v，将创建新的配置文件", err)
+				// 备份损坏的文件
+				backupFile := keyFile + ".bak." + time.Now().Format("20060102150405")
+				if copyErr := copyFile(keyFile, backupFile); copyErr != nil {
+					log.Printf("备份现有配置文件失败: %v", copyErr)
+				} else {
+					log.Printf("已将可能损坏的配置文件备份为: %s", backupFile)
+				}
 				cfg = ini.Empty()
-			} else {
-				return fmt.Errorf("读取配置文件失败: %v", err)
 			}
 		}
 		
@@ -847,7 +943,7 @@ func (a *Agent) saveSecurityKey(keyFile, key string) error {
 		return nil
 	}
 	
-	// 否则使用原来的JSON方式保存
+	// 否则使用JSON方式保存
 	securityKey := struct {
 		Key string `json:"key"`
 	}{
@@ -875,6 +971,15 @@ func (a *Agent) saveSecurityKey(keyFile, key string) error {
 	
 	log.Printf("密钥已保存到文件: %s", keyFile)
 	return nil
+}
+
+// 复制文件的辅助函数
+func copyFile(src, dst string) error {
+	data, err := ioutil.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return ioutil.WriteFile(dst, data, 0644)
 }
 
 // 从文件加载安全密钥

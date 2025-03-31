@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 	"encoding/base64"
 	"github.com/google/uuid"
+	"gopkg.in/ini.v1"
 )
 
 // 常量
@@ -42,25 +43,34 @@ type AgentConnection struct {
 	Mutex         sync.Mutex
 }
 
-// Server 表示服务器实例
-type Server struct {
-	Config            *Config
-	keyPair           *shared.KeyPair
-	keyManager        shared.KeyManagerInterface
-	agents            map[string]*AgentConnection
-	agentMutex        sync.RWMutex
-	upgrader          websocket.Upgrader
-	stopChan          chan struct{}
-	keyUpdateSessions *KeyUpdateSessionManager // 密钥更新会话管理器
-}
-
 // Config 服务器配置
 type Config struct {
-	ListenAddr string // 监听地址
-	TLSCert    string // TLS证书文件
-	TLSKey     string // TLS密钥文件
-	KeyFile    string // 通信密钥文件
+	ListenAddr  string // 监听地址
+	TLSCert     string // TLS证书文件
+	TLSKey      string // TLS密钥文件
+	KeyFile     string // 通信密钥文件
 	SecurityKey string // 通信安全密钥
+}
+
+// ClientConnection 表示一个客户端连接
+type ClientConnection struct {
+	ClientID    string
+	Connection  *shared.SecureConnection
+	LastSeen    time.Time
+	Mutex       sync.Mutex
+}
+
+// Server 表示API服务器
+type Server struct {
+	Config               *Config
+	clients              map[string]*ClientConnection
+	clientsMutex         sync.RWMutex
+	agents               map[string]*AgentConnection
+	agentMutex           sync.RWMutex
+	upgrader             websocket.Upgrader
+	stopChan             chan struct{}
+	wg                   sync.WaitGroup
+	keyUpdateSessions    *KeyUpdateSessionManager
 }
 
 // KeyUpdateSession 表示一次密钥更新会话
@@ -93,29 +103,11 @@ func NewKeyUpdateSessionManager() *KeyUpdateSessionManager {
 	}
 }
 
-// NewServer 创建新的服务器实例
+// NewServer 创建一个新的服务器实例
 func NewServer(config *Config) (*Server, error) {
-	// 生成密钥对
-	keyPair, err := shared.GenerateKeyPair()
-	if err != nil {
-		return nil, fmt.Errorf("生成密钥对失败: %v", err)
-	}
-	
-	// 初始化密钥管理器，使用配置文件而不是独立的密钥文件
-	log.Printf("正在初始化密钥管理器，使用配置文件: %s", config.KeyFile)
-	keyManager, err := shared.NewKeyManagerWithConfig(config.KeyFile, "server", "SECURITY_KEY")
-	if err != nil {
-		return nil, fmt.Errorf("初始化密钥管理器失败: %v", err)
-	}
-
-	// 输出当前使用的密钥
-	currentKey := keyManager.GetKey()
-	log.Printf("当前服务器通信密钥: %s", currentKey)
-	
 	server := &Server{
 		Config:            config,
-		keyPair:           keyPair,
-		keyManager:        keyManager,
+		clients:           make(map[string]*ClientConnection),
 		agents:            make(map[string]*AgentConnection),
 		stopChan:          make(chan struct{}),
 		keyUpdateSessions: NewKeyUpdateSessionManager(),
@@ -127,13 +119,150 @@ func NewServer(config *Config) (*Server, error) {
 			},
 		},
 	}
-	
-	// 设置密钥变更回调
-	keyManager.SetKeyChangedCallback(func(newKey string) {
-		log.Printf("检测到通信密钥变更，新密钥: %s", newKey)
-	})
+
+	// 初始化服务器
+	if err := server.Init(); err != nil {
+		return nil, err
+	}
 
 	return server, nil
+}
+
+// Init 初始化服务器
+func (s *Server) Init() error {
+	// 如果未指定密钥文件，设置默认路径
+	if s.Config.KeyFile == "" {
+		s.Config.KeyFile = "./conf/app.conf"
+		log.Printf("使用配置文件保存通信密钥: %s", s.Config.KeyFile)
+	}
+
+	// 加载或生成密钥
+	if s.Config.SecurityKey == "" {
+		// 尝试从文件加载密钥
+		key, err := s.loadSecurityKey(s.Config.KeyFile)
+		if err == nil {
+			s.Config.SecurityKey = key
+			log.Printf("已从文件加载通信密钥")
+		} else {
+			// 无法加载密钥，生成新密钥
+			log.Printf("无法加载密钥 (%v)，生成新密钥", err)
+			key := s.generateRandomKey()
+			s.Config.SecurityKey = key
+			
+			// 保存新生成的密钥
+			if err := s.saveSecurityKey(s.Config.KeyFile, key); err != nil {
+				log.Printf("警告: 保存密钥到文件失败: %v", err)
+			} else {
+				log.Printf("新生成的密钥已保存到: %s", s.Config.KeyFile)
+			}
+		}
+	}
+
+	// 设置路由
+	s.setupRouter()
+
+	return nil
+}
+
+// LoadConfig 从配置文件加载配置
+func LoadConfig(configFile string) (*Config, error) {
+	// 如果是.conf文件，使用ini解析
+	if strings.HasSuffix(configFile, ".conf") {
+		return loadConfigFromIni(configFile)
+	}
+	
+	// 否则尝试JSON解析
+	data, err := ioutil.ReadFile(configFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// 文件不存在，返回默认配置
+			return &Config{
+				ListenAddr: ":8081",
+				KeyFile:    "./conf/app.conf",
+			}, nil
+		}
+		return nil, fmt.Errorf("读取配置文件失败: %v", err)
+	}
+	
+	var config Config
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("解析配置文件失败: %v", err)
+	}
+	
+	// 设置默认值
+	if config.ListenAddr == "" {
+		config.ListenAddr = ":8081"
+	}
+	
+	return &config, nil
+}
+
+// loadConfigFromIni 从INI配置文件加载配置
+func loadConfigFromIni(configFile string) (*Config, error) {
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		// 文件不存在，返回默认配置
+		return &Config{
+			ListenAddr: ":8081",
+			KeyFile:    configFile,
+		}, nil
+	}
+	
+	// 加载INI配置
+	cfg, err := ini.Load(configFile)
+	if err != nil {
+		return nil, fmt.Errorf("加载配置文件失败: %v", err)
+	}
+	
+	// 从[server]节读取配置
+	section := cfg.Section("server")
+	
+	config := &Config{
+		ListenAddr:  ":8081", // 默认值
+		KeyFile:     configFile,
+	}
+	
+	// 读取配置值
+	if section.HasKey("HTTP_PORT") {
+		port := section.Key("HTTP_PORT").String()
+		if port != "" {
+			config.ListenAddr = ":" + port
+		}
+	}
+	
+	if section.HasKey("TLS_CERT") {
+		config.TLSCert = section.Key("TLS_CERT").String()
+	}
+	
+	if section.HasKey("TLS_KEY") {
+		config.TLSKey = section.Key("TLS_KEY").String()
+	}
+	
+	if section.HasKey("SECURITY_KEY") {
+		config.SecurityKey = section.Key("SECURITY_KEY").String()
+	}
+	
+	return config, nil
+}
+
+// 生成随机密钥
+func (s *Server) generateRandomKey() string {
+	// 生成32字节的随机密钥
+	keyBytes := make([]byte, 32)
+	_, err := rand.Read(keyBytes)
+	if err != nil {
+		log.Printf("生成随机密钥时发生错误: %v，使用时间戳替代", err)
+		// 使用时间戳作为备用随机源
+		timestamp := time.Now().UnixNano()
+		for i := 0; i < 32; i++ {
+			keyBytes[i] = byte((timestamp >> (i % 8)) & 0xff)
+		}
+	}
+	
+	// Base64编码密钥
+	key := base64.StdEncoding.EncodeToString(keyBytes)
+	log.Printf("已成功生成新密钥: %s", key)
+	
+	return key
 }
 
 // Start 启动服务器
@@ -168,176 +297,120 @@ func (s *Server) Stop() {
 	log.Println("服务器正在停止...")
 	close(s.stopChan)
 
-	// 停止密钥文件监控
-	if s.keyManager != nil {
-		s.keyManager.StopWatching()
-	}
-
-	// 关闭所有agent连接
+	// 关闭所有Agent连接
 	s.agentMutex.Lock()
 	for _, agent := range s.agents {
-		agent.Mutex.Lock()
 		if agent.Connection != nil {
 			agent.Connection.Close()
 		}
-		agent.Mutex.Unlock()
 	}
-	s.agents = make(map[string]*AgentConnection)
 	s.agentMutex.Unlock()
 
+	s.wg.Wait()
 	log.Println("服务器已停止")
 }
 
 // 处理Agent连接
 func (s *Server) handleAgentConnection(w http.ResponseWriter, r *http.Request) {
-	// 获取查询参数中的密钥
-	authKey := r.URL.Query().Get("key")
+	// 从查询参数获取密钥
+	keyParam := r.URL.Query().Get("key")
 	
-	// 处理Base64编码中的特殊字符
-	decodedKey := authKey
-	// 检查是否包含%编码字符
-	if strings.Contains(authKey, "%") {
-		// 替换所有编码的Base64特殊字符
-		decodedKey = strings.ReplaceAll(authKey, "%2B", "+")
-		decodedKey = strings.ReplaceAll(decodedKey, "%2F", "/")
-		decodedKey = strings.ReplaceAll(decodedKey, "%3D", "=")
-		
-		// 如果还有其他编码字符，尝试URL解码
-		if strings.Contains(decodedKey, "%") {
-			unescaped, err := url.QueryUnescape(decodedKey)
-			if err == nil {
-				decodedKey = unescaped
-			}
-		}
-		
-		log.Printf("密钥已解码: %s -> %s", authKey, decodedKey)
+	// 解码密钥中的URL编码字符
+	decodedKey, err := url.QueryUnescape(keyParam)
+	if err != nil {
+		log.Printf("密钥解码失败: %v", err)
+		http.Error(w, "密钥解码失败", http.StatusBadRequest)
+		return
 	}
 	
 	// 验证密钥（必须提供有效密钥）
-	if s.keyManager != nil {
-		if decodedKey == "" {
-			log.Printf("拒绝连接：未提供通信密钥")
-			http.Error(w, "必须提供通信密钥", http.StatusUnauthorized)
-			return
-		}
-		
-		if !s.keyManager.ValidateKey(decodedKey) {
-			log.Printf("拒绝连接：无效的通信密钥")
-			http.Error(w, "无效的通信密钥", http.StatusUnauthorized)
-			return
-		}
-	}
-
-	// 升级HTTP连接为WebSocket
-	conn, err := s.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("升级连接失败: %v", err)
+	if decodedKey == "" {
+		log.Printf("拒绝连接：未提供通信密钥")
+		http.Error(w, "未提供通信密钥", http.StatusUnauthorized)
 		return
 	}
-
-	log.Printf("新的WebSocket连接: %s", conn.RemoteAddr())
-
+	
+	if !s.validateKey(decodedKey) {
+		log.Printf("拒绝连接：无效的通信密钥")
+		http.Error(w, "无效的通信密钥", http.StatusUnauthorized)
+		return
+	}
+	
+	// 升级HTTP连接到WebSocket
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("升级WebSocket连接失败: %v", err)
+		return
+	}
+	
+	// 设置读取超时
+	err = conn.SetReadDeadline(time.Now().Add(ReadTimeout))
+	if err != nil {
+		log.Printf("设置WebSocket读取超时失败: %v", err)
+		conn.Close()
+		return
+	}
+	
 	// 读取注册消息
-	_, msgBytes, err := conn.ReadMessage()
+	messageType, payload, err := conn.ReadMessage()
 	if err != nil {
 		log.Printf("读取注册消息失败: %v", err)
 		conn.Close()
 		return
 	}
-
+	
+	if messageType != websocket.TextMessage {
+		log.Printf("收到非文本消息，类型: %d", messageType)
+		conn.Close()
+		return
+	}
+	
+	// 解析注册消息
 	var msg shared.Message
-	if err := json.Unmarshal(msgBytes, &msg); err != nil {
+	if err := json.Unmarshal(payload, &msg); err != nil {
 		log.Printf("解析注册消息失败: %v", err)
 		conn.Close()
 		return
 	}
-
+	
 	if msg.Type != shared.TypeRegister {
 		log.Printf("预期注册消息，但收到: %s", msg.Type)
 		conn.Close()
 		return
 	}
-
-	// 解析注册负载
-	var regPayload shared.RegisterPayload
-	if err := json.Unmarshal(msg.Payload, &regPayload); err != nil {
-		log.Printf("解析注册负载失败: %v", err)
-		conn.Close()
-		return
-	}
-
-	// 解码Agent公钥
-	agentPubKey, err := shared.DecodePublicKey(regPayload.PublicKey)
+	
+	// 处理注册
+	secureConn, err := s.handleRegister(conn, &msg)
 	if err != nil {
-		log.Printf("解码Agent公钥失败: %v", err)
+		log.Printf("处理注册失败: %v", err)
 		conn.Close()
 		return
 	}
-
-	// 创建注册确认负载
-	ackPayload := shared.RegisterAckPayload{
-		ServerPublicKey: shared.EncodePublicKey(s.keyPair.PublicKey),
-		Success:         true,
-		Message:         "注册成功",
+	
+	// 创建Agent连接并保存
+	agent := &AgentConnection{
+		AgentID:       msg.AgentID,
+		Connection:    secureConn,
+		LastHeartbeat: time.Now(),
+		Info:          make(map[string]interface{}),
 	}
-
-	// 创建确认消息
-	ackMsg, err := shared.CreateMessage(shared.TypeRegisterAck, "server", ackPayload)
-	if err != nil {
-		log.Printf("创建注册确认消息失败: %v", err)
-		conn.Close()
-		return
-	}
-
-	// 发送确认
-	ackBytes, err := json.Marshal(ackMsg)
-	if err != nil {
-		log.Printf("序列化注册确认消息失败: %v", err)
-		conn.Close()
-		return
-	}
-
-	if err := conn.WriteMessage(websocket.TextMessage, ackBytes); err != nil {
-		log.Printf("发送注册确认失败: %v", err)
-		conn.Close()
-		return
-	}
-
-	// 创建安全连接
-	secureConn := shared.NewSecureConnection(conn, s.keyPair, true)
-	secureConn.SetRemotePublicKey(agentPubKey)
-
-	// 检查是否已有相同ID的连接
+	
 	s.agentMutex.Lock()
-	existingAgent, exists := s.agents[msg.AgentID]
-	if exists {
-		log.Printf("重复的Agent ID: %s，关闭旧连接", msg.AgentID)
-		existingAgent.Mutex.Lock()
+	// 检查是否已存在该Agent
+	if existingAgent, exists := s.agents[msg.AgentID]; exists {
+		log.Printf("Agent已存在，关闭旧连接: %s", msg.AgentID)
+		
 		if existingAgent.Connection != nil {
 			existingAgent.Connection.Close()
 		}
-		existingAgent.Mutex.Unlock()
 	}
-
-	// 存储Agent连接信息
-	agentConn := &AgentConnection{
-		AgentID:       msg.AgentID,
-		Connection:    secureConn,
-		PublicKey:     agentPubKey,
-		LastHeartbeat: time.Now(),
-		Info: map[string]interface{}{
-			"hostname": regPayload.Hostname,
-			"os":       regPayload.OS,
-			"arch":     regPayload.Arch,
-		},
-	}
-	s.agents[msg.AgentID] = agentConn
+	s.agents[msg.AgentID] = agent
 	s.agentMutex.Unlock()
-
-	log.Printf("Agent已注册: ID=%s, OS=%s, Arch=%s", msg.AgentID, regPayload.OS, regPayload.Arch)
-
+	
+	log.Printf("Agent已连接: %s", msg.AgentID)
+	
 	// 启动消息处理循环
-	go s.handleAgentMessages(agentConn)
+	go s.handleAgentMessages(agent)
 }
 
 // 处理来自Agent的消息
@@ -703,10 +776,7 @@ func (s *Server) GetAllAgentInfo() map[string]map[string]interface{} {
 
 // GetSecurityKey 获取当前的通信安全密钥
 func (s *Server) GetSecurityKey() string {
-	if s.keyManager == nil {
-		return ""
-	}
-	return s.keyManager.GetKey()
+	return s.Config.SecurityKey
 }
 
 // 创建新的密钥更新会话
@@ -822,22 +892,15 @@ func (s *Server) createKeyUpdateSession(proposedKey string) (*KeyUpdateSession, 
 	return session, nil
 }
 
+// 验证密钥是否有效
+func (s *Server) validateKey(key string) bool {
+	return key == s.Config.SecurityKey
+}
+
 // GenerateNewSecurityKey 生成新的通信安全密钥
 func (s *Server) GenerateNewSecurityKey() error {
-	if s.keyManager == nil {
-		return fmt.Errorf("密钥管理器未初始化")
-	}
-	
-	// 生成随机密钥
-	keyBytes := make([]byte, 32)
-	_, err := rand.Read(keyBytes)
-	if err != nil {
-		return fmt.Errorf("生成随机密钥失败: %v", err)
-	}
-	
-	// Base64编码密钥
-	newKey := base64.StdEncoding.EncodeToString(keyBytes)
-	log.Printf("已成功生成新密钥: %s", newKey)
+	// 生成新的随机密钥
+	newKey := s.generateRandomKey()
 	
 	// 创建密钥更新会话
 	session, err := s.createKeyUpdateSession(newKey)
@@ -845,10 +908,7 @@ func (s *Server) GenerateNewSecurityKey() error {
 		return err
 	}
 	
-	// 如果session为nil，表示没有连接的agent，已直接应用密钥
-	if session == nil {
-		return nil
-	}
+	log.Printf("已生成新的通信密钥: %s", newKey)
 	
 	// 推送新密钥给所有已连接的Agent
 	go s.broadcastKeyUpdateProposal(session, newKey)
@@ -858,25 +918,14 @@ func (s *Server) GenerateNewSecurityKey() error {
 
 // UpdateSecurityKey 更新通信安全密钥
 func (s *Server) UpdateSecurityKey(newKey string) error {
-	if s.keyManager == nil {
-		return fmt.Errorf("密钥管理器未初始化")
-	}
-	
-	// 验证密钥格式
-	_, err := base64.StdEncoding.DecodeString(newKey)
-	if err != nil {
-		return fmt.Errorf("无效的密钥格式，必须是有效的Base64编码字符串: %v", err)
+	if newKey == "" {
+		return fmt.Errorf("不能设置空密钥")
 	}
 	
 	// 创建密钥更新会话
 	session, err := s.createKeyUpdateSession(newKey)
 	if err != nil {
 		return err
-	}
-	
-	// 如果session为nil，表示没有连接的agent，已直接应用密钥
-	if session == nil {
-		return nil
 	}
 	
 	// 推送新密钥给所有已连接的Agent
@@ -980,7 +1029,56 @@ func (s *Server) handleAgentKeyUpdateReady(agentID string, payload struct {
 
 // 保存安全密钥到文件
 func (s *Server) saveSecurityKey(keyFile, key string) error {
-	// 创建密钥数据
+	// 如果路径中包含conf/app.conf，则保存到配置文件格式
+	if strings.Contains(keyFile, "conf/app.conf") {
+		log.Printf("保存密钥到配置文件: %s", keyFile)
+		
+		// 检查文件是否存在
+		var cfg *ini.File
+		var err error
+		
+		if _, fileErr := os.Stat(keyFile); os.IsNotExist(fileErr) {
+			// 如果文件不存在，创建新的配置文件
+			log.Printf("配置文件不存在，创建新文件")
+			cfg = ini.Empty()
+		} else {
+			// 加载现有配置
+			cfg, err = ini.Load(keyFile)
+			if err != nil {
+				log.Printf("警告: 加载现有配置文件失败: %v，将创建新的配置文件", err)
+				// 备份损坏的文件
+				backupFile := keyFile + ".bak." + time.Now().Format("20060102150405")
+				if copyErr := copyFile(keyFile, backupFile); copyErr != nil {
+					log.Printf("备份现有配置文件失败: %v", copyErr)
+				} else {
+					log.Printf("已将可能损坏的配置文件备份为: %s", backupFile)
+				}
+				cfg = ini.Empty()
+			}
+		}
+		
+		// 设置密钥值到[server]部分
+		section, err := cfg.GetSection("server")
+		if err != nil {
+			// 如果节不存在，创建新节
+			section, err = cfg.NewSection("server")
+			if err != nil {
+				return fmt.Errorf("创建配置节失败: %v", err)
+			}
+		}
+		
+		section.Key("SECURITY_KEY").SetValue(key)
+		
+		// 保存配置
+		if err := cfg.SaveTo(keyFile); err != nil {
+			return fmt.Errorf("保存配置文件失败: %v", err)
+		}
+		
+		log.Printf("密钥已保存到配置文件: %s [server].SECURITY_KEY", keyFile)
+		return nil
+	}
+	
+	// 否则使用JSON方式保存
 	securityKey := struct {
 		Key string `json:"key"`
 	}{
@@ -1010,8 +1108,48 @@ func (s *Server) saveSecurityKey(keyFile, key string) error {
 	return nil
 }
 
+// 复制文件的辅助函数
+func copyFile(src, dst string) error {
+	data, err := ioutil.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return ioutil.WriteFile(dst, data, 0644)
+}
+
 // 从文件加载安全密钥
 func (s *Server) loadSecurityKey(keyFile string) (string, error) {
+	// 如果路径中包含conf/app.conf，则从配置文件加载
+	if strings.Contains(keyFile, "conf/app.conf") {
+		log.Printf("从配置文件加载密钥: %s", keyFile)
+		
+		// 检查文件是否存在
+		if _, err := os.Stat(keyFile); os.IsNotExist(err) {
+			return "", fmt.Errorf("配置文件不存在: %s", keyFile)
+		}
+		
+		// 加载配置
+		cfg, err := ini.Load(keyFile)
+		if err != nil {
+			return "", fmt.Errorf("读取配置文件失败: %v", err)
+		}
+		
+		// 从[server]部分读取密钥
+		section := cfg.Section("server")
+		if !section.HasKey("SECURITY_KEY") {
+			return "", fmt.Errorf("配置文件中未找到密钥项 [server].SECURITY_KEY")
+		}
+		
+		keyValue := section.Key("SECURITY_KEY").String()
+		if keyValue == "" {
+			return "", fmt.Errorf("配置文件中密钥项值为空 [server].SECURITY_KEY")
+		}
+		
+		log.Printf("从配置文件成功加载密钥")
+		return keyValue, nil
+	}
+	
+	// 否则使用JSON方式加载
 	// 检查文件是否存在
 	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
 		return "", fmt.Errorf("密钥文件不存在: %s", keyFile)
@@ -1032,4 +1170,71 @@ func (s *Server) loadSecurityKey(keyFile string) (string, error) {
 	}
 	
 	return securityKey.Key, nil
+}
+
+// setupRouter 设置HTTP路由
+func (s *Server) setupRouter() {
+	// 初始化WebSocket升级器
+	s.upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			return true // 允许所有源
+		},
+	}
+}
+
+// 处理注册请求
+func (s *Server) handleRegister(conn *websocket.Conn, msg *shared.Message) (*shared.SecureConnection, error) {
+	// 解析注册负载
+	var registerPayload shared.RegisterPayload
+	if err := json.Unmarshal(msg.Payload, &registerPayload); err != nil {
+		return nil, fmt.Errorf("解析注册负载失败: %v", err)
+	}
+
+	log.Printf("收到注册请求: agent=%s, hostname=%s, os=%s, arch=%s", 
+		msg.AgentID, registerPayload.Hostname, registerPayload.OS, registerPayload.Arch)
+
+	// 解码客户端公钥
+	clientPubKey, err := shared.DecodePublicKey(registerPayload.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("解码客户端公钥失败: %v", err)
+	}
+
+	// 生成服务器密钥对
+	serverKeyPair, err := shared.GenerateKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("生成服务器密钥对失败: %v", err)
+	}
+
+	// 创建确认响应
+	serverPubKeyStr := shared.EncodePublicKey(serverKeyPair.PublicKey)
+	
+	ackPayload := shared.RegisterAckPayload{
+		Success:         true,
+		Message:         "注册成功",
+		ServerPublicKey: serverPubKeyStr,
+	}
+
+	ackMsg, err := shared.CreateMessage(shared.TypeRegisterAck, "server", ackPayload)
+	if err != nil {
+		return nil, fmt.Errorf("创建注册确认消息失败: %v", err)
+	}
+
+	// 发送确认
+	ackBytes, err := json.Marshal(ackMsg)
+	if err != nil {
+		return nil, fmt.Errorf("序列化注册确认失败: %v", err)
+	}
+
+	if err := conn.WriteMessage(websocket.TextMessage, ackBytes); err != nil {
+		return nil, fmt.Errorf("发送注册确认失败: %v", err)
+	}
+
+	// 创建安全连接
+	secureConn := shared.NewSecureConnection(conn, serverKeyPair, true)
+	secureConn.SetRemotePublicKey(clientPubKey)
+
+	log.Printf("客户端注册成功: %s", msg.AgentID)
+	return secureConn, nil
 } 
