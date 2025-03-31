@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -124,20 +125,27 @@ func (km *KeyManager) loadKey() error {
 	km.mutex.Lock()
 	defer km.mutex.Unlock()
 	
-	// 获取绝对路径
-	absPath, err := filepath.Abs(km.keyFile)
-	if err != nil {
-		log.Printf("无法获取密钥文件的绝对路径: %v，将使用原始路径", err)
-		absPath = km.keyFile
+	// 检查是否是直接使用文件名而非路径
+	if !filepath.IsAbs(km.keyFile) && !strings.Contains(km.keyFile, "/") && !strings.Contains(km.keyFile, "\\") {
+		// 如果是纯文件名，检查当前目录
+		workDir, err := os.Getwd()
+		if err == nil {
+			possiblePath := filepath.Join(workDir, km.keyFile)
+			fileInfo, err := os.Stat(possiblePath)
+			if err == nil && !fileInfo.IsDir() {
+				log.Printf("使用当前目录中的密钥文件: %s", possiblePath)
+				km.keyFile = possiblePath
+			}
+		}
 	}
 	
-	log.Printf("尝试加载密钥文件: %s", absPath)
+	log.Printf("尝试加载密钥文件: %s", km.keyFile)
 	
 	// 检查文件是否存在
-	fileInfo, err := os.Stat(absPath)
+	fileInfo, err := os.Stat(km.keyFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("密钥文件不存在: %s", absPath)
+			log.Printf("密钥文件不存在: %s", km.keyFile)
 		} else {
 			log.Printf("检查密钥文件状态失败: %v", err)
 		}
@@ -145,13 +153,13 @@ func (km *KeyManager) loadKey() error {
 	}
 	
 	if fileInfo.IsDir() {
-		err := fmt.Errorf("指定的密钥文件路径是一个目录: %s", absPath)
+		err := fmt.Errorf("指定的密钥文件路径是一个目录: %s", km.keyFile)
 		log.Print(err)
 		return err
 	}
 	
 	// 读取文件内容
-	data, err := ioutil.ReadFile(absPath)
+	data, err := ioutil.ReadFile(km.keyFile)
 	if err != nil {
 		log.Printf("读取密钥文件失败: %v", err)
 		return err
@@ -165,7 +173,8 @@ func (km *KeyManager) loadKey() error {
 	}
 	
 	km.lastModified = fileInfo.ModTime()
-	log.Printf("密钥文件成功加载: %s", absPath)
+	log.Printf("密钥文件成功加载: %s", km.keyFile)
+	log.Printf("密钥值: %s", km.securityKey.Key)
 	return nil
 }
 
@@ -174,14 +183,16 @@ func (km *KeyManager) saveKey() error {
 	km.mutex.RLock()
 	defer km.mutex.RUnlock()
 	
-	// 获取绝对路径
-	absPath, err := filepath.Abs(km.keyFile)
+	// 尝试直接在当前目录保存密钥文件
+	fileName := "agent_server_key.json"
+	workDir, err := os.Getwd()
 	if err != nil {
-		log.Printf("无法获取密钥文件的绝对路径: %v", err)
-		absPath = km.keyFile // 如果获取失败，使用原始路径
+		log.Printf("无法获取当前工作目录: %v", err)
+		workDir = "."
 	}
 	
-	log.Printf("尝试保存密钥到文件: %s", absPath)
+	localPath := filepath.Join(workDir, fileName)
+	log.Printf("尝试直接保存密钥到当前目录: %s", localPath)
 	
 	data, err := json.MarshalIndent(km.securityKey, "", "  ")
 	if err != nil {
@@ -189,67 +200,30 @@ func (km *KeyManager) saveKey() error {
 		return err
 	}
 	
-	// 确保目录存在
-	dir := filepath.Dir(absPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		log.Printf("创建目录失败: %v", err)
+	// 尝试写入到当前目录
+	err = ioutil.WriteFile(localPath, data, 0600)
+	if err != nil {
+		log.Printf("写入密钥文件到当前目录失败: %v", err)
 		
-		// 尝试回退到当前目录
-		currentDir, err := os.Getwd()
+		// 尝试/tmp目录
+		tmpPath := filepath.Join("/tmp", fileName)
+		log.Printf("尝试保存到/tmp目录: %s", tmpPath)
+		
+		err = ioutil.WriteFile(tmpPath, data, 0600)
 		if err != nil {
-			log.Printf("无法获取当前工作目录: %v", err)
+			log.Printf("写入密钥文件到/tmp目录失败: %v", err)
 			return err
 		}
 		
-		// 修改文件路径为当前目录中的文件
-		newPath := filepath.Join(currentDir, filepath.Base(absPath))
-		log.Printf("尝试使用当前目录作为替代: %s", newPath)
-		absPath = newPath
+		// 更新文件路径
+		km.keyFile = tmpPath
+		log.Printf("密钥文件已保存到/tmp目录: %s", tmpPath)
+		return nil
 	}
 	
-	// 尝试先写入临时文件
-	tempFile := absPath + ".tmp"
-	err = ioutil.WriteFile(tempFile, data, 0600)
-	if err != nil {
-		log.Printf("写入临时密钥文件失败: %v", err)
-		
-		// 尝试直接写入最终文件
-		err = ioutil.WriteFile(absPath, data, 0600)
-		if err != nil {
-			log.Printf("写入密钥文件失败: %v", err)
-			
-			// 最后尝试写入用户主目录
-			homeDir, err := os.UserHomeDir()
-			if err != nil {
-				log.Printf("无法获取用户主目录: %v", err)
-				return err
-			}
-			
-			homeFilePath := filepath.Join(homeDir, "agent_server_key.json")
-			log.Printf("尝试写入到用户主目录: %s", homeFilePath)
-			err = ioutil.WriteFile(homeFilePath, data, 0600)
-			if err != nil {
-				log.Printf("写入到用户主目录也失败: %v", err)
-				return err
-			}
-			
-			// 更新文件路径
-			km.keyFile = homeFilePath
-			log.Printf("密钥文件已保存到用户主目录: %s", homeFilePath)
-			return nil
-		}
-	} else {
-		// 如果临时文件写入成功，重命名为最终文件
-		if err := os.Rename(tempFile, absPath); err != nil {
-			log.Printf("重命名临时文件失败: %v，尝试直接使用临时文件", err)
-			// 如果重命名失败，直接使用临时文件
-			km.keyFile = tempFile
-			log.Printf("使用临时文件作为密钥文件: %s", tempFile)
-			return nil
-		}
-	}
-	
-	log.Printf("密钥文件保存成功: %s", absPath)
+	// 成功写入当前目录
+	km.keyFile = localPath
+	log.Printf("密钥文件成功保存到当前目录: %s", localPath)
 	return nil
 }
 
@@ -262,22 +236,48 @@ func (km *KeyManager) GenerateNewKey() error {
 	keyBytes := make([]byte, 32)
 	_, err := rand.Read(keyBytes)
 	if err != nil {
+		log.Printf("生成随机密钥失败: %v", err)
 		return err
 	}
 	
 	// Base64编码密钥
 	km.securityKey.Key = base64.StdEncoding.EncodeToString(keyBytes)
+	log.Printf("已成功生成新密钥，长度为 %d 字符", len(km.securityKey.Key))
 	
-	// 保存到文件
-	err = km.saveKey()
-	if err != nil {
+	// 如果路径不是/tmp目录下，则修改为/tmp目录
+	if !strings.HasPrefix(km.keyFile, "/tmp/") {
+		km.keyFile = "/tmp/agent_server_key.json"
+		log.Printf("修改密钥文件路径为: %s", km.keyFile)
+	}
+	
+	// 确保目录存在
+	dir := filepath.Dir(km.keyFile)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Printf("创建目录失败: %v", err)
 		return err
 	}
 	
-	// 更新最后修改时间
-	fileInfo, err := os.Stat(km.keyFile)
-	if err == nil {
-		km.lastModified = fileInfo.ModTime()
+	// 保存到文件
+	data, err := json.MarshalIndent(km.securityKey, "", "  ")
+	if err != nil {
+		log.Printf("序列化密钥数据失败: %v", err)
+		return err
+	}
+	
+	log.Printf("正在写入密钥到文件: %s", km.keyFile)
+	err = ioutil.WriteFile(km.keyFile, data, 0600)
+	if err != nil {
+		log.Printf("写入密钥文件失败: %v", err)
+		return err
+	}
+	
+	log.Printf("密钥文件成功保存: %s", km.keyFile)
+	
+	// 验证文件是否真的写入成功
+	if _, err := os.Stat(km.keyFile); err != nil {
+		log.Printf("警告: 无法验证文件是否写入成功: %v", err)
+	} else {
+		log.Printf("确认密钥文件已成功写入")
 	}
 	
 	return nil

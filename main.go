@@ -7,6 +7,7 @@ import (
 	"dont/server"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -55,31 +56,38 @@ func main() {
 	// 如果启用了Agent-Server功能，则启动Agent-Server服务器
 	var agentServer *server.Server
 	if *enableAgentServer {
-		// 如果未指定密钥文件，使用默认路径
-		if *keyFile == "" {
-			// 获取当前工作目录作为基础路径
-			workDir, err := os.Getwd()
-			if err != nil {
-				log.Printf("警告：无法获取当前工作目录: %v，将使用相对路径", err)
-				workDir = "."
-			}
-			
-			*keyFile = filepath.Join(workDir, "agent_server_key.json")
-			log.Printf("未指定通信密钥文件，使用默认路径: %s", *keyFile)
-		} else {
-			// 确保使用绝对路径
-			absPath, err := filepath.Abs(*keyFile)
-			if err != nil {
-				log.Printf("警告：无法获取密钥文件的绝对路径: %v，将使用原始路径", err)
-			} else {
-				*keyFile = absPath
-			}
+		// 强制使用/tmp目录中的文件 - 这是一个几乎所有系统都应该有权限的目录
+		*keyFile = "/tmp/agent_server_key.json"
+		log.Printf("强制使用/tmp目录中的密钥文件: %s", *keyFile)
+		
+		// 确保/tmp目录存在并可写
+		if err := os.MkdirAll("/tmp", 0755); err != nil {
+			log.Printf("警告: 无法确保/tmp目录存在: %v", err)
 		}
 		
-		// 检查密钥文件所在目录是否存在，如果不存在则创建
-		keyDir := filepath.Dir(*keyFile)
-		if err := os.MkdirAll(keyDir, 0755); err != nil {
-			log.Printf("警告：无法创建密钥文件目录: %v", err)
+		// 检查文件是否存在，如果存在则输出其状态
+		fileInfo, err := os.Stat(*keyFile)
+		if err == nil {
+			// 文件存在
+			isDir := fileInfo.IsDir()
+			mode := fileInfo.Mode()
+			log.Printf("密钥文件已存在: isDir=%v, 权限=%v, 大小=%d字节", 
+				isDir, mode, fileInfo.Size())
+		} else if os.IsNotExist(err) {
+			// 文件不存在 - 这是预期情况，会在后续创建
+			log.Printf("密钥文件不存在，将在初始化时创建")
+		} else {
+			// 其他错误
+			log.Printf("检查密钥文件时出错: %v", err)
+		}
+		
+		// 测试/tmp目录写入权限
+		testFile := "/tmp/agent_key_test"
+		if err := ioutil.WriteFile(testFile, []byte("test"), 0600); err != nil {
+			log.Printf("警告: 无法在/tmp目录写入测试文件: %v", err)
+		} else {
+			os.Remove(testFile)
+			log.Printf("/tmp目录可写，测试成功")
 		}
 		
 		// 创建服务器配置

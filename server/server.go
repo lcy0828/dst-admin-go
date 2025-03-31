@@ -64,44 +64,28 @@ func NewServer(config *Config) (*Server, error) {
 		return nil, fmt.Errorf("生成密钥对失败: %v", err)
 	}
 	
-	// 设置默认密钥文件路径
-	if config.KeyFile == "" {
-		workDir, err := os.Getwd()
-		if err != nil {
-			log.Printf("警告：无法获取当前工作目录: %v，将使用相对路径", err)
-			workDir = "."
-		}
-		config.KeyFile = filepath.Join(workDir, "agent_server_key.json")
-		log.Printf("未指定密钥文件路径，使用默认路径: %s", config.KeyFile)
-	}
-	
-	// 获取绝对路径
-	absKeyFile, err := filepath.Abs(config.KeyFile)
+	// 强制使用当前目录或/tmp目录
+	workDir, err := os.Getwd()
 	if err != nil {
-		log.Printf("警告：无法获取密钥文件的绝对路径: %v，将使用原始路径", err)
+		log.Printf("无法获取当前工作目录: %v", err)
+		config.KeyFile = "/tmp/agent_server_key.json"
 	} else {
-		config.KeyFile = absKeyFile
-		log.Printf("使用密钥文件的绝对路径: %s", config.KeyFile)
-	}
-	
-	// 确保密钥文件目录存在
-	keyDir := filepath.Dir(config.KeyFile)
-	if err := os.MkdirAll(keyDir, 0755); err != nil {
-		log.Printf("警告：创建密钥文件目录失败: %v", err)
-	}
-	
-	// 尝试创建一个测试文件来验证写入权限
-	testFile := filepath.Join(keyDir, ".write_test")
-	if err := ioutil.WriteFile(testFile, []byte("test"), 0600); err != nil {
-		log.Printf("警告：无法写入测试文件，可能没有写入权限: %v", err)
-		// 尝试使用当前目录
-		workDir, _ := os.Getwd()
 		config.KeyFile = filepath.Join(workDir, "agent_server_key.json")
-		log.Printf("切换到当前工作目录: %s", config.KeyFile)
-		keyDir = workDir
+	}
+	
+	log.Printf("将使用密钥文件: %s", config.KeyFile)
+	
+	// 尝试直接写入空文件测试权限
+	testFile := config.KeyFile + ".test"
+	if err := ioutil.WriteFile(testFile, []byte("test"), 0600); err != nil {
+		log.Printf("警告: 无法写入测试文件: %v", err)
+		// 如果无法写入，则切换到/tmp目录
+		config.KeyFile = "/tmp/agent_server_key.json"
+		log.Printf("切换到/tmp目录: %s", config.KeyFile)
 	} else {
-		// 清理测试文件
+		// 测试成功，删除测试文件
 		os.Remove(testFile)
+		log.Printf("当前目录可写，将使用: %s", config.KeyFile)
 	}
 	
 	// 初始化密钥管理器
