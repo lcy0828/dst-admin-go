@@ -668,14 +668,17 @@ func (ckm *ConfigKeyManager) watchConfigFile() {
 			
 			// 如果文件被修改，重新加载
 			if modTime.After(lastModTime) {
-				log.Println("检测到配置文件变更，尝试重新加载密钥")
-				oldKey := ckm.GetKey()
+				log.Printf("检测到配置文件变更，尝试重新加载密钥")
 				
 				// 更新最后修改时间
 				lastModTime = modTime
 				
-				// 读取新密钥
-				newKey, err := ckm.loadNewKeyFromConfig()
+				// 保存当前密钥用于对比
+				oldKey := ckm.GetKey()
+				
+				// 从文件重新加载密钥
+				log.Printf("从文件重新加载密钥...")
+				newKey, err := ckm.reloadKeyFromFile()
 				if err != nil {
 					log.Printf("重新加载密钥失败: %v", err)
 					continue
@@ -687,26 +690,28 @@ func (ckm *ConfigKeyManager) watchConfigFile() {
 					continue
 				}
 				
-				// 更新密钥
-				ckm.mutex.Lock()
-				oldKeyValue := ckm.securityKey.Key
-				ckm.securityKey.Key = newKey
-				ckm.mutex.Unlock()
-				
-				log.Printf("成功重新加载密钥，旧密钥: %s, 新密钥: %s", oldKeyValue, newKey)
+				log.Printf("检测到密钥变更，从 '%s' 变更为 '%s'", oldKey, newKey)
 				
 				// 触发回调
 				if ckm.keyChangedCb != nil {
+					log.Printf("触发密钥变更回调")
 					go ckm.keyChangedCb(newKey)
+				} else {
+					log.Printf("警告: 未设置密钥变更回调函数")
 				}
 			}
 		}
 	}
 }
 
-// 从配置文件加载新密钥，但不更新内部状态
-func (ckm *ConfigKeyManager) loadNewKeyFromConfig() (string, error) {
+// 从文件重新加载密钥
+func (ckm *ConfigKeyManager) reloadKeyFromFile() (string, error) {
+	// 确保不会被其他操作干扰
+	ckm.mutex.Lock()
+	defer ckm.mutex.Unlock()
+	
 	// 读取配置文件
+	log.Printf("正在读取配置文件: %s", ckm.configFile)
 	cfg, err := ini.Load(ckm.configFile)
 	if err != nil {
 		return "", fmt.Errorf("读取配置文件失败: %v", err)
@@ -723,6 +728,22 @@ func (ckm *ConfigKeyManager) loadNewKeyFromConfig() (string, error) {
 		return "", fmt.Errorf("配置文件中密钥项值为空 [%s].%s", ckm.section, ckm.keyName)
 	}
 	
+	// 检查密钥是否符合Base64格式
+	_, err = base64.StdEncoding.DecodeString(keyValue)
+	if err != nil {
+		return "", fmt.Errorf("无效的密钥格式，应为Base64编码字符串: %v", err)
+	}
+	
+	// 更新密钥
+	ckm.securityKey.Key = keyValue
+	
+	// 更新文件修改时间
+	fileInfo, err := os.Stat(ckm.configFile)
+	if err == nil {
+		ckm.lastModified = fileInfo.ModTime()
+	}
+	
+	log.Printf("成功从配置文件加载新密钥: %s", keyValue)
 	return keyValue, nil
 }
 
@@ -810,20 +831,62 @@ func (ckm *ConfigKeyManager) SetKey(newKey string) error {
 		return errors.New("密钥不能为空")
 	}
 	
-	ckm.mutex.Lock()
-	defer ckm.mutex.Unlock()
-	
 	// 检查密钥是否符合Base64格式
 	_, err := base64.StdEncoding.DecodeString(newKey)
 	if err != nil {
 		return fmt.Errorf("无效的密钥格式，应为Base64编码字符串: %v", err)
 	}
 	
-	// 更新密钥
-	ckm.securityKey.Key = newKey
+	// 检查是否与当前密钥相同
+	ckm.mutex.RLock()
+	currentKey := ckm.securityKey.Key
+	ckm.mutex.RUnlock()
 	
-	// 保存到配置文件
-	return ckm.saveKeyToConfig()
+	if currentKey == newKey {
+		log.Printf("新密钥与当前密钥相同，无需更新")
+		return nil
+	}
+	
+	log.Printf("准备设置新密钥：%s", newKey)
+	
+	// 更新内存中的密钥
+	ckm.mutex.Lock()
+	oldKey := ckm.securityKey.Key
+	ckm.securityKey.Key = newKey
+	// 保存一个副本，用于文件保存
+	keyToSave := newKey 
+	ckm.mutex.Unlock()
+	
+	log.Printf("内存中的密钥已更新: %s -> %s", oldKey, newKey)
+	
+	// 保存到配置文件，确保持久化
+	log.Printf("保存密钥到配置文件")
+	if err := ckm.saveKeyToConfig(); err != nil {
+		// 保存失败，回滚内存中的密钥
+		log.Printf("保存密钥到配置文件失败: %v，回滚到原密钥", err)
+		ckm.mutex.Lock()
+		ckm.securityKey.Key = oldKey
+		ckm.mutex.Unlock()
+		return fmt.Errorf("保存密钥到配置文件失败: %v", err)
+	}
+	
+	// 强制更新文件最后修改时间，避免watchConfigFile被跳过
+	ckm.mutex.Lock()
+	fileInfo, statErr := os.Stat(ckm.configFile)
+	if statErr == nil {
+		ckm.lastModified = fileInfo.ModTime()
+	}
+	ckm.mutex.Unlock()
+	
+	// 单独触发回调，确保配置文件更新和回调都能正确执行
+	if ckm.keyChangedCb != nil {
+		log.Printf("触发密钥变更回调函数")
+		go ckm.keyChangedCb(keyToSave)
+	} else {
+		log.Printf("警告: 未设置密钥变更回调函数")
+	}
+	
+	return nil
 }
 
 // ValidateKey 验证提供的密钥是否匹配

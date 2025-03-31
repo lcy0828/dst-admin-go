@@ -140,17 +140,21 @@ func NewServer(config *Config) (*Server, error) {
 		log.Printf("检测到通信密钥变更，新密钥: %s", newKey)
 		
 		// 更新服务器使用的密钥
+		oldKey := server.Config.SecurityKey
 		server.Config.SecurityKey = newKey
-		log.Printf("服务器已应用新的密钥: %s", newKey)
+		log.Printf("服务器已应用新的密钥: %s，替换旧密钥: %s", newKey, oldKey)
 		
 		// 向所有连接的客户端广播密钥变更通知
-		agentCount := 0
 		server.agentMutex.RLock()
-		agentCount = len(server.agents)
+		agentCount := len(server.agents)
+		var agentList []string
+		for agentID := range server.agents {
+			agentList = append(agentList, agentID)
+		}
 		server.agentMutex.RUnlock()
 		
 		if agentCount > 0 {
-			log.Printf("检测到 %d 个已连接的客户端，将通知密钥变更", agentCount)
+			log.Printf("检测到 %d 个已连接的客户端，将通知密钥变更: %v", agentCount, agentList)
 			// 创建一个新的会话以推送密钥变更
 			go func() {
 				session, err := server.createKeyUpdateSession(newKey)
@@ -161,8 +165,12 @@ func NewServer(config *Config) (*Server, error) {
 				
 				if session != nil {
 					server.broadcastKeyUpdateProposal(session, newKey)
+				} else {
+					log.Printf("无需创建密钥更新会话，可能没有连接的客户端或会话已经存在")
 				}
 			}()
+		} else {
+			log.Printf("没有已连接的客户端，无需广播密钥变更")
 		}
 	})
 
