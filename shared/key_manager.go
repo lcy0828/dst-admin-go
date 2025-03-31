@@ -332,14 +332,15 @@ func NewKeyManagerWithConfig(configFile, section, keyName string) (*ConfigKeyMan
 	// 尝试加载现有密钥
 	err := ckm.loadKeyFromConfig()
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, err
-		}
-		
-		// 如果配置文件不存在或没有设置密钥，则生成新密钥
-		log.Printf("配置文件中未找到密钥设置 [%s].%s，将创建新密钥", section, keyName)
-		err = ckm.GenerateNewKeyToConfig()
-		if err != nil {
+		// 如果是密钥项不存在的错误，或者文件不存在的错误，生成新密钥
+		if os.IsNotExist(err) || strings.Contains(err.Error(), "未找到密钥项") || strings.Contains(err.Error(), "配置文件不存在") {
+			log.Printf("配置文件中未找到密钥设置 [%s].%s，将创建新密钥", section, keyName)
+			err = ckm.GenerateNewKeyToConfig()
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			// 其他错误则返回
 			return nil, err
 		}
 	}
@@ -416,13 +417,23 @@ func (ckm *ConfigKeyManager) saveKeyToConfig() error {
 	
 	if _, err := os.Stat(ckm.configFile); os.IsNotExist(err) {
 		// 如果文件不存在，创建新的配置文件
+		log.Printf("配置文件不存在，创建新文件")
 		cfg = ini.Empty()
+		
+		// 确保目录存在
+		dir := filepath.Dir(ckm.configFile)
+		if dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				log.Printf("创建配置文件目录失败: %v", err)
+				return fmt.Errorf("创建配置文件目录失败: %v", err)
+			}
+		}
 	} else {
 		// 如果文件存在，加载现有内容
 		cfg, err = ini.Load(ckm.configFile)
 		if err != nil {
-			log.Printf("读取配置文件失败: %v", err)
-			return err
+			log.Printf("读取配置文件失败: %v，将创建新配置文件", err)
+			cfg = ini.Empty()
 		}
 	}
 	
@@ -430,6 +441,7 @@ func (ckm *ConfigKeyManager) saveKeyToConfig() error {
 	section, err := cfg.GetSection(ckm.section)
 	if err != nil {
 		// 如果节不存在，创建新节
+		log.Printf("配置文件中不存在节 [%s]，创建新节", ckm.section)
 		section, err = cfg.NewSection(ckm.section)
 		if err != nil {
 			log.Printf("创建配置节失败: %v", err)
@@ -443,6 +455,28 @@ func (ckm *ConfigKeyManager) saveKeyToConfig() error {
 	err = cfg.SaveTo(ckm.configFile)
 	if err != nil {
 		log.Printf("保存配置文件失败: %v", err)
+		
+		// 尝试使用临时文件保存，然后重命名
+		tempFile := ckm.configFile + ".tmp"
+		log.Printf("尝试使用临时文件保存: %s", tempFile)
+		
+		if err := cfg.SaveTo(tempFile); err != nil {
+			log.Printf("保存到临时文件也失败: %v", err)
+			return err
+		}
+		
+		// 重命名临时文件
+		if err := os.Rename(tempFile, ckm.configFile); err != nil {
+			log.Printf("重命名临时文件失败: %v", err)
+			// 尽管重命名失败，但至少密钥已保存在临时文件中
+			log.Printf("密钥已保存到临时文件: %s", tempFile)
+			return err
+		}
+	}
+	
+	// 验证文件是否成功保存
+	if _, err := os.Stat(ckm.configFile); err != nil {
+		log.Printf("验证配置文件保存失败: %v", err)
 		return err
 	}
 	
@@ -502,6 +536,15 @@ func (ckm *ConfigKeyManager) watchConfigFile() {
 func (ckm *ConfigKeyManager) GenerateNewKeyToConfig() error {
 	ckm.mutex.Lock()
 	defer ckm.mutex.Unlock()
+	
+	// 确保配置文件目录存在
+	dir := filepath.Dir(ckm.configFile)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Printf("创建配置文件目录失败: %v", err)
+			return fmt.Errorf("创建配置文件目录失败: %v", err)
+		}
+	}
 	
 	// 生成32字节的随机密钥
 	keyBytes := make([]byte, 32)

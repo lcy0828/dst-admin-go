@@ -62,8 +62,8 @@ func NewServer(config *Config) (*Server, error) {
 	}
 	
 	// 初始化密钥管理器，使用配置文件而不是独立的密钥文件
-	log.Printf("正在初始化密钥管理器，使用配置文件: conf/app.conf")
-	keyManager, err := shared.NewKeyManagerWithConfig("conf/app.conf", "server", "SECURITY_KEY")
+	log.Printf("正在初始化密钥管理器，使用配置文件: %s", config.KeyFile)
+	keyManager, err := shared.NewKeyManagerWithConfig(config.KeyFile, "server", "SECURITY_KEY")
 	if err != nil {
 		return nil, fmt.Errorf("初始化密钥管理器失败: %v", err)
 	}
