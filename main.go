@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"dont/pkg/setting"
@@ -56,38 +55,20 @@ func main() {
 	// 如果启用了Agent-Server功能，则启动Agent-Server服务器
 	var agentServer *server.Server
 	if *enableAgentServer {
-		// 强制使用/tmp目录中的文件 - 这是一个几乎所有系统都应该有权限的目录
-		*keyFile = "/tmp/agent_server_key.json"
-		log.Printf("强制使用/tmp目录中的密钥文件: %s", *keyFile)
-		
-		// 确保/tmp目录存在并可写
-		if err := os.MkdirAll("/tmp", 0755); err != nil {
-			log.Printf("警告: 无法确保/tmp目录存在: %v", err)
+		// 设置密钥文件保存在当前目录
+		if *keyFile == "" {
+			*keyFile = "./agent_server_key.json"
 		}
+		log.Printf("使用当前目录中的密钥文件: %s", *keyFile)
 		
-		// 检查文件是否存在，如果存在则输出其状态
-		fileInfo, err := os.Stat(*keyFile)
-		if err == nil {
-			// 文件存在
-			isDir := fileInfo.IsDir()
-			mode := fileInfo.Mode()
-			log.Printf("密钥文件已存在: isDir=%v, 权限=%v, 大小=%d字节", 
-				isDir, mode, fileInfo.Size())
-		} else if os.IsNotExist(err) {
-			// 文件不存在 - 这是预期情况，会在后续创建
-			log.Printf("密钥文件不存在，将在初始化时创建")
-		} else {
-			// 其他错误
-			log.Printf("检查密钥文件时出错: %v", err)
-		}
-		
-		// 测试/tmp目录写入权限
-		testFile := "/tmp/agent_key_test"
-		if err := ioutil.WriteFile(testFile, []byte("test"), 0600); err != nil {
-			log.Printf("警告: 无法在/tmp目录写入测试文件: %v", err)
+		// 测试当前目录写入权限
+		testFile := "./agent_key_test"
+		testErr := ioutil.WriteFile(testFile, []byte("test"), 0600)
+		if testErr != nil {
+			log.Printf("警告: 无法在当前目录写入测试文件: %v", testErr)
 		} else {
 			os.Remove(testFile)
-			log.Printf("/tmp目录可写，测试成功")
+			log.Printf("当前目录可写，测试成功")
 		}
 		
 		// 创建服务器配置

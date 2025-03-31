@@ -64,29 +64,11 @@ func NewServer(config *Config) (*Server, error) {
 		return nil, fmt.Errorf("生成密钥对失败: %v", err)
 	}
 	
-	// 强制使用当前目录或/tmp目录
-	workDir, err := os.Getwd()
-	if err != nil {
-		log.Printf("无法获取当前工作目录: %v", err)
-		config.KeyFile = "/tmp/agent_server_key.json"
-	} else {
-		config.KeyFile = filepath.Join(workDir, "agent_server_key.json")
+	// 使用当前目录保存密钥文件
+	if config.KeyFile == "" {
+		config.KeyFile = "./agent_server_key.json"
 	}
-	
-	log.Printf("将使用密钥文件: %s", config.KeyFile)
-	
-	// 尝试直接写入空文件测试权限
-	testFile := config.KeyFile + ".test"
-	if err := ioutil.WriteFile(testFile, []byte("test"), 0600); err != nil {
-		log.Printf("警告: 无法写入测试文件: %v", err)
-		// 如果无法写入，则切换到/tmp目录
-		config.KeyFile = "/tmp/agent_server_key.json"
-		log.Printf("切换到/tmp目录: %s", config.KeyFile)
-	} else {
-		// 测试成功，删除测试文件
-		os.Remove(testFile)
-		log.Printf("当前目录可写，将使用: %s", config.KeyFile)
-	}
+	log.Printf("使用密钥文件: %s", config.KeyFile)
 	
 	// 初始化密钥管理器
 	log.Printf("正在初始化密钥管理器，使用文件: %s", config.KeyFile)
