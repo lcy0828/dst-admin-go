@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -171,28 +172,60 @@ func NewServer(config *Config) (*Server, error) {
 // Start 启动服务器
 func (s *Server) Start() error {
 	log.Println("服务器开始启动...")
-
+	
+	// 创建和配置HTTP服务器
+	httpServer := &http.Server{
+		Addr:         s.Config.ListenAddr,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+	
 	// 设置HTTP处理函数
 	http.HandleFunc("/agent", s.handleAgentConnection)
 
+	// 创建错误通道
+	errChan := make(chan error, 1)
+	
+	// 启动HTTP服务
+	go func() {
+		var err error
+		log.Printf("准备启动HTTP服务器，监听地址: %s", s.Config.ListenAddr)
+		
+		// 根据配置决定是否使用TLS
+		if s.Config.TLSCert != "" && s.Config.TLSKey != "" {
+			log.Printf("使用TLS启动服务器，监听: %s", s.Config.ListenAddr)
+			err = httpServer.ListenAndServeTLS(s.Config.TLSCert, s.Config.TLSKey)
+		} else {
+			log.Printf("以非TLS模式启动服务器，监听: %s", s.Config.ListenAddr)
+			err = httpServer.ListenAndServe()
+		}
+		
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("HTTP服务启动失败: %v", err)
+			errChan <- err
+		}
+	}()
+	
 	// 启动清理过期连接的goroutine
 	go s.cleanupExpiredConnections()
-
-	// 根据配置决定是否使用TLS
-	var err error
-	if s.Config.TLSCert != "" && s.Config.TLSKey != "" {
-		log.Printf("使用TLS启动服务器，监听: %s", s.Config.ListenAddr)
-		err = http.ListenAndServeTLS(s.Config.ListenAddr, s.Config.TLSCert, s.Config.TLSKey, nil)
-	} else {
-		log.Printf("以非TLS模式启动服务器，监听: %s", s.Config.ListenAddr)
-		err = http.ListenAndServe(s.Config.ListenAddr, nil)
+	
+	// 等待停止信号或错误
+	select {
+	case <-s.stopChan:
+		log.Println("收到停止信号，正在关闭HTTP服务...")
+		// 关闭HTTP服务
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(ctx); err != nil {
+			log.Printf("HTTP服务关闭错误: %v", err)
+		}
+		log.Println("HTTP服务已关闭")
+		return nil
+	case err := <-errChan:
+		log.Printf("服务器发生错误: %v", err)
+		return err
 	}
-
-	if err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("启动HTTP服务失败: %v", err)
-	}
-
-	return nil
 }
 
 // Stop 停止服务器
@@ -802,11 +835,30 @@ func (s *Server) createKeyUpdateSession(proposedKey string) (*KeyUpdateSession, 
 				
 				// 设置一个最终超时，确保无论如何都会应用密钥
 				appliedChan := make(chan bool, 1)
+				errChan := make(chan error, 1)
+				
+				// 在单独的goroutine中应用密钥，以防止阻塞
 				go func() {
-					// 尝试设置新密钥
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("密钥应用过程发生严重错误: %v", r)
+							errChan <- fmt.Errorf("密钥应用崩溃: %v", r)
+						}
+					}()
+					
+					// 先尝试直接保存文件
+					err := s.saveSecurityKey(s.Config.KeyFile, key)
+					if err != nil {
+						log.Printf("直接保存密钥到文件失败: %v", err)
+						errChan <- err
+						return
+					}
+					log.Printf("成功保存密钥到文件")
+					
+					// 然后尝试通过keyManager设置新密钥
 					if err := s.keyManager.SetKey(key); err != nil {
 						log.Printf("应用新密钥失败: %v，将保持旧密钥: %s", err, oldKey)
-						appliedChan <- false
+						errChan <- err
 						return
 					}
 					
@@ -814,7 +866,7 @@ func (s *Server) createKeyUpdateSession(proposedKey string) (*KeyUpdateSession, 
 					newKey := s.keyManager.GetKey()
 					if newKey != key {
 						log.Printf("警告：密钥可能未正确应用，期望的密钥: %s, 当前密钥: %s", key, newKey)
-						appliedChan <- false
+						errChan <- fmt.Errorf("密钥应用后验证失败")
 					} else {
 						log.Printf("成功应用新密钥: %s", newKey)
 						appliedChan <- true
@@ -823,14 +875,29 @@ func (s *Server) createKeyUpdateSession(proposedKey string) (*KeyUpdateSession, 
 				
 				// 设置5秒超时
 				select {
-				case applied := <-appliedChan:
-					if applied {
-						log.Printf("密钥更新会话成功完成，新密钥已应用: %s", key)
-					} else {
-						log.Printf("密钥应用过程失败")
-					}
+				case <-appliedChan:
+					log.Printf("密钥更新会话成功完成，新密钥已应用: %s", key)
+					
+					// 确保配置中的密钥也被更新
+					s.Config.SecurityKey = key
+				case err := <-errChan:
+					log.Printf("密钥应用过程失败: %v", err)
+					
+					// 尝试确保Server的配置一致性
+					currentKey := s.keyManager.GetKey()
+					s.Config.SecurityKey = currentKey
+					log.Printf("已将Server配置中的密钥设置为当前实际密钥: %s", currentKey)
 				case <-time.After(5 * time.Second):
 					log.Printf("警告：密钥应用过程超时，无法确认新密钥是否已成功应用")
+					
+					// 检查超时后配置中的密钥
+					currentKey := s.keyManager.GetKey()
+					if currentKey != oldKey {
+						log.Printf("密钥已被更改为: %s", currentKey)
+						s.Config.SecurityKey = currentKey
+					} else {
+						log.Printf("密钥似乎未被更改，仍然是: %s", currentKey)
+					}
 				}
 				
 				// 标记会话为已完成
@@ -1089,6 +1156,14 @@ func (s *Server) saveSecurityKey(keyFile, key string) error {
 	if strings.Contains(keyFile, "conf/app.conf") || strings.HasSuffix(keyFile, ".conf") || strings.HasSuffix(keyFile, ".ini") {
 		log.Printf("保存密钥到配置文件: %s", keyFile)
 		
+		// 确保目录存在
+		dir := filepath.Dir(keyFile)
+		if dir != "." && dir != "" {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return fmt.Errorf("创建配置文件目录失败: %v", err)
+			}
+		}
+		
 		// 检查文件是否存在
 		fileExists := true
 		fileInfo, err := os.Stat(keyFile)
@@ -1134,9 +1209,26 @@ func (s *Server) saveSecurityKey(keyFile, key string) error {
 			section, _ := cfg.NewSection("server")
 			section.Key("SECURITY_KEY").SetValue(key)
 			
-			// 保存配置
-			if err := cfg.SaveTo(keyFile); err != nil {
-				return fmt.Errorf("保存INI配置文件失败: %v", err)
+			// 保存到临时文件然后重命名，确保原子操作
+			tempFile := keyFile + ".tmp"
+			if err := cfg.SaveTo(tempFile); err != nil {
+				return fmt.Errorf("保存INI配置到临时文件失败: %v", err)
+			}
+			
+			// 重命名文件
+			if err := os.Rename(tempFile, keyFile); err != nil {
+				// 如果重命名失败，尝试直接复制文件内容
+				tempData, readErr := ioutil.ReadFile(tempFile)
+				if readErr != nil {
+					return fmt.Errorf("读取临时文件失败: %v", readErr)
+				}
+				
+				if writeErr := ioutil.WriteFile(keyFile, tempData, 0644); writeErr != nil {
+					return fmt.Errorf("写入目标文件失败: %v", writeErr)
+				}
+				
+				// 尝试删除临时文件
+				os.Remove(tempFile)
 			}
 			
 			log.Printf("成功创建/转换为INI格式并保存密钥")
@@ -1165,9 +1257,38 @@ func (s *Server) saveSecurityKey(keyFile, key string) error {
 		// 设置密钥
 		section.Key("SECURITY_KEY").SetValue(key)
 		
-		// 保存配置
-		if err := cfg.SaveTo(keyFile); err != nil {
-			return fmt.Errorf("保存配置文件失败: %v", err)
+		// 保存到临时文件然后重命名，确保原子操作
+		tempFile := keyFile + ".tmp"
+		if err := cfg.SaveTo(tempFile); err != nil {
+			return fmt.Errorf("保存INI配置到临时文件失败: %v", err)
+		}
+		
+		// 重命名文件
+		if err := os.Rename(tempFile, keyFile); err != nil {
+			// 如果重命名失败，尝试直接复制文件内容
+			tempData, readErr := ioutil.ReadFile(tempFile)
+			if readErr != nil {
+				return fmt.Errorf("读取临时文件失败: %v", readErr)
+			}
+			
+			if writeErr := ioutil.WriteFile(keyFile, tempData, 0644); writeErr != nil {
+				return fmt.Errorf("写入目标文件失败: %v", writeErr)
+			}
+			
+			// 尝试删除临时文件
+			os.Remove(tempFile)
+		}
+		
+		// 验证文件是否成功保存
+		savedCfg, err := ini.Load(keyFile)
+		if err != nil {
+			return fmt.Errorf("验证保存的配置文件失败: %v", err)
+		}
+		
+		// 检查密钥是否正确保存
+		savedKey := savedCfg.Section("server").Key("SECURITY_KEY").String()
+		if savedKey != key {
+			return fmt.Errorf("验证保存的密钥失败，期望值: %s, 实际值: %s", key, savedKey)
 		}
 		
 		log.Printf("密钥已保存到配置文件: %s [server].SECURITY_KEY", keyFile)
@@ -1195,12 +1316,41 @@ func (s *Server) saveSecurityKey(keyFile, key string) error {
 		}
 	}
 	
-	// 写入文件
-	if err := ioutil.WriteFile(keyFile, data, 0600); err != nil {
-		return fmt.Errorf("写入密钥文件失败: %v", err)
+	// 保存到临时文件然后重命名，确保原子操作
+	tempFile := keyFile + ".tmp"
+	if err := ioutil.WriteFile(tempFile, data, 0600); err != nil {
+		return fmt.Errorf("写入临时密钥文件失败: %v", err)
 	}
 	
-	log.Printf("密钥已保存到文件: %s", keyFile)
+	// 重命名文件
+	if err := os.Rename(tempFile, keyFile); err != nil {
+		// 如果重命名失败，尝试直接复制文件内容
+		if writeErr := ioutil.WriteFile(keyFile, data, 0600); writeErr != nil {
+			return fmt.Errorf("写入目标文件失败: %v", writeErr)
+		}
+		
+		// 尝试删除临时文件
+		os.Remove(tempFile)
+	}
+	
+	// 验证文件是否正确保存
+	savedData, err := ioutil.ReadFile(keyFile)
+	if err != nil {
+		return fmt.Errorf("验证保存的密钥文件失败: %v", err)
+	}
+	
+	var savedKey struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(savedData, &savedKey); err != nil {
+		return fmt.Errorf("解析保存的密钥文件失败: %v", err)
+	}
+	
+	if savedKey.Key != key {
+		return fmt.Errorf("验证保存的密钥失败，期望值: %s, 实际值: %s", key, savedKey.Key)
+	}
+	
+	log.Printf("密钥已成功保存到文件: %s", keyFile)
 	return nil
 }
 
