@@ -19,6 +19,8 @@ import (
 	"dont/shared"
 	"github.com/gorilla/websocket"
 	"github.com/go-ini/ini"
+	"bytes"
+	"io"
 )
 
 // 常量
@@ -898,28 +900,66 @@ func (a *Agent) saveSecurityKey(keyFile, key string) error {
 	if strings.Contains(keyFile, "conf/app.conf") {
 		log.Printf("保存密钥到配置文件: %s", keyFile)
 		
-		// 检查文件是否存在
-		var cfg *ini.File
-		var err error
-		
-		if _, fileErr := os.Stat(keyFile); os.IsNotExist(fileErr) {
-			// 如果文件不存在，创建新的配置文件
-			log.Printf("配置文件不存在，创建新文件")
-			cfg = ini.Empty()
-		} else {
-			// 加载现有配置
-			cfg, err = ini.Load(keyFile)
-			if err != nil {
-				log.Printf("警告: 加载现有配置文件失败: %v，将创建新的配置文件", err)
-				// 备份损坏的文件
-				backupFile := keyFile + ".bak." + time.Now().Format("20060102150405")
-				if copyErr := copyFile(keyFile, backupFile); copyErr != nil {
-					log.Printf("备份现有配置文件失败: %v", copyErr)
-				} else {
-					log.Printf("已将可能损坏的配置文件备份为: %s", backupFile)
+		// 检查文件是否存在并检查格式
+		fileInfo, err := os.Stat(keyFile)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// 文件不存在，创建一个新的INI格式配置文件
+				cfg := ini.Empty()
+				section, _ := cfg.NewSection("agent")
+				section.Key("SECURITY_KEY").SetValue(key)
+				
+				if err := cfg.SaveTo(keyFile); err != nil {
+					return fmt.Errorf("创建新配置文件失败: %v", err)
 				}
-				cfg = ini.Empty()
+				log.Printf("已创建新的配置文件: %s", keyFile)
+				return nil
 			}
+			return fmt.Errorf("检查配置文件状态失败: %v", err)
+		}
+		
+		// 读取文件前几个字节来判断是JSON还是INI
+		f, err := os.Open(keyFile)
+		if err != nil {
+			return fmt.Errorf("无法打开配置文件: %v", err)
+		}
+		
+		// 读取前100个字节来判断格式
+		header := make([]byte, 100)
+		_, err = f.Read(header)
+		f.Close()
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("读取配置文件头部失败: %v", err)
+		}
+		
+		// 判断是否是JSON格式
+		isJSON := bytes.HasPrefix(bytes.TrimSpace(header), []byte{'{'})
+		
+		if isJSON {
+			// 如果是JSON格式，将其转换为INI格式
+			log.Printf("检测到JSON格式配置文件，将转换为INI格式")
+			
+			// 创建一个新的INI配置
+			cfg := ini.Empty()
+			section, _ := cfg.NewSection("agent")
+			section.Key("SECURITY_KEY").SetValue(key)
+			
+			// 保存配置
+			if err := cfg.SaveTo(keyFile); err != nil {
+				return fmt.Errorf("保存INI配置文件失败: %v", err)
+			}
+			
+			log.Printf("成功将JSON格式转换为INI格式并保存密钥")
+			return nil
+		}
+		
+		// 如果是INI格式，正常处理
+		log.Printf("正在更新INI格式配置文件中的密钥")
+		
+		// 加载现有配置
+		cfg, err := ini.Load(keyFile)
+		if err != nil {
+			return fmt.Errorf("读取配置文件失败: %v", err)
 		}
 		
 		// 设置密钥值到[agent]部分
@@ -943,7 +983,7 @@ func (a *Agent) saveSecurityKey(keyFile, key string) error {
 		return nil
 	}
 	
-	// 否则使用JSON方式保存
+	// 否则使用原来的JSON方式保存
 	securityKey := struct {
 		Key string `json:"key"`
 	}{
@@ -971,15 +1011,6 @@ func (a *Agent) saveSecurityKey(keyFile, key string) error {
 	
 	log.Printf("密钥已保存到文件: %s", keyFile)
 	return nil
-}
-
-// 复制文件的辅助函数
-func copyFile(src, dst string) error {
-	data, err := ioutil.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return ioutil.WriteFile(dst, data, 0644)
 }
 
 // 从文件加载安全密钥
