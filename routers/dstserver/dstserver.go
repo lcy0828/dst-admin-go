@@ -37,45 +37,6 @@ func init() {
 	}
 }
 
-// DSTServerConfig 服务器配置结构
-type DSTServerConfig struct {
-	// STEAM部分
-	SteamGroupID      string `json:"steam_group_id"`
-	SteamGroupAdmins  bool   `json:"steam_group_admins"`
-	SteamGroupOnly    bool   `json:"steam_group_only"`
-	
-	// GAMEPLAY部分
-	GameMode         string `json:"game_mode"`
-	PauseWhenEmpty   bool   `json:"pause_when_empty"`
-	VoteEnabled      bool   `json:"vote_enabled"`
-	PVP              bool   `json:"pvp"`
-	MaxPlayers       int    `json:"max_players"`
-	
-	// NETWORK部分
-	ClusterName        string `json:"cluster_name"`
-	ClusterDescription string `json:"cluster_description"`
-	ClusterIntention   string `json:"cluster_intention"`
-	ClusterLanguage    string `json:"cluster_language"`
-	WhitelistSlots     int    `json:"whitelist_slots"`
-	IdleTimeout        int    `json:"idle_timeout"`
-	ClusterPassword    string `json:"cluster_password"`
-	LanOnlyCluster     bool   `json:"lan_only_cluster"`
-	OfflineCluster     bool   `json:"offline_cluster"`
-	AutosaverEnabled   bool   `json:"autosaver_enabled"`
-	TickRate           int    `json:"tick_rate"`
-	
-	// MISC部分
-	MaxSnapshots   int  `json:"max_snapshots"`
-	ConsoleEnabled bool `json:"console_enabled"`
-	
-	// SHARD部分
-	MasterIP      string `json:"master_ip"`
-	ShardEnabled  bool   `json:"shard_enabled"`
-	BindIP        string `json:"bind_ip"`
-	MasterPort    int    `json:"master_port"`
-	ClusterKey    string `json:"cluster_key"`
-}
-
 // ListResponse 列表响应结构
 type ListResponse struct {
 	Status int      `json:"status"`
@@ -107,10 +68,10 @@ type WorldInfo struct {
 	Type     string `json:"type"`  // 世界类型 (forest/cave)
 }
 
-// 服务器详细信息响应
-type ServerDetailResponse struct {
-	Status int             `json:"status"`
-	Data   DSTServerConfig `json:"data"`
+// ClusterConfigResponse 集群配置响应结构
+type ClusterConfigResponse struct {
+	Status int                 `json:"status"`
+	Data   map[string]map[string]string `json:"data"`
 }
 
 // GetServerList 获取所有服务器存档列表
@@ -190,13 +151,13 @@ func GetServerList(g *gin.Context) {
 	})
 }
 
-// GetServerConfig 获取特定服务器的配置信息
-func GetServerConfig(g *gin.Context) {
+// GetClusterConfig 获取特定服务器的 cluster.ini 配置信息
+func GetClusterConfig(g *gin.Context) {
 	saveName := g.Query("savename")
 	if saveName == "" {
-		g.JSON(http.StatusOK, ServerDetailResponse{
+		g.JSON(http.StatusOK, ClusterConfigResponse{
 			Status: 400,
-			Data:   DSTServerConfig{},
+			Data:   nil,
 		})
 		return
 	}
@@ -206,9 +167,9 @@ func GetServerConfig(g *gin.Context) {
 	
 	// 检查文件是否存在
 	if _, err := os.Stat(clusterPath); os.IsNotExist(err) {
-		g.JSON(http.StatusOK, ServerDetailResponse{
+		g.JSON(http.StatusOK, ClusterConfigResponse{
 			Status: 404,
-			Data:   DSTServerConfig{},
+			Data:   nil,
 		})
 		return
 	}
@@ -217,67 +178,49 @@ func GetServerConfig(g *gin.Context) {
 	cfg, err := ini.Load(clusterPath)
 	if err != nil {
 		log.Printf("读取cluster.ini失败: %v", err)
-		g.JSON(http.StatusOK, ServerDetailResponse{
+		g.JSON(http.StatusOK, ClusterConfigResponse{
 			Status: 500,
-			Data:   DSTServerConfig{},
+			Data:   nil,
 		})
 		return
 	}
 	
-	// 解析配置到结构体
-	serverConfig := DSTServerConfig{
-		// STEAM部分
-		SteamGroupID:      cfg.Section("STEAM").Key("steam_group_id").String(),
-		SteamGroupAdmins:  cfg.Section("STEAM").Key("steam_group_admins").MustBool(false),
-		SteamGroupOnly:    cfg.Section("STEAM").Key("steam_group_only").MustBool(false),
+	// 将所有配置项转换为map
+	configMap := make(map[string]map[string]string)
+	
+	// 遍历所有section
+	for _, section := range cfg.Sections() {
+		sectionName := section.Name()
 		
-		// GAMEPLAY部分
-		GameMode:        cfg.Section("GAMEPLAY").Key("game_mode").String(),
-		PauseWhenEmpty:  cfg.Section("GAMEPLAY").Key("pause_when_empty").MustBool(true),
-		VoteEnabled:     cfg.Section("GAMEPLAY").Key("vote_enabled").MustBool(true),
-		PVP:             cfg.Section("GAMEPLAY").Key("pvp").MustBool(false),
-		MaxPlayers:      cfg.Section("GAMEPLAY").Key("max_players").MustInt(6),
+		// 跳过DEFAULT section
+		if sectionName == "DEFAULT" {
+			continue
+		}
 		
-		// NETWORK部分
-		ClusterName:        cfg.Section("NETWORK").Key("cluster_name").String(),
-		ClusterDescription: cfg.Section("NETWORK").Key("cluster_description").String(),
-		ClusterIntention:   cfg.Section("NETWORK").Key("cluster_intention").String(),
-		ClusterLanguage:    cfg.Section("NETWORK").Key("cluster_language").String(),
-		WhitelistSlots:     cfg.Section("NETWORK").Key("whitelist_slots").MustInt(0),
-		IdleTimeout:        cfg.Section("NETWORK").Key("idle_timeout").MustInt(0),
-		ClusterPassword:    cfg.Section("NETWORK").Key("cluster_password").String(),
-		LanOnlyCluster:     cfg.Section("NETWORK").Key("lan_only_cluster").MustBool(false),
-		OfflineCluster:     cfg.Section("NETWORK").Key("offline_cluster").MustBool(false),
-		AutosaverEnabled:   cfg.Section("NETWORK").Key("autosaver_enabled").MustBool(true),
-		TickRate:           cfg.Section("NETWORK").Key("tick_rate").MustInt(15),
+		// 创建section map
+		configMap[sectionName] = make(map[string]string)
 		
-		// MISC部分
-		MaxSnapshots:   cfg.Section("MISC").Key("max_snapshots").MustInt(10),
-		ConsoleEnabled: cfg.Section("MISC").Key("console_enabled").MustBool(true),
-		
-		// SHARD部分
-		MasterIP:     cfg.Section("SHARD").Key("master_ip").String(),
-		ShardEnabled: cfg.Section("SHARD").Key("shard_enabled").MustBool(true),
-		BindIP:       cfg.Section("SHARD").Key("bind_ip").String(),
-		MasterPort:   cfg.Section("SHARD").Key("master_port").MustInt(10888),
-		ClusterKey:   cfg.Section("SHARD").Key("cluster_key").String(),
+		// 遍历section中的所有key
+		for _, key := range section.Keys() {
+			configMap[sectionName][key.Name()] = key.String()
+		}
 	}
 	
-	g.JSON(http.StatusOK, ServerDetailResponse{
+	g.JSON(http.StatusOK, ClusterConfigResponse{
 		Status: 200,
-		Data:   serverConfig,
+		Data:   configMap,
 	})
 }
 
-// UpdateServerConfig 更新服务器配置
-func UpdateServerConfig(g *gin.Context) {
+// UpdateClusterConfig 更新服务器的cluster.ini配置
+func UpdateClusterConfig(g *gin.Context) {
 	// 请求参数结构
-	type updateConfigRequest struct {
-		SaveName string          `json:"savename" binding:"required"`
-		Config   DSTServerConfig `json:"config" binding:"required"`
+	type updateClusterConfigRequest struct {
+		SaveName string                     `json:"savename" binding:"required"`
+		Config   map[string]map[string]string `json:"config" binding:"required"`
 	}
 	
-	var req updateConfigRequest
+	var req updateClusterConfigRequest
 	if err := g.BindJSON(&req); err != nil {
 		g.JSON(http.StatusOK, gin.H{
 			"status": 400,
@@ -298,68 +241,49 @@ func UpdateServerConfig(g *gin.Context) {
 	}
 	
 	// 构建cluster.ini路径
-	clusterPath := filepath.Join(dstSavePath, saveName, "cluster.ini")
+	saveDir := filepath.Join(dstSavePath, saveName)
+	clusterPath := filepath.Join(saveDir, "cluster.ini")
+	
+	var cfg *ini.File
+	var err error
 	
 	// 检查文件是否存在
 	if _, err := os.Stat(clusterPath); os.IsNotExist(err) {
-		g.JSON(http.StatusOK, gin.H{
-			"status": 404,
-			"msg":    "存档不存在",
-		})
-		return
+		// 检查存档目录是否存在，如果不存在则创建
+		if _, err := os.Stat(saveDir); os.IsNotExist(err) {
+			if err := os.MkdirAll(saveDir, 0755); err != nil {
+				log.Printf("创建存档目录失败: %v", err)
+				g.JSON(http.StatusOK, gin.H{
+					"status": 500,
+					"msg":    "创建存档目录失败",
+				})
+				return
+			}
+		}
+		
+		// 创建新的ini文件
+		cfg = ini.Empty()
+	} else {
+		// 读取现有ini文件
+		cfg, err = ini.Load(clusterPath)
+		if err != nil {
+			log.Printf("读取cluster.ini失败: %v", err)
+			g.JSON(http.StatusOK, gin.H{
+				"status": 500,
+				"msg":    "读取配置文件失败",
+			})
+			return
+		}
 	}
 	
-	// 读取现有ini文件
-	cfg, err := ini.Load(clusterPath)
-	if err != nil {
-		log.Printf("读取cluster.ini失败: %v", err)
-		g.JSON(http.StatusOK, gin.H{
-			"status": 500,
-			"msg":    "读取配置文件失败",
-		})
-		return
+	// 更新配置
+	for sectionName, sectionConfig := range config {
+		section := cfg.Section(sectionName)
+		
+		for key, value := range sectionConfig {
+			section.Key(key).SetValue(value)
+		}
 	}
-	
-	// 更新STEAM部分
-	steamSection := cfg.Section("STEAM")
-	steamSection.Key("steam_group_id").SetValue(config.SteamGroupID)
-	steamSection.Key("steam_group_admins").SetValue(fmt.Sprintf("%t", config.SteamGroupAdmins))
-	steamSection.Key("steam_group_only").SetValue(fmt.Sprintf("%t", config.SteamGroupOnly))
-	
-	// 更新GAMEPLAY部分
-	gameplaySection := cfg.Section("GAMEPLAY")
-	gameplaySection.Key("game_mode").SetValue(config.GameMode)
-	gameplaySection.Key("pause_when_empty").SetValue(fmt.Sprintf("%t", config.PauseWhenEmpty))
-	gameplaySection.Key("vote_enabled").SetValue(fmt.Sprintf("%t", config.VoteEnabled))
-	gameplaySection.Key("pvp").SetValue(fmt.Sprintf("%t", config.PVP))
-	gameplaySection.Key("max_players").SetValue(fmt.Sprintf("%d", config.MaxPlayers))
-	
-	// 更新NETWORK部分
-	networkSection := cfg.Section("NETWORK")
-	networkSection.Key("cluster_name").SetValue(config.ClusterName)
-	networkSection.Key("cluster_description").SetValue(config.ClusterDescription)
-	networkSection.Key("cluster_intention").SetValue(config.ClusterIntention)
-	networkSection.Key("cluster_language").SetValue(config.ClusterLanguage)
-	networkSection.Key("whitelist_slots").SetValue(fmt.Sprintf("%d", config.WhitelistSlots))
-	networkSection.Key("idle_timeout").SetValue(fmt.Sprintf("%d", config.IdleTimeout))
-	networkSection.Key("cluster_password").SetValue(config.ClusterPassword)
-	networkSection.Key("lan_only_cluster").SetValue(fmt.Sprintf("%t", config.LanOnlyCluster))
-	networkSection.Key("offline_cluster").SetValue(fmt.Sprintf("%t", config.OfflineCluster))
-	networkSection.Key("autosaver_enabled").SetValue(fmt.Sprintf("%t", config.AutosaverEnabled))
-	networkSection.Key("tick_rate").SetValue(fmt.Sprintf("%d", config.TickRate))
-	
-	// 更新MISC部分
-	miscSection := cfg.Section("MISC")
-	miscSection.Key("max_snapshots").SetValue(fmt.Sprintf("%d", config.MaxSnapshots))
-	miscSection.Key("console_enabled").SetValue(fmt.Sprintf("%t", config.ConsoleEnabled))
-	
-	// 更新SHARD部分
-	shardSection := cfg.Section("SHARD")
-	shardSection.Key("master_ip").SetValue(config.MasterIP)
-	shardSection.Key("shard_enabled").SetValue(fmt.Sprintf("%t", config.ShardEnabled))
-	shardSection.Key("bind_ip").SetValue(config.BindIP)
-	shardSection.Key("master_port").SetValue(fmt.Sprintf("%d", config.MasterPort))
-	shardSection.Key("cluster_key").SetValue(config.ClusterKey)
 	
 	// 保存修改后的配置
 	if err := cfg.SaveTo(clusterPath); err != nil {
@@ -430,22 +354,7 @@ func GetAdminList(g *gin.Context) {
 
 // UpdateAdminList 更新管理员列表
 func UpdateAdminList(g *gin.Context) {
-	// 请求参数结构
-	type updateListRequest struct {
-		SaveName string   `json:"savename" binding:"required"`
-		List     []string `json:"list"`
-	}
-	
-	var req updateListRequest
-	if err := g.BindJSON(&req); err != nil {
-		g.JSON(http.StatusOK, gin.H{
-			"status": 400,
-			"msg":    "请求参数错误",
-		})
-		return
-	}
-	
-	saveName := req.SaveName
+	saveName := g.Query("savename")
 	if saveName == "" {
 		g.JSON(http.StatusOK, gin.H{
 			"status": 400,
@@ -457,28 +366,25 @@ func UpdateAdminList(g *gin.Context) {
 	// 构建管理员列表文件路径
 	adminListPath := filepath.Join(dstSavePath, saveName, "adminlist.txt")
 	
-	// 确保目录存在
-	saveDir := filepath.Join(dstSavePath, saveName)
-	if _, err := os.Stat(saveDir); os.IsNotExist(err) {
+	// 读取请求体
+	var req struct {
+		Admins []string `json:"admins" binding:"required"`
+	}
+	if err := g.BindJSON(&req); err != nil {
 		g.JSON(http.StatusOK, gin.H{
-			"status": 404,
-			"msg":    "存档不存在",
+			"status": 400,
+			"msg":    "请求参数错误",
 		})
 		return
 	}
 	
-	// 将列表转换为带换行符的字符串
-	content := strings.Join(req.List, "\n")
-	if content != "" {
-		content += "\n" // 确保最后有换行符
-	}
-	
-	// 写入管理员列表文件
+	// 将管理员列表写入文件
+	content := strings.Join(req.Admins, "\n")
 	if err := ioutil.WriteFile(adminListPath, []byte(content), 0644); err != nil {
-		log.Printf("保存管理员列表失败: %v", err)
+		log.Printf("写入管理员列表失败: %v", err)
 		g.JSON(http.StatusOK, gin.H{
 			"status": 500,
-			"msg":    "保存管理员列表失败",
+			"msg":    "写入管理员列表失败",
 		})
 		return
 	}
@@ -500,7 +406,7 @@ func GetBlockList(g *gin.Context) {
 		return
 	}
 	
-	// 构建黑名单文件路径
+	// 构建黑名单列表文件路径
 	blockListPath := filepath.Join(dstSavePath, saveName, "blocklist.txt")
 	
 	// 检查文件是否存在
@@ -513,10 +419,10 @@ func GetBlockList(g *gin.Context) {
 		return
 	}
 	
-	// 读取黑名单文件
+	// 读取黑名单列表文件
 	content, err := ioutil.ReadFile(blockListPath)
 	if err != nil {
-		log.Printf("读取黑名单失败: %v", err)
+		log.Printf("读取黑名单列表失败: %v", err)
 		g.JSON(http.StatusOK, ListResponse{
 			Status: 500,
 			Data:   nil,
@@ -542,22 +448,7 @@ func GetBlockList(g *gin.Context) {
 
 // UpdateBlockList 更新黑名单列表
 func UpdateBlockList(g *gin.Context) {
-	// 请求参数结构
-	type updateListRequest struct {
-		SaveName string   `json:"savename" binding:"required"`
-		List     []string `json:"list"`
-	}
-	
-	var req updateListRequest
-	if err := g.BindJSON(&req); err != nil {
-		g.JSON(http.StatusOK, gin.H{
-			"status": 400,
-			"msg":    "请求参数错误",
-		})
-		return
-	}
-	
-	saveName := req.SaveName
+	saveName := g.Query("savename")
 	if saveName == "" {
 		g.JSON(http.StatusOK, gin.H{
 			"status": 400,
@@ -566,38 +457,35 @@ func UpdateBlockList(g *gin.Context) {
 		return
 	}
 	
-	// 构建黑名单文件路径
+	// 构建黑名单列表文件路径
 	blockListPath := filepath.Join(dstSavePath, saveName, "blocklist.txt")
 	
-	// 确保目录存在
-	saveDir := filepath.Join(dstSavePath, saveName)
-	if _, err := os.Stat(saveDir); os.IsNotExist(err) {
+	// 读取请求体
+	var req struct {
+		Blocked []string `json:"blocked" binding:"required"`
+	}
+	if err := g.BindJSON(&req); err != nil {
 		g.JSON(http.StatusOK, gin.H{
-			"status": 404,
-			"msg":    "存档不存在",
+			"status": 400,
+			"msg":    "请求参数错误",
 		})
 		return
 	}
 	
-	// 将列表转换为带换行符的字符串
-	content := strings.Join(req.List, "\n")
-	if content != "" {
-		content += "\n" // 确保最后有换行符
-	}
-	
-	// 写入黑名单文件
+	// 将黑名单列表写入文件
+	content := strings.Join(req.Blocked, "\n")
 	if err := ioutil.WriteFile(blockListPath, []byte(content), 0644); err != nil {
-		log.Printf("保存黑名单失败: %v", err)
+		log.Printf("写入黑名单列表失败: %v", err)
 		g.JSON(http.StatusOK, gin.H{
 			"status": 500,
-			"msg":    "保存黑名单失败",
+			"msg":    "写入黑名单列表失败",
 		})
 		return
 	}
 	
 	g.JSON(http.StatusOK, gin.H{
 		"status": 200,
-		"msg":    "更新黑名单成功",
+		"msg":    "更新黑名单列表成功",
 	})
 }
 
@@ -612,7 +500,7 @@ func GetWhiteList(g *gin.Context) {
 		return
 	}
 	
-	// 构建白名单文件路径
+	// 构建白名单列表文件路径
 	whiteListPath := filepath.Join(dstSavePath, saveName, "whitelist.txt")
 	
 	// 检查文件是否存在
@@ -625,10 +513,10 @@ func GetWhiteList(g *gin.Context) {
 		return
 	}
 	
-	// 读取白名单文件
+	// 读取白名单列表文件
 	content, err := ioutil.ReadFile(whiteListPath)
 	if err != nil {
-		log.Printf("读取白名单失败: %v", err)
+		log.Printf("读取白名单列表失败: %v", err)
 		g.JSON(http.StatusOK, ListResponse{
 			Status: 500,
 			Data:   nil,
@@ -654,22 +542,7 @@ func GetWhiteList(g *gin.Context) {
 
 // UpdateWhiteList 更新白名单列表
 func UpdateWhiteList(g *gin.Context) {
-	// 请求参数结构
-	type updateListRequest struct {
-		SaveName string   `json:"savename" binding:"required"`
-		List     []string `json:"list"`
-	}
-	
-	var req updateListRequest
-	if err := g.BindJSON(&req); err != nil {
-		g.JSON(http.StatusOK, gin.H{
-			"status": 400,
-			"msg":    "请求参数错误",
-		})
-		return
-	}
-	
-	saveName := req.SaveName
+	saveName := g.Query("savename")
 	if saveName == "" {
 		g.JSON(http.StatusOK, gin.H{
 			"status": 400,
@@ -678,38 +551,35 @@ func UpdateWhiteList(g *gin.Context) {
 		return
 	}
 	
-	// 构建白名单文件路径
+	// 构建白名单列表文件路径
 	whiteListPath := filepath.Join(dstSavePath, saveName, "whitelist.txt")
 	
-	// 确保目录存在
-	saveDir := filepath.Join(dstSavePath, saveName)
-	if _, err := os.Stat(saveDir); os.IsNotExist(err) {
+	// 读取请求体
+	var req struct {
+		Whitelisted []string `json:"whitelisted" binding:"required"`
+	}
+	if err := g.BindJSON(&req); err != nil {
 		g.JSON(http.StatusOK, gin.H{
-			"status": 404,
-			"msg":    "存档不存在",
+			"status": 400,
+			"msg":    "请求参数错误",
 		})
 		return
 	}
 	
-	// 将列表转换为带换行符的字符串
-	content := strings.Join(req.List, "\n")
-	if content != "" {
-		content += "\n" // 确保最后有换行符
-	}
-	
-	// 写入白名单文件
+	// 将白名单列表写入文件
+	content := strings.Join(req.Whitelisted, "\n")
 	if err := ioutil.WriteFile(whiteListPath, []byte(content), 0644); err != nil {
-		log.Printf("保存白名单失败: %v", err)
+		log.Printf("写入白名单列表失败: %v", err)
 		g.JSON(http.StatusOK, gin.H{
 			"status": 500,
-			"msg":    "保存白名单失败",
+			"msg":    "写入白名单列表失败",
 		})
 		return
 	}
 	
 	g.JSON(http.StatusOK, gin.H{
 		"status": 200,
-		"msg":    "更新白名单成功",
+		"msg":    "更新白名单列表成功",
 	})
 }
 
@@ -724,21 +594,20 @@ func GetClusterToken(g *gin.Context) {
 		return
 	}
 	
-	// 构建令牌文件路径
+	// 构建cluster_token.txt路径
 	tokenPath := filepath.Join(dstSavePath, saveName, "cluster_token.txt")
 	
 	// 检查文件是否存在
 	if _, err := os.Stat(tokenPath); os.IsNotExist(err) {
-		// 如果文件不存在，返回空字符串
 		g.JSON(http.StatusOK, TokenResponse{
-			Status: 200,
+			Status: 404,
 			Data:   "",
 		})
 		return
 	}
 	
-	// 读取令牌文件
-	content, err := ioutil.ReadFile(tokenPath)
+	// 读取服务器令牌
+	token, err := ioutil.ReadFile(tokenPath)
 	if err != nil {
 		log.Printf("读取服务器令牌失败: %v", err)
 		g.JSON(http.StatusOK, TokenResponse{
@@ -748,33 +617,15 @@ func GetClusterToken(g *gin.Context) {
 		return
 	}
 	
-	// 返回去除空白字符的令牌
-	token := strings.TrimSpace(string(content))
-	
 	g.JSON(http.StatusOK, TokenResponse{
 		Status: 200,
-		Data:   token,
+		Data:   string(token),
 	})
 }
 
 // UpdateClusterToken 更新服务器令牌
 func UpdateClusterToken(g *gin.Context) {
-	// 请求参数结构
-	type updateTokenRequest struct {
-		SaveName string `json:"savename" binding:"required"`
-		Token    string `json:"token"`
-	}
-	
-	var req updateTokenRequest
-	if err := g.BindJSON(&req); err != nil {
-		g.JSON(http.StatusOK, gin.H{
-			"status": 400,
-			"msg":    "请求参数错误",
-		})
-		return
-	}
-	
-	saveName := req.SaveName
+	saveName := g.Query("savename")
 	if saveName == "" {
 		g.JSON(http.StatusOK, gin.H{
 			"status": 400,
@@ -783,26 +634,27 @@ func UpdateClusterToken(g *gin.Context) {
 		return
 	}
 	
-	// 构建令牌文件路径
+	// 构建cluster_token.txt路径
 	tokenPath := filepath.Join(dstSavePath, saveName, "cluster_token.txt")
 	
-	// 确保目录存在
-	saveDir := filepath.Join(dstSavePath, saveName)
-	if _, err := os.Stat(saveDir); os.IsNotExist(err) {
+	// 读取请求体
+	var req struct {
+		Token string `json:"token" binding:"required"`
+	}
+	if err := g.BindJSON(&req); err != nil {
 		g.JSON(http.StatusOK, gin.H{
-			"status": 404,
-			"msg":    "存档不存在",
+			"status": 400,
+			"msg":    "请求参数错误",
 		})
 		return
 	}
 	
-	// 写入令牌文件
-	token := strings.TrimSpace(req.Token)
-	if err := ioutil.WriteFile(tokenPath, []byte(token), 0644); err != nil {
-		log.Printf("保存服务器令牌失败: %v", err)
+	// 将服务器令牌写入文件
+	if err := ioutil.WriteFile(tokenPath, []byte(req.Token), 0644); err != nil {
+		log.Printf("写入服务器令牌失败: %v", err)
 		g.JSON(http.StatusOK, gin.H{
 			"status": 500,
-			"msg":    "保存服务器令牌失败",
+			"msg":    "写入服务器令牌失败",
 		})
 		return
 	}

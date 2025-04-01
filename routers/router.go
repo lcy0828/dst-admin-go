@@ -90,9 +90,9 @@ func InitRouter() *gin.Engine {
 			// 基本服务器管理
 			dstservers.GET("/list", dstserver.GetServerList)
 
-			// cluster.ini管理
-			dstservers.GET("/config", dstserver.GetServerConfig)
-			dstservers.POST("/config", dstserver.UpdateServerConfig)
+			// cluster.ini配置管理
+			dstservers.GET("/clusterconfig", dstserver.GetClusterConfig)
+			dstservers.POST("/clusterconfig", dstserver.UpdateClusterConfig)
 
 			// 管理员列表管理
 			dstservers.GET("/adminlist", dstserver.GetAdminList)
