@@ -402,11 +402,27 @@ func (s *Server) handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 	secureConn := shared.NewSecureConnection(conn, s.keyPair, true)
 	secureConn.SetRemotePublicKey(agentPubKey)
 
-	// 检查是否已有相同ID的连接
+	// 使用AgentUUID作为唯一标识符
+	agentID := regPayload.AgentUUID
+	
+	// 检查AgentUUID是否为空，如果为空则回退到使用消息中的AgentID
+	if agentID == "" {
+		log.Printf("警告: Agent未提供UUID，将使用消息中的ID: %s", msg.AgentID)
+		agentID = msg.AgentID
+	}
+	
+	// 检查是否是有效的UUID格式（至少要求有一定长度）
+	if len(agentID) < 10 {
+		log.Printf("错误: Agent提供的UUID无效: %s，连接将被拒绝", agentID)
+		conn.Close()
+		return
+	}
+	
+	// 检查UUID是否已存在，避免重复标识符
 	s.agentMutex.Lock()
-	existingAgent, exists := s.agents[msg.AgentID]
-	if exists {
-		log.Printf("重复的Agent ID: %s，关闭旧连接", msg.AgentID)
+	if _, exists := s.agents[agentID]; exists {
+		log.Printf("检测到重复的Agent UUID: %s，关闭旧连接", agentID)
+		existingAgent := s.agents[agentID]
 		existingAgent.Mutex.Lock()
 		if existingAgent.Connection != nil {
 			existingAgent.Connection.Close()
@@ -416,20 +432,48 @@ func (s *Server) handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 
 	// 存储Agent连接信息
 	agentConn := &AgentConnection{
-		AgentID:       msg.AgentID,
+		AgentID:       agentID,
 		Connection:    secureConn,
 		PublicKey:     agentPubKey,
 		LastHeartbeat: time.Now(),
 		Info: map[string]interface{}{
-			"hostname": regPayload.Hostname,
-			"os":       regPayload.OS,
-			"arch":     regPayload.Arch,
+			"hostname":   regPayload.Hostname,
+			"os":         regPayload.OS,
+			"arch":       regPayload.Arch,
+			"agent_uuid": agentID, // 确保UUID也存储在信息中
 		},
 	}
-	s.agents[msg.AgentID] = agentConn
+	s.agents[agentID] = agentConn
 	s.agentMutex.Unlock()
 
-	log.Printf("Agent已注册: ID=%s, OS=%s, Arch=%s", msg.AgentID, regPayload.OS, regPayload.Arch)
+	log.Printf("Agent已注册: UUID=%s, 主机名=%s, OS=%s, Arch=%s", agentID, regPayload.Hostname, regPayload.OS, regPayload.Arch)
+
+	// 立即请求system_info上报
+	go func() {
+		// 等待100ms确保注册流程完成
+		time.Sleep(100 * time.Millisecond)
+		
+		// 通过被动上报请求立即上报系统信息
+		requestPayload := map[string]interface{}{
+			"report_type": "system_info",
+			"params":      map[string]interface{}{},
+		}
+		requestMsg, err := shared.CreateMessage(shared.TypeReportRequest, "server", requestPayload)
+		if err != nil {
+			log.Printf("创建上报请求失败: %v", err)
+			return
+		}
+		
+		agentConn.Mutex.Lock()
+		if agentConn.Connection != nil {
+			if err := agentConn.Connection.SendEncrypted(requestMsg); err != nil {
+				log.Printf("发送上报请求失败: %v", err)
+			} else {
+				log.Printf("已请求Agent(%s)立即上报system_info", agentID)
+			}
+		}
+		agentConn.Mutex.Unlock()
+	}()
 
 	// 启动消息处理循环
 	go s.handleAgentMessages(agentConn)
@@ -882,6 +926,11 @@ func (s *Server) GetAllAgentInfo() map[string]map[string]interface{} {
 		// 添加连接信息
 		info["last_heartbeat"] = agent.LastHeartbeat.Unix()
 		info["connected"] = agent.Connection != nil
+		
+		// 确保agent_uuid存在（这是客户端的唯一标识）
+		if _, exists := info["agent_uuid"]; !exists {
+			info["agent_uuid"] = id // 使用agentID作为唯一标识符
+		}
 		
 		agent.Mutex.Unlock()
 		

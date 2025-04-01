@@ -26,6 +26,7 @@ const (
 	TypeActiveReport  MessageType = "active_report"  // 主动上报
 	TypePassiveReport MessageType = "passive_report" // 被动上报（响应查询）
 	TypeReportAck     MessageType = "report_ack"     // 服务器确认数据上报
+	TypeReportRequest MessageType = "report_request" // 服务器请求数据上报
 
 	// 命令控制消息
 	TypeCommand     MessageType = "command"      // 服务器下发命令
@@ -52,6 +53,7 @@ type RegisterPayload struct {
 	Hostname  string `json:"hostname"`   // 主机名
 	OS        string `json:"os"`         // 操作系统
 	Arch      string `json:"arch"`       // 架构
+	AgentUUID string `json:"agent_uuid"` // 代理唯一标识符
 }
 
 // RegisterAckPayload 是注册确认消息的负载

@@ -261,12 +261,23 @@ func (a *Agent) Connect() error {
 		hostname = "unknown"
 	}
 
+	// 获取或创建Agent UUID
+	agentUUID, err := a.getOrCreateAgentUUID()
+	if err != nil {
+		log.Printf("获取Agent UUID失败: %v, 将使用临时UUID", err)
+		agentUUID = shared.GenerateUUID() // 临时生成一个UUID作为备用
+	}
+	
+	// 更新Agent ID为UUID
+	a.Config.AgentID = agentUUID
+
 	// 构建注册负载
 	payload := shared.RegisterPayload{
 		Hostname:  hostname,
 		OS:        runtime.GOOS,
 		Arch:      runtime.GOARCH,
 		PublicKey: publicKey,
+		AgentUUID: agentUUID,
 	}
 
 	// 创建并发送注册消息
