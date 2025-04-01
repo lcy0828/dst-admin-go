@@ -590,31 +590,34 @@ func (a *Agent) handleMessages() {
 // 处理接收到的消息
 func (a *Agent) processMessage(msg *shared.Message) {
 	switch msg.Type {
+	case shared.TypeCommand:
+		a.handleCommand(msg)
+	
 	case shared.TypeHeartbeatAck:
 		// 心跳确认，不需要特殊处理
+	
+	case shared.TypeReportAck:
+		// 处理上报确认
+		a.handleReportAck(msg)
 		
-	case shared.TypeCommand:
-		// 处理命令
-		a.handleCommand(msg)
+	case "security_key_update_proposal":
+		// 处理安全密钥更新提议
+		a.handleSecurityKeyUpdateProposal(msg)
+		
+	case "security_key_update":
+		// 处理安全密钥更新
+		a.handleSecurityKeyUpdate(msg)
+		
+	case shared.TypeReportRequest:
+		// 处理服务器请求上报
+		a.handleReportRequest(msg)
 		
 	case shared.TypePassiveReport:
 		// 处理被动上报请求
 		a.handlePassiveReportRequest(msg)
-		
-	case shared.TypeReportAck:
-		// 处理上报确认
-		a.handleReportAck(msg)
 	
-	case TypeSecurityKeyUpdate:
-		// 处理密钥更新消息
-		a.handleSecurityKeyUpdate(msg)
-		
-	case TypeSecurityKeyUpdateProposal:
-		// 处理密钥更新提议
-		a.handleSecurityKeyUpdateProposal(msg)
-		
 	default:
-		log.Printf("收到未知消息类型: %s", msg.Type)
+		log.Printf("未知消息类型: %s", msg.Type)
 	}
 }
 
@@ -800,6 +803,27 @@ func (a *Agent) startActiveReporting() {
 func (a *Agent) sendActiveReport() {
 	// 收集系统信息
 	data := a.collectSystemInfo()
+	
+	// 添加IP地址信息
+	if ips, err := a.getIPAddresses(); err == nil && len(ips) > 0 {
+		data["ip_addresses"] = ips
+	}
+	
+	// 添加进程信息（限制数量）
+	if a.reportInterval > time.Minute { // 如果上报间隔较长，加入更详细的进程信息
+		procData := a.collectProcessList()
+		if procData != nil {
+			for k, v := range procData {
+				data[k] = v
+			}
+		}
+	}
+
+	// 确保UUID存在于每次上报的数据中
+	agentUUID, err := a.getOrCreateAgentUUID()
+	if err == nil {
+		data["agent_uuid"] = agentUUID
+	}
 
 	reportPayload := shared.ReportDataPayload{
 		ReportID:   shared.GenerateUUID(),
@@ -825,35 +849,84 @@ func (a *Agent) sendActiveReport() {
 
 	if err := a.conn.SendEncrypted(msg); err != nil {
 		log.Printf("发送主动上报失败: %v", err)
+	} else {
+		log.Printf("已发送系统信息主动上报，包含 %d 项数据", len(data))
 	}
 }
 
 // 处理被动上报请求
 func (a *Agent) handlePassiveReportRequest(msg *shared.Message) {
+	// 解析请求负载
 	var requestPayload struct {
 		ReportType string                 `json:"report_type"`
 		Params     map[string]interface{} `json:"params"`
 	}
-
 	if err := json.Unmarshal(msg.Payload, &requestPayload); err != nil {
 		log.Printf("解析被动上报请求失败: %v", err)
 		return
 	}
 
-	var data map[string]interface{}
+	log.Printf("收到被动上报请求: %s, 参数: %v", requestPayload.ReportType, requestPayload.Params)
 
-	// 根据请求类型收集不同的数据
+	// 收集数据
+	var data map[string]interface{}
 	switch requestPayload.ReportType {
 	case "system_info":
 		data = a.collectSystemInfo()
+		
+		// 添加IP地址信息
+		if ips, err := a.getIPAddresses(); err == nil && len(ips) > 0 {
+			data["ip_addresses"] = ips
+		}
+		
+		// 添加UUID信息
+		agentUUID, err := a.getOrCreateAgentUUID()
+		if err == nil {
+			data["agent_uuid"] = agentUUID
+		}
+		
 	case "process_list":
 		data = a.collectProcessList()
+		
+		// 添加UUID信息
+		agentUUID, err := a.getOrCreateAgentUUID()
+		if err == nil {
+			data["agent_uuid"] = agentUUID
+		}
+		
+	case "custom":
+		// 自定义上报，根据参数执行命令
+		if cmd, ok := requestPayload.Params["command"].(string); ok {
+			timeout := 30 // 默认30秒超时
+			if timeoutParam, ok := requestPayload.Params["timeout"].(float64); ok {
+				timeout = int(timeoutParam)
+			}
+			output, errMsg, exitCode := a.executeShellCommand(cmd, timeout)
+			data = map[string]interface{}{
+				"output":    output,
+				"error":     errMsg,
+				"exit_code": exitCode,
+				"success":   exitCode == 0 && errMsg == "",
+			}
+		} else {
+			data = map[string]interface{}{
+				"error": "缺少命令参数",
+			}
+		}
+		
+		// 添加UUID信息
+		agentUUID, err := a.getOrCreateAgentUUID()
+		if err == nil {
+			data["agent_uuid"] = agentUUID
+		}
+		
 	default:
-		log.Printf("不支持的被动上报类型: %s", requestPayload.ReportType)
-		return
+		data = map[string]interface{}{
+			"error": fmt.Sprintf("不支持的上报类型: %s", requestPayload.ReportType),
+		}
 	}
 
-	// 创建上报负载
+	// 创建上报消息
 	reportPayload := shared.ReportDataPayload{
 		ReportID:   shared.GenerateUUID(),
 		ReportType: requestPayload.ReportType,
@@ -870,6 +943,8 @@ func (a *Agent) handlePassiveReportRequest(msg *shared.Message) {
 	// 发送响应
 	if err := a.conn.SendEncrypted(respMsg); err != nil {
 		log.Printf("发送被动上报响应失败: %v", err)
+	} else {
+		log.Printf("已发送被动上报响应: %s, 包含 %d 项数据", requestPayload.ReportType, len(data))
 	}
 }
 
@@ -1719,4 +1794,71 @@ func (a *Agent) handleReportAck(msg *shared.Message) {
 	}
 	
 	log.Printf("服务器已确认接收上报，报告ID: %s, 状态: %s", ackPayload.ReportID, ackPayload.Status)
+}
+
+// 处理服务器请求上报
+func (a *Agent) handleReportRequest(msg *shared.Message) {
+	// 解析请求负载
+	var requestPayload struct {
+		ReportType string                 `json:"report_type"`
+		Params     map[string]interface{} `json:"params"`
+	}
+	if err := json.Unmarshal(msg.Payload, &requestPayload); err != nil {
+		log.Printf("解析上报请求失败: %v", err)
+		return
+	}
+	
+	log.Printf("收到服务器上报请求: %s", requestPayload.ReportType)
+	
+	// 收集数据
+	var data map[string]interface{}
+	switch requestPayload.ReportType {
+	case "system_info":
+		data = a.collectSystemInfo()
+		
+		// 添加IP地址信息
+		if ips, err := a.getIPAddresses(); err == nil && len(ips) > 0 {
+			data["ip_addresses"] = ips
+		}
+		
+		// 添加UUID信息
+		agentUUID, err := a.getOrCreateAgentUUID()
+		if err == nil {
+			data["agent_uuid"] = agentUUID
+		}
+		
+	case "process_list":
+		data = a.collectProcessList()
+		
+		// 添加UUID信息
+		agentUUID, err := a.getOrCreateAgentUUID()
+		if err == nil {
+			data["agent_uuid"] = agentUUID
+		}
+		
+	default:
+		log.Printf("不支持的上报请求类型: %s", requestPayload.ReportType)
+		return
+	}
+	
+	// 创建上报响应
+	reportPayload := shared.ReportDataPayload{
+		ReportID:   shared.GenerateUUID(),
+		ReportType: requestPayload.ReportType,
+		Data:       data,
+	}
+	
+	// 创建响应消息
+	respMsg, err := shared.CreateMessage(shared.TypePassiveReport, a.Config.AgentID, reportPayload)
+	if err != nil {
+		log.Printf("创建上报响应失败: %v", err)
+		return
+	}
+	
+	// 发送响应
+	if err := a.conn.SendEncrypted(respMsg); err != nil {
+		log.Printf("发送上报响应失败: %v", err)
+	} else {
+		log.Printf("已响应服务器上报请求: %s, 包含 %d 项数据", requestPayload.ReportType, len(data))
+	}
 } 
