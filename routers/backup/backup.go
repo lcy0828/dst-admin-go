@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"fmt"
 	"github.com/gin-gonic/gin"
+	"github.com/go-ini/ini"
 	"io"
 	"io/ioutil"
 	"log"
@@ -15,11 +16,39 @@ import (
 	"time"
 )
 
-const (
-	// 存档路径和备份路径
-	DstSavePath    = "/root/DST/Klei/DoNotStarveTogether" // DST存档目录
-	DstBackupPath  = "/root/DST/Klei/dst-archive"         // DST备份目录
+// 存档路径和备份路径变量
+var (
+	DstSavePath   string // DST存档目录
+	DstBackupPath string // DST备份目录
 )
+
+// 初始化函数，从配置文件读取配置
+func init() {
+	// 默认配置
+	DstSavePath = "./Klei/DoNotStarveTogether"
+	DstBackupPath = "./Klei/dst-archive"
+	
+	// 尝试从配置文件读取
+	configFile := "./conf/app.conf"
+	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
+		if cfg, err := ini.Load(configFile); err == nil {
+			// 读取路径配置
+			if cfg.Section("paths").HasKey("DST_SAVE_PATH") {
+				DstSavePath = cfg.Section("paths").Key("DST_SAVE_PATH").String()
+				log.Printf("从配置文件加载DST存档路径: %s", DstSavePath)
+			}
+			
+			if cfg.Section("paths").HasKey("DST_BACKUP_PATH") {
+				DstBackupPath = cfg.Section("paths").Key("DST_BACKUP_PATH").String()
+				log.Printf("从配置文件加载DST备份路径: %s", DstBackupPath)
+			}
+		}
+	} else {
+		log.Printf("配置文件不存在，使用默认路径配置")
+		log.Printf("DST存档路径: %s", DstSavePath)
+		log.Printf("DST备份路径: %s", DstBackupPath)
+	}
+}
 
 // ArchiveBackupResponse 备份响应结构
 type ArchiveBackupResponse struct {

@@ -152,7 +152,12 @@ func getSystemInfo() SystemInfo {
 	info.MemoryUsage = memInfo.UsedPercent
 	
 	// 获取磁盘信息
-	diskInfo, _ := disk.Usage("/")
+	rootPath := "/"
+	if runtime.GOOS == "windows" {
+		// Windows 系统获取 C 盘信息
+		rootPath = "C:\\"
+	}
+	diskInfo, _ := disk.Usage(rootPath)
 	info.TotalDisk = diskInfo.Total / 1024 / 1024 / 1024  // 转为GB
 	info.UsedDisk = diskInfo.Used / 1024 / 1024 / 1024
 	info.FreeDisk = diskInfo.Free / 1024 / 1024 / 1024

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"net"
+	"os/user"
 
 	"dont/shared"
 	"github.com/gorilla/websocket"
@@ -37,6 +39,9 @@ const (
 	// 密钥更新准备类型
 	TypeSecurityKeyUpdateReady = "security_key_update_ready"
 )
+
+// 记录启动时间
+var startTime = time.Now()
 
 // Agent 表示一个代理实例
 type Agent struct {
@@ -871,51 +876,275 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 	if err == nil {
 		info["hostname"] = hostname
 	}
+	
+	// 生成持久化的唯一标识符
+	agentUUID, err := a.getOrCreateAgentUUID()
+	if err == nil {
+		info["agent_uuid"] = agentUUID
+	}
+	
+	// 添加更多系统信息
+	info["go_version"] = runtime.Version()
+	info["go_root"] = runtime.GOROOT()
+	
+	// 添加内存信息
+	var memStat runtime.MemStats
+	runtime.ReadMemStats(&memStat)
+	info["memory"] = map[string]interface{}{
+		"allocated": memStat.Alloc,
+		"total_allocated": memStat.TotalAlloc,
+		"system": memStat.Sys,
+		"heap_allocated": memStat.HeapAlloc,
+		"heap_system": memStat.HeapSys,
+	}
+	
+	// 获取当前目录
+	currentDir, err := os.Getwd()
+	if err == nil {
+		info["current_dir"] = currentDir
+	}
+	
+	// 获取当前用户
+	currentUser := "unknown"
+	if usr, err := user.Current(); err == nil {
+		currentUser = usr.Username
+		info["user"] = map[string]string{
+			"name": usr.Username,
+			"uid":  usr.Uid,
+			"gid":  usr.Gid,
+			"home": usr.HomeDir,
+		}
+	} else {
+		info["user"] = currentUser
+	}
+	
+	// 获取运行时间
+	uptime := time.Since(startTime).Seconds()
+	info["uptime_seconds"] = uptime
+	
+	// 获取当前进程PID
+	info["pid"] = os.Getpid()
+	
+	// 获取IP地址信息
+	if ips, err := a.getIPAddresses(); err == nil {
+		info["ip_addresses"] = ips
+	}
 
 	return info
+}
+
+// 获取或创建代理唯一标识符
+func (a *Agent) getOrCreateAgentUUID() (string, error) {
+	// 检查Agent.Config.KeyFile的目录中是否存在UUID文件
+	uuidFilePath := filepath.Join(filepath.Dir(a.Config.KeyFile), "agent_uuid.txt")
+	
+	// 尝试读取已存在的UUID
+	if data, err := ioutil.ReadFile(uuidFilePath); err == nil && len(data) > 0 {
+		uuid := strings.TrimSpace(string(data))
+		if uuid != "" {
+			log.Printf("使用已存在的Agent UUID: %s", uuid)
+			return uuid, nil
+		}
+	}
+	
+	// 如果UUID不存在或无效，生成新的UUID
+	uuid := shared.GenerateUUID()
+	log.Printf("生成新的Agent UUID: %s", uuid)
+	
+	// 确保目录存在
+	dir := filepath.Dir(uuidFilePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return uuid, fmt.Errorf("创建UUID存储目录失败: %v", err)
+	}
+	
+	// 保存UUID到文件
+	if err := ioutil.WriteFile(uuidFilePath, []byte(uuid), 0644); err != nil {
+		return uuid, fmt.Errorf("保存UUID到文件失败: %v", err)
+	}
+	
+	return uuid, nil
+}
+
+// 获取IP地址列表
+func (a *Agent) getIPAddresses() ([]string, error) {
+	var ips []string
+	
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	
+	for _, iface := range ifaces {
+		// 跳过禁用的接口和回环接口
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			
+			// 跳过IPv6地址
+			if ip == nil || ip.IsLoopback() || ip.To4() == nil {
+				continue
+			}
+			
+			ips = append(ips, ip.String())
+		}
+	}
+	
+	return ips, nil
 }
 
 // 收集进程列表
 func (a *Agent) collectProcessList() map[string]interface{} {
 	processes := []map[string]interface{}{}
+	
+	// 记录开始时间
+	startTime := time.Now()
 
-	// 这里只是一个简化示例，真实环境需要使用系统特定的API
-	var output string
-
+	// 根据操作系统获取不同的进程信息
 	switch runtime.GOOS {
 	case "windows":
-		output, _, _ = a.executeShellCommand("tasklist", 10)
-	default:
-		output, _, _ = a.executeShellCommand("ps aux", 10)
-	}
-
-	// 简单处理输出，这里仅作示例
-	lines := strings.Split(output, "\n")
-	for i, line := range lines {
-		if i == 0 { // 跳过标题行
-			continue
-		}
-		if line == "" {
-			continue
+		// Windows下获取更详细的进程信息
+		output, _, _ := a.executeShellCommand("tasklist /fo csv /nh", 20)
+		lines := strings.Split(strings.TrimSpace(output), "\n")
+		
+		for _, line := range lines {
+			if line == "" {
+				continue
+			}
+			
+			// CSV格式解析
+			parts := strings.Split(line, ",")
+			if len(parts) < 2 {
+				continue
+			}
+			
+			// 处理CSV格式 - 去除引号
+			name := strings.Trim(parts[0], "\"")
+			pid := strings.Trim(parts[1], "\"")
+			
+			memUsage := ""
+			if len(parts) > 4 {
+				memUsage = strings.Trim(parts[4], "\"")
+			}
+			
+			proc := map[string]interface{}{
+				"name": name,
+				"pid":  pid,
+			}
+			
+			if memUsage != "" {
+				proc["memory_usage"] = memUsage
+			}
+			
+			processes = append(processes, proc)
 		}
 		
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
+	case "linux", "darwin":
+		// Linux/MacOS使用ps命令获取详细进程信息
+		output, _, _ := a.executeShellCommand("ps -eo pid,ppid,user,stat,pcpu,pmem,comm --sort=-pcpu", 20)
+		lines := strings.Split(strings.TrimSpace(output), "\n")
+		
+		// 跳过标题行
+		if len(lines) > 1 {
+			for i := 1; i < len(lines); i++ {
+				line := lines[i]
+				fields := strings.Fields(line)
+				
+				if len(fields) < 7 {
+					continue
+				}
+				
+				proc := map[string]interface{}{
+					"pid":       fields[0],
+					"ppid":      fields[1],
+					"user":      fields[2],
+					"state":     fields[3],
+					"cpu_usage": fields[4],
+					"mem_usage": fields[5],
+					"name":      fields[6],
+				}
+				
+				processes = append(processes, proc)
+			}
 		}
-
-		proc := map[string]interface{}{
-			"pid":  fields[1],
-			"name": fields[0],
+		
+	default:
+		// 其他操作系统使用简单实现
+		output, _, _ := a.executeShellCommand("ps aux", 10)
+		lines := strings.Split(output, "\n")
+		
+		// 跳过标题行
+		if len(lines) > 1 {
+			for i := 1; i < len(lines); i++ {
+				line := lines[i]
+				if line == "" {
+					continue
+				}
+				
+				fields := strings.Fields(line)
+				if len(fields) < 11 {
+					continue
+				}
+				
+				proc := map[string]interface{}{
+					"user":      fields[0],
+					"pid":       fields[1],
+					"cpu_usage": fields[2],
+					"mem_usage": fields[3],
+					"vsz":       fields[4],
+					"rss":       fields[5],
+					"tty":       fields[6],
+					"stat":      fields[7],
+					"start":     fields[8],
+					"time":      fields[9],
+					"command":   strings.Join(fields[10:], " "),
+				}
+				
+				processes = append(processes, proc)
+			}
 		}
-		processes = append(processes, proc)
 	}
+	
+	// 限制进程数量，避免数据过大
+	maxProcesses := 50
+	if len(processes) > maxProcesses {
+		processes = processes[:maxProcesses]
+	}
+
+	// 计算收集时间
+	elapsedTime := time.Since(startTime).Milliseconds()
 
 	return map[string]interface{}{
-		"processes": processes,
-		"count":     len(processes),
-		"timestamp": time.Now().Unix(),
+		"processes":      processes,
+		"count":          len(processes),
+		"collection_ms":  elapsedTime,
+		"timestamp":      time.Now().Unix(),
+		"agent_uuid":     a.getAgentUUIDOrEmpty(),
+		"process_limit":  maxProcesses,
+		"os":             runtime.GOOS,
 	}
+}
+
+// 获取Agent UUID，如果不存在则返回空字符串
+func (a *Agent) getAgentUUIDOrEmpty() string {
+	uuid, err := a.getOrCreateAgentUUID()
+	if err != nil {
+		return ""
+	}
+	return uuid
 }
 
 // 加载配置文件，返回服务器地址和密钥

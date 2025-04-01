@@ -2,8 +2,16 @@ package shared
 
 import (
 	"encoding/json"
+	"fmt"
+	"math/rand"
+	"os"
 	"time"
 )
+
+// 初始化随机数种子
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
 
 // MessageType 定义了消息类型
 type MessageType string
@@ -95,8 +103,29 @@ func CreateMessage(msgType MessageType, agentID string, payload interface{}) (*M
 
 // GenerateUUID 生成唯一标识符
 func GenerateUUID() string {
-	// 简化版本，真实环境应使用UUID库
-	time.Now().UnixNano() // 简单触发一次当前时间获取
-	time.Sleep(time.Nanosecond)
-	return time.Now().Format("20060102150405.000000000")
+	// 生成更可靠的UUID，结合时间戳、随机数和主机特征
+	// 格式: 时间戳+随机数+主机名散列
+	timestamp := time.Now().UnixNano()
+	
+	// 生成8位随机字符串 
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	random := make([]byte, 8)
+	for i := range random {
+		random[i] = charset[rand.Intn(len(charset))]
+	}
+	
+	// 获取主机名作为额外标识
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "unknown"
+	}
+	
+	// 计算主机名的简单哈希值（最后4位）
+	hostHash := int64(0)
+	for _, c := range hostname {
+		hostHash = (hostHash*31 + int64(c)) % 10000
+	}
+	
+	// 组合成最终UUID
+	return fmt.Sprintf("%d-%s-%04d", timestamp, string(random), hostHash)
 } 

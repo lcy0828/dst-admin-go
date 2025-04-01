@@ -12,10 +12,30 @@ import (
 	"strings"
 )
 
-// 配置常量
-const (
-	dstSavePath = "/root/DST/Klei/DoNotStarveTogether" // DST存档目录
+// 配置变量，加载时从配置文件初始化
+var (
+	dstSavePath string // DST存档目录
 )
+
+// 初始化函数，从配置文件读取配置
+func init() {
+	// 默认配置
+	dstSavePath = "./Klei/DoNotStarveTogether"
+	
+	// 尝试从配置文件读取
+	configFile := "./conf/app.conf"
+	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
+		if cfg, err := ini.Load(configFile); err == nil {
+			// 读取路径配置
+			if cfg.Section("paths").HasKey("DST_SAVE_PATH") {
+				dstSavePath = cfg.Section("paths").Key("DST_SAVE_PATH").String()
+				log.Printf("从配置文件加载DST存档路径: %s", dstSavePath)
+			}
+		}
+	} else {
+		log.Printf("配置文件不存在，使用默认DST存档路径: %s", dstSavePath)
+	}
+}
 
 // DSTServerConfig 服务器配置结构
 type DSTServerConfig struct {

@@ -2,13 +2,41 @@ package server
 
 import (
 	"github.com/gin-gonic/gin"
+	"github.com/go-ini/ini"
 	"net/http"
 	"bufio"
 	"os"
 	"io"
+	"log"
 	"time"
 	"strings"
+	"path/filepath"
 )
+
+// 配置变量
+var (
+	dstSavePath string // DST存档目录
+)
+
+// 初始化函数，从配置文件读取配置
+func init() {
+	// 默认配置
+	dstSavePath = "./Klei/DoNotStarveTogether"
+	
+	// 尝试从配置文件读取
+	configFile := "./conf/app.conf"
+	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
+		if cfg, err := ini.Load(configFile); err == nil {
+			// 读取路径配置
+			if cfg.Section("paths").HasKey("DST_SAVE_PATH") {
+				dstSavePath = cfg.Section("paths").Key("DST_SAVE_PATH").String()
+				log.Printf("从配置文件加载DST存档路径: %s", dstSavePath)
+			}
+		}
+	} else {
+		log.Printf("配置文件不存在，使用默认DST存档路径: %s", dstSavePath)
+	}
+}
 
 // ServerLog 获取服务器日志
 func ServerLog(c *gin.Context) {
@@ -59,8 +87,8 @@ func StreamLog(c *gin.Context) {
 		return
 	}
 	
-	// 构造日志文件路径
-	logPath := "/root/DST/Klei/DoNotStarveTogether/" + archiveName + "/" + worldName + "/server_log.txt"
+	// 构造日志文件路径，使用配置的DST_SAVE_PATH而非硬编码路径
+	logPath := filepath.Join(dstSavePath, archiveName, worldName, "server_log.txt")
 	
 	// 检查文件是否存在
 	if _, err := os.Stat(logPath); os.IsNotExist(err) {
