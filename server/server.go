@@ -810,7 +810,7 @@ func (s *Server) SendCommand(agentID, commandType, content string, timeout int) 
 	}
 
 	// 创建命令ID
-	commandID := shared.GenerateUUID()
+	commandID := shared.GenerateCommandID() // 使用专用的命令ID生成函数
 	log.Printf("为Agent %s 生成新的命令ID: %s", agentID, commandID)
 
 	// 创建命令负载

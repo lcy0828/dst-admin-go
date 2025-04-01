@@ -623,15 +623,22 @@ func (a *Agent) processMessage(msg *shared.Message) {
 
 // 处理命令消息
 func (a *Agent) handleCommand(msg *shared.Message) {
+	// 解析命令负载
 	var cmdPayload shared.CommandPayload
 	if err := json.Unmarshal(msg.Payload, &cmdPayload); err != nil {
 		log.Printf("解析命令负载失败: %v", err)
 		return
 	}
 
-	log.Printf("收到命令: ID=%s, Type=%s", cmdPayload.CommandID, cmdPayload.Type)
+	log.Printf("收到命令，ID: %s, 类型: %s", cmdPayload.CommandID, cmdPayload.Type)
+	
+	// 检查命令ID格式
+	if !strings.HasPrefix(cmdPayload.CommandID, "CMD") && strings.Contains(cmdPayload.CommandID, "-") {
+		// 老版本格式的命令ID，为兼容性考虑继续处理
+		log.Printf("警告: 收到旧格式的命令ID: %s", cmdPayload.CommandID)
+	}
 
-	// 创建命令确认消息
+	// 发送命令确认
 	ackMsg, _ := shared.CreateMessage(shared.TypeCommandAck, a.Config.AgentID, map[string]string{
 		"command_id": cmdPayload.CommandID,
 		"status":     "received",

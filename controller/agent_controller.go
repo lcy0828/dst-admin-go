@@ -84,9 +84,13 @@ func SendCommand(c *gin.Context) {
 		}
 	}
 
+	log.Printf("准备向Agent(%s)发送命令，类型: %s, 内容: %s, 超时: %d秒", 
+		req.AgentID, req.Type, req.Content, req.Timeout)
+
 	// 发送命令
 	commandID, err := AgentServer.SendCommand(req.AgentID, req.Type, req.Content, req.Timeout)
 	if err != nil {
+		log.Printf("发送命令失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code": 500,
 			"msg":  "发送命令失败: " + err.Error(),
@@ -95,11 +99,16 @@ func SendCommand(c *gin.Context) {
 		return
 	}
 
+	log.Printf("命令已成功发送，AgentID: %s, CommandID: %s", req.AgentID, commandID)
+
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
 		"msg":  "命令已发送",
 		"data": gin.H{
 			"command_id": commandID,
+			"agent_id": req.AgentID,
+			"type": req.Type,
+			"timeout": req.Timeout,
 		},
 	})
 }
@@ -126,9 +135,12 @@ func GetCommandResult(c *gin.Context) {
 		return
 	}
 
+	log.Printf("获取命令执行结果，CommandID: %s", commandID)
+
 	// 查询命令结果
 	result, err := AgentServer.GetCommandResult(commandID)
 	if err != nil {
+		log.Printf("获取命令结果失败: %v", err)
 		c.JSON(http.StatusNotFound, gin.H{
 			"code": 404,
 			"msg":  err.Error(),
@@ -136,6 +148,13 @@ func GetCommandResult(c *gin.Context) {
 		})
 		return
 	}
+
+	// 验证结果格式
+	if result.CommandID == "" {
+		log.Printf("警告：返回的命令结果缺少CommandID")
+	}
+
+	log.Printf("成功获取命令结果: %s, AgentID: %s, Status: %s", result.CommandID, result.AgentID, result.Status)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,
@@ -159,6 +178,17 @@ func GetCommandResults(c *gin.Context) {
 	agentID := c.Query("agent_id")
 	limitStr := c.Query("limit")
 	
+	if agentID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code": 400,
+			"msg":  "缺少必要的agent_id参数",
+			"data": nil,
+		})
+		return
+	}
+	
+	log.Printf("获取命令执行结果列表，AgentID: %s", agentID)
+	
 	limit := 20 // 默认限制20条
 	if limitStr != "" {
 		var err error
@@ -170,6 +200,19 @@ func GetCommandResults(c *gin.Context) {
 
 	// 获取结果列表
 	results := AgentServer.GetCommandResults(agentID, limit)
+	
+	if len(results) == 0 {
+		log.Printf("未找到Agent(%s)的命令结果", agentID)
+		// 返回空数组而不是null
+		c.JSON(http.StatusOK, gin.H{
+			"code": 200,
+			"msg":  "获取成功",
+			"data": []interface{}{},
+		})
+		return
+	}
+
+	log.Printf("成功获取Agent(%s)的命令结果，共%d条", agentID, len(results))
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": 200,

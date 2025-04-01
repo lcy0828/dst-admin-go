@@ -127,4 +127,18 @@ func GenerateUUID() string {
 	
 	// 组合成最终纯数字UUID
 	return fmt.Sprintf("%d%08d%04d", timestamp, randomNum, hostHash)
+}
+
+// GenerateCommandID 生成命令唯一标识符
+func GenerateCommandID() string {
+	// 生成命令ID，使用与UUID不同的格式以区分
+	// 格式: CMD-时间戳-随机数
+	timestamp := time.Now().UnixNano() / 1000000 // 毫秒时间戳
+	
+	// 生成6位随机数字
+	rand.Seed(time.Now().UnixNano())
+	randomNum := rand.Intn(1000000)
+	
+	// 组合成命令ID
+	return fmt.Sprintf("CMD%d%06d", timestamp, randomNum)
 } 
