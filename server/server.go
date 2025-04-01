@@ -699,7 +699,11 @@ func (s *Server) handleCommandResponse(agent *AgentConnection, msg *shared.Messa
 		agent.AgentID, respPayload.CommandID, status, respPayload.ExitCode)
 	
 	if respPayload.Output != "" {
-		log.Printf("命令输出: %s", respPayload.Output)
+		output := respPayload.Output
+		if len(output) > 100 {
+			output = output[:100] + "..."
+		}
+		log.Printf("命令输出 (前100字符): %s", output)
 	}
 	
 	if respPayload.ErrorMsg != "" {
@@ -710,6 +714,7 @@ func (s *Server) handleCommandResponse(agent *AgentConnection, msg *shared.Messa
 	s.commandMutex.Lock()
 	cmdResult, exists := s.commandResults[respPayload.CommandID]
 	if exists {
+		log.Printf("更新命令结果: %s", respPayload.CommandID)
 		// 更新现有结果
 		cmdResult.Output = respPayload.Output
 		cmdResult.ErrorMsg = respPayload.ErrorMsg
@@ -721,6 +726,7 @@ func (s *Server) handleCommandResponse(agent *AgentConnection, msg *shared.Messa
 			cmdResult.Status = "failed"
 		}
 	} else {
+		log.Printf("未找到命令结果记录，创建新记录: %s", respPayload.CommandID)
 		// 创建新的结果记录
 		s.commandResults[respPayload.CommandID] = &CommandResult{
 			AgentID:   agent.AgentID,
@@ -736,6 +742,14 @@ func (s *Server) handleCommandResponse(agent *AgentConnection, msg *shared.Messa
 			s.commandResults[respPayload.CommandID].Status = "failed"
 		}
 	}
+	
+	// 打印所有命令ID以便调试
+	var commandIDs []string
+	for id := range s.commandResults {
+		commandIDs = append(commandIDs, id)
+	}
+	log.Printf("当前有 %d 个命令结果", len(s.commandResults))
+	
 	s.commandMutex.Unlock()
 }
 
@@ -791,11 +805,13 @@ func (s *Server) SendCommand(agentID, commandType, content string, timeout int) 
 	s.agentMutex.RUnlock()
 
 	if !exists {
+		log.Printf("发送命令失败: 未找到指定的Agent: %s", agentID)
 		return "", fmt.Errorf("未找到指定的Agent: %s", agentID)
 	}
 
 	// 创建命令ID
 	commandID := shared.GenerateUUID()
+	log.Printf("为Agent %s 生成新的命令ID: %s", agentID, commandID)
 
 	// 创建命令负载
 	cmdPayload := shared.CommandPayload{
@@ -830,6 +846,7 @@ func (s *Server) SendCommand(agentID, commandType, content string, timeout int) 
 		s.commandResults[commandID].EndTime = time.Now().Unix()
 		s.commandMutex.Unlock()
 		
+		log.Printf("创建命令消息失败: %v, 命令ID: %s", err, commandID)
 		return "", fmt.Errorf("创建命令消息失败: %v", err)
 	}
 
@@ -845,6 +862,7 @@ func (s *Server) SendCommand(agentID, commandType, content string, timeout int) 
 		s.commandResults[commandID].EndTime = time.Now().Unix()
 		s.commandMutex.Unlock()
 		
+		log.Printf("发送命令失败: Agent连接已关闭: %s, 命令ID: %s", agentID, commandID)
 		return "", fmt.Errorf("Agent连接已关闭: %s", agentID)
 	}
 	
@@ -859,10 +877,23 @@ func (s *Server) SendCommand(agentID, commandType, content string, timeout int) 
 		s.commandResults[commandID].EndTime = time.Now().Unix()
 		s.commandMutex.Unlock()
 		
+		log.Printf("发送命令失败: %v, 命令ID: %s", err, commandID)
 		return "", fmt.Errorf("发送命令失败: %v", err)
 	}
 
-	log.Printf("向Agent发送命令: %s, CommandID: %s, Type: %s", agentID, commandID, commandType)
+	log.Printf("已成功向Agent %s 发送命令: CommandID: %s, Type: %s", agentID, commandID, commandType)
+	
+	// 添加额外日志，确认命令结果已保存
+	s.commandMutex.RLock()
+	_, resultExists := s.commandResults[commandID]
+	s.commandMutex.RUnlock()
+	
+	if resultExists {
+		log.Printf("已确认命令结果已保存: %s", commandID)
+	} else {
+		log.Printf("警告: 命令结果可能未正确保存: %s", commandID)
+	}
+	
 	return commandID, nil
 }
 
@@ -1638,12 +1669,25 @@ func (s *Server) GetCommandResult(commandID string) (*CommandResult, error) {
 	s.commandMutex.RLock()
 	defer s.commandMutex.RUnlock()
 	
+	// 直接通过命令ID查找结果
 	result, exists := s.commandResults[commandID]
-	if !exists {
-		return nil, fmt.Errorf("未找到命令结果: %s", commandID)
+	if exists {
+		return result, nil
 	}
 	
-	return result, nil
+	// 如果找不到命令结果，记录详细日志
+	log.Printf("未找到命令结果 ID=%s, 当前结果数量: %d", commandID, len(s.commandResults))
+	
+	// 打印所有命令ID以便调试
+	var commandIDs []string
+	for id := range s.commandResults {
+		commandIDs = append(commandIDs, id)
+	}
+	if len(commandIDs) > 0 {
+		log.Printf("当前存在的命令ID: %v", commandIDs)
+	}
+	
+	return nil, fmt.Errorf("未找到命令结果: %s", commandID)
 }
 
 // 获取命令执行结果列表
@@ -1653,12 +1697,18 @@ func (s *Server) GetCommandResults(agentID string, limit int) []*CommandResult {
 	
 	var results []*CommandResult
 	
+	// 记录日志
+	log.Printf("获取命令结果列表, AgentID=%s, Limit=%d, 当前结果数量: %d", agentID, limit, len(s.commandResults))
+	
 	// 复制结果到临时切片，如果指定了agentID则只返回该agent的结果
-	for _, result := range s.commandResults {
+	for id, result := range s.commandResults {
 		if agentID == "" || result.AgentID == agentID {
 			results = append(results, result)
+			log.Printf("添加命令结果: ID=%s, AgentID=%s, Status=%s", id, result.AgentID, result.Status)
 		}
 	}
+	
+	log.Printf("找到符合条件的命令结果: %d 条", len(results))
 	
 	// 按时间倒序排序
 	sort.Slice(results, func(i, j int) bool {
