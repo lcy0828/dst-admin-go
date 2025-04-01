@@ -1,7 +1,6 @@
 package dstserver
 
 import (
-	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/go-ini/ini"
 	"io/ioutil"
@@ -248,9 +247,9 @@ func UpdateClusterConfig(g *gin.Context) {
 	var err error
 	
 	// 检查文件是否存在
-	if _, err := os.Stat(clusterPath); os.IsNotExist(err) {
+	if _, fileErr := os.Stat(clusterPath); os.IsNotExist(fileErr) {
 		// 检查存档目录是否存在，如果不存在则创建
-		if _, err := os.Stat(saveDir); os.IsNotExist(err) {
+		if _, dirErr := os.Stat(saveDir); os.IsNotExist(dirErr) {
 			if err := os.MkdirAll(saveDir, 0755); err != nil {
 				log.Printf("创建存档目录失败: %v", err)
 				g.JSON(http.StatusOK, gin.H{
