@@ -935,31 +935,66 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 
 // 获取或创建代理唯一标识符
 func (a *Agent) getOrCreateAgentUUID() (string, error) {
-	// 检查Agent.Config.KeyFile的目录中是否存在UUID文件
-	uuidFilePath := filepath.Join(filepath.Dir(a.Config.KeyFile), "agent_uuid.txt")
+	// 尝试从配置文件读取UUID
+	configFile := a.Config.KeyFile
 	
-	// 尝试读取已存在的UUID
-	if data, err := ioutil.ReadFile(uuidFilePath); err == nil && len(data) > 0 {
-		uuid := strings.TrimSpace(string(data))
+	// 确保配置文件存在
+	if _, err := os.Stat(configFile); os.IsNotExist(err) {
+		// 如果配置文件不存在，先创建包含UUID的配置
+		uuid := shared.GenerateUUID()
+		log.Printf("生成新的Agent UUID: %s", uuid)
+		
+		// 确保目录存在
+		dir := filepath.Dir(configFile)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return uuid, fmt.Errorf("创建配置目录失败: %v", err)
+		}
+		
+		// 创建新的配置文件
+		cfg := ini.Empty()
+		section, _ := cfg.NewSection("agent")
+		section.Key("AGENT_UUID").SetValue(uuid)
+		if a.Config.SecurityKey != "" {
+			section.Key("SECURITY_KEY").SetValue(a.Config.SecurityKey)
+		}
+		if a.Config.ServerURL != "" {
+			section.Key("SERVER_URL").SetValue(a.Config.ServerURL)
+		}
+		
+		if err := cfg.SaveTo(configFile); err != nil {
+			return uuid, fmt.Errorf("保存UUID到配置文件失败: %v", err)
+		}
+		
+		return uuid, nil
+	}
+	
+	// 从现有配置文件中读取UUID
+	cfg, err := ini.Load(configFile)
+	if err != nil {
+		// 如果读取配置失败，生成新的UUID并返回，但不保存
+		uuid := shared.GenerateUUID()
+		log.Printf("读取配置文件失败，生成临时UUID: %s", uuid)
+		return uuid, nil
+	}
+	
+	// 从[agent]部分读取UUID
+	section := cfg.Section("agent")
+	if section.HasKey("AGENT_UUID") {
+		uuid := section.Key("AGENT_UUID").String()
 		if uuid != "" {
-			log.Printf("使用已存在的Agent UUID: %s", uuid)
+			log.Printf("从配置文件加载Agent UUID: %s", uuid)
 			return uuid, nil
 		}
 	}
 	
-	// 如果UUID不存在或无效，生成新的UUID
+	// 如果UUID不存在，生成新的并保存
 	uuid := shared.GenerateUUID()
-	log.Printf("生成新的Agent UUID: %s", uuid)
+	log.Printf("配置文件中未找到UUID，生成新的: %s", uuid)
 	
-	// 确保目录存在
-	dir := filepath.Dir(uuidFilePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return uuid, fmt.Errorf("创建UUID存储目录失败: %v", err)
-	}
-	
-	// 保存UUID到文件
-	if err := ioutil.WriteFile(uuidFilePath, []byte(uuid), 0644); err != nil {
-		return uuid, fmt.Errorf("保存UUID到文件失败: %v", err)
+	// 更新配置文件
+	section.Key("AGENT_UUID").SetValue(uuid)
+	if err := cfg.SaveTo(configFile); err != nil {
+		log.Printf("保存UUID到配置文件失败: %v", err)
 	}
 	
 	return uuid, nil
@@ -1231,6 +1266,9 @@ func (a *Agent) saveConfig(configFile, serverURL, key string) error {
 	if strings.Contains(configFile, "conf/app.conf") {
 		log.Printf("保存配置到配置文件: %s", configFile)
 		
+		// 获取当前UUID
+		uuid, _ := a.getOrCreateAgentUUID()
+		
 		// 检查文件是否存在并检查格式
 		_, err := os.Stat(configFile)
 		if err != nil {
@@ -1243,6 +1281,9 @@ func (a *Agent) saveConfig(configFile, serverURL, key string) error {
 				}
 				if serverURL != "" {
 					section.Key("SERVER_URL").SetValue(serverURL)
+				}
+				if uuid != "" {
+					section.Key("AGENT_UUID").SetValue(uuid)
 				}
 				
 				if err := cfg.SaveTo(configFile); err != nil {
@@ -1284,6 +1325,9 @@ func (a *Agent) saveConfig(configFile, serverURL, key string) error {
 			if serverURL != "" {
 				section.Key("SERVER_URL").SetValue(serverURL)
 			}
+			if uuid != "" {
+				section.Key("AGENT_UUID").SetValue(uuid)
+			}
 			
 			// 保存配置
 			if err := cfg.SaveTo(configFile); err != nil {
@@ -1318,6 +1362,9 @@ func (a *Agent) saveConfig(configFile, serverURL, key string) error {
 		}
 		if serverURL != "" {
 			section.Key("SERVER_URL").SetValue(serverURL)
+		}
+		if uuid != "" {
+			section.Key("AGENT_UUID").SetValue(uuid)
 		}
 		
 		// 保存配置

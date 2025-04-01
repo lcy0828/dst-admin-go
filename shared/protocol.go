@@ -103,16 +103,13 @@ func CreateMessage(msgType MessageType, agentID string, payload interface{}) (*M
 
 // GenerateUUID 生成唯一标识符
 func GenerateUUID() string {
-	// 生成更可靠的UUID，结合时间戳、随机数和主机特征
+	// 生成更可靠的纯数字UUID，结合时间戳、随机数和主机特征
 	// 格式: 时间戳+随机数+主机名散列
 	timestamp := time.Now().UnixNano()
 	
-	// 生成8位随机字符串 
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	random := make([]byte, 8)
-	for i := range random {
-		random[i] = charset[rand.Intn(len(charset))]
-	}
+	// 生成8位随机数字
+	rand.Seed(time.Now().UnixNano())
+	randomNum := rand.Intn(100000000)
 	
 	// 获取主机名作为额外标识
 	hostname, err := os.Hostname()
@@ -126,6 +123,6 @@ func GenerateUUID() string {
 		hostHash = (hostHash*31 + int64(c)) % 10000
 	}
 	
-	// 组合成最终UUID
-	return fmt.Sprintf("%d-%s-%04d", timestamp, string(random), hostHash)
+	// 组合成最终纯数字UUID
+	return fmt.Sprintf("%d%08d%04d", timestamp, randomNum, hostHash)
 } 
