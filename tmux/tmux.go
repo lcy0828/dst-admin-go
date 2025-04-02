@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GianlucaP106/gotmux/gotmux"
@@ -224,6 +225,10 @@ func (s *DSTServer) Start() error {
 	// 记录最终启动信息，包含启动模式、目录和可执行文件
 	log.Printf("[TMUX] 已启动饥荒服务器: %s, 启动模式: %s, 耗时: %v",
 		s.SessionName, s.ServerMode, elapsedTime)
+
+	// 保存服务器信息供查询
+	SaveServerInfo(s)
+
 	return nil
 }
 
@@ -355,6 +360,39 @@ func (s *DSTServer) Restart() error {
 	startTime := time.Now()
 	log.Printf("[TMUX] 开始重启饥荒服务器 会话名: %s", s.SessionName)
 
+	// 保存服务器的原始信息，确保重启后使用相同的参数
+	originalServerInfo := &DSTServer{
+		ArchiveName:    s.ArchiveName,
+		WorldName:      s.WorldName,
+		UGCDirectory:   s.UGCDirectory,
+		StorageRoot:    s.StorageRoot,
+		ConfDir:        s.ConfDir,
+		SessionName:    s.SessionName,
+		StartDirectory: s.StartDirectory,
+		ServerMode:     s.ServerMode,
+		tmux:           s.tmux,
+	}
+
+	// 从全局映射中获取服务器的完整信息
+	serverInfoMapMutex.Lock()
+	var originalInfo *ServerInfo
+	if info, exists := serverInfoMap[s.SessionName]; exists {
+		// 创建一个副本，避免引用原始对象
+		originalInfo = &ServerInfo{
+			SessionName:    info.SessionName,
+			ArchiveName:    info.ArchiveName,
+			WorldName:      info.WorldName,
+			ServerMode:     info.ServerMode,
+			StartDirectory: info.StartDirectory,
+			Status:         info.Status,
+			StartTime:      info.StartTime,
+			RunningTime:    info.RunningTime,
+		}
+		log.Printf("[TMUX] 已保存服务器原始信息: 模式=%s, 启动时间=%s",
+			originalInfo.ServerMode, originalInfo.StartTime)
+	}
+	serverInfoMapMutex.Unlock()
+
 	// 检查服务器是否在运行
 	log.Printf("[TMUX] 检查服务器是否在运行")
 	running, err := s.IsRunning()
@@ -427,21 +465,75 @@ func (s *DSTServer) Restart() error {
 		}
 	}
 
-	// 启动服务器
-	log.Printf("[TMUX] 开始启动服务器")
-	err = s.Start()
+	// 使用原始服务器对象启动服务器，确保使用相同的参数
+	log.Printf("[TMUX] 开始启动服务器，使用原始参数")
+	log.Printf("[TMUX] 原始参数: 模式=%s, 启动目录=%s",
+		originalServerInfo.ServerMode, originalServerInfo.StartDirectory)
+
+	// 使用原始服务器对象启动服务器
+	err = originalServerInfo.Start()
 	if err != nil {
 		log.Printf("[TMUX][错误] 启动服务器失败: %v", err)
 		return fmt.Errorf("启动服务器失败: %v", err)
 	}
 
+	// 如果有原始信息，恢复原始启动时间
+	if originalInfo != nil {
+		serverInfoMapMutex.Lock()
+		if newInfo, exists := serverInfoMap[s.SessionName]; exists {
+			// 恢复原始启动时间，但保留新的运行状态
+			newInfo.StartTime = originalInfo.StartTime
+			log.Printf("[TMUX] 已恢复服务器原始启动时间: %s", originalInfo.StartTime)
+		}
+		serverInfoMapMutex.Unlock()
+	}
+
 	elapsedTime := time.Since(startTime)
-	log.Printf("[TMUX] 已重启饥荒服务器: %s, 耗时: %v", s.SessionName, elapsedTime)
+	log.Printf("[TMUX] 已重启饥荒服务器: %s, 模式: %s, 启动目录: %s, 耗时: %v",
+		s.SessionName, originalServerInfo.ServerMode, originalServerInfo.StartDirectory, elapsedTime)
 	return nil
 }
 
+// ServerInfo 服务器信息结构体
+type ServerInfo struct {
+	SessionName    string `json:"session_name"`    // 会话名称
+	ArchiveName    string `json:"archive_name"`    // 存档名称
+	WorldName      string `json:"world_name"`      // 世界名称
+	ServerMode     string `json:"server_mode"`     // 服务器启动模式（32位或64位）
+	StartDirectory string `json:"start_directory"` // 启动目录
+	Status         string `json:"status"`          // 服务器状态（运行中/已停止）
+	StartTime      string `json:"start_time"`      // 启动时间
+	RunningTime    string `json:"running_time"`    // 运行时间
+}
+
+// 全局变量，用于存储服务器信息
+var serverInfoMap = make(map[string]*ServerInfo)
+
+// SaveServerInfo 保存服务器信息
+func SaveServerInfo(server *DSTServer) {
+	info := &ServerInfo{
+		SessionName:    server.SessionName,
+		ArchiveName:    server.ArchiveName,
+		WorldName:      server.WorldName,
+		ServerMode:     server.ServerMode,
+		StartDirectory: server.StartDirectory,
+		Status:         "running",
+		StartTime:      time.Now().Format("2006-01-02 15:04:05"),
+	}
+
+	// 使用互斥锁保护并发访问
+	serverInfoMapMutex.Lock()
+	serverInfoMap[server.SessionName] = info
+	serverInfoMapMutex.Unlock()
+
+	log.Printf("[TMUX] 已保存服务器信息: %s, 模式: %s", server.SessionName, server.ServerMode)
+}
+
+// 互斥锁，保护并发访问serverInfoMap
+var serverInfoMapMutex sync.Mutex
+
 // ListDSTServers 列出所有饥荒服务器会话
-func ListDSTServers() ([]string, error) {
+func ListDSTServers() ([]ServerInfo, error) {
 	startTime := time.Now()
 	log.Printf("[TMUX] 开始列出所有饥荒服务器会话")
 
@@ -461,17 +553,64 @@ func ListDSTServers() ([]string, error) {
 		return nil, fmt.Errorf("获取tmux会话列表失败: %v", err)
 	}
 
-	// 筛选出饥荒服务器会话
-	var dstSessions []string
+	// 筛选出饥荒服务器会话并更新状态
+	var result []ServerInfo
+	runningSessionMap := make(map[string]bool)
+
+	// 记录当前运行的会话
 	for _, session := range sessions {
 		if strings.HasPrefix(session.Name, "dstserver_") {
-			dstSessions = append(dstSessions, session.Name)
+			runningSessionMap[session.Name] = true
+		}
+	}
+
+	// 获取互斥锁
+	serverInfoMapMutex.Lock()
+	defer serverInfoMapMutex.Unlock()
+
+	// 更新所有已知服务器的状态
+	for sessionName, info := range serverInfoMap {
+		// 检查会话是否仍在运行
+		if running, exists := runningSessionMap[sessionName]; exists && running {
+			info.Status = "running"
+			// 计算运行时间
+			startTime, _ := time.Parse("2006-01-02 15:04:05", info.StartTime)
+			info.RunningTime = time.Since(startTime).Round(time.Second).String()
+		} else {
+			info.Status = "stopped"
+			info.RunningTime = ""
+		}
+
+		// 添加到结果中
+		result = append(result, *info)
+	}
+
+	// 检查是否有新的会话未记录
+	for sessionName := range runningSessionMap {
+		if _, exists := serverInfoMap[sessionName]; !exists {
+			// 解析会话名称获取存档和世界信息
+			parts := strings.Split(sessionName, "_")
+			if len(parts) >= 3 && parts[0] == "dstserver" {
+				// 创建新的服务器信息
+				info := ServerInfo{
+					SessionName: sessionName,
+					ArchiveName: parts[1],
+					WorldName:   parts[2],
+					ServerMode:  "unknown", // 未知模式
+					Status:      "running",
+					StartTime:   "unknown",
+				}
+
+				// 添加到结果和映射中
+				result = append(result, info)
+				serverInfoMap[sessionName] = &info
+			}
 		}
 	}
 
 	elapsedTime := time.Since(startTime)
-	log.Printf("[TMUX] 已列出所有饥荒服务器会话，共 %d 个, 耗时: %v", len(dstSessions), elapsedTime)
-	return dstSessions, nil
+	log.Printf("[TMUX] 已列出所有饥荒服务器会话，共 %d 个, 耗时: %v", len(result), elapsedTime)
+	return result, nil
 }
 
 // GetSessionInfo 获取会话信息

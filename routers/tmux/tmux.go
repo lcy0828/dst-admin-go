@@ -325,8 +325,8 @@ func ListServers(c *gin.Context) {
 	clientIP := c.ClientIP()
 	log.Printf("[API][ListServers] 收到列出服务器请求 来自IP: %s", clientIP)
 
-	// 获取所有饥荒服务器会话
-	sessions, err := tmux.ListDSTServers()
+	// 获取所有饥荒服务器会话及详细信息
+	serverInfos, err := tmux.ListDSTServers()
 	if err != nil {
 		log.Printf("[API][ListServers] 获取服务器列表失败: %v IP: %s", err, clientIP)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -336,28 +336,16 @@ func ListServers(c *gin.Context) {
 		return
 	}
 
-	log.Printf("[API][ListServers] 获取到 %d 个服务器会话", len(sessions))
-
-	// 获取每个会话的详细信息
-	var serversInfo []map[string]string
-	for _, sessionName := range sessions {
-		log.Printf("[API][ListServers] 正在获取会话信息: %s", sessionName)
-		info, err := tmux.GetSessionInfo(sessionName)
-		if err != nil {
-			log.Printf("[API][ListServers] 获取会话信息失败: %v, 会话名: %s", err, sessionName)
-			continue
-		}
-		serversInfo = append(serversInfo, info)
-	}
+	log.Printf("[API][ListServers] 获取到 %d 个服务器信息", len(serverInfos))
 
 	elapsedTime := time.Since(startTime)
-	log.Printf("[API][ListServers] 获取服务器列表成功，共 %d 个服务器, 耗时: %v", len(serversInfo), elapsedTime)
+	log.Printf("[API][ListServers] 获取服务器列表成功，共 %d 个服务器, 耗时: %v", len(serverInfos), elapsedTime)
 	c.JSON(http.StatusOK, gin.H{
 		"status": 200,
 		"msg":    "获取服务器列表成功",
-		"data":   serversInfo,
+		"data":   serverInfos,
 		"meta": gin.H{
-			"count":        len(serversInfo),
+			"count":        len(serverInfos),
 			"elapsed_time": elapsedTime.String(),
 		},
 	})
@@ -405,15 +393,36 @@ func RestartServer(c *gin.Context) {
 	log.Printf("[API][RestartServer] 尝试重启服务器 会话名: %s, 存档: %s, 世界: %s",
 		sessionName, parts[1], parts[2])
 
-	// 获取服务器实例引用
+	// 先检查服务器信息是否已经存在，如果存在则使用实际的参数
+	serverInfos, _ := tmux.ListDSTServers()
+	serverMode := dstServerMode // 默认使用配置文件中的启动模式
+	startDir := dstServerPath   // 默认使用配置文件中的启动目录
+
+	// 在服务器信息列表中查找匹配的服务器
+	for _, info := range serverInfos {
+		if info.SessionName == sessionName {
+			// 如果找到匹配的服务器，使用它的实际参数
+			if info.ServerMode != "unknown" {
+				serverMode = info.ServerMode
+				log.Printf("[API][RestartServer] 使用服务器实际的启动模式: %s", serverMode)
+			}
+			if info.StartDirectory != "" {
+				startDir = info.StartDirectory
+				log.Printf("[API][RestartServer] 使用服务器实际的启动目录: %s", startDir)
+			}
+			break
+		}
+	}
+
+	// 获取服务器实例引用，使用实际的参数
 	server, err := tmux.NewDSTServer(
 		parts[1],
 		parts[2],
 		dstUGCPath,
 		filepath.Dir(dstSavePath),
 		"DoNotStarveTogether",
-		dstServerPath, // 传递服务器安装路径作为启动目录
-		dstServerMode, // 使用默认启动模式
+		startDir,   // 使用实际的启动目录
+		serverMode, // 使用实际的启动模式
 	)
 	if err != nil {
 		log.Printf("[API][RestartServer] 获取服务器实例引用失败: %v 会话名: %s", err, sessionName)
@@ -435,13 +444,18 @@ func RestartServer(c *gin.Context) {
 	}
 
 	elapsedTime := time.Since(startTime)
-	log.Printf("[API][RestartServer] 服务器已重启 会话名: %s, 耗时: %v", sessionName, elapsedTime)
+	log.Printf("[API][RestartServer] 服务器已重启 会话名: %s, 模式: %s, 启动目录: %s, 耗时: %v",
+		sessionName, serverMode, startDir, elapsedTime)
 	c.JSON(http.StatusOK, gin.H{
 		"status": 200,
 		"msg":    "服务器已重启",
 		"data": gin.H{
-			"session_name": sessionName,
-			"elapsed_time": elapsedTime.String(),
+			"session_name":    sessionName,
+			"archive_name":    parts[1],
+			"world_name":      parts[2],
+			"server_mode":     serverMode,
+			"start_directory": startDir,
+			"elapsed_time":    elapsedTime.String(),
 		},
 	})
 }
