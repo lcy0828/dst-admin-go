@@ -369,18 +369,62 @@ func (s *DSTServer) Restart() error {
 		// 先尝试优雅地停止
 		stopErr := s.Stop()
 		if stopErr != nil {
-			log.Printf("[TMUX][警告] 优雅停止服务器失败: %v, 尝试强制终止", stopErr)
-			// 如果优雅停止失败，尝试强制终止
-			killErr := s.KillSession()
-			if killErr != nil {
-				log.Printf("[TMUX][错误] 强制终止服务器失败: %v", killErr)
-				return fmt.Errorf("停止服务器失败: %v, 强制终止也失败: %v", stopErr, killErr)
+			log.Printf("[TMUX][警告] 优雅停止服务器失败: %v, 将等待一段时间后再检查", stopErr)
+		}
+
+		// 设置最大等待时间为30秒
+		maxWaitTime := 30 * time.Second
+		checkInterval := 1 * time.Second // 每秒检查一次服务器状态
+		timeoutTimer := time.NewTimer(maxWaitTime)
+		checkTicker := time.NewTicker(checkInterval)
+		defer timeoutTimer.Stop()
+		defer checkTicker.Stop()
+
+		log.Printf("[TMUX] 开始等待服务器停止，最长等待时间: %v", maxWaitTime)
+
+		// 定期检查服务器是否已停止
+		serverStopped := false
+	waitLoop:
+		for {
+			select {
+			case <-timeoutTimer.C:
+				// 超时，强制终止
+				log.Printf("[TMUX][警告] 等待服务器停止超时(%v)，尝试强制终止", maxWaitTime)
+				killErr := s.KillSession()
+				if killErr != nil {
+					log.Printf("[TMUX][错误] 强制终止服务器失败: %v", killErr)
+					return fmt.Errorf("等待服务器停止超时，强制终止也失败: %v", killErr)
+				}
+				break waitLoop
+
+			case <-checkTicker.C:
+				// 检查服务器是否已停止
+				log.Printf("[TMUX] 检查服务器是否已停止")
+				stillRunning, err := s.IsRunning()
+				if err != nil {
+					log.Printf("[TMUX][警告] 检查服务器状态失败: %v, 继续等待", err)
+					continue
+				}
+
+				if !stillRunning {
+					log.Printf("[TMUX] 服务器已成功停止")
+					serverStopped = true
+					break waitLoop
+				} else {
+					log.Printf("[TMUX] 服务器仍在运行，继续等待")
+				}
 			}
 		}
 
-		// 等待一些时间，确保服务器完全停止
-		log.Printf("[TMUX] 等待服务器完全停止")
-		time.Sleep(2 * time.Second)
+		// 如果服务器已停止，等待一小段时间确保完全停止
+		if serverStopped {
+			log.Printf("[TMUX] 服务器已停止，等待额外的几秒确保完全停止")
+			time.Sleep(2 * time.Second)
+		} else {
+			// 如果是通过强制终止停止的，等待更长时间
+			log.Printf("[TMUX] 服务器已强制终止，等待额外的时间确保完全停止")
+			time.Sleep(5 * time.Second)
+		}
 	}
 
 	// 启动服务器
