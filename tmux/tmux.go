@@ -512,8 +512,11 @@ var serverInfoMap = make(map[string]*ServerInfo)
 // SaveServerInfo 保存服务器信息
 func SaveServerInfo(server *DSTServer) {
 	// 获取当前时间，确保使用本地时区
+	// 先保存原始时间对象，以便于精确比较
 	now := time.Now()
-	startTimeStr := now.Format("2006-01-02 15:04:05")
+	// 将时间向前调整5秒，确保在计算运行时间时不会出现负值
+	startTime := now.Add(-5 * time.Second)
+	startTimeStr := startTime.Format("2006-01-02 15:04:05")
 
 	info := &ServerInfo{
 		SessionName:    server.SessionName,
@@ -523,7 +526,7 @@ func SaveServerInfo(server *DSTServer) {
 		StartDirectory: server.StartDirectory,
 		Status:         "running",
 		StartTime:      startTimeStr,
-		RunningTime:    "0s", // 初始运行时间为0
+		RunningTime:    "5s", // 初始运行时间为5秒，与上面的时间调整一致
 	}
 
 	// 使用互斥锁保护并发访问
@@ -531,8 +534,8 @@ func SaveServerInfo(server *DSTServer) {
 	serverInfoMap[server.SessionName] = info
 	serverInfoMapMutex.Unlock()
 
-	log.Printf("[TMUX] 已保存服务器信息: %s, 模式: %s, 启动时间: %s",
-		server.SessionName, server.ServerMode, startTimeStr)
+	log.Printf("[TMUX] 已保存服务器信息: %s, 模式: %s, 启动时间: %s (实际时间: %s)",
+		server.SessionName, server.ServerMode, startTimeStr, now.Format("2006-01-02 15:04:05.000"))
 }
 
 // 互斥锁，保护并发访问serverInfoMap
@@ -586,16 +589,31 @@ func ListDSTServers() ([]ServerInfo, error) {
 				if err == nil {
 					// 确保运行时间为正数
 					now := time.Now()
-					if now.After(startTime) {
-						// 正常情况：当前时间在启动时间之后
-						duration := now.Sub(startTime)
-						info.RunningTime = duration.Round(time.Second).String()
-						log.Printf("[TMUX] 计算服务器运行时间: %s, 启动时间: %s, 当前时间: %s",
-							info.RunningTime, startTime.Format("2006-01-02 15:04:05"), now.Format("2006-01-02 15:04:05"))
+
+					// 计算时间差异
+					timeDiff := now.Sub(startTime)
+
+					// 允许有小的时间差异，比如启动时间和当前时间相差不超过10秒
+					tolerance := 10 * time.Second
+
+					if timeDiff >= -tolerance {
+						// 正常情况：当前时间在启动时间之后，或者时间差异在容差范围内
+
+						// 如果时间差异为负，但在容差范围内，则使用当前时间作为计算起点
+						if timeDiff < 0 {
+							log.Printf("[TMUX] 启动时间(%s)和当前时间(%s)差异在容差范围内，使用当前时间计算运行时间",
+								startTime.Format("2006-01-02 15:04:05.000"), now.Format("2006-01-02 15:04:05.000"))
+							info.RunningTime = "0s"
+						} else {
+							// 正常计算运行时间
+							info.RunningTime = timeDiff.Round(time.Second).String()
+							log.Printf("[TMUX] 计算服务器运行时间: %s, 启动时间: %s, 当前时间: %s",
+								info.RunningTime, startTime.Format("2006-01-02 15:04:05.000"), now.Format("2006-01-02 15:04:05.000"))
+						}
 					} else {
-						// 异常情况：启动时间在当前时间之后（可能是时区问题或时间设置错误）
-						log.Printf("[TMUX][警告] 服务器启动时间(%s)在当前时间(%s)之后，可能是时区问题",
-							startTime.Format("2006-01-02 15:04:05"), now.Format("2006-01-02 15:04:05"))
+						// 异常情况：启动时间远远早于当前时间（超过容差范围）
+						log.Printf("[TMUX][警告] 服务器启动时间(%s)远远早于当前时间(%s)，时间差异: %s",
+							startTime.Format("2006-01-02 15:04:05.000"), now.Format("2006-01-02 15:04:05.000"), timeDiff)
 						// 使用当前时间作为启动时间，运行时间设为0
 						info.StartTime = now.Format("2006-01-02 15:04:05")
 						info.RunningTime = "0s"
