@@ -2,15 +2,15 @@ package serverlog
 
 import (
 	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"time"
+
 	"github.com/gin-gonic/gin"
 	"github.com/go-ini/ini"
 	"github.com/gorilla/websocket"
 	"github.com/hpcloud/tail"
-	"log"
-	"net/http"
-	"os"
-	"path/filepath"
-	"time"
 )
 
 // 日志文件路径变量
@@ -22,7 +22,7 @@ var (
 func init() {
 	// 默认配置
 	DstServerLogPath = "./Klei/DoNotStarveTogether/02/Forest1/server_log.txt"
-	
+
 	// 尝试从配置文件读取
 	configFile := "./conf/app.conf"
 	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
@@ -38,8 +38,8 @@ func init() {
 	}
 }
 
-var upgrader = websocket.Upgrader{  CheckOrigin: func (r *http.Request) bool {  return true  },
-}
+var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
 func Logtailf(c *gin.Context) {
 	//服务升级，对于来到的http连接进行服务升级，升级到ws
 	cn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -58,7 +58,7 @@ func Logtailf(c *gin.Context) {
 		msg := string(message)
 		if msg == "log" {
 
-			Lslog(mt,cn)
+			Lslog(mt, cn)
 		}
 		if msg == "woshi client1" {
 			message = []byte("client1 去服务端了一趟")
@@ -74,7 +74,7 @@ func Logtailf(c *gin.Context) {
 		}
 	}
 }
-func Lslog(mt int,ws *websocket.Conn)  {
+func Lslog(mt int, ws *websocket.Conn) {
 	fileName := DstServerLogPath
 	//message := []byte(line.Text)
 	config := tail.Config{
@@ -100,7 +100,7 @@ func Lslog(mt int,ws *websocket.Conn)  {
 			time.Sleep(time.Second)
 			continue
 		}
-		msg:=line.Text+"\n"
+		msg := line.Text + "\n"
 		message := []byte(msg)
 		ws.WriteMessage(mt, message)
 		fmt.Println("line:", msg)
