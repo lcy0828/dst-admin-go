@@ -125,12 +125,13 @@ func (s *DSTServer) Start() error {
 	}
 
 	// 根据启动模式选择正确的可执行文件
-	executableName := "dontstarve_dedicated_server_nullrenderer"
+	executableName := ""
 	if s.ServerMode == "64" {
 		executableName = "dontstarve_dedicated_server_nullrenderer_x64"
-		log.Printf("[TMUX] 使用 64 位可执行文件: %s", executableName)
+		log.Printf("[TMUX] 启动模式: 64位, 使用可执行文件: %s", executableName)
 	} else {
-		log.Printf("[TMUX] 使用 32 位可执行文件: %s", executableName)
+		executableName = "dontstarve_dedicated_server_nullrenderer"
+		log.Printf("[TMUX] 启动模式: 32位, 使用可执行文件: %s", executableName)
 	}
 
 	// 构建启动命令
@@ -147,22 +148,50 @@ func (s *DSTServer) Start() error {
 		// 使用 -c 参数指定启动目录
 		log.Printf("[TMUX] 使用指定的启动目录: %s", s.StartDirectory)
 
-		// 判断启动目录是否应该是bin或bin64
+		// 根据启动模式和目录存在情况选择正确的目录
 		binDir := s.StartDirectory
 		if !strings.HasSuffix(binDir, "/bin") && !strings.HasSuffix(binDir, "/bin64") {
-			// 如果路径不以bin或bin64结尾，则判断使用哪个
+			// 如果路径不以bin或bin64结尾，则根据启动模式选择目录
 			bin64Path := fmt.Sprintf("%s/bin64", s.StartDirectory)
 			binPath := fmt.Sprintf("%s/bin", s.StartDirectory)
 
-			// 优先使用bin64目录
+			// 首先检查目录是否存在
+			bin64Exists := false
+			binExists := false
+
 			if _, err := os.Stat(bin64Path); !os.IsNotExist(err) {
-				binDir = bin64Path
-				log.Printf("[TMUX] 检测到bin64目录存在，使用: %s", binDir)
-			} else if _, err := os.Stat(binPath); !os.IsNotExist(err) {
-				binDir = binPath
-				log.Printf("[TMUX] 检测到bin目录存在，使用: %s", binDir)
+				bin64Exists = true
+				log.Printf("[TMUX] 检测到bin64目录存在: %s", bin64Path)
+			}
+
+			if _, err := os.Stat(binPath); !os.IsNotExist(err) {
+				binExists = true
+				log.Printf("[TMUX] 检测到bin目录存在: %s", binPath)
+			}
+
+			// 根据启动模式和目录存在情况选择目录
+			if s.ServerMode == "64" {
+				// 64位模式优先使用bin64目录
+				if bin64Exists {
+					binDir = bin64Path
+					log.Printf("[TMUX] 64位模式，使用bin64目录: %s", binDir)
+				} else if binExists {
+					binDir = binPath
+					log.Printf("[TMUX] 64位模式，但bin64目录不存在，使用bin目录: %s", binDir)
+				} else {
+					log.Printf("[TMUX] 64位模式，但bin和bin64目录都不存在，使用原始目录: %s", binDir)
+				}
 			} else {
-				log.Printf("[TMUX] 未检测到bin或bin64目录，使用原始目录: %s", binDir)
+				// 32位模式优先使用bin目录
+				if binExists {
+					binDir = binPath
+					log.Printf("[TMUX] 32位模式，使用bin目录: %s", binDir)
+				} else if bin64Exists {
+					binDir = bin64Path
+					log.Printf("[TMUX] 32位模式，但bin目录不存在，使用bin64目录: %s", binDir)
+				} else {
+					log.Printf("[TMUX] 32位模式，但bin和bin64目录都不存在，使用原始目录: %s", binDir)
+				}
 			}
 		}
 
@@ -180,7 +209,9 @@ func (s *DSTServer) Start() error {
 	}
 
 	elapsedTime := time.Since(startTime)
-	log.Printf("[TMUX] 已启动饥荒服务器: %s, 耗时: %v", s.SessionName, elapsedTime)
+	// 记录最终启动信息，包含启动模式、目录和可执行文件
+	log.Printf("[TMUX] 已启动饥荒服务器: %s, 启动模式: %s, 耗时: %v",
+		s.SessionName, s.ServerMode, elapsedTime)
 	return nil
 }
 

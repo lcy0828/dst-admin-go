@@ -145,7 +145,8 @@ func StartServer(c *gin.Context) {
 	}
 
 	elapsedTime := time.Since(startTime)
-	log.Printf("[API][StartServer] 服务器启动成功 会话名: %s, 耗时: %v", server.SessionName, elapsedTime)
+	log.Printf("[API][StartServer] 服务器启动成功 会话名: %s, 启动模式: %s, 耗时: %v",
+		server.SessionName, serverMode, elapsedTime)
 	c.JSON(http.StatusOK, gin.H{
 		"status": 200,
 		"msg":    "服务器启动成功",
@@ -153,6 +154,7 @@ func StartServer(c *gin.Context) {
 			"session_name": server.SessionName,
 			"archive_name": req.ArchiveName,
 			"world_name":   req.WorldName,
+			"server_mode":  serverMode,
 			"elapsed_time": elapsedTime.String(),
 		},
 	})
