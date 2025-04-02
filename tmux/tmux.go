@@ -350,6 +350,52 @@ func (s *DSTServer) KillSession() error {
 	return nil
 }
 
+// Restart 重启饥荒服务器，先停止再启动
+func (s *DSTServer) Restart() error {
+	startTime := time.Now()
+	log.Printf("[TMUX] 开始重启饥荒服务器 会话名: %s", s.SessionName)
+
+	// 检查服务器是否在运行
+	log.Printf("[TMUX] 检查服务器是否在运行")
+	running, err := s.IsRunning()
+	if err != nil {
+		log.Printf("[TMUX][错误] 检查服务器状态失败: %v", err)
+		return err
+	}
+
+	// 如果服务器正在运行，先停止它
+	if running {
+		log.Printf("[TMUX] 服务器正在运行，先停止它")
+		// 先尝试优雅地停止
+		stopErr := s.Stop()
+		if stopErr != nil {
+			log.Printf("[TMUX][警告] 优雅停止服务器失败: %v, 尝试强制终止", stopErr)
+			// 如果优雅停止失败，尝试强制终止
+			killErr := s.KillSession()
+			if killErr != nil {
+				log.Printf("[TMUX][错误] 强制终止服务器失败: %v", killErr)
+				return fmt.Errorf("停止服务器失败: %v, 强制终止也失败: %v", stopErr, killErr)
+			}
+		}
+
+		// 等待一些时间，确保服务器完全停止
+		log.Printf("[TMUX] 等待服务器完全停止")
+		time.Sleep(2 * time.Second)
+	}
+
+	// 启动服务器
+	log.Printf("[TMUX] 开始启动服务器")
+	err = s.Start()
+	if err != nil {
+		log.Printf("[TMUX][错误] 启动服务器失败: %v", err)
+		return fmt.Errorf("启动服务器失败: %v", err)
+	}
+
+	elapsedTime := time.Since(startTime)
+	log.Printf("[TMUX] 已重启饥荒服务器: %s, 耗时: %v", s.SessionName, elapsedTime)
+	return nil
+}
+
 // ListDSTServers 列出所有饥荒服务器会话
 func ListDSTServers() ([]string, error) {
 	startTime := time.Now()

@@ -164,6 +164,7 @@ func InitRouter() *gin.Engine {
 		{
 			tmuxGroup.POST("/start", tmux.StartServer)
 			tmuxGroup.POST("/stop", tmux.StopServer)
+			tmuxGroup.POST("/restart", tmux.RestartServer) // 新增重启接口
 			tmuxGroup.POST("/command", tmux.SendCommand)
 			tmuxGroup.GET("/list", tmux.ListServers)
 			tmuxGroup.POST("/kill", tmux.KillServer)

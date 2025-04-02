@@ -363,6 +363,89 @@ func ListServers(c *gin.Context) {
 	})
 }
 
+// RestartServer 重启服务器处理函数
+func RestartServer(c *gin.Context) {
+	startTime := time.Now()
+	clientIP := c.ClientIP()
+	log.Printf("[API][RestartServer] 收到重启服务器请求 来自IP: %s", clientIP)
+
+	sessionName := c.Query("session_name")
+	if sessionName == "" {
+		var req ServerSessionRequest
+		if err := c.ShouldBindJSON(&req); err == nil {
+			sessionName = req.SessionName
+			log.Printf("[API][RestartServer] 从请求体获取会话名: %s", sessionName)
+		} else {
+			log.Printf("[API][RestartServer] 请求体解析失败: %v", err)
+		}
+	} else {
+		log.Printf("[API][RestartServer] 从查询参数获取会话名: %s", sessionName)
+	}
+
+	if sessionName == "" {
+		log.Printf("[API][RestartServer] 未提供会话名称 IP: %s", clientIP)
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status": 400,
+			"msg":    "请提供会话名称",
+		})
+		return
+	}
+
+	// 解析会话名称获取存档和世界信息
+	parts := strings.Split(sessionName, "_")
+	if len(parts) < 3 || parts[0] != "dstserver" {
+		log.Printf("[API][RestartServer] 会话名称格式不正确: %s IP: %s", sessionName, clientIP)
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status": 400,
+			"msg":    "会话名称格式不正确，应为 dstserver_存档名_世界名",
+		})
+		return
+	}
+
+	log.Printf("[API][RestartServer] 尝试重启服务器 会话名: %s, 存档: %s, 世界: %s",
+		sessionName, parts[1], parts[2])
+
+	// 获取服务器实例引用
+	server, err := tmux.NewDSTServer(
+		parts[1],
+		parts[2],
+		dstUGCPath,
+		filepath.Dir(dstSavePath),
+		"DoNotStarveTogether",
+		dstServerPath, // 传递服务器安装路径作为启动目录
+		dstServerMode, // 使用默认启动模式
+	)
+	if err != nil {
+		log.Printf("[API][RestartServer] 获取服务器实例引用失败: %v 会话名: %s", err, sessionName)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status": 500,
+			"msg":    "获取服务器实例引用失败: " + err.Error(),
+		})
+		return
+	}
+
+	// 重启服务器
+	if err := server.Restart(); err != nil {
+		log.Printf("[API][RestartServer] 重启服务器失败: %v 会话名: %s", err, sessionName)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status": 500,
+			"msg":    "重启服务器失败: " + err.Error(),
+		})
+		return
+	}
+
+	elapsedTime := time.Since(startTime)
+	log.Printf("[API][RestartServer] 服务器已重启 会话名: %s, 耗时: %v", sessionName, elapsedTime)
+	c.JSON(http.StatusOK, gin.H{
+		"status": 200,
+		"msg":    "服务器已重启",
+		"data": gin.H{
+			"session_name": sessionName,
+			"elapsed_time": elapsedTime.String(),
+		},
+	})
+}
+
 // KillServer 强制终止服务器处理函数
 func KillServer(c *gin.Context) {
 	startTime := time.Now()
