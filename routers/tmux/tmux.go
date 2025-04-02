@@ -18,6 +18,7 @@ var (
 	dstSavePath   string // DST存档目录
 	dstUGCPath    string // DST模组目录
 	dstServerPath string // DST服务器安装路径
+	dstServerMode string // DST服务器启动模式，32或64
 )
 
 // 初始化函数，从配置文件读取配置
@@ -26,6 +27,7 @@ func init() {
 	dstSavePath = "./Klei/DoNotStarveTogether"
 	dstUGCPath = "./dstserver/ugc_mods"
 	dstServerPath = "./dstserver"
+	dstServerMode = "64" // 默认使用 64 位模式
 
 	// 尝试从配置文件读取
 	configFile := "./conf/app.conf"
@@ -46,6 +48,17 @@ func init() {
 				dstServerPath = cfg.Section("paths").Key("DST_SERVER_PATH").String()
 				log.Printf("从配置文件加载DST服务器安装路径: %s", dstServerPath)
 			}
+
+			if cfg.Section("paths").HasKey("DST_SERVER_MODE") {
+				dstServerMode = cfg.Section("paths").Key("DST_SERVER_MODE").String()
+				// 验证启动模式是否有效
+				if dstServerMode != "32" && dstServerMode != "64" {
+					log.Printf("配置文件中的DST服务器启动模式无效: %s，将使用默认值64", dstServerMode)
+					dstServerMode = "64"
+				} else {
+					log.Printf("从配置文件加载DST服务器启动模式: %s", dstServerMode)
+				}
+			}
 		} else {
 			log.Printf("加载配置文件失败: %v，将使用默认配置", err)
 		}
@@ -53,14 +66,15 @@ func init() {
 		log.Printf("配置文件不存在，使用默认DST路径配置")
 	}
 
-	log.Printf("tmux模块初始化完成，DST存档路径: %s, 模组路径: %s, 服务器安装路径: %s",
-		dstSavePath, dstUGCPath, dstServerPath)
+	log.Printf("tmux模块初始化完成，DST存档路径: %s, 模组路径: %s, 服务器安装路径: %s, 启动模式: %s",
+		dstSavePath, dstUGCPath, dstServerPath, dstServerMode)
 }
 
 // ServerStartRequest 启动服务器请求结构
 type ServerStartRequest struct {
 	ArchiveName string `json:"archive_name" binding:"required"` // 存档名称
 	WorldName   string `json:"world_name" binding:"required"`   // 世界名称
+	ServerMode  string `json:"server_mode"`                     // 服务器启动模式，32或64，可选
 }
 
 // ServerCommandRequest 发送命令请求结构
@@ -85,7 +99,21 @@ func StartServer(c *gin.Context) {
 		return
 	}
 
-	log.Printf("[API][StartServer] 尝试启动服务器 存档: %s, 世界: %s", req.ArchiveName, req.WorldName)
+	// 如果请求中指定了启动模式，则使用请求中的启动模式
+	serverMode := dstServerMode // 默认使用配置文件中的启动模式
+	if req.ServerMode != "" {
+		// 验证启动模式是否有效
+		if req.ServerMode == "32" || req.ServerMode == "64" {
+			serverMode = req.ServerMode
+			log.Printf("[API][StartServer] 使用请求指定的启动模式: %s", serverMode)
+		} else {
+			log.Printf("[API][StartServer] 请求指定的启动模式无效: %s，将使用默认值: %s", req.ServerMode, dstServerMode)
+		}
+	} else {
+		log.Printf("[API][StartServer] 未指定启动模式，使用默认模式: %s", serverMode)
+	}
+
+	log.Printf("[API][StartServer] 尝试启动服务器 存档: %s, 世界: %s, 启动模式: %s", req.ArchiveName, req.WorldName, serverMode)
 
 	// 创建服务器实例
 	server, err := tmux.NewDSTServer(
@@ -95,6 +123,7 @@ func StartServer(c *gin.Context) {
 		filepath.Dir(dstSavePath), // 存档根目录是存档路径的父目录
 		"DoNotStarveTogether",
 		dstServerPath, // 传递服务器安装路径作为启动目录
+		serverMode,    // 传递启动模式
 	)
 	if err != nil {
 		log.Printf("[API][StartServer] 创建服务器实例失败: %v 存档: %s, 世界: %s", err, req.ArchiveName, req.WorldName)
@@ -179,6 +208,7 @@ func StopServer(c *gin.Context) {
 		filepath.Dir(dstSavePath),
 		"DoNotStarveTogether",
 		dstServerPath, // 传递服务器安装路径作为启动目录
+		dstServerMode, // 使用默认启动模式
 	)
 	if err != nil {
 		log.Printf("[API][StopServer] 创建服务器实例失败: %v 会话名: %s", err, sessionName)
@@ -248,6 +278,7 @@ func SendCommand(c *gin.Context) {
 		filepath.Dir(dstSavePath),
 		"DoNotStarveTogether",
 		dstServerPath, // 传递服务器安装路径作为启动目录
+		dstServerMode, // 使用默认启动模式
 	)
 	if err != nil {
 		log.Printf("[API][SendCommand] 创建服务器实例失败: %v 会话名: %s", err, req.SessionName)
@@ -375,6 +406,7 @@ func KillServer(c *gin.Context) {
 		filepath.Dir(dstSavePath),
 		"DoNotStarveTogether",
 		dstServerPath, // 传递服务器安装路径作为启动目录
+		dstServerMode, // 使用默认启动模式
 	)
 	if err != nil {
 		log.Printf("[API][KillServer] 创建服务器实例失败: %v 会话名: %s", err, sessionName)

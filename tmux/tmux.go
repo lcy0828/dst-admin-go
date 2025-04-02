@@ -20,11 +20,12 @@ type DSTServer struct {
 	ConfDir        string // 配置目录
 	SessionName    string // tmux会话名称
 	StartDirectory string // 启动目录
+	ServerMode     string // 服务器启动模式，32或64
 	tmux           *gotmux.Tmux
 }
 
 // NewDSTServer 创建一个新的饥荒服务器实例
-func NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir string, startDirectory ...string) (*DSTServer, error) {
+func NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir string, startDirectory string, serverMode ...string) (*DSTServer, error) {
 	log.Printf("[TMUX] 创建饥荒服务器实例 存档: %s, 世界: %s", archiveName, worldName)
 
 	// 初始化tmux客户端
@@ -42,11 +43,26 @@ func NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir str
 	// 如果提供了启动目录，则使用提供的启动目录
 	// 否则使用默认目录
 	startDir := ""
-	if len(startDirectory) > 0 && startDirectory[0] != "" {
-		startDir = startDirectory[0]
+	if startDirectory != "" {
+		startDir = startDirectory
 		log.Printf("[TMUX] 使用指定的启动目录: %s", startDir)
 	} else {
 		log.Printf("[TMUX] 未指定启动目录，使用默认目录")
+	}
+
+	// 如果提供了启动模式，则使用提供的启动模式
+	// 否则使用默认模式
+	mode := "64" // 默认使用 64 位模式
+	if len(serverMode) > 0 && serverMode[0] != "" {
+		// 验证启动模式是否有效
+		if serverMode[0] == "32" || serverMode[0] == "64" {
+			mode = serverMode[0]
+			log.Printf("[TMUX] 使用指定的启动模式: %s", mode)
+		} else {
+			log.Printf("[TMUX] 指定的启动模式无效: %s，将使用默认值64", serverMode[0])
+		}
+	} else {
+		log.Printf("[TMUX] 未指定启动模式，使用默认模式: %s", mode)
 	}
 
 	server := &DSTServer{
@@ -57,10 +73,11 @@ func NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir str
 		ConfDir:        confDir,
 		SessionName:    sessionName,
 		StartDirectory: startDir,
+		ServerMode:     mode,
 		tmux:           tmux,
 	}
 
-	log.Printf("[TMUX] 饥荒服务器实例创建成功 会话名: %s", sessionName)
+	log.Printf("[TMUX] 饥荒服务器实例创建成功 会话名: %s, 启动模式: %s", sessionName, mode)
 	return server, nil
 }
 
@@ -107,9 +124,18 @@ func (s *DSTServer) Start() error {
 		return fmt.Errorf("服务器已经在运行中: %s", s.SessionName)
 	}
 
+	// 根据启动模式选择正确的可执行文件
+	executableName := "dontstarve_dedicated_server_nullrenderer"
+	if s.ServerMode == "64" {
+		executableName = "dontstarve_dedicated_server_nullrenderer_x64"
+		log.Printf("[TMUX] 使用 64 位可执行文件: %s", executableName)
+	} else {
+		log.Printf("[TMUX] 使用 32 位可执行文件: %s", executableName)
+	}
+
 	// 构建启动命令
-	startCmd := fmt.Sprintf("./dontstarve_dedicated_server_nullrenderer -ugc_directory %s -persistent_storage_root %s -conf_dir %s -cluster %s -shard %s",
-		s.UGCDirectory, s.StorageRoot, s.ConfDir, s.ArchiveName, s.WorldName)
+	startCmd := fmt.Sprintf("./%s -ugc_directory %s -persistent_storage_root %s -conf_dir %s -cluster %s -shard %s",
+		executableName, s.UGCDirectory, s.StorageRoot, s.ConfDir, s.ArchiveName, s.WorldName)
 	log.Printf("[TMUX] 构建启动命令: %s", startCmd)
 
 	// 使用gotmux的Command方法创建会话
