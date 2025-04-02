@@ -15,8 +15,9 @@ import (
 
 // 配置变量
 var (
-	dstSavePath string // DST存档目录
-	dstUGCPath  string // DST模组目录
+	dstSavePath   string // DST存档目录
+	dstUGCPath    string // DST模组目录
+	dstServerPath string // DST服务器安装路径
 )
 
 // 初始化函数，从配置文件读取配置
@@ -24,6 +25,7 @@ func init() {
 	// 默认配置
 	dstSavePath = "./Klei/DoNotStarveTogether"
 	dstUGCPath = "./dstserver/ugc_mods"
+	dstServerPath = "./dstserver"
 
 	// 尝试从配置文件读取
 	configFile := "./conf/app.conf"
@@ -39,6 +41,11 @@ func init() {
 				dstUGCPath = cfg.Section("paths").Key("DST_UGC_PATH").String()
 				log.Printf("从配置文件加载DST模组路径: %s", dstUGCPath)
 			}
+
+			if cfg.Section("paths").HasKey("DST_SERVER_PATH") {
+				dstServerPath = cfg.Section("paths").Key("DST_SERVER_PATH").String()
+				log.Printf("从配置文件加载DST服务器安装路径: %s", dstServerPath)
+			}
 		} else {
 			log.Printf("加载配置文件失败: %v，将使用默认配置", err)
 		}
@@ -46,7 +53,8 @@ func init() {
 		log.Printf("配置文件不存在，使用默认DST路径配置")
 	}
 
-	log.Printf("tmux模块初始化完成，DST存档路径: %s, 模组路径: %s", dstSavePath, dstUGCPath)
+	log.Printf("tmux模块初始化完成，DST存档路径: %s, 模组路径: %s, 服务器安装路径: %s",
+		dstSavePath, dstUGCPath, dstServerPath)
 }
 
 // ServerStartRequest 启动服务器请求结构
@@ -86,6 +94,7 @@ func StartServer(c *gin.Context) {
 		dstUGCPath,
 		filepath.Dir(dstSavePath), // 存档根目录是存档路径的父目录
 		"DoNotStarveTogether",
+		dstServerPath, // 传递服务器安装路径作为启动目录
 	)
 	if err != nil {
 		log.Printf("[API][StartServer] 创建服务器实例失败: %v 存档: %s, 世界: %s", err, req.ArchiveName, req.WorldName)
@@ -169,6 +178,7 @@ func StopServer(c *gin.Context) {
 		dstUGCPath,
 		filepath.Dir(dstSavePath),
 		"DoNotStarveTogether",
+		dstServerPath, // 传递服务器安装路径作为启动目录
 	)
 	if err != nil {
 		log.Printf("[API][StopServer] 创建服务器实例失败: %v 会话名: %s", err, sessionName)
@@ -237,6 +247,7 @@ func SendCommand(c *gin.Context) {
 		dstUGCPath,
 		filepath.Dir(dstSavePath),
 		"DoNotStarveTogether",
+		dstServerPath, // 传递服务器安装路径作为启动目录
 	)
 	if err != nil {
 		log.Printf("[API][SendCommand] 创建服务器实例失败: %v 会话名: %s", err, req.SessionName)
@@ -363,6 +374,7 @@ func KillServer(c *gin.Context) {
 		dstUGCPath,
 		filepath.Dir(dstSavePath),
 		"DoNotStarveTogether",
+		dstServerPath, // 传递服务器安装路径作为启动目录
 	)
 	if err != nil {
 		log.Printf("[API][KillServer] 创建服务器实例失败: %v 会话名: %s", err, sessionName)

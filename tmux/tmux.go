@@ -3,6 +3,7 @@ package tmux
 import (
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -12,17 +13,18 @@ import (
 
 // DSTServer 表示一个饥荒服务器实例
 type DSTServer struct {
-	ArchiveName  string // 存档名称
-	WorldName    string // 世界名称
-	UGCDirectory string // 模组目录
-	StorageRoot  string // 存档根目录
-	ConfDir      string // 配置目录
-	SessionName  string // tmux会话名称
-	tmux         *gotmux.Tmux
+	ArchiveName    string // 存档名称
+	WorldName      string // 世界名称
+	UGCDirectory   string // 模组目录
+	StorageRoot    string // 存档根目录
+	ConfDir        string // 配置目录
+	SessionName    string // tmux会话名称
+	StartDirectory string // 启动目录
+	tmux           *gotmux.Tmux
 }
 
 // NewDSTServer 创建一个新的饥荒服务器实例
-func NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir string) (*DSTServer, error) {
+func NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir string, startDirectory ...string) (*DSTServer, error) {
 	log.Printf("[TMUX] 创建饥荒服务器实例 存档: %s, 世界: %s", archiveName, worldName)
 
 	// 初始化tmux客户端
@@ -37,14 +39,25 @@ func NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir str
 	sessionName := fmt.Sprintf("dstserver_%s_%s", archiveName, worldName)
 	log.Printf("[TMUX] 创建会话名称: %s", sessionName)
 
+	// 如果提供了启动目录，则使用提供的启动目录
+	// 否则使用默认目录
+	startDir := ""
+	if len(startDirectory) > 0 && startDirectory[0] != "" {
+		startDir = startDirectory[0]
+		log.Printf("[TMUX] 使用指定的启动目录: %s", startDir)
+	} else {
+		log.Printf("[TMUX] 未指定启动目录，使用默认目录")
+	}
+
 	server := &DSTServer{
-		ArchiveName:  archiveName,
-		WorldName:    worldName,
-		UGCDirectory: ugcDirectory,
-		StorageRoot:  storageRoot,
-		ConfDir:      confDir,
-		SessionName:  sessionName,
-		tmux:         tmux,
+		ArchiveName:    archiveName,
+		WorldName:      worldName,
+		UGCDirectory:   ugcDirectory,
+		StorageRoot:    storageRoot,
+		ConfDir:        confDir,
+		SessionName:    sessionName,
+		StartDirectory: startDir,
+		tmux:           tmux,
 	}
 
 	log.Printf("[TMUX] 饥荒服务器实例创建成功 会话名: %s", sessionName)
@@ -101,7 +114,40 @@ func (s *DSTServer) Start() error {
 
 	// 使用gotmux的Command方法创建会话
 	log.Printf("[TMUX] 正在创建tmux会话 会话名: %s", s.SessionName)
-	output, err := s.tmux.Command("new-session", "-s", s.SessionName, "-d", startCmd)
+
+	// 如果指定了启动目录，则使用指定的启动目录
+	var output string
+	if s.StartDirectory != "" {
+		// 使用 -c 参数指定启动目录
+		log.Printf("[TMUX] 使用指定的启动目录: %s", s.StartDirectory)
+
+		// 判断启动目录是否应该是bin或bin64
+		binDir := s.StartDirectory
+		if !strings.HasSuffix(binDir, "/bin") && !strings.HasSuffix(binDir, "/bin64") {
+			// 如果路径不以bin或bin64结尾，则判断使用哪个
+			bin64Path := fmt.Sprintf("%s/bin64", s.StartDirectory)
+			binPath := fmt.Sprintf("%s/bin", s.StartDirectory)
+
+			// 优先使用bin64目录
+			if _, err := os.Stat(bin64Path); !os.IsNotExist(err) {
+				binDir = bin64Path
+				log.Printf("[TMUX] 检测到bin64目录存在，使用: %s", binDir)
+			} else if _, err := os.Stat(binPath); !os.IsNotExist(err) {
+				binDir = binPath
+				log.Printf("[TMUX] 检测到bin目录存在，使用: %s", binDir)
+			} else {
+				log.Printf("[TMUX] 未检测到bin或bin64目录，使用原始目录: %s", binDir)
+			}
+		}
+
+		// 使用 -c 参数指定启动目录
+		output, err = s.tmux.Command("new-session", "-s", s.SessionName, "-c", binDir, "-d", startCmd)
+	} else {
+		// 不指定启动目录，使用默认目录
+		log.Printf("[TMUX] 使用默认启动目录")
+		output, err = s.tmux.Command("new-session", "-s", s.SessionName, "-d", startCmd)
+	}
+
 	if err != nil {
 		log.Printf("[TMUX][错误] 创建tmux会话失败: %v, 输出: %s", err, output)
 		return fmt.Errorf("创建tmux会话失败: %v", err)
