@@ -11,6 +11,7 @@ import (
 	"dont/routers/server"
 	"dont/routers/status"
 	"dont/routers/tag"
+	"dont/routers/tmux"
 	"dont/routers/user"
 	"github.com/gin-gonic/gin"
 )
@@ -116,22 +117,22 @@ func InitRouter() *gin.Engine {
 		{
 			dstcustom.GET("/customize", dstcustomize.GetCustomizeLua)
 		}
-		
+
 		// 存档备份管理
 		archiveBackup := api.Group("/backup")
 		{
 			// 创建存档备份
 			archiveBackup.POST("/create", backup.CreateBackup())
-			
+
 			// 获取备份列表
 			archiveBackup.GET("/list", backup.ListBackups())
-			
+
 			// 下载备份文件
 			archiveBackup.GET("/download", backup.DownloadBackup())
-			
+
 			// 恢复备份
 			archiveBackup.POST("/restore", backup.RestoreBackup())
-			
+
 			// 删除备份
 			archiveBackup.POST("/delete", backup.DeleteBackup())
 		}
@@ -141,13 +142,13 @@ func InitRouter() *gin.Engine {
 		{
 			// 获取所有已连接的Agent
 			agents.GET("/list", agent.GetAllAgents)
-			
+
 			// 向指定Agent发送命令（需要认证）
-			agents.POST("/command",  agent.SendCommand)
-			
+			agents.POST("/command", agent.SendCommand)
+
 			// 请求Agent上报信息（需要认证）
 			agents.POST("/report", agent.RequestReport)
-			
+
 			// 安全密钥管理（暂时不需要认证）
 			agents.GET("/security/key", agent.GetSecurityKey)
 			agents.POST("/security/key/generate", agent.GenerateNewKey)
@@ -156,6 +157,16 @@ func InitRouter() *gin.Engine {
 			// 获取命令执行结果
 			agents.GET("/command/:command_id", agent.GetCommandResult)
 			agents.GET("/command", agent.GetCommandResults)
+		}
+
+		// Tmux服务器管理API
+		tmuxGroup := api.Group("/tmux")
+		{
+			tmuxGroup.POST("/start", tmux.StartServer)
+			tmuxGroup.POST("/stop", tmux.StopServer)
+			tmuxGroup.POST("/command", tmux.SendCommand)
+			tmuxGroup.GET("/list", tmux.ListServers)
+			tmuxGroup.POST("/kill", tmux.KillServer)
 		}
 	}
 
