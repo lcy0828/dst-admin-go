@@ -85,24 +85,36 @@ func NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir str
 func (s *DSTServer) IsRunning() (bool, error) {
 	log.Printf("[TMUX] 检查服务器运行状态 会话名: %s", s.SessionName)
 
-	// 列出所有会话
-	log.Printf("[TMUX] 正在获取tmux会话列表")
+	// 使用两种方法检查会话是否存在
+	// 方法1: 使用gotmux的ListSessions方法
+	log.Printf("[TMUX] 方法1: 使用gotmux的ListSessions方法检查")
 	sessions, err := s.tmux.ListSessions()
-
 	if err != nil {
-		log.Printf("[TMUX][错误] 获取tmux会话列表失败: %v", err)
-		return false, fmt.Errorf("获取tmux会话列表失败: %v", err)
-	}
-
-	// 检查是否存在指定名称的会话
-	for _, session := range sessions {
-		if session.Name == s.SessionName {
-			log.Printf("[TMUX] 服务器正在运行 会话名: %s", s.SessionName)
-			return true, nil
+		log.Printf("[TMUX][警告] 使用gotmux获取tmux会话列表失败: %v, 将尝试方法2", err)
+	} else {
+		// 检查是否存在指定名称的会话
+		for _, session := range sessions {
+			log.Printf("[TMUX] 检测到会话: %s", session.Name)
+			if session.Name == s.SessionName {
+				log.Printf("[TMUX] 方法1检测到服务器正在运行 会话名: %s", s.SessionName)
+				return true, nil
+			}
 		}
+		log.Printf("[TMUX] 方法1未检测到服务器运行, 将尝试方法2")
 	}
 
-	log.Printf("[TMUX] 服务器未运行 会话名: %s", s.SessionName)
+	// 方法2: 直接使用tmux has-session命令检查
+	log.Printf("[TMUX] 方法2: 使用tmux has-session命令检查")
+	cmd := exec.Command("tmux", "has-session", "-t", s.SessionName)
+	err = cmd.Run()
+	if err == nil {
+		// 如果命令执行成功，说明会话存在
+		log.Printf("[TMUX] 方法2检测到服务器正在运行 会话名: %s", s.SessionName)
+		return true, nil
+	}
+
+	// 如果两种方法都未检测到会话，则认为服务器未运行
+	log.Printf("[TMUX] 两种方法都未检测到服务器运行 会话名: %s", s.SessionName)
 	return false, nil
 }
 
