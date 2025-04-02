@@ -511,6 +511,10 @@ var serverInfoMap = make(map[string]*ServerInfo)
 
 // SaveServerInfo 保存服务器信息
 func SaveServerInfo(server *DSTServer) {
+	// 获取当前时间，确保使用本地时区
+	now := time.Now()
+	startTimeStr := now.Format("2006-01-02 15:04:05")
+
 	info := &ServerInfo{
 		SessionName:    server.SessionName,
 		ArchiveName:    server.ArchiveName,
@@ -518,7 +522,8 @@ func SaveServerInfo(server *DSTServer) {
 		ServerMode:     server.ServerMode,
 		StartDirectory: server.StartDirectory,
 		Status:         "running",
-		StartTime:      time.Now().Format("2006-01-02 15:04:05"),
+		StartTime:      startTimeStr,
+		RunningTime:    "0s", // 初始运行时间为0
 	}
 
 	// 使用互斥锁保护并发访问
@@ -526,7 +531,8 @@ func SaveServerInfo(server *DSTServer) {
 	serverInfoMap[server.SessionName] = info
 	serverInfoMapMutex.Unlock()
 
-	log.Printf("[TMUX] 已保存服务器信息: %s, 模式: %s", server.SessionName, server.ServerMode)
+	log.Printf("[TMUX] 已保存服务器信息: %s, 模式: %s, 启动时间: %s",
+		server.SessionName, server.ServerMode, startTimeStr)
 }
 
 // 互斥锁，保护并发访问serverInfoMap
@@ -574,8 +580,37 @@ func ListDSTServers() ([]ServerInfo, error) {
 		if running, exists := runningSessionMap[sessionName]; exists && running {
 			info.Status = "running"
 			// 计算运行时间
-			startTime, _ := time.Parse("2006-01-02 15:04:05", info.StartTime)
-			info.RunningTime = time.Since(startTime).Round(time.Second).String()
+			startTimeStr := info.StartTime
+			if startTimeStr != "unknown" {
+				startTime, err := time.Parse("2006-01-02 15:04:05", startTimeStr)
+				if err == nil {
+					// 确保运行时间为正数
+					now := time.Now()
+					if now.After(startTime) {
+						// 正常情况：当前时间在启动时间之后
+						duration := now.Sub(startTime)
+						info.RunningTime = duration.Round(time.Second).String()
+						log.Printf("[TMUX] 计算服务器运行时间: %s, 启动时间: %s, 当前时间: %s",
+							info.RunningTime, startTime.Format("2006-01-02 15:04:05"), now.Format("2006-01-02 15:04:05"))
+					} else {
+						// 异常情况：启动时间在当前时间之后（可能是时区问题或时间设置错误）
+						log.Printf("[TMUX][警告] 服务器启动时间(%s)在当前时间(%s)之后，可能是时区问题",
+							startTime.Format("2006-01-02 15:04:05"), now.Format("2006-01-02 15:04:05"))
+						// 使用当前时间作为启动时间，运行时间设为0
+						info.StartTime = now.Format("2006-01-02 15:04:05")
+						info.RunningTime = "0s"
+					}
+				} else {
+					log.Printf("[TMUX][警告] 解析启动时间失败: %v, 原始时间字符串: %s", err, startTimeStr)
+					// 如果解析失败，重置启动时间和运行时间
+					info.StartTime = time.Now().Format("2006-01-02 15:04:05")
+					info.RunningTime = "0s"
+				}
+			} else {
+				// 如果启动时间未知，设置为当前时间
+				info.StartTime = time.Now().Format("2006-01-02 15:04:05")
+				info.RunningTime = "0s"
+			}
 		} else {
 			info.Status = "stopped"
 			info.RunningTime = ""
