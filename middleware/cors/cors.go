@@ -8,14 +8,21 @@ import (
 )
 
 func Cors() gin.HandlerFunc {
+	// 注意: AllowAllOrigins 和 AllowCredentials 同时为 true 可能会导致某些浏览器拒绝请求
+	// 因为这违反了 CORS 规范
+	// 如果需要支持凭证，则使用 AllowOriginFunc 或者指定具体的源
 	return cors.New(cors.Config{
-		//AllowAllOrigins:  true,
-		AllowOrigins:  []string{"http://dont.lcy.pub", "https://dont.lcy.pub", "http://dont.lcy.pub:5173", "http://192.168.2.25:8080", "http://192.168.2.22:8080"},
-		AllowMethods:  []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		// 选择一种方式允许所有源
+		AllowAllOrigins: true, // 允许所有源，但不支持凭证
+		// 或者使用下面的方式允许所有源并支持凭证
+		AllowOriginFunc: func(origin string) bool {
+			return true // 允许所有源，并支持凭证
+		},
+		AllowMethods:  []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
 		AllowHeaders:  []string{"Origin", "X-Requested-With", "X-Extra-Header", "Content-Type", "Accept", "Authorization"},
-		ExposeHeaders: []string{"*"},
-		//ExposeHeaders:    []string{"Content-Length", "Authorization", "Content-Type","Access-Control-Allow-Origin","Access-Control-Allow-Headers","Cache-Control","Content-Language"},
-		AllowCredentials: true,
+		ExposeHeaders: []string{"Content-Length", "Authorization", "Content-Type", "Access-Control-Allow-Origin", "Access-Control-Allow-Headers"},
+		// 如果需要支持凭证，请使用 AllowOriginFunc 而不是 AllowAllOrigins
+		AllowCredentials: false, // 当 AllowAllOrigins 为 true 时，这里应该设置为 false
 		MaxAge:           12 * time.Hour,
 	},
 	)
