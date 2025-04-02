@@ -77,6 +77,11 @@ type ServerStartRequest struct {
 	ServerMode  string `json:"server_mode"`                     // 服务器启动模式，32或64，可选
 }
 
+// ServerSessionRequest 会话操作请求结构，用于停止和强制终止服务器
+type ServerSessionRequest struct {
+	SessionName string `json:"session_name" binding:"required"` // 会话名称
+}
+
 // ServerCommandRequest 发送命令请求结构
 type ServerCommandRequest struct {
 	SessionName string `json:"session_name" binding:"required"` // 会话名称
@@ -115,7 +120,7 @@ func StartServer(c *gin.Context) {
 
 	log.Printf("[API][StartServer] 尝试启动服务器 存档: %s, 世界: %s, 启动模式: %s", req.ArchiveName, req.WorldName, serverMode)
 
-	// 创建服务器实例
+	// 创建新的服务器实例
 	server, err := tmux.NewDSTServer(
 		req.ArchiveName,
 		req.WorldName,
@@ -126,10 +131,10 @@ func StartServer(c *gin.Context) {
 		serverMode,    // 传递启动模式
 	)
 	if err != nil {
-		log.Printf("[API][StartServer] 创建服务器实例失败: %v 存档: %s, 世界: %s", err, req.ArchiveName, req.WorldName)
+		log.Printf("[API][StartServer] 创建新的服务器实例失败: %v 存档: %s, 世界: %s", err, req.ArchiveName, req.WorldName)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status": 500,
-			"msg":    "创建服务器实例失败: " + err.Error(),
+			"msg":    "创建新的服务器实例失败: " + err.Error(),
 		})
 		return
 	}
@@ -168,7 +173,7 @@ func StopServer(c *gin.Context) {
 
 	sessionName := c.Query("session_name")
 	if sessionName == "" {
-		var req ServerCommandRequest
+		var req ServerSessionRequest
 		if err := c.ShouldBindJSON(&req); err == nil {
 			sessionName = req.SessionName
 			log.Printf("[API][StopServer] 从请求体获取会话名: %s", sessionName)
@@ -202,7 +207,7 @@ func StopServer(c *gin.Context) {
 	log.Printf("[API][StopServer] 尝试停止服务器 会话名: %s, 存档: %s, 世界: %s",
 		sessionName, parts[1], parts[2])
 
-	// 创建服务器实例
+	// 获取服务器实例引用
 	server, err := tmux.NewDSTServer(
 		parts[1],
 		parts[2],
@@ -213,10 +218,10 @@ func StopServer(c *gin.Context) {
 		dstServerMode, // 使用默认启动模式
 	)
 	if err != nil {
-		log.Printf("[API][StopServer] 创建服务器实例失败: %v 会话名: %s", err, sessionName)
+		log.Printf("[API][StopServer] 获取服务器实例引用失败: %v 会话名: %s", err, sessionName)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status": 500,
-			"msg":    "创建服务器实例失败: " + err.Error(),
+			"msg":    "获取服务器实例引用失败: " + err.Error(),
 		})
 		return
 	}
@@ -272,7 +277,7 @@ func SendCommand(c *gin.Context) {
 		return
 	}
 
-	// 创建服务器实例
+	// 获取服务器实例引用
 	server, err := tmux.NewDSTServer(
 		parts[1],
 		parts[2],
@@ -283,10 +288,10 @@ func SendCommand(c *gin.Context) {
 		dstServerMode, // 使用默认启动模式
 	)
 	if err != nil {
-		log.Printf("[API][SendCommand] 创建服务器实例失败: %v 会话名: %s", err, req.SessionName)
+		log.Printf("[API][SendCommand] 获取服务器实例引用失败: %v 会话名: %s", err, req.SessionName)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status": 500,
-			"msg":    "创建服务器实例失败: " + err.Error(),
+			"msg":    "获取服务器实例引用失败: " + err.Error(),
 		})
 		return
 	}
@@ -366,7 +371,7 @@ func KillServer(c *gin.Context) {
 
 	sessionName := c.Query("session_name")
 	if sessionName == "" {
-		var req ServerCommandRequest
+		var req ServerSessionRequest
 		if err := c.ShouldBindJSON(&req); err == nil {
 			sessionName = req.SessionName
 			log.Printf("[API][KillServer] 从请求体获取会话名: %s", sessionName)
@@ -400,7 +405,7 @@ func KillServer(c *gin.Context) {
 	log.Printf("[API][KillServer] 尝试终止服务器 会话名: %s, 存档: %s, 世界: %s",
 		sessionName, parts[1], parts[2])
 
-	// 创建服务器实例
+	// 获取服务器实例引用
 	server, err := tmux.NewDSTServer(
 		parts[1],
 		parts[2],
@@ -411,10 +416,10 @@ func KillServer(c *gin.Context) {
 		dstServerMode, // 使用默认启动模式
 	)
 	if err != nil {
-		log.Printf("[API][KillServer] 创建服务器实例失败: %v 会话名: %s", err, sessionName)
+		log.Printf("[API][KillServer] 获取服务器实例引用失败: %v 会话名: %s", err, sessionName)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status": 500,
-			"msg":    "创建服务器实例失败: " + err.Error(),
+			"msg":    "获取服务器实例引用失败: " + err.Error(),
 		})
 		return
 	}
