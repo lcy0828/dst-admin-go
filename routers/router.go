@@ -110,6 +110,12 @@ func InitRouter() *gin.Engine {
 			// 服务器令牌管理
 			dstservers.GET("/token", dstserver.GetClusterToken)
 			dstservers.POST("/token", dstserver.UpdateClusterToken)
+
+			// 获取饥荒最新版本
+			dstservers.GET("/version", dstserver.GetDSTVersion)
+
+			// 获取本地安装的饥荒版本
+			dstservers.GET("/localversion", dstserver.GetLocalDSTVersion)
 		}
 
 		// DST游戏自定义配置管理
@@ -164,7 +170,6 @@ func InitRouter() *gin.Engine {
 		{
 			tmuxGroup.POST("/start", tmux.StartServer)
 			tmuxGroup.POST("/stop", tmux.StopServer)
-			tmuxGroup.POST("/restart", tmux.RestartServer) // 新增重启接口
 			tmuxGroup.POST("/command", tmux.SendCommand)
 			tmuxGroup.GET("/list", tmux.ListServers)
 			tmuxGroup.POST("/kill", tmux.KillServer)
