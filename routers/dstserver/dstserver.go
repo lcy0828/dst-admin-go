@@ -447,21 +447,10 @@ func GetBlockList(g *gin.Context) {
 
 // UpdateBlockList 更新黑名单列表
 func UpdateBlockList(g *gin.Context) {
-	saveName := g.Query("savename")
-	if saveName == "" {
-		g.JSON(http.StatusOK, gin.H{
-			"status": 400,
-			"msg":    "存档名称不能为空",
-		})
-		return
-	}
-
-	// 构建黑名单列表文件路径
-	blockListPath := filepath.Join(dstSavePath, saveName, "blocklist.txt")
-
 	// 读取请求体
 	var req struct {
-		Blocked []string `json:"blocked" binding:"required"`
+		SaveName string   `json:"savename" binding:"required"`
+		List     []string `json:"list" binding:"required"`
 	}
 	if err := g.BindJSON(&req); err != nil {
 		g.JSON(http.StatusOK, gin.H{
@@ -471,8 +460,19 @@ func UpdateBlockList(g *gin.Context) {
 		return
 	}
 
+	if req.SaveName == "" {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 400,
+			"msg":    "存档名称不能为空",
+		})
+		return
+	}
+
+	// 构建黑名单列表文件路径
+	blockListPath := filepath.Join(dstSavePath, req.SaveName, "blocklist.txt")
+
 	// 将黑名单列表写入文件
-	content := strings.Join(req.Blocked, "\n")
+	content := strings.Join(req.List, "\n")
 	if err := ioutil.WriteFile(blockListPath, []byte(content), 0644); err != nil {
 		log.Printf("写入黑名单列表失败: %v", err)
 		g.JSON(http.StatusOK, gin.H{
@@ -541,21 +541,10 @@ func GetWhiteList(g *gin.Context) {
 
 // UpdateWhiteList 更新白名单列表
 func UpdateWhiteList(g *gin.Context) {
-	saveName := g.Query("savename")
-	if saveName == "" {
-		g.JSON(http.StatusOK, gin.H{
-			"status": 400,
-			"msg":    "存档名称不能为空",
-		})
-		return
-	}
-
-	// 构建白名单列表文件路径
-	whiteListPath := filepath.Join(dstSavePath, saveName, "whitelist.txt")
-
 	// 读取请求体
 	var req struct {
-		Whitelisted []string `json:"whitelisted" binding:"required"`
+		SaveName string   `json:"savename" binding:"required"`
+		List     []string `json:"list" binding:"required"`
 	}
 	if err := g.BindJSON(&req); err != nil {
 		g.JSON(http.StatusOK, gin.H{
@@ -565,8 +554,19 @@ func UpdateWhiteList(g *gin.Context) {
 		return
 	}
 
+	if req.SaveName == "" {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 400,
+			"msg":    "存档名称不能为空",
+		})
+		return
+	}
+
+	// 构建白名单列表文件路径
+	whiteListPath := filepath.Join(dstSavePath, req.SaveName, "whitelist.txt")
+
 	// 将白名单列表写入文件
-	content := strings.Join(req.Whitelisted, "\n")
+	content := strings.Join(req.List, "\n")
 	if err := ioutil.WriteFile(whiteListPath, []byte(content), 0644); err != nil {
 		log.Printf("写入白名单列表失败: %v", err)
 		g.JSON(http.StatusOK, gin.H{
@@ -624,21 +624,10 @@ func GetClusterToken(g *gin.Context) {
 
 // UpdateClusterToken 更新服务器令牌
 func UpdateClusterToken(g *gin.Context) {
-	saveName := g.Query("savename")
-	if saveName == "" {
-		g.JSON(http.StatusOK, gin.H{
-			"status": 400,
-			"msg":    "存档名称不能为空",
-		})
-		return
-	}
-
-	// 构建cluster_token.txt路径
-	tokenPath := filepath.Join(dstSavePath, saveName, "cluster_token.txt")
-
 	// 读取请求体
 	var req struct {
-		Token string `json:"token" binding:"required"`
+		SaveName string `json:"savename" binding:"required"`
+		Token    string `json:"token" binding:"required"`
 	}
 	if err := g.BindJSON(&req); err != nil {
 		g.JSON(http.StatusOK, gin.H{
@@ -647,6 +636,17 @@ func UpdateClusterToken(g *gin.Context) {
 		})
 		return
 	}
+
+	if req.SaveName == "" {
+		g.JSON(http.StatusOK, gin.H{
+			"status": 400,
+			"msg":    "存档名称不能为空",
+		})
+		return
+	}
+
+	// 构建cluster_token.txt路径
+	tokenPath := filepath.Join(dstSavePath, req.SaveName, "cluster_token.txt")
 
 	// 将服务器令牌写入文件
 	if err := ioutil.WriteFile(tokenPath, []byte(req.Token), 0644); err != nil {
