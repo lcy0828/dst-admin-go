@@ -6,7 +6,7 @@ import (
 	"log"
 )
 
-func main() {
+func main2() {
 	// 创建一个新的饥荒服务器实例
 	server, err := tmux.NewDSTServer(
 		"TestArchive",
@@ -14,6 +14,7 @@ func main() {
 		"./dstserver/ugc_mods",
 		"./Klei",
 		"DoNotStarveTogether",
+		"64",
 	)
 	if err != nil {
 		log.Fatalf("创建服务器实例失败: %v", err)

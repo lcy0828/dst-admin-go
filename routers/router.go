@@ -13,6 +13,7 @@ import (
 	"dont/routers/tag"
 	"dont/routers/tmux"
 	"dont/routers/user"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -170,9 +171,20 @@ func InitRouter() *gin.Engine {
 		{
 			tmuxGroup.POST("/start", tmux.StartServer)
 			tmuxGroup.POST("/stop", tmux.StopServer)
-			tmuxGroup.POST("/command", tmux.SendCommand)
+			tmuxGroup.POST("/command", tmux.HandleCommand)        // 模块化命令API
+			tmuxGroup.POST("/raw-command", tmux.HandleRawCommand) // 原始命令API（保持向后兼容）
 			tmuxGroup.GET("/list", tmux.ListServers)
 			tmuxGroup.POST("/kill", tmux.KillServer)
+
+			// 命令管理API
+			commandGroup := tmuxGroup.Group("/commands")
+			{
+				commandGroup.GET("", tmux.ListCommands)             // 获取命令列表
+				commandGroup.POST("/detail", tmux.GetCommandDetail) // 获取单个命令
+				commandGroup.POST("", tmux.AddCommand)              // 添加命令
+				commandGroup.POST("/update", tmux.UpdateCommand)    // 更新命令
+				commandGroup.POST("/delete", tmux.DeleteCommand)    // 删除命令
+			}
 		}
 	}
 

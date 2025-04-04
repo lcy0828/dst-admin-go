@@ -248,15 +248,33 @@ func StopServer(c *gin.Context) {
 	})
 }
 
-// SendCommand 向服务器发送命令处理函数
-func SendCommand(c *gin.Context) {
+// 添加函数，导出配置变量，以便在同一包内的其他文件访问
+func GetDSTSavePath() string {
+	return dstSavePath
+}
+
+func GetDSTUGCPath() string {
+	return dstUGCPath
+}
+
+func GetDSTServerPath() string {
+	return dstServerPath
+}
+
+func GetDSTServerMode() string {
+	return dstServerMode
+}
+
+// SendCommandLegacy 向服务器发送命令处理函数(旧版本，保持向后兼容)
+// Deprecated: 使用新的HandleCommand或HandleRawCommand替代
+func SendCommandLegacy(c *gin.Context) {
 	startTime := time.Now()
 	clientIP := c.ClientIP()
-	log.Printf("[API][SendCommand] 收到发送命令请求 来自IP: %s", clientIP)
+	log.Printf("[API][SendCommandLegacy] 收到发送命令请求 来自IP: %s", clientIP)
 
 	var req ServerCommandRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		log.Printf("[API][SendCommand] 请求参数错误: %v IP: %s", err, clientIP)
+		log.Printf("[API][SendCommandLegacy] 请求参数错误: %v IP: %s", err, clientIP)
 		c.JSON(http.StatusBadRequest, gin.H{
 			"status": 400,
 			"msg":    "请求参数错误: " + err.Error(),
@@ -264,12 +282,12 @@ func SendCommand(c *gin.Context) {
 		return
 	}
 
-	log.Printf("[API][SendCommand] 尝试发送命令 会话名: %s, 命令: %s", req.SessionName, req.Command)
+	log.Printf("[API][SendCommandLegacy] 尝试发送命令 会话名: %s, 命令: %s", req.SessionName, req.Command)
 
 	// 解析会话名称获取存档和世界信息
 	parts := strings.Split(req.SessionName, "_")
 	if len(parts) < 3 || parts[0] != "dstserver" {
-		log.Printf("[API][SendCommand] 会话名称格式不正确: %s IP: %s", req.SessionName, clientIP)
+		log.Printf("[API][SendCommandLegacy] 会话名称格式不正确: %s IP: %s", req.SessionName, clientIP)
 		c.JSON(http.StatusBadRequest, gin.H{
 			"status": 400,
 			"msg":    "会话名称格式不正确，应为 dstserver_存档名_世界名",
@@ -288,7 +306,7 @@ func SendCommand(c *gin.Context) {
 		dstServerMode, // 使用默认启动模式
 	)
 	if err != nil {
-		log.Printf("[API][SendCommand] 获取服务器实例引用失败: %v 会话名: %s", err, req.SessionName)
+		log.Printf("[API][SendCommandLegacy] 获取服务器实例引用失败: %v 会话名: %s", err, req.SessionName)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status": 500,
 			"msg":    "获取服务器实例引用失败: " + err.Error(),
@@ -298,7 +316,7 @@ func SendCommand(c *gin.Context) {
 
 	// 发送命令
 	if err := server.SendCommand(req.Command); err != nil {
-		log.Printf("[API][SendCommand] 发送命令失败: %v 会话名: %s, 命令: %s", err, req.SessionName, req.Command)
+		log.Printf("[API][SendCommandLegacy] 发送命令失败: %v 会话名: %s, 命令: %s", err, req.SessionName, req.Command)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status": 500,
 			"msg":    "发送命令失败: " + err.Error(),
@@ -307,7 +325,7 @@ func SendCommand(c *gin.Context) {
 	}
 
 	elapsedTime := time.Since(startTime)
-	log.Printf("[API][SendCommand] 命令发送成功 会话名: %s, 命令: %s, 耗时: %v", req.SessionName, req.Command, elapsedTime)
+	log.Printf("[API][SendCommandLegacy] 命令发送成功 会话名: %s, 命令: %s, 耗时: %v", req.SessionName, req.Command, elapsedTime)
 	c.JSON(http.StatusOK, gin.H{
 		"status": 200,
 		"msg":    "命令发送成功",
@@ -317,6 +335,12 @@ func SendCommand(c *gin.Context) {
 			"elapsed_time": elapsedTime.String(),
 		},
 	})
+}
+
+// SendCommand 是SendCommandLegacy的别名，保持向后兼容
+// Deprecated: 使用新的HandleCommand或HandleRawCommand替代
+func SendCommand(c *gin.Context) {
+	SendCommandLegacy(c)
 }
 
 // ListServers 列出所有服务器处理函数
