@@ -1,14 +1,18 @@
 package dstserver
 
 import (
+	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/go-ini/ini"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 )
 
 // 配置变量，加载时从配置文件初始化
@@ -662,4 +666,851 @@ func UpdateClusterToken(g *gin.Context) {
 		"status": 200,
 		"msg":    "更新服务器令牌成功",
 	})
+}
+
+// WorldOverridesResponse 世界配置响应结构
+type WorldOverridesResponse struct {
+	Status int                    `json:"status"`
+	Data   map[string]interface{} `json:"data"`
+	Msg    string                 `json:"msg,omitempty"`
+}
+
+// ServerIniConfig 服务器配置结构
+type ServerIniConfig struct {
+	Network struct {
+		ServerPort int `ini:"server_port" json:"server_port"`
+	} `ini:"NETWORK" json:"network"`
+
+	Shard struct {
+		IsMaster bool   `ini:"is_master" json:"is_master"`
+		Name     string `ini:"name" json:"name"`
+		ID       int    `ini:"id" json:"id"`
+	} `ini:"SHARD" json:"shard"`
+
+	Account struct {
+		EncodeUserPath bool `ini:"encode_user_path" json:"encode_user_path"`
+	} `ini:"ACCOUNT" json:"account"`
+
+	Steam struct {
+		MasterServerPort   int `ini:"master_server_port" json:"master_server_port"`
+		AuthenticationPort int `ini:"authentication_port" json:"authentication_port"`
+	} `ini:"STEAM" json:"steam"`
+}
+
+// ServerIniResponse 服务器配置响应结构
+type ServerIniResponse struct {
+	Status int             `json:"status"`
+	Data   ServerIniConfig `json:"data"`
+	Msg    string          `json:"msg,omitempty"`
+}
+
+// UpdateServerIniRequest 更新服务器配置请求结构
+type UpdateServerIniRequest struct {
+	SaveName  string          `json:"savename" binding:"required"`
+	WorldName string          `json:"worldname" binding:"required"`
+	Config    ServerIniConfig `json:"config" binding:"required"`
+}
+
+// UpdateWorldOverridesRequest 更新世界配置请求结构
+type UpdateWorldOverridesRequest struct {
+	SaveName  string                 `json:"savename" binding:"required"`
+	WorldName string                 `json:"worldname" binding:"required"`
+	Overrides map[string]interface{} `json:"overrides" binding:"required"`
+}
+
+// CreateForestWorldRequest 创建森林世界配置请求结构
+type CreateForestWorldRequest struct {
+	SaveName  string                 `json:"savename" binding:"required"`
+	WorldName string                 `json:"worldname" binding:"required"`
+	Overrides map[string]interface{} `json:"overrides" binding:"required"`
+}
+
+// CreateCaveWorldRequest 创建洞穴世界配置请求结构
+type CreateCaveWorldRequest struct {
+	SaveName  string                 `json:"savename" binding:"required"`
+	WorldName string                 `json:"worldname" binding:"required"`
+	Overrides map[string]interface{} `json:"overrides" binding:"required"`
+}
+
+// GetWorldOverrides 获取指定房间和世界的leveldataoverride.lua中的overrides字段
+func GetWorldOverrides(g *gin.Context) {
+	// 获取请求参数
+	saveName := g.Query("savename")
+	worldName := g.Query("worldname")
+
+	// 记录请求参数
+	log.Printf("接收到获取世界配置请求 - 存档名称: %s, 世界名称: %s", saveName, worldName)
+
+	if saveName == "" || worldName == "" {
+		errorMsg := "缺少必要的参数"
+		if saveName == "" {
+			errorMsg += ": savename"
+		}
+		if worldName == "" {
+			if saveName == "" {
+				errorMsg += " 和 worldname"
+			} else {
+				errorMsg += ": worldname"
+			}
+		}
+		log.Printf("请求参数错误: %s", errorMsg)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 400,
+			Data:   nil,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	// 构建leveldataoverride.lua文件路径
+	levelDataPath := filepath.Join(dstSavePath, saveName, worldName, "leveldataoverride.lua")
+	log.Printf("尝试读取文件: %s", levelDataPath)
+
+	// 检查文件是否存在
+	if _, err := os.Stat(levelDataPath); os.IsNotExist(err) {
+		errorMsg := fmt.Sprintf("文件不存在: %s", levelDataPath)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 404,
+			Data:   nil,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	// 读取leveldataoverride.lua文件内容
+	content, err := ioutil.ReadFile(levelDataPath)
+	if err != nil {
+		errorMsg := fmt.Sprintf("读取leveldataoverride.lua失败: %v", err)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 500,
+			Data:   nil,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	// 解析Lua文件内容，提取overrides字段
+	overrides, err := parseLevelDataOverrides(string(content))
+	if err != nil {
+		errorMsg := fmt.Sprintf("解析leveldataoverride.lua失败: %v", err)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 500,
+			Data:   nil,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	// 检查是否成功提取到overrides字段
+	if len(overrides) == 0 {
+		log.Printf("成功解析文件，但没有找到overrides字段或字段为空")
+	}
+
+	log.Printf("成功获取世界配置 - 存档: %s, 世界: %s, 配置项数量: %d", saveName, worldName, len(overrides))
+	g.JSON(http.StatusOK, WorldOverridesResponse{
+		Status: 200,
+		Data:   overrides,
+	})
+}
+
+// parseLevelDataOverrides 解析leveldataoverride.lua文件中的overrides字段
+func parseLevelDataOverrides(content string) (map[string]interface{}, error) {
+	// 创建一个空的map来存储结果
+	result := make(map[string]interface{})
+
+	// 使用正则表达式匹配overrides部分
+	// 注意：我们使用(?s)模式使.(点)可以匹配换行符
+	overridesPattern := regexp.MustCompile(`(?s)overrides\s*=\s*\{(.+?)\},`)
+	matches := overridesPattern.FindStringSubmatch(content)
+
+	if len(matches) < 2 {
+		// 尝试另一种模式，如果overrides是最后一个字段
+		overridesPattern = regexp.MustCompile(`(?s)overrides\s*=\s*\{(.+?)\}\s*,?\s*$`)
+		matches = overridesPattern.FindStringSubmatch(content)
+		if len(matches) < 2 {
+			// 尝试第三种模式，匹配中间的overrides
+			overridesPattern = regexp.MustCompile(`(?s)overrides\s*=\s*\{(.+?)\}\s*,\s*["\w]`)
+			matches = overridesPattern.FindStringSubmatch(content)
+			if len(matches) < 2 {
+				// 最后尝试一种更宽松的模式
+				overridesPattern = regexp.MustCompile(`(?s)overrides\s*=\s*\{(.+?)\}`)
+				matches = overridesPattern.FindStringSubmatch(content)
+				if len(matches) < 2 {
+					// 没有找到overrides部分
+					log.Printf("没有找到overrides部分")
+					return result, nil
+				}
+			}
+		}
+	}
+
+	// 提取overrides内容
+	overridesContent := matches[1]
+	log.Printf("成功提取overrides内容，长度: %d字节", len(overridesContent))
+
+	// 解析键值对
+	// 匹配形如 ["key"]="value" 或 key="value" 或 key=value 的模式
+	pairs := regexp.MustCompile(`\[?"?([\w]+)"?\]?\s*=\s*"?([^,"\}\n]+)"?\s*,?`)
+	allMatches := pairs.FindAllStringSubmatch(overridesContent, -1)
+
+	for _, match := range allMatches {
+		if len(match) >= 3 {
+			key := strings.TrimSpace(match[1])
+			value := strings.TrimSpace(match[2])
+			result[key] = value
+		}
+	}
+
+	return result, nil
+}
+
+// UpdateWorldOverrides 更新指定房间和世界的leveldataoverride.lua中的overrides字段
+func UpdateWorldOverrides(g *gin.Context) {
+	// 解析请求体
+	var req UpdateWorldOverridesRequest
+	if err := g.ShouldBindJSON(&req); err != nil {
+		log.Printf("解析请求体失败: %v", err)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 400,
+			Data:   nil,
+			Msg:    "请求参数错误: " + err.Error(),
+		})
+		return
+	}
+
+	// 记录请求参数
+	log.Printf("接收到更新世界配置请求 - 存档名称: %s, 世界名称: %s, 配置项数量: %d",
+		req.SaveName, req.WorldName, len(req.Overrides))
+
+	// 构建leveldataoverride.lua文件路径
+	levelDataPath := filepath.Join(dstSavePath, req.SaveName, req.WorldName, "leveldataoverride.lua")
+	log.Printf("尝试读取文件: %s", levelDataPath)
+
+	// 检查文件是否存在
+	if _, err := os.Stat(levelDataPath); os.IsNotExist(err) {
+		errorMsg := fmt.Sprintf("文件不存在: %s", levelDataPath)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 404,
+			Data:   nil,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	// 读取leveldataoverride.lua文件内容
+	content, err := ioutil.ReadFile(levelDataPath)
+	if err != nil {
+		errorMsg := fmt.Sprintf("读取leveldataoverride.lua失败: %v", err)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 500,
+			Data:   nil,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	// 将文件内容转换为字符串
+	fileContent := string(content)
+
+	// 使用正则表达式匹配overrides部分
+	// 注意：我们使用(?s)模式使.(点)可以匹配换行符
+	overridesPattern := regexp.MustCompile(`(?s)(overrides\s*=\s*\{)(.+?)(\}),`)
+	matches := overridesPattern.FindStringSubmatch(fileContent)
+
+	if len(matches) < 4 {
+		// 尝试另一种模式，如果overrides是最后一个字段
+		overridesPattern = regexp.MustCompile(`(?s)(overrides\s*=\s*\{)(.+?)(\})\s*,?\s*$`)
+		matches = overridesPattern.FindStringSubmatch(fileContent)
+		if len(matches) < 4 {
+			// 尝试第三种模式，匹配中间的overrides
+			overridesPattern = regexp.MustCompile(`(?s)(overrides\s*=\s*\{)(.+?)(\})\s*,\s*["\w]`)
+			matches = overridesPattern.FindStringSubmatch(fileContent)
+			if len(matches) < 4 {
+				// 最后尝试一种更宽松的模式
+				overridesPattern = regexp.MustCompile(`(?s)(overrides\s*=\s*\{)(.+?)(\})`)
+				matches = overridesPattern.FindStringSubmatch(fileContent)
+				if len(matches) < 4 {
+					errorMsg := "无法在文件中找到overrides部分"
+					log.Printf(errorMsg)
+					g.JSON(http.StatusOK, WorldOverridesResponse{
+						Status: 500,
+						Data:   nil,
+						Msg:    errorMsg,
+					})
+					return
+				}
+			}
+		}
+	}
+
+	// 构建新的overrides内容
+	newOverridesContent := "\n"
+	for key, value := range req.Overrides {
+		// 将值转换为字符串
+		valueStr := fmt.Sprintf("%v", value)
+		// 如果值不是"default"或"true"/"false"，则添加引号
+		if valueStr != "default" && valueStr != "true" && valueStr != "false" {
+			valueStr = "\"" + valueStr + "\""
+		}
+		newOverridesContent += fmt.Sprintf("    [\"%s\"]=%s,\n", key, valueStr)
+	}
+
+	// 替换文件中的overrides部分
+	newContent := overridesPattern.ReplaceAllString(fileContent, "${1}"+newOverridesContent+"${3}")
+
+	// 备份原文件
+	backupPath := levelDataPath + ".bak." + time.Now().Format("20060102150405")
+	if err := ioutil.WriteFile(backupPath, content, 0644); err != nil {
+		log.Printf("备份原文件失败: %v", err)
+		// 备份失败不影响继续操作，只记录日志
+	}
+
+	// 写入新文件
+	if err := ioutil.WriteFile(levelDataPath, []byte(newContent), 0644); err != nil {
+		errorMsg := fmt.Sprintf("写入文件失败: %v", err)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 500,
+			Data:   nil,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	log.Printf("成功更新世界配置 - 存档: %s, 世界: %s, 配置项数量: %d", req.SaveName, req.WorldName, len(req.Overrides))
+
+	// 返回更新后的配置
+	g.JSON(http.StatusOK, WorldOverridesResponse{
+		Status: 200,
+		Data:   req.Overrides,
+		Msg:    "更新世界配置成功",
+	})
+}
+
+// CreateForestWorld 创建或更新森林世界的leveldataoverride.lua文件
+func CreateForestWorld(g *gin.Context) {
+	// 解析请求体
+	var req CreateForestWorldRequest
+	if err := g.ShouldBindJSON(&req); err != nil {
+		log.Printf("解析请求体失败: %v", err)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 400,
+			Data:   nil,
+			Msg:    "请求参数错误: " + err.Error(),
+		})
+		return
+	}
+
+	// 记录请求参数
+	log.Printf("接收到创建或更新森林世界请求 - 存档名称: %s, 世界名称: %s, 配置项数量: %d",
+		req.SaveName, req.WorldName, len(req.Overrides))
+
+	// 构建leveldataoverride.lua文件路径
+	levelDataPath := filepath.Join(dstSavePath, req.SaveName, req.WorldName, "leveldataoverride.lua")
+	log.Printf("尝试创建文件: %s", levelDataPath)
+
+	// 检查目录是否存在，如果不存在则创建
+	dirPath := filepath.Join(dstSavePath, req.SaveName, req.WorldName)
+	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(dirPath, 0755); err != nil {
+			errorMsg := fmt.Sprintf("创建目录失败: %v", err)
+			log.Printf(errorMsg)
+			g.JSON(http.StatusOK, WorldOverridesResponse{
+				Status: 500,
+				Data:   nil,
+				Msg:    errorMsg,
+			})
+			return
+		}
+		log.Printf("成功创建目录: %s", dirPath)
+	}
+
+	// 检查文件是否已存在
+	if _, err := os.Stat(levelDataPath); err == nil {
+		// 文件已存在，备份原文件
+		backupPath := levelDataPath + ".bak." + time.Now().Format("20060102150405")
+		content, err := ioutil.ReadFile(levelDataPath)
+		if err == nil {
+			if err := ioutil.WriteFile(backupPath, content, 0644); err != nil {
+				log.Printf("备份原文件失败: %v", err)
+				// 备份失败不影响继续操作，只记录日志
+			} else {
+				log.Printf("成功备份原文件到: %s", backupPath)
+			}
+		}
+	}
+
+	// 构建新的overrides内容
+	overridesContent := "\n"
+	for key, value := range req.Overrides {
+		// 将值转换为字符串
+		valueStr := fmt.Sprintf("%v", value)
+		// 如果值不是"default"或"true"/"false"，则添加引号
+		if valueStr != "default" && valueStr != "true" && valueStr != "false" {
+			valueStr = "\"" + valueStr + "\""
+		}
+		overridesContent += fmt.Sprintf("    [\"%s\"]=%s,\n", key, valueStr)
+	}
+
+	// 构建森林世界模板
+	template := fmt.Sprintf(`return {
+  desc="由https://github.com/lcy0828/dst-admin-go面板生成的世界",
+  hideminimap=false,
+  id="SURVIVAL_TOGETHER",
+  location="forest",
+  max_playlist_position=999,
+  min_playlist_position=0,
+  name="游山玩水——基于dst-admin-go可视化面板一键部署创建！",
+  numrandom_set_pieces=4,
+  override_level_string=false,
+  overrides={%s  },
+  playstyle="survival",
+  random_set_pieces={
+    "Sculptures_2",
+    "Sculptures_3",
+    "Sculptures_4",
+    "Sculptures_5",
+    "Chessy_1",
+    "Chessy_2",
+    "Chessy_3",
+    "Chessy_4",
+    "Chessy_5",
+    "Chessy_6",
+    "Maxwell1",
+    "Maxwell2",
+    "Maxwell3",
+    "Maxwell4",
+    "Maxwell6",
+    "Maxwell7",
+    "Warzone_1",
+    "Warzone_2",
+    "Warzone_3"
+  },
+  required_prefabs={ "multiplayer_portal" },
+  required_setpieces={ "Sculptures_1", "Maxwell5" },
+  settings_desc="标准《饥荒》体验。",
+  settings_id="SURVIVAL_TOGETHER",
+  settings_name="生存",
+  substitutes={  },
+  version=4,
+  worldgen_desc="标准《饥荒》体验。",
+  worldgen_id="SURVIVAL_TOGETHER",
+  worldgen_name="生存"
+}
+`, overridesContent)
+
+	// 写入新文件
+	if err := ioutil.WriteFile(levelDataPath, []byte(template), 0644); err != nil {
+		errorMsg := fmt.Sprintf("写入文件失败: %v", err)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 500,
+			Data:   nil,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	log.Printf("成功创建或更新森林世界配置 - 存档: %s, 世界: %s, 配置项数量: %d", req.SaveName, req.WorldName, len(req.Overrides))
+
+	// 返回创建或更新后的配置
+	g.JSON(http.StatusOK, WorldOverridesResponse{
+		Status: 200,
+		Data:   req.Overrides,
+		Msg:    "创建或更新森林世界配置成功",
+	})
+}
+
+// CreateCaveWorld 创建或更新洞穴世界的leveldataoverride.lua文件
+func CreateCaveWorld(g *gin.Context) {
+	// 解析请求体
+	var req CreateCaveWorldRequest
+	if err := g.ShouldBindJSON(&req); err != nil {
+		log.Printf("解析请求体失败: %v", err)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 400,
+			Data:   nil,
+			Msg:    "请求参数错误: " + err.Error(),
+		})
+		return
+	}
+
+	// 记录请求参数
+	log.Printf("接收到创建或更新洞穴世界请求 - 存档名称: %s, 世界名称: %s, 配置项数量: %d",
+		req.SaveName, req.WorldName, len(req.Overrides))
+
+	// 构建leveldataoverride.lua文件路径
+	levelDataPath := filepath.Join(dstSavePath, req.SaveName, req.WorldName, "leveldataoverride.lua")
+	log.Printf("尝试创建文件: %s", levelDataPath)
+
+	// 检查目录是否存在，如果不存在则创建
+	dirPath := filepath.Join(dstSavePath, req.SaveName, req.WorldName)
+	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(dirPath, 0755); err != nil {
+			errorMsg := fmt.Sprintf("创建目录失败: %v", err)
+			log.Printf(errorMsg)
+			g.JSON(http.StatusOK, WorldOverridesResponse{
+				Status: 500,
+				Data:   nil,
+				Msg:    errorMsg,
+			})
+			return
+		}
+		log.Printf("成功创建目录: %s", dirPath)
+	}
+
+	// 检查文件是否已存在
+	if _, err := os.Stat(levelDataPath); err == nil {
+		// 文件已存在，备份原文件
+		backupPath := levelDataPath + ".bak." + time.Now().Format("20060102150405")
+		content, err := ioutil.ReadFile(levelDataPath)
+		if err == nil {
+			if err := ioutil.WriteFile(backupPath, content, 0644); err != nil {
+				log.Printf("备份原文件失败: %v", err)
+				// 备份失败不影响继续操作，只记录日志
+			} else {
+				log.Printf("成功备份原文件到: %s", backupPath)
+			}
+		}
+	}
+
+	// 构建新的overrides内容
+	overridesContent := "\n"
+	for key, value := range req.Overrides {
+		// 将值转换为字符串
+		valueStr := fmt.Sprintf("%v", value)
+		// 如果值不是"default"或"true"/"false"或"always"，则添加引号
+		if valueStr != "default" && valueStr != "true" && valueStr != "false" && valueStr != "always" {
+			valueStr = "\"" + valueStr + "\""
+		}
+		overridesContent += fmt.Sprintf("    [\"%s\"]=%s,\n", key, valueStr)
+	}
+
+	// 构建洞穴世界模板
+	template := fmt.Sprintf(`return {
+  background_node_range={ 0, 1 },
+  desc="探查洞穴…… 一起！",
+  hideminimap=false,
+  id="DST_CAVE",
+  location="cave",
+  max_playlist_position=999,
+  min_playlist_position=0,
+  name="洞穴",
+  numrandom_set_pieces=0,
+  override_level_string=false,
+  overrides={%s  },
+  required_prefabs={ "multiplayer_portal" },
+  settings_desc="探查洞穴…… 一起！",
+  settings_id="DST_CAVE",
+  settings_name="洞穴",
+  substitutes={  },
+  version=4,
+  worldgen_desc="探查洞穴…… 一起！",
+  worldgen_id="DST_CAVE",
+  worldgen_name="洞穴"
+}
+`, overridesContent)
+
+	// 写入新文件
+	if err := ioutil.WriteFile(levelDataPath, []byte(template), 0644); err != nil {
+		errorMsg := fmt.Sprintf("写入文件失败: %v", err)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 500,
+			Data:   nil,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	log.Printf("成功创建或更新洞穴世界配置 - 存档: %s, 世界: %s, 配置项数量: %d", req.SaveName, req.WorldName, len(req.Overrides))
+
+	// 返回创建或更新后的配置
+	g.JSON(http.StatusOK, WorldOverridesResponse{
+		Status: 200,
+		Data:   req.Overrides,
+		Msg:    "创建或更新洞穴世界配置成功",
+	})
+}
+
+// GetServerIni 获取指定房间和世界的server.ini文件
+func GetServerIni(g *gin.Context) {
+	// 获取请求参数
+	saveName := g.Query("savename")
+	worldName := g.Query("worldname")
+
+	// 记录请求参数
+	log.Printf("接收到获取server.ini请求 - 存档名称: %s, 世界名称: %s", saveName, worldName)
+
+	if saveName == "" || worldName == "" {
+		errorMsg := "缺少必要的参数"
+		if saveName == "" {
+			errorMsg += ": savename"
+		}
+		if worldName == "" {
+			if saveName == "" {
+				errorMsg += " 和 worldname"
+			} else {
+				errorMsg += ": worldname"
+			}
+		}
+		log.Printf("请求参数错误: %s", errorMsg)
+		g.JSON(http.StatusOK, ServerIniResponse{
+			Status: 400,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	// 构建leveldataoverride.lua文件路径
+	serverIniPath := filepath.Join(dstSavePath, saveName, worldName, "server.ini")
+	log.Printf("尝试读取文件: %s", serverIniPath)
+
+	// 检查文件是否存在
+	if _, err := os.Stat(serverIniPath); os.IsNotExist(err) {
+		errorMsg := fmt.Sprintf("文件不存在: %s", serverIniPath)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, ServerIniResponse{
+			Status: 404,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	// 读取并解析server.ini文件
+	cfg, err := ini.Load(serverIniPath)
+	if err != nil {
+		errorMsg := fmt.Sprintf("读取server.ini失败: %v", err)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, ServerIniResponse{
+			Status: 500,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	// 将配置映射到结构体
+	var config ServerIniConfig
+	if err := cfg.MapTo(&config); err != nil {
+		errorMsg := fmt.Sprintf("解析server.ini失败: %v", err)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, ServerIniResponse{
+			Status: 500,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	log.Printf("成功获取server.ini - 存档: %s, 世界: %s", saveName, worldName)
+
+	// 返回配置
+	g.JSON(http.StatusOK, ServerIniResponse{
+		Status: 200,
+		Data:   config,
+	})
+}
+
+// UpdateServerIni 更新指定房间和世界的server.ini文件
+func UpdateServerIni(g *gin.Context) {
+	// 解析请求体
+	var req UpdateServerIniRequest
+	if err := g.ShouldBindJSON(&req); err != nil {
+		log.Printf("解析请求体失败: %v", err)
+		g.JSON(http.StatusOK, ServerIniResponse{
+			Status: 400,
+			Msg:    "请求参数错误: " + err.Error(),
+		})
+		return
+	}
+
+	// 记录请求参数
+	log.Printf("接收到更新server.ini请求 - 存档名称: %s, 世界名称: %s",
+		req.SaveName, req.WorldName)
+
+	// 构建leveldataoverride.lua文件路径
+	serverIniPath := filepath.Join(dstSavePath, req.SaveName, req.WorldName, "server.ini")
+	log.Printf("尝试更新文件: %s", serverIniPath)
+
+	// 检查目录是否存在，如果不存在则创建
+	dirPath := filepath.Join(dstSavePath, req.SaveName, req.WorldName)
+	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(dirPath, 0755); err != nil {
+			errorMsg := fmt.Sprintf("创建目录失败: %v", err)
+			log.Printf(errorMsg)
+			g.JSON(http.StatusOK, ServerIniResponse{
+				Status: 500,
+				Msg:    errorMsg,
+			})
+			return
+		}
+		log.Printf("成功创建目录: %s", dirPath)
+	}
+
+	// 检查文件是否已存在
+	if _, err := os.Stat(serverIniPath); err == nil {
+		// 文件已存在，备份原文件
+		backupPath := serverIniPath + ".bak." + time.Now().Format("20060102150405")
+		if err := copyFile(serverIniPath, backupPath); err != nil {
+			log.Printf("备份原文件失败: %v", err)
+			// 备份失败不影响继续操作，只记录日志
+		} else {
+			log.Printf("成功备份原文件到: %s", backupPath)
+		}
+	}
+
+	// 创建新的ini文件
+	cfg := ini.Empty()
+
+	// 添加NETWORK部分
+	networkSection, _ := cfg.NewSection("NETWORK")
+	networkSection.NewKey("server_port", fmt.Sprintf("%d", req.Config.Network.ServerPort))
+
+	// 添加SHARD部分
+	shardSection, _ := cfg.NewSection("SHARD")
+	shardSection.NewKey("is_master", fmt.Sprintf("%t", req.Config.Shard.IsMaster))
+	shardSection.NewKey("name", req.Config.Shard.Name)
+	shardSection.NewKey("id", fmt.Sprintf("%d", req.Config.Shard.ID))
+
+	// 添加ACCOUNT部分
+	accountSection, _ := cfg.NewSection("ACCOUNT")
+	accountSection.NewKey("encode_user_path", fmt.Sprintf("%t", req.Config.Account.EncodeUserPath))
+
+	// 添加STEAM部分
+	steamSection, _ := cfg.NewSection("STEAM")
+	steamSection.NewKey("master_server_port", fmt.Sprintf("%d", req.Config.Steam.MasterServerPort))
+	steamSection.NewKey("authentication_port", fmt.Sprintf("%d", req.Config.Steam.AuthenticationPort))
+
+	// 写入文件
+	if err := cfg.SaveTo(serverIniPath); err != nil {
+		errorMsg := fmt.Sprintf("写入server.ini失败: %v", err)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, ServerIniResponse{
+			Status: 500,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	log.Printf("成功更新server.ini - 存档: %s, 世界: %s", req.SaveName, req.WorldName)
+
+	// 返回更新后的配置
+	g.JSON(http.StatusOK, ServerIniResponse{
+		Status: 200,
+		Data:   req.Config,
+		Msg:    "更新server.ini成功",
+	})
+}
+
+// CreateServerIni 创建指定房间和世界的server.ini文件
+func CreateServerIni(g *gin.Context) {
+	// 解析请求体
+	var req UpdateServerIniRequest
+	if err := g.ShouldBindJSON(&req); err != nil {
+		log.Printf("解析请求体失败: %v", err)
+		g.JSON(http.StatusOK, ServerIniResponse{
+			Status: 400,
+			Msg:    "请求参数错误: " + err.Error(),
+		})
+		return
+	}
+
+	// 记录请求参数
+	log.Printf("接收到创建server.ini请求 - 存档名称: %s, 世界名称: %s",
+		req.SaveName, req.WorldName)
+
+	// 构建leveldataoverride.lua文件路径
+	serverIniPath := filepath.Join(dstSavePath, req.SaveName, req.WorldName, "server.ini")
+	log.Printf("尝试创建文件: %s", serverIniPath)
+
+	// 检查目录是否存在，如果不存在则创建
+	dirPath := filepath.Join(dstSavePath, req.SaveName, req.WorldName)
+	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(dirPath, 0755); err != nil {
+			errorMsg := fmt.Sprintf("创建目录失败: %v", err)
+			log.Printf(errorMsg)
+			g.JSON(http.StatusOK, ServerIniResponse{
+				Status: 500,
+				Msg:    errorMsg,
+			})
+			return
+		}
+		log.Printf("成功创建目录: %s", dirPath)
+	}
+
+	// 检查文件是否已存在
+	if _, err := os.Stat(serverIniPath); err == nil {
+		// 文件已存在，备份原文件
+		backupPath := serverIniPath + ".bak." + time.Now().Format("20060102150405")
+		if err := copyFile(serverIniPath, backupPath); err != nil {
+			log.Printf("备份原文件失败: %v", err)
+			// 备份失败不影响继续操作，只记录日志
+		} else {
+			log.Printf("成功备份原文件到: %s", backupPath)
+		}
+	}
+
+	// 创建新的ini文件
+	cfg := ini.Empty()
+
+	// 添加NETWORK部分
+	networkSection, _ := cfg.NewSection("NETWORK")
+	networkSection.NewKey("server_port", fmt.Sprintf("%d", req.Config.Network.ServerPort))
+
+	// 添加SHARD部分
+	shardSection, _ := cfg.NewSection("SHARD")
+	shardSection.NewKey("is_master", fmt.Sprintf("%t", req.Config.Shard.IsMaster))
+	shardSection.NewKey("name", req.Config.Shard.Name)
+	shardSection.NewKey("id", fmt.Sprintf("%d", req.Config.Shard.ID))
+
+	// 添加ACCOUNT部分
+	accountSection, _ := cfg.NewSection("ACCOUNT")
+	accountSection.NewKey("encode_user_path", fmt.Sprintf("%t", req.Config.Account.EncodeUserPath))
+
+	// 添加STEAM部分
+	steamSection, _ := cfg.NewSection("STEAM")
+	steamSection.NewKey("master_server_port", fmt.Sprintf("%d", req.Config.Steam.MasterServerPort))
+	steamSection.NewKey("authentication_port", fmt.Sprintf("%d", req.Config.Steam.AuthenticationPort))
+
+	// 写入文件
+	if err := cfg.SaveTo(serverIniPath); err != nil {
+		errorMsg := fmt.Sprintf("写入server.ini失败: %v", err)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, ServerIniResponse{
+			Status: 500,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	log.Printf("成功创建server.ini - 存档: %s, 世界: %s", req.SaveName, req.WorldName)
+
+	// 返回创建后的配置
+	g.JSON(http.StatusOK, ServerIniResponse{
+		Status: 200,
+		Data:   req.Config,
+		Msg:    "创建server.ini成功",
+	})
+}
+
+// copyFile 复制文件的辅助函数
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, srcFile)
+	return err
 }

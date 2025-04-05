@@ -129,6 +129,27 @@ func InitRouter() *gin.Engine {
 
 			// 获取本地安装的饥荒版本
 			dstservers.GET("/localversion", dstserver.GetLocalDSTVersion)
+
+			// 获取世界配置中的overrides字段
+			dstservers.GET("/worldoverrides", dstserver.GetWorldOverrides)
+
+			// 更新世界配置中的overrides字段
+			dstservers.POST("/worldoverrides", dstserver.UpdateWorldOverrides)
+
+			// 创建或更新森林世界的leveldataoverride.lua文件
+			dstservers.POST("/forestworld", dstserver.CreateForestWorld)
+
+			// 创建或更新洞穴世界的leveldataoverride.lua文件
+			dstservers.POST("/caveworld", dstserver.CreateCaveWorld)
+
+			// 获取server.ini文件
+			dstservers.GET("/serverini", dstserver.GetServerIni)
+
+			// 更新server.ini文件
+			dstservers.PUT("/serverini", dstserver.UpdateServerIni)
+
+			// 创建server.ini文件
+			dstservers.POST("/serverini", dstserver.CreateServerIni)
 		}
 
 		// DST游戏自定义配置管理
