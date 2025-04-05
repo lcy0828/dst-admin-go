@@ -1,10 +1,12 @@
 package tmux
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -386,7 +388,6 @@ func (s *DSTServer) Restart() error {
 			StartDirectory: info.StartDirectory,
 			Status:         info.Status,
 			StartTime:      info.StartTime,
-			RunningTime:    info.RunningTime,
 		}
 		log.Printf("[TMUX] 已保存服务器原始信息: 模式=%s, 启动时间=%s",
 			originalInfo.ServerMode, originalInfo.StartTime)
@@ -503,7 +504,6 @@ type ServerInfo struct {
 	StartDirectory string `json:"start_directory"` // 启动目录
 	Status         string `json:"status"`          // 服务器状态（运行中/已停止）
 	StartTime      string `json:"start_time"`      // 启动时间
-	RunningTime    string `json:"running_time"`    // 运行时间
 }
 
 // 全局变量，用于存储服务器信息
@@ -512,11 +512,8 @@ var serverInfoMap = make(map[string]*ServerInfo)
 // SaveServerInfo 保存服务器信息
 func SaveServerInfo(server *DSTServer) {
 	// 获取当前时间，确保使用本地时区
-	// 先保存原始时间对象，以便于精确比较
 	now := time.Now()
-	// 将时间向前调整5秒，确保在计算运行时间时不会出现负值
-	startTime := now.Add(-5 * time.Second)
-	startTimeStr := startTime.Format("2006-01-02 15:04:05")
+	startTimeStr := now.Format("2006-01-02 15:04:05")
 
 	info := &ServerInfo{
 		SessionName:    server.SessionName,
@@ -526,7 +523,6 @@ func SaveServerInfo(server *DSTServer) {
 		StartDirectory: server.StartDirectory,
 		Status:         "running",
 		StartTime:      startTimeStr,
-		RunningTime:    "5s", // 初始运行时间为5秒，与上面的时间调整一致
 	}
 
 	// 使用互斥锁保护并发访问
@@ -540,6 +536,8 @@ func SaveServerInfo(server *DSTServer) {
 
 // 互斥锁，保护并发访问serverInfoMap
 var serverInfoMapMutex sync.Mutex
+
+
 
 // ListDSTServers 列出所有饥荒服务器会话
 func ListDSTServers() ([]ServerInfo, error) {
@@ -562,14 +560,35 @@ func ListDSTServers() ([]ServerInfo, error) {
 		return nil, fmt.Errorf("获取tmux会话列表失败: %v", err)
 	}
 
+	// 输出所有会话的详细信息到日志
+	log.Printf("[TMUX] 找到 %d 个tmux会话", len(sessions))
+	for i, session := range sessions {
+		// 输出会话的所有字段
+		sessionJSON, _ := json.Marshal(session)
+		log.Printf("[TMUX] 会话 #%d 原始信息: %s", i+1, string(sessionJSON))
+
+		// 尝试获取更多会话信息
+		detailedSession, err := tmux.GetSessionByName(session.Name)
+		if err == nil {
+			detailedJSON, _ := json.Marshal(detailedSession)
+			log.Printf("[TMUX] 会话 #%d 详细信息: %s", i+1, string(detailedJSON))
+		}
+	}
+
 	// 筛选出饥荒服务器会话并更新状态
 	var result []ServerInfo
 	runningSessionMap := make(map[string]bool)
 
-	// 记录当前运行的会话
+	// 记录当前运行的会话及其创建时间
+	runningSessionCreationTimes := make(map[string]string)
 	for _, session := range sessions {
 		if strings.HasPrefix(session.Name, "dstserver_") {
 			runningSessionMap[session.Name] = true
+			// 如果会话有创建时间，记录下来
+			if session.Created != "" {
+				log.Printf("[TMUX] 会话 %s 的原始创建时间: %s", session.Name, session.Created)
+				runningSessionCreationTimes[session.Name] = session.Created
+			}
 		}
 	}
 
@@ -582,56 +601,54 @@ func ListDSTServers() ([]ServerInfo, error) {
 		// 检查会话是否仍在运行
 		if running, exists := runningSessionMap[sessionName]; exists && running {
 			info.Status = "running"
-			// 计算运行时间
-			startTimeStr := info.StartTime
-			if startTimeStr != "unknown" {
-				startTime, err := time.Parse("2006-01-02 15:04:05", startTimeStr)
+
+			// 如果有tmux会话的创建时间，使用它替代当前的启动时间
+			if createdTime, exists := runningSessionCreationTimes[sessionName]; exists && createdTime != "" {
+				// 尝试将tmux的创建时间转换为我们的时间格式
+				// tmux的时间格式可能是不同的，需要尝试多种格式
+				var parsedTime time.Time
+				var parseErr error
+
+				// 先尝试将创建时间解析为Unix时间戳
+				timestamp, err := strconv.ParseInt(createdTime, 10, 64)
 				if err == nil {
-					// 确保运行时间为正数
-					now := time.Now()
-
-					// 计算时间差异
-					timeDiff := now.Sub(startTime)
-
-					// 允许有小的时间差异，比如启动时间和当前时间相差不超过10秒
-					tolerance := 10 * time.Second
-
-					if timeDiff >= -tolerance {
-						// 正常情况：当前时间在启动时间之后，或者时间差异在容差范围内
-
-						// 如果时间差异为负，但在容差范围内，则使用当前时间作为计算起点
-						if timeDiff < 0 {
-							log.Printf("[TMUX] 启动时间(%s)和当前时间(%s)差异在容差范围内，使用当前时间计算运行时间",
-								startTime.Format("2006-01-02 15:04:05.000"), now.Format("2006-01-02 15:04:05.000"))
-							info.RunningTime = "0s"
-						} else {
-							// 正常计算运行时间
-							info.RunningTime = timeDiff.Round(time.Second).String()
-							log.Printf("[TMUX] 计算服务器运行时间: %s, 启动时间: %s, 当前时间: %s",
-								info.RunningTime, startTime.Format("2006-01-02 15:04:05.000"), now.Format("2006-01-02 15:04:05.000"))
-						}
-					} else {
-						// 异常情况：启动时间远远早于当前时间（超过容差范围）
-						log.Printf("[TMUX][警告] 服务器启动时间(%s)远远早于当前时间(%s)，时间差异: %s",
-							startTime.Format("2006-01-02 15:04:05.000"), now.Format("2006-01-02 15:04:05.000"), timeDiff)
-						// 使用当前时间作为启动时间，运行时间设为0
-						info.StartTime = now.Format("2006-01-02 15:04:05")
-						info.RunningTime = "0s"
-					}
+					// 成功解析为时间戳
+					parsedTime = time.Unix(timestamp, 0)
+					parseErr = nil
+					log.Printf("[TMUX] 成功将创建时间 %s 解析为时间戳: %v", createdTime, parsedTime)
 				} else {
-					log.Printf("[TMUX][警告] 解析启动时间失败: %v, 原始时间字符串: %s", err, startTimeStr)
-					// 如果解析失败，重置启动时间和运行时间
-					info.StartTime = time.Now().Format("2006-01-02 15:04:05")
-					info.RunningTime = "0s"
+					// 如果不是时间戳，尝试多种时间格式
+					log.Printf("[TMUX] 创建时间 %s 不是时间戳格式，尝试其他格式", createdTime)
+					timeFormats := []string{
+						"2006-01-02 15:04:05",
+						"Mon Jan 2 15:04:05 2006",
+						"Mon Jan 2 15:04:05 MST 2006",
+						"Mon Jan _2 15:04:05 2006",
+						"Mon Jan _2 15:04:05 MST 2006",
+					}
+
+					for _, format := range timeFormats {
+						parsedTime, parseErr = time.Parse(format, createdTime)
+						if parseErr == nil {
+							break
+						}
+					}
 				}
-			} else {
-				// 如果启动时间未知，设置为当前时间
-				info.StartTime = time.Now().Format("2006-01-02 15:04:05")
-				info.RunningTime = "0s"
+
+				if parseErr == nil {
+					// 成功解析时间，更新启动时间
+					info.StartTime = parsedTime.Format("2006-01-02 15:04:05")
+					log.Printf("[TMUX] 更新会话 %s 的启动时间为: %s (从原始创建时间: %s)",
+						sessionName, info.StartTime, createdTime)
+				} else {
+					log.Printf("[TMUX][警告] 无法解析会话 %s 的创建时间: %s, 错误: %v",
+						sessionName, createdTime, parseErr)
+				}
 			}
+
+			// 只保留启动时间信息
 		} else {
 			info.Status = "stopped"
-			info.RunningTime = ""
 		}
 
 		// 添加到结果中
@@ -645,13 +662,58 @@ func ListDSTServers() ([]ServerInfo, error) {
 			parts := strings.Split(sessionName, "_")
 			if len(parts) >= 3 && parts[0] == "dstserver" {
 				// 创建新的服务器信息
+				startTime := "unknown"
+
+				// 如果有tmux会话的创建时间，使用它作为启动时间
+				if createdTime, exists := runningSessionCreationTimes[sessionName]; exists && createdTime != "" {
+					// 尝试将tmux的创建时间转换为我们的时间格式
+					var parsedTime time.Time
+					var parseErr error
+
+					// 先尝试将创建时间解析为Unix时间戳
+					timestamp, err := strconv.ParseInt(createdTime, 10, 64)
+					if err == nil {
+						// 成功解析为时间戳
+						parsedTime = time.Unix(timestamp, 0)
+						parseErr = nil
+						log.Printf("[TMUX] 成功将新会话创建时间 %s 解析为时间戳: %v", createdTime, parsedTime)
+					} else {
+						// 如果不是时间戳，尝试多种时间格式
+						log.Printf("[TMUX] 新会话创建时间 %s 不是时间戳格式，尝试其他格式", createdTime)
+						timeFormats := []string{
+							"2006-01-02 15:04:05",
+							"Mon Jan 2 15:04:05 2006",
+							"Mon Jan 2 15:04:05 MST 2006",
+							"Mon Jan _2 15:04:05 2006",
+							"Mon Jan _2 15:04:05 MST 2006",
+						}
+
+						for _, format := range timeFormats {
+							parsedTime, parseErr = time.Parse(format, createdTime)
+							if parseErr == nil {
+								break
+							}
+						}
+					}
+
+					if parseErr == nil {
+						// 成功解析时间，更新启动时间
+						startTime = parsedTime.Format("2006-01-02 15:04:05")
+						log.Printf("[TMUX] 新会话 %s 的启动时间设置为: %s (从原始创建时间: %s)",
+							sessionName, startTime, createdTime)
+					} else {
+						log.Printf("[TMUX][警告] 无法解析新会话 %s 的创建时间: %s, 错误: %v",
+							sessionName, createdTime, parseErr)
+					}
+				}
+
 				info := ServerInfo{
 					SessionName: sessionName,
 					ArchiveName: parts[1],
 					WorldName:   parts[2],
 					ServerMode:  "unknown", // 未知模式
 					Status:      "running",
-					StartTime:   "unknown",
+					StartTime:   startTime,
 				}
 
 				// 添加到结果和映射中

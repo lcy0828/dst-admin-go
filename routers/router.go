@@ -175,6 +175,7 @@ func InitRouter() *gin.Engine {
 			tmuxGroup.POST("/raw-command", tmux.HandleRawCommand) // 原始命令API（保持向后兼容）
 			tmuxGroup.GET("/list", tmux.ListServers)
 			tmuxGroup.POST("/kill", tmux.KillServer)
+			tmuxGroup.GET("/debug", tmux.DebugTmuxSessions) // 调试端点，输出会话信息到日志
 
 			// 命令管理API
 			commandGroup := tmuxGroup.Group("/commands")

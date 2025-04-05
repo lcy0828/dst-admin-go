@@ -2,18 +2,16 @@ package server
 
 import (
 	"bufio"
-	"github.com/gin-g
 	"github.com/gin-gonic/gin"
-	"os"
+	"github.com/go-ini/ini"
 	"io"
 	"log"
 	"net/http"
 	"os"
-
-"path/
-	"log"
-	"strings"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 )
 
 // 配置变量
@@ -54,13 +52,13 @@ func ServerLog(c *gin.Context) {
 func Status(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status": 200,
+		"msg":    "服务器状态功能待实现",
+		"data": map[string]interface{}{
 			"running":    false,
 			"uptime":     "0",
 			"cpu":        "0%",
 			"memory":     "0MB",
 			"players":    0,
-			"memory":   "0MB",
-			"players":  0,
 			"maxplayers": 0,
 		},
 	})
@@ -287,6 +285,5 @@ func StreamLog(c *gin.Context) {
 			c.SSEvent("error", "读取日志出错: "+err.Error())
 			return false
 		}
-())
 	})
 }

@@ -18,11 +18,11 @@ import (
 
 // 配置常量
 const (
-	appID             = "322330" // 饥荒联机版的AppID
-	steamCmdPath      = "/opt/go-dont/steam"
-	luaShPath         = "/opt/go-dont/lua-sh"
-	workshopContent   = "/root/Steam/steamapps/workshop/content/322330"
-	tmuxSessionName   = "DST_MODDOWN"
+	appID           = "322330" // 饥荒联机版的AppID
+	steamCmdPath    = "/opt/go-dont/steam"
+	luaShPath       = "/opt/go-dont/lua-sh"
+	workshopContent = "/root/Steam/steamapps/workshop/content/322330"
+	tmuxSessionName = "DST_MODDOWN"
 )
 
 var wg sync.WaitGroup
@@ -103,7 +103,7 @@ func SearchMod(g *gin.Context) {
 	// 使用map存储模组信息，以模组ID为键
 	modInfoMap := make(map[string]*Searchmodinfo)
 	var modList []string // 保持模组顺序
-	
+
 	// 互斥锁用于保护map的并发访问
 	var mapMutex sync.Mutex
 
@@ -128,20 +128,20 @@ func SearchMod(g *gin.Context) {
 		if modID == "" {
 			return
 		}
-		
+
 		mapMutex.Lock()
-		
+
 		// 检查是否已存在，如果不存在则创建新项
 		if _, exists := modInfoMap[modID]; !exists {
 			modInfoMap[modID] = &Searchmodinfo{Id: modID}
 			modList = append(modList, modID) // 保持顺序
 		}
-		
+
 		// 更新模组基本信息
 		modInfoMap[modID].Img = e.ChildAttr("a>div>img", "src")
 		modInfoMap[modID].Name = e.ChildText("a[class=item_link]>div")
 		modInfoMap[modID].Auth = e.ChildText("div>a[class=workshop_author_link]")
-		
+
 		// 提取评分图片
 		ratingImg := e.ChildAttr("img.fileRating", "src")
 		if ratingImg == "" {
@@ -160,12 +160,12 @@ func SearchMod(g *gin.Context) {
 			modInfoMap[modID].RatingImg = ratingImg
 			log.Printf("模组 %s 评分图片: %s", modID, ratingImg)
 		}
-		
+
 		mapMutex.Unlock()
-		
-		log.Printf("找到模组: %s (ID: %s, 作者: %s)", 
+
+		log.Printf("找到模组: %s (ID: %s, 作者: %s)",
 			modInfoMap[modID].Name, modID, modInfoMap[modID].Auth)
-		
+
 		// 访问详情页获取更多信息
 		detailURL := e.ChildAttr("a[class=ugc]", "href")
 		if detailURL != "" {
@@ -183,15 +183,15 @@ func SearchMod(g *gin.Context) {
 		if modID == "" {
 			return
 		}
-		
+
 		mapMutex.Lock()
 		defer mapMutex.Unlock()
-		
+
 		if _, exists := modInfoMap[modID]; !exists {
 			// 如果模组ID不存在，可能是爬虫直接访问了详情页
 			return
 		}
-		
+
 		// 获取并设置模组时间信息
 		moduptime := e.ChildText("div:nth-child(3)")
 		if moduptime != "" {
@@ -206,14 +206,14 @@ func SearchMod(g *gin.Context) {
 		if modID == "" {
 			return
 		}
-		
+
 		mapMutex.Lock()
 		defer mapMutex.Unlock()
-		
+
 		if _, exists := modInfoMap[modID]; !exists {
 			return
 		}
-		
+
 		// 获取并设置订阅信息
 		modnowsub := e.ChildText("tbody>tr:nth-child(2)>td:nth-child(1)")
 		if modnowsub != "" {
@@ -228,14 +228,14 @@ func SearchMod(g *gin.Context) {
 		if modID == "" {
 			return
 		}
-		
+
 		mapMutex.Lock()
 		defer mapMutex.Unlock()
-		
+
 		if _, exists := modInfoMap[modID]; !exists {
 			return
 		}
-		
+
 		// 获取并设置版本信息
 		modversion := e.ChildText("a")
 		if modversion != "" {
@@ -254,9 +254,9 @@ func SearchMod(g *gin.Context) {
 		g.JSON(http.StatusInternalServerError, gin.H{"error": "搜索失败"})
 		return
 	}
-	
+
 	c.Wait()
-	
+
 	// 按原始顺序构建结果数组
 	var searchResults [30]Searchmodinfo
 	for i, modID := range modList {
@@ -267,7 +267,7 @@ func SearchMod(g *gin.Context) {
 			searchResults[i] = *info
 		}
 	}
-	
+
 	g.JSON(http.StatusOK, searchResults)
 }
 
@@ -311,7 +311,7 @@ func DownloadMod(g *gin.Context) {
 
 	// 直接构建JSON字符串，避免嵌套JSON被转义
 	data := fmt.Sprintf("{\"status\": %d, \"modinfo\": %s}", status, modinfo)
-	
+
 	g.Header("Content-Type", "application/json")
 	g.String(http.StatusOK, data)
 }
@@ -378,7 +378,7 @@ func DownloadMod2(modid string, refresh string, version string) string {
 	if !isSessionExists {
 		initCmd := fmt.Sprintf("cd %s && tmux new-session -s %s -d \"./steamcmd.sh\"",
 			steamCmdPath, tmuxSessionName)
-
+		log.Printf("创建tmux会话: %s", initCmd)
 		cmd := exec.Command("bash", "-c", initCmd)
 		if err := cmd.Run(); err != nil {
 			log.Printf("创建tmux会话失败: %v", err)
