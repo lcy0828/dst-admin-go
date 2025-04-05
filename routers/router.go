@@ -145,11 +145,11 @@ func InitRouter() *gin.Engine {
 			// 获取server.ini文件
 			dstservers.GET("/serverini", dstserver.GetServerIni)
 
-			// 更新server.ini文件
-			dstservers.PUT("/serverini", dstserver.UpdateServerIni)
+			// 创建或更新server.ini文件
+			dstservers.POST("/serverini", dstserver.CreateOrUpdateServerIni)
 
-			// 创建server.ini文件
-			dstservers.POST("/serverini", dstserver.CreateServerIni)
+			// 删除世界
+			dstservers.POST("/deleteworld", dstserver.DeleteWorld)
 		}
 
 		// DST游戏自定义配置管理
