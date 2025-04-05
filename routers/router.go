@@ -84,6 +84,18 @@ func InitRouter() *gin.Engine {
 			mods.GET("/log", server.ServerLog)      // 临时使用server.ServerLog替代
 			mods.GET("/local", server.Status)       // 临时使用server.Status替代
 			mods.DELETE("/local", server.Status)    // 临时使用server.Status替代
+			// 新增服务器模组管理API
+			mods.POST("/server/add", mod.AddModToServer)
+			mods.POST("/server/update", mod.AddModToServer) // 添加模组到服务器
+			mods.GET("/server/list", mod.GetServerMods)     // 获取服务器模组列表
+			mods.GET("/config", mod.GetModConfig)           // 获取模组配置信息
+			// 新增模组自定义配置管理API
+			mods.POST("/custom-config", mod.SaveModCustomConfig) // 保存模组自定义配置
+			mods.GET("/custom-config", mod.GetModCustomConfig)   // 获取模组自定义配置
+			mods.GET("/config-file", mod.GenerateModConfigFile)  // 生成模组配置文件
+			// 新增模组删除和启用/禁用API
+			mods.POST("/server/delete", mod.DeleteServerMod) // 删除服务器模组
+			mods.POST("/toggle", mod.ToggleModEnabled)       // 启用/禁用模组
 		}
 
 		// DST服务器配置管理
