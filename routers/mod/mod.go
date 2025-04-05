@@ -595,13 +595,19 @@ func GenerateModConfigFile(g *gin.Context) {
 		g.JSON(http.StatusInternalServerError, gin.H{"status": 500, "message": "获取模组配置失败"})
 		return
 	}
-
+	checkconfigs, err := models.GetServerMods()
+	if err != nil {
+		log.Printf("%s 获取已下载模组状态失败: %v", LogPrefix, err)
+		g.JSON(http.StatusInternalServerError, gin.H{"status": 500, "message": "获取模组状态失败"})
+		return
+	}
 	// 构建配置文件内容
 	configFileContent := "return {\n"
 
 	// 遍历所有模组配置
 	for i, config := range configs {
 		// 解析配置选项JSON
+		checkisenable := false
 		var configOptions map[string]interface{}
 		if config.ConfigurationOptions == "" {
 			configOptions = map[string]interface{}{}
@@ -610,6 +616,14 @@ func GenerateModConfigFile(g *gin.Context) {
 				log.Printf("%s 解析模组自定义配置失败 - 模组ID: %s, 错误: %v", LogPrefix, config.Modid, err)
 				configOptions = map[string]interface{}{}
 			}
+		}
+		for _, checkconfig := range checkconfigs {
+			if checkconfig.Modid == config.Modid && checkconfig.Enabled == true {
+				checkisenable = true
+			}
+		}
+		if !checkisenable {
+			continue
 		}
 
 		// 添加模组配置
