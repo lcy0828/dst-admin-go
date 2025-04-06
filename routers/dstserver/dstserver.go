@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -731,6 +733,12 @@ type CreateCaveWorldRequest struct {
 	Overrides map[string]interface{} `json:"overrides" binding:"required"`
 }
 
+// TemplateWorldRequest 从模板创建世界配置请求结构
+type TemplateWorldRequest struct {
+	SaveName  string `json:"savename" binding:"required"`
+	WorldName string `json:"worldname" binding:"required"`
+}
+
 // GetWorldOverrides 获取指定房间和世界的leveldataoverride.lua中的overrides字段
 func GetWorldOverrides(g *gin.Context) {
 	// 获取请求参数
@@ -952,11 +960,12 @@ func UpdateWorldOverrides(g *gin.Context) {
 	for key, value := range req.Overrides {
 		// 将值转换为字符串
 		valueStr := fmt.Sprintf("%v", value)
-		// 如果值不是"default"或"true"/"false"，则添加引号
-		if valueStr != "default" && valueStr != "true" && valueStr != "false" {
+		// 检查值的类型，数字、true、false不需要引号，其他字符串需要引号
+		_, errFloat := strconv.ParseFloat(valueStr, 64)
+		if valueStr != "true" && valueStr != "false" && errFloat != nil {
 			valueStr = "\"" + valueStr + "\""
 		}
-		newOverridesContent += fmt.Sprintf("    [\"%s\"]=%s,\n", key, valueStr)
+		newOverridesContent += fmt.Sprintf("    %s=%s,\n", key, valueStr)
 	}
 
 	// 替换文件中的overrides部分
@@ -1033,15 +1042,34 @@ func CreateForestWorld(g *gin.Context) {
 
 	// 构建新的overrides内容
 	overridesContent := "\n"
-	for key, value := range req.Overrides {
+
+	// 将键排序
+	keys := make([]string, 0, len(req.Overrides))
+	for key := range req.Overrides {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	// 按排序后的键生成内容
+	for _, key := range keys {
+		value := req.Overrides[key]
 		// 将值转换为字符串
 		valueStr := fmt.Sprintf("%v", value)
-		// 如果值不是"default"或"true"/"false"，则添加引号
-		if valueStr != "default" && valueStr != "true" && valueStr != "false" {
+		// 检查值的类型，数字、true、false不需要引号，其他字符串需要引号
+		_, errFloat := strconv.ParseFloat(valueStr, 64)
+		if valueStr != "true" && valueStr != "false" && errFloat != nil {
 			valueStr = "\"" + valueStr + "\""
 		}
-		overridesContent += fmt.Sprintf("    [\"%s\"]=%s,\n", key, valueStr)
+		overridesContent += fmt.Sprintf("    %s=%s,\n", key, valueStr)
 	}
+
+	// 在overrides最后增加指定的配置项
+	overridesContent += "    has_ocean=true,\n"
+	overridesContent += "    keep_disconnected_tiles=true,\n"
+	overridesContent += "    layout_mode=\"LinkNodesByKeys\",\n"
+	overridesContent += "    no_joining_islands=true,\n"
+	overridesContent += "    no_wormholes_to_disconnected_tiles=true,\n"
+	overridesContent += "    wormhole_prefab=\"wormhole\",\n"
 
 	// 构建森林世界模板
 	template := fmt.Sprintf(`return {
@@ -1158,15 +1186,31 @@ func CreateCaveWorld(g *gin.Context) {
 
 	// 构建新的overrides内容
 	overridesContent := "\n"
-	for key, value := range req.Overrides {
+
+	// 将键排序
+	keys := make([]string, 0, len(req.Overrides))
+	for key := range req.Overrides {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	// 按排序后的键生成内容
+	for _, key := range keys {
+		value := req.Overrides[key]
 		// 将值转换为字符串
 		valueStr := fmt.Sprintf("%v", value)
-		// 如果值不是"default"或"true"/"false"或"always"，则添加引号
-		if valueStr != "default" && valueStr != "true" && valueStr != "false" && valueStr != "always" {
+		// 检查值的类型，数字、true、false不需要引号，其他字符串需要引号
+		_, errFloat := strconv.ParseFloat(valueStr, 64)
+		if valueStr != "true" && valueStr != "false" && errFloat != nil {
 			valueStr = "\"" + valueStr + "\""
 		}
-		overridesContent += fmt.Sprintf("    [\"%s\"]=%s,\n", key, valueStr)
+		overridesContent += fmt.Sprintf("    %s=%s,\n", key, valueStr)
 	}
+
+	// 在overrides最后增加指定的配置项
+	overridesContent += "    layout_mode=\"RestrictNodesByKey\",\n"
+	overridesContent += "    roads=\"never\",\n"
+	overridesContent += "    wormhole_prefab=\"tentacle_pillar\",\n"
 
 	// 构建洞穴世界模板
 	template := fmt.Sprintf(`return {
@@ -1419,6 +1463,164 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(dstFile, srcFile)
 	return err
+}
+
+// CreateTemplateForestWorld 从模板创建森林世界的leveldataoverride.lua文件
+func CreateTemplateForestWorld(g *gin.Context) {
+	// 解析请求体
+	var req TemplateWorldRequest
+	if err := g.ShouldBindJSON(&req); err != nil {
+		log.Printf("解析请求体失败: %v", err)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 400,
+			Data:   nil,
+			Msg:    "请求参数错误: " + err.Error(),
+		})
+		return
+	}
+
+	// 记录请求参数
+	log.Printf("接收到从模板创建森林世界请求 - 存档名称: %s, 世界名称: %s",
+		req.SaveName, req.WorldName)
+
+	// 构建target目录路径
+	targetDir := filepath.Join(dstSavePath, req.SaveName, req.WorldName)
+	log.Printf("目标目录: %s", targetDir)
+
+	// 检查目录是否存在，如果不存在则创建
+	if _, err := os.Stat(targetDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(targetDir, 0755); err != nil {
+			errorMsg := fmt.Sprintf("创建目录失败: %v", err)
+			log.Printf(errorMsg)
+			g.JSON(http.StatusOK, WorldOverridesResponse{
+				Status: 500,
+				Data:   nil,
+				Msg:    errorMsg,
+			})
+			return
+		}
+		log.Printf("成功创建目录: %s", targetDir)
+	}
+
+	// 构建源文件路径
+	sourceFile := "./template/forest/leveldataoverride.lua"
+	log.Printf("源文件: %s", sourceFile)
+
+	// 检查源文件是否存在
+	if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
+		errorMsg := fmt.Sprintf("模板文件不存在: %s", sourceFile)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 404,
+			Data:   nil,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	// 构建目标文件路径
+	targetFile := filepath.Join(targetDir, "leveldataoverride.lua")
+	log.Printf("目标文件: %s", targetFile)
+
+	// 复制文件
+	if err := copyFile(sourceFile, targetFile); err != nil {
+		errorMsg := fmt.Sprintf("复制文件失败: %v", err)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 500,
+			Data:   nil,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	log.Printf("成功从模板创建森林世界配置 - 存档: %s, 世界: %s", req.SaveName, req.WorldName)
+
+	// 返回成功消息
+	g.JSON(http.StatusOK, WorldOverridesResponse{
+		Status: 200,
+		Data:   nil,
+		Msg:    "从模板创建森林世界配置成功",
+	})
+}
+
+// CreateTemplateCaveWorld 从模板创建洞穴世界的leveldataoverride.lua文件
+func CreateTemplateCaveWorld(g *gin.Context) {
+	// 解析请求体
+	var req TemplateWorldRequest
+	if err := g.ShouldBindJSON(&req); err != nil {
+		log.Printf("解析请求体失败: %v", err)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 400,
+			Data:   nil,
+			Msg:    "请求参数错误: " + err.Error(),
+		})
+		return
+	}
+
+	// 记录请求参数
+	log.Printf("接收到从模板创建洞穴世界请求 - 存档名称: %s, 世界名称: %s",
+		req.SaveName, req.WorldName)
+
+	// 构建target目录路径
+	targetDir := filepath.Join(dstSavePath, req.SaveName, req.WorldName)
+	log.Printf("目标目录: %s", targetDir)
+
+	// 检查目录是否存在，如果不存在则创建
+	if _, err := os.Stat(targetDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(targetDir, 0755); err != nil {
+			errorMsg := fmt.Sprintf("创建目录失败: %v", err)
+			log.Printf(errorMsg)
+			g.JSON(http.StatusOK, WorldOverridesResponse{
+				Status: 500,
+				Data:   nil,
+				Msg:    errorMsg,
+			})
+			return
+		}
+		log.Printf("成功创建目录: %s", targetDir)
+	}
+
+	// 构建源文件路径
+	sourceFile := "./template/cave/leveldataoverride.lua"
+	log.Printf("源文件: %s", sourceFile)
+
+	// 检查源文件是否存在
+	if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
+		errorMsg := fmt.Sprintf("模板文件不存在: %s", sourceFile)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 404,
+			Data:   nil,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	// 构建目标文件路径
+	targetFile := filepath.Join(targetDir, "leveldataoverride.lua")
+	log.Printf("目标文件: %s", targetFile)
+
+	// 复制文件
+	if err := copyFile(sourceFile, targetFile); err != nil {
+		errorMsg := fmt.Sprintf("复制文件失败: %v", err)
+		log.Printf(errorMsg)
+		g.JSON(http.StatusOK, WorldOverridesResponse{
+			Status: 500,
+			Data:   nil,
+			Msg:    errorMsg,
+		})
+		return
+	}
+
+	log.Printf("成功从模板创建洞穴世界配置 - 存档: %s, 世界: %s", req.SaveName, req.WorldName)
+
+	// 返回成功消息
+	g.JSON(http.StatusOK, WorldOverridesResponse{
+		Status: 200,
+		Data:   nil,
+		Msg:    "从模板创建洞穴世界配置成功",
+	})
 }
 
 // DeleteWorldRequest 删除世界请求结构

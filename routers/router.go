@@ -133,14 +133,19 @@ func InitRouter() *gin.Engine {
 			// 获取世界配置中的overrides字段
 			dstservers.GET("/worldoverrides", dstserver.GetWorldOverrides)
 
-			// 更新世界配置中的overrides字段
-			dstservers.POST("/worldoverrides", dstserver.UpdateWorldOverrides)
+			// POST方法的worldoverrides接口已删除
 
 			// 创建或更新森林世界的leveldataoverride.lua文件
 			dstservers.POST("/forestworld", dstserver.CreateForestWorld)
 
 			// 创建或更新洞穴世界的leveldataoverride.lua文件
 			dstservers.POST("/caveworld", dstserver.CreateCaveWorld)
+
+			// 从模板创建森林世界的leveldataoverride.lua文件
+			dstservers.POST("/template/forestworld", dstserver.CreateTemplateForestWorld)
+
+			// 从模板创建洞穴世界的leveldataoverride.lua文件
+			dstservers.POST("/template/caveworld", dstserver.CreateTemplateCaveWorld)
 
 			// 获取server.ini文件
 			dstservers.GET("/serverini", dstserver.GetServerIni)
