@@ -7,6 +7,7 @@ import (
 	"dont/routers/backup"
 	"dont/routers/dstcustomize"
 	"dont/routers/dstserver"
+	"dont/routers/gamelog"
 	"dont/routers/mod"
 	"dont/routers/server"
 	"dont/routers/status"
@@ -27,6 +28,10 @@ func InitRouter() *gin.Engine {
 		gin.Recovery(),
 		middleware.CorsMiddleware(),
 	)
+
+	// 静态文件服务
+	router.StaticFile("/gamelog", "./static/gamelog.html")
+	router.Static("/static", "./static")
 
 	api := router.Group("/api")
 	{
@@ -66,6 +71,9 @@ func InitRouter() *gin.Engine {
 
 		// 流式日志接口 - 不需要认证
 		api.GET("/server/log/stream", server.StreamLog)
+
+		// 游戏日志实时监控接口 - 使用WebSocket
+		api.GET("/game/log/ws", gamelog.HandleLogWebSocket)
 
 		// Dashboard
 		dashboardGroup := api.Group("/dashboard")

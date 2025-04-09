@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>饥荒游戏日志实时监控</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-top: 0;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #logContainer {
+            margin-top: 20px;
+            border: 1px solid #ddd;
+            padding: 10px;
+            height: 500px;
+            overflow-y: auto;
+            background-color: #f9f9f9;
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .connected {
+            background-color: #dff0d8;
+            color: #3c763d;
+        }
+        .disconnected {
+            background-color: #f2dede;
+            color: #a94442;
+        }
+        .log-entry {
+            margin: 2px 0;
+            padding: 2px 5px;
+            border-bottom: 1px solid #eee;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>饥荒游戏日志实时监控</h1>
+        
+        <div class="form-group">
+            <label for="archiveName">存档名称:</label>
+            <input type="text" id="archiveName" placeholder="输入存档名称">
+        </div>
+        
+        <div class="form-group">
+            <label for="worldName">世界名称:</label>
+            <input type="text" id="worldName" placeholder="输入世界名称">
+        </div>
+        
+        <button id="connectBtn">连接</button>
+        <button id="disconnectBtn" disabled>断开连接</button>
+        
+        <div id="status" class="status disconnected">未连接</div>
+        
+        <div id="logContainer"></div>
+    </div>
+
+    <script>
+        let socket = null;
+        
+        document.getElementById('connectBtn').addEventListener('click', connect);
+        document.getElementById('disconnectBtn').addEventListener('click', disconnect);
+        
+        function connect() {
+            const archiveName = document.getElementById('archiveName').value.trim();
+            const worldName = document.getElementById('worldName').value.trim();
+            
+            if (!archiveName || !worldName) {
+                alert('请输入存档名称和世界名称');
+                return;
+            }
+            
+            // 构建WebSocket URL
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/api/game/log/ws?archive=${encodeURIComponent(archiveName)}&world=${encodeURIComponent(worldName)}`;
+            
+            try {
+                socket = new WebSocket(wsUrl);
+                
+                socket.onopen = function() {
+                    document.getElementById('status').textContent = '已连接';
+                    document.getElementById('status').className = 'status connected';
+                    document.getElementById('connectBtn').disabled = true;
+                    document.getElementById('disconnectBtn').disabled = false;
+                    document.getElementById('archiveName').disabled = true;
+                    document.getElementById('worldName').disabled = true;
+                    
+                    addLogEntry('已连接到日志服务器');
+                };
+                
+                socket.onmessage = function(event) {
+                    addLogEntry(event.data);
+                };
+                
+                socket.onclose = function() {
+                    handleDisconnect();
+                    addLogEntry('连接已关闭');
+                };
+                
+                socket.onerror = function(error) {
+                    handleDisconnect();
+                    addLogEntry('连接错误: ' + JSON.stringify(error));
+                };
+            } catch (error) {
+                alert('连接失败: ' + error.message);
+            }
+        }
+        
+        function disconnect() {
+            if (socket) {
+                socket.close();
+                handleDisconnect();
+            }
+        }
+        
+        function handleDisconnect() {
+            document.getElementById('status').textContent = '未连接';
+            document.getElementById('status').className = 'status disconnected';
+            document.getElementById('connectBtn').disabled = false;
+            document.getElementById('disconnectBtn').disabled = true;
+            document.getElementById('archiveName').disabled = false;
+            document.getElementById('worldName').disabled = false;
+            socket = null;
+        }
+        
+        function addLogEntry(text) {
+            const logContainer = document.getElementById('logContainer');
+            
+            // 处理多行文本
+            const lines = text.split('\n');
+            for (const line of lines) {
+                if (line.trim() === '') continue;
+                
+                const entry = document.createElement('div');
+                entry.className = 'log-entry';
+                entry.textContent = line;
+                logContainer.appendChild(entry);
+            }
+            
+            // 自动滚动到底部
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+        
+        // 页面关闭前断开连接
+        window.addEventListener('beforeunload', function() {
+            if (socket) {
+                socket.close();
+            }
+        });
+    </script>
+</body>
+</html>
