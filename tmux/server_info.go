@@ -2,7 +2,6 @@ package tmux
 
 import (
 	"log"
-	"sync"
 	"time"
 )
 
@@ -34,31 +33,25 @@ func GetServerInfoMap() map[string]*ServerInfo {
 // GetRunningServers 获取所有运行中的服务器信息
 // 这个函数可以被其他包直接调用，避免通过HTTP请求获取服务器状态
 func GetRunningServers() []ServerInfo {
-	serverInfoMapMutex.Lock()
-	defer serverInfoMapMutex.Unlock()
-
-	// 打印调试信息
-	log.Printf("[TMUX] serverInfoMap 包含 %d 个服务器", len(serverInfoMap))
-	for k, v := range serverInfoMap {
-		log.Printf("[TMUX] 服务器 %s: 存档=%s, 世界=%s, 状态=%s",
-			k, v.ArchiveName, v.WorldName, v.Status)
+	// 直接调用ListDSTServers函数获取服务器列表
+	servers, err := ListDSTServers()
+	if err != nil {
+		log.Printf("[TMUX] 获取服务器列表失败: %v", err)
+		return []ServerInfo{}
 	}
 
+	// 筛选出运行中的服务器
 	var result []ServerInfo
-	for _, info := range serverInfoMap {
-		if info.Status == "running" {
-			// 创建一个副本
-			serverInfo := ServerInfo{
-				SessionName:    info.SessionName,
-				ArchiveName:    info.ArchiveName,
-				WorldName:      info.WorldName,
-				ServerMode:     info.ServerMode,
-				StartDirectory: info.StartDirectory,
-				Status:         info.Status,
-				StartTime:      info.StartTime,
-			}
-			result = append(result, serverInfo)
+	for _, server := range servers {
+		if server.Status == "running" {
+			result = append(result, server)
 		}
+	}
+
+	log.Printf("[TMUX] 获取到 %d 个运行中的服务器", len(result))
+	for i, server := range result {
+		log.Printf("[TMUX] 运行中的服务器 #%d: 会话=%s, 存档=%s, 世界=%s",
+			i+1, server.SessionName, server.ArchiveName, server.WorldName)
 	}
 
 	return result

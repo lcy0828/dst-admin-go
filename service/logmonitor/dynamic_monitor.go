@@ -192,7 +192,22 @@ func (m *DynamicLogMonitor) startMonitoringServer(server ServerInfo) {
 	// 检查日志文件是否存在
 	if _, err := os.Stat(logPath); os.IsNotExist(err) {
 		log.Printf("[DynamicLogMonitor] 日志文件不存在: %s", logPath)
-		return
+
+		// 创建目录
+		dir := filepath.Dir(logPath)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Printf("[DynamicLogMonitor] 创建目录失败: %s, 错误: %v", dir, err)
+			return
+		}
+
+		// 创建空文件
+		file, err := os.Create(logPath)
+		if err != nil {
+			log.Printf("[DynamicLogMonitor] 创建日志文件失败: %s, 错误: %v", logPath, err)
+			return
+		}
+		file.Close()
+		log.Printf("[DynamicLogMonitor] 已创建空日志文件: %s", logPath)
 	}
 
 	// 创建日志监控器
