@@ -72,6 +72,14 @@ func main() {
 		// 设置全局实例
 		logmonitor.SetDynamicLogMonitor(dynamicLogMonitor)
 
+		// 测试获取全局实例
+		testMonitor := logmonitor.GetDynamicLogMonitor()
+		if testMonitor == nil {
+			log.Printf("警告: 无法获取全局动态日志监控服务实例")
+		} else {
+			log.Printf("成功获取全局动态日志监控服务实例")
+		}
+
 		// 启动监控服务
 		if err := dynamicLogMonitor.Start(); err != nil {
 			log.Printf("警告: 启动动态日志监控服务失败: %v", err)

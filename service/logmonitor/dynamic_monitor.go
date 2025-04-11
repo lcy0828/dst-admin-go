@@ -241,6 +241,8 @@ func (m *DynamicLogMonitor) startMonitoringServer(server ServerInfo) {
 	// 保存监控器引用
 	m.watcherMapMutex.Lock()
 	m.watcherMap[server.SessionName] = watcher
+	log.Printf("[DynamicLogMonitor] 已保存监控器引用: %s, 当前有 %d 个监控器",
+		server.SessionName, len(m.watcherMap))
 	m.watcherMapMutex.Unlock()
 }
 
@@ -275,6 +277,13 @@ func (m *DynamicLogMonitor) GetAllWatchers() map[string]*gamelog.LogWatcher {
 	m.watcherMapMutex.Lock()
 	defer m.watcherMapMutex.Unlock()
 
+	// 打印调试信息
+	log.Printf("[DynamicLogMonitor] GetAllWatchers: 当前有 %d 个监控器", len(m.watcherMap))
+	for k, v := range m.watcherMap {
+		log.Printf("[DynamicLogMonitor] 监控器: %s, 存档=%s, 世界=%s",
+			k, v.GetArchiveName(), v.GetWorldName())
+	}
+
 	// 创建副本
 	result := make(map[string]*gamelog.LogWatcher)
 	for k, v := range m.watcherMap {
@@ -292,6 +301,13 @@ var globalMonitorMutex sync.Mutex
 func SetDynamicLogMonitor(monitor *DynamicLogMonitor) {
 	globalMonitorMutex.Lock()
 	defer globalMonitorMutex.Unlock()
+
+	if monitor == nil {
+		log.Printf("[DynamicLogMonitor] SetDynamicLogMonitor: 设置全局实例为空")
+	} else {
+		log.Printf("[DynamicLogMonitor] SetDynamicLogMonitor: 设置全局实例非空")
+	}
+
 	globalMonitor = monitor
 }
 
@@ -299,5 +315,12 @@ func SetDynamicLogMonitor(monitor *DynamicLogMonitor) {
 func GetDynamicLogMonitor() *DynamicLogMonitor {
 	globalMonitorMutex.Lock()
 	defer globalMonitorMutex.Unlock()
+
+	if globalMonitor == nil {
+		log.Printf("[DynamicLogMonitor] GetDynamicLogMonitor: 全局实例为空")
+	} else {
+		log.Printf("[DynamicLogMonitor] GetDynamicLogMonitor: 全局实例存在")
+	}
+
 	return globalMonitor
 }

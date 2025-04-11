@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"log"
 	"net/http"
 	"time"
 
@@ -25,9 +26,13 @@ type ParserStatus struct {
 
 // GetActiveParsers 获取当前运行中的解析器
 func GetActiveParsers(c *gin.Context) {
+	// 打印调试信息
+	log.Printf("[Parser] GetActiveParsers: 开始获取活跃解析器")
+
 	// 获取动态日志监控服务实例
 	monitor := logmonitor.GetDynamicLogMonitor()
 	if monitor == nil {
+		log.Printf("[Parser] GetActiveParsers: 动态日志监控服务未启动")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status": 500,
 			"msg":    "动态日志监控服务未启动",
@@ -35,8 +40,11 @@ func GetActiveParsers(c *gin.Context) {
 		return
 	}
 
+	log.Printf("[Parser] GetActiveParsers: 成功获取动态日志监控服务实例")
+
 	// 获取所有活跃的监控器
 	watchers := monitor.GetAllWatchers()
+	log.Printf("[Parser] GetActiveParsers: 获取到 %d 个监控器", len(watchers))
 
 	// 构建响应数据
 	var parsers []ParserStatus
@@ -56,6 +64,11 @@ func GetActiveParsers(c *gin.Context) {
 		}
 
 		parsers = append(parsers, status)
+	}
+
+	// 确保返回空数组而不是null
+	if parsers == nil {
+		parsers = []ParserStatus{}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
