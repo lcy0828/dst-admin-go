@@ -50,20 +50,42 @@ func GetActiveParsers(c *gin.Context) {
 	var parsers []ParserStatus
 	for key, watcher := range watchers {
 		// 获取解析器状态
+		log.Printf("[Parser] 处理监控器: %s", key)
+
+		// 检查监控器是否有效
+		if watcher == nil {
+			log.Printf("[Parser] 监控器为空: %s", key)
+			continue
+		}
+
+		// 获取监控器属性
+		archiveName := watcher.GetArchiveName()
+		worldName := watcher.GetWorldName()
+		serverType := watcher.GetServerType()
+		startTime := watcher.GetStartTime()
+		logFile := watcher.GetLogFile()
+		processedLines := watcher.GetProcessedLines()
+		lastActivity := watcher.GetLastActivity()
+		clientCount := watcher.GetClientCount()
+
+		log.Printf("[Parser] 监控器属性: 存档=%s, 世界=%s, 类型=%s, 文件=%s",
+			archiveName, worldName, serverType, logFile)
+
 		status := ParserStatus{
 			ID:             key,
-			ArchiveName:    watcher.GetArchiveName(),
-			WorldName:      watcher.GetWorldName(),
-			ServerType:     watcher.GetServerType(),
-			StartTime:      watcher.GetStartTime(),
-			LogFile:        watcher.GetLogFile(),
+			ArchiveName:    archiveName,
+			WorldName:      worldName,
+			ServerType:     serverType,
+			StartTime:      startTime,
+			LogFile:        logFile,
 			Status:         "running",
-			ProcessedLines: watcher.GetProcessedLines(),
-			LastActivity:   watcher.GetLastActivity(),
-			ClientCount:    watcher.GetClientCount(),
+			ProcessedLines: processedLines,
+			LastActivity:   lastActivity,
+			ClientCount:    clientCount,
 		}
 
 		parsers = append(parsers, status)
+		log.Printf("[Parser] 添加解析器状态: %s", key)
 	}
 
 	// 确保返回空数组而不是null

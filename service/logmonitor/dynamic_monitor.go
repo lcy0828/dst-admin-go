@@ -224,6 +224,16 @@ func (m *DynamicLogMonitor) startMonitoringServer(server ServerInfo) {
 	} else {
 		log.Printf("[DynamicLogMonitor] 成功获取日志解析器: 存档=%s, 世界=%s",
 			server.ArchiveName, server.WorldName)
+
+		// 测试解析器
+		testContent := "[00:00:00]: Starting Up\n[00:00:01]: Game version: 123456\n"
+		log.Printf("[DynamicLogMonitor] 测试解析器处理内容: %s", testContent)
+		if err := parser.ProcessAndSaveLog(testContent); err != nil {
+			log.Printf("[DynamicLogMonitor] 测试解析器失败: %v", err)
+		} else {
+			log.Printf("[DynamicLogMonitor] 测试解析器成功")
+		}
+
 		watcher.SetLogParser(parser)
 		watcher.EnableDBStore(true) // 启用数据库存储
 	}

@@ -1,8 +1,12 @@
 package models
 
 import (
+	"log"
 	"time"
 )
+
+// 使用标准日志包作为日志记录器
+var logger = log.New(log.Writer(), "[GameLog] ", log.LstdFlags)
 
 // GameLog 游戏日志记录
 type GameLog struct {
@@ -62,6 +66,10 @@ func InitGameLogTables() {
 
 // AddGameLog 添加游戏日志记录
 func AddGameLog(archiveName, worldName, logType, content, rawContent string, timestamp time.Time) error {
+	// 打印调试信息
+	logger.Printf("[Models] AddGameLog: 存档=%s, 世界=%s, 类型=%s, 内容=%s",
+		archiveName, worldName, logType, content)
+
 	log := GameLog{
 		ArchiveName: archiveName,
 		WorldName:   worldName,
@@ -73,8 +81,11 @@ func AddGameLog(archiveName, worldName, logType, content, rawContent string, tim
 	}
 
 	if err := db.Create(&log).Error; err != nil {
+		logger.Printf("[Models] AddGameLog 失败: %v", err)
 		return err
 	}
+
+	logger.Printf("[Models] AddGameLog 成功: ID=%d", log.ID)
 
 	// 更新统计信息
 	updateLogStatistics(archiveName, worldName, logType, timestamp)
