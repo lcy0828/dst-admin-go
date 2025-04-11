@@ -16,13 +16,13 @@ import (
 
 // ServerInfo 表示服务器信息
 type ServerInfo struct {
-	SessionName    string `json:"session_name"`
-	ArchiveName    string `json:"archive_name"`
-	WorldName      string `json:"world_name"`
-	ServerMode     string `json:"server_mode"`
-	Status         string `json:"status"`
-	StartTime      string `json:"start_time"`
-	StartDirectory string `json:"start_directory"`
+	SessionName    string `json:"session_name"`    // 会话名称
+	ArchiveName    string `json:"archive_name"`    // 存档名称
+	WorldName      string `json:"world_name"`      // 世界名称
+	ServerMode     string `json:"server_mode"`     // 服务器启动模式（32位或64位）
+	StartDirectory string `json:"start_directory"` // 启动目录
+	Status         string `json:"status"`          // 服务器状态（运行中/已停止）
+	StartTime      string `json:"start_time"`      // 启动时间
 }
 
 // ServerListResponse 表示服务器列表响应

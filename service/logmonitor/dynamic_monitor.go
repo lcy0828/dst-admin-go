@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -12,17 +11,6 @@ import (
 	"dont/service/logparser"
 	"dont/tmux"
 )
-
-// ServerInfo 表示服务器信息
-type ServerInfo struct {
-	SessionName    string `json:"session_name"`    // 会话名称
-	ArchiveName    string `json:"archive_name"`    // 存档名称
-	WorldName      string `json:"world_name"`      // 世界名称
-	ServerMode     string `json:"server_mode"`     // 服务器启动模式（32位或64位）
-	StartDirectory string `json:"start_directory"` // 启动目录
-	Status         string `json:"status"`          // 服务器状态（运行中/已停止）
-	StartTime      string `json:"start_time"`      // 启动时间
-}
 
 // DynamicLogMonitor 动态日志监控服务
 // 根据服务器状态动态调整监控的日志文件

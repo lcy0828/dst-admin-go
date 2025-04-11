@@ -162,7 +162,7 @@ func (p *LogParser) GetWorldName() string {
 	return p.worldName
 }
 
-func main() {
+func main3() {
 	// 设置日志输出
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.Println("开始测试日志解析功能")

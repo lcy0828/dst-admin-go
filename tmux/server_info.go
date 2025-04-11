@@ -1,9 +1,5 @@
 package tmux
 
-import (
-	"sync"
-)
-
 // GetServerInfoMap 获取服务器信息映射的副本
 // 这个函数可以被其他包直接调用，避免通过HTTP请求获取服务器状态
 func GetServerInfoMap() map[string]*ServerInfo {
