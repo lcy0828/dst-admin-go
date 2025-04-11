@@ -2,7 +2,6 @@ package gamelog
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
@@ -43,10 +42,10 @@ type ExportRequest struct {
 
 // ImportRequest 导入请求结构
 type ImportRequest struct {
-	ArchiveName string         `json:"archive_name"` // 存档名称
-	WorldName   string         `json:"world_name"`   // 世界名称
+	ArchiveName string          `json:"archive_name"` // 存档名称
+	WorldName   string          `json:"world_name"`   // 世界名称
 	Data        *ExportRuleData `json:"data"`         // 导入数据
-	Overwrite   bool           `json:"overwrite"`    // 是否覆盖
+	Overwrite   bool            `json:"overwrite"`    // 是否覆盖
 }
 
 // HandleGetRules 获取规则列表
@@ -746,20 +745,6 @@ func HandleResetStats(c *gin.Context) {
 		"status": 200,
 		"msg":    "重置统计信息成功",
 		"data":   ruleManager.GetStats(),
-	})
-}
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"status": 500,
-			"msg":    fmt.Sprintf("更新规则失败: %v", err),
-		})
-		return
-	}
-
-	// 返回成功
-	c.JSON(http.StatusOK, gin.H{
-		"status": 200,
-		"msg":    "更新规则成功",
-		"data":   req.Rule,
 	})
 }
 

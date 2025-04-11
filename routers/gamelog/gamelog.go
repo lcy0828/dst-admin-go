@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"dont/service/logparser"
+
 	"github.com/edsrzf/mmap-go"
 	"github.com/fsnotify/fsnotify"
 	"github.com/gin-gonic/gin"
@@ -66,12 +68,16 @@ type LogWatcher struct {
 	archiveName   string
 	worldName     string
 	ruleManager   *RuleManager
+	logParser     *logparser.LogParser // 日志解析器
+	enableDBStore bool                 // 是否启用数据库存储
+	parserMutex   sync.RWMutex         // 解析器读写锁
 }
 
 // ClientInfo 客户端信息
 type ClientInfo struct {
-	Conn        *websocket.Conn // WebSocket连接
-	UseRules    bool           // 是否使用规则过滤
+	Conn         *websocket.Conn // WebSocket连接
+	UseRules     bool            // 是否使用规则过滤
+	EnableParser bool            // 是否启用日志解析
 }
 
 // 创建新的日志监控管理器
@@ -134,6 +140,18 @@ func NewLogWatcher(logFilePath string, archiveName, worldName string) (*LogWatch
 	// 获取或创建规则管理器
 	lw.ruleManager = GetOrCreateRuleManager(archiveName, worldName)
 
+	// 创建日志解析器
+	parser, err := logparser.NewLogParser(archiveName, worldName)
+	if err != nil {
+		mmapData.Unmap()
+		file.Close()
+		return nil, fmt.Errorf("创建日志解析器失败: %v", err)
+	}
+	lw.logParser = parser
+
+	// 默认启用数据库存储
+	lw.enableDBStore = true
+
 	return lw, nil
 }
 
@@ -180,6 +198,102 @@ func (lw *LogWatcher) Stop() {
 	lw.isRunning = false
 
 	log.Printf("停止监控日志文件: %s", lw.logFile)
+}
+
+// SetLogParser 设置日志解析器
+func (lw *LogWatcher) SetLogParser(parser *logparser.LogParser) {
+	lw.parserMutex.Lock()
+	defer lw.parserMutex.Unlock()
+
+	lw.logParser = parser
+	log.Printf("已设置日志解析器，存档: %s, 世界: %s", lw.archiveName, lw.worldName)
+}
+
+// EnableDBStore 启用或禁用数据库存储
+func (lw *LogWatcher) EnableDBStore(enable bool) {
+	lw.parserMutex.Lock()
+	defer lw.parserMutex.Unlock()
+
+	lw.enableDBStore = enable
+	statusText := "禁用"
+	if enable {
+		statusText = "启用"
+	}
+	log.Printf("已%s数据库存储，存档: %s, 世界: %s",
+		statusText, lw.archiveName, lw.worldName)
+}
+
+// GetArchiveName 获取存档名称
+func (lw *LogWatcher) GetArchiveName() string {
+	return lw.archiveName
+}
+
+// GetWorldName 获取世界名称
+func (lw *LogWatcher) GetWorldName() string {
+	return lw.worldName
+}
+
+// GetServerType 获取服务器类型
+func (lw *LogWatcher) GetServerType() string {
+	lw.parserMutex.RLock()
+	defer lw.parserMutex.RUnlock()
+
+	if lw.logParser != nil {
+		return lw.logParser.GetServerType()
+	}
+
+	// 如果日志解析器不可用，尝试从世界名称推断
+	if strings.Contains(strings.ToLower(lw.worldName), "cave") {
+		return "cave"
+	}
+	return "forest"
+}
+
+// GetStartTime 获取监控器启动时间
+func (lw *LogWatcher) GetStartTime() time.Time {
+	lw.parserMutex.RLock()
+	defer lw.parserMutex.RUnlock()
+
+	if lw.logParser != nil && lw.logParser.GetRealStartTime().Unix() > 0 {
+		return lw.logParser.GetRealStartTime()
+	}
+
+	// 如果日志解析器没有有效的启动时间，返回当前时间
+	return time.Now()
+}
+
+// GetLogFile 获取日志文件路径
+func (lw *LogWatcher) GetLogFile() string {
+	return lw.logFile
+}
+
+// GetProcessedLines 获取已处理行数
+func (lw *LogWatcher) GetProcessedLines() int64 {
+	return lw.lastPosition
+}
+
+// GetLastActivity 获取最后活动时间
+func (lw *LogWatcher) GetLastActivity() time.Time {
+	lw.parserMutex.RLock()
+	defer lw.parserMutex.RUnlock()
+
+	// 返回当前时间作为最后活动时间
+	// 实际实现中可以添加一个字段来记录最后活动时间
+	return time.Now()
+}
+
+// IsRunning 检查监控器是否正在运行
+func (lw *LogWatcher) IsRunning() bool {
+	lw.runningMutex.Lock()
+	defer lw.runningMutex.Unlock()
+	return lw.isRunning
+}
+
+// GetClientCount 获取当前连接的客户端数量
+func (lw *LogWatcher) GetClientCount() int {
+	lw.clientsMutex.Lock()
+	defer lw.clientsMutex.Unlock()
+	return len(lw.clients)
 }
 
 // 添加客户端连接
@@ -272,20 +386,19 @@ func (lw *LogWatcher) BroadcastMessage(message string) {
 				}
 
 				// 序列化为JSON
-				jsonData, err := json.Marshal(logMsg)
-				if err != nil {
-					log.Printf("序列化日志消息失败: %v", err)
+				jsonData, jsonErr := json.Marshal(logMsg)
+				if jsonErr != nil {
+					log.Printf("序列化日志消息失败: %v", jsonErr)
 					continue
 				}
 
 				// 发送JSON消息
-				err = clientInfo.Conn.WriteMessage(websocket.TextMessage, jsonData)
-			}
-
-			if err != nil {
-				log.Printf("发送消息到客户端失败: %v", err)
-				clientInfo.Conn.Close()
-				delete(lw.clients, conn)
+				sendErr := clientInfo.Conn.WriteMessage(websocket.TextMessage, jsonData)
+				if sendErr != nil {
+					log.Printf("发送消息到客户端失败: %v", sendErr)
+					clientInfo.Conn.Close()
+					delete(lw.clients, conn)
+				}
 			}
 		}
 	}
@@ -416,7 +529,11 @@ func (lw *LogWatcher) handleClientMessage(conn *websocket.Conn, message []byte) 
 		if clientInfo, ok := lw.clients[conn]; ok {
 			clientInfo.UseRules = !clientInfo.UseRules
 			response.Success = true
-			response.Message = fmt.Sprintf("已%s规则过滤", clientInfo.UseRules ? "启用" : "禁用")
+			if clientInfo.UseRules {
+				response.Message = "已启用规则过滤"
+			} else {
+				response.Message = "已禁用规则过滤"
+			}
 		} else {
 			response.Success = false
 			response.Message = "客户端信息不存在"
@@ -494,7 +611,22 @@ func (lw *LogWatcher) readNewContent() {
 		if currentSize < lw.lastPosition {
 			// 文件被截断，重置位置
 			lw.lastPosition = 0
-			log.Printf("检测到日志文件被截断，重置读取位置")
+			log.Printf("检测到日志文件被截断，可能是服务器重启。重置读取位置")
+
+			// 重置解析器状态
+			if lw.logParser != nil {
+				// 添加一条服务器重启的日志
+				restartMsg := "服务器可能已重启，日志文件被重置"
+				lw.logParser.SaveLogToDatabase("system", restartMsg, time.Now()) // 使用字符串“system”代替models.LogTypeSystem常量，因为我们不想引入models包
+
+				// 创建新的解析器，使用相同的存档名称和世界名称
+				newParser, err := logparser.NewLogParser(lw.archiveName, lw.worldName)
+				if err != nil {
+					log.Printf("重置解析器状态失败: %v", err)
+				} else {
+					lw.logParser = newParser
+				}
+			}
 		}
 		return
 	}
@@ -519,8 +651,26 @@ func (lw *LogWatcher) readNewContent() {
 	// 读取新内容
 	newContent := lw.mmapData[lw.lastPosition:currentSize]
 	if len(newContent) > 0 {
-		// 广播新内容
-		lw.BroadcastMessage(string(newContent))
+		// 将新内容转换为字符串
+		contentStr := string(newContent)
+
+		// 广播新内容到WebSocket客户端
+		lw.BroadcastMessage(contentStr)
+
+		// 如果启用了数据库存储，则解析并存储日志
+		lw.parserMutex.RLock()
+		enableStore := lw.enableDBStore
+		parser := lw.logParser
+		lw.parserMutex.RUnlock()
+
+		if enableStore && parser != nil {
+			go func(content string, p *logparser.LogParser) {
+				if err := p.ProcessAndSaveLog(content); err != nil {
+					log.Printf("处理并存储日志失败: %v", err)
+				}
+			}(contentStr, parser)
+		}
+
 		lw.lastPosition = currentSize
 	}
 }
@@ -670,4 +820,7 @@ func RegisterRoutes(router *gin.RouterGroup) {
 		// 禁用规则
 		rules.POST("/disable", HandleDisableRule)
 	}
+
+	// 注册日志解析器API路由
+	RegisterParserAPIRoutes(router)
 }

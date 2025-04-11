@@ -91,7 +91,7 @@ func StreamLog(c *gin.Context) {
 	}
 
 	// 构造日志文件路径，使用配置的DST_SAVE_PATH而非硬编码路径
-	logPath := filepath.Join(dstSavePath, archiveName, worldName, "server_log.txt")
+	logPath := filepath.Join(dstSavePath, archiveName, worldName, "forest_server_log.txt")
 
 	// 检查文件是否存在
 	if _, err := os.Stat(logPath); os.IsNotExist(err) {

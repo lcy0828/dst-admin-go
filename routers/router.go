@@ -9,6 +9,7 @@ import (
 	"dont/routers/dstserver"
 	"dont/routers/gamelog"
 	"dont/routers/mod"
+	"dont/routers/parser"
 	"dont/routers/server"
 	"dont/routers/status"
 	"dont/routers/tag"
@@ -210,6 +211,13 @@ func InitRouter() *gin.Engine {
 			// 获取命令执行结果
 			agents.GET("/command/:command_id", agent.GetCommandResult)
 			agents.GET("/command", agent.GetCommandResults)
+		}
+
+		// 日志解析器API
+		parserGroup := api.Group("/v1/parser")
+		{
+			parserGroup.GET("/active", parser.GetActiveParsers) // 获取当前运行中的解析器
+			// 其他日志解析器API将在这里添加
 		}
 
 		// Tmux服务器管理API

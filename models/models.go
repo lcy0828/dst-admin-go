@@ -61,8 +61,21 @@ func init() {
 	db.LogMode(true)
 	db.DB().SetMaxIdleConns(10)
 	db.DB().SetMaxOpenConns(100)
+
+	// 初始化游戏日志相关表结构
+	initGameLogTables()
 }
 
 func CloseDB() {
 	defer db.Close()
+}
+
+// 初始化游戏日志相关表结构
+func initGameLogTables() {
+	// 自动迁移表结构
+	db.AutoMigrate(&GameLog{})
+	db.AutoMigrate(&LogExtractRule{})
+	db.AutoMigrate(&LogStatistics{})
+
+	log.Println("游戏日志相关表结构初始化完成")
 }
