@@ -507,7 +507,16 @@ type ServerInfo struct {
 }
 
 // 全局变量，用于存储服务器信息
-var serverInfoMap = make(map[string]*ServerInfo)
+var serverInfoMap map[string]*ServerInfo
+
+// 互斥锁，保护并发访问serverInfoMap
+var serverInfoMapMutex sync.Mutex
+
+// 初始化函数
+func init() {
+	serverInfoMap = make(map[string]*ServerInfo)
+	log.Printf("[TMUX] 初始化serverInfoMap")
+}
 
 // SaveServerInfo 保存服务器信息
 func SaveServerInfo(server *DSTServer) {
@@ -533,11 +542,6 @@ func SaveServerInfo(server *DSTServer) {
 	log.Printf("[TMUX] 已保存服务器信息: %s, 模式: %s, 启动时间: %s (实际时间: %s)",
 		server.SessionName, server.ServerMode, startTimeStr, now.Format("2006-01-02 15:04:05.000"))
 }
-
-// 互斥锁，保护并发访问serverInfoMap
-var serverInfoMapMutex sync.Mutex
-
-
 
 // ListDSTServers 列出所有饥荒服务器会话
 func ListDSTServers() ([]ServerInfo, error) {

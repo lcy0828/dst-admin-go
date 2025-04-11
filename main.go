@@ -72,6 +72,9 @@ func main() {
 		// 设置全局实例
 		logmonitor.SetDynamicLogMonitor(dynamicLogMonitor)
 
+		// 添加测试服务器数据
+		tmux.AddTestServer()
+
 		// 启动监控服务
 		if err := dynamicLogMonitor.Start(); err != nil {
 			log.Printf("警告: 启动动态日志监控服务失败: %v", err)

@@ -1,5 +1,11 @@
 package tmux
 
+import (
+	"log"
+	"sync"
+	"time"
+)
+
 // GetServerInfoMap 获取服务器信息映射的副本
 // 这个函数可以被其他包直接调用，避免通过HTTP请求获取服务器状态
 func GetServerInfoMap() map[string]*ServerInfo {
@@ -31,6 +37,13 @@ func GetRunningServers() []ServerInfo {
 	serverInfoMapMutex.Lock()
 	defer serverInfoMapMutex.Unlock()
 
+	// 打印调试信息
+	log.Printf("[TMUX] serverInfoMap 包含 %d 个服务器", len(serverInfoMap))
+	for k, v := range serverInfoMap {
+		log.Printf("[TMUX] 服务器 %s: 存档=%s, 世界=%s, 状态=%s",
+			k, v.ArchiveName, v.WorldName, v.Status)
+	}
+
 	var result []ServerInfo
 	for _, info := range serverInfoMap {
 		if info.Status == "running" {
@@ -59,4 +72,23 @@ func UpdateServerStatus(sessionName, status string) {
 	if info, exists := serverInfoMap[sessionName]; exists {
 		info.Status = status
 	}
+}
+
+// AddTestServer 添加测试服务器数据
+func AddTestServer() {
+	serverInfoMapMutex.Lock()
+	defer serverInfoMapMutex.Unlock()
+
+	// 添加测试数据
+	serverInfoMap["dstserver_test_forest"] = &ServerInfo{
+		SessionName:    "dstserver_test_forest",
+		ArchiveName:    "test",
+		WorldName:      "Forest",
+		ServerMode:     "64bit",
+		StartDirectory: "/root/DST",
+		Status:         "running",
+		StartTime:      time.Now().Format(time.RFC3339),
+	}
+
+	log.Printf("[TMUX] 添加测试服务器数据: dstserver_test_forest")
 }

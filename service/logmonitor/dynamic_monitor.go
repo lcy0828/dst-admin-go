@@ -3,6 +3,7 @@ package logmonitor
 import (
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -118,6 +119,9 @@ func (m *DynamicLogMonitor) getServerList() ([]ServerInfo, error) {
 	// 直接调用tmux包的函数获取运行中的服务器信息
 	tmuxServers := tmux.GetRunningServers()
 
+	// 打印调试信息
+	log.Printf("[DynamicLogMonitor] 获取到 %d 个运行中的服务器", len(tmuxServers))
+
 	// 将tmux.ServerInfo转换为本包的ServerInfo
 	servers := make([]ServerInfo, len(tmuxServers))
 	for i, server := range tmuxServers {
@@ -129,6 +133,10 @@ func (m *DynamicLogMonitor) getServerList() ([]ServerInfo, error) {
 			Status:      server.Status,
 			StartTime:   server.StartTime,
 		}
+
+		// 打印服务器信息
+		log.Printf("[DynamicLogMonitor] 服务器 #%d: 会话=%s, 存档=%s, 世界=%s, 状态=%s",
+			i, server.SessionName, server.ArchiveName, server.WorldName, server.Status)
 	}
 
 	return servers, nil
@@ -170,35 +178,50 @@ func (m *DynamicLogMonitor) updateServerStatus(servers []ServerInfo) {
 
 // startMonitoringServer 开始监控服务器日志
 func (m *DynamicLogMonitor) startMonitoringServer(server ServerInfo) {
+	log.Printf("[DynamicLogMonitor] 开始监控服务器日志: 会话=%s, 存档=%s, 世界=%s",
+		server.SessionName, server.ArchiveName, server.WorldName)
+
 	// 注意：我们不需要在这里显式地解析服务器类型
 	// LogWatcher 将会自动检测世界类型（森林或洞穴）
 
 	// 构建日志文件路径
 	logFileName := "server_log.txt" // 无论森林还是洞穴，日志文件名都是server_log.txt
 	logPath := filepath.Join(m.dstSavePath, server.ArchiveName, server.WorldName, logFileName)
+	log.Printf("[DynamicLogMonitor] 监控日志文件: %s", logPath)
+
+	// 检查日志文件是否存在
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		log.Printf("[DynamicLogMonitor] 日志文件不存在: %s", logPath)
+		return
+	}
 
 	// 创建日志监控器
 	watcher, err := gamelog.NewLogWatcher(logPath, server.ArchiveName, server.WorldName)
 	if err != nil {
-		// 只在调试模式下打印错误
-		// log.Printf("[DynamicLogMonitor] 创建日志监控器失败: %v", err)
+		log.Printf("[DynamicLogMonitor] 创建日志监控器失败: %v", err)
 		return
 	}
 
 	// 设置日志解析器
 	parser, err := m.parserManager.GetParser(server.ArchiveName, server.WorldName)
-	if err == nil {
+	if err != nil {
+		log.Printf("[DynamicLogMonitor] 获取日志解析器失败: %v", err)
+	} else {
+		log.Printf("[DynamicLogMonitor] 成功获取日志解析器: 存档=%s, 世界=%s",
+			server.ArchiveName, server.WorldName)
 		watcher.SetLogParser(parser)
 		watcher.EnableDBStore(true) // 启用数据库存储
 	}
 
 	// 启动监控
 	if err := watcher.Start(); err != nil {
-		// 只在调试模式下打印错误
-		// log.Printf("[DynamicLogMonitor] 启动日志监控器失败: %v", err)
+		log.Printf("[DynamicLogMonitor] 启动日志监控器失败: %v", err)
 		watcher.Stop()
 		return
 	}
+
+	log.Printf("[DynamicLogMonitor] 成功启动日志监控器: 会话=%s, 存档=%s, 世界=%s",
+		server.SessionName, server.ArchiveName, server.WorldName)
 
 	// 保存监控器引用
 	m.watcherMapMutex.Lock()
