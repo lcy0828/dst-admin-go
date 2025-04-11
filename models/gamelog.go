@@ -1,6 +1,7 @@
 package models
 
 import (
+	"fmt"
 	"log"
 	"time"
 )
@@ -70,6 +71,12 @@ func AddGameLog(archiveName, worldName, logType, content, rawContent string, tim
 	logger.Printf("[Models] AddGameLog: 存档=%s, 世界=%s, 类型=%s, 内容=%s",
 		archiveName, worldName, logType, content)
 
+	// 检查数据库连接
+	if db == nil {
+		logger.Printf("[Models] AddGameLog 失败: 数据库连接为空")
+		return fmt.Errorf("数据库连接为空")
+	}
+
 	log := GameLog{
 		ArchiveName: archiveName,
 		WorldName:   worldName,
@@ -79,6 +86,9 @@ func AddGameLog(archiveName, worldName, logType, content, rawContent string, tim
 		Timestamp:   timestamp,
 		CreatedAt:   time.Now(),
 	}
+
+	// 打印详细的SQL日志
+	db.LogMode(true)
 
 	if err := db.Create(&log).Error; err != nil {
 		logger.Printf("[Models] AddGameLog 失败: %v", err)
@@ -95,8 +105,17 @@ func AddGameLog(archiveName, worldName, logType, content, rawContent string, tim
 
 // GetGameLogs 获取游戏日志记录
 func GetGameLogs(archiveName, worldName, logType string, startTime, endTime time.Time, page, pageSize int) ([]GameLog, int, error) {
+	logger.Printf("[Models] GetGameLogs: 开始查询日志记录, 存档=%s, 世界=%s, 类型=%s, 页码=%d, 每页数量=%d",
+		archiveName, worldName, logType, page, pageSize)
+
 	var logs []GameLog
 	var count int
+
+	// 检查数据库连接
+	if db == nil {
+		logger.Printf("[Models] GetGameLogs 失败: 数据库连接为空")
+		return nil, 0, fmt.Errorf("数据库连接为空")
+	}
 
 	query := db.Model(&GameLog{})
 
@@ -117,17 +136,26 @@ func GetGameLogs(archiveName, worldName, logType string, startTime, endTime time
 		query = query.Where("timestamp <= ?", endTime)
 	}
 
+	logger.Printf("[Models] GetGameLogs: 构建查询条件完成, 开始查询总数")
+
 	// 获取总数
 	if err := query.Count(&count).Error; err != nil {
+		logger.Printf("[Models] GetGameLogs 查询总数失败: %v", err)
 		return nil, 0, err
 	}
+
+	logger.Printf("[Models] GetGameLogs: 查询到总数: %d", count)
 
 	// 分页查询
 	offset := (page - 1) * pageSize
+	logger.Printf("[Models] GetGameLogs: 开始分页查询, offset=%d, limit=%d", offset, pageSize)
+
 	if err := query.Order("timestamp desc").Offset(offset).Limit(pageSize).Find(&logs).Error; err != nil {
+		logger.Printf("[Models] GetGameLogs 分页查询失败: %v", err)
 		return nil, 0, err
 	}
 
+	logger.Printf("[Models] GetGameLogs: 查询成功, 返回 %d 条记录", len(logs))
 	return logs, count, nil
 }
 
@@ -290,4 +318,14 @@ func SearchGameLogs(keyword string, page, pageSize int) ([]GameLog, int, error) 
 	}
 
 	return logs, count, nil
+}
+
+// GetGameLogCount 获取日志总数
+func GetGameLogCount() (int, error) {
+	var count int
+	if err := db.Model(&GameLog{}).Count(&count).Error; err != nil {
+		logger.Printf("[Models] GetGameLogCount 失败: %v", err)
+		return 0, err
+	}
+	return count, nil
 }

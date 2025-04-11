@@ -3,6 +3,7 @@ package gamelog
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -13,7 +14,6 @@ import (
 
 	"dont/service/logparser"
 
-	"github.com/edsrzf/mmap-go"
 	"github.com/fsnotify/fsnotify"
 	"github.com/gin-gonic/gin"
 	"github.com/go-ini/ini"
@@ -55,22 +55,24 @@ var upgrader = websocket.Upgrader{
 
 // 日志监控管理器
 type LogWatcher struct {
-	watcher       *fsnotify.Watcher
-	logFile       string
-	mmapData      mmap.MMap
-	file          *os.File
-	lastPosition  int64
-	clients       map[*websocket.Conn]*ClientInfo
-	clientsMutex  sync.Mutex
-	stopChan      chan struct{}
-	isRunning     bool
-	runningMutex  sync.Mutex
-	archiveName   string
-	worldName     string
-	ruleManager   *RuleManager
-	logParser     *logparser.LogParser // 日志解析器
-	enableDBStore bool                 // 是否启用数据库存储
-	parserMutex   sync.RWMutex         // 解析器读写锁
+	watcher        *fsnotify.Watcher
+	logFile        string
+	file           *os.File
+	lastPosition   int64
+	lastModTime    time.Time // 上次文件修改时间
+	clients        map[*websocket.Conn]*ClientInfo
+	clientsMutex   sync.Mutex
+	stopChan       chan struct{}
+	isRunning      bool
+	runningMutex   sync.Mutex
+	archiveName    string
+	worldName      string
+	ruleManager    *RuleManager
+	logParser      *logparser.LogParser // 日志解析器
+	enableDBStore  bool                 // 是否启用数据库存储
+	parserMutex    sync.RWMutex         // 解析器读写锁
+	lastActivity   time.Time            // 最后活动时间
+	processedLines int64                // 已处理的行数
 }
 
 // ClientInfo 客户端信息
@@ -95,46 +97,34 @@ func NewLogWatcher(logFilePath string, archiveName, worldName string) (*LogWatch
 	}
 
 	// 如果日志文件不存在，创建一个空文件
-	if _, err := os.Stat(logFilePath); os.IsNotExist(err) {
+	fileInfo, err := os.Stat(logFilePath)
+	if os.IsNotExist(err) {
 		emptyFile, err := os.Create(logFilePath)
 		if err != nil {
 			return nil, fmt.Errorf("创建日志文件失败: %v", err)
 		}
 		emptyFile.Close()
-	}
-
-	// 打开日志文件
-	file, err := os.OpenFile(logFilePath, os.O_RDWR, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("打开日志文件失败: %v", err)
-	}
-
-	// 创建内存映射
-	mmapData, err := mmap.Map(file, mmap.RDONLY, 0)
-	if err != nil {
-		file.Close()
-		return nil, fmt.Errorf("创建内存映射失败: %v", err)
-	}
-
-	// 获取文件当前大小作为初始位置
-	fileInfo, err := file.Stat()
-	if err != nil {
-		mmapData.Unmap()
-		file.Close()
+		// 重新获取文件信息
+		fileInfo, err = os.Stat(logFilePath)
+		if err != nil {
+			return nil, fmt.Errorf("获取文件信息失败: %v", err)
+		}
+	} else if err != nil {
 		return nil, fmt.Errorf("获取文件信息失败: %v", err)
 	}
 
 	// 创建日志监控管理器
 	lw := &LogWatcher{
-		watcher:      watcher,
-		logFile:      logFilePath,
-		mmapData:     mmapData,
-		file:         file,
-		lastPosition: fileInfo.Size(),
-		clients:      make(map[*websocket.Conn]*ClientInfo),
-		stopChan:     make(chan struct{}),
-		archiveName:  archiveName,
-		worldName:    worldName,
+		watcher:        watcher,
+		logFile:        logFilePath,
+		lastPosition:   fileInfo.Size(),
+		lastModTime:    fileInfo.ModTime(),
+		clients:        make(map[*websocket.Conn]*ClientInfo),
+		stopChan:       make(chan struct{}),
+		archiveName:    archiveName,
+		worldName:      worldName,
+		lastActivity:   time.Now(),
+		processedLines: 0,
 	}
 
 	// 获取或创建规则管理器
@@ -143,8 +133,6 @@ func NewLogWatcher(logFilePath string, archiveName, worldName string) (*LogWatch
 	// 创建日志解析器
 	parser, err := logparser.NewLogParser(archiveName, worldName)
 	if err != nil {
-		mmapData.Unmap()
-		file.Close()
 		return nil, fmt.Errorf("创建日志解析器失败: %v", err)
 	}
 	lw.logParser = parser
@@ -193,8 +181,10 @@ func (lw *LogWatcher) Stop() {
 
 	close(lw.stopChan)
 	lw.watcher.Close()
-	lw.mmapData.Unmap()
-	lw.file.Close()
+	if lw.file != nil {
+		lw.file.Close()
+		lw.file = nil
+	}
 	lw.isRunning = false
 
 	log.Printf("停止监控日志文件: %s", lw.logFile)
@@ -269,17 +259,12 @@ func (lw *LogWatcher) GetLogFile() string {
 
 // GetProcessedLines 获取已处理行数
 func (lw *LogWatcher) GetProcessedLines() int64 {
-	return lw.lastPosition
+	return lw.processedLines
 }
 
 // GetLastActivity 获取最后活动时间
 func (lw *LogWatcher) GetLastActivity() time.Time {
-	lw.parserMutex.RLock()
-	defer lw.parserMutex.RUnlock()
-
-	// 返回当前时间作为最后活动时间
-	// 实际实现中可以添加一个字段来记录最后活动时间
-	return time.Now()
+	return lw.lastActivity
 }
 
 // IsRunning 检查监控器是否正在运行
@@ -562,25 +547,41 @@ func (lw *LogWatcher) handleClientMessage(conn *websocket.Conn, message []byte) 
 
 // 监控循环
 func (lw *LogWatcher) watchLoop() {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	log.Printf("[LogWatcher] 开始监控循环: 存档=%s, 世界=%s, 文件=%s",
+		lw.archiveName, lw.worldName, lw.logFile)
+
+	// 使用更短的间隔进行检查，确保实时性
+	ticker := time.NewTicker(100 * time.Millisecond)
+
+	// 首次读取文件内容
+	log.Printf("[LogWatcher] 首次读取文件内容: %s", lw.logFile)
+	lw.readNewContent()
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-lw.stopChan:
+			log.Printf("[LogWatcher] 监控循环收到停止信号: 存档=%s, 世界=%s",
+				lw.archiveName, lw.worldName)
 			return
 		case event, ok := <-lw.watcher.Events:
 			if !ok {
+				log.Printf("[LogWatcher] 监控器事件通道关闭: 存档=%s, 世界=%s",
+					lw.archiveName, lw.worldName)
 				return
 			}
 			if event.Op&fsnotify.Write == fsnotify.Write && event.Name == lw.logFile {
+				log.Printf("[LogWatcher] 检测到文件写入事件: %s", event.Name)
 				lw.readNewContent()
 			}
 		case err, ok := <-lw.watcher.Errors:
 			if !ok {
+				log.Printf("[LogWatcher] 监控器错误通道关闭: 存档=%s, 世界=%s",
+					lw.archiveName, lw.worldName)
 				return
 			}
-			log.Printf("文件监控错误: %v", err)
+			log.Printf("[LogWatcher] 文件监控错误: %v, 存档=%s, 世界=%s",
+				err, lw.archiveName, lw.worldName)
 		case <-ticker.C:
 			// 定期检查文件变化，防止某些系统上fsnotify事件丢失
 			lw.readNewContent()
@@ -588,35 +589,79 @@ func (lw *LogWatcher) watchLoop() {
 	}
 }
 
+// ReadNewContent 公开方法，手动触发读取新内容
+func (lw *LogWatcher) ReadNewContent() {
+	log.Printf("[LogWatcher] 手动触发读取新内容: 存档=%s, 世界=%s", lw.archiveName, lw.worldName)
+	lw.readNewContent()
+}
+
 // 读取新内容
 func (lw *LogWatcher) readNewContent() {
-	// 重新打开文件以获取最新状态
-	file, err := os.Open(lw.logFile)
-	if err != nil {
-		log.Printf("重新打开日志文件失败: %v", err)
-		return
-	}
-	defer file.Close()
+	log.Printf("[LogWatcher] 开始读取日志文件新内容: %s", lw.logFile)
 
-	// 获取文件当前大小
-	fileInfo, err := file.Stat()
+	// 获取文件信息
+	fileInfo, err := os.Stat(lw.logFile)
 	if err != nil {
-		log.Printf("获取文件信息失败: %v", err)
+		log.Printf("[LogWatcher] 获取文件信息失败: %v", err)
 		return
 	}
 
+	// 获取文件当前大小和修改时间
 	currentSize := fileInfo.Size()
+	currentModTime := fileInfo.ModTime()
+
+	// 从位置管理器获取上次读取位置
+	positionManager := GetPositionManager()
+	position := positionManager.GetPosition(lw.logFile)
+	if position != nil {
+		lw.lastPosition = position.LastPosition
+		lw.lastModTime = position.LastModTime
+	}
+
+	// 检查文件是否被修改
+	if currentSize == lw.lastPosition && currentModTime.Equal(lw.lastModTime) {
+		// 文件没有变化，跳过处理
+		return
+	}
+
+	log.Printf("[LogWatcher] 文件大小: %d 字节, 上次读取位置: %d, 上次修改时间: %s, 当前修改时间: %s",
+		currentSize, lw.lastPosition, lw.lastModTime.Format("2006-01-02 15:04:05"), currentModTime.Format("2006-01-02 15:04:05"))
+
+	// 检测服务器重启的情况
+	isServerRestart := currentSize < lw.lastPosition && !currentModTime.Equal(lw.lastModTime)
+
 	if currentSize <= lw.lastPosition {
 		// 文件没有新内容或被截断
-		if currentSize < lw.lastPosition {
-			// 文件被截断，重置位置
+		if isServerRestart {
+			// 服务器重启，备份旧日志文件
+			if lw.lastPosition > 0 {
+				// 创建备份目录
+				backupDir := filepath.Join(dstSavePath, "logs_backup", lw.archiveName, lw.worldName)
+				if err := os.MkdirAll(backupDir, 0755); err != nil {
+					log.Printf("[LogWatcher] 创建日志备份目录失败: %v", err)
+				} else {
+					// 生成备份文件名（使用时间戳）
+					timestamp := time.Now().Format("20060102_150405")
+					backupFileName := fmt.Sprintf("server_log_%s.txt", timestamp)
+					backupFilePath := filepath.Join(backupDir, backupFileName)
+
+					// 复制日志文件
+					if err := copyLogFile(lw.logFile, backupFilePath); err != nil {
+						log.Printf("[LogWatcher] 备份日志文件失败: %v", err)
+					} else {
+						log.Printf("[LogWatcher] 成功备份日志文件到: %s", backupFilePath)
+					}
+				}
+			}
+
+			// 服务器重启，重置位置
 			lw.lastPosition = 0
-			log.Printf("检测到日志文件被截断，可能是服务器重启。重置读取位置")
+			log.Printf("[LogWatcher] 检测到服务器重启，日志文件被重置。文件大小从 %d 变为 %d。重置读取位置", lw.lastPosition, currentSize)
 
 			// 重置解析器状态
 			if lw.logParser != nil {
 				// 添加一条服务器重启的日志
-				restartMsg := "服务器可能已重启，日志文件被重置"
+				restartMsg := fmt.Sprintf("服务器已重启，日志文件被重置。文件大小从 %d 字节变为 %d 字节", lw.lastPosition, currentSize)
 				lw.logParser.SaveLogToDatabase("system", restartMsg, time.Now()) // 使用字符串“system”代替models.LogTypeSystem常量，因为我们不想引入models包
 
 				// 创建新的解析器，使用相同的存档名称和世界名称
@@ -631,25 +676,44 @@ func (lw *LogWatcher) readNewContent() {
 		return
 	}
 
-	// 重新映射文件
-	lw.mmapData.Unmap()
-	lw.file.Close()
+	// 使用增量读取方式读取新内容
 
-	lw.file, err = os.OpenFile(lw.logFile, os.O_RDWR, 0644)
-	if err != nil {
-		log.Printf("重新打开日志文件失败: %v", err)
-		return
+	// 确保lastPosition不超过文件大小
+	if lw.lastPosition > currentSize {
+		log.Printf("[LogWatcher] 上次读取位置超过文件大小，重置为0")
+		lw.lastPosition = 0
 	}
 
-	lw.mmapData, err = mmap.Map(lw.file, mmap.RDONLY, 0)
+	// 打开文件
+	file, err := os.Open(lw.logFile)
 	if err != nil {
-		log.Printf("重新映射文件失败: %v", err)
-		lw.file.Close()
+		log.Printf("[LogWatcher] 打开文件失败: %v", err)
+		return
+	}
+	defer file.Close()
+
+	// 设置读取位置
+	if _, err := file.Seek(lw.lastPosition, 0); err != nil {
+		log.Printf("[LogWatcher] 设置文件读取位置失败: %v", err)
 		return
 	}
 
 	// 读取新内容
-	newContent := lw.mmapData[lw.lastPosition:currentSize]
+	newContent := make([]byte, currentSize-lw.lastPosition)
+	n, err := file.Read(newContent)
+	if err != nil {
+		log.Printf("[LogWatcher] 读取文件内容失败: %v", err)
+		return
+	}
+
+	// 如果没有读取到内容，跳过处理
+	if n == 0 {
+		log.Printf("[LogWatcher] 没有读取到新内容")
+		return
+	}
+
+	// 使用实际读取的字节数
+	newContent = newContent[:n]
 	if len(newContent) > 0 {
 		// 将新内容转换为字符串
 		contentStr := string(newContent)
@@ -663,15 +727,67 @@ func (lw *LogWatcher) readNewContent() {
 		parser := lw.logParser
 		lw.parserMutex.RUnlock()
 
+		log.Printf("[LogWatcher] 检测到日志文件变化，新内容长度: %d 字节, 存档=%s, 世界=%s",
+			len(contentStr), lw.archiveName, lw.worldName)
+
 		if enableStore && parser != nil {
-			go func(content string, p *logparser.LogParser) {
-				if err := p.ProcessAndSaveLog(content); err != nil {
-					log.Printf("处理并存储日志失败: %v", err)
+
+			// 尝试处理日志内容
+			if err := parser.ProcessAndSaveLog(contentStr); err != nil {
+				log.Printf("[LogWatcher] 处理并存储日志失败: %v", err)
+
+				// 尝试重新创建解析器
+				newParser, err := logparser.NewLogParser(lw.archiveName, lw.worldName)
+				if err != nil {
+					log.Printf("[LogWatcher] 创建新的解析器失败: %v", err)
+				} else {
+					lw.parserMutex.Lock()
+					lw.logParser = newParser
+					lw.parserMutex.Unlock()
+
+					// 使用新的解析器重新尝试
+					if err := newParser.ProcessAndSaveLog(contentStr); err != nil {
+						log.Printf("[LogWatcher] 使用新解析器处理并存储日志失败: %v", err)
+					}
 				}
-			}(contentStr, parser)
+			}
+		} else {
+			log.Printf("[LogWatcher] 未启用数据库存储或解析器为空, enableStore=%v, parser=%v",
+				enableStore, parser != nil)
+
+			// 如果解析器为空，尝试创建新的解析器
+			if parser == nil {
+				newParser, err := logparser.NewLogParser(lw.archiveName, lw.worldName)
+				if err != nil {
+					log.Printf("[LogWatcher] 创建新的解析器失败: %v", err)
+				} else {
+					lw.parserMutex.Lock()
+					lw.logParser = newParser
+					lw.enableDBStore = true
+					lw.parserMutex.Unlock()
+
+					// 使用新的解析器处理内容
+					if err := newParser.ProcessAndSaveLog(contentStr); err != nil {
+						log.Printf("[LogWatcher] 使用新解析器处理并存储日志失败: %v", err)
+					}
+				}
+			}
 		}
 
+		// 更新最后读取位置
 		lw.lastPosition = currentSize
+
+		// 更新最后修改时间
+		lw.lastModTime = currentModTime
+
+		// 更新位置管理器中的位置记录
+		positionManager.UpdatePosition(lw.logFile, currentSize, currentModTime)
+
+		// 更新最后活动时间
+		lw.lastActivity = time.Now()
+
+		// 增加处理行数
+		lw.processedLines += int64(strings.Count(contentStr, "\n") + 1)
 	}
 }
 
@@ -823,4 +939,29 @@ func RegisterRoutes(router *gin.RouterGroup) {
 
 	// 注册日志解析器API路由
 	RegisterParserAPIRoutes(router)
+}
+
+// copyLogFile 复制日志文件
+func copyLogFile(src, dst string) error {
+	// 打开源文件
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("打开源文件失败: %v", err)
+	}
+	defer srcFile.Close()
+
+	// 创建目标文件
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return fmt.Errorf("创建目标文件失败: %v", err)
+	}
+	defer dstFile.Close()
+
+	// 复制内容
+	_, err = io.Copy(dstFile, srcFile)
+	if err != nil {
+		return fmt.Errorf("复制文件内容失败: %v", err)
+	}
+
+	return nil
 }

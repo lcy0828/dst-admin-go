@@ -3,7 +3,10 @@ package gamelog
 import (
 	"dont/models"
 	"dont/service/logparser"
+	"dont/tmux"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -25,12 +28,18 @@ func RegisterParserAPIRoutes(router *gin.RouterGroup) {
 
 // GetParsedLogs 获取解析后的日志数据
 func GetParsedLogs(c *gin.Context) {
+	// 打印调试信息
+	log.Printf("[GameLog] GetParsedLogs: 开始获取解析后的日志数据")
+
 	// 解析请求参数
 	archiveName := c.Query("archive")
 	worldName := c.Query("world")
 	logType := c.Query("type")
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+
+	log.Printf("[GameLog] GetParsedLogs: 请求参数: 存档=%s, 世界=%s, 类型=%s, 页码=%d, 每页数量=%d",
+		archiveName, worldName, logType, page, pageSize)
 
 	// 解析时间范围
 	startTimeStr := c.Query("start_time")
@@ -42,35 +51,98 @@ func GetParsedLogs(c *gin.Context) {
 	if startTimeStr != "" {
 		startTime, err = time.Parse(time.RFC3339, startTimeStr)
 		if err != nil {
+			log.Printf("[GameLog] GetParsedLogs: 开始时间格式错误: %v", err)
 			c.JSON(http.StatusBadRequest, gin.H{
 				"status": 400,
 				"msg":    "开始时间格式错误: " + err.Error(),
 			})
 			return
 		}
+		log.Printf("[GameLog] GetParsedLogs: 开始时间=%s", startTime.Format(time.RFC3339))
 	}
 
 	if endTimeStr != "" {
 		endTime, err = time.Parse(time.RFC3339, endTimeStr)
 		if err != nil {
+			log.Printf("[GameLog] GetParsedLogs: 结束时间格式错误: %v", err)
 			c.JSON(http.StatusBadRequest, gin.H{
 				"status": 400,
 				"msg":    "结束时间格式错误: " + err.Error(),
 			})
 			return
 		}
+		log.Printf("[GameLog] GetParsedLogs: 结束时间=%s", endTime.Format(time.RFC3339))
 	} else {
 		endTime = time.Now()
+		log.Printf("[GameLog] GetParsedLogs: 未指定结束时间，使用当前时间=%s", endTime.Format(time.RFC3339))
 	}
+
+	log.Printf("[GameLog] GetParsedLogs: 开始查询数据库")
 
 	// 获取日志数据
 	logs, total, err := models.GetGameLogs(archiveName, worldName, logType, startTime, endTime, page, pageSize)
 	if err != nil {
+		log.Printf("[GameLog] GetParsedLogs: 获取日志数据失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status": 500,
 			"msg":    "获取日志数据失败: " + err.Error(),
 		})
 		return
+	}
+
+	log.Printf("[GameLog] GetParsedLogs: 查询成功，返回 %d 条记录，总数 %d", len(logs), total)
+
+	// 如果没有日志数据，尝试手动解析日志文件
+	if len(logs) == 0 && total == 0 {
+		log.Printf("[GameLog] GetParsedLogs: 没有日志数据，尝试手动解析日志文件")
+
+		// 获取服务器列表
+		servers := tmux.GetRunningServers()
+		log.Printf("[GameLog] GetParsedLogs: 获取到 %d 个运行中的服务器", len(servers))
+
+		// 手动解析日志文件
+		for _, server := range servers {
+			// 构建日志文件路径
+			logFilePath := "/Users/lcy/DoNotStarveTogether/" + server.ArchiveName + "/" + server.WorldName + "/server_log.txt"
+			log.Printf("[GameLog] GetParsedLogs: 尝试解析日志文件: %s", logFilePath)
+
+			// 检查文件是否存在
+			if _, err := os.Stat(logFilePath); os.IsNotExist(err) {
+				log.Printf("[GameLog] GetParsedLogs: 日志文件不存在: %s", logFilePath)
+				continue
+			}
+
+			// 读取日志文件内容
+			logContent, err := os.ReadFile(logFilePath)
+			if err != nil {
+				log.Printf("[GameLog] GetParsedLogs: 读取日志文件失败: %v", err)
+				continue
+			}
+
+			log.Printf("[GameLog] GetParsedLogs: 成功读取日志文件，大小: %d 字节", len(logContent))
+
+			// 创建日志解析器
+			parser, err := logparser.NewLogParser(server.ArchiveName, server.WorldName)
+			if err != nil {
+				log.Printf("[GameLog] GetParsedLogs: 创建日志解析器失败: %v", err)
+				continue
+			}
+
+			// 解析日志内容
+			if err := parser.ProcessAndSaveLog(string(logContent)); err != nil {
+				log.Printf("[GameLog] GetParsedLogs: 解析日志内容失败: %v", err)
+			} else {
+				log.Printf("[GameLog] GetParsedLogs: 成功解析日志内容")
+			}
+		}
+
+		// 重新查询数据库
+		logs, total, err = models.GetGameLogs(archiveName, worldName, logType, startTime, endTime, page, pageSize)
+		if err != nil {
+			log.Printf("[GameLog] GetParsedLogs: 重新查询数据库失败: %v", err)
+		} else {
+			log.Printf("[GameLog] GetParsedLogs: 重新查询数据库成功，返回 %d 条记录，总数 %d", len(logs), total)
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -83,6 +155,8 @@ func GetParsedLogs(c *gin.Context) {
 			"size":  pageSize,
 		},
 	})
+
+	log.Printf("[GameLog] GetParsedLogs: 已返回响应")
 }
 
 // GetLogTypes 获取日志类型统计

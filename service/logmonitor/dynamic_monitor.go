@@ -120,8 +120,10 @@ func (m *DynamicLogMonitor) getServerList() ([]ServerInfo, error) {
 	tmuxServers := tmux.GetRunningServers()
 
 	// 打印调试信息
-	log.Printf("[DynamicLogMonitor] 获取到 %d 个运行中的服务器", len(tmuxServers))
-
+	//log.Printf("[DynamicLogMonitor] 获取到 %d 个运行中的服务器", len(tmuxServers))
+	if len(tmuxServers) == 0 {
+		return nil, fmt.Errorf("没有运行中的服务器")
+	}
 	// 将tmux.ServerInfo转换为本包的ServerInfo
 	servers := make([]ServerInfo, len(tmuxServers))
 	for i, server := range tmuxServers {
@@ -135,8 +137,8 @@ func (m *DynamicLogMonitor) getServerList() ([]ServerInfo, error) {
 		}
 
 		// 打印服务器信息
-		log.Printf("[DynamicLogMonitor] 服务器 #%d: 会话=%s, 存档=%s, 世界=%s, 状态=%s",
-			i, server.SessionName, server.ArchiveName, server.WorldName, server.Status)
+		//log.Printf("[DynamicLogMonitor] 服务器 #%d: 会话=%s, 存档=%s, 世界=%s, 状态=%s",
+		//	i, server.SessionName, server.ArchiveName, server.WorldName, server.Status)
 	}
 
 	return servers, nil
@@ -160,6 +162,14 @@ func (m *DynamicLogMonitor) updateServerStatus(servers []ServerInfo) {
 			if !m.serverStatus[server.SessionName] {
 				// 新启动的服务器，创建监控器
 				go m.startMonitoringServer(server)
+			} else {
+				// 已经在监控中的服务器，触发一次日志读取
+				m.watcherMapMutex.Lock()
+				if watcher, exists := m.watcherMap[server.SessionName]; exists {
+					log.Printf("[DynamicLogMonitor] 触发定期日志读取: %s", server.SessionName)
+					go watcher.ReadNewContent()
+				}
+				m.watcherMapMutex.Unlock()
 			}
 		}
 	}
@@ -180,6 +190,34 @@ func (m *DynamicLogMonitor) updateServerStatus(servers []ServerInfo) {
 func (m *DynamicLogMonitor) startMonitoringServer(server ServerInfo) {
 	log.Printf("[DynamicLogMonitor] 开始监控服务器日志: 会话=%s, 存档=%s, 世界=%s",
 		server.SessionName, server.ArchiveName, server.WorldName)
+
+	// 检查是否已经存在该服务器的监控器
+	m.watcherMapMutex.Lock()
+	if watcher, exists := m.watcherMap[server.SessionName]; exists {
+		log.Printf("[DynamicLogMonitor] 服务器已有监控器: 会话=%s, 存档=%s, 世界=%s",
+			server.SessionName, watcher.GetArchiveName(), watcher.GetWorldName())
+
+		// 检查监控器是否正在运行
+		if !watcher.IsRunning() {
+			log.Printf("[DynamicLogMonitor] 监控器未运行，尝试重新启动: 会话=%s", server.SessionName)
+
+			// 尝试重新启动监控器
+			if err := watcher.Start(); err != nil {
+				log.Printf("[DynamicLogMonitor] 重新启动监控器失败: %v", err)
+
+				// 删除旧的监控器，稍后创建新的
+				delete(m.watcherMap, server.SessionName)
+			} else {
+				log.Printf("[DynamicLogMonitor] 成功重新启动监控器: 会话=%s", server.SessionName)
+				m.watcherMapMutex.Unlock()
+				return
+			}
+		} else {
+			m.watcherMapMutex.Unlock()
+			return
+		}
+	}
+	m.watcherMapMutex.Unlock()
 
 	// 注意：我们不需要在这里显式地解析服务器类型
 	// LogWatcher 将会自动检测世界类型（森林或洞穴）
@@ -221,29 +259,59 @@ func (m *DynamicLogMonitor) startMonitoringServer(server ServerInfo) {
 	parser, err := m.parserManager.GetParser(server.ArchiveName, server.WorldName)
 	if err != nil {
 		log.Printf("[DynamicLogMonitor] 获取日志解析器失败: %v", err)
+
+		// 尝试创建新的解析器
+		log.Printf("[DynamicLogMonitor] 尝试创建新的解析器")
+		parser, err = logparser.NewLogParser(server.ArchiveName, server.WorldName)
+		if err != nil {
+			log.Printf("[DynamicLogMonitor] 创建新的解析器失败: %v", err)
+			return
+		}
+		log.Printf("[DynamicLogMonitor] 成功创建新的解析器")
 	} else {
 		log.Printf("[DynamicLogMonitor] 成功获取日志解析器: 存档=%s, 世界=%s",
 			server.ArchiveName, server.WorldName)
-
-		// 测试解析器
-		testContent := "[00:00:00]: Starting Up\n[00:00:01]: Game version: 123456\n"
-		log.Printf("[DynamicLogMonitor] 测试解析器处理内容: %s", testContent)
-		if err := parser.ProcessAndSaveLog(testContent); err != nil {
-			log.Printf("[DynamicLogMonitor] 测试解析器失败: %v", err)
-		} else {
-			log.Printf("[DynamicLogMonitor] 测试解析器成功")
-		}
-
-		watcher.SetLogParser(parser)
-		watcher.EnableDBStore(true) // 启用数据库存储
 	}
 
+	// 测试解析器
+	testContent := "[00:00:00]: Starting Up\n[00:00:01]: Game version: 123456\n"
+	log.Printf("[DynamicLogMonitor] 测试解析器处理内容: %s", testContent)
+	if err := parser.ProcessAndSaveLog(testContent); err != nil {
+		log.Printf("[DynamicLogMonitor] 测试解析器失败: %v", err)
+	} else {
+		log.Printf("[DynamicLogMonitor] 测试解析器成功")
+	}
+
+	// 读取现有日志文件内容
+	log.Printf("[DynamicLogMonitor] 尝试读取现有日志文件内容: %s", logPath)
+	existingContent, err := os.ReadFile(logPath)
+	if err != nil {
+		log.Printf("[DynamicLogMonitor] 读取现有日志文件失败: %v", err)
+	} else if len(existingContent) > 0 {
+		log.Printf("[DynamicLogMonitor] 成功读取现有日志文件，大小: %d 字节", len(existingContent))
+
+		// 处理现有日志内容
+		if err := parser.ProcessAndSaveLog(string(existingContent)); err != nil {
+			log.Printf("[DynamicLogMonitor] 处理现有日志内容失败: %v", err)
+		} else {
+			log.Printf("[DynamicLogMonitor] 成功处理现有日志内容")
+		}
+	}
+
+	watcher.SetLogParser(parser)
+	watcher.EnableDBStore(true) // 启用数据库存储
+
 	// 启动监控
+	log.Printf("[DynamicLogMonitor] 尝试启动日志监控器: %s", logPath)
 	if err := watcher.Start(); err != nil {
 		log.Printf("[DynamicLogMonitor] 启动日志监控器失败: %v", err)
 		watcher.Stop()
 		return
 	}
+	log.Printf("[DynamicLogMonitor] 成功启动日志监控器: %s", logPath)
+
+	// 手动触发一次日志读取
+	watcher.ReadNewContent()
 
 	log.Printf("[DynamicLogMonitor] 成功启动日志监控器: 会话=%s, 存档=%s, 世界=%s",
 		server.SessionName, server.ArchiveName, server.WorldName)
@@ -253,7 +321,53 @@ func (m *DynamicLogMonitor) startMonitoringServer(server ServerInfo) {
 	m.watcherMap[server.SessionName] = watcher
 	log.Printf("[DynamicLogMonitor] 已保存监控器引用: %s, 当前有 %d 个监控器",
 		server.SessionName, len(m.watcherMap))
+
+	// 打印所有监控器的详细信息
+	for k, v := range m.watcherMap {
+		log.Printf("[DynamicLogMonitor] 当前监控器列表: %s -> 存档=%s, 世界=%s",
+			k, v.GetArchiveName(), v.GetWorldName())
+	}
 	m.watcherMapMutex.Unlock()
+
+	// 启动一个定时器，定期检查日志文件的变化
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// 检查服务器是否还在运行
+				servers, err := m.getServerList()
+				if err != nil {
+					log.Printf("[DynamicLogMonitor] 获取服务器列表失败: %v", err)
+					continue
+				}
+
+				// 检查服务器是否还在运行
+				serverRunning := false
+				for _, s := range servers {
+					if s.SessionName == server.SessionName && s.Status == "running" {
+						serverRunning = true
+						break
+					}
+				}
+
+				if !serverRunning {
+					log.Printf("[DynamicLogMonitor] 服务器已停止运行，停止监控: %s", server.SessionName)
+					return
+				}
+
+				// 手动触发日志读取
+				m.watcherMapMutex.Lock()
+				if w, exists := m.watcherMap[server.SessionName]; exists {
+					log.Printf("[DynamicLogMonitor] 手动触发日志读取: %s", server.SessionName)
+					w.ReadNewContent()
+				}
+				m.watcherMapMutex.Unlock()
+			}
+		}
+	}()
 }
 
 // stopMonitoringServerWithDelay 延迟停止监控服务器日志
@@ -284,21 +398,20 @@ func (m *DynamicLogMonitor) GetWatcherForServer(sessionName string) (*gamelog.Lo
 
 // GetAllWatchers 获取所有日志监控器
 func (m *DynamicLogMonitor) GetAllWatchers() map[string]*gamelog.LogWatcher {
-	m.watcherMapMutex.Lock()
-	defer m.watcherMapMutex.Unlock()
+	// 直接返回空映射，避免死锁和超时
+	result := make(map[string]*gamelog.LogWatcher)
 
+	m.watcherMapMutex.Lock()
 	// 打印调试信息
 	log.Printf("[DynamicLogMonitor] GetAllWatchers: 当前有 %d 个监控器", len(m.watcherMap))
+
+	// 复制监控器映射
 	for k, v := range m.watcherMap {
+		result[k] = v
 		log.Printf("[DynamicLogMonitor] 监控器: %s, 存档=%s, 世界=%s",
 			k, v.GetArchiveName(), v.GetWorldName())
 	}
-
-	// 创建副本
-	result := make(map[string]*gamelog.LogWatcher)
-	for k, v := range m.watcherMap {
-		result[k] = v
-	}
+	m.watcherMapMutex.Unlock()
 
 	return result
 }

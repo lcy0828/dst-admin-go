@@ -86,6 +86,14 @@ func main() {
 		} else {
 			log.Printf("动态日志监控服务已启动，检查间隔: %v", *logCheckInterval)
 		}
+
+		// 初始化全局位置管理器
+		logparser.GetGlobalPositionManager(dstSavePath)
+		log.Printf("全局位置管理器已初始化")
+
+		// 初始化自动日志解析服务
+		logparser.InitAutoParserService(dstSavePath, 30*time.Second)
+		log.Printf("自动日志解析服务已启动，检查间隔: %v", 30*time.Second)
 	}
 
 	router := routers.InitRouter()
@@ -174,6 +182,14 @@ func main() {
 		dynamicLogMonitor.Stop()
 		log.Println("动态日志监控服务已关闭")
 	}
+
+	// 关闭全局位置管理器
+	logparser.ShutdownGlobalPositionManager()
+	log.Println("全局位置管理器已关闭")
+
+	// 关闭 gamelog 包中的位置管理器
+	routers.ShutdownGameLogPositionManager()
+	log.Println("GameLog 位置管理器已关闭")
 
 	log.Println("服务器已关闭")
 }

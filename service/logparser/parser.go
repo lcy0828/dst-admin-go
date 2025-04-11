@@ -603,27 +603,48 @@ func (p *LogParser) ParseLogLine(line string) (string, string, time.Time, error)
 
 // ProcessLogContent 处理日志内容
 func (p *LogParser) ProcessLogContent(content string) []string {
+	// 打印简化的调试信息
+	log.Printf("[LogParser] 开始处理日志内容，长度: %d 字节", len(content))
+
 	// 按行分割日志内容
 	lines := strings.Split(content, "\n")
+
 	result := make([]string, 0, len(lines))
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line != "" {
-			result = append(result, line)
+			// 检测是否为有效的日志行
+			if p.timeRegex.MatchString(line) {
+				result = append(result, line)
+			} else {
+				// 尝试其他日志格式
+				// 有些日志可能没有时间戳，但仍然是有效的
+				if strings.Contains(line, "[Connect]") ||
+					strings.Contains(line, "[Disconnect]") ||
+					strings.Contains(line, "[Join") ||
+					strings.Contains(line, "[Leave") ||
+					strings.Contains(line, "[Death") ||
+					strings.Contains(line, "[Chat") {
+					result = append(result, line)
+				} else {
+					// 尝试其他可能的日志格式
+					if strings.Contains(line, ":") || strings.Contains(line, "[") {
+						result = append(result, line)
+					}
+				}
+			}
 		}
 	}
 
+	log.Printf("[LogParser] 处理完成，共有 %d 行有效日志", len(result))
 	return result
 }
 
 // SaveLogToDatabase 将日志保存到数据库
 func (p *LogParser) SaveLogToDatabase(logType, content string, timestamp time.Time) error {
-	// 添加服务器类型到存档名称
+	// 使用原始存档名称，不添加服务器类型
 	archiveName := p.archiveName
-	if p.serverType != "" {
-		archiveName = p.archiveName + "_" + p.serverType
-	}
 
 	// 分离原始内容和处理后的内容
 	rawContent := content
@@ -635,12 +656,38 @@ func (p *LogParser) SaveLogToDatabase(logType, content string, timestamp time.Ti
 		}
 	}
 
-	return models.AddGameLog(archiveName, p.worldName, logType, content, rawContent, timestamp)
+	// 只在调试模式下输出日志
+	// log.Printf("[LogParser] 将日志保存到数据库: 存档=%s, 世界=%s, 类型=%s",
+	// 	archiveName, p.worldName, logType)
+
+	err := models.AddGameLog(archiveName, p.worldName, logType, content, rawContent, timestamp)
+	if err != nil {
+		log.Printf("[LogParser] 保存日志到数据库失败: %v", err)
+	}
+
+	return err
 }
 
 // ProcessAndSaveLog 处理并保存日志
 func (p *LogParser) ProcessAndSaveLog(content string) error {
+	log.Printf("[LogParser] 开始处理日志内容，存档=%s, 世界=%s, 内容长度=%d字节",
+		p.archiveName, p.worldName, len(content))
+
+	// 检查内容是否为空
+	if len(content) == 0 {
+		log.Printf("[LogParser] 内容为空，跳过处理")
+		return nil
+	}
+
+	// 尝试处理日志内容
 	lines := p.ProcessLogContent(content)
+	log.Printf("[LogParser] 处理后得到 %d 行有效日志内容", len(lines))
+
+	// 检查是否有有效的日志行
+	if len(lines) == 0 {
+		log.Printf("[LogParser] 没有有效的日志行，跳过处理")
+		return nil
+	}
 
 	// 首先收集所有日志行和相对时间
 	type LogEntry struct {
@@ -723,7 +770,17 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 				serverTypeTag = "[cave] "
 				p.serverType = "cave"
 			} else {
-				serverTypeTag = "[unknown] "
+				// 尝试从世界名称推断服务器类型
+				if strings.Contains(strings.ToLower(p.worldName), "cave") {
+					serverTypeTag = "[cave] "
+					p.serverType = "cave"
+					p.isSecondary = true
+				} else {
+					// 默认为森林服务器
+					serverTypeTag = "[forest] "
+					p.serverType = "forest"
+					p.isMaster = true
+				}
 			}
 
 			// 添加服务器类型标记到内容中
@@ -731,6 +788,7 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 
 			// 保存到数据库
 			if err := p.SaveLogToDatabase(entry.LogType, enhancedContent, timestamp); err != nil {
+				log.Printf("[LogParser] 保存日志到数据库失败: %v", err)
 				return err
 			}
 		}
@@ -748,7 +806,17 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 				serverTypeTag = "[cave] "
 				p.serverType = "cave"
 			} else {
-				serverTypeTag = "[unknown] "
+				// 尝试从世界名称推断服务器类型
+				if strings.Contains(strings.ToLower(p.worldName), "cave") {
+					serverTypeTag = "[cave] "
+					p.serverType = "cave"
+					p.isSecondary = true
+				} else {
+					// 默认为森林服务器
+					serverTypeTag = "[forest] "
+					p.serverType = "forest"
+					p.isMaster = true
+				}
 			}
 
 			// 添加服务器类型标记到内容中
@@ -756,6 +824,7 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 
 			// 保存到数据库
 			if err := p.SaveLogToDatabase(entry.LogType, enhancedContent, entry.Timestamp); err != nil {
+				log.Printf("[LogParser] 保存日志到数据库失败: %v", err)
 				return err
 			}
 		}
