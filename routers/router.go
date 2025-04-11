@@ -214,10 +214,13 @@ func InitRouter() *gin.Engine {
 		}
 
 		// 日志解析器API
-		parserGroup := api.Group("/v1/parser")
+		parserGroup := api.Group("/v1")
 		{
-			parserGroup.GET("/active", parser.GetActiveParsers) // 获取当前运行中的解析器
-			// 其他日志解析器API将在这里添加
+			// 注册现有的日志解析器API
+			gamelog.RegisterParserAPIRoutes(parserGroup)
+
+			// 添加新的日志解析器API
+			parserGroup.GET("/parser/active", parser.GetActiveParsers) // 获取当前运行中的解析器
 		}
 
 		// Tmux服务器管理API

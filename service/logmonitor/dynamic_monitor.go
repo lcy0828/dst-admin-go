@@ -1,11 +1,8 @@
 package logmonitor
 
 import (
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,12 +10,23 @@ import (
 
 	"dont/routers/gamelog"
 	"dont/service/logparser"
+	"dont/tmux"
 )
+
+// ServerInfo 表示服务器信息
+type ServerInfo struct {
+	SessionName    string `json:"session_name"`    // 会话名称
+	ArchiveName    string `json:"archive_name"`    // 存档名称
+	WorldName      string `json:"world_name"`      // 世界名称
+	ServerMode     string `json:"server_mode"`     // 服务器启动模式（32位或64位）
+	StartDirectory string `json:"start_directory"` // 启动目录
+	Status         string `json:"status"`          // 服务器状态（运行中/已停止）
+	StartTime      string `json:"start_time"`      // 启动时间
+}
 
 // DynamicLogMonitor 动态日志监控服务
 // 根据服务器状态动态调整监控的日志文件
 type DynamicLogMonitor struct {
-	apiBaseURL      string                         // API基础URL
 	dstSavePath     string                         // DST存档路径
 	checkInterval   time.Duration                  // 检查间隔
 	stopChan        chan struct{}                  // 停止信号
@@ -33,9 +41,8 @@ type DynamicLogMonitor struct {
 }
 
 // NewDynamicLogMonitor 创建新的动态日志监控服务
-func NewDynamicLogMonitor(apiBaseURL, dstSavePath string, checkInterval time.Duration, logRetention int) *DynamicLogMonitor {
+func NewDynamicLogMonitor(dstSavePath string, checkInterval time.Duration, logRetention int) *DynamicLogMonitor {
 	return &DynamicLogMonitor{
-		apiBaseURL:    apiBaseURL,
 		dstSavePath:   dstSavePath,
 		checkInterval: checkInterval,
 		stopChan:      make(chan struct{}),
@@ -110,7 +117,7 @@ func (m *DynamicLogMonitor) checkServers() {
 	// 获取服务器列表
 	servers, err := m.getServerList()
 	if err != nil {
-		log.Printf("[DynamicLogMonitor] 获取服务器列表失败: %v", err)
+		// 不打印错误日志，因为这个方法会被频繁调用
 		return
 	}
 
@@ -120,34 +127,23 @@ func (m *DynamicLogMonitor) checkServers() {
 
 // getServerList 获取服务器列表
 func (m *DynamicLogMonitor) getServerList() ([]ServerInfo, error) {
-	// 构建API URL
-	url := fmt.Sprintf("%s/api/tmux/list", m.apiBaseURL)
+	// 直接调用tmux包的函数获取运行中的服务器信息
+	tmuxServers := tmux.GetRunningServers()
 
-	// 发送HTTP请求
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("请求服务器列表失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// 读取响应内容
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("读取响应内容失败: %v", err)
-	}
-
-	// 解析JSON响应
-	var response ServerListResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, fmt.Errorf("解析JSON响应失败: %v", err)
+	// 将tmux.ServerInfo转换为本包的ServerInfo
+	servers := make([]ServerInfo, len(tmuxServers))
+	for i, server := range tmuxServers {
+		servers[i] = ServerInfo{
+			SessionName: server.SessionName,
+			ArchiveName: server.ArchiveName,
+			WorldName:   server.WorldName,
+			ServerMode:  server.ServerMode,
+			Status:      server.Status,
+			StartTime:   server.StartTime,
+		}
 	}
 
-	// 检查响应状态
-	if response.Status != 200 {
-		return nil, fmt.Errorf("API返回错误: %s", response.Msg)
-	}
-
-	return response.Data, nil
+	return servers, nil
 }
 
 // updateServerStatus 更新服务器状态并管理监控器
@@ -186,39 +182,32 @@ func (m *DynamicLogMonitor) updateServerStatus(servers []ServerInfo) {
 
 // startMonitoringServer 开始监控服务器日志
 func (m *DynamicLogMonitor) startMonitoringServer(server ServerInfo) {
-	log.Printf("[DynamicLogMonitor] 开始监控服务器日志: %s (存档: %s, 世界: %s)",
-		server.SessionName, server.ArchiveName, server.WorldName)
-
-	// 解析服务器类型（森林或洞穴）
-	worldType := "forest"
-	if strings.Contains(strings.ToLower(server.WorldName), "cave") {
-		worldType = "cave"
-	}
+	// 注意：我们不需要在这里显式地解析服务器类型
+	// LogWatcher 将会自动检测世界类型（森林或洞穴）
 
 	// 构建日志文件路径
 	logFileName := "server_log.txt" // 无论森林还是洞穴，日志文件名都是server_log.txt
 	logPath := filepath.Join(m.dstSavePath, server.ArchiveName, server.WorldName, logFileName)
-	log.Printf("[DynamicLogMonitor] 监控日志文件: %s", logPath)
 
 	// 创建日志监控器
 	watcher, err := gamelog.NewLogWatcher(logPath, server.ArchiveName, server.WorldName)
 	if err != nil {
-		log.Printf("[DynamicLogMonitor] 创建日志监控器失败: %v", err)
+		// 只在调试模式下打印错误
+		// log.Printf("[DynamicLogMonitor] 创建日志监控器失败: %v", err)
 		return
 	}
 
 	// 设置日志解析器
 	parser, err := m.parserManager.GetParser(server.ArchiveName, server.WorldName)
-	if err != nil {
-		log.Printf("[DynamicLogMonitor] 获取日志解析器失败: %v", err)
-	} else {
+	if err == nil {
 		watcher.SetLogParser(parser)
 		watcher.EnableDBStore(true) // 启用数据库存储
 	}
 
 	// 启动监控
 	if err := watcher.Start(); err != nil {
-		log.Printf("[DynamicLogMonitor] 启动日志监控器失败: %v", err)
+		// 只在调试模式下打印错误
+		// log.Printf("[DynamicLogMonitor] 启动日志监控器失败: %v", err)
 		watcher.Stop()
 		return
 	}
@@ -231,8 +220,6 @@ func (m *DynamicLogMonitor) startMonitoringServer(server ServerInfo) {
 
 // stopMonitoringServerWithDelay 延迟停止监控服务器日志
 func (m *DynamicLogMonitor) stopMonitoringServerWithDelay(sessionName string, delay time.Duration) {
-	log.Printf("[DynamicLogMonitor] 服务器已停止，将在 %v 后停止监控: %s", delay, sessionName)
-
 	// 等待指定时间
 	time.Sleep(delay)
 
@@ -243,7 +230,8 @@ func (m *DynamicLogMonitor) stopMonitoringServerWithDelay(sessionName string, de
 	if watcher, ok := m.watcherMap[sessionName]; ok {
 		watcher.Stop()
 		delete(m.watcherMap, sessionName)
-		log.Printf("[DynamicLogMonitor] 已停止监控服务器日志: %s", sessionName)
+		// 只在调试模式下打印日志
+		// log.Printf("[DynamicLogMonitor] 已停止监控服务器日志: %s", sessionName)
 	}
 }
 

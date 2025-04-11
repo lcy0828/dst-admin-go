@@ -64,7 +64,6 @@ func main() {
 
 		// 创建动态日志监控服务
 		dynamicLogMonitor = logmonitor.NewDynamicLogMonitor(
-			"http://localhost:"+fmt.Sprintf("%d", setting.HTTPPort),
 			dstSavePath,
 			*logCheckInterval,
 			*logRetentionDays,
