@@ -9,6 +9,15 @@ import (
 	"time"
 )
 
+// LogEntry 日志条目，用于批量处理
+type LogEntry struct {
+	Line         string    // 原始日志行
+	RelativeTime string    // 相对时间
+	LogType      string    // 日志类型
+	Content      string    // 日志内容
+	Timestamp    time.Time // 时间戳
+}
+
 // LogParser 日志解析器
 type LogParser struct {
 	rules        []models.LogExtractRule // 提取规则
@@ -27,6 +36,12 @@ type LogParser struct {
 	isMaster    bool   // 是否为主服务器（森林服务器）
 	isSecondary bool   // 是否为从服务器（洞穴服务器）
 	serverType  string // 服务器类型（"forest"或"cave"）
+
+	// 日志缓冲相关字段
+	logBuffer     []models.GameLog // 日志缓冲区
+	bufferMutex   sync.Mutex       // 缓冲区互斥锁
+	bufferSize    int              // 缓冲区大小阈值，超过此值将触发批量写入
+	lastFlushTime time.Time        // 上次刷新缓冲区的时间
 }
 
 // NewLogParser 创建新的日志解析器
@@ -44,6 +59,11 @@ func NewLogParser(archiveName, worldName string) (*LogParser, error) {
 		isMaster:    false,
 		isSecondary: false,
 		serverType:  "", // 将在解析日志时自动检测
+
+		// 初始化日志缓冲相关字段
+		logBuffer:     make([]models.GameLog, 0, 100), // 初始容量为100
+		bufferSize:    50,                             // 默认缓冲区大小阈值为50
+		lastFlushTime: time.Now(),                     // 初始化为当前时间
 	}
 
 	// 加载默认规则
@@ -537,7 +557,17 @@ func (p *LogParser) ParseLogLine(line string) (string, string, time.Time, error)
 	}
 
 	// 提取日志中的相对时间
-	timestamp := time.Now() // 默认使用当前时间
+	// 确保时区信息正确（东八区）
+	cst := time.FixedZone("CST", 8*3600)
+	// 默认使用当前时间，但不进行时区转换，只确保时区信息正确
+	timestamp := time.Now()
+	if timestamp.Location().String() == "UTC" {
+		timestamp = time.Date(
+			timestamp.Year(), timestamp.Month(), timestamp.Day(),
+			timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
+			timestamp.Nanosecond(), cst,
+		)
+	}
 	timeMatches := p.timeRegex.FindStringSubmatch(line)
 	if len(timeMatches) > 1 {
 		// 解析时间
@@ -550,16 +580,33 @@ func (p *LogParser) ParseLogLine(line string) (string, string, time.Time, error)
 				relativeSeconds := relativeTime.Hour()*3600 + relativeTime.Minute()*60 + relativeTime.Second()
 				// 将相对时间添加到真实启动时间上
 				timestamp = p.realStartTime.Add(time.Duration(relativeSeconds) * time.Second)
+				// 确保时区信息正确
+				if timestamp.Location().String() == "UTC" {
+					timestamp = time.Date(
+						timestamp.Year(), timestamp.Month(), timestamp.Day(),
+						timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
+						timestamp.Nanosecond(), cst,
+					)
+				}
 			} else {
 				// 如果未检测到真实时间，使用当前日期和提取的时间
 				// 注意：这里我们使用当前时间，但在检测到真实时间后应该重新计算
 				// 这个问题将在ProcessAndSaveLog函数中解决
 				now := time.Now()
-				timestamp = time.Date(
-					now.Year(), now.Month(), now.Day(),
-					relativeTime.Hour(), relativeTime.Minute(), relativeTime.Second(),
-					0, now.Location(),
-				)
+				// 确保时区信息正确
+				if now.Location().String() == "UTC" {
+					timestamp = time.Date(
+						now.Year(), now.Month(), now.Day(),
+						relativeTime.Hour(), relativeTime.Minute(), relativeTime.Second(),
+						0, cst,
+					)
+				} else {
+					timestamp = time.Date(
+						now.Year(), now.Month(), now.Day(),
+						relativeTime.Hour(), relativeTime.Minute(), relativeTime.Second(),
+						0, now.Location(),
+					)
+				}
 			}
 		}
 	}
@@ -656,16 +703,134 @@ func (p *LogParser) SaveLogToDatabase(logType, content string, timestamp time.Ti
 		}
 	}
 
-	// 只在调试模式下输出日志
-	// log.Printf("[LogParser] 将日志保存到数据库: 存档=%s, 世界=%s, 类型=%s",
-	// 	archiveName, p.worldName, logType)
+	// 确保时间戳有正确的时区信息（东八区）
+	if timestamp.Location().String() == "UTC" {
+		cst := time.FixedZone("CST", 8*3600)
+		timestamp = time.Date(
+			timestamp.Year(), timestamp.Month(), timestamp.Day(),
+			timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
+			timestamp.Nanosecond(), cst,
+		)
+	}
 
-	err := models.AddGameLog(archiveName, p.worldName, logType, content, rawContent, timestamp)
+	// 创建日志记录
+	log := models.GameLog{
+		ArchiveName: archiveName,
+		WorldName:   p.worldName,
+		LogType:     logType,
+		Content:     content,
+		RawContent:  rawContent,
+		Timestamp:   timestamp,
+		CreatedAt:   time.Now(),
+	}
+
+	// 将日志添加到缓冲区
+	return p.addToBuffer(log)
+}
+
+// addToBuffer 将日志添加到缓冲区
+func (p *LogParser) addToBuffer(log models.GameLog) error {
+	p.bufferMutex.Lock()
+	defer p.bufferMutex.Unlock()
+
+	// 添加日志到缓冲区
+	p.logBuffer = append(p.logBuffer, log)
+
+	// 检查是否需要刷新缓冲区
+	if len(p.logBuffer) >= p.bufferSize || time.Since(p.lastFlushTime) > 5*time.Second {
+		return p.flushBuffer()
+	}
+
+	return nil
+}
+
+// flushBuffer 刷新缓冲区，将日志批量写入数据库
+func (p *LogParser) flushBuffer() error {
+	// 如果缓冲区为空，直接返回
+	if len(p.logBuffer) == 0 {
+		return nil
+	}
+
+	// 复制缓冲区中的日志
+	logs := make([]models.GameLog, len(p.logBuffer))
+	copy(logs, p.logBuffer)
+
+	// 清空缓冲区
+	p.logBuffer = p.logBuffer[:0]
+
+	// 更新最后刷新时间
+	p.lastFlushTime = time.Now()
+
+	// 释放锁后批量写入数据库
+	p.bufferMutex.Unlock()
+	err := models.AddGameLogBatch(logs)
+	p.bufferMutex.Lock()
+
 	if err != nil {
-		log.Printf("[LogParser] 保存日志到数据库失败: %v", err)
+		log.Printf("[LogParser] 批量保存日志到数据库失败: %v", err)
+	} else {
+		log.Printf("[LogParser] 批量保存日志到数据库成功: %d 条记录", len(logs))
 	}
 
 	return err
+}
+
+// SaveLogToDatabaseBatch 批量将日志保存到数据库
+func (p *LogParser) SaveLogToDatabaseBatch(entries []LogEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	log.Printf("[LogParser] 批量保存 %d 条日志到数据库", len(entries))
+
+	// 准备批量插入的日志记录
+	logs := make([]models.GameLog, 0, len(entries))
+	cst := time.FixedZone("CST", 8*3600)
+
+	for _, entry := range entries {
+		// 分离原始内容和处理后的内容
+		rawContent := entry.Content
+		if strings.HasPrefix(entry.Content, "[") && strings.Contains(entry.Content, "] ") {
+			// 如果内容已经包含服务器类型标记，提取原始内容
+			parts := strings.SplitN(entry.Content, "] ", 2)
+			if len(parts) > 1 {
+				rawContent = parts[1]
+			}
+		}
+
+		// 确保时间戳有正确的时区信息
+		timestamp := entry.Timestamp
+		if timestamp.Location().String() == "UTC" {
+			timestamp = time.Date(
+				timestamp.Year(), timestamp.Month(), timestamp.Day(),
+				timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
+				timestamp.Nanosecond(), cst,
+			)
+		}
+
+		// 创建日志记录
+		log := models.GameLog{
+			ArchiveName: p.archiveName,
+			WorldName:   p.worldName,
+			LogType:     entry.LogType,
+			Content:     entry.Content,
+			RawContent:  rawContent,
+			Timestamp:   timestamp,
+			CreatedAt:   time.Now(),
+		}
+
+		logs = append(logs, log)
+	}
+
+	// 批量插入日志记录
+	err := models.AddGameLogBatch(logs)
+	if err != nil {
+		log.Printf("[LogParser] 批量保存日志到数据库失败: %v", err)
+		return err
+	}
+
+	log.Printf("[LogParser] 批量保存日志到数据库成功")
+	return nil
 }
 
 // ProcessAndSaveLog 处理并保存日志
@@ -739,6 +904,8 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 	}
 
 	// 如果找到了真实时间，则重新计算所有日志的时间戳
+	// 确保时区信息正确（东八区）
+	cst := time.FixedZone("CST", 8*3600)
 	if realTimeFound {
 		for _, entry := range logEntries {
 			var timestamp time.Time
@@ -750,13 +917,37 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 					relativeSeconds := relativeTime.Hour()*3600 + relativeTime.Minute()*60 + relativeTime.Second()
 					// 将相对时间添加到真实启动时间上
 					timestamp = realTime.Add(time.Duration(relativeSeconds) * time.Second)
+					// 确保时区信息正确
+					if timestamp.Location().String() == "UTC" {
+						timestamp = time.Date(
+							timestamp.Year(), timestamp.Month(), timestamp.Day(),
+							timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
+							timestamp.Nanosecond(), cst,
+						)
+					}
 				} else {
 					// 如果解析时间失败，使用原始时间戳
 					timestamp = entry.Timestamp
+					// 确保时区信息正确
+					if timestamp.Location().String() == "UTC" {
+						timestamp = time.Date(
+							timestamp.Year(), timestamp.Month(), timestamp.Day(),
+							timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
+							timestamp.Nanosecond(), cst,
+						)
+					}
 				}
 			} else {
 				// 如果没有相对时间，使用原始时间戳
 				timestamp = entry.Timestamp
+				// 确保时区信息正确
+				if timestamp.Location().String() == "UTC" {
+					timestamp = time.Date(
+						timestamp.Year(), timestamp.Month(), timestamp.Day(),
+						timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
+						timestamp.Nanosecond(), cst,
+					)
+				}
 			}
 
 			// 根据服务器类型添加标记
@@ -795,6 +986,15 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 	} else {
 		// 如果没有找到真实时间，则使用原始时间戳
 		for _, entry := range logEntries {
+			// 确保时区信息正确
+			timestamp := entry.Timestamp
+			if timestamp.Location().String() == "UTC" {
+				timestamp = time.Date(
+					timestamp.Year(), timestamp.Month(), timestamp.Day(),
+					timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
+					timestamp.Nanosecond(), cst,
+				)
+			}
 			// 根据服务器类型添加标记
 			var serverTypeTag string
 			if p.serverType != "" {
@@ -823,7 +1023,7 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 			enhancedContent := serverTypeTag + entry.Content
 
 			// 保存到数据库
-			if err := p.SaveLogToDatabase(entry.LogType, enhancedContent, entry.Timestamp); err != nil {
+			if err := p.SaveLogToDatabase(entry.LogType, enhancedContent, timestamp); err != nil {
 				log.Printf("[LogParser] 保存日志到数据库失败: %v", err)
 				return err
 			}

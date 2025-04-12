@@ -3,26 +3,26 @@ package parser
 import (
 	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"dont/routers/gamelog"
 	"dont/tmux"
 )
 
 // ParserStatus 解析器状态结构体
 type ParserStatus struct {
-	ID             string    `json:"id"`              // 解析器ID
-	ArchiveName    string    `json:"archive_name"`    // 存档名称
-	WorldName      string    `json:"world_name"`      // 世界名称
-	ServerType     string    `json:"server_type"`     // 服务器类型（forest或cave）
-	StartTime      time.Time `json:"start_time"`      // 启动时间
-	LogFile        string    `json:"log_file"`        // 日志文件路径
-	Status         string    `json:"status"`          // 状态（running或stopped）
-	ProcessedLines int64     `json:"processed_lines"` // 已处理行数
-	LastActivity   time.Time `json:"last_activity"`   // 最后活动时间
-	ClientCount    int       `json:"client_count"`    // 当前连接的客户端数量
+	ID           string    `json:"id"`            // 解析器ID
+	ArchiveName  string    `json:"archive_name"`  // 存档名称
+	WorldName    string    `json:"world_name"`    // 世界名称
+	ServerType   string    `json:"server_type"`   // 服务器类型（forest或cave）
+	LogFile      string    `json:"log_file"`      // 日志文件路径
+	Status       string    `json:"status"`        // 状态（running或stopped）
+	LastActivity time.Time `json:"last_activity"` // 最后活动时间
+	ClientCount  int       `json:"client_count"`  // 当前连接的客户端数量
 }
 
 // GetActiveParsers 获取当前运行中的解析器
@@ -31,7 +31,8 @@ func GetActiveParsers(c *gin.Context) {
 	log.Printf("[Parser] GetActiveParsers: 开始获取活跃解析器")
 
 	// 直接从 tmux 获取运行中的服务器列表
-	servers := tmux.GetRunningServers()
+	// 使用silent=false参数，输出正常日志
+	servers := tmux.GetRunningServers(false)
 	log.Printf("[Parser] GetActiveParsers: 直接从 tmux 获取到 %d 个运行中的服务器", len(servers))
 
 	// 构建响应数据
@@ -40,7 +41,7 @@ func GetActiveParsers(c *gin.Context) {
 	// 直接从服务器列表构建解析器状态
 	for _, server := range servers {
 		// 构建日志文件路径
-		logFile := "/Users/lcy/DoNotStarveTogether/" + server.ArchiveName + "/" + server.WorldName + "/server_log.txt"
+		logFile := filepath.Join(gamelog.GetDSTSavePath(), server.ArchiveName, server.WorldName, "server_log.txt")
 
 		// 推断服务器类型
 		serverType := ""
@@ -50,18 +51,35 @@ func GetActiveParsers(c *gin.Context) {
 			serverType = "Caves"
 		}
 
+		// 获取其他信息
+		lastActivity := time.Now()
+		clientCount := 0
+
+		// 尝试获取日志监控器
+		logWatcher, err := gamelog.GetLogWatcher(server.ArchiveName, server.WorldName)
+		if err == nil && logWatcher != nil {
+			// 获取最后活动时间
+			lastActivity = logWatcher.GetLastActivity()
+			// 获取客户端数量
+			clientCount = logWatcher.GetClientCount()
+			// 获取服务器类型
+			if serverType == "" {
+				serverType = logWatcher.GetServerType()
+			}
+		} else {
+			log.Printf("[Parser] 无法获取日志监控器: %v", err)
+		}
+
 		// 构建解析器状态
 		status := ParserStatus{
-			ID:             server.SessionName,
-			ArchiveName:    server.ArchiveName,
-			WorldName:      server.WorldName,
-			ServerType:     serverType,
-			StartTime:      time.Now().Add(-24 * time.Hour), // 假设服务器运行了24小时
-			LogFile:        logFile,
-			Status:         "running",
-			ProcessedLines: 1000, // 假设已处理了1000行
-			LastActivity:   time.Now(),
-			ClientCount:    0,
+			ID:           server.SessionName,
+			ArchiveName:  server.ArchiveName,
+			WorldName:    server.WorldName,
+			ServerType:   serverType,
+			LogFile:      logFile,
+			Status:       "running",
+			LastActivity: lastActivity,
+			ClientCount:  clientCount,
 		}
 
 		parsers = append(parsers, status)

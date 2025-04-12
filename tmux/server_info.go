@@ -32,9 +32,16 @@ func GetServerInfoMap() map[string]*ServerInfo {
 
 // GetRunningServers 获取所有运行中的服务器信息
 // 这个函数可以被其他包直接调用，避免通过HTTP请求获取服务器状态
-func GetRunningServers() []ServerInfo {
+// silent 参数控制是否输出日志信息，true表示不输出正常日志，只输出错误日志
+func GetRunningServers(silent ...bool) []ServerInfo {
+	// 判断是否需要输出日志
+	isSilent := false
+	if len(silent) > 0 && silent[0] {
+		isSilent = true
+	}
+
 	// 直接调用ListDSTServers函数获取服务器列表
-	servers, err := ListDSTServers()
+	servers, err := ListDSTServers(isSilent)
 	if err != nil {
 		log.Printf("[TMUX] 获取服务器列表失败: %v", err)
 		return []ServerInfo{}
@@ -48,10 +55,12 @@ func GetRunningServers() []ServerInfo {
 		}
 	}
 
-	log.Printf("[TMUX] 获取到 %d 个运行中的服务器", len(result))
-	for i, server := range result {
-		log.Printf("[TMUX] 运行中的服务器 #%d: 会话=%s, 存档=%s, 世界=%s",
-			i+1, server.SessionName, server.ArchiveName, server.WorldName)
+	if !isSilent {
+		log.Printf("[TMUX] 获取到 %d 个运行中的服务器", len(result))
+		for i, server := range result {
+			log.Printf("[TMUX] 运行中的服务器 #%d: 会话=%s, 存档=%s, 世界=%s",
+				i+1, server.SessionName, server.ArchiveName, server.WorldName)
+		}
 	}
 
 	return result

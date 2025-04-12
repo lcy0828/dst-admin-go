@@ -2,6 +2,7 @@ package main
 
 import (
 	"dont/controller"
+	"dont/models"
 	"dont/routers"
 	"dont/routers/backup"
 	"dont/server"
@@ -190,6 +191,10 @@ func main() {
 	// 关闭 gamelog 包中的位置管理器
 	routers.ShutdownGameLogPositionManager()
 	log.Println("GameLog 位置管理器已关闭")
+
+	// 关闭统计缓存，确保所有缓存数据被写入数据库
+	models.CloseStatCache()
+	log.Println("统计缓存已关闭")
 
 	log.Println("服务器已关闭")
 }

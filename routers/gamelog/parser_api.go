@@ -97,7 +97,8 @@ func GetParsedLogs(c *gin.Context) {
 		log.Printf("[GameLog] GetParsedLogs: 没有日志数据，尝试手动解析日志文件")
 
 		// 获取服务器列表
-		servers := tmux.GetRunningServers()
+		// 使用silent=false参数，输出正常日志
+		servers := tmux.GetRunningServers(false)
 		log.Printf("[GameLog] GetParsedLogs: 获取到 %d 个运行中的服务器", len(servers))
 
 		// 手动解析日志文件

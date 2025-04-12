@@ -543,12 +543,24 @@ func SaveServerInfo(server *DSTServer) {
 }
 
 // ListDSTServers 列出所有饥荒服务器会话
-func ListDSTServers() ([]ServerInfo, error) {
+// silent 参数控制是否输出日志信息，true表示不输出正常日志，只输出错误日志
+func ListDSTServers(silent ...bool) ([]ServerInfo, error) {
 	startTime := time.Now()
-	log.Printf("[TMUX] 开始列出所有饥荒服务器会话")
+
+	// 判断是否需要输出日志
+	isSilent := false
+	if len(silent) > 0 && silent[0] {
+		isSilent = true
+	}
+
+	if !isSilent {
+		log.Printf("[TMUX] 开始列出所有饥荒服务器会话")
+	}
 
 	// 初始化tmux客户端
-	log.Printf("[TMUX] 初始化tmux客户端")
+	if !isSilent {
+		log.Printf("[TMUX] 初始化tmux客户端")
+	}
 	tmux, err := gotmux.DefaultTmux()
 	if err != nil {
 		log.Printf("[TMUX][错误] 初始化tmux失败: %v", err)
@@ -564,7 +576,9 @@ func ListDSTServers() ([]ServerInfo, error) {
 	}
 
 	// 输出所有会话的详细信息到日志
-	log.Printf("[TMUX] 找到 %d 个tmux会话", len(sessions))
+	if !isSilent {
+		log.Printf("[TMUX] 找到 %d 个tmux会话", len(sessions))
+	}
 	//for i, session := range sessions {
 	//	// 输出会话的所有字段
 	//	//sessionJSON, _ := json.Marshal(session)
@@ -727,7 +741,9 @@ func ListDSTServers() ([]ServerInfo, error) {
 	}
 
 	elapsedTime := time.Since(startTime)
-	log.Printf("[TMUX] 已列出所有饥荒服务器会话，共 %d 个, 耗时: %v", len(result), elapsedTime)
+	if !isSilent {
+		log.Printf("[TMUX] 已列出所有饥荒服务器会话，共 %d 个, 耗时: %v", len(result), elapsedTime)
+	}
 	return result, nil
 }
 

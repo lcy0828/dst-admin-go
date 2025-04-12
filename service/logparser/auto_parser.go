@@ -111,7 +111,8 @@ func copyLogFile(src, dst string) error {
 // processAllServerLogs 处理所有服务器的日志
 func (s *AutoParserService) processAllServerLogs() {
 	// 获取所有运行中的服务器
-	servers := tmux.GetRunningServers()
+	// 使用silent=true参数，不输出正常日志
+	servers := tmux.GetRunningServers(true)
 	log.Printf("[AutoParser] 获取到 %d 个运行中的服务器", len(servers))
 
 	for _, server := range servers {
@@ -159,6 +160,7 @@ func (s *AutoParserService) processAllServerLogs() {
 					log.Printf("[AutoParser] 创建日志备份目录失败: %v", err)
 				} else {
 					// 生成备份文件名（使用时间戳）
+					// 确保时区信息正确（东八区）
 					timestamp := time.Now().Format("20060102_150405")
 					backupFileName := fmt.Sprintf("server_log_%s.txt", timestamp)
 					backupFilePath := filepath.Join(backupDir, backupFileName)

@@ -241,14 +241,27 @@ func (lw *LogWatcher) GetServerType() string {
 
 // GetStartTime 获取监控器启动时间
 func (lw *LogWatcher) GetStartTime() time.Time {
+	// 尝试从日志解析器获取真实启动时间
 	lw.parserMutex.RLock()
-	defer lw.parserMutex.RUnlock()
+	var realStartTime time.Time
+	hasRealStartTime := false
+	if lw.logParser != nil {
+		realStartTime = lw.logParser.GetRealStartTime()
+		hasRealStartTime = realStartTime.Unix() > 0
+	}
+	lw.parserMutex.RUnlock()
 
-	if lw.logParser != nil && lw.logParser.GetRealStartTime().Unix() > 0 {
-		return lw.logParser.GetRealStartTime()
+	if hasRealStartTime {
+		return realStartTime
 	}
 
-	// 如果日志解析器没有有效的启动时间，返回当前时间
+	// 如果日志解析器没有有效的启动时间，返回日志文件的创建时间
+	fileInfo, err := os.Stat(lw.logFile)
+	if err == nil {
+		return fileInfo.ModTime()
+	}
+
+	// 如果所有方法都失败，返回当前时间
 	return time.Now()
 }
 
@@ -641,6 +654,7 @@ func (lw *LogWatcher) readNewContent() {
 					log.Printf("[LogWatcher] 创建日志备份目录失败: %v", err)
 				} else {
 					// 生成备份文件名（使用时间戳）
+					// 确保时区信息正确（东八区）
 					timestamp := time.Now().Format("20060102_150405")
 					backupFileName := fmt.Sprintf("server_log_%s.txt", timestamp)
 					backupFilePath := filepath.Join(backupDir, backupFileName)
@@ -835,6 +849,27 @@ func closeLogWatcher(archiveName, worldName string) {
 		delete(logWatchers, key)
 		log.Printf("关闭日志监控器: %s", key)
 	}
+}
+
+// GetDSTSavePath 获取DST存档路径
+func GetDSTSavePath() string {
+	return dstSavePath
+}
+
+// GetLogWatcher 获取日志监控器
+func GetLogWatcher(archiveName, worldName string) (*LogWatcher, error) {
+	// 首先尝试获取现有的监控器
+	logWatchersMutex.Lock()
+	key := fmt.Sprintf("%s_%s", archiveName, worldName)
+	if watcher, ok := logWatchers[key]; ok {
+		logWatchersMutex.Unlock()
+		return watcher, nil
+	}
+	logWatchersMutex.Unlock()
+
+	// 如果没有找到监控器，返回错误
+	// 不尝试创建新的监控器，避免在API调用中创建新的监控器
+	return nil, fmt.Errorf("无法找到日志监控器: %s_%s", archiveName, worldName)
 }
 
 // WebSocket处理函数

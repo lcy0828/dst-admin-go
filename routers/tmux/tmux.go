@@ -350,7 +350,8 @@ func ListServers(c *gin.Context) {
 	log.Printf("[API][ListServers] 收到列出服务器请求 来自IP: %s", clientIP)
 
 	// 获取所有饥荒服务器会话及详细信息
-	serverInfos, err := tmux.ListDSTServers()
+	// 使用silent=false参数，输出正常日志
+	serverInfos, err := tmux.ListDSTServers(false)
 	if err != nil {
 		log.Printf("[API][ListServers] 获取服务器列表失败: %v IP: %s", err, clientIP)
 		c.JSON(http.StatusInternalServerError, gin.H{

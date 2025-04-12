@@ -16,29 +16,42 @@ import (
 // DynamicLogMonitor 动态日志监控服务
 // 根据服务器状态动态调整监控的日志文件
 type DynamicLogMonitor struct {
-	dstSavePath     string                         // DST存档路径
-	checkInterval   time.Duration                  // 检查间隔
-	stopChan        chan struct{}                  // 停止信号
-	isRunning       bool                           // 是否运行中
-	runningMutex    sync.Mutex                     // 运行状态互斥锁
-	watcherMap      map[string]*gamelog.LogWatcher // 监控器映射
-	watcherMapMutex sync.Mutex                     // 监控器映射互斥锁
-	serverStatus    map[string]bool                // 服务器状态映射
-	statusMutex     sync.Mutex                     // 状态互斥锁
-	logRetention    int                            // 日志保留天数
-	parserManager   *logparser.LogParserManager    // 日志解析器管理器
+	dstSavePath          string                         // DST存档路径
+	checkInterval        time.Duration                  // 当前检查间隔
+	initialCheckInterval time.Duration                  // 初始检查间隔（5秒）
+	regularCheckInterval time.Duration                  // 常规检查间隔（30秒）
+	hasDetectedServers   bool                           // 是否已检测到服务器运行
+	stopChan             chan struct{}                  // 停止信号
+	isRunning            bool                           // 是否运行中
+	runningMutex         sync.Mutex                     // 运行状态互斥锁
+	watcherMap           map[string]*gamelog.LogWatcher // 监控器映射
+	watcherMapMutex      sync.Mutex                     // 监控器映射互斥锁
+	serverStatus         map[string]bool                // 服务器状态映射
+	statusMutex          sync.Mutex                     // 状态互斥锁
+	logRetention         int                            // 日志保留天数
+	parserManager        *logparser.LogParserManager    // 日志解析器管理器
+	ticker               *time.Ticker                   // 定时器
+	tickerMutex          sync.Mutex                     // 定时器互斥锁
 }
 
 // NewDynamicLogMonitor 创建新的动态日志监控服务
 func NewDynamicLogMonitor(dstSavePath string, checkInterval time.Duration, logRetention int) *DynamicLogMonitor {
+	// 初始检查间隔为5秒，常规检查间隔为30秒
+	initialInterval := 5 * time.Second
+	regularInterval := 30 * time.Second
+
 	return &DynamicLogMonitor{
-		dstSavePath:   dstSavePath,
-		checkInterval: checkInterval,
-		stopChan:      make(chan struct{}),
-		watcherMap:    make(map[string]*gamelog.LogWatcher),
-		serverStatus:  make(map[string]bool),
-		logRetention:  logRetention,
-		parserManager: logparser.GetLogParserManager(),
+		dstSavePath:          dstSavePath,
+		checkInterval:        initialInterval, // 初始使用初始间隔
+		initialCheckInterval: initialInterval,
+		regularCheckInterval: regularInterval,
+		hasDetectedServers:   false,
+		stopChan:             make(chan struct{}),
+		watcherMap:           make(map[string]*gamelog.LogWatcher),
+		serverStatus:         make(map[string]bool),
+		logRetention:         logRetention,
+		parserManager:        logparser.GetLogParserManager(),
+		ticker:               nil, // 在monitorLoop中初始化
 	}
 }
 
@@ -54,8 +67,8 @@ func (m *DynamicLogMonitor) Start() error {
 	m.isRunning = true
 	go m.monitorLoop()
 
-	log.Printf("[DynamicLogMonitor] 动态日志监控服务已启动，检查间隔: %v, 日志保留天数: %d",
-		m.checkInterval, m.logRetention)
+	log.Printf("[DynamicLogMonitor] 动态日志监控服务已启动，初始检查间隔: %v, 常规检查间隔: %v, 日志保留天数: %d",
+		m.initialCheckInterval, m.regularCheckInterval, m.logRetention)
 	return nil
 }
 
@@ -85,8 +98,17 @@ func (m *DynamicLogMonitor) Stop() {
 
 // monitorLoop 监控循环
 func (m *DynamicLogMonitor) monitorLoop() {
-	ticker := time.NewTicker(m.checkInterval)
-	defer ticker.Stop()
+	// 初始化定时器，使用初始间隔
+	m.tickerMutex.Lock()
+	m.ticker = time.NewTicker(m.initialCheckInterval)
+	m.tickerMutex.Unlock()
+	defer func() {
+		m.tickerMutex.Lock()
+		if m.ticker != nil {
+			m.ticker.Stop()
+		}
+		m.tickerMutex.Unlock()
+	}()
 
 	// 立即执行一次检查
 	m.checkServers()
@@ -95,7 +117,7 @@ func (m *DynamicLogMonitor) monitorLoop() {
 		select {
 		case <-m.stopChan:
 			return
-		case <-ticker.C:
+		case <-m.ticker.C:
 			m.checkServers()
 		}
 	}
@@ -117,7 +139,8 @@ func (m *DynamicLogMonitor) checkServers() {
 // getServerList 获取服务器列表
 func (m *DynamicLogMonitor) getServerList() ([]ServerInfo, error) {
 	// 直接调用tmux包的函数获取运行中的服务器信息
-	tmuxServers := tmux.GetRunningServers()
+	// 使用silent=true参数，不输出正常日志
+	tmuxServers := tmux.GetRunningServers(true)
 
 	// 打印调试信息
 	//log.Printf("[DynamicLogMonitor] 获取到 %d 个运行中的服务器", len(tmuxServers))
@@ -152,11 +175,15 @@ func (m *DynamicLogMonitor) updateServerStatus(servers []ServerInfo) {
 	// 创建新的状态映射
 	newStatus := make(map[string]bool)
 
+	// 记录是否有运行中的服务器
+	hasRunningServers := false
+
 	// 处理运行中的服务器
 	for _, server := range servers {
 		// 只处理状态为running的服务器
 		if server.Status == "running" {
 			newStatus[server.SessionName] = true
+			hasRunningServers = true
 
 			// 检查是否已经在监控中
 			if !m.serverStatus[server.SessionName] {
@@ -184,6 +211,43 @@ func (m *DynamicLogMonitor) updateServerStatus(servers []ServerInfo) {
 
 	// 更新状态映射
 	m.serverStatus = newStatus
+
+	// 检查是否需要调整检测间隔
+	if hasRunningServers {
+		// 如果检测到服务器运行，且之前没有检测到，则切换到常规间隔
+		if !m.hasDetectedServers {
+			m.hasDetectedServers = true
+
+			// 更新当前检查间隔
+			m.checkInterval = m.regularCheckInterval
+
+			// 重新创建定时器
+			m.tickerMutex.Lock()
+			if m.ticker != nil {
+				m.ticker.Stop()
+				m.ticker = time.NewTicker(m.regularCheckInterval)
+				log.Printf("[DynamicLogMonitor] 检测到服务器运行，将检测间隔调整为 %v", m.regularCheckInterval)
+			}
+			m.tickerMutex.Unlock()
+		}
+	} else {
+		// 如果没有检测到服务器运行，且之前检测到过，则切换回初始间隔
+		if m.hasDetectedServers {
+			m.hasDetectedServers = false
+
+			// 更新当前检查间隔
+			m.checkInterval = m.initialCheckInterval
+
+			// 重新创建定时器
+			m.tickerMutex.Lock()
+			if m.ticker != nil {
+				m.ticker.Stop()
+				m.ticker = time.NewTicker(m.initialCheckInterval)
+				log.Printf("[DynamicLogMonitor] 没有检测到服务器运行，将检测间隔调整为 %v", m.initialCheckInterval)
+			}
+			m.tickerMutex.Unlock()
+		}
+	}
 }
 
 // startMonitoringServer 开始监控服务器日志

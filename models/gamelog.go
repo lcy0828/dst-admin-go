@@ -3,11 +3,22 @@ package models
 import (
 	"fmt"
 	"log"
+	"strings"
+	"sync"
 	"time"
 )
 
 // 使用标准日志包作为日志记录器
 var logger = log.New(log.Writer(), "[GameLog] ", log.LstdFlags)
+
+// 统计缓存相关
+var (
+	statCache      = make(map[string]int) // 统计缓存
+	statCacheMutex sync.RWMutex           // 缓存读写锁
+	lastFlushTime  = time.Now()           // 上次刷新缓存的时间
+	cacheThreshold = 50                   // 缓存阈值，超过此值将触发批量写入
+	flushInterval  = 30 * time.Second     // 定时刷新间隔
+)
 
 // GameLog 游戏日志记录
 type GameLog struct {
@@ -63,10 +74,120 @@ func InitGameLogTables() {
 	db.AutoMigrate(&GameLog{})
 	db.AutoMigrate(&LogExtractRule{})
 	db.AutoMigrate(&LogStatistics{})
+
+	// 启动定时刷新统计缓存的协程
+	go startStatCacheFlushTimer()
+}
+
+// 启动定时刷新统计缓存的定时器
+func startStatCacheFlushTimer() {
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		FlushStatCache()
+	}
+}
+
+// FlushStatCache 刷新统计缓存到数据库
+func FlushStatCache() {
+	statCacheMutex.Lock()
+	defer statCacheMutex.Unlock()
+
+	// 如果缓存为空，直接返回
+	if len(statCache) == 0 {
+		return
+	}
+
+	logger.Printf("[Models] 开始刷新统计缓存到数据库，缓存条目数: %d", len(statCache))
+
+	// 使用事务批量更新
+	tx := db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	if err := tx.Error; err != nil {
+		logger.Printf("[Models] FlushStatCache 开始事务失败: %v", err)
+		return
+	}
+
+	// 复制缓存内容并清空缓存
+	tempCache := make(map[string]int)
+	for k, v := range statCache {
+		tempCache[k] = v
+	}
+	statCache = make(map[string]int)
+
+	// 更新最后刷新时间
+	lastFlushTime = time.Now()
+
+	// 批量更新统计信息
+	for key, count := range tempCache {
+		// 解析键
+		parts := strings.Split(key, ":")
+		if len(parts) != 4 {
+			continue
+		}
+		archiveName := parts[0]
+		worldName := parts[1]
+		logType := parts[2]
+		dateStr := parts[3]
+		date, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			continue
+		}
+
+		// 查找现有统计记录
+		var stat LogStatistics
+		result := tx.Where("archive_name = ? AND world_name = ? AND date = ? AND log_type = ?",
+			archiveName, worldName, date, logType).First(&stat)
+
+		if result.Error != nil {
+			// 如果记录不存在，创建新记录
+			if result.RecordNotFound() {
+				stat = LogStatistics{
+					ArchiveName: archiveName,
+					WorldName:   worldName,
+					Date:        date,
+					LogType:     logType,
+					Count:       count,
+				}
+				if err := tx.Create(&stat).Error; err != nil {
+					tx.Rollback()
+					logger.Printf("[Models] FlushStatCache 创建统计记录失败: %v", err)
+					return
+				}
+			} else {
+				tx.Rollback()
+				logger.Printf("[Models] FlushStatCache 查询统计记录失败: %v", result.Error)
+				return
+			}
+		} else {
+			// 更新计数
+			stat.Count += count
+			if err := tx.Save(&stat).Error; err != nil {
+				tx.Rollback()
+				logger.Printf("[Models] FlushStatCache 更新统计记录失败: %v", err)
+				return
+			}
+		}
+	}
+
+	// 提交事务
+	if err := tx.Commit().Error; err != nil {
+		logger.Printf("[Models] FlushStatCache 提交事务失败: %v", err)
+		return
+	}
+
+	logger.Printf("[Models] 成功刷新统计缓存到数据库，共 %d 条记录", len(tempCache))
 }
 
 // AddGameLog 添加游戏日志记录
-func AddGameLog(archiveName, worldName, logType, content, rawContent string, timestamp time.Time) error {
+// updateStats 参数控制是否更新统计信息，在批量处理时可以设为false以提高性能
+func AddGameLog(archiveName, worldName, logType, content, rawContent string, timestamp time.Time, updateStats bool) error {
 	// 打印调试信息
 	logger.Printf("[Models] AddGameLog: 存档=%s, 世界=%s, 类型=%s, 内容=%s",
 		archiveName, worldName, logType, content)
@@ -97,9 +218,122 @@ func AddGameLog(archiveName, worldName, logType, content, rawContent string, tim
 
 	logger.Printf("[Models] AddGameLog 成功: ID=%d", log.ID)
 
-	// 更新统计信息
-	updateLogStatistics(archiveName, worldName, logType, timestamp)
+	// 根据参数决定是否更新统计信息
+	if updateStats {
+		updateLogStatistics(archiveName, worldName, logType, timestamp)
+	}
 
+	return nil
+}
+
+// AddGameLogBatch 批量添加游戏日志记录
+func AddGameLogBatch(logs []GameLog) error {
+	// 检查数据库连接
+	if db == nil {
+		logger.Printf("[Models] AddGameLogBatch 失败: 数据库连接为空")
+		return fmt.Errorf("数据库连接为空")
+	}
+
+	// 如果没有日志，直接返回
+	if len(logs) == 0 {
+		return nil
+	}
+
+	// 打印调试信息
+	logger.Printf("[Models] AddGameLogBatch: 批量添加 %d 条日志记录", len(logs))
+
+	// 使用事务批量插入
+	tx := db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	if err := tx.Error; err != nil {
+		logger.Printf("[Models] AddGameLogBatch 开始事务失败: %v", err)
+		return err
+	}
+
+	// 批量插入日志
+	for _, log := range logs {
+		if err := tx.Create(&log).Error; err != nil {
+			tx.Rollback()
+			logger.Printf("[Models] AddGameLogBatch 插入日志失败: %v", err)
+			return err
+		}
+	}
+
+	// 收集统计信息
+	statMap := make(map[string]int)
+	for _, log := range logs {
+		// 获取日期（不包含时间）
+		date := time.Date(log.Timestamp.Year(), log.Timestamp.Month(), log.Timestamp.Day(), 0, 0, 0, 0, log.Timestamp.Location())
+		// 创建统计键
+		key := fmt.Sprintf("%s:%s:%s:%s", log.ArchiveName, log.WorldName, log.LogType, date.Format("2006-01-02"))
+		// 增加计数
+		statMap[key]++
+	}
+
+	// 批量更新统计信息
+	for key, count := range statMap {
+		// 解析键
+		parts := strings.Split(key, ":")
+		if len(parts) != 4 {
+			continue
+		}
+		archiveName := parts[0]
+		worldName := parts[1]
+		logType := parts[2]
+		dateStr := parts[3]
+		date, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			continue
+		}
+
+		// 查找现有统计记录
+		var stat LogStatistics
+		result := tx.Where("archive_name = ? AND world_name = ? AND date = ? AND log_type = ?",
+			archiveName, worldName, date, logType).First(&stat)
+
+		if result.Error != nil {
+			// 如果记录不存在，创建新记录
+			if result.RecordNotFound() {
+				stat = LogStatistics{
+					ArchiveName: archiveName,
+					WorldName:   worldName,
+					Date:        date,
+					LogType:     logType,
+					Count:       count,
+				}
+				if err := tx.Create(&stat).Error; err != nil {
+					tx.Rollback()
+					logger.Printf("[Models] AddGameLogBatch 创建统计记录失败: %v", err)
+					return err
+				}
+			} else {
+				tx.Rollback()
+				logger.Printf("[Models] AddGameLogBatch 查询统计记录失败: %v", result.Error)
+				return result.Error
+			}
+		} else {
+			// 更新计数
+			stat.Count += count
+			if err := tx.Save(&stat).Error; err != nil {
+				tx.Rollback()
+				logger.Printf("[Models] AddGameLogBatch 更新统计记录失败: %v", err)
+				return err
+			}
+		}
+	}
+
+	// 提交事务
+	if err := tx.Commit().Error; err != nil {
+		logger.Printf("[Models] AddGameLogBatch 提交事务失败: %v", err)
+		return err
+	}
+
+	logger.Printf("[Models] AddGameLogBatch 成功: 添加了 %d 条日志记录", len(logs))
 	return nil
 }
 
@@ -164,29 +398,24 @@ func updateLogStatistics(archiveName, worldName, logType string, timestamp time.
 	// 获取日期（不包含时间）
 	date := time.Date(timestamp.Year(), timestamp.Month(), timestamp.Day(), 0, 0, 0, 0, timestamp.Location())
 
-	// 查找现有统计记录
-	var stat LogStatistics
-	result := db.Where("archive_name = ? AND world_name = ? AND date = ? AND log_type = ?",
-		archiveName, worldName, date, logType).First(&stat)
+	// 创建统计键
+	key := fmt.Sprintf("%s:%s:%s:%s", archiveName, worldName, logType, date.Format("2006-01-02"))
 
-	if result.Error != nil {
-		// 如果记录不存在，创建新记录
-		if result.RecordNotFound() {
-			stat = LogStatistics{
-				ArchiveName: archiveName,
-				WorldName:   worldName,
-				Date:        date,
-				LogType:     logType,
-				Count:       1,
-			}
-			return db.Create(&stat).Error
-		}
-		return result.Error
+	// 更新缓存
+	statCacheMutex.Lock()
+	statCache[key]++
+
+	// 检查是否需要刷新缓存
+	cacheSize := len(statCache)
+	timeToFlush := time.Since(lastFlushTime) > flushInterval
+	statCacheMutex.Unlock()
+
+	// 如果缓存超过阈值或者时间超过间隔，则刷新缓存
+	if cacheSize >= cacheThreshold || timeToFlush {
+		go FlushStatCache()
 	}
 
-	// 更新计数
-	stat.Count++
-	return db.Save(&stat).Error
+	return nil
 }
 
 // AddLogExtractRule 添加日志提取规则
@@ -328,4 +557,11 @@ func GetGameLogCount() (int, error) {
 		return 0, err
 	}
 	return count, nil
+}
+
+// CloseStatCache 关闭统计缓存，确保所有缓存数据被写入数据库
+func CloseStatCache() {
+	// 刷新缓存到数据库
+	FlushStatCache()
+	logger.Printf("[Models] 统计缓存已关闭并刷新到数据库")
 }
