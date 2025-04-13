@@ -40,3 +40,12 @@ func ShutdownGlobalPositionManager() {
 		globalPositionManager.Stop()
 	}
 }
+
+// ShutdownAllLogParsers 关闭所有日志解析器
+func ShutdownAllLogParsers() {
+	// 获取日志解析器管理器
+	manager := GetLogParserManager()
+
+	// 关闭所有解析器
+	manager.ShutdownAllParsers()
+}

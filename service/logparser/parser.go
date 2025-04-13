@@ -42,6 +42,11 @@ type LogParser struct {
 	bufferMutex   sync.Mutex       // 缓冲区互斥锁
 	bufferSize    int              // 缓冲区大小阈值，超过此值将触发批量写入
 	lastFlushTime time.Time        // 上次刷新缓冲区的时间
+	flushInterval time.Duration    // 定时刷新间隔
+	flushTicker   *time.Ticker     // 定时刷新定时器
+	stopChan      chan struct{}    // 停止信号通道
+	isRunning     bool             // 是否正在运行
+	runningMutex  sync.Mutex       // 运行状态互斥锁
 }
 
 // NewLogParser 创建新的日志解析器
@@ -64,6 +69,9 @@ func NewLogParser(archiveName, worldName string) (*LogParser, error) {
 		logBuffer:     make([]models.GameLog, 0, 100), // 初始容量为100
 		bufferSize:    50,                             // 默认缓冲区大小阈值为50
 		lastFlushTime: time.Now(),                     // 初始化为当前时间
+		flushInterval: 5 * time.Second,                // 定时刷新间隔为5秒
+		stopChan:      make(chan struct{}),            // 初始化停止信号通道
+		isRunning:     false,                          // 初始化为非运行状态
 	}
 
 	// 加载默认规则
@@ -73,6 +81,9 @@ func NewLogParser(archiveName, worldName string) (*LogParser, error) {
 	if err := parser.LoadRules(); err != nil {
 		return nil, err
 	}
+
+	// 启动定时刷新
+	parser.Start()
 
 	return parser, nil
 }
@@ -781,6 +792,104 @@ func (p *LogParser) flushBuffer() error {
 		log.Printf("[LogParser] 批量保存日志到数据库失败: %v", err)
 	} else {
 		log.Printf("[LogParser] 批量保存日志到数据库成功: %d 条记录", len(logs))
+	}
+
+	return err
+}
+
+// Start 启动日志解析器的定时刷新
+func (p *LogParser) Start() {
+	p.runningMutex.Lock()
+	defer p.runningMutex.Unlock()
+
+	if p.isRunning {
+		return // 如果已经在运行，直接返回
+	}
+
+	// 创建定时器
+	p.flushTicker = time.NewTicker(p.flushInterval)
+	p.isRunning = true
+
+	// 启动定时刷新协程
+	go p.flushLoop()
+
+	log.Printf("[LogParser] 启动日志解析器定时刷新，存档=%s, 世界=%s, 间隔=%v",
+		p.archiveName, p.worldName, p.flushInterval)
+}
+
+// Stop 停止日志解析器的定时刷新
+func (p *LogParser) Stop() {
+	p.runningMutex.Lock()
+	defer p.runningMutex.Unlock()
+
+	if !p.isRunning {
+		return // 如果没有运行，直接返回
+	}
+
+	// 停止定时器
+	if p.flushTicker != nil {
+		p.flushTicker.Stop()
+		p.flushTicker = nil
+	}
+
+	// 发送停止信号
+	close(p.stopChan)
+	p.stopChan = make(chan struct{})
+	p.isRunning = false
+
+	log.Printf("[LogParser] 停止日志解析器定时刷新，存档=%s, 世界=%s",
+		p.archiveName, p.worldName)
+}
+
+// flushLoop 定时刷新循环
+func (p *LogParser) flushLoop() {
+	for {
+		select {
+		case <-p.stopChan:
+			return // 收到停止信号，退出循环
+		case <-p.flushTicker.C:
+			// 定时刷新缓冲区
+			p.bufferMutex.Lock()
+			if len(p.logBuffer) > 0 && time.Since(p.lastFlushTime) > p.flushInterval {
+				log.Printf("[LogParser] 定时刷新缓冲区，存档=%s, 世界=%s, 日志数量=%d",
+					p.archiveName, p.worldName, len(p.logBuffer))
+				p.flushBuffer()
+			}
+			p.bufferMutex.Unlock()
+		}
+	}
+}
+
+// Close 关闭日志解析器，确保所有缓冲区中的日志都被写入数据库
+func (p *LogParser) Close() error {
+	// 停止定时刷新
+	p.Stop()
+
+	p.bufferMutex.Lock()
+	defer p.bufferMutex.Unlock()
+
+	// 如果缓冲区为空，直接返回
+	if len(p.logBuffer) == 0 {
+		return nil
+	}
+
+	// 复制缓冲区中的日志
+	logs := make([]models.GameLog, len(p.logBuffer))
+	copy(logs, p.logBuffer)
+
+	// 清空缓冲区
+	p.logBuffer = p.logBuffer[:0]
+
+	// 更新最后刷新时间
+	p.lastFlushTime = time.Now()
+
+	// 批量写入数据库
+	err := models.AddGameLogBatch(logs)
+
+	if err != nil {
+		log.Printf("[LogParser] 关闭时批量保存日志到数据库失败: %v", err)
+	} else {
+		log.Printf("[LogParser] 关闭时批量保存日志到数据库成功: %d 条记录", len(logs))
 	}
 
 	return err

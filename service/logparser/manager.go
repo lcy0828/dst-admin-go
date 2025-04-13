@@ -193,3 +193,21 @@ func (m *LogParserManager) DeleteCustomRule(id int) error {
 func (m *LogParserManager) GetAllRules() ([]models.LogExtractRule, error) {
 	return models.GetLogExtractRules()
 }
+
+// ShutdownAllParsers 关闭所有解析器，确保所有缓冲区中的日志都被写入数据库
+func (m *LogParserManager) ShutdownAllParsers() {
+	m.parsersMutex.Lock()
+	defer m.parsersMutex.Unlock()
+
+	log.Printf("[LogParserManager] 开始关闭所有日志解析器，共 %d 个", len(m.parsers))
+
+	for key, parser := range m.parsers {
+		if err := parser.Close(); err != nil {
+			log.Printf("[LogParserManager] 关闭解析器 %s 失败: %v", key, err)
+		} else {
+			log.Printf("[LogParserManager] 关闭解析器 %s 成功", key)
+		}
+	}
+
+	log.Printf("[LogParserManager] 所有日志解析器已关闭")
+}

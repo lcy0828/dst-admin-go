@@ -204,6 +204,10 @@ func main() {
 		log.Println("动态日志监控服务已关闭")
 	}
 
+	// 关闭所有日志解析器，确保缓冲区中的日志被写入数据库
+	logparser.ShutdownAllLogParsers()
+	log.Println("所有日志解析器已关闭")
+
 	// 关闭全局位置管理器
 	logparser.ShutdownGlobalPositionManager()
 	log.Println("全局位置管理器已关闭")
