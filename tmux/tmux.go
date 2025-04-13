@@ -92,7 +92,12 @@ func (s *DSTServer) IsRunning() (bool, error) {
 	log.Printf("[TMUX] 方法1: 使用gotmux的ListSessions方法检查")
 	sessions, err := s.tmux.ListSessions()
 	if err != nil {
-		log.Printf("[TMUX][警告] 使用gotmux获取tmux会话列表失败: %v, 将尝试方法2", err)
+		// 检查错误是否是因为没有tmux会话
+		if strings.Contains(err.Error(), "failed to list sessions") {
+			log.Printf("[TMUX] 没有运行中的tmux会话，将尝试方法2")
+		} else {
+			log.Printf("[TMUX][警告] 使用gotmux获取tmux会话列表失败: %v, 将尝试方法2", err)
+		}
 	} else {
 		// 检查是否存在指定名称的会话
 		for _, session := range sessions {
@@ -284,8 +289,14 @@ func (s *DSTServer) SendCommand(command string) error {
 	log.Printf("[TMUX] 获取会话 会话名: %s", s.SessionName)
 	session, err := s.tmux.GetSessionByName(s.SessionName)
 	if err != nil {
-		log.Printf("[TMUX][错误] 获取会话失败: %v", err)
-		return fmt.Errorf("获取会话失败: %v", err)
+		// 检查错误是否是因为没有tmux会话
+		if strings.Contains(err.Error(), "failed to list sessions") || strings.Contains(err.Error(), "no session") {
+			log.Printf("[TMUX] 没有找到会话: %s", s.SessionName)
+			return fmt.Errorf("没有找到会话: %s", s.SessionName)
+		} else {
+			log.Printf("[TMUX][错误] 获取会话失败: %v", err)
+			return fmt.Errorf("获取会话失败: %v", err)
+		}
 	}
 
 	// 获取窗口
@@ -571,8 +582,18 @@ func ListDSTServers(silent ...bool) ([]ServerInfo, error) {
 	//log.Printf("[TMUX] 获取tmux会话列表")
 	sessions, err := tmux.ListSessions()
 	if err != nil {
-		log.Printf("[TMUX][错误] 获取tmux会话列表失败: %v", err)
-		return nil, fmt.Errorf("获取tmux会话列表失败: %v", err)
+		// 检查错误是否是因为没有tmux会话
+		if strings.Contains(err.Error(), "failed to list sessions") {
+			// 没有tmux会话是正常情况，使用信息日志而不是错误日志
+			if !isSilent {
+				log.Printf("[TMUX] 没有运行中的tmux会话")
+			}
+			return nil, fmt.Errorf("获取tmux会话列表失败: %v", err)
+		} else {
+			// 其他错误仍然记录为错误
+			log.Printf("[TMUX][错误] 获取tmux会话列表失败: %v", err)
+			return nil, fmt.Errorf("获取tmux会话列表失败: %v", err)
+		}
 	}
 
 	// 输出所有会话的详细信息到日志
@@ -764,8 +785,14 @@ func GetSessionInfo(sessionName string) (map[string]string, error) {
 	log.Printf("[TMUX] 获取会话 会话名: %s", sessionName)
 	session, err := tmux.GetSessionByName(sessionName)
 	if err != nil {
-		log.Printf("[TMUX][错误] 获取会话失败: %v", err)
-		return nil, fmt.Errorf("获取会话失败: %v", err)
+		// 检查错误是否是因为没有tmux会话
+		if strings.Contains(err.Error(), "failed to list sessions") || strings.Contains(err.Error(), "no session") {
+			log.Printf("[TMUX] 没有找到会话: %s", sessionName)
+			return nil, fmt.Errorf("没有找到会话: %s", sessionName)
+		} else {
+			log.Printf("[TMUX][错误] 获取会话失败: %v", err)
+			return nil, fmt.Errorf("获取会话失败: %v", err)
+		}
 	}
 
 	// 解析会话名称获取存档和世界信息

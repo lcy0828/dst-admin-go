@@ -24,6 +24,7 @@ func RegisterParserAPIRoutes(router *gin.RouterGroup) {
 	router.DELETE("/parser/rules/:id", DeleteExtractRule)
 	router.GET("/parser/search", SearchParsedLogs)
 	router.POST("/parser/toggle", ToggleLogParser)
+	router.GET("/parser/startup_versions", GetStartupVersions) // 添加获取启动版本列表的API
 }
 
 // GetParsedLogs 获取解析后的日志数据
@@ -35,11 +36,12 @@ func GetParsedLogs(c *gin.Context) {
 	archiveName := c.Query("archive")
 	worldName := c.Query("world")
 	logType := c.Query("type")
+	startupVersion := c.Query("startup_version") // 添加启动版本参数
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
 
-	log.Printf("[GameLog] GetParsedLogs: 请求参数: 存档=%s, 世界=%s, 类型=%s, 页码=%d, 每页数量=%d",
-		archiveName, worldName, logType, page, pageSize)
+	log.Printf("[GameLog] GetParsedLogs: 请求参数: 存档=%s, 世界=%s, 类型=%s, 启动版本=%s, 页码=%d, 每页数量=%d",
+		archiveName, worldName, logType, startupVersion, page, pageSize)
 
 	// 解析时间范围
 	startTimeStr := c.Query("start_time")
@@ -80,7 +82,7 @@ func GetParsedLogs(c *gin.Context) {
 	log.Printf("[GameLog] GetParsedLogs: 开始查询数据库")
 
 	// 获取日志数据
-	logs, total, err := models.GetGameLogs(archiveName, worldName, logType, startTime, endTime, page, pageSize)
+	logs, total, err := models.GetGameLogs(archiveName, worldName, logType, startupVersion, startTime, endTime, page, pageSize)
 	if err != nil {
 		log.Printf("[GameLog] GetParsedLogs: 获取日志数据失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -138,7 +140,7 @@ func GetParsedLogs(c *gin.Context) {
 		}
 
 		// 重新查询数据库
-		logs, total, err = models.GetGameLogs(archiveName, worldName, logType, startTime, endTime, page, pageSize)
+		logs, total, err = models.GetGameLogs(archiveName, worldName, logType, startupVersion, startTime, endTime, page, pageSize)
 		if err != nil {
 			log.Printf("[GameLog] GetParsedLogs: 重新查询数据库失败: %v", err)
 		} else {
@@ -443,5 +445,35 @@ func ToggleLogParser(c *gin.Context) {
 		"data": gin.H{
 			"enabled": req.Enabled,
 		},
+	})
+}
+
+// GetStartupVersions 获取启动版本列表
+func GetStartupVersions(c *gin.Context) {
+	// 解析请求参数
+	archiveName := c.Query("archive")
+	worldName := c.Query("world")
+
+	log.Printf("[GameLog] GetStartupVersions: 请求参数: 存档=%s, 世界=%s",
+		archiveName, worldName)
+
+	// 获取启动版本列表
+	manager := logparser.GetLogParserManager()
+	versions, err := manager.GetStartupVersions(archiveName, worldName)
+	if err != nil {
+		log.Printf("[GameLog] GetStartupVersions: 获取启动版本列表失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status": 500,
+			"msg":    "获取启动版本列表失败: " + err.Error(),
+		})
+		return
+	}
+
+	log.Printf("[GameLog] GetStartupVersions: 查询成功，返回 %d 个启动版本", len(versions))
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": 200,
+		"msg":    "获取启动版本列表成功",
+		"data":   versions,
 	})
 }

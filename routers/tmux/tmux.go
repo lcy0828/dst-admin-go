@@ -353,12 +353,23 @@ func ListServers(c *gin.Context) {
 	// 使用silent=false参数，输出正常日志
 	serverInfos, err := tmux.ListDSTServers(false)
 	if err != nil {
-		log.Printf("[API][ListServers] 获取服务器列表失败: %v IP: %s", err, clientIP)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"status": 500,
-			"msg":    "获取服务器列表失败: " + err.Error(),
-		})
-		return
+		// 如果错误是因为没有tmux会话，返回空列表而不是错误
+		log.Printf("[API][ListServers] 获取服务器列表时发生错误: %v IP: %s", err, clientIP)
+
+		// 检查错误消息是否包含“failed to list sessions”
+		if strings.Contains(err.Error(), "failed to list sessions") {
+			log.Printf("[API][ListServers] 没有运行中的tmux会话，返回空列表 IP: %s", clientIP)
+
+			// 返回空列表
+			serverInfos = []tmux.ServerInfo{}
+		} else {
+			// 其他错误仍然返回500
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"status": 500,
+				"msg":    "获取服务器列表失败: " + err.Error(),
+			})
+			return
+		}
 	}
 
 	log.Printf("[API][ListServers] 获取到 %d 个服务器信息", len(serverInfos))

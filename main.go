@@ -2,6 +2,7 @@ package main
 
 import (
 	"dont/controller"
+	"dont/cron"
 	"dont/models"
 	"dont/routers"
 	"dont/routers/backup"
@@ -41,12 +42,22 @@ func main() {
 		log.Printf("警告：无法创建备份目录: %v", err)
 	}
 
-	// 初始化日志解析器管理器
-	logManager := logparser.GetLogParserManager()
+	// 初始化数据库表
+	models.InitCronTaskTable()
+	models.InitCronTaskLogTable()
 
-	// 启动日志清理任务
-	logManager.StartCleanupTask(*logRetentionDays)
-	log.Printf("日志清理任务已启动，保留最近 %d 天的日志", *logRetentionDays)
+	// 初始化日志解析器管理器
+	_ = logparser.GetLogParserManager()
+
+	// 初始化定时任务管理器
+	taskManager := cron.GetTaskManager()
+
+	// 启动定时任务管理器
+	if err := taskManager.Start(); err != nil {
+		log.Printf("警告：启动定时任务管理器失败: %v", err)
+	} else {
+		log.Printf("定时任务管理器已启动")
+	}
 
 	// 初始化动态日志监控服务
 	var dynamicLogMonitor *logmonitor.DynamicLogMonitor
@@ -195,6 +206,10 @@ func main() {
 	// 关闭统计缓存，确保所有缓存数据被写入数据库
 	models.CloseStatCache()
 	log.Println("统计缓存已关闭")
+
+	// 停止定时任务管理器
+	taskManager.Stop()
+	log.Println("定时任务管理器已关闭")
 
 	log.Println("服务器已关闭")
 }

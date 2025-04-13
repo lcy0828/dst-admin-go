@@ -35,6 +35,8 @@ func GetActiveParsers(c *gin.Context) {
 	servers := tmux.GetRunningServers(false)
 	log.Printf("[Parser] GetActiveParsers: 直接从 tmux 获取到 %d 个运行中的服务器", len(servers))
 
+	// 即使没有运行中的服务器，也不返回错误
+
 	// 构建响应数据
 	var parsers []ParserStatus
 

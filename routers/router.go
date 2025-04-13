@@ -5,6 +5,7 @@ import (
 	"dont/routers/agent"
 	"dont/routers/auth"
 	"dont/routers/backup"
+	"dont/routers/cron"
 	"dont/routers/dstcustomize"
 	"dont/routers/dstserver"
 	"dont/routers/gamelog"
@@ -164,6 +165,10 @@ func InitRouter() *gin.Engine {
 
 			// 删除世界
 			dstservers.POST("/deleteworld", dstserver.DeleteWorld)
+
+			// 更新游戏服务器
+			dstservers.POST("/update", dstserver.UpdateServer)
+			dstservers.GET("/update/status", dstserver.GetUpdateStatus)
 		}
 
 		// DST游戏自定义配置管理
@@ -222,6 +227,9 @@ func InitRouter() *gin.Engine {
 			// 添加新的日志解析器API
 			parserGroup.GET("/parser/active", parser.GetActiveParsers) // 获取当前运行中的解析器
 		}
+
+		// 定时任务管理API
+		cron.RegisterCronRoutes(api)
 
 		// Tmux服务器管理API
 		tmuxGroup := api.Group("/tmux")

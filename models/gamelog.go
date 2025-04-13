@@ -22,14 +22,15 @@ var (
 
 // GameLog 游戏日志记录
 type GameLog struct {
-	ID          int       `gorm:"primary_key" json:"id"`
-	ArchiveName string    `json:"archive_name"` // 存档名称
-	WorldName   string    `json:"world_name"`   // 世界名称
-	LogType     string    `json:"log_type"`     // 日志类型
-	Content     string    `json:"content"`      // 日志内容
-	RawContent  string    `json:"raw_content"`  // 原始日志内容
-	Timestamp   time.Time `json:"timestamp"`    // 日志时间戳
-	CreatedAt   time.Time `json:"created_at"`   // 记录创建时间
+	ID             int       `gorm:"primary_key" json:"id"`
+	ArchiveName    string    `json:"archive_name"`    // 存档名称
+	WorldName      string    `json:"world_name"`      // 世界名称
+	LogType        string    `json:"log_type"`        // 日志类型
+	Content        string    `json:"content"`         // 日志内容
+	RawContent     string    `json:"raw_content"`     // 原始日志内容
+	Timestamp      time.Time `json:"timestamp"`       // 日志时间戳
+	CreatedAt      time.Time `json:"created_at"`      // 记录创建时间
+	StartupVersion string    `json:"startup_version"` // 服务启动版本
 }
 
 // LogType 日志类型常量
@@ -187,10 +188,10 @@ func FlushStatCache() {
 
 // AddGameLog 添加游戏日志记录
 // updateStats 参数控制是否更新统计信息，在批量处理时可以设为false以提高性能
-func AddGameLog(archiveName, worldName, logType, content, rawContent string, timestamp time.Time, updateStats bool) error {
+func AddGameLog(archiveName, worldName, logType, content, rawContent string, timestamp time.Time, startupVersion string, updateStats bool) error {
 	// 打印调试信息
-	logger.Printf("[Models] AddGameLog: 存档=%s, 世界=%s, 类型=%s, 内容=%s",
-		archiveName, worldName, logType, content)
+	logger.Printf("[Models] AddGameLog: 存档=%s, 世界=%s, 类型=%s, 内容=%s, 启动版本=%s",
+		archiveName, worldName, logType, content, startupVersion)
 
 	// 检查数据库连接
 	if db == nil {
@@ -199,13 +200,14 @@ func AddGameLog(archiveName, worldName, logType, content, rawContent string, tim
 	}
 
 	log := GameLog{
-		ArchiveName: archiveName,
-		WorldName:   worldName,
-		LogType:     logType,
-		Content:     content,
-		RawContent:  rawContent,
-		Timestamp:   timestamp,
-		CreatedAt:   time.Now(),
+		ArchiveName:    archiveName,
+		WorldName:      worldName,
+		LogType:        logType,
+		Content:        content,
+		RawContent:     rawContent,
+		Timestamp:      timestamp,
+		StartupVersion: startupVersion,
+		CreatedAt:      time.Now(),
 	}
 
 	// 打印详细的SQL日志
@@ -338,9 +340,9 @@ func AddGameLogBatch(logs []GameLog) error {
 }
 
 // GetGameLogs 获取游戏日志记录
-func GetGameLogs(archiveName, worldName, logType string, startTime, endTime time.Time, page, pageSize int) ([]GameLog, int, error) {
-	logger.Printf("[Models] GetGameLogs: 开始查询日志记录, 存档=%s, 世界=%s, 类型=%s, 页码=%d, 每页数量=%d",
-		archiveName, worldName, logType, page, pageSize)
+func GetGameLogs(archiveName, worldName, logType, startupVersion string, startTime, endTime time.Time, page, pageSize int) ([]GameLog, int, error) {
+	logger.Printf("[Models] GetGameLogs: 开始查询日志记录, 存档=%s, 世界=%s, 类型=%s, 启动版本=%s, 页码=%d, 每页数量=%d",
+		archiveName, worldName, logType, startupVersion, page, pageSize)
 
 	var logs []GameLog
 	var count int
@@ -362,6 +364,9 @@ func GetGameLogs(archiveName, worldName, logType string, startTime, endTime time
 	}
 	if logType != "" {
 		query = query.Where("log_type = ?", logType)
+	}
+	if startupVersion != "" {
+		query = query.Where("startup_version = ?", startupVersion)
 	}
 	if !startTime.IsZero() {
 		query = query.Where("timestamp >= ?", startTime)
@@ -557,6 +562,53 @@ func GetGameLogCount() (int, error) {
 		return 0, err
 	}
 	return count, nil
+}
+
+// GetStartupVersions 获取所有启动版本
+func GetStartupVersions(archiveName, worldName string) ([]string, error) {
+	logger.Printf("[Models] GetStartupVersions: 开始查询启动版本, 存档=%s, 世界=%s",
+		archiveName, worldName)
+
+	var versions []string
+
+	// 检查数据库连接
+	if db == nil {
+		logger.Printf("[Models] GetStartupVersions 失败: 数据库连接为空")
+		return nil, fmt.Errorf("数据库连接为空")
+	}
+
+	query := db.Model(&GameLog{}).Select("DISTINCT startup_version")
+
+	// 添加查询条件
+	if archiveName != "" {
+		query = query.Where("archive_name = ?", archiveName)
+	}
+	if worldName != "" {
+		query = query.Where("world_name = ?", worldName)
+	}
+
+	// 执行查询
+	rows, err := query.Rows()
+	if err != nil {
+		logger.Printf("[Models] GetStartupVersions 查询失败: %v", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	// 遍历结果
+	for rows.Next() {
+		var version string
+		if err := rows.Scan(&version); err != nil {
+			logger.Printf("[Models] GetStartupVersions 扫描结果失败: %v", err)
+			return nil, err
+		}
+		if version != "" {
+			versions = append(versions, version)
+		}
+	}
+
+	logger.Printf("[Models] GetStartupVersions: 查询成功，返回 %d 个启动版本", len(versions))
+	return versions, nil
 }
 
 // CloseStatCache 关闭统计缓存，确保所有缓存数据被写入数据库

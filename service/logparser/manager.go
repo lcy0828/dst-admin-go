@@ -137,7 +137,7 @@ func (m *LogParserManager) GetLogStatistics(archiveName, worldName string, days 
 // GetRecentLogs 获取最近的日志
 func (m *LogParserManager) GetRecentLogs(archiveName, worldName string, logType string, limit int) ([]models.GameLog, error) {
 	// 获取最近的日志
-	logs, _, err := models.GetGameLogs(archiveName, worldName, logType, time.Time{}, time.Now(), 1, limit)
+	logs, _, err := models.GetGameLogs(archiveName, worldName, logType, "", time.Time{}, time.Now(), 1, limit)
 	return logs, err
 }
 
@@ -149,6 +149,11 @@ func (m *LogParserManager) SearchLogs(keyword string, page, pageSize int) ([]mod
 // GetLogTypeDistribution 获取日志类型分布
 func (m *LogParserManager) GetLogTypeDistribution(archiveName, worldName string) (map[string]int, error) {
 	return models.GetLogTypeCount(archiveName, worldName)
+}
+
+// GetStartupVersions 获取启动版本列表
+func (m *LogParserManager) GetStartupVersions(archiveName, worldName string) ([]string, error) {
+	return models.GetStartupVersions(archiveName, worldName)
 }
 
 // AddCustomRule 添加自定义规则

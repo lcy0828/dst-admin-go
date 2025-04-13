@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"log"
+	"strings"
 	"time"
 )
 
@@ -43,7 +44,16 @@ func GetRunningServers(silent ...bool) []ServerInfo {
 	// 直接调用ListDSTServers函数获取服务器列表
 	servers, err := ListDSTServers(isSilent)
 	if err != nil {
-		log.Printf("[TMUX] 获取服务器列表失败: %v", err)
+		// 检查错误是否是因为没有tmux会话
+		if strings.Contains(err.Error(), "failed to list sessions") {
+			// 没有tmux会话是正常情况，不记录错误日志
+			if !isSilent {
+				log.Printf("[TMUX] 没有运行中的tmux会话")
+			}
+		} else {
+			// 其他错误仍然记录为错误
+			log.Printf("[TMUX] 获取服务器列表失败: %v", err)
+		}
 		return []ServerInfo{}
 	}
 

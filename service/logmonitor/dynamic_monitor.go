@@ -132,7 +132,7 @@ func (m *DynamicLogMonitor) checkServers() {
 		return
 	}
 
-	// 更新服务器状态
+	// 更新服务器状态，即使服务器列表为空
 	m.updateServerStatus(servers)
 }
 
@@ -145,7 +145,8 @@ func (m *DynamicLogMonitor) getServerList() ([]ServerInfo, error) {
 	// 打印调试信息
 	//log.Printf("[DynamicLogMonitor] 获取到 %d 个运行中的服务器", len(tmuxServers))
 	if len(tmuxServers) == 0 {
-		return nil, fmt.Errorf("没有运行中的服务器")
+		// 返回空列表而不是错误
+		return []ServerInfo{}, nil
 	}
 	// 将tmux.ServerInfo转换为本包的ServerInfo
 	servers := make([]ServerInfo, len(tmuxServers))

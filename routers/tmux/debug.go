@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/GianlucaP106/gotmux/gotmux"
 	"github.com/gin-gonic/gin"
@@ -27,12 +28,23 @@ func DebugTmuxSessions(c *gin.Context) {
 	// 列出所有会话
 	sessions, err := tmux.ListSessions()
 	if err != nil {
-		log.Printf("[DEBUG][错误] 获取tmux会话列表失败: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"status": 500,
-			"msg":    "获取tmux会话列表失败: " + err.Error(),
-		})
-		return
+		// 检查错误是否是因为没有tmux会话
+		if strings.Contains(err.Error(), "failed to list sessions") {
+			log.Printf("[DEBUG] 没有运行中的tmux会话")
+			c.JSON(http.StatusOK, gin.H{
+				"status": 200,
+				"msg":    "没有运行中的tmux会话",
+				"data":   []interface{}{},
+			})
+			return
+		} else {
+			log.Printf("[DEBUG][错误] 获取tmux会话列表失败: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"status": 500,
+				"msg":    "获取tmux会话列表失败: " + err.Error(),
+			})
+			return
+		}
 	}
 
 	// 详细记录每个会话的所有字段

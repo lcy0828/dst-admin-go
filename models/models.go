@@ -70,6 +70,11 @@ func CloseDB() {
 	defer db.Close()
 }
 
+// DB 返回数据库连接
+func DB() *gorm.DB {
+	return db
+}
+
 // 初始化游戏日志相关表结构
 func initGameLogTables() {
 	// 自动迁移表结构

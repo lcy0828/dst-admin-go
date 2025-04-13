@@ -713,15 +713,26 @@ func (p *LogParser) SaveLogToDatabase(logType, content string, timestamp time.Ti
 		)
 	}
 
+	// 获取启动版本（使用服务器启动时间作为版本标识）
+	startupVersion := ""
+	if !p.realStartTime.IsZero() {
+		// 使用服务器启动时间的格式化字符串作为版本标识
+		startupVersion = p.realStartTime.Format("20060102_150405")
+	} else {
+		// 如果没有检测到服务器启动时间，使用当前时间
+		startupVersion = time.Now().Format("20060102_150405") + "_unknown"
+	}
+
 	// 创建日志记录
 	log := models.GameLog{
-		ArchiveName: archiveName,
-		WorldName:   p.worldName,
-		LogType:     logType,
-		Content:     content,
-		RawContent:  rawContent,
-		Timestamp:   timestamp,
-		CreatedAt:   time.Now(),
+		ArchiveName:    archiveName,
+		WorldName:      p.worldName,
+		LogType:        logType,
+		Content:        content,
+		RawContent:     rawContent,
+		Timestamp:      timestamp,
+		StartupVersion: startupVersion,
+		CreatedAt:      time.Now(),
 	}
 
 	// 将日志添加到缓冲区
@@ -808,15 +819,26 @@ func (p *LogParser) SaveLogToDatabaseBatch(entries []LogEntry) error {
 			)
 		}
 
+		// 获取启动版本（使用服务器启动时间作为版本标识）
+		startupVersion := ""
+		if !p.realStartTime.IsZero() {
+			// 使用服务器启动时间的格式化字符串作为版本标识
+			startupVersion = p.realStartTime.Format("20060102_150405")
+		} else {
+			// 如果没有检测到服务器启动时间，使用当前时间
+			startupVersion = time.Now().Format("20060102_150405") + "_unknown"
+		}
+
 		// 创建日志记录
 		log := models.GameLog{
-			ArchiveName: p.archiveName,
-			WorldName:   p.worldName,
-			LogType:     entry.LogType,
-			Content:     entry.Content,
-			RawContent:  rawContent,
-			Timestamp:   timestamp,
-			CreatedAt:   time.Now(),
+			ArchiveName:    p.archiveName,
+			WorldName:      p.worldName,
+			LogType:        entry.LogType,
+			Content:        entry.Content,
+			RawContent:     rawContent,
+			Timestamp:      timestamp,
+			StartupVersion: startupVersion,
+			CreatedAt:      time.Now(),
 		}
 
 		logs = append(logs, log)
