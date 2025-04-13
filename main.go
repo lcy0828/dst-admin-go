@@ -4,6 +4,7 @@ import (
 	"dont/controller"
 	"dont/cron"
 	"dont/models"
+	"dont/pkg/commands"
 	"dont/routers"
 	"dont/routers/backup"
 	"dont/server"
@@ -45,6 +46,14 @@ func main() {
 	// 初始化数据库表
 	models.InitCronTaskTable()
 	models.InitCronTaskLogTable()
+	models.InitCommandTable() // 初始化命令表
+
+	// 手动初始化内置命令
+	if err := commands.InitBuiltinCommands(); err != nil {
+		log.Printf("警告：手动初始化内置命令失败: %v", err)
+	} else {
+		log.Printf("手动初始化内置命令成功")
+	}
 
 	// 初始化日志解析器管理器
 	_ = logparser.GetLogParserManager()

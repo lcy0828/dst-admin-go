@@ -20,9 +20,8 @@ var (
 
 // 初始化函数，创建命令管理器
 func init() {
-	// 设置命令存储路径
-	storagePath := "./conf/commands.json"
-	commandManager = commands.NewCommandManager(storagePath)
+	// 创建命令管理器
+	commandManager = commands.NewCommandManager()
 
 	// 初始化命令管理器
 	if err := commandManager.Initialize(); err != nil {
