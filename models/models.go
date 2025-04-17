@@ -64,6 +64,9 @@ func init() {
 
 	// 初始化游戏日志相关表结构
 	initGameLogTables()
+
+	// 初始化定时任务相关表结构
+	InitCronTables()
 }
 
 func CloseDB() {
@@ -81,6 +84,8 @@ func initGameLogTables() {
 	db.AutoMigrate(&GameLog{})
 	db.AutoMigrate(&LogExtractRule{})
 	db.AutoMigrate(&LogStatistics{})
+	// 初始化玩家信息表
+	InitPlayerInfoTable()
 
 	log.Println("游戏日志相关表结构初始化完成")
 }

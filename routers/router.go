@@ -11,6 +11,7 @@ import (
 	"dont/routers/gamelog"
 	"dont/routers/mod"
 	"dont/routers/parser"
+	"dont/routers/player"
 	"dont/routers/server"
 	"dont/routers/status"
 	"dont/routers/tag"
@@ -230,6 +231,17 @@ func InitRouter() *gin.Engine {
 
 		// 定时任务管理API
 		cron.RegisterCronRoutes(api)
+
+		// 玩家信息管理API
+		playerGroup := api.Group("/player")
+		{
+			playerGroup.GET("/online", player.GetOnlinePlayers)    // 获取在线玩家列表
+			playerGroup.GET("/all", player.GetAllPlayers)          // 获取所有玩家列表
+			playerGroup.GET("/stats", player.GetPlayerStats)       // 获取玩家统计信息
+			playerGroup.GET("/detail/:id", player.GetPlayerDetail) // 获取玩家详情
+			playerGroup.POST("/update", player.UpdatePlayerInfo)   // 手动更新玩家信息
+			playerGroup.GET("/archives", player.GetPlayerArchives) // 获取玩家数据库中的存档列表
+		}
 
 		// Tmux服务器管理API
 		tmuxGroup := api.Group("/tmux")

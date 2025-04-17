@@ -4,6 +4,7 @@ import (
 	"dont/cron"
 	"dont/models"
 	"dont/pkg/e"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -54,6 +55,12 @@ func RegisterCronRoutes(router *gin.RouterGroup) {
 
 	// 注册定时任务图表路由
 	RegisterCronChartRoutes(router)
+
+	// 注册tmux集成路由
+	RegisterTmuxIntegrationRoutes(router)
+
+	// 注册tmux任务路由
+	RegisterTmuxTaskRoutes(router)
 }
 
 // GetAllTasks 获取所有任务
@@ -112,13 +119,18 @@ type TaskRequest struct {
 	GroupID       int           `json:"group_id"`
 	Spec          string        `json:"spec" binding:"required"`
 	Type          string        `json:"type" binding:"required"`
-	Target        string        `json:"target" binding:"required"`
+	Target        string        `json:"target"` // 不再强制要求
 	Args          []interface{} `json:"args"`
 	Dependencies  []int         `json:"dependencies"`
 	Timeout       int           `json:"timeout"`
 	RetryTimes    int           `json:"retry_times"`
 	RetryInterval int           `json:"retry_interval"`
 	Status        int           `json:"status"`
+	// tmux相关字段
+	SessionName   string   `json:"session_name"`   // tmux会话名称
+	CommandID     string   `json:"command_id"`     // 命令ID（对于tmux_command类型）
+	RawCommand    string   `json:"raw_command"`    // 原始命令（对于tmux_raw_command类型）
+	CommandParams []string `json:"command_params"` // 命令参数（对于tmux_command类型）
 }
 
 // AddTask 添加任务
@@ -134,10 +146,17 @@ func AddTask(c *gin.Context) {
 	}
 
 	// 验证任务类型
-	if req.Type != "function" && req.Type != "shell" {
+	validTypes := map[string]bool{
+		"function":         true,
+		"shell":            true,
+		"tmux_command":     true,
+		"tmux_raw_command": true,
+	}
+
+	if !validTypes[req.Type] {
 		c.JSON(http.StatusOK, gin.H{
 			"code": e.INVALID_PARAMS,
-			"msg":  "无效的任务类型，只支持 function 和 shell",
+			"msg":  "无效的任务类型，支持的类型: function, shell, tmux_command, tmux_raw_command",
 			"data": nil,
 		})
 		return
@@ -181,6 +200,43 @@ func AddTask(c *gin.Context) {
 		req.GroupID = groups[0].ID
 	}
 
+	// 对于tmux相关的任务类型，不需要指定target
+	target := req.Target
+	if req.Type == "tmux_command" || req.Type == "tmux_raw_command" {
+		// 对于tmux相关的任务类型，target可以为空，因为我们根据类型直接调用相应的处理函数
+		if target == "" {
+			target = "tmux_task" // 设置一个默认值，仅作标记用
+		}
+
+		// 检查tmux相关字段
+		if req.SessionName == "" {
+			c.JSON(http.StatusOK, gin.H{
+				"code": e.INVALID_PARAMS,
+				"msg":  "tmux会话名称不能为空",
+				"data": nil,
+			})
+			return
+		}
+
+		if req.Type == "tmux_command" && req.CommandID == "" {
+			c.JSON(http.StatusOK, gin.H{
+				"code": e.INVALID_PARAMS,
+				"msg":  "tmux命令ID不能为空",
+				"data": nil,
+			})
+			return
+		}
+
+		if req.Type == "tmux_raw_command" && req.RawCommand == "" {
+			c.JSON(http.StatusOK, gin.H{
+				"code": e.INVALID_PARAMS,
+				"msg":  "tmux原始命令不能为空",
+				"data": nil,
+			})
+			return
+		}
+	}
+
 	// 创建任务
 	task := &models.CronTask{
 		Name:          req.Name,
@@ -188,7 +244,7 @@ func AddTask(c *gin.Context) {
 		GroupID:       req.GroupID,
 		Spec:          req.Spec,
 		Type:          req.Type,
-		Target:        req.Target,
+		Target:        target,
 		Timeout:       req.Timeout,
 		RetryTimes:    req.RetryTimes,
 		RetryInterval: req.RetryInterval,
@@ -244,6 +300,41 @@ func AddTask(c *gin.Context) {
 		return
 	}
 
+	// 如果是tmux相关的任务类型，创建tmux任务详情
+	if req.Type == "tmux_command" || req.Type == "tmux_raw_command" {
+		tmuxTask := &models.TmuxTask{
+			TaskID:      task.ID,
+			SessionName: req.SessionName,
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+		}
+
+		if req.Type == "tmux_command" {
+			tmuxTask.CommandID = req.CommandID
+			// 设置命令参数
+			if err := tmuxTask.SetCommandParams(req.CommandParams); err != nil {
+				c.JSON(http.StatusOK, gin.H{
+					"code": e.ERROR,
+					"msg":  "设置命令参数失败: " + err.Error(),
+					"data": nil,
+				})
+				return
+			}
+		} else {
+			tmuxTask.RawCommand = req.RawCommand
+		}
+
+		// 创建tmux任务
+		if err := models.CreateTmuxTask(tmuxTask); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"code": e.ERROR,
+				"msg":  "创建tmux任务失败: " + err.Error(),
+				"data": nil,
+			})
+			return
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"code": e.SUCCESS,
 		"msg":  "添加任务成功",
@@ -286,10 +377,17 @@ func UpdateTask(c *gin.Context) {
 	}
 
 	// 验证任务类型
-	if req.Type != "function" && req.Type != "shell" {
+	validTypes := map[string]bool{
+		"function":         true,
+		"shell":            true,
+		"tmux_command":     true,
+		"tmux_raw_command": true,
+	}
+
+	if !validTypes[req.Type] {
 		c.JSON(http.StatusOK, gin.H{
 			"code": e.INVALID_PARAMS,
-			"msg":  "无效的任务类型，只支持 function 和 shell",
+			"msg":  "无效的任务类型，支持的类型: function, shell, tmux_command, tmux_raw_command",
 			"data": nil,
 		})
 		return
@@ -328,7 +426,44 @@ func UpdateTask(c *gin.Context) {
 	}
 	existingTask.Spec = req.Spec
 	existingTask.Type = req.Type
-	existingTask.Target = req.Target
+
+	// 对于tmux相关的任务类型，不需要指定target
+	target := req.Target
+	if req.Type == "tmux_command" || req.Type == "tmux_raw_command" {
+		// 对于tmux相关的任务类型，target可以为空，因为我们根据类型直接调用相应的处理函数
+		if target == "" {
+			target = "tmux_task" // 设置一个默认值，仅作标记用
+		}
+
+		// 检查tmux相关字段
+		if req.SessionName == "" {
+			c.JSON(http.StatusOK, gin.H{
+				"code": e.INVALID_PARAMS,
+				"msg":  "tmux会话名称不能为空",
+				"data": nil,
+			})
+			return
+		}
+
+		if req.Type == "tmux_command" && req.CommandID == "" {
+			c.JSON(http.StatusOK, gin.H{
+				"code": e.INVALID_PARAMS,
+				"msg":  "tmux命令ID不能为空",
+				"data": nil,
+			})
+			return
+		}
+
+		if req.Type == "tmux_raw_command" && req.RawCommand == "" {
+			c.JSON(http.StatusOK, gin.H{
+				"code": e.INVALID_PARAMS,
+				"msg":  "tmux原始命令不能为空",
+				"data": nil,
+			})
+			return
+		}
+	}
+	existingTask.Target = target
 	existingTask.Timeout = req.Timeout
 	existingTask.RetryTimes = req.RetryTimes
 	existingTask.RetryInterval = req.RetryInterval
@@ -401,6 +536,78 @@ func UpdateTask(c *gin.Context) {
 		return
 	}
 
+	// 如果是tmux相关的任务类型，更新或创建tmux任务详情
+	if req.Type == "tmux_command" || req.Type == "tmux_raw_command" {
+		// 尝试获取现有的tmux任务
+		tmuxTask, err := models.GetTmuxTaskByTaskID(existingTask.ID)
+		if err != nil {
+			// 如果不存在，创建新的tmux任务
+			tmuxTask = &models.TmuxTask{
+				TaskID:      existingTask.ID,
+				SessionName: req.SessionName,
+				CreatedAt:   time.Now(),
+				UpdatedAt:   time.Now(),
+			}
+
+			if req.Type == "tmux_command" {
+				tmuxTask.CommandID = req.CommandID
+				// 设置命令参数
+				if err := tmuxTask.SetCommandParams(req.CommandParams); err != nil {
+					c.JSON(http.StatusOK, gin.H{
+						"code": e.ERROR,
+						"msg":  "设置命令参数失败: " + err.Error(),
+						"data": nil,
+					})
+					return
+				}
+			} else {
+				tmuxTask.RawCommand = req.RawCommand
+			}
+
+			// 创建tmux任务
+			if err := models.CreateTmuxTask(tmuxTask); err != nil {
+				c.JSON(http.StatusOK, gin.H{
+					"code": e.ERROR,
+					"msg":  "创建tmux任务失败: " + err.Error(),
+					"data": nil,
+				})
+				return
+			}
+		} else {
+			// 更新现有的tmux任务
+			tmuxTask.SessionName = req.SessionName
+			tmuxTask.UpdatedAt = time.Now()
+
+			if req.Type == "tmux_command" {
+				tmuxTask.CommandID = req.CommandID
+				tmuxTask.RawCommand = "" // 清空原始命令
+				// 设置命令参数
+				if err := tmuxTask.SetCommandParams(req.CommandParams); err != nil {
+					c.JSON(http.StatusOK, gin.H{
+						"code": e.ERROR,
+						"msg":  "设置命令参数失败: " + err.Error(),
+						"data": nil,
+					})
+					return
+				}
+			} else {
+				tmuxTask.RawCommand = req.RawCommand
+				tmuxTask.CommandID = ""     // 清空命令ID
+				tmuxTask.CommandParams = "" // 清空命令参数
+			}
+
+			// 更新tmux任务
+			if err := models.UpdateTmuxTask(tmuxTask); err != nil {
+				c.JSON(http.StatusOK, gin.H{
+					"code": e.ERROR,
+					"msg":  "更新tmux任务失败: " + err.Error(),
+					"data": nil,
+				})
+				return
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"code": e.SUCCESS,
 		"msg":  "更新任务成功",
@@ -419,6 +626,12 @@ func DeleteTask(c *gin.Context) {
 			"data": nil,
 		})
 		return
+	}
+
+	// 先尝试删除tmux任务（如果存在）
+	if err := models.DeleteTmuxTask(id); err != nil {
+		// 如果删除tmux任务失败，仅记录日志，不中断删除主任务
+		log.Printf("删除tmux任务失败 (ID: %d): %v", id, err)
 	}
 
 	// 删除任务
@@ -516,7 +729,8 @@ func RunTask(c *gin.Context) {
 
 	// 运行任务
 	taskManager := cron.GetTaskManager()
-	if err := taskManager.RunTask(id); err != nil {
+	logID, err := taskManager.RunTask(id)
+	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"code": e.ERROR,
 			"msg":  "运行任务失败: " + err.Error(),
@@ -528,7 +742,9 @@ func RunTask(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": e.SUCCESS,
 		"msg":  "任务已开始运行",
-		"data": nil,
+		"data": gin.H{
+			"log_id": logID,
+		},
 	})
 }
 

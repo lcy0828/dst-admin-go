@@ -58,7 +58,7 @@ func GetTaskExecutionChart(taskID int, days int) (*TaskExecutionChart, error) {
 	var successResults []Result
 	query := `
 		SELECT DATE(start_time) as date, COUNT(*) as count
-		FROM cron_task_log
+		FROM dont_cron_task_log
 		WHERE task_id = ? AND status = 1 AND start_time >= ?
 		GROUP BY DATE(start_time)
 	`
@@ -78,7 +78,7 @@ func GetTaskExecutionChart(taskID int, days int) (*TaskExecutionChart, error) {
 	var failResults []Result
 	query = `
 		SELECT DATE(start_time) as date, COUNT(*) as count
-		FROM cron_task_log
+		FROM dont_cron_task_log
 		WHERE task_id = ? AND status = 0 AND start_time >= ?
 		GROUP BY DATE(start_time)
 	`
@@ -141,8 +141,8 @@ func GetGroupExecutionChart(groupID int, days int) (*GroupExecutionChart, error)
 	var successResults []Result
 	query := `
 		SELECT DATE(l.start_time) as date, COUNT(*) as count
-		FROM cron_task_log l
-		JOIN cron_task t ON l.task_id = t.id
+		FROM dont_cron_task_log l
+		JOIN dont_cron_task t ON l.task_id = t.id
 		WHERE t.group_id = ? AND l.status = 1 AND l.start_time >= ?
 		GROUP BY DATE(l.start_time)
 	`
@@ -162,8 +162,8 @@ func GetGroupExecutionChart(groupID int, days int) (*GroupExecutionChart, error)
 	var failResults []Result
 	query = `
 		SELECT DATE(l.start_time) as date, COUNT(*) as count
-		FROM cron_task_log l
-		JOIN cron_task t ON l.task_id = t.id
+		FROM dont_cron_task_log l
+		JOIN dont_cron_task t ON l.task_id = t.id
 		WHERE t.group_id = ? AND l.status = 0 AND l.start_time >= ?
 		GROUP BY DATE(l.start_time)
 	`
@@ -226,13 +226,13 @@ func GetTaskDurationChart(taskID int, days int) ([]ChartDataPoint, error) {
 	// 查询平均执行时长数据
 	type Result struct {
 		Date     string
-		Duration int
+		Duration float64
 	}
 
 	var results []Result
 	query := `
 		SELECT DATE(start_time) as date, AVG(duration) as duration
-		FROM cron_task_log
+		FROM dont_cron_task_log
 		WHERE task_id = ? AND start_time >= ?
 		GROUP BY DATE(start_time)
 	`
@@ -243,7 +243,7 @@ func GetTaskDurationChart(taskID int, days int) ([]ChartDataPoint, error) {
 	// 填充执行时长数据
 	for _, result := range results {
 		if idx, ok := dateMap[result.Date]; ok {
-			chart[idx].Count = result.Duration
+			chart[idx].Count = int(result.Duration)
 		}
 	}
 

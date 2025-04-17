@@ -74,6 +74,48 @@ func NewLogParser(archiveName, worldName string) (*LogParser, error) {
 		isRunning:     false,                          // 初始化为非运行状态
 	}
 
+	// 尝试从日志文件中提取启动时间
+	logFilePath := models.GetServerLogPath(archiveName, worldName)
+	if logFilePath != "" {
+		// 读取日志文件的前20行
+		logContent, err := models.ReadFileHead(logFilePath, 20)
+		if err == nil && logContent != "" {
+			// 匹配启动时间行
+			timeRegex := regexp.MustCompile(`\[\d{2}:\d{2}:\d{2}\]: Current time: ([A-Za-z]+ [A-Za-z]+ \d{1,2} \d{2}:\d{2}:\d{2} \d{4})`)
+			matches := timeRegex.FindStringSubmatch(logContent)
+			if len(matches) > 1 {
+				// 解析时间
+				parsedTime, err := time.Parse("Mon Jan 2 15:04:05 2006", matches[1])
+				if err == nil {
+					// 设置服务器启动时间
+					parser.realStartTime = parsedTime
+					parser.realTimeDetected = true
+					log.Printf("[LogParser] 从日志文件提取到服务器启动时间: %s", parsedTime.Format("2006-01-02 15:04:05"))
+				}
+			}
+		}
+	}
+
+	// 如果从日志文件中无法提取启动时间，尝试从数据库加载
+	if parser.realStartTime.IsZero() {
+		startupVersions, err := models.GetStartupVersions(archiveName, worldName)
+		if err == nil && len(startupVersions) > 0 {
+			// 使用最新的启动版本（不包含_unknown后缀的）
+			for _, version := range startupVersions {
+				if !strings.Contains(version, "_unknown") {
+					startTime, err := time.Parse("20060102_150405", version)
+					if err == nil {
+						// 设置服务器启动时间
+						parser.realStartTime = startTime
+						parser.realTimeDetected = true
+						log.Printf("[LogParser] 从数据库加载服务器启动时间: %s", startTime.Format("2006-01-02 15:04:05"))
+						break
+					}
+				}
+			}
+		}
+	}
+
 	// 加载默认规则
 	parser.initDefaultRules()
 
@@ -101,6 +143,8 @@ func (p *LogParser) initDefaultRules() {
 			IsRegex:     true,
 			IsEnabled:   true,
 			Priority:    100,
+			MatchMode:   models.MatchModeSingle, // 单行匹配模式
+			LineCount:   1,                      // 单行
 		},
 		{
 			Name:        "服务器版本",
@@ -474,6 +518,9 @@ func (p *LogParser) LoadRules() error {
 				rule.IsRegex,
 				rule.IsEnabled,
 				rule.Priority,
+				rule.MatchMode,   // 添加匹配模式参数
+				rule.TailPattern, // 添加尾行匹配模式参数
+				rule.LineCount,   // 添加固定行数参数
 			)
 		}
 	} else {
@@ -518,12 +565,32 @@ func (p *LogParser) GetRealStartTime() time.Time {
 	return p.realStartTime
 }
 
+// ParseLogLineResult 解析日志行的结果
+type ParseLogLineResult struct {
+	LogType   string                 // 日志类型
+	Content   string                 // 日志内容
+	Timestamp time.Time              // 时间戳
+	Rule      *models.LogExtractRule // 匹配的规则
+}
+
 // ParseLogLine 解析单行日志
 func (p *LogParser) ParseLogLine(line string) (string, string, time.Time, error) {
+	result, err := p.ParseLogLineWithRule(line)
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	return result.LogType, result.Content, result.Timestamp, nil
+}
+
+// ParseLogLineWithRule 解析单行日志，返回匹配的规则
+func (p *LogParser) ParseLogLineWithRule(line string) (ParseLogLineResult, error) {
+	// 初始化结果
+	result := ParseLogLineResult{}
+
 	// 去除首尾空白字符
 	line = strings.TrimSpace(line)
 	if line == "" {
-		return "", "", time.Time{}, nil
+		return result, nil
 	}
 
 	// 检测服务器类型
@@ -562,7 +629,34 @@ func (p *LogParser) ParseLogLine(line string) (string, string, time.Time, error)
 			if err == nil {
 				p.realStartTime = realTime
 				p.realTimeDetected = true
-				log.Printf("检测到服务器真实启动时间: %s", realTime.Format("2006-01-02 15:04:05"))
+				log.Printf("[LogParser] 检测到服务器真实启动时间: %s", realTime.Format("2006-01-02 15:04:05"))
+
+				// 将启动时间保存到数据库中
+				// 创建一条系统日志，记录服务器启动时间
+				systemLog := models.GameLog{
+					ArchiveName:    p.archiveName,
+					WorldName:      p.worldName,
+					LogType:        models.LogTypeSystem,
+					Content:        "[" + p.serverType + "] " + "Server started at " + realTime.Format("2006-01-02 15:04:05"),
+					RawContent:     "Server started at " + realTime.Format("2006-01-02 15:04:05"),
+					Timestamp:      realTime,
+					StartupVersion: realTime.Format("20060102_150405"),
+					CreatedAt:      time.Now(),
+				}
+
+				// 直接保存到数据库，不经过缓冲区
+				if err := models.AddGameLog(
+					systemLog.ArchiveName,
+					systemLog.WorldName,
+					systemLog.LogType,
+					systemLog.Content,
+					systemLog.RawContent,
+					systemLog.Timestamp,
+					systemLog.StartupVersion,
+					true, // updateStats
+				); err != nil {
+					log.Printf("[LogParser] 保存服务器启动时间到数据库失败: %v", err)
+				}
 			}
 		}
 	}
@@ -591,6 +685,11 @@ func (p *LogParser) ParseLogLine(line string) (string, string, time.Time, error)
 				relativeSeconds := relativeTime.Hour()*3600 + relativeTime.Minute()*60 + relativeTime.Second()
 				// 将相对时间添加到真实启动时间上
 				timestamp = p.realStartTime.Add(time.Duration(relativeSeconds) * time.Second)
+				// 打印日志以便调试
+				log.Printf("[LogParser] 计算时间戳: 启动时间=%s, 相对时间=%s, 计算结果=%s",
+					p.realStartTime.Format("2006-01-02 15:04:05"),
+					timeStr,
+					timestamp.Format("2006-01-02 15:04:05"))
 				// 确保时区信息正确
 				if timestamp.Location().String() == "UTC" {
 					timestamp = time.Date(
@@ -626,7 +725,8 @@ func (p *LogParser) ParseLogLine(line string) (string, string, time.Time, error)
 	p.rulesMutex.RLock()
 	defer p.rulesMutex.RUnlock()
 
-	for _, rule := range p.rules {
+	for i := range p.rules {
+		rule := &p.rules[i] // 使用指针以便返回原始规则
 		var matched bool
 		var content string
 
@@ -651,12 +751,19 @@ func (p *LogParser) ParseLogLine(line string) (string, string, time.Time, error)
 		}
 
 		if matched {
-			return rule.LogType, content, timestamp, nil
+			result.LogType = rule.LogType
+			result.Content = content
+			result.Timestamp = timestamp
+			result.Rule = rule
+			return result, nil
 		}
 	}
 
 	// 如果没有匹配的规则，返回未知类型
-	return models.LogTypeUnknown, line, timestamp, nil
+	result.LogType = models.LogTypeUnknown
+	result.Content = line
+	result.Timestamp = timestamp
+	return result, nil
 }
 
 // ProcessLogContent 处理日志内容
@@ -697,6 +804,13 @@ func (p *LogParser) ProcessLogContent(content string) []string {
 
 	log.Printf("[LogParser] 处理完成，共有 %d 行有效日志", len(result))
 	return result
+}
+
+// SetRealStartTime 设置服务器启动时间
+func (p *LogParser) SetRealStartTime(startTime time.Time) {
+	p.realStartTime = startTime
+	p.realTimeDetected = true
+	log.Printf("[LogParser] 设置服务器启动时间: %s", startTime.Format("2006-01-02 15:04:05"))
 }
 
 // SaveLogToDatabase 将日志保存到数据库
@@ -930,12 +1044,70 @@ func (p *LogParser) SaveLogToDatabaseBatch(entries []LogEntry) error {
 
 		// 获取启动版本（使用服务器启动时间作为版本标识）
 		startupVersion := ""
+
+		// 如果已经有启动时间，直接使用
 		if !p.realStartTime.IsZero() {
 			// 使用服务器启动时间的格式化字符串作为版本标识
 			startupVersion = p.realStartTime.Format("20060102_150405")
+			log.Printf("[LogParser] 使用已知的服务器启动时间: %s", p.realStartTime.Format("2006-01-02 15:04:05"))
 		} else {
-			// 如果没有检测到服务器启动时间，使用当前时间
-			startupVersion = time.Now().Format("20060102_150405") + "_unknown"
+			// 如果没有启动时间，尝试从数据库中获取最新的启动版本
+			startupVersions, err := models.GetStartupVersions(p.archiveName, p.worldName)
+			if err == nil && len(startupVersions) > 0 {
+				// 使用最新的启动版本（不包含_unknown后缀的）
+				for _, version := range startupVersions {
+					if !strings.Contains(version, "_unknown") {
+						startupVersion = version
+						// 尝试解析启动时间并设置到解析器中
+						startTime, err := time.Parse("20060102_150405", version)
+						if err == nil {
+							p.realStartTime = startTime
+							p.realTimeDetected = true
+						}
+						log.Printf("[LogParser] 使用数据库中的最新启动版本: %s", version)
+						break
+					}
+				}
+			}
+
+			// 如果仍然无法获取启动版本，尝试从日志文件中提取
+			if startupVersion == "" {
+				logFilePath := models.GetServerLogPath(p.archiveName, p.worldName)
+				if logFilePath != "" {
+					// 读取日志文件的前20行
+					logContent, err := models.ReadFileHead(logFilePath, 20)
+					if err == nil && logContent != "" {
+						// 匹配启动时间行
+						timeRegex := regexp.MustCompile(`\[\d{2}:\d{2}:\d{2}\]: Current time: ([A-Za-z]+ [A-Za-z]+ \d{1,2} \d{2}:\d{2}:\d{2} \d{4})`)
+						matches := timeRegex.FindStringSubmatch(logContent)
+						if len(matches) > 1 {
+							// 解析时间
+							parsedTime, err := time.Parse("Mon Jan 2 15:04:05 2006", matches[1])
+							if err == nil {
+								// 设置服务器启动时间
+								p.realStartTime = parsedTime
+								p.realTimeDetected = true
+								startupVersion = parsedTime.Format("20060102_150405")
+								log.Printf("[LogParser] 从日志文件提取到服务器启动时间: %s", parsedTime.Format("2006-01-02 15:04:05"))
+							}
+						}
+					}
+				}
+			}
+
+			// 如果仍然无法获取启动时间，使用当前时间
+			if startupVersion == "" {
+				// 如果数据库中有任何启动版本，即使包含_unknown后缀，也使用它
+				startupVersions, err := models.GetStartupVersions(p.archiveName, p.worldName)
+				if err == nil && len(startupVersions) > 0 {
+					startupVersion = startupVersions[0]
+					log.Printf("[LogParser] 使用数据库中的启动版本（包含_unknown）: %s", startupVersion)
+				} else {
+					// 如果数据库中没有任何启动版本，才使用当前时间
+					startupVersion = time.Now().Format("20060102_150405") + "_unknown"
+					log.Printf("[LogParser] 无法获取启动时间，使用当前时间作为启动版本: %s", startupVersion)
+				}
+			}
 		}
 
 		// 创建日志记录
@@ -998,16 +1170,29 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 	var realTimeFound bool
 	var realTime time.Time
 
+	// 创建一个数组来跟踪已经处理过的行索引，避免重复处理
+	processedLines := make(map[int]bool)
+
+	// 确保时区信息正确（东八区）
+	cst := time.FixedZone("CST", 8*3600)
+
 	// 第一次扫描，收集日志行和查找真实时间
-	for _, line := range lines {
+	for i := 0; i < len(lines); i++ {
+	NextLine:
+		// 检查该行是否已经被处理过
+		if processedLines[i] {
+			continue
+		}
+
+		line := lines[i]
 		// 解析日志行
-		logType, parsedContent, timestamp, err := p.ParseLogLine(line)
+		result, err := p.ParseLogLineWithRule(line)
 		if err != nil {
 			continue // 跳过解析错误的行
 		}
 
 		// 如果解析结果为空，跳过
-		if logType == "" || parsedContent == "" {
+		if result.LogType == "" || result.Content == "" {
 			continue
 		}
 
@@ -1022,23 +1207,229 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 		if p.realTimeDetected && !realTimeFound {
 			realTimeFound = true
 			realTime = p.realStartTime
+			log.Printf("[LogParser] 使用服务器启动时间: %s", realTime.Format("2006-01-02 15:04:05"))
 		}
 
-		// 添加日志条目
-		logEntries = append(logEntries, LogEntry{
-			Line:         line,
-			RelativeTime: relativeTime,
-			LogType:      logType,
-			Content:      parsedContent,
-			Timestamp:    timestamp,
-		})
+		// 如果没有检测到真实时间，尝试从当前行提取
+		if !p.realTimeDetected && !realTimeFound {
+			// 尝试匹配真实时间
+			timeMatches := p.realTimeRegex.FindStringSubmatch(line)
+			if len(timeMatches) > 1 {
+				// 解析时间
+				parsedTime, err := time.Parse("Mon Jan 2 15:04:05 2006", timeMatches[1])
+				if err == nil {
+					// 设置服务器启动时间
+					p.realStartTime = parsedTime
+					p.realTimeDetected = true
+					realTimeFound = true
+					realTime = parsedTime
+					log.Printf("[LogParser] 从日志行提取到服务器启动时间: %s", parsedTime.Format("2006-01-02 15:04:05"))
+				}
+			}
+		}
+
+		// 处理多行匹配和首尾行匹配模式
+		if result.Rule != nil {
+			// 处理不同的匹配模式
+			if result.Rule.MatchMode == models.MatchModeMultiLine {
+				// 多行匹配模式
+				// 初始化多行内容
+				multiLineContent := result.Content
+
+				// 记录是否找到了多行匹配
+				multiLineFound := false
+
+				// 继续向下匹配
+				for j := i + 1; j < len(lines); j++ {
+					nextLine := lines[j]
+					if nextLine == "" {
+						// 如果下一行为空，结束匹配
+						break
+					}
+
+					// 解析下一行
+					nextResult, err := p.ParseLogLineWithRule(nextLine)
+					if err != nil || nextResult.Rule == nil {
+						// 如果解析错误或没有匹配规则，结束匹配
+						break
+					}
+
+					// 如果下一行的规则类型和当前规则类型一样，合并
+					if nextResult.Rule.LogType == result.Rule.LogType {
+						multiLineContent += "\n" + nextResult.Content
+						i = j // 更新外层循环的索引
+						multiLineFound = true
+
+						// 标记该行已经被处理
+						processedLines[j] = true
+					} else {
+						// 如果下一行的规则类型不同，结束匹配
+						break
+					}
+				}
+
+				// 更新内容
+				result.Content = multiLineContent
+
+				// 如果找到了多行匹配，添加到日志条目中
+				if multiLineFound {
+					// 标记首行已经被处理
+					processedLines[i] = true
+
+					// 提取相对时间
+					var relativeTime string
+					timeMatches := p.timeRegex.FindStringSubmatch(line)
+					if len(timeMatches) > 1 {
+						relativeTime = timeMatches[1]
+					}
+
+					// 添加日志条目
+					logEntries = append(logEntries, LogEntry{
+						Line:         line,
+						RelativeTime: relativeTime,
+						LogType:      result.LogType,
+						Content:      result.Content,
+						Timestamp:    result.Timestamp,
+					})
+
+					// 跳过外层循环中对当前日志的处理
+					goto NextLine
+				}
+			} else if result.Rule.MatchMode == models.MatchModeHeadTail && result.Rule.TailPattern != "" {
+				// 首尾行匹配模式
+				// 初始化多行内容
+				multiLineContent := result.Content
+
+				// 编译尾行正则表达式
+				tailRegex, err := regexp.Compile(result.Rule.TailPattern)
+				if err == nil {
+					// 继续向下匹配，直到匹配到尾行
+					tailFound := false
+					for j := i + 1; j < len(lines) && !tailFound; j++ {
+						nextLine := lines[j]
+						if nextLine == "" {
+							continue
+						}
+
+						// 添加行到多行内容
+						multiLineContent += "\n" + nextLine
+						i = j // 更新外层循环的索引
+
+						// 标记该行已经被处理
+						processedLines[j] = true
+
+						// 检查是否匹配尾行
+						if tailRegex.MatchString(nextLine) {
+							tailFound = true
+
+							// 在匹配到尾行时更新内容
+							result.Content = multiLineContent
+
+							// 标记首行已经被处理
+							processedLines[i] = true
+
+							// 提取相对时间
+							var relativeTime string
+							timeMatches := p.timeRegex.FindStringSubmatch(line)
+							if len(timeMatches) > 1 {
+								relativeTime = timeMatches[1]
+							}
+
+							// 添加日志条目
+							logEntries = append(logEntries, LogEntry{
+								Line:         line,
+								RelativeTime: relativeTime,
+								LogType:      result.LogType,
+								Content:      result.Content,
+								Timestamp:    result.Timestamp,
+							})
+
+							// 跳过外层循环中对当前日志的处理
+							i = j         // 更新外层循环的索引
+							goto NextLine // 跳过外层循环中对当前日志的处理
+						}
+					}
+				}
+
+				// 更新内容（如果没有匹配到尾行，仍然更新内容）
+				result.Content = multiLineContent
+			} else if result.Rule.MatchMode == models.MatchModeFixedLines && result.Rule.LineCount > 0 {
+				// 固定行数匹配模式
+				// 初始化多行内容
+				multiLineContent := result.Content
+
+				// 计算需要匹配的行数
+				lineCount := result.Rule.LineCount - 1 // 减1是因为已经匹配了第一行
+				if lineCount > 0 {
+					// 继续向下匹配固定行数
+					for j := i + 1; j < len(lines) && lineCount > 0; j++ {
+						nextLine := lines[j]
+						if nextLine == "" {
+							continue // 跳过空行
+						}
+
+						// 添加行到多行内容
+						multiLineContent += "\n" + nextLine
+						i = j // 更新外层循环的索引
+						lineCount--
+
+						// 标记该行已经被处理
+						processedLines[j] = true
+
+						// 如果已经匹配到指定行数，立即保存
+						if lineCount == 0 {
+							// 更新内容
+							result.Content = multiLineContent
+
+							// 标记首行已经被处理
+							processedLines[i] = true
+
+							// 提取相对时间
+							var relativeTime string
+							timeMatches := p.timeRegex.FindStringSubmatch(line)
+							if len(timeMatches) > 1 {
+								relativeTime = timeMatches[1]
+							}
+
+							// 添加日志条目
+							logEntries = append(logEntries, LogEntry{
+								Line:         line,
+								RelativeTime: relativeTime,
+								LogType:      result.LogType,
+								Content:      result.Content,
+								Timestamp:    result.Timestamp,
+							})
+
+							// 跳过外层循环中对当前日志的处理
+							goto NextLine
+						}
+					}
+				}
+
+				// 更新内容（如果没有匹配到指定行数，仍然更新内容）
+				result.Content = multiLineContent
+			}
+		}
+
+		// 对于单行模式或未匹配到多行/首尾行/固定行数的日志，添加到日志条目中
+		// 多行模式、首尾行模式和固定行数模式的日志已经在匹配到时添加到日志条目中
+		if result.Rule == nil || result.Rule.MatchMode == models.MatchModeSingle {
+			// 标记当前行已经被处理
+			processedLines[i] = true
+			logEntries = append(logEntries, LogEntry{
+				Line:         line,
+				RelativeTime: relativeTime,
+				LogType:      result.LogType,
+				Content:      result.Content,
+				Timestamp:    result.Timestamp,
+			})
+		}
 	}
 
 	// 如果找到了真实时间，则重新计算所有日志的时间戳
-	// 确保时区信息正确（东八区）
-	cst := time.FixedZone("CST", 8*3600)
 	if realTimeFound {
-		for _, entry := range logEntries {
+		log.Printf("[LogParser] ProcessAndSaveLog: 开始重新计算时间戳，共 %d 条日志", len(logEntries))
+		for i, entry := range logEntries {
 			var timestamp time.Time
 
 			if entry.RelativeTime != "" {
@@ -1048,6 +1439,12 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 					relativeSeconds := relativeTime.Hour()*3600 + relativeTime.Minute()*60 + relativeTime.Second()
 					// 将相对时间添加到真实启动时间上
 					timestamp = realTime.Add(time.Duration(relativeSeconds) * time.Second)
+					// 打印日志以便调试
+					log.Printf("[LogParser] ProcessAndSaveLog: 日志[%d] 计算时间戳: 启动时间=%s, 相对时间=%s, 计算结果=%s",
+						i,
+						realTime.Format("2006-01-02 15:04:05"),
+						entry.RelativeTime,
+						timestamp.Format("2006-01-02 15:04:05"))
 					// 确保时区信息正确
 					if timestamp.Location().String() == "UTC" {
 						timestamp = time.Date(

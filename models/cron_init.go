@@ -22,6 +22,11 @@ func InitCronTables() {
 		log.Printf("初始化定时任务日志表失败: %v", err)
 	}
 
+	// 初始化tmux任务表
+	if err := db.AutoMigrate(&TmuxTask{}).Error; err != nil {
+		log.Printf("初始化tmux任务表失败: %v", err)
+	}
+
 	fmt.Println("定时任务相关表初始化完成")
 
 	// 初始化默认任务组

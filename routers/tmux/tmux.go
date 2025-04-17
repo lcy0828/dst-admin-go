@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"dont/models"
 	"dont/tmux"
 	"log"
 	"net/http"
@@ -234,6 +235,15 @@ func StopServer(c *gin.Context) {
 			"msg":    "停止服务器失败: " + err.Error(),
 		})
 		return
+	}
+
+	// 将存档中的所有在线玩家状态更新为离线
+	archiveName := parts[1]
+	if err := models.SetAllPlayersOffline(archiveName); err != nil {
+		log.Printf("[API][StopServer] 更新玩家状态失败: %v 存档: %s", err, archiveName)
+		// 不返回错误，继续执行
+	} else {
+		log.Printf("[API][StopServer] 已将存档 %s 中的所有在线玩家状态更新为离线", archiveName)
 	}
 
 	elapsedTime := time.Since(startTime)
@@ -565,6 +575,15 @@ func KillServer(c *gin.Context) {
 			"msg":    "终止服务器失败: " + err.Error(),
 		})
 		return
+	}
+
+	// 将存档中的所有在线玩家状态更新为离线
+	archiveName := parts[1]
+	if err := models.SetAllPlayersOffline(archiveName); err != nil {
+		log.Printf("[API][KillServer] 更新玩家状态失败: %v 存档: %s", err, archiveName)
+		// 不返回错误，继续执行
+	} else {
+		log.Printf("[API][KillServer] 已将存档 %s 中的所有在线玩家状态更新为离线", archiveName)
 	}
 
 	elapsedTime := time.Since(startTime)

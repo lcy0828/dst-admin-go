@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -683,6 +684,22 @@ func (lw *LogWatcher) readNewContent() {
 				if err != nil {
 					log.Printf("重置解析器状态失败: %v", err)
 				} else {
+					// 尝试从日志文件中提取启动时间
+					logContent, err := os.ReadFile(lw.logFile)
+					if err == nil && len(logContent) > 0 {
+						// 尝试匹配启动时间
+						timeRegex := regexp.MustCompile(`\[\d{2}:\d{2}:\d{2}\]: Current time: ([A-Za-z]+ [A-Za-z]+ \d{1,2} \d{2}:\d{2}:\d{2} \d{4})`)
+						matches := timeRegex.FindStringSubmatch(string(logContent))
+						if len(matches) > 1 {
+							// 解析时间
+							parsedTime, err := time.Parse("Mon Jan 2 15:04:05 2006", matches[1])
+							if err == nil {
+								// 设置服务器启动时间
+								newParser.SetRealStartTime(parsedTime)
+								log.Printf("[LogWatcher] 从重置的日志文件中提取到服务器启动时间: %s", parsedTime.Format("2006-01-02 15:04:05"))
+							}
+						}
+					}
 					lw.logParser = newParser
 				}
 			}

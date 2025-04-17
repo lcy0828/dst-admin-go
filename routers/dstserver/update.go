@@ -45,8 +45,8 @@ func getDstServerPath() string {
 			if pathsSection.HasKey("DST_SERVER_PATH") {
 				path := pathsSection.Key("DST_SERVER_PATH").String()
 				// 在macOS上需要截取路径
-				if strings.Contains(path, ".app/Contents/MacOS") {
-					path = strings.Split(path, ".app/Contents/MacOS")[0]
+				if strings.Contains(path, "dontstarve_dedicated_server_nullrenderer.app/Contents/MacOS") {
+					path = strings.Split(path, "dontstarve_dedicated_server_nullrenderer.app/Contents/MacOS")[0]
 					log.Printf("[DST-SERVER] 在macOS上截取游戏服务器路径: %s", path)
 				} else {
 					log.Printf("[DST-SERVER] 从配置文件加载游戏服务器路径: %s", path)
@@ -353,7 +353,7 @@ func UpdateServer(c *gin.Context) {
 
 // 全局变量记录更新状态
 var (
-	updateStatusMap = make(map[string]UpdateStatus)
+	updateStatusMap   = make(map[string]UpdateStatus)
 	updateStatusMutex sync.Mutex
 )
 
@@ -407,7 +407,7 @@ func GetUpdateStatus(c *gin.Context) {
 			"status": 200,
 			"msg":    "未找到更新任务或更新已完成",
 			"data": gin.H{
-				"is_running": false,
+				"is_running":   false,
 				"is_completed": true,
 			},
 		})

@@ -1,8 +1,13 @@
 package models
 
 import (
+	"bufio"
 	"fmt"
+	"github.com/go-ini/ini"
 	"log"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -45,18 +50,29 @@ const (
 	LogTypeUnknown = "unknown" // 未知类型
 )
 
+// 日志匹配模式常量
+const (
+	MatchModeSingle     = "single"      // 单行匹配模式（默认）
+	MatchModeMultiLine  = "multi_line"  // 多行匹配模式
+	MatchModeHeadTail   = "head_tail"   // 首尾行匹配模式
+	MatchModeFixedLines = "fixed_lines" // 固定行数匹配模式
+)
+
 // LogExtractRule 日志提取规则
 type LogExtractRule struct {
 	ID          int       `gorm:"primary_key" json:"id"`
-	Name        string    `json:"name"`        // 规则名称
-	Description string    `json:"description"` // 规则描述
-	LogType     string    `json:"log_type"`    // 提取的日志类型
-	Pattern     string    `json:"pattern"`     // 匹配模式（正则表达式）
-	IsRegex     bool      `json:"is_regex"`    // 是否使用正则表达式
-	IsEnabled   bool      `json:"is_enabled"`  // 是否启用
-	Priority    int       `json:"priority"`    // 优先级（数字越大优先级越高）
-	CreatedAt   time.Time `json:"created_at"`  // 创建时间
-	UpdatedAt   time.Time `json:"updated_at"`  // 更新时间
+	Name        string    `json:"name"`         // 规则名称
+	Description string    `json:"description"`  // 规则描述
+	LogType     string    `json:"log_type"`     // 提取的日志类型
+	Pattern     string    `json:"pattern"`      // 匹配模式（正则表达式）
+	IsRegex     bool      `json:"is_regex"`     // 是否使用正则表达式
+	IsEnabled   bool      `json:"is_enabled"`   // 是否启用
+	Priority    int       `json:"priority"`     // 优先级（数字越大优先级越高）
+	MatchMode   string    `json:"match_mode"`   // 匹配模式：single(单行), multi_line(多行), head_tail(首尾行), fixed_lines(固定行数)
+	TailPattern string    `json:"tail_pattern"` // 尾行匹配模式（仅当match_mode为head_tail时有效）
+	LineCount   int       `json:"line_count"`   // 固定行数（仅当match_mode为fixed_lines时有效）
+	CreatedAt   time.Time `json:"created_at"`   // 创建时间
+	UpdatedAt   time.Time `json:"updated_at"`   // 更新时间
 }
 
 // LogStatistics 日志统计信息
@@ -76,8 +92,18 @@ func InitGameLogTables() {
 	db.AutoMigrate(&LogExtractRule{})
 	db.AutoMigrate(&LogStatistics{})
 
+	// 添加索引以提高查询性能
+	// 为 timestamp 字段添加索引
+	db.Model(&GameLog{}).AddIndex("idx_game_log_timestamp", "timestamp")
+	// 为 archive_name, world_name, timestamp 添加组合索引
+	db.Model(&GameLog{}).AddIndex("idx_game_log_archive_world_timestamp", "archive_name", "world_name", "timestamp")
+	// 为 startup_version 添加索引
+	db.Model(&GameLog{}).AddIndex("idx_game_log_startup_version", "startup_version")
+
 	// 启动定时刷新统计缓存的协程
 	go startStatCacheFlushTimer()
+
+	logger.Printf("[Models] 游戏日志表初始化完成，已添加索引")
 }
 
 // 启动定时刷新统计缓存的定时器
@@ -353,6 +379,16 @@ func GetGameLogs(archiveName, worldName, logType, startupVersion string, startTi
 		return nil, 0, fmt.Errorf("数据库连接为空")
 	}
 
+	// 如果没有指定启动版本，获取最新的启动版本
+	if startupVersion == "" && archiveName != "" && worldName != "" {
+		versions, err := GetStartupVersions(archiveName, worldName)
+		if err == nil && len(versions) > 0 {
+			// 使用最新的启动版本
+			startupVersion = versions[0]
+			logger.Printf("[Models] GetGameLogs: 自动选择最新的启动版本: %s", startupVersion)
+		}
+	}
+
 	query := db.Model(&GameLog{})
 
 	// 添加查询条件
@@ -389,9 +425,17 @@ func GetGameLogs(archiveName, worldName, logType, startupVersion string, startTi
 	offset := (page - 1) * pageSize
 	logger.Printf("[Models] GetGameLogs: 开始分页查询, offset=%d, limit=%d", offset, pageSize)
 
-	if err := query.Order("timestamp desc").Offset(offset).Limit(pageSize).Find(&logs).Error; err != nil {
+	// 按时间戳和创建时间排序，确保日志顺序正确
+	if err := query.Order("timestamp desc, created_at desc").Offset(offset).Limit(pageSize).Find(&logs).Error; err != nil {
 		logger.Printf("[Models] GetGameLogs 分页查询失败: %v", err)
 		return nil, 0, err
+	}
+
+	// 打印日志时间戳信息以便调试
+	if len(logs) > 0 {
+		logger.Printf("[Models] GetGameLogs: 日志时间戳范围: 最早=%s, 最晚=%s",
+			logs[len(logs)-1].Timestamp.Format("2006-01-02 15:04:05"),
+			logs[0].Timestamp.Format("2006-01-02 15:04:05"))
 	}
 
 	logger.Printf("[Models] GetGameLogs: 查询成功, 返回 %d 条记录", len(logs))
@@ -424,7 +468,12 @@ func updateLogStatistics(archiveName, worldName, logType string, timestamp time.
 }
 
 // AddLogExtractRule 添加日志提取规则
-func AddLogExtractRule(name, description, logType, pattern string, isRegex, isEnabled bool, priority int) error {
+func AddLogExtractRule(name, description, logType, pattern string, isRegex, isEnabled bool, priority int, matchMode, tailPattern string, lineCount int) error {
+	// 如果未指定匹配模式，默认为单行匹配
+	if matchMode == "" {
+		matchMode = MatchModeSingle
+	}
+
 	rule := LogExtractRule{
 		Name:        name,
 		Description: description,
@@ -433,6 +482,9 @@ func AddLogExtractRule(name, description, logType, pattern string, isRegex, isEn
 		IsRegex:     isRegex,
 		IsEnabled:   isEnabled,
 		Priority:    priority,
+		MatchMode:   matchMode,
+		TailPattern: tailPattern,
+		LineCount:   lineCount,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
@@ -441,7 +493,7 @@ func AddLogExtractRule(name, description, logType, pattern string, isRegex, isEn
 }
 
 // UpdateLogExtractRule 更新日志提取规则
-func UpdateLogExtractRule(id int, name, description, logType, pattern string, isRegex, isEnabled bool, priority int) error {
+func UpdateLogExtractRule(id int, name, description, logType, pattern string, isRegex, isEnabled bool, priority int, matchMode, tailPattern string, lineCount int) error {
 	updates := map[string]interface{}{
 		"name":        name,
 		"description": description,
@@ -451,6 +503,21 @@ func UpdateLogExtractRule(id int, name, description, logType, pattern string, is
 		"is_enabled":  isEnabled,
 		"priority":    priority,
 		"updated_at":  time.Now(),
+	}
+
+	// 如果指定了匹配模式，更新匹配模式
+	if matchMode != "" {
+		updates["match_mode"] = matchMode
+	}
+
+	// 如果指定了尾行匹配模式，更新尾行匹配模式
+	if tailPattern != "" {
+		updates["tail_pattern"] = tailPattern
+	}
+
+	// 如果指定了固定行数，更新固定行数
+	if lineCount > 0 || matchMode == MatchModeFixedLines {
+		updates["line_count"] = lineCount
 	}
 
 	return db.Model(&LogExtractRule{}).Where("id = ?", id).Updates(updates).Error
@@ -547,8 +614,15 @@ func SearchGameLogs(keyword string, page, pageSize int) ([]GameLog, int, error) 
 
 	// 分页查询
 	offset := (page - 1) * pageSize
-	if err := query.Order("timestamp desc").Offset(offset).Limit(pageSize).Find(&logs).Error; err != nil {
+	if err := query.Order("timestamp desc, created_at desc").Offset(offset).Limit(pageSize).Find(&logs).Error; err != nil {
 		return nil, 0, err
+	}
+
+	// 打印日志时间戳信息以便调试
+	if len(logs) > 0 {
+		logger.Printf("[Models] SearchGameLogs: 日志时间戳范围: 最早=%s, 最晚=%s",
+			logs[len(logs)-1].Timestamp.Format("2006-01-02 15:04:05"),
+			logs[0].Timestamp.Format("2006-01-02 15:04:05"))
 	}
 
 	return logs, count, nil
@@ -564,6 +638,84 @@ func GetGameLogCount() (int, error) {
 	return count, nil
 }
 
+// GetArchivePath 获取存档路径
+func GetArchivePath(archiveName string) string {
+	// 从配置文件获取DST存档路径
+	dstSavePath := "./Klei/DoNotStarveTogether" // 默认路径
+
+	// 尝试从配置文件读取
+	configFile := "./conf/app.conf"
+	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
+		if cfg, err := ini.Load(configFile); err == nil {
+			// 读取路径配置
+			if cfg.Section("paths").HasKey("DST_SAVE_PATH") {
+				dstSavePath = cfg.Section("paths").Key("DST_SAVE_PATH").String()
+			}
+		}
+	}
+
+	// 构造存档路径
+	archivePath := filepath.Join(dstSavePath, archiveName)
+
+	// 检查存档路径是否存在
+	if _, err := os.Stat(archivePath); os.IsNotExist(err) {
+		logger.Printf("[Models] GetArchivePath 失败: 存档路径不存在, 路径=%s", archivePath)
+		return ""
+	}
+
+	return archivePath
+}
+
+// GetServerLogPath 获取服务器日志文件路径
+func GetServerLogPath(archiveName, worldName string) string {
+	// 获取存档路径
+	archivePath := GetArchivePath(archiveName)
+	if archivePath == "" {
+		logger.Printf("[Models] GetServerLogPath 失败: 无法获取存档路径, 存档=%s", archiveName)
+		return ""
+	}
+
+	// 构造日志文件路径
+	logPath := filepath.Join(archivePath, worldName, "server_log.txt")
+
+	// 检查文件是否存在
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		logger.Printf("[Models] GetServerLogPath 失败: 日志文件不存在, 路径=%s", logPath)
+		return ""
+	}
+
+	return logPath
+}
+
+// ReadFileHead 读取文件的前n行
+func ReadFileHead(filePath string, n int) (string, error) {
+	// 打开文件
+	file, err := os.Open(filePath)
+	if err != nil {
+		logger.Printf("[Models] ReadFileHead 失败: 无法打开文件, 路径=%s, 错误=%v", filePath, err)
+		return "", err
+	}
+	defer file.Close()
+
+	// 创建扫描器
+	scanner := bufio.NewScanner(file)
+
+	// 读取前n行
+	lines := make([]string, 0, n)
+	for i := 0; i < n && scanner.Scan(); i++ {
+		lines = append(lines, scanner.Text())
+	}
+
+	// 检查扫描错误
+	if err := scanner.Err(); err != nil {
+		logger.Printf("[Models] ReadFileHead 失败: 扫描文件时出错, 路径=%s, 错误=%v", filePath, err)
+		return "", err
+	}
+
+	// 返回读取的内容
+	return strings.Join(lines, "\n"), nil
+}
+
 // GetStartupVersions 获取所有启动版本
 func GetStartupVersions(archiveName, worldName string) ([]string, error) {
 	logger.Printf("[Models] GetStartupVersions: 开始查询启动版本, 存档=%s, 世界=%s",
@@ -577,6 +729,7 @@ func GetStartupVersions(archiveName, worldName string) ([]string, error) {
 		return nil, fmt.Errorf("数据库连接为空")
 	}
 
+	// 直接查询不同的启动版本
 	query := db.Model(&GameLog{}).Select("DISTINCT startup_version")
 
 	// 添加查询条件
@@ -596,6 +749,13 @@ func GetStartupVersions(archiveName, worldName string) ([]string, error) {
 	defer rows.Close()
 
 	// 遍历结果
+	type VersionInfo struct {
+		Version   string
+		Timestamp time.Time
+	}
+	var versionInfos []VersionInfo
+
+	// 遍历结果
 	for rows.Next() {
 		var version string
 		if err := rows.Scan(&version); err != nil {
@@ -603,7 +763,49 @@ func GetStartupVersions(archiveName, worldName string) ([]string, error) {
 			return nil, err
 		}
 		if version != "" {
-			versions = append(versions, version)
+			// 查询每个版本的最新日志时间
+			var latestLog GameLog
+			if err := db.Where("startup_version = ?", version).
+				Order("timestamp DESC").First(&latestLog).Error; err == nil {
+				versionInfos = append(versionInfos, VersionInfo{
+					Version:   version,
+					Timestamp: latestLog.Timestamp,
+				})
+			} else {
+				// 如果无法获取时间戳，仍然添加版本
+				versionInfos = append(versionInfos, VersionInfo{
+					Version:   version,
+					Timestamp: time.Time{},
+				})
+			}
+		}
+	}
+
+	// 按时间戳降序排序
+	sort.Slice(versionInfos, func(i, j int) bool {
+		// 如果两个版本的时间戳都为零值，则按版本名称排序
+		if versionInfos[i].Timestamp.IsZero() && versionInfos[j].Timestamp.IsZero() {
+			return versionInfos[i].Version > versionInfos[j].Version
+		}
+		// 如果一个版本的时间戳为零值，另一个不为零值，则非零值的排在前面
+		if versionInfos[i].Timestamp.IsZero() {
+			return false
+		}
+		if versionInfos[j].Timestamp.IsZero() {
+			return true
+		}
+		// 如果两个版本的时间戳都不为零值，则按时间戳降序排序
+		return versionInfos[i].Timestamp.After(versionInfos[j].Timestamp)
+	})
+
+	// 提取版本列表
+	for _, info := range versionInfos {
+		versions = append(versions, info.Version)
+		if !info.Timestamp.IsZero() {
+			logger.Printf("[Models] GetStartupVersions: 版本 %s, 最新时间 %s",
+				info.Version, info.Timestamp.Format("2006-01-02 15:04:05"))
+		} else {
+			logger.Printf("[Models] GetStartupVersions: 版本 %s, 无时间戳信息", info.Version)
 		}
 	}
 
@@ -616,4 +818,81 @@ func CloseStatCache() {
 	// 刷新缓存到数据库
 	FlushStatCache()
 	logger.Printf("[Models] 统计缓存已关闭并刷新到数据库")
+}
+
+// ArchiveWorldInfo 存档和世界信息
+type ArchiveWorldInfo struct {
+	ArchiveName string   `json:"archive_name"` // 存档名称
+	Worlds      []string `json:"worlds"`       // 世界列表
+}
+
+// GetArchivesWithLogs 获取有日志的存档和世界列表
+func GetArchivesWithLogs() ([]ArchiveWorldInfo, error) {
+	logger.Printf("[Models] GetArchivesWithLogs: 开始查询有日志的存档和世界列表")
+
+	// 检查数据库连接
+	if db == nil {
+		logger.Printf("[Models] GetArchivesWithLogs 失败: 数据库连接为空")
+		return nil, fmt.Errorf("数据库连接为空")
+	}
+
+	// 查询所有唯一的存档名称
+	var archiveNames []string
+	query := db.Model(&LogStatistics{}).Select("DISTINCT archive_name")
+	rows, err := query.Rows()
+	if err != nil {
+		logger.Printf("[Models] GetArchivesWithLogs 查询存档名称失败: %v", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	// 遍历结果
+	for rows.Next() {
+		var archiveName string
+		if err := rows.Scan(&archiveName); err != nil {
+			logger.Printf("[Models] GetArchivesWithLogs 扫描存档名称失败: %v", err)
+			return nil, err
+		}
+		if archiveName != "" {
+			archiveNames = append(archiveNames, archiveName)
+		}
+	}
+
+	// 为每个存档查询世界列表
+	result := make([]ArchiveWorldInfo, 0, len(archiveNames))
+	for _, archiveName := range archiveNames {
+		// 查询该存档下的所有唯一世界名称
+		var worldNames []string
+		worldQuery := db.Model(&LogStatistics{}).Select("DISTINCT world_name").Where("archive_name = ?", archiveName)
+		worldRows, err := worldQuery.Rows()
+		if err != nil {
+			logger.Printf("[Models] GetArchivesWithLogs 查询世界名称失败: %v", err)
+			continue
+		}
+
+		// 遍历结果
+		for worldRows.Next() {
+			var worldName string
+			if err := worldRows.Scan(&worldName); err != nil {
+				logger.Printf("[Models] GetArchivesWithLogs 扫描世界名称失败: %v", err)
+				worldRows.Close()
+				continue
+			}
+			if worldName != "" {
+				worldNames = append(worldNames, worldName)
+			}
+		}
+		worldRows.Close()
+
+		// 添加到结果中
+		if len(worldNames) > 0 {
+			result = append(result, ArchiveWorldInfo{
+				ArchiveName: archiveName,
+				Worlds:      worldNames,
+			})
+		}
+	}
+
+	logger.Printf("[Models] GetArchivesWithLogs: 查询成功，返回 %d 个存档信息", len(result))
+	return result, nil
 }

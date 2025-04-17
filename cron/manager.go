@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"dont/models"
+	"dont/pkg/commands"
+	"dont/pkg/taskbridge"
 	"dont/service/logparser"
 	"encoding/json"
 	"fmt"
@@ -29,9 +31,10 @@ type FunctionInfo struct {
 // TaskManager 定时任务管理器
 type TaskManager struct {
 	cron            *cron.Cron
-	entryMap        map[int]cron.EntryID    // 任务ID到cron EntryID的映射
-	functionMap     map[string]interface{}  // 函数名到函数的映射
-	functionInfoMap map[string]FunctionInfo // 函数信息映射
+	entryMap        map[int]cron.EntryID            // 任务ID到cron EntryID的映射
+	functionMap     map[string]interface{}          // 函数名到函数的映射
+	functionInfoMap map[string]FunctionInfo         // 函数信息映射
+	tmuxExecutor    *taskbridge.TmuxCommandExecutor // tmux命令执行器
 	mutex           sync.RWMutex
 	isRunning       bool
 }
@@ -52,6 +55,8 @@ func GetTaskManager() *TaskManager {
 		}
 		// 注册内置函数
 		manager.registerBuiltinFunctions()
+		// 初始化tmux命令执行器
+		manager.initTmuxExecutor()
 	})
 	return manager
 }
@@ -60,6 +65,9 @@ func GetTaskManager() *TaskManager {
 func (m *TaskManager) registerBuiltinFunctions() {
 	// 获取日志解析器管理器
 	logManager := logparser.GetLogParserManager()
+
+	// 注册玩家相关任务
+	RegisterPlayerTasks(m)
 
 	// 注册日志清理函数
 	m.RegisterFunctionWithInfo("cleanupLogs", func(retentionDays int) {
@@ -394,23 +402,30 @@ func (m *TaskManager) DisableTask(id int) error {
 }
 
 // RunTask 立即运行任务
-func (m *TaskManager) RunTask(id int) error {
+func (m *TaskManager) RunTask(id int) (int, error) {
 	// 获取任务
 	task, err := models.GetTaskByID(id)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
+	// 创建通道来接收日志ID
+	logIDChan := make(chan int, 1)
+
 	// 执行任务
-	go m.executeTask(task)
-	return nil
+	go m.executeTask(task, models.TriggerManual, logIDChan)
+
+	// 等待日志ID
+	logID := <-logIDChan
+	return logID, nil
 }
 
 // addTaskToCron 添加任务到cron
 func (m *TaskManager) addTaskToCron(task *models.CronTask) error {
 	// 创建任务函数
 	taskFunc := func() {
-		m.executeTask(task)
+		// 自动触发不需要返回日志ID
+		m.executeTask(task, models.TriggerAuto, nil)
 	}
 
 	// 添加到cron
@@ -426,8 +441,11 @@ func (m *TaskManager) addTaskToCron(task *models.CronTask) error {
 }
 
 // executeTask 执行任务
-func (m *TaskManager) executeTask(task *models.CronTask) {
-	log.Printf("[CronTask] 开始执行任务: %s (ID: %d)", task.Name, task.ID)
+// triggerType 触发类型：0-自动触发，1-手动触发
+// logIDChan 用于返回日志ID的通道，如果为nil则不返回
+// 当手动触发时，需要返回日志ID，当自动触发时不需要返回
+func (m *TaskManager) executeTask(task *models.CronTask, triggerType models.TriggerType, logIDChan chan<- int) {
+	log.Printf("[CronTask] 开始执行任务: %s (ID: %d), 触发类型: %s", task.Name, task.ID, models.GetTriggerTypeName(triggerType))
 	startTime := time.Now()
 
 	// 更新最后运行时间
@@ -437,10 +455,11 @@ func (m *TaskManager) executeTask(task *models.CronTask) {
 
 	// 创建任务日志
 	taskLog := &models.CronTaskLog{
-		TaskID:    task.ID,
-		TaskName:  task.Name,
-		StartTime: startTime,
-		CreatedAt: time.Now(),
+		TaskID:      task.ID,
+		TaskName:    task.Name,
+		StartTime:   startTime,
+		CreatedAt:   time.Now(),
+		TriggerType: triggerType,
 	}
 
 	// 检查依赖任务是否完成
@@ -496,6 +515,10 @@ func (m *TaskManager) executeTask(task *models.CronTask) {
 				o, e = m.executeFunction(task)
 			case "shell":
 				o, e = m.executeShell(task)
+			case "tmux_command":
+				o, e = m.executeTmuxCommand(task)
+			case "tmux_raw_command":
+				o, e = m.executeTmuxRawCommand(task)
 			default:
 				e = fmt.Errorf("不支持的任务类型: %s", task.Type)
 			}
@@ -523,6 +546,10 @@ func (m *TaskManager) executeTask(task *models.CronTask) {
 			output, err = m.executeFunction(task)
 		case "shell":
 			output, err = m.executeShell(task)
+		case "tmux_command":
+			output, err = m.executeTmuxCommand(task)
+		case "tmux_raw_command":
+			output, err = m.executeTmuxRawCommand(task)
 		default:
 			err = fmt.Errorf("不支持的任务类型: %s", task.Type)
 		}
@@ -559,6 +586,12 @@ func (m *TaskManager) executeTask(task *models.CronTask) {
 	// 保存任务日志
 	if err := models.AddTaskLog(taskLog); err != nil {
 		log.Printf("[CronTask] 保存任务日志失败: %v", err)
+	} else {
+		log.Printf("[CronTask] 任务日志已保存: ID=%d", taskLog.ID)
+		// 如果需要返回日志ID，则通过通道返回
+		if logIDChan != nil {
+			logIDChan <- taskLog.ID
+		}
 	}
 
 	// 更新任务状态
@@ -744,11 +777,12 @@ func (m *TaskManager) retryTask(task *models.CronTask, retryCount int) {
 	// 创建任务日志
 	startTime := time.Now()
 	taskLog := &models.CronTaskLog{
-		TaskID:    updatedTask.ID,
-		TaskName:  updatedTask.Name,
-		StartTime: startTime,
-		CreatedAt: time.Now(),
-		Output:    fmt.Sprintf("重试执行 (%d/%d)", retryCount, updatedTask.RetryTimes),
+		TaskID:      updatedTask.ID,
+		TaskName:    updatedTask.Name,
+		StartTime:   startTime,
+		CreatedAt:   time.Now(),
+		Output:      fmt.Sprintf("重试执行 (%d/%d)", retryCount, updatedTask.RetryTimes),
+		TriggerType: models.TriggerAuto, // 重试任务视为自动触发
 	}
 
 	// 执行任务
@@ -814,6 +848,176 @@ func (m *TaskManager) GetRegisteredFunctions() map[string]FunctionInfo {
 	}
 
 	return result
+}
+
+// initTmuxExecutor 初始化tmux命令执行器
+func (m *TaskManager) initTmuxExecutor() {
+	// 从配置或环境变量中获取路径
+	dstSavePath := os.Getenv("DST_SAVE_PATH")
+	if dstSavePath == "" {
+		dstSavePath = "./dst/save" // 默认路径
+	}
+
+	dstUGCPath := os.Getenv("DST_UGC_PATH")
+	if dstUGCPath == "" {
+		dstUGCPath = "./dst/ugc_mods" // 默认路径
+	}
+
+	dstServerPath := os.Getenv("DST_SERVER_PATH")
+	if dstServerPath == "" {
+		dstServerPath = "./dst/bin" // 默认路径
+	}
+
+	dstServerMode := os.Getenv("DST_SERVER_MODE")
+	if dstServerMode == "" {
+		dstServerMode = "survival" // 默认模式
+	}
+
+	// 创建命令管理器
+	cmdManager := commands.CreateCommandManager("./conf/commands.json")
+	if err := cmdManager.Initialize(); err != nil {
+		log.Printf("[CronTask] 初始化命令管理器失败: %v", err)
+	}
+
+	// 创建tmux命令执行器
+	m.tmuxExecutor = taskbridge.NewTmuxCommandExecutor(
+		cmdManager,
+		dstSavePath,
+		dstUGCPath,
+		dstServerPath,
+		dstServerMode,
+	)
+
+	log.Printf("[CronTask] tmux命令执行器初始化成功")
+}
+
+// executeTmuxCommand 执行模块化tmux命令
+func (m *TaskManager) executeTmuxCommand(task *models.CronTask) (string, error) {
+	if m.tmuxExecutor == nil {
+		return "", fmt.Errorf("tmux命令执行器未初始化")
+	}
+
+	// 获取tmux任务详情
+	tmuxTask, err := models.GetTmuxTaskByTaskID(task.ID)
+	if err != nil {
+		// 如果没有找到tmux任务详情，尝试使用旧的方式解析参数
+		return m.executeTmuxCommandLegacy(task)
+	}
+
+	// 检查必要参数
+	if tmuxTask.SessionName == "" {
+		return "", fmt.Errorf("会话名称不能为空")
+	}
+	if tmuxTask.CommandID == "" {
+		return "", fmt.Errorf("命令ID不能为空")
+	}
+
+	// 获取命令参数
+	params, err := tmuxTask.GetCommandParams()
+	if err != nil {
+		return "", fmt.Errorf("解析命令参数失败: %v", err)
+	}
+
+	// 执行命令
+	return m.tmuxExecutor.ExecuteCommand(tmuxTask.SessionName, tmuxTask.CommandID, params)
+}
+
+// executeTmuxCommandLegacy 使用旧的方式执行模块化tmux命令
+func (m *TaskManager) executeTmuxCommandLegacy(task *models.CronTask) (string, error) {
+	// 解析参数
+	args, err := task.GetArgs()
+	if err != nil {
+		return "", fmt.Errorf("解析参数失败: %v", err)
+	}
+
+	// 检查参数数量
+	if len(args) < 2 {
+		return "", fmt.Errorf("参数不足，需要会话名称和命令ID")
+	}
+
+	// 获取会话名称和命令ID
+	sessionName, ok := args[0].(string)
+	if !ok {
+		return "", fmt.Errorf("会话名称必须是字符串")
+	}
+
+	commandID, ok := args[1].(string)
+	if !ok {
+		return "", fmt.Errorf("命令ID必须是字符串")
+	}
+
+	// 提取其他参数
+	params := []string{}
+	if len(args) > 2 {
+		for i := 2; i < len(args); i++ {
+			if param, ok := args[i].(string); ok {
+				params = append(params, param)
+			} else {
+				// 尝试将非字符串参数转换为字符串
+				paramStr, err := json.Marshal(args[i])
+				if err != nil {
+					return "", fmt.Errorf("参数格式错误: %v", err)
+				}
+				params = append(params, string(paramStr))
+			}
+		}
+	}
+
+	// 执行命令
+	return m.tmuxExecutor.ExecuteCommand(sessionName, commandID, params)
+}
+
+// executeTmuxRawCommand 执行原始tmux命令
+func (m *TaskManager) executeTmuxRawCommand(task *models.CronTask) (string, error) {
+	if m.tmuxExecutor == nil {
+		return "", fmt.Errorf("tmux命令执行器未初始化")
+	}
+
+	// 获取tmux任务详情
+	tmuxTask, err := models.GetTmuxTaskByTaskID(task.ID)
+	if err != nil {
+		// 如果没有找到tmux任务详情，尝试使用旧的方式解析参数
+		return m.executeTmuxRawCommandLegacy(task)
+	}
+
+	// 检查必要参数
+	if tmuxTask.SessionName == "" {
+		return "", fmt.Errorf("会话名称不能为空")
+	}
+	if tmuxTask.RawCommand == "" {
+		return "", fmt.Errorf("原始命令不能为空")
+	}
+
+	// 执行原始命令
+	return m.tmuxExecutor.ExecuteRawCommand(tmuxTask.SessionName, tmuxTask.RawCommand)
+}
+
+// executeTmuxRawCommandLegacy 使用旧的方式执行原始tmux命令
+func (m *TaskManager) executeTmuxRawCommandLegacy(task *models.CronTask) (string, error) {
+	// 解析参数
+	args, err := task.GetArgs()
+	if err != nil {
+		return "", fmt.Errorf("解析参数失败: %v", err)
+	}
+
+	// 检查参数数量
+	if len(args) < 2 {
+		return "", fmt.Errorf("参数不足，需要会话名称和原始命令")
+	}
+
+	// 获取会话名称和原始命令
+	sessionName, ok := args[0].(string)
+	if !ok {
+		return "", fmt.Errorf("会话名称必须是字符串")
+	}
+
+	command, ok := args[1].(string)
+	if !ok {
+		return "", fmt.Errorf("原始命令必须是字符串")
+	}
+
+	// 执行原始命令
+	return m.tmuxExecutor.ExecuteRawCommand(sessionName, command)
 }
 
 // ValidateSpec 验证cron表达式

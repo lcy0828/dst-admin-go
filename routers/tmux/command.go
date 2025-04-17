@@ -15,13 +15,15 @@ import (
 
 var (
 	// 全局命令管理器实例
-	commandManager *commands.CommandManager
+	commandManager commands.CommandManagerInterface
 )
 
 // 初始化函数，创建命令管理器
 func init() {
-	// 创建命令管理器
-	commandManager = commands.NewCommandManager()
+	// 设置命令存储路径
+	storagePath := "./conf/commands.json"
+	// 使用工厂函数创建命令管理器
+	commandManager = commands.CreateCommandManager(storagePath)
 
 	// 初始化命令管理器
 	if err := commandManager.Initialize(); err != nil {

@@ -24,7 +24,8 @@ func RegisterParserAPIRoutes(router *gin.RouterGroup) {
 	router.DELETE("/parser/rules/:id", DeleteExtractRule)
 	router.GET("/parser/search", SearchParsedLogs)
 	router.POST("/parser/toggle", ToggleLogParser)
-	router.GET("/parser/startup_versions", GetStartupVersions) // 添加获取启动版本列表的API
+	router.GET("/parser/startup_versions", GetStartupVersions)    // 添加获取启动版本列表的API
+	router.GET("/parser/archives_with_logs", GetArchivesWithLogs) // 添加获取有日志的存档和世界列表的API
 }
 
 // GetParsedLogs 获取解析后的日志数据
@@ -242,6 +243,9 @@ func AddExtractRule(c *gin.Context) {
 		IsRegex     bool   `json:"is_regex"`
 		IsEnabled   bool   `json:"is_enabled"`
 		Priority    int    `json:"priority"`
+		MatchMode   string `json:"match_mode"`   // 匹配模式：single(单行), multi_line(多行), head_tail(首尾行), fixed_lines(固定行数)
+		TailPattern string `json:"tail_pattern"` // 尾行匹配模式（仅当match_mode为head_tail时有效）
+		LineCount   int    `json:"line_count"`   // 固定行数（仅当match_mode为fixed_lines时有效）
 	}
 
 	if err := c.ShouldBindJSON(&rule); err != nil {
@@ -250,6 +254,11 @@ func AddExtractRule(c *gin.Context) {
 			"msg":    "请求参数错误: " + err.Error(),
 		})
 		return
+	}
+
+	// 如果未指定匹配模式，默认为单行匹配
+	if rule.MatchMode == "" {
+		rule.MatchMode = models.MatchModeSingle
 	}
 
 	// 添加规则
@@ -262,6 +271,9 @@ func AddExtractRule(c *gin.Context) {
 		rule.IsRegex,
 		rule.IsEnabled,
 		rule.Priority,
+		rule.MatchMode,
+		rule.TailPattern,
+		rule.LineCount,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -299,6 +311,9 @@ func UpdateExtractRule(c *gin.Context) {
 		IsRegex     bool   `json:"is_regex"`
 		IsEnabled   bool   `json:"is_enabled"`
 		Priority    int    `json:"priority"`
+		MatchMode   string `json:"match_mode"`   // 匹配模式：single(单行), multi_line(多行), head_tail(首尾行), fixed_lines(固定行数)
+		TailPattern string `json:"tail_pattern"` // 尾行匹配模式（仅当match_mode为head_tail时有效）
+		LineCount   int    `json:"line_count"`   // 固定行数（仅当match_mode为fixed_lines时有效）
 	}
 
 	if err := c.ShouldBindJSON(&rule); err != nil {
@@ -320,6 +335,9 @@ func UpdateExtractRule(c *gin.Context) {
 		rule.IsRegex,
 		rule.IsEnabled,
 		rule.Priority,
+		rule.MatchMode,
+		rule.TailPattern,
+		rule.LineCount,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -475,5 +493,30 @@ func GetStartupVersions(c *gin.Context) {
 		"status": 200,
 		"msg":    "获取启动版本列表成功",
 		"data":   versions,
+	})
+}
+
+// GetArchivesWithLogs 获取有日志的存档和世界列表
+func GetArchivesWithLogs(c *gin.Context) {
+	log.Printf("[GameLog] GetArchivesWithLogs: 开始获取有日志的存档和世界列表")
+
+	// 获取有日志的存档和世界列表
+	manager := logparser.GetLogParserManager()
+	archives, err := manager.GetArchivesWithLogs()
+	if err != nil {
+		log.Printf("[GameLog] GetArchivesWithLogs: 获取有日志的存档和世界列表失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status": 500,
+			"msg":    "获取有日志的存档和世界列表失败: " + err.Error(),
+		})
+		return
+	}
+
+	log.Printf("[GameLog] GetArchivesWithLogs: 查询成功，返回 %d 个存档信息", len(archives))
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": 200,
+		"msg":    "获取有日志的存档和世界列表成功",
+		"data":   archives,
 	})
 }

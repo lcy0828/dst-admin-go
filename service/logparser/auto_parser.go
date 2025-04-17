@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
 
@@ -180,9 +181,33 @@ func (s *AutoParserService) processAllServerLogs() {
 			// 添加一条服务器重启的日志
 			parser, err := NewLogParser(server.ArchiveName, server.WorldName)
 			if err == nil {
+				// 重置服务器启动时间，因为服务器已重启
+				// 这将强制解析器重新检测服务器启动时间
+				parser.realStartTime = time.Time{}
+				parser.realTimeDetected = false
+
+				// 尝试从日志文件中提取启动时间
+				logContent, err := os.ReadFile(logFilePath)
+				if err == nil && len(logContent) > 0 {
+					// 尝试匹配启动时间
+					timeRegex := regexp.MustCompile(`\[\d{2}:\d{2}:\d{2}\]: Current time: ([A-Za-z]+ [A-Za-z]+ \d{1,2} \d{2}:\d{2}:\d{2} \d{4})`)
+					matches := timeRegex.FindStringSubmatch(string(logContent))
+					if len(matches) > 1 {
+						// 解析时间
+						parsedTime, err := time.Parse("Mon Jan 2 15:04:05 2006", matches[1])
+						if err == nil {
+							// 设置服务器启动时间
+							parser.realStartTime = parsedTime
+							parser.realTimeDetected = true
+							log.Printf("[AutoParser] 从重置的日志文件中提取到服务器启动时间: %s", parsedTime.Format("2006-01-02 15:04:05"))
+						}
+					}
+				}
+
 				restartMsg := fmt.Sprintf("服务器已重启，日志文件被重置。文件大小从 %d 字节变为 %d 字节",
 					position.LastPosition, currentSize)
 				parser.SaveLogToDatabase("system", restartMsg, time.Now())
+				log.Printf("[AutoParser] 重置服务器启动时间，等待重新检测")
 			}
 
 			position.LastPosition = 0

@@ -297,7 +297,7 @@ func GetSystemOverviewChart(c *gin.Context) {
 	var successResults []Result
 	query := `
 		SELECT DATE(start_time) as date, COUNT(*) as count
-		FROM cron_task_log
+		FROM dont_cron_task_log
 		WHERE status = 1 AND start_time >= ?
 		GROUP BY DATE(start_time)
 	`
@@ -322,7 +322,7 @@ func GetSystemOverviewChart(c *gin.Context) {
 	var failResults []Result
 	query = `
 		SELECT DATE(start_time) as date, COUNT(*) as count
-		FROM cron_task_log
+		FROM dont_cron_task_log
 		WHERE status = 0 AND start_time >= ?
 		GROUP BY DATE(start_time)
 	`

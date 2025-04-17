@@ -157,8 +157,8 @@ func (m *LogParserManager) GetStartupVersions(archiveName, worldName string) ([]
 }
 
 // AddCustomRule 添加自定义规则
-func (m *LogParserManager) AddCustomRule(name, description, logType, pattern string, isRegex, isEnabled bool, priority int) error {
-	err := models.AddLogExtractRule(name, description, logType, pattern, isRegex, isEnabled, priority)
+func (m *LogParserManager) AddCustomRule(name, description, logType, pattern string, isRegex, isEnabled bool, priority int, matchMode, tailPattern string, lineCount int) error {
+	err := models.AddLogExtractRule(name, description, logType, pattern, isRegex, isEnabled, priority, matchMode, tailPattern, lineCount)
 	if err != nil {
 		return err
 	}
@@ -168,8 +168,8 @@ func (m *LogParserManager) AddCustomRule(name, description, logType, pattern str
 }
 
 // UpdateCustomRule 更新自定义规则
-func (m *LogParserManager) UpdateCustomRule(id int, name, description, logType, pattern string, isRegex, isEnabled bool, priority int) error {
-	err := models.UpdateLogExtractRule(id, name, description, logType, pattern, isRegex, isEnabled, priority)
+func (m *LogParserManager) UpdateCustomRule(id int, name, description, logType, pattern string, isRegex, isEnabled bool, priority int, matchMode, tailPattern string, lineCount int) error {
+	err := models.UpdateLogExtractRule(id, name, description, logType, pattern, isRegex, isEnabled, priority, matchMode, tailPattern, lineCount)
 	if err != nil {
 		return err
 	}
@@ -192,6 +192,11 @@ func (m *LogParserManager) DeleteCustomRule(id int) error {
 // GetAllRules 获取所有规则
 func (m *LogParserManager) GetAllRules() ([]models.LogExtractRule, error) {
 	return models.GetLogExtractRules()
+}
+
+// GetArchivesWithLogs 获取有日志的存档和世界列表
+func (m *LogParserManager) GetArchivesWithLogs() ([]models.ArchiveWorldInfo, error) {
+	return models.GetArchivesWithLogs()
 }
 
 // ShutdownAllParsers 关闭所有解析器，确保所有缓冲区中的日志都被写入数据库
