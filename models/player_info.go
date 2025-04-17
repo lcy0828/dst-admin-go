@@ -71,19 +71,34 @@ func InitPlayerInfoTable() {
 // 解析格式: [DST-ADMIN-GO] [Listplayers] [0] [000] [KU_HQp7BOVs] [[Host]] []
 func ParsePlayerListLog(rawContent string) []PlayerInfo {
 	log.Printf("[PlayerInfo] 开始解析玩家列表日志")
-	var players []PlayerInfo
+
+	// 使用map来记录已经解析到的玩家，避免重复
+	playerMap := make(map[string]PlayerInfo)
 
 	// 分行处理
 	lines := strings.Split(rawContent, "\n")
 	log.Printf("[PlayerInfo] 分行后共有 %d 行", len(lines))
 
 	// 正则表达式匹配玩家信息行
-	// 格式: [DST-ADMIN-GO] [Listplayers] [index] [age] [userid] [name] [prefab]
-	re := regexp.MustCompile(`\[DST-ADMIN-GO\] \[Listplayers\] \[(\d+)\] \[(\d+)\] \[([^\]]+)\] \[([^\]]+)\] \[([^\]]*)\]`)
+	// 格式1: [时间戳]: [DST-ADMIN-GO] [Listplayers] [index] [age] [userid] [name] [prefab]
+	// 例如: [01:46:15]: [DST-ADMIN-GO] [Listplayers] [0] [000] [KU_HQp7BOVs] [[Host]] []
+	re1 := regexp.MustCompile(`\[\d+:\d+:\d+\]: \[DST-ADMIN-GO\] \[Listplayers\] \[(\d+)\] \[(\d+)\] \[([^\]]+)\] \[([^\]]+)\] \[([^\]]*)\]`)
+
+	// 格式2: [DST-ADMIN-GO] [Listplayers] [index] [age] [userid] [name] [prefab]
+	// 例如: [DST-ADMIN-GO] [Listplayers] [0] [000] [KU_HQp7BOVs] [[Host]] []
+	re2 := regexp.MustCompile(`\[DST-ADMIN-GO\] \[Listplayers\] \[(\d+)\] \[(\d+)\] \[([^\]]+)\] \[([^\]]+)\] \[([^\]]*)\]`)
 
 	for i, line := range lines {
 		log.Printf("[PlayerInfo] 处理第 %d 行: %s", i+1, line)
-		matches := re.FindStringSubmatch(line)
+
+		// 先尝试格式1
+		matches := re1.FindStringSubmatch(line)
+
+		// 如果格式1不匹配，尝试格式2
+		if len(matches) < 6 {
+			matches = re2.FindStringSubmatch(line)
+		}
+
 		if len(matches) >= 6 {
 			log.Printf("[PlayerInfo] 匹配到玩家信息行: %s", line)
 
@@ -100,10 +115,14 @@ func ParsePlayerListLog(rawContent string) []PlayerInfo {
 			// 转换年龄为整数
 			age, _ := strconv.Atoi(ageStr)
 
-			// 跳过主机行
+			// 处理主机行，主机行也包含有用的信息
+			// 如果是主机行，我们仍然记录它，因为它可能是服务器管理员
+			// 但是我们会在日志中标记它
 			if playerName == "[Host]" {
-				log.Printf("[PlayerInfo] 跳过主机行")
-				continue
+				log.Printf("[PlayerInfo] 检测到主机行，作为特殊玩家处理")
+				// 不跳过，继续处理
+				// 为主机行添加特殊标记
+				playerName = "[Host-Admin]"
 			}
 
 			// 创建玩家信息对象
@@ -115,11 +134,22 @@ func ParsePlayerListLog(rawContent string) []PlayerInfo {
 				Status:     PlayerStatusOnline,
 			}
 
-			log.Printf("[PlayerInfo] 添加玩家: %s (%s)", player.PlayerName, player.UserID)
-			players = append(players, player)
+			// 检查玩家是否已经存在，如果存在则跳过
+			if _, exists := playerMap[userID]; !exists {
+				log.Printf("[PlayerInfo] 添加玩家: %s (%s)", player.PlayerName, player.UserID)
+				playerMap[userID] = player
+			} else {
+				log.Printf("[PlayerInfo] 跳过重复玩家: %s (%s)", player.PlayerName, player.UserID)
+			}
 		} else {
 			log.Printf("[PlayerInfo] 未匹配到玩家信息行: %s", line)
 		}
+	}
+
+	// 将map转换为切片
+	var players []PlayerInfo
+	for _, player := range playerMap {
+		players = append(players, player)
 	}
 
 	log.Printf("[PlayerInfo] 解析完成，共有 %d 个玩家", len(players))
@@ -136,9 +166,10 @@ func UpdatePlayersFromLog(archiveName string, rawContent string) error {
 	currentPlayers := ParsePlayerListLog(rawContent)
 	log.Printf("[PlayerInfo] 解析到 %d 个玩家", len(currentPlayers))
 
+	// 即使没有解析到玩家信息，也继续执行，将所有玩家标记为离线
 	if len(currentPlayers) == 0 {
-		log.Printf("[PlayerInfo] 没有解析到玩家信息，不需要更新")
-		return nil // 没有玩家，不需要更新
+		log.Printf("[PlayerInfo] 没有解析到玩家信息，将所有玩家标记为离线")
+		// 不返回，继续执行，将所有玩家标记为离线
 	}
 
 	// 获取当前时间
@@ -163,7 +194,15 @@ func UpdatePlayersFromLog(archiveName string, rawContent string) error {
 	userIDCount := make(map[string]int)
 	for _, player := range existingPlayers {
 		userIDCount[player.UserID]++
-		existingPlayerMap[player.UserID] = player
+		// 如果已经存在该UserID，保留最新的一条记录
+		if existingPlayer, exists := existingPlayerMap[player.UserID]; exists {
+			// 如果当前玩家的最后见到时间更新，则替换
+			if player.LastSeen.After(existingPlayer.LastSeen) {
+				existingPlayerMap[player.UserID] = player
+			}
+		} else {
+			existingPlayerMap[player.UserID] = player
+		}
 	}
 
 	// 处理重复的UserID

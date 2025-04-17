@@ -4,27 +4,18 @@ import (
 	"time"
 )
 
-// TriggerType 触发类型
-type TriggerType int
-
-const (
-	TriggerAuto   TriggerType = 0 // 自动触发（定时任务）
-	TriggerManual TriggerType = 1 // 手动触发
-)
-
 // CronTaskLog 定时任务执行日志
 type CronTaskLog struct {
-	ID          int         `gorm:"primary_key" json:"id"`
-	TaskID      int         `json:"task_id"`      // 任务ID
-	TaskName    string      `json:"task_name"`    // 任务名称
-	Status      int         `json:"status"`       // 执行状态：0-失败，1-成功
-	Output      string      `json:"output"`       // 执行输出
-	Error       string      `json:"error"`        // 错误信息
-	StartTime   time.Time   `json:"start_time"`   // 开始时间
-	EndTime     time.Time   `json:"end_time"`     // 结束时间
-	Duration    int64       `json:"duration"`     // 执行时长（毫秒）
-	TriggerType TriggerType `json:"trigger_type"` // 触发类型：0-自动触发，1-手动触发
-	CreatedAt   time.Time   `json:"created_at"`   // 创建时间
+	ID        int       `gorm:"primary_key" json:"id"`
+	TaskID    int       `json:"task_id"`    // 任务ID
+	TaskName  string    `json:"task_name"`  // 任务名称
+	Status    int       `json:"status"`     // 执行状态：0-失败，1-成功
+	Output    string    `json:"output"`     // 执行输出
+	Error     string    `json:"error"`      // 错误信息
+	StartTime time.Time `json:"start_time"` // 开始时间
+	EndTime   time.Time `json:"end_time"`   // 结束时间
+	Duration  int64     `json:"duration"`   // 执行时长（毫秒）
+	CreatedAt time.Time `json:"created_at"` // 创建时间
 }
 
 // AddTaskLog 添加任务日志
@@ -149,16 +140,4 @@ func GetTaskLogStats(taskID int, days int) (map[string]interface{}, error) {
 // InitCronTaskLogTable 初始化定时任务日志表
 func InitCronTaskLogTable() {
 	db.AutoMigrate(&CronTaskLog{})
-}
-
-// GetTriggerTypeName 获取触发类型名称
-func GetTriggerTypeName(triggerType TriggerType) string {
-	switch triggerType {
-	case TriggerAuto:
-		return "自动触发"
-	case TriggerManual:
-		return "手动触发"
-	default:
-		return "未知触发类型"
-	}
 }

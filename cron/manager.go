@@ -402,30 +402,23 @@ func (m *TaskManager) DisableTask(id int) error {
 }
 
 // RunTask 立即运行任务
-func (m *TaskManager) RunTask(id int) (int, error) {
+func (m *TaskManager) RunTask(id int) error {
 	// 获取任务
 	task, err := models.GetTaskByID(id)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
-	// 创建通道来接收日志ID
-	logIDChan := make(chan int, 1)
-
 	// 执行任务
-	go m.executeTask(task, models.TriggerManual, logIDChan)
-
-	// 等待日志ID
-	logID := <-logIDChan
-	return logID, nil
+	go m.executeTask(task)
+	return nil
 }
 
 // addTaskToCron 添加任务到cron
 func (m *TaskManager) addTaskToCron(task *models.CronTask) error {
 	// 创建任务函数
 	taskFunc := func() {
-		// 自动触发不需要返回日志ID
-		m.executeTask(task, models.TriggerAuto, nil)
+		m.executeTask(task)
 	}
 
 	// 添加到cron
@@ -441,11 +434,8 @@ func (m *TaskManager) addTaskToCron(task *models.CronTask) error {
 }
 
 // executeTask 执行任务
-// triggerType 触发类型：0-自动触发，1-手动触发
-// logIDChan 用于返回日志ID的通道，如果为nil则不返回
-// 当手动触发时，需要返回日志ID，当自动触发时不需要返回
-func (m *TaskManager) executeTask(task *models.CronTask, triggerType models.TriggerType, logIDChan chan<- int) {
-	log.Printf("[CronTask] 开始执行任务: %s (ID: %d), 触发类型: %s", task.Name, task.ID, models.GetTriggerTypeName(triggerType))
+func (m *TaskManager) executeTask(task *models.CronTask) {
+	log.Printf("[CronTask] 开始执行任务: %s (ID: %d)", task.Name, task.ID)
 	startTime := time.Now()
 
 	// 更新最后运行时间
@@ -455,11 +445,10 @@ func (m *TaskManager) executeTask(task *models.CronTask, triggerType models.Trig
 
 	// 创建任务日志
 	taskLog := &models.CronTaskLog{
-		TaskID:      task.ID,
-		TaskName:    task.Name,
-		StartTime:   startTime,
-		CreatedAt:   time.Now(),
-		TriggerType: triggerType,
+		TaskID:    task.ID,
+		TaskName:  task.Name,
+		StartTime: startTime,
+		CreatedAt: time.Now(),
 	}
 
 	// 检查依赖任务是否完成
@@ -586,12 +575,6 @@ func (m *TaskManager) executeTask(task *models.CronTask, triggerType models.Trig
 	// 保存任务日志
 	if err := models.AddTaskLog(taskLog); err != nil {
 		log.Printf("[CronTask] 保存任务日志失败: %v", err)
-	} else {
-		log.Printf("[CronTask] 任务日志已保存: ID=%d", taskLog.ID)
-		// 如果需要返回日志ID，则通过通道返回
-		if logIDChan != nil {
-			logIDChan <- taskLog.ID
-		}
 	}
 
 	// 更新任务状态
@@ -777,12 +760,11 @@ func (m *TaskManager) retryTask(task *models.CronTask, retryCount int) {
 	// 创建任务日志
 	startTime := time.Now()
 	taskLog := &models.CronTaskLog{
-		TaskID:      updatedTask.ID,
-		TaskName:    updatedTask.Name,
-		StartTime:   startTime,
-		CreatedAt:   time.Now(),
-		Output:      fmt.Sprintf("重试执行 (%d/%d)", retryCount, updatedTask.RetryTimes),
-		TriggerType: models.TriggerAuto, // 重试任务视为自动触发
+		TaskID:    updatedTask.ID,
+		TaskName:  updatedTask.Name,
+		StartTime: startTime,
+		CreatedAt: time.Now(),
+		Output:    fmt.Sprintf("重试执行 (%d/%d)", retryCount, updatedTask.RetryTimes),
 	}
 
 	// 执行任务

@@ -1,8 +1,10 @@
 package cron
 
 import (
+	"dont/cron"
 	"dont/models"
 	"dont/pkg/e"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -213,6 +215,13 @@ func UpdateTaskGroup(c *gin.Context) {
 		return
 	}
 
+	// 如果状态发生变化，重启任务管理器
+	taskManager := cron.GetTaskManager()
+	if err := taskManager.Restart(); err != nil {
+		log.Printf("更新任务组后重启任务管理器失败: %v", err)
+		// 不返回错误，因为任务组状态已经更新成功
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"code": e.SUCCESS,
 		"msg":  "更新任务组成功",
@@ -273,6 +282,13 @@ func EnableTaskGroup(c *gin.Context) {
 		return
 	}
 
+	// 重启任务管理器，使变更生效
+	taskManager := cron.GetTaskManager()
+	if err := taskManager.Restart(); err != nil {
+		log.Printf("启用任务组后重启任务管理器失败: %v", err)
+		// 不返回错误，因为任务组状态已经更新成功
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"code": e.SUCCESS,
 		"msg":  "启用任务组成功",
@@ -301,6 +317,13 @@ func DisableTaskGroup(c *gin.Context) {
 			"data": nil,
 		})
 		return
+	}
+
+	// 重启任务管理器，使变更生效
+	taskManager := cron.GetTaskManager()
+	if err := taskManager.Restart(); err != nil {
+		log.Printf("禁用任务组后重启任务管理器失败: %v", err)
+		// 不返回错误，因为任务组状态已经更新成功
 	}
 
 	c.JSON(http.StatusOK, gin.H{

@@ -729,8 +729,7 @@ func RunTask(c *gin.Context) {
 
 	// 运行任务
 	taskManager := cron.GetTaskManager()
-	logID, err := taskManager.RunTask(id)
-	if err != nil {
+	if err := taskManager.RunTask(id); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"code": e.ERROR,
 			"msg":  "运行任务失败: " + err.Error(),
@@ -742,9 +741,7 @@ func RunTask(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": e.SUCCESS,
 		"msg":  "任务已开始运行",
-		"data": gin.H{
-			"log_id": logID,
-		},
+		"data": nil,
 	})
 }
 
