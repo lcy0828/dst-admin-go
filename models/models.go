@@ -61,8 +61,31 @@ func init() {
 	db.LogMode(true)
 	db.DB().SetMaxIdleConns(10)
 	db.DB().SetMaxOpenConns(100)
+
+	// 初始化游戏日志相关表结构
+	initGameLogTables()
+
+	// 初始化定时任务相关表结构
+	InitCronTables()
 }
 
 func CloseDB() {
 	defer db.Close()
+}
+
+// DB 返回数据库连接
+func DB() *gorm.DB {
+	return db
+}
+
+// 初始化游戏日志相关表结构
+func initGameLogTables() {
+	// 自动迁移表结构
+	db.AutoMigrate(&GameLog{})
+	db.AutoMigrate(&LogExtractRule{})
+	db.AutoMigrate(&LogStatistics{})
+	// 初始化玩家信息表
+	InitPlayerInfoTable()
+
+	log.Println("游戏日志相关表结构初始化完成")
 }

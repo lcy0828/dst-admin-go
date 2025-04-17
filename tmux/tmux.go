@@ -1,7 +1,6 @@
 package tmux
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -93,7 +92,12 @@ func (s *DSTServer) IsRunning() (bool, error) {
 	log.Printf("[TMUX] 方法1: 使用gotmux的ListSessions方法检查")
 	sessions, err := s.tmux.ListSessions()
 	if err != nil {
-		log.Printf("[TMUX][警告] 使用gotmux获取tmux会话列表失败: %v, 将尝试方法2", err)
+		// 检查错误是否是因为没有tmux会话
+		if strings.Contains(err.Error(), "failed to list sessions") {
+			log.Printf("[TMUX] 没有运行中的tmux会话，将尝试方法2")
+		} else {
+			log.Printf("[TMUX][警告] 使用gotmux获取tmux会话列表失败: %v, 将尝试方法2", err)
+		}
 	} else {
 		// 检查是否存在指定名称的会话
 		for _, session := range sessions {
@@ -285,8 +289,14 @@ func (s *DSTServer) SendCommand(command string) error {
 	log.Printf("[TMUX] 获取会话 会话名: %s", s.SessionName)
 	session, err := s.tmux.GetSessionByName(s.SessionName)
 	if err != nil {
-		log.Printf("[TMUX][错误] 获取会话失败: %v", err)
-		return fmt.Errorf("获取会话失败: %v", err)
+		// 检查错误是否是因为没有tmux会话
+		if strings.Contains(err.Error(), "failed to list sessions") || strings.Contains(err.Error(), "no session") {
+			log.Printf("[TMUX] 没有找到会话: %s", s.SessionName)
+			return fmt.Errorf("没有找到会话: %s", s.SessionName)
+		} else {
+			log.Printf("[TMUX][错误] 获取会话失败: %v", err)
+			return fmt.Errorf("获取会话失败: %v", err)
+		}
 	}
 
 	// 获取窗口
@@ -507,7 +517,16 @@ type ServerInfo struct {
 }
 
 // 全局变量，用于存储服务器信息
-var serverInfoMap = make(map[string]*ServerInfo)
+var serverInfoMap map[string]*ServerInfo
+
+// 互斥锁，保护并发访问serverInfoMap
+var serverInfoMapMutex sync.Mutex
+
+// 初始化函数
+func init() {
+	serverInfoMap = make(map[string]*ServerInfo)
+	log.Printf("[TMUX] 初始化serverInfoMap")
+}
 
 // SaveServerInfo 保存服务器信息
 func SaveServerInfo(server *DSTServer) {
@@ -534,18 +553,25 @@ func SaveServerInfo(server *DSTServer) {
 		server.SessionName, server.ServerMode, startTimeStr, now.Format("2006-01-02 15:04:05.000"))
 }
 
-// 互斥锁，保护并发访问serverInfoMap
-var serverInfoMapMutex sync.Mutex
-
-
-
 // ListDSTServers 列出所有饥荒服务器会话
-func ListDSTServers() ([]ServerInfo, error) {
+// silent 参数控制是否输出日志信息，true表示不输出正常日志，只输出错误日志
+func ListDSTServers(silent ...bool) ([]ServerInfo, error) {
 	startTime := time.Now()
-	log.Printf("[TMUX] 开始列出所有饥荒服务器会话")
+
+	// 判断是否需要输出日志
+	isSilent := false
+	if len(silent) > 0 && silent[0] {
+		isSilent = true
+	}
+
+	if !isSilent {
+		log.Printf("[TMUX] 开始列出所有饥荒服务器会话")
+	}
 
 	// 初始化tmux客户端
-	log.Printf("[TMUX] 初始化tmux客户端")
+	if !isSilent {
+		log.Printf("[TMUX] 初始化tmux客户端")
+	}
 	tmux, err := gotmux.DefaultTmux()
 	if err != nil {
 		log.Printf("[TMUX][错误] 初始化tmux失败: %v", err)
@@ -553,27 +579,39 @@ func ListDSTServers() ([]ServerInfo, error) {
 	}
 
 	// 列出所有会话
-	log.Printf("[TMUX] 获取tmux会话列表")
+	//log.Printf("[TMUX] 获取tmux会话列表")
 	sessions, err := tmux.ListSessions()
 	if err != nil {
-		log.Printf("[TMUX][错误] 获取tmux会话列表失败: %v", err)
-		return nil, fmt.Errorf("获取tmux会话列表失败: %v", err)
+		// 检查错误是否是因为没有tmux会话
+		if strings.Contains(err.Error(), "failed to list sessions") {
+			// 没有tmux会话是正常情况，使用信息日志而不是错误日志
+			if !isSilent {
+				log.Printf("[TMUX] 没有运行中的tmux会话")
+			}
+			return nil, fmt.Errorf("获取tmux会话列表失败: %v", err)
+		} else {
+			// 其他错误仍然记录为错误
+			log.Printf("[TMUX][错误] 获取tmux会话列表失败: %v", err)
+			return nil, fmt.Errorf("获取tmux会话列表失败: %v", err)
+		}
 	}
 
 	// 输出所有会话的详细信息到日志
-	log.Printf("[TMUX] 找到 %d 个tmux会话", len(sessions))
-	for i, session := range sessions {
-		// 输出会话的所有字段
-		sessionJSON, _ := json.Marshal(session)
-		log.Printf("[TMUX] 会话 #%d 原始信息: %s", i+1, string(sessionJSON))
-
-		// 尝试获取更多会话信息
-		detailedSession, err := tmux.GetSessionByName(session.Name)
-		if err == nil {
-			detailedJSON, _ := json.Marshal(detailedSession)
-			log.Printf("[TMUX] 会话 #%d 详细信息: %s", i+1, string(detailedJSON))
-		}
+	if !isSilent {
+		log.Printf("[TMUX] 找到 %d 个tmux会话", len(sessions))
 	}
+	//for i, session := range sessions {
+	//	// 输出会话的所有字段
+	//	//sessionJSON, _ := json.Marshal(session)
+	//	//log.Printf("[TMUX] 会话 #%d 原始信息: %s", i+1, string(sessionJSON))
+	//
+	//	// 尝试获取更多会话信息
+	//	//detailedSession, err := tmux.GetSessionByName(session.Name)
+	//	//if err == nil {
+	//	//	detailedJSON, _ := json.Marshal(detailedSession)
+	//	//	//log.Printf("[TMUX] 会话 #%d 详细信息: %s", i+1, string(detailedJSON))
+	//	//}
+	//}
 
 	// 筛选出饥荒服务器会话并更新状态
 	var result []ServerInfo
@@ -586,7 +624,7 @@ func ListDSTServers() ([]ServerInfo, error) {
 			runningSessionMap[session.Name] = true
 			// 如果会话有创建时间，记录下来
 			if session.Created != "" {
-				log.Printf("[TMUX] 会话 %s 的原始创建时间: %s", session.Name, session.Created)
+				//log.Printf("[TMUX] 会话 %s 的原始创建时间: %s", session.Name, session.Created)
 				runningSessionCreationTimes[session.Name] = session.Created
 			}
 		}
@@ -615,7 +653,7 @@ func ListDSTServers() ([]ServerInfo, error) {
 					// 成功解析为时间戳
 					parsedTime = time.Unix(timestamp, 0)
 					parseErr = nil
-					log.Printf("[TMUX] 成功将创建时间 %s 解析为时间戳: %v", createdTime, parsedTime)
+					//log.Printf("[TMUX] 成功将创建时间 %s 解析为时间戳: %v", createdTime, parsedTime)
 				} else {
 					// 如果不是时间戳，尝试多种时间格式
 					log.Printf("[TMUX] 创建时间 %s 不是时间戳格式，尝试其他格式", createdTime)
@@ -638,8 +676,8 @@ func ListDSTServers() ([]ServerInfo, error) {
 				if parseErr == nil {
 					// 成功解析时间，更新启动时间
 					info.StartTime = parsedTime.Format("2006-01-02 15:04:05")
-					log.Printf("[TMUX] 更新会话 %s 的启动时间为: %s (从原始创建时间: %s)",
-						sessionName, info.StartTime, createdTime)
+					//log.Printf("[TMUX] 更新会话 %s 的启动时间为: %s (从原始创建时间: %s)",
+					//	sessionName, info.StartTime, createdTime)
 				} else {
 					log.Printf("[TMUX][警告] 无法解析会话 %s 的创建时间: %s, 错误: %v",
 						sessionName, createdTime, parseErr)
@@ -676,7 +714,7 @@ func ListDSTServers() ([]ServerInfo, error) {
 						// 成功解析为时间戳
 						parsedTime = time.Unix(timestamp, 0)
 						parseErr = nil
-						log.Printf("[TMUX] 成功将新会话创建时间 %s 解析为时间戳: %v", createdTime, parsedTime)
+						//log.Printf("[TMUX] 成功将新会话创建时间 %s 解析为时间戳: %v", createdTime, parsedTime)
 					} else {
 						// 如果不是时间戳，尝试多种时间格式
 						log.Printf("[TMUX] 新会话创建时间 %s 不是时间戳格式，尝试其他格式", createdTime)
@@ -699,8 +737,8 @@ func ListDSTServers() ([]ServerInfo, error) {
 					if parseErr == nil {
 						// 成功解析时间，更新启动时间
 						startTime = parsedTime.Format("2006-01-02 15:04:05")
-						log.Printf("[TMUX] 新会话 %s 的启动时间设置为: %s (从原始创建时间: %s)",
-							sessionName, startTime, createdTime)
+						//log.Printf("[TMUX] 新会话 %s 的启动时间设置为: %s (从原始创建时间: %s)",
+						//	sessionName, startTime, createdTime)
 					} else {
 						log.Printf("[TMUX][警告] 无法解析新会话 %s 的创建时间: %s, 错误: %v",
 							sessionName, createdTime, parseErr)
@@ -724,7 +762,9 @@ func ListDSTServers() ([]ServerInfo, error) {
 	}
 
 	elapsedTime := time.Since(startTime)
-	log.Printf("[TMUX] 已列出所有饥荒服务器会话，共 %d 个, 耗时: %v", len(result), elapsedTime)
+	if !isSilent {
+		log.Printf("[TMUX] 已列出所有饥荒服务器会话，共 %d 个, 耗时: %v", len(result), elapsedTime)
+	}
 	return result, nil
 }
 
@@ -734,7 +774,7 @@ func GetSessionInfo(sessionName string) (map[string]string, error) {
 	log.Printf("[TMUX] 开始获取会话信息 会话名: %s", sessionName)
 
 	// 初始化tmux客户端
-	log.Printf("[TMUX] 初始化tmux客户端")
+	//log.Printf("[TMUX] 初始化tmux客户端")
 	tmux, err := gotmux.DefaultTmux()
 	if err != nil {
 		log.Printf("[TMUX][错误] 初始化tmux失败: %v", err)
@@ -745,8 +785,14 @@ func GetSessionInfo(sessionName string) (map[string]string, error) {
 	log.Printf("[TMUX] 获取会话 会话名: %s", sessionName)
 	session, err := tmux.GetSessionByName(sessionName)
 	if err != nil {
-		log.Printf("[TMUX][错误] 获取会话失败: %v", err)
-		return nil, fmt.Errorf("获取会话失败: %v", err)
+		// 检查错误是否是因为没有tmux会话
+		if strings.Contains(err.Error(), "failed to list sessions") || strings.Contains(err.Error(), "no session") {
+			log.Printf("[TMUX] 没有找到会话: %s", sessionName)
+			return nil, fmt.Errorf("没有找到会话: %s", sessionName)
+		} else {
+			log.Printf("[TMUX][错误] 获取会话失败: %v", err)
+			return nil, fmt.Errorf("获取会话失败: %v", err)
+		}
 	}
 
 	// 解析会话名称获取存档和世界信息

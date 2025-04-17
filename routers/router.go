@@ -5,9 +5,13 @@ import (
 	"dont/routers/agent"
 	"dont/routers/auth"
 	"dont/routers/backup"
+	"dont/routers/cron"
 	"dont/routers/dstcustomize"
 	"dont/routers/dstserver"
+	"dont/routers/gamelog"
 	"dont/routers/mod"
+	"dont/routers/parser"
+	"dont/routers/player"
 	"dont/routers/server"
 	"dont/routers/status"
 	"dont/routers/tag"
@@ -27,6 +31,10 @@ func InitRouter() *gin.Engine {
 		gin.Recovery(),
 		middleware.CorsMiddleware(),
 	)
+
+	// 静态文件服务
+	router.StaticFile("/gamelog", "./static/gamelog.html")
+	router.Static("/static", "./static")
 
 	api := router.Group("/api")
 	{
@@ -66,6 +74,9 @@ func InitRouter() *gin.Engine {
 
 		// 流式日志接口 - 不需要认证
 		api.GET("/server/log/stream", server.StreamLog)
+
+		// 游戏日志实时监控接口 - 使用WebSocket
+		api.GET("/game/log/ws", gamelog.HandleLogWebSocket)
 
 		// Dashboard
 		dashboardGroup := api.Group("/dashboard")
@@ -155,6 +166,10 @@ func InitRouter() *gin.Engine {
 
 			// 删除世界
 			dstservers.POST("/deleteworld", dstserver.DeleteWorld)
+
+			// 更新游戏服务器
+			dstservers.POST("/update", dstserver.UpdateServer)
+			dstservers.GET("/update/status", dstserver.GetUpdateStatus)
 		}
 
 		// DST游戏自定义配置管理
@@ -202,6 +217,30 @@ func InitRouter() *gin.Engine {
 			// 获取命令执行结果
 			agents.GET("/command/:command_id", agent.GetCommandResult)
 			agents.GET("/command", agent.GetCommandResults)
+		}
+
+		// 日志解析器API
+		parserGroup := api.Group("/v1")
+		{
+			// 注册现有的日志解析器API
+			gamelog.RegisterParserAPIRoutes(parserGroup)
+
+			// 添加新的日志解析器API
+			parserGroup.GET("/parser/active", parser.GetActiveParsers) // 获取当前运行中的解析器
+		}
+
+		// 定时任务管理API
+		cron.RegisterCronRoutes(api)
+
+		// 玩家信息管理API
+		playerGroup := api.Group("/player")
+		{
+			playerGroup.GET("/online", player.GetOnlinePlayers)    // 获取在线玩家列表
+			playerGroup.GET("/all", player.GetAllPlayers)          // 获取所有玩家列表
+			playerGroup.GET("/stats", player.GetPlayerStats)       // 获取玩家统计信息
+			playerGroup.GET("/detail/:id", player.GetPlayerDetail) // 获取玩家详情
+			playerGroup.POST("/update", player.UpdatePlayerInfo)   // 手动更新玩家信息
+			playerGroup.GET("/archives", player.GetPlayerArchives) // 获取玩家数据库中的存档列表
 		}
 
 		// Tmux服务器管理API
