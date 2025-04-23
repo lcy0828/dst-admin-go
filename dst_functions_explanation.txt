@@ -1,0 +1,134 @@
+# 饥荒服务器控制台函数解释
+
+## 第一阶段（函数1-24）
+
+1. c_addelectricity - 为目标添加电力，通常用于给需要电力的物品充电。
+2. c_allbooks - 生成游戏中所有可用的书籍物品。
+3. c_announce - 在服务器中发布全局公告，所有玩家都能看到。
+4. c_armor - 给玩家装备一套完整的护甲。
+5. c_armour - 与c_armor功能相同，是英式拼写版本。
+6. c_autoteleportplayers - 自动将玩家传送到指定位置，常用于管理员将玩家集中。
+7. c_boatcollision - 调试船只碰撞系统，用于测试船只碰撞机制。
+8. c_cancelmaintaintasks - 取消所有维持状态的任务（如自动回血等）。
+9. c_connect - 连接到指定的服务器，用于服务器间通信。
+10. c_countallprefabs - 统计世界中所有预制体(prefab)的数量。
+11. c_countprefabs - 统计特定预制体在世界中的数量。
+12. c_counttagged - 统计带有特定标签的实体数量。
+13. c_debugshards - 调试分片世界系统，显示分片相关信息。
+14. c_despawn - 使实体消失，通常用于移除生物或物品。
+15. c_doscenario - 执行预设的场景脚本。
+16. c_dump - 输出调试信息，将内部状态信息打印到控制台。
+17. c_dumpentities - 输出世界中所有实体的详细信息。
+18. c_dumpseasons - 输出当前季节系统的详细信息。
+19. c_dumpworldstate - 输出当前世界状态的详细信息。
+20. c_emptyworld - 清空世界中的所有实体，创建一个空白世界。
+21. c_equip - 为玩家装备指定的物品。
+22. c_find - 查找特定类型的实体。
+23. c_findnext - 查找下一个符合条件的实体。
+24. c_findtag - 查找带有特定标签的实体。
+
+## 第二阶段（函数25-48）
+
+25. c_forcecrash - 强制使服务器崩溃，通常用于测试崩溃恢复机制。
+26. c_freecrafting - 启用免费制作模式，不消耗材料就能制作物品。
+27. c_gatherplayers - 将所有玩家聚集到一个位置。
+28. c_getmaxplayers - 获取服务器设置的最大玩家数量。
+29. c_getnumplayers - 获取当前服务器中的玩家数量。
+30. c_give - 给予玩家指定的物品。
+31. c_giveingredients - 给予玩家制作特定物品所需的所有材料。
+32. c_goadventuring - 使角色进入冒险模式，可能会触发特定事件。
+33. c_godmode - 开启上帝模式，使玩家不会受到伤害。
+34. c_gonext - 移动到下一个符合条件的实体位置。
+35. c_goto - 传送到指定实体或坐标位置。
+36. c_gotoroom - 传送到特定的房间（在洞穴或其他分区地图中）。
+37. c_groundtype - 显示或修改当前位置的地面类型。
+38. c_guitartab - 与吉他相关的功能，可能用于显示或播放吉他谱。
+39. c_inst - 获取当前选中实体的实例信息。
+40. c_kitcoon - 生成小猫（Kitcoon）宠物。
+41. c_knownassert - 触发已知的断言错误，用于测试错误处理。
+42. c_list - 列出符合特定条件的实体。
+43. c_listallplayers - 列出服务器中的所有玩家。
+44. c_listplayers - 列出当前分片中的玩家。
+45. c_listtag - 列出带有特定标签的所有实体。
+46. c_maintainall - 维持玩家的所有状态（生命值、饥饿、精神等）。
+47. c_maintainhealth - 自动维持玩家的生命值在最大值。
+48. c_maintainhunger - 自动维持玩家的饥饿值在最大值。
+
+## 第三阶段（函数49-72）
+
+49. c_maintainmoisture - 自动维持玩家的湿度值在指定水平。
+50. c_maintainsanity - 自动维持玩家的精神值在最大值。
+51. c_maintaintemperature - 自动维持玩家的体温在适宜范围。
+52. c_makeboat - 在指定位置创建一艘船。
+53. c_makeboatspiral - 创建一个螺旋形状排列的船队。
+54. c_makecrabboat - 创建一艘特殊的螃蟹船。
+55. c_makegrassboat - 创建一艘草船。
+56. c_makeinvisible - 使实体变为隐形状态。
+57. c_mat - 修改地面材质，可能用于改变地形类型。
+58. c_mermking - 生成鱼人王。
+59. c_mermthrone - 生成鱼人王座。
+60. c_migrateto - 将玩家迁移到另一个服务器或分片。
+61. c_migrationportal - 创建一个迁移传送门，用于在分片间移动。
+62. c_move - 移动选中的实体到指定位置。
+63. c_netstats - 显示网络统计信息，用于诊断网络问题。
+64. c_pos - 获取实体的当前位置坐标。
+65. c_printpos - 打印当前选中实体的位置坐标。
+66. c_printtextureinfo - 打印纹理信息，用于调试图形渲染。
+67. c_record - 开始记录游戏数据，用于调试或回放。
+68. c_regenerateshard - 重新生成当前分片世界。
+69. c_regenerateworld - 重新生成整个世界。
+70. c_remote - 远程执行命令，可在其他分片或服务器上执行操作。
+71. c_remove - 移除选中的实体。
+72. c_removeall - 移除所有指定类型的实体。
+
+## 第四阶段（函数73-96）
+
+73. c_removeallwithtags - 移除所有带有特定标签的实体。
+74. c_removeat - 移除指定位置的实体。
+75. c_repeatlastcommand - 重复执行上一条控制台命令。
+76. c_reregisterportals - 重新注册所有传送门，修复传送门系统问题。
+77. c_reset - 重置游戏状态或特定系统。
+78. c_rollback - 回滚世界状态到之前的存档点。
+79. c_rotateccw - 逆时针旋转选中的实体。
+80. c_rotatecw - 顺时针旋转选中的实体。
+81. c_save - 保存当前游戏状态。
+82. c_searchprefabs - 搜索特定预制体在世界中的实例。
+83. c_sel - 选择特定实体，作为后续命令的目标。
+84. c_sel_health - 显示或修改选中实体的生命值。
+85. c_select - 选择特定类型的实体。
+86. c_selectnear - 选择靠近指定位置的实体。
+87. c_selectnext - 选择下一个符合条件的实体。
+88. c_sethealth - 设置实体的生命值。
+89. c_sethunger - 设置玩家的饥饿值。
+90. c_setinspiration - 设置灵感值（与沃利、沃特等角色相关）。
+91. c_setmightiness - 设置威猛值（与沃克斯等角色相关）。
+92. c_setminhealth - 设置实体的最小生命值。
+93. c_setmoisture - 设置玩家的湿度值。
+94. c_setrotation - 设置实体的旋转角度。
+95. c_setsanity - 设置玩家的精神值。
+96. c_settemperature - 设置玩家的体温。
+
+## 第五阶段（函数97-118）
+
+97. c_setwereness - 设置变身状态（与伍迪等可变身角色相关）。
+98. c_shellsfromtable - 从表格生成贝壳，可能与海滩或贝壳相关内容有关。
+99. c_showradius - 显示实体的影响半径或检测范围。
+100. c_shutdown - 关闭服务器。
+101. c_simphase - 显示或修改模拟阶段，用于调试游戏循环。
+102. c_skip - 跳过时间或事件，加速游戏进程。
+103. c_sounddebug - 启用声音调试模式，显示声音相关信息。
+104. c_sounddebugui - 显示声音调试界面，用于调试音效系统。
+105. c_spawn - 在指定位置生成实体。
+106. c_spawnrift - 生成时空裂缝，与月岛或暗影生物相关。
+107. c_speedmult - 修改游戏速度倍率。
+108. c_speedup - 加速游戏进程。
+109. c_startinggear - 给予玩家初始装备。
+110. c_startvote - 开始一个投票（如踢人投票）。
+111. c_stopvote - 停止当前进行的投票。
+112. c_summonbearger - 召唤熊獾（秋季boss）。
+113. c_summondeerclops - 召唤独眼巨鹿（冬季boss）。
+114. c_summonmalbatross - 召唤邪天翁（海洋boss）。
+115. c_supergodmode - 启用超级上帝模式，比普通上帝模式提供更多保护。
+116. c_teleport - 将实体传送到指定位置。
+117. c_tile - 修改或显示地图瓦片信息。
+118. c_worldstatedebug - 显示世界状态调试信息，用于诊断世界状态问题。

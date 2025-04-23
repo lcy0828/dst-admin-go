@@ -69,6 +69,9 @@ func (m *TaskManager) registerBuiltinFunctions() {
 	// 注册玩家相关任务
 	RegisterPlayerTasks(m)
 
+	// 注册玩家配置相关任务
+	RegisterPlayerConfigTasks(m)
+
 	// 注册日志清理函数
 	m.RegisterFunctionWithInfo("cleanupLogs", func(retentionDays int) {
 		// 计算保留日期
