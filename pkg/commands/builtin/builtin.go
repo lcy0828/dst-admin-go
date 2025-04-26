@@ -68,6 +68,15 @@ func getBasicCommands() []*types.Command {
 			ParamDesc:   "回退的天数，例如：1",
 			Example:     "1",
 		},
+		{
+			ID:          "cleanup_log",
+			Name:        "清空日志",
+			Description: "清空数据库中的日志记录并重置日志位置",
+			Category:    "基础操作",
+			IsBuiltin:   true,
+			Script:      "print('[DST-ADMIN-GO]','[Cleanup Log]','日志清理命令已执行，请在管理后台查看结果')",
+			NeedsParams: false,
+		},
 	}
 }
 

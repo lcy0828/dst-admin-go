@@ -1,0 +1,55 @@
+# DST-ADMIN 配置文件
+
+# 代理配置
+[agent]
+SECURITY_KEY =
+SERVER_URL = ws://localhost:8081/agent
+
+# 路径配置
+[paths]
+# DST存档路径
+DST_SAVE_PATH = /root/DST/Klei/DoNotStarveTogether
+# DST备份路径
+DST_BACKUP_PATH = /root/DST/Klei/dst-archive
+# DST服务器日志路径
+DST_SERVER_LOG_PATH = /root/DST/Klei/DoNotStarveTogether/02/Forest1/server_log.txt
+# DST模组目录
+DST_UGC_PATH = /root/DST/dstserver/ugc_mods
+# DST服务器安装路径
+DST_SERVER_PATH = /root/DST/DSTServer
+# DST服务器启动模式，可选值：32或64，默认使用服务器支持的最高位数
+DST_SERVER_MODE = 64
+
+# 服务器配置
+[server]
+# 监听地址
+LISTEN_ADDR = :8081
+# 通信安全密钥
+SECURITY_KEY =  KZ50c+J4whcHLociKVAZPe9aPK6ySJODdUSycCI2wB4=
+
+# 其他配置
+[misc]
+# 日志级别: debug, info, warn, error
+LOG_LEVEL = info
+
+# debug or release
+RUN_MODE = debug
+SETUP    = complete
+
+[app]
+PAGE_SIZE  = 10
+JWT_SECRET = 23347$040412
+
+# [database]
+# TYPE = mysql
+# USER = dont
+# PASSWORD = 001011
+# #127.0.0.1:3306
+# HOST = 192.168.2.12:3306
+# NAME = dont
+# TABLE_PREFIX = dont_
+[database]
+TYPE         = sqlite3
+# NAME = dont
+PATH         = ./go-dont.db
+TABLE_PREFIX = dont_
