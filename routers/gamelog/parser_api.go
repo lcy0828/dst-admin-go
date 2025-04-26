@@ -26,6 +26,7 @@ func RegisterParserAPIRoutes(router *gin.RouterGroup) {
 	router.POST("/parser/toggle", ToggleLogParser)
 	router.GET("/parser/startup_versions", GetStartupVersions)    // 添加获取启动版本列表的API
 	router.GET("/parser/archives_with_logs", GetArchivesWithLogs) // 添加获取有日志的存档和世界列表的API
+	router.POST("/parser/cleanup_log", CleanupLog)                // 添加清空日志并重置日志位置的API
 }
 
 // GetParsedLogs 获取解析后的日志数据
