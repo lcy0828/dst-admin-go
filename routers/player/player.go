@@ -4,9 +4,13 @@ import (
 	"dont/cron"
 	"dont/models"
 	"dont/pkg/e"
+	"dont/pkg/types"
 	"github.com/gin-gonic/gin"
+	"github.com/go-ini/ini"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 )
 
@@ -147,10 +151,11 @@ func GetPlayerArchives(c *gin.Context) {
 	})
 }
 
-// UpdatePlayerInfo 手动更新玩家信息
-func UpdatePlayerInfo(c *gin.Context) {
+// GetHostInfo 从数据库中获取主机信息
+func GetHostInfo(c *gin.Context) {
 	var req struct {
-		SessionName string `json:"session_name" binding:"required"`
+		ArchiveName string `json:"archive_name" binding:"required"`
+		WorldName   string `json:"world_name"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -162,17 +167,16 @@ func UpdatePlayerInfo(c *gin.Context) {
 		return
 	}
 
-	log.Printf("[API][UpdatePlayerInfo] 开始手动更新玩家信息，会话名: %s", req.SessionName)
+	log.Printf("[API][GetHostInfo] 开始从数据库中获取主机信息，存档: %s, 世界: %s",
+		req.ArchiveName, req.WorldName)
 
-	// 直接调用 cron 包中的 UpdatePlayerInfo 函数
-
-	// 直接调用 UpdatePlayerInfo 函数
-	output, err := cron.UpdatePlayerInfo(req.SessionName)
+	// 从数据库中获取主机信息
+	hosts, err := models.GetHostInfo(req.ArchiveName, req.WorldName)
 	if err != nil {
-		log.Printf("[API][UpdatePlayerInfo] 更新玩家信息失败: %v", err)
+		log.Printf("[API][GetHostInfo] 获取主机信息失败: %v", err)
 		c.JSON(http.StatusOK, gin.H{
 			"code": e.ERROR,
-			"msg":  "更新玩家信息失败: " + err.Error(),
+			"msg":  "获取主机信息失败: " + err.Error(),
 			"data": nil,
 		})
 		return
@@ -180,10 +184,246 @@ func UpdatePlayerInfo(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": e.SUCCESS,
-		"msg":  "玩家信息更新成功",
+		"msg":  "获取主机信息成功",
 		"data": gin.H{
-			"output":       output,
-			"session_name": req.SessionName,
+			"archive_name": req.ArchiveName,
+			"world_name":   req.WorldName,
+			"host_count":   len(hosts),
+			"hosts":        hosts,
 		},
 	})
+}
+
+// GetPlayerConfig 从数据库中获取玩家配置信息
+func GetPlayerConfig(c *gin.Context) {
+	var req struct {
+		ArchiveName string `json:"archive_name" binding:"required"`
+		WorldName   string `json:"world_name"`
+		FilterMode  int    `json:"filter_mode"` // 过滤模式，0=全部显示，1=只显示主机，2=只显示玩家
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"code": e.INVALID_PARAMS,
+			"msg":  "无效的请求参数: " + err.Error(),
+			"data": nil,
+		})
+		return
+	}
+
+	// 验证过滤模式
+	if req.FilterMode < 0 || req.FilterMode > 2 {
+		req.FilterMode = 0 // 默认显示全部
+	}
+
+	// 输出过滤模式信息
+	var modeDesc string
+	switch req.FilterMode {
+	case 0:
+		modeDesc = "全部"
+	case 1:
+		modeDesc = "只显示主机"
+	case 2:
+		modeDesc = "只显示玩家"
+	}
+
+	log.Printf("[API][GetPlayerConfig] 开始从数据库中获取玩家配置信息，存档: %s, 世界: %s, 模式: %s",
+		req.ArchiveName, req.WorldName, modeDesc)
+
+	// 从数据库中获取玩家配置信息
+	players, err := models.GetPlayerConfigInfo(req.ArchiveName, req.WorldName, req.FilterMode)
+	if err != nil {
+		log.Printf("[API][GetPlayerConfig] 获取玩家配置信息失败: %v", err)
+		c.JSON(http.StatusOK, gin.H{
+			"code": e.ERROR,
+			"msg":  "获取玩家配置信息失败: " + err.Error(),
+			"data": nil,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": e.SUCCESS,
+		"msg":  "获取玩家配置信息成功",
+		"data": gin.H{
+			"archive_name": req.ArchiveName,
+			"world_name":   req.WorldName,
+			"filter_mode":  req.FilterMode,
+			"player_count": len(players),
+			"players":      players,
+		},
+	})
+}
+
+// ReadPlayerConfig 手动读取玩家配置文件
+func ReadPlayerConfig(c *gin.Context) {
+	var req struct {
+		ArchiveName string `json:"archive_name" binding:"required"`
+		WorldName   string `json:"world_name" binding:"required"`
+		FilterMode  int    `json:"filter_mode"` // 过滤模式，0=全部显示，1=只显示主机，2=只显示玩家
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"code": e.INVALID_PARAMS,
+			"msg":  "无效的请求参数: " + err.Error(),
+			"data": nil,
+		})
+		return
+	}
+
+	// 验证过滤模式
+	if req.FilterMode < 0 || req.FilterMode > 2 {
+		req.FilterMode = 0 // 默认显示全部
+	}
+
+	// 输出过滤模式信息
+	var modeDesc string
+	switch req.FilterMode {
+	case 0:
+		modeDesc = "全部"
+	case 1:
+		modeDesc = "只显示主机"
+	case 2:
+		modeDesc = "只显示玩家"
+	}
+
+	log.Printf("[API][ReadPlayerConfig] 开始读取玩家配置文件，存档: %s, 世界: %s, 模式: %s",
+		req.ArchiveName, req.WorldName, modeDesc)
+
+	// 直接调用 cron 包中的 ReadPlayerConfigFile 函数
+	output, err := cron.ReadPlayerConfigFile(req.ArchiveName, req.WorldName, req.FilterMode)
+	if err != nil {
+		log.Printf("[API][ReadPlayerConfig] 读取玩家配置文件失败: %v", err)
+		c.JSON(http.StatusOK, gin.H{
+			"code": e.ERROR,
+			"msg":  "读取玩家配置文件失败: " + err.Error(),
+			"data": nil,
+		})
+		return
+	}
+
+	// 获取存档路径
+	dstSavePath := getDstSavePath()
+	log.Printf("[API][ReadPlayerConfig] 存档路径: %s", dstSavePath)
+
+	// 构建玩家配置文件路径
+	playerConfigPath := filepath.Join(dstSavePath, req.ArchiveName, req.WorldName, "save", "mod_config_data", "players")
+	log.Printf("[API][ReadPlayerConfig] 玩家配置文件路径: %s", playerConfigPath)
+
+	// 读取文件并解析详细信息
+	fileContent, err := os.ReadFile(playerConfigPath)
+	if err != nil {
+		log.Printf("[API][ReadPlayerConfig] 读取玩家配置文件失败: %v", err)
+		c.JSON(http.StatusOK, gin.H{
+			"code": e.ERROR,
+			"msg":  "读取玩家配置文件失败: " + err.Error(),
+			"data": gin.H{
+				"output":        output,
+				"archive_name":  req.ArchiveName,
+				"world_name":    req.WorldName,
+				"config_path":   playerConfigPath,
+				"detailed_info": nil,
+			},
+		})
+		return
+	}
+
+	// 解析玩家配置文件
+	players, err := cron.ParsePlayerConfigString(string(fileContent))
+	if err != nil {
+		log.Printf("[API][ReadPlayerConfig] 解析玩家配置文件失败: %v", err)
+		c.JSON(http.StatusOK, gin.H{
+			"code": e.ERROR,
+			"msg":  "解析玩家配置文件失败: " + err.Error(),
+			"data": gin.H{
+				"output":        output,
+				"archive_name":  req.ArchiveName,
+				"world_name":    req.WorldName,
+				"config_path":   playerConfigPath,
+				"detailed_info": nil,
+			},
+		})
+		return
+	}
+
+	// 将玩家配置信息保存到数据库
+	if err := models.SavePlayerConfigInfo(req.ArchiveName, req.WorldName, players); err != nil {
+		log.Printf("[API][ReadPlayerConfig] 保存玩家配置信息到数据库失败: %v", err)
+		// 不返回错误，继续处理
+	}
+
+	// 根据过滤模式过滤玩家列表
+	var displayPlayers []types.PlayerConfigInfo
+	switch req.FilterMode {
+	case 1: // 只显示主机
+		for _, player := range players {
+			if player.IsHost {
+				displayPlayers = append(displayPlayers, player)
+			}
+		}
+	case 2: // 只显示玩家
+		for _, player := range players {
+			if !player.IsHost {
+				displayPlayers = append(displayPlayers, player)
+			}
+		}
+	default: // 显示全部
+		displayPlayers = players
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": e.SUCCESS,
+		"msg":  "读取玩家配置文件成功",
+		"data": gin.H{
+			"output":        output,
+			"archive_name":  req.ArchiveName,
+			"world_name":    req.WorldName,
+			"config_path":   playerConfigPath,
+			"player_count":  len(displayPlayers),
+			"detailed_info": displayPlayers,
+			"total_count":   len(players),
+			"filter_mode":   req.FilterMode,
+		},
+	})
+}
+
+// getDstSavePath 获取DST存档路径
+func getDstSavePath() string {
+	// 默认路径
+	dstSavePath := "./Klei/DoNotStarveTogether"
+
+	// 直接使用配置文件中的路径
+	configFile := "./conf/app.conf"
+	log.Printf("[API][getDstSavePath] 尝试读取配置文件: %s", configFile)
+
+	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
+		log.Printf("[API][getDstSavePath] 配置文件存在")
+		if cfg, err := ini.Load(configFile); err == nil {
+			log.Printf("[API][getDstSavePath] 成功加载配置文件")
+			// 读取路径配置
+			if cfg.Section("paths").HasKey("DST_SAVE_PATH") {
+				dstSavePath = cfg.Section("paths").Key("DST_SAVE_PATH").String()
+				log.Printf("[API][getDstSavePath] 从配置文件加载DST存档路径: %s", dstSavePath)
+				return dstSavePath
+			} else {
+				log.Printf("[API][getDstSavePath] 配置文件中没有 DST_SAVE_PATH 配置")
+			}
+		} else {
+			log.Printf("[API][getDstSavePath] 加载配置文件失败: %v", err)
+		}
+	} else {
+		log.Printf("[API][getDstSavePath] 配置文件不存在: %s", configFile)
+	}
+
+	// 如果配置文件不存在或者没有配置，尝试使用环境变量
+	if envPath := os.Getenv("DST_SAVE_PATH"); envPath != "" {
+		dstSavePath = envPath
+		log.Printf("[API][getDstSavePath] 从环境变量加载DST存档路径: %s", dstSavePath)
+		return dstSavePath
+	}
+
+	// 如果环境变量也没有设置，使用默认路径
+	log.Printf("[API][getDstSavePath] 使用默认路径: %s", dstSavePath)
+	return dstSavePath
 }

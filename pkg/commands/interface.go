@@ -1,6 +1,8 @@
 package commands
 
-import "dont/pkg/commands/types"
+import (
+	"dont/pkg/commands/types"
+)
 
 // CommandManagerInterface 命令管理器接口
 type CommandManagerInterface interface {

@@ -239,6 +239,90 @@
 }
 ```
 
+### 7. 读取玩家配置文件
+
+手动读取和解析玩家配置文件。
+
+**请求方式**: `POST`
+
+**路径**: `/api/player/config`
+
+**请求体**:
+
+```json
+{
+  "archive_name": "MyCluster",
+  "world_name": "Master",
+  "filter_mode": 0
+}
+```
+
+| 参数名 | 类型 | 必需 | 描述 |
+|-------|------|------|------|
+| archive_name | string | 是 | 存档名称 |
+| world_name | string | 是 | 世界名称 |
+| filter_mode | int | 否 | 过滤模式，0=全部显示（默认），1=只显示主机，2=只显示玩家 |
+
+**响应示例**:
+
+```json
+{
+  "code": 200,
+  "msg": "读取玩家配置文件成功",
+  "data": {
+    "output": "成功读取玩家配置文件",
+    "archive_name": "MyCluster",
+    "world_name": "Master",
+    "config_path": "/path/to/Klei/DoNotStarveTogether/MyCluster/Master/save/mod_config_data/players",
+    "player_count": 2,
+    "detailed_info": [
+      {
+        "UserID": "KU_F4GEnAsM",
+        "Name": "[Host]",
+        "Admin": true,
+        "EventLevel": 0,
+        "Muted": false,
+        "Friend": false,
+        "PlayerAge": 52,
+        "IsHost": true,
+        "UserFlags": 0,
+        "Performance": 0,
+        "Prefab": "webber",
+        "LobbyCharacter": "webber",
+        "Colour": [0.5, 0.5, 0.5, 1],
+        "BaseSkin": "webber_none",
+        "NetID": "76561198812646511",
+        "NetScore": 0,
+        "SkillSelection": [0],
+        "Vanity": {},
+        "Equip": {}
+      },
+      {
+        "UserID": "KU_HQp7BOVs",
+        "Name": "lcy",
+        "Admin": true,
+        "EventLevel": 0,
+        "Muted": false,
+        "Friend": false,
+        "PlayerAge": 2,
+        "IsHost": false,
+        "UserFlags": 8,
+        "Performance": 0,
+        "Prefab": "wormwood",
+        "LobbyCharacter": "",
+        "Colour": [1, 0.647, 0.31, 1],
+        "BaseSkin": "wormwood_none",
+        "NetID": "76561198812646511",
+        "NetScore": 0,
+        "SkillSelection": [0],
+        "Vanity": {},
+        "Equip": {}
+      }
+    ]
+  }
+}
+```
+
 ## 错误码
 
 | 错误码 | 描述 |

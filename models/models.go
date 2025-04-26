@@ -1,10 +1,10 @@
 package models
 
 import (
+	"dont/pkg/setting"
 	"fmt"
 	"log"
 
-	"dont/pkg/setting"
 	"github.com/jinzhu/gorm"
 	//_ "github.com/jinzhu/gorm/dialects/mysql"
 	_ "github.com/mattn/go-sqlite3"
@@ -86,6 +86,10 @@ func initGameLogTables() {
 	db.AutoMigrate(&LogStatistics{})
 	// 初始化玩家信息表
 	InitPlayerInfoTable()
+	// 初始化主机信息表
+	InitHostInfoTable()
+	// 初始化世界状态信息表
+	InitWorldStateInfoTable()
 
 	log.Println("游戏日志相关表结构初始化完成")
 }

@@ -826,43 +826,6 @@ type ArchiveWorldInfo struct {
 	Worlds      []string `json:"worlds"`       // 世界列表
 }
 
-// CleanupGameLogs 清空指定存档和世界的日志记录
-func CleanupGameLogs(archiveName, worldName string) error {
-	logger.Printf("[Models] CleanupGameLogs: 开始清空存档 %s 世界 %s 的日志记录", archiveName, worldName)
-
-	// 检查数据库连接
-	if db == nil {
-		logger.Printf("[Models] CleanupGameLogs 失败: 数据库连接为空")
-		return fmt.Errorf("数据库连接为空")
-	}
-
-	// 开始事务
-	tx := db.Begin()
-
-	// 删除游戏日志记录
-	if err := tx.Where("archive_name = ? AND world_name = ?", archiveName, worldName).Delete(&GameLog{}).Error; err != nil {
-		tx.Rollback()
-		logger.Printf("[Models] CleanupGameLogs 删除游戏日志记录失败: %v", err)
-		return fmt.Errorf("删除游戏日志记录失败: %w", err)
-	}
-
-	// 删除日志统计记录
-	if err := tx.Where("archive_name = ? AND world_name = ?", archiveName, worldName).Delete(&LogStatistics{}).Error; err != nil {
-		tx.Rollback()
-		logger.Printf("[Models] CleanupGameLogs 删除日志统计记录失败: %v", err)
-		return fmt.Errorf("删除日志统计记录失败: %w", err)
-	}
-
-	// 提交事务
-	if err := tx.Commit().Error; err != nil {
-		logger.Printf("[Models] CleanupGameLogs 提交事务失败: %v", err)
-		return fmt.Errorf("提交事务失败: %w", err)
-	}
-
-	logger.Printf("[Models] CleanupGameLogs: 成功清空存档 %s 世界 %s 的日志记录", archiveName, worldName)
-	return nil
-}
-
 // GetArchivesWithLogs 获取有日志的存档和世界列表
 func GetArchivesWithLogs() ([]ArchiveWorldInfo, error) {
 	logger.Printf("[Models] GetArchivesWithLogs: 开始查询有日志的存档和世界列表")

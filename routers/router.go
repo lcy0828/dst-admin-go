@@ -17,6 +17,7 @@ import (
 	"dont/routers/tag"
 	"dont/routers/tmux"
 	"dont/routers/user"
+	"dont/routers/world"
 
 	"github.com/gin-gonic/gin"
 )
@@ -239,9 +240,14 @@ func InitRouter() *gin.Engine {
 			playerGroup.GET("/all", player.GetAllPlayers)          // 获取所有玩家列表
 			playerGroup.GET("/stats", player.GetPlayerStats)       // 获取玩家统计信息
 			playerGroup.GET("/detail/:id", player.GetPlayerDetail) // 获取玩家详情
-			playerGroup.POST("/update", player.UpdatePlayerInfo)   // 手动更新玩家信息
+			// playerGroup.POST("/update", player.UpdatePlayerInfo)   // 手动更新玩家信息 - 已移除
 			playerGroup.GET("/archives", player.GetPlayerArchives) // 获取玩家数据库中的存档列表
+			playerGroup.POST("/config", player.ReadPlayerConfig)   // 手动读取玩家配置文件
+			playerGroup.POST("/db/config", player.GetPlayerConfig) // 从数据库中获取玩家配置信息
 		}
+
+		// 世界状态管理API
+		world.RegisterWorldRoutes(api)
 
 		// Tmux服务器管理API
 		tmuxGroup := api.Group("/tmux")

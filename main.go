@@ -5,6 +5,7 @@ import (
 	"dont/cron"
 	"dont/models"
 	"dont/pkg/commands"
+	"dont/pkg/setting"
 	"dont/routers"
 	"dont/routers/backup"
 	"dont/server"
@@ -18,8 +19,6 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
-
-	"dont/pkg/setting"
 )
 
 var (

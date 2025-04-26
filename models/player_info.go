@@ -1,11 +1,16 @@
 package models
 
 import (
+	"dont/pkg/types"
+	"encoding/json"
+	"fmt"
 	"log"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jinzhu/gorm"
 )
 
 // PlayerStatus 玩家状态
@@ -16,18 +21,37 @@ const (
 
 // PlayerInfo 玩家信息表
 type PlayerInfo struct {
-	ID           int       `gorm:"primary_key" json:"id"`
-	ArchiveName  string    `json:"archive_name"`  // 存档名称
-	UserID       string    `json:"user_id"`       // 玩家ID (KU_xxx格式)
-	PlayerName   string    `json:"player_name"`   // 玩家名称
-	PlayerAge    int       `json:"player_age"`    // 玩家年龄
-	Prefab       string    `json:"prefab"`        // 玩家角色
-	Status       string    `json:"status"`        // 玩家状态：online/offline
-	FirstSeen    time.Time `json:"first_seen"`    // 首次出现时间
-	LastSeen     time.Time `json:"last_seen"`     // 最后出现时间
-	StatusChange time.Time `json:"status_change"` // 状态变更时间
-	CreatedAt    time.Time `json:"created_at"`    // 记录创建时间
-	UpdatedAt    time.Time `json:"updated_at"`    // 记录更新时间
+	ID             int       `gorm:"primary_key" json:"id"`
+	ArchiveName    string    `json:"archive_name"`    // 存档名称
+	WorldName      string    `json:"world_name"`      // 世界名称
+	UserID         string    `json:"user_id"`         // 玩家ID (KU_xxx格式)
+	PlayerName     string    `json:"player_name"`     // 玩家名称
+	PlayerAge      int       `json:"player_age"`      // 玩家年龄
+	Prefab         string    `json:"prefab"`          // 玩家角色
+	Status         string    `json:"status"`          // 玩家状态：online/offline
+	IsAdmin        bool      `json:"is_admin"`        // 是否管理员
+	IsHost         bool      `json:"is_host"`         // 是否主机
+	IsMuted        bool      `json:"is_muted"`        // 是否被禁言
+	IsFriend       bool      `json:"is_friend"`       // 是否好友
+	EventLevel     int       `json:"event_level"`     // 事件等级
+	UserFlags      int       `json:"user_flags"`      // 用户标志
+	Performance    int       `json:"performance"`     // 性能指标
+	LobbyCharacter string    `json:"lobby_character"` // 大厅角色
+	BaseSkin       string    `json:"base_skin"`       // 基础皮肤
+	NetID          string    `json:"net_id"`          // 网络服务标识符（通常是SteamID64）
+	NetScore       int       `json:"net_score"`       // 网络评分
+	ColourR        float32   `json:"colour_r"`        // 颜色R分量
+	ColourG        float32   `json:"colour_g"`        // 颜色G分量
+	ColourB        float32   `json:"colour_b"`        // 颜色B分量
+	ColourA        float32   `json:"colour_a"`        // 颜色A分量
+	SkillSelection string    `json:"skill_selection"` // 技能选择，以JSON字符串存储
+	Vanity         string    `json:"vanity"`          // 装饰性物品，以JSON字符串存储
+	Equip          string    `json:"equip"`           // 装备物品，以JSON字符串存储
+	FirstSeen      time.Time `json:"first_seen"`      // 首次出现时间
+	LastSeen       time.Time `json:"last_seen"`       // 最后出现时间
+	StatusChange   time.Time `json:"status_change"`   // 状态变更时间
+	CreatedAt      time.Time `json:"created_at"`      // 记录创建时间
+	UpdatedAt      time.Time `json:"updated_at"`      // 记录更新时间
 }
 
 // InitPlayerInfoTable 初始化玩家信息表
@@ -46,22 +70,46 @@ func InitPlayerInfoTable() {
 	}
 
 	// 添加索引以提高查询性能
+	// 为 archive_name 和 user_id 添加组合索引
 	if err := db.Model(&PlayerInfo{}).AddIndex("idx_player_info_archive_userid", "archive_name", "user_id").Error; err != nil {
 		log.Printf("[PlayerInfo] 添加索引 idx_player_info_archive_userid 失败: %v", err)
 	} else {
 		log.Println("[PlayerInfo] 添加索引 idx_player_info_archive_userid 成功")
 	}
 
+	// 为 archive_name 和 user_id 添加唯一索引
+	if err := db.Model(&PlayerInfo{}).AddUniqueIndex("idx_player_info_archive_userid_unique", "archive_name", "user_id").Error; err != nil {
+		log.Printf("[PlayerInfo] 添加唯一索引 idx_player_info_archive_userid_unique 失败: %v", err)
+	} else {
+		log.Println("[PlayerInfo] 添加唯一索引 idx_player_info_archive_userid_unique 成功")
+	}
+
+	// 为 status 添加索引
 	if err := db.Model(&PlayerInfo{}).AddIndex("idx_player_info_status", "status").Error; err != nil {
 		log.Printf("[PlayerInfo] 添加索引 idx_player_info_status 失败: %v", err)
 	} else {
 		log.Println("[PlayerInfo] 添加索引 idx_player_info_status 成功")
 	}
 
+	// 为 last_seen 添加索引
 	if err := db.Model(&PlayerInfo{}).AddIndex("idx_player_info_last_seen", "last_seen").Error; err != nil {
 		log.Printf("[PlayerInfo] 添加索引 idx_player_info_last_seen 失败: %v", err)
 	} else {
 		log.Println("[PlayerInfo] 添加索引 idx_player_info_last_seen 成功")
+	}
+
+	// 为 player_name 添加索引
+	if err := db.Model(&PlayerInfo{}).AddIndex("idx_player_info_player_name", "player_name").Error; err != nil {
+		log.Printf("[PlayerInfo] 添加索引 idx_player_info_player_name 失败: %v", err)
+	} else {
+		log.Println("[PlayerInfo] 添加索引 idx_player_info_player_name 成功")
+	}
+
+	// 为 net_id 添加索引
+	if err := db.Model(&PlayerInfo{}).AddIndex("idx_player_info_net_id", "net_id").Error; err != nil {
+		log.Printf("[PlayerInfo] 添加索引 idx_player_info_net_id 失败: %v", err)
+	} else {
+		log.Println("[PlayerInfo] 添加索引 idx_player_info_net_id 成功")
 	}
 
 	log.Println("[PlayerInfo] 玩家信息表初始化完成")
@@ -371,6 +419,42 @@ func GetPlayerByUserID(archiveName, userID string) (*PlayerInfo, error) {
 	return &player, nil
 }
 
+// GetPlayerConfigInfo 获取玩家配置信息
+func GetPlayerConfigInfo(archiveName, worldName string, filterMode int) ([]PlayerInfo, error) {
+	log.Printf("[PlayerInfo] 开始获取玩家配置信息, 存档: %s, 世界: %s, 过滤模式: %d",
+		archiveName, worldName, filterMode)
+
+	// 构建查询
+	query := db.Model(&PlayerInfo{})
+
+	// 添加存档名称条件
+	query = query.Where("archive_name = ?", archiveName)
+
+	// 如果提供了世界名称，添加世界名称条件
+	if worldName != "" {
+		query = query.Where("world_name = ?", worldName)
+	}
+
+	// 根据过滤模式添加条件
+	switch filterMode {
+	case 1: // 只显示主机
+		query = query.Where("is_host = ?", true)
+	case 2: // 只显示玩家
+		query = query.Where("is_host = ?", false)
+	}
+
+	// 执行查询
+	var players []PlayerInfo
+	err := query.Order("last_seen DESC").Find(&players).Error
+	if err != nil {
+		log.Printf("[PlayerInfo] 获取玩家配置信息失败: %v", err)
+		return nil, err
+	}
+
+	log.Printf("[PlayerInfo] 成功获取 %d 个玩家配置信息", len(players))
+	return players, nil
+}
+
 // GetPlayerStats 获取玩家统计信息
 // 如果提供 archiveName，则只获取指定存档的统计信息
 // 如果不提供 archiveName，则获取所有存档的统计信息
@@ -481,4 +565,321 @@ func GetPlayerArchives() ([]string, error) {
 
 	log.Printf("[PlayerInfo] 查询到 %d 个存档", len(archives))
 	return archives, nil
+}
+
+// DeleteDuplicatePlayerInfo 删除重复的玩家信息记录
+// 根据archive_name和user_id判断唯一性，保留最新的记录
+func DeleteDuplicatePlayerInfo() error {
+	log.Println("[PlayerInfo] 开始删除重复的玩家信息记录")
+
+	// 查询所有玩家信息记录，按archive_name和user_id分组
+	rows, err := db.Raw(`
+		SELECT p1.id, p1.archive_name, p1.user_id
+		FROM dont_player_info p1
+		INNER JOIN (
+			SELECT archive_name, user_id, MAX(id) as max_id
+			FROM dont_player_info
+			GROUP BY archive_name, user_id
+			HAVING COUNT(*) > 1
+		) p2 ON p1.archive_name = p2.archive_name AND p1.user_id = p2.user_id AND p1.id != p2.max_id
+	`).Rows()
+
+	if err != nil {
+		log.Printf("[PlayerInfo] 查询重复记录失败: %v", err)
+		return err
+	}
+	defer rows.Close()
+
+	// 删除重复记录
+	var duplicateIDs []int
+	for rows.Next() {
+		var id int
+		var archiveName, userID string
+		if err := rows.Scan(&id, &archiveName, &userID); err != nil {
+			log.Printf("[PlayerInfo] 扫描行数据失败: %v", err)
+			continue
+		}
+		duplicateIDs = append(duplicateIDs, id)
+		log.Printf("[PlayerInfo] 发现重复记录: ID=%d, 存档=%s, 用户ID=%s", id, archiveName, userID)
+	}
+
+	// 删除重复记录
+	if len(duplicateIDs) > 0 {
+		for _, id := range duplicateIDs {
+			if err := db.Where("id = ?", id).Delete(&PlayerInfo{}).Error; err != nil {
+				log.Printf("[PlayerInfo] 删除重复记录失败: ID=%d, 错误=%v", id, err)
+			} else {
+				log.Printf("[PlayerInfo] 成功删除重复记录: ID=%d", id)
+			}
+		}
+	} else {
+		log.Println("[PlayerInfo] 未发现重复记录")
+	}
+
+	return nil
+}
+
+// RebuildPlayerInfoTable 重建玩家信息表结构
+// 这个函数会删除旧的唯一索引，并添加新的唯一索引
+func RebuildPlayerInfoTable() error {
+	log.Println("[PlayerInfo] 开始重建玩家信息表结构")
+
+	// 删除旧的唯一索引
+	if err := db.Exec("DROP INDEX IF EXISTS idx_player_info_archive_world_userid").Error; err != nil {
+		log.Printf("[PlayerInfo] 删除旧的唯一索引失败: %v", err)
+		return err
+	}
+	log.Println("[PlayerInfo] 成功删除旧的唯一索引")
+
+	// 添加新的唯一索引
+	if err := db.Model(&PlayerInfo{}).AddUniqueIndex("idx_player_info_archive_userid_unique", "archive_name", "user_id").Error; err != nil {
+		log.Printf("[PlayerInfo] 添加新的唯一索引失败: %v", err)
+		return err
+	}
+	log.Println("[PlayerInfo] 成功添加新的唯一索引")
+
+	// 删除重复记录
+	if err := DeleteDuplicatePlayerInfo(); err != nil {
+		log.Printf("[PlayerInfo] 删除重复记录失败: %v", err)
+		return err
+	}
+
+	log.Println("[PlayerInfo] 玩家信息表结构重建完成")
+	return nil
+}
+
+// SavePlayerConfigInfo 保存玩家配置信息到数据库
+func SavePlayerConfigInfo(archiveName, worldName string, playerConfigs []types.PlayerConfigInfo) error {
+	log.Printf("[PlayerInfo] 开始保存玩家配置信息到数据库, 存档: %s, 世界: %s, 玩家数: %d",
+		archiveName, worldName, len(playerConfigs))
+
+	// 获取当前时间
+	now := time.Now()
+
+	// 开启事务
+	tx := db.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+
+	// 创建一个map来跟踪配置文件中的玩家ID
+	currentPlayerIDs := make(map[string]bool)
+	for _, config := range playerConfigs {
+		currentPlayerIDs[config.UserID] = true
+	}
+
+	// 处理每个玩家配置
+	for _, config := range playerConfigs {
+		// 如果是主机，则保存到主机信息表
+		if config.IsHost {
+			// 将技能选择、装饰物品和装备物品转换为JSON字符串
+			skillSelectionJSON, _ := json.Marshal(config.SkillSelection)
+			vanityJSON, _ := json.Marshal(config.Vanity)
+			equipJSON, _ := json.Marshal(config.Equip)
+
+			// 创建主机信息对象
+			hostInfo := &HostInfo{
+				ArchiveName:    archiveName,
+				WorldName:      worldName,
+				UserID:         config.UserID,
+				Name:           config.Name,
+				Performance:    config.Performance,
+				EventLevel:     config.EventLevel,
+				UserFlags:      config.UserFlags,
+				ColourR:        config.Colour[0],
+				ColourG:        config.Colour[1],
+				ColourB:        config.Colour[2],
+				ColourA:        config.Colour[3],
+				SkillSelection: string(skillSelectionJSON),
+				Vanity:         string(vanityJSON),
+				Equip:          string(equipJSON),
+				LastSeen:       now,
+				UpdatedAt:      now,
+			}
+
+			// 保存主机信息 - 根据存档名称和用户ID判断唯一性
+			var existingHost HostInfo
+			result := tx.Where("archive_name = ? AND user_id = ?",
+				archiveName, config.UserID).First(&existingHost)
+
+			if result.Error != nil && !gorm.IsRecordNotFoundError(result.Error) {
+				// 查询出错，但不是因为记录不存在
+				tx.Rollback()
+				return result.Error
+			} else if gorm.IsRecordNotFoundError(result.Error) {
+				// 主机不存在，创建新记录
+				hostInfo.FirstSeen = now
+				hostInfo.CreatedAt = now
+
+				if err := tx.Create(hostInfo).Error; err != nil {
+					tx.Rollback()
+					return err
+				}
+
+				log.Printf("[PlayerInfo] 创建新主机记录: UserID=%s, 名称='%s', 存档=%s, 世界=%s",
+					config.UserID, config.Name, archiveName, worldName)
+			} else {
+				// 主机已存在，更新记录
+				existingHost.Name = config.Name
+				existingHost.Performance = config.Performance
+				existingHost.EventLevel = config.EventLevel
+				existingHost.UserFlags = config.UserFlags
+				existingHost.ColourR = config.Colour[0]
+				existingHost.ColourG = config.Colour[1]
+				existingHost.ColourB = config.Colour[2]
+				existingHost.ColourA = config.Colour[3]
+				existingHost.SkillSelection = string(skillSelectionJSON)
+				existingHost.Vanity = string(vanityJSON)
+				existingHost.Equip = string(equipJSON)
+				existingHost.LastSeen = now
+				existingHost.UpdatedAt = now
+
+				if err := tx.Save(&existingHost).Error; err != nil {
+					tx.Rollback()
+					return err
+				}
+
+				log.Printf("[PlayerInfo] 更新主机记录: UserID=%s, 名称='%s', 存档=%s, 世界=%s",
+					config.UserID, config.Name, archiveName, worldName)
+			}
+
+			// 主机信息已处理，继续下一个配置
+			continue
+		}
+
+		// 如果不是主机，则保存到玩家信息表
+		// 查询玩家是否已存在 - 根据存档名称和用户ID判断唯一性
+		var existingPlayer PlayerInfo
+		result := tx.Where("archive_name = ? AND user_id = ?",
+			archiveName, config.UserID).First(&existingPlayer)
+
+		// 将技能选择、装饰物品和装备物品转换为JSON字符串
+		skillSelectionJSON, _ := json.Marshal(config.SkillSelection)
+		vanityJSON, _ := json.Marshal(config.Vanity)
+		equipJSON, _ := json.Marshal(config.Equip)
+
+		if result.Error != nil && !gorm.IsRecordNotFoundError(result.Error) {
+			// 查询出错，但不是因为记录不存在
+			tx.Rollback()
+			return result.Error
+		} else if gorm.IsRecordNotFoundError(result.Error) {
+			// 玩家不存在，创建新记录
+			newPlayer := PlayerInfo{
+				ArchiveName:    archiveName,
+				WorldName:      worldName,
+				UserID:         config.UserID,
+				PlayerName:     config.Name,
+				PlayerAge:      config.PlayerAge,
+				Prefab:         config.Prefab,
+				Status:         PlayerStatusOnline, // 设置为在线状态，因为玩家配置文件中的玩家都是在线的
+				IsAdmin:        config.Admin,
+				IsHost:         config.IsHost,
+				IsMuted:        config.Muted,
+				IsFriend:       config.Friend,
+				EventLevel:     config.EventLevel,
+				UserFlags:      config.UserFlags,
+				Performance:    config.Performance,
+				LobbyCharacter: config.LobbyCharacter,
+				BaseSkin:       config.BaseSkin,
+				NetID:          config.NetID,
+				NetScore:       config.NetScore,
+				ColourR:        config.Colour[0],
+				ColourG:        config.Colour[1],
+				ColourB:        config.Colour[2],
+				ColourA:        config.Colour[3],
+				SkillSelection: string(skillSelectionJSON),
+				Vanity:         string(vanityJSON),
+				Equip:          string(equipJSON),
+				FirstSeen:      now,
+				LastSeen:       now,
+				StatusChange:   now,
+				CreatedAt:      now,
+				UpdatedAt:      now,
+			}
+
+			if err := tx.Create(&newPlayer).Error; err != nil {
+				tx.Rollback()
+				return err
+			}
+
+			log.Printf("[PlayerInfo] 创建新玩家记录: UserID=%s, 名称='%s', 存档=%s, 世界=%s",
+				config.UserID, config.Name, archiveName, worldName)
+		} else {
+			// 玩家已存在，更新记录
+			existingPlayer.PlayerName = config.Name
+			existingPlayer.PlayerAge = config.PlayerAge
+			existingPlayer.Prefab = config.Prefab
+			existingPlayer.IsAdmin = config.Admin
+			existingPlayer.IsHost = config.IsHost
+			existingPlayer.IsMuted = config.Muted
+			existingPlayer.IsFriend = config.Friend
+			existingPlayer.EventLevel = config.EventLevel
+			existingPlayer.UserFlags = config.UserFlags
+			existingPlayer.Performance = config.Performance
+			existingPlayer.LobbyCharacter = config.LobbyCharacter
+			existingPlayer.BaseSkin = config.BaseSkin
+			existingPlayer.NetID = config.NetID
+			existingPlayer.NetScore = config.NetScore
+			existingPlayer.ColourR = config.Colour[0]
+			existingPlayer.ColourG = config.Colour[1]
+			existingPlayer.ColourB = config.Colour[2]
+			existingPlayer.ColourA = config.Colour[3]
+			existingPlayer.SkillSelection = string(skillSelectionJSON)
+			existingPlayer.Vanity = string(vanityJSON)
+			existingPlayer.Equip = string(equipJSON)
+			existingPlayer.LastSeen = now
+			existingPlayer.UpdatedAt = now
+
+			// 更新玩家状态，如果玩家当前为离线状态，则更新为在线状态
+			if existingPlayer.Status == PlayerStatusOffline {
+				existingPlayer.Status = PlayerStatusOnline
+				existingPlayer.StatusChange = now
+				log.Printf("[PlayerInfo] 玩家状态从离线变为在线: UserID=%s, 名称='%s', 存档=%s",
+					config.UserID, config.Name, archiveName)
+			}
+
+			if err := tx.Save(&existingPlayer).Error; err != nil {
+				tx.Rollback()
+				return err
+			}
+
+			log.Printf("[PlayerInfo] 更新玩家记录: UserID=%s, 名称='%s', 存档=%s, 世界=%s",
+				config.UserID, config.Name, archiveName, worldName)
+		}
+	}
+
+	// 将数据库中存在但配置文件中不存在的玩家标记为离线
+	var existingPlayers []PlayerInfo
+	if err := tx.Where("archive_name = ? AND status = ?", archiveName, PlayerStatusOnline).Find(&existingPlayers).Error; err != nil {
+		tx.Rollback()
+		return fmt.Errorf("获取存档 %s 中的在线玩家失败: %v", archiveName, err)
+	}
+
+	// 检查每个在线玩家，如果不在当前配置文件中，则标记为离线
+	for _, player := range existingPlayers {
+		if !currentPlayerIDs[player.UserID] {
+			// 玩家不在当前配置文件中，标记为离线
+			updates := map[string]interface{}{
+				"status":        PlayerStatusOffline,
+				"status_change": now,
+				"updated_at":    now,
+			}
+
+			if err := tx.Model(&PlayerInfo{}).Where("id = ?", player.ID).Updates(updates).Error; err != nil {
+				tx.Rollback()
+				return fmt.Errorf("更新玩家 %s (%s) 的状态失败: %v", player.PlayerName, player.UserID, err)
+			}
+
+			log.Printf("[PlayerInfo] 玩家状态从在线变为离线: UserID=%s, 名称='%s', 存档=%s",
+				player.UserID, player.PlayerName, archiveName)
+		}
+	}
+
+	// 提交事务
+	if err := tx.Commit().Error; err != nil {
+		return err
+	}
+
+	log.Printf("[PlayerInfo] 成功保存 %d 个玩家配置信息到数据库", len(playerConfigs))
+	return nil
 }
