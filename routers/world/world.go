@@ -1,8 +1,10 @@
 package world
 
 import (
+	"dont/cron"
 	"dont/models"
 	"dont/pkg/e"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -118,9 +120,13 @@ func ReadWorldState(c *gin.Context) {
 		return
 	}
 
-	// 调用 cron 包中的 ReadWorldStateFile 函数
-	output, err := models.CallCronFunction("read_world_state", req.ArchiveName, req.WorldName)
+	log.Printf("[API][ReadWorldState] 开始读取世界状态文件，存档: %s, 世界: %s",
+		req.ArchiveName, req.WorldName)
+
+	// 直接调用 cron 包中的 ReadWorldStateFile 函数
+	output, err := cron.ReadWorldStateFile(req.ArchiveName, req.WorldName)
 	if err != nil {
+		log.Printf("[API][ReadWorldState] 读取世界状态文件失败: %v", err)
 		c.JSON(http.StatusOK, gin.H{
 			"code": e.ERROR,
 			"msg":  "读取世界状态文件失败: " + err.Error(),
@@ -132,6 +138,7 @@ func ReadWorldState(c *gin.Context) {
 	// 从数据库中获取最新的世界状态信息
 	worldState, err := models.GetLatestWorldStateInfo(req.ArchiveName, req.WorldName)
 	if err != nil {
+		log.Printf("[API][ReadWorldState] 获取世界状态信息失败: %v", err)
 		c.JSON(http.StatusOK, gin.H{
 			"code": e.ERROR,
 			"msg":  "获取世界状态信息失败: " + err.Error(),
@@ -144,6 +151,9 @@ func ReadWorldState(c *gin.Context) {
 		})
 		return
 	}
+
+	log.Printf("[API][ReadWorldState] 成功读取世界状态文件，存档: %s, 世界: %s",
+		req.ArchiveName, req.WorldName)
 
 	c.JSON(http.StatusOK, gin.H{
 		"code": e.SUCCESS,
