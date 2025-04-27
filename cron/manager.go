@@ -15,6 +15,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,6 +70,15 @@ func (m *TaskManager) registerBuiltinFunctions() {
 
 	// 注册玩家相关任务
 	RegisterPlayerTasks(m)
+
+	// 注册玩家配置相关任务
+	RegisterPlayerConfigTasks(m)
+
+	// 注册世界状态相关任务
+	RegisterWorldStateTasks(m)
+
+	// 注册服务器监控相关任务
+	RegisterServerMonitorTasks(m)
 
 	// 注册日志清理函数
 	m.RegisterFunctionWithInfo("cleanupLogs", func(retentionDays int) {
@@ -604,7 +615,38 @@ func (m *TaskManager) executeFunction(task *models.CronTask) (string, error) {
 	fnType := fnValue.Type()
 
 	// 检查参数数量
-	if fnType.NumIn() != len(args) {
+	// 获取函数信息以检查是否有可选参数
+	m.mutex.RLock()
+	fnInfo, infoExists := m.functionInfoMap[task.Target]
+	m.mutex.RUnlock()
+
+	// 如果函数是可变参数函数
+	if fnType.IsVariadic() {
+		// 可变参数函数至少需要满足非可变部分的参数数量
+		minArgs := fnType.NumIn() - 1 // 减去可变参数部分
+		if len(args) < minArgs {
+			return "", fmt.Errorf("参数数量不足: 至少需要 %d 个参数, 实际提供 %d 个", minArgs, len(args))
+		}
+	} else if infoExists && len(fnInfo.ParamTypes) > 0 {
+		// 检查是否有可选参数标记
+		requiredParams := 0
+		for _, paramType := range fnInfo.ParamTypes {
+			if !strings.HasSuffix(paramType, "?") { // 不以?结尾的是必需参数
+				requiredParams++
+			}
+		}
+
+		// 检查必需参数数量
+		if len(args) < requiredParams {
+			return "", fmt.Errorf("参数数量不足: 至少需要 %d 个参数, 实际提供 %d 个", requiredParams, len(args))
+		}
+
+		// 检查参数数量上限
+		if len(args) > len(fnInfo.ParamTypes) {
+			return "", fmt.Errorf("参数数量过多: 最多需要 %d 个参数, 实际提供 %d 个", len(fnInfo.ParamTypes), len(args))
+		}
+	} else if fnType.NumIn() != len(args) {
+		// 如果没有可选参数标记，则要求参数数量完全匹配
 		return "", fmt.Errorf("参数数量不匹配: 期望 %d, 实际 %d", fnType.NumIn(), len(args))
 	}
 
@@ -634,6 +676,144 @@ func (m *TaskManager) executeFunction(task *models.CronTask) (string, error) {
 
 	// 返回捕获到的输出
 	return outputBuffer.String(), nil
+}
+
+// ExecuteTaskCommand 执行任务命令并返回结果
+func (m *TaskManager) ExecuteTaskCommand(task *models.CronTask) (string, error) {
+	// 如果是函数类型的任务，则解析命令字符串
+	if task.Type == "function" || task.Command != "" {
+		// 解析命令字符串
+		funcName, args, err := m.parseCommand(task.Command)
+		if err != nil {
+			return "", fmt.Errorf("解析命令失败: %v", err)
+		}
+
+		// 设置任务目标和参数
+		task.Target = funcName
+		if err := task.SetArgs(args); err != nil {
+			return "", fmt.Errorf("设置参数失败: %v", err)
+		}
+
+		// 执行函数
+		return m.executeFunction(task)
+	}
+
+	// 如果是其他类型的任务，则根据类型执行
+	switch task.Type {
+	case "shell":
+		return m.executeShell(task)
+	case "tmux_command":
+		return m.executeTmuxCommand(task)
+	case "tmux_raw_command":
+		return m.executeTmuxRawCommand(task)
+	default:
+		return "", fmt.Errorf("不支持的任务类型: %s", task.Type)
+	}
+}
+
+// parseCommand 解析命令字符串，提取函数名和参数
+func (m *TaskManager) parseCommand(command string) (string, []interface{}, error) {
+	// 提取函数名
+	funcNameEndIndex := strings.Index(command, "(")
+	if funcNameEndIndex == -1 {
+		return "", nil, fmt.Errorf("无效的命令格式: %s", command)
+	}
+
+	funcName := strings.TrimSpace(command[:funcNameEndIndex])
+	if funcName == "" {
+		return "", nil, fmt.Errorf("函数名为空")
+	}
+
+	// 检查函数是否存在
+	m.mutex.RLock()
+	_, exists := m.functionMap[funcName]
+	m.mutex.RUnlock()
+
+	if !exists {
+		return "", nil, fmt.Errorf("函数不存在: %s", funcName)
+	}
+
+	// 提取参数字符串
+	if funcNameEndIndex+1 >= len(command) || command[len(command)-1] != ')' {
+		return "", nil, fmt.Errorf("无效的命令格式: %s", command)
+	}
+
+	argsStr := command[funcNameEndIndex+1 : len(command)-1]
+	argsStr = strings.TrimSpace(argsStr)
+
+	// 如果没有参数，返回空数组
+	if argsStr == "" {
+		return funcName, []interface{}{}, nil
+	}
+
+	// 解析参数
+	var args []interface{}
+	// 分割参数，考虑引号内的逗号
+	var currentArg strings.Builder
+	inQuotes := false
+	for i := 0; i < len(argsStr); i++ {
+		ch := argsStr[i]
+		if ch == '"' {
+			// 切换引号状态
+			inQuotes = !inQuotes
+			currentArg.WriteByte(ch)
+		} else if ch == ',' && !inQuotes {
+			// 如果不在引号内且遇到逗号，则完成一个参数
+			arg := strings.TrimSpace(currentArg.String())
+			if arg != "" {
+				// 解析参数值
+				parsedArg, err := parseArgValue(arg)
+				if err != nil {
+					return "", nil, fmt.Errorf("解析参数失败: %v", err)
+				}
+				args = append(args, parsedArg)
+			}
+			currentArg.Reset()
+		} else {
+			currentArg.WriteByte(ch)
+		}
+	}
+
+	// 处理最后一个参数
+	arg := strings.TrimSpace(currentArg.String())
+	if arg != "" {
+		// 解析参数值
+		parsedArg, err := parseArgValue(arg)
+		if err != nil {
+			return "", nil, fmt.Errorf("解析参数失败: %v", err)
+		}
+		args = append(args, parsedArg)
+	}
+
+	return funcName, args, nil
+}
+
+// parseArgValue 解析参数值
+func parseArgValue(arg string) (interface{}, error) {
+	// 如果是字符串
+	if strings.HasPrefix(arg, "\"") && strings.HasSuffix(arg, "\"") {
+		// 去除引号
+		return arg[1 : len(arg)-1], nil
+	}
+
+	// 如果是数字
+	if i, err := strconv.Atoi(arg); err == nil {
+		return i, nil
+	}
+	if f, err := strconv.ParseFloat(arg, 64); err == nil {
+		return f, nil
+	}
+
+	// 如果是布尔值
+	if arg == "true" {
+		return true, nil
+	}
+	if arg == "false" {
+		return false, nil
+	}
+
+	// 如果无法解析，则作为字符串处理
+	return arg, nil
 }
 
 // executeShell 执行shell类型的任务

@@ -26,6 +26,7 @@ type CronTask struct {
 	Spec          string    `json:"spec"`           // cron表达式
 	Type          string    `json:"type"`           // 任务类型：function(内置函数)、shell(shell命令)
 	Target        string    `json:"target"`         // 目标：函数名或shell命令
+	Command       string    `json:"command"`        // 命令字符串，用于直接执行
 	Args          string    `json:"args"`           // 参数，JSON格式
 	Dependencies  string    `json:"dependencies"`   // 依赖的任务ID，JSON格式的数组
 	Timeout       int       `json:"timeout"`        // 超时时间（秒），0表示无超时
@@ -154,6 +155,41 @@ func GetEnabledTasks() ([]CronTask, error) {
 // AddTask 添加任务
 func AddTask(task *CronTask) error {
 	return db.Create(task).Error
+}
+
+// RunTask 运行任务
+func RunTask(id int) error {
+	// 调用 cron 包中的 RunTask 函数
+	// 注意：这里我们不能直接调用 cron.GetTaskManager().RunTask
+	// 因为这会导致循环导入。我们只能更新任务状态，然后等待任务管理器执行。
+
+	// 获取任务
+	task, err := GetTaskByID(id)
+	if err != nil {
+		return err
+	}
+
+	// 更新任务最后运行时间
+	if err := UpdateLastRunTime(id, time.Now()); err != nil {
+		return err
+	}
+
+	// 创建任务日志
+	taskLog := &CronTaskLog{
+		TaskID:    id,
+		TaskName:  task.Name,
+		StartTime: time.Now(),
+		CreatedAt: time.Now(),
+		Output:    "Task started",
+		Status:    1, // 默认成功
+	}
+
+	// 保存任务日志
+	if err := AddTaskLog(taskLog); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // UpdateTask 更新任务

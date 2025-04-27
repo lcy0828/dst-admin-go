@@ -5,12 +5,14 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/GianlucaP106/gotmux/gotmux"
+	"github.com/go-ini/ini"
 )
 
 // DSTServer 表示一个饥荒服务器实例
@@ -398,6 +400,7 @@ func (s *DSTServer) Restart() error {
 			StartDirectory: info.StartDirectory,
 			Status:         info.Status,
 			StartTime:      info.StartTime,
+			IsMaster:       info.IsMaster,
 		}
 		log.Printf("[TMUX] 已保存服务器原始信息: 模式=%s, 启动时间=%s",
 			originalInfo.ServerMode, originalInfo.StartTime)
@@ -514,6 +517,7 @@ type ServerInfo struct {
 	StartDirectory string `json:"start_directory"` // 启动目录
 	Status         string `json:"status"`          // 服务器状态（运行中/已停止）
 	StartTime      string `json:"start_time"`      // 启动时间
+	IsMaster       bool   `json:"is_master"`       // 是否为主世界
 }
 
 // 全局变量，用于存储服务器信息
@@ -534,6 +538,22 @@ func SaveServerInfo(server *DSTServer) {
 	now := time.Now()
 	startTimeStr := now.Format("2006-01-02 15:04:05")
 
+	// 检查是否为主世界
+	isMaster := false
+	serverIniPath := filepath.Join(server.StorageRoot, server.ConfDir, server.ArchiveName, server.WorldName, "server.ini")
+	if _, err := os.Stat(serverIniPath); !os.IsNotExist(err) {
+		// 读取并解析server.ini文件
+		if cfg, err := ini.Load(serverIniPath); err == nil {
+			// 检查是否有SHARD部分和is_master配置项
+			if cfg.Section("SHARD").HasKey("is_master") {
+				// 获取is_master的值并转换为布尔值
+				isMasterStr := cfg.Section("SHARD").Key("is_master").String()
+				isMaster = strings.ToLower(isMasterStr) == "true"
+				log.Printf("[TMUX] 服务器 %s 的is_master值为: %v", server.SessionName, isMaster)
+			}
+		}
+	}
+
 	info := &ServerInfo{
 		SessionName:    server.SessionName,
 		ArchiveName:    server.ArchiveName,
@@ -542,6 +562,7 @@ func SaveServerInfo(server *DSTServer) {
 		StartDirectory: server.StartDirectory,
 		Status:         "running",
 		StartTime:      startTimeStr,
+		IsMaster:       isMaster,
 	}
 
 	// 使用互斥锁保护并发访问
@@ -549,8 +570,8 @@ func SaveServerInfo(server *DSTServer) {
 	serverInfoMap[server.SessionName] = info
 	serverInfoMapMutex.Unlock()
 
-	log.Printf("[TMUX] 已保存服务器信息: %s, 模式: %s, 启动时间: %s (实际时间: %s)",
-		server.SessionName, server.ServerMode, startTimeStr, now.Format("2006-01-02 15:04:05.000"))
+	log.Printf("[TMUX] 已保存服务器信息: %s, 模式: %s, 启动时间: %s, 主世界: %v (实际时间: %s)",
+		server.SessionName, server.ServerMode, startTimeStr, isMaster, now.Format("2006-01-02 15:04:05.000"))
 }
 
 // ListDSTServers 列出所有饥荒服务器会话
@@ -745,6 +766,39 @@ func ListDSTServers(silent ...bool) ([]ServerInfo, error) {
 					}
 				}
 
+				// 检查是否为主世界
+				isMaster := false
+
+				// 尝试从存档目录中找到server.ini文件
+				// 首先尝试从配置文件中获取存档路径
+				configFile := "./conf/app.conf"
+				dstSavePath := "./Klei/DoNotStarveTogether"
+				if _, err := os.Stat(configFile); !os.IsNotExist(err) {
+					if cfg, err := ini.Load(configFile); err == nil {
+						// 读取路径配置
+						if cfg.Section("paths").HasKey("DST_SAVE_PATH") {
+							dstSavePath = cfg.Section("paths").Key("DST_SAVE_PATH").String()
+						}
+					}
+				}
+
+				// 构建server.ini文件路径
+				serverIniPath := filepath.Join(dstSavePath, parts[1], parts[2], "server.ini")
+				if _, err := os.Stat(serverIniPath); !os.IsNotExist(err) {
+					// 读取并解析server.ini文件
+					if cfg, err := ini.Load(serverIniPath); err == nil {
+						// 检查是否有SHARD部分和is_master配置项
+						if cfg.Section("SHARD").HasKey("is_master") {
+							// 获取is_master的值并转换为布尔值
+							isMasterStr := cfg.Section("SHARD").Key("is_master").String()
+							isMaster = strings.ToLower(isMasterStr) == "true"
+							if !isSilent {
+								log.Printf("[TMUX] 新发现的服务器 %s 的is_master值为: %v", sessionName, isMaster)
+							}
+						}
+					}
+				}
+
 				info := ServerInfo{
 					SessionName: sessionName,
 					ArchiveName: parts[1],
@@ -752,6 +806,7 @@ func ListDSTServers(silent ...bool) ([]ServerInfo, error) {
 					ServerMode:  "unknown", // 未知模式
 					Status:      "running",
 					StartTime:   startTime,
+					IsMaster:    isMaster,
 				}
 
 				// 添加到结果和映射中

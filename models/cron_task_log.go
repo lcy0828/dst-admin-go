@@ -58,6 +58,32 @@ func GetTaskLogs(taskID int, page, pageSize int) ([]CronTaskLog, int, error) {
 	return logs, int(count), nil
 }
 
+// GetTaskLogsByTaskID 根据任务ID获取任务日志
+func GetTaskLogsByTaskID(taskID int, limit, offset int) ([]CronTaskLog, error) {
+	var logs []CronTaskLog
+
+	// 构建查询
+	query := db.Where("task_id = ?", taskID)
+
+	// 设置限制
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+
+	// 设置偏移
+	if offset > 0 {
+		query = query.Offset(offset)
+	}
+
+	// 获取数据
+	err := query.Order("id DESC").Find(&logs).Error
+	if err != nil {
+		return nil, err
+	}
+
+	return logs, nil
+}
+
 // GetTaskLogByID 根据ID获取任务日志
 func GetTaskLogByID(id int) (*CronTaskLog, error) {
 	var log CronTaskLog

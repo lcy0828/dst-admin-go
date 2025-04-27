@@ -1,10 +1,10 @@
 package gamelog
 
 import (
-	"dont/models"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -24,7 +24,7 @@ type CleanupLogResponse struct {
 	Data   interface{} `json:"data"`   // 数据
 }
 
-// CleanupLog 清空数据库中的日志记录并重置日志位置
+// CleanupLog 清空日志并重置日志位置
 func CleanupLog(c *gin.Context) {
 	var req CleanupLogRequest
 
@@ -49,6 +49,43 @@ func CleanupLog(c *gin.Context) {
 	// 构建日志文件路径
 	logFilePath := filepath.Join(dstSavePath, req.ArchiveName, req.WorldName, "server_log.txt")
 
+	// 检查日志文件是否存在
+	_, err := os.Stat(logFilePath)
+	if os.IsNotExist(err) {
+		c.JSON(http.StatusOK, CleanupLogResponse{
+			Status: 404,
+			Msg:    "日志文件不存在: " + logFilePath,
+		})
+		return
+	}
+
+	// 备份旧日志文件
+	backupDir := filepath.Join(dstSavePath, "logs_backup", req.ArchiveName, req.WorldName)
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		log.Printf("[LogCleanup] 创建日志备份目录失败: %v", err)
+	} else {
+		// 生成备份文件名（使用时间戳）
+		timestamp := time.Now().Format("20060102_150405")
+		backupFileName := fmt.Sprintf("server_log_%s.txt", timestamp)
+		backupFilePath := filepath.Join(backupDir, backupFileName)
+
+		// 复制日志文件
+		if err := copyLogFile(logFilePath, backupFilePath); err != nil {
+			log.Printf("[LogCleanup] 备份日志文件失败: %v", err)
+		} else {
+			log.Printf("[LogCleanup] 成功备份日志文件到: %s", backupFilePath)
+		}
+	}
+
+	// 清空日志文件
+	if err := os.WriteFile(logFilePath, []byte(""), 0644); err != nil {
+		c.JSON(http.StatusOK, CleanupLogResponse{
+			Status: 500,
+			Msg:    "清空日志文件失败: " + err.Error(),
+		})
+		return
+	}
+
 	// 获取位置管理器
 	positionManager := GetPositionManager()
 
@@ -69,25 +106,15 @@ func CleanupLog(c *gin.Context) {
 		log.Printf("[LogCleanup] 重置日志监控管理器状态: %s", key)
 	}
 
-	// 清空数据库中的日志记录
-	if err := models.CleanupGameLogs(req.ArchiveName, req.WorldName); err != nil {
-		log.Printf("[LogCleanup] 清空数据库中的日志记录失败: %v", err)
-		c.JSON(http.StatusOK, CleanupLogResponse{
-			Status: 500,
-			Msg:    "清空数据库中的日志记录失败: " + err.Error(),
-		})
-		return
-	}
-	log.Printf("[LogCleanup] 成功清空数据库中的日志记录: %s/%s", req.ArchiveName, req.WorldName)
-
 	// 返回成功响应
 	c.JSON(http.StatusOK, CleanupLogResponse{
 		Status: 200,
-		Msg:    "成功清空数据库中的日志记录并重置日志位置",
+		Msg:    "成功清空日志并重置日志位置",
 		Data: gin.H{
 			"archive_name": req.ArchiveName,
 			"world_name":   req.WorldName,
 			"log_file":     logFilePath,
+			"backup_dir":   backupDir,
 		},
 	})
 }
