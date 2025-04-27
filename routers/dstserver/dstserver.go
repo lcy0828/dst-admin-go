@@ -68,8 +68,9 @@ type ServerShortInfo struct {
 
 // 世界信息
 type WorldInfo struct {
-	Name string `json:"name"` // 世界名称
-	Type string `json:"type"` // 世界类型 (forest/cave)
+	Name     string `json:"name"`      // 世界名称
+	Type     string `json:"type"`      // 世界类型 (forest/cave)
+	IsMaster bool   `json:"is_master"` // 是否为主世界
 }
 
 // ClusterConfigResponse 集群配置响应结构
@@ -136,9 +137,25 @@ func GetServerList(g *gin.Context) {
 								}
 							}
 
+							// 检查是否为主世界
+							isMaster := false
+							serverIniPath := filepath.Join(dstSavePath, file.Name(), worldFolder.Name(), "server.ini")
+							if _, err := os.Stat(serverIniPath); !os.IsNotExist(err) {
+								// 读取并解析server.ini文件
+								if cfg, err := ini.Load(serverIniPath); err == nil {
+									// 检查是否有SHARD部分和is_master配置项
+									if cfg.Section("SHARD").HasKey("is_master") {
+										// 获取is_master的值并转换为布尔值
+										isMasterStr := cfg.Section("SHARD").Key("is_master").String()
+										isMaster = strings.ToLower(isMasterStr) == "true"
+									}
+								}
+							}
+
 							server.Worlds = append(server.Worlds, WorldInfo{
-								Name: worldFolder.Name(),
-								Type: worldType,
+								Name:     worldFolder.Name(),
+								Type:     worldType,
+								IsMaster: isMaster,
 							})
 						}
 					}

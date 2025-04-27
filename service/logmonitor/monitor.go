@@ -23,6 +23,7 @@ type ServerInfo struct {
 	StartDirectory string `json:"start_directory"` // 启动目录
 	Status         string `json:"status"`          // 服务器状态（运行中/已停止）
 	StartTime      string `json:"start_time"`      // 启动时间
+	IsMaster       bool   `json:"is_master"`       // 是否为主世界
 }
 
 // ServerListResponse 表示服务器列表响应

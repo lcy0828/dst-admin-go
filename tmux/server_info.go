@@ -24,6 +24,7 @@ func GetServerInfoMap() map[string]*ServerInfo {
 			StartDirectory: v.StartDirectory,
 			Status:         v.Status,
 			StartTime:      v.StartTime,
+			IsMaster:       v.IsMaster,
 		}
 		result[k] = info
 	}
@@ -100,6 +101,7 @@ func AddTestServer() {
 		StartDirectory: "/root/DST",
 		Status:         "running",
 		StartTime:      time.Now().Format(time.RFC3339),
+		IsMaster:       true, // 测试数据设置为主世界
 	}
 
 	log.Printf("[TMUX] 添加测试服务器数据: dstserver_test_forest")

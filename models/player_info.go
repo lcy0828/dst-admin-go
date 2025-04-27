@@ -668,6 +668,16 @@ func SavePlayerConfigInfo(archiveName, worldName string, playerConfigs []types.P
 		currentPlayerIDs[config.UserID] = true
 	}
 
+	// 检查是否只有主机，没有其他玩家
+	onlyHostExists := false
+	if len(playerConfigs) == 1 {
+		// 检查唯一的玩家是否是主机
+		if playerConfigs[0].IsHost {
+			log.Printf("[PlayerInfo] 检测到存档 %s 世界 %s 中只有主机，没有其他玩家", archiveName, worldName)
+			onlyHostExists = true
+		}
+	}
+
 	// 处理每个玩家配置
 	for _, config := range playerConfigs {
 		// 如果是主机，则保存到主机信息表
@@ -695,6 +705,25 @@ func SavePlayerConfigInfo(archiveName, worldName string, playerConfigs []types.P
 				Equip:          string(equipJSON),
 				LastSeen:       now,
 				UpdatedAt:      now,
+			}
+
+			// 同时检查主机的UserID是否在PlayerInfo表中存在
+			// 如果存在，则将其标记为离线
+			var hostPlayer PlayerInfo
+			hostResult := tx.Where("archive_name = ? AND user_id = ?", archiveName, config.UserID).First(&hostPlayer)
+			if hostResult.Error == nil {
+				// 如果主机在PlayerInfo表中存在，则将其标记为离线
+				updates := map[string]interface{}{
+					"status":        PlayerStatusOffline,
+					"status_change": now,
+					"updated_at":    now,
+				}
+				if err := tx.Model(&PlayerInfo{}).Where("id = ?", hostPlayer.ID).Updates(updates).Error; err != nil {
+					log.Printf("[PlayerInfo] 更新主机在PlayerInfo表中的状态失败: %v", err)
+				} else {
+					log.Printf("[PlayerInfo] 主机状态从在线变为离线: UserID=%s, 名称='%s', 存档=%s",
+						config.UserID, config.Name, archiveName)
+				}
 			}
 
 			// 保存主机信息 - 根据存档名称和用户ID判断唯一性
@@ -850,28 +879,64 @@ func SavePlayerConfigInfo(archiveName, worldName string, playerConfigs []types.P
 
 	// 将数据库中存在但配置文件中不存在的玩家标记为离线
 	var existingPlayers []PlayerInfo
-	if err := tx.Where("archive_name = ? AND status = ?", archiveName, PlayerStatusOnline).Find(&existingPlayers).Error; err != nil {
-		tx.Rollback()
-		return fmt.Errorf("获取存档 %s 中的在线玩家失败: %v", archiveName, err)
-	}
 
-	// 检查每个在线玩家，如果不在当前配置文件中，则标记为离线
-	for _, player := range existingPlayers {
-		if !currentPlayerIDs[player.UserID] {
-			// 玩家不在当前配置文件中，标记为离线
+	// 如果只有主机，没有其他玩家，则获取所有在线玩家
+	if onlyHostExists {
+		// 获取存档中所有在线的玩家（包括主机和非主机）
+		if err := tx.Where("archive_name = ? AND status = ?", archiveName, PlayerStatusOnline).Find(&existingPlayers).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("获取存档 %s 中的在线玩家失败: %v", archiveName, err)
+		}
+
+		// 如果有在线玩家，则将它们全部标记为离线
+		if len(existingPlayers) > 0 {
+			log.Printf("[PlayerInfo] 存档 %s 世界 %s 中只有主机，将 %d 个在线玩家标记为离线",
+				archiveName, worldName, len(existingPlayers))
+
+			// 批量更新所有在线玩家为离线状态
 			updates := map[string]interface{}{
 				"status":        PlayerStatusOffline,
 				"status_change": now,
 				"updated_at":    now,
 			}
 
-			if err := tx.Model(&PlayerInfo{}).Where("id = ?", player.ID).Updates(updates).Error; err != nil {
+			if err := tx.Model(&PlayerInfo{}).Where("archive_name = ? AND status = ?",
+				archiveName, PlayerStatusOnline).Updates(updates).Error; err != nil {
 				tx.Rollback()
-				return fmt.Errorf("更新玩家 %s (%s) 的状态失败: %v", player.PlayerName, player.UserID, err)
+				return fmt.Errorf("批量更新存档 %s 中的玩家状态失败: %v", archiveName, err)
 			}
 
-			log.Printf("[PlayerInfo] 玩家状态从在线变为离线: UserID=%s, 名称='%s', 存档=%s",
-				player.UserID, player.PlayerName, archiveName)
+			// 输出每个玩家的状态变化日志
+			for _, player := range existingPlayers {
+				log.Printf("[PlayerInfo] 玩家状态从在线变为离线: UserID=%s, 名称='%s', 存档=%s",
+					player.UserID, player.PlayerName, archiveName)
+			}
+		}
+	} else {
+		// 正常情况，获取所有在线玩家
+		if err := tx.Where("archive_name = ? AND status = ?", archiveName, PlayerStatusOnline).Find(&existingPlayers).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("获取存档 %s 中的在线玩家失败: %v", archiveName, err)
+		}
+
+		// 检查每个在线玩家，如果不在当前配置文件中，则标记为离线
+		for _, player := range existingPlayers {
+			if !currentPlayerIDs[player.UserID] {
+				// 玩家不在当前配置文件中，标记为离线
+				updates := map[string]interface{}{
+					"status":        PlayerStatusOffline,
+					"status_change": now,
+					"updated_at":    now,
+				}
+
+				if err := tx.Model(&PlayerInfo{}).Where("id = ?", player.ID).Updates(updates).Error; err != nil {
+					tx.Rollback()
+					return fmt.Errorf("更新玩家 %s (%s) 的状态失败: %v", player.PlayerName, player.UserID, err)
+				}
+
+				log.Printf("[PlayerInfo] 玩家状态从在线变为离线: UserID=%s, 名称='%s', 存档=%s",
+					player.UserID, player.PlayerName, archiveName)
+			}
 		}
 	}
 

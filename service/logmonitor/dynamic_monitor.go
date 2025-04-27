@@ -158,6 +158,7 @@ func (m *DynamicLogMonitor) getServerList() ([]ServerInfo, error) {
 			ServerMode:  server.ServerMode,
 			Status:      server.Status,
 			StartTime:   server.StartTime,
+			IsMaster:    server.IsMaster,
 		}
 
 		// 打印服务器信息

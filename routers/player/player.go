@@ -194,6 +194,39 @@ func GetHostInfo(c *gin.Context) {
 	})
 }
 
+// GetHostInfoList 获取主机信息列表
+func GetHostInfoList(c *gin.Context) {
+	// 获取查询参数
+	archiveName := c.Query("archive_name")
+	worldName := c.Query("world_name")
+
+	log.Printf("[API][GetHostInfoList] 开始获取主机信息列表，存档: %s, 世界: %s",
+		archiveName, worldName)
+
+	// 从数据库中获取主机信息
+	hosts, err := models.GetHostInfo(archiveName, worldName)
+	if err != nil {
+		log.Printf("[API][GetHostInfoList] 获取主机信息失败: %v", err)
+		c.JSON(http.StatusOK, gin.H{
+			"code": e.ERROR,
+			"msg":  "获取主机信息失败: " + err.Error(),
+			"data": nil,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": e.SUCCESS,
+		"msg":  "获取主机信息列表成功",
+		"data": gin.H{
+			"archive_name": archiveName,
+			"world_name":   worldName,
+			"host_count":   len(hosts),
+			"hosts":        hosts,
+		},
+	})
+}
+
 // GetPlayerConfig 从数据库中获取玩家配置信息
 func GetPlayerConfig(c *gin.Context) {
 	var req struct {

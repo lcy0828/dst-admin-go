@@ -32,7 +32,7 @@ type HostInfo struct {
 
 // TableName 设置表名
 func (HostInfo) TableName() string {
-	return "dont_host_info"
+	return "host_info"
 }
 
 // InitHostInfoTable 初始化主机信息表

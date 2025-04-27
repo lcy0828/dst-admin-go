@@ -2,6 +2,8 @@ package setting
 
 import (
 	"log"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/go-ini/ini"
@@ -42,7 +44,20 @@ func LoadServer() {
 		log.Fatalf("Fail to get section 'server': %v", err)
 	}
 
-	HTTPPort = sec.Key("HTTP_PORT").MustInt(8000)
+	// 优先使用环境变量 PORT
+	portEnv := os.Getenv("PORT")
+	if portEnv != "" {
+		if port, err := strconv.Atoi(portEnv); err == nil {
+			HTTPPort = port
+			log.Printf("使用环境变量设置端口: %d", HTTPPort)
+		} else {
+			log.Printf("环境变量 PORT 格式不正确: %s, 使用配置文件端口", portEnv)
+			HTTPPort = sec.Key("HTTP_PORT").MustInt(8000)
+		}
+	} else {
+		HTTPPort = sec.Key("HTTP_PORT").MustInt(8000)
+	}
+
 	ReadTimeout = time.Duration(sec.Key("READ_TIMEOUT").MustInt(60)) * time.Second
 	WriteTimeout = time.Duration(sec.Key("WRITE_TIMEOUT").MustInt(60)) * time.Second
 }

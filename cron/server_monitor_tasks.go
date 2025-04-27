@@ -93,13 +93,54 @@ func MonitorServerStatus() (string, error) {
 
 	// 如果有运行中的服务器，为每个服务器启用或创建相应的任务
 	taskManager := GetTaskManager()
-	for _, server := range runningServers {
-		sessionName := server.SessionName
-		archiveName := server.ArchiveName
-		worldName := server.WorldName
 
-		// 如果一个存档有多个世界正在运行，优先选择带有forest的
-		if strings.Contains(strings.ToLower(worldName), "forest") {
+	// 按存档名分组服务器，以便于选择主世界
+	archiveServers := make(map[string][]tmux.ServerInfo)
+	for _, server := range runningServers {
+		archiveServers[server.ArchiveName] = append(archiveServers[server.ArchiveName], server)
+	}
+
+	// 处理每个存档
+	for _, servers := range archiveServers {
+		// 首先尝试找到主世界
+		var masterServer *tmux.ServerInfo
+		var forestServer *tmux.ServerInfo
+
+		// 首先尝试找到 is_master 为 true 的世界
+		for i, server := range servers {
+			if server.IsMaster {
+				masterServer = &servers[i]
+				log.Printf("[ServerMonitor] 找到主世界: %s (存档: %s, 世界: %s)",
+					server.SessionName, server.ArchiveName, server.WorldName)
+				break
+			}
+
+			// 同时记录包含 forest 的世界作为备用
+			if strings.Contains(strings.ToLower(server.WorldName), "forest") && forestServer == nil {
+				forestServer = &servers[i]
+			}
+		}
+
+		// 如果没有找到 is_master 为 true 的世界，则使用包含 forest 的世界
+		if masterServer == nil && forestServer != nil {
+			masterServer = forestServer
+			log.Printf("[ServerMonitor] 未找到主世界，使用包含 forest 的世界: %s (存档: %s, 世界: %s)",
+				masterServer.SessionName, masterServer.ArchiveName, masterServer.WorldName)
+		}
+
+		// 如果仍然没有找到适合的世界，则使用第一个世界
+		if masterServer == nil && len(servers) > 0 {
+			masterServer = &servers[0]
+			log.Printf("[ServerMonitor] 未找到主世界或包含 forest 的世界，使用第一个世界: %s (存档: %s, 世界: %s)",
+				masterServer.SessionName, masterServer.ArchiveName, masterServer.WorldName)
+		}
+
+		// 如果找到了适合的世界，则为其创建或启用任务
+		if masterServer != nil {
+			sessionName := masterServer.SessionName
+			archiveName := masterServer.ArchiveName
+			worldName := masterServer.WorldName
+
 			// 1. 处理玩家配置任务
 			// 检查是否已存在相应的任务
 			if task, exists := playerConfigTasks[sessionName]; exists {

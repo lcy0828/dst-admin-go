@@ -244,6 +244,8 @@ func InitRouter() *gin.Engine {
 			playerGroup.GET("/archives", player.GetPlayerArchives) // 获取玩家数据库中的存档列表
 			playerGroup.POST("/config", player.ReadPlayerConfig)   // 手动读取玩家配置文件
 			playerGroup.POST("/db/config", player.GetPlayerConfig) // 从数据库中获取玩家配置信息
+			playerGroup.GET("/host", player.GetHostInfoList)       // 获取主机信息列表
+			playerGroup.POST("/host", player.GetHostInfo)          // 获取指定存档和世界的主机信息
 		}
 
 		// 世界状态管理API
