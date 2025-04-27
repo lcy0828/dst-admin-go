@@ -92,6 +92,7 @@ func InitWorldStateInfoTable() {
 }
 
 // SaveWorldStateInfo 保存世界状态信息到数据库
+// 每个存档和世界只保留一条最新的记录
 func SaveWorldStateInfo(worldState *WorldStateInfo) error {
 	// 检查是否已存在相同存档和世界的记录
 	var existingState WorldStateInfo
@@ -100,7 +101,11 @@ func SaveWorldStateInfo(worldState *WorldStateInfo) error {
 		Order("created_at DESC").
 		First(&existingState)
 
-	// 如果存在记录，检查是否有变化
+	// 设置更新时间
+	now := time.Now()
+	worldState.UpdatedAt = now
+
+	// 如果存在记录
 	if result.Error == nil {
 		// 如果原始数据相同，不需要更新
 		if existingState.RawData == worldState.RawData {
@@ -108,26 +113,40 @@ func SaveWorldStateInfo(worldState *WorldStateInfo) error {
 				worldState.ArchiveName, worldState.WorldName)
 			return nil
 		}
-	} else if !gorm.IsRecordNotFoundError(result.Error) {
+
+		// 保留原有记录的ID和创建时间
+		worldState.ID = existingState.ID
+		worldState.CreatedAt = existingState.CreatedAt
+
+		// 更新现有记录
+		if err := db.Save(worldState).Error; err != nil {
+			log.Printf("[WorldStateInfo] 更新世界状态信息失败: %v", err)
+			return err
+		}
+
+		log.Printf("[WorldStateInfo] 成功更新世界状态信息: %s/%s, 季节=%s, 天数=%d/%d",
+			worldState.ArchiveName, worldState.WorldName,
+			worldState.Season, worldState.ElapsedDaysInSeason,
+			worldState.ElapsedDaysInSeason+worldState.RemainingDaysInSeason)
+	} else if gorm.IsRecordNotFoundError(result.Error) {
+		// 如果记录不存在，创建新记录
+		worldState.CreatedAt = now
+
+		// 创建新记录
+		if err := db.Create(worldState).Error; err != nil {
+			log.Printf("[WorldStateInfo] 保存世界状态信息失败: %v", err)
+			return err
+		}
+
+		log.Printf("[WorldStateInfo] 成功创建世界状态信息: %s/%s, 季节=%s, 天数=%d/%d",
+			worldState.ArchiveName, worldState.WorldName,
+			worldState.Season, worldState.ElapsedDaysInSeason,
+			worldState.ElapsedDaysInSeason+worldState.RemainingDaysInSeason)
+	} else {
 		// 如果是其他错误，返回错误
 		return result.Error
 	}
 
-	// 设置创建和更新时间
-	now := time.Now()
-	worldState.CreatedAt = now
-	worldState.UpdatedAt = now
-
-	// 创建新记录
-	if err := db.Create(worldState).Error; err != nil {
-		log.Printf("[WorldStateInfo] 保存世界状态信息失败: %v", err)
-		return err
-	}
-
-	log.Printf("[WorldStateInfo] 成功保存世界状态信息: %s/%s, 季节=%s, 天数=%d/%d",
-		worldState.ArchiveName, worldState.WorldName,
-		worldState.Season, worldState.ElapsedDaysInSeason,
-		worldState.ElapsedDaysInSeason+worldState.RemainingDaysInSeason)
 	return nil
 }
 
@@ -152,10 +171,32 @@ func GetLatestWorldStateInfo(archiveName, worldName string) (*WorldStateInfo, er
 }
 
 // GetWorldStateHistory 获取世界状态历史记录
+// 注意：由于现在每个存档和世界只保留一条记录，所以这个函数现在返回所有存档和世界的最新状态
 func GetWorldStateHistory(archiveName, worldName string, limit, offset int) ([]WorldStateInfo, error) {
 	var worldStates []WorldStateInfo
-	query := db.Where("archive_name = ? AND world_name = ?", archiveName, worldName).
-		Order("created_at DESC")
+	var query *gorm.DB
+
+	// 如果指定了存档和世界，只返回该存档和世界的记录
+	if archiveName != "" && worldName != "" {
+		// 直接获取最新的一条记录
+		worldState, err := GetLatestWorldStateInfo(archiveName, worldName)
+		if err != nil {
+			return nil, err
+		}
+		if worldState != nil {
+			worldStates = append(worldStates, *worldState)
+		}
+		return worldStates, nil
+	} else if archiveName != "" {
+		// 如果只指定了存档，返回该存档下所有世界的记录
+		query = db.Where("archive_name = ?", archiveName)
+	} else {
+		// 如果没有指定存档和世界，返回所有记录
+		query = db
+	}
+
+	// 添加排序和分页
+	query = query.Order("archive_name ASC, world_name ASC")
 
 	if limit > 0 {
 		query = query.Limit(limit)
