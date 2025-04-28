@@ -88,7 +88,7 @@ func ReadWorldStateFile(archiveName, worldName string) (string, error) {
 	}
 
 	// 解析文件内容
-	worldState, err := ParseWorldStateString(string(fileContent))
+	worldState, fieldCount, err := ParseWorldStateString(string(fileContent))
 	if err != nil {
 		return "", fmt.Errorf("解析世界状态文件失败: %v", err)
 	}
@@ -120,15 +120,16 @@ func ReadWorldStateFile(archiveName, worldName string) (string, error) {
 		worldState.ElapsedDaysInSeason+worldState.RemainingDaysInSeason)
 
 	// 简化日志输出
-	log.Printf("[WorldStateTask] 读取完成: %s/%s, 季节: %s, 天数: %d/%d",
+	log.Printf("[WorldStateTask] 读取完成: %s/%s, 季节: %s, 天数: %d/%d, 共解析了 %d 个字段",
 		archiveName, worldName, worldState.Season, worldState.ElapsedDaysInSeason,
-		worldState.ElapsedDaysInSeason+worldState.RemainingDaysInSeason)
+		worldState.ElapsedDaysInSeason+worldState.RemainingDaysInSeason, fieldCount)
 
 	return message, nil
 }
 
 // ParseWorldStateString 解析世界状态字符串
-func ParseWorldStateString(content string) (*models.WorldStateInfo, error) {
+// 返回值：世界状态信息、解析的字段数量、错误
+func ParseWorldStateString(content string) (*models.WorldStateInfo, int, error) {
 	// 创建世界状态信息对象
 	worldState := &models.WorldStateInfo{}
 
@@ -320,7 +321,7 @@ func ParseWorldStateString(content string) (*models.WorldStateInfo, error) {
 	// 记录解析到的字段数量
 	log.Printf("[WorldStateTask] 成功解析世界状态文件，共解析了 %d 个字段", fieldCount)
 
-	return worldState, nil
+	return worldState, fieldCount, nil
 }
 
 // TestParseWorldState 测试解析世界状态
@@ -335,14 +336,14 @@ func TestParseWorldState(content string) string {
 		originalFieldCount = len(strings.Split(matches[1], ","))
 	}
 
-	worldState, err := ParseWorldStateString(content)
+	worldState, fieldCount, err := ParseWorldStateString(content)
 	if err != nil {
 		return fmt.Sprintf("解析失败: %v", err)
 	}
 
 	// 构建返回消息
 	var result strings.Builder
-	result.WriteString(fmt.Sprintf("解析成功! 原始字段数: %d\n", originalFieldCount))
+	result.WriteString(fmt.Sprintf("解析成功! 原始字段数: %d, 实际解析字段数: %d\n", originalFieldCount, fieldCount))
 	result.WriteString(fmt.Sprintf("季节: %s (进度: %.2f%%)\n", worldState.Season, worldState.SeasonProgress*100))
 	result.WriteString(fmt.Sprintf("天数: %d/%d (总天数: %d)\n",
 		worldState.ElapsedDaysInSeason,
