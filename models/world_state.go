@@ -15,41 +15,60 @@ type WorldStateInfo struct {
 	Season                string    `json:"season"`                   // 当前季节 (autumn, winter, spring, summer)
 	Phase                 string    `json:"phase"`                    // 当前时间段 (day, dusk, night)
 	Cycles                int       `json:"cycles"`                   // 已经过的完整昼夜循环总数
-	ElapsedDaysInSeason   int       `json:"elapsed_days_in_season"`   // 当前季节已经过去的天数
-	RemainingDaysInSeason int       `json:"remaining_days_in_season"` // 当前季节还剩下的天数
-	IsDay                 bool      `json:"is_day"`                   // 当前是否是白天
-	IsDusk                bool      `json:"is_dusk"`                  // 当前是否是黄昏
-	IsNight               bool      `json:"is_night"`                 // 当前是否是夜晚
-	IsAutumn              bool      `json:"is_autumn"`                // 当前季节是否是秋季
-	IsWinter              bool      `json:"is_winter"`                // 当前季节是否是冬季
-	IsSpring              bool      `json:"is_spring"`                // 当前季节是否是春季
-	IsSummer              bool      `json:"is_summer"`                // 当前季节是否是夏季
-	IsSnowing             bool      `json:"is_snowing"`               // 当前是否正在下雪
-	IsRaining             bool      `json:"is_raining"`               // 当前是否正在下雨
-	IsWet                 bool      `json:"is_wet"`                   // 世界环境当前是否普遍潮湿
+	ElapsedDaysInSeason   int       `json:"elapseddaysinseason"`      // 当前季节已经过去的天数
+	RemainingDaysInSeason int       `json:"remainingdaysinseason"`    // 当前季节还剩下的天数
+	IsDay                 bool      `json:"isday"`                    // 当前是否是白天
+	IsDusk                bool      `json:"isdusk"`                   // 当前是否是黄昏
+	IsNight               bool      `json:"isnight"`                  // 当前是否是夜晚
+	IsAutumn              bool      `json:"isautumn"`                 // 当前季节是否是秋季
+	IsWinter              bool      `json:"iswinter"`                 // 当前季节是否是冬季
+	IsSpring              bool      `json:"isspring"`                 // 当前季节是否是春季
+	IsSummer              bool      `json:"issummer"`                 // 当前季节是否是夏季
+	IsSnowing             bool      `json:"issnowing"`                // 当前是否正在下雪
+	IsRaining             bool      `json:"israining"`                // 当前是否正在下雨
+	IsWet                 bool      `json:"iswet"`                    // 世界环境当前是否普遍潮湿
 	Temperature           float64   `json:"temperature"`              // 当前世界的环境温度
 	Precipitation         string    `json:"precipitation"`            // 当前的降水类型 (none, rain, snow)
-	MoonPhase             string    `json:"moon_phase"`               // 当前月相
-	AutumnLength          int       `json:"autumn_length"`            // 秋季设定持续的总天数
-	WinterLength          int       `json:"winter_length"`            // 冬季设定持续的总天数
-	SpringLength          int       `json:"spring_length"`            // 春季设定持续的总天数
-	SummerLength          int       `json:"summer_length"`            // 夏季设定持续的总天数
-	SeasonProgress        float64   `json:"season_progress"`          // 当前季节的进度 (0-1)
+	MoonPhase             string    `json:"moonphase"`                // 当前月相
+	AutumnLength          int       `json:"autumnlength"`             // 秋季设定持续的总天数
+	WinterLength          int       `json:"winterlength"`             // 冬季设定持续的总天数
+	SpringLength          int       `json:"springlength"`             // 春季设定持续的总天数
+	SummerLength          int       `json:"summerlength"`             // 夏季设定持续的总天数
+	SeasonProgress        float64   `json:"seasonprogress"`           // 当前季节的进度 (0-1)
 	Time                  float64   `json:"time"`                     // 当前在整个昼夜循环中的进度 (0-1)
-	TimeInPhase           float64   `json:"time_in_phase"`            // 当前在当前时间段内的进度 (0-1)
+	TimeInPhase           float64   `json:"timeinphase"`              // 当前在当前时间段内的进度 (0-1)
 	Wetness               float64   `json:"wetness"`                  // 潮湿度
 	Moisture              float64   `json:"moisture"`                 // 湿度值
-	MoistureCeil          float64   `json:"moisture_ceil"`            // 湿度上限值
+	MoistureCeil          float64   `json:"moistureceil"`            // 湿度上限值
 	Pop                   float64   `json:"pop"`                      // 降水概率
-	SnowLevel             float64   `json:"snow_level"`               // 积雪程度
-	IsAcidRaining         bool      `json:"is_acid_raining"`          // 当前是否正在下酸雨
-	IsLunarHailing        bool      `json:"is_lunar_hailing"`         // 当前是否正在下月岩冰雹
-	LunarHailLevel        float64   `json:"lunar_hail_level"`         // 月岩冰雹的强度等级
-	IsAlterAwake          bool      `json:"is_alter_awake"`           // 月亮祭坛是否处于激活状态
-	IsFullMoon            bool      `json:"is_full_moon"`             // 当前是否是满月
-	IsNewMoon             bool      `json:"is_new_moon"`              // 当前是否是新月
-	IsWaxingMoon          bool      `json:"is_waxing_moon"`           // 月亮当前是否处于渐盈状态
-	IsSnowCovered         bool      `json:"is_snow_covered"`          // 地表是否被雪覆盖
+	SnowLevel             float64   `json:"snowlevel"`               // 积雪程度
+	IsAcidRaining         bool      `json:"isacidraining"`           // 当前是否正在下酸雨
+	IsLunarHailing        bool      `json:"islunarhailing"`          // 当前是否正在下月岩冰雹
+	LunarHailLevel        float64   `json:"lunarhaillevel"`          // 月岩冰雹的强度等级
+	IsAlterAwake          bool      `json:"isalterawake"`            // 月亮祭坛是否处于激活状态
+	IsFullMoon            bool      `json:"isfullmoon"`              // 当前是否是满月
+	IsNewMoon             bool      `json:"isnewmoon"`               // 当前是否是新月
+	IsWaxingMoon          bool      `json:"iswaxingmoon"`            // 月亮当前是否处于渐盈状态
+	IsSnowCovered         bool      `json:"issnowcovered"`           // 地表是否被雪覆盖
+	// 洞穴相关字段
+	CaveMoonPhase         string    `json:"cavemoonphase"`           // 洞穴月相
+	CavePhase             string    `json:"cavephase"`                // 洞穴时间段 (day, dusk, night)
+	IsCaveDay             bool      `json:"iscaveday"`               // 洞穴是否是白天
+	IsCaveDusk            bool      `json:"iscavedusk"`              // 洞穴是否是黄昏
+	IsCaveNight           bool      `json:"iscavenight"`             // 洞穴是否是夜晚
+	IsCaveFullMoon        bool      `json:"iscavefullmoon"`          // 洞穴是否是满月
+	IsCaveNewMoon         bool      `json:"iscavenewmoon"`           // 洞穴是否是新月
+	IsCaveWaxingMoon      bool      `json:"iscavewaxingmoon"`        // 洞穴月亮是否处于渐盈状态
+	// 噩梦相关字段
+	NightmarePhase        string    `json:"nightmarephase"`           // 噩梦阶段 (none, calm, warn, wild, dawn)
+	NightmareTime         float64   `json:"nightmaretime"`           // 噩梦时间
+	NightmareTimeInPhase  float64   `json:"nightmaretimeinphase"`      // 当前噩梦阶段内的进度
+	IsNightmareCalm       bool      `json:"isnightmarecalm"`         // 是否处于噩梦平静期
+	IsNightmareWarn       bool      `json:"isnightmarewarn"`         // 是否处于噩梦警告期
+	IsNightmareWild       bool      `json:"isnightmarewild"`         // 是否处于噩梦狂暴期
+	IsNightmareDawn       bool      `json:"isnightmaredawn"`         // 是否处于噩梦黎明期
+	// 其他字段
+	PrecipitationRate     float64   `json:"precipitationrate"`        // 降水率
 	RawData               string    `json:"raw_data"`                 // 原始数据
 	CreatedAt             time.Time `json:"created_at"`               // 记录创建时间
 	UpdatedAt             time.Time `json:"updated_at"`               // 记录更新时间

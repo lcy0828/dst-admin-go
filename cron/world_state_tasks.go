@@ -132,6 +132,9 @@ func ParseWorldStateString(content string) (*models.WorldStateInfo, error) {
 	// 创建世界状态信息对象
 	worldState := &models.WorldStateInfo{}
 
+	// 初始化字段计数器
+	var fieldCount int
+
 	// 正则表达式匹配世界状态行
 	// 格式: KLEI     1 return {summerlength=15,cavemoonphase="threequarter",...}
 	// 注意：有些文件可能没有KLEI前缀，直接是世界状态数据
@@ -162,6 +165,7 @@ func ParseWorldStateString(content string) (*models.WorldStateInfo, error) {
 			fieldName := match[1]
 			fieldValue := match[2]
 
+			fieldCount++
 			switch fieldName {
 			case "season":
 				worldState.Season = fieldValue
@@ -171,6 +175,12 @@ func ParseWorldStateString(content string) (*models.WorldStateInfo, error) {
 				worldState.MoonPhase = fieldValue
 			case "precipitation":
 				worldState.Precipitation = fieldValue
+			case "cavemoonphase":
+				worldState.CaveMoonPhase = fieldValue
+			case "cavephase":
+				worldState.CavePhase = fieldValue
+			case "nightmarephase":
+				worldState.NightmarePhase = fieldValue
 			}
 		}
 	}
@@ -189,6 +199,7 @@ func ParseWorldStateString(content string) (*models.WorldStateInfo, error) {
 				continue
 			}
 
+			fieldCount++
 			switch fieldName {
 			case "cycles":
 				worldState.Cycles = int(fieldValue)
@@ -224,6 +235,12 @@ func ParseWorldStateString(content string) (*models.WorldStateInfo, error) {
 				worldState.SnowLevel = fieldValue
 			case "lunarhaillevel":
 				worldState.LunarHailLevel = fieldValue
+			case "nightmaretime":
+				worldState.NightmareTime = fieldValue
+			case "nightmaretimeinphase":
+				worldState.NightmareTimeInPhase = fieldValue
+			case "precipitationrate":
+				worldState.PrecipitationRate = fieldValue
 			}
 		}
 	}
@@ -238,6 +255,7 @@ func ParseWorldStateString(content string) (*models.WorldStateInfo, error) {
 			// 将字符串转换为布尔值
 			fieldValue := fieldValueStr == "true"
 
+			fieldCount++
 			switch fieldName {
 			case "isday":
 				worldState.IsDay = fieldValue
@@ -273,15 +291,50 @@ func ParseWorldStateString(content string) (*models.WorldStateInfo, error) {
 				worldState.IsWaxingMoon = fieldValue
 			case "issnowcovered":
 				worldState.IsSnowCovered = fieldValue
+			// 洞穴相关布尔字段
+			case "iscaveday":
+				worldState.IsCaveDay = fieldValue
+			case "iscavedusk":
+				worldState.IsCaveDusk = fieldValue
+			case "iscavenight":
+				worldState.IsCaveNight = fieldValue
+			case "iscavefullmoon":
+				worldState.IsCaveFullMoon = fieldValue
+			case "iscavenewmoon":
+				worldState.IsCaveNewMoon = fieldValue
+			case "iscavewaxingmoon":
+				worldState.IsCaveWaxingMoon = fieldValue
+			// 噩梦相关布尔字段
+			case "isnightmarecalm":
+				worldState.IsNightmareCalm = fieldValue
+			case "isnightmarewarn":
+				worldState.IsNightmareWarn = fieldValue
+			case "isnightmarewild":
+				worldState.IsNightmareWild = fieldValue
+			case "isnightmaredawn":
+				worldState.IsNightmareDawn = fieldValue
 			}
 		}
 	}
+
+	// 记录解析到的字段数量
+	log.Printf("[WorldStateTask] 成功解析世界状态文件，共解析了 %d 个字段", fieldCount)
 
 	return worldState, nil
 }
 
 // TestParseWorldState 测试解析世界状态
 func TestParseWorldState(content string) string {
+	// 计算原始字段数量
+	// 先提取字段内容
+	re := regexp.MustCompile(`(?:KLEI\s+\d+\s+return\s+)?\{(.*)\}`)
+	matches := re.FindStringSubmatch(content)
+	var originalFieldCount int
+	if len(matches) >= 2 {
+		// 简单的按逗号分割计数
+		originalFieldCount = len(strings.Split(matches[1], ","))
+	}
+
 	worldState, err := ParseWorldStateString(content)
 	if err != nil {
 		return fmt.Sprintf("解析失败: %v", err)
@@ -289,7 +342,7 @@ func TestParseWorldState(content string) string {
 
 	// 构建返回消息
 	var result strings.Builder
-	result.WriteString(fmt.Sprintf("解析成功!\n"))
+	result.WriteString(fmt.Sprintf("解析成功! 原始字段数: %d\n", originalFieldCount))
 	result.WriteString(fmt.Sprintf("季节: %s (进度: %.2f%%)\n", worldState.Season, worldState.SeasonProgress*100))
 	result.WriteString(fmt.Sprintf("天数: %d/%d (总天数: %d)\n",
 		worldState.ElapsedDaysInSeason,
@@ -305,7 +358,25 @@ func TestParseWorldState(content string) string {
 		worldState.AutumnLength, worldState.WinterLength,
 		worldState.SpringLength, worldState.SummerLength))
 
+	// 添加洞穴相关信息
+	result.WriteString("\n洞穴信息:\n")
+	result.WriteString(fmt.Sprintf("洞穴时间段: %s\n", worldState.CavePhase))
+	result.WriteString(fmt.Sprintf("洞穴月相: %s\n", worldState.CaveMoonPhase))
+
+	// 添加噩梦相关信息
+	result.WriteString("\n噩梦信息:\n")
+	result.WriteString(fmt.Sprintf("噩梦阶段: %s\n", worldState.NightmarePhase))
+	result.WriteString(fmt.Sprintf("噩梦时间: %.2f (进度: %.2f%%)\n",
+		worldState.NightmareTime, worldState.NightmareTimeInPhase*100))
+
+	// 添加其他数值信息
+	result.WriteString("\n其他数值信息:\n")
+	result.WriteString(fmt.Sprintf("降水率: %.2f%%\n", worldState.PrecipitationRate*100))
+
 	// 添加当前状态信息
+	result.WriteString("\n当前状态:\n")
+
+	// 主世界状态
 	var states []string
 	if worldState.IsDay {
 		states = append(states, "白天")
@@ -352,8 +423,45 @@ func TestParseWorldState(content string) string {
 	if worldState.IsSnowCovered {
 		states = append(states, "积雪")
 	}
+	result.WriteString(fmt.Sprintf("主世界: %s\n", strings.Join(states, ", ")))
 
-	result.WriteString(fmt.Sprintf("当前状态: %s\n", strings.Join(states, ", ")))
+	// 洞穴状态
+	var caveStates []string
+	if worldState.IsCaveDay {
+		caveStates = append(caveStates, "白天")
+	}
+	if worldState.IsCaveDusk {
+		caveStates = append(caveStates, "黄昏")
+	}
+	if worldState.IsCaveNight {
+		caveStates = append(caveStates, "夜晚")
+	}
+	if worldState.IsCaveFullMoon {
+		caveStates = append(caveStates, "满月")
+	}
+	if worldState.IsCaveNewMoon {
+		caveStates = append(caveStates, "新月")
+	}
+	if worldState.IsCaveWaxingMoon {
+		caveStates = append(caveStates, "渐盈月")
+	}
+	result.WriteString(fmt.Sprintf("洞穴世界: %s\n", strings.Join(caveStates, ", ")))
+
+	// 噩梦状态
+	var nightmareStates []string
+	if worldState.IsNightmareCalm {
+		nightmareStates = append(nightmareStates, "平静期")
+	}
+	if worldState.IsNightmareWarn {
+		nightmareStates = append(nightmareStates, "警告期")
+	}
+	if worldState.IsNightmareWild {
+		nightmareStates = append(nightmareStates, "狂暴期")
+	}
+	if worldState.IsNightmareDawn {
+		nightmareStates = append(nightmareStates, "黎明期")
+	}
+	result.WriteString(fmt.Sprintf("噩梦状态: %s\n", strings.Join(nightmareStates, ", ")))
 
 	return result.String()
 }
