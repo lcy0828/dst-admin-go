@@ -145,7 +145,7 @@ func ParseWorldStateString(content string) (*models.WorldStateInfo, int, error) 
 	matches := re.FindStringSubmatch(content)
 	if len(matches) < 2 {
 		log.Printf("[WorldStateTask] 内容不匹配世界状态格式: %s", content)
-		return nil, fmt.Errorf("内容不匹配世界状态格式")
+		return nil,0, fmt.Errorf("内容不匹配世界状态格式")
 	}
 
 	// 提取字段内容
