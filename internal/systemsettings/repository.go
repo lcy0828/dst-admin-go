@@ -43,7 +43,7 @@ var fieldDefinitions = []fieldDefinition{
 	{ID: "ui.language", Group: "ui", Label: "系统语言", Kind: "select", Section: "ui", Key: "LANGUAGE", Environment: "DST_ADMIN_LANGUAGE", Default: "zh-CN", Options: []string{"zh-CN", "en-US", "ja-JP"}, Required: true},
 	{ID: "ui.timezone", Group: "ui", Label: "时区设置", Kind: "select", Section: "ui", Key: "TIMEZONE", Environment: "DST_ADMIN_TIMEZONE", Default: "Asia/Shanghai", Options: []string{"Asia/Shanghai", "UTC", "America/Los_Angeles", "America/New_York", "Europe/Berlin", "Asia/Tokyo"}, Required: true},
 	{ID: "ui.dateFormat", Group: "ui", Label: "日期格式", Kind: "select", Section: "ui", Key: "DATE_FORMAT", Environment: "DST_ADMIN_DATE_FORMAT", Default: "YYYY-MM-DD", Options: []string{"YYYY-MM-DD", "MM/DD/YYYY", "DD/MM/YYYY", "YYYY年MM月DD日"}, Required: true},
-	{ID: "ui.theme", Group: "ui", Label: "主题颜色", Kind: "color", Section: "ui", Key: "THEME_COLOR", Environment: "DST_ADMIN_THEME_COLOR", Default: "#3f7656", Required: true},
+	{ID: "ui.theme", Group: "ui", Label: "主题颜色", Kind: "color", Section: "ui", Key: "THEME_COLOR", Environment: "DST_ADMIN_THEME_COLOR", Default: "#e5482d", Required: true},
 
 	{ID: "security.passwordComplexity", Group: "security", Label: "密码复杂度检查", Kind: "boolean", Section: "security", Key: "PASSWORD_COMPLEXITY", Environment: "DST_ADMIN_PASSWORD_COMPLEXITY", Default: "false", Required: true},
 	{ID: "security.minPasswordLength", Group: "security", Label: "密码最小长度", Kind: "number", Section: "security", Key: "MIN_PASSWORD_LENGTH", Environment: "DST_ADMIN_MIN_PASSWORD_LENGTH", Default: "6", Required: true, Minimum: 6, Maximum: 20},
