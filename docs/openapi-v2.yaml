@@ -5039,7 +5039,7 @@ components:
         workshopContentPath: { type: string, maxLength: 2048 }
         luaBinary: { type: string, maxLength: 255, default: lua }
         luaFallbackPath: { type: string, maxLength: 2048 }
-        serverMode: { type: string, enum: [32, 64, luajit], default: 64 }
+        serverMode: { type: string, enum: ["32", "64", luajit], default: "64" }
         updatedAt: { type: string, format: date-time, readOnly: true }
     RuntimeConfigInput:
       type: object
@@ -5055,7 +5055,7 @@ components:
         workshopContentPath: { type: string, maxLength: 2048 }
         luaBinary: { type: string, maxLength: 255, default: lua }
         luaFallbackPath: { type: string, maxLength: 2048 }
-        serverMode: { type: string, enum: [32, 64, luajit], default: 64 }
+        serverMode: { type: string, enum: ["32", "64", luajit], default: "64" }
     RuntimeTarget:
       type: object
       additionalProperties: false
