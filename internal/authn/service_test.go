@@ -3,6 +3,7 @@ package authn
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jinzhu/gorm"
 	_ "github.com/mattn/go-sqlite3"
@@ -19,6 +20,29 @@ func openTestDB(t *testing.T) *gorm.DB {
 	db.LogMode(false)
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+func TestConfiguredPasswordPolicyAndIdleSessionTimeout(t *testing.T) {
+	service := NewService(openTestDB(t))
+	if err := service.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	service.SetPolicyProvider(func() PasswordPolicy {
+		return PasswordPolicy{MinimumLength: 8, RequireComplexity: true, SessionTTL: 5 * time.Minute}
+	})
+	if _, _, err := service.Setup("admin", "12345678", "", ""); err != ErrPasswordComplexity {
+		t.Fatalf("complexity policy error=%v", err)
+	}
+	_, token, err := service.Setup("admin", "Aa1!5678", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(6 * time.Minute)
+	if _, err := service.Authenticate(token); err != ErrInvalidSession {
+		t.Fatalf("idle session should expire, got %v", err)
+	}
 }
 
 func TestMigrateHashesLegacyPassword(t *testing.T) {

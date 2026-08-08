@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSettingsMaskSecretPreviewAndApply(t *testing.T) {
@@ -35,6 +36,57 @@ func TestSettingsMaskSecretPreviewAndApply(t *testing.T) {
 	}
 	if _, err := service.Preview(Input{Revision: settings.Revision, Values: map[string]string{"misc.logLevel": "warn"}}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale revision error=%v", err)
+	}
+}
+
+func TestRuntimeSettingsUseRealDefaultsAndApplyWithoutRestart(t *testing.T) {
+	service, err := NewService(NewMemoryRepository())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := service.Runtime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.MinPasswordLength != 6 || runtime.PasswordComplexity || runtime.SessionTimeout != 24*time.Hour || runtime.SystemName != "饥荒管理系统" {
+		t.Fatalf("unexpected runtime defaults: %#v", runtime)
+	}
+	settings, _ := service.Settings()
+	result, err := service.Apply(Input{
+		Revision: settings.Revision,
+		Values: map[string]string{
+			"ui.systemName":           "林火管理台",
+			"security.sessionTimeout": "30",
+		},
+		Confirmation: ApplyConfirmation,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Settings.RestartRequired {
+		t.Fatal("runtime-only settings incorrectly require a restart")
+	}
+	runtime, _ = service.Runtime()
+	if runtime.SystemName != "林火管理台" || runtime.SessionTimeout != 30*time.Minute {
+		t.Fatalf("runtime settings were not applied: %#v", runtime)
+	}
+}
+
+func TestIPWhitelistValidationAndMatching(t *testing.T) {
+	value := "192.168.2.5\n10.0.0.0/8\n::1"
+	if err := ValidateIPWhitelist(value); err != nil {
+		t.Fatalf("valid whitelist rejected: %v", err)
+	}
+	for _, address := range []string{"192.168.2.5", "10.2.3.4", "::1"} {
+		if !IPAllowed(value, address) {
+			t.Fatalf("expected %s to be allowed", address)
+		}
+	}
+	if IPAllowed(value, "192.168.2.6") {
+		t.Fatal("unexpected address was allowed")
+	}
+	if err := ValidateIPWhitelist("192.168.2.999"); err == nil {
+		t.Fatal("invalid whitelist entry was accepted")
 	}
 }
 

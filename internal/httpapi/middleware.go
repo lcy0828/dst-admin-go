@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"dont/internal/authn"
+	"dont/internal/systemsettings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -85,6 +86,7 @@ func RequireSession(service *authn.Service) gin.HandlerFunc {
 			Failure(c, http.StatusUnauthorized, "SESSION_INVALID", "登录状态已失效，请重新登录", nil)
 			return
 		}
+		setSessionCookie(c, rawToken, authenticated.Session.ExpiresAt)
 		c.Set(authn.ContextAdminKey, authenticated.Admin)
 		c.Set(authn.ContextSessionKey, authenticated.Session)
 
@@ -93,6 +95,16 @@ func RequireSession(service *authn.Service) gin.HandlerFunc {
 			return
 		}
 		c.Next()
+	}
+}
+
+func AdminIPPolicy(provider func() string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Method == http.MethodOptions || provider == nil || systemsettings.IPAllowed(provider(), c.ClientIP()) {
+			c.Next()
+			return
+		}
+		Failure(c, http.StatusForbidden, "IP_NOT_ALLOWED", "当前 IP 不在管理系统白名单中", nil)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"dont/internal/authn"
 
@@ -17,6 +18,7 @@ import (
 type authTestApp struct {
 	router  *gin.Engine
 	service *authn.Service
+	handler *AuthHandler
 }
 
 func newAuthTestApp(t *testing.T) authTestApp {
@@ -40,7 +42,7 @@ func newAuthTestApp(t *testing.T) authTestApp {
 	handler.Register(api.Group("/v2/auth"))
 	api.GET("/v2/protected", func(c *gin.Context) { Success(c, http.StatusOK, gin.H{"ok": true}) })
 	api.POST("/v2/protected", func(c *gin.Context) { Success(c, http.StatusOK, gin.H{"ok": true}) })
-	return authTestApp{router: router, service: service}
+	return authTestApp{router: router, service: service, handler: handler}
 }
 
 func TestAuthLifecycleAndCSRF(t *testing.T) {
@@ -118,6 +120,27 @@ func TestOriginAndLoginRateLimit(t *testing.T) {
 	if response.Header().Get("Retry-After") == "" {
 		t.Fatal("rate limited response is missing Retry-After")
 	}
+}
+
+func TestConfiguredLoginAttemptLimit(t *testing.T) {
+	app := newAuthTestApp(t)
+	app.handler.SetSecurityPolicyProvider(func() LoginSecurityPolicy {
+		return LoginSecurityPolicy{MaxAttempts: 3, BlockFor: time.Minute}
+	})
+	response := performJSON(app.router, http.MethodPost, "/api/v2/auth/setup", map[string]string{
+		"username": "admin", "password": "strong-password-one",
+	}, nil, "")
+	assertStatus(t, response, http.StatusCreated)
+	for attempt := 0; attempt < 3; attempt++ {
+		response = performJSON(app.router, http.MethodPost, "/api/v2/auth/login", map[string]string{
+			"username": "admin", "password": "wrong-password",
+		}, nil, "")
+		assertStatus(t, response, http.StatusUnauthorized)
+	}
+	response = performJSON(app.router, http.MethodPost, "/api/v2/auth/login", map[string]string{
+		"username": "admin", "password": "strong-password-one",
+	}, nil, "")
+	assertStatus(t, response, http.StatusTooManyRequests)
 }
 
 func TestChangePasswordValidationAndSessionRevocation(t *testing.T) {

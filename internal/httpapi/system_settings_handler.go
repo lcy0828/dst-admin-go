@@ -19,6 +19,7 @@ func (h *SystemSettingsHandler) Register(v2 *gin.RouterGroup) {
 	v2.GET("/system/settings", h.get)
 	v2.POST("/system/settings/preview", h.preview)
 	v2.POST("/system/settings/actions/apply", h.apply)
+	v2.POST("/system/settings/actions/test-email", h.testEmail)
 }
 
 func (h *SystemSettingsHandler) get(c *gin.Context) {
@@ -52,12 +53,30 @@ func (h *SystemSettingsHandler) apply(c *gin.Context) {
 		Failure(c, http.StatusBadRequest, "INVALID_JSON", "系统设置请求不是有效 JSON", nil)
 		return
 	}
+	if whitelist, changed := input.Values["security.ipWhitelist"]; changed && !systemsettings.IPAllowed(whitelist, c.ClientIP()) {
+		Failure(c, http.StatusUnprocessableEntity, "IP_WHITELIST_LOCKOUT", "IP 白名单必须包含当前访问地址", map[string]string{"security.ipWhitelist": c.ClientIP()})
+		return
+	}
 	value, err := h.service.Apply(input)
 	if err != nil {
 		systemSettingsFailure(c, err)
 		return
 	}
 	c.Header("Cache-Control", "no-store")
+	Success(c, http.StatusOK, value)
+}
+
+func (h *SystemSettingsHandler) testEmail(c *gin.Context) {
+	var input systemsettings.SMTPTestInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "SMTP 测试参数无效", nil)
+		return
+	}
+	value, err := h.service.TestSMTP(c.Request.Context(), input)
+	if err != nil {
+		Failure(c, http.StatusUnprocessableEntity, "SMTP_TEST_FAILED", "SMTP 连接或认证失败", map[string]string{"reason": err.Error()})
+		return
+	}
 	Success(c, http.StatusOK, value)
 }
 

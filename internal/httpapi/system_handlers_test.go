@@ -49,4 +49,17 @@ func TestSystemStatusAndSettingsHTTP(t *testing.T) {
 	if !strings.Contains(response.Body.String(), `"restartRequired":true`) || strings.Contains(response.Body.String(), "test-steam-api-key") {
 		t.Fatalf("unexpected apply: %s", response.Body.String())
 	}
+
+	settings = responseData(t, response)["settings"].(map[string]interface{})
+	revision = settings["revision"].(string)
+	response = performJSON(router, http.MethodPost, "/api/v2/system/settings/actions/apply", map[string]interface{}{
+		"revision": revision, "values": map[string]string{"security.ipWhitelist": "127.0.0.1"},
+		"clearSecrets": []string{}, "confirmation": systemsettings.ApplyConfirmation,
+	}, nil, "")
+	assertAPIError(t, response, http.StatusUnprocessableEntity, "IP_WHITELIST_LOCKOUT")
+
+	response = performJSON(router, http.MethodPost, "/api/v2/system/settings/actions/test-email", map[string]interface{}{
+		"server": "127.0.0.1", "port": 1, "username": "admin",
+	}, nil, "")
+	assertAPIError(t, response, http.StatusUnprocessableEntity, "SMTP_TEST_FAILED")
 }

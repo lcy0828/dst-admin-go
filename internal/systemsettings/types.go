@@ -78,3 +78,44 @@ type ApplyResult struct {
 	Settings Settings `json:"settings"`
 	Changes  []Change `json:"changes"`
 }
+
+type RuntimeSettings struct {
+	SystemName          string
+	AdminEmail          string
+	Language            string
+	Timezone            string
+	DateFormat          string
+	Theme               string
+	PasswordComplexity  bool
+	MinPasswordLength   int
+	SessionTimeout      time.Duration
+	MaxLoginAttempts    int
+	IPWhitelist         string
+	AutoBackup          bool
+	BackupFrequency     string
+	BackupTime          string
+	BackupRetention     int
+	EmailEnabled        bool
+	SMTPServer          string
+	SMTPPort            int
+	SMTPUsername        string
+	SMTPPassword        string
+	SenderEmail         string
+	NotifyServerStatus  bool
+	NotifyLoginFailures bool
+	NotifyBackupResults bool
+	NotifySystemUpdates bool
+}
+
+type SMTPTestInput struct {
+	Server   string `json:"server" binding:"required"`
+	Port     int    `json:"port" binding:"required"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type SMTPTestResult struct {
+	Server        string `json:"server"`
+	TLS           bool   `json:"tls"`
+	Authenticated bool   `json:"authenticated"`
+}

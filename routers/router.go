@@ -142,6 +142,24 @@ func InitRouter() (*gin.Engine, error) {
 		return nil, err
 	}
 	systemSettingsHandler := httpapi.NewSystemSettingsHandler(systemSettingsService)
+	authService.SetPolicyProvider(func() authn.PasswordPolicy {
+		preferences, runtimeErr := systemSettingsService.Runtime()
+		if runtimeErr != nil {
+			return authn.PasswordPolicy{MinimumLength: authn.MinPasswordLength, SessionTTL: 24 * time.Hour}
+		}
+		return authn.PasswordPolicy{
+			MinimumLength:     preferences.MinPasswordLength,
+			RequireComplexity: preferences.PasswordComplexity,
+			SessionTTL:        preferences.SessionTimeout,
+		}
+	})
+	authHandler.SetSecurityPolicyProvider(func() httpapi.LoginSecurityPolicy {
+		preferences, runtimeErr := systemSettingsService.Runtime()
+		if runtimeErr != nil {
+			return httpapi.LoginSecurityPolicy{MaxAttempts: 5, BlockFor: 15 * time.Minute}
+		}
+		return httpapi.LoginSecurityPolicy{MaxAttempts: preferences.MaxLoginAttempts, BlockFor: 15 * time.Minute}
+	})
 	var containerTransport containers.Transport = containers.NewExecTransport()
 	if driver := os.Getenv("DST_ADMIN_TEST_CONTAINERS"); driver != "" {
 		if os.Getenv("DST_ADMIN_ENV") != "test" || driver != "memory" {
@@ -355,7 +373,13 @@ func InitRouter() (*gin.Engine, error) {
 	)
 	router.NoRoute(httpapi.NotFound)
 
-	api := router.Group("/api", httpapi.RequireSession(authService))
+	api := router.Group("/api", httpapi.AdminIPPolicy(func() string {
+		preferences, runtimeErr := systemSettingsService.Runtime()
+		if runtimeErr != nil {
+			return ""
+		}
+		return preferences.IPWhitelist
+	}), httpapi.RequireSession(authService))
 	{
 		v2 := api.Group("/v2", idempotencyStore.Middleware())
 		authHandler.Register(v2.Group("/auth"))

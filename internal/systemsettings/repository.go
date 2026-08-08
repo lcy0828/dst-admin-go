@@ -17,25 +17,56 @@ import (
 type fieldDefinition struct {
 	ID, Group, Label, Kind, Section, Key, Environment, Default string
 	Options                                                    []string
-	Sensitive, Required                                        bool
+	Sensitive, Required, ReadOnly, RestartRequired             bool
+	Minimum, Maximum                                           int
 }
 
 var fieldDefinitions = []fieldDefinition{
-	{ID: "paths.save", Group: "paths", Label: "DST 存档目录", Kind: "path", Section: "paths", Key: "DST_SAVE_PATH", Environment: "DST_ADMIN_SAVE_PATH", Required: true},
-	{ID: "paths.backup", Group: "paths", Label: "备份目录", Kind: "path", Section: "paths", Key: "DST_BACKUP_PATH", Environment: "DST_ADMIN_BACKUP_PATH", Required: true},
-	{ID: "paths.server", Group: "paths", Label: "DST 服务端目录", Kind: "path", Section: "paths", Key: "DST_SERVER_PATH", Environment: "DST_ADMIN_SERVER_PATH", Required: true},
-	{ID: "paths.ugc", Group: "paths", Label: "UGC Mod 目录", Kind: "path", Section: "paths", Key: "DST_UGC_PATH", Environment: "DST_ADMIN_UGC_PATH"},
-	{ID: "paths.map", Group: "paths", Label: "地图输出目录", Kind: "path", Section: "paths", Key: "DST_MAP_PATH", Environment: "DST_ADMIN_MAP_PATH"},
-	{ID: "paths.serverMode", Group: "paths", Label: "服务端位数", Kind: "select", Section: "paths", Key: "DST_SERVER_MODE", Environment: "DST_ADMIN_SERVER_MODE", Default: "64", Options: []string{"32", "64"}, Required: true},
-	{ID: "mod.steamCMD", Group: "mod", Label: "SteamCMD 路径", Kind: "path", Section: "mod", Key: "STEAM_CMD_PATH", Environment: "DST_ADMIN_STEAMCMD_PATH"},
-	{ID: "mod.workshopDownload", Group: "mod", Label: "Workshop 下载目录", Kind: "path", Section: "mod", Key: "WORKSHOP_MOD_PATH", Environment: "DST_ADMIN_WORKSHOP_DOWNLOAD"},
-	{ID: "mod.workshopContent", Group: "mod", Label: "Workshop 内容目录", Kind: "path", Section: "mod", Key: "WORKSHOP_CONTENT", Environment: "DST_ADMIN_WORKSHOP_CONTENT"},
-	{ID: "mod.steamAppID", Group: "mod", Label: "Steam App ID", Kind: "text", Section: "mod", Key: "APP_ID", Environment: "DST_ADMIN_STEAM_APP_ID", Default: "322330", Required: true},
-	{ID: "mod.steamAPIKey", Group: "mod", Label: "Steam Web API Key", Kind: "secret", Section: "mod", Key: "STEAM_WEB_API_KEY", Environment: "DST_ADMIN_STEAM_API_KEY", Sensitive: true},
-	{ID: "lua.binary", Group: "lua", Label: "外部 Lua 解释器", Kind: "text", Section: "mod", Key: "LUA_BINARY", Environment: "DST_ADMIN_LUA_BINARY", Default: "lua", Required: true},
-	{ID: "lua.fallback", Group: "lua", Label: "Lua 兼容模块目录（可选）", Kind: "path", Section: "mod", Key: "LUA_SH_PATH", Environment: "DST_ADMIN_LUA_PATH"},
-	{ID: "map.renderer", Group: "map", Label: "地图渲染器路径", Kind: "path", Section: "map", Key: "RENDERER_PATH", Environment: "DST_ADMIN_MAP_RENDERER_PATH"},
-	{ID: "misc.logLevel", Group: "misc", Label: "日志级别", Kind: "select", Section: "misc", Key: "LOG_LEVEL", Environment: "DST_ADMIN_LOG_LEVEL", Default: "info", Options: []string{"debug", "info", "warn", "error"}, Required: true},
+	{ID: "paths.save", Group: "paths", Label: "DST 存档目录", Kind: "path", Section: "paths", Key: "DST_SAVE_PATH", Environment: "DST_ADMIN_SAVE_PATH", Required: true, RestartRequired: true},
+	{ID: "paths.backup", Group: "paths", Label: "备份目录", Kind: "path", Section: "paths", Key: "DST_BACKUP_PATH", Environment: "DST_ADMIN_BACKUP_PATH", Required: true, RestartRequired: true},
+	{ID: "paths.server", Group: "paths", Label: "DST 服务端目录", Kind: "path", Section: "paths", Key: "DST_SERVER_PATH", Environment: "DST_ADMIN_SERVER_PATH", Required: true, RestartRequired: true},
+	{ID: "paths.ugc", Group: "paths", Label: "UGC Mod 目录", Kind: "path", Section: "paths", Key: "DST_UGC_PATH", Environment: "DST_ADMIN_UGC_PATH", RestartRequired: true},
+	{ID: "paths.map", Group: "paths", Label: "地图输出目录", Kind: "path", Section: "paths", Key: "DST_MAP_PATH", Environment: "DST_ADMIN_MAP_PATH", RestartRequired: true},
+	{ID: "paths.serverMode", Group: "paths", Label: "服务端位数", Kind: "select", Section: "paths", Key: "DST_SERVER_MODE", Environment: "DST_ADMIN_SERVER_MODE", Default: "64", Options: []string{"32", "64"}, Required: true, RestartRequired: true},
+	{ID: "mod.steamCMD", Group: "mod", Label: "SteamCMD 路径", Kind: "path", Section: "mod", Key: "STEAM_CMD_PATH", Environment: "DST_ADMIN_STEAMCMD_PATH", RestartRequired: true},
+	{ID: "mod.workshopDownload", Group: "mod", Label: "Workshop 下载目录", Kind: "path", Section: "mod", Key: "WORKSHOP_MOD_PATH", Environment: "DST_ADMIN_WORKSHOP_DOWNLOAD", RestartRequired: true},
+	{ID: "mod.workshopContent", Group: "mod", Label: "Workshop 内容目录", Kind: "path", Section: "mod", Key: "WORKSHOP_CONTENT", Environment: "DST_ADMIN_WORKSHOP_CONTENT", RestartRequired: true},
+	{ID: "mod.steamAppID", Group: "mod", Label: "Steam App ID", Kind: "text", Section: "mod", Key: "APP_ID", Environment: "DST_ADMIN_STEAM_APP_ID", Default: "322330", Required: true, RestartRequired: true},
+	{ID: "mod.steamAPIKey", Group: "mod", Label: "Steam Web API Key", Kind: "secret", Section: "mod", Key: "STEAM_WEB_API_KEY", Environment: "DST_ADMIN_STEAM_API_KEY", Sensitive: true, RestartRequired: true},
+	{ID: "lua.binary", Group: "lua", Label: "外部 Lua 解释器", Kind: "text", Section: "mod", Key: "LUA_BINARY", Environment: "DST_ADMIN_LUA_BINARY", Default: "lua", Required: true, RestartRequired: true},
+	{ID: "lua.fallback", Group: "lua", Label: "Lua 兼容模块目录（可选）", Kind: "path", Section: "mod", Key: "LUA_SH_PATH", Environment: "DST_ADMIN_LUA_PATH", RestartRequired: true},
+	{ID: "map.renderer", Group: "map", Label: "地图渲染器路径", Kind: "path", Section: "map", Key: "RENDERER_PATH", Environment: "DST_ADMIN_MAP_RENDERER_PATH", RestartRequired: true},
+	{ID: "misc.logLevel", Group: "misc", Label: "日志级别", Kind: "select", Section: "misc", Key: "LOG_LEVEL", Environment: "DST_ADMIN_LOG_LEVEL", Default: "info", Options: []string{"debug", "info", "warn", "error"}, Required: true, RestartRequired: true},
+
+	{ID: "ui.systemName", Group: "ui", Label: "管理系统名称", Kind: "text", Section: "ui", Key: "SYSTEM_NAME", Environment: "DST_ADMIN_SYSTEM_NAME", Default: "饥荒管理系统", Required: true},
+	{ID: "ui.adminEmail", Group: "ui", Label: "管理员联系邮箱", Kind: "email", Section: "ui", Key: "ADMIN_EMAIL", Environment: "DST_ADMIN_ADMIN_EMAIL", Default: "admin@example.com", Required: true},
+	{ID: "ui.language", Group: "ui", Label: "系统语言", Kind: "select", Section: "ui", Key: "LANGUAGE", Environment: "DST_ADMIN_LANGUAGE", Default: "zh-CN", Options: []string{"zh-CN", "en-US", "ja-JP"}, Required: true},
+	{ID: "ui.timezone", Group: "ui", Label: "时区设置", Kind: "select", Section: "ui", Key: "TIMEZONE", Environment: "DST_ADMIN_TIMEZONE", Default: "Asia/Shanghai", Options: []string{"Asia/Shanghai", "UTC", "America/Los_Angeles", "America/New_York", "Europe/Berlin", "Asia/Tokyo"}, Required: true},
+	{ID: "ui.dateFormat", Group: "ui", Label: "日期格式", Kind: "select", Section: "ui", Key: "DATE_FORMAT", Environment: "DST_ADMIN_DATE_FORMAT", Default: "YYYY-MM-DD", Options: []string{"YYYY-MM-DD", "MM/DD/YYYY", "DD/MM/YYYY", "YYYY年MM月DD日"}, Required: true},
+	{ID: "ui.theme", Group: "ui", Label: "主题颜色", Kind: "color", Section: "ui", Key: "THEME_COLOR", Environment: "DST_ADMIN_THEME_COLOR", Default: "#d97932", Required: true},
+
+	{ID: "security.passwordComplexity", Group: "security", Label: "密码复杂度检查", Kind: "boolean", Section: "security", Key: "PASSWORD_COMPLEXITY", Environment: "DST_ADMIN_PASSWORD_COMPLEXITY", Default: "false", Required: true},
+	{ID: "security.minPasswordLength", Group: "security", Label: "密码最小长度", Kind: "number", Section: "security", Key: "MIN_PASSWORD_LENGTH", Environment: "DST_ADMIN_MIN_PASSWORD_LENGTH", Default: "6", Required: true, Minimum: 6, Maximum: 20},
+	{ID: "security.sessionTimeout", Group: "security", Label: "会话超时时间", Kind: "number", Section: "security", Key: "SESSION_TIMEOUT_MINUTES", Environment: "DST_ADMIN_SESSION_TIMEOUT", Default: "1440", Required: true, Minimum: 5, Maximum: 1440},
+	{ID: "security.maxLoginAttempts", Group: "security", Label: "最大登录尝试次数", Kind: "number", Section: "security", Key: "MAX_LOGIN_ATTEMPTS", Environment: "DST_ADMIN_MAX_LOGIN_ATTEMPTS", Default: "5", Required: true, Minimum: 3, Maximum: 10},
+	{ID: "security.twoFactorAuth", Group: "security", Label: "双因素认证", Kind: "boolean", Section: "security", Key: "TWO_FACTOR_AUTH", Default: "false", ReadOnly: true},
+	{ID: "security.ipWhitelist", Group: "security", Label: "IP 白名单", Kind: "ip-list", Section: "security", Key: "IP_WHITELIST", Environment: "DST_ADMIN_IP_WHITELIST"},
+
+	{ID: "backup.auto", Group: "backup", Label: "自动备份", Kind: "boolean", Section: "backup", Key: "AUTO_BACKUP", Environment: "DST_ADMIN_AUTO_BACKUP", Default: "true", Required: true},
+	{ID: "backup.frequency", Group: "backup", Label: "备份频率", Kind: "select", Section: "backup", Key: "FREQUENCY", Environment: "DST_ADMIN_BACKUP_FREQUENCY", Default: "daily", Options: []string{"daily", "weekly", "monthly"}, Required: true},
+	{ID: "backup.time", Group: "backup", Label: "备份时间", Kind: "time", Section: "backup", Key: "TIME", Environment: "DST_ADMIN_BACKUP_TIME", Default: "03:00", Required: true},
+	{ID: "backup.retention", Group: "backup", Label: "保留备份数量", Kind: "number", Section: "backup", Key: "RETENTION", Environment: "DST_ADMIN_BACKUP_RETENTION", Default: "7", Required: true, Minimum: 1, Maximum: 100},
+
+	{ID: "notification.emailEnabled", Group: "notification", Label: "邮件通知", Kind: "boolean", Section: "notification", Key: "EMAIL_ENABLED", Environment: "DST_ADMIN_EMAIL_ENABLED", Default: "false", Required: true},
+	{ID: "notification.smtpServer", Group: "notification", Label: "SMTP 服务器", Kind: "text", Section: "notification", Key: "SMTP_SERVER", Environment: "DST_ADMIN_SMTP_SERVER"},
+	{ID: "notification.smtpPort", Group: "notification", Label: "SMTP 端口", Kind: "number", Section: "notification", Key: "SMTP_PORT", Environment: "DST_ADMIN_SMTP_PORT", Default: "587", Minimum: 1, Maximum: 65535},
+	{ID: "notification.smtpUsername", Group: "notification", Label: "SMTP 用户名", Kind: "text", Section: "notification", Key: "SMTP_USERNAME", Environment: "DST_ADMIN_SMTP_USERNAME"},
+	{ID: "notification.smtpPassword", Group: "notification", Label: "SMTP 密码", Kind: "secret", Section: "notification", Key: "SMTP_PASSWORD", Environment: "DST_ADMIN_SMTP_PASSWORD", Sensitive: true},
+	{ID: "notification.senderEmail", Group: "notification", Label: "发件人邮箱", Kind: "email", Section: "notification", Key: "SENDER_EMAIL", Environment: "DST_ADMIN_SENDER_EMAIL"},
+	{ID: "notification.serverStatus", Group: "notification", Label: "服务器状态通知", Kind: "boolean", Section: "notification", Key: "SERVER_STATUS", Environment: "DST_ADMIN_NOTIFY_SERVER_STATUS", Default: "true", Required: true},
+	{ID: "notification.loginFailures", Group: "notification", Label: "登录失败通知", Kind: "boolean", Section: "notification", Key: "LOGIN_FAILURES", Environment: "DST_ADMIN_NOTIFY_LOGIN_FAILURES", Default: "true", Required: true},
+	{ID: "notification.backupResults", Group: "notification", Label: "备份结果通知", Kind: "boolean", Section: "notification", Key: "BACKUP_RESULTS", Environment: "DST_ADMIN_NOTIFY_BACKUP_RESULTS", Default: "true", Required: true},
+	{ID: "notification.systemUpdates", Group: "notification", Label: "系统更新通知", Kind: "boolean", Section: "notification", Key: "SYSTEM_UPDATES", Environment: "DST_ADMIN_NOTIFY_SYSTEM_UPDATES", Default: "true", Required: true},
 }
 
 type Snapshot struct {

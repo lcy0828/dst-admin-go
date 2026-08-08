@@ -18,6 +18,12 @@ type AuthHandler struct {
 	service  *authn.Service
 	mu       sync.Mutex
 	failures map[string]loginFailure
+	policy   func() LoginSecurityPolicy
+}
+
+type LoginSecurityPolicy struct {
+	MaxAttempts int
+	BlockFor    time.Duration
 }
 
 type loginFailure struct {
@@ -36,7 +42,15 @@ type changePasswordRequest struct {
 }
 
 func NewAuthHandler(service *authn.Service) *AuthHandler {
-	return &AuthHandler{service: service, failures: make(map[string]loginFailure)}
+	return &AuthHandler{service: service, failures: make(map[string]loginFailure), policy: func() LoginSecurityPolicy {
+		return LoginSecurityPolicy{MaxAttempts: 5, BlockFor: 15 * time.Minute}
+	}}
+}
+
+func (h *AuthHandler) SetSecurityPolicyProvider(provider func() LoginSecurityPolicy) {
+	if provider != nil {
+		h.policy = provider
+	}
 }
 
 func (h *AuthHandler) Register(group *gin.RouterGroup) {
@@ -160,7 +174,9 @@ func (h *AuthHandler) writeAuthError(c *gin.Context, err error) {
 	case errors.Is(err, authn.ErrSetupComplete):
 		Failure(c, http.StatusConflict, "SETUP_COMPLETE", "管理员初始化已经完成", nil)
 	case errors.Is(err, authn.ErrWeakPassword):
-		Failure(c, http.StatusUnprocessableEntity, "WEAK_PASSWORD", fmt.Sprintf("密码至少需要 %d 个字符", authn.MinPasswordLength), nil)
+		Failure(c, http.StatusUnprocessableEntity, "WEAK_PASSWORD", fmt.Sprintf("密码至少需要 %d 个字符", h.service.PasswordPolicy().MinimumLength), nil)
+	case errors.Is(err, authn.ErrPasswordComplexity):
+		Failure(c, http.StatusUnprocessableEntity, "PASSWORD_COMPLEXITY_REQUIRED", "密码必须包含大小写字母、数字和特殊字符", nil)
 	case errors.Is(err, authn.ErrPasswordTooLong):
 		Failure(c, http.StatusUnprocessableEntity, "PASSWORD_TOO_LONG", "密码不能超过 72 字节", nil)
 	case errors.Is(err, authn.ErrPasswordUnchanged):
@@ -189,8 +205,15 @@ func (h *AuthHandler) recordFailure(key string) {
 	defer h.mu.Unlock()
 	failure := h.failures[key]
 	failure.count++
-	if failure.count >= 5 {
-		failure.blockedUntil = time.Now().Add(15 * time.Minute)
+	policy := h.policy()
+	if policy.MaxAttempts < 3 || policy.MaxAttempts > 10 {
+		policy.MaxAttempts = 5
+	}
+	if policy.BlockFor <= 0 {
+		policy.BlockFor = 15 * time.Minute
+	}
+	if failure.count >= policy.MaxAttempts {
+		failure.blockedUntil = time.Now().Add(policy.BlockFor)
 	}
 	h.failures[key] = failure
 }

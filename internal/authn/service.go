@@ -29,6 +29,7 @@ var (
 	ErrSetupRequired      = errors.New("initial setup is required")
 	ErrInvalidSession     = errors.New("invalid session")
 	ErrWeakPassword       = fmt.Errorf("password must contain at least %d characters", MinPasswordLength)
+	ErrPasswordComplexity = errors.New("password does not satisfy the configured complexity policy")
 	ErrPasswordTooLong    = errors.New("password must not exceed 72 bytes")
 	ErrPasswordUnchanged  = errors.New("new password must differ from current password")
 )
@@ -42,14 +43,15 @@ type Admin struct {
 func (Admin) TableName() string { return "auth" }
 
 type Session struct {
-	ID        int       `gorm:"primary_key" json:"-"`
-	TokenHash string    `gorm:"type:char(64);unique_index;not null" json:"-"`
-	CSRFToken string    `gorm:"type:varchar(64);not null" json:"-"`
-	AdminID   int       `gorm:"index;not null" json:"-"`
-	ExpiresAt time.Time `gorm:"index;not null" json:"expiresAt"`
-	CreatedAt time.Time `json:"createdAt"`
-	IPAddress string    `gorm:"type:varchar(64)" json:"-"`
-	UserAgent string    `gorm:"type:varchar(512)" json:"-"`
+	ID         int       `gorm:"primary_key" json:"-"`
+	TokenHash  string    `gorm:"type:char(64);unique_index;not null" json:"-"`
+	CSRFToken  string    `gorm:"type:varchar(64);not null" json:"-"`
+	AdminID    int       `gorm:"index;not null" json:"-"`
+	ExpiresAt  time.Time `gorm:"index;not null" json:"expiresAt"`
+	CreatedAt  time.Time `json:"createdAt"`
+	LastSeenAt time.Time `gorm:"index" json:"-"`
+	IPAddress  string    `gorm:"type:varchar(64)" json:"-"`
+	UserAgent  string    `gorm:"type:varchar(512)" json:"-"`
 }
 
 func (Session) TableName() string { return "admin_session" }
@@ -67,6 +69,13 @@ type Service struct {
 	bcryptCost   int
 	adminTable   string
 	sessionTable string
+	policy       func() PasswordPolicy
+}
+
+type PasswordPolicy struct {
+	MinimumLength     int
+	RequireComplexity bool
+	SessionTTL        time.Duration
 }
 
 func NewService(db *gorm.DB) *Service {
@@ -77,7 +86,27 @@ func NewService(db *gorm.DB) *Service {
 		bcryptCost:   bcrypt.DefaultCost,
 		adminTable:   "auth",
 		sessionTable: "admin_session",
+		policy: func() PasswordPolicy {
+			return PasswordPolicy{MinimumLength: MinPasswordLength, SessionTTL: 24 * time.Hour}
+		},
 	}
+}
+
+func (s *Service) SetPolicyProvider(provider func() PasswordPolicy) {
+	if provider != nil {
+		s.policy = provider
+	}
+}
+
+func (s *Service) PasswordPolicy() PasswordPolicy {
+	policy := s.policy()
+	if policy.MinimumLength < MinPasswordLength || policy.MinimumLength > 20 {
+		policy.MinimumLength = MinPasswordLength
+	}
+	if policy.SessionTTL < 5*time.Minute || policy.SessionTTL > 24*time.Hour {
+		policy.SessionTTL = 24 * time.Hour
+	}
+	return policy
 }
 
 var tablePrefixPattern = regexp.MustCompile(`^[A-Za-z0-9_]*$`)
@@ -142,7 +171,7 @@ func (s *Service) Setup(username, password, ipAddress, userAgent string) (*Authe
 	if username == "" {
 		return nil, "", ErrInvalidCredentials
 	}
-	if err := checkNewPassword(password); err != nil {
+	if err := checkPassword(password, s.PasswordPolicy()); err != nil {
 		return nil, "", err
 	}
 
@@ -211,10 +240,28 @@ func (s *Service) Authenticate(rawToken string) (*AuthenticatedSession, error) {
 		return nil, ErrInvalidSession
 	}
 	var session Session
-	if err := s.sessions().Where("token_hash = ? AND expires_at > ?", digest(rawToken), s.now()).First(&session).Error; err != nil {
+	if err := s.sessions().Where("token_hash = ?", digest(rawToken)).First(&session).Error; err != nil {
 		if gorm.IsRecordNotFoundError(err) {
 			return nil, ErrInvalidSession
 		}
+		return nil, err
+	}
+	now := s.now()
+	policy := s.PasswordPolicy()
+	lastSeen := session.LastSeenAt
+	if lastSeen.IsZero() {
+		lastSeen = session.CreatedAt
+	}
+	if !session.ExpiresAt.After(now) || now.Sub(lastSeen) > policy.SessionTTL {
+		_ = s.sessions().Where("id = ?", session.ID).Delete(&Session{}).Error
+		return nil, ErrInvalidSession
+	}
+	session.LastSeenAt = now
+	session.ExpiresAt = now.Add(policy.SessionTTL)
+	if err := s.sessions().Where("id = ?", session.ID).Updates(map[string]interface{}{
+		"last_seen_at": session.LastSeenAt,
+		"expires_at":   session.ExpiresAt,
+	}).Error; err != nil {
 		return nil, err
 	}
 	var admin Admin
@@ -236,7 +283,7 @@ func (s *Service) Logout(rawToken string) error {
 }
 
 func (s *Service) ChangePassword(adminID int, currentPassword, newPassword string) error {
-	if err := checkNewPassword(newPassword); err != nil {
+	if err := checkPassword(newPassword, s.PasswordPolicy()); err != nil {
 		return err
 	}
 	var admin Admin
@@ -278,14 +325,16 @@ func (s *Service) createSession(admin Admin, ipAddress, userAgent string) (*Auth
 		return nil, "", err
 	}
 	now := s.now()
+	policy := s.PasswordPolicy()
 	session := Session{
-		TokenHash: digest(rawToken),
-		CSRFToken: csrfToken,
-		AdminID:   admin.ID,
-		ExpiresAt: now.Add(s.sessionTTL),
-		CreatedAt: now,
-		IPAddress: truncate(ipAddress, 64),
-		UserAgent: truncate(userAgent, 512),
+		TokenHash:  digest(rawToken),
+		CSRFToken:  csrfToken,
+		AdminID:    admin.ID,
+		ExpiresAt:  now.Add(policy.SessionTTL),
+		CreatedAt:  now,
+		LastSeenAt: now,
+		IPAddress:  truncate(ipAddress, 64),
+		UserAgent:  truncate(userAgent, 512),
 	}
 	if err := s.sessions().Create(&session).Error; err != nil {
 		return nil, "", err
@@ -306,11 +355,33 @@ func (s *Service) sessions() *gorm.DB {
 }
 
 func checkNewPassword(password string) error {
-	if len([]rune(password)) < MinPasswordLength {
+	return checkPassword(password, PasswordPolicy{MinimumLength: MinPasswordLength, SessionTTL: 24 * time.Hour})
+}
+
+func checkPassword(password string, policy PasswordPolicy) error {
+	if len([]rune(password)) < policy.MinimumLength {
 		return ErrWeakPassword
 	}
 	if len([]byte(password)) > 72 {
 		return ErrPasswordTooLong
+	}
+	if policy.RequireComplexity {
+		var lower, upper, digit, symbol bool
+		for _, character := range password {
+			switch {
+			case character >= 'a' && character <= 'z':
+				lower = true
+			case character >= 'A' && character <= 'Z':
+				upper = true
+			case character >= '0' && character <= '9':
+				digit = true
+			default:
+				symbol = true
+			}
+		}
+		if !lower || !upper || !digit || !symbol {
+			return ErrPasswordComplexity
+		}
 	}
 	return nil
 }
