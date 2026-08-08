@@ -20,6 +20,7 @@ const (
 	SessionCookieName = "dst_admin_session"
 	ContextAdminKey   = "dst_admin.admin"
 	ContextSessionKey = "dst_admin.session"
+	MinPasswordLength = 6
 )
 
 var (
@@ -27,7 +28,7 @@ var (
 	ErrSetupComplete      = errors.New("setup is already complete")
 	ErrSetupRequired      = errors.New("initial setup is required")
 	ErrInvalidSession     = errors.New("invalid session")
-	ErrWeakPassword       = errors.New("password must contain at least 12 characters")
+	ErrWeakPassword       = fmt.Errorf("password must contain at least %d characters", MinPasswordLength)
 	ErrPasswordTooLong    = errors.New("password must not exceed 72 bytes")
 	ErrPasswordUnchanged  = errors.New("new password must differ from current password")
 )
@@ -305,7 +306,7 @@ func (s *Service) sessions() *gorm.DB {
 }
 
 func checkNewPassword(password string) error {
-	if len([]rune(password)) < 12 {
+	if len([]rune(password)) < MinPasswordLength {
 		return ErrWeakPassword
 	}
 	if len([]byte(password)) > 72 {

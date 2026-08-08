@@ -50,7 +50,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/Credentials"
+              $ref: "#/components/schemas/SetupCredentials"
       responses:
         "201":
           description: Administrator and session created
@@ -138,7 +138,7 @@ paths:
                   maxLength: 72
                 newPassword:
                   type: string
-                  minLength: 12
+                  minLength: 6
                   maxLength: 72
       responses:
         "200":
@@ -2100,6 +2100,19 @@ components:
         password:
           type: string
           minLength: 1
+    SetupCredentials:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 128
+        password:
+          type: string
+          minLength: 6
+          maxLength: 72
     Admin:
       type: object
       additionalProperties: false

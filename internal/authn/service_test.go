@@ -102,6 +102,16 @@ func TestChangePasswordInvalidatesEverySession(t *testing.T) {
 }
 
 func TestPasswordBoundariesAndUnchangedPassword(t *testing.T) {
+	if err := checkNewPassword("12345"); err != ErrWeakPassword {
+		t.Fatalf("five-character password error = %v, want %v", err, ErrWeakPassword)
+	}
+	if err := checkNewPassword("123456"); err != nil {
+		t.Fatalf("six-character password should be accepted: %v", err)
+	}
+	if err := checkNewPassword("一二三四五六"); err != nil {
+		t.Fatalf("six-character Unicode password should be accepted: %v", err)
+	}
+
 	service := NewService(openTestDB(t))
 	if err := service.Migrate(); err != nil {
 		t.Fatalf("migrate: %v", err)

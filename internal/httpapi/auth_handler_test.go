@@ -62,7 +62,7 @@ func TestAuthLifecycleAndCSRF(t *testing.T) {
 	assertStatus(t, response, http.StatusUnprocessableEntity)
 
 	response = performJSON(app.router, http.MethodPost, "/api/v2/auth/setup", map[string]string{
-		"username": "admin", "password": "strong-password-one",
+		"username": "admin", "password": "123456",
 	}, nil, "")
 	assertStatus(t, response, http.StatusCreated)
 	cookie := response.Result().Cookies()[0]
@@ -140,11 +140,15 @@ func TestChangePasswordValidationAndSessionRevocation(t *testing.T) {
 	assertAPIError(t, response, http.StatusUnprocessableEntity, "PASSWORD_UNCHANGED")
 
 	response = performJSON(app.router, http.MethodPut, "/api/v2/auth/password", map[string]string{
-		"currentPassword": "strong-password-one", "newPassword": "strong-password-two",
+		"currentPassword": "strong-password-one", "newPassword": "654321",
 	}, cookie, csrfToken)
 	assertStatus(t, response, http.StatusOK)
 	response = performJSON(app.router, http.MethodGet, "/api/v2/protected", nil, cookie, "")
 	assertStatus(t, response, http.StatusUnauthorized)
+	response = performJSON(app.router, http.MethodPost, "/api/v2/auth/login", map[string]string{
+		"username": "admin", "password": "654321",
+	}, nil, "")
+	assertStatus(t, response, http.StatusOK)
 }
 
 func performJSON(router http.Handler, method, path string, body interface{}, cookie *http.Cookie, csrfToken string) *httptest.ResponseRecorder {

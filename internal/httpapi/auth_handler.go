@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -159,7 +160,7 @@ func (h *AuthHandler) writeAuthError(c *gin.Context, err error) {
 	case errors.Is(err, authn.ErrSetupComplete):
 		Failure(c, http.StatusConflict, "SETUP_COMPLETE", "管理员初始化已经完成", nil)
 	case errors.Is(err, authn.ErrWeakPassword):
-		Failure(c, http.StatusUnprocessableEntity, "WEAK_PASSWORD", "密码至少需要 12 个字符", nil)
+		Failure(c, http.StatusUnprocessableEntity, "WEAK_PASSWORD", fmt.Sprintf("密码至少需要 %d 个字符", authn.MinPasswordLength), nil)
 	case errors.Is(err, authn.ErrPasswordTooLong):
 		Failure(c, http.StatusUnprocessableEntity, "PASSWORD_TOO_LONG", "密码不能超过 72 字节", nil)
 	case errors.Is(err, authn.ErrPasswordUnchanged):
