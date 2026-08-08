@@ -40,12 +40,37 @@ func TestAgentHTTPListCommandFailureAndKeyRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	localRoot := t.TempDir()
+	service.ConfigureLocalRuntime(agents.RuntimeConfig{DisplayName: "本机", SavePath: localRoot, ServerPath: localRoot, LuaBinary: "lua", ServerMode: "64"})
 	router := gin.New()
 	v2 := router.Group("/api/v2")
 	NewAgentHandler(service).Register(v2)
 	NewJobHandler(jobService).Register(v2)
 
-	response := performJSON(router, http.MethodGet, "/api/v2/agents", nil, nil, "")
+	response := performJSON(router, http.MethodGet, "/api/v2/runtime-targets", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	runtimeData := responseData(t, response)
+	if runtimeData["defaultTargetId"] != "local" || runtimeData["total"] != float64(3) {
+		t.Fatalf("unexpected runtime targets: %s", response.Body.String())
+	}
+	runtimeItems := runtimeData["items"].([]interface{})
+	localTarget := runtimeItems[0].(map[string]interface{})
+	if localTarget["id"] != "local" || localTarget["default"] != true {
+		t.Fatalf("local runtime is not first/default: %s", response.Body.String())
+	}
+	response = performJSON(router, http.MethodPut, "/api/v2/runtime-targets/agents/agent-primary", map[string]interface{}{
+		"displayName": "远程生产节点", "savePath": "/srv/dst/save", "serverPath": "/srv/dst/server", "serverMode": "64",
+	}, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if data := responseData(t, response); data["id"] != "agent:agent-primary" || data["configured"] != true {
+		t.Fatalf("unexpected saved runtime: %s", response.Body.String())
+	}
+	response = performJSON(router, http.MethodPut, "/api/v2/runtime-targets/agents/agent-primary", map[string]interface{}{
+		"displayName": "无效节点", "savePath": "relative", "serverPath": "/srv/dst/server",
+	}, nil, "")
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+
+	response = performJSON(router, http.MethodGet, "/api/v2/agents", nil, nil, "")
 	assertStatus(t, response, http.StatusOK)
 	if data := responseData(t, response); data["total"] != float64(2) || data["transportAvailable"] != true {
 		t.Fatalf("unexpected list: %s", response.Body.String())

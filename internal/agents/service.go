@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -23,12 +25,94 @@ const (
 )
 
 var agentIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var windowsAbsolutePathPattern = regexp.MustCompile(`(?i)^(?:[a-z]:[\\/]|\\\\)`)
 
 type Service struct {
 	store     *Store
 	jobs      *jobs.Service
 	transport Transport
 	now       func() time.Time
+	local     RuntimeConfig
+}
+
+// ConfigureLocalRuntime sets the controller-local paths. It is intentionally
+// separate from persisted Agent runtime configuration.
+func (s *Service) ConfigureLocalRuntime(config RuntimeConfig) {
+	s.local = normalizeRuntimeConfig(config)
+}
+
+func (s *Service) RuntimeTargets() ([]RuntimeTarget, error) {
+	agentItems, _, err := s.Agents()
+	if err != nil {
+		return nil, err
+	}
+	configs, err := s.store.RuntimeConfigs()
+	if err != nil {
+		return nil, err
+	}
+	items := make([]RuntimeTarget, 0, len(agentItems)+1)
+	items = append(items, s.localRuntimeTarget())
+	for _, agent := range agentItems {
+		config, configured := configs[agent.ID]
+		items = append(items, runtimeTargetFromAgent(agent, config, configured))
+	}
+	return items, nil
+}
+
+func (s *Service) RuntimeTarget(agentID string) (RuntimeTarget, error) {
+	agent, err := s.Agent(agentID)
+	if err != nil {
+		return RuntimeTarget{}, err
+	}
+	config, err := s.store.RuntimeConfig(agentID)
+	if errors.Is(err, ErrRuntimeNotConfigured) {
+		return runtimeTargetFromAgent(agent, RuntimeConfig{}, false), nil
+	}
+	if err != nil {
+		return RuntimeTarget{}, err
+	}
+	return runtimeTargetFromAgent(agent, config, true), nil
+}
+
+func (s *Service) SaveRuntimeConfig(agentID string, input RuntimeConfig) (RuntimeTarget, error) {
+	agent, err := s.Agent(agentID)
+	if err != nil {
+		return RuntimeTarget{}, err
+	}
+	config := normalizeRuntimeConfig(input)
+	if config.DisplayName == "" {
+		config.DisplayName = agent.Hostname
+	}
+	if err := validateRuntimeConfig(config, agent.OS); err != nil {
+		return RuntimeTarget{}, err
+	}
+	config, err = s.store.SaveRuntimeConfig(agentID, config)
+	if err != nil {
+		return RuntimeTarget{}, err
+	}
+	return runtimeTargetFromAgent(agent, config, true), nil
+}
+
+func (s *Service) DeleteRuntimeConfig(agentID string) error {
+	if _, err := s.Agent(agentID); err != nil {
+		return err
+	}
+	return s.store.DeleteRuntimeConfig(agentID)
+}
+
+func (s *Service) localRuntimeTarget() RuntimeTarget {
+	configured := s.local.SavePath != "" && s.local.ServerPath != ""
+	ready := configured && existingDirectory(s.local.SavePath) && existingDirectory(s.local.ServerPath)
+	status := RuntimeStatusConfigurationRequired
+	if ready {
+		status = RuntimeStatusReady
+	}
+	hostname, _ := os.Hostname()
+	return RuntimeTarget{
+		ID: "local", Kind: RuntimeKindLocal, Name: "本机", Hostname: hostname, OS: runtime.GOOS, Arch: runtime.GOARCH, Status: status,
+		Default: true, Configured: configured, Online: true,
+		Capabilities: []string{"runtime.local"}, Config: s.local,
+	}
 }
 
 func NewService(store *Store, jobService *jobs.Service, transport Transport) (*Service, error) {
@@ -355,6 +439,84 @@ func truncateBytes(value string, maximum int) string {
 		return value
 	}
 	return value[:maximum] + "\n[输出已截断]"
+}
+
+func normalizeRuntimeConfig(config RuntimeConfig) RuntimeConfig {
+	config.DisplayName = strings.TrimSpace(config.DisplayName)
+	config.SavePath = strings.TrimSpace(config.SavePath)
+	config.BackupPath = strings.TrimSpace(config.BackupPath)
+	config.ServerPath = strings.TrimSpace(config.ServerPath)
+	config.UGCPath = strings.TrimSpace(config.UGCPath)
+	config.SteamCMDPath = strings.TrimSpace(config.SteamCMDPath)
+	config.WorkshopContentPath = strings.TrimSpace(config.WorkshopContentPath)
+	config.LuaBinary = strings.TrimSpace(config.LuaBinary)
+	config.LuaFallbackPath = strings.TrimSpace(config.LuaFallbackPath)
+	config.ServerMode = strings.ToLower(strings.TrimSpace(config.ServerMode))
+	if config.LuaBinary == "" {
+		config.LuaBinary = "lua"
+	}
+	if config.ServerMode == "" {
+		config.ServerMode = "64"
+	}
+	config.UpdatedAt = nil
+	return config
+}
+
+func validateRuntimeConfig(config RuntimeConfig, platform string) error {
+	if config.DisplayName == "" || utf8.RuneCountInString(config.DisplayName) > 100 ||
+		config.SavePath == "" || config.ServerPath == "" ||
+		utf8.RuneCountInString(config.LuaBinary) > 255 ||
+		(config.ServerMode != "32" && config.ServerMode != "64" && config.ServerMode != "luajit") {
+		return ErrInvalidInput
+	}
+	if strings.ContainsAny(config.DisplayName+config.LuaBinary, "\x00\r\n") {
+		return ErrInvalidInput
+	}
+	for _, path := range []string{
+		config.SavePath, config.BackupPath, config.ServerPath, config.UGCPath,
+		config.SteamCMDPath, config.WorkshopContentPath, config.LuaFallbackPath,
+	} {
+		if path == "" {
+			continue
+		}
+		if utf8.RuneCountInString(path) > 2048 || strings.ContainsAny(path, "\x00\r\n") || !absoluteRuntimePath(path, platform) {
+			return ErrInvalidInput
+		}
+	}
+	return nil
+}
+
+func absoluteRuntimePath(value, platform string) bool {
+	if strings.EqualFold(strings.TrimSpace(platform), "windows") {
+		return windowsAbsolutePathPattern.MatchString(value)
+	}
+	return strings.HasPrefix(value, "/")
+}
+
+func runtimeTargetFromAgent(agent Agent, config RuntimeConfig, configured bool) RuntimeTarget {
+	status := RuntimeStatusConfigurationRequired
+	if configured {
+		status = RuntimeStatusReady
+		if agent.Status != StatusOnline {
+			status = RuntimeStatusOffline
+		}
+	}
+	name := agent.Hostname
+	if config.DisplayName != "" {
+		name = config.DisplayName
+	}
+	heartbeat := agent.LastHeartbeat.UTC()
+	return RuntimeTarget{
+		ID: "agent:" + agent.ID, Kind: RuntimeKindAgent, AgentID: agent.ID, Name: name,
+		Hostname: agent.Hostname, OS: agent.OS, Arch: agent.Arch, Status: status,
+		Configured: configured, Online: agent.Status == StatusOnline,
+		Capabilities: append([]string(nil), agent.Capabilities...), LastHeartbeat: &heartbeat, Config: config,
+	}
+}
+
+func existingDirectory(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 func utcTimePointer(value time.Time) *time.Time { utc := value.UTC(); return &utc }

@@ -2094,6 +2094,49 @@ paths:
         "200": { description: Rule test result, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleTestEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /runtime-targets:
+    get:
+      tags: [Agents]
+      operationId: listRuntimeTargets
+      summary: List the controller-local runtime first, followed by Agent-backed remote runtimes
+      responses:
+        "200":
+          description: Local-first runtime target list
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RuntimeTargetListEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /runtime-targets/agents/{agentId}:
+    parameters: [{ $ref: "#/components/parameters/AgentID" }]
+    get:
+      tags: [Agents]
+      operationId: getAgentRuntimeTarget
+      summary: Read one Agent and its isolated remote runtime configuration
+      responses:
+        "200": { description: Remote runtime target, content: { application/json: { schema: { $ref: "#/components/schemas/RuntimeTargetEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Agents]
+      operationId: configureAgentRuntimeTarget
+      summary: Save paths interpreted only on the selected Agent machine
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuntimeConfigInput" }
+      responses:
+        "200": { description: Configured remote runtime target, content: { application/json: { schema: { $ref: "#/components/schemas/RuntimeTargetEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+    delete:
+      tags: [Agents]
+      operationId: unconfigureAgentRuntimeTarget
+      summary: Remove only the Agent runtime paths without forgetting the Agent
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Remote runtime configuration removed }
+        "404": { $ref: "#/components/responses/NotFound" }
   /agents:
     get:
       tags: [Agents]
@@ -4975,6 +5018,84 @@ components:
     AgentStatus:
       type: string
       enum: [online, offline]
+    RuntimeKind:
+      type: string
+      enum: [local, agent]
+    RuntimeStatus:
+      type: string
+      enum: [ready, offline, configuration_required]
+    RuntimeConfig:
+      type: object
+      additionalProperties: false
+      required: [displayName, savePath, backupPath, serverPath, ugcPath, steamcmdPath, workshopContentPath, luaBinary, luaFallbackPath, serverMode]
+      properties:
+        displayName: { type: string, maxLength: 100 }
+        savePath: { type: string, maxLength: 2048 }
+        backupPath: { type: string, maxLength: 2048 }
+        serverPath: { type: string, maxLength: 2048 }
+        ugcPath: { type: string, maxLength: 2048 }
+        steamcmdPath: { type: string, maxLength: 2048 }
+        workshopContentPath: { type: string, maxLength: 2048 }
+        luaBinary: { type: string, maxLength: 255, default: lua }
+        luaFallbackPath: { type: string, maxLength: 2048 }
+        serverMode: { type: string, enum: [32, 64, luajit], default: 64 }
+        updatedAt: { type: string, format: date-time, readOnly: true }
+    RuntimeConfigInput:
+      type: object
+      additionalProperties: false
+      required: [savePath, serverPath]
+      properties:
+        displayName: { type: string, maxLength: 100 }
+        savePath: { type: string, minLength: 1, maxLength: 2048 }
+        backupPath: { type: string, maxLength: 2048 }
+        serverPath: { type: string, minLength: 1, maxLength: 2048 }
+        ugcPath: { type: string, maxLength: 2048 }
+        steamcmdPath: { type: string, maxLength: 2048 }
+        workshopContentPath: { type: string, maxLength: 2048 }
+        luaBinary: { type: string, maxLength: 255, default: lua }
+        luaFallbackPath: { type: string, maxLength: 2048 }
+        serverMode: { type: string, enum: [32, 64, luajit], default: 64 }
+    RuntimeTarget:
+      type: object
+      additionalProperties: false
+      required: [id, kind, name, hostname, os, arch, status, default, configured, online, capabilities, config]
+      properties:
+        id: { type: string, description: local or agent followed by a colon and Agent ID }
+        kind: { $ref: "#/components/schemas/RuntimeKind" }
+        agentId: { type: string }
+        name: { type: string }
+        hostname: { type: string }
+        os: { type: string }
+        arch: { type: string }
+        status: { $ref: "#/components/schemas/RuntimeStatus" }
+        default: { type: boolean }
+        configured: { type: boolean }
+        online: { type: boolean }
+        capabilities: { type: array, items: { type: string } }
+        lastHeartbeat: { type: string, format: date-time }
+        config: { $ref: "#/components/schemas/RuntimeConfig" }
+    RuntimeTargetEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/RuntimeTarget" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    RuntimeTargetList:
+      type: object
+      additionalProperties: false
+      required: [items, total, defaultTargetId]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/RuntimeTarget" } }
+        total: { type: integer, minimum: 1 }
+        defaultTargetId: { type: string, const: local }
+    RuntimeTargetListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/RuntimeTargetList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     AgentAction:
       type: string
       enum: [system.refresh, disk.inspect]

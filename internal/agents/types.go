@@ -15,6 +15,7 @@ var (
 	ErrInvalidInput         = errors.New("agent input is invalid")
 	ErrUnsupportedAction    = errors.New("agent action is not supported")
 	ErrConfirmationRequired = errors.New("agent key rotation confirmation is required")
+	ErrRuntimeNotConfigured = errors.New("agent runtime is not configured")
 )
 
 type Status string
@@ -63,6 +64,54 @@ type Agent struct {
 	Details       map[string]interface{} `json:"details"`
 	CreatedAt     time.Time              `json:"createdAt"`
 	UpdatedAt     time.Time              `json:"updatedAt"`
+}
+
+type RuntimeKind string
+
+const (
+	RuntimeKindLocal RuntimeKind = "local"
+	RuntimeKindAgent RuntimeKind = "agent"
+)
+
+type RuntimeStatus string
+
+const (
+	RuntimeStatusReady                 RuntimeStatus = "ready"
+	RuntimeStatusOffline               RuntimeStatus = "offline"
+	RuntimeStatusConfigurationRequired RuntimeStatus = "configuration_required"
+)
+
+// RuntimeConfig contains paths interpreted on the target machine. Remote
+// values are never merged into the controller's local app.conf settings.
+type RuntimeConfig struct {
+	DisplayName         string     `json:"displayName"`
+	SavePath            string     `json:"savePath"`
+	BackupPath          string     `json:"backupPath"`
+	ServerPath          string     `json:"serverPath"`
+	UGCPath             string     `json:"ugcPath"`
+	SteamCMDPath        string     `json:"steamcmdPath"`
+	WorkshopContentPath string     `json:"workshopContentPath"`
+	LuaBinary           string     `json:"luaBinary"`
+	LuaFallbackPath     string     `json:"luaFallbackPath"`
+	ServerMode          string     `json:"serverMode"`
+	UpdatedAt           *time.Time `json:"updatedAt,omitempty"`
+}
+
+type RuntimeTarget struct {
+	ID            string        `json:"id"`
+	Kind          RuntimeKind   `json:"kind"`
+	AgentID       string        `json:"agentId,omitempty"`
+	Name          string        `json:"name"`
+	Hostname      string        `json:"hostname"`
+	OS            string        `json:"os"`
+	Arch          string        `json:"arch"`
+	Status        RuntimeStatus `json:"status"`
+	Default       bool          `json:"default"`
+	Configured    bool          `json:"configured"`
+	Online        bool          `json:"online"`
+	Capabilities  []string      `json:"capabilities"`
+	LastHeartbeat *time.Time    `json:"lastHeartbeat,omitempty"`
+	Config        RuntimeConfig `json:"config"`
 }
 
 type ActionDefinition struct {

@@ -127,6 +127,11 @@ func InitRouter() (*gin.Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	agentService.ConfigureLocalRuntime(agentservice.RuntimeConfig{
+		DisplayName: "本机", SavePath: savePath, BackupPath: backupPath, ServerPath: serverPath,
+		UGCPath: ugcPath, SteamCMDPath: steamCMDPath, WorkshopContentPath: workshopContentPath,
+		LuaBinary: luaBinary, LuaFallbackPath: luaFallbackPath, ServerMode: serverMode,
+	})
 	agentHandler := httpapi.NewAgentHandler(agentService)
 	if os.Getenv("DST_ADMIN_ENV") != "test" {
 		agentService.StartWatcher(context.Background(), 5*time.Second, jobService.Notify)

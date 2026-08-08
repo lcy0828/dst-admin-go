@@ -68,6 +68,54 @@ func TestAgentSyncOfflineProtectionAndForget(t *testing.T) {
 	}
 }
 
+func TestRuntimeTargetsPreferLocalAndKeepRemoteConfigurationIsolated(t *testing.T) {
+	service, _, _, _ := newAgentTestService(t)
+	localRoot := t.TempDir()
+	service.ConfigureLocalRuntime(RuntimeConfig{
+		DisplayName: "本机", SavePath: localRoot, ServerPath: localRoot, LuaBinary: "lua", ServerMode: "64",
+	})
+
+	items, err := service.RuntimeTargets()
+	if err != nil || len(items) != 3 {
+		t.Fatalf("targets=%#v err=%v", items, err)
+	}
+	if items[0].ID != "local" || !items[0].Default || items[0].Kind != RuntimeKindLocal || items[0].Status != RuntimeStatusReady {
+		t.Fatalf("local target=%#v", items[0])
+	}
+	if items[1].Configured || items[1].Status != RuntimeStatusConfigurationRequired {
+		t.Fatalf("unconfigured remote target=%#v", items[1])
+	}
+
+	input := RuntimeConfig{
+		DisplayName: "生产节点", SavePath: "/srv/dst/save", BackupPath: "/srv/dst/backups",
+		ServerPath: "/srv/dst/server", SteamCMDPath: "/usr/games/steamcmd", LuaBinary: "lua5.4", ServerMode: "64",
+	}
+	target, err := service.SaveRuntimeConfig("agent-primary", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "agent:agent-primary" || target.Default || !target.Configured || target.Status != RuntimeStatusReady {
+		t.Fatalf("configured target=%#v", target)
+	}
+	if target.Config.SavePath != input.SavePath || items[0].Config.SavePath != localRoot {
+		t.Fatalf("remote config leaked into local target: local=%#v remote=%#v", items[0].Config, target.Config)
+	}
+	if _, err := service.SaveRuntimeConfig("agent-primary", RuntimeConfig{DisplayName: "bad", SavePath: "relative", ServerPath: "/srv/dst"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("relative remote path error=%v", err)
+	}
+	offline, err := service.SaveRuntimeConfig("agent-offline", input)
+	if err != nil || offline.Status != RuntimeStatusOffline {
+		t.Fatalf("offline target=%#v err=%v", offline, err)
+	}
+	if err := service.DeleteRuntimeConfig("agent-primary"); err != nil {
+		t.Fatal(err)
+	}
+	target, err = service.RuntimeTarget("agent-primary")
+	if err != nil || target.Configured || target.Status != RuntimeStatusConfigurationRequired {
+		t.Fatalf("deleted target=%#v err=%v", target, err)
+	}
+}
+
 func TestAgentCommandsPersistSuccessAndFailure(t *testing.T) {
 	service, _, jobService, _ := newAgentTestService(t)
 	job, err := service.RunCommand("agent-primary", CommandInput{Action: ActionSystemRefresh, TimeoutSeconds: 30})

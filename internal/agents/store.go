@@ -49,24 +49,41 @@ type securityRecord struct {
 	RotatedAt   time.Time
 }
 
+type runtimeRecord struct {
+	AgentID             string `gorm:"type:varchar(128);primary_key"`
+	DisplayName         string `gorm:"type:varchar(100);not null"`
+	SavePath            string `gorm:"type:text;not null"`
+	BackupPath          string `gorm:"type:text;not null"`
+	ServerPath          string `gorm:"type:text;not null"`
+	UGCPath             string `gorm:"type:text;not null"`
+	SteamCMDPath        string `gorm:"type:text;not null"`
+	WorkshopContentPath string `gorm:"type:text;not null"`
+	LuaBinary           string `gorm:"type:varchar(255);not null"`
+	LuaFallbackPath     string `gorm:"type:text;not null"`
+	ServerMode          string `gorm:"type:varchar(16);not null"`
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
 type Store struct {
 	db            *gorm.DB
 	agentsTable   string
 	commandsTable string
 	securityTable string
+	runtimeTable  string
 	now           func() time.Time
 }
 
 func NewStore(db *gorm.DB, prefix string) *Store {
 	prefix = strings.TrimSpace(prefix)
-	return &Store{db: db, agentsTable: prefix + "agent", commandsTable: prefix + "agent_command", securityTable: prefix + "agent_security", now: time.Now}
+	return &Store{db: db, agentsTable: prefix + "agent", commandsTable: prefix + "agent_command", securityTable: prefix + "agent_security", runtimeTable: prefix + "agent_runtime", now: time.Now}
 }
 
 func (s *Store) Migrate() error {
 	for _, migration := range []struct {
 		table string
 		model interface{}
-	}{{s.agentsTable, &agentRecord{}}, {s.commandsTable, &commandRecord{}}, {s.securityTable, &securityRecord{}}} {
+	}{{s.agentsTable, &agentRecord{}}, {s.commandsTable, &commandRecord{}}, {s.securityTable, &securityRecord{}}, {s.runtimeTable, &runtimeRecord{}}} {
 		if err := s.db.Table(migration.table).AutoMigrate(migration.model).Error; err != nil {
 			return fmt.Errorf("migrate %s: %w", migration.table, err)
 		}
@@ -172,15 +189,85 @@ func (s *Store) Agent(id string) (Agent, error) {
 }
 
 func (s *Store) DeleteAgent(id string) error {
-	result := s.db.Table(s.agentsTable).Where("id = ? AND status = ?", id, StatusOffline).Delete(&agentRecord{})
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	result := tx.Table(s.agentsTable).Where("id = ? AND status = ?", id, StatusOffline).Delete(&agentRecord{})
 	if result.Error != nil {
+		tx.Rollback()
 		return result.Error
 	}
 	if result.RowsAffected == 0 {
+		tx.Rollback()
 		if agent, err := s.Agent(id); err == nil && agent.Status == StatusOnline {
 			return ErrAgentOnline
 		}
 		return ErrAgentNotFound
+	}
+	if err := tx.Table(s.runtimeTable).Where("agent_id = ?", id).Delete(&runtimeRecord{}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit().Error
+}
+
+func (s *Store) RuntimeConfigs() (map[string]RuntimeConfig, error) {
+	var records []runtimeRecord
+	if err := s.db.Table(s.runtimeTable).Find(&records).Error; err != nil {
+		return nil, err
+	}
+	result := make(map[string]RuntimeConfig, len(records))
+	for _, record := range records {
+		result[record.AgentID] = runtimeConfigFromRecord(record)
+	}
+	return result, nil
+}
+
+func (s *Store) RuntimeConfig(agentID string) (RuntimeConfig, error) {
+	var record runtimeRecord
+	result := s.db.Table(s.runtimeTable).Where("agent_id = ?", agentID).First(&record)
+	if gorm.IsRecordNotFoundError(result.Error) {
+		return RuntimeConfig{}, ErrRuntimeNotConfigured
+	}
+	if result.Error != nil {
+		return RuntimeConfig{}, result.Error
+	}
+	return runtimeConfigFromRecord(record), nil
+}
+
+func (s *Store) SaveRuntimeConfig(agentID string, config RuntimeConfig) (RuntimeConfig, error) {
+	now := s.now().UTC()
+	record := runtimeRecordFromConfig(agentID, config)
+	var count int
+	if err := s.db.Table(s.runtimeTable).Where("agent_id = ?", agentID).Count(&count).Error; err != nil {
+		return RuntimeConfig{}, err
+	}
+	if count == 0 {
+		record.CreatedAt = now
+		record.UpdatedAt = now
+		if err := s.db.Table(s.runtimeTable).Create(&record).Error; err != nil {
+			return RuntimeConfig{}, err
+		}
+	} else if err := s.db.Table(s.runtimeTable).Where("agent_id = ?", agentID).Updates(map[string]interface{}{
+		"display_name": record.DisplayName, "save_path": record.SavePath, "backup_path": record.BackupPath,
+		"server_path": record.ServerPath, "ugc_path": record.UGCPath, "steam_cmd_path": record.SteamCMDPath,
+		"workshop_content_path": record.WorkshopContentPath, "lua_binary": record.LuaBinary,
+		"lua_fallback_path": record.LuaFallbackPath, "server_mode": record.ServerMode, "updated_at": now,
+	}).Error; err != nil {
+		return RuntimeConfig{}, err
+	}
+	saved, err := s.RuntimeConfig(agentID)
+	return saved, err
+}
+
+func (s *Store) DeleteRuntimeConfig(agentID string) error {
+	result := s.db.Table(s.runtimeTable).Where("agent_id = ?", agentID).Delete(&runtimeRecord{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrRuntimeNotConfigured
 	}
 	return nil
 }
@@ -337,6 +424,25 @@ func agentFromRecord(record agentRecord) (Agent, error) {
 
 func commandFromRecord(record commandRecord) Command {
 	return Command{ID: record.ID, AgentID: record.AgentID, AgentName: record.AgentName, Action: Action(record.Action), Status: CommandStatus(record.Status), JobID: record.JobID, RemoteID: record.RemoteID, Output: record.Output, Error: record.Error, ExitCode: record.ExitCode, StartedAt: utcPointer(record.StartedAt), FinishedAt: utcPointer(record.FinishedAt), DurationMs: record.DurationMs, CreatedAt: record.CreatedAt.UTC()}
+}
+
+func runtimeRecordFromConfig(agentID string, config RuntimeConfig) runtimeRecord {
+	return runtimeRecord{
+		AgentID: agentID, DisplayName: config.DisplayName, SavePath: config.SavePath, BackupPath: config.BackupPath,
+		ServerPath: config.ServerPath, UGCPath: config.UGCPath, SteamCMDPath: config.SteamCMDPath,
+		WorkshopContentPath: config.WorkshopContentPath, LuaBinary: config.LuaBinary,
+		LuaFallbackPath: config.LuaFallbackPath, ServerMode: config.ServerMode,
+	}
+}
+
+func runtimeConfigFromRecord(record runtimeRecord) RuntimeConfig {
+	updatedAt := record.UpdatedAt.UTC()
+	return RuntimeConfig{
+		DisplayName: record.DisplayName, SavePath: record.SavePath, BackupPath: record.BackupPath,
+		ServerPath: record.ServerPath, UGCPath: record.UGCPath, SteamCMDPath: record.SteamCMDPath,
+		WorkshopContentPath: record.WorkshopContentPath, LuaBinary: record.LuaBinary,
+		LuaFallbackPath: record.LuaFallbackPath, ServerMode: record.ServerMode, UpdatedAt: &updatedAt,
+	}
 }
 
 func utcPointer(value *time.Time) *time.Time {

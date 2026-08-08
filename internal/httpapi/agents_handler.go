@@ -16,6 +16,12 @@ type AgentHandler struct{ service *agents.Service }
 func NewAgentHandler(service *agents.Service) *AgentHandler { return &AgentHandler{service: service} }
 
 func (h *AgentHandler) Register(v2 *gin.RouterGroup) {
+	runtimes := v2.Group("/runtime-targets")
+	runtimes.GET("", h.runtimeTargets)
+	runtimes.GET("/agents/:agentId", h.runtimeTarget)
+	runtimes.PUT("/agents/:agentId", h.saveRuntimeConfig)
+	runtimes.DELETE("/agents/:agentId", h.deleteRuntimeConfig)
+
 	group := v2.Group("/agents")
 	group.GET("", h.list)
 	group.GET("/actions", h.actions)
@@ -27,6 +33,46 @@ func (h *AgentHandler) Register(v2 *gin.RouterGroup) {
 	group.DELETE("/:agentId", h.forget)
 	group.GET("/:agentId/commands", h.agentCommands)
 	group.POST("/:agentId/commands", h.runCommand)
+}
+
+func (h *AgentHandler) runtimeTargets(c *gin.Context) {
+	items, err := h.service.RuntimeTargets()
+	if err != nil {
+		agentFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, gin.H{"items": items, "total": len(items), "defaultTargetId": "local"})
+}
+
+func (h *AgentHandler) runtimeTarget(c *gin.Context) {
+	item, err := h.service.RuntimeTarget(c.Param("agentId"))
+	if err != nil {
+		agentFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, item)
+}
+
+func (h *AgentHandler) saveRuntimeConfig(c *gin.Context) {
+	var input agents.RuntimeConfig
+	if err := c.ShouldBindJSON(&input); err != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "远程运行时配置不是有效 JSON", nil)
+		return
+	}
+	item, err := h.service.SaveRuntimeConfig(c.Param("agentId"), input)
+	if err != nil {
+		agentFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, item)
+}
+
+func (h *AgentHandler) deleteRuntimeConfig(c *gin.Context) {
+	if err := h.service.DeleteRuntimeConfig(c.Param("agentId")); err != nil {
+		agentFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, gin.H{"deleted": true})
 }
 
 func (h *AgentHandler) list(c *gin.Context) {
@@ -146,7 +192,7 @@ func (h *AgentHandler) rotateKey(c *gin.Context) {
 
 func agentFailure(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, agents.ErrAgentNotFound), errors.Is(err, agents.ErrCommandNotFound):
+	case errors.Is(err, agents.ErrAgentNotFound), errors.Is(err, agents.ErrCommandNotFound), errors.Is(err, agents.ErrRuntimeNotConfigured):
 		NotFound(c)
 	case errors.Is(err, agents.ErrAgentOffline):
 		Failure(c, http.StatusConflict, "AGENT_OFFLINE", "Agent 当前离线，无法执行命令", nil)
