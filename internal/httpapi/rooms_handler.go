@@ -228,8 +228,6 @@ func roomFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusConflict, "WORLD_RUNNING", "请先停止相关世界再执行此操作", nil)
 	case errors.Is(err, rooms.ErrInvalidRoom), errors.Is(err, rooms.ErrInvalidWorld):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_DST_CONFIG", "DST 房间或世界配置不完整", nil)
-	case errors.Is(err, rooms.ErrSaveRootMissing):
-		Failure(c, http.StatusServiceUnavailable, "SAVE_ROOT_MISSING", "DST 存档目录不存在", nil)
 	case errors.Is(err, shards.ErrRoomNotManaged):
 		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "请先接管房间再执行操作", nil)
 	case errors.Is(err, shards.ErrNoWorlds):

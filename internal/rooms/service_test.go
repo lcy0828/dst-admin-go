@@ -71,6 +71,17 @@ func TestCreateDiscoverAdoptAndReadWorlds(t *testing.T) {
 	}
 }
 
+func TestListTreatsUncreatedSaveRootAsEmpty(t *testing.T) {
+	service, root := newTestService(t)
+	if err := os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	items, err := service.List()
+	if err != nil || items == nil || len(items) != 0 {
+		t.Fatalf("list missing save root = %#v, %v", items, err)
+	}
+}
+
 func TestDiscoveredRoomRequiresExplicitAdoption(t *testing.T) {
 	service, root := newTestService(t)
 	roomPath := filepath.Join(root, "existing")

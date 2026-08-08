@@ -14,18 +14,17 @@ import (
 )
 
 var (
-	ErrInvalidID       = errors.New("invalid room or world id")
-	ErrUnsafePath      = errors.New("unsafe room or world path")
-	ErrRoomNotFound    = errors.New("room not found")
-	ErrWorldNotFound   = errors.New("world not found")
-	ErrInvalidRoom     = errors.New("room configuration is invalid")
-	ErrInvalidWorld    = errors.New("world configuration is invalid")
-	ErrSaveRootMissing = errors.New("save root does not exist")
-	ErrRoomExists      = errors.New("room already exists")
-	ErrWorldExists     = errors.New("world already exists")
-	ErrRoomNotManaged  = errors.New("room must be adopted before it can be changed")
-	ErrConfirmation    = errors.New("exact room name confirmation is required")
-	ErrWorldRunning    = errors.New("world must be stopped before it can be changed")
+	ErrInvalidID      = errors.New("invalid room or world id")
+	ErrUnsafePath     = errors.New("unsafe room or world path")
+	ErrRoomNotFound   = errors.New("room not found")
+	ErrWorldNotFound  = errors.New("world not found")
+	ErrInvalidRoom    = errors.New("room configuration is invalid")
+	ErrInvalidWorld   = errors.New("world configuration is invalid")
+	ErrRoomExists     = errors.New("room already exists")
+	ErrWorldExists    = errors.New("world already exists")
+	ErrRoomNotManaged = errors.New("room must be adopted before it can be changed")
+	ErrConfirmation   = errors.New("exact room name confirmation is required")
+	ErrWorldRunning   = errors.New("world must be stopped before it can be changed")
 )
 
 type Room struct {
@@ -88,7 +87,7 @@ func (c *Catalog) List() ([]Room, error) {
 	entries, err := os.ReadDir(c.root)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, ErrSaveRootMissing
+			return []Room{}, nil
 		}
 		return nil, fmt.Errorf("read save root: %w", err)
 	}
