@@ -478,13 +478,107 @@ paths:
                 type: string
         "404":
           $ref: "#/components/responses/NotFound"
+  /commands:
+    get:
+      tags: [Console]
+      operationId: listCommands
+      summary: List built-in and persistent custom command definitions
+      responses:
+        "200":
+          description: Commands ordered for display
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandDefinitionListEnvelope"
+    post:
+      tags: [Console]
+      operationId: createCommand
+      summary: Persist a custom Lua command definition
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommandDefinitionInput"
+      responses:
+        "201":
+          description: Custom command created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandDefinitionEnvelope"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /commands/{commandId}:
+    parameters:
+      - $ref: "#/components/parameters/CommandID"
+    get:
+      tags: [Console]
+      operationId: getCommand
+      summary: Read one built-in or custom command definition
+      responses:
+        "200":
+          description: Command definition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandDefinitionEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Console]
+      operationId: updateCommand
+      summary: Update a persistent custom command definition
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommandDefinitionInput"
+      responses:
+        "200":
+          description: Custom command updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandDefinitionEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+    delete:
+      tags: [Console]
+      operationId: deleteCommand
+      summary: Delete a persistent custom command definition
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Custom command deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandDeleteResultEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
   /rooms/{roomId}/commands:
     parameters:
       - $ref: "#/components/parameters/RoomID"
     get:
       tags: [Console]
       operationId: listRoomCommands
-      summary: List typed built-in command definitions
+      summary: List built-in and persistent custom command definitions
       responses:
         "200":
           description: Built-in commands ordered for display
@@ -524,6 +618,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CommandRunListEnvelope"
+    delete:
+      tags: [Console]
+      operationId: clearCommandRuns
+      summary: Delete persistent command audit records for a room or world
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: worldId
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Number of command records deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandClearRunsResultEnvelope"
   /rooms/{roomId}/command-runs/{runId}:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -2156,6 +2268,12 @@ components:
       schema:
         type: string
         format: uuid
+    CommandID:
+      name: commandId
+      in: path
+      required: true
+      schema:
+        type: string
     BackupID:
       name: backupId
       in: path
@@ -2729,7 +2847,7 @@ components:
           type: string
         type:
           type: string
-          enum: [string, integer, enum]
+          enum: [string, number, integer, boolean, enum]
         required:
           type: boolean
         description:
@@ -2742,10 +2860,11 @@ components:
           type: integer
         maximum:
           type: integer
+        default: {}
     CommandDefinition:
       type: object
       additionalProperties: false
-      required: [id, name, description, category, risk, parameters]
+      required: [id, name, description, category, risk, parameters, script, isBuiltin]
       properties:
         id:
           type: string
@@ -2761,6 +2880,46 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/CommandParameter"
+        script:
+          type: string
+        isBuiltin:
+          type: boolean
+    CommandDefinitionInput:
+      type: object
+      additionalProperties: false
+      required: [name, category, script, parameters]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        description:
+          type: string
+          maxLength: 300
+          default: ""
+        category:
+          type: string
+          minLength: 1
+          maxLength: 80
+        script:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        parameters:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/CommandParameter"
+    CommandDefinitionEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/CommandDefinition"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
     CommandDefinitionList:
       type: object
       additionalProperties: false
@@ -2776,6 +2935,21 @@ components:
       properties:
         data:
           $ref: "#/components/schemas/CommandDefinitionList"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    CommandDeleteResultEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [deleted]
+          properties:
+            deleted:
+              type: boolean
         error:
           type: "null"
         meta:
@@ -2821,7 +2995,7 @@ components:
           type: string
         mode:
           type: string
-          enum: [builtin, raw]
+          enum: [builtin, custom, raw]
         commandId:
           type: string
         name:
@@ -2884,6 +3058,23 @@ components:
       properties:
         data:
           $ref: "#/components/schemas/CommandRunList"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    CommandClearRunsResultEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [deleted]
+          properties:
+            deleted:
+              type: integer
+              format: int64
+              minimum: 0
         error:
           type: "null"
         meta:

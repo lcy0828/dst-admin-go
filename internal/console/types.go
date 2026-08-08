@@ -12,14 +12,15 @@ const (
 )
 
 type Parameter struct {
-	Name        string   `json:"name"`
-	Label       string   `json:"label"`
-	Type        string   `json:"type"`
-	Required    bool     `json:"required"`
-	Description string   `json:"description,omitempty"`
-	Options     []string `json:"options,omitempty"`
-	Minimum     *int     `json:"minimum,omitempty"`
-	Maximum     *int     `json:"maximum,omitempty"`
+	Name        string      `json:"name"`
+	Label       string      `json:"label"`
+	Type        string      `json:"type"`
+	Required    bool        `json:"required"`
+	Description string      `json:"description,omitempty"`
+	Options     []string    `json:"options,omitempty"`
+	Minimum     *int        `json:"minimum,omitempty"`
+	Maximum     *int        `json:"maximum,omitempty"`
+	Default     interface{} `json:"default,omitempty"`
 }
 
 type Definition struct {
@@ -29,6 +30,8 @@ type Definition struct {
 	Category    string      `json:"category"`
 	Risk        Risk        `json:"risk"`
 	Parameters  []Parameter `json:"parameters"`
+	Script      string      `json:"script"`
+	IsBuiltin   bool        `json:"isBuiltin"`
 }
 
 type RunStatus string

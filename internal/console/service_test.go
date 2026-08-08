@@ -79,3 +79,60 @@ func TestCriticalAndRawCommandsRequireExactRoomConfirmation(t *testing.T) {
 		t.Fatalf("raw command: %v", err)
 	}
 }
+
+func TestCustomDefinitionsPersistExecuteAndDelete(t *testing.T) {
+	sender := &captureSender{}
+	service := newConsoleService(t, sender)
+	created, err := service.CreateDefinition(Definition{
+		Name: "  自定义公告  ", Description: "测试自定义命令", Category: "自定义命令",
+		Script:     `c_announce("{message}")`,
+		Parameters: []Parameter{{Name: "message", Label: "公告内容", Type: "string", Required: true}},
+	})
+	if err != nil || created.ID == "" || created.Name != "自定义公告" || created.IsBuiltin || created.Risk != RiskCritical {
+		t.Fatalf("created = %#v, %v", created, err)
+	}
+	definitions, err := service.DefinitionsWithError()
+	if err != nil || len(definitions) != 8 {
+		t.Fatalf("definitions = %#v, %v", definitions, err)
+	}
+	request := ExecuteRequest{CommandID: created.ID, Arguments: map[string]interface{}{"message": `hello\"); c_shutdown()`}}
+	if _, err := service.Execute(context.Background(), "room", "world", request); err != ErrConfirmationNeeded {
+		t.Fatalf("custom confirmation error = %v", err)
+	}
+	request.Confirmation = "周末服"
+	run, err := service.Execute(context.Background(), "room", "world", request)
+	if err != nil || run.Mode != "custom" || run.CommandID != created.ID {
+		t.Fatalf("custom run = %#v, %v", run, err)
+	}
+	if !strings.Contains(sender.script, `c_announce("hello\\\"); c_shutdown()")`) {
+		t.Fatalf("unsafe custom script: %s", sender.script)
+	}
+	created.Description = "已更新"
+	updated, err := service.UpdateDefinition(created.ID, created)
+	if err != nil || updated.Description != "已更新" {
+		t.Fatalf("updated = %#v, %v", updated, err)
+	}
+	if err := service.DeleteDefinition("save_world"); err != ErrBuiltinDefinition {
+		t.Fatalf("builtin delete error = %v", err)
+	}
+	if err := service.DeleteDefinition(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Definition(created.ID); err != ErrDefinitionNotFound {
+		t.Fatalf("deleted definition error = %v", err)
+	}
+	deleted, err := service.DeleteRuns(ListFilter{RoomID: "room"})
+	if err != nil || deleted != 1 {
+		t.Fatalf("deleted runs = %d, %v", deleted, err)
+	}
+}
+
+func TestCustomDefinitionRejectsUnknownPlaceholder(t *testing.T) {
+	service := newConsoleService(t, &captureSender{})
+	_, err := service.CreateDefinition(Definition{
+		Name: "无效命令", Category: "自定义命令", Script: `c_announce("{missing}")`,
+	})
+	if err != ErrInvalidDefinition {
+		t.Fatalf("create error = %v", err)
+	}
+}

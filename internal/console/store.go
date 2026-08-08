@@ -13,6 +13,8 @@ import (
 
 var ErrRunNotFound = errors.New("command run not found")
 
+var ErrDefinitionNotFound = errors.New("command definition not found")
+
 type runRecord struct {
 	ID           string    `gorm:"primary_key;type:char(36)"`
 	RoomID       string    `gorm:"type:varchar(255);index;not null"`
@@ -31,19 +33,37 @@ type runRecord struct {
 	FinishedAt   *time.Time
 }
 
+type definitionRecord struct {
+	ID          string    `gorm:"primary_key;type:char(36)"`
+	Name        string    `gorm:"type:varchar(80);not null"`
+	Description string    `gorm:"type:varchar(300);not null"`
+	Category    string    `gorm:"type:varchar(80);index;not null"`
+	Script      string    `gorm:"type:text;not null"`
+	Parameters  string    `gorm:"type:text;not null"`
+	CreatedAt   time.Time `gorm:"not null"`
+	UpdatedAt   time.Time `gorm:"not null"`
+}
+
 type Store struct {
-	db    *gorm.DB
-	table string
-	now   func() time.Time
+	db               *gorm.DB
+	runsTable        string
+	definitionsTable string
+	now              func() time.Time
 }
 
 func NewStore(db *gorm.DB, tablePrefix string) *Store {
-	return &Store{db: db, table: strings.TrimSpace(tablePrefix) + "command_run", now: time.Now}
+	prefix := strings.TrimSpace(tablePrefix)
+	return &Store{
+		db: db, runsTable: prefix + "command_run", definitionsTable: prefix + "command_definition", now: time.Now,
+	}
 }
 
 func (s *Store) Migrate() error {
-	if err := s.db.Table(s.table).AutoMigrate(&runRecord{}).Error; err != nil {
+	if err := s.db.Table(s.runsTable).AutoMigrate(&runRecord{}).Error; err != nil {
 		return fmt.Errorf("migrate command runs: %w", err)
+	}
+	if err := s.db.Table(s.definitionsTable).AutoMigrate(&definitionRecord{}).Error; err != nil {
+		return fmt.Errorf("migrate command definitions: %w", err)
 	}
 	return nil
 }
@@ -58,7 +78,7 @@ func (s *Store) Create(run Run) (Run, error) {
 	run.LogQuery = run.ID
 	run.CreatedAt = s.now().UTC()
 	record := recordFromRun(run, string(arguments))
-	if err := s.db.Table(s.table).Create(&record).Error; err != nil {
+	if err := s.db.Table(s.runsTable).Create(&record).Error; err != nil {
 		return Run{}, err
 	}
 	return run, nil
@@ -73,7 +93,7 @@ func (s *Store) Complete(runID string, sendErr error) (Run, error) {
 		updates["error_code"] = "COMMAND_SEND_FAILED"
 		updates["error_message"] = sendErr.Error()
 	}
-	result := s.db.Table(s.table).Where("id = ? AND status = ?", runID, RunSending).Updates(updates)
+	result := s.db.Table(s.runsTable).Where("id = ? AND status = ?", runID, RunSending).Updates(updates)
 	if result.Error != nil {
 		return Run{}, result.Error
 	}
@@ -85,7 +105,7 @@ func (s *Store) Complete(runID string, sendErr error) (Run, error) {
 
 func (s *Store) Get(runID string) (Run, error) {
 	var record runRecord
-	result := s.db.Table(s.table).Where("id = ?", runID).First(&record)
+	result := s.db.Table(s.runsTable).Where("id = ?", runID).First(&record)
 	if gorm.IsRecordNotFoundError(result.Error) {
 		return Run{}, ErrRunNotFound
 	}
@@ -96,7 +116,7 @@ func (s *Store) Get(runID string) (Run, error) {
 }
 
 func (s *Store) List(filter ListFilter) ([]Run, int, error) {
-	query := s.db.Table(s.table)
+	query := s.db.Table(s.runsTable)
 	if filter.RoomID != "" {
 		query = query.Where("room_id = ?", filter.RoomID)
 	}
@@ -128,6 +148,107 @@ func (s *Store) List(filter ListFilter) ([]Run, int, error) {
 		runs = append(runs, run)
 	}
 	return runs, total, nil
+}
+
+func (s *Store) DeleteRuns(filter ListFilter) (int64, error) {
+	query := s.db.Table(s.runsTable)
+	if filter.RoomID != "" {
+		query = query.Where("room_id = ?", filter.RoomID)
+	}
+	if filter.WorldID != "" {
+		query = query.Where("world_id = ?", filter.WorldID)
+	}
+	result := query.Delete(&runRecord{})
+	return result.RowsAffected, result.Error
+}
+
+func (s *Store) CreateDefinition(definition Definition) (Definition, error) {
+	parameters, err := json.Marshal(definition.Parameters)
+	if err != nil {
+		return Definition{}, fmt.Errorf("encode command parameters: %w", err)
+	}
+	now := s.now().UTC()
+	definition.ID = uuid.NewString()
+	record := definitionRecord{
+		ID: definition.ID, Name: definition.Name, Description: definition.Description,
+		Category: definition.Category, Script: definition.Script, Parameters: string(parameters),
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.db.Table(s.definitionsTable).Create(&record).Error; err != nil {
+		return Definition{}, err
+	}
+	return definitionFromRecord(record)
+}
+
+func (s *Store) UpdateDefinition(definition Definition) (Definition, error) {
+	parameters, err := json.Marshal(definition.Parameters)
+	if err != nil {
+		return Definition{}, fmt.Errorf("encode command parameters: %w", err)
+	}
+	updates := map[string]interface{}{
+		"name": definition.Name, "description": definition.Description, "category": definition.Category,
+		"script": definition.Script, "parameters": string(parameters), "updated_at": s.now().UTC(),
+	}
+	result := s.db.Table(s.definitionsTable).Where("id = ?", definition.ID).Updates(updates)
+	if result.Error != nil {
+		return Definition{}, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return Definition{}, ErrDefinitionNotFound
+	}
+	return s.Definition(definition.ID)
+}
+
+func (s *Store) DeleteDefinition(id string) error {
+	result := s.db.Table(s.definitionsTable).Where("id = ?", id).Delete(&definitionRecord{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrDefinitionNotFound
+	}
+	return nil
+}
+
+func (s *Store) Definition(id string) (Definition, error) {
+	var record definitionRecord
+	result := s.db.Table(s.definitionsTable).Where("id = ?", id).First(&record)
+	if gorm.IsRecordNotFoundError(result.Error) {
+		return Definition{}, ErrDefinitionNotFound
+	}
+	if result.Error != nil {
+		return Definition{}, result.Error
+	}
+	return definitionFromRecord(record)
+}
+
+func (s *Store) Definitions() ([]Definition, error) {
+	var records []definitionRecord
+	if err := s.db.Table(s.definitionsTable).Order("category ASC, name ASC, id ASC").Find(&records).Error; err != nil {
+		return nil, err
+	}
+	definitions := make([]Definition, 0, len(records))
+	for _, record := range records {
+		definition, err := definitionFromRecord(record)
+		if err != nil {
+			return nil, err
+		}
+		definitions = append(definitions, definition)
+	}
+	return definitions, nil
+}
+
+func definitionFromRecord(record definitionRecord) (Definition, error) {
+	parameters := make([]Parameter, 0)
+	if record.Parameters != "" && record.Parameters != "null" {
+		if err := json.Unmarshal([]byte(record.Parameters), &parameters); err != nil {
+			return Definition{}, fmt.Errorf("decode command parameters: %w", err)
+		}
+	}
+	return Definition{
+		ID: record.ID, Name: record.Name, Description: record.Description, Category: record.Category,
+		Risk: RiskCritical, Parameters: parameters, Script: record.Script, IsBuiltin: false,
+	}, nil
 }
 
 func recordFromRun(run Run, arguments string) runRecord {
