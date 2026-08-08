@@ -97,6 +97,9 @@ type Command struct {
 type CommandFilter struct {
 	AgentID string
 	Status  CommandStatus
+	Query   string
+	StartAt *time.Time
+	EndAt   *time.Time
 	Limit   int
 	Offset  int
 }

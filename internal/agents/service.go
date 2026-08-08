@@ -192,10 +192,22 @@ func (s *Service) RunCommand(agentID string, input CommandInput) (jobs.Job, erro
 }
 
 func (s *Service) Commands(filter CommandFilter) (CommandList, error) {
-	if filter.Limit < 1 || filter.Limit > 100 || filter.Offset < 0 || (filter.AgentID != "" && !agentIDPattern.MatchString(filter.AgentID)) || (filter.Status != "" && !validCommandStatus(filter.Status)) {
+	filter.Query = strings.TrimSpace(filter.Query)
+	if filter.Limit < 1 || filter.Limit > 100 || filter.Offset < 0 ||
+		(filter.AgentID != "" && !agentIDPattern.MatchString(filter.AgentID)) ||
+		(filter.Status != "" && !validCommandStatus(filter.Status)) ||
+		utf8.RuneCountInString(filter.Query) > 100 ||
+		(filter.StartAt != nil && filter.EndAt != nil && !filter.StartAt.Before(*filter.EndAt)) {
 		return CommandList{}, ErrInvalidInput
 	}
 	return s.store.Commands(filter)
+}
+
+func (s *Service) Command(id string) (Command, error) {
+	if _, err := uuid.Parse(strings.TrimSpace(id)); err != nil {
+		return Command{}, ErrCommandNotFound
+	}
+	return s.store.Command(id)
 }
 
 func (s *Service) Security() (SecurityStatus, error) {

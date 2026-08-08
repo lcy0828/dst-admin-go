@@ -93,6 +93,14 @@ func TestAgentCommandsPersistSuccessAndFailure(t *testing.T) {
 	if !strings.Contains(commands.Items[0].Error, "磁盘检查失败") {
 		t.Fatalf("failure detail=%#v", commands.Items[0])
 	}
+	detail, err := service.Command(commands.Items[0].ID)
+	if err != nil || detail.ID != commands.Items[0].ID || detail.Status != CommandFailed {
+		t.Fatalf("command detail=%#v err=%v", detail, err)
+	}
+	filtered, err := service.Commands(CommandFilter{Query: "disk", Status: CommandFailed, StartAt: utcAgentTimePointer(time.Now().Add(-time.Hour)), EndAt: utcAgentTimePointer(time.Now().Add(time.Hour)), Limit: 25})
+	if err != nil || filtered.Total != 1 || filtered.Items[0].ID != detail.ID {
+		t.Fatalf("filtered commands=%#v err=%v", filtered, err)
+	}
 }
 
 func TestAgentSecurityMasksAndRotatesOnce(t *testing.T) {
@@ -147,3 +155,5 @@ func waitAgentJob(t *testing.T, service *jobs.Service, id string) jobs.Job {
 	t.Fatalf("agent job %s did not finish", id)
 	return jobs.Job{}
 }
+
+func utcAgentTimePointer(value time.Time) *time.Time { utc := value.UTC(); return &utc }

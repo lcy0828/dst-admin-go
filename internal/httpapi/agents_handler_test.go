@@ -68,6 +68,17 @@ func TestAgentHTTPListCommandFailureAndKeyRotation(t *testing.T) {
 	if responseData(t, response)["total"] != float64(1) {
 		t.Fatalf("unexpected commands: %s", response.Body.String())
 	}
+	commandID := responseData(t, response)["items"].([]interface{})[0].(map[string]interface{})["id"].(string)
+	response = performJSON(router, http.MethodGet, "/api/v2/agents/commands/"+commandID, nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if responseData(t, response)["id"] != commandID {
+		t.Fatalf("unexpected command detail: %s", response.Body.String())
+	}
+	response = performJSON(router, http.MethodGet, "/api/v2/agents/commands?query=disk&startDate=2020-01-01&endDate=2030-01-01&limit=25", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if responseData(t, response)["total"] != float64(1) {
+		t.Fatalf("unexpected filtered commands: %s", response.Body.String())
+	}
 
 	response = performJSON(router, http.MethodGet, "/api/v2/agents/security", nil, nil, "")
 	assertStatus(t, response, http.StatusOK)

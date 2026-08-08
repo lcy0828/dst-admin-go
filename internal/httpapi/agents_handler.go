@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"dont/internal/agents"
 
@@ -19,6 +20,7 @@ func (h *AgentHandler) Register(v2 *gin.RouterGroup) {
 	group.GET("", h.list)
 	group.GET("/actions", h.actions)
 	group.GET("/commands", h.commands)
+	group.GET("/commands/:commandId", h.command)
 	group.GET("/security", h.security)
 	group.POST("/security/actions/rotate", h.rotateKey)
 	group.GET("/:agentId", h.get)
@@ -77,16 +79,44 @@ func (h *AgentHandler) agentCommands(c *gin.Context) { h.commandList(c, c.Param(
 func (h *AgentHandler) commandList(c *gin.Context, agentID string) {
 	limit, limitErr := strconv.Atoi(c.DefaultQuery("limit", "25"))
 	offset, offsetErr := strconv.Atoi(c.DefaultQuery("offset", "0"))
-	if limitErr != nil || offsetErr != nil {
+	startAt, startErr := parseAgentCommandDate(c.Query("startDate"), false)
+	endAt, endErr := parseAgentCommandDate(c.Query("endDate"), true)
+	if limitErr != nil || offsetErr != nil || startErr != nil || endErr != nil {
 		agentFailure(c, agents.ErrInvalidInput)
 		return
 	}
-	value, err := h.service.Commands(agents.CommandFilter{AgentID: agentID, Status: agents.CommandStatus(c.Query("status")), Limit: limit, Offset: offset})
+	value, err := h.service.Commands(agents.CommandFilter{
+		AgentID: agentID, Status: agents.CommandStatus(c.Query("status")), Query: c.Query("query"),
+		StartAt: startAt, EndAt: endAt, Limit: limit, Offset: offset,
+	})
 	if err != nil {
 		agentFailure(c, err)
 		return
 	}
 	Success(c, http.StatusOK, value)
+}
+
+func (h *AgentHandler) command(c *gin.Context) {
+	value, err := h.service.Command(c.Param("commandId"))
+	if err != nil {
+		agentFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
+}
+
+func parseAgentCommandDate(value string, exclusiveEnd bool) (*time.Time, error) {
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return nil, err
+	}
+	if exclusiveEnd {
+		parsed = parsed.AddDate(0, 0, 1)
+	}
+	return &parsed, nil
 }
 
 func (h *AgentHandler) security(c *gin.Context) {

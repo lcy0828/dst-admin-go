@@ -1987,6 +1987,9 @@ paths:
       parameters:
         - { name: agentId, in: query, schema: { type: string, maxLength: 128 } }
         - { name: status, in: query, schema: { $ref: "#/components/schemas/AgentCommandStatus" } }
+        - { name: query, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: startDate, in: query, schema: { type: string, format: date } }
+        - { name: endDate, in: query, schema: { type: string, format: date } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
         - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
       responses:
@@ -1996,6 +1999,16 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AgentCommandListEnvelope" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /agents/commands/{commandId}:
+    parameters:
+      - { name: commandId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Agents]
+      operationId: getAgentCommand
+      summary: Read one persisted Agent command result
+      responses:
+        "200": { description: Agent command result, content: { application/json: { schema: { $ref: "#/components/schemas/AgentCommandEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
   /agents/security:
     get:
       tags: [Agents]
@@ -2055,6 +2068,9 @@ paths:
       operationId: listAgentCommandsForAgent
       parameters:
         - { name: status, in: query, schema: { $ref: "#/components/schemas/AgentCommandStatus" } }
+        - { name: query, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: startDate, in: query, schema: { type: string, format: date } }
+        - { name: endDate, in: query, schema: { type: string, format: date } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
         - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
       responses:
@@ -4842,6 +4858,13 @@ components:
         total: { type: integer, minimum: 0 }
         limit: { type: integer, minimum: 1, maximum: 100 }
         offset: { type: integer, minimum: 0 }
+    AgentCommandEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AgentCommand" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     AgentCommandListEnvelope:
       type: object
       required: [data, error, meta]

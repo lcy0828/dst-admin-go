@@ -233,6 +233,16 @@ func (s *Store) Commands(filter CommandFilter) (CommandList, error) {
 	if filter.Status != "" {
 		query = query.Where("status = ?", filter.Status)
 	}
+	if filter.Query != "" {
+		pattern := "%" + filter.Query + "%"
+		query = query.Where("(action LIKE ? OR agent_name LIKE ? OR output LIKE ? OR error LIKE ?)", pattern, pattern, pattern, pattern)
+	}
+	if filter.StartAt != nil {
+		query = query.Where("created_at >= ?", filter.StartAt.UTC())
+	}
+	if filter.EndAt != nil {
+		query = query.Where("created_at < ?", filter.EndAt.UTC())
+	}
 	var total int
 	if err := query.Count(&total).Error; err != nil {
 		return CommandList{}, err
@@ -246,6 +256,18 @@ func (s *Store) Commands(filter CommandFilter) (CommandList, error) {
 		items = append(items, commandFromRecord(record))
 	}
 	return CommandList{Items: items, Total: total, Limit: filter.Limit, Offset: filter.Offset}, nil
+}
+
+func (s *Store) Command(id string) (Command, error) {
+	var record commandRecord
+	result := s.db.Table(s.commandsTable).Where("id = ?", id).First(&record)
+	if gorm.IsRecordNotFoundError(result.Error) {
+		return Command{}, ErrCommandNotFound
+	}
+	if result.Error != nil {
+		return Command{}, result.Error
+	}
+	return commandFromRecord(record), nil
 }
 
 func (s *Store) Security() (securityRecord, error) {
