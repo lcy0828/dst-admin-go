@@ -9,7 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-ini/ini"
 )
@@ -28,9 +31,24 @@ type CreateRequest struct {
 	IncludeCaves  bool   `json:"includeCaves"`
 }
 
+type CreateWorldRequest struct {
+	DirectoryName string `json:"directoryName"`
+	Type          string `json:"type"`
+}
+
+type DeleteWorldRequest struct {
+	Confirmation string `json:"confirmation"`
+}
+
+type DeleteWorldResult struct {
+	World        World  `json:"world"`
+	RecoveryName string `json:"recoveryName"`
+}
+
 type Service struct {
 	catalog *Catalog
 	store   *Store
+	worldMu sync.Mutex
 }
 
 func NewService(catalog *Catalog, store *Store) *Service {
@@ -111,6 +129,163 @@ func (s *Service) Create(request CreateRequest) (Room, error) {
 	return room, nil
 }
 
+func (s *Service) CreateWorld(roomID string, request CreateWorldRequest) (World, error) {
+	s.worldMu.Lock()
+	defer s.worldMu.Unlock()
+
+	request.DirectoryName = strings.TrimSpace(request.DirectoryName)
+	request.Type = strings.ToLower(strings.TrimSpace(request.Type))
+	fields := make(map[string]string)
+	if !directoryNamePattern.MatchString(request.DirectoryName) {
+		fields["directoryName"] = "仅允许 1-64 位字母、数字、下划线和短横线，且必须以字母或数字开头"
+	}
+	if request.Type != "forest" && request.Type != "cave" {
+		fields["type"] = "世界类型必须为 forest 或 cave"
+	}
+	if len(fields) > 0 {
+		return World{}, &ValidationError{Fields: fields}
+	}
+	room, err := s.catalog.Room(roomID)
+	if err != nil {
+		return World{}, err
+	}
+	if !room.Managed {
+		return World{}, ErrRoomNotManaged
+	}
+	roomPath := filepath.Join(s.catalog.root, room.DirectoryName)
+	target := filepath.Join(roomPath, request.DirectoryName)
+	if err := ensureContained(roomPath, target); err != nil {
+		return World{}, err
+	}
+	if _, err := os.Lstat(target); err == nil {
+		return World{}, ErrWorldExists
+	} else if !os.IsNotExist(err) {
+		return World{}, fmt.Errorf("inspect world target: %w", err)
+	}
+	allocation, err := s.nextWorldAllocation(roomID, roomPath, request.Type)
+	if err != nil {
+		return World{}, err
+	}
+	temporary, err := os.MkdirTemp(roomPath, ".dst-admin-create-world-")
+	if err != nil {
+		return World{}, fmt.Errorf("create world staging directory: %w", err)
+	}
+	defer os.RemoveAll(temporary)
+	if err := writeWorld(
+		temporary,
+		request.DirectoryName,
+		allocation.shardID,
+		allocation.serverPort,
+		allocation.authenticationPort,
+		allocation.masterServerPort,
+		allocation.master,
+		request.Type,
+	); err != nil {
+		return World{}, err
+	}
+	if err := os.Rename(filepath.Join(temporary, request.DirectoryName), target); err != nil {
+		return World{}, fmt.Errorf("publish world directory: %w", err)
+	}
+	return s.catalog.World(roomID, EncodeID(request.DirectoryName))
+}
+
+func (s *Service) DeleteWorld(roomID, worldID string, request DeleteWorldRequest) (DeleteWorldResult, error) {
+	s.worldMu.Lock()
+	defer s.worldMu.Unlock()
+
+	room, err := s.catalog.Room(roomID)
+	if err != nil {
+		return DeleteWorldResult{}, err
+	}
+	if !room.Managed {
+		return DeleteWorldResult{}, ErrRoomNotManaged
+	}
+	if request.Confirmation != room.Name {
+		return DeleteWorldResult{}, ErrConfirmation
+	}
+	world, err := s.catalog.World(roomID, worldID)
+	if err != nil {
+		return DeleteWorldResult{}, err
+	}
+	roomPath := filepath.Join(s.catalog.root, room.DirectoryName)
+	source := filepath.Join(roomPath, world.DirectoryName)
+	trashRoot := filepath.Join(roomPath, ".dst-admin-trash")
+	if err := ensureContained(roomPath, source); err != nil {
+		return DeleteWorldResult{}, err
+	}
+	if err := os.MkdirAll(trashRoot, 0750); err != nil {
+		return DeleteWorldResult{}, fmt.Errorf("create world recovery directory: %w", err)
+	}
+	trashName := strconv.FormatInt(time.Now().UnixNano(), 10) + "-" + world.DirectoryName
+	target := filepath.Join(trashRoot, trashName)
+	if err := os.Rename(source, target); err != nil {
+		return DeleteWorldResult{}, fmt.Errorf("move world to recovery directory: %w", err)
+	}
+	return DeleteWorldResult{World: world, RecoveryName: filepath.Join(".dst-admin-trash", trashName)}, nil
+}
+
+type worldAllocation struct {
+	shardID            int
+	serverPort         int
+	authenticationPort int
+	masterServerPort   int
+	master             bool
+}
+
+func (s *Service) nextWorldAllocation(roomID, roomPath, worldType string) (worldAllocation, error) {
+	worlds, err := s.catalog.Worlds(roomID)
+	if err != nil {
+		return worldAllocation{}, err
+	}
+	usedShardIDs := make(map[int]bool)
+	usedPorts := make(map[int]bool)
+	hasMaster := false
+	for _, world := range worlds {
+		config, loadErr := ini.Load(filepath.Join(roomPath, world.DirectoryName, "server.ini"))
+		if loadErr != nil {
+			return worldAllocation{}, fmt.Errorf("parse existing world server.ini: %w", loadErr)
+		}
+		shardID := config.Section("SHARD").Key("id").MustInt(0)
+		if shardID > 0 {
+			usedShardIDs[shardID] = true
+		}
+		for _, port := range []int{
+			config.Section("NETWORK").Key("server_port").MustInt(0),
+			config.Section("STEAM").Key("authentication_port").MustInt(0),
+			config.Section("STEAM").Key("master_server_port").MustInt(0),
+		} {
+			if port > 0 {
+				usedPorts[port] = true
+			}
+		}
+		hasMaster = hasMaster || world.IsMaster
+	}
+	master := worldType == "forest" && !hasMaster
+	shardID := 2
+	if master {
+		shardID = 1
+	}
+	for usedShardIDs[shardID] {
+		shardID++
+	}
+	serverPort := nextFreePort(10998+shardID, usedPorts)
+	usedPorts[serverPort] = true
+	authenticationPort := nextFreePort(8766+shardID, usedPorts)
+	usedPorts[authenticationPort] = true
+	masterServerPort := nextFreePort(27016+shardID, usedPorts)
+	return worldAllocation{
+		shardID: shardID, serverPort: serverPort, authenticationPort: authenticationPort,
+		masterServerPort: masterServerPort, master: master,
+	}, nil
+}
+
+func nextFreePort(candidate int, used map[int]bool) int {
+	for candidate <= 65535 && used[candidate] {
+		candidate++
+	}
+	return candidate
+}
+
 func validateCreateRequest(request CreateRequest) error {
 	details := make(map[string]string)
 	if !directoryNamePattern.MatchString(request.DirectoryName) {
@@ -177,11 +352,11 @@ func writeRoomFiles(root string, request CreateRequest) error {
 			return fmt.Errorf("write cluster token: %w", err)
 		}
 	}
-	if err := writeWorld(root, "Master", 10999, true, "forest"); err != nil {
+	if err := writeWorld(root, "Master", 1, 10999, 8767, 27017, true, "forest"); err != nil {
 		return err
 	}
 	if request.IncludeCaves {
-		if err := writeWorld(root, "Caves", 11000, false, "cave"); err != nil {
+		if err := writeWorld(root, "Caves", 2, 11000, 8768, 27018, false, "cave"); err != nil {
 			return err
 		}
 	}
@@ -196,7 +371,7 @@ func randomClusterKey() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(value), nil
 }
 
-func writeWorld(root, name string, port int, master bool, location string) error {
+func writeWorld(root, name string, shardID, port, authenticationPort, masterServerPort int, master bool, location string) error {
 	directory := filepath.Join(root, name)
 	if err := os.MkdirAll(directory, 0750); err != nil {
 		return fmt.Errorf("create %s world: %w", name, err)
@@ -207,8 +382,12 @@ func writeWorld(root, name string, port int, master bool, location string) error
 	shard, _ := config.NewSection("SHARD")
 	_, _ = shard.NewKey("is_master", fmt.Sprintf("%t", master))
 	_, _ = shard.NewKey("name", name)
-	_, _ = shard.NewKey("id", fmt.Sprintf("%d", map[bool]int{true: 1, false: 2}[master]))
-	_, _ = config.NewSection("STEAM")
+	_, _ = shard.NewKey("id", strconv.Itoa(shardID))
+	steam, _ := config.NewSection("STEAM")
+	_, _ = steam.NewKey("authentication_port", strconv.Itoa(authenticationPort))
+	_, _ = steam.NewKey("master_server_port", strconv.Itoa(masterServerPort))
+	account, _ := config.NewSection("ACCOUNT")
+	_, _ = account.NewKey("encode_user_path", "true")
 	if err := writeINI(filepath.Join(directory, "server.ini"), config, 0640); err != nil {
 		return err
 	}

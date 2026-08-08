@@ -316,6 +316,60 @@ paths:
                 $ref: "#/components/schemas/WorldListEnvelope"
         "404":
           $ref: "#/components/responses/NotFound"
+    post:
+      tags: [Rooms]
+      operationId: createRoomWorld
+      summary: Atomically create a stopped world with collision-free shard ports
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWorldInput"
+      responses:
+        "201":
+          description: World created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorldRecordEnvelope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/worlds/{worldId}:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    delete:
+      tags: [Rooms]
+      operationId: deleteRoomWorld
+      summary: Move a stopped world into the room recovery directory
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteWorldInput"
+      responses:
+        "200":
+          description: World moved to the recovery directory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteWorldResultEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
   /rooms/{roomId}/actions/{action}:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -2399,6 +2453,68 @@ components:
           type: boolean
         statusMessage:
           type: string
+    WorldRecord:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, directoryName, name, role, isMaster, serverPort, updatedAt]
+      properties:
+        id: { type: string }
+        roomId: { type: string }
+        directoryName: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [master, caves, custom] }
+        isMaster: { type: boolean }
+        serverPort: { type: integer }
+        updatedAt: { type: string, format: date-time }
+    CreateWorldInput:
+      type: object
+      additionalProperties: false
+      required: [directoryName, type]
+      properties:
+        directoryName:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+        type:
+          type: string
+          enum: [forest, cave]
+    DeleteWorldInput:
+      type: object
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation:
+          type: string
+          description: Must exactly equal the room name
+    DeleteWorldResult:
+      type: object
+      additionalProperties: false
+      required: [world, recoveryName]
+      properties:
+        world:
+          $ref: "#/components/schemas/WorldRecord"
+        recoveryName:
+          type: string
+          description: Relative path below the room directory
+    WorldRecordEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/WorldRecord"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    DeleteWorldResultEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/DeleteWorldResult"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
     WorldList:
       type: object
       additionalProperties: false
@@ -3129,7 +3245,7 @@ components:
     RoomConfigurationValues:
       type: object
       additionalProperties: false
-      required: [clusterName, clusterDescription, clusterPassword, gameMode, maxPlayers, pvp, pauseWhenEmpty, voteEnabled, consoleEnabled, lanOnly, offline]
+      required: [clusterName, clusterDescription, clusterPassword, clusterIntention, clusterLanguage, gameMode, maxPlayers, pvp, pauseWhenEmpty, voteEnabled, voteKickEnabled, consoleEnabled, lanOnly, offline, whitelistSlots, tickRate, autosaverEnabled, idleTimeout, maxSnapshots, shardEnabled, bindIp, masterIp, masterPort, clusterKey, steamGroupOnly, steamGroupId, steamGroupAdmins]
       properties:
         clusterName:
           type: string
@@ -3141,6 +3257,12 @@ components:
         clusterPassword:
           type: string
           maxLength: 64
+        clusterIntention:
+          type: string
+          enum: [cooperative, competitive, social, madness]
+        clusterLanguage:
+          type: string
+          enum: [zh, en]
         gameMode:
           type: string
           enum: [survival, endless, wilderness]
@@ -3154,11 +3276,52 @@ components:
           type: boolean
         voteEnabled:
           type: boolean
+        voteKickEnabled:
+          type: boolean
         consoleEnabled:
           type: boolean
         lanOnly:
           type: boolean
         offline:
+          type: boolean
+        whitelistSlots:
+          type: integer
+          minimum: 0
+          maximum: 64
+        tickRate:
+          type: integer
+          minimum: 15
+          maximum: 60
+        autosaverEnabled:
+          type: boolean
+        idleTimeout:
+          type: integer
+          minimum: 0
+        maxSnapshots:
+          type: integer
+          minimum: 1
+        shardEnabled:
+          type: boolean
+        bindIp:
+          type: string
+          maxLength: 255
+        masterIp:
+          type: string
+          maxLength: 255
+        masterPort:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        clusterKey:
+          type: string
+          maxLength: 256
+        steamGroupOnly:
+          type: boolean
+        steamGroupId:
+          type: integer
+          format: int64
+          minimum: 0
+        steamGroupAdmins:
           type: boolean
     RoomConfiguration:
       type: object
@@ -3201,12 +3364,21 @@ components:
     WorldServerValues:
       type: object
       additionalProperties: false
-      required: [serverPort, authenticationPort, masterServerPort, encodeUserPath]
+      required: [serverPort, isMaster, shardName, shardId, authenticationPort, masterServerPort, encodeUserPath]
       properties:
         serverPort:
           type: integer
           minimum: 1
           maximum: 65535
+        isMaster:
+          type: boolean
+        shardName:
+          type: string
+          maxLength: 64
+        shardId:
+          type: integer
+          minimum: 1
+          maximum: 999
         authenticationPort:
           type: integer
           minimum: 0

@@ -109,6 +109,23 @@ func TestRoomAndShardJobHTTPFlow(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &worldsEnvelope); err != nil || len(worldsEnvelope.Data.Items) != 2 {
 		t.Fatalf("decode worlds: %v, %s", err, response.Body.String())
 	}
+
+	response = performJSON(router, http.MethodPost, "/api/v2/rooms/"+roomID+"/worlds", map[string]interface{}{
+		"directoryName": "Forest2", "type": "forest",
+	}, nil, "")
+	assertStatus(t, response, http.StatusCreated)
+	worldID, _ := responseData(t, response)["id"].(string)
+	if worldID == "" {
+		t.Fatalf("create world response missing id: %s", response.Body.String())
+	}
+	response = performJSON(router, http.MethodDelete, "/api/v2/rooms/"+roomID+"/worlds/"+worldID, map[string]interface{}{
+		"confirmation": "wrong",
+	}, nil, "")
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+	response = performJSON(router, http.MethodDelete, "/api/v2/rooms/"+roomID+"/worlds/"+worldID, map[string]interface{}{
+		"confirmation": "周末服",
+	}, nil, "")
+	assertStatus(t, response, http.StatusOK)
 	for _, world := range worldsEnvelope.Data.Items {
 		if world.Status != "stopped" {
 			t.Fatalf("initial world status = %q", world.Status)

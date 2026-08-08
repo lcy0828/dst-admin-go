@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/go-ini/ini"
 	"github.com/jinzhu/gorm"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -89,6 +90,45 @@ func TestDiscoveredRoomRequiresExplicitAdoption(t *testing.T) {
 	adopted, err := service.Adopt(rooms[0].ID)
 	if err != nil || !adopted.Managed {
 		t.Fatalf("adopt room: %#v, %v", adopted, err)
+	}
+}
+
+func TestCreateAndRecoverablyDeleteWorld(t *testing.T) {
+	service, root := newTestService(t)
+	room, err := service.Create(CreateRequest{
+		DirectoryName: "world_crud", Name: "世界管理", GameMode: "survival", MaxPlayers: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	world, err := service.CreateWorld(room.ID, CreateWorldRequest{DirectoryName: "Caves2", Type: "cave"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if world.Role != WorldRoleCaves || world.ServerPort != 11000 {
+		t.Fatalf("created world = %#v", world)
+	}
+	config, err := ini.Load(filepath.Join(root, "world_crud", "Caves2", "server.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Section("SHARD").Key("id").MustInt(0) != 2 ||
+		config.Section("STEAM").Key("authentication_port").MustInt(0) != 8768 ||
+		config.Section("STEAM").Key("master_server_port").MustInt(0) != 27018 {
+		t.Fatalf("allocated server.ini = %#v", config)
+	}
+	if _, err := service.DeleteWorld(room.ID, world.ID, DeleteWorldRequest{Confirmation: "wrong"}); !errors.Is(err, ErrConfirmation) {
+		t.Fatalf("delete confirmation error = %v", err)
+	}
+	deleted, err := service.DeleteWorld(room.ID, world.ID, DeleteWorldRequest{Confirmation: room.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.World(room.ID, world.ID); !errors.Is(err, ErrWorldNotFound) {
+		t.Fatalf("deleted world is still discoverable: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(root, "world_crud", deleted.RecoveryName)); err != nil || !info.IsDir() {
+		t.Fatalf("recovery directory missing: %v", err)
 	}
 }
 

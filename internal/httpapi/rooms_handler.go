@@ -29,7 +29,69 @@ func (h *RoomHandler) Register(v2 *gin.RouterGroup) {
 	group.GET("/:roomId", h.get)
 	group.POST("/:roomId/adopt", h.adopt)
 	group.GET("/:roomId/worlds", h.worldsList)
+	group.POST("/:roomId/worlds", h.createWorld)
+	group.DELETE("/:roomId/worlds/:worldId", h.deleteWorld)
 	group.POST("/:roomId/actions/:action", h.action)
+}
+
+func (h *RoomHandler) createWorld(c *gin.Context) {
+	var request rooms.CreateWorldRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的世界配置", nil)
+		return
+	}
+	if err := h.requireRoomStopped(c, c.Param("roomId"), ""); err != nil {
+		roomFailure(c, err)
+		return
+	}
+	result, err := h.rooms.CreateWorld(c.Param("roomId"), request)
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusCreated, result)
+}
+
+func (h *RoomHandler) deleteWorld(c *gin.Context) {
+	var request rooms.DeleteWorldRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的删除确认", nil)
+		return
+	}
+	if err := h.requireRoomStopped(c, c.Param("roomId"), c.Param("worldId")); err != nil {
+		roomFailure(c, err)
+		return
+	}
+	result, err := h.rooms.DeleteWorld(c.Param("roomId"), c.Param("worldId"), request)
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, result)
+}
+
+func (h *RoomHandler) requireRoomStopped(c *gin.Context, roomID, selectedWorldID string) error {
+	room, err := h.rooms.Room(roomID)
+	if err != nil {
+		return err
+	}
+	worlds, err := h.rooms.Worlds(room.ID)
+	if err != nil {
+		return err
+	}
+	for _, world := range worlds {
+		if selectedWorldID != "" && world.ID != selectedWorldID {
+			continue
+		}
+		running, statusErr := h.operations.IsRunning(c.Request.Context(), room.DirectoryName, world.DirectoryName)
+		if statusErr != nil {
+			return statusErr
+		}
+		if running {
+			return rooms.ErrWorldRunning
+		}
+	}
+	return nil
 }
 
 func (h *RoomHandler) list(c *gin.Context) {
@@ -156,6 +218,14 @@ func roomFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusNotFound, "RESOURCE_NOT_FOUND", "房间或世界不存在", nil)
 	case errors.Is(err, rooms.ErrRoomExists):
 		Failure(c, http.StatusConflict, "ROOM_EXISTS", "房间目录已经存在", nil)
+	case errors.Is(err, rooms.ErrWorldExists):
+		Failure(c, http.StatusConflict, "WORLD_EXISTS", "世界目录已经存在", nil)
+	case errors.Is(err, rooms.ErrRoomNotManaged):
+		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "接管房间后才能修改世界", nil)
+	case errors.Is(err, rooms.ErrConfirmation):
+		Failure(c, http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", "请输入完整房间名称确认删除", nil)
+	case errors.Is(err, rooms.ErrWorldRunning):
+		Failure(c, http.StatusConflict, "WORLD_RUNNING", "请先停止相关世界再执行此操作", nil)
 	case errors.Is(err, rooms.ErrInvalidRoom), errors.Is(err, rooms.ErrInvalidWorld):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_DST_CONFIG", "DST 房间或世界配置不完整", nil)
 	case errors.Is(err, rooms.ErrSaveRootMissing):

@@ -22,6 +22,10 @@ var (
 	ErrInvalidWorld    = errors.New("world configuration is invalid")
 	ErrSaveRootMissing = errors.New("save root does not exist")
 	ErrRoomExists      = errors.New("room already exists")
+	ErrWorldExists     = errors.New("world already exists")
+	ErrRoomNotManaged  = errors.New("room must be adopted before it can be changed")
+	ErrConfirmation    = errors.New("exact room name confirmation is required")
+	ErrWorldRunning    = errors.New("world must be stopped before it can be changed")
 )
 
 type Room struct {
