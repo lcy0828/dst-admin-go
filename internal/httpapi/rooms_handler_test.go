@@ -1,0 +1,140 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"testing"
+	"time"
+
+	"dont/internal/jobs"
+	"dont/internal/rooms"
+	"dont/internal/shards"
+
+	"github.com/gin-gonic/gin"
+	"github.com/jinzhu/gorm"
+	_ "github.com/mattn/go-sqlite3"
+)
+
+type roomHandlerControl struct {
+	running map[string]bool
+}
+
+func (c *roomHandlerControl) IsRunning(_ context.Context, room, world string) (bool, error) {
+	return c.running[room+"/"+world], nil
+}
+
+func (c *roomHandlerControl) Start(_ context.Context, room, world string) error {
+	c.running[room+"/"+world] = true
+	return nil
+}
+
+func (c *roomHandlerControl) Stop(_ context.Context, room, world string) error {
+	c.running[room+"/"+world] = false
+	return nil
+}
+
+func newRoomHandlerApp(t *testing.T) (*gin.Engine, *jobs.Service) {
+	t.Helper()
+	db, err := gorm.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SingularTable(true)
+	db.LogMode(false)
+	db.DB().SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	roomStore := rooms.NewStore(db, "api_")
+	if err := roomStore.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := rooms.NewCatalog(t.TempDir(), roomStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomService := rooms.NewService(catalog, roomStore)
+	jobStore := jobs.NewStore(db, "api_")
+	if err := jobStore.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	jobService, err := jobs.NewService(jobStore, jobs.NewBroker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := &roomHandlerControl{running: make(map[string]bool)}
+	operations := shards.NewOperations(roomService, control)
+	router := gin.New()
+	v2 := router.Group("/api/v2")
+	NewRoomHandler(roomService, operations, jobService).Register(v2)
+	NewJobHandler(jobService).Register(v2)
+	return router, jobService
+}
+
+func TestRoomAndShardJobHTTPFlow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router, jobService := newRoomHandlerApp(t)
+
+	response := performJSON(router, http.MethodPost, "/api/v2/rooms", map[string]interface{}{
+		"directoryName": "../bad", "name": "", "gameMode": "unknown", "maxPlayers": 0,
+	}, nil, "")
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+
+	response = performJSON(router, http.MethodPost, "/api/v2/rooms", map[string]interface{}{
+		"directoryName": "room_2026", "name": "周末服", "description": "联机测试", "gameMode": "survival",
+		"maxPlayers": 8, "includeCaves": true,
+	}, nil, "")
+	assertStatus(t, response, http.StatusCreated)
+	roomID, _ := responseData(t, response)["id"].(string)
+	if roomID == "" {
+		t.Fatalf("create room response missing id: %s", response.Body.String())
+	}
+
+	response = performJSON(router, http.MethodGet, "/api/v2/rooms", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	items, _ := responseData(t, response)["items"].([]interface{})
+	if len(items) != 1 {
+		t.Fatalf("room list = %s", response.Body.String())
+	}
+
+	response = performJSON(router, http.MethodGet, "/api/v2/rooms/"+roomID+"/worlds", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	var worldsEnvelope struct {
+		Data struct {
+			Items []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &worldsEnvelope); err != nil || len(worldsEnvelope.Data.Items) != 2 {
+		t.Fatalf("decode worlds: %v, %s", err, response.Body.String())
+	}
+	for _, world := range worldsEnvelope.Data.Items {
+		if world.Status != "stopped" {
+			t.Fatalf("initial world status = %q", world.Status)
+		}
+	}
+
+	response = performJSON(router, http.MethodPost, "/api/v2/rooms/"+roomID+"/actions/start", map[string]interface{}{}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	jobID, _ := responseData(t, response)["id"].(string)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		job, err := jobService.Get(jobID)
+		if err == nil && job.Status == jobs.StatusSucceeded {
+			if len(job.Targets) != 2 || job.Outcome != jobs.OutcomeFull {
+				t.Fatalf("unexpected job: %#v", job)
+			}
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	response = performJSON(router, http.MethodGet, "/api/v2/jobs/"+jobID, nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if responseData(t, response)["status"] != string(jobs.StatusSucceeded) {
+		t.Fatalf("job response = %s", response.Body.String())
+	}
+
+	response = performJSON(router, http.MethodGet, "/api/v2/rooms/not-base64", nil, nil, "")
+	assertStatus(t, response, http.StatusBadRequest)
+}

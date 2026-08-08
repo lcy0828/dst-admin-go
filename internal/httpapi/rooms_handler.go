@@ -1,0 +1,174 @@
+package httpapi
+
+import (
+	"errors"
+	"net/http"
+	"strings"
+
+	"dont/internal/jobs"
+	"dont/internal/rooms"
+	"dont/internal/shards"
+
+	"github.com/gin-gonic/gin"
+)
+
+type RoomHandler struct {
+	rooms      *rooms.Service
+	operations *shards.Operations
+	jobs       *jobs.Service
+}
+
+func NewRoomHandler(roomService *rooms.Service, operations *shards.Operations, jobService *jobs.Service) *RoomHandler {
+	return &RoomHandler{rooms: roomService, operations: operations, jobs: jobService}
+}
+
+func (h *RoomHandler) Register(v2 *gin.RouterGroup) {
+	group := v2.Group("/rooms")
+	group.GET("", h.list)
+	group.POST("", h.create)
+	group.GET("/:roomId", h.get)
+	group.POST("/:roomId/adopt", h.adopt)
+	group.GET("/:roomId/worlds", h.worldsList)
+	group.POST("/:roomId/actions/:action", h.action)
+}
+
+func (h *RoomHandler) list(c *gin.Context) {
+	result, err := h.rooms.List()
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, gin.H{"items": result, "total": len(result)})
+}
+
+func (h *RoomHandler) create(c *gin.Context) {
+	var request rooms.CreateRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的房间配置", nil)
+		return
+	}
+	result, err := h.rooms.Create(request)
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusCreated, result)
+}
+
+func (h *RoomHandler) get(c *gin.Context) {
+	result, err := h.rooms.Room(c.Param("roomId"))
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, result)
+}
+
+func (h *RoomHandler) adopt(c *gin.Context) {
+	result, err := h.rooms.Adopt(c.Param("roomId"))
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, result)
+}
+
+type worldState struct {
+	rooms.World
+	Status           string `json:"status"`
+	ControlAvailable bool   `json:"controlAvailable"`
+	StatusMessage    string `json:"statusMessage,omitempty"`
+}
+
+func (h *RoomHandler) worldsList(c *gin.Context) {
+	room, err := h.rooms.Room(c.Param("roomId"))
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	worlds, err := h.rooms.Worlds(room.ID)
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	result := make([]worldState, 0, len(worlds))
+	for _, world := range worlds {
+		state := worldState{World: world, Status: "unknown", ControlAvailable: room.Managed}
+		if !room.Managed {
+			state.StatusMessage = "接管房间后可执行运行操作"
+			result = append(result, state)
+			continue
+		}
+		running, statusErr := h.operations.IsRunning(c.Request.Context(), room.DirectoryName, world.DirectoryName)
+		if statusErr != nil {
+			state.StatusMessage = statusErr.Error()
+			result = append(result, state)
+			continue
+		}
+		if running {
+			state.Status = "running"
+		} else {
+			state.Status = "stopped"
+		}
+		result = append(result, state)
+	}
+	Success(c, http.StatusOK, gin.H{"items": result, "total": len(result)})
+}
+
+type roomActionRequest struct {
+	WorldIDs []string `json:"worldIds"`
+}
+
+func (h *RoomHandler) action(c *gin.Context) {
+	action := shards.Action(strings.ToLower(strings.TrimSpace(c.Param("action"))))
+	var request roomActionRequest
+	if c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&request); err != nil {
+			Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的操作配置", nil)
+			return
+		}
+	}
+	targets, runner, err := h.operations.Plan(action, c.Param("roomId"), request.WorldIDs)
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	worldID := ""
+	if len(request.WorldIDs) == 1 {
+		worldID = request.WorldIDs[0]
+	}
+	job, err := h.jobs.Submit("room."+string(action), c.Param("roomId"), worldID, targets, runner)
+	if err != nil {
+		Failure(c, http.StatusInternalServerError, "JOB_CREATE_FAILED", "无法创建运行任务", nil)
+		return
+	}
+	Success(c, http.StatusAccepted, job)
+}
+
+func roomFailure(c *gin.Context, err error) {
+	var validation *rooms.ValidationError
+	switch {
+	case errors.As(err, &validation):
+		Failure(c, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "房间配置校验失败", validation.Fields)
+	case errors.Is(err, rooms.ErrInvalidID), errors.Is(err, rooms.ErrUnsafePath):
+		Failure(c, http.StatusBadRequest, "INVALID_RESOURCE_ID", "房间或世界标识无效", nil)
+	case errors.Is(err, rooms.ErrRoomNotFound), errors.Is(err, rooms.ErrWorldNotFound):
+		Failure(c, http.StatusNotFound, "RESOURCE_NOT_FOUND", "房间或世界不存在", nil)
+	case errors.Is(err, rooms.ErrRoomExists):
+		Failure(c, http.StatusConflict, "ROOM_EXISTS", "房间目录已经存在", nil)
+	case errors.Is(err, rooms.ErrInvalidRoom), errors.Is(err, rooms.ErrInvalidWorld):
+		Failure(c, http.StatusUnprocessableEntity, "INVALID_DST_CONFIG", "DST 房间或世界配置不完整", nil)
+	case errors.Is(err, rooms.ErrSaveRootMissing):
+		Failure(c, http.StatusServiceUnavailable, "SAVE_ROOT_MISSING", "DST 存档目录不存在", nil)
+	case errors.Is(err, shards.ErrRoomNotManaged):
+		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "请先接管房间再执行操作", nil)
+	case errors.Is(err, shards.ErrNoWorlds):
+		Failure(c, http.StatusUnprocessableEntity, "NO_WORLDS", "房间中没有可控制的世界", nil)
+	case errors.Is(err, shards.ErrUnknownAction):
+		Failure(c, http.StatusNotFound, "ACTION_NOT_FOUND", "不支持该房间操作", nil)
+	case errors.Is(err, shards.ErrUnsafeName):
+		Failure(c, http.StatusUnprocessableEntity, "UNSUPPORTED_DIRECTORY_NAME", "目录名称不符合 tmux 安全规则，请重命名后再接管", nil)
+	default:
+		Failure(c, http.StatusInternalServerError, "ROOM_OPERATION_FAILED", "房间操作失败", nil)
+	}
+}

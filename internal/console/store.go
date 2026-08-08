@@ -1,0 +1,155 @@
+package console
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jinzhu/gorm"
+)
+
+var ErrRunNotFound = errors.New("command run not found")
+
+type runRecord struct {
+	ID           string    `gorm:"primary_key;type:char(36)"`
+	RoomID       string    `gorm:"type:varchar(255);index;not null"`
+	WorldID      string    `gorm:"type:varchar(255);index;not null"`
+	Mode         string    `gorm:"type:varchar(16);not null"`
+	CommandID    string    `gorm:"type:varchar(64)"`
+	Name         string    `gorm:"type:varchar(128);not null"`
+	Risk         string    `gorm:"type:varchar(16);not null"`
+	Arguments    string    `gorm:"type:text"`
+	RawCommand   string    `gorm:"type:text"`
+	Status       string    `gorm:"type:varchar(16);index;not null"`
+	Message      string    `gorm:"type:text"`
+	ErrorCode    string    `gorm:"type:varchar(64)"`
+	ErrorMessage string    `gorm:"type:text"`
+	CreatedAt    time.Time `gorm:"index;not null"`
+	FinishedAt   *time.Time
+}
+
+type Store struct {
+	db    *gorm.DB
+	table string
+	now   func() time.Time
+}
+
+func NewStore(db *gorm.DB, tablePrefix string) *Store {
+	return &Store{db: db, table: strings.TrimSpace(tablePrefix) + "command_run", now: time.Now}
+}
+
+func (s *Store) Migrate() error {
+	if err := s.db.Table(s.table).AutoMigrate(&runRecord{}).Error; err != nil {
+		return fmt.Errorf("migrate command runs: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) Create(run Run) (Run, error) {
+	arguments, err := json.Marshal(run.Arguments)
+	if err != nil {
+		return Run{}, fmt.Errorf("encode command arguments: %w", err)
+	}
+	run.ID = uuid.NewString()
+	run.Status = RunSending
+	run.LogQuery = run.ID
+	run.CreatedAt = s.now().UTC()
+	record := recordFromRun(run, string(arguments))
+	if err := s.db.Table(s.table).Create(&record).Error; err != nil {
+		return Run{}, err
+	}
+	return run, nil
+}
+
+func (s *Store) Complete(runID string, sendErr error) (Run, error) {
+	now := s.now().UTC()
+	updates := map[string]interface{}{"status": RunSent, "message": "命令已发送到分片控制台", "finished_at": now, "error_code": "", "error_message": ""}
+	if sendErr != nil {
+		updates["status"] = RunFailed
+		updates["message"] = "命令发送失败"
+		updates["error_code"] = "COMMAND_SEND_FAILED"
+		updates["error_message"] = sendErr.Error()
+	}
+	result := s.db.Table(s.table).Where("id = ? AND status = ?", runID, RunSending).Updates(updates)
+	if result.Error != nil {
+		return Run{}, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return Run{}, ErrRunNotFound
+	}
+	return s.Get(runID)
+}
+
+func (s *Store) Get(runID string) (Run, error) {
+	var record runRecord
+	result := s.db.Table(s.table).Where("id = ?", runID).First(&record)
+	if gorm.IsRecordNotFoundError(result.Error) {
+		return Run{}, ErrRunNotFound
+	}
+	if result.Error != nil {
+		return Run{}, result.Error
+	}
+	return runFromRecord(record)
+}
+
+func (s *Store) List(filter ListFilter) ([]Run, int, error) {
+	query := s.db.Table(s.table)
+	if filter.RoomID != "" {
+		query = query.Where("room_id = ?", filter.RoomID)
+	}
+	if filter.WorldID != "" {
+		query = query.Where("world_id = ?", filter.WorldID)
+	}
+	var total int
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	limit := filter.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 25
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	var records []runRecord
+	if err := query.Order("created_at DESC").Limit(limit).Offset(offset).Find(&records).Error; err != nil {
+		return nil, 0, err
+	}
+	runs := make([]Run, 0, len(records))
+	for _, record := range records {
+		run, err := runFromRecord(record)
+		if err != nil {
+			return nil, 0, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, total, nil
+}
+
+func recordFromRun(run Run, arguments string) runRecord {
+	return runRecord{
+		ID: run.ID, RoomID: run.RoomID, WorldID: run.WorldID, Mode: run.Mode, CommandID: run.CommandID,
+		Name: run.Name, Risk: string(run.Risk), Arguments: arguments, RawCommand: run.RawCommand,
+		Status: string(run.Status), Message: run.Message, ErrorCode: run.ErrorCode, ErrorMessage: run.ErrorMessage,
+		CreatedAt: run.CreatedAt, FinishedAt: run.FinishedAt,
+	}
+}
+
+func runFromRecord(record runRecord) (Run, error) {
+	arguments := make(map[string]interface{})
+	if record.Arguments != "" && record.Arguments != "null" {
+		if err := json.Unmarshal([]byte(record.Arguments), &arguments); err != nil {
+			return Run{}, fmt.Errorf("decode command arguments: %w", err)
+		}
+	}
+	return Run{
+		ID: record.ID, RoomID: record.RoomID, WorldID: record.WorldID, Mode: record.Mode, CommandID: record.CommandID,
+		Name: record.Name, Risk: Risk(record.Risk), Arguments: arguments, RawCommand: record.RawCommand,
+		Status: RunStatus(record.Status), Message: record.Message, ErrorCode: record.ErrorCode, ErrorMessage: record.ErrorMessage,
+		LogQuery: record.ID, CreatedAt: record.CreatedAt, FinishedAt: record.FinishedAt,
+	}, nil
+}

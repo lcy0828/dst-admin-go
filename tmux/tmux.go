@@ -85,6 +85,18 @@ func NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir str
 	return server, nil
 }
 
+func NewDSTServerWithSessionName(archiveName, worldName, sessionName, ugcDirectory, storageRoot, confDir string, startDirectory string, serverMode ...string) (*DSTServer, error) {
+	server, err := NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir, startDirectory, serverMode...)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(sessionName) == "" || strings.ContainsAny(sessionName, ":.\x00\r\n") {
+		return nil, fmt.Errorf("无效的 tmux 会话名称")
+	}
+	server.SessionName = sessionName
+	return server, nil
+}
+
 // IsRunning 检查服务器是否正在运行
 func (s *DSTServer) IsRunning() (bool, error) {
 	log.Printf("[TMUX] 检查服务器运行状态 会话名: %s", s.SessionName)
@@ -157,7 +169,7 @@ func (s *DSTServer) Start() error {
 
 	// 构建启动命令
 	startCmd := fmt.Sprintf("./%s -ugc_directory %s -persistent_storage_root %s -conf_dir %s -cluster %s -shard %s",
-		executableName, s.UGCDirectory, s.StorageRoot, s.ConfDir, s.ArchiveName, s.WorldName)
+		executableName, shellArg(s.UGCDirectory), shellArg(s.StorageRoot), shellArg(s.ConfDir), shellArg(s.ArchiveName), shellArg(s.WorldName))
 	log.Printf("[TMUX] 构建启动命令: %s", startCmd)
 
 	// 使用gotmux的Command方法创建会话
@@ -238,6 +250,10 @@ func (s *DSTServer) Start() error {
 	SaveServerInfo(s)
 
 	return nil
+}
+
+func shellArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 // Stop 停止饥荒服务器
@@ -718,8 +734,8 @@ func ListDSTServers(silent ...bool) ([]ServerInfo, error) {
 	for sessionName := range runningSessionMap {
 		if _, exists := serverInfoMap[sessionName]; !exists {
 			// 解析会话名称获取存档和世界信息
-			parts := strings.Split(sessionName, "_")
-			if len(parts) >= 3 && parts[0] == "dstserver" {
+			parsed := ParseSessionName(sessionName)
+			if parsed.Valid {
 				// 创建新的服务器信息
 				startTime := "unknown"
 
@@ -783,7 +799,7 @@ func ListDSTServers(silent ...bool) ([]ServerInfo, error) {
 				}
 
 				// 构建server.ini文件路径
-				serverIniPath := filepath.Join(dstSavePath, parts[1], parts[2], "server.ini")
+				serverIniPath := filepath.Join(dstSavePath, parsed.ClusterName, parsed.ShardName, "server.ini")
 				if _, err := os.Stat(serverIniPath); !os.IsNotExist(err) {
 					// 读取并解析server.ini文件
 					if cfg, err := ini.Load(serverIniPath); err == nil {
@@ -801,8 +817,8 @@ func ListDSTServers(silent ...bool) ([]ServerInfo, error) {
 
 				info := ServerInfo{
 					SessionName: sessionName,
-					ArchiveName: parts[1],
-					WorldName:   parts[2],
+					ArchiveName: parsed.ClusterName,
+					WorldName:   parsed.ShardName,
 					ServerMode:  "unknown", // 未知模式
 					Status:      "running",
 					StartTime:   startTime,
@@ -851,16 +867,16 @@ func GetSessionInfo(sessionName string) (map[string]string, error) {
 	}
 
 	// 解析会话名称获取存档和世界信息
-	parts := strings.Split(sessionName, "_")
-	if len(parts) < 3 {
+	parts := ParseSessionName(sessionName)
+	if !parts.Valid {
 		log.Printf("[TMUX][错误] 会话名称格式不正确: %s", sessionName)
 		return nil, fmt.Errorf("会话名称格式不正确: %s", sessionName)
 	}
 
 	info := map[string]string{
 		"SessionName": sessionName,
-		"ArchiveName": parts[1],
-		"WorldName":   parts[2],
+		"ArchiveName": parts.ClusterName,
+		"WorldName":   parts.ShardName,
 		"Created":     session.Created,
 		"Attached":    fmt.Sprintf("%d", session.Attached),
 		"Windows":     fmt.Sprintf("%d", session.Windows),

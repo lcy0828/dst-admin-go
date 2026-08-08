@@ -1,0 +1,289 @@
+package backups
+
+import (
+	"archive/zip"
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"dont/internal/jobs"
+	"dont/internal/rooms"
+
+	"github.com/jinzhu/gorm"
+	_ "github.com/mattn/go-sqlite3"
+)
+
+type testCatalog struct {
+	room   rooms.Room
+	worlds []rooms.World
+}
+
+func (c testCatalog) Room(string) (rooms.Room, error)      { return c.room, nil }
+func (c testCatalog) Worlds(string) ([]rooms.World, error) { return c.worlds, nil }
+
+type testRuntime struct {
+	running map[string]bool
+	sent    []string
+}
+
+func (r *testRuntime) IsRunning(_ context.Context, _, world string) (bool, error) {
+	return r.running[world], nil
+}
+
+func (r *testRuntime) Send(_ context.Context, _, _, command string) error {
+	r.sent = append(r.sent, command)
+	return nil
+}
+
+func newBackupService(t *testing.T) (*Service, *testRuntime, string, string) {
+	t.Helper()
+	saveRoot := filepath.Join(t.TempDir(), "saves")
+	backupRoot := filepath.Join(t.TempDir(), "backups")
+	roomPath := filepath.Join(saveRoot, "room")
+	if err := os.MkdirAll(filepath.Join(roomPath, "Master"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(roomPath, "cluster.ini"), []byte("[NETWORK]\ncluster_name = Test\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(roomPath, "Master", "server.ini"), []byte("[SHARD]\nis_master = true\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(roomPath, "Master", "session-data"), []byte("before"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	db, err := gorm.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.DB().SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	store := NewStore(db, "test_")
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	room := rooms.Room{ID: rooms.EncodeID("room"), DirectoryName: "room", Name: "Test Room", Managed: true}
+	world := rooms.World{ID: rooms.EncodeID("Master"), RoomID: room.ID, DirectoryName: "Master", Name: "Master", IsMaster: true}
+	runtime := &testRuntime{running: make(map[string]bool)}
+	service, err := NewService(saveRoot, backupRoot, testCatalog{room: room, worlds: []rooms.World{world}}, runtime, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.saveSettle = time.Millisecond
+	return service, runtime, roomPath, backupRoot
+}
+
+func TestCreateRequestsConsistentSaveAndPersistsVerifiedArchive(t *testing.T) {
+	service, runtime, _, _ := newBackupService(t)
+	runtime.running["Master"] = true
+	value, err := service.Create(context.Background(), rooms.EncodeID("room"), "第一次备份", KindManual, "job-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime.sent) != 1 || runtime.sent[0] != "c_save()" {
+		t.Fatalf("save commands = %#v", runtime.sent)
+	}
+	if value.VerifiedAt == nil || value.SHA256 == "" || value.FileCount < 3 || value.SourceJobID != "job-id" {
+		t.Fatalf("backup = %#v", value)
+	}
+	file, _, _, err := service.Open(value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = file.Close()
+}
+
+func TestProtectionBackupAlsoRequestsConsistentSave(t *testing.T) {
+	service, runtime, _, _ := newBackupService(t)
+	runtime.running["Master"] = true
+	if _, err := service.Create(context.Background(), rooms.EncodeID("room"), "更新前", KindProtection, "job-id"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime.sent) != 1 || runtime.sent[0] != "c_save()" {
+		t.Fatalf("save commands = %#v", runtime.sent)
+	}
+}
+
+func TestRestoreCreatesProtectionBackupAndAtomicallyReplacesRoom(t *testing.T) {
+	service, _, roomPath, _ := newBackupService(t)
+	value, err := service.Create(context.Background(), rooms.EncodeID("room"), "可恢复", KindManual, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataPath := filepath.Join(roomPath, "Master", "session-data")
+	if err := os.WriteFile(dataPath, []byte("after"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	protection, err := service.Restore(context.Background(), rooms.EncodeID("room"), value.ID, "Test Room", "restore-job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(dataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "before" || protection.Kind != KindProtection || protection.SourceJobID != "restore-job" {
+		t.Fatalf("restored content = %q, protection = %#v", content, protection)
+	}
+	items, err := service.List(rooms.EncodeID("room"))
+	if err != nil || len(items) != 2 {
+		t.Fatalf("backups = %#v, %v", items, err)
+	}
+}
+
+func TestRestoreRequiresStoppedWorldAndExactRoomName(t *testing.T) {
+	service, runtime, _, _ := newBackupService(t)
+	value, err := service.Create(context.Background(), rooms.EncodeID("room"), "备份", KindManual, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Restore(context.Background(), rooms.EncodeID("room"), value.ID, "wrong", ""); !errors.Is(err, ErrConfirmationNeeded) {
+		t.Fatalf("confirmation error = %v", err)
+	}
+	runtime.running["Master"] = true
+	if _, err := service.Restore(context.Background(), rooms.EncodeID("room"), value.ID, "Test Room", ""); !errors.Is(err, ErrWorldRunning) {
+		t.Fatalf("running error = %v", err)
+	}
+	items, _ := service.List(rooms.EncodeID("room"))
+	if len(items) != 1 {
+		t.Fatalf("restore created protection backup before safety checks: %#v", items)
+	}
+}
+
+func TestUploadRejectsZipSlipAndDoesNotPublish(t *testing.T) {
+	service, _, _, backupRoot := newBackupService(t)
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	entry, err := writer.Create("../cluster.ini")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = entry.Write([]byte("bad"))
+	_ = writer.Close()
+	if _, err := service.Import(context.Background(), rooms.EncodeID("room"), "bad", "bad.zip", &archive); !errors.Is(err, ErrUnsafeArchive) {
+		t.Fatalf("upload error = %v", err)
+	}
+	items, _ := service.List(rooms.EncodeID("room"))
+	if len(items) != 0 {
+		t.Fatalf("invalid upload was persisted: %#v", items)
+	}
+	files, err := filepath.Glob(filepath.Join(backupRoot, "room", "*"))
+	if err != nil || len(files) != 0 {
+		t.Fatalf("invalid upload files = %#v, %v", files, err)
+	}
+}
+
+func TestPolicyCanBeDisabledAndSnapshotsArePruned(t *testing.T) {
+	service, _, _, _ := newBackupService(t)
+	roomID := rooms.EncodeID("room")
+	policy, err := service.SavePolicy(roomID, PolicyRequest{Enabled: true, IntervalMinute: 15, MaxSnapshots: 1})
+	if err != nil || policy.NextRunAt == nil {
+		t.Fatalf("enabled policy = %#v, %v", policy, err)
+	}
+	for index := 0; index < 2; index++ {
+		if _, err := service.Create(context.Background(), roomID, "snapshot", KindSnapshot, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, removed, err := service.PruneSnapshots(roomID, 1)
+	if err != nil || removed != 1 {
+		t.Fatalf("prune = %d, %v", removed, err)
+	}
+	policy, err = service.SavePolicy(roomID, PolicyRequest{Enabled: false, IntervalMinute: 15, MaxSnapshots: 1})
+	if err != nil || policy.Enabled || policy.NextRunAt != nil {
+		t.Fatalf("disabled policy = %#v, %v", policy, err)
+	}
+}
+
+func TestSchedulerSubmitsPersistentSnapshotJobAndAdvancesPolicy(t *testing.T) {
+	service, _, _, _ := newBackupService(t)
+	roomID := rooms.EncodeID("room")
+	if _, err := service.SavePolicy(roomID, PolicyRequest{Enabled: true, IntervalMinute: 15, MaxSnapshots: 2}); err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return time.Now().Add(16 * time.Minute) }
+	jobStore := jobs.NewStore(service.store.db, "scheduler_")
+	if err := jobStore.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	jobService, err := jobs.NewService(jobStore, jobs.NewBroker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewScheduler(service, jobService)
+	if err := scheduler.RunDue(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		policy, policyErr := service.Policy(roomID)
+		if policyErr != nil {
+			t.Fatal(policyErr)
+		}
+		if policy.LastJobID != "" {
+			job, getErr := jobService.Get(policy.LastJobID)
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			if job.Status != jobs.StatusSucceeded || policy.NextRunAt == nil {
+				t.Fatalf("job = %#v, policy = %#v", job, policy)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("snapshot job did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	items, err := service.List(roomID)
+	if err != nil || len(items) != 1 || items[0].Kind != KindSnapshot {
+		t.Fatalf("snapshot backups = %#v, %v", items, err)
+	}
+}
+
+func TestListAdoptsLegacyArchivesAndMarksInvalidFiles(t *testing.T) {
+	service, _, _, backupRoot := newBackupService(t)
+	roomID := rooms.EncodeID("room")
+	created, err := service.Create(context.Background(), roomID, "source", KindManual, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, _, _, err := service.Open(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validBytes, err := io.ReadAll(file)
+	_ = file.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Delete(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(backupRoot, "room")
+	if err := os.WriteFile(filepath.Join(directory, "legacy.zip"), validBytes, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "broken.zip"), []byte("not a zip"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	items, err := service.List(roomID)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("legacy backups = %#v, %v", items, err)
+	}
+	statuses := map[string]string{}
+	for _, item := range items {
+		statuses[item.FileName] = item.Status
+		if item.Kind != KindImported {
+			t.Fatalf("legacy kind = %s", item.Kind)
+		}
+	}
+	if statuses["legacy.zip"] != "verified" || statuses["broken.zip"] != "invalid" {
+		t.Fatalf("legacy statuses = %#v", statuses)
+	}
+}
