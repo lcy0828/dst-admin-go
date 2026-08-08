@@ -65,7 +65,7 @@ func (s *Scheduler) Stop() {
 }
 
 func (s *Scheduler) build() (*cron.Cron, error) {
-	engine := cron.New()
+	engine := cron.New(cron.WithParser(scheduleParser))
 	tasks, err := s.store.ScheduledTasks()
 	if err != nil {
 		return nil, err

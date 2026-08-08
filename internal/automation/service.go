@@ -19,7 +19,10 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+var (
+	identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+	scheduleParser    = cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+)
 
 type RoomCatalog interface {
 	Room(string) (rooms.Room, error)
@@ -58,7 +61,7 @@ func (s *Service) CreateGroup(roomID string, input GroupInput) (Group, error) {
 		return Group{}, err
 	}
 	now := s.now().UTC()
-	return s.store.CreateGroup(Group{ID: uuid.NewString(), RoomID: roomID, Name: input.Name, Description: input.Description, Enabled: input.Enabled, Revision: uuid.NewString(), CreatedAt: now, UpdatedAt: now})
+	return s.store.CreateGroup(Group{ID: uuid.NewString(), RoomID: roomID, Name: input.Name, Description: input.Description, Type: input.Type, Enabled: input.Enabled, Revision: uuid.NewString(), CreatedAt: now, UpdatedAt: now})
 }
 
 func (s *Service) UpdateGroup(roomID, groupID string, input GroupInput) (Group, error) {
@@ -73,7 +76,7 @@ func (s *Service) UpdateGroup(roomID, groupID string, input GroupInput) (Group, 
 	if err != nil {
 		return Group{}, err
 	}
-	existing.Name, existing.Description, existing.Enabled = input.Name, input.Description, input.Enabled
+	existing.Name, existing.Description, existing.Type, existing.Enabled = input.Name, input.Description, input.Type, input.Enabled
 	existing.Revision, existing.UpdatedAt = uuid.NewString(), s.now().UTC()
 	return s.store.UpdateGroup(existing, input.ExpectedRevision)
 }
@@ -119,7 +122,7 @@ func (s *Service) CreateTask(roomID string, input TaskInput) (Task, error) {
 		return Task{}, err
 	}
 	now := s.now().UTC()
-	task := Task{ID: uuid.NewString(), RoomID: roomID, GroupID: input.GroupID, Name: input.Name, Description: input.Description, Enabled: input.Enabled, Schedule: input.Schedule, Timezone: input.Timezone, Action: input.Action, WorldIDs: input.WorldIDs, Parameters: input.Parameters, TimeoutSeconds: input.TimeoutSeconds, Revision: uuid.NewString(), CreatedAt: now, UpdatedAt: now}
+	task := Task{ID: uuid.NewString(), RoomID: roomID, GroupID: input.GroupID, Name: input.Name, Description: input.Description, Enabled: input.Enabled, Schedule: input.Schedule, Timezone: input.Timezone, Action: input.Action, WorldIDs: input.WorldIDs, Parameters: input.Parameters, TimeoutSeconds: input.TimeoutSeconds, RetryTimes: input.RetryTimes, RetryInterval: input.RetryInterval, Dependencies: append([]string(nil), input.Dependencies...), Revision: uuid.NewString(), CreatedAt: now, UpdatedAt: now}
 	if err := s.executor.Validate(task); err != nil {
 		return Task{}, err
 	}
@@ -142,6 +145,10 @@ func (s *Service) UpdateTask(roomID, taskID string, input TaskInput) (Task, erro
 	existing.GroupID, existing.Name, existing.Description, existing.Enabled = input.GroupID, input.Name, input.Description, input.Enabled
 	existing.Schedule, existing.Timezone, existing.Action = input.Schedule, input.Timezone, input.Action
 	existing.WorldIDs, existing.Parameters, existing.TimeoutSeconds = input.WorldIDs, input.Parameters, input.TimeoutSeconds
+	existing.RetryTimes, existing.RetryInterval, existing.Dependencies = input.RetryTimes, input.RetryInterval, append([]string(nil), input.Dependencies...)
+	if err := s.validateDependencies(roomID, existing.ID, existing.Dependencies); err != nil {
+		return Task{}, err
+	}
 	existing.Revision, existing.UpdatedAt = uuid.NewString(), s.now().UTC()
 	if err := s.executor.Validate(existing); err != nil {
 		return Task{}, err
@@ -176,6 +183,36 @@ func (s *Service) Runs(roomID string, filter RunFilter) (RunList, error) {
 	return s.store.Runs(roomID, filter)
 }
 
+func (s *Service) Run(roomID, runID string) (Run, error) {
+	if !validID(runID) {
+		return Run{}, ErrRunNotFound
+	}
+	if _, err := s.rooms.Room(roomID); err != nil {
+		return Run{}, err
+	}
+	return s.store.Run(roomID, runID)
+}
+
+func (s *Service) ClearRuns(roomID string, input ClearRunsInput) (ClearRunsResult, error) {
+	if _, err := s.rooms.Room(roomID); err != nil {
+		return ClearRunsResult{}, err
+	}
+	if input.KeepDays < 1 || input.KeepDays > 3650 || (input.Status != "" && !validRunStatus(input.Status)) {
+		return ClearRunsResult{}, ErrInvalidInput
+	}
+	if input.TaskID != "" {
+		if !validID(input.TaskID) {
+			return ClearRunsResult{}, ErrInvalidInput
+		}
+		if _, err := s.store.Task(roomID, input.TaskID); err != nil {
+			return ClearRunsResult{}, err
+		}
+	}
+	before := s.now().UTC().AddDate(0, 0, -input.KeepDays)
+	count, err := s.store.ClearRuns(roomID, before, input.TaskID, input.Status)
+	return ClearRunsResult{DeletedCount: count}, err
+}
+
 func (s *Service) Stats(roomID string, days int) (Stats, error) {
 	if days < 1 || days > 90 {
 		return Stats{}, ErrInvalidInput
@@ -193,6 +230,11 @@ func (s *Service) RunTask(roomID, taskID string, trigger Trigger) (jobs.Job, err
 	task, err := s.store.Task(roomID, taskID)
 	if err != nil {
 		return jobs.Job{}, err
+	}
+	if dependency := s.unsatisfiedDependency(task); dependency != "" {
+		now := s.now().UTC()
+		_, _ = s.store.CreateRun(Run{ID: uuid.NewString(), TaskID: task.ID, TaskName: task.Name, GroupID: task.GroupID, GroupName: task.GroupName, RoomID: task.RoomID, Action: task.Action, Trigger: trigger, Status: RunSkipped, Error: dependency, FinishedAt: &now, CreatedAt: now})
+		return jobs.Job{}, ErrDependencies
 	}
 	s.activeMu.Lock()
 	if s.active[task.ID] {
@@ -222,7 +264,31 @@ func (s *Service) RunTask(roomID, taskID string, trigger Trigger) (jobs.Job, err
 			_ = s.store.StartRun(run.ID, started)
 			taskCtx, cancel := context.WithTimeout(ctx, time.Duration(task.TimeoutSeconds)*time.Second)
 			defer cancel()
-			result, executeErr := s.executor.Execute(taskCtx, task, job.ID)
+			var result ExecutionResult
+			var executeErr error
+			retryCount := 0
+			for attempt := 0; attempt <= task.RetryTimes; attempt++ {
+				result, executeErr = s.executor.Execute(taskCtx, task, job.ID)
+				if executeErr == nil || taskCtx.Err() != nil || attempt == task.RetryTimes {
+					break
+				}
+				retryCount++
+				timer := time.NewTimer(time.Duration(task.RetryInterval) * time.Second)
+				select {
+				case <-taskCtx.Done():
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					executeErr = taskCtx.Err()
+				case <-timer.C:
+				}
+				if taskCtx.Err() != nil {
+					break
+				}
+			}
 			finished := s.now().UTC()
 			status := RunSucceeded
 			errorMessage := ""
@@ -233,7 +299,7 @@ func (s *Service) RunTask(roomID, taskID string, trigger Trigger) (jobs.Job, err
 					status = RunCanceled
 				}
 			}
-			_ = s.store.FinishRun(run.ID, status, result.Message, errorMessage, finished)
+			_ = s.store.FinishRun(run.ID, status, result.Message, errorMessage, retryCount, finished)
 			if executeErr != nil {
 				code := "AUTOMATION_ACTION_FAILED"
 				if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
@@ -248,7 +314,7 @@ func (s *Service) RunTask(roomID, taskID string, trigger Trigger) (jobs.Job, err
 	})
 	if err != nil {
 		release()
-		_ = s.store.FinishRun(run.ID, RunFailed, "", err.Error(), s.now().UTC())
+		_ = s.store.FinishRun(run.ID, RunFailed, "", err.Error(), 0, s.now().UTC())
 		return jobs.Job{}, err
 	}
 	return job, nil
@@ -265,10 +331,10 @@ func (s *Service) Export(roomID string) (Document, error) {
 	}
 	document := Document{Version: 1, Groups: make([]DocumentGroup, 0, len(groups)), Tasks: make([]DocumentTask, 0, len(tasks))}
 	for _, group := range groups {
-		document.Groups = append(document.Groups, DocumentGroup{Key: group.ID, Name: group.Name, Description: group.Description, Enabled: group.Enabled})
+		document.Groups = append(document.Groups, DocumentGroup{Key: group.ID, Name: group.Name, Description: group.Description, Type: group.Type, Enabled: group.Enabled})
 	}
 	for _, task := range tasks {
-		document.Tasks = append(document.Tasks, DocumentTask{GroupKey: task.GroupID, Name: task.Name, Description: task.Description, Enabled: task.Enabled, Schedule: task.Schedule, Timezone: task.Timezone, Action: task.Action, WorldIDs: task.WorldIDs, Parameters: task.Parameters, TimeoutSeconds: task.TimeoutSeconds})
+		document.Tasks = append(document.Tasks, DocumentTask{Key: task.ID, GroupKey: task.GroupID, Name: task.Name, Description: task.Description, Enabled: task.Enabled, Schedule: task.Schedule, Timezone: task.Timezone, Action: task.Action, WorldIDs: task.WorldIDs, Parameters: task.Parameters, TimeoutSeconds: task.TimeoutSeconds, RetryTimes: task.RetryTimes, RetryInterval: task.RetryInterval, Dependencies: task.Dependencies})
 	}
 	return document, nil
 }
@@ -311,6 +377,9 @@ func (s *Service) normalizeTaskInput(roomID string, input TaskInput, updating bo
 	if input.TimeoutSeconds == 0 {
 		input.TimeoutSeconds = 300
 	}
+	if input.RetryInterval == 0 {
+		input.RetryInterval = 60
+	}
 	if input.Parameters == nil {
 		input.Parameters = map[string]interface{}{}
 	}
@@ -324,14 +393,20 @@ func (s *Service) normalizeTaskInput(roomID string, input TaskInput, updating bo
 	if len([]rune(input.Description)) > 300 {
 		fields["description"] = "说明不能超过 300 个字符"
 	}
-	if _, err := cron.ParseStandard(input.Schedule); err != nil {
-		fields["schedule"] = "请输入标准五段 Cron 表达式"
+	if _, err := scheduleParser.Parse(input.Schedule); err != nil {
+		fields["schedule"] = "请输入有效的五段或六段 Cron 表达式"
 	}
 	if _, err := time.LoadLocation(input.Timezone); err != nil || len(input.Timezone) > 64 {
 		fields["timezone"] = "时区名称无效"
 	}
 	if input.TimeoutSeconds < 5 || input.TimeoutSeconds > 3600 {
 		fields["timeoutSeconds"] = "超时必须在 5-3600 秒之间"
+	}
+	if input.RetryTimes < 0 || input.RetryTimes > 10 {
+		fields["retryTimes"] = "重试次数必须在 0-10 之间"
+	}
+	if input.RetryInterval < 1 || input.RetryInterval > 3600 {
+		fields["retryIntervalSeconds"] = "重试间隔必须在 1-3600 秒之间"
 	}
 	if len(input.WorldIDs) > 64 {
 		fields["worldIds"] = "世界数量超过上限"
@@ -342,6 +417,20 @@ func (s *Service) normalizeTaskInput(roomID string, input TaskInput, updating bo
 			fields["worldIds"] = "世界 ID 无效或重复"
 		}
 		seen[worldID] = true
+	}
+	if len(input.Dependencies) > 64 {
+		fields["dependencies"] = "依赖任务数量超过上限"
+	}
+	dependencySeen := make(map[string]bool)
+	for _, dependencyID := range input.Dependencies {
+		if !validID(dependencyID) || dependencySeen[dependencyID] {
+			fields["dependencies"] = "依赖任务 ID 无效或重复"
+			continue
+		}
+		dependencySeen[dependencyID] = true
+		if _, err := s.store.Task(roomID, dependencyID); err != nil {
+			fields["dependencies"] = "依赖任务不存在"
+		}
 	}
 	if updating && !validID(input.ExpectedRevision) {
 		fields["expectedRevision"] = "版本号无效"
@@ -355,6 +444,7 @@ func (s *Service) normalizeTaskInput(roomID string, input TaskInput, updating bo
 func normalizeGroupInput(input GroupInput, updating bool) (GroupInput, error) {
 	input.Name = strings.TrimSpace(input.Name)
 	input.Description = strings.TrimSpace(input.Description)
+	input.Type = normalizeGroupType(input.Type)
 	fields := make(map[string]string)
 	if input.Name == "" || len([]rune(input.Name)) > 80 {
 		fields["name"] = "名称必须为 1-80 个字符"
@@ -379,12 +469,73 @@ func nextRun(task Task, now time.Time) *time.Time {
 	if err != nil {
 		return nil
 	}
-	schedule, err := cron.ParseStandard(task.Schedule)
+	schedule, err := scheduleParser.Parse(task.Schedule)
 	if err != nil {
 		return nil
 	}
 	value := schedule.Next(now.In(location)).UTC()
 	return &value
+}
+
+func normalizeGroupType(value string) string {
+	switch strings.TrimSpace(value) {
+	case "system", "world", "custom":
+		return strings.TrimSpace(value)
+	default:
+		return "custom"
+	}
+}
+
+func (s *Service) validateDependencies(roomID, taskID string, dependencies []string) error {
+	for _, dependencyID := range dependencies {
+		if dependencyID == taskID {
+			return &FieldError{Fields: map[string]string{"dependencies": "任务不能依赖自身"}}
+		}
+	}
+	tasks, err := s.store.Tasks(roomID)
+	if err != nil {
+		return err
+	}
+	graph := make(map[string][]string, len(tasks))
+	for _, task := range tasks {
+		graph[task.ID] = task.Dependencies
+	}
+	graph[taskID] = dependencies
+	visiting, visited := make(map[string]bool), make(map[string]bool)
+	var visit func(string) bool
+	visit = func(id string) bool {
+		if visiting[id] {
+			return true
+		}
+		if visited[id] {
+			return false
+		}
+		visiting[id] = true
+		for _, dependencyID := range graph[id] {
+			if visit(dependencyID) {
+				return true
+			}
+		}
+		visiting[id], visited[id] = false, true
+		return false
+	}
+	if visit(taskID) {
+		return &FieldError{Fields: map[string]string{"dependencies": "任务依赖不能形成循环"}}
+	}
+	return nil
+}
+
+func (s *Service) unsatisfiedDependency(task Task) string {
+	for _, dependencyID := range task.Dependencies {
+		dependency, err := s.store.Task(task.RoomID, dependencyID)
+		if err != nil {
+			return "依赖任务不存在"
+		}
+		if dependency.LastRunAt == nil || dependency.LastStatus != RunSucceeded {
+			return "依赖任务“" + dependency.Name + "”尚未成功执行"
+		}
+	}
+	return ""
 }
 
 func validID(value string) bool {
@@ -435,6 +586,17 @@ func validateDocument(document Document, validateAction func(Task) error, roomID
 		groupNames[strings.ToLower(name)] = true
 	}
 	taskNames := make(map[string]bool)
+	taskKeys := make(map[string]bool)
+	for index, item := range document.Tasks {
+		key := strings.TrimSpace(item.Key)
+		if key == "" {
+			key = fmt.Sprintf("task-%d", index)
+		}
+		if taskKeys[key] {
+			issues = append(issues, ImportIssue{Path: fmt.Sprintf("tasks[%d].key", index), Message: "任务 key 重复"})
+		}
+		taskKeys[key] = true
+	}
 	for index, item := range document.Tasks {
 		path := fmt.Sprintf("tasks[%d]", index)
 		if !groupKeys[item.GroupKey] {
@@ -445,7 +607,12 @@ func validateDocument(document Document, validateAction func(Task) error, roomID
 			issues = append(issues, ImportIssue{Path: path + ".name", Message: "任务名称无效或重复"})
 		}
 		taskNames[strings.ToLower(name)] = true
-		if _, err := cron.ParseStandard(strings.Join(strings.Fields(item.Schedule), " ")); err != nil {
+		for _, dependency := range item.Dependencies {
+			if !taskKeys[dependency] {
+				issues = append(issues, ImportIssue{Path: path + ".dependencies", Message: "引用的依赖任务不存在"})
+			}
+		}
+		if _, err := scheduleParser.Parse(strings.Join(strings.Fields(item.Schedule), " ")); err != nil {
 			issues = append(issues, ImportIssue{Path: path + ".schedule", Message: "Cron 表达式无效"})
 		}
 		if _, err := time.LoadLocation(item.Timezone); err != nil {
@@ -453,6 +620,9 @@ func validateDocument(document Document, validateAction func(Task) error, roomID
 		}
 		if item.TimeoutSeconds < 5 || item.TimeoutSeconds > 3600 {
 			issues = append(issues, ImportIssue{Path: path + ".timeoutSeconds", Message: "超时必须在 5-3600 秒之间"})
+		}
+		if item.RetryTimes < 0 || item.RetryTimes > 10 || (item.RetryInterval != 0 && (item.RetryInterval < 1 || item.RetryInterval > 3600)) {
+			issues = append(issues, ImportIssue{Path: path + ".retry", Message: "重试参数无效"})
 		}
 		task := Task{RoomID: roomID, Action: item.Action, WorldIDs: item.WorldIDs, Parameters: item.Parameters}
 		if err := validateAction(task); err != nil {

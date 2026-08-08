@@ -9,9 +9,11 @@ var (
 	ErrInvalidInput     = errors.New("automation input is invalid")
 	ErrGroupNotFound    = errors.New("automation group not found")
 	ErrTaskNotFound     = errors.New("automation task not found")
+	ErrRunNotFound      = errors.New("automation run not found")
 	ErrGroupNotEmpty    = errors.New("automation group still contains tasks")
 	ErrRevisionConflict = errors.New("automation revision conflict")
 	ErrTaskRunning      = errors.New("automation task is already running")
+	ErrDependencies     = errors.New("automation task dependencies are not satisfied")
 	ErrImportDigest     = errors.New("automation import preview has changed")
 	ErrImportInvalid    = errors.New("automation import document is invalid")
 	ErrUnsafeAction     = errors.New("automation action is not allowed")
@@ -43,6 +45,7 @@ type Group struct {
 	RoomID      string    `json:"roomId"`
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
+	Type        string    `json:"type"`
 	Enabled     bool      `json:"enabled"`
 	TaskCount   int       `json:"taskCount"`
 	Revision    string    `json:"revision"`
@@ -53,6 +56,7 @@ type Group struct {
 type GroupInput struct {
 	Name             string `json:"name"`
 	Description      string `json:"description"`
+	Type             string `json:"type"`
 	Enabled          bool   `json:"enabled"`
 	ExpectedRevision string `json:"expectedRevision"`
 }
@@ -71,6 +75,9 @@ type Task struct {
 	WorldIDs       []string               `json:"worldIds"`
 	Parameters     map[string]interface{} `json:"parameters"`
 	TimeoutSeconds int                    `json:"timeoutSeconds"`
+	RetryTimes     int                    `json:"retryTimes"`
+	RetryInterval  int                    `json:"retryIntervalSeconds"`
+	Dependencies   []string               `json:"dependencies"`
 	NextRunAt      *time.Time             `json:"nextRunAt,omitempty"`
 	LastRunAt      *time.Time             `json:"lastRunAt,omitempty"`
 	LastStatus     RunStatus              `json:"lastStatus,omitempty"`
@@ -91,6 +98,9 @@ type TaskInput struct {
 	WorldIDs         []string               `json:"worldIds"`
 	Parameters       map[string]interface{} `json:"parameters"`
 	TimeoutSeconds   int                    `json:"timeoutSeconds"`
+	RetryTimes       int                    `json:"retryTimes"`
+	RetryInterval    int                    `json:"retryIntervalSeconds"`
+	Dependencies     []string               `json:"dependencies"`
 	ExpectedRevision string                 `json:"expectedRevision"`
 }
 
@@ -128,6 +138,7 @@ type Run struct {
 	StartedAt  *time.Time `json:"startedAt,omitempty"`
 	FinishedAt *time.Time `json:"finishedAt,omitempty"`
 	DurationMs int64      `json:"durationMs"`
+	RetryCount int        `json:"retryCount"`
 	CreatedAt  time.Time  `json:"createdAt"`
 }
 
@@ -135,8 +146,20 @@ type RunFilter struct {
 	TaskID  string
 	GroupID string
 	Status  RunStatus
+	StartAt *time.Time
+	EndAt   *time.Time
 	Limit   int
 	Offset  int
+}
+
+type ClearRunsInput struct {
+	KeepDays int       `json:"keepDays"`
+	TaskID   string    `json:"taskId"`
+	Status   RunStatus `json:"status"`
+}
+
+type ClearRunsResult struct {
+	DeletedCount int `json:"deletedCount"`
 }
 
 type RunList struct {
@@ -187,10 +210,12 @@ type DocumentGroup struct {
 	Key         string `json:"key"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	Type        string `json:"type"`
 	Enabled     bool   `json:"enabled"`
 }
 
 type DocumentTask struct {
+	Key            string                 `json:"key"`
 	GroupKey       string                 `json:"groupKey"`
 	Name           string                 `json:"name"`
 	Description    string                 `json:"description"`
@@ -201,6 +226,9 @@ type DocumentTask struct {
 	WorldIDs       []string               `json:"worldIds"`
 	Parameters     map[string]interface{} `json:"parameters"`
 	TimeoutSeconds int                    `json:"timeoutSeconds"`
+	RetryTimes     int                    `json:"retryTimes"`
+	RetryInterval  int                    `json:"retryIntervalSeconds"`
+	Dependencies   []string               `json:"dependencies"`
 }
 
 type ImportIssue struct {

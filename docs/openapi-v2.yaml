@@ -1816,10 +1816,33 @@ paths:
         - { name: taskId, in: query, schema: { type: string } }
         - { name: groupId, in: query, schema: { type: string } }
         - { name: status, in: query, schema: { $ref: "#/components/schemas/AutomationRunStatus" } }
+        - { name: startDate, in: query, schema: { type: string, format: date } }
+        - { name: endDate, in: query, schema: { type: string, format: date } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
         - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
       responses:
         "200": { description: Automation run records, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationRunListEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/automation/runs/{runId}:
+    parameters:
+      - { $ref: "#/components/parameters/RoomID" }
+      - { name: runId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Automation]
+      operationId: getAutomationRun
+      responses:
+        "200": { description: Automation run record, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationRunEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /rooms/{roomId}/automation/runs/actions/clear:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Automation]
+      operationId: clearAutomationRuns
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationClearRunsInput" } } } }
+      responses:
+        "200": { description: Deleted automation run count, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationClearRunsResultEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/automation/stats:
     parameters: [{ $ref: "#/components/parameters/RoomID" }]
@@ -4005,12 +4028,13 @@ components:
     AutomationGroup:
       type: object
       additionalProperties: false
-      required: [id, roomId, name, description, enabled, taskCount, revision, createdAt, updatedAt]
+      required: [id, roomId, name, description, type, enabled, taskCount, revision, createdAt, updatedAt]
       properties:
         id: { type: string, format: uuid }
         roomId: { type: string }
         name: { type: string }
         description: { type: string }
+        type: { type: string, enum: [system, world, custom] }
         enabled: { type: boolean }
         taskCount: { type: integer, minimum: 0 }
         revision: { type: string, format: uuid }
@@ -4019,10 +4043,11 @@ components:
     AutomationGroupInput:
       type: object
       additionalProperties: false
-      required: [name, description, enabled, expectedRevision]
+      required: [name, description, type, enabled, expectedRevision]
       properties:
         name: { type: string, minLength: 1, maxLength: 80 }
         description: { type: string, maxLength: 300 }
+        type: { type: string, enum: [system, world, custom] }
         enabled: { type: boolean }
         expectedRevision: { type: string }
     AutomationGroupEnvelope:
@@ -4048,7 +4073,7 @@ components:
     AutomationTask:
       type: object
       additionalProperties: false
-      required: [id, roomId, groupId, groupName, name, description, enabled, schedule, timezone, action, worldIds, parameters, timeoutSeconds, revision, createdAt, updatedAt]
+      required: [id, roomId, groupId, groupName, name, description, enabled, schedule, timezone, action, worldIds, parameters, timeoutSeconds, retryTimes, retryIntervalSeconds, dependencies, revision, createdAt, updatedAt]
       properties:
         id: { type: string, format: uuid }
         roomId: { type: string }
@@ -4063,6 +4088,9 @@ components:
         worldIds: { type: array, items: { type: string } }
         parameters: { type: object, additionalProperties: true }
         timeoutSeconds: { type: integer, minimum: 5, maximum: 3600 }
+        retryTimes: { type: integer, minimum: 0, maximum: 10 }
+        retryIntervalSeconds: { type: integer, minimum: 1, maximum: 3600 }
+        dependencies: { type: array, maxItems: 64, items: { type: string, format: uuid } }
         nextRunAt: { type: string, format: date-time }
         lastRunAt: { type: string, format: date-time }
         lastStatus: { $ref: "#/components/schemas/AutomationRunStatus" }
@@ -4073,7 +4101,7 @@ components:
     AutomationTaskInput:
       type: object
       additionalProperties: false
-      required: [groupId, name, description, enabled, schedule, timezone, action, worldIds, parameters, timeoutSeconds, expectedRevision]
+      required: [groupId, name, description, enabled, schedule, timezone, action, worldIds, parameters, timeoutSeconds, retryTimes, retryIntervalSeconds, dependencies, expectedRevision]
       properties:
         groupId: { type: string, format: uuid }
         name: { type: string, minLength: 1, maxLength: 80 }
@@ -4085,6 +4113,9 @@ components:
         worldIds: { type: array, maxItems: 64, items: { type: string } }
         parameters: { type: object, additionalProperties: true }
         timeoutSeconds: { type: integer, minimum: 5, maximum: 3600 }
+        retryTimes: { type: integer, minimum: 0, maximum: 10 }
+        retryIntervalSeconds: { type: integer, minimum: 1, maximum: 3600 }
+        dependencies: { type: array, maxItems: 64, items: { type: string, format: uuid } }
         expectedRevision: { type: string }
     AutomationTaskEnvelope:
       type: object
@@ -4112,7 +4143,7 @@ components:
     AutomationRun:
       type: object
       additionalProperties: false
-      required: [id, taskId, taskName, groupId, groupName, roomId, action, trigger, status, durationMs, createdAt]
+      required: [id, taskId, taskName, groupId, groupName, roomId, action, trigger, status, durationMs, retryCount, createdAt]
       properties:
         id: { type: string, format: uuid }
         taskId: { type: string, format: uuid }
@@ -4129,7 +4160,15 @@ components:
         startedAt: { type: string, format: date-time }
         finishedAt: { type: string, format: date-time }
         durationMs: { type: integer, format: int64, minimum: 0 }
+        retryCount: { type: integer, minimum: 0, maximum: 10 }
         createdAt: { type: string, format: date-time }
+    AutomationRunEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AutomationRun" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     AutomationRunList:
       type: object
       required: [items, total, limit, offset]
@@ -4143,6 +4182,30 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/AutomationRunList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AutomationClearRunsInput:
+      type: object
+      additionalProperties: false
+      required: [keepDays, taskId, status]
+      properties:
+        keepDays: { type: integer, minimum: 1, maximum: 3650 }
+        taskId: { type: string }
+        status:
+          oneOf:
+            - { $ref: "#/components/schemas/AutomationRunStatus" }
+            - { type: string, enum: [""] }
+    AutomationClearRunsResult:
+      type: object
+      additionalProperties: false
+      required: [deletedCount]
+      properties:
+        deletedCount: { type: integer, minimum: 0 }
+    AutomationClearRunsResultEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AutomationClearRunsResult" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     AutomationDailyStat:
@@ -4175,16 +4238,18 @@ components:
         meta: { $ref: "#/components/schemas/Meta" }
     AutomationDocumentGroup:
       type: object
-      required: [key, name, description, enabled]
+      required: [key, name, description, type, enabled]
       properties:
         key: { type: string }
         name: { type: string }
         description: { type: string }
+        type: { type: string, enum: [system, world, custom] }
         enabled: { type: boolean }
     AutomationDocumentTask:
       type: object
-      required: [groupKey, name, description, enabled, schedule, timezone, action, worldIds, parameters, timeoutSeconds]
+      required: [key, groupKey, name, description, enabled, schedule, timezone, action, worldIds, parameters, timeoutSeconds, retryTimes, retryIntervalSeconds, dependencies]
       properties:
+        key: { type: string }
         groupKey: { type: string }
         name: { type: string }
         description: { type: string }
@@ -4195,6 +4260,9 @@ components:
         worldIds: { type: array, items: { type: string } }
         parameters: { type: object, additionalProperties: true }
         timeoutSeconds: { type: integer }
+        retryTimes: { type: integer, minimum: 0, maximum: 10 }
+        retryIntervalSeconds: { type: integer, minimum: 1, maximum: 3600 }
+        dependencies: { type: array, items: { type: string } }
     AutomationDocument:
       type: object
       additionalProperties: false

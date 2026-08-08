@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"dont/internal/automation"
 	"dont/internal/jobs"
@@ -23,6 +24,8 @@ type AutomationService interface {
 	UpdateTask(string, string, automation.TaskInput) (automation.Task, error)
 	DeleteTask(string, string) error
 	Runs(string, automation.RunFilter) (automation.RunList, error)
+	Run(string, string) (automation.Run, error)
+	ClearRuns(string, automation.ClearRunsInput) (automation.ClearRunsResult, error)
 	Stats(string, int) (automation.Stats, error)
 	RunTask(string, string, automation.Trigger) (jobs.Job, error)
 	Export(string) (automation.Document, error)
@@ -57,6 +60,8 @@ func (h *AutomationHandler) Register(v2 *gin.RouterGroup) {
 	root.DELETE("/tasks/:taskId", h.deleteTask)
 	root.POST("/tasks/:taskId/actions/run", h.runTask)
 	root.GET("/runs", h.runs)
+	root.GET("/runs/:runId", h.run)
+	root.POST("/runs/actions/clear", h.clearRuns)
 	root.GET("/stats", h.stats)
 	root.GET("/export", h.export)
 	root.POST("/imports/preview", h.previewImport)
@@ -196,12 +201,54 @@ func (h *AutomationHandler) runs(c *gin.Context) {
 		automationFailure(c, automation.ErrInvalidInput)
 		return
 	}
-	value, err := h.service.Runs(c.Param("roomId"), automation.RunFilter{TaskID: c.Query("taskId"), GroupID: c.Query("groupId"), Status: automation.RunStatus(c.Query("status")), Limit: limit, Offset: offset})
+	startAt, startErr := parseAutomationDate(c.Query("startDate"), false)
+	endAt, endErr := parseAutomationDate(c.Query("endDate"), true)
+	if startErr != nil || endErr != nil {
+		automationFailure(c, automation.ErrInvalidInput)
+		return
+	}
+	value, err := h.service.Runs(c.Param("roomId"), automation.RunFilter{TaskID: c.Query("taskId"), GroupID: c.Query("groupId"), Status: automation.RunStatus(c.Query("status")), StartAt: startAt, EndAt: endAt, Limit: limit, Offset: offset})
 	if err != nil {
 		automationFailure(c, err)
 		return
 	}
 	Success(c, http.StatusOK, value)
+}
+
+func (h *AutomationHandler) run(c *gin.Context) {
+	value, err := h.service.Run(c.Param("roomId"), c.Param("runId"))
+	if err != nil {
+		automationFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
+}
+
+func (h *AutomationHandler) clearRuns(c *gin.Context) {
+	var input automation.ClearRunsInput
+	if !bindAutomationJSON(c, &input) {
+		return
+	}
+	value, err := h.service.ClearRuns(c.Param("roomId"), input)
+	if err != nil {
+		automationFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
+}
+
+func parseAutomationDate(value string, exclusiveEnd bool) (*time.Time, error) {
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return nil, err
+	}
+	if exclusiveEnd {
+		parsed = parsed.AddDate(0, 0, 1)
+	}
+	return &parsed, nil
 }
 
 func (h *AutomationHandler) stats(c *gin.Context) {
@@ -282,7 +329,7 @@ func automationFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_AUTOMATION_INPUT", "自动化参数无效", fieldErr.Fields)
 	case errors.Is(err, automation.ErrInvalidInput), errors.Is(err, automation.ErrImportInvalid), errors.Is(err, automation.ErrUnsafeAction):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_AUTOMATION_INPUT", "自动化参数无效或动作不允许", nil)
-	case errors.Is(err, automation.ErrGroupNotFound), errors.Is(err, automation.ErrTaskNotFound):
+	case errors.Is(err, automation.ErrGroupNotFound), errors.Is(err, automation.ErrTaskNotFound), errors.Is(err, automation.ErrRunNotFound):
 		NotFound(c)
 	case errors.Is(err, automation.ErrGroupNotEmpty):
 		Failure(c, http.StatusConflict, "AUTOMATION_GROUP_NOT_EMPTY", "请先移动或删除组内任务", nil)
@@ -290,6 +337,8 @@ func automationFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusConflict, "AUTOMATION_REVISION_CONFLICT", "自动化内容已被其他请求修改，请刷新后重试", nil)
 	case errors.Is(err, automation.ErrTaskRunning):
 		Failure(c, http.StatusConflict, "AUTOMATION_TASK_RUNNING", "该任务已有一轮正在执行", nil)
+	case errors.Is(err, automation.ErrDependencies):
+		Failure(c, http.StatusConflict, "AUTOMATION_DEPENDENCIES", "任务依赖尚未全部成功执行", nil)
 	case errors.Is(err, automation.ErrImportDigest):
 		Failure(c, http.StatusConflict, "AUTOMATION_IMPORT_CHANGED", "导入内容与预览版本不一致", nil)
 	case errors.Is(err, rooms.ErrRoomNotFound):

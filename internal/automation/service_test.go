@@ -9,6 +9,7 @@ import (
 	"dont/internal/jobs"
 	"dont/internal/rooms"
 
+	"github.com/google/uuid"
 	"github.com/jinzhu/gorm"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -23,13 +24,16 @@ func (automationTestCatalog) Room(id string) (rooms.Room, error) {
 }
 
 type automationTestExecutor struct {
-	started chan struct{}
-	release chan struct{}
-	err     error
+	started  chan struct{}
+	release  chan struct{}
+	err      error
+	failures int
+	attempts int
 }
 
 func (e *automationTestExecutor) Validate(Task) error { return nil }
 func (e *automationTestExecutor) Execute(ctx context.Context, _ Task, _ string) (ExecutionResult, error) {
+	e.attempts++
 	if e.started != nil {
 		select {
 		case e.started <- struct{}{}:
@@ -42,6 +46,10 @@ func (e *automationTestExecutor) Execute(ctx context.Context, _ Task, _ string) 
 		case <-ctx.Done():
 			return ExecutionResult{}, ctx.Err()
 		}
+	}
+	if e.failures > 0 {
+		e.failures--
+		return ExecutionResult{}, errors.New("temporary failure")
 	}
 	return ExecutionResult{Message: "action complete"}, e.err
 }
@@ -76,6 +84,55 @@ func newAutomationTestService(t *testing.T, executor ActionExecutor) (*Service, 
 	service.now = func() time.Time { return now }
 	store.now = service.now
 	return service, store, jobService
+}
+
+func TestMigrateLegacyAutomationTablesPreservesData(t *testing.T) {
+	db, err := gorm.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SingularTable(true)
+	db.LogMode(false)
+	db.DB().SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+
+	legacySchema := []string{
+		`CREATE TABLE legacy_automation_group (id char(36) PRIMARY KEY, room_id varchar(255) NOT NULL, name varchar(80) NOT NULL, description varchar(300) NOT NULL, enabled bool NOT NULL, revision char(36) NOT NULL, created_at datetime, updated_at datetime)`,
+		`CREATE TABLE legacy_automation_task (id char(36) PRIMARY KEY, room_id varchar(255) NOT NULL, group_id char(36) NOT NULL, name varchar(80) NOT NULL, description varchar(300) NOT NULL, enabled bool NOT NULL, schedule varchar(128) NOT NULL, timezone varchar(64) NOT NULL, action varchar(64) NOT NULL, world_ids text NOT NULL, parameters text NOT NULL, timeout_seconds integer NOT NULL, last_run_at datetime, last_status varchar(20), last_job_id char(36), revision char(36) NOT NULL, created_at datetime, updated_at datetime)`,
+		`CREATE TABLE legacy_automation_run (id char(36) PRIMARY KEY, task_id char(36) NOT NULL, task_name varchar(80) NOT NULL, group_id char(36) NOT NULL, group_name varchar(80) NOT NULL, room_id varchar(255) NOT NULL, action varchar(64) NOT NULL, trigger varchar(20) NOT NULL, status varchar(20) NOT NULL, job_id char(36), output text, error text, started_at datetime, finished_at datetime, duration_ms bigint, created_at datetime NOT NULL)`,
+	}
+	for _, statement := range legacySchema {
+		if err := db.Exec(statement).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC)
+	if err := db.Exec(`INSERT INTO legacy_automation_group (id, room_id, name, description, enabled, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, "group", "room", "Legacy", "kept", true, "group-revision", now, now).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`INSERT INTO legacy_automation_task (id, room_id, group_id, name, description, enabled, schedule, timezone, action, world_ids, parameters, timeout_seconds, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, "task", "room", "group", "Legacy task", "kept", true, "0 10 * * *", "Asia/Shanghai", string(ActionWorldStateRefresh), "[]", "{}", 30, "task-revision", now, now).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`INSERT INTO legacy_automation_run (id, task_id, task_name, group_id, group_name, room_id, action, trigger, status, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, "run", "task", "Legacy task", "group", "Legacy", "room", string(ActionWorldStateRefresh), string(TriggerManual), string(RunSucceeded), 25, now).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewStore(db, "legacy_")
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	group, err := store.Group("room", "group")
+	if err != nil || group.Type != "custom" || group.Description != "kept" {
+		t.Fatalf("migrated group=%#v err=%v", group, err)
+	}
+	task, err := store.Task("room", "task")
+	if err != nil || task.RetryTimes != 0 || task.RetryInterval != 60 || len(task.Dependencies) != 0 || task.Description != "kept" {
+		t.Fatalf("migrated task=%#v err=%v", task, err)
+	}
+	run, err := store.Run("room", "run")
+	if err != nil || run.RetryCount != 0 || run.DurationMs != 25 {
+		t.Fatalf("migrated run=%#v err=%v", run, err)
+	}
 }
 
 func createAutomationFixture(t *testing.T, service *Service) (Group, Task) {
@@ -185,6 +242,62 @@ func TestImportPreviewDigestAndReplace(t *testing.T) {
 	exported, err := service.Export("room")
 	if err != nil || len(exported.Groups) != 1 || len(exported.Tasks) != 1 || exported.Tasks[0].Action != ActionWorldStateRefresh {
 		t.Fatalf("export=%#v err=%v", exported, err)
+	}
+}
+
+func TestSixFieldScheduleDependenciesRetryAndRunCleanup(t *testing.T) {
+	executor := &automationTestExecutor{}
+	service, store, jobService := newAutomationTestService(t, executor)
+	group, dependency := createAutomationFixture(t, service)
+	task, err := service.CreateTask("room", TaskInput{
+		GroupID: group.ID, Name: "Dependent task", Enabled: true,
+		Schedule: "0 0 10 * * *", Timezone: "Asia/Shanghai",
+		Action: ActionWorldStateRefresh, Parameters: map[string]interface{}{},
+		TimeoutSeconds: 30, RetryTimes: 1, RetryInterval: 1,
+		Dependencies: []string{dependency.ID},
+	})
+	if err != nil || task.NextRunAt == nil {
+		t.Fatalf("six-field task=%#v err=%v", task, err)
+	}
+	if _, err := service.RunTask("room", task.ID, TriggerManual); !errors.Is(err, ErrDependencies) {
+		t.Fatalf("unsatisfied dependency error=%v", err)
+	}
+	job, err := service.RunTask("room", dependency.ID, TriggerManual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitAutomationJob(t, jobService, job.ID)
+	executor.failures = 1
+	job, err = service.RunTask("room", task.ID, TriggerManual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitAutomationJob(t, jobService, job.ID)
+	runs, err := service.Runs("room", RunFilter{TaskID: task.ID, Limit: 25})
+	var successful *Run
+	for index := range runs.Items {
+		if runs.Items[index].Status == RunSucceeded {
+			successful = &runs.Items[index]
+		}
+	}
+	if err != nil || len(runs.Items) != 2 || successful == nil || successful.RetryCount != 1 {
+		t.Fatalf("dependent runs=%#v err=%v", runs, err)
+	}
+	detail, err := service.Run("room", successful.ID)
+	if err != nil || detail.ID != successful.ID {
+		t.Fatalf("run detail=%#v err=%v", detail, err)
+	}
+	old := service.now().AddDate(0, 0, -40)
+	if _, err := store.CreateRun(Run{ID: uuid.NewString(), TaskID: task.ID, TaskName: task.Name, GroupID: group.ID, GroupName: group.Name, RoomID: "room", Action: task.Action, Trigger: TriggerManual, Status: RunFailed, CreatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := service.ClearRuns("room", ClearRunsInput{KeepDays: 30, TaskID: task.ID, Status: RunFailed})
+	if err != nil || cleared.DeletedCount != 1 {
+		t.Fatalf("clear=%#v err=%v", cleared, err)
+	}
+	update := TaskInput{GroupID: group.ID, Name: task.Name, Enabled: true, Schedule: task.Schedule, Timezone: task.Timezone, Action: task.Action, Parameters: map[string]interface{}{}, TimeoutSeconds: 30, RetryInterval: 60, Dependencies: []string{task.ID}, ExpectedRevision: task.Revision}
+	if _, err := service.UpdateTask("room", task.ID, update); err == nil {
+		t.Fatal("self dependency was accepted")
 	}
 }
 

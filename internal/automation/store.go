@@ -15,6 +15,7 @@ type groupRecord struct {
 	RoomID      string `gorm:"type:varchar(255);not null;unique_index:idx_automation_group_room_name;index"`
 	Name        string `gorm:"type:varchar(80);not null;unique_index:idx_automation_group_room_name"`
 	Description string `gorm:"type:varchar(300);not null"`
+	Type        string `gorm:"type:varchar(20);not null;default:'custom'"`
 	Enabled     bool   `gorm:"not null;index"`
 	Revision    string `gorm:"type:char(36);not null"`
 	CreatedAt   time.Time
@@ -34,6 +35,9 @@ type taskRecord struct {
 	WorldIDs       string `gorm:"type:text;not null"`
 	Parameters     string `gorm:"type:text;not null"`
 	TimeoutSeconds int    `gorm:"not null"`
+	RetryTimes     int    `gorm:"not null;default:0"`
+	RetryInterval  int    `gorm:"not null;default:60"`
+	Dependencies   string `gorm:"type:text;not null;default:'[]'"`
 	LastRunAt      *time.Time
 	LastStatus     string `gorm:"type:varchar(20)"`
 	LastJobID      string `gorm:"type:char(36)"`
@@ -58,6 +62,7 @@ type runRecord struct {
 	StartedAt  *time.Time
 	FinishedAt *time.Time
 	DurationMs int64
+	RetryCount int
 	CreatedAt  time.Time `gorm:"not null;index"`
 }
 
@@ -119,7 +124,7 @@ func (s *Store) Group(roomID, groupID string) (Group, error) {
 }
 
 func (s *Store) CreateGroup(group Group) (Group, error) {
-	record := groupRecord{ID: group.ID, RoomID: group.RoomID, Name: group.Name, Description: group.Description, Enabled: group.Enabled, Revision: group.Revision, CreatedAt: group.CreatedAt, UpdatedAt: group.UpdatedAt}
+	record := groupRecord{ID: group.ID, RoomID: group.RoomID, Name: group.Name, Description: group.Description, Type: group.Type, Enabled: group.Enabled, Revision: group.Revision, CreatedAt: group.CreatedAt, UpdatedAt: group.UpdatedAt}
 	if err := s.db.Table(s.groupsTable).Create(&record).Error; err != nil {
 		return Group{}, err
 	}
@@ -128,7 +133,7 @@ func (s *Store) CreateGroup(group Group) (Group, error) {
 
 func (s *Store) UpdateGroup(group Group, expectedRevision string) (Group, error) {
 	result := s.db.Table(s.groupsTable).Where("room_id = ? AND id = ? AND revision = ?", group.RoomID, group.ID, expectedRevision).Updates(map[string]interface{}{
-		"name": group.Name, "description": group.Description, "enabled": group.Enabled, "revision": group.Revision, "updated_at": group.UpdatedAt,
+		"name": group.Name, "description": group.Description, "type": group.Type, "enabled": group.Enabled, "revision": group.Revision, "updated_at": group.UpdatedAt,
 	})
 	if result.Error != nil {
 		return Group{}, result.Error
@@ -219,7 +224,8 @@ func (s *Store) UpdateTask(task Task, expectedRevision string) (Task, error) {
 	result := s.db.Table(s.tasksTable).Where("room_id = ? AND id = ? AND revision = ?", task.RoomID, task.ID, expectedRevision).Updates(map[string]interface{}{
 		"group_id": record.GroupID, "name": record.Name, "description": record.Description, "enabled": record.Enabled,
 		"schedule": record.Schedule, "timezone": record.Timezone, "action": record.Action, "world_ids": record.WorldIDs,
-		"parameters": record.Parameters, "timeout_seconds": record.TimeoutSeconds, "revision": record.Revision, "updated_at": record.UpdatedAt,
+		"parameters": record.Parameters, "timeout_seconds": record.TimeoutSeconds, "retry_times": record.RetryTimes,
+		"retry_interval": record.RetryInterval, "dependencies": record.Dependencies, "revision": record.Revision, "updated_at": record.UpdatedAt,
 	})
 	if result.Error != nil {
 		return Task{}, result.Error
@@ -245,7 +251,7 @@ func (s *Store) DeleteTask(roomID, taskID string) error {
 }
 
 func (s *Store) CreateRun(run Run) (Run, error) {
-	record := runRecord{ID: run.ID, TaskID: run.TaskID, TaskName: run.TaskName, GroupID: run.GroupID, GroupName: run.GroupName, RoomID: run.RoomID, Action: string(run.Action), Trigger: string(run.Trigger), Status: string(run.Status), JobID: run.JobID, Output: run.Output, Error: run.Error, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt, DurationMs: run.DurationMs, CreatedAt: run.CreatedAt.UTC()}
+	record := runRecord{ID: run.ID, TaskID: run.TaskID, TaskName: run.TaskName, GroupID: run.GroupID, GroupName: run.GroupName, RoomID: run.RoomID, Action: string(run.Action), Trigger: string(run.Trigger), Status: string(run.Status), JobID: run.JobID, Output: run.Output, Error: run.Error, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt, DurationMs: run.DurationMs, RetryCount: run.RetryCount, CreatedAt: run.CreatedAt.UTC()}
 	if err := s.db.Table(s.runsTable).Create(&record).Error; err != nil {
 		return Run{}, err
 	}
@@ -260,7 +266,7 @@ func (s *Store) StartRun(runID string, startedAt time.Time) error {
 	return s.db.Table(s.runsTable).Where("id = ?", runID).Updates(map[string]interface{}{"status": string(RunRunning), "started_at": startedAt.UTC()}).Error
 }
 
-func (s *Store) FinishRun(runID string, status RunStatus, output, errorMessage string, finishedAt time.Time) error {
+func (s *Store) FinishRun(runID string, status RunStatus, output, errorMessage string, retryCount int, finishedAt time.Time) error {
 	var record runRecord
 	if err := s.db.Table(s.runsTable).Where("id = ?", runID).First(&record).Error; err != nil {
 		return err
@@ -274,7 +280,7 @@ func (s *Store) FinishRun(runID string, status RunStatus, output, errorMessage s
 	if tx.Error != nil {
 		return tx.Error
 	}
-	if err := tx.Table(s.runsTable).Where("id = ?", runID).Updates(map[string]interface{}{"status": string(status), "output": output, "error": errorMessage, "finished_at": finishedAt.UTC(), "duration_ms": duration}).Error; err != nil {
+	if err := tx.Table(s.runsTable).Where("id = ?", runID).Updates(map[string]interface{}{"status": string(status), "output": output, "error": errorMessage, "finished_at": finishedAt.UTC(), "duration_ms": duration, "retry_count": retryCount}).Error; err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -303,6 +309,12 @@ func (s *Store) Runs(roomID string, filter RunFilter) (RunList, error) {
 	if filter.Status != "" {
 		query = query.Where("status = ?", filter.Status)
 	}
+	if filter.StartAt != nil {
+		query = query.Where("created_at >= ?", filter.StartAt.UTC())
+	}
+	if filter.EndAt != nil {
+		query = query.Where("created_at < ?", filter.EndAt.UTC())
+	}
 	var total int
 	if err := query.Count(&total).Error; err != nil {
 		return RunList{}, err
@@ -316,6 +328,30 @@ func (s *Store) Runs(roomID string, filter RunFilter) (RunList, error) {
 		items = append(items, runFromRecord(record))
 	}
 	return RunList{Items: items, Total: total, Limit: filter.Limit, Offset: filter.Offset}, nil
+}
+
+func (s *Store) Run(roomID, runID string) (Run, error) {
+	var record runRecord
+	result := s.db.Table(s.runsTable).Where("room_id = ? AND id = ?", roomID, runID).First(&record)
+	if gorm.IsRecordNotFoundError(result.Error) {
+		return Run{}, ErrRunNotFound
+	}
+	if result.Error != nil {
+		return Run{}, result.Error
+	}
+	return runFromRecord(record), nil
+}
+
+func (s *Store) ClearRuns(roomID string, before time.Time, taskID string, status RunStatus) (int, error) {
+	query := s.db.Table(s.runsTable).Where("room_id = ? AND created_at < ?", roomID, before.UTC())
+	if taskID != "" {
+		query = query.Where("task_id = ?", taskID)
+	}
+	if status != "" {
+		query = query.Where("status = ?", status)
+	}
+	result := query.Delete(&runRecord{})
+	return int(result.RowsAffected), result.Error
 }
 
 func (s *Store) Stats(roomID string, since time.Time) (Stats, error) {
@@ -390,12 +426,20 @@ func (s *Store) ImportDocument(roomID string, document Document, replace bool, n
 	for _, item := range document.Groups {
 		id := uuid.NewString()
 		groupIDs[item.Key] = id
-		record := groupRecord{ID: id, RoomID: roomID, Name: strings.TrimSpace(item.Name), Description: strings.TrimSpace(item.Description), Enabled: item.Enabled, Revision: uuid.NewString(), CreatedAt: now.UTC(), UpdatedAt: now.UTC()}
+		record := groupRecord{ID: id, RoomID: roomID, Name: strings.TrimSpace(item.Name), Description: strings.TrimSpace(item.Description), Type: normalizeGroupType(item.Type), Enabled: item.Enabled, Revision: uuid.NewString(), CreatedAt: now.UTC(), UpdatedAt: now.UTC()}
 		if err := tx.Table(s.groupsTable).Create(&record).Error; err != nil {
 			return rollback(err)
 		}
 	}
-	for _, item := range document.Tasks {
+	taskIDs := make(map[string]string, len(document.Tasks))
+	for index, item := range document.Tasks {
+		key := strings.TrimSpace(item.Key)
+		if key == "" {
+			key = fmt.Sprintf("task-%d", index)
+		}
+		taskIDs[key] = uuid.NewString()
+	}
+	for index, item := range document.Tasks {
 		worldIDs, err := json.Marshal(item.WorldIDs)
 		if err != nil {
 			return rollback(err)
@@ -404,7 +448,23 @@ func (s *Store) ImportDocument(roomID string, document Document, replace bool, n
 		if err != nil {
 			return rollback(err)
 		}
-		record := taskRecord{ID: uuid.NewString(), RoomID: roomID, GroupID: groupIDs[item.GroupKey], Name: strings.TrimSpace(item.Name), Description: strings.TrimSpace(item.Description), Enabled: item.Enabled, Schedule: strings.Join(strings.Fields(item.Schedule), " "), Timezone: item.Timezone, Action: string(item.Action), WorldIDs: string(worldIDs), Parameters: string(parameters), TimeoutSeconds: item.TimeoutSeconds, Revision: uuid.NewString(), CreatedAt: now.UTC(), UpdatedAt: now.UTC()}
+		dependencyIDs := make([]string, 0, len(item.Dependencies))
+		for _, dependency := range item.Dependencies {
+			dependencyIDs = append(dependencyIDs, taskIDs[dependency])
+		}
+		dependencies, err := json.Marshal(dependencyIDs)
+		if err != nil {
+			return rollback(err)
+		}
+		key := strings.TrimSpace(item.Key)
+		if key == "" {
+			key = fmt.Sprintf("task-%d", index)
+		}
+		retryInterval := item.RetryInterval
+		if retryInterval == 0 {
+			retryInterval = 60
+		}
+		record := taskRecord{ID: taskIDs[key], RoomID: roomID, GroupID: groupIDs[item.GroupKey], Name: strings.TrimSpace(item.Name), Description: strings.TrimSpace(item.Description), Enabled: item.Enabled, Schedule: strings.Join(strings.Fields(item.Schedule), " "), Timezone: item.Timezone, Action: string(item.Action), WorldIDs: string(worldIDs), Parameters: string(parameters), TimeoutSeconds: item.TimeoutSeconds, RetryTimes: item.RetryTimes, RetryInterval: retryInterval, Dependencies: string(dependencies), Revision: uuid.NewString(), CreatedAt: now.UTC(), UpdatedAt: now.UTC()}
 		if err := tx.Table(s.tasksTable).Create(&record).Error; err != nil {
 			return rollback(err)
 		}
@@ -430,17 +490,23 @@ func (s *Store) tasksFromRecords(records []taskRecord) ([]Task, error) {
 func (s *Store) taskFromRecord(record taskRecord) (Task, error) {
 	var worldIDs []string
 	var parameters map[string]interface{}
+	var dependencies []string
 	if err := json.Unmarshal([]byte(record.WorldIDs), &worldIDs); err != nil {
 		return Task{}, err
 	}
 	if err := json.Unmarshal([]byte(record.Parameters), &parameters); err != nil {
 		return Task{}, err
 	}
+	if record.Dependencies != "" {
+		if err := json.Unmarshal([]byte(record.Dependencies), &dependencies); err != nil {
+			return Task{}, err
+		}
+	}
 	var group groupRecord
 	if err := s.db.Table(s.groupsTable).Where("id = ?", record.GroupID).First(&group).Error; err != nil {
 		return Task{}, err
 	}
-	return Task{ID: record.ID, RoomID: record.RoomID, GroupID: record.GroupID, GroupName: group.Name, Name: record.Name, Description: record.Description, Enabled: record.Enabled, Schedule: record.Schedule, Timezone: record.Timezone, Action: Action(record.Action), WorldIDs: worldIDs, Parameters: parameters, TimeoutSeconds: record.TimeoutSeconds, LastRunAt: utcPointer(record.LastRunAt), LastStatus: RunStatus(record.LastStatus), LastJobID: record.LastJobID, Revision: record.Revision, CreatedAt: record.CreatedAt.UTC(), UpdatedAt: record.UpdatedAt.UTC()}, nil
+	return Task{ID: record.ID, RoomID: record.RoomID, GroupID: record.GroupID, GroupName: group.Name, Name: record.Name, Description: record.Description, Enabled: record.Enabled, Schedule: record.Schedule, Timezone: record.Timezone, Action: Action(record.Action), WorldIDs: worldIDs, Parameters: parameters, TimeoutSeconds: record.TimeoutSeconds, RetryTimes: record.RetryTimes, RetryInterval: record.RetryInterval, Dependencies: dependencies, LastRunAt: utcPointer(record.LastRunAt), LastStatus: RunStatus(record.LastStatus), LastJobID: record.LastJobID, Revision: record.Revision, CreatedAt: record.CreatedAt.UTC(), UpdatedAt: record.UpdatedAt.UTC()}, nil
 }
 
 func recordFromTask(task Task) (taskRecord, error) {
@@ -452,15 +518,19 @@ func recordFromTask(task Task) (taskRecord, error) {
 	if err != nil {
 		return taskRecord{}, err
 	}
-	return taskRecord{ID: task.ID, RoomID: task.RoomID, GroupID: task.GroupID, Name: task.Name, Description: task.Description, Enabled: task.Enabled, Schedule: task.Schedule, Timezone: task.Timezone, Action: string(task.Action), WorldIDs: string(worldIDs), Parameters: string(parameters), TimeoutSeconds: task.TimeoutSeconds, LastRunAt: task.LastRunAt, LastStatus: string(task.LastStatus), LastJobID: task.LastJobID, Revision: task.Revision, CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt}, nil
+	dependencies, err := json.Marshal(task.Dependencies)
+	if err != nil {
+		return taskRecord{}, err
+	}
+	return taskRecord{ID: task.ID, RoomID: task.RoomID, GroupID: task.GroupID, Name: task.Name, Description: task.Description, Enabled: task.Enabled, Schedule: task.Schedule, Timezone: task.Timezone, Action: string(task.Action), WorldIDs: string(worldIDs), Parameters: string(parameters), TimeoutSeconds: task.TimeoutSeconds, RetryTimes: task.RetryTimes, RetryInterval: task.RetryInterval, Dependencies: string(dependencies), LastRunAt: task.LastRunAt, LastStatus: string(task.LastStatus), LastJobID: task.LastJobID, Revision: task.Revision, CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt}, nil
 }
 
 func groupFromRecord(record groupRecord, taskCount int) Group {
-	return Group{ID: record.ID, RoomID: record.RoomID, Name: record.Name, Description: record.Description, Enabled: record.Enabled, TaskCount: taskCount, Revision: record.Revision, CreatedAt: record.CreatedAt.UTC(), UpdatedAt: record.UpdatedAt.UTC()}
+	return Group{ID: record.ID, RoomID: record.RoomID, Name: record.Name, Description: record.Description, Type: normalizeGroupType(record.Type), Enabled: record.Enabled, TaskCount: taskCount, Revision: record.Revision, CreatedAt: record.CreatedAt.UTC(), UpdatedAt: record.UpdatedAt.UTC()}
 }
 
 func runFromRecord(record runRecord) Run {
-	return Run{ID: record.ID, TaskID: record.TaskID, TaskName: record.TaskName, GroupID: record.GroupID, GroupName: record.GroupName, RoomID: record.RoomID, Action: Action(record.Action), Trigger: Trigger(record.Trigger), Status: RunStatus(record.Status), JobID: record.JobID, Output: record.Output, Error: record.Error, StartedAt: utcPointer(record.StartedAt), FinishedAt: utcPointer(record.FinishedAt), DurationMs: record.DurationMs, CreatedAt: record.CreatedAt.UTC()}
+	return Run{ID: record.ID, TaskID: record.TaskID, TaskName: record.TaskName, GroupID: record.GroupID, GroupName: record.GroupName, RoomID: record.RoomID, Action: Action(record.Action), Trigger: Trigger(record.Trigger), Status: RunStatus(record.Status), JobID: record.JobID, Output: record.Output, Error: record.Error, StartedAt: utcPointer(record.StartedAt), FinishedAt: utcPointer(record.FinishedAt), DurationMs: record.DurationMs, RetryCount: record.RetryCount, CreatedAt: record.CreatedAt.UTC()}
 }
 
 func utcPointer(value *time.Time) *time.Time {
