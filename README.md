@@ -1,244 +1,70 @@
 # DST Admin Go
 
-这是一个使用Go语言开发的《饥荒联机版》(Don't Starve Together)服务器管理工具。
+DST Admin Go 是《饥荒联机版》专用的服务器管理 API。当前 release 只发布同源、会话认证的 `/api/v2`，配套前端位于 `dst-admin-vue`。
 
-## 新增功能：Agent-Server通信系统
+## 当前能力
 
-现在DST Admin Go增加了一个基于WebSocket的Agent-Server通信系统，支持远程管理和监控功能。
+- 首次管理员初始化、bcrypt 密码、HttpOnly 会话、CSRF、登录限流和全会话密码轮换。
+- 房间发现、接管、创建，以及 Master/Caves 分片启停和持久化 Job。
+- 实时日志与 Job SSE、参数化/原始控制台、结构化日志和世界状态。
+- 配置 Diff、revision、保护备份、原子写入和未知 Lua 字段保留。
+- 备份上传、下载、恢复、自动快照、地图与 Session 诊断。
+- Steam Mod 搜索、依赖安装、更新健康度，以及 gopher-lua 主解析和外部 Lua fallback。
+- 游戏更新、DST Docker 容器、自动化任务和多节点 Agent。
 
-### 特点
+完整功能状态与证据见前端仓库的 `docs/DST_ADMIN_FUNCTION_TRUTH.md`。
 
-- 基于WebSocket的实时通信
-- 端到端加密（使用NaCl Box密码学）
-- 通信安全密钥认证（支持多团队使用不同密钥）
-- 断线自动重连
-- 主动/被动数据上报
-- 远程命令执行（Shell命令和脚本）
-- 跨平台支持
+## 安全边界
 
-### 使用方法
+- 除首次初始化、登录和会话探针外，所有 v2 接口都要求管理员会话。
+- 认证写请求同时要求 `X-CSRF-Token` 和 `Idempotency-Key`。
+- Agent 只允许 `system.refresh` 和 `disk.inspect` 两个领域动作；任意 shell、script 和 custom 命令不属于生产 API。
+- Agent 密钥常规读取只返回掩码与 SHA-256 指纹，轮换结果只显示一次。
+- 新二进制不注册旧 `/api/*`、旧静态日志页、tmux raw-command 或旧 cron raw-command。需要回滚时切换到 `previous` release，不能在当前进程重新开启旧路由。
+- 测试 memory adapter 只有在 `DST_ADMIN_ENV=test` 且显式设置对应 `DST_ADMIN_TEST_*=memory` 时才能启用。
 
-#### 启动带Agent Server的DST Admin
+## 本地验证
 
-```bash
-# 启用Agent Server功能
-./dont-admin --agent-server --agent-listen :8081
-
-# 指定通信密钥文件
-./dont-admin --agent-server --agent-listen :8081 --key-file /path/to/keys.json
-
-# 指定TLS证书（推荐用于生产环境）
-./dont-admin --agent-server --agent-listen :8081 --cert /path/to/cert.pem --key /path/to/key.pem
-```
-
-#### 启动Agent客户端
+项目固定 Go 1.25.12 工具链，并使用 SQLite，因此构建机需要可用的 CGO 编译环境。
 
 ```bash
-# 连接到Agent Server
-./agent --server ws://your-server-address:8081/agent
-
-# 使用通信密钥连接
-./agent --server ws://your-server-address:8081/agent --key YourSecurityKey
-
-# 指定Agent ID
-./agent --id myserver1
-
-# 设置主动上报间隔
-./agent --report 1m
+GOTOOLCHAIN=go1.25.12+auto go test -race ./...
+GOTOOLCHAIN=go1.25.12+auto go vet ./...
+GOTOOLCHAIN=go1.25.12+auto go build ./...
 ```
 
-### 通过API管理Agent
-
-Agent Server功能集成了以下API接口：
-
-- `GET /api/agent/list` - 获取所有已连接的Agent
-- `POST /api/agent/command` - 向Agent发送命令
-- `POST /api/agent/report` - 请求Agent上报信息
-
-所有API接口都需要JWT认证。
-
-### 通信安全密钥管理
-
-安全密钥用于验证Agent与Server之间的通信，确保只有授权的Agent可以连接到Server。
-
-系统提供了以下API接口管理通信安全密钥：
-
-- `GET /api/agent/security/key` - 获取当前的通信安全密钥
-- `POST /api/agent/security/key/generate` - 生成新的随机通信安全密钥
-- `POST /api/agent/security/key/update` - 更新通信安全密钥
-
-#### 获取当前密钥示例
-
-```
-GET /api/agent/security/key
-Authorization: Bearer <your-jwt-token>
-```
-
-#### 生成新的随机密钥示例
-
-```
-POST /api/agent/security/key/generate
-Authorization: Bearer <your-jwt-token>
-```
-
-#### 更新通信密钥示例
-
-```
-POST /api/agent/security/key/update
-Authorization: Bearer <your-jwt-token>
-Content-Type: application/json
-
-{
-  "key": "YourNewSecurityKey"
-}
-```
-
-### Agent Server API示例
-
-#### 获取所有Agent
-```
-GET /api/agent/list
-Authorization: Bearer <your-jwt-token>
-```
-
-#### 发送命令到Agent
-```
-POST /api/agent/command
-Authorization: Bearer <your-jwt-token>
-Content-Type: application/json
-
-{
-  "agent_id": "server1",
-  "type": "shell",
-  "content": "ls -la",
-  "timeout": 30
-}
-```
-
-#### 请求数据上报
-```
-POST /api/agent/report
-Authorization: Bearer <your-jwt-token>
-Content-Type: application/json
-
-{
-  "agent_id": "server1",
-  "report_type": "system_info",
-  "params": {}
-}
-```
-
-## 原项目说明
-
-# Go Agent-Server 通信系统
-
-这是一个基于Golang的Agent-Server通信系统，支持安全的远程管理和监控功能。
-
-## 特点
-
-- 基于WebSocket的实时通信
-- 端到端加密（使用NaCl Box密码学）
-- 断线自动重连
-- 主动/被动数据上报
-- 远程命令执行（Shell命令和脚本）
-- 跨平台支持
-
-## 项目结构
-
-```
-.
-├── agent/          # Agent端代码
-│   └── cmd/agent/  # Agent主程序
-├── server/         # Server端代码
-│   └── cmd/server/ # Server主程序
-└── shared/         # 共享代码（加密、协议等）
-```
-
-## 编译
-
-### 使用脚本编译
-
-#### Windows
+启动独立 API：
 
 ```bash
-build.bat
+GOTOOLCHAIN=go1.25.12+auto go run ./cmd/admin-api -addr 127.0.0.1:18000
 ```
 
-#### Linux/macOS
+实际路径和密钥通过 `conf/app.conf` 或 `DST_ADMIN_*` 环境变量配置。不要用测试 adapter 运行生产服务。
+
+## 发布构建
+
+发布产物应注入可查询的版本信息：
 
 ```bash
-chmod +x build.sh
-./build.sh
+release_version="$(git describe --tags --always --dirty)"
+release_commit="$(git rev-parse HEAD)"
+release_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CGO_ENABLED=1 go build -trimpath \
+  -ldflags "-X dont/internal/buildinfo.Version=${release_version} -X dont/internal/buildinfo.Commit=${release_commit} -X dont/internal/buildinfo.BuildTime=${release_time}" \
+  -o dist/dst-admin .
 ```
 
-### 手动编译
+登录后可从 `GET /api/v2/system/status` 的 `application` 字段核对版本、提交和构建时间。
 
-#### 编译Agent
+## 关键文档
 
-```bash
-# Windows
-go build -o agent.exe ./agent/cmd/agent
+- API 契约：`docs/openapi-v2.yaml`
+- 生产部署与回滚：`docs/deployment-and-rollback.md`
+- Mod 兼容策略：`docs/mod-management.md`
+- 地图渲染器：`docs/map-renderer.md`
 
-# Linux/macOS
-go build -o agent ./agent/cmd/agent
-```
+## Agent
 
-#### 编译Server
+Agent WebSocket 由主程序可选启动，生产环境必须通过同源 TLS 代理，并使用 `Authorization: Bearer <key>`。URL query key 仅为旧 Agent 的临时兼容路径，可能泄漏到访问日志，不应用于新部署。
 
-```bash
-# Windows
-go build -o server.exe ./server/cmd/server
-
-# Linux/macOS
-go build -o server ./server/cmd/server
-```
-
-## 使用方法
-
-### 启动Server
-
-```bash
-# 基本启动
-./server
-
-# 指定监听地址
-./server -listen :8443
-
-# 使用TLS
-./server -listen :8443 -cert /path/to/cert.pem -key /path/to/key.pem
-```
-
-### 启动Agent
-
-```bash
-# 基本启动（连接本地服务器）
-./agent
-
-# 指定服务器地址
-./agent -server ws://server-address:8080/agent
-
-# 指定Agent ID
-./agent -id myagent1
-
-# 设置主动上报间隔
-./agent -report 1m
-```
-
-## Server控制台命令
-
-Server提供了一个简单的命令行界面，可以使用以下命令：
-
-- `list` - 列出所有已连接的Agent
-- `info <agent_id>` - 显示指定Agent的详细信息
-- `shell <agent_id> <command>` - 在指定Agent上执行shell命令
-- `script <agent_id> <script>` - 在指定Agent上执行脚本
-- `report <agent_id> <type>` - 请求Agent进行被动上报
-- `exit` - 退出服务器
-
-## 安全说明
-
-通信使用NaCl Box (curve25519, XSalsa20和Poly1305)进行端到端加密保护。每个Agent和Server都有自己的公钥/私钥对，确保通信过程的安全性。
-
-## 许可证
-
-MIT 
+Agent 和独立 Agent Server 的构建入口仍位于 `agent/cmd/agent` 与 `server/cmd/server`；它们的底层协议代码不等于公开管理 API，生产动作范围始终以 `/api/v2/agents/actions` 返回的白名单为准。
