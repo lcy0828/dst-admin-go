@@ -27,6 +27,10 @@ type PlayerHandler struct {
 	jobs    *jobs.Service
 }
 
+type playerRefreshRequest struct {
+	WorldIDs []string `json:"worldIds"`
+}
+
 func NewPlayerHandler(service PlayerService, jobService *jobs.Service) *PlayerHandler {
 	return &PlayerHandler{players: service, jobs: jobService}
 }
@@ -40,6 +44,11 @@ func (h *PlayerHandler) Register(v2 *gin.RouterGroup) {
 	group.POST("/:playerId/actions/ban", h.action(players.ActionBan))
 	group.POST("/:playerId/actions/unban", h.action(players.ActionUnban))
 	group.POST("/:playerId/actions/announce", h.action(players.ActionAnnounce))
+	group.POST("/:playerId/actions/kill", h.action(players.ActionKill))
+	group.POST("/:playerId/actions/god-mode", h.action(players.ActionGodMode))
+	group.POST("/:playerId/actions/creative-mode", h.action(players.ActionCreativeMode))
+	group.POST("/:playerId/actions/resurrect", h.action(players.ActionResurrect))
+	group.POST("/:playerId/actions/change-character", h.action(players.ActionChangeCharacter))
 }
 
 func (h *PlayerHandler) list(c *gin.Context) {
@@ -66,9 +75,19 @@ func (h *PlayerHandler) player(c *gin.Context) {
 }
 
 func (h *PlayerHandler) refresh(c *gin.Context) {
+	var request playerRefreshRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的玩家刷新操作", nil)
+		return
+	}
 	targets, err := h.players.WorldTargets(c.Param("roomId"))
 	if err != nil {
 		playerFailure(c, err)
+		return
+	}
+	targets, err = selectPlayerRefreshTargets(targets, request.WorldIDs)
+	if err != nil {
+		Failure(c, http.StatusUnprocessableEntity, "INVALID_PLAYER_REFRESH", "选择的刷新世界无效", nil)
 		return
 	}
 	jobTargets := make([]jobs.TargetSpec, 0, len(targets))
@@ -94,6 +113,30 @@ func (h *PlayerHandler) refresh(c *gin.Context) {
 		return
 	}
 	Success(c, http.StatusAccepted, job)
+}
+
+func selectPlayerRefreshTargets(targets []players.WorldTarget, worldIDs []string) ([]players.WorldTarget, error) {
+	if len(worldIDs) == 0 {
+		return targets, nil
+	}
+	if len(worldIDs) > 64 {
+		return nil, players.ErrInvalidFilter
+	}
+	available := make(map[string]players.WorldTarget, len(targets))
+	for _, target := range targets {
+		available[target.ID] = target
+	}
+	selected := make([]players.WorldTarget, 0, len(worldIDs))
+	seen := make(map[string]bool, len(worldIDs))
+	for _, worldID := range worldIDs {
+		target, exists := available[worldID]
+		if !exists || seen[worldID] {
+			return nil, players.ErrInvalidFilter
+		}
+		seen[worldID] = true
+		selected = append(selected, target)
+	}
+	return selected, nil
 }
 
 func (h *PlayerHandler) action(action players.Action) gin.HandlerFunc {

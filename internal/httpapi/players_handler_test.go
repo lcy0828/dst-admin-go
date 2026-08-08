@@ -81,13 +81,31 @@ func TestPlayerHTTPListRefreshAndActions(t *testing.T) {
 		t.Fatalf("unexpected refresh job: %#v", job)
 	}
 
+	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room/players/actions/refresh", map[string]interface{}{
+		"worldIds": []string{"caves"},
+	}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	job = waitForPlayerJob(t, jobsService, responseData(t, response)["id"].(string))
+	if len(job.Targets) != 1 || job.Targets[0].TargetID != "caves" {
+		t.Fatalf("selected world refresh was not respected: %#v", job)
+	}
+
 	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room/players/KU_ONE/actions/ban", map[string]interface{}{
-		"worldId": "master", "confirmation": "room",
+		"worldId": "master", "confirmation": "room", "reason": "测试", "duration": "permanent",
 	}, nil, "")
 	assertStatus(t, response, http.StatusAccepted)
 	job = waitForPlayerJob(t, jobsService, responseData(t, response)["id"].(string))
 	if job.Kind != "player.ban" || job.Outcome != jobs.OutcomeFull {
 		t.Fatalf("unexpected action job: %#v", job)
+	}
+
+	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room/players/KU_ONE/actions/god-mode", map[string]interface{}{
+		"worldId": "master", "enabled": true,
+	}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	job = waitForPlayerJob(t, jobsService, responseData(t, response)["id"].(string))
+	if job.Kind != "player.god-mode" || job.Outcome != jobs.OutcomeFull {
+		t.Fatalf("unexpected god mode job: %#v", job)
 	}
 
 	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room/players/..%2Fbad/actions/kick", map[string]interface{}{}, nil, "")

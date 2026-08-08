@@ -24,27 +24,30 @@ func (e *FieldError) Error() string { return ErrInvalidAction.Error() }
 func (e *FieldError) Unwrap() error { return ErrInvalidAction }
 
 type Player struct {
-	ID              string    `json:"id"`
-	RoomID          string    `json:"roomId"`
-	WorldID         string    `json:"worldId"`
-	WorldName       string    `json:"worldName"`
-	Name            string    `json:"name"`
-	Prefab          string    `json:"prefab,omitempty"`
-	Online          bool      `json:"online"`
-	Banned          bool      `json:"banned"`
-	Admin           bool      `json:"admin"`
-	Age             int       `json:"age"`
-	NetID           string    `json:"netId,omitempty"`
-	Performance     int       `json:"performance,omitempty"`
-	HealthPercent   *float64  `json:"healthPercent,omitempty"`
-	HungerPercent   *float64  `json:"hungerPercent,omitempty"`
-	SanityPercent   *float64  `json:"sanityPercent,omitempty"`
-	Temperature     *float64  `json:"temperature,omitempty"`
-	Moisture        *float64  `json:"moisture,omitempty"`
-	FirstSeenAt     time.Time `json:"firstSeenAt"`
-	LastSeenAt      time.Time `json:"lastSeenAt"`
-	StatusChangedAt time.Time `json:"statusChangedAt"`
-	LastRefreshedAt time.Time `json:"lastRefreshedAt"`
+	ID              string     `json:"id"`
+	RoomID          string     `json:"roomId"`
+	WorldID         string     `json:"worldId"`
+	WorldName       string     `json:"worldName"`
+	Name            string     `json:"name"`
+	Prefab          string     `json:"prefab,omitempty"`
+	Online          bool       `json:"online"`
+	Banned          bool       `json:"banned"`
+	BanReason       string     `json:"banReason,omitempty"`
+	BannedAt        *time.Time `json:"bannedAt,omitempty"`
+	BanExpiresAt    *time.Time `json:"banExpiresAt,omitempty"`
+	Admin           bool       `json:"admin"`
+	Age             int        `json:"age"`
+	NetID           string     `json:"netId,omitempty"`
+	Performance     int        `json:"performance"`
+	HealthPercent   *float64   `json:"healthPercent,omitempty"`
+	HungerPercent   *float64   `json:"hungerPercent,omitempty"`
+	SanityPercent   *float64   `json:"sanityPercent,omitempty"`
+	Temperature     *float64   `json:"temperature,omitempty"`
+	Moisture        *float64   `json:"moisture,omitempty"`
+	FirstSeenAt     time.Time  `json:"firstSeenAt"`
+	LastSeenAt      time.Time  `json:"lastSeenAt"`
+	StatusChangedAt time.Time  `json:"statusChangedAt"`
+	LastRefreshedAt time.Time  `json:"lastRefreshedAt"`
 }
 
 type Observation struct {
@@ -97,16 +100,33 @@ type RefreshResult struct {
 type Action string
 
 const (
-	ActionKick     Action = "kick"
-	ActionBan      Action = "ban"
-	ActionUnban    Action = "unban"
-	ActionAnnounce Action = "announce"
+	ActionKick            Action = "kick"
+	ActionBan             Action = "ban"
+	ActionUnban           Action = "unban"
+	ActionAnnounce        Action = "announce"
+	ActionKill            Action = "kill"
+	ActionGodMode         Action = "god-mode"
+	ActionCreativeMode    Action = "creative-mode"
+	ActionResurrect       Action = "resurrect"
+	ActionChangeCharacter Action = "change-character"
 )
 
 type ActionRequest struct {
 	WorldID      string `json:"worldId"`
 	Message      string `json:"message"`
 	Confirmation string `json:"confirmation"`
+	Reason       string `json:"reason"`
+	Duration     string `json:"duration"`
+	Enabled      *bool  `json:"enabled"`
+}
+
+type Ban struct {
+	RoomID    string     `json:"roomId"`
+	PlayerID  string     `json:"playerId"`
+	Reason    string     `json:"reason"`
+	Duration  string     `json:"duration"`
+	CreatedAt time.Time  `json:"createdAt"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
 type ActionResult struct {

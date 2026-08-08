@@ -31,19 +31,34 @@ type playerRecord struct {
 	LastRefreshedAt time.Time `gorm:"not null;index"`
 }
 
+type banRecord struct {
+	RoomID    string     `gorm:"type:varchar(255);not null;unique_index:idx_player_ban_room_user;index"`
+	UserID    string     `gorm:"type:varchar(128);not null;unique_index:idx_player_ban_room_user"`
+	Reason    string     `gorm:"type:varchar(300);not null"`
+	Duration  string     `gorm:"type:varchar(16);not null"`
+	CreatedAt time.Time  `gorm:"not null"`
+	UpdatedAt time.Time  `gorm:"not null"`
+	ExpiresAt *time.Time `gorm:"index"`
+}
+
 type Store struct {
-	db    *gorm.DB
-	table string
-	now   func() time.Time
+	db        *gorm.DB
+	table     string
+	bansTable string
+	now       func() time.Time
 }
 
 func NewStore(db *gorm.DB, tablePrefix string) *Store {
-	return &Store{db: db, table: strings.TrimSpace(tablePrefix) + "player", now: time.Now}
+	prefix := strings.TrimSpace(tablePrefix)
+	return &Store{db: db, table: prefix + "player", bansTable: prefix + "player_ban", now: time.Now}
 }
 
 func (s *Store) Migrate() error {
 	if err := s.db.Table(s.table).AutoMigrate(&playerRecord{}).Error; err != nil {
 		return fmt.Errorf("migrate players: %w", err)
+	}
+	if err := s.db.Table(s.bansTable).AutoMigrate(&banRecord{}).Error; err != nil {
+		return fmt.Errorf("migrate player bans: %w", err)
 	}
 	return nil
 }
@@ -187,6 +202,69 @@ func (s *Store) Counts(roomID string) (int, int, *time.Time, error) {
 	}
 	refreshed := record.LastRefreshedAt.UTC()
 	return total, online, &refreshed, nil
+}
+
+func (s *Store) SaveBan(value Ban) error {
+	record := banRecord{
+		RoomID: value.RoomID, UserID: value.PlayerID, Reason: value.Reason, Duration: value.Duration,
+		CreatedAt: value.CreatedAt.UTC(), UpdatedAt: s.now().UTC(), ExpiresAt: utcPointer(value.ExpiresAt),
+	}
+	var existing banRecord
+	result := s.db.Table(s.bansTable).Where("room_id = ? AND user_id = ?", value.RoomID, value.PlayerID).First(&existing)
+	if gorm.IsRecordNotFoundError(result.Error) {
+		return s.db.Table(s.bansTable).Create(&record).Error
+	}
+	if result.Error != nil {
+		return result.Error
+	}
+	return s.db.Table(s.bansTable).Where("room_id = ? AND user_id = ?", value.RoomID, value.PlayerID).Updates(map[string]interface{}{
+		"reason": record.Reason, "duration": record.Duration, "created_at": record.CreatedAt,
+		"updated_at": record.UpdatedAt, "expires_at": record.ExpiresAt,
+	}).Error
+}
+
+func (s *Store) DeleteBan(roomID, playerID string) error {
+	return s.db.Table(s.bansTable).Where("room_id = ? AND user_id = ?", roomID, playerID).Delete(&banRecord{}).Error
+}
+
+func (s *Store) Bans(roomID string) (map[string]Ban, error) {
+	var records []banRecord
+	if err := s.db.Table(s.bansTable).Where("room_id = ?", roomID).Find(&records).Error; err != nil {
+		return nil, err
+	}
+	values := make(map[string]Ban, len(records))
+	for _, record := range records {
+		value := banFromRecord(record)
+		values[value.PlayerID] = value
+	}
+	return values, nil
+}
+
+func (s *Store) ExpiredBans(now time.Time) ([]Ban, error) {
+	var records []banRecord
+	if err := s.db.Table(s.bansTable).Where("expires_at IS NOT NULL AND expires_at <= ?", now.UTC()).Order("expires_at ASC").Find(&records).Error; err != nil {
+		return nil, err
+	}
+	values := make([]Ban, 0, len(records))
+	for _, record := range records {
+		values = append(values, banFromRecord(record))
+	}
+	return values, nil
+}
+
+func banFromRecord(record banRecord) Ban {
+	return Ban{
+		RoomID: record.RoomID, PlayerID: record.UserID, Reason: record.Reason, Duration: record.Duration,
+		CreatedAt: record.CreatedAt.UTC(), ExpiresAt: utcPointer(record.ExpiresAt),
+	}
+}
+
+func utcPointer(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	utc := value.UTC()
+	return &utc
 }
 
 func playerFromRecord(record playerRecord) Player {

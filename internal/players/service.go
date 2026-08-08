@@ -13,6 +13,8 @@ import (
 
 	"dont/internal/configuration"
 	"dont/internal/rooms"
+
+	"github.com/google/uuid"
 )
 
 var playerIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
@@ -74,6 +76,9 @@ func (s *Service) List(roomID string, filter ListFilter) (List, error) {
 	if err != nil {
 		return List{}, err
 	}
+	if err := s.expireRoomBans(room); err != nil {
+		return List{}, err
+	}
 	filter, err = s.normalizeFilter(room.ID, filter)
 	if err != nil {
 		return List{}, err
@@ -93,6 +98,15 @@ func (s *Service) List(roomID string, filter ListFilter) (List, error) {
 	for index := range items {
 		items[index].Banned = blocked[items[index].ID]
 	}
+	banDetails, err := s.store.Bans(room.ID)
+	if err != nil {
+		return List{}, err
+	}
+	for index := range items {
+		if details, exists := banDetails[items[index].ID]; items[index].Banned && exists {
+			applyBanDetails(&items[index], details)
+		}
+	}
 	totalPlayers, online, refreshed, err := s.store.Counts(room.ID)
 	if err != nil {
 		return List{}, err
@@ -108,6 +122,9 @@ func (s *Service) Player(roomID, playerID string) (Player, error) {
 	if err != nil {
 		return Player{}, err
 	}
+	if err := s.expireRoomBans(room); err != nil {
+		return Player{}, err
+	}
 	playerID = strings.TrimSpace(playerID)
 	if !ValidID(playerID) {
 		return Player{}, ErrInvalidPlayer
@@ -121,6 +138,15 @@ func (s *Service) Player(roomID, playerID string) (Player, error) {
 		return Player{}, err
 	}
 	player.Banned = contains(access.Blocked, player.ID)
+	if player.Banned {
+		banDetails, detailsErr := s.store.Bans(room.ID)
+		if detailsErr != nil {
+			return Player{}, detailsErr
+		}
+		if details, exists := banDetails[player.ID]; exists {
+			applyBanDetails(&player, details)
+		}
+	}
 	return player, nil
 }
 
@@ -226,6 +252,25 @@ func (s *Service) Act(ctx context.Context, jobID, roomID, playerID string, actio
 			return ActionResult{}, err
 		}
 		result.ProtectionBackupID = backupID
+		if blocked {
+			expiresAt, expiryErr := banExpiry(s.now().UTC(), request.Duration)
+			if expiryErr != nil {
+				return ActionResult{}, expiryErr
+			}
+			ban := Ban{
+				RoomID: room.ID, PlayerID: player.ID, Reason: strings.TrimSpace(request.Reason),
+				Duration: request.Duration, CreatedAt: s.now().UTC(), ExpiresAt: expiresAt,
+			}
+			if saveErr := s.store.SaveBan(ban); saveErr != nil {
+				if changed {
+					_, _, rollbackErr := s.updateBlocklist(ctx, uuid.NewString(), room, player.ID, false, room.Name)
+					return ActionResult{}, errors.Join(saveErr, rollbackErr)
+				}
+				return ActionResult{}, saveErr
+			}
+		} else if deleteErr := s.store.DeleteBan(room.ID, player.ID); deleteErr != nil {
+			result.Warning = "封禁名单已更新，但封禁说明清理失败：" + deleteErr.Error()
+		}
 		script := `TheNet:Ban(` + quoteLua(player.ID) + `)`
 		result.Message = "玩家已加入封禁名单"
 		if !blocked {
@@ -246,6 +291,40 @@ func (s *Service) Act(ctx context.Context, jobID, roomID, playerID string, actio
 		if !changed {
 			result.Message += "（名单原本已是目标状态）"
 		}
+	case ActionKill:
+		if err := s.sendToRunningWorld(ctx, room, world, playerLookupScript(player.ID, `p:PushEvent("death")`)); err != nil {
+			return ActionResult{}, err
+		}
+		result.Message = "已向目标分片发送玩家死亡命令"
+	case ActionGodMode:
+		enabled := *request.Enabled
+		statement := `if p.components.health then p.components.health:SetInvincible(` + luaBoolean(enabled) + `) end; ` +
+			`if p.components.talker then p.components.talker:Say(` + quoteLua(toggleMessage("无敌模式", enabled)) + `) end`
+		if err := s.sendToRunningWorld(ctx, room, world, playerLookupScript(player.ID, statement)); err != nil {
+			return ActionResult{}, err
+		}
+		result.Message = "玩家无敌模式已" + enabledText(enabled)
+	case ActionCreativeMode:
+		enabled := *request.Enabled
+		statement := `if p.components.builder then p.components.builder.freebuildmode=` + luaBoolean(enabled) + ` end; ` +
+			`if p.components.talker then p.components.talker:Say(` + quoteLua(toggleMessage("制作模式", enabled)) + `) end`
+		if err := s.sendToRunningWorld(ctx, room, world, playerLookupScript(player.ID, statement)); err != nil {
+			return ActionResult{}, err
+		}
+		result.Message = "玩家制作模式已" + enabledText(enabled)
+	case ActionResurrect:
+		statement := `p:PushEvent("respawnfromghost"); p.rezsource=` + quoteLua("DST-ADMIN-GO控制台")
+		if err := s.sendToRunningWorld(ctx, room, world, playerLookupScript(player.ID, statement)); err != nil {
+			return ActionResult{}, err
+		}
+		result.Message = "已向目标分片发送玩家复活命令"
+	case ActionChangeCharacter:
+		statement := `c_despawn(p); c_announce(` + quoteLua("管理员已将玩家重置，该玩家可以重新选择角色") + `)`
+		if err := s.sendToRunningWorld(ctx, room, world, playerLookupScript(player.ID, statement)); err != nil {
+			return ActionResult{}, err
+		}
+		_ = s.store.MarkPlayerOffline(room.ID, player.ID, s.now().UTC())
+		result.Message = "已向目标分片发送重选人物命令"
 	default:
 		return ActionResult{}, ErrInvalidAction
 	}
@@ -326,6 +405,76 @@ func (s *Service) normalizeFilter(roomID string, filter ListFilter) (ListFilter,
 	return filter, nil
 }
 
+func (s *Service) StartBanExpiryScheduler(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	go func() {
+		_ = s.ExpireBans(ctx)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = s.ExpireBans(ctx)
+			}
+		}
+	}()
+}
+
+func (s *Service) ExpireBans(ctx context.Context) error {
+	expired, err := s.store.ExpiredBans(s.now().UTC())
+	if err != nil {
+		return err
+	}
+	var result error
+	for _, ban := range expired {
+		room, roomErr := s.managedRoom(ban.RoomID)
+		if roomErr != nil {
+			result = errors.Join(result, roomErr)
+			continue
+		}
+		if expireErr := s.expireBan(ctx, room, ban); expireErr != nil {
+			result = errors.Join(result, expireErr)
+		}
+	}
+	return result
+}
+
+func (s *Service) expireRoomBans(room rooms.Room) error {
+	expired, err := s.store.ExpiredBans(s.now().UTC())
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	var result error
+	for _, ban := range expired {
+		if ban.RoomID != room.ID {
+			continue
+		}
+		if expireErr := s.expireBan(ctx, room, ban); expireErr != nil {
+			result = errors.Join(result, expireErr)
+		}
+	}
+	return result
+}
+
+func (s *Service) expireBan(ctx context.Context, room rooms.Room, ban Ban) error {
+	lock := s.roomLock(room.ID)
+	lock.Lock()
+	defer lock.Unlock()
+	if ban.ExpiresAt == nil || ban.ExpiresAt.After(s.now().UTC()) {
+		return nil
+	}
+	if _, _, err := s.updateBlocklist(ctx, uuid.NewString(), room, ban.PlayerID, false, room.Name); err != nil {
+		return err
+	}
+	return s.store.DeleteBan(room.ID, ban.PlayerID)
+}
+
 func validateAction(room rooms.Room, player Player, action Action, request ActionRequest) error {
 	fields := make(map[string]string)
 	switch action {
@@ -339,7 +488,18 @@ func validateAction(room rooms.Room, player Player, action Action, request Actio
 		if player.Online && request.WorldID != player.WorldID {
 			fields["worldId"] = "目标世界与玩家当前世界不一致"
 		}
-	case ActionBan, ActionUnban:
+	case ActionBan:
+		if request.Confirmation != room.Name {
+			return ErrConfirmationRequired
+		}
+		reason := strings.TrimSpace(request.Reason)
+		if reason == "" || len([]rune(reason)) > 300 || !utf8.ValidString(reason) || strings.ContainsRune(reason, '\x00') {
+			fields["reason"] = "封禁原因必须为 1-300 个有效字符"
+		}
+		if _, err := banExpiry(time.Now(), request.Duration); err != nil {
+			fields["duration"] = "封禁时长无效"
+		}
+	case ActionUnban:
 		if request.Confirmation != room.Name {
 			return ErrConfirmationRequired
 		}
@@ -354,6 +514,16 @@ func validateAction(room rooms.Room, player Player, action Action, request Actio
 		if player.Online && request.WorldID != player.WorldID {
 			fields["worldId"] = "目标世界与玩家当前世界不一致"
 		}
+	case ActionKill, ActionResurrect, ActionChangeCharacter:
+		if request.Confirmation != player.ID {
+			return ErrConfirmationRequired
+		}
+		validateOnlinePlayerWorld(fields, player, request.WorldID)
+	case ActionGodMode, ActionCreativeMode:
+		if request.Enabled == nil {
+			fields["enabled"] = "必须明确指定开启或关闭"
+		}
+		validateOnlinePlayerWorld(fields, player, request.WorldID)
 	default:
 		return ErrInvalidAction
 	}
@@ -361,6 +531,69 @@ func validateAction(room rooms.Room, player Player, action Action, request Actio
 		return &FieldError{Fields: fields}
 	}
 	return nil
+}
+
+func validateOnlinePlayerWorld(fields map[string]string, player Player, worldID string) {
+	if !player.Online {
+		fields["playerId"] = "只能操作当前在线玩家"
+	}
+	if player.Online && worldID != player.WorldID {
+		fields["worldId"] = "目标世界与玩家当前世界不一致"
+	}
+}
+
+func banExpiry(now time.Time, duration string) (*time.Time, error) {
+	durations := map[string]time.Duration{
+		"1h": time.Hour, "6h": 6 * time.Hour, "12h": 12 * time.Hour,
+		"1d": 24 * time.Hour, "3d": 3 * 24 * time.Hour, "7d": 7 * 24 * time.Hour,
+		"30d": 30 * 24 * time.Hour,
+	}
+	if duration == "permanent" {
+		return nil, nil
+	}
+	value, exists := durations[duration]
+	if !exists {
+		return nil, ErrInvalidAction
+	}
+	expiresAt := now.Add(value).UTC()
+	return &expiresAt, nil
+}
+
+func applyBanDetails(player *Player, ban Ban) {
+	createdAt := ban.CreatedAt.UTC()
+	player.BanReason = ban.Reason
+	player.BannedAt = &createdAt
+	player.BanExpiresAt = utcTimePointer(ban.ExpiresAt)
+}
+
+func utcTimePointer(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	utc := value.UTC()
+	return &utc
+}
+
+func playerLookupScript(playerID, statement string) string {
+	return `local p=UserToPlayer(` + quoteLua(playerID) + `); if p ~= nil then ` + statement + ` end`
+}
+
+func luaBoolean(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func enabledText(value bool) string {
+	if value {
+		return "开启"
+	}
+	return "关闭"
+}
+
+func toggleMessage(name string, enabled bool) string {
+	return name + "已" + enabledText(enabled)
 }
 
 func validateObservations(values []Observation) error {

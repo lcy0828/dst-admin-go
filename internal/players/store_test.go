@@ -66,3 +66,30 @@ func TestStoreMovesPlayerBetweenWorldsWithoutDuplicateIdentity(t *testing.T) {
 		t.Fatalf("player move produced an invalid state: total=%d items=%#v err=%v", total, items, err)
 	}
 }
+
+func TestStorePersistsAndFindsExpiredBans(t *testing.T) {
+	store := newPlayerTestStore(t)
+	now := time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(time.Hour)
+	store.now = func() time.Time { return now }
+	if err := store.SaveBan(Ban{
+		RoomID: "room", PlayerID: "KU_ONE", Reason: "测试原因", Duration: "1h", CreatedAt: now, ExpiresAt: &expiresAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bans, err := store.Bans("room")
+	if err != nil || bans["KU_ONE"].Reason != "测试原因" {
+		t.Fatalf("ban was not persisted: %#v err=%v", bans, err)
+	}
+	expired, err := store.ExpiredBans(expiresAt.Add(time.Second))
+	if err != nil || len(expired) != 1 || expired[0].PlayerID != "KU_ONE" {
+		t.Fatalf("expired ban was not found: %#v err=%v", expired, err)
+	}
+	if err := store.DeleteBan("room", "KU_ONE"); err != nil {
+		t.Fatal(err)
+	}
+	bans, err = store.Bans("room")
+	if err != nil || len(bans) != 0 {
+		t.Fatalf("ban was not deleted: %#v err=%v", bans, err)
+	}
+}

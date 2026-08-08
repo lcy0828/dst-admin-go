@@ -249,6 +249,9 @@ func InitRouter() (*gin.Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	if os.Getenv("DST_ADMIN_ENV") != "test" {
+		playerService.StartBanExpiryScheduler(context.Background(), time.Minute)
+	}
 	playerHandler := httpapi.NewPlayerHandler(playerService, jobService)
 	worldStateStore := worldstate.NewStore(models.DB(), tablePrefix)
 	if err := worldStateStore.Migrate(); err != nil {

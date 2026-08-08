@@ -148,12 +148,18 @@ func TestPlayerActionsEnforceWorldAndPersistBanList(t *testing.T) {
 	if len(sender.scripts) != 1 || strings.Contains(sender.scripts[0], `c_announce("[给 Willow] hello "); c_shutdown()`) {
 		t.Fatalf("announcement was not safely quoted: %q", sender.scripts)
 	}
-	result, err := service.Act(context.Background(), "job", "room", "KU_ONE", ActionBan, ActionRequest{WorldID: "master", Confirmation: "测试房间"})
+	result, err := service.Act(context.Background(), "job", "room", "KU_ONE", ActionBan, ActionRequest{
+		WorldID: "master", Confirmation: "测试房间", Reason: "破坏建筑", Duration: "1h",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !contains(access.values.Blocked, "KU_ONE") || result.ProtectionBackupID != "backup" || access.backupCount != 1 {
 		t.Fatalf("ban was not persisted with protection: result=%#v access=%#v", result, access)
+	}
+	player, err := service.Player("room", "KU_ONE")
+	if err != nil || player.BanReason != "破坏建筑" || player.BanExpiresAt == nil {
+		t.Fatalf("temporary ban details were not persisted: player=%#v err=%v", player, err)
 	}
 	if _, err := service.Act(context.Background(), "job", "room", "KU_ONE", ActionUnban, ActionRequest{WorldID: "master", Confirmation: "wrong"}); !errors.Is(err, ErrConfirmationRequired) {
 		t.Fatalf("invalid unban confirmation accepted: %v", err)
@@ -163,5 +169,38 @@ func TestPlayerActionsEnforceWorldAndPersistBanList(t *testing.T) {
 	}
 	if contains(access.values.Blocked, "KU_ONE") || access.backupCount != 2 {
 		t.Fatalf("unban did not update access list: %#v", access.values)
+	}
+}
+
+func TestTemporaryBanExpiresAndPlayerCommandsAreFixedTemplates(t *testing.T) {
+	service, _, sender, access, _ := newPlayerTestService(t)
+	if _, err := service.RefreshWorld(context.Background(), "room", "master"); err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	if _, err := service.Act(context.Background(), "job", "room", "KU_ONE", ActionGodMode, ActionRequest{WorldID: "master", Enabled: &enabled}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.scripts) != 1 || !strings.Contains(sender.scripts[0], "SetInvincible(true)") {
+		t.Fatalf("god mode did not use the fixed server template: %q", sender.scripts)
+	}
+	if _, err := service.Act(context.Background(), "job", "room", "KU_ONE", ActionCreativeMode, ActionRequest{WorldID: "master"}); err == nil {
+		t.Fatal("creative mode accepted a missing enabled value")
+	}
+	if _, err := service.Act(context.Background(), "job", "room", "KU_ONE", ActionBan, ActionRequest{
+		WorldID: "master", Confirmation: "测试房间", Reason: "临时封禁", Duration: "1h",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return time.Date(2026, 8, 8, 11, 1, 0, 0, time.UTC) }
+	if err := service.ExpireBans(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if contains(access.values.Blocked, "KU_ONE") {
+		t.Fatal("expired temporary ban remains in the blocklist")
+	}
+	bans, err := service.store.Bans("room")
+	if err != nil || len(bans) != 0 {
+		t.Fatalf("expired ban metadata remains: %#v err=%v", bans, err)
 	}
 }

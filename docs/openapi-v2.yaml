@@ -1527,6 +1527,7 @@ paths:
       operationId: refreshRoomPlayers
       summary: Probe each world and persist its current player snapshot
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerRefreshInput" } } } }
       responses:
         "202": { description: Player refresh job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -1580,6 +1581,71 @@ paths:
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
       responses:
         "202": { description: Player announcement job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/players/{playerId}/actions/kill:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }]
+    post:
+      tags: [Players, Jobs]
+      operationId: killRoomPlayer
+      summary: Kill an online player in the world where they were observed
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
+      responses:
+        "202": { description: Player kill job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/players/{playerId}/actions/god-mode:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }]
+    post:
+      tags: [Players, Jobs]
+      operationId: setRoomPlayerGodMode
+      summary: Enable or disable invincibility for an online player
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
+      responses:
+        "202": { description: Player god mode job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/players/{playerId}/actions/creative-mode:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }]
+    post:
+      tags: [Players, Jobs]
+      operationId: setRoomPlayerCreativeMode
+      summary: Enable or disable free-build mode for an online player
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
+      responses:
+        "202": { description: Player creative mode job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/players/{playerId}/actions/resurrect:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }]
+    post:
+      tags: [Players, Jobs]
+      operationId: resurrectRoomPlayer
+      summary: Resurrect an online ghost player
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
+      responses:
+        "202": { description: Player resurrection job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/players/{playerId}/actions/change-character:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }]
+    post:
+      tags: [Players, Jobs]
+      operationId: resetRoomPlayerCharacter
+      summary: Despawn an online player so they can choose another character
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
+      responses:
+        "202": { description: Player character reset job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
@@ -3744,7 +3810,7 @@ components:
     Player:
       type: object
       additionalProperties: false
-      required: [id, roomId, worldId, worldName, name, online, banned, admin, age, firstSeenAt, lastSeenAt, statusChangedAt, lastRefreshedAt]
+      required: [id, roomId, worldId, worldName, name, online, banned, admin, age, performance, firstSeenAt, lastSeenAt, statusChangedAt, lastRefreshedAt]
       properties:
         id: { type: string, pattern: '^[A-Za-z0-9_-]{1,128}$' }
         roomId: { type: string }
@@ -3754,6 +3820,9 @@ components:
         prefab: { type: string }
         online: { type: boolean }
         banned: { type: boolean }
+        banReason: { type: string, maxLength: 300 }
+        bannedAt: { type: string, format: date-time }
+        banExpiresAt: { type: string, format: date-time }
         admin: { type: boolean }
         age: { type: integer, minimum: 0 }
         netId: { type: string }
@@ -3797,11 +3866,18 @@ components:
     PlayerActionInput:
       type: object
       additionalProperties: false
-      required: [worldId, message, confirmation]
       properties:
         worldId: { type: string }
         message: { type: string, maxLength: 300 }
         confirmation: { type: string }
+        reason: { type: string, maxLength: 300 }
+        duration: { type: string, enum: [1h, 6h, 12h, 1d, 3d, 7d, 30d, permanent] }
+        enabled: { type: boolean }
+    PlayerRefreshInput:
+      type: object
+      additionalProperties: false
+      properties:
+        worldIds: { type: array, maxItems: 64, uniqueItems: true, items: { type: string } }
     WorldStateSnapshot:
       type: object
       additionalProperties: false
