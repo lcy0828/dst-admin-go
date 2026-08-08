@@ -396,6 +396,7 @@ func InitRouter() (*gin.Engine, error) {
 	}), httpapi.RequireSession(authService))
 	{
 		v2 := api.Group("/v2", idempotencyStore.Middleware())
+		v2.Use(httpapi.RuntimeTargetBoundary())
 		authHandler.Register(v2.Group("/auth"))
 		v2.GET("/system/capabilities", httpapi.CapabilitiesProvider(func() capabilities.Report {
 			return capabilities.Probe(capabilityConfig)

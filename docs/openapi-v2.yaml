@@ -5,7 +5,8 @@ info:
   description: >-
     Contract for the authenticated DST Admin management API. JSON fields use
     camelCase. Authenticated state-changing requests require X-CSRF-Token and
-    Idempotency-Key headers.
+    Idempotency-Key headers. Clients send X-DST-Runtime-Target with local or an
+    agent-prefixed target ID; unsupported remote domain operations fail closed.
 servers:
   - url: /api/v2
 tags:
