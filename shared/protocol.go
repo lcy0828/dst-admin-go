@@ -54,6 +54,7 @@ type RegisterPayload struct {
 	OS        string `json:"os"`         // 操作系统
 	Arch      string `json:"arch"`       // 架构
 	AgentUUID string `json:"agent_uuid"` // 代理唯一标识符
+	Version   string `json:"version,omitempty"`
 }
 
 // RegisterAckPayload 是注册确认消息的负载
@@ -66,7 +67,7 @@ type RegisterAckPayload struct {
 // CommandPayload 是命令消息的负载
 type CommandPayload struct {
 	CommandID string `json:"command_id"` // 命令ID
-	Type      string `json:"type"`       // 命令类型: "shell", "script", "builtin"
+	Type      string `json:"type"`       // 命令类型: "exec"（服务端与 Agent 均执行白名单校验）
 	Content   string `json:"content"`    // 命令内容
 	Timeout   int    `json:"timeout"`    // 超时时间(秒)
 }
@@ -108,23 +109,23 @@ func GenerateUUID() string {
 	// 生成更可靠的纯数字UUID，结合时间戳、随机数和主机特征
 	// 格式: 时间戳+随机数+主机名散列
 	timestamp := time.Now().UnixNano()
-	
+
 	// 生成8位随机数字
 	rand.Seed(time.Now().UnixNano())
 	randomNum := rand.Intn(100000000)
-	
+
 	// 获取主机名作为额外标识
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = "unknown"
 	}
-	
+
 	// 计算主机名的简单哈希值（最后4位）
 	hostHash := int64(0)
 	for _, c := range hostname {
 		hostHash = (hostHash*31 + int64(c)) % 10000
 	}
-	
+
 	// 组合成最终纯数字UUID
 	return fmt.Sprintf("%d%08d%04d", timestamp, randomNum, hostHash)
 }
@@ -134,11 +135,11 @@ func GenerateCommandID() string {
 	// 生成命令ID，使用与UUID不同的格式以区分
 	// 格式: CMD-时间戳-随机数
 	timestamp := time.Now().UnixNano() / 1000000 // 毫秒时间戳
-	
+
 	// 生成6位随机数字
 	rand.Seed(time.Now().UnixNano())
 	randomNum := rand.Intn(1000000)
-	
+
 	// 组合成命令ID
 	return fmt.Sprintf("CMD%d%06d", timestamp, randomNum)
-} 
+}

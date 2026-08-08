@@ -83,8 +83,6 @@ func startCLI(s *server.Server) {
 			fmt.Println("可用命令:")
 			fmt.Println("  list              - 列出所有已连接的Agent")
 			fmt.Println("  info <agent_id>   - 显示指定Agent的详细信息")
-			fmt.Println("  shell <agent_id> <command> - 在指定Agent上执行shell命令")
-			fmt.Println("  script <agent_id> <script> - 在指定Agent上执行脚本")
 			fmt.Println("  report <agent_id> <type>   - 请求Agent进行被动上报")
 			fmt.Println("  exit              - 退出服务器")
 
@@ -125,36 +123,6 @@ func startCLI(s *server.Server) {
 				fmt.Printf("  %s: %v\n", k, v)
 			}
 
-		case "shell":
-			if len(parts) < 3 {
-				fmt.Println("用法: shell <agent_id> <command>")
-				continue
-			}
-			agentID := parts[1]
-			command := strings.Join(parts[2:], " ")
-
-			commandID, err := s.SendCommand(agentID, "shell", command, 30)
-			if err != nil {
-				fmt.Printf("发送命令失败: %v\n", err)
-				continue
-			}
-			fmt.Printf("命令已发送，CommandID: %s\n", commandID)
-
-		case "script":
-			if len(parts) < 3 {
-				fmt.Println("用法: script <agent_id> <script_content>")
-				continue
-			}
-			agentID := parts[1]
-			script := strings.Join(parts[2:], " ")
-
-			commandID, err := s.SendCommand(agentID, "script", script, 60)
-			if err != nil {
-				fmt.Printf("发送脚本失败: %v\n", err)
-				continue
-			}
-			fmt.Printf("脚本已发送，CommandID: %s\n", commandID)
-
 		case "report":
 			if len(parts) < 3 {
 				fmt.Println("用法: report <agent_id> <report_type>")
@@ -181,4 +149,4 @@ func startCLI(s *server.Server) {
 			fmt.Println("输入'help'查看可用命令")
 		}
 	}
-} 
+}

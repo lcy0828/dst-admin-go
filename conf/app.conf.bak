@@ -25,7 +25,7 @@ DST_SERVER_MODE = 64
 # 监听地址
 LISTEN_ADDR = :8081
 # 通信安全密钥
-SECURITY_KEY =  KZ50c+J4whcHLociKVAZPe9aPK6ySJODdUSycCI2wB4=
+SECURITY_KEY =
 
 # 其他配置
 [misc]
@@ -38,12 +38,12 @@ SETUP    = complete
 
 [app]
 PAGE_SIZE  = 10
-JWT_SECRET = 23347$040412
+JWT_SECRET =
 
 # [database]
 # TYPE = mysql
 # USER = dont
-# PASSWORD = 001011
+# PASSWORD =
 # #127.0.0.1:3306
 # HOST = 192.168.2.12:3306
 # NAME = dont
