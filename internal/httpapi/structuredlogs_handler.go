@@ -18,6 +18,7 @@ type StructuredLogService interface {
 	List(string, structuredlogs.ListFilter) (structuredlogs.List, error)
 	WorldTargets(string) ([]rooms.World, error)
 	RefreshWorld(context.Context, string, string) (structuredlogs.RefreshResult, error)
+	ClearWorld(string, string) (structuredlogs.ClearResult, error)
 	Rules(string) ([]structuredlogs.Rule, error)
 	CreateRule(string, structuredlogs.RuleInput) (structuredlogs.Rule, error)
 	UpdateRule(string, string, structuredlogs.RuleInput) (structuredlogs.Rule, error)
@@ -38,12 +39,29 @@ func (h *StructuredLogHandler) Register(v2 *gin.RouterGroup) {
 	logs := v2.Group("/rooms/:roomId/structured-logs")
 	logs.GET("", h.list)
 	logs.POST("/actions/refresh", h.refresh)
+	logs.POST("/actions/clear", h.clear)
 	rules := v2.Group("/rooms/:roomId/log-rules")
 	rules.GET("", h.rules)
 	rules.POST("", h.createRule)
 	rules.PUT("/:ruleId", h.updateRule)
 	rules.DELETE("/:ruleId", h.deleteRule)
 	rules.POST("/actions/test", h.testRule)
+}
+
+func (h *StructuredLogHandler) clear(c *gin.Context) {
+	var input struct {
+		WorldID string `json:"worldId" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请选择要清空日志的世界", nil)
+		return
+	}
+	value, err := h.logs.ClearWorld(c.Param("roomId"), input.WorldID)
+	if err != nil {
+		structuredLogFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
 }
 
 func (h *StructuredLogHandler) list(c *gin.Context) {

@@ -106,3 +106,50 @@ func TestServiceRequiresManagedRoom(t *testing.T) {
 		t.Fatalf("unmanaged list error = %v", err)
 	}
 }
+
+func TestServicePreservesMultiLineHeadTailCustomTypesAndClear(t *testing.T) {
+	store := newStructuredLogStore(t)
+	service, err := NewService(structuredLogCatalog{managed: true}, structuredRawLogs{snapshots: map[string]logstream.Snapshot{
+		"master": {Lines: []logstream.Line{
+			{Cursor: 10, Text: "[00:00:01]: Error: first"},
+			{Cursor: 20, Text: "[00:00:02]: Error: second"},
+			{Cursor: 30, Text: "[00:00:03]: ordinary"},
+			{Cursor: 40, Text: "[00:00:04]: BEGIN stack"},
+			{Cursor: 50, Text: "[00:00:05]: detail"},
+			{Cursor: 60, Text: "[00:00:06]: END"},
+			{Cursor: 70, Text: "[00:00:07]: after"},
+		}},
+	}}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateRule("room", RuleInput{Name: "连续错误", LogType: TypeError, Pattern: "Error:", Enabled: true, Priority: 100, MatchMode: MatchModeMultiLine}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateRule("room", RuleInput{Name: "堆栈", LogType: LogType("连接事件"), Pattern: "BEGIN", Enabled: true, Priority: 200, MatchMode: MatchModeHeadTail, TailPattern: "END$"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RefreshWorld(context.Background(), "room", "master"); err != nil {
+		t.Fatal(err)
+	}
+	errorsList, err := service.List("room", ListFilter{Type: TypeError, Limit: 50})
+	if err != nil || errorsList.Total != 1 || errorsList.Items[0].Content != "Error: first\nError: second" {
+		t.Fatalf("multi-line entries = %#v, %v", errorsList, err)
+	}
+	stack, err := service.List("room", ListFilter{Type: LogType("连接事件"), Limit: 50})
+	if err != nil || stack.Total != 1 || stack.Items[0].RawContent != "[00:00:04]: BEGIN stack\n[00:00:05]: detail\n[00:00:06]: END" {
+		t.Fatalf("head-tail entries = %#v, %v", stack, err)
+	}
+	tested, err := service.TestRule("room", RuleTestInput{RuleInput: RuleInput{Name: "堆栈", LogType: LogType("连接事件"), Pattern: "BEGIN", MatchMode: MatchModeHeadTail, TailPattern: "END$"}, Sample: "BEGIN stack\ndetail\nEND"})
+	if err != nil || !tested.Matched {
+		t.Fatalf("head-tail test = %#v, %v", tested, err)
+	}
+	cleared, err := service.ClearWorld("room", "master")
+	if err != nil || cleared.Deleted != 4 {
+		t.Fatalf("clear = %#v, %v", cleared, err)
+	}
+	list, err := service.List("room", ListFilter{Limit: 50})
+	if err != nil || list.Total != 0 || list.LastRefreshedAt != nil {
+		t.Fatalf("list after clear = %#v, %v", list, err)
+	}
+}

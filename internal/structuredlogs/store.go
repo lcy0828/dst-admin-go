@@ -36,6 +36,8 @@ type ruleRecord struct {
 	Regex       bool
 	Enabled     bool
 	Priority    int
+	MatchMode   string
+	TailPattern string `gorm:"type:text"`
 	BuiltIn     bool
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
@@ -126,6 +128,32 @@ func (s *Store) ReplaceWorldSnapshot(roomID, worldID, worldName string, entries 
 		return err
 	}
 	return tx.Commit().Error
+}
+
+func (s *Store) ClearWorldSnapshot(roomID, worldID string) (int64, error) {
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return 0, tx.Error
+	}
+	defer func() {
+		if recoverValue := recover(); recoverValue != nil {
+			tx.Rollback()
+			panic(recoverValue)
+		}
+	}()
+	deleted := tx.Table(s.entriesTable).Where("room_id = ? AND world_id = ?", roomID, worldID).Delete(&entryRecord{})
+	if deleted.Error != nil {
+		tx.Rollback()
+		return 0, deleted.Error
+	}
+	if err := tx.Table(s.refreshTable).Where("room_id = ? AND world_id = ?", roomID, worldID).Delete(&refreshRecord{}).Error; err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	if err := tx.Commit().Error; err != nil {
+		return 0, err
+	}
+	return deleted.RowsAffected, nil
 }
 
 func (s *Store) List(roomID string, filter ListFilter) ([]Entry, int, error) {
@@ -220,7 +248,8 @@ func (s *Store) UpdateRule(rule Rule) (Rule, error) {
 	record := ruleToRecord(rule)
 	result := s.db.Table(s.rulesTable).Where("room_id = ? AND id = ?", rule.RoomID, rule.ID).Updates(map[string]interface{}{
 		"name": rule.Name, "description": rule.Description, "log_type": string(rule.LogType), "pattern": rule.Pattern,
-		"regex": rule.Regex, "enabled": rule.Enabled, "priority": rule.Priority, "updated_at": rule.UpdatedAt,
+		"regex": rule.Regex, "enabled": rule.Enabled, "priority": rule.Priority, "match_mode": string(rule.MatchMode),
+		"tail_pattern": rule.TailPattern, "updated_at": rule.UpdatedAt,
 	})
 	if result.Error != nil {
 		return Rule{}, result.Error
@@ -247,11 +276,15 @@ func entryFromRecord(record entryRecord) Entry {
 }
 
 func ruleToRecord(rule Rule) ruleRecord {
-	return ruleRecord{ID: rule.ID, RoomID: rule.RoomID, Name: rule.Name, Description: rule.Description, LogType: string(rule.LogType), Pattern: rule.Pattern, Regex: rule.Regex, Enabled: rule.Enabled, Priority: rule.Priority, BuiltIn: rule.BuiltIn, CreatedAt: rule.CreatedAt, UpdatedAt: rule.UpdatedAt}
+	return ruleRecord{ID: rule.ID, RoomID: rule.RoomID, Name: rule.Name, Description: rule.Description, LogType: string(rule.LogType), Pattern: rule.Pattern, Regex: rule.Regex, Enabled: rule.Enabled, Priority: rule.Priority, MatchMode: string(rule.MatchMode), TailPattern: rule.TailPattern, BuiltIn: rule.BuiltIn, CreatedAt: rule.CreatedAt, UpdatedAt: rule.UpdatedAt}
 }
 
 func ruleFromRecord(record ruleRecord) Rule {
-	return Rule{ID: record.ID, RoomID: record.RoomID, Name: record.Name, Description: record.Description, LogType: LogType(record.LogType), Pattern: record.Pattern, Regex: record.Regex, Enabled: record.Enabled, Priority: record.Priority, BuiltIn: record.BuiltIn, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt}
+	matchMode := MatchMode(record.MatchMode)
+	if matchMode == "" {
+		matchMode = MatchModeSingle
+	}
+	return Rule{ID: record.ID, RoomID: record.RoomID, Name: record.Name, Description: record.Description, LogType: LogType(record.LogType), Pattern: record.Pattern, Regex: record.Regex, Enabled: record.Enabled, Priority: record.Priority, MatchMode: matchMode, TailPattern: record.TailPattern, BuiltIn: record.BuiltIn, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt}
 }
 
 func escapeLike(value string) string {

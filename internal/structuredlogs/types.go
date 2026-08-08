@@ -13,6 +13,14 @@ var (
 	ErrRoomNotManaged = errors.New("room must be managed before structured logs can be used")
 )
 
+type MatchMode string
+
+const (
+	MatchModeSingle    MatchMode = "single"
+	MatchModeMultiLine MatchMode = "multi_line"
+	MatchModeHeadTail  MatchMode = "head_tail"
+)
+
 type LogType string
 
 const (
@@ -69,19 +77,23 @@ type Rule struct {
 	Regex       bool      `json:"regex"`
 	Enabled     bool      `json:"enabled"`
 	Priority    int       `json:"priority"`
+	MatchMode   MatchMode `json:"matchMode"`
+	TailPattern string    `json:"tailPattern"`
 	BuiltIn     bool      `json:"builtIn"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 type RuleInput struct {
-	Name        string  `json:"name"`
-	Description string  `json:"description"`
-	LogType     LogType `json:"logType"`
-	Pattern     string  `json:"pattern"`
-	Regex       bool    `json:"regex"`
-	Enabled     bool    `json:"enabled"`
-	Priority    int     `json:"priority"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	LogType     LogType   `json:"logType"`
+	Pattern     string    `json:"pattern"`
+	Regex       bool      `json:"regex"`
+	Enabled     bool      `json:"enabled"`
+	Priority    int       `json:"priority"`
+	MatchMode   MatchMode `json:"matchMode"`
+	TailPattern string    `json:"tailPattern"`
 }
 
 type RuleTestInput struct {
@@ -99,6 +111,13 @@ type RefreshResult struct {
 	Count     int    `json:"count"`
 	Truncated bool   `json:"truncated"`
 	Message   string `json:"message"`
+}
+
+type ClearResult struct {
+	RoomID    string    `json:"roomId"`
+	WorldID   string    `json:"worldId"`
+	Deleted   int64     `json:"deleted"`
+	ClearedAt time.Time `json:"clearedAt"`
 }
 
 type FieldError struct{ Fields map[string]string }

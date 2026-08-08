@@ -1868,6 +1868,18 @@ paths:
         "202": { description: Structured log refresh job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/structured-logs/actions/clear:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Logs]
+      operationId: clearStructuredLogs
+      summary: Delete one world's derived structured-log snapshot and refresh cursor
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogClearInput" } } } }
+      responses:
+        "200": { description: Derived snapshot cleared, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogClearResultEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /rooms/{roomId}/log-rules:
     parameters: [{ $ref: "#/components/parameters/RoomID" }]
     get:
@@ -4242,7 +4254,11 @@ components:
         meta: { $ref: "#/components/schemas/Meta" }
     StructuredLogType:
       type: string
-      enum: [system, chat, player, entity, world, error, warning, unknown]
+      minLength: 1
+      maxLength: 48
+    StructuredLogMatchMode:
+      type: string
+      enum: [single, multi_line, head_tail]
     StructuredLogEntry:
       type: object
       additionalProperties: false
@@ -4263,7 +4279,7 @@ components:
         observedAt: { type: string, format: date-time }
     StructuredLogCounts:
       type: object
-      additionalProperties: false
+      additionalProperties: { type: integer, minimum: 0 }
       required: [system, chat, player, entity, world, error, warning, unknown]
       properties:
         system: { type: integer, minimum: 0 }
@@ -4295,7 +4311,7 @@ components:
     StructuredLogRule:
       type: object
       additionalProperties: false
-      required: [id, roomId, name, description, logType, pattern, regex, enabled, priority, builtIn, createdAt, updatedAt]
+      required: [id, roomId, name, description, logType, pattern, regex, enabled, priority, matchMode, tailPattern, builtIn, createdAt, updatedAt]
       properties:
         id: { type: string }
         roomId: { type: string }
@@ -4306,6 +4322,8 @@ components:
         regex: { type: boolean }
         enabled: { type: boolean }
         priority: { type: integer, minimum: 0, maximum: 1000 }
+        matchMode: { $ref: "#/components/schemas/StructuredLogMatchMode" }
+        tailPattern: { type: string, maxLength: 512 }
         builtIn: { type: boolean }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
@@ -4321,6 +4339,8 @@ components:
         regex: { type: boolean }
         enabled: { type: boolean }
         priority: { type: integer, minimum: 0, maximum: 1000 }
+        matchMode: { $ref: "#/components/schemas/StructuredLogMatchMode", default: single }
+        tailPattern: { type: string, maxLength: 512, default: "" }
     StructuredLogRuleEnvelope:
       type: object
       required: [data, error, meta]
@@ -4354,6 +4374,8 @@ components:
         regex: { type: boolean }
         enabled: { type: boolean }
         priority: { type: integer, minimum: 0, maximum: 1000 }
+        matchMode: { $ref: "#/components/schemas/StructuredLogMatchMode", default: single }
+        tailPattern: { type: string, maxLength: 512, default: "" }
         sample: { type: string, maxLength: 65536 }
     StructuredLogRuleTestResult:
       type: object
@@ -4367,6 +4389,28 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/StructuredLogRuleTestResult" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    StructuredLogClearInput:
+      type: object
+      additionalProperties: false
+      required: [worldId]
+      properties:
+        worldId: { type: string }
+    StructuredLogClearResult:
+      type: object
+      additionalProperties: false
+      required: [roomId, worldId, deleted, clearedAt]
+      properties:
+        roomId: { type: string }
+        worldId: { type: string }
+        deleted: { type: integer, format: int64, minimum: 0 }
+        clearedAt: { type: string, format: date-time }
+    StructuredLogClearResultEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/StructuredLogClearResult" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     SystemCPUStatus:

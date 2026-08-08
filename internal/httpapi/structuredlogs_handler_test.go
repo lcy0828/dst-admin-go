@@ -26,6 +26,9 @@ func (structuredLogHandlerService) WorldTargets(string) ([]rooms.World, error) {
 func (structuredLogHandlerService) RefreshWorld(context.Context, string, string) (structuredlogs.RefreshResult, error) {
 	return structuredlogs.RefreshResult{Count: 2, Message: "已解析 2 行日志"}, nil
 }
+func (structuredLogHandlerService) ClearWorld(_, worldID string) (structuredlogs.ClearResult, error) {
+	return structuredlogs.ClearResult{RoomID: "room", WorldID: worldID, Deleted: 2}, nil
+}
 func (structuredLogHandlerService) Rules(string) ([]structuredlogs.Rule, error) {
 	return []structuredlogs.Rule{{ID: "rule", Name: "规则", LogType: structuredlogs.TypeSystem}}, nil
 }
@@ -89,6 +92,11 @@ func TestStructuredLogHTTPReadRulesAndRefreshJob(t *testing.T) {
 	job := waitForStructuredLogJob(t, jobService, responseData(t, response)["id"].(string))
 	if job.Kind != "log.structured.refresh" || job.Outcome != jobs.OutcomeFull {
 		t.Fatalf("unexpected structured log job: %#v", job)
+	}
+	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room/structured-logs/actions/clear", map[string]interface{}{"worldId": "master"}, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if responseData(t, response)["deleted"].(float64) != 2 {
+		t.Fatalf("unexpected clear response: %s", response.Body.String())
 	}
 }
 

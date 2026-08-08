@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"dont/internal/logstream"
@@ -32,8 +33,9 @@ type RawLogs interface {
 }
 
 type compiledRule struct {
-	rule    Rule
-	pattern *regexp.Regexp
+	rule        Rule
+	pattern     *regexp.Regexp
+	tailPattern *regexp.Regexp
 }
 
 type Service struct {
@@ -108,14 +110,9 @@ func (s *Service) RefreshWorld(ctx context.Context, roomID, worldID string) (Ref
 		return RefreshResult{}, err
 	}
 	observedAt := s.now().UTC()
-	entries := make([]Entry, 0, len(snapshot.Lines))
-	for index, line := range snapshot.Lines {
-		if index%100 == 0 {
-			if err := ctx.Err(); err != nil {
-				return RefreshResult{}, err
-			}
-		}
-		entries = append(entries, classify(line, world, rules, observedAt))
+	entries, err := classifySnapshot(ctx, snapshot.Lines, world, rules, observedAt)
+	if err != nil {
+		return RefreshResult{}, err
 	}
 	if err := s.store.ReplaceWorldSnapshot(room.ID, world.ID, world.Name, entries, observedAt); err != nil {
 		return RefreshResult{}, err
@@ -125,6 +122,25 @@ func (s *Service) RefreshWorld(ctx context.Context, roomID, worldID string) (Ref
 		message += "（仅保留受限尾部快照）"
 	}
 	return RefreshResult{WorldID: world.ID, Count: len(entries), Truncated: snapshot.Truncated, Message: message}, nil
+}
+
+func (s *Service) ClearWorld(roomID, worldID string) (ClearResult, error) {
+	room, err := s.managedRoom(roomID)
+	if err != nil {
+		return ClearResult{}, err
+	}
+	world, err := s.rooms.World(room.ID, strings.TrimSpace(worldID))
+	if err != nil {
+		return ClearResult{}, err
+	}
+	lock := s.lock(room.ID + "\x00" + world.ID)
+	lock.Lock()
+	defer lock.Unlock()
+	deleted, err := s.store.ClearWorldSnapshot(room.ID, world.ID)
+	if err != nil {
+		return ClearResult{}, err
+	}
+	return ClearResult{RoomID: room.ID, WorldID: world.ID, Deleted: deleted, ClearedAt: s.now().UTC()}, nil
 }
 
 func (s *Service) Rules(roomID string) ([]Rule, error) {
@@ -151,7 +167,7 @@ func (s *Service) CreateRule(roomID string, input RuleInput) (Rule, error) {
 	if err != nil {
 		return Rule{}, err
 	}
-	return s.store.CreateRule(Rule{ID: id, RoomID: room.ID, Name: input.Name, Description: input.Description, LogType: input.LogType, Pattern: input.Pattern, Regex: input.Regex, Enabled: input.Enabled, Priority: input.Priority})
+	return s.store.CreateRule(Rule{ID: id, RoomID: room.ID, Name: input.Name, Description: input.Description, LogType: input.LogType, Pattern: input.Pattern, Regex: input.Regex, Enabled: input.Enabled, Priority: input.Priority, MatchMode: input.MatchMode, TailPattern: input.TailPattern})
 }
 
 func (s *Service) UpdateRule(roomID, ruleID string, input RuleInput) (Rule, error) {
@@ -169,6 +185,7 @@ func (s *Service) UpdateRule(roomID, ruleID string, input RuleInput) (Rule, erro
 	}
 	current.Name, current.Description, current.LogType = input.Name, input.Description, input.LogType
 	current.Pattern, current.Regex, current.Enabled, current.Priority = input.Pattern, input.Regex, input.Enabled, input.Priority
+	current.MatchMode, current.TailPattern = input.MatchMode, input.TailPattern
 	return s.store.UpdateRule(current)
 }
 
@@ -191,11 +208,26 @@ func (s *Service) TestRule(roomID string, input RuleTestInput) (RuleTestResult, 
 	if err != nil {
 		return RuleTestResult{}, err
 	}
-	compiled, err := compileRule(Rule{Pattern: rule.Pattern, Regex: rule.Regex})
+	compiled, err := compileRule(Rule{Pattern: rule.Pattern, Regex: rule.Regex, MatchMode: rule.MatchMode, TailPattern: rule.TailPattern})
 	if err != nil {
 		return RuleTestResult{}, err
 	}
-	return RuleTestResult{Matched: matches(compiled, input.Sample), Content: stripSourcePrefix(input.Sample)}, nil
+	lines := strings.Split(input.Sample, "\n")
+	matched := len(lines) > 0 && matches(compiled, lines[0])
+	content := ""
+	if matched {
+		content = stripSourcePrefixes(lines)
+		if rule.MatchMode == MatchModeHeadTail {
+			matched = false
+			for _, line := range lines[1:] {
+				if compiled.tailPattern.MatchString(line) {
+					matched = true
+					break
+				}
+			}
+		}
+	}
+	return RuleTestResult{Matched: matched, Content: content}, nil
 }
 
 func (s *Service) managedRoom(roomID string) (rooms.Room, error) {
@@ -269,7 +301,56 @@ func (s *Service) lock(key string) *sync.Mutex {
 	return s.locks[key]
 }
 
-func classify(line logstream.Line, world rooms.World, rules []compiledRule, observedAt time.Time) Entry {
+func classifySnapshot(ctx context.Context, lines []logstream.Line, world rooms.World, rules []compiledRule, observedAt time.Time) ([]Entry, error) {
+	entries := make([]Entry, 0, len(lines))
+	for index := 0; index < len(lines); index++ {
+		if index%100 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		entry, rule := classifyLine(lines[index], world, rules, observedAt)
+		if rule == nil || rule.rule.MatchMode == MatchModeSingle {
+			entries = append(entries, entry)
+			continue
+		}
+		rawLines := []string{entry.RawContent}
+		contentLines := []string{entry.Content}
+		switch rule.rule.MatchMode {
+		case MatchModeMultiLine:
+			for next := index + 1; next < len(lines); next++ {
+				if strings.TrimSpace(lines[next].Text) == "" {
+					break
+				}
+				nextEntry, nextRule := classifyLine(lines[next], world, rules, observedAt)
+				if nextRule == nil || nextRule.rule.LogType != rule.rule.LogType {
+					break
+				}
+				rawLines = append(rawLines, nextEntry.RawContent)
+				contentLines = append(contentLines, nextEntry.Content)
+				index = next
+			}
+		case MatchModeHeadTail:
+			for next := index + 1; next < len(lines); next++ {
+				if strings.TrimSpace(lines[next].Text) == "" {
+					continue
+				}
+				rawLines = append(rawLines, lines[next].Text)
+				contentLines = append(contentLines, stripSourcePrefix(lines[next].Text))
+				index = next
+				if rule.tailPattern.MatchString(lines[next].Text) {
+					break
+				}
+			}
+		}
+		entry.RawContent = strings.Join(rawLines, "\n")
+		entry.Content = strings.Join(contentLines, "\n")
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+func classifyLine(line logstream.Line, world rooms.World, rules []compiledRule, observedAt time.Time) (Entry, *compiledRule) {
 	entry := Entry{RoomID: world.RoomID, WorldID: world.ID, WorldName: world.Name, Type: TypeUnknown, Content: stripSourcePrefix(line.Text), RawContent: line.Text, SourceCursor: line.Cursor, ObservedAt: observedAt}
 	if match := sourcePrefix.FindStringSubmatch(line.Text); len(match) == 2 {
 		entry.SourceTimestamp = match[1]
@@ -278,17 +359,25 @@ func classify(line logstream.Line, world rooms.World, rules []compiledRule, obse
 			entry.OccurredAt = &value
 		}
 	}
-	for _, rule := range rules {
-		if matches(rule, line.Text) {
-			entry.Type, entry.RuleID, entry.RuleName = rule.rule.LogType, rule.rule.ID, rule.rule.Name
-			break
+	for index := range rules {
+		if matches(rules[index], line.Text) {
+			entry.Type, entry.RuleID, entry.RuleName = rules[index].rule.LogType, rules[index].rule.ID, rules[index].rule.Name
+			return entry, &rules[index]
 		}
 	}
-	return entry
+	return entry, nil
 }
 
 func stripSourcePrefix(value string) string {
 	return strings.TrimSpace(sourcePrefix.ReplaceAllString(strings.TrimSpace(value), ""))
+}
+
+func stripSourcePrefixes(lines []string) string {
+	values := make([]string, 0, len(lines))
+	for _, line := range lines {
+		values = append(values, stripSourcePrefix(line))
+	}
+	return strings.Join(values, "\n")
 }
 
 func matches(rule compiledRule, sample string) bool {
@@ -307,11 +396,22 @@ func compileRule(rule Rule) (compiledRule, error) {
 		}
 		compiled.pattern = pattern
 	}
+	if rule.MatchMode == MatchModeHeadTail {
+		pattern, err := regexp.Compile(rule.TailPattern)
+		if err != nil {
+			return compiledRule{}, &FieldError{Fields: map[string]string{"tailPattern": "尾行正则表达式无效：" + err.Error()}}
+		}
+		compiled.tailPattern = pattern
+	}
 	return compiled, nil
 }
 
 func normalizeRule(input RuleInput) (RuleInput, error) {
 	input.Name, input.Description, input.Pattern = strings.TrimSpace(input.Name), strings.TrimSpace(input.Description), strings.TrimSpace(input.Pattern)
+	input.TailPattern = strings.TrimSpace(input.TailPattern)
+	if input.MatchMode == "" {
+		input.MatchMode = MatchModeSingle
+	}
 	fields := make(map[string]string)
 	if input.Name == "" || len([]rune(input.Name)) > 80 {
 		fields["name"] = "名称必须为 1-80 个字符"
@@ -328,6 +428,18 @@ func normalizeRule(input RuleInput) (RuleInput, error) {
 	if input.Priority < 0 || input.Priority > 1000 {
 		fields["priority"] = "优先级必须为 0-1000"
 	}
+	if input.MatchMode != MatchModeSingle && input.MatchMode != MatchModeMultiLine && input.MatchMode != MatchModeHeadTail {
+		fields["matchMode"] = "匹配模式必须是 single、multi_line 或 head_tail"
+	}
+	if input.MatchMode == MatchModeHeadTail {
+		if input.TailPattern == "" || len(input.TailPattern) > 512 || !utf8.ValidString(input.TailPattern) || strings.ContainsRune(input.TailPattern, '\x00') {
+			fields["tailPattern"] = "首尾行匹配必须提供 1-512 字节的有效尾行正则"
+		} else if _, err := regexp.Compile(input.TailPattern); err != nil {
+			fields["tailPattern"] = "尾行正则表达式无效：" + err.Error()
+		}
+	} else {
+		input.TailPattern = ""
+	}
 	if len(fields) == 0 && input.Regex {
 		if _, err := regexp.Compile(input.Pattern); err != nil {
 			fields["pattern"] = "正则表达式无效：" + err.Error()
@@ -340,12 +452,16 @@ func normalizeRule(input RuleInput) (RuleInput, error) {
 }
 
 func validType(value LogType) bool {
-	for _, item := range allTypes() {
-		if item == value {
-			return true
+	runes := []rune(strings.TrimSpace(string(value)))
+	if len(runes) == 0 || len(runes) > 48 {
+		return false
+	}
+	for _, value := range runes {
+		if !unicode.IsLetter(value) && !unicode.IsDigit(value) && value != '_' && value != '-' && value != '.' {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func allTypes() []LogType {
