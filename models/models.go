@@ -4,6 +4,8 @@ import (
 	"dont/pkg/setting"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 
 	"github.com/jinzhu/gorm"
 	//_ "github.com/jinzhu/gorm/dialects/mysql"
@@ -41,6 +43,13 @@ func init() {
 	tablePrefix = sec.Key("TABLE_PREFIX").String()
 	dbType = sec.Key("TYPE").String()
 	path = sec.Key("PATH").String()
+	if override := os.Getenv("DST_ADMIN_DATABASE_PATH"); override != "" {
+		path = override
+	} else if strings.HasSuffix(os.Args[0], ".test") {
+		path = ":memory:"
+	} else {
+		path = setting.ResolvePath(path)
+	}
 
 	//db, err = gorm.Open(dbType, fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8&parseTime=True&loc=Local",
 	//	user,
@@ -58,15 +67,22 @@ func init() {
 	}
 
 	db.SingularTable(true)
-	db.LogMode(true)
+	db.LogMode(setting.RunMode == "debug" && os.Getenv("DST_ADMIN_SQL_LOG") == "1")
 	db.DB().SetMaxIdleConns(10)
-	db.DB().SetMaxOpenConns(100)
+	if path == ":memory:" {
+		db.DB().SetMaxOpenConns(1)
+	} else {
+		db.DB().SetMaxOpenConns(100)
+	}
 
 	// 初始化游戏日志相关表结构
 	initGameLogTables()
 
 	// 初始化定时任务相关表结构
 	InitCronTables()
+
+	// 路由包会在 init 阶段加载内置命令，表结构必须先准备好。
+	InitCommandTable()
 }
 
 func CloseDB() {
