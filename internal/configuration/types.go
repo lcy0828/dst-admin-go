@@ -75,14 +75,30 @@ type RoomValues struct {
 	ClusterName        string `json:"clusterName"`
 	ClusterDescription string `json:"clusterDescription"`
 	ClusterPassword    string `json:"clusterPassword"`
+	ClusterIntention   string `json:"clusterIntention"`
+	ClusterLanguage    string `json:"clusterLanguage"`
 	GameMode           string `json:"gameMode"`
 	MaxPlayers         int    `json:"maxPlayers"`
 	PvP                bool   `json:"pvp"`
 	PauseWhenEmpty     bool   `json:"pauseWhenEmpty"`
 	VoteEnabled        bool   `json:"voteEnabled"`
+	VoteKickEnabled    bool   `json:"voteKickEnabled"`
 	ConsoleEnabled     bool   `json:"consoleEnabled"`
 	LANOnly            bool   `json:"lanOnly"`
 	Offline            bool   `json:"offline"`
+	WhitelistSlots     int    `json:"whitelistSlots"`
+	TickRate           int    `json:"tickRate"`
+	AutosaverEnabled   bool   `json:"autosaverEnabled"`
+	IdleTimeout        int    `json:"idleTimeout"`
+	MaxSnapshots       int    `json:"maxSnapshots"`
+	ShardEnabled       bool   `json:"shardEnabled"`
+	BindIP             string `json:"bindIp"`
+	MasterIP           string `json:"masterIp"`
+	MasterPort         int    `json:"masterPort"`
+	ClusterKey         string `json:"clusterKey"`
+	SteamGroupOnly     bool   `json:"steamGroupOnly"`
+	SteamGroupID       int64  `json:"steamGroupId"`
+	SteamGroupAdmins   bool   `json:"steamGroupAdmins"`
 }
 
 type RoomConfig struct {
@@ -99,10 +115,13 @@ type RoomUpdateRequest struct {
 }
 
 type WorldServerValues struct {
-	ServerPort         int  `json:"serverPort"`
-	AuthenticationPort int  `json:"authenticationPort"`
-	MasterServerPort   int  `json:"masterServerPort"`
-	EncodeUserPath     bool `json:"encodeUserPath"`
+	ServerPort         int    `json:"serverPort"`
+	IsMaster           bool   `json:"isMaster"`
+	ShardName          string `json:"shardName"`
+	ShardID            int    `json:"shardId"`
+	AuthenticationPort int    `json:"authenticationPort"`
+	MasterServerPort   int    `json:"masterServerPort"`
+	EncodeUserPath     bool   `json:"encodeUserPath"`
 }
 
 type OverrideSchema struct {

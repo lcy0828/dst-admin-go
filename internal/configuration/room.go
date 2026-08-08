@@ -19,22 +19,44 @@ var roomSchema = []FieldSchema{
 	{Key: "clusterName", Group: "network", Label: "房间名称", Type: "string", Required: true},
 	{Key: "clusterDescription", Group: "network", Label: "房间描述", Type: "textarea"},
 	{Key: "clusterPassword", Group: "network", Label: "房间密码", Type: "password", Secret: true},
+	{Key: "clusterIntention", Group: "network", Label: "游戏偏好", Type: "select", Options: []Option{{Value: "cooperative", Label: "合作"}, {Value: "competitive", Label: "竞争"}, {Value: "social", Label: "社交"}, {Value: "madness", Label: "疯狂"}}},
+	{Key: "clusterLanguage", Group: "network", Label: "服务器语言", Type: "select", Options: []Option{{Value: "zh", Label: "中文"}, {Value: "en", Label: "英文"}}},
 	{Key: "gameMode", Group: "gameplay", Label: "游戏模式", Type: "select", Required: true, Options: []Option{{Value: "survival", Label: "生存"}, {Value: "endless", Label: "无尽"}, {Value: "wilderness", Label: "荒野"}}},
 	{Key: "maxPlayers", Group: "gameplay", Label: "玩家上限", Type: "number", Required: true, Minimum: intPointer(1), Maximum: intPointer(64)},
 	{Key: "pvp", Group: "gameplay", Label: "玩家对战", Type: "boolean"},
 	{Key: "pauseWhenEmpty", Group: "gameplay", Label: "无人时暂停", Type: "boolean"},
 	{Key: "voteEnabled", Group: "gameplay", Label: "启用投票", Type: "boolean"},
+	{Key: "voteKickEnabled", Group: "gameplay", Label: "投票踢人", Type: "boolean"},
 	{Key: "consoleEnabled", Group: "system", Label: "启用控制台", Type: "boolean"},
 	{Key: "lanOnly", Group: "network", Label: "仅局域网", Type: "boolean"},
 	{Key: "offline", Group: "network", Label: "离线模式", Type: "boolean"},
+	{Key: "whitelistSlots", Group: "network", Label: "白名单预留位", Type: "number", Minimum: intPointer(0), Maximum: intPointer(64)},
+	{Key: "tickRate", Group: "network", Label: "通信频率", Type: "number", Minimum: intPointer(15), Maximum: intPointer(60)},
+	{Key: "autosaverEnabled", Group: "network", Label: "自动保存", Type: "boolean"},
+	{Key: "idleTimeout", Group: "network", Label: "挂机超时", Type: "number", Minimum: intPointer(0)},
+	{Key: "maxSnapshots", Group: "system", Label: "最大快照数", Type: "number", Minimum: intPointer(1)},
+	{Key: "shardEnabled", Group: "shard", Label: "开启服务器共享", Type: "boolean"},
+	{Key: "bindIp", Group: "shard", Label: "监听地址", Type: "string"},
+	{Key: "masterIp", Group: "shard", Label: "主服务器 IP", Type: "string"},
+	{Key: "masterPort", Group: "shard", Label: "主服务器端口", Type: "number", Minimum: intPointer(1), Maximum: intPointer(65535)},
+	{Key: "clusterKey", Group: "shard", Label: "分片连接密码", Type: "password", Secret: true},
+	{Key: "steamGroupOnly", Group: "steam", Label: "仅 Steam 组", Type: "boolean"},
+	{Key: "steamGroupId", Group: "steam", Label: "Steam 组 ID", Type: "number", Minimum: intPointer(0)},
+	{Key: "steamGroupAdmins", Group: "steam", Label: "组管理员权限", Type: "boolean"},
 }
 
 var roomKnownKeys = map[string]bool{
 	"GAMEPLAY\x00game_mode": true, "GAMEPLAY\x00max_players": true, "GAMEPLAY\x00pvp": true,
 	"GAMEPLAY\x00pause_when_empty": true, "GAMEPLAY\x00vote_enabled": true,
-	"NETWORK\x00cluster_name": true, "NETWORK\x00cluster_description": true, "NETWORK\x00cluster_password": true,
-	"NETWORK\x00lan_only_cluster": true, "NETWORK\x00offline_cluster": true,
-	"MISC\x00console_enabled": true,
+	"GAMEPLAY\x00vote_kick_enabled": true,
+	"NETWORK\x00cluster_name":       true, "NETWORK\x00cluster_description": true, "NETWORK\x00cluster_password": true,
+	"NETWORK\x00cluster_intention": true, "NETWORK\x00cluster_language": true,
+	"NETWORK\x00lan_only_cluster": true, "NETWORK\x00offline_cluster": true, "NETWORK\x00whitelist_slots": true,
+	"NETWORK\x00tick_rate": true, "NETWORK\x00autosaver_enabled": true, "NETWORK\x00idle_timeout": true,
+	"MISC\x00console_enabled": true, "MISC\x00max_snapshots": true,
+	"SHARD\x00shard_enabled": true, "SHARD\x00bind_ip": true, "SHARD\x00master_ip": true,
+	"SHARD\x00master_port": true, "SHARD\x00cluster_key": true,
+	"STEAM\x00steam_group_only": true, "STEAM\x00steam_group_id": true, "STEAM\x00steam_group_admins": true,
 }
 
 type roomDocument struct {
@@ -134,14 +156,30 @@ func loadRoomDocument(roomPath string) (roomDocument, error) {
 		ClusterName:        strings.TrimSpace(config.Section("NETWORK").Key("cluster_name").String()),
 		ClusterDescription: config.Section("NETWORK").Key("cluster_description").String(),
 		ClusterPassword:    config.Section("NETWORK").Key("cluster_password").String(),
+		ClusterIntention:   config.Section("NETWORK").Key("cluster_intention").MustString("cooperative"),
+		ClusterLanguage:    config.Section("NETWORK").Key("cluster_language").MustString("zh"),
 		GameMode:           config.Section("GAMEPLAY").Key("game_mode").MustString("survival"),
 		MaxPlayers:         config.Section("GAMEPLAY").Key("max_players").MustInt(6),
 		PvP:                config.Section("GAMEPLAY").Key("pvp").MustBool(false),
 		PauseWhenEmpty:     config.Section("GAMEPLAY").Key("pause_when_empty").MustBool(true),
 		VoteEnabled:        config.Section("GAMEPLAY").Key("vote_enabled").MustBool(true),
+		VoteKickEnabled:    config.Section("GAMEPLAY").Key("vote_kick_enabled").MustBool(false),
 		ConsoleEnabled:     config.Section("MISC").Key("console_enabled").MustBool(true),
 		LANOnly:            config.Section("NETWORK").Key("lan_only_cluster").MustBool(false),
 		Offline:            config.Section("NETWORK").Key("offline_cluster").MustBool(false),
+		WhitelistSlots:     config.Section("NETWORK").Key("whitelist_slots").MustInt(0),
+		TickRate:           config.Section("NETWORK").Key("tick_rate").MustInt(15),
+		AutosaverEnabled:   config.Section("NETWORK").Key("autosaver_enabled").MustBool(true),
+		IdleTimeout:        config.Section("NETWORK").Key("idle_timeout").MustInt(0),
+		MaxSnapshots:       config.Section("MISC").Key("max_snapshots").MustInt(10),
+		ShardEnabled:       config.Section("SHARD").Key("shard_enabled").MustBool(true),
+		BindIP:             config.Section("SHARD").Key("bind_ip").MustString("127.0.0.1"),
+		MasterIP:           config.Section("SHARD").Key("master_ip").MustString("127.0.0.1"),
+		MasterPort:         config.Section("SHARD").Key("master_port").MustInt(10889),
+		ClusterKey:         config.Section("SHARD").Key("cluster_key").String(),
+		SteamGroupOnly:     config.Section("STEAM").Key("steam_group_only").MustBool(false),
+		SteamGroupID:       config.Section("STEAM").Key("steam_group_id").MustInt64(0),
+		SteamGroupAdmins:   config.Section("STEAM").Key("steam_group_admins").MustBool(false),
 	}
 	unknown := 0
 	for _, section := range config.Sections() {
@@ -205,6 +243,39 @@ func validateRoomValues(values RoomValues) error {
 	if values.MaxPlayers < 1 || values.MaxPlayers > 64 {
 		fields["maxPlayers"] = "玩家上限必须在 1-64 之间"
 	}
+	if values.ClusterIntention != "cooperative" && values.ClusterIntention != "competitive" && values.ClusterIntention != "social" && values.ClusterIntention != "madness" {
+		fields["clusterIntention"] = "游戏偏好必须为 cooperative、competitive、social 或 madness"
+	}
+	if values.ClusterLanguage != "zh" && values.ClusterLanguage != "en" {
+		fields["clusterLanguage"] = "服务器语言必须为 zh 或 en"
+	}
+	if values.WhitelistSlots < 0 || values.WhitelistSlots > values.MaxPlayers {
+		fields["whitelistSlots"] = "白名单预留位必须在 0 到玩家上限之间"
+	}
+	if values.TickRate < 15 || values.TickRate > 60 {
+		fields["tickRate"] = "通信频率必须在 15-60 之间"
+	}
+	if values.IdleTimeout < 0 {
+		fields["idleTimeout"] = "挂机超时不能小于 0"
+	}
+	if values.MaxSnapshots < 1 {
+		fields["maxSnapshots"] = "最大快照数不能小于 1"
+	}
+	if strings.ContainsAny(values.BindIP, "\x00\r\n") || len(values.BindIP) > 255 {
+		fields["bindIp"] = "监听地址格式无效"
+	}
+	if strings.ContainsAny(values.MasterIP, "\x00\r\n") || len(values.MasterIP) > 255 {
+		fields["masterIp"] = "主服务器 IP 格式无效"
+	}
+	if values.MasterPort < 1 || values.MasterPort > 65535 {
+		fields["masterPort"] = "主服务器端口必须在 1-65535 之间"
+	}
+	if strings.ContainsAny(values.ClusterKey, "\x00\r\n") || len(values.ClusterKey) > 256 {
+		fields["clusterKey"] = "分片连接密码格式无效"
+	}
+	if values.SteamGroupID < 0 {
+		fields["steamGroupId"] = "Steam 组 ID 不能小于 0"
+	}
 	if len(fields) > 0 {
 		return &FieldError{Fields: fields}
 	}
@@ -219,14 +290,30 @@ func setRoomValues(config *ini.File, before, after RoomValues) {
 		{"NETWORK", "cluster_name", strings.TrimSpace(after.ClusterName), before.ClusterName != strings.TrimSpace(after.ClusterName)},
 		{"NETWORK", "cluster_description", after.ClusterDescription, before.ClusterDescription != after.ClusterDescription},
 		{"NETWORK", "cluster_password", after.ClusterPassword, before.ClusterPassword != after.ClusterPassword},
+		{"NETWORK", "cluster_intention", after.ClusterIntention, before.ClusterIntention != after.ClusterIntention},
+		{"NETWORK", "cluster_language", after.ClusterLanguage, before.ClusterLanguage != after.ClusterLanguage},
 		{"NETWORK", "lan_only_cluster", strconv.FormatBool(after.LANOnly), before.LANOnly != after.LANOnly},
 		{"NETWORK", "offline_cluster", strconv.FormatBool(after.Offline), before.Offline != after.Offline},
+		{"NETWORK", "whitelist_slots", strconv.Itoa(after.WhitelistSlots), before.WhitelistSlots != after.WhitelistSlots},
+		{"NETWORK", "tick_rate", strconv.Itoa(after.TickRate), before.TickRate != after.TickRate},
+		{"NETWORK", "autosaver_enabled", strconv.FormatBool(after.AutosaverEnabled), before.AutosaverEnabled != after.AutosaverEnabled},
+		{"NETWORK", "idle_timeout", strconv.Itoa(after.IdleTimeout), before.IdleTimeout != after.IdleTimeout},
 		{"GAMEPLAY", "game_mode", after.GameMode, before.GameMode != after.GameMode},
 		{"GAMEPLAY", "max_players", strconv.Itoa(after.MaxPlayers), before.MaxPlayers != after.MaxPlayers},
 		{"GAMEPLAY", "pvp", strconv.FormatBool(after.PvP), before.PvP != after.PvP},
 		{"GAMEPLAY", "pause_when_empty", strconv.FormatBool(after.PauseWhenEmpty), before.PauseWhenEmpty != after.PauseWhenEmpty},
 		{"GAMEPLAY", "vote_enabled", strconv.FormatBool(after.VoteEnabled), before.VoteEnabled != after.VoteEnabled},
+		{"GAMEPLAY", "vote_kick_enabled", strconv.FormatBool(after.VoteKickEnabled), before.VoteKickEnabled != after.VoteKickEnabled},
 		{"MISC", "console_enabled", strconv.FormatBool(after.ConsoleEnabled), before.ConsoleEnabled != after.ConsoleEnabled},
+		{"MISC", "max_snapshots", strconv.Itoa(after.MaxSnapshots), before.MaxSnapshots != after.MaxSnapshots},
+		{"SHARD", "shard_enabled", strconv.FormatBool(after.ShardEnabled), before.ShardEnabled != after.ShardEnabled},
+		{"SHARD", "bind_ip", after.BindIP, before.BindIP != after.BindIP},
+		{"SHARD", "master_ip", after.MasterIP, before.MasterIP != after.MasterIP},
+		{"SHARD", "master_port", strconv.Itoa(after.MasterPort), before.MasterPort != after.MasterPort},
+		{"SHARD", "cluster_key", after.ClusterKey, before.ClusterKey != after.ClusterKey},
+		{"STEAM", "steam_group_only", strconv.FormatBool(after.SteamGroupOnly), before.SteamGroupOnly != after.SteamGroupOnly},
+		{"STEAM", "steam_group_id", strconv.FormatInt(after.SteamGroupID, 10), before.SteamGroupID != after.SteamGroupID},
+		{"STEAM", "steam_group_admins", strconv.FormatBool(after.SteamGroupAdmins), before.SteamGroupAdmins != after.SteamGroupAdmins},
 	}
 	for _, entry := range entries {
 		if !entry.changed {
@@ -239,13 +326,25 @@ func setRoomValues(config *ini.File, before, after RoomValues) {
 func roomChanges(before, after RoomValues) []Change {
 	valuesBefore := map[string]interface{}{
 		"clusterName": before.ClusterName, "clusterDescription": before.ClusterDescription, "clusterPassword": before.ClusterPassword,
+		"clusterIntention": before.ClusterIntention, "clusterLanguage": before.ClusterLanguage,
 		"gameMode": before.GameMode, "maxPlayers": before.MaxPlayers, "pvp": before.PvP, "pauseWhenEmpty": before.PauseWhenEmpty,
-		"voteEnabled": before.VoteEnabled, "consoleEnabled": before.ConsoleEnabled, "lanOnly": before.LANOnly, "offline": before.Offline,
+		"voteEnabled": before.VoteEnabled, "voteKickEnabled": before.VoteKickEnabled, "consoleEnabled": before.ConsoleEnabled,
+		"lanOnly": before.LANOnly, "offline": before.Offline, "whitelistSlots": before.WhitelistSlots, "tickRate": before.TickRate,
+		"autosaverEnabled": before.AutosaverEnabled, "idleTimeout": before.IdleTimeout, "maxSnapshots": before.MaxSnapshots,
+		"shardEnabled": before.ShardEnabled, "bindIp": before.BindIP, "masterIp": before.MasterIP, "masterPort": before.MasterPort,
+		"clusterKey": before.ClusterKey, "steamGroupOnly": before.SteamGroupOnly, "steamGroupId": before.SteamGroupID,
+		"steamGroupAdmins": before.SteamGroupAdmins,
 	}
 	valuesAfter := map[string]interface{}{
 		"clusterName": after.ClusterName, "clusterDescription": after.ClusterDescription, "clusterPassword": after.ClusterPassword,
+		"clusterIntention": after.ClusterIntention, "clusterLanguage": after.ClusterLanguage,
 		"gameMode": after.GameMode, "maxPlayers": after.MaxPlayers, "pvp": after.PvP, "pauseWhenEmpty": after.PauseWhenEmpty,
-		"voteEnabled": after.VoteEnabled, "consoleEnabled": after.ConsoleEnabled, "lanOnly": after.LANOnly, "offline": after.Offline,
+		"voteEnabled": after.VoteEnabled, "voteKickEnabled": after.VoteKickEnabled, "consoleEnabled": after.ConsoleEnabled,
+		"lanOnly": after.LANOnly, "offline": after.Offline, "whitelistSlots": after.WhitelistSlots, "tickRate": after.TickRate,
+		"autosaverEnabled": after.AutosaverEnabled, "idleTimeout": after.IdleTimeout, "maxSnapshots": after.MaxSnapshots,
+		"shardEnabled": after.ShardEnabled, "bindIp": after.BindIP, "masterIp": after.MasterIP, "masterPort": after.MasterPort,
+		"clusterKey": after.ClusterKey, "steamGroupOnly": after.SteamGroupOnly, "steamGroupId": after.SteamGroupID,
+		"steamGroupAdmins": after.SteamGroupAdmins,
 	}
 	keys := make([]string, 0, len(valuesBefore))
 	for key := range valuesBefore {
@@ -258,10 +357,15 @@ func roomChanges(before, after RoomValues) []Change {
 			continue
 		}
 		change := Change{Path: "cluster." + key, Label: fieldLabel(roomSchema, key), Before: valuesBefore[key], After: valuesAfter[key], Operation: "replace"}
-		if key == "clusterPassword" {
+		if key == "clusterPassword" || key == "clusterKey" {
 			change.Sensitive = true
-			change.Before = configuredLabel(before.ClusterPassword)
-			change.After = configuredLabel(after.ClusterPassword)
+			if key == "clusterPassword" {
+				change.Before = configuredLabel(before.ClusterPassword)
+				change.After = configuredLabel(after.ClusterPassword)
+			} else {
+				change.Before = configuredLabel(before.ClusterKey)
+				change.After = configuredLabel(after.ClusterKey)
+			}
 		}
 		changes = append(changes, change)
 	}

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-ini/ini"
@@ -20,6 +21,9 @@ var overrideKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_]{1,128}$`)
 
 var serverSchema = []FieldSchema{
 	{Key: "serverPort", Group: "network", Label: "游戏端口", Type: "number", Required: true, Minimum: intPointer(1), Maximum: intPointer(65535)},
+	{Key: "isMaster", Group: "shard", Label: "是否为主世界", Type: "boolean"},
+	{Key: "shardName", Group: "shard", Label: "世界名称", Type: "string"},
+	{Key: "shardId", Group: "shard", Label: "世界 ID", Type: "number", Required: true, Minimum: intPointer(1), Maximum: intPointer(999)},
 	{Key: "authenticationPort", Group: "steam", Label: "认证端口", Type: "number", Minimum: intPointer(0), Maximum: intPointer(65535)},
 	{Key: "masterServerPort", Group: "steam", Label: "主服务器端口", Type: "number", Minimum: intPointer(0), Maximum: intPointer(65535)},
 	{Key: "encodeUserPath", Group: "account", Label: "编码用户路径", Type: "boolean"},
@@ -186,6 +190,9 @@ func loadWorldDocument(worldPath string) (worldDocument, error) {
 		serverData: serverData, serverMode: serverMode,
 		serverValues: WorldServerValues{
 			ServerPort:         serverConfig.Section("NETWORK").Key("server_port").MustInt(0),
+			IsMaster:           serverConfig.Section("SHARD").Key("is_master").MustBool(false),
+			ShardName:          serverConfig.Section("SHARD").Key("name").String(),
+			ShardID:            serverConfig.Section("SHARD").Key("id").MustInt(0),
 			AuthenticationPort: serverConfig.Section("STEAM").Key("authentication_port").MustInt(0),
 			MasterServerPort:   serverConfig.Section("STEAM").Key("master_server_port").MustInt(0),
 			EncodeUserPath:     serverConfig.Section("ACCOUNT").Key("encode_user_path").MustBool(true),
@@ -227,6 +234,15 @@ func renderWorldDocument(document worldDocument, request WorldUpdateRequest) ([]
 	}
 	if document.serverValues.ServerPort != request.Server.ServerPort {
 		serverConfig.Section("NETWORK").Key("server_port").SetValue(strconv.Itoa(request.Server.ServerPort))
+	}
+	if document.serverValues.IsMaster != request.Server.IsMaster {
+		serverConfig.Section("SHARD").Key("is_master").SetValue(strconv.FormatBool(request.Server.IsMaster))
+	}
+	if document.serverValues.ShardName != request.Server.ShardName {
+		serverConfig.Section("SHARD").Key("name").SetValue(request.Server.ShardName)
+	}
+	if document.serverValues.ShardID != request.Server.ShardID {
+		serverConfig.Section("SHARD").Key("id").SetValue(strconv.Itoa(request.Server.ShardID))
 	}
 	if document.serverValues.AuthenticationPort != request.Server.AuthenticationPort {
 		serverConfig.Section("STEAM").Key("authentication_port").SetValue(strconv.Itoa(request.Server.AuthenticationPort))
@@ -316,6 +332,12 @@ func validateWorldServer(values WorldServerValues) error {
 	if values.ServerPort < 1 || values.ServerPort > 65535 {
 		fields["server.serverPort"] = "游戏端口必须在 1-65535 之间"
 	}
+	if len([]rune(values.ShardName)) > 64 || strings.ContainsAny(values.ShardName, "\x00\r\n") {
+		fields["server.shardName"] = "世界名称不能超过 64 个字符且不能包含换行"
+	}
+	if values.ShardID < 1 || values.ShardID > 999 {
+		fields["server.shardId"] = "世界 ID 必须在 1-999 之间"
+	}
 	for key, value := range map[string]int{"server.authenticationPort": values.AuthenticationPort, "server.masterServerPort": values.MasterServerPort} {
 		if value < 0 || value > 65535 {
 			fields[key] = "端口必须为 0 或 1-65535"
@@ -339,12 +361,14 @@ func validateWorldServer(values WorldServerValues) error {
 }
 
 func serverChanges(before, after WorldServerValues) []Change {
-	result := make([]Change, 0, 4)
+	result := make([]Change, 0, 7)
 	items := []struct {
 		key           string
 		before, after interface{}
 	}{
-		{"serverPort", before.ServerPort, after.ServerPort}, {"authenticationPort", before.AuthenticationPort, after.AuthenticationPort},
+		{"serverPort", before.ServerPort, after.ServerPort}, {"isMaster", before.IsMaster, after.IsMaster},
+		{"shardName", before.ShardName, after.ShardName}, {"shardId", before.ShardID, after.ShardID},
+		{"authenticationPort", before.AuthenticationPort, after.AuthenticationPort},
 		{"masterServerPort", before.MasterServerPort, after.MasterServerPort}, {"encodeUserPath", before.EncodeUserPath, after.EncodeUserPath},
 	}
 	for _, item := range items {

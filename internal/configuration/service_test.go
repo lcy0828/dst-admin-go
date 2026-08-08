@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -50,7 +51,7 @@ func newConfigurationService(t *testing.T) (*Service, string, *configurationBack
 		t.Fatal(err)
 	}
 	cluster := "[NETWORK]\ncluster_name = Original\ncluster_description = Test\ncluster_password = old-secret\n[CUSTOM]\nkeep = yes\n[GAMEPLAY]\ngame_mode = survival\nmax_players = 6\npvp = false\n"
-	server := "[NETWORK]\nserver_port = 10999\n[STEAM]\nauthentication_port = 8768\nmaster_server_port = 27018\n[ACCOUNT]\nencode_user_path = true\n[CUSTOM]\nkeep = yes\n"
+	server := "[NETWORK]\nserver_port = 10999\n[SHARD]\nis_master = true\nname = Master\nid = 1\n[STEAM]\nauthentication_port = 8768\nmaster_server_port = 27018\n[ACCOUNT]\nencode_user_path = true\n[CUSTOM]\nkeep = yes\n"
 	override := `return {
   location = "forest",
   overrides = {
@@ -120,6 +121,61 @@ func TestRoomConfigurationPreviewApplyPreservesUnknownAndProtectsSecrets(t *test
 	}
 	if _, err := service.ApplyRoom(context.Background(), "job-2", "room", request); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale revision error = %v", err)
+	}
+}
+
+func TestRoomConfigurationRoundTripsEveryLegacyField(t *testing.T) {
+	service, _, _ := newConfigurationService(t)
+	current, err := service.RoomConfig("room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := RoomValues{
+		ClusterName:        "Complete room",
+		ClusterDescription: "Every legacy setting",
+		ClusterPassword:    "room-secret",
+		ClusterIntention:   "social",
+		ClusterLanguage:    "en",
+		GameMode:           "endless",
+		MaxPlayers:         18,
+		PvP:                true,
+		PauseWhenEmpty:     false,
+		VoteEnabled:        false,
+		VoteKickEnabled:    true,
+		ConsoleEnabled:     false,
+		LANOnly:            true,
+		Offline:            true,
+		WhitelistSlots:     4,
+		TickRate:           30,
+		AutosaverEnabled:   false,
+		IdleTimeout:        120,
+		MaxSnapshots:       20,
+		ShardEnabled:       false,
+		BindIP:             "0.0.0.0",
+		MasterIP:           "192.168.2.12",
+		MasterPort:         10888,
+		ClusterKey:         "shard-secret",
+		SteamGroupOnly:     true,
+		SteamGroupID:       123456789,
+		SteamGroupAdmins:   true,
+	}
+	request := RoomUpdateRequest{ExpectedRevision: current.Revision, Values: next}
+	preview, err := service.PreviewRoom("room", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Changes) != len(roomSchema) {
+		t.Fatalf("changes = %d, schema fields = %d", len(preview.Changes), len(roomSchema))
+	}
+	if _, err := service.ApplyRoom(context.Background(), "job-all-room-fields", "room", request); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := service.RoomConfig("room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(updated.Values, next) {
+		t.Fatalf("round trip mismatch:\nwant %#v\n got %#v", next, updated.Values)
 	}
 }
 
@@ -225,12 +281,15 @@ func TestWorldConfigurationPreservesComplexUnknownLuaValues(t *testing.T) {
 	}
 	server := current.Server
 	server.ServerPort = 11000
+	server.IsMaster = false
+	server.ShardName = "Forest Two"
+	server.ShardID = 2
 	request := WorldUpdateRequest{
 		ExpectedRevision: current.Revision, Server: server,
 		OverridePatch: map[string]json.RawMessage{"day": json.RawMessage(`"longday"`), "new_option": json.RawMessage(`{"enabled":true,"values":[1,2]}`)},
 	}
 	preview, err := service.PreviewWorld("room", "world", request)
-	if err != nil || len(preview.Changes) != 3 {
+	if err != nil || len(preview.Changes) != 6 {
 		t.Fatalf("preview = %#v, %v", preview, err)
 	}
 	if _, err := service.ApplyWorld(context.Background(), "job-world", "room", "world", request); err != nil {
@@ -240,7 +299,7 @@ func TestWorldConfigurationPreservesComplexUnknownLuaValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Server.ServerPort != 11000 || updated.Overrides["day"] != "longday" || backup.count != 1 {
+	if updated.Server.ServerPort != 11000 || updated.Server.IsMaster || updated.Server.ShardName != "Forest Two" || updated.Server.ShardID != 2 || updated.Overrides["day"] != "longday" || backup.count != 1 {
 		t.Fatalf("updated = %#v", updated)
 	}
 	written, _ := os.ReadFile(filepath.Join(roomPath, "Master", "leveldataoverride.lua"))
