@@ -60,7 +60,8 @@ type DeleteRequest struct {
 }
 
 type PolicyRequest struct {
-	Enabled        bool `json:"enabled"`
-	IntervalMinute int  `json:"intervalMinutes"`
-	MaxSnapshots   int  `json:"maxSnapshots"`
+	Enabled        bool       `json:"enabled"`
+	IntervalMinute int        `json:"intervalMinutes"`
+	MaxSnapshots   int        `json:"maxSnapshots"`
+	NextRunAt      *time.Time `json:"nextRunAt,omitempty"`
 }

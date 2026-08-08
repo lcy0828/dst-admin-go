@@ -364,10 +364,17 @@ func (s *Service) SavePolicy(roomID string, request PolicyRequest) (Policy, erro
 	if _, err := s.resolveRoom(roomID); err != nil {
 		return Policy{}, err
 	}
-	if request.IntervalMinute < 15 || request.IntervalMinute > 10080 || request.MaxSnapshots < 1 || request.MaxSnapshots > 100 {
+	if request.IntervalMinute < 15 || request.IntervalMinute > 44640 || request.MaxSnapshots < 1 || request.MaxSnapshots > 100 {
 		return Policy{}, ErrSnapshotPolicyInvalid
 	}
 	now := s.now().UTC()
+	if request.Enabled && request.NextRunAt != nil {
+		next := request.NextRunAt.UTC()
+		latest := now.Add(time.Duration(request.IntervalMinute) * time.Minute)
+		if !next.After(now) || next.After(latest) {
+			return Policy{}, ErrSnapshotPolicyInvalid
+		}
+	}
 	policy, err := s.store.Policy(roomID)
 	if err != nil {
 		return Policy{}, err
@@ -377,6 +384,9 @@ func (s *Service) SavePolicy(roomID string, request PolicyRequest) (Policy, erro
 	policy.MaxSnapshots = request.MaxSnapshots
 	if request.Enabled {
 		next := now.Add(time.Duration(request.IntervalMinute) * time.Minute)
+		if request.NextRunAt != nil {
+			next = request.NextRunAt.UTC()
+		}
 		policy.NextRunAt = &next
 	} else {
 		policy.NextRunAt = nil

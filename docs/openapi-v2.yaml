@@ -225,6 +225,33 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/SystemSettingsApplyEnvelope" } } }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /system/settings/actions/test-email:
+    post:
+      tags: [System]
+      operationId: testSystemSMTPConnection
+      summary: Establish a real SMTP connection, negotiate TLS, and authenticate when configured
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [server, port]
+              properties:
+                server: { type: string }
+                port: { type: integer, minimum: 1, maximum: 65535 }
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: SMTP connection and optional authentication succeeded
+          content:
+            application/json:
+              schema:
+                type: object
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms:
     get:
       tags: [Rooms]
@@ -3216,7 +3243,7 @@ components:
         intervalMinutes:
           type: integer
           minimum: 15
-          maximum: 10080
+          maximum: 44640
         maxSnapshots:
           type: integer
           minimum: 1
@@ -3245,11 +3272,14 @@ components:
         intervalMinutes:
           type: integer
           minimum: 15
-          maximum: 10080
+          maximum: 44640
         maxSnapshots:
           type: integer
           minimum: 1
           maximum: 100
+        nextRunAt:
+          type: string
+          format: date-time
     BackupPolicyEnvelope:
       type: object
       required: [data, error, meta]
