@@ -52,6 +52,13 @@ func (modHandlerService) CheckUpdates(context.Context, string) (mods.ActionResul
 	return mods.ActionResult{ModIDs: []string{}, Message: "没有更新"}, nil
 }
 
+func (modHandlerService) ConfigurationFile(roomID, worldID string) (mods.ConfigurationFile, error) {
+	return mods.ConfigurationFile{
+		RoomID: roomID, WorldID: worldID, FileName: "modoverrides.lua", Content: "return {}\n",
+		Exists: true, Revision: "revision", ReadAt: time.Now().UTC(),
+	}, nil
+}
+
 func (modHandlerService) Configuration(_ context.Context, roomID, worldID, modID string) (mods.ModConfiguration, error) {
 	return mods.ModConfiguration{Revision: "current", RoomID: roomID, WorldID: worldID, ModID: modID, Fields: []mods.ConfigField{}, Values: map[string]interface{}{}, UnknownValues: map[string]interface{}{}}, nil
 }
@@ -106,6 +113,11 @@ func TestModHTTPReadEndpointsAndValidation(t *testing.T) {
 	assertAPIError(t, response, http.StatusUnprocessableEntity, "INVALID_MOD_ID")
 	response = performJSON(router, http.MethodGet, "/api/v2/rooms/room/worlds/world/mods/378160973/configuration", nil, nil, "")
 	assertStatus(t, response, http.StatusOK)
+	response = performJSON(router, http.MethodGet, "/api/v2/rooms/room/worlds/world/mods/configuration-file", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if responseData(t, response)["content"] != "return {}\n" {
+		t.Fatalf("unexpected configuration file response: %s", response.Body.String())
+	}
 	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room/worlds/world/mods/378160973/configuration/preview", map[string]interface{}{
 		"expectedRevision": "stale", "enabled": true, "patch": map[string]interface{}{},
 	}, nil, "")

@@ -29,6 +29,7 @@ type modService interface {
 	Repair(context.Context, string, string, mods.ModActionRequest, io.Writer) (mods.ActionResult, error)
 	Uninstall(context.Context, string, string, string, mods.ModActionRequest) (mods.ActionResult, error)
 	CheckUpdates(context.Context, string) (mods.ActionResult, error)
+	ConfigurationFile(string, string) (mods.ConfigurationFile, error)
 	Configuration(context.Context, string, string, string) (mods.ModConfiguration, error)
 	PreviewConfiguration(context.Context, string, string, string, mods.ConfigUpdateRequest) (mods.ConfigPreview, error)
 	ApplyConfiguration(context.Context, string, string, string, string, mods.ConfigUpdateRequest) (mods.ConfigApplyResult, error)
@@ -50,6 +51,7 @@ func (h *ModHandler) Register(v2 *gin.RouterGroup) {
 	room.POST("/mods/:modId/actions/enable", h.enable)
 	room.POST("/mods/:modId/actions/repair", h.repair)
 	room.POST("/mods/:modId/actions/uninstall", h.uninstall)
+	room.GET("/worlds/:worldId/mods/configuration-file", h.configurationFile)
 
 	configuration := room.Group("/worlds/:worldId/mods/:modId/configuration")
 	configuration.GET("", h.configuration)
@@ -168,6 +170,15 @@ func (h *ModHandler) checkUpdates(c *gin.Context) {
 	h.submit(c, "mod.check-updates", roomID, "", roomID, "Mod 更新检查", func(ctx context.Context, _ string) (mods.ActionResult, error) {
 		return h.mods.CheckUpdates(ctx, roomID)
 	})
+}
+
+func (h *ModHandler) configurationFile(c *gin.Context) {
+	value, err := h.mods.ConfigurationFile(c.Param("roomId"), c.Param("worldId"))
+	if err != nil {
+		modFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
 }
 
 func (h *ModHandler) configuration(c *gin.Context) {

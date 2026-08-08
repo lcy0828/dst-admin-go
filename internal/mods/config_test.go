@@ -188,6 +188,21 @@ func TestConfigurationPreviewApplyPreservesUnknownFields(t *testing.T) {
 	}
 }
 
+func TestConfigurationFileReturnsExactWorldFile(t *testing.T) {
+	service, _, overridesPath := newConfigTestService(t)
+	want, err := os.ReadFile(overridesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.ConfigurationFile("room-1", "world-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Exists || result.FileName != "modoverrides.lua" || result.Content != string(want) || result.Revision == "" {
+		t.Fatalf("unexpected configuration file: %#v", result)
+	}
+}
+
 func TestConfigurationRejectsValueOutsideDeclaredOptions(t *testing.T) {
 	service, backupService, _ := newConfigTestService(t)
 	configuration, err := service.Configuration(context.Background(), "room-1", "world-1", "378160973")

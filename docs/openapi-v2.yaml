@@ -1460,6 +1460,15 @@ paths:
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModActionInput" } } } }
       responses:
         "202": { description: Uninstall job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+  /rooms/{roomId}/worlds/{worldId}/mods/configuration-file:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }]
+    get:
+      tags: [Mods]
+      operationId: getModConfigurationFile
+      summary: Read the selected world's actual modoverrides.lua without modifying it
+      responses:
+        "200": { description: Exact modoverrides.lua content, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationFileEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
   /rooms/{roomId}/worlds/{worldId}/mods/{modId}/configuration:
     parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }, { $ref: "#/components/parameters/ModID" }]
     get:
@@ -3781,6 +3790,25 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/ModConfiguration" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    ModConfigurationFile:
+      type: object
+      additionalProperties: false
+      required: [roomId, worldId, fileName, content, exists, revision, readAt]
+      properties:
+        roomId: { type: string }
+        worldId: { type: string }
+        fileName: { type: string, enum: [modoverrides.lua] }
+        content: { type: string }
+        exists: { type: boolean }
+        revision: { type: string }
+        readAt: { type: string, format: date-time }
+    ModConfigurationFileEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ModConfigurationFile" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     ModConfigurationInput:

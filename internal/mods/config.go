@@ -19,6 +19,29 @@ type configPlan struct {
 	mutation      fileMutation
 }
 
+func (s *Service) ConfigurationFile(roomID, worldID string) (ConfigurationFile, error) {
+	_, roomPath, err := s.resolveRoom(roomID)
+	if err != nil {
+		return ConfigurationFile{}, err
+	}
+	world, err := s.rooms.World(roomID, worldID)
+	if err != nil {
+		return ConfigurationFile{}, err
+	}
+	worldPath, err := safeDirectory(roomPath, world.DirectoryName)
+	if err != nil {
+		return ConfigurationFile{}, err
+	}
+	data, _, exists, err := readModFile(filepath.Join(worldPath, "modoverrides.lua"), true)
+	if err != nil {
+		return ConfigurationFile{}, err
+	}
+	return ConfigurationFile{
+		RoomID: roomID, WorldID: worldID, FileName: "modoverrides.lua",
+		Content: string(data), Exists: exists, Revision: contentRevision(data), ReadAt: s.now().UTC(),
+	}, nil
+}
+
 func (s *Service) Configuration(ctx context.Context, roomID, worldID, modID string) (ModConfiguration, error) {
 	if !validModID(modID) {
 		return ModConfiguration{}, ErrInvalidModID

@@ -163,6 +163,16 @@ type ModConfiguration struct {
 	UnknownValues  map[string]interface{} `json:"unknownValues"`
 }
 
+type ConfigurationFile struct {
+	RoomID   string    `json:"roomId"`
+	WorldID  string    `json:"worldId"`
+	FileName string    `json:"fileName"`
+	Content  string    `json:"content"`
+	Exists   bool      `json:"exists"`
+	Revision string    `json:"revision"`
+	ReadAt   time.Time `json:"readAt"`
+}
+
 type ConfigUpdateRequest struct {
 	ExpectedRevision string                     `json:"expectedRevision"`
 	Enabled          bool                       `json:"enabled"`
