@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -1067,44 +1068,27 @@ func DownloadMod(g *gin.Context) {
 // checktemp 检查模组缓存是否存在
 func checktemp(modid string) string {
 	log.Printf("%s 检查模组缓存 - 模组ID: %s", LogCachePrefix, modid)
-	cmd := fmt.Sprintf("cd %s && ls -l temp/%s", luaShPath, modid)
-	output, err := exec.Command("bash", "-c", cmd).CombinedOutput()
-
-	if err != nil {
+	cachePath := filepath.Join(luaShPath, "temp", modid, "modinfo.lua")
+	if info, err := os.Stat(cachePath); err != nil || info.IsDir() {
 		log.Printf("%s 模组缓存不存在 - 模组ID: %s, 错误: %v", LogCachePrefix, modid, err)
 		return "false"
 	}
 
-	log.Printf("%s 模组缓存存在 - 模组ID: %s, 输出: %s", LogCachePrefix, modid, strings.TrimSpace(string(output)))
+	log.Printf("%s 模组缓存存在 - 模组ID: %s, 路径: %s", LogCachePrefix, modid, cachePath)
 	return "ok"
 }
 
 // jsonmod 解析模组信息并转换为JSON格式
 func jsonmod(modid string) string {
 	log.Printf("%s 开始解析模组信息 - 模组ID: %s", LogPrefix, modid)
-
-	// 复制模组信息到处理目录
-	copyCmd := fmt.Sprintf("rm -rf %s/modinfo.lua && cp %s/%s/modinfo.lua %s/modinfo.lua",
-		luaShPath, workshopContent, modid, luaShPath)
-
-	output, err := exec.Command("bash", "-c", copyCmd).CombinedOutput()
+	modInfoPath := filepath.Join(workshopContent, modid, "modinfo.lua")
+	output, method, err := renderModInfo(modid, modInfoPath)
 	if err != nil {
-		log.Printf("%s 复制模组信息失败 - 模组ID: %s, 错误: %v, 输出: %s",
-			LogPrefix, modid, err, strings.TrimSpace(string(output)))
-		return "{\"error\": \"复制模组信息失败\"}"
+		log.Printf("%s 解析模组信息失败 - 模组ID: %s, 错误: %v", LogPrefix, modid, err)
+		return modInfoErrorJSON("解析模组信息失败")
 	}
 
-	// 使用Lua脚本解析模组信息
-	parseCmd := fmt.Sprintf("cd %s && lua modgetinfo.lua", luaShPath)
-	output, err = exec.Command("bash", "-c", parseCmd).CombinedOutput()
-
-	if err != nil {
-		log.Printf("%s 解析模组信息失败 - 模组ID: %s, 错误: %v, 输出: %s",
-			LogPrefix, modid, err, strings.TrimSpace(string(output)))
-		return "{\"error\": \"解析模组信息失败\"}"
-	}
-
-	log.Printf("%s 模组信息解析成功 - 模组ID: %s", LogPrefix, modid)
+	log.Printf("%s 模组信息解析成功 - 模组ID: %s, 解析器: %s", LogPrefix, modid, method)
 	return string(output)
 }
 
@@ -1113,22 +1097,31 @@ func DownloadMod2(modid string, refresh string, version string) string {
 	startTime := time.Now()
 	log.Printf("%s 开始处理模组下载 - 模组ID: %s, 强制刷新: %s, 版本: %s",
 		LogDownPrefix, modid, refresh, version)
+	if !isWorkshopModID(modid) {
+		p1 = 0
+		log.Printf("%s 拒绝无效模组ID: %q", LogDownPrefix, modid)
+		return modInfoErrorJSON("模组ID必须为数字")
+	}
 
 	// 检查缓存
 	if checktemp(modid) == "ok" && refresh != "true" {
 		log.Printf("%s 使用缓存的模组信息 - 模组ID: %s", LogCachePrefix, modid)
-		cmd := fmt.Sprintf("cd %s/temp/%s && lua modgetinfo.lua", luaShPath, modid)
-		output, err := exec.Command("bash", "-c", cmd).CombinedOutput()
+		cachePath := filepath.Join(luaShPath, "temp", modid, "modinfo.lua")
+		parsePath := cachePath
+		sourcePath := filepath.Join(workshopContent, modid, "modinfo.lua")
+		if info, sourceErr := os.Stat(sourcePath); sourceErr == nil && !info.IsDir() {
+			parsePath = sourcePath
+		}
+		output, method, err := renderModInfo(modid, parsePath)
 
 		if err == nil {
 			p1 = 1
-			log.Printf("%s 从缓存读取模组信息成功 - 模组ID: %s, 耗时: %v",
-				LogCachePrefix, modid, time.Since(startTime))
+			log.Printf("%s 从缓存读取模组信息成功 - 模组ID: %s, 解析器: %s, 耗时: %v",
+				LogCachePrefix, modid, method, time.Since(startTime))
 			return string(output)
 		}
 
-		log.Printf("%s 读取缓存失败 - 模组ID: %s, 错误: %v, 输出: %s",
-			LogCachePrefix, modid, err, strings.TrimSpace(string(output)))
+		log.Printf("%s 读取缓存失败 - 模组ID: %s, 错误: %v", LogCachePrefix, modid, err)
 	}
 
 	// 检查tmux会话是否存在
@@ -1259,20 +1252,21 @@ func DownloadMod2(modid string, refresh string, version string) string {
 
 	// 处理下载成功的模组信息
 	log.Printf("%s 模组下载成功，开始创建缓存 - 模组ID: %s", LogCachePrefix, modid)
-	createCacheCmd := fmt.Sprintf("rm -rf %s/modinfo.lua && cp %s/%s/modinfo.lua %s/modinfo.lua && cd %s && mkdir -p temp/%s && cp -f modgetinfo.lua cjson.so modinfo.lua temp/%s/ && lua modgetinfo.lua",
-		luaShPath, workshopContent, modid, luaShPath, luaShPath, modid, modid)
-
-	cmd = exec.Command("bash", "-c", createCacheCmd)
-	var cmdOutput []byte
-	cmdOutput, err = cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("%s 创建模组缓存失败 - 模组ID: %s, 错误: %v",
-			LogCachePrefix, modid, err)
+	sourcePath := filepath.Join(workshopContent, modid, "modinfo.lua")
+	if cachePath, cacheErr := cacheModInfo(modid, sourcePath); cacheErr != nil {
+		log.Printf("%s 创建模组缓存失败 - 模组ID: %s, 错误: %v", LogCachePrefix, modid, cacheErr)
 	} else {
-		log.Printf("%s 创建模组缓存成功 - 模组ID: %s", LogCachePrefix, modid)
+		log.Printf("%s 创建模组缓存成功 - 模组ID: %s, 路径: %s", LogCachePrefix, modid, cachePath)
 	}
 
-	return string(cmdOutput)
+	modInfoOutput, method, parseErr := renderModInfo(modid, sourcePath)
+	if parseErr != nil {
+		p1 = 0
+		log.Printf("%s 模组信息解析失败 - 模组ID: %s, 错误: %v", LogPrefix, modid, parseErr)
+		return modInfoErrorJSON("解析模组信息失败")
+	}
+	log.Printf("%s 模组信息解析成功 - 模组ID: %s, 解析器: %s", LogPrefix, modid, method)
+	return string(modInfoOutput)
 }
 
 // readmod 监控模组下载进度
