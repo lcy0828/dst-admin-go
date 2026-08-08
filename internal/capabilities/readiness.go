@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	dstinstall "dont/internal/dstserver"
+
 	"github.com/shirou/gopsutil/v3/disk"
 )
 
@@ -40,7 +42,7 @@ func ProbeReadiness(config Config, countRooms RoomCounter) Readiness {
 		pathCheck("savePath", "DST 存档目录", report.Paths["saves"], true),
 		pathCheck("backupPath", "备份目录", report.Paths["backups"], true),
 		toolCheck("tmux", "tmux 运行控制", report.Tools["tmux"], true, "安装 tmux 后才能在本机启动和停止分片"),
-		serverExecutableCheck(config.ServerPath),
+		serverExecutableCheck(config.ServerPath, config.ServerMode),
 		toolCheck("steamcmd", "SteamCMD", report.Tools["steamcmd"], false, "配置 SteamCMD 后才能执行游戏更新和 Workshop 下载"),
 		toolCheck("luaFallback", "外部 Lua 回退", report.Tools["luaFallback"], false, "安装 Lua 可在内嵌解析器遇到兼容问题时自动回退"),
 		toolCheck("mapRenderer", "地图渲染器", report.Tools["mapRenderer"], false, "配置 dst-map-renderer 后可生成分层地图；Session 诊断下载不受影响"),
@@ -112,42 +114,36 @@ func toolCheck(id, label string, tool Tool, required bool, remediation string) C
 	return check
 }
 
-func serverExecutableCheck(serverPath string) Check {
-	path := findDSTExecutable(serverPath)
+func serverExecutableCheck(serverPath, serverMode string) Check {
 	check := Check{ID: "serverExecutable", Label: "DST 服务端", Required: true, Details: map[string]interface{}{"configuredPath": serverPath}}
-	if path == "" {
+	layout, ok := dstinstall.Resolve(serverPath, serverMode)
+	if !ok {
 		check.Status = CheckFail
 		check.Summary = "未找到 DST 专用服务器可执行文件"
-		check.Remediation = "使用 SteamCMD 安装 343050，并把 DST_SERVER_PATH 指向安装目录"
+		check.Remediation = "把 DST_SERVER_PATH 指向安装目录；macOS 可直接指向 Don't Starve Together 目录或 .app"
 		return check
 	}
 	check.Status = CheckPass
 	check.Summary = "服务端可执行文件可用"
-	check.Details["executable"] = path
+	check.Details["executable"] = layout.Executable
+	check.Details["layout"] = layout.Kind
+	check.Details["contentRoot"] = layout.ContentRoot
+	check.Details["appId"] = layout.AppID
+	check.Details["updateMethod"] = layout.UpdateMethod
+	check.Details["updateSupported"] = layout.UpdateSupported
 	return check
 }
 
-func findDSTExecutable(serverPath string) string {
-	serverPath = strings.TrimSpace(serverPath)
-	if serverPath == "" {
+func findDSTExecutable(serverPath string, serverMode ...string) string {
+	mode := "64"
+	if len(serverMode) > 0 {
+		mode = serverMode[0]
+	}
+	layout, ok := dstinstall.Resolve(serverPath, mode)
+	if !ok {
 		return ""
 	}
-	if executable(serverPath) {
-		return serverPath
-	}
-	candidates := []string{
-		"dontstarve_dedicated_server_nullrenderer_x64",
-		"dontstarve_dedicated_server_nullrenderer",
-		filepath.Join("bin64", "dontstarve_dedicated_server_nullrenderer_x64"),
-		filepath.Join("bin", "dontstarve_dedicated_server_nullrenderer"),
-	}
-	for _, candidate := range candidates {
-		path := filepath.Join(serverPath, candidate)
-		if executable(path) {
-			return path
-		}
-	}
-	return ""
+	return layout.Executable
 }
 
 func diskCheck(savePath string) Check {

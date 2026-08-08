@@ -4,10 +4,13 @@ import "time"
 
 type VersionReport struct {
 	Installed         bool      `json:"installed"`
+	AppID             string    `json:"appId"`
 	LocalVersion      string    `json:"localVersion,omitempty"`
 	LatestVersion     string    `json:"latestVersion,omitempty"`
 	UpToDate          *bool     `json:"upToDate,omitempty"`
 	InstallPath       string    `json:"installPath"`
+	UpdateMethod      string    `json:"updateMethod"`
+	UpdateSupported   bool      `json:"updateSupported"`
 	SteamCMDAvailable bool      `json:"steamcmdAvailable"`
 	SteamCMDPath      string    `json:"steamcmdPath,omitempty"`
 	CheckError        string    `json:"checkError,omitempty"`

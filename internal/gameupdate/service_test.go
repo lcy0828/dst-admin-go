@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"dont/internal/backups"
+	dstinstall "dont/internal/dstserver"
 	"dont/internal/jobs"
 	"dont/internal/rooms"
 
@@ -96,7 +97,16 @@ func (r *updateRunner) Run(_ context.Context, _ string, arguments []string, outp
 
 type staticLatest struct{}
 
-func (staticLatest) Check(context.Context, string) (string, bool, error) { return "200", false, nil }
+func (staticLatest) Check(context.Context, string, string) (string, bool, error) {
+	return "200", false, nil
+}
+
+type recordingLatest struct{ appID string }
+
+func (c *recordingLatest) Check(_ context.Context, appID, local string) (string, bool, error) {
+	c.appID = appID
+	return local, true, nil
+}
 
 func newUpdateService(t *testing.T, runner CommandRunner) (*Service, *Store, updateCatalog, *updateControl, *[]string, string) {
 	t.Helper()
@@ -235,6 +245,47 @@ func TestPrepareRejectsConcurrentUpdatesAndRequiresExactConfirmation(t *testing.
 	releaseAgain()
 }
 
+func TestSteamClientInstallReportsExternalUpdateAndRejectsPrepare(t *testing.T) {
+	base, store, catalog, control, events, _ := newUpdateService(t, nil)
+	steamApps := filepath.Join(t.TempDir(), "steamapps")
+	gameRoot := filepath.Join(steamApps, "common", "Don't Starve Together")
+	executablePath := filepath.Join(gameRoot, "dontstarve_steam.app", "Contents", "MacOS", dstinstall.Binary)
+	if err := os.MkdirAll(filepath.Dir(executablePath), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(executablePath, []byte("test"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(steamApps, "appmanifest_322330.acf"), []byte(`"AppState" { "buildid" "654321" }`), 0640); err != nil {
+		t.Fatal(err)
+	}
+	steamCMD := filepath.Join(t.TempDir(), "steamcmd")
+	if err := os.WriteFile(steamCMD, []byte("#!/bin/sh\nexit 0\n"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	latest := &recordingLatest{}
+	service, err := NewService(
+		Config{ServerPath: gameRoot, SteamCMDPath: steamCMD},
+		catalog, control, updateBackups{events: events}, store, base.runner, latest,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := service.Version(context.Background())
+	if !report.Installed || report.LocalVersion != "654321" || report.AppID != dstinstall.AppIDGame {
+		t.Fatalf("version report = %#v", report)
+	}
+	if report.UpdateMethod != dstinstall.UpdateMethodSteamClient || report.UpdateSupported || !report.SteamCMDAvailable {
+		t.Fatalf("update capability = %#v", report)
+	}
+	if latest.appID != dstinstall.AppIDGame {
+		t.Fatalf("latest checker app ID = %q", latest.appID)
+	}
+	if _, _, _, err := service.Prepare(context.Background(), UpdateRequest{Confirmation: "更新游戏"}); !errors.Is(err, ErrSteamClientManaged) {
+		t.Fatalf("prepare error = %v", err)
+	}
+}
+
 func TestCleanSteamCacheOnlyRemovesApp343050(t *testing.T) {
 	root := t.TempDir()
 	executable := filepath.Join(root, "steamcmd")
@@ -249,7 +300,7 @@ func TestCleanSteamCacheOnlyRemovesApp343050(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := cleanSteamCache(executable, server); err != nil {
+	if err := cleanSteamCache(executable, server, dstinstall.AppIDDedicatedServer); err != nil {
 		t.Fatal(err)
 	}
 	for _, base := range []string{filepath.Join(root, "steamapps"), filepath.Join(server, "steamapps")} {

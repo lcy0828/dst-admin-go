@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	dstinstall "dont/internal/dstserver"
+
 	"github.com/GianlucaP106/gotmux/gotmux"
 	"github.com/go-ini/ini"
 )
@@ -157,84 +159,22 @@ func (s *DSTServer) Start() error {
 		return fmt.Errorf("服务器已经在运行中: %s", s.SessionName)
 	}
 
-	// 根据启动模式选择正确的可执行文件
-	executableName := ""
-	if s.ServerMode == "64" {
-		executableName = "dontstarve_dedicated_server_nullrenderer_x64"
-		log.Printf("[TMUX] 启动模式: 64位, 使用可执行文件: %s", executableName)
-	} else {
-		executableName = "dontstarve_dedicated_server_nullrenderer"
-		log.Printf("[TMUX] 启动模式: 32位, 使用可执行文件: %s", executableName)
+	layout, ok := dstinstall.Resolve(s.StartDirectory, s.ServerMode)
+	if !ok {
+		return fmt.Errorf("在配置路径 %s 中未找到可执行的 DST 专服程序", s.StartDirectory)
 	}
+	log.Printf("[TMUX] 已识别服务端布局: %s, 可执行文件: %s", layout.Kind, layout.Executable)
 
 	// 构建启动命令
-	startCmd := fmt.Sprintf("./%s -ugc_directory %s -persistent_storage_root %s -conf_dir %s -cluster %s -shard %s",
-		executableName, shellArg(s.UGCDirectory), shellArg(s.StorageRoot), shellArg(s.ConfDir), shellArg(s.ArchiveName), shellArg(s.WorldName))
+	startCmd := fmt.Sprintf("%s -ugc_directory %s -persistent_storage_root %s -conf_dir %s -cluster %s -shard %s",
+		shellArg(layout.Executable), shellArg(s.UGCDirectory), shellArg(s.StorageRoot), shellArg(s.ConfDir), shellArg(s.ArchiveName), shellArg(s.WorldName))
 	log.Printf("[TMUX] 构建启动命令: %s", startCmd)
 
 	// 使用gotmux的Command方法创建会话
 	log.Printf("[TMUX] 正在创建tmux会话 会话名: %s", s.SessionName)
 
-	// 如果指定了启动目录，则使用指定的启动目录
-	var output string
-	if s.StartDirectory != "" {
-		// 使用 -c 参数指定启动目录
-		log.Printf("[TMUX] 使用指定的启动目录: %s", s.StartDirectory)
-
-		// 根据启动模式和目录存在情况选择正确的目录
-		binDir := s.StartDirectory
-		if !strings.HasSuffix(binDir, "/bin") && !strings.HasSuffix(binDir, "/bin64") {
-			// 如果路径不以bin或bin64结尾，则根据启动模式选择目录
-			bin64Path := fmt.Sprintf("%s/bin64", s.StartDirectory)
-			binPath := fmt.Sprintf("%s/bin", s.StartDirectory)
-
-			// 首先检查目录是否存在
-			bin64Exists := false
-			binExists := false
-
-			if _, err := os.Stat(bin64Path); !os.IsNotExist(err) {
-				bin64Exists = true
-				log.Printf("[TMUX] 检测到bin64目录存在: %s", bin64Path)
-			}
-
-			if _, err := os.Stat(binPath); !os.IsNotExist(err) {
-				binExists = true
-				log.Printf("[TMUX] 检测到bin目录存在: %s", binPath)
-			}
-
-			// 根据启动模式和目录存在情况选择目录
-			if s.ServerMode == "64" {
-				// 64位模式优先使用bin64目录
-				if bin64Exists {
-					binDir = bin64Path
-					log.Printf("[TMUX] 64位模式，使用bin64目录: %s", binDir)
-				} else if binExists {
-					binDir = binPath
-					log.Printf("[TMUX] 64位模式，但bin64目录不存在，使用bin目录: %s", binDir)
-				} else {
-					log.Printf("[TMUX] 64位模式，但bin和bin64目录都不存在，使用原始目录: %s", binDir)
-				}
-			} else {
-				// 32位模式优先使用bin目录
-				if binExists {
-					binDir = binPath
-					log.Printf("[TMUX] 32位模式，使用bin目录: %s", binDir)
-				} else if bin64Exists {
-					binDir = bin64Path
-					log.Printf("[TMUX] 32位模式，但bin目录不存在，使用bin64目录: %s", binDir)
-				} else {
-					log.Printf("[TMUX] 32位模式，但bin和bin64目录都不存在，使用原始目录: %s", binDir)
-				}
-			}
-		}
-
-		// 使用 -c 参数指定启动目录
-		output, err = s.tmux.Command("new-session", "-s", s.SessionName, "-c", binDir, "-d", startCmd)
-	} else {
-		// 不指定启动目录，使用默认目录
-		log.Printf("[TMUX] 使用默认启动目录")
-		output, err = s.tmux.Command("new-session", "-s", s.SessionName, "-d", startCmd)
-	}
+	log.Printf("[TMUX] 使用服务端工作目录: %s", layout.WorkingDirectory)
+	output, err := s.tmux.Command("new-session", "-s", s.SessionName, "-c", layout.WorkingDirectory, "-d", startCmd)
 
 	if err != nil {
 		log.Printf("[TMUX][错误] 创建tmux会话失败: %v, 输出: %s", err, output)

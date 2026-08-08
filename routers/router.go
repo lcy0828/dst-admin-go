@@ -16,6 +16,7 @@ import (
 	"dont/internal/configuration"
 	consoleapi "dont/internal/console"
 	"dont/internal/containers"
+	dstinstall "dont/internal/dstserver"
 	"dont/internal/gameupdate"
 	"dont/internal/httpapi"
 	"dont/internal/jobs"
@@ -90,6 +91,14 @@ func InitRouter() (*gin.Engine, error) {
 		mapPath = backupPath + string(os.PathSeparator) + "maps"
 	}
 	serverMode := setting.String("paths", "DST_SERVER_MODE", "DST_ADMIN_SERVER_MODE")
+	serverExecutablePath := serverPath
+	serverInstallRoot := serverPath
+	serverContentRoot := serverPath
+	if layout, ok := dstinstall.Resolve(serverPath, serverMode); ok {
+		serverExecutablePath = layout.Executable
+		serverInstallRoot = layout.InstallRoot
+		serverContentRoot = layout.ContentRoot
+	}
 	roomCatalog, err := rooms.NewCatalog(savePath, roomStore)
 	if err != nil {
 		return nil, err
@@ -240,7 +249,7 @@ func InitRouter() (*gin.Engine, error) {
 		modParser = &modservice.MemoryModInfoParser{Base: modParser}
 	}
 	modService, err := modservice.NewService(modservice.Config{
-		SaveRoot: savePath, ServerRoot: serverPath, WorkshopContentRoot: workshopContentPath,
+		SaveRoot: savePath, ServerRoot: serverContentRoot, WorkshopContentRoot: workshopContentPath,
 		UGCRoot: ugcPath, AppID: steamAppID,
 	}, roomService, shardControl, backupService, modMetadata, modParser, modRunner)
 	if err != nil {
@@ -328,11 +337,11 @@ func InitRouter() (*gin.Engine, error) {
 		if version == "" {
 			version = "200"
 		}
-		updateRunner = gameupdate.NewMemoryRunner(serverPath, version)
+		updateRunner = gameupdate.NewMemoryRunner(serverInstallRoot, version)
 		latestChecker = gameupdate.NewMemoryLatestChecker(version)
 	}
 	gameUpdateService, err := gameupdate.NewService(
-		gameupdate.Config{ServerPath: serverPath, SteamCMDPath: steamCMDPath},
+		gameupdate.Config{ServerPath: serverExecutablePath, SteamCMDPath: steamCMDPath},
 		roomService, shardControl, backupService, gameUpdateStore, updateRunner, latestChecker,
 	)
 	if err != nil {
@@ -356,7 +365,7 @@ func InitRouter() (*gin.Engine, error) {
 	}
 	worldMapHandler := httpapi.NewWorldMapHandler(worldMapService, jobService)
 	capabilityConfig := capabilities.Config{
-		SavePath: savePath, BackupPath: backupPath, ServerPath: serverPath, SteamCMDPath: steamCMDPath, LuaFallbackPath: luaFallbackPath,
+		SavePath: savePath, BackupPath: backupPath, ServerPath: serverPath, ServerMode: serverMode, SteamCMDPath: steamCMDPath, LuaFallbackPath: luaFallbackPath,
 		MapRendererPath: mapRendererPath, MapPath: mapPath,
 	}
 	idempotencyStore := httpapi.NewIdempotencyStore(15*time.Minute, 2048)

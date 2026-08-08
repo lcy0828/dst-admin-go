@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+
+	dstinstall "dont/internal/dstserver"
 )
 
 type Tool struct {
@@ -31,6 +33,7 @@ type Config struct {
 	SavePath        string
 	BackupPath      string
 	ServerPath      string
+	ServerMode      string
 	SteamCMDPath    string
 	LuaFallbackPath string
 	MapRendererPath string
@@ -43,6 +46,7 @@ func Probe(config Config) Report {
 	docker := findTool("docker", "")
 	steamcmd := findTool("steamcmd", config.SteamCMDPath)
 	mapRenderer := findTool("dst-map-renderer", config.MapRendererPath)
+	_, serverAvailable := dstinstall.Resolve(config.ServerPath, config.ServerMode)
 	paths := map[string]Path{
 		"saves":   inspectPath(config.SavePath),
 		"backups": inspectPath(config.BackupPath),
@@ -59,7 +63,7 @@ func Probe(config Config) Report {
 		Features: map[string]bool{
 			"embeddedLuaParser":   true,
 			"externalLuaFallback": lua.Available,
-			"localShardControl":   tmux.Available && paths["server"].Exists,
+			"localShardControl":   tmux.Available && serverAvailable,
 			"backupRestore":       paths["saves"].Exists && paths["backups"].Configured,
 			"dockerControl":       docker.Available,
 			"agentControl":        true,

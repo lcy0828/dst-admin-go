@@ -42,7 +42,7 @@ func NewMemoryLatestChecker(version string) *MemoryLatestChecker {
 	return &MemoryLatestChecker{version: strings.TrimSpace(version)}
 }
 
-func (c *MemoryLatestChecker) Check(ctx context.Context, local string) (string, bool, error) {
+func (c *MemoryLatestChecker) Check(ctx context.Context, _, local string) (string, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", false, err
 	}

@@ -1382,7 +1382,7 @@ paths:
     post:
       tags: [Game, Jobs]
       operationId: updateGameServer
-      summary: Protect managed rooms, stop running shards, update app 343050, and optionally restart shards
+      summary: Protect managed rooms, stop running shards, update a SteamCMD-managed server, and optionally restart shards
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -3293,10 +3293,13 @@ components:
     GameVersion:
       type: object
       additionalProperties: false
-      required: [installed, installPath, steamcmdAvailable, checkedAt]
+      required: [installed, appId, installPath, updateMethod, updateSupported, steamcmdAvailable, checkedAt]
       properties:
         installed:
           type: boolean
+        appId:
+          type: string
+          enum: ["343050", "322330"]
         localVersion:
           type: string
         latestVersion:
@@ -3305,6 +3308,12 @@ components:
           type: boolean
         installPath:
           type: string
+        updateMethod:
+          type: string
+          enum: [steamcmd, steam-client]
+        updateSupported:
+          type: boolean
+          description: Whether this installation can be updated through the admin API
         steamcmdAvailable:
           type: boolean
         steamcmdPath:

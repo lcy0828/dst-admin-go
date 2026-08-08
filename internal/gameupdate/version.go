@@ -17,12 +17,14 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	dstinstall "dont/internal/dstserver"
 )
 
 var buildIDPattern = regexp.MustCompile(`(?m)"buildid"\s+"([0-9]+)"`)
 
 type LatestChecker interface {
-	Check(context.Context, string) (string, bool, error)
+	Check(context.Context, string, string) (string, bool, error)
 }
 
 type SteamVersionChecker struct{ client *http.Client }
@@ -31,9 +33,9 @@ func NewSteamVersionChecker() *SteamVersionChecker {
 	return &SteamVersionChecker{client: &http.Client{Timeout: 8 * time.Second}}
 }
 
-func (c *SteamVersionChecker) Check(ctx context.Context, localVersion string) (string, bool, error) {
+func (c *SteamVersionChecker) Check(ctx context.Context, appID, localVersion string) (string, bool, error) {
 	endpoint := "https://api.steampowered.com/ISteamApps/UpToDateCheck/v1/"
-	query := url.Values{"appid": {"343050"}, "version": {localVersion}}
+	query := url.Values{"appid": {appID}, "version": {localVersion}}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil)
 	if err != nil {
 		return "", false, err
@@ -86,14 +88,21 @@ func parseRequiredVersion(raw json.RawMessage) (string, error) {
 	return value, nil
 }
 
-func readLocalVersion(serverPath string) (string, bool) {
+func readLocalVersion(serverPath string, requestedAppIDs ...string) (string, bool) {
 	root := installRoot(serverPath)
 	candidates := []string{
 		filepath.Join(root, "version.txt"),
 		filepath.Join(serverPath, "version.txt"),
-		filepath.Join(root, "steamapps", "appmanifest_343050.acf"),
-		filepath.Join(filepath.Dir(root), "steamapps", "appmanifest_343050.acf"),
 	}
+	appIDs := uniqueAppIDs(requestedAppIDs)
+	if len(appIDs) == 0 {
+		if layout, ok := dstinstall.Resolve(serverPath, "64"); ok {
+			appIDs = []string{layout.AppID}
+		} else {
+			appIDs = []string{dstinstall.AppIDDedicatedServer}
+		}
+	}
+	candidates = append(candidates, steamManifestCandidates(root, appIDs...)...)
 	seen := make(map[string]bool)
 	for _, candidate := range candidates {
 		candidate = filepath.Clean(candidate)
@@ -123,10 +132,43 @@ func readLocalVersion(serverPath string) (string, bool) {
 	return "", false
 }
 
+func steamManifestCandidates(root string, appIDs ...string) []string {
+	values := make([]string, 0, 24)
+	for current, depth := filepath.Clean(root), 0; depth < 6; depth++ {
+		for _, appID := range uniqueAppIDs(appIDs) {
+			name := "appmanifest_" + appID + ".acf"
+			values = append(values, filepath.Join(current, name), filepath.Join(current, "steamapps", name))
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return values
+}
+
+func uniqueAppIDs(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
 func installRoot(serverPath string) string {
 	serverPath = filepath.Clean(strings.TrimSpace(serverPath))
 	if serverPath == "." || serverPath == "" {
 		return serverPath
+	}
+	if layout, ok := dstinstall.Resolve(serverPath, "64"); ok {
+		return layout.InstallRoot
 	}
 	if runtime.GOOS == "darwin" || strings.Contains(serverPath, ".app"+string(os.PathSeparator)) {
 		parts := strings.Split(serverPath, string(os.PathSeparator))

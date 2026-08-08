@@ -15,6 +15,7 @@ import (
 	"time"
 
 	backupapi "dont/internal/backups"
+	dstinstall "dont/internal/dstserver"
 	"dont/internal/jobs"
 	"dont/internal/rooms"
 	"dont/internal/shards"
@@ -24,6 +25,7 @@ var (
 	ErrConfirmationNeeded  = errors.New("game update confirmation does not match")
 	ErrUpdateInProgress    = errors.New("a game update is already active")
 	ErrSteamCMDUnavailable = errors.New("steamcmd is unavailable")
+	ErrSteamClientManaged  = errors.New("game installation is managed by the Steam client")
 	ErrUnsafeCachePath     = errors.New("steam cache path is unsafe")
 )
 
@@ -52,6 +54,8 @@ func (ExecRunner) Run(ctx context.Context, executable string, arguments []string
 type Config struct {
 	ServerPath   string
 	SteamCMDPath string
+	AppID        string
+	UpdateMethod string
 }
 
 type plannedWorld struct {
@@ -84,6 +88,25 @@ func NewService(config Config, roomCatalog RoomCatalog, control shards.Control, 
 	}
 	config.ServerPath = filepath.Clean(strings.TrimSpace(config.ServerPath))
 	config.SteamCMDPath = filepath.Clean(strings.TrimSpace(config.SteamCMDPath))
+	config.AppID = strings.TrimSpace(config.AppID)
+	config.UpdateMethod = strings.TrimSpace(config.UpdateMethod)
+	if layout, ok := dstinstall.Resolve(config.ServerPath, "64"); ok {
+		if config.AppID == "" {
+			config.AppID = layout.AppID
+		}
+		if config.UpdateMethod == "" {
+			config.UpdateMethod = layout.UpdateMethod
+		}
+	}
+	if config.AppID == "" {
+		config.AppID = dstinstall.AppIDDedicatedServer
+	}
+	if config.UpdateMethod == "" {
+		config.UpdateMethod = dstinstall.UpdateMethodSteamCMD
+	}
+	if config.UpdateMethod != dstinstall.UpdateMethodSteamCMD && config.UpdateMethod != dstinstall.UpdateMethodSteamClient {
+		return nil, fmt.Errorf("unsupported game update method %q", config.UpdateMethod)
+	}
 	return &Service{
 		config: config, rooms: roomCatalog, control: control, backups: backups, store: store, runner: runner, latest: latest,
 		now: time.Now, pollInterval: 500 * time.Millisecond, stopTimeout: 60 * time.Second, startTimeout: 20 * time.Second,
@@ -91,17 +114,18 @@ func NewService(config Config, roomCatalog RoomCatalog, control shards.Control, 
 }
 
 func (s *Service) Version(ctx context.Context) VersionReport {
-	local, installed := readLocalVersion(s.config.ServerPath)
+	local, installed := readLocalVersion(s.config.ServerPath, s.config.AppID)
 	executable := findSteamCMD(s.config.SteamCMDPath)
 	report := VersionReport{
-		Installed: installed, LocalVersion: local, InstallPath: installRoot(s.config.ServerPath),
+		Installed: installed, AppID: s.config.AppID, LocalVersion: local, InstallPath: installRoot(s.config.ServerPath),
+		UpdateMethod: s.config.UpdateMethod, UpdateSupported: s.config.UpdateMethod == dstinstall.UpdateMethodSteamCMD && executable != "",
 		SteamCMDAvailable: executable != "", SteamCMDPath: executable, CheckedAt: s.now().UTC(),
 	}
 	queryVersion := local
 	if queryVersion == "" {
 		queryVersion = "0"
 	}
-	latest, upToDate, err := s.latest.Check(ctx, queryVersion)
+	latest, upToDate, err := s.latest.Check(ctx, s.config.AppID, queryVersion)
 	if err != nil {
 		report.CheckError = err.Error()
 		return report
@@ -117,6 +141,9 @@ func (s *Service) Version(ctx context.Context) VersionReport {
 func (s *Service) Run(jobID string) (Run, error) { return s.store.Get(jobID) }
 
 func (s *Service) Prepare(ctx context.Context, request UpdateRequest) ([]jobs.TargetSpec, func(jobs.Job) jobs.Runner, func(), error) {
+	if s.config.UpdateMethod == dstinstall.UpdateMethodSteamClient {
+		return nil, nil, nil, ErrSteamClientManaged
+	}
 	if request.Confirmation != "更新游戏" {
 		return nil, nil, nil, ErrConfirmationNeeded
 	}
@@ -207,20 +234,20 @@ func (s *Service) execute(ctx context.Context, jobID string, request UpdateReque
 }
 
 func (s *Service) runSteamCMD(ctx context.Context, jobID string, cleanCache bool, executable string) error {
-	before, _ := readLocalVersion(s.config.ServerPath)
+	before, _ := readLocalVersion(s.config.ServerPath, s.config.AppID)
 	if _, err := s.store.Begin(jobID, before, cleanCache); err != nil {
 		return err
 	}
 	logBuffer := &boundedBuffer{limit: 2 * 1024 * 1024}
 	if cleanCache {
-		if err := cleanSteamCache(executable, installRoot(s.config.ServerPath)); err != nil {
+		if err := cleanSteamCache(executable, installRoot(s.config.ServerPath), s.config.AppID); err != nil {
 			_, _ = s.store.Complete(jobID, before, logBuffer.String(), err)
 			return err
 		}
 	}
-	arguments := []string{"+force_install_dir", installRoot(s.config.ServerPath), "+login", "anonymous", "+app_update", "343050", "validate", "+quit"}
+	arguments := []string{"+force_install_dir", installRoot(s.config.ServerPath), "+login", "anonymous", "+app_update", s.config.AppID, "validate", "+quit"}
 	runErr := s.runner.Run(ctx, executable, arguments, logBuffer)
-	after, _ := readLocalVersion(s.config.ServerPath)
+	after, _ := readLocalVersion(s.config.ServerPath, s.config.AppID)
 	if _, err := s.store.Complete(jobID, after, logBuffer.String(), runErr); err != nil {
 		return err
 	}
@@ -329,7 +356,7 @@ func startOrder(input []plannedWorld) []plannedWorld {
 func stopTargetID(world plannedWorld) string  { return "stop:" + world.roomID + ":" + world.worldID }
 func startTargetID(world plannedWorld) string { return "start:" + world.roomID + ":" + world.worldID }
 
-func cleanSteamCache(executable, serverRoot string) error {
+func cleanSteamCache(executable, serverRoot, appID string) error {
 	roots := []string{filepath.Join(filepath.Dir(executable), "steamapps"), filepath.Join(serverRoot, "steamapps")}
 	seen := make(map[string]bool)
 	for _, root := range roots {
@@ -338,7 +365,7 @@ func cleanSteamCache(executable, serverRoot string) error {
 			continue
 		}
 		seen[root] = true
-		for _, relative := range []string{filepath.Join("downloading", "343050"), filepath.Join("temp", "343050"), "appmanifest_343050.acf"} {
+		for _, relative := range []string{filepath.Join("downloading", appID), filepath.Join("temp", appID), "appmanifest_" + appID + ".acf"} {
 			target := filepath.Join(root, relative)
 			if !contained(root, target) {
 				return ErrUnsafeCachePath
