@@ -116,14 +116,19 @@ func main() {
 		log.Printf("自动日志解析服务已启动，检查间隔: %v", 30*time.Second)
 	}
 
-	router := routers.InitRouter()
+	router, err := routers.InitRouter()
+	if err != nil {
+		log.Fatalf("初始化 HTTP 路由失败: %v", err)
+	}
 
 	s := &http.Server{
-		Addr:           fmt.Sprintf(":%d", setting.HTTPPort),
-		Handler:        router,
-		ReadTimeout:    setting.ReadTimeout,
-		WriteTimeout:   setting.WriteTimeout,
-		MaxHeaderBytes: 1 << 20,
+		Addr:              fmt.Sprintf(":%d", setting.HTTPPort),
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       setting.ReadTimeout,
+		WriteTimeout:      0,
+		IdleTimeout:       90 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	// 使用goroutine启动服务器

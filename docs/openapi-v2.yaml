@@ -1,0 +1,4632 @@
+openapi: 3.1.0
+info:
+  title: DST Admin API
+  version: 2.0.0-alpha.1
+  description: >-
+    Contract for the authenticated DST Admin management API. JSON fields use
+    camelCase. Authenticated state-changing requests require X-CSRF-Token and
+    Idempotency-Key headers.
+servers:
+  - url: /api/v2
+tags:
+  - name: Auth
+  - name: System
+  - name: Rooms
+  - name: Logs
+  - name: Console
+  - name: Backups
+  - name: Game
+  - name: Maps
+  - name: Configuration
+  - name: Mods
+  - name: Players
+  - name: WorldState
+  - name: Automation
+  - name: Agents
+  - name: Containers
+  - name: Jobs
+paths:
+  /auth/session:
+    get:
+      tags: [Auth]
+      operationId: getAuthSession
+      security: []
+      summary: Inspect setup and session state
+      responses:
+        "200":
+          description: Current session state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionEnvelope"
+  /auth/setup:
+    post:
+      tags: [Auth]
+      operationId: setupAdmin
+      security: []
+      summary: Create the single administrator on first run
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Credentials"
+      responses:
+        "201":
+          description: Administrator and session created
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionEnvelope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      security: []
+      summary: Create an administrator session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Credentials"
+      responses:
+        "200":
+          description: Authenticated session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          description: Login attempts are temporarily rate limited
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Revoke the current session
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Session revoked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /auth/password:
+    put:
+      tags: [Auth]
+      operationId: changePassword
+      summary: Change the administrator password and revoke every session
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword:
+                  type: string
+                  maxLength: 72
+                newPassword:
+                  type: string
+                  minLength: 12
+                  maxLength: 72
+      responses:
+        "200":
+          description: Password changed; the client must log in again
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /system/capabilities:
+    get:
+      tags: [System]
+      operationId: getSystemCapabilities
+      summary: Detect platform, tools, paths, and available management features
+      responses:
+        "200":
+          description: Runtime capability report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CapabilitiesEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /system/setup-checks:
+    get:
+      tags: [System]
+      operationId: getSetupChecks
+      summary: Re-run deployment and room discovery checks
+      responses:
+        "200":
+          description: Current deployment readiness
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /system/status:
+    get:
+      tags: [System]
+      operationId: getSystemStatus
+      summary: Read host, CPU, memory, disk, process, and Go runtime metrics
+      responses:
+        "200": { description: Current system status, content: { application/json: { schema: { $ref: "#/components/schemas/SystemStatusEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /system/settings:
+    get:
+      tags: [System]
+      operationId: getSystemSettings
+      summary: Read effective editable settings and their source without revealing secrets
+      responses:
+        "200":
+          description: Current settings
+          headers: { Cache-Control: { schema: { type: string }, description: Always no-store } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/SystemSettingsEnvelope" } } }
+  /system/settings/preview:
+    post:
+      tags: [System]
+      operationId: previewSystemSettings
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SystemSettingsInput" } } } }
+      responses:
+        "200":
+          description: Validated settings diff
+          headers: { Cache-Control: { schema: { type: string }, description: Always no-store } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/SystemSettingsPreviewEnvelope" } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /system/settings/actions/apply:
+    post:
+      tags: [System]
+      operationId: applySystemSettings
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SystemSettingsInput" } } } }
+      responses:
+        "200":
+          description: Applied settings and restart state
+          headers: { Cache-Control: { schema: { type: string }, description: Always no-store } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/SystemSettingsApplyEnvelope" } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms:
+    get:
+      tags: [Rooms]
+      operationId: listRooms
+      summary: Discover DST rooms from the configured save root
+      responses:
+        "200":
+          description: Discovered rooms
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomListEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    post:
+      tags: [Rooms]
+      operationId: createRoom
+      summary: Atomically create and adopt a DST room
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRoomInput"
+      responses:
+        "201":
+          description: Room created and adopted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomEnvelope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Rooms]
+      operationId: getRoom
+      summary: Read a discovered room
+      responses:
+        "200":
+          description: Room details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /rooms/{roomId}/adopt:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Rooms]
+      operationId: adoptRoom
+      summary: Mark a discovered room as managed
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Adopted room
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /rooms/{roomId}/worlds:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Rooms]
+      operationId: listRoomWorlds
+      summary: List shard configuration and current tmux state
+      responses:
+        "200":
+          description: Room worlds
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorldListEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /rooms/{roomId}/actions/{action}:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - name: action
+        in: path
+        required: true
+        schema:
+          type: string
+          enum: [start, stop, restart]
+    post:
+      tags: [Rooms, Jobs]
+      operationId: runRoomAction
+      summary: Start, stop, or restart selected worlds through a persistent job
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomActionInput"
+      responses:
+        "202":
+          description: Operation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/worlds/{worldId}/logs:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    get:
+      tags: [Logs]
+      operationId: getWorldLog
+      summary: Read a bounded tail of the current world log
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 2000
+            default: 500
+        - name: query
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Current log snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogSnapshotEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /rooms/{roomId}/worlds/{worldId}/logs/download:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    get:
+      tags: [Logs]
+      operationId: downloadWorldLog
+      summary: Download the current world log without creating a missing file
+      responses:
+        "200":
+          description: Current world log file
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            text/plain:
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /rooms/{roomId}/worlds/{worldId}/logs/events:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    get:
+      tags: [Logs]
+      operationId: streamWorldLog
+      summary: Stream log snapshots, appended lines, resets, and heartbeats
+      parameters:
+        - name: tail
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 2000
+            default: 200
+      responses:
+        "200":
+          description: Authenticated server-sent event stream containing LogEvent values
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /rooms/{roomId}/commands:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Console]
+      operationId: listRoomCommands
+      summary: List typed built-in command definitions
+      responses:
+        "200":
+          description: Built-in commands ordered for display
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandDefinitionListEnvelope"
+  /rooms/{roomId}/command-runs:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Console]
+      operationId: listCommandRuns
+      summary: List persistent command audit records
+      parameters:
+        - name: worldId
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Command records ordered newest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandRunListEnvelope"
+  /rooms/{roomId}/command-runs/{runId}:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/CommandRunID"
+    get:
+      tags: [Console]
+      operationId: getCommandRun
+      summary: Read one persistent command record
+      responses:
+        "200":
+          description: Command record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandRunEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /rooms/{roomId}/worlds/{worldId}/commands:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    post:
+      tags: [Console]
+      operationId: executeRoomCommand
+      summary: Render and send a typed built-in command
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecuteCommandInput"
+      responses:
+        "201":
+          description: Command send attempt persisted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandRunEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/worlds/{worldId}/raw-commands:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    post:
+      tags: [Console]
+      operationId: executeRawRoomCommand
+      summary: Send a bounded raw Lua command after exact room-name confirmation
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecuteRawCommandInput"
+      responses:
+        "201":
+          description: Raw command send attempt persisted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandRunEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/backups:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Backups]
+      operationId: listRoomBackups
+      summary: List verified backups for a managed room
+      responses:
+        "200":
+          description: Backups ordered newest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupListEnvelope"
+    post:
+      tags: [Backups, Jobs]
+      operationId: createRoomBackup
+      summary: Request a consistent manual backup through a persistent job
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBackupInput"
+      responses:
+        "202":
+          description: Backup job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/backups/upload:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Backups]
+      operationId: uploadRoomBackup
+      summary: Upload and verify a ZIP backup without publishing invalid content
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                name:
+                  type: string
+                  maxLength: 128
+      responses:
+        "201":
+          description: Verified upload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupEnvelope"
+        "413":
+          description: Upload or expanded archive exceeds safety limits
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/backups/actions/prune:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Backups, Jobs]
+      operationId: pruneRoomBackups
+      summary: Apply the current snapshot retention limit through a persistent job
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Prune job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+  /rooms/{roomId}/backup-policy:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Backups]
+      operationId: getRoomBackupPolicy
+      summary: Read the persisted automatic snapshot policy
+      responses:
+        "200":
+          description: Snapshot policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupPolicyEnvelope"
+    put:
+      tags: [Backups]
+      operationId: updateRoomBackupPolicy
+      summary: Enable, disable, or reschedule automatic snapshots
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupPolicyInput"
+      responses:
+        "200":
+          description: Updated snapshot policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupPolicyEnvelope"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /backups/{backupId}:
+    parameters:
+      - $ref: "#/components/parameters/BackupID"
+    get:
+      tags: [Backups]
+      operationId: getBackup
+      summary: Read one backup record
+      responses:
+        "200":
+          description: Backup record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [Backups]
+      operationId: renameBackup
+      summary: Rename backup metadata without moving the verified archive
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RenameBackupInput"
+      responses:
+        "200":
+          description: Renamed backup
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+    delete:
+      tags: [Backups]
+      operationId: deleteBackup
+      summary: Delete a backup after exact backup-name confirmation
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteBackupInput"
+      responses:
+        "200":
+          description: Deleted backup record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackupEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /backups/{backupId}/download:
+    parameters:
+      - $ref: "#/components/parameters/BackupID"
+    get:
+      tags: [Backups]
+      operationId: downloadBackup
+      summary: Download an authenticated verified ZIP backup
+      responses:
+        "200":
+          description: Backup ZIP archive
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /backups/{backupId}/actions/restore:
+    parameters:
+      - $ref: "#/components/parameters/BackupID"
+    post:
+      tags: [Backups, Jobs]
+      operationId: restoreBackup
+      summary: Atomically restore a stopped room after creating a protection backup
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RestoreBackupInput"
+      responses:
+        "202":
+          description: Restore job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/configuration:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Configuration]
+      operationId: getRoomConfiguration
+      summary: Read schema-backed cluster.ini values with a content revision
+      responses:
+        "200":
+          description: Current room configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomConfigurationEnvelope"
+  /rooms/{roomId}/configuration/preview:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Configuration]
+      operationId: previewRoomConfiguration
+      summary: Validate a room configuration and calculate its server-side diff without writing
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomConfigurationInput"
+      responses:
+        "200":
+          description: Configuration diff and planned revision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationPreviewEnvelope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/configuration/actions/apply:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Configuration, Jobs]
+      operationId: applyRoomConfiguration
+      summary: Create a protection backup and atomically apply cluster.ini through a persistent job
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomConfigurationInput"
+      responses:
+        "202":
+          description: Configuration job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+  /rooms/{roomId}/worlds/{worldId}/configuration:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    get:
+      tags: [Configuration]
+      operationId: getWorldConfiguration
+      summary: Read server.ini and leveldataoverride.lua as one revisioned configuration
+      responses:
+        "200":
+          description: Current world configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorldConfigurationEnvelope"
+  /rooms/{roomId}/worlds/{worldId}/configuration/preview:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    post:
+      tags: [Configuration]
+      operationId: previewWorldConfiguration
+      summary: Validate ports and Lua override patches and calculate a server-side diff
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorldConfigurationInput"
+      responses:
+        "200":
+          description: Configuration diff and planned revision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationPreviewEnvelope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/worlds/{worldId}/configuration/actions/apply:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    post:
+      tags: [Configuration, Jobs]
+      operationId: applyWorldConfiguration
+      summary: Protect the room and apply revisioned INI and Lua changes through a persistent job
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorldConfigurationInput"
+      responses:
+        "202":
+          description: Configuration job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+  /rooms/{roomId}/access:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Configuration]
+      operationId: getRoomAccessLists
+      summary: Read admin, block, and whitelist files as one revisioned resource
+      responses:
+        "200":
+          description: Current access lists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessListsEnvelope"
+  /rooms/{roomId}/access/preview:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Configuration]
+      operationId: previewRoomAccessLists
+      summary: Validate and diff access lists; removals require the exact room name
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccessListsInput"
+      responses:
+        "200":
+          description: Access list diff
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationPreviewEnvelope"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/access/actions/apply:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Configuration, Jobs]
+      operationId: applyRoomAccessLists
+      summary: Protect the room and atomically apply changed access list files through a job
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccessListsInput"
+      responses:
+        "202":
+          description: Access list job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+  /rooms/{roomId}/cluster-token:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Configuration]
+      operationId: getClusterTokenStatus
+      summary: Read only masked Cluster Token status and revision
+      responses:
+        "200":
+          description: Masked token status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenStatusEnvelope"
+  /rooms/{roomId}/cluster-token/reveal:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Configuration]
+      operationId: revealClusterToken
+      summary: Reveal the Cluster Token after exact room-name confirmation; response is never cached
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmationInput"
+      responses:
+        "200":
+          description: Unmasked token with no-store response headers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenRevealEnvelope"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/cluster-token/preview:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Configuration]
+      operationId: previewClusterToken
+      summary: Validate a token change without returning either secret in the diff
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenUpdateInput"
+      responses:
+        "200":
+          description: Secret-safe token diff
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConfigurationPreviewEnvelope"
+  /rooms/{roomId}/cluster-token/actions/apply:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Configuration, Jobs]
+      operationId: applyClusterToken
+      summary: Protect the room and atomically replace or clear the token through a persistent job
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenUpdateInput"
+      responses:
+        "202":
+          description: Token update job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+  /game/version:
+    get:
+      tags: [Game]
+      operationId: getGameVersion
+      summary: Inspect the local DST build, latest Steam build, and update capability
+      responses:
+        "200":
+          description: Version report; checkError is populated when Steam is temporarily unreachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameVersionEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /rooms/{roomId}/maps:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Maps]
+      operationId: listRoomMaps
+      summary: List successful, running, and failed map generations without hiding the last usable map
+      responses:
+        "200":
+          description: Room maps and renderer capability
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MapListEnvelope"
+  /rooms/{roomId}/maps/actions/generate:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Maps, Jobs]
+      operationId: generateRoomMap
+      summary: Generate validated map layers through a persistent job and atomically publish them
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateMapInput"
+      responses:
+        "202":
+          description: Map generation job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/worlds/{worldId}/sessions:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    get:
+      tags: [Maps]
+      operationId: listWorldSessions
+      summary: Discover bounded regular world snapshots while excluding metadata and unsafe links
+      responses:
+        "200":
+          description: Session snapshots ordered newest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionListEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /sessions/{sessionId}/download:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Maps]
+      operationId: downloadSessionSnapshot
+      summary: Download an authenticated world Session snapshot for diagnosis
+      responses:
+        "200":
+          description: Raw Session snapshot
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /maps/{mapId}/images/{layer}:
+    parameters:
+      - name: mapId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: layer
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/MapLayer"
+    get:
+      tags: [Maps]
+      operationId: getMapLayerImage
+      summary: Read one immutable authenticated PNG layer
+      responses:
+        "200":
+          description: Map layer PNG
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /game/actions/update:
+    post:
+      tags: [Game, Jobs]
+      operationId: updateGameServer
+      summary: Protect managed rooms, stop running shards, update app 343050, and optionally restart shards
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GameUpdateInput"
+      responses:
+        "202":
+          description: Persistent update job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /game/update-runs/{jobId}:
+    parameters:
+      - $ref: "#/components/parameters/JobID"
+    get:
+      tags: [Game]
+      operationId: getGameUpdateRun
+      summary: Read the bounded persistent SteamCMD log and version transition for an update job
+      responses:
+        "200":
+          description: Persisted update run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameUpdateRunEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /jobs:
+    get:
+      tags: [Jobs]
+      operationId: listJobs
+      summary: List persisted operation jobs
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/JobStatus"
+        - name: kind
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Jobs ordered newest first
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobListEnvelope"
+  /jobs/{jobId}:
+    parameters:
+      - $ref: "#/components/parameters/JobID"
+    get:
+      tags: [Jobs]
+      operationId: getJob
+      summary: Read one job and all target results
+      responses:
+        "200":
+          description: Job details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /jobs/{jobId}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/JobID"
+    post:
+      tags: [Jobs]
+      operationId: cancelJob
+      summary: Request cooperative cancellation
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Cancellation requested
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /jobs/events:
+    get:
+      tags: [Jobs]
+      operationId: streamJobEvents
+      summary: Replay and stream authenticated job events
+      parameters:
+        - name: after
+          in: query
+          description: Last persisted event ID already observed
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: Last-Event-ID
+          in: header
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+      responses:
+        "200":
+          description: Server-sent event stream; each data field contains a JobEvent JSON object
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /mods/search:
+    get:
+      tags: [Mods]
+      operationId: searchMods
+      parameters:
+        - { name: query, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 100 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+      responses:
+        "200": { description: Workshop search results, content: { application/json: { schema: { $ref: "#/components/schemas/ModSearchEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /mods/{modId}:
+    parameters: [{ $ref: "#/components/parameters/ModID" }]
+    get:
+      tags: [Mods]
+      operationId: getModDetails
+      responses:
+        "200": { description: Workshop item, content: { application/json: { schema: { $ref: "#/components/schemas/SteamModEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /rooms/{roomId}/mods:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Mods]
+      operationId: listRoomMods
+      responses:
+        "200": { description: Room Mod health inventory, content: { application/json: { schema: { $ref: "#/components/schemas/ModListEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /rooms/{roomId}/mods/actions/install:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Mods]
+      operationId: installMod
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModInstallInput" } } } }
+      responses:
+        "202": { description: Install job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/mods/actions/check-updates:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Mods]
+      operationId: checkModUpdates
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Update check job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+  /rooms/{roomId}/mods/{modId}/actions/update:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
+    post:
+      tags: [Mods]
+      operationId: updateMod
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Update job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+  /rooms/{roomId}/mods/{modId}/actions/enable:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
+    post:
+      tags: [Mods]
+      operationId: setModEnabled
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModEnableInput" } } } }
+      responses:
+        "202": { description: Enable job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+  /rooms/{roomId}/mods/{modId}/actions/repair:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
+    post:
+      tags: [Mods]
+      operationId: repairMod
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModActionInput" } } } }
+      responses:
+        "202": { description: Repair job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+  /rooms/{roomId}/mods/{modId}/actions/uninstall:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
+    post:
+      tags: [Mods]
+      operationId: uninstallMod
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModActionInput" } } } }
+      responses:
+        "202": { description: Uninstall job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+  /rooms/{roomId}/worlds/{worldId}/mods/{modId}/configuration:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }, { $ref: "#/components/parameters/ModID" }]
+    get:
+      tags: [Mods]
+      operationId: getModConfiguration
+      responses:
+        "200": { description: Parsed Mod configuration, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/worlds/{worldId}/mods/{modId}/configuration/preview:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }, { $ref: "#/components/parameters/ModID" }]
+    post:
+      tags: [Mods]
+      operationId: previewModConfiguration
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationInput" } } } }
+      responses:
+        "200": { description: Semantic configuration diff, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationPreviewEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/worlds/{worldId}/mods/{modId}/configuration/actions/apply:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }, { $ref: "#/components/parameters/ModID" }]
+    post:
+      tags: [Mods]
+      operationId: applyModConfiguration
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationInput" } } } }
+      responses:
+        "202": { description: Configuration job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/players:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Players]
+      operationId: listRoomPlayers
+      summary: List persisted player observations and current access state
+      parameters:
+        - { name: query, in: query, schema: { type: string, maxLength: 128 } }
+        - { name: status, in: query, schema: { type: string, enum: [online, offline] } }
+        - { name: worldId, in: query, schema: { type: string } }
+        - { name: prefab, in: query, schema: { type: string, maxLength: 128 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200": { description: Player history and status summary, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerListEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/players/{playerId}:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }]
+    get:
+      tags: [Players]
+      operationId: getRoomPlayer
+      summary: Read one persisted player observation
+      responses:
+        "200": { description: Player details, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/players/actions/refresh:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Players, Jobs]
+      operationId: refreshRoomPlayers
+      summary: Probe each world and persist its current player snapshot
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Player refresh job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/players/{playerId}/actions/kick:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }]
+    post:
+      tags: [Players, Jobs]
+      operationId: kickRoomPlayer
+      summary: Kick an online player from the world where they were observed
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
+      responses:
+        "202": { description: Player kick job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/players/{playerId}/actions/ban:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }]
+    post:
+      tags: [Players, Jobs]
+      operationId: banRoomPlayer
+      summary: Add a player to the room blocklist and notify a running shard
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
+      responses:
+        "202": { description: Player ban job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/players/{playerId}/actions/unban:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }]
+    post:
+      tags: [Players, Jobs]
+      operationId: unbanRoomPlayer
+      summary: Remove a player from the room blocklist and notify a running shard
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
+      responses:
+        "202": { description: Player unban job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/players/{playerId}/actions/announce:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }]
+    post:
+      tags: [Players, Jobs]
+      operationId: announceToRoomPlayer
+      summary: Broadcast a marked reminder on the online player's current shard
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
+      responses:
+        "202": { description: Player announcement job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/structured-logs:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Logs]
+      operationId: listStructuredLogs
+      summary: Query the latest persisted structured snapshot from every room shard
+      parameters:
+        - { name: query, in: query, schema: { type: string, maxLength: 256 } }
+        - { name: worldId, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { $ref: "#/components/schemas/StructuredLogType" } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200": { description: Structured log entries and type counts, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogListEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/world-states:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [WorldState]
+      operationId: listWorldStates
+      summary: Read the latest persisted world-state snapshot for each room shard
+      responses:
+        "200": { description: Latest world-state snapshots, content: { application/json: { schema: { $ref: "#/components/schemas/WorldStateListEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /rooms/{roomId}/world-states/history:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [WorldState]
+      operationId: getWorldStateHistory
+      summary: Read a bounded time series for one world shard
+      parameters:
+        - { name: worldId, in: query, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 720, default: 120 } }
+      responses:
+        "200": { description: World-state time series ordered newest first, content: { application/json: { schema: { $ref: "#/components/schemas/WorldStateHistoryEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/world-states/actions/refresh:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [WorldState, Jobs]
+      operationId: refreshWorldStates
+      summary: Probe every running shard and append a world-state snapshot
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: World-state refresh job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/automation/actions:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Automation]
+      operationId: listAutomationActions
+      responses:
+        "200": { description: Allowed automation actions, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationActionListEnvelope" } } } }
+  /rooms/{roomId}/automation/groups:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Automation]
+      operationId: listAutomationGroups
+      responses:
+        "200": { description: Automation groups, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationGroupListEnvelope" } } } }
+    post:
+      tags: [Automation]
+      operationId: createAutomationGroup
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationGroupInput" } } } }
+      responses:
+        "201": { description: Created group, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationGroupEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/automation/groups/{groupId}:
+    parameters:
+      - { $ref: "#/components/parameters/RoomID" }
+      - { name: groupId, in: path, required: true, schema: { type: string, format: uuid } }
+    put:
+      tags: [Automation]
+      operationId: updateAutomationGroup
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationGroupInput" } } } }
+      responses:
+        "200": { description: Updated group, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationGroupEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+    delete:
+      tags: [Automation]
+      operationId: deleteAutomationGroup
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Group deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/automation/tasks:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Automation]
+      operationId: listAutomationTasks
+      responses:
+        "200": { description: Automation tasks, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationTaskListEnvelope" } } } }
+    post:
+      tags: [Automation]
+      operationId: createAutomationTask
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationTaskInput" } } } }
+      responses:
+        "201": { description: Created task, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationTaskEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/automation/tasks/{taskId}:
+    parameters:
+      - { $ref: "#/components/parameters/RoomID" }
+      - { name: taskId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Automation]
+      operationId: getAutomationTask
+      responses:
+        "200": { description: Automation task, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationTaskEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Automation]
+      operationId: updateAutomationTask
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationTaskInput" } } } }
+      responses:
+        "200": { description: Updated task, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationTaskEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+    delete:
+      tags: [Automation]
+      operationId: deleteAutomationTask
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Task deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/automation/tasks/{taskId}/actions/run:
+    parameters:
+      - { $ref: "#/components/parameters/RoomID" }
+      - { name: taskId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Automation, Jobs]
+      operationId: runAutomationTask
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Automation job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/automation/runs:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Automation]
+      operationId: listAutomationRuns
+      parameters:
+        - { name: taskId, in: query, schema: { type: string } }
+        - { name: groupId, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/AutomationRunStatus" } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200": { description: Automation run records, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationRunListEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/automation/stats:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Automation]
+      operationId: getAutomationStats
+      parameters:
+        - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 90, default: 7 } }
+      responses:
+        "200": { description: Automation execution statistics, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationStatsEnvelope" } } } }
+  /rooms/{roomId}/automation/export:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Automation]
+      operationId: exportAutomation
+      responses:
+        "200": { description: Portable automation document, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationDocumentEnvelope" } } } }
+  /rooms/{roomId}/automation/imports/preview:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Automation]
+      operationId: previewAutomationImport
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationDocument" } } } }
+      responses:
+        "200": { description: Import validation and digest, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationImportPreviewEnvelope" } } } }
+  /rooms/{roomId}/automation/imports:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Automation]
+      operationId: importAutomation
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationImportInput" } } } }
+      responses:
+        "200": { description: Imported group and task counts, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationImportResultEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/structured-logs/actions/refresh:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Logs, Jobs]
+      operationId: refreshStructuredLogs
+      summary: Parse bounded current log snapshots for every room shard
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Structured log refresh job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/log-rules:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Logs]
+      operationId: listStructuredLogRules
+      summary: List room-scoped structured log extraction rules
+      responses:
+        "200": { description: Extraction rules ordered by priority, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleListEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+    post:
+      tags: [Logs]
+      operationId: createStructuredLogRule
+      summary: Create a room-scoped extraction rule
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleInput" } } } }
+      responses:
+        "201": { description: Created extraction rule, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/log-rules/{ruleId}:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/StructuredLogRuleID" }]
+    put:
+      tags: [Logs]
+      operationId: updateStructuredLogRule
+      summary: Replace a room-scoped extraction rule
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleInput" } } } }
+      responses:
+        "200": { description: Updated extraction rule, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+    delete:
+      tags: [Logs]
+      operationId: deleteStructuredLogRule
+      summary: Delete a custom extraction rule
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Custom extraction rule deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/log-rules/actions/test:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Logs]
+      operationId: testStructuredLogRule
+      summary: Compile and test an extraction rule against a bounded text sample
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleTestInput" } } } }
+      responses:
+        "200": { description: Rule test result, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleTestEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /agents:
+    get:
+      tags: [Agents]
+      operationId: listAgents
+      summary: List persisted Agent snapshots and current connectivity
+      responses:
+        "200":
+          description: Agent nodes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentListEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /agents/actions:
+    get:
+      tags: [Agents]
+      operationId: listAgentActions
+      summary: List the fixed domain action allowlist
+      responses:
+        "200":
+          description: Allowed Agent actions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentActionListEnvelope" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /agents/commands:
+    get:
+      tags: [Agents]
+      operationId: listAgentCommands
+      summary: List persisted Agent command history
+      parameters:
+        - { name: agentId, in: query, schema: { type: string, maxLength: 128 } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/AgentCommandStatus" } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: Agent command history
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentCommandListEnvelope" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /agents/security:
+    get:
+      tags: [Agents]
+      operationId: getAgentSecurity
+      summary: Read masked Agent key metadata without exposing the secret
+      responses:
+        "200":
+          description: Masked Agent key state
+          headers:
+            Cache-Control: { schema: { type: string }, description: Always no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentSecurityEnvelope" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /agents/security/actions/rotate:
+    post:
+      tags: [Agents]
+      operationId: rotateAgentKey
+      summary: Rotate the Agent key and reveal the replacement exactly once
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentRotateKeyInput" }
+      responses:
+        "200":
+          description: One-time replacement key
+          headers:
+            Cache-Control: { schema: { type: string }, description: Always no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentRotateKeyEnvelope" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /agents/{agentId}:
+    parameters: [{ $ref: "#/components/parameters/AgentID" }]
+    get:
+      tags: [Agents]
+      operationId: getAgent
+      responses:
+        "200": { description: Agent node, content: { application/json: { schema: { $ref: "#/components/schemas/AgentEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Agents]
+      operationId: forgetAgent
+      summary: Remove an offline Agent snapshot
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Offline Agent snapshot removed }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /agents/{agentId}/commands:
+    parameters: [{ $ref: "#/components/parameters/AgentID" }]
+    get:
+      tags: [Agents]
+      operationId: listAgentCommandsForAgent
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/AgentCommandStatus" } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200": { description: Agent command history, content: { application/json: { schema: { $ref: "#/components/schemas/AgentCommandListEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+    post:
+      tags: [Agents, Jobs]
+      operationId: runAgentCommand
+      summary: Run one fixed domain action on an online Agent
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentCommandInput" }
+      responses:
+        "202": { description: Agent command Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /containers:
+    get:
+      tags: [Containers]
+      operationId: listContainers
+      summary: List managed or clearly DST-owned Docker containers
+      responses:
+        "200": { description: Docker capability and containers, content: { application/json: { schema: { $ref: "#/components/schemas/ContainerListEnvelope" } } } }
+  /containers/{containerId}/actions/{action}:
+    parameters:
+      - { $ref: "#/components/parameters/ContainerID" }
+      - { name: action, in: path, required: true, schema: { $ref: "#/components/schemas/ContainerAction" } }
+    post:
+      tags: [Containers, Jobs]
+      operationId: runContainerAction
+      summary: Run a fixed lifecycle action on a managed DST container
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ContainerActionInput" } } } }
+      responses:
+        "202": { description: Container Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: dst_admin_session
+  parameters:
+    CSRFToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: A unique operation key. Reusing it with the same request replays the original response; reusing it with different JSON content returns 409.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+        pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$'
+    RoomID:
+      name: roomId
+      in: path
+      required: true
+      schema:
+        type: string
+    WorldID:
+      name: worldId
+      in: path
+      required: true
+      schema:
+        type: string
+    CommandRunID:
+      name: runId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    BackupID:
+      name: backupId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    JobID:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ModID:
+      name: modId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[0-9]{1,20}$'
+    PlayerID:
+      name: playerId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9_-]{1,128}$'
+    StructuredLogRuleID:
+      name: ruleId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    AgentID:
+      name: agentId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+    ContainerID:
+      name: containerId
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[a-f0-9]{12,64}$' }
+  responses:
+    Unauthorized:
+      description: A valid administrator session is required
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Forbidden:
+      description: Origin or CSRF validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Conflict:
+      description: The request conflicts with current setup state
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    UnprocessableEntity:
+      description: The request is valid JSON but violates a domain constraint
+      content:
+        application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    NotFound:
+      description: The requested resource does not exist
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ServiceUnavailable:
+      description: A required local path or runtime dependency is unavailable
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+  schemas:
+    Meta:
+      type: object
+      required: [requestId]
+      properties:
+        requestId:
+          type: string
+    APIError:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details: {}
+    ErrorEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          type: "null"
+        error:
+          $ref: "#/components/schemas/APIError"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    Credentials:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 128
+        password:
+          type: string
+          minLength: 1
+    Admin:
+      type: object
+      additionalProperties: false
+      required: [id, username]
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+    SessionState:
+      type: object
+      required: [authenticated, setupRequired]
+      properties:
+        authenticated:
+          type: boolean
+        setupRequired:
+          type: boolean
+        user:
+          $ref: "#/components/schemas/Admin"
+        expiresAt:
+          type: string
+          format: date-time
+        csrfToken:
+          type: string
+        passwordChanged:
+          type: boolean
+    SessionEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/SessionState"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    ToolCapability:
+      type: object
+      required: [available]
+      properties:
+        available:
+          type: boolean
+        path:
+          type: string
+    PathCapability:
+      type: object
+      required: [configured, exists, writable]
+      properties:
+        configured:
+          type: boolean
+        exists:
+          type: boolean
+        writable:
+          type: boolean
+        value:
+          type: string
+    Capabilities:
+      type: object
+      required: [platform, arch, tools, paths, features]
+      properties:
+        platform:
+          type: string
+        arch:
+          type: string
+        tools:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ToolCapability"
+        paths:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/PathCapability"
+        features:
+          type: object
+          additionalProperties:
+            type: boolean
+    CapabilitiesEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/Capabilities"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    CheckStatus:
+      type: string
+      enum: [pass, warning, fail]
+    SetupCheck:
+      type: object
+      additionalProperties: false
+      required: [id, label, status, required, summary]
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        status:
+          $ref: "#/components/schemas/CheckStatus"
+        required:
+          type: boolean
+        summary:
+          type: string
+        remediation:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+    Readiness:
+      type: object
+      additionalProperties: false
+      required: [ready, checks]
+      properties:
+        ready:
+          type: boolean
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/SetupCheck"
+    ReadinessEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/Readiness"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    Room:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - directoryName
+        - name
+        - description
+        - gameMode
+        - maxPlayers
+        - pvp
+        - passwordProtected
+        - managed
+        - worldCount
+        - updatedAt
+      properties:
+        id:
+          type: string
+          description: Canonical opaque ID derived from the safe directory component
+        directoryName:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        gameMode:
+          type: string
+        maxPlayers:
+          type: integer
+        pvp:
+          type: boolean
+        passwordProtected:
+          type: boolean
+        managed:
+          type: boolean
+        worldCount:
+          type: integer
+        updatedAt:
+          type: string
+          format: date-time
+    CreateRoomInput:
+      type: object
+      additionalProperties: false
+      required: [directoryName, name, gameMode, maxPlayers, includeCaves]
+      properties:
+        directoryName:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        description:
+          type: string
+          maxLength: 512
+          default: ""
+        gameMode:
+          type: string
+          enum: [survival, endless, wilderness]
+        maxPlayers:
+          type: integer
+          minimum: 1
+          maximum: 64
+        pvp:
+          type: boolean
+          default: false
+        password:
+          type: string
+          maxLength: 64
+          writeOnly: true
+        clusterToken:
+          type: string
+          maxLength: 4096
+          writeOnly: true
+        includeCaves:
+          type: boolean
+    RoomActionInput:
+      type: object
+      additionalProperties: false
+      properties:
+        worldIds:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+    RoomEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/Room"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    RoomList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Room"
+        total:
+          type: integer
+    RoomListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/RoomList"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    World:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - roomId
+        - directoryName
+        - name
+        - role
+        - isMaster
+        - serverPort
+        - updatedAt
+        - status
+        - controlAvailable
+      properties:
+        id:
+          type: string
+        roomId:
+          type: string
+        directoryName:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+          enum: [master, caves, custom]
+        isMaster:
+          type: boolean
+        serverPort:
+          type: integer
+        updatedAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [running, stopped, unknown]
+        controlAvailable:
+          type: boolean
+        statusMessage:
+          type: string
+    WorldList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/World"
+        total:
+          type: integer
+    WorldListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/WorldList"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    LogLine:
+      type: object
+      additionalProperties: false
+      required: [cursor, text]
+      properties:
+        cursor:
+          type: integer
+          format: int64
+          minimum: 0
+        text:
+          type: string
+    LogSnapshot:
+      type: object
+      additionalProperties: false
+      required: [fileName, size, updatedAt, truncated, lines]
+      properties:
+        fileName:
+          type: string
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+        updatedAt:
+          type: string
+          format: date-time
+        truncated:
+          type: boolean
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/LogLine"
+    LogEvent:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [connected, line, reset]
+        line:
+          $ref: "#/components/schemas/LogLine"
+        snapshot:
+          $ref: "#/components/schemas/LogSnapshot"
+    LogSnapshotEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/LogSnapshot"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    CommandRisk:
+      type: string
+      enum: [low, medium, high, critical]
+    CommandParameter:
+      type: object
+      additionalProperties: false
+      required: [name, label, type, required]
+      properties:
+        name:
+          type: string
+        label:
+          type: string
+        type:
+          type: string
+          enum: [string, integer, enum]
+        required:
+          type: boolean
+        description:
+          type: string
+        options:
+          type: array
+          items:
+            type: string
+        minimum:
+          type: integer
+        maximum:
+          type: integer
+    CommandDefinition:
+      type: object
+      additionalProperties: false
+      required: [id, name, description, category, risk, parameters]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        risk:
+          $ref: "#/components/schemas/CommandRisk"
+        parameters:
+          type: array
+          items:
+            $ref: "#/components/schemas/CommandParameter"
+    CommandDefinitionList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CommandDefinition"
+    CommandDefinitionListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/CommandDefinitionList"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    ExecuteCommandInput:
+      type: object
+      additionalProperties: false
+      required: [commandId]
+      properties:
+        commandId:
+          type: string
+        arguments:
+          type: object
+          additionalProperties: true
+          default: {}
+        confirmation:
+          type: string
+    ExecuteRawCommandInput:
+      type: object
+      additionalProperties: false
+      required: [command, confirmation]
+      properties:
+        command:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        confirmation:
+          type: string
+    CommandRunStatus:
+      type: string
+      enum: [sending, sent, failed]
+    CommandRun:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, worldId, mode, name, risk, status, logQuery, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        roomId:
+          type: string
+        worldId:
+          type: string
+        mode:
+          type: string
+          enum: [builtin, raw]
+        commandId:
+          type: string
+        name:
+          type: string
+        risk:
+          $ref: "#/components/schemas/CommandRisk"
+        arguments:
+          type: object
+          additionalProperties: true
+        rawCommand:
+          type: string
+        status:
+          $ref: "#/components/schemas/CommandRunStatus"
+        message:
+          type: string
+        errorCode:
+          type: string
+        errorMessage:
+          type: string
+        logQuery:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+    CommandRunEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/CommandRun"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    CommandRunList:
+      type: object
+      additionalProperties: false
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CommandRun"
+        total:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+        offset:
+          type: integer
+          minimum: 0
+    CommandRunListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/CommandRunList"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    BackupKind:
+      type: string
+      enum: [manual, upload, snapshot, protection, imported]
+    Backup:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - roomId
+        - name
+        - kind
+        - fileName
+        - size
+        - contentSize
+        - fileCount
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        roomId:
+          type: string
+        name:
+          type: string
+        kind:
+          $ref: "#/components/schemas/BackupKind"
+        fileName:
+          type: string
+        sourceName:
+          type: string
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+        contentSize:
+          type: integer
+          format: int64
+          minimum: 0
+        fileCount:
+          type: integer
+          minimum: 0
+        sha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        status:
+          type: string
+          enum: [verified, invalid]
+        validationError:
+          type: string
+        verifiedAt:
+          type: string
+          format: date-time
+        sourceJobId:
+          type: string
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    BackupEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/Backup"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    BackupList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Backup"
+        total:
+          type: integer
+          minimum: 0
+    BackupListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/BackupList"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    CreateBackupInput:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          maxLength: 128
+    RenameBackupInput:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+    DeleteBackupInput:
+      type: object
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation:
+          type: string
+    RestoreBackupInput:
+      type: object
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation:
+          type: string
+    BackupPolicy:
+      type: object
+      additionalProperties: false
+      required: [roomId, enabled, intervalMinutes, maxSnapshots, updatedAt]
+      properties:
+        roomId:
+          type: string
+        enabled:
+          type: boolean
+        intervalMinutes:
+          type: integer
+          minimum: 15
+          maximum: 10080
+        maxSnapshots:
+          type: integer
+          minimum: 1
+          maximum: 100
+        nextRunAt:
+          type: string
+          format: date-time
+        lastRunAt:
+          type: string
+          format: date-time
+        lastJobId:
+          type: string
+          format: uuid
+        lastError:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+    BackupPolicyInput:
+      type: object
+      additionalProperties: false
+      required: [enabled, intervalMinutes, maxSnapshots]
+      properties:
+        enabled:
+          type: boolean
+        intervalMinutes:
+          type: integer
+          minimum: 15
+          maximum: 10080
+        maxSnapshots:
+          type: integer
+          minimum: 1
+          maximum: 100
+    BackupPolicyEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/BackupPolicy"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    GameVersion:
+      type: object
+      additionalProperties: false
+      required: [installed, installPath, steamcmdAvailable, checkedAt]
+      properties:
+        installed:
+          type: boolean
+        localVersion:
+          type: string
+        latestVersion:
+          type: string
+        upToDate:
+          type: boolean
+        installPath:
+          type: string
+        steamcmdAvailable:
+          type: boolean
+        steamcmdPath:
+          type: string
+        checkError:
+          type: string
+        checkedAt:
+          type: string
+          format: date-time
+    GameVersionEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/GameVersion"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    GameUpdateInput:
+      type: object
+      additionalProperties: false
+      required: [confirmation, restartRunning, cleanCache]
+      properties:
+        confirmation:
+          type: string
+          description: Must exactly equal 更新游戏
+        restartRunning:
+          type: boolean
+        cleanCache:
+          type: boolean
+    GameUpdateRun:
+      type: object
+      additionalProperties: false
+      required: [jobId, status, cleanCache, log, startedAt]
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [running, succeeded, failed]
+        beforeVersion:
+          type: string
+        afterVersion:
+          type: string
+        cleanCache:
+          type: boolean
+        log:
+          type: string
+          maxLength: 2097152
+        errorMessage:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+    GameUpdateRunEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/GameUpdateRun"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    MapLayer:
+      type: string
+      enum: [terrain, walrusCamps, spawnPoints, players, worldState]
+    SessionSnapshot:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, worldId, sessionId, fileName, size, playerCount, latest, modifiedAt]
+      properties:
+        id:
+          type: string
+        roomId:
+          type: string
+        worldId:
+          type: string
+        sessionId:
+          type: string
+        fileName:
+          type: string
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+        playerCount:
+          type: integer
+          minimum: 0
+        latest:
+          type: boolean
+        modifiedAt:
+          type: string
+          format: date-time
+    SessionList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/SessionSnapshot"
+        total:
+          type: integer
+          minimum: 0
+    SessionListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/SessionList"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    GenerateMapInput:
+      type: object
+      additionalProperties: false
+      required: [worldId, sessionId, layers]
+      properties:
+        worldId:
+          type: string
+        sessionId:
+          type: string
+        layers:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/MapLayer"
+    WorldMap:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, worldId, sessionId, sessionLabel, status, layers, sourceJobId, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        roomId:
+          type: string
+        worldId:
+          type: string
+        sessionId:
+          type: string
+        sessionLabel:
+          type: string
+        status:
+          type: string
+          enum: [running, succeeded, failed]
+        stage:
+          type: string
+          enum: [renderer, staging, validate, publish, interrupted, complete]
+        layers:
+          type: array
+          items:
+            $ref: "#/components/schemas/MapLayer"
+        width:
+          type: integer
+          minimum: 1
+        height:
+          type: integer
+          minimum: 1
+        log:
+          type: string
+          maxLength: 524288
+        errorMessage:
+          type: string
+        sourceJobId:
+          type: string
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+    MapList:
+      type: object
+      additionalProperties: false
+      required: [items, total, rendererAvailable, rendererPath]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorldMap"
+        total:
+          type: integer
+          minimum: 0
+        rendererAvailable:
+          type: boolean
+        rendererPath:
+          type: string
+    MapListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/MapList"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    ConfigurationOption:
+      type: object
+      additionalProperties: false
+      required: [value, label]
+      properties:
+        value:
+          type: string
+        label:
+          type: string
+    ConfigurationFieldSchema:
+      type: object
+      additionalProperties: false
+      required: [key, group, label, type]
+      properties:
+        key:
+          type: string
+        group:
+          type: string
+        label:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+        required:
+          type: boolean
+        secret:
+          type: boolean
+        minimum:
+          type: integer
+        maximum:
+          type: integer
+        options:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConfigurationOption"
+    ConfigurationChange:
+      type: object
+      additionalProperties: false
+      required: [path, label, operation]
+      properties:
+        path:
+          type: string
+        label:
+          type: string
+        before: {}
+        after: {}
+        sensitive:
+          type: boolean
+        operation:
+          type: string
+          enum: [add, replace, remove]
+    ConfigurationPreview:
+      type: object
+      additionalProperties: false
+      required: [revision, nextRevision, changes, requiresConfirmation]
+      properties:
+        revision:
+          type: string
+        nextRevision:
+          type: string
+        changes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConfigurationChange"
+        requiresConfirmation:
+          type: boolean
+    ConfigurationPreviewEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/ConfigurationPreview"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    RoomConfigurationValues:
+      type: object
+      additionalProperties: false
+      required: [clusterName, clusterDescription, clusterPassword, gameMode, maxPlayers, pvp, pauseWhenEmpty, voteEnabled, consoleEnabled, lanOnly, offline]
+      properties:
+        clusterName:
+          type: string
+          minLength: 1
+          maxLength: 64
+        clusterDescription:
+          type: string
+          maxLength: 512
+        clusterPassword:
+          type: string
+          maxLength: 64
+        gameMode:
+          type: string
+          enum: [survival, endless, wilderness]
+        maxPlayers:
+          type: integer
+          minimum: 1
+          maximum: 64
+        pvp:
+          type: boolean
+        pauseWhenEmpty:
+          type: boolean
+        voteEnabled:
+          type: boolean
+        consoleEnabled:
+          type: boolean
+        lanOnly:
+          type: boolean
+        offline:
+          type: boolean
+    RoomConfiguration:
+      type: object
+      additionalProperties: false
+      required: [revision, values, schema, unknownFieldCount, modifiedAt]
+      properties:
+        revision:
+          type: string
+        values:
+          $ref: "#/components/schemas/RoomConfigurationValues"
+        schema:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConfigurationFieldSchema"
+        unknownFieldCount:
+          type: integer
+          minimum: 0
+        modifiedAt:
+          type: string
+          format: date-time
+    RoomConfigurationInput:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision, values]
+      properties:
+        expectedRevision:
+          type: string
+        values:
+          $ref: "#/components/schemas/RoomConfigurationValues"
+    RoomConfigurationEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/RoomConfiguration"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    WorldServerValues:
+      type: object
+      additionalProperties: false
+      required: [serverPort, authenticationPort, masterServerPort, encodeUserPath]
+      properties:
+        serverPort:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        authenticationPort:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        masterServerPort:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        encodeUserPath:
+          type: boolean
+    OverrideFieldSchema:
+      type: object
+      additionalProperties: false
+      required: [key, group, label, type]
+      properties:
+        key:
+          type: string
+        group:
+          type: string
+        label:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+        options:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConfigurationOption"
+    WorldConfiguration:
+      type: object
+      additionalProperties: false
+      required: [revision, server, serverSchema, overrides, overrideSchema, unknownFieldCount, modifiedAt]
+      properties:
+        revision:
+          type: string
+        server:
+          $ref: "#/components/schemas/WorldServerValues"
+        serverSchema:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConfigurationFieldSchema"
+        overrides:
+          type: object
+          additionalProperties: true
+        overrideSchema:
+          type: array
+          items:
+            $ref: "#/components/schemas/OverrideFieldSchema"
+        unknownFieldCount:
+          type: integer
+          minimum: 0
+        modifiedAt:
+          type: string
+          format: date-time
+    WorldConfigurationInput:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision, server, overridePatch]
+      properties:
+        expectedRevision:
+          type: string
+        server:
+          $ref: "#/components/schemas/WorldServerValues"
+        overridePatch:
+          type: object
+          maxProperties: 1000
+          additionalProperties: true
+    WorldConfigurationEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/WorldConfiguration"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    AccessLists:
+      type: object
+      additionalProperties: false
+      required: [revision, admins, blocked, whitelist]
+      properties:
+        revision:
+          type: string
+        admins:
+          type: array
+          items:
+            type: string
+        blocked:
+          type: array
+          items:
+            type: string
+        whitelist:
+          type: array
+          items:
+            type: string
+    AccessListsInput:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision, admins, blocked, whitelist, confirmation]
+      properties:
+        expectedRevision:
+          type: string
+        admins:
+          type: array
+          maxItems: 10000
+          items:
+            type: string
+        blocked:
+          type: array
+          maxItems: 10000
+          items:
+            type: string
+        whitelist:
+          type: array
+          maxItems: 10000
+          items:
+            type: string
+        confirmation:
+          type: string
+    AccessListsEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/AccessLists"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    ConfirmationInput:
+      type: object
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation:
+          type: string
+    TokenStatus:
+      type: object
+      additionalProperties: false
+      required: [revision, configured, maskedValue]
+      properties:
+        revision:
+          type: string
+        configured:
+          type: boolean
+        maskedValue:
+          type: string
+    TokenReveal:
+      type: object
+      additionalProperties: false
+      required: [revision, token]
+      properties:
+        revision:
+          type: string
+        token:
+          type: string
+    TokenUpdateInput:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision, token, confirmation]
+      properties:
+        expectedRevision:
+          type: string
+        token:
+          type: string
+          maxLength: 4096
+        confirmation:
+          type: string
+    TokenStatusEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/TokenStatus"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    TokenRevealEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/TokenReveal"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    SteamMod:
+      type: object
+      required: [id, name, subscriptions, score, dependencies, tags]
+      properties:
+        id: { type: string, pattern: '^[0-9]{1,20}$' }
+        name: { type: string }
+        authorId: { type: string }
+        author: { type: string }
+        description: { type: string }
+        previewUrl: { type: string, format: uri }
+        subscriptions: { type: integer, format: int64 }
+        score: { type: number }
+        updatedAt: { type: string, format: date-time }
+        dependencies: { type: array, items: { type: string } }
+        tags: { type: array, items: { type: string } }
+    SteamModEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/SteamMod" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    ModSearchResult:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/SteamMod" } }
+        total: { type: integer }
+        page: { type: integer }
+        pageSize: { type: integer }
+    ModSearchEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ModSearchResult" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    ModHealthState:
+      type: string
+      enum: [healthy, disabled, not_downloaded, not_installed, not_loaded, update_available, corrupt, parse_warning]
+    ModState:
+      allOf:
+        - $ref: "#/components/schemas/SteamMod"
+        - type: object
+          required: [configured, downloaded, installed, loaded, enabled, configuredWorlds, enabledWorlds, installedWorlds, loadedWorlds, workshopManifest, health, healthMessage, fallbackUsed, warnings]
+          properties:
+            configured: { type: boolean }
+            downloaded: { type: boolean }
+            installed: { type: boolean }
+            loaded: { type: boolean }
+            enabled: { type: boolean }
+            configuredWorlds: { type: array, items: { type: string } }
+            enabledWorlds: { type: array, items: { type: string } }
+            installedWorlds: { type: array, items: { type: string } }
+            loadedWorlds: { type: array, items: { type: string } }
+            localUpdatedAt: { type: string, format: date-time }
+            workshopManifest: { type: boolean }
+            manifestUpdatedAt: { type: string, format: date-time }
+            health: { $ref: "#/components/schemas/ModHealthState" }
+            healthMessage: { type: string }
+            repairAction: { type: string }
+            parser: { type: string, enum: [go, lua] }
+            fallbackUsed: { type: boolean }
+            fallbackReason: { type: string }
+            warnings: { type: array, items: { type: string } }
+    ModList:
+      type: object
+      required: [items, total, healthy, attention, checkedAt]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ModState" } }
+        total: { type: integer }
+        healthy: { type: integer }
+        attention: { type: integer }
+        checkedAt: { type: string, format: date-time }
+        metadataWarning: { type: string }
+    ModListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ModList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    ModInstallInput:
+      type: object
+      additionalProperties: false
+      required: [modId, worldIds, enabled, includeDependencies]
+      properties:
+        modId: { type: string, pattern: '^[0-9]{1,20}$' }
+        worldIds: { type: array, items: { type: string } }
+        enabled: { type: boolean }
+        includeDependencies: { type: boolean }
+    ModEnableInput:
+      type: object
+      additionalProperties: false
+      required: [worldIds, enabled]
+      properties:
+        worldIds: { type: array, items: { type: string } }
+        enabled: { type: boolean }
+    ModActionInput:
+      type: object
+      additionalProperties: false
+      required: [worldIds, confirmation, removeFiles]
+      properties:
+        worldIds: { type: array, items: { type: string } }
+        confirmation: { type: string }
+        removeFiles: { type: boolean }
+    ModConfigOption:
+      type: object
+      required: [value, label]
+      properties:
+        value: {}
+        label: { type: string }
+        hint: { type: string }
+    ModConfigField:
+      type: object
+      required: [key, label, type, options]
+      properties:
+        key: { type: string }
+        label: { type: string }
+        description: { type: string }
+        type: { type: string, enum: [boolean, select, number, text, json] }
+        defaultValue: {}
+        options: { type: array, items: { $ref: "#/components/schemas/ModConfigOption" } }
+    ModConfiguration:
+      type: object
+      required: [revision, roomId, worldId, modId, enabled, parser, fallbackUsed, warnings, rawPreserved, schemaVersion, fields, values, unknownValues]
+      properties:
+        revision: { type: string }
+        roomId: { type: string }
+        worldId: { type: string }
+        modId: { type: string }
+        enabled: { type: boolean }
+        parser: { type: string, enum: [go, lua] }
+        fallbackUsed: { type: boolean }
+        fallbackReason: { type: string }
+        warnings: { type: array, items: { type: string } }
+        rawPreserved: { type: boolean }
+        schemaVersion: { type: string }
+        fields: { type: array, items: { $ref: "#/components/schemas/ModConfigField" } }
+        values: { type: object, additionalProperties: true }
+        unknownValues: { type: object, additionalProperties: true }
+    ModConfigurationEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ModConfiguration" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    ModConfigurationInput:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision, enabled, patch]
+      properties:
+        expectedRevision: { type: string }
+        enabled: { type: boolean }
+        patch: { type: object, additionalProperties: true }
+    ModConfigurationPreview:
+      type: object
+      required: [revision, nextRevision, changes, warnings, rawPreserved]
+      properties:
+        revision: { type: string }
+        nextRevision: { type: string }
+        changes: { type: array, items: { $ref: "#/components/schemas/ConfigurationChange" } }
+        warnings: { type: array, items: { type: string } }
+        rawPreserved: { type: boolean }
+    ModConfigurationPreviewEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ModConfigurationPreview" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    Player:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, worldId, worldName, name, online, banned, admin, age, firstSeenAt, lastSeenAt, statusChangedAt, lastRefreshedAt]
+      properties:
+        id: { type: string, pattern: '^[A-Za-z0-9_-]{1,128}$' }
+        roomId: { type: string }
+        worldId: { type: string }
+        worldName: { type: string }
+        name: { type: string }
+        prefab: { type: string }
+        online: { type: boolean }
+        banned: { type: boolean }
+        admin: { type: boolean }
+        age: { type: integer, minimum: 0 }
+        netId: { type: string }
+        performance: { type: integer }
+        healthPercent: { type: number }
+        hungerPercent: { type: number }
+        sanityPercent: { type: number }
+        temperature: { type: number }
+        moisture: { type: number }
+        firstSeenAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        statusChangedAt: { type: string, format: date-time }
+        lastRefreshedAt: { type: string, format: date-time }
+    PlayerEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/Player" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    PlayerList:
+      type: object
+      additionalProperties: false
+      required: [items, total, online, offline, banned, limit, offset]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Player" } }
+        total: { type: integer, minimum: 0 }
+        online: { type: integer, minimum: 0 }
+        offline: { type: integer, minimum: 0 }
+        banned: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        offset: { type: integer, minimum: 0 }
+        lastRefreshedAt: { type: string, format: date-time }
+    PlayerListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/PlayerList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    PlayerActionInput:
+      type: object
+      additionalProperties: false
+      required: [worldId, message, confirmation]
+      properties:
+        worldId: { type: string }
+        message: { type: string, maxLength: 300 }
+        confirmation: { type: string }
+    WorldStateSnapshot:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, worldId, worldName, worldRole, observedAt]
+      properties:
+        id: { type: integer, format: int64 }
+        roomId: { type: string }
+        worldId: { type: string }
+        worldName: { type: string }
+        worldRole: { type: string, enum: [master, caves, custom] }
+        season: { type: string }
+        phase: { type: string }
+        cycles: { type: integer, minimum: 0 }
+        elapsedDaysInSeason: { type: integer, minimum: 0 }
+        remainingDaysInSeason: { type: integer, minimum: 0 }
+        seasonProgress: { type: number }
+        dayProgress: { type: number }
+        phaseProgress: { type: number }
+        precipitation: { type: string }
+        moonPhase: { type: string }
+        temperature: { type: number }
+        wetness: { type: number }
+        moisture: { type: number }
+        moistureCeil: { type: number }
+        precipitationRate: { type: number }
+        nightmarePhase: { type: string }
+        nightmareProgress: { type: number }
+        observedAt: { type: string, format: date-time }
+    WorldStateList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/WorldStateSnapshot" } }
+        total: { type: integer, minimum: 0 }
+        lastRefreshedAt: { type: string, format: date-time }
+    WorldStateListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/WorldStateList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    WorldStateHistory:
+      type: object
+      additionalProperties: false
+      required: [items, total, limit, worldId]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/WorldStateSnapshot" } }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1, maximum: 720 }
+        worldId: { type: string }
+    WorldStateHistoryEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/WorldStateHistory" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AutomationAction:
+      type: string
+      enum: [room.start, room.stop, room.restart, backup.create, backup.prune, command.execute, player.refresh, log.structured.refresh, world.state.refresh]
+    AutomationActionDefinition:
+      type: object
+      additionalProperties: false
+      required: [id, name, description, needsWorld, parameters]
+      properties:
+        id: { $ref: "#/components/schemas/AutomationAction" }
+        name: { type: string }
+        description: { type: string }
+        needsWorld: { type: boolean }
+        parameters: { type: array, items: { type: string } }
+    AutomationActionList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AutomationActionDefinition" } }
+    AutomationActionListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AutomationActionList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AutomationGroup:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, name, description, enabled, taskCount, revision, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        roomId: { type: string }
+        name: { type: string }
+        description: { type: string }
+        enabled: { type: boolean }
+        taskCount: { type: integer, minimum: 0 }
+        revision: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    AutomationGroupInput:
+      type: object
+      additionalProperties: false
+      required: [name, description, enabled, expectedRevision]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        description: { type: string, maxLength: 300 }
+        enabled: { type: boolean }
+        expectedRevision: { type: string }
+    AutomationGroupEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AutomationGroup" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AutomationGroupList:
+      type: object
+      required: [items, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AutomationGroup" } }
+        total: { type: integer, minimum: 0 }
+    AutomationGroupListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AutomationGroupList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AutomationTask:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, groupId, groupName, name, description, enabled, schedule, timezone, action, worldIds, parameters, timeoutSeconds, revision, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        roomId: { type: string }
+        groupId: { type: string, format: uuid }
+        groupName: { type: string }
+        name: { type: string }
+        description: { type: string }
+        enabled: { type: boolean }
+        schedule: { type: string }
+        timezone: { type: string }
+        action: { $ref: "#/components/schemas/AutomationAction" }
+        worldIds: { type: array, items: { type: string } }
+        parameters: { type: object, additionalProperties: true }
+        timeoutSeconds: { type: integer, minimum: 5, maximum: 3600 }
+        nextRunAt: { type: string, format: date-time }
+        lastRunAt: { type: string, format: date-time }
+        lastStatus: { $ref: "#/components/schemas/AutomationRunStatus" }
+        lastJobId: { type: string, format: uuid }
+        revision: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    AutomationTaskInput:
+      type: object
+      additionalProperties: false
+      required: [groupId, name, description, enabled, schedule, timezone, action, worldIds, parameters, timeoutSeconds, expectedRevision]
+      properties:
+        groupId: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 80 }
+        description: { type: string, maxLength: 300 }
+        enabled: { type: boolean }
+        schedule: { type: string, maxLength: 128 }
+        timezone: { type: string, maxLength: 64 }
+        action: { $ref: "#/components/schemas/AutomationAction" }
+        worldIds: { type: array, maxItems: 64, items: { type: string } }
+        parameters: { type: object, additionalProperties: true }
+        timeoutSeconds: { type: integer, minimum: 5, maximum: 3600 }
+        expectedRevision: { type: string }
+    AutomationTaskEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AutomationTask" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AutomationTaskList:
+      type: object
+      required: [items, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AutomationTask" } }
+        total: { type: integer, minimum: 0 }
+    AutomationTaskListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AutomationTaskList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AutomationRunStatus:
+      type: string
+      enum: [queued, running, succeeded, failed, canceled, skipped]
+    AutomationRun:
+      type: object
+      additionalProperties: false
+      required: [id, taskId, taskName, groupId, groupName, roomId, action, trigger, status, durationMs, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        taskId: { type: string, format: uuid }
+        taskName: { type: string }
+        groupId: { type: string, format: uuid }
+        groupName: { type: string }
+        roomId: { type: string }
+        action: { $ref: "#/components/schemas/AutomationAction" }
+        trigger: { type: string, enum: [manual, schedule] }
+        status: { $ref: "#/components/schemas/AutomationRunStatus" }
+        jobId: { type: string, format: uuid }
+        output: { type: string }
+        error: { type: string }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        durationMs: { type: integer, format: int64, minimum: 0 }
+        createdAt: { type: string, format: date-time }
+    AutomationRunList:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AutomationRun" } }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer }
+        offset: { type: integer }
+    AutomationRunListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AutomationRunList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AutomationDailyStat:
+      type: object
+      required: [date, succeeded, failed, skipped]
+      properties:
+        date: { type: string, format: date }
+        succeeded: { type: integer, minimum: 0 }
+        failed: { type: integer, minimum: 0 }
+        skipped: { type: integer, minimum: 0 }
+    AutomationStats:
+      type: object
+      required: [days, total, succeeded, failed, canceled, skipped, successRate, averageDurationMs, daily]
+      properties:
+        days: { type: integer }
+        total: { type: integer }
+        succeeded: { type: integer }
+        failed: { type: integer }
+        canceled: { type: integer }
+        skipped: { type: integer }
+        successRate: { type: number }
+        averageDurationMs: { type: integer, format: int64 }
+        daily: { type: array, items: { $ref: "#/components/schemas/AutomationDailyStat" } }
+    AutomationStatsEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AutomationStats" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AutomationDocumentGroup:
+      type: object
+      required: [key, name, description, enabled]
+      properties:
+        key: { type: string }
+        name: { type: string }
+        description: { type: string }
+        enabled: { type: boolean }
+    AutomationDocumentTask:
+      type: object
+      required: [groupKey, name, description, enabled, schedule, timezone, action, worldIds, parameters, timeoutSeconds]
+      properties:
+        groupKey: { type: string }
+        name: { type: string }
+        description: { type: string }
+        enabled: { type: boolean }
+        schedule: { type: string }
+        timezone: { type: string }
+        action: { $ref: "#/components/schemas/AutomationAction" }
+        worldIds: { type: array, items: { type: string } }
+        parameters: { type: object, additionalProperties: true }
+        timeoutSeconds: { type: integer }
+    AutomationDocument:
+      type: object
+      additionalProperties: false
+      required: [version, groups, tasks]
+      properties:
+        version: { type: integer, enum: [1] }
+        groups: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/AutomationDocumentGroup" } }
+        tasks: { type: array, maxItems: 500, items: { $ref: "#/components/schemas/AutomationDocumentTask" } }
+    AutomationDocumentEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AutomationDocument" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AutomationImportIssue:
+      type: object
+      required: [path, message]
+      properties:
+        path: { type: string }
+        message: { type: string }
+    AutomationImportPreview:
+      type: object
+      required: [digest, valid, groupCount, taskCount, issues]
+      properties:
+        digest: { type: string, pattern: '^[a-f0-9]{64}$' }
+        valid: { type: boolean }
+        groupCount: { type: integer }
+        taskCount: { type: integer }
+        issues: { type: array, items: { $ref: "#/components/schemas/AutomationImportIssue" } }
+    AutomationImportPreviewEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AutomationImportPreview" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AutomationImportInput:
+      type: object
+      required: [document, digest, replace]
+      properties:
+        document: { $ref: "#/components/schemas/AutomationDocument" }
+        digest: { type: string, pattern: '^[a-f0-9]{64}$' }
+        replace: { type: boolean }
+    AutomationImportResult:
+      type: object
+      required: [groupsCreated, tasksCreated]
+      properties:
+        groupsCreated: { type: integer }
+        tasksCreated: { type: integer }
+    AutomationImportResultEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AutomationImportResult" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    StructuredLogType:
+      type: string
+      enum: [system, chat, player, entity, world, error, warning, unknown]
+    StructuredLogEntry:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, worldId, worldName, type, content, rawContent, sourceCursor, observedAt]
+      properties:
+        id: { type: integer, format: int64 }
+        roomId: { type: string }
+        worldId: { type: string }
+        worldName: { type: string }
+        type: { $ref: "#/components/schemas/StructuredLogType" }
+        content: { type: string }
+        rawContent: { type: string }
+        ruleId: { type: string }
+        ruleName: { type: string }
+        sourceCursor: { type: integer, format: int64 }
+        sourceTimestamp: { type: string }
+        occurredAt: { type: string, format: date-time }
+        observedAt: { type: string, format: date-time }
+    StructuredLogCounts:
+      type: object
+      additionalProperties: false
+      required: [system, chat, player, entity, world, error, warning, unknown]
+      properties:
+        system: { type: integer, minimum: 0 }
+        chat: { type: integer, minimum: 0 }
+        player: { type: integer, minimum: 0 }
+        entity: { type: integer, minimum: 0 }
+        world: { type: integer, minimum: 0 }
+        error: { type: integer, minimum: 0 }
+        warning: { type: integer, minimum: 0 }
+        unknown: { type: integer, minimum: 0 }
+    StructuredLogList:
+      type: object
+      additionalProperties: false
+      required: [items, total, counts, limit, offset]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/StructuredLogEntry" } }
+        total: { type: integer, minimum: 0 }
+        counts: { $ref: "#/components/schemas/StructuredLogCounts" }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        offset: { type: integer, minimum: 0 }
+        lastRefreshedAt: { type: string, format: date-time }
+    StructuredLogListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/StructuredLogList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    StructuredLogRule:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, name, description, logType, pattern, regex, enabled, priority, builtIn, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        roomId: { type: string }
+        name: { type: string }
+        description: { type: string }
+        logType: { $ref: "#/components/schemas/StructuredLogType" }
+        pattern: { type: string }
+        regex: { type: boolean }
+        enabled: { type: boolean }
+        priority: { type: integer, minimum: 0, maximum: 1000 }
+        builtIn: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    StructuredLogRuleInput:
+      type: object
+      additionalProperties: false
+      required: [name, description, logType, pattern, regex, enabled, priority]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        description: { type: string, maxLength: 300 }
+        logType: { $ref: "#/components/schemas/StructuredLogType" }
+        pattern: { type: string, minLength: 1, maxLength: 512 }
+        regex: { type: boolean }
+        enabled: { type: boolean }
+        priority: { type: integer, minimum: 0, maximum: 1000 }
+    StructuredLogRuleEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/StructuredLogRule" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    StructuredLogRuleList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/StructuredLogRule" } }
+        total: { type: integer, minimum: 0 }
+    StructuredLogRuleListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/StructuredLogRuleList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    StructuredLogRuleTestInput:
+      type: object
+      additionalProperties: false
+      required: [name, description, logType, pattern, regex, enabled, priority, sample]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        description: { type: string, maxLength: 300 }
+        logType: { $ref: "#/components/schemas/StructuredLogType" }
+        pattern: { type: string, minLength: 1, maxLength: 512 }
+        regex: { type: boolean }
+        enabled: { type: boolean }
+        priority: { type: integer, minimum: 0, maximum: 1000 }
+        sample: { type: string, maxLength: 65536 }
+    StructuredLogRuleTestResult:
+      type: object
+      additionalProperties: false
+      required: [matched, content]
+      properties:
+        matched: { type: boolean }
+        content: { type: string }
+    StructuredLogRuleTestEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/StructuredLogRuleTestResult" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    SystemCPUStatus:
+      type: object
+      additionalProperties: false
+      required: [available, model, cores, threads, usage, coreUsage, load1, load5, load15, loadSupported]
+      properties:
+        available: { type: boolean }
+        error: { type: string }
+        model: { type: string }
+        cores: { type: integer, minimum: 0 }
+        threads: { type: integer, minimum: 0 }
+        usage: { type: number, minimum: 0, maximum: 100 }
+        coreUsage: { type: array, items: { type: number, minimum: 0, maximum: 100 } }
+        load1: { type: number }
+        load5: { type: number }
+        load15: { type: number }
+        loadSupported: { type: boolean }
+    SystemMemoryStatus:
+      type: object
+      additionalProperties: false
+      required: [available, totalBytes, usedBytes, availableBytes, usage]
+      properties:
+        available: { type: boolean }
+        error: { type: string }
+        totalBytes: { type: integer, format: int64, minimum: 0 }
+        usedBytes: { type: integer, format: int64, minimum: 0 }
+        availableBytes: { type: integer, format: int64, minimum: 0 }
+        usage: { type: number, minimum: 0, maximum: 100 }
+    SystemDiskStatus:
+      type: object
+      additionalProperties: false
+      required: [available, path, totalBytes, usedBytes, availableBytes, usage]
+      properties:
+        available: { type: boolean }
+        error: { type: string }
+        path: { type: string }
+        totalBytes: { type: integer, format: int64, minimum: 0 }
+        usedBytes: { type: integer, format: int64, minimum: 0 }
+        availableBytes: { type: integer, format: int64, minimum: 0 }
+        usage: { type: number, minimum: 0, maximum: 100 }
+    SystemHostStatus:
+      type: object
+      additionalProperties: false
+      required: [available, hostname, platform, version, kernel, architecture, uptimeSeconds]
+      properties:
+        available: { type: boolean }
+        error: { type: string }
+        hostname: { type: string }
+        platform: { type: string }
+        version: { type: string }
+        kernel: { type: string }
+        architecture: { type: string }
+        uptimeSeconds: { type: integer, format: int64, minimum: 0 }
+    SystemProcessStatus:
+      type: object
+      additionalProperties: false
+      required: [available, pid, uptimeSeconds, cpuUsage, memoryRssBytes, memoryVmsBytes, threads]
+      properties:
+        available: { type: boolean }
+        error: { type: string }
+        pid: { type: integer, minimum: 0 }
+        uptimeSeconds: { type: integer, format: int64, minimum: 0 }
+        cpuUsage: { type: number, minimum: 0, maximum: 100 }
+        memoryRssBytes: { type: integer, format: int64, minimum: 0 }
+        memoryVmsBytes: { type: integer, format: int64, minimum: 0 }
+        threads: { type: integer, minimum: 0 }
+    SystemRuntimeStatus:
+      type: object
+      additionalProperties: false
+      required: [goVersion, goroutines, heapAllocBytes, systemBytes, heapObjects, lastGcPauseNano, gcRuns]
+      properties:
+        goVersion: { type: string }
+        goroutines: { type: integer, minimum: 0 }
+        heapAllocBytes: { type: integer, format: int64, minimum: 0 }
+        systemBytes: { type: integer, format: int64, minimum: 0 }
+        heapObjects: { type: integer, format: int64, minimum: 0 }
+        lastGcPauseNano: { type: integer, format: int64, minimum: 0 }
+        gcRuns: { type: integer, minimum: 0 }
+    ApplicationBuildInfo:
+      type: object
+      additionalProperties: false
+      required: [version, commit, buildTime, dirty]
+      properties:
+        version: { type: string }
+        commit: { type: string }
+        buildTime: { type: string }
+        dirty: { type: boolean }
+    SystemStatus:
+      type: object
+      additionalProperties: false
+      required: [observedAt, application, host, cpu, memory, disk, process, runtime, warnings]
+      properties:
+        observedAt: { type: string, format: date-time }
+        application: { $ref: "#/components/schemas/ApplicationBuildInfo" }
+        host: { $ref: "#/components/schemas/SystemHostStatus" }
+        cpu: { $ref: "#/components/schemas/SystemCPUStatus" }
+        memory: { $ref: "#/components/schemas/SystemMemoryStatus" }
+        disk: { $ref: "#/components/schemas/SystemDiskStatus" }
+        process: { $ref: "#/components/schemas/SystemProcessStatus" }
+        runtime: { $ref: "#/components/schemas/SystemRuntimeStatus" }
+        warnings: { type: array, items: { type: string } }
+    SystemStatusEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/SystemStatus" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    SystemSettingSource:
+      type: string
+      enum: [file, environment, default]
+    SystemSettingField:
+      type: object
+      additionalProperties: false
+      required: [id, group, label, kind, value, options, source, editable, sensitive, configured, restartRequired]
+      properties:
+        id: { type: string }
+        group: { type: string, enum: [paths, mod, lua, map, misc] }
+        label: { type: string }
+        kind: { type: string, enum: [path, text, select, secret] }
+        value: { type: string }
+        options: { type: array, items: { type: string } }
+        source: { $ref: "#/components/schemas/SystemSettingSource" }
+        environment: { type: string }
+        editable: { type: boolean }
+        sensitive: { type: boolean }
+        configured: { type: boolean }
+        restartRequired: { type: boolean }
+    SystemSettings:
+      type: object
+      additionalProperties: false
+      required: [revision, configurationPath, backupPath, restartRequired, fields, readAt]
+      properties:
+        revision: { type: string, pattern: '^[a-f0-9]{64}$' }
+        configurationPath: { type: string }
+        backupPath: { type: string }
+        restartRequired: { type: boolean }
+        fields: { type: array, items: { $ref: "#/components/schemas/SystemSettingField" } }
+        readAt: { type: string, format: date-time }
+    SystemSettingsEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/SystemSettings" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    SystemSettingsInput:
+      type: object
+      additionalProperties: false
+      required: [revision, values, clearSecrets]
+      properties:
+        revision: { type: string, pattern: '^[a-f0-9]{64}$' }
+        values: { type: object, additionalProperties: { type: string } }
+        clearSecrets: { type: array, items: { type: string }, uniqueItems: true }
+        confirmation: { type: string }
+    SystemSettingChange:
+      type: object
+      additionalProperties: false
+      required: [fieldId, label, before, after, sensitive]
+      properties:
+        fieldId: { type: string }
+        label: { type: string }
+        before: { type: string }
+        after: { type: string }
+        sensitive: { type: boolean }
+    SystemSettingIssue:
+      type: object
+      additionalProperties: false
+      required: [severity, message]
+      properties:
+        fieldId: { type: string }
+        severity: { type: string, enum: [warning, error] }
+        message: { type: string }
+    SystemSettingsPreview:
+      type: object
+      additionalProperties: false
+      required: [valid, revision, changes, issues, restartRequired]
+      properties:
+        valid: { type: boolean }
+        revision: { type: string }
+        changes: { type: array, items: { $ref: "#/components/schemas/SystemSettingChange" } }
+        issues: { type: array, items: { $ref: "#/components/schemas/SystemSettingIssue" } }
+        restartRequired: { type: boolean }
+    SystemSettingsPreviewEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/SystemSettingsPreview" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    SystemSettingsApplyResult:
+      type: object
+      additionalProperties: false
+      required: [settings, changes]
+      properties:
+        settings: { $ref: "#/components/schemas/SystemSettings" }
+        changes: { type: array, items: { $ref: "#/components/schemas/SystemSettingChange" } }
+    SystemSettingsApplyEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/SystemSettingsApplyResult" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    ContainerAction:
+      type: string
+      enum: [start, stop, restart, remove]
+    Container:
+      type: object
+      additionalProperties: false
+      required: [id, name, image, command, state, status, ports, labels, running, managed, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        image: { type: string }
+        command: { type: string }
+        state: { type: string }
+        status: { type: string }
+        ports: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+        running: { type: boolean }
+        managed: { type: boolean }
+        createdAt: { type: string }
+    ContainerList:
+      type: object
+      additionalProperties: false
+      required: [available, items, total, observedAt]
+      properties:
+        available: { type: boolean }
+        error: { type: string }
+        items: { type: array, items: { $ref: "#/components/schemas/Container" } }
+        total: { type: integer, minimum: 0 }
+        observedAt: { type: string, format: date-time }
+    ContainerListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ContainerList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    ContainerActionInput:
+      type: object
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation: { type: string }
+    AgentStatus:
+      type: string
+      enum: [online, offline]
+    AgentAction:
+      type: string
+      enum: [system.refresh, disk.inspect]
+    AgentCommandStatus:
+      type: string
+      enum: [queued, running, succeeded, failed, canceled]
+    AgentMetrics:
+      type: object
+      additionalProperties: false
+      required: [cpuCount, memoryUsed, memoryTotal, uptimeSeconds]
+      properties:
+        cpuCount: { type: integer, minimum: 0 }
+        memoryUsed: { type: integer, format: int64, minimum: 0 }
+        memoryTotal: { type: integer, format: int64, minimum: 0 }
+        uptimeSeconds: { type: integer, format: int64, minimum: 0 }
+    Agent:
+      type: object
+      additionalProperties: false
+      required: [id, hostname, os, arch, version, ipAddresses, status, lastHeartbeat, capabilities, metrics, details, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        hostname: { type: string }
+        os: { type: string }
+        arch: { type: string }
+        version: { type: string }
+        ipAddresses: { type: array, items: { type: string } }
+        status: { $ref: "#/components/schemas/AgentStatus" }
+        lastHeartbeat: { type: string, format: date-time }
+        lastReportAt: { type: string, format: date-time }
+        capabilities: { type: array, items: { type: string } }
+        metrics: { $ref: "#/components/schemas/AgentMetrics" }
+        details: { type: object, additionalProperties: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    AgentEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/Agent" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AgentList:
+      type: object
+      additionalProperties: false
+      required: [items, total, transportAvailable]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Agent" } }
+        total: { type: integer, minimum: 0 }
+        transportAvailable: { type: boolean }
+    AgentListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AgentList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AgentActionDefinition:
+      type: object
+      additionalProperties: false
+      required: [id, name, description, platforms]
+      properties:
+        id: { $ref: "#/components/schemas/AgentAction" }
+        name: { type: string }
+        description: { type: string }
+        platforms: { type: array, items: { type: string } }
+    AgentActionList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AgentActionDefinition" } }
+    AgentActionListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AgentActionList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AgentCommandInput:
+      type: object
+      additionalProperties: false
+      required: [action, timeoutSeconds]
+      properties:
+        action: { $ref: "#/components/schemas/AgentAction" }
+        timeoutSeconds: { type: integer, minimum: 5, maximum: 300, default: 30 }
+    AgentCommand:
+      type: object
+      additionalProperties: false
+      required: [id, agentId, agentName, action, status, durationMs, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        agentId: { type: string }
+        agentName: { type: string }
+        action: { $ref: "#/components/schemas/AgentAction" }
+        status: { $ref: "#/components/schemas/AgentCommandStatus" }
+        jobId: { type: string, format: uuid }
+        remoteId: { type: string }
+        output: { type: string }
+        error: { type: string }
+        exitCode: { type: integer }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        durationMs: { type: integer, format: int64, minimum: 0 }
+        createdAt: { type: string, format: date-time }
+    AgentCommandList:
+      type: object
+      additionalProperties: false
+      required: [items, total, limit, offset]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AgentCommand" } }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        offset: { type: integer, minimum: 0 }
+    AgentCommandListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AgentCommandList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AgentSecurity:
+      type: object
+      additionalProperties: false
+      required: [available, configured, maskedKey, fingerprint, connectedAgents]
+      properties:
+        available: { type: boolean }
+        configured: { type: boolean }
+        maskedKey: { type: string }
+        fingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
+        rotatedAt: { type: string, format: date-time }
+        connectedAgents: { type: integer, minimum: 0 }
+    AgentSecurityEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AgentSecurity" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AgentRotateKeyInput:
+      type: object
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation: { type: string, enum: [ROTATE AGENT KEY] }
+    AgentRotateKeyResult:
+      type: object
+      additionalProperties: false
+      required: [newKey, fingerprint, rotatedAt]
+      properties:
+        newKey: { type: string, minLength: 32 }
+        fingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
+        rotatedAt: { type: string, format: date-time }
+    AgentRotateKeyEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AgentRotateKeyResult" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    JobStatus:
+      type: string
+      enum: [queued, running, succeeded, failed, canceled]
+    JobOutcome:
+      type: string
+      enum: [pending, full, partial, none]
+    JobError:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+    JobTarget:
+      type: object
+      additionalProperties: false
+      required: [id, targetId, name, status]
+      properties:
+        id:
+          type: integer
+          format: int64
+        targetId:
+          type: string
+        name:
+          type: string
+        status:
+          $ref: "#/components/schemas/JobStatus"
+        message:
+          type: string
+        error:
+          $ref: "#/components/schemas/JobError"
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+    Job:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - kind
+        - status
+        - outcome
+        - progress
+        - cancelRequested
+        - createdAt
+        - targets
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+        status:
+          $ref: "#/components/schemas/JobStatus"
+        outcome:
+          $ref: "#/components/schemas/JobOutcome"
+        roomId:
+          type: string
+        worldId:
+          type: string
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        message:
+          type: string
+        error:
+          $ref: "#/components/schemas/JobError"
+        cancelRequested:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+        targets:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobTarget"
+    JobEvent:
+      type: object
+      additionalProperties: false
+      required: [id, jobId, type, data, createdAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        jobId:
+          type: string
+          format: uuid
+        type:
+          type: string
+        data:
+          $ref: "#/components/schemas/Job"
+        createdAt:
+          type: string
+          format: date-time
+    JobEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/Job"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+    JobList:
+      type: object
+      additionalProperties: false
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Job"
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+    JobListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/JobList"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+security:
+  - sessionCookie: []

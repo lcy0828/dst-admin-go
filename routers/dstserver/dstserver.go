@@ -793,7 +793,7 @@ func GetWorldOverrides(g *gin.Context) {
 	// 检查文件是否存在
 	if _, err := os.Stat(levelDataPath); os.IsNotExist(err) {
 		errorMsg := fmt.Sprintf("文件不存在: %s", levelDataPath)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, WorldOverridesResponse{
 			Status: 404,
 			Data:   nil,
@@ -806,7 +806,7 @@ func GetWorldOverrides(g *gin.Context) {
 	content, err := ioutil.ReadFile(levelDataPath)
 	if err != nil {
 		errorMsg := fmt.Sprintf("读取leveldataoverride.lua失败: %v", err)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, WorldOverridesResponse{
 			Status: 500,
 			Data:   nil,
@@ -819,7 +819,7 @@ func GetWorldOverrides(g *gin.Context) {
 	overrides, err := parseLevelDataOverrides(string(content))
 	if err != nil {
 		errorMsg := fmt.Sprintf("解析leveldataoverride.lua失败: %v", err)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, WorldOverridesResponse{
 			Status: 500,
 			Data:   nil,
@@ -830,7 +830,7 @@ func GetWorldOverrides(g *gin.Context) {
 
 	// 检查是否成功提取到overrides字段
 	if len(overrides) == 0 {
-		log.Printf("成功解析文件，但没有找到overrides字段或字段为空")
+		log.Print("成功解析文件，但没有找到overrides字段或字段为空")
 	}
 
 	log.Printf("成功获取世界配置 - 存档: %s, 世界: %s, 配置项数量: %d", saveName, worldName, len(overrides))
@@ -864,7 +864,7 @@ func parseLevelDataOverrides(content string) (map[string]interface{}, error) {
 				matches = overridesPattern.FindStringSubmatch(content)
 				if len(matches) < 2 {
 					// 没有找到overrides部分
-					log.Printf("没有找到overrides部分")
+					log.Print("没有找到overrides部分")
 					return result, nil
 				}
 			}
@@ -916,7 +916,7 @@ func UpdateWorldOverrides(g *gin.Context) {
 	// 检查文件是否存在
 	if _, err := os.Stat(levelDataPath); os.IsNotExist(err) {
 		errorMsg := fmt.Sprintf("文件不存在: %s", levelDataPath)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, WorldOverridesResponse{
 			Status: 404,
 			Data:   nil,
@@ -929,7 +929,7 @@ func UpdateWorldOverrides(g *gin.Context) {
 	content, err := ioutil.ReadFile(levelDataPath)
 	if err != nil {
 		errorMsg := fmt.Sprintf("读取leveldataoverride.lua失败: %v", err)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, WorldOverridesResponse{
 			Status: 500,
 			Data:   nil,
@@ -960,7 +960,7 @@ func UpdateWorldOverrides(g *gin.Context) {
 				matches = overridesPattern.FindStringSubmatch(fileContent)
 				if len(matches) < 4 {
 					errorMsg := "无法在文件中找到overrides部分"
-					log.Printf(errorMsg)
+					log.Print(errorMsg)
 					g.JSON(http.StatusOK, WorldOverridesResponse{
 						Status: 500,
 						Data:   nil,
@@ -994,7 +994,7 @@ func UpdateWorldOverrides(g *gin.Context) {
 	// 写入新文件
 	if err := ioutil.WriteFile(levelDataPath, []byte(newContent), 0644); err != nil {
 		errorMsg := fmt.Sprintf("写入文件失败: %v", err)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, WorldOverridesResponse{
 			Status: 500,
 			Data:   nil,
@@ -1040,7 +1040,7 @@ func CreateForestWorld(g *gin.Context) {
 	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
 		if err := os.MkdirAll(dirPath, 0755); err != nil {
 			errorMsg := fmt.Sprintf("创建目录失败: %v", err)
-			log.Printf(errorMsg)
+			log.Print(errorMsg)
 			g.JSON(http.StatusOK, WorldOverridesResponse{
 				Status: 500,
 				Data:   nil,
@@ -1138,7 +1138,7 @@ func CreateForestWorld(g *gin.Context) {
 	// 写入新文件
 	if err := ioutil.WriteFile(levelDataPath, []byte(template), 0644); err != nil {
 		errorMsg := fmt.Sprintf("写入文件失败: %v", err)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, WorldOverridesResponse{
 			Status: 500,
 			Data:   nil,
@@ -1184,7 +1184,7 @@ func CreateCaveWorld(g *gin.Context) {
 	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
 		if err := os.MkdirAll(dirPath, 0755); err != nil {
 			errorMsg := fmt.Sprintf("创建目录失败: %v", err)
-			log.Printf(errorMsg)
+			log.Print(errorMsg)
 			g.JSON(http.StatusOK, WorldOverridesResponse{
 				Status: 500,
 				Data:   nil,
@@ -1257,7 +1257,7 @@ func CreateCaveWorld(g *gin.Context) {
 	// 写入新文件
 	if err := ioutil.WriteFile(levelDataPath, []byte(template), 0644); err != nil {
 		errorMsg := fmt.Sprintf("写入文件失败: %v", err)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, WorldOverridesResponse{
 			Status: 500,
 			Data:   nil,
@@ -1312,7 +1312,7 @@ func GetServerIni(g *gin.Context) {
 	// 检查文件是否存在
 	if _, err := os.Stat(serverIniPath); os.IsNotExist(err) {
 		errorMsg := fmt.Sprintf("文件不存在: %s", serverIniPath)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, ServerIniResponse{
 			Status: 404,
 			Msg:    errorMsg,
@@ -1324,7 +1324,7 @@ func GetServerIni(g *gin.Context) {
 	cfg, err := ini.Load(serverIniPath)
 	if err != nil {
 		errorMsg := fmt.Sprintf("读取server.ini失败: %v", err)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, ServerIniResponse{
 			Status: 500,
 			Msg:    errorMsg,
@@ -1336,7 +1336,7 @@ func GetServerIni(g *gin.Context) {
 	var config ServerIniConfig
 	if err := cfg.MapTo(&config); err != nil {
 		errorMsg := fmt.Sprintf("解析server.ini失败: %v", err)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, ServerIniResponse{
 			Status: 500,
 			Msg:    errorMsg,
@@ -1385,7 +1385,7 @@ func CreateOrUpdateServerIni(g *gin.Context) {
 	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
 		if err := os.MkdirAll(dirPath, 0755); err != nil {
 			errorMsg := fmt.Sprintf("创建目录失败: %v", err)
-			log.Printf(errorMsg)
+			log.Print(errorMsg)
 			g.JSON(http.StatusOK, ServerIniResponse{
 				Status: 500,
 				Msg:    errorMsg,
@@ -1426,7 +1426,7 @@ func CreateOrUpdateServerIni(g *gin.Context) {
 	// 写入文件
 	if err := cfg.SaveTo(serverIniPath); err != nil {
 		errorMsg := fmt.Sprintf("写入server.ini失败: %v", err)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, ServerIniResponse{
 			Status: 500,
 			Msg:    errorMsg,
@@ -1508,7 +1508,7 @@ func CreateTemplateForestWorld(g *gin.Context) {
 	if _, err := os.Stat(targetDir); os.IsNotExist(err) {
 		if err := os.MkdirAll(targetDir, 0755); err != nil {
 			errorMsg := fmt.Sprintf("创建目录失败: %v", err)
-			log.Printf(errorMsg)
+			log.Print(errorMsg)
 			g.JSON(http.StatusOK, WorldOverridesResponse{
 				Status: 500,
 				Data:   nil,
@@ -1526,7 +1526,7 @@ func CreateTemplateForestWorld(g *gin.Context) {
 	// 检查源文件是否存在
 	if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
 		errorMsg := fmt.Sprintf("模板文件不存在: %s", sourceFile)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, WorldOverridesResponse{
 			Status: 404,
 			Data:   nil,
@@ -1542,7 +1542,7 @@ func CreateTemplateForestWorld(g *gin.Context) {
 	// 复制文件
 	if err := copyFile(sourceFile, targetFile); err != nil {
 		errorMsg := fmt.Sprintf("复制文件失败: %v", err)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, WorldOverridesResponse{
 			Status: 500,
 			Data:   nil,
@@ -1587,7 +1587,7 @@ func CreateTemplateCaveWorld(g *gin.Context) {
 	if _, err := os.Stat(targetDir); os.IsNotExist(err) {
 		if err := os.MkdirAll(targetDir, 0755); err != nil {
 			errorMsg := fmt.Sprintf("创建目录失败: %v", err)
-			log.Printf(errorMsg)
+			log.Print(errorMsg)
 			g.JSON(http.StatusOK, WorldOverridesResponse{
 				Status: 500,
 				Data:   nil,
@@ -1605,7 +1605,7 @@ func CreateTemplateCaveWorld(g *gin.Context) {
 	// 检查源文件是否存在
 	if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
 		errorMsg := fmt.Sprintf("模板文件不存在: %s", sourceFile)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, WorldOverridesResponse{
 			Status: 404,
 			Data:   nil,
@@ -1621,7 +1621,7 @@ func CreateTemplateCaveWorld(g *gin.Context) {
 	// 复制文件
 	if err := copyFile(sourceFile, targetFile); err != nil {
 		errorMsg := fmt.Sprintf("复制文件失败: %v", err)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, WorldOverridesResponse{
 			Status: 500,
 			Data:   nil,
@@ -1676,7 +1676,7 @@ func DeleteWorld(g *gin.Context) {
 	// 检查目录是否存在
 	if _, err := os.Stat(worldPath); os.IsNotExist(err) {
 		errorMsg := fmt.Sprintf("世界目录不存在: %s", worldPath)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, DeleteWorldResponse{
 			Status: 404,
 			Msg:    errorMsg,
@@ -1690,7 +1690,7 @@ func DeleteWorld(g *gin.Context) {
 	// 使用os.RemoveAll删除目录及其内容
 	if err := os.RemoveAll(worldPath); err != nil {
 		errorMsg := fmt.Sprintf("删除世界目录失败: %v", err)
-		log.Printf(errorMsg)
+		log.Print(errorMsg)
 		g.JSON(http.StatusOK, DeleteWorldResponse{
 			Status: 500,
 			Msg:    errorMsg,

@@ -1,6 +1,7 @@
 package models
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -83,7 +84,7 @@ func CallCronFunction(functionName string, args ...interface{}) (string, error) 
 	// 返回任务输出
 	result := logs[0].Output
 	if logs[0].Status == 0 {
-		return result, fmt.Errorf(logs[0].Error)
+		return result, errors.New(logs[0].Error)
 	}
 
 	log.Printf("[CallCronFunction] 执行命令成功: %s", result)
