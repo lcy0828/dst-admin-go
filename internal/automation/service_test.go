@@ -23,6 +23,17 @@ func (automationTestCatalog) Room(id string) (rooms.Room, error) {
 	return rooms.Room{ID: id, Name: "Test Room", Managed: true}, nil
 }
 
+func (automationTestCatalog) List() ([]rooms.Room, error) {
+	return []rooms.Room{{ID: "room", DirectoryName: "survival", Name: "Test Room", Managed: true}}, nil
+}
+
+func (automationTestCatalog) Worlds(roomID string) ([]rooms.World, error) {
+	if roomID != "room" {
+		return nil, rooms.ErrRoomNotFound
+	}
+	return []rooms.World{{ID: "Master", RoomID: roomID, DirectoryName: "Master", Name: "Master"}}, nil
+}
+
 type automationTestExecutor struct {
 	started  chan struct{}
 	release  chan struct{}
@@ -132,6 +143,58 @@ func TestMigrateLegacyAutomationTablesPreservesData(t *testing.T) {
 	run, err := store.Run("room", "run")
 	if err != nil || run.RetryCount != 0 || run.DurationMs != 25 {
 		t.Fatalf("migrated run=%#v err=%v", run, err)
+	}
+}
+
+func TestMigrateLegacyCronTasksOnlyImportsResolvableTargets(t *testing.T) {
+	service, store, _ := newAutomationTestService(t, &automationTestExecutor{})
+	if err := store.db.Exec(`CREATE TABLE legacy_cron_task (
+		id integer primary key, name varchar(255), description varchar(255), spec varchar(255),
+		type varchar(255), target varchar(255), args varchar(255), dependencies varchar(255),
+		timeout integer, retry_times integer, retry_interval integer, status integer
+	)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	rows := []struct {
+		id     int
+		name   string
+		target string
+		args   string
+	}{
+		{1, "refresh state", "read_world_state", `["survival","Master"]`},
+		{2, "missing target", "read_player_config", `["missing","Master"]`},
+		{3, "unsupported", "cleanupLogs", `[30]`},
+	}
+	for _, row := range rows {
+		if err := store.db.Exec(`INSERT INTO legacy_cron_task
+			(id, name, description, spec, type, target, args, dependencies, timeout, retry_times, retry_interval, status)
+			VALUES (?, ?, '', '*/30 * * * * *', 'function', ?, ?, '', 0, 0, 0, 1)`,
+			row.id, row.name, row.target, row.args).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	report, err := MigrateLegacyCronTasks(store.db, "legacy_", automationTestCatalog{}, service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Examined != 3 || report.Migrated != 1 || report.Existing != 0 || len(report.Skipped) != 2 {
+		t.Fatalf("unexpected migration report: %+v", report)
+	}
+	tasks, err := service.Tasks("room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].Action != ActionWorldStateRefresh || len(tasks[0].WorldIDs) != 1 || tasks[0].WorldIDs[0] != "Master" {
+		t.Fatalf("unexpected migrated tasks: %+v", tasks)
+	}
+
+	repeated, err := MigrateLegacyCronTasks(store.db, "legacy_", automationTestCatalog{}, service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.Migrated != 0 || repeated.Existing != 1 || len(repeated.Skipped) != 2 {
+		t.Fatalf("migration is not idempotent: %+v", repeated)
 	}
 }
 
