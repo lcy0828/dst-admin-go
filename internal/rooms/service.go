@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	worldtemplate "dont/template"
+
 	"github.com/go-ini/ini"
 )
 
@@ -439,26 +441,11 @@ func writeWorld(root, name string, shardID, port, authenticationPort, masterServ
 	if err := writeINI(filepath.Join(directory, "server.ini"), config, 0640); err != nil {
 		return err
 	}
-	override := fmt.Sprintf(`return {
-  desc = "The standard Don't Starve Together experience.",
-  hideminimap = false,
-  id = "SURVIVAL_TOGETHER",
-  location = %q,
-  max_playlist_position = 999,
-  min_playlist_position = 0,
-  name = "Default",
-  numrandom_set_pieces = 4,
-  override_enabled = true,
-  overrides = {},
-  playstyle = "survival",
-  random_set_pieces = {},
-  required_prefabs = {},
-  required_setpieces = {},
-  substitutes = {},
-  version = 4,
-}
-`, location)
-	if err := os.WriteFile(filepath.Join(directory, "leveldataoverride.lua"), []byte(override), 0640); err != nil {
+	override, err := worldtemplate.LevelDataOverride(location)
+	if err != nil {
+		return fmt.Errorf("compose %s world override: %w", name, err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "leveldataoverride.lua"), override, 0640); err != nil {
 		return fmt.Errorf("write %s world override: %w", name, err)
 	}
 	if err := os.WriteFile(filepath.Join(directory, "modoverrides.lua"), []byte("return {}\n"), 0640); err != nil {

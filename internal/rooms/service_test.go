@@ -1,6 +1,7 @@
 package rooms
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -65,6 +66,8 @@ func TestCreateDiscoverAdoptAndReadWorlds(t *testing.T) {
 	if mode := fileMode(t, filepath.Join(root, "summer_2026", "cluster_token.txt")); mode != 0600 {
 		t.Fatalf("cluster token mode = %o, want 600", mode)
 	}
+	assertWorldGenerationDefaults(t, filepath.Join(root, "summer_2026", "Master", "leveldataoverride.lua"), "default", "default")
+	assertWorldGenerationDefaults(t, filepath.Join(root, "summer_2026", "Caves", "leveldataoverride.lua"), "cave_default", "caves")
 	rooms, err := service.List()
 	if err != nil || len(rooms) != 1 || !rooms[0].Managed {
 		t.Fatalf("list rooms = %#v, %v", rooms, err)
@@ -214,4 +217,17 @@ func fileMode(t *testing.T, path string) os.FileMode {
 		t.Fatal(err)
 	}
 	return info.Mode().Perm()
+}
+
+func assertWorldGenerationDefaults(t *testing.T, path, taskSet, startLocation string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range [][]byte{[]byte(`task_set="` + taskSet + `"`), []byte(`start_location="` + startLocation + `"`), []byte(`required_prefabs={ "multiplayer_portal" }`)} {
+		if !bytes.Contains(data, expected) {
+			t.Fatalf("%s does not contain %q", path, expected)
+		}
+	}
 }
