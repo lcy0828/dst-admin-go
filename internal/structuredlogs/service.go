@@ -67,7 +67,7 @@ func (s *Service) List(roomID string, filter ListFilter) (List, error) {
 	if err != nil {
 		return List{}, err
 	}
-	counts, refreshed, err := s.store.Counts(room.ID)
+	counts, refreshed, err := s.store.Counts(room.ID, filter.WorldID)
 	if err != nil {
 		return List{}, err
 	}

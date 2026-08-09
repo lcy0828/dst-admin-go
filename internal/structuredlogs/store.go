@@ -183,8 +183,14 @@ func (s *Store) List(roomID string, filter ListFilter) ([]Entry, int, error) {
 	return items, total, nil
 }
 
-func (s *Store) Counts(roomID string) (map[LogType]int, *time.Time, error) {
-	rows, err := s.db.Table(s.entriesTable).Select("type, count(*) AS count").Where("room_id = ?", roomID).Group("type").Rows()
+func (s *Store) Counts(roomID, worldID string) (map[LogType]int, *time.Time, error) {
+	entries := s.db.Table(s.entriesTable).Select("type, count(*) AS count").Where("room_id = ?", roomID)
+	refreshes := s.db.Table(s.refreshTable).Where("room_id = ?", roomID)
+	if worldID != "" {
+		entries = entries.Where("world_id = ?", worldID)
+		refreshes = refreshes.Where("world_id = ?", worldID)
+	}
+	rows, err := entries.Group("type").Rows()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -199,7 +205,7 @@ func (s *Store) Counts(roomID string) (map[LogType]int, *time.Time, error) {
 		counts[LogType(value)] = count
 	}
 	var record refreshRecord
-	result := s.db.Table(s.refreshTable).Where("room_id = ?", roomID).Order("refreshed_at DESC").First(&record)
+	result := refreshes.Order("refreshed_at DESC").First(&record)
 	if gorm.IsRecordNotFoundError(result.Error) {
 		return counts, nil, nil
 	}

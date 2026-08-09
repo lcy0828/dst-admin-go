@@ -46,9 +46,20 @@ func TestStoreReplacesWorldSnapshotAndEscapesSearchWildcards(t *testing.T) {
 	if err != nil || total != 1 || len(items) != 1 || items[0].Content != "new failure" {
 		t.Fatalf("replacement snapshot = %#v, total=%d, err=%v", items, total, err)
 	}
-	counts, refreshed, err := store.Counts("room")
+	counts, refreshed, err := store.Counts("room", "master")
 	if err != nil || counts[TypeError] != 1 || refreshed == nil || !refreshed.Equal(now.Add(time.Minute)) {
 		t.Fatalf("counts=%#v refreshed=%v err=%v", counts, refreshed, err)
+	}
+	if err := store.ReplaceWorldSnapshot("room", "caves", "Caves", []Entry{{Type: TypeWarning, Content: "cave warning", RawContent: "cave warning", SourceCursor: 6}}, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	masterCounts, masterRefreshed, err := store.Counts("room", "master")
+	if err != nil || masterCounts[TypeError] != 1 || masterCounts[TypeWarning] != 0 || masterRefreshed == nil || !masterRefreshed.Equal(now.Add(time.Minute)) {
+		t.Fatalf("master counts=%#v refreshed=%v err=%v", masterCounts, masterRefreshed, err)
+	}
+	cavesCounts, cavesRefreshed, err := store.Counts("room", "caves")
+	if err != nil || cavesCounts[TypeWarning] != 1 || cavesCounts[TypeError] != 0 || cavesRefreshed == nil || !cavesRefreshed.Equal(now.Add(2*time.Minute)) {
+		t.Fatalf("caves counts=%#v refreshed=%v err=%v", cavesCounts, cavesRefreshed, err)
 	}
 }
 
