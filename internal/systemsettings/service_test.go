@@ -48,7 +48,7 @@ func TestRuntimeSettingsUseRealDefaultsAndApplyWithoutRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.MinPasswordLength != 6 || runtime.PasswordComplexity || runtime.SessionTimeout != 24*time.Hour || runtime.SystemName != "饥荒管理系统" || runtime.AdminEmail != "" || runtime.Theme != "#e5482d" {
+	if runtime.MinPasswordLength != 6 || runtime.PasswordComplexity || runtime.SessionTimeout != 24*time.Hour || runtime.SystemName != "饥荒管理系统" || runtime.AdminEmail != "" || runtime.Theme != "#27272a" {
 		t.Fatalf("unexpected runtime defaults: %#v", runtime)
 	}
 	settings, _ := service.Settings()
