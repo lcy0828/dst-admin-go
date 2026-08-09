@@ -46,7 +46,14 @@ type ruleRecord struct {
 type refreshRecord struct {
 	RoomID      string `gorm:"primary_key"`
 	WorldID     string `gorm:"primary_key"`
+	State       string
 	RefreshedAt time.Time
+}
+
+type snapshotMetadata struct {
+	State           SnapshotState
+	UpdatedAt       *time.Time
+	LastRefreshedAt *time.Time
 }
 
 type Store struct {
@@ -122,7 +129,7 @@ func (s *Store) ReplaceWorldSnapshot(roomID, worldID, worldName string, entries 
 			return err
 		}
 	}
-	refresh := refreshRecord{RoomID: roomID, WorldID: worldID, RefreshedAt: observedAt}
+	refresh := refreshRecord{RoomID: roomID, WorldID: worldID, State: string(SnapshotStateReady), RefreshedAt: observedAt}
 	if err := tx.Table(s.refreshTable).Where("room_id = ? AND world_id = ?", roomID, worldID).Assign(refresh).FirstOrCreate(&refresh).Error; err != nil {
 		tx.Rollback()
 		return err
@@ -130,7 +137,7 @@ func (s *Store) ReplaceWorldSnapshot(roomID, worldID, worldName string, entries 
 	return tx.Commit().Error
 }
 
-func (s *Store) ClearWorldSnapshot(roomID, worldID string) (int64, error) {
+func (s *Store) ClearWorldSnapshot(roomID, worldID string, clearedAt time.Time) (int64, error) {
 	tx := s.db.Begin()
 	if tx.Error != nil {
 		return 0, tx.Error
@@ -146,7 +153,8 @@ func (s *Store) ClearWorldSnapshot(roomID, worldID string) (int64, error) {
 		tx.Rollback()
 		return 0, deleted.Error
 	}
-	if err := tx.Table(s.refreshTable).Where("room_id = ? AND world_id = ?", roomID, worldID).Delete(&refreshRecord{}).Error; err != nil {
+	cleared := refreshRecord{RoomID: roomID, WorldID: worldID, State: string(SnapshotStateCleared), RefreshedAt: clearedAt.UTC()}
+	if err := tx.Table(s.refreshTable).Where("room_id = ? AND world_id = ?", roomID, worldID).Assign(cleared).FirstOrCreate(&cleared).Error; err != nil {
 		tx.Rollback()
 		return 0, err
 	}
@@ -183,7 +191,7 @@ func (s *Store) List(roomID string, filter ListFilter) ([]Entry, int, error) {
 	return items, total, nil
 }
 
-func (s *Store) Counts(roomID, worldID string) (map[LogType]int, *time.Time, error) {
+func (s *Store) Counts(roomID, worldID string) (map[LogType]int, snapshotMetadata, error) {
 	entries := s.db.Table(s.entriesTable).Select("type, count(*) AS count").Where("room_id = ?", roomID)
 	refreshes := s.db.Table(s.refreshTable).Where("room_id = ?", roomID)
 	if worldID != "" {
@@ -192,7 +200,7 @@ func (s *Store) Counts(roomID, worldID string) (map[LogType]int, *time.Time, err
 	}
 	rows, err := entries.Group("type").Rows()
 	if err != nil {
-		return nil, nil, err
+		return nil, snapshotMetadata{}, err
 	}
 	defer rows.Close()
 	counts := make(map[LogType]int)
@@ -200,20 +208,35 @@ func (s *Store) Counts(roomID, worldID string) (map[LogType]int, *time.Time, err
 		var value string
 		var count int
 		if err := rows.Scan(&value, &count); err != nil {
-			return nil, nil, err
+			return nil, snapshotMetadata{}, err
 		}
 		counts[LogType(value)] = count
 	}
-	var record refreshRecord
-	result := refreshes.Order("refreshed_at DESC").First(&record)
-	if gorm.IsRecordNotFoundError(result.Error) {
-		return counts, nil, nil
+	var records []refreshRecord
+	result := refreshes.Order("refreshed_at DESC").Find(&records)
+	if result.Error != nil && !gorm.IsRecordNotFoundError(result.Error) {
+		return nil, snapshotMetadata{}, result.Error
 	}
-	if result.Error != nil {
-		return nil, nil, result.Error
+	metadata := snapshotMetadata{State: SnapshotStateUninitialized}
+	for _, record := range records {
+		updatedAt := record.RefreshedAt
+		if metadata.UpdatedAt == nil || updatedAt.After(*metadata.UpdatedAt) {
+			metadata.UpdatedAt = &updatedAt
+		}
+		state := SnapshotState(record.State)
+		if state == "" {
+			state = SnapshotStateReady
+		}
+		if state == SnapshotStateReady {
+			metadata.State = SnapshotStateReady
+			if metadata.LastRefreshedAt == nil || updatedAt.After(*metadata.LastRefreshedAt) {
+				metadata.LastRefreshedAt = &updatedAt
+			}
+		} else if state == SnapshotStateCleared && metadata.State == SnapshotStateUninitialized {
+			metadata.State = SnapshotStateCleared
+		}
 	}
-	value := record.RefreshedAt
-	return counts, &value, nil
+	return counts, metadata, nil
 }
 
 func (s *Store) Rules(roomID string) ([]Rule, error) {

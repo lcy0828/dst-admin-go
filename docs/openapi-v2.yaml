@@ -4747,6 +4747,9 @@ components:
     StructuredLogMatchMode:
       type: string
       enum: [single, multi_line, head_tail]
+    StructuredLogSnapshotState:
+      type: string
+      enum: [uninitialized, ready, cleared]
     StructuredLogEntry:
       type: object
       additionalProperties: false
@@ -4781,13 +4784,15 @@ components:
     StructuredLogList:
       type: object
       additionalProperties: false
-      required: [items, total, counts, limit, offset]
+      required: [items, total, counts, limit, offset, snapshotState]
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/StructuredLogEntry" } }
         total: { type: integer, minimum: 0 }
         counts: { $ref: "#/components/schemas/StructuredLogCounts" }
         limit: { type: integer, minimum: 1, maximum: 100 }
         offset: { type: integer, minimum: 0 }
+        snapshotState: { $ref: "#/components/schemas/StructuredLogSnapshotState" }
+        snapshotUpdatedAt: { type: string, format: date-time }
         lastRefreshedAt: { type: string, format: date-time }
     StructuredLogListEnvelope:
       type: object

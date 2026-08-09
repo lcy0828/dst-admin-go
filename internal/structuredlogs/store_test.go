@@ -28,6 +28,10 @@ func newStructuredLogStore(t *testing.T) *Store {
 func TestStoreReplacesWorldSnapshotAndEscapesSearchWildcards(t *testing.T) {
 	store := newStructuredLogStore(t)
 	now := time.Date(2026, 8, 8, 1, 2, 3, 0, time.UTC)
+	counts, snapshot, err := store.Counts("room", "master")
+	if err != nil || len(counts) != 0 || snapshot.State != SnapshotStateUninitialized || snapshot.UpdatedAt != nil || snapshot.LastRefreshedAt != nil {
+		t.Fatalf("initial counts=%#v snapshot=%#v err=%v", counts, snapshot, err)
+	}
 	first := []Entry{
 		{Type: TypeSystem, Content: "loading 100% complete", RawContent: "loading 100% complete", SourceCursor: 10},
 		{Type: TypeWarning, Content: "old warning", RawContent: "old warning", SourceCursor: 20},
@@ -46,20 +50,20 @@ func TestStoreReplacesWorldSnapshotAndEscapesSearchWildcards(t *testing.T) {
 	if err != nil || total != 1 || len(items) != 1 || items[0].Content != "new failure" {
 		t.Fatalf("replacement snapshot = %#v, total=%d, err=%v", items, total, err)
 	}
-	counts, refreshed, err := store.Counts("room", "master")
-	if err != nil || counts[TypeError] != 1 || refreshed == nil || !refreshed.Equal(now.Add(time.Minute)) {
-		t.Fatalf("counts=%#v refreshed=%v err=%v", counts, refreshed, err)
+	counts, snapshot, err = store.Counts("room", "master")
+	if err != nil || counts[TypeError] != 1 || snapshot.State != SnapshotStateReady || snapshot.LastRefreshedAt == nil || !snapshot.LastRefreshedAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("counts=%#v snapshot=%#v err=%v", counts, snapshot, err)
 	}
 	if err := store.ReplaceWorldSnapshot("room", "caves", "Caves", []Entry{{Type: TypeWarning, Content: "cave warning", RawContent: "cave warning", SourceCursor: 6}}, now.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	masterCounts, masterRefreshed, err := store.Counts("room", "master")
-	if err != nil || masterCounts[TypeError] != 1 || masterCounts[TypeWarning] != 0 || masterRefreshed == nil || !masterRefreshed.Equal(now.Add(time.Minute)) {
-		t.Fatalf("master counts=%#v refreshed=%v err=%v", masterCounts, masterRefreshed, err)
+	masterCounts, masterSnapshot, err := store.Counts("room", "master")
+	if err != nil || masterCounts[TypeError] != 1 || masterCounts[TypeWarning] != 0 || masterSnapshot.State != SnapshotStateReady || masterSnapshot.LastRefreshedAt == nil || !masterSnapshot.LastRefreshedAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("master counts=%#v snapshot=%#v err=%v", masterCounts, masterSnapshot, err)
 	}
-	cavesCounts, cavesRefreshed, err := store.Counts("room", "caves")
-	if err != nil || cavesCounts[TypeWarning] != 1 || cavesCounts[TypeError] != 0 || cavesRefreshed == nil || !cavesRefreshed.Equal(now.Add(2*time.Minute)) {
-		t.Fatalf("caves counts=%#v refreshed=%v err=%v", cavesCounts, cavesRefreshed, err)
+	cavesCounts, cavesSnapshot, err := store.Counts("room", "caves")
+	if err != nil || cavesCounts[TypeWarning] != 1 || cavesCounts[TypeError] != 0 || cavesSnapshot.State != SnapshotStateReady || cavesSnapshot.LastRefreshedAt == nil || !cavesSnapshot.LastRefreshedAt.Equal(now.Add(2*time.Minute)) {
+		t.Fatalf("caves counts=%#v snapshot=%#v err=%v", cavesCounts, cavesSnapshot, err)
 	}
 }
 

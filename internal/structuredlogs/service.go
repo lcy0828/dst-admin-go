@@ -67,7 +67,7 @@ func (s *Service) List(roomID string, filter ListFilter) (List, error) {
 	if err != nil {
 		return List{}, err
 	}
-	counts, refreshed, err := s.store.Counts(room.ID, filter.WorldID)
+	counts, snapshot, err := s.store.Counts(room.ID, filter.WorldID)
 	if err != nil {
 		return List{}, err
 	}
@@ -76,7 +76,10 @@ func (s *Service) List(roomID string, filter ListFilter) (List, error) {
 			counts[value] = 0
 		}
 	}
-	return List{Items: items, Total: total, Counts: counts, Limit: filter.Limit, Offset: filter.Offset, LastRefreshedAt: refreshed}, nil
+	return List{
+		Items: items, Total: total, Counts: counts, Limit: filter.Limit, Offset: filter.Offset,
+		SnapshotState: snapshot.State, SnapshotUpdatedAt: snapshot.UpdatedAt, LastRefreshedAt: snapshot.LastRefreshedAt,
+	}, nil
 }
 
 func (s *Service) WorldTargets(roomID string) ([]rooms.World, error) {
@@ -136,11 +139,12 @@ func (s *Service) ClearWorld(roomID, worldID string) (ClearResult, error) {
 	lock := s.lock(room.ID + "\x00" + world.ID)
 	lock.Lock()
 	defer lock.Unlock()
-	deleted, err := s.store.ClearWorldSnapshot(room.ID, world.ID)
+	clearedAt := s.now().UTC()
+	deleted, err := s.store.ClearWorldSnapshot(room.ID, world.ID, clearedAt)
 	if err != nil {
 		return ClearResult{}, err
 	}
-	return ClearResult{RoomID: room.ID, WorldID: world.ID, Deleted: deleted, ClearedAt: s.now().UTC()}, nil
+	return ClearResult{RoomID: room.ID, WorldID: world.ID, Deleted: deleted, ClearedAt: clearedAt}, nil
 }
 
 func (s *Service) Rules(roomID string) ([]Rule, error) {

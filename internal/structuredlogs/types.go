@@ -34,6 +34,14 @@ const (
 	TypeUnknown LogType = "unknown"
 )
 
+type SnapshotState string
+
+const (
+	SnapshotStateUninitialized SnapshotState = "uninitialized"
+	SnapshotStateReady         SnapshotState = "ready"
+	SnapshotStateCleared       SnapshotState = "cleared"
+)
+
 type Entry struct {
 	ID              int64      `json:"id"`
 	RoomID          string     `json:"roomId"`
@@ -59,12 +67,14 @@ type ListFilter struct {
 }
 
 type List struct {
-	Items           []Entry         `json:"items"`
-	Total           int             `json:"total"`
-	Counts          map[LogType]int `json:"counts"`
-	Limit           int             `json:"limit"`
-	Offset          int             `json:"offset"`
-	LastRefreshedAt *time.Time      `json:"lastRefreshedAt,omitempty"`
+	Items             []Entry         `json:"items"`
+	Total             int             `json:"total"`
+	Counts            map[LogType]int `json:"counts"`
+	Limit             int             `json:"limit"`
+	Offset            int             `json:"offset"`
+	SnapshotState     SnapshotState   `json:"snapshotState"`
+	SnapshotUpdatedAt *time.Time      `json:"snapshotUpdatedAt,omitempty"`
+	LastRefreshedAt   *time.Time      `json:"lastRefreshedAt,omitempty"`
 }
 
 type Rule struct {

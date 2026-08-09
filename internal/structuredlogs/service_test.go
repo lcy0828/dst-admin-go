@@ -57,7 +57,7 @@ func TestServiceRefreshClassifiesAndQueriesStructuredLogs(t *testing.T) {
 		t.Fatalf("refresh = %#v, %v", result, err)
 	}
 	list, err := service.List("room", ListFilter{Limit: 50})
-	if err != nil || list.Total != 4 || len(list.Counts) != 8 || list.Counts[TypePlayer] != 1 || list.Counts[TypeWarning] != 1 || list.Counts[TypeChat] != 1 || list.Counts[TypeUnknown] != 1 {
+	if err != nil || list.Total != 4 || len(list.Counts) != 8 || list.SnapshotState != SnapshotStateReady || list.LastRefreshedAt == nil || list.Counts[TypePlayer] != 1 || list.Counts[TypeWarning] != 1 || list.Counts[TypeChat] != 1 || list.Counts[TypeUnknown] != 1 {
 		t.Fatalf("list = %#v, %v", list, err)
 	}
 	players, err := service.List("room", ListFilter{Type: TypePlayer, Query: "Willow", Limit: 50})
@@ -149,7 +149,14 @@ func TestServicePreservesMultiLineHeadTailCustomTypesAndClear(t *testing.T) {
 		t.Fatalf("clear = %#v, %v", cleared, err)
 	}
 	list, err := service.List("room", ListFilter{Limit: 50})
-	if err != nil || list.Total != 0 || list.LastRefreshedAt != nil {
+	if err != nil || list.Total != 0 || list.SnapshotState != SnapshotStateCleared || list.SnapshotUpdatedAt == nil || list.LastRefreshedAt != nil {
 		t.Fatalf("list after clear = %#v, %v", list, err)
+	}
+	if _, err := service.RefreshWorld(context.Background(), "room", "master"); err != nil {
+		t.Fatal(err)
+	}
+	list, err = service.List("room", ListFilter{Limit: 50})
+	if err != nil || list.SnapshotState != SnapshotStateReady || list.LastRefreshedAt == nil || list.Total != 4 {
+		t.Fatalf("list after refresh = %#v, %v", list, err)
 	}
 }
