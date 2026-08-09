@@ -146,4 +146,28 @@ func TestStartReportsRuntimeFailureInsteadOfTmuxSuccess(t *testing.T) {
 	if len(results) != 1 || results[0].Status != jobs.StatusFailed || results[0].Error == nil || results[0].Error.Message != "Klei 集群令牌已过期或无效" {
 		t.Fatalf("results = %#v", results)
 	}
+	if fmt.Sprint(control.calls) != "[start:Master stop:Master]" {
+		t.Fatalf("failed start was not cleaned up: %v", control.calls)
+	}
+}
+
+func TestStartTimeoutCleansUpSession(t *testing.T) {
+	control := &fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}}
+	operations := testOperations(control)
+	operations.startTimeout = 5 * time.Millisecond
+	control.status["summer_2026/Master"] = RuntimeStatus{State: RuntimeStarting, SessionExists: true}
+	_, runner, err := operations.Plan(ActionStart, rooms.EncodeID("summer_2026"), []string{rooms.EncodeID("Master")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []jobs.TargetResult
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != jobs.StatusFailed || results[0].Error == nil || results[0].Error.Message != "等待分片启动超时" {
+		t.Fatalf("results = %#v", results)
+	}
+	if fmt.Sprint(control.calls) != "[stop:Master]" {
+		t.Fatalf("timed out start was not cleaned up: %v", control.calls)
+	}
 }

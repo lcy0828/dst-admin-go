@@ -48,6 +48,10 @@ var runtimeFailureSignals = []struct {
 	{`Address already in use`, "PORT_IN_USE", "服务器端口已被占用", 2},
 	{`Failed to bind`, "PORT_BIND_FAILED", "服务器无法绑定配置端口", 2},
 	{`Could not bind`, "PORT_BIND_FAILED", "服务器无法绑定配置端口", 2},
+	{`Must specify the task set for a level`, "WORLDGEN_TASK_SET_MISSING", "世界配置缺少地图任务集，请重新保存地面或洞穴的世界生成配置", 3},
+	{`has no data! If preset`, "WORLDGEN_TASK_SET_INVALID", "世界配置引用的地图任务集不可用，请检查世界预设和相关模组", 3},
+	{`Worldgen had an error`, "WORLDGEN_FAILED", "世界生成失败，请检查世界配置和世界生成模组", 1},
+	{`Error loading worldgen_main.lua`, "WORLDGEN_FAILED", "世界生成失败，请检查世界配置和世界生成模组", 1},
 }
 
 var runtimeReadySignals = []string{
@@ -56,6 +60,8 @@ var runtimeReadySignals = []string{
 	"Shard server ready",
 	"Connected to master",
 	"Master connection established",
+	"[Shard] secondary shard is now ready!",
+	"[Shard] secondary shard LUA is now ready!",
 	"Sim paused",
 }
 
@@ -77,14 +83,38 @@ func (s *DSTServer) RuntimeStatus() (RuntimeStatus, error) {
 		}
 		return RuntimeStatus{}, fmt.Errorf("读取分片日志状态: %w", err)
 	}
-	if createdAt, createdErr := s.sessionCreatedAt(); createdErr == nil && info.ModTime().Before(createdAt.Add(-2*time.Second)) {
+	createdAt, createdErr := s.sessionCreatedAt()
+	if createdErr == nil && !runtimeLogModifiedAfterSession(info.ModTime(), createdAt) {
 		return status, nil
 	}
 	content, err := readFileTail(logPath, runtimeLogTailBytes)
 	if err != nil {
 		return RuntimeStatus{}, fmt.Errorf("读取分片日志: %w", err)
 	}
+	if createdErr == nil {
+		if logStartedAt, ok := runtimeLogStartedAt(string(content)); ok && logStartedAt.Before(createdAt) {
+			return status, nil
+		}
+	}
 	return classifyRuntimeLog(string(content), status), nil
+}
+
+func runtimeLogModifiedAfterSession(logModified, sessionCreated time.Time) bool {
+	return logModified.After(sessionCreated)
+}
+
+func runtimeLogStartedAt(content string) (time.Time, bool) {
+	const marker = "Current time: "
+	start := strings.Index(content, marker)
+	if start < 0 {
+		return time.Time{}, false
+	}
+	value := content[start+len(marker):]
+	if end := strings.IndexByte(value, '\n'); end >= 0 {
+		value = value[:end]
+	}
+	parsed, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", strings.TrimSpace(value), time.Local)
+	return parsed, err == nil
 }
 
 func classifyRuntimeLog(content string, fallback RuntimeStatus) RuntimeStatus {
@@ -132,7 +162,7 @@ func (s *DSTServer) SessionExists() (bool, error) {
 }
 
 func (s *DSTServer) sessionCreatedAt() (time.Time, error) {
-	output, err := exec.Command("tmux", "display-message", "-p", "-t", "="+s.SessionName, "#{session_created}").Output()
+	output, err := exec.Command("tmux", "display-message", "-p", "-t", s.SessionName, "#{session_created}").Output()
 	if err != nil {
 		return time.Time{}, err
 	}

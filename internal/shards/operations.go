@@ -216,7 +216,11 @@ func (o *Operations) waitFor(ctx context.Context, roomName, worldName string, ex
 			if !expected {
 				state = "停止"
 			}
-			return fmt.Errorf("等待分片%s超时", state)
+			message := fmt.Sprintf("等待分片%s超时", state)
+			if expected {
+				return errors.New(o.cleanupFailedStart(ctx, roomName, worldName, message))
+			}
+			return errors.New(message)
 		case <-ticker.C:
 			status, err := o.Status(ctx, roomName, worldName)
 			if err != nil {
@@ -226,7 +230,7 @@ func (o *Operations) waitFor(ctx context.Context, roomName, worldName string, ex
 				if status.Message == "" {
 					status.Message = "DST 启动失败，请检查分片日志"
 				}
-				return errors.New(status.Message)
+				return errors.New(o.cleanupFailedStart(ctx, roomName, worldName, status.Message))
 			}
 			if expected && status.State == RuntimeRunning {
 				return nil
@@ -236,6 +240,13 @@ func (o *Operations) waitFor(ctx context.Context, roomName, worldName string, ex
 			}
 		}
 	}
+}
+
+func (o *Operations) cleanupFailedStart(ctx context.Context, roomName, worldName, message string) string {
+	if err := o.control.Stop(ctx, roomName, worldName); err != nil {
+		return fmt.Sprintf("%s；清理失败启动会话时出错: %v", message, err)
+	}
+	return message
 }
 
 func selectWorlds(worlds []rooms.World, selected []string) ([]rooms.World, error) {
