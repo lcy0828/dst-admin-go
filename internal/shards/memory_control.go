@@ -34,6 +34,17 @@ func (c *MemoryControl) IsRunning(ctx context.Context, roomName, worldName strin
 	return c.running[memoryControlKey(roomName, worldName)], nil
 }
 
+func (c *MemoryControl) Status(ctx context.Context, roomName, worldName string) (RuntimeStatus, error) {
+	running, err := c.IsRunning(ctx, roomName, worldName)
+	if err != nil {
+		return RuntimeStatus{State: RuntimeUnknown}, err
+	}
+	if running {
+		return RuntimeStatus{State: RuntimeRunning, SessionExists: true}, nil
+	}
+	return RuntimeStatus{State: RuntimeStopped}, nil
+}
+
 func (c *MemoryControl) Start(ctx context.Context, roomName, worldName string) error {
 	if err := ctx.Err(); err != nil {
 		return err

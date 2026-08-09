@@ -43,6 +43,23 @@ func (c *TmuxControl) IsRunning(ctx context.Context, roomName, worldName string)
 	return server.IsRunning()
 }
 
+func (c *TmuxControl) Status(ctx context.Context, roomName, worldName string) (RuntimeStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return RuntimeStatus{State: RuntimeUnknown}, err
+	}
+	server, err := c.server(roomName, worldName)
+	if err != nil {
+		return RuntimeStatus{State: RuntimeUnknown}, err
+	}
+	status, err := server.RuntimeStatus()
+	if err != nil {
+		return RuntimeStatus{State: RuntimeUnknown}, err
+	}
+	return RuntimeStatus{
+		State: RuntimeState(status.State), Code: status.Code, Message: status.Message, SessionExists: status.SessionExists,
+	}, nil
+}
+
 func (c *TmuxControl) Start(ctx context.Context, roomName, worldName string) error {
 	if err := ctx.Err(); err != nil {
 		return err

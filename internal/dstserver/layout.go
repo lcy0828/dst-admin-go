@@ -141,3 +141,24 @@ func uniquePaths(values []string) []string {
 	}
 	return result
 }
+
+func SteamClientLibraryDirectory(layout Layout) string {
+	if layout.Kind != LayoutMac {
+		return ""
+	}
+	candidates := []string{}
+	if configured := strings.TrimSpace(os.Getenv("DST_ADMIN_STEAM_CLIENT_LIBRARY_PATH")); configured != "" {
+		candidates = append(candidates, configured)
+	}
+	steamRoot := filepath.Dir(filepath.Dir(filepath.Dir(layout.InstallRoot)))
+	candidates = append(candidates, filepath.Join(steamRoot, "Steam.AppBundle", "Steam", "Contents", "MacOS"))
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, "Library", "Application Support", "Steam", "Steam.AppBundle", "Steam", "Contents", "MacOS"))
+	}
+	for _, candidate := range candidates {
+		if info, err := os.Stat(filepath.Join(candidate, "steamclient.dylib")); err == nil && !info.IsDir() {
+			return filepath.Clean(candidate)
+		}
+	}
+	return ""
+}

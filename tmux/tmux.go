@@ -101,44 +101,8 @@ func NewDSTServerWithSessionName(archiveName, worldName, sessionName, ugcDirecto
 
 // IsRunning 检查服务器是否正在运行
 func (s *DSTServer) IsRunning() (bool, error) {
-	log.Printf("[TMUX] 检查服务器运行状态 会话名: %s", s.SessionName)
-
-	// 使用两种方法检查会话是否存在
-	// 方法1: 使用gotmux的ListSessions方法
-	log.Printf("[TMUX] 方法1: 使用gotmux的ListSessions方法检查")
-	sessions, err := s.tmux.ListSessions()
-	if err != nil {
-		// 检查错误是否是因为没有tmux会话
-		if strings.Contains(err.Error(), "failed to list sessions") {
-			log.Printf("[TMUX] 没有运行中的tmux会话，将尝试方法2")
-		} else {
-			log.Printf("[TMUX][警告] 使用gotmux获取tmux会话列表失败: %v, 将尝试方法2", err)
-		}
-	} else {
-		// 检查是否存在指定名称的会话
-		for _, session := range sessions {
-			log.Printf("[TMUX] 检测到会话: %s", session.Name)
-			if session.Name == s.SessionName {
-				log.Printf("[TMUX] 方法1检测到服务器正在运行 会话名: %s", s.SessionName)
-				return true, nil
-			}
-		}
-		log.Printf("[TMUX] 方法1未检测到服务器运行, 将尝试方法2")
-	}
-
-	// 方法2: 直接使用tmux has-session命令检查
-	log.Printf("[TMUX] 方法2: 使用tmux has-session命令检查")
-	cmd := exec.Command("tmux", "has-session", "-t", s.SessionName)
-	err = cmd.Run()
-	if err == nil {
-		// 如果命令执行成功，说明会话存在
-		log.Printf("[TMUX] 方法2检测到服务器正在运行 会话名: %s", s.SessionName)
-		return true, nil
-	}
-
-	// 如果两种方法都未检测到会话，则认为服务器未运行
-	log.Printf("[TMUX] 两种方法都未检测到服务器运行 会话名: %s", s.SessionName)
-	return false, nil
+	status, err := s.RuntimeStatus()
+	return status.State == RuntimeRunning, err
 }
 
 // Start 启动饥荒服务器
@@ -147,16 +111,22 @@ func (s *DSTServer) Start() error {
 	log.Printf("[TMUX] 开始启动饥荒服务器 会话名: %s, 存档: %s, 世界: %s",
 		s.SessionName, s.ArchiveName, s.WorldName)
 
-	// 检查服务器是否已经在运行
-	log.Printf("[TMUX] 检查服务器是否已经在运行")
-	running, err := s.IsRunning()
+	status, err := s.RuntimeStatus()
 	if err != nil {
 		log.Printf("[TMUX][错误] 检查服务器状态失败: %v", err)
 		return err
 	}
-	if running {
+	if status.State == RuntimeRunning || status.State == RuntimeStarting {
 		log.Printf("[TMUX][错误] 服务器已经在运行中: %s", s.SessionName)
 		return fmt.Errorf("服务器已经在运行中: %s", s.SessionName)
+	}
+	if status.SessionExists {
+		if err := s.KillSession(); err != nil {
+			return fmt.Errorf("清理启动失败的旧会话: %w", err)
+		}
+	}
+	if err := s.validateClusterAuth(); err != nil {
+		return err
 	}
 
 	layout, ok := dstinstall.Resolve(s.StartDirectory, s.ServerMode)
@@ -165,9 +135,13 @@ func (s *DSTServer) Start() error {
 	}
 	log.Printf("[TMUX] 已识别服务端布局: %s, 可执行文件: %s", layout.Kind, layout.Executable)
 
-	// 构建启动命令
-	startCmd := fmt.Sprintf("%s -ugc_directory %s -persistent_storage_root %s -conf_dir %s -cluster %s -shard %s",
-		shellArg(layout.Executable), shellArg(s.UGCDirectory), shellArg(s.StorageRoot), shellArg(s.ConfDir), shellArg(s.ArchiveName), shellArg(s.WorldName))
+	startCmd := buildStartCommand(layout, layout.Executable, []string{
+		"-ugc_directory", s.UGCDirectory,
+		"-persistent_storage_root", s.StorageRoot,
+		"-conf_dir", s.ConfDir,
+		"-cluster", s.ArchiveName,
+		"-shard", s.WorldName,
+	})
 	log.Printf("[TMUX] 构建启动命令: %s", startCmd)
 
 	// 使用gotmux的Command方法创建会话
@@ -201,16 +175,16 @@ func (s *DSTServer) Stop() error {
 	startTime := time.Now()
 	log.Printf("[TMUX] 开始停止饥荒服务器 会话名: %s", s.SessionName)
 
-	// 检查服务器是否在运行
-	log.Printf("[TMUX] 检查服务器是否在运行")
-	running, err := s.IsRunning()
+	status, err := s.RuntimeStatus()
 	if err != nil {
 		log.Printf("[TMUX][错误] 检查服务器状态失败: %v", err)
 		return err
 	}
-	if !running {
-		log.Printf("[TMUX][错误] 服务器未运行: %s", s.SessionName)
-		return fmt.Errorf("服务器未运行: %s", s.SessionName)
+	if !status.SessionExists {
+		return nil
+	}
+	if status.State != RuntimeRunning {
+		return s.KillSession()
 	}
 
 	// 向会话发送关闭命令
@@ -231,16 +205,13 @@ func (s *DSTServer) SendCommand(command string) error {
 	startTime := time.Now()
 	log.Printf("[TMUX] 开始向服务器发送命令 会话名: %s, 命令: %s", s.SessionName, command)
 
-	// 检查服务器是否在运行
-	log.Printf("[TMUX] 检查服务器是否在运行")
-	running, err := s.IsRunning()
+	status, err := s.RuntimeStatus()
 	if err != nil {
 		log.Printf("[TMUX][错误] 检查服务器状态失败: %v", err)
 		return err
 	}
-	if !running {
-		log.Printf("[TMUX][错误] 服务器未运行: %s", s.SessionName)
-		return fmt.Errorf("服务器未运行: %s", s.SessionName)
+	if status.State != RuntimeRunning {
+		return fmt.Errorf("服务器当前状态为 %s，无法执行控制台命令: %s", status.State, status.Message)
 	}
 
 	// 获取会话
@@ -300,16 +271,13 @@ func (s *DSTServer) KillSession() error {
 	startTime := time.Now()
 	log.Printf("[TMUX] 开始强制终止会话 会话名: %s", s.SessionName)
 
-	// 检查服务器是否在运行
-	log.Printf("[TMUX] 检查服务器是否在运行")
-	running, err := s.IsRunning()
+	exists, err := s.SessionExists()
 	if err != nil {
 		log.Printf("[TMUX][错误] 检查服务器状态失败: %v", err)
 		return err
 	}
-	if !running {
-		log.Printf("[TMUX][错误] 服务器未运行: %s", s.SessionName)
-		return fmt.Errorf("服务器未运行: %s", s.SessionName)
+	if !exists {
+		return nil
 	}
 
 	// 使用Command方法终止会话

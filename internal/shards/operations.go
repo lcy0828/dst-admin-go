@@ -29,6 +29,23 @@ const (
 	ActionRestart Action = "restart"
 )
 
+type RuntimeState string
+
+const (
+	RuntimeStopped  RuntimeState = "stopped"
+	RuntimeStarting RuntimeState = "starting"
+	RuntimeRunning  RuntimeState = "running"
+	RuntimeFailed   RuntimeState = "failed"
+	RuntimeUnknown  RuntimeState = "unknown"
+)
+
+type RuntimeStatus struct {
+	State         RuntimeState
+	Code          string
+	Message       string
+	SessionExists bool
+}
+
 type Control interface {
 	IsRunning(context.Context, string, string) (bool, error)
 	Start(context.Context, string, string) error
@@ -51,7 +68,7 @@ type Operations struct {
 func NewOperations(roomCatalog RoomCatalog, control Control) *Operations {
 	return &Operations{
 		rooms: roomCatalog, control: control,
-		pollInterval: 500 * time.Millisecond, startTimeout: 15 * time.Second, stopTimeout: 60 * time.Second,
+		pollInterval: 500 * time.Millisecond, startTimeout: 2 * time.Minute, stopTimeout: 60 * time.Second,
 	}
 }
 
@@ -114,28 +131,47 @@ func (o *Operations) Plan(action Action, roomID string, selectedWorldIDs []strin
 }
 
 func (o *Operations) IsRunning(ctx context.Context, roomName, worldName string) (bool, error) {
-	return o.control.IsRunning(ctx, roomName, worldName)
+	status, err := o.Status(ctx, roomName, worldName)
+	return status.State == RuntimeRunning, err
+}
+
+func (o *Operations) Status(ctx context.Context, roomName, worldName string) (RuntimeStatus, error) {
+	if control, ok := o.control.(interface {
+		Status(context.Context, string, string) (RuntimeStatus, error)
+	}); ok {
+		return control.Status(ctx, roomName, worldName)
+	}
+	running, err := o.control.IsRunning(ctx, roomName, worldName)
+	if err != nil {
+		return RuntimeStatus{State: RuntimeUnknown}, err
+	}
+	if running {
+		return RuntimeStatus{State: RuntimeRunning, SessionExists: true}, nil
+	}
+	return RuntimeStatus{State: RuntimeStopped}, nil
 }
 
 func (o *Operations) execute(ctx context.Context, action Action, roomName, worldName string) (string, error) {
-	running, err := o.control.IsRunning(ctx, roomName, worldName)
+	status, err := o.Status(ctx, roomName, worldName)
 	if err != nil {
 		return "", fmt.Errorf("检查分片状态: %w", err)
 	}
 	switch action {
 	case ActionStart:
-		if running {
+		if status.State == RuntimeRunning {
 			return "分片已在运行", nil
 		}
-		if err := o.control.Start(ctx, roomName, worldName); err != nil {
-			return "", err
+		if status.State != RuntimeStarting {
+			if err := o.control.Start(ctx, roomName, worldName); err != nil {
+				return "", err
+			}
 		}
 		if err := o.waitFor(ctx, roomName, worldName, true, o.startTimeout); err != nil {
 			return "", err
 		}
 		return "分片已启动", nil
 	case ActionStop:
-		if !running {
+		if !status.SessionExists && status.State == RuntimeStopped {
 			return "分片已停止", nil
 		}
 		if err := o.control.Stop(ctx, roomName, worldName); err != nil {
@@ -146,7 +182,7 @@ func (o *Operations) execute(ctx context.Context, action Action, roomName, world
 		}
 		return "分片已停止", nil
 	case ActionRestart:
-		if running {
+		if status.SessionExists || status.State != RuntimeStopped {
 			if err := o.control.Stop(ctx, roomName, worldName); err != nil {
 				return "", err
 			}
@@ -182,11 +218,20 @@ func (o *Operations) waitFor(ctx context.Context, roomName, worldName string, ex
 			}
 			return fmt.Errorf("等待分片%s超时", state)
 		case <-ticker.C:
-			running, err := o.control.IsRunning(ctx, roomName, worldName)
+			status, err := o.Status(ctx, roomName, worldName)
 			if err != nil {
 				return err
 			}
-			if running == expected {
+			if expected && status.State == RuntimeFailed {
+				if status.Message == "" {
+					status.Message = "DST 启动失败，请检查分片日志"
+				}
+				return errors.New(status.Message)
+			}
+			if expected && status.State == RuntimeRunning {
+				return nil
+			}
+			if !expected && status.State == RuntimeStopped && !status.SessionExists {
 				return nil
 			}
 		}

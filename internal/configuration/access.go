@@ -433,8 +433,8 @@ func prepareTokenUpdate(room rooms.Room, roomPath string, request TokenUpdateReq
 	if request.Confirmation != room.Name {
 		return Preview{}, ErrConfirmationNeeded
 	}
-	if strings.ContainsAny(request.Token, "\x00\r\n") || len(request.Token) > 4096 {
-		return Preview{}, &FieldError{Fields: map[string]string{"token": "Token 不能超过 4096 个字符且不能包含换行"}}
+	if err := rooms.ValidateClusterToken(request.Token, true); err != nil {
+		return Preview{}, &FieldError{Fields: map[string]string{"token": err.Error()}}
 	}
 	data, _, _, exists, err := readConfiguration(filepath.Join(roomPath, "cluster_token.txt"), true)
 	if err != nil {

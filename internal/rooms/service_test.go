@@ -43,7 +43,7 @@ func TestCreateDiscoverAdoptAndReadWorlds(t *testing.T) {
 		MaxPlayers:    12,
 		PvP:           true,
 		Password:      "secret",
-		ClusterToken:  "token-value",
+		ClusterToken:  "token-value-12345",
 		IncludeCaves:  true,
 	})
 	if err != nil {

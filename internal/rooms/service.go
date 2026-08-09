@@ -355,8 +355,8 @@ func validateCreateRequest(request CreateRequest) error {
 	if len([]rune(request.Password)) > 64 || strings.ContainsAny(request.Password, "\x00\r\n") {
 		details["password"] = "密码不能超过 64 个字符且不能包含换行"
 	}
-	if len(request.ClusterToken) > 4096 || strings.ContainsRune(request.ClusterToken, '\x00') {
-		details["clusterToken"] = "令牌格式无效"
+	if err := ValidateClusterToken(request.ClusterToken, true); err != nil {
+		details["clusterToken"] = err.Error()
 	}
 	if len(details) > 0 {
 		return &ValidationError{Fields: details}

@@ -43,6 +43,18 @@ func TestResolveMacSteamApplicationLayout(t *testing.T) {
 	}
 }
 
+func TestSteamClientLibraryDirectoryUsesConfiguredPath(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "steamclient.dylib"), []byte("test"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DST_ADMIN_STEAM_CLIENT_LIBRARY_PATH", directory)
+	resolved := SteamClientLibraryDirectory(Layout{Kind: LayoutMac})
+	if resolved != directory {
+		t.Fatalf("library directory = %q", resolved)
+	}
+}
+
 func TestResolveLegacyDedicatedServerApplication(t *testing.T) {
 	root := t.TempDir()
 	app := filepath.Join(root, "dontstarve_dedicated_server_nullrenderer.app")

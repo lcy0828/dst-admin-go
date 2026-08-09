@@ -22,12 +22,23 @@ func (f fakeRooms) Worlds(string) ([]rooms.World, error) {
 
 type fakeControl struct {
 	running map[string]bool
+	status  map[string]RuntimeStatus
 	calls   []string
 	fail    map[string]error
 }
 
 func (f *fakeControl) IsRunning(_ context.Context, room, world string) (bool, error) {
 	return f.running[room+"/"+world], nil
+}
+func (f *fakeControl) Status(_ context.Context, room, world string) (RuntimeStatus, error) {
+	key := room + "/" + world
+	if status, ok := f.status[key]; ok {
+		return status, nil
+	}
+	if f.running[key] {
+		return RuntimeStatus{State: RuntimeRunning, SessionExists: true}, nil
+	}
+	return RuntimeStatus{State: RuntimeStopped}, nil
 }
 func (f *fakeControl) Start(_ context.Context, room, world string) error {
 	key := room + "/" + world
@@ -116,5 +127,23 @@ func TestRequiresAdoptionAndSafeTmuxNames(t *testing.T) {
 	operations.rooms = base
 	if _, _, err := operations.Plan(ActionStart, base.room.ID, nil); err != ErrUnsafeName {
 		t.Fatalf("unsafe room error = %v", err)
+	}
+}
+
+func TestStartReportsRuntimeFailureInsteadOfTmuxSuccess(t *testing.T) {
+	control := &fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}}
+	operations := testOperations(control)
+	operations.pollInterval = time.Millisecond
+	control.status["summer_2026/Master"] = RuntimeStatus{State: RuntimeFailed, SessionExists: true, Message: "Klei 集群令牌已过期或无效"}
+	_, runner, err := operations.Plan(ActionStart, rooms.EncodeID("summer_2026"), []string{rooms.EncodeID("Master")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []jobs.TargetResult
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != jobs.StatusFailed || results[0].Error == nil || results[0].Error.Message != "Klei 集群令牌已过期或无效" {
+		t.Fatalf("results = %#v", results)
 	}
 }

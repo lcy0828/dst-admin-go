@@ -102,11 +102,11 @@ func (h *RoomHandler) requireRoomStopped(c *gin.Context, roomID, selectedWorldID
 		if selectedWorldID != "" && world.ID != selectedWorldID {
 			continue
 		}
-		running, statusErr := h.operations.IsRunning(c.Request.Context(), room.DirectoryName, world.DirectoryName)
+		status, statusErr := h.operations.Status(c.Request.Context(), room.DirectoryName, world.DirectoryName)
 		if statusErr != nil {
 			return statusErr
 		}
-		if running {
+		if status.SessionExists || status.State == shards.RuntimeStarting || status.State == shards.RuntimeRunning {
 			return rooms.ErrWorldRunning
 		}
 	}
@@ -180,17 +180,14 @@ func (h *RoomHandler) worldsList(c *gin.Context) {
 			result = append(result, state)
 			continue
 		}
-		running, statusErr := h.operations.IsRunning(c.Request.Context(), room.DirectoryName, world.DirectoryName)
+		status, statusErr := h.operations.Status(c.Request.Context(), room.DirectoryName, world.DirectoryName)
 		if statusErr != nil {
 			state.StatusMessage = statusErr.Error()
 			result = append(result, state)
 			continue
 		}
-		if running {
-			state.Status = "running"
-		} else {
-			state.Status = "stopped"
-		}
+		state.Status = string(status.State)
+		state.StatusMessage = status.Message
 		result = append(result, state)
 	}
 	Success(c, http.StatusOK, gin.H{"items": result, "total": len(result)})
