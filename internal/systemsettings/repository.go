@@ -34,6 +34,7 @@ var fieldDefinitions = []fieldDefinition{
 	{ID: "mod.steamAppID", Group: "mod", Label: "Steam App ID", Kind: "text", Section: "mod", Key: "APP_ID", Environment: "DST_ADMIN_STEAM_APP_ID", Default: "322330", Required: true, RestartRequired: true},
 	{ID: "mod.steamAPIKey", Group: "mod", Label: "Steam Web API Key", Kind: "secret", Section: "mod", Key: "STEAM_WEB_API_KEY", Environment: "DST_ADMIN_STEAM_API_KEY", Sensitive: true, RestartRequired: true},
 	{ID: "lua.binary", Group: "lua", Label: "外部 Lua 解释器", Kind: "text", Section: "mod", Key: "LUA_BINARY", Environment: "DST_ADMIN_LUA_BINARY", Default: "lua", Required: true, RestartRequired: true},
+	{ID: "lua.pythonBinary", Group: "lua", Label: "Python/Lupa 解释器（可选）", Kind: "text", Section: "mod", Key: "PYTHON_BINARY", Environment: "DST_ADMIN_PYTHON_BINARY", Default: "python3", RestartRequired: true},
 	{ID: "lua.fallback", Group: "lua", Label: "Lua 兼容模块目录（可选）", Kind: "path", Section: "mod", Key: "LUA_SH_PATH", Environment: "DST_ADMIN_LUA_PATH", RestartRequired: true},
 	{ID: "map.renderer", Group: "map", Label: "地图渲染器路径", Kind: "path", Section: "map", Key: "RENDERER_PATH", Environment: "DST_ADMIN_MAP_RENDERER_PATH", RestartRequired: true},
 	{ID: "misc.logLevel", Group: "misc", Label: "日志级别", Kind: "select", Section: "misc", Key: "LOG_LEVEL", Environment: "DST_ADMIN_LOG_LEVEL", Default: "info", Options: []string{"debug", "info", "warn", "error"}, Required: true, RestartRequired: true},
@@ -178,7 +179,7 @@ func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{values: map[string]string{
 		"paths.save": "/srv/dst/saves", "paths.backup": "/srv/dst/backups", "paths.server": "/srv/dst/server", "paths.ugc": "/srv/dst/ugc", "paths.map": "/srv/dst/maps", "paths.serverMode": "64",
 		"mod.steamCMD": "/usr/local/bin/steamcmd", "mod.workshopDownload": "/srv/steam", "mod.workshopContent": "/srv/steam/steamapps/workshop/content/322330", "mod.steamAppID": "322330", "mod.steamAPIKey": "test-steam-api-key",
-		"lua.binary": "lua", "lua.fallback": "/srv/dst/lua", "map.renderer": "/srv/dst/bin/map-renderer", "misc.logLevel": "info",
+		"lua.binary": "lua", "lua.pythonBinary": "python3", "lua.fallback": "/srv/dst/lua", "map.renderer": "/srv/dst/bin/map-renderer", "misc.logLevel": "info",
 	}}
 }
 

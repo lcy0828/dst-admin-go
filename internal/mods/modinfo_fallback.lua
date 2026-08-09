@@ -13,6 +13,7 @@ ChooseTranslationTable = function(translations)
     return translations[selected_locale] or translations.zhr or translations[1]
 end
 modimport = require
+print = function() end
 
 local chunk, load_error = loadfile(modinfo_path)
 if not chunk then
@@ -64,12 +65,16 @@ local function encode(value, visiting, depth)
         return tostring(value)
     elseif kind == "string" then
         return encode_string(value)
-    elseif kind ~= "table" or depth > 100 then
+    elseif kind == "function" then
         return "null"
+    elseif kind ~= "table" then
+        error("unsupported Lua value type: " .. kind)
+    elseif depth > 100 then
+        error("Lua table nesting exceeds 100 levels")
     end
 
     if visiting[value] then
-        return "null"
+        error("cyclic Lua table")
     end
     visiting[value] = true
 
@@ -87,7 +92,16 @@ local function encode(value, visiting, depth)
     for key, item in pairs(value) do
         local key_kind = type(key)
         if key_kind == "string" or key_kind == "number" or key_kind == "boolean" then
-            mapped[tostring(key)] = item
+            if key_kind == "number" and (key ~= key or key == math.huge or key == -math.huge) then
+                error("unsupported non-finite Lua table key")
+            end
+            local mapped_key = tostring(key)
+            if mapped[mapped_key] ~= nil then
+                error("duplicate JSON key after Lua key conversion: " .. mapped_key)
+            end
+            mapped[mapped_key] = item
+        else
+            error("unsupported Lua table key type: " .. key_kind)
         end
     end
     local keys = {}

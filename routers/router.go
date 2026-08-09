@@ -3,6 +3,7 @@ package routers
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -89,6 +90,7 @@ func InitRouter() (*gin.Engine, error) {
 	steamAPIKey := setting.String("mod", "STEAM_WEB_API_KEY", "DST_ADMIN_STEAM_API_KEY")
 	steamAppID := setting.String("mod", "APP_ID", "DST_ADMIN_STEAM_APP_ID")
 	luaBinary := setting.String("mod", "LUA_BINARY", "DST_ADMIN_LUA_BINARY")
+	pythonBinary := setting.String("mod", "PYTHON_BINARY", "DST_ADMIN_PYTHON_BINARY")
 	if steamAppID == "" {
 		steamAppID = "322330"
 	}
@@ -254,7 +256,7 @@ func InitRouter() (*gin.Engine, error) {
 	configurationHandler := httpapi.NewConfigurationHandler(configurationService, jobService)
 	var modMetadata modservice.MetadataProvider = modservice.NewSteamProvider(steamAPIKey, steamAppID)
 	var modRunner modservice.DownloadRunner = modservice.NewSteamCMDRunner(steamCMDPath, workshopDownloadPath, steamAppID)
-	var modParser modservice.ModInfoParser = modservice.NewDualParser(luaBinary, luaFallbackPath)
+	var modParser modservice.ModInfoParser = modservice.NewDualParserWithPython(luaBinary, pythonBinary, luaFallbackPath)
 	if driver := os.Getenv("DST_ADMIN_TEST_MODS"); driver != "" {
 		if os.Getenv("DST_ADMIN_ENV") != "test" || driver != "memory" {
 			return nil, fmt.Errorf("DST_ADMIN_TEST_MODS is only available as memory in the test environment")
@@ -328,6 +330,16 @@ func InitRouter() (*gin.Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	legacyMigration, err := automation.MigrateLegacyCronTasks(models.DB(), tablePrefix, roomService, automationService)
+	if err != nil {
+		return nil, err
+	}
+	if legacyMigration.Examined > 0 {
+		log.Printf("[AutomationMigration] checked=%d migrated=%d existing=%d skipped=%d", legacyMigration.Examined, legacyMigration.Migrated, legacyMigration.Existing, len(legacyMigration.Skipped))
+		for _, skipped := range legacyMigration.Skipped {
+			log.Printf("[AutomationMigration] skipped legacy task id=%d name=%q: %s", skipped.ID, skipped.Name, skipped.Reason)
+		}
+	}
 	automationScheduler := automation.NewScheduler(automationStore, automationService)
 	if os.Getenv("DST_ADMIN_ENV") != "test" {
 		if err := automationScheduler.Start(context.Background()); err != nil {
@@ -380,7 +392,8 @@ func InitRouter() (*gin.Engine, error) {
 	}
 	worldMapHandler := httpapi.NewWorldMapHandler(worldMapService, jobService)
 	capabilityConfig := capabilities.Config{
-		SavePath: savePath, BackupPath: backupPath, ServerPath: serverPath, ServerMode: serverMode, SteamCMDPath: steamCMDPath, LuaFallbackPath: luaFallbackPath,
+		SavePath: savePath, BackupPath: backupPath, ServerPath: serverPath, ServerMode: serverMode, SteamCMDPath: steamCMDPath,
+		LuaBinary: luaBinary, PythonBinary: pythonBinary, LuaFallbackPath: luaFallbackPath,
 		MapRendererPath: mapRendererPath, MapPath: mapPath,
 	}
 	idempotencyStore := httpapi.NewIdempotencyStore(15*time.Minute, 2048)

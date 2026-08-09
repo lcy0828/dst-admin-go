@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -70,4 +71,26 @@ func TestConfiguredMacDeploymentProbe(t *testing.T) {
 		t.Fatalf("macOS Steam update policy is incorrect: %#v", check.Details)
 	}
 	t.Logf("macOS deployment ready: executable=%s tmux=%s steamcmd=%s", check.Details["executable"], report.Tools["tmux"].Path, report.Tools["steamcmd"].Path)
+}
+
+func TestLuaFallbackCheckUsesInterpreterConfigAndDiagnosesMissingModulePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test adapter is POSIX-only")
+	}
+	root := t.TempDir()
+	luaBinary := filepath.Join(root, "lua-test")
+	if err := os.WriteFile(luaBinary, []byte("#!/bin/sh\nprintf 'Lua test'\n"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	missingModules := filepath.Join(root, "missing-modules")
+	config := Config{LuaBinary: luaBinary, LuaFallbackPath: missingModules}
+	report := Probe(config)
+	tool := report.Tools["luaFallback"]
+	if !tool.Available || tool.Path != luaBinary || tool.Kind != "lua" {
+		t.Fatalf("configured Lua was not reported: %#v", tool)
+	}
+	check := luaFallbackCheck(config, tool)
+	if check.Status != CheckWarning || !strings.Contains(check.Summary, "模块目录不存在") || check.Details["modulePathAvailable"] != false {
+		t.Fatalf("missing optional module directory was not diagnosed: %#v", check)
+	}
 }

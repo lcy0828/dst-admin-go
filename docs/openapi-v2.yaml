@@ -2620,6 +2620,14 @@ components:
           type: boolean
         path:
           type: string
+        kind:
+          type: string
+        source:
+          type: string
+        version:
+          type: string
+        diagnostic:
+          type: string
     PathCapability:
       type: object
       required: [configured, exists, writable]

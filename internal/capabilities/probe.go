@@ -7,11 +7,16 @@ import (
 	"strings"
 
 	dstinstall "dont/internal/dstserver"
+	"dont/internal/modruntime"
 )
 
 type Tool struct {
-	Available bool   `json:"available"`
-	Path      string `json:"path,omitempty"`
+	Available  bool   `json:"available"`
+	Path       string `json:"path,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	Source     string `json:"source,omitempty"`
+	Version    string `json:"version,omitempty"`
+	Diagnostic string `json:"diagnostic,omitempty"`
 }
 
 type Path struct {
@@ -35,6 +40,8 @@ type Config struct {
 	ServerPath      string
 	ServerMode      string
 	SteamCMDPath    string
+	LuaBinary       string
+	PythonBinary    string
 	LuaFallbackPath string
 	MapRendererPath string
 	MapPath         string
@@ -42,11 +49,16 @@ type Config struct {
 
 func Probe(config Config) Report {
 	tmux := findTool("tmux", "")
-	lua := findTool("lua", config.LuaFallbackPath)
+	fallbackDiscovery := modruntime.Discover(config.LuaBinary, config.PythonBinary)
+	fallback := fallbackTool(fallbackDiscovery)
 	docker := findTool("docker", "")
 	steamcmd := findTool("steamcmd", config.SteamCMDPath)
 	mapRenderer := findTool("dst-map-renderer", config.MapRendererPath)
-	_, serverAvailable := dstinstall.Resolve(config.ServerPath, config.ServerMode)
+	layout, serverAvailable := dstinstall.Resolve(config.ServerPath, config.ServerMode)
+	steamClientLibrary := Tool{}
+	if directory := dstinstall.SteamClientLibraryDirectory(layout); directory != "" {
+		steamClientLibrary = Tool{Available: true, Path: directory}
+	}
 	paths := map[string]Path{
 		"saves":   inspectPath(config.SavePath),
 		"backups": inspectPath(config.BackupPath),
@@ -57,19 +69,43 @@ func Probe(config Config) Report {
 		Platform: runtime.GOOS,
 		Arch:     runtime.GOARCH,
 		Tools: map[string]Tool{
-			"tmux": tmux, "luaFallback": lua, "docker": docker, "steamcmd": steamcmd, "mapRenderer": mapRenderer,
+			"tmux": tmux, "luaFallback": fallback, "docker": docker, "steamcmd": steamcmd, "mapRenderer": mapRenderer, "steamClientLibrary": steamClientLibrary,
 		},
 		Paths: paths,
 		Features: map[string]bool{
 			"embeddedLuaParser":   true,
-			"externalLuaFallback": lua.Available,
+			"externalLuaFallback": containsRuntime(fallbackDiscovery, modruntime.KindLua),
+			"pythonLupaFallback":  fallbackDiscovery.PythonLupa,
+			"modFallback":         fallback.Available,
 			"localShardControl":   tmux.Available && serverAvailable,
 			"backupRestore":       paths["saves"].Exists && paths["backups"].Configured,
 			"dockerControl":       docker.Available,
 			"agentControl":        true,
 			"mapGeneration":       mapRenderer.Available && paths["maps"].Configured,
+			"macSteamIntegration": layout.Kind != dstinstall.LayoutMac || steamClientLibrary.Available,
 		},
 	}
+}
+
+func fallbackTool(discovery modruntime.Discovery) Tool {
+	tool := Tool{Diagnostic: discovery.Diagnostic()}
+	if runtime, ok := discovery.Primary(); ok {
+		tool.Available = true
+		tool.Path = runtime.Path
+		tool.Kind = string(runtime.Kind)
+		tool.Source = runtime.Source
+		tool.Version = runtime.Version
+	}
+	return tool
+}
+
+func containsRuntime(discovery modruntime.Discovery, kind modruntime.Kind) bool {
+	for _, runtime := range discovery.Runtimes {
+		if runtime.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func findTool(name, configuredPath string) Tool {

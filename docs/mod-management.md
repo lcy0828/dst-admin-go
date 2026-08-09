@@ -25,7 +25,8 @@
 | `DST_ADMIN_WORKSHOP_CONTENT` | Workshop content 的 App 目录 | `/opt/dst/workshop/steamapps/workshop/content/322330` |
 | `DST_ADMIN_STEAM_APP_ID` | Workshop consumer App ID | `322330` |
 | `DST_ADMIN_STEAM_API_KEY` | Steam Web API Key；名称搜索和完整依赖元数据需要 | secret |
-| `DST_ADMIN_LUA_BINARY` | 外部 Lua fallback 可执行文件 | `/usr/bin/lua` |
+| `DST_ADMIN_LUA_BINARY` | 外部 Lua fallback 可执行文件；留空或使用默认 `lua` 时会继续自动发现版本化命令和标准安装目录 | `/usr/bin/lua` |
+| `DST_ADMIN_PYTHON_BINARY` | 可选 Python/Lupa fallback；仅在外部 Lua 不可用或执行失败后使用 | `/opt/dst-admin/venv/bin/python3` |
 | `DST_ADMIN_LUA_PATH` | 可选的 Lua/C 兼容模块搜索目录；fallback helper 已内嵌，不再要求 `modgetinfo.lua` | `/opt/dst-admin/lua-modules` |
 
 `DST_ADMIN_TEST_MODS=memory` 只允许在 `DST_ADMIN_ENV=test` 中使用。生产环境设置该变量会导致启动失败，不能使用测试元数据或伪下载器替代 Steam。
@@ -49,18 +50,23 @@
 - 空结果、循环表、无法无损映射的表键和重复 JSON 键都视为主解析失败并进入 fallback，不能静默丢字段。
 - `package.loaded`、循环 `require` 和符号链接逃逸均有明确处理；模块路径越出当前 Mod 目录会被拒绝。
 
-Go 解析失败时才调用外部 Lua fallback：
+Go 解析失败时才进入兼容 fallback，顺序固定为外部 Lua、Python/Lupa：
 
 - fallback helper 通过 `go:embed` 随 Go 二进制发布，并从标准输入交给配置的 Lua 解释器执行；部署不再依赖外置 helper 脚本。
+- `DST_ADMIN_LUA_BINARY` 显式路径优先；否则自动发现 `lua`、`lua5.5` 至 `lua5.1`、`luajit`，并检查 macOS Homebrew 等标准安装目录，不硬编码用户主目录。
+- 外部 Lua 不存在或执行失败时，可使用 `DST_ADMIN_PYTHON_BINARY` 指向已安装 `lupa` 的独立 Python 环境；Python 适配器同样内嵌，不复用参考项目中包含 Steam 网络访问的脚本。
 - 使用参数数组启动 Lua 二进制；Mod 路径和 ID 通过固定环境变量传入，不拼接 shell。
 - 固定最小环境变量和受控 `LUA_PATH`/`LUA_CPATH`。
 - 可选 `DST_ADMIN_LUA_PATH` 只扩展 Lua/C 模块搜索目录，不决定 helper 来源。
 - helper 提供 `locale`、`folder_name`、`ChooseTranslationTable` 和 `modimport`，使用纯 Lua 生成 JSON。
+- Python/Lupa 适配器遇到循环表、超过 100 层、不可表示的键或键转换冲突时会明确失败，不会静默丢字段后宣称兼容。
 - 8 秒超时；stdout 上限 8 MiB，stderr 独立限制为 16 KiB；只接受唯一、非空 JSON 对象。
 - 返回前会脱敏本地 Mod 路径及疑似 key、token、password、secret 内容。
 - API 返回 `parser`、`fallbackUsed`、`fallbackReason` 和 `warnings`，前端明确显示兼容路径。
 
 外部 Lua 提供最高兼容性，但仍会执行第三方 Mod 代码。生产部署应使用低权限专用系统用户，并限制该用户对存档、服务端和网络的权限。gopher-lua 是安全优先的主路径，外部 Lua 是兼容性 fallback，不应调换顺序。
+
+部署检查会返回实际选中的 fallback 类型、绝对路径、发现来源、版本和缺失原因。macOS 未发现运行时时会明确提示 `brew install lua`；系统不会自动安装 Lua、Python 包或修改全局环境。`DST_ADMIN_LUA_PATH` 只是可选模块搜索目录，缺失时会单独告警，但内嵌 helper 不依赖它。
 
 ### 4.1 真实服务器兼容矩阵
 

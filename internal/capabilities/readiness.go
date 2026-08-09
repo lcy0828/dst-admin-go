@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	dstinstall "dont/internal/dstserver"
@@ -44,9 +45,12 @@ func ProbeReadiness(config Config, countRooms RoomCounter) Readiness {
 		toolCheck("tmux", "tmux 运行控制", report.Tools["tmux"], true, "安装 tmux 后才能在本机启动和停止分片"),
 		serverExecutableCheck(config.ServerPath, config.ServerMode),
 		toolCheck("steamcmd", "SteamCMD", report.Tools["steamcmd"], false, "配置 SteamCMD 后才能执行游戏更新和 Workshop 下载"),
-		toolCheck("luaFallback", "外部 Lua 回退", report.Tools["luaFallback"], false, "安装 Lua 可在内嵌解析器遇到兼容问题时自动回退"),
+		luaFallbackCheck(config, report.Tools["luaFallback"]),
 		toolCheck("mapRenderer", "地图渲染器", report.Tools["mapRenderer"], false, "配置 dst-map-renderer 后可生成分层地图；Session 诊断下载不受影响"),
 		diskCheck(config.SavePath),
+	}
+	if check, relevant := macSteamRuntimeCheck(config.ServerPath, config.ServerMode); relevant {
+		checks = append(checks, check)
 	}
 	roomCheck := Check{ID: "rooms", Label: "已有房间", Required: false, Status: CheckPass, Summary: "未发现已有房间，可直接创建新房间"}
 	if countRooms != nil {
@@ -69,6 +73,76 @@ func ProbeReadiness(config Config, countRooms RoomCounter) Readiness {
 		}
 	}
 	return Readiness{Ready: ready, Checks: checks}
+}
+
+func luaFallbackCheck(config Config, tool Tool) Check {
+	check := Check{
+		ID: "luaFallback", Label: "Mod 兼容 fallback", Required: false,
+		Details: map[string]interface{}{
+			"configuredLuaBinary": config.LuaBinary, "configuredPythonBinary": config.PythonBinary,
+			"modulePath": strings.TrimSpace(config.LuaFallbackPath), "diagnostic": tool.Diagnostic,
+		},
+	}
+	if tool.Available {
+		check.Status = CheckPass
+		check.Summary = "兼容 fallback 可用（" + tool.Kind + "）"
+		check.Details["path"] = tool.Path
+		check.Details["source"] = tool.Source
+		check.Details["version"] = tool.Version
+	} else {
+		check.Status = CheckWarning
+		check.Summary = "未发现外部 fallback；Go 主解析器仍可用"
+		check.Remediation = fallbackRemediation()
+	}
+
+	modulePath := strings.TrimSpace(config.LuaFallbackPath)
+	if modulePath == "" {
+		check.Details["modulePathConfigured"] = false
+		return check
+	}
+	check.Details["modulePathConfigured"] = true
+	info, err := os.Stat(modulePath)
+	moduleAvailable := err == nil && info.IsDir()
+	check.Details["modulePathAvailable"] = moduleAvailable
+	if moduleAvailable {
+		return check
+	}
+	if tool.Available {
+		check.Status = CheckWarning
+		check.Summary = "解释器可用，但可选 Lua 兼容模块目录不存在"
+	}
+	moduleRemediation := "清空 DST_ADMIN_LUA_PATH，或将它指向确实存在的 Lua/C 模块目录；内嵌 fallback helper 不依赖该目录"
+	if check.Remediation == "" {
+		check.Remediation = moduleRemediation
+	} else {
+		check.Remediation += "；" + moduleRemediation
+	}
+	return check
+}
+
+func fallbackRemediation() string {
+	if runtime.GOOS == "darwin" {
+		return "安装 Homebrew Lua（brew install lua），或为独立 Python 环境安装 Lupa 并通过 DST_ADMIN_PYTHON_BINARY 指定解释器"
+	}
+	return "安装 Lua 并通过 DST_ADMIN_LUA_BINARY 指定解释器，或为独立 Python 环境安装 Lupa 并配置 DST_ADMIN_PYTHON_BINARY"
+}
+
+func macSteamRuntimeCheck(serverPath, serverMode string) (Check, bool) {
+	layout, ok := dstinstall.Resolve(serverPath, serverMode)
+	if !ok || layout.Kind != dstinstall.LayoutMac {
+		return Check{}, false
+	}
+	check := Check{ID: "steamClientLibrary", Label: "macOS Steam 运行库", Required: false}
+	if directory := dstinstall.SteamClientLibraryDirectory(layout); directory != "" {
+		check.Status = CheckPass
+		check.Summary = "steamclient.dylib 可用"
+		check.Details = map[string]interface{}{"path": directory}
+		return check, true
+	}
+	check.Status = CheckWarning
+	check.Summary = "未找到 steamclient.dylib"
+	check.Remediation = "启动 Steam 客户端，或通过 DST_ADMIN_STEAM_CLIENT_LIBRARY_PATH 配置动态库目录"
+	return check, true
 }
 
 func pathCheck(id, label string, path Path, required bool) Check {
@@ -167,14 +241,14 @@ func diskCheck(savePath string) Check {
 		"path": probePath, "freeBytes": usage.Free, "totalBytes": usage.Total, "usedPercent": usage.UsedPercent,
 	}
 	switch {
-	case usage.Free < 2*gib:
+	case usage.Free < 2*gib || usage.UsedPercent >= 95:
 		check.Status = CheckFail
-		check.Summary = "剩余空间低于 2 GiB"
+		check.Summary = "磁盘空间已达到危险阈值"
 		check.Remediation = "清理磁盘或迁移存档后再执行开服、更新和备份"
-	case usage.Free < 10*gib:
+	case usage.Free < 10*gib || usage.UsedPercent >= 80:
 		check.Status = CheckWarning
-		check.Summary = "剩余空间低于 10 GiB"
-		check.Remediation = "建议先清理旧日志和备份"
+		check.Summary = "磁盘使用率较高"
+		check.Remediation = "建议清理旧日志和备份，并保持至少 20% 可用空间"
 	default:
 		check.Status = CheckPass
 		check.Summary = "磁盘空间充足"

@@ -18,6 +18,8 @@ import (
 	"time"
 	"unicode"
 
+	"dont/internal/modruntime"
+
 	lua "github.com/yuin/gopher-lua"
 )
 
@@ -34,20 +36,28 @@ var parserSecretPattern = regexp.MustCompile(`(?i)\b(api[_ -]?key|token|password
 //go:embed modinfo_fallback.lua
 var externalModInfoHelper string
 
+//go:embed modinfo_fallback.py
+var pythonModInfoHelper string
+
 type ModInfoParser interface {
 	Parse(context.Context, string, string) (ParserResult, error)
 }
 
 type DualParser struct {
-	LuaBinary string
-	HelperDir string
+	LuaBinary    string
+	PythonBinary string
+	HelperDir    string
 }
 
 func NewDualParser(luaBinary, helperDir string) *DualParser {
-	if strings.TrimSpace(luaBinary) == "" {
-		luaBinary = "lua"
+	return NewDualParserWithPython(luaBinary, "", helperDir)
+}
+
+func NewDualParserWithPython(luaBinary, pythonBinary, helperDir string) *DualParser {
+	return &DualParser{
+		LuaBinary: strings.TrimSpace(luaBinary), PythonBinary: strings.TrimSpace(pythonBinary),
+		HelperDir: strings.TrimSpace(helperDir),
 	}
-	return &DualParser{LuaBinary: luaBinary, HelperDir: strings.TrimSpace(helperDir)}
 }
 
 func (p *DualParser) Parse(ctx context.Context, modID, modInfoPath string) (ParserResult, error) {
@@ -57,10 +67,10 @@ func (p *DualParser) Parse(ctx context.Context, modID, modInfoPath string) (Pars
 	if embeddedErr == nil {
 		return ParserResult{Values: values, Parser: "go", Warnings: []string{}}, nil
 	}
-	values, fallbackErr := p.parseExternal(ctx, modID, modInfoPath)
+	values, fallbackRuntime, fallbackErr := p.parseFallback(ctx, modID, modInfoPath)
 	if fallbackErr != nil {
 		return ParserResult{}, fmt.Errorf(
-			"modinfo compatibility parsing failed: embedded: %s; external Lua: %s",
+			"modinfo compatibility parsing failed: embedded: %s; fallback: %s",
 			sanitizeParserErrorForPath(embeddedErr, modInfoPath),
 			sanitizeParserErrorForPath(fallbackErr, modInfoPath),
 		)
@@ -68,7 +78,7 @@ func (p *DualParser) Parse(ctx context.Context, modID, modInfoPath string) (Pars
 	reason := sanitizeParserErrorForPath(embeddedErr, modInfoPath)
 	return ParserResult{
 		Values: values, Parser: "lua", FallbackUsed: true, FallbackReason: reason,
-		Warnings: []string{"Go 主解析器不兼容此 Mod，已使用外部 Lua fallback"},
+		Warnings: []string{fmt.Sprintf("Go 主解析器不兼容此 Mod，已使用 %s fallback", fallbackRuntime)},
 	}, nil
 }
 
@@ -311,15 +321,71 @@ func parserLuaKey(value lua.LValue) (string, error) {
 }
 
 func (p *DualParser) parseExternal(ctx context.Context, modID, modInfoPath string) (map[string]interface{}, error) {
+	values, _, err := p.parseFallback(ctx, modID, modInfoPath)
+	return values, err
+}
+
+func (p *DualParser) parseFallback(ctx context.Context, modID, modInfoPath string) (map[string]interface{}, string, error) {
+	discovery := modruntime.Discover(p.LuaBinary, p.PythonBinary)
+	if len(discovery.Runtimes) == 0 {
+		return nil, "", errors.New(discovery.Diagnostic())
+	}
+	failures := make([]string, 0, len(discovery.Runtimes))
+	for _, runtime := range discovery.Runtimes {
+		var values map[string]interface{}
+		var err error
+		switch runtime.Kind {
+		case modruntime.KindLua:
+			values, err = p.parseExternalLua(ctx, runtime.Path, modID, modInfoPath)
+		case modruntime.KindPythonLupa:
+			values, err = p.parseExternalPython(ctx, runtime.Path, modID, modInfoPath)
+		default:
+			continue
+		}
+		if err == nil {
+			return values, fallbackRuntimeLabel(runtime.Kind), nil
+		}
+		failures = append(failures, fmt.Sprintf("%s (%s): %v", runtime.Kind, runtime.Path, err))
+	}
+	return nil, "", errors.New(strings.Join(failures, "; "))
+}
+
+func fallbackRuntimeLabel(kind modruntime.Kind) string {
+	if kind == modruntime.KindPythonLupa {
+		return "Python/Lupa"
+	}
+	return "外部 Lua"
+}
+
+func (p *DualParser) parseExternalLua(ctx context.Context, binary, modID, modInfoPath string) (map[string]interface{}, error) {
 	modInfoAbs, err := safeRegularFile(modInfoPath)
 	if err != nil {
 		return nil, err
 	}
 	externalCtx, cancel := context.WithTimeout(ctx, externalParserTimeout)
 	defer cancel()
-	command := exec.CommandContext(externalCtx, p.LuaBinary, "-")
+	command := exec.CommandContext(externalCtx, binary, "-")
 	command.Dir = filepath.Dir(modInfoAbs)
 	command.Stdin = strings.NewReader(externalModInfoHelper)
+	command.Env = p.fallbackEnvironment(binary, modID, modInfoAbs)
+	return runFallbackCommand(externalCtx, command, "external Lua")
+}
+
+func (p *DualParser) parseExternalPython(ctx context.Context, binary, modID, modInfoPath string) (map[string]interface{}, error) {
+	modInfoAbs, err := safeRegularFile(modInfoPath)
+	if err != nil {
+		return nil, err
+	}
+	externalCtx, cancel := context.WithTimeout(ctx, externalParserTimeout)
+	defer cancel()
+	command := exec.CommandContext(externalCtx, binary, "-")
+	command.Dir = filepath.Dir(modInfoAbs)
+	command.Stdin = strings.NewReader(pythonModInfoHelper)
+	command.Env = p.fallbackEnvironment(binary, modID, modInfoAbs)
+	return runFallbackCommand(externalCtx, command, "Python/Lupa")
+}
+
+func (p *DualParser) fallbackEnvironment(binary, modID, modInfoAbs string) []string {
 	modulePaths := []string{
 		filepath.ToSlash(filepath.Join(filepath.Dir(modInfoAbs), "?.lua")),
 		filepath.ToSlash(filepath.Join(filepath.Dir(modInfoAbs), "?", "init.lua")),
@@ -335,23 +401,44 @@ func (p *DualParser) parseExternal(ctx context.Context, modID, modInfoPath strin
 			filepath.ToSlash(filepath.Join(p.HelperDir, "luaclib", "?.so")),
 		)
 	}
-	command.Env = []string{
+	pathDirectories := []string{filepath.Dir(binary), "/usr/local/bin", "/usr/bin", "/bin"}
+	if filepath.Clean(filepath.Dir(binary)) != "/opt/homebrew/bin" {
+		pathDirectories = append([]string{"/opt/homebrew/bin"}, pathDirectories...)
+	}
+	return []string{
 		"LANG=C.UTF-8",
 		"LC_ALL=C.UTF-8",
-		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"PATH=" + strings.Join(uniquePathDirectories(pathDirectories), string(os.PathListSeparator)),
 		"DST_MODINFO_PATH=" + modInfoAbs,
 		"DST_MODINFO_ID=" + modID,
 		"DST_MODINFO_LOCALE=zh",
 		"LUA_PATH=" + strings.Join(modulePaths, ";") + ";;",
 		"LUA_CPATH=" + strings.Join(cModulePaths, ";") + ";;",
 	}
+}
+
+func uniquePathDirectories(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = filepath.Clean(strings.TrimSpace(value))
+		if value == "." || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+func runFallbackCommand(externalCtx context.Context, command *exec.Cmd, label string) (map[string]interface{}, error) {
 	output := &limitedBuffer{limit: maxParserOutputBytes}
 	diagnostics := &limitedBuffer{limit: maxParserErrorBytes}
 	command.Stdout = output
 	command.Stderr = diagnostics
 	if err := command.Run(); err != nil {
 		if errors.Is(externalCtx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("external Lua timed out after %s", externalParserTimeout)
+			return nil, fmt.Errorf("%s timed out after %s", label, externalParserTimeout)
 		}
 		if errors.Is(externalCtx.Err(), context.Canceled) {
 			return nil, context.Canceled
@@ -361,28 +448,28 @@ func (p *DualParser) parseExternal(ctx context.Context, modID, modInfoPath strin
 			message += " [diagnostic truncated]"
 		}
 		if message == "" {
-			return nil, fmt.Errorf("run external Lua: %w", err)
+			return nil, fmt.Errorf("run %s: %w", label, err)
 		}
-		return nil, fmt.Errorf("run external Lua: %w: %s", err, message)
+		return nil, fmt.Errorf("run %s: %w: %s", label, err, message)
 	}
 	if output.truncated {
-		return nil, errors.New("external Lua output exceeded 8 MiB")
+		return nil, fmt.Errorf("%s output exceeded 8 MiB", label)
 	}
 	var values map[string]interface{}
 	decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
 	decoder.UseNumber()
 	if err := decoder.Decode(&values); err != nil {
-		return nil, fmt.Errorf("decode external Lua output: %w", err)
+		return nil, fmt.Errorf("decode %s output: %w", label, err)
 	}
 	var trailing interface{}
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return nil, errors.New("external Lua output contains more than one JSON value")
+			return nil, fmt.Errorf("%s output contains more than one JSON value", label)
 		}
-		return nil, fmt.Errorf("external Lua output has trailing data: %w", err)
+		return nil, fmt.Errorf("%s output has trailing data: %w", label, err)
 	}
 	if len(values) == 0 {
-		return nil, errors.New("external Lua produced an empty JSON object")
+		return nil, fmt.Errorf("%s produced an empty JSON object", label)
 	}
 	return values, nil
 }
