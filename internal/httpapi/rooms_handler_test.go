@@ -152,6 +152,29 @@ func TestRoomAndShardJobHTTPFlow(t *testing.T) {
 		t.Fatalf("job response = %s", response.Body.String())
 	}
 
+	response = performJSON(router, http.MethodPost, "/api/v2/rooms/"+roomID+"/actions/stop", map[string]interface{}{}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	stopJobID, _ := responseData(t, response)["id"].(string)
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		job, err := jobService.Get(stopJobID)
+		if err == nil && job.Status == jobs.StatusSucceeded {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	response = performJSON(router, http.MethodDelete, "/api/v2/rooms/"+roomID, map[string]interface{}{
+		"confirmation": "wrong",
+	}, nil, "")
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+	response = performJSON(router, http.MethodDelete, "/api/v2/rooms/"+roomID, map[string]interface{}{
+		"confirmation": "周末服",
+	}, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if responseData(t, response)["recoveryName"] == "" {
+		t.Fatalf("delete room response missing recovery path: %s", response.Body.String())
+	}
+
 	response = performJSON(router, http.MethodGet, "/api/v2/rooms/not-base64", nil, nil, "")
 	assertStatus(t, response, http.StatusBadRequest)
 }

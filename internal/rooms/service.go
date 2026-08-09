@@ -40,6 +40,15 @@ type DeleteWorldRequest struct {
 	Confirmation string `json:"confirmation"`
 }
 
+type DeleteRoomRequest struct {
+	Confirmation string `json:"confirmation"`
+}
+
+type DeleteRoomResult struct {
+	Room         Room   `json:"room"`
+	RecoveryName string `json:"recoveryName"`
+}
+
 type DeleteWorldResult struct {
 	World        World  `json:"world"`
 	RecoveryName string `json:"recoveryName"`
@@ -187,6 +196,45 @@ func (s *Service) CreateWorld(roomID string, request CreateWorldRequest) (World,
 		return World{}, fmt.Errorf("publish world directory: %w", err)
 	}
 	return s.catalog.World(roomID, EncodeID(request.DirectoryName))
+}
+
+func (s *Service) DeleteRoom(roomID string, request DeleteRoomRequest) (DeleteRoomResult, error) {
+	s.worldMu.Lock()
+	defer s.worldMu.Unlock()
+
+	room, err := s.catalog.Room(roomID)
+	if err != nil {
+		return DeleteRoomResult{}, err
+	}
+	if !room.Managed {
+		return DeleteRoomResult{}, ErrRoomNotManaged
+	}
+	if request.Confirmation != room.Name {
+		return DeleteRoomResult{}, ErrConfirmation
+	}
+	source := filepath.Join(s.catalog.root, room.DirectoryName)
+	trashRoot := filepath.Join(s.catalog.root, ".dst-admin-trash")
+	if err := ensureContained(s.catalog.root, source); err != nil {
+		return DeleteRoomResult{}, err
+	}
+	if err := os.MkdirAll(trashRoot, 0750); err != nil {
+		return DeleteRoomResult{}, fmt.Errorf("create room recovery directory: %w", err)
+	}
+	trashName := strconv.FormatInt(time.Now().UnixNano(), 10) + "-" + room.DirectoryName
+	target := filepath.Join(trashRoot, trashName)
+	if err := os.Rename(source, target); err != nil {
+		return DeleteRoomResult{}, fmt.Errorf("move room to recovery directory: %w", err)
+	}
+	if err := s.store.Unadopt(room.ID); err != nil {
+		if rollbackErr := os.Rename(target, source); rollbackErr != nil {
+			return DeleteRoomResult{}, fmt.Errorf("%w; restore room directory: %v", err, rollbackErr)
+		}
+		return DeleteRoomResult{}, err
+	}
+	return DeleteRoomResult{
+		Room:         room,
+		RecoveryName: filepath.Join(".dst-admin-trash", trashName),
+	}, nil
 }
 
 func (s *Service) DeleteWorld(roomID, worldID string, request DeleteWorldRequest) (DeleteWorldResult, error) {

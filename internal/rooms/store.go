@@ -54,3 +54,10 @@ func (s *Store) Adopt(room Room) error {
 	}
 	return nil
 }
+
+func (s *Store) Unadopt(roomID string) error {
+	if err := s.db.Table(s.table).Where("room_id = ?", roomID).Delete(&managedRoomRecord{}).Error; err != nil {
+		return fmt.Errorf("unadopt room: %w", err)
+	}
+	return nil
+}

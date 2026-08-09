@@ -143,6 +143,33 @@ func TestCreateAndRecoverablyDeleteWorld(t *testing.T) {
 	}
 }
 
+func TestRecoverablyDeleteRoom(t *testing.T) {
+	service, root := newTestService(t)
+	room, err := service.Create(CreateRequest{
+		DirectoryName: "room_delete", Name: "待删除房间", GameMode: "survival", MaxPlayers: 6, IncludeCaves: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.DeleteRoom(room.ID, DeleteRoomRequest{Confirmation: "wrong"}); !errors.Is(err, ErrConfirmation) {
+		t.Fatalf("delete confirmation error = %v", err)
+	}
+	deleted, err := service.DeleteRoom(room.ID, DeleteRoomRequest{Confirmation: room.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Room(room.ID); !errors.Is(err, ErrRoomNotFound) {
+		t.Fatalf("deleted room is still discoverable: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(root, deleted.RecoveryName)); err != nil || !info.IsDir() {
+		t.Fatalf("room recovery directory missing: %v", err)
+	}
+	managed, err := service.store.IsManaged(room.ID)
+	if err != nil || managed {
+		t.Fatalf("deleted room is still managed: managed=%v err=%v", managed, err)
+	}
+}
+
 func TestRejectsTraversalNonCanonicalIDsAndEscapingSymlinks(t *testing.T) {
 	service, root := newTestService(t)
 	badID := EncodeID("../outside")

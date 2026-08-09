@@ -27,11 +27,30 @@ func (h *RoomHandler) Register(v2 *gin.RouterGroup) {
 	group.GET("", h.list)
 	group.POST("", h.create)
 	group.GET("/:roomId", h.get)
+	group.DELETE("/:roomId", h.deleteRoom)
 	group.POST("/:roomId/adopt", h.adopt)
 	group.GET("/:roomId/worlds", h.worldsList)
 	group.POST("/:roomId/worlds", h.createWorld)
 	group.DELETE("/:roomId/worlds/:worldId", h.deleteWorld)
 	group.POST("/:roomId/actions/:action", h.action)
+}
+
+func (h *RoomHandler) deleteRoom(c *gin.Context) {
+	var request rooms.DeleteRoomRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的删除确认", nil)
+		return
+	}
+	if err := h.requireRoomStopped(c, c.Param("roomId"), ""); err != nil {
+		roomFailure(c, err)
+		return
+	}
+	result, err := h.rooms.DeleteRoom(c.Param("roomId"), request)
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, result)
 }
 
 func (h *RoomHandler) createWorld(c *gin.Context) {
