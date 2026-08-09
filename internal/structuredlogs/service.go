@@ -266,20 +266,9 @@ func (s *Service) normalizeFilter(roomID string, filter ListFilter) (ListFilter,
 }
 
 func (s *Service) rules(roomID string) ([]compiledRule, error) {
-	rules, err := s.store.Rules(roomID)
+	rules, err := s.ensureRulesInitialized(roomID)
 	if err != nil {
 		return nil, err
-	}
-	if len(rules) == 0 {
-		for _, rule := range defaultRules(roomID) {
-			if _, err := s.store.CreateRule(rule); err != nil {
-				return nil, err
-			}
-		}
-		rules, err = s.store.Rules(roomID)
-		if err != nil {
-			return nil, err
-		}
 	}
 	compiled := make([]compiledRule, 0, len(rules))
 	for _, rule := range rules {
@@ -294,6 +283,17 @@ func (s *Service) rules(roomID string) ([]compiledRule, error) {
 	}
 	sort.SliceStable(compiled, func(i, j int) bool { return compiled[i].rule.Priority > compiled[j].rule.Priority })
 	return compiled, nil
+}
+
+func (s *Service) ensureRulesInitialized(roomID string) ([]Rule, error) {
+	rules, err := s.store.Rules(roomID)
+	if err != nil || len(rules) > 0 {
+		return rules, err
+	}
+	if _, err := s.store.CreateRules(defaultRules(roomID)); err != nil {
+		return nil, err
+	}
+	return s.store.Rules(roomID)
 }
 
 func (s *Service) lock(key string) *sync.Mutex {

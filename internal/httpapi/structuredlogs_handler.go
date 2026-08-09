@@ -24,6 +24,8 @@ type StructuredLogService interface {
 	UpdateRule(string, string, structuredlogs.RuleInput) (structuredlogs.Rule, error)
 	DeleteRule(string, string) error
 	TestRule(string, structuredlogs.RuleTestInput) (structuredlogs.RuleTestResult, error)
+	PreviewRuleMigration(string) (structuredlogs.RuleMigrationPreview, error)
+	MigrateLegacyRules(string) (structuredlogs.RuleMigrationResult, error)
 }
 
 type StructuredLogHandler struct {
@@ -46,6 +48,8 @@ func (h *StructuredLogHandler) Register(v2 *gin.RouterGroup) {
 	rules.PUT("/:ruleId", h.updateRule)
 	rules.DELETE("/:ruleId", h.deleteRule)
 	rules.POST("/actions/test", h.testRule)
+	rules.GET("/migration-preview", h.previewRuleMigration)
+	rules.POST("/actions/migrate-legacy", h.migrateLegacyRules)
 }
 
 func (h *StructuredLogHandler) clear(c *gin.Context) {
@@ -160,6 +164,24 @@ func (h *StructuredLogHandler) testRule(c *gin.Context) {
 		return
 	}
 	value, err := h.logs.TestRule(c.Param("roomId"), input)
+	if err != nil {
+		structuredLogFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
+}
+
+func (h *StructuredLogHandler) previewRuleMigration(c *gin.Context) {
+	value, err := h.logs.PreviewRuleMigration(c.Param("roomId"))
+	if err != nil {
+		structuredLogFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
+}
+
+func (h *StructuredLogHandler) migrateLegacyRules(c *gin.Context) {
+	value, err := h.logs.MigrateLegacyRules(c.Param("roomId"))
 	if err != nil {
 		structuredLogFailure(c, err)
 		return

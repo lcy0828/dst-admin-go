@@ -116,6 +116,46 @@ type RuleTestResult struct {
 	Content string `json:"content"`
 }
 
+type RuleMigrationStatus string
+
+const (
+	RuleMigrationReady        RuleMigrationStatus = "ready"
+	RuleMigrationSkipped      RuleMigrationStatus = "skipped"
+	RuleMigrationConflict     RuleMigrationStatus = "conflict"
+	RuleMigrationIncompatible RuleMigrationStatus = "incompatible"
+)
+
+type RuleMigrationItem struct {
+	LegacyID       int                 `json:"legacyId"`
+	Name           string              `json:"name"`
+	LogType        LogType             `json:"logType"`
+	Pattern        string              `json:"pattern"`
+	Regex          bool                `json:"regex"`
+	Enabled        bool                `json:"enabled"`
+	Priority       int                 `json:"priority"`
+	MatchMode      string              `json:"matchMode"`
+	TailPattern    string              `json:"tailPattern,omitempty"`
+	Status         RuleMigrationStatus `json:"status"`
+	Reason         string              `json:"reason"`
+	TargetRuleID   string              `json:"targetRuleId,omitempty"`
+	ExistingRuleID string              `json:"existingRuleId,omitempty"`
+}
+
+type RuleMigrationPreview struct {
+	SourceAvailable bool                `json:"sourceAvailable"`
+	Total           int                 `json:"total"`
+	Ready           int                 `json:"ready"`
+	Skipped         int                 `json:"skipped"`
+	Conflicts       int                 `json:"conflicts"`
+	Incompatible    int                 `json:"incompatible"`
+	Items           []RuleMigrationItem `json:"items"`
+}
+
+type RuleMigrationResult struct {
+	Imported int                  `json:"imported"`
+	Preview  RuleMigrationPreview `json:"preview"`
+}
+
 type RefreshResult struct {
 	WorldID   string `json:"worldId"`
 	Count     int    `json:"count"`

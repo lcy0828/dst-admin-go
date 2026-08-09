@@ -160,3 +160,71 @@ func TestServicePreservesMultiLineHeadTailCustomTypesAndClear(t *testing.T) {
 		t.Fatalf("list after refresh = %#v, %v", list, err)
 	}
 }
+
+func TestServicePreviewsAndMigratesLegacyRulesIdempotently(t *testing.T) {
+	store := newStructuredLogStore(t)
+	if err := store.db.Table(store.legacyRulesTable).CreateTable(&legacyRuleRecord{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacyRules := []legacyRuleRecord{
+		{ID: 1, Name: "服务器启动", LogType: "system", Pattern: `Starting Up`, IsRegex: false, IsEnabled: true, Priority: 100, MatchMode: "single"},
+		{ID: 2, Name: "匹配所有日志", LogType: "all", Pattern: `.*`, IsRegex: true, IsEnabled: true, Priority: 1, MatchMode: "single"},
+		{ID: 3, Name: "错误正则", LogType: "error", Pattern: `[`, IsRegex: true, IsEnabled: true, Priority: 90, MatchMode: "single"},
+		{ID: 4, Name: "固定行", LogType: "system", Pattern: `BEGIN`, IsRegex: false, IsEnabled: true, Priority: 80, MatchMode: "fixed_lines", LineCount: 3},
+		{ID: 5, Name: "重复启动", LogType: "system", Pattern: `Starting Up`, IsRegex: false, IsEnabled: true, Priority: 100, MatchMode: "single"},
+	}
+	for _, rule := range legacyRules {
+		if err := store.db.Table(store.legacyRulesTable).Create(&rule).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	service, err := NewService(structuredLogCatalog{managed: true}, structuredRawLogs{}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := service.PreviewRuleMigration("room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.SourceAvailable || preview.Total != 5 || preview.Ready != 1 || preview.Skipped != 2 || preview.Incompatible != 2 || preview.Conflicts != 0 {
+		t.Fatalf("unexpected migration preview: %#v", preview)
+	}
+	result, err := service.MigrateLegacyRules("room")
+	if err != nil || result.Imported != 1 {
+		t.Fatalf("migration result = %#v, err=%v", result, err)
+	}
+	migrated, err := store.Rule("room", "legacy-1")
+	if err != nil || migrated.Name != "服务器启动" || migrated.Priority != 900 || migrated.BuiltIn {
+		t.Fatalf("migrated rule = %#v, err=%v", migrated, err)
+	}
+	second, err := service.MigrateLegacyRules("room")
+	if err != nil || second.Imported != 0 || second.Preview.Ready != 0 || second.Preview.Skipped != 3 {
+		t.Fatalf("second migration = %#v, err=%v", second, err)
+	}
+	rules, err := service.Rules("room")
+	if err != nil || len(rules) != len(defaultRules("room"))+1 {
+		t.Fatalf("rules after migration = %d, err=%v", len(rules), err)
+	}
+}
+
+func TestServiceMigrationReportsMatcherConflicts(t *testing.T) {
+	store := newStructuredLogStore(t)
+	if err := store.db.Table(store.legacyRulesTable).CreateTable(&legacyRuleRecord{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacy := legacyRuleRecord{ID: 9, Name: "冲突分类", LogType: "diagnostic", Pattern: `server`, IsEnabled: true, MatchMode: "single"}
+	if err := store.db.Table(store.legacyRulesTable).Create(&legacy).Error; err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(structuredLogCatalog{managed: true}, structuredRawLogs{}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateRule("room", RuleInput{Name: "现有规则", LogType: TypeSystem, Pattern: "server", Enabled: true, Priority: 800}); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := service.PreviewRuleMigration("room")
+	if err != nil || preview.Conflicts != 1 || preview.Ready != 0 || preview.Items[0].ExistingRuleID == "" {
+		t.Fatalf("conflict preview = %#v, err=%v", preview, err)
+	}
+}

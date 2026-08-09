@@ -2121,6 +2121,25 @@ paths:
         "200": { description: Rule test result, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleTestEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/log-rules/migration-preview:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Logs]
+      operationId: previewLegacyStructuredLogRuleMigration
+      summary: Preview an idempotent migration from legacy global log rules into one managed room
+      responses:
+        "200": { description: Legacy rule migration classification and counts, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleMigrationPreviewEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/log-rules/actions/migrate-legacy:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Logs]
+      operationId: migrateLegacyStructuredLogRules
+      summary: Import migration-ready legacy global log rules into one managed room
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Imported rule count and the applied preview, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleMigrationResultEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
   /runtime-targets:
     get:
       tags: [Agents]
@@ -4882,6 +4901,60 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/StructuredLogRuleTestResult" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    StructuredLogRuleMigrationStatus:
+      type: string
+      enum: [ready, skipped, conflict, incompatible]
+    StructuredLogRuleMigrationItem:
+      type: object
+      additionalProperties: false
+      required: [legacyId, name, logType, pattern, regex, enabled, priority, matchMode, status, reason]
+      properties:
+        legacyId: { type: integer }
+        name: { type: string }
+        logType: { $ref: "#/components/schemas/StructuredLogType" }
+        pattern: { type: string }
+        regex: { type: boolean }
+        enabled: { type: boolean }
+        priority: { type: integer, minimum: 0, maximum: 1000 }
+        matchMode: { type: string }
+        tailPattern: { type: string }
+        status: { $ref: "#/components/schemas/StructuredLogRuleMigrationStatus" }
+        reason: { type: string }
+        targetRuleId: { type: string }
+        existingRuleId: { type: string }
+    StructuredLogRuleMigrationPreview:
+      type: object
+      additionalProperties: false
+      required: [sourceAvailable, total, ready, skipped, conflicts, incompatible, items]
+      properties:
+        sourceAvailable: { type: boolean }
+        total: { type: integer, minimum: 0 }
+        ready: { type: integer, minimum: 0 }
+        skipped: { type: integer, minimum: 0 }
+        conflicts: { type: integer, minimum: 0 }
+        incompatible: { type: integer, minimum: 0 }
+        items: { type: array, items: { $ref: "#/components/schemas/StructuredLogRuleMigrationItem" } }
+    StructuredLogRuleMigrationPreviewEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/StructuredLogRuleMigrationPreview" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    StructuredLogRuleMigrationResult:
+      type: object
+      additionalProperties: false
+      required: [imported, preview]
+      properties:
+        imported: { type: integer, minimum: 0 }
+        preview: { $ref: "#/components/schemas/StructuredLogRuleMigrationPreview" }
+    StructuredLogRuleMigrationResultEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/StructuredLogRuleMigrationResult" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     StructuredLogClearInput:

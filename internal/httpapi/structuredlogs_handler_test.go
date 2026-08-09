@@ -50,6 +50,12 @@ func (structuredLogHandlerService) DeleteRule(_, id string) error {
 func (structuredLogHandlerService) TestRule(string, structuredlogs.RuleTestInput) (structuredlogs.RuleTestResult, error) {
 	return structuredlogs.RuleTestResult{Matched: true}, nil
 }
+func (structuredLogHandlerService) PreviewRuleMigration(string) (structuredlogs.RuleMigrationPreview, error) {
+	return structuredlogs.RuleMigrationPreview{SourceAvailable: true, Total: 2, Ready: 1, Skipped: 1}, nil
+}
+func (structuredLogHandlerService) MigrateLegacyRules(string) (structuredlogs.RuleMigrationResult, error) {
+	return structuredlogs.RuleMigrationResult{Imported: 1}, nil
+}
 
 func newStructuredLogHandlerApp(t *testing.T) (*gin.Engine, *jobs.Service) {
 	t.Helper()
@@ -83,6 +89,16 @@ func TestStructuredLogHTTPReadRulesAndRefreshJob(t *testing.T) {
 	assertStatus(t, response, http.StatusOK)
 	response = performJSON(router, http.MethodGet, "/api/v2/rooms/room/log-rules", nil, nil, "")
 	assertStatus(t, response, http.StatusOK)
+	response = performJSON(router, http.MethodGet, "/api/v2/rooms/room/log-rules/migration-preview", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if responseData(t, response)["ready"].(float64) != 1 {
+		t.Fatalf("unexpected migration preview: %s", response.Body.String())
+	}
+	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room/log-rules/actions/migrate-legacy", map[string]interface{}{}, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if responseData(t, response)["imported"].(float64) != 1 {
+		t.Fatalf("unexpected migration result: %s", response.Body.String())
+	}
 	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room/log-rules", map[string]interface{}{"name": "missing"}, nil, "")
 	assertAPIError(t, response, http.StatusUnprocessableEntity, "INVALID_LOG_RULE")
 	response = performJSON(router, http.MethodDelete, "/api/v2/rooms/room/log-rules/builtin", nil, nil, "")

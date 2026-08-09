@@ -43,6 +43,20 @@ type ruleRecord struct {
 	UpdatedAt   time.Time
 }
 
+type legacyRuleRecord struct {
+	ID          int `gorm:"primary_key"`
+	Name        string
+	Description string
+	LogType     string
+	Pattern     string
+	IsRegex     bool
+	IsEnabled   bool
+	Priority    int
+	MatchMode   string
+	TailPattern string
+	LineCount   int
+}
+
 type refreshRecord struct {
 	RoomID      string `gorm:"primary_key"`
 	WorldID     string `gorm:"primary_key"`
@@ -57,18 +71,19 @@ type snapshotMetadata struct {
 }
 
 type Store struct {
-	db           *gorm.DB
-	entriesTable string
-	rulesTable   string
-	refreshTable string
-	now          func() time.Time
+	db               *gorm.DB
+	entriesTable     string
+	rulesTable       string
+	refreshTable     string
+	legacyRulesTable string
+	now              func() time.Time
 }
 
 func NewStore(db *gorm.DB, prefix string) *Store {
 	prefix = strings.TrimSpace(prefix)
 	return &Store{
 		db: db, entriesTable: prefix + "structured_log", rulesTable: prefix + "structured_log_rule",
-		refreshTable: prefix + "structured_log_refresh", now: time.Now,
+		refreshTable: prefix + "structured_log_refresh", legacyRulesTable: prefix + "log_extract_rule", now: time.Now,
 	}
 }
 
@@ -259,6 +274,48 @@ func (s *Store) CreateRule(rule Rule) (Rule, error) {
 		return Rule{}, err
 	}
 	return ruleFromRecord(record), nil
+}
+
+func (s *Store) CreateRules(rules []Rule) ([]Rule, error) {
+	if len(rules) == 0 {
+		return []Rule{}, nil
+	}
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return nil, tx.Error
+	}
+	defer func() {
+		if recoverValue := recover(); recoverValue != nil {
+			tx.Rollback()
+			panic(recoverValue)
+		}
+	}()
+	created := make([]Rule, 0, len(rules))
+	for _, rule := range rules {
+		now := s.now().UTC()
+		rule.CreatedAt, rule.UpdatedAt = now, now
+		record := ruleToRecord(rule)
+		if err := tx.Table(s.rulesTable).Create(&record).Error; err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+		created = append(created, ruleFromRecord(record))
+	}
+	if err := tx.Commit().Error; err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+func (s *Store) LegacyRules() ([]legacyRuleRecord, bool, error) {
+	if !s.db.HasTable(s.legacyRulesTable) {
+		return []legacyRuleRecord{}, false, nil
+	}
+	var records []legacyRuleRecord
+	if err := s.db.Table(s.legacyRulesTable).Order("priority DESC, id ASC").Find(&records).Error; err != nil {
+		return nil, true, err
+	}
+	return records, true, nil
 }
 
 func (s *Store) Rule(roomID, ruleID string) (Rule, error) {
