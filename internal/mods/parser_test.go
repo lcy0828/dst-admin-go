@@ -237,7 +237,7 @@ func TestExternalParserRejectsTrailingJSON(t *testing.T) {
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s' '{\"name\":\"first\"}{\"name\":\"second\"}'\n"), 0750); err != nil {
 		t.Fatal(err)
 	}
-	_, err := NewDualParser(binary, helperDir).parseExternal(context.Background(), "123", modInfo)
+	_, err := NewDualParser(binary, helperDir).parseExternalLua(context.Background(), binary, "123", modInfo)
 	if err == nil || !strings.Contains(err.Error(), "more than one JSON value") {
 		t.Fatalf("expected trailing JSON rejection, got %v", err)
 	}

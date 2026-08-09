@@ -16,7 +16,7 @@ type Kind string
 const (
 	KindLua        Kind = "lua"
 	KindPythonLupa Kind = "python-lupa"
-	probeTimeout        = 2 * time.Second
+	probeTimeout        = 5 * time.Second
 )
 
 type Runtime struct {
@@ -75,10 +75,11 @@ func Discover(luaBinary, pythonBinary string) Discovery {
 	seen := make(map[string]bool)
 	for _, item := range executableCandidates(discovery.ConfiguredLua, luaNames()) {
 		path, ok := resolveExecutable(item.value)
-		if !ok || seen[path] {
+		identity := executableIdentity(path)
+		if !ok || seen[identity] {
 			continue
 		}
-		seen[path] = true
+		seen[identity] = true
 		version, err := probe(path, []string{"-e", "io.write(_VERSION)"})
 		if err != nil {
 			discovery.Failures = append(discovery.Failures, fmt.Sprintf("Lua %s: %v", path, err))
@@ -89,10 +90,11 @@ func Discover(luaBinary, pythonBinary string) Discovery {
 
 	for _, item := range executableCandidates(discovery.ConfiguredPython, pythonNames()) {
 		path, ok := resolveExecutable(item.value)
-		if !ok || seen[path] {
+		identity := executableIdentity(path)
+		if !ok || seen[identity] {
 			continue
 		}
-		seen[path] = true
+		seen[identity] = true
 		discovery.PythonAvailable = true
 		version, err := probe(path, []string{"-c", "import lupa; print(lupa.__version__)"})
 		if err != nil {
@@ -164,6 +166,17 @@ func resolveExecutable(value string) (string, bool) {
 		return "", false
 	}
 	return absolute, true
+}
+
+func executableIdentity(path string) string {
+	if path == "" {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(resolved)
 }
 
 func probe(path string, arguments []string) (string, error) {

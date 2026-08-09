@@ -64,3 +64,30 @@ func TestDiscoverAcceptsPythonOnlyWhenLupaImports(t *testing.T) {
 		t.Fatalf("Python/Lupa runtime was not discovered: %#v", available)
 	}
 }
+
+func TestDiscoverDeduplicatesExecutableAliases(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink test is POSIX-only")
+	}
+	directory := t.TempDir()
+	binary := filepath.Join(directory, "lua-real")
+	alias := filepath.Join(directory, "lua")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf 'Lua test'\n"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(binary, alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+
+	discovery := Discover(binary, "missing-python")
+	count := 0
+	for _, item := range discovery.Runtimes {
+		if item.Kind == KindLua && executableIdentity(item.Path) == executableIdentity(binary) {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("executable aliases were not deduplicated: %#v", discovery.Runtimes)
+	}
+}
