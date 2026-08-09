@@ -54,6 +54,18 @@ func TestSnapshotFiltersAndDoesNotCreateMissingLogs(t *testing.T) {
 	}
 }
 
+func TestReadTailStopsAtCapturedFileSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server_log.txt")
+	first := "first line\n"
+	if err := os.WriteFile(path, []byte(first+"appended later\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	lines, truncated, err := readTail(path, int64(len(first)), 10, "")
+	if err != nil || truncated || len(lines) != 1 || lines[0].Text != "first line" {
+		t.Fatalf("bounded tail = %#v, truncated=%v, err=%v", lines, truncated, err)
+	}
+}
+
 func TestFollowEmitsAppendAndStopsWithContext(t *testing.T) {
 	service, path := newTestService(t)
 	if err := os.WriteFile(path, []byte("ready\n"), 0640); err != nil {

@@ -71,6 +71,10 @@ func (s *Service) Snapshot(roomID, worldID string, limit int, query string) (Sna
 	if err != nil {
 		return Snapshot{}, err
 	}
+	return snapshotAt(path, info, limit, query)
+}
+
+func snapshotAt(path string, info os.FileInfo, limit int, query string) (Snapshot, error) {
 	if limit <= 0 || limit > 2000 {
 		limit = 500
 	}
@@ -105,7 +109,7 @@ func (s *Service) Follow(ctx context.Context, roomID, worldID string, tail int, 
 		tail = 200
 
 	}
-	snapshot, err := s.Snapshot(roomID, worldID, tail, "")
+	snapshot, err := snapshotAt(path, info, tail, "")
 	if err != nil {
 		return err
 	}
@@ -211,13 +215,21 @@ func readTail(path string, size int64, limit int, query string) ([]Line, bool, e
 	if _, err := file.Seek(start, io.SeekStart); err != nil {
 		return nil, false, fmt.Errorf("seek world log: %w", err)
 	}
-	reader := bufio.NewReaderSize(io.LimitReader(file, maxReadBytes), 64*1024)
+	readBytes := size - start
+	if readBytes < 0 {
+		readBytes = 0
+	}
+	if readBytes > maxReadBytes {
+		readBytes = maxReadBytes
+	}
+	reader := bufio.NewReaderSize(io.LimitReader(file, readBytes), 64*1024)
+	cursor := start
 	if start > 0 {
-		_, _ = reader.ReadString('\n')
+		skipped, _ := reader.ReadString('\n')
+		cursor += int64(len(skipped))
 	}
 	needle := strings.ToLower(query)
 	lines := make([]Line, 0, limit)
-	cursor := start
 	for {
 		text, readErr := reader.ReadString('\n')
 		cursor += int64(len(text))
