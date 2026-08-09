@@ -112,7 +112,6 @@ go test -race ./internal/mods ./internal/httpapi ./routers -count=1
 npm run lint
 npm run test
 npm run build
-npm run test:e2e
 ```
 
-浏览器用例覆盖普通 Go parser Mod、递归依赖、配置预览/应用/回读、Lua fallback 原因，以及 390/768/1024/1440 四档无横向溢出。生命周期测试覆盖下载失败恢复、半成品清理、更新并发隔离、人工 setup 保留和无变化卸载。
+当前仓库尚未提供浏览器 E2E 脚本。发布前人工浏览器验收需覆盖普通 Go parser Mod、递归依赖、配置预览/应用/回读、Lua fallback 原因，以及 390/768/1024/1440 四档无横向溢出。生命周期自动测试覆盖下载失败恢复、半成品清理、更新并发隔离、人工 setup 保留和无变化卸载。

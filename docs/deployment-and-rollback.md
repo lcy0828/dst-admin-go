@@ -4,7 +4,7 @@
 
 本文适用于 Vue 3 静态前端、Go 管理 API 和可选 Agent Server 的同源生产部署。示例目录使用 `/opt/dst-admin`，服务用户使用 `dstadmin`；实际路径必须与系统设置和 DST 专用用户一致。
 
-生产切换必须满足：后端全量测试、前端 lint/unit/build、Playwright 核心流程、数据库备份校验、配置备份和上一版本产物均已完成。不要在没有可恢复数据库副本时直接启动新版本迁移。
+生产切换必须满足：后端全量测试、前端 lint/unit/build、真实后端核心流程人工验收、数据库备份校验、配置备份和上一版本产物均已完成。当前前端尚未接入浏览器 E2E，不能用不存在的脚本替代人工验收。不要在没有可恢复数据库副本时直接启动新版本迁移。
 
 ## 2. 发布目录
 
@@ -67,14 +67,14 @@ CGO_ENABLED=1 go build -trimpath \
 cd ../dst-admin-vue
 npm ci
 npm audit --registry=https://registry.npmjs.org --audit-level=moderate
-npm run api:generate
-npm run lint
+npm run lint -- --no-fix
 npm run test
 npm run build
-npm run test:e2e
 ```
 
 把 `dist/dst-admin` 和前端 `dist/` 放入新的 release 目录，校验 SHA-256 后再切换。部署探针还要确认 `/api/v2/system/status` 返回的 `application.version` 和 `application.commit` 与本次 release 一致。不要把 `.env`、数据库、`app.conf`、Agent 密钥或 Steam API Key 打进前端产物。
+
+前端 API 当前由手写客户端维护，契约源是本仓库的 `docs/openapi-v2.yaml`，没有 `api:generate` 命令。浏览器 E2E 接入前，必须按前端 `docs/DST_ADMIN_FUNCTION_TRUTH.md` 的发布清单使用真实后端完成人工验收。
 
 ## 5. 服务启动
 
