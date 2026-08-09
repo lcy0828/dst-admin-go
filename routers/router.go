@@ -9,6 +9,7 @@ import (
 
 	"dont/controller"
 	agentservice "dont/internal/agents"
+	"dont/internal/announcements"
 	"dont/internal/authn"
 	"dont/internal/automation"
 	backupapi "dont/internal/backups"
@@ -64,6 +65,15 @@ func InitRouter() (*gin.Engine, error) {
 		return nil, err
 	}
 	authHandler := httpapi.NewAuthHandler(authService)
+	announcementStore := announcements.NewStore(models.DB(), tablePrefix)
+	if err := announcementStore.Migrate(); err != nil {
+		return nil, err
+	}
+	announcementService, err := announcements.NewService(announcementStore)
+	if err != nil {
+		return nil, err
+	}
+	announcementHandler := httpapi.NewAnnouncementHandler(announcementService)
 	roomStore := rooms.NewStore(models.DB(), tablePrefix)
 	if err := roomStore.Migrate(); err != nil {
 		return nil, err
@@ -398,6 +408,7 @@ func InitRouter() (*gin.Engine, error) {
 		v2 := api.Group("/v2", idempotencyStore.Middleware())
 		v2.Use(httpapi.RuntimeTargetBoundary())
 		authHandler.Register(v2.Group("/auth"))
+		announcementHandler.Register(v2)
 		v2.GET("/system/capabilities", httpapi.CapabilitiesProvider(func() capabilities.Report {
 			return capabilities.Probe(capabilityConfig)
 		}))

@@ -309,6 +309,32 @@ paths:
                 $ref: "#/components/schemas/RoomEnvelope"
         "404":
           $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Rooms]
+      operationId: deleteRoom
+      summary: Move a stopped room into the save-root recovery directory
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteRoomInput"
+      responses:
+        "200":
+          description: Room moved to the recovery directory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteRoomResultEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
   /rooms/{roomId}/adopt:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -2274,6 +2300,66 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /announcements:
+    get:
+      tags: [Announcements]
+      operationId: listAnnouncements
+      summary: List persisted system announcements
+      responses:
+        "200":
+          description: Announcements ordered by importance and publication time
+          headers:
+            Cache-Control: { schema: { type: string }, description: Always no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnnouncementListEnvelope" }
+    post:
+      tags: [Announcements]
+      operationId: createAnnouncement
+      summary: Publish a system announcement
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AnnouncementInput" }
+      responses:
+        "201": { description: Announcement created, content: { application/json: { schema: { $ref: "#/components/schemas/AnnouncementEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /announcements/{announcementId}:
+    parameters: [{ $ref: "#/components/parameters/AnnouncementID" }]
+    get:
+      tags: [Announcements]
+      operationId: getAnnouncement
+      responses:
+        "200":
+          description: Persisted announcement
+          headers:
+            Cache-Control: { schema: { type: string }, description: Always no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnnouncementEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Announcements]
+      operationId: updateAnnouncement
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AnnouncementInput" }
+      responses:
+        "200": { description: Announcement updated, content: { application/json: { schema: { $ref: "#/components/schemas/AnnouncementEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+    delete:
+      tags: [Announcements]
+      operationId: deleteAnnouncement
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Announcement deleted, content: { application/json: { schema: { $ref: "#/components/schemas/AnnouncementDeleteEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
   /containers:
     get:
       tags: [Containers]
@@ -2388,6 +2474,14 @@ components:
       schema:
         type: string
         pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+    AnnouncementID:
+      name: announcementId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
     ContainerID:
       name: containerId
       in: path
@@ -2792,6 +2886,34 @@ components:
         type:
           type: string
           enum: [forest, cave]
+    DeleteRoomInput:
+      type: object
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation:
+          type: string
+          description: Must exactly equal the room name
+    DeleteRoomResult:
+      type: object
+      additionalProperties: false
+      required: [room, recoveryName]
+      properties:
+        room:
+          $ref: "#/components/schemas/Room"
+        recoveryName:
+          type: string
+          description: Relative path below the configured save root
+    DeleteRoomResultEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/DeleteRoomResult"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
     DeleteWorldInput:
       type: object
       additionalProperties: false
@@ -5261,6 +5383,67 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/AgentRotateKeyResult" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AnnouncementTarget:
+      type: string
+      enum: [all, online, admins]
+    AnnouncementStatus:
+      type: string
+      enum: [active, expired]
+    AnnouncementInput:
+      type: object
+      additionalProperties: false
+      required: [title, content, expireTime, target, important]
+      properties:
+        title: { type: string, minLength: 2, maxLength: 50 }
+        content: { type: string, minLength: 1, maxLength: 10000 }
+        expireTime: { type: string, format: date-time }
+        target: { $ref: "#/components/schemas/AnnouncementTarget" }
+        important: { type: boolean }
+    Announcement:
+      type: object
+      additionalProperties: false
+      required: [id, title, content, publishTime, expireTime, target, important, status, updatedAt]
+      properties:
+        id: { type: integer, format: int64, minimum: 1 }
+        title: { type: string }
+        content: { type: string }
+        publishTime: { type: string, format: date-time }
+        expireTime: { type: string, format: date-time }
+        target: { $ref: "#/components/schemas/AnnouncementTarget" }
+        important: { type: boolean }
+        status: { $ref: "#/components/schemas/AnnouncementStatus" }
+        updatedAt: { type: string, format: date-time }
+    AnnouncementList:
+      type: array
+      items: { $ref: "#/components/schemas/Announcement" }
+    AnnouncementEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/Announcement" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AnnouncementListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AnnouncementList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AnnouncementDeleteResult:
+      type: object
+      additionalProperties: false
+      required: [id, deleted]
+      properties:
+        id: { type: integer, format: int64, minimum: 1 }
+        deleted: { type: boolean, enum: [true] }
+    AnnouncementDeleteEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AnnouncementDeleteResult" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     JobStatus:
