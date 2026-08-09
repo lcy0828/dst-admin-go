@@ -4790,7 +4790,7 @@ components:
     StructuredLogCounts:
       type: object
       additionalProperties: { type: integer, minimum: 0 }
-      required: [system, chat, player, entity, world, error, warning, unknown]
+      required: [system, chat, player, entity, world, error, warning, startup, worldgen, diagnostic, unknown]
       properties:
         system: { type: integer, minimum: 0 }
         chat: { type: integer, minimum: 0 }
@@ -4799,6 +4799,9 @@ components:
         world: { type: integer, minimum: 0 }
         error: { type: integer, minimum: 0 }
         warning: { type: integer, minimum: 0 }
+        startup: { type: integer, minimum: 0 }
+        worldgen: { type: integer, minimum: 0 }
+        diagnostic: { type: integer, minimum: 0 }
         unknown: { type: integer, minimum: 0 }
     StructuredLogList:
       type: object

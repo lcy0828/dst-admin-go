@@ -24,14 +24,17 @@ const (
 type LogType string
 
 const (
-	TypeSystem  LogType = "system"
-	TypeChat    LogType = "chat"
-	TypePlayer  LogType = "player"
-	TypeEntity  LogType = "entity"
-	TypeWorld   LogType = "world"
-	TypeError   LogType = "error"
-	TypeWarning LogType = "warning"
-	TypeUnknown LogType = "unknown"
+	TypeSystem     LogType = "system"
+	TypeChat       LogType = "chat"
+	TypePlayer     LogType = "player"
+	TypeEntity     LogType = "entity"
+	TypeWorld      LogType = "world"
+	TypeError      LogType = "error"
+	TypeWarning    LogType = "warning"
+	TypeUnknown    LogType = "unknown"
+	TypeStartup    LogType = "startup"
+	TypeWorldGen   LogType = "worldgen"
+	TypeDiagnostic LogType = "diagnostic"
 )
 
 type SnapshotState string

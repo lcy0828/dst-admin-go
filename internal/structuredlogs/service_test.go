@@ -38,6 +38,19 @@ func (l structuredRawLogs) Snapshot(_, worldID string, _ int, _ string) (logstre
 	return value, nil
 }
 
+func TestDefaultRulesRemainValid(t *testing.T) {
+	for _, rule := range defaultRules("room") {
+		_, err := normalizeRule(RuleInput{
+			Name: rule.Name, Description: rule.Description, LogType: rule.LogType, Pattern: rule.Pattern,
+			Regex: rule.Regex, Enabled: rule.Enabled, Priority: rule.Priority, MatchMode: rule.MatchMode,
+			TailPattern: rule.TailPattern,
+		})
+		if err != nil {
+			t.Fatalf("default rule %q is invalid: %v", rule.ID, err)
+		}
+	}
+}
+
 func TestServiceRefreshClassifiesAndQueriesStructuredLogs(t *testing.T) {
 	store := newStructuredLogStore(t)
 	service, err := NewService(structuredLogCatalog{managed: true}, structuredRawLogs{snapshots: map[string]logstream.Snapshot{
@@ -57,7 +70,7 @@ func TestServiceRefreshClassifiesAndQueriesStructuredLogs(t *testing.T) {
 		t.Fatalf("refresh = %#v, %v", result, err)
 	}
 	list, err := service.List("room", ListFilter{Limit: 50})
-	if err != nil || list.Total != 4 || len(list.Counts) != 8 || list.SnapshotState != SnapshotStateReady || list.LastRefreshedAt == nil || list.Counts[TypePlayer] != 1 || list.Counts[TypeWarning] != 1 || list.Counts[TypeChat] != 1 || list.Counts[TypeUnknown] != 1 {
+	if err != nil || list.Total != 4 || len(list.Counts) != len(allTypes()) || list.SnapshotState != SnapshotStateReady || list.LastRefreshedAt == nil || list.Counts[TypePlayer] != 1 || list.Counts[TypeWarning] != 1 || list.Counts[TypeChat] != 1 || list.Counts[TypeUnknown] != 1 {
 		t.Fatalf("list = %#v, %v", list, err)
 	}
 	players, err := service.List("room", ListFilter{Type: TypePlayer, Query: "Willow", Limit: 50})
@@ -123,7 +136,7 @@ func TestServicePreservesMultiLineHeadTailCustomTypesAndClear(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CreateRule("room", RuleInput{Name: "连续错误", LogType: TypeError, Pattern: "Error:", Enabled: true, Priority: 100, MatchMode: MatchModeMultiLine}); err != nil {
+	if _, err := service.CreateRule("room", RuleInput{Name: "连续错误", LogType: TypeError, Pattern: "Error:", Enabled: true, Priority: 1000, MatchMode: MatchModeMultiLine}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.CreateRule("room", RuleInput{Name: "堆栈", LogType: LogType("连接事件"), Pattern: "BEGIN", Enabled: true, Priority: 200, MatchMode: MatchModeHeadTail, TailPattern: "END$"}); err != nil {
@@ -226,5 +239,57 @@ func TestServiceMigrationReportsMatcherConflicts(t *testing.T) {
 	preview, err := service.PreviewRuleMigration("room")
 	if err != nil || preview.Conflicts != 1 || preview.Ready != 0 || preview.Items[0].ExistingRuleID == "" {
 		t.Fatalf("conflict preview = %#v, err=%v", preview, err)
+	}
+}
+
+func TestServiceReconcilesNewBuiltInsWithoutOverwritingExistingRules(t *testing.T) {
+	store := newStructuredLogStore(t)
+	existing := defaultRules("room")[0]
+	existing.Name = "用户调整后的错误规则"
+	existing.Priority = 999
+	if _, err := store.CreateRule(existing); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(structuredLogCatalog{managed: true}, structuredRawLogs{}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, err := service.Rules("room")
+	if err != nil || len(rules) != len(defaultRules("room")) {
+		t.Fatalf("reconciled rules = %d, err=%v", len(rules), err)
+	}
+	preserved, err := store.Rule("room", existing.ID)
+	if err != nil || preserved.Name != existing.Name || preserved.Priority != existing.Priority {
+		t.Fatalf("existing built-in was overwritten: %#v, err=%v", preserved, err)
+	}
+	if _, err := store.Rule("room", "builtin-worldgen"); err != nil {
+		t.Fatalf("new built-in was not added: %v", err)
+	}
+}
+
+func TestServiceClassifiesStartupWorldGenerationAndDiagnostics(t *testing.T) {
+	store := newStructuredLogStore(t)
+	service, err := NewService(structuredLogCatalog{managed: true}, structuredRawLogs{snapshots: map[string]logstream.Snapshot{
+		"master": {Lines: []logstream.Line{
+			{Cursor: 10, Text: "[00:00:00]: Don't Starve Together: 740477 OSX"},
+			{Cursor: 20, Text: "[00:00:00]: LOADING LUA"},
+			{Cursor: 30, Text: "[00:00:04]: [WorldSimActual::WorldGen_VoronoiPass]"},
+			{Cursor: 40, Text: "[00:00:05]: [WorldSimActual::WorldGen_Commit] woldgen failed!"},
+			{Cursor: 50, Text: "[00:00:06]: Collecting garbage..."},
+			{Cursor: 60, Text: "[00:00:07]: unmatched detail"},
+			{Cursor: 70, Text: "   "},
+			{Cursor: 80, Text: "[00:00:08]:   "},
+			{Cursor: 90, Text: "#######"},
+		}},
+	}}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RefreshWorld(context.Background(), "room", "master"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := service.List("room", ListFilter{Limit: 50})
+	if err != nil || list.Total != 5 || list.Counts[TypeStartup] != 1 || list.Counts[TypeWorldGen] != 1 || list.Counts[TypeWarning] != 1 || list.Counts[TypeDiagnostic] != 1 || list.Counts[TypeUnknown] != 1 {
+		t.Fatalf("specialized classifications = %#v, err=%v", list.Counts, err)
 	}
 }
