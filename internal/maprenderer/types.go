@@ -86,10 +86,22 @@ type Feature struct {
 	Properties map[string]interface{} `json:"properties"`
 }
 
+type Road struct {
+	Kind   int
+	Points []WorldPoint
+}
+
+type WorldPoint struct {
+	X float64
+	Z float64
+}
+
 type ParsedSave struct {
 	TileWidth  int
 	TileHeight int
 	TileIDs    []uint16
+	TileNames  map[uint16]string
+	Roads      []Road
 	Features   []Feature
 	WorldState map[string]interface{}
 	Warnings   []string

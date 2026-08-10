@@ -379,7 +379,7 @@ func InitRouter() (*gin.Engine, error) {
 	if err := worldMapStore.Migrate(); err != nil {
 		return nil, err
 	}
-	var mapRenderer worldmap.Renderer = worldmap.NewExecRenderer(mapRendererPath)
+	var mapRenderer worldmap.Renderer = worldmap.NewExecRenderer(mapRendererPath, serverPath)
 	if driver := os.Getenv("DST_ADMIN_TEST_MAP"); driver != "" {
 		if os.Getenv("DST_ADMIN_ENV") != "test" || driver != "memory" {
 			return nil, fmt.Errorf("DST_ADMIN_TEST_MAP is only available as memory in the test environment")

@@ -28,6 +28,7 @@ func run(arguments []string) error {
 	probe := flags.Bool("probe", false, "print renderer capabilities as JSON")
 	input := flags.String("input", "", "read-only Session snapshot")
 	output := flags.String("output", "", "empty output directory")
+	assets := flags.String("assets", "", "DST installation or data directory")
 	layers := flags.String("layers", "terrain", "legacy layer selection")
 	timeout := flags.Duration("timeout", 90*time.Second, "render timeout")
 	if err := flags.Parse(arguments); err != nil {
@@ -37,7 +38,11 @@ func run(arguments []string) error {
 		return errors.New("positional arguments are not supported")
 	}
 	renderer := maprenderer.New(version)
+	renderer.AssetsPath = strings.TrimSpace(*assets)
 	if *probe {
+		if _, err := maprenderer.DiscoverAssets(renderer.AssetsPath); err != nil {
+			return fmt.Errorf("official DST assets are unavailable: %w", err)
+		}
 		return json.NewEncoder(os.Stdout).Encode(renderer.Probe())
 	}
 	if strings.TrimSpace(*input) == "" || strings.TrimSpace(*output) == "" {

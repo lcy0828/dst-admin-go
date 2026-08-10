@@ -50,14 +50,19 @@ type rendererProbe struct {
 
 type ExecRenderer struct {
 	configuredPath string
+	assetsPath     string
 	mu             sync.Mutex
 	cachedAt       time.Time
 	cachedPath     string
 	cachedInfo     RendererInfo
 }
 
-func NewExecRenderer(configuredPath string) *ExecRenderer {
-	return &ExecRenderer{configuredPath: strings.TrimSpace(configuredPath)}
+func NewExecRenderer(configuredPath string, assetsPath ...string) *ExecRenderer {
+	value := ""
+	if len(assetsPath) > 0 {
+		value = strings.TrimSpace(assetsPath[0])
+	}
+	return &ExecRenderer{configuredPath: strings.TrimSpace(configuredPath), assetsPath: value}
 }
 
 func (r *ExecRenderer) Available() (bool, string) {
@@ -77,13 +82,13 @@ func (r *ExecRenderer) Info() RendererInfo {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), rendererProbeTimeout)
 	defer cancel()
-	info := probeRenderer(ctx, path)
+	info := probeRenderer(ctx, path, r.assetsPath)
 	r.cachedAt, r.cachedPath, r.cachedInfo = time.Now(), path, info
 	return info
 }
 
-func probeRenderer(ctx context.Context, path string) RendererInfo {
-	command := exec.CommandContext(ctx, path, "--probe")
+func probeRenderer(ctx context.Context, path, assetsPath string) RendererInfo {
+	command := exec.CommandContext(ctx, path, "--probe", "--assets", assetsPath)
 	command.Env = rendererEnvironment()
 	var output bytes.Buffer
 	command.Stdout = &limitedBuffer{buffer: &output, remaining: maxProbeOutput}
@@ -139,6 +144,7 @@ func (r *ExecRenderer) Render(ctx context.Context, input, output string, layers 
 	arguments := []string{
 		"--input", input,
 		"--output", output,
+		"--assets", r.assetsPath,
 		"--layers", strings.Join(values, ","),
 	}
 	if deadline, ok := ctx.Deadline(); ok {

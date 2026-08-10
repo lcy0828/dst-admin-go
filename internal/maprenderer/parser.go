@@ -83,10 +83,75 @@ func parseRoot(root *lua.LTable) (ParsedSave, error) {
 	warnings := make([]string, 0)
 	features, featureWarnings := extractFeatures(root, width, height)
 	warnings = append(warnings, featureWarnings...)
+	tileNames := extractTileNames(mapTable)
+	roads, roadWarnings := extractRoads(mapTable)
+	warnings = append(warnings, roadWarnings...)
 	return ParsedSave{
-		TileWidth: width, TileHeight: height, TileIDs: tiles, Features: features,
+		TileWidth: width, TileHeight: height, TileIDs: tiles, TileNames: tileNames, Roads: roads, Features: features,
 		WorldState: extractWorldState(root, &warnings), Warnings: warnings,
 	}, nil
+}
+
+func extractTileNames(mapTable *lua.LTable) map[uint16]string {
+	result := make(map[uint16]string)
+	worldTileMap, ok := tableField(mapTable, "world_tile_map")
+	if !ok {
+		return result
+	}
+	worldTileMap.ForEach(func(nameValue, idValue lua.LValue) {
+		name, nameOK := nameValue.(lua.LString)
+		id, idOK := idValue.(lua.LNumber)
+		if nameOK && idOK && id >= 0 && id <= 65535 && id == lua.LNumber(uint16(id)) {
+			result[uint16(id)] = string(name)
+		}
+	})
+	return result
+}
+
+func extractRoads(mapTable *lua.LTable) ([]Road, []string) {
+	const maxRoads = 65536
+	const maxRoadPoints = 1000000
+	roadsTable, ok := tableField(mapTable, "roads")
+	if !ok {
+		return []Road{}, nil
+	}
+	result := make([]Road, 0, min(roadsTable.Len(), maxRoads))
+	warnings := make([]string, 0)
+	pointCount := 0
+	roadsTable.ForEach(func(_, roadValue lua.LValue) {
+		if len(result) >= maxRoads || pointCount >= maxRoadPoints {
+			return
+		}
+		roadTable, ok := roadValue.(*lua.LTable)
+		if !ok || roadTable.Len() < 3 {
+			return
+		}
+		kindValue, ok := roadTable.RawGetInt(1).(lua.LNumber)
+		if !ok {
+			return
+		}
+		road := Road{Kind: int(kindValue), Points: make([]WorldPoint, 0, roadTable.Len()-1)}
+		for index := 2; index <= roadTable.Len() && pointCount < maxRoadPoints; index++ {
+			pointTable, ok := roadTable.RawGetInt(index).(*lua.LTable)
+			if !ok {
+				continue
+			}
+			x, xOK := pointTable.RawGetInt(1).(lua.LNumber)
+			z, zOK := pointTable.RawGetInt(2).(lua.LNumber)
+			if !xOK || !zOK || math.IsNaN(float64(x)) || math.IsNaN(float64(z)) || math.IsInf(float64(x), 0) || math.IsInf(float64(z), 0) {
+				continue
+			}
+			road.Points = append(road.Points, WorldPoint{X: float64(x), Z: float64(z)})
+			pointCount++
+		}
+		if len(road.Points) >= 2 {
+			result = append(result, road)
+		}
+	})
+	if len(result) >= maxRoads || pointCount >= maxRoadPoints {
+		warnings = append(warnings, "道路数据超过渲染器限制，超出部分未渲染")
+	}
+	return result, warnings
 }
 
 func decodeTiles(encoded string, width, height int) ([]uint16, error) {

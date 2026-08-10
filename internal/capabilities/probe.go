@@ -54,7 +54,7 @@ func Probe(config Config) Report {
 	fallback := fallbackTool(fallbackDiscovery)
 	docker := findTool("docker", "")
 	steamcmd := findTool("steamcmd", config.SteamCMDPath)
-	mapRendererInfo := worldmap.NewExecRenderer(config.MapRendererPath).Info()
+	mapRendererInfo := worldmap.NewExecRenderer(config.MapRendererPath, config.ServerPath).Info()
 	mapRenderer := Tool{
 		Available:  mapRendererInfo.Available,
 		Path:       mapRendererInfo.Path,

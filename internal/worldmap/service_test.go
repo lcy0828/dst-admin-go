@@ -239,7 +239,7 @@ func TestExecRendererUsesArgumentArray(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("DST_MAP_TEST_ARGUMENTS", argumentsFile)
-	renderer := NewExecRenderer(executable)
+	renderer := NewExecRenderer(executable, root)
 	input := filepath.Join(root, "input;touch-not-executed")
 	output := filepath.Join(root, "output with spaces")
 	if err := os.Mkdir(output, 0750); err != nil {
@@ -253,7 +253,7 @@ func TestExecRendererUsesArgumentArray(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	expected := []string{"--input", input, "--output", output, "--layers", "terrain,features"}
+	expected := []string{"--input", input, "--output", output, "--assets", root, "--layers", "terrain,features"}
 	if !reflect.DeepEqual(lines, expected) {
 		t.Fatalf("arguments = %#v", lines)
 	}
@@ -266,7 +266,7 @@ func TestRendererProbeAllowsAdditiveCapabilitiesAndRejectsIncompatibleProtocol(t
 	if err := os.WriteFile(compatible, []byte(compatibleScript), 0750); err != nil {
 		t.Fatal(err)
 	}
-	info := probeRenderer(context.Background(), compatible)
+	info := probeRenderer(context.Background(), compatible, root)
 	if !info.Available || info.Version != "future" {
 		t.Fatalf("compatible probe = %#v", info)
 	}
@@ -276,7 +276,7 @@ func TestRendererProbeAllowsAdditiveCapabilitiesAndRejectsIncompatibleProtocol(t
 	if err := os.WriteFile(incompatible, []byte(incompatibleScript), 0750); err != nil {
 		t.Fatal(err)
 	}
-	info = probeRenderer(context.Background(), incompatible)
+	info = probeRenderer(context.Background(), incompatible, root)
 	if info.Available || !strings.Contains(info.Error, "incompatible") {
 		t.Fatalf("incompatible probe = %#v", info)
 	}

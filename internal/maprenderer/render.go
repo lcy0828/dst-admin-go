@@ -19,8 +19,9 @@ const (
 )
 
 type Renderer struct {
-	Version string
-	Now     func() time.Time
+	Version    string
+	AssetsPath string
+	Now        func() time.Time
 }
 
 func New(version string) *Renderer {
@@ -42,6 +43,14 @@ func (r *Renderer) Probe() Probe {
 }
 
 func (r *Renderer) Render(ctx context.Context, inputPath, outputDirectory string) (Manifest, error) {
+	assets, err := DiscoverAssets(r.AssetsPath)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("load official DST assets: %w", err)
+	}
+	definitions, err := LoadTileDefinitions(ctx, assets)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("load official DST tile definitions: %w", err)
+	}
 	input, err := os.Open(inputPath)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("open input snapshot: %w", err)
@@ -67,7 +76,7 @@ func (r *Renderer) Render(ctx context.Context, inputPath, outputDirectory string
 	if err != nil {
 		return Manifest{}, fmt.Errorf("create terrain output: %w", err)
 	}
-	unknownTiles, terrainErr := RenderTerrain(terrain, parsed)
+	unknownTiles, terrainErr := RenderTerrain(terrain, parsed, assets, definitions)
 	terrainCloseErr := terrain.Close()
 	if terrainErr != nil {
 		return Manifest{}, terrainErr
@@ -76,7 +85,7 @@ func (r *Renderer) Render(ctx context.Context, inputPath, outputDirectory string
 		return Manifest{}, fmt.Errorf("close terrain output: %w", terrainCloseErr)
 	}
 	if unknownTiles > 0 {
-		parsed.Warnings = appendWarning(parsed.Warnings, fmt.Sprintf("%d 个地形块使用了扩展 Tile ID，已使用稳定备用颜色显示", unknownTiles))
+		parsed.Warnings = appendWarning(parsed.Warnings, fmt.Sprintf("%d 个地形块没有可用的官方小地图纹理，已使用稳定备用颜色显示", unknownTiles))
 	}
 	prefabCounts := make(map[string]int)
 	for _, feature := range parsed.Features {
