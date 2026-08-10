@@ -94,3 +94,24 @@ func TestLuaFallbackCheckUsesInterpreterConfigAndDiagnosesMissingModulePath(t *t
 		t.Fatalf("missing optional module directory was not diagnosed: %#v", check)
 	}
 }
+
+func TestMapGenerationRequiresCompatibleRendererProtocol(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test adapter is POSIX-only")
+	}
+	root := t.TempDir()
+	mapRoot := filepath.Join(root, "maps")
+	if err := os.Mkdir(mapRoot, 0750); err != nil {
+		t.Fatal(err)
+	}
+	renderer := filepath.Join(root, "dst-map-renderer")
+	script := "#!/bin/sh\nprintf '%s\\n' '{\"protocolVersion\":\"2\",\"rendererVersion\":\"future\",\"capabilities\":{\"artifacts\":[\"terrain.png\",\"manifest.json\",\"features.json\"]}}'\n"
+	if err := os.WriteFile(renderer, []byte(script), 0750); err != nil {
+		t.Fatal(err)
+	}
+	report := Probe(Config{MapRendererPath: renderer, MapPath: mapRoot})
+	tool := report.Tools["mapRenderer"]
+	if tool.Available || report.Features["mapGeneration"] || !strings.Contains(tool.Diagnostic, "incompatible") {
+		t.Fatalf("incompatible map renderer was accepted: tool=%#v features=%#v", tool, report.Features)
+	}
+}

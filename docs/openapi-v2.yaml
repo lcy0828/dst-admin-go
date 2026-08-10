@@ -1390,7 +1390,8 @@ paths:
         in: path
         required: true
         schema:
-          $ref: "#/components/schemas/MapLayer"
+          type: string
+          enum: [terrain]
     get:
       tags: [Maps]
       operationId: getMapLayerImage
@@ -1403,6 +1404,48 @@ paths:
               schema:
                 type: string
                 format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /maps/{mapId}/manifest:
+    parameters:
+      - name: mapId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Maps]
+      operationId: getMapManifest
+      summary: Read the immutable renderer manifest, world state, dimensions, and generation warnings
+      responses:
+        "200":
+          description: Renderer v1 manifest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MapManifest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /maps/{mapId}/features:
+    parameters:
+      - name: mapId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Maps]
+      operationId: getMapFeatures
+      summary: Read immutable map POIs while preserving unknown MOD prefabs and properties
+      responses:
+        "200":
+          description: Renderer v1 feature collection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MapFeatureCollection"
         "404":
           $ref: "#/components/responses/NotFound"
   /game/actions/update:
@@ -3578,7 +3621,7 @@ components:
           $ref: "#/components/schemas/Meta"
     MapLayer:
       type: string
-      enum: [terrain, walrusCamps, spawnPoints, players, worldState]
+      enum: [terrain, features, worldState, walrusCamps, spawnPoints, players]
     SessionSnapshot:
       type: object
       additionalProperties: false
@@ -3663,7 +3706,7 @@ components:
           enum: [running, succeeded, failed]
         stage:
           type: string
-          enum: [renderer, staging, validate, publish, interrupted, complete]
+          enum: [snapshot, renderer, staging, validate, publish, interrupted, complete]
         layers:
           type: array
           items:
@@ -3674,6 +3717,17 @@ components:
         height:
           type: integer
           minimum: 1
+        featureCount:
+          type: integer
+          minimum: 0
+        warningCount:
+          type: integer
+          minimum: 0
+        sourceSha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        rendererVersion:
+          type: string
         log:
           type: string
           maxLength: 524288
@@ -3691,7 +3745,7 @@ components:
     MapList:
       type: object
       additionalProperties: false
-      required: [items, total, rendererAvailable, rendererPath]
+      required: [items, total, renderer, rendererAvailable, rendererPath]
       properties:
         items:
           type: array
@@ -3704,6 +3758,180 @@ components:
           type: boolean
         rendererPath:
           type: string
+        renderer:
+          $ref: "#/components/schemas/MapRendererInfo"
+    MapRendererInfo:
+      type: object
+      additionalProperties: false
+      required: [available, artifacts]
+      properties:
+        available:
+          type: boolean
+        path:
+          type: string
+        protocolVersion:
+          type: string
+        version:
+          type: string
+        artifacts:
+          type: array
+          items:
+            type: string
+            enum: [terrain.png, manifest.json, features.json]
+        error:
+          type: string
+    MapBounds:
+      type: object
+      additionalProperties: false
+      required: [minX, minZ, maxX, maxZ]
+      properties:
+        minX:
+          type: number
+        minZ:
+          type: number
+        maxX:
+          type: number
+        maxZ:
+          type: number
+    MapCoordinateTransform:
+      type: object
+      additionalProperties: false
+      required: [pixelX, pixelY]
+      properties:
+        pixelX:
+          type: string
+        pixelY:
+          type: string
+    MapDimensions:
+      type: object
+      additionalProperties: false
+      required: [tileWidth, tileHeight, imageWidth, imageHeight, pixelsPerTile, worldUnitsPerTile, worldBounds, coordinateTransform]
+      properties:
+        tileWidth:
+          type: integer
+          minimum: 1
+        tileHeight:
+          type: integer
+          minimum: 1
+        imageWidth:
+          type: integer
+          minimum: 1
+          maximum: 16384
+        imageHeight:
+          type: integer
+          minimum: 1
+          maximum: 16384
+        pixelsPerTile:
+          type: integer
+          minimum: 1
+        worldUnitsPerTile:
+          type: integer
+          minimum: 1
+        worldBounds:
+          $ref: "#/components/schemas/MapBounds"
+        coordinateTransform:
+          $ref: "#/components/schemas/MapCoordinateTransform"
+    MapLayerDescriptor:
+      type: object
+      additionalProperties: false
+      required: [id, kind, file, mimeType]
+      properties:
+        id:
+          type: string
+          enum: [terrain, features]
+        kind:
+          type: string
+          enum: [raster, vector]
+        file:
+          type: string
+          enum: [terrain.png, features.json]
+        mimeType:
+          type: string
+          enum: [image/png, application/json]
+    MapStatistics:
+      type: object
+      additionalProperties: false
+      required: [tileCount, unknownTileCount, featureCount, prefabCounts]
+      properties:
+        tileCount:
+          type: integer
+          minimum: 0
+        unknownTileCount:
+          type: integer
+          minimum: 0
+        featureCount:
+          type: integer
+          minimum: 0
+        prefabCounts:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+    MapManifest:
+      type: object
+      additionalProperties: false
+      required: [protocolVersion, rendererVersion, generatedAt, sourceSha256, map, layers, statistics, worldState, warnings]
+      properties:
+        protocolVersion:
+          type: string
+          enum: ["1"]
+        rendererVersion:
+          type: string
+        generatedAt:
+          type: string
+          format: date-time
+        sourceSha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        map:
+          $ref: "#/components/schemas/MapDimensions"
+        layers:
+          type: array
+          items:
+            $ref: "#/components/schemas/MapLayerDescriptor"
+        statistics:
+          $ref: "#/components/schemas/MapStatistics"
+        worldState:
+          type: object
+          additionalProperties: true
+        warnings:
+          type: array
+          items:
+            type: string
+    MapFeature:
+      type: object
+      additionalProperties: false
+      required: [id, prefab, category, x, z, pixelX, pixelY, properties]
+      properties:
+        id:
+          type: string
+        prefab:
+          type: string
+        category:
+          type: string
+        x:
+          type: number
+        z:
+          type: number
+        pixelX:
+          type: number
+        pixelY:
+          type: number
+        properties:
+          type: object
+          additionalProperties: true
+    MapFeatureCollection:
+      type: object
+      additionalProperties: false
+      required: [protocolVersion, features]
+      properties:
+        protocolVersion:
+          type: string
+          enum: ["1"]
+        features:
+          type: array
+          items:
+            $ref: "#/components/schemas/MapFeature"
     MapListEnvelope:
       type: object
       required: [data, error, meta]

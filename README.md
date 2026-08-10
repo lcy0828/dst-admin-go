@@ -52,7 +52,12 @@ release_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 CGO_ENABLED=1 go build -trimpath \
   -ldflags "-X dont/internal/buildinfo.Version=${release_version} -X dont/internal/buildinfo.Commit=${release_commit} -X dont/internal/buildinfo.BuildTime=${release_time}" \
   -o dist/dst-admin .
+CGO_ENABLED=0 go build -trimpath \
+  -ldflags "-X main.version=${release_version}" \
+  -o dist/dst-map-renderer ./cmd/dst-map-renderer
 ```
+
+两个二进制应发布到同一目录。API 会先检查显式配置，再检查自身所在目录，最后检查 `PATH`，并通过 Renderer v1 能力握手确认版本兼容；只有文件存在但握手失败不会启用地图功能。
 
 登录后可从 `GET /api/v2/system/status` 的 `application` 字段核对版本、提交和构建时间。
 

@@ -8,6 +8,7 @@ import (
 
 	dstinstall "dont/internal/dstserver"
 	"dont/internal/modruntime"
+	"dont/internal/worldmap"
 )
 
 type Tool struct {
@@ -53,7 +54,14 @@ func Probe(config Config) Report {
 	fallback := fallbackTool(fallbackDiscovery)
 	docker := findTool("docker", "")
 	steamcmd := findTool("steamcmd", config.SteamCMDPath)
-	mapRenderer := findTool("dst-map-renderer", config.MapRendererPath)
+	mapRendererInfo := worldmap.NewExecRenderer(config.MapRendererPath).Info()
+	mapRenderer := Tool{
+		Available:  mapRendererInfo.Available,
+		Path:       mapRendererInfo.Path,
+		Kind:       "renderer",
+		Version:    mapRendererInfo.Version,
+		Diagnostic: mapRendererInfo.Error,
+	}
 	layout, serverAvailable := dstinstall.Resolve(config.ServerPath, config.ServerMode)
 	steamClientLibrary := Tool{}
 	if directory := dstinstall.SteamClientLibraryDirectory(layout); directory != "" {

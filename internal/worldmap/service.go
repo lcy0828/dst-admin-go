@@ -3,30 +3,40 @@ package worldmap
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"image/png"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"dont/internal/jobs"
+	"dont/internal/maprenderer"
 	"dont/internal/rooms"
 
 	"github.com/google/uuid"
 )
 
 const (
-	maxSessions       = 500
-	maxRendererLog    = 512 * 1024
-	maxLayerImageSize = int64(64 * 1024 * 1024)
-	maxMapDimension   = 16384
-	failedRetention   = 20
+	maxSessions          = 500
+	maxRendererLog       = 512 * 1024
+	maxLayerImageSize    = int64(64 * 1024 * 1024)
+	maxManifestSize      = int64(2 * 1024 * 1024)
+	maxFeaturesSize      = int64(64 * 1024 * 1024)
+	maxSnapshotSize      = int64(128 * 1024 * 1024)
+	maxMapDimension      = 16384
+	failedRetention      = 20
+	defaultRenderTimeout = 90 * time.Second
 )
 
 var (
@@ -39,15 +49,19 @@ var (
 	ErrRendererOutput       = errors.New("map renderer output is invalid")
 )
 
+var rendererSecretPattern = regexp.MustCompile(`(?i)\b(api[_ -]?key|token|password|secret)\b\s*[:=]\s*[^;\s]+`)
+var rendererANSIPattern = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))`)
+
 type RoomCatalog interface {
 	Room(string) (rooms.Room, error)
 	World(string, string) (rooms.World, error)
 }
 
 type Config struct {
-	SaveRoot  string
-	MapRoot   string
-	Retention int
+	SaveRoot      string
+	MapRoot       string
+	Retention     int
+	RenderTimeout time.Duration
 }
 
 type sessionReference struct {
@@ -85,13 +99,25 @@ func NewService(config Config, roomCatalog RoomCatalog, store *Store, renderer R
 	if config.Retention > 20 {
 		return nil, errors.New("map retention cannot exceed 20")
 	}
+	if config.RenderTimeout <= 0 {
+		config.RenderTimeout = defaultRenderTimeout
+	}
+	if config.RenderTimeout > 10*time.Minute {
+		return nil, errors.New("map render timeout cannot exceed 10 minutes")
+	}
 	if err := cleanupStaging(config.MapRoot); err != nil {
 		return nil, fmt.Errorf("clean map staging directories: %w", err)
 	}
 	return &Service{config: config, rooms: roomCatalog, store: store, renderer: renderer, active: make(map[string]bool)}, nil
 }
 
-func (s *Service) RendererStatus() (bool, string) { return s.renderer.Available() }
+func (s *Service) RendererStatus() RendererInfo {
+	if renderer, ok := s.renderer.(interface{ Info() RendererInfo }); ok {
+		return renderer.Info()
+	}
+	available, path := s.renderer.Available()
+	return RendererInfo{Available: available, Path: path, Artifacts: []string{}}
+}
 
 func (s *Service) List(roomID string) ([]Map, error) {
 	if _, _, err := s.resolveRoom(roomID); err != nil {
@@ -240,6 +266,10 @@ func (s *Service) Prepare(roomID string, request GenerateRequest) ([]jobs.Target
 }
 
 func (s *Service) Generate(ctx context.Context, jobID, roomID, worldID, sessionID string, layers []Layer) (Map, error) {
+	layers, err := normalizeLayers(layers)
+	if err != nil {
+		return Map{}, err
+	}
 	input, session, err := s.resolveSession(sessionID, roomID, worldID)
 	if err != nil {
 		return Map{}, err
@@ -255,30 +285,52 @@ func (s *Service) Generate(ctx context.Context, jobID, roomID, worldID, sessionI
 	if err := os.MkdirAll(s.config.MapRoot, 0750); err != nil {
 		return s.fail(value, "staging", "", err)
 	}
-	staging, err := os.MkdirTemp(s.config.MapRoot, ".map-render-")
+	workDirectory, err := os.MkdirTemp(s.config.MapRoot, ".map-render-")
 	if err != nil {
 		return s.fail(value, "staging", "", err)
 	}
-	published := false
-	defer func() {
-		if !published {
-			_ = os.RemoveAll(staging)
-		}
-	}()
-	logBuffer := &boundedLog{limit: maxRendererLog}
-	if err := s.renderer.Render(ctx, input, staging, layers, logBuffer); err != nil {
-		return s.fail(value, "renderer", logBuffer.String(), err)
-	}
-	width, height, err := validateLayerImages(staging, layers)
+	defer os.RemoveAll(workDirectory)
+	snapshotPath := filepath.Join(workDirectory, "session.snapshot")
+	sourceSHA256, err := copySessionSnapshot(ctx, input, snapshotPath)
 	if err != nil {
-		return s.fail(value, "validate", logBuffer.String(), err)
+		return s.fail(value, "snapshot", "", err)
+	}
+	artifactDirectory := filepath.Join(workDirectory, "artifacts")
+	if err := os.Mkdir(artifactDirectory, 0750); err != nil {
+		return s.fail(value, "staging", "", err)
+	}
+	if err := s.store.Stage(value.ID, "renderer"); err != nil {
+		return Map{}, err
+	}
+	logBuffer := &boundedLog{limit: maxRendererLog}
+	renderContext, cancel := context.WithTimeout(ctx, s.config.RenderTimeout)
+	renderErr := s.renderer.Render(renderContext, snapshotPath, artifactDirectory, layers, logBuffer)
+	cancel()
+	sanitizedLog := sanitizeRendererText(logBuffer.String(), input, snapshotPath, workDirectory, s.config.SaveRoot, s.config.MapRoot)
+	if renderErr != nil {
+		return s.fail(value, "renderer", sanitizedLog, renderErr)
+	}
+	if err := s.store.Stage(value.ID, "validate"); err != nil {
+		return Map{}, err
+	}
+	manifest, err := validateRendererArtifacts(artifactDirectory, sourceSHA256)
+	if err != nil {
+		return s.fail(value, "validate", sanitizedLog, err)
 	}
 	final := filepath.Join(s.config.MapRoot, id)
-	if err := os.Rename(staging, final); err != nil {
-		return s.fail(value, "publish", logBuffer.String(), err)
+	if err := s.store.Stage(value.ID, "publish"); err != nil {
+		return Map{}, err
 	}
-	published = true
-	completed, err := s.store.Complete(id, "succeeded", "complete", logBuffer.String(), "", width, height)
+	if err := os.Rename(artifactDirectory, final); err != nil {
+		return s.fail(value, "publish", sanitizedLog, err)
+	}
+	value.Width = manifest.Map.ImageWidth
+	value.Height = manifest.Map.ImageHeight
+	value.FeatureCount = manifest.Statistics.FeatureCount
+	value.WarningCount = len(manifest.Warnings)
+	value.SourceSHA256 = sourceSHA256
+	value.RendererVersion = manifest.RendererVersion
+	completed, err := s.store.Complete(id, "succeeded", "complete", sanitizedLog, "", value)
 	if err != nil {
 		_ = os.RemoveAll(final)
 		return Map{}, err
@@ -310,8 +362,39 @@ func (s *Service) OpenImage(id string, layer Layer) (*os.File, os.FileInfo, Map,
 	return file, info, value, nil
 }
 
+func (s *Service) OpenArtifact(id string, artifact Artifact) (*os.File, os.FileInfo, Map, error) {
+	value, err := s.store.Get(id)
+	if err != nil {
+		return nil, nil, Map{}, err
+	}
+	if value.Status != "succeeded" {
+		return nil, nil, Map{}, ErrMapImageNotFound
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return nil, nil, Map{}, ErrMapImageNotFound
+	}
+	name := map[Artifact]string{
+		ArtifactManifest: maprenderer.ManifestFileName,
+		ArtifactFeatures: maprenderer.FeaturesFileName,
+	}[artifact]
+	if name == "" {
+		return nil, nil, Map{}, ErrMapImageNotFound
+	}
+	path := filepath.Join(s.config.MapRoot, id, name)
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, Map{}, ErrMapImageNotFound
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, Map{}, err
+	}
+	return file, info, value, nil
+}
+
 func (s *Service) fail(value Map, stage, logText string, generationErr error) (Map, error) {
-	_, storeErr := s.store.Complete(value.ID, "failed", stage, logText, generationErr.Error(), 0, 0)
+	sanitizedError := sanitizeRendererText(generationErr.Error(), s.config.SaveRoot, s.config.MapRoot)
+	_, storeErr := s.store.Complete(value.ID, "failed", stage, logText, sanitizedError, value)
 	if storeErr != nil {
 		return Map{}, errors.Join(generationErr, storeErr)
 	}
@@ -457,49 +540,184 @@ func (s *Service) resolveSession(id, expectedRoomID, expectedWorldID string) (st
 	}, nil
 }
 
-func validateLayerImages(root string, layers []Layer) (int, int, error) {
-	width, height := 0, 0
-	for _, layer := range layers {
-		path := filepath.Join(root, layerFileName(layer))
-		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > maxLayerImageSize {
-			return 0, 0, fmt.Errorf("%w: missing or unsafe %s", ErrRendererOutput, layer)
+func validateRendererArtifacts(root, sourceSHA256 string) (maprenderer.Manifest, error) {
+	expected := map[string]int64{
+		maprenderer.TerrainFileName:  maxLayerImageSize,
+		maprenderer.ManifestFileName: maxManifestSize,
+		maprenderer.FeaturesFileName: maxFeaturesSize,
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return maprenderer.Manifest{}, err
+	}
+	if len(entries) != len(expected) {
+		return maprenderer.Manifest{}, fmt.Errorf("%w: renderer must emit exactly three v1 artifacts", ErrRendererOutput)
+	}
+	for _, entry := range entries {
+		limit, ok := expected[entry.Name()]
+		if !ok || entry.IsDir() {
+			return maprenderer.Manifest{}, fmt.Errorf("%w: unexpected renderer artifact %q", ErrRendererOutput, entry.Name())
 		}
-		file, err := os.Open(path)
-		if err != nil {
-			return 0, 0, err
-		}
-		config, decodeErr := png.DecodeConfig(io.LimitReader(file, maxLayerImageSize))
-		_ = file.Close()
-		if decodeErr != nil || config.Width <= 0 || config.Height <= 0 || config.Width > maxMapDimension || config.Height > maxMapDimension {
-			return 0, 0, fmt.Errorf("%w: invalid PNG for %s", ErrRendererOutput, layer)
-		}
-		if width == 0 {
-			width, height = config.Width, config.Height
-		} else if config.Width != width || config.Height != height {
-			return 0, 0, fmt.Errorf("%w: layer dimensions do not match", ErrRendererOutput)
+		info, statErr := os.Lstat(filepath.Join(root, entry.Name()))
+		if statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > limit {
+			return maprenderer.Manifest{}, fmt.Errorf("%w: artifact %q is missing, unsafe, or too large", ErrRendererOutput, entry.Name())
 		}
 	}
-	return width, height, nil
+	var manifest maprenderer.Manifest
+	if err := decodeArtifactJSON(filepath.Join(root, maprenderer.ManifestFileName), maxManifestSize, &manifest); err != nil {
+		return maprenderer.Manifest{}, fmt.Errorf("%w: invalid manifest: %v", ErrRendererOutput, err)
+	}
+	if manifest.ProtocolVersion != maprenderer.ProtocolVersion || manifest.RendererVersion == "" || manifest.GeneratedAt.IsZero() {
+		return maprenderer.Manifest{}, fmt.Errorf("%w: manifest protocol metadata is invalid", ErrRendererOutput)
+	}
+	if manifest.SourceSHA256 != sourceSHA256 {
+		return maprenderer.Manifest{}, fmt.Errorf("%w: manifest source hash does not match the immutable snapshot", ErrRendererOutput)
+	}
+	if manifest.Map.ImageWidth <= 0 || manifest.Map.ImageHeight <= 0 || manifest.Map.ImageWidth > maxMapDimension || manifest.Map.ImageHeight > maxMapDimension || manifest.Map.TileWidth <= 0 || manifest.Map.TileHeight <= 0 || manifest.Map.PixelsPerTile <= 0 || manifest.Map.WorldUnitsPerTile <= 0 {
+		return maprenderer.Manifest{}, fmt.Errorf("%w: manifest map dimensions are invalid", ErrRendererOutput)
+	}
+	if !manifestHasLayer(manifest, "terrain", "raster", maprenderer.TerrainFileName, "image/png") || !manifestHasLayer(manifest, "features", "vector", maprenderer.FeaturesFileName, "application/json") {
+		return maprenderer.Manifest{}, fmt.Errorf("%w: manifest layer descriptors are incomplete", ErrRendererOutput)
+	}
+	terrain, err := os.Open(filepath.Join(root, maprenderer.TerrainFileName))
+	if err != nil {
+		return maprenderer.Manifest{}, err
+	}
+	imageConfig, decodeErr := png.DecodeConfig(io.LimitReader(terrain, maxLayerImageSize))
+	_ = terrain.Close()
+	if decodeErr != nil || imageConfig.Width != manifest.Map.ImageWidth || imageConfig.Height != manifest.Map.ImageHeight {
+		return maprenderer.Manifest{}, fmt.Errorf("%w: terrain PNG does not match the manifest", ErrRendererOutput)
+	}
+	var features maprenderer.FeatureCollection
+	if err := decodeArtifactJSON(filepath.Join(root, maprenderer.FeaturesFileName), maxFeaturesSize, &features); err != nil {
+		return maprenderer.Manifest{}, fmt.Errorf("%w: invalid features: %v", ErrRendererOutput, err)
+	}
+	if features.ProtocolVersion != maprenderer.ProtocolVersion || len(features.Features) != manifest.Statistics.FeatureCount {
+		return maprenderer.Manifest{}, fmt.Errorf("%w: feature collection metadata does not match the manifest", ErrRendererOutput)
+	}
+	for _, feature := range features.Features {
+		if feature.ID == "" || feature.Prefab == "" || feature.Category == "" || !finite(feature.X) || !finite(feature.Z) || !finite(feature.PixelX) || !finite(feature.PixelY) {
+			return maprenderer.Manifest{}, fmt.Errorf("%w: feature collection contains an invalid feature", ErrRendererOutput)
+		}
+	}
+	return manifest, nil
+}
+
+func decodeArtifactJSON(path string, limit int64, target interface{}) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(io.LimitReader(file, limit+1))
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("JSON artifact contains trailing data")
+	}
+	return nil
+}
+
+func sanitizeRendererText(value string, paths ...string) string {
+	value = rendererANSIPattern.ReplaceAllString(value, "")
+	cleanedPaths := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path != "" {
+			cleanedPaths = append(cleanedPaths, filepath.Clean(path))
+		}
+	}
+	sort.Slice(cleanedPaths, func(i, j int) bool { return len(cleanedPaths[i]) > len(cleanedPaths[j]) })
+	for _, path := range cleanedPaths {
+		value = strings.ReplaceAll(value, path, "[REDACTED_PATH]")
+	}
+	value = rendererSecretPattern.ReplaceAllString(value, "$1=[REDACTED]")
+	value = strings.Map(func(character rune) rune {
+		switch character {
+		case '\n', '\r', '\t':
+			return character
+		}
+		if character < 0x20 || character == 0x7f {
+			return -1
+		}
+		return character
+	}, value)
+	return strings.TrimSpace(value)
+}
+
+func manifestHasLayer(manifest maprenderer.Manifest, id, kind, fileName, mimeType string) bool {
+	for _, layer := range manifest.Layers {
+		if layer.ID == id && layer.Kind == kind && layer.File == fileName && layer.MimeType == mimeType {
+			return true
+		}
+	}
+	return false
+}
+
+func finite(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value, 0) }
+
+func copySessionSnapshot(ctx context.Context, sourcePath, targetPath string) (string, error) {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return "", fmt.Errorf("open Session for snapshot: %w", err)
+	}
+	defer source.Close()
+	before, err := source.Stat()
+	if err != nil || !before.Mode().IsRegular() || before.Size() <= 0 || before.Size() > maxSnapshotSize {
+		return "", errors.New("Session snapshot source is invalid or exceeds 128 MiB")
+	}
+	target, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return "", fmt.Errorf("create Session snapshot: %w", err)
+	}
+	hash := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(target, hash), &contextReader{ctx: ctx, reader: io.LimitReader(source, maxSnapshotSize+1)})
+	closeErr := target.Close()
+	if copyErr != nil {
+		_ = os.Remove(targetPath)
+		return "", fmt.Errorf("copy Session snapshot: %w", copyErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(targetPath)
+		return "", fmt.Errorf("close Session snapshot: %w", closeErr)
+	}
+	after, err := source.Stat()
+	if err != nil || written != before.Size() || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		_ = os.Remove(targetPath)
+		return "", errors.New("Session changed while its snapshot was being copied; retry generation")
+	}
+	if err := os.Chmod(targetPath, 0440); err != nil {
+		_ = os.Remove(targetPath)
+		return "", fmt.Errorf("make Session snapshot read-only: %w", err)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(value []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(value)
 }
 
 func normalizeLayers(input []Layer) ([]Layer, error) {
-	allowed := map[Layer]bool{LayerTerrain: true, LayerWalrusCamps: true, LayerSpawnPoints: true, LayerPlayers: true, LayerWorldState: true}
-	seen := make(map[Layer]bool)
-	result := []Layer{LayerTerrain}
-	seen[LayerTerrain] = true
+	allowed := map[Layer]bool{
+		LayerTerrain: true, LayerFeatures: true, LayerWorldState: true,
+		LayerWalrusCamps: true, LayerSpawnPoints: true, LayerPlayers: true,
+	}
 	for _, layer := range input {
 		if !allowed[layer] {
 			return nil, ErrInvalidLayers
 		}
-		if !seen[layer] {
-			seen[layer] = true
-			if layer != LayerTerrain {
-				result = append(result, layer)
-			}
-		}
 	}
-	return result, nil
+	return []Layer{LayerTerrain, LayerFeatures, LayerWorldState}, nil
 }
 
 func containsLayer(layers []Layer, wanted Layer) bool {

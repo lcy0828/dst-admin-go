@@ -13,21 +13,25 @@ import (
 var ErrMapNotFound = errors.New("map not found")
 
 type mapRecord struct {
-	ID           string    `gorm:"primary_key;type:char(36)"`
-	RoomID       string    `gorm:"type:varchar(255);index;not null"`
-	WorldID      string    `gorm:"type:varchar(255);index;not null"`
-	SessionID    string    `gorm:"type:text;not null"`
-	SessionLabel string    `gorm:"type:varchar(255);not null"`
-	Status       string    `gorm:"type:varchar(16);index;not null"`
-	Stage        string    `gorm:"type:varchar(32)"`
-	LayersJSON   string    `gorm:"type:text;not null"`
-	Width        int       `gorm:"not null"`
-	Height       int       `gorm:"not null"`
-	Log          string    `gorm:"type:text"`
-	ErrorMessage string    `gorm:"type:text"`
-	SourceJobID  string    `gorm:"type:char(36);index;not null"`
-	CreatedAt    time.Time `gorm:"index;not null"`
-	FinishedAt   *time.Time
+	ID              string    `gorm:"primary_key;type:char(36)"`
+	RoomID          string    `gorm:"type:varchar(255);index;not null"`
+	WorldID         string    `gorm:"type:varchar(255);index;not null"`
+	SessionID       string    `gorm:"type:text;not null"`
+	SessionLabel    string    `gorm:"type:varchar(255);not null"`
+	Status          string    `gorm:"type:varchar(16);index;not null"`
+	Stage           string    `gorm:"type:varchar(32)"`
+	LayersJSON      string    `gorm:"type:text;not null"`
+	Width           int       `gorm:"not null"`
+	Height          int       `gorm:"not null"`
+	FeatureCount    int       `gorm:"not null"`
+	WarningCount    int       `gorm:"not null"`
+	SourceSHA256    string    `gorm:"type:char(64)"`
+	RendererVersion string    `gorm:"type:varchar(128)"`
+	Log             string    `gorm:"type:text"`
+	ErrorMessage    string    `gorm:"type:text"`
+	SourceJobID     string    `gorm:"type:char(36);index;not null"`
+	CreatedAt       time.Time `gorm:"index;not null"`
+	FinishedAt      *time.Time
 }
 
 type Store struct {
@@ -55,7 +59,7 @@ func (s *Store) Migrate() error {
 
 func (s *Store) Begin(value Map) (Map, error) {
 	value.Status = "running"
-	value.Stage = "renderer"
+	value.Stage = "snapshot"
 	value.CreatedAt = s.now().UTC()
 	record, err := recordFromMap(value)
 	if err != nil {
@@ -67,11 +71,24 @@ func (s *Store) Begin(value Map) (Map, error) {
 	return value, nil
 }
 
-func (s *Store) Complete(id, status, stage, logText, errorMessage string, width, height int) (Map, error) {
+func (s *Store) Stage(id, stage string) error {
+	result := s.db.Table(s.table).Where("id = ? AND status = ?", id, "running").Update("stage", stage)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrMapNotFound
+	}
+	return nil
+}
+
+func (s *Store) Complete(id, status, stage, logText, errorMessage string, value Map) (Map, error) {
 	now := s.now().UTC()
 	result := s.db.Table(s.table).Where("id = ? AND status = ?", id, "running").Updates(map[string]interface{}{
 		"status": status, "stage": stage, "log": logText, "error_message": errorMessage,
-		"width": width, "height": height, "finished_at": now,
+		"width": value.Width, "height": value.Height, "feature_count": value.FeatureCount,
+		"warning_count": value.WarningCount, "source_sha256": value.SourceSHA256,
+		"renderer_version": value.RendererVersion, "finished_at": now,
 	})
 	if result.Error != nil {
 		return Map{}, result.Error
@@ -144,7 +161,9 @@ func recordFromMap(value Map) (mapRecord, error) {
 		ID: value.ID, RoomID: value.RoomID, WorldID: value.WorldID, SessionID: value.SessionID,
 		SessionLabel: value.SessionLabel, Status: value.Status, Stage: value.Stage, LayersJSON: string(layers),
 		Width: value.Width, Height: value.Height, Log: value.Log, ErrorMessage: value.ErrorMessage,
-		SourceJobID: value.SourceJobID, CreatedAt: value.CreatedAt, FinishedAt: value.FinishedAt,
+		FeatureCount: value.FeatureCount, WarningCount: value.WarningCount, SourceSHA256: value.SourceSHA256,
+		RendererVersion: value.RendererVersion,
+		SourceJobID:     value.SourceJobID, CreatedAt: value.CreatedAt, FinishedAt: value.FinishedAt,
 	}, nil
 }
 
@@ -157,6 +176,8 @@ func mapFromRecord(record mapRecord) (Map, error) {
 		ID: record.ID, RoomID: record.RoomID, WorldID: record.WorldID, SessionID: record.SessionID,
 		SessionLabel: record.SessionLabel, Status: record.Status, Stage: record.Stage, Layers: layers,
 		Width: record.Width, Height: record.Height, Log: record.Log, ErrorMessage: record.ErrorMessage,
-		SourceJobID: record.SourceJobID, CreatedAt: record.CreatedAt, FinishedAt: record.FinishedAt,
+		FeatureCount: record.FeatureCount, WarningCount: record.WarningCount, SourceSHA256: record.SourceSHA256,
+		RendererVersion: record.RendererVersion,
+		SourceJobID:     record.SourceJobID, CreatedAt: record.CreatedAt, FinishedAt: record.FinishedAt,
 	}, nil
 }

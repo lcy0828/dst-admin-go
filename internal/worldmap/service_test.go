@@ -2,6 +2,8 @@ package worldmap
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"dont/internal/maprenderer"
 	"dont/internal/rooms"
 
 	"github.com/jinzhu/gorm"
@@ -105,18 +108,28 @@ func TestGenerateValidatesLayersPublishesAtomicallyAndPrunes(t *testing.T) {
 		t.Fatal(err)
 	}
 	layers, err := normalizeLayers([]Layer{LayerPlayers, LayerTerrain, LayerPlayers})
-	if err != nil || !reflect.DeepEqual(layers, []Layer{LayerTerrain, LayerPlayers}) {
+	if err != nil || !reflect.DeepEqual(layers, []Layer{LayerTerrain, LayerFeatures, LayerWorldState}) {
 		t.Fatalf("layers = %#v, %v", layers, err)
 	}
 	first, err := service.Generate(context.Background(), "job-1", "room", "world", sessions[0].ID, layers)
 	if err != nil || first.Status != "succeeded" || first.Width != 960 || first.Height != 640 {
 		t.Fatalf("first map = %#v, %v", first, err)
 	}
-	file, _, _, err := service.OpenImage(first.ID, LayerPlayers)
+	file, _, _, err := service.OpenImage(first.ID, LayerTerrain)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = file.Close()
+	for _, artifact := range []Artifact{ArtifactManifest, ArtifactFeatures} {
+		file, _, _, err := service.OpenArtifact(first.ID, artifact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = file.Close()
+	}
+	if first.SourceSHA256 == "" || first.RendererVersion != "test" || !reflect.DeepEqual(first.Layers, []Layer{LayerTerrain, LayerFeatures, LayerWorldState}) {
+		t.Fatalf("renderer metadata = %#v", first)
+	}
 	second, err := service.Generate(context.Background(), "job-2", "room", "world", sessions[0].ID, layers)
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +229,7 @@ func TestExecRendererUsesArgumentArray(t *testing.T) {
 	root := t.TempDir()
 	executable := filepath.Join(root, "renderer")
 	argumentsFile := filepath.Join(root, "arguments")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$DST_MAP_TEST_ARGUMENTS\"\n"
+	script := "#!/bin/sh\nif [ \"$1\" = \"--probe\" ]; then\n  printf '%s\\n' '{\"protocolVersion\":\"1\",\"rendererVersion\":\"test\",\"capabilities\":{\"inputFormats\":[\"session\"],\"artifacts\":[\"terrain.png\",\"manifest.json\",\"features.json\"],\"maxInputSize\":1}}'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > \"$DST_MAP_TEST_ARGUMENTS\"\n"
 	if err := os.WriteFile(executable, []byte(script), 0750); err != nil {
 		t.Fatal(err)
 	}
@@ -224,6 +237,9 @@ func TestExecRendererUsesArgumentArray(t *testing.T) {
 	renderer := NewExecRenderer(executable)
 	input := filepath.Join(root, "input;touch-not-executed")
 	output := filepath.Join(root, "output with spaces")
+	if err := os.Mkdir(output, 0750); err != nil {
+		t.Fatal(err)
+	}
 	if err := renderer.Render(context.Background(), input, output, []Layer{LayerTerrain, LayerPlayers}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
@@ -235,5 +251,123 @@ func TestExecRendererUsesArgumentArray(t *testing.T) {
 	expected := []string{"--input", input, "--output", output, "--layers", "terrain,players"}
 	if !reflect.DeepEqual(lines, expected) {
 		t.Fatalf("arguments = %#v", lines)
+	}
+}
+
+func TestRendererProbeAllowsAdditiveCapabilitiesAndRejectsIncompatibleProtocol(t *testing.T) {
+	root := t.TempDir()
+	compatible := filepath.Join(root, "compatible")
+	compatibleScript := "#!/bin/sh\nprintf '%s\\n' '{\"protocolVersion\":\"1\",\"rendererVersion\":\"future\",\"capabilities\":{\"inputFormats\":[\"session\"],\"artifacts\":[\"terrain.png\",\"manifest.json\",\"features.json\"],\"maxInputSize\":1,\"futureField\":true},\"futureRoot\":true}'\n"
+	if err := os.WriteFile(compatible, []byte(compatibleScript), 0750); err != nil {
+		t.Fatal(err)
+	}
+	info := probeRenderer(context.Background(), compatible)
+	if !info.Available || info.Version != "future" {
+		t.Fatalf("compatible probe = %#v", info)
+	}
+
+	incompatible := filepath.Join(root, "incompatible")
+	incompatibleScript := "#!/bin/sh\nprintf '%s\\n' '{\"protocolVersion\":\"2\",\"rendererVersion\":\"future\",\"capabilities\":{\"artifacts\":[\"terrain.png\",\"manifest.json\",\"features.json\"]}}'\n"
+	if err := os.WriteFile(incompatible, []byte(incompatibleScript), 0750); err != nil {
+		t.Fatal(err)
+	}
+	info = probeRenderer(context.Background(), incompatible)
+	if info.Available || !strings.Contains(info.Error, "incompatible") {
+		t.Fatalf("incompatible probe = %#v", info)
+	}
+}
+
+func TestRendererArtifactsRejectExtraFilesAndHashMismatch(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "session")
+	if err := os.WriteFile(input, []byte("session snapshot"), 0440); err != nil {
+		t.Fatal(err)
+	}
+	expectedHash := sha256.Sum256([]byte("session snapshot"))
+	expectedSHA256 := hex.EncodeToString(expectedHash[:])
+
+	render := func() string {
+		output := filepath.Join(root, time.Now().Format("150405.000000000"))
+		if err := os.Mkdir(output, 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := NewMemoryRenderer().Render(context.Background(), input, output, []Layer{LayerTerrain}, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		return output
+	}
+
+	valid := render()
+	if _, err := validateRendererArtifacts(valid, expectedSHA256); err != nil {
+		t.Fatalf("valid artifacts rejected: %v", err)
+	}
+	extra := render()
+	if err := os.WriteFile(filepath.Join(extra, "unexpected.txt"), []byte("unexpected"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateRendererArtifacts(extra, expectedSHA256); !errors.Is(err, ErrRendererOutput) {
+		t.Fatalf("extra artifact error = %v", err)
+	}
+	mismatch := render()
+	if _, err := validateRendererArtifacts(mismatch, strings.Repeat("0", 64)); !errors.Is(err, ErrRendererOutput) {
+		t.Fatalf("hash mismatch error = %v", err)
+	}
+}
+
+func TestCopySessionSnapshotAndRendererTextSanitization(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "Cluster", "Master", "session")
+	if err := os.MkdirAll(filepath.Dir(source), 0750); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("immutable Session")
+	if err := os.WriteFile(source, content, 0640); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "snapshot")
+	digest, err := copySessionSnapshot(context.Background(), source, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := sha256.Sum256(content)
+	if digest != hex.EncodeToString(expected[:]) {
+		t.Fatalf("snapshot hash = %q", digest)
+	}
+	info, err := os.Stat(target)
+	if err != nil || info.Mode().Perm()&0222 != 0 {
+		t.Fatalf("snapshot mode = %v, error = %v", info.Mode(), err)
+	}
+
+	raw := "\x1b[31mfailed " + source + " token=abc123 password:secret\x00\x1b[0m"
+	cleaned := sanitizeRendererText(raw, source, root)
+	for _, forbidden := range []string{source, root, "abc123", "secret", "\x1b", "\x00"} {
+		if strings.Contains(cleaned, forbidden) {
+			t.Fatalf("sanitized text still contains %q: %q", forbidden, cleaned)
+		}
+	}
+	if !strings.Contains(cleaned, "token=[REDACTED]") || !strings.Contains(cleaned, "password=[REDACTED]") {
+		t.Fatalf("sanitized text = %q", cleaned)
+	}
+}
+
+func TestMemoryRendererManifestUsesProtocolV1(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "session")
+	output := filepath.Join(root, "output")
+	if err := os.WriteFile(input, []byte("snapshot"), 0440); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(output, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewMemoryRenderer().Render(context.Background(), input, output, nil, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var manifest maprenderer.Manifest
+	if err := decodeArtifactJSON(filepath.Join(output, maprenderer.ManifestFileName), maxManifestSize, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.ProtocolVersion != maprenderer.ProtocolVersion || manifest.SourceSHA256 == "" || manifest.Map.WorldBounds.MaxX <= manifest.Map.WorldBounds.MinX {
+		t.Fatalf("manifest = %#v", manifest)
 	}
 }

@@ -29,6 +29,8 @@ func (h *WorldMapHandler) Register(v2 *gin.RouterGroup) {
 	roomsGroup.GET("/worlds/:worldId/sessions", h.sessions)
 	v2.GET("/sessions/:sessionId/download", h.downloadSession)
 	v2.GET("/maps/:mapId/images/:layer", h.image)
+	v2.GET("/maps/:mapId/manifest", h.artifact(worldmap.ArtifactManifest))
+	v2.GET("/maps/:mapId/features", h.artifact(worldmap.ArtifactFeatures))
 }
 
 func (h *WorldMapHandler) list(c *gin.Context) {
@@ -37,8 +39,11 @@ func (h *WorldMapHandler) list(c *gin.Context) {
 		worldMapFailure(c, err)
 		return
 	}
-	available, rendererPath := h.maps.RendererStatus()
-	Success(c, http.StatusOK, gin.H{"items": items, "total": len(items), "rendererAvailable": available, "rendererPath": rendererPath})
+	renderer := h.maps.RendererStatus()
+	Success(c, http.StatusOK, gin.H{
+		"items": items, "total": len(items), "renderer": renderer,
+		"rendererAvailable": renderer.Available, "rendererPath": renderer.Path,
+	})
 }
 
 func (h *WorldMapHandler) sessions(c *gin.Context) {
@@ -96,6 +101,21 @@ func (h *WorldMapHandler) image(c *gin.Context) {
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("Cache-Control", "private, max-age=31536000, immutable")
 	http.ServeContent(c.Writer, c.Request, strings.ReplaceAll(string(layer), "World", "-world")+".png", info.ModTime(), file)
+}
+
+func (h *WorldMapHandler) artifact(artifact worldmap.Artifact) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		file, info, _, err := h.maps.OpenArtifact(c.Param("mapId"), artifact)
+		if err != nil {
+			worldMapFailure(c, err)
+			return
+		}
+		defer file.Close()
+		c.Header("Content-Type", "application/json; charset=utf-8")
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("Cache-Control", "private, max-age=31536000, immutable")
+		http.ServeContent(c.Writer, c.Request, string(artifact)+".json", info.ModTime(), file)
+	}
 }
 
 func worldMapFailure(c *gin.Context, err error) {
