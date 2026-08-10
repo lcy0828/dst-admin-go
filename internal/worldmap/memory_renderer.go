@@ -28,7 +28,7 @@ func (*MemoryRenderer) Available() (bool, string) { return true, "memory" }
 func (*MemoryRenderer) Info() RendererInfo {
 	return RendererInfo{
 		Available: true, Path: "memory", ProtocolVersion: maprenderer.ProtocolVersion, Version: "test",
-		Artifacts: []string{maprenderer.TerrainFileName, maprenderer.ManifestFileName, maprenderer.FeaturesFileName},
+		Artifacts: []string{maprenderer.TerrainFileName, maprenderer.IconsFileName, maprenderer.ManifestFileName, maprenderer.FeaturesFileName},
 	}
 }
 
@@ -49,6 +49,19 @@ func (*MemoryRenderer) Render(ctx context.Context, input, output string, layers 
 	if closeErr != nil {
 		return closeErr
 	}
+	icons := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	iconsFile, err := os.OpenFile(filepath.Join(output, maprenderer.IconsFileName), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0640)
+	if err != nil {
+		return err
+	}
+	encodeErr := png.Encode(iconsFile, icons)
+	closeErr = iconsFile.Close()
+	if encodeErr != nil {
+		return encodeErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
 	sourceSHA256 := hex.EncodeToString(hash.Sum(nil))
 	canvas := image.NewRGBA(image.Rect(0, 0, 960, 640))
 	draw.Draw(canvas, canvas.Bounds(), &image.Uniform{C: color.RGBA{R: 29, G: 74, B: 48, A: 255}}, image.Point{}, draw.Src)
@@ -60,7 +73,7 @@ func (*MemoryRenderer) Render(ctx context.Context, input, output string, layers 
 	if err != nil {
 		return err
 	}
-	encodeErr := png.Encode(file, canvas)
+	encodeErr = png.Encode(file, canvas)
 	closeErr = file.Close()
 	if encodeErr != nil {
 		return encodeErr
@@ -85,6 +98,7 @@ func (*MemoryRenderer) Render(ctx context.Context, input, output string, layers 
 		},
 		Layers: []maprenderer.LayerDescriptor{
 			{ID: "terrain", Kind: "raster", File: maprenderer.TerrainFileName, MimeType: "image/png"},
+			{ID: "icons", Kind: "sprite", File: maprenderer.IconsFileName, MimeType: "image/png"},
 			{ID: "features", Kind: "vector", File: maprenderer.FeaturesFileName, MimeType: "application/json"},
 		},
 		Statistics: maprenderer.Statistics{TileCount: 240 * 160, PrefabCounts: map[string]int{}},

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
 	"io"
 	"os"
 	"path/filepath"
@@ -36,7 +37,7 @@ func (r *Renderer) Probe() Probe {
 		ProtocolVersion: ProtocolVersion, RendererVersion: r.Version,
 		Capabilities: Capabilities{
 			InputFormats: []string{"lua", "klei-text-v1", "klei-deflate-v1"},
-			Artifacts:    []string{TerrainFileName, ManifestFileName, FeaturesFileName},
+			Artifacts:    []string{TerrainFileName, IconsFileName, ManifestFileName, FeaturesFileName},
 			MaxInputSize: MaxInputSize,
 		},
 	}
@@ -87,6 +88,23 @@ func (r *Renderer) Render(ctx context.Context, inputPath, outputDirectory string
 	if unknownTiles > 0 {
 		parsed.Warnings = appendWarning(parsed.Warnings, fmt.Sprintf("%d 个地形块没有可用的官方小地图纹理，已使用稳定备用颜色显示", unknownTiles))
 	}
+	iconSprite, iconFeatureCount, err := RenderOfficialIcons(&parsed, assets)
+	if err != nil {
+		return Manifest{}, err
+	}
+	iconsPath := filepath.Join(outputDirectory, IconsFileName)
+	icons, err := os.OpenFile(iconsPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("create icon sprite output: %w", err)
+	}
+	iconsErr := png.Encode(icons, iconSprite)
+	iconsCloseErr := icons.Close()
+	if iconsErr != nil {
+		return Manifest{}, fmt.Errorf("encode icon sprite PNG: %w", iconsErr)
+	}
+	if iconsCloseErr != nil {
+		return Manifest{}, fmt.Errorf("close icon sprite output: %w", iconsCloseErr)
+	}
 	prefabCounts := make(map[string]int)
 	for _, feature := range parsed.Features {
 		prefabCounts[feature.Prefab]++
@@ -112,11 +130,12 @@ func (r *Renderer) Render(ctx context.Context, inputPath, outputDirectory string
 		},
 		Layers: []LayerDescriptor{
 			{ID: "terrain", Kind: "raster", File: TerrainFileName, MimeType: "image/png"},
+			{ID: "icons", Kind: "sprite", File: IconsFileName, MimeType: "image/png"},
 			{ID: "features", Kind: "vector", File: FeaturesFileName, MimeType: "application/json"},
 		},
 		Statistics: Statistics{
 			TileCount: len(parsed.TileIDs), UnknownTileCount: unknownTiles,
-			FeatureCount: len(parsed.Features), PrefabCounts: prefabCounts,
+			FeatureCount: len(parsed.Features), IconFeatureCount: iconFeatureCount, PrefabCounts: prefabCounts,
 		},
 		WorldState: parsed.WorldState, Warnings: parsed.Warnings,
 	}

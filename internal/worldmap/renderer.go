@@ -118,7 +118,7 @@ func probeRenderer(ctx context.Context, path, assetsPath string) RendererInfo {
 	if strings.TrimSpace(probe.RendererVersion) == "" {
 		return RendererInfo{Path: path, ProtocolVersion: probe.ProtocolVersion, Artifacts: append([]string(nil), probe.Capabilities.Artifacts...), Error: "renderer version is missing"}
 	}
-	for _, required := range []string{maprenderer.TerrainFileName, maprenderer.ManifestFileName, maprenderer.FeaturesFileName} {
+	for _, required := range []string{maprenderer.TerrainFileName, maprenderer.IconsFileName, maprenderer.ManifestFileName, maprenderer.FeaturesFileName} {
 		if !containsString(probe.Capabilities.Artifacts, required) {
 			return RendererInfo{
 				Path: path, ProtocolVersion: probe.ProtocolVersion, Version: probe.RendererVersion,
@@ -263,5 +263,5 @@ func (w *limitedBuffer) Write(value []byte) (int, error) {
 }
 
 func layerFileName(layer Layer) string {
-	return map[Layer]string{LayerTerrain: maprenderer.TerrainFileName}[layer]
+	return map[Layer]string{LayerTerrain: maprenderer.TerrainFileName, LayerIcons: maprenderer.IconsFileName}[layer]
 }

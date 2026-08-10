@@ -234,7 +234,7 @@ func TestExecRendererUsesArgumentArray(t *testing.T) {
 	root := t.TempDir()
 	executable := filepath.Join(root, "renderer")
 	argumentsFile := filepath.Join(root, "arguments")
-	script := "#!/bin/sh\nif [ \"$1\" = \"--probe\" ]; then\n  printf '%s\\n' '{\"protocolVersion\":\"1\",\"rendererVersion\":\"test\",\"capabilities\":{\"inputFormats\":[\"session\"],\"artifacts\":[\"terrain.png\",\"manifest.json\",\"features.json\"],\"maxInputSize\":1}}'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > \"$DST_MAP_TEST_ARGUMENTS\"\n"
+	script := "#!/bin/sh\nif [ \"$1\" = \"--probe\" ]; then\n  printf '%s\\n' '{\"protocolVersion\":\"1\",\"rendererVersion\":\"test\",\"capabilities\":{\"inputFormats\":[\"session\"],\"artifacts\":[\"terrain.png\",\"icons.png\",\"manifest.json\",\"features.json\"],\"maxInputSize\":1}}'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > \"$DST_MAP_TEST_ARGUMENTS\"\n"
 	if err := os.WriteFile(executable, []byte(script), 0750); err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestExecRendererUsesArgumentArray(t *testing.T) {
 func TestRendererProbeAllowsAdditiveCapabilitiesAndRejectsIncompatibleProtocol(t *testing.T) {
 	root := t.TempDir()
 	compatible := filepath.Join(root, "compatible")
-	compatibleScript := "#!/bin/sh\nprintf '%s\\n' '{\"protocolVersion\":\"1\",\"rendererVersion\":\"future\",\"capabilities\":{\"inputFormats\":[\"session\"],\"artifacts\":[\"terrain.png\",\"manifest.json\",\"features.json\"],\"maxInputSize\":1,\"futureField\":true},\"futureRoot\":true}'\n"
+	compatibleScript := "#!/bin/sh\nprintf '%s\\n' '{\"protocolVersion\":\"1\",\"rendererVersion\":\"future\",\"capabilities\":{\"inputFormats\":[\"session\"],\"artifacts\":[\"terrain.png\",\"icons.png\",\"manifest.json\",\"features.json\"],\"maxInputSize\":1,\"futureField\":true},\"futureRoot\":true}'\n"
 	if err := os.WriteFile(compatible, []byte(compatibleScript), 0750); err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestRendererProbeAllowsAdditiveCapabilitiesAndRejectsIncompatibleProtocol(t
 	}
 
 	incompatible := filepath.Join(root, "incompatible")
-	incompatibleScript := "#!/bin/sh\nprintf '%s\\n' '{\"protocolVersion\":\"2\",\"rendererVersion\":\"future\",\"capabilities\":{\"artifacts\":[\"terrain.png\",\"manifest.json\",\"features.json\"]}}'\n"
+	incompatibleScript := "#!/bin/sh\nprintf '%s\\n' '{\"protocolVersion\":\"2\",\"rendererVersion\":\"future\",\"capabilities\":{\"artifacts\":[\"terrain.png\",\"icons.png\",\"manifest.json\",\"features.json\"]}}'\n"
 	if err := os.WriteFile(incompatible, []byte(incompatibleScript), 0750); err != nil {
 		t.Fatal(err)
 	}

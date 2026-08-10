@@ -7,6 +7,7 @@ const (
 	TerrainFileName  = "terrain.png"
 	ManifestFileName = "manifest.json"
 	FeaturesFileName = "features.json"
+	IconsFileName    = "icons.png"
 )
 
 type Probe struct {
@@ -67,6 +68,7 @@ type Statistics struct {
 	TileCount        int            `json:"tileCount"`
 	UnknownTileCount int            `json:"unknownTileCount"`
 	FeatureCount     int            `json:"featureCount"`
+	IconFeatureCount int            `json:"iconFeatureCount"`
 	PrefabCounts     map[string]int `json:"prefabCounts"`
 }
 
@@ -83,7 +85,15 @@ type Feature struct {
 	Z          float64                `json:"z"`
 	PixelX     float64                `json:"pixelX"`
 	PixelY     float64                `json:"pixelY"`
+	Icon       *IconReference         `json:"icon,omitempty"`
 	Properties map[string]interface{} `json:"properties"`
+}
+
+type IconReference struct {
+	X      int `json:"x"`
+	Y      int `json:"y"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
 }
 
 type Road struct {

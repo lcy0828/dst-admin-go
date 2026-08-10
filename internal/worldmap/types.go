@@ -6,6 +6,7 @@ type Layer string
 
 const (
 	LayerTerrain    Layer = "terrain"
+	LayerIcons      Layer = "icons"
 	LayerFeatures   Layer = "features"
 	LayerWorldState Layer = "worldState"
 )

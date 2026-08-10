@@ -344,7 +344,7 @@ func (s *Service) OpenImage(id string, layer Layer) (*os.File, os.FileInfo, Map,
 	if err != nil {
 		return nil, nil, Map{}, err
 	}
-	if value.Status != "succeeded" || !containsLayer(value.Layers, layer) {
+	if value.Status != "succeeded" || (layer != LayerIcons && !containsLayer(value.Layers, layer)) {
 		return nil, nil, Map{}, ErrMapImageNotFound
 	}
 	if _, err := uuid.Parse(id); err != nil {
@@ -543,6 +543,7 @@ func (s *Service) resolveSession(id, expectedRoomID, expectedWorldID string) (st
 func validateRendererArtifacts(root, sourceSHA256 string) (maprenderer.Manifest, error) {
 	expected := map[string]int64{
 		maprenderer.TerrainFileName:  maxLayerImageSize,
+		maprenderer.IconsFileName:    maxLayerImageSize,
 		maprenderer.ManifestFileName: maxManifestSize,
 		maprenderer.FeaturesFileName: maxFeaturesSize,
 	}
@@ -551,7 +552,7 @@ func validateRendererArtifacts(root, sourceSHA256 string) (maprenderer.Manifest,
 		return maprenderer.Manifest{}, err
 	}
 	if len(entries) != len(expected) {
-		return maprenderer.Manifest{}, fmt.Errorf("%w: renderer must emit exactly three v1 artifacts", ErrRendererOutput)
+		return maprenderer.Manifest{}, fmt.Errorf("%w: renderer must emit exactly four v1 artifacts", ErrRendererOutput)
 	}
 	for _, entry := range entries {
 		limit, ok := expected[entry.Name()]
@@ -576,7 +577,7 @@ func validateRendererArtifacts(root, sourceSHA256 string) (maprenderer.Manifest,
 	if manifest.Map.ImageWidth <= 0 || manifest.Map.ImageHeight <= 0 || manifest.Map.ImageWidth > maxMapDimension || manifest.Map.ImageHeight > maxMapDimension || manifest.Map.TileWidth <= 0 || manifest.Map.TileHeight <= 0 || manifest.Map.PixelsPerTile <= 0 || manifest.Map.WorldUnitsPerTile <= 0 {
 		return maprenderer.Manifest{}, fmt.Errorf("%w: manifest map dimensions are invalid", ErrRendererOutput)
 	}
-	if !manifestHasLayer(manifest, "terrain", "raster", maprenderer.TerrainFileName, "image/png") || !manifestHasLayer(manifest, "features", "vector", maprenderer.FeaturesFileName, "application/json") {
+	if !manifestHasLayer(manifest, "terrain", "raster", maprenderer.TerrainFileName, "image/png") || !manifestHasLayer(manifest, "icons", "sprite", maprenderer.IconsFileName, "image/png") || !manifestHasLayer(manifest, "features", "vector", maprenderer.FeaturesFileName, "application/json") {
 		return maprenderer.Manifest{}, fmt.Errorf("%w: manifest layer descriptors are incomplete", ErrRendererOutput)
 	}
 	terrain, err := os.Open(filepath.Join(root, maprenderer.TerrainFileName))
@@ -588,6 +589,15 @@ func validateRendererArtifacts(root, sourceSHA256 string) (maprenderer.Manifest,
 	if decodeErr != nil || imageConfig.Width != manifest.Map.ImageWidth || imageConfig.Height != manifest.Map.ImageHeight {
 		return maprenderer.Manifest{}, fmt.Errorf("%w: terrain PNG does not match the manifest", ErrRendererOutput)
 	}
+	icons, err := os.Open(filepath.Join(root, maprenderer.IconsFileName))
+	if err != nil {
+		return maprenderer.Manifest{}, err
+	}
+	iconsConfig, iconsDecodeErr := png.DecodeConfig(io.LimitReader(icons, maxLayerImageSize))
+	_ = icons.Close()
+	if iconsDecodeErr != nil || iconsConfig.Width <= 0 || iconsConfig.Height <= 0 || iconsConfig.Width > maxMapDimension || iconsConfig.Height > maxMapDimension {
+		return maprenderer.Manifest{}, fmt.Errorf("%w: icon sprite PNG is invalid", ErrRendererOutput)
+	}
 	var features maprenderer.FeatureCollection
 	if err := decodeArtifactJSON(filepath.Join(root, maprenderer.FeaturesFileName), maxFeaturesSize, &features); err != nil {
 		return maprenderer.Manifest{}, fmt.Errorf("%w: invalid features: %v", ErrRendererOutput, err)
@@ -595,9 +605,15 @@ func validateRendererArtifacts(root, sourceSHA256 string) (maprenderer.Manifest,
 	if features.ProtocolVersion != maprenderer.ProtocolVersion || len(features.Features) != manifest.Statistics.FeatureCount {
 		return maprenderer.Manifest{}, fmt.Errorf("%w: feature collection metadata does not match the manifest", ErrRendererOutput)
 	}
+	if manifest.Statistics.IconFeatureCount < 0 || manifest.Statistics.IconFeatureCount > manifest.Statistics.FeatureCount {
+		return maprenderer.Manifest{}, fmt.Errorf("%w: icon statistics are invalid", ErrRendererOutput)
+	}
 	for _, feature := range features.Features {
 		if feature.ID == "" || feature.Prefab == "" || feature.Category == "" || !finite(feature.X) || !finite(feature.Z) || !finite(feature.PixelX) || !finite(feature.PixelY) {
 			return maprenderer.Manifest{}, fmt.Errorf("%w: feature collection contains an invalid feature", ErrRendererOutput)
+		}
+		if feature.Icon != nil && (feature.Icon.X < 0 || feature.Icon.Y < 0 || feature.Icon.Width <= 0 || feature.Icon.Height <= 0 || feature.Icon.X+feature.Icon.Width > iconsConfig.Width || feature.Icon.Y+feature.Icon.Height > iconsConfig.Height) {
+			return maprenderer.Manifest{}, fmt.Errorf("%w: feature collection contains an invalid icon reference", ErrRendererOutput)
 		}
 	}
 	return manifest, nil
