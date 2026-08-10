@@ -12,10 +12,12 @@ import (
 )
 
 type TileDefinition struct {
-	Name        string
-	StaticID    uint16
-	Noise       string
-	RenderOrder int
+	Name            string
+	StaticID        uint16
+	Noise           string
+	MinimapColor    [4]uint8
+	HasMinimapColor bool
+	RenderOrder     int
 }
 
 var groundEntryPattern = regexp.MustCompile(`(?m)^\s*([A-Z][A-Z0-9_]*)\s*=\s*([0-9]+)\s*,`)
@@ -52,6 +54,22 @@ func LoadTileDefinitions(ctx context.Context, assets *AssetSource) ([]TileDefini
 		if minimap, ok := state.Get(5).(*lua.LTable); ok {
 			if value, stringOK := minimap.RawGetString("noise_texture").(lua.LString); stringOK {
 				definition.Noise = string(value)
+			}
+		}
+		if ground, ok := state.Get(4).(*lua.LTable); ok {
+			if colors, colorsOK := ground.RawGetString("colors").(*lua.LTable); colorsOK {
+				if minimapColor, colorOK := colors.RawGetString("minimap_color").(*lua.LTable); colorOK {
+					valid := true
+					for index := 1; index <= 4; index++ {
+						value, numberOK := minimapColor.RawGetInt(index).(lua.LNumber)
+						if !numberOK || value < 0 || value > 255 {
+							valid = false
+							break
+						}
+						definition.MinimapColor[index-1] = uint8(value)
+					}
+					definition.HasMinimapColor = valid
+				}
 			}
 		}
 		definitions = append(definitions, definition)

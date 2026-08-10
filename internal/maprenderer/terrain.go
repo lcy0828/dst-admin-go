@@ -158,7 +158,7 @@ func renderTerrainLayer(canvas *image.NRGBA, parsed ParsedSave, scale int, names
 			if edgeNumber == 0 {
 				continue
 			}
-			renderTerrainTile(canvas, parsed.TileHeight, tileX, tileY, scale, layer.texture, edges.texture, edges.elements[edgeNumber])
+			renderTerrainTile(canvas, parsed.TileHeight, tileX, tileY, scale, layer, edges.texture, edges.elements[edgeNumber])
 		}
 	}
 }
@@ -209,7 +209,8 @@ func tileNameAt(names []string, width, height, x, y int) string {
 	return names[y*width+x]
 }
 
-func renderTerrainTile(canvas *image.NRGBA, tileHeight, tileX, tileY, scale int, noise, mask *image.NRGBA, maskBounds image.Rectangle) {
+func renderTerrainTile(canvas *image.NRGBA, tileHeight, tileX, tileY, scale int, layer terrainLayer, mask *image.NRGBA, maskBounds image.Rectangle) {
+	noise := layer.texture
 	imageY := tileHeight - tileY - 1
 	for offsetY := 0; offsetY < scale; offsetY++ {
 		for offsetX := 0; offsetX < scale; offsetX++ {
@@ -226,14 +227,35 @@ func renderTerrainTile(canvas *image.NRGBA, tileHeight, tileX, tileY, scale int,
 			noiseX := positiveModulo(int(math.Floor(worldX/noiseWorldRepeat*float64(noise.Bounds().Dx()))), noise.Bounds().Dx())
 			noiseY := positiveModulo(int(math.Floor(worldZ/noiseWorldRepeat*float64(noise.Bounds().Dy()))), noise.Bounds().Dy())
 			noiseColor := noise.NRGBAAt(noise.Bounds().Min.X+noiseX, noise.Bounds().Min.Y+noiseY)
-			source := color.NRGBA{
-				R: uint8(uint16(maskColor.R) * uint16(noiseColor.R) / 255),
-				G: uint8(uint16(maskColor.G) * uint16(noiseColor.G) / 255),
-				B: uint8(uint16(maskColor.B) * uint16(noiseColor.B) / 255),
-				A: uint8(uint16(maskColor.A) * uint16(noiseColor.A) / 255),
-			}
+			source := minimapTerrainColor(layer.definition, maskColor, noiseColor)
 			blendNRGBA(canvas, x, y, source)
 		}
+	}
+}
+
+func minimapTerrainColor(definition TileDefinition, maskColor, noiseColor color.NRGBA) color.NRGBA {
+	alpha := uint8(uint16(maskColor.A) * uint16(noiseColor.A) / 255)
+	if !definition.HasMinimapColor {
+		return color.NRGBA{
+			R: uint8(uint16(maskColor.R) * uint16(noiseColor.R) / 255),
+			G: uint8(uint16(maskColor.G) * uint16(noiseColor.G) / 255),
+			B: uint8(uint16(maskColor.B) * uint16(noiseColor.B) / 255),
+			A: alpha,
+		}
+	}
+	// Ocean tiles use the official per-depth minimap tint. Noise and map paper
+	// contribute luminance while the tint retains the game's depth bands.
+	noiseLight := (float64(noiseColor.R)*0.299 + float64(noiseColor.G)*0.587 + float64(noiseColor.B)*0.114) / 255
+	maskLight := (float64(maskColor.R)*0.299 + float64(maskColor.G)*0.587 + float64(maskColor.B)*0.114) / 255
+	factor := (0.72 + noiseLight*0.5) * (0.78 + maskLight*0.28)
+	tinted := func(value uint8) uint8 {
+		return uint8(math.Min(255, math.Round(float64(value)*factor)))
+	}
+	return color.NRGBA{
+		R: tinted(definition.MinimapColor[0]),
+		G: tinted(definition.MinimapColor[1]),
+		B: tinted(definition.MinimapColor[2]),
+		A: alpha,
 	}
 }
 

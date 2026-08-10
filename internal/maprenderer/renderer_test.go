@@ -31,7 +31,7 @@ func fixtureAssets(t *testing.T) string {
 TileManager.RegisterTileRange("LAND", 1, 10)
 TileManager.AddTile("IMPASSABLE", "LAND", {old_static_id=GROUND.IMPASSABLE}, {}, {noise_texture="mini_impassable"})
 TileManager.AddTile("GRASS", "LAND", {old_static_id=GROUND.GRASS}, {}, {noise_texture="mini_grass_noise"})
-TileManager.AddTile("OCEAN_COASTAL", "OCEAN", {old_static_id=GROUND.OCEAN_COASTAL}, {}, {noise_texture="ocean_noise"})
+TileManager.AddTile("OCEAN_COASTAL", "OCEAN", {old_static_id=GROUND.OCEAN_COASTAL}, {colors={minimap_color={23,51,62,102}}}, {noise_texture="ocean_noise"})
 `
 	writeFixtureZip(t, filepath.Join(root, "databundles", "scripts.zip"), map[string][]byte{
 		"scripts/constants.lua": []byte(constants), "scripts/tiledefs.lua": []byte(tiledefs),
@@ -228,6 +228,26 @@ func TestParseHonorsContextCancellation(t *testing.T) {
 	}
 }
 
+func TestTileDefinitionsCaptureOfficialOceanMinimapColor(t *testing.T) {
+	assets, err := DiscoverAssets(fixtureAssets(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	definitions, err := LoadTileDefinitions(context.Background(), assets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, definition := range definitions {
+		if definition.Name == "OCEAN_COASTAL" {
+			if !definition.HasMinimapColor || definition.MinimapColor != ([4]uint8{23, 51, 62, 102}) {
+				t.Fatalf("ocean minimap color = %#v", definition)
+			}
+			return
+		}
+	}
+	t.Fatal("ocean tile definition was not loaded")
+}
+
 func TestRendererWritesProtocolArtifacts(t *testing.T) {
 	root := t.TempDir()
 	input := filepath.Join(root, "snapshot")
@@ -257,7 +277,10 @@ func TestRendererWritesProtocolArtifacts(t *testing.T) {
 	if err != nil || decoded.Bounds().Dx() != 16 || decoded.Bounds().Dy() != 16 {
 		t.Fatalf("terrain bounds = %#v, %v", decoded.Bounds(), err)
 	}
-	if got := color.NRGBAModel.Convert(decoded.At(0, 0)).(color.NRGBA); got != (color.NRGBA{R: 30, G: 90, B: 130, A: 255}) {
+	if got := color.NRGBAModel.Convert(decoded.At(0, 0)).(color.NRGBA); got != minimapTerrainColor(
+		TileDefinition{HasMinimapColor: true, MinimapColor: [4]uint8{23, 51, 62, 102}},
+		color.NRGBA{R: 255, G: 255, B: 255, A: 255}, color.NRGBA{R: 30, G: 90, B: 130, A: 255},
+	) {
 		t.Fatalf("top-left tile = %#v", got)
 	}
 	if got := color.NRGBAModel.Convert(decoded.At(0, 15)).(color.NRGBA); got != (color.NRGBA{R: 40, G: 40, B: 40, A: 255}) {
