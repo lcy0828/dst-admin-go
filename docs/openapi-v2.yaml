@@ -3621,7 +3621,7 @@ components:
           $ref: "#/components/schemas/Meta"
     MapLayer:
       type: string
-      enum: [terrain, features, worldState, walrusCamps, spawnPoints, players]
+      enum: [terrain, features, worldState]
     SessionSnapshot:
       type: object
       additionalProperties: false

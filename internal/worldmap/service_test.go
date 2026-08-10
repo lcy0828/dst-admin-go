@@ -71,39 +71,6 @@ func newMapService(t *testing.T, renderer Renderer, retention int) (*Service, st
 	return service, sessionRoot, mapRoot
 }
 
-func TestStoreMigrationAddsRendererMetadataToPopulatedLegacyTable(t *testing.T) {
-	db, err := gorm.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	db.DB().SetMaxOpenConns(1)
-	legacySchema := `CREATE TABLE upgrade_world_map (
-id char(36) PRIMARY KEY, room_id varchar(255) NOT NULL, world_id varchar(255) NOT NULL,
-session_id text NOT NULL, session_label varchar(255) NOT NULL, status varchar(16) NOT NULL,
-stage varchar(32), layers_json text NOT NULL, width integer NOT NULL, height integer NOT NULL,
-log text, error_message text, source_job_id char(36) NOT NULL, created_at datetime NOT NULL,
-finished_at datetime)`
-	if err := db.Exec(legacySchema).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Exec(`INSERT INTO upgrade_world_map
-(id, room_id, world_id, session_id, session_label, status, stage, layers_json, width, height, source_job_id, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		"86fc8959-76cf-495a-a13b-275628eb27de", "room", "world", "session", "legacy", "succeeded", "complete", `["terrain"]`, 960, 640, "job", time.Now().UTC(),
-	).Error; err != nil {
-		t.Fatal(err)
-	}
-	store := NewStore(db, "upgrade_")
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("migrate populated legacy table: %v", err)
-	}
-	value, err := store.Get("86fc8959-76cf-495a-a13b-275628eb27de")
-	if err != nil || value.FeatureCount != 0 || value.WarningCount != 0 {
-		t.Fatalf("migrated map = %#v, error = %v", value, err)
-	}
-}
-
 func TestSessionsDiscoverLatestSnapshotsAndIgnoreMetadataAndSymlinks(t *testing.T) {
 	service, sessionRoot, _ := newMapService(t, nil, 3)
 	second := filepath.Join(sessionRoot, "0000000002")
@@ -140,7 +107,7 @@ func TestGenerateValidatesLayersPublishesAtomicallyAndPrunes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	layers, err := normalizeLayers([]Layer{LayerPlayers, LayerTerrain, LayerPlayers})
+	layers, err := normalizeLayers([]Layer{LayerWorldState, LayerTerrain, LayerFeatures, LayerTerrain})
 	if err != nil || !reflect.DeepEqual(layers, []Layer{LayerTerrain, LayerFeatures, LayerWorldState}) {
 		t.Fatalf("layers = %#v, %v", layers, err)
 	}
@@ -248,6 +215,11 @@ func TestPrepareRejectsInvalidLayersAndConcurrentWorldGeneration(t *testing.T) {
 	if _, _, _, err := service.Prepare("room", GenerateRequest{WorldID: "world", SessionID: sessions[0].ID, Layers: []Layer{"bad"}}); !errors.Is(err, ErrInvalidLayers) {
 		t.Fatalf("invalid layers error = %v", err)
 	}
+	for _, legacy := range []Layer{"walrusCamps", "spawnPoints", "players"} {
+		if _, _, _, err := service.Prepare("room", GenerateRequest{WorldID: "world", SessionID: sessions[0].ID, Layers: []Layer{legacy}}); !errors.Is(err, ErrInvalidLayers) {
+			t.Fatalf("legacy layer %q error = %v", legacy, err)
+		}
+	}
 	_, _, release, err := service.Prepare("room", GenerateRequest{WorldID: "world", SessionID: sessions[0].ID})
 	if err != nil {
 		t.Fatal(err)
@@ -273,7 +245,7 @@ func TestExecRendererUsesArgumentArray(t *testing.T) {
 	if err := os.Mkdir(output, 0750); err != nil {
 		t.Fatal(err)
 	}
-	if err := renderer.Render(context.Background(), input, output, []Layer{LayerTerrain, LayerPlayers}, io.Discard); err != nil {
+	if err := renderer.Render(context.Background(), input, output, []Layer{LayerTerrain, LayerFeatures}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(argumentsFile)
@@ -281,7 +253,7 @@ func TestExecRendererUsesArgumentArray(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	expected := []string{"--input", input, "--output", output, "--layers", "terrain,players"}
+	expected := []string{"--input", input, "--output", output, "--layers", "terrain,features"}
 	if !reflect.DeepEqual(lines, expected) {
 		t.Fatalf("arguments = %#v", lines)
 	}

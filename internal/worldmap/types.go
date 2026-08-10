@@ -5,12 +5,9 @@ import "time"
 type Layer string
 
 const (
-	LayerTerrain     Layer = "terrain"
-	LayerFeatures    Layer = "features"
-	LayerWalrusCamps Layer = "walrusCamps"
-	LayerSpawnPoints Layer = "spawnPoints"
-	LayerPlayers     Layer = "players"
-	LayerWorldState  Layer = "worldState"
+	LayerTerrain    Layer = "terrain"
+	LayerFeatures   Layer = "features"
+	LayerWorldState Layer = "worldState"
 )
 
 type Session struct {

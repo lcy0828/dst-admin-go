@@ -710,7 +710,6 @@ func (r *contextReader) Read(value []byte) (int, error) {
 func normalizeLayers(input []Layer) ([]Layer, error) {
 	allowed := map[Layer]bool{
 		LayerTerrain: true, LayerFeatures: true, LayerWorldState: true,
-		LayerWalrusCamps: true, LayerSpawnPoints: true, LayerPlayers: true,
 	}
 	for _, layer := range input {
 		if !allowed[layer] {
