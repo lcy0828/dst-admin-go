@@ -71,6 +71,39 @@ func newMapService(t *testing.T, renderer Renderer, retention int) (*Service, st
 	return service, sessionRoot, mapRoot
 }
 
+func TestStoreMigrationAddsRendererMetadataToPopulatedLegacyTable(t *testing.T) {
+	db, err := gorm.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.DB().SetMaxOpenConns(1)
+	legacySchema := `CREATE TABLE upgrade_world_map (
+id char(36) PRIMARY KEY, room_id varchar(255) NOT NULL, world_id varchar(255) NOT NULL,
+session_id text NOT NULL, session_label varchar(255) NOT NULL, status varchar(16) NOT NULL,
+stage varchar(32), layers_json text NOT NULL, width integer NOT NULL, height integer NOT NULL,
+log text, error_message text, source_job_id char(36) NOT NULL, created_at datetime NOT NULL,
+finished_at datetime)`
+	if err := db.Exec(legacySchema).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`INSERT INTO upgrade_world_map
+(id, room_id, world_id, session_id, session_label, status, stage, layers_json, width, height, source_job_id, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"86fc8959-76cf-495a-a13b-275628eb27de", "room", "world", "session", "legacy", "succeeded", "complete", `["terrain"]`, 960, 640, "job", time.Now().UTC(),
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(db, "upgrade_")
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate populated legacy table: %v", err)
+	}
+	value, err := store.Get("86fc8959-76cf-495a-a13b-275628eb27de")
+	if err != nil || value.FeatureCount != 0 || value.WarningCount != 0 {
+		t.Fatalf("migrated map = %#v, error = %v", value, err)
+	}
+}
+
 func TestSessionsDiscoverLatestSnapshotsAndIgnoreMetadataAndSymlinks(t *testing.T) {
 	service, sessionRoot, _ := newMapService(t, nil, 3)
 	second := filepath.Join(sessionRoot, "0000000002")

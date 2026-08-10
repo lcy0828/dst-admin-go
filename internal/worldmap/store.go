@@ -23,8 +23,8 @@ type mapRecord struct {
 	LayersJSON      string    `gorm:"type:text;not null"`
 	Width           int       `gorm:"not null"`
 	Height          int       `gorm:"not null"`
-	FeatureCount    int       `gorm:"not null"`
-	WarningCount    int       `gorm:"not null"`
+	FeatureCount    int       `gorm:"not null;default:0"`
+	WarningCount    int       `gorm:"not null;default:0"`
 	SourceSHA256    string    `gorm:"type:char(64)"`
 	RendererVersion string    `gorm:"type:varchar(128)"`
 	Log             string    `gorm:"type:text"`
