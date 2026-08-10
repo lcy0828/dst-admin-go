@@ -67,6 +67,7 @@ CGO_ENABLED=0 go build -trimpath \
 - 生产部署与回滚：`docs/deployment-and-rollback.md`
 - Mod 兼容策略：`docs/mod-management.md`
 - 地图渲染器：`docs/map-renderer.md`
+- 产品矩阵架构：`docs/dst-platform-matrix.md`
 
 ## Agent
 
