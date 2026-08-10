@@ -16,6 +16,7 @@ go build -trimpath -ldflags "-X main.version=$(git describe --tags --always)" \
 3. 当前 `PATH` 中的 `dst-map-renderer`。
 
 地图目录通过 `DST_ADMIN_MAP_PATH` 或 `[paths] DST_MAP_PATH` 配置。服务账号必须能创建该目录及其中的暂存目录。
+渲染器还会从 `DST_SERVER_PATH` 定位当前安装版本的官方 `data` 目录；它接受 data 目录、游戏根目录、macOS `.app` 或其上级 `Don't Starve Together` 目录。官方资源只在本机读取，不会复制到地图产物或项目发行包。
 
 ```ini
 [map]
@@ -30,10 +31,10 @@ DST_MAP_PATH = /var/lib/dst-admin/maps
 API 在启用地图功能前执行一个 3 秒、有大小上限的探针：
 
 ```text
-dst-map-renderer --probe
+dst-map-renderer --probe --assets <dst-installation-or-data-directory>
 ```
 
-Renderer v1 必须返回 JSON，并声明 `protocolVersion: "1"`、非空版本号以及三个固定产物。允许新增字段，以便兼容后续能力扩展。
+Renderer v1 必须返回 JSON，并声明 `protocolVersion: "1"`、非空版本号以及四个固定产物。允许新增字段，以便兼容后续能力扩展。
 
 ```json
 {
@@ -41,7 +42,7 @@ Renderer v1 必须返回 JSON，并声明 `protocolVersion: "1"`、非空版本�
   "rendererVersion": "v1.0.0",
   "capabilities": {
     "inputFormats": ["lua-session", "klei-text-v1", "klei-base64-deflate-v1"],
-    "artifacts": ["terrain.png", "manifest.json", "features.json"],
+    "artifacts": ["terrain.png", "icons.png", "manifest.json", "features.json"],
     "maxInputSize": 134217728
   }
 }
@@ -57,6 +58,7 @@ API 不经 shell，以参数数组启动进程：
 dst-map-renderer \
   --input <read-only-session-snapshot> \
   --output <empty-private-directory> \
+  --assets <dst-installation-or-data-directory> \
   --layers terrain,features,worldState \
   --timeout <duration>
 ```
@@ -72,16 +74,17 @@ dst-map-renderer \
 | 文件 | 用途 | API |
 | --- | --- | --- |
 | `terrain.png` | 地形底图 | `GET /api/v2/maps/{mapId}/images/terrain` |
+| `icons.png` | 本次地图使用的官方小地图图标精灵 | `GET /api/v2/maps/{mapId}/images/icons` |
 | `manifest.json` | 尺寸、坐标变换、世界状态、统计和 warning | `GET /api/v2/maps/{mapId}/manifest` |
 | `features.json` | 玩家、出生点、资源、建筑及未知 MOD prefab | `GET /api/v2/maps/{mapId}/features` |
 
-`manifest.sourceSha256` 必须等于 API 快照哈希。三个文件必须恰好存在、是普通非链接文件并满足大小上限；PNG 尺寸、Feature 数量、协议版本和图层描述必须互相一致。校验完成前不会发布任何文件。
+`manifest.sourceSha256` 必须等于 API 快照哈希。四个文件必须恰好存在、是普通非链接文件并满足大小上限；PNG 尺寸、Feature 数量、图标坐标、协议版本和图层描述必须互相一致。校验完成前不会发布任何文件。
 
 ## Session 与 MOD 兼容
 
 内置解析器支持普通 Lua Session、`KLEI     1` 文本以及 `KLEI0001 + Base64 + 16-byte header + raw Deflate`。Lua 运行在受限 `gopher-lua` 环境中，带执行超时、输入/解压/JSON 上限以及属性深度和数量限制。
 
-未知 MOD prefab 不会被丢弃，原始 prefab、坐标、分类和受限属性会写入 `features.json`。未知 Tile ID 使用由 ID 稳定派生的备用色，同时写入 warning。Renderer 不依赖图鉴数据库，因此 `/Users/lcy/dst` 或未来 Catalog 服务不可用时仍能生成基础地图。
+Renderer 从当前游戏的 `scripts/tiledefs.lua` 读取官方 Tile 顺序，并使用 Session 的 `world_tile_map` 解释实际 ID；地形由官方 KTEX 纹理、`map_edge` 遮罩和道路纹理生成。未知 MOD prefab 不会被丢弃，原始 prefab、坐标、分类和受限属性会写入 `features.json`；能匹配官方图标的实体还会携带 `icons.png` 精灵坐标。未知 MOD Tile 使用由 ID 稳定派生的备用色并写入 warning。Renderer 不依赖图鉴数据库，因此 `/Users/lcy/dst` 或未来 Catalog 服务不可用时仍能生成地图，但缺少当前 DST 官方资源时会明确失败。
 
 ## 任务状态与故障处理
 
@@ -95,7 +98,7 @@ dst-map-renderer \
 
 ## 部署验证
 
-1. 使用服务账号执行 `dst-map-renderer --probe`，确认协议为 `1`。
+1. 使用服务账号执行 `dst-map-renderer --probe --assets <DST_SERVER_PATH>`，确认协议为 `1`。
 2. 在“部署检查”确认 `mapRenderer.available` 和 `mapGeneration` 均为真。
 3. 用真实 Session 生成地图，核对 Manifest 中的 Tile/图片尺寸、Feature 数量和 `sourceSha256`。
 4. 检查地标方向：世界 X 正向向右，Z 正向向上，图片 Y 轴向下，因此只翻转 Y。

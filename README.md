@@ -58,6 +58,7 @@ CGO_ENABLED=0 go build -trimpath \
 ```
 
 两个二进制应发布到同一目录。API 会先检查显式配置，再检查自身所在目录，最后检查 `PATH`，并通过 Renderer v1 能力握手确认版本兼容；只有文件存在但握手失败不会启用地图功能。
+地图渲染还要求 `DST_SERVER_PATH` 可定位当前版本的官方 `data` 目录；渲染器在本机读取地形、道路和小地图图标资源，不会把 Klei 资源打包进项目。
 
 登录后可从 `GET /api/v2/system/status` 的 `application` 字段核对版本、提交和构建时间。
 

@@ -1391,7 +1391,7 @@ paths:
         required: true
         schema:
           type: string
-          enum: [terrain]
+          enum: [terrain, icons]
     get:
       tags: [Maps]
       operationId: getMapLayerImage
@@ -3777,7 +3777,7 @@ components:
           type: array
           items:
             type: string
-            enum: [terrain.png, manifest.json, features.json]
+            enum: [terrain.png, icons.png, manifest.json, features.json]
         error:
           type: string
     MapBounds:
@@ -3838,20 +3838,20 @@ components:
       properties:
         id:
           type: string
-          enum: [terrain, features]
+          enum: [terrain, icons, features]
         kind:
           type: string
-          enum: [raster, vector]
+          enum: [raster, sprite, vector]
         file:
           type: string
-          enum: [terrain.png, features.json]
+          enum: [terrain.png, icons.png, features.json]
         mimeType:
           type: string
           enum: [image/png, application/json]
     MapStatistics:
       type: object
       additionalProperties: false
-      required: [tileCount, unknownTileCount, featureCount, prefabCounts]
+      required: [tileCount, unknownTileCount, featureCount, iconFeatureCount, prefabCounts]
       properties:
         tileCount:
           type: integer
@@ -3860,6 +3860,9 @@ components:
           type: integer
           minimum: 0
         featureCount:
+          type: integer
+          minimum: 0
+        iconFeatureCount:
           type: integer
           minimum: 0
         prefabCounts:
@@ -3917,9 +3920,28 @@ components:
           type: number
         pixelY:
           type: number
+        icon:
+          $ref: "#/components/schemas/MapIconReference"
         properties:
           type: object
           additionalProperties: true
+    MapIconReference:
+      type: object
+      additionalProperties: false
+      required: [x, y, width, height]
+      properties:
+        x:
+          type: integer
+          minimum: 0
+        y:
+          type: integer
+          minimum: 0
+        width:
+          type: integer
+          minimum: 1
+        height:
+          type: integer
+          minimum: 1
     MapFeatureCollection:
       type: object
       additionalProperties: false
