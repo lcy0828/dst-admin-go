@@ -87,8 +87,8 @@ func NewService(config Config, roomCatalog RoomCatalog, runtime Runtime, backupC
 	}, nil
 }
 
-func (s *Service) Search(ctx context.Context, query string, page, pageSize int) (SearchResult, error) {
-	result, err := s.metadata.Search(ctx, query, page, pageSize)
+func (s *Service) Search(ctx context.Context, options SearchOptions) (SearchResult, error) {
+	result, err := s.metadata.Search(ctx, options)
 	for index := range result.Items {
 		normalizeSteamModCollections(&result.Items[index])
 	}
@@ -235,9 +235,7 @@ func (s *Service) buildModList(ctx context.Context, aggregates map[string]*modAg
 					state.FallbackUsed = parsed.FallbackUsed
 					state.FallbackReason = parsed.FallbackReason
 					state.Warnings = append(state.Warnings, parsed.Warnings...)
-					if state.Name == "" {
-						state.Name, _ = parsed.Values["name"].(string)
-					}
+					mergeLocalModInfo(&state.SteamMod, parsed.Values)
 				} else {
 					state.Warnings = append(state.Warnings, "modinfo.lua 解析失败："+sanitizeParserError(parseErr))
 				}
@@ -291,6 +289,16 @@ func (state *ModState) applyHealth() {
 	}
 	if state.Configured && !state.Enabled {
 		state.Health, state.HealthMessage = HealthDisabled, "所有已配置分片均已禁用"
+	}
+}
+
+func mergeLocalModInfo(item *SteamMod, values map[string]interface{}) {
+	for key, target := range map[string]*string{
+		"name": &item.Name, "author": &item.Author, "version": &item.Version, "description": &item.Description,
+	} {
+		if value, ok := values[key].(string); ok && strings.TrimSpace(value) != "" {
+			*target = strings.TrimSpace(value)
+		}
 	}
 }
 

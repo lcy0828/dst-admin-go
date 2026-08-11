@@ -17,11 +17,11 @@ import (
 
 type modHandlerService struct{}
 
-func (modHandlerService) Search(_ context.Context, query string, page, pageSize int) (mods.SearchResult, error) {
-	if !mods.ValidID(query) && query != "Global" {
+func (modHandlerService) Search(_ context.Context, options mods.SearchOptions) (mods.SearchResult, error) {
+	if !mods.ValidID(options.Query) && options.Query != "Global" && options.Query != "" {
 		return mods.SearchResult{}, &mods.FieldError{Fields: map[string]string{"query": "无效搜索"}}
 	}
-	return mods.SearchResult{Items: []mods.SteamMod{{ID: "378160973", Name: "Global Positions"}}, Total: 1, Page: page, PageSize: pageSize}, nil
+	return mods.SearchResult{Items: []mods.SteamMod{{ID: "378160973", Name: "Global Positions"}}, Total: 1, Page: options.Page, PageSize: options.PageSize}, nil
 }
 
 func (modHandlerService) List(context.Context, string) (mods.ModList, error) {

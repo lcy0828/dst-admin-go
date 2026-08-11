@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"dont/internal/jobs"
 	"dont/internal/mods"
@@ -22,7 +23,7 @@ type ModHandler struct {
 }
 
 type modService interface {
-	Search(context.Context, string, int, int) (mods.SearchResult, error)
+	Search(context.Context, mods.SearchOptions) (mods.SearchResult, error)
 	Library(context.Context) (mods.ModList, error)
 	List(context.Context, string) (mods.ModList, error)
 	Download(context.Context, mods.DownloadRequest, io.Writer) (mods.ActionResult, error)
@@ -118,11 +119,11 @@ func (h *ModHandler) addToRoom(c *gin.Context) {
 }
 
 func (h *ModHandler) search(c *gin.Context) {
-	page, pageSize, ok := modPagination(c)
+	options, ok := modSearchOptions(c)
 	if !ok {
 		return
 	}
-	value, err := h.mods.Search(c.Request.Context(), c.Query("query"), page, pageSize)
+	value, err := h.mods.Search(c.Request.Context(), options)
 	if err != nil {
 		modFailure(c, err)
 		return
@@ -131,7 +132,9 @@ func (h *ModHandler) search(c *gin.Context) {
 }
 
 func (h *ModHandler) details(c *gin.Context) {
-	value, err := h.mods.Search(c.Request.Context(), c.Param("modId"), 1, 1)
+	value, err := h.mods.Search(c.Request.Context(), mods.SearchOptions{
+		Query: c.Param("modId"), Sort: mods.SearchSortRelevance, Days: 7, Page: 1, PageSize: 1,
+	})
 	if err != nil {
 		modFailure(c, err)
 		return
@@ -355,6 +358,33 @@ func modPagination(c *gin.Context) (int, int, bool) {
 		}
 	}
 	return page, pageSize, true
+}
+
+func modSearchOptions(c *gin.Context) (mods.SearchOptions, bool) {
+	page, pageSize, ok := modPagination(c)
+	if !ok {
+		return mods.SearchOptions{}, false
+	}
+	days := 7
+	if value := c.Query("days"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			Failure(c, http.StatusUnprocessableEntity, "INVALID_MOD_SEARCH", "搜索时间参数无效", gin.H{"fields": gin.H{"days": "必须为整数"}})
+			return mods.SearchOptions{}, false
+		}
+		days = parsed
+	}
+	tags := c.QueryArray("tags")
+	if value := c.Query("tag"); value != "" {
+		tags = append(tags, value)
+	}
+	if len(tags) == 1 && strings.Contains(tags[0], ",") {
+		tags = strings.Split(tags[0], ",")
+	}
+	return mods.SearchOptions{
+		Query: c.Query("query"), Sort: mods.SearchSort(c.Query("sort")), Days: days,
+		Tags: tags, Page: page, PageSize: pageSize,
+	}, true
 }
 
 func bindModJSON(c *gin.Context, target interface{}) bool {

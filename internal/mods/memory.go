@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -21,36 +22,74 @@ func NewMemoryMetadataProvider() *MemoryMetadataProvider {
 		"378160973": {
 			ID: "378160973", Name: "Global Positions", AuthorID: "76561198000000001", Author: "E2E Author",
 			Description: "Share map positions with other players.", PreviewURL: "https://steamusercontent.example/378160973.webp",
-			Subscriptions: 2500000, Score: 0.96, UpdatedAt: now, Dependencies: []string{"123456789"}, Tags: []string{"Server", "Utility"},
+			Version: "1.0.0", Subscriptions: 2500000, Score: 0.96, RatingCount: 4200, UpdatedAt: now, Dependencies: []string{"123456789"}, Tags: []string{"server_admin", "utility"},
 		},
 		"123456789": {
 			ID: "123456789", Name: "Shared Library", AuthorID: "76561198000000002", Author: "Dependency Author",
 			Description: "Dependency used by the test Mod.", PreviewURL: "https://steamusercontent.example/123456789.webp",
-			Subscriptions: 100000, Score: 0.88, UpdatedAt: now.Add(-time.Hour), Tags: []string{"Library"},
+			Version: "1.0.0", Subscriptions: 100000, Score: 0.88, RatingCount: 500, UpdatedAt: now.Add(-time.Hour), Tags: []string{"utility"},
 		},
 		"987654321": {
 			ID: "987654321", Name: "Runtime Compatibility Mod", AuthorID: "76561198000000003", Author: "Fallback Author",
 			Description: "Exercises the external Lua compatibility path in test mode.", PreviewURL: "https://steamusercontent.example/987654321.webp",
-			Subscriptions: 42000, Score: 0.91, UpdatedAt: now.Add(-2 * time.Hour), Tags: []string{"Compatibility"},
+			Version: "1.0.0", Subscriptions: 42000, Score: 0.91, RatingCount: 200, UpdatedAt: now.Add(-2 * time.Hour), Tags: []string{"server_admin"},
 		},
 	}}
 }
 
-func (p *MemoryMetadataProvider) Search(_ context.Context, query string, page, pageSize int) (SearchResult, error) {
-	if err := validateSearch(query, page, pageSize); err != nil {
+func (p *MemoryMetadataProvider) Search(_ context.Context, options SearchOptions) (SearchResult, error) {
+	options = normalizeSearchOptions(options)
+	if err := validateSearch(options); err != nil {
 		return SearchResult{}, err
 	}
 	items := make([]SteamMod, 0)
 	for _, item := range p.Items {
-		if validModID(query) && item.ID != query {
+		if validModID(options.Query) && item.ID != options.Query {
 			continue
 		}
-		if !validModID(query) && !strings.Contains(strings.ToLower(item.Name), strings.ToLower(query)) {
+		if options.Query != "" && !validModID(options.Query) && !strings.Contains(strings.ToLower(item.Name), strings.ToLower(options.Query)) {
+			continue
+		}
+		if !containsAllTags(item.Tags, options.Tags) {
 			continue
 		}
 		items = append(items, item)
 	}
-	return SearchResult{Items: items, Total: len(items), Page: page, PageSize: pageSize}, nil
+	sortMemoryMods(items, options.Sort)
+	total := len(items)
+	start := min((options.Page-1)*options.PageSize, total)
+	end := min(start+options.PageSize, total)
+	return SearchResult{Items: items[start:end], Total: total, Page: options.Page, PageSize: options.PageSize}, nil
+}
+
+func containsAllTags(values, expected []string) bool {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[strings.ToLower(value)] = true
+	}
+	for _, value := range expected {
+		if !set[value] {
+			return false
+		}
+	}
+	return true
+}
+
+func sortMemoryMods(items []SteamMod, value SearchSort) {
+	sort.SliceStable(items, func(left, right int) bool {
+		switch value {
+		case SearchSortMostRecent:
+			return items[left].CreatedAt.After(items[right].CreatedAt)
+		case SearchSortLastUpdated:
+			return items[left].UpdatedAt.After(items[right].UpdatedAt)
+		case SearchSortMostSubscribed:
+			return items[left].Subscriptions > items[right].Subscriptions
+		case SearchSortTopRated:
+			return items[left].Score > items[right].Score
+		default:
+			return items[left].Name < items[right].Name
+		}
+	})
 }
 
 func (p *MemoryMetadataProvider) Details(_ context.Context, ids []string) (map[string]SteamMod, error) {

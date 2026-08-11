@@ -63,7 +63,7 @@ func TestSteamSearchWithoutKeyUsesPublicWorkshopAndPreservesPagination(t *testin
 	provider := NewSteamProvider("", "322330")
 	provider.APIBase = server.URL
 	provider.CommunityBase = server.URL
-	result, err := provider.Search(context.Background(), "棱镜", 2, 20)
+	result, err := provider.Search(context.Background(), SearchOptions{Query: "棱镜", Page: 2, PageSize: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +143,73 @@ func TestSteamDetailsWithoutKeyUsesPublicEndpoint(t *testing.T) {
 	}
 	if capturedPath != "/ISteamRemoteStorage/GetPublishedFileDetails/v1/" || itemCount != "1" {
 		t.Fatalf("unexpected public request: path=%q itemcount=%q", capturedPath, itemCount)
+	}
+}
+
+func TestSteamDetailMapsVersionAndWorkshopStats(t *testing.T) {
+	value := steamDetailWire{
+		ID: "1392778117", Result: 1, Creator: "76561198246008860", ConsumerAppID: 322330,
+		Title: "[DST] Legion", Created: 1527083092, Updated: 1779719397,
+		Subscriptions: 750761, Favorites: 39164, Views: 1098171, FileSize: 110354453,
+	}
+	value.Tags = append(value.Tags, struct {
+		Tag         string `json:"tag"`
+		DisplayName string `json:"display_name"`
+	}{Tag: "version:7.6.5"})
+	value.VoteData.Score = 0.96
+	value.VoteData.VotesUp = 8071
+
+	item, ok := value.mod("322330")
+	if !ok {
+		t.Fatal("valid Workshop detail was rejected")
+	}
+	if item.Version != "7.6.5" || item.FileSize != 110354453 || item.Favorites != 39164 || item.Views != 1098171 {
+		t.Fatalf("Workshop metadata was not mapped: %#v", item)
+	}
+	if item.Score != 0.96 || item.RatingCount != 8071 || item.CreatedAt.IsZero() || item.UpdatedAt.IsZero() {
+		t.Fatalf("Workshop dates or rating were not mapped: %#v", item)
+	}
+}
+
+func TestSteamCommunityParsesAuthorAndRating(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/workshop/browse/":
+			_, _ = fmt.Fprint(writer, `<html><body><div class="item"><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=1392778117"><img src="preview" alt="[DST] Legion"></a><div><a href="https://steamcommunity.com/profiles/76561198246008860/myworkshopfiles/?appid=322330">创作者：ti_Tout</a></div></div></body></html>`)
+		case "/sharedfiles/filedetails/":
+			_, _ = fmt.Fprint(writer, `<html><body><a href="https://steamcommunity.com/profiles/76561198246008860/myworkshopfiles/?appid=322330">ti_Tout</a><div class="fileRatingDetails"><img src="/public/images/sharedfiles/5-star_large.png?v=2"></div><div class="numRatings">8,071 个评价</div><div id="highlightContent"><div class="bb_h1">棱镜官方群组</div>请加QQ群<br>喜欢潜水的小伙伴</div></body></html>`)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewSteamProvider("", "322330")
+	provider.CommunityBase = server.URL
+	items, _, err := provider.searchCommunityPage(context.Background(), normalizeSearchOptions(SearchOptions{Query: "棱镜", Page: 1, PageSize: 20}), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Author != "ti_Tout" || items[0].AuthorID != "76561198246008860" {
+		t.Fatalf("community author was not parsed: %#v", items)
+	}
+	metadata, ok := provider.loadCommunityMetadata(context.Background(), "1392778117")
+	if !ok || metadata.Author != "ti_Tout" || metadata.Score != 1 || metadata.RatingCount != 8071 || !strings.Contains(metadata.Description, "请加QQ群\n喜欢潜水") {
+		t.Fatalf("community rating was not parsed: %#v", metadata)
+	}
+}
+
+func TestSearchOptionsSupportBrowsingAndCategories(t *testing.T) {
+	options := normalizeSearchOptions(SearchOptions{Page: 1, PageSize: 30, Tags: []string{" ITEM ", "item"}})
+	if options.Sort != SearchSortTrend || options.Days != 7 || fmt.Sprint(options.Tags) != "[item]" {
+		t.Fatalf("unexpected normalized browsing options: %#v", options)
+	}
+	if err := validateSearch(options); err != nil {
+		t.Fatal(err)
+	}
+	options.Tags = []string{"unsupported"}
+	if err := validateSearch(options); err == nil {
+		t.Fatal("unsupported Workshop category was accepted")
 	}
 }
 

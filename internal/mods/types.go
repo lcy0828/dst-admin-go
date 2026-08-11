@@ -42,13 +42,39 @@ type SteamMod struct {
 	Name          string    `json:"name"`
 	AuthorID      string    `json:"authorId,omitempty"`
 	Author        string    `json:"author,omitempty"`
+	Version       string    `json:"version,omitempty"`
 	Description   string    `json:"description,omitempty"`
 	PreviewURL    string    `json:"previewUrl,omitempty"`
 	Subscriptions int64     `json:"subscriptions"`
 	Score         float64   `json:"score"`
+	RatingCount   int64     `json:"ratingCount"`
+	Favorites     int64     `json:"favorites"`
+	Views         int64     `json:"views"`
+	FileSize      int64     `json:"fileSize"`
+	CreatedAt     time.Time `json:"createdAt,omitempty"`
 	UpdatedAt     time.Time `json:"updatedAt,omitempty"`
 	Dependencies  []string  `json:"dependencies"`
 	Tags          []string  `json:"tags"`
+}
+
+type SearchSort string
+
+const (
+	SearchSortRelevance      SearchSort = "relevance"
+	SearchSortTrend          SearchSort = "trend"
+	SearchSortMostRecent     SearchSort = "most_recent"
+	SearchSortLastUpdated    SearchSort = "last_updated"
+	SearchSortMostSubscribed SearchSort = "most_subscribed"
+	SearchSortTopRated       SearchSort = "top_rated"
+)
+
+type SearchOptions struct {
+	Query    string
+	Sort     SearchSort
+	Days     int
+	Tags     []string
+	Page     int
+	PageSize int
 }
 
 type SearchResult struct {

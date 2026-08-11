@@ -224,7 +224,7 @@ func TestModCollectionsAreNeverNull(t *testing.T) {
 	if len(list.Items) == 0 || list.Items[0].Dependencies == nil || list.Items[0].Tags == nil {
 		t.Fatalf("list returned nullable collections: %#v", list.Items)
 	}
-	search, err := service.Search(context.Background(), "123456789", 1, 20)
+	search, err := service.Search(context.Background(), SearchOptions{Query: "123456789", Page: 1, PageSize: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,6 +323,16 @@ func TestRoomListWaitsForCoherentNodeLibraryState(t *testing.T) {
 	}
 	if err := <-listDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMergeLocalModInfoPrefersPackagedMetadata(t *testing.T) {
+	item := SteamMod{Name: "Steam Name", Author: "Steam Author", Version: "1.0", Description: "Steam description"}
+	mergeLocalModInfo(&item, map[string]interface{}{
+		"name": "[DST] 棱镜", "author": "ti_Tout", "version": "7.6.5", "description": "本地描述",
+	})
+	if item.Name != "[DST] 棱镜" || item.Author != "ti_Tout" || item.Version != "7.6.5" || item.Description != "本地描述" {
+		t.Fatalf("local modinfo metadata was not preferred: %#v", item)
 	}
 }
 
