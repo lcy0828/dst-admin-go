@@ -241,6 +241,13 @@ func (s *Store) Complete(jobID string, runnerErr error, canceled bool) (Job, Eve
 		}
 		if runnerErr != nil {
 			errorMessage = runnerErr.Error()
+		} else if outcome == OutcomeNone {
+			for _, target := range job.Targets {
+				if target.Status == StatusFailed && target.Error != nil {
+					errorCode, errorMessage = target.Error.Code, target.Error.Message
+					break
+				}
+			}
 		}
 	}
 	now := s.now().UTC()

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"dont/controller"
@@ -94,9 +95,7 @@ func InitRouter() (*gin.Engine, error) {
 	if steamAppID == "" {
 		steamAppID = "322330"
 	}
-	if workshopDownloadPath == "" && workshopContentPath != "" {
-		workshopDownloadPath = filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(workshopContentPath))))
-	}
+	workshopDownloadPath, workshopContentPath = resolveWorkshopPaths(workshopDownloadPath, workshopContentPath, steamAppID)
 	mapRendererPath := setting.Path("map", "RENDERER_PATH", "DST_ADMIN_MAP_RENDERER_PATH")
 	mapPath := setting.Path("paths", "DST_MAP_PATH", "DST_ADMIN_MAP_PATH")
 	if mapPath == "" {
@@ -451,6 +450,19 @@ func InitRouter() (*gin.Engine, error) {
 	}
 
 	return router, nil
+}
+
+func resolveWorkshopPaths(downloadPath, contentPath, appID string) (string, string) {
+	downloadPath = strings.TrimSpace(downloadPath)
+	contentPath = strings.TrimSpace(contentPath)
+	appID = strings.TrimSpace(appID)
+	if contentPath == "" && downloadPath != "" {
+		contentPath = filepath.Join(downloadPath, "steamapps", "workshop", "content", appID)
+	}
+	if downloadPath == "" && contentPath != "" {
+		downloadPath = filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(contentPath))))
+	}
+	return downloadPath, contentPath
 }
 
 func validateTestAdapters() error {

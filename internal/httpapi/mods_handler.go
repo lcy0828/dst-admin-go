@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -105,7 +106,7 @@ func (h *ModHandler) install(c *gin.Context) {
 	}
 	roomID := c.Param("roomId")
 	h.submit(c, "mod.install", roomID, "", request.ModID, "Workshop "+request.ModID, func(ctx context.Context, jobID string) (mods.ActionResult, error) {
-		return h.mods.Install(ctx, jobID, roomID, request, io.Discard)
+		return h.mods.Install(ctx, jobID, roomID, request, log.Writer())
 	})
 }
 
@@ -116,7 +117,7 @@ func (h *ModHandler) update(c *gin.Context) {
 		return
 	}
 	h.submit(c, "mod.update", roomID, "", modID, "Workshop "+modID, func(ctx context.Context, _ string) (mods.ActionResult, error) {
-		return h.mods.Update(ctx, roomID, modID, io.Discard)
+		return h.mods.Update(ctx, roomID, modID, log.Writer())
 	})
 }
 
@@ -146,7 +147,7 @@ func (h *ModHandler) repair(c *gin.Context) {
 		return
 	}
 	h.submit(c, "mod.repair", roomID, "", modID, "Workshop "+modID, func(ctx context.Context, _ string) (mods.ActionResult, error) {
-		return h.mods.Repair(ctx, roomID, modID, request, io.Discard)
+		return h.mods.Repair(ctx, roomID, modID, request, log.Writer())
 	})
 }
 
@@ -247,9 +248,23 @@ func (h *ModHandler) submit(c *gin.Context, kind, roomID, worldID, targetID, tar
 
 func modJobError(err error) *jobs.Error {
 	code := "MOD_OPERATION_FAILED"
+	message := err.Error()
 	switch {
 	case errors.Is(err, context.Canceled):
 		code = "JOB_CANCELED"
+		message = "任务已取消"
+	case errors.Is(err, mods.ErrSteamCMDUnavailable):
+		code = "STEAMCMD_UNAVAILABLE"
+		message = "SteamCMD 不可用，请在系统设置中检查可执行文件路径"
+	case errors.Is(err, mods.ErrSteamCMDDownload):
+		code = "STEAMCMD_DOWNLOAD_FAILED"
+		message = "SteamCMD 下载失败，请查看服务日志中的 SteamCMD 输出"
+	case errors.Is(err, mods.ErrWorkshopItemMissing):
+		code = "WORKSHOP_DOWNLOAD_MISSING"
+		message = "SteamCMD 已结束，但未在配置的 Workshop 内容目录中找到模组文件"
+	case errors.Is(err, mods.ErrModInfoUnavailable):
+		code = "MODINFO_UNAVAILABLE"
+		message = "下载目录中缺少安全可读的 modinfo.lua"
 	case errors.Is(err, mods.ErrRevisionConflict):
 		code = "CONFIG_REVISION_CONFLICT"
 	case errors.Is(err, mods.ErrConfirmationNeeded):
@@ -259,7 +274,7 @@ func modJobError(err error) *jobs.Error {
 	case errors.Is(err, mods.ErrNoChanges):
 		code = "NO_CHANGES"
 	}
-	return &jobs.Error{Code: code, Message: err.Error()}
+	return &jobs.Error{Code: code, Message: message}
 }
 
 func modPagination(c *gin.Context) (int, int, bool) {

@@ -82,6 +82,21 @@ func TestCancelMarksUnfinishedTargetsAndJob(t *testing.T) {
 	}
 }
 
+func TestAllFailedJobExposesTargetError(t *testing.T) {
+	service, _ := newTestJobService(t)
+	job, err := service.Submit("mod.install", "room-1", "", []TargetSpec{{ID: "1392778117", Name: "Workshop 1392778117"}}, func(_ context.Context, report func(TargetResult)) error {
+		report(TargetResult{TargetID: "1392778117", Status: StatusFailed, Error: &Error{Code: "WORKSHOP_DOWNLOAD_MISSING", Message: "未找到下载后的模组文件"}})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := waitForJob(t, service, job.ID, StatusFailed)
+	if completed.Error == nil || completed.Error.Code != "WORKSHOP_DOWNLOAD_MISSING" || completed.Error.Message != "未找到下载后的模组文件" {
+		t.Fatalf("target failure was not promoted to the job: %#v", completed)
+	}
+}
+
 func TestRecoversQueuedAndRunningJobsAfterRestart(t *testing.T) {
 	_, store := newTestJobService(t)
 	job, _, err := store.Create("server.update", "", "", []TargetSpec{{ID: "local", Name: "当前节点"}})

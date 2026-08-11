@@ -578,10 +578,10 @@ func (s *Service) resolveDependencies(ctx context.Context, root string, include 
 func (s *Service) verifyDownloads(ids []string) error {
 	for _, id := range ids {
 		if !directoryExists(s.downloadedPath(id)) {
-			return fmt.Errorf("SteamCMD completed but Workshop item %s is missing", id)
+			return fmt.Errorf("%w: item %s was not found at %s", ErrWorkshopItemMissing, id, s.downloadedPath(id))
 		}
 		if _, err := safeRegularFile(filepath.Join(s.downloadedPath(id), "modinfo.lua")); err != nil {
-			return fmt.Errorf("SteamCMD completed but Workshop item %s has no safe modinfo.lua: %w", id, err)
+			return fmt.Errorf("%w: Workshop item %s has no safe modinfo.lua: %v", ErrModInfoUnavailable, id, err)
 		}
 	}
 	return nil

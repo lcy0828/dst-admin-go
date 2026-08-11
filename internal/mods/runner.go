@@ -2,7 +2,6 @@ package mods
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,7 +27,7 @@ func NewSteamCMDRunner(configuredPath, downloadRoot, appID string) *SteamCMDRunn
 
 func (r *SteamCMDRunner) Download(ctx context.Context, ids []string, validate bool, output io.Writer) error {
 	if r.Executable == "" {
-		return errors.New("SteamCMD is unavailable")
+		return ErrSteamCMDUnavailable
 	}
 	ids = uniqueModIDs(ids)
 	if len(ids) == 0 {
@@ -46,7 +45,7 @@ func (r *SteamCMDRunner) Download(ctx context.Context, ids []string, validate bo
 	command.Stdout = output
 	command.Stderr = output
 	if err := command.Run(); err != nil {
-		return fmt.Errorf("SteamCMD workshop download failed: %w", err)
+		return fmt.Errorf("%w: %v", ErrSteamCMDDownload, err)
 	}
 	return nil
 }

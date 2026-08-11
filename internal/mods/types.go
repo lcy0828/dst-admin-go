@@ -16,6 +16,9 @@ var (
 	ErrNoChanges           = errors.New("mod configuration has no changes")
 	ErrConfirmationNeeded  = errors.New("exact room name confirmation is required")
 	ErrSteamKeyRequired    = errors.New("steam web api key is required for text search")
+	ErrSteamCMDUnavailable = errors.New("steamcmd is unavailable")
+	ErrSteamCMDDownload    = errors.New("steamcmd workshop download failed")
+	ErrWorkshopItemMissing = errors.New("workshop download is missing")
 	ErrUnsupportedLuaValue = errors.New("Lua value is not supported")
 )
 
