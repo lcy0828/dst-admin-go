@@ -8,7 +8,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestSteamSearchWithoutKeyUsesPublicWorkshopAndPreservesPagination(t *testing.T) {
@@ -207,6 +210,58 @@ func TestSteamCommunityParsesAuthorAndRating(t *testing.T) {
 	metadata, ok := provider.loadCommunityMetadata(context.Background(), "1392778117")
 	if !ok || metadata.Name != "[DST] Legion-棱镜" || metadata.Author != "ti_Tout" || metadata.Score != 1 || metadata.RatingCount != 8071 || !strings.Contains(metadata.Description, "请加QQ群\n喜欢潜水") {
 		t.Fatalf("community rating was not parsed: %#v", metadata)
+	}
+}
+
+func TestSteamCommunityMetadataRetriesTransientFailures(t *testing.T) {
+	var attempts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			http.Error(writer, "try again", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = fmt.Fprint(writer, `<html><body><div class="workshopItemTitle">Retry Result</div><div class="fileRatingDetails"><img src="/public/images/sharedfiles/3-star_large.png?v=2"></div><div class="numRatings">80 个评价</div></body></html>`)
+	}))
+	defer server.Close()
+
+	provider := NewSteamProvider("", "322330")
+	provider.CommunityBase = server.URL
+	metadata, ok := provider.loadCommunityMetadata(context.Background(), "2007975851")
+	if !ok || attempts.Load() != 2 || metadata.Score != 0.6 || metadata.RatingCount != 80 {
+		t.Fatalf("transient community failure was not recovered: attempts=%d metadata=%#v", attempts.Load(), metadata)
+	}
+}
+
+func TestSteamCommunityConcurrencyIsBoundedAcrossSearches(t *testing.T) {
+	var active atomic.Int64
+	var maximum atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		current := active.Add(1)
+		defer active.Add(-1)
+		for observed := maximum.Load(); current > observed && !maximum.CompareAndSwap(observed, current); observed = maximum.Load() {
+		}
+		time.Sleep(25 * time.Millisecond)
+		_, _ = fmt.Fprint(writer, `<html><body><div class="workshopItemTitle">Result</div></body></html>`)
+	}))
+	defer server.Close()
+
+	provider := NewSteamProvider("", "322330")
+	provider.CommunityBase = server.URL
+	var wait sync.WaitGroup
+	for batch := 0; batch < 3; batch++ {
+		items := make([]SteamMod, 12)
+		for index := range items {
+			items[index].ID = fmt.Sprintf("%d%02d", batch+1, index)
+		}
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			provider.populateCommunityMetadata(context.Background(), items)
+		}()
+	}
+	wait.Wait()
+	if maximum.Load() > steamCommunityWorkers {
+		t.Fatalf("community request concurrency = %d, want <= %d", maximum.Load(), steamCommunityWorkers)
 	}
 }
 

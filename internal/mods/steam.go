@@ -25,6 +25,8 @@ const (
 	steamCommunityUserAgent = "dst-admin-go/1.0 (+https://github.com/lcy0828/dst-admin-go)"
 	steamCommunityCacheTTL  = 6 * time.Hour
 	steamCommunityWorkers   = 6
+	steamCommunityAttempts  = 2
+	steamCommunityRetryWait = 150 * time.Millisecond
 )
 
 var steamRatingImagePattern = regexp.MustCompile(`(?:^|/)([1-5])-star_large(?:[.?]|$)`)
@@ -42,6 +44,14 @@ type SteamProvider struct {
 	CommunityBase  string
 	cacheMu        sync.Mutex
 	communityCache map[string]communityMetadataCache
+	communityCalls map[string]*communityMetadataCall
+	communitySlots chan struct{}
+}
+
+type communityMetadataCall struct {
+	done     chan struct{}
+	metadata communityMetadataCache
+	ok       bool
 }
 
 type communityMetadataCache struct {
@@ -77,6 +87,7 @@ func NewSteamProvider(apiKey, appID string) *SteamProvider {
 		APIKey: strings.TrimSpace(apiKey), AppID: appID,
 		HTTPClient: &http.Client{Timeout: 12 * time.Second}, APIBase: "https://api.steampowered.com",
 		CommunityBase: "https://steamcommunity.com", communityCache: make(map[string]communityMetadataCache),
+		communityCalls: make(map[string]*communityMetadataCall), communitySlots: make(chan struct{}, steamCommunityWorkers),
 	}
 }
 
@@ -474,28 +485,15 @@ func (p *SteamProvider) populateAuthors(ctx context.Context, items []SteamMod) {
 
 func (p *SteamProvider) populateCommunityMetadata(ctx context.Context, items []SteamMod) {
 	var wait sync.WaitGroup
-	workers := make(chan struct{}, steamCommunityWorkers)
 	for index := range items {
-		cached, ok := p.cachedCommunityMetadata(items[index].ID)
-		if ok {
-			mergeCommunityMetadata(&items[index], cached)
-			continue
-		}
 		index := index
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			select {
-			case workers <- struct{}{}:
-				defer func() { <-workers }()
-			case <-ctx.Done():
-				return
-			}
-			metadata, ok := p.loadCommunityMetadata(ctx, items[index].ID)
+			metadata, ok := p.communityMetadata(ctx, items[index].ID)
 			if !ok {
 				return
 			}
-			p.cacheCommunityMetadata(items[index].ID, metadata)
 			mergeCommunityMetadata(&items[index], metadata)
 		}()
 	}
@@ -503,6 +501,28 @@ func (p *SteamProvider) populateCommunityMetadata(ctx context.Context, items []S
 }
 
 func (p *SteamProvider) loadCommunityMetadata(ctx context.Context, id string) (communityMetadataCache, bool) {
+	for attempt := 0; attempt < steamCommunityAttempts; attempt++ {
+		metadata, ok := p.fetchCommunityMetadata(ctx, id)
+		if ok {
+			return metadata, true
+		}
+		if attempt == steamCommunityAttempts-1 {
+			break
+		}
+		timer := time.NewTimer(steamCommunityRetryWait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return communityMetadataCache{}, false
+		}
+	}
+	return communityMetadataCache{}, false
+}
+
+func (p *SteamProvider) fetchCommunityMetadata(ctx context.Context, id string) (communityMetadataCache, bool) {
 	parameters := url.Values{"id": {id}, "l": {"schinese"}}
 	endpoint := strings.TrimRight(p.CommunityBase, "/") + "/sharedfiles/filedetails/?" + parameters.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -555,6 +575,41 @@ func (p *SteamProvider) loadCommunityMetadata(ctx context.Context, id string) (c
 	return metadata, metadata.Name != "" || metadata.Author != "" || metadata.Description != "" || metadata.Score > 0 || metadata.RatingCount > 0
 }
 
+func (p *SteamProvider) communityMetadata(ctx context.Context, id string) (communityMetadataCache, bool) {
+	if cached, ok := p.cachedCommunityMetadata(id); ok {
+		return cached, true
+	}
+	p.cacheMu.Lock()
+	if call, ok := p.communityCalls[id]; ok {
+		p.cacheMu.Unlock()
+		select {
+		case <-call.done:
+			return call.metadata, call.ok
+		case <-ctx.Done():
+			return communityMetadataCache{}, false
+		}
+	}
+	call := &communityMetadataCall{done: make(chan struct{})}
+	p.communityCalls[id] = call
+	p.cacheMu.Unlock()
+
+	select {
+	case p.communitySlots <- struct{}{}:
+		call.metadata, call.ok = p.loadCommunityMetadata(ctx, id)
+		<-p.communitySlots
+	case <-ctx.Done():
+	}
+
+	p.cacheMu.Lock()
+	if call.ok {
+		p.communityCache[id] = call.metadata
+	}
+	delete(p.communityCalls, id)
+	close(call.done)
+	p.cacheMu.Unlock()
+	return call.metadata, call.ok
+}
+
 func (p *SteamProvider) cachedCommunityMetadata(id string) (communityMetadataCache, bool) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
@@ -564,12 +619,6 @@ func (p *SteamProvider) cachedCommunityMetadata(id string) (communityMetadataCac
 		return communityMetadataCache{}, false
 	}
 	return value, true
-}
-
-func (p *SteamProvider) cacheCommunityMetadata(id string, value communityMetadataCache) {
-	p.cacheMu.Lock()
-	defer p.cacheMu.Unlock()
-	p.communityCache[id] = value
 }
 
 func mergeCommunityMetadata(item *SteamMod, metadata communityMetadataCache) {
