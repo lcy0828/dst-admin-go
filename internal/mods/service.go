@@ -342,6 +342,31 @@ func (s *Service) Download(ctx context.Context, request DownloadRequest, output 
 	return ActionResult{ModIDs: ids, Message: "Workshop 文件已下载到当前节点并完成校验"}, nil
 }
 
+// EnsureLibrarySetup registers already-downloaded Workshop items without
+// rewriting any room's modoverrides.lua.
+func (s *Service) EnsureLibrarySetup(modIDs []string) error {
+	ids := uniqueModIDs(modIDs)
+	for _, id := range ids {
+		if !validModID(id) {
+			return ErrInvalidModID
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	s.libraryMu.Lock()
+	defer s.libraryMu.Unlock()
+	mutation, err := s.setupMutation(ids, nil)
+	if err != nil {
+		return err
+	}
+	mutations := changedMutations([]fileMutation{mutation})
+	if len(mutations) == 0 {
+		return nil
+	}
+	return applyFileMutations(mutations)
+}
+
 func (s *Service) AddToRoom(ctx context.Context, jobID, roomID, modID string, request AddToRoomRequest) (ActionResult, error) {
 	if !validModID(modID) {
 		return ActionResult{}, ErrInvalidModID

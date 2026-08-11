@@ -767,6 +767,150 @@ paths:
           $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+  /save-imports:
+    get:
+      tags: [Save Imports]
+      operationId: listSaveImports
+      summary: List local save import sessions and compatibility reports
+      responses:
+        "200":
+          description: Save import sessions ordered newest first
+          content:
+            application/json:
+              schema: { type: object }
+  /save-imports/upload:
+    post:
+      tags: [Save Imports, Jobs]
+      operationId: uploadSaveImport
+      summary: Upload a local DST archive and start a deep analysis job
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                name: { type: string, maxLength: 128 }
+      responses:
+        "202":
+          description: Upload stored and analysis job accepted
+          content:
+            application/json:
+              schema: { type: object }
+        "413":
+          description: Upload exceeds the configured safety limit
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /save-imports/{importId}:
+    parameters:
+      - name: importId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Save Imports]
+      operationId: getSaveImport
+      summary: Read one save import and its normalized manifest
+      responses:
+        "200":
+          description: Save import session
+          content:
+            application/json:
+              schema: { type: object }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Save Imports]
+      operationId: deleteSaveImport
+      summary: Delete an imported artifact after exact-name confirmation
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirmation]
+              properties:
+                confirmation: { type: string }
+      responses:
+        "200":
+          description: Deleted save import
+          content:
+            application/json:
+              schema: { type: object }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /save-imports/{importId}/actions/analyze:
+    parameters:
+      - name: importId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Save Imports, Jobs]
+      operationId: analyzeSaveImport
+      summary: Re-run deep analysis for an uploaded local archive
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Analysis job accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /save-imports/{importId}/actions/apply:
+    parameters:
+      - name: importId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Save Imports, Jobs]
+      operationId: applySaveImport
+      summary: Deploy one analyzed candidate to a local room through an atomic job
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [candidateId, mode, tokenPolicy, networkPolicy, modPolicy]
+              properties:
+                candidateId: { type: string }
+                mode: { type: string, enum: [new, replace, clone] }
+                targetRoomId: { type: string }
+                directoryName: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' }
+                roomName: { type: string, maxLength: 128 }
+                confirmation: { type: string }
+                tokenPolicy: { type: string, enum: [source, preserve, provided, none] }
+                clusterToken: { type: string, maxLength: 4096 }
+                networkPolicy: { type: string, enum: [source, preserve, auto] }
+                modPolicy: { type: string, enum: [preserve, require_downloaded, install_missing] }
+                allowPartial: { type: boolean }
+                allowMissingToken: { type: boolean }
+      responses:
+        "202":
+          description: Local deployment job accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/backups:
     parameters:
       - $ref: "#/components/parameters/RoomID"

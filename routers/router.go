@@ -27,6 +27,7 @@ import (
 	modservice "dont/internal/mods"
 	playerapi "dont/internal/players"
 	"dont/internal/rooms"
+	"dont/internal/saveimport"
 	"dont/internal/shards"
 	"dont/internal/structuredlogs"
 	"dont/internal/systemsettings"
@@ -251,6 +252,10 @@ func InitRouter() (*gin.Engine, error) {
 		return nil, err
 	}
 	backupHandler := httpapi.NewBackupHandler(backupService, jobService)
+	saveImportStore := saveimport.NewStore(models.DB(), tablePrefix)
+	if err := saveImportStore.Migrate(); err != nil {
+		return nil, err
+	}
 	configurationService, err := configuration.NewService(savePath, roomService, backupService)
 	if err != nil {
 		return nil, err
@@ -275,6 +280,13 @@ func InitRouter() (*gin.Engine, error) {
 		return nil, err
 	}
 	modHandler := httpapi.NewModHandler(modService, jobService)
+	saveImportService, err := saveimport.NewService(saveimport.Config{
+		SaveRoot: savePath, ImportRoot: filepath.Join(backupPath, ".imports"), WorkshopRoot: workshopContentPath,
+	}, saveImportStore, roomService, shardControl, backupService, modService)
+	if err != nil {
+		return nil, err
+	}
+	saveImportHandler := httpapi.NewSaveImportHandler(saveImportService, jobService)
 	playerStore := playerapi.NewStore(models.DB(), tablePrefix)
 	if err := playerStore.Migrate(); err != nil {
 		return nil, err
@@ -446,6 +458,7 @@ func InitRouter() (*gin.Engine, error) {
 		systemSettingsHandler.Register(v2)
 		containerHandler.Register(v2)
 		backupHandler.Register(v2)
+		saveImportHandler.Register(v2)
 		configurationHandler.Register(v2)
 		modHandler.Register(v2)
 		gameUpdateHandler.Register(v2)
