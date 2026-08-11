@@ -17,12 +17,22 @@ func TestSteamSearchWithoutKeyUsesPublicWorkshopAndPreservesPagination(t *testin
 		switch request.URL.Path {
 		case "/workshop/browse/":
 			page := request.URL.Query().Get("p")
+			for key, expected := range map[string]string{
+				"browsesort": "textsearch", "section": "readytouseitems", "num_per_page": "30", "days": "7",
+			} {
+				if value := request.URL.Query().Get(key); value != expected {
+					t.Errorf("community %s = %q, want %q", key, value, expected)
+				}
+			}
+			if language := request.URL.Query().Get("l"); language != "schinese" {
+				t.Errorf("community language = %q, want schinese", language)
+			}
 			requestedPages = append(requestedPages, page)
 			start := 1
 			if page == "2" {
 				start = 31
 			}
-			_, _ = fmt.Fprint(writer, `<html><body><div>61 entries matching filters</div>`)
+			_, _ = fmt.Fprint(writer, `<html><body><div>61 个条目符合筛选条件</div>`)
 			for index := start; index < start+30; index++ {
 				id := fmt.Sprintf("100000%03d", index)
 				_, _ = fmt.Fprintf(writer, `<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=%s"><img src="preview-%d" alt="Result %d"></a>`, id, index, index)
@@ -66,8 +76,17 @@ func TestSteamSearchWithoutKeyUsesPublicWorkshopAndPreservesPagination(t *testin
 	if result.Items[0].ID != "100000021" || result.Items[19].ID != "100000040" {
 		t.Fatalf("unexpected result range: first=%q last=%q", result.Items[0].ID, result.Items[19].ID)
 	}
-	if result.Items[0].Name != "Detail 100000021" {
-		t.Fatalf("public details were not merged: %#v", result.Items[0])
+	if result.Items[0].Name != "Result 21" {
+		t.Fatalf("localized search title was not preserved: %#v", result.Items[0])
+	}
+}
+
+func TestSteamCommunityLanguageFollowsTheSearchText(t *testing.T) {
+	if language := steamCommunityLanguage("棱镜"); language != "schinese" {
+		t.Fatalf("Chinese search language = %q", language)
+	}
+	if language := steamCommunityLanguage("Global Positions"); language != "english" {
+		t.Fatalf("English search language = %q", language)
 	}
 }
 

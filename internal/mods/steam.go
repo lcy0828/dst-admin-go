@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/PuerkitoBio/goquery"
 )
@@ -141,10 +142,10 @@ func (p *SteamProvider) searchCommunity(ctx context.Context, query string, page,
 	}
 	for index, item := range items {
 		if detail, ok := details[item.ID]; ok {
-			if detail.Name == "" {
+			if item.Name != "" {
 				detail.Name = item.Name
 			}
-			if detail.PreviewURL == "" {
+			if item.PreviewURL != "" {
 				detail.PreviewURL = item.PreviewURL
 			}
 			items[index] = detail
@@ -156,7 +157,9 @@ func (p *SteamProvider) searchCommunity(ctx context.Context, query string, page,
 func (p *SteamProvider) searchCommunityPage(ctx context.Context, query string, page int) ([]SteamMod, int, error) {
 	parameters := url.Values{
 		"appid": {p.AppID}, "searchtext": {query}, "browsesort": {"textsearch"},
-		"section": {"items"}, "p": {strconv.Itoa(page)}, "l": {"english"},
+		"section": {"readytouseitems"}, "p": {strconv.Itoa(page)},
+		"num_per_page": {strconv.Itoa(steamCommunityPageSize)}, "days": {"7"},
+		"l": {steamCommunityLanguage(query)},
 	}
 	endpoint := strings.TrimRight(p.CommunityBase, "/") + "/workshop/browse/?" + parameters.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -212,11 +215,10 @@ func (p *SteamProvider) searchCommunityPage(ctx context.Context, query string, p
 	total := -1
 	document.Find("div").EachWithBreak(func(_ int, selection *goquery.Selection) bool {
 		text := strings.TrimSpace(selection.Text())
-		const suffix = " entries matching filters"
-		if !strings.HasSuffix(text, suffix) {
+		if !strings.HasSuffix(text, " entries matching filters") && !strings.HasSuffix(text, " 个条目符合筛选条件") {
 			return true
 		}
-		value := strings.TrimSpace(strings.TrimSuffix(text, suffix))
+		value, _, _ := strings.Cut(text, " ")
 		if parsed, parseErr := strconv.Atoi(value); parseErr == nil && parsed >= 0 {
 			total = parsed
 			return false
@@ -224,6 +226,15 @@ func (p *SteamProvider) searchCommunityPage(ctx context.Context, query string, p
 		return true
 	})
 	return items, total, nil
+}
+
+func steamCommunityLanguage(query string) string {
+	for _, character := range query {
+		if unicode.Is(unicode.Han, character) {
+			return "schinese"
+		}
+	}
+	return "english"
 }
 
 func (p *SteamProvider) Details(ctx context.Context, ids []string) (map[string]SteamMod, error) {
