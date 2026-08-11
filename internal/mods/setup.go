@@ -3,6 +3,7 @@ package mods
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -193,6 +194,79 @@ func stageDirectories(targets []directoryTarget) ([]directorySnapshot, error) {
 		})
 	}
 	return snapshots, nil
+}
+
+func snapshotDirectories(targets []directoryTarget) ([]directorySnapshot, error) {
+	snapshots := make([]directorySnapshot, 0, len(targets))
+	for _, target := range targets {
+		targetAbs, err := safeDirectoryTarget(target.root, target.path)
+		if err != nil {
+			return nil, errors.Join(err, restoreDirectories(snapshots))
+		}
+		info, err := os.Lstat(targetAbs)
+		if os.IsNotExist(err) {
+			snapshots = append(snapshots, directorySnapshot{directoryTarget: directoryTarget{root: target.root, path: targetAbs}})
+			continue
+		}
+		if err != nil {
+			return nil, errors.Join(err, restoreDirectories(snapshots))
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.Join(errors.New("refusing to snapshot an unsafe Mod path"), restoreDirectories(snapshots))
+		}
+		stagingRoot, err := os.MkdirTemp(filepath.Dir(targetAbs), ".dst-admin-repair-")
+		if err != nil {
+			return nil, errors.Join(err, restoreDirectories(snapshots))
+		}
+		stagedPath := filepath.Join(stagingRoot, "original")
+		if err := copyDirectory(targetAbs, stagedPath); err != nil {
+			_ = os.RemoveAll(stagingRoot)
+			return nil, errors.Join(err, restoreDirectories(snapshots))
+		}
+		snapshots = append(snapshots, directorySnapshot{
+			directoryTarget: directoryTarget{root: target.root, path: targetAbs},
+			stagingRoot:     stagingRoot,
+			stagedPath:      stagedPath,
+		})
+	}
+	return snapshots, nil
+}
+
+func copyDirectory(source, destination string) error {
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("refusing to snapshot a Mod directory containing symlinks")
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destination, relative)
+		if entry.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("refusing to snapshot a Mod directory containing special files")
+		}
+		input, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		output, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
+		if err != nil {
+			_ = input.Close()
+			return err
+		}
+		_, copyErr := io.Copy(output, input)
+		return errors.Join(copyErr, output.Close(), input.Close())
+	})
 }
 
 func restoreDirectories(snapshots []directorySnapshot) error {

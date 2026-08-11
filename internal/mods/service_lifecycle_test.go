@@ -23,6 +23,21 @@ type blockingLifecycleRunner struct {
 	release chan struct{}
 }
 
+type existingDirectoryRunner struct {
+	root     string
+	observed bool
+}
+
+func (r *existingDirectoryRunner) Download(ctx context.Context, ids []string, validate bool, output io.Writer) error {
+	for _, id := range ids {
+		if !directoryExists(filepath.Join(r.root, id)) {
+			return errors.New("existing Workshop directory was hidden from SteamCMD")
+		}
+	}
+	r.observed = true
+	return lifecycleRunner{root: r.root, content: `name = "updated"`}.Download(ctx, ids, validate, output)
+}
+
 func (r blockingLifecycleRunner) Download(_ context.Context, ids []string, _ bool, _ io.Writer) error {
 	close(r.started)
 	<-r.release
@@ -143,6 +158,20 @@ func TestRepairReplacesWorkshopAndDropsStaleUGCCache(t *testing.T) {
 		t.Fatalf("stale UGC cache still exists: %v", err)
 	}
 	assertNoRepairStagingDirectories(t, filepath.Dir(service.downloadedPath("378160973")), filepath.Dir(ugcPath))
+}
+
+func TestUpdateKeepsExistingWorkshopDirectoryVisibleToRunner(t *testing.T) {
+	service, _, _ := newConfigTestService(t)
+	runner := &existingDirectoryRunner{root: service.config.WorkshopContentRoot}
+	service.runner = runner
+
+	if _, err := service.Update(context.Background(), "room-1", "378160973", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.observed {
+		t.Fatal("runner did not inspect the existing Workshop directory")
+	}
+	assertNoRepairStagingDirectories(t, filepath.Dir(service.downloadedPath("378160973")))
 }
 
 func TestUninstallNoChangeDoesNotCreateProtectionBackup(t *testing.T) {

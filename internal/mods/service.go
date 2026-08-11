@@ -293,7 +293,7 @@ func (s *Service) Install(ctx context.Context, jobID, roomID string, request Ins
 	for _, id := range ids {
 		targets = append(targets, directoryTarget{root: s.config.WorkshopContentRoot, path: s.downloadedPath(id)})
 	}
-	staged, err := stageDirectories(targets)
+	staged, err := snapshotDirectories(targets)
 	if err != nil {
 		return ActionResult{}, err
 	}
@@ -356,7 +356,7 @@ func (s *Service) Update(ctx context.Context, roomID, modID string, output io.Wr
 	if _, _, err := s.resolveRoom(roomID); err != nil {
 		return ActionResult{}, err
 	}
-	staged, err := stageDirectories([]directoryTarget{{root: s.config.WorkshopContentRoot, path: s.downloadedPath(modID)}})
+	staged, err := snapshotDirectories([]directoryTarget{{root: s.config.WorkshopContentRoot, path: s.downloadedPath(modID)}})
 	if err != nil {
 		return ActionResult{}, err
 	}
@@ -516,10 +516,16 @@ func (s *Service) Repair(ctx context.Context, roomID, modID string, request ModA
 	if err != nil {
 		return ActionResult{}, err
 	}
-	staged, err := stageDirectories(s.modFileTargets(room, worlds, modID))
+	targets := s.modFileTargets(room, worlds, modID)
+	staged, err := snapshotDirectories(targets[:1])
 	if err != nil {
 		return ActionResult{}, err
 	}
+	ugcStaged, err := stageDirectories(targets[1:])
+	if err != nil {
+		return ActionResult{}, errors.Join(err, restoreDirectories(staged))
+	}
+	staged = append(staged, ugcStaged...)
 	downloadErr := s.runner.Download(ctx, []string{modID}, true, output)
 	if downloadErr == nil {
 		downloadErr = s.verifyDownloads([]string{modID})
