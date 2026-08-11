@@ -188,7 +188,7 @@ func TestSteamCommunityParsesAuthorAndRating(t *testing.T) {
 		case "/workshop/browse/":
 			_, _ = fmt.Fprint(writer, `<html><body><div class="item"><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=1392778117"><img src="preview" alt="[DST] Legion"></a><div><a href="https://steamcommunity.com/profiles/76561198246008860/myworkshopfiles/?appid=322330">创作者：ti_Tout</a></div></div></body></html>`)
 		case "/sharedfiles/filedetails/":
-			_, _ = fmt.Fprint(writer, `<html><body><div class="workshopItemTitle">[DST] Legion-棱镜</div><a href="https://steamcommunity.com/profiles/76561198246008860/myworkshopfiles/?appid=322330">ti_Tout</a><div class="fileRatingDetails"><img src="/public/images/sharedfiles/5-star_large.png?v=2"></div><div class="numRatings">8,071 个评价</div><div id="highlightContent"><div class="bb_h1">棱镜官方群组</div>请加QQ群<br>喜欢潜水的小伙伴</div></body></html>`)
+			_, _ = fmt.Fprint(writer, `<html><body><div class="workshopItemTitle">[DST] Legion-棱镜</div><a href="https://steamcommunity.com/profiles/76561198246008860/myworkshopfiles/?appid=322330">ti_Tout 的创意工坊</a><div class="fileRatingDetails"><img src="/public/images/sharedfiles/5-star_large.png?v=2"></div><div class="numRatings">8,071 个评价</div><div id="highlightContent"><div class="bb_h1">棱镜官方群组</div>请加QQ群<br>喜欢潜水的小伙伴</div></body></html>`)
 		default:
 			http.NotFound(writer, request)
 		}
@@ -221,6 +221,18 @@ func TestSearchOptionsSupportBrowsingAndCategories(t *testing.T) {
 	options.Tags = []string{"unsupported"}
 	if err := validateSearch(options); err == nil {
 		t.Fatal("unsupported Workshop category was accepted")
+	}
+}
+
+func TestCleanCommunityAuthorRemovesLocalizedWorkshopLabels(t *testing.T) {
+	for input, expected := range map[string]string{
+		"创作者：ti_Tout":        "ti_Tout",
+		"ti_Tout 的创意工坊":      "ti_Tout",
+		"ti_Tout's Workshop": "ti_Tout",
+	} {
+		if actual := cleanCommunityAuthor(input); actual != expected {
+			t.Fatalf("cleanCommunityAuthor(%q) = %q, want %q", input, actual, expected)
+		}
 	}
 }
 

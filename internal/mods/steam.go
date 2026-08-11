@@ -529,7 +529,7 @@ func (p *SteamProvider) loadCommunityMetadata(ctx context.Context, id string) (c
 	}
 	metadata := communityMetadataCache{ExpiresAt: time.Now().Add(steamCommunityCacheTTL)}
 	metadata.Name = strings.TrimSpace(document.Find(".workshopItemTitle").First().Text())
-	metadata.Author = strings.TrimSpace(document.Find(`a[href*="/myworkshopfiles/"]`).First().Text())
+	metadata.Author = cleanCommunityAuthor(document.Find(`a[href*="/myworkshopfiles/"]`).First().Text())
 	description := document.Find("#highlightContent").First()
 	description.Find("br").Each(func(_ int, selection *goquery.Selection) {
 		_ = selection.ReplaceWithHtml("\n")
@@ -742,6 +742,9 @@ func cleanCommunityAuthor(value string) string {
 	value = strings.TrimSpace(value)
 	for _, prefix := range []string{"创作者：", "创作者:", "Creator:", "Creator："} {
 		value = strings.TrimSpace(strings.TrimPrefix(value, prefix))
+	}
+	for _, suffix := range []string{" 的创意工坊", "的创意工坊", "'s Workshop"} {
+		value = strings.TrimSpace(strings.TrimSuffix(value, suffix))
 	}
 	return value
 }
