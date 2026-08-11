@@ -11,6 +11,7 @@ var (
 	ErrInvalidRequest      = errors.New("mod request is invalid")
 	ErrRoomNotManaged      = errors.New("room must be managed before mods can be changed")
 	ErrModNotConfigured    = errors.New("mod is not configured for the selected world")
+	ErrModNotDownloaded    = errors.New("mod is not downloaded on the selected runtime target")
 	ErrModInfoUnavailable  = errors.New("modinfo.lua is unavailable")
 	ErrRevisionConflict    = errors.New("mod configuration revision has changed")
 	ErrNoChanges           = errors.New("mod configuration has no changes")
@@ -104,6 +105,17 @@ type ModList struct {
 
 type InstallRequest struct {
 	ModID               string   `json:"modId"`
+	WorldIDs            []string `json:"worldIds"`
+	Enabled             bool     `json:"enabled"`
+	IncludeDependencies bool     `json:"includeDependencies"`
+}
+
+type DownloadRequest struct {
+	ModID               string `json:"modId"`
+	IncludeDependencies bool   `json:"includeDependencies"`
+}
+
+type AddToRoomRequest struct {
 	WorldIDs            []string `json:"worldIds"`
 	Enabled             bool     `json:"enabled"`
 	IncludeDependencies bool     `json:"includeDependencies"`

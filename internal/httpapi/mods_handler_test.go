@@ -28,6 +28,22 @@ func (modHandlerService) List(context.Context, string) (mods.ModList, error) {
 	return mods.ModList{Items: []mods.ModState{{SteamMod: mods.SteamMod{ID: "378160973", Name: "Global Positions"}, Health: mods.HealthHealthy}}, Total: 1}, nil
 }
 
+func (modHandlerService) Library(context.Context) (mods.ModList, error) {
+	return mods.ModList{Items: []mods.ModState{{SteamMod: mods.SteamMod{ID: "378160973", Name: "Global Positions"}, Downloaded: true, Health: mods.HealthHealthy}}, Total: 1}, nil
+}
+
+func (modHandlerService) Download(_ context.Context, request mods.DownloadRequest, _ io.Writer) (mods.ActionResult, error) {
+	return mods.ActionResult{ModIDs: []string{request.ModID}, Message: "下载完成"}, nil
+}
+
+func (modHandlerService) AddToRoom(_ context.Context, _ string, _ string, modID string, _ mods.AddToRoomRequest) (mods.ActionResult, error) {
+	return mods.ActionResult{ModIDs: []string{modID}, ProtectionBackupID: "backup", Message: "添加完成"}, nil
+}
+
+func (modHandlerService) UpdateLibrary(_ context.Context, modID string, _ io.Writer) (mods.ActionResult, error) {
+	return mods.ActionResult{ModIDs: []string{modID}, Message: "更新完成"}, nil
+}
+
 func (modHandlerService) Install(_ context.Context, _ string, _ string, request mods.InstallRequest, _ io.Writer) (mods.ActionResult, error) {
 	return mods.ActionResult{ModIDs: []string{request.ModID}, ProtectionBackupID: "backup", Message: "安装完成"}, nil
 }
@@ -109,6 +125,8 @@ func TestModHTTPReadEndpointsAndValidation(t *testing.T) {
 	}
 	response = performJSON(router, http.MethodGet, "/api/v2/rooms/room/mods", nil, nil, "")
 	assertStatus(t, response, http.StatusOK)
+	response = performJSON(router, http.MethodGet, "/api/v2/mods/library", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
 	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room/mods/actions/install", map[string]interface{}{"modId": "../bad"}, nil, "")
 	assertAPIError(t, response, http.StatusUnprocessableEntity, "INVALID_MOD_ID")
 	response = performJSON(router, http.MethodGet, "/api/v2/rooms/room/worlds/world/mods/378160973/configuration", nil, nil, "")
@@ -127,12 +145,31 @@ func TestModHTTPReadEndpointsAndValidation(t *testing.T) {
 func TestModHTTPActionsUseJobs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router, jobService := newModHandlerApp(t)
-	response := performJSON(router, http.MethodPost, "/api/v2/rooms/room/mods/378160973/actions/enable", map[string]interface{}{
-		"worldIds": []string{"world"}, "enabled": true,
+	response := performJSON(router, http.MethodPost, "/api/v2/mods/library/actions/download", map[string]interface{}{
+		"modId": "378160973", "includeDependencies": true,
 	}, nil, "")
 	assertStatus(t, response, http.StatusAccepted)
 	jobID, _ := responseData(t, response)["id"].(string)
 	job := waitForModJob(t, jobService, jobID)
+	if job.Kind != "mod.download" || job.RoomID != "" || job.Outcome != jobs.OutcomeFull {
+		t.Fatalf("unexpected node download job: %#v", job)
+	}
+
+	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room/mods/378160973/actions/add", map[string]interface{}{
+		"worldIds": []string{"world"}, "enabled": true, "includeDependencies": true,
+	}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	job = waitForModJob(t, jobService, responseData(t, response)["id"].(string))
+	if job.Kind != "mod.room.add" || job.RoomID != "room" || job.Outcome != jobs.OutcomeFull {
+		t.Fatalf("unexpected room add job: %#v", job)
+	}
+
+	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room/mods/378160973/actions/enable", map[string]interface{}{
+		"worldIds": []string{"world"}, "enabled": true,
+	}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	jobID, _ = responseData(t, response)["id"].(string)
+	job = waitForModJob(t, jobService, jobID)
 	if job.Kind != "mod.enable" || job.Outcome != jobs.OutcomeFull {
 		t.Fatalf("unexpected Mod job: %#v", job)
 	}

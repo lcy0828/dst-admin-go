@@ -95,7 +95,10 @@ func InitRouter() (*gin.Engine, error) {
 	if steamAppID == "" {
 		steamAppID = "322330"
 	}
-	workshopDownloadPath, workshopContentPath = resolveWorkshopPaths(workshopDownloadPath, workshopContentPath, steamAppID)
+	workshopDownloadPath, workshopContentPath, err = resolveWorkshopPaths(workshopDownloadPath, workshopContentPath, steamAppID)
+	if err != nil {
+		return nil, err
+	}
 	mapRendererPath := setting.Path("map", "RENDERER_PATH", "DST_ADMIN_MAP_RENDERER_PATH")
 	mapPath := setting.Path("paths", "DST_MAP_PATH", "DST_ADMIN_MAP_PATH")
 	if mapPath == "" {
@@ -452,7 +455,7 @@ func InitRouter() (*gin.Engine, error) {
 	return router, nil
 }
 
-func resolveWorkshopPaths(downloadPath, contentPath, appID string) (string, string) {
+func resolveWorkshopPaths(downloadPath, contentPath, appID string) (string, string, error) {
 	downloadPath = strings.TrimSpace(downloadPath)
 	contentPath = strings.TrimSpace(contentPath)
 	appID = strings.TrimSpace(appID)
@@ -462,7 +465,13 @@ func resolveWorkshopPaths(downloadPath, contentPath, appID string) (string, stri
 	if downloadPath == "" && contentPath != "" {
 		downloadPath = filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(contentPath))))
 	}
-	return downloadPath, contentPath
+	if downloadPath != "" && contentPath != "" {
+		expected := filepath.Clean(filepath.Join(downloadPath, "steamapps", "workshop", "content", appID))
+		if filepath.Clean(contentPath) != expected {
+			return "", "", fmt.Errorf("Workshop path mismatch: WORKSHOP_CONTENT must be %q when WORKSHOP_MOD_PATH is %q", expected, filepath.Clean(downloadPath))
+		}
+	}
+	return downloadPath, contentPath, nil
 }
 
 func validateTestAdapters() error {

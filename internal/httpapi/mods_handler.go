@@ -23,7 +23,11 @@ type ModHandler struct {
 
 type modService interface {
 	Search(context.Context, string, int, int) (mods.SearchResult, error)
+	Library(context.Context) (mods.ModList, error)
 	List(context.Context, string) (mods.ModList, error)
+	Download(context.Context, mods.DownloadRequest, io.Writer) (mods.ActionResult, error)
+	AddToRoom(context.Context, string, string, string, mods.AddToRoomRequest) (mods.ActionResult, error)
+	UpdateLibrary(context.Context, string, io.Writer) (mods.ActionResult, error)
 	Install(context.Context, string, string, mods.InstallRequest, io.Writer) (mods.ActionResult, error)
 	Update(context.Context, string, string, io.Writer) (mods.ActionResult, error)
 	Enable(context.Context, string, string, string, mods.EnableRequest) (mods.ActionResult, error)
@@ -42,10 +46,14 @@ func NewModHandler(service modService, jobService *jobs.Service) *ModHandler {
 
 func (h *ModHandler) Register(v2 *gin.RouterGroup) {
 	v2.GET("/mods/search", h.search)
+	v2.GET("/mods/library", h.library)
+	v2.POST("/mods/library/actions/download", h.download)
+	v2.POST("/mods/library/:modId/actions/update", h.updateLibrary)
 	v2.GET("/mods/:modId", h.details)
 
 	room := v2.Group("/rooms/:roomId")
 	room.GET("/mods", h.list)
+	room.POST("/mods/:modId/actions/add", h.addToRoom)
 	room.POST("/mods/actions/install", h.install)
 	room.POST("/mods/actions/check-updates", h.checkUpdates)
 	room.POST("/mods/:modId/actions/update", h.update)
@@ -58,6 +66,55 @@ func (h *ModHandler) Register(v2 *gin.RouterGroup) {
 	configuration.GET("", h.configuration)
 	configuration.POST("/preview", h.previewConfiguration)
 	configuration.POST("/actions/apply", h.applyConfiguration)
+}
+
+func (h *ModHandler) library(c *gin.Context) {
+	value, err := h.mods.Library(c.Request.Context())
+	if err != nil {
+		modFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
+}
+
+func (h *ModHandler) download(c *gin.Context) {
+	var request mods.DownloadRequest
+	if !bindModJSON(c, &request) {
+		return
+	}
+	if !mods.ValidID(request.ModID) {
+		modFailure(c, mods.ErrInvalidModID)
+		return
+	}
+	h.submit(c, "mod.download", "", "", request.ModID, "Workshop "+request.ModID, func(ctx context.Context, _ string) (mods.ActionResult, error) {
+		return h.mods.Download(ctx, request, log.Writer())
+	})
+}
+
+func (h *ModHandler) updateLibrary(c *gin.Context) {
+	modID := c.Param("modId")
+	if !mods.ValidID(modID) {
+		modFailure(c, mods.ErrInvalidModID)
+		return
+	}
+	h.submit(c, "mod.update", "", "", modID, "Workshop "+modID, func(ctx context.Context, _ string) (mods.ActionResult, error) {
+		return h.mods.UpdateLibrary(ctx, modID, log.Writer())
+	})
+}
+
+func (h *ModHandler) addToRoom(c *gin.Context) {
+	var request mods.AddToRoomRequest
+	if !bindModJSON(c, &request) {
+		return
+	}
+	roomID, modID := c.Param("roomId"), c.Param("modId")
+	if !mods.ValidID(modID) {
+		modFailure(c, mods.ErrInvalidModID)
+		return
+	}
+	h.submit(c, "mod.room.add", roomID, "", modID, "Workshop "+modID, func(ctx context.Context, jobID string) (mods.ActionResult, error) {
+		return h.mods.AddToRoom(ctx, jobID, roomID, modID, request)
+	})
 }
 
 func (h *ModHandler) search(c *gin.Context) {
@@ -271,6 +328,9 @@ func modJobError(err error) *jobs.Error {
 		code = "CONFIRMATION_REQUIRED"
 	case errors.Is(err, mods.ErrModNotConfigured):
 		code = "MOD_NOT_CONFIGURED"
+	case errors.Is(err, mods.ErrModNotDownloaded):
+		code = "MOD_NOT_DOWNLOADED"
+		message = "请先将 Mod 下载到当前运行节点"
 	case errors.Is(err, mods.ErrNoChanges):
 		code = "NO_CHANGES"
 	}
@@ -323,6 +383,8 @@ func modFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "接管房间后才能管理 Mod", nil)
 	case errors.Is(err, mods.ErrModNotConfigured):
 		Failure(c, http.StatusNotFound, "MOD_NOT_CONFIGURED", "所选世界未配置该 Mod", nil)
+	case errors.Is(err, mods.ErrModNotDownloaded):
+		Failure(c, http.StatusConflict, "MOD_NOT_DOWNLOADED", "请先将 Mod 下载到当前运行节点", nil)
 	case errors.Is(err, mods.ErrModInfoUnavailable):
 		Failure(c, http.StatusConflict, "MODINFO_UNAVAILABLE", "下载并校验 Mod 后才能编辑配置", nil)
 	case errors.Is(err, mods.ErrSteamKeyRequired):

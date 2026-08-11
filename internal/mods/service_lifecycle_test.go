@@ -233,7 +233,68 @@ func TestModCollectionsAreNeverNull(t *testing.T) {
 	}
 }
 
-func TestRoomLockPreventsListFromObservingStagedUpdate(t *testing.T) {
+func TestNodeDownloadDoesNotChangeRoomConfiguration(t *testing.T) {
+	service, backupService, overridesPath := newConfigTestService(t)
+	beforeOverrides, err := os.ReadFile(overridesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setupPath := service.setupPath()
+	beforeSetup, err := os.ReadFile(setupPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	service.runner = lifecycleRunner{root: service.config.WorkshopContentRoot, content: `name = "Shared Library"`}
+	result, err := service.Download(context.Background(), DownloadRequest{ModID: "123456789"}, io.Discard)
+	if err != nil || len(result.ModIDs) != 1 || result.ModIDs[0] != "123456789" {
+		t.Fatalf("node download result=%#v err=%v", result, err)
+	}
+	afterOverrides, _ := os.ReadFile(overridesPath)
+	afterSetup, afterSetupErr := os.ReadFile(setupPath)
+	if os.IsNotExist(afterSetupErr) {
+		afterSetup = nil
+	} else if afterSetupErr != nil {
+		t.Fatal(afterSetupErr)
+	}
+	if string(afterOverrides) != string(beforeOverrides) || string(afterSetup) != string(beforeSetup) {
+		t.Fatal("node download changed room or dedicated server configuration")
+	}
+	if backupService.count != 0 {
+		t.Fatalf("node download created a room backup: %d", backupService.count)
+	}
+	roomList, err := service.List(context.Background(), "room-1")
+	if err != nil || len(roomList.Items) != 1 || roomList.Items[0].ID != "378160973" {
+		t.Fatalf("room list contains node-only Mods: value=%#v err=%v", roomList, err)
+	}
+	library, err := service.Library(context.Background())
+	if err != nil || library.Total != 2 {
+		t.Fatalf("node library did not include both downloads: value=%#v err=%v", library, err)
+	}
+}
+
+func TestAddDownloadedModToRoomIsConfigurationOnly(t *testing.T) {
+	service, backupService, overridesPath := newConfigTestService(t)
+	modPath := service.downloadedPath("123456789")
+	if err := os.MkdirAll(modPath, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modPath, "modinfo.lua"), []byte(`name = "Shared Library"`), 0640); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.AddToRoom(context.Background(), "job", "room-1", "123456789", AddToRoomRequest{
+		WorldIDs: []string{"world-1"}, Enabled: true,
+	})
+	if err != nil || result.ProtectionBackupID == "" || backupService.count != 1 {
+		t.Fatalf("add result=%#v backups=%d err=%v", result, backupService.count, err)
+	}
+	overrides, _ := os.ReadFile(overridesPath)
+	setup, _ := os.ReadFile(service.setupPath())
+	if !strings.Contains(string(overrides), `workshop-123456789`) || !strings.Contains(string(setup), `ServerModSetup("123456789")`) {
+		t.Fatalf("room or server setup was not updated:\n%s\n%s", overrides, setup)
+	}
+}
+
+func TestRoomListWaitsForCoherentNodeLibraryState(t *testing.T) {
 	service, _, _ := newConfigTestService(t)
 	runner := blockingLifecycleRunner{
 		root: service.config.WorkshopContentRoot, started: make(chan struct{}), release: make(chan struct{}),
@@ -253,7 +314,7 @@ func TestRoomLockPreventsListFromObservingStagedUpdate(t *testing.T) {
 	}()
 	select {
 	case err := <-listDone:
-		t.Fatalf("list bypassed the room lock while cache was staged: %v", err)
+		t.Fatalf("room list observed an in-progress node update: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 	close(runner.release)

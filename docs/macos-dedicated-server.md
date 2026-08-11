@@ -17,8 +17,11 @@ DST_UGC_PATH = /path/to/steamapps/workshop
 
 [mod]
 STEAM_CMD_PATH = /opt/homebrew/bin/steamcmd
-WORKSHOP_CONTENT = /path/to/steamapps/workshop/content/322330
+WORKSHOP_MOD_PATH = /path/to/steamcmd-library
+WORKSHOP_CONTENT = /path/to/steamcmd-library/steamapps/workshop/content/322330
 ```
+
+The two Workshop settings are one library: `WORKSHOP_CONTENT` must be the App content directory derived from `WORKSHOP_MOD_PATH`. The desktop Steam Workshop directory is only valid when SteamCMD is also configured to use that same Steam library root.
 
 The Steam game layout resolves to:
 

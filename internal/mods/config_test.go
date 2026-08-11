@@ -19,6 +19,10 @@ type testRoomCatalog struct {
 	worlds []rooms.World
 }
 
+func (c *testRoomCatalog) List() ([]rooms.Room, error) {
+	return []rooms.Room{c.room}, nil
+}
+
 func (c *testRoomCatalog) Room(id string) (rooms.Room, error) {
 	if id != c.room.ID {
 		return rooms.Room{}, rooms.ErrRoomNotFound
@@ -217,6 +221,44 @@ func TestConfigurationRejectsValueOutsideDeclaredOptions(t *testing.T) {
 	}
 	if backupService.count != 0 {
 		t.Fatalf("invalid request created a backup: %d", backupService.count)
+	}
+}
+
+func TestWorldModConfigurationsRemainIndependent(t *testing.T) {
+	service, _, _ := newConfigTestService(t)
+	catalog := service.rooms.(*testRoomCatalog)
+	caves := rooms.World{ID: "world-2", RoomID: "room-1", DirectoryName: "Caves", Name: "洞穴"}
+	catalog.worlds = append(catalog.worlds, caves)
+	cavesPath := filepath.Join(service.config.SaveRoot, catalog.room.DirectoryName, caves.DirectoryName)
+	if err := os.MkdirAll(cavesPath, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cavesPath, "modoverrides.lua"), []byte(`return {
+  ["workshop-378160973"] = {
+    enabled = true,
+    configuration_options = { show_players = true },
+  },
+}`), 0640); err != nil {
+		t.Fatal(err)
+	}
+	master, err := service.Configuration(context.Background(), "room-1", "world-1", "378160973")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.ApplyConfiguration(context.Background(), "job", "room-1", "world-1", "378160973", ConfigUpdateRequest{
+		ExpectedRevision: master.Revision,
+		Enabled:          false,
+		Patch:            map[string]json.RawMessage{"show_players": json.RawMessage(`false`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cavesConfig, err := service.Configuration(context.Background(), "room-1", "world-2", "378160973")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cavesConfig.Enabled || cavesConfig.Values["show_players"] != true {
+		t.Fatalf("editing Master leaked into Caves: %#v", cavesConfig)
 	}
 }
 

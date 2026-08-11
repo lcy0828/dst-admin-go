@@ -2,7 +2,7 @@
 
 ## 1. 范围
 
-`/api/v2` Mod 模块负责 Steam Workshop 元数据、下载、分片配置、UGC/加载状态、更新检查、修复、卸载和 `modoverrides.lua` 配置编辑。所有修改动作通过 Job 执行，终态由认证 SSE 发布。
+`/api/v2` Mod 模块把运行节点的 Workshop 文件库与房间配置分开管理。节点级能力负责元数据、下载和更新；房间级能力负责选择使用哪些 Mod、分片启停、UGC/加载状态和 `modoverrides.lua` 配置编辑。所有修改动作通过 Job 执行，终态由认证 SSE 发布。
 
 生命周期状态相互独立：
 
@@ -12,6 +12,13 @@
 - `loaded`：运行中分片的日志确认已加载该 Mod。
 
 不得将“SteamCMD 退出成功”等同于已安装或已加载。
+
+作用域固定如下：
+
+- `/mods/library` 是当前运行节点共享的已下载文件库，不按房间区分。
+- `/rooms/{roomId}/mods` 只列出该房间 `modoverrides.lua` 实际引用的 Mod。
+- `configuration_options` 属于单个房间的单个世界；不同房间以及同一房间的地面/洞穴都允许采用不同配置。
+- `dedicated_server_mods_setup.lua` 属于节点上的 DST 安装目录，保存所有受管房间引用 Mod 的并集；它负责启动时下载，不决定房间是否启用。
 
 ## 2. 生产配置
 
@@ -30,6 +37,8 @@
 | `DST_ADMIN_LUA_PATH` | 可选的 Lua/C 兼容模块搜索目录；fallback helper 已内嵌，不再要求 `modgetinfo.lua` | `/opt/dst-admin/lua-modules` |
 
 `DST_ADMIN_TEST_MODS=memory` 只允许在 `DST_ADMIN_ENV=test` 中使用。生产环境设置该变量会导致启动失败，不能使用测试元数据或伪下载器替代 Steam。
+
+`DST_ADMIN_WORKSHOP_DOWNLOAD` 与 `DST_ADMIN_WORKSHOP_CONTENT` 必须指向同一个 SteamCMD 库。后者必须等于前者下的 `steamapps/workshop/content/{APP_ID}`；配置不一致时服务拒绝启动，避免 SteamCMD 下载成功后到另一个目录校验。
 
 ## 3. Steam 与依赖
 
@@ -85,6 +94,7 @@ Go 解析失败时才进入兼容 fallback，顺序固定为外部 Lua、Python/
 
 - `dedicated_server_mods_setup.lua` 只修改 DST Admin managed block，人工内容保持原样。
 - `modoverrides.lua` 使用语法树更新，未知顶层字段、未知配置项和未知嵌套值无损往返。
+- 配置读取与写入始终包含明确的 `roomId` 和 `worldId`，修改一个世界不会覆盖其他房间或其他世界。
 - 预览和应用使用同一规范化渲染结果与 revision；过期 revision 返回冲突，绝不静默覆盖。
 - 配置修改先创建保护备份，再原子写入；多文件写入失败会回滚已写文件。
 - 无语义变化的启停、配置或卸载返回 `NO_CHANGES`，不制造空保护备份。
@@ -92,11 +102,11 @@ Go 解析失败时才进入兼容 fallback，顺序固定为外部 Lua、Python/
 
 ## 6. 下载、修复与卸载恢复
 
-- 安装、更新和修复会先把已有 Workshop 缓存原子移动到同文件系统暂存目录。
+- 下载、更新和修复会复制已有 Workshop 缓存作为保护快照，同时保留原目录供 SteamCMD 与 ACF 清单核对。
 - 下载失败、取消、缺少目录或缺少安全 `modinfo.lua` 时，删除半成品并恢复原缓存。
 - 修复同时暂存目标世界的 UGC 缓存；成功后丢弃旧 UGC，提示重启分片重新安装。
 - 卸载先计算真实配置 Diff 和文件变化，再决定是否创建保护备份。
-- 只要其他世界或人工 `ServerModSetup` 仍引用 Mod，就保留 Workshop/UGC 文件。
+- 从房间移除只修改所选世界，不删除节点下载文件；只要其他房间、其他世界或人工 `ServerModSetup` 仍引用 Mod，就保留 setup 记录与 Workshop/UGC 文件。
 - 删除前验证目标必须位于配置根目录内，且必须是非符号链接目录。
 
 ## 7. 验收

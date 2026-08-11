@@ -18,6 +18,7 @@ import (
 )
 
 type RoomCatalog interface {
+	List() ([]rooms.Room, error)
 	Room(string) (rooms.Room, error)
 	World(string, string) (rooms.World, error)
 	Worlds(string) ([]rooms.World, error)
@@ -40,16 +41,24 @@ type Config struct {
 }
 
 type Service struct {
-	config   Config
-	rooms    RoomCatalog
-	runtime  Runtime
-	backups  BackupCreator
-	metadata MetadataProvider
-	parser   ModInfoParser
-	runner   DownloadRunner
-	now      func() time.Time
-	locksMu  sync.Mutex
-	locks    map[string]*sync.Mutex
+	config    Config
+	rooms     RoomCatalog
+	runtime   Runtime
+	backups   BackupCreator
+	metadata  MetadataProvider
+	parser    ModInfoParser
+	runner    DownloadRunner
+	now       func() time.Time
+	locksMu   sync.Mutex
+	locks     map[string]*sync.Mutex
+	libraryMu sync.RWMutex
+}
+
+type modAggregate struct {
+	configured []string
+	enabled    []string
+	installed  []string
+	loaded     []string
 }
 
 func NewService(config Config, roomCatalog RoomCatalog, runtime Runtime, backupCreator BackupCreator, metadata MetadataProvider, parser ModInfoParser, runner DownloadRunner) (*Service, error) {
@@ -96,6 +105,8 @@ func (s *Service) roomLock(roomID string) *sync.Mutex {
 }
 
 func (s *Service) List(ctx context.Context, roomID string) (ModList, error) {
+	s.libraryMu.RLock()
+	defer s.libraryMu.RUnlock()
 	lock := s.roomLock(roomID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -107,17 +118,10 @@ func (s *Service) List(ctx context.Context, roomID string) (ModList, error) {
 	if err != nil {
 		return ModList{}, err
 	}
-	type aggregate struct {
-		configured []string
-		enabled    []string
-		installed  []string
-		loaded     []string
-		running    bool
-	}
-	aggregates := make(map[string]*aggregate)
-	ensure := func(id string) *aggregate {
+	aggregates := make(map[string]*modAggregate)
+	ensure := func(id string) *modAggregate {
 		if aggregates[id] == nil {
-			aggregates[id] = &aggregate{}
+			aggregates[id] = &modAggregate{}
 		}
 		return aggregates[id]
 	}
@@ -142,19 +146,28 @@ func (s *Service) List(ctx context.Context, roomID string) (ModList, error) {
 		}
 		running, _ := s.runtime.IsRunning(ctx, roomID, world.ID)
 		for _, id := range scanInstalledIDs(s.ugcCandidates(room, world)) {
-			item := ensure(id)
+			item := aggregates[id]
+			if item == nil {
+				continue
+			}
 			item.installed = append(item.installed, world.ID)
 			if running && logContainsMod(filepath.Join(roomPath, world.DirectoryName, "server_log.txt"), id) {
 				item.loaded = append(item.loaded, world.ID)
 			}
 		}
 	}
-	setup, err := loadSetup(s.setupPath())
-	if err != nil {
-		return ModList{}, err
-	}
-	for _, id := range setupIDs(setup.data) {
-		ensure(id)
+	manifest, manifestErr := loadWorkshopManifest(s.workshopManifestPath())
+	return s.buildModList(ctx, aggregates, manifest, manifestErr)
+}
+
+func (s *Service) Library(ctx context.Context) (ModList, error) {
+	s.libraryMu.RLock()
+	defer s.libraryMu.RUnlock()
+	aggregates := make(map[string]*modAggregate)
+	ensure := func(id string) {
+		if aggregates[id] == nil {
+			aggregates[id] = &modAggregate{}
+		}
 	}
 	for _, id := range scanNumericDirectories(s.config.WorkshopContentRoot) {
 		ensure(id)
@@ -163,6 +176,17 @@ func (s *Service) List(ctx context.Context, roomID string) (ModList, error) {
 	for id := range manifest {
 		ensure(id)
 	}
+	setup, setupErr := loadSetup(s.setupPath())
+	if setupErr != nil {
+		return ModList{}, setupErr
+	}
+	for _, id := range setupIDs(setup.data) {
+		ensure(id)
+	}
+	return s.buildModList(ctx, aggregates, manifest, manifestErr)
+}
+
+func (s *Service) buildModList(ctx context.Context, aggregates map[string]*modAggregate, manifest map[string]workshopManifestItem, manifestErr error) (ModList, error) {
 	ids := make([]string, 0, len(aggregates))
 	for id := range aggregates {
 		ids = append(ids, id)
@@ -271,24 +295,24 @@ func (state *ModState) applyHealth() {
 }
 
 func (s *Service) Install(ctx context.Context, jobID, roomID string, request InstallRequest, output io.Writer) (ActionResult, error) {
+	if _, err := s.Download(ctx, DownloadRequest{ModID: request.ModID, IncludeDependencies: request.IncludeDependencies}, output); err != nil {
+		return ActionResult{}, err
+	}
+	return s.AddToRoom(ctx, jobID, roomID, request.ModID, AddToRoomRequest{
+		WorldIDs: request.WorldIDs, Enabled: request.Enabled, IncludeDependencies: request.IncludeDependencies,
+	})
+}
+
+func (s *Service) Download(ctx context.Context, request DownloadRequest, output io.Writer) (ActionResult, error) {
 	if !validModID(request.ModID) {
 		return ActionResult{}, &FieldError{Fields: map[string]string{"modId": "Workshop ID 必须为数字"}}
-	}
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
-	room, roomPath, err := s.resolveRoom(roomID)
-	if err != nil {
-		return ActionResult{}, err
-	}
-	worlds, err := s.selectWorlds(roomID, request.WorldIDs)
-	if err != nil {
-		return ActionResult{}, err
 	}
 	ids, err := s.resolveDependencies(ctx, request.ModID, request.IncludeDependencies)
 	if err != nil {
 		return ActionResult{}, err
 	}
+	s.libraryMu.Lock()
+	defer s.libraryMu.Unlock()
 	targets := make([]directoryTarget, 0, len(ids))
 	for _, id := range ids {
 		targets = append(targets, directoryTarget{root: s.config.WorkshopContentRoot, path: s.downloadedPath(id)})
@@ -306,6 +330,33 @@ func (s *Service) Install(ctx context.Context, jobID, roomID string, request Ins
 	}
 	if err := discardDirectories(staged); err != nil {
 		return ActionResult{}, fmt.Errorf("remove staged Mod cache: %w", err)
+	}
+	return ActionResult{ModIDs: ids, Message: "Workshop 文件已下载到当前节点并完成校验"}, nil
+}
+
+func (s *Service) AddToRoom(ctx context.Context, jobID, roomID, modID string, request AddToRoomRequest) (ActionResult, error) {
+	if !validModID(modID) {
+		return ActionResult{}, ErrInvalidModID
+	}
+	ids, err := s.resolveDependencies(ctx, modID, request.IncludeDependencies)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	s.libraryMu.Lock()
+	defer s.libraryMu.Unlock()
+	if err := s.verifyDownloads(ids); err != nil {
+		return ActionResult{}, ErrModNotDownloaded
+	}
+	lock := s.roomLock(roomID)
+	lock.Lock()
+	defer lock.Unlock()
+	room, roomPath, err := s.resolveRoom(roomID)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	worlds, err := s.selectWorlds(roomID, request.WorldIDs)
+	if err != nil {
+		return ActionResult{}, err
 	}
 	configurationChanged := false
 	mutations, err := s.modMutations(roomPath, worlds, func(document *modOverrideDocument) error {
@@ -330,32 +381,27 @@ func (s *Service) Install(ctx context.Context, jobID, roomID string, request Ins
 		return ActionResult{}, err
 	}
 	mutations = changedMutations(append(mutations, setupMutation))
-	result := ActionResult{ModIDs: ids, Message: "Mod 已下载；分片配置原本已是目标状态"}
 	if len(mutations) == 0 {
-		return result, nil
+		return ActionResult{}, ErrNoChanges
 	}
-	backup, err := s.protectionBackup(ctx, room, "Mod 安装", jobID)
+	backup, err := s.protectionBackup(ctx, room, "添加房间 Mod", jobID)
 	if err != nil {
 		return ActionResult{}, err
 	}
 	if err := applyFileMutations(mutations); err != nil {
 		return ActionResult{}, err
 	}
-	result.ProtectionBackupID = backup.ID
-	result.Message = "Mod 已下载并写入分片配置"
-	return result, nil
+	return ActionResult{
+		ModIDs: ids, ProtectionBackupID: backup.ID, Message: "Mod 已添加到所选房间世界；各世界配置保持独立",
+	}, nil
 }
 
-func (s *Service) Update(ctx context.Context, roomID, modID string, output io.Writer) (ActionResult, error) {
+func (s *Service) UpdateLibrary(ctx context.Context, modID string, output io.Writer) (ActionResult, error) {
 	if !validModID(modID) {
 		return ActionResult{}, ErrInvalidModID
 	}
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
-	if _, _, err := s.resolveRoom(roomID); err != nil {
-		return ActionResult{}, err
-	}
+	s.libraryMu.Lock()
+	defer s.libraryMu.Unlock()
 	staged, err := snapshotDirectories([]directoryTarget{{root: s.config.WorkshopContentRoot, path: s.downloadedPath(modID)}})
 	if err != nil {
 		return ActionResult{}, err
@@ -370,7 +416,14 @@ func (s *Service) Update(ctx context.Context, roomID, modID string, output io.Wr
 	if err := discardDirectories(staged); err != nil {
 		return ActionResult{}, fmt.Errorf("remove staged Mod cache: %w", err)
 	}
-	return ActionResult{ModIDs: []string{modID}, Message: "Workshop 文件已更新并完成校验"}, nil
+	return ActionResult{ModIDs: []string{modID}, Message: "当前节点的 Workshop 文件已更新并完成校验"}, nil
+}
+
+func (s *Service) Update(ctx context.Context, roomID, modID string, output io.Writer) (ActionResult, error) {
+	if _, _, err := s.resolveRoom(roomID); err != nil {
+		return ActionResult{}, err
+	}
+	return s.UpdateLibrary(ctx, modID, output)
 }
 
 func (s *Service) Enable(ctx context.Context, jobID, roomID, modID string, request EnableRequest) (ActionResult, error) {
@@ -434,6 +487,8 @@ func (s *Service) Uninstall(ctx context.Context, jobID, roomID, modID string, re
 	if !validModID(modID) {
 		return ActionResult{}, ErrInvalidModID
 	}
+	s.libraryMu.Lock()
+	defer s.libraryMu.Unlock()
 	lock := s.roomLock(roomID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -502,6 +557,8 @@ func (s *Service) Repair(ctx context.Context, roomID, modID string, request ModA
 	if !validModID(modID) {
 		return ActionResult{}, ErrInvalidModID
 	}
+	s.libraryMu.Lock()
+	defer s.libraryMu.Unlock()
 	lock := s.roomLock(roomID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -682,6 +739,32 @@ func (s *Service) configuredOutside(roomPath, roomID string, selected []rooms.Wo
 		}
 		if _, ok := document.mod(modID); ok {
 			return true, nil
+		}
+	}
+	roomItems, err := s.rooms.List()
+	if err != nil {
+		return false, err
+	}
+	for _, room := range roomItems {
+		if room.ID == roomID || !room.Managed {
+			continue
+		}
+		otherPath, pathErr := safeDirectory(s.config.SaveRoot, room.DirectoryName)
+		if pathErr != nil {
+			return false, pathErr
+		}
+		otherWorlds, worldsErr := s.rooms.Worlds(room.ID)
+		if worldsErr != nil {
+			return false, worldsErr
+		}
+		for _, world := range otherWorlds {
+			document, loadErr := loadModOverride(filepath.Join(otherPath, world.DirectoryName, "modoverrides.lua"))
+			if loadErr != nil {
+				return false, loadErr
+			}
+			if _, ok := document.mod(modID); ok {
+				return true, nil
+			}
 		}
 	}
 	return false, nil

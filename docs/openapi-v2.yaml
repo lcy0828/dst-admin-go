@@ -1600,6 +1600,31 @@ paths:
         "200": { description: Workshop search results, content: { application/json: { schema: { $ref: "#/components/schemas/ModSearchEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /mods/library:
+    get:
+      tags: [Mods]
+      operationId: listNodeModLibrary
+      summary: List Workshop files stored on the active runtime target
+      responses:
+        "200": { description: Runtime target Mod library, content: { application/json: { schema: { $ref: "#/components/schemas/ModListEnvelope" } } } }
+  /mods/library/actions/download:
+    post:
+      tags: [Mods]
+      operationId: downloadModToNode
+      summary: Download Workshop files without changing any room configuration
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModDownloadInput" } } } }
+      responses:
+        "202": { description: Node download job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /mods/library/{modId}/actions/update:
+    parameters: [{ $ref: "#/components/parameters/ModID" }]
+    post:
+      tags: [Mods]
+      operationId: updateNodeMod
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Node update job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
   /mods/{modId}:
     parameters: [{ $ref: "#/components/parameters/ModID" }]
     get:
@@ -1626,6 +1651,17 @@ paths:
       responses:
         "202": { description: Install job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/mods/{modId}/actions/add:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
+    post:
+      tags: [Mods]
+      operationId: addModToRoom
+      summary: Add an already downloaded Mod to selected worlds in a room
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModAddToRoomInput" } } } }
+      responses:
+        "202": { description: Room configuration job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
   /rooms/{roomId}/mods/actions/check-updates:
     parameters: [{ $ref: "#/components/parameters/RoomID" }]
     post:
@@ -4456,6 +4492,21 @@ components:
       required: [modId, worldIds, enabled, includeDependencies]
       properties:
         modId: { type: string, pattern: '^[0-9]{1,20}$' }
+        worldIds: { type: array, items: { type: string } }
+        enabled: { type: boolean }
+        includeDependencies: { type: boolean }
+    ModDownloadInput:
+      type: object
+      additionalProperties: false
+      required: [modId, includeDependencies]
+      properties:
+        modId: { type: string, pattern: '^[0-9]{1,20}$' }
+        includeDependencies: { type: boolean }
+    ModAddToRoomInput:
+      type: object
+      additionalProperties: false
+      required: [worldIds, enabled, includeDependencies]
+      properties:
         worldIds: { type: array, items: { type: string } }
         enabled: { type: boolean }
         includeDependencies: { type: boolean }

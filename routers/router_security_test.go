@@ -130,7 +130,7 @@ func configureRouterTestEnvironment(t *testing.T) {
 		"DST_ADMIN_BACKUP_PATH":       filepath.Join(root, "backups"),
 		"DST_ADMIN_SERVER_PATH":       filepath.Join(root, "server", "dontstarve_dedicated_server_nullrenderer"),
 		"DST_ADMIN_UGC_PATH":          filepath.Join(root, "ugc_mods"),
-		"DST_ADMIN_WORKSHOP_CONTENT":  filepath.Join(root, "workshop", "content", "322330"),
+		"DST_ADMIN_WORKSHOP_CONTENT":  filepath.Join(root, "workshop", "steamapps", "workshop", "content", "322330"),
 		"DST_ADMIN_WORKSHOP_DOWNLOAD": filepath.Join(root, "workshop"),
 		"DST_ADMIN_STEAMCMD_PATH":     filepath.Join(root, "steamcmd"),
 		"DST_ADMIN_MAP_PATH":          filepath.Join(root, "maps"),
