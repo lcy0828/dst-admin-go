@@ -1593,7 +1593,10 @@ paths:
       tags: [Mods]
       operationId: searchMods
       parameters:
-        - { name: query, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 100 } }
+        - { name: query, in: query, schema: { type: string, maxLength: 100, default: "" } }
+        - { name: sort, in: query, schema: { type: string, enum: [relevance, trend, most_recent, last_updated, most_subscribed, top_rated], default: relevance } }
+        - { name: days, in: query, schema: { type: integer, enum: [-1, 1, 7, 30, 90, 180, 365], default: 7 } }
+        - { name: tags, in: query, description: Repeat this parameter or provide a comma-separated list of Workshop category identifiers, schema: { type: array, items: { type: string, enum: [character, item, pet, creature, environment, interface, utility, art, worldgen, tweak, scenario, language, other, tutorial, client_only_mod, server_only_mod, all_clients_require_mod, server_admin] } } }
         - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
         - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
       responses:
@@ -4406,16 +4409,22 @@ components:
           $ref: "#/components/schemas/Meta"
     SteamMod:
       type: object
-      required: [id, name, subscriptions, score, dependencies, tags]
+      required: [id, name, subscriptions, score, ratingCount, favorites, views, fileSize, dependencies, tags]
       properties:
         id: { type: string, pattern: '^[0-9]{1,20}$' }
         name: { type: string }
         authorId: { type: string }
         author: { type: string }
+        version: { type: string }
         description: { type: string }
         previewUrl: { type: string, format: uri }
         subscriptions: { type: integer, format: int64 }
         score: { type: number }
+        ratingCount: { type: integer, format: int64 }
+        favorites: { type: integer, format: int64 }
+        views: { type: integer, format: int64 }
+        fileSize: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
         dependencies: { type: array, items: { type: string } }
         tags: { type: array, items: { type: string } }

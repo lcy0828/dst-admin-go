@@ -45,6 +45,7 @@ type SteamProvider struct {
 }
 
 type communityMetadataCache struct {
+	Name        string
 	Author      string
 	Description string
 	Score       float64
@@ -129,6 +130,7 @@ func (p *SteamProvider) Search(ctx context.Context, options SearchOptions) (Sear
 		}
 	}
 	p.populateAuthors(ctx, items)
+	p.populateCommunityMetadata(ctx, items)
 	return SearchResult{Items: items, Total: payload.Response.Total, Page: page, PageSize: pageSize}, nil
 }
 
@@ -343,9 +345,7 @@ func (p *SteamProvider) Details(ctx context.Context, ids []string) (map[string]S
 		items = append(items, converted)
 	}
 	p.populateAuthors(ctx, items)
-	if p.APIKey == "" {
-		p.populateCommunityMetadata(ctx, items)
-	}
+	p.populateCommunityMetadata(ctx, items)
 	for _, item := range items {
 		result[item.ID] = item
 	}
@@ -528,6 +528,7 @@ func (p *SteamProvider) loadCommunityMetadata(ctx context.Context, id string) (c
 		return communityMetadataCache{}, false
 	}
 	metadata := communityMetadataCache{ExpiresAt: time.Now().Add(steamCommunityCacheTTL)}
+	metadata.Name = strings.TrimSpace(document.Find(".workshopItemTitle").First().Text())
 	metadata.Author = strings.TrimSpace(document.Find(`a[href*="/myworkshopfiles/"]`).First().Text())
 	description := document.Find("#highlightContent").First()
 	description.Find("br").Each(func(_ int, selection *goquery.Selection) {
@@ -551,7 +552,7 @@ func (p *SteamProvider) loadCommunityMetadata(ctx context.Context, id string) (c
 		}
 		return false
 	})
-	return metadata, metadata.Author != "" || metadata.Description != "" || metadata.Score > 0 || metadata.RatingCount > 0
+	return metadata, metadata.Name != "" || metadata.Author != "" || metadata.Description != "" || metadata.Score > 0 || metadata.RatingCount > 0
 }
 
 func (p *SteamProvider) cachedCommunityMetadata(id string) (communityMetadataCache, bool) {
@@ -572,6 +573,9 @@ func (p *SteamProvider) cacheCommunityMetadata(id string, value communityMetadat
 }
 
 func mergeCommunityMetadata(item *SteamMod, metadata communityMetadataCache) {
+	if metadata.Name != "" {
+		item.Name = metadata.Name
+	}
 	if item.Author == "" {
 		item.Author = metadata.Author
 	}

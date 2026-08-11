@@ -91,27 +91,35 @@ func TestSteamCommunityLanguageFollowsTheSearchText(t *testing.T) {
 }
 
 func TestSteamDetailsUsesKeyedEndpointAndRequestsDependencies(t *testing.T) {
-	var capturedPath string
 	var capturedForm url.Values
+	communityLocalized := false
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		capturedPath = request.URL.Path
-		if err := request.ParseForm(); err != nil {
-			t.Fatal(err)
+		switch request.URL.Path {
+		case "/IPublishedFileService/GetDetails/v1/":
+			if err := request.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			capturedForm = request.PostForm
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(writer, `{"response":{"publishedfiledetails":[{"publishedfileid":"378160973","result":1,"creator":"76561198246008860","consumer_app_id":322330,"title":"Global Positions","description":"English description","children":[{"publishedfileid":"123456789"}]}]}}`)
+		case "/ISteamUser/GetPlayerSummaries/v2/":
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(writer, `{"response":{"players":[{"steamid":"76561198246008860","personaname":"Steam Author"}]}}`)
+		case "/sharedfiles/filedetails/":
+			communityLocalized = request.URL.Query().Get("l") == "schinese"
+			_, _ = fmt.Fprint(writer, `<html><body><div class="workshopItemTitle">Global Positions-全球定位</div><div id="highlightContent">中文详情</div></body></html>`)
+		default:
+			http.NotFound(writer, request)
 		}
-		capturedForm = request.PostForm
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(writer, `{"response":{"publishedfiledetails":[{"publishedfileid":"378160973","result":1,"consumer_app_id":322330,"title":"Global Positions","children":[{"publishedfileid":"123456789"}]}]}}`)
 	}))
 	defer server.Close()
 
 	provider := NewSteamProvider("secret-key", "322330")
 	provider.APIBase = server.URL
+	provider.CommunityBase = server.URL
 	items, err := provider.Details(context.Background(), []string{"378160973"})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if capturedPath != "/IPublishedFileService/GetDetails/v1/" {
-		t.Fatalf("path = %q", capturedPath)
 	}
 	for key, expected := range map[string]string{
 		"key": "secret-key", "includechildren": "true", "includetags": "true", "includevotes": "true",
@@ -122,6 +130,9 @@ func TestSteamDetailsUsesKeyedEndpointAndRequestsDependencies(t *testing.T) {
 	}
 	if got := items["378160973"].Dependencies; len(got) != 1 || got[0] != "123456789" {
 		t.Fatalf("dependencies = %#v", got)
+	}
+	if !communityLocalized || items["378160973"].Name != "Global Positions-全球定位" || items["378160973"].Description != "中文详情" {
+		t.Fatalf("keyed details did not use the Chinese community description: %#v", items["378160973"])
 	}
 }
 
@@ -177,7 +188,7 @@ func TestSteamCommunityParsesAuthorAndRating(t *testing.T) {
 		case "/workshop/browse/":
 			_, _ = fmt.Fprint(writer, `<html><body><div class="item"><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=1392778117"><img src="preview" alt="[DST] Legion"></a><div><a href="https://steamcommunity.com/profiles/76561198246008860/myworkshopfiles/?appid=322330">创作者：ti_Tout</a></div></div></body></html>`)
 		case "/sharedfiles/filedetails/":
-			_, _ = fmt.Fprint(writer, `<html><body><a href="https://steamcommunity.com/profiles/76561198246008860/myworkshopfiles/?appid=322330">ti_Tout</a><div class="fileRatingDetails"><img src="/public/images/sharedfiles/5-star_large.png?v=2"></div><div class="numRatings">8,071 个评价</div><div id="highlightContent"><div class="bb_h1">棱镜官方群组</div>请加QQ群<br>喜欢潜水的小伙伴</div></body></html>`)
+			_, _ = fmt.Fprint(writer, `<html><body><div class="workshopItemTitle">[DST] Legion-棱镜</div><a href="https://steamcommunity.com/profiles/76561198246008860/myworkshopfiles/?appid=322330">ti_Tout</a><div class="fileRatingDetails"><img src="/public/images/sharedfiles/5-star_large.png?v=2"></div><div class="numRatings">8,071 个评价</div><div id="highlightContent"><div class="bb_h1">棱镜官方群组</div>请加QQ群<br>喜欢潜水的小伙伴</div></body></html>`)
 		default:
 			http.NotFound(writer, request)
 		}
@@ -194,7 +205,7 @@ func TestSteamCommunityParsesAuthorAndRating(t *testing.T) {
 		t.Fatalf("community author was not parsed: %#v", items)
 	}
 	metadata, ok := provider.loadCommunityMetadata(context.Background(), "1392778117")
-	if !ok || metadata.Author != "ti_Tout" || metadata.Score != 1 || metadata.RatingCount != 8071 || !strings.Contains(metadata.Description, "请加QQ群\n喜欢潜水") {
+	if !ok || metadata.Name != "[DST] Legion-棱镜" || metadata.Author != "ti_Tout" || metadata.Score != 1 || metadata.RatingCount != 8071 || !strings.Contains(metadata.Description, "请加QQ群\n喜欢潜水") {
 		t.Fatalf("community rating was not parsed: %#v", metadata)
 	}
 }
