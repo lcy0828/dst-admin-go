@@ -236,6 +236,7 @@ func (s *Service) loadConfiguration(ctx context.Context, roomID, worldID, modID 
 		known[field.Key] = field
 	}
 	values := make(map[string]interface{}, len(fields))
+	overrides := make(map[string]interface{})
 	for _, field := range fields {
 		values[field.Key] = field.DefaultValue
 	}
@@ -252,6 +253,7 @@ func (s *Service) loadConfiguration(ctx context.Context, roomID, worldID, modID 
 			}
 			if _, exists := known[key]; exists {
 				values[key] = value
+				overrides[key] = value
 			} else {
 				unknown[key] = value
 			}
@@ -261,7 +263,7 @@ func (s *Service) loadConfiguration(ctx context.Context, roomID, worldID, modID 
 		Revision: document.revision, RoomID: roomID, WorldID: worldID, ModID: modID,
 		Enabled: modEnabled(entry), Parser: parsed.Parser, FallbackUsed: parsed.FallbackUsed,
 		FallbackReason: parsed.FallbackReason, Warnings: nonNilStrings(parsed.Warnings),
-		RawPreserved: true, SchemaVersion: "1", Fields: fields, Values: values, UnknownValues: unknown,
+		RawPreserved: true, SchemaVersion: "1", Fields: fields, Values: values, Overrides: overrides, UnknownValues: unknown,
 	}, document, path, nil
 }
 

@@ -201,6 +201,7 @@ type ModConfiguration struct {
 	SchemaVersion  string                 `json:"schemaVersion"`
 	Fields         []ConfigField          `json:"fields"`
 	Values         map[string]interface{} `json:"values"`
+	Overrides      map[string]interface{} `json:"overrides"`
 	UnknownValues  map[string]interface{} `json:"unknownValues"`
 }
 

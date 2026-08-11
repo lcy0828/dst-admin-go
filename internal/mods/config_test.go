@@ -134,6 +134,12 @@ func TestConfigurationPreviewApplyPreservesUnknownFields(t *testing.T) {
 	if configuration.Values["show_players"] != false {
 		t.Fatalf("current value not loaded: %#v", configuration.Values)
 	}
+	if configuration.Overrides["show_players"] != false {
+		t.Fatalf("explicit override not reported: %#v", configuration.Overrides)
+	}
+	if _, overridden := configuration.Overrides["position_color"]; overridden {
+		t.Fatalf("default-only value reported as override: %#v", configuration.Overrides)
+	}
 	mystery, ok := configuration.UnknownValues["mystery"].(map[string]interface{})
 	if !ok || mystery["nested"] != "keep" {
 		t.Fatalf("unknown nested value missing: %#v", configuration.UnknownValues)
@@ -221,6 +227,45 @@ func TestConfigurationRejectsValueOutsideDeclaredOptions(t *testing.T) {
 	}
 	if backupService.count != 0 {
 		t.Fatalf("invalid request created a backup: %d", backupService.count)
+	}
+}
+
+func TestConfigurationRestoreDefaultsRemovesKnownOverrides(t *testing.T) {
+	service, _, overridesPath := newConfigTestService(t)
+	ctx := context.Background()
+	configuration, err := service.Configuration(ctx, "room-1", "world-1", "378160973")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.ApplyConfiguration(ctx, "job-restore", "room-1", "world-1", "378160973", ConfigUpdateRequest{
+		ExpectedRevision: configuration.Revision,
+		Enabled:          true,
+		Patch: map[string]json.RawMessage{
+			"show_players": json.RawMessage(`null`),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := service.Configuration(ctx, "room-1", "world-1", "378160973")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Values["show_players"] != true {
+		t.Fatalf("declared default was not restored: %#v", restored.Values)
+	}
+	if _, overridden := restored.Overrides["show_players"]; overridden {
+		t.Fatalf("known override was not removed: %#v", restored.Overrides)
+	}
+	if _, preserved := restored.UnknownValues["mystery"]; !preserved {
+		t.Fatalf("unknown override was removed: %#v", restored.UnknownValues)
+	}
+	rendered, err := os.ReadFile(overridesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rendered), "show_players") || !strings.Contains(string(rendered), "mystery") {
+		t.Fatalf("restored file did not preserve the expected fields:\n%s", rendered)
 	}
 }
 
