@@ -2,6 +2,7 @@ package mods
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,66 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestSteamSearchWithoutKeyUsesPublicWorkshopAndPreservesPagination(t *testing.T) {
+	requestedPages := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/workshop/browse/":
+			page := request.URL.Query().Get("p")
+			requestedPages = append(requestedPages, page)
+			start := 1
+			if page == "2" {
+				start = 31
+			}
+			_, _ = fmt.Fprint(writer, `<html><body><div>61 entries matching filters</div>`)
+			for index := start; index < start+30; index++ {
+				id := fmt.Sprintf("100000%03d", index)
+				_, _ = fmt.Fprintf(writer, `<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=%s"><img src="preview-%d" alt="Result %d"></a>`, id, index, index)
+			}
+			_, _ = fmt.Fprint(writer, `</body></html>`)
+		case "/ISteamRemoteStorage/GetPublishedFileDetails/v1/":
+			if err := request.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			items := make([]map[string]interface{}, 0)
+			for index := 0; ; index++ {
+				id := request.PostForm.Get(fmt.Sprintf("publishedfileids[%d]", index))
+				if id == "" {
+					break
+				}
+				items = append(items, map[string]interface{}{
+					"publishedfileid": id, "result": 1, "consumer_app_id": 322330, "title": "Detail " + id,
+				})
+			}
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]interface{}{"response": map[string]interface{}{"publishedfiledetails": items}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewSteamProvider("", "322330")
+	provider.APIBase = server.URL
+	provider.CommunityBase = server.URL
+	result, err := provider.Search(context.Background(), "棱镜", 2, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(requestedPages) != "[1 2]" {
+		t.Fatalf("community pages = %v", requestedPages)
+	}
+	if result.Total != 61 || result.Page != 2 || result.PageSize != 20 || len(result.Items) != 20 {
+		t.Fatalf("unexpected pagination: %#v", result)
+	}
+	if result.Items[0].ID != "100000021" || result.Items[19].ID != "100000040" {
+		t.Fatalf("unexpected result range: first=%q last=%q", result.Items[0].ID, result.Items[19].ID)
+	}
+	if result.Items[0].Name != "Detail 100000021" {
+		t.Fatalf("public details were not merged: %#v", result.Items[0])
+	}
+}
 
 func TestSteamDetailsUsesKeyedEndpointAndRequestsDependencies(t *testing.T) {
 	var capturedPath string

@@ -24,7 +24,7 @@
 | `DST_ADMIN_WORKSHOP_DOWNLOAD` | SteamCMD 下载根目录 | `/opt/dst/workshop` |
 | `DST_ADMIN_WORKSHOP_CONTENT` | Workshop content 的 App 目录 | `/opt/dst/workshop/steamapps/workshop/content/322330` |
 | `DST_ADMIN_STEAM_APP_ID` | Workshop consumer App ID | `322330` |
-| `DST_ADMIN_STEAM_API_KEY` | Steam Web API Key；名称搜索和完整依赖元数据需要 | secret |
+| `DST_ADMIN_STEAM_API_KEY` | Steam Web API Key；可选，配置后名称搜索可获得更完整的作者、标签和依赖元数据 | secret |
 | `DST_ADMIN_LUA_BINARY` | 外部 Lua fallback 可执行文件；留空或使用默认 `lua` 时会继续自动发现版本化命令和标准安装目录 | `/usr/bin/lua` |
 | `DST_ADMIN_PYTHON_BINARY` | 可选 Python/Lupa fallback；仅在外部 Lua 不可用或执行失败后使用 | `/opt/dst-admin/venv/bin/python3` |
 | `DST_ADMIN_LUA_PATH` | 可选的 Lua/C 兼容模块搜索目录；fallback helper 已内嵌，不再要求 `modgetinfo.lua` | `/opt/dst-admin/lua-modules` |
@@ -33,7 +33,8 @@
 
 ## 3. Steam 与依赖
 
-- Workshop ID 搜索可使用公开 `ISteamRemoteStorage/GetPublishedFileDetails`。
+- 名称搜索在未配置 Key 时使用公开 Workshop 搜索页，并通过 `ISteamRemoteStorage/GetPublishedFileDetails` 补全结果。
+- Workshop ID 搜索可直接使用公开 `ISteamRemoteStorage/GetPublishedFileDetails`。
 - 配置 API Key 后，详情使用 `IPublishedFileService/GetDetails` 并显式请求 children、tags 和 votes；名称搜索使用 `QueryFiles`。
 - 依赖按图递归展开，去重并限制为最多 100 个节点，循环引用不会无限递归。
 - HTTP 客户端有 12 秒超时、16 MiB 响应上限，并拒绝尾随 JSON。

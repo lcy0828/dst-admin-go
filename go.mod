@@ -6,6 +6,7 @@ toolchain go1.25.12
 
 require (
 	github.com/GianlucaP106/gotmux v0.3.0
+	github.com/PuerkitoBio/goquery v1.8.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gin-gonic/gin v1.9.1
 	github.com/go-ini/ini v1.67.0
@@ -25,7 +26,6 @@ require (
 )
 
 require (
-	github.com/PuerkitoBio/goquery v1.8.0 // indirect
 	github.com/andybalholm/cascadia v1.3.1 // indirect
 	github.com/antchfx/htmlquery v1.2.5 // indirect
 	github.com/antchfx/xmlquery v1.3.13 // indirect

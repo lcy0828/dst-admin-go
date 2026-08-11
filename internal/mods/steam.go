@@ -12,9 +12,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/PuerkitoBio/goquery"
 )
 
-const steamResponseLimit = int64(16 * 1024 * 1024)
+const (
+	steamResponseLimit      = int64(16 * 1024 * 1024)
+	steamCommunityPageSize  = 30
+	steamCommunityUserAgent = "dst-admin-go/1.0 (+https://github.com/lcy0828/dst-admin-go)"
+)
 
 type MetadataProvider interface {
 	Search(context.Context, string, int, int) (SearchResult, error)
@@ -22,10 +28,11 @@ type MetadataProvider interface {
 }
 
 type SteamProvider struct {
-	APIKey     string
-	AppID      string
-	HTTPClient *http.Client
-	APIBase    string
+	APIKey        string
+	AppID         string
+	HTTPClient    *http.Client
+	APIBase       string
+	CommunityBase string
 }
 
 func NewSteamProvider(apiKey, appID string) *SteamProvider {
@@ -35,6 +42,7 @@ func NewSteamProvider(apiKey, appID string) *SteamProvider {
 	return &SteamProvider{
 		APIKey: strings.TrimSpace(apiKey), AppID: appID,
 		HTTPClient: &http.Client{Timeout: 12 * time.Second}, APIBase: "https://api.steampowered.com",
+		CommunityBase: "https://steamcommunity.com",
 	}
 }
 
@@ -55,7 +63,7 @@ func (p *SteamProvider) Search(ctx context.Context, query string, page, pageSize
 		return SearchResult{Items: items, Total: len(items), Page: 1, PageSize: pageSize}, nil
 	}
 	if p.APIKey == "" {
-		return SearchResult{}, ErrSteamKeyRequired
+		return p.searchCommunity(ctx, query, page, pageSize)
 	}
 	parameters := url.Values{
 		"key": {p.APIKey}, "appid": {p.AppID}, "search_text": {query}, "page": {strconv.Itoa(page)},
@@ -84,6 +92,138 @@ func (p *SteamProvider) Search(ctx context.Context, query string, page, pageSize
 	}
 	p.populateAuthors(ctx, items)
 	return SearchResult{Items: items, Total: payload.Response.Total, Page: page, PageSize: pageSize}, nil
+}
+
+func (p *SteamProvider) searchCommunity(ctx context.Context, query string, page, pageSize int) (SearchResult, error) {
+	start := (page - 1) * pageSize
+	communityPage := start/steamCommunityPageSize + 1
+	offset := start % steamCommunityPageSize
+	pageCount := (offset + pageSize + steamCommunityPageSize - 1) / steamCommunityPageSize
+	items := make([]SteamMod, 0, pageCount*steamCommunityPageSize)
+	seen := make(map[string]bool, cap(items))
+	total := -1
+	for index := 0; index < pageCount; index++ {
+		batch, batchTotal, err := p.searchCommunityPage(ctx, query, communityPage+index)
+		if err != nil {
+			return SearchResult{}, err
+		}
+		if batchTotal >= 0 {
+			total = batchTotal
+		}
+		for _, item := range batch {
+			if !seen[item.ID] {
+				seen[item.ID] = true
+				items = append(items, item)
+			}
+		}
+		if len(batch) < steamCommunityPageSize {
+			break
+		}
+	}
+	if total < 0 {
+		total = (communityPage-1)*steamCommunityPageSize + len(items)
+		if len(items) == pageCount*steamCommunityPageSize {
+			total++
+		}
+	}
+	if offset >= len(items) {
+		return SearchResult{Items: []SteamMod{}, Total: total, Page: page, PageSize: pageSize}, nil
+	}
+	end := min(offset+pageSize, len(items))
+	items = items[offset:end]
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.ID)
+	}
+	details, err := p.Details(ctx, ids)
+	if err != nil {
+		return SearchResult{}, fmt.Errorf("load public Steam Workshop search details: %w", err)
+	}
+	for index, item := range items {
+		if detail, ok := details[item.ID]; ok {
+			if detail.Name == "" {
+				detail.Name = item.Name
+			}
+			if detail.PreviewURL == "" {
+				detail.PreviewURL = item.PreviewURL
+			}
+			items[index] = detail
+		}
+	}
+	return SearchResult{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
+}
+
+func (p *SteamProvider) searchCommunityPage(ctx context.Context, query string, page int) ([]SteamMod, int, error) {
+	parameters := url.Values{
+		"appid": {p.AppID}, "searchtext": {query}, "browsesort": {"textsearch"},
+		"section": {"items"}, "p": {strconv.Itoa(page)}, "l": {"english"},
+	}
+	endpoint := strings.TrimRight(p.CommunityBase, "/") + "/workshop/browse/?" + parameters.Encode()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, -1, err
+	}
+	request.Header.Set("User-Agent", steamCommunityUserAgent)
+	request.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	response, err := p.HTTPClient.Do(request)
+	if err != nil {
+		return nil, -1, fmt.Errorf("search public Steam Workshop: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		return nil, -1, fmt.Errorf("public Steam Workshop returned HTTP %d", response.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, steamResponseLimit+1))
+	if err != nil {
+		return nil, -1, err
+	}
+	if int64(len(data)) > steamResponseLimit {
+		return nil, -1, fmt.Errorf("public Steam Workshop response exceeds %d bytes", steamResponseLimit)
+	}
+	document, err := goquery.NewDocumentFromReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, -1, fmt.Errorf("parse public Steam Workshop response: %w", err)
+	}
+	items := make([]SteamMod, 0, steamCommunityPageSize)
+	seen := make(map[string]bool, steamCommunityPageSize)
+	document.Find(`a[href*="/sharedfiles/filedetails/"]`).Each(func(_ int, selection *goquery.Selection) {
+		image := selection.ChildrenFiltered("img").First()
+		if image.Length() == 0 {
+			return
+		}
+		href, exists := selection.Attr("href")
+		if !exists {
+			return
+		}
+		parsed, parseErr := url.Parse(href)
+		if parseErr != nil || parsed.Path != "/sharedfiles/filedetails/" {
+			return
+		}
+		id := parsed.Query().Get("id")
+		if !validModID(id) || seen[id] {
+			return
+		}
+		seen[id] = true
+		name, _ := image.Attr("alt")
+		previewURL, _ := image.Attr("src")
+		items = append(items, SteamMod{ID: id, Name: strings.TrimSpace(name), PreviewURL: previewURL})
+	})
+	total := -1
+	document.Find("div").EachWithBreak(func(_ int, selection *goquery.Selection) bool {
+		text := strings.TrimSpace(selection.Text())
+		const suffix = " entries matching filters"
+		if !strings.HasSuffix(text, suffix) {
+			return true
+		}
+		value := strings.TrimSpace(strings.TrimSuffix(text, suffix))
+		if parsed, parseErr := strconv.Atoi(value); parseErr == nil && parsed >= 0 {
+			total = parsed
+			return false
+		}
+		return true
+	})
+	return items, total, nil
 }
 
 func (p *SteamProvider) Details(ctx context.Context, ids []string) (map[string]SteamMod, error) {
