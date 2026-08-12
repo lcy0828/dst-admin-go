@@ -520,6 +520,15 @@ func (s *Store) taskFromRecord(record taskRecord) (Task, error) {
 			return Task{}, err
 		}
 	}
+	if worldIDs == nil {
+		worldIDs = []string{}
+	}
+	if parameters == nil {
+		parameters = map[string]interface{}{}
+	}
+	if dependencies == nil {
+		dependencies = []string{}
+	}
 	var group groupRecord
 	if err := s.db.Table(s.groupsTable).Where("id = ?", record.GroupID).First(&group).Error; err != nil {
 		return Task{}, err

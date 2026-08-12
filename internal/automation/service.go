@@ -390,6 +390,12 @@ func (s *Service) normalizeTaskInput(roomID string, input TaskInput, updating bo
 	if input.Parameters == nil {
 		input.Parameters = map[string]interface{}{}
 	}
+	if input.WorldIDs == nil {
+		input.WorldIDs = []string{}
+	}
+	if input.Dependencies == nil {
+		input.Dependencies = []string{}
+	}
 	fields := make(map[string]string)
 	if _, err := s.store.Group(roomID, input.GroupID); err != nil {
 		fields["groupId"] = "任务组不存在"

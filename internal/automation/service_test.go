@@ -2,7 +2,9 @@ package automation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -209,6 +211,34 @@ func createAutomationFixture(t *testing.T, service *Service) (Group, Task) {
 		t.Fatal(err)
 	}
 	return group, task
+}
+
+func TestTaskCollectionsRemainJSONCollectionsWhenEmpty(t *testing.T) {
+	service, _, _ := newAutomationTestService(t, &automationTestExecutor{})
+	group, err := service.CreateGroup("room", GroupInput{Name: "Daily", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := service.CreateTask("room", TaskInput{
+		GroupID: group.ID, Name: "Refresh", Enabled: true, Schedule: "0 10 * * *",
+		Timezone: "Asia/Shanghai", Action: ActionWorldStateRefresh, TimeoutSeconds: 30,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.WorldIDs == nil || task.Dependencies == nil || task.Parameters == nil {
+		t.Fatalf("empty collections must remain non-nil: %#v", task)
+	}
+	encoded, err := json.Marshal(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	for _, expected := range []string{`"worldIds":[]`, `"parameters":{}`, `"dependencies":[]`} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("task JSON %s does not contain %s", text, expected)
+		}
+	}
 }
 
 func TestEnsureDefaultPlayerRefreshIsIdempotent(t *testing.T) {
