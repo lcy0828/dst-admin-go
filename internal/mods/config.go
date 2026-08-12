@@ -20,6 +20,11 @@ type configPlan struct {
 }
 
 func (s *Service) ConfigurationFile(roomID, worldID string) (ConfigurationFile, error) {
+	_, release, err := s.acquireRoom(context.Background(), roomID)
+	if err != nil {
+		return ConfigurationFile{}, err
+	}
+	defer release()
 	_, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return ConfigurationFile{}, err
@@ -46,9 +51,11 @@ func (s *Service) Configuration(ctx context.Context, roomID, worldID, modID stri
 	if !validModID(modID) {
 		return ModConfiguration{}, ErrInvalidModID
 	}
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	ctx, release, err := s.acquireRoom(ctx, roomID)
+	if err != nil {
+		return ModConfiguration{}, err
+	}
+	defer release()
 	configuration, _, _, err := s.loadConfiguration(ctx, roomID, worldID, modID)
 	return configuration, err
 }
@@ -57,9 +64,11 @@ func (s *Service) PreviewConfiguration(ctx context.Context, roomID, worldID, mod
 	if !validModID(modID) {
 		return ConfigPreview{}, ErrInvalidModID
 	}
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	ctx, release, err := s.acquireRoom(ctx, roomID)
+	if err != nil {
+		return ConfigPreview{}, err
+	}
+	defer release()
 	plan, err := s.planConfiguration(ctx, roomID, worldID, modID, request)
 	return plan.preview, err
 }
@@ -68,9 +77,11 @@ func (s *Service) ApplyConfiguration(ctx context.Context, jobID, roomID, worldID
 	if !validModID(modID) {
 		return ConfigApplyResult{}, ErrInvalidModID
 	}
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	ctx, release, err := s.acquireRoom(ctx, roomID)
+	if err != nil {
+		return ConfigApplyResult{}, err
+	}
+	defer release()
 	plan, err := s.planConfiguration(ctx, roomID, worldID, modID, request)
 	if err != nil {
 		return ConfigApplyResult{}, err

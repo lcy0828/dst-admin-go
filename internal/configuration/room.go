@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"dont/internal/roomops"
+
 	"github.com/go-ini/ini"
 )
 
@@ -70,9 +72,11 @@ type roomDocument struct {
 }
 
 func (s *Service) RoomConfig(roomID string) (RoomConfig, error) {
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return RoomConfig{}, err
+	}
+	defer release()
 	_, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return RoomConfig{}, err
@@ -85,9 +89,11 @@ func (s *Service) RoomConfig(roomID string) (RoomConfig, error) {
 }
 
 func (s *Service) PreviewRoom(roomID string, request RoomUpdateRequest) (Preview, error) {
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return Preview{}, err
+	}
+	defer release()
 	_, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return Preview{}, err
@@ -103,9 +109,11 @@ func (s *Service) PreviewRoom(roomID string, request RoomUpdateRequest) (Preview
 }
 
 func (s *Service) ApplyRoom(ctx context.Context, jobID, roomID string, request RoomUpdateRequest) (ApplyResult, error) {
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	ctx, release, err := roomops.Acquire(ctx, roomID)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	defer release()
 	room, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return ApplyResult{}, err

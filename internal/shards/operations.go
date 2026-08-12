@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"dont/internal/jobs"
+	"dont/internal/roomops"
 	"dont/internal/rooms"
 )
 
@@ -57,17 +58,22 @@ type RoomCatalog interface {
 	Worlds(string) ([]rooms.World, error)
 }
 
+type RuntimePreparer interface {
+	Prepare(context.Context, string, string) error
+}
+
 type Operations struct {
 	rooms        RoomCatalog
 	control      Control
+	preparers    []RuntimePreparer
 	pollInterval time.Duration
 	startTimeout time.Duration
 	stopTimeout  time.Duration
 }
 
-func NewOperations(roomCatalog RoomCatalog, control Control) *Operations {
+func NewOperations(roomCatalog RoomCatalog, control Control, preparers ...RuntimePreparer) *Operations {
 	return &Operations{
-		rooms: roomCatalog, control: control,
+		rooms: roomCatalog, control: control, preparers: append([]RuntimePreparer(nil), preparers...),
 		pollInterval: 500 * time.Millisecond, startTimeout: 2 * time.Minute, stopTimeout: 60 * time.Second,
 	}
 }
@@ -76,44 +82,37 @@ func (o *Operations) Plan(action Action, roomID string, selectedWorldIDs []strin
 	if action != ActionStart && action != ActionStop && action != ActionRestart {
 		return nil, nil, ErrUnknownAction
 	}
-	room, err := o.rooms.Room(roomID)
+	room, worlds, err := o.resolvePlan(roomID, selectedWorldIDs)
 	if err != nil {
 		return nil, nil, err
-	}
-	if !room.Managed {
-		return nil, nil, ErrRoomNotManaged
-	}
-	if !controlName.MatchString(room.DirectoryName) {
-		return nil, nil, ErrUnsafeName
-	}
-	worlds, err := o.rooms.Worlds(roomID)
-	if err != nil {
-		return nil, nil, err
-	}
-	worlds, err = selectWorlds(worlds, selectedWorldIDs)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(worlds) == 0 {
-		return nil, nil, ErrNoWorlds
-	}
-	for _, world := range worlds {
-		if !controlName.MatchString(world.DirectoryName) {
-			return nil, nil, fmt.Errorf("%w: %s", ErrUnsafeName, world.DirectoryName)
-		}
 	}
 	orderWorlds(worlds, action)
+	plannedWorldIDs := make([]string, 0, len(worlds))
 	targets := make([]jobs.TargetSpec, 0, len(worlds))
 	for _, world := range worlds {
+		plannedWorldIDs = append(plannedWorldIDs, world.ID)
 		targets = append(targets, jobs.TargetSpec{ID: world.ID, Name: world.Name})
 	}
 	runner := func(ctx context.Context, report func(jobs.TargetResult)) error {
-		for _, world := range worlds {
+		ctx, release, err := roomops.Acquire(ctx, room.ID)
+		if err != nil {
+			return err
+		}
+		defer release()
+		currentRoom, currentWorlds, err := o.resolvePlan(room.ID, plannedWorldIDs)
+		if err != nil {
+			for _, world := range worlds {
+				report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "ROOM_CHANGED", Message: "等待执行期间房间或分片配置已变化，请重新提交操作"}})
+			}
+			return nil
+		}
+		orderWorlds(currentWorlds, action)
+		for _, world := range currentWorlds {
 			if err := ctx.Err(); err != nil {
 				report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusCanceled, Error: &jobs.Error{Code: "JOB_CANCELED", Message: "任务已取消"}})
 				continue
 			}
-			message, err := o.execute(ctx, action, room.DirectoryName, world.DirectoryName)
+			message, err := o.execute(ctx, action, currentRoom.DirectoryName, world.DirectoryName)
 			if err != nil {
 				code := strings.ToUpper(string(action)) + "_FAILED"
 				if errors.Is(err, context.Canceled) {
@@ -128,6 +127,36 @@ func (o *Operations) Plan(action Action, roomID string, selectedWorldIDs []strin
 		return nil
 	}
 	return targets, runner, nil
+}
+
+func (o *Operations) resolvePlan(roomID string, selectedWorldIDs []string) (rooms.Room, []rooms.World, error) {
+	room, err := o.rooms.Room(roomID)
+	if err != nil {
+		return rooms.Room{}, nil, err
+	}
+	if !room.Managed {
+		return rooms.Room{}, nil, ErrRoomNotManaged
+	}
+	if !controlName.MatchString(room.DirectoryName) {
+		return rooms.Room{}, nil, ErrUnsafeName
+	}
+	worlds, err := o.rooms.Worlds(roomID)
+	if err != nil {
+		return rooms.Room{}, nil, err
+	}
+	worlds, err = selectWorlds(worlds, selectedWorldIDs)
+	if err != nil {
+		return rooms.Room{}, nil, err
+	}
+	if len(worlds) == 0 {
+		return rooms.Room{}, nil, ErrNoWorlds
+	}
+	for _, world := range worlds {
+		if !controlName.MatchString(world.DirectoryName) {
+			return rooms.Room{}, nil, fmt.Errorf("%w: %s", ErrUnsafeName, world.DirectoryName)
+		}
+	}
+	return room, worlds, nil
 }
 
 func (o *Operations) IsRunning(ctx context.Context, roomName, worldName string) (bool, error) {
@@ -162,6 +191,9 @@ func (o *Operations) execute(ctx context.Context, action Action, roomName, world
 			return "分片已在运行", nil
 		}
 		if status.State != RuntimeStarting {
+			if err := o.prepare(ctx, roomName, worldName); err != nil {
+				return "", fmt.Errorf("准备分片运行时: %w", err)
+			}
 			if err := o.control.Start(ctx, roomName, worldName); err != nil {
 				return "", err
 			}
@@ -190,6 +222,9 @@ func (o *Operations) execute(ctx context.Context, action Action, roomName, world
 				return "", err
 			}
 		}
+		if err := o.prepare(ctx, roomName, worldName); err != nil {
+			return "", fmt.Errorf("准备分片运行时: %w", err)
+		}
 		if err := o.control.Start(ctx, roomName, worldName); err != nil {
 			return "", err
 		}
@@ -200,6 +235,18 @@ func (o *Operations) execute(ctx context.Context, action Action, roomName, world
 	default:
 		return "", ErrUnknownAction
 	}
+}
+
+func (o *Operations) prepare(ctx context.Context, roomName, worldName string) error {
+	for _, preparer := range o.preparers {
+		if preparer == nil {
+			continue
+		}
+		if err := preparer.Prepare(ctx, roomName, worldName); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (o *Operations) waitFor(ctx context.Context, roomName, worldName string, expected bool, timeout time.Duration) error {

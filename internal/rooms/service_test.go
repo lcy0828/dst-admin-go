@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 
@@ -104,6 +105,60 @@ func TestDiscoveredRoomRequiresExplicitAdoption(t *testing.T) {
 	adopted, err := service.Adopt(rooms[0].ID)
 	if err != nil || !adopted.Managed {
 		t.Fatalf("adopt room: %#v, %v", adopted, err)
+	}
+}
+
+func TestManagedRoomLifecycleCoversEveryManagementTransition(t *testing.T) {
+	service, _ := newTestService(t)
+	events := make([]string, 0, 4)
+	service.SetManagedRoomLifecycle(func(roomID string) {
+		events = append(events, "managed:"+roomID)
+	}, func(roomID string) {
+		events = append(events, "unmanaged:"+roomID)
+	})
+	room, err := service.Create(CreateRequest{
+		DirectoryName: "lifecycle_room", Name: "生命周期测试", GameMode: "survival", MaxPlayers: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Unadopt(room.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Adopt(room.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.DeleteRoom(room.ID, DeleteRoomRequest{Confirmation: room.Name}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"managed:" + room.ID,
+		"unmanaged:" + room.ID,
+		"managed:" + room.ID,
+		"unmanaged:" + room.ID,
+	}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("lifecycle events = %#v, want %#v", events, want)
+	}
+}
+
+func TestManagedRoomLifecycleSubscribersComposeAndWorldCreationNotifies(t *testing.T) {
+	service, _ := newTestService(t)
+	events := make([]string, 0, 4)
+	service.SetManagedRoomLifecycle(func(roomID string) { events = append(events, "first:"+roomID) }, nil)
+	service.AddManagedRoomLifecycle(func(roomID string) { events = append(events, "second:"+roomID) }, nil)
+	service.AddWorldLifecycle(func(roomID, worldID string) { events = append(events, "world:"+roomID+":"+worldID) })
+	room, err := service.Create(CreateRequest{DirectoryName: "composed", Name: "组合测试", GameMode: "survival", MaxPlayers: 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	world, err := service.CreateWorld(room.ID, CreateWorldRequest{DirectoryName: "Caves2", Type: "cave"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"first:" + room.ID, "second:" + room.ID, "world:" + room.ID + ":" + world.ID}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("lifecycle events = %#v, want %#v", events, want)
 	}
 }
 

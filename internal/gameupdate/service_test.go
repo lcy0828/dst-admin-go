@@ -15,6 +15,7 @@ import (
 	"dont/internal/backups"
 	dstinstall "dont/internal/dstserver"
 	"dont/internal/jobs"
+	"dont/internal/roomops"
 	"dont/internal/rooms"
 
 	"github.com/jinzhu/gorm"
@@ -70,7 +71,14 @@ func (c *updateControl) Stop(_ context.Context, room, world string) error {
 
 type updateBackups struct{ events *[]string }
 
-func (b updateBackups) Create(_ context.Context, roomID, name string, kind backups.Kind, sourceJobID string) (backups.Backup, error) {
+func (b updateBackups) Create(ctx context.Context, roomID, name string, kind backups.Kind, sourceJobID string) (backups.Backup, error) {
+	leaseContext, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	_, release, err := roomops.Acquire(leaseContext, roomID)
+	if err != nil {
+		return backups.Backup{}, err
+	}
+	defer release()
 	*b.events = append(*b.events, "backup:"+roomID)
 	if kind != backups.KindProtection || sourceJobID == "" || !strings.Contains(name, "保护备份") {
 		return backups.Backup{}, errors.New("invalid protection backup request")
@@ -185,9 +193,10 @@ func TestExecuteProtectsThenStopsAndRestartsInShardOrder(t *testing.T) {
 }
 
 func TestUpdateFailureIsPersistedAndFailsRunnerAfterRecovery(t *testing.T) {
-	service, store, catalog, _, events, server := newUpdateService(t, nil)
+	service, store, catalog, control, events, server := newUpdateService(t, nil)
 	runner := &updateRunner{events: events, server: server, err: errors.New("steam unavailable")}
 	service.runner = runner
+	control.running["Cluster/Caves"] = false
 	running := []plannedWorld{{roomID: "room", roomName: "Cluster", worldID: "master", worldName: "Master", isMaster: true}}
 	err := service.execute(context.Background(), "job-fail", UpdateRequest{RestartRunning: true}, "/tmp/steamcmd", catalog.rooms, running, func(jobs.TargetResult) {})
 	if err == nil || !strings.Contains(err.Error(), "steam unavailable") {
@@ -199,6 +208,40 @@ func TestUpdateFailureIsPersistedAndFailsRunnerAfterRecovery(t *testing.T) {
 	}
 	if got := (*events)[len(*events)-1]; got != "start:Master" {
 		t.Fatalf("last event = %q", got)
+	}
+}
+
+func TestExecuteRejectsPlanWhenRuntimeStateChangesWhileWaitingForRoom(t *testing.T) {
+	service, _, catalog, control, events, _ := newUpdateService(t, nil)
+	planned := []plannedWorld{
+		{roomID: "room", roomName: "Cluster", worldID: "master", worldName: "Master", isMaster: true},
+		{roomID: "room", roomName: "Cluster", worldID: "caves", worldName: "Caves"},
+	}
+	_, release, err := roomops.Acquire(context.Background(), "room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- service.execute(context.Background(), "job-stale", UpdateRequest{RestartRunning: true}, "/tmp/steamcmd", catalog.rooms, planned, func(jobs.TargetResult) {})
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	control.mu.Lock()
+	control.running["Cluster/Caves"] = false
+	control.mu.Unlock()
+	release()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrRoomStateChanged) {
+			t.Fatalf("execute error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued game update did not finish")
+	}
+	if len(*events) != 0 {
+		t.Fatalf("stale update performed mutations: %#v", *events)
 	}
 }
 

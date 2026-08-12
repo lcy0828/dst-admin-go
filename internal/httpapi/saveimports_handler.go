@@ -51,6 +51,10 @@ func (h *SaveImportHandler) get(c *gin.Context) {
 
 func (h *SaveImportHandler) upload(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, saveimport.MaxUploadBytes+1024*1024)
+	if err := h.imports.CheckUploadSpace(c.Request.ContentLength, true); err != nil {
+		saveImportFailure(c, err)
+		return
+	}
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -67,7 +71,7 @@ func (h *SaveImportHandler) upload(c *gin.Context) {
 		return
 	}
 	defer file.Close()
-	value, err := h.imports.Upload(c.Request.Context(), c.PostForm("name"), fileHeader.Filename, file)
+	value, err := h.imports.UploadWithSize(c.Request.Context(), c.PostForm("name"), fileHeader.Filename, file, fileHeader.Size)
 	if err != nil {
 		saveImportFailure(c, err)
 		return
@@ -88,6 +92,10 @@ func (h *SaveImportHandler) analyze(c *gin.Context) {
 	}
 	job, err := h.submitAnalysis(value)
 	if err != nil {
+		if errors.Is(err, saveimport.ErrImportBusy) {
+			saveImportFailure(c, err)
+			return
+		}
 		Failure(c, http.StatusInternalServerError, "JOB_CREATE_FAILED", "无法创建存档分析任务", nil)
 		return
 	}
@@ -106,9 +114,19 @@ func (h *SaveImportHandler) apply(c *gin.Context) {
 		return
 	}
 	roomID := request.TargetRoomID
+	reservationTarget := roomID
+	if request.Mode != saveimport.ApplyModeReplace {
+		reservationTarget = "directory:" + request.DirectoryName
+	}
+	release, err := h.imports.ReserveApply(value.ID, reservationTarget)
+	if err != nil {
+		saveImportFailure(c, err)
+		return
+	}
 	targets := []jobs.TargetSpec{{ID: value.ID, Name: value.Name}}
 	job, err := h.jobs.SubmitFactory("save-import.apply", roomID, "", targets, func(job jobs.Job) jobs.Runner {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
+			defer release()
 			result, applyErr := h.imports.Apply(ctx, value.ID, job.ID, request)
 			if applyErr != nil {
 				report(jobs.TargetResult{TargetID: value.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: saveImportErrorCode(applyErr), Message: applyErr.Error()}})
@@ -122,6 +140,7 @@ func (h *SaveImportHandler) apply(c *gin.Context) {
 		}
 	})
 	if err != nil {
+		release()
 		Failure(c, http.StatusInternalServerError, "JOB_CREATE_FAILED", "无法创建存档部署任务", nil)
 		return
 	}
@@ -129,8 +148,13 @@ func (h *SaveImportHandler) apply(c *gin.Context) {
 }
 
 func (h *SaveImportHandler) submitAnalysis(value saveimport.Session) (jobs.Job, error) {
+	release, err := h.imports.Reserve(value.ID, "analyze")
+	if err != nil {
+		return jobs.Job{}, err
+	}
 	targets := []jobs.TargetSpec{{ID: value.ID, Name: value.Name}}
-	return h.jobs.Submit("save-import.analyze", "", "", targets, func(ctx context.Context, report func(jobs.TargetResult)) error {
+	job, err := h.jobs.Submit("save-import.analyze", "", "", targets, func(ctx context.Context, report func(jobs.TargetResult)) error {
+		defer release()
 		analyzed, err := h.imports.Analyze(ctx, value.ID)
 		if err != nil {
 			report(jobs.TargetResult{TargetID: value.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: saveimport.AnalysisErrorCode(err), Message: err.Error()}})
@@ -142,6 +166,10 @@ func (h *SaveImportHandler) submitAnalysis(value saveimport.Session) (jobs.Job, 
 		})
 		return nil
 	})
+	if err != nil {
+		release()
+	}
+	return job, err
 }
 
 func (h *SaveImportHandler) delete(c *gin.Context) {
@@ -176,6 +204,10 @@ func saveImportFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusUnprocessableEntity, saveImportErrorCode(err), "存档压缩包结构或内容无效", nil)
 	case errors.Is(err, saveimport.ErrArchiveTooLarge):
 		Failure(c, http.StatusRequestEntityTooLarge, "ARCHIVE_TOO_LARGE", "存档超过上传或解压安全上限", nil)
+	case errors.Is(err, saveimport.ErrInsufficientSpace):
+		Failure(c, http.StatusInsufficientStorage, "INSUFFICIENT_SPACE", "本机剩余空间不足，无法安全处理存档", nil)
+	case errors.Is(err, saveimport.ErrImportBusy):
+		Failure(c, http.StatusConflict, "SAVE_IMPORT_BUSY", "该存档已有分析或部署任务正在执行", nil)
 	case errors.Is(err, saveimport.ErrImportNotReady), errors.Is(err, saveimport.ErrCandidateMissing):
 		Failure(c, http.StatusConflict, saveImportErrorCode(err), "存档尚未完成分析或候选房间不存在", nil)
 	case errors.Is(err, saveimport.ErrRoomRunning):

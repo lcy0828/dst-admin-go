@@ -70,6 +70,60 @@ func newRoomHandlerApp(t *testing.T) (*gin.Engine, *jobs.Service) {
 	return router, jobService
 }
 
+func TestRoomHandlerPropagatesManagedRoomLifecycle(t *testing.T) {
+	db, err := gorm.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SingularTable(true)
+	db.LogMode(false)
+	db.DB().SetMaxOpenConns(1)
+	defer db.Close()
+	roomStore := rooms.NewStore(db, "init_")
+	if err := roomStore.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := rooms.NewCatalog(t.TempDir(), roomStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomService := rooms.NewService(catalog, roomStore)
+	jobStore := jobs.NewStore(db, "init_")
+	if err := jobStore.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	jobService, err := jobs.NewService(jobStore, jobs.NewBroker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := &roomHandlerControl{running: make(map[string]bool)}
+	handler := NewRoomHandler(roomService, shards.NewOperations(roomService, control), jobService)
+	initialized := ""
+	finalized := ""
+	roomService.SetManagedRoomLifecycle(func(roomID string) {
+		initialized = roomID
+	}, func(roomID string) {
+		finalized = roomID
+	})
+	router := gin.New()
+	handler.Register(router.Group("/api/v2"))
+	response := performJSON(router, http.MethodPost, "/api/v2/rooms", map[string]interface{}{
+		"directoryName": "initialized_room", "name": "初始化测试", "gameMode": "survival", "maxPlayers": 6,
+	}, nil, "")
+	assertStatus(t, response, http.StatusCreated)
+	roomID, _ := responseData(t, response)["id"].(string)
+	if initialized == "" || initialized != roomID {
+		t.Fatalf("managed room initializer got %q, want %q", initialized, roomID)
+	}
+	response = performJSON(router, http.MethodDelete, "/api/v2/rooms/"+roomID, map[string]interface{}{
+		"confirmation": "初始化测试",
+	}, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if finalized != roomID {
+		t.Fatalf("managed room finalizer got %q, want %q", finalized, roomID)
+	}
+}
+
 func TestRoomAndShardJobHTTPFlow(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router, jobService := newRoomHandlerApp(t)

@@ -1,6 +1,7 @@
 package rooms
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"dont/internal/roomops"
 	worldtemplate "dont/template"
 
 	"github.com/go-ini/ini"
@@ -57,13 +59,44 @@ type DeleteWorldResult struct {
 }
 
 type Service struct {
-	catalog *Catalog
-	store   *Store
-	worldMu sync.Mutex
+	catalog     *Catalog
+	store       *Store
+	worldMu     sync.Mutex
+	lifecycleMu sync.RWMutex
+	onManaged   []func(string)
+	onUnmanaged []func(string)
+	onWorld     []func(string, string)
 }
 
 func NewService(catalog *Catalog, store *Store) *Service {
 	return &Service{catalog: catalog, store: store}
+}
+
+func (s *Service) SetManagedRoomLifecycle(onManaged, onUnmanaged func(string)) {
+	s.lifecycleMu.Lock()
+	s.onManaged = callbacks(onManaged)
+	s.onUnmanaged = callbacks(onUnmanaged)
+	s.lifecycleMu.Unlock()
+}
+
+func (s *Service) AddManagedRoomLifecycle(onManaged, onUnmanaged func(string)) {
+	s.lifecycleMu.Lock()
+	if onManaged != nil {
+		s.onManaged = append(s.onManaged, onManaged)
+	}
+	if onUnmanaged != nil {
+		s.onUnmanaged = append(s.onUnmanaged, onUnmanaged)
+	}
+	s.lifecycleMu.Unlock()
+}
+
+func (s *Service) AddWorldLifecycle(onCreated func(string, string)) {
+	if onCreated == nil {
+		return
+	}
+	s.lifecycleMu.Lock()
+	s.onWorld = append(s.onWorld, onCreated)
+	s.lifecycleMu.Unlock()
 }
 
 func (s *Service) List() ([]Room, error) { return s.catalog.List() }
@@ -85,7 +118,16 @@ func (s *Service) Adopt(roomID string) (Room, error) {
 		return Room{}, err
 	}
 	room.Managed = true
+	s.notifyManagedRoom(room.ID, true)
 	return room, nil
+}
+
+func (s *Service) Unadopt(roomID string) error {
+	if err := s.store.Unadopt(roomID); err != nil {
+		return err
+	}
+	s.notifyManagedRoom(roomID, false)
+	return nil
 }
 
 func (s *Service) Create(request CreateRequest) (Room, error) {
@@ -96,6 +138,11 @@ func (s *Service) Create(request CreateRequest) (Room, error) {
 	if err := validateCreateRequest(request); err != nil {
 		return Room{}, err
 	}
+	_, release, err := roomops.Acquire(context.Background(), EncodeID(request.DirectoryName))
+	if err != nil {
+		return Room{}, err
+	}
+	defer release()
 	if err := os.MkdirAll(s.catalog.root, 0750); err != nil {
 		return Room{}, fmt.Errorf("create save root: %w", err)
 	}
@@ -137,10 +184,16 @@ func (s *Service) Create(request CreateRequest) (Room, error) {
 	}
 	room.Managed = true
 	completed = true
+	s.notifyManagedRoom(room.ID, true)
 	return room, nil
 }
 
 func (s *Service) CreateWorld(roomID string, request CreateWorldRequest) (World, error) {
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return World{}, err
+	}
+	defer release()
 	s.worldMu.Lock()
 	defer s.worldMu.Unlock()
 
@@ -197,10 +250,20 @@ func (s *Service) CreateWorld(roomID string, request CreateWorldRequest) (World,
 	if err := os.Rename(filepath.Join(temporary, request.DirectoryName), target); err != nil {
 		return World{}, fmt.Errorf("publish world directory: %w", err)
 	}
-	return s.catalog.World(roomID, EncodeID(request.DirectoryName))
+	world, err := s.catalog.World(roomID, EncodeID(request.DirectoryName))
+	if err != nil {
+		return World{}, err
+	}
+	s.notifyWorldCreated(room.ID, world.ID)
+	return world, nil
 }
 
 func (s *Service) DeleteRoom(roomID string, request DeleteRoomRequest) (DeleteRoomResult, error) {
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return DeleteRoomResult{}, err
+	}
+	defer release()
 	s.worldMu.Lock()
 	defer s.worldMu.Unlock()
 
@@ -233,13 +296,47 @@ func (s *Service) DeleteRoom(roomID string, request DeleteRoomRequest) (DeleteRo
 		}
 		return DeleteRoomResult{}, err
 	}
+	s.notifyManagedRoom(room.ID, false)
 	return DeleteRoomResult{
 		Room:         room,
 		RecoveryName: filepath.Join(".dst-admin-trash", trashName),
 	}, nil
 }
 
+func (s *Service) notifyManagedRoom(roomID string, managed bool) {
+	s.lifecycleMu.RLock()
+	notify := append([]func(string){}, s.onUnmanaged...)
+	if managed {
+		notify = append([]func(string){}, s.onManaged...)
+	}
+	s.lifecycleMu.RUnlock()
+	for _, callback := range notify {
+		callback(roomID)
+	}
+}
+
+func (s *Service) notifyWorldCreated(roomID, worldID string) {
+	s.lifecycleMu.RLock()
+	notify := append([]func(string, string){}, s.onWorld...)
+	s.lifecycleMu.RUnlock()
+	for _, callback := range notify {
+		callback(roomID, worldID)
+	}
+}
+
+func callbacks(callback func(string)) []func(string) {
+	if callback == nil {
+		return nil
+	}
+	return []func(string){callback}
+}
+
 func (s *Service) DeleteWorld(roomID, worldID string, request DeleteWorldRequest) (DeleteWorldResult, error) {
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return DeleteWorldResult{}, err
+	}
+	defer release()
 	s.worldMu.Lock()
 	defer s.worldMu.Unlock()
 

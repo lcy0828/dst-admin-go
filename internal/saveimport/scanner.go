@@ -111,6 +111,9 @@ func extractArchive(ctx context.Context, archivePath, sourceName, destination st
 		if size < 0 || size > MaxContentBytes || summary.ContentSize > MaxContentBytes-size {
 			return ErrArchiveTooLarge
 		}
+		if err := requireImportSpace(destination, size); err != nil {
+			return err
+		}
 		if err := os.MkdirAll(filepath.Dir(target), 0750); err != nil {
 			return err
 		}
@@ -547,6 +550,8 @@ func AnalysisErrorCode(err error) string {
 		return "UNSAFE_ARCHIVE"
 	case errors.Is(err, ErrArchiveTooLarge):
 		return "ARCHIVE_TOO_LARGE"
+	case errors.Is(err, ErrInsufficientSpace):
+		return "INSUFFICIENT_SPACE"
 	case errors.Is(err, ErrInvalidArchive):
 		return "INVALID_ARCHIVE"
 	default:

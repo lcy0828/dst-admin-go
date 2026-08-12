@@ -15,6 +15,16 @@ type fakeRooms struct {
 	worlds []rooms.World
 }
 
+type mutableRooms struct {
+	room   rooms.Room
+	worlds []rooms.World
+}
+
+func (f *mutableRooms) Room(string) (rooms.Room, error) { return f.room, nil }
+func (f *mutableRooms) Worlds(string) ([]rooms.World, error) {
+	return append([]rooms.World(nil), f.worlds...), nil
+}
+
 func (f fakeRooms) Room(string) (rooms.Room, error) { return f.room, nil }
 func (f fakeRooms) Worlds(string) ([]rooms.World, error) {
 	return append([]rooms.World(nil), f.worlds...), nil
@@ -25,6 +35,16 @@ type fakeControl struct {
 	status  map[string]RuntimeStatus
 	calls   []string
 	fail    map[string]error
+}
+
+type fakePreparer struct {
+	calls []string
+	err   error
+}
+
+func (f *fakePreparer) Prepare(_ context.Context, room, world string) error {
+	f.calls = append(f.calls, room+"/"+world)
+	return f.err
 }
 
 func (f *fakeControl) IsRunning(_ context.Context, room, world string) (bool, error) {
@@ -89,6 +109,30 @@ func TestStartOrdersMasterFirstAndPreservesUnderscoreRoomName(t *testing.T) {
 		t.Fatalf("start order = %v", control.calls)
 	}
 	if len(results) != 2 || results[0].Status != jobs.StatusSucceeded || results[1].Status != jobs.StatusSucceeded {
+		t.Fatalf("results = %#v", results)
+	}
+}
+
+func TestStartDoesNotCallControlWhenRuntimePreparationFails(t *testing.T) {
+	control := &fakeControl{running: map[string]bool{}, fail: map[string]error{}}
+	operations := testOperations(control)
+	preparer := &fakePreparer{err: fmt.Errorf("customcommands.lua is invalid")}
+	operations.preparers = []RuntimePreparer{preparer}
+	_, runner, err := operations.Plan(ActionStart, rooms.EncodeID("summer_2026"), []string{rooms.EncodeID("Master")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []jobs.TargetResult
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(preparer.calls) != "[summer_2026/Master]" {
+		t.Fatalf("preparer calls = %v", preparer.calls)
+	}
+	if len(control.calls) != 0 {
+		t.Fatalf("control was called after preparation failed: %v", control.calls)
+	}
+	if len(results) != 1 || results[0].Status != jobs.StatusFailed || results[0].Error == nil || results[0].Error.Code != "START_FAILED" {
 		t.Fatalf("results = %#v", results)
 	}
 }
@@ -169,5 +213,37 @@ func TestStartTimeoutCleansUpSession(t *testing.T) {
 	}
 	if fmt.Sprint(control.calls) != "[stop:Master]" {
 		t.Fatalf("timed out start was not cleaned up: %v", control.calls)
+	}
+}
+
+func TestRunnerRejectsWorldPlanChangedWhileWaiting(t *testing.T) {
+	roomID := rooms.EncodeID("summer_2026")
+	master := rooms.World{ID: rooms.EncodeID("Master"), RoomID: roomID, DirectoryName: "Master", Name: "Master", Role: rooms.WorldRoleMaster}
+	caves := rooms.World{ID: rooms.EncodeID("Caves"), RoomID: roomID, DirectoryName: "Caves", Name: "Caves", Role: rooms.WorldRoleCaves}
+	catalog := &mutableRooms{
+		room:   rooms.Room{ID: roomID, DirectoryName: "summer_2026", Managed: true},
+		worlds: []rooms.World{master, caves},
+	}
+	control := &fakeControl{running: map[string]bool{}, fail: map[string]error{}}
+	operations := NewOperations(catalog, control)
+	_, runner, err := operations.Plan(ActionStart, roomID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog.worlds = []rooms.World{master}
+	var results []jobs.TargetResult
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(control.calls) != 0 {
+		t.Fatalf("stale plan executed runtime calls: %v", control.calls)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %#v", results)
+	}
+	for _, result := range results {
+		if result.Status != jobs.StatusFailed || result.Error == nil || result.Error.Code != "ROOM_CHANGED" {
+			t.Fatalf("result = %#v", result)
+		}
 	}
 }

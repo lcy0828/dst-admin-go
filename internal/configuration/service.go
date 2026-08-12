@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"dont/internal/backups"
@@ -33,8 +32,6 @@ type Service struct {
 	rooms    RoomCatalog
 	backups  BackupCreator
 	now      func() time.Time
-	locksMu  sync.Mutex
-	locks    map[string]*sync.Mutex
 }
 
 func NewService(saveRoot string, roomCatalog RoomCatalog, backupCreator BackupCreator) (*Service, error) {
@@ -47,17 +44,8 @@ func NewService(saveRoot string, roomCatalog RoomCatalog, backupCreator BackupCr
 	}
 	return &Service{
 		saveRoot: filepath.Clean(root), rooms: roomCatalog, backups: backupCreator,
-		now: time.Now, locks: make(map[string]*sync.Mutex),
+		now: time.Now,
 	}, nil
-}
-
-func (s *Service) roomLock(roomID string) *sync.Mutex {
-	s.locksMu.Lock()
-	defer s.locksMu.Unlock()
-	if s.locks[roomID] == nil {
-		s.locks[roomID] = &sync.Mutex{}
-	}
-	return s.locks[roomID]
 }
 
 func (s *Service) resolveRoom(roomID string) (rooms.Room, string, error) {

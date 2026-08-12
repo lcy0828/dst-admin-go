@@ -9,8 +9,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"dont/internal/backups"
+	"dont/internal/roomops"
 	"dont/internal/rooms"
 )
 
@@ -28,7 +30,14 @@ type configurationBackups struct {
 	err      error
 }
 
-func (b *configurationBackups) Create(_ context.Context, roomID, _ string, kind backups.Kind, jobID string) (backups.Backup, error) {
+func (b *configurationBackups) Create(ctx context.Context, roomID, _ string, kind backups.Kind, jobID string) (backups.Backup, error) {
+	acquireCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	_, release, err := roomops.Acquire(acquireCtx, roomID)
+	if err != nil {
+		return backups.Backup{}, err
+	}
+	defer release()
 	b.count++
 	if b.onCreate != nil {
 		b.onCreate()

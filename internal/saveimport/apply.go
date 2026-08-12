@@ -13,11 +13,11 @@ import (
 
 	"dont/internal/backups"
 	"dont/internal/mods"
+	"dont/internal/roomops"
 	"dont/internal/rooms"
 
 	"github.com/go-ini/ini"
 	"github.com/google/uuid"
-	"github.com/shirou/gopsutil/v3/disk"
 )
 
 var directoryNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
@@ -54,15 +54,16 @@ func (s *Service) Apply(ctx context.Context, id, jobID string, request ApplyRequ
 	if err := validateApplyPolicies(request); err != nil {
 		return ApplyResult{}, err
 	}
-	if err := s.store.MarkApplying(id); err != nil {
+
+	operationRoomID := strings.TrimSpace(request.TargetRoomID)
+	if request.Mode != ApplyModeReplace {
+		operationRoomID = rooms.EncodeID(request.DirectoryName)
+	}
+	ctx, releaseRoom, err := roomops.Acquire(ctx, operationRoomID)
+	if err != nil {
 		return ApplyResult{}, err
 	}
-	defer func() {
-		if resultErr != nil {
-			_ = s.store.MarkApplyFailed(id, ErrorCode(resultErr), resultErr.Error())
-		}
-	}()
-
+	defer releaseRoom()
 	target, targetRoom, err := s.resolveApplyTarget(ctx, request)
 	if err != nil {
 		return ApplyResult{}, err
@@ -72,7 +73,7 @@ func (s *Service) Apply(ctx context.Context, id, jobID string, request ApplyRequ
 	if !contained(contentRoot, sourceRoot) || !regularDirectory(sourceRoot) {
 		return ApplyResult{}, ErrUnsafeArchive
 	}
-	usage, err := disk.Usage(s.config.SaveRoot)
+	usage, err := inspectDiskUsage(s.config.SaveRoot)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -129,39 +130,53 @@ func (s *Service) Apply(ctx context.Context, id, jobID string, request ApplyRequ
 	rollback := ""
 	if request.Mode == ApplyModeReplace {
 		rollback = filepath.Join(s.config.SaveRoot, ".dst-admin-import-rollback-"+uuid.NewString())
+	}
+	recovery := importRecord{
+		ID: id, Status: string(StatusApplying), ApplyPhase: applyPhasePublishing, ApplyMode: string(request.Mode),
+		ApplyRoomID: operationRoomID, ApplyTarget: filepath.Base(target), ApplyStaging: filepath.Base(staging),
+		ApplyRollback: pathBaseOrEmpty(rollback),
+	}
+	if err := s.store.BeginApply(id, request.Mode, operationRoomID, recovery.ApplyTarget, recovery.ApplyStaging, recovery.ApplyRollback); err != nil {
+		return ApplyResult{}, err
+	}
+	committed := false
+	defer func() {
+		if resultErr == nil || committed {
+			return
+		}
+		if rollbackErr := s.rollbackApply(recovery); rollbackErr != nil {
+			resultErr = fmt.Errorf("%v; rollback imported room: %w", resultErr, rollbackErr)
+			return
+		}
+		published = false
+		_ = s.store.MarkApplyFailed(id, ErrorCode(resultErr), resultErr.Error())
+	}()
+	if rollback != "" {
 		if err := os.Rename(target, rollback); err != nil {
 			return ApplyResult{}, fmt.Errorf("stage current room before import: %w", err)
 		}
 	}
 	if err := os.Rename(staging, target); err != nil {
-		if rollback != "" {
-			_ = os.Rename(rollback, target)
-		}
 		return ApplyResult{}, fmt.Errorf("publish imported room: %w", err)
 	}
 	published = true
 	roomID := rooms.EncodeID(filepath.Base(target))
 	room, err := s.rooms.Room(roomID)
 	if err != nil {
-		_ = os.Rename(target, staging)
-		published = false
-		if rollback != "" {
-			_ = os.Rename(rollback, target)
-		}
 		return ApplyResult{}, fmt.Errorf("verify published room: %w", err)
 	}
 	if request.Mode != ApplyModeReplace {
 		room, err = s.rooms.Adopt(roomID)
 		if err != nil {
-			_ = os.Rename(target, staging)
-			published = false
 			return ApplyResult{}, fmt.Errorf("adopt imported room: %w", err)
 		}
 	}
-	if rollback != "" {
-		_ = os.RemoveAll(rollback)
+	if err := s.store.MarkApplyCommitted(id); err != nil {
+		return ApplyResult{}, err
 	}
-	if _, err := s.store.MarkApplied(id); err != nil {
+	recovery.ApplyPhase = applyPhaseCommitted
+	committed = true
+	if err := s.finalizeCommittedApply(recovery); err != nil {
 		return ApplyResult{}, err
 	}
 	now := s.now().UTC()
@@ -170,6 +185,136 @@ func (s *Service) Apply(ctx context.Context, id, jobID string, request ApplyRequ
 		DirectoryName: room.DirectoryName, RoomName: room.Name, ProtectionBackupID: protectionID,
 		InstalledMods: installedMods, Warnings: warnings, AppliedAt: now,
 	}, nil
+}
+
+func pathBaseOrEmpty(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return filepath.Base(value)
+}
+
+func (s *Service) recoverApply(record importRecord) error {
+	if strings.TrimSpace(record.ApplyTarget) == "" {
+		return s.store.MarkApplyFailed(record.ID, "SERVER_RESTARTED", "服务重启中断了旧版存档部署，请重新执行")
+	}
+	if record.ApplyPhase == applyPhaseCommitted {
+		return s.finalizeCommittedApply(record)
+	}
+	if err := s.rollbackApply(record); err != nil {
+		return err
+	}
+	_, staging, _, err := s.applyRecoveryPaths(record)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(staging); err != nil {
+		return err
+	}
+	return s.store.MarkApplyFailed(record.ID, "SERVER_RESTARTED", "服务重启中断了存档部署，已恢复部署前状态")
+}
+
+func (s *Service) rollbackApply(record importRecord) error {
+	target, staging, rollback, err := s.applyRecoveryPaths(record)
+	if err != nil {
+		return err
+	}
+	mode := ApplyMode(record.ApplyMode)
+	if mode != ApplyModeReplace {
+		if strings.TrimSpace(record.ApplyRoomID) != "" && s.rooms != nil {
+			if err := s.rooms.Unadopt(record.ApplyRoomID); err != nil {
+				return fmt.Errorf("remove interrupted room adoption: %w", err)
+			}
+		}
+		if regularDirectory(staging) {
+			// Publishing never consumed staging, so any target that appeared is
+			// not owned by this import and must be left untouched.
+			return nil
+		}
+		if regularDirectory(target) {
+			if err := os.Rename(target, staging); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if rollback == "" || !regularDirectory(rollback) {
+		// The original room is still at the target when the first rename did
+		// not happen. The staged import can be discarded by the caller.
+		if regularDirectory(target) {
+			return nil
+		}
+		return errors.New("interrupted replacement has neither target nor rollback directory")
+	}
+	if regularDirectory(target) {
+		if regularDirectory(staging) {
+			return errors.New("replacement target appeared before the staged import was published")
+		} else if err := os.Rename(target, staging); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(rollback, target); err != nil {
+		return fmt.Errorf("restore replaced room: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) finalizeCommittedApply(record importRecord) error {
+	target, staging, rollback, err := s.applyRecoveryPaths(record)
+	if err != nil {
+		return err
+	}
+	if !regularDirectory(target) {
+		return errors.New("committed import target is missing")
+	}
+	if ApplyMode(record.ApplyMode) != ApplyModeReplace && s.rooms != nil {
+		room, roomErr := s.rooms.Room(record.ApplyRoomID)
+		if roomErr != nil {
+			return roomErr
+		}
+		if !room.Managed {
+			if _, roomErr = s.rooms.Adopt(record.ApplyRoomID); roomErr != nil {
+				return roomErr
+			}
+		}
+	}
+	if Status(record.Status) == StatusApplying {
+		if _, err := s.store.MarkApplied(record.ID); err != nil {
+			return err
+		}
+	}
+	if rollback != "" {
+		if err := os.RemoveAll(rollback); err != nil {
+			return fmt.Errorf("remove committed import rollback: %w", err)
+		}
+	}
+	if regularDirectory(staging) {
+		if err := os.RemoveAll(staging); err != nil {
+			return fmt.Errorf("remove committed import staging: %w", err)
+		}
+	}
+	return s.store.ClearApplyJournal(record.ID)
+}
+
+func (s *Service) applyRecoveryPaths(record importRecord) (string, string, string, error) {
+	if !directoryNamePattern.MatchString(record.ApplyTarget) ||
+		!strings.HasPrefix(record.ApplyStaging, ".dst-admin-import-") || filepath.Base(record.ApplyStaging) != record.ApplyStaging {
+		return "", "", "", ErrUnsafeArchive
+	}
+	if record.ApplyRollback != "" && (!strings.HasPrefix(record.ApplyRollback, ".dst-admin-import-rollback-") || filepath.Base(record.ApplyRollback) != record.ApplyRollback) {
+		return "", "", "", ErrUnsafeArchive
+	}
+	target := filepath.Join(s.config.SaveRoot, record.ApplyTarget)
+	staging := filepath.Join(s.config.SaveRoot, record.ApplyStaging)
+	rollback := ""
+	if record.ApplyRollback != "" {
+		rollback = filepath.Join(s.config.SaveRoot, record.ApplyRollback)
+	}
+	if !contained(s.config.SaveRoot, target) || !contained(s.config.SaveRoot, staging) || rollback != "" && !contained(s.config.SaveRoot, rollback) {
+		return "", "", "", ErrUnsafeArchive
+	}
+	return target, staging, rollback, nil
 }
 
 func (s *Service) resolveApplyTarget(ctx context.Context, request ApplyRequest) (string, rooms.Room, error) {
@@ -305,9 +450,20 @@ func (s *Service) applyTokenPolicy(staging, target string, request ApplyRequest)
 func (s *Service) applyNetworkPolicy(staging, target string, policy NetworkPolicy) error {
 	switch policy {
 	case NetworkSource:
-		return nil
+		used, err := usedPorts(s.config.SaveRoot, target)
+		if err != nil {
+			return err
+		}
+		return validateNetworkConfiguration(staging, used)
 	case NetworkPreserve:
-		return preserveNetworkConfiguration(target, staging)
+		if err := preserveNetworkConfiguration(target, staging); err != nil {
+			return err
+		}
+		used, err := usedPorts(s.config.SaveRoot, target)
+		if err != nil {
+			return err
+		}
+		return validateNetworkConfiguration(staging, used)
 	case NetworkAuto:
 		used, err := usedPorts(s.config.SaveRoot, target)
 		if err != nil {
@@ -500,32 +656,120 @@ func preserveNetworkConfiguration(sourceRoot, destinationRoot string) error {
 	if err := destinationCluster.SaveTo(filepath.Join(destinationRoot, "cluster.ini")); err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(destinationRoot)
+	sourceWorlds, err := readNetworkWorlds(sourceRoot)
 	if err != nil {
 		return err
 	}
+	destinationWorlds, err := readNetworkWorlds(destinationRoot)
+	if err != nil {
+		return err
+	}
+	usedSource := make(map[string]bool)
+	for _, destinationWorld := range destinationWorlds {
+		sourceWorld := matchNetworkWorld(sourceWorlds, destinationWorld, usedSource)
+		if sourceWorld == nil {
+			continue
+		}
+		usedSource[sourceWorld.directory] = true
+		copyINIKey(sourceWorld.config, destinationWorld.config, "NETWORK", "server_port")
+		copyINIKey(sourceWorld.config, destinationWorld.config, "STEAM", "authentication_port")
+		copyINIKey(sourceWorld.config, destinationWorld.config, "STEAM", "master_server_port")
+		if err := destinationWorld.config.SaveTo(destinationWorld.path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type networkWorld struct {
+	directory string
+	path      string
+	shardID   int
+	master    bool
+	config    *ini.File
+}
+
+func readNetworkWorlds(root string) ([]networkWorld, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	worlds := make([]networkWorld, 0)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		sourcePath := filepath.Join(sourceRoot, entry.Name(), "server.ini")
-		destinationPath := filepath.Join(destinationRoot, entry.Name(), "server.ini")
-		if !regularFile(sourcePath) || !regularFile(destinationPath) {
+		filePath := filepath.Join(root, entry.Name(), "server.ini")
+		if !regularFile(filePath) {
 			continue
 		}
-		source, err := ini.Load(sourcePath)
+		config, err := ini.Load(filePath)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		destination, err := ini.Load(destinationPath)
-		if err != nil {
-			return err
+		worlds = append(worlds, networkWorld{
+			directory: entry.Name(), path: filePath,
+			shardID: config.Section("SHARD").Key("id").MustInt(0),
+			master:  config.Section("SHARD").Key("is_master").MustBool(false), config: config,
+		})
+	}
+	return worlds, nil
+}
+
+func matchNetworkWorld(sources []networkWorld, destination networkWorld, used map[string]bool) *networkWorld {
+	for index := range sources {
+		if !used[sources[index].directory] && strings.EqualFold(sources[index].directory, destination.directory) {
+			return &sources[index]
 		}
-		copyINIKey(source, destination, "NETWORK", "server_port")
-		copyINIKey(source, destination, "STEAM", "authentication_port")
-		copyINIKey(source, destination, "STEAM", "master_server_port")
-		if err := destination.SaveTo(destinationPath); err != nil {
-			return err
+	}
+	if destination.shardID > 0 {
+		for index := range sources {
+			if !used[sources[index].directory] && sources[index].shardID == destination.shardID {
+				return &sources[index]
+			}
+		}
+	}
+	if destination.master {
+		for index := range sources {
+			if !used[sources[index].directory] && sources[index].master {
+				return &sources[index]
+			}
+		}
+	}
+	return nil
+}
+
+func validateNetworkConfiguration(root string, used map[int]bool) error {
+	reserve := func(value int) error {
+		if value == 0 {
+			return nil
+		}
+		if value < 1 || value > 65535 || used[value] {
+			return fmt.Errorf("%w: %d", ErrPortConflict, value)
+		}
+		used[value] = true
+		return nil
+	}
+	cluster, err := ini.Load(filepath.Join(root, "cluster.ini"))
+	if err != nil {
+		return err
+	}
+	if err := reserve(cluster.Section("SHARD").Key("master_port").MustInt(0)); err != nil {
+		return err
+	}
+	worlds, err := readNetworkWorlds(root)
+	if err != nil {
+		return err
+	}
+	for _, world := range worlds {
+		for _, value := range []int{
+			world.config.Section("NETWORK").Key("server_port").MustInt(0),
+			world.config.Section("STEAM").Key("authentication_port").MustInt(0),
+			world.config.Section("STEAM").Key("master_server_port").MustInt(0),
+		} {
+			if err := reserve(value); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -591,6 +835,9 @@ func allocateNetworkConfiguration(root string, used map[int]bool) error {
 		return err
 	}
 	clusterPort := nextAvailablePort(10889, used)
+	if clusterPort == 0 {
+		return ErrPortConflict
+	}
 	used[clusterPort] = true
 	cluster.Section("SHARD").Key("master_port").SetValue(fmt.Sprintf("%d", clusterPort))
 	if err := cluster.SaveTo(clusterPath); err != nil {
@@ -613,10 +860,19 @@ func allocateNetworkConfiguration(root string, used map[int]bool) error {
 			return err
 		}
 		serverPort = nextAvailablePort(serverPort, used)
+		if serverPort == 0 {
+			return ErrPortConflict
+		}
 		used[serverPort] = true
 		authPort = nextAvailablePort(authPort, used)
+		if authPort == 0 {
+			return ErrPortConflict
+		}
 		used[authPort] = true
 		masterPort = nextAvailablePort(masterPort, used)
+		if masterPort == 0 {
+			return ErrPortConflict
+		}
 		used[masterPort] = true
 		config.Section("NETWORK").Key("server_port").SetValue(fmt.Sprintf("%d", serverPort))
 		config.Section("STEAM").Key("authentication_port").SetValue(fmt.Sprintf("%d", authPort))
@@ -637,6 +893,9 @@ func allocateNetworkConfiguration(root string, used map[int]bool) error {
 func nextAvailablePort(candidate int, used map[int]bool) int {
 	for candidate <= 65535 && used[candidate] {
 		candidate++
+	}
+	if candidate > 65535 {
+		return 0
 	}
 	return candidate
 }
@@ -716,6 +975,12 @@ func ErrorCode(err error) string {
 		return "PARTIAL_IMPORT_CONFIRMATION_REQUIRED"
 	case errors.Is(err, backups.ErrInsufficientSpace):
 		return "INSUFFICIENT_SPACE"
+	case errors.Is(err, ErrInsufficientSpace):
+		return "INSUFFICIENT_SPACE"
+	case errors.Is(err, ErrImportBusy):
+		return "SAVE_IMPORT_BUSY"
+	case errors.Is(err, ErrPortConflict):
+		return "PORT_CONFLICT"
 	default:
 		return "SAVE_IMPORT_APPLY_FAILED"
 	}

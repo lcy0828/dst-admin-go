@@ -17,6 +17,7 @@ import (
 	backupapi "dont/internal/backups"
 	dstinstall "dont/internal/dstserver"
 	"dont/internal/jobs"
+	"dont/internal/roomops"
 	"dont/internal/rooms"
 	"dont/internal/shards"
 )
@@ -27,6 +28,7 @@ var (
 	ErrSteamCMDUnavailable = errors.New("steamcmd is unavailable")
 	ErrSteamClientManaged  = errors.New("game installation is managed by the Steam client")
 	ErrUnsafeCachePath     = errors.New("steam cache path is unsafe")
+	ErrRoomStateChanged    = errors.New("room runtime state changed while the game update was queued")
 )
 
 type RoomCatalog interface {
@@ -192,6 +194,23 @@ func (s *Service) Prepare(ctx context.Context, request UpdateRequest) ([]jobs.Ta
 }
 
 func (s *Service) execute(ctx context.Context, jobID string, request UpdateRequest, executable string, managed []rooms.Room, running []plannedWorld, report func(jobs.TargetResult)) error {
+	roomIDs := make([]string, 0, len(managed))
+	for _, room := range managed {
+		roomIDs = append(roomIDs, room.ID)
+	}
+	ctx, releaseRooms, err := roomops.AcquireMany(ctx, roomIDs)
+	if err != nil {
+		return err
+	}
+	defer releaseRooms()
+	currentManaged, currentRunning, err := s.captureState(ctx)
+	if err != nil {
+		return err
+	}
+	if !sameUpdatePlan(managed, running, currentManaged, currentRunning) {
+		s.reportPlanChanged(request, managed, running, report)
+		return ErrRoomStateChanged
+	}
 	for _, room := range managed {
 		value, err := s.backups.Create(ctx, room.ID, "游戏更新前保护备份 "+s.now().Format("2006-01-02 15:04:05"), backupapi.KindProtection, jobID)
 		if err != nil {
@@ -231,6 +250,56 @@ func (s *Service) execute(ctx context.Context, jobID string, request UpdateReque
 		}
 	}
 	return errors.Join(append([]error{updateErr}, restartErrors...)...)
+}
+
+func sameUpdatePlan(plannedRooms []rooms.Room, plannedWorlds []plannedWorld, currentRooms []rooms.Room, currentWorlds []plannedWorld) bool {
+	roomKeys := func(items []rooms.Room) []string {
+		keys := make([]string, 0, len(items))
+		for _, room := range items {
+			keys = append(keys, room.ID+"\x00"+room.DirectoryName)
+		}
+		sort.Strings(keys)
+		return keys
+	}
+	worldKeys := func(items []plannedWorld) []string {
+		keys := make([]string, 0, len(items))
+		for _, world := range items {
+			keys = append(keys, world.roomID+"\x00"+world.worldID+"\x00"+world.roomName+"\x00"+world.worldName)
+		}
+		sort.Strings(keys)
+		return keys
+	}
+	return equalStrings(roomKeys(plannedRooms), roomKeys(currentRooms)) && equalStrings(worldKeys(plannedWorlds), worldKeys(currentWorlds))
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Service) reportPlanChanged(request UpdateRequest, managed []rooms.Room, running []plannedWorld, report func(jobs.TargetResult)) {
+	failure := func(targetID string) {
+		report(jobs.TargetResult{TargetID: targetID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "ROOM_CHANGED", Message: "等待执行期间房间或分片运行状态已变化，请重新提交游戏更新"}})
+	}
+	for _, room := range managed {
+		failure("protect:" + room.ID)
+	}
+	for _, world := range running {
+		failure(stopTargetID(world))
+	}
+	failure("steamcmd")
+	if request.RestartRunning {
+		for _, world := range running {
+			failure(startTargetID(world))
+		}
+	}
 }
 
 func (s *Service) runSteamCMD(ctx context.Context, jobID string, cleanCache bool, executable string) error {

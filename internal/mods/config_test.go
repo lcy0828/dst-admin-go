@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"dont/internal/backups"
+	"dont/internal/roomops"
 	"dont/internal/rooms"
 )
 
@@ -57,7 +59,14 @@ type testBackups struct {
 	count int
 }
 
-func (b *testBackups) Create(_ context.Context, roomID, name string, kind backups.Kind, jobID string) (backups.Backup, error) {
+func (b *testBackups) Create(ctx context.Context, roomID, name string, kind backups.Kind, jobID string) (backups.Backup, error) {
+	acquireCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	_, release, err := roomops.Acquire(acquireCtx, roomID)
+	if err != nil {
+		return backups.Backup{}, err
+	}
+	defer release()
 	b.count++
 	return backups.Backup{ID: "backup-id", RoomID: roomID, Name: name, Kind: kind, SourceJobID: jobID}, nil
 }

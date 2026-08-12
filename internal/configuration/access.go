@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"dont/internal/roomops"
 	"dont/internal/rooms"
 )
 
@@ -28,9 +29,11 @@ type fileSnapshot struct {
 }
 
 func (s *Service) AccessLists(roomID string) (AccessLists, error) {
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return AccessLists{}, err
+	}
+	defer release()
 	_, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return AccessLists{}, err
@@ -43,9 +46,11 @@ func (s *Service) AccessLists(roomID string) (AccessLists, error) {
 }
 
 func (s *Service) PreviewAccess(roomID string, request AccessUpdateRequest) (Preview, error) {
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return Preview{}, err
+	}
+	defer release()
 	room, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return Preview{}, err
@@ -61,9 +66,11 @@ func (s *Service) PreviewAccess(roomID string, request AccessUpdateRequest) (Pre
 }
 
 func (s *Service) ValidateAccessApply(roomID string, request AccessUpdateRequest) (Preview, error) {
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return Preview{}, err
+	}
+	defer release()
 	room, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return Preview{}, err
@@ -79,9 +86,11 @@ func (s *Service) ValidateAccessApply(roomID string, request AccessUpdateRequest
 }
 
 func (s *Service) ApplyAccess(ctx context.Context, jobID, roomID string, request AccessUpdateRequest) (ApplyResult, error) {
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	ctx, release, err := roomops.Acquire(ctx, roomID)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	defer release()
 	room, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return ApplyResult{}, err
@@ -334,9 +343,11 @@ func rollbackWrites(directory string, previous map[string]fileSnapshot, names []
 }
 
 func (s *Service) TokenStatus(roomID string) (TokenStatus, error) {
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return TokenStatus{}, err
+	}
+	defer release()
 	_, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return TokenStatus{}, err
@@ -345,9 +356,11 @@ func (s *Service) TokenStatus(roomID string) (TokenStatus, error) {
 }
 
 func (s *Service) RevealToken(roomID, confirmation string) (TokenReveal, error) {
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return TokenReveal{}, err
+	}
+	defer release()
 	room, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return TokenReveal{}, err
@@ -363,9 +376,11 @@ func (s *Service) RevealToken(roomID, confirmation string) (TokenReveal, error) 
 }
 
 func (s *Service) PreviewToken(roomID string, request TokenUpdateRequest) (Preview, error) {
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return Preview{}, err
+	}
+	defer release()
 	room, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return Preview{}, err
@@ -374,9 +389,11 @@ func (s *Service) PreviewToken(roomID string, request TokenUpdateRequest) (Previ
 }
 
 func (s *Service) ApplyToken(ctx context.Context, jobID, roomID string, request TokenUpdateRequest) (ApplyResult, error) {
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	ctx, release, err := roomops.Acquire(ctx, roomID)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	defer release()
 	room, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return ApplyResult{}, err

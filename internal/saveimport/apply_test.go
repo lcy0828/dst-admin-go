@@ -45,13 +45,16 @@ func (d *applyModDownloader) Download(_ context.Context, request modapi.Download
 func (d *applyModDownloader) EnsureLibrarySetup([]string) error { return nil }
 
 type applyTestApp struct {
-	service    *Service
-	rooms      *rooms.Service
-	backups    *backupapi.Service
-	runtime    *applyRuntime
-	downloader *applyModDownloader
-	saveRoot   string
-	backupRoot string
+	service      *Service
+	store        *Store
+	rooms        *rooms.Service
+	backups      *backupapi.Service
+	runtime      *applyRuntime
+	downloader   *applyModDownloader
+	saveRoot     string
+	backupRoot   string
+	importRoot   string
+	workshopRoot string
 }
 
 func newApplyTestApp(t *testing.T) applyTestApp {
@@ -101,12 +104,19 @@ func newApplyTestApp(t *testing.T) applyTestApp {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return applyTestApp{service: service, rooms: roomService, backups: backupService, runtime: runtime, downloader: downloader, saveRoot: saveRoot, backupRoot: backupRoot}
+	return applyTestApp{
+		service: service, store: importStore, rooms: roomService, backups: backupService, runtime: runtime,
+		downloader: downloader, saveRoot: saveRoot, backupRoot: backupRoot, importRoot: importRoot, workshopRoot: workshopRoot,
+	}
 }
 
 func TestApplyCreatesManagedRoomAndAllocatesConflictFreePorts(t *testing.T) {
 	app := newApplyTestApp(t)
 	createManagedRoom(t, app, "Existing", "Existing Room", "target-token-1234567890", 10999, "old")
+	managedRoomID := ""
+	app.rooms.SetManagedRoomLifecycle(func(roomID string) {
+		managedRoomID = roomID
+	}, nil)
 	archive := createZIP(t, []archiveTestEntry{
 		{name: "Cluster_1/cluster.ini", content: clusterINI("Source Room")},
 		{name: "Cluster_1/cluster_token.txt", content: "source-token-1234567890\n"},
@@ -131,6 +141,9 @@ func TestApplyCreatesManagedRoomAndAllocatesConflictFreePorts(t *testing.T) {
 	}
 	if result.DirectoryName != "Imported" || result.RoomName != "Imported Room" || len(result.InstalledMods) != 1 {
 		t.Fatalf("result = %#v", result)
+	}
+	if managedRoomID != result.RoomID {
+		t.Fatalf("managed room lifecycle got %q, want %q", managedRoomID, result.RoomID)
 	}
 	room, err := app.rooms.Room(rooms.EncodeID("Imported"))
 	if err != nil || !room.Managed {
@@ -226,6 +239,236 @@ func TestApplyReplaceRefusesRunningRoomWithoutChangingFiles(t *testing.T) {
 	if readErr != nil || string(content) != "old-save" {
 		t.Fatalf("original content = %q, %v", content, readErr)
 	}
+}
+
+func TestApplyRejectsSourcePortsUsedByAnotherRoom(t *testing.T) {
+	app := newApplyTestApp(t)
+	createManagedRoom(t, app, "Existing", "Existing Room", "target-token-1234567890", 10999, "old")
+	archive := createZIP(t, []archiveTestEntry{
+		{name: "cluster.ini", content: clusterINI("Imported")},
+		{name: "cluster_token.txt", content: "source-token-1234567890\n"},
+		{name: "Master/server.ini", content: serverINI(true, 1, 10999)},
+	})
+	value, err := app.service.Upload(context.Background(), "端口冲突", "source.zip", bytes.NewReader(archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err = app.service.Analyze(context.Background(), value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = app.service.Apply(context.Background(), value.ID, "job", ApplyRequest{
+		CandidateID: value.Manifest.Candidates[0].ID, Mode: ApplyModeNew, DirectoryName: "Imported",
+		TokenPolicy: TokenSource, NetworkPolicy: NetworkSource, ModPolicy: ModsPreserve,
+	})
+	if !errors.Is(err, ErrPortConflict) {
+		t.Fatalf("error = %v, want port conflict", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(app.saveRoot, "Imported")); !os.IsNotExist(statErr) {
+		t.Fatalf("conflicting room was published: %v", statErr)
+	}
+}
+
+func TestApplyPreservesPortsByShardIDWhenDirectoryNamesDiffer(t *testing.T) {
+	app := newApplyTestApp(t)
+	target := createManagedRoom(t, app, "Target", "Target Room", "target-token-1234567890", 12001, "old")
+	archive := createZIP(t, []archiveTestEntry{
+		{name: "cluster.ini", content: clusterINI("Source")},
+		{name: "cluster_token.txt", content: "source-token-1234567890\n"},
+		{name: "Forest/server.ini", content: serverINI(true, 1, 10999)},
+	})
+	value, err := app.service.Upload(context.Background(), "改名分片", "source.zip", bytes.NewReader(archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err = app.service.Analyze(context.Background(), value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = app.service.Apply(context.Background(), value.ID, "job", ApplyRequest{
+		CandidateID: value.Manifest.Candidates[0].ID, Mode: ApplyModeReplace, TargetRoomID: target.ID,
+		Confirmation: target.Name, TokenPolicy: TokenPreserve, NetworkPolicy: NetworkPreserve, ModPolicy: ModsPreserve,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := ini.Load(filepath.Join(app.saveRoot, "Target", "Forest", "server.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if port := config.Section("NETWORK").Key("server_port").MustInt(0); port != 12001 {
+		t.Fatalf("preserved port = %d, want 12001", port)
+	}
+}
+
+func TestServiceRecoversInterruptedReplacementByRestoringOriginalRoom(t *testing.T) {
+	app := newApplyTestApp(t)
+	target := createManagedRoom(t, app, "Target", "Target Room", "target-token-1234567890", 12001, "old-save")
+	value := analyzedImportForRecovery(t, app)
+	staging := createRecoveryRoom(t, app.saveRoot, ".dst-admin-import-test", "new-save")
+	rollback := filepath.Join(app.saveRoot, ".dst-admin-import-rollback-test")
+	if err := app.store.BeginApply(value.ID, ApplyModeReplace, target.ID, "Target", filepath.Base(staging), filepath.Base(rollback)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(app.saveRoot, "Target"), rollback); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(staging, filepath.Join(app.saveRoot, "Target")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewService(Config{SaveRoot: app.saveRoot, ImportRoot: app.importRoot, WorkshopRoot: app.workshopRoot}, app.store, app.rooms, app.runtime, app.backups, app.downloader); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(app.saveRoot, "Target", "Master", "save", "session", "old", "0000000001"))
+	if err != nil || string(content) != "old-save" {
+		t.Fatalf("restored content = %q, %v", content, err)
+	}
+	recovered, err := app.store.Get(value.ID)
+	if err != nil || recovered.Status != StatusReady || recovered.ErrorCode != "SERVER_RESTARTED" {
+		t.Fatalf("recovered import = %#v, %v", recovered, err)
+	}
+}
+
+func TestServiceRecoveryUnmanagesInterruptedNewRoom(t *testing.T) {
+	app := newApplyTestApp(t)
+	value := analyzedImportForRecovery(t, app)
+	target := createRecoveryRoom(t, app.saveRoot, "Imported", "new-save")
+	roomID := rooms.EncodeID(filepath.Base(target))
+	stagingName := ".dst-admin-import-interrupted-new"
+	if err := app.store.BeginApply(value.ID, ApplyModeNew, roomID, filepath.Base(target), stagingName, ""); err != nil {
+		t.Fatal(err)
+	}
+	managedRoomID := ""
+	unmanagedRoomID := ""
+	app.rooms.SetManagedRoomLifecycle(func(value string) {
+		managedRoomID = value
+	}, func(value string) {
+		unmanagedRoomID = value
+	})
+	if _, err := app.rooms.Adopt(roomID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewService(Config{SaveRoot: app.saveRoot, ImportRoot: app.importRoot, WorkshopRoot: app.workshopRoot}, app.store, app.rooms, app.runtime, app.backups, app.downloader); err != nil {
+		t.Fatal(err)
+	}
+	if managedRoomID != roomID || unmanagedRoomID != roomID {
+		t.Fatalf("lifecycle managed=%q unmanaged=%q, want %q", managedRoomID, unmanagedRoomID, roomID)
+	}
+	if _, err := app.rooms.Room(roomID); !errors.Is(err, rooms.ErrRoomNotFound) {
+		t.Fatalf("interrupted imported room still exists: %v", err)
+	}
+	recovered, err := app.store.Get(value.ID)
+	if err != nil || recovered.Status != StatusReady || recovered.ErrorCode != "SERVER_RESTARTED" {
+		t.Fatalf("recovered import = %#v, %v", recovered, err)
+	}
+}
+
+func TestServiceFinishesCommittedReplacementAfterRestart(t *testing.T) {
+	app := newApplyTestApp(t)
+	target := createManagedRoom(t, app, "Target", "Target Room", "target-token-1234567890", 12001, "old-save")
+	value := analyzedImportForRecovery(t, app)
+	staging := createRecoveryRoom(t, app.saveRoot, ".dst-admin-import-committed", "new-save")
+	rollback := filepath.Join(app.saveRoot, ".dst-admin-import-rollback-committed")
+	if err := app.store.BeginApply(value.ID, ApplyModeReplace, target.ID, "Target", filepath.Base(staging), filepath.Base(rollback)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(app.saveRoot, "Target"), rollback); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(staging, filepath.Join(app.saveRoot, "Target")); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store.MarkApplyCommitted(value.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewService(Config{SaveRoot: app.saveRoot, ImportRoot: app.importRoot, WorkshopRoot: app.workshopRoot}, app.store, app.rooms, app.runtime, app.backups, app.downloader); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(app.saveRoot, "Target", "Master", "save", "session", "new", "0000000001"))
+	if err != nil || string(content) != "new-save" {
+		t.Fatalf("committed content = %q, %v", content, err)
+	}
+	recovered, err := app.store.Get(value.ID)
+	if err != nil || recovered.Status != StatusApplied {
+		t.Fatalf("recovered import = %#v, %v", recovered, err)
+	}
+	if _, err := os.Stat(rollback); !os.IsNotExist(err) {
+		t.Fatalf("committed rollback was not removed: %v", err)
+	}
+}
+
+func TestServiceFinishesAppliedJournalCleanupAfterRestart(t *testing.T) {
+	app := newApplyTestApp(t)
+	target := createManagedRoom(t, app, "Target", "Target Room", "target-token-1234567890", 12001, "old-save")
+	value := analyzedImportForRecovery(t, app)
+	staging := createRecoveryRoom(t, app.saveRoot, ".dst-admin-import-applied", "new-save")
+	rollback := filepath.Join(app.saveRoot, ".dst-admin-import-rollback-applied")
+	if err := app.store.BeginApply(value.ID, ApplyModeReplace, target.ID, "Target", filepath.Base(staging), filepath.Base(rollback)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(app.saveRoot, "Target"), rollback); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(staging, filepath.Join(app.saveRoot, "Target")); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store.MarkApplyCommitted(value.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.MarkApplied(value.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewService(Config{SaveRoot: app.saveRoot, ImportRoot: app.importRoot, WorkshopRoot: app.workshopRoot}, app.store, app.rooms, app.runtime, app.backups, app.downloader); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(rollback); !os.IsNotExist(err) {
+		t.Fatalf("applied rollback was not removed: %v", err)
+	}
+	var record importRecord
+	if err := app.store.db.Table(app.store.table).Where("id = ?", value.ID).First(&record).Error; err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != string(StatusApplied) || record.ApplyPhase != "" || record.ApplyTarget != "" || record.ApplyRollback != "" {
+		t.Fatalf("apply journal was not cleared: %#v", record)
+	}
+}
+
+func analyzedImportForRecovery(t *testing.T, app applyTestApp) Session {
+	t.Helper()
+	archive := createZIP(t, []archiveTestEntry{
+		{name: "cluster.ini", content: clusterINI("Source")},
+		{name: "Master/server.ini", content: serverINI(true, 1, 10999)},
+	})
+	value, err := app.service.Upload(context.Background(), "恢复测试", "source.zip", bytes.NewReader(archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err = app.service.Analyze(context.Background(), value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func createRecoveryRoom(t *testing.T, saveRoot, name, save string) string {
+	t.Helper()
+	root := filepath.Join(saveRoot, name)
+	world := filepath.Join(root, "Master")
+	if err := os.MkdirAll(filepath.Join(world, "save", "session", "new"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	for filePath, content := range map[string]string{
+		filepath.Join(root, "cluster.ini"):                           clusterINI("Imported"),
+		filepath.Join(world, "server.ini"):                           serverINI(true, 1, 10999),
+		filepath.Join(world, "save", "session", "new", "0000000001"): save,
+	} {
+		if err := os.WriteFile(filePath, []byte(content), 0640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
 }
 
 func createManagedRoom(t *testing.T, app applyTestApp, directory, name, token string, port int, save string) rooms.Room {

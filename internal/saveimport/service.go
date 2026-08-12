@@ -18,6 +18,7 @@ import (
 	"dont/internal/rooms"
 
 	"github.com/google/uuid"
+	"github.com/shirou/gopsutil/v3/disk"
 )
 
 type Config struct {
@@ -27,17 +28,22 @@ type Config struct {
 	MaxUploadSize int64
 }
 
+var inspectDiskUsage = disk.Usage
+
 type Service struct {
-	config  Config
-	store   *Store
-	scanner *Scanner
-	rooms   RoomManager
-	runtime Runtime
-	backups BackupCreator
-	mods    ModDownloader
-	locksMu sync.Mutex
-	locks   map[string]*sync.Mutex
-	now     func() time.Time
+	config        Config
+	store         *Store
+	scanner       *Scanner
+	rooms         RoomManager
+	runtime       Runtime
+	backups       BackupCreator
+	mods          ModDownloader
+	locksMu       sync.Mutex
+	locks         map[string]*sync.Mutex
+	activeMu      sync.Mutex
+	active        map[string]string
+	activeTargets map[string]string
+	now           func() time.Time
 }
 
 type RoomManager interface {
@@ -45,6 +51,7 @@ type RoomManager interface {
 	Room(string) (rooms.Room, error)
 	Worlds(string) ([]rooms.World, error)
 	Adopt(string) (rooms.Room, error)
+	Unadopt(string) error
 }
 
 type Runtime interface {
@@ -76,10 +83,15 @@ func NewService(config Config, store *Store, roomManager RoomManager, runtime Ru
 	if config.MaxUploadSize <= 0 {
 		config.MaxUploadSize = MaxUploadBytes
 	}
-	return &Service{
+	service := &Service{
 		config: config, store: store, scanner: NewScanner(config.WorkshopRoot), rooms: roomManager,
-		runtime: runtime, backups: backupCreator, mods: modDownloader, locks: make(map[string]*sync.Mutex), now: time.Now,
-	}, nil
+		runtime: runtime, backups: backupCreator, mods: modDownloader, locks: make(map[string]*sync.Mutex),
+		active: make(map[string]string), activeTargets: make(map[string]string), now: time.Now,
+	}
+	if err := service.recoverInterrupted(); err != nil {
+		return nil, fmt.Errorf("recover save imports: %w", err)
+	}
+	return service, nil
 }
 
 func (s *Service) List() ([]Session, error) { return s.store.List() }
@@ -87,6 +99,31 @@ func (s *Service) List() ([]Session, error) { return s.store.List() }
 func (s *Service) Get(id string) (Session, error) { return s.store.Get(id) }
 
 func (s *Service) Upload(ctx context.Context, name, sourceName string, input io.Reader) (Session, error) {
+	return s.UploadWithSize(ctx, name, sourceName, input, -1)
+}
+
+func (s *Service) CheckUploadSpace(size int64, includeMultipartCopy bool) error {
+	limit := s.config.MaxUploadSize
+	if includeMultipartCopy {
+		limit += 1024 * 1024
+	}
+	if size > limit {
+		return ErrArchiveTooLarge
+	}
+	required := size
+	if required < 0 {
+		required = 0
+	}
+	if includeMultipartCopy && required <= (1<<63-1)/2 {
+		required *= 2
+	}
+	return requireImportSpace(s.config.ImportRoot, required)
+}
+
+func (s *Service) UploadWithSize(ctx context.Context, name, sourceName string, input io.Reader, sizeHint int64) (Session, error) {
+	if err := s.CheckUploadSpace(sizeHint, false); err != nil {
+		return Session{}, err
+	}
 	name, err := normalizeDisplayName(name, "导入 "+s.now().Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return Session{}, err
@@ -136,7 +173,25 @@ func (s *Service) Upload(ctx context.Context, name, sourceName string, input io.
 	return value, nil
 }
 
-func (s *Service) Analyze(ctx context.Context, id string) (Session, error) {
+func requireImportSpace(target string, contentBytes int64) error {
+	if contentBytes < 0 {
+		contentBytes = 0
+	}
+	required := uint64(contentBytes)
+	if required > ^uint64(0)-minimumImportHeadroom {
+		return ErrInsufficientSpace
+	}
+	usage, err := inspectDiskUsage(target)
+	if err != nil {
+		return err
+	}
+	if usage.Free < required+minimumImportHeadroom {
+		return ErrInsufficientSpace
+	}
+	return nil
+}
+
+func (s *Service) Analyze(ctx context.Context, id string) (result Session, resultErr error) {
 	lock := s.importLock(id)
 	lock.Lock()
 	defer lock.Unlock()
@@ -147,6 +202,25 @@ func (s *Service) Analyze(ctx context.Context, id string) (Session, error) {
 	if err := s.store.MarkAnalyzing(id); err != nil {
 		return Session{}, err
 	}
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		code := AnalysisErrorCode(resultErr)
+		if errors.Is(resultErr, ErrUnsafeArchive) || errors.Is(resultErr, ErrInvalidArchive) || errors.Is(resultErr, ErrArchiveTooLarge) {
+			_ = s.store.MarkInvalid(id, code, resultErr.Error())
+			return
+		}
+		recovery := importRecord{ID: id}
+		if value.Manifest != nil {
+			recovery.ManifestJSON = "{}"
+		}
+		if recoveryErr := s.recoverAnalysis(recovery); recoveryErr != nil {
+			resultErr = fmt.Errorf("%v; recover interrupted analysis: %w", resultErr, recoveryErr)
+			return
+		}
+		_ = s.store.MarkAnalysisFailed(id, code, resultErr.Error())
+	}()
 	directory := filepath.Join(s.config.ImportRoot, id)
 	artifactPath := filepath.Join(directory, "source.archive")
 	if !contained(s.config.ImportRoot, artifactPath) {
@@ -154,7 +228,6 @@ func (s *Service) Analyze(ctx context.Context, id string) (Session, error) {
 	}
 	sha, err := fileSHA256(artifactPath)
 	if err != nil {
-		_ = s.store.MarkInvalid(id, AnalysisErrorCode(err), err.Error())
 		return Session{}, err
 	}
 	staging, err := os.MkdirTemp(directory, ".analyze-")
@@ -164,20 +237,45 @@ func (s *Service) Analyze(ctx context.Context, id string) (Session, error) {
 	defer os.RemoveAll(staging)
 	manifest, err := s.scanner.Scan(ctx, artifactPath, value.SourceName, staging, value.Size, sha)
 	if err != nil {
-		_ = s.store.MarkInvalid(id, AnalysisErrorCode(err), err.Error())
 		return Session{}, err
 	}
 	contentRoot := filepath.Join(directory, "content")
-	if err := os.RemoveAll(contentRoot); err != nil {
+	rollbackRoot := filepath.Join(directory, ".content-rollback")
+	if err := os.RemoveAll(rollbackRoot); err != nil {
 		return Session{}, err
 	}
+	hadContent := regularDirectory(contentRoot)
+	if hadContent {
+		if err := os.Rename(contentRoot, rollbackRoot); err != nil {
+			return Session{}, fmt.Errorf("stage previous analyzed content: %w", err)
+		}
+	}
 	if err := os.Rename(staging, contentRoot); err != nil {
+		if hadContent {
+			if rollbackErr := os.Rename(rollbackRoot, contentRoot); rollbackErr != nil {
+				return Session{}, fmt.Errorf("publish analyzed save content: %v; restore previous content: %w", err, rollbackErr)
+			}
+		}
 		return Session{}, fmt.Errorf("publish analyzed save content: %w", err)
 	}
-	return s.store.SaveManifest(id, sha, manifest)
+	result, err = s.store.SaveManifest(id, sha, manifest)
+	if err != nil {
+		rollbackErr := restoreAnalyzedContent(contentRoot, staging, rollbackRoot, hadContent)
+		if rollbackErr != nil {
+			return Session{}, fmt.Errorf("save import manifest: %v; restore analyzed content: %w", err, rollbackErr)
+		}
+		return Session{}, err
+	}
+	_ = os.RemoveAll(rollbackRoot)
+	return result, nil
 }
 
 func (s *Service) Delete(id string) error {
+	release, err := s.Reserve(id, "delete")
+	if err != nil {
+		return err
+	}
+	defer release()
 	lock := s.importLock(id)
 	lock.Lock()
 	defer lock.Unlock()
@@ -208,6 +306,137 @@ func (s *Service) importLock(id string) *sync.Mutex {
 		s.locks[id] = lock
 	}
 	return lock
+}
+
+func (s *Service) Reserve(id, operation string) (func(), error) {
+	return s.reserve(id, operation, "")
+}
+
+func (s *Service) ReserveApply(id, targetRoomID string) (func(), error) {
+	return s.reserve(id, "apply", strings.TrimSpace(targetRoomID))
+}
+
+func (s *Service) reserve(id, operation, targetRoomID string) (func(), error) {
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	if _, exists := s.active[id]; exists {
+		return nil, ErrImportBusy
+	}
+	if targetRoomID != "" {
+		if _, exists := s.activeTargets[targetRoomID]; exists {
+			return nil, ErrImportBusy
+		}
+	}
+	s.active[id] = operation
+	if targetRoomID != "" {
+		s.activeTargets[targetRoomID] = id
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.activeMu.Lock()
+			delete(s.active, id)
+			if s.activeTargets[targetRoomID] == id {
+				delete(s.activeTargets, targetRoomID)
+			}
+			s.activeMu.Unlock()
+		})
+	}, nil
+}
+
+func restoreAnalyzedContent(contentRoot, staging, rollbackRoot string, hadContent bool) error {
+	if regularDirectory(contentRoot) {
+		if err := os.Rename(contentRoot, staging); err != nil {
+			return err
+		}
+	}
+	if hadContent && regularDirectory(rollbackRoot) {
+		if err := os.Rename(rollbackRoot, contentRoot); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) recoverInterrupted() error {
+	records, err := s.store.RecoveryRecords()
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		switch Status(record.Status) {
+		case StatusAnalyzing:
+			if err := s.recoverAnalysis(record); err != nil {
+				return err
+			}
+			if err := s.store.MarkAnalysisFailed(record.ID, "SERVER_RESTARTED", "服务重启中断了存档分析，请重新分析"); err != nil {
+				return err
+			}
+		case StatusApplying:
+			if err := s.recoverApply(record); err != nil {
+				return err
+			}
+		case StatusApplied:
+			if record.ApplyPhase != applyPhaseCommitted && record.ApplyPhase != applyPhaseApplied {
+				return fmt.Errorf("recover applied save import %s: invalid phase %q", record.ID, record.ApplyPhase)
+			}
+			if err := s.finalizeCommittedApply(record); err != nil {
+				return err
+			}
+		}
+	}
+	return s.cleanupOrphanApplyStaging()
+}
+
+func (s *Service) cleanupOrphanApplyStaging() error {
+	matches, err := filepath.Glob(filepath.Join(s.config.SaveRoot, ".dst-admin-import-*"))
+	if err != nil {
+		return err
+	}
+	for _, match := range matches {
+		name := filepath.Base(match)
+		if strings.HasPrefix(name, ".dst-admin-import-rollback-") || !contained(s.config.SaveRoot, match) {
+			continue
+		}
+		if err := os.RemoveAll(match); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) recoverAnalysis(record importRecord) error {
+	directory := filepath.Join(s.config.ImportRoot, record.ID)
+	contentRoot := filepath.Join(directory, "content")
+	rollbackRoot := filepath.Join(directory, ".content-rollback")
+	if regularDirectory(rollbackRoot) {
+		discard := filepath.Join(directory, ".content-interrupted-"+uuid.NewString())
+		if regularDirectory(contentRoot) {
+			if err := os.Rename(contentRoot, discard); err != nil {
+				return err
+			}
+			defer os.RemoveAll(discard)
+		}
+		if err := os.Rename(rollbackRoot, contentRoot); err != nil {
+			return err
+		}
+	} else if strings.TrimSpace(record.ManifestJSON) == "" {
+		if err := os.RemoveAll(contentRoot); err != nil {
+			return err
+		}
+	}
+	matches, err := filepath.Glob(filepath.Join(directory, ".analyze-*"))
+	if err != nil {
+		return err
+	}
+	for _, match := range matches {
+		if contained(directory, match) {
+			if err := os.RemoveAll(match); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func absoluteDirectory(value string) (string, error) {

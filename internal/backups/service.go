@@ -18,6 +18,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"dont/internal/roomops"
 	"dont/internal/rooms"
 
 	"github.com/google/uuid"
@@ -112,6 +113,11 @@ func (s *Service) List(roomID string) ([]Backup, error) {
 func (s *Service) Get(id string) (Backup, error) { return s.store.Get(id) }
 
 func (s *Service) Create(ctx context.Context, roomID, name string, kind Kind, sourceJobID string) (Backup, error) {
+	ctx, release, err := roomops.Acquire(ctx, roomID)
+	if err != nil {
+		return Backup{}, err
+	}
+	defer release()
 	room, err := s.resolveRoom(roomID)
 	if err != nil {
 		return Backup{}, err
@@ -255,6 +261,11 @@ func (s *Service) Open(id string) (*os.File, os.FileInfo, Backup, error) {
 }
 
 func (s *Service) Restore(ctx context.Context, roomID, backupID, confirmation, sourceJobID string) (Backup, error) {
+	ctx, release, err := roomops.Acquire(ctx, roomID)
+	if err != nil {
+		return Backup{}, err
+	}
+	defer release()
 	room, err := s.resolveRoom(roomID)
 	if err != nil {
 		return Backup{}, err

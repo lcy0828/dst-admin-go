@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"dont/internal/roomops"
+
 	"github.com/go-ini/ini"
 	lua "github.com/yuin/gopher-lua"
 )
@@ -74,9 +76,11 @@ type worldDocument struct {
 }
 
 func (s *Service) WorldConfig(roomID, worldID string) (WorldConfig, error) {
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return WorldConfig{}, err
+	}
+	defer release()
 	_, _, worldPath, err := s.resolveWorld(roomID, worldID)
 	if err != nil {
 		return WorldConfig{}, err
@@ -89,9 +93,11 @@ func (s *Service) WorldConfig(roomID, worldID string) (WorldConfig, error) {
 }
 
 func (s *Service) PreviewWorld(roomID, worldID string, request WorldUpdateRequest) (Preview, error) {
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return Preview{}, err
+	}
+	defer release()
 	_, _, worldPath, err := s.resolveWorld(roomID, worldID)
 	if err != nil {
 		return Preview{}, err
@@ -108,9 +114,11 @@ func (s *Service) PreviewWorld(roomID, worldID string, request WorldUpdateReques
 }
 
 func (s *Service) ApplyWorld(ctx context.Context, jobID, roomID, worldID string, request WorldUpdateRequest) (ApplyResult, error) {
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	ctx, release, err := roomops.Acquire(ctx, roomID)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	defer release()
 	room, _, worldPath, err := s.resolveWorld(roomID, worldID)
 	if err != nil {
 		return ApplyResult{}, err

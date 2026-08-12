@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"dont/internal/backups"
+	"dont/internal/roomops"
 	"dont/internal/rooms"
 	lua "github.com/yuin/gopher-lua"
 )
@@ -104,12 +105,30 @@ func (s *Service) roomLock(roomID string) *sync.Mutex {
 	return s.locks[roomID]
 }
 
-func (s *Service) List(ctx context.Context, roomID string) (ModList, error) {
-	s.libraryMu.RLock()
-	defer s.libraryMu.RUnlock()
+func (s *Service) acquireRoom(ctx context.Context, roomID string) (context.Context, func(), error) {
+	ctx, releaseRoom, err := roomops.Acquire(ctx, roomID)
+	if err != nil {
+		return ctx, nil, err
+	}
 	lock := s.roomLock(roomID)
 	lock.Lock()
-	defer lock.Unlock()
+	var once sync.Once
+	return ctx, func() {
+		once.Do(func() {
+			lock.Unlock()
+			releaseRoom()
+		})
+	}, nil
+}
+
+func (s *Service) List(ctx context.Context, roomID string) (ModList, error) {
+	ctx, release, err := s.acquireRoom(ctx, roomID)
+	if err != nil {
+		return ModList{}, err
+	}
+	defer release()
+	s.libraryMu.RLock()
+	defer s.libraryMu.RUnlock()
 	room, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return ModList{}, err
@@ -375,14 +394,16 @@ func (s *Service) AddToRoom(ctx context.Context, jobID, roomID, modID string, re
 	if err != nil {
 		return ActionResult{}, err
 	}
+	ctx, release, err := s.acquireRoom(ctx, roomID)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	defer release()
 	s.libraryMu.Lock()
 	defer s.libraryMu.Unlock()
 	if err := s.verifyDownloads(ids); err != nil {
 		return ActionResult{}, ErrModNotDownloaded
 	}
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
 	room, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return ActionResult{}, err
@@ -463,9 +484,11 @@ func (s *Service) Enable(ctx context.Context, jobID, roomID, modID string, reque
 	if !validModID(modID) {
 		return ActionResult{}, ErrInvalidModID
 	}
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
+	ctx, release, err := s.acquireRoom(ctx, roomID)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	defer release()
 	room, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return ActionResult{}, err
@@ -520,11 +543,13 @@ func (s *Service) Uninstall(ctx context.Context, jobID, roomID, modID string, re
 	if !validModID(modID) {
 		return ActionResult{}, ErrInvalidModID
 	}
+	ctx, release, err := s.acquireRoom(ctx, roomID)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	defer release()
 	s.libraryMu.Lock()
 	defer s.libraryMu.Unlock()
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
 	room, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return ActionResult{}, err
@@ -590,11 +615,13 @@ func (s *Service) Repair(ctx context.Context, roomID, modID string, request ModA
 	if !validModID(modID) {
 		return ActionResult{}, ErrInvalidModID
 	}
+	ctx, release, err := s.acquireRoom(ctx, roomID)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	defer release()
 	s.libraryMu.Lock()
 	defer s.libraryMu.Unlock()
-	lock := s.roomLock(roomID)
-	lock.Lock()
-	defer lock.Unlock()
 	room, _, err := s.resolveRoom(roomID)
 	if err != nil {
 		return ActionResult{}, err
