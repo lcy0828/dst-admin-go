@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"dont/internal/configuration"
+	"dont/internal/dstruntime"
 	"dont/internal/rooms"
 
 	"github.com/google/uuid"
@@ -33,31 +34,40 @@ type Sender interface {
 	Send(context.Context, string, string, string) error
 }
 
+type RuntimeCommander interface {
+	ExecuteCommand(context.Context, string, string, dstruntime.CommandRequest) (dstruntime.CommandReceipt, error)
+}
+
 type AccessManager interface {
 	AccessLists(string) (configuration.AccessLists, error)
 	ApplyAccess(context.Context, string, string, configuration.AccessUpdateRequest) (configuration.ApplyResult, error)
 }
 
 type Service struct {
-	rooms   RoomCatalog
-	runtime Runtime
-	sender  Sender
-	access  AccessManager
-	store   *Store
-	probe   Probe
-	now     func() time.Time
-	locksMu sync.Mutex
-	locks   map[string]*sync.Mutex
+	rooms     RoomCatalog
+	runtime   Runtime
+	sender    Sender
+	access    AccessManager
+	store     *Store
+	probe     Probe
+	commander RuntimeCommander
+	now       func() time.Time
+	locksMu   sync.Mutex
+	locks     map[string]*sync.Mutex
 }
 
-func NewService(roomCatalog RoomCatalog, runtime Runtime, sender Sender, access AccessManager, store *Store, probe Probe) (*Service, error) {
+func NewService(roomCatalog RoomCatalog, runtime Runtime, sender Sender, access AccessManager, store *Store, probe Probe, commanders ...RuntimeCommander) (*Service, error) {
 	if roomCatalog == nil || runtime == nil || sender == nil || access == nil || store == nil || probe == nil {
 		return nil, errors.New("rooms, runtime, sender, access manager, store, and probe are required")
 	}
-	return &Service{
+	service := &Service{
 		rooms: roomCatalog, runtime: runtime, sender: sender, access: access, store: store, probe: probe,
 		now: time.Now, locks: make(map[string]*sync.Mutex),
-	}, nil
+	}
+	if len(commanders) > 0 {
+		service.commander = commanders[0]
+	}
+	return service, nil
 }
 
 func ValidID(value string) bool { return playerIDPattern.MatchString(strings.TrimSpace(value)) }
@@ -166,42 +176,156 @@ func (s *Service) WorldTargets(roomID string) ([]WorldTarget, error) {
 }
 
 func (s *Service) RefreshWorld(ctx context.Context, roomID, worldID string) (RefreshResult, error) {
+	outcomes, err := s.RefreshWorlds(ctx, roomID, []string{worldID})
+	if err != nil {
+		return RefreshResult{}, err
+	}
+	if len(outcomes) != 1 {
+		return RefreshResult{}, errors.New("player refresh returned no world result")
+	}
+	return outcomes[0].Result, outcomes[0].Err
+}
+
+func (s *Service) RefreshWorlds(ctx context.Context, roomID string, worldIDs []string) ([]RefreshOutcome, error) {
 	lock := s.roomLock(roomID)
 	lock.Lock()
 	defer lock.Unlock()
 	room, err := s.managedRoom(roomID)
 	if err != nil {
-		return RefreshResult{}, err
+		return nil, err
 	}
+	if len(worldIDs) == 0 || len(worldIDs) > 64 {
+		return nil, ErrInvalidFilter
+	}
+	seenWorlds := make(map[string]bool, len(worldIDs))
+	outcomes := make([]RefreshOutcome, 0, len(worldIDs))
+	snapshots := make([]worldSnapshot, 0, len(worldIDs))
+	for _, worldID := range worldIDs {
+		if seenWorlds[worldID] {
+			return nil, ErrInvalidFilter
+		}
+		seenWorlds[worldID] = true
+		outcome, snapshot := s.collectWorldSnapshot(ctx, room, worldID)
+		outcomes = append(outcomes, outcome)
+		if outcome.Err == nil {
+			snapshots = append(snapshots, snapshot)
+		}
+	}
+	if err := s.store.ReplaceRoomSnapshots(room.ID, snapshots); err != nil {
+		return outcomes, err
+	}
+	return outcomes, nil
+}
+
+func (s *Service) collectWorldSnapshot(ctx context.Context, room rooms.Room, worldID string) (RefreshOutcome, worldSnapshot) {
+	outcome := RefreshOutcome{WorldID: worldID}
 	world, err := s.rooms.World(room.ID, worldID)
 	if err != nil {
-		return RefreshResult{}, err
+		outcome.Err = err
+		return outcome, worldSnapshot{}
 	}
 	running, err := s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
 	if err != nil {
-		return RefreshResult{}, err
+		outcome.Err = err
+		return outcome, worldSnapshot{}
 	}
 	observedAt := s.now().UTC()
+	history, historyErr := s.readWorldHistory(ctx, room.ID, world.ID)
+	snapshot := worldSnapshot{WorldID: world.ID, WorldName: world.Name, History: history, ObservedAt: observedAt, Source: SourceNativeLog}
 	if !running {
-		if err := s.store.MarkWorldOffline(room.ID, world.ID, observedAt); err != nil {
-			return RefreshResult{}, err
+		message := "分片未运行，已确认该分片没有在线玩家"
+		if len(history) > 0 {
+			message = fmt.Sprintf("分片未运行，已恢复 %d 个历史玩家并标记为离线", len(history))
 		}
-		return RefreshResult{WorldID: world.ID, Running: false, Message: "分片未运行，已确认该分片没有在线玩家"}, nil
+		warning := ""
+		if historyErr != nil {
+			warning = "历史玩家日志读取失败：" + historyErr.Error()
+		}
+		outcome.Result = RefreshResult{WorldID: world.ID, Running: false, Source: SourceNativeLog, Status: FreshnessLive, ObservedAt: &observedAt, Warning: warning, Message: message}
+		return outcome, snapshot
 	}
-	observations, err := s.probe.Snapshot(ctx, room.ID, world.ID)
+	observations, source, status, warning, snapshotAt, err := s.readSnapshot(ctx, room.ID, world.ID, observedAt)
 	if err != nil {
-		return RefreshResult{}, err
+		outcome.Err = err
+		return outcome, worldSnapshot{}
+	}
+	observedAt = snapshotAt
+	if err := validateObservations(observations); err != nil {
+		outcome.Err = err
+		return outcome, worldSnapshot{}
+	}
+	snapshot.Observations = observations
+	snapshot.ObservedAt = observedAt
+	snapshot.Source = source
+	if historyErr != nil {
+		if warning != "" {
+			warning += "；"
+		}
+		warning += "历史玩家日志读取失败：" + historyErr.Error()
+	}
+	message := fmt.Sprintf("已通过 %s 读取 %d 个在线玩家", playerSourceLabel(source), len(observations))
+	outcome.Result = RefreshResult{
+		WorldID: world.ID, Count: len(observations), Running: true, Source: source, Status: status,
+		ObservedAt: &observedAt, Warning: warning, Message: message,
+	}
+	return outcome, snapshot
+}
+
+func (s *Service) readSnapshot(ctx context.Context, roomID, worldID string, observedAt time.Time) ([]Observation, DataSource, FreshnessStatus, string, time.Time, error) {
+	if detailed, ok := s.probe.(DetailedProbe); ok {
+		result, err := detailed.SnapshotDetailed(ctx, roomID, worldID)
+		if err != nil {
+			return nil, "", FreshnessUnavailable, "", time.Time{}, err
+		}
+		status := FreshnessLive
+		if result.Degraded {
+			status = FreshnessStale
+		}
+		if result.ObservedAt.IsZero() {
+			result.ObservedAt = observedAt
+		}
+		return result.Observations, result.Source, status, result.Warning, result.ObservedAt.UTC(), nil
+	}
+	observations, err := s.probe.Snapshot(ctx, roomID, worldID)
+	if err != nil {
+		return nil, "", FreshnessUnavailable, "", time.Time{}, err
+	}
+	observations = stampNativeObservations(observations, observedAt)
+	return observations, SourceNativeLog, FreshnessLive, "", observedAt, nil
+}
+
+func playerSourceLabel(source DataSource) string {
+	switch source {
+	case SourceRuntime:
+		return "customcommands"
+	case SourceConsoleFallback:
+		return "控制台 fallback"
+	default:
+		return "原生日志"
+	}
+}
+
+func (s *Service) mergeWorldHistory(ctx context.Context, room rooms.Room, world rooms.World, observedAt time.Time) (int, error) {
+	observations, err := s.readWorldHistory(ctx, room.ID, world.ID)
+	if err != nil {
+		return 0, err
+	}
+	return s.store.MergeWorldHistory(room.ID, world.ID, world.Name, observations, observedAt)
+}
+
+func (s *Service) readWorldHistory(ctx context.Context, roomID, worldID string) ([]Observation, error) {
+	historyProbe, supported := s.probe.(HistoryProbe)
+	if !supported {
+		return []Observation{}, nil
+	}
+	observations, err := historyProbe.HistorySnapshot(ctx, roomID, worldID)
+	if err != nil {
+		return nil, err
 	}
 	if err := validateObservations(observations); err != nil {
-		return RefreshResult{}, err
+		return nil, err
 	}
-	if err := s.store.ReplaceWorldSnapshot(room.ID, world.ID, world.Name, observations, observedAt); err != nil {
-		return RefreshResult{}, err
-	}
-	return RefreshResult{
-		WorldID: world.ID, Count: len(observations), Running: true,
-		Message: fmt.Sprintf("已读取 %d 个在线玩家", len(observations)),
-	}, nil
+	return observations, nil
 }
 
 func (s *Service) Act(ctx context.Context, jobID, roomID, playerID string, action Action, request ActionRequest) (ActionResult, error) {
@@ -232,16 +356,18 @@ func (s *Service) Act(ctx context.Context, jobID, roomID, playerID string, actio
 		return ActionResult{}, err
 	}
 	result := ActionResult{PlayerID: player.ID, WorldID: world.ID, Action: action}
+	runtimeRequest, runtimeSupported := runtimePlayerRequest(jobID, action, player, request)
 	switch action {
 	case ActionKick:
-		if err := s.sendToRunningWorld(ctx, room, world, `TheNet:Kick(`+quoteLua(player.ID)+`)`); err != nil {
+		if err := s.sendPlayerAction(ctx, room, world, runtimeRequest, runtimeSupported, `TheNet:Kick(`+quoteLua(player.ID)+`)`); err != nil {
 			return ActionResult{}, err
 		}
 		_ = s.store.MarkPlayerOffline(room.ID, player.ID, s.now().UTC())
 		result.Message = "已向目标分片发送踢出命令"
 	case ActionAnnounce:
 		message := "[给 " + player.Name + "] " + strings.TrimSpace(request.Message)
-		if err := s.sendToRunningWorld(ctx, room, world, `c_announce(`+quoteLua(message)+`)`); err != nil {
+		runtimeRequest.Arguments["message"] = message
+		if err := s.sendPlayerAction(ctx, room, world, runtimeRequest, runtimeSupported, `c_announce(`+quoteLua(message)+`)`); err != nil {
 			return ActionResult{}, err
 		}
 		result.Message = "已向玩家所在分片广播提醒"
@@ -281,7 +407,7 @@ func (s *Service) Act(ctx context.Context, jobID, roomID, playerID string, actio
 		if runtimeErr != nil {
 			result.Warning = "名单已保存，但无法确认分片状态：" + runtimeErr.Error()
 		} else if running {
-			if sendErr := s.sender.Send(ctx, room.DirectoryName, world.DirectoryName, markedPlayerScript(action, player.ID, script)); sendErr != nil {
+			if sendErr := s.sendPlayerAction(ctx, room, world, runtimeRequest, runtimeSupported, script); sendErr != nil {
 				result.Warning = "名单已保存，但即时命令发送失败：" + sendErr.Error()
 			}
 		}
@@ -292,7 +418,7 @@ func (s *Service) Act(ctx context.Context, jobID, roomID, playerID string, actio
 			result.Message += "（名单原本已是目标状态）"
 		}
 	case ActionKill:
-		if err := s.sendToRunningWorld(ctx, room, world, playerLookupScript(player.ID, `p:PushEvent("death")`)); err != nil {
+		if err := s.sendPlayerAction(ctx, room, world, runtimeRequest, runtimeSupported, playerLookupScript(player.ID, `p:PushEvent("death")`)); err != nil {
 			return ActionResult{}, err
 		}
 		result.Message = "已向目标分片发送玩家死亡命令"
@@ -300,7 +426,7 @@ func (s *Service) Act(ctx context.Context, jobID, roomID, playerID string, actio
 		enabled := *request.Enabled
 		statement := `if p.components.health then p.components.health:SetInvincible(` + luaBoolean(enabled) + `) end; ` +
 			`if p.components.talker then p.components.talker:Say(` + quoteLua(toggleMessage("无敌模式", enabled)) + `) end`
-		if err := s.sendToRunningWorld(ctx, room, world, playerLookupScript(player.ID, statement)); err != nil {
+		if err := s.sendPlayerAction(ctx, room, world, runtimeRequest, runtimeSupported, playerLookupScript(player.ID, statement)); err != nil {
 			return ActionResult{}, err
 		}
 		result.Message = "玩家无敌模式已" + enabledText(enabled)
@@ -308,19 +434,19 @@ func (s *Service) Act(ctx context.Context, jobID, roomID, playerID string, actio
 		enabled := *request.Enabled
 		statement := `if p.components.builder then p.components.builder.freebuildmode=` + luaBoolean(enabled) + ` end; ` +
 			`if p.components.talker then p.components.talker:Say(` + quoteLua(toggleMessage("制作模式", enabled)) + `) end`
-		if err := s.sendToRunningWorld(ctx, room, world, playerLookupScript(player.ID, statement)); err != nil {
+		if err := s.sendPlayerAction(ctx, room, world, runtimeRequest, runtimeSupported, playerLookupScript(player.ID, statement)); err != nil {
 			return ActionResult{}, err
 		}
 		result.Message = "玩家制作模式已" + enabledText(enabled)
 	case ActionResurrect:
 		statement := `p:PushEvent("respawnfromghost"); p.rezsource=` + quoteLua("DST-ADMIN-GO控制台")
-		if err := s.sendToRunningWorld(ctx, room, world, playerLookupScript(player.ID, statement)); err != nil {
+		if err := s.sendPlayerAction(ctx, room, world, runtimeRequest, runtimeSupported, playerLookupScript(player.ID, statement)); err != nil {
 			return ActionResult{}, err
 		}
 		result.Message = "已向目标分片发送玩家复活命令"
 	case ActionChangeCharacter:
 		statement := `c_despawn(p); c_announce(` + quoteLua("管理员已将玩家重置，该玩家可以重新选择角色") + `)`
-		if err := s.sendToRunningWorld(ctx, room, world, playerLookupScript(player.ID, statement)); err != nil {
+		if err := s.sendPlayerAction(ctx, room, world, runtimeRequest, runtimeSupported, playerLookupScript(player.ID, statement)); err != nil {
 			return ActionResult{}, err
 		}
 		_ = s.store.MarkPlayerOffline(room.ID, player.ID, s.now().UTC())
@@ -373,6 +499,36 @@ func (s *Service) sendToRunningWorld(ctx context.Context, room rooms.Room, world
 	return s.sender.Send(ctx, room.DirectoryName, world.DirectoryName, markedPlayerScript("action", "", script))
 }
 
+func (s *Service) sendPlayerAction(ctx context.Context, room rooms.Room, world rooms.World, request dstruntime.CommandRequest, runtimeSupported bool, fallback string) error {
+	if s.commander != nil && runtimeSupported {
+		receipt, err := s.commander.ExecuteCommand(ctx, room.ID, world.ID, request)
+		if err == nil {
+			if receipt.OK {
+				return nil
+			}
+			return fmt.Errorf("runtime action rejected: %s: %s", receipt.Code, receipt.Message)
+		}
+		if !errors.Is(err, dstruntime.ErrRuntimeUnavailable) && !errors.Is(err, dstruntime.ErrRuntimeNotInstalled) {
+			return err
+		}
+	}
+	return s.sendToRunningWorld(ctx, room, world, fallback)
+}
+
+func runtimePlayerRequest(requestID string, action Action, player Player, request ActionRequest) (dstruntime.CommandRequest, bool) {
+	actions := map[Action]string{
+		ActionKick: "player.kick", ActionBan: "player.ban", ActionUnban: "player.unban", ActionAnnounce: "player.announce",
+		ActionKill: "player.kill", ActionGodMode: "player.god_mode", ActionCreativeMode: "player.creative_mode",
+		ActionResurrect: "player.resurrect", ActionChangeCharacter: "player.change_character",
+	}
+	runtimeAction, supported := actions[action]
+	arguments := map[string]interface{}{"userId": player.ID}
+	if request.Enabled != nil {
+		arguments["enabled"] = *request.Enabled
+	}
+	return dstruntime.CommandRequest{RequestID: requestID, Action: runtimeAction, Arguments: arguments}, supported
+}
+
 func (s *Service) managedRoom(roomID string) (rooms.Room, error) {
 	room, err := s.rooms.Room(roomID)
 	if err != nil {
@@ -406,22 +562,24 @@ func (s *Service) normalizeFilter(roomID string, filter ListFilter) (ListFilter,
 }
 
 func (s *Service) StartBanExpiryScheduler(ctx context.Context, interval time.Duration) {
+	go s.RunBanExpiryScheduler(ctx, interval)
+}
+
+func (s *Service) RunBanExpiryScheduler(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = time.Minute
 	}
-	go func() {
-		_ = s.ExpireBans(ctx)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				_ = s.ExpireBans(ctx)
-			}
+	_ = s.ExpireBans(ctx)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = s.ExpireBans(ctx)
 		}
-	}()
+	}
 }
 
 func (s *Service) ExpireBans(ctx context.Context) error {

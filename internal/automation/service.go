@@ -29,13 +29,14 @@ type RoomCatalog interface {
 }
 
 type Service struct {
-	rooms    RoomCatalog
-	store    *Store
-	jobs     *jobs.Service
-	executor ActionExecutor
-	now      func() time.Time
-	activeMu sync.Mutex
-	active   map[string]bool
+	rooms      RoomCatalog
+	store      *Store
+	jobs       *jobs.Service
+	executor   ActionExecutor
+	now        func() time.Time
+	defaultsMu sync.Mutex
+	activeMu   sync.Mutex
+	active     map[string]bool
 }
 
 func NewService(roomCatalog RoomCatalog, store *Store, jobService *jobs.Service, executor ActionExecutor) (*Service, error) {
@@ -171,6 +172,12 @@ func (s *Service) DeleteTask(roomID, taskID string) error {
 		return ErrTaskRunning
 	}
 	return s.store.DeleteTask(roomID, taskID)
+}
+
+func (s *Service) DeleteRoomTasks(roomID string) error {
+	s.defaultsMu.Lock()
+	defer s.defaultsMu.Unlock()
+	return s.store.DeleteRoomTasks(roomID)
 }
 
 func (s *Service) Runs(roomID string, filter RunFilter) (RunList, error) {

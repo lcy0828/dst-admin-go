@@ -24,31 +24,49 @@ func (e *FieldError) Error() string { return ErrInvalidAction.Error() }
 func (e *FieldError) Unwrap() error { return ErrInvalidAction }
 
 type Player struct {
-	ID              string     `json:"id"`
-	RoomID          string     `json:"roomId"`
-	WorldID         string     `json:"worldId"`
-	WorldName       string     `json:"worldName"`
-	Name            string     `json:"name"`
-	Prefab          string     `json:"prefab,omitempty"`
-	Online          bool       `json:"online"`
-	Banned          bool       `json:"banned"`
-	BanReason       string     `json:"banReason,omitempty"`
-	BannedAt        *time.Time `json:"bannedAt,omitempty"`
-	BanExpiresAt    *time.Time `json:"banExpiresAt,omitempty"`
-	Admin           bool       `json:"admin"`
-	Age             int        `json:"age"`
-	NetID           string     `json:"netId,omitempty"`
-	Performance     int        `json:"performance"`
-	HealthPercent   *float64   `json:"healthPercent,omitempty"`
-	HungerPercent   *float64   `json:"hungerPercent,omitempty"`
-	SanityPercent   *float64   `json:"sanityPercent,omitempty"`
-	Temperature     *float64   `json:"temperature,omitempty"`
-	Moisture        *float64   `json:"moisture,omitempty"`
-	FirstSeenAt     time.Time  `json:"firstSeenAt"`
-	LastSeenAt      time.Time  `json:"lastSeenAt"`
-	StatusChangedAt time.Time  `json:"statusChangedAt"`
-	LastRefreshedAt time.Time  `json:"lastRefreshedAt"`
+	ID              string      `json:"id"`
+	RoomID          string      `json:"roomId"`
+	WorldID         string      `json:"worldId"`
+	WorldName       string      `json:"worldName"`
+	Name            string      `json:"name"`
+	Prefab          string      `json:"prefab,omitempty"`
+	Online          bool        `json:"online"`
+	Banned          bool        `json:"banned"`
+	BanReason       string      `json:"banReason,omitempty"`
+	BannedAt        *time.Time  `json:"bannedAt,omitempty"`
+	BanExpiresAt    *time.Time  `json:"banExpiresAt,omitempty"`
+	Admin           bool        `json:"admin"`
+	Age             int         `json:"age"`
+	NetID           string      `json:"netId,omitempty"`
+	NetScore        *int        `json:"netScore,omitempty"`
+	Performance     *int        `json:"performance,omitempty"`
+	HealthPercent   *float64    `json:"healthPercent,omitempty"`
+	HungerPercent   *float64    `json:"hungerPercent,omitempty"`
+	SanityPercent   *float64    `json:"sanityPercent,omitempty"`
+	Temperature     *float64    `json:"temperature,omitempty"`
+	Moisture        *float64    `json:"moisture,omitempty"`
+	FirstSeenAt     time.Time   `json:"firstSeenAt"`
+	LastSeenAt      time.Time   `json:"lastSeenAt"`
+	StatusChangedAt time.Time   `json:"statusChangedAt"`
+	LastRefreshedAt time.Time   `json:"lastRefreshedAt"`
+	Fields          FieldStates `json:"fields"`
 }
+
+type FreshnessStatus string
+
+const (
+	FreshnessLive        FreshnessStatus = "live"
+	FreshnessStale       FreshnessStatus = "stale"
+	FreshnessUnavailable FreshnessStatus = "unavailable"
+)
+
+type FieldState struct {
+	Source     DataSource      `json:"source"`
+	ObservedAt *time.Time      `json:"observedAt,omitempty"`
+	Status     FreshnessStatus `json:"status"`
+}
+
+type FieldStates map[string]FieldState
 
 type Observation struct {
 	ID            string
@@ -57,12 +75,13 @@ type Observation struct {
 	Admin         bool
 	Age           int
 	NetID         string
-	Performance   int
+	NetScore      *int
 	HealthPercent *float64
 	HungerPercent *float64
 	SanityPercent *float64
 	Temperature   *float64
 	Moisture      *float64
+	Fields        FieldStates
 }
 
 type ListFilter struct {
@@ -91,10 +110,20 @@ type WorldTarget struct {
 }
 
 type RefreshResult struct {
-	WorldID string `json:"worldId"`
-	Count   int    `json:"count"`
-	Running bool   `json:"running"`
-	Message string `json:"message"`
+	WorldID    string          `json:"worldId"`
+	Count      int             `json:"count"`
+	Running    bool            `json:"running"`
+	Source     DataSource      `json:"source"`
+	Status     FreshnessStatus `json:"status"`
+	ObservedAt *time.Time      `json:"observedAt,omitempty"`
+	Warning    string          `json:"warning,omitempty"`
+	Message    string          `json:"message"`
+}
+
+type RefreshOutcome struct {
+	WorldID string
+	Result  RefreshResult
+	Err     error
 }
 
 type Action string

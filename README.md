@@ -66,6 +66,8 @@ CGO_ENABLED=0 go build -trimpath \
 
 - API 契约：`docs/openapi-v2.yaml`
 - 生产部署与回滚：`docs/deployment-and-rollback.md`
+- 现存设计与实现改造审计：`docs/project-architecture-audit.md`
+- `customcommands.lua` 与 Telemetry V2：`docs/customcommands.md`
 - Mod 兼容策略：`docs/mod-management.md`
 - 地图渲染器：`docs/map-renderer.md`
 - 产品矩阵架构：`docs/dst-platform-matrix.md`

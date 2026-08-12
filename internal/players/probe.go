@@ -1,32 +1,29 @@
 package players
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
-	"time"
+	"sync"
 
 	"dont/internal/rooms"
-
-	"github.com/google/uuid"
 )
 
-const (
-	probeTimeout = 6 * time.Second
-	probeLimit   = int64(2 * 1024 * 1024)
-)
+const nativeProbeLineLimit = 1024 * 1024
 
 type Probe interface {
 	Snapshot(context.Context, string, string) ([]Observation, error)
 }
 
-type ProbeSender interface {
-	Send(context.Context, string, string, string) error
+type HistoryProbe interface {
+	HistorySnapshot(context.Context, string, string) ([]Observation, error)
 }
 
 type ProbeCatalog interface {
@@ -37,21 +34,43 @@ type ProbeCatalog interface {
 type LogProbe struct {
 	saveRoot string
 	rooms    ProbeCatalog
-	sender   ProbeSender
+	mu       sync.Mutex
+	logs     map[string]*nativeLogState
+	known    map[string]map[string]Observation
 }
 
-func NewLogProbe(saveRoot string, roomCatalog ProbeCatalog, sender ProbeSender) (*LogProbe, error) {
-	if roomCatalog == nil || sender == nil {
-		return nil, errors.New("room catalog and probe sender are required")
+type nativeLogState struct {
+	identity os.FileInfo
+	position int64
+	pending  string
+	known    map[string]Observation
+	online   map[string]bool
+	adminSet map[string]bool
+	blocks   map[string]*historicalProbeBlock
+}
+
+func NewLogProbe(saveRoot string, roomCatalog ProbeCatalog) (*LogProbe, error) {
+	if roomCatalog == nil {
+		return nil, errors.New("room catalog is required")
 	}
 	root, err := filepath.Abs(strings.TrimSpace(saveRoot))
 	if err != nil || strings.TrimSpace(saveRoot) == "" {
 		return nil, errors.New("save root is required")
 	}
-	return &LogProbe{saveRoot: root, rooms: roomCatalog, sender: sender}, nil
+	return &LogProbe{
+		saveRoot: root, rooms: roomCatalog, logs: make(map[string]*nativeLogState), known: make(map[string]map[string]Observation),
+	}, nil
 }
 
 func (p *LogProbe) Snapshot(ctx context.Context, roomID, worldID string) ([]Observation, error) {
+	return p.nativeObservations(ctx, roomID, worldID, true)
+}
+
+func (p *LogProbe) HistorySnapshot(ctx context.Context, roomID, worldID string) ([]Observation, error) {
+	return p.nativeObservations(ctx, roomID, worldID, false)
+}
+
+func (p *LogProbe) nativeObservations(ctx context.Context, roomID, worldID string, onlineOnly bool) ([]Observation, error) {
 	room, err := p.rooms.Room(roomID)
 	if err != nil {
 		return nil, err
@@ -64,49 +83,55 @@ func (p *LogProbe) Snapshot(ctx context.Context, roomID, worldID string) ([]Obse
 	if err != nil {
 		return nil, err
 	}
-	offset, err := probeLogSize(logPath)
+	info, err := probeLogInfo(logPath)
 	if err != nil {
 		return nil, err
 	}
-	nonce := uuid.NewString()
-	if err := p.sender.Send(ctx, room.DirectoryName, world.DirectoryName, playerProbeScript(nonce)); err != nil {
-		return nil, err
+	if info == nil {
+		return []Observation{}, nil
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-	defer cancel()
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		observations, complete, readErr := readProbeResult(logPath, offset, nonce)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	state := p.logs[logPath]
+	if state == nil || state.identity == nil || !os.SameFile(state.identity, info) || info.Size() < state.position {
+		state = newNativeLogState(info)
+		p.logs[logPath] = state
+	}
+	if info.Size() > state.position {
+		position, pending, readErr := consumeNativeLog(ctx, logPath, state.position, info.Size(), state.pending, func(line string) {
+			p.applyNativeLine(room.ID, state, line)
+		})
 		if readErr != nil {
 			return nil, readErr
 		}
-		if complete {
-			return observations, nil
+		state.position, state.pending, state.identity = position, pending, info
+	}
+	ids := make([]string, 0, len(state.known))
+	if onlineOnly {
+		for id := range state.online {
+			ids = append(ids, id)
 		}
-		select {
-		case <-probeCtx.Done():
-			if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
-				return nil, ErrProbeTimedOut
-			}
-			return nil, probeCtx.Err()
-		case <-ticker.C:
+	} else {
+		for id := range state.known {
+			ids = append(ids, id)
 		}
 	}
-}
-
-func playerProbeScript(nonce string) string {
-	return `local __p="[DST-".."ADMIN-PLAYERS ` + nonce + `"; ` +
-		`local function __e(v) return (tostring(v or ""):gsub("([^%w%-%._])",function(c) return string.format("%%%02X",string.byte(c)) end)) end; ` +
-		`for _,v in ipairs(TheNet:GetClientTable() or {}) do local p=UserToPlayer(v.userid); ` +
-		`local h=-1 local u=-1 local s=-1 local t=-999 local m=-1; ` +
-		`if p then if p.components.health then h=p.components.health:GetPercent()*100 end; ` +
-		`if p.components.hunger then u=p.components.hunger:GetPercent()*100 end; ` +
-		`if p.components.sanity then s=p.components.sanity:GetPercent()*100 end; ` +
-		`if p.components.temperature then t=p.components.temperature.current end; ` +
-		`if p.components.moisture then m=p.components.moisture:GetMoisture() end end; ` +
-		`print(__p.." ITEM] "..table.concat({__e(v.userid),__e(v.name),__e(v.prefab),tostring(v.playerage or 0),v.admin and "1" or "0",__e(v.netid),tostring(v.performance or 0),tostring(h),tostring(u),tostring(s),tostring(t),tostring(m)},"\t")) end; ` +
-		`print(__p.." DONE]")`
+	sort.Strings(ids)
+	observations := make([]Observation, 0, len(ids))
+	for _, id := range ids {
+		observation := state.known[id]
+		if roomKnown := p.known[room.ID]; roomKnown != nil {
+			observation = mergeObservation(roomKnown[id], observation)
+		}
+		if state.adminSet[id] {
+			observation.Admin = state.known[id].Admin
+		}
+		if observation.Name == "" {
+			observation.Name = observation.ID
+		}
+		observations = append(observations, observation)
+	}
+	return observations, nil
 }
 
 func safeProbeLog(root, roomName, worldName string) (string, error) {
@@ -121,51 +146,115 @@ func safeProbeLog(root, roomName, worldName string) (string, error) {
 	return path, nil
 }
 
-func probeLogSize(path string) (int64, error) {
+func probeLogInfo(path string) (os.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
-		return 0, nil
+		return nil, nil
 	}
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return 0, errors.New("player probe log is unsafe")
+		return nil, errors.New("player probe log is unsafe")
 	}
-	return info.Size(), nil
+	return info, nil
 }
 
-func readProbeResult(path string, offset int64, nonce string) ([]Observation, bool, error) {
-	file, err := os.Open(path)
-	if os.IsNotExist(err) {
-		return []Observation{}, false, nil
+func newNativeLogState(info os.FileInfo) *nativeLogState {
+	return &nativeLogState{
+		identity: info, known: make(map[string]Observation), online: make(map[string]bool), adminSet: make(map[string]bool), blocks: make(map[string]*historicalProbeBlock),
 	}
+}
+
+func consumeNativeLog(ctx context.Context, path string, position, size int64, pending string, consume func(string)) (int64, string, error) {
+	file, err := os.Open(path)
 	if err != nil {
-		return nil, false, err
+		return position, pending, err
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, false, errors.New("player probe log is unsafe")
+	if _, err := file.Seek(position, io.SeekStart); err != nil {
+		return position, pending, err
 	}
-	if info.Size() < offset {
-		offset = 0
+	reader := bufio.NewReaderSize(io.LimitReader(file, size-position), 64*1024)
+	cursor := position
+	for {
+		if err := ctx.Err(); err != nil {
+			return position, pending, err
+		}
+		part, readErr := reader.ReadString('\n')
+		cursor += int64(len(part))
+		if len(pending)+len(part) > nativeProbeLineLimit {
+			return position, pending, errors.New("player source log line exceeds 1 MiB")
+		}
+		part = pending + part
+		pending = ""
+		if strings.HasSuffix(part, "\n") {
+			consume(strings.TrimSuffix(strings.TrimSuffix(part, "\n"), "\r"))
+		} else {
+			pending = part
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return position, pending, readErr
+		}
 	}
-	length := info.Size() - offset
-	if length > probeLimit {
-		return nil, false, errors.New("player probe output exceeds 2 MiB")
+	return cursor, pending, nil
+}
+
+func (p *LogProbe) applyNativeLine(roomID string, state *nativeLogState, line string) {
+	if observation, authenticated := parseAuthenticatedClient(line); authenticated {
+		state.known[observation.ID] = mergeObservation(state.known[observation.ID], observation)
+		state.online[observation.ID] = true
+		p.rememberObservation(roomID, observation)
+		return
 	}
-	if length == 0 {
-		return []Observation{}, false, nil
+	if observation, initialized := parseInitializedClient(line); initialized {
+		current := mergeObservation(state.known[observation.ID], observation)
+		current.Admin = observation.Admin
+		state.known[observation.ID] = current
+		state.online[observation.ID] = true
+		state.adminSet[observation.ID] = true
+		p.rememberInitializedObservation(roomID, observation)
+		return
 	}
-	if _, err := file.Seek(offset, io.SeekStart); err != nil {
-		return nil, false, err
+	if id, prefab, owned := parsePlayerOwnership(line); owned {
+		observation := state.known[id]
+		observation.ID = id
+		observation.Prefab = prefab
+		state.known[id] = observation
+		state.online[id] = true
+		p.rememberObservation(roomID, observation)
+		return
 	}
-	data, err := io.ReadAll(io.LimitReader(file, probeLimit+1))
-	if err != nil {
-		return nil, false, err
+	if id, disconnected := parseDisconnectedClient(line); disconnected {
+		delete(state.online, id)
+		return
 	}
-	return parseProbeOutput(string(data), nonce)
+	applyHistoricalProbeLine(state, line, func(observations []Observation) {
+		for _, observation := range observations {
+			state.known[observation.ID] = mergeObservation(state.known[observation.ID], observation)
+			p.rememberObservation(roomID, observation)
+		}
+	})
+}
+
+func (p *LogProbe) rememberObservation(roomID string, observation Observation) {
+	if observation.ID == "" {
+		return
+	}
+	if p.known[roomID] == nil {
+		p.known[roomID] = make(map[string]Observation)
+	}
+	p.known[roomID][observation.ID] = mergeObservation(p.known[roomID][observation.ID], observation)
+}
+
+func (p *LogProbe) rememberInitializedObservation(roomID string, observation Observation) {
+	p.rememberObservation(roomID, observation)
+	known := p.known[roomID][observation.ID]
+	known.Admin = observation.Admin
+	p.known[roomID][observation.ID] = known
 }
 
 func parseProbeOutput(output, nonce string) ([]Observation, bool, error) {
@@ -182,49 +271,17 @@ func parseProbeOutput(output, nonce string) ([]Observation, bool, error) {
 		if index < 0 {
 			continue
 		}
-		fields := strings.Split(strings.TrimSpace(line[index+len(itemMarker):]), "\t")
-		if len(fields) != 12 {
-			return nil, false, errors.New("player probe returned malformed fields")
+		observation, ignored, err := parseProbeObservation(line[index+len(itemMarker):], true)
+		if err != nil {
+			return nil, false, err
 		}
-		decoded := make([]string, 6)
-		for fieldIndex := 0; fieldIndex < 6; fieldIndex++ {
-			value, decodeErr := url.PathUnescape(fields[fieldIndex])
-			if decodeErr != nil {
-				return nil, false, errors.New("player probe returned invalid escaping")
-			}
-			decoded[fieldIndex] = value
+		if ignored {
+			continue
 		}
-		if !ValidID(decoded[0]) || seen[decoded[0]] || len([]rune(decoded[1])) > 256 || len([]rune(decoded[2])) > 128 {
+		if seen[observation.ID] {
 			return nil, false, errors.New("player probe returned invalid identity data")
 		}
-		seen[decoded[0]] = true
-		age, parseErr := strconv.Atoi(fields[3])
-		if parseErr != nil || age < 0 {
-			return nil, false, errors.New("player probe returned invalid age")
-		}
-		performance, parseErr := strconv.Atoi(fields[6])
-		if parseErr != nil {
-			return nil, false, errors.New("player probe returned invalid performance")
-		}
-		observation := Observation{
-			ID: decoded[0], Name: decoded[1], Prefab: decoded[2], Age: age, Admin: fields[4] == "1",
-			NetID: decoded[5], Performance: performance,
-		}
-		metrics := []*(*float64){&observation.HealthPercent, &observation.HungerPercent, &observation.SanityPercent, &observation.Temperature, &observation.Moisture}
-		for metricIndex, destination := range metrics {
-			value, valueErr := strconv.ParseFloat(fields[7+metricIndex], 64)
-			if valueErr != nil {
-				return nil, false, errors.New("player probe returned invalid metrics")
-			}
-			unavailable := value < 0
-			if metricIndex == 3 {
-				unavailable = value <= -999
-			}
-			if !unavailable {
-				metric := value
-				*destination = &metric
-			}
-		}
+		seen[observation.ID] = true
 		observations = append(observations, observation)
 		if len(observations) > 64 {
 			return nil, false, errors.New("player probe exceeds room player limit")
@@ -233,21 +290,260 @@ func parseProbeOutput(output, nonce string) ([]Observation, bool, error) {
 	return observations, complete, nil
 }
 
+type historicalProbeBlock struct {
+	observations []Observation
+	seen         map[string]bool
+	invalid      bool
+}
+
+func parseProbeHistory(output string) []Observation {
+	state := newNativeLogState(nil)
+	var latest []Observation
+	for _, line := range strings.Split(output, "\n") {
+		applyHistoricalProbeLine(state, line, func(observations []Observation) {
+			latest = append([]Observation(nil), observations...)
+		})
+	}
+	return latest
+}
+
+func applyHistoricalProbeLine(state *nativeLogState, line string, complete func([]Observation)) {
+	const marker = "[DST-ADMIN-PLAYERS "
+	index := strings.Index(line, marker)
+	if index < 0 {
+		return
+	}
+	remainder := line[index+len(marker):]
+	if itemEnd := strings.Index(remainder, " ITEM] "); itemEnd > 0 {
+		nonce := remainder[:itemEnd]
+		block := state.blocks[nonce]
+		if block == nil {
+			block = &historicalProbeBlock{seen: make(map[string]bool)}
+			state.blocks[nonce] = block
+		}
+		observation, ignored, err := parseProbeObservation(remainder[itemEnd+len(" ITEM] "):], false)
+		if err != nil {
+			block.invalid = true
+			return
+		}
+		if ignored || block.seen[observation.ID] {
+			return
+		}
+		block.seen[observation.ID] = true
+		block.observations = append(block.observations, observation)
+		if len(block.observations) > 64 {
+			block.invalid = true
+		}
+		return
+	}
+	if doneEnd := strings.Index(remainder, " DONE]"); doneEnd > 0 {
+		nonce := remainder[:doneEnd]
+		if block := state.blocks[nonce]; block != nil && !block.invalid && len(block.observations) > 0 {
+			complete(block.observations)
+		}
+		delete(state.blocks, nonce)
+	}
+}
+
+func parseAuthenticatedClient(line string) (Observation, bool) {
+	const marker = "Client authenticated: ("
+	start := strings.Index(line, marker)
+	if start < 0 {
+		return Observation{}, false
+	}
+	payload := line[start+len(marker):]
+	end := strings.Index(payload, ") ")
+	if end < 0 {
+		return Observation{}, false
+	}
+	id := strings.TrimSpace(payload[:end])
+	name := strings.TrimSpace(payload[end+2:])
+	if !ValidID(id) || name == "" || len([]rune(name)) > 256 {
+		return Observation{}, false
+	}
+	return Observation{ID: id, Name: name}, true
+}
+
+func parseInitializedClient(line string) (Observation, bool) {
+	if !strings.Contains(line, "[ClientObject] Initialized (authenticated)") {
+		return Observation{}, false
+	}
+	fields := strings.Fields(line)
+	observation := Observation{}
+	for _, field := range fields {
+		key, value, found := strings.Cut(field, "=")
+		if !found {
+			continue
+		}
+		switch key {
+		case "userid":
+			observation.ID = value
+		case "netid":
+			observation.NetID = value
+		case "admin":
+			observation.Admin = value == "1" || strings.EqualFold(value, "true")
+		}
+	}
+	if !ValidID(observation.ID) {
+		return Observation{}, false
+	}
+	return observation, true
+}
+
+func parsePlayerOwnership(line string) (string, string, bool) {
+	const marker = "User ID\t"
+	start := strings.Index(line, marker)
+	if start < 0 || !strings.Contains(line, "\tassigned ownership to entity\t") {
+		return "", "", false
+	}
+	payload := line[start+len(marker):]
+	idEnd := strings.IndexByte(payload, '\t')
+	entity := strings.LastIndex(payload, " - ")
+	if idEnd < 0 || entity < 0 {
+		return "", "", false
+	}
+	id := strings.TrimSpace(payload[:idEnd])
+	prefab := strings.TrimSpace(payload[entity+3:])
+	if !ValidID(id) || prefab == "" || len([]rune(prefab)) > 128 {
+		return "", "", false
+	}
+	return id, prefab, true
+}
+
+func parseDisconnectedClient(line string) (string, bool) {
+	const marker = "[Shard] ("
+	start := strings.Index(line, marker)
+	if start < 0 {
+		return "", false
+	}
+	payload := line[start+len(marker):]
+	end := strings.Index(payload, ") disconnected from ")
+	if end < 0 {
+		return "", false
+	}
+	id := strings.TrimSpace(payload[:end])
+	return id, ValidID(id)
+}
+
+func mergeObservation(existing, update Observation) Observation {
+	if existing.ID == "" {
+		existing.ID = update.ID
+	}
+	if update.Name != "" {
+		existing.Name = update.Name
+	}
+	if update.Prefab != "" {
+		existing.Prefab = update.Prefab
+	}
+	if update.NetID != "" {
+		existing.NetID = update.NetID
+	}
+	if update.Admin {
+		existing.Admin = true
+	}
+	if update.Age > 0 {
+		existing.Age = update.Age
+	}
+	if update.NetScore != nil {
+		existing.NetScore = update.NetScore
+	}
+	if update.HealthPercent != nil {
+		existing.HealthPercent = update.HealthPercent
+	}
+	if update.HungerPercent != nil {
+		existing.HungerPercent = update.HungerPercent
+	}
+	if update.SanityPercent != nil {
+		existing.SanityPercent = update.SanityPercent
+	}
+	if update.Temperature != nil {
+		existing.Temperature = update.Temperature
+	}
+	if update.Moisture != nil {
+		existing.Moisture = update.Moisture
+	}
+	if existing.Fields == nil && len(update.Fields) > 0 {
+		existing.Fields = make(FieldStates, len(update.Fields))
+	}
+	for field, state := range update.Fields {
+		existing.Fields[field] = state
+	}
+	return existing
+}
+
+func parseProbeObservation(payload string, captureNetScore bool) (Observation, bool, error) {
+	fields := strings.Split(strings.TrimSpace(payload), "\t")
+	if len(fields) != 12 {
+		return Observation{}, false, errors.New("player probe returned malformed fields")
+	}
+	decoded := make([]string, 6)
+	for fieldIndex := 0; fieldIndex < 6; fieldIndex++ {
+		value, err := url.PathUnescape(fields[fieldIndex])
+		if err != nil {
+			return Observation{}, false, errors.New("player probe returned invalid escaping")
+		}
+		decoded[fieldIndex] = value
+	}
+	if virtualHostObservation(decoded) {
+		return Observation{}, true, nil
+	}
+	if !ValidID(decoded[0]) || len([]rune(decoded[1])) > 256 || len([]rune(decoded[2])) > 128 {
+		return Observation{}, false, errors.New("player probe returned invalid identity data")
+	}
+	age, err := strconv.Atoi(fields[3])
+	if err != nil || age < 0 {
+		return Observation{}, false, errors.New("player probe returned invalid age")
+	}
+	netScore, err := strconv.Atoi(fields[6])
+	if err != nil {
+		return Observation{}, false, errors.New("player probe returned invalid network score")
+	}
+	observation := Observation{
+		ID: decoded[0], Name: decoded[1], Prefab: decoded[2], Age: age, Admin: fields[4] == "1", NetID: decoded[5],
+	}
+	if captureNetScore && netScore >= 0 {
+		observation.NetScore = &netScore
+	}
+	metrics := []*(*float64){&observation.HealthPercent, &observation.HungerPercent, &observation.SanityPercent, &observation.Temperature, &observation.Moisture}
+	for metricIndex, destination := range metrics {
+		value, err := strconv.ParseFloat(fields[7+metricIndex], 64)
+		if err != nil {
+			return Observation{}, false, errors.New("player probe returned invalid metrics")
+		}
+		unavailable := value < 0
+		if metricIndex == 3 {
+			unavailable = value <= -999
+		}
+		if !unavailable {
+			metric := value
+			*destination = &metric
+		}
+	}
+	return observation, false, nil
+}
+
+func virtualHostObservation(identity []string) bool {
+	return len(identity) >= 6 && identity[1] == "[Host]" && identity[2] == "" && identity[5] == ""
+}
+
 type MemoryProbe struct{}
 
 func (MemoryProbe) Snapshot(_ context.Context, _ string, worldID string) ([]Observation, error) {
 	value := func(number float64) *float64 { return &number }
 	if decoded, _ := rooms.DecodeID(worldID); strings.EqualFold(decoded, "Master") {
+		netScore := 0
 		return []Observation{{
-			ID: "KU_E2E_ONE", Name: "Willow", Prefab: "willow", Admin: true, Age: 42, NetID: "76561198000000001", Performance: 5,
+			ID: "KU_E2E_ONE", Name: "Willow", Prefab: "willow", Admin: true, Age: 42, NetID: "76561198000000001", NetScore: &netScore,
 			HealthPercent: value(92), HungerPercent: value(61), SanityPercent: value(74), Temperature: value(31), Moisture: value(8),
 		}}, nil
 	}
+	netScore := 1
 	return []Observation{{
-		ID: "KU_E2E_TWO", Name: "Wilson", Prefab: "wilson", Age: 18, NetID: "76561198000000002", Performance: 4,
+		ID: "KU_E2E_TWO", Name: "Wilson", Prefab: "wilson", Age: 18, NetID: "76561198000000002", NetScore: &netScore,
 		HealthPercent: value(80), HungerPercent: value(55), SanityPercent: value(88), Temperature: value(22), Moisture: value(0),
 	}}, nil
 }
 
 var _ Probe = (*LogProbe)(nil)
+var _ HistoryProbe = (*LogProbe)(nil)
 var _ Probe = MemoryProbe{}

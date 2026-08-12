@@ -22,19 +22,21 @@ func NewScheduler(backupService *Service, jobService *jobs.Service) *Scheduler {
 }
 
 func (s *Scheduler) Start(ctx context.Context) {
-	go func() {
-		_ = s.RunDue()
-		ticker := time.NewTicker(s.interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				_ = s.RunDue()
-			}
+	go s.Run(ctx)
+}
+
+func (s *Scheduler) Run(ctx context.Context) {
+	_ = s.RunDue()
+	ticker := time.NewTicker(s.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = s.RunDue()
 		}
-	}()
+	}
 }
 
 func (s *Scheduler) RunDue() error {

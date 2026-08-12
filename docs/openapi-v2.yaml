@@ -21,6 +21,7 @@ tags:
   - name: Configuration
   - name: Mods
   - name: Players
+  - name: Runtime
   - name: WorldState
   - name: Automation
   - name: Agents
@@ -424,6 +425,125 @@ paths:
           $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/runtime:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Runtime]
+      operationId: getRoomRuntime
+      summary: Inspect managed customcommands.lua installation and health for every shard
+      responses:
+        "200": { description: Per-shard runtime status, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeReportListEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /rooms/{roomId}/runtime/actions/install:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Runtime]
+      operationId: installRoomRuntime
+      summary: Idempotently install or upgrade the managed runtime in every shard
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Runtime installation results, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeStatusListEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/worlds/{worldId}/runtime/actions/install:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    post:
+      tags: [Runtime]
+      operationId: installWorldRuntime
+      summary: Idempotently install or upgrade the managed runtime in one shard
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Runtime installation result, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeStatusEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/worlds/{worldId}/runtime/backups:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    get:
+      tags: [Runtime]
+      operationId: listWorldRuntimeBackups
+      summary: List verified managed-runtime state backups for one shard
+      responses:
+        "200": { description: Runtime backups, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeBackupListEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /rooms/{roomId}/worlds/{worldId}/runtime/events:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    get:
+      tags: [Rooms]
+      operationId: getWorldRuntimeEvents
+      summary: Read the bounded recent customcommands runtime event batches
+      responses:
+        "200": { description: Recent runtime events, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeEventBatchEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /rooms/{roomId}/worlds/{worldId}/runtime/diagnostics/latest:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    get:
+      tags: [Rooms]
+      operationId: getLatestWorldRuntimeDiagnostic
+      summary: Read the latest bounded customcommands runtime diagnostic report
+      responses:
+        "200": { description: Latest runtime diagnostic report, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeDiagnosticEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /rooms/{roomId}/worlds/{worldId}/runtime/diagnostics:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    post:
+      tags: [Rooms]
+      operationId: captureWorldRuntimeDiagnostic
+      summary: Run one bounded runtime diagnostic and wait for its structured report
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DSTRuntimeDiagnosticInput" }
+      responses:
+        "200": { description: Completed runtime diagnostic report, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeDiagnosticEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/worlds/{worldId}/runtime/actions/rollback:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    post:
+      tags: [Runtime]
+      operationId: rollbackWorldRuntime
+      summary: Restore a verified runtime backup while the shard is stopped
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeRollbackInput" } } } }
+      responses:
+        "200": { description: Runtime rollback result, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeStatusEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/worlds/{worldId}/runtime:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    delete:
+      tags: [Runtime]
+      operationId: uninstallWorldRuntime
+      summary: Remove only DST Admin managed runtime content while the shard is stopped
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeConfirmationInput" } } } }
+      responses:
+        "200": { description: Runtime uninstall result, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeStatusEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/actions/{action}:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -807,6 +927,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "507":
+          description: Local storage cannot keep the upload safety headroom
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /save-imports/{importId}:
     parameters:
@@ -869,6 +994,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/JobEnvelope" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /save-imports/{importId}/actions/apply:
     parameters:
       - name: importId
@@ -1708,11 +1834,11 @@ paths:
     get:
       tags: [Jobs]
       operationId: streamJobEvents
-      summary: Replay and stream authenticated job events
+      summary: Stream authenticated job events from the current watermark or resume cursor
       parameters:
         - name: after
           in: query
-          description: Last persisted event ID already observed
+          description: Last persisted event ID observed by this browser session; omit on a fresh connection to start at the current watermark
           schema:
             type: integer
             format: int64
@@ -1725,7 +1851,7 @@ paths:
             minimum: 0
       responses:
         "200":
-          description: Server-sent event stream; each data field contains a JobEvent JSON object
+          description: Server-sent event stream; starts with job.cursor and persisted events contain JobEvent JSON
           content:
             text/event-stream:
               schema:
@@ -3226,6 +3352,223 @@ components:
           type: "null"
         meta:
           $ref: "#/components/schemas/Meta"
+    DSTRuntimeInstallState:
+      type: string
+      enum: [missing, installed, outdated, invalid]
+    DSTRuntimeHealthState:
+      type: string
+      enum: [ready, starting, stopped, degraded, unavailable]
+    DSTRuntimeStatus:
+      type: object
+      additionalProperties: false
+      required: [roomId, worldId, worldName, state]
+      properties:
+        roomId: { type: string }
+        worldId: { type: string }
+        worldName: { type: string }
+        state: { $ref: "#/components/schemas/DSTRuntimeInstallState" }
+        version: { type: string }
+        protocolVersion: { type: integer, minimum: 1 }
+        changed: { type: boolean }
+        backupPath: { type: string, description: Relative path below the shard directory }
+        message: { type: string }
+    DSTRuntimeHealth:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, producerVersion, producerInstanceId, sessionId, shardId, running, ready, writing, sequence, consecutiveFailures]
+      properties:
+        schemaVersion: { type: integer, minimum: 1 }
+        producerVersion: { type: string }
+        producerInstanceId: { type: string }
+        sessionId: { type: string }
+        shardId: { type: string }
+        running: { type: boolean }
+        ready: { type: boolean }
+        writing: { type: boolean }
+        sequence: { type: integer, format: int64, minimum: 0 }
+        lastCapturedAtUnix: { type: integer, format: int64 }
+        lastWrittenAtUnix: { type: integer, format: int64 }
+        lastDurationMilliseconds: { type: number, minimum: 0 }
+        lastError: { type: string }
+        consecutiveFailures: { type: integer, minimum: 0 }
+        modules:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/DSTRuntimeModuleHealth" }
+
+    DSTRuntimeModuleHealth:
+      type: object
+      additionalProperties: false
+      required: [running, ready]
+      properties:
+        running: { type: boolean }
+        ready: { type: boolean }
+        busy: { type: boolean }
+        sequence: { type: integer, format: int64, minimum: 0 }
+        lastError: { type: string, maxLength: 1024 }
+
+    DSTRuntimeEvent:
+      type: object
+      additionalProperties: false
+      required: [sequence, kind, occurredAtUnix, fields]
+      properties:
+        sequence: { type: integer, format: int64, minimum: 1 }
+        kind:
+          type: string
+          enum: [player.joined, player.left, world.save, world.reset, world.shutdown, world.cycles, world.phase, world.season, world.rain]
+        occurredAtUnix: { type: integer, format: int64, minimum: 1 }
+        fields: { type: object, additionalProperties: true }
+
+    DSTRuntimeEventBatch:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, producerVersion, producerInstanceId, sessionId, shardId, firstSequence, lastSequence, events]
+      properties:
+        schemaVersion: { type: integer, enum: [1] }
+        producerVersion: { type: string }
+        producerInstanceId: { type: string }
+        sessionId: { type: string }
+        shardId: { type: string }
+        firstSequence: { type: integer, format: int64, minimum: 1 }
+        lastSequence: { type: integer, format: int64, minimum: 1 }
+        events: { type: array, maxItems: 256, items: { $ref: "#/components/schemas/DSTRuntimeEvent" } }
+
+    DSTRuntimeEventBatchEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/DSTRuntimeEventBatch" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+
+    DSTRuntimeDiagnosticProfile:
+      type: string
+      enum: [summary, prefab, performance]
+
+    DSTRuntimeDiagnosticInput:
+      type: object
+      additionalProperties: false
+      required: [profile]
+      properties:
+        profile: { $ref: "#/components/schemas/DSTRuntimeDiagnosticProfile" }
+        prefab: { type: string, pattern: "^[a-z0-9_]{1,80}$" }
+        durationSeconds: { type: integer, minimum: 1, maximum: 5 }
+        sampleLimit: { type: integer, minimum: 0, maximum: 50 }
+
+    DSTRuntimeDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, producerVersion, producerInstanceId, sessionId, shardId, sequence, requestId, profile, ok, code, message, result, completedAtUnix]
+      properties:
+        schemaVersion: { type: integer, enum: [1] }
+        producerVersion: { type: string }
+        producerInstanceId: { type: string }
+        sessionId: { type: string }
+        shardId: { type: string }
+        sequence: { type: integer, format: int64, minimum: 1 }
+        requestId: { type: string }
+        profile: { $ref: "#/components/schemas/DSTRuntimeDiagnosticProfile" }
+        ok: { type: boolean }
+        code: { type: string }
+        message: { type: string }
+        result: { type: object, additionalProperties: true }
+        completedAtUnix: { type: integer, format: int64, minimum: 1 }
+
+    DSTRuntimeDiagnosticEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/DSTRuntimeDiagnostic" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    DSTRuntimeReport:
+      type: object
+      additionalProperties: false
+      required: [roomId, worldId, worldName, state, processRunning, healthState]
+      properties:
+        roomId: { type: string }
+        worldId: { type: string }
+        worldName: { type: string }
+        state: { $ref: "#/components/schemas/DSTRuntimeInstallState" }
+        version: { type: string }
+        protocolVersion: { type: integer, minimum: 1 }
+        changed: { type: boolean }
+        backupPath: { type: string }
+        message: { type: string }
+        processRunning: { type: boolean }
+        healthState: { $ref: "#/components/schemas/DSTRuntimeHealthState" }
+        health: { $ref: "#/components/schemas/DSTRuntimeHealth" }
+        healthMessage: { type: string }
+    DSTRuntimeStatusEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/DSTRuntimeStatus" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    DSTRuntimeStatusList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/DSTRuntimeStatus" } }
+        total: { type: integer, minimum: 0 }
+    DSTRuntimeStatusListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/DSTRuntimeStatusList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    DSTRuntimeReportList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/DSTRuntimeReport" } }
+        total: { type: integer, minimum: 0 }
+    DSTRuntimeReportListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/DSTRuntimeReportList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    DSTRuntimeBackup:
+      type: object
+      additionalProperties: false
+      required: [id, worldId, createdAt, reason]
+      properties:
+        id: { type: string, pattern: '^state-[0-9]{8}T[0-9]{6}\.[0-9]{9}Z-[0-9a-f]{32}$' }
+        worldId: { type: string }
+        createdAt: { type: string, format: date-time }
+        reason: { type: string, enum: [before-install, before-uninstall, before-rollback] }
+    DSTRuntimeBackupList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/DSTRuntimeBackup" } }
+        total: { type: integer, minimum: 0 }
+    DSTRuntimeBackupListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/DSTRuntimeBackupList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    DSTRuntimeConfirmationInput:
+      type: object
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation: { type: string, description: Must exactly equal the room name }
+    DSTRuntimeRollbackInput:
+      type: object
+      additionalProperties: false
+      required: [confirmation, backupId]
+      properties:
+        confirmation: { type: string, description: Must exactly equal the room name }
+        backupId: { type: string, pattern: '^state-[0-9]{8}T[0-9]{6}\.[0-9]{9}Z-[0-9a-f]{32}$' }
     LogLine:
       type: object
       additionalProperties: false
@@ -4766,7 +5109,7 @@ components:
     Player:
       type: object
       additionalProperties: false
-      required: [id, roomId, worldId, worldName, name, online, banned, admin, age, performance, firstSeenAt, lastSeenAt, statusChangedAt, lastRefreshedAt]
+      required: [id, roomId, worldId, worldName, name, online, banned, admin, age, firstSeenAt, lastSeenAt, statusChangedAt, lastRefreshedAt, fields]
       properties:
         id: { type: string, pattern: '^[A-Za-z0-9_-]{1,128}$' }
         roomId: { type: string }
@@ -4782,7 +5125,8 @@ components:
         admin: { type: boolean }
         age: { type: integer, minimum: 0 }
         netId: { type: string }
-        performance: { type: integer }
+        netScore: { type: integer, minimum: 0 }
+        performance: { type: integer, deprecated: true, description: Legacy field retained for read compatibility; use netScore }
         healthPercent: { type: number }
         hungerPercent: { type: number }
         sanityPercent: { type: number }
@@ -4792,6 +5136,23 @@ components:
         lastSeenAt: { type: string, format: date-time }
         statusChangedAt: { type: string, format: date-time }
         lastRefreshedAt: { type: string, format: date-time }
+        fields:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/PlayerFieldState" }
+    PlayerDataSource:
+      type: string
+      enum: [customcommands, console-fallback, native-log]
+    PlayerFreshnessStatus:
+      type: string
+      enum: [live, stale, unavailable]
+    PlayerFieldState:
+      type: object
+      additionalProperties: false
+      required: [source, status]
+      properties:
+        source: { $ref: "#/components/schemas/PlayerDataSource" }
+        observedAt: { type: string, format: date-time }
+        status: { $ref: "#/components/schemas/PlayerFreshnessStatus" }
     PlayerEnvelope:
       type: object
       required: [data, error, meta]
@@ -5522,10 +5883,23 @@ components:
         commit: { type: string }
         buildTime: { type: string }
         dirty: { type: boolean }
+    SystemDatabaseStatus:
+      type: object
+      additionalProperties: false
+      required: [available, driver, journalMode, busyTimeoutMilliseconds, foreignKeys, maxOpenConnections, migrationVersion]
+      properties:
+        available: { type: boolean }
+        error: { type: string }
+        driver: { type: string }
+        journalMode: { type: string, enum: [wal, memory] }
+        busyTimeoutMilliseconds: { type: integer, minimum: 0 }
+        foreignKeys: { type: boolean }
+        maxOpenConnections: { type: integer, minimum: 0 }
+        migrationVersion: { type: string }
     SystemStatus:
       type: object
       additionalProperties: false
-      required: [observedAt, application, host, cpu, memory, disk, process, runtime, warnings]
+      required: [observedAt, application, host, cpu, memory, disk, process, runtime, database, warnings]
       properties:
         observedAt: { type: string, format: date-time }
         application: { $ref: "#/components/schemas/ApplicationBuildInfo" }
@@ -5535,6 +5909,7 @@ components:
         disk: { $ref: "#/components/schemas/SystemDiskStatus" }
         process: { $ref: "#/components/schemas/SystemProcessStatus" }
         runtime: { $ref: "#/components/schemas/SystemRuntimeStatus" }
+        database: { $ref: "#/components/schemas/SystemDatabaseStatus" }
         warnings: { type: array, items: { type: string } }
     SystemStatusEnvelope:
       type: object

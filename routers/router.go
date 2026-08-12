@@ -19,6 +19,7 @@ import (
 	"dont/internal/configuration"
 	consoleapi "dont/internal/console"
 	"dont/internal/containers"
+	"dont/internal/dstruntime"
 	dstinstall "dont/internal/dstserver"
 	"dont/internal/gameupdate"
 	"dont/internal/httpapi"
@@ -54,11 +55,36 @@ var testAdapterEnvironmentVariables = []string{
 	"DST_ADMIN_TEST_MAP",
 }
 
-// InitRouter 初始化路由
+// InitRouter builds HTTP routes without starting process-scoped background tasks.
 func InitRouter() (*gin.Engine, error) {
+	application, err := initApplication(false)
+	if err != nil {
+		return nil, err
+	}
+	return application.Router(), nil
+}
+
+// InitApplication builds the production application and its managed lifecycle.
+func InitApplication() (*Application, error) {
+	return initApplication(true)
+}
+
+func initApplication(manageBackground bool) (*Application, error) {
 	if err := validateTestAdapters(); err != nil {
 		return nil, err
 	}
+	hooks := applicationHooks{}
+	backgroundEnabled := manageBackground && os.Getenv("DST_ADMIN_ENV") != "test"
+	_, databaseOpened, err := models.OpenConfigured()
+	if err != nil {
+		return nil, err
+	}
+	completed := false
+	defer func() {
+		if !completed && databaseOpened && manageBackground {
+			_ = models.CloseDB()
+		}
+	}()
 	tablePrefix := setting.Cfg.Section("database").Key("TABLE_PREFIX").String()
 	authService, err := authn.NewServiceWithTablePrefix(models.DB(), tablePrefix)
 	if err != nil {
@@ -119,6 +145,10 @@ func InitRouter() (*gin.Engine, error) {
 		return nil, err
 	}
 	roomService := rooms.NewService(roomCatalog, roomStore)
+	runtimeManager, err := dstruntime.NewManager(savePath, roomService)
+	if err != nil {
+		return nil, err
+	}
 	jobStore := jobs.NewStore(models.DB(), tablePrefix)
 	if err := jobStore.Migrate(); err != nil {
 		return nil, err
@@ -126,6 +156,14 @@ func InitRouter() (*gin.Engine, error) {
 	jobService, err := jobs.NewService(jobStore, jobs.NewBroker())
 	if err != nil {
 		return nil, err
+	}
+	if _, err := jobService.Prune(jobs.DefaultRetentionPolicy); err != nil {
+		return nil, fmt.Errorf("prune retained jobs: %w", err)
+	}
+	if backgroundEnabled {
+		hooks.workers = append(hooks.workers, func(ctx context.Context) {
+			jobService.RunRetention(ctx, 24*time.Hour, jobs.DefaultRetentionPolicy)
+		})
 	}
 	agentStore := agentservice.NewStore(models.DB(), tablePrefix)
 	if err := agentStore.Migrate(); err != nil {
@@ -148,8 +186,10 @@ func InitRouter() (*gin.Engine, error) {
 		LuaBinary: luaBinary, LuaFallbackPath: luaFallbackPath, ServerMode: serverMode,
 	})
 	agentHandler := httpapi.NewAgentHandler(agentService)
-	if os.Getenv("DST_ADMIN_ENV") != "test" {
-		agentService.StartWatcher(context.Background(), 5*time.Second, jobService.Notify)
+	if backgroundEnabled {
+		hooks.workers = append(hooks.workers, func(ctx context.Context) {
+			agentService.Watch(ctx, 5*time.Second, jobService.Notify)
+		})
 	}
 	var systemStatusProvider systemstatus.Provider = systemstatus.NewLocalProvider("")
 	if driver := os.Getenv("DST_ADMIN_TEST_SYSTEM_STATUS"); driver != "" {
@@ -158,7 +198,16 @@ func InitRouter() (*gin.Engine, error) {
 		}
 		systemStatusProvider = systemstatus.NewMemoryProvider()
 	}
-	systemStatusHandler := httpapi.NewSystemStatusHandler(systemstatus.NewService(systemStatusProvider))
+	systemStatusService := systemstatus.NewService(systemStatusProvider)
+	systemStatusService.SetDatabaseProvider(func() (systemstatus.DatabaseStatus, error) {
+		status, statusErr := models.Status()
+		return systemstatus.DatabaseStatus{
+			Driver: status.Driver, JournalMode: status.JournalMode,
+			BusyTimeoutMilliseconds: status.BusyTimeoutMilliseconds, ForeignKeys: status.ForeignKeys,
+			MaxOpenConnections: status.MaxOpenConnections, MigrationVersion: status.MigrationVersion,
+		}, statusErr
+	})
+	systemStatusHandler := httpapi.NewSystemStatusHandler(systemStatusService)
 	var systemSettingsRepository systemsettings.Repository = systemsettings.NewFileRepository(setting.ConfigPath)
 	if driver := os.Getenv("DST_ADMIN_TEST_SYSTEM_SETTINGS"); driver != "" {
 		if os.Getenv("DST_ADMIN_ENV") != "test" || driver != "memory" {
@@ -217,8 +266,16 @@ func InitRouter() (*gin.Engine, error) {
 		}
 		shardControl = shards.NewMemoryControlWithLogRoot(savePath)
 	}
+	runtimeBridge, err := dstruntime.NewBridge(runtimeManager, shardControl, shardControl)
+	if err != nil {
+		return nil, err
+	}
 	shardOperations := shards.NewOperations(roomService, shardControl)
+	if os.Getenv("DST_ADMIN_ENV") != "test" {
+		shardOperations = shards.NewOperations(roomService, shardControl, runtimeManager)
+	}
 	roomHandler := httpapi.NewRoomHandler(roomService, shardOperations, jobService)
+	runtimeHandler := httpapi.NewDSTRuntimeHandler(runtimeManager, roomService, shardControl, runtimeBridge)
 	jobHandler := httpapi.NewJobHandler(jobService)
 	logService, err := logstream.NewService(savePath, roomService)
 	if err != nil {
@@ -280,13 +337,6 @@ func InitRouter() (*gin.Engine, error) {
 		return nil, err
 	}
 	modHandler := httpapi.NewModHandler(modService, jobService)
-	saveImportService, err := saveimport.NewService(saveimport.Config{
-		SaveRoot: savePath, ImportRoot: filepath.Join(backupPath, ".imports"), WorkshopRoot: workshopContentPath,
-	}, saveImportStore, roomService, shardControl, backupService, modService)
-	if err != nil {
-		return nil, err
-	}
-	saveImportHandler := httpapi.NewSaveImportHandler(saveImportService, jobService)
 	playerStore := playerapi.NewStore(models.DB(), tablePrefix)
 	if err := playerStore.Migrate(); err != nil {
 		return nil, err
@@ -298,17 +348,27 @@ func InitRouter() (*gin.Engine, error) {
 		}
 		playerProbe = playerapi.MemoryProbe{}
 	} else {
-		playerProbe, err = playerapi.NewLogProbe(savePath, roomService, shardControl)
+		nativeProbe, probeErr := playerapi.NewLogProbe(savePath, roomService)
+		if probeErr != nil {
+			return nil, probeErr
+		}
+		fallbackProbe, probeErr := playerapi.NewConsoleProbe(savePath, roomService, shardControl)
+		if probeErr != nil {
+			return nil, probeErr
+		}
+		playerProbe, err = playerapi.NewTelemetryProbe(nativeProbe, runtimeManager, fallbackProbe)
 		if err != nil {
 			return nil, err
 		}
 	}
-	playerService, err := playerapi.NewService(roomService, shardControl, shardControl, configurationService, playerStore, playerProbe)
+	playerService, err := playerapi.NewService(roomService, shardControl, shardControl, configurationService, playerStore, playerProbe, runtimeBridge)
 	if err != nil {
 		return nil, err
 	}
-	if os.Getenv("DST_ADMIN_ENV") != "test" {
-		playerService.StartBanExpiryScheduler(context.Background(), time.Minute)
+	if backgroundEnabled {
+		hooks.workers = append(hooks.workers, func(ctx context.Context) {
+			playerService.RunBanExpiryScheduler(ctx, time.Minute)
+		})
 	}
 	playerHandler := httpapi.NewPlayerHandler(playerService, jobService)
 	worldStateStore := worldstate.NewStore(models.DB(), tablePrefix)
@@ -354,15 +414,75 @@ func InitRouter() (*gin.Engine, error) {
 			log.Printf("[AutomationMigration] skipped legacy task id=%d name=%q: %s", skipped.ID, skipped.Name, skipped.Reason)
 		}
 	}
-	automationScheduler := automation.NewScheduler(automationStore, automationService)
-	if os.Getenv("DST_ADMIN_ENV") != "test" {
-		if err := automationScheduler.Start(context.Background()); err != nil {
-			return nil, err
+	managedRooms, err := roomService.List()
+	if err != nil {
+		return nil, err
+	}
+	for _, room := range managedRooms {
+		if !room.Managed {
+			continue
+		}
+		if _, changed, ensureErr := automationService.EnsureDefaultPlayerRefresh(room.ID); ensureErr != nil {
+			return nil, ensureErr
+		} else if changed {
+			log.Printf("[AutomationDefaults] ensured player refresh for room=%s", room.ID)
+		}
+		if backgroundEnabled {
+			if _, installErr := runtimeManager.InstallRoom(context.Background(), room.ID); installErr != nil {
+				log.Printf("[DSTRuntime] initialize room=%s: %v", room.ID, installErr)
+			}
 		}
 	}
+	automationScheduler := automation.NewScheduler(automationStore, automationService)
+	if backgroundEnabled {
+		hooks.start = append(hooks.start, automationScheduler.Start)
+		hooks.stop = append(hooks.stop, automationScheduler.Close)
+	}
+	roomService.SetManagedRoomLifecycle(func(roomID string) {
+		_, changed, ensureErr := automationService.EnsureDefaultPlayerRefresh(roomID)
+		if ensureErr != nil {
+			log.Printf("[RoomLifecycle] initialize automation room=%s: %v", roomID, ensureErr)
+			return
+		}
+		if changed && backgroundEnabled {
+			if reloadErr := automationScheduler.Reload(); reloadErr != nil {
+				log.Printf("[RoomLifecycle] reload automation after managing room=%s: %v", roomID, reloadErr)
+			}
+		}
+	}, func(roomID string) {
+		if cleanupErr := automationService.DeleteRoomTasks(roomID); cleanupErr != nil {
+			log.Printf("[RoomLifecycle] finalize automation room=%s: %v", roomID, cleanupErr)
+			return
+		}
+		if backgroundEnabled {
+			if reloadErr := automationScheduler.Reload(); reloadErr != nil {
+				log.Printf("[RoomLifecycle] reload automation after unmanaging room=%s: %v", roomID, reloadErr)
+			}
+		}
+	})
+	if backgroundEnabled {
+		roomService.AddManagedRoomLifecycle(func(roomID string) {
+			if _, installErr := runtimeManager.InstallRoom(context.Background(), roomID); installErr != nil {
+				log.Printf("[DSTRuntime] initialize managed room=%s: %v", roomID, installErr)
+			}
+		}, nil)
+		roomService.AddWorldLifecycle(func(roomID, worldID string) {
+			if _, installErr := runtimeManager.InstallWorld(context.Background(), roomID, worldID); installErr != nil {
+				log.Printf("[DSTRuntime] initialize world room=%s world=%s: %v", roomID, worldID, installErr)
+			}
+		})
+	}
+	saveImportService, err := saveimport.NewService(saveimport.Config{
+		SaveRoot: savePath, ImportRoot: filepath.Join(backupPath, ".imports"), WorkshopRoot: workshopContentPath,
+	}, saveImportStore, roomService, shardControl, backupService, modService)
+	if err != nil {
+		return nil, err
+	}
+	saveImportHandler := httpapi.NewSaveImportHandler(saveImportService, jobService)
 	automationHandler := httpapi.NewAutomationHandler(automationService, automationScheduler)
-	if os.Getenv("DST_ADMIN_ENV") != "test" {
-		backupapi.NewScheduler(backupService, jobService).Start(context.Background())
+	if backgroundEnabled {
+		backupScheduler := backupapi.NewScheduler(backupService, jobService)
+		hooks.workers = append(hooks.workers, backupScheduler.Run)
 	}
 	gameUpdateStore := gameupdate.NewStore(models.DB(), tablePrefix)
 	if err := gameUpdateStore.Migrate(); err != nil {
@@ -405,6 +525,9 @@ func InitRouter() (*gin.Engine, error) {
 		return nil, err
 	}
 	worldMapHandler := httpapi.NewWorldMapHandler(worldMapService, jobService)
+	if err := models.RecordMigration(models.CurrentMigrationVersion); err != nil {
+		return nil, err
+	}
 	capabilityConfig := capabilities.Config{
 		SavePath: savePath, BackupPath: backupPath, ServerPath: serverPath, ServerMode: serverMode, SteamCMDPath: steamCMDPath,
 		LuaBinary: luaBinary, PythonBinary: pythonBinary, LuaFallbackPath: luaFallbackPath,
@@ -446,6 +569,7 @@ func InitRouter() (*gin.Engine, error) {
 			})
 		}))
 		roomHandler.Register(v2)
+		runtimeHandler.Register(v2)
 		jobHandler.Register(v2)
 		logHandler.Register(v2)
 		structuredLogHandler.Register(v2)
@@ -465,7 +589,11 @@ func InitRouter() (*gin.Engine, error) {
 		worldMapHandler.Register(v2)
 	}
 
-	return router, nil
+	if manageBackground {
+		hooks.final = append(hooks.final, models.CloseDB)
+	}
+	completed = true
+	return newApplication(router, hooks), nil
 }
 
 func resolveWorkshopPaths(downloadPath, contentPath, appID string) (string, string, error) {

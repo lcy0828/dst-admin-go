@@ -16,6 +16,9 @@ import (
 
 func TestRouterPublishesOnlyV2AndMigratesAdmin(t *testing.T) {
 	configureRouterTestEnvironment(t)
+	if _, _, err := models.OpenConfigured(); err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
 	db := models.DB()
 	if err := db.DropTableIfExists("dont_admin_session", "dont_auth").Error; err != nil {
 		t.Fatalf("reset auth tables: %v", err)

@@ -1,6 +1,7 @@
 package players
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -19,12 +20,14 @@ type playerRecord struct {
 	Admin           bool   `gorm:"not null"`
 	Age             int
 	NetID           string `gorm:"type:varchar(128)"`
-	Performance     int
+	NetScore        *int
+	Performance     *int
 	HealthPercent   *float64
 	HungerPercent   *float64
 	SanityPercent   *float64
 	Temperature     *float64
 	Moisture        *float64
+	FieldStates     string    `gorm:"type:text"`
 	FirstSeenAt     time.Time `gorm:"not null"`
 	LastSeenAt      time.Time `gorm:"not null;index"`
 	StatusChangedAt time.Time `gorm:"not null"`
@@ -64,6 +67,29 @@ func (s *Store) Migrate() error {
 }
 
 func (s *Store) ReplaceWorldSnapshot(roomID, worldID, worldName string, observations []Observation, observedAt time.Time) error {
+	return s.ReplaceRoomSnapshots(roomID, []worldSnapshot{{
+		WorldID: worldID, WorldName: worldName, Observations: observations, ObservedAt: observedAt,
+	}})
+}
+
+type worldSnapshot struct {
+	WorldID      string
+	WorldName    string
+	Observations []Observation
+	History      []Observation
+	ObservedAt   time.Time
+	Source       DataSource
+}
+
+type snapshotCandidate struct {
+	worldSnapshot
+	observation Observation
+}
+
+func (s *Store) ReplaceRoomSnapshots(roomID string, snapshots []worldSnapshot) error {
+	if len(snapshots) == 0 {
+		return nil
+	}
 	tx := s.db.Begin()
 	if tx.Error != nil {
 		return tx.Error
@@ -72,59 +98,190 @@ func (s *Store) ReplaceWorldSnapshot(roomID, worldID, worldName string, observat
 		tx.Rollback()
 		return err
 	}
-	seen := make(map[string]bool, len(observations))
-	for _, observation := range observations {
-		seen[observation.ID] = true
-		var existing playerRecord
-		result := tx.Table(s.table).Where("room_id = ? AND user_id = ?", roomID, observation.ID).First(&existing)
-		if result.Error != nil && !gorm.IsRecordNotFoundError(result.Error) {
-			return rollback(result.Error)
-		}
-		if gorm.IsRecordNotFoundError(result.Error) {
-			record := playerRecord{
-				RoomID: roomID, UserID: observation.ID, WorldID: worldID, WorldName: worldName,
-				Name: observation.Name, Prefab: observation.Prefab, Online: true, Admin: observation.Admin,
-				Age: observation.Age, NetID: observation.NetID, Performance: observation.Performance,
-				HealthPercent: observation.HealthPercent, HungerPercent: observation.HungerPercent,
-				SanityPercent: observation.SanityPercent, Temperature: observation.Temperature, Moisture: observation.Moisture,
-				FirstSeenAt: observedAt, LastSeenAt: observedAt, StatusChangedAt: observedAt, LastRefreshedAt: observedAt,
+	var current []playerRecord
+	if err := tx.Table(s.table).Where("room_id = ?", roomID).Find(&current).Error; err != nil {
+		return rollback(err)
+	}
+	existingByID := make(map[string]playerRecord, len(current))
+	for _, record := range current {
+		existingByID[record.UserID] = record
+	}
+	winners := make(map[string]snapshotCandidate)
+	for _, snapshot := range snapshots {
+		for _, observation := range snapshot.Observations {
+			candidate := snapshotCandidate{worldSnapshot: snapshot, observation: observation}
+			winner, exists := winners[observation.ID]
+			if !exists || snapshotCandidateWins(candidate, winner, existingByID[observation.ID]) {
+				winners[observation.ID] = candidate
 			}
-			if err := tx.Table(s.table).Create(&record).Error; err != nil {
-				return rollback(err)
-			}
-			continue
 		}
-		statusChanged := existing.StatusChangedAt
-		if !existing.Online || existing.WorldID != worldID {
-			statusChanged = observedAt
-		}
-		updates := map[string]interface{}{
-			"world_id": worldID, "world_name": worldName, "name": observation.Name, "prefab": observation.Prefab,
-			"online": true, "admin": observation.Admin, "age": observation.Age, "net_id": observation.NetID,
-			"performance": observation.Performance, "health_percent": observation.HealthPercent,
-			"hunger_percent": observation.HungerPercent, "sanity_percent": observation.SanityPercent,
-			"temperature": observation.Temperature, "moisture": observation.Moisture,
-			"last_seen_at": observedAt, "last_refreshed_at": observedAt, "status_changed_at": statusChanged,
-		}
-		if err := tx.Table(s.table).Where("room_id = ? AND user_id = ?", roomID, observation.ID).Updates(updates).Error; err != nil {
+	}
+	for _, candidate := range winners {
+		if err := s.upsertSnapshotPlayer(tx, roomID, candidate); err != nil {
 			return rollback(err)
 		}
 	}
-	var online []playerRecord
-	if err := tx.Table(s.table).Where("room_id = ? AND world_id = ? AND online = ?", roomID, worldID, true).Find(&online).Error; err != nil {
-		return rollback(err)
-	}
-	for _, record := range online {
-		if seen[record.UserID] {
-			continue
+	for _, snapshot := range snapshots {
+		if err := s.markMissingSnapshotPlayersOffline(tx, roomID, snapshot, winners); err != nil {
+			return rollback(err)
 		}
-		if err := tx.Table(s.table).Where("room_id = ? AND user_id = ?", roomID, record.UserID).Updates(map[string]interface{}{
-			"online": false, "status_changed_at": observedAt, "last_refreshed_at": observedAt,
-		}).Error; err != nil {
+		if _, err := s.mergeWorldHistoryTx(tx, roomID, snapshot.WorldID, snapshot.WorldName, snapshot.History, snapshot.ObservedAt); err != nil {
 			return rollback(err)
 		}
 	}
 	return tx.Commit().Error
+}
+
+func snapshotCandidateWins(candidate, current snapshotCandidate, existing playerRecord) bool {
+	if !candidate.ObservedAt.Equal(current.ObservedAt) {
+		return candidate.ObservedAt.After(current.ObservedAt)
+	}
+	if existing.Online {
+		if candidate.WorldID == existing.WorldID && current.WorldID != existing.WorldID {
+			return true
+		}
+		if current.WorldID == existing.WorldID && candidate.WorldID != existing.WorldID {
+			return false
+		}
+	}
+	return candidate.WorldID < current.WorldID
+}
+
+func (s *Store) upsertSnapshotPlayer(tx *gorm.DB, roomID string, candidate snapshotCandidate) error {
+	observation := candidate.observation
+	var existing playerRecord
+	result := tx.Table(s.table).Where("room_id = ? AND user_id = ?", roomID, observation.ID).First(&existing)
+	if result.Error != nil && !gorm.IsRecordNotFoundError(result.Error) {
+		return result.Error
+	}
+	if gorm.IsRecordNotFoundError(result.Error) {
+		fieldStates, err := encodeFieldStates(observation.Fields)
+		if err != nil {
+			return err
+		}
+		record := playerRecord{
+			RoomID: roomID, UserID: observation.ID, WorldID: candidate.WorldID, WorldName: candidate.WorldName,
+			Name: observation.Name, Prefab: observation.Prefab, Online: true, Admin: observation.Admin,
+			Age: observation.Age, NetID: observation.NetID, NetScore: observation.NetScore,
+			HealthPercent: observation.HealthPercent, HungerPercent: observation.HungerPercent,
+			SanityPercent: observation.SanityPercent, Temperature: observation.Temperature, Moisture: observation.Moisture,
+			FieldStates: fieldStates,
+			FirstSeenAt: candidate.ObservedAt, LastSeenAt: candidate.ObservedAt, StatusChangedAt: candidate.ObservedAt, LastRefreshedAt: candidate.ObservedAt,
+		}
+		return tx.Table(s.table).Create(&record).Error
+	}
+	statusChanged := existing.StatusChangedAt
+	if !existing.Online || existing.WorldID != candidate.WorldID {
+		statusChanged = candidate.ObservedAt
+	}
+	fieldStates := decodeFieldStates(existing.FieldStates)
+	mergeStoredFieldStates(fieldStates, observation.Fields, existing, observation)
+	encodedFieldStates, err := encodeFieldStates(fieldStates)
+	if err != nil {
+		return err
+	}
+	updates := map[string]interface{}{
+		"world_id": candidate.WorldID, "world_name": candidate.WorldName, "name": observation.Name,
+		"online": true, "admin": observation.Admin, "age": observation.Age, "net_id": observation.NetID,
+		"performance": nil, "field_states": encodedFieldStates,
+		"last_seen_at": candidate.ObservedAt, "last_refreshed_at": candidate.ObservedAt, "status_changed_at": statusChanged,
+	}
+	setObservedMetric(updates, "net_score", observation.NetScore)
+	setObservedMetric(updates, "health_percent", observation.HealthPercent)
+	setObservedMetric(updates, "hunger_percent", observation.HungerPercent)
+	setObservedMetric(updates, "sanity_percent", observation.SanityPercent)
+	setObservedMetric(updates, "temperature", observation.Temperature)
+	setObservedMetric(updates, "moisture", observation.Moisture)
+	if observation.Prefab != "" {
+		updates["prefab"] = observation.Prefab
+	}
+	if observation.Age == 0 && existing.Age > 0 {
+		delete(updates, "age")
+	}
+	if observation.NetID == "" && existing.NetID != "" {
+		delete(updates, "net_id")
+	}
+	return tx.Table(s.table).Where("room_id = ? AND user_id = ?", roomID, observation.ID).Updates(updates).Error
+}
+
+func (s *Store) markMissingSnapshotPlayersOffline(tx *gorm.DB, roomID string, snapshot worldSnapshot, winners map[string]snapshotCandidate) error {
+	var online []playerRecord
+	if err := tx.Table(s.table).Where("room_id = ? AND world_id = ? AND online = ?", roomID, snapshot.WorldID, true).Find(&online).Error; err != nil {
+		return err
+	}
+	for _, record := range online {
+		if _, observed := winners[record.UserID]; observed {
+			continue
+		}
+		fieldStates := decodeFieldStates(record.FieldStates)
+		source := snapshot.Source
+		if source == "" {
+			source = SourceNativeLog
+		}
+		fieldStates["online"] = liveField(source, snapshot.ObservedAt)
+		encodedFieldStates, err := encodeFieldStates(fieldStates)
+		if err != nil {
+			return err
+		}
+		if err := tx.Table(s.table).Where("room_id = ? AND user_id = ?", roomID, record.UserID).Updates(map[string]interface{}{
+			"online": false, "status_changed_at": snapshot.ObservedAt, "last_refreshed_at": snapshot.ObservedAt,
+			"field_states": encodedFieldStates,
+		}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) MergeWorldHistory(roomID, worldID, worldName string, observations []Observation, observedAt time.Time) (int, error) {
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return 0, tx.Error
+	}
+	rollback := func(err error) (int, error) {
+		tx.Rollback()
+		return 0, err
+	}
+	inserted, err := s.mergeWorldHistoryTx(tx, roomID, worldID, worldName, observations, observedAt)
+	if err != nil {
+		return rollback(err)
+	}
+	if err := tx.Commit().Error; err != nil {
+		return 0, err
+	}
+	return inserted, nil
+}
+
+func (s *Store) mergeWorldHistoryTx(tx *gorm.DB, roomID, worldID, worldName string, observations []Observation, observedAt time.Time) (int, error) {
+	inserted := 0
+	for _, observation := range observations {
+		var existing playerRecord
+		result := tx.Table(s.table).Where("room_id = ? AND user_id = ?", roomID, observation.ID).First(&existing)
+		if result.Error == nil {
+			continue
+		}
+		if !gorm.IsRecordNotFoundError(result.Error) {
+			return 0, result.Error
+		}
+		record := playerRecord{
+			RoomID: roomID, UserID: observation.ID, WorldID: worldID, WorldName: worldName,
+			Name: observation.Name, Prefab: observation.Prefab, Online: false, Admin: observation.Admin,
+			Age: observation.Age, NetID: observation.NetID,
+			HealthPercent: observation.HealthPercent, HungerPercent: observation.HungerPercent,
+			SanityPercent: observation.SanityPercent, Temperature: observation.Temperature, Moisture: observation.Moisture,
+			FirstSeenAt: observedAt, LastSeenAt: observedAt, StatusChangedAt: observedAt, LastRefreshedAt: observedAt,
+		}
+		fieldStates, err := encodeFieldStates(observation.Fields)
+		if err != nil {
+			return 0, err
+		}
+		record.FieldStates = fieldStates
+		if err := tx.Table(s.table).Create(&record).Error; err != nil {
+			return 0, err
+		}
+		inserted++
+	}
+	return inserted, nil
 }
 
 func (s *Store) MarkWorldOffline(roomID, worldID string, observedAt time.Time) error {
@@ -271,11 +428,92 @@ func playerFromRecord(record playerRecord) Player {
 	return Player{
 		ID: record.UserID, RoomID: record.RoomID, WorldID: record.WorldID, WorldName: record.WorldName,
 		Name: record.Name, Prefab: record.Prefab, Online: record.Online, Admin: record.Admin, Age: record.Age,
-		NetID: record.NetID, Performance: record.Performance, HealthPercent: record.HealthPercent,
+		NetID: record.NetID, NetScore: record.NetScore, Performance: record.Performance, HealthPercent: record.HealthPercent,
 		HungerPercent: record.HungerPercent, SanityPercent: record.SanityPercent,
 		Temperature: record.Temperature, Moisture: record.Moisture,
 		FirstSeenAt: record.FirstSeenAt.UTC(), LastSeenAt: record.LastSeenAt.UTC(),
 		StatusChangedAt: record.StatusChangedAt.UTC(), LastRefreshedAt: record.LastRefreshedAt.UTC(),
+		Fields: decodeFieldStates(record.FieldStates),
+	}
+}
+
+func setObservedMetric(updates map[string]interface{}, column string, value interface{}) {
+	switch typed := value.(type) {
+	case *int:
+		if typed != nil {
+			updates[column] = typed
+		}
+	case *float64:
+		if typed != nil {
+			updates[column] = typed
+		}
+	}
+}
+
+func encodeFieldStates(values FieldStates) (string, error) {
+	if values == nil {
+		values = FieldStates{}
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return "", fmt.Errorf("encode player field states: %w", err)
+	}
+	return string(encoded), nil
+}
+
+func decodeFieldStates(encoded string) FieldStates {
+	values := make(FieldStates)
+	if strings.TrimSpace(encoded) != "" {
+		_ = json.Unmarshal([]byte(encoded), &values)
+	}
+	return values
+}
+
+func mergeStoredFieldStates(current, incoming FieldStates, existing playerRecord, observation Observation) {
+	for field, state := range incoming {
+		if state.Status == FreshnessUnavailable && storedMetricAvailable(existing, field) {
+			previous := current[field]
+			if previous.ObservedAt == nil {
+				instant := existing.LastRefreshedAt.UTC()
+				previous = FieldState{Source: state.Source, ObservedAt: &instant}
+			}
+			previous.Status = FreshnessStale
+			current[field] = previous
+			continue
+		}
+		current[field] = state
+	}
+	for field, available := range map[string]bool{
+		"netScore": observation.NetScore != nil, "healthPercent": observation.HealthPercent != nil,
+		"hungerPercent": observation.HungerPercent != nil, "sanityPercent": observation.SanityPercent != nil,
+		"temperature": observation.Temperature != nil, "moisture": observation.Moisture != nil,
+	} {
+		if available {
+			continue
+		}
+		if previous, exists := current[field]; exists && previous.Status == FreshnessLive && storedMetricAvailable(existing, field) {
+			previous.Status = FreshnessStale
+			current[field] = previous
+		}
+	}
+}
+
+func storedMetricAvailable(record playerRecord, field string) bool {
+	switch field {
+	case "netScore":
+		return record.NetScore != nil
+	case "healthPercent":
+		return record.HealthPercent != nil
+	case "hungerPercent":
+		return record.HungerPercent != nil
+	case "sanityPercent":
+		return record.SanityPercent != nil
+	case "temperature":
+		return record.Temperature != nil
+	case "moisture":
+		return record.Moisture != nil
+	default:
+		return false
 	}
 }
 

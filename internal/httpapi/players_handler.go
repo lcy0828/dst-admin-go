@@ -22,6 +22,10 @@ type PlayerService interface {
 	Act(context.Context, string, string, string, players.Action, players.ActionRequest) (players.ActionResult, error)
 }
 
+type playerBatchRefresher interface {
+	RefreshWorlds(context.Context, string, []string) ([]players.RefreshOutcome, error)
+}
+
 type PlayerHandler struct {
 	players PlayerService
 	jobs    *jobs.Service
@@ -96,6 +100,26 @@ func (h *PlayerHandler) refresh(c *gin.Context) {
 	}
 	roomID := c.Param("roomId")
 	job, err := h.jobs.Submit("player.refresh", roomID, "", jobTargets, func(ctx context.Context, report func(jobs.TargetResult)) error {
+		if batch, supported := h.players.(playerBatchRefresher); supported {
+			worldIDs := make([]string, 0, len(targets))
+			for _, target := range targets {
+				worldIDs = append(worldIDs, target.ID)
+			}
+			outcomes, refreshErr := batch.RefreshWorlds(ctx, roomID, worldIDs)
+			if refreshErr != nil {
+				return refreshErr
+			}
+			var result error
+			for _, outcome := range outcomes {
+				if outcome.Err != nil {
+					report(jobs.TargetResult{TargetID: outcome.WorldID, Status: jobs.StatusFailed, Error: playerJobError(outcome.Err)})
+					result = errors.Join(result, outcome.Err)
+					continue
+				}
+				report(jobs.TargetResult{TargetID: outcome.WorldID, Status: jobs.StatusSucceeded, Message: outcome.Result.Message})
+			}
+			return result
+		}
 		var result error
 		for _, target := range targets {
 			refreshed, refreshErr := h.players.RefreshWorld(ctx, roomID, target.ID)

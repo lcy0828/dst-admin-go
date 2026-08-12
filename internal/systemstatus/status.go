@@ -71,6 +71,17 @@ type RuntimeStatus struct {
 	GCRuns          uint32 `json:"gcRuns"`
 }
 
+type DatabaseStatus struct {
+	Available               bool   `json:"available"`
+	Error                   string `json:"error,omitempty"`
+	Driver                  string `json:"driver"`
+	JournalMode             string `json:"journalMode"`
+	BusyTimeoutMilliseconds int    `json:"busyTimeoutMilliseconds"`
+	ForeignKeys             bool   `json:"foreignKeys"`
+	MaxOpenConnections      int    `json:"maxOpenConnections"`
+	MigrationVersion        string `json:"migrationVersion"`
+}
+
 type Status struct {
 	ObservedAt  time.Time      `json:"observedAt"`
 	Application buildinfo.Info `json:"application"`
@@ -80,6 +91,7 @@ type Status struct {
 	Disk        DiskStatus     `json:"disk"`
 	Process     ProcessStatus  `json:"process"`
 	Runtime     RuntimeStatus  `json:"runtime"`
+	Database    DatabaseStatus `json:"database"`
 	Warnings    []string       `json:"warnings"`
 }
 
@@ -87,11 +99,25 @@ type Provider interface {
 	Status() Status
 }
 
-type Service struct{ provider Provider }
+type DatabaseProvider func() (DatabaseStatus, error)
 
-func NewService(provider Provider) *Service { return &Service{provider: provider} }
+type Service struct {
+	provider Provider
+	database DatabaseProvider
+}
+
+func NewService(provider Provider) *Service                      { return &Service{provider: provider} }
+func (s *Service) SetDatabaseProvider(provider DatabaseProvider) { s.database = provider }
 func (s *Service) Status() Status {
 	status := s.provider.Status()
 	status.Application = buildinfo.Current()
+	if s.database == nil {
+		status.Database = DatabaseStatus{Error: "数据库状态提供器未配置"}
+	} else if database, err := s.database(); err != nil {
+		status.Database = DatabaseStatus{Error: err.Error()}
+	} else {
+		database.Available = true
+		status.Database = database
+	}
 	return status
 }

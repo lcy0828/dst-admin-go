@@ -80,12 +80,27 @@ func (a *playerTestAccess) ApplyAccess(_ context.Context, _ string, _ string, re
 }
 
 type playerTestProbe struct {
-	items []Observation
-	err   error
+	items        []Observation
+	historyItems []Observation
+	err          error
+	historyErr   error
+}
+
+type playerWorldProbe struct {
+	items map[string][]Observation
+	errs  map[string]error
+}
+
+func (p *playerWorldProbe) Snapshot(_ context.Context, _, worldID string) ([]Observation, error) {
+	return append([]Observation(nil), p.items[worldID]...), p.errs[worldID]
 }
 
 func (p *playerTestProbe) Snapshot(context.Context, string, string) ([]Observation, error) {
 	return append([]Observation(nil), p.items...), p.err
+}
+
+func (p *playerTestProbe) HistorySnapshot(context.Context, string, string) ([]Observation, error) {
+	return append([]Observation(nil), p.historyItems...), p.historyErr
 }
 
 func newPlayerTestService(t *testing.T) (*Service, *playerTestRuntime, *playerTestSender, *playerTestAccess, *playerTestProbe) {
@@ -130,6 +145,69 @@ func TestRefreshDoesNotMarkPlayersOfflineWhenProbeFails(t *testing.T) {
 	player, _ = service.Player("room", "KU_ONE")
 	if player.Online {
 		t.Fatal("stopped world still reports player online")
+	}
+}
+
+func TestRefreshWorldsCommitsSuccessfulShardsAndPreservesFailedShard(t *testing.T) {
+	catalog := playerTestCatalog{
+		room: rooms.Room{ID: "room", DirectoryName: "Cluster_1", Name: "测试房间", Managed: true},
+		worlds: []rooms.World{
+			{ID: "master", RoomID: "room", DirectoryName: "Master", Name: "地面", IsMaster: true},
+			{ID: "caves", RoomID: "room", DirectoryName: "Caves", Name: "洞穴"},
+		},
+	}
+	runtime := &playerTestRuntime{running: map[string]bool{"Cluster_1/Master": true, "Cluster_1/Caves": true}}
+	store := newPlayerTestStore(t)
+	now := time.Date(2026, 8, 12, 10, 0, 0, 0, time.UTC)
+	if err := store.ReplaceRoomSnapshots("room", []worldSnapshot{
+		{WorldID: "master", WorldName: "地面", ObservedAt: now, Observations: []Observation{{ID: "KU_MASTER_OLD", Name: "Old Master"}}},
+		{WorldID: "caves", WorldName: "洞穴", ObservedAt: now, Observations: []Observation{{ID: "KU_CAVES", Name: "Caves"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	probe := &playerWorldProbe{
+		items: map[string][]Observation{"master": {{ID: "KU_MASTER_NEW", Name: "New Master"}}},
+		errs:  map[string]error{"caves": errors.New("caves snapshot unavailable")},
+	}
+	access := &playerTestAccess{values: configuration.AccessLists{Revision: "current"}}
+	service, err := NewService(catalog, runtime, &playerTestSender{}, access, store, probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return now.Add(time.Minute) }
+
+	outcomes, err := service.RefreshWorlds(context.Background(), "room", []string{"master", "caves"})
+	if err != nil || len(outcomes) != 2 || outcomes[0].Err != nil || outcomes[1].Err == nil {
+		t.Fatalf("unexpected partial refresh: outcomes=%#v err=%v", outcomes, err)
+	}
+	masterOld, err := store.Get("room", "KU_MASTER_OLD")
+	if err != nil || masterOld.Online {
+		t.Fatalf("successful shard did not mark missing player offline: player=%#v err=%v", masterOld, err)
+	}
+	masterNew, err := store.Get("room", "KU_MASTER_NEW")
+	if err != nil || !masterNew.Online || masterNew.WorldID != "master" {
+		t.Fatalf("successful shard was not committed: player=%#v err=%v", masterNew, err)
+	}
+	caves, err := store.Get("room", "KU_CAVES")
+	if err != nil || !caves.Online || caves.WorldID != "caves" {
+		t.Fatalf("failed shard state was cleared: player=%#v err=%v", caves, err)
+	}
+}
+
+func TestRefreshRestoresHistoricalPlayersWhileWorldIsStopped(t *testing.T) {
+	service, runtime, _, _, probe := newPlayerTestService(t)
+	probe.historyItems = []Observation{{ID: "KU_HISTORY", Name: "Wendy", Prefab: "wendy", Age: 12}}
+	runtime.running["Cluster_1/Master"] = false
+	result, err := service.RefreshWorld(context.Background(), "room", "master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Running || !strings.Contains(result.Message, "已恢复 1 个历史玩家") {
+		t.Fatalf("unexpected stopped refresh result: %#v", result)
+	}
+	player, err := service.Player("room", "KU_HISTORY")
+	if err != nil || player.Online || player.WorldID != "master" {
+		t.Fatalf("historical player was not restored offline: player=%#v err=%v", player, err)
 	}
 }
 

@@ -352,24 +352,26 @@ func (s *Service) RotateKey(ctx context.Context, input RotateKeyInput) (RotateKe
 }
 
 func (s *Service) StartWatcher(ctx context.Context, interval time.Duration, notify func()) {
+	go s.Watch(ctx, interval, notify)
+}
+
+func (s *Service) Watch(ctx context.Context, interval time.Duration, notify func()) {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				changed, _ := s.Sync()
-				if changed && notify != nil {
-					notify()
-				}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			changed, _ := s.Sync()
+			if changed && notify != nil {
+				notify()
 			}
 		}
-	}()
+	}
 }
 
 func supportsAction(action Action, platform string) bool {

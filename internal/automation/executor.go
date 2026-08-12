@@ -42,6 +42,10 @@ type PlayerRefresher interface {
 	RefreshWorld(context.Context, string, string) (players.RefreshResult, error)
 }
 
+type playerBatchRefresher interface {
+	RefreshWorlds(context.Context, string, []string) ([]players.RefreshOutcome, error)
+}
+
 type StructuredLogRefresher interface {
 	WorldTargets(string) ([]rooms.World, error)
 	RefreshWorld(context.Context, string, string) (structuredlogs.RefreshResult, error)
@@ -156,7 +160,27 @@ func (e *DomainExecutor) Execute(ctx context.Context, task Task, jobID string) (
 		for _, target := range targets {
 			available = append(available, target.ID)
 		}
-		return executeRefresh(ctx, task.WorldIDs, available, func(worldID string) (string, error) {
+		selected, err := selectWorldIDs(task.WorldIDs, available)
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		if batch, supported := e.players.(playerBatchRefresher); supported {
+			outcomes, refreshErr := batch.RefreshWorlds(ctx, task.RoomID, selected)
+			if refreshErr != nil {
+				return ExecutionResult{}, refreshErr
+			}
+			messages := make([]string, 0, len(outcomes))
+			var resultErr error
+			for _, outcome := range outcomes {
+				if outcome.Err != nil {
+					resultErr = errors.Join(resultErr, outcome.Err)
+					continue
+				}
+				messages = append(messages, outcome.Result.Message)
+			}
+			return ExecutionResult{Message: strings.Join(messages, "；")}, resultErr
+		}
+		return executeRefresh(ctx, selected, available, func(worldID string) (string, error) {
 			result, refreshErr := e.players.RefreshWorld(ctx, task.RoomID, worldID)
 			return result.Message, refreshErr
 		})

@@ -2,9 +2,9 @@
 
 ## 1. 适用范围
 
-本文适用于 Vue 3 静态前端、Go 管理 API 和可选 Agent Server 的同源生产部署。示例目录使用 `/opt/dst-admin`，服务用户使用 `dstadmin`；实际路径必须与系统设置和 DST 专用用户一致。
+本文适用于 Vue 3 静态前端和 Go 管理 API 的同源生产部署。示例目录使用 `/opt/dst-admin`，服务用户使用 `dstadmin`；实际路径必须与系统设置和 DST 专用用户一致。远程 Agent 当前冻结，不属于本地优先版本的部署范围。
 
-生产切换必须满足：后端全量测试、前端 lint/unit/build、真实后端核心流程人工验收、数据库备份校验、配置备份和上一版本产物均已完成。当前前端尚未接入浏览器 E2E，不能用不存在的脚本替代人工验收。不要在没有可恢复数据库副本时直接启动新版本迁移。
+生产切换必须满足：后端全量测试、前端 OpenAPI 生成/lint/unit/build、适用的浏览器 E2E、真实后端核心流程人工验收、数据库备份校验、配置备份和上一版本产物均已完成。不要在没有可恢复数据库副本时直接启动新版本迁移。
 
 ## 2. 发布目录
 
@@ -25,7 +25,7 @@
 
 - 二进制和前端产物按版本只读保存，运行数据放在 `shared/`。
 - 切换使用同一文件系统内的符号链接原子替换，不在生产机临时重新构建。
-- `app.conf`、数据库和 Agent 配置权限为 `0600`，运行服务的 `UMask` 为 `0077`。
+- `app.conf` 和数据库权限为 `0600`，运行服务的 `UMask` 为 `0077`。
 - `VERSION` 至少记录后端 Git SHA、前端 Git SHA、构建时间和最低兼容版本。
 
 ## 3. 上线前备份
@@ -67,14 +67,16 @@ CGO_ENABLED=1 go build -trimpath \
 cd ../dst-admin-vue
 npm ci
 npm audit --registry=https://registry.npmjs.org --audit-level=moderate
-npm run lint -- --no-fix
-npm run test
+npm run api:generate
+npm run lint
+npm test
 npm run build
+npm run test:e2e
 ```
 
 把 `dist/dst-admin` 和前端 `dist/` 放入新的 release 目录，校验 SHA-256 后再切换。部署探针还要确认 `/api/v2/system/status` 返回的 `application.version` 和 `application.commit` 与本次 release 一致。不要把 `.env`、数据库、`app.conf`、Agent 密钥或 Steam API Key 打进前端产物。
 
-前端 API 当前由手写客户端维护，契约源是本仓库的 `docs/openapi-v2.yaml`，没有 `api:generate` 命令。浏览器 E2E 接入前，必须按前端 `docs/DST_ADMIN_FUNCTION_TRUTH.md` 的发布清单使用真实后端完成人工验收。
+前端 API 方法由手写 client 维护，类型由本仓库 `docs/openapi-v2.yaml` 通过 `npm run api:generate` 生成。生成后必须确认 `src/api/schema.d.ts` 无非预期差异，并按前端 `docs/DST_ADMIN_FUNCTION_TRUTH.md` 的发布清单完成真实后端验收。
 
 ## 5. 服务启动
 
@@ -91,8 +93,7 @@ Type=simple
 User=dstadmin
 Group=dstadmin
 WorkingDirectory=/opt/dst-admin/shared
-ExecStart=/opt/dst-admin/current/dst-admin --agent-server --agent-listen=127.0.0.1:8081 --key-file=/opt/dst-admin/shared/app.conf
-Environment=PORT=8000
+ExecStart=/opt/dst-admin/current/dst-admin -addr 127.0.0.1:8000
 Environment=DST_ADMIN_SAVE_PATH=/srv/dst/.klei/DoNotStarveTogether
 Environment=DST_ADMIN_BACKUP_PATH=/srv/dst/backups
 Environment=DST_ADMIN_SERVER_PATH=/srv/dst/server
@@ -111,11 +112,6 @@ WantedBy=multi-user.target
 ## 6. Nginx 同源反向代理
 
 ```nginx
-map $http_upgrade $connection_upgrade {
-    default upgrade;
-    ''      close;
-}
-
 server {
     listen 443 ssl http2;
     server_name dst.example.com;
@@ -131,17 +127,6 @@ server {
         proxy_cache off;
         proxy_read_timeout 3600s;
         add_header X-Accel-Buffering no always;
-    }
-
-    location = /agent {
-        proxy_pass http://127.0.0.1:8081/agent;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        proxy_set_header Authorization $http_authorization;
-        proxy_read_timeout 3600s;
     }
 
     location /assets/ {
@@ -161,7 +146,7 @@ server {
 }
 ```
 
-Job 和日志 SSE 都位于 `/api/v2` 下，必须关闭代理缓冲并放宽读取超时。Agent WebSocket 使用 `Authorization: Bearer <key>`；`?key=` 只为旧 Agent 临时兼容，可能出现在代理访问日志中，应尽快升级并停用。
+Job 和日志 SSE 都位于 `/api/v2` 下，必须关闭代理缓冲并放宽读取超时。
 
 新 release 只注册 `/api/v2`。旧 `/api/*`、`/gamelog`、`/static`、tmux raw-command 和旧 cron raw-command 必须返回 `404`；上线前把这些负向探针纳入检查。兼容旧前端只能通过保留的 `previous` release，禁止在新二进制增加环境开关重新暴露旧路由。
 
@@ -172,11 +157,10 @@ Job 和日志 SSE 都位于 `/api/v2` 下，必须关闭代理缓冲并放宽读
 3. 令 `previous` 指向当前 release，再原子切换 `current`。
 4. 启动 `dst-admin`，确认没有迁移和配置错误。
 5. 执行未登录会话探针：`curl -fsS https://dst.example.com/api/v2/auth/session`。
-6. 登录后检查 `/api/v2/system/capabilities`、`/api/v2/system/status`、房间列表和最近 Job。
+6. 登录后检查 `/api/v2/system/capabilities`、`/api/v2/system/status`、房间列表和最近 Job；数据库状态必须为可用、`WAL`、外键已启用且迁移版本与本次发布一致。
 7. 验证一个无副作用刷新 Job，并观察 `/api/v2/jobs/events` 的 `queued -> running -> terminal`。
 8. 断开 SSE 后携带 `Last-Event-ID` 重连，确认事件可回放且没有重复业务动作。
-9. 验证 Agent 使用 Header 连接、心跳和一次 `system.refresh`；不要用旧 shell/custom 接口测试。
-10. 验证前端 `index.html` 不缓存、带 Hash 的 assets 长缓存，最后开放流量。
+9. 验证前端 `index.html` 不缓存、带 Hash 的 assets 长缓存，最后开放流量。
 
 ## 8. 健康与运行检查
 
@@ -184,10 +168,11 @@ Job 和日志 SSE 都位于 `/api/v2` 下，必须关闭代理缓冲并放宽读
 - API 健康：`GET /api/v2/auth/session` 返回 JSON；登录后能力与系统状态接口成功。
 - 数据健康：数据库 `PRAGMA quick_check` 返回 `ok`，最新 Job 可持久化并在刷新后读取。
 - 实时健康：Job SSE 和世界日志 SSE 保持连接；Nginx 日志中没有周期性 499/504。
-- Agent 健康：8081 仅由代理公开，Bearer 不出现在 URL、应用日志或错误正文。
 - Mod 健康：能力页同时显示内嵌解析器与外部 Lua fallback；至少各验证一个主路径和强制 fallback 样本。
 
 ## 9. 密钥轮换
+
+本节仅适用于已经部署旧 Agent 的兼容环境。远程节点冻结期间，新部署不启用 Agent，也不把本节纳入本地版本发布门禁。
 
 - 常规读取 `GET /api/v2/agents/security` 只返回掩码和 SHA-256 指纹。
 - 轮换必须在前端输入 `ROTATE AGENT KEY`，调用 `/api/v2/agents/security/actions/rotate`。

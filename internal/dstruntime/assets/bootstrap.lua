@@ -1,0 +1,206 @@
+local VERSION = "2.2.0"
+local PROTOCOL_VERSION = 2
+local MODULE_ROOT = "../dst-admin/"
+
+local function emit_error(code, message)
+    print(string.format("[DST-ADMIN-RUNTIME ERROR] code=%s message=%s", tostring(code), tostring(message)))
+end
+
+local function load_module(name, callback)
+    TheSim:GetPersistentString(MODULE_ROOT .. name .. ".lua", function(success, source)
+        if not success or type(source) ~= "string" then
+            callback(nil, "module " .. name .. " is unavailable")
+            return
+        end
+        local chunk, compile_error = loadstring(source)
+        if chunk == nil then
+            callback(nil, "module " .. name .. " failed to compile: " .. tostring(compile_error))
+            return
+        end
+        local executed, module = xpcall(chunk, debug.traceback)
+        if not executed or type(module) ~= "table" then
+            callback(nil, "module " .. name .. " failed to load: " .. tostring(module))
+            return
+        end
+        callback(module, nil)
+    end)
+end
+
+local build_candidate
+local activate_candidate
+
+local function new_candidate()
+    local candidate = {
+        version = VERSION,
+        protocolVersion = PROTOCOL_VERSION,
+        state = "loading",
+        reloadInProgress = false,
+    }
+
+    function candidate.Status()
+        local telemetry = candidate.Telemetry ~= nil and candidate.Telemetry.Status() or nil
+        local commands = candidate.Commands ~= nil and candidate.Commands.Status() or nil
+        local events = candidate.Events ~= nil and candidate.Events.Status() or nil
+        local diagnostics = candidate.Diagnostics ~= nil and candidate.Diagnostics.Status() or nil
+        return {
+            version = candidate.version,
+            protocolVersion = candidate.protocolVersion,
+            state = candidate.state,
+            reloadInProgress = candidate.reloadInProgress,
+            telemetry = telemetry,
+            commands = commands,
+            events = events,
+            diagnostics = diagnostics,
+        }
+    end
+
+    function candidate.Start()
+        if candidate.state == "running" or candidate.state == "starting" then
+            return true
+        end
+        if candidate.Telemetry == nil or candidate.Commands == nil or candidate.Events == nil or candidate.Diagnostics == nil then
+            candidate.state = "failed"
+            emit_error("START_FAILED", "telemetry is unavailable")
+            return false
+        end
+        candidate.state = "starting"
+        local ok, started = xpcall(candidate.Telemetry.Start, debug.traceback)
+        if not ok or started == false then
+            candidate.state = "failed"
+            emit_error("START_FAILED", started)
+            return false
+        end
+        ok, started = xpcall(candidate.Events.Start, debug.traceback)
+        if not ok or started == false then
+            candidate.Telemetry.Stop()
+            candidate.state = "failed"
+            emit_error("START_FAILED", started)
+            return false
+        end
+        ok, started = xpcall(candidate.Diagnostics.Start, debug.traceback)
+        if not ok or started == false then
+            candidate.Events.Stop()
+            candidate.Telemetry.Stop()
+            candidate.state = "failed"
+            emit_error("START_FAILED", started)
+            return false
+        end
+        candidate.state = "running"
+        return true
+    end
+
+    function candidate.Stop()
+        if candidate.state == "stopped" then
+            return true
+        end
+        if candidate.Diagnostics ~= nil then
+            local ok, stopped = xpcall(candidate.Diagnostics.Stop, debug.traceback)
+            if not ok or stopped == false then
+                emit_error("STOP_FAILED", stopped)
+                return false
+            end
+        end
+        if candidate.Events ~= nil then
+            local ok, stopped = xpcall(candidate.Events.Stop, debug.traceback)
+            if not ok or stopped == false then
+                emit_error("STOP_FAILED", stopped)
+                return false
+            end
+        end
+        if candidate.Telemetry ~= nil then
+            local ok, stopped = xpcall(candidate.Telemetry.Stop, debug.traceback)
+            if not ok or stopped == false then
+                emit_error("STOP_FAILED", stopped)
+                return false
+            end
+        end
+        candidate.state = "stopped"
+        return true
+    end
+
+    function candidate.Reload()
+        if candidate.reloadInProgress or rawget(_G, "DSTAdmin") ~= candidate then
+            return false
+        end
+        candidate.reloadInProgress = true
+        build_candidate(function(next_candidate, load_error)
+            candidate.reloadInProgress = false
+            if next_candidate == nil then
+                emit_error("RELOAD_LOAD_FAILED", load_error)
+                return
+            end
+            activate_candidate(candidate, next_candidate, "RELOAD")
+        end)
+        return true
+    end
+
+    return candidate
+end
+
+build_candidate = function(callback)
+    local candidate = new_candidate()
+    load_module("telemetry", function(telemetry, telemetry_error)
+        if telemetry == nil then
+            callback(nil, telemetry_error)
+            return
+        end
+        candidate.Telemetry = telemetry
+        load_module("commands", function(commands, commands_error)
+            if commands == nil then
+                callback(nil, commands_error)
+                return
+            end
+            candidate.Commands = commands
+            load_module("events", function(events, events_error)
+                if events == nil then
+                    callback(nil, events_error)
+                    return
+                end
+                candidate.Events = events
+                load_module("diagnostics", function(diagnostics, diagnostics_error)
+                    if diagnostics == nil then
+                        callback(nil, diagnostics_error)
+                        return
+                    end
+                    candidate.Diagnostics = diagnostics
+                    callback(candidate, nil)
+                end)
+            end)
+        end)
+    end)
+end
+
+activate_candidate = function(previous, candidate, operation)
+    if previous ~= nil and type(previous.Stop) == "function" then
+        local stopped, stop_result = xpcall(previous.Stop, debug.traceback)
+        if not stopped or stop_result == false then
+            emit_error(operation .. "_PREVIOUS_STOP_FAILED", stop_result)
+            return false
+        end
+    end
+
+    if candidate.Start() then
+        rawset(_G, "DSTAdmin", candidate)
+        print(string.format("[DST-ADMIN-RUNTIME READY] version=%s protocol=%d", VERSION, PROTOCOL_VERSION))
+        return true
+    end
+
+    candidate.Stop()
+    if previous ~= nil and type(previous.Start) == "function" then
+        local restored, restore_result = xpcall(previous.Start, debug.traceback)
+        if not restored or restore_result == false then
+            emit_error(operation .. "_ROLLBACK_FAILED", restore_result)
+        end
+    end
+    return false
+end
+
+build_candidate(function(candidate, load_error)
+    if candidate == nil then
+        emit_error("RUNTIME_LOAD_FAILED", load_error)
+        return
+    end
+    activate_candidate(rawget(_G, "DSTAdmin"), candidate, "LOAD")
+end)
+
+return true

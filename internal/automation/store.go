@@ -250,6 +250,24 @@ func (s *Store) DeleteTask(roomID, taskID string) error {
 	return nil
 }
 
+func (s *Store) DeleteRoomTasks(roomID string) error {
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	rollback := func(err error) error {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.Table(s.tasksTable).Where("room_id = ?", roomID).Delete(&taskRecord{}).Error; err != nil {
+		return rollback(err)
+	}
+	if err := tx.Table(s.groupsTable).Where("room_id = ?", roomID).Delete(&groupRecord{}).Error; err != nil {
+		return rollback(err)
+	}
+	return tx.Commit().Error
+}
+
 func (s *Store) CreateRun(run Run) (Run, error) {
 	record := runRecord{ID: run.ID, TaskID: run.TaskID, TaskName: run.TaskName, GroupID: run.GroupID, GroupName: run.GroupName, RoomID: run.RoomID, Action: string(run.Action), Trigger: string(run.Trigger), Status: string(run.Status), JobID: run.JobID, Output: run.Output, Error: run.Error, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt, DurationMs: run.DurationMs, RetryCount: run.RetryCount, CreatedAt: run.CreatedAt.UTC()}
 	if err := s.db.Table(s.runsTable).Create(&record).Error; err != nil {
