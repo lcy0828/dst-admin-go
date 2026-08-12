@@ -305,7 +305,9 @@ typed query key factory
 
 ### 6.6 建立可验证的 Capability Manifest
 
-当前功能事实表已经出现“后端无公告/存档导入未记录”等漂移。建议用机器可读清单表达：
+> 落地状态：已完成。前端仓库 `docs/capability-manifest.yaml` 当前登记 25 个产品能力域，并显式区分 `closed`、`backend-only`、`experimental` 和 `frozen`。校验器使用 TypeScript AST 检查生成契约中的 operationId、API client 方法、Vue 路由和前端测试；相邻后端仓库存在时继续核对 Go 测试函数。CI 已将该校验放在 lint、unit 和 build 之前，并有负向测试证明伪造 operationId、API、路由、测试或 backend-only 前端入口会失败。
+
+当前功能事实表曾出现“后端无公告/存档导入未记录”等漂移。机器可读清单按以下关系表达：
 
 ```text
 capability
@@ -447,4 +449,4 @@ CI 检查：
 
 项目无需从零重造。现有领域模块、OpenAPI、安全边界、Job、备份、Mod 双解析和 Vue 3 页面都值得保留。真正需要重建的是跨领域的“运行和反馈骨架”：统一进程生命周期、正确使用 SQLite、让 Job 结果可靠地传播到页面，并把已经存在的后端能力做成真实前端闭环。
 
-批次 1、本地存档导入与房间/世界生命周期、SMTP 分阶段诊断，以及 Runtime 2.3.0 玩家/事件/诊断/世界状态链路都已实现；Runtime 继续保留受审计的控制台 fallback。当前下一阶段应建立机器可验证的 Capability Manifest，并补真实 macOS/Linux DST、代表性 Mod、存档导入和 SMTP 提供商验收；日志与 Mod 锁优化仍必须先测量，视觉收敛必须跟随真实功能页面。
+批次 1、本地存档导入与房间/世界生命周期、SMTP 分阶段诊断，以及 Runtime 2.3.0 玩家/事件/诊断/世界状态链路都已实现；Runtime 继续保留受审计的控制台 fallback，Capability Manifest 也已进入 CI。当前下一阶段应补真实 macOS/Linux DST、代表性 Mod、存档导入和 SMTP 提供商验收，并逐步拆分按领域运行的 E2E、设置可测量的 bundle 门槛；日志与 Mod 锁优化仍必须先测量，视觉收敛必须跟随真实功能页面。
