@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -180,6 +181,12 @@ func TestRoomAndShardJobHTTPFlow(t *testing.T) {
 		"confirmation": "周末服",
 	}, nil, "")
 	assertStatus(t, response, http.StatusOK)
+	worldRecoveryPath, _ := responseData(t, response)["recoveryName"].(string)
+	worldRecoveryName := filepath.Base(worldRecoveryPath)
+	response = performJSON(router, http.MethodGet, "/api/v2/rooms/"+roomID+"/worlds/recovery", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	response = performJSON(router, http.MethodPost, "/api/v2/rooms/"+roomID+"/worlds/recovery/"+worldRecoveryName+"/actions/restore", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
 	for _, world := range worldsEnvelope.Data.Items {
 		if world.Status != "stopped" {
 			t.Fatalf("initial world status = %q", world.Status)
@@ -193,7 +200,7 @@ func TestRoomAndShardJobHTTPFlow(t *testing.T) {
 	for time.Now().Before(deadline) {
 		job, err := jobService.Get(jobID)
 		if err == nil && job.Status == jobs.StatusSucceeded {
-			if len(job.Targets) != 2 || job.Outcome != jobs.OutcomeFull {
+			if len(job.Targets) != 3 || job.Outcome != jobs.OutcomeFull {
 				t.Fatalf("unexpected job: %#v", job)
 			}
 			break
@@ -228,6 +235,16 @@ func TestRoomAndShardJobHTTPFlow(t *testing.T) {
 	if responseData(t, response)["recoveryName"] == "" {
 		t.Fatalf("delete room response missing recovery path: %s", response.Body.String())
 	}
+	roomRecoveryPath, _ := responseData(t, response)["recoveryName"].(string)
+	roomRecoveryName := filepath.Base(roomRecoveryPath)
+	response = performJSON(router, http.MethodGet, "/api/v2/rooms/recovery", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	response = performJSON(router, http.MethodDelete, "/api/v2/rooms/recovery/"+roomRecoveryName, map[string]interface{}{
+		"confirmation": "wrong",
+	}, nil, "")
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+	response = performJSON(router, http.MethodPost, "/api/v2/rooms/recovery/"+roomRecoveryName+"/actions/restore", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
 
 	response = performJSON(router, http.MethodGet, "/api/v2/rooms/not-base64", nil, nil, "")
 	assertStatus(t, response, http.StatusBadRequest)

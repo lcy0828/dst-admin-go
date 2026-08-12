@@ -330,6 +330,51 @@ paths:
           $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/recovery:
+    get:
+      tags: [Rooms]
+      operationId: listRoomRecoveries
+      summary: List recoverable room directories
+      responses:
+        "200":
+          description: Recoverable rooms
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryListEnvelope"
+  /rooms/recovery/{recoveryName}/actions/restore:
+    parameters:
+      - $ref: "#/components/parameters/RecoveryName"
+    post:
+      tags: [Rooms]
+      operationId: restoreRoomRecovery
+      summary: Restore and adopt a deleted room
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": { description: Restored room, content: { application/json: { schema: { $ref: "#/components/schemas/RoomEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/recovery/{recoveryName}:
+    parameters:
+      - $ref: "#/components/parameters/RecoveryName"
+    delete:
+      tags: [Rooms]
+      operationId: purgeRoomRecovery
+      summary: Permanently remove a deleted room
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PurgeRecoveryInput" }
+      responses:
+        "200": { description: Recovery item removed }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/adopt:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -419,6 +464,51 @@ paths:
           $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/worlds/recovery:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Rooms]
+      operationId: listWorldRecoveries
+      summary: List recoverable world directories for a room
+      responses:
+        "200": { description: Recoverable worlds, content: { application/json: { schema: { $ref: "#/components/schemas/RecoveryListEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /rooms/{roomId}/worlds/recovery/{recoveryName}/actions/restore:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/RecoveryName"
+    post:
+      tags: [Rooms]
+      operationId: restoreWorldRecovery
+      summary: Restore a deleted world while the room is stopped
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": { description: Restored world, content: { application/json: { schema: { $ref: "#/components/schemas/WorldRecordEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/worlds/recovery/{recoveryName}:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/RecoveryName"
+    delete:
+      tags: [Rooms]
+      operationId: purgeWorldRecovery
+      summary: Permanently remove a deleted world
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PurgeRecoveryInput" }
+      responses:
+        "200": { description: Recovery item removed }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/runtime:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -2792,6 +2882,13 @@ components:
       required: true
       schema:
         type: string
+    RecoveryName:
+      name: recoveryName
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[0-9]{10,20}-[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'
     CommandRunID:
       name: runId
       in: path
@@ -3219,6 +3316,40 @@ components:
           type: "null"
         meta:
           $ref: "#/components/schemas/Meta"
+    RecoveryItem:
+      type: object
+      additionalProperties: false
+      required: [recoveryName, directoryName, displayName, deletedAt, updatedAt]
+      properties:
+        recoveryName: { type: string }
+        directoryName: { type: string }
+        displayName: { type: string }
+        deletedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    RecoveryList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/RecoveryItem" }
+        total: { type: integer }
+    RecoveryListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/RecoveryList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    PurgeRecoveryInput:
+      type: object
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation:
+          type: string
+          description: Must exactly equal recoveryName
     World:
       type: object
       additionalProperties: false

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 )
 
 var directoryNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+var recoveryNamePattern = regexp.MustCompile(`^([0-9]{10,20})-([A-Za-z0-9][A-Za-z0-9_-]{0,63})$`)
 
 type CreateRequest struct {
 	DirectoryName string `json:"directoryName"`
@@ -56,6 +58,18 @@ type DeleteRoomResult struct {
 type DeleteWorldResult struct {
 	World        World  `json:"world"`
 	RecoveryName string `json:"recoveryName"`
+}
+
+type RecoveryItem struct {
+	RecoveryName  string    `json:"recoveryName"`
+	DirectoryName string    `json:"directoryName"`
+	DisplayName   string    `json:"displayName"`
+	DeletedAt     time.Time `json:"deletedAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+type PurgeRecoveryRequest struct {
+	Confirmation string `json:"confirmation"`
 }
 
 type Service struct {
@@ -369,6 +383,239 @@ func (s *Service) DeleteWorld(roomID, worldID string, request DeleteWorldRequest
 		return DeleteWorldResult{}, fmt.Errorf("move world to recovery directory: %w", err)
 	}
 	return DeleteWorldResult{World: world, RecoveryName: filepath.Join(".dst-admin-trash", trashName)}, nil
+}
+
+func (s *Service) ListRoomRecoveries() ([]RecoveryItem, error) {
+	return listRecoveries(filepath.Join(s.catalog.root, ".dst-admin-trash"), "cluster.ini", "NETWORK", "cluster_name")
+}
+
+func (s *Service) RestoreRoom(recoveryName string) (Room, error) {
+	directoryName, _, err := parseRecoveryName(recoveryName)
+	if err != nil {
+		return Room{}, err
+	}
+	roomID := EncodeID(directoryName)
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return Room{}, err
+	}
+	defer release()
+	s.worldMu.Lock()
+	defer s.worldMu.Unlock()
+
+	trashRoot := filepath.Join(s.catalog.root, ".dst-admin-trash")
+	source, err := recoveryDirectory(trashRoot, recoveryName)
+	if err != nil {
+		return Room{}, err
+	}
+	target := filepath.Join(s.catalog.root, directoryName)
+	if err := ensureContained(s.catalog.root, target); err != nil {
+		return Room{}, err
+	}
+	if _, err := os.Lstat(target); err == nil {
+		return Room{}, ErrRoomExists
+	} else if !os.IsNotExist(err) {
+		return Room{}, fmt.Errorf("inspect room restore target: %w", err)
+	}
+	if err := os.Rename(source, target); err != nil {
+		return Room{}, fmt.Errorf("restore room directory: %w", err)
+	}
+	room, err := s.catalog.Room(roomID)
+	if err != nil {
+		_ = os.Rename(target, source)
+		return Room{}, err
+	}
+	if err := s.store.Adopt(room); err != nil {
+		if rollbackErr := os.Rename(target, source); rollbackErr != nil {
+			return Room{}, fmt.Errorf("%w; return room to recovery directory: %v", err, rollbackErr)
+		}
+		return Room{}, err
+	}
+	room.Managed = true
+	s.notifyManagedRoom(room.ID, true)
+	return room, nil
+}
+
+func (s *Service) PurgeRoomRecovery(recoveryName string, request PurgeRecoveryRequest) error {
+	if request.Confirmation != recoveryName {
+		return ErrRecoveryConfirmation
+	}
+	directoryName, _, err := parseRecoveryName(recoveryName)
+	if err != nil {
+		return err
+	}
+	_, release, err := roomops.Acquire(context.Background(), EncodeID(directoryName))
+	if err != nil {
+		return err
+	}
+	defer release()
+	s.worldMu.Lock()
+	defer s.worldMu.Unlock()
+	source, err := recoveryDirectory(filepath.Join(s.catalog.root, ".dst-admin-trash"), recoveryName)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(source); err != nil {
+		return fmt.Errorf("purge room recovery: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) ListWorldRecoveries(roomID string) ([]RecoveryItem, error) {
+	room, err := s.catalog.Room(roomID)
+	if err != nil {
+		return nil, err
+	}
+	roomPath := filepath.Join(s.catalog.root, room.DirectoryName)
+	return listRecoveries(filepath.Join(roomPath, ".dst-admin-trash"), "server.ini", "SHARD", "name")
+}
+
+func (s *Service) RestoreWorld(roomID, recoveryName string) (World, error) {
+	directoryName, _, err := parseRecoveryName(recoveryName)
+	if err != nil {
+		return World{}, err
+	}
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return World{}, err
+	}
+	defer release()
+	s.worldMu.Lock()
+	defer s.worldMu.Unlock()
+
+	room, err := s.catalog.Room(roomID)
+	if err != nil {
+		return World{}, err
+	}
+	if !room.Managed {
+		return World{}, ErrRoomNotManaged
+	}
+	roomPath := filepath.Join(s.catalog.root, room.DirectoryName)
+	source, err := recoveryDirectory(filepath.Join(roomPath, ".dst-admin-trash"), recoveryName)
+	if err != nil {
+		return World{}, err
+	}
+	target := filepath.Join(roomPath, directoryName)
+	if err := ensureContained(roomPath, target); err != nil {
+		return World{}, err
+	}
+	if _, err := os.Lstat(target); err == nil {
+		return World{}, ErrWorldExists
+	} else if !os.IsNotExist(err) {
+		return World{}, fmt.Errorf("inspect world restore target: %w", err)
+	}
+	if err := os.Rename(source, target); err != nil {
+		return World{}, fmt.Errorf("restore world directory: %w", err)
+	}
+	world, err := s.catalog.World(room.ID, EncodeID(directoryName))
+	if err != nil {
+		_ = os.Rename(target, source)
+		return World{}, err
+	}
+	s.notifyWorldCreated(room.ID, world.ID)
+	return world, nil
+}
+
+func (s *Service) PurgeWorldRecovery(roomID, recoveryName string, request PurgeRecoveryRequest) error {
+	if request.Confirmation != recoveryName {
+		return ErrRecoveryConfirmation
+	}
+	if _, _, err := parseRecoveryName(recoveryName); err != nil {
+		return err
+	}
+	_, release, err := roomops.Acquire(context.Background(), roomID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	s.worldMu.Lock()
+	defer s.worldMu.Unlock()
+	room, err := s.catalog.Room(roomID)
+	if err != nil {
+		return err
+	}
+	roomPath := filepath.Join(s.catalog.root, room.DirectoryName)
+	source, err := recoveryDirectory(filepath.Join(roomPath, ".dst-admin-trash"), recoveryName)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(source); err != nil {
+		return fmt.Errorf("purge world recovery: %w", err)
+	}
+	return nil
+}
+
+func listRecoveries(trashRoot, metadataFile, section, key string) ([]RecoveryItem, error) {
+	entries, err := os.ReadDir(trashRoot)
+	if os.IsNotExist(err) {
+		return []RecoveryItem{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read recovery directory: %w", err)
+	}
+	items := make([]RecoveryItem, 0, len(entries))
+	for _, entry := range entries {
+		directoryName, deletedAt, parseErr := parseRecoveryName(entry.Name())
+		if parseErr != nil || entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
+			continue
+		}
+		path, pathErr := recoveryDirectory(trashRoot, entry.Name())
+		if pathErr != nil {
+			continue
+		}
+		info, statErr := os.Stat(filepath.Join(path, metadataFile))
+		if statErr != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		displayName := directoryName
+		if config, loadErr := ini.Load(filepath.Join(path, metadataFile)); loadErr == nil {
+			if value := strings.TrimSpace(config.Section(section).Key(key).String()); value != "" {
+				displayName = value
+			}
+		}
+		items = append(items, RecoveryItem{
+			RecoveryName: entry.Name(), DirectoryName: directoryName, DisplayName: displayName,
+			DeletedAt: deletedAt, UpdatedAt: info.ModTime(),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].DeletedAt.After(items[j].DeletedAt) })
+	return items, nil
+}
+
+func parseRecoveryName(name string) (string, time.Time, error) {
+	if err := validateComponent(name); err != nil {
+		return "", time.Time{}, err
+	}
+	matches := recoveryNamePattern.FindStringSubmatch(name)
+	if len(matches) != 3 || !directoryNamePattern.MatchString(matches[2]) {
+		return "", time.Time{}, ErrUnsafePath
+	}
+	timestamp, err := strconv.ParseInt(matches[1], 10, 64)
+	if err != nil || timestamp <= 0 {
+		return "", time.Time{}, ErrUnsafePath
+	}
+	return matches[2], time.Unix(0, timestamp).UTC(), nil
+}
+
+func recoveryDirectory(trashRoot, recoveryName string) (string, error) {
+	if _, _, err := parseRecoveryName(recoveryName); err != nil {
+		return "", err
+	}
+	path := filepath.Join(trashRoot, recoveryName)
+	if err := ensureContained(trashRoot, path); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return "", ErrRecoveryNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect recovery directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", ErrUnsafePath
+	}
+	return path, nil
 }
 
 type worldAllocation struct {

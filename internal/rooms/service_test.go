@@ -228,6 +228,118 @@ func TestRecoverablyDeleteRoom(t *testing.T) {
 	}
 }
 
+func TestListRestoreAndPurgeRecoveries(t *testing.T) {
+	service, _ := newTestService(t)
+	managed := make([]string, 0, 2)
+	worldsCreated := make([]string, 0, 1)
+	service.AddManagedRoomLifecycle(func(roomID string) { managed = append(managed, roomID) }, nil)
+	service.AddWorldLifecycle(func(roomID, worldID string) { worldsCreated = append(worldsCreated, roomID+":"+worldID) })
+	room, err := service.Create(CreateRequest{
+		DirectoryName: "recover_room", Name: "恢复测试", GameMode: "survival", MaxPlayers: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	world, err := service.CreateWorld(room.ID, CreateWorldRequest{DirectoryName: "Caves2", Type: "cave"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deletedWorld, err := service.DeleteWorld(room.ID, world.ID, DeleteWorldRequest{Confirmation: room.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worldRecoveryName := filepath.Base(deletedWorld.RecoveryName)
+	worldRecoveries, err := service.ListWorldRecoveries(room.ID)
+	if err != nil || len(worldRecoveries) != 1 || worldRecoveries[0].RecoveryName != worldRecoveryName || worldRecoveries[0].DirectoryName != "Caves2" {
+		t.Fatalf("world recoveries = %#v, %v", worldRecoveries, err)
+	}
+	restoredWorld, err := service.RestoreWorld(room.ID, worldRecoveryName)
+	if err != nil || restoredWorld.ID != world.ID {
+		t.Fatalf("restore world = %#v, %v", restoredWorld, err)
+	}
+	if len(worldsCreated) != 2 || worldsCreated[1] != room.ID+":"+world.ID {
+		t.Fatalf("world lifecycle = %#v", worldsCreated)
+	}
+	deletedWorld, err = service.DeleteWorld(room.ID, world.ID, DeleteWorldRequest{Confirmation: room.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worldRecoveryName = filepath.Base(deletedWorld.RecoveryName)
+	if err := service.PurgeWorldRecovery(room.ID, worldRecoveryName, PurgeRecoveryRequest{Confirmation: "wrong"}); !errors.Is(err, ErrRecoveryConfirmation) {
+		t.Fatalf("purge world confirmation error = %v", err)
+	}
+	if err := service.PurgeWorldRecovery(room.ID, worldRecoveryName, PurgeRecoveryRequest{Confirmation: worldRecoveryName}); err != nil {
+		t.Fatal(err)
+	}
+	worldRecoveries, err = service.ListWorldRecoveries(room.ID)
+	if err != nil || len(worldRecoveries) != 0 {
+		t.Fatalf("world recoveries after purge = %#v, %v", worldRecoveries, err)
+	}
+
+	deletedRoom, err := service.DeleteRoom(room.ID, DeleteRoomRequest{Confirmation: room.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomRecoveryName := filepath.Base(deletedRoom.RecoveryName)
+	roomRecoveries, err := service.ListRoomRecoveries()
+	if err != nil || len(roomRecoveries) != 1 || roomRecoveries[0].RecoveryName != roomRecoveryName || roomRecoveries[0].DisplayName != room.Name {
+		t.Fatalf("room recoveries = %#v, %v", roomRecoveries, err)
+	}
+	restoredRoom, err := service.RestoreRoom(roomRecoveryName)
+	if err != nil || restoredRoom.ID != room.ID || !restoredRoom.Managed {
+		t.Fatalf("restore room = %#v, %v", restoredRoom, err)
+	}
+	if len(managed) != 2 || managed[1] != room.ID {
+		t.Fatalf("managed lifecycle = %#v", managed)
+	}
+	deletedRoom, err = service.DeleteRoom(room.ID, DeleteRoomRequest{Confirmation: room.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomRecoveryName = filepath.Base(deletedRoom.RecoveryName)
+	if err := service.PurgeRoomRecovery(roomRecoveryName, PurgeRecoveryRequest{Confirmation: roomRecoveryName}); err != nil {
+		t.Fatal(err)
+	}
+	roomRecoveries, err = service.ListRoomRecoveries()
+	if err != nil || len(roomRecoveries) != 0 {
+		t.Fatalf("room recoveries after purge = %#v, %v", roomRecoveries, err)
+	}
+}
+
+func TestRecoveryRejectsUnsafeNamesSymlinksAndRestoreCollisions(t *testing.T) {
+	service, root := newTestService(t)
+	room, err := service.Create(CreateRequest{
+		DirectoryName: "collision", Name: "冲突测试", GameMode: "survival", MaxPlayers: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := service.DeleteRoom(room.ID, DeleteRoomRequest{Confirmation: room.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryName := filepath.Base(deleted.RecoveryName)
+	if err := os.MkdirAll(filepath.Join(root, room.DirectoryName), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RestoreRoom(recoveryName); !errors.Is(err, ErrRoomExists) {
+		t.Fatalf("restore collision error = %v", err)
+	}
+	if _, err := service.RestoreRoom("../" + recoveryName); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("unsafe recovery error = %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		outside := t.TempDir()
+		linkName := "1234567890123456789-linked"
+		if err := os.Symlink(outside, filepath.Join(root, ".dst-admin-trash", linkName)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.RestoreRoom(linkName); !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("symlink recovery error = %v", err)
+		}
+	}
+}
+
 func TestRejectsTraversalNonCanonicalIDsAndEscapingSymlinks(t *testing.T) {
 	service, root := newTestService(t)
 	badID := EncodeID("../outside")

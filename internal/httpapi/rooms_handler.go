@@ -26,13 +26,86 @@ func (h *RoomHandler) Register(v2 *gin.RouterGroup) {
 	group := v2.Group("/rooms")
 	group.GET("", h.list)
 	group.POST("", h.create)
+	group.GET("/recovery", h.roomRecoveries)
+	group.POST("/recovery/:recoveryName/actions/restore", h.restoreRoom)
+	group.DELETE("/recovery/:recoveryName", h.purgeRoomRecovery)
 	group.GET("/:roomId", h.get)
 	group.DELETE("/:roomId", h.deleteRoom)
 	group.POST("/:roomId/adopt", h.adopt)
 	group.GET("/:roomId/worlds", h.worldsList)
 	group.POST("/:roomId/worlds", h.createWorld)
+	group.GET("/:roomId/worlds/recovery", h.worldRecoveries)
+	group.POST("/:roomId/worlds/recovery/:recoveryName/actions/restore", h.restoreWorld)
+	group.DELETE("/:roomId/worlds/recovery/:recoveryName", h.purgeWorldRecovery)
 	group.DELETE("/:roomId/worlds/:worldId", h.deleteWorld)
 	group.POST("/:roomId/actions/:action", h.action)
+}
+
+func (h *RoomHandler) roomRecoveries(c *gin.Context) {
+	items, err := h.rooms.ListRoomRecoveries()
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, gin.H{"items": items, "total": len(items)})
+}
+
+func (h *RoomHandler) restoreRoom(c *gin.Context) {
+	room, err := h.rooms.RestoreRoom(c.Param("recoveryName"))
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, room)
+}
+
+func (h *RoomHandler) purgeRoomRecovery(c *gin.Context) {
+	var request rooms.PurgeRecoveryRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的永久清理确认", nil)
+		return
+	}
+	if err := h.rooms.PurgeRoomRecovery(c.Param("recoveryName"), request); err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, gin.H{"recoveryName": c.Param("recoveryName")})
+}
+
+func (h *RoomHandler) worldRecoveries(c *gin.Context) {
+	items, err := h.rooms.ListWorldRecoveries(c.Param("roomId"))
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, gin.H{"items": items, "total": len(items)})
+}
+
+func (h *RoomHandler) restoreWorld(c *gin.Context) {
+	roomID := c.Param("roomId")
+	if err := h.requireRoomStopped(c, roomID, ""); err != nil {
+		roomFailure(c, err)
+		return
+	}
+	world, err := h.rooms.RestoreWorld(roomID, c.Param("recoveryName"))
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, world)
+}
+
+func (h *RoomHandler) purgeWorldRecovery(c *gin.Context) {
+	var request rooms.PurgeRecoveryRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的永久清理确认", nil)
+		return
+	}
+	if err := h.rooms.PurgeWorldRecovery(c.Param("roomId"), c.Param("recoveryName"), request); err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, gin.H{"recoveryName": c.Param("recoveryName")})
 }
 
 func (h *RoomHandler) deleteRoom(c *gin.Context) {
@@ -232,6 +305,8 @@ func roomFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusBadRequest, "INVALID_RESOURCE_ID", "房间或世界标识无效", nil)
 	case errors.Is(err, rooms.ErrRoomNotFound), errors.Is(err, rooms.ErrWorldNotFound):
 		Failure(c, http.StatusNotFound, "RESOURCE_NOT_FOUND", "房间或世界不存在", nil)
+	case errors.Is(err, rooms.ErrRecoveryNotFound):
+		Failure(c, http.StatusNotFound, "RECOVERY_NOT_FOUND", "回收项不存在", nil)
 	case errors.Is(err, rooms.ErrRoomExists):
 		Failure(c, http.StatusConflict, "ROOM_EXISTS", "房间目录已经存在", nil)
 	case errors.Is(err, rooms.ErrWorldExists):
@@ -240,6 +315,8 @@ func roomFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "接管房间后才能修改世界", nil)
 	case errors.Is(err, rooms.ErrConfirmation):
 		Failure(c, http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", "请输入完整房间名称确认删除", nil)
+	case errors.Is(err, rooms.ErrRecoveryConfirmation):
+		Failure(c, http.StatusUnprocessableEntity, "RECOVERY_CONFIRMATION_REQUIRED", "请输入完整回收项名称确认永久清理", nil)
 	case errors.Is(err, rooms.ErrWorldRunning):
 		Failure(c, http.StatusConflict, "WORLD_RUNNING", "请先停止相关世界再执行此操作", nil)
 	case errors.Is(err, rooms.ErrInvalidRoom), errors.Is(err, rooms.ErrInvalidWorld):
