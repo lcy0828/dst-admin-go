@@ -1,6 +1,6 @@
 # DST Admin 现存设计与实现改造审计
 
-> 版本：1.1
+> 版本：1.2
 > 审计日期：2026-08-12
 > 范围：`dst-admin-go`、`dst-admin-vue` 当前 `feature/v2-rebuild` 工作树
 > 关联文档：`docs/customcommands.md`、`docs/dst-platform-matrix.md`、前端 `docs/DST_ADMIN_FUNCTION_TRUTH.md`
@@ -57,7 +57,7 @@ DST 运行时
 1. HTTP、后台任务和数据库已经由 Application 管理生命周期。
 2. SQLite 已启用 WAL、5 秒 busy timeout、foreign keys、保守连接池和迁移版本状态。
 3. Job SSE 已具备水位、断线补偿、过期游标 reset、保留策略和声明式前端刷新。
-4. Runtime 2.2.0 已取代默认持续长探针，并保留旧控制台 fallback。
+4. Runtime 2.3.0 已取代默认持续长探针，并保留旧控制台 fallback。
 
 当前主要剩余断点是后端已有但前端未交付的存档导入、世界/房间生命周期与 SMTP 测试，以及真实 DST 实机验收和日志事实源收敛。
 
@@ -70,13 +70,13 @@ DST 运行时
 | 已完成 | Job 事件水位、保留策略和声明式缓存影响表 | 修复操作后必须刷新页面，避免全历史回放 | M | 保持回归 |
 | P0 | 存档导入前端闭环 | 把已完成的安全导入能力交付给用户 | L | 必须改 |
 | P1 | 世界创建/删除、房间删除、SMTP 测试前端闭环 | 补齐本地服完整生命周期和部署验证 | M | 值得改 |
-| 已完成，待实机 | Runtime 2.2.0 与字段级新鲜度 | 保留完整指标且消除周期性长 Lua 命令日志 | L | macOS/Linux 验收 |
+| 已完成，待实机 | Runtime 2.3.0 与字段级新鲜度 | 保留完整指标且消除周期性长 Lua 命令日志 | L | macOS/Linux 验收 |
 | P1 | v2 日志事实源收敛 | 避免双链重复采集和状态不一致 | M | 值得改 |
 | P1 | 房间操作锁和 Mod 下载锁粒度调整 | 防止跨领域死等和大 Mod 下载阻塞所有读取 | M | 先测后改 |
 | P1 | 能力清单与前端 CI | 防止文档和功能再次漂移 | M | 值得改 |
 | P2 | 页面级 shadcn-vue 组件收敛 | 提高一致性、可访问性和表单维护性 | M | 随功能改造推进 |
-| P2 | E2E 按领域拆分、增加关键单元测试 | 缩短定位时间并支持选择性回归 | M | 值得改 |
-| P2 | ECharts 按需加载和包体预算 | 改善世界状态页首开成本 | S-M | 测量后改 |
+| 已完成 | E2E 领域标签、setup 隔离与关键单元测试 | 缩短定位时间并支持选择性回归 | M | 保持回归 |
+| 已完成 | ECharts 路由隔离与可测量包体预算 | 防止世界状态页与入口体积无界增长 | S-M | 持续监测 |
 | 冻结 | 远程 Agent 新能力 | 当前不符合本地优先阶段目标 | - | 保留边界，不扩张 |
 | 不做 | 微服务、重型消息队列、全量 GORM 迁移、Vue 重写 | 风险和成本高于当前收益 | XL | 明确不建议 |
 
@@ -245,7 +245,7 @@ typed query key factory
 
 ### 6.2 实施 Telemetry V2，而不是恢复持续长探针
 
-> 落地状态：Runtime 2.2.0 已完成自动化实现，包含 A/B Telemetry、固定允许列表短动作与结构化回执、世界事件、有界诊断、热加载清理和旧控制台 fallback。真实 macOS/Linux DST、全部短动作及代表性 Mod 组合仍是发布前门禁。
+> 落地状态：Runtime 2.3.0 已完成自动化实现，包含 A/B Telemetry、固定允许列表短动作与结构化回执、世界事件、有界诊断、热加载清理、世界状态快照和旧控制台 fallback。真实 macOS/Linux DST、全部短动作及代表性 Mod 组合仍是发布前门禁。
 
 `docs/customcommands.md` 已给出完整方案。推荐的数据链为：
 
@@ -343,9 +343,9 @@ CI 检查：
 
 ### 6.8 调整测试结构与前端性能门槛
 
-- 当前单元测试只有少量 API/auth 测试，E2E 集中在一个约千行文件。覆盖面不能仅按文件数判断，但应按 auth、rooms、mods、backups、logs、maps、imports 等领域拆分，以支持失败定位和选择性执行。
-- `RoomWorldStateView` 产物主要受 ECharts 影响。先记录真实 chunk、加载时间和低端设备表现，再决定模块按需导入或页面延迟加载。
-- 设置 bundle budget，超过预算由 CI 提醒；不以删除功能换取体积。
+> 落地状态：Playwright 已使用 setup project 创建管理员和种子房间，共享有状态测试后端固定为单 worker；12 条用例按 `auth`、`rooms`、`mods`、`players`、`logs`、`world-state`、`automation`、`agents` 和 `system` 标签可独立回归。玩家、日志等用例自行产生前置事件，不再依赖用例执行顺序。
+
+前端当前有 48 条单元测试。生产构建对应用入口、全局 CSS、世界状态路由和 Select 共享块同时检查原始与 gzip 体积，包含正向与负向门禁测试。预算超限或目标产物消失时构建失败，不以删除功能换取体积。
 
 ### 6.9 让界面设置成为真实运行时配置
 
@@ -449,4 +449,4 @@ CI 检查：
 
 项目无需从零重造。现有领域模块、OpenAPI、安全边界、Job、备份、Mod 双解析和 Vue 3 页面都值得保留。真正需要重建的是跨领域的“运行和反馈骨架”：统一进程生命周期、正确使用 SQLite、让 Job 结果可靠地传播到页面，并把已经存在的后端能力做成真实前端闭环。
 
-批次 1、本地存档导入与房间/世界生命周期、SMTP 分阶段诊断，以及 Runtime 2.3.0 玩家/事件/诊断/世界状态链路都已实现；Runtime 继续保留受审计的控制台 fallback，Capability Manifest 也已进入 CI。当前下一阶段应补真实 macOS/Linux DST、代表性 Mod、存档导入和 SMTP 提供商验收，并逐步拆分按领域运行的 E2E、设置可测量的 bundle 门槛；日志与 Mod 锁优化仍必须先测量，视觉收敛必须跟随真实功能页面。
+批次 1、本地存档导入与房间/世界生命周期、SMTP 分阶段诊断，以及 Runtime 2.3.0 玩家/事件/诊断/世界状态链路都已实现；Runtime 继续保留受审计的控制台 fallback，Capability Manifest、领域标签 E2E 和可测量 bundle 门禁也已进入 CI。当前下一阶段应补真实 macOS/Linux DST、代表性 Mod、存档导入和 SMTP 提供商验收；日志与 Mod 锁优化仍必须先测量，视觉收敛必须跟随真实功能页面。
