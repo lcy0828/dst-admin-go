@@ -47,12 +47,19 @@ func newAuthTestApp(t *testing.T) authTestApp {
 
 func TestAuthLifecycleAndCSRF(t *testing.T) {
 	app := newAuthTestApp(t)
+	app.handler.SetUIPreferencesProvider(func() UIPreferences {
+		return UIPreferences{SystemName: "林火管理台", Timezone: "UTC", DateFormat: "DD/MM/YYYY", ThemeColor: "#228844"}
+	})
 
 	response := performJSON(app.router, http.MethodGet, "/api/v2/auth/session", nil, nil, "")
 	assertStatus(t, response, http.StatusOK)
 	data := responseData(t, response)
 	if data["setupRequired"] != true || data["authenticated"] != false {
 		t.Fatalf("unexpected initial session: %#v", data)
+	}
+	preferences, ok := data["preferences"].(map[string]interface{})
+	if !ok || preferences["systemName"] != "林火管理台" || preferences["timezone"] != "UTC" || preferences["dateFormat"] != "DD/MM/YYYY" || preferences["themeColor"] != "#228844" {
+		t.Fatalf("session UI preferences = %#v", data["preferences"])
 	}
 
 	response = performJSON(app.router, http.MethodGet, "/api/v2/protected", nil, nil, "")
@@ -74,6 +81,9 @@ func TestAuthLifecycleAndCSRF(t *testing.T) {
 	csrfToken, _ := responseData(t, response)["csrfToken"].(string)
 	if csrfToken == "" {
 		t.Fatal("setup response did not contain a CSRF token")
+	}
+	if responseData(t, response)["preferences"].(map[string]interface{})["systemName"] != "林火管理台" {
+		t.Fatalf("authenticated response lost UI preferences: %s", response.Body.String())
 	}
 
 	response = performJSON(app.router, http.MethodPost, "/api/v2/protected", nil, cookie, "")

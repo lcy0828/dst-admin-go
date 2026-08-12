@@ -41,7 +41,7 @@ var fieldDefinitions = []fieldDefinition{
 
 	{ID: "ui.systemName", Group: "ui", Label: "管理系统名称", Kind: "text", Section: "ui", Key: "SYSTEM_NAME", Environment: "DST_ADMIN_SYSTEM_NAME", Default: "饥荒管理系统", Required: true},
 	{ID: "ui.adminEmail", Group: "ui", Label: "管理员联系邮箱", Kind: "email", Section: "ui", Key: "ADMIN_EMAIL", Environment: "DST_ADMIN_ADMIN_EMAIL"},
-	{ID: "ui.language", Group: "ui", Label: "系统语言", Kind: "select", Section: "ui", Key: "LANGUAGE", Environment: "DST_ADMIN_LANGUAGE", Default: "zh-CN", Options: []string{"zh-CN", "en-US", "ja-JP"}, Required: true},
+	{ID: "ui.language", Group: "ui", Label: "系统语言", Kind: "select", Section: "ui", Key: "LANGUAGE", Environment: "DST_ADMIN_LANGUAGE", Default: "zh-CN", Options: []string{"zh-CN", "en-US"}, Required: true, ReadOnly: true},
 	{ID: "ui.timezone", Group: "ui", Label: "时区设置", Kind: "select", Section: "ui", Key: "TIMEZONE", Environment: "DST_ADMIN_TIMEZONE", Default: "Asia/Shanghai", Options: []string{"Asia/Shanghai", "UTC", "America/Los_Angeles", "America/New_York", "Europe/Berlin", "Asia/Tokyo"}, Required: true},
 	{ID: "ui.dateFormat", Group: "ui", Label: "日期格式", Kind: "select", Section: "ui", Key: "DATE_FORMAT", Environment: "DST_ADMIN_DATE_FORMAT", Default: "YYYY-MM-DD", Options: []string{"YYYY-MM-DD", "MM/DD/YYYY", "DD/MM/YYYY", "YYYY年MM月DD日"}, Required: true},
 	{ID: "ui.theme", Group: "ui", Label: "主题颜色", Kind: "color", Section: "ui", Key: "THEME_COLOR", Environment: "DST_ADMIN_THEME_COLOR", Default: "#27272a", Required: true},

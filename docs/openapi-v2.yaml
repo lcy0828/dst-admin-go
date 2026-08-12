@@ -2937,7 +2937,7 @@ components:
           type: string
     SessionState:
       type: object
-      required: [authenticated, setupRequired]
+      required: [authenticated, setupRequired, preferences]
       properties:
         authenticated:
           type: boolean
@@ -2952,6 +2952,21 @@ components:
           type: string
         passwordChanged:
           type: boolean
+        preferences:
+          $ref: "#/components/schemas/UIPreferences"
+    UIPreferences:
+      type: object
+      additionalProperties: false
+      required: [systemName, timezone, dateFormat, themeColor]
+      properties:
+        systemName: { type: string, minLength: 1, maxLength: 256 }
+        timezone: { type: string, minLength: 1, maxLength: 64 }
+        dateFormat:
+          type: string
+          enum: [YYYY-MM-DD, MM/DD/YYYY, DD/MM/YYYY, YYYY年MM月DD日]
+        themeColor:
+          type: string
+          pattern: '^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$'
     SessionEnvelope:
       type: object
       required: [data, error, meta]

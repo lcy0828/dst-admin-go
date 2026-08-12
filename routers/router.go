@@ -238,6 +238,16 @@ func initApplication(manageBackground bool) (*Application, error) {
 		}
 		return httpapi.LoginSecurityPolicy{MaxAttempts: preferences.MaxLoginAttempts, BlockFor: 15 * time.Minute}
 	})
+	authHandler.SetUIPreferencesProvider(func() httpapi.UIPreferences {
+		preferences, runtimeErr := systemSettingsService.Runtime()
+		if runtimeErr != nil {
+			return httpapi.UIPreferences{SystemName: "饥荒管理系统", Timezone: "Asia/Shanghai", DateFormat: "YYYY-MM-DD", ThemeColor: "#27272a"}
+		}
+		return httpapi.UIPreferences{
+			SystemName: preferences.SystemName, Timezone: preferences.Timezone,
+			DateFormat: preferences.DateFormat, ThemeColor: preferences.Theme,
+		}
+	})
 	var containerTransport containers.Transport = containers.NewExecTransport()
 	if driver := os.Getenv("DST_ADMIN_TEST_CONTAINERS"); driver != "" {
 		if os.Getenv("DST_ADMIN_ENV") != "test" || driver != "memory" {

@@ -19,11 +19,19 @@ type AuthHandler struct {
 	mu       sync.Mutex
 	failures map[string]loginFailure
 	policy   func() LoginSecurityPolicy
+	ui       func() UIPreferences
 }
 
 type LoginSecurityPolicy struct {
 	MaxAttempts int
 	BlockFor    time.Duration
+}
+
+type UIPreferences struct {
+	SystemName string `json:"systemName"`
+	Timezone   string `json:"timezone"`
+	DateFormat string `json:"dateFormat"`
+	ThemeColor string `json:"themeColor"`
 }
 
 type loginFailure struct {
@@ -44,12 +52,18 @@ type changePasswordRequest struct {
 func NewAuthHandler(service *authn.Service) *AuthHandler {
 	return &AuthHandler{service: service, failures: make(map[string]loginFailure), policy: func() LoginSecurityPolicy {
 		return LoginSecurityPolicy{MaxAttempts: 5, BlockFor: 15 * time.Minute}
-	}}
+	}, ui: defaultUIPreferences}
 }
 
 func (h *AuthHandler) SetSecurityPolicyProvider(provider func() LoginSecurityPolicy) {
 	if provider != nil {
 		h.policy = provider
+	}
+}
+
+func (h *AuthHandler) SetUIPreferencesProvider(provider func() UIPreferences) {
+	if provider != nil {
+		h.ui = provider
 	}
 }
 
@@ -68,7 +82,7 @@ func (h *AuthHandler) Session(c *gin.Context) {
 		Failure(c, http.StatusInternalServerError, "AUTH_STORAGE_ERROR", "无法读取认证状态", nil)
 		return
 	}
-	result := gin.H{"authenticated": false, "setupRequired": required}
+	result := gin.H{"authenticated": false, "setupRequired": required, "preferences": h.ui()}
 	if rawToken, err := c.Cookie(authn.SessionCookieName); err == nil {
 		if authenticated, err := h.service.Authenticate(rawToken); err == nil {
 			result["authenticated"] = true
@@ -126,7 +140,7 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 		}
 	}
 	clearSessionCookie(c)
-	Success(c, http.StatusOK, gin.H{"authenticated": false, "setupRequired": false})
+	Success(c, http.StatusOK, gin.H{"authenticated": false, "setupRequired": false, "preferences": h.ui()})
 }
 
 func (h *AuthHandler) ChangePassword(c *gin.Context) {
@@ -150,7 +164,7 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		return
 	}
 	clearSessionCookie(c)
-	Success(c, http.StatusOK, gin.H{"authenticated": false, "setupRequired": false, "passwordChanged": true})
+	Success(c, http.StatusOK, gin.H{"authenticated": false, "setupRequired": false, "passwordChanged": true, "preferences": h.ui()})
 }
 
 func (h *AuthHandler) writeAuthenticated(c *gin.Context, authenticated *authn.AuthenticatedSession, rawToken string, status int) {
@@ -162,7 +176,12 @@ func (h *AuthHandler) writeAuthenticated(c *gin.Context, authenticated *authn.Au
 		"user":          gin.H{"id": authenticated.Admin.ID, "username": authenticated.Admin.Username},
 		"expiresAt":     authenticated.Session.ExpiresAt,
 		"csrfToken":     authenticated.CSRFToken,
+		"preferences":   h.ui(),
 	})
+}
+
+func defaultUIPreferences() UIPreferences {
+	return UIPreferences{SystemName: "饥荒管理系统", Timezone: "Asia/Shanghai", DateFormat: "YYYY-MM-DD", ThemeColor: "#27272a"}
 }
 
 func (h *AuthHandler) writeAuthError(c *gin.Context, err error) {

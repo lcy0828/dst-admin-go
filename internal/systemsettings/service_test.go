@@ -89,6 +89,10 @@ func TestSettingsExposeFieldKindsAndNumericBounds(t *testing.T) {
 	if emailEnabled.Group != "notification" || emailEnabled.Kind != "boolean" {
 		t.Fatalf("email field metadata=%#v", emailEnabled)
 	}
+	language := fieldByID(t, settings, "ui.language")
+	if language.Editable || len(language.Options) != 2 || language.Options[0] != "zh-CN" || language.Options[1] != "en-US" {
+		t.Fatalf("language capability metadata=%#v", language)
+	}
 }
 
 func TestIPWhitelistValidationAndMatching(t *testing.T) {
