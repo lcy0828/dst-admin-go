@@ -92,7 +92,7 @@ func TestCustomDefinitionsPersistExecuteAndDelete(t *testing.T) {
 		t.Fatalf("created = %#v, %v", created, err)
 	}
 	definitions, err := service.DefinitionsWithError()
-	if err != nil || len(definitions) != 8 {
+	if err != nil || len(definitions) != 14 {
 		t.Fatalf("definitions = %#v, %v", definitions, err)
 	}
 	request := ExecuteRequest{CommandID: created.ID, Arguments: map[string]interface{}{"message": `hello\"); c_shutdown()`}}
@@ -124,6 +124,110 @@ func TestCustomDefinitionsPersistExecuteAndDelete(t *testing.T) {
 	deleted, err := service.DeleteRuns(ListFilter{RoomID: "room"})
 	if err != nil || deleted != 1 {
 		t.Fatalf("deleted runs = %d, %v", deleted, err)
+	}
+}
+
+func TestGiveItemTargetsKUAndRejectsUnsafePrefab(t *testing.T) {
+	sender := &captureSender{}
+	service := newConsoleService(t, sender)
+	request := ExecuteRequest{
+		CommandID: "give_item", Confirmation: "周末服",
+		Arguments: map[string]interface{}{"player_id": "KU_SAFE_PLAYER", "prefab": "goldnugget", "count": float64(3)},
+	}
+	if _, err := service.Execute(context.Background(), "room", "world", request); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sender.script, `v.userid=="KU_SAFE_PLAYER"`) || !strings.Contains(sender.script, `SpawnPrefab("goldnugget")`) || !strings.Contains(sender.script, `for i=1,3`) {
+		t.Fatalf("unexpected give script: %s", sender.script)
+	}
+	request.Arguments["prefab"] = `flint");c_shutdown()`
+	if _, err := service.Execute(context.Background(), "room", "world", request); err != ErrInvalidArguments {
+		t.Fatalf("unsafe prefab error = %v", err)
+	}
+}
+
+func TestClockSegmentsRequireSixteenSegments(t *testing.T) {
+	sender := &captureSender{}
+	service := newConsoleService(t, sender)
+	request := ExecuteRequest{
+		CommandID: "set_clock_segments", Confirmation: "周末服",
+		Arguments: map[string]interface{}{"day": float64(10), "dusk": float64(4), "night": float64(1)},
+	}
+	if _, err := service.Execute(context.Background(), "room", "world", request); err != ErrInvalidArguments {
+		t.Fatalf("invalid segment error = %v", err)
+	}
+	request.Arguments["night"] = float64(2)
+	if _, err := service.Execute(context.Background(), "room", "world", request); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sender.script, `day=10,dusk=4,night=2`) {
+		t.Fatalf("unexpected clock script: %s", sender.script)
+	}
+}
+
+func TestSpawnEntityIsBoundedAndAnchoredToPlayer(t *testing.T) {
+	sender := &captureSender{}
+	service := newConsoleService(t, sender)
+	request := ExecuteRequest{
+		CommandID: "spawn_entity", Confirmation: "周末服",
+		Arguments: map[string]interface{}{"player_id": "KU_SAFE_PLAYER", "prefab": "pigman", "count": float64(21)},
+	}
+	if _, err := service.Execute(context.Background(), "room", "world", request); err != ErrInvalidArguments {
+		t.Fatalf("unbounded spawn error = %v", err)
+	}
+	request.Arguments["count"] = float64(2)
+	if _, err := service.Execute(context.Background(), "room", "world", request); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sender.script, `v.userid=="KU_SAFE_PLAYER"`) || !strings.Contains(sender.script, `SpawnPrefab("pigman")`) || !strings.Contains(sender.script, `GetWorldPosition()`) {
+		t.Fatalf("unexpected spawn script: %s", sender.script)
+	}
+}
+
+func TestWorldInfoAndNextPhaseCommandsAreBoundedTemplates(t *testing.T) {
+	sender := &captureSender{}
+	service := newConsoleService(t, sender)
+	if _, err := service.Execute(context.Background(), "room", "world", ExecuteRequest{CommandID: "world_info"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sender.script, `[DST-ADMIN-WORLD]`) || !strings.Contains(sender.script, `remainingdaysinseason`) {
+		t.Fatalf("unexpected world info script: %s", sender.script)
+	}
+	request := ExecuteRequest{CommandID: "next_phase"}
+	if _, err := service.Execute(context.Background(), "room", "world", request); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sender.script, `TheWorld:PushEvent("ms_nextphase")`) {
+		t.Fatalf("unexpected phase script: %s", sender.script)
+	}
+	request.Arguments = map[string]interface{}{"unexpected": true}
+	if _, err := service.Execute(context.Background(), "room", "world", request); err != ErrInvalidArguments {
+		t.Fatalf("unexpected phase arguments error = %v", err)
+	}
+}
+
+func TestRemoveNearbyEntitiesRequiresConfirmationAndLimitsScope(t *testing.T) {
+	sender := &captureSender{}
+	service := newConsoleService(t, sender)
+	request := ExecuteRequest{
+		CommandID: "remove_nearby_entities",
+		Arguments: map[string]interface{}{"player_id": "KU_SAFE_PLAYER", "prefab": "spoiled_food", "radius": float64(10), "maximum": float64(20)},
+	}
+	if _, err := service.Execute(context.Background(), "room", "world", request); err != ErrConfirmationNeeded {
+		t.Fatalf("confirmation error = %v", err)
+	}
+	request.Confirmation = "周末服"
+	if _, err := service.Execute(context.Background(), "room", "world", request); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`v.userid=="KU_SAFE_PLAYER"`, `e.prefab=="spoiled_food"`, `n>=20`, `<=100`} {
+		if !strings.Contains(sender.script, expected) {
+			t.Fatalf("missing %q in cleanup script: %s", expected, sender.script)
+		}
+	}
+	request.Arguments["maximum"] = float64(101)
+	if _, err := service.Execute(context.Background(), "room", "world", request); err != ErrInvalidArguments {
+		t.Fatalf("unbounded cleanup error = %v", err)
 	}
 }
 

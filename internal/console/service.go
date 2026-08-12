@@ -24,6 +24,8 @@ var (
 
 var parameterNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var placeholderPattern = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+var dstUserIDPattern = regexp.MustCompile(`^KU_[A-Za-z0-9_-]{3,64}$`)
+var prefabPattern = regexp.MustCompile(`^[a-z0-9_]{1,80}$`)
 
 type Sender interface {
 	Send(context.Context, string, string, string) error
@@ -59,7 +61,10 @@ func (s *Service) Definitions() []Definition {
 }
 
 func (s *Service) DefinitionsWithError() ([]Definition, error) {
-	order := []string{"save_world", "announce", "list_players", "set_season", "rollback", "shutdown", "regenerate"}
+	order := []string{
+		"world_info", "save_world", "announce", "list_players", "give_item", "set_season", "next_phase",
+		"set_clock_segments", "spawn_entity", "remove_nearby_entities", "rollback", "shutdown", "regenerate",
+	}
 	result := make([]Definition, 0, len(order))
 	for _, id := range order {
 		result = append(result, s.templates[id].definition)
@@ -205,7 +210,15 @@ func (s *Service) resolve(roomID, worldID string) (rooms.Room, rooms.World, erro
 
 func builtinTemplates() map[string]template {
 	minRollback, maxRollback := 1, 5
+	minCount, maxItemCount, maxEntityCount := 1, 40, 20
+	minRadius, maxRadius, maxRemoveCount := 1, 30, 100
+	minSegment, maxSegment := 0, 16
 	templates := map[string]template{
+		"world_info": simpleTemplate(
+			"world_info", "查询世界信息", "将天数、季节、昼夜、月相、温度和降水状态写入服务器日志",
+			"查询", RiskLow,
+			`print("[DST-ADMIN-WORLD]",(TheWorld.state.cycles or 0)+1,TheWorld.state.season or "unknown",TheWorld.state.remainingdaysinseason or -1,TheWorld.state.phase or "unknown",TheWorld.state.moonphase or "unknown",TheWorld.state.temperature or 0,tostring(TheWorld.state.israining))`,
+		),
 		"save_world":   simpleTemplate("save_world", "保存世界", "立即保存当前世界", "基础操作", RiskLow, "c_save()"),
 		"list_players": simpleTemplate("list_players", "列出玩家", "将当前玩家列表写入服务器日志", "查询", RiskLow, `for i,v in ipairs(TheNet:GetClientTable()) do print("[DST-ADMIN-PLAYER]",i,v.userid,v.name,v.prefab) end`),
 		"shutdown":     simpleTemplate("shutdown", "关闭分片", "保存并关闭当前分片", "危险操作", RiskHigh, "c_shutdown(true)"),
@@ -230,6 +243,119 @@ func builtinTemplates() map[string]template {
 				return "", err
 			}
 			return "TheWorld:PushEvent(\"ms_setseason\"," + quoteLua(season) + ")", nil
+		},
+	}
+	templates["next_phase"] = simpleTemplate(
+		"next_phase", "推进昼夜阶段", "将当前世界从白天推进到黄昏、从黄昏推进到夜晚，或从夜晚推进到白天",
+		"世界控制", RiskMedium, `TheWorld:PushEvent("ms_nextphase")`,
+	)
+	templates["give_item"] = template{
+		definition: Definition{
+			ID: "give_item", Name: "给予玩家物品", Description: "按 KU ID 向当前分片的在线玩家发放物品", Category: "玩家管理", Risk: RiskHigh,
+			Parameters: []Parameter{
+				{Name: "player_id", Label: "玩家 KU ID", Type: "string", Required: true, Description: "玩家必须在线且位于当前分片"},
+				{Name: "prefab", Label: "物品 Prefab", Type: "string", Required: true, Description: "例如 flint、goldnugget"},
+				{Name: "count", Label: "数量", Type: "integer", Required: true, Minimum: &minCount, Maximum: &maxItemCount, Default: 1},
+			},
+			Script: `按 KU ID 查找玩家并安全调用 SpawnPrefab 与 inventory:GiveItem`, IsBuiltin: true,
+		},
+		render: func(arguments map[string]interface{}) (string, error) {
+			playerID, err := matchedArgument(arguments, "player_id", dstUserIDPattern)
+			if err != nil {
+				return "", err
+			}
+			prefab, err := matchedArgument(arguments, "prefab", prefabPattern)
+			if err != nil {
+				return "", err
+			}
+			count, err := intArgument(arguments, "count", minCount, maxItemCount)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.components and p.components.inventory then local n=0;for i=1,%d do local item=SpawnPrefab(%s);if item then p.components.inventory:GiveItem(item);n=n+1 end end;print("[DST-ADMIN-GIVE]",%s,%s,n)else print("[DST-ADMIN-GIVE]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), count, quoteLua(prefab), quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
+		},
+	}
+	templates["set_clock_segments"] = template{
+		definition: Definition{
+			ID: "set_clock_segments", Name: "设置昼夜时段", Description: "调整一天中白天、黄昏和夜晚的时长，总和必须为 16", Category: "世界控制", Risk: RiskHigh,
+			Parameters: []Parameter{
+				{Name: "day", Label: "白天段数", Type: "integer", Required: true, Minimum: &minSegment, Maximum: &maxSegment, Default: 10},
+				{Name: "dusk", Label: "黄昏段数", Type: "integer", Required: true, Minimum: &minSegment, Maximum: &maxSegment, Default: 4},
+				{Name: "night", Label: "夜晚段数", Type: "integer", Required: true, Minimum: &minSegment, Maximum: &maxSegment, Default: 2},
+			},
+			Script: `TheWorld:PushEvent("ms_setclocksegs", {day={day}, dusk={dusk}, night={night}})`, IsBuiltin: true,
+		},
+		render: func(arguments map[string]interface{}) (string, error) {
+			day, err := intArgument(arguments, "day", minSegment, maxSegment)
+			if err != nil {
+				return "", err
+			}
+			dusk, err := intArgument(arguments, "dusk", minSegment, maxSegment)
+			if err != nil {
+				return "", err
+			}
+			night, err := intArgument(arguments, "night", minSegment, maxSegment)
+			if err != nil || day+dusk+night != 16 {
+				return "", ErrInvalidArguments
+			}
+			return fmt.Sprintf(`TheWorld:PushEvent("ms_setclocksegs",{day=%d,dusk=%d,night=%d})`, day, dusk, night), nil
+		},
+	}
+	templates["spawn_entity"] = template{
+		definition: Definition{
+			ID: "spawn_entity", Name: "在玩家附近生成实体", Description: "按 KU ID 在当前分片玩家附近生成指定 Prefab", Category: "世界控制", Risk: RiskCritical,
+			Parameters: []Parameter{
+				{Name: "player_id", Label: "玩家 KU ID", Type: "string", Required: true, Description: "实体将在该玩家附近生成"},
+				{Name: "prefab", Label: "实体 Prefab", Type: "string", Required: true, Description: "例如 pigman、hound"},
+				{Name: "count", Label: "数量", Type: "integer", Required: true, Minimum: &minCount, Maximum: &maxEntityCount, Default: 1},
+			},
+			Script: `按 KU ID 查找玩家，在其附近安全调用 SpawnPrefab`, IsBuiltin: true,
+		},
+		render: func(arguments map[string]interface{}) (string, error) {
+			playerID, err := matchedArgument(arguments, "player_id", dstUserIDPattern)
+			if err != nil {
+				return "", err
+			}
+			prefab, err := matchedArgument(arguments, "prefab", prefabPattern)
+			if err != nil {
+				return "", err
+			}
+			count, err := intArgument(arguments, "count", minCount, maxEntityCount)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.Transform then local x,y,z=p.Transform:GetWorldPosition();local n=0;for i=1,%d do local e=SpawnPrefab(%s);if e and e.Transform then local a=(i-1)*6.28318530718/%d;e.Transform:SetPosition(x+math.cos(a)*2,y,z+math.sin(a)*2);n=n+1 end end;print("[DST-ADMIN-SPAWN]",%s,%s,n)else print("[DST-ADMIN-SPAWN]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), count, quoteLua(prefab), count, quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
+		},
+	}
+	templates["remove_nearby_entities"] = template{
+		definition: Definition{
+			ID: "remove_nearby_entities", Name: "清理玩家附近实体", Description: "按 KU ID 清理玩家附近指定 Prefab，并限制半径和最大数量", Category: "世界控制", Risk: RiskCritical,
+			Parameters: []Parameter{
+				{Name: "player_id", Label: "玩家 KU ID", Type: "string", Required: true, Description: "以该在线玩家为清理中心"},
+				{Name: "prefab", Label: "实体 Prefab", Type: "string", Required: true, Description: "只移除完全匹配的 Prefab"},
+				{Name: "radius", Label: "半径", Type: "integer", Required: true, Minimum: &minRadius, Maximum: &maxRadius, Default: 10},
+				{Name: "maximum", Label: "最大数量", Type: "integer", Required: true, Minimum: &minCount, Maximum: &maxRemoveCount, Default: 20},
+			},
+			Script: `按 KU ID 查找玩家，在限定半径内移除最多指定数量的同名 Prefab`, IsBuiltin: true,
+		},
+		render: func(arguments map[string]interface{}) (string, error) {
+			playerID, err := matchedArgument(arguments, "player_id", dstUserIDPattern)
+			if err != nil {
+				return "", err
+			}
+			prefab, err := matchedArgument(arguments, "prefab", prefabPattern)
+			if err != nil {
+				return "", err
+			}
+			radius, err := intArgument(arguments, "radius", minRadius, maxRadius)
+			if err != nil {
+				return "", err
+			}
+			maximum, err := intArgument(arguments, "maximum", minCount, maxRemoveCount)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.Transform then local x,_,z=p.Transform:GetWorldPosition();local n=0;for _,e in pairs(Ents or {})do if n>=%d then break end;if e~=p and e.prefab==%s and e.Transform and e:IsValid()then local ex,_,ez=e.Transform:GetWorldPosition();local dx,dz=ex-x,ez-z;if dx*dx+dz*dz<=%d then e:Remove();n=n+1 end end end;print("[DST-ADMIN-REMOVE]",%s,%s,n)else print("[DST-ADMIN-REMOVE]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), maximum, quoteLua(prefab), radius*radius, quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
 		},
 	}
 	templates["rollback"] = template{
@@ -402,6 +528,14 @@ func enumArgument(arguments map[string]interface{}, name string, options ...stri
 		}
 	}
 	return "", ErrInvalidArguments
+}
+
+func matchedArgument(arguments map[string]interface{}, name string, pattern *regexp.Regexp) (string, error) {
+	value, err := stringArgument(arguments, name, 1, 80)
+	if err != nil || !pattern.MatchString(value) {
+		return "", ErrInvalidArguments
+	}
+	return value, nil
 }
 
 func intArgument(arguments map[string]interface{}, name string, minimum, maximum int) (int, error) {
