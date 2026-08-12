@@ -60,10 +60,13 @@ func (h *JobHandler) cancel(c *gin.Context) {
 }
 
 func (h *JobHandler) events(c *gin.Context) {
-	afterID := parseEventID(c.Query("after"))
-	if headerID := parseEventID(c.GetHeader("Last-Event-ID")); headerID > afterID {
+	afterValue, hasAfter := c.GetQuery("after")
+	headerValue := strings.TrimSpace(c.GetHeader("Last-Event-ID"))
+	afterID := parseEventID(afterValue)
+	if headerID := parseEventID(headerValue); headerID > afterID {
 		afterID = headerID
 	}
+	hasCursor := hasAfter || headerValue != ""
 	c.Header("Content-Type", "text/event-stream; charset=utf-8")
 	c.Header("Cache-Control", "no-cache, no-transform")
 	c.Header("Connection", "keep-alive")
@@ -76,6 +79,21 @@ func (h *JobHandler) events(c *gin.Context) {
 	}
 	signal, unsubscribe := h.service.Subscribe()
 	defer unsubscribe()
+	window, err := h.service.EventWindow()
+	if err != nil {
+		return
+	}
+	reset := false
+	if !hasCursor {
+		afterID = window.LastID
+	} else if afterID > window.LastID || window.FirstID > 0 && afterID < window.FirstID-1 {
+		afterID = window.LastID
+		reset = true
+	}
+	if _, err := fmt.Fprintf(c.Writer, "id: %d\nevent: job.cursor\ndata: {\"watermark\":%d,\"reset\":%t}\n\n", afterID, afterID, reset); err != nil {
+		return
+	}
+	flusher.Flush()
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
 	for {

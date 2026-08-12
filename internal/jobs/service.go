@@ -5,7 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
+
+var DefaultRetentionPolicy = RetentionPolicy{
+	EventMaxAge: 7 * 24 * time.Hour,
+	EventLimit:  10_000,
+	JobMaxAge:   90 * 24 * time.Hour,
+	JobLimit:    5_000,
+}
 
 type Broker struct {
 	mu          sync.Mutex
@@ -115,6 +123,28 @@ func (s *Service) List(filter ListFilter) ([]Job, int, error) { return s.store.L
 
 func (s *Service) EventsAfter(afterID int64, limit int) ([]Event, error) {
 	return s.store.EventsAfter(afterID, limit)
+}
+
+func (s *Service) EventWindow() (EventWindow, error) { return s.store.EventWindow() }
+
+func (s *Service) Prune(policy RetentionPolicy) (RetentionResult, error) {
+	return s.store.Prune(policy)
+}
+
+func (s *Service) RunRetention(ctx context.Context, interval time.Duration, policy RetentionPolicy) {
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_, _ = s.Prune(policy)
+		}
+	}
 }
 
 func (s *Service) Subscribe() (<-chan struct{}, func()) { return s.broker.Subscribe() }

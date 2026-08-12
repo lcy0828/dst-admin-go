@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -378,6 +379,92 @@ func (s *Store) EventsAfter(afterID int64, limit int) ([]Event, error) {
 		events = append(events, Event{ID: record.ID, JobID: record.JobID, Type: record.Type, Data: job, CreatedAt: record.CreatedAt})
 	}
 	return events, nil
+}
+
+func (s *Store) EventWindow() (EventWindow, error) {
+	var first, last sql.NullInt64
+	if err := s.db.Table(s.eventsTable).Select("MIN(id), MAX(id)").Row().Scan(&first, &last); err != nil {
+		return EventWindow{}, fmt.Errorf("read job event window: %w", err)
+	}
+	return EventWindow{FirstID: first.Int64, LastID: last.Int64}, nil
+}
+
+func (s *Store) Prune(policy RetentionPolicy) (RetentionResult, error) {
+	if policy.EventMaxAge <= 0 || policy.EventLimit <= 0 || policy.JobMaxAge <= 0 || policy.JobLimit <= 0 {
+		return RetentionResult{}, errors.New("job retention policy is invalid")
+	}
+	now := s.now().UTC()
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return RetentionResult{}, tx.Error
+	}
+	rollback := func(err error) (RetentionResult, error) {
+		tx.Rollback()
+		return RetentionResult{}, err
+	}
+	result := RetentionResult{}
+	deletedEvents := tx.Table(s.eventsTable).Where("created_at < ?", now.Add(-policy.EventMaxAge)).Delete(&eventRecord{})
+	if deletedEvents.Error != nil {
+		return rollback(deletedEvents.Error)
+	}
+	result.EventsDeleted += deletedEvents.RowsAffected
+
+	var eventCount int
+	if err := tx.Table(s.eventsTable).Count(&eventCount).Error; err != nil {
+		return rollback(err)
+	}
+	if excess := eventCount - policy.EventLimit; excess > 0 {
+		var boundary eventRecord
+		if err := tx.Table(s.eventsTable).Select("id").Order("id ASC").Offset(excess - 1).Limit(1).First(&boundary).Error; err != nil {
+			return rollback(err)
+		}
+		deleted := tx.Table(s.eventsTable).Where("id <= ?", boundary.ID).Delete(&eventRecord{})
+		if deleted.Error != nil {
+			return rollback(deleted.Error)
+		}
+		result.EventsDeleted += deleted.RowsAffected
+	}
+
+	terminal := []Status{StatusSucceeded, StatusFailed, StatusCanceled}
+	var terminalRecords []jobRecord
+	if err := tx.Table(s.jobsTable).Select("id, finished_at").Where("status IN (?)", terminal).
+		Order("COALESCE(finished_at, created_at) DESC").Find(&terminalRecords).Error; err != nil {
+		return rollback(err)
+	}
+	deleteIDs := make(map[string]struct{})
+	cutoff := now.Add(-policy.JobMaxAge)
+	for index, record := range terminalRecords {
+		if index >= policy.JobLimit || record.FinishedAt != nil && record.FinishedAt.Before(cutoff) {
+			deleteIDs[record.ID] = struct{}{}
+		}
+	}
+	ids := make([]string, 0, len(deleteIDs))
+	for id := range deleteIDs {
+		ids = append(ids, id)
+	}
+	for start := 0; start < len(ids); start += 400 {
+		end := min(start+400, len(ids))
+		batch := ids[start:end]
+		deleted := tx.Table(s.targetsTable).Where("job_id IN (?)", batch).Delete(&targetRecord{})
+		if deleted.Error != nil {
+			return rollback(deleted.Error)
+		}
+		result.TargetsDeleted += deleted.RowsAffected
+		deleted = tx.Table(s.eventsTable).Where("job_id IN (?)", batch).Delete(&eventRecord{})
+		if deleted.Error != nil {
+			return rollback(deleted.Error)
+		}
+		result.EventsDeleted += deleted.RowsAffected
+		deleted = tx.Table(s.jobsTable).Where("id IN (?) AND status IN (?)", batch, terminal).Delete(&jobRecord{})
+		if deleted.Error != nil {
+			return rollback(deleted.Error)
+		}
+		result.JobsDeleted += deleted.RowsAffected
+	}
+	if err := tx.Commit().Error; err != nil {
+		return RetentionResult{}, err
+	}
+	return result, nil
 }
 
 func (s *Store) commitEvent(tx *gorm.DB, eventType, jobID string) (Job, Event, error) {

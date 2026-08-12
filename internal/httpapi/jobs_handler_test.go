@@ -17,7 +17,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func TestJobEventsResumeFromLastEventID(t *testing.T) {
+func TestJobEventsStartAtCurrentWatermarkAndResumeFromLastEventID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db, err := gorm.Open("sqlite3", ":memory:")
 	if err != nil {
@@ -57,12 +57,25 @@ func TestJobEventsResumeFromLastEventID(t *testing.T) {
 
 	router := gin.New()
 	NewJobHandler(service).Register(router.Group("/api/v2"))
-	request := httptest.NewRequest(http.MethodGet, "/api/v2/jobs/events?after=0", nil)
-	request.Header.Set("Last-Event-ID", strconv.FormatInt(resumeAfter, 10))
+	request := httptest.NewRequest(http.MethodGet, "/api/v2/jobs/events", nil)
 	requestContext, cancel := context.WithCancel(request.Context())
 	cancel()
 	request = request.WithContext(requestContext)
 	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if ids := streamEventIDs(t, recorder.Body.String()); len(ids) != 1 || ids[0] != expectedID {
+		t.Fatalf("fresh stream ids = %v, expected watermark [%d]", ids, expectedID)
+	}
+	if !strings.Contains(recorder.Body.String(), "event: job.cursor") || !strings.Contains(recorder.Body.String(), `"reset":false`) {
+		t.Fatalf("fresh stream did not expose cursor: %s", recorder.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/v2/jobs/events", nil)
+	request.Header.Set("Last-Event-ID", strconv.FormatInt(resumeAfter, 10))
+	requestContext, cancel = context.WithCancel(request.Context())
+	cancel()
+	request = request.WithContext(requestContext)
+	recorder = httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
@@ -74,8 +87,61 @@ func TestJobEventsResumeFromLastEventID(t *testing.T) {
 	if recorder.Header().Get("Cache-Control") != "no-cache, no-transform" || recorder.Header().Get("X-Accel-Buffering") != "no" {
 		t.Fatalf("unexpected stream headers: %#v", recorder.Header())
 	}
-	if ids := streamEventIDs(t, recorder.Body.String()); len(ids) != 1 || ids[0] != expectedID {
-		t.Fatalf("replayed event ids = %v, expected [%d]", ids, expectedID)
+	if ids := streamEventIDs(t, recorder.Body.String()); len(ids) != 2 || ids[0] != resumeAfter || ids[1] != expectedID {
+		t.Fatalf("resumed event ids = %v, expected cursor %d then event %d", ids, resumeAfter, expectedID)
+	}
+}
+
+func TestJobEventsResetCursorOutsideRetentionWindow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SingularTable(true)
+	db.LogMode(false)
+	db.DB().SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	store := jobs.NewStore(db, "sse_reset_")
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	service, err := jobs.NewService(store, jobs.NewBroker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _, err := store.Create("system.refresh", "", "", []jobs.TargetSpec{{ID: "local", Name: "当前节点"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	window, err := store.EventWindow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`INSERT INTO sse_reset_job_event (job_id, type, data, created_at) VALUES (?, ?, ?, ?)`,
+		job.ID, "job.created", "{}", time.Now().UTC()).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`DELETE FROM sse_reset_job_event WHERE id = ?`, window.FirstID).Error; err != nil {
+		t.Fatal(err)
+	}
+	window, err = store.EventWindow()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	router := gin.New()
+	NewJobHandler(service).Register(router.Group("/api/v2"))
+	request := httptest.NewRequest(http.MethodGet, "/api/v2/jobs/events?after=0", nil)
+	requestContext, cancel := context.WithCancel(request.Context())
+	cancel()
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request.WithContext(requestContext))
+	if ids := streamEventIDs(t, recorder.Body.String()); len(ids) != 1 || ids[0] != window.LastID {
+		t.Fatalf("reset stream ids = %v, expected [%d]", ids, window.LastID)
+	}
+	if !strings.Contains(recorder.Body.String(), `"reset":true`) {
+		t.Fatalf("reset stream did not mark reset: %s", recorder.Body.String())
 	}
 }
 

@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -116,6 +117,75 @@ func TestRecoversQueuedAndRunningJobsAfterRestart(t *testing.T) {
 	}
 	if recovered.Status != StatusFailed || recovered.Error == nil || recovered.Error.Code != "SERVER_RESTARTED" || recovered.Targets[0].Status != StatusFailed {
 		t.Fatalf("unexpected recovered job: %#v", recovered)
+	}
+}
+
+func TestRetentionPrunesTerminalJobsAndEventsButKeepsRunningJobs(t *testing.T) {
+	service, store := newTestJobService(t)
+	base := time.Unix(1_786_500_000, 0).UTC()
+	store.now = func() time.Time { return base.Add(-100 * 24 * time.Hour) }
+	old, _, err := store.Create("backup.create", "room-1", "", []TargetSpec{{ID: "room-1", Name: "旧备份"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.MarkRunning(old.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecordTarget(old.ID, TargetResult{TargetID: "room-1", Status: StatusSucceeded}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Complete(old.ID, nil, false); err != nil {
+		t.Fatal(err)
+	}
+
+	store.now = func() time.Time { return base }
+	kept, _, err := store.Create("map.generate", "room-1", "", []TargetSpec{{ID: "master", Name: "运行中地图"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.MarkRunning(kept.ID); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 4; index++ {
+		job, _, createErr := store.Create("system.refresh", "", "", []TargetSpec{{ID: fmt.Sprintf("target-%d", index), Name: "刷新"}})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, _, createErr = store.MarkRunning(job.ID); createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, _, createErr = store.RecordTarget(job.ID, TargetResult{TargetID: fmt.Sprintf("target-%d", index), Status: StatusSucceeded}); createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, _, createErr = store.Complete(job.ID, nil, false); createErr != nil {
+			t.Fatal(createErr)
+		}
+	}
+
+	result, err := service.Prune(RetentionPolicy{EventMaxAge: 7 * 24 * time.Hour, EventLimit: 6, JobMaxAge: 90 * 24 * time.Hour, JobLimit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.JobsDeleted != 3 || result.TargetsDeleted != 3 || result.EventsDeleted == 0 {
+		t.Fatalf("retention result = %#v", result)
+	}
+	if _, err := service.Get(old.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old job error = %v", err)
+	}
+	if running, err := service.Get(kept.ID); err != nil || running.Status != StatusRunning {
+		t.Fatalf("running job = %#v, error = %v", running, err)
+	}
+	events, err := service.EventsAfter(0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) > 6 {
+		t.Fatalf("retained event count = %d, want at most 6", len(events))
+	}
+	for _, event := range events {
+		if event.JobID == old.ID {
+			t.Fatal("old job event survived retention")
+		}
 	}
 }
 

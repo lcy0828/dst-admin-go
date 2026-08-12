@@ -85,3 +85,21 @@ type ListFilter struct {
 	Limit  int
 	Offset int
 }
+
+type EventWindow struct {
+	FirstID int64
+	LastID  int64
+}
+
+type RetentionPolicy struct {
+	EventMaxAge time.Duration
+	EventLimit  int
+	JobMaxAge   time.Duration
+	JobLimit    int
+}
+
+type RetentionResult struct {
+	EventsDeleted  int64
+	JobsDeleted    int64
+	TargetsDeleted int64
+}
