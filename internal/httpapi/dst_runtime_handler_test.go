@@ -90,9 +90,23 @@ type runtimeHandlerProcess struct {
 type runtimeHandlerBridge struct {
 	events          dstruntime.EventBatch
 	diagnostic      dstruntime.DiagnosticReport
+	lifecycle       dstruntime.LifecycleResult
 	eventsErr       error
 	diagnosticErr   error
+	lifecycleErr    error
+	activateCalls   int
+	reloadCalls     int
 	captureRequests []dstruntime.DiagnosticRequest
+}
+
+func (b *runtimeHandlerBridge) Activate(context.Context, string, string) (dstruntime.LifecycleResult, error) {
+	b.activateCalls++
+	return b.lifecycle, b.lifecycleErr
+}
+
+func (b *runtimeHandlerBridge) Reload(context.Context, string, string) (dstruntime.LifecycleResult, error) {
+	b.reloadCalls++
+	return b.lifecycle, b.lifecycleErr
 }
 
 func (b *runtimeHandlerBridge) ReadEvents(context.Context, string, string) (dstruntime.EventBatch, error) {
@@ -237,6 +251,32 @@ func TestDSTRuntimeEventAndDiagnosticEndpoints(t *testing.T) {
 	if len(bridge.captureRequests) != 1 || bridge.captureRequests[0].RequestID == "" || bridge.captureRequests[0].Prefab != "pigking" {
 		t.Fatalf("capture requests = %#v", bridge.captureRequests)
 	}
+}
+
+func TestDSTRuntimeLifecycleEndpointsUseTheManagedBridge(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	_, manager, catalog, process := newRuntimeHandlerTestApp(t)
+	worldID := rooms.EncodeID("Master")
+	bridge := &runtimeHandlerBridge{lifecycle: dstruntime.LifecycleResult{
+		RoomID: catalog.room.ID, WorldID: worldID, WorldName: "地面", Mode: dstruntime.LifecycleModeActivate,
+		Health:  dstruntime.Health{SchemaVersion: 1, ProducerVersion: dstruntime.RuntimeVersion, Running: true, Ready: true},
+		Message: "activated",
+	}}
+	router := gin.New()
+	NewDSTRuntimeHandler(manager, catalog, process, bridge).Register(router.Group("/api/v2"))
+	base := "/api/v2/rooms/" + catalog.room.ID + "/worlds/" + worldID + "/runtime/actions/"
+
+	response := performJSON(router, http.MethodPost, base+"activate", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	response = performJSON(router, http.MethodPost, base+"reload", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if bridge.activateCalls != 1 || bridge.reloadCalls != 1 {
+		t.Fatalf("lifecycle calls activate=%d reload=%d", bridge.activateCalls, bridge.reloadCalls)
+	}
+
+	bridge.lifecycleErr = dstruntime.ErrRuntimeActivation
+	response = performJSON(router, http.MethodPost, base+"reload", nil, nil, "")
+	assertStatus(t, response, http.StatusConflict)
 }
 
 func TestDSTRuntimeResultErrorsAreActionable(t *testing.T) {

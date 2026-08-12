@@ -1,7 +1,6 @@
 package dstruntime
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,7 +22,9 @@ const (
 	maxRuntimeResultBytes    = int64(256 * 1024)
 	defaultCommandTimeout    = 5 * time.Second
 	defaultDiagnosticTimeout = 8 * time.Second
+	defaultLifecycleTimeout  = 10 * time.Second
 	defaultPollInterval      = 100 * time.Millisecond
+	managedActivationScript  = `TheSim:GetPersistentString("../dst-admin/bootstrap.lua",function(ok,source) if not ok or type(source)~="string" then print("[DST-ADMIN-RUNTIME ERROR] code=BOOTSTRAP_UNAVAILABLE") return end local chunk,compile_error=loadstring(source) if chunk==nil then print("[DST-ADMIN-RUNTIME ERROR] code=BOOTSTRAP_COMPILE_FAILED message="..tostring(compile_error)) return end local executed,runtime_error=xpcall(chunk,debug.traceback) if not executed then print("[DST-ADMIN-RUNTIME ERROR] code=BOOTSTRAP_EXECUTE_FAILED message="..tostring(runtime_error)) end end)`
 )
 
 var (
@@ -77,6 +78,127 @@ func NewBridge(manager *Manager, process RuntimeProcess, sender CommandSender) (
 		manager: manager, process: process, sender: sender, now: time.Now,
 		timeout: defaultCommandTimeout, pollInterval: defaultPollInterval, locks: make(map[string]*sync.Mutex),
 	}, nil
+}
+
+func (b *Bridge) Activate(ctx context.Context, roomID, worldID string) (LifecycleResult, error) {
+	room, world, worldPath, err := b.resolveWorld(roomID, worldID)
+	if err != nil {
+		return LifecycleResult{}, err
+	}
+	lock := b.worldLock(worldPath)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := b.lifecycleReady(ctx, room, world, worldPath); err != nil {
+		return LifecycleResult{}, err
+	}
+	if health, healthErr := b.manager.Health(room.ID, world.ID); healthErr == nil && b.validLifecycleHealth(worldPath, health, time.Time{}) {
+		return LifecycleResult{
+			RoomID: room.ID, WorldID: world.ID, WorldName: world.Name, Mode: LifecycleModeCurrent,
+			Health: health, Message: "DST Admin 运行时已在当前分片健康运行",
+		}, nil
+	}
+	startedAt := b.now().UTC()
+	if err := b.sender.Send(ctx, room.DirectoryName, world.DirectoryName, managedActivationScript); err != nil {
+		return LifecycleResult{}, fmt.Errorf("%w: send managed bootstrap: %v", ErrRuntimeActivation, err)
+	}
+	health, err := b.waitForLifecycleHealth(ctx, room.ID, world.ID, worldPath, startedAt, "")
+	if err != nil {
+		return LifecycleResult{}, err
+	}
+	return LifecycleResult{
+		RoomID: room.ID, WorldID: world.ID, WorldName: world.Name, Mode: LifecycleModeActivate,
+		Health: health, Message: "DST Admin 运行时已在不中断分片的情况下激活",
+	}, nil
+}
+
+func (b *Bridge) Reload(ctx context.Context, roomID, worldID string) (LifecycleResult, error) {
+	room, world, worldPath, err := b.resolveWorld(roomID, worldID)
+	if err != nil {
+		return LifecycleResult{}, err
+	}
+	lock := b.worldLock(worldPath)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := b.lifecycleReady(ctx, room, world, worldPath); err != nil {
+		return LifecycleResult{}, err
+	}
+	previous, err := b.manager.Health(room.ID, world.ID)
+	if err != nil || !b.validLifecycleHealth(worldPath, previous, time.Time{}) {
+		return LifecycleResult{}, fmt.Errorf("%w: current runtime health is unavailable", ErrRuntimeUnavailable)
+	}
+	startedAt := b.now().UTC()
+	const reloadScript = `local runtime=rawget(_G,"DSTAdmin"); if runtime~=nil and type(runtime.Reload)=="function" then runtime.Reload() else print("[DST-ADMIN-RUNTIME ERROR] code=RELOAD_UNAVAILABLE") end`
+	if err := b.sender.Send(ctx, room.DirectoryName, world.DirectoryName, reloadScript); err != nil {
+		return LifecycleResult{}, fmt.Errorf("%w: send managed reload: %v", ErrRuntimeActivation, err)
+	}
+	health, err := b.waitForLifecycleHealth(ctx, room.ID, world.ID, worldPath, startedAt, previous.ProducerInstanceID)
+	if err != nil {
+		return LifecycleResult{}, err
+	}
+	return LifecycleResult{
+		RoomID: room.ID, WorldID: world.ID, WorldName: world.Name, Mode: LifecycleModeReload,
+		Health: health, Message: "DST Admin 运行时已热重载，分片未重启",
+	}, nil
+}
+
+func (b *Bridge) lifecycleReady(ctx context.Context, room rooms.Room, world rooms.World, worldPath string) error {
+	running, err := b.process.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
+	if err != nil {
+		return fmt.Errorf("inspect runtime process: %w", err)
+	}
+	if !running {
+		return fmt.Errorf("%w: shard is not running", ErrRuntimeUnavailable)
+	}
+	status := b.manager.inspect(room, world)
+	if status.State != InstallStateInstalled {
+		return fmt.Errorf("%w: %s", ErrRuntimeNotInstalled, status.Message)
+	}
+	if err := ensureRuntimeOutputDirectory(worldPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (b *Bridge) waitForLifecycleHealth(ctx context.Context, roomID, worldID, worldPath string, startedAt time.Time, previousInstanceID string) (Health, error) {
+	deadline := time.NewTimer(defaultLifecycleTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(b.pollInterval)
+	defer ticker.Stop()
+	for {
+		health, err := b.manager.Health(roomID, worldID)
+		if err == nil && b.validLifecycleHealth(worldPath, health, startedAt) && (previousInstanceID == "" || health.ProducerInstanceID != previousInstanceID) {
+			return health, nil
+		}
+		select {
+		case <-ctx.Done():
+			return Health{}, ctx.Err()
+		case <-deadline.C:
+			return Health{}, fmt.Errorf("%w: managed runtime did not publish fresh healthy state", ErrRuntimeActivation)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (b *Bridge) validLifecycleHealth(worldPath string, health Health, startedAt time.Time) bool {
+	if health.ProducerVersion != RuntimeVersion || !health.Running || !health.Ready || health.Writing || health.LastError != nil || health.ConsecutiveFailures != 0 {
+		return false
+	}
+	if !startedAt.IsZero() && health.ReadAt.Before(startedAt) {
+		return false
+	}
+	if b.now().UTC().Sub(health.ReadAt) > defaultFreshFor {
+		return false
+	}
+	if shardID, err := configuredShardID(worldPath); err != nil || shardID != "" && health.ShardID != shardID {
+		return false
+	}
+	for _, name := range []string{"worldstate", "commands", "events", "diagnostics"} {
+		module, exists := health.Modules[name]
+		if !exists || !module.Running || !module.Ready || module.Busy || module.LastError != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *Bridge) ExecuteCommand(ctx context.Context, roomID, worldID string, request CommandRequest) (CommandReceipt, error) {
@@ -317,9 +439,7 @@ func decodeCommandReceipt(path, expectedSession string, request CommandRequest, 
 		return CommandReceipt{}, os.ErrNotExist
 	}
 	var value CommandReceipt
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil {
+	if err := decodeStrictJSON(data, &value); err != nil {
 		return CommandReceipt{}, fmt.Errorf("%w: decode command receipt: %v", ErrRuntimeResultInvalid, err)
 	}
 	if value.RequestID != request.RequestID || value.Action != request.Action {
@@ -406,9 +526,7 @@ func decodeEventBatch(path, expectedSession string, now time.Time) (EventBatch, 
 		return EventBatch{}, os.ErrNotExist
 	}
 	var value EventBatch
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil {
+	if err := decodeStrictJSON(data, &value); err != nil {
 		return EventBatch{}, fmt.Errorf("%w: decode event batch: %v", ErrRuntimeResultInvalid, err)
 	}
 	if value.SchemaVersion != 1 || value.ProducerVersion == "" || value.ProducerInstanceID == "" || value.SessionID == "" || value.ShardID == "" ||
@@ -491,9 +609,7 @@ func decodeDiagnosticReport(path, expectedSession string, now time.Time) (Diagno
 		return DiagnosticReport{}, os.ErrNotExist
 	}
 	var value DiagnosticReport
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil {
+	if err := decodeStrictJSON(data, &value); err != nil {
 		return DiagnosticReport{}, fmt.Errorf("%w: decode diagnostic report: %v", ErrRuntimeResultInvalid, err)
 	}
 	if value.SchemaVersion != 1 || value.ProducerVersion == "" || value.ProducerInstanceID == "" || value.SessionID == "" || value.ShardID == "" ||

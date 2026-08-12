@@ -23,6 +23,7 @@ var (
 	ErrRuntimeResultStale    = errors.New("DST Admin runtime result is stale")
 	ErrRuntimeResultInvalid  = errors.New("DST Admin runtime result is invalid")
 	ErrRuntimeRequestInvalid = errors.New("DST Admin runtime request is invalid")
+	ErrRuntimeActivation     = errors.New("DST Admin runtime activation failed")
 )
 
 type InstallState string
@@ -69,6 +70,23 @@ type WorldReport struct {
 	HealthState    HealthState `json:"healthState"`
 	Health         *Health     `json:"health,omitempty"`
 	HealthMessage  string      `json:"healthMessage,omitempty"`
+}
+
+type LifecycleMode string
+
+const (
+	LifecycleModeActivate LifecycleMode = "activate"
+	LifecycleModeReload   LifecycleMode = "reload"
+	LifecycleModeCurrent  LifecycleMode = "current"
+)
+
+type LifecycleResult struct {
+	RoomID    string        `json:"roomId"`
+	WorldID   string        `json:"worldId"`
+	WorldName string        `json:"worldName"`
+	Mode      LifecycleMode `json:"mode"`
+	Health    Health        `json:"health"`
+	Message   string        `json:"message"`
 }
 
 type Snapshot struct {
@@ -148,11 +166,15 @@ type Health struct {
 }
 
 type ModuleHealth struct {
-	Running   bool    `json:"running"`
-	Ready     bool    `json:"ready"`
-	Busy      bool    `json:"busy,omitempty"`
-	Sequence  int64   `json:"sequence,omitempty"`
-	LastError *string `json:"lastError,omitempty"`
+	Running                  bool     `json:"running"`
+	Ready                    bool     `json:"ready"`
+	Busy                     bool     `json:"busy,omitempty"`
+	Sequence                 int64    `json:"sequence,omitempty"`
+	LastCapturedAtUnix       *int64   `json:"lastCapturedAtUnix,omitempty"`
+	LastWrittenAtUnix        *int64   `json:"lastWrittenAtUnix,omitempty"`
+	LastDurationMilliseconds *float64 `json:"lastDurationMilliseconds,omitempty"`
+	ConsecutiveFailures      int      `json:"consecutiveFailures,omitempty"`
+	LastError                *string  `json:"lastError,omitempty"`
 }
 
 type CommandRequest struct {

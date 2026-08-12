@@ -26,6 +26,8 @@ type DSTRuntimeManager interface {
 }
 
 type DSTRuntimeBridge interface {
+	Activate(context.Context, string, string) (dstruntime.LifecycleResult, error)
+	Reload(context.Context, string, string) (dstruntime.LifecycleResult, error)
 	ReadEvents(context.Context, string, string) (dstruntime.EventBatch, error)
 	LatestDiagnostic(context.Context, string, string) (dstruntime.DiagnosticReport, error)
 	CaptureDiagnostic(context.Context, string, string, dstruntime.DiagnosticRequest) (dstruntime.DiagnosticReport, error)
@@ -72,12 +74,40 @@ func (h *DSTRuntimeHandler) Register(v2 *gin.RouterGroup) {
 	room.GET("/runtime", h.status)
 	room.POST("/runtime/actions/install", h.installRoom)
 	room.POST("/worlds/:worldId/runtime/actions/install", h.installWorld)
+	room.POST("/worlds/:worldId/runtime/actions/activate", h.activate)
+	room.POST("/worlds/:worldId/runtime/actions/reload", h.reload)
 	room.GET("/worlds/:worldId/runtime/backups", h.backups)
 	room.GET("/worlds/:worldId/runtime/events", h.events)
 	room.GET("/worlds/:worldId/runtime/diagnostics/latest", h.latestDiagnostic)
 	room.POST("/worlds/:worldId/runtime/diagnostics", h.captureDiagnostic)
 	room.POST("/worlds/:worldId/runtime/actions/rollback", h.rollback)
 	room.DELETE("/worlds/:worldId/runtime", h.uninstall)
+}
+
+func (h *DSTRuntimeHandler) activate(c *gin.Context) {
+	if h.bridge == nil {
+		dstRuntimeFailure(c, dstruntime.ErrRuntimeUnavailable)
+		return
+	}
+	value, err := h.bridge.Activate(c.Request.Context(), c.Param("roomId"), c.Param("worldId"))
+	if err != nil {
+		dstRuntimeFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
+}
+
+func (h *DSTRuntimeHandler) reload(c *gin.Context) {
+	if h.bridge == nil {
+		dstRuntimeFailure(c, dstruntime.ErrRuntimeUnavailable)
+		return
+	}
+	value, err := h.bridge.Reload(c.Request.Context(), c.Param("roomId"), c.Param("worldId"))
+	if err != nil {
+		dstRuntimeFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
 }
 
 func (h *DSTRuntimeHandler) events(c *gin.Context) {
@@ -164,7 +194,10 @@ func (h *DSTRuntimeHandler) status(c *gin.Context) {
 		}
 		report.Health = &health
 		report.HealthState = runtimeHealthState(health, report.ProcessRunning)
-		if health.LastError != nil {
+		if report.ProcessRunning && status.Version != "" && health.ProducerVersion != status.Version {
+			report.HealthState = dstruntime.HealthStateDegraded
+			report.HealthMessage = "运行中的版本为 " + health.ProducerVersion + "，已安装版本为 " + status.Version + "；请激活以应用新版本"
+		} else if health.LastError != nil {
 			report.HealthMessage = *health.LastError
 		}
 		items = append(items, report)
@@ -294,6 +327,8 @@ func dstRuntimeFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusNotFound, "RUNTIME_RESULT_NOT_FOUND", "运行时尚未产生对应结果", nil)
 	case errors.Is(err, dstruntime.ErrRuntimeUnavailable), errors.Is(err, dstruntime.ErrRuntimeNotInstalled):
 		Failure(c, http.StatusConflict, "RUNTIME_UNAVAILABLE", "目标分片运行时尚未就绪", nil)
+	case errors.Is(err, dstruntime.ErrRuntimeActivation):
+		Failure(c, http.StatusConflict, "RUNTIME_ACTIVATION_FAILED", "运行时未能在限定时间内进入健康状态；分片未重启，也不会自动重试", nil)
 	case errors.Is(err, dstruntime.ErrRuntimeResultStale), errors.Is(err, dstruntime.ErrRuntimeResultInvalid):
 		Failure(c, http.StatusConflict, "RUNTIME_RESULT_INVALID", "运行时结果已过期或损坏", nil)
 	default:

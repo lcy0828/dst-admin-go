@@ -181,6 +181,11 @@ func (m *Manager) Health(roomID, worldID string) (Health, error) {
 	if health.SchemaVersion != 1 || health.ProducerVersion == "" || health.ProducerInstanceID == "" || health.SessionID == "" || health.ShardID == "" || health.Sequence < 0 || health.ConsecutiveFailures < 0 {
 		return Health{}, ErrSnapshotInvalid
 	}
+	for _, module := range health.Modules {
+		if module.Sequence < 0 || module.ConsecutiveFailures < 0 || !validMetric(module.LastDurationMilliseconds) || module.LastCapturedAtUnix != nil && *module.LastCapturedAtUnix < 1 || module.LastWrittenAtUnix != nil && *module.LastWrittenAtUnix < 1 {
+			return Health{}, ErrSnapshotInvalid
+		}
+	}
 	if expectedSession := currentSessionID(worldPath); expectedSession != "" && health.SessionID != expectedSession {
 		return Health{}, fmt.Errorf("%w: health session %q does not match %q", ErrSnapshotStale, health.SessionID, expectedSession)
 	}
@@ -292,7 +297,11 @@ func readWorldStateSnapshot(path, expectedSession, expectedShard string, now tim
 }
 
 func decodeStrictJSON(data []byte, destination interface{}) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	payload, err := persistentJSONPayload(data)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return err
@@ -305,6 +314,39 @@ func decodeStrictJSON(data []byte, destination interface{}) error {
 		return err
 	}
 	return nil
+}
+
+func persistentJSONPayload(data []byte) ([]byte, error) {
+	data = bytes.TrimSpace(data)
+	if !bytes.HasPrefix(data, []byte("KLEI")) {
+		return data, nil
+	}
+	index := len("KLEI")
+	if index >= len(data) || !isJSONHeaderSpace(data[index]) {
+		return nil, errors.New("invalid KLEI persistent JSON header")
+	}
+	for index < len(data) && isJSONHeaderSpace(data[index]) {
+		index++
+	}
+	versionStart := index
+	for index < len(data) && data[index] >= '0' && data[index] <= '9' {
+		index++
+	}
+	if versionStart == index || index-versionStart > 10 || index >= len(data) || !isJSONHeaderSpace(data[index]) {
+		return nil, errors.New("invalid KLEI persistent JSON header")
+	}
+	for index < len(data) && isJSONHeaderSpace(data[index]) {
+		index++
+	}
+	payload := bytes.TrimSpace(data[index:])
+	if len(payload) == 0 || payload[0] != '{' {
+		return nil, errors.New("invalid KLEI persistent JSON payload")
+	}
+	return payload, nil
+}
+
+func isJSONHeaderSpace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n'
 }
 
 func configuredShardID(worldPath string) (string, error) {

@@ -452,6 +452,30 @@ paths:
       responses:
         "200": { description: Runtime installation result, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeStatusEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/worlds/{worldId}/runtime/actions/activate:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    post:
+      tags: [Runtime]
+      operationId: activateWorldRuntime
+      summary: Activate the installed managed runtime without restarting the shard
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Current or newly activated runtime health, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeLifecycleEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/worlds/{worldId}/runtime/actions/reload:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    post:
+      tags: [Runtime]
+      operationId: reloadWorldRuntime
+      summary: Reload only the managed runtime modules without restarting the shard
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Reloaded runtime health, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeLifecycleEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
   /rooms/{roomId}/worlds/{worldId}/runtime/backups:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -3557,6 +3581,30 @@ components:
           type: object
           additionalProperties: { $ref: "#/components/schemas/DSTRuntimeModuleHealth" }
 
+    DSTRuntimeLifecycleMode:
+      type: string
+      enum: [activate, reload, current]
+
+    DSTRuntimeLifecycle:
+      type: object
+      additionalProperties: false
+      required: [roomId, worldId, worldName, mode, health, message]
+      properties:
+        roomId: { type: string }
+        worldId: { type: string }
+        worldName: { type: string }
+        mode: { $ref: "#/components/schemas/DSTRuntimeLifecycleMode" }
+        health: { $ref: "#/components/schemas/DSTRuntimeHealth" }
+        message: { type: string }
+
+    DSTRuntimeLifecycleEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/DSTRuntimeLifecycle" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+
     DSTRuntimeModuleHealth:
       type: object
       additionalProperties: false
@@ -3566,6 +3614,10 @@ components:
         ready: { type: boolean }
         busy: { type: boolean }
         sequence: { type: integer, format: int64, minimum: 0 }
+        lastCapturedAtUnix: { type: integer, format: int64, minimum: 1 }
+        lastWrittenAtUnix: { type: integer, format: int64, minimum: 1 }
+        lastDurationMilliseconds: { type: number, minimum: 0 }
+        consecutiveFailures: { type: integer, minimum: 0 }
         lastError: { type: string, maxLength: 1024 }
 
     DSTRuntimeEvent:

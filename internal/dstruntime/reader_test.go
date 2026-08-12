@@ -233,6 +233,50 @@ func TestHealthRejectsUnknownOrInvalidPayload(t *testing.T) {
 	if _, err := manager.Health(catalog.room.ID, catalog.worlds[0].ID); !errors.Is(err, ErrSnapshotStale) {
 		t.Fatalf("stale health session error = %v", err)
 	}
+	invalidFailures := -1
+	valid.SessionID = "CURRENT"
+	valid.Modules = map[string]ModuleHealth{"worldstate": {Running: true, Ready: true, ConsecutiveFailures: invalidFailures}}
+	data, _ = json.Marshal(valid)
+	if err := os.WriteFile(filepath.Join(output, "health.json"), data, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Health(catalog.room.ID, catalog.worlds[0].ID); !errors.Is(err, ErrSnapshotInvalid) {
+		t.Fatalf("invalid module health error = %v", err)
+	}
+}
+
+func TestDecodeStrictJSONSupportsKLEIPersistentHeader(t *testing.T) {
+	type payload struct {
+		Value string `json:"value"`
+	}
+	for name, source := range map[string][]byte{
+		"plain": []byte(`{"value":"plain"}`),
+		"klei":  []byte("KLEI     1 {\"value\":\"klei\"}"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var value payload
+			if err := decodeStrictJSON(source, &value); err != nil {
+				t.Fatal(err)
+			}
+			if value.Value != name {
+				t.Fatalf("decoded value = %q", value.Value)
+			}
+		})
+	}
+	for name, source := range map[string][]byte{
+		"missing separator":  []byte(`KLEI1 {"value":"x"}`),
+		"missing version":    []byte(`KLEI     {"value":"x"}`),
+		"non-object payload": []byte(`KLEI     1 ["x"]`),
+		"unknown field":      []byte(`KLEI     1 {"value":"x","extra":true}`),
+		"trailing content":   []byte(`KLEI     1 {"value":"x"}{}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var value payload
+			if err := decodeStrictJSON(source, &value); err == nil {
+				t.Fatal("invalid persistent JSON was accepted")
+			}
+		})
+	}
 }
 
 func writeSnapshot(t *testing.T, path string, value interface{}) {

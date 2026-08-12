@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,10 +24,14 @@ type bridgeSender struct {
 	now     time.Time
 	scripts []string
 	reply   bool
+	onSend  func(string)
 }
 
 func (s *bridgeSender) Send(_ context.Context, _, _ string, script string) error {
 	s.scripts = append(s.scripts, script)
+	if s.onSend != nil {
+		s.onSend(script)
+	}
 	if !s.reply {
 		return nil
 	}
@@ -40,6 +45,99 @@ func (s *bridgeSender) Send(_ context.Context, _, _ string, script string) error
 	output := filepath.Join(s.root, "Cluster_1", "Master", "save", "mod_config_data", "dst-admin")
 	_ = os.MkdirAll(output, 0750)
 	return os.WriteFile(filepath.Join(output, "command-receipt-a.json"), data, 0640)
+}
+
+func TestBridgeActivatesAndReloadsOnlyTheManagedRuntime(t *testing.T) {
+	manager, catalog, root := newRuntimeTestManager(t)
+	now := time.Now().UTC()
+	manager.now = func() time.Time { return now }
+	if _, err := manager.InstallWorld(context.Background(), catalog.room.ID, catalog.worlds[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	worldPath := filepath.Join(root, "Cluster_1", "Master")
+	if err := os.MkdirAll(filepath.Join(worldPath, "save", "session", "SESSION"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worldPath, "server.ini"), []byte("[SHARD]\nid = 1\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(worldPath, "save", "mod_config_data", managedDirectory)
+	if err := os.RemoveAll(output); err != nil {
+		t.Fatal(err)
+	}
+	instance := 0
+	outputReadyBeforeSend := false
+	sender := &bridgeSender{onSend: func(script string) {
+		if info, err := os.Stat(output); err == nil && info.IsDir() {
+			outputReadyBeforeSend = true
+		}
+		instance++
+		writeHealthyRuntime(t, worldPath, now.Add(time.Duration(instance)*time.Millisecond), fmt.Sprintf("instance-%d", instance))
+	}}
+	bridge, err := NewBridge(manager, bridgeProcess{running: true}, sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge.now = func() time.Time { return now.Add(time.Duration(instance+1) * time.Millisecond) }
+	bridge.pollInterval = time.Millisecond
+
+	activated, err := bridge.Activate(context.Background(), catalog.room.ID, catalog.worlds[0].ID)
+	if err != nil || activated.Mode != LifecycleModeActivate || activated.Health.ProducerInstanceID != "instance-1" {
+		t.Fatalf("activated = %#v, error = %v", activated, err)
+	}
+	if len(sender.scripts) != 1 || sender.scripts[0] != managedActivationScript || strings.Contains(sender.scripts[0], "customcommands.lua") {
+		t.Fatalf("activation scripts = %#v", sender.scripts)
+	}
+	if !outputReadyBeforeSend {
+		t.Fatal("activation sent Lua before repairing the runtime output directory")
+	}
+
+	reloaded, err := bridge.Reload(context.Background(), catalog.room.ID, catalog.worlds[0].ID)
+	if err != nil || reloaded.Mode != LifecycleModeReload || reloaded.Health.ProducerInstanceID != "instance-2" {
+		t.Fatalf("reloaded = %#v, error = %v", reloaded, err)
+	}
+	if len(sender.scripts) != 2 || !strings.Contains(sender.scripts[1], `rawget(_G,"DSTAdmin")`) || strings.Contains(sender.scripts[1], "customcommands.lua") {
+		t.Fatalf("reload scripts = %#v", sender.scripts)
+	}
+}
+
+func TestBridgeLifecycleRefusesStoppedOrUninstalledWorlds(t *testing.T) {
+	manager, catalog, _ := newRuntimeTestManager(t)
+	sender := &bridgeSender{}
+	bridge, _ := NewBridge(manager, bridgeProcess{running: false}, sender)
+	if _, err := bridge.Activate(context.Background(), catalog.room.ID, catalog.worlds[0].ID); !errors.Is(err, ErrRuntimeUnavailable) {
+		t.Fatalf("stopped activation error = %v", err)
+	}
+	if len(sender.scripts) != 0 {
+		t.Fatalf("scripts sent to stopped shard = %#v", sender.scripts)
+	}
+
+	bridge, _ = NewBridge(manager, bridgeProcess{running: true}, sender)
+	if _, err := bridge.Activate(context.Background(), catalog.room.ID, catalog.worlds[0].ID); !errors.Is(err, ErrRuntimeNotInstalled) {
+		t.Fatalf("uninstalled activation error = %v", err)
+	}
+	if len(sender.scripts) != 0 {
+		t.Fatalf("scripts sent without installation = %#v", sender.scripts)
+	}
+}
+
+func writeHealthyRuntime(t *testing.T, worldPath string, modifiedAt time.Time, instanceID string) {
+	t.Helper()
+	health := Health{
+		SchemaVersion: 1, ProducerVersion: RuntimeVersion, ProducerInstanceID: instanceID, SessionID: "SESSION", ShardID: "1",
+		Running: true, Ready: true, Sequence: 1, Modules: map[string]ModuleHealth{
+			"worldstate": {Running: true, Ready: true}, "commands": {Running: true, Ready: true},
+			"events": {Running: true, Ready: true}, "diagnostics": {Running: true, Ready: true},
+		},
+	}
+	output := filepath.Join(worldPath, "save", "mod_config_data", "dst-admin")
+	if err := os.MkdirAll(output, 0750); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFile(t, filepath.Join(output, "health.json"), health)
+	if err := os.Chtimes(filepath.Join(output, "health.json"), modifiedAt, modifiedAt); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func extractJSONString(source, marker string) string {

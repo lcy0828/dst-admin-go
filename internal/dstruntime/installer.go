@@ -314,6 +314,9 @@ func (m *Manager) install(room rooms.Room, world rooms.World) (WorldStatus, erro
 		}
 	}
 	assetsChanged := !manifestExists || currentManifest.Version != RuntimeVersion || currentManifest.ProtocolVersion != ProtocolVersion || !equalHashes(currentManifest.Assets, hashes)
+	if err := ensureRuntimeOutputDirectory(worldPath); err != nil {
+		return status, err
+	}
 	if !changed && !assetsChanged {
 		status.State, status.Version, status.Protocol = InstallStateInstalled, RuntimeVersion, ProtocolVersion
 		status.Message = "DST Admin 运行时已是最新版本"
@@ -428,6 +431,27 @@ func (m *Manager) worldPath(room rooms.Room, world rooms.World) (string, error) 
 		return "", ErrUnsafeRuntimePath
 	}
 	return path, nil
+}
+
+func ensureRuntimeOutputDirectory(worldPath string) error {
+	current := worldPath
+	for _, name := range []string{"save", "mod_config_data", managedDirectory} {
+		current = filepath.Join(current, name)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			if err := os.Mkdir(current, 0750); err != nil && !os.IsExist(err) {
+				return fmt.Errorf("create runtime output directory: %w", err)
+			}
+			info, err = os.Lstat(current)
+		}
+		if err != nil {
+			return fmt.Errorf("inspect runtime output directory: %w", err)
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: runtime output path %s is not a regular directory", ErrUnsafeRuntimePath, current)
+		}
+	}
+	return nil
 }
 
 func (m *Manager) lock(path string) *sync.Mutex {

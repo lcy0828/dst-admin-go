@@ -95,6 +95,10 @@ func TestInstallRoomPreservesUserCommandsAndIsIdempotent(t *testing.T) {
 				t.Fatalf("managed asset %s missing: %v", path, err)
 			}
 		}
+		output := filepath.Join(root, "Cluster_1", world.DirectoryName, "save", "mod_config_data", managedDirectory)
+		if info, err := os.Stat(output); err != nil || !info.IsDir() || info.Mode().Perm() != 0750 {
+			t.Fatalf("runtime output directory %s invalid: info=%v error=%v", output, info, err)
+		}
 	}
 	second, err := manager.InstallRoom(context.Background(), catalog.room.ID)
 	if err != nil || second[0].Changed || second[1].Changed {
@@ -103,6 +107,46 @@ func TestInstallRoomPreservesUserCommandsAndIsIdempotent(t *testing.T) {
 	after, _ := os.ReadFile(masterCustom)
 	if !bytes.Equal(installed, after) {
 		t.Fatal("idempotent install rewrote customcommands.lua")
+	}
+}
+
+func TestInstallRepairsMissingRuntimeOutputDirectoryWithoutRewritingAssets(t *testing.T) {
+	manager, catalog, root := newRuntimeTestManager(t)
+	world := catalog.worlds[0]
+	first, err := manager.InstallWorld(context.Background(), catalog.room.ID, world.ID)
+	if err != nil || !first.Changed {
+		t.Fatalf("first install = %#v, error = %v", first, err)
+	}
+	output := filepath.Join(root, catalog.room.DirectoryName, world.DirectoryName, "save", "mod_config_data", managedDirectory)
+	if err := os.RemoveAll(output); err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.InstallWorld(context.Background(), catalog.room.ID, world.ID)
+	if err != nil || second.Changed {
+		t.Fatalf("repair install = %#v, error = %v", second, err)
+	}
+	if info, err := os.Stat(output); err != nil || !info.IsDir() {
+		t.Fatalf("runtime output directory was not repaired: info=%v error=%v", info, err)
+	}
+}
+
+func TestInstallRejectsSymlinkedRuntimeOutputDirectory(t *testing.T) {
+	manager, catalog, root := newRuntimeTestManager(t)
+	world := catalog.worlds[0]
+	outputParent := filepath.Join(root, catalog.room.DirectoryName, world.DirectoryName, "save", "mod_config_data")
+	if err := os.MkdirAll(outputParent, 0750); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(outputParent, managedDirectory)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.InstallWorld(context.Background(), catalog.room.ID, world.ID); !errors.Is(err, ErrUnsafeRuntimePath) {
+		t.Fatalf("symlinked runtime output error = %v", err)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("symlink target was modified: entries=%v error=%v", entries, err)
 	}
 }
 
