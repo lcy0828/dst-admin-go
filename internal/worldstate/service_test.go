@@ -87,3 +87,26 @@ func TestServiceRefreshPersistsTimeSeriesAndRejectsStoppedWorld(t *testing.T) {
 		t.Fatalf("invalid limit error = %v", err)
 	}
 }
+
+func TestServiceRefreshUsesRuntimeCaptureTimeWhenProvided(t *testing.T) {
+	catalog := stateTestCatalog{
+		room:   rooms.Room{ID: "room", DirectoryName: "Cluster_1", Name: "Room", Managed: true},
+		worlds: []rooms.World{{ID: "master", RoomID: "room", DirectoryName: "Master", Name: "Master", Role: rooms.WorldRoleMaster}},
+	}
+	capturedAt := time.Date(2026, 8, 12, 10, 0, 1, 0, time.UTC)
+	service, err := NewService(catalog, &stateTestRuntime{running: true}, newWorldStateStore(t), &stateTestSampler{
+		observation: Observation{Season: "winter", CapturedAt: capturedAt},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return capturedAt.Add(4 * time.Second) }
+	result, err := service.RefreshWorld(context.Background(), "room", "master")
+	if err != nil || !result.ObservedAt.Equal(capturedAt) {
+		t.Fatalf("refresh result = %#v, error = %v", result, err)
+	}
+	list, err := service.List("room")
+	if err != nil || len(list.Items) != 1 || !list.Items[0].ObservedAt.Equal(capturedAt) {
+		t.Fatalf("stored capture time = %#v, error = %v", list, err)
+	}
+}

@@ -57,6 +57,119 @@ func TestTelemetryLuaStartAndStopAreIdempotent(t *testing.T) {
 	}
 }
 
+func TestWorldStateLuaWritesAllMetricsAndRotatesSlots(t *testing.T) {
+	state := lua.NewState()
+	defer state.Close()
+
+	writtenPaths := make([]string, 0, 2)
+	var encodedPayload *lua.LTable
+	state.PreloadModule("json", func(L *lua.LState) int {
+		module := L.NewTable()
+		state.SetField(module, "encode", state.NewFunction(func(L *lua.LState) int {
+			encodedPayload = L.CheckTable(1)
+			L.Push(lua.LString("{}"))
+			return 1
+		}))
+		L.Push(module)
+		return 1
+	})
+	theSim := state.NewTable()
+	state.SetField(theSim, "SetPersistentString", state.NewFunction(func(L *lua.LState) int {
+		writtenPaths = append(writtenPaths, L.CheckString(2))
+		callback := L.CheckFunction(5)
+		if err := L.CallByParam(lua.P{Fn: callback, NRet: 0, Protect: true}, lua.LTrue); err != nil {
+			L.RaiseError("write callback: %v", err)
+		}
+		return 0
+	}))
+	state.SetGlobal("TheSim", theSim)
+	theNet := state.NewTable()
+	state.SetField(theNet, "GetSessionIdentifier", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LString("SESSION")); return 1 }))
+	state.SetGlobal("TheNet", theNet)
+	theShard := state.NewTable()
+	state.SetField(theShard, "GetShardId", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LString("1")); return 1 }))
+	state.SetGlobal("TheShard", theShard)
+
+	scheduled := make([]*lua.LFunction, 0, 1)
+	scheduler := state.NewTable()
+	state.SetField(scheduler, "ExecuteInTime", state.NewFunction(func(L *lua.LState) int {
+		scheduled = append(scheduled, L.CheckFunction(3))
+		canceled := 0
+		L.Push(luaTask(state, &canceled))
+		return 1
+	}))
+	state.SetGlobal("scheduler", scheduler)
+	periodicCanceled := 0
+	var periodicCallback *lua.LFunction
+	theWorld := state.NewTable()
+	state.SetField(theWorld, "ismastersim", lua.LTrue)
+	worldValues := state.NewTable()
+	for name, value := range map[string]lua.LValue{
+		"season": lua.LString("autumn"), "phase": lua.LString("day"), "cycles": lua.LNumber(48),
+		"elapseddaysinseason": lua.LNumber(6), "remainingdaysinseason": lua.LNumber(14), "seasonprogress": lua.LNumber(.3),
+		"time": lua.LNumber(.34), "timeinphase": lua.LNumber(.57), "isacidraining": lua.LTrue, "moonphase": lua.LString("new"),
+		"temperature": lua.LNumber(18.5), "wetness": lua.LNumber(.18), "moisture": lua.LNumber(18), "moistureceil": lua.LNumber(100),
+		"precipitationrate": lua.LNumber(.25), "nightmarephase": lua.LString("warn"), "nightmaretimeinphase": lua.LNumber(.46),
+	} {
+		state.SetField(worldValues, name, value)
+	}
+	state.SetField(theWorld, "state", worldValues)
+	state.SetField(theWorld, "components", state.NewTable())
+	state.SetField(theWorld, "DoPeriodicTask", state.NewFunction(func(L *lua.LState) int {
+		periodicCallback = L.CheckFunction(3)
+		L.Push(luaTask(state, &periodicCanceled))
+		return 1
+	}))
+	state.SetGlobal("TheWorld", theWorld)
+
+	module := loadLuaModule(t, state, "worldstate.lua")
+	callLuaMethod(t, state, module, "Start", true)
+	callLuaMethod(t, state, module, "Start", true)
+	if len(scheduled) != 1 {
+		t.Fatalf("Start scheduled %d readiness tasks, want 1", len(scheduled))
+	}
+	callLuaFunction(t, state, scheduled[0])
+	if len(writtenPaths) != 1 || writtenPaths[0] != "mod_config_data/dst-admin/worldstate-a.json" || periodicCallback == nil {
+		t.Fatalf("initial world state writes = %#v, periodic callback = %v", writtenPaths, periodicCallback != nil)
+	}
+	if encodedPayload == nil {
+		t.Fatal("world state payload was not encoded")
+	}
+	for name, expected := range map[string]string{
+		"season": "autumn", "phase": "day", "precipitation": "acid_rain", "moonPhase": "new", "nightmarePhase": "warn",
+		"sessionId": "SESSION", "shardId": "1", "producerVersion": RuntimeVersion,
+	} {
+		if actual := state.GetField(encodedPayload, name).String(); actual != expected {
+			t.Fatalf("payload %s = %q, want %q", name, actual, expected)
+		}
+	}
+	for name, expected := range map[string]float64{
+		"cycles": 48, "elapsedDaysInSeason": 6, "remainingDaysInSeason": 14, "seasonProgress": .3,
+		"dayProgress": .34, "phaseProgress": .57, "temperature": 18.5, "wetness": .18, "moisture": 18,
+		"moistureCeil": 100, "precipitationRate": .25, "nightmareProgress": .46,
+	} {
+		if actual := float64(lua.LVAsNumber(state.GetField(encodedPayload, name))); actual != expected {
+			t.Fatalf("payload %s = %v, want %v", name, actual, expected)
+		}
+	}
+	if !lua.LVAsBool(state.GetField(encodedPayload, "complete")) || luaIntField(state, encodedPayload, "schemaVersion") != ProtocolVersion {
+		t.Fatalf("payload envelope = %v", encodedPayload)
+	}
+	status := callLuaTableMethod(t, state, module, "Status")
+	if luaIntField(state, status, "sequence") != 1 || !lua.LVAsBool(state.GetField(status, "ready")) {
+		t.Fatalf("world state status = %v", status)
+	}
+	callLuaFunction(t, state, periodicCallback)
+	if len(writtenPaths) != 2 || writtenPaths[1] != "mod_config_data/dst-admin/worldstate-b.json" {
+		t.Fatalf("rotated world state writes = %#v", writtenPaths)
+	}
+	callLuaMethod(t, state, module, "Stop", true)
+	callLuaMethod(t, state, module, "Stop", true)
+	if periodicCanceled != 1 {
+		t.Fatalf("Stop canceled periodic tasks %d times, want 1", periodicCanceled)
+	}
+}
+
 func TestCommandsLuaUsesAllowlistAndWritesStructuredReceipt(t *testing.T) {
 	state := lua.NewState()
 	defer state.Close()
@@ -500,4 +613,8 @@ func callLuaTableMethod(t *testing.T, state *lua.LState, table *lua.LTable, name
 
 func luaInt(state *lua.LState, name string) int {
 	return int(lua.LVAsNumber(state.GetGlobal(name)))
+}
+
+func luaIntField(state *lua.LState, table *lua.LTable, name string) int {
+	return int(lua.LVAsNumber(state.GetField(table, name)))
 }

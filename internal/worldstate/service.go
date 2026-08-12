@@ -105,7 +105,10 @@ func (s *Service) RefreshWorld(ctx context.Context, roomID, worldID string) (Ref
 	if err := validateObservation(observation); err != nil {
 		return RefreshResult{}, err
 	}
-	observedAt := s.now().UTC()
+	observedAt := observation.CapturedAt.UTC()
+	if observedAt.IsZero() {
+		observedAt = s.now().UTC()
+	}
 	snapshot := Snapshot{
 		RoomID: roomID, WorldID: world.ID, WorldName: world.Name, WorldRole: string(world.Role),
 		Season: observation.Season, Phase: observation.Phase, Cycles: observation.Cycles,

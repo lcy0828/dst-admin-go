@@ -1,4 +1,4 @@
-local VERSION = "2.2.0"
+local VERSION = "2.3.0"
 local PROTOCOL_VERSION = 2
 local MODULE_ROOT = "../dst-admin/"
 
@@ -39,6 +39,7 @@ local function new_candidate()
 
     function candidate.Status()
         local telemetry = candidate.Telemetry ~= nil and candidate.Telemetry.Status() or nil
+        local worldstate = candidate.WorldState ~= nil and candidate.WorldState.Status() or nil
         local commands = candidate.Commands ~= nil and candidate.Commands.Status() or nil
         local events = candidate.Events ~= nil and candidate.Events.Status() or nil
         local diagnostics = candidate.Diagnostics ~= nil and candidate.Diagnostics.Status() or nil
@@ -48,6 +49,7 @@ local function new_candidate()
             state = candidate.state,
             reloadInProgress = candidate.reloadInProgress,
             telemetry = telemetry,
+            worldstate = worldstate,
             commands = commands,
             events = events,
             diagnostics = diagnostics,
@@ -58,9 +60,9 @@ local function new_candidate()
         if candidate.state == "running" or candidate.state == "starting" then
             return true
         end
-        if candidate.Telemetry == nil or candidate.Commands == nil or candidate.Events == nil or candidate.Diagnostics == nil then
+        if candidate.Telemetry == nil or candidate.WorldState == nil or candidate.Commands == nil or candidate.Events == nil or candidate.Diagnostics == nil then
             candidate.state = "failed"
-            emit_error("START_FAILED", "telemetry is unavailable")
+            emit_error("START_FAILED", "runtime module is unavailable")
             return false
         end
         candidate.state = "starting"
@@ -70,8 +72,16 @@ local function new_candidate()
             emit_error("START_FAILED", started)
             return false
         end
+        ok, started = xpcall(candidate.WorldState.Start, debug.traceback)
+        if not ok or started == false then
+            candidate.Telemetry.Stop()
+            candidate.state = "failed"
+            emit_error("START_FAILED", started)
+            return false
+        end
         ok, started = xpcall(candidate.Events.Start, debug.traceback)
         if not ok or started == false then
+            candidate.WorldState.Stop()
             candidate.Telemetry.Stop()
             candidate.state = "failed"
             emit_error("START_FAILED", started)
@@ -80,6 +90,7 @@ local function new_candidate()
         ok, started = xpcall(candidate.Diagnostics.Start, debug.traceback)
         if not ok or started == false then
             candidate.Events.Stop()
+            candidate.WorldState.Stop()
             candidate.Telemetry.Stop()
             candidate.state = "failed"
             emit_error("START_FAILED", started)
@@ -102,6 +113,13 @@ local function new_candidate()
         end
         if candidate.Events ~= nil then
             local ok, stopped = xpcall(candidate.Events.Stop, debug.traceback)
+            if not ok or stopped == false then
+                emit_error("STOP_FAILED", stopped)
+                return false
+            end
+        end
+        if candidate.WorldState ~= nil then
+            local ok, stopped = xpcall(candidate.WorldState.Stop, debug.traceback)
             if not ok or stopped == false then
                 emit_error("STOP_FAILED", stopped)
                 return false
@@ -145,25 +163,32 @@ build_candidate = function(callback)
             return
         end
         candidate.Telemetry = telemetry
-        load_module("commands", function(commands, commands_error)
-            if commands == nil then
-                callback(nil, commands_error)
+        load_module("worldstate", function(worldstate, worldstate_error)
+            if worldstate == nil then
+                callback(nil, worldstate_error)
                 return
             end
-            candidate.Commands = commands
-            load_module("events", function(events, events_error)
-                if events == nil then
-                    callback(nil, events_error)
+            candidate.WorldState = worldstate
+            load_module("commands", function(commands, commands_error)
+                if commands == nil then
+                    callback(nil, commands_error)
                     return
                 end
-                candidate.Events = events
-                load_module("diagnostics", function(diagnostics, diagnostics_error)
-                    if diagnostics == nil then
-                        callback(nil, diagnostics_error)
+                candidate.Commands = commands
+                load_module("events", function(events, events_error)
+                    if events == nil then
+                        callback(nil, events_error)
                         return
                     end
-                    candidate.Diagnostics = diagnostics
-                    callback(candidate, nil)
+                    candidate.Events = events
+                    load_module("diagnostics", function(diagnostics, diagnostics_error)
+                        if diagnostics == nil then
+                            callback(nil, diagnostics_error)
+                            return
+                        end
+                        candidate.Diagnostics = diagnostics
+                        callback(candidate, nil)
+                    end)
                 end)
             end)
         end)

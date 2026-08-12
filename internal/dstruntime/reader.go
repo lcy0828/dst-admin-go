@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"dont/internal/rooms"
+
+	"github.com/go-ini/ini"
 )
 
 const (
@@ -84,6 +87,73 @@ func (m *Manager) ReadPlayers(ctx context.Context, roomID, worldID string) (Snap
 	return candidates[0], nil
 }
 
+func (m *Manager) ReadWorldState(ctx context.Context, roomID, worldID string) (WorldStateSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return WorldStateSnapshot{}, err
+	}
+	room, err := m.rooms.Room(roomID)
+	if err != nil {
+		return WorldStateSnapshot{}, err
+	}
+	if !room.Managed {
+		return WorldStateSnapshot{}, rooms.ErrRoomNotManaged
+	}
+	world, err := m.rooms.World(room.ID, worldID)
+	if err != nil {
+		return WorldStateSnapshot{}, err
+	}
+	worldPath, err := m.worldPath(room, world)
+	if err != nil {
+		return WorldStateSnapshot{}, err
+	}
+	status := m.inspectAt(room, world, worldPath)
+	if status.State == InstallStateMissing {
+		return WorldStateSnapshot{}, ErrRuntimeNotInstalled
+	}
+	if status.State != InstallStateInstalled {
+		return WorldStateSnapshot{}, fmt.Errorf("%w: %s", ErrRuntimeNotInstalled, status.Message)
+	}
+	expectedShard, err := configuredShardID(worldPath)
+	if err != nil {
+		return WorldStateSnapshot{}, err
+	}
+	expectedSession := currentSessionID(worldPath)
+	candidates := make([]WorldStateSnapshot, 0, 2)
+	var failures error
+	for _, name := range []string{"worldstate-a.json", "worldstate-b.json"} {
+		value, readErr := readWorldStateSnapshot(
+			filepath.Join(worldPath, "save", "mod_config_data", "dst-admin", name),
+			expectedSession,
+			expectedShard,
+			m.now().UTC(),
+		)
+		if readErr != nil {
+			if !errors.Is(readErr, os.ErrNotExist) {
+				failures = errors.Join(failures, fmt.Errorf("%s: %w", name, readErr))
+			}
+			continue
+		}
+		candidates = append(candidates, value)
+	}
+	if len(candidates) == 0 {
+		if failures != nil {
+			return WorldStateSnapshot{}, fmt.Errorf("%w: %v", ErrSnapshotUnavailable, failures)
+		}
+		return WorldStateSnapshot{}, ErrSnapshotUnavailable
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		if left.ProducerInstanceID == right.ProducerInstanceID && left.Sequence != right.Sequence {
+			return left.Sequence > right.Sequence
+		}
+		if !left.CapturedAt.Equal(right.CapturedAt) {
+			return left.CapturedAt.After(right.CapturedAt)
+		}
+		return left.Sequence > right.Sequence
+	})
+	return candidates[0], nil
+}
+
 func (m *Manager) Health(roomID, worldID string) (Health, error) {
 	room, err := m.rooms.Room(roomID)
 	if err != nil {
@@ -105,9 +175,7 @@ func (m *Manager) Health(roomID, worldID string) (Health, error) {
 		return Health{}, ErrSnapshotUnavailable
 	}
 	var health Health
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&health); err != nil {
+	if err := decodeStrictJSON(data, &health); err != nil {
 		return Health{}, fmt.Errorf("%w: decode health: %v", ErrSnapshotInvalid, err)
 	}
 	if health.SchemaVersion != 1 || health.ProducerVersion == "" || health.ProducerInstanceID == "" || health.SessionID == "" || health.ShardID == "" || health.Sequence < 0 || health.ConsecutiveFailures < 0 {
@@ -132,13 +200,8 @@ func readSnapshot(path, expectedSession string, now time.Time) (Snapshot, error)
 		return Snapshot{}, os.ErrNotExist
 	}
 	var value Snapshot
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil {
+	if err := decodeStrictJSON(data, &value); err != nil {
 		return Snapshot{}, fmt.Errorf("%w: decode JSON: %v", ErrSnapshotInvalid, err)
-	}
-	if decoder.More() {
-		return Snapshot{}, fmt.Errorf("%w: trailing JSON content", ErrSnapshotInvalid)
 	}
 	if value.SchemaVersion != ProtocolVersion || value.ProducerVersion == "" || value.ProducerInstanceID == "" || value.SessionID == "" || value.ShardID == "" || value.Sequence < 1 || value.CapturedAtUnix < 1 || !value.Complete || value.Players == nil {
 		return Snapshot{}, ErrSnapshotInvalid
@@ -171,6 +234,92 @@ func readSnapshot(path, expectedSession string, now time.Time) (Snapshot, error)
 		seen[player.ID] = true
 	}
 	return value, nil
+}
+
+func readWorldStateSnapshot(path, expectedSession, expectedShard string, now time.Time) (WorldStateSnapshot, error) {
+	data, _, exists, err := readRegular(path, maxSnapshotBytes)
+	if err != nil {
+		return WorldStateSnapshot{}, err
+	}
+	if !exists {
+		return WorldStateSnapshot{}, os.ErrNotExist
+	}
+	var value WorldStateSnapshot
+	if err := decodeStrictJSON(data, &value); err != nil {
+		return WorldStateSnapshot{}, fmt.Errorf("%w: decode JSON: %v", ErrSnapshotInvalid, err)
+	}
+	if value.SchemaVersion != ProtocolVersion || value.ProducerVersion != RuntimeVersion || value.ProducerInstanceID == "" || value.SessionID == "" || value.ShardID == "" || value.Sequence < 1 || value.CapturedAtUnix < 1 || !value.Complete {
+		return WorldStateSnapshot{}, ErrSnapshotInvalid
+	}
+	for _, text := range []struct {
+		value string
+		limit int
+	}{
+		{value.ProducerVersion, 64}, {value.ProducerInstanceID, 128}, {value.SessionID, 128}, {value.ShardID, 64},
+		{value.Season, 64}, {value.Phase, 64}, {value.Precipitation, 64}, {value.MoonPhase, 64}, {value.NightmarePhase, 64},
+	} {
+		if len([]rune(text.value)) > text.limit || strings.ContainsRune(text.value, '\x00') {
+			return WorldStateSnapshot{}, fmt.Errorf("%w: invalid text field", ErrSnapshotInvalid)
+		}
+	}
+	for _, metric := range []*int{value.Cycles, value.ElapsedDaysInSeason, value.RemainingDaysInSeason} {
+		if metric != nil && *metric < 0 {
+			return WorldStateSnapshot{}, fmt.Errorf("%w: invalid world counter", ErrSnapshotInvalid)
+		}
+	}
+	for _, metric := range []*float64{
+		value.SeasonProgress, value.DayProgress, value.PhaseProgress, value.Temperature, value.Wetness,
+		value.Moisture, value.MoistureCeil, value.PrecipitationRate, value.NightmareProgress,
+	} {
+		if !validMetric(metric) {
+			return WorldStateSnapshot{}, fmt.Errorf("%w: invalid world metric", ErrSnapshotInvalid)
+		}
+	}
+	value.CapturedAt = time.Unix(value.CapturedAtUnix, 0).UTC()
+	if value.CapturedAt.After(now.Add(maxFutureSkew)) {
+		return WorldStateSnapshot{}, fmt.Errorf("%w: capture time is in the future", ErrSnapshotInvalid)
+	}
+	if now.Sub(value.CapturedAt) > defaultFreshFor {
+		return WorldStateSnapshot{}, fmt.Errorf("%w: captured at %s", ErrSnapshotStale, value.CapturedAt.Format(time.RFC3339))
+	}
+	if expectedSession != "" && value.SessionID != expectedSession {
+		return WorldStateSnapshot{}, fmt.Errorf("%w: session %q does not match %q", ErrSnapshotStale, value.SessionID, expectedSession)
+	}
+	if expectedShard != "" && value.ShardID != expectedShard {
+		return WorldStateSnapshot{}, fmt.Errorf("%w: shard %q does not match %q", ErrSnapshotStale, value.ShardID, expectedShard)
+	}
+	return value, nil
+}
+
+func decodeStrictJSON(data []byte, destination interface{}) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("trailing JSON content")
+		}
+		return err
+	}
+	return nil
+}
+
+func configuredShardID(worldPath string) (string, error) {
+	data, _, exists, err := readRegular(filepath.Join(worldPath, "server.ini"), 256*1024)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return "", nil
+	}
+	config, err := ini.Load(data)
+	if err != nil {
+		return "", fmt.Errorf("parse server.ini shard identity: %w", err)
+	}
+	return strings.TrimSpace(config.Section("SHARD").Key("id").String()), nil
 }
 
 func validMetric(value *float64) bool {

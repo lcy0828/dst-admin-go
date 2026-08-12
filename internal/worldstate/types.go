@@ -57,6 +57,7 @@ type Observation struct {
 	PrecipitationRate     *float64
 	NightmarePhase        string
 	NightmareProgress     *float64
+	CapturedAt            time.Time
 }
 
 type List struct {

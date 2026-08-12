@@ -7,7 +7,7 @@ import (
 
 const (
 	ProtocolVersion = 2
-	RuntimeVersion  = "2.2.0"
+	RuntimeVersion  = "2.3.0"
 )
 
 var (
@@ -97,6 +97,35 @@ type SnapshotPlayer struct {
 	SanityPercent *float64 `json:"sanityPercent,omitempty"`
 	Temperature   *float64 `json:"temperature,omitempty"`
 	Moisture      *float64 `json:"moisture,omitempty"`
+}
+
+type WorldStateSnapshot struct {
+	SchemaVersion         int       `json:"schemaVersion"`
+	ProducerVersion       string    `json:"producerVersion"`
+	ProducerInstanceID    string    `json:"producerInstanceId"`
+	SessionID             string    `json:"sessionId"`
+	ShardID               string    `json:"shardId"`
+	Sequence              int64     `json:"sequence"`
+	CapturedAtUnix        int64     `json:"capturedAtUnix"`
+	Complete              bool      `json:"complete"`
+	Season                string    `json:"season"`
+	Phase                 string    `json:"phase"`
+	Cycles                *int      `json:"cycles,omitempty"`
+	ElapsedDaysInSeason   *int      `json:"elapsedDaysInSeason,omitempty"`
+	RemainingDaysInSeason *int      `json:"remainingDaysInSeason,omitempty"`
+	SeasonProgress        *float64  `json:"seasonProgress,omitempty"`
+	DayProgress           *float64  `json:"dayProgress,omitempty"`
+	PhaseProgress         *float64  `json:"phaseProgress,omitempty"`
+	Precipitation         string    `json:"precipitation"`
+	MoonPhase             string    `json:"moonPhase"`
+	Temperature           *float64  `json:"temperature,omitempty"`
+	Wetness               *float64  `json:"wetness,omitempty"`
+	Moisture              *float64  `json:"moisture,omitempty"`
+	MoistureCeil          *float64  `json:"moistureCeil,omitempty"`
+	PrecipitationRate     *float64  `json:"precipitationRate,omitempty"`
+	NightmarePhase        string    `json:"nightmarePhase"`
+	NightmareProgress     *float64  `json:"nightmareProgress,omitempty"`
+	CapturedAt            time.Time `json:"-"`
 }
 
 type Health struct {

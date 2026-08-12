@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 2
-local PRODUCER_VERSION = "2.2.0"
+local PRODUCER_VERSION = "2.3.0"
 local SNAPSHOT_INTERVAL = 5
 local READY_RETRY_SECONDS = 1
 local READY_RETRY_LIMIT = 60
@@ -119,7 +119,7 @@ local function health_payload()
     local modules = {}
     local runtime = rawget(_G, "DSTAdmin")
     if runtime ~= nil then
-        for _, name in ipairs({ "Commands", "Events", "Diagnostics" }) do
+        for _, name in ipairs({ "WorldState", "Commands", "Events", "Diagnostics" }) do
             local module = runtime[name]
             if module ~= nil and type(module.Status) == "function" then
                 local ok, status = pcall(module.Status)

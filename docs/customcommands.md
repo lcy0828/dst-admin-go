@@ -1,19 +1,21 @@
 # DST `customcommands.lua` 能力与集成设计
 
-> 文档状态：设计与实现基线 v1.2
+> 文档状态：设计与实现基线 v1.3
 > 更新时间：2026-08-12
 > 适用仓库：`dst-admin-go`、`dst-admin-vue`
 > 目标：明确 `customcommands.lua` 能做什么、适合做什么，以及 DST Admin 应如何安全使用它
 
 ## 0. 当前实现状态
 
-截至 2026-08-12，阶段 A 至阶段 D 已完成代码实现和自动化验收：
+截至 2026-08-12，阶段 A 至阶段 E 已完成代码实现和自动化验收：
 
-- Runtime `2.2.0` 以唯一受管块接入每个分片，不覆盖用户已有脚本。
+- Runtime `2.3.0` 以唯一受管块接入每个分片，不覆盖用户已有脚本。
 - 安装、升级、状态、卸载、完整备份和校验回滚 API 已接通；卸载和回滚要求分片停止及精确房间名确认。
 - `Start/Stop` 幂等，`Reload` 重新读取受管模块；候选加载或启动失败时保留或恢复旧实例。
 - 玩家 A/B JSON 快照、健康信标、Session/Shard/sequence/时间校验和损坏槽回退已实现。
 - 房间级多分片一次事务刷新、字段级 `live/stale/unavailable`、原生日志补充及旧控制台探针 fallback 已实现。
+- 世界状态每 5 秒写入 A/B JSON 快照，完整保留 17 项季节、昼夜、天气、环境与洞穴指标；Go 严格校验版本、Session、Shard、实例、sequence、时间和有限字段，快照有效时不发送控制台 Lua。
+- Runtime 未安装、版本过旧、快照缺失、损坏、错 Session/Shard 或过期时，世界状态刷新只执行一次原 nonce 日志探针 fallback；请求取消或超时后不会再触发 fallback。
 - 玩家页已展示 Runtime 正常、fallback、降级和不可用状态，并提供安装或修复入口。
 - 玩家操作已迁移到固定允许列表短命令，使用 A/B 结构化回执；发送后未收到回执时不会自动重试，避免重复执行危险动作。
 - 世界事件使用最多 128 条的 A/B 小批次；Go 按 Runtime 实例和 sequence 合并、去重，并校验当前 Session 与 Shard 数据。
@@ -361,6 +363,7 @@ customcommands.lua
 dst-admin/
 ├── bootstrap.lua
 ├── telemetry.lua
+├── worldstate.lua
 ├── commands.lua
 ├── events.lua
 └── diagnostics.lua
@@ -370,9 +373,10 @@ dst-admin/
 
 ```lua
 _G.DSTAdmin = {
-    version = "2.2.0",
+    version = "2.3.0",
     protocolVersion = 2,
     Telemetry = {},
+    WorldState = {},
     Commands = {},
     Events = {},
     Diagnostics = {},
@@ -388,6 +392,7 @@ DSTAdmin.Status()
 DSTAdmin.Reload()
 
 DSTAdmin.Telemetry.EmitOnce()
+DSTAdmin.WorldState.EmitOnce()
 DSTAdmin.Commands.Execute(request_json)
 DSTAdmin.Diagnostics.Capture(request_json)
 ```
@@ -432,7 +437,7 @@ DSTAdmin.Diagnostics.Capture(request_json)
 ```json
 {
   "schemaVersion": 2,
-  "producerVersion": "2.2.0",
+  "producerVersion": "2.3.0",
   "producerInstanceId": "runtime-random-id",
   "sessionId": "dst-session-id",
   "shardId": "1",
@@ -452,7 +457,23 @@ players-b.json
 
 同一 `producerInstanceId` 选择最大 `sequence`。不同实例优先选择 `capturedAtUnix` 更新且 Session 匹配的快照。空数组只有在 `complete=true` 且快照新鲜时，才能证明当前分片无人在线。
 
-### 9.2 事件批次
+### 9.2 世界状态 A/B 快照
+
+`worldstate-a.json` 与 `worldstate-b.json` 每 5 秒轮换一次，信封字段与玩家快照一致，并固定承载以下 17 项业务字段：
+
+```text
+season, phase, cycles
+elapsedDaysInSeason, remainingDaysInSeason, seasonProgress
+dayProgress, phaseProgress, precipitation, moonPhase
+temperature, wetness, moisture, moistureCeil, precipitationRate
+nightmarePhase, nightmareProgress
+```
+
+Lua 优先读取 `TheWorld.state`；季节进度、噩梦阶段和噩梦进度在对应字段缺失时，分别尝试 `seasonmanager` 与 `nightmareclock` 的只读方法。单项不存在时省略数值或返回空文本，不伪装为零。采集不遍历 `Ents`，只做有限字段读取、JSON 编码和一次异步持久化。
+
+Go 只接受 Runtime `2.3.0`、协议 2、当前 Session 和当前 `server.ini [SHARD].id` 的新鲜完整快照；拒绝未知 JSON 字段、尾随 JSON、NaN/Inf、负计数、超长文本与未来时间。A/B 中一槽损坏时读取另一槽；两槽都不可用时才调用旧 nonce 控制台探针，保证旧 Runtime、特殊环境和代表性 Mod 仍有恢复路径。
+
+### 9.3 事件批次
 
 事件不要每条写一个文件。使用有上限的批次或双槽文件：
 
@@ -470,7 +491,7 @@ players-b.json
 
 Runtime 在停止或热升级时会取消尚未发布的内存批次并解绑监听器，避免旧实例在新实例启动后继续发布事件。已经开始的异步持久化无法由 DST API 取消，因此 Go 选择事件发生时间更新的 Runtime 实例，并只合并同一实例的 A/B 槽。
 
-### 9.3 管理动作回执
+### 9.4 管理动作回执
 
 请求由 Go 生成不可预测 ID，Lua 只接受固定动作及结构化参数：
 
@@ -498,7 +519,7 @@ Lua 不能根据请求中的字符串动态调用任意全局函数。
 
 命令采用至多一次发送语义：Go 在确认 Runtime 已安装、健康且命令模块空闲后只发送一次。发送后即使回执超时，也不能自动使用同一命令或旧控制台命令重试，因为动作可能已经在游戏内成功执行。只有在发送前确认 Runtime 未安装或未就绪时，玩家服务才允许使用旧内联控制台实现作为 fallback。
 
-### 9.4 诊断报告
+### 9.5 诊断报告
 
 诊断请求由 Go 生成请求 ID，只允许以下三种固定档位：
 
@@ -607,7 +628,14 @@ Go 安装器必须遵守：
 1. 增加稳定事件的小型批次协议。
 2. 增加有限、按需、自动停止的诊断采样。
 3. 世界状态页展示最近事件、历史诊断与结构化诊断结果。
-4. 后续与地图和专门性能页面关联属于产品增强，不阻塞 Runtime 2.2.0 发布。
+4. 后续与地图和专门性能页面关联属于产品增强，不阻塞 Runtime 2.3.0 发布。
+
+### 阶段 E：世界状态无日志采集（代码已完成）
+
+1. 增加独立 `worldstate.lua`，每 5 秒发布完整 17 项 A/B 快照。
+2. Go 严格校验版本、Session、Shard、实例、sequence、时间、字段边界和 JSON 完整性。
+3. Runtime 快照正常时世界状态刷新不再向控制台发送 Lua，也不再产生周期性 `RemoteCommandInput`。
+4. Runtime 缺失、旧版、损坏或过期时保留原 nonce 日志探针；上下文取消时禁止额外 fallback。
 
 ## 15. 验收清单
 

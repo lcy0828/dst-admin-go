@@ -382,7 +382,11 @@ func initApplication(manageBackground bool) (*Application, error) {
 		}
 		worldStateSampler = worldstate.MemorySampler{}
 	} else {
-		worldStateSampler, err = worldstate.NewLogSampler(savePath, roomService, shardControl)
+		fallbackSampler, samplerErr := worldstate.NewLogSampler(savePath, roomService, shardControl)
+		if samplerErr != nil {
+			return nil, samplerErr
+		}
+		worldStateSampler, err = worldstate.NewRuntimeSampler(runtimeManager, fallbackSampler)
 		if err != nil {
 			return nil, err
 		}
