@@ -27,6 +27,7 @@ tags:
   - name: Agents
   - name: Containers
   - name: Jobs
+  - name: Save Imports
 paths:
   /auth/session:
     get:
@@ -897,7 +898,7 @@ paths:
           description: Save import sessions ordered newest first
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/SaveImportListEnvelope" }
   /save-imports/upload:
     post:
       tags: [Save Imports, Jobs]
@@ -921,7 +922,7 @@ paths:
           description: Upload stored and analysis job accepted
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/SaveImportUploadEnvelope" }
         "413":
           description: Upload exceeds the configured safety limit
           content:
@@ -948,7 +949,7 @@ paths:
           description: Save import session
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/SaveImportEnvelope" }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
       tags: [Save Imports]
@@ -971,7 +972,7 @@ paths:
           description: Deleted save import
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/SaveImportEnvelope" }
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /save-imports/{importId}/actions/analyze:
@@ -1012,22 +1013,7 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [candidateId, mode, tokenPolicy, networkPolicy, modPolicy]
-              properties:
-                candidateId: { type: string }
-                mode: { type: string, enum: [new, replace, clone] }
-                targetRoomId: { type: string }
-                directoryName: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' }
-                roomName: { type: string, maxLength: 128 }
-                confirmation: { type: string }
-                tokenPolicy: { type: string, enum: [source, preserve, provided, none] }
-                clusterToken: { type: string, maxLength: 4096 }
-                networkPolicy: { type: string, enum: [source, preserve, auto] }
-                modPolicy: { type: string, enum: [preserve, require_downloaded, install_missing] }
-                allowPartial: { type: boolean }
-                allowMissingToken: { type: boolean }
+            schema: { $ref: "#/components/schemas/SaveImportApplyInput" }
       responses:
         "202":
           description: Local deployment job accepted
@@ -3352,6 +3338,174 @@ components:
           type: "null"
         meta:
           $ref: "#/components/schemas/Meta"
+    SaveImportStatus:
+      type: string
+      enum: [uploaded, analyzing, ready, invalid, applying, applied]
+    SaveImportSeverity:
+      type: string
+      enum: [info, warning, error]
+    SaveImportDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [code, severity, message, autoFix]
+      properties:
+        code: { type: string }
+        severity: { $ref: "#/components/schemas/SaveImportSeverity" }
+        message: { type: string }
+        path: { type: string }
+        autoFix: { type: boolean }
+        details:
+          type: object
+          additionalProperties: true
+    SaveImportPorts:
+      type: object
+      additionalProperties: false
+      required: [server, authentication, masterServer]
+      properties:
+        server: { type: integer, minimum: 0, maximum: 65535 }
+        authentication: { type: integer, minimum: 0, maximum: 65535 }
+        masterServer: { type: integer, minimum: 0, maximum: 65535 }
+    SaveImportWorld:
+      type: object
+      additionalProperties: false
+      required: [directoryName, name, role, isMaster, shardId, ports, sessionCount, modFile, serverFile]
+      properties:
+        directoryName: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [master, caves, custom] }
+        isMaster: { type: boolean }
+        shardId: { type: integer }
+        ports: { $ref: "#/components/schemas/SaveImportPorts" }
+        sessionCount: { type: integer, minimum: 0 }
+        modFile: { type: boolean }
+        serverFile: { type: string }
+    SaveImportMod:
+      type: object
+      additionalProperties: false
+      required: [id, worlds, downloaded]
+      properties:
+        id: { type: string, pattern: '^[0-9]+$' }
+        worlds:
+          type: array
+          items: { type: string }
+        downloaded: { type: boolean }
+    SaveImportCandidate:
+      type: object
+      additionalProperties: false
+      required: [id, root, directoryName, name, description, gameMode, maxPlayers, pvp, tokenPresent, worlds, mods, compatibility, diagnostics, ignoredSystemFiles]
+      properties:
+        id: { type: string }
+        root: { type: string }
+        directoryName: { type: string }
+        name: { type: string }
+        description: { type: string }
+        gameMode: { type: string }
+        maxPlayers: { type: integer, minimum: 0 }
+        pvp: { type: boolean }
+        tokenPresent: { type: boolean }
+        worlds:
+          type: array
+          items: { $ref: "#/components/schemas/SaveImportWorld" }
+        mods:
+          type: array
+          items: { $ref: "#/components/schemas/SaveImportMod" }
+        compatibility: { type: string, enum: [ready, needs_attention, blocked] }
+        diagnostics:
+          type: array
+          items: { $ref: "#/components/schemas/SaveImportDiagnostic" }
+        ignoredSystemFiles: { type: integer, minimum: 0 }
+    SaveImportManifest:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, format, sourceName, compressedSize, contentSize, fileCount, sha256, normalizedPaths, ignoredSystemFiles, candidates, diagnostics, analyzedAt]
+      properties:
+        schemaVersion: { type: string }
+        format: { type: string, enum: [zip, tar, tar.gz] }
+        sourceName: { type: string }
+        compressedSize: { type: integer, format: int64, minimum: 0 }
+        contentSize: { type: integer, format: int64, minimum: 0 }
+        fileCount: { type: integer, minimum: 0 }
+        sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        normalizedPaths: { type: integer, minimum: 0 }
+        ignoredSystemFiles: { type: integer, minimum: 0 }
+        candidates:
+          type: array
+          items: { $ref: "#/components/schemas/SaveImportCandidate" }
+        diagnostics:
+          type: array
+          items: { $ref: "#/components/schemas/SaveImportDiagnostic" }
+        analyzedAt: { type: string, format: date-time }
+    SaveImport:
+      type: object
+      additionalProperties: false
+      required: [id, name, sourceName, status, size, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        sourceName: { type: string }
+        status: { $ref: "#/components/schemas/SaveImportStatus" }
+        size: { type: integer, format: int64, minimum: 0 }
+        sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        manifest: { $ref: "#/components/schemas/SaveImportManifest" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        appliedAt: { type: string, format: date-time }
+    SaveImportList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/SaveImport" }
+        total: { type: integer, minimum: 0 }
+    SaveImportUploadResult:
+      type: object
+      additionalProperties: false
+      required: [import, job]
+      properties:
+        import: { $ref: "#/components/schemas/SaveImport" }
+        job: { $ref: "#/components/schemas/Job" }
+    SaveImportApplyInput:
+      type: object
+      additionalProperties: false
+      required: [candidateId, mode, tokenPolicy, networkPolicy, modPolicy, allowPartial, allowMissingToken]
+      properties:
+        candidateId: { type: string }
+        mode: { type: string, enum: [new, replace, clone] }
+        targetRoomId: { type: string }
+        directoryName: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' }
+        roomName: { type: string, maxLength: 128 }
+        confirmation: { type: string }
+        tokenPolicy: { type: string, enum: [source, preserve, provided, none] }
+        clusterToken: { type: string, maxLength: 4096 }
+        networkPolicy: { type: string, enum: [source, preserve, auto] }
+        modPolicy: { type: string, enum: [preserve, require_downloaded, install_missing] }
+        allowPartial: { type: boolean }
+        allowMissingToken: { type: boolean }
+    SaveImportEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/SaveImport" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    SaveImportListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/SaveImportList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    SaveImportUploadEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/SaveImportUploadResult" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     DSTRuntimeInstallState:
       type: string
       enum: [missing, installed, outdated, invalid]
