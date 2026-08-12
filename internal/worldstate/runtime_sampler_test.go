@@ -52,6 +52,18 @@ func TestRuntimeSamplerPreservesEveryMetricWithoutCallingFallback(t *testing.T) 
 	}
 }
 
+func TestRuntimeSamplerCurrentSnapshotNeverCallsFallback(t *testing.T) {
+	reader := &runtimeWorldStateReader{err: dstruntime.ErrSnapshotUnavailable}
+	fallback := &countingWorldStateSampler{observation: Observation{Season: "winter"}}
+	sampler, err := NewRuntimeSampler(reader, fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sampler.CurrentSnapshot(context.Background(), "room", "world"); !errors.Is(err, dstruntime.ErrSnapshotUnavailable) || fallback.calls != 0 {
+		t.Fatalf("current snapshot error = %v, fallback calls = %d", err, fallback.calls)
+	}
+}
+
 func TestRuntimeSamplerFallsBackExactlyOnceForUnavailableSnapshot(t *testing.T) {
 	reader := &runtimeWorldStateReader{err: dstruntime.ErrSnapshotUnavailable}
 	fallback := &countingWorldStateSampler{observation: Observation{Season: "winter"}}

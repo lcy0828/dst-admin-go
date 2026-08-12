@@ -24,14 +24,24 @@ func NewRuntimeSampler(runtime RuntimeSnapshotReader, fallback Sampler) (*Runtim
 }
 
 func (s *RuntimeSampler) Snapshot(ctx context.Context, roomID, worldID string) (Observation, error) {
-	snapshot, err := s.runtime.ReadWorldState(ctx, roomID, worldID)
+	observation, err := s.CurrentSnapshot(ctx, roomID, worldID)
 	if err == nil {
-		return observationFromRuntime(snapshot), nil
+		return observation, nil
 	}
 	if contextErr := contextError(ctx, err); contextErr != nil {
 		return Observation{}, contextErr
 	}
 	return s.fallback.Snapshot(ctx, roomID, worldID)
+}
+
+// CurrentSnapshot reads only the managed runtime output and never invokes the
+// console fallback. It is suitable for read-only current-state views.
+func (s *RuntimeSampler) CurrentSnapshot(ctx context.Context, roomID, worldID string) (Observation, error) {
+	snapshot, err := s.runtime.ReadWorldState(ctx, roomID, worldID)
+	if err != nil {
+		return Observation{}, err
+	}
+	return observationFromRuntime(snapshot), nil
 }
 
 func contextError(ctx context.Context, err error) error {

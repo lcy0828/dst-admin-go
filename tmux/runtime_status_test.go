@@ -69,6 +69,42 @@ func TestRuntimeLogStartedAtParsesDSTTimestamp(t *testing.T) {
 	}
 }
 
+func TestClassifyRuntimeLogFilePreservesReadySignalAfterLongRuntimeLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server_log.txt")
+	content := "[00:00:00]: Current time: Wed Aug 12 09:19:26 2026\n" +
+		strings.Repeat("startup detail\n", 400000) +
+		"[00:00:27]: Server registered via geo DNS in us-east-1\n" +
+		strings.Repeat("runtime detail\n", 400000) +
+		"[16:51:26]: routine mod output\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	status, err := classifyRuntimeLogFile(path, RuntimeStatus{State: RuntimeStarting, SessionExists: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != RuntimeRunning {
+		t.Fatalf("long-running status = %#v", status)
+	}
+}
+
+func TestClassifyRuntimeLogFileLetsRecentFailureOverrideStartupReady(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server_log.txt")
+	content := "[00:00:20]: Server registered via geo DNS\n" +
+		strings.Repeat("runtime detail\n", 400000) +
+		"[16:51:26]: Failed to bind server port\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	status, err := classifyRuntimeLogFile(path, RuntimeStatus{State: RuntimeStarting, SessionExists: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != RuntimeFailed || status.Code != "PORT_BIND_FAILED" {
+		t.Fatalf("long-running failure status = %#v", status)
+	}
+}
+
 func TestBuildStartCommandAddsMacSteamEnvironmentWithoutLeakingArguments(t *testing.T) {
 	libraryPath := t.TempDir()
 	if err := os.WriteFile(filepath.Join(libraryPath, "steamclient.dylib"), []byte("test"), 0600); err != nil {

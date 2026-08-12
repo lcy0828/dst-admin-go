@@ -17,7 +17,7 @@ import (
 
 type worldStateHandlerService struct{}
 
-func (worldStateHandlerService) List(string) (worldstate.List, error) {
+func (worldStateHandlerService) List(context.Context, string) (worldstate.List, error) {
 	return worldstate.List{Items: []worldstate.Snapshot{{WorldID: "master", Season: "autumn"}}, Total: 1}, nil
 }
 func (worldStateHandlerService) History(_ string, worldID string, limit int) (worldstate.History, error) {

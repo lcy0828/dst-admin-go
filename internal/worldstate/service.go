@@ -21,6 +21,10 @@ type Runtime interface {
 	IsRunning(context.Context, string, string) (bool, error)
 }
 
+type CurrentSampler interface {
+	CurrentSnapshot(context.Context, string, string) (Observation, error)
+}
+
 type Service struct {
 	rooms   RoomCatalog
 	runtime Runtime
@@ -36,13 +40,46 @@ func NewService(roomCatalog RoomCatalog, runtime Runtime, store *Store, sampler 
 	return &Service{rooms: roomCatalog, runtime: runtime, store: store, sampler: sampler, now: time.Now}, nil
 }
 
-func (s *Service) List(roomID string) (List, error) {
-	if _, err := s.rooms.Room(roomID); err != nil {
+func (s *Service) List(ctx context.Context, roomID string) (List, error) {
+	room, err := s.rooms.Room(roomID)
+	if err != nil {
 		return List{}, err
 	}
 	items, err := s.store.Current(roomID)
 	if err != nil {
 		return List{}, err
+	}
+	if current, ok := s.sampler.(CurrentSampler); ok && room.Managed {
+		worlds, worldsErr := s.rooms.Worlds(roomID)
+		if worldsErr != nil {
+			return List{}, worldsErr
+		}
+		byWorld := make(map[string]int, len(items))
+		for index, item := range items {
+			byWorld[item.WorldID] = index
+		}
+		for _, world := range worlds {
+			if err := ctx.Err(); err != nil {
+				return List{}, err
+			}
+			running, runningErr := s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
+			if runningErr != nil || !running {
+				continue
+			}
+			observation, snapshotErr := current.CurrentSnapshot(ctx, roomID, world.ID)
+			if snapshotErr != nil || validateObservation(observation) != nil {
+				continue
+			}
+			live := snapshotFromObservation(roomID, world, observation, s.now())
+			if index, exists := byWorld[world.ID]; exists {
+				if live.ObservedAt.After(items[index].ObservedAt) {
+					items[index] = live
+				}
+				continue
+			}
+			byWorld[world.ID] = len(items)
+			items = append(items, live)
+		}
 	}
 	var last *time.Time
 	for _, item := range items {
@@ -109,7 +146,20 @@ func (s *Service) RefreshWorld(ctx context.Context, roomID, worldID string) (Ref
 	if observedAt.IsZero() {
 		observedAt = s.now().UTC()
 	}
-	snapshot := Snapshot{
+	snapshot := snapshotFromObservation(roomID, world, observation, observedAt)
+	stored, err := s.store.Append(snapshot)
+	if err != nil {
+		return RefreshResult{}, err
+	}
+	return RefreshResult{WorldID: world.ID, WorldName: world.Name, ObservedAt: stored.ObservedAt, Message: "世界状态已采样"}, nil
+}
+
+func snapshotFromObservation(roomID string, world rooms.World, observation Observation, fallbackTime time.Time) Snapshot {
+	observedAt := observation.CapturedAt.UTC()
+	if observedAt.IsZero() {
+		observedAt = fallbackTime.UTC()
+	}
+	return Snapshot{
 		RoomID: roomID, WorldID: world.ID, WorldName: world.Name, WorldRole: string(world.Role),
 		Season: observation.Season, Phase: observation.Phase, Cycles: observation.Cycles,
 		ElapsedDaysInSeason: observation.ElapsedDaysInSeason, RemainingDaysInSeason: observation.RemainingDaysInSeason,
@@ -119,11 +169,6 @@ func (s *Service) RefreshWorld(ctx context.Context, roomID, worldID string) (Ref
 		PrecipitationRate: observation.PrecipitationRate, NightmarePhase: observation.NightmarePhase,
 		NightmareProgress: observation.NightmareProgress, ObservedAt: observedAt,
 	}
-	stored, err := s.store.Append(snapshot)
-	if err != nil {
-		return RefreshResult{}, err
-	}
-	return RefreshResult{WorldID: world.ID, WorldName: world.Name, ObservedAt: stored.ObservedAt, Message: "世界状态已采样"}, nil
 }
 
 func validateObservation(observation Observation) error {

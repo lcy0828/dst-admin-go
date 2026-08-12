@@ -14,7 +14,7 @@ import (
 )
 
 type WorldStateService interface {
-	List(string) (worldstate.List, error)
+	List(context.Context, string) (worldstate.List, error)
 	History(string, string, int) (worldstate.History, error)
 	WorldTargets(string) ([]rooms.World, error)
 	RefreshWorld(context.Context, string, string) (worldstate.RefreshResult, error)
@@ -37,7 +37,7 @@ func (h *WorldStateHandler) Register(v2 *gin.RouterGroup) {
 }
 
 func (h *WorldStateHandler) list(c *gin.Context) {
-	value, err := h.states.List(c.Param("roomId"))
+	value, err := h.states.List(c.Request.Context(), c.Param("roomId"))
 	if err != nil {
 		worldStateFailure(c, err)
 		return

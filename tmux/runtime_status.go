@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -34,6 +35,7 @@ type RuntimeStatus struct {
 	SessionExists bool
 }
 
+const runtimeLogScanChunkBytes = 64 * 1024
 const runtimeLogTailBytes int64 = 256 * 1024
 
 var runtimeFailureSignals = []struct {
@@ -63,6 +65,7 @@ var runtimeReadySignals = []string{
 	"[Shard] secondary shard is now ready!",
 	"[Shard] secondary shard LUA is now ready!",
 	"Sim paused",
+	"Serializing world:",
 }
 
 func (s *DSTServer) RuntimeStatus() (RuntimeStatus, error) {
@@ -87,16 +90,25 @@ func (s *DSTServer) RuntimeStatus() (RuntimeStatus, error) {
 	if createdErr == nil && !runtimeLogModifiedAfterSession(info.ModTime(), createdAt) {
 		return status, nil
 	}
-	content, err := readFileTail(logPath, runtimeLogTailBytes)
+	logStartedAt, hasLogStart, err := readRuntimeLogStartedAt(logPath)
 	if err != nil {
 		return RuntimeStatus{}, fmt.Errorf("读取分片日志: %w", err)
 	}
-	if createdErr == nil {
-		if logStartedAt, ok := runtimeLogStartedAt(string(content)); ok && logStartedAt.Before(createdAt) {
-			return status, nil
-		}
+	if createdErr == nil && hasLogStart && logStartedAt.Before(createdAt) {
+		return status, nil
 	}
-	return classifyRuntimeLog(string(content), status), nil
+	tail, err := readFileTail(logPath, runtimeLogTailBytes)
+	if err != nil {
+		return RuntimeStatus{}, fmt.Errorf("读取分片日志: %w", err)
+	}
+	if tailStatus := classifyRuntimeLog(string(tail), status); tailStatus.State != RuntimeStarting {
+		return tailStatus, nil
+	}
+	classified, err := classifyRuntimeLogFile(logPath, status)
+	if err != nil {
+		return RuntimeStatus{}, fmt.Errorf("读取分片日志: %w", err)
+	}
+	return classified, nil
 }
 
 func runtimeLogModifiedAfterSession(logModified, sessionCreated time.Time) bool {
@@ -149,6 +161,103 @@ func classifyRuntimeLog(content string, fallback RuntimeStatus) RuntimeStatus {
 	return fallback
 }
 
+func classifyRuntimeLogFile(path string, fallback RuntimeStatus) (RuntimeStatus, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return RuntimeStatus{}, err
+	}
+	defer file.Close()
+
+	latestReady := int64(-1)
+	failurePositions := make([]int64, len(runtimeFailureSignals))
+	for index := range failurePositions {
+		failurePositions[index] = -1
+	}
+	workshopUnavailable := false
+	overlapSize := runtimeLogSignalOverlap()
+	overlap := make([]byte, 0, overlapSize)
+	chunk := make([]byte, runtimeLogScanChunkBytes)
+	var consumed int64
+	for {
+		read, readErr := file.Read(chunk)
+		if read > 0 {
+			window := make([]byte, 0, len(overlap)+read)
+			window = append(window, overlap...)
+			window = append(window, chunk[:read]...)
+			base := consumed - int64(len(overlap))
+			for _, signal := range runtimeReadySignals {
+				if index := bytes.LastIndex(window, []byte(signal)); index >= 0 {
+					position := base + int64(index)
+					if position > latestReady {
+						latestReady = position
+					}
+				}
+			}
+			for index, signal := range runtimeFailureSignals {
+				if found := bytes.LastIndex(window, []byte(signal.needle)); found >= 0 {
+					position := base + int64(found)
+					if position > failurePositions[index] {
+						failurePositions[index] = position
+					}
+				}
+			}
+			if bytes.Contains(window, []byte("Steam Workshop functionality will be disabled")) {
+				workshopUnavailable = true
+			}
+			consumed += int64(read)
+			keep := overlapSize
+			if keep > len(window) {
+				keep = len(window)
+			}
+			overlap = append(overlap[:0], window[len(window)-keep:]...)
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return RuntimeStatus{}, readErr
+		}
+	}
+
+	latestFailure := int64(-1)
+	failurePriority := -1
+	var failure RuntimeStatus
+	for index, signal := range runtimeFailureSignals {
+		position := failurePositions[index]
+		if position > latestReady && (signal.priority > failurePriority || signal.priority == failurePriority && position > latestFailure) {
+			latestFailure = position
+			failurePriority = signal.priority
+			failure = RuntimeStatus{State: RuntimeFailed, Code: signal.code, Message: signal.message, SessionExists: true}
+		}
+	}
+	if latestFailure >= 0 {
+		return failure, nil
+	}
+	if latestReady >= 0 {
+		message := ""
+		if workshopUnavailable {
+			message = "服务已运行，但 Steam Workshop 当前不可用"
+		}
+		return RuntimeStatus{State: RuntimeRunning, Message: message, SessionExists: true}, nil
+	}
+	return fallback, nil
+}
+
+func runtimeLogSignalOverlap() int {
+	longest := len("Steam Workshop functionality will be disabled")
+	for _, signal := range runtimeReadySignals {
+		if len(signal) > longest {
+			longest = len(signal)
+		}
+	}
+	for _, signal := range runtimeFailureSignals {
+		if len(signal.needle) > longest {
+			longest = len(signal.needle)
+		}
+	}
+	return longest - 1
+}
+
 func (s *DSTServer) SessionExists() (bool, error) {
 	command := exec.Command("tmux", "has-session", "-t", "="+s.SessionName)
 	if err := command.Run(); err != nil {
@@ -175,6 +284,20 @@ func (s *DSTServer) sessionCreatedAt() (time.Time, error) {
 
 func (s *DSTServer) runtimeLogPath() string {
 	return filepath.Join(s.StorageRoot, s.ConfDir, s.ArchiveName, s.WorldName, "server_log.txt")
+}
+
+func readRuntimeLogStartedAt(path string) (time.Time, bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, 4096))
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	startedAt, ok := runtimeLogStartedAt(string(content))
+	return startedAt, ok, nil
 }
 
 func readFileTail(path string, limit int64) ([]byte, error) {
