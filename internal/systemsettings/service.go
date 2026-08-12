@@ -172,7 +172,7 @@ func (s *Service) settingsFromSnapshot(snapshot Snapshot) Settings {
 		}
 		options := make([]string, len(definition.Options))
 		copy(options, definition.Options)
-		fields = append(fields, Field{ID: definition.ID, Group: definition.Group, Label: definition.Label, Kind: definition.Kind, Value: value, Options: options, Source: source, Environment: environment, Editable: source != SourceEnvironment && !definition.ReadOnly, Sensitive: definition.Sensitive, Configured: configured, RestartRequired: definition.RestartRequired})
+		fields = append(fields, Field{ID: definition.ID, Group: definition.Group, Label: definition.Label, Kind: definition.Kind, Value: value, Options: options, Source: source, Environment: environment, Editable: source != SourceEnvironment && !definition.ReadOnly, Sensitive: definition.Sensitive, Configured: configured, RestartRequired: definition.RestartRequired, Minimum: definition.Minimum, Maximum: definition.Maximum})
 	}
 	restartRequired := false
 	for _, definition := range fieldDefinitions {

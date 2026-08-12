@@ -62,4 +62,7 @@ func TestSystemStatusAndSettingsHTTP(t *testing.T) {
 		"server": "127.0.0.1", "port": 1, "username": "admin",
 	}, nil, "")
 	assertAPIError(t, response, http.StatusUnprocessableEntity, "SMTP_TEST_FAILED")
+	if !strings.Contains(response.Body.String(), `"name":"connect"`) || !strings.Contains(response.Body.String(), `"status":"failed"`) {
+		t.Fatalf("SMTP failure did not expose its completed stages: %s", response.Body.String())
+	}
 }

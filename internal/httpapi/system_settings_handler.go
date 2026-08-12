@@ -74,7 +74,7 @@ func (h *SystemSettingsHandler) testEmail(c *gin.Context) {
 	}
 	value, err := h.service.TestSMTP(c.Request.Context(), input)
 	if err != nil {
-		Failure(c, http.StatusUnprocessableEntity, "SMTP_TEST_FAILED", "SMTP 连接或认证失败", map[string]string{"reason": err.Error()})
+		Failure(c, http.StatusUnprocessableEntity, "SMTP_TEST_FAILED", "SMTP 连接或认证失败", gin.H{"reason": err.Error(), "result": value})
 		return
 	}
 	Success(c, http.StatusOK, value)

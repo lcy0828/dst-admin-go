@@ -34,6 +34,8 @@ type Field struct {
 	Sensitive       bool        `json:"sensitive"`
 	Configured      bool        `json:"configured"`
 	RestartRequired bool        `json:"restartRequired"`
+	Minimum         int         `json:"minimum,omitempty"`
+	Maximum         int         `json:"maximum,omitempty"`
 }
 
 type Settings struct {
@@ -108,14 +110,22 @@ type RuntimeSettings struct {
 }
 
 type SMTPTestInput struct {
-	Server   string `json:"server" binding:"required"`
-	Port     int    `json:"port" binding:"required"`
-	Username string `json:"username"`
-	Password string `json:"password"`
+	Server            string `json:"server" binding:"required"`
+	Port              int    `json:"port" binding:"required"`
+	Username          string `json:"username"`
+	Password          string `json:"password"`
+	UseStoredPassword bool   `json:"useStoredPassword"`
 }
 
 type SMTPTestResult struct {
-	Server        string `json:"server"`
-	TLS           bool   `json:"tls"`
-	Authenticated bool   `json:"authenticated"`
+	Server        string          `json:"server"`
+	TLS           bool            `json:"tls"`
+	Authenticated bool            `json:"authenticated"`
+	Stages        []SMTPTestStage `json:"stages"`
+}
+
+type SMTPTestStage struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Detail string `json:"detail,omitempty"`
 }

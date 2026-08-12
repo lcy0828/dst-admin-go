@@ -239,21 +239,14 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: false
-              required: [server, port]
-              properties:
-                server: { type: string }
-                port: { type: integer, minimum: 1, maximum: 65535 }
-                username: { type: string }
-                password: { type: string, format: password }
+              $ref: "#/components/schemas/SMTPTestInput"
       responses:
         "200":
           description: SMTP connection and optional authentication succeeded
           content:
             application/json:
               schema:
-                type: object
+                $ref: "#/components/schemas/SMTPTestResultEnvelope"
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms:
     get:
@@ -6081,9 +6074,9 @@ components:
       required: [id, group, label, kind, value, options, source, editable, sensitive, configured, restartRequired]
       properties:
         id: { type: string }
-        group: { type: string, enum: [paths, mod, lua, map, misc] }
+        group: { type: string, enum: [paths, mod, lua, map, misc, ui, security, backup, notification] }
         label: { type: string }
-        kind: { type: string, enum: [path, text, select, secret] }
+        kind: { type: string, enum: [path, text, select, secret, boolean, number, email, color, time, ip-list] }
         value: { type: string }
         options: { type: array, items: { type: string } }
         source: { $ref: "#/components/schemas/SystemSettingSource" }
@@ -6092,6 +6085,8 @@ components:
         sensitive: { type: boolean }
         configured: { type: boolean }
         restartRequired: { type: boolean }
+        minimum: { type: integer }
+        maximum: { type: integer }
     SystemSettings:
       type: object
       additionalProperties: false
@@ -6166,6 +6161,43 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/SystemSettingsApplyResult" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    SMTPTestInput:
+      type: object
+      additionalProperties: false
+      required: [server, port]
+      properties:
+        server: { type: string, minLength: 1 }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        username: { type: string }
+        password: { type: string, format: password }
+        useStoredPassword:
+          type: boolean
+          default: false
+          description: Reuse the configured password only when server and username still match the effective settings
+    SMTPTestStage:
+      type: object
+      additionalProperties: false
+      required: [name, status]
+      properties:
+        name: { type: string, enum: [dns, connect, tls, auth, verify] }
+        status: { type: string, enum: [success, skipped, failed] }
+        detail: { type: string }
+    SMTPTestResult:
+      type: object
+      additionalProperties: false
+      required: [server, tls, authenticated, stages]
+      properties:
+        server: { type: string }
+        tls: { type: boolean }
+        authenticated: { type: boolean }
+        stages: { type: array, items: { $ref: "#/components/schemas/SMTPTestStage" } }
+    SMTPTestResultEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/SMTPTestResult" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     ContainerAction:

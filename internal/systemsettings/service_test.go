@@ -72,6 +72,25 @@ func TestRuntimeSettingsUseRealDefaultsAndApplyWithoutRestart(t *testing.T) {
 	}
 }
 
+func TestSettingsExposeFieldKindsAndNumericBounds(t *testing.T) {
+	service, err := NewService(NewMemoryRepository())
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := service.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	minimumLength := fieldByID(t, settings, "security.minPasswordLength")
+	if minimumLength.Kind != "number" || minimumLength.Minimum != 6 || minimumLength.Maximum != 20 {
+		t.Fatalf("password length metadata=%#v", minimumLength)
+	}
+	emailEnabled := fieldByID(t, settings, "notification.emailEnabled")
+	if emailEnabled.Group != "notification" || emailEnabled.Kind != "boolean" {
+		t.Fatalf("email field metadata=%#v", emailEnabled)
+	}
+}
+
 func TestIPWhitelistValidationAndMatching(t *testing.T) {
 	value := "192.168.2.5\n10.0.0.0/8\n::1"
 	if err := ValidateIPWhitelist(value); err != nil {
