@@ -44,6 +44,18 @@ type automationTestExecutor struct {
 	attempts int
 }
 
+type automationPreflightExecutor struct {
+	automationTestExecutor
+	shouldRun bool
+	err       error
+	checks    int
+}
+
+func (e *automationPreflightExecutor) ShouldRunScheduled(context.Context, Task) (bool, error) {
+	e.checks++
+	return e.shouldRun, e.err
+}
+
 func (e *automationTestExecutor) Validate(Task) error { return nil }
 func (e *automationTestExecutor) Execute(ctx context.Context, _ Task, _ string) (ExecutionResult, error) {
 	e.attempts++
@@ -257,6 +269,29 @@ func TestEnsureDefaultPlayerRefreshIsIdempotent(t *testing.T) {
 	groups, err := service.Groups("room")
 	if err != nil || len(groups) != 1 || groups[0].Name != playerManagementGroupName || groups[0].Type != "system" {
 		t.Fatalf("unexpected default group: groups=%#v err=%v", groups, err)
+	}
+}
+
+func TestScheduledPlayerRefreshSkipsBeforePersistingRunOrJob(t *testing.T) {
+	executor := &automationPreflightExecutor{}
+	service, _, jobService := newAutomationTestService(t, executor)
+	task, _, err := service.EnsureDefaultPlayerRefresh("room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RunTask("room", task.ID, TriggerSchedule); !errors.Is(err, ErrNoRunningWorlds) {
+		t.Fatalf("scheduled preflight error = %v", err)
+	}
+	if executor.checks != 1 || executor.attempts != 0 {
+		t.Fatalf("preflight checks=%d execute attempts=%d", executor.checks, executor.attempts)
+	}
+	runs, err := service.Runs("room", RunFilter{Limit: 25})
+	if err != nil || runs.Total != 0 {
+		t.Fatalf("stopped schedule persisted runs: %#v err=%v", runs, err)
+	}
+	jobsList, total, err := jobService.List(jobs.ListFilter{Limit: 25})
+	if err != nil || total != 0 || len(jobsList) != 0 {
+		t.Fatalf("stopped schedule persisted jobs: total=%d jobs=%#v err=%v", total, jobsList, err)
 	}
 }
 

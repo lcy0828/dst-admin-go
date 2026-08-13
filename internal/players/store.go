@@ -79,6 +79,7 @@ type worldSnapshot struct {
 	History      []Observation
 	ObservedAt   time.Time
 	Source       DataSource
+	Stopped      bool
 }
 
 type snapshotCandidate struct {
@@ -122,6 +123,15 @@ func (s *Store) ReplaceRoomSnapshots(roomID string, snapshots []worldSnapshot) e
 		}
 	}
 	for _, snapshot := range snapshots {
+		if snapshot.Stopped {
+			if err := s.markStoppedWorldPlayersOffline(tx, roomID, snapshot); err != nil {
+				return rollback(err)
+			}
+			if _, err := s.mergeWorldHistoryTx(tx, roomID, snapshot.WorldID, snapshot.WorldName, snapshot.History, snapshot.ObservedAt); err != nil {
+				return rollback(err)
+			}
+			continue
+		}
 		if err := s.markMissingSnapshotPlayersOffline(tx, roomID, snapshot, winners); err != nil {
 			return rollback(err)
 		}
@@ -130,6 +140,28 @@ func (s *Store) ReplaceRoomSnapshots(roomID string, snapshots []worldSnapshot) e
 		}
 	}
 	return tx.Commit().Error
+}
+
+func (s *Store) markStoppedWorldPlayersOffline(tx *gorm.DB, roomID string, snapshot worldSnapshot) error {
+	var online []playerRecord
+	if err := tx.Table(s.table).Where("room_id = ? AND world_id = ? AND online = ?", roomID, snapshot.WorldID, true).Find(&online).Error; err != nil {
+		return err
+	}
+	for _, record := range online {
+		fieldStates := decodeFieldStates(record.FieldStates)
+		observedAt := snapshot.ObservedAt.UTC()
+		fieldStates["online"] = FieldState{Source: SourceNativeLog, ObservedAt: &observedAt, Status: FreshnessStale}
+		encoded, err := encodeFieldStates(fieldStates)
+		if err != nil {
+			return err
+		}
+		if err := tx.Table(s.table).Where("room_id = ? AND user_id = ?", roomID, record.UserID).Updates(map[string]interface{}{
+			"online": false, "status_changed_at": snapshot.ObservedAt, "field_states": encoded,
+		}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func snapshotCandidateWins(candidate, current snapshotCandidate, existing playerRecord) bool {

@@ -139,12 +139,19 @@ func TestRefreshDoesNotMarkPlayersOfflineWhenProbeFails(t *testing.T) {
 	}
 	probe.err = nil
 	runtime.running["Cluster_1/Master"] = false
+	previous, err := service.Player("room", "KU_ONE")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := service.RefreshWorld(context.Background(), "room", "master"); err != nil {
 		t.Fatal(err)
 	}
 	player, _ = service.Player("room", "KU_ONE")
 	if player.Online {
 		t.Fatal("stopped world still reports player online")
+	}
+	if !player.LastRefreshedAt.Equal(previous.LastRefreshedAt) {
+		t.Fatalf("stopped refresh changed collection timestamp: before=%s after=%s", previous.LastRefreshedAt, player.LastRefreshedAt)
 	}
 }
 
@@ -204,6 +211,9 @@ func TestRefreshRestoresHistoricalPlayersWhileWorldIsStopped(t *testing.T) {
 	}
 	if result.Running || !strings.Contains(result.Message, "已恢复 1 个历史玩家") {
 		t.Fatalf("unexpected stopped refresh result: %#v", result)
+	}
+	if result.Status != FreshnessStale || result.ObservedAt != nil {
+		t.Fatalf("stopped refresh was presented as a live observation: %#v", result)
 	}
 	player, err := service.Player("room", "KU_HISTORY")
 	if err != nil || player.Online || player.WorldID != "master" {

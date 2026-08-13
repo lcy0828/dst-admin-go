@@ -48,6 +48,10 @@ type playerBatchRefresher interface {
 	RefreshWorlds(context.Context, string, []string) ([]players.RefreshOutcome, error)
 }
 
+type playerRuntimePreflight interface {
+	AnyWorldRunning(context.Context, string, []string) (bool, error)
+}
+
 type StructuredLogRefresher interface {
 	WorldTargets(string) ([]rooms.World, error)
 	RefreshWorld(context.Context, string, string) (structuredlogs.RefreshResult, error)
@@ -124,6 +128,17 @@ func (e *DomainExecutor) Validate(task Task) error {
 		return ErrUnsafeAction
 	}
 	return nil
+}
+
+func (e *DomainExecutor) ShouldRunScheduled(ctx context.Context, task Task) (bool, error) {
+	if task.Action != ActionPlayerRefresh {
+		return true, nil
+	}
+	preflight, ok := e.players.(playerRuntimePreflight)
+	if !ok {
+		return true, nil
+	}
+	return preflight.AnyWorldRunning(ctx, task.RoomID, task.WorldIDs)
 }
 
 func (e *DomainExecutor) Execute(ctx context.Context, task Task, jobID string) (ExecutionResult, error) {

@@ -17,6 +17,7 @@ var (
 	ErrImportDigest     = errors.New("automation import preview has changed")
 	ErrImportInvalid    = errors.New("automation import document is invalid")
 	ErrUnsafeAction     = errors.New("automation action is not allowed")
+	ErrNoRunningWorlds  = errors.New("scheduled player refresh has no running worlds")
 )
 
 type FieldError struct {

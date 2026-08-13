@@ -175,6 +175,39 @@ func (s *Service) WorldTargets(roomID string) ([]WorldTarget, error) {
 	return targets, nil
 }
 
+func (s *Service) AnyWorldRunning(ctx context.Context, roomID string, worldIDs []string) (bool, error) {
+	room, err := s.managedRoom(roomID)
+	if err != nil {
+		return false, err
+	}
+	worlds, err := s.rooms.Worlds(room.ID)
+	if err != nil {
+		return false, err
+	}
+	selected := make(map[string]bool, len(worldIDs))
+	for _, worldID := range worldIDs {
+		selected[worldID] = true
+	}
+	found := len(selected) == 0
+	for _, world := range worlds {
+		if len(selected) > 0 && !selected[world.ID] {
+			continue
+		}
+		found = true
+		running, runningErr := s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
+		if runningErr != nil {
+			return false, runningErr
+		}
+		if running {
+			return true, nil
+		}
+	}
+	if !found {
+		return false, rooms.ErrWorldNotFound
+	}
+	return false, nil
+}
+
 func (s *Service) RefreshWorld(ctx context.Context, roomID, worldID string) (RefreshResult, error) {
 	outcomes, err := s.RefreshWorlds(ctx, roomID, []string{worldID})
 	if err != nil {
@@ -233,6 +266,7 @@ func (s *Service) collectWorldSnapshot(ctx context.Context, room rooms.Room, wor
 	history, historyErr := s.readWorldHistory(ctx, room.ID, world.ID)
 	snapshot := worldSnapshot{WorldID: world.ID, WorldName: world.Name, History: history, ObservedAt: observedAt, Source: SourceNativeLog}
 	if !running {
+		snapshot.Stopped = true
 		message := "分片未运行，已确认该分片没有在线玩家"
 		if len(history) > 0 {
 			message = fmt.Sprintf("分片未运行，已恢复 %d 个历史玩家并标记为离线", len(history))
@@ -241,7 +275,7 @@ func (s *Service) collectWorldSnapshot(ctx context.Context, room rooms.Room, wor
 		if historyErr != nil {
 			warning = "历史玩家日志读取失败：" + historyErr.Error()
 		}
-		outcome.Result = RefreshResult{WorldID: world.ID, Running: false, Source: SourceNativeLog, Status: FreshnessLive, ObservedAt: &observedAt, Warning: warning, Message: message}
+		outcome.Result = RefreshResult{WorldID: world.ID, Running: false, Source: SourceNativeLog, Status: FreshnessStale, Warning: warning, Message: message}
 		return outcome, snapshot
 	}
 	observations, source, status, warning, snapshotAt, err := s.readSnapshot(ctx, room.ID, world.ID, observedAt)

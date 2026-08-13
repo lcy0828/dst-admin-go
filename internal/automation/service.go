@@ -39,6 +39,10 @@ type Service struct {
 	active     map[string]bool
 }
 
+type scheduledPreflight interface {
+	ShouldRunScheduled(context.Context, Task) (bool, error)
+}
+
 func NewService(roomCatalog RoomCatalog, store *Store, jobService *jobs.Service, executor ActionExecutor) (*Service, error) {
 	if roomCatalog == nil || store == nil || jobService == nil || executor == nil {
 		return nil, errors.New("automation dependencies are required")
@@ -237,6 +241,17 @@ func (s *Service) RunTask(roomID, taskID string, trigger Trigger) (jobs.Job, err
 	task, err := s.store.Task(roomID, taskID)
 	if err != nil {
 		return jobs.Job{}, err
+	}
+	if trigger == TriggerSchedule {
+		if preflight, ok := s.executor.(scheduledPreflight); ok {
+			shouldRun, preflightErr := preflight.ShouldRunScheduled(context.Background(), task)
+			if preflightErr != nil {
+				return jobs.Job{}, preflightErr
+			}
+			if !shouldRun {
+				return jobs.Job{}, ErrNoRunningWorlds
+			}
+		}
 	}
 	if dependency := s.unsatisfiedDependency(task); dependency != "" {
 		now := s.now().UTC()
