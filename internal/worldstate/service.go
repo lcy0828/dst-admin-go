@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"dont/internal/rooms"
+	"dont/internal/shards"
 )
 
 type RoomCatalog interface {
@@ -20,6 +21,12 @@ type RoomCatalog interface {
 type Runtime interface {
 	IsRunning(context.Context, string, string) (bool, error)
 }
+
+type statusRuntime interface {
+	Status(context.Context, string, string) (shards.RuntimeStatus, error)
+}
+
+const liveObservationWindow = 2 * time.Minute
 
 type CurrentSampler interface {
 	CurrentSnapshot(context.Context, string, string) (Observation, error)
@@ -81,6 +88,35 @@ func (s *Service) List(ctx context.Context, roomID string) (List, error) {
 			items = append(items, live)
 		}
 	}
+	worlds, worldsErr := s.rooms.Worlds(roomID)
+	if worldsErr != nil {
+		return List{}, worldsErr
+	}
+	worldByID := make(map[string]rooms.World, len(worlds))
+	for _, world := range worlds {
+		worldByID[world.ID] = world
+	}
+	for index := range items {
+		world, exists := worldByID[items[index].WorldID]
+		if !exists || !room.Managed {
+			items[index] = decorateSnapshot(items[index], shards.RuntimeUnknown, s.now())
+			continue
+		}
+		state := shards.RuntimeUnknown
+		if runtime, ok := s.runtime.(statusRuntime); ok {
+			status, statusErr := runtime.Status(ctx, room.DirectoryName, world.DirectoryName)
+			if statusErr == nil {
+				state = status.State
+			}
+		} else if running, runningErr := s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName); runningErr == nil {
+			if running {
+				state = shards.RuntimeRunning
+			} else {
+				state = shards.RuntimeStopped
+			}
+		}
+		items[index] = decorateSnapshot(items[index], state, s.now())
+	}
 	var last *time.Time
 	for _, item := range items {
 		if last == nil || item.ObservedAt.After(*last) {
@@ -91,16 +127,63 @@ func (s *Service) List(ctx context.Context, roomID string) (List, error) {
 	return List{Items: items, Total: len(items), LastRefreshedAt: last}, nil
 }
 
+func decorateSnapshot(snapshot Snapshot, runtimeState shards.RuntimeState, now time.Time) Snapshot {
+	age := now.UTC().Sub(snapshot.ObservedAt.UTC())
+	if age < 0 {
+		age = 0
+	}
+	snapshot.RuntimeState = string(runtimeState)
+	snapshot.AgeSeconds = int64(age / time.Second)
+	switch {
+	case snapshot.ObservedAt.IsZero():
+		snapshot.Freshness = FreshnessUnavailable
+	case runtimeState == shards.RuntimeRunning && age <= liveObservationWindow:
+		snapshot.Freshness = FreshnessLive
+	case runtimeState == shards.RuntimeRunning:
+		snapshot.Freshness = FreshnessDelayed
+	case runtimeState == shards.RuntimeStopped || runtimeState == shards.RuntimeFailed:
+		snapshot.Freshness = FreshnessStopped
+	case runtimeState == shards.RuntimeStarting:
+		snapshot.Freshness = FreshnessDelayed
+	default:
+		snapshot.Freshness = FreshnessUnavailable
+	}
+	snapshot.Stale = snapshot.Freshness != FreshnessLive
+	return snapshot
+}
+
 func (s *Service) History(roomID, worldID string, limit int) (History, error) {
 	if limit < 1 || limit > 720 || strings.TrimSpace(worldID) == "" {
 		return History{}, ErrInvalidFilter
 	}
-	if _, err := s.rooms.World(roomID, worldID); err != nil {
+	room, err := s.rooms.Room(roomID)
+	if err != nil {
+		return History{}, err
+	}
+	world, err := s.rooms.World(roomID, worldID)
+	if err != nil {
 		return History{}, err
 	}
 	items, total, err := s.store.History(roomID, worldID, limit)
 	if err != nil {
 		return History{}, err
+	}
+	state := shards.RuntimeUnknown
+	if room.Managed {
+		if runtime, ok := s.runtime.(statusRuntime); ok {
+			if status, statusErr := runtime.Status(context.Background(), room.DirectoryName, world.DirectoryName); statusErr == nil {
+				state = status.State
+			}
+		} else if running, runningErr := s.runtime.IsRunning(context.Background(), room.DirectoryName, world.DirectoryName); runningErr == nil {
+			if running {
+				state = shards.RuntimeRunning
+			} else {
+				state = shards.RuntimeStopped
+			}
+		}
+	}
+	for index := range items {
+		items[index] = decorateSnapshot(items[index], state, s.now())
 	}
 	return History{Items: items, Total: total, Limit: limit, WorldID: worldID}, nil
 }

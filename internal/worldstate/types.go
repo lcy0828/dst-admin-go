@@ -37,7 +37,20 @@ type Snapshot struct {
 	NightmarePhase        string    `json:"nightmarePhase,omitempty"`
 	NightmareProgress     *float64  `json:"nightmareProgress,omitempty"`
 	ObservedAt            time.Time `json:"observedAt"`
+	RuntimeState          string    `json:"runtimeState,omitempty" gorm:"-"`
+	Freshness             Freshness `json:"freshness,omitempty" gorm:"-"`
+	AgeSeconds            int64     `json:"ageSeconds,omitempty" gorm:"-"`
+	Stale                 bool      `json:"stale" gorm:"-"`
 }
+
+type Freshness string
+
+const (
+	FreshnessLive        Freshness = "live"
+	FreshnessDelayed     Freshness = "delayed"
+	FreshnessStopped     Freshness = "stopped"
+	FreshnessUnavailable Freshness = "unavailable"
+)
 
 type Observation struct {
 	Season                string

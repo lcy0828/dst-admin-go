@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"dont/internal/rooms"
+	"dont/internal/shards"
 )
 
 type stateTestCatalog struct {
@@ -42,6 +43,15 @@ type stateTestRuntime struct{ running bool }
 
 func (r *stateTestRuntime) IsRunning(context.Context, string, string) (bool, error) {
 	return r.running, nil
+}
+
+type stateStatusRuntime struct{ status shards.RuntimeStatus }
+
+func (r *stateStatusRuntime) IsRunning(context.Context, string, string) (bool, error) {
+	return r.status.State == shards.RuntimeRunning, nil
+}
+func (r *stateStatusRuntime) Status(context.Context, string, string) (shards.RuntimeStatus, error) {
+	return r.status, nil
 }
 
 type stateTestSampler struct {
@@ -159,5 +169,42 @@ func TestServiceListMergesLiveRuntimeStateWithoutPersistingIt(t *testing.T) {
 	stored, err := store.Current("room")
 	if err != nil || len(stored) != 0 {
 		t.Fatalf("read-only list persisted snapshots: %#v, error = %v", stored, err)
+	}
+}
+
+func TestServiceListDecoratesFreshnessFromRuntimeAndObservationAge(t *testing.T) {
+	catalog := stateTestCatalog{
+		room:   rooms.Room{ID: "room", DirectoryName: "Cluster_1", Name: "Room", Managed: true},
+		worlds: []rooms.World{{ID: "master", RoomID: "room", DirectoryName: "Master", Name: "Master", Role: rooms.WorldRoleMaster}},
+	}
+	store := newWorldStateStore(t)
+	now := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	if _, err := store.Append(Snapshot{RoomID: "room", WorldID: "master", WorldName: "Master", WorldRole: "master", Season: "autumn", ObservedAt: now.Add(-time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &stateStatusRuntime{status: shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}}
+	service, err := NewService(catalog, runtime, store, &stateTestSampler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return now }
+	list, err := service.List(context.Background(), "room")
+	if err != nil || len(list.Items) != 1 || list.Items[0].Freshness != FreshnessLive || list.Items[0].Stale || list.Items[0].RuntimeState != "running" || list.Items[0].AgeSeconds != 60 {
+		t.Fatalf("live snapshot = %#v, error = %v", list, err)
+	}
+	service.now = func() time.Time { return now.Add(3 * time.Minute) }
+	list, _ = service.List(context.Background(), "room")
+	if list.Items[0].Freshness != FreshnessDelayed || !list.Items[0].Stale {
+		t.Fatalf("delayed snapshot = %#v", list.Items[0])
+	}
+	runtime.status = shards.RuntimeStatus{State: shards.RuntimeStopped}
+	list, _ = service.List(context.Background(), "room")
+	if list.Items[0].Freshness != FreshnessStopped || list.Items[0].RuntimeState != "stopped" || !list.Items[0].Stale {
+		t.Fatalf("stopped snapshot = %#v", list.Items[0])
+	}
+	runtime.status = shards.RuntimeStatus{State: shards.RuntimeUnknown}
+	list, _ = service.List(context.Background(), "room")
+	if list.Items[0].Freshness != FreshnessUnavailable || list.Items[0].RuntimeState != "unknown" || !list.Items[0].Stale {
+		t.Fatalf("unavailable snapshot = %#v", list.Items[0])
 	}
 }

@@ -5598,7 +5598,7 @@ components:
     WorldStateSnapshot:
       type: object
       additionalProperties: false
-      required: [id, roomId, worldId, worldName, worldRole, observedAt]
+      required: [id, roomId, worldId, worldName, worldRole, observedAt, runtimeState, freshness, stale]
       properties:
         id: { type: integer, format: int64 }
         roomId: { type: string }
@@ -5623,6 +5623,10 @@ components:
         nightmarePhase: { type: string }
         nightmareProgress: { type: number }
         observedAt: { type: string, format: date-time }
+        runtimeState: { type: string, enum: [stopped, starting, running, failed, unknown] }
+        freshness: { type: string, enum: [live, delayed, stopped, unavailable] }
+        ageSeconds: { type: integer, minimum: 0 }
+        stale: { type: boolean }
     WorldStateList:
       type: object
       additionalProperties: false
