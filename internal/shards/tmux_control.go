@@ -82,6 +82,17 @@ func (c *TmuxControl) Stop(ctx context.Context, roomName, worldName string) erro
 	return server.Stop()
 }
 
+func (c *TmuxControl) Cleanup(ctx context.Context, roomName, worldName string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	server, err := c.server(roomName, worldName)
+	if err != nil {
+		return err
+	}
+	return server.KillSession()
+}
+
 func (c *TmuxControl) Send(ctx context.Context, roomName, worldName, command string) error {
 	if err := ctx.Err(); err != nil {
 		return err

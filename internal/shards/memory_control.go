@@ -83,6 +83,10 @@ func (c *MemoryControl) Stop(ctx context.Context, roomName, worldName string) er
 	return nil
 }
 
+func (c *MemoryControl) Cleanup(ctx context.Context, roomName, worldName string) error {
+	return c.Stop(ctx, roomName, worldName)
+}
+
 func (c *MemoryControl) Send(ctx context.Context, roomName, worldName, command string) error {
 	if err := ctx.Err(); err != nil {
 		return err

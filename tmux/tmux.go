@@ -183,13 +183,10 @@ func (s *DSTServer) Stop() error {
 	if !status.SessionExists {
 		return nil
 	}
-	if status.State != RuntimeRunning {
-		return s.KillSession()
-	}
 
 	// 向会话发送关闭命令
 	log.Printf("[TMUX] 向会话发送关闭命令 会话名: %s", s.SessionName)
-	err = s.SendCommand("c_shutdown(true)")
+	err = s.sendCommand("c_shutdown(true)", false)
 	if err != nil {
 		log.Printf("[TMUX][错误] 发送关闭命令失败: %v", err)
 		return fmt.Errorf("发送关闭命令失败: %v", err)
@@ -202,6 +199,10 @@ func (s *DSTServer) Stop() error {
 
 // SendCommand 向服务器发送命令
 func (s *DSTServer) SendCommand(command string) error {
+	return s.sendCommand(command, true)
+}
+
+func (s *DSTServer) sendCommand(command string, requireRunning bool) error {
 	startTime := time.Now()
 	log.Printf("[TMUX] 开始向服务器发送命令 会话名: %s, 命令: %s", s.SessionName, command)
 
@@ -210,8 +211,11 @@ func (s *DSTServer) SendCommand(command string) error {
 		log.Printf("[TMUX][错误] 检查服务器状态失败: %v", err)
 		return err
 	}
-	if status.State != RuntimeRunning {
+	if requireRunning && status.State != RuntimeRunning {
 		return fmt.Errorf("服务器当前状态为 %s，无法执行控制台命令: %s", status.State, status.Message)
+	}
+	if !status.SessionExists {
+		return fmt.Errorf("没有找到会话: %s", s.SessionName)
 	}
 
 	// 获取会话

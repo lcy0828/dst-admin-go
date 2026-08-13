@@ -28,6 +28,7 @@ const (
 	ActionStart   Action = "start"
 	ActionStop    Action = "stop"
 	ActionRestart Action = "restart"
+	ActionCleanup Action = "cleanup"
 )
 
 type RuntimeState string
@@ -51,6 +52,10 @@ type Control interface {
 	IsRunning(context.Context, string, string) (bool, error)
 	Start(context.Context, string, string) error
 	Stop(context.Context, string, string) error
+}
+
+type CleanupControl interface {
+	Cleanup(context.Context, string, string) error
 }
 
 type RoomCatalog interface {
@@ -79,7 +84,7 @@ func NewOperations(roomCatalog RoomCatalog, control Control, preparers ...Runtim
 }
 
 func (o *Operations) Plan(action Action, roomID string, selectedWorldIDs []string) ([]jobs.TargetSpec, jobs.Runner, error) {
-	if action != ActionStart && action != ActionStop && action != ActionRestart {
+	if action != ActionStart && action != ActionStop && action != ActionRestart && action != ActionCleanup {
 		return nil, nil, ErrUnknownAction
 	}
 	room, worlds, err := o.resolvePlan(roomID, selectedWorldIDs)
@@ -213,6 +218,20 @@ func (o *Operations) execute(ctx context.Context, action Action, roomName, world
 			return "", err
 		}
 		return "分片已停止", nil
+	case ActionCleanup:
+		if !status.SessionExists {
+			return "没有需要清理的残留会话", nil
+		}
+		if status.State == RuntimeRunning {
+			return "", errors.New("分片仍在运行，请先执行停止操作")
+		}
+		if err := o.cleanup(ctx, roomName, worldName); err != nil {
+			return "", err
+		}
+		if err := o.waitFor(ctx, roomName, worldName, false, o.stopTimeout); err != nil {
+			return "", err
+		}
+		return "失败或残留会话已清理", nil
 	case ActionRestart:
 		if status.SessionExists || status.State != RuntimeStopped {
 			if err := o.control.Stop(ctx, roomName, worldName); err != nil {
@@ -290,10 +309,18 @@ func (o *Operations) waitFor(ctx context.Context, roomName, worldName string, ex
 }
 
 func (o *Operations) cleanupFailedStart(ctx context.Context, roomName, worldName, message string) string {
-	if err := o.control.Stop(ctx, roomName, worldName); err != nil {
+	if err := o.cleanup(ctx, roomName, worldName); err != nil {
 		return fmt.Sprintf("%s；清理失败启动会话时出错: %v", message, err)
 	}
 	return message
+}
+
+func (o *Operations) cleanup(ctx context.Context, roomName, worldName string) error {
+	control, ok := o.control.(CleanupControl)
+	if !ok {
+		return errors.New("当前运行控制器不支持强制清理会话")
+	}
+	return control.Cleanup(ctx, roomName, worldName)
 }
 
 func selectWorlds(worlds []rooms.World, selected []string) ([]rooms.World, error) {
@@ -327,7 +354,7 @@ func orderWorlds(worlds []rooms.World, action Action) {
 		if leftMaster == rightMaster {
 			return strings.ToLower(worlds[i].Name) < strings.ToLower(worlds[j].Name)
 		}
-		if action == ActionStop {
+		if action == ActionStop || action == ActionCleanup {
 			return !leftMaster
 		}
 		return leftMaster
