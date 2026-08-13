@@ -28,6 +28,7 @@ import (
 	modservice "dont/internal/mods"
 	playerapi "dont/internal/players"
 	"dont/internal/rooms"
+	"dont/internal/runtimeaudit"
 	"dont/internal/saveimport"
 	"dont/internal/shards"
 	"dont/internal/structuredlogs"
@@ -284,7 +285,21 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if os.Getenv("DST_ADMIN_ENV") != "test" {
 		shardOperations = shards.NewOperations(roomService, shardControl, runtimeManager)
 	}
-	roomHandler := httpapi.NewRoomHandler(roomService, shardOperations, jobService)
+	runtimeAuditStore := runtimeaudit.NewStore(models.DB(), tablePrefix)
+	if err := runtimeAuditStore.Migrate(); err != nil {
+		return nil, err
+	}
+	runtimeAuditService, err := runtimeaudit.NewService(roomService, shardOperations, runtimeAuditStore)
+	if err != nil {
+		return nil, err
+	}
+	if backgroundEnabled {
+		hooks.workers = append(hooks.workers, func(ctx context.Context) {
+			runtimeAuditService.Watch(ctx, 5*time.Second)
+		})
+	}
+	roomHandler := httpapi.NewRoomHandler(roomService, shardOperations, jobService, runtimeAuditService)
+	runtimeAuditHandler := httpapi.NewRuntimeAuditHandler(runtimeAuditService)
 	runtimeHandler := httpapi.NewDSTRuntimeHandler(runtimeManager, roomService, shardControl, runtimeBridge)
 	jobHandler := httpapi.NewJobHandler(jobService)
 	logService, err := logstream.NewService(savePath, roomService)
@@ -410,7 +425,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err := automationStore.Migrate(); err != nil {
 		return nil, err
 	}
-	automationExecutor, err := automation.NewDomainExecutor(shardOperations, backupService, commandService, playerService, structuredLogService, worldStateService)
+	automationExecutor, err := automation.NewDomainExecutor(shardOperations, backupService, commandService, playerService, structuredLogService, worldStateService, runtimeAuditService)
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +532,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	}
 	gameUpdateService, err := gameupdate.NewService(
 		gameupdate.Config{ServerPath: serverExecutablePath, SteamCMDPath: steamCMDPath},
-		roomService, shardControl, backupService, gameUpdateStore, updateRunner, latestChecker,
+		roomService, shardControl, backupService, gameUpdateStore, updateRunner, latestChecker, runtimeAuditService,
 	)
 	if err != nil {
 		return nil, err
@@ -583,6 +598,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 			})
 		}))
 		roomHandler.Register(v2)
+		runtimeAuditHandler.Register(v2)
 		runtimeHandler.Register(v2)
 		jobHandler.Register(v2)
 		logHandler.Register(v2)

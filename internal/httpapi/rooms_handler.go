@@ -1,12 +1,15 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
 	"dont/internal/jobs"
 	"dont/internal/rooms"
+	"dont/internal/runtimeaudit"
 	"dont/internal/shards"
 
 	"github.com/gin-gonic/gin"
@@ -16,10 +19,15 @@ type RoomHandler struct {
 	rooms      *rooms.Service
 	operations *shards.Operations
 	jobs       *jobs.Service
+	audit      *runtimeaudit.Service
 }
 
-func NewRoomHandler(roomService *rooms.Service, operations *shards.Operations, jobService *jobs.Service) *RoomHandler {
-	return &RoomHandler{rooms: roomService, operations: operations, jobs: jobService}
+func NewRoomHandler(roomService *rooms.Service, operations *shards.Operations, jobService *jobs.Service, audits ...*runtimeaudit.Service) *RoomHandler {
+	handler := &RoomHandler{rooms: roomService, operations: operations, jobs: jobService}
+	if len(audits) > 0 {
+		handler.audit = audits[0]
+	}
+	return handler
 }
 
 func (h *RoomHandler) Register(v2 *gin.RouterGroup) {
@@ -229,9 +237,10 @@ func (h *RoomHandler) adopt(c *gin.Context) {
 
 type worldState struct {
 	rooms.World
-	Status           string `json:"status"`
-	ControlAvailable bool   `json:"controlAvailable"`
-	StatusMessage    string `json:"statusMessage,omitempty"`
+	Status           string              `json:"status"`
+	ControlAvailable bool                `json:"controlAvailable"`
+	StatusMessage    string              `json:"statusMessage,omitempty"`
+	LatestExit       *runtimeaudit.Event `json:"latestExit,omitempty"`
 }
 
 func (h *RoomHandler) worldsList(c *gin.Context) {
@@ -261,6 +270,9 @@ func (h *RoomHandler) worldsList(c *gin.Context) {
 		}
 		state.Status = string(status.State)
 		state.StatusMessage = status.Message
+		if h.audit != nil {
+			state.LatestExit, _ = h.audit.LatestExit(room.ID, world.ID)
+		}
 		result = append(result, state)
 	}
 	Success(c, http.StatusOK, gin.H{"items": result, "total": len(result)})
@@ -288,7 +300,21 @@ func (h *RoomHandler) action(c *gin.Context) {
 	if len(request.WorldIDs) == 1 {
 		worldID = request.WorldIDs[0]
 	}
-	job, err := h.jobs.Submit("room."+string(action), c.Param("roomId"), worldID, targets, runner)
+	requestID := RequestID(c)
+	roomID := c.Param("roomId")
+	job, err := h.jobs.SubmitFactory("room."+string(action), roomID, worldID, targets, func(job jobs.Job) jobs.Runner {
+		return func(ctx context.Context, report func(jobs.TargetResult)) error {
+			if h.audit != nil {
+				if auditErr := h.audit.RecordAction(runtimeaudit.ActionRequest{
+					RoomID: roomID, WorldIDs: request.WorldIDs, Action: string(action), Source: runtimeaudit.SourceAPI,
+					JobID: job.ID, RequestID: requestID,
+				}); auditErr != nil {
+					log.Printf("[RuntimeAudit] record API action room=%s action=%s: %v", roomID, action, auditErr)
+				}
+			}
+			return runner(ctx, report)
+		}
+	})
 	if err != nil {
 		Failure(c, http.StatusInternalServerError, "JOB_CREATE_FAILED", "无法创建运行任务", nil)
 		return

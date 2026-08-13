@@ -22,6 +22,7 @@ tags:
   - name: Mods
   - name: Players
   - name: Runtime
+  - name: Runtime Audit
   - name: WorldState
   - name: Automation
   - name: Agents
@@ -519,6 +520,21 @@ paths:
       responses:
         "200": { description: Per-shard runtime status, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeReportListEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
+  /rooms/{roomId}/runtime-events:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Runtime Audit]
+      operationId: listRoomRuntimeEvents
+      summary: Read persisted shard lifecycle and unexpected-exit audit events
+      parameters:
+        - { name: worldId, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { $ref: "#/components/schemas/ShardRuntimeEventType" } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        "200": { description: Runtime audit events ordered newest first, content: { application/json: { schema: { $ref: "#/components/schemas/ShardRuntimeEventListEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/runtime/actions/install:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -3667,6 +3683,45 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/SaveImportUploadResult" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    ShardRuntimeEventType:
+      type: string
+      enum: [start_requested, stop_requested, restart_requested, cleanup_requested, session_started, running, failed, stopped, unexpected_exit]
+    ShardRuntimeEvent:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, worldId, roomDirectory, worldDirectory, type, source, expectedExit, expectedObserved, occurredAt]
+      properties:
+        id: { type: integer, format: int64 }
+        roomId: { type: string }
+        worldId: { type: string }
+        roomDirectory: { type: string }
+        worldDirectory: { type: string }
+        type: { $ref: "#/components/schemas/ShardRuntimeEventType" }
+        action: { type: string, enum: [start, stop, restart, cleanup] }
+        source: { type: string, enum: [api, automation, game_update, system_monitor, external] }
+        previousState: { type: string, enum: [stopped, starting, running, failed, unknown] }
+        runtimeState: { type: string, enum: [stopped, starting, running, failed, unknown] }
+        reasonCode: { type: string }
+        message: { type: string }
+        jobId: { type: string }
+        requestId: { type: string }
+        expectedExit: { type: boolean }
+        expectedObserved: { type: boolean }
+        occurredAt: { type: string, format: date-time }
+    ShardRuntimeEventList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ShardRuntimeEvent" } }
+        total: { type: integer, minimum: 0 }
+    ShardRuntimeEventListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ShardRuntimeEventList" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     DSTRuntimeInstallState:

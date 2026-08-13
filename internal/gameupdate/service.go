@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"dont/internal/jobs"
 	"dont/internal/roomops"
 	"dont/internal/rooms"
+	"dont/internal/runtimeaudit"
 	"dont/internal/shards"
 )
 
@@ -82,9 +84,14 @@ type Service struct {
 	startTimeout time.Duration
 	mu           sync.Mutex
 	active       bool
+	audit        interface {
+		RecordAction(runtimeaudit.ActionRequest) error
+	}
 }
 
-func NewService(config Config, roomCatalog RoomCatalog, control shards.Control, backups BackupCreator, store *Store, runner CommandRunner, latest LatestChecker) (*Service, error) {
+func NewService(config Config, roomCatalog RoomCatalog, control shards.Control, backups BackupCreator, store *Store, runner CommandRunner, latest LatestChecker, audits ...interface {
+	RecordAction(runtimeaudit.ActionRequest) error
+}) (*Service, error) {
 	if roomCatalog == nil || control == nil || backups == nil || store == nil || runner == nil || latest == nil {
 		return nil, errors.New("rooms, control, backups, store, runner, and latest checker are required")
 	}
@@ -109,10 +116,14 @@ func NewService(config Config, roomCatalog RoomCatalog, control shards.Control, 
 	if config.UpdateMethod != dstinstall.UpdateMethodSteamCMD && config.UpdateMethod != dstinstall.UpdateMethodSteamClient {
 		return nil, fmt.Errorf("unsupported game update method %q", config.UpdateMethod)
 	}
-	return &Service{
+	service := &Service{
 		config: config, rooms: roomCatalog, control: control, backups: backups, store: store, runner: runner, latest: latest,
 		now: time.Now, pollInterval: 500 * time.Millisecond, stopTimeout: 60 * time.Second, startTimeout: 20 * time.Second,
-	}, nil
+	}
+	if len(audits) > 0 {
+		service.audit = audits[0]
+	}
+	return service, nil
 }
 
 func (s *Service) Version(ctx context.Context) VersionReport {
@@ -222,6 +233,14 @@ func (s *Service) execute(ctx context.Context, jobID string, request UpdateReque
 
 	stopped := make([]plannedWorld, 0, len(running))
 	for _, world := range stopOrder(running) {
+		if s.audit != nil {
+			if err := s.audit.RecordAction(runtimeaudit.ActionRequest{
+				RoomID: world.roomID, WorldIDs: []string{world.worldID}, Action: string(shards.ActionStop),
+				Source: runtimeaudit.SourceGameUpdate, JobID: jobID,
+			}); err != nil {
+				log.Printf("[RuntimeAudit] record game-update stop room=%s world=%s: %v", world.roomID, world.worldID, err)
+			}
+		}
 		if err := s.setRunning(ctx, world, false); err != nil {
 			report(jobs.TargetResult{TargetID: stopTargetID(world), Status: jobs.StatusFailed, Error: &jobs.Error{Code: "STOP_FAILED", Message: err.Error()}})
 			s.recoverStopped(ctx, stopped)
@@ -241,6 +260,14 @@ func (s *Service) execute(ctx context.Context, jobID string, request UpdateReque
 	var restartErrors []error
 	if request.RestartRunning {
 		for _, world := range startOrder(running) {
+			if s.audit != nil {
+				if err := s.audit.RecordAction(runtimeaudit.ActionRequest{
+					RoomID: world.roomID, WorldIDs: []string{world.worldID}, Action: string(shards.ActionStart),
+					Source: runtimeaudit.SourceGameUpdate, JobID: jobID,
+				}); err != nil {
+					log.Printf("[RuntimeAudit] record game-update start room=%s world=%s: %v", world.roomID, world.worldID, err)
+				}
+			}
 			if err := s.setRunning(ctx, world, true); err != nil {
 				report(jobs.TargetResult{TargetID: startTargetID(world), Status: jobs.StatusFailed, Error: &jobs.Error{Code: "RESTART_FAILED", Message: err.Error()}})
 				restartErrors = append(restartErrors, fmt.Errorf("restart %s/%s: %w", world.roomName, world.worldName, err))

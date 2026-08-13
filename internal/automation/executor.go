@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"dont/internal/jobs"
 	"dont/internal/players"
 	"dont/internal/rooms"
+	"dont/internal/runtimeaudit"
 	"dont/internal/shards"
 	"dont/internal/structuredlogs"
 	"dont/internal/worldstate"
@@ -63,13 +65,22 @@ type DomainExecutor struct {
 	players        PlayerRefresher
 	structuredLogs StructuredLogRefresher
 	worldStates    WorldStateRefresher
+	audit          interface {
+		RecordAction(runtimeaudit.ActionRequest) error
+	}
 }
 
-func NewDomainExecutor(roomActions RoomActionPlanner, backupService BackupExecutor, commands CommandExecutor, playerService PlayerRefresher, logs StructuredLogRefresher, states WorldStateRefresher) (*DomainExecutor, error) {
+func NewDomainExecutor(roomActions RoomActionPlanner, backupService BackupExecutor, commands CommandExecutor, playerService PlayerRefresher, logs StructuredLogRefresher, states WorldStateRefresher, audits ...interface {
+	RecordAction(runtimeaudit.ActionRequest) error
+}) (*DomainExecutor, error) {
 	if roomActions == nil || backupService == nil || commands == nil || playerService == nil || logs == nil || states == nil {
 		return nil, errors.New("automation domain executors are required")
 	}
-	return &DomainExecutor{roomActions: roomActions, backups: backupService, commands: commands, players: playerService, structuredLogs: logs, worldStates: states}, nil
+	executor := &DomainExecutor{roomActions: roomActions, backups: backupService, commands: commands, players: playerService, structuredLogs: logs, worldStates: states}
+	if len(audits) > 0 {
+		executor.audit = audits[0]
+	}
+	return executor, nil
 }
 
 func (e *DomainExecutor) Validate(task Task) error {
@@ -121,7 +132,7 @@ func (e *DomainExecutor) Execute(ctx context.Context, task Task, jobID string) (
 	}
 	switch task.Action {
 	case ActionRoomStart, ActionRoomStop, ActionRoomRestart:
-		return e.executeRoomAction(ctx, task)
+		return e.executeRoomAction(ctx, task, jobID)
 	case ActionBackupCreate:
 		name, _ := task.Parameters["name"].(string)
 		name = strings.TrimSpace(name)
@@ -215,8 +226,15 @@ func (e *DomainExecutor) Execute(ctx context.Context, task Task, jobID string) (
 	}
 }
 
-func (e *DomainExecutor) executeRoomAction(ctx context.Context, task Task) (ExecutionResult, error) {
+func (e *DomainExecutor) executeRoomAction(ctx context.Context, task Task, jobID string) (ExecutionResult, error) {
 	action := shards.Action(strings.TrimPrefix(string(task.Action), "room."))
+	if e.audit != nil {
+		if err := e.audit.RecordAction(runtimeaudit.ActionRequest{
+			RoomID: task.RoomID, WorldIDs: task.WorldIDs, Action: string(action), Source: runtimeaudit.SourceAutomation, JobID: jobID,
+		}); err != nil {
+			log.Printf("[RuntimeAudit] record automation action room=%s action=%s: %v", task.RoomID, action, err)
+		}
+	}
 	targets, runner, err := e.roomActions.Plan(action, task.RoomID, task.WorldIDs)
 	if err != nil {
 		return ExecutionResult{}, err
