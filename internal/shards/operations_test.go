@@ -76,6 +76,7 @@ func (f *fakeControl) Stop(_ context.Context, room, world string) error {
 		return err
 	}
 	f.running[key] = false
+	delete(f.status, key)
 	return nil
 }
 func (f *fakeControl) Cleanup(_ context.Context, room, world string) error {
@@ -163,6 +164,31 @@ func TestStopOrdersMasterLastAndReportsPerWorldFailure(t *testing.T) {
 		t.Fatalf("stop order = %v", control.calls)
 	}
 	if len(results) != 2 || results[0].Status != jobs.StatusFailed || results[1].Status != jobs.StatusSucceeded {
+		t.Fatalf("results = %#v", results)
+	}
+}
+
+func TestStopStartingSessionUsesGracefulShutdown(t *testing.T) {
+	control := &fakeControl{
+		running: map[string]bool{},
+		status: map[string]RuntimeStatus{
+			"summer_2026/Master": {State: RuntimeStarting, SessionExists: true},
+		},
+		fail: map[string]error{},
+	}
+	operations := testOperations(control)
+	_, runner, err := operations.Plan(ActionStop, rooms.EncodeID("summer_2026"), []string{rooms.EncodeID("Master")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []jobs.TargetResult
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(control.calls) != "[stop:Master]" {
+		t.Fatalf("starting session did not use graceful stop: %v", control.calls)
+	}
+	if len(results) != 1 || results[0].Status != jobs.StatusSucceeded {
 		t.Fatalf("results = %#v", results)
 	}
 }
