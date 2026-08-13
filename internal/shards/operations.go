@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"dont/internal/jobs"
@@ -74,12 +75,19 @@ type Operations struct {
 	pollInterval time.Duration
 	startTimeout time.Duration
 	stopTimeout  time.Duration
+	activeMu     sync.Mutex
+	activeSeq    uint64
+	activeStarts map[string]map[uint64]context.CancelFunc
+	// stopEpoch invalidates start plans submitted before a stop runner begins.
+	stopEpoch map[string]uint64
 }
 
 func NewOperations(roomCatalog RoomCatalog, control Control, preparers ...RuntimePreparer) *Operations {
 	return &Operations{
 		rooms: roomCatalog, control: control, preparers: append([]RuntimePreparer(nil), preparers...),
 		pollInterval: 500 * time.Millisecond, startTimeout: 2 * time.Minute, stopTimeout: 60 * time.Second,
+		activeStarts: make(map[string]map[uint64]context.CancelFunc),
+		stopEpoch:    make(map[string]uint64),
 	}
 }
 
@@ -98,9 +106,38 @@ func (o *Operations) Plan(action Action, roomID string, selectedWorldIDs []strin
 		plannedWorldIDs = append(plannedWorldIDs, world.ID)
 		targets = append(targets, jobs.TargetSpec{ID: world.ID, Name: world.Name})
 	}
+	startEpoch := uint64(0)
+	if action == ActionStart || action == ActionRestart {
+		startEpoch = o.currentStopEpoch(room.ID)
+	}
 	runner := func(ctx context.Context, report func(jobs.TargetResult)) error {
+		if action == ActionStop && ctx.Err() == nil {
+			o.interruptStarts(room.ID)
+		}
+		if action == ActionStart || action == ActionRestart {
+			startContext, cancel := context.WithCancel(ctx)
+			unregister, interrupted := o.registerStart(room.ID, startEpoch, cancel)
+			defer func() {
+				unregister()
+				cancel()
+			}()
+			if interrupted {
+				cancel()
+			}
+			ctx = startContext
+		}
 		ctx, release, err := roomops.Acquire(ctx, room.ID)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				message := "任务已取消"
+				if action == ActionStart || action == ActionRestart {
+					message = "启动已被停止请求取消"
+				}
+				for _, world := range worlds {
+					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusCanceled, Error: &jobs.Error{Code: "JOB_CANCELED", Message: message}})
+				}
+				return nil
+			}
 			return err
 		}
 		defer release()
@@ -132,6 +169,48 @@ func (o *Operations) Plan(action Action, roomID string, selectedWorldIDs []strin
 		return nil
 	}
 	return targets, runner, nil
+}
+
+func (o *Operations) currentStopEpoch(roomID string) uint64 {
+	o.activeMu.Lock()
+	defer o.activeMu.Unlock()
+	return o.stopEpoch[roomID]
+}
+
+func (o *Operations) registerStart(roomID string, expectedEpoch uint64, cancel context.CancelFunc) (func(), bool) {
+	o.activeMu.Lock()
+	if o.stopEpoch[roomID] != expectedEpoch {
+		o.activeMu.Unlock()
+		return func() {}, true
+	}
+	o.activeSeq++
+	id := o.activeSeq
+	if o.activeStarts[roomID] == nil {
+		o.activeStarts[roomID] = make(map[uint64]context.CancelFunc)
+	}
+	o.activeStarts[roomID][id] = cancel
+	o.activeMu.Unlock()
+	return func() {
+		o.activeMu.Lock()
+		delete(o.activeStarts[roomID], id)
+		if len(o.activeStarts[roomID]) == 0 {
+			delete(o.activeStarts, roomID)
+		}
+		o.activeMu.Unlock()
+	}, false
+}
+
+func (o *Operations) interruptStarts(roomID string) {
+	o.activeMu.Lock()
+	o.stopEpoch[roomID]++
+	cancels := make([]context.CancelFunc, 0, len(o.activeStarts[roomID]))
+	for _, cancel := range o.activeStarts[roomID] {
+		cancels = append(cancels, cancel)
+	}
+	o.activeMu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 }
 
 func (o *Operations) resolvePlan(roomID string, selectedWorldIDs []string) (rooms.Room, []rooms.World, error) {
@@ -192,12 +271,21 @@ func (o *Operations) execute(ctx context.Context, action Action, roomName, world
 	}
 	switch action {
 	case ActionStart:
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if status.State == RuntimeRunning {
 			return "分片已在运行", nil
 		}
 		if status.State != RuntimeStarting {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
 			if err := o.prepare(ctx, roomName, worldName); err != nil {
 				return "", fmt.Errorf("准备分片运行时: %w", err)
+			}
+			if err := ctx.Err(); err != nil {
+				return "", err
 			}
 			if err := o.control.Start(ctx, roomName, worldName); err != nil {
 				return "", err
@@ -241,8 +329,14 @@ func (o *Operations) execute(ctx context.Context, action Action, roomName, world
 				return "", err
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if err := o.prepare(ctx, roomName, worldName); err != nil {
 			return "", fmt.Errorf("准备分片运行时: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
 		if err := o.control.Start(ctx, roomName, worldName); err != nil {
 			return "", err

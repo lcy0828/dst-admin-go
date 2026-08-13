@@ -3,6 +3,7 @@ package shards
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,6 +41,41 @@ type fakeControl struct {
 type fakePreparer struct {
 	calls []string
 	err   error
+}
+
+type interruptControl struct {
+	mu      sync.Mutex
+	started chan struct{}
+	state   RuntimeStatus
+	calls   []string
+}
+
+func (c *interruptControl) IsRunning(ctx context.Context, room, world string) (bool, error) {
+	status, err := c.Status(ctx, room, world)
+	return status.State == RuntimeRunning, err
+}
+
+func (c *interruptControl) Status(_ context.Context, _, _ string) (RuntimeStatus, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state, nil
+}
+
+func (c *interruptControl) Start(_ context.Context, _, world string) error {
+	c.mu.Lock()
+	c.calls = append(c.calls, "start:"+world)
+	c.state = RuntimeStatus{State: RuntimeStarting, SessionExists: true}
+	close(c.started)
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *interruptControl) Stop(_ context.Context, _, world string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, "stop:"+world)
+	c.state = RuntimeStatus{State: RuntimeStopped}
+	return nil
 }
 
 func (f *fakePreparer) Prepare(_ context.Context, room, world string) error {
@@ -190,6 +226,96 @@ func TestStopStartingSessionUsesGracefulShutdown(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].Status != jobs.StatusSucceeded {
 		t.Fatalf("results = %#v", results)
+	}
+}
+
+func TestStopInterruptsActiveStartBeforeTakingRoomLease(t *testing.T) {
+	roomID := rooms.EncodeID("summer_2026")
+	worldID := rooms.EncodeID("Master")
+	control := &interruptControl{started: make(chan struct{}), state: RuntimeStatus{State: RuntimeStopped}}
+	operations := NewOperations(fakeRooms{
+		room: rooms.Room{ID: roomID, DirectoryName: "summer_2026", Managed: true},
+		worlds: []rooms.World{
+			{ID: worldID, RoomID: roomID, DirectoryName: "Master", Name: "Master", Role: rooms.WorldRoleMaster},
+		},
+	}, control)
+	operations.pollInterval = time.Millisecond
+	operations.startTimeout = time.Second
+	operations.stopTimeout = time.Second
+
+	_, startRunner, err := operations.Plan(ActionStart, roomID, []string{worldID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startDone := make(chan []jobs.TargetResult, 1)
+	go func() {
+		var results []jobs.TargetResult
+		_ = startRunner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) })
+		startDone <- results
+	}()
+	select {
+	case <-control.started:
+	case <-time.After(time.Second):
+		t.Fatal("start did not reach the runtime wait")
+	}
+
+	_, stopRunner, err := operations.Plan(ActionStop, roomID, []string{worldID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stopResults []jobs.TargetResult
+	if err := stopRunner(context.Background(), func(result jobs.TargetResult) { stopResults = append(stopResults, result) }); err != nil {
+		t.Fatal(err)
+	}
+	startResults := <-startDone
+	if len(startResults) != 1 || startResults[0].Status != jobs.StatusCanceled {
+		t.Fatalf("start results = %#v", startResults)
+	}
+	if len(stopResults) != 1 || stopResults[0].Status != jobs.StatusSucceeded {
+		t.Fatalf("stop results = %#v", stopResults)
+	}
+	control.mu.Lock()
+	calls := fmt.Sprint(control.calls)
+	control.mu.Unlock()
+	if calls != "[start:Master stop:Master]" {
+		t.Fatalf("calls = %s", calls)
+	}
+}
+
+func TestStopInvalidatesStartPlanBeforeItsRunnerRegisters(t *testing.T) {
+	roomID := rooms.EncodeID("summer_2026")
+	worldID := rooms.EncodeID("Master")
+	control := &fakeControl{running: map[string]bool{}, fail: map[string]error{}}
+	operations := NewOperations(fakeRooms{
+		room: rooms.Room{ID: roomID, DirectoryName: "summer_2026", Managed: true},
+		worlds: []rooms.World{
+			{ID: worldID, RoomID: roomID, DirectoryName: "Master", Name: "Master", Role: rooms.WorldRoleMaster},
+		},
+	}, control)
+	_, startRunner, err := operations.Plan(ActionStart, roomID, []string{worldID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, stopRunner, err := operations.Plan(ActionStop, roomID, []string{worldID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stopResults []jobs.TargetResult
+	if err := stopRunner(context.Background(), func(result jobs.TargetResult) { stopResults = append(stopResults, result) }); err != nil {
+		t.Fatal(err)
+	}
+	var startResults []jobs.TargetResult
+	if err := startRunner(context.Background(), func(result jobs.TargetResult) { startResults = append(startResults, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(control.calls) != 0 {
+		t.Fatalf("invalidated start reached runtime control: %v", control.calls)
+	}
+	if len(startResults) != 1 || startResults[0].Status != jobs.StatusCanceled {
+		t.Fatalf("start results = %#v", startResults)
+	}
+	if len(stopResults) != 1 || stopResults[0].Status != jobs.StatusSucceeded {
+		t.Fatalf("stop results = %#v", stopResults)
 	}
 }
 
