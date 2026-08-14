@@ -208,3 +208,95 @@ func topologyPlacement(t *testing.T, snapshot Snapshot, worldID string) Placemen
 	t.Fatalf("placement %s not found in %#v", worldID, snapshot.Placements)
 	return Placement{}
 }
+
+func TestResolveExecutionUsesAppliedTargetWithoutDesiredFallback(t *testing.T) {
+	now := time.Now().UTC()
+	room := rooms.Room{ID: "room-a", DirectoryName: "Cluster_A", Name: "A", Managed: true}
+	world := rooms.World{ID: "master-a", RoomID: room.ID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}
+	local := runtimeInventory(
+		agents.RuntimeTarget{ID: localTargetID, Name: "本机", Kind: agents.RuntimeKindLocal, Status: agents.RuntimeStatusReady, Online: true, Configured: true},
+		4, 4, []shared.RoomInventoryReport{inventoryRoom("Cluster_A", "Master")}, nil, now,
+	)
+	remote := runtimeInventory(
+		agents.RuntimeTarget{ID: "agent:node", AgentID: "node", Name: "远程", Kind: agents.RuntimeKindAgent, Status: agents.RuntimeStatusReady, Online: true, Configured: true, Capabilities: []string{"shard.control.v1"}},
+		4, 4, []shared.RoomInventoryReport{inventoryRoom("Cluster_A", "Master")}, nil, now,
+	)
+	service, err := NewService(
+		topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {world}}},
+		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{local, remote}}, newTopologyTestStore(t),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := service.Topology(context.Background(), room.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Update(context.Background(), room.ID, UpdateRequest{
+		ExpectedRevision: current.Revision, Placements: []PlacementInput{{WorldID: world.ID, TargetID: "agent:node"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := service.ResolveExecution(context.Background(), room.ID, world.ID)
+	if err != nil || resolved.AppliedTargetID != localTargetID || resolved.DesiredTargetID != "agent:node" {
+		t.Fatalf("resolved=%#v err=%v", resolved, err)
+	}
+}
+
+func TestResolveExecutionRequiresFreshAppliedAgentAndRejectsConflict(t *testing.T) {
+	now := time.Now().UTC()
+	room := rooms.Room{ID: "room-a", DirectoryName: "Cluster_A", Name: "A", Managed: true}
+	world := rooms.World{ID: "master-a", RoomID: room.ID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}
+	remoteTarget := agents.RuntimeTarget{
+		ID: "agent:node", AgentID: "node", Name: "远程", Kind: agents.RuntimeKindAgent,
+		Status: agents.RuntimeStatusReady, Online: true, Configured: true, Capabilities: []string{"shard.control.v1"},
+	}
+	remote := runtimeInventory(remoteTarget, 4, 4, []shared.RoomInventoryReport{inventoryRoom("Cluster_A", "Master")}, nil, now)
+	store := newTopologyTestStore(t)
+	service, err := NewService(
+		topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {world}}},
+		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{remote}}, store,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Ensure(room.ID, []string{world.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Placements[0].DesiredTargetID, record.Placements[0].AppliedTargetID = "agent:node", "agent:node"
+	if _, err := store.Save(room.ID, record.Revision, record.Placements); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := service.ResolveExecution(context.Background(), room.ID, world.ID)
+	if err != nil || resolved.Target.AgentID != "node" {
+		t.Fatalf("resolved=%#v err=%v", resolved, err)
+	}
+
+	stale := remote
+	stale.Stale = true
+	stale.StaleReason = "report_expired"
+	staleService, _ := NewService(
+		topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {world}}},
+		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{stale}}, store,
+	)
+	if _, err := staleService.ResolveExecution(context.Background(), room.ID, world.ID); !executionErrorCode(err, "APPLIED_INVENTORY_STALE") {
+		t.Fatalf("stale error=%v", err)
+	}
+
+	conflictRemote := remote
+	conflictRemote.Inventory.Processes = []shared.ShardProcessReport{{PID: 1, Cluster: "Cluster_A", Shard: "Master"}, {PID: 2, Cluster: "Cluster_A", Shard: "Master"}}
+	conflictService, _ := NewService(
+		topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {world}}},
+		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{conflictRemote}}, store,
+	)
+	if _, err := conflictService.ResolveExecution(context.Background(), room.ID, world.ID); !executionErrorCode(err, "SHARD_RUNTIME_CONFLICT") {
+		t.Fatalf("conflict error=%v", err)
+	}
+}
+
+func executionErrorCode(err error, code string) bool {
+	var executionError *ExecutionError
+	return errors.As(err, &executionError) && executionError.Code == code
+}

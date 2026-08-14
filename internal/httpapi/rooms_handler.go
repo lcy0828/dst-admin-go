@@ -183,7 +183,7 @@ func (h *RoomHandler) requireRoomStopped(c *gin.Context, roomID, selectedWorldID
 		if selectedWorldID != "" && world.ID != selectedWorldID {
 			continue
 		}
-		status, statusErr := h.operations.Status(c.Request.Context(), room.DirectoryName, world.DirectoryName)
+		status, statusErr := h.operations.StatusFor(c.Request.Context(), room.ID, world.ID)
 		if statusErr != nil {
 			return statusErr
 		}
@@ -262,7 +262,7 @@ func (h *RoomHandler) worldsList(c *gin.Context) {
 			result = append(result, state)
 			continue
 		}
-		status, statusErr := h.operations.Status(c.Request.Context(), room.DirectoryName, world.DirectoryName)
+		status, statusErr := h.operations.StatusFor(c.Request.Context(), room.ID, world.ID)
 		if statusErr != nil {
 			state.StatusMessage = statusErr.Error()
 			result = append(result, state)
@@ -312,6 +312,9 @@ func (h *RoomHandler) action(c *gin.Context) {
 					log.Printf("[RuntimeAudit] record API action room=%s action=%s: %v", roomID, action, auditErr)
 				}
 			}
+			ctx = shards.WithOperationAudit(ctx, shards.OperationAuditMetadata{
+				JobID: job.ID, RequestID: requestID, Source: string(runtimeaudit.SourceAPI),
+			})
 			return runner(ctx, report)
 		}
 	})

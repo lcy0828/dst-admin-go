@@ -2,14 +2,83 @@ package shards
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"dont/internal/agents"
 	"dont/internal/jobs"
+	"dont/internal/operationlease"
 	"dont/internal/rooms"
+	"dont/internal/topology"
+	"dont/shared"
 )
+
+type fakePlacementResolver struct {
+	applied  topology.ExecutionPlacement
+	resolved topology.ExecutionPlacement
+	err      error
+}
+
+func (resolver *fakePlacementResolver) AppliedPlacement(string, string) (topology.ExecutionPlacement, error) {
+	return resolver.applied, resolver.err
+}
+
+func (resolver *fakePlacementResolver) ResolveExecution(context.Context, string, string) (topology.ExecutionPlacement, error) {
+	return resolver.resolved, resolver.err
+}
+
+type fakeRemoteExecutor struct {
+	targetID string
+	request  shared.ShardOperationRequest
+	calls    int
+	err      error
+}
+
+func (executor *fakeRemoteExecutor) ExecuteShard(_ context.Context, targetID string, request shared.ShardOperationRequest, _ int) (agents.ShardExecutionResult, error) {
+	executor.targetID, executor.request = targetID, request
+	executor.calls++
+	if executor.err != nil {
+		return agents.ShardExecutionResult{}, executor.err
+	}
+	state := "running"
+	if request.Action == shared.ShardActionStop {
+		state = "stopped"
+	}
+	return agents.ShardExecutionResult{Result: shared.ShardOperationResult{
+		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: request.OperationID,
+		InstallationID: "default", Action: request.Action, Cluster: request.Cluster, Shard: request.Shard,
+		Status: shared.ShardRuntimeStatus{State: state, SessionExists: state == "running"}, Message: "远程完成",
+	}}, nil
+}
+
+type fakeLeaseService struct {
+	lease      operationlease.Lease
+	acquireErr error
+	released   bool
+}
+
+type fakeOperationObserver struct{ items []OperationAudit }
+
+func (observer *fakeOperationObserver) ObserveOperation(_ context.Context, audit OperationAudit) error {
+	observer.items = append(observer.items, audit)
+	return nil
+}
+
+func (service *fakeLeaseService) Acquire(context.Context, string, string, time.Duration) (operationlease.Lease, error) {
+	return service.lease, service.acquireErr
+}
+
+func (service *fakeLeaseService) Renew(context.Context, operationlease.Lease, time.Duration) (operationlease.Lease, error) {
+	return service.lease, nil
+}
+
+func (service *fakeLeaseService) Release(operationlease.Lease) error {
+	service.released = true
+	return nil
+}
 
 type fakeRooms struct {
 	room   rooms.Room
@@ -407,5 +476,85 @@ func TestRunnerRejectsWorldPlanChangedWhileWaiting(t *testing.T) {
 		if result.Status != jobs.StatusFailed || result.Error == nil || result.Error.Code != "ROOM_CHANGED" {
 			t.Fatalf("result = %#v", result)
 		}
+	}
+}
+
+func TestDistributedOperationUsesAppliedRemoteTargetWithLeaseAndNoLocalFallback(t *testing.T) {
+	control := &fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}}
+	operations := testOperations(control)
+	resolver := &fakePlacementResolver{
+		applied:  topology.ExecutionPlacement{AppliedTargetID: "agent:node-a"},
+		resolved: topology.ExecutionPlacement{Revision: "revision-1", AppliedTargetID: "agent:node-a", Target: agents.RuntimeTarget{AgentID: "node-a"}},
+	}
+	remote := &fakeRemoteExecutor{}
+	leaseService := &fakeLeaseService{lease: operationlease.Lease{
+		RoomID: rooms.EncodeID("summer_2026"), LeaseID: "lease-1", OperationKey: "plan-1",
+		FencingToken: 7, ExpiresAt: time.Now().UTC().Add(5 * time.Minute),
+	}}
+	if err := operations.ConfigureDistributed(resolver, remote, leaseService); err != nil {
+		t.Fatal(err)
+	}
+	observer := &fakeOperationObserver{}
+	operations.ConfigureObserver(observer)
+	masterID := rooms.EncodeID("Master")
+	_, runner, err := operations.Plan(ActionStart, rooms.EncodeID("summer_2026"), []string{masterID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []jobs.TargetResult
+	runnerContext := WithOperationAudit(context.Background(), OperationAuditMetadata{JobID: "job-1", RequestID: "request-1", Source: "api"})
+	if err := runner(runnerContext, func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != jobs.StatusSucceeded || remote.calls != 1 || remote.targetID != "agent:node-a" {
+		t.Fatalf("results=%#v remote=%#v", results, remote)
+	}
+	if remote.request.Action != shared.ShardActionStart || remote.request.FencingToken != 7 || remote.request.LeaseID != "lease-1" || remote.request.OperationKey == "" {
+		t.Fatalf("request=%#v", remote.request)
+	}
+	if len(control.calls) != 0 || !leaseService.released {
+		t.Fatalf("local calls=%v released=%v", control.calls, leaseService.released)
+	}
+	if len(observer.items) != 1 || observer.items[0].TargetID != "agent:node-a" || observer.items[0].FencingToken != 7 || observer.items[0].JobID != "job-1" {
+		t.Fatalf("audit=%#v", observer.items)
+	}
+
+	remote.err = errors.New("connection lost")
+	_, runner, err = operations.Plan(ActionRestart, rooms.EncodeID("summer_2026"), []string{masterID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results = nil
+	_ = runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) })
+	if len(results) != 1 || results[0].Status != jobs.StatusFailed || len(control.calls) != 0 {
+		t.Fatalf("remote failure fell back locally: results=%#v calls=%v", results, control.calls)
+	}
+}
+
+func TestDistributedStatusIsReadOnlyAndLeaseBusyBlocksExecution(t *testing.T) {
+	control := &fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}}
+	operations := testOperations(control)
+	resolver := &fakePlacementResolver{
+		applied:  topology.ExecutionPlacement{AppliedTargetID: "agent:node-a"},
+		resolved: topology.ExecutionPlacement{Revision: "revision-1", AppliedTargetID: "agent:node-a"},
+	}
+	remote := &fakeRemoteExecutor{}
+	leaseService := &fakeLeaseService{acquireErr: operationlease.ErrBusy}
+	if err := operations.ConfigureDistributed(resolver, remote, leaseService); err != nil {
+		t.Fatal(err)
+	}
+	status, err := operations.StatusFor(context.Background(), rooms.EncodeID("summer_2026"), rooms.EncodeID("Master"))
+	if err != nil || status.State != RuntimeRunning || remote.request.Action != shared.ShardActionStatus || remote.request.FencingToken != 0 {
+		t.Fatalf("status=%#v request=%#v err=%v", status, remote.request, err)
+	}
+	remote.calls = 0
+	_, runner, err := operations.Plan(ActionSave, rooms.EncodeID("summer_2026"), []string{rooms.EncodeID("Master")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []jobs.TargetResult
+	_ = runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) })
+	if len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "ROOM_LEASE_BUSY" || remote.calls != 0 {
+		t.Fatalf("results=%#v remote calls=%d", results, remote.calls)
 	}
 }

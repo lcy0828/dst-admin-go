@@ -13,7 +13,16 @@ var (
 	ErrRevisionConflict = errors.New("topology revision has changed")
 	ErrRoomNotManaged   = errors.New("room must be managed before topology can be changed")
 	ErrOvercommit       = errors.New("topology exceeds the recommended shard capacity")
+	ErrExecutionBlocked = errors.New("topology does not allow shard execution")
 )
+
+type ExecutionError struct {
+	Code    string
+	Message string
+}
+
+func (e *ExecutionError) Error() string { return e.Message }
+func (e *ExecutionError) Unwrap() error { return ErrExecutionBlocked }
 
 type FieldError struct {
 	Fields map[string]string
@@ -124,6 +133,16 @@ type Snapshot struct {
 	RequiresOvercommitConfirmation bool            `json:"requiresOvercommitConfirmation"`
 	CapacityPolicy                 CapacityPolicy  `json:"capacityPolicy"`
 	UpdatedAt                      time.Time       `json:"updatedAt"`
+}
+
+type ExecutionPlacement struct {
+	Room            rooms.Room
+	World           rooms.World
+	Revision        string
+	DesiredTargetID string
+	AppliedTargetID string
+	Target          agents.RuntimeTarget
+	Inventory       agents.RuntimeTargetInventory
 }
 
 type storedPlacement struct {

@@ -68,6 +68,13 @@ func TestExpectedExitPreservesActionSourceAndReferences(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := service.ObserveOperation(context.Background(), shards.OperationAudit{
+		RoomID: room.ID, WorldID: world.ID, TargetID: "agent:node-a", AgentID: "node-a", Action: shards.ActionStop,
+		OperationID: "operation-1", OperationKey: "key-1", LeaseID: "lease-1", FencingToken: 9,
+		TopologyRevision: "revision-1", JobID: "job-1", RequestID: "request-1", Source: string(SourceAPI),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	runtime.status = shards.RuntimeStatus{State: shards.RuntimeStopped}
 	service.recordTransition(room, world,
 		observedRuntime{state: shards.RuntimeRunning, sessionExists: true},
@@ -76,8 +83,24 @@ func TestExpectedExitPreservesActionSourceAndReferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Items) != 2 || list.Items[0].Type != EventStopped || list.Items[0].Source != SourceAPI || list.Items[0].JobID != "job-1" || list.Items[0].RequestID != "request-1" {
+	if len(list.Items) != 2 || list.Items[0].Type != EventStopped || list.Items[0].Source != SourceAPI || list.Items[0].JobID != "job-1" || list.Items[0].RequestID != "request-1" ||
+		list.Items[0].TargetID != "agent:node-a" || list.Items[0].AgentID != "node-a" || list.Items[0].OperationID != "operation-1" ||
+		list.Items[0].LeaseID != "lease-1" || list.Items[0].FencingToken != 9 || list.Items[0].TopologyRevision != "revision-1" {
 		t.Fatalf("events = %#v", list.Items)
+	}
+}
+
+func TestSaveActionUsesDedicatedAuditType(t *testing.T) {
+	service, _, room, world := newAuditService(t)
+	if err := service.RecordAction(ActionRequest{RoomID: room.ID, WorldIDs: []string{world.ID}, Action: "save", Source: SourceAPI}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := service.List(room.ID, ListFilter{WorldID: world.ID, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 || list.Items[0].Type != EventSaveRequested || list.Items[0].ExpectedExit {
+		t.Fatalf("events=%#v", list.Items)
 	}
 }
 

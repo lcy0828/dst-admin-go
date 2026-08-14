@@ -10,9 +10,15 @@ import (
 	"sync"
 	"time"
 
+	"dont/internal/agents"
 	"dont/internal/jobs"
+	"dont/internal/operationlease"
 	"dont/internal/roomops"
 	"dont/internal/rooms"
+	"dont/internal/topology"
+	"dont/shared"
+
+	"github.com/google/uuid"
 )
 
 var (
@@ -29,6 +35,7 @@ const (
 	ActionStart   Action = "start"
 	ActionStop    Action = "stop"
 	ActionRestart Action = "restart"
+	ActionSave    Action = "save"
 	ActionCleanup Action = "cleanup"
 )
 
@@ -59,6 +66,10 @@ type CleanupControl interface {
 	Cleanup(context.Context, string, string) error
 }
 
+type ConsoleControl interface {
+	Send(context.Context, string, string, string) error
+}
+
 type RoomCatalog interface {
 	Room(string) (rooms.Room, error)
 	Worlds(string) ([]rooms.World, error)
@@ -68,6 +79,53 @@ type RuntimePreparer interface {
 	Prepare(context.Context, string, string) error
 }
 
+type executionPlacementResolver interface {
+	AppliedPlacement(string, string) (topology.ExecutionPlacement, error)
+	ResolveExecution(context.Context, string, string) (topology.ExecutionPlacement, error)
+}
+
+type remoteShardExecutor interface {
+	ExecuteShard(context.Context, string, shared.ShardOperationRequest, int) (agents.ShardExecutionResult, error)
+}
+
+type operationLeaseService interface {
+	Acquire(context.Context, string, string, time.Duration) (operationlease.Lease, error)
+	Renew(context.Context, operationlease.Lease, time.Duration) (operationlease.Lease, error)
+	Release(operationlease.Lease) error
+}
+
+type OperationAuditMetadata struct {
+	JobID     string
+	RequestID string
+	Source    string
+}
+
+type OperationAudit struct {
+	RoomID           string
+	WorldID          string
+	TargetID         string
+	AgentID          string
+	Action           Action
+	OperationID      string
+	OperationKey     string
+	LeaseID          string
+	FencingToken     uint64
+	TopologyRevision string
+	JobID            string
+	RequestID        string
+	Source           string
+}
+
+type OperationObserver interface {
+	ObserveOperation(context.Context, OperationAudit) error
+}
+
+type operationAuditContextKey struct{}
+
+func WithOperationAudit(ctx context.Context, metadata OperationAuditMetadata) context.Context {
+	return context.WithValue(ctx, operationAuditContextKey{}, metadata)
+}
+
 type Operations struct {
 	rooms        RoomCatalog
 	control      Control
@@ -75,6 +133,11 @@ type Operations struct {
 	pollInterval time.Duration
 	startTimeout time.Duration
 	stopTimeout  time.Duration
+	placements   executionPlacementResolver
+	remote       remoteShardExecutor
+	leases       operationLeaseService
+	leaseTTL     time.Duration
+	observer     OperationObserver
 	activeMu     sync.Mutex
 	activeSeq    uint64
 	activeStarts map[string]map[uint64]context.CancelFunc
@@ -82,17 +145,30 @@ type Operations struct {
 	stopEpoch map[string]uint64
 }
 
+func (o *Operations) ConfigureObserver(observer OperationObserver) {
+	o.observer = observer
+}
+
 func NewOperations(roomCatalog RoomCatalog, control Control, preparers ...RuntimePreparer) *Operations {
 	return &Operations{
 		rooms: roomCatalog, control: control, preparers: append([]RuntimePreparer(nil), preparers...),
 		pollInterval: 500 * time.Millisecond, startTimeout: 2 * time.Minute, stopTimeout: 60 * time.Second,
+		leaseTTL:     5 * time.Minute,
 		activeStarts: make(map[string]map[uint64]context.CancelFunc),
 		stopEpoch:    make(map[string]uint64),
 	}
 }
 
+func (o *Operations) ConfigureDistributed(placements executionPlacementResolver, remote remoteShardExecutor, leases operationLeaseService) error {
+	if placements == nil || remote == nil || leases == nil {
+		return errors.New("distributed shard control dependencies are required")
+	}
+	o.placements, o.remote, o.leases = placements, remote, leases
+	return nil
+}
+
 func (o *Operations) Plan(action Action, roomID string, selectedWorldIDs []string) ([]jobs.TargetSpec, jobs.Runner, error) {
-	if action != ActionStart && action != ActionStop && action != ActionRestart && action != ActionCleanup {
+	if action != ActionStart && action != ActionStop && action != ActionRestart && action != ActionSave && action != ActionCleanup {
 		return nil, nil, ErrUnknownAction
 	}
 	room, worlds, err := o.resolvePlan(roomID, selectedWorldIDs)
@@ -105,6 +181,11 @@ func (o *Operations) Plan(action Action, roomID string, selectedWorldIDs []strin
 	for _, world := range worlds {
 		plannedWorldIDs = append(plannedWorldIDs, world.ID)
 		targets = append(targets, jobs.TargetSpec{ID: world.ID, Name: world.Name})
+	}
+	leaseOperationKey := uuid.NewString()
+	operationIDs := make(map[string]string, len(worlds))
+	for _, world := range worlds {
+		operationIDs[world.ID] = uuid.NewString()
 	}
 	startEpoch := uint64(0)
 	if action == ActionStart || action == ActionRestart {
@@ -141,6 +222,22 @@ func (o *Operations) Plan(action Action, roomID string, selectedWorldIDs []strin
 			return err
 		}
 		defer release()
+		var activeLease *operationlease.Lease
+		if o.leases != nil {
+			lease, leaseErr := o.leases.Acquire(ctx, room.ID, leaseOperationKey, o.leaseTTL)
+			if leaseErr != nil {
+				code := "ROOM_LEASE_FAILED"
+				if errors.Is(leaseErr, operationlease.ErrBusy) {
+					code = "ROOM_LEASE_BUSY"
+				}
+				for _, world := range worlds {
+					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: code, Message: leaseErr.Error()}})
+				}
+				return nil
+			}
+			activeLease = &lease
+			defer func() { _ = o.leases.Release(*activeLease) }()
+		}
 		currentRoom, currentWorlds, err := o.resolvePlan(room.ID, plannedWorldIDs)
 		if err != nil {
 			for _, world := range worlds {
@@ -154,9 +251,17 @@ func (o *Operations) Plan(action Action, roomID string, selectedWorldIDs []strin
 				report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusCanceled, Error: &jobs.Error{Code: "JOB_CANCELED", Message: "任务已取消"}})
 				continue
 			}
-			message, err := o.execute(ctx, action, currentRoom.DirectoryName, world.DirectoryName)
+			if activeLease != nil {
+				renewed, renewErr := o.leases.Renew(ctx, *activeLease, o.leaseTTL)
+				if renewErr != nil {
+					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "ROOM_LEASE_LOST", Message: renewErr.Error()}})
+					continue
+				}
+				*activeLease = renewed
+			}
+			message, err := o.executePlaced(ctx, action, currentRoom, world, activeLease, operationIDs[world.ID])
 			if err != nil {
-				code := strings.ToUpper(string(action)) + "_FAILED"
+				code := operationErrorCode(action, err)
 				if errors.Is(err, context.Canceled) {
 					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusCanceled, Error: &jobs.Error{Code: "JOB_CANCELED", Message: "任务已取消"}})
 					continue
@@ -264,6 +369,154 @@ func (o *Operations) Status(ctx context.Context, roomName, worldName string) (Ru
 	return RuntimeStatus{State: RuntimeStopped}, nil
 }
 
+func (o *Operations) StatusFor(ctx context.Context, roomID, worldID string) (RuntimeStatus, error) {
+	room, worlds, err := o.resolvePlan(roomID, []string{worldID})
+	if err != nil {
+		return RuntimeStatus{State: RuntimeUnknown}, err
+	}
+	world := worlds[0]
+	if o.placements == nil {
+		return o.Status(ctx, room.DirectoryName, world.DirectoryName)
+	}
+	applied, err := o.placements.AppliedPlacement(room.ID, world.ID)
+	if err != nil {
+		return RuntimeStatus{State: RuntimeUnknown}, err
+	}
+	if applied.AppliedTargetID == "local" {
+		return o.Status(ctx, room.DirectoryName, world.DirectoryName)
+	}
+	resolved, err := o.placements.ResolveExecution(ctx, room.ID, world.ID)
+	if err != nil {
+		return RuntimeStatus{State: RuntimeUnknown}, err
+	}
+	request := shared.ShardOperationRequest{
+		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: uuid.NewString(),
+		Action: shared.ShardActionStatus, Cluster: room.DirectoryName, Shard: world.DirectoryName,
+		TopologyRevision: resolved.Revision,
+	}
+	result, err := o.remote.ExecuteShard(ctx, resolved.AppliedTargetID, request, 30)
+	if err != nil {
+		return RuntimeStatus{State: RuntimeUnknown}, err
+	}
+	return runtimeStatusFromShared(result.Result.Status), nil
+}
+
+func (o *Operations) executePlaced(ctx context.Context, action Action, room rooms.Room, world rooms.World, lease *operationlease.Lease, operationID string) (string, error) {
+	if o.placements == nil {
+		return o.execute(ctx, action, room.DirectoryName, world.DirectoryName)
+	}
+	applied, err := o.placements.AppliedPlacement(room.ID, world.ID)
+	if err != nil {
+		return "", err
+	}
+	o.observeOperation(ctx, action, room.ID, world.ID, applied, lease, operationID)
+	if applied.AppliedTargetID == "local" {
+		return o.execute(ctx, action, room.DirectoryName, world.DirectoryName)
+	}
+	if action == ActionCleanup {
+		return "", errors.New("远程节点不开放强制清理；请先诊断 Agent 和分片状态")
+	}
+	if lease == nil {
+		return "", errors.New("远程分片操作缺少控制面房间租约")
+	}
+	resolved, err := o.placements.ResolveExecution(ctx, room.ID, world.ID)
+	if err != nil {
+		return "", err
+	}
+	shardAction, timeout, err := remoteAction(action, o.startTimeout, o.stopTimeout)
+	if err != nil {
+		return "", err
+	}
+	expiresAt := lease.ExpiresAt.UTC()
+	request := shared.ShardOperationRequest{
+		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: operationID, OperationKey: operationID,
+		Action: shardAction, Cluster: room.DirectoryName, Shard: world.DirectoryName, TopologyRevision: resolved.Revision,
+		LeaseID: lease.LeaseID, FencingToken: lease.FencingToken, LeaseExpiresAt: &expiresAt,
+	}
+	result, err := o.remote.ExecuteShard(ctx, resolved.AppliedTargetID, request, timeout)
+	if err != nil {
+		return "", err
+	}
+	message := strings.TrimSpace(result.Result.Message)
+	if message == "" {
+		message = "远程分片操作已完成"
+	}
+	return message, nil
+}
+
+func (o *Operations) observeOperation(ctx context.Context, action Action, roomID, worldID string, placement topology.ExecutionPlacement, lease *operationlease.Lease, operationID string) {
+	if o.observer == nil {
+		return
+	}
+	metadata, _ := ctx.Value(operationAuditContextKey{}).(OperationAuditMetadata)
+	audit := OperationAudit{
+		RoomID: roomID, WorldID: worldID, TargetID: placement.AppliedTargetID,
+		Action: action, OperationID: operationID, OperationKey: operationID, TopologyRevision: placement.Revision,
+		JobID: metadata.JobID, RequestID: metadata.RequestID, Source: metadata.Source,
+	}
+	if strings.HasPrefix(placement.AppliedTargetID, "agent:") {
+		audit.AgentID = strings.TrimPrefix(placement.AppliedTargetID, "agent:")
+	}
+	if lease != nil {
+		audit.LeaseID, audit.FencingToken = lease.LeaseID, lease.FencingToken
+	}
+	_ = o.observer.ObserveOperation(ctx, audit)
+}
+
+func remoteAction(action Action, startTimeout, stopTimeout time.Duration) (shared.ShardAction, int, error) {
+	timeout := 30
+	switch action {
+	case ActionStart:
+		timeout = int(startTimeout.Seconds())
+		return shared.ShardActionStart, boundedRemoteTimeout(timeout), nil
+	case ActionStop:
+		timeout = int(stopTimeout.Seconds())
+		return shared.ShardActionStop, boundedRemoteTimeout(timeout), nil
+	case ActionRestart:
+		timeout = int((startTimeout + stopTimeout).Seconds())
+		return shared.ShardActionRestart, boundedRemoteTimeout(timeout), nil
+	case ActionSave:
+		return shared.ShardActionSave, 30, nil
+	default:
+		return "", 0, ErrUnknownAction
+	}
+}
+
+func boundedRemoteTimeout(value int) int {
+	if value < 5 {
+		return 5
+	}
+	if value > 300 {
+		return 300
+	}
+	return value
+}
+
+func runtimeStatusFromShared(status shared.ShardRuntimeStatus) RuntimeStatus {
+	state := RuntimeState(status.State)
+	if state != RuntimeStopped && state != RuntimeStarting && state != RuntimeRunning && state != RuntimeFailed {
+		state = RuntimeUnknown
+	}
+	return RuntimeStatus{State: state, Code: status.Code, Message: status.Message, SessionExists: status.SessionExists}
+}
+
+func operationErrorCode(action Action, err error) string {
+	var executionError *topology.ExecutionError
+	if errors.As(err, &executionError) && executionError.Code != "" {
+		return executionError.Code
+	}
+	switch {
+	case errors.Is(err, agents.ErrAgentOffline):
+		return "AGENT_OFFLINE"
+	case errors.Is(err, agents.ErrUnsupportedAction):
+		return "AGENT_CAPABILITY_MISSING"
+	case errors.Is(err, operationlease.ErrLeaseLost):
+		return "ROOM_LEASE_LOST"
+	default:
+		return strings.ToUpper(string(action)) + "_FAILED"
+	}
+}
+
 func (o *Operations) execute(ctx context.Context, action Action, roomName, worldName string) (string, error) {
 	status, err := o.Status(ctx, roomName, worldName)
 	if err != nil {
@@ -345,6 +598,18 @@ func (o *Operations) execute(ctx context.Context, action Action, roomName, world
 			return "", err
 		}
 		return "分片已重启", nil
+	case ActionSave:
+		if status.State != RuntimeRunning {
+			return "", errors.New("分片未运行，无法保存")
+		}
+		control, ok := o.control.(ConsoleControl)
+		if !ok {
+			return "", errors.New("当前运行控制器不支持保存分片")
+		}
+		if err := control.Send(ctx, roomName, worldName, "c_save()"); err != nil {
+			return "", err
+		}
+		return "已请求 DST 保存当前分片", nil
 	default:
 		return "", ErrUnknownAction
 	}

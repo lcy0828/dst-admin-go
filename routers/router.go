@@ -26,6 +26,7 @@ import (
 	"dont/internal/jobs"
 	"dont/internal/logstream"
 	modservice "dont/internal/mods"
+	"dont/internal/operationlease"
 	playerapi "dont/internal/players"
 	"dont/internal/rooms"
 	"dont/internal/runtimeaudit"
@@ -197,6 +198,10 @@ func initApplication(manageBackground bool) (*Application, error) {
 		return nil, err
 	}
 	topologyHandler := httpapi.NewTopologyHandler(topologyService)
+	operationLeaseService := operationlease.NewService(models.DB(), tablePrefix)
+	if err := operationLeaseService.Migrate(); err != nil {
+		return nil, err
+	}
 	if backgroundEnabled {
 		hooks.workers = append(hooks.workers, func(ctx context.Context) {
 			agentService.Watch(ctx, 5*time.Second, jobService.Notify)
@@ -298,6 +303,9 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if os.Getenv("DST_ADMIN_ENV") != "test" {
 		shardOperations = shards.NewOperations(roomService, shardControl, runtimeManager)
 	}
+	if err := shardOperations.ConfigureDistributed(topologyService, agentService, operationLeaseService); err != nil {
+		return nil, err
+	}
 	runtimeAuditStore := runtimeaudit.NewStore(models.DB(), tablePrefix)
 	if err := runtimeAuditStore.Migrate(); err != nil {
 		return nil, err
@@ -306,6 +314,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	shardOperations.ConfigureObserver(runtimeAuditService)
 	if backgroundEnabled {
 		hooks.workers = append(hooks.workers, func(ctx context.Context) {
 			runtimeAuditService.Watch(ctx, 5*time.Second)

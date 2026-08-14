@@ -87,6 +87,113 @@ func (s *Service) Update(ctx context.Context, roomID string, request UpdateReque
 	return result.snapshot, nil
 }
 
+// ResolveExecution returns the currently applied runtime target. Desired
+// placement is never used as an execution fallback while migration is pending.
+func (s *Service) ResolveExecution(ctx context.Context, roomID, worldID string) (ExecutionPlacement, error) {
+	result, err := s.plan(ctx, roomID, nil)
+	if err != nil {
+		return ExecutionPlacement{}, err
+	}
+	selected := result.plans[roomID]
+	var world rooms.World
+	worldFound := false
+	for _, item := range selected.worlds {
+		if item.ID == worldID {
+			world, worldFound = item, true
+			break
+		}
+	}
+	if !worldFound {
+		return ExecutionPlacement{}, rooms.ErrWorldNotFound
+	}
+	stored, placementFound := placementsByWorld(selected.record.Placements)[worldID]
+	if !placementFound || strings.TrimSpace(stored.AppliedTargetID) == "" {
+		return ExecutionPlacement{}, executionBlocked("APPLIED_TARGET_MISSING", "世界没有已生效的运行目标")
+	}
+	for _, placement := range result.snapshot.Placements {
+		if placement.WorldID == worldID && placement.State == PlacementConflict {
+			return ExecutionPlacement{}, executionBlocked("SHARD_RUNTIME_CONFLICT", "世界在多个位置或非生效目标上运行，已阻止控制操作")
+		}
+	}
+	inventories := make(map[string]agents.RuntimeTargetInventory, len(result.inventories))
+	for _, inventory := range result.inventories {
+		inventories[inventory.Target.ID] = inventory
+	}
+	inventory, exists := inventories[stored.AppliedTargetID]
+	if !exists || !inventory.Target.Configured {
+		return ExecutionPlacement{}, executionBlocked("APPLIED_TARGET_MISSING", "已生效运行目标不存在或尚未配置")
+	}
+	resolved := ExecutionPlacement{
+		Room: selected.room, World: world, Revision: selected.record.Revision,
+		DesiredTargetID: stored.DesiredTargetID, AppliedTargetID: stored.AppliedTargetID,
+		Target: inventory.Target, Inventory: inventory,
+	}
+	if stored.AppliedTargetID == localTargetID {
+		return resolved, nil
+	}
+	if inventory.Target.Kind != agents.RuntimeKindAgent || strings.TrimSpace(inventory.Target.AgentID) == "" {
+		return ExecutionPlacement{}, executionBlocked("APPLIED_TARGET_INVALID", "已生效运行目标不是可控制的 Agent 节点")
+	}
+	if !inventory.Target.Online {
+		return ExecutionPlacement{}, executionBlocked("APPLIED_TARGET_OFFLINE", "已生效运行目标当前离线，操作不会回落到本机")
+	}
+	if !containsCapability(inventory.Target.Capabilities, "shard.control.v1") {
+		return ExecutionPlacement{}, executionBlocked("AGENT_CAPABILITY_MISSING", "Agent 版本不支持类型化分片控制")
+	}
+	if !inventory.Available {
+		return ExecutionPlacement{}, executionBlocked("APPLIED_INVENTORY_MISSING", "已生效运行目标尚无运行时清单")
+	}
+	if inventory.Stale {
+		return ExecutionPlacement{}, executionBlocked("APPLIED_INVENTORY_STALE", "已生效运行目标的运行时清单已过期")
+	}
+	if !inventoryHasShard(inventory.Inventory, identityFor(selected.room.DirectoryName, world.DirectoryName)) {
+		return ExecutionPlacement{}, executionBlocked("APPLIED_SHARD_MISSING", "Agent 未在受信安装中发现该世界文件")
+	}
+	return resolved, nil
+}
+
+// AppliedPlacement is a lightweight lookup used to keep the established local
+// runtime path fast. Remote targets must still pass ResolveExecution before use.
+func (s *Service) AppliedPlacement(roomID, worldID string) (ExecutionPlacement, error) {
+	plans, err := s.reconcileAll(roomID)
+	if err != nil {
+		return ExecutionPlacement{}, err
+	}
+	selected := plans[roomID]
+	var world rooms.World
+	found := false
+	for _, item := range selected.worlds {
+		if item.ID == worldID {
+			world, found = item, true
+			break
+		}
+	}
+	if !found {
+		return ExecutionPlacement{}, rooms.ErrWorldNotFound
+	}
+	stored, exists := placementsByWorld(selected.record.Placements)[worldID]
+	if !exists || strings.TrimSpace(stored.AppliedTargetID) == "" {
+		return ExecutionPlacement{}, executionBlocked("APPLIED_TARGET_MISSING", "世界没有已生效的运行目标")
+	}
+	return ExecutionPlacement{
+		Room: selected.room, World: world, Revision: selected.record.Revision,
+		DesiredTargetID: stored.DesiredTargetID, AppliedTargetID: stored.AppliedTargetID,
+	}, nil
+}
+
+func executionBlocked(code, message string) error {
+	return &ExecutionError{Code: code, Message: message}
+}
+
+func containsCapability(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) plan(ctx context.Context, roomID string, request *UpdateRequest) (planResult, error) {
 	plans, err := s.reconcileAll(roomID)
 	if err != nil {

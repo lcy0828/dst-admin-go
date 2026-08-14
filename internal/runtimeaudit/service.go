@@ -24,6 +24,10 @@ type Runtime interface {
 	Status(context.Context, string, string) (shards.RuntimeStatus, error)
 }
 
+type IdentifiedRuntime interface {
+	StatusFor(context.Context, string, string) (shards.RuntimeStatus, error)
+}
+
 type observedRuntime struct {
 	state         shards.RuntimeState
 	sessionExists bool
@@ -61,7 +65,7 @@ func (s *Service) RecordAction(request ActionRequest) error {
 		if len(selected) > 0 && !selected[world.ID] {
 			continue
 		}
-		status, statusErr := s.runtime.Status(context.Background(), room.DirectoryName, world.DirectoryName)
+		status, statusErr := s.status(context.Background(), room, world)
 		if statusErr != nil {
 			status = shards.RuntimeStatus{State: shards.RuntimeUnknown}
 		}
@@ -94,6 +98,15 @@ func (s *Service) List(roomID string, filter ListFilter) (List, error) {
 
 func (s *Service) LatestExit(roomID, worldID string) (*Event, error) {
 	return s.store.LatestExit(roomID, worldID)
+}
+
+func (s *Service) ObserveOperation(_ context.Context, audit shards.OperationAudit) error {
+	return s.store.AnnotateAction(Event{
+		RoomID: audit.RoomID, WorldID: audit.WorldID, Action: string(audit.Action), Source: Source(audit.Source),
+		JobID: audit.JobID, RequestID: audit.RequestID, TargetID: audit.TargetID, AgentID: audit.AgentID,
+		OperationID: audit.OperationID, OperationKey: audit.OperationKey, LeaseID: audit.LeaseID,
+		FencingToken: audit.FencingToken, TopologyRevision: audit.TopologyRevision,
+	})
 }
 
 func (s *Service) Watch(ctx context.Context, interval time.Duration) {
@@ -132,7 +145,7 @@ func (s *Service) observe(ctx context.Context, previous map[string]observedRunti
 			if ctx.Err() != nil {
 				return current
 			}
-			status, statusErr := s.runtime.Status(ctx, room.DirectoryName, world.DirectoryName)
+			status, statusErr := s.status(ctx, room, world)
 			if statusErr != nil {
 				continue
 			}
@@ -147,6 +160,13 @@ func (s *Service) observe(ctx context.Context, previous map[string]observedRunti
 		}
 	}
 	return current
+}
+
+func (s *Service) status(ctx context.Context, room rooms.Room, world rooms.World) (shards.RuntimeStatus, error) {
+	if runtime, ok := s.runtime.(IdentifiedRuntime); ok {
+		return runtime.StatusFor(ctx, room.ID, world.ID)
+	}
+	return s.runtime.Status(ctx, room.DirectoryName, world.DirectoryName)
 }
 
 func (s *Service) recordTransition(room rooms.Room, world rooms.World, before, current observedRuntime, status shards.RuntimeStatus) {
@@ -164,6 +184,9 @@ func (s *Service) recordTransition(room rooms.Room, world rooms.World, before, c
 		if expected != nil {
 			base.Type, base.Action, base.Source = EventStopped, expected.Action, expected.Source
 			base.JobID, base.RequestID = expected.JobID, expected.RequestID
+			base.TargetID, base.AgentID = expected.TargetID, expected.AgentID
+			base.OperationID, base.OperationKey = expected.OperationID, expected.OperationKey
+			base.LeaseID, base.FencingToken, base.TopologyRevision = expected.LeaseID, expected.FencingToken, expected.TopologyRevision
 			base.ReasonCode, base.Message = "EXPECTED_EXIT", "分片在停止、重启或清理请求后退出"
 		} else {
 			base.Type, base.Source = EventUnexpectedExit, SourceExternal
@@ -200,6 +223,8 @@ func actionEvent(action string) (EventType, bool) {
 		return EventStopRequested, true
 	case "restart":
 		return EventRestartRequested, true
+	case "save":
+		return EventSaveRequested, false
 	case "cleanup":
 		return EventCleanupRequested, true
 	default:

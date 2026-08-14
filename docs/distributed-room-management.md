@@ -150,9 +150,12 @@ preconditions, parameters, deadline
 - `runtime.processes.read`
 - `runtime.capacity.read`
 
-后续控制能力：
+已实现的单分片控制能力：
 
-- `shard.start`、`shard.stop`、`shard.restart`、`shard.save`
+- `shard.status`、`shard.start`、`shard.stop`、`shard.restart`、`shard.save`
+
+后续房间与资源控制能力：
+
 - `room.start`、`room.stop`、`room.restart`、`room.save`
 - `backup.stage`、`backup.upload`、`backup.restore`
 - `mod.prepare`、`mod.publish`、`mod.verify`

@@ -23,6 +23,13 @@ type eventRecord struct {
 	Message          string    `gorm:"type:text"`
 	JobID            string    `gorm:"type:varchar(64);index"`
 	RequestID        string    `gorm:"type:varchar(128);index"`
+	TargetID         string    `gorm:"type:varchar(160);index"`
+	AgentID          string    `gorm:"type:varchar(128);index"`
+	OperationID      string    `gorm:"type:varchar(128);index"`
+	OperationKey     string    `gorm:"type:varchar(128);index"`
+	LeaseID          string    `gorm:"type:varchar(128);index"`
+	FencingToken     uint64    `gorm:"not null;default:0"`
+	TopologyRevision string    `gorm:"type:varchar(128)"`
 	ExpectedExit     bool      `gorm:"not null"`
 	ExpectedObserved bool      `gorm:"not null"`
 	OccurredAt       time.Time `gorm:"not null;index:idx_runtime_audit_room_time;index:idx_runtime_audit_world_time"`
@@ -90,6 +97,27 @@ func (s *Store) LatestExit(roomID, worldID string) (*Event, error) {
 	return &event, nil
 }
 
+func (s *Store) AnnotateAction(event Event) error {
+	if event.JobID == "" || event.RoomID == "" || event.WorldID == "" || event.Action == "" {
+		return nil
+	}
+	var record eventRecord
+	result := s.db.Table(s.table).
+		Where("room_id = ? AND world_id = ? AND job_id = ? AND action = ?", event.RoomID, event.WorldID, event.JobID, event.Action).
+		Order("occurred_at DESC, id DESC").First(&record)
+	if gorm.IsRecordNotFoundError(result.Error) {
+		return nil
+	}
+	if result.Error != nil {
+		return result.Error
+	}
+	return s.db.Table(s.table).Where("id = ?", record.ID).Updates(map[string]interface{}{
+		"target_id": event.TargetID, "agent_id": event.AgentID, "operation_id": event.OperationID,
+		"operation_key": event.OperationKey, "lease_id": event.LeaseID, "fencing_token": event.FencingToken,
+		"topology_revision": event.TopologyRevision,
+	}).Error
+}
+
 func (s *Store) ConsumeExpectedExit(roomID, worldID string, since time.Time) (*Event, error) {
 	tx := s.db.Begin()
 	if tx.Error != nil {
@@ -125,6 +153,8 @@ func recordFromEvent(event Event) eventRecord {
 		WorldDirectory: event.WorldDirectory, Type: string(event.Type), Action: event.Action, Source: string(event.Source),
 		PreviousState: event.PreviousState, RuntimeState: event.RuntimeState, ReasonCode: event.ReasonCode,
 		Message: event.Message, JobID: event.JobID, RequestID: event.RequestID, ExpectedExit: event.ExpectedExit,
+		TargetID: event.TargetID, AgentID: event.AgentID, OperationID: event.OperationID, OperationKey: event.OperationKey,
+		LeaseID: event.LeaseID, FencingToken: event.FencingToken, TopologyRevision: event.TopologyRevision,
 		ExpectedObserved: event.ExpectedObserved, OccurredAt: event.OccurredAt.UTC(),
 	}
 }
@@ -135,6 +165,8 @@ func eventFromRecord(record eventRecord) Event {
 		WorldDirectory: record.WorldDirectory, Type: EventType(record.Type), Action: record.Action, Source: Source(record.Source),
 		PreviousState: record.PreviousState, RuntimeState: record.RuntimeState, ReasonCode: record.ReasonCode,
 		Message: record.Message, JobID: record.JobID, RequestID: record.RequestID, ExpectedExit: record.ExpectedExit,
+		TargetID: record.TargetID, AgentID: record.AgentID, OperationID: record.OperationID, OperationKey: record.OperationKey,
+		LeaseID: record.LeaseID, FencingToken: record.FencingToken, TopologyRevision: record.TopologyRevision,
 		ExpectedObserved: record.ExpectedObserved, OccurredAt: record.OccurredAt.UTC(),
 	}
 }

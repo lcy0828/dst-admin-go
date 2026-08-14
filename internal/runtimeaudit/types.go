@@ -8,6 +8,7 @@ const (
 	EventStartRequested   EventType = "start_requested"
 	EventStopRequested    EventType = "stop_requested"
 	EventRestartRequested EventType = "restart_requested"
+	EventSaveRequested    EventType = "save_requested"
 	EventCleanupRequested EventType = "cleanup_requested"
 	EventSessionStarted   EventType = "session_started"
 	EventRunning          EventType = "running"
@@ -41,6 +42,13 @@ type Event struct {
 	Message          string    `json:"message,omitempty"`
 	JobID            string    `json:"jobId,omitempty"`
 	RequestID        string    `json:"requestId,omitempty"`
+	TargetID         string    `json:"targetId,omitempty"`
+	AgentID          string    `json:"agentId,omitempty"`
+	OperationID      string    `json:"operationId,omitempty"`
+	OperationKey     string    `json:"operationKey,omitempty"`
+	LeaseID          string    `json:"leaseId,omitempty"`
+	FencingToken     uint64    `json:"fencingToken,omitempty"`
+	TopologyRevision string    `json:"topologyRevision,omitempty"`
 	ExpectedExit     bool      `json:"expectedExit"`
 	ExpectedObserved bool      `json:"expectedObserved"`
 	OccurredAt       time.Time `json:"occurredAt"`
