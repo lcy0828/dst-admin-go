@@ -4,7 +4,7 @@
 > 更新日期：2026-08-15
 > 范围：多台服务器集中管理、一个房间跨节点运行多个世界分片、集中操作与可观测性
 
-当前进度：Phase 1、Phase 2 和 Phase 3 已完成，Phase 4 进行中。节点清单、容量、新鲜度、房间拓扑与 Placement 规划已交付；单 Shard 类型化控制、控制面房间租约、Agent fencing/幂等保护和运行审计也已交付。Phase 4 已交付单房间与跨房间启动容量预检、结构化风险确认、房间内全量预检和跨房间批量 Job；集中看板的批量选择界面和恢复入口仍待完成。Placement 当前仍只保存期望位置，不会迁移分片；只有后续迁移流程成功写入 `appliedTargetId` 后才能对远程目标执行，失败时不会回落本机。
+当前进度：Phase 1 至 Phase 4 已完成。节点清单、容量、新鲜度、房间拓扑与 Placement 规划已交付；单 Shard 类型化控制、控制面房间租约、Agent fencing/幂等保护和运行审计也已交付。Phase 4 已交付单房间与跨房间启动容量预检、结构化风险确认、房间内全量预检、跨房间批量 Job、集中看板的批量选择和未成功项重试入口。Placement 当前仍只保存期望位置，不会迁移分片；只有后续迁移流程成功写入 `appliedTargetId` 后才能对远程目标执行，失败时不会回落本机。下一阶段是跨节点一致性备份与恢复。
 
 ## 1. 目标
 
@@ -372,13 +372,13 @@ Mod 管理继续区分：
 
 已交付说明：Agent 2.2.0 支持 `shard.status/start/stop/restart/save` 固定动作，不接受任意 Shell 或请求内路径；Agent 从本地受信安装注册表解析路径，并持久化最高 fencing token、完成结果和中断后的 `unknown` 状态。控制器使用持久化房间租约和单调 token，Job 保留逐世界结果，运行审计记录 target、Agent、operation、lease、fencing 和拓扑 revision。执行器只使用 `appliedTargetId`；节点离线、清单过期、文件缺失或运行冲突时拒绝操作，不自动改在本机执行。
 
-### Phase 4：房间级协调与批量操作
+### Phase 4：房间级协调与批量操作（已完成）
 
 - 实现房间整体操作计划和逐目标状态。
 - 支持选择多个房间、节点或分片分批执行。
 - 建立部分失败和恢复入口。
 
-已交付说明：`POST /api/v2/rooms/:roomId/actions/:action` 在启动和重启前按 `appliedTargetId` 计算启动后容量，首次超配或容量未知时返回 `CAPACITY_RISK_CONFIRMATION_REQUIRED`，确认后允许继续但不提供性能保证。整房间在任一世界预检失败时不会先操作其他世界。`POST /api/v2/rooms/actions/:action` 支持多个房间合并预览容量，并用 `roomId:worldId` 作为 Job 目标标识；不同房间使用独立租约，单个房间失败不阻塞其他房间。前端已统一所有单房间和单世界启动、重启入口的 shadcn-vue 风险确认；多房间批量选择界面仍待交付。
+已交付说明：`POST /api/v2/rooms/:roomId/actions/:action` 在启动和重启前按 `appliedTargetId` 计算启动后容量，首次超配或容量未知时返回 `CAPACITY_RISK_CONFIRMATION_REQUIRED`，确认后允许继续但不提供性能保证。整房间在任一世界预检失败时不会先操作其他世界。`POST /api/v2/rooms/actions/:action` 支持多个房间合并预览容量，并用 `roomId:worldId` 作为 Job 目标标识；不同房间使用独立租约，单个房间失败不阻塞其他房间。前端已统一所有单房间、单世界和跨房间启动、重启入口的 shadcn-vue 风险确认；批量界面按房间选择世界，显示每层世界的当前生效节点和运行状态，完整展示部分或全部失败的逐世界结果，并在重新读取拓扑与状态后只重试未成功项。同一台服务器可以承载同一房间或不同房间的多层世界，但界面固定提醒“一颗物理核心最多运行一层世界，并额外预留 1 核”；这是可确认绕过的保守告警，不是硬限制。
 
 ### Phase 5：一致性备份与恢复
 
