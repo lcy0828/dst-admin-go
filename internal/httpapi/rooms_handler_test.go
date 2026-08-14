@@ -279,3 +279,67 @@ func TestRoomFailureReturnsCapacityRiskPreview(t *testing.T) {
 		t.Fatalf("response = %s", response.Body.String())
 	}
 }
+
+func TestBatchRoomActionHTTPFlowUsesRoomScopedTargets(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router, jobService := newRoomHandlerApp(t)
+	createRoom := func(directory, name string) (string, string) {
+		t.Helper()
+		response := performJSON(router, http.MethodPost, "/api/v2/rooms", map[string]interface{}{
+			"directoryName": directory, "name": name, "gameMode": "survival", "maxPlayers": 6,
+		}, nil, "")
+		assertStatus(t, response, http.StatusCreated)
+		roomID, _ := responseData(t, response)["id"].(string)
+		response = performJSON(router, http.MethodGet, "/api/v2/rooms/"+roomID+"/worlds", nil, nil, "")
+		assertStatus(t, response, http.StatusOK)
+		var envelope struct {
+			Data struct {
+				Items []struct {
+					ID string `json:"id"`
+				} `json:"items"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil || len(envelope.Data.Items) != 1 {
+			t.Fatalf("worlds: %v %s", err, response.Body.String())
+		}
+		return roomID, envelope.Data.Items[0].ID
+	}
+	roomAID, worldAID := createRoom("batch_a", "批量 A")
+	roomBID, worldBID := createRoom("batch_b", "批量 B")
+	response := performJSON(router, http.MethodPost, "/api/v2/rooms/actions/start", map[string]interface{}{
+		"rooms": []map[string]interface{}{
+			{"roomId": roomAID, "worldIds": []string{worldAID}},
+			{"roomId": roomBID, "worldIds": []string{worldBID}},
+		},
+	}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	jobID, _ := responseData(t, response)["id"].(string)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		job, err := jobService.Get(jobID)
+		if err == nil && job.Status == jobs.StatusSucceeded {
+			if len(job.Targets) != 2 || job.Targets[0].TargetID == job.Targets[1].TargetID || job.Outcome != jobs.OutcomeFull {
+				t.Fatalf("job = %#v", job)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	job, _ := jobService.Get(jobID)
+	t.Fatalf("batch job did not succeed: %#v", job)
+}
+
+func TestBatchRoomActionRequiresAtLeastOneRoom(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router, _ := newRoomHandlerApp(t)
+	response := performJSON(router, http.MethodPost, "/api/v2/rooms/actions/start", map[string]interface{}{"rooms": []interface{}{}}, nil, "")
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil || envelope.Error.Code != "NO_ROOMS" {
+		t.Fatalf("error = %v, response = %s", err, response.Body.String())
+	}
+}

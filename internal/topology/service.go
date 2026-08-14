@@ -182,33 +182,69 @@ func (s *Service) AppliedPlacement(roomID, worldID string) (ExecutionPlacement, 
 }
 
 func (s *Service) PreviewStartCapacity(ctx context.Context, roomID string, selectedWorldIDs []string) (StartCapacityPreview, error) {
-	result, err := s.plan(ctx, roomID, nil)
+	batch, err := s.PreviewBatchStartCapacity(ctx, []StartCapacitySelection{{RoomID: roomID, WorldIDs: selectedWorldIDs}})
 	if err != nil {
 		return StartCapacityPreview{}, err
 	}
-	selected := result.plans[roomID]
-	worlds, err := selectCapacityWorlds(selected.worlds, selectedWorldIDs)
+	selection := batch.Rooms[0]
+	return StartCapacityPreview{
+		RoomID: roomID, WorldIDs: selection.WorldIDs, Targets: batch.Targets,
+		RequiresRiskConfirmation: batch.RequiresRiskConfirmation, Policy: batch.Policy,
+	}, nil
+}
+
+func (s *Service) PreviewBatchStartCapacity(ctx context.Context, selections []StartCapacitySelection) (BatchStartCapacityPreview, error) {
+	if len(selections) == 0 {
+		return BatchStartCapacityPreview{}, ErrInvalidInput
+	}
+	firstRoomID := strings.TrimSpace(selections[0].RoomID)
+	if firstRoomID == "" {
+		return BatchStartCapacityPreview{}, ErrInvalidInput
+	}
+	result, err := s.plan(ctx, firstRoomID, nil)
 	if err != nil {
-		return StartCapacityPreview{}, err
+		return BatchStartCapacityPreview{}, err
 	}
 	inventories := make(map[string]agents.RuntimeTargetInventory, len(result.inventories))
 	for _, inventory := range result.inventories {
 		inventories[inventory.Target.ID] = inventory
 	}
-	placements := placementsByWorld(selected.record.Placements)
 	starting := make(map[string]int)
-	worldIDs := make([]string, 0, len(worlds))
-	for _, world := range worlds {
-		worldIDs = append(worldIDs, world.ID)
-		placement, exists := placements[world.ID]
+	normalizedSelections := make([]StartCapacitySelection, 0, len(selections))
+	seenRooms := make(map[string]bool, len(selections))
+	for _, selection := range selections {
+		roomID := strings.TrimSpace(selection.RoomID)
+		if roomID == "" || seenRooms[roomID] {
+			return BatchStartCapacityPreview{}, ErrInvalidInput
+		}
+		seenRooms[roomID] = true
+		selected, exists := result.plans[roomID]
 		if !exists {
-			return StartCapacityPreview{}, executionBlocked("APPLIED_TARGET_MISSING", "世界没有已生效的运行目标")
+			if _, roomErr := s.rooms.Room(roomID); roomErr != nil {
+				return BatchStartCapacityPreview{}, roomErr
+			}
+			return BatchStartCapacityPreview{}, ErrRoomNotManaged
 		}
-		starting[placement.AppliedTargetID] += 0
-		inventory, available := inventories[placement.AppliedTargetID]
-		if !available || !currentlyRunning(inventory, selected.room.DirectoryName, world.DirectoryName) {
-			starting[placement.AppliedTargetID]++
+		worlds, worldErr := selectCapacityWorlds(selected.worlds, selection.WorldIDs)
+		if worldErr != nil {
+			return BatchStartCapacityPreview{}, worldErr
 		}
+		placements := placementsByWorld(selected.record.Placements)
+		worldIDs := make([]string, 0, len(worlds))
+		for _, world := range worlds {
+			worldIDs = append(worldIDs, world.ID)
+			placement, placementExists := placements[world.ID]
+			if !placementExists {
+				return BatchStartCapacityPreview{}, executionBlocked("APPLIED_TARGET_MISSING", "世界没有已生效的运行目标")
+			}
+			starting[placement.AppliedTargetID] += 0
+			inventory, available := inventories[placement.AppliedTargetID]
+			if !available || !currentlyRunning(inventory, selected.room.DirectoryName, world.DirectoryName) {
+				starting[placement.AppliedTargetID]++
+			}
+		}
+		sort.Strings(worldIDs)
+		normalizedSelections = append(normalizedSelections, StartCapacitySelection{RoomID: roomID, WorldIDs: worldIDs})
 	}
 	targets := make([]StartCapacityTarget, 0, len(starting))
 	requiresConfirmation := false
@@ -243,9 +279,9 @@ func (s *Service) PreviewStartCapacity(ctx context.Context, roomID string, selec
 		}
 		return strings.ToLower(targets[i].TargetName) < strings.ToLower(targets[j].TargetName)
 	})
-	sort.Strings(worldIDs)
-	return StartCapacityPreview{
-		RoomID: roomID, WorldIDs: worldIDs, Targets: targets, RequiresRiskConfirmation: requiresConfirmation,
+	sort.Slice(normalizedSelections, func(i, j int) bool { return normalizedSelections[i].RoomID < normalizedSelections[j].RoomID })
+	return BatchStartCapacityPreview{
+		Rooms: normalizedSelections, Targets: targets, RequiresRiskConfirmation: requiresConfirmation,
 		Policy: CapacityPolicy{
 			Basis: "physical_cores", ShardsPerPhysicalCore: 1, ReservedPhysicalCores: 1, Enforced: false,
 			Message: "保守建议一颗物理核心最多运行一层世界，并额外为系统和运维任务预留 1 核；超出只告警并要求确认。",

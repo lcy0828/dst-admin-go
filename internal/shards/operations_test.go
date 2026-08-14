@@ -20,6 +20,7 @@ type fakePlacementResolver struct {
 	applied         topology.ExecutionPlacement
 	resolved        topology.ExecutionPlacement
 	preview         topology.StartCapacityPreview
+	batchPreview    topology.BatchStartCapacityPreview
 	err             error
 	previewErr      error
 	appliedByWorld  map[string]topology.ExecutionPlacement
@@ -49,6 +50,10 @@ func (resolver *fakePlacementResolver) ResolveExecution(_ context.Context, _ str
 
 func (resolver *fakePlacementResolver) PreviewStartCapacity(context.Context, string, []string) (topology.StartCapacityPreview, error) {
 	return resolver.preview, resolver.previewErr
+}
+
+func (resolver *fakePlacementResolver) PreviewBatchStartCapacity(context.Context, []topology.StartCapacitySelection) (topology.BatchStartCapacityPreview, error) {
+	return resolver.batchPreview, resolver.previewErr
 }
 
 type fakeRemoteExecutor struct {
@@ -104,6 +109,23 @@ func (service *fakeLeaseService) Release(operationlease.Lease) error {
 type fakeRooms struct {
 	room   rooms.Room
 	worlds []rooms.World
+}
+
+type batchRooms struct {
+	rooms  map[string]rooms.Room
+	worlds map[string][]rooms.World
+}
+
+func (f batchRooms) Room(id string) (rooms.Room, error) {
+	room, exists := f.rooms[id]
+	if !exists {
+		return rooms.Room{}, rooms.ErrRoomNotFound
+	}
+	return room, nil
+}
+
+func (f batchRooms) Worlds(id string) ([]rooms.World, error) {
+	return append([]rooms.World(nil), f.worlds[id]...), nil
 }
 
 type mutableRooms struct {
@@ -572,6 +594,78 @@ func TestRoomPreflightPreventsPartialStartWhenRemoteWorldIsUnavailable(t *testin
 	}
 	if codes[masterID] != "ROOM_PREFLIGHT_ABORTED" || codes[cavesID] == "ROOM_PREFLIGHT_ABORTED" {
 		t.Fatalf("codes = %#v", codes)
+	}
+}
+
+func TestBatchPlanUsesRoomScopedTargetsAndMergedCapacityConfirmation(t *testing.T) {
+	roomAID := rooms.EncodeID("cluster_a")
+	roomBID := rooms.EncodeID("cluster_b")
+	worldID := rooms.EncodeID("Master")
+	catalog := batchRooms{
+		rooms: map[string]rooms.Room{
+			roomAID: {ID: roomAID, DirectoryName: "cluster_a", Name: "房间 A", Managed: true},
+			roomBID: {ID: roomBID, DirectoryName: "cluster_b", Name: "房间 B", Managed: true},
+		},
+		worlds: map[string][]rooms.World{
+			roomAID: {{ID: worldID, RoomID: roomAID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}},
+			roomBID: {{ID: worldID, RoomID: roomBID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}},
+		},
+	}
+	control := &fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}}
+	operations := NewOperations(catalog, control)
+	operations.pollInterval = time.Millisecond
+	operations.startTimeout = 100 * time.Millisecond
+	resolver := &fakePlacementResolver{
+		applied: topology.ExecutionPlacement{AppliedTargetID: "local"},
+		batchPreview: topology.BatchStartCapacityPreview{
+			RequiresRiskConfirmation: true,
+			Targets:                  []topology.StartCapacityTarget{{TargetID: "local", RequiresRiskConfirmation: true}},
+		},
+	}
+	leaseService := &fakeLeaseService{lease: operationlease.Lease{
+		LeaseID: "lease", OperationKey: "operation", FencingToken: 1, ExpiresAt: time.Now().UTC().Add(time.Minute),
+	}}
+	if err := operations.ConfigureDistributed(resolver, &fakeRemoteExecutor{}, leaseService); err != nil {
+		t.Fatal(err)
+	}
+	selections := []BatchRoomSelection{{RoomID: roomAID}, {RoomID: roomBID}}
+	if _, _, err := operations.PlanBatch(ActionStart, []BatchRoomSelection{{RoomID: roomAID}, {RoomID: roomAID}}, BatchPlanOptions{}); !errors.Is(err, ErrInvalidBatch) {
+		t.Fatalf("duplicate room error = %v", err)
+	}
+	err := operations.RequireBatchCapacityConfirmation(context.Background(), ActionStart, selections, false)
+	var risk *BatchCapacityRiskError
+	if !errors.As(err, &risk) || !risk.Preview.RequiresRiskConfirmation {
+		t.Fatalf("risk error = %#v", err)
+	}
+	targets, runner, err := operations.PlanBatch(ActionStart, selections, BatchPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 2 || targets[0].ID == targets[1].ID || targets[0].ID != batchTargetID(roomAID, worldID) {
+		t.Fatalf("targets = %#v", targets)
+	}
+	var results []jobs.TargetResult
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(control.calls) != 0 || len(results) != 2 || results[0].Error == nil || results[0].Error.Code != "CAPACITY_RISK_CONFIRMATION_REQUIRED" {
+		t.Fatalf("unconfirmed batch executed: calls=%v results=%#v", control.calls, results)
+	}
+
+	resolver.batchPreview.RequiresRiskConfirmation = false
+	targets, runner, err = operations.PlanBatch(ActionStart, selections, BatchPlanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results = nil
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(control.calls) != "[start:Master start:Master]" || len(results) != 2 {
+		t.Fatalf("calls=%v results=%#v", control.calls, results)
+	}
+	if results[0].TargetID == results[1].TargetID || results[0].Status != jobs.StatusSucceeded || results[1].Status != jobs.StatusSucceeded {
+		t.Fatalf("results = %#v", results)
 	}
 }
 

@@ -27,6 +27,8 @@ var (
 	ErrUnknownAction  = errors.New("unknown room action")
 	ErrUnsafeName     = errors.New("room or world name cannot be represented safely by tmux")
 	ErrCapacityRisk   = errors.New("shard start requires capacity risk confirmation")
+	ErrNoRooms        = errors.New("no rooms selected")
+	ErrInvalidBatch   = errors.New("batch room selection is invalid")
 	controlName       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 )
 
@@ -91,10 +93,28 @@ type PlanOptions struct {
 	AllowCapacityRisk bool
 }
 
+type BatchRoomSelection struct {
+	RoomID            string
+	WorldIDs          []string
+	AllowCapacityRisk bool
+}
+
+type BatchPlanOptions struct {
+	AllowCapacityRisk bool
+}
+
+type BatchCapacityRiskError struct {
+	Preview topology.BatchStartCapacityPreview
+}
+
+func (e *BatchCapacityRiskError) Error() string { return ErrCapacityRisk.Error() }
+func (e *BatchCapacityRiskError) Unwrap() error { return ErrCapacityRisk }
+
 type executionPlacementResolver interface {
 	AppliedPlacement(string, string) (topology.ExecutionPlacement, error)
 	ResolveExecution(context.Context, string, string) (topology.ExecutionPlacement, error)
 	PreviewStartCapacity(context.Context, string, []string) (topology.StartCapacityPreview, error)
+	PreviewBatchStartCapacity(context.Context, []topology.StartCapacitySelection) (topology.BatchStartCapacityPreview, error)
 }
 
 type remoteShardExecutor interface {
@@ -318,11 +338,126 @@ func (o *Operations) PlanWithOptions(action Action, roomID string, selectedWorld
 	return targets, runner, nil
 }
 
+func (o *Operations) PlanBatch(action Action, selections []BatchRoomSelection, options BatchPlanOptions) ([]jobs.TargetSpec, jobs.Runner, error) {
+	if action != ActionStart && action != ActionStop && action != ActionRestart && action != ActionSave {
+		return nil, nil, ErrUnknownAction
+	}
+	if len(selections) == 0 {
+		return nil, nil, ErrNoRooms
+	}
+	type roomPlan struct {
+		roomID  string
+		worlds  []string
+		targets []jobs.TargetSpec
+		runner  jobs.Runner
+	}
+	riskAllowed := options.AllowCapacityRisk
+	if !riskAllowed {
+		riskAllowed = true
+		for _, selection := range selections {
+			if !selection.AllowCapacityRisk {
+				riskAllowed = false
+				break
+			}
+		}
+	}
+	seenRooms := make(map[string]bool, len(selections))
+	plans := make([]roomPlan, 0, len(selections))
+	batchTargets := make([]jobs.TargetSpec, 0)
+	normalized := make([]BatchRoomSelection, 0, len(selections))
+	for _, selection := range selections {
+		roomID := strings.TrimSpace(selection.RoomID)
+		if roomID == "" || seenRooms[roomID] {
+			return nil, nil, ErrInvalidBatch
+		}
+		seenRooms[roomID] = true
+		room, worlds, err := o.resolvePlan(roomID, selection.WorldIDs)
+		if err != nil {
+			return nil, nil, err
+		}
+		worldIDs := make([]string, 0, len(worlds))
+		for _, world := range worlds {
+			worldIDs = append(worldIDs, world.ID)
+		}
+		targets, runner, err := o.PlanWithOptions(action, roomID, worldIDs, PlanOptions{AllowCapacityRisk: riskAllowed})
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, target := range targets {
+			batchTargets = append(batchTargets, jobs.TargetSpec{
+				ID: batchTargetID(roomID, target.ID), Name: room.Name + " / " + target.Name,
+			})
+		}
+		plans = append(plans, roomPlan{roomID: roomID, worlds: worldIDs, targets: targets, runner: runner})
+		normalized = append(normalized, BatchRoomSelection{RoomID: roomID, WorldIDs: worldIDs, AllowCapacityRisk: selection.AllowCapacityRisk})
+	}
+	runner := func(ctx context.Context, report func(jobs.TargetResult)) error {
+		if action == ActionStop && ctx.Err() == nil {
+			for _, plan := range plans {
+				o.interruptStarts(plan.roomID)
+			}
+		}
+		if action == ActionStart || action == ActionRestart {
+			preview, err := o.PreviewBatchCapacity(ctx, action, normalized)
+			if err != nil {
+				for _, target := range batchTargets {
+					report(jobs.TargetResult{TargetID: target.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: operationErrorCode(action, err), Message: err.Error()}})
+				}
+				return nil
+			}
+			if preview.RequiresRiskConfirmation && !riskAllowed {
+				for _, target := range batchTargets {
+					report(jobs.TargetResult{TargetID: target.ID, Status: jobs.StatusFailed, Error: &jobs.Error{
+						Code: "CAPACITY_RISK_CONFIRMATION_REQUIRED", Message: "批量启动后将超过建议核心容量或节点容量数据未知，请确认卡顿风险",
+					}})
+				}
+				return nil
+			}
+		}
+		for _, plan := range plans {
+			reported := make(map[string]bool, len(plan.targets))
+			err := plan.runner(ctx, func(result jobs.TargetResult) {
+				reported[result.TargetID] = true
+				result.TargetID = batchTargetID(plan.roomID, result.TargetID)
+				report(result)
+			})
+			if err == nil {
+				continue
+			}
+			for _, target := range plan.targets {
+				if reported[target.ID] {
+					continue
+				}
+				report(jobs.TargetResult{TargetID: batchTargetID(plan.roomID, target.ID), Status: jobs.StatusFailed, Error: &jobs.Error{
+					Code: "ROOM_BATCH_FAILED", Message: err.Error(),
+				}})
+			}
+		}
+		return nil
+	}
+	return batchTargets, runner, nil
+}
+
+func batchTargetID(roomID, worldID string) string {
+	return roomID + ":" + worldID
+}
+
 func (o *Operations) PreviewCapacity(ctx context.Context, action Action, roomID string, worldIDs []string) (topology.StartCapacityPreview, error) {
 	if action != ActionStart && action != ActionRestart || o.placements == nil {
 		return topology.StartCapacityPreview{RoomID: roomID, WorldIDs: append([]string(nil), worldIDs...)}, nil
 	}
 	return o.placements.PreviewStartCapacity(ctx, roomID, worldIDs)
+}
+
+func (o *Operations) PreviewBatchCapacity(ctx context.Context, action Action, selections []BatchRoomSelection) (topology.BatchStartCapacityPreview, error) {
+	inputs := make([]topology.StartCapacitySelection, 0, len(selections))
+	for _, selection := range selections {
+		inputs = append(inputs, topology.StartCapacitySelection{RoomID: selection.RoomID, WorldIDs: append([]string(nil), selection.WorldIDs...)})
+	}
+	if action != ActionStart && action != ActionRestart || o.placements == nil {
+		return topology.BatchStartCapacityPreview{Rooms: inputs}, nil
+	}
+	return o.placements.PreviewBatchStartCapacity(ctx, inputs)
 }
 
 func (o *Operations) RequireCapacityConfirmation(ctx context.Context, action Action, roomID string, worldIDs []string, allow bool) error {
@@ -332,6 +467,17 @@ func (o *Operations) RequireCapacityConfirmation(ctx context.Context, action Act
 	}
 	if preview.RequiresRiskConfirmation && !allow {
 		return &CapacityRiskError{Preview: preview}
+	}
+	return nil
+}
+
+func (o *Operations) RequireBatchCapacityConfirmation(ctx context.Context, action Action, selections []BatchRoomSelection, allow bool) error {
+	preview, err := o.PreviewBatchCapacity(ctx, action, selections)
+	if err != nil {
+		return err
+	}
+	if preview.RequiresRiskConfirmation && !allow {
+		return &BatchCapacityRiskError{Preview: preview}
 	}
 	return nil
 }

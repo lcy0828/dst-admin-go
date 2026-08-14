@@ -140,6 +140,18 @@ type StartCapacityPreview struct {
 	Policy                   CapacityPolicy        `json:"policy"`
 }
 
+type StartCapacitySelection struct {
+	RoomID   string   `json:"roomId"`
+	WorldIDs []string `json:"worldIds"`
+}
+
+type BatchStartCapacityPreview struct {
+	Rooms                    []StartCapacitySelection `json:"rooms"`
+	Targets                  []StartCapacityTarget    `json:"targets"`
+	RequiresRiskConfirmation bool                     `json:"requiresRiskConfirmation"`
+	Policy                   CapacityPolicy           `json:"policy"`
+}
+
 type Snapshot struct {
 	RoomID                         string          `json:"roomId"`
 	Revision                       string          `json:"revision"`

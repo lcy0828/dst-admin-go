@@ -222,6 +222,61 @@ func TestPreviewStartCapacityRequiresConfirmationForOvercommitOrUnknownCapacity(
 	})
 }
 
+func TestPreviewBatchStartCapacityMergesConcurrentRoomsBeforeCapacityDecision(t *testing.T) {
+	now := time.Now().UTC()
+	roomA := rooms.Room{ID: "room-a", DirectoryName: "Cluster_A", Name: "A", Managed: true}
+	roomB := rooms.Room{ID: "room-b", DirectoryName: "Cluster_B", Name: "B", Managed: true}
+	masterA := rooms.World{ID: "master-a", RoomID: roomA.ID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}
+	cavesA := rooms.World{ID: "caves-a", RoomID: roomA.ID, DirectoryName: "Caves", Name: "洞穴", Role: rooms.WorldRoleCaves}
+	masterB := rooms.World{ID: "master-b", RoomID: roomB.ID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}
+	catalog := topologyRoomCatalog{
+		rooms: []rooms.Room{roomA, roomB},
+		worlds: map[string][]rooms.World{
+			roomA.ID: {masterA, cavesA},
+			roomB.ID: {masterB},
+		},
+	}
+	local := runtimeInventory(
+		agents.RuntimeTarget{ID: localTargetID, Name: "本机", Kind: agents.RuntimeKindLocal, Status: agents.RuntimeStatusReady, Online: true, Configured: true},
+		3, 3,
+		[]shared.RoomInventoryReport{inventoryRoom("Cluster_A", "Master", "Caves"), inventoryRoom("Cluster_B", "Master")},
+		nil, now,
+	)
+	service, err := NewService(catalog, topologyTargetCatalog{items: []agents.RuntimeTargetInventory{local}}, newTopologyTestStore(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomAPreview, err := service.PreviewStartCapacity(context.Background(), roomA.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomBPreview, err := service.PreviewStartCapacity(context.Background(), roomB.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roomAPreview.RequiresRiskConfirmation || roomBPreview.RequiresRiskConfirmation {
+		t.Fatalf("individual previews unexpectedly required confirmation: A=%#v B=%#v", roomAPreview, roomBPreview)
+	}
+	batch, err := service.PreviewBatchStartCapacity(context.Background(), []StartCapacitySelection{
+		{RoomID: roomA.ID},
+		{RoomID: roomB.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Targets) != 1 || batch.Targets[0].CurrentRunningShards != 0 ||
+		batch.Targets[0].StartingShards != 3 || batch.Targets[0].ProjectedRunningShards != 3 ||
+		batch.Targets[0].Capacity.State != agents.CapacityOvercommitted || !batch.RequiresRiskConfirmation {
+		t.Fatalf("batch preview = %#v", batch)
+	}
+	if len(batch.Rooms) != 2 || len(batch.Rooms[0].WorldIDs) != 2 || len(batch.Rooms[1].WorldIDs) != 1 {
+		t.Fatalf("normalized rooms = %#v", batch.Rooms)
+	}
+	if _, err := service.PreviewBatchStartCapacity(context.Background(), []StartCapacitySelection{{RoomID: roomA.ID}, {RoomID: roomA.ID}}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("duplicate room error = %v", err)
+	}
+}
+
 func TestTopologyReportsDuplicateRuntimeAndValidatesCompletePlacement(t *testing.T) {
 	now := time.Now().UTC()
 	room := rooms.Room{ID: "room", DirectoryName: "Cluster", Name: "Room", Managed: true}

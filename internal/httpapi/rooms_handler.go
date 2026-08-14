@@ -34,6 +34,7 @@ func (h *RoomHandler) Register(v2 *gin.RouterGroup) {
 	group := v2.Group("/rooms")
 	group.GET("", h.list)
 	group.POST("", h.create)
+	group.POST("/actions/:action", h.batchAction)
 	group.GET("/recovery", h.roomRecoveries)
 	group.POST("/recovery/:recoveryName/actions/restore", h.restoreRoom)
 	group.DELETE("/recovery/:recoveryName", h.purgeRoomRecovery)
@@ -283,6 +284,17 @@ type roomActionRequest struct {
 	AllowCapacityRisk bool     `json:"allowCapacityRisk"`
 }
 
+type batchRoomActionSelection struct {
+	RoomID            string   `json:"roomId"`
+	WorldIDs          []string `json:"worldIds"`
+	AllowCapacityRisk bool     `json:"allowCapacityRisk"`
+}
+
+type batchRoomActionRequest struct {
+	Rooms             []batchRoomActionSelection `json:"rooms"`
+	AllowCapacityRisk bool                       `json:"allowCapacityRisk"`
+}
+
 func (h *RoomHandler) action(c *gin.Context) {
 	action := shards.Action(strings.ToLower(strings.TrimSpace(c.Param("action"))))
 	var request roomActionRequest
@@ -332,14 +344,75 @@ func (h *RoomHandler) action(c *gin.Context) {
 	Success(c, http.StatusAccepted, job)
 }
 
+func (h *RoomHandler) batchAction(c *gin.Context) {
+	action := shards.Action(strings.ToLower(strings.TrimSpace(c.Param("action"))))
+	var request batchRoomActionRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的批量操作配置", nil)
+		return
+	}
+	selections := make([]shards.BatchRoomSelection, 0, len(request.Rooms))
+	allowCapacityRisk := request.AllowCapacityRisk
+	if !allowCapacityRisk && len(request.Rooms) > 0 {
+		allowCapacityRisk = true
+		for _, room := range request.Rooms {
+			if !room.AllowCapacityRisk {
+				allowCapacityRisk = false
+				break
+			}
+		}
+	}
+	for _, room := range request.Rooms {
+		selections = append(selections, shards.BatchRoomSelection{
+			RoomID: room.RoomID, WorldIDs: room.WorldIDs, AllowCapacityRisk: room.AllowCapacityRisk,
+		})
+	}
+	targets, runner, err := h.operations.PlanBatch(action, selections, shards.BatchPlanOptions{AllowCapacityRisk: allowCapacityRisk})
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	if err := h.operations.RequireBatchCapacityConfirmation(c.Request.Context(), action, selections, allowCapacityRisk); err != nil {
+		roomFailure(c, err)
+		return
+	}
+	requestID := RequestID(c)
+	job, err := h.jobs.SubmitFactory("rooms."+string(action), "", "", targets, func(job jobs.Job) jobs.Runner {
+		return func(ctx context.Context, report func(jobs.TargetResult)) error {
+			if h.audit != nil {
+				for _, selection := range selections {
+					if auditErr := h.audit.RecordAction(runtimeaudit.ActionRequest{
+						RoomID: selection.RoomID, WorldIDs: selection.WorldIDs, Action: string(action), Source: runtimeaudit.SourceAPI,
+						JobID: job.ID, RequestID: requestID,
+					}); auditErr != nil {
+						log.Printf("[RuntimeAudit] record batch API action room=%s action=%s: %v", selection.RoomID, action, auditErr)
+					}
+				}
+			}
+			ctx = shards.WithOperationAudit(ctx, shards.OperationAuditMetadata{
+				JobID: job.ID, RequestID: requestID, Source: string(runtimeaudit.SourceAPI),
+			})
+			return runner(ctx, report)
+		}
+	})
+	if err != nil {
+		Failure(c, http.StatusInternalServerError, "JOB_CREATE_FAILED", "无法创建批量运行任务", nil)
+		return
+	}
+	Success(c, http.StatusAccepted, job)
+}
+
 func roomFailure(c *gin.Context, err error) {
 	var validation *rooms.ValidationError
 	var capacityRisk *shards.CapacityRiskError
+	var batchCapacityRisk *shards.BatchCapacityRiskError
 	switch {
 	case errors.As(err, &validation):
 		Failure(c, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "房间配置校验失败", validation.Fields)
 	case errors.As(err, &capacityRisk):
 		Failure(c, http.StatusUnprocessableEntity, "CAPACITY_RISK_CONFIRMATION_REQUIRED", "启动后可能超过建议核心容量，请确认卡顿风险", capacityRisk.Preview)
+	case errors.As(err, &batchCapacityRisk):
+		Failure(c, http.StatusUnprocessableEntity, "CAPACITY_RISK_CONFIRMATION_REQUIRED", "批量启动后可能超过建议核心容量，请确认卡顿风险", batchCapacityRisk.Preview)
 	case errors.Is(err, rooms.ErrInvalidID), errors.Is(err, rooms.ErrUnsafePath):
 		Failure(c, http.StatusBadRequest, "INVALID_RESOURCE_ID", "房间或世界标识无效", nil)
 	case errors.Is(err, rooms.ErrRoomNotFound), errors.Is(err, rooms.ErrWorldNotFound):
@@ -364,6 +437,10 @@ func roomFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "请先接管房间再执行操作", nil)
 	case errors.Is(err, shards.ErrNoWorlds):
 		Failure(c, http.StatusUnprocessableEntity, "NO_WORLDS", "房间中没有可控制的世界", nil)
+	case errors.Is(err, shards.ErrNoRooms):
+		Failure(c, http.StatusUnprocessableEntity, "NO_ROOMS", "请至少选择一个房间", nil)
+	case errors.Is(err, shards.ErrInvalidBatch):
+		Failure(c, http.StatusUnprocessableEntity, "INVALID_BATCH_SELECTION", "批量操作中的房间不能为空或重复", nil)
 	case errors.Is(err, shards.ErrUnknownAction):
 		Failure(c, http.StatusNotFound, "ACTION_NOT_FOUND", "不支持该房间操作", nil)
 	case errors.Is(err, shards.ErrUnsafeName):
