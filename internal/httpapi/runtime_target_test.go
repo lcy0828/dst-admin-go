@@ -14,6 +14,7 @@ func TestRuntimeTargetBoundaryKeepsLocalDefaultAndBlocksRemoteFallthrough(t *tes
 	router := gin.New()
 	router.Use(RequestContext(), RuntimeTargetBoundary())
 	router.GET("/api/v2/rooms", func(c *gin.Context) { Success(c, http.StatusOK, gin.H{"source": "local"}) })
+	router.GET("/api/v2/rooms/room-one/topology", func(c *gin.Context) { Success(c, http.StatusOK, gin.H{"source": "topology"}) })
 	router.GET("/api/v2/runtime-targets", func(c *gin.Context) { Success(c, http.StatusOK, gin.H{"source": "targets"}) })
 
 	request := httptest.NewRequest(http.MethodGet, "/api/v2/rooms", nil)
@@ -31,6 +32,12 @@ func TestRuntimeTargetBoundaryKeepsLocalDefaultAndBlocksRemoteFallthrough(t *tes
 	}
 
 	request = httptest.NewRequest(http.MethodGet, "/api/v2/runtime-targets", nil)
+	request.Header.Set(RuntimeTargetHeader, "agent:node-one")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	assertStatus(t, response, http.StatusOK)
+
+	request = httptest.NewRequest(http.MethodGet, "/api/v2/rooms/room-one/topology", nil)
 	request.Header.Set(RuntimeTargetHeader, "agent:node-one")
 	response = httptest.NewRecorder()
 	router.ServeHTTP(response, request)

@@ -37,7 +37,21 @@ func RuntimeTargetBoundary() gin.HandlerFunc {
 				return
 			}
 		}
+		if isTopologyControlPath(c.Request.URL.Path) {
+			c.Next()
+			return
+		}
 		Failure(c, http.StatusConflict, "REMOTE_RUNTIME_ACTION_UNAVAILABLE", "所选远程节点尚未开放此领域操作", map[string]string{"targetId": targetID})
 		c.Abort()
 	}
+}
+
+func isTopologyControlPath(value string) bool {
+	if !strings.HasPrefix(value, "/api/v2/rooms/") {
+		return false
+	}
+	relative := strings.Trim(strings.TrimPrefix(value, "/api/v2/rooms/"), "/")
+	parts := strings.Split(relative, "/")
+	return (len(parts) == 2 && parts[1] == "topology") ||
+		(len(parts) == 3 && parts[1] == "topology" && parts[2] == "preview")
 }
