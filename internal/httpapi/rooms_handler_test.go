@@ -11,6 +11,7 @@ import (
 	"dont/internal/jobs"
 	"dont/internal/rooms"
 	"dont/internal/shards"
+	"dont/internal/topology"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/gorm"
@@ -248,4 +249,33 @@ func TestRoomAndShardJobHTTPFlow(t *testing.T) {
 
 	response = performJSON(router, http.MethodGet, "/api/v2/rooms/not-base64", nil, nil, "")
 	assertStatus(t, response, http.StatusBadRequest)
+}
+
+func TestRoomFailureReturnsCapacityRiskPreview(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/capacity-risk", func(c *gin.Context) {
+		roomFailure(c, &shards.CapacityRiskError{Preview: topology.StartCapacityPreview{
+			RoomID: "room", WorldIDs: []string{"master"}, RequiresRiskConfirmation: true,
+			Targets: []topology.StartCapacityTarget{{
+				TargetID: "local", TargetName: "本机", CurrentRunningShards: 2,
+				StartingShards: 1, ProjectedRunningShards: 3, RequiresRiskConfirmation: true,
+			}},
+		}})
+	})
+	response := performJSON(router, http.MethodPost, "/capacity-risk", map[string]interface{}{}, nil, "")
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+	var envelope struct {
+		Error struct {
+			Code    string                        `json:"code"`
+			Details topology.StartCapacityPreview `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error.Code != "CAPACITY_RISK_CONFIRMATION_REQUIRED" ||
+		!envelope.Error.Details.RequiresRiskConfirmation || len(envelope.Error.Details.Targets) != 1 {
+		t.Fatalf("response = %s", response.Body.String())
+	}
 }

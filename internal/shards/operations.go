@@ -26,6 +26,7 @@ var (
 	ErrNoWorlds       = errors.New("room has no controllable worlds")
 	ErrUnknownAction  = errors.New("unknown room action")
 	ErrUnsafeName     = errors.New("room or world name cannot be represented safely by tmux")
+	ErrCapacityRisk   = errors.New("shard start requires capacity risk confirmation")
 	controlName       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 )
 
@@ -79,9 +80,21 @@ type RuntimePreparer interface {
 	Prepare(context.Context, string, string) error
 }
 
+type CapacityRiskError struct {
+	Preview topology.StartCapacityPreview
+}
+
+func (e *CapacityRiskError) Error() string { return ErrCapacityRisk.Error() }
+func (e *CapacityRiskError) Unwrap() error { return ErrCapacityRisk }
+
+type PlanOptions struct {
+	AllowCapacityRisk bool
+}
+
 type executionPlacementResolver interface {
 	AppliedPlacement(string, string) (topology.ExecutionPlacement, error)
 	ResolveExecution(context.Context, string, string) (topology.ExecutionPlacement, error)
+	PreviewStartCapacity(context.Context, string, []string) (topology.StartCapacityPreview, error)
 }
 
 type remoteShardExecutor interface {
@@ -168,6 +181,10 @@ func (o *Operations) ConfigureDistributed(placements executionPlacementResolver,
 }
 
 func (o *Operations) Plan(action Action, roomID string, selectedWorldIDs []string) ([]jobs.TargetSpec, jobs.Runner, error) {
+	return o.PlanWithOptions(action, roomID, selectedWorldIDs, PlanOptions{AllowCapacityRisk: true})
+}
+
+func (o *Operations) PlanWithOptions(action Action, roomID string, selectedWorldIDs []string, options PlanOptions) ([]jobs.TargetSpec, jobs.Runner, error) {
 	if action != ActionStart && action != ActionStop && action != ActionRestart && action != ActionSave && action != ActionCleanup {
 		return nil, nil, ErrUnknownAction
 	}
@@ -246,6 +263,31 @@ func (o *Operations) Plan(action Action, roomID string, selectedWorldIDs []strin
 			return nil
 		}
 		orderWorlds(currentWorlds, action)
+		if action == ActionStart || action == ActionRestart {
+			preview, previewErr := o.PreviewCapacity(ctx, action, room.ID, plannedWorldIDs)
+			if previewErr != nil {
+				for _, world := range currentWorlds {
+					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: operationErrorCode(action, previewErr), Message: previewErr.Error()}})
+				}
+				return nil
+			}
+			if preview.RequiresRiskConfirmation && !options.AllowCapacityRisk {
+				for _, world := range currentWorlds {
+					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "CAPACITY_RISK_CONFIRMATION_REQUIRED", Message: "启动后将超过建议核心容量或节点容量数据未知，请确认卡顿风险"}})
+				}
+				return nil
+			}
+		}
+		if failures := o.preflightTargets(ctx, action, currentRoom, currentWorlds); len(failures) > 0 {
+			for _, world := range currentWorlds {
+				if failure := failures[world.ID]; failure != nil {
+					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: operationErrorCode(action, failure), Message: failure.Error()}})
+				} else {
+					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "ROOM_PREFLIGHT_ABORTED", Message: "房间内其他世界未通过执行预检，本次未操作任何世界"}})
+				}
+			}
+			return nil
+		}
 		for _, world := range currentWorlds {
 			if err := ctx.Err(); err != nil {
 				report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusCanceled, Error: &jobs.Error{Code: "JOB_CANCELED", Message: "任务已取消"}})
@@ -274,6 +316,57 @@ func (o *Operations) Plan(action Action, roomID string, selectedWorldIDs []strin
 		return nil
 	}
 	return targets, runner, nil
+}
+
+func (o *Operations) PreviewCapacity(ctx context.Context, action Action, roomID string, worldIDs []string) (topology.StartCapacityPreview, error) {
+	if action != ActionStart && action != ActionRestart || o.placements == nil {
+		return topology.StartCapacityPreview{RoomID: roomID, WorldIDs: append([]string(nil), worldIDs...)}, nil
+	}
+	return o.placements.PreviewStartCapacity(ctx, roomID, worldIDs)
+}
+
+func (o *Operations) RequireCapacityConfirmation(ctx context.Context, action Action, roomID string, worldIDs []string, allow bool) error {
+	preview, err := o.PreviewCapacity(ctx, action, roomID, worldIDs)
+	if err != nil {
+		return err
+	}
+	if preview.RequiresRiskConfirmation && !allow {
+		return &CapacityRiskError{Preview: preview}
+	}
+	return nil
+}
+
+func (o *Operations) preflightTargets(ctx context.Context, action Action, room rooms.Room, worlds []rooms.World) map[string]error {
+	if o.placements == nil {
+		return nil
+	}
+	failures := make(map[string]error)
+	for _, world := range worlds {
+		applied, err := o.placements.AppliedPlacement(room.ID, world.ID)
+		if err != nil {
+			failures[world.ID] = err
+			continue
+		}
+		if applied.AppliedTargetID != "local" {
+			if action == ActionCleanup {
+				failures[world.ID] = errors.New("远程节点不开放强制清理")
+				continue
+			}
+			if _, err := o.placements.ResolveExecution(ctx, room.ID, world.ID); err != nil {
+				failures[world.ID] = err
+				continue
+			}
+		}
+		status, err := o.StatusFor(ctx, room.ID, world.ID)
+		if err != nil {
+			failures[world.ID] = err
+			continue
+		}
+		if action == ActionSave && status.State != RuntimeRunning {
+			failures[world.ID] = errors.New("分片未运行，无法保存")
+		}
+	}
+	return failures
 }
 
 func (o *Operations) currentStopEpoch(roomID string) uint64 {

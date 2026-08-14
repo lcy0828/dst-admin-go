@@ -181,6 +181,116 @@ func (s *Service) AppliedPlacement(roomID, worldID string) (ExecutionPlacement, 
 	}, nil
 }
 
+func (s *Service) PreviewStartCapacity(ctx context.Context, roomID string, selectedWorldIDs []string) (StartCapacityPreview, error) {
+	result, err := s.plan(ctx, roomID, nil)
+	if err != nil {
+		return StartCapacityPreview{}, err
+	}
+	selected := result.plans[roomID]
+	worlds, err := selectCapacityWorlds(selected.worlds, selectedWorldIDs)
+	if err != nil {
+		return StartCapacityPreview{}, err
+	}
+	inventories := make(map[string]agents.RuntimeTargetInventory, len(result.inventories))
+	for _, inventory := range result.inventories {
+		inventories[inventory.Target.ID] = inventory
+	}
+	placements := placementsByWorld(selected.record.Placements)
+	starting := make(map[string]int)
+	worldIDs := make([]string, 0, len(worlds))
+	for _, world := range worlds {
+		worldIDs = append(worldIDs, world.ID)
+		placement, exists := placements[world.ID]
+		if !exists {
+			return StartCapacityPreview{}, executionBlocked("APPLIED_TARGET_MISSING", "世界没有已生效的运行目标")
+		}
+		starting[placement.AppliedTargetID] += 0
+		inventory, available := inventories[placement.AppliedTargetID]
+		if !available || !currentlyRunning(inventory, selected.room.DirectoryName, world.DirectoryName) {
+			starting[placement.AppliedTargetID]++
+		}
+	}
+	targets := make([]StartCapacityTarget, 0, len(starting))
+	requiresConfirmation := false
+	for targetID, startingShards := range starting {
+		inventory, exists := inventories[targetID]
+		current := 0
+		stale := true
+		name := targetID
+		if exists {
+			name = inventory.Target.Name
+			current = len(inventory.Inventory.Processes)
+			stale = !inventory.Available || inventory.Stale || !inventory.Target.Online
+		}
+		projected := current + startingShards
+		capacity := agents.CapacityFor(
+			inventory.Inventory.CPU.LogicalProcessors, inventory.Inventory.CPU.PhysicalCores,
+			inventory.Inventory.CPU.PhysicalCoreEstimated, projected, stale,
+		)
+		requiresRisk := capacity.State == agents.CapacityOvercommitted || capacity.State == agents.CapacityUnknown
+		requiresConfirmation = requiresConfirmation || requiresRisk
+		targets = append(targets, StartCapacityTarget{
+			TargetID: targetID, TargetName: name, CurrentRunningShards: current, StartingShards: startingShards,
+			ProjectedRunningShards: projected, Capacity: capacity, RequiresRiskConfirmation: requiresRisk,
+		})
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].TargetID == localTargetID {
+			return true
+		}
+		if targets[j].TargetID == localTargetID {
+			return false
+		}
+		return strings.ToLower(targets[i].TargetName) < strings.ToLower(targets[j].TargetName)
+	})
+	sort.Strings(worldIDs)
+	return StartCapacityPreview{
+		RoomID: roomID, WorldIDs: worldIDs, Targets: targets, RequiresRiskConfirmation: requiresConfirmation,
+		Policy: CapacityPolicy{
+			Basis: "physical_cores", ShardsPerPhysicalCore: 1, ReservedPhysicalCores: 1, Enforced: false,
+			Message: "保守建议一颗物理核心最多运行一层世界，并额外为系统和运维任务预留 1 核；超出只告警并要求确认。",
+		},
+	}, nil
+}
+
+func selectCapacityWorlds(worlds []rooms.World, selected []string) ([]rooms.World, error) {
+	if len(selected) == 0 {
+		return append([]rooms.World(nil), worlds...), nil
+	}
+	wanted := make(map[string]bool, len(selected))
+	for _, worldID := range selected {
+		worldID = strings.TrimSpace(worldID)
+		if worldID == "" || wanted[worldID] {
+			return nil, ErrInvalidInput
+		}
+		wanted[worldID] = true
+	}
+	result := make([]rooms.World, 0, len(wanted))
+	for _, world := range worlds {
+		if wanted[world.ID] {
+			result = append(result, world)
+			delete(wanted, world.ID)
+		}
+	}
+	if len(wanted) > 0 {
+		return nil, rooms.ErrWorldNotFound
+	}
+	return result, nil
+}
+
+func currentlyRunning(inventory agents.RuntimeTargetInventory, cluster, shard string) bool {
+	if !inventory.Available || inventory.Stale || !inventory.Target.Online {
+		return false
+	}
+	identity := identityFor(cluster, shard)
+	for _, process := range inventory.Inventory.Processes {
+		if identityFor(process.Cluster, process.Shard) == identity {
+			return true
+		}
+	}
+	return false
+}
+
 func executionBlocked(code, message string) error {
 	return &ExecutionError{Code: code, Message: message}
 }

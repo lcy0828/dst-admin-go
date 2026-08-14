@@ -122,6 +122,24 @@ type CapacityPolicy struct {
 	Message               string `json:"message"`
 }
 
+type StartCapacityTarget struct {
+	TargetID                 string          `json:"targetId"`
+	TargetName               string          `json:"targetName"`
+	CurrentRunningShards     int             `json:"currentRunningShards"`
+	StartingShards           int             `json:"startingShards"`
+	ProjectedRunningShards   int             `json:"projectedRunningShards"`
+	Capacity                 agents.Capacity `json:"capacity"`
+	RequiresRiskConfirmation bool            `json:"requiresRiskConfirmation"`
+}
+
+type StartCapacityPreview struct {
+	RoomID                   string                `json:"roomId"`
+	WorldIDs                 []string              `json:"worldIds"`
+	Targets                  []StartCapacityTarget `json:"targets"`
+	RequiresRiskConfirmation bool                  `json:"requiresRiskConfirmation"`
+	Policy                   CapacityPolicy        `json:"policy"`
+}
+
 type Snapshot struct {
 	RoomID                         string          `json:"roomId"`
 	Revision                       string          `json:"revision"`

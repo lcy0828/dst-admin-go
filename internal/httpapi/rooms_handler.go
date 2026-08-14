@@ -279,7 +279,8 @@ func (h *RoomHandler) worldsList(c *gin.Context) {
 }
 
 type roomActionRequest struct {
-	WorldIDs []string `json:"worldIds"`
+	WorldIDs          []string `json:"worldIds"`
+	AllowCapacityRisk bool     `json:"allowCapacityRisk"`
 }
 
 func (h *RoomHandler) action(c *gin.Context) {
@@ -291,7 +292,14 @@ func (h *RoomHandler) action(c *gin.Context) {
 			return
 		}
 	}
-	targets, runner, err := h.operations.Plan(action, c.Param("roomId"), request.WorldIDs)
+	roomID := c.Param("roomId")
+	if err := h.operations.RequireCapacityConfirmation(c.Request.Context(), action, roomID, request.WorldIDs, request.AllowCapacityRisk); err != nil {
+		roomFailure(c, err)
+		return
+	}
+	targets, runner, err := h.operations.PlanWithOptions(action, roomID, request.WorldIDs, shards.PlanOptions{
+		AllowCapacityRisk: request.AllowCapacityRisk,
+	})
 	if err != nil {
 		roomFailure(c, err)
 		return
@@ -301,7 +309,6 @@ func (h *RoomHandler) action(c *gin.Context) {
 		worldID = request.WorldIDs[0]
 	}
 	requestID := RequestID(c)
-	roomID := c.Param("roomId")
 	job, err := h.jobs.SubmitFactory("room."+string(action), roomID, worldID, targets, func(job jobs.Job) jobs.Runner {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
 			if h.audit != nil {
@@ -327,9 +334,12 @@ func (h *RoomHandler) action(c *gin.Context) {
 
 func roomFailure(c *gin.Context, err error) {
 	var validation *rooms.ValidationError
+	var capacityRisk *shards.CapacityRiskError
 	switch {
 	case errors.As(err, &validation):
 		Failure(c, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "房间配置校验失败", validation.Fields)
+	case errors.As(err, &capacityRisk):
+		Failure(c, http.StatusUnprocessableEntity, "CAPACITY_RISK_CONFIRMATION_REQUIRED", "启动后可能超过建议核心容量，请确认卡顿风险", capacityRisk.Preview)
 	case errors.Is(err, rooms.ErrInvalidID), errors.Is(err, rooms.ErrUnsafePath):
 		Failure(c, http.StatusBadRequest, "INVALID_RESOURCE_ID", "房间或世界标识无效", nil)
 	case errors.Is(err, rooms.ErrRoomNotFound), errors.Is(err, rooms.ErrWorldNotFound):

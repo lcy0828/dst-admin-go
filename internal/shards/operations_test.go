@@ -17,17 +17,38 @@ import (
 )
 
 type fakePlacementResolver struct {
-	applied  topology.ExecutionPlacement
-	resolved topology.ExecutionPlacement
-	err      error
+	applied         topology.ExecutionPlacement
+	resolved        topology.ExecutionPlacement
+	preview         topology.StartCapacityPreview
+	err             error
+	previewErr      error
+	appliedByWorld  map[string]topology.ExecutionPlacement
+	resolvedByWorld map[string]topology.ExecutionPlacement
+	errByWorld      map[string]error
 }
 
-func (resolver *fakePlacementResolver) AppliedPlacement(string, string) (topology.ExecutionPlacement, error) {
+func (resolver *fakePlacementResolver) AppliedPlacement(_ string, worldID string) (topology.ExecutionPlacement, error) {
+	if err := resolver.errByWorld[worldID]; err != nil {
+		return topology.ExecutionPlacement{}, err
+	}
+	if value, exists := resolver.appliedByWorld[worldID]; exists {
+		return value, nil
+	}
 	return resolver.applied, resolver.err
 }
 
-func (resolver *fakePlacementResolver) ResolveExecution(context.Context, string, string) (topology.ExecutionPlacement, error) {
+func (resolver *fakePlacementResolver) ResolveExecution(_ context.Context, _ string, worldID string) (topology.ExecutionPlacement, error) {
+	if err := resolver.errByWorld[worldID]; err != nil {
+		return topology.ExecutionPlacement{}, err
+	}
+	if value, exists := resolver.resolvedByWorld[worldID]; exists {
+		return value, nil
+	}
 	return resolver.resolved, resolver.err
+}
+
+func (resolver *fakePlacementResolver) PreviewStartCapacity(context.Context, string, []string) (topology.StartCapacityPreview, error) {
+	return resolver.preview, resolver.previewErr
 }
 
 type fakeRemoteExecutor struct {
@@ -479,6 +500,81 @@ func TestRunnerRejectsWorldPlanChangedWhileWaiting(t *testing.T) {
 	}
 }
 
+func TestCapacityRiskRequiresExplicitConfirmation(t *testing.T) {
+	operations := testOperations(&fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}})
+	resolver := &fakePlacementResolver{
+		applied: topology.ExecutionPlacement{AppliedTargetID: "local"},
+		preview: topology.StartCapacityPreview{
+			RoomID: rooms.EncodeID("summer_2026"), RequiresRiskConfirmation: true,
+			Targets: []topology.StartCapacityTarget{{TargetID: "local", RequiresRiskConfirmation: true}},
+		},
+	}
+	if err := operations.ConfigureDistributed(resolver, &fakeRemoteExecutor{}, &fakeLeaseService{}); err != nil {
+		t.Fatal(err)
+	}
+	worldIDs := []string{rooms.EncodeID("Master"), rooms.EncodeID("Caves")}
+	err := operations.RequireCapacityConfirmation(context.Background(), ActionStart, rooms.EncodeID("summer_2026"), worldIDs, false)
+	var risk *CapacityRiskError
+	if !errors.As(err, &risk) || !risk.Preview.RequiresRiskConfirmation || len(risk.Preview.Targets) != 1 {
+		t.Fatalf("risk error = %#v", err)
+	}
+	if err := operations.RequireCapacityConfirmation(context.Background(), ActionStart, rooms.EncodeID("summer_2026"), worldIDs, true); err != nil {
+		t.Fatalf("confirmed risk was rejected: %v", err)
+	}
+	if err := operations.RequireCapacityConfirmation(context.Background(), ActionStop, rooms.EncodeID("summer_2026"), worldIDs, false); err != nil {
+		t.Fatalf("stop should not require capacity confirmation: %v", err)
+	}
+}
+
+func TestRoomPreflightPreventsPartialStartWhenRemoteWorldIsUnavailable(t *testing.T) {
+	roomID := rooms.EncodeID("summer_2026")
+	masterID := rooms.EncodeID("Master")
+	cavesID := rooms.EncodeID("Caves")
+	control := &fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}}
+	operations := testOperations(control)
+	resolver := &fakePlacementResolver{
+		appliedByWorld: map[string]topology.ExecutionPlacement{
+			masterID: {AppliedTargetID: "local"},
+			cavesID:  {AppliedTargetID: "agent:node-a"},
+		},
+		resolvedByWorld: map[string]topology.ExecutionPlacement{
+			cavesID: {AppliedTargetID: "agent:node-a"},
+		},
+		errByWorld: map[string]error{cavesID: errors.New("Agent 已离线")},
+	}
+	remote := &fakeRemoteExecutor{}
+	if err := operations.ConfigureDistributed(resolver, remote, &fakeLeaseService{lease: operationlease.Lease{
+		RoomID: roomID, LeaseID: "lease", OperationKey: "operation", FencingToken: 1,
+		ExpiresAt: time.Now().UTC().Add(time.Minute),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	_, runner, err := operations.Plan(ActionStart, roomID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []jobs.TargetResult
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(control.calls) != 0 || remote.calls != 0 {
+		t.Fatalf("preflight allowed partial execution: local=%v remote=%d", control.calls, remote.calls)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %#v", results)
+	}
+	codes := map[string]string{}
+	for _, result := range results {
+		if result.Error == nil {
+			t.Fatalf("result = %#v", result)
+		}
+		codes[result.TargetID] = result.Error.Code
+	}
+	if codes[masterID] != "ROOM_PREFLIGHT_ABORTED" || codes[cavesID] == "ROOM_PREFLIGHT_ABORTED" {
+		t.Fatalf("codes = %#v", codes)
+	}
+}
+
 func TestDistributedOperationUsesAppliedRemoteTargetWithLeaseAndNoLocalFallback(t *testing.T) {
 	control := &fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}}
 	operations := testOperations(control)
@@ -506,7 +602,7 @@ func TestDistributedOperationUsesAppliedRemoteTargetWithLeaseAndNoLocalFallback(
 	if err := runner(runnerContext, func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Status != jobs.StatusSucceeded || remote.calls != 1 || remote.targetID != "agent:node-a" {
+	if len(results) != 1 || results[0].Status != jobs.StatusSucceeded || remote.calls != 2 || remote.targetID != "agent:node-a" {
 		t.Fatalf("results=%#v remote=%#v", results, remote)
 	}
 	if remote.request.Action != shared.ShardActionStart || remote.request.FencingToken != 7 || remote.request.LeaseID != "lease-1" || remote.request.OperationKey == "" {

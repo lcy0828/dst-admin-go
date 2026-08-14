@@ -106,6 +106,122 @@ func TestTopologyAggregatesRoomsAndRequiresExplicitOvercommit(t *testing.T) {
 	}
 }
 
+func TestPreviewStartCapacityCountsRunningShardsAcrossRooms(t *testing.T) {
+	now := time.Now().UTC()
+	roomA := rooms.Room{ID: "room-a", DirectoryName: "Cluster_A", Name: "A", Managed: true}
+	roomB := rooms.Room{ID: "room-b", DirectoryName: "Cluster_B", Name: "B", Managed: true}
+	masterA := rooms.World{ID: "master-a", RoomID: roomA.ID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}
+	cavesA := rooms.World{ID: "caves-a", RoomID: roomA.ID, DirectoryName: "Caves", Name: "洞穴", Role: rooms.WorldRoleCaves}
+	masterB := rooms.World{ID: "master-b", RoomID: roomB.ID, DirectoryName: "Master", Name: "另一房间地表", Role: rooms.WorldRoleMaster}
+	catalog := topologyRoomCatalog{
+		rooms: []rooms.Room{roomA, roomB},
+		worlds: map[string][]rooms.World{
+			roomA.ID: {masterA, cavesA},
+			roomB.ID: {masterB},
+		},
+	}
+	local := runtimeInventory(
+		agents.RuntimeTarget{ID: localTargetID, Name: "本机", Kind: agents.RuntimeKindLocal, Status: agents.RuntimeStatusReady, Online: true, Configured: true},
+		4, 4,
+		[]shared.RoomInventoryReport{inventoryRoom("Cluster_A", "Master", "Caves"), inventoryRoom("Cluster_B", "Master")},
+		[]shared.ShardProcessReport{{PID: 101, Cluster: "Cluster_B", Shard: "Master"}}, now,
+	)
+	service, err := NewService(catalog, topologyTargetCatalog{items: []agents.RuntimeTargetInventory{local}}, newTopologyTestStore(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := service.PreviewStartCapacity(context.Background(), roomA.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Targets) != 1 {
+		t.Fatalf("targets = %#v", preview.Targets)
+	}
+	target := preview.Targets[0]
+	if target.CurrentRunningShards != 1 || target.StartingShards != 2 || target.ProjectedRunningShards != 3 {
+		t.Fatalf("target = %#v", target)
+	}
+	if target.Capacity.State != agents.CapacityFull || preview.RequiresRiskConfirmation {
+		t.Fatalf("full capacity should be allowed without risk confirmation: %#v", preview)
+	}
+	if preview.Policy.ShardsPerPhysicalCore != 1 || preview.Policy.ReservedPhysicalCores != 1 || preview.Policy.Enforced {
+		t.Fatalf("policy = %#v", preview.Policy)
+	}
+
+	local.Inventory.Processes = append(local.Inventory.Processes, shared.ShardProcessReport{PID: 102, Cluster: "Cluster_A", Shard: "Master"})
+	service, err = NewService(catalog, topologyTargetCatalog{items: []agents.RuntimeTargetInventory{local}}, newTopologyTestStore(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err = service.PreviewStartCapacity(context.Background(), roomA.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target = preview.Targets[0]
+	if target.CurrentRunningShards != 2 || target.StartingShards != 1 || target.ProjectedRunningShards != 3 {
+		t.Fatalf("already-running shard was counted twice: %#v", target)
+	}
+}
+
+func TestPreviewStartCapacityRequiresConfirmationForOvercommitOrUnknownCapacity(t *testing.T) {
+	now := time.Now().UTC()
+	room := rooms.Room{ID: "room", DirectoryName: "Cluster", Name: "Room", Managed: true}
+	master := rooms.World{ID: "master", RoomID: room.ID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}
+	caves := rooms.World{ID: "caves", RoomID: room.ID, DirectoryName: "Caves", Name: "洞穴", Role: rooms.WorldRoleCaves}
+	catalog := topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {master, caves}}}
+
+	t.Run("overcommitted", func(t *testing.T) {
+		local := runtimeInventory(
+			agents.RuntimeTarget{ID: localTargetID, Name: "本机", Kind: agents.RuntimeKindLocal, Status: agents.RuntimeStatusReady, Online: true, Configured: true},
+			3, 3, []shared.RoomInventoryReport{inventoryRoom("Cluster", "Master", "Caves")}, nil, now,
+		)
+		service, err := NewService(catalog, topologyTargetCatalog{items: []agents.RuntimeTargetInventory{local}}, newTopologyTestStore(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		preview, err := service.PreviewStartCapacity(context.Background(), room.ID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(preview.Targets) != 1 || preview.Targets[0].Capacity.State != agents.CapacityFull || preview.RequiresRiskConfirmation {
+			t.Fatalf("projected-at-limit preview = %#v", preview)
+		}
+		local.Inventory.Processes = append(local.Inventory.Processes, shared.ShardProcessReport{PID: 1, Cluster: "Other", Shard: "Master"})
+		service, err = NewService(catalog, topologyTargetCatalog{items: []agents.RuntimeTargetInventory{local}}, newTopologyTestStore(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		preview, err = service.PreviewStartCapacity(context.Background(), room.ID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if preview.Targets[0].Capacity.State != agents.CapacityOvercommitted || !preview.RequiresRiskConfirmation {
+			t.Fatalf("overcommit preview = %#v", preview)
+		}
+	})
+
+	t.Run("unknown", func(t *testing.T) {
+		local := runtimeInventory(
+			agents.RuntimeTarget{ID: localTargetID, Name: "本机", Kind: agents.RuntimeKindLocal, Status: agents.RuntimeStatusReady, Online: true, Configured: true},
+			4, 4, []shared.RoomInventoryReport{inventoryRoom("Cluster", "Master", "Caves")}, nil, now,
+		)
+		local.Stale = true
+		local.StaleReason = "collection_failed"
+		service, err := NewService(catalog, topologyTargetCatalog{items: []agents.RuntimeTargetInventory{local}}, newTopologyTestStore(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		preview, err := service.PreviewStartCapacity(context.Background(), room.ID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if preview.Targets[0].Capacity.State != agents.CapacityUnknown || !preview.RequiresRiskConfirmation {
+			t.Fatalf("unknown preview = %#v", preview)
+		}
+	})
+}
+
 func TestTopologyReportsDuplicateRuntimeAndValidatesCompletePlacement(t *testing.T) {
 	now := time.Now().UTC()
 	room := rooms.Room{ID: "room", DirectoryName: "Cluster", Name: "Room", Managed: true}
