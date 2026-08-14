@@ -26,6 +26,7 @@ tags:
   - name: WorldState
   - name: Automation
   - name: Agents
+  - name: Topology
   - name: Containers
   - name: Jobs
   - name: Save Imports
@@ -331,6 +332,66 @@ paths:
           $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/topology:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Topology]
+      operationId: getRoomTopology
+      summary: Read desired and applied Shard placement with whole-node capacity projections
+      responses:
+        "200":
+          description: Planning-only room topology
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TopologyEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    put:
+      tags: [Topology]
+      operationId: updateRoomTopology
+      summary: Save desired placement without activating remote execution
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TopologyUpdateInput" }
+      responses:
+        "200":
+          description: Desired placement saved; applied placement remains unchanged
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TopologyEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/topology/preview:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Topology]
+      operationId: previewRoomTopology
+      summary: Preview cross-room target capacity, stale inventory, missing Shards, and duplicate runtimes
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TopologyUpdateInput" }
+      responses:
+        "200":
+          description: Topology preview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TopologyEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/recovery:
     get:
       tags: [Rooms]
@@ -6922,6 +6983,111 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/AgentInventorySnapshot" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    TopologyPlacementInput:
+      type: object
+      additionalProperties: false
+      required: [worldId, targetId]
+      properties:
+        worldId: { type: string }
+        targetId: { type: string, description: local or agent followed by a colon and Agent ID }
+    TopologyUpdateInput:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision, placements]
+      properties:
+        expectedRevision: { type: string, format: uuid }
+        allowOvercommit:
+          type: boolean
+          default: false
+          description: Explicitly acknowledge the advisory risk when projected Shards exceed the recommended physical-core budget.
+        placements:
+          type: array
+          items: { $ref: "#/components/schemas/TopologyPlacementInput" }
+    TopologyPlacementState:
+      type: string
+      enum: [aligned, planned, target_offline, inventory_stale, inventory_missing, shard_missing, conflict]
+    TopologyPlacement:
+      type: object
+      additionalProperties: false
+      required: [worldId, worldName, worldRole, desiredTargetId, appliedTargetId, state, observedTargetIds]
+      properties:
+        worldId: { type: string }
+        worldName: { type: string }
+        worldRole: { type: string, enum: [master, caves, custom] }
+        desiredTargetId: { type: string }
+        appliedTargetId: { type: string }
+        state: { $ref: "#/components/schemas/TopologyPlacementState" }
+        observedTargetIds: { type: array, items: { type: string } }
+    TopologyTargetSummary:
+      type: object
+      additionalProperties: false
+      required: [id, name, kind, status, online, configured, inventoryAvailable, inventoryStale, observedRunningShards, unmanagedRunningShards, plannedShards, projectedShards, currentCapacity, projectedCapacity, requiresOvercommitConfirmation]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        kind: { $ref: "#/components/schemas/RuntimeKind" }
+        status: { $ref: "#/components/schemas/RuntimeStatus" }
+        online: { type: boolean }
+        configured: { type: boolean }
+        inventoryAvailable: { type: boolean }
+        inventoryStale: { type: boolean }
+        staleReason: { type: string }
+        observedAt: { type: string, format: date-time }
+        observedRunningShards: { type: integer, minimum: 0 }
+        unmanagedRunningShards: { type: integer, minimum: 0 }
+        plannedShards: { type: integer, minimum: 0 }
+        projectedShards: { type: integer, minimum: 0 }
+        currentCapacity: { $ref: "#/components/schemas/AgentCapacity" }
+        projectedCapacity: { $ref: "#/components/schemas/AgentCapacity" }
+        requiresOvercommitConfirmation: { type: boolean }
+    TopologyIssue:
+      type: object
+      additionalProperties: false
+      required: [code, severity, message]
+      properties:
+        code: { type: string }
+        severity: { type: string, enum: [info, warning, error] }
+        message: { type: string }
+        targetId: { type: string }
+        worldId: { type: string }
+    TopologyCapacityPolicy:
+      type: object
+      additionalProperties: false
+      required: [basis, shardsPerPhysicalCore, reservedPhysicalCores, enforced, message]
+      properties:
+        basis: { type: string, enum: [physical_cores] }
+        shardsPerPhysicalCore: { type: integer, const: 1 }
+        reservedPhysicalCores: { type: integer, minimum: 1 }
+        enforced:
+          type: boolean
+          const: false
+          description: Capacity is advisory; users may explicitly acknowledge overcommit.
+        message: { type: string }
+    Topology:
+      type: object
+      additionalProperties: false
+      required: [roomId, revision, mode, remoteExecutionReady, placements, targets, issues, requiresOvercommitConfirmation, capacityPolicy, updatedAt]
+      properties:
+        roomId: { type: string }
+        revision: { type: string, format: uuid }
+        mode: { type: string, const: planning_only }
+        remoteExecutionReady:
+          type: boolean
+          const: false
+          description: Remote desired placement is not active until typed control, leases, and fencing are implemented.
+        placements: { type: array, items: { $ref: "#/components/schemas/TopologyPlacement" } }
+        targets: { type: array, items: { $ref: "#/components/schemas/TopologyTargetSummary" } }
+        issues: { type: array, items: { $ref: "#/components/schemas/TopologyIssue" } }
+        requiresOvercommitConfirmation: { type: boolean }
+        capacityPolicy: { $ref: "#/components/schemas/TopologyCapacityPolicy" }
+        updatedAt: { type: string, format: date-time }
+    TopologyEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/Topology" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     AnnouncementTarget:

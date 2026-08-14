@@ -148,6 +148,17 @@ type RuntimeTarget struct {
 	Config        RuntimeConfig `json:"config"`
 }
 
+type RuntimeTargetInventory struct {
+	Target      RuntimeTarget                 `json:"target"`
+	Available   bool                          `json:"available"`
+	Inventory   shared.RuntimeInventoryReport `json:"inventory"`
+	Capacity    Capacity                      `json:"capacity"`
+	ObservedAt  *time.Time                    `json:"observedAt,omitempty"`
+	ReceivedAt  *time.Time                    `json:"receivedAt,omitempty"`
+	Stale       bool                          `json:"stale"`
+	StaleReason string                        `json:"staleReason,omitempty"`
+}
+
 type ActionDefinition struct {
 	ID          Action   `json:"id"`
 	Name        string   `json:"name"`

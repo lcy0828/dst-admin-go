@@ -34,6 +34,7 @@ import (
 	"dont/internal/structuredlogs"
 	"dont/internal/systemsettings"
 	"dont/internal/systemstatus"
+	"dont/internal/topology"
 	"dont/internal/worldmap"
 	"dont/internal/worldstate"
 	"dont/models"
@@ -187,6 +188,15 @@ func initApplication(manageBackground bool) (*Application, error) {
 		LuaBinary: luaBinary, LuaFallbackPath: luaFallbackPath, ServerMode: serverMode,
 	})
 	agentHandler := httpapi.NewAgentHandler(agentService)
+	topologyStore := topology.NewStore(models.DB(), tablePrefix)
+	if err := topologyStore.Migrate(); err != nil {
+		return nil, err
+	}
+	topologyService, err := topology.NewService(roomService, agentService, topologyStore)
+	if err != nil {
+		return nil, err
+	}
+	topologyHandler := httpapi.NewTopologyHandler(topologyService)
 	if backgroundEnabled {
 		hooks.workers = append(hooks.workers, func(ctx context.Context) {
 			agentService.Watch(ctx, 5*time.Second, jobService.Notify)
@@ -616,6 +626,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		worldStateHandler.Register(v2)
 		automationHandler.Register(v2)
 		agentHandler.Register(v2)
+		topologyHandler.Register(v2)
 		systemStatusHandler.Register(v2)
 		systemSettingsHandler.Register(v2)
 		containerHandler.Register(v2)

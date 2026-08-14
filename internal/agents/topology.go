@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"dont/internal/jobs"
+	"dont/internal/runtimeinventory"
 	"dont/shared"
 )
 
@@ -41,6 +43,71 @@ func (s *Service) Inventory(agentID string) (InventorySnapshot, error) {
 		snapshot.Stale,
 	)
 	return snapshot, nil
+}
+
+// RuntimeTargetInventories returns one normalized read-only snapshot per
+// configured execution target. Missing remote reports remain visible so a
+// topology preview can explain why capacity is unknown.
+func (s *Service) RuntimeTargetInventories(ctx context.Context) ([]RuntimeTargetInventory, error) {
+	targets, err := s.RuntimeTargets()
+	if err != nil {
+		return nil, err
+	}
+	items := make([]RuntimeTargetInventory, 0, len(targets))
+	for _, target := range targets {
+		item := RuntimeTargetInventory{Target: target, Capacity: Capacity{State: CapacityUnknown}, Stale: true}
+		if target.ID == "local" {
+			if !target.Configured {
+				item.StaleReason = "runtime_not_configured"
+				items = append(items, item)
+				continue
+			}
+			report, collectErr := runtimeinventory.Collect(ctx, shared.RuntimeInventoryRequest{
+				InstallationID: "local", DisplayName: target.Name,
+				SavePath: target.Config.SavePath, ServerPath: target.Config.ServerPath, ServerMode: target.Config.ServerMode,
+			})
+			if collectErr != nil {
+				item.StaleReason = "collection_failed"
+				items = append(items, item)
+				continue
+			}
+			report, collectErr = normalizeInventory(report, target.Config)
+			if collectErr != nil {
+				item.StaleReason = "invalid_report"
+				items = append(items, item)
+				continue
+			}
+			observedAt := report.ObservedAt.UTC()
+			item.Available, item.Stale = true, false
+			item.Inventory = report
+			item.ObservedAt, item.ReceivedAt = &observedAt, &observedAt
+			item.Capacity = capacityFor(report.CPU.LogicalProcessors, report.CPU.PhysicalCores, report.CPU.PhysicalCoreEstimated, len(report.Processes), false)
+			items = append(items, item)
+			continue
+		}
+		if !target.Configured {
+			item.StaleReason = "runtime_not_configured"
+			items = append(items, item)
+			continue
+		}
+		snapshot, snapshotErr := s.Inventory(target.AgentID)
+		if errors.Is(snapshotErr, ErrInventoryNotFound) {
+			item.StaleReason = "inventory_missing"
+			items = append(items, item)
+			continue
+		}
+		if snapshotErr != nil {
+			return nil, snapshotErr
+		}
+		observedAt, receivedAt := snapshot.ObservedAt.UTC(), snapshot.ReceivedAt.UTC()
+		item.Available = true
+		item.Inventory = snapshot.Inventory
+		item.Capacity = snapshot.Capacity
+		item.ObservedAt, item.ReceivedAt = &observedAt, &receivedAt
+		item.Stale, item.StaleReason = snapshot.Stale, snapshot.StaleReason
+		items = append(items, item)
+	}
+	return items, nil
 }
 
 func (s *Service) RefreshInventory(agentID string) (jobs.Job, error) {
@@ -245,15 +312,23 @@ func capacityFor(logicalProcessors, physicalCores int, estimated bool, runningSh
 	return capacity
 }
 
+func CapacityFor(logicalProcessors, physicalCores int, estimated bool, runningShards int, stale bool) Capacity {
+	return capacityFor(logicalProcessors, physicalCores, estimated, runningShards, stale)
+}
+
 func normalizeInventory(report shared.RuntimeInventoryReport, config RuntimeConfig) (shared.RuntimeInventoryReport, error) {
 	if report.ProtocolVersion != shared.RuntimeInventoryProtocolVersion || report.ObservedAt.IsZero() ||
 		report.CPU.LogicalProcessors < 1 || report.CPU.PhysicalCores < 0 || report.CPU.PhysicalCores > report.CPU.LogicalProcessors ||
 		len(report.Rooms) > maximumReportedRooms || len(report.Processes) > maximumReportedProcesses {
 		return shared.RuntimeInventoryReport{}, errors.New("Agent 返回的 DST 运行时清单不符合协议")
 	}
-	if strings.TrimSpace(report.Installation.SavePath) != config.SavePath || strings.TrimSpace(report.Installation.ServerPath) != config.ServerPath {
+	reportedSavePath := strings.TrimSpace(report.Installation.SavePath)
+	reportedServerPath := strings.TrimSpace(report.Installation.ServerPath)
+	if !sameRuntimePath(reportedSavePath, config.SavePath) || !sameRuntimePath(reportedServerPath, config.ServerPath) {
 		return shared.RuntimeInventoryReport{}, errors.New("Agent 返回的运行时路径与已配置安装不一致")
 	}
+	report.Installation.SavePath = cleanRuntimePath(reportedSavePath)
+	report.Installation.ServerPath = cleanRuntimePath(reportedServerPath)
 	report.Installation.ID = trimLimit(report.Installation.ID, 128)
 	report.Installation.DisplayName = trimLimit(report.Installation.DisplayName, 100)
 	report.Installation.SavePath = trimLimit(report.Installation.SavePath, 2048)
@@ -305,4 +380,31 @@ func normalizeInventory(report shared.RuntimeInventoryReport, config RuntimeConf
 		report.Warnings = []string{}
 	}
 	return report, nil
+}
+
+func sameRuntimePath(left, right string) bool {
+	left, right = strings.TrimSpace(left), strings.TrimSpace(right)
+	leftWindows, rightWindows := windowsAbsolutePathPattern.MatchString(left), windowsAbsolutePathPattern.MatchString(right)
+	if leftWindows || rightWindows {
+		return leftWindows && rightWindows && strings.EqualFold(cleanWindowsRuntimePath(left), cleanWindowsRuntimePath(right))
+	}
+	return filepath.Clean(left) == filepath.Clean(right)
+}
+
+func cleanRuntimePath(value string) string {
+	value = strings.TrimSpace(value)
+	if windowsAbsolutePathPattern.MatchString(value) {
+		return cleanWindowsRuntimePath(value)
+	}
+	return filepath.Clean(value)
+}
+
+func cleanWindowsRuntimePath(value string) string {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "/", `\`)
+	// Keep a drive root such as C:\ intact while removing redundant trailing
+	// separators from regular paths. The Agent already resolves dot segments.
+	if len(value) > 3 {
+		value = strings.TrimRight(value, `\`)
+	}
+	return value
 }

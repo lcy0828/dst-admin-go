@@ -3,11 +3,13 @@ package agents
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"dont/internal/jobs"
+	"dont/shared"
 
 	"github.com/jinzhu/gorm"
 	_ "github.com/mattn/go-sqlite3"
@@ -116,6 +118,49 @@ func TestRuntimeTargetsPreferLocalAndKeepRemoteConfigurationIsolated(t *testing.
 	target, err = service.RuntimeTarget("agent-primary")
 	if err != nil || target.Configured || target.Status != RuntimeStatusConfigurationRequired {
 		t.Fatalf("deleted target=%#v err=%v", target, err)
+	}
+}
+
+func TestRuntimeTargetInventoriesCollectsConfiguredLocalTarget(t *testing.T) {
+	service, _, _, _ := newAgentTestService(t)
+	localRoot := t.TempDir()
+	service.ConfigureLocalRuntime(RuntimeConfig{
+		DisplayName: "本机", SavePath: localRoot + string(os.PathSeparator),
+		ServerPath: localRoot + string(os.PathSeparator), LuaBinary: "lua", ServerMode: "64",
+	})
+
+	items, err := service.RuntimeTargetInventories(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) == 0 || items[0].Target.ID != "local" || !items[0].Available || items[0].Stale {
+		t.Fatalf("local inventory=%#v", items)
+	}
+	if items[0].Inventory.Installation.SavePath != localRoot || items[0].Inventory.Installation.ServerPath != localRoot {
+		t.Fatalf("local paths were not normalized: %#v", items[0].Inventory.Installation)
+	}
+	if items[0].Capacity.PhysicalCores < 1 || items[0].Capacity.ReservedPhysicalCores != 1 {
+		t.Fatalf("local capacity=%#v", items[0].Capacity)
+	}
+}
+
+func TestNormalizeInventoryAcceptsEquivalentWindowsPathSeparators(t *testing.T) {
+	now := time.Now().UTC()
+	report := shared.RuntimeInventoryReport{
+		ProtocolVersion: shared.RuntimeInventoryProtocolVersion,
+		ObservedAt:      now,
+		CPU:             shared.CPUInventory{LogicalProcessors: 8, PhysicalCores: 4},
+		Installation: shared.RuntimeInstallationReport{
+			SavePath: `C:\dst\save`, ServerPath: `C:\dst\server`,
+		},
+	}
+	config := RuntimeConfig{SavePath: `C:\dst\save\`, ServerPath: `C:/dst/server/`}
+	normalized, err := normalizeInventory(report, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.Installation.SavePath != `C:\dst\save` || normalized.Installation.ServerPath != `C:\dst\server` {
+		t.Fatalf("windows paths=%#v", normalized.Installation)
 	}
 }
 
