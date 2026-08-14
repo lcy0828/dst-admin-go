@@ -7,6 +7,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"dont/shared"
 )
 
 type MemoryTransport struct {
@@ -25,17 +27,54 @@ func NewMemoryTransport() *MemoryTransport {
 			"agent-primary": {
 				ID: "agent-primary", Status: StatusOnline, Hostname: "林火节点", OS: "linux", Arch: "amd64", Version: "2.0.0-test",
 				IPAddresses: []string{"192.168.2.12"}, LastHeartbeat: now, LastReportAt: utcTimePointer(now),
-				Capabilities: []string{"system.report", "command.exec", "disk.inspect"},
-				Metrics:      Metrics{CPUCount: 8, MemoryUsed: 3 * 1024 * 1024 * 1024, MemoryTotal: 8 * 1024 * 1024 * 1024, UptimeSeconds: 86400},
+				Capabilities: []string{"system.report", "command.exec", "disk.inspect", "runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read"},
+				Metrics:      Metrics{CPUCount: 16, LogicalProcessors: 16, PhysicalCores: 8, PhysicalCoreSource: "test", RunningShardCount: 2, MemoryUsed: 3 * 1024 * 1024 * 1024, MemoryTotal: 8 * 1024 * 1024 * 1024, UptimeSeconds: 86400, ObservedAt: utcTimePointer(now)},
 				Details:      map[string]interface{}{"goVersion": "go1.25", "currentDirectory": "/opt/dst-admin-agent"},
 			},
 			"agent-offline": {
 				ID: "agent-offline", Status: StatusOffline, Hostname: "离线节点", OS: "darwin", Arch: "arm64", Version: "1.9.0-test",
 				IPAddresses: []string{"192.168.2.13"}, LastHeartbeat: now.Add(-10 * time.Minute), LastReportAt: utcTimePointer(now.Add(-10 * time.Minute)),
-				Capabilities: []string{"system.report", "command.exec", "disk.inspect"}, Metrics: Metrics{CPUCount: 4, MemoryTotal: 4 * 1024 * 1024 * 1024}, Details: map[string]interface{}{},
+				Capabilities: []string{"system.report", "command.exec", "disk.inspect"}, Metrics: Metrics{CPUCount: 8, LogicalProcessors: 8, PhysicalCores: 4, PhysicalCoreSource: "test", MemoryTotal: 4 * 1024 * 1024 * 1024, ObservedAt: utcTimePointer(now.Add(-10 * time.Minute))}, Details: map[string]interface{}{},
 			},
 		},
 	}
+}
+
+func (m *MemoryTransport) Inventory(ctx context.Context, agentID string, config RuntimeConfig, _ int) (shared.RuntimeInventoryReport, error) {
+	select {
+	case <-ctx.Done():
+		return shared.RuntimeInventoryReport{}, ctx.Err()
+	default:
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	snapshot, exists := m.snapshots[agentID]
+	if !exists || snapshot.Status != StatusOnline {
+		return shared.RuntimeInventoryReport{}, ErrAgentOffline
+	}
+	now := m.now().UTC()
+	return shared.RuntimeInventoryReport{
+		ProtocolVersion: shared.RuntimeInventoryProtocolVersion,
+		ObservedAt:      now,
+		CPU:             shared.CPUInventory{LogicalProcessors: 16, PhysicalCores: 8, PhysicalCoreSource: "test"},
+		Memory:          shared.MemoryInventory{TotalBytes: 8 * 1024 * 1024 * 1024, UsedBytes: 3 * 1024 * 1024 * 1024, AvailableBytes: 5 * 1024 * 1024 * 1024},
+		Installation: shared.RuntimeInstallationReport{
+			ID: "default", DisplayName: config.DisplayName, SavePath: config.SavePath, ServerPath: config.ServerPath,
+			ServerMode: config.ServerMode, SavePathOK: true, ServerPathOK: true,
+		},
+		Rooms: []shared.RoomInventoryReport{{
+			Directory: "Cluster_1", Name: "测试房间", ConfigPath: config.SavePath + "/Cluster_1/cluster.ini", MasterPort: 10889,
+			Shards: []shared.ShardInventoryReport{
+				{Directory: "Master", Name: "Master", ID: 1, Role: "master", ServerPort: 10999},
+				{Directory: "Caves", Name: "Caves", ID: 2, Role: "secondary", ServerPort: 10998},
+			},
+		}},
+		Processes: []shared.ShardProcessReport{
+			{PID: 101, Executable: "dontstarve_dedicated_server_nullrenderer", Cluster: "Cluster_1", Shard: "Master", RSSBytes: 1024},
+			{PID: 102, Executable: "dontstarve_dedicated_server_nullrenderer", Cluster: "Cluster_1", Shard: "Caves", RSSBytes: 1024},
+		},
+		Warnings: []string{},
+	}, nil
 }
 
 func (m *MemoryTransport) Available() bool { return true }

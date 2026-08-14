@@ -27,7 +27,7 @@ import (
 
 // 常量
 const (
-	AgentVersion = "2.0.0"
+	AgentVersion = "2.1.0"
 	// 心跳间隔
 	HeartbeatInterval = 30 * time.Second
 	// 重连间隔
@@ -901,6 +901,26 @@ func (a *Agent) handlePassiveReportRequest(msg *shared.Message) {
 			data["agent_uuid"] = agentUUID
 		}
 
+	case "dst_runtime_inventory":
+		encoded, encodeErr := json.Marshal(requestPayload.Params)
+		var request shared.RuntimeInventoryRequest
+		if encodeErr != nil {
+			data = map[string]interface{}{"error": "DST 运行时清单参数无效"}
+			break
+		}
+		if decodeErr := json.Unmarshal(encoded, &request); decodeErr != nil {
+			data = map[string]interface{}{"error": "DST 运行时清单参数无效"}
+			break
+		}
+		inventoryContext, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		inventory, inventoryErr := a.collectRuntimeInventory(inventoryContext, request)
+		cancel()
+		if inventoryErr != nil {
+			data = map[string]interface{}{"error": inventoryErr.Error()}
+			break
+		}
+		data = map[string]interface{}{"inventory": inventory}
+
 	case "custom":
 		data = map[string]interface{}{
 			"error":   "自定义命令上报已禁用，请使用白名单领域动作",
@@ -937,13 +957,19 @@ func (a *Agent) handlePassiveReportRequest(msg *shared.Message) {
 
 // 收集系统信息
 func (a *Agent) collectSystemInfo() map[string]interface{} {
+	cpuInfo, memoryInfo := collectHostResources()
 	info := map[string]interface{}{
 		"hostname":      "unknown",
 		"os":            runtime.GOOS,
 		"arch":          runtime.GOARCH,
 		"agent_version": AgentVersion,
-		"cpu_count":     runtime.NumCPU(),
-		"timestamp":     time.Now().Unix(),
+		"cpu_count":     cpuInfo.LogicalProcessors,
+		"cpu":           cpuInfo,
+		"capabilities": []string{
+			"system.report", "command.exec", "disk.inspect",
+			"runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read",
+		},
+		"timestamp": time.Now().Unix(),
 	}
 
 	hostname, err := os.Hostname()
@@ -961,10 +987,13 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 	info["go_version"] = runtime.Version()
 	info["go_root"] = runtime.GOROOT()
 
-	// 添加内存信息
+	// 宿主机内存和 Agent 自身内存分开上报，避免把 Go 堆误认为整机占用。
+	info["memory"] = map[string]interface{}{
+		"total": memoryInfo.TotalBytes, "used": memoryInfo.UsedBytes, "available": memoryInfo.AvailableBytes,
+	}
 	var memStat runtime.MemStats
 	runtime.ReadMemStats(&memStat)
-	info["memory"] = map[string]interface{}{
+	info["agent_memory"] = map[string]interface{}{
 		"allocated":       memStat.Alloc,
 		"total_allocated": memStat.TotalAlloc,
 		"system":          memStat.Sys,
@@ -998,6 +1027,13 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 
 	// 获取当前进程PID
 	info["pid"] = os.Getpid()
+
+	processContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	dstProcesses := collectDSTProcesses(processContext)
+	cancel()
+	info["dst_process_count"] = len(dstProcesses)
+	info["dst_processes"] = dstProcesses
+	info["runtime_observed_at"] = time.Now().UTC()
 
 	// 获取IP地址信息
 	if ips, err := a.getIPAddresses(); err == nil {

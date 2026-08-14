@@ -9,6 +9,7 @@ import (
 	"time"
 
 	legacyserver "dont/server"
+	"dont/shared"
 )
 
 type LegacyTransport struct{ server func() *legacyserver.Server }
@@ -107,6 +108,52 @@ func (t *LegacyTransport) Execute(ctx context.Context, agentID string, action Ac
 	}
 }
 
+func (t *LegacyTransport) Inventory(ctx context.Context, agentID string, config RuntimeConfig, _ int) (shared.RuntimeInventoryReport, error) {
+	server := t.current()
+	if server == nil {
+		return shared.RuntimeInventoryReport{}, ErrUnavailable
+	}
+	before := legacyReportTimestamp(server.GetAllAgentInfo()[agentID])
+	params := map[string]interface{}{
+		"installation_id": "default", "display_name": config.DisplayName,
+		"save_path": config.SavePath, "server_path": config.ServerPath, "server_mode": config.ServerMode,
+	}
+	if err := server.RequestPassiveReport(agentID, "dst_runtime_inventory", params); err != nil {
+		return shared.RuntimeInventoryReport{}, err
+	}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return shared.RuntimeInventoryReport{}, ctx.Err()
+		case <-ticker.C:
+			info, exists := server.GetAllAgentInfo()[agentID]
+			if !exists {
+				return shared.RuntimeInventoryReport{}, ErrAgentOffline
+			}
+			if legacyReportTimestamp(info) <= before || stringValue(info["_last_report_type"]) != "dst_runtime_inventory" {
+				continue
+			}
+			if message := stringValue(info["error"]); message != "" {
+				return shared.RuntimeInventoryReport{}, errors.New(message)
+			}
+			encoded, err := json.Marshal(info["inventory"])
+			if err != nil {
+				return shared.RuntimeInventoryReport{}, err
+			}
+			var report shared.RuntimeInventoryReport
+			if err := json.Unmarshal(encoded, &report); err != nil {
+				return shared.RuntimeInventoryReport{}, err
+			}
+			if report.ProtocolVersion < 1 || report.ObservedAt.IsZero() {
+				return shared.RuntimeInventoryReport{}, errors.New("Agent 返回的 DST 运行时清单无效")
+			}
+			return report, nil
+		}
+	}
+}
+
 func (t *LegacyTransport) CurrentKey() (string, error) {
 	server := t.current()
 	if server == nil {
@@ -149,19 +196,47 @@ func legacySnapshot(id string, info map[string]interface{}) TransportSnapshot {
 	if reportAt.Unix() > 0 {
 		reportPointer = &reportAt
 	}
-	capabilities := []string{"system.report", "command.exec"}
+	capabilities := stringSlice(info["capabilities"])
+	if len(capabilities) == 0 {
+		capabilities = []string{"system.report", "command.exec"}
+	}
 	platform := strings.ToLower(stringValue(info["os"]))
-	if platform == "linux" || platform == "darwin" || platform == "windows" {
+	if (platform == "linux" || platform == "darwin" || platform == "windows") && !containsString(capabilities, "disk.inspect") {
 		capabilities = append(capabilities, "disk.inspect")
 	}
 	memory := mapValue(info["memory"])
+	cpuInfo := mapValue(info["cpu"])
+	logicalProcessors := int(int64Value(cpuInfo["logical_processors"]))
+	if logicalProcessors < 1 {
+		logicalProcessors = int(int64Value(info["cpu_count"]))
+	}
+	physicalCores := int(int64Value(cpuInfo["physical_cores"]))
+	memoryUsed := int64Value(memory["used"])
+	if memoryUsed == 0 {
+		memoryUsed = int64Value(memory["allocated"])
+	}
+	memoryTotal := int64Value(memory["total"])
+	if memoryTotal == 0 {
+		memoryTotal = int64Value(memory["system"])
+	}
+	var observedAt *time.Time
+	if parsed := timeValue(info["runtime_observed_at"]); !parsed.IsZero() {
+		observedAt = &parsed
+	} else if reportPointer != nil {
+		observedAt = reportPointer
+	}
 	details := make(map[string]interface{}, len(info))
 	for key, value := range info {
 		if key != "security_key" && !strings.HasPrefix(key, "_") {
 			details[key] = value
 		}
 	}
-	return TransportSnapshot{ID: id, Status: StatusOnline, Hostname: stringValue(info["hostname"]), OS: stringValue(info["os"]), Arch: stringValue(info["arch"]), Version: nonEmpty(stringValue(info["agent_version"]), "legacy"), IPAddresses: stringSlice(info["ip_addresses"]), LastHeartbeat: heartbeat, LastReportAt: reportPointer, Capabilities: capabilities, Metrics: Metrics{CPUCount: int(int64Value(info["cpu_count"])), MemoryUsed: int64Value(memory["allocated"]), MemoryTotal: int64Value(memory["system"]), UptimeSeconds: int64Value(info["uptime_seconds"])}, Details: details}
+	return TransportSnapshot{ID: id, Status: StatusOnline, Hostname: stringValue(info["hostname"]), OS: stringValue(info["os"]), Arch: stringValue(info["arch"]), Version: nonEmpty(stringValue(info["agent_version"]), "legacy"), IPAddresses: stringSlice(info["ip_addresses"]), LastHeartbeat: heartbeat, LastReportAt: reportPointer, Capabilities: capabilities, Metrics: Metrics{
+		CPUCount: logicalProcessors, LogicalProcessors: logicalProcessors, PhysicalCores: physicalCores,
+		PhysicalCoreSource: stringValue(cpuInfo["physical_core_source"]), PhysicalCoreEstimated: boolValue(cpuInfo["physical_core_estimated"]),
+		RunningShardCount: int(int64Value(info["dst_process_count"])), MemoryUsed: memoryUsed, MemoryTotal: memoryTotal,
+		MemoryAvailable: int64Value(memory["available"]), UptimeSeconds: int64Value(info["uptime_seconds"]), ObservedAt: observedAt,
+	}, Details: details}
 }
 
 func diskCommand(platform string) (string, []string, error) {
@@ -220,9 +295,38 @@ func stringSlice(value interface{}) []string {
 	typed, _ := value.([]string)
 	return typed
 }
+func boolValue(value interface{}) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
+	default:
+		return false
+	}
+}
+func timeValue(value interface{}) time.Time {
+	switch typed := value.(type) {
+	case time.Time:
+		return typed.UTC()
+	case string:
+		parsed, _ := time.Parse(time.RFC3339Nano, typed)
+		return parsed.UTC()
+	}
+	return time.Time{}
+}
 func nonEmpty(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
 	}
 	return value
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }

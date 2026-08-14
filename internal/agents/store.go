@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"dont/shared"
+
 	"github.com/jinzhu/gorm"
 )
 
@@ -65,25 +67,39 @@ type runtimeRecord struct {
 	UpdatedAt           time.Time
 }
 
+type inventoryRecord struct {
+	AgentID    string `gorm:"type:varchar(128);primary_key"`
+	Payload    string `gorm:"type:text;not null"`
+	ObservedAt time.Time
+	ReceivedAt time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
 type Store struct {
-	db            *gorm.DB
-	agentsTable   string
-	commandsTable string
-	securityTable string
-	runtimeTable  string
-	now           func() time.Time
+	db             *gorm.DB
+	agentsTable    string
+	commandsTable  string
+	securityTable  string
+	runtimeTable   string
+	inventoryTable string
+	now            func() time.Time
 }
 
 func NewStore(db *gorm.DB, prefix string) *Store {
 	prefix = strings.TrimSpace(prefix)
-	return &Store{db: db, agentsTable: prefix + "agent", commandsTable: prefix + "agent_command", securityTable: prefix + "agent_security", runtimeTable: prefix + "agent_runtime", now: time.Now}
+	return &Store{
+		db: db, agentsTable: prefix + "agent", commandsTable: prefix + "agent_command",
+		securityTable: prefix + "agent_security", runtimeTable: prefix + "agent_runtime",
+		inventoryTable: prefix + "agent_inventory", now: time.Now,
+	}
 }
 
 func (s *Store) Migrate() error {
 	for _, migration := range []struct {
 		table string
 		model interface{}
-	}{{s.agentsTable, &agentRecord{}}, {s.commandsTable, &commandRecord{}}, {s.securityTable, &securityRecord{}}, {s.runtimeTable, &runtimeRecord{}}} {
+	}{{s.agentsTable, &agentRecord{}}, {s.commandsTable, &commandRecord{}}, {s.securityTable, &securityRecord{}}, {s.runtimeTable, &runtimeRecord{}}, {s.inventoryTable, &inventoryRecord{}}} {
 		if err := s.db.Table(migration.table).AutoMigrate(migration.model).Error; err != nil {
 			return fmt.Errorf("migrate %s: %w", migration.table, err)
 		}
@@ -209,6 +225,10 @@ func (s *Store) DeleteAgent(id string) error {
 		tx.Rollback()
 		return err
 	}
+	if err := tx.Table(s.inventoryTable).Where("agent_id = ?", id).Delete(&inventoryRecord{}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
 	return tx.Commit().Error
 }
 
@@ -270,6 +290,58 @@ func (s *Store) DeleteRuntimeConfig(agentID string) error {
 		return ErrRuntimeNotConfigured
 	}
 	return nil
+}
+
+func (s *Store) DeleteInventory(agentID string) error {
+	return s.db.Table(s.inventoryTable).Where("agent_id = ?", agentID).Delete(&inventoryRecord{}).Error
+}
+
+func (s *Store) SaveInventory(agentID string, report shared.RuntimeInventoryReport) (InventorySnapshot, error) {
+	payload, err := json.Marshal(report)
+	if err != nil {
+		return InventorySnapshot{}, err
+	}
+	now := s.now().UTC()
+	observedAt := report.ObservedAt.UTC()
+	if observedAt.IsZero() {
+		observedAt = now
+	}
+	record := inventoryRecord{AgentID: agentID, Payload: string(payload), ObservedAt: observedAt, ReceivedAt: now}
+	var count int
+	if err := s.db.Table(s.inventoryTable).Where("agent_id = ?", agentID).Count(&count).Error; err != nil {
+		return InventorySnapshot{}, err
+	}
+	if count == 0 {
+		record.CreatedAt = now
+		record.UpdatedAt = now
+		if err := s.db.Table(s.inventoryTable).Create(&record).Error; err != nil {
+			return InventorySnapshot{}, err
+		}
+	} else if err := s.db.Table(s.inventoryTable).Where("agent_id = ?", agentID).Updates(map[string]interface{}{
+		"payload": record.Payload, "observed_at": record.ObservedAt, "received_at": record.ReceivedAt, "updated_at": now,
+	}).Error; err != nil {
+		return InventorySnapshot{}, err
+	}
+	return s.Inventory(agentID)
+}
+
+func (s *Store) Inventory(agentID string) (InventorySnapshot, error) {
+	var record inventoryRecord
+	result := s.db.Table(s.inventoryTable).Where("agent_id = ?", agentID).First(&record)
+	if gorm.IsRecordNotFoundError(result.Error) {
+		return InventorySnapshot{}, ErrInventoryNotFound
+	}
+	if result.Error != nil {
+		return InventorySnapshot{}, result.Error
+	}
+	var report shared.RuntimeInventoryReport
+	if err := json.Unmarshal([]byte(record.Payload), &report); err != nil {
+		return InventorySnapshot{}, err
+	}
+	return InventorySnapshot{
+		AgentID: agentID, Inventory: report,
+		ObservedAt: record.ObservedAt.UTC(), ReceivedAt: record.ReceivedAt.UTC(),
+	}, nil
 }
 
 func (s *Store) CreateCommand(command Command) error {

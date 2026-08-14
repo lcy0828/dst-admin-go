@@ -65,6 +65,17 @@ func TestAgentHTTPListCommandFailureAndKeyRotation(t *testing.T) {
 	if data := responseData(t, response); data["id"] != "agent:agent-primary" || data["configured"] != true {
 		t.Fatalf("unexpected saved runtime: %s", response.Body.String())
 	}
+	response = performJSON(router, http.MethodGet, "/api/v2/agents/agent-primary/inventory", nil, nil, "")
+	assertStatus(t, response, http.StatusNotFound)
+	response = performJSON(router, http.MethodPost, "/api/v2/agents/agent-primary/inventory/actions/refresh", nil, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	inventoryJobID := responseData(t, response)["id"].(string)
+	waitHTTPJobStatus(t, jobService, inventoryJobID, jobs.StatusSucceeded)
+	response = performJSON(router, http.MethodGet, "/api/v2/agents/agent-primary/inventory", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if data := responseData(t, response); data["stale"] != false || data["capacity"].(map[string]interface{})["recommendedShardLimit"] != float64(7) {
+		t.Fatalf("unexpected inventory: %s", response.Body.String())
+	}
 	response = performJSON(router, http.MethodPut, "/api/v2/runtime-targets/agents/agent-primary", map[string]interface{}{
 		"displayName": "无效节点", "savePath": "relative", "serverPath": "/srv/dst/server",
 	}, nil, "")
@@ -117,4 +128,20 @@ func TestAgentHTTPListCommandFailureAndKeyRotation(t *testing.T) {
 	if response.Header().Get("Cache-Control") != "no-store" || responseData(t, response)["newKey"] == "" {
 		t.Fatalf("unexpected rotation: %s", response.Body.String())
 	}
+}
+
+func waitHTTPJobStatus(t *testing.T, service *jobs.Service, id string, status jobs.Status) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		job, _ := service.Get(id)
+		if job.Status == status {
+			return
+		}
+		if job.Status == jobs.StatusFailed || job.Status == jobs.StatusCanceled {
+			t.Fatalf("job %s status=%s", id, job.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("job %s did not reach %s", id, status)
 }

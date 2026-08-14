@@ -662,9 +662,15 @@ func (s *Server) handlePassiveReport(agent *AgentConnection, msg *shared.Message
 
 	// 存储上报数据
 	agent.Mutex.Lock()
+	if reportPayload.ReportType == "dst_runtime_inventory" {
+		delete(agent.Info, "inventory")
+		delete(agent.Info, "error")
+	}
 	for k, v := range reportPayload.Data {
 		agent.Info[k] = v
 	}
+	agent.Info["_last_passive_report_at"] = time.Now().UnixNano()
+	agent.Info["_last_report_type"] = reportPayload.ReportType
 	agent.Mutex.Unlock()
 
 	// 发送确认
@@ -927,11 +933,27 @@ func (s *Server) SendExec(agentID, program string, arguments []string, timeout i
 
 // 请求Agent进行被动上报
 func (s *Server) RequestPassiveReport(agentID, reportType string, params map[string]interface{}) error {
-	if reportType != "system_info" && reportType != "process_list" {
+	if reportType != "system_info" && reportType != "process_list" && reportType != "dst_runtime_inventory" {
 		return fmt.Errorf("Agent 上报类型不在白名单中")
 	}
-	if len(params) != 0 {
+	if reportType != "dst_runtime_inventory" && len(params) != 0 {
 		return fmt.Errorf("Agent 上报不接受自定义参数")
+	}
+	if reportType == "dst_runtime_inventory" {
+		if len(params) == 0 || len(params) > 5 {
+			return fmt.Errorf("DST 运行时清单参数无效")
+		}
+		encoded, err := json.Marshal(params)
+		if err != nil {
+			return fmt.Errorf("DST 运行时清单参数无效")
+		}
+		var request shared.RuntimeInventoryRequest
+		if err := json.Unmarshal(encoded, &request); err != nil || strings.TrimSpace(request.InstallationID) == "" ||
+			strings.TrimSpace(request.SavePath) == "" || strings.TrimSpace(request.ServerPath) == "" ||
+			len(request.InstallationID) > 128 || len(request.DisplayName) > 100 || len(request.SavePath) > 2048 || len(request.ServerPath) > 2048 ||
+			strings.ContainsAny(request.InstallationID+request.DisplayName+request.SavePath+request.ServerPath, "\x00\r\n") {
+			return fmt.Errorf("DST 运行时清单参数无效")
+		}
 	}
 	// 查找Agent
 	s.agentMutex.RLock()

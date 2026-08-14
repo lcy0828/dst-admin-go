@@ -2733,6 +2733,27 @@ paths:
               schema: { $ref: "#/components/schemas/AgentRotateKeyEnvelope" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /agents/{agentId}/inventory:
+    parameters: [{ $ref: "#/components/parameters/AgentID" }]
+    get:
+      tags: [Agents]
+      operationId: getAgentRuntimeInventory
+      summary: Read the last typed DST installation, room, Shard, process, and capacity observation
+      responses:
+        "200": { description: Agent runtime inventory snapshot, content: { application/json: { schema: { $ref: "#/components/schemas/AgentInventorySnapshotEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /agents/{agentId}/inventory/actions/refresh:
+    parameters: [{ $ref: "#/components/parameters/AgentID" }]
+    post:
+      tags: [Agents, Jobs]
+      operationId: refreshAgentRuntimeInventory
+      summary: Request one read-only typed runtime inventory observation from a configured online Agent
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Inventory refresh Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /agents/{agentId}:
     parameters: [{ $ref: "#/components/parameters/AgentID" }]
     get:
@@ -6620,16 +6641,40 @@ components:
     AgentMetrics:
       type: object
       additionalProperties: false
-      required: [cpuCount, memoryUsed, memoryTotal, uptimeSeconds]
+      required: [physicalCoreEstimated, runningShardCount]
       properties:
         cpuCount: { type: integer, minimum: 0 }
+        logicalProcessors: { type: integer, minimum: 0 }
+        physicalCores: { type: integer, minimum: 0 }
+        physicalCoreSource: { type: string }
+        physicalCoreEstimated: { type: boolean }
+        runningShardCount: { type: integer, minimum: 0 }
         memoryUsed: { type: integer, format: int64, minimum: 0 }
         memoryTotal: { type: integer, format: int64, minimum: 0 }
+        memoryAvailable: { type: integer, format: int64, minimum: 0 }
         uptimeSeconds: { type: integer, format: int64, minimum: 0 }
+        observedAt: { type: string, format: date-time }
+    AgentCapacityState:
+      type: string
+      enum: [available, full, overcommitted, unknown]
+    AgentCapacity:
+      type: object
+      additionalProperties: false
+      required: [state, logicalProcessors, physicalCores, physicalCoreEstimated, reservedPhysicalCores, recommendedShardLimit, runningShards, availableSlots, message]
+      properties:
+        state: { $ref: "#/components/schemas/AgentCapacityState" }
+        logicalProcessors: { type: integer, minimum: 0 }
+        physicalCores: { type: integer, minimum: 0 }
+        physicalCoreEstimated: { type: boolean }
+        reservedPhysicalCores: { type: integer, minimum: 0 }
+        recommendedShardLimit: { type: integer, minimum: 0 }
+        runningShards: { type: integer, minimum: 0 }
+        availableSlots: { type: integer, minimum: 0 }
+        message: { type: string }
     Agent:
       type: object
       additionalProperties: false
-      required: [id, hostname, os, arch, version, ipAddresses, status, lastHeartbeat, capabilities, metrics, details, createdAt, updatedAt]
+      required: [id, hostname, os, arch, version, ipAddresses, status, lastHeartbeat, capabilities, metrics, capacity, metricsStale, details, createdAt, updatedAt]
       properties:
         id: { type: string }
         hostname: { type: string }
@@ -6642,6 +6687,9 @@ components:
         lastReportAt: { type: string, format: date-time }
         capabilities: { type: array, items: { type: string } }
         metrics: { $ref: "#/components/schemas/AgentMetrics" }
+        capacity: { $ref: "#/components/schemas/AgentCapacity" }
+        metricsStale: { type: boolean }
+        staleReason: { type: string, enum: [agent_offline, report_missing, report_expired, clock_skew] }
         details: { type: object, additionalProperties: true }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
@@ -6775,6 +6823,105 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/AgentRotateKeyResult" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AgentInventoryCPU:
+      type: object
+      additionalProperties: false
+      required: [logical_processors, physical_cores, physical_core_source, physical_core_estimated]
+      properties:
+        logical_processors: { type: integer, minimum: 1 }
+        physical_cores: { type: integer, minimum: 0 }
+        physical_core_source: { type: string }
+        physical_core_estimated: { type: boolean }
+    AgentInventoryMemory:
+      type: object
+      additionalProperties: false
+      required: [total_bytes, used_bytes, available_bytes]
+      properties:
+        total_bytes: { type: integer, format: int64, minimum: 0 }
+        used_bytes: { type: integer, format: int64, minimum: 0 }
+        available_bytes: { type: integer, format: int64, minimum: 0 }
+    AgentRuntimeInstallationInventory:
+      type: object
+      additionalProperties: false
+      required: [id, display_name, save_path, server_path, server_mode, save_path_ok, server_path_ok]
+      properties:
+        id: { type: string }
+        display_name: { type: string }
+        save_path: { type: string }
+        server_path: { type: string }
+        server_mode: { type: string }
+        save_path_ok: { type: boolean }
+        server_path_ok: { type: boolean }
+    AgentShardInventory:
+      type: object
+      additionalProperties: false
+      required: [directory, name, role, config_path]
+      properties:
+        directory: { type: string }
+        name: { type: string }
+        id: { type: integer }
+        role: { type: string, enum: [master, secondary] }
+        config_path: { type: string }
+        server_port: { type: integer, minimum: 0, maximum: 65535 }
+        master_server_port: { type: integer, minimum: 0, maximum: 65535 }
+        authentication_port: { type: integer, minimum: 0, maximum: 65535 }
+    AgentRoomInventory:
+      type: object
+      additionalProperties: false
+      required: [directory, name, config_path, cluster_key_set, shards]
+      properties:
+        directory: { type: string }
+        name: { type: string }
+        config_path: { type: string }
+        master_port: { type: integer, minimum: 0, maximum: 65535 }
+        cluster_key_set: { type: boolean }
+        shards: { type: array, items: { $ref: "#/components/schemas/AgentShardInventory" } }
+    AgentShardProcessInventory:
+      type: object
+      additionalProperties: false
+      required: [pid, executable, cluster, shard]
+      properties:
+        pid: { type: integer, format: int32, minimum: 1 }
+        executable: { type: string }
+        cluster: { type: string }
+        shard: { type: string }
+        storage_root: { type: string }
+        config_directory: { type: string }
+        started_at: { type: string, format: date-time }
+        cpu_percent: { type: number, minimum: 0 }
+        rss_bytes: { type: integer, format: int64, minimum: 0 }
+    AgentRuntimeInventory:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, observed_at, cpu, memory, installation, rooms, processes, warnings]
+      properties:
+        protocol_version: { type: integer, enum: [1] }
+        observed_at: { type: string, format: date-time }
+        cpu: { $ref: "#/components/schemas/AgentInventoryCPU" }
+        memory: { $ref: "#/components/schemas/AgentInventoryMemory" }
+        installation: { $ref: "#/components/schemas/AgentRuntimeInstallationInventory" }
+        rooms: { type: array, items: { $ref: "#/components/schemas/AgentRoomInventory" } }
+        processes: { type: array, items: { $ref: "#/components/schemas/AgentShardProcessInventory" } }
+        warnings: { type: array, items: { type: string } }
+    AgentInventorySnapshot:
+      type: object
+      additionalProperties: false
+      required: [agentId, inventory, capacity, observedAt, receivedAt, stale]
+      properties:
+        agentId: { type: string }
+        inventory: { $ref: "#/components/schemas/AgentRuntimeInventory" }
+        capacity: { $ref: "#/components/schemas/AgentCapacity" }
+        observedAt: { type: string, format: date-time }
+        receivedAt: { type: string, format: date-time }
+        stale: { type: boolean }
+        staleReason: { type: string, enum: [agent_offline, report_expired, clock_skew] }
+    AgentInventorySnapshotEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AgentInventorySnapshot" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     AnnouncementTarget:

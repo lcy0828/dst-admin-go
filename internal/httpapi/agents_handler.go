@@ -29,6 +29,8 @@ func (h *AgentHandler) Register(v2 *gin.RouterGroup) {
 	group.GET("/commands/:commandId", h.command)
 	group.GET("/security", h.security)
 	group.POST("/security/actions/rotate", h.rotateKey)
+	group.GET("/:agentId/inventory", h.inventory)
+	group.POST("/:agentId/inventory/actions/refresh", h.refreshInventory)
 	group.GET("/:agentId", h.get)
 	group.DELETE("/:agentId", h.forget)
 	group.GET("/:agentId/commands", h.agentCommands)
@@ -91,6 +93,24 @@ func (h *AgentHandler) get(c *gin.Context) {
 		return
 	}
 	Success(c, http.StatusOK, item)
+}
+
+func (h *AgentHandler) inventory(c *gin.Context) {
+	value, err := h.service.Inventory(c.Param("agentId"))
+	if err != nil {
+		agentFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
+}
+
+func (h *AgentHandler) refreshInventory(c *gin.Context) {
+	job, err := h.service.RefreshInventory(c.Param("agentId"))
+	if err != nil {
+		agentFailure(c, err)
+		return
+	}
+	Success(c, http.StatusAccepted, job)
 }
 
 func (h *AgentHandler) forget(c *gin.Context) {
@@ -192,7 +212,7 @@ func (h *AgentHandler) rotateKey(c *gin.Context) {
 
 func agentFailure(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, agents.ErrAgentNotFound), errors.Is(err, agents.ErrCommandNotFound), errors.Is(err, agents.ErrRuntimeNotConfigured):
+	case errors.Is(err, agents.ErrAgentNotFound), errors.Is(err, agents.ErrCommandNotFound), errors.Is(err, agents.ErrRuntimeNotConfigured), errors.Is(err, agents.ErrInventoryNotFound):
 		NotFound(c)
 	case errors.Is(err, agents.ErrAgentOffline):
 		Failure(c, http.StatusConflict, "AGENT_OFFLINE", "Agent 当前离线，无法执行命令", nil)

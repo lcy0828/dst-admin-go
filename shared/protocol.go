@@ -88,6 +88,84 @@ type ReportDataPayload struct {
 	Data       map[string]interface{} `json:"data"`        // 上报数据
 }
 
+const RuntimeInventoryProtocolVersion = 1
+
+// RuntimeInventoryRequest contains controller-managed paths interpreted by
+// the Agent. Inventory collection is read-only and rejects relative paths.
+type RuntimeInventoryRequest struct {
+	InstallationID string `json:"installation_id"`
+	DisplayName    string `json:"display_name"`
+	SavePath       string `json:"save_path"`
+	ServerPath     string `json:"server_path"`
+	ServerMode     string `json:"server_mode"`
+}
+
+type CPUInventory struct {
+	LogicalProcessors     int    `json:"logical_processors"`
+	PhysicalCores         int    `json:"physical_cores"`
+	PhysicalCoreSource    string `json:"physical_core_source"`
+	PhysicalCoreEstimated bool   `json:"physical_core_estimated"`
+}
+
+type MemoryInventory struct {
+	TotalBytes     uint64 `json:"total_bytes"`
+	UsedBytes      uint64 `json:"used_bytes"`
+	AvailableBytes uint64 `json:"available_bytes"`
+}
+
+type RuntimeInstallationReport struct {
+	ID           string `json:"id"`
+	DisplayName  string `json:"display_name"`
+	SavePath     string `json:"save_path"`
+	ServerPath   string `json:"server_path"`
+	ServerMode   string `json:"server_mode"`
+	SavePathOK   bool   `json:"save_path_ok"`
+	ServerPathOK bool   `json:"server_path_ok"`
+}
+
+type RoomInventoryReport struct {
+	Directory     string                 `json:"directory"`
+	Name          string                 `json:"name"`
+	ConfigPath    string                 `json:"config_path"`
+	MasterPort    int                    `json:"master_port,omitempty"`
+	ClusterKeySet bool                   `json:"cluster_key_set"`
+	Shards        []ShardInventoryReport `json:"shards"`
+}
+
+type ShardInventoryReport struct {
+	Directory          string `json:"directory"`
+	Name               string `json:"name"`
+	ID                 int    `json:"id,omitempty"`
+	Role               string `json:"role"`
+	ConfigPath         string `json:"config_path"`
+	ServerPort         int    `json:"server_port,omitempty"`
+	MasterServerPort   int    `json:"master_server_port,omitempty"`
+	AuthenticationPort int    `json:"authentication_port,omitempty"`
+}
+
+type ShardProcessReport struct {
+	PID             int32      `json:"pid"`
+	Executable      string     `json:"executable"`
+	Cluster         string     `json:"cluster"`
+	Shard           string     `json:"shard"`
+	StorageRoot     string     `json:"storage_root,omitempty"`
+	ConfigDirectory string     `json:"config_directory,omitempty"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	CPUPercent      float64    `json:"cpu_percent,omitempty"`
+	RSSBytes        uint64     `json:"rss_bytes,omitempty"`
+}
+
+type RuntimeInventoryReport struct {
+	ProtocolVersion int                       `json:"protocol_version"`
+	ObservedAt      time.Time                 `json:"observed_at"`
+	CPU             CPUInventory              `json:"cpu"`
+	Memory          MemoryInventory           `json:"memory"`
+	Installation    RuntimeInstallationReport `json:"installation"`
+	Rooms           []RoomInventoryReport     `json:"rooms"`
+	Processes       []ShardProcessReport      `json:"processes"`
+	Warnings        []string                  `json:"warnings"`
+}
+
 // CreateMessage 创建新消息
 func CreateMessage(msgType MessageType, agentID string, payload interface{}) (*Message, error) {
 	payloadBytes, err := json.Marshal(payload)

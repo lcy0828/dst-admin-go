@@ -191,6 +191,9 @@ func initApplication(manageBackground bool) (*Application, error) {
 		hooks.workers = append(hooks.workers, func(ctx context.Context) {
 			agentService.Watch(ctx, 5*time.Second, jobService.Notify)
 		})
+		hooks.workers = append(hooks.workers, func(ctx context.Context) {
+			agentService.WatchInventories(ctx, 60*time.Second, jobService.Notify)
+		})
 	}
 	var systemStatusProvider systemstatus.Provider = systemstatus.NewLocalProvider("")
 	if driver := os.Getenv("DST_ADMIN_TEST_SYSTEM_STATUS"); driver != "" {

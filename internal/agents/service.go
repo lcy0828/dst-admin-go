@@ -90,6 +90,9 @@ func (s *Service) SaveRuntimeConfig(agentID string, input RuntimeConfig) (Runtim
 	if err != nil {
 		return RuntimeTarget{}, err
 	}
+	if err := s.store.DeleteInventory(agentID); err != nil {
+		return RuntimeTarget{}, err
+	}
 	return runtimeTargetFromAgent(agent, config, true), nil
 }
 
@@ -97,7 +100,10 @@ func (s *Service) DeleteRuntimeConfig(agentID string) error {
 	if _, err := s.Agent(agentID); err != nil {
 		return err
 	}
-	return s.store.DeleteRuntimeConfig(agentID)
+	if err := s.store.DeleteRuntimeConfig(agentID); err != nil {
+		return err
+	}
+	return s.store.DeleteInventory(agentID)
 }
 
 func (s *Service) localRuntimeTarget() RuntimeTarget {
@@ -177,6 +183,9 @@ func (s *Service) Agents() ([]Agent, bool, error) {
 	if syncErr != nil && len(items) == 0 {
 		return nil, s.transport.Available(), syncErr
 	}
+	for index := range items {
+		items[index] = s.decorateAgent(items[index])
+	}
 	return items, s.transport.Available(), nil
 }
 
@@ -185,7 +194,11 @@ func (s *Service) Agent(id string) (Agent, error) {
 		return Agent{}, ErrAgentNotFound
 	}
 	_, _ = s.Sync()
-	return s.store.Agent(id)
+	item, err := s.store.Agent(id)
+	if err != nil {
+		return Agent{}, err
+	}
+	return s.decorateAgent(item), nil
 }
 
 func (s *Service) Forget(id string) error {

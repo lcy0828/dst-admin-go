@@ -50,8 +50,11 @@ func TestAgentSyncOfflineProtectionAndForget(t *testing.T) {
 		t.Fatalf("agents=%#v available=%v err=%v", items, available, err)
 	}
 	primary, err := service.Agent("agent-primary")
-	if err != nil || primary.Status != StatusOnline || primary.Metrics.CPUCount != 8 || primary.Version == "" {
+	if err != nil || primary.Status != StatusOnline || primary.Metrics.LogicalProcessors != 16 || primary.Metrics.PhysicalCores != 8 || primary.Version == "" {
 		t.Fatalf("primary=%#v err=%v", primary, err)
+	}
+	if primary.Capacity.State != CapacityAvailable || primary.Capacity.RecommendedShardLimit != 7 || primary.Capacity.AvailableSlots != 5 {
+		t.Fatalf("primary capacity=%#v", primary.Capacity)
 	}
 	if err := service.Forget(primary.ID); !errors.Is(err, ErrAgentOnline) {
 		t.Fatalf("forget online error=%v", err)
@@ -187,6 +190,81 @@ func TestAgentInterruptedCommandRecovery(t *testing.T) {
 	commands, err := service.Commands(CommandFilter{Limit: 25})
 	if err != nil || len(commands.Items) != 1 || commands.Items[0].Status != CommandFailed || !strings.Contains(commands.Items[0].Error, "服务重启") {
 		t.Fatalf("commands=%#v err=%v", commands, err)
+	}
+}
+
+func TestAgentInventoryRefreshCapacityAndFreshness(t *testing.T) {
+	service, _, jobService, transport := newAgentTestService(t)
+	config := RuntimeConfig{
+		DisplayName: "生产节点", SavePath: "/srv/dst/save", BackupPath: "/srv/dst/backups",
+		ServerPath: "/srv/dst/server", SteamCMDPath: "/usr/games/steamcmd", LuaBinary: "lua", ServerMode: "64",
+	}
+	if _, err := service.SaveRuntimeConfig("agent-primary", config); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Inventory("agent-primary"); !errors.Is(err, ErrInventoryNotFound) {
+		t.Fatalf("inventory before refresh error=%v", err)
+	}
+	job, err := service.RefreshInventory("agent-primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed := waitAgentJob(t, jobService, job.ID); completed.Status != jobs.StatusSucceeded {
+		t.Fatalf("inventory job=%#v", completed)
+	}
+	snapshot, err := service.Inventory("agent-primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Stale || len(snapshot.Inventory.Rooms) != 1 || len(snapshot.Inventory.Rooms[0].Shards) != 2 || len(snapshot.Inventory.Processes) != 2 {
+		t.Fatalf("inventory=%#v", snapshot)
+	}
+	if snapshot.Capacity.State != CapacityAvailable || snapshot.Capacity.RecommendedShardLimit != 7 || snapshot.Capacity.AvailableSlots != 5 {
+		t.Fatalf("capacity=%#v", snapshot.Capacity)
+	}
+
+	service.now = func() time.Time { return snapshot.ReceivedAt.Add(2 * time.Minute) }
+	stale, err := service.Inventory("agent-primary")
+	if err != nil || !stale.Stale || stale.StaleReason != "report_expired" || stale.Capacity.State != CapacityUnknown {
+		t.Fatalf("stale inventory=%#v err=%v", stale, err)
+	}
+
+	transport.mu.Lock()
+	value := transport.snapshots["agent-primary"]
+	value.Status = StatusOffline
+	transport.snapshots["agent-primary"] = value
+	transport.mu.Unlock()
+	if _, err := service.RefreshInventory("agent-primary"); !errors.Is(err, ErrAgentOffline) {
+		t.Fatalf("offline refresh error=%v", err)
+	}
+}
+
+func TestCapacityUsesOnePhysicalCorePerShardBudget(t *testing.T) {
+	tests := []struct {
+		name     string
+		logical  int
+		physical int
+		running  int
+		stale    bool
+		state    CapacityState
+		limit    int
+	}{
+		{name: "available", logical: 16, physical: 8, running: 6, state: CapacityAvailable, limit: 7},
+		{name: "full", logical: 16, physical: 8, running: 7, state: CapacityFull, limit: 7},
+		{name: "overcommitted", logical: 16, physical: 8, running: 8, state: CapacityOvercommitted, limit: 7},
+		{name: "estimated physical cores", logical: 12, running: 4, state: CapacityAvailable, limit: 5},
+		{name: "stale", logical: 16, physical: 8, running: 2, stale: true, state: CapacityUnknown},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := capacityFor(test.logical, test.physical, false, test.running, test.stale)
+			if value.State != test.state || value.RecommendedShardLimit != test.limit {
+				t.Fatalf("capacity=%#v", value)
+			}
+			if test.physical == 0 && !test.stale && !value.PhysicalCoreEstimated {
+				t.Fatalf("estimated capacity=%#v", value)
+			}
+		})
 	}
 }
 

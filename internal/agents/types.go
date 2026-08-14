@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"dont/shared"
 )
 
 var (
@@ -16,6 +18,7 @@ var (
 	ErrUnsupportedAction    = errors.New("agent action is not supported")
 	ErrConfirmationRequired = errors.New("agent key rotation confirmation is required")
 	ErrRuntimeNotConfigured = errors.New("agent runtime is not configured")
+	ErrInventoryNotFound    = errors.New("agent runtime inventory not found")
 )
 
 type Status string
@@ -43,10 +46,38 @@ const (
 )
 
 type Metrics struct {
-	CPUCount      int   `json:"cpuCount,omitempty"`
-	MemoryUsed    int64 `json:"memoryUsed,omitempty"`
-	MemoryTotal   int64 `json:"memoryTotal,omitempty"`
-	UptimeSeconds int64 `json:"uptimeSeconds,omitempty"`
+	CPUCount              int        `json:"cpuCount,omitempty"`
+	LogicalProcessors     int        `json:"logicalProcessors,omitempty"`
+	PhysicalCores         int        `json:"physicalCores,omitempty"`
+	PhysicalCoreSource    string     `json:"physicalCoreSource,omitempty"`
+	PhysicalCoreEstimated bool       `json:"physicalCoreEstimated"`
+	RunningShardCount     int        `json:"runningShardCount"`
+	MemoryUsed            int64      `json:"memoryUsed,omitempty"`
+	MemoryTotal           int64      `json:"memoryTotal,omitempty"`
+	MemoryAvailable       int64      `json:"memoryAvailable,omitempty"`
+	UptimeSeconds         int64      `json:"uptimeSeconds,omitempty"`
+	ObservedAt            *time.Time `json:"observedAt,omitempty"`
+}
+
+type CapacityState string
+
+const (
+	CapacityAvailable     CapacityState = "available"
+	CapacityFull          CapacityState = "full"
+	CapacityOvercommitted CapacityState = "overcommitted"
+	CapacityUnknown       CapacityState = "unknown"
+)
+
+type Capacity struct {
+	State                 CapacityState `json:"state"`
+	LogicalProcessors     int           `json:"logicalProcessors"`
+	PhysicalCores         int           `json:"physicalCores"`
+	PhysicalCoreEstimated bool          `json:"physicalCoreEstimated"`
+	ReservedPhysicalCores int           `json:"reservedPhysicalCores"`
+	RecommendedShardLimit int           `json:"recommendedShardLimit"`
+	RunningShards         int           `json:"runningShards"`
+	AvailableSlots        int           `json:"availableSlots"`
+	Message               string        `json:"message"`
 }
 
 type Agent struct {
@@ -61,6 +92,9 @@ type Agent struct {
 	LastReportAt  *time.Time             `json:"lastReportAt,omitempty"`
 	Capabilities  []string               `json:"capabilities"`
 	Metrics       Metrics                `json:"metrics"`
+	Capacity      Capacity               `json:"capacity"`
+	MetricsStale  bool                   `json:"metricsStale"`
+	StaleReason   string                 `json:"staleReason,omitempty"`
 	Details       map[string]interface{} `json:"details"`
 	CreatedAt     time.Time              `json:"createdAt"`
 	UpdatedAt     time.Time              `json:"updatedAt"`
@@ -200,10 +234,21 @@ type ExecutionResult struct {
 	ExitCode int
 }
 
+type InventorySnapshot struct {
+	AgentID     string                        `json:"agentId"`
+	Inventory   shared.RuntimeInventoryReport `json:"inventory"`
+	Capacity    Capacity                      `json:"capacity"`
+	ObservedAt  time.Time                     `json:"observedAt"`
+	ReceivedAt  time.Time                     `json:"receivedAt"`
+	Stale       bool                          `json:"stale"`
+	StaleReason string                        `json:"staleReason,omitempty"`
+}
+
 type Transport interface {
 	Available() bool
 	Snapshots() ([]TransportSnapshot, error)
 	Execute(context.Context, string, Action, int) (ExecutionResult, error)
+	Inventory(context.Context, string, RuntimeConfig, int) (shared.RuntimeInventoryReport, error)
 	CurrentKey() (string, error)
 	RotateKey(context.Context) (string, error)
 }
