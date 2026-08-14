@@ -519,6 +519,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	}
 	var updateRunner gameupdate.CommandRunner = gameupdate.ExecRunner{}
 	var latestChecker gameupdate.LatestChecker = gameupdate.NewSteamVersionChecker()
+	var officialReleaseChecker gameupdate.OfficialReleaseChecker = gameupdate.NewKleiReleaseChecker()
 	if driver := os.Getenv("DST_ADMIN_TEST_UPDATE"); driver != "" {
 		if os.Getenv("DST_ADMIN_ENV") != "test" || driver != "memory" {
 			return nil, fmt.Errorf("DST_ADMIN_TEST_UPDATE is only available as memory in the test environment")
@@ -529,9 +530,13 @@ func initApplication(manageBackground bool) (*Application, error) {
 		}
 		updateRunner = gameupdate.NewMemoryRunner(serverInstallRoot, version)
 		latestChecker = gameupdate.NewMemoryLatestChecker(version)
+		officialReleaseChecker = nil
 	}
 	gameUpdateService, err := gameupdate.NewService(
-		gameupdate.Config{ServerPath: serverExecutablePath, SteamCMDPath: steamCMDPath},
+		gameupdate.Config{
+			ServerPath: serverExecutablePath, SteamCMDPath: steamCMDPath,
+			OfficialReleaseChecker: officialReleaseChecker,
+		},
 		roomService, shardControl, backupService, gameUpdateStore, updateRunner, latestChecker, runtimeAuditService,
 	)
 	if err != nil {

@@ -3,18 +3,30 @@ package gameupdate
 import "time"
 
 type VersionReport struct {
-	Installed         bool      `json:"installed"`
-	AppID             string    `json:"appId"`
-	LocalVersion      string    `json:"localVersion,omitempty"`
-	LatestVersion     string    `json:"latestVersion,omitempty"`
-	UpToDate          *bool     `json:"upToDate,omitempty"`
-	InstallPath       string    `json:"installPath"`
-	UpdateMethod      string    `json:"updateMethod"`
-	UpdateSupported   bool      `json:"updateSupported"`
-	SteamCMDAvailable bool      `json:"steamcmdAvailable"`
-	SteamCMDPath      string    `json:"steamcmdPath,omitempty"`
-	CheckError        string    `json:"checkError,omitempty"`
-	CheckedAt         time.Time `json:"checkedAt"`
+	Installed          bool             `json:"installed"`
+	AppID              string           `json:"appId"`
+	LocalVersion       string           `json:"localVersion,omitempty"`
+	LatestVersion      string           `json:"latestVersion,omitempty"`
+	UpToDate           *bool            `json:"upToDate,omitempty"`
+	InstallPath        string           `json:"installPath"`
+	UpdateMethod       string           `json:"updateMethod"`
+	UpdateSupported    bool             `json:"updateSupported"`
+	SteamCMDAvailable  bool             `json:"steamcmdAvailable"`
+	SteamCMDPath       string           `json:"steamcmdPath,omitempty"`
+	CheckError         string           `json:"checkError,omitempty"`
+	OfficialRelease    *OfficialRelease `json:"officialRelease,omitempty"`
+	OfficialCheckError string           `json:"officialCheckError,omitempty"`
+	CheckedAt          time.Time        `json:"checkedAt"`
+}
+
+type OfficialRelease struct {
+	Version     string    `json:"version"`
+	ReleaseID   string    `json:"releaseId"`
+	PublishedAt time.Time `json:"publishedAt"`
+	URL         string    `json:"url"`
+	Source      string    `json:"source"`
+	CheckedAt   time.Time `json:"checkedAt"`
+	Stale       bool      `json:"stale"`
 }
 
 type UpdateRequest struct {

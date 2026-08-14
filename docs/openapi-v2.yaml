@@ -1668,10 +1668,10 @@ paths:
     get:
       tags: [Game]
       operationId: getGameVersion
-      summary: Inspect the local DST build, latest Steam build, and update capability
+      summary: Inspect the local Steam build, Steam update state, official Klei PC release, and update capability
       responses:
         "200":
-          description: Version report; checkError is populated when Steam is temporarily unreachable
+          description: Version report; Steam and Klei failures are reported independently
           content:
             application/json:
               schema:
@@ -4482,9 +4482,40 @@ components:
           type: string
         checkError:
           type: string
+          description: Steam update check error; local installation data remains available
+        officialRelease:
+          $ref: "#/components/schemas/OfficialGameRelease"
+        officialCheckError:
+          type: string
+          description: Klei RSS check error; officialRelease may contain the last successful stale result
         checkedAt:
           type: string
           format: date-time
+    OfficialGameRelease:
+      type: object
+      additionalProperties: false
+      required: [version, releaseId, publishedAt, url, source, checkedAt, stale]
+      properties:
+        version:
+          type: string
+          description: Official DST PC game version published by Klei
+        releaseId:
+          type: string
+          description: Klei forum release record identifier
+        publishedAt:
+          type: string
+          format: date-time
+        url:
+          type: string
+          format: uri
+        source:
+          type: string
+          enum: [klei-forums-rss]
+        checkedAt:
+          type: string
+          format: date-time
+        stale:
+          type: boolean
     GameVersionEnvelope:
       type: object
       required: [data, error, meta]

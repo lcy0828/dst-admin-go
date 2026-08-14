@@ -116,6 +116,18 @@ func (c *recordingLatest) Check(_ context.Context, appID, local string) (string,
 	return local, true, nil
 }
 
+type latestCheckerFunc func(context.Context, string, string) (string, bool, error)
+
+func (f latestCheckerFunc) Check(ctx context.Context, appID, local string) (string, bool, error) {
+	return f(ctx, appID, local)
+}
+
+type officialReleaseCheckerFunc func(context.Context) (OfficialRelease, error)
+
+func (f officialReleaseCheckerFunc) Check(ctx context.Context) (OfficialRelease, error) {
+	return f(ctx)
+}
+
 func newUpdateService(t *testing.T, runner CommandRunner) (*Service, *Store, updateCatalog, *updateControl, *[]string, string) {
 	t.Helper()
 	db, err := gorm.Open("sqlite3", ":memory:")
@@ -326,6 +338,33 @@ func TestSteamClientInstallReportsExternalUpdateAndRejectsPrepare(t *testing.T) 
 	}
 	if _, _, _, err := service.Prepare(context.Background(), UpdateRequest{Confirmation: "更新游戏"}); !errors.Is(err, ErrSteamClientManaged) {
 		t.Fatalf("prepare error = %v", err)
+	}
+}
+
+func TestVersionReportsSteamAndOfficialFailuresIndependently(t *testing.T) {
+	service, _, _, _, _, _ := newUpdateService(t, nil)
+	publishedAt := time.Date(2026, time.August, 13, 17, 11, 57, 0, time.UTC)
+	service.latest = latestCheckerFunc(func(context.Context, string, string) (string, bool, error) {
+		return "", false, errors.New("steam unavailable")
+	})
+	service.official = officialReleaseCheckerFunc(func(context.Context) (OfficialRelease, error) {
+		return OfficialRelease{Version: "747465", ReleaseID: "2783", PublishedAt: publishedAt}, nil
+	})
+	report := service.Version(context.Background())
+	if report.CheckError != "steam unavailable" || report.OfficialCheckError != "" || report.OfficialRelease == nil || report.OfficialRelease.Version != "747465" {
+		t.Fatalf("Steam failure report = %#v", report)
+	}
+
+	service.latest = staticLatest{}
+	service.official = officialReleaseCheckerFunc(func(context.Context) (OfficialRelease, error) {
+		return OfficialRelease{Version: "747465", ReleaseID: "2783", PublishedAt: publishedAt, Stale: true}, errors.New("Klei unavailable")
+	})
+	report = service.Version(context.Background())
+	if report.CheckError != "" || report.LatestVersion != "200" || report.UpToDate == nil || *report.UpToDate {
+		t.Fatalf("Steam success report = %#v", report)
+	}
+	if report.OfficialCheckError != "Klei unavailable" || report.OfficialRelease == nil || !report.OfficialRelease.Stale {
+		t.Fatalf("official failure report = %#v", report)
 	}
 }
 

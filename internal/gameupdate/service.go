@@ -56,10 +56,11 @@ func (ExecRunner) Run(ctx context.Context, executable string, arguments []string
 }
 
 type Config struct {
-	ServerPath   string
-	SteamCMDPath string
-	AppID        string
-	UpdateMethod string
+	ServerPath             string
+	SteamCMDPath           string
+	AppID                  string
+	UpdateMethod           string
+	OfficialReleaseChecker OfficialReleaseChecker
 }
 
 type plannedWorld struct {
@@ -78,6 +79,7 @@ type Service struct {
 	store        *Store
 	runner       CommandRunner
 	latest       LatestChecker
+	official     OfficialReleaseChecker
 	now          func() time.Time
 	pollInterval time.Duration
 	stopTimeout  time.Duration
@@ -118,7 +120,8 @@ func NewService(config Config, roomCatalog RoomCatalog, control shards.Control, 
 	}
 	service := &Service{
 		config: config, rooms: roomCatalog, control: control, backups: backups, store: store, runner: runner, latest: latest,
-		now: time.Now, pollInterval: 500 * time.Millisecond, stopTimeout: 60 * time.Second, startTimeout: 20 * time.Second,
+		official: config.OfficialReleaseChecker,
+		now:      time.Now, pollInterval: 500 * time.Millisecond, stopTimeout: 60 * time.Second, startTimeout: 20 * time.Second,
 	}
 	if len(audits) > 0 {
 		service.audit = audits[0]
@@ -138,16 +141,50 @@ func (s *Service) Version(ctx context.Context) VersionReport {
 	if queryVersion == "" {
 		queryVersion = "0"
 	}
-	latest, upToDate, err := s.latest.Check(ctx, s.config.AppID, queryVersion)
-	if err != nil {
-		report.CheckError = err.Error()
-		return report
+	type steamResult struct {
+		latest   string
+		upToDate bool
+		err      error
 	}
-	report.LatestVersion = latest
-	if report.LatestVersion == "" && upToDate {
-		report.LatestVersion = local
+	steamResults := make(chan steamResult, 1)
+	go func() {
+		latest, upToDate, err := s.latest.Check(ctx, s.config.AppID, queryVersion)
+		steamResults <- steamResult{latest: latest, upToDate: upToDate, err: err}
+	}()
+
+	type officialResult struct {
+		release OfficialRelease
+		err     error
 	}
-	report.UpToDate = &upToDate
+	var officialResults chan officialResult
+	if s.official != nil {
+		officialResults = make(chan officialResult, 1)
+		go func() {
+			release, err := s.official.Check(ctx)
+			officialResults <- officialResult{release: release, err: err}
+		}()
+	}
+
+	steam := <-steamResults
+	if steam.err != nil {
+		report.CheckError = steam.err.Error()
+	} else {
+		report.LatestVersion = steam.latest
+		if report.LatestVersion == "" && steam.upToDate {
+			report.LatestVersion = local
+		}
+		report.UpToDate = &steam.upToDate
+	}
+	if officialResults != nil {
+		official := <-officialResults
+		if official.release.Version != "" {
+			release := official.release
+			report.OfficialRelease = &release
+		}
+		if official.err != nil {
+			report.OfficialCheckError = official.err.Error()
+		}
+	}
 	return report
 }
 
