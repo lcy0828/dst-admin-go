@@ -53,6 +53,7 @@ type securityRecord struct {
 
 type runtimeRecord struct {
 	AgentID             string `gorm:"type:varchar(128);primary_key"`
+	InstallationID      string `gorm:"type:varchar(64);not null;default:'default'"`
 	DisplayName         string `gorm:"type:varchar(100);not null"`
 	SavePath            string `gorm:"type:text;not null"`
 	BackupPath          string `gorm:"type:text;not null"`
@@ -270,7 +271,7 @@ func (s *Store) SaveRuntimeConfig(agentID string, config RuntimeConfig) (Runtime
 			return RuntimeConfig{}, err
 		}
 	} else if err := s.db.Table(s.runtimeTable).Where("agent_id = ?", agentID).Updates(map[string]interface{}{
-		"display_name": record.DisplayName, "save_path": record.SavePath, "backup_path": record.BackupPath,
+		"installation_id": record.InstallationID, "display_name": record.DisplayName, "save_path": record.SavePath, "backup_path": record.BackupPath,
 		"server_path": record.ServerPath, "ugc_path": record.UGCPath, "steam_cmd_path": record.SteamCMDPath,
 		"workshop_content_path": record.WorkshopContentPath, "lua_binary": record.LuaBinary,
 		"lua_fallback_path": record.LuaFallbackPath, "server_mode": record.ServerMode, "updated_at": now,
@@ -500,7 +501,7 @@ func commandFromRecord(record commandRecord) Command {
 
 func runtimeRecordFromConfig(agentID string, config RuntimeConfig) runtimeRecord {
 	return runtimeRecord{
-		AgentID: agentID, DisplayName: config.DisplayName, SavePath: config.SavePath, BackupPath: config.BackupPath,
+		AgentID: agentID, InstallationID: config.InstallationID, DisplayName: config.DisplayName, SavePath: config.SavePath, BackupPath: config.BackupPath,
 		ServerPath: config.ServerPath, UGCPath: config.UGCPath, SteamCMDPath: config.SteamCMDPath,
 		WorkshopContentPath: config.WorkshopContentPath, LuaBinary: config.LuaBinary,
 		LuaFallbackPath: config.LuaFallbackPath, ServerMode: config.ServerMode,
@@ -510,7 +511,7 @@ func runtimeRecordFromConfig(agentID string, config RuntimeConfig) runtimeRecord
 func runtimeConfigFromRecord(record runtimeRecord) RuntimeConfig {
 	updatedAt := record.UpdatedAt.UTC()
 	return RuntimeConfig{
-		DisplayName: record.DisplayName, SavePath: record.SavePath, BackupPath: record.BackupPath,
+		InstallationID: nonEmpty(record.InstallationID, "default"), DisplayName: record.DisplayName, SavePath: record.SavePath, BackupPath: record.BackupPath,
 		ServerPath: record.ServerPath, UGCPath: record.UGCPath, SteamCMDPath: record.SteamCMDPath,
 		WorkshopContentPath: record.WorkshopContentPath, LuaBinary: record.LuaBinary,
 		LuaFallbackPath: record.LuaFallbackPath, ServerMode: record.ServerMode, UpdatedAt: &updatedAt,

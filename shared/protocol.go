@@ -66,10 +66,11 @@ type RegisterAckPayload struct {
 
 // CommandPayload 是命令消息的负载
 type CommandPayload struct {
-	CommandID string `json:"command_id"` // 命令ID
-	Type      string `json:"type"`       // 命令类型: "exec"（服务端与 Agent 均执行白名单校验）
-	Content   string `json:"content"`    // 命令内容
-	Timeout   int    `json:"timeout"`    // 超时时间(秒)
+	CommandID      string                 `json:"command_id"` // 命令ID
+	Type           string                 `json:"type"`       // 固定领域动作；不接受任意 Shell
+	Content        string                 `json:"content,omitempty"`
+	ShardOperation *ShardOperationRequest `json:"shard_operation,omitempty"`
+	Timeout        int                    `json:"timeout"` // 超时时间(秒)
 }
 
 // CommandResponsePayload 是命令响应消息的负载
@@ -89,6 +90,69 @@ type ReportDataPayload struct {
 }
 
 const RuntimeInventoryProtocolVersion = 1
+
+const ShardOperationProtocolVersion = 1
+
+type ShardAction string
+
+const (
+	ShardActionStatus  ShardAction = "shard.status"
+	ShardActionStart   ShardAction = "shard.start"
+	ShardActionStop    ShardAction = "shard.stop"
+	ShardActionRestart ShardAction = "shard.restart"
+	ShardActionSave    ShardAction = "shard.save"
+)
+
+// ShardOperationRequest contains identifiers only. Runtime paths are resolved
+// from the Agent's local trusted installation registry.
+type ShardOperationRequest struct {
+	ProtocolVersion  int         `json:"protocol_version"`
+	OperationID      string      `json:"operation_id"`
+	OperationKey     string      `json:"operation_key"`
+	InstallationID   string      `json:"installation_id"`
+	Action           ShardAction `json:"action"`
+	Cluster          string      `json:"cluster"`
+	Shard            string      `json:"shard"`
+	TopologyRevision string      `json:"topology_revision"`
+	LeaseID          string      `json:"lease_id,omitempty"`
+	FencingToken     uint64      `json:"fencing_token,omitempty"`
+	LeaseExpiresAt   *time.Time  `json:"lease_expires_at,omitempty"`
+}
+
+type ShardRuntimeStatus struct {
+	State         string `json:"state"`
+	Code          string `json:"code,omitempty"`
+	Message       string `json:"message,omitempty"`
+	SessionExists bool   `json:"session_exists"`
+}
+
+type ShardOperationResult struct {
+	ProtocolVersion int                `json:"protocol_version"`
+	OperationID     string             `json:"operation_id"`
+	OperationKey    string             `json:"operation_key"`
+	InstallationID  string             `json:"installation_id"`
+	Action          ShardAction        `json:"action"`
+	Cluster         string             `json:"cluster"`
+	Shard           string             `json:"shard"`
+	FencingToken    uint64             `json:"fencing_token,omitempty"`
+	Status          ShardRuntimeStatus `json:"status"`
+	Message         string             `json:"message,omitempty"`
+	Idempotent      bool               `json:"idempotent"`
+	ObservedAt      time.Time          `json:"observed_at"`
+}
+
+func IsShardAction(value ShardAction) bool {
+	switch value {
+	case ShardActionStatus, ShardActionStart, ShardActionStop, ShardActionRestart, ShardActionSave:
+		return true
+	default:
+		return false
+	}
+}
+
+func ShardActionMutates(value ShardAction) bool {
+	return value != ShardActionStatus && IsShardAction(value)
+}
 
 // RuntimeInventoryRequest contains controller-managed paths interpreted by
 // the Agent. Inventory collection is read-only and rejects relative paths.

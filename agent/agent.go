@@ -27,7 +27,7 @@ import (
 
 // 常量
 const (
-	AgentVersion = "2.1.0"
+	AgentVersion = "2.2.0"
 	// 心跳间隔
 	HeartbeatInterval = 30 * time.Second
 	// 重连间隔
@@ -60,15 +60,20 @@ type Agent struct {
 	reportInterval time.Duration
 	reportMutex    sync.Mutex
 	keyManager     *shared.KeyManager // 添加密钥管理器
+	shardState     *shardOperationState
+	shardRuntime   shardRuntimeFactory
+	now            func() time.Time
 }
 
 // Config 代理配置
 type Config struct {
-	ServerURL      string        // 服务器WebSocket URL
-	AgentID        string        // 代理唯一标识
-	ReportInterval time.Duration // 主动上报间隔
-	SecurityKey    string        // 通信安全密钥
-	KeyFile        string        // 密钥存储文件路径
+	ServerURL            string        // 服务器WebSocket URL
+	AgentID              string        // 代理唯一标识
+	ReportInterval       time.Duration // 主动上报间隔
+	SecurityKey          string        // 通信安全密钥
+	KeyFile              string        // 密钥存储文件路径
+	RuntimeInstallations []RuntimeInstallation
+	OperationStateFile   string
 }
 
 func normalizedAgentURL(raw string) (string, error) {
@@ -133,6 +138,7 @@ func NewAgent(config *Config) (*Agent, error) {
 		reconnecting:   false,
 		stopChan:       make(chan struct{}),
 		reportInterval: config.ReportInterval,
+		now:            time.Now,
 	}
 
 	// 从配置文件加载配置
@@ -151,6 +157,29 @@ func NewAgent(config *Config) (*Agent, error) {
 			config.SecurityKey = key
 		}
 	}
+	if len(config.RuntimeInstallations) == 0 {
+		installations, runtimeErr := loadRuntimeInstallations(config.KeyFile)
+		if runtimeErr != nil {
+			log.Printf("警告: 无法加载受信 DST 安装配置: %v", runtimeErr)
+		} else {
+			config.RuntimeInstallations = installations
+		}
+	} else {
+		installations, runtimeErr := normalizeRuntimeInstallations(config.RuntimeInstallations)
+		if runtimeErr != nil {
+			return nil, runtimeErr
+		}
+		config.RuntimeInstallations = installations
+	}
+	if config.OperationStateFile == "" {
+		config.OperationStateFile = config.KeyFile + ".runtime-state.json"
+	}
+	state, err := loadShardOperationState(config.OperationStateFile)
+	if err != nil {
+		return nil, fmt.Errorf("加载分片操作状态失败: %w", err)
+	}
+	agent.shardState = state
+	agent.shardRuntime = newTmuxShardRuntime
 
 	return agent, nil
 }
@@ -678,9 +707,26 @@ func (a *Agent) handleCommand(msg *shared.Message) {
 		output, errMsg, exitCode = a.executeArgumentCommand(cmdPayload.Content, cmdPayload.Timeout)
 		success = exitCode == 0 && errMsg == ""
 	default:
-		errMsg = fmt.Sprintf("不支持的命令类型: %s", cmdPayload.Type)
-		success = false
-		exitCode = 1
+		if shared.IsShardAction(shared.ShardAction(cmdPayload.Type)) {
+			result, operationErr := a.executeShardOperation(cmdPayload.Type, cmdPayload.ShardOperation, cmdPayload.Timeout)
+			encoded, encodeErr := json.Marshal(result)
+			if encodeErr != nil {
+				errMsg = encodeErr.Error()
+			} else {
+				output = string(encoded)
+			}
+			if operationErr != nil {
+				errMsg = operationErr.Error()
+			}
+			success = operationErr == nil && encodeErr == nil
+			if !success {
+				exitCode = 1
+			}
+		} else {
+			errMsg = fmt.Sprintf("不支持的命令类型: %s", cmdPayload.Type)
+			success = false
+			exitCode = 1
+		}
 	}
 
 	// 创建命令响应
@@ -958,6 +1004,13 @@ func (a *Agent) handlePassiveReportRequest(msg *shared.Message) {
 // 收集系统信息
 func (a *Agent) collectSystemInfo() map[string]interface{} {
 	cpuInfo, memoryInfo := collectHostResources()
+	capabilities := []string{
+		"system.report", "command.exec", "disk.inspect",
+		"runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read",
+	}
+	if len(a.Config.RuntimeInstallations) > 0 && runtime.GOOS != "windows" {
+		capabilities = append(capabilities, "shard.control.v1")
+	}
 	info := map[string]interface{}{
 		"hostname":      "unknown",
 		"os":            runtime.GOOS,
@@ -965,11 +1018,8 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 		"agent_version": AgentVersion,
 		"cpu_count":     cpuInfo.LogicalProcessors,
 		"cpu":           cpuInfo,
-		"capabilities": []string{
-			"system.report", "command.exec", "disk.inspect",
-			"runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read",
-		},
-		"timestamp": time.Now().Unix(),
+		"capabilities":  capabilities,
+		"timestamp":     time.Now().Unix(),
 	}
 
 	hostname, err := os.Hostname()

@@ -199,6 +199,33 @@ func TestAgentCommandsPersistSuccessAndFailure(t *testing.T) {
 	}
 }
 
+func TestExecuteShardUsesConfiguredInstallationAndTypedTransport(t *testing.T) {
+	service, _, _, _ := newAgentTestService(t)
+	_, err := service.SaveRuntimeConfig("agent-primary", RuntimeConfig{
+		InstallationID: "primary", DisplayName: "生产节点", SavePath: "/srv/dst/save", ServerPath: "/srv/dst/server", ServerMode: "64",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().UTC().Add(5 * time.Minute)
+	request := shared.ShardOperationRequest{
+		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: "operation-1", OperationKey: "key-1",
+		Action: shared.ShardActionStart, Cluster: "Cluster_1", Shard: "Master", TopologyRevision: "revision-1",
+		LeaseID: "lease-1", FencingToken: 1, LeaseExpiresAt: &expires,
+	}
+	result, err := service.ExecuteShard(context.Background(), "agent:agent-primary", request, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Result.InstallationID != "primary" || result.Result.Action != shared.ShardActionStart || result.Result.Status.State != "running" {
+		t.Fatalf("result=%#v", result)
+	}
+	request.InstallationID = "other"
+	if _, err := service.ExecuteShard(context.Background(), "agent:agent-primary", request, 30); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("mismatched installation error=%v", err)
+	}
+}
+
 func TestAgentSecurityMasksAndRotatesOnce(t *testing.T) {
 	service, _, _, transport := newAgentTestService(t)
 	before, _ := transport.CurrentKey()

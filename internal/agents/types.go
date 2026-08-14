@@ -118,6 +118,7 @@ const (
 // RuntimeConfig contains paths interpreted on the target machine. Remote
 // values are never merged into the controller's local app.conf settings.
 type RuntimeConfig struct {
+	InstallationID      string     `json:"installationId"`
 	DisplayName         string     `json:"displayName"`
 	SavePath            string     `json:"savePath"`
 	BackupPath          string     `json:"backupPath"`
@@ -245,6 +246,11 @@ type ExecutionResult struct {
 	ExitCode int
 }
 
+type ShardExecutionResult struct {
+	RemoteID string
+	Result   shared.ShardOperationResult
+}
+
 type InventorySnapshot struct {
 	AgentID     string                        `json:"agentId"`
 	Inventory   shared.RuntimeInventoryReport `json:"inventory"`
@@ -259,6 +265,7 @@ type Transport interface {
 	Available() bool
 	Snapshots() ([]TransportSnapshot, error)
 	Execute(context.Context, string, Action, int) (ExecutionResult, error)
+	ExecuteShard(context.Context, string, shared.ShardOperationRequest, int) (ShardExecutionResult, error)
 	Inventory(context.Context, string, RuntimeConfig, int) (shared.RuntimeInventoryReport, error)
 	CurrentKey() (string, error)
 	RotateKey(context.Context) (string, error)

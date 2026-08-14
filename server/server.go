@@ -815,6 +815,33 @@ func (s *Server) SendCommand(agentID, commandType, content string, timeout int) 
 	if err := json.Unmarshal([]byte(content), &request); err != nil || !allowedAgentExec(request.Program, request.Arguments) {
 		return "", fmt.Errorf("Agent 参数数组命令不在白名单中")
 	}
+	return s.sendCommandPayload(agentID, shared.CommandPayload{Type: commandType, Content: content, Timeout: timeout}, content)
+}
+
+// SendShardOperation sends a fixed, structured Shard action. The request does
+// not contain paths or shell content; the Agent resolves InstallationID from
+// its local trusted registry.
+func (s *Server) SendShardOperation(agentID string, request shared.ShardOperationRequest, timeout int) (string, error) {
+	if request.ProtocolVersion != shared.ShardOperationProtocolVersion || !shared.IsShardAction(request.Action) ||
+		timeout < 5 || timeout > 300 || strings.TrimSpace(request.InstallationID) == "" ||
+		strings.TrimSpace(request.Cluster) == "" || strings.TrimSpace(request.Shard) == "" ||
+		strings.ContainsAny(request.InstallationID+request.Cluster+request.Shard+request.TopologyRevision, "\x00\r\n") {
+		return "", fmt.Errorf("Agent 分片操作请求无效")
+	}
+	if shared.ShardActionMutates(request.Action) && (request.FencingToken == 0 || request.LeaseExpiresAt == nil || strings.TrimSpace(request.LeaseID) == "") {
+		return "", fmt.Errorf("Agent 分片操作缺少租约或 fencing token")
+	}
+	content, err := json.Marshal(request)
+	if err != nil {
+		return "", err
+	}
+	requestCopy := request
+	return s.sendCommandPayload(agentID, shared.CommandPayload{
+		Type: string(request.Action), ShardOperation: &requestCopy, Timeout: timeout,
+	}, string(content))
+}
+
+func (s *Server) sendCommandPayload(agentID string, payload shared.CommandPayload, auditContent string) (string, error) {
 
 	// 查找Agent
 	s.agentMutex.RLock()
@@ -831,12 +858,7 @@ func (s *Server) SendCommand(agentID, commandType, content string, timeout int) 
 	log.Printf("为Agent %s 生成新的命令ID: %s", agentID, commandID)
 
 	// 创建命令负载
-	cmdPayload := shared.CommandPayload{
-		CommandID: commandID,
-		Type:      commandType,
-		Content:   content,
-		Timeout:   timeout,
-	}
+	payload.CommandID = commandID
 
 	// 在结果map中记录命令
 	s.commandMutex.Lock()
@@ -846,15 +868,15 @@ func (s *Server) SendCommand(agentID, commandType, content string, timeout int) 
 	s.commandResults[commandID] = &CommandResult{
 		AgentID:   agentID,
 		CommandID: commandID,
-		Type:      commandType,
-		Content:   content,
+		Type:      payload.Type,
+		Content:   auditContent,
 		StartTime: time.Now().Unix(),
 		Status:    "pending",
 	}
 	s.commandMutex.Unlock()
 
 	// 创建命令消息
-	cmdMsg, err := shared.CreateMessage(shared.TypeCommand, "server", cmdPayload)
+	cmdMsg, err := shared.CreateMessage(shared.TypeCommand, "server", payload)
 	if err != nil {
 		// 更新命令状态为失败
 		s.commandMutex.Lock()
@@ -898,7 +920,7 @@ func (s *Server) SendCommand(agentID, commandType, content string, timeout int) 
 		return "", fmt.Errorf("发送命令失败: %v", err)
 	}
 
-	log.Printf("已成功向Agent %s 发送命令: CommandID: %s, Type: %s", agentID, commandID, commandType)
+	log.Printf("已成功向Agent %s 发送命令: CommandID: %s, Type: %s", agentID, commandID, payload.Type)
 
 	// 添加额外日志，确认命令结果已保存
 	s.commandMutex.RLock()

@@ -159,6 +159,24 @@ preconditions, parameters, deadline
 
 Agent 不接受任意 Shell 字符串。路径必须落入已登记 RuntimeInstallation 的允许根目录。
 
+Agent 主机在自己的 `app.conf` 中登记受信安装，控制中心只能引用 `INSTALLATION_ID`，不能随操作覆盖路径：
+
+```ini
+[runtime]
+INSTALLATION_ID = default
+SAVE_PATH = /srv/dst/.klei/DoNotStarveTogether
+SERVER_PATH = /srv/dst/server
+UGC_PATH = /srv/dst/server/ugc_mods
+SERVER_MODE = 64
+
+[runtime.secondary]
+SAVE_PATH = /srv/dst-secondary/.klei/DoNotStarveTogether
+SERVER_PATH = /srv/dst-secondary/server
+SERVER_MODE = 64
+```
+
+`[runtime]` 默认 ID 为 `default`，额外安装使用 `[runtime.<id>]`。Agent 在启动、停止、重启或保存前重新检查 Cluster 与 Shard 名称、真实路径、`cluster.ini`、`server.ini` 和服务端路径；符号链接不能越出对应的受信 Cluster。Agent 将最高 fencing token 和最近的幂等结果持久化到私有状态文件。若进程在接收操作后、记录结果前中断，重复请求返回 `unknown`，不会盲目再次执行。
+
 ## 6. 生命周期协调
 
 房间级操作生成父计划和逐 Shard 子步骤：

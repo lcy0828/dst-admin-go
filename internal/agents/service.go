@@ -457,6 +457,10 @@ func truncateBytes(value string, maximum int) string {
 }
 
 func normalizeRuntimeConfig(config RuntimeConfig) RuntimeConfig {
+	config.InstallationID = strings.TrimSpace(config.InstallationID)
+	if config.InstallationID == "" {
+		config.InstallationID = "default"
+	}
 	config.DisplayName = strings.TrimSpace(config.DisplayName)
 	config.SavePath = strings.TrimSpace(config.SavePath)
 	config.BackupPath = strings.TrimSpace(config.BackupPath)
@@ -478,7 +482,8 @@ func normalizeRuntimeConfig(config RuntimeConfig) RuntimeConfig {
 }
 
 func validateRuntimeConfig(config RuntimeConfig, platform string) error {
-	if config.DisplayName == "" || utf8.RuneCountInString(config.DisplayName) > 100 ||
+	if !agentIDPattern.MatchString(config.InstallationID) || utf8.RuneCountInString(config.InstallationID) > 64 ||
+		config.DisplayName == "" || utf8.RuneCountInString(config.DisplayName) > 100 ||
 		config.SavePath == "" || config.ServerPath == "" ||
 		utf8.RuneCountInString(config.LuaBinary) > 255 ||
 		(config.ServerMode != "32" && config.ServerMode != "64" && config.ServerMode != "luajit") {

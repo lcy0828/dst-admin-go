@@ -27,7 +27,7 @@ func NewMemoryTransport() *MemoryTransport {
 			"agent-primary": {
 				ID: "agent-primary", Status: StatusOnline, Hostname: "林火节点", OS: "linux", Arch: "amd64", Version: "2.0.0-test",
 				IPAddresses: []string{"192.168.2.12"}, LastHeartbeat: now, LastReportAt: utcTimePointer(now),
-				Capabilities: []string{"system.report", "command.exec", "disk.inspect", "runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read"},
+				Capabilities: []string{"system.report", "command.exec", "disk.inspect", "runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read", "shard.control.v1"},
 				Metrics:      Metrics{CPUCount: 16, LogicalProcessors: 16, PhysicalCores: 8, PhysicalCoreSource: "test", RunningShardCount: 2, MemoryUsed: 3 * 1024 * 1024 * 1024, MemoryTotal: 8 * 1024 * 1024 * 1024, UptimeSeconds: 86400, ObservedAt: utcTimePointer(now)},
 				Details:      map[string]interface{}{"goVersion": "go1.25", "currentDirectory": "/opt/dst-admin-agent"},
 			},
@@ -122,6 +122,33 @@ func (m *MemoryTransport) Execute(ctx context.Context, agentID string, action Ac
 	default:
 		return ExecutionResult{ExitCode: 1}, ErrUnsupportedAction
 	}
+}
+
+func (m *MemoryTransport) ExecuteShard(ctx context.Context, agentID string, request shared.ShardOperationRequest, _ int) (ShardExecutionResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	snapshot, exists := m.snapshots[agentID]
+	if !exists || snapshot.Status != StatusOnline {
+		return ShardExecutionResult{}, ErrAgentOffline
+	}
+	select {
+	case <-ctx.Done():
+		return ShardExecutionResult{}, ctx.Err()
+	default:
+	}
+	if !shared.IsShardAction(request.Action) {
+		return ShardExecutionResult{}, ErrUnsupportedAction
+	}
+	state := "running"
+	if request.Action == shared.ShardActionStop {
+		state = "stopped"
+	}
+	return ShardExecutionResult{RemoteID: "memory-" + request.OperationID, Result: shared.ShardOperationResult{
+		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: request.OperationID, OperationKey: request.OperationKey,
+		InstallationID: request.InstallationID, Action: request.Action, Cluster: request.Cluster, Shard: request.Shard,
+		FencingToken: request.FencingToken, Status: shared.ShardRuntimeStatus{State: state, SessionExists: state == "running"},
+		Message: "测试分片操作已完成", ObservedAt: m.now().UTC(),
+	}}, nil
 }
 
 func (m *MemoryTransport) CurrentKey() (string, error) {
