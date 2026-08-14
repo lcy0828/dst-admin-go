@@ -222,6 +222,15 @@ func TestAgentInventoryRefreshCapacityAndFreshness(t *testing.T) {
 	if snapshot.Capacity.State != CapacityAvailable || snapshot.Capacity.RecommendedShardLimit != 7 || snapshot.Capacity.AvailableSlots != 5 {
 		t.Fatalf("capacity=%#v", snapshot.Capacity)
 	}
+	transport.mu.Lock()
+	value := transport.snapshots["agent-primary"]
+	value.Metrics.RunningShardCount = 0
+	transport.snapshots["agent-primary"] = value
+	transport.mu.Unlock()
+	agent, err := service.Agent("agent-primary")
+	if err != nil || agent.Capacity.RunningShards != 2 || agent.Capacity.AvailableSlots != 5 {
+		t.Fatalf("agent inventory capacity=%#v err=%v", agent.Capacity, err)
+	}
 
 	service.now = func() time.Time { return snapshot.ReceivedAt.Add(2 * time.Minute) }
 	stale, err := service.Inventory("agent-primary")
@@ -230,7 +239,7 @@ func TestAgentInventoryRefreshCapacityAndFreshness(t *testing.T) {
 	}
 
 	transport.mu.Lock()
-	value := transport.snapshots["agent-primary"]
+	value = transport.snapshots["agent-primary"]
 	value.Status = StatusOffline
 	transport.snapshots["agent-primary"] = value
 	transport.mu.Unlock()

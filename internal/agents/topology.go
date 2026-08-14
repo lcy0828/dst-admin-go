@@ -162,6 +162,16 @@ func (s *Service) decorateAgent(agent Agent) Agent {
 		agent.Metrics.RunningShardCount,
 		agent.MetricsStale,
 	)
+	if snapshot, err := s.store.Inventory(agent.ID); err == nil {
+		inventoryStale, _ := s.inventoryFreshness(agent, snapshot)
+		agent.Capacity = capacityFor(
+			snapshot.Inventory.CPU.LogicalProcessors,
+			snapshot.Inventory.CPU.PhysicalCores,
+			snapshot.Inventory.CPU.PhysicalCoreEstimated,
+			len(snapshot.Inventory.Processes),
+			inventoryStale,
+		)
+	}
 	return agent
 }
 
