@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1.7
 FROM golang:1.25-bookworm AS build
 WORKDIR /src
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates git && rm -rf /var/lib/apt/lists/*
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
@@ -13,15 +12,42 @@ RUN CGO_ENABLED=1 go build -trimpath \
     -o /out/dst-admin ./cmd/admin-api
 
 FROM debian:12-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tzdata && rm -rf /var/lib/apt/lists/* \
+ARG TARGETARCH
+ARG DEBIAN_MIRROR=http://deb.debian.org/debian
+ARG DEBIAN_SECURITY_MIRROR=http://deb.debian.org/debian-security
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN sed -i \
+        -e "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+        -e "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
+        /etc/apt/sources.list.d/debian.sources \
+    && if [ "$TARGETARCH" = "amd64" ]; then \
+        dpkg --add-architecture i386; \
+        sed -i 's/^Components: main$/Components: main contrib non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && apt-get update \
+    && if [ "$TARGETARCH" = "amd64" ]; then \
+        echo 'steamcmd steam/question select I AGREE' | debconf-set-selections; \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl lua5.1 steamcmd tmux tzdata; \
+    else \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl lua5.1 tmux tzdata; \
+    fi \
+    && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 dstadmin && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin dstadmin \
-    && install -d -o dstadmin -g dstadmin -m 0700 /var/lib/dst-admin /var/lib/dst-admin/backups /var/lib/dst-admin/maps
+    && install -d -o dstadmin -g dstadmin -m 0700 \
+        /var/lib/dst-admin \
+        /var/lib/dst-admin/backups \
+        /var/lib/dst-admin/maps \
+        /var/lib/dst-admin/unmanaged-saves \
+        /var/lib/dst-admin/unmanaged-server \
+        /var/lib/dst-admin/unmanaged-ugc \
+        /var/lib/dst-admin/workshop/steamapps/workshop/content/322330
 COPY --from=build /out/dst-admin /usr/local/bin/dst-admin
 COPY deploy/docker/config/control-plane.conf /usr/local/share/dst-admin/control-plane.conf
 COPY deploy/docker/control-plane-entrypoint.sh /usr/local/bin/control-plane-entrypoint
 USER 10001:10001
 WORKDIR /var/lib/dst-admin
-ENV DST_ADMIN_CONFIG=/var/lib/dst-admin/app.conf
+ENV DST_ADMIN_CONFIG=/var/lib/dst-admin/app.conf \
+    HOME=/var/lib/dst-admin
 EXPOSE 8000
 ENTRYPOINT ["/usr/local/bin/control-plane-entrypoint"]
 CMD ["/usr/local/bin/dst-admin", "-addr", "0.0.0.0:8000"]

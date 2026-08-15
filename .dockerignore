@@ -1,8 +1,15 @@
 .git
 .github
+.idea
 .DS_Store
+.gocache
+.gomodcache
+.tmp-*
 .tmp-runtime-lab
 go-dont.db*
+dont.exe
+dst-admin-go
+source.tar.gz
 dist
 node_modules
 coverage
