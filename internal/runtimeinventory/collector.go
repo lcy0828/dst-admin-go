@@ -89,6 +89,18 @@ func HostResources() (shared.CPUInventory, shared.MemoryInventory) {
 		LogicalProcessors: logical, PhysicalCores: physical,
 		PhysicalCoreSource: source, PhysicalCoreEstimated: estimated,
 	}
+	if threads, topologyOK := cpuTopology(logical); topologyOK {
+		cpuInfo.TopologyAvailable = true
+		cpuInfo.Threads = threads
+		groups := make(map[string]int, len(threads))
+		for _, thread := range threads {
+			key := thread.PackageID + "\x00" + thread.CoreID
+			groups[key]++
+			if groups[key] > 1 {
+				cpuInfo.SMTDetected = true
+			}
+		}
+	}
 	memoryInfo := shared.MemoryInventory{}
 	if value, memoryErr := mem.VirtualMemory(); memoryErr == nil && value != nil {
 		memoryInfo.TotalBytes = value.Total
@@ -96,6 +108,30 @@ func HostResources() (shared.CPUInventory, shared.MemoryInventory) {
 		memoryInfo.AvailableBytes = value.Available
 	}
 	return cpuInfo, memoryInfo
+}
+
+func cpuTopology(logical int) ([]shared.CPUThreadInventory, bool) {
+	values, err := cpu.Info()
+	if err != nil || len(values) == 0 {
+		return nil, false
+	}
+	seen := make(map[int]bool, len(values))
+	threads := make([]shared.CPUThreadInventory, 0, len(values))
+	for _, value := range values {
+		logicalID := int(value.CPU)
+		packageID := strings.TrimSpace(value.PhysicalID)
+		coreID := strings.TrimSpace(value.CoreID)
+		if logicalID < 0 || logicalID >= logical || packageID == "" || coreID == "" || seen[logicalID] {
+			continue
+		}
+		seen[logicalID] = true
+		threads = append(threads, shared.CPUThreadInventory{LogicalID: logicalID, PackageID: packageID, CoreID: coreID})
+	}
+	if len(threads) != logical {
+		return nil, false
+	}
+	sort.Slice(threads, func(i, j int) bool { return threads[i].LogicalID < threads[j].LogicalID })
+	return threads, true
 }
 
 func scanRooms(saveRoot string) ([]shared.RoomInventoryReport, []string, error) {

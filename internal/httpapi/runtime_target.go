@@ -13,6 +13,7 @@ var remoteRuntimeControlPrefixes = []string{
 	"/api/v2/agents",
 	"/api/v2/auth",
 	"/api/v2/jobs",
+	"/api/v2/runtime-infrastructure",
 	"/api/v2/runtime-targets",
 	"/api/v2/system/settings",
 }

@@ -189,9 +189,12 @@ type MigrationPlacement struct {
 }
 
 type storedPlacement struct {
-	WorldID         string `json:"worldId"`
-	DesiredTargetID string `json:"desiredTargetId"`
-	AppliedTargetID string `json:"appliedTargetId"`
+	WorldID            string          `json:"worldId"`
+	WorldDirectoryName string          `json:"worldDirectoryName,omitempty"`
+	WorldName          string          `json:"worldName,omitempty"`
+	WorldRole          rooms.WorldRole `json:"worldRole,omitempty"`
+	DesiredTargetID    string          `json:"desiredTargetId"`
+	AppliedTargetID    string          `json:"appliedTargetId"`
 }
 
 type record struct {

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"dont/internal/rooms"
+
 	"github.com/jinzhu/gorm"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -24,6 +26,28 @@ func newTopologyTestStore(t *testing.T) *Store {
 		t.Fatal(err)
 	}
 	return store
+}
+
+func TestStoreRetainsRemoteWorldWhenLocalDirectoryDisappears(t *testing.T) {
+	store := newTopologyTestStore(t)
+	world := rooms.World{ID: "master", DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}
+	initial, err := store.EnsureWorlds("room", []rooms.World{world})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placements := append([]storedPlacement(nil), initial.Placements...)
+	placements[0].DesiredTargetID = "agent:node"
+	placements[0].AppliedTargetID = "agent:node"
+	if _, err := store.Save("room", initial.Revision, placements); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := store.EnsureWorlds("room", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retained.Placements) != 1 || retained.Placements[0].WorldDirectoryName != "Master" || retained.Placements[0].WorldRole != rooms.WorldRoleMaster {
+		t.Fatalf("retained=%#v", retained)
+	}
 }
 
 func TestStoreEnsureReturnsPersistentCreateError(t *testing.T) {

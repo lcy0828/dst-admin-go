@@ -28,6 +28,18 @@ type fakePlacementResolver struct {
 	errByWorld      map[string]error
 }
 
+type preflightPlacementResolver struct {
+	*fakePlacementResolver
+	preflight    topology.ResourcePreflight
+	preflightErr error
+	calls        int
+}
+
+func (resolver *preflightPlacementResolver) PreflightExecution(context.Context, string, []string) (topology.ResourcePreflight, error) {
+	resolver.calls++
+	return resolver.preflight, resolver.preflightErr
+}
+
 func (resolver *fakePlacementResolver) AppliedPlacement(_ string, worldID string) (topology.ExecutionPlacement, error) {
 	if err := resolver.errByWorld[worldID]; err != nil {
 		return topology.ExecutionPlacement{}, err
@@ -594,6 +606,45 @@ func TestRoomPreflightPreventsPartialStartWhenRemoteWorldIsUnavailable(t *testin
 	}
 	if codes[masterID] != "ROOM_PREFLIGHT_ABORTED" || codes[cavesID] == "ROOM_PREFLIGHT_ABORTED" {
 		t.Fatalf("codes = %#v", codes)
+	}
+}
+
+func TestResourcePreflightPreventsEveryShardStart(t *testing.T) {
+	roomID := rooms.EncodeID("summer_2026")
+	control := &fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}}
+	operations := testOperations(control)
+	preflight := topology.ResourcePreflight{
+		Ready: false,
+		Conflicts: []topology.ResourceConflict{{
+			Code: "UDP_PORT_CONFLICT", Port: 10999, Message: "UDP 10999 已被其他 Shard 占用",
+		}},
+	}
+	resolver := &preflightPlacementResolver{
+		fakePlacementResolver: &fakePlacementResolver{applied: topology.ExecutionPlacement{AppliedTargetID: "local"}},
+		preflight:             preflight,
+		preflightErr:          &topology.ResourceConflictError{Preflight: preflight},
+	}
+	if err := operations.ConfigureDistributed(resolver, &fakeRemoteExecutor{}, &fakeLeaseService{lease: operationlease.Lease{
+		RoomID: roomID, LeaseID: "lease", OperationKey: "operation", FencingToken: 1,
+		ExpiresAt: time.Now().UTC().Add(time.Minute),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	_, runner, err := operations.Plan(ActionStart, roomID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []jobs.TargetResult
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if resolver.calls != 1 || len(control.calls) != 0 || len(results) != 2 {
+		t.Fatalf("preflight calls=%d control=%#v results=%#v", resolver.calls, control.calls, results)
+	}
+	for _, result := range results {
+		if result.Error == nil || result.Error.Code != "RESOURCE_PREFLIGHT_FAILED" || result.Error.Message != preflight.Conflicts[0].Message {
+			t.Fatalf("result=%#v", result)
+		}
 	}
 }
 

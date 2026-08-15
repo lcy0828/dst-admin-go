@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"dont/internal/rooms"
+
 	"github.com/google/uuid"
 	"github.com/jinzhu/gorm"
 )
@@ -20,30 +22,63 @@ type topologyRecord struct {
 }
 
 type Store struct {
-	db    *gorm.DB
-	table string
-	now   func() time.Time
+	db                    *gorm.DB
+	table                 string
+	providersTable        string
+	environmentsTable     string
+	networkProfilesTable  string
+	portReservationsTable string
+	cpuAllocationsTable   string
+	now                   func() time.Time
 }
 
 func NewStore(db *gorm.DB, tablePrefix string) *Store {
-	return &Store{db: db, table: strings.TrimSpace(tablePrefix) + "room_topology", now: time.Now}
+	prefix := strings.TrimSpace(tablePrefix)
+	return &Store{
+		db: db, table: prefix + "room_topology", providersTable: prefix + "runtime_provider",
+		environmentsTable: prefix + "execution_environment", networkProfilesTable: prefix + "network_profile",
+		portReservationsTable: prefix + "port_reservation", cpuAllocationsTable: prefix + "cpu_allocation", now: time.Now,
+	}
 }
 
 func (s *Store) Migrate() error {
 	if err := s.db.Table(s.table).AutoMigrate(&topologyRecord{}).Error; err != nil {
 		return fmt.Errorf("migrate room topology: %w", err)
 	}
+	for _, migration := range []struct {
+		table string
+		model interface{}
+	}{
+		{s.providersTable, &runtimeProviderRecord{}},
+		{s.environmentsTable, &executionEnvironmentRecord{}},
+		{s.networkProfilesTable, &networkProfileRecord{}},
+		{s.portReservationsTable, &portReservationRecord{}},
+		{s.cpuAllocationsTable, &cpuAllocationRecord{}},
+	} {
+		if err := s.db.Table(migration.table).AutoMigrate(migration.model).Error; err != nil {
+			return fmt.Errorf("migrate %s: %w", migration.table, err)
+		}
+	}
 	return nil
 }
 
 func (s *Store) Ensure(roomID string, worldIDs []string) (record, error) {
 	worldIDs = normalizedWorldIDs(worldIDs)
+	worlds := make([]rooms.World, 0, len(worldIDs))
+	for _, worldID := range worldIDs {
+		worlds = append(worlds, rooms.World{ID: worldID})
+	}
+	return s.EnsureWorlds(roomID, worlds)
+}
+
+func (s *Store) EnsureWorlds(roomID string, worlds []rooms.World) (record, error) {
+	worlds = normalizedWorlds(worlds)
 	for attempt := 0; attempt < 3; attempt++ {
 		current, err := s.load(roomID)
 		if gorm.IsRecordNotFoundError(err) {
-			placements := make([]storedPlacement, 0, len(worldIDs))
-			for _, worldID := range worldIDs {
-				placements = append(placements, storedPlacement{WorldID: worldID, DesiredTargetID: "local", AppliedTargetID: "local"})
+			placements := make([]storedPlacement, 0, len(worlds))
+			for _, world := range worlds {
+				placements = append(placements, placementForWorld(world))
 			}
 			now := s.now().UTC()
 			created := record{RoomID: roomID, Revision: uuid.NewString(), Placements: placements, CreatedAt: now, UpdatedAt: now}
@@ -62,7 +97,7 @@ func (s *Store) Ensure(roomID string, worldIDs []string) (record, error) {
 		if err != nil {
 			return record{}, err
 		}
-		next, changed := reconcilePlacements(current.Placements, worldIDs)
+		next, changed := reconcileWorldPlacements(current.Placements, worlds)
 		if !changed {
 			return current, nil
 		}
@@ -175,6 +210,11 @@ func normalizedPlacements(values []storedPlacement) []storedPlacement {
 	result := append([]storedPlacement(nil), values...)
 	for index := range result {
 		result[index].WorldID = strings.TrimSpace(result[index].WorldID)
+		result[index].WorldDirectoryName = strings.TrimSpace(result[index].WorldDirectoryName)
+		result[index].WorldName = strings.TrimSpace(result[index].WorldName)
+		if result[index].WorldRole != rooms.WorldRoleMaster && result[index].WorldRole != rooms.WorldRoleCaves && result[index].WorldRole != rooms.WorldRoleCustom {
+			result[index].WorldRole = ""
+		}
 		result[index].DesiredTargetID = strings.TrimSpace(result[index].DesiredTargetID)
 		result[index].AppliedTargetID = strings.TrimSpace(result[index].AppliedTargetID)
 		if result[index].DesiredTargetID == "" {
@@ -189,17 +229,34 @@ func normalizedPlacements(values []storedPlacement) []storedPlacement {
 }
 
 func reconcilePlacements(current []storedPlacement, worldIDs []string) ([]storedPlacement, bool) {
+	worldIDs = normalizedWorldIDs(worldIDs)
+	worlds := make([]rooms.World, 0, len(worldIDs))
+	for _, worldID := range worldIDs {
+		worlds = append(worlds, rooms.World{ID: worldID})
+	}
+	return reconcileWorldPlacements(current, worlds)
+}
+
+func reconcileWorldPlacements(current []storedPlacement, worlds []rooms.World) ([]storedPlacement, bool) {
 	byWorld := make(map[string]storedPlacement, len(current))
 	for _, placement := range current {
 		byWorld[placement.WorldID] = placement
 	}
-	next := make([]storedPlacement, 0, len(worldIDs))
-	for _, worldID := range worldIDs {
-		placement, exists := byWorld[worldID]
+	next := make([]storedPlacement, 0, len(worlds)+len(current))
+	for _, world := range normalizedWorlds(worlds) {
+		placement, exists := byWorld[world.ID]
 		if !exists {
-			placement = storedPlacement{WorldID: worldID, DesiredTargetID: "local", AppliedTargetID: "local"}
+			placement = placementForWorld(world)
+		} else {
+			placement = mergeWorldMetadata(placement, world)
 		}
 		next = append(next, placement)
+		delete(byWorld, world.ID)
+	}
+	for _, placement := range byWorld {
+		if placement.AppliedTargetID != localTargetID || placement.DesiredTargetID != localTargetID {
+			next = append(next, placement)
+		}
 	}
 	next = normalizedPlacements(next)
 	current = normalizedPlacements(current)
@@ -212,4 +269,38 @@ func reconcilePlacements(current []storedPlacement, worldIDs []string) ([]stored
 		}
 	}
 	return next, false
+}
+
+func normalizedWorlds(values []rooms.World) []rooms.World {
+	seen := make(map[string]bool, len(values))
+	result := make([]rooms.World, 0, len(values))
+	for _, value := range values {
+		value.ID = strings.TrimSpace(value.ID)
+		if value.ID == "" || seen[value.ID] {
+			continue
+		}
+		seen[value.ID] = true
+		result = append(result, value)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result
+}
+
+func placementForWorld(world rooms.World) storedPlacement {
+	return mergeWorldMetadata(storedPlacement{
+		WorldID: world.ID, DesiredTargetID: localTargetID, AppliedTargetID: localTargetID,
+	}, world)
+}
+
+func mergeWorldMetadata(placement storedPlacement, world rooms.World) storedPlacement {
+	if value := strings.TrimSpace(world.DirectoryName); value != "" {
+		placement.WorldDirectoryName = value
+	}
+	if value := strings.TrimSpace(world.Name); value != "" {
+		placement.WorldName = value
+	}
+	if world.Role == rooms.WorldRoleMaster || world.Role == rooms.WorldRoleCaves || world.Role == rooms.WorldRoleCustom {
+		placement.WorldRole = world.Role
+	}
+	return placement
 }

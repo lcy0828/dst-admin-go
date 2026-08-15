@@ -166,10 +166,22 @@ type RuntimeInventoryRequest struct {
 }
 
 type CPUInventory struct {
-	LogicalProcessors     int    `json:"logical_processors"`
-	PhysicalCores         int    `json:"physical_cores"`
-	PhysicalCoreSource    string `json:"physical_core_source"`
-	PhysicalCoreEstimated bool   `json:"physical_core_estimated"`
+	LogicalProcessors     int                  `json:"logical_processors"`
+	PhysicalCores         int                  `json:"physical_cores"`
+	PhysicalCoreSource    string               `json:"physical_core_source"`
+	PhysicalCoreEstimated bool                 `json:"physical_core_estimated"`
+	TopologyAvailable     bool                 `json:"topology_available"`
+	SMTDetected           bool                 `json:"smt_detected"`
+	Threads               []CPUThreadInventory `json:"threads,omitempty"`
+}
+
+// CPUThreadInventory maps one schedulable logical CPU to its physical core.
+// PackageID and CoreID are opaque platform identifiers and must be interpreted
+// together; CoreID alone is not necessarily unique across CPU packages.
+type CPUThreadInventory struct {
+	LogicalID int    `json:"logical_id"`
+	PackageID string `json:"package_id"`
+	CoreID    string `json:"core_id"`
 }
 
 type MemoryInventory struct {

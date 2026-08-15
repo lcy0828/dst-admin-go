@@ -3,6 +3,8 @@ package topology
 import (
 	"context"
 	"errors"
+	"hash/fnv"
+	"strings"
 	"testing"
 	"time"
 
@@ -351,9 +353,23 @@ func runtimeInventory(target agents.RuntimeTarget, logical, physical int, invent
 }
 
 func inventoryRoom(directory string, shards ...string) shared.RoomInventoryReport {
-	value := shared.RoomInventoryReport{Directory: directory, Shards: make([]shared.ShardInventoryReport, 0, len(shards))}
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(strings.ToLower(directory)))
+	base := 10000 + int(hash.Sum32()%1000)*20
+	value := shared.RoomInventoryReport{Directory: directory, MasterPort: base, Shards: make([]shared.ShardInventoryReport, 0, len(shards))}
 	for _, shard := range shards {
-		value.Shards = append(value.Shards, shared.ShardInventoryReport{Directory: shard})
+		offset := 7
+		role := "secondary"
+		switch strings.ToLower(shard) {
+		case "master":
+			offset, role = 1, "master"
+		case "caves":
+			offset = 4
+		}
+		value.Shards = append(value.Shards, shared.ShardInventoryReport{
+			Directory: shard, Role: role, ServerPort: base + offset,
+			AuthenticationPort: base + offset + 1, MasterServerPort: base + offset + 2,
+		})
 	}
 	return value
 }
@@ -519,5 +535,68 @@ func TestPrepareAndApplyMigrationMovesOnlyAppliedPlacement(t *testing.T) {
 	}
 	if _, err := service.ApplyMigration(room.ID, world.ID, plan.Revision, plan.TargetTargetID); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale apply error=%v", err)
+	}
+}
+
+func TestAppliedRemoteWorldSurvivesMissingLocalDirectory(t *testing.T) {
+	now := time.Now().UTC()
+	room := rooms.Room{ID: "room-remote", DirectoryName: "Cluster_Remote", Name: "远程房间", Managed: true}
+	world := rooms.World{ID: "world-master", RoomID: room.ID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster, IsMaster: true}
+	catalog := topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {world}}}
+	local := runtimeInventory(
+		agents.RuntimeTarget{ID: localTargetID, Name: "本机", Kind: agents.RuntimeKindLocal, Status: agents.RuntimeStatusReady, Online: true, Configured: true},
+		4, 4, []shared.RoomInventoryReport{inventoryRoom(room.DirectoryName, world.DirectoryName)}, nil, now,
+	)
+	remoteTarget := agents.RuntimeTarget{
+		ID: "agent:node", AgentID: "node", Name: "节点", Kind: agents.RuntimeKindAgent,
+		Status: agents.RuntimeStatusReady, Online: true, Configured: true,
+		Capabilities: []string{"runtime.migration.v1", "shard.control.v1"},
+	}
+	remote := runtimeInventory(remoteTarget, 4, 4, nil, nil, now)
+	targets := &topologyTargetCatalog{items: []agents.RuntimeTargetInventory{local, remote}}
+	service, err := NewService(catalog, targets, newTopologyTestStore(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := service.Topology(context.Background(), room.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := service.Update(context.Background(), room.ID, UpdateRequest{
+		ExpectedRevision: current.Revision,
+		Placements:       []PlacementInput{{WorldID: world.ID, TargetID: remoteTarget.ID}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := service.PrepareMigration(context.Background(), room.ID, world.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(catalog.worlds, room.ID)
+	applied, err := service.ApplyMigration(room.ID, world.ID, plan.Revision, remoteTarget.ID)
+	if err != nil {
+		t.Fatalf("apply after source directory removal: %v", err)
+	}
+	if applied.World.DirectoryName != world.DirectoryName || applied.World.Role != world.Role || applied.Revision == planned.Revision {
+		t.Fatalf("applied=%#v", applied)
+	}
+	local.Inventory.Rooms = nil
+	remote.Inventory.Rooms = []shared.RoomInventoryReport{inventoryRoom(room.DirectoryName, world.DirectoryName)}
+	targets.items = []agents.RuntimeTargetInventory{local, remote}
+	snapshot, err := service.Topology(context.Background(), room.ID)
+	if err != nil {
+		t.Fatalf("topology after source directory removal: %v", err)
+	}
+	placement := topologyPlacement(t, snapshot, world.ID)
+	if placement.AppliedTargetID != remoteTarget.ID || placement.DesiredTargetID != remoteTarget.ID || placement.WorldRole != rooms.WorldRoleMaster {
+		t.Fatalf("remote placement was not retained: %#v", placement)
+	}
+	resolved, err := service.ResolveExecution(context.Background(), room.ID, world.ID)
+	if err != nil {
+		t.Fatalf("resolve remote world without local directory: %v", err)
+	}
+	if resolved.AppliedTargetID != remoteTarget.ID || resolved.World.DirectoryName != world.DirectoryName || resolved.World.Role != rooms.WorldRoleMaster {
+		t.Fatalf("resolved remote world=%#v", resolved)
 	}
 }

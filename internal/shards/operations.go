@@ -117,6 +117,10 @@ type executionPlacementResolver interface {
 	PreviewBatchStartCapacity(context.Context, []topology.StartCapacitySelection) (topology.BatchStartCapacityPreview, error)
 }
 
+type resourceExecutionPreflight interface {
+	PreflightExecution(context.Context, string, []string) (topology.ResourcePreflight, error)
+}
+
 type remoteShardExecutor interface {
 	ExecuteShard(context.Context, string, shared.ShardOperationRequest, int) (agents.ShardExecutionResult, error)
 }
@@ -296,6 +300,15 @@ func (o *Operations) PlanWithOptions(action Action, roomID string, selectedWorld
 					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "CAPACITY_RISK_CONFIRMATION_REQUIRED", Message: "启动后将超过建议核心容量或节点容量数据未知，请确认卡顿风险"}})
 				}
 				return nil
+			}
+			if preflight, ok := o.placements.(resourceExecutionPreflight); ok {
+				if _, preflightErr := preflight.PreflightExecution(ctx, room.ID, plannedWorldIDs); preflightErr != nil {
+					code, message := resourcePreflightFailure(action, preflightErr)
+					for _, world := range currentWorlds {
+						report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: code, Message: message}})
+					}
+					return nil
+				}
 			}
 		}
 		if failures := o.preflightTargets(ctx, action, currentRoom, currentWorlds); len(failures) > 0 {
@@ -745,6 +758,8 @@ func operationErrorCode(action Action, err error) string {
 		return executionError.Code
 	}
 	switch {
+	case errors.Is(err, topology.ErrResourceConflict):
+		return "RESOURCE_PREFLIGHT_FAILED"
 	case errors.Is(err, agents.ErrAgentOffline):
 		return "AGENT_OFFLINE"
 	case errors.Is(err, agents.ErrUnsupportedAction):
@@ -754,6 +769,19 @@ func operationErrorCode(action Action, err error) string {
 	default:
 		return strings.ToUpper(string(action)) + "_FAILED"
 	}
+}
+
+func resourcePreflightFailure(action Action, err error) (string, string) {
+	code := operationErrorCode(action, err)
+	message := err.Error()
+	var conflict *topology.ResourceConflictError
+	if errors.As(err, &conflict) && len(conflict.Preflight.Conflicts) > 0 {
+		message = conflict.Preflight.Conflicts[0].Message
+		if len(conflict.Preflight.Conflicts) > 1 {
+			message += fmt.Sprintf("（另有 %d 项冲突）", len(conflict.Preflight.Conflicts)-1)
+		}
+	}
+	return code, message
 }
 
 func (o *Operations) execute(ctx context.Context, action Action, roomName, worldName string) (string, error) {

@@ -41,6 +41,8 @@ type planResult struct {
 	record      record
 	plans       map[string]roomPlan
 	inventories []agents.RuntimeTargetInventory
+	resources   resourceBuild
+	resourcesOK bool
 	changed     bool
 }
 
@@ -76,6 +78,11 @@ func (s *Service) Update(ctx context.Context, roomID string, request UpdateReque
 		return Snapshot{}, &OvercommitError{Preview: result.snapshot}
 	}
 	if !result.changed {
+		if result.resourcesOK {
+			if err := s.persistInfrastructureState(result.resources); err != nil {
+				return Snapshot{}, err
+			}
+		}
 		return result.snapshot, nil
 	}
 	saved, err := s.store.Save(roomID, request.ExpectedRevision, result.record.Placements)
@@ -84,6 +91,11 @@ func (s *Service) Update(ctx context.Context, roomID string, request UpdateReque
 	}
 	result.snapshot.Revision = saved.Revision
 	result.snapshot.UpdatedAt = saved.UpdatedAt
+	if result.resourcesOK {
+		if err := s.persistInfrastructureState(result.resources); err != nil {
+			return Snapshot{}, err
+		}
+	}
 	return result.snapshot, nil
 }
 
@@ -229,6 +241,18 @@ func (s *Service) PrepareMigration(ctx context.Context, roomID, worldID string) 
 	if currentlyRunning(source, identity.cluster, identity.shard) || currentlyRunning(target, identity.cluster, identity.shard) {
 		return MigrationPlacement{}, executionBlocked("MIGRATION_SHARD_RUNNING", "迁移前必须停止源和目标上的分片进程")
 	}
+	build, err := s.syncInfrastructureState(result.plans, result.inventories, &resourcePreflightScope{
+		owners: map[string]bool{resourceOwnerKey(roomID, worldID): true},
+		states: map[ReservationState]bool{
+			ReservationActive: true, ReservationPlanned: true, ReservationObserved: true,
+		},
+	})
+	if err != nil {
+		return MigrationPlacement{}, err
+	}
+	if !build.preflight.Ready {
+		return MigrationPlacement{}, &ResourceConflictError{Preflight: build.preflight}
+	}
 	return MigrationPlacement{
 		Room: selected.room, World: world, Revision: selected.record.Revision,
 		SourceTargetID: placement.AppliedTargetID, TargetTargetID: placement.DesiredTargetID,
@@ -271,14 +295,11 @@ func (s *Service) ApplyMigration(roomID, worldID, expectedRevision, targetID str
 	if err != nil {
 		return ExecutionPlacement{}, err
 	}
-	worlds, err := s.rooms.Worlds(roomID)
-	if err != nil {
-		return ExecutionPlacement{}, err
-	}
-	world, exists := worldsByID(worlds)[worldID]
+	placement, exists := placementsByWorld(saved.Placements)[worldID]
 	if !exists {
 		return ExecutionPlacement{}, rooms.ErrWorldNotFound
 	}
+	world := worldFromStoredPlacement(roomID, placement)
 	return ExecutionPlacement{
 		Room: room, World: world, Revision: saved.Revision,
 		DesiredTargetID: targetID, AppliedTargetID: targetID,
@@ -386,10 +407,7 @@ func (s *Service) PreviewBatchStartCapacity(ctx context.Context, selections []St
 	sort.Slice(normalizedSelections, func(i, j int) bool { return normalizedSelections[i].RoomID < normalizedSelections[j].RoomID })
 	return BatchStartCapacityPreview{
 		Rooms: normalizedSelections, Targets: targets, RequiresRiskConfirmation: requiresConfirmation,
-		Policy: CapacityPolicy{
-			Basis: "physical_cores", ShardsPerPhysicalCore: 1, ReservedPhysicalCores: 1, Enforced: false,
-			Message: "保守建议一颗物理核心最多运行一层世界，并额外为系统和运维任务预留 1 核；超出只告警并要求确认。",
-		},
+		Policy: defaultCapacityPolicy(),
 	}, nil
 }
 
@@ -457,8 +475,13 @@ func (s *Service) plan(ctx context.Context, roomID string, request *UpdateReques
 	if err != nil {
 		return planResult{}, err
 	}
+	if err := s.store.SyncRuntimeCatalog(inventories); err != nil {
+		return planResult{}, err
+	}
 	candidate := selected.record
 	changed := false
+	var resources resourceBuild
+	resourcesOK := false
 	if request != nil {
 		if err := validateRequest(*request, selected, inventories); err != nil {
 			return planResult{}, err
@@ -470,9 +493,29 @@ func (s *Service) plan(ctx context.Context, roomID string, request *UpdateReques
 		changed = !samePlacements(candidate.Placements, selected.record.Placements)
 		selected.record = candidate
 		plans[roomID] = selected
+		owners := make(map[string]bool, len(selected.worlds))
+		for _, world := range selected.worlds {
+			owners[resourceOwnerKey(roomID, world.ID)] = true
+		}
+		resources, err = s.buildRuntimeResources(plans, inventories, &resourcePreflightScope{
+			owners: owners,
+			states: map[ReservationState]bool{
+				ReservationActive: true, ReservationPlanned: true, ReservationObserved: true,
+			},
+		})
+		if err != nil {
+			return planResult{}, err
+		}
+		resourcesOK = true
+		if !resources.preflight.Ready {
+			return planResult{}, &ResourceConflictError{Preflight: resources.preflight}
+		}
 	}
 	snapshot := buildSnapshot(roomID, plans, inventories)
-	return planResult{snapshot: snapshot, record: candidate, plans: plans, inventories: inventories, changed: changed}, nil
+	return planResult{
+		snapshot: snapshot, record: candidate, plans: plans, inventories: inventories,
+		resources: resources, resourcesOK: resourcesOK, changed: changed,
+	}, nil
 }
 
 func (s *Service) reconcileAll(selectedRoomID string) (map[string]roomPlan, error) {
@@ -499,14 +542,11 @@ func (s *Service) reconcileAll(selectedRoomID string) (map[string]roomPlan, erro
 		if worldsErr != nil {
 			return nil, worldsErr
 		}
-		worldIDs := make([]string, 0, len(worlds))
-		for _, world := range worlds {
-			worldIDs = append(worldIDs, world.ID)
-		}
-		stored, ensureErr := s.store.Ensure(room.ID, worldIDs)
+		stored, ensureErr := s.store.EnsureWorlds(room.ID, worlds)
 		if ensureErr != nil {
 			return nil, ensureErr
 		}
+		worlds = mergeStoredWorlds(room.ID, worlds, stored.Placements)
 		plans[room.ID] = roomPlan{room: room, worlds: worlds, record: stored}
 	}
 	return plans, nil
@@ -735,11 +775,8 @@ func buildSnapshot(roomID string, plans map[string]roomPlan, inventories []agent
 		RoomID: roomID, Revision: selected.record.Revision, Mode: "applied_placement", RemoteExecutionReady: true,
 		Placements: placements, Targets: targets, Issues: issues,
 		RequiresOvercommitConfirmation: requiresConfirmation,
-		CapacityPolicy: CapacityPolicy{
-			Basis: "physical_cores", ShardsPerPhysicalCore: 1, ReservedPhysicalCores: 1, Enforced: false,
-			Message: "同一服务器可以运行多个房间和多层世界；保守建议每个运行中的世界分片预留 1 个物理核心，并为系统、Agent、SteamCMD 和备份至少保留 1 核。该规则仅用于预警，不是性能保证。",
-		},
-		UpdatedAt: selected.record.UpdatedAt,
+		CapacityPolicy:                 defaultCapacityPolicy(),
+		UpdatedAt:                      selected.record.UpdatedAt,
 	}
 }
 
@@ -816,6 +853,54 @@ func worldsByID(values []rooms.World) map[string]rooms.World {
 		result[value.ID] = value
 	}
 	return result
+}
+
+func mergeStoredWorlds(roomID string, values []rooms.World, placements []storedPlacement) []rooms.World {
+	result := append([]rooms.World(nil), values...)
+	seen := make(map[string]bool, len(result))
+	for _, world := range result {
+		seen[world.ID] = true
+	}
+	for _, placement := range placements {
+		if !seen[placement.WorldID] {
+			result = append(result, worldFromStoredPlacement(roomID, placement))
+		}
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Role != result[j].Role {
+			return result[i].Role < result[j].Role
+		}
+		return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
+	})
+	return result
+}
+
+func worldFromStoredPlacement(roomID string, placement storedPlacement) rooms.World {
+	directory := strings.TrimSpace(placement.WorldDirectoryName)
+	if directory == "" {
+		if decoded, err := rooms.DecodeID(placement.WorldID); err == nil {
+			directory = decoded
+		}
+	}
+	name := strings.TrimSpace(placement.WorldName)
+	if name == "" {
+		name = directory
+	}
+	role := placement.WorldRole
+	if role == "" {
+		switch strings.ToLower(directory) {
+		case "master":
+			role = rooms.WorldRoleMaster
+		case "caves":
+			role = rooms.WorldRoleCaves
+		default:
+			role = rooms.WorldRoleCustom
+		}
+	}
+	return rooms.World{
+		ID: placement.WorldID, RoomID: roomID, DirectoryName: directory, Name: name,
+		Role: role, IsMaster: role == rooms.WorldRoleMaster,
+	}
 }
 
 func placementsByWorld(values []storedPlacement) map[string]storedPlacement {

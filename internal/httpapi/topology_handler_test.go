@@ -62,11 +62,11 @@ func TestTopologyHTTPPreviewRevisionAndOvercommit(t *testing.T) {
 	now := time.Now().UTC()
 	local := httpTargetInventory(
 		agents.RuntimeTarget{ID: "local", Name: "本机", Kind: agents.RuntimeKindLocal, Status: agents.RuntimeStatusReady, Online: true, Configured: true},
-		4, []shared.RoomInventoryReport{{Directory: "Cluster", Shards: []shared.ShardInventoryReport{{Directory: "Master"}}}}, nil, now,
+		4, []shared.RoomInventoryReport{{Directory: "Cluster", MasterPort: 10889, Shards: []shared.ShardInventoryReport{{Directory: "Master", Role: "master", ServerPort: 10999, AuthenticationPort: 8767, MasterServerPort: 27017}}}}, nil, now,
 	)
 	remote := httpTargetInventory(
 		agents.RuntimeTarget{ID: "agent:node", AgentID: "node", Name: "节点", Kind: agents.RuntimeKindAgent, Status: agents.RuntimeStatusReady, Online: true, Configured: true},
-		2, []shared.RoomInventoryReport{{Directory: "Cluster", Shards: []shared.ShardInventoryReport{{Directory: "Master"}}}},
+		2, []shared.RoomInventoryReport{{Directory: "Cluster", MasterPort: 10889, Shards: []shared.ShardInventoryReport{{Directory: "Master", Role: "master", ServerPort: 10999, AuthenticationPort: 8767, MasterServerPort: 27017}}}},
 		[]shared.ShardProcessReport{{PID: 42, Cluster: "Other", Shard: "Master"}}, now,
 	)
 	service, err := topology.NewService(httpTopologyRooms{room: room, world: world}, httpTopologyTargets{items: []agents.RuntimeTargetInventory{local, remote}}, store)
@@ -106,6 +106,36 @@ func TestTopologyHTTPPreviewRevisionAndOvercommit(t *testing.T) {
 	}
 	response = performJSON(router, http.MethodPut, "/api/v2/rooms/room/topology", request, nil, "")
 	assertAPIError(t, response, http.StatusConflict, "TOPOLOGY_REVISION_CONFLICT")
+
+	response = performJSON(router, http.MethodGet, "/api/v2/runtime-infrastructure", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	infrastructure := responseData(t, response)
+	for _, field := range []string{"providers", "environments", "networkProfiles", "portReservations", "cpuAllocations"} {
+		values, ok := infrastructure[field].([]interface{})
+		if !ok || len(values) == 0 {
+			t.Fatalf("runtime infrastructure %s=%#v body=%s", field, infrastructure[field], response.Body.String())
+		}
+	}
+	profiles := infrastructure["networkProfiles"].([]interface{})
+	profile := profiles[0].(map[string]interface{})
+	profileID, _ := profile["id"].(string)
+	response = performJSON(router, http.MethodPut, "/api/v2/runtime-infrastructure/network-profiles/"+profileID, map[string]interface{}{
+		"name": "本机网络", "bindAddress": "not-an-ip", "advertiseAddress": "",
+	}, nil, "")
+	assertAPIError(t, response, http.StatusUnprocessableEntity, "INVALID_RUNTIME_RESOURCE")
+	environments := infrastructure["environments"].([]interface{})
+	localEnvironmentID := ""
+	for _, value := range environments {
+		environment := value.(map[string]interface{})
+		if environment["targetId"] == "local" {
+			localEnvironmentID, _ = environment["id"].(string)
+		}
+	}
+	response = performJSON(router, http.MethodPut, "/api/v2/runtime-infrastructure/cpu-allocations", map[string]interface{}{
+		"roomId": "room", "worldId": "world", "environmentId": localEnvironmentID,
+		"policy": "none", "logicalCpuIds": []int{}, "allowSmtSiblingRisk": false,
+	}, nil, "")
+	assertStatus(t, response, http.StatusOK)
 }
 
 func httpTargetInventory(target agents.RuntimeTarget, physical int, inventoryRooms []shared.RoomInventoryReport, processes []shared.ShardProcessReport, now time.Time) agents.RuntimeTargetInventory {

@@ -319,8 +319,21 @@ func CapacityFor(logicalProcessors, physicalCores int, estimated bool, runningSh
 func normalizeInventory(report shared.RuntimeInventoryReport, config RuntimeConfig) (shared.RuntimeInventoryReport, error) {
 	if report.ProtocolVersion != shared.RuntimeInventoryProtocolVersion || report.ObservedAt.IsZero() ||
 		report.CPU.LogicalProcessors < 1 || report.CPU.PhysicalCores < 0 || report.CPU.PhysicalCores > report.CPU.LogicalProcessors ||
+		len(report.CPU.Threads) > report.CPU.LogicalProcessors ||
 		len(report.Rooms) > maximumReportedRooms || len(report.Processes) > maximumReportedProcesses {
 		return shared.RuntimeInventoryReport{}, errors.New("Agent 返回的 DST 运行时清单不符合协议")
+	}
+	seenLogicalCPUs := make(map[int]bool, len(report.CPU.Threads))
+	for _, thread := range report.CPU.Threads {
+		if thread.LogicalID < 0 || thread.LogicalID >= report.CPU.LogicalProcessors || seenLogicalCPUs[thread.LogicalID] ||
+			strings.TrimSpace(thread.PackageID) == "" || strings.TrimSpace(thread.CoreID) == "" ||
+			len(thread.PackageID) > 64 || len(thread.CoreID) > 64 {
+			return shared.RuntimeInventoryReport{}, errors.New("Agent 返回的 CPU 拓扑不符合协议")
+		}
+		seenLogicalCPUs[thread.LogicalID] = true
+	}
+	if report.CPU.TopologyAvailable && len(report.CPU.Threads) != report.CPU.LogicalProcessors {
+		return shared.RuntimeInventoryReport{}, errors.New("Agent 返回的 CPU 拓扑不完整")
 	}
 	reportedSavePath := strings.TrimSpace(report.Installation.SavePath)
 	reportedServerPath := strings.TrimSpace(report.Installation.ServerPath)
