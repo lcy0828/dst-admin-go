@@ -242,6 +242,22 @@ func TestBackupSetNeverVerifiesDifferentClusterSharedFiles(t *testing.T) {
 	}
 }
 
+func TestCoordinatedStopAndStartOrdersMasterAtTheSafeBoundary(t *testing.T) {
+	parts := []runtimePart{
+		{part: Part{WorldID: "master", WorldRole: string(rooms.WorldRoleMaster), Shard: "Master"}},
+		{part: Part{WorldID: "forest", WorldRole: string(rooms.WorldRoleCustom), Shard: "Forest"}},
+		{part: Part{WorldID: "caves", WorldRole: string(rooms.WorldRoleCaves), Shard: "Caves"}},
+	}
+	stopping := orderedRuntimeParts(parts, false)
+	starting := orderedRuntimeParts(parts, true)
+	if got := []string{stopping[0].part.Shard, stopping[1].part.Shard, stopping[2].part.Shard}; got[2] != "Master" {
+		t.Fatalf("stop order=%v", got)
+	}
+	if got := []string{starting[0].part.Shard, starting[1].part.Shard, starting[2].part.Shard}; got[0] != "Master" {
+		t.Fatalf("start order=%v", got)
+	}
+}
+
 func assertControlRunning(t *testing.T, control *backupTestControl, shard string) {
 	t.Helper()
 	status, err := control.Status(context.Background(), "Cluster_1", shard)

@@ -366,7 +366,7 @@ func (c *Coordinator) failCreate(value Set, operation Operation, cause error) (S
 }
 
 func (c *Coordinator) stopAll(ctx context.Context, parts []runtimePart, operation Operation, lease *operationlease.Lease) error {
-	for index, part := range parts {
+	for index, part := range orderedRuntimeParts(parts, false) {
 		status, err := part.driver.Status(ctx, part.target)
 		if err != nil {
 			return err
@@ -411,7 +411,7 @@ func (c *Coordinator) restartWorlds(ctx context.Context, parts []runtimePart, wo
 		selected[id] = true
 	}
 	var failures error
-	for index, part := range parts {
+	for index, part := range orderedRuntimeParts(parts, true) {
 		if !selected[part.part.WorldID] {
 			continue
 		}
@@ -423,6 +423,19 @@ func (c *Coordinator) restartWorlds(ctx context.Context, parts []runtimePart, wo
 		failures = errors.Join(failures, err)
 	}
 	return failures
+}
+
+func orderedRuntimeParts(parts []runtimePart, masterFirst bool) []runtimePart {
+	ordered := append([]runtimePart(nil), parts...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		iMaster := ordered[i].part.WorldRole == string(rooms.WorldRoleMaster)
+		jMaster := ordered[j].part.WorldRole == string(rooms.WorldRoleMaster)
+		if iMaster != jMaster {
+			return iMaster == masterFirst
+		}
+		return ordered[i].part.WorldID < ordered[j].part.WorldID
+	})
+	return ordered
 }
 
 func (c *Coordinator) renewLease(ctx context.Context, lease *operationlease.Lease) error {
