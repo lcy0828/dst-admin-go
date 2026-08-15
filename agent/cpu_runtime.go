@@ -143,7 +143,7 @@ func (c *containerShardRuntime) ExecuteCPU(ctx context.Context, cluster, shard s
 	} else if inspect.State.Running {
 		state, enforced = shared.RuntimeCPUStateApplied, true
 	}
-	if action == shared.RuntimeActionCPUApply && !inspect.State.Running {
+	if action == shared.RuntimeActionCPUApply && request.Policy != shared.RuntimeCPUPolicyNone && !inspect.State.Running {
 		return shared.RuntimeCPUResult{}, errors.New("容器尚未运行，无法确认 CPU 策略已作用于分片进程")
 	}
 	return shared.RuntimeCPUResult{

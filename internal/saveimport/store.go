@@ -155,25 +155,13 @@ func (s *Store) MarkInvalid(id, code, message string) error {
 	return nil
 }
 
-func (s *Store) BeginApply(id string, mode ApplyMode, roomID, target, staging, rollback string) error {
+func (s *Store) BeginApply(id string, mode ApplyMode, roomID, target, staging, rollback, portLeaseID string) error {
 	now := s.now().UTC()
 	result := s.db.Table(s.table).Where("id = ? AND status IN (?)", id, []Status{StatusReady, StatusApplied}).Updates(map[string]interface{}{
 		"status": StatusApplying, "error_code": "", "error_message": "", "updated_at": now,
 		"apply_phase": applyPhasePublishing, "apply_mode": mode, "apply_room_id": roomID,
 		"apply_target": target, "apply_staging": staging, "apply_rollback": rollback,
-	})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected != 1 {
-		return ErrImportNotReady
-	}
-	return nil
-}
-
-func (s *Store) SetApplyPortLease(id, leaseID string) error {
-	result := s.db.Table(s.table).Where("id = ? AND status = ?", id, StatusApplying).Updates(map[string]interface{}{
-		"apply_port_lease_id": strings.TrimSpace(leaseID), "updated_at": s.now().UTC(),
+		"apply_port_lease_id": strings.TrimSpace(portLeaseID),
 	})
 	if result.Error != nil {
 		return result.Error

@@ -42,6 +42,9 @@ func (s *Service) Infrastructure(ctx context.Context) (InfrastructureSnapshot, e
 	if err != nil {
 		return InfrastructureSnapshot{}, err
 	}
+	if err := s.recoverPendingCPUExecutionState(ctx, inventories); err != nil {
+		return InfrastructureSnapshot{}, err
+	}
 	providers, environments, profiles, reservations, allocations, err := s.store.RuntimeResources()
 	if err != nil {
 		return InfrastructureSnapshot{}, err
@@ -177,6 +180,23 @@ func (s *Service) RecordCPUResult(roomID, worldID string, observed shared.Runtim
 		allocation.ExecutionState = CPUExecutionReleased
 	default:
 		allocation.ExecutionState = CPUExecutionDesired
+	}
+	allocation, err = s.store.SaveCPUAllocation(allocation)
+	if err == nil {
+		s.clearCPURecoveryPending(roomID, worldID)
+	}
+	return allocation, err
+}
+
+func (s *Service) RecordCPUFailure(roomID, worldID string, cause error) (CPUAllocation, error) {
+	allocation, err := s.store.CPUAllocation(roomID, worldID)
+	if err != nil {
+		return CPUAllocation{}, err
+	}
+	allocation.ExecutionState = CPUExecutionFailed
+	allocation.ExecutionError = "CPU 生命周期操作失败"
+	if cause != nil && strings.TrimSpace(cause.Error()) != "" {
+		allocation.ExecutionError = truncateResourceError(cause.Error())
 	}
 	return s.store.SaveCPUAllocation(allocation)
 }

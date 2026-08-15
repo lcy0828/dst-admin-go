@@ -92,6 +92,33 @@ func TestNativeNoneDoesNotMoveUnmanagedProcessToCgroupRoot(t *testing.T) {
 	}
 }
 
+func TestNativeNoneRemovesPreparedCgroupAfterShardStops(t *testing.T) {
+	executor, _ := newNativeTestExecutor(t, "linux")
+	policy := shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyExclusive, LogicalCPUIds: []int{0}}
+	if _, err := executor.Prepare(context.Background(), "default", "Cluster_1", "Master", policy); err != nil {
+		t.Fatal(err)
+	}
+	path := executor.cgroupPath("default", "Cluster_1", "Master")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("prepared cgroup missing: %v", err)
+	}
+	result, err := executor.Apply(context.Background(), "default", "Cluster_1", "Master", shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyNone})
+	if err != nil || result.State != shared.RuntimeCPUStateReleased || !result.Enforced || result.InstanceRunning {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("released cgroup still exists: %v", err)
+	}
+}
+
+func TestNativeObserveStoppedShardWithoutCgroupRetainsPreparedIntent(t *testing.T) {
+	executor, _ := newNativeTestExecutor(t, "linux")
+	result, err := executor.Observe(context.Background(), "default", "Cluster_1", "Master", shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyShared, LogicalCPUIds: []int{1}})
+	if err != nil || result.State != shared.RuntimeCPUStatePrepared || result.Enforced || result.InstanceRunning {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
 func TestCPUSetFormattingAndParsing(t *testing.T) {
 	formatted := FormatCPUSet([]int{5, 2, 1, 0, 5})
 	if formatted != "0-2,5" {

@@ -326,6 +326,25 @@ type recordingCPUAllocationExecutor struct {
 	calls  []CPUAllocation
 }
 
+type recoveringCPUAllocationExecutor struct {
+	result  shared.RuntimeCPUResult
+	err     error
+	calls   []CPUAllocation
+	observe func(context.Context, CPUAllocation) (shared.RuntimeCPUResult, error)
+}
+
+func (e *recoveringCPUAllocationExecutor) ApplyCPUAllocation(_ context.Context, value CPUAllocation) (shared.RuntimeCPUResult, error) {
+	return e.result, e.err
+}
+
+func (e *recoveringCPUAllocationExecutor) ObserveCPUAllocation(ctx context.Context, value CPUAllocation) (shared.RuntimeCPUResult, error) {
+	e.calls = append(e.calls, value)
+	if e.observe != nil {
+		return e.observe(ctx, value)
+	}
+	return e.result, e.err
+}
+
 func (e *recordingCPUAllocationExecutor) ApplyCPUAllocation(_ context.Context, value CPUAllocation) (shared.RuntimeCPUResult, error) {
 	e.calls = append(e.calls, value)
 	return e.result, e.err
@@ -374,6 +393,273 @@ func TestCPUAllocationPersistsExecutionFailure(t *testing.T) {
 	stored, loadErr := store.CPUAllocation(room.ID, world.ID)
 	if loadErr != nil || stored.ExecutionState != CPUExecutionFailed || stored.ExecutionError != "cgroup unavailable" || stored.Policy != CPUPolicyShared {
 		t.Fatalf("stored=%#v err=%v", stored, loadErr)
+	}
+}
+
+func TestConfigureCPUExecutorRecoversPersistedExecutionState(t *testing.T) {
+	now := time.Now().UTC()
+	room, world := resourceRoom("room-cpu-recovery", "Cluster_CPU_Recovery")
+	inventory := runtimeInventory(resourceLocalTarget(), 2, 2, []shared.RoomInventoryReport{resourceInventoryRoom(room.DirectoryName, 10889, 10999, 8767, 27017)}, nil, now)
+	store := newTopologyTestStore(t)
+	service, _ := NewService(topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {world}}}, topologyTargetCatalog{items: []agents.RuntimeTargetInventory{inventory}}, store)
+	allocation := CPUAllocation{ID: allocationResourceID(room.ID, world.ID), EnvironmentID: environmentResourceID(localTargetID), TargetID: localTargetID, RoomID: room.ID, WorldID: world.ID}
+	allocation.Policy = CPUPolicyShared
+	allocation.LogicalCPUIds = []int{0}
+	allocation.ExecutionState = CPUExecutionApplied
+	allocation.Observed = &shared.RuntimeCPUResult{Policy: shared.RuntimeCPUPolicyShared, State: shared.RuntimeCPUStateApplied, InstanceID: "old-instance", ObservedAt: now.Add(-time.Hour)}
+	if _, err := store.SaveCPUAllocation(allocation); err != nil {
+		t.Fatal(err)
+	}
+	executor := &recoveringCPUAllocationExecutor{result: shared.RuntimeCPUResult{Policy: shared.RuntimeCPUPolicyShared, LogicalCPUIds: []int{0}, State: shared.RuntimeCPUStatePrepared, RuntimeKind: "native", ObservedAt: now}}
+	if err := service.ConfigureCPUExecutor(executor); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := store.CPUAllocation(room.ID, world.ID)
+	if err != nil || len(executor.calls) != 1 || recovered.ExecutionState != CPUExecutionPrepared || recovered.Observed == nil || recovered.Observed.InstanceID != "" {
+		t.Fatalf("recovered=%#v calls=%d err=%v", recovered, len(executor.calls), err)
+	}
+}
+
+func TestConfigureCPUExecutorDefersRemoteRecoveryUntilInfrastructureIsAvailable(t *testing.T) {
+	now := time.Now().UTC()
+	room, world := resourceRoom("room-cpu-remote-recovery", "Cluster_CPU_Remote_Recovery")
+	local := runtimeInventory(resourceLocalTarget(), 2, 2, nil, nil, now)
+	remoteTarget := agents.RuntimeTarget{
+		ID: "agent:node", AgentID: "node", Name: "远程节点", Kind: agents.RuntimeKindAgent,
+		Status: agents.RuntimeStatusReady, Online: true, Configured: true, OS: "linux", Arch: "amd64",
+	}
+	remote := runtimeInventory(remoteTarget, 2, 2, []shared.RoomInventoryReport{
+		resourceInventoryRoom(room.DirectoryName, 10889, 10999, 8767, 27017),
+	}, nil, now)
+	store := newTopologyTestStore(t)
+	service, _ := NewService(
+		topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {world}}},
+		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{local, remote}}, store,
+	)
+	if _, err := service.Topology(context.Background(), room.ID); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.load(room.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Placements[0].DesiredTargetID = remoteTarget.ID
+	record.Placements[0].AppliedTargetID = remoteTarget.ID
+	if _, err := store.Save(room.ID, record.Revision, record.Placements); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Infrastructure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	allocation, err := store.CPUAllocation(room.ID, world.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocation.Policy = CPUPolicyShared
+	allocation.LogicalCPUIds = []int{0}
+	allocation.ExecutionState = CPUExecutionApplied
+	if _, err := store.SaveCPUAllocation(allocation); err != nil {
+		t.Fatal(err)
+	}
+	executor := &recoveringCPUAllocationExecutor{result: shared.RuntimeCPUResult{
+		Policy: shared.RuntimeCPUPolicyShared, LogicalCPUIds: []int{0}, State: shared.RuntimeCPUStatePrepared, RuntimeKind: "native", ObservedAt: now,
+	}}
+	if err := service.ConfigureCPUExecutor(executor); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.calls) != 0 {
+		t.Fatalf("remote recovery ran before inventory-triggered retry: calls=%#v", executor.calls)
+	}
+	before, err := store.CPUAllocation(room.ID, world.ID)
+	if err != nil || before.ExecutionState != CPUExecutionApplied {
+		t.Fatalf("remote allocation changed during configure: allocation=%#v err=%v", before, err)
+	}
+	if _, err := service.Infrastructure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := store.CPUAllocation(room.ID, world.ID)
+	if err != nil || len(executor.calls) != 1 || recovered.ExecutionState != CPUExecutionPrepared {
+		t.Fatalf("recovered=%#v calls=%#v err=%v", recovered, executor.calls, err)
+	}
+}
+
+func TestRemoteCPURecoveryUsesIndependentTimeoutPerAllocation(t *testing.T) {
+	store := newTopologyTestStore(t)
+	for _, roomID := range []string{"room-a", "room-b"} {
+		allocation := CPUAllocation{
+			ID: allocationResourceID(roomID, "world"), EnvironmentID: environmentResourceID("agent:node"),
+			TargetID: "agent:node", RoomID: roomID, WorldID: "world", Policy: CPUPolicyShared,
+			LogicalCPUIds: []int{0}, ExecutionState: CPUExecutionApplied,
+		}
+		if _, err := store.SaveCPUAllocation(allocation); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := &recoveringCPUAllocationExecutor{}
+	executor.observe = func(ctx context.Context, allocation CPUAllocation) (shared.RuntimeCPUResult, error) {
+		if allocation.RoomID == "room-a" {
+			<-ctx.Done()
+			return shared.RuntimeCPUResult{}, ctx.Err()
+		}
+		return shared.RuntimeCPUResult{Policy: shared.RuntimeCPUPolicyShared, State: shared.RuntimeCPUStatePrepared}, nil
+	}
+	service := &Service{
+		store: store, cpuRecoveryPending: make(map[string]struct{}), cpuRecoveryTimeout: 10 * time.Millisecond,
+	}
+	if err := service.ConfigureCPUExecutor(executor); err != nil {
+		t.Fatal(err)
+	}
+	inventory := agents.RuntimeTargetInventory{
+		Target: agents.RuntimeTarget{ID: "agent:node", Online: true}, Available: true,
+	}
+	if err := service.recoverPendingCPUExecutionState(context.Background(), []agents.RuntimeTargetInventory{inventory}); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.calls) != 2 || executor.calls[0].RoomID != "room-a" || executor.calls[1].RoomID != "room-b" {
+		t.Fatalf("recovery calls=%#v", executor.calls)
+	}
+	failed, err := store.CPUAllocation("room-a", "world")
+	if err != nil || failed.ExecutionState != CPUExecutionFailed {
+		t.Fatalf("timed-out allocation=%#v err=%v", failed, err)
+	}
+	recovered, err := store.CPUAllocation("room-b", "world")
+	if err != nil || recovered.ExecutionState != CPUExecutionPrepared {
+		t.Fatalf("second allocation=%#v err=%v", recovered, err)
+	}
+	service.cpuRecoveryMu.Lock()
+	pending := len(service.cpuRecoveryPending)
+	service.cpuRecoveryMu.Unlock()
+	if pending != 1 {
+		t.Fatalf("pending recoveries=%d", pending)
+	}
+}
+
+func TestRemoteCPURecoveryDoesNotOverwriteConcurrentAllocationChange(t *testing.T) {
+	store := newTopologyTestStore(t)
+	allocation := CPUAllocation{
+		ID: allocationResourceID("room", "world"), EnvironmentID: environmentResourceID("agent:node"),
+		TargetID: "agent:node", RoomID: "room", WorldID: "world", Policy: CPUPolicyShared,
+		LogicalCPUIds: []int{0}, ExecutionState: CPUExecutionApplied,
+	}
+	if _, err := store.SaveCPUAllocation(allocation); err != nil {
+		t.Fatal(err)
+	}
+	executor := &recoveringCPUAllocationExecutor{}
+	executor.observe = func(_ context.Context, stale CPUAllocation) (shared.RuntimeCPUResult, error) {
+		current, err := store.CPUAllocation(stale.RoomID, stale.WorldID)
+		if err != nil {
+			return shared.RuntimeCPUResult{}, err
+		}
+		current.Policy = CPUPolicyExclusive
+		current.LogicalCPUIds = []int{1}
+		current.ExecutionState = CPUExecutionDesired
+		current.Observed = nil
+		if _, err := store.SaveCPUAllocation(current); err != nil {
+			return shared.RuntimeCPUResult{}, err
+		}
+		return shared.RuntimeCPUResult{Policy: shared.RuntimeCPUPolicyShared, LogicalCPUIds: []int{0}, State: shared.RuntimeCPUStateApplied}, nil
+	}
+	service := &Service{
+		store: store, cpuRecoveryPending: make(map[string]struct{}), cpuRecoveryTimeout: time.Second,
+	}
+	if err := service.ConfigureCPUExecutor(executor); err != nil {
+		t.Fatal(err)
+	}
+	inventory := agents.RuntimeTargetInventory{Target: agents.RuntimeTarget{ID: "agent:node", Online: true}, Available: true}
+	if err := service.recoverPendingCPUExecutionState(context.Background(), []agents.RuntimeTargetInventory{inventory}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.CPUAllocation("room", "world")
+	if err != nil || current.Policy != CPUPolicyExclusive || len(current.LogicalCPUIds) != 1 || current.LogicalCPUIds[0] != 1 || current.ExecutionState != CPUExecutionDesired || current.Observed != nil {
+		t.Fatalf("concurrent allocation overwritten: allocation=%#v err=%v", current, err)
+	}
+	service.cpuRecoveryMu.Lock()
+	_, pending := service.cpuRecoveryPending[allocationResourceID("room", "world")]
+	service.cpuRecoveryMu.Unlock()
+	if !pending {
+		t.Fatal("changed allocation was not retained for a fresh recovery observation")
+	}
+}
+
+func TestRemoteCPURecoveryDiscardsObservationAfterAllocationDeletion(t *testing.T) {
+	store := newTopologyTestStore(t)
+	allocation := CPUAllocation{
+		ID: allocationResourceID("room", "world"), EnvironmentID: environmentResourceID("agent:node"),
+		TargetID: "agent:node", RoomID: "room", WorldID: "world", Policy: CPUPolicyShared,
+		LogicalCPUIds: []int{0}, ExecutionState: CPUExecutionApplied,
+	}
+	if _, err := store.SaveCPUAllocation(allocation); err != nil {
+		t.Fatal(err)
+	}
+	executor := &recoveringCPUAllocationExecutor{}
+	executor.observe = func(_ context.Context, stale CPUAllocation) (shared.RuntimeCPUResult, error) {
+		if err := store.db.Table(store.cpuAllocationsTable).Where("id = ?", stale.ID).Delete(&cpuAllocationRecord{}).Error; err != nil {
+			return shared.RuntimeCPUResult{}, err
+		}
+		return shared.RuntimeCPUResult{Policy: shared.RuntimeCPUPolicyShared, LogicalCPUIds: []int{0}, State: shared.RuntimeCPUStateApplied}, nil
+	}
+	service := &Service{
+		store: store, cpuRecoveryPending: make(map[string]struct{}), cpuRecoveryTimeout: time.Second,
+	}
+	if err := service.ConfigureCPUExecutor(executor); err != nil {
+		t.Fatal(err)
+	}
+	inventory := agents.RuntimeTargetInventory{Target: agents.RuntimeTarget{ID: "agent:node", Online: true}, Available: true}
+	if err := service.recoverPendingCPUExecutionState(context.Background(), []agents.RuntimeTargetInventory{inventory}); err != nil {
+		t.Fatal(err)
+	}
+	service.cpuRecoveryMu.Lock()
+	_, pending := service.cpuRecoveryPending[allocationResourceID("room", "world")]
+	service.cpuRecoveryMu.Unlock()
+	if pending {
+		t.Fatal("deleted allocation retained a pending recovery key")
+	}
+}
+
+func TestRemoteCPURecoveryKeepsUnknownObservationPending(t *testing.T) {
+	store := newTopologyTestStore(t)
+	allocation := CPUAllocation{
+		ID: allocationResourceID("room", "world"), EnvironmentID: environmentResourceID("agent:node"),
+		TargetID: "agent:node", RoomID: "room", WorldID: "world", Policy: CPUPolicyShared,
+		LogicalCPUIds: []int{0}, ExecutionState: CPUExecutionApplied,
+	}
+	if _, err := store.SaveCPUAllocation(allocation); err != nil {
+		t.Fatal(err)
+	}
+	executor := &recoveringCPUAllocationExecutor{result: shared.RuntimeCPUResult{Policy: shared.RuntimeCPUPolicyShared}}
+	service := &Service{
+		store: store, cpuRecoveryPending: make(map[string]struct{}), cpuRecoveryTimeout: time.Second,
+	}
+	if err := service.ConfigureCPUExecutor(executor); err != nil {
+		t.Fatal(err)
+	}
+	inventory := agents.RuntimeTargetInventory{Target: agents.RuntimeTarget{ID: "agent:node", Online: true}, Available: true}
+	if err := service.recoverPendingCPUExecutionState(context.Background(), []agents.RuntimeTargetInventory{inventory}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.CPUAllocation("room", "world")
+	if err != nil || current.ExecutionState != CPUExecutionDesired || current.Observed == nil {
+		t.Fatalf("unknown observation=%#v err=%v", current, err)
+	}
+	service.cpuRecoveryMu.Lock()
+	_, pending := service.cpuRecoveryPending[allocationResourceID("room", "world")]
+	service.cpuRecoveryMu.Unlock()
+	if !pending {
+		t.Fatal("unknown observation cleared pending recovery")
+	}
+}
+
+func TestRecordCPUFailureArchivesErrorWithoutLosingObservation(t *testing.T) {
+	store := newTopologyTestStore(t)
+	service := &Service{store: store}
+	observed := &shared.RuntimeCPUResult{Policy: shared.RuntimeCPUPolicyExclusive, State: shared.RuntimeCPUStateReleased, RuntimeKind: "native", ObservedAt: time.Now().UTC()}
+	allocation := CPUAllocation{ID: allocationResourceID("room", "world"), EnvironmentID: "environment", TargetID: localTargetID, RoomID: "room", WorldID: "world", Policy: CPUPolicyExclusive, LogicalCPUIds: []int{0}, ExecutionState: CPUExecutionReleased, Observed: observed}
+	if _, err := store.SaveCPUAllocation(allocation); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := service.RecordCPUFailure("room", "world", errors.New("cleanup failed"))
+	if err != nil || failed.ExecutionState != CPUExecutionFailed || failed.ExecutionError != "cleanup failed" || failed.Observed == nil || failed.Observed.State != shared.RuntimeCPUStateReleased {
+		t.Fatalf("failed=%#v err=%v", failed, err)
 	}
 }
 

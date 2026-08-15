@@ -73,6 +73,8 @@ func runtimeCapability(action shared.RuntimeAction) string {
 		return "runtime.mods.v1"
 	case shared.RuntimeActionGameVersionObserve, shared.RuntimeActionGameVersionUpdate:
 		return "runtime.game-update.v1"
+	case shared.RuntimeActionCPUPrepare, shared.RuntimeActionCPUApply, shared.RuntimeActionCPUObserve:
+		return "runtime.cpu.v1"
 	default:
 		return ""
 	}

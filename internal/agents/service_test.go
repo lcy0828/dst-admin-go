@@ -168,6 +168,34 @@ func TestExecuteRuntimeAllowsBoundedGameUpdateTimeout(t *testing.T) {
 	}
 }
 
+func TestExecuteRuntimeAllowsCPULifecycleActions(t *testing.T) {
+	service, _, _, _ := newAgentTestService(t)
+	config := RuntimeConfig{InstallationID: "primary", DisplayName: "运行节点", SavePath: "/srv/dst/save", ServerPath: "/srv/dst/server", ServerMode: "64"}
+	if _, err := service.SaveRuntimeConfig("agent-primary", config); err != nil {
+		t.Fatal(err)
+	}
+	request := shared.RuntimeOperationRequest{
+		ProtocolVersion: shared.RuntimeOperationProtocolVersion, OperationID: "operation-cpu-prepare",
+		Action: shared.RuntimeActionCPUPrepare, Cluster: "Cluster_1", Shard: "Master", TopologyRevision: "revision-1",
+		CPU: &shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyExclusive, LogicalCPUIds: []int{2, 3}},
+	}
+	for _, action := range []shared.RuntimeAction{shared.RuntimeActionCPUPrepare, shared.RuntimeActionCPUApply, shared.RuntimeActionCPUObserve} {
+		request.OperationID = "operation-" + string(action)
+		request.Action = action
+		result, err := service.ExecuteRuntime(context.Background(), "agent:agent-primary", request, 60)
+		if err != nil || result.Result.CPU == nil || result.Result.CPU.Policy != shared.RuntimeCPUPolicyExclusive {
+			t.Fatalf("action=%s result=%#v err=%v", action, result, err)
+		}
+	}
+	request.OperationID = "operation-cpu-release"
+	request.Action = shared.RuntimeActionCPUApply
+	request.CPU = &shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyNone}
+	result, err := service.ExecuteRuntime(context.Background(), "agent:agent-primary", request, 60)
+	if err != nil || result.Result.CPU == nil || result.Result.CPU.State != shared.RuntimeCPUStateReleased {
+		t.Fatalf("release result=%#v err=%v", result, err)
+	}
+}
+
 func TestRuntimeTargetInventoriesCollectsConfiguredLocalTarget(t *testing.T) {
 	service, _, _, _ := newAgentTestService(t)
 	localRoot := t.TempDir()

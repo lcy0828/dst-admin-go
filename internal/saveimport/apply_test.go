@@ -48,10 +48,12 @@ type applyModDownloader struct {
 }
 
 type applyPortAllocator struct {
-	allocation topology.PortAllocation
-	request    topology.PortAllocationRequest
-	activated  string
-	released   string
+	allocation  topology.PortAllocation
+	request     topology.PortAllocationRequest
+	activated   string
+	released    string
+	activateErr error
+	releaseErr  error
 }
 
 func (allocator *applyPortAllocator) ReservePorts(_ context.Context, request topology.PortAllocationRequest) (topology.PortAllocation, error) {
@@ -61,12 +63,12 @@ func (allocator *applyPortAllocator) ReservePorts(_ context.Context, request top
 
 func (allocator *applyPortAllocator) ActivatePorts(_ context.Context, leaseID string) error {
 	allocator.activated = leaseID
-	return nil
+	return allocator.activateErr
 }
 
 func (allocator *applyPortAllocator) ReleasePorts(_ context.Context, leaseID string) error {
 	allocator.released = leaseID
-	return nil
+	return allocator.releaseErr
 }
 
 func (d *applyModDownloader) Download(_ context.Context, request modapi.DownloadRequest, _ io.Writer) (modapi.ActionResult, error) {
@@ -289,6 +291,99 @@ func TestApplyReleasesPortLeaseWhenModInstallIsCanceled(t *testing.T) {
 	}
 	if allocator.released != allocator.allocation.LeaseID || allocator.activated != "" {
 		t.Fatalf("allocator after cancellation=%#v", allocator)
+	}
+}
+
+func TestApplyReleasesPortLeaseWhenActivationFails(t *testing.T) {
+	app := newApplyTestApp(t)
+	value := uploadAnalyzedImportWithMod(t, app, "activation-failure")
+	allocator := importTestPortAllocator()
+	allocator.activateErr = errors.New("activation failed")
+	if err := app.service.ConfigurePortAllocator(allocator); err != nil {
+		t.Fatal(err)
+	}
+	_, err := app.service.Apply(context.Background(), value.ID, "job-activation-failure", ApplyRequest{
+		CandidateID: value.Manifest.Candidates[0].ID, Mode: ApplyModeNew, DirectoryName: "FailedActivationImport",
+		RoomName: "Failed Activation Import", TokenPolicy: TokenSource, NetworkPolicy: NetworkAuto, ModPolicy: ModsPreserve,
+	})
+	if err == nil || !strings.Contains(err.Error(), "activation failed") {
+		t.Fatalf("apply error=%v", err)
+	}
+	if allocator.activated != allocator.allocation.LeaseID || allocator.released != allocator.allocation.LeaseID {
+		t.Fatalf("allocator after activation failure=%#v", allocator)
+	}
+	if _, statErr := os.Stat(filepath.Join(app.saveRoot, "FailedActivationImport")); !os.IsNotExist(statErr) {
+		t.Fatalf("activation-failed import was not rolled back: %v", statErr)
+	}
+}
+
+func TestApplyPreservesJournalWhenActivationAndPortReleaseFail(t *testing.T) {
+	app := newApplyTestApp(t)
+	value := uploadAnalyzedImportWithMod(t, app, "activation-release-failure")
+	activationErr := errors.New("activation failed")
+	releaseErr := errors.New("release failed")
+	allocator := importTestPortAllocator()
+	allocator.activateErr = activationErr
+	allocator.releaseErr = releaseErr
+	if err := app.service.ConfigurePortAllocator(allocator); err != nil {
+		t.Fatal(err)
+	}
+	_, err := app.service.Apply(context.Background(), value.ID, "job-activation-release-failure", ApplyRequest{
+		CandidateID: value.Manifest.Candidates[0].ID, Mode: ApplyModeNew, DirectoryName: "FailedActivationReleaseImport",
+		RoomName: "Failed Activation Release Import", TokenPolicy: TokenSource, NetworkPolicy: NetworkAuto, ModPolicy: ModsPreserve,
+	})
+	if !errors.Is(err, activationErr) || !errors.Is(err, releaseErr) {
+		t.Fatalf("apply error=%v", err)
+	}
+	var blocked importRecord
+	if dbErr := app.store.db.Table(app.store.table).Where("id = ?", value.ID).First(&blocked).Error; dbErr != nil {
+		t.Fatal(dbErr)
+	}
+	if blocked.Status != string(StatusApplying) || blocked.ApplyPhase != applyPhasePublishing || blocked.ApplyPortLeaseID != allocator.allocation.LeaseID || !strings.Contains(blocked.ErrorMessage, "release failed") {
+		t.Fatalf("blocked apply journal=%#v", blocked)
+	}
+	if _, statErr := os.Stat(filepath.Join(app.saveRoot, "FailedActivationReleaseImport")); !os.IsNotExist(statErr) {
+		t.Fatalf("failed import target was not rolled back: %v", statErr)
+	}
+
+	allocator.activateErr = nil
+	allocator.releaseErr = nil
+	if err := app.service.recoverInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	var recovered importRecord
+	if dbErr := app.store.db.Table(app.store.table).Where("id = ?", value.ID).First(&recovered).Error; dbErr != nil {
+		t.Fatal(dbErr)
+	}
+	if recovered.Status != string(StatusReady) || recovered.ApplyPhase != "" || recovered.ApplyPortLeaseID != "" {
+		t.Fatalf("recovered apply journal=%#v", recovered)
+	}
+}
+
+func TestApplyPreservesJournalWhenPrePublishPortReleaseFails(t *testing.T) {
+	app := newApplyTestApp(t)
+	value := uploadAnalyzedImportWithMod(t, app, "mod-release-failure")
+	modErr := errors.New("steamcmd failed")
+	releaseErr := errors.New("release failed")
+	allocator := importTestPortAllocator()
+	allocator.releaseErr = releaseErr
+	if err := app.service.ConfigurePortAllocator(allocator); err != nil {
+		t.Fatal(err)
+	}
+	app.downloader.downloadErr = modErr
+	_, err := app.service.Apply(context.Background(), value.ID, "job-mod-release-failure", ApplyRequest{
+		CandidateID: value.Manifest.Candidates[0].ID, Mode: ApplyModeNew, DirectoryName: "FailedModReleaseImport",
+		RoomName: "Failed Mod Release Import", TokenPolicy: TokenSource, NetworkPolicy: NetworkAuto, ModPolicy: ModsInstallMissing,
+	})
+	if !errors.Is(err, modErr) || !errors.Is(err, releaseErr) {
+		t.Fatalf("apply error=%v", err)
+	}
+	var blocked importRecord
+	if dbErr := app.store.db.Table(app.store.table).Where("id = ?", value.ID).First(&blocked).Error; dbErr != nil {
+		t.Fatal(dbErr)
+	}
+	if blocked.Status != string(StatusApplying) || blocked.ApplyPhase != applyPhasePublishing || blocked.ApplyPortLeaseID != allocator.allocation.LeaseID {
+		t.Fatalf("pre-publish journal=%#v", blocked)
 	}
 }
 
@@ -538,7 +633,7 @@ func TestServiceRecoversInterruptedReplacementByRestoringOriginalRoom(t *testing
 	value := analyzedImportForRecovery(t, app)
 	staging := createRecoveryRoom(t, app.saveRoot, ".dst-admin-import-test", "new-save")
 	rollback := filepath.Join(app.saveRoot, ".dst-admin-import-rollback-test")
-	if err := app.store.BeginApply(value.ID, ApplyModeReplace, target.ID, "Target", filepath.Base(staging), filepath.Base(rollback)); err != nil {
+	if err := app.store.BeginApply(value.ID, ApplyModeReplace, target.ID, "Target", filepath.Base(staging), filepath.Base(rollback), ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(filepath.Join(app.saveRoot, "Target"), rollback); err != nil {
@@ -567,7 +662,7 @@ func TestServiceDefersRemoteReplacementRecoveryWithoutTouchingLocalPaths(t *test
 	value := analyzedImportForRecovery(t, app)
 	staging := createRecoveryRoom(t, app.saveRoot, ".dst-admin-import-remote", "new-save")
 	rollback := filepath.Join(app.saveRoot, ".dst-admin-import-rollback-remote")
-	if err := app.store.BeginApply(value.ID, ApplyModeReplace, target.ID, "Target", filepath.Base(staging), filepath.Base(rollback)); err != nil {
+	if err := app.store.BeginApply(value.ID, ApplyModeReplace, target.ID, "Target", filepath.Base(staging), filepath.Base(rollback), ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(filepath.Join(app.saveRoot, "Target"), rollback); err != nil {
@@ -607,7 +702,7 @@ func TestServiceRecoveryUnmanagesInterruptedNewRoom(t *testing.T) {
 	target := createRecoveryRoom(t, app.saveRoot, "Imported", "new-save")
 	roomID := rooms.EncodeID(filepath.Base(target))
 	stagingName := ".dst-admin-import-interrupted-new"
-	if err := app.store.BeginApply(value.ID, ApplyModeNew, roomID, filepath.Base(target), stagingName, ""); err != nil {
+	if err := app.store.BeginApply(value.ID, ApplyModeNew, roomID, filepath.Base(target), stagingName, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	managedRoomID := ""
@@ -641,10 +736,7 @@ func TestServiceReleasesInterruptedApplyLeaseAfterAllocatorIsConfigured(t *testi
 	target := createRecoveryRoom(t, app.saveRoot, "ImportedLeaseRecovery", "new-save")
 	roomID := rooms.EncodeID(filepath.Base(target))
 	stagingName := ".dst-admin-import-interrupted-lease"
-	if err := app.store.BeginApply(value.ID, ApplyModeNew, roomID, filepath.Base(target), stagingName, ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := app.store.SetApplyPortLease(value.ID, "lease-restart"); err != nil {
+	if err := app.store.BeginApply(value.ID, ApplyModeNew, roomID, filepath.Base(target), stagingName, "", "lease-restart"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.rooms.Adopt(roomID); err != nil {
@@ -678,13 +770,54 @@ func TestServiceReleasesInterruptedApplyLeaseAfterAllocatorIsConfigured(t *testi
 	}
 }
 
+func TestServiceActivatesCommittedApplyLeaseAfterAllocatorIsConfigured(t *testing.T) {
+	app := newApplyTestApp(t)
+	value := analyzedImportForRecovery(t, app)
+	target := createRecoveryRoom(t, app.saveRoot, "CommittedLeaseRecovery", "new-save")
+	roomID := rooms.EncodeID(filepath.Base(target))
+	if err := app.store.BeginApply(value.ID, ApplyModeNew, roomID, filepath.Base(target), ".dst-admin-import-committed-lease", "", "lease-committed-restart"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store.MarkApplyCommitted(value.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.rooms.Adopt(roomID); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(
+		Config{SaveRoot: app.saveRoot, ImportRoot: app.importRoot, WorkshopRoot: app.workshopRoot},
+		app.store, app.rooms, app.runtime, app.backups, app.downloader,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocator := &applyPortAllocator{}
+	if err := service.ConfigurePortAllocator(allocator); err != nil {
+		t.Fatal(err)
+	}
+	if allocator.activated != "lease-committed-restart" || allocator.released != "" {
+		t.Fatalf("allocator after committed recovery=%#v", allocator)
+	}
+	recovered, err := app.store.Get(value.ID)
+	if err != nil || recovered.Status != StatusApplied {
+		t.Fatalf("recovered import=%#v err=%v", recovered, err)
+	}
+	var record importRecord
+	if err := app.store.db.Table(app.store.table).Where("id = ?", value.ID).First(&record).Error; err != nil {
+		t.Fatal(err)
+	}
+	if record.ApplyPhase != "" || record.ApplyPortLeaseID != "" {
+		t.Fatalf("committed recovery journal not cleared: %#v", record)
+	}
+}
+
 func TestServiceFinishesCommittedReplacementAfterRestart(t *testing.T) {
 	app := newApplyTestApp(t)
 	target := createManagedRoom(t, app, "Target", "Target Room", "target-token-1234567890", 12001, "old-save")
 	value := analyzedImportForRecovery(t, app)
 	staging := createRecoveryRoom(t, app.saveRoot, ".dst-admin-import-committed", "new-save")
 	rollback := filepath.Join(app.saveRoot, ".dst-admin-import-rollback-committed")
-	if err := app.store.BeginApply(value.ID, ApplyModeReplace, target.ID, "Target", filepath.Base(staging), filepath.Base(rollback)); err != nil {
+	if err := app.store.BeginApply(value.ID, ApplyModeReplace, target.ID, "Target", filepath.Base(staging), filepath.Base(rollback), ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(filepath.Join(app.saveRoot, "Target"), rollback); err != nil {
@@ -718,7 +851,7 @@ func TestServiceFinishesAppliedJournalCleanupAfterRestart(t *testing.T) {
 	value := analyzedImportForRecovery(t, app)
 	staging := createRecoveryRoom(t, app.saveRoot, ".dst-admin-import-applied", "new-save")
 	rollback := filepath.Join(app.saveRoot, ".dst-admin-import-rollback-applied")
-	if err := app.store.BeginApply(value.ID, ApplyModeReplace, target.ID, "Target", filepath.Base(staging), filepath.Base(rollback)); err != nil {
+	if err := app.store.BeginApply(value.ID, ApplyModeReplace, target.ID, "Target", filepath.Base(staging), filepath.Base(rollback), ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(filepath.Join(app.saveRoot, "Target"), rollback); err != nil {

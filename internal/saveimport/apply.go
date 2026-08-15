@@ -110,12 +110,43 @@ func (s *Service) Apply(ctx context.Context, id, jobID string, request ApplyRequ
 	}
 	portLeaseID, err := s.applyNetworkPolicy(ctx, id, operationRoomID, staging, target, request.NetworkPolicy)
 	if err != nil {
-		return ApplyResult{}, err
+		return ApplyResult{}, errors.Join(err, s.releaseApplyPortLease(context.Background(), portLeaseID))
 	}
-	keepPortLease := false
+	rollback := ""
+	if request.Mode == ApplyModeReplace {
+		rollback = filepath.Join(s.config.SaveRoot, ".dst-admin-import-rollback-"+uuid.NewString())
+	}
+	recovery := importRecord{
+		ID: id, Status: string(StatusApplying), ApplyPhase: applyPhasePublishing, ApplyMode: string(request.Mode),
+		ApplyRoomID: operationRoomID, ApplyTarget: filepath.Base(target), ApplyStaging: filepath.Base(staging),
+		ApplyRollback:    pathBaseOrEmpty(rollback),
+		ApplyPortLeaseID: portLeaseID,
+	}
+	if err := s.store.BeginApply(id, request.Mode, operationRoomID, recovery.ApplyTarget, recovery.ApplyStaging, recovery.ApplyRollback, portLeaseID); err != nil {
+		return ApplyResult{}, errors.Join(err, s.releaseApplyPortLease(context.Background(), portLeaseID))
+	}
+	committed := false
 	defer func() {
-		if portLeaseID != "" && !keepPortLease && s.ports != nil {
-			_ = s.ports.ReleasePorts(context.Background(), portLeaseID)
+		if resultErr == nil || committed {
+			return
+		}
+		if rollbackErr := s.rollbackApply(recovery); rollbackErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("rollback imported room: %w", rollbackErr))
+			if markErr := s.store.MarkRecoveryBlocked(id, ErrorCode(resultErr), resultErr.Error()); markErr != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("persist blocked import recovery: %w", markErr))
+			}
+			return
+		}
+		published = false
+		if releaseErr := s.releaseApplyPortLease(context.Background(), portLeaseID); releaseErr != nil {
+			resultErr = errors.Join(resultErr, releaseErr)
+			if markErr := s.store.MarkRecoveryBlocked(id, ErrorCode(resultErr), resultErr.Error()); markErr != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("persist blocked import recovery: %w", markErr))
+			}
+			return
+		}
+		if markErr := s.store.MarkApplyFailed(id, ErrorCode(resultErr), resultErr.Error()); markErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("clear failed import journal: %w", markErr))
 		}
 	}()
 	installedMods, warnings, err := s.reconcileMods(ctx, candidate, request.ModPolicy)
@@ -137,36 +168,6 @@ func (s *Service) Apply(ctx context.Context, id, jobID string, request ApplyRequ
 	if err := ctx.Err(); err != nil {
 		return ApplyResult{}, err
 	}
-	rollback := ""
-	if request.Mode == ApplyModeReplace {
-		rollback = filepath.Join(s.config.SaveRoot, ".dst-admin-import-rollback-"+uuid.NewString())
-	}
-	recovery := importRecord{
-		ID: id, Status: string(StatusApplying), ApplyPhase: applyPhasePublishing, ApplyMode: string(request.Mode),
-		ApplyRoomID: operationRoomID, ApplyTarget: filepath.Base(target), ApplyStaging: filepath.Base(staging),
-		ApplyRollback:    pathBaseOrEmpty(rollback),
-		ApplyPortLeaseID: portLeaseID,
-	}
-	if err := s.store.BeginApply(id, request.Mode, operationRoomID, recovery.ApplyTarget, recovery.ApplyStaging, recovery.ApplyRollback); err != nil {
-		return ApplyResult{}, err
-	}
-	if portLeaseID != "" {
-		if err := s.store.SetApplyPortLease(id, portLeaseID); err != nil {
-			return ApplyResult{}, err
-		}
-	}
-	committed := false
-	defer func() {
-		if resultErr == nil || committed {
-			return
-		}
-		if rollbackErr := s.rollbackApply(recovery); rollbackErr != nil {
-			resultErr = fmt.Errorf("%v; rollback imported room: %w", resultErr, rollbackErr)
-			return
-		}
-		published = false
-		_ = s.store.MarkApplyFailed(id, ErrorCode(resultErr), resultErr.Error())
-	}()
 	if rollback != "" {
 		if err := os.Rename(target, rollback); err != nil {
 			return ApplyResult{}, fmt.Errorf("stage current room before import: %w", err)
@@ -197,7 +198,6 @@ func (s *Service) Apply(ctx context.Context, id, jobID string, request ApplyRequ
 	}
 	recovery.ApplyPhase = applyPhaseCommitted
 	committed = true
-	keepPortLease = true
 	if err := s.finalizeCommittedApply(recovery); err != nil {
 		return ApplyResult{}, err
 	}
@@ -207,6 +207,16 @@ func (s *Service) Apply(ctx context.Context, id, jobID string, request ApplyRequ
 		DirectoryName: room.DirectoryName, RoomName: room.Name, ProtectionBackupID: protectionID,
 		InstalledMods: installedMods, Warnings: warnings, AppliedAt: now,
 	}, nil
+}
+
+func (s *Service) releaseApplyPortLease(ctx context.Context, leaseID string) error {
+	if strings.TrimSpace(leaseID) == "" || s.ports == nil {
+		return nil
+	}
+	if err := s.ports.ReleasePorts(ctx, leaseID); err != nil && !errors.Is(err, topology.ErrResourceNotFound) {
+		return fmt.Errorf("release imported room port reservations: %w", err)
+	}
+	return nil
 }
 
 func pathBaseOrEmpty(value string) string {
@@ -226,10 +236,9 @@ func (s *Service) recoverApply(record importRecord) error {
 	if err := s.rollbackApply(record); err != nil {
 		return err
 	}
-	if record.ApplyPortLeaseID != "" && s.ports != nil {
-		if err := s.ports.ReleasePorts(context.Background(), record.ApplyPortLeaseID); err != nil {
-			return fmt.Errorf("release interrupted import ports: %w", err)
-		}
+	if err := s.releaseApplyPortLease(context.Background(), record.ApplyPortLeaseID); err != nil {
+		blockedErr := s.store.MarkRecoveryBlocked(record.ID, ErrorCode(err), err.Error())
+		return errors.Join(err, blockedErr)
 	}
 	_, staging, _, err := s.applyRecoveryPaths(record)
 	if err != nil {
@@ -503,8 +512,7 @@ func (s *Service) applyNetworkPolicy(ctx context.Context, importID, roomID, stag
 			return "", err
 		}
 		if err := applyAllocatedNetworkConfiguration(staging, allocation.Reservations); err != nil {
-			_ = s.ports.ReleasePorts(context.Background(), allocation.LeaseID)
-			return "", err
+			return allocation.LeaseID, err
 		}
 		return allocation.LeaseID, nil
 	}

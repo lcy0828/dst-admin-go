@@ -3,6 +3,7 @@ package runtimedriver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 
 	"github.com/google/uuid"
 )
+
+var errShardStopUnconfirmed = errors.New("分片停止未得到明确状态确认")
 
 type PlacementResolver interface {
 	AppliedPlacement(string, string) (topology.ExecutionPlacement, error)
@@ -33,19 +36,27 @@ type cpuObservationRecorder interface {
 	RecordCPUResult(string, string, shared.RuntimeCPUResult) (topology.CPUAllocation, error)
 }
 
+type cpuFailureRecorder interface {
+	RecordCPUFailure(string, string, error) (topology.CPUAllocation, error)
+}
+
 type Router struct {
 	placements PlacementResolver
 	leases     LeaseService
 	local      Driver
 	remote     Driver
 	leaseTTL   time.Duration
+	cleanupTTL time.Duration
 }
 
 func NewRouter(placements PlacementResolver, leases LeaseService, local, remote Driver) (*Router, error) {
 	if placements == nil || leases == nil || local == nil || remote == nil {
 		return nil, errors.New("runtime driver router dependencies are required")
 	}
-	return &Router{placements: placements, leases: leases, local: local, remote: remote, leaseTTL: 2 * time.Minute}, nil
+	return &Router{
+		placements: placements, leases: leases, local: local, remote: remote,
+		leaseTTL: 2 * time.Minute, cleanupTTL: 30 * time.Second,
+	}, nil
 }
 
 func (r *Router) DriverTarget(ctx context.Context, roomID, worldID string) (Driver, Target, error) {
@@ -201,6 +212,7 @@ func (r *Router) ExecutePlacedShard(ctx context.Context, roomID, worldID string,
 		cpuRequest = cpuRequestFromAllocation(allocation)
 		prepared, prepareErr := cpuDriver.PrepareCPU(ctx, target, cpuPhaseOperation(operation), cpuRequest)
 		if prepareErr != nil {
+			r.recordCPUFailure(roomID, worldID, prepareErr)
 			return shared.ShardOperationResult{}, prepareErr
 		}
 		if err := r.recordCPUResult(roomID, worldID, prepared); err != nil {
@@ -208,12 +220,42 @@ func (r *Router) ExecutePlacedShard(ctx context.Context, roomID, worldID string,
 		}
 	}
 	result, err := driver.ExecuteShard(ctx, target, operation, request.Action, timeout)
+	if request.Action == shared.ShardActionStop {
+		_, allocationErr := r.cpuAllocation(roomID, worldID)
+		stopped := shardStopped(result.Status)
+		if !stopped && err == nil {
+			err = errShardStopUnconfirmed
+		}
+		if candidate, ok := driver.(CPUDriver); ok && allocationErr == nil && HasCapability(driver, CapabilityExclusiveCPU) && stopped {
+			cleanupErr := r.releaseCPU(context.WithoutCancel(ctx), candidate, target, operation, roomID, worldID)
+			if cleanupErr != nil {
+				r.recordCPUFailure(roomID, worldID, cleanupErr)
+				err = errors.Join(err, cleanupErr)
+			}
+		}
+		return result, err
+	}
+	if err != nil && cpuDriver != nil {
+		reconcileErr := r.reconcileCPUAfterLifecycleError(context.WithoutCancel(ctx), driver, cpuDriver, target, operation, roomID, worldID, cpuRequest, result.Status, err)
+		return result, errors.Join(err, reconcileErr)
+	}
 	if err == nil && cpuDriver != nil {
 		applied, applyErr := cpuDriver.ApplyCPU(ctx, target, cpuPhaseOperation(operation), cpuRequest)
 		if applyErr != nil {
+			stopContext, cancel := r.cleanupContext(ctx)
 			rollback := cpuPhaseOperation(operation)
-			_, _ = driver.ExecuteShard(ctx, target, rollback, shared.ShardActionStop, 30*time.Second)
-			return result, applyErr
+			stopped, stopErr := driver.ExecuteShard(stopContext, target, rollback, shared.ShardActionStop, r.cleanupTTL)
+			cancel()
+			if stopErr == nil && !shardStopped(stopped.Status) {
+				stopErr = errShardStopUnconfirmed
+			}
+			var releaseErr error
+			if shardStopped(stopped.Status) {
+				releaseErr = r.releaseCPU(context.WithoutCancel(ctx), cpuDriver, target, rollback, roomID, worldID)
+			}
+			cleanupErr := errors.Join(applyErr, stopErr, releaseErr)
+			r.recordCPUFailure(roomID, worldID, cleanupErr)
+			return result, cleanupErr
 		}
 		if recordErr := r.recordCPUResult(roomID, worldID, applied); recordErr != nil {
 			return result, recordErr
@@ -245,6 +287,9 @@ func (r *Router) ApplyCPUAllocation(ctx context.Context, allocation topology.CPU
 	expires := lease.ExpiresAt.UTC()
 	operation := Operation{ID: newOperationID(), Key: newOperationID(), LeaseID: lease.LeaseID, FencingToken: lease.FencingToken, LeaseExpiresAt: &expires}
 	request := cpuRequestFromAllocation(allocation)
+	if request.Policy == shared.RuntimeCPUPolicyNone {
+		return cpu.ApplyCPU(ctx, target, cpuPhaseOperation(operation), request)
+	}
 	prepared, err := cpu.PrepareCPU(ctx, target, operation, request)
 	if err != nil {
 		return shared.RuntimeCPUResult{}, err
@@ -257,6 +302,21 @@ func (r *Router) ApplyCPUAllocation(ctx context.Context, allocation topology.CPU
 		return prepared, nil
 	}
 	return cpu.ApplyCPU(ctx, target, cpuPhaseOperation(operation), request)
+}
+
+func (r *Router) ObserveCPUAllocation(ctx context.Context, allocation topology.CPUAllocation) (shared.RuntimeCPUResult, error) {
+	driver, target, err := r.DriverTarget(ctx, allocation.RoomID, allocation.WorldID)
+	if err != nil {
+		return shared.RuntimeCPUResult{}, err
+	}
+	if target.TargetID != allocation.TargetID {
+		return shared.RuntimeCPUResult{}, ErrTopologyChanged
+	}
+	cpu, ok := driver.(CPUDriver)
+	if !ok {
+		return shared.RuntimeCPUResult{}, ErrCapabilityMissing
+	}
+	return cpu.ObserveCPU(ctx, target, cpuRequestFromAllocation(allocation))
 }
 
 func cpuRequestFromAllocation(allocation topology.CPUAllocation) shared.RuntimeCPURequest {
@@ -275,6 +335,99 @@ func (r *Router) recordCPUResult(roomID, worldID string, result shared.RuntimeCP
 	}
 	_, err := recorder.RecordCPUResult(roomID, worldID, result)
 	return err
+}
+
+func (r *Router) recordCPUFailure(roomID, worldID string, cause error) {
+	if cause == nil {
+		return
+	}
+	if recorder, ok := r.placements.(cpuFailureRecorder); ok {
+		_, _ = recorder.RecordCPUFailure(roomID, worldID, cause)
+	}
+}
+
+func (r *Router) releaseCPU(ctx context.Context, cpu CPUDriver, target Target, operation Operation, roomID, worldID string) error {
+	cleanupContext, cancel := r.cleanupContext(ctx)
+	defer cancel()
+	released, err := cpu.ApplyCPU(cleanupContext, target, cpuPhaseOperation(operation), shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyNone})
+	if err != nil {
+		return err
+	}
+	if err := r.recordCPUResult(roomID, worldID, released); errors.Is(err, topology.ErrResourceNotFound) {
+		return nil
+	} else {
+		return err
+	}
+}
+
+func (r *Router) cpuAllocation(roomID, worldID string) (topology.CPUAllocation, error) {
+	resolver, ok := r.placements.(cpuAllocationResolver)
+	if !ok {
+		return topology.CPUAllocation{}, ErrCapabilityMissing
+	}
+	return resolver.CPUAllocation(roomID, worldID)
+}
+
+func (r *Router) reconcileCPUAfterLifecycleError(ctx context.Context, driver Driver, cpu CPUDriver, target Target, operation Operation, roomID, worldID string, request shared.RuntimeCPURequest, fallback shared.ShardRuntimeStatus, lifecycleErr error) error {
+	status := fallback
+	statusErr := error(nil)
+	statusContext, cancelStatus := r.cleanupContext(ctx)
+	observed, observeErr := driver.Status(statusContext, target)
+	cancelStatus()
+	if observeErr == nil {
+		status = observed
+	} else {
+		statusErr = fmt.Errorf("重新确认分片状态: %w", observeErr)
+	}
+	if status.State == "running" || status.State == "starting" {
+		applyContext, cancelApply := r.cleanupContext(ctx)
+		applied, err := cpu.ApplyCPU(applyContext, target, cpuPhaseOperation(operation), request)
+		cancelApply()
+		if err == nil {
+			if recordErr := r.recordCPUResult(roomID, worldID, applied); recordErr != nil {
+				r.recordCPUFailure(roomID, worldID, errors.Join(lifecycleErr, statusErr, recordErr))
+				return errors.Join(statusErr, recordErr)
+			}
+			return nil
+		}
+		stopContext, cancelStop := r.cleanupContext(ctx)
+		stopped, stopErr := driver.ExecuteShard(stopContext, target, cpuPhaseOperation(operation), shared.ShardActionStop, r.cleanupTTL)
+		cancelStop()
+		if stopErr == nil && !shardStopped(stopped.Status) {
+			stopErr = errShardStopUnconfirmed
+		}
+		var releaseErr error
+		if shardStopped(stopped.Status) {
+			releaseErr = r.releaseCPU(context.WithoutCancel(ctx), cpu, target, operation, roomID, worldID)
+		}
+		cleanupErr := errors.Join(statusErr, err, stopErr, releaseErr)
+		r.recordCPUFailure(roomID, worldID, errors.Join(lifecycleErr, cleanupErr))
+		return cleanupErr
+	}
+	if shardStopped(status) {
+		releaseErr := r.releaseCPU(context.WithoutCancel(ctx), cpu, target, operation, roomID, worldID)
+		if releaseErr != nil {
+			r.recordCPUFailure(roomID, worldID, errors.Join(lifecycleErr, statusErr, releaseErr))
+			return errors.Join(statusErr, releaseErr)
+		}
+		r.recordCPUFailure(roomID, worldID, lifecycleErr)
+		return nil
+	}
+	unconfirmedErr := errShardStopUnconfirmed
+	r.recordCPUFailure(roomID, worldID, errors.Join(lifecycleErr, statusErr, unconfirmedErr))
+	return errors.Join(statusErr, unconfirmedErr)
+}
+
+func (r *Router) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := r.cleanupTTL
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
+}
+
+func shardStopped(status shared.ShardRuntimeStatus) bool {
+	return !status.SessionExists && status.State == "stopped"
 }
 
 func (r *Router) ConsoleHealth(ctx context.Context, roomID, worldID string) (shared.RuntimeConsoleHealth, error) {

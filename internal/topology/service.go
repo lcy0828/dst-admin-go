@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"dont/internal/agents"
 	"dont/internal/rooms"
@@ -25,14 +27,21 @@ type targetCatalog interface {
 }
 
 type Service struct {
-	rooms   roomCatalog
-	targets targetCatalog
-	store   *Store
-	cpu     CPUAllocationExecutor
+	rooms              roomCatalog
+	targets            targetCatalog
+	store              *Store
+	cpu                CPUAllocationExecutor
+	cpuRecoveryMu      sync.Mutex
+	cpuRecoveryPending map[string]struct{}
+	cpuRecoveryTimeout time.Duration
 }
 
 type CPUAllocationExecutor interface {
 	ApplyCPUAllocation(context.Context, CPUAllocation) (shared.RuntimeCPUResult, error)
+}
+
+type cpuAllocationObserver interface {
+	ObserveCPUAllocation(context.Context, CPUAllocation) (shared.RuntimeCPUResult, error)
 }
 
 type roomPlan struct {
@@ -46,7 +55,149 @@ func (s *Service) ConfigureCPUExecutor(executor CPUAllocationExecutor) error {
 		return errors.New("CPU allocation executor is required")
 	}
 	s.cpu = executor
+	observer, ok := executor.(cpuAllocationObserver)
+	if !ok {
+		return nil
+	}
+	_, _, _, _, allocations, err := s.store.RuntimeResources()
+	if err != nil {
+		return err
+	}
+	s.resetCPURecoveryPending()
+	for _, allocation := range allocations {
+		if allocation.TargetID != localTargetID {
+			s.addCPURecoveryPending(allocation)
+			continue
+		}
+		if _, err := s.observeCPUExecutionState(context.Background(), observer, allocation); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (s *Service) observeCPUExecutionState(ctx context.Context, observer cpuAllocationObserver, allocation CPUAllocation) (bool, error) {
+	timeout := s.cpuRecoveryTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	observeContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	observed, observeErr := observer.ObserveCPUAllocation(observeContext, allocation)
+	if observeErr != nil {
+		if err := ctx.Err(); err != nil {
+			return true, err
+		}
+		return s.recordRecoveredCPUState(allocation, nil, fmt.Errorf("恢复 CPU 执行状态: %w", observeErr))
+	}
+	return s.recordRecoveredCPUState(allocation, &observed, nil)
+}
+
+func (s *Service) recordRecoveredCPUState(expected CPUAllocation, observed *shared.RuntimeCPUResult, cause error) (bool, error) {
+	updated := expected
+	confirmed := false
+	if cause != nil {
+		updated.ExecutionState = CPUExecutionFailed
+		updated.ExecutionError = truncateResourceError(cause.Error())
+	} else if observed != nil {
+		updated.Observed, updated.ExecutionError = observed, ""
+		switch observed.State {
+		case shared.RuntimeCPUStateApplied:
+			updated.ExecutionState = CPUExecutionApplied
+			confirmed = true
+		case shared.RuntimeCPUStatePrepared:
+			updated.ExecutionState = CPUExecutionPrepared
+			confirmed = true
+		case shared.RuntimeCPUStateReleased:
+			updated.ExecutionState = CPUExecutionReleased
+			confirmed = true
+		default:
+			updated.ExecutionState = CPUExecutionDesired
+		}
+	}
+	current, applied, err := s.store.SaveCPUAllocationIfCurrent(expected, updated)
+	if err != nil {
+		return true, err
+	}
+	if !applied {
+		if current.ID == "" {
+			s.clearCPURecoveryPending(expected.RoomID, expected.WorldID)
+			return false, nil
+		}
+		return true, nil
+	}
+	if cause != nil || !confirmed {
+		return true, nil
+	}
+	s.clearCPURecoveryPending(expected.RoomID, expected.WorldID)
+	return false, nil
+}
+
+func (s *Service) recoverPendingCPUExecutionState(ctx context.Context, inventories []agents.RuntimeTargetInventory) error {
+	observer, ok := s.cpu.(cpuAllocationObserver)
+	if !ok {
+		return nil
+	}
+	_, _, _, _, allocations, err := s.store.RuntimeResources()
+	if err != nil {
+		return err
+	}
+	available := make(map[string]bool, len(inventories))
+	for _, inventory := range inventories {
+		available[inventory.Target.ID] = inventory.Target.Online && inventory.Available && !inventory.Stale
+	}
+	sort.Slice(allocations, func(i, j int) bool {
+		if allocations[i].RoomID == allocations[j].RoomID {
+			return allocations[i].WorldID < allocations[j].WorldID
+		}
+		return allocations[i].RoomID < allocations[j].RoomID
+	})
+	for _, allocation := range allocations {
+		if allocation.TargetID == localTargetID || !available[allocation.TargetID] || !s.takeCPURecoveryPending(allocation) {
+			continue
+		}
+		retry, err := s.observeCPUExecutionState(ctx, observer, allocation)
+		if err != nil {
+			s.addCPURecoveryPending(allocation)
+			return err
+		}
+		if retry {
+			s.addCPURecoveryPending(allocation)
+		}
+	}
+	return nil
+}
+
+func (s *Service) resetCPURecoveryPending() {
+	s.cpuRecoveryMu.Lock()
+	s.cpuRecoveryPending = make(map[string]struct{})
+	s.cpuRecoveryMu.Unlock()
+}
+
+func (s *Service) addCPURecoveryPending(allocation CPUAllocation) {
+	s.cpuRecoveryMu.Lock()
+	if s.cpuRecoveryPending == nil {
+		s.cpuRecoveryPending = make(map[string]struct{})
+	}
+	s.cpuRecoveryPending[allocationResourceID(allocation.RoomID, allocation.WorldID)] = struct{}{}
+	s.cpuRecoveryMu.Unlock()
+}
+
+func (s *Service) takeCPURecoveryPending(allocation CPUAllocation) bool {
+	key := allocationResourceID(allocation.RoomID, allocation.WorldID)
+	s.cpuRecoveryMu.Lock()
+	defer s.cpuRecoveryMu.Unlock()
+	if _, exists := s.cpuRecoveryPending[key]; !exists {
+		return false
+	}
+	delete(s.cpuRecoveryPending, key)
+	return true
+}
+
+func (s *Service) clearCPURecoveryPending(roomID, worldID string) {
+	s.cpuRecoveryMu.Lock()
+	delete(s.cpuRecoveryPending, allocationResourceID(roomID, worldID))
+	s.cpuRecoveryMu.Unlock()
 }
 
 type planResult struct {
@@ -63,7 +214,10 @@ func NewService(roomService roomCatalog, targetService targetCatalog, store *Sto
 	if roomService == nil || targetService == nil || store == nil {
 		return nil, errors.New("topology dependencies are required")
 	}
-	return &Service{rooms: roomService, targets: targetService, store: store}, nil
+	return &Service{
+		rooms: roomService, targets: targetService, store: store,
+		cpuRecoveryPending: make(map[string]struct{}), cpuRecoveryTimeout: 5 * time.Second,
+	}, nil
 }
 
 func (s *Service) Topology(ctx context.Context, roomID string) (Snapshot, error) {

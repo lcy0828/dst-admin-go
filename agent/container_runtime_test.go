@@ -261,6 +261,24 @@ func TestContainerRuntimeAppliesAndVerifiesCPUWithTrustedIdentity(t *testing.T) 
 	}
 }
 
+func TestContainerRuntimeReleasesCPUForStoppedContainer(t *testing.T) {
+	id := strings.Repeat("8", 64)
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{
+		containerListLine(id, "exited", "Cluster_1", "Master"), nil,
+		containerListLine(id, "exited", "Cluster_1", "Master"),
+		containerCPUInspect(id, "Cluster_1", "Master", "", 0, false),
+	}}
+	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
+	result, err := runtime.ExecuteCPU(context.Background(), "Cluster_1", "Master", shared.RuntimeActionCPUApply, shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyNone})
+	if err != nil || result.State != shared.RuntimeCPUStateReleased || !result.Enforced || result.InstanceRunning {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	wantUpdate := []string{"update", "--cpus", "0", "--cpuset-cpus", "", id}
+	if !reflect.DeepEqual(cli.calls[1].arguments, wantUpdate) {
+		t.Fatalf("calls=%#v", cli.calls)
+	}
+}
+
 func TestContainerRuntimeRejectsCPUResultForChangedInstance(t *testing.T) {
 	first, second := strings.Repeat("7", 64), strings.Repeat("8", 64)
 	cli := &fakeContainerCLI{available: true, responses: [][]byte{

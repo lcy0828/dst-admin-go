@@ -121,12 +121,20 @@ func (n *Native) Apply(ctx context.Context, installationID, cluster, shard strin
 	} else if n.platform != "linux" {
 		return shared.RuntimeCPUResult{}, fmt.Errorf("%w: %s does not provide a verifiable CPU release boundary", ErrUnsupportedPlatform, n.platform)
 	}
-	identity, err := n.resolveWaiting(ctx, cluster, shard)
-	if err != nil {
-		return shared.RuntimeCPUResult{}, err
-	}
 	path := n.cgroupPath(installationID, cluster, shard)
 	if request.Policy == shared.RuntimeCPUPolicyNone {
+		identity, err := n.resolve(ctx, n.serverRoot, cluster, shard)
+		if errors.Is(err, ErrInstanceNotRunning) {
+			if err := n.removeCgroup(path); err != nil && !os.IsNotExist(err) {
+				return shared.RuntimeCPUResult{}, fmt.Errorf("remove stopped DST cgroup: %w", err)
+			}
+			result := n.result(request, shared.RuntimeCPUStateReleased, nil)
+			result.Enforced = true
+			return result, nil
+		}
+		if err != nil {
+			return shared.RuntimeCPUResult{}, err
+		}
 		// A process that was never attached to our cgroup is already released.
 		// Moving it to the cgroup root would incorrectly escape an enclosing
 		// service boundary (for example a delegated systemd unit).
@@ -144,6 +152,10 @@ func (n *Native) Apply(ctx context.Context, installationID, cluster, shard strin
 		result := n.result(request, shared.RuntimeCPUStateReleased, &identity)
 		result.Enforced, result.InstanceRunning = true, true
 		return result, nil
+	}
+	identity, err := n.resolveWaiting(ctx, cluster, shard)
+	if err != nil {
+		return shared.RuntimeCPUResult{}, err
 	}
 	if err := os.WriteFile(filepath.Join(path, "cgroup.procs"), []byte(strconv.FormatInt(int64(identity.PID), 10)), 0o644); err != nil {
 		return shared.RuntimeCPUResult{}, fmt.Errorf("attach DST process to managed cgroup: %w", err)
@@ -195,7 +207,13 @@ func (n *Native) Observe(ctx context.Context, installationID, cluster, shard str
 		if request.Policy == shared.RuntimeCPUPolicyNone {
 			return n.result(request, shared.RuntimeCPUStateReleased, nil), nil
 		}
-		result, observeErr := n.observeCgroup(n.cgroupPath(installationID, cluster, shard), request, nil)
+		path := n.cgroupPath(installationID, cluster, shard)
+		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+			return n.result(request, shared.RuntimeCPUStatePrepared, nil), nil
+		} else if statErr != nil {
+			return shared.RuntimeCPUResult{}, statErr
+		}
+		result, observeErr := n.observeCgroup(path, request, nil)
 		result.State, result.Enforced = shared.RuntimeCPUStatePrepared, false
 		return result, observeErr
 	}

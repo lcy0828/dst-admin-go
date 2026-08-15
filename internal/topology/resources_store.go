@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -390,6 +391,34 @@ func (s *Store) SaveCPUAllocation(value CPUAllocation) (CPUAllocation, error) {
 	}
 	record.UpdatedAt = now
 	return allocationFromRecord(record), nil
+}
+
+func (s *Store) SaveCPUAllocationIfCurrent(expected, value CPUAllocation) (CPUAllocation, bool, error) {
+	if expected.ID == "" || expected.ID != value.ID {
+		return CPUAllocation{}, false, ErrResourceNotFound
+	}
+	now := s.now().UTC()
+	record := cpuRecordFromAllocation(value)
+	expectedRecord := cpuRecordFromAllocation(expected)
+	result := s.db.Table(s.cpuAllocationsTable).
+		Where("id = ? AND target_id = ? AND environment_id = ? AND policy = ? AND logical_cpu_ids = ? AND updated_at = ?",
+			expected.ID, expected.TargetID, expected.EnvironmentID, expectedRecord.Policy, expectedRecord.LogicalCPUIds, expected.UpdatedAt).
+		Updates(map[string]interface{}{
+			"execution_state": record.ExecutionState, "observed": record.Observed,
+			"execution_error": record.ExecutionError, "updated_at": now,
+		})
+	if result.Error != nil {
+		return CPUAllocation{}, false, result.Error
+	}
+	if result.RowsAffected != 1 {
+		current, err := s.CPUAllocation(expected.RoomID, expected.WorldID)
+		if errors.Is(err, ErrResourceNotFound) {
+			return CPUAllocation{}, false, nil
+		}
+		return current, false, err
+	}
+	record.UpdatedAt = now
+	return allocationFromRecord(record), true, nil
 }
 
 func (s *Store) CPUAllocation(roomID, worldID string) (CPUAllocation, error) {
