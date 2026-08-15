@@ -157,6 +157,31 @@ Docker 官方资料说明，bridge 网络中的端口默认不会从宿主对外
 
 访问日期：2026-08-15。可信度：Docker 平台语义高；DST 外部发现行为需要实机验证。
 
+### 1.10 主服务、Agent 与 DST 容器化是三个问题
+
+当前项目代码核验：
+
+- Agent 的 RuntimeInstallation 使用 Agent 所在环境可见的绝对 `SAVE_PATH`、`SERVER_PATH` 和 `UGC_PATH`。
+- Agent 的 native Shard control 直接构造 tmux Runtime。
+- Agent 将最高 fencing token、lease 和幂等操作结果写入本地 operation state file。
+
+因此可以直接支持的首要组合是“主服务容器 + 裸机 Agent + 裸机 DST”：主服务容器只负责 Web/API/数据库，裸机 Agent 继续拥有真实路径、tmux 和进程视图。把 Agent 放进容器后，如果仍要控制宿主 native DST，仅挂一个配置文件并不足够，还需要受信路径、tmux socket/运行目录、宿主进程可见性、相同用户权限和持久 Agent state。
+
+Docker 官方资料同时说明：bind mount 默认可写宿主文件并与宿主目录结构强耦合；Docker daemon 通常具有高权限，只能向受信主体开放。因此：
+
+- 主服务容器默认不挂 DST 目录、host PID 或 Docker Socket。
+- 容器 Agent 管理容器化 DST 时优先使用 rootless Podman 或受限 Docker Socket Proxy。
+- 容器 Agent 管理宿主 native DST 作为单独的 `native-host-integration` 高权限 profile，验证前不能作为默认安装方式。
+- Agent ID、凭证、Runtime 注册表和 operation/fencing state 必须使用持久卷；状态丢失后禁止自动接管旧 Shard。
+
+来源：
+
+- 当前代码：`agent/runtime_installations.go`、`agent/shard_operations.go`。
+- Docker Docs, Bind mounts：<https://docs.docker.com/engine/storage/bind-mounts/>
+- Docker Docs, Docker Engine security：<https://docs.docker.com/engine/security/>
+
+访问日期：2026-08-15。可信度：当前代码与 Docker 平台语义高；容器 Agent 的 native host-integration 仍需 Linux 实机验证。
+
 ## 2. CPU 容量规则
 
 用户产品要求：同一服务器允许运行多个世界，但必须提醒用户“一核心最多安排一层世界”，避免卡顿。
@@ -195,6 +220,9 @@ Docker 官方资料说明，bridge 网络中的端口默认不会从宿主对外
 10. Kubernetes ClusterIP/NodePort/LoadBalancer 下玩家连接、Steam 列表、Shard 注册和源地址行为。
 11. Shard Pod 被强制删除、Worker 失联、PVC 重挂载时，lease/fencing 是否能阻止双实例写入。
 12. 保存屏障完成后使用不同 CSI snapshot provider 生成一致备份集的时序和失败语义。
+13. 主服务容器经反向代理连接同宿主/远程裸机 Agent 时的 WebSocket 重连、真实来源地址和健康检查。
+14. 容器 Agent 在同 UID/GID、受限 bind mount、tmux socket 和宿主进程视图下控制 native DST 的完整生命周期。
+15. Agent 容器状态卷丢失、回滚或复制后，identity/fencing 防止重复接管的行为。
 
 ## 4. 实机测试记录格式
 

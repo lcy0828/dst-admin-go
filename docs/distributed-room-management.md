@@ -4,7 +4,7 @@
 > 更新日期：2026-08-15
 > 依赖：`distributed-room-management-plan.md`、`multi-node-dst-research.md`
 
-实现状态说明：当前代码只支持 `native` 执行环境，本机和 Agent 都通过受信路径及 tmux 控制 DST；已经采集四类 DST 端口和 CPU 容量，但尚未实现执行环境、端口租约、CPU 绑核、容器 Driver 或 Kubernetes Driver。本文后续对应能力均为目标设计，不代表已经可用。
+实现状态说明：当前代码的主服务和 Agent 尚无仓库内 OCI 镜像/Compose 交付；DST 只支持 `native` 执行环境，本机和 Agent 都通过受信路径及 tmux 控制。代码已经采集四类 DST 端口和 CPU 容量，但尚未实现执行环境、端口租约、CPU 绑核、container Runtime Driver 或 Kubernetes Driver。本文后续对应能力均为目标设计，不代表已经可用。
 
 ## 1. 产品边界
 
@@ -19,14 +19,25 @@
 - 一个节点运行多个房间的多个 Shard。
 - 一个房间的不同 Shard 分布在多个节点。
 
-目标部署形态：
+部署必须拆成三个独立维度：
 
-- 裸机：Linux/macOS 直接运行 DST，本机或 Agent 使用原生进程 Driver。
-- 容器：Linux 节点使用 Docker 或 Podman；推荐一个容器承载一个 Shard，不在容器内运行 tmux。
-- Kubernetes：未来由 Kubernetes Driver 管理命名空间内的有状态 Shard 工作负载；推荐一个 Pod 承载一个 Shard。
-- 混合拓扑：同一 Room 可以把 Shard 放在不同部署形态，但只有各目标的版本、网络、存储和 Mod 预检全部通过后才允许启动。
+- Control Plane Deployment：主服务运行在裸机、普通容器或未来 Kubernetes 中。
+- Agent Deployment：Agent 运行在裸机、普通容器或未来 DaemonSet 中。
+- DST Runtime：Shard 运行在裸机进程、普通容器或未来 Pod 中。
 
-控制器的部署位置和 Shard 的执行形态相互独立。控制器可以运行在裸机或容器中，但不得因为自身位于容器中就默认取得宿主机、Docker Socket 或 Kubernetes 集群权限。
+主服务/Agent 容器化不代表 DST 必须容器化。目标组合为：
+
+| 主服务 | Agent | DST Runtime | 定位 |
+| --- | --- | --- | --- |
+| 裸机 | 内置本机/裸机 Agent | 裸机 | 当前基线 |
+| 容器 | 裸机 Agent | 裸机 | 推荐主路径；主服务与宿主控制权限分离 |
+| 容器 | 容器 Agent | 容器 | 推荐完整容器路径；Agent 通过受限容器 Runtime Driver 管理 Shard |
+| 容器 | 容器 Agent | 裸机 | 高权限兼容模式；验证前不作为默认方案 |
+| Kubernetes | Kubernetes Provider/外部 Agent/可选 DaemonSet | Pod 或外部裸机 | 未来实验能力 |
+
+同一 Room 仍可把 Shard 放在不同 Node 或 Runtime，但只有各目标版本、网络、存储和 Mod 预检全部通过后才允许启动。
+
+控制器的部署位置和 Shard 的执行形态相互独立。主服务容器默认不取得宿主 PID、tmux socket、DST 目录、Docker Socket 或 Kubernetes 凭证；需要管理同宿主裸机 DST 时，也应通过该宿主注册的 Agent 完成。
 
 同机多 Shard 是合法能力，但默认容量策略为“每个运行中的 Shard 预留一个物理核心预算单位，并给系统至少预留一个核心”。
 
@@ -39,10 +50,13 @@
 ```text
 id, kind(local|agent|kubernetes)
 displayName, connectionState, credentialsRef
+deploymentKind(in_process|native|container|daemonset)
 protocolVersion, capabilities, observedAt
 ```
 
 `RuntimeProvider` 表示控制权和连接边界。当前 `local`/`Agent` target 一对一管理一台 Node；未来一个 Kubernetes Provider 可以发现多台 Worker Node。这样不要求为每个 K8s Worker 安装普通 Agent，也不会把“集群连接”错误建模成一台服务器。
+
+Provider capability 需要分别声明 `nativeRuntimeControl`、`containerRuntimeControl` 和 `kubernetesRuntimeControl`。Agent 自己运行在容器里，不代表自动具有控制宿主 native Runtime 或 Docker daemon 的权限。
 
 ### 2.2 Node
 
@@ -71,7 +85,7 @@ memoryRequestBytes, memoryLimitBytes
 capabilities, observedAt, health
 ```
 
-`ExecutionEnvironment` 是稳定的逻辑执行和隔离边界；实际 PID、container ID 或 Pod UID 属于 ProcessObservation：
+`ExecutionEnvironment` 是稳定的 DST Shard 逻辑执行和隔离边界，不描述主服务或 Agent 自身怎么部署；实际 PID、container ID 或 Pod UID 属于 ProcessObservation：
 
 - 裸机节点固定存在一个 `native` 环境。
 - Docker/Podman 的一个 Shard 容器对应一个稳定环境，容器重建不改变环境 ID；`host` 网络模式显式共享宿主网络作用域。
@@ -380,22 +394,43 @@ resolve desired mod lock
 
 ## 11. 部署形态
 
-### 11.1 裸机
+### 11.1 主服务部署
 
-- Linux 推荐 Agent 由 systemd 托管，macOS 推荐 launchd；现有 tmux 继续作为 Shard Runtime Driver，不承担 Agent 保活。
-- 路径、用户、文件权限和端口均在 Agent 本机预注册，控制中心只引用 ID。
-- CPU `exclusive` 仅 Linux 能力探测通过时开放；macOS 保持建议模式。
-- 内存默认只预检和告警，不自动施加可能杀死 DST 的硬限制。
+主服务提供 Web/API、拓扑、Job、审计和数据库，不直接等同于运行节点：
 
-### 11.2 Docker/Podman
+- 裸机模式保持现有本地优先行为，可以使用内置 `local` Provider。
+- 容器模式使用非 root OCI 镜像，只挂载主服务配置、密钥引用和持久数据卷；SQLite 阶段固定单副本并持久化数据库/WAL，不能把数据库放在容器可写层。
+- 主服务容器通过明确的 HTTP/WebSocket 地址对 Agent 提供连接。Agent 从宿主或其他容器主动连接，不能把各自的 `127.0.0.1` 当成对方地址。
+- 主服务容器默认关闭内置宿主 Runtime 管理。若要管理同一宿主的裸机 DST，推荐在宿主安装 Agent，而不是给主服务容器增加 host PID、DST 路径或 Docker Socket。
+- 反向代理必须支持 WebSocket、请求 ID、真实来源地址和长任务状态连接；健康检查区分进程存活、数据库可写和迁移完成。
 
-- 推荐一个 Shard 一个容器，容器使用非 root 用户、只读基础镜像、明确的存档/Mod/日志 volume 和 graceful stop timeout。
-- bridge 与 host 网络都支持，但创建前必须展示实际对外 UDP 映射；跨机器 Master 必须发布可路由地址。
-- Docker Socket 等同宿主高权限。Agent 只能操作带项目标签、镜像白名单和挂载白名单的资源；优先支持 rootless Podman 或受限 Socket Proxy。
-- DST 二进制采用“受控可变安装卷”或“不可变版本镜像”二选一的 Installation profile，同一发布计划不得静默混用。
-- 内存限制是高级设置；Driver 必须把 OOM kill 与普通退出分开审计。配置备份 staging 时还要预留压缩和临时文件空间。
+### 11.2 Agent 部署
 
-### 11.3 Kubernetes（未来）
+裸机 Agent 是管理裸机 DST 的推荐方式：
+
+- Linux 由 systemd 托管，macOS 由 launchd 托管；现有 tmux 只作为 Shard Runtime Driver，不承担 Agent 保活。
+- 路径、用户、文件权限和端口均在 Agent 本机预注册，主服务只能引用 ID。
+- Agent 主动建立 WebSocket，不要求对公网开放 Agent 入站端口。
+
+容器 Agent 必须持久化身份、配置、密钥和 operation/fencing state，并根据目标 Runtime 选择权限 profile：
+
+- `container-runtime`：管理容器化 Shard。推荐使用 rootless Podman 或受限 Docker Socket Proxy；只允许受管 label、镜像、网络和挂载，不把原始 Docker Socket 暴露给主服务。
+- `native-host-integration`：管理宿主裸机 Shard。由于当前实现依赖绝对路径、tmux 和进程观察，需要同 UID/GID、受信路径 bind mount、tmux socket/运行目录、宿主进程可见性和持久 Agent state。这相当于授予较高宿主权限，必须单独安装、显式确认并先完成 Linux 实机验证；macOS Docker Desktop 不作为该模式的目标。
+- capability 必须来自实测环境。未取得宿主进程/tmux 能力时，容器 Agent 可保持只读或只管理容器 Runtime，不能报告 native 控制可用。
+
+Agent 容器重建后必须保留同一 Agent ID 和最高 fencing token；状态卷丢失时进入 `identity_lost/operation_state_unknown`，禁止直接接管原 Shard。
+
+### 11.3 DST Runtime 部署
+
+- `native`：DST 直接运行在 Linux/macOS，继续由 native/tmux Driver 控制。CPU `exclusive` 仅 Linux 探测通过时开放；macOS 保持建议模式。
+- `container`：推荐一个 Shard 一个容器，不在容器中运行 tmux；使用非 root 用户、只读基础镜像、明确的存档/Mod/日志 volume 和 graceful stop timeout。
+- container bridge 与 host 网络都可作为 profile，但必须展示真实 UDP 对外映射；跨机器 Master 使用可路由地址。
+- DST 二进制采用“受控可变安装卷”或“不可变版本镜像”二选一，同一发布计划不得静默混用。
+- 内存默认只预检和告警。启用硬限制后，Driver 必须把 OOM kill 与普通退出分开审计，并为备份压缩和临时文件保留资源。
+
+CPU 绑核和 DST 四类 UDP 端口都附着在 Shard Runtime/Node 上，不附着在主服务或 Agent 容器上。主服务和 Agent 只计入系统预留资源。
+
+### 11.4 Kubernetes（未来）
 
 - 一个 Shard 一个有状态工作负载，副本数固定为 1，使用稳定身份和独立 PVC；不把多个 Shard 塞入同一个 Pod。
 - Master Shard 通信优先通过稳定 Service ClusterIP；DNS 写入 `master_ip` 需验证后开放。玩家 UDP、Steam 端口使用明确的 hostPort、NodePort 或 LoadBalancer profile，不能由前端猜测可达地址，也不能假设端口转换后 Steam 会公布正确外部端点。
@@ -405,16 +440,18 @@ resolve desired mod lock
 - 最小权限 RBAC 仅覆盖指定 namespace/label；NetworkPolicy 只放行控制、Master/Secondary、玩家 UDP 和必要 Steam 出站。
 - 一致性备份使用保存屏障后协调各 PVC snapshot/上传；单个 PVC 快照不能宣称为完整 Room 备份。
 - K8s Placement 默认由 scheduler 在允许节点池中选择，页面显示期望节点池和实际 Worker；“停止某台服务器上的分片”只操作当前实际位于该 Worker 的受管 Shard，不等同于 drain、关机或迁移。
+- 主服务可以作为单副本 Deployment + PVC 运行；需要控制 Pod Shard 时由 Kubernetes Provider 使用受限 ServiceAccount。只有需要宿主级清单或 native Runtime 控制时才部署 Agent DaemonSet，不能默认给 DaemonSet 特权。
 
-### 11.4 配置体验
+### 11.5 配置体验
 
 默认流程面向个人服主，不要求理解容器网络或 Kubernetes：
 
-1. 新增运行目标时选择“本机”“远程服务器”“容器主机”或“Kubernetes 集群（实验）”。
-2. 创建/放置 Shard 时先选运行目标；系统自动生成不冲突的推荐端口和 `none` CPU 策略。
-3. “网络高级设置”才展示 bind、对外地址、端口映射和网络作用域；跨节点时必须确认 Master 实际可达地址。
-4. “资源高级设置”展示建议容量、CPU request/quota 和独占绑核；独占能力不可用时直接解释原因。
-5. 执行前预览按 Node 汇总启动后的所有 Shard，包括其他 Room 和不同执行环境，并显示会操作的具体范围。
+1. 安装向导先选择主服务部署方式，再登记 Agent；不会把“主服务使用 Docker”自动推导为“DST 使用 Docker”。
+2. 新增运行目标时选择“本机”“远程服务器”“容器 Runtime”或“Kubernetes 集群（实验）”，并显示 Agent 的实际 capability。
+3. 创建/放置 Shard 时选择 DST Runtime；系统自动生成不冲突的推荐端口和 `none` CPU 策略。
+4. “网络高级设置”才展示 bind、对外地址、端口映射和网络作用域；跨节点时必须确认 Master 实际可达地址。
+5. “资源高级设置”展示建议容量、CPU request/quota 和独占绑核；独占能力不可用时直接解释原因。
+6. 执行前预览按 Node 汇总启动后的所有 Shard，包括其他 Room 和不同执行环境，并显示会操作的具体范围。
 
 商家或多机用户可以保存 Network/CPU/Storage profile 批量复用，但 profile 只保存期望参数，落到目标环境后仍需重新预检，不能把一台机器验证过的端口或 cpuset 原样套到另一台机器。
 
@@ -425,10 +462,11 @@ resolve desired mod lock
 3. 建立 Placement 和拓扑版本，但暂不迁移现有本地 Room ID。
 4. 把单 Shard 本地控制适配到统一 typed operation，再接入远程 Agent。
 5. 增加房间租约、幂等和 fencing 后开放房间级远程操作。
-6. 引入 `ExecutionEnvironment`、Runtime Driver、NetworkProfile、PortReservation 和 CPU policy；先让 `native` Driver 完全等价现状。
-7. 建立备份集与 Mod 发布协议，所有文件操作从 Runtime Driver 进入。
-8. 迁移玩家、日志、世界状态和诊断到带来源的新鲜度模型。
-9. 交付 Docker/Podman Driver 和部署模板，再完成裸机/容器混合房间验证。
-10. 在独立实验能力中交付 Kubernetes Driver，通过存储、网络、CPU Manager 和故障注入矩阵后再标记生产可用。
+6. 拆分主服务、Provider/Agent 和 DST Runtime 三层 deployment profile；引入 `ExecutionEnvironment`、Runtime Driver、NetworkProfile、PortReservation 和 CPU policy。
+7. 先交付“主服务容器 + 裸机 Agent + native DST”，并证明 `native` Driver 与现状完全等价。
+8. 交付容器 Agent 的持久状态和 capability，再交付可选 Docker/Podman Shard Runtime；native host-integration 保持实验模式。
+9. 建立备份集与 Mod 发布协议，所有文件操作从 Runtime Driver 进入。
+10. 迁移玩家、日志、世界状态和诊断到带来源的新鲜度模型。
+11. 在独立实验能力中交付 Kubernetes Driver，通过存储、网络、CPU Manager 和故障注入矩阵后再标记生产可用。
 
 任何阶段都不得让远程选择回退到本地执行。旧 Agent 缺少能力时保持只读或显示升级要求。

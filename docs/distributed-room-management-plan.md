@@ -2,19 +2,21 @@
 
 > 状态：已批准，进入资料核验与实现阶段
 > 更新日期：2026-08-15
-> 范围：多台服务器集中管理、一个房间跨节点运行多个世界分片、裸机/容器/Kubernetes 执行环境、集中操作与可观测性
+> 范围：多台服务器集中管理、一个房间跨节点运行多个世界分片、主服务/Agent/DST Runtime 独立部署、集中操作与可观测性
 
-当前进度：Phase 1 至 Phase 4 已完成。节点清单、容量、新鲜度、房间拓扑与 Placement 规划已交付；单 Shard 类型化控制、控制面房间租约、Agent fencing/幂等保护和运行审计也已交付。Phase 4 已交付单房间与跨房间启动容量预检、结构化风险确认、房间内全量预检、跨房间批量 Job、集中看板的批量选择和未成功项重试入口。Placement 当前仍只保存期望位置，不会迁移分片；只有后续迁移流程成功写入 `appliedTargetId` 后才能对远程目标执行，失败时不会回落本机。当前 Runtime 仍是裸机/虚拟机上的 tmux 实现；执行环境、端口租约、CPU 绑核、容器和 Kubernetes 均未实现。下一阶段先完成平台抽象与网络/CPU 基线，再继续跨节点一致性备份。
+当前进度：Phase 1 至 Phase 4 已完成。节点清单、容量、新鲜度、房间拓扑与 Placement 规划已交付；单 Shard 类型化控制、控制面房间租约、Agent fencing/幂等保护和运行审计也已交付。Phase 4 已交付单房间与跨房间启动容量预检、结构化风险确认、房间内全量预检、跨房间批量 Job、集中看板的批量选择和未成功项重试入口。Placement 当前仍只保存期望位置，不会迁移分片；只有后续迁移流程成功写入 `appliedTargetId` 后才能对远程目标执行，失败时不会回落本机。当前主服务与 Agent 尚无仓库内 OCI/Compose 交付，DST Runtime 仍是裸机/虚拟机上的 tmux 实现；执行环境、端口租约、CPU 绑核、容器 Runtime 和 Kubernetes 均未实现。下一阶段先拆分三层部署模型并完成 native 等价基线。
 
 ## 1. 目标
 
 DST Admin 需要从“管理当前机器上的 DST”扩展为“本地优先、可选多节点”的集中控制系统：
 
-- 默认继续管理控制器所在本机，不要求部署 Agent。
+- 主服务裸机部署时默认继续管理控制器所在本机，不要求部署 Agent。
+- 主服务容器化时默认不获取宿主控制权限；管理同宿主或远程裸机 DST 时使用 Agent。
 - 用户拥有多台服务器时，可以在每台机器安装 Agent 并接入同一个控制中心。
 - 一个节点可以运行多个房间或多个世界分片。
 - 一个房间可以把不同世界分片放置在不同节点，以分摊 CPU、内存和磁盘负载。
-- 同一领域模型支持裸机、Docker/Podman 容器，并为未来 Kubernetes 预留明确 Driver；容器化不减少房间、Mod、日志、备份或控制能力。
+- 主服务部署、Agent 部署和 DST Runtime 三个维度独立组合；任何一层容器化都不自动推导另外两层也容器化。
+- 同一领域模型支持裸机和容器 Runtime，并为未来 Kubernetes 预留明确 Driver；容器化不减少房间、Mod、日志、备份或控制能力。
 - 用户可以控制单个节点、单个分片、整个房间或一组房间。
 - 玩家、日志、世界状态、Mod、备份和操作结果在控制中心聚合展示。
 - 网络分区、节点离线和部分失败时，系统必须避免双启动、错误恢复和静默数据损坏。
@@ -38,7 +40,8 @@ DST Admin 需要从“管理当前机器上的 DST”扩展为“本地优先、
 - CPU 只提供“一核一层”的建议容量与超配确认，尚无 quota、cpuset、SMT sibling 或 NUMA 分配。
 - Placement 仍是规划能力，尚无 Shard 文件迁移、切换和回滚流程。
 - 跨节点一致性备份、Mod/DST 发布、玩家/日志聚合尚未交付。
-- 容器和 Kubernetes Driver、部署模板、持久卷、Service、RBAC 与 NetworkPolicy 尚未交付。
+- container Runtime 和 Kubernetes Driver、部署模板、持久卷、Service、RBAC 与 NetworkPolicy 尚未交付。
+- 主服务容器、裸机 Agent 安装包和容器 Agent 都没有正式部署契约；当前仓库也没有对应 Dockerfile/Compose。
 
 ## 3. 资料核验原则
 
@@ -79,7 +82,9 @@ DST Admin 需要从“管理当前机器上的 DST”扩展为“本地优先、
 
 ```text
 Control Plane（控制中心）
+  deployment = native | container | kubernetes
   -> Runtime Provider（local/agent/kubernetes）
+      deployment = in_process | native | container | daemonset
       -> Node（物理机、虚拟机或 Kubernetes Worker）
           -> Execution Environment（native/container/kubernetes）
               -> Runtime Installation（DST 安装实例）
@@ -88,6 +93,8 @@ Control Plane（控制中心）
 ```
 
 Room / Cluster 与 Shard / World 是控制面的逻辑对象，不从属于某一 Node；Placement 把 Shard 映射到具体执行环境。
+
+三个 `deployment` 维度分别表示主服务、Agent/Provider 和 DST Runtime，不能合并成一个 `containerized` 布尔值。
 
 ### 4.1 核心对象
 
@@ -116,6 +123,7 @@ Room / Cluster 与 Shard / World 是控制面的逻辑对象，不从属于某�
 - 控制中心不能在 Agent 离线时假设操作已成功。
 - 同一 Shard 在任一拓扑版本中只能有一个有效 Placement。
 - 进程、容器、Pod、端口和 PVC 等观察状态都不能替代控制面的 Shard lease 与 fencing 所有权。
+- Provider 必须声明自己如何部署以及能够控制哪类 Runtime；Agent 容器化不自动获得宿主 native 或 Docker 控制能力。
 
 ## 5. 操作范围
 
@@ -406,6 +414,10 @@ Mod 管理继续区分：
 | 绑核重叠或硬件拓扑变化 | 持久化分配、SMT/NUMA 拓扑、启动前重验 |
 | 容器内部端口与宿主端口混淆 | NetworkProfile、网络作用域和 PortReservation |
 | Docker Socket 导致宿主越权 | 标签/镜像/挂载白名单、最小权限代理、禁止任意容器参数 |
+| 把主服务容器化误认为 DST 容器化 | 三层 DeploymentProfile 独立配置和能力展示 |
+| 主服务容器直接接管宿主 | 默认禁用 host PID/DST 路径/Docker Socket，改由 Agent 控制 |
+| Agent 容器状态卷丢失 | 持久化身份/fencing/幂等状态，丢失后阻止自动接管 |
+| Agent 容器越权控制宿主 native DST | 单独 host-integration profile、最小 bind mount 和高风险确认 |
 | 容器可写层或 Pod 消失导致存档丢失 | 显式 volume/PVC、回收策略和恢复前校验 |
 | K8s 节点失联后重复调度写同一存档 | Room lease、fencing、Pod UID、PVC 所有权与旧实例终止确认 |
 | 部分成功 | 逐目标结果、补偿步骤和显式降级状态 |
@@ -447,8 +459,11 @@ Mod 管理继续区分：
 
 已交付说明：`POST /api/v2/rooms/:roomId/actions/:action` 在启动和重启前按 `appliedTargetId` 计算启动后容量，首次超配或容量未知时返回 `CAPACITY_RISK_CONFIRMATION_REQUIRED`，确认后允许继续但不提供性能保证。整房间在任一世界预检失败时不会先操作其他世界。`POST /api/v2/rooms/actions/:action` 支持多个房间合并预览容量，并用 `roomId:worldId` 作为 Job 目标标识；不同房间使用独立租约，单个房间失败不阻塞其他房间。前端已统一所有单房间、单世界和跨房间启动、重启入口的 shadcn-vue 风险确认；批量界面按房间选择世界，显示每层世界的当前生效节点和运行状态，完整展示部分或全部失败的逐世界结果，并在重新读取拓扑与状态后只重试未成功项。同一台服务器可以承载同一房间或不同房间的多层世界，但界面固定提醒“一颗物理核心最多运行一层世界，并额外预留 1 核”；这是可确认绕过的保守告警，不是硬限制。
 
-### Phase 5：执行环境、网络与 CPU 基线
+### Phase 5：主服务容器 + 裸机 Agent + native 基线
 
+- 新增 ControlPlaneDeployment、ProviderDeployment 和 RuntimeExecution 三个独立 profile，禁止用一个 `containerized` 字段代替。
+- 交付主服务非 root OCI 镜像与 Compose：持久化数据库/WAL、配置和密钥引用；默认不挂 host PID、DST 路径或 Docker Socket。
+- 交付 Linux systemd 与 macOS launchd 的 Agent 安装/升级/卸载流程；验证 Agent 通过主服务容器暴露的 WebSocket 主动连接。
 - 新增 ExecutionEnvironment、Runtime Driver capability 和统一观察身份。
 - 把现有 tmux 实现迁入 `native` Driver，并用现有 API/测试证明行为等价。
 - 新增 NetworkProfile、PortReservation、四类 UDP 端点和作用域冲突预检。
@@ -457,10 +472,13 @@ Mod 管理继续区分：
 - 把当前 local/Agent target 回填为 RuntimeProvider + Node + `native/default` 环境；旧 API 在兼容期从新模型投影返回。
 - 把存档导入的全局端口重写改为基于目标 NetworkScope 的分配器；native 单节点行为保持不变。
 
-完成标准：本机和现有 Agent 的所有已交付功能无回归；旧配置自动映射为 `native/default` 环境；未配置高级策略时运行行为不变。
+完成标准：本机和现有 Agent 的所有已交付功能无回归；旧配置自动映射为 `native/default` 环境；未配置高级策略时运行行为不变。主服务容器 + 同宿主/远程裸机 Agent + 裸机 DST 可以完成发现、启动、停止、保存、日志和审计，且主服务容器没有宿主控制权限。
 
-### Phase 6：Docker/Podman 执行环境
+### Phase 6：容器 Agent 与可选容器 Runtime
 
+- 交付 Agent 非 root OCI 镜像，并把 Agent ID、密钥、Runtime 注册表、最高 fencing token 和幂等结果放入持久状态卷。
+- Agent capability 分成 `container-runtime` 和 `native-host-integration`；前者为推荐容器模式，后者在 Linux 实机验证前保持高风险实验状态。
+- `native-host-integration` 明确要求同 UID/GID、最小受信路径、tmux socket/运行目录和宿主进程可见性；缺少任一能力时不得报告 native control 可用。
 - 交付一个 Shard 一个容器的 Runtime profile、非 root 镜像和持久 volume 契约。
 - 支持 bridge/host 网络、UDP published endpoint、优雅停止和容器退出审计。
 - 支持 CPU quota 与 cpuset，明确区分限制份额和独占核心。
@@ -487,7 +505,9 @@ Mod 管理继续区分：
 
 ### Phase 10：Kubernetes 实验能力
 
+- 主服务以单副本 Deployment + PVC 运行；SQLite 阶段不宣称多副本 HA。
 - Kubernetes Driver 使用受限 ServiceAccount 管理指定 namespace/label 范围。
+- Agent DaemonSet 只在需要宿主清单或 native Runtime control 时可选安装，默认不授予 privileged/hostPath/hostPID。
 - 一个 Shard 一个副本为 1 的有状态工作负载，独立 PVC、稳定 Master Service ClusterIP 和显式 UDP 暴露策略。
 - Secret 保存 Token/cluster key，ConfigMap 只保存非敏感生成配置。
 - Readiness 以 DST 世界加载和 Shard 注册为准；节点失联后结合 lease、fencing、Pod UID 和 PVC 所有权决定是否可重调度。
@@ -502,6 +522,10 @@ Mod 管理继续区分：
 至少覆盖：
 
 - 本机单节点、单房间双分片。
+- 主服务容器 + 同宿主裸机 Agent + 裸机 DST，主服务不挂宿主控制资源。
+- 主服务容器 + 远程裸机 Agent + 裸机 DST，反向代理/WebSocket 重连和错误 localhost 配置提示。
+- 主服务容器 + 容器 Agent + 容器 DST，Agent 状态卷保留和重建后幂等恢复。
+- 容器 Agent 的 native host-integration 在缺少 PID/tmux/path 能力时拒绝控制，状态卷丢失时拒绝接管。
 - 两节点、一个房间、Master 与 Caves 分离。
 - 三节点、一个房间、三个自定义分片。
 - 一个节点运行多个房间。
@@ -521,6 +545,7 @@ Mod 管理继续区分：
 - Linux/Linux 与 macOS/Linux 组合。
 - Kubernetes Master Service、玩家 UDP 暴露、NodePort 冲突、NetworkPolicy 阻断和 Endpoint 过期。
 - Kubernetes CPU Manager static 可用/不可用、PVC Retain、Worker NotReady、旧 Pod 未终止和 CSI snapshot 部分失败。
+- Kubernetes 主服务不部署 DaemonSet 也能管理 Pod Runtime；安装 DaemonSet 后 RBAC/host capability 与声明一致。
 
 每个场景必须验证：观察状态、用户提示、Job 结果、审计、数据安全和恢复路径。
 
