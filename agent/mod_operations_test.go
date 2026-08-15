@@ -160,6 +160,18 @@ func TestModCacheUploadInspectAndRestartResume(t *testing.T) {
 	}
 }
 
+func TestModTargetObservationReturnsUsableCapacity(t *testing.T) {
+	agent, _ := newModOperationAgent(t)
+	sequence := 0
+	result, err := executeModRequest(t, agent, &sequence, shared.RuntimeActionModTargetObserve, shared.RuntimeModRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Complete || result.RuntimeVersion != modRuntimeVersion || result.AvailableBytes < 0 {
+		t.Fatalf("unexpected target observation: %#v", result)
+	}
+}
+
 func TestModReleasePlanLifecycleAndOverridesRead(t *testing.T) {
 	agent, installation := newModOperationAgent(t)
 	sequence := 0

@@ -168,7 +168,7 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 		if request.Action == shared.RuntimeActionMigrationImportWrite && len(request.Migration.Data) == 0 {
 			return errors.New("分片迁移块为空")
 		}
-	case shared.RuntimeActionModCacheInspect, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite, shared.RuntimeActionModUploadCommit,
+	case shared.RuntimeActionModTargetObserve, shared.RuntimeActionModCacheInspect, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite, shared.RuntimeActionModUploadCommit,
 		shared.RuntimeActionModReleasePlanBegin, shared.RuntimeActionModReleasePlanWrite, shared.RuntimeActionModReleasePlanCommit,
 		shared.RuntimeActionModReleasePrepare, shared.RuntimeActionModReleasePublish, shared.RuntimeActionModReleaseRollback,
 		shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState, shared.RuntimeActionModOverridesRead:
@@ -410,7 +410,7 @@ func isMigrationAction(action shared.RuntimeAction) bool {
 
 func isModAction(action shared.RuntimeAction) bool {
 	switch action {
-	case shared.RuntimeActionModCacheInspect, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite, shared.RuntimeActionModUploadCommit,
+	case shared.RuntimeActionModTargetObserve, shared.RuntimeActionModCacheInspect, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite, shared.RuntimeActionModUploadCommit,
 		shared.RuntimeActionModReleasePlanBegin, shared.RuntimeActionModReleasePlanWrite, shared.RuntimeActionModReleasePlanCommit,
 		shared.RuntimeActionModReleasePrepare, shared.RuntimeActionModReleasePublish, shared.RuntimeActionModReleaseRollback,
 		shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState, shared.RuntimeActionModOverridesRead:
@@ -442,7 +442,7 @@ func runtimeActionRequiresExistingShard(action shared.RuntimeAction) bool {
 		shared.RuntimeActionBackupRead, shared.RuntimeActionBackupRelease,
 		shared.RuntimeActionRestoreBegin, shared.RuntimeActionRestoreWrite, shared.RuntimeActionRestorePrepare,
 		shared.RuntimeActionRestorePublish, shared.RuntimeActionRestoreRollback, shared.RuntimeActionRestoreComplete,
-		shared.RuntimeActionModCacheInspect, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite,
+		shared.RuntimeActionModTargetObserve, shared.RuntimeActionModCacheInspect, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite,
 		shared.RuntimeActionModUploadCommit, shared.RuntimeActionModReleasePlanBegin, shared.RuntimeActionModReleasePlanWrite,
 		shared.RuntimeActionModReleasePlanCommit, shared.RuntimeActionModReleasePrepare, shared.RuntimeActionModReleasePublish,
 		shared.RuntimeActionModReleaseRollback, shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState,

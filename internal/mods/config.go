@@ -60,6 +60,30 @@ func (s *Service) Configuration(ctx context.Context, roomID, worldID, modID stri
 	return configuration, err
 }
 
+// ConfigurationFromContent reads a Mod schema from the controller's trusted
+// Workshop cache while taking the selected world's state from placement-aware
+// bytes supplied by its runtime target.
+func (s *Service) ConfigurationFromContent(ctx context.Context, roomID, worldID, modID string, content []byte) (ModConfiguration, error) {
+	if !validModID(modID) {
+		return ModConfiguration{}, ErrInvalidModID
+	}
+	room, err := s.rooms.Room(roomID)
+	if err != nil {
+		return ModConfiguration{}, err
+	}
+	if !room.Managed {
+		return ModConfiguration{}, ErrRoomNotManaged
+	}
+	if _, err := s.rooms.World(roomID, worldID); err != nil {
+		return ModConfiguration{}, err
+	}
+	document, err := parseModOverrideContent(content, 0o640, len(content) > 0, "modoverrides.lua")
+	if err != nil {
+		return ModConfiguration{}, err
+	}
+	return s.configurationFromDocument(ctx, roomID, worldID, modID, document)
+}
+
 func (s *Service) PreviewConfiguration(ctx context.Context, roomID, worldID, modID string, request ConfigUpdateRequest) (ConfigPreview, error) {
 	if !validModID(modID) {
 		return ConfigPreview{}, ErrInvalidModID
@@ -229,20 +253,25 @@ func (s *Service) loadConfiguration(ctx context.Context, roomID, worldID, modID 
 	if err != nil {
 		return ModConfiguration{}, modOverrideDocument{}, "", err
 	}
+	configuration, err := s.configurationFromDocument(ctx, roomID, worldID, modID, document)
+	return configuration, document, path, err
+}
+
+func (s *Service) configurationFromDocument(ctx context.Context, roomID, worldID, modID string, document modOverrideDocument) (ModConfiguration, error) {
 	entry, ok := document.mod(modID)
 	if !ok {
-		return ModConfiguration{}, modOverrideDocument{}, "", ErrModNotConfigured
+		return ModConfiguration{}, ErrModNotConfigured
 	}
 	modInfoPath := filepath.Join(s.downloadedPath(modID), "modinfo.lua")
 	if _, err := safeRegularFile(modInfoPath); err != nil {
 		if os.IsNotExist(err) {
-			return ModConfiguration{}, modOverrideDocument{}, "", ErrModInfoUnavailable
+			return ModConfiguration{}, ErrModInfoUnavailable
 		}
-		return ModConfiguration{}, modOverrideDocument{}, "", fmt.Errorf("inspect modinfo.lua: %w", err)
+		return ModConfiguration{}, fmt.Errorf("inspect modinfo.lua: %w", err)
 	}
 	parsed, err := s.parser.Parse(ctx, modID, modInfoPath)
 	if err != nil {
-		return ModConfiguration{}, modOverrideDocument{}, "", fmt.Errorf("parse modinfo.lua: %w", err)
+		return ModConfiguration{}, fmt.Errorf("parse modinfo.lua: %w", err)
 	}
 	fields := configurationFields(parsed.Values["configuration_options"])
 	known := make(map[string]ConfigField, len(fields))
@@ -278,7 +307,7 @@ func (s *Service) loadConfiguration(ctx context.Context, roomID, worldID, modID 
 		Enabled: modEnabled(entry), Parser: parsed.Parser, FallbackUsed: parsed.FallbackUsed,
 		FallbackReason: parsed.FallbackReason, Warnings: nonNilStrings(parsed.Warnings),
 		RawPreserved: true, SchemaVersion: "1", Fields: fields, Values: values, Overrides: overrides, UnknownValues: unknown,
-	}, document, path, nil
+	}, nil
 }
 
 func configurationFields(raw interface{}) []ConfigField {

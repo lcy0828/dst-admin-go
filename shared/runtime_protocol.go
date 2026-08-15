@@ -35,6 +35,7 @@ const (
 	RuntimeActionRestorePublish          RuntimeAction = "runtime.restore.publish"
 	RuntimeActionRestoreRollback         RuntimeAction = "runtime.restore.rollback"
 	RuntimeActionRestoreComplete         RuntimeAction = "runtime.restore.complete"
+	RuntimeActionModTargetObserve        RuntimeAction = "runtime.mods.target.observe"
 	RuntimeActionModCacheInspect         RuntimeAction = "runtime.mods.cache.inspect"
 	RuntimeActionModUploadBegin          RuntimeAction = "runtime.mods.upload.begin"
 	RuntimeActionModUploadWrite          RuntimeAction = "runtime.mods.upload.write"
@@ -323,17 +324,19 @@ type RuntimeModOverridesChunk struct {
 }
 
 type RuntimeModResult struct {
-	Kind          RuntimeModUploadKind      `json:"kind,omitempty"`
-	UploadID      string                    `json:"upload_id,omitempty"`
-	OperationID   string                    `json:"release_operation_id,omitempty"`
-	Offset        int64                     `json:"offset,omitempty"`
-	NextOffset    int64                     `json:"next_offset,omitempty"`
-	Size          int64                     `json:"size,omitempty"`
-	SHA256        string                    `json:"sha256,omitempty"`
-	Complete      bool                      `json:"complete"`
-	CacheManifest *RuntimeModCacheManifest  `json:"cache_manifest,omitempty"`
-	Release       *RuntimeModReleaseState   `json:"release,omitempty"`
-	Overrides     *RuntimeModOverridesChunk `json:"overrides,omitempty"`
+	Kind           RuntimeModUploadKind      `json:"kind,omitempty"`
+	UploadID       string                    `json:"upload_id,omitempty"`
+	OperationID    string                    `json:"release_operation_id,omitempty"`
+	Offset         int64                     `json:"offset,omitempty"`
+	NextOffset     int64                     `json:"next_offset,omitempty"`
+	Size           int64                     `json:"size,omitempty"`
+	SHA256         string                    `json:"sha256,omitempty"`
+	Complete       bool                      `json:"complete"`
+	CacheManifest  *RuntimeModCacheManifest  `json:"cache_manifest,omitempty"`
+	Release        *RuntimeModReleaseState   `json:"release,omitempty"`
+	Overrides      *RuntimeModOverridesChunk `json:"overrides,omitempty"`
+	AvailableBytes int64                     `json:"available_bytes,omitempty"`
+	RuntimeVersion string                    `json:"runtime_version,omitempty"`
 }
 
 type RuntimeOperationResult struct {
@@ -373,7 +376,7 @@ func IsRuntimeAction(value RuntimeAction) bool {
 		RuntimeActionRestoreBegin, RuntimeActionRestoreWrite, RuntimeActionRestorePrepare,
 		RuntimeActionRestorePublish, RuntimeActionRestoreRollback, RuntimeActionRestoreComplete:
 		return true
-	case RuntimeActionModCacheInspect, RuntimeActionModUploadBegin, RuntimeActionModUploadWrite, RuntimeActionModUploadCommit,
+	case RuntimeActionModTargetObserve, RuntimeActionModCacheInspect, RuntimeActionModUploadBegin, RuntimeActionModUploadWrite, RuntimeActionModUploadCommit,
 		RuntimeActionModReleasePlanBegin, RuntimeActionModReleasePlanWrite, RuntimeActionModReleasePlanCommit,
 		RuntimeActionModReleasePrepare, RuntimeActionModReleasePublish, RuntimeActionModReleaseRollback,
 		RuntimeActionModReleaseComplete, RuntimeActionModReleaseState, RuntimeActionModOverridesRead:

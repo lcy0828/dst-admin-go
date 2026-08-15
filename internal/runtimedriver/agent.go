@@ -103,6 +103,20 @@ func (d *Agent) ReadArtifacts(ctx context.Context, target Target, kind shared.Ar
 	return *result.Result.Artifacts, err
 }
 
+func (d *Agent) ObserveModTarget(ctx context.Context, target Target) (int64, string, error) {
+	request := modRuntimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionModTargetObserve)
+	request.Mod = &shared.RuntimeModRequest{}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 60)
+	value, err := checkedModResult(result.Result, err)
+	if err != nil {
+		return 0, "", err
+	}
+	if value.AvailableBytes < 0 || value.RuntimeVersion == "" {
+		return 0, "", errors.New("Agent 返回了无效的 Mod 运行目标状态")
+	}
+	return value.AvailableBytes, value.RuntimeVersion, nil
+}
+
 func (d *Agent) InspectModCache(ctx context.Context, target Target, workshopID, treeSHA string) (shared.RuntimeModCacheManifest, error) {
 	request := modRuntimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionModCacheInspect)
 	request.Mod = &shared.RuntimeModRequest{WorkshopID: workshopID, ExpectedTreeSHA256: treeSHA}

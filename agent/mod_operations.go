@@ -24,6 +24,7 @@ import (
 )
 
 const (
+	modRuntimeVersion      = "1.0.0"
 	modUploadStateVersion  = 1
 	modMaximumBundleBytes  = int64(64 << 30)
 	modMaximumPlanBytes    = int64(32 << 20)
@@ -99,6 +100,20 @@ func (a *Agent) observeModAction(ctx context.Context, installation RuntimeInstal
 		return result, err
 	}
 	switch request.Action {
+	case shared.RuntimeActionModTargetObserve:
+		usage, usageErr := disk.Usage(installation.ModCachePath)
+		if usageErr == nil {
+			available := int64(usage.Free)
+			if available > modDiskReserveBytes {
+				available -= modDiskReserveBytes
+			} else {
+				available = 0
+			}
+			response.AvailableBytes = available
+			response.RuntimeVersion = modRuntimeVersion
+			response.Complete = true
+		}
+		err = usageErr
 	case shared.RuntimeActionModCacheInspect:
 		manifest, inspectErr := manager.Verify(ctx, request.Mod.WorkshopID, request.Mod.ExpectedTreeSHA256)
 		if inspectErr == nil {
@@ -131,6 +146,11 @@ func validateModOperationPayload(request shared.RuntimeOperationRequest) error {
 	emptyMetadata := mod.Metadata == (shared.RuntimeModMetadata{})
 	emptyTransfer := mod.Kind == "" && mod.UploadID == "" && mod.Size == 0 && mod.SHA256 == "" && len(mod.Data) == 0
 	switch request.Action {
+	case shared.RuntimeActionModTargetObserve:
+		if !emptyTransfer || mod.OperationID != "" || mod.WorkshopID != "" || mod.ExpectedTreeSHA256 != "" || mod.Offset != 0 ||
+			!emptyMetadata || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
+			return errors.New("Mod 运行目标观察请求无效")
+		}
 	case shared.RuntimeActionModCacheInspect:
 		if !emptyTransfer || mod.OperationID != "" || !modWorkshopID.MatchString(mod.WorkshopID) || !validRuntimeDigest(mod.ExpectedTreeSHA256) ||
 			mod.Offset != 0 || !emptyMetadata || mod.RoomDirectory != "" || mod.WorldDirectory != "" {

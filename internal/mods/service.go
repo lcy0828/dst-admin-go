@@ -185,6 +185,54 @@ func (s *Service) List(ctx context.Context, roomID string) (ModList, error) {
 	return s.buildModList(ctx, aggregates, manifest, manifestErr)
 }
 
+// ListFromOverrides builds the room-level Mod view from placement-aware
+// modoverrides.lua bytes. Installed/loaded state remains empty because those
+// observations belong to each runtime target, not the controller filesystem.
+func (s *Service) ListFromOverrides(ctx context.Context, roomID string, contents map[string][]byte) (ModList, error) {
+	room, err := s.rooms.Room(roomID)
+	if err != nil {
+		return ModList{}, err
+	}
+	if !room.Managed {
+		return ModList{}, ErrRoomNotManaged
+	}
+	worlds, err := s.rooms.Worlds(roomID)
+	if err != nil {
+		return ModList{}, err
+	}
+	aggregates := make(map[string]*modAggregate)
+	for _, world := range worlds {
+		content, exists := contents[world.ID]
+		if !exists {
+			return ModList{}, fmt.Errorf("read %s modoverrides.lua: content missing", world.Name)
+		}
+		document, parseErr := parseModOverrideContent(content, 0o640, len(content) > 0, "modoverrides.lua")
+		if parseErr != nil {
+			return ModList{}, fmt.Errorf("read %s modoverrides.lua: %w", world.Name, parseErr)
+		}
+		for _, entry := range document.root.entries {
+			if entry.key.kind.String() != "string" || !strings.HasPrefix(entry.key.text, "workshop-") {
+				continue
+			}
+			id := strings.TrimPrefix(entry.key.text, "workshop-")
+			if !validModID(id) {
+				continue
+			}
+			item := aggregates[id]
+			if item == nil {
+				item = &modAggregate{}
+				aggregates[id] = item
+			}
+			item.configured = append(item.configured, world.ID)
+			if modEnabled(entry.value) {
+				item.enabled = append(item.enabled, world.ID)
+			}
+		}
+	}
+	manifest, manifestErr := loadWorkshopManifest(s.workshopManifestPath())
+	return s.buildModList(ctx, aggregates, manifest, manifestErr)
+}
+
 func (s *Service) Library(ctx context.Context) (ModList, error) {
 	s.libraryMu.RLock()
 	defer s.libraryMu.RUnlock()
@@ -368,6 +416,10 @@ func (s *Service) Download(ctx context.Context, request DownloadRequest, output 
 		return ActionResult{}, fmt.Errorf("remove staged Mod cache: %w", err)
 	}
 	return ActionResult{ModIDs: ids, Message: "Workshop 文件已下载到当前节点并完成校验"}, nil
+}
+
+func (s *Service) ResolveDependencies(ctx context.Context, modID string, include bool) ([]string, error) {
+	return s.resolveDependencies(ctx, modID, include)
 }
 
 // EnsureLibrarySetup registers already-downloaded Workshop items without

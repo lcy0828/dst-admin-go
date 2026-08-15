@@ -107,6 +107,7 @@ type ModUploadDescriptor struct {
 // ModDriver is intentionally separate from Driver so existing runtime
 // providers do not acquire Mod distribution methods they cannot implement.
 type ModDriver interface {
+	ObserveModTarget(context.Context, Target) (int64, string, error)
 	InspectModCache(context.Context, Target, string, string) (shared.RuntimeModCacheManifest, error)
 	BeginModUpload(context.Context, Target, Operation, ModUploadDescriptor) (int64, error)
 	WriteModUpload(context.Context, Target, Operation, ModUploadDescriptor, int64, []byte) (int64, error)

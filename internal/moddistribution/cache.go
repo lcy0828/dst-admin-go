@@ -1,6 +1,7 @@
 package moddistribution
 
 import (
+	"archive/tar"
 	"bufio"
 	"context"
 	"crypto/sha256"
@@ -18,6 +19,60 @@ import (
 
 	"github.com/shirou/gopsutil/v3/disk"
 )
+
+// WriteBundle streams a verified immutable cache version as a deterministic
+// tar archive. The receiver can import it and reproduce the same tree SHA.
+func (m *Manager) WriteBundle(ctx context.Context, workshopID, treeSHA string, output io.Writer) error {
+	if output == nil {
+		return ErrInvalidInput
+	}
+	manifest, err := m.Verify(ctx, workshopID, treeSHA)
+	if err != nil {
+		return err
+	}
+	content := filepath.Join(m.cacheVersionRoot(manifest.WorkshopID, manifest.TreeSHA256), "content")
+	archive := tar.NewWriter(output)
+	for _, entry := range manifest.Entries {
+		if err := ctx.Err(); err != nil {
+			_ = archive.Close()
+			return err
+		}
+		header := &tar.Header{
+			Name: entry.Path, Mode: int64(entry.Mode), ModTime: time.Unix(0, 0).UTC(),
+			AccessTime: time.Unix(0, 0).UTC(), ChangeTime: time.Unix(0, 0).UTC(), Format: tar.FormatPAX,
+		}
+		if entry.Kind == "directory" {
+			header.Typeflag = tar.TypeDir
+			header.Name += "/"
+		} else {
+			header.Typeflag = tar.TypeReg
+			header.Size = entry.Size
+		}
+		if err := archive.WriteHeader(header); err != nil {
+			_ = archive.Close()
+			return err
+		}
+		if entry.Kind == "directory" {
+			continue
+		}
+		file, err := os.Open(filepath.Join(content, filepath.FromSlash(entry.Path)))
+		if err != nil {
+			_ = archive.Close()
+			return err
+		}
+		written, copyErr := io.Copy(archive, &contextReader{ctx: ctx, reader: file})
+		closeErr := file.Close()
+		if err := errors.Join(copyErr, closeErr); err != nil {
+			_ = archive.Close()
+			return err
+		}
+		if written != entry.Size {
+			_ = archive.Close()
+			return ErrIntegrity
+		}
+	}
+	return archive.Close()
+}
 
 func (m *Manager) Import(ctx context.Context, workshopID, source string, metadata Metadata) (Manifest, error) {
 	if !validWorkshopID(workshopID) {

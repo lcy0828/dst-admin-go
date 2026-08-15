@@ -1,6 +1,7 @@
 package moddistribution
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math"
@@ -105,6 +106,24 @@ func TestImmutableCacheManifestAndTamperDetection(t *testing.T) {
 	}
 	if _, err := environment.manager.Verify(context.Background(), manifest.WorkshopID, manifest.TreeSHA256); !errors.Is(err, ErrIntegrity) {
 		t.Fatalf("expected integrity error, got %v", err)
+	}
+}
+
+func TestWriteBundleIsDeterministic(t *testing.T) {
+	environment := newTestEnvironment(t, 0)
+	manifest := environment.importMod(t, "102", map[string]string{
+		"modinfo.lua": "name='bundle'\n", "scripts/main.lua": "return true\n",
+	})
+	var first bytes.Buffer
+	if err := environment.manager.WriteBundle(context.Background(), manifest.WorkshopID, manifest.TreeSHA256, &first); err != nil {
+		t.Fatal(err)
+	}
+	var second bytes.Buffer
+	if err := environment.manager.WriteBundle(context.Background(), manifest.WorkshopID, manifest.TreeSHA256, &second); err != nil {
+		t.Fatal(err)
+	}
+	if first.Len() == 0 || !bytes.Equal(first.Bytes(), second.Bytes()) {
+		t.Fatal("bundle output is empty or non-deterministic")
 	}
 }
 
