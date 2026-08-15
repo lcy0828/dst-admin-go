@@ -1,6 +1,7 @@
 package logparser
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -11,8 +12,16 @@ import (
 	"time"
 
 	"dont/models"
-	"dont/tmux"
 )
+
+type RuntimeLogTarget struct {
+	RoomDirectory  string
+	WorldDirectory string
+}
+
+type RuntimeLogCatalog interface {
+	RunningLogTargets(context.Context) ([]RuntimeLogTarget, error)
+}
 
 // AutoParserService 自动日志解析服务
 type AutoParserService struct {
@@ -22,19 +31,25 @@ type AutoParserService struct {
 	running         bool
 	positionManager *PositionManager // 位置管理器
 	posLock         sync.Mutex       // 位置映射的锁
+	runtimeCatalog  RuntimeLogCatalog
 }
 
 // NewAutoParserService 创建新的自动日志解析服务
-func NewAutoParserService(dstSavePath string, interval time.Duration) *AutoParserService {
+func NewAutoParserService(dstSavePath string, interval time.Duration, catalogs ...RuntimeLogCatalog) *AutoParserService {
 	// 使用全局位置管理器
 	positionManager := GetGlobalPositionManager(dstSavePath)
 
+	var runtimeCatalog RuntimeLogCatalog
+	if len(catalogs) > 0 {
+		runtimeCatalog = catalogs[0]
+	}
 	return &AutoParserService{
 		dstSavePath:     dstSavePath,
 		interval:        interval,
 		stopChan:        make(chan struct{}),
 		running:         false,
 		positionManager: positionManager,
+		runtimeCatalog:  runtimeCatalog,
 	}
 }
 
@@ -42,6 +57,10 @@ func NewAutoParserService(dstSavePath string, interval time.Duration) *AutoParse
 func (s *AutoParserService) Start() {
 	if s.running {
 		log.Printf("[AutoParser] 服务已经在运行中")
+		return
+	}
+	if s.runtimeCatalog == nil {
+		log.Printf("[AutoParser] 未配置受管 Runtime 清单，旧自动解析服务保持禁用")
 		return
 	}
 
@@ -111,14 +130,19 @@ func copyLogFile(src, dst string) error {
 
 // processAllServerLogs 处理所有服务器的日志
 func (s *AutoParserService) processAllServerLogs() {
-	// 获取所有运行中的服务器
-	// 使用silent=true参数，不输出正常日志
-	servers := tmux.GetRunningServers(true)
+	if s.runtimeCatalog == nil {
+		return
+	}
+	servers, err := s.runtimeCatalog.RunningLogTargets(context.Background())
+	if err != nil {
+		log.Printf("[AutoParser] 获取 Runtime 日志目标失败: %v", err)
+		return
+	}
 	log.Printf("[AutoParser] 获取到 %d 个运行中的服务器", len(servers))
 
 	for _, server := range servers {
 		// 构建日志文件路径
-		logFilePath := s.dstSavePath + "/" + server.ArchiveName + "/" + server.WorldName + "/server_log.txt"
+		logFilePath := filepath.Join(s.dstSavePath, server.RoomDirectory, server.WorldDirectory, "server_log.txt")
 		log.Printf("[AutoParser] 处理服务器日志: %s", logFilePath)
 
 		// 检查文件是否存在
@@ -156,7 +180,7 @@ func (s *AutoParserService) processAllServerLogs() {
 			// 服务器重启，备份旧日志文件
 			if position.LastPosition > 0 {
 				// 创建备份目录
-				backupDir := filepath.Join(s.dstSavePath, "logs_backup", server.ArchiveName, server.WorldName)
+				backupDir := filepath.Join(s.dstSavePath, "logs_backup", server.RoomDirectory, server.WorldDirectory)
 				if err := os.MkdirAll(backupDir, 0755); err != nil {
 					log.Printf("[AutoParser] 创建日志备份目录失败: %v", err)
 				} else {
@@ -179,7 +203,7 @@ func (s *AutoParserService) processAllServerLogs() {
 				position.LastPosition, currentSize, logFilePath)
 
 			// 添加一条服务器重启的日志
-			parser, err := NewLogParser(server.ArchiveName, server.WorldName)
+			parser, err := NewLogParser(server.RoomDirectory, server.WorldDirectory)
 			if err == nil {
 				// 重置服务器启动时间，因为服务器已重启
 				// 这将强制解析器重新检测服务器启动时间
@@ -248,7 +272,7 @@ func (s *AutoParserService) processAllServerLogs() {
 		log.Printf("[AutoParser] 成功读取新内容，大小: %d 字节，总大小: %d 字节", n, currentSize)
 
 		// 创建日志解析器
-		parser, err := NewLogParser(server.ArchiveName, server.WorldName)
+		parser, err := NewLogParser(server.RoomDirectory, server.WorldDirectory)
 		if err != nil {
 			log.Printf("[AutoParser] 创建日志解析器失败: %v", err)
 			continue

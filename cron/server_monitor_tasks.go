@@ -1,13 +1,32 @@
 package cron
 
 import (
+	"context"
 	"dont/models"
-	"dont/tmux"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 )
+
+var ErrRuntimeCatalogUnavailable = errors.New("legacy server monitor requires a managed Runtime catalog")
+
+type ManagedServer struct {
+	SessionName string
+	ArchiveName string
+	WorldName   string
+	Status      string
+	IsMaster    bool
+}
+
+type RuntimeServerCatalog interface {
+	RunningServers(context.Context) ([]ManagedServer, error)
+}
+
+var serverMonitorCatalog RuntimeServerCatalog
+
+func ConfigureServerMonitorCatalog(catalog RuntimeServerCatalog) { serverMonitorCatalog = catalog }
 
 // MonitorServerStatus 监控服务器状态并管理玩家信息和世界状态定时任务
 // 每30秒检测一次服务器是否正在运行
@@ -17,7 +36,13 @@ func MonitorServerStatus() (string, error) {
 	log.Printf("[ServerMonitor] 开始监控服务器状态")
 
 	// 获取所有运行中的服务器
-	runningServers := tmux.GetRunningServers(true)
+	if serverMonitorCatalog == nil {
+		return "", ErrRuntimeCatalogUnavailable
+	}
+	runningServers, err := serverMonitorCatalog.RunningServers(context.Background())
+	if err != nil {
+		return "", fmt.Errorf("读取 Runtime 运行清单: %w", err)
+	}
 	log.Printf("[ServerMonitor] 检测到 %d 个运行中的服务器", len(runningServers))
 
 	// 获取所有定时任务
@@ -95,7 +120,7 @@ func MonitorServerStatus() (string, error) {
 	taskManager := GetTaskManager()
 
 	// 按存档名分组服务器，以便于选择主世界
-	archiveServers := make(map[string][]tmux.ServerInfo)
+	archiveServers := make(map[string][]ManagedServer)
 	for _, server := range runningServers {
 		archiveServers[server.ArchiveName] = append(archiveServers[server.ArchiveName], server)
 	}
@@ -103,8 +128,8 @@ func MonitorServerStatus() (string, error) {
 	// 处理每个存档
 	for _, servers := range archiveServers {
 		// 首先尝试找到主世界
-		var masterServer *tmux.ServerInfo
-		var forestServer *tmux.ServerInfo
+		var masterServer *ManagedServer
+		var forestServer *ManagedServer
 
 		// 首先尝试找到 is_master 为 true 的世界
 		for i, server := range servers {

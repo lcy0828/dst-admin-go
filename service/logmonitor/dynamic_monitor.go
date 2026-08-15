@@ -1,6 +1,8 @@
 package logmonitor
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -10,8 +12,13 @@ import (
 
 	"dont/routers/gamelog"
 	"dont/service/logparser"
-	"dont/tmux"
 )
+
+var ErrRuntimeCatalogUnavailable = errors.New("dynamic log monitor requires a managed Runtime catalog")
+
+type RuntimeServerCatalog interface {
+	RunningServers(context.Context) ([]ServerInfo, error)
+}
 
 // DynamicLogMonitor 动态日志监控服务
 // 根据服务器状态动态调整监控的日志文件
@@ -30,16 +37,21 @@ type DynamicLogMonitor struct {
 	statusMutex          sync.Mutex                     // 状态互斥锁
 	logRetention         int                            // 日志保留天数
 	parserManager        *logparser.LogParserManager    // 日志解析器管理器
-	ticker               *time.Ticker                   // 定时器
-	tickerMutex          sync.Mutex                     // 定时器互斥锁
+	runtimeCatalog       RuntimeServerCatalog
+	ticker               *time.Ticker // 定时器
+	tickerMutex          sync.Mutex   // 定时器互斥锁
 }
 
 // NewDynamicLogMonitor 创建新的动态日志监控服务
-func NewDynamicLogMonitor(dstSavePath string, checkInterval time.Duration, logRetention int) *DynamicLogMonitor {
+func NewDynamicLogMonitor(dstSavePath string, checkInterval time.Duration, logRetention int, catalogs ...RuntimeServerCatalog) *DynamicLogMonitor {
 	// 初始检查间隔为5秒，常规检查间隔为30秒
 	initialInterval := 5 * time.Second
 	regularInterval := 30 * time.Second
 
+	var runtimeCatalog RuntimeServerCatalog
+	if len(catalogs) > 0 {
+		runtimeCatalog = catalogs[0]
+	}
 	return &DynamicLogMonitor{
 		dstSavePath:          dstSavePath,
 		checkInterval:        initialInterval, // 初始使用初始间隔
@@ -51,6 +63,7 @@ func NewDynamicLogMonitor(dstSavePath string, checkInterval time.Duration, logRe
 		serverStatus:         make(map[string]bool),
 		logRetention:         logRetention,
 		parserManager:        logparser.GetLogParserManager(),
+		runtimeCatalog:       runtimeCatalog,
 		ticker:               nil, // 在monitorLoop中初始化
 	}
 }
@@ -62,6 +75,9 @@ func (m *DynamicLogMonitor) Start() error {
 
 	if m.isRunning {
 		return fmt.Errorf("动态日志监控服务已经在运行中")
+	}
+	if m.runtimeCatalog == nil {
+		return ErrRuntimeCatalogUnavailable
 	}
 
 	m.isRunning = true
@@ -138,35 +154,10 @@ func (m *DynamicLogMonitor) checkServers() {
 
 // getServerList 获取服务器列表
 func (m *DynamicLogMonitor) getServerList() ([]ServerInfo, error) {
-	// 直接调用tmux包的函数获取运行中的服务器信息
-	// 使用silent=true参数，不输出正常日志
-	tmuxServers := tmux.GetRunningServers(true)
-
-	// 打印调试信息
-	//log.Printf("[DynamicLogMonitor] 获取到 %d 个运行中的服务器", len(tmuxServers))
-	if len(tmuxServers) == 0 {
-		// 返回空列表而不是错误
-		return []ServerInfo{}, nil
+	if m.runtimeCatalog == nil {
+		return nil, ErrRuntimeCatalogUnavailable
 	}
-	// 将tmux.ServerInfo转换为本包的ServerInfo
-	servers := make([]ServerInfo, len(tmuxServers))
-	for i, server := range tmuxServers {
-		servers[i] = ServerInfo{
-			SessionName: server.SessionName,
-			ArchiveName: server.ArchiveName,
-			WorldName:   server.WorldName,
-			ServerMode:  server.ServerMode,
-			Status:      server.Status,
-			StartTime:   server.StartTime,
-			IsMaster:    server.IsMaster,
-		}
-
-		// 打印服务器信息
-		//log.Printf("[DynamicLogMonitor] 服务器 #%d: 会话=%s, 存档=%s, 世界=%s, 状态=%s",
-		//	i, server.SessionName, server.ArchiveName, server.WorldName, server.Status)
-	}
-
-	return servers, nil
+	return m.runtimeCatalog.RunningServers(context.Background())
 }
 
 // updateServerStatus 更新服务器状态并管理监控器

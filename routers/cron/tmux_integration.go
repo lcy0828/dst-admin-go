@@ -1,14 +1,32 @@
 package cron
 
 import (
+	"context"
 	"dont/pkg/commands"
 	"dont/pkg/e"
-	"dont/tmux"
+	"dont/pkg/taskbridge"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
+
+type LegacyRuntimeSession struct {
+	Name  string `json:"name"`
+	State string `json:"state"`
+}
+
+type LegacyRuntimeCatalog interface {
+	Sessions(context.Context) ([]LegacyRuntimeSession, error)
+}
+
+var legacyRuntimeCatalog LegacyRuntimeCatalog
+var legacyRuntimeConsole taskbridge.RuntimeConsole
+
+func ConfigureLegacyRuntime(catalog LegacyRuntimeCatalog, console taskbridge.RuntimeConsole) {
+	legacyRuntimeCatalog, legacyRuntimeConsole = catalog, console
+}
 
 // RegisterTmuxIntegrationRoutes 注册tmux集成相关路由
 func RegisterTmuxIntegrationRoutes(router *gin.RouterGroup) {
@@ -30,8 +48,11 @@ func RegisterTmuxIntegrationRoutes(router *gin.RouterGroup) {
 
 // GetTmuxSessions 获取可用的tmux会话列表
 func GetTmuxSessions(c *gin.Context) {
-	// 获取所有tmux会话
-	sessions, err := tmux.ListAllSessions()
+	if legacyRuntimeCatalog == nil {
+		c.JSON(http.StatusOK, gin.H{"code": e.ERROR, "msg": "旧 tmux 清单已停用，请使用 Runtime 目标和房间拓扑", "data": nil})
+		return
+	}
+	sessions, err := legacyRuntimeCatalog.Sessions(c.Request.Context())
 	if err != nil {
 		log.Printf("[API][GetTmuxSessions] 获取tmux会话列表失败: %v", err)
 		c.JSON(http.StatusOK, gin.H{
@@ -42,21 +63,10 @@ func GetTmuxSessions(c *gin.Context) {
 		return
 	}
 
-	// 过滤出DST服务器会话
-	dstSessions := make([]map[string]interface{}, 0)
-	for _, session := range sessions {
-		if len(session.Name) > 0 && session.Name[:9] == "dstserver" {
-			dstSessions = append(dstSessions, map[string]interface{}{
-				"name":  session.Name,
-				"state": session.State,
-			})
-		}
-	}
-
 	c.JSON(http.StatusOK, gin.H{
 		"code": e.SUCCESS,
 		"msg":  e.GetMsg(e.SUCCESS),
-		"data": dstSessions,
+		"data": sessions,
 	})
 }
 
@@ -148,16 +158,8 @@ func TestTmuxCommand(c *gin.Context) {
 	// 生成脚本
 	script := cmd.GenerateScript(req.Params...)
 
-	// 从tmux.go获取配置变量
-	// 这里应该从配置或环境变量中获取，为简化示例直接使用默认值
-	dstSavePath := "./dst/save"
-	dstUGCPath := "./dst/ugc_mods"
-	dstServerPath := "./dst/bin"
-	dstServerMode := "survival"
-
-	// 解析会话名称
-	parts := tmux.ParseSessionName(req.SessionName)
-	if !parts.Valid {
+	cluster, shard, valid := taskbridge.ParseManagedSessionName(req.SessionName)
+	if !valid {
 		log.Printf("[API][TestTmuxCommand] 会话名称格式不正确: %s", req.SessionName)
 		c.JSON(http.StatusOK, gin.H{
 			"code": e.INVALID_PARAMS,
@@ -167,28 +169,17 @@ func TestTmuxCommand(c *gin.Context) {
 		return
 	}
 
-	// 获取服务器实例
-	server, err := tmux.NewDSTServer(
-		parts.ClusterName,
-		parts.ShardName,
-		dstUGCPath,
-		dstSavePath,
-		"DoNotStarveTogether",
-		dstServerPath,
-		dstServerMode,
-	)
-	if err != nil {
-		log.Printf("[API][TestTmuxCommand] 获取服务器实例失败: %v", err)
+	if legacyRuntimeConsole == nil {
 		c.JSON(http.StatusOK, gin.H{
 			"code": e.ERROR,
-			"msg":  "获取服务器实例失败: " + err.Error(),
+			"msg":  "旧 tmux 命令已停用；任务必须迁移到受管 Room/Shard Runtime",
 			"data": nil,
 		})
 		return
 	}
-
-	// 发送命令
-	if err := server.SendCommand(script); err != nil {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	if err := legacyRuntimeConsole.Send(ctx, cluster, shard, script); err != nil {
 		log.Printf("[API][TestTmuxCommand] 发送命令失败: %v", err)
 		c.JSON(http.StatusOK, gin.H{
 			"code": e.ERROR,
@@ -228,16 +219,8 @@ func TestTmuxRawCommand(c *gin.Context) {
 		return
 	}
 
-	// 从tmux.go获取配置变量
-	// 这里应该从配置或环境变量中获取，为简化示例直接使用默认值
-	dstSavePath := "./dst/save"
-	dstUGCPath := "./dst/ugc_mods"
-	dstServerPath := "./dst/bin"
-	dstServerMode := "survival"
-
-	// 解析会话名称
-	parts := tmux.ParseSessionName(req.SessionName)
-	if !parts.Valid {
+	cluster, shard, valid := taskbridge.ParseManagedSessionName(req.SessionName)
+	if !valid {
 		log.Printf("[API][TestTmuxRawCommand] 会话名称格式不正确: %s", req.SessionName)
 		c.JSON(http.StatusOK, gin.H{
 			"code": e.INVALID_PARAMS,
@@ -247,28 +230,17 @@ func TestTmuxRawCommand(c *gin.Context) {
 		return
 	}
 
-	// 获取服务器实例
-	server, err := tmux.NewDSTServer(
-		parts.ClusterName,
-		parts.ShardName,
-		dstUGCPath,
-		dstSavePath,
-		"DoNotStarveTogether",
-		dstServerPath,
-		dstServerMode,
-	)
-	if err != nil {
-		log.Printf("[API][TestTmuxRawCommand] 获取服务器实例失败: %v", err)
+	if legacyRuntimeConsole == nil {
 		c.JSON(http.StatusOK, gin.H{
 			"code": e.ERROR,
-			"msg":  "获取服务器实例失败: " + err.Error(),
+			"msg":  "旧 tmux 原始命令已停用；请使用受管 Runtime 命令接口",
 			"data": nil,
 		})
 		return
 	}
-
-	// 发送命令
-	if err := server.SendCommand(req.Command); err != nil {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	if err := legacyRuntimeConsole.Send(ctx, cluster, shard, req.Command); err != nil {
 		log.Printf("[API][TestTmuxRawCommand] 发送命令失败: %v", err)
 		c.JSON(http.StatusOK, gin.H{
 			"code": e.ERROR,
