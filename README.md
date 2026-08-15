@@ -25,18 +25,18 @@ DST Admin Go 是《饥荒联机版》专用的服务器管理 API。当前 relea
 
 ## 本地验证
 
-项目固定 Go 1.25.12 工具链，并使用 SQLite，因此构建机需要可用的 CGO 编译环境。
+项目固定 Go 1.25.13 工具链，并使用 SQLite，因此构建机需要可用的 CGO 编译环境。
 
 ```bash
-GOTOOLCHAIN=go1.25.12+auto go test -race ./...
-GOTOOLCHAIN=go1.25.12+auto go vet ./...
-GOTOOLCHAIN=go1.25.12+auto go build ./...
+GOTOOLCHAIN=go1.25.13+auto go test -race ./...
+GOTOOLCHAIN=go1.25.13+auto go vet ./...
+GOTOOLCHAIN=go1.25.13+auto go build ./...
 ```
 
 启动独立 API：
 
 ```bash
-GOTOOLCHAIN=go1.25.12+auto go run ./cmd/admin-api -addr 127.0.0.1:18000
+GOTOOLCHAIN=go1.25.13+auto go run ./cmd/admin-api -addr 127.0.0.1:18000
 ```
 
 实际路径和密钥通过 `conf/app.conf` 或 `DST_ADMIN_*` 环境变量配置。不要用测试 adapter 运行生产服务。
