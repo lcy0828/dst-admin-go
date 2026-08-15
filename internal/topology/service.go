@@ -106,6 +106,33 @@ func (s *Service) ResolveExecution(ctx context.Context, roomID, worldID string) 
 	if err != nil {
 		return ExecutionPlacement{}, err
 	}
+	return resolveExecution(result, roomID, worldID)
+}
+
+// ResolveRoomExecutions resolves every applied world in a room from one
+// topology snapshot. Callers that need a room-wide consistent view should use
+// this method instead of resolving each world independently.
+func (s *Service) ResolveRoomExecutions(ctx context.Context, roomID string) ([]ExecutionPlacement, error) {
+	result, err := s.plan(ctx, roomID, nil)
+	if err != nil {
+		return nil, err
+	}
+	selected, exists := result.plans[roomID]
+	if !exists {
+		return nil, rooms.ErrRoomNotFound
+	}
+	resolved := make([]ExecutionPlacement, 0, len(selected.worlds))
+	for _, world := range selected.worlds {
+		placement, err := resolveExecution(result, roomID, world.ID)
+		if err != nil {
+			return nil, err
+		}
+		resolved = append(resolved, placement)
+	}
+	return resolved, nil
+}
+
+func resolveExecution(result planResult, roomID, worldID string) (ExecutionPlacement, error) {
 	selected := result.plans[roomID]
 	var world rooms.World
 	worldFound := false

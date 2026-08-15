@@ -134,7 +134,10 @@ func (m *Manager) PrepareRestore(ctx context.Context, id string) (BackupDescript
 	if err != nil || actual.Size != descriptor.Size || !strings.EqualFold(actual.SHA256, descriptor.SHA256) {
 		return BackupDescriptor{}, ErrIntegrity
 	}
-	stage := m.restoreStagePath(id)
+	stage, err := m.restoreStagePath(descriptor.Cluster, id)
+	if err != nil {
+		return BackupDescriptor{}, err
+	}
 	if err := os.RemoveAll(stage); err != nil {
 		return BackupDescriptor{}, err
 	}
@@ -202,12 +205,24 @@ func (m *Manager) PublishRestore(id string, publishShared bool) (string, error) 
 func (m *Manager) RollbackRestore(id string) error {
 	receipt, err := m.restoreReceipt(id)
 	if os.IsNotExist(err) {
-		return errors.Join(os.RemoveAll(m.restoreStagePath(id)), removeIfExists(m.restoreArchivePath(id)), removeIfExists(m.restoreMetaPath(id)))
+		var stageErr error
+		if descriptor, descriptorErr := m.restoreDescriptor(id); descriptorErr == nil {
+			if stage, pathErr := m.restoreStagePath(descriptor.Cluster, id); pathErr != nil {
+				stageErr = pathErr
+			} else {
+				stageErr = os.RemoveAll(stage)
+			}
+		}
+		return errors.Join(stageErr, removeIfExists(m.restoreArchivePath(id)), removeIfExists(m.restoreMetaPath(id)))
 	}
 	if err != nil {
 		return err
 	}
 	roomPath, err := m.targetRoomPath(receipt.Cluster)
+	if err != nil {
+		return err
+	}
+	stage, err := m.restoreStagePath(receipt.Cluster, id)
 	if err != nil {
 		return err
 	}
@@ -243,7 +258,7 @@ func (m *Manager) RollbackRestore(id string) error {
 			}
 		}
 	}
-	return errors.Join(os.RemoveAll(recoveryRoot), os.RemoveAll(m.restoreStagePath(id)), removeIfExists(m.restoreReceiptPath(id)), removeIfExists(m.restoreArchivePath(id)), removeIfExists(m.restoreMetaPath(id)))
+	return errors.Join(os.RemoveAll(recoveryRoot), os.RemoveAll(stage), removeIfExists(m.restoreReceiptPath(id)), removeIfExists(m.restoreArchivePath(id)), removeIfExists(m.restoreMetaPath(id)))
 }
 
 func (m *Manager) CompleteRestore(id string) (string, error) {
@@ -252,6 +267,10 @@ func (m *Manager) CompleteRestore(id string) (string, error) {
 		return "", err
 	}
 	roomPath, err := m.targetRoomPath(receipt.Cluster)
+	if err != nil {
+		return "", err
+	}
+	stage, err := m.restoreStagePath(receipt.Cluster, id)
 	if err != nil {
 		return "", err
 	}
@@ -264,7 +283,7 @@ func (m *Manager) CompleteRestore(id string) (string, error) {
 		return "", err
 	}
 	recoveryRoot := filepath.Join(m.saveRoot, filepath.FromSlash(receipt.RecoveryRef))
-	err = errors.Join(os.RemoveAll(recoveryRoot), os.RemoveAll(m.restoreStagePath(id)), removeIfExists(m.restoreReceiptPath(id)), removeIfExists(m.restoreArchivePath(id)), removeIfExists(m.restoreMetaPath(id)))
+	err = errors.Join(os.RemoveAll(recoveryRoot), os.RemoveAll(stage), removeIfExists(m.restoreReceiptPath(id)), removeIfExists(m.restoreArchivePath(id)), removeIfExists(m.restoreMetaPath(id)))
 	return receipt.RecoveryRef, err
 }
 
@@ -286,6 +305,10 @@ func (m *Manager) prepareRestoreReceipt(descriptor BackupDescriptor, publishShar
 		BackupID: descriptor.BackupID, Cluster: descriptor.Cluster, Shard: descriptor.Shard,
 		Phase: "publishing", PublishShared: publishShared, RecoveryRef: recoveryRef,
 	}
+	stage, err := m.restoreStagePath(descriptor.Cluster, descriptor.BackupID)
+	if err != nil {
+		return RestoreReceipt{}, err
+	}
 	if publishShared {
 		for _, name := range sortedSharedNames() {
 			if regularExists(filepath.Join(roomPath, name)) {
@@ -294,7 +317,7 @@ func (m *Manager) prepareRestoreReceipt(descriptor BackupDescriptor, publishShar
 					return RestoreReceipt{}, err
 				}
 			}
-			if regularExists(filepath.Join(m.restoreStagePath(descriptor.BackupID), "shared", name)) {
+			if regularExists(filepath.Join(stage, "shared", name)) {
 				receipt.IncomingShared = append(receipt.IncomingShared, name)
 			}
 		}
@@ -306,7 +329,10 @@ func (m *Manager) prepareRestoreReceipt(descriptor BackupDescriptor, publishShar
 }
 
 func (m *Manager) publishRestoreFiles(descriptor BackupDescriptor, receipt RestoreReceipt, roomPath string) error {
-	stage := m.restoreStagePath(descriptor.BackupID)
+	stage, err := m.restoreStagePath(descriptor.Cluster, descriptor.BackupID)
+	if err != nil {
+		return err
+	}
 	recoveryRoot := filepath.Join(m.saveRoot, filepath.FromSlash(receipt.RecoveryRef))
 	targetShard := filepath.Join(roomPath, descriptor.Shard)
 	recoveryShard := filepath.Join(recoveryRoot, "shard")
@@ -350,7 +376,10 @@ func (m *Manager) publishRestoreFiles(descriptor BackupDescriptor, receipt Resto
 }
 
 func (m *Manager) validateRestoreStage(descriptor BackupDescriptor) error {
-	stage := m.restoreStagePath(descriptor.BackupID)
+	stage, err := m.restoreStagePath(descriptor.Cluster, descriptor.BackupID)
+	if err != nil {
+		return err
+	}
 	if !regularExists(filepath.Join(stage, "shared", "cluster.ini")) || !regularExists(filepath.Join(stage, "shard", "server.ini")) {
 		return ErrIntegrity
 	}
@@ -508,8 +537,8 @@ func (m *Manager) restoreMetaPath(id string) string {
 	return filepath.Join(m.stateRoot, "restore-"+id+".json")
 }
 
-func (m *Manager) restoreStagePath(id string) string {
-	return filepath.Join(m.stateRoot, "restore-stage-"+id)
+func (m *Manager) restoreStagePath(cluster, id string) (string, error) {
+	return m.targetStagePath(cluster, "restore", id)
 }
 
 func (m *Manager) restoreReceiptPath(id string) string {

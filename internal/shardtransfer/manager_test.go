@@ -135,6 +135,39 @@ func TestTransferRejectsDifferentSharedClusterConfiguration(t *testing.T) {
 	}
 }
 
+func TestTransferStagesInsideTargetSaveFilesystem(t *testing.T) {
+	_, targetRoot, _, target := prepareTransferRoots(t)
+	stage, err := target.targetStagePath("Cluster_1", "migration", "migration-stage-path-0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedTargetRoot, err := filepath.EvalSymlinks(targetRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedStateRoot, err := filepath.EvalSymlinks(target.stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contained(resolvedTargetRoot, stage) || contained(resolvedStateRoot, stage) {
+		t.Fatalf("stage=%q saveRoot=%q stateRoot=%q", stage, targetRoot, target.stateRoot)
+	}
+}
+
+func TestTransferRejectsSymlinkedTargetStageRoot(t *testing.T) {
+	_, targetRoot, _, target := prepareTransferRoots(t)
+	cluster := filepath.Join(targetRoot, "Cluster_1")
+	if err := os.MkdirAll(cluster, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(cluster, ".dst-admin-staging")); err != nil {
+		t.Skipf("symlink is unavailable: %v", err)
+	}
+	if _, err := target.targetStagePath("Cluster_1", "migration", "migration-stage-link-0001"); !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("symlinked stage error=%v", err)
+	}
+}
+
 func TestFinalizeSourceIsRetrySafeBeforeAndAfterReceiptRecovery(t *testing.T) {
 	sourceRoot, _, source, _ := prepareTransferRoots(t)
 	id := "migration-finalize-retry-0001"

@@ -431,6 +431,41 @@ func TestResolveExecutionUsesAppliedTargetWithoutDesiredFallback(t *testing.T) {
 	}
 }
 
+func TestResolveRoomExecutionsUsesOneConsistentTopologySnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	room := rooms.Room{ID: "room-batch", DirectoryName: "Cluster_Batch", Name: "Batch", Managed: true}
+	master := rooms.World{ID: "master-batch", RoomID: room.ID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}
+	caves := rooms.World{ID: "caves-batch", RoomID: room.ID, DirectoryName: "Caves", Name: "洞穴", Role: rooms.WorldRoleCaves}
+	local := runtimeInventory(
+		agents.RuntimeTarget{ID: localTargetID, Name: "本机", Kind: agents.RuntimeKindLocal, Status: agents.RuntimeStatusReady, Online: true, Configured: true},
+		4, 4, []shared.RoomInventoryReport{inventoryRoom(room.DirectoryName, master.DirectoryName, caves.DirectoryName)}, nil, now,
+	)
+	service, err := NewService(
+		topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {master, caves}}},
+		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{local}}, newTopologyTestStore(t),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := service.ResolveRoomExecutions(context.Background(), room.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved) != 2 || resolved[0].Revision == "" || resolved[0].Revision != resolved[1].Revision {
+		t.Fatalf("inconsistent room executions: %#v", resolved)
+	}
+	worlds := map[string]bool{}
+	for _, placement := range resolved {
+		worlds[placement.World.ID] = true
+		if placement.Room.ID != room.ID || placement.AppliedTargetID != localTargetID {
+			t.Fatalf("unexpected execution: %#v", placement)
+		}
+	}
+	if !worlds[master.ID] || !worlds[caves.ID] {
+		t.Fatalf("room executions omitted worlds: %#v", worlds)
+	}
+}
+
 func TestResolveExecutionRequiresFreshAppliedAgentAndRejectsConflict(t *testing.T) {
 	now := time.Now().UTC()
 	room := rooms.Room{ID: "room-a", DirectoryName: "Cluster_A", Name: "A", Managed: true}

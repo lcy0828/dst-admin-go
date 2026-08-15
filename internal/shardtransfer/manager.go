@@ -279,8 +279,17 @@ func (m *Manager) CommitImport(ctx context.Context, id, cluster, shard string) (
 	} else if !os.IsNotExist(err) {
 		return Descriptor{}, err
 	}
-	staging, err := os.MkdirTemp(m.stateRoot, ".extract-")
+	if err := os.MkdirAll(roomPath, 0o750); err != nil {
+		return Descriptor{}, err
+	}
+	staging, err := m.targetStagePath(cluster, "migration", id)
 	if err != nil {
+		return Descriptor{}, err
+	}
+	if err := os.RemoveAll(staging); err != nil {
+		return Descriptor{}, err
+	}
+	if err := os.MkdirAll(staging, 0o700); err != nil {
 		return Descriptor{}, err
 	}
 	defer os.RemoveAll(staging)
@@ -289,9 +298,6 @@ func (m *Manager) CommitImport(ctx context.Context, id, cluster, shard string) (
 	}
 	if !regularExists(filepath.Join(staging, "shared", "cluster.ini")) || !regularExists(filepath.Join(staging, "shard", "server.ini")) {
 		return Descriptor{}, ErrIntegrity
-	}
-	if err := os.MkdirAll(roomPath, 0o750); err != nil {
-		return Descriptor{}, err
 	}
 	createdShared := make([]string, 0)
 	for _, name := range sortedSharedNames() {
@@ -497,6 +503,44 @@ func (m *Manager) targetRoomPath(cluster string) (string, error) {
 		return "", ErrInvalidRequest
 	}
 	return candidate, nil
+}
+
+func (m *Manager) targetStagePath(cluster, kind, id string) (string, error) {
+	if !resourceName.MatchString(cluster) || !resourceName.MatchString(kind) || !migrationID.MatchString(id) {
+		return "", ErrInvalidRequest
+	}
+	roomPath, err := m.targetRoomPath(cluster)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(roomPath, 0o750); err != nil {
+		return "", err
+	}
+	roomInfo, err := os.Lstat(roomPath)
+	if err != nil || !roomInfo.IsDir() || roomInfo.Mode()&os.ModeSymlink != 0 {
+		return "", ErrIntegrity
+	}
+	stageRoot := filepath.Join(roomPath, ".dst-admin-staging")
+	if err := os.MkdirAll(stageRoot, 0o700); err != nil {
+		return "", err
+	}
+	stageInfo, err := os.Lstat(stageRoot)
+	if err != nil || !stageInfo.IsDir() || stageInfo.Mode()&os.ModeSymlink != 0 {
+		return "", ErrIntegrity
+	}
+	resolvedSaveRoot, err := filepath.EvalSymlinks(m.saveRoot)
+	if err != nil {
+		return "", err
+	}
+	resolvedStageRoot, err := filepath.EvalSymlinks(stageRoot)
+	if err != nil || !contained(resolvedSaveRoot, resolvedStageRoot) {
+		return "", ErrIntegrity
+	}
+	stage := filepath.Join(resolvedStageRoot, kind+"-"+id)
+	if !contained(resolvedStageRoot, stage) {
+		return "", ErrIntegrity
+	}
+	return stage, nil
 }
 
 func (m *Manager) exportPath(id string) string {
