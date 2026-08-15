@@ -12,12 +12,19 @@ import (
 )
 
 type testCatalog struct {
-	room  rooms.Room
-	world rooms.World
+	room   rooms.Room
+	world  rooms.World
+	worlds []rooms.World
 }
 
 func (c testCatalog) Room(string) (rooms.Room, error)           { return c.room, nil }
 func (c testCatalog) World(string, string) (rooms.World, error) { return c.world, nil }
+func (c testCatalog) Worlds(string) ([]rooms.World, error) {
+	if len(c.worlds) > 0 {
+		return c.worlds, nil
+	}
+	return []rooms.World{c.world}, nil
+}
 
 func newTestService(t *testing.T) (*Service, string) {
 	t.Helper()
@@ -35,6 +42,55 @@ func newTestService(t *testing.T) (*Service, string) {
 	}
 	service.pollInterval = 5 * time.Millisecond
 	return service, filepath.Join(worldPath, "server_log.txt")
+}
+
+func TestRoomSnapshotKeepsAvailableWorldsWhenAnotherLogIsMissing(t *testing.T) {
+	root := t.TempDir()
+	masterID := rooms.EncodeID("Master")
+	cavesID := rooms.EncodeID("Caves")
+	for _, name := range []string{"Master", "Caves"} {
+		if err := os.MkdirAll(filepath.Join(root, "room", name), 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "room", "Master", "server_log.txt"), []byte("master ready\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	catalog := testCatalog{
+		room: rooms.Room{ID: rooms.EncodeID("room"), DirectoryName: "room"},
+		worlds: []rooms.World{
+			{ID: masterID, DirectoryName: "Master", Name: "地面", Role: rooms.WorldRoleMaster},
+			{ID: cavesID, DirectoryName: "Caves", Name: "洞穴", Role: rooms.WorldRoleCaves},
+		},
+	}
+	service, err := NewService(root, roomSnapshotCatalog{testCatalog: catalog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.RoomSnapshot(context.Background(), catalog.room.ID, 10, "ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Partial || result.Available != 1 || result.Unavailable != 1 || len(result.Worlds) != 2 {
+		t.Fatalf("room snapshot summary = %#v", result)
+	}
+	if result.Worlds[0].Snapshot == nil || len(result.Worlds[0].Snapshot.Lines) != 1 || result.Worlds[0].Problem != nil {
+		t.Fatalf("master snapshot = %#v", result.Worlds[0])
+	}
+	if result.Worlds[1].Snapshot != nil || result.Worlds[1].Problem == nil || result.Worlds[1].Problem.Code != "LOG_NOT_FOUND" {
+		t.Fatalf("caves snapshot = %#v", result.Worlds[1])
+	}
+}
+
+type roomSnapshotCatalog struct{ testCatalog }
+
+func (c roomSnapshotCatalog) World(_ string, worldID string) (rooms.World, error) {
+	for _, world := range c.worlds {
+		if world.ID == worldID {
+			return world, nil
+		}
+	}
+	return rooms.World{}, rooms.ErrWorldNotFound
 }
 
 func TestSnapshotFiltersAndDoesNotCreateMissingLogs(t *testing.T) {

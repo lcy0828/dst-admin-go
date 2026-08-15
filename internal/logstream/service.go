@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"dont/internal/rooms"
@@ -30,6 +31,7 @@ var (
 type RoomCatalog interface {
 	Room(string) (rooms.Room, error)
 	World(string, string) (rooms.World, error)
+	Worlds(string) ([]rooms.World, error)
 }
 
 type Line struct {
@@ -43,6 +45,29 @@ type Snapshot struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 	Truncated bool      `json:"truncated"`
 	Lines     []Line    `json:"lines"`
+}
+
+type Problem struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type WorldSnapshot struct {
+	WorldID   string          `json:"worldId"`
+	WorldName string          `json:"worldName"`
+	WorldRole rooms.WorldRole `json:"worldRole"`
+	ReadAt    time.Time       `json:"readAt"`
+	Snapshot  *Snapshot       `json:"snapshot,omitempty"`
+	Problem   *Problem        `json:"problem,omitempty"`
+}
+
+type RoomSnapshot struct {
+	RoomID      string          `json:"roomId"`
+	ReadAt      time.Time       `json:"readAt"`
+	Partial     bool            `json:"partial"`
+	Available   int             `json:"available"`
+	Unavailable int             `json:"unavailable"`
+	Worlds      []WorldSnapshot `json:"worlds"`
 }
 
 type Event struct {
@@ -84,14 +109,79 @@ func NewService(saveRoot string, roomCatalog RoomCatalog, readers ...Distributed
 }
 
 func (s *Service) Snapshot(roomID, worldID string, limit int, query string) (Snapshot, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return s.SnapshotContext(ctx, roomID, worldID, limit, query)
+}
+
+func (s *Service) SnapshotContext(ctx context.Context, roomID, worldID string, limit int, query string) (Snapshot, error) {
 	if s.distributed != nil {
-		return s.distributedSnapshot(roomID, worldID, limit, query)
+		return s.distributedSnapshot(ctx, roomID, worldID, limit, query)
+	}
+	if err := ctx.Err(); err != nil {
+		return Snapshot{}, err
 	}
 	path, info, err := s.locate(roomID, worldID)
 	if err != nil {
 		return Snapshot{}, err
 	}
 	return snapshotAt(path, info, limit, query)
+}
+
+func (s *Service) RoomSnapshot(ctx context.Context, roomID string, limit int, query string) (RoomSnapshot, error) {
+	worlds, err := s.rooms.Worlds(roomID)
+	if err != nil {
+		return RoomSnapshot{}, err
+	}
+	result := RoomSnapshot{
+		RoomID: roomID,
+		ReadAt: time.Now().UTC(),
+		Worlds: make([]WorldSnapshot, len(worlds)),
+	}
+	semaphore := make(chan struct{}, 4)
+	var wait sync.WaitGroup
+	for index, world := range worlds {
+		index, world := index, world
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			item := WorldSnapshot{
+				WorldID: world.ID, WorldName: world.Name, WorldRole: world.Role,
+			}
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				item.ReadAt = time.Now().UTC()
+				item.Problem = logProblem(ctx.Err())
+				result.Worlds[index] = item
+				return
+			}
+			worldContext, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			snapshot, snapshotErr := s.SnapshotContext(worldContext, roomID, world.ID, limit, query)
+			item.ReadAt = time.Now().UTC()
+			if snapshotErr != nil {
+				item.Problem = logProblem(snapshotErr)
+			} else {
+				item.Snapshot = &snapshot
+			}
+			result.Worlds[index] = item
+		}()
+	}
+	wait.Wait()
+	if err := ctx.Err(); err != nil {
+		return RoomSnapshot{}, err
+	}
+	for _, world := range result.Worlds {
+		if world.Problem == nil {
+			result.Available++
+		} else {
+			result.Unavailable++
+		}
+	}
+	result.Partial = result.Available > 0 && result.Unavailable > 0
+	return result, nil
 }
 
 func snapshotAt(path string, info os.FileInfo, limit int, query string) (Snapshot, error) {
@@ -240,12 +330,10 @@ func (s *Service) Follow(ctx context.Context, roomID, worldID string, tail int, 
 	}
 }
 
-func (s *Service) distributedSnapshot(roomID, worldID string, limit int, query string) (Snapshot, error) {
+func (s *Service) distributedSnapshot(ctx context.Context, roomID, worldID string, limit int, query string) (Snapshot, error) {
 	if limit <= 0 || limit > 2000 {
 		limit = 500
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
 	chunk, err := s.distributed.ReadLogs(ctx, roomID, worldID, shared.RuntimeLogRequest{
 		Cursor: -1, MaxBytes: runtimefiles.MaximumLogBytes, MaxLines: limit, Query: strings.TrimSpace(query),
 	})
@@ -256,6 +344,23 @@ func (s *Service) distributedSnapshot(roomID, worldID string, limit int, query s
 		return Snapshot{}, err
 	}
 	return snapshotFromChunk(chunk), nil
+}
+
+func logProblem(err error) *Problem {
+	switch {
+	case errors.Is(err, ErrLogNotFound), errors.Is(err, os.ErrNotExist):
+		return &Problem{Code: "LOG_NOT_FOUND", Message: "该分片还没有生成服务器日志"}
+	case errors.Is(err, context.DeadlineExceeded):
+		return &Problem{Code: "LOG_READ_TIMEOUT", Message: "读取分片日志超时"}
+	case errors.Is(err, context.Canceled):
+		return &Problem{Code: "LOG_READ_CANCELED", Message: "读取分片日志已取消"}
+	case errors.Is(err, ErrUnsafeLog), errors.Is(err, rooms.ErrUnsafePath), errors.Is(err, rooms.ErrInvalidID):
+		return &Problem{Code: "UNSAFE_LOG_PATH", Message: "日志资源路径无效"}
+	case errors.Is(err, rooms.ErrRoomNotFound), errors.Is(err, rooms.ErrWorldNotFound):
+		return &Problem{Code: "RESOURCE_NOT_FOUND", Message: "房间或世界不存在"}
+	default:
+		return &Problem{Code: "LOG_READ_FAILED", Message: "读取服务器日志失败"}
+	}
 }
 
 func (s *Service) followDistributed(ctx context.Context, roomID, worldID string, tail int, emit func(Event) error) error {

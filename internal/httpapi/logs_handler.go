@@ -20,15 +20,26 @@ type LogHandler struct {
 func NewLogHandler(service *logstream.Service) *LogHandler { return &LogHandler{logs: service} }
 
 func (h *LogHandler) Register(v2 *gin.RouterGroup) {
+	v2.GET("/rooms/:roomId/logs", h.roomSnapshot)
 	group := v2.Group("/rooms/:roomId/worlds/:worldId/logs")
 	group.GET("", h.snapshot)
 	group.GET("/download", h.download)
 	group.GET("/events", h.events)
 }
 
+func (h *LogHandler) roomSnapshot(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "500"))
+	result, err := h.logs.RoomSnapshot(c.Request.Context(), c.Param("roomId"), limit, c.Query("query"))
+	if err != nil {
+		logFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, result)
+}
+
 func (h *LogHandler) snapshot(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "500"))
-	result, err := h.logs.Snapshot(c.Param("roomId"), c.Param("worldId"), limit, c.Query("query"))
+	result, err := h.logs.SnapshotContext(c.Request.Context(), c.Param("roomId"), c.Param("worldId"), limit, c.Query("query"))
 	if err != nil {
 		logFailure(c, err)
 		return
@@ -58,7 +69,7 @@ func (h *LogHandler) download(c *gin.Context) {
 
 func (h *LogHandler) events(c *gin.Context) {
 	tail, _ := strconv.Atoi(c.DefaultQuery("tail", "200"))
-	if _, err := h.logs.Snapshot(c.Param("roomId"), c.Param("worldId"), 1, ""); err != nil {
+	if _, err := h.logs.SnapshotContext(c.Request.Context(), c.Param("roomId"), c.Param("worldId"), 1, ""); err != nil {
 		logFailure(c, err)
 		return
 	}

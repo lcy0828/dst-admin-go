@@ -80,7 +80,8 @@ func TestRoomSnapshotsChooseNewestWorldForMigratingPlayer(t *testing.T) {
 		t.Fatal(err)
 	}
 	player, err := store.Get("room", "KU_ONE")
-	if err != nil || !player.Online || player.WorldID != "caves" || !player.LastRefreshedAt.Equal(now.Add(2*time.Second)) {
+	if err != nil || !player.Online || player.WorldID != "caves" || !player.LastRefreshedAt.Equal(now.Add(2*time.Second)) ||
+		!player.PresenceConflict || len(player.ObservedWorldIDs) != 2 {
 		t.Fatalf("newest shard did not win migration: player=%#v err=%v", player, err)
 	}
 }
@@ -98,8 +99,23 @@ func TestRoomSnapshotsKeepExistingWorldWhenCaptureTimesTie(t *testing.T) {
 		t.Fatal(err)
 	}
 	player, err := store.Get("room", "KU_ONE")
-	if err != nil || player.WorldID != "master" {
+	if err != nil || player.WorldID != "master" || !player.PresenceConflict || len(player.ObservedWorldIDs) != 2 {
 		t.Fatalf("tie did not preserve existing shard: player=%#v err=%v", player, err)
+	}
+}
+
+func TestRoomSnapshotsDoNotReportOldWorldAsPresenceConflict(t *testing.T) {
+	store := newPlayerTestStore(t)
+	now := time.Date(2026, 8, 12, 10, 0, 0, 0, time.UTC)
+	if err := store.ReplaceRoomSnapshots("room", []worldSnapshot{
+		{WorldID: "master", WorldName: "地面", ObservedAt: now, Observations: []Observation{{ID: "KU_ONE", Name: "Wilson"}}},
+		{WorldID: "caves", WorldName: "洞穴", ObservedAt: now.Add(30 * time.Second), Observations: []Observation{{ID: "KU_ONE", Name: "Wilson"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	player, err := store.Get("room", "KU_ONE")
+	if err != nil || player.WorldID != "caves" || player.PresenceConflict || len(player.ObservedWorldIDs) != 1 || player.ObservedWorldIDs[0] != "caves" {
+		t.Fatalf("old world was reported as a live conflict: player=%#v err=%v", player, err)
 	}
 }
 
