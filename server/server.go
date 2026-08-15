@@ -1440,7 +1440,8 @@ func (s *Server) GetCommandResult(commandID string) (*CommandResult, error) {
 	// 直接通过命令ID查找结果
 	result, exists := s.commandResults[commandID]
 	if exists {
-		return result, nil
+		value := *result
+		return &value, nil
 	}
 
 	// 如果找不到命令结果，记录详细日志
@@ -1471,7 +1472,8 @@ func (s *Server) GetCommandResults(agentID string, limit int) []*CommandResult {
 	// 复制结果到临时切片，如果指定了agentID则只返回该agent的结果
 	for id, result := range s.commandResults {
 		if agentID == "" || result.AgentID == agentID {
-			results = append(results, result)
+			value := *result
+			results = append(results, &value)
 			log.Printf("添加命令结果: ID=%s, AgentID=%s, Status=%s", id, result.AgentID, result.Status)
 		}
 	}
