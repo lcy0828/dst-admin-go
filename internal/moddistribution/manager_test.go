@@ -234,6 +234,30 @@ func TestRollbackRestoresModAndWorldConfigurations(t *testing.T) {
 	assertFileContent(t, filepath.Join(environment.saves, "Cluster_1", "Caves", "modoverrides.lua"), oldCaves)
 }
 
+func TestCompleteIsIdempotentAfterJournalCleanup(t *testing.T) {
+	environment := newTestEnvironment(t, 0)
+	manifest := environment.importMod(t, "401", map[string]string{"modinfo.lua": "version='new'"})
+	plan, err := environment.manager.BuildPlan(context.Background(), release("release-complete-idempotent", manifest, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.manager.Prepare(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.manager.Publish(context.Background(), plan.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.manager.Complete(context.Background(), plan.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.manager.Complete(context.Background(), plan.OperationID); err != nil {
+		t.Fatalf("completed operation was not idempotent: %v", err)
+	}
+	if err := environment.manager.Complete(context.Background(), "release-never-created"); !os.IsNotExist(err) {
+		t.Fatalf("unknown operation was accepted as complete: %v", err)
+	}
+}
+
 func TestNewManagerRecoversUncommittedPublishByRollback(t *testing.T) {
 	environment := newTestEnvironment(t, 0)
 	manifest := environment.importMod(t, "500", map[string]string{"modinfo.lua": "version='new'"})

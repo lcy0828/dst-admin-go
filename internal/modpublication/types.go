@@ -1,13 +1,14 @@
 package modpublication
 
 import (
+	"context"
 	"errors"
 	"time"
 )
 
 const (
 	PlanVersion        = 1
-	RequiredCapability = "mod.publication.v1"
+	RequiredCapability = "runtime.mods.v1"
 )
 
 var (
@@ -189,9 +190,11 @@ type Fence struct {
 }
 
 type RuntimeOperation struct {
-	PublicationID  string  `json:"publicationId"`
-	PlanHash       string  `json:"planHash"`
-	Fences         []Fence `json:"fences"`
-	Action         string  `json:"action"`
-	IdempotencyKey string  `json:"idempotencyKey"`
+	PublicationID    string                                          `json:"publicationId"`
+	TopologyRevision string                                          `json:"topologyRevision"`
+	PlanHash         string                                          `json:"planHash"`
+	Fences           []Fence                                         `json:"fences"`
+	Action           string                                          `json:"action"`
+	IdempotencyKey   string                                          `json:"idempotencyKey"`
+	RenewFences      func(context.Context, []Fence) ([]Fence, error) `json:"-"`
 }

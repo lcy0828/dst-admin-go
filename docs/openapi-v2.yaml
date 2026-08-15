@@ -2314,16 +2314,20 @@ paths:
     post:
       tags: [Mods]
       operationId: installMod
+      deprecated: true
+      summary: Legacy local room mutation; production Placement-aware deployments return MOD_PUBLICATION_REQUIRED
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModInstallInput" } } } }
       responses:
         "202": { description: Install job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/mods/{modId}/actions/add:
     parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
     post:
       tags: [Mods]
       operationId: addModToRoom
+      deprecated: true
       summary: Add an already downloaded Mod to selected worlds in a room
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModAddToRoomInput" } } } }
@@ -2343,36 +2347,48 @@ paths:
     post:
       tags: [Mods]
       operationId: updateMod
+      deprecated: true
+      summary: Legacy local room mutation; update controller content and publish a reconcile plan instead
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "202": { description: Update job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
   /rooms/{roomId}/mods/{modId}/actions/enable:
     parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
     post:
       tags: [Mods]
       operationId: setModEnabled
+      deprecated: true
+      summary: Legacy local room mutation; production deployments require a Mod publication
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModEnableInput" } } } }
       responses:
         "202": { description: Enable job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
   /rooms/{roomId}/mods/{modId}/actions/repair:
     parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
     post:
       tags: [Mods]
       operationId: repairMod
+      deprecated: true
+      summary: Legacy local room mutation; production deployments require a Mod publication
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModActionInput" } } } }
       responses:
         "202": { description: Repair job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
   /rooms/{roomId}/mods/{modId}/actions/uninstall:
     parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
     post:
       tags: [Mods]
       operationId: uninstallMod
+      deprecated: true
+      summary: Legacy local room mutation; use a remove publication to retain controller content safely
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModActionInput" } } } }
       responses:
         "202": { description: Uninstall job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
   /rooms/{roomId}/worlds/{worldId}/mods/configuration-file:
     parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }]
     get:
@@ -2407,12 +2423,70 @@ paths:
     post:
       tags: [Mods]
       operationId: applyModConfiguration
+      deprecated: true
+      summary: Legacy local configuration write; production deployments require a configure publication
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationInput" } } } }
       responses:
         "202": { description: Configuration job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/mod-publications/preview:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Mods]
+      operationId: previewRoomModPublication
+      summary: Build an immutable Placement-aware Mod publication plan without changing any node
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModPublicationRequest" } } } }
+      responses:
+        "200": { description: Publication plan with node readiness and blockers, content: { application/json: { schema: { $ref: "#/components/schemas/ModPublicationPlanEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/mod-publications:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Mods]
+      operationId: listRoomModPublications
+      summary: List durable Mod publication and recovery records for a room
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 10 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200": { description: Paginated publication records, content: { application/json: { schema: { $ref: "#/components/schemas/ModPublicationListEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+    post:
+      tags: [Mods, Jobs]
+      operationId: publishRoomMods
+      summary: Revalidate a confirmed plan and atomically publish it to every affected installation
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModPublicationConfirmedRequest" } } } }
+      responses:
+        "202": { description: Atomic publication job accepted; resolve the resulting publication by sourceJobId, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /mod-publications/{publicationId}:
+    parameters: [{ $ref: "#/components/parameters/ModPublicationID" }]
+    get:
+      tags: [Mods]
+      operationId: getModPublication
+      summary: Read one durable Mod publication, including node results and recovery state
+      responses:
+        "200": { description: Publication record, content: { application/json: { schema: { $ref: "#/components/schemas/ModPublicationEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /mod-publications/{publicationId}/actions/retry-failed:
+    parameters: [{ $ref: "#/components/parameters/ModPublicationID" }]
+    post:
+      tags: [Mods, Jobs]
+      operationId: retryFailedModPublication
+      summary: Resume post-commit recovery or create a new publication from a failed pre-commit desired state
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Publication recovery job accepted; in-place recovery keeps the original publication ID, while a retry of failed or rolled-back state creates a new publication resolved by sourceJobId, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /rooms/{roomId}/players:
     parameters: [{ $ref: "#/components/parameters/RoomID" }]
     get:
@@ -3246,6 +3320,13 @@ components:
       schema:
         type: string
         pattern: '^[0-9]{1,20}$'
+    ModPublicationID:
+      name: publicationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
     PlayerID:
       name: playerId
       in: path
@@ -5961,6 +6042,176 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/ModConfigurationPreview" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    ModPublicationRequest:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action: { type: string, enum: [reconcile, add, enable, remove, configure] }
+        modId: { type: string, pattern: '^[0-9]{1,20}$' }
+        modIds: { type: array, items: { type: string, pattern: '^[0-9]{1,20}$' } }
+        worldIds: { type: array, uniqueItems: true, items: { type: string } }
+        enabled: { type: boolean }
+        includeDependencies: { type: boolean }
+        expectedConfigurationRevision: { type: string }
+        expectedTopologyRevision: { type: string }
+        patch: { type: object, additionalProperties: true }
+    ModPublicationConfirmedRequest:
+      allOf:
+        - $ref: "#/components/schemas/ModPublicationRequest"
+        - type: object
+          required: [planHash, confirmation]
+          properties:
+            planHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+            confirmation: { type: string, pattern: '^[a-f0-9]{64}$' }
+    ModPublicationBlocker:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        targetId: { type: string }
+        installationId: { type: string }
+    ModPublicationArtifact:
+      type: object
+      additionalProperties: false
+      required: [workshopId, treeSha256, manifestSha256, size, fileCount, sourceRef]
+      properties:
+        workshopId: { type: string, pattern: '^[0-9]{1,20}$' }
+        treeSha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        manifestSha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        size: { type: integer, format: int64, minimum: 0 }
+        fileCount: { type: integer, minimum: 0 }
+        sourceRef: { type: string }
+    ModPublicationWorldPlan:
+      type: object
+      additionalProperties: false
+      required: [roomId, roomDirectory, worldId, worldDirectory, mods, modOverrides]
+      properties:
+        roomId: { type: string }
+        roomDirectory: { type: string }
+        worldId: { type: string }
+        worldDirectory: { type: string }
+        mods: { type: array, items: { $ref: "#/components/schemas/ModPublicationArtifact" } }
+        modOverrides: { type: string, format: byte, description: Base64-encoded exact modoverrides.lua content }
+    ModPublicationTargetPlan:
+      type: object
+      additionalProperties: false
+      required: [targetId, nodeId, installationId, online, capabilities, runtimeVersion, availableBytes, requiredBytes, mods, worlds, blockers]
+      properties:
+        targetId: { type: string }
+        nodeId: { type: string }
+        installationId: { type: string }
+        online: { type: boolean }
+        capabilities: { type: array, items: { type: string } }
+        runtimeVersion: { type: string }
+        minimumVersion: { type: string }
+        availableBytes: { type: integer, format: int64, minimum: 0 }
+        requiredBytes: { type: integer, format: int64, minimum: 0 }
+        mods: { type: array, items: { $ref: "#/components/schemas/ModPublicationArtifact" } }
+        worlds: { type: array, items: { $ref: "#/components/schemas/ModPublicationWorldPlan" } }
+        blockers: { type: array, items: { $ref: "#/components/schemas/ModPublicationBlocker" } }
+    ModPublicationPlan:
+      type: object
+      additionalProperties: false
+      required: [version, roomId, topologyRevision, planHash, affectedRoomIds, targets, blockers, ready, restartRequired, createdAt]
+      properties:
+        version: { type: integer, enum: [1] }
+        roomId: { type: string }
+        topologyRevision: { type: string }
+        planHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        affectedRoomIds: { type: array, items: { type: string } }
+        targets: { type: array, items: { $ref: "#/components/schemas/ModPublicationTargetPlan" } }
+        blockers: { type: array, items: { $ref: "#/components/schemas/ModPublicationBlocker" } }
+        ready: { type: boolean }
+        restartRequired: { type: boolean }
+        createdAt: { type: string, format: date-time }
+    ModPublicationPlanEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ModPublicationPlan" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    ModPublicationStatus:
+      type: string
+      enum: [previewed, preparing, prepared, publishing, committed, completing, succeeded, failed, rolled_back, recovery_required]
+    ModPublicationTargetResult:
+      type: object
+      additionalProperties: false
+      required: [targetId, installationId, status, cacheEnsured, prepared, published, completed, rolledBack, updatedAt]
+      properties:
+        targetId: { type: string }
+        installationId: { type: string }
+        status: { $ref: "#/components/schemas/ModPublicationStatus" }
+        cacheEnsured: { type: boolean }
+        prepared: { type: boolean }
+        published: { type: boolean }
+        completed: { type: boolean }
+        rolledBack: { type: boolean }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        preparedAt: { type: string, format: date-time }
+        publishedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+        rolledBackAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ModPublicationFence:
+      type: object
+      additionalProperties: false
+      required: [roomId, leaseId, operationKey, fencingToken, expiresAt]
+      properties:
+        roomId: { type: string }
+        leaseId: { type: string }
+        operationKey: { type: string }
+        fencingToken: { type: integer, format: int64, minimum: 1 }
+        expiresAt: { type: string, format: date-time }
+    ModPublication:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, status, outcome, plan, protectionBackupIds, fences, commitDecision, restartRequired, targets, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        sourceJobId: { type: string, format: uuid }
+        roomId: { type: string }
+        status: { $ref: "#/components/schemas/ModPublicationStatus" }
+        outcome: { type: string, enum: [full, partial, none] }
+        plan: { $ref: "#/components/schemas/ModPublicationPlan" }
+        protectionBackupIds: { type: array, items: { type: string } }
+        fences: { type: array, items: { $ref: "#/components/schemas/ModPublicationFence" } }
+        commitDecision: { type: boolean }
+        restartRequired: { type: boolean }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        targets: { type: array, items: { $ref: "#/components/schemas/ModPublicationTargetResult" } }
+        commitDecidedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+    ModPublicationEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ModPublication" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    ModPublicationList:
+      type: object
+      additionalProperties: false
+      required: [items, total, limit, offset]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/ModPublication" } }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        offset: { type: integer, minimum: 0 }
+    ModPublicationListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ModPublicationList" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     Player:

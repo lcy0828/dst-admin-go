@@ -19,8 +19,16 @@ import (
 )
 
 type ModHandler struct {
-	mods modService
-	jobs *jobs.Service
+	mods      modService
+	placement modPlacementReader
+	jobs      *jobs.Service
+}
+
+type modPlacementReader interface {
+	RoomList(context.Context, string) (mods.ModList, error)
+	ConfigurationFile(context.Context, string, string) (mods.ConfigurationFile, error)
+	Configuration(context.Context, string, string, string) (mods.ModConfiguration, error)
+	PreviewConfiguration(context.Context, string, string, string, mods.ConfigUpdateRequest) (mods.ConfigPreview, error)
 }
 
 type modService interface {
@@ -44,6 +52,10 @@ type modService interface {
 
 func NewModHandler(service modService, jobService *jobs.Service) *ModHandler {
 	return &ModHandler{mods: service, jobs: jobService}
+}
+
+func (h *ModHandler) ConfigurePlacementReader(reader modPlacementReader) {
+	h.placement = reader
 }
 
 func (h *ModHandler) Register(v2 *gin.RouterGroup) {
@@ -105,6 +117,9 @@ func (h *ModHandler) updateLibrary(c *gin.Context) {
 }
 
 func (h *ModHandler) addToRoom(c *gin.Context) {
+	if h.requirePublication(c) {
+		return
+	}
 	var request mods.AddToRoomRequest
 	if !bindModJSON(c, &request) {
 		return
@@ -148,7 +163,13 @@ func (h *ModHandler) details(c *gin.Context) {
 }
 
 func (h *ModHandler) list(c *gin.Context) {
-	value, err := h.mods.List(c.Request.Context(), c.Param("roomId"))
+	var value mods.ModList
+	var err error
+	if h.placement != nil {
+		value, err = h.placement.RoomList(c.Request.Context(), c.Param("roomId"))
+	} else {
+		value, err = h.mods.List(c.Request.Context(), c.Param("roomId"))
+	}
 	if err != nil {
 		modFailure(c, err)
 		return
@@ -157,6 +178,9 @@ func (h *ModHandler) list(c *gin.Context) {
 }
 
 func (h *ModHandler) install(c *gin.Context) {
+	if h.requirePublication(c) {
+		return
+	}
 	var request mods.InstallRequest
 	if !bindModJSON(c, &request) {
 		return
@@ -172,6 +196,9 @@ func (h *ModHandler) install(c *gin.Context) {
 }
 
 func (h *ModHandler) update(c *gin.Context) {
+	if h.requirePublication(c) {
+		return
+	}
 	roomID, modID := c.Param("roomId"), c.Param("modId")
 	if !mods.ValidID(modID) {
 		modFailure(c, mods.ErrInvalidModID)
@@ -183,6 +210,9 @@ func (h *ModHandler) update(c *gin.Context) {
 }
 
 func (h *ModHandler) enable(c *gin.Context) {
+	if h.requirePublication(c) {
+		return
+	}
 	var request mods.EnableRequest
 	if !bindModJSON(c, &request) {
 		return
@@ -198,6 +228,9 @@ func (h *ModHandler) enable(c *gin.Context) {
 }
 
 func (h *ModHandler) repair(c *gin.Context) {
+	if h.requirePublication(c) {
+		return
+	}
 	var request mods.ModActionRequest
 	if !bindModJSON(c, &request) {
 		return
@@ -213,6 +246,9 @@ func (h *ModHandler) repair(c *gin.Context) {
 }
 
 func (h *ModHandler) uninstall(c *gin.Context) {
+	if h.requirePublication(c) {
+		return
+	}
 	var request mods.ModActionRequest
 	if !bindModJSON(c, &request) {
 		return
@@ -235,7 +271,13 @@ func (h *ModHandler) checkUpdates(c *gin.Context) {
 }
 
 func (h *ModHandler) configurationFile(c *gin.Context) {
-	value, err := h.mods.ConfigurationFile(c.Param("roomId"), c.Param("worldId"))
+	var value mods.ConfigurationFile
+	var err error
+	if h.placement != nil {
+		value, err = h.placement.ConfigurationFile(c.Request.Context(), c.Param("roomId"), c.Param("worldId"))
+	} else {
+		value, err = h.mods.ConfigurationFile(c.Param("roomId"), c.Param("worldId"))
+	}
 	if err != nil {
 		modFailure(c, err)
 		return
@@ -244,7 +286,13 @@ func (h *ModHandler) configurationFile(c *gin.Context) {
 }
 
 func (h *ModHandler) configuration(c *gin.Context) {
-	value, err := h.mods.Configuration(c.Request.Context(), c.Param("roomId"), c.Param("worldId"), c.Param("modId"))
+	var value mods.ModConfiguration
+	var err error
+	if h.placement != nil {
+		value, err = h.placement.Configuration(c.Request.Context(), c.Param("roomId"), c.Param("worldId"), c.Param("modId"))
+	} else {
+		value, err = h.mods.Configuration(c.Request.Context(), c.Param("roomId"), c.Param("worldId"), c.Param("modId"))
+	}
 	if err != nil {
 		modFailure(c, err)
 		return
@@ -257,7 +305,13 @@ func (h *ModHandler) previewConfiguration(c *gin.Context) {
 	if !bindModJSON(c, &request) {
 		return
 	}
-	value, err := h.mods.PreviewConfiguration(c.Request.Context(), c.Param("roomId"), c.Param("worldId"), c.Param("modId"), request)
+	var value mods.ConfigPreview
+	var err error
+	if h.placement != nil {
+		value, err = h.placement.PreviewConfiguration(c.Request.Context(), c.Param("roomId"), c.Param("worldId"), c.Param("modId"), request)
+	} else {
+		value, err = h.mods.PreviewConfiguration(c.Request.Context(), c.Param("roomId"), c.Param("worldId"), c.Param("modId"), request)
+	}
 	if err != nil {
 		modFailure(c, err)
 		return
@@ -266,19 +320,36 @@ func (h *ModHandler) previewConfiguration(c *gin.Context) {
 }
 
 func (h *ModHandler) applyConfiguration(c *gin.Context) {
+	if h.requirePublication(c) {
+		return
+	}
 	var request mods.ConfigUpdateRequest
 	if !bindModJSON(c, &request) {
 		return
 	}
 	roomID, worldID, modID := c.Param("roomId"), c.Param("worldId"), c.Param("modId")
-	if _, err := h.mods.PreviewConfiguration(c.Request.Context(), roomID, worldID, modID, request); err != nil {
-		modFailure(c, err)
+	var previewErr error
+	if h.placement != nil {
+		_, previewErr = h.placement.PreviewConfiguration(c.Request.Context(), roomID, worldID, modID, request)
+	} else {
+		_, previewErr = h.mods.PreviewConfiguration(c.Request.Context(), roomID, worldID, modID, request)
+	}
+	if previewErr != nil {
+		modFailure(c, previewErr)
 		return
 	}
 	h.submit(c, "mod.configuration.apply", roomID, worldID, modID, "Workshop "+modID, func(ctx context.Context, jobID string) (mods.ActionResult, error) {
 		result, err := h.mods.ApplyConfiguration(ctx, jobID, roomID, worldID, modID, request)
 		return mods.ActionResult{ModIDs: []string{modID}, ProtectionBackupID: result.ProtectionBackupID, Message: fmt.Sprintf("Mod 配置已应用（%d 项变更）", len(result.Changes))}, err
 	})
+}
+
+func (h *ModHandler) requirePublication(c *gin.Context) bool {
+	if h.placement == nil {
+		return false
+	}
+	Failure(c, http.StatusConflict, "MOD_PUBLICATION_REQUIRED", "房间 Mod 修改必须先预览并通过 Placement 发布", nil)
+	return true
 }
 
 type modAction func(context.Context, string) (mods.ActionResult, error)

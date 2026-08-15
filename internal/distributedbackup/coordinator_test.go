@@ -14,6 +14,7 @@ import (
 	"dont/internal/rooms"
 	"dont/internal/runtimedriver"
 	"dont/internal/shards"
+	"dont/internal/topology"
 
 	"github.com/jinzhu/gorm"
 	_ "github.com/mattn/go-sqlite3"
@@ -26,8 +27,18 @@ type backupTestRooms struct {
 
 func (f backupTestRooms) Room(string) (rooms.Room, error) { return f.room, nil }
 
-func (f backupTestRooms) Worlds(string) ([]rooms.World, error) {
-	return append([]rooms.World(nil), f.worlds...), nil
+type backupTestPlacements struct {
+	room     rooms.Room
+	worlds   []rooms.World
+	revision string
+}
+
+func (f backupTestPlacements) ResolveRoomExecutions(_ context.Context, roomID string) ([]topology.ExecutionPlacement, error) {
+	result := make([]topology.ExecutionPlacement, 0, len(f.worlds))
+	for _, world := range f.worlds {
+		result = append(result, topology.ExecutionPlacement{Room: f.room, World: world, Revision: f.revision, AppliedTargetID: "local"})
+	}
+	return result, nil
 }
 
 type backupTestRouter struct {
@@ -179,7 +190,8 @@ func newDistributedBackupFixture(t *testing.T) distributedBackupFixture {
 		masterID: {driver: masterDriver, target: runtimedriver.Target{TargetID: "agent:master-node", InstallationID: "default", RoomID: roomID, WorldID: masterID, Cluster: "Cluster_1", Shard: "Master", TopologyRevision: "revision-1"}},
 		cavesID:  {driver: cavesDriver, target: runtimedriver.Target{TargetID: "agent:caves-node", InstallationID: "default", RoomID: roomID, WorldID: cavesID, Cluster: "Cluster_1", Shard: "Caves", TopologyRevision: "revision-1"}},
 	}}
-	coordinator, err := NewCoordinator(filepath.Join(t.TempDir(), "central-backups"), catalog, router, leases, store)
+	placements := backupTestPlacements{room: catalog.room, worlds: catalog.worlds, revision: "revision-1"}
+	coordinator, err := NewCoordinator(filepath.Join(t.TempDir(), "central-backups"), catalog, placements, router, leases, store)
 	if err != nil {
 		t.Fatal(err)
 	}

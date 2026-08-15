@@ -222,6 +222,24 @@ func TestConfigurationFileReturnsExactWorldFile(t *testing.T) {
 	}
 }
 
+func TestPlacementContentDoesNotRequireLocalWorldDirectory(t *testing.T) {
+	service, _, overridesPath := newConfigTestService(t)
+	content, err := os.ReadFile(overridesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.rooms.(*testRoomCatalog).worlds = nil
+
+	configuration, err := service.ConfigurationFromContent(context.Background(), "room-1", "world-1", "378160973", content)
+	if err != nil || configuration.ModID != "378160973" || len(configuration.Fields) != 2 {
+		t.Fatalf("configuration=%#v err=%v", configuration, err)
+	}
+	list, err := service.ListFromOverrides(context.Background(), "room-1", map[string][]byte{"world-1": content})
+	if err != nil || list.Total != 1 || len(list.Items) != 1 || list.Items[0].ID != "378160973" {
+		t.Fatalf("list=%#v err=%v", list, err)
+	}
+}
+
 func TestConfigurationRejectsValueOutsideDeclaredOptions(t *testing.T) {
 	service, backupService, _ := newConfigTestService(t)
 	configuration, err := service.Configuration(context.Background(), "room-1", "world-1", "378160973")

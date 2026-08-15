@@ -160,6 +160,68 @@ func TestModCacheUploadInspectAndRestartResume(t *testing.T) {
 	}
 }
 
+func TestModUploadSessionAcceptsDistinctIdempotencyKeysAcrossActions(t *testing.T) {
+	agent, _ := newModOperationAgent(t)
+	data := []byte("name = 'idempotency session test'\n")
+	archive := testModTar(t, []testTarEntry{{name: "modinfo.lua", data: data, kind: tar.TypeReg}})
+	treeSHA := testSingleFileTreeSHA("modinfo.lua", data)
+	digest := sha256.Sum256(archive)
+	descriptor := shared.RuntimeModRequest{
+		Kind: shared.RuntimeModUploadCacheBundle, UploadID: "cache-upload-session-0001", WorkshopID: "1392778117",
+		ExpectedTreeSHA256: treeSHA, Size: int64(len(archive)), SHA256: hex.EncodeToString(digest[:]),
+	}
+	expires := time.Now().UTC().Add(5 * time.Minute)
+	execute := func(action shared.RuntimeAction, operationID, operationKey string, mod shared.RuntimeModRequest) shared.RuntimeOperationResult {
+		t.Helper()
+		request := shared.RuntimeOperationRequest{
+			ProtocolVersion:  shared.RuntimeOperationProtocolVersion,
+			OperationID:      operationID,
+			OperationKey:     operationKey,
+			InstallationID:   "default",
+			Action:           action,
+			Cluster:          "Mods",
+			Shard:            "Installation",
+			TopologyRevision: "revision-1",
+			LeaseID:          "mod-upload-session-lease",
+			FencingToken:     7,
+			LeaseExpiresAt:   &expires,
+			Mod:              &mod,
+		}
+		result, err := agent.executeRuntimeOperation(string(action), &request, 30)
+		if err != nil {
+			t.Fatalf("%s failed: %v", action, err)
+		}
+		return result
+	}
+
+	begin := execute(shared.RuntimeActionModUploadBegin, "mod-upload-session-begin", "mod-upload-session-key-begin", descriptor)
+	if begin.Mod == nil || begin.Mod.NextOffset != 0 {
+		t.Fatalf("unexpected begin result: %#v", begin)
+	}
+	writeRequest := descriptor
+	writeRequest.Data = archive
+	write := execute(shared.RuntimeActionModUploadWrite, "mod-upload-session-write", "mod-upload-session-key-write", writeRequest)
+	if write.Mod == nil || write.Mod.NextOffset != descriptor.Size {
+		t.Fatalf("unexpected write result: %#v", write)
+	}
+	commit := execute(shared.RuntimeActionModUploadCommit, "mod-upload-session-commit", "mod-upload-session-key-commit", descriptor)
+	if commit.Mod == nil || !commit.Mod.Complete || commit.Mod.CacheManifest == nil || commit.Mod.CacheManifest.TreeSHA256 != treeSHA {
+		t.Fatalf("unexpected commit result: %#v", commit)
+	}
+}
+
+func TestModCacheUploadPreservesExecutableModeInTreeHash(t *testing.T) {
+	agent, _ := newModOperationAgent(t)
+	data := []byte("#!/bin/sh\nexit 0\n")
+	archive := testModTar(t, []testTarEntry{{name: "tool.sh", data: data, kind: tar.TypeReg, mode: 0o755}})
+	treeSHA := testSingleFileTreeSHAWithMode("tool.sh", data, 0o555)
+	sequence := 0
+	manifest := uploadCacheBundle(t, agent, &sequence, "cache-upload-executable-0001", "1392778117", archive, treeSHA)
+	if manifest.TreeSHA256 != treeSHA || manifest.FileCount != 1 {
+		t.Fatalf("executable manifest = %#v", manifest)
+	}
+}
+
 func TestModTargetObservationReturnsUsableCapacity(t *testing.T) {
 	agent, _ := newModOperationAgent(t)
 	sequence := 0
@@ -311,6 +373,7 @@ type testTarEntry struct {
 	data []byte
 	kind byte
 	link string
+	mode int64
 }
 
 func testModTar(t *testing.T, entries []testTarEntry) []byte {
@@ -318,7 +381,11 @@ func testModTar(t *testing.T, entries []testTarEntry) []byte {
 	var output bytes.Buffer
 	writer := tar.NewWriter(&output)
 	for _, entry := range entries {
-		header := &tar.Header{Name: entry.name, Mode: 0o644, Size: int64(len(entry.data)), Typeflag: entry.kind, Linkname: entry.link}
+		mode := entry.mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		header := &tar.Header{Name: entry.name, Mode: mode, Size: int64(len(entry.data)), Typeflag: entry.kind, Linkname: entry.link}
 		if entry.kind != tar.TypeReg && entry.kind != tar.TypeRegA {
 			header.Size = 0
 		}
@@ -338,8 +405,12 @@ func testModTar(t *testing.T, entries []testTarEntry) []byte {
 }
 
 func testSingleFileTreeSHA(path string, data []byte) string {
+	return testSingleFileTreeSHAWithMode(path, data, 0o444)
+}
+
+func testSingleFileTreeSHAWithMode(path string, data []byte, mode uint32) string {
 	fileDigest := sha256.Sum256(data)
 	hash := sha256.New()
-	fmt.Fprintf(hash, "file\x00%s\x00%o\x00%d\x00%s\n", path, 0o444, len(data), hex.EncodeToString(fileDigest[:]))
+	fmt.Fprintf(hash, "file\x00%s\x00%o\x00%d\x00%s\n", path, mode, len(data), hex.EncodeToString(fileDigest[:]))
 	return hex.EncodeToString(hash.Sum(nil))
 }

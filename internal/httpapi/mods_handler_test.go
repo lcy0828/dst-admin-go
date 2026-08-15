@@ -19,6 +19,24 @@ import (
 
 type modHandlerService struct{}
 
+type modPlacementReaderFixture struct{}
+
+func (modPlacementReaderFixture) RoomList(context.Context, string) (mods.ModList, error) {
+	return mods.ModList{}, nil
+}
+
+func (modPlacementReaderFixture) ConfigurationFile(context.Context, string, string) (mods.ConfigurationFile, error) {
+	return mods.ConfigurationFile{}, nil
+}
+
+func (modPlacementReaderFixture) Configuration(context.Context, string, string, string) (mods.ModConfiguration, error) {
+	return mods.ModConfiguration{}, nil
+}
+
+func (modPlacementReaderFixture) PreviewConfiguration(context.Context, string, string, string, mods.ConfigUpdateRequest) (mods.ConfigPreview, error) {
+	return mods.ConfigPreview{}, nil
+}
+
 func (modHandlerService) Search(_ context.Context, options mods.SearchOptions) (mods.SearchResult, error) {
 	if !mods.ValidID(options.Query) && options.Query != "Global" && options.Query != "" {
 		return mods.SearchResult{}, &mods.FieldError{Fields: map[string]string{"query": "无效搜索"}}
@@ -207,6 +225,48 @@ func TestModHTTPActionsUseJobs(t *testing.T) {
 	if job.Kind != "mod.configuration.apply" || job.Outcome != jobs.OutcomeFull {
 		t.Fatalf("unexpected configuration job: %#v", job)
 	}
+}
+
+func TestPlacementAwareModHandlerRejectsLegacyRoomMutations(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.DB().SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	store := jobs.NewStore(db, "mods_placement_http_")
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	jobService, err := jobs.NewService(store, jobs.NewBroker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewModHandler(modHandlerService{}, jobService)
+	handler.ConfigurePlacementReader(modPlacementReaderFixture{})
+	router := gin.New()
+	handler.Register(router.Group("/api/v2"))
+
+	requests := []struct {
+		path string
+		body interface{}
+	}{
+		{"/api/v2/rooms/room/mods/378160973/actions/add", map[string]interface{}{}},
+		{"/api/v2/rooms/room/mods/actions/install", map[string]interface{}{}},
+		{"/api/v2/rooms/room/mods/378160973/actions/update", nil},
+		{"/api/v2/rooms/room/mods/378160973/actions/enable", map[string]interface{}{}},
+		{"/api/v2/rooms/room/mods/378160973/actions/repair", map[string]interface{}{}},
+		{"/api/v2/rooms/room/mods/378160973/actions/uninstall", map[string]interface{}{}},
+		{"/api/v2/rooms/room/worlds/world/mods/378160973/configuration/actions/apply", map[string]interface{}{}},
+	}
+	for _, item := range requests {
+		response := performJSON(router, http.MethodPost, item.path, item.body, nil, "")
+		assertAPIError(t, response, http.StatusConflict, "MOD_PUBLICATION_REQUIRED")
+	}
+
+	response := performJSON(router, http.MethodPost, "/api/v2/mods/library/378160973/actions/update", nil, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
 }
 
 func waitForModJob(t *testing.T, service *jobs.Service, jobID string) jobs.Job {

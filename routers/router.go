@@ -26,6 +26,9 @@ import (
 	"dont/internal/httpapi"
 	"dont/internal/jobs"
 	"dont/internal/logstream"
+	"dont/internal/modcontrol"
+	"dont/internal/moddistribution"
+	"dont/internal/modpublication"
 	modservice "dont/internal/mods"
 	"dont/internal/operationlease"
 	"dont/internal/placementmigration"
@@ -435,7 +438,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err := distributedBackupStore.Migrate(); err != nil {
 		return nil, err
 	}
-	distributedBackupService, err := distributedbackup.NewCoordinator(backupPath, roomService, runtimeDriverRouter, operationLeaseService, distributedBackupStore)
+	distributedBackupService, err := distributedbackup.NewCoordinator(backupPath, roomService, topologyService, runtimeDriverRouter, operationLeaseService, distributedBackupStore)
 	if err != nil {
 		return nil, err
 	}
@@ -477,6 +480,71 @@ func initApplication(manageBackground bool) (*Application, error) {
 	}
 	modService.ConfigureMutationGuard(localMutationGuard)
 	modHandler := httpapi.NewModHandler(modService, jobService)
+	modPublicationRoot := filepath.Join(backupPath, ".mod-publication")
+	localModManager, err := moddistribution.New(moddistribution.Config{
+		CacheRoot: filepath.Join(modPublicationRoot, "cache"), StateRoot: filepath.Join(modPublicationRoot, "state"),
+		NodeID: "local", ReserveBytes: 16 << 20,
+		Installations: []moddistribution.TrustedInstallation{{
+			ID: "default", NodeID: "local", ServerPath: serverContentRoot, SavePath: savePath,
+		}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("initialize local Mod distribution: %w", err)
+	}
+	modSnapshotSource, err := modcontrol.NewSnapshotSource(roomService, topologyService, modService, agentRuntimeDriver, savePath)
+	if err != nil {
+		return nil, fmt.Errorf("initialize Mod publication snapshots: %w", err)
+	}
+	modContentSource, err := modcontrol.NewContentSource(localModManager, workshopContentPath)
+	if err != nil {
+		return nil, fmt.Errorf("initialize Mod publication content: %w", err)
+	}
+	modPublicationRuntime, err := modcontrol.NewRuntime(
+		modSnapshotSource, localModManager, agentRuntimeDriver,
+		filepath.Join(modPublicationRoot, "cache"), filepath.Join(modPublicationRoot, "transfers"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("initialize Mod publication runtime: %w", err)
+	}
+	modPublicationPlanner, err := modpublication.NewPlanner(
+		modSnapshotSource, modSnapshotSource, modContentSource, modPublicationRuntime, "1.0.0",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("initialize Mod publication planner: %w", err)
+	}
+	modPublicationStore := modpublication.NewStore(models.DB(), tablePrefix)
+	if err := modPublicationStore.Migrate(); err != nil {
+		return nil, err
+	}
+	modLeaseAdapter, err := modcontrol.NewLeaseAdapter(operationLeaseService)
+	if err != nil {
+		return nil, err
+	}
+	modBackupAdapter, err := modcontrol.NewBackupAdapter(distributedBackupService)
+	if err != nil {
+		return nil, err
+	}
+	modPublicationCoordinator, err := modpublication.NewCoordinator(
+		modPublicationPlanner, modPublicationRuntime, modLeaseAdapter, modBackupAdapter,
+		modPublicationStore, 5*time.Minute,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("initialize Mod publication coordinator: %w", err)
+	}
+	modControlService, err := modcontrol.NewService(modSnapshotSource, modService, modPublicationCoordinator)
+	if err != nil {
+		return nil, fmt.Errorf("initialize Mod publication service: %w", err)
+	}
+	modPublicationHandler, err := httpapi.NewModPublicationHandler(modControlService, jobService)
+	if err != nil {
+		return nil, err
+	}
+	modHandler.ConfigurePlacementReader(modControlService)
+	if backgroundEnabled {
+		hooks.workers = append(hooks.workers, func(ctx context.Context) {
+			modControlService.RunRecovery(ctx, time.Minute)
+		})
+	}
 	playerStore := playerapi.NewStore(models.DB(), tablePrefix)
 	if err := playerStore.Migrate(); err != nil {
 		return nil, err
@@ -650,6 +718,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	gameUpdateService, err := gameupdate.NewService(
 		gameupdate.Config{
 			ServerPath: serverExecutablePath, SteamCMDPath: steamCMDPath,
+			DisableUpdate:          strings.EqualFold(strings.TrimSpace(os.Getenv("DST_ADMIN_DISABLE_LOCAL_GAME_UPDATE")), "true"),
 			OfficialReleaseChecker: officialReleaseChecker,
 		},
 		roomService, shardControl, backupService, gameUpdateStore, updateRunner, latestChecker, runtimeAuditService,
@@ -742,6 +811,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		saveImportHandler.Register(v2)
 		configurationHandler.Register(v2)
 		modHandler.Register(v2)
+		modPublicationHandler.Register(v2)
 		gameUpdateHandler.Register(v2)
 		worldMapHandler.Register(v2)
 	}

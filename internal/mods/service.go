@@ -196,19 +196,17 @@ func (s *Service) ListFromOverrides(ctx context.Context, roomID string, contents
 	if !room.Managed {
 		return ModList{}, ErrRoomNotManaged
 	}
-	worlds, err := s.rooms.Worlds(roomID)
-	if err != nil {
-		return ModList{}, err
-	}
 	aggregates := make(map[string]*modAggregate)
-	for _, world := range worlds {
-		content, exists := contents[world.ID]
-		if !exists {
-			return ModList{}, fmt.Errorf("read %s modoverrides.lua: content missing", world.Name)
-		}
+	worldIDs := make([]string, 0, len(contents))
+	for worldID := range contents {
+		worldIDs = append(worldIDs, worldID)
+	}
+	sort.Strings(worldIDs)
+	for _, worldID := range worldIDs {
+		content := contents[worldID]
 		document, parseErr := parseModOverrideContent(content, 0o640, len(content) > 0, "modoverrides.lua")
 		if parseErr != nil {
-			return ModList{}, fmt.Errorf("read %s modoverrides.lua: %w", world.Name, parseErr)
+			return ModList{}, fmt.Errorf("read world %s modoverrides.lua: %w", worldID, parseErr)
 		}
 		for _, entry := range document.root.entries {
 			if entry.key.kind.String() != "string" || !strings.HasPrefix(entry.key.text, "workshop-") {
@@ -223,9 +221,9 @@ func (s *Service) ListFromOverrides(ctx context.Context, roomID string, contents
 				item = &modAggregate{}
 				aggregates[id] = item
 			}
-			item.configured = append(item.configured, world.ID)
+			item.configured = append(item.configured, worldID)
 			if modEnabled(entry.value) {
-				item.enabled = append(item.enabled, world.ID)
+				item.enabled = append(item.enabled, worldID)
 			}
 		}
 	}

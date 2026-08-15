@@ -19,6 +19,7 @@ import (
 	"dont/internal/rooms"
 	"dont/internal/runtimedriver"
 	"dont/internal/shards"
+	"dont/internal/topology"
 	"dont/shared"
 
 	"github.com/google/uuid"
@@ -32,7 +33,10 @@ const (
 
 type RoomCatalog interface {
 	Room(string) (rooms.Room, error)
-	Worlds(string) ([]rooms.World, error)
+}
+
+type PlacementResolver interface {
+	ResolveRoomExecutions(context.Context, string) ([]topology.ExecutionPlacement, error)
 }
 
 type RuntimeRouter interface {
@@ -46,12 +50,13 @@ type LeaseService interface {
 }
 
 type Coordinator struct {
-	root     string
-	rooms    RoomCatalog
-	runtimes RuntimeRouter
-	leases   LeaseService
-	store    *Store
-	now      func() time.Time
+	root       string
+	rooms      RoomCatalog
+	placements PlacementResolver
+	runtimes   RuntimeRouter
+	leases     LeaseService
+	store      *Store
+	now        func() time.Time
 }
 
 type runtimePart struct {
@@ -60,9 +65,9 @@ type runtimePart struct {
 	target runtimedriver.Target
 }
 
-func NewCoordinator(root string, rooms RoomCatalog, runtimes RuntimeRouter, leases LeaseService, store *Store) (*Coordinator, error) {
+func NewCoordinator(root string, rooms RoomCatalog, placements PlacementResolver, runtimes RuntimeRouter, leases LeaseService, store *Store) (*Coordinator, error) {
 	root = strings.TrimSpace(root)
-	if root == "" || rooms == nil || runtimes == nil || leases == nil || store == nil {
+	if root == "" || rooms == nil || placements == nil || runtimes == nil || leases == nil || store == nil {
 		return nil, errors.New("distributed backup dependencies are required")
 	}
 	absolute, err := filepath.Abs(root)
@@ -72,7 +77,7 @@ func NewCoordinator(root string, rooms RoomCatalog, runtimes RuntimeRouter, leas
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		return nil, err
 	}
-	return &Coordinator{root: filepath.Clean(absolute), rooms: rooms, runtimes: runtimes, leases: leases, store: store, now: time.Now}, nil
+	return &Coordinator{root: filepath.Clean(absolute), rooms: rooms, placements: placements, runtimes: runtimes, leases: leases, store: store, now: time.Now}, nil
 }
 
 func (c *Coordinator) List(roomID string) ([]Set, error) { return c.store.ListSets(roomID) }
@@ -185,22 +190,26 @@ func (c *Coordinator) plan(ctx context.Context, roomID string) (rooms.Room, []ru
 	if !room.Managed {
 		return rooms.Room{}, nil, "", nil, ErrInvalidInput
 	}
-	worlds, err := c.rooms.Worlds(roomID)
-	if err != nil || len(worlds) == 0 {
+	executions, err := c.placements.ResolveRoomExecutions(ctx, roomID)
+	if err != nil || len(executions) == 0 {
 		return rooms.Room{}, nil, "", nil, errors.Join(err, ErrInvalidInput)
 	}
 	now := c.now().UTC()
-	parts := make([]runtimePart, 0, len(worlds))
+	parts := make([]runtimePart, 0, len(executions))
 	running := make([]string, 0)
 	revision := ""
 	setID := uuid.NewString()
-	for index, world := range worlds {
+	for index, execution := range executions {
+		world := execution.World
 		driver, target, resolveErr := c.runtimes.DriverTarget(ctx, roomID, world.ID)
 		if resolveErr != nil {
 			return rooms.Room{}, nil, "", nil, resolveErr
 		}
 		if !runtimedriver.HasCapability(driver, runtimedriver.CapabilityBackupStage) || !runtimedriver.HasCapability(driver, runtimedriver.CapabilityBackupRestore) {
 			return rooms.Room{}, nil, "", nil, ErrTargetUnavailable
+		}
+		if target.TopologyRevision != execution.Revision {
+			return rooms.Room{}, nil, "", nil, ErrTopologyChanged
 		}
 		if revision == "" {
 			revision = target.TopologyRevision

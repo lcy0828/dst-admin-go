@@ -50,6 +50,7 @@ func (f *fakeContent) Resolve(_ context.Context, requirement ModRequirement) (Co
 
 type runtimeCall struct {
 	action, target, installation, publication string
+	idempotency, attempt                      string
 	plan                                      TargetPlan
 }
 
@@ -89,7 +90,14 @@ func (f *fakeRuntime) Complete(_ context.Context, target TargetPlan, operation R
 func (f *fakeRuntime) invoke(action string, target TargetPlan, operation RuntimeOperation) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, runtimeCall{action: action, target: target.TargetID, installation: target.InstallationID, publication: operation.PublicationID, plan: target})
+	attempt := ""
+	if len(operation.Fences) > 0 {
+		attempt = operation.Fences[0].OperationKey
+	}
+	f.calls = append(f.calls, runtimeCall{
+		action: action, target: target.TargetID, installation: target.InstallationID,
+		publication: operation.PublicationID, idempotency: operation.IdempotencyKey, attempt: attempt, plan: target,
+	})
 	key := action + ":" + targetIdentity(target.TargetID, target.InstallationID)
 	if f.failures[key] > 0 {
 		f.failures[key]--
@@ -322,6 +330,45 @@ func TestCommitDecisionPreventsRollbackAndRecoveryCompletes(t *testing.T) {
 	}
 }
 
+func TestRepeatedRecoveryUsesFreshRuntimeIdempotencyDomain(t *testing.T) {
+	worlds, placements := twoTargetWorlds()
+	app := newTestApplication(t, worlds, placements)
+	app.runtime.failures["complete:"+targetIdentity("target-b", "install-b")] = 2
+	plan, err := app.coordinator.Preview(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication, err := app.coordinator.Publish(context.Background(), PublishRequest{ID: "publication-repeat-recovery", Plan: plan})
+	if !errors.Is(err, ErrRecoveryRequired) || publication.Status != StatusRecoveryRequired {
+		t.Fatalf("initial publication did not require recovery: %#v err=%v", publication, err)
+	}
+	publication, err = app.coordinator.RecoverOne(context.Background(), publication.ID)
+	if !errors.Is(err, ErrRecoveryRequired) || publication.Status != StatusRecoveryRequired {
+		t.Fatalf("first recovery unexpectedly completed: %#v err=%v", publication, err)
+	}
+	publication, err = app.coordinator.RecoverOne(context.Background(), publication.ID)
+	if err != nil || publication.Status != StatusSucceeded {
+		t.Fatalf("second recovery did not complete: %#v err=%v", publication, err)
+	}
+
+	app.runtime.mu.Lock()
+	defer app.runtime.mu.Unlock()
+	seenAttempts := map[string]bool{}
+	seenKeys := map[string]bool{}
+	for _, call := range app.runtime.calls {
+		if call.action != "complete" || call.target != "target-b" {
+			continue
+		}
+		if seenAttempts[call.attempt] || seenKeys[call.idempotency] {
+			t.Fatalf("recovery reused an Agent idempotency domain: %#v", app.runtime.calls)
+		}
+		seenAttempts[call.attempt], seenKeys[call.idempotency] = true, true
+	}
+	if len(seenAttempts) != 3 {
+		t.Fatalf("expected initial completion and two recovery attempts, got %#v", app.runtime.calls)
+	}
+}
+
 func TestControlPlaneRestartWithoutCommitRollsBackAllTargets(t *testing.T) {
 	worlds, placements := twoTargetWorlds()
 	app := newTestApplication(t, worlds, placements)
@@ -519,6 +566,26 @@ func TestOperationAndSourceJobIdempotencyDoNotRepublish(t *testing.T) {
 	third, err := app.coordinator.Publish(context.Background(), request)
 	if err != nil || third.ID != first.ID || len(app.runtime.calls) != calls {
 		t.Fatalf("source job ID was not idempotent: %#v err=%v", third, err)
+	}
+	conflictingPlan := plan
+	conflictingPlan.Targets = append([]TargetPlan(nil), plan.Targets...)
+	conflictingPlan.Targets[0].NodeID += "-conflict"
+	conflictingPlan.PlanHash, err = calculatePlanHash(conflictingPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.coordinator.Publish(context.Background(), PublishRequest{
+		ID: first.ID, Plan: conflictingPlan,
+	}); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("operation ID accepted a different plan: %v", err)
+	}
+	if _, err := app.coordinator.Publish(context.Background(), PublishRequest{
+		ID: "publication-idempotent-03", SourceJobID: request.SourceJobID, Plan: conflictingPlan,
+	}); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("source job ID accepted a different plan: %v", err)
+	}
+	if len(app.runtime.calls) != calls {
+		t.Fatalf("idempotency conflicts re-executed runtime calls: %#v", app.runtime.calls)
 	}
 }
 

@@ -70,6 +70,8 @@ func gameUpdateFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusConflict, "STEAMCMD_UNAVAILABLE", "SteamCMD 不可用，请先完成部署检查", nil)
 	case errors.Is(err, gameupdate.ErrSteamClientManaged):
 		Failure(c, http.StatusConflict, "STEAM_CLIENT_MANAGED", "当前游戏由 Steam 客户端管理，请在 Steam 中完成更新", nil)
+	case errors.Is(err, gameupdate.ErrUpdateDisabled):
+		Failure(c, http.StatusConflict, "LOCAL_GAME_UPDATE_DISABLED", "当前控制面不管理本地 DST 安装，请在对应 Runtime 节点执行更新", nil)
 	default:
 		Failure(c, http.StatusInternalServerError, "GAME_UPDATE_FAILED", "游戏更新操作失败", nil)
 	}

@@ -103,6 +103,15 @@ func (m *Manager) Complete(ctx context.Context, operationID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	journal, err := m.readJournal(operationID)
+	if errors.Is(err, os.ErrNotExist) {
+		committed, stateErr := m.operationCommitted(operationID)
+		if stateErr != nil {
+			return stateErr
+		}
+		if committed {
+			return nil
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -131,6 +140,22 @@ func (m *Manager) Complete(ctx context.Context, operationID string) error {
 		return err
 	}
 	return os.Remove(m.journalPath(operationID))
+}
+
+func (m *Manager) operationCommitted(operationID string) (bool, error) {
+	states, err := m.readStates()
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for _, state := range states {
+		if state.LastOperationID == operationID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *Manager) Rollback(ctx context.Context, operationID string) error {

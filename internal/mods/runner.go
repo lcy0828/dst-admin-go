@@ -1,6 +1,7 @@
 package mods
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -42,12 +43,51 @@ func (r *SteamCMDRunner) Download(ctx context.Context, ids []string, validate bo
 	}
 	arguments = append(arguments, "+quit")
 	command := exec.CommandContext(ctx, r.Executable, arguments...)
-	command.Stdout = output
-	command.Stderr = output
+	if output == nil {
+		output = io.Discard
+	}
+	tail := &boundedTailWriter{limit: 64 * 1024}
+	writer := io.MultiWriter(output, tail)
+	command.Stdout = writer
+	command.Stderr = writer
 	if err := command.Run(); err != nil {
 		return fmt.Errorf("%w: %v", ErrSteamCMDDownload, err)
 	}
+	if steamCMDOutputFailed(tail.String()) {
+		return fmt.Errorf("%w: SteamCMD reported a Workshop download failure", ErrSteamCMDDownload)
+	}
 	return nil
+}
+
+type boundedTailWriter struct {
+	buffer bytes.Buffer
+	limit  int
+}
+
+func (w *boundedTailWriter) Write(value []byte) (int, error) {
+	if w.limit <= 0 {
+		return len(value), nil
+	}
+	if len(value) >= w.limit {
+		w.buffer.Reset()
+		_, _ = w.buffer.Write(value[len(value)-w.limit:])
+		return len(value), nil
+	}
+	if excess := w.buffer.Len() + len(value) - w.limit; excess > 0 {
+		current := append([]byte(nil), w.buffer.Bytes()[excess:]...)
+		w.buffer.Reset()
+		_, _ = w.buffer.Write(current)
+	}
+	_, _ = w.buffer.Write(value)
+	return len(value), nil
+}
+
+func (w *boundedTailWriter) String() string { return w.buffer.String() }
+
+func steamCMDOutputFailed(output string) bool {
+	value := strings.ToLower(output)
+	return strings.Contains(value, "error! download item") && strings.Contains(value, "failed") ||
+		strings.Contains(value, "update canceled:") && strings.Contains(value, "failure")
 }
 
 func findSteamCMD(configured string) string {

@@ -29,6 +29,7 @@ var (
 	ErrUpdateInProgress    = errors.New("a game update is already active")
 	ErrSteamCMDUnavailable = errors.New("steamcmd is unavailable")
 	ErrSteamClientManaged  = errors.New("game installation is managed by the Steam client")
+	ErrUpdateDisabled      = errors.New("local game update is disabled for this deployment")
 	ErrUnsafeCachePath     = errors.New("steam cache path is unsafe")
 	ErrRoomStateChanged    = errors.New("room runtime state changed while the game update was queued")
 )
@@ -60,6 +61,7 @@ type Config struct {
 	SteamCMDPath           string
 	AppID                  string
 	UpdateMethod           string
+	DisableUpdate          bool
 	OfficialReleaseChecker OfficialReleaseChecker
 }
 
@@ -134,8 +136,11 @@ func (s *Service) Version(ctx context.Context) VersionReport {
 	executable := findSteamCMD(s.config.SteamCMDPath)
 	report := VersionReport{
 		Installed: installed, AppID: s.config.AppID, LocalVersion: local, InstallPath: installRoot(s.config.ServerPath),
-		UpdateMethod: s.config.UpdateMethod, UpdateSupported: s.config.UpdateMethod == dstinstall.UpdateMethodSteamCMD && executable != "",
+		UpdateMethod: s.config.UpdateMethod, UpdateSupported: !s.config.DisableUpdate && s.config.UpdateMethod == dstinstall.UpdateMethodSteamCMD && executable != "",
 		SteamCMDAvailable: executable != "", SteamCMDPath: executable, CheckedAt: s.now().UTC(),
+	}
+	if s.config.DisableUpdate {
+		report.UpdateBlockedReason = "local_runtime_not_managed"
 	}
 	queryVersion := local
 	if queryVersion == "" {
@@ -191,6 +196,9 @@ func (s *Service) Version(ctx context.Context) VersionReport {
 func (s *Service) Run(jobID string) (Run, error) { return s.store.Get(jobID) }
 
 func (s *Service) Prepare(ctx context.Context, request UpdateRequest) ([]jobs.TargetSpec, func(jobs.Job) jobs.Runner, func(), error) {
+	if s.config.DisableUpdate {
+		return nil, nil, nil, ErrUpdateDisabled
+	}
 	if s.config.UpdateMethod == dstinstall.UpdateMethodSteamClient {
 		return nil, nil, nil, ErrSteamClientManaged
 	}

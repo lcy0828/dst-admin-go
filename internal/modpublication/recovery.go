@@ -3,6 +3,8 @@ package modpublication
 import (
 	"context"
 	"errors"
+
+	"github.com/google/uuid"
 )
 
 func (c *Coordinator) Recover(ctx context.Context) ([]Publication, error) {
@@ -33,7 +35,8 @@ func (c *Coordinator) RecoverOne(ctx context.Context, publicationID string) (Pub
 	if publication.Status == StatusSucceeded || publication.Status == StatusFailed || publication.Status == StatusRolledBack {
 		return publication, ErrConflict
 	}
-	fences, acquireErr := c.acquireFences(ctx, publication.Plan, publication.ID+":recover")
+	recoveryAttemptID := publication.ID + ":recover:" + uuid.NewString()
+	fences, acquireErr := c.acquireFences(ctx, publication.Plan, recoveryAttemptID)
 	if acquireErr != nil {
 		return publication, acquireErr
 	}

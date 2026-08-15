@@ -736,6 +736,13 @@ func extractModArchive(ctx context.Context, archivePath, target string) error {
 			if written != header.Size {
 				return io.ErrUnexpectedEOF
 			}
+			mode := os.FileMode(0o444)
+			if header.Mode&0o111 != 0 {
+				mode = 0o555
+			}
+			if err := os.Chmod(path, mode); err != nil {
+				return err
+			}
 		default:
 			return errors.New("Mod 缓存归档包含链接或特殊文件")
 		}

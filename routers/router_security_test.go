@@ -127,7 +127,10 @@ func TestMemoryAdaptersAreAcceptedOnlyInExplicitTestEnvironment(t *testing.T) {
 
 func configureRouterTestEnvironment(t *testing.T) {
 	t.Helper()
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve router test root: %v", err)
+	}
 	paths := map[string]string{
 		"DST_ADMIN_SAVE_PATH":         filepath.Join(root, "saves"),
 		"DST_ADMIN_BACKUP_PATH":       filepath.Join(root, "backups"),
@@ -147,6 +150,13 @@ func configureRouterTestEnvironment(t *testing.T) {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			t.Fatalf("create router test path %s: %v", path, err)
 		}
+	}
+	serverExecutable := paths["DST_ADMIN_SERVER_PATH"]
+	if err := os.MkdirAll(filepath.Dir(serverExecutable), 0o700); err != nil {
+		t.Fatalf("create router test server path: %v", err)
+	}
+	if err := os.WriteFile(serverExecutable, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("create router test server executable: %v", err)
 	}
 	t.Setenv("DST_ADMIN_ENV", "test")
 	for _, name := range []string{

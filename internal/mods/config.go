@@ -74,9 +74,6 @@ func (s *Service) ConfigurationFromContent(ctx context.Context, roomID, worldID,
 	if !room.Managed {
 		return ModConfiguration{}, ErrRoomNotManaged
 	}
-	if _, err := s.rooms.World(roomID, worldID); err != nil {
-		return ModConfiguration{}, err
-	}
 	document, err := parseModOverrideContent(content, 0o640, len(content) > 0, "modoverrides.lua")
 	if err != nil {
 		return ModConfiguration{}, err

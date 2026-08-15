@@ -300,6 +300,18 @@ func TestPrepareRejectsConcurrentUpdatesAndRequiresExactConfirmation(t *testing.
 	releaseAgain()
 }
 
+func TestDisabledUpdateStillReportsVersionsButRejectsMutation(t *testing.T) {
+	service, _, _, _, _, _ := newUpdateService(t, nil)
+	service.config.DisableUpdate = true
+	report := service.Version(context.Background())
+	if report.UpdateSupported || report.UpdateBlockedReason != "local_runtime_not_managed" {
+		t.Fatalf("disabled update report = %#v", report)
+	}
+	if _, _, _, err := service.Prepare(context.Background(), UpdateRequest{Confirmation: "更新游戏"}); !errors.Is(err, ErrUpdateDisabled) {
+		t.Fatalf("disabled update error = %v", err)
+	}
+}
+
 func TestSteamClientInstallReportsExternalUpdateAndRejectsPrepare(t *testing.T) {
 	base, store, catalog, control, events, _ := newUpdateService(t, nil)
 	steamApps := filepath.Join(t.TempDir(), "steamapps")

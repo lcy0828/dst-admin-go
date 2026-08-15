@@ -323,9 +323,15 @@ func (c *Coordinator) fail(publication Publication, code string, cause error) (P
 }
 
 func (c *Coordinator) operation(publication Publication, target TargetPlan, fences []Fence, action string) RuntimeOperation {
+	attempt := ""
+	if len(fences) > 0 {
+		attempt = fences[0].OperationKey
+	}
 	return RuntimeOperation{
-		PublicationID: publication.ID, PlanHash: publication.Plan.PlanHash, Fences: append([]Fence(nil), fences...), Action: action,
-		IdempotencyKey: fmt.Sprintf("%s:%s:%s:%s", publication.ID, target.TargetID, target.InstallationID, action),
+		PublicationID: publication.ID, TopologyRevision: publication.Plan.TopologyRevision,
+		PlanHash: publication.Plan.PlanHash, Fences: append([]Fence(nil), fences...), Action: action,
+		IdempotencyKey: fmt.Sprintf("%s:%s:%s:%s:%s", publication.ID, target.TargetID, target.InstallationID, action, attempt),
+		RenewFences:    c.renewFences,
 	}
 }
 
