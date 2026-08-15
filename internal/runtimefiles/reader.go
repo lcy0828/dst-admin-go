@@ -293,8 +293,27 @@ func runtimeFileID(file *os.File, name string) (string, error) {
 	if identity == "" {
 		identity = fmt.Sprintf("fallback:%d:%d", info.ModTime().UnixNano(), info.Size())
 	}
-	sum := sha256.Sum256([]byte(name + "\x00" + identity))
+	generation, err := logGenerationMarker(file)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(name + "\x00" + identity + "\x00" + generation))
 	return hex.EncodeToString(sum[:16]), nil
+}
+
+func logGenerationMarker(file *os.File) (string, error) {
+	const maximumProbeBytes = 512
+	probe := make([]byte, maximumProbeBytes)
+	read, err := file.ReadAt(probe, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	probe = probe[:read]
+	if newline := bytes.IndexByte(probe, '\n'); newline >= 0 {
+		probe = probe[:newline+1]
+	}
+	sum := sha256.Sum256(probe)
+	return hex.EncodeToString(sum[:8]), nil
 }
 
 func stableFileIdentity(info os.FileInfo) string {

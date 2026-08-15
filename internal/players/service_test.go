@@ -196,7 +196,7 @@ func TestRefreshWorldsCommitsSuccessfulShardsAndPreservesFailedShard(t *testing.
 		t.Fatalf("successful shard was not committed: player=%#v err=%v", masterNew, err)
 	}
 	caves, err := store.Get("room", "KU_CAVES")
-	if err != nil || !caves.Online || caves.WorldID != "caves" {
+	if err != nil || !caves.Online || caves.WorldID != "caves" || caves.PresenceStatus != FreshnessStale {
 		t.Fatalf("failed shard state was cleared: player=%#v err=%v", caves, err)
 	}
 }

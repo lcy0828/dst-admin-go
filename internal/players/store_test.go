@@ -67,6 +67,25 @@ func TestStoreMovesPlayerBetweenWorldsWithoutDuplicateIdentity(t *testing.T) {
 	}
 }
 
+func TestStoreMarksFailedWorldPresenceStaleWithoutErasingLastKnownOnline(t *testing.T) {
+	store := newPlayerTestStore(t)
+	observedAt := time.Date(2026, 8, 12, 10, 0, 0, 0, time.UTC)
+	if err := store.ReplaceWorldSnapshot("room", "master", "地面", stampNativeObservations([]Observation{{ID: "KU_ONE", Name: "Wilson"}}, observedAt), observedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkWorldStale("room", "master"); err != nil {
+		t.Fatal(err)
+	}
+	player, err := store.Get("room", "KU_ONE")
+	if err != nil || !player.Online || player.PresenceStatus != FreshnessStale || player.PresenceObservedAt == nil || !player.PresenceObservedAt.Equal(observedAt) || !player.LastRefreshedAt.Equal(observedAt) {
+		t.Fatalf("stale player=%#v err=%v", player, err)
+	}
+	_, online, staleOnline, _, err := store.Counts("room")
+	if err != nil || online != 0 || staleOnline != 1 {
+		t.Fatalf("counts online=%d stale=%d err=%v", online, staleOnline, err)
+	}
+}
+
 func TestRoomSnapshotsChooseNewestWorldForMigratingPlayer(t *testing.T) {
 	store := newPlayerTestStore(t)
 	now := time.Date(2026, 8, 12, 10, 0, 0, 0, time.UTC)

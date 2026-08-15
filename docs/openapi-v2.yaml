@@ -6712,7 +6712,7 @@ components:
     Player:
       type: object
       additionalProperties: false
-      required: [id, roomId, worldId, worldName, name, online, banned, admin, age, firstSeenAt, lastSeenAt, statusChangedAt, lastRefreshedAt, fields]
+      required: [id, roomId, worldId, worldName, name, online, banned, admin, age, firstSeenAt, lastSeenAt, statusChangedAt, lastRefreshedAt, presenceStatus, fields, presenceConflict, observedWorldIds]
       properties:
         id: { type: string, pattern: '^[A-Za-z0-9_-]{1,128}$' }
         roomId: { type: string }
@@ -6739,9 +6739,13 @@ components:
         lastSeenAt: { type: string, format: date-time }
         statusChangedAt: { type: string, format: date-time }
         lastRefreshedAt: { type: string, format: date-time }
+        presenceStatus: { $ref: "#/components/schemas/PlayerFreshnessStatus" }
+        presenceObservedAt: { type: string, format: date-time }
         fields:
           type: object
           additionalProperties: { $ref: "#/components/schemas/PlayerFieldState" }
+        presenceConflict: { type: boolean }
+        observedWorldIds: { type: array, items: { type: string } }
     PlayerDataSource:
       type: string
       enum: [customcommands, console-fallback, native-log]
@@ -6766,12 +6770,22 @@ components:
     PlayerList:
       type: object
       additionalProperties: false
-      required: [items, total, online, offline, banned, limit, offset]
+      required: [items, total, online, staleOnline, offline, banned, limit, offset]
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/Player" } }
         total: { type: integer, minimum: 0 }
-        online: { type: integer, minimum: 0 }
-        offline: { type: integer, minimum: 0 }
+        online:
+          type: integer
+          minimum: 0
+          description: Players confirmed online by the latest successful observation.
+        staleOnline:
+          type: integer
+          minimum: 0
+          description: Players last known online whose latest world observation failed.
+        offline:
+          type: integer
+          minimum: 0
+          description: Players confirmed offline.
         banned: { type: integer, minimum: 0 }
         limit: { type: integer, minimum: 1, maximum: 100 }
         offset: { type: integer, minimum: 0 }

@@ -122,13 +122,13 @@ func (s *Service) List(roomID string, filter ListFilter) (List, error) {
 			applyBanDetails(&items[index], details)
 		}
 	}
-	totalPlayers, online, refreshed, err := s.store.Counts(room.ID)
+	totalPlayers, online, staleOnline, refreshed, err := s.store.Counts(room.ID)
 	if err != nil {
 		return List{}, err
 	}
 	return List{
-		Items: items, Total: total, Online: online, Offline: totalPlayers - online,
-		Banned: len(access.Blocked), Limit: filter.Limit, Offset: filter.Offset, LastRefreshedAt: refreshed,
+		Items: items, Total: total, Online: online, Offline: totalPlayers - online - staleOnline,
+		StaleOnline: staleOnline, Banned: len(access.Blocked), Limit: filter.Limit, Offset: filter.Offset, LastRefreshedAt: refreshed,
 	}, nil
 }
 
@@ -251,6 +251,13 @@ func (s *Service) RefreshWorlds(ctx context.Context, roomID string, worldIDs []s
 	}
 	if err := s.store.ReplaceRoomSnapshots(room.ID, snapshots); err != nil {
 		return outcomes, err
+	}
+	for _, outcome := range outcomes {
+		if outcome.Err != nil {
+			if err := s.store.MarkWorldStale(room.ID, outcome.WorldID); err != nil {
+				return outcomes, err
+			}
+		}
 	}
 	return outcomes, nil
 }

@@ -335,6 +335,42 @@ func (s *Store) MarkWorldOffline(roomID, worldID string, observedAt time.Time) e
 	}).Error
 }
 
+func (s *Store) MarkWorldStale(roomID, worldID string) error {
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	rollback := func(err error) error {
+		tx.Rollback()
+		return err
+	}
+	var records []playerRecord
+	if err := tx.Table(s.table).Where("room_id = ? AND world_id = ? AND online = ?", roomID, worldID, true).Find(&records).Error; err != nil {
+		return rollback(err)
+	}
+	for _, record := range records {
+		states := decodeFieldStates(record.FieldStates)
+		for field, state := range states {
+			if state.Status == FreshnessLive {
+				state.Status = FreshnessStale
+				states[field] = state
+			}
+		}
+		if _, exists := states["online"]; !exists {
+			observedAt := record.LastRefreshedAt.UTC()
+			states["online"] = FieldState{Source: SourceNativeLog, ObservedAt: &observedAt, Status: FreshnessStale}
+		}
+		encoded, err := encodeFieldStates(states)
+		if err != nil {
+			return rollback(err)
+		}
+		if err := tx.Table(s.table).Where("room_id = ? AND user_id = ? AND world_id = ? AND online = ?", roomID, record.UserID, worldID, true).Update("field_states", encoded).Error; err != nil {
+			return rollback(err)
+		}
+	}
+	return tx.Commit().Error
+}
+
 func (s *Store) MarkPlayerOffline(roomID, userID string, observedAt time.Time) error {
 	return s.db.Table(s.table).Where("room_id = ? AND user_id = ? AND online = ?", roomID, userID, true).Updates(map[string]interface{}{
 		"online": false, "status_changed_at": observedAt, "last_refreshed_at": observedAt,
@@ -386,25 +422,33 @@ func (s *Store) List(roomID string, filter ListFilter) ([]Player, int, error) {
 	return items, total, nil
 }
 
-func (s *Store) Counts(roomID string) (int, int, *time.Time, error) {
-	var total, online int
+func (s *Store) Counts(roomID string) (int, int, int, *time.Time, error) {
+	var total int
 	base := s.db.Table(s.table).Where("room_id = ?", roomID)
 	if err := base.Count(&total).Error; err != nil {
-		return 0, 0, nil, err
+		return 0, 0, 0, nil, err
 	}
-	if err := s.db.Table(s.table).Where("room_id = ? AND online = ?", roomID, true).Count(&online).Error; err != nil {
-		return 0, 0, nil, err
+	var onlineRecords []playerRecord
+	if err := s.db.Table(s.table).Select("field_states").Where("room_id = ? AND online = ?", roomID, true).Find(&onlineRecords).Error; err != nil {
+		return 0, 0, 0, nil, err
 	}
+	staleOnline := 0
+	for _, record := range onlineRecords {
+		if decodeFieldStates(record.FieldStates)["online"].Status != FreshnessLive {
+			staleOnline++
+		}
+	}
+	online := len(onlineRecords) - staleOnline
 	var record playerRecord
 	result := s.db.Table(s.table).Where("room_id = ?", roomID).Order("last_refreshed_at DESC").First(&record)
 	if gorm.IsRecordNotFoundError(result.Error) {
-		return total, online, nil, nil
+		return total, online, staleOnline, nil, nil
 	}
 	if result.Error != nil {
-		return 0, 0, nil, result.Error
+		return 0, 0, 0, nil, result.Error
 	}
 	refreshed := record.LastRefreshedAt.UTC()
-	return total, online, &refreshed, nil
+	return total, online, staleOnline, &refreshed, nil
 }
 
 func (s *Store) SaveBan(value Ban) error {
@@ -471,6 +515,11 @@ func utcPointer(value *time.Time) *time.Time {
 }
 
 func playerFromRecord(record playerRecord) Player {
+	fields := decodeFieldStates(record.FieldStates)
+	presence := fields["online"]
+	if presence.Status == "" {
+		presence.Status = FreshnessUnavailable
+	}
 	return Player{
 		ID: record.UserID, RoomID: record.RoomID, WorldID: record.WorldID, WorldName: record.WorldName,
 		Name: record.Name, Prefab: record.Prefab, Online: record.Online, Admin: record.Admin, Age: record.Age,
@@ -479,7 +528,8 @@ func playerFromRecord(record playerRecord) Player {
 		Temperature: record.Temperature, Moisture: record.Moisture,
 		FirstSeenAt: record.FirstSeenAt.UTC(), LastSeenAt: record.LastSeenAt.UTC(),
 		StatusChangedAt: record.StatusChangedAt.UTC(), LastRefreshedAt: record.LastRefreshedAt.UTC(),
-		Fields: decodeFieldStates(record.FieldStates), PresenceConflict: record.PresenceConflict,
+		PresenceStatus: presence.Status, PresenceObservedAt: presence.ObservedAt,
+		Fields: fields, PresenceConflict: record.PresenceConflict,
 		ObservedWorldIDs: decodeWorldIDs(record.ObservedWorldIDs, record.WorldID),
 	}
 }

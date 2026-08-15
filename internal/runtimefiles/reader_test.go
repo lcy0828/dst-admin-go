@@ -75,6 +75,35 @@ func TestReadLogsContinuesByFileIdentityAndResetsAfterRotation(t *testing.T) {
 	}
 }
 
+func TestReadLogsDetectsInPlaceTruncateAfterNewLogOutgrowsOldCursor(t *testing.T) {
+	root := t.TempDir()
+	world := filepath.Join(root, "Cluster_1", "Master")
+	if err := os.MkdirAll(world, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(world, "server_log.txt")
+	if err := os.WriteFile(path, []byte("old generation\nold line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := ReadLogs(context.Background(), root, "Cluster_1", "Master", shared.RuntimeLogRequest{Cursor: -1, MaxBytes: 1024, MaxLines: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newLog := "new generation\nnew line one\nnew line two\n"
+	if int64(len(newLog)) <= first.Cursor {
+		t.Fatal("test fixture must outgrow the old cursor")
+	}
+	if err := os.WriteFile(path, []byte(newLog), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reset, err := ReadLogs(context.Background(), root, "Cluster_1", "Master", shared.RuntimeLogRequest{
+		FileID: first.FileID, Cursor: first.Cursor, MaxBytes: 1024, MaxLines: 10,
+	})
+	if err != nil || !reset.Reset || len(reset.Lines) != 3 || reset.Lines[0].Text != "new generation" {
+		t.Fatalf("reset=%#v err=%v", reset, err)
+	}
+}
+
 func TestReadArtifactsRejectsSymlink(t *testing.T) {
 	root := t.TempDir()
 	artifactRoot := filepath.Join(root, "Cluster_1", "Master", "save", "mod_config_data", "dst-admin")

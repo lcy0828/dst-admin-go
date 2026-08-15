@@ -24,34 +24,36 @@ func (e *FieldError) Error() string { return ErrInvalidAction.Error() }
 func (e *FieldError) Unwrap() error { return ErrInvalidAction }
 
 type Player struct {
-	ID               string      `json:"id"`
-	RoomID           string      `json:"roomId"`
-	WorldID          string      `json:"worldId"`
-	WorldName        string      `json:"worldName"`
-	Name             string      `json:"name"`
-	Prefab           string      `json:"prefab,omitempty"`
-	Online           bool        `json:"online"`
-	Banned           bool        `json:"banned"`
-	BanReason        string      `json:"banReason,omitempty"`
-	BannedAt         *time.Time  `json:"bannedAt,omitempty"`
-	BanExpiresAt     *time.Time  `json:"banExpiresAt,omitempty"`
-	Admin            bool        `json:"admin"`
-	Age              int         `json:"age"`
-	NetID            string      `json:"netId,omitempty"`
-	NetScore         *int        `json:"netScore,omitempty"`
-	Performance      *int        `json:"performance,omitempty"`
-	HealthPercent    *float64    `json:"healthPercent,omitempty"`
-	HungerPercent    *float64    `json:"hungerPercent,omitempty"`
-	SanityPercent    *float64    `json:"sanityPercent,omitempty"`
-	Temperature      *float64    `json:"temperature,omitempty"`
-	Moisture         *float64    `json:"moisture,omitempty"`
-	FirstSeenAt      time.Time   `json:"firstSeenAt"`
-	LastSeenAt       time.Time   `json:"lastSeenAt"`
-	StatusChangedAt  time.Time   `json:"statusChangedAt"`
-	LastRefreshedAt  time.Time   `json:"lastRefreshedAt"`
-	Fields           FieldStates `json:"fields"`
-	PresenceConflict bool        `json:"presenceConflict"`
-	ObservedWorldIDs []string    `json:"observedWorldIds"`
+	ID                 string          `json:"id"`
+	RoomID             string          `json:"roomId"`
+	WorldID            string          `json:"worldId"`
+	WorldName          string          `json:"worldName"`
+	Name               string          `json:"name"`
+	Prefab             string          `json:"prefab,omitempty"`
+	Online             bool            `json:"online"`
+	Banned             bool            `json:"banned"`
+	BanReason          string          `json:"banReason,omitempty"`
+	BannedAt           *time.Time      `json:"bannedAt,omitempty"`
+	BanExpiresAt       *time.Time      `json:"banExpiresAt,omitempty"`
+	Admin              bool            `json:"admin"`
+	Age                int             `json:"age"`
+	NetID              string          `json:"netId,omitempty"`
+	NetScore           *int            `json:"netScore,omitempty"`
+	Performance        *int            `json:"performance,omitempty"`
+	HealthPercent      *float64        `json:"healthPercent,omitempty"`
+	HungerPercent      *float64        `json:"hungerPercent,omitempty"`
+	SanityPercent      *float64        `json:"sanityPercent,omitempty"`
+	Temperature        *float64        `json:"temperature,omitempty"`
+	Moisture           *float64        `json:"moisture,omitempty"`
+	FirstSeenAt        time.Time       `json:"firstSeenAt"`
+	LastSeenAt         time.Time       `json:"lastSeenAt"`
+	StatusChangedAt    time.Time       `json:"statusChangedAt"`
+	LastRefreshedAt    time.Time       `json:"lastRefreshedAt"`
+	PresenceStatus     FreshnessStatus `json:"presenceStatus"`
+	PresenceObservedAt *time.Time      `json:"presenceObservedAt,omitempty"`
+	Fields             FieldStates     `json:"fields"`
+	PresenceConflict   bool            `json:"presenceConflict"`
+	ObservedWorldIDs   []string        `json:"observedWorldIds"`
 }
 
 type FreshnessStatus string
@@ -99,6 +101,7 @@ type List struct {
 	Items           []Player   `json:"items"`
 	Total           int        `json:"total"`
 	Online          int        `json:"online"`
+	StaleOnline     int        `json:"staleOnline"`
 	Offline         int        `json:"offline"`
 	Banned          int        `json:"banned"`
 	Limit           int        `json:"limit"`
