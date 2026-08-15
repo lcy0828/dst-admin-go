@@ -208,3 +208,40 @@ func TestServiceListDecoratesFreshnessFromRuntimeAndObservationAge(t *testing.T)
 		t.Fatalf("unavailable snapshot = %#v", list.Items[0])
 	}
 }
+
+func TestServiceListIncludesWorldsWithoutSnapshots(t *testing.T) {
+	catalog := stateTestCatalog{
+		room: rooms.Room{ID: "room", DirectoryName: "Cluster_1", Name: "Room", Managed: true},
+		worlds: []rooms.World{
+			{ID: "master", RoomID: "room", DirectoryName: "Master", Name: "Master", Role: rooms.WorldRoleMaster},
+			{ID: "caves", RoomID: "room", DirectoryName: "Caves", Name: "Caves", Role: rooms.WorldRoleCaves},
+		},
+	}
+	store := newWorldStateStore(t)
+	now := time.Date(2026, 8, 16, 1, 0, 0, 0, time.UTC)
+	if _, err := store.Append(Snapshot{
+		RoomID: "room", WorldID: "master", WorldName: "Master", WorldRole: "master",
+		Season: "autumn", ObservedAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(catalog, &stateStatusRuntime{status: shards.RuntimeStatus{State: shards.RuntimeStopped}}, store, &stateTestSampler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return now }
+	list, err := service.List(context.Background(), "room")
+	if err != nil || list.Total != 2 || len(list.Items) != 2 {
+		t.Fatalf("world state list = %#v, error = %v", list, err)
+	}
+	if list.Items[0].WorldID != "master" || list.Items[1].WorldID != "caves" {
+		t.Fatalf("world order = %#v", list.Items)
+	}
+	missing := list.Items[1]
+	if !missing.ObservedAt.IsZero() || missing.Freshness != FreshnessUnavailable || missing.RuntimeState != "stopped" || missing.AgeSeconds != 0 || !missing.Stale {
+		t.Fatalf("missing world placeholder = %#v", missing)
+	}
+	if list.LastRefreshedAt == nil || !list.LastRefreshedAt.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("last refreshed = %#v", list.LastRefreshedAt)
+	}
+}

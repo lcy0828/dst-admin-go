@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -97,9 +98,36 @@ func (s *Service) List(ctx context.Context, roomID string) (List, error) {
 		return List{}, worldsErr
 	}
 	worldByID := make(map[string]rooms.World, len(worlds))
+	worldOrder := make(map[string]int, len(worlds))
 	for _, world := range worlds {
 		worldByID[world.ID] = world
 	}
+	for index, world := range worlds {
+		worldOrder[world.ID] = index
+	}
+	existingWorlds := make(map[string]bool, len(items))
+	for _, item := range items {
+		existingWorlds[item.WorldID] = true
+	}
+	for _, world := range worlds {
+		if existingWorlds[world.ID] {
+			continue
+		}
+		items = append(items, Snapshot{
+			RoomID: roomID, WorldID: world.ID, WorldName: world.Name, WorldRole: string(world.Role),
+		})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		left, leftExists := worldOrder[items[i].WorldID]
+		right, rightExists := worldOrder[items[j].WorldID]
+		if leftExists != rightExists {
+			return leftExists
+		}
+		if left != right {
+			return left < right
+		}
+		return items[i].WorldID < items[j].WorldID
+	})
 	for index := range items {
 		world, exists := worldByID[items[index].WorldID]
 		if !exists || !room.Managed {
@@ -128,6 +156,9 @@ func (s *Service) List(ctx context.Context, roomID string) (List, error) {
 	}
 	var last *time.Time
 	for _, item := range items {
+		if item.ObservedAt.IsZero() {
+			continue
+		}
 		if last == nil || item.ObservedAt.After(*last) {
 			value := item.ObservedAt.UTC()
 			last = &value
@@ -137,9 +168,12 @@ func (s *Service) List(ctx context.Context, roomID string) (List, error) {
 }
 
 func decorateSnapshot(snapshot Snapshot, runtimeState shards.RuntimeState, now time.Time) Snapshot {
-	age := now.UTC().Sub(snapshot.ObservedAt.UTC())
-	if age < 0 {
-		age = 0
+	age := time.Duration(0)
+	if !snapshot.ObservedAt.IsZero() {
+		age = now.UTC().Sub(snapshot.ObservedAt.UTC())
+		if age < 0 {
+			age = 0
+		}
 	}
 	snapshot.RuntimeState = string(runtimeState)
 	snapshot.AgeSeconds = int64(age / time.Second)
