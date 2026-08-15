@@ -202,14 +202,22 @@ const (
 )
 
 type RuntimeConsoleHealth struct {
-	Available   bool               `json:"available"`
-	Accepting   bool               `json:"accepting"`
-	Busy        bool               `json:"busy"`
-	Pending     int                `json:"pending"`
-	Class       string             `json:"class,omitempty"`
-	CoalesceKey string             `json:"coalesce_key,omitempty"`
-	StartedAt   time.Time          `json:"started_at,omitempty"`
-	Runtime     ShardRuntimeStatus `json:"runtime"`
+	Available            bool               `json:"available"`
+	Status               string             `json:"status,omitempty"`
+	Accepting            bool               `json:"accepting"`
+	Busy                 bool               `json:"busy"`
+	Pending              int                `json:"pending"`
+	PendingLimit         int                `json:"pending_limit,omitempty"`
+	Class                string             `json:"class,omitempty"`
+	CoalesceKey          string             `json:"coalesce_key,omitempty"`
+	StartedAt            time.Time          `json:"started_at,omitempty"`
+	InstanceID           string             `json:"instance_id,omitempty"`
+	Maintenance          bool               `json:"maintenance"`
+	MaintenanceOwner     string             `json:"maintenance_owner,omitempty"`
+	MaintenanceStartedAt time.Time          `json:"maintenance_started_at,omitempty"`
+	InputDirty           bool               `json:"input_dirty"`
+	ExternalWriter       bool               `json:"external_writer"`
+	Runtime              ShardRuntimeStatus `json:"runtime"`
 }
 
 type RuntimeLogLine struct {

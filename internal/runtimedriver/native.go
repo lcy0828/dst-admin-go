@@ -259,7 +259,10 @@ func (d *Native) ConsoleHealth(ctx context.Context, target Target) (shared.Runti
 	if provider, ok := d.control.(nativeConsoleHealth); ok {
 		current := provider.ConsoleHealth(target.Cluster, target.Shard)
 		health.Accepting, health.Busy, health.Pending = current.Accepting, current.Busy, current.Pending
+		health.Status, health.PendingLimit, health.InstanceID = current.Status, current.PendingLimit, current.InstanceID
 		health.Class, health.CoalesceKey, health.StartedAt = string(current.Class), current.CoalesceKey, current.StartedAt
+		health.Maintenance, health.MaintenanceOwner, health.MaintenanceStartedAt = current.Maintenance, current.MaintenanceOwner, current.MaintenanceStartedAt
+		health.InputDirty, health.ExternalWriter = current.InputDirty, current.ExternalWriter
 	}
 	return health, err
 }

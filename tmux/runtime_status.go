@@ -282,6 +282,16 @@ func (s *DSTServer) sessionCreatedAt() (time.Time, error) {
 	return time.Unix(timestamp, 0), nil
 }
 
+// RuntimeInstanceID identifies one concrete tmux session lifetime. A session
+// recreated with the same name receives a different identity.
+func (s *DSTServer) RuntimeInstanceID() (string, error) {
+	createdAt, err := s.sessionCreatedAt()
+	if err != nil {
+		return "", err
+	}
+	return s.SessionName + "@" + strconv.FormatInt(createdAt.Unix(), 10), nil
+}
+
 func (s *DSTServer) runtimeLogPath() string {
 	return filepath.Join(s.StorageRoot, s.ConfDir, s.ArchiveName, s.WorldName, "server_log.txt")
 }

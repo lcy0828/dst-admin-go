@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"dont/internal/consoledispatch"
 	"dont/internal/shards"
 )
 
@@ -62,7 +63,10 @@ func containerListLine(id, state, cluster, shard string) []byte {
 
 func TestContainerRuntimeUsesTrustedLabelsAndFixedConsoleArguments(t *testing.T) {
 	id := strings.Repeat("a", 64)
-	cli := &fakeContainerCLI{available: true, responses: [][]byte{containerListLine(id, "running", "Cluster_1", "Master"), nil}}
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{
+		containerListLine(id, "running", "Cluster_1", "Master"),
+		containerListLine(id, "running", "Cluster_1", "Master"), nil,
+	}}
 	runtime, err := newContainerShardRuntime(containerTestInstallation(), cli)
 	if err != nil {
 		t.Fatal(err)
@@ -72,12 +76,12 @@ func TestContainerRuntimeUsesTrustedLabelsAndFixedConsoleArguments(t *testing.T)
 	}
 	wantList := []string{"ps", "-a", "--no-trunc", "--filter", "label=com.dst-admin.managed=true", "--filter", "label=com.dst-admin.installation=runtime-a", "--filter", "label=com.dst-admin.cluster=Cluster_1", "--filter", "label=com.dst-admin.shard=Master", "--format", "{{json .}}"}
 	wantExec := []string{"exec", id, "tmux", "-S", "/run/dst-admin/tmux/tmux.sock", "send-keys", "-t", "=dst:0.0", "-l", "--", "c_announce('hello')", ";", "send-keys", "-t", "=dst:0.0", "Enter"}
-	if !reflect.DeepEqual(cli.calls[0].arguments, wantList) || !reflect.DeepEqual(cli.calls[1].arguments, wantExec) {
+	if !reflect.DeepEqual(cli.calls[0].arguments, wantList) || !reflect.DeepEqual(cli.calls[1].arguments, wantList) || !reflect.DeepEqual(cli.calls[2].arguments, wantExec) {
 		t.Fatalf("calls=%#v", cli.calls)
 	}
-	for _, argument := range cli.calls[1].arguments {
+	for _, argument := range cli.calls[2].arguments {
 		if argument == "sh" || argument == "bash" || argument == "-c" {
-			t.Fatalf("shell argument found: %#v", cli.calls[1].arguments)
+			t.Fatalf("shell argument found: %#v", cli.calls[2].arguments)
 		}
 	}
 }
@@ -149,6 +153,7 @@ func TestContainerRuntimeCoalescesBackgroundConsoleProbes(t *testing.T) {
 	id := strings.Repeat("f", 64)
 	release := make(chan struct{})
 	cli := &fakeContainerCLI{available: true, responses: [][]byte{
+		containerListLine(id, "running", "Cluster_1", "Master"),
 		containerListLine(id, "running", "Cluster_1", "Master"), nil,
 	}, blockExec: release}
 	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
@@ -160,7 +165,7 @@ func TestContainerRuntimeCoalescesBackgroundConsoleProbes(t *testing.T) {
 		cli.mu.Lock()
 		calls := len(cli.calls)
 		cli.mu.Unlock()
-		if calls == 2 {
+		if calls == 3 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -180,7 +185,24 @@ func TestContainerRuntimeCoalescesBackgroundConsoleProbes(t *testing.T) {
 	}
 	cli.mu.Lock()
 	defer cli.mu.Unlock()
-	if len(cli.calls) != 2 {
+	if len(cli.calls) != 3 {
 		t.Fatalf("coalesced calls=%#v", cli.calls)
+	}
+}
+
+func TestContainerRuntimeRejectsInstanceChangeBeforeConsoleWrite(t *testing.T) {
+	oldID := strings.Repeat("a", 64)
+	newID := strings.Repeat("b", 64)
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{
+		containerListLine(oldID, "running", "Cluster_1", "Master"),
+		containerListLine(newID, "running", "Cluster_1", "Master"),
+	}}
+	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
+	err := runtime.Send(context.Background(), "Cluster_1", "Master", "c_save()")
+	if !errors.Is(err, consoledispatch.ErrInstanceChanged) {
+		t.Fatalf("send after instance change=%v", err)
+	}
+	if len(cli.calls) != 2 {
+		t.Fatalf("unexpected console write: %#v", cli.calls)
 	}
 }

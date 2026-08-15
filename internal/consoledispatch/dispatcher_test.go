@@ -141,3 +141,128 @@ func TestPauseWaitsForInflightAndRejectsNewCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestDispatcherBoundsPendingWorkButStillCoalesces(t *testing.T) {
+	dispatcher := NewWithPendingLimit(1)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	first := make(chan error, 1)
+	request := Request{Class: ClassBackground, CoalesceKey: "telemetry", Execute: func(context.Context) error {
+		close(started)
+		<-release
+		return nil
+	}}
+	go func() { first <- dispatcher.Dispatch(context.Background(), "room/master", request) }()
+	<-started
+
+	joined := make(chan error, 1)
+	go func() { joined <- dispatcher.Dispatch(context.Background(), "room/master", request) }()
+	queued := make(chan error, 1)
+	go func() {
+		queued <- dispatcher.Dispatch(context.Background(), "room/master", Request{Execute: func(context.Context) error { return nil }})
+	}()
+	for deadline := time.Now().Add(time.Second); dispatcher.Health("room/master").Pending != 1; {
+		if time.Now().After(deadline) {
+			t.Fatal("foreground command did not enter the bounded wait slot")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := dispatcher.Dispatch(context.Background(), "room/master", Request{Execute: func(context.Context) error { return nil }}); !errors.Is(err, ErrCapacityReached) {
+		t.Fatalf("dispatch beyond capacity=%v", err)
+	}
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-joined; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-queued; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDispatcherRejectsCommandsBoundToOldInstance(t *testing.T) {
+	dispatcher := New()
+	if err := dispatcher.BindInstance("room/master", "instance-one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.Dispatch(context.Background(), "room/master", Request{InstanceID: "instance-two", Execute: func(context.Context) error { return nil }}); !errors.Is(err, ErrInstanceChanged) {
+		t.Fatalf("dispatch to changed instance=%v", err)
+	}
+	if err := dispatcher.BindInstance("room/master", "instance-two"); err != nil {
+		t.Fatal(err)
+	}
+	if health := dispatcher.Health("room/master"); health.InstanceID != "instance-two" || health.Status != "ready" {
+		t.Fatalf("health=%#v", health)
+	}
+}
+
+func TestMaintenanceLeaseDrainsAndGatesWriters(t *testing.T) {
+	dispatcher := New()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- dispatcher.Dispatch(context.Background(), "room/master", Request{Execute: func(context.Context) error {
+			close(started)
+			<-release
+			return nil
+		}})
+	}()
+	<-started
+	leaseResult := make(chan *MaintenanceLease, 1)
+	leaseError := make(chan error, 1)
+	go func() {
+		lease, err := dispatcher.BeginMaintenance(context.Background(), "room/master", "operator", "")
+		leaseResult <- lease
+		leaseError <- err
+	}()
+	for deadline := time.Now().Add(time.Second); ; {
+		health := dispatcher.Health("room/master")
+		if health.Maintenance {
+			if health.Status != "maintenance" || health.MaintenanceOwner != "operator" || health.Accepting {
+				t.Fatalf("maintenance health=%#v", health)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("maintenance did not close the lane")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := dispatcher.Dispatch(context.Background(), "room/master", Request{Execute: func(context.Context) error { return nil }}); !errors.Is(err, ErrPaused) {
+		t.Fatalf("dispatch during maintenance=%v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	lease := <-leaseResult
+	if err := <-leaseError; err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if !dispatcher.Health("room/master").Accepting {
+		t.Fatal("lane did not reopen after maintenance")
+	}
+}
+
+func TestDirtyInputRequiresNewInstanceBeforeResume(t *testing.T) {
+	dispatcher := New()
+	if err := dispatcher.BindInstance("room/master", "instance-one"); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher.MarkInputDirty("room/master")
+	if err := dispatcher.Resume("room/master"); !errors.Is(err, ErrInputDirty) {
+		t.Fatalf("resume dirty input=%v", err)
+	}
+	if err := dispatcher.BindInstance("room/master", "instance-two"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.Resume("room/master"); err != nil {
+		t.Fatal(err)
+	}
+}

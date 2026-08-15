@@ -100,22 +100,25 @@ func (c *containerShardRuntime) Status(ctx context.Context, cluster, shard strin
 
 func (c *containerShardRuntime) Start(ctx context.Context, cluster, shard string) error {
 	key := c.shardKey(cluster, shard)
-	if err := c.dispatcher.Resume(key); err != nil {
-		return err
-	}
 	instance, err := c.find(ctx, cluster, shard)
 	if err != nil {
 		_ = c.dispatcher.Pause(context.Background(), key)
 		return err
 	}
 	if instance.State == "running" || instance.State == "restarting" {
-		return nil
+		if err := c.dispatcher.BindInstance(key, instance.ID); err != nil {
+			return err
+		}
+		return c.dispatcher.Resume(key)
 	}
 	if _, err := c.cli.Run(ctx, "start", instance.ID); err != nil {
 		_ = c.dispatcher.Pause(context.Background(), key)
 		return fmt.Errorf("启动分片容器: %w", err)
 	}
-	return nil
+	if err := c.dispatcher.BindInstance(key, instance.ID); err != nil {
+		return err
+	}
+	return c.dispatcher.Resume(key)
 }
 
 func (c *containerShardRuntime) Stop(ctx context.Context, cluster, shard string) error {
@@ -139,32 +142,76 @@ func (c *containerShardRuntime) Stop(ctx context.Context, cluster, shard string)
 }
 
 func (c *containerShardRuntime) Send(ctx context.Context, cluster, shard, command string) error {
-	return c.dispatcher.Dispatch(ctx, c.shardKey(cluster, shard), consoledispatch.Request{Execute: func(sendContext context.Context) error {
-		instance, err := c.find(sendContext, cluster, shard)
+	instance, err := c.find(ctx, cluster, shard)
+	if err != nil {
+		return err
+	}
+	if instance.State != "running" {
+		return errors.New("分片容器未运行")
+	}
+	key := c.shardKey(cluster, shard)
+	if err := c.dispatcher.BindInstance(key, instance.ID); err != nil {
+		return err
+	}
+	writeAttempted := false
+	err = c.dispatcher.Dispatch(ctx, key, consoledispatch.Request{InstanceID: instance.ID, Execute: func(sendContext context.Context) error {
+		current, err := c.find(sendContext, cluster, shard)
+		if err != nil {
+			return err
+		}
+		if current.ID != instance.ID {
+			return consoledispatch.ErrInstanceChanged
+		}
+		if current.State != "running" {
+			return errors.New("分片容器未运行")
+		}
+		writeAttempted = true
+		return c.sendToInstance(sendContext, current.ID, command)
+	}})
+	if err != nil && writeAttempted && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		c.dispatcher.MarkInputDirty(key)
+	}
+	return err
+}
+
+func (c *containerShardRuntime) SendBackground(ctx context.Context, cluster, shard, coalesceKey, command string) error {
+	key := c.shardKey(cluster, shard)
+	instanceID := c.dispatcher.Health(key).InstanceID
+	if instanceID == "" {
+		instance, err := c.find(ctx, cluster, shard)
 		if err != nil {
 			return err
 		}
 		if instance.State != "running" {
 			return errors.New("分片容器未运行")
 		}
-		return c.sendToInstance(sendContext, instance.ID, command)
-	}})
-}
-
-func (c *containerShardRuntime) SendBackground(ctx context.Context, cluster, shard, coalesceKey, command string) error {
-	return c.dispatcher.Dispatch(ctx, c.shardKey(cluster, shard), consoledispatch.Request{
-		Class: consoledispatch.ClassBackground, CoalesceKey: coalesceKey,
+		instanceID = instance.ID
+		if err := c.dispatcher.BindInstance(key, instanceID); err != nil {
+			return err
+		}
+	}
+	writeAttempted := false
+	err := c.dispatcher.Dispatch(ctx, key, consoledispatch.Request{
+		Class: consoledispatch.ClassBackground, CoalesceKey: coalesceKey, InstanceID: instanceID,
 		Execute: func(sendContext context.Context) error {
-			instance, err := c.find(sendContext, cluster, shard)
+			current, err := c.find(sendContext, cluster, shard)
 			if err != nil {
 				return err
 			}
-			if instance.State != "running" {
+			if current.ID != instanceID {
+				return consoledispatch.ErrInstanceChanged
+			}
+			if current.State != "running" {
 				return errors.New("分片容器未运行")
 			}
-			return c.sendToInstance(sendContext, instance.ID, command)
+			writeAttempted = true
+			return c.sendToInstance(sendContext, current.ID, command)
 		},
 	})
+	if err != nil && writeAttempted && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		c.dispatcher.MarkInputDirty(key)
+	}
+	return err
 }
 
 func (c *containerShardRuntime) ConsoleHealth(cluster, shard string) consoledispatch.Health {

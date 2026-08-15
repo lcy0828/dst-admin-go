@@ -2,6 +2,7 @@ package shards
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -67,9 +68,6 @@ func (c *TmuxControl) Start(ctx context.Context, roomName, worldName string) err
 		return err
 	}
 	key := c.shardKey(roomName, worldName)
-	if err := c.dispatcher.Resume(key); err != nil {
-		return err
-	}
 	server, err := c.server(roomName, worldName)
 	if err != nil {
 		return err
@@ -78,7 +76,15 @@ func (c *TmuxControl) Start(ctx context.Context, roomName, worldName string) err
 		_ = c.dispatcher.Pause(context.Background(), key)
 		return err
 	}
-	return nil
+	instanceID, err := server.RuntimeInstanceID()
+	if err != nil {
+		_ = c.dispatcher.Pause(context.Background(), key)
+		return fmt.Errorf("读取新启动的 tmux 实例身份: %w", err)
+	}
+	if err := c.dispatcher.BindInstance(key, instanceID); err != nil {
+		return err
+	}
+	return c.dispatcher.Resume(key)
 }
 
 func (c *TmuxControl) Stop(ctx context.Context, roomName, worldName string) error {
@@ -125,32 +131,82 @@ func (c *TmuxControl) Send(ctx context.Context, roomName, worldName, command str
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return c.dispatcher.Dispatch(ctx, c.shardKey(roomName, worldName), consoledispatch.Request{Execute: func(sendContext context.Context) error {
+	server, err := c.server(roomName, worldName)
+	if err != nil {
+		return err
+	}
+	instanceID, err := server.RuntimeInstanceID()
+	if err != nil {
+		return err
+	}
+	key := c.shardKey(roomName, worldName)
+	if err := c.dispatcher.BindInstance(key, instanceID); err != nil {
+		return err
+	}
+	writeAttempted := false
+	err = c.dispatcher.Dispatch(ctx, key, consoledispatch.Request{InstanceID: instanceID, Execute: func(sendContext context.Context) error {
 		if err := sendContext.Err(); err != nil {
 			return err
 		}
-		server, err := c.server(roomName, worldName)
+		current, err := c.server(roomName, worldName)
 		if err != nil {
 			return err
 		}
-		return server.SendCommand(command)
+		currentID, err := current.RuntimeInstanceID()
+		if err != nil {
+			return err
+		}
+		if currentID != instanceID {
+			return consoledispatch.ErrInstanceChanged
+		}
+		writeAttempted = true
+		return current.SendCommand(command)
 	}})
+	if err != nil && writeAttempted && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		c.dispatcher.MarkInputDirty(key)
+	}
+	return err
 }
 
 func (c *TmuxControl) SendBackground(ctx context.Context, roomName, worldName, coalesceKey, command string) error {
-	return c.dispatcher.Dispatch(ctx, c.shardKey(roomName, worldName), consoledispatch.Request{
-		Class: consoledispatch.ClassBackground, CoalesceKey: coalesceKey,
+	server, err := c.server(roomName, worldName)
+	if err != nil {
+		return err
+	}
+	instanceID, err := server.RuntimeInstanceID()
+	if err != nil {
+		return err
+	}
+	key := c.shardKey(roomName, worldName)
+	if err := c.dispatcher.BindInstance(key, instanceID); err != nil {
+		return err
+	}
+	writeAttempted := false
+	err = c.dispatcher.Dispatch(ctx, key, consoledispatch.Request{
+		Class: consoledispatch.ClassBackground, CoalesceKey: coalesceKey, InstanceID: instanceID,
 		Execute: func(sendContext context.Context) error {
 			if err := sendContext.Err(); err != nil {
 				return err
 			}
-			server, err := c.server(roomName, worldName)
+			current, err := c.server(roomName, worldName)
 			if err != nil {
 				return err
 			}
-			return server.SendCommand(command)
+			currentID, err := current.RuntimeInstanceID()
+			if err != nil {
+				return err
+			}
+			if currentID != instanceID {
+				return consoledispatch.ErrInstanceChanged
+			}
+			writeAttempted = true
+			return current.SendCommand(command)
 		},
 	})
+	if err != nil && writeAttempted && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		c.dispatcher.MarkInputDirty(key)
+	}
+	return err
 }
 
 func (c *TmuxControl) ConsoleHealth(roomName, worldName string) consoledispatch.Health {
