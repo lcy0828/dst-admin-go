@@ -222,25 +222,40 @@ Agent enroll
 ```text
 Discover / Inventory / Status
 Start / Stop / Restart / Save / SendConsole
-ConsoleHealth / ConfirmCommand
+ConsoleHealth / ObserveOperation
 StreamLogs / ReadArtifacts
 StageBackup / RestoreBackup
 PrepareMod / PublishConfig / VerifyRuntime
 ```
 
-Driver 输入只引用已登记的 `environmentId`、`installationId`、Room、Shard、配置版本、租约和 fencing token，不接受任意命令、镜像、路径、挂载或 Kubernetes manifest。Driver 输出保留平台原始身份：native PID/tmux session、container ID、Pod UID 和 restart count。
+Driver 输入只引用已登记的 `environmentId`、`installationId`、Room、Shard、配置版本、租约和 fencing token，不接受任意宿主命令、镜像、路径、挂载或 Kubernetes manifest。只有显式 `rawConsole` capability 和高风险授权可以携带受限 Lua payload；它不能转换为宿主 Shell。Driver 输出保留平台原始身份：native PID/tmux socket/session/pane、container ID、Pod UID 和 restart count。
 
 实现顺序：
 
-1. 把现有 tmux 分片控制封装为 `native` Driver，API 与行为保持完全等价。
-2. 将现有“tmux 已接收”状态映射为 transport acknowledgement；日志采集消费 `START/DONE` marker 后再实现 `ConfirmCommand`，超时或实例变化返回 `unknown`。
-3. 房间操作、日志、备份、Mod 和 Runtime 诊断全部改为依赖 Driver 契约。
-4. 增加 `container` Driver；首版保留 Shard 容器内 `tmux-compat` console transport，Agent 仍独立运行。
-5. 最后增加 `kubernetes` Driver，不在控制器中拼接 kubectl Shell 命令。
+1. 建立 Agent 内唯一的 per-Shard console dispatcher；本地与 Agent 都通过它串行发送，停止期间拒绝新命令，后台探针有界合并。
+2. 把现有 tmux 分片控制封装为 `native` Driver；按 RuntimeInstallation 隔离 socket，固定并校验 pane 与 DST process instance。
+3. 将现有“tmux 已接收”映射为 `sent`，再按操作类型实现完成证据：ready observation、process exit、snapshot barrier、受管文件回执或 probe nonce。原始 Lua 不承诺 `confirmed`。
+4. 交付类型化 `StreamLogs/ReadArtifacts`，再把房间操作、命令、自动化、玩家/世界探针、日志、备份、Mod 和 Runtime 诊断全部改为依赖 Driver 契约。
+5. 迁移旧 cron/taskbridge、动态日志监控和 tmux 枚举旁路；CI 只允许 native Driver/低层 tmux adapter 直接导入 tmux package。
+6. 增加 `container` Driver；首版保留 Shard 容器内 `tmux-compat` console transport，Agent 仍独立运行。
+7. 最后增加 `kubernetes` Driver，不在控制器中拼接 kubectl Shell 命令。
 
-每个 Driver 必须声明 capability。缺少 `consoleInput`、`consoleAck`、`exclusiveCpu`、`volumeSnapshot`、`publishedUdpEndpoint` 等能力时，UI 显示不支持或明确降级选项，不能假定所有平台等价。
+每个 Driver 必须声明 capability。缺少 `consoleInput`、`managedRuntimeReceipt`、`snapshotBarrier`、`rawConsole`、`exclusiveCpu`、`volumeSnapshot`、`publishedUdpEndpoint` 等能力时，UI 显示不支持或明确降级选项，不能假定所有平台等价。
 
-`SendConsole` 必须写入正在运行的 DST 主进程 stdin。`docker exec` 只会创建新进程，不能直接作为实现；它仅可调用固定的 tmux/console client。每个请求携带 command ID、目标实例 ID、deadline 和 fencing token，同一 Shard 串行发送。transport 接受与日志 marker 确认分开记录；Agent/Engine 重启或实例变化造成结果不确定时返回 `unknown`，危险命令不自动重放。
+`SendConsole` 必须写入正在运行的 DST 主进程 stdin。`docker exec` 只会创建新进程，不能直接作为实现；它仅可调用固定的 tmux/console client。每个请求携带 operation ID/kind、目标 instance ID、deadline、lease 和 fencing token，同一 Shard 的所有调用源由一个 dispatcher 串行发送。transport 接受只产生 `sent`；`ObserveOperation` 根据操作类型读取证据。Agent/Engine 重启、pane 输入状态不确定或 instance 变化时返回 `unknown/input_dirty`，危险命令不自动重放。
+
+完成证据固定映射：启动看新 instance ready；停止看目标进程退出；热保存看所有必需 Shard 的 snapshot 屏障；`customcommands.lua` 看 session/shard/request 匹配的持久回执；探针看 nonce 完整批次；原始 Lua 默认只到 `sent`。不能为了统一回执强制包装任意 Lua，从而改变 Mod 或控制台语义。
+
+远程迁移清单必须逐项关闭本地旁路：
+
+| 当前路径 | 目标 |
+| --- | --- |
+| `routers/router.go` 中共享本机 `tmuxControl/savePath` | 按 Placement 解析 Runtime Driver 与 Artifact provider |
+| `pkg/taskbridge`、tmux cron task | 迁移为 Room/Shard ID 的自动化领域动作；无法映射的旧任务禁用并生成报告 |
+| `service/logmonitor`、`service/logparser`、server monitor 的 tmux 枚举 | 使用 topology observation 与 `StreamLogs` |
+| 玩家/世界 console fallback | 使用统一 dispatcher，后台请求可合并并受生命周期门禁 |
+| 备份固定等待 2 秒 | snapshot barrier；不可用时使用 cold-consistent fallback |
+| 旧 `/api/tmux` 写操作 | 兼容期转发 typed Driver，禁止直接执行；最终删除 |
 
 ## 7. 分布式生命周期
 
@@ -422,8 +437,17 @@ Mod 管理继续区分：
 | 主服务容器直接接管宿主 | 默认禁用 host PID/DST 路径/Docker Socket，改由 Agent 控制 |
 | Agent 容器状态卷丢失 | 持久化身份/fencing/幂等状态，丢失后阻止自动接管 |
 | Agent 容器越权控制宿主 native DST | 单独 host-integration profile、最小 bind mount 和高风险确认 |
-| 容器能启停但不能发送 DST 命令 | Runtime Driver 强制 `consoleInput/consoleAck` capability 和等价验收 |
-| 命令在重启边界发给错误实例 | instance ID、fencing、单 Shard 串行和 marker 确认 |
+| 容器能启停但不能发送 DST 命令 | Runtime Driver 强制 `consoleInput/operationEvidence` capability 和等价验收 |
+| 命令在重启边界发给错误实例 | instance ID、fencing、per-Shard dispatcher 和操作类型证据 |
+| 原始 Lua 被包装后与 Mod 行为不同 | 原始 Lua 只报告 sent；可靠产品动作进入受管 Runtime allowlist |
+| 多来源控制台输入交叉 | Agent per-Shard dispatcher、有界队列、停止门禁和输入 dirty 状态 |
+| 同宿主多个 Installation 的 tmux session 冲突 | 安装级私有 tmux socket、稳定 session identity 和固定 pane ID |
+| tmux 返回权限/socket 错误却被当成 stopped | ConsoleHealth 细分错误，只有明确 not_found 才是不存在 |
+| 服主手动 attach 与自动命令交叉 | 只读 attach；可写 attach 获取 maintenance lease，未知 writer 时阻止 dispatcher |
+| 容器用空闲进程保活，DST 已退但容器仍 Running | init + runtime supervisor 作为 PID 1，退出码和 instance observation 绑定 DST |
+| Engine restart policy 绕过 fencing 自动拉起旧 Shard | 默认控制器恢复 desired state；禁止默认 always/unless-stopped |
+| 主服务读取远程 savePath | 仅允许类型化 ArtifactRef、范围读取、generation 和大小限制 |
+| 普通日志泄露完整 Lua/敏感参数 | 审计保存类型、摘要、hash 和证据引用；敏感内容分权与脱敏 |
 | 容器可写层或 Pod 消失导致存档丢失 | 显式 volume/PVC、回收策略和恢复前校验 |
 | K8s 节点失联后重复调度写同一存档 | Room lease、fencing、Pod UID、PVC 所有权与旧实例终止确认 |
 | 部分成功 | 逐目标结果、补偿步骤和显式降级状态 |
@@ -471,14 +495,19 @@ Mod 管理继续区分：
 - 交付主服务非 root OCI 镜像与 Compose：持久化数据库/WAL、配置和密钥引用；默认不挂 host PID、DST 路径或 Docker Socket。
 - 交付 Linux systemd 与 macOS launchd 的 Agent 安装/升级/卸载流程；验证 Agent 通过主服务容器暴露的 WebSocket 主动连接。
 - 新增 ExecutionEnvironment、Runtime Driver capability 和统一观察身份。
-- 把现有 tmux 实现迁入 `native` Driver，并用现有 API/测试证明行为等价。
+- 新增 per-Shard console dispatcher；命令、自动化、备份、玩家/世界探针和 Runtime Bridge 共用同一串行与生命周期门禁。
+- 把现有 tmux 实现迁入 `native` Driver：每个 Installation 私有 socket、固定 pane、literal 输入、instance 校验、输入 dirty 和细分 ConsoleHealth。
+- 交付 Agent 本地 console attach CLI：默认只读；可写模式需要超时 maintenance lease，Web UI 不提供宿主 Shell。
+- 建立操作类型化证据；受管 Runtime 继续使用结构化文件回执，原始 Lua UI 明确显示“已发送，未确认执行”。
+- 交付 `StreamLogs/ReadArtifacts`，ArtifactRef 不包含任意路径并支持 generation、offset、大小上限和内容校验。
+- 迁移 cron/taskbridge、动态日志监控、日志解析和旧 tmux API 旁路，并增加直接 tmux import 的架构回归检查。
 - 新增 NetworkProfile、PortReservation、四类 UDP 端点和作用域冲突预检。
 - 新增 CPU policy；先交付 `none`、拓扑观察和能力展示，再在 Linux 交付 `reserved/exclusive`。
 - 前端拓扑和执行确认展示环境、内外端点、CPU 策略、实际 cpuset 和最近校验时间。
 - 把当前 local/Agent target 回填为 RuntimeProvider + Node + `native/default` 环境；旧 API 在兼容期从新模型投影返回。
 - 把存档导入的全局端口重写改为基于目标 NetworkScope 的分配器；native 单节点行为保持不变。
 
-完成标准：本机和现有 Agent 的所有已交付功能无回归；旧配置自动映射为 `native/default` 环境；未配置高级策略时运行行为不变。主服务容器 + 同宿主/远程裸机 Agent + 裸机 DST 可以完成发现、启动、停止、保存、日志和审计，且主服务容器没有宿主控制权限。
+完成标准：本机和现有 Agent 的所有已交付功能无回归；旧配置自动映射为 `native/default` 环境；未配置高级策略时运行行为不变。主服务容器 + 同宿主/远程裸机 Agent + 裸机 DST 可以完成发现、启动、停止、保存、命令、自动化、玩家/世界探针、Runtime 激活、日志、Artifact 回执和审计，且主服务容器没有宿主控制权限或远程路径读取旁路。
 
 ### Phase 6：容器 Agent 与可选容器 Runtime
 
@@ -486,7 +515,10 @@ Mod 管理继续区分：
 - Agent capability 分成 `container-runtime` 和 `native-host-integration`；前者为推荐容器模式，后者在 Linux 实机验证前保持高风险实验状态。
 - `native-host-integration` 明确要求同 UID/GID、最小受信路径、tmux socket/运行目录和宿主进程可见性；缺少任一能力时不得报告 native control 可用。
 - 交付一个 Shard 一个容器的 Runtime profile、非 root 镜像和持久 volume 契约；Shard 容器首版保留 `tmux-compat`，Agent 不与 DST 合并。
-- container Driver 交付 `SendConsole/ConsoleHealth/ConfirmCommand`；固定 tmux client 动作是兼容基线，Docker attach/stdin 通过专项验证后才可设为默认。
+- Shard 镜像使用轻量 init + 固定 runtime supervisor 作为 PID 1；supervisor 创建临时 tmux socket/pane、等待 DST、传播退出原因并处理 SIGTERM，不允许 `sleep infinity` 保活。
+- container Driver 交付 `SendConsole/ConsoleHealth/ObserveOperation`；固定 tmux client 动作是兼容基线，Docker attach/stdin 通过专项验证后才可设为默认。
+- tmux socket 与控制临时状态位于 `/run` tmpfs；存档、配置、Mod、日志和 staging 使用显式持久 volume，并校验 UID/GID。
+- 默认禁用 `always/unless-stopped` 一类脱离 lease 的 Engine 自动恢复；由 Agent 根据持久 desired state 和 fencing 协调恢复。
 - 支持 bridge/host 网络、UDP published endpoint、优雅停止和容器退出审计。
 - 支持 CPU quota 与 cpuset，明确区分限制份额和独占核心。
 - 同一宿主的 native/container 资源合并预检，容器 OOM kill 单独审计；默认不设置未经用户确认的低内存硬上限。
@@ -495,7 +527,8 @@ Mod 管理继续区分：
 
 ### Phase 7：一致性备份与恢复
 
-- 实现保存屏障、分片快照、manifest 和逻辑备份集。
+- 先实现 `cold-consistent`：协调停止、确认无写入、分片快照、manifest、逻辑备份集和可选恢复原运行状态。
+- `hot-consistent` 只有在游戏事件、Runtime 回执和故障注入证明跨分片 snapshot 屏障后开放；固定等待与 mtime 稳定不算证据。
 - 完成整套恢复、失败恢复和完整性校验。
 - native 与 container Driver 使用同一备份协议；容器存档只从受管 volume staging，不从可写层提取。
 
@@ -521,7 +554,7 @@ Mod 管理继续区分：
 - 支持普通 CPU request/limit；只有集群满足 CPU Manager static 等前提时开放 exclusive。
 - 支持保存屏障后的 CSI snapshot adapter，并保持 manifest/上传备份作为通用 fallback。
 - Placement 默认交给 scheduler 在允许节点池内选择，固定 Worker 只在高级模式开放；按 Worker 批量停止只作用于实际位于该节点的受管 Shard，不等同于 drain 或迁移。
-- Pod Runtime 提供与 native/container 相同的 `SendConsole/ConsoleHealth/ConfirmCommand`，控制台不可用时不允许保存屏障或危险命令。
+- Pod Runtime 提供与 native/container 相同的 `SendConsole/ConsoleHealth/ObserveOperation`，控制台不可用时不允许热保存屏障或危险命令。
 
 完成故障注入和至少两个 Kubernetes/CSI 组合验证前，界面固定标记“实验能力”，不宣称生产可用。
 
@@ -537,6 +570,15 @@ Mod 管理继续区分：
 - container Runtime 分别验证保存、优雅停止、玩家命令、命令目录、自动化和 `customcommands.lua` 热激活。
 - tmux-compat 在 Agent 重启后继续发送命令；attach/stdin 在反复 attach、Docker 重启、高日志量和并发请求下不关闭 DST stdin。
 - 命令发送后 Shard 恰好重启时返回 `unknown`，不会把危险命令重放给新实例。
+- 同一宿主两个 Installation 使用相同 Cluster/Shard 名仍落到不同 tmux socket/pane，命令不会串服。
+- 多来源并发发送时严格串行；停止开始后拒绝探针，队列满/过期可观察，partial send 进入 input_dirty 后不会拼接下一条命令。
+- raw Lua 的分号、引号、UTF-8、最大长度、换行拒绝和 Mod 自定义全局函数不因 transport 包装改变；UI 只显示 sent。
+- ConsoleHealth 分别验证 disabled、not_found、socket_unavailable、permission_denied、pane_dead、process_mismatch 和 input_dirty。
+- tmux 只读 attach 不影响自动命令；可写 maintenance attach 暂停 dispatcher，未知外部 writer 触发 external_writer 且不会交叉发送。
+- PID 1 supervisor 验证正常退出码、SIGTERM 优雅关服、超时 SIGKILL、OOM、DST 崩溃而 tmux/容器尚存以及 Agent 离线时的状态。
+- Docker daemon/节点重启后，Shard 不会绕过 desired state、lease 和 fencing 自动形成双实例。
+- 远程命令回执、日志 follow、offset 续传、日志截断/轮转、Artifact generation 变化和大小限制。
+- 旧 cron/taskbridge 和日志监控不再直接访问 tmux；无法映射的旧任务被禁用并可人工修复。
 - 两节点、一个房间、Master 与 Caves 分离。
 - 三节点、一个房间、三个自定义分片。
 - 一个节点运行多个房间。
@@ -550,7 +592,7 @@ Mod 管理继续区分：
 - Secondary 节点异常退出和恢复。
 - Agent 断线、网络分区和控制中心重启。
 - 操作提交后重复请求和 Agent 重连。
-- 一致性备份成功、部分失败、上传中断和整套恢复。
+- cold-consistent 与 hot-consistent 备份成功、保存屏障超时、部分失败、上传中断和整套恢复；热证据不足时不得标记 complete。
 - Mod 下载失败、版本不一致、配置发布失败和回滚。
 - 磁盘不足、端口冲突和 DST 版本不一致。
 - Linux/Linux 与 macOS/Linux 组合。

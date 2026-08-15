@@ -190,6 +190,10 @@ Docker 官方资料同时说明：bind mount 默认可写宿主文件并与宿�
 - `tmux/tmux.go` 使用 `tmux send-keys ... C-m` 把 Lua 输入正在运行的 DST 会话。
 - 保存、优雅停止、玩家管理、命令目录、自动化、运行时激活和 console fallback 都依赖统一 `Send` 接口。
 - `internal/console/service.go` 会在脚本前后打印 `START/DONE` marker，但当前 `Store.Complete` 在 `Send` 返回后就将状态记为 `sent`；尚无日志消费者用 `DONE` 确认 DST 已实际执行。
+- `internal/backups/service.go` 在发送 `c_save()` 后固定等待 2 秒，尚未确认跨分片 snapshot 已完成。
+- `TmuxControl` 没有所有调用方共享的 per-Shard 串行器；Runtime Bridge 只有自己的 world lock，命令、探针、备份和其他调用仍可能交叉。
+- v2 tmux session 名只编码 Cluster/Shard，不包含 RuntimeInstallation；同一宿主的不同安装使用同名 Cluster 时可能冲突。`send-keys` 目标也是 session 而非启动时记录的固定 pane。
+- `pkg/taskbridge`、cron server monitor、dynamic log monitor 和 auto parser 仍直接解析或枚举 tmux，尚未经过 Runtime Driver。
 
 因此“容器能启动/停止”不等于 Runtime 功能等价。Docker 官方说明，`docker exec` 会在运行容器内启动一个新进程；它不能直接向已有 DST 主进程 stdin 写入 Lua。Docker attach 可以连接运行容器主进程的 stdin/stdout/stderr，Engine API 也提供 `AttachStdin`、`OpenStdin` 和 `StdinOnce`，但 attached client 断开、日志缓冲、Engine 重启和并发写入仍需实机验证。
 
@@ -198,7 +202,10 @@ Docker 官方资料同时说明：bind mount 默认可写宿主文件并与宿�
 - native Runtime 继续使用 tmux。
 - container Runtime 首版在每个 Shard 容器内保留 `tmux-compat`，Agent 通过固定 container Driver 动作调用 tmux client；Agent 与 DST 仍不放在同一容器。
 - attach/stdin 作为后续候选 transport，要求 `OpenStdin=true`、`StdinOnce=false`、`Tty=false` 并只 attach stdin；完成等价矩阵前不替换 tmux。
-- Runtime Driver 必须提供 `SendConsole`、`ConsoleHealth` 和命令 marker 确认，区分“已写入 transport”和“DST 已执行”。
+- Agent 为每个逻辑 Shard 提供唯一、有界、带生命周期门禁的 console dispatcher，每个队列项绑定 instance ID；所有命令、探针、保存和自动化共用，不能依赖各模块局部锁。发送前持久化 in-flight，Agent 重启后不重放未确认项。
+- native tmux 按 RuntimeInstallation 使用私有 socket，并固定 session/pane/process identity；literal payload 与 Enter 必须作为一个受管 transport 操作，partial send 后进入 `input_dirty`。
+- Runtime Driver 提供 `SendConsole`、`ConsoleHealth` 和 `ObserveOperation`。transport 成功只表示 `sent`；启动、停止、保存、受管命令和探针分别使用 ready、process exit、snapshot barrier、结构化文件回执和 nonce 结果确认。
+- 原始 Lua 默认不包装，不宣称 `confirmed`。这是为避免改变 Mod 命令、语法环境、错误和返回语义；需要可靠回执的产品动作进入 `customcommands.lua` allowlist。
 - 目标实例变化或确认中断时结果为 `unknown`；保存、关服等危险命令不得自动重放到新实例。
 
 来源：
@@ -209,6 +216,30 @@ Docker 官方资料同时说明：bind mount 默认可写宿主文件并与宿�
 - Docker Engine API container configuration and attach endpoint：<https://docs.docker.com/reference/api/engine/>
 
 访问日期：2026-08-15。可信度：当前 tmux 与 Docker API 语义高；DST attach/stdin 的长期可靠性需实机验证。
+
+### 1.12 tmux-compat 需要明确容器主进程和恢复边界
+
+Docker 官方资料确认：
+
+- 容器的主进程接收停止信号；默认先收到 `SIGTERM`，宽限期后仍未退出会收到 `SIGKILL`。
+- `--init` 可以加入轻量 init 处理子进程回收，但不会自动理解 DST 保存或 tmux session 语义。
+- Docker 提供 `no`、`on-failure`、`always` 和 `unless-stopped` 等 restart policy。Engine 自动重启只依据容器退出/daemon 状态，不知道本项目的 Room lease、fencing、旧 instance 或共享存储所有权。
+
+因此 Shard 容器不能用 `sleep infinity` 作为 PID 1 后再仅靠 `docker exec` 启动 DST；这种形态会造成 DST 已退出但容器仍显示 Running、退出码丢失和停止信号无法完成游戏保存。首版容器契约为：
+
+- 轻量 init 启动固定 runtime supervisor；supervisor 创建 tmux socket/session/pane、等待 DST 进程并传播退出来源。
+- Agent 正常停止先发送 `c_shutdown(true)` 并等待目标 instance 退出；直接 `docker stop` 时，supervisor 只在 console ready 时把 SIGTERM 转换为同一有界优雅关服。输入 dirty 或控制台不可用时使用信号 fallback、记录未保存风险，超时才允许 Engine 强制终止。
+- tmux socket、PID 和输入状态位于容器 `/run` tmpfs，不能跨容器重建复用；存档、配置、Mod、日志和 staging 使用显式持久 volume。
+- 默认 restart policy 不独立恢复 DST；由 Agent 持久 desired state 并在 lease/fencing/存储所有权确认后重建。未来节点本地恢复模式必须单独限制和验收。
+
+来源：
+
+- Docker Docs, Run multiple processes in a container：<https://docs.docker.com/engine/containers/multi-service_container/>
+- Docker Docs, Start containers automatically：<https://docs.docker.com/engine/containers/start-containers-automatically/>
+- Docker Docs, `docker container stop`：<https://docs.docker.com/reference/cli/docker/container/stop/>
+- tmux manual, socket 与 `send-keys`：<https://man.openbsd.org/tmux.1>
+
+访问日期：2026-08-15。可信度：Docker/tmux 平台语义高；supervisor 到 DST 的信号和退出码映射需镜像级故障注入验证。
 
 ## 2. CPU 容量规则
 
@@ -253,7 +284,15 @@ Docker 官方资料同时说明：bind mount 默认可写宿主文件并与宿�
 15. Agent 容器状态卷丢失、回滚或复制后，identity/fencing 防止重复接管的行为。
 16. container tmux-compat 在 Agent/Engine 重启、Shard 高日志量和多次命令发送后的控制台可用性。
 17. Docker attach/stdin 的断开重连、并发串行、stdin 是否保持打开，以及 Lua 换行/编码行为。
-18. 命令 transport 成功但 marker 未出现、命令执行中 Shard 重启和危险命令去重语义。
+18. 命令 transport 成功但操作类型证据未出现、命令执行中 Shard 重启和危险命令去重语义。
+19. 同宿主多个 RuntimeInstallation 使用相同 Cluster/Shard 名时的 tmux socket、session、pane 和进程隔离。
+20. tmux payload 已输入但 Enter 未确认时，`input_dirty` 能否阻止下一条命令拼接并提供安全恢复。
+21. ConsoleHealth 对关闭控制台、socket 不存在、权限错误、pane dead、process mismatch 和普通 stopped 的区分。
+22. tmux 只读 attach、受管可写 maintenance attach 和未知外部 writer 对 dispatcher 的隔离行为。
+23. PID 1 supervisor 对正常退出、SIGTERM、SIGKILL、OOM、DST 崩溃和 Agent 断线的退出来源映射。
+24. Engine/节点重启后 restart policy 不绕过 desired state、lease、fencing 和存储所有权。
+25. `cold-consistent` 备份的停止/恢复与 `hot-consistent` snapshot 屏障在大型存档和高负载 Mod 下的行为。
+26. 远程 Artifact offset/generation、日志轮转截断、回执大小限制和 Agent 重连续传。
 
 ## 4. 实机测试记录格式
 
