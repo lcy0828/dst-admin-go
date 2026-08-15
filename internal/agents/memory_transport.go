@@ -187,6 +187,27 @@ func (m *MemoryTransport) ExecuteRuntime(ctx context.Context, agentID string, re
 			result.Outcome = shared.RuntimeOutcomeConfirmed
 		}
 	}
+	if request.Action == shared.RuntimeActionCPUPrepare || request.Action == shared.RuntimeActionCPUApply || request.Action == shared.RuntimeActionCPUObserve {
+		if request.CPU == nil {
+			return RuntimeExecutionResult{}, ErrInvalidInput
+		}
+		state := shared.RuntimeCPUStateApplied
+		if request.Action == shared.RuntimeActionCPUPrepare {
+			state = shared.RuntimeCPUStatePrepared
+		}
+		if request.CPU.Policy == shared.RuntimeCPUPolicyNone {
+			state = shared.RuntimeCPUStateReleased
+		}
+		result.CPU = &shared.RuntimeCPUResult{
+			Policy: request.CPU.Policy, LogicalCPUIds: append([]int(nil), request.CPU.LogicalCPUIds...),
+			EffectiveCPUIds: append([]int(nil), request.CPU.LogicalCPUIds...), State: state,
+			RuntimeKind: "memory", InstanceID: "memory-shard", Enforced: state != shared.RuntimeCPUStatePrepared,
+			InstanceRunning: state == shared.RuntimeCPUStateApplied, ObservedAt: m.now().UTC(),
+		}
+		if request.Action != shared.RuntimeActionCPUObserve {
+			result.Outcome = shared.RuntimeOutcomeConfirmed
+		}
+	}
 	return RuntimeExecutionResult{RemoteID: "memory-" + request.OperationID, Result: result}, nil
 }
 

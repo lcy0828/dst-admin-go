@@ -51,6 +51,9 @@ const (
 	RuntimeActionModOverridesRead        RuntimeAction = "runtime.mods.overrides.read"
 	RuntimeActionGameVersionObserve      RuntimeAction = "runtime.game.version.observe"
 	RuntimeActionGameVersionUpdate       RuntimeAction = "runtime.game.version.update"
+	RuntimeActionCPUPrepare              RuntimeAction = "runtime.cpu.prepare"
+	RuntimeActionCPUApply                RuntimeAction = "runtime.cpu.apply"
+	RuntimeActionCPUObserve              RuntimeAction = "runtime.cpu.observe"
 )
 
 type ConsoleMode string
@@ -200,6 +203,7 @@ type RuntimeOperationRequest struct {
 	Backup           *RuntimeBackupRequest      `json:"backup,omitempty"`
 	Mod              *RuntimeModRequest         `json:"mod,omitempty"`
 	GameVersion      *RuntimeGameVersionRequest `json:"game_version,omitempty"`
+	CPU              *RuntimeCPURequest         `json:"cpu,omitempty"`
 }
 
 type RuntimeOutcome string
@@ -392,6 +396,7 @@ type RuntimeOperationResult struct {
 	Backup           *RuntimeBackupResult      `json:"backup,omitempty"`
 	Mod              *RuntimeModResult         `json:"mod,omitempty"`
 	GameVersion      *RuntimeGameVersionResult `json:"game_version,omitempty"`
+	CPU              *RuntimeCPUResult         `json:"cpu,omitempty"`
 }
 
 func IsRuntimeAction(value RuntimeAction) bool {
@@ -412,6 +417,8 @@ func IsRuntimeAction(value RuntimeAction) bool {
 		RuntimeActionModReleaseComplete, RuntimeActionModReleaseState, RuntimeActionModOverridesRead:
 		return true
 	case RuntimeActionGameVersionObserve, RuntimeActionGameVersionUpdate:
+		return true
+	case RuntimeActionCPUPrepare, RuntimeActionCPUApply, RuntimeActionCPUObserve:
 		return true
 	default:
 		return false
@@ -435,6 +442,8 @@ func RuntimeActionMutates(value RuntimeAction) bool {
 		RuntimeActionModReleaseComplete:
 		return true
 	case RuntimeActionGameVersionUpdate:
+		return true
+	case RuntimeActionCPUPrepare, RuntimeActionCPUApply:
 		return true
 	default:
 		return false

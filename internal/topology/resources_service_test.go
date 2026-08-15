@@ -177,6 +177,9 @@ func TestCPUAllocationPoliciesAndSMTSiblingSafety(t *testing.T) {
 	if _, err := validateCPUAllocation(CPUAllocationUpdate{EnvironmentID: "environment", Policy: CPUPolicyExclusive, LogicalCPUIds: []int{0, 1}}, roomA, worldA, localTargetID, cpu, "darwin", nil); !errors.Is(err, ErrCPUNotSupported) {
 		t.Fatalf("darwin exclusive error=%v", err)
 	}
+	if _, err := validateCPUAllocation(CPUAllocationUpdate{EnvironmentID: "environment", Policy: CPUPolicyShared, LogicalCPUIds: []int{0}}, roomA, worldA, localTargetID, cpu, "darwin", nil); !errors.Is(err, ErrCPUNotSupported) {
+		t.Fatalf("darwin shared error=%v", err)
+	}
 	if _, err := validateCPUAllocation(CPUAllocationUpdate{EnvironmentID: "environment", Policy: CPUPolicyExclusive, LogicalCPUIds: []int{0}}, roomA, worldA, localTargetID, cpu, "linux", nil); err == nil {
 		t.Fatal("partial SMT core did not require acknowledgement")
 	}
@@ -193,6 +196,63 @@ func TestCPUAllocationPoliciesAndSMTSiblingSafety(t *testing.T) {
 	}
 	if _, err := validateCPUAllocation(CPUAllocationUpdate{EnvironmentID: "environment", Policy: CPUPolicyExclusive, LogicalCPUIds: []int{0, 2}, AllowSMTSiblingRisk: true}, roomB, worldB, localTargetID, cpu, "linux", nil); err == nil {
 		t.Fatal("exclusive allocation accepted multiple physical cores")
+	}
+}
+
+type recordingCPUAllocationExecutor struct {
+	result shared.RuntimeCPUResult
+	err    error
+	calls  []CPUAllocation
+}
+
+func (e *recordingCPUAllocationExecutor) ApplyCPUAllocation(_ context.Context, value CPUAllocation) (shared.RuntimeCPUResult, error) {
+	e.calls = append(e.calls, value)
+	return e.result, e.err
+}
+
+func TestCPUAllocationPersistsDesiredAndObservedState(t *testing.T) {
+	now := time.Now().UTC()
+	room, world := resourceRoom("room-cpu", "Cluster_CPU")
+	inventory := runtimeInventory(resourceLocalTarget(), 4, 2, []shared.RoomInventoryReport{resourceInventoryRoom(room.DirectoryName, 10889, 10999, 8767, 27017)}, nil, now)
+	inventory.Inventory.CPU.TopologyAvailable = true
+	inventory.Inventory.CPU.Threads = []shared.CPUThreadInventory{{LogicalID: 0, PackageID: "0", CoreID: "0"}, {LogicalID: 1, PackageID: "0", CoreID: "0"}, {LogicalID: 2, PackageID: "0", CoreID: "1"}, {LogicalID: 3, PackageID: "0", CoreID: "1"}}
+	store := newTopologyTestStore(t)
+	service, _ := NewService(topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {world}}}, topologyTargetCatalog{items: []agents.RuntimeTargetInventory{inventory}}, store)
+	if _, err := service.Topology(context.Background(), room.ID); err != nil {
+		t.Fatal(err)
+	}
+	executor := &recordingCPUAllocationExecutor{result: shared.RuntimeCPUResult{Policy: shared.RuntimeCPUPolicyExclusive, LogicalCPUIds: []int{0, 1}, EffectiveCPUIds: []int{0, 1}, State: shared.RuntimeCPUStateApplied, RuntimeKind: "native", InstanceID: "42:100", PID: 42, Enforced: true, InstanceRunning: true, ObservedAt: now}}
+	if err := service.ConfigureCPUExecutor(executor); err != nil {
+		t.Fatal(err)
+	}
+	allocation, err := service.UpdateCPUAllocation(context.Background(), CPUAllocationUpdate{RoomID: room.ID, WorldID: world.ID, EnvironmentID: environmentResourceID(localTargetID), Policy: CPUPolicyExclusive, LogicalCPUIds: []int{0, 1}})
+	if err != nil || len(executor.calls) != 1 || allocation.ExecutionState != CPUExecutionApplied || allocation.Observed == nil || !allocation.Observed.Enforced {
+		t.Fatalf("allocation=%#v calls=%d err=%v", allocation, len(executor.calls), err)
+	}
+	stored, err := store.CPUAllocation(room.ID, world.ID)
+	if err != nil || stored.ExecutionState != CPUExecutionApplied || stored.Observed == nil || stored.Observed.InstanceID != "42:100" {
+		t.Fatalf("stored=%#v err=%v", stored, err)
+	}
+}
+
+func TestCPUAllocationPersistsExecutionFailure(t *testing.T) {
+	now := time.Now().UTC()
+	room, world := resourceRoom("room-cpu-fail", "Cluster_CPU_Fail")
+	inventory := runtimeInventory(resourceLocalTarget(), 2, 2, []shared.RoomInventoryReport{resourceInventoryRoom(room.DirectoryName, 10889, 10999, 8767, 27017)}, nil, now)
+	store := newTopologyTestStore(t)
+	service, _ := NewService(topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {world}}}, topologyTargetCatalog{items: []agents.RuntimeTargetInventory{inventory}}, store)
+	if _, err := service.Topology(context.Background(), room.ID); err != nil {
+		t.Fatal(err)
+	}
+	executor := &recordingCPUAllocationExecutor{err: errors.New("cgroup unavailable")}
+	_ = service.ConfigureCPUExecutor(executor)
+	_, err := service.UpdateCPUAllocation(context.Background(), CPUAllocationUpdate{RoomID: room.ID, WorldID: world.ID, EnvironmentID: environmentResourceID(localTargetID), Policy: CPUPolicyShared, LogicalCPUIds: []int{0}})
+	if err == nil {
+		t.Fatal("expected CPU execution failure")
+	}
+	stored, loadErr := store.CPUAllocation(room.ID, world.ID)
+	if loadErr != nil || stored.ExecutionState != CPUExecutionFailed || stored.ExecutionError != "cgroup unavailable" || stored.Policy != CPUPolicyShared {
+		t.Fatalf("stored=%#v err=%v", stored, loadErr)
 	}
 }
 

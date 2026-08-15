@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"dont/internal/consoledispatch"
+	"dont/internal/runtimecpu"
 	"dont/internal/shards"
+	"dont/shared"
 )
 
 type containerCLICall struct{ arguments []string }
@@ -59,6 +62,10 @@ func containerTestInstallation() RuntimeInstallation {
 
 func containerListLine(id, state, cluster, shard string) []byte {
 	return []byte(`{"ID":"` + id + `","Names":"dst-` + shard + `","State":"` + state + `","Labels":"com.dst-admin.managed=true,com.dst-admin.installation=runtime-a,com.dst-admin.cluster=` + cluster + `,com.dst-admin.shard=` + shard + `"}` + "\n")
+}
+
+func containerCPUInspect(id, cluster, shard, cpuset string, nanoCPUs int64, running bool) []byte {
+	return []byte(`{"Id":"` + id + `","Config":{"Labels":{"com.dst-admin.managed":"true","com.dst-admin.installation":"runtime-a","com.dst-admin.cluster":"` + cluster + `","com.dst-admin.shard":"` + shard + `"}},"State":{"Running":` + strconv.FormatBool(running) + `},"HostConfig":{"NanoCpus":` + strconv.FormatInt(nanoCPUs, 10) + `,"CpusetCpus":"` + cpuset + `"}}`)
 }
 
 func TestContainerRuntimeUsesTrustedLabelsAndFixedConsoleArguments(t *testing.T) {
@@ -124,6 +131,38 @@ func TestContainerRuntimeRunningRequiresConsoleAndReportsInventory(t *testing.T)
 	processes, err := runtime.ContainerProcesses(context.Background())
 	if err != nil || len(processes) != 1 || processes[0].RuntimeKind != "container" || processes[0].InstanceID != id || processes[0].PID <= 0 {
 		t.Fatalf("processes=%#v err=%v", processes, err)
+	}
+}
+
+func TestContainerRuntimeAppliesAndVerifiesCPUWithTrustedIdentity(t *testing.T) {
+	id := strings.Repeat("9", 64)
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{
+		containerListLine(id, "running", "Cluster_1", "Master"), nil,
+		containerListLine(id, "running", "Cluster_1", "Master"),
+		containerCPUInspect(id, "Cluster_1", "Master", "2-3", 2_000_000_000, true),
+	}}
+	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
+	result, err := runtime.ExecuteCPU(context.Background(), "Cluster_1", "Master", shared.RuntimeActionCPUApply, shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyExclusive, LogicalCPUIds: []int{3, 2}})
+	if err != nil || !result.Enforced || result.State != shared.RuntimeCPUStateApplied || !reflect.DeepEqual(result.EffectiveCPUIds, []int{2, 3}) {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	wantUpdate := []string{"update", "--cpus", "2", "--cpuset-cpus", "2-3", id}
+	wantInspect := []string{"inspect", "--format", "{{json .}}", id}
+	if !reflect.DeepEqual(cli.calls[1].arguments, wantUpdate) || !reflect.DeepEqual(cli.calls[3].arguments, wantInspect) {
+		t.Fatalf("calls=%#v", cli.calls)
+	}
+}
+
+func TestContainerRuntimeRejectsCPUResultForChangedInstance(t *testing.T) {
+	first, second := strings.Repeat("7", 64), strings.Repeat("8", 64)
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{
+		containerListLine(first, "running", "Cluster_1", "Master"), nil,
+		containerListLine(second, "running", "Cluster_1", "Master"),
+	}}
+	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
+	_, err := runtime.ExecuteCPU(context.Background(), "Cluster_1", "Master", shared.RuntimeActionCPUApply, shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyShared, LogicalCPUIds: []int{0}})
+	if !errors.Is(err, runtimecpu.ErrInstanceChanged) {
+		t.Fatalf("error=%v", err)
 	}
 }
 

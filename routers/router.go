@@ -36,6 +36,7 @@ import (
 	playerapi "dont/internal/players"
 	"dont/internal/rooms"
 	"dont/internal/runtimeaudit"
+	"dont/internal/runtimecpu"
 	"dont/internal/runtimedriver"
 	"dont/internal/runtimeevents"
 	"dont/internal/runtimeguard"
@@ -342,12 +343,26 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	trustedServerRoot, err := filepath.Abs(serverInstallRoot)
+	if err != nil {
+		return nil, err
+	}
+	nativeCPUExecutor, err := runtimecpu.NewNative(runtimecpu.NativeConfig{ServerRoot: trustedServerRoot})
+	if err != nil {
+		return nil, err
+	}
+	if err := nativeRuntimeDriver.ConfigureCPU(nativeCPUExecutor); err != nil {
+		return nil, err
+	}
 	agentRuntimeDriver, err := runtimedriver.NewAgent(agentService)
 	if err != nil {
 		return nil, err
 	}
 	runtimeDriverRouter, err := runtimedriver.NewRouter(topologyService, operationLeaseService, nativeRuntimeDriver, agentRuntimeDriver)
 	if err != nil {
+		return nil, err
+	}
+	if err := topologyService.ConfigureCPUExecutor(runtimeDriverRouter); err != nil {
 		return nil, err
 	}
 	localMutationGuard, err := runtimeguard.New(roomService, runtimeDriverRouter)

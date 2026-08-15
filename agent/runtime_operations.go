@@ -62,6 +62,9 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 	defer cancel()
 
 	if !shared.RuntimeActionMutates(request.Action) {
+		if isCPUAction(request.Action) {
+			return a.executeCPUAction(operationContext, installation, *request)
+		}
 		if isModAction(request.Action) {
 			return a.observeModAction(operationContext, installation, *request)
 		}
@@ -96,6 +99,8 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 		result, operationErr = a.executeModAction(operationContext, installation, *request)
 	} else if request.Action == shared.RuntimeActionGameVersionUpdate {
 		result, operationErr = a.updateGameVersion(operationContext, installation, *request)
+	} else if isCPUAction(request.Action) {
+		result, operationErr = a.executeCPUAction(operationContext, installation, *request)
 	} else if request.Action == shared.RuntimeActionConsoleSend {
 		control, controlErr := a.runtimeControl(installation)
 		if controlErr != nil {
@@ -128,6 +133,9 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 			request.LeaseExpiresAt.After(now.Add(10*time.Minute)) {
 			return errors.New("Runtime 操作租约无效或已过期")
 		}
+	}
+	if !isCPUAction(request.Action) && request.CPU != nil {
+		return errors.New("Runtime 操作包含无关 CPU 负载")
 	}
 	switch request.Action {
 	case shared.RuntimeActionConsoleHealth:
@@ -186,10 +194,32 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 		if err := validateGameVersionPayload(request); err != nil {
 			return err
 		}
+	case shared.RuntimeActionCPUPrepare, shared.RuntimeActionCPUApply, shared.RuntimeActionCPUObserve:
+		if err := validateCPUOperationPayload(request); err != nil {
+			return err
+		}
 	default:
 		if err := validateBackupOperationPayload(request); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateCPUOperationPayload(request shared.RuntimeOperationRequest) error {
+	if request.CPU == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil || !shared.IsRuntimeCPUPolicy(request.CPU.Policy) {
+		return errors.New("CPU Runtime 请求无效")
+	}
+	ids := request.CPU.LogicalCPUIds
+	if request.CPU.Policy == shared.RuntimeCPUPolicyNone && len(ids) != 0 || request.CPU.Policy != shared.RuntimeCPUPolicyNone && (len(ids) == 0 || len(ids) > 4096) {
+		return errors.New("CPU Runtime 策略与逻辑 CPU 选择不一致")
+	}
+	seen := make(map[int]bool, len(ids))
+	for _, id := range ids {
+		if id < 0 || id > 1048575 || seen[id] {
+			return errors.New("CPU Runtime 逻辑 CPU 列表无效")
+		}
+		seen[id] = true
 	}
 	return nil
 }
@@ -432,6 +462,10 @@ func isModAction(action shared.RuntimeAction) bool {
 	default:
 		return false
 	}
+}
+
+func isCPUAction(action shared.RuntimeAction) bool {
+	return action == shared.RuntimeActionCPUPrepare || action == shared.RuntimeActionCPUApply || action == shared.RuntimeActionCPUObserve
 }
 
 func (a *Agent) transferManager(installation RuntimeInstallation) (*shardtransfer.Manager, error) {

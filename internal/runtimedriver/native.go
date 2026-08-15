@@ -34,9 +34,16 @@ type Native struct {
 	saveRoot string
 	control  NativeControl
 	transfer *shardtransfer.Manager
+	cpu      NativeCPUBackend
 
 	mu       sync.Mutex
 	evidence map[string]shared.RuntimeOperationEvidence
+}
+
+type NativeCPUBackend interface {
+	Prepare(context.Context, string, string, string, shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error)
+	Apply(context.Context, string, string, string, shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error)
+	Observe(context.Context, string, string, string, shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error)
 }
 
 func NewNative(saveRoot string, control NativeControl) (*Native, error) {
@@ -48,6 +55,35 @@ func NewNative(saveRoot string, control NativeControl) (*Native, error) {
 		return nil, err
 	}
 	return &Native{saveRoot: saveRoot, control: control, transfer: transfer, evidence: make(map[string]shared.RuntimeOperationEvidence)}, nil
+}
+
+func (d *Native) ConfigureCPU(backend NativeCPUBackend) error {
+	if backend == nil {
+		return ErrInvalidTarget
+	}
+	d.cpu = backend
+	return nil
+}
+
+func (d *Native) PrepareCPU(ctx context.Context, target Target, _ Operation, request shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error) {
+	if d.cpu == nil {
+		return shared.RuntimeCPUResult{}, ErrCapabilityMissing
+	}
+	return d.cpu.Prepare(ctx, target.InstallationID, target.Cluster, target.Shard, request)
+}
+
+func (d *Native) ApplyCPU(ctx context.Context, target Target, _ Operation, request shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error) {
+	if d.cpu == nil {
+		return shared.RuntimeCPUResult{}, ErrCapabilityMissing
+	}
+	return d.cpu.Apply(ctx, target.InstallationID, target.Cluster, target.Shard, request)
+}
+
+func (d *Native) ObserveCPU(ctx context.Context, target Target, request shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error) {
+	if d.cpu == nil {
+		return shared.RuntimeCPUResult{}, ErrCapabilityMissing
+	}
+	return d.cpu.Observe(ctx, target.InstallationID, target.Cluster, target.Shard, request)
 }
 
 func (d *Native) PrepareMigrationExport(ctx context.Context, target Target, _ Operation, migrationID string) (MigrationDescriptor, error) {
@@ -156,11 +192,15 @@ func backupDescriptorToTransfer(target Target, value BackupDescriptor) shardtran
 func (d *Native) Kind() Kind { return KindNative }
 
 func (d *Native) Capabilities() []Capability {
-	return []Capability{
+	result := []Capability{
 		CapabilityLifecycle, CapabilityConsoleInput, CapabilityConsoleHealth, CapabilityRawConsole,
 		CapabilityOperationProof, CapabilityLogContinuation, CapabilityArtifacts,
 		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore,
 	}
+	if d.cpu != nil {
+		result = append(result, CapabilityExclusiveCPU)
+	}
+	return result
 }
 
 func (d *Native) Status(ctx context.Context, target Target) (shared.ShardRuntimeStatus, error) {

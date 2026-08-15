@@ -28,12 +28,25 @@ type Service struct {
 	rooms   roomCatalog
 	targets targetCatalog
 	store   *Store
+	cpu     CPUAllocationExecutor
+}
+
+type CPUAllocationExecutor interface {
+	ApplyCPUAllocation(context.Context, CPUAllocation) (shared.RuntimeCPUResult, error)
 }
 
 type roomPlan struct {
 	room   rooms.Room
 	worlds []rooms.World
 	record record
+}
+
+func (s *Service) ConfigureCPUExecutor(executor CPUAllocationExecutor) error {
+	if executor == nil {
+		return errors.New("CPU allocation executor is required")
+	}
+	s.cpu = executor
+	return nil
 }
 
 type planResult struct {

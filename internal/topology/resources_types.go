@@ -62,6 +62,16 @@ const (
 	CPUPolicyExclusive CPUPolicy = "exclusive"
 )
 
+type CPUExecutionState string
+
+const (
+	CPUExecutionDesired  CPUExecutionState = "desired"
+	CPUExecutionPrepared CPUExecutionState = "prepared"
+	CPUExecutionApplied  CPUExecutionState = "applied"
+	CPUExecutionReleased CPUExecutionState = "released"
+	CPUExecutionFailed   CPUExecutionState = "failed"
+)
+
 type RuntimeProvider struct {
 	ID           string       `json:"id"`
 	TargetID     string       `json:"targetId"`
@@ -146,17 +156,20 @@ type PortAllocation struct {
 }
 
 type CPUAllocation struct {
-	ID                  string    `json:"id"`
-	EnvironmentID       string    `json:"environmentId"`
-	TargetID            string    `json:"targetId"`
-	RoomID              string    `json:"roomId"`
-	WorldID             string    `json:"worldId"`
-	Policy              CPUPolicy `json:"policy"`
-	LogicalCPUIds       []int     `json:"logicalCpuIds"`
-	PhysicalCoreKeys    []string  `json:"physicalCoreKeys"`
-	AllowSMTSiblingRisk bool      `json:"allowSmtSiblingRisk"`
-	Warnings            []string  `json:"warnings"`
-	UpdatedAt           time.Time `json:"updatedAt"`
+	ID                  string                   `json:"id"`
+	EnvironmentID       string                   `json:"environmentId"`
+	TargetID            string                   `json:"targetId"`
+	RoomID              string                   `json:"roomId"`
+	WorldID             string                   `json:"worldId"`
+	Policy              CPUPolicy                `json:"policy"`
+	LogicalCPUIds       []int                    `json:"logicalCpuIds"`
+	PhysicalCoreKeys    []string                 `json:"physicalCoreKeys"`
+	AllowSMTSiblingRisk bool                     `json:"allowSmtSiblingRisk"`
+	Warnings            []string                 `json:"warnings"`
+	ExecutionState      CPUExecutionState        `json:"executionState"`
+	Observed            *shared.RuntimeCPUResult `json:"observed,omitempty"`
+	ExecutionError      string                   `json:"executionError,omitempty"`
+	UpdatedAt           time.Time                `json:"updatedAt"`
 }
 
 type ResourceConflict struct {

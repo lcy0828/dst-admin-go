@@ -96,6 +96,9 @@ type cpuAllocationRecord struct {
 	PhysicalCoreKeys    string `gorm:"type:text;not null"`
 	AllowSMTSiblingRisk bool
 	Warnings            string `gorm:"type:text;not null"`
+	ExecutionState      string `gorm:"type:varchar(24);not null"`
+	Observed            string `gorm:"type:text;not null"`
+	ExecutionError      string `gorm:"type:text;not null"`
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 }
@@ -352,6 +355,7 @@ func (s *Store) EnsureCPUAllocations(values []CPUAllocation) error {
 			value.Policy, value.LogicalCPUIds, value.PhysicalCoreKeys = CPUPolicyNone, []int{}, []string{}
 			value.AllowSMTSiblingRisk = false
 			value.Warnings = []string{"Placement 已变化，旧 CPU 分配已重置为不绑核"}
+			value.ExecutionState, value.Observed, value.ExecutionError = CPUExecutionDesired, nil, ""
 			if _, err := s.SaveCPUAllocation(value); err != nil {
 				return err
 			}
@@ -379,11 +383,24 @@ func (s *Store) SaveCPUAllocation(value CPUAllocation) (CPUAllocation, error) {
 	} else if err := s.db.Table(s.cpuAllocationsTable).Where("id = ?", value.ID).Updates(map[string]interface{}{
 		"environment_id": record.EnvironmentID, "target_id": record.TargetID, "room_id": record.RoomID, "world_id": record.WorldID,
 		"policy": record.Policy, "logical_cpu_ids": record.LogicalCPUIds, "physical_core_keys": record.PhysicalCoreKeys,
-		"allow_smt_sibling_risk": record.AllowSMTSiblingRisk, "warnings": record.Warnings, "updated_at": now,
+		"allow_smt_sibling_risk": record.AllowSMTSiblingRisk, "warnings": record.Warnings,
+		"execution_state": record.ExecutionState, "observed": record.Observed, "execution_error": record.ExecutionError, "updated_at": now,
 	}).Error; err != nil {
 		return CPUAllocation{}, err
 	}
 	record.UpdatedAt = now
+	return allocationFromRecord(record), nil
+}
+
+func (s *Store) CPUAllocation(roomID, worldID string) (CPUAllocation, error) {
+	var record cpuAllocationRecord
+	result := s.db.Table(s.cpuAllocationsTable).Where("id = ?", allocationResourceID(roomID, worldID)).First(&record)
+	if gorm.IsRecordNotFoundError(result.Error) {
+		return CPUAllocation{}, ErrResourceNotFound
+	}
+	if result.Error != nil {
+		return CPUAllocation{}, result.Error
+	}
 	return allocationFromRecord(record), nil
 }
 
@@ -427,14 +444,30 @@ func allocationFromRecord(record cpuAllocationRecord) CPUAllocation {
 	_ = json.Unmarshal([]byte(record.LogicalCPUIds), &logical)
 	_ = json.Unmarshal([]byte(record.PhysicalCoreKeys), &cores)
 	_ = json.Unmarshal([]byte(record.Warnings), &warnings)
-	return CPUAllocation{ID: record.ID, EnvironmentID: record.EnvironmentID, TargetID: record.TargetID, RoomID: record.RoomID, WorldID: record.WorldID, Policy: CPUPolicy(record.Policy), LogicalCPUIds: logical, PhysicalCoreKeys: cores, AllowSMTSiblingRisk: record.AllowSMTSiblingRisk, Warnings: warnings, UpdatedAt: record.UpdatedAt.UTC()}
+	var observed *shared.RuntimeCPUResult
+	if strings.TrimSpace(record.Observed) != "" && strings.TrimSpace(record.Observed) != "null" {
+		var value shared.RuntimeCPUResult
+		if json.Unmarshal([]byte(record.Observed), &value) == nil {
+			observed = &value
+		}
+	}
+	state := CPUExecutionState(record.ExecutionState)
+	if state == "" {
+		state = CPUExecutionDesired
+	}
+	return CPUAllocation{ID: record.ID, EnvironmentID: record.EnvironmentID, TargetID: record.TargetID, RoomID: record.RoomID, WorldID: record.WorldID, Policy: CPUPolicy(record.Policy), LogicalCPUIds: logical, PhysicalCoreKeys: cores, AllowSMTSiblingRisk: record.AllowSMTSiblingRisk, Warnings: warnings, ExecutionState: state, Observed: observed, ExecutionError: record.ExecutionError, UpdatedAt: record.UpdatedAt.UTC()}
 }
 
 func cpuRecordFromAllocation(value CPUAllocation) cpuAllocationRecord {
 	logical, _ := json.Marshal(value.LogicalCPUIds)
 	cores, _ := json.Marshal(value.PhysicalCoreKeys)
 	warnings, _ := json.Marshal(value.Warnings)
-	return cpuAllocationRecord{ID: value.ID, EnvironmentID: value.EnvironmentID, TargetID: value.TargetID, RoomID: value.RoomID, WorldID: value.WorldID, Policy: string(value.Policy), LogicalCPUIds: string(logical), PhysicalCoreKeys: string(cores), AllowSMTSiblingRisk: value.AllowSMTSiblingRisk, Warnings: string(warnings)}
+	observed, _ := json.Marshal(value.Observed)
+	state := value.ExecutionState
+	if state == "" {
+		state = CPUExecutionDesired
+	}
+	return cpuAllocationRecord{ID: value.ID, EnvironmentID: value.EnvironmentID, TargetID: value.TargetID, RoomID: value.RoomID, WorldID: value.WorldID, Policy: string(value.Policy), LogicalCPUIds: string(logical), PhysicalCoreKeys: string(cores), AllowSMTSiblingRisk: value.AllowSMTSiblingRisk, Warnings: string(warnings), ExecutionState: string(state), Observed: string(observed), ExecutionError: value.ExecutionError}
 }
 
 func sortedUniqueInts(values []int) []int {

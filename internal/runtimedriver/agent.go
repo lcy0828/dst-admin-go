@@ -23,6 +23,7 @@ var (
 	_ Driver            = (*Agent)(nil)
 	_ ModDriver         = (*Agent)(nil)
 	_ GameVersionDriver = (*Agent)(nil)
+	_ CPUDriver         = (*Agent)(nil)
 )
 
 func NewAgent(executor AgentExecutor) (*Agent, error) {
@@ -40,7 +41,33 @@ func (d *Agent) Capabilities() []Capability {
 		CapabilityOperationProof, CapabilityLogContinuation, CapabilityArtifacts,
 		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore,
 		CapabilityModPrepare, CapabilityModPublish, CapabilityGameUpdate,
+		CapabilityExclusiveCPU,
 	}
+}
+
+func (d *Agent) PrepareCPU(ctx context.Context, target Target, operation Operation, cpu shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error) {
+	return d.executeCPU(ctx, target, operation, shared.RuntimeActionCPUPrepare, cpu)
+}
+
+func (d *Agent) ApplyCPU(ctx context.Context, target Target, operation Operation, cpu shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error) {
+	return d.executeCPU(ctx, target, operation, shared.RuntimeActionCPUApply, cpu)
+}
+
+func (d *Agent) ObserveCPU(ctx context.Context, target Target, cpu shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error) {
+	return d.executeCPU(ctx, target, Operation{ID: newOperationID()}, shared.RuntimeActionCPUObserve, cpu)
+}
+
+func (d *Agent) executeCPU(ctx context.Context, target Target, operation Operation, action shared.RuntimeAction, cpu shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error) {
+	request := runtimeRequest(target, operation, action)
+	request.CPU = &cpu
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 60)
+	if result.Result.CPU == nil {
+		if err != nil {
+			return shared.RuntimeCPUResult{}, err
+		}
+		return shared.RuntimeCPUResult{}, errors.New("Agent 未返回有效的 CPU 执行结果")
+	}
+	return *result.Result.CPU, err
 }
 
 func (d *Agent) ObserveGameVersion(ctx context.Context, target Target) (shared.RuntimeGameVersionResult, error) {

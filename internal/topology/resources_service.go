@@ -143,7 +143,50 @@ func (s *Service) UpdateCPUAllocation(ctx context.Context, input CPUAllocationUp
 	if err != nil {
 		return CPUAllocation{}, err
 	}
+	allocation.ExecutionState, allocation.Observed, allocation.ExecutionError = CPUExecutionDesired, nil, ""
+	allocation, err = s.store.SaveCPUAllocation(allocation)
+	if err != nil || s.cpu == nil {
+		return allocation, err
+	}
+	observed, applyErr := s.cpu.ApplyCPUAllocation(ctx, allocation)
+	if applyErr != nil {
+		allocation.ExecutionState = CPUExecutionFailed
+		allocation.ExecutionError = truncateResourceError(applyErr.Error())
+		allocation, _ = s.store.SaveCPUAllocation(allocation)
+		return allocation, applyErr
+	}
+	return s.RecordCPUResult(allocation.RoomID, allocation.WorldID, observed)
+}
+
+func (s *Service) CPUAllocation(roomID, worldID string) (CPUAllocation, error) {
+	return s.store.CPUAllocation(roomID, worldID)
+}
+
+func (s *Service) RecordCPUResult(roomID, worldID string, observed shared.RuntimeCPUResult) (CPUAllocation, error) {
+	allocation, err := s.store.CPUAllocation(roomID, worldID)
+	if err != nil {
+		return CPUAllocation{}, err
+	}
+	allocation.Observed, allocation.ExecutionError = &observed, ""
+	switch observed.State {
+	case shared.RuntimeCPUStateApplied:
+		allocation.ExecutionState = CPUExecutionApplied
+	case shared.RuntimeCPUStatePrepared:
+		allocation.ExecutionState = CPUExecutionPrepared
+	case shared.RuntimeCPUStateReleased:
+		allocation.ExecutionState = CPUExecutionReleased
+	default:
+		allocation.ExecutionState = CPUExecutionDesired
+	}
 	return s.store.SaveCPUAllocation(allocation)
+}
+
+func truncateResourceError(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 1000 {
+		return value[:1000]
+	}
+	return value
 }
 
 // PreflightExecution is called immediately before starting one or more Shards.
@@ -480,7 +523,7 @@ func validateCPUAllocation(input CPUAllocationUpdate, room rooms.Room, world roo
 	if len(fields) > 0 {
 		return CPUAllocation{}, &ResourceFieldError{Fields: fields}
 	}
-	if input.Policy == CPUPolicyExclusive && (strings.EqualFold(platform, "darwin") || !cpu.TopologyAvailable) {
+	if input.Policy != CPUPolicyNone && strings.EqualFold(platform, "darwin") || input.Policy == CPUPolicyExclusive && !cpu.TopologyAvailable {
 		return CPUAllocation{}, ErrCPUNotSupported
 	}
 	logicalToCore, siblings := cpuCoreTopology(cpu)

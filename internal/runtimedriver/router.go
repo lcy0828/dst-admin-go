@@ -25,6 +25,14 @@ type LeaseService interface {
 	Release(operationlease.Lease) error
 }
 
+type cpuAllocationResolver interface {
+	CPUAllocation(string, string) (topology.CPUAllocation, error)
+}
+
+type cpuObservationRecorder interface {
+	RecordCPUResult(string, string, shared.RuntimeCPUResult) (topology.CPUAllocation, error)
+}
+
 type Router struct {
 	placements PlacementResolver
 	leases     LeaseService
@@ -174,8 +182,99 @@ func (r *Router) ExecutePlacedShard(ctx context.Context, roomID, worldID string,
 		ID: request.OperationID, Key: request.OperationKey, LeaseID: request.LeaseID,
 		FencingToken: request.FencingToken, LeaseExpiresAt: request.LeaseExpiresAt,
 	}
+	var cpuDriver CPUDriver
+	var cpuRequest shared.RuntimeCPURequest
+	if request.Action == shared.ShardActionStart || request.Action == shared.ShardActionRestart {
+		resolver, ok := r.placements.(cpuAllocationResolver)
+		if !ok {
+			return shared.ShardOperationResult{}, ErrCapabilityMissing
+		}
+		allocation, allocationErr := resolver.CPUAllocation(roomID, worldID)
+		if allocationErr != nil {
+			return shared.ShardOperationResult{}, allocationErr
+		}
+		var supported bool
+		cpuDriver, supported = driver.(CPUDriver)
+		if !supported {
+			return shared.ShardOperationResult{}, ErrCapabilityMissing
+		}
+		cpuRequest = cpuRequestFromAllocation(allocation)
+		prepared, prepareErr := cpuDriver.PrepareCPU(ctx, target, cpuPhaseOperation(operation), cpuRequest)
+		if prepareErr != nil {
+			return shared.ShardOperationResult{}, prepareErr
+		}
+		if err := r.recordCPUResult(roomID, worldID, prepared); err != nil {
+			return shared.ShardOperationResult{}, err
+		}
+	}
 	result, err := driver.ExecuteShard(ctx, target, operation, request.Action, timeout)
+	if err == nil && cpuDriver != nil {
+		applied, applyErr := cpuDriver.ApplyCPU(ctx, target, cpuPhaseOperation(operation), cpuRequest)
+		if applyErr != nil {
+			rollback := cpuPhaseOperation(operation)
+			_, _ = driver.ExecuteShard(ctx, target, rollback, shared.ShardActionStop, 30*time.Second)
+			return result, applyErr
+		}
+		if recordErr := r.recordCPUResult(roomID, worldID, applied); recordErr != nil {
+			return result, recordErr
+		}
+	}
 	return result, err
+}
+
+// ApplyCPUAllocation is called after desired policy validation/persistence.
+// It serializes with room lifecycle operations and applies immediately when a
+// Shard is running; stopped instances retain a prepared policy for next start.
+func (r *Router) ApplyCPUAllocation(ctx context.Context, allocation topology.CPUAllocation) (shared.RuntimeCPUResult, error) {
+	driver, target, err := r.DriverTarget(ctx, allocation.RoomID, allocation.WorldID)
+	if err != nil {
+		return shared.RuntimeCPUResult{}, err
+	}
+	if target.TargetID != allocation.TargetID {
+		return shared.RuntimeCPUResult{}, ErrTopologyChanged
+	}
+	cpu, ok := driver.(CPUDriver)
+	if !ok {
+		return shared.RuntimeCPUResult{}, ErrCapabilityMissing
+	}
+	lease, err := r.leases.Acquire(ctx, allocation.RoomID, "runtime.cpu:"+allocation.WorldID, r.leaseTTL)
+	if err != nil {
+		return shared.RuntimeCPUResult{}, err
+	}
+	defer r.leases.Release(lease)
+	expires := lease.ExpiresAt.UTC()
+	operation := Operation{ID: newOperationID(), Key: newOperationID(), LeaseID: lease.LeaseID, FencingToken: lease.FencingToken, LeaseExpiresAt: &expires}
+	request := cpuRequestFromAllocation(allocation)
+	prepared, err := cpu.PrepareCPU(ctx, target, operation, request)
+	if err != nil {
+		return shared.RuntimeCPUResult{}, err
+	}
+	status, err := driver.Status(ctx, target)
+	if err != nil {
+		return shared.RuntimeCPUResult{}, err
+	}
+	if status.State != "running" && status.State != "starting" {
+		return prepared, nil
+	}
+	return cpu.ApplyCPU(ctx, target, cpuPhaseOperation(operation), request)
+}
+
+func cpuRequestFromAllocation(allocation topology.CPUAllocation) shared.RuntimeCPURequest {
+	return shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicy(allocation.Policy), LogicalCPUIds: append([]int(nil), allocation.LogicalCPUIds...)}
+}
+
+func cpuPhaseOperation(source Operation) Operation {
+	source.ID, source.Key = newOperationID(), newOperationID()
+	return source
+}
+
+func (r *Router) recordCPUResult(roomID, worldID string, result shared.RuntimeCPUResult) error {
+	recorder, ok := r.placements.(cpuObservationRecorder)
+	if !ok {
+		return ErrCapabilityMissing
+	}
+	_, err := recorder.RecordCPUResult(roomID, worldID, result)
+	return err
 }
 
 func (r *Router) ConsoleHealth(ctx context.Context, roomID, worldID string) (shared.RuntimeConsoleHealth, error) {

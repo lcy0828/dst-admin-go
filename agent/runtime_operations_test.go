@@ -138,6 +138,49 @@ func TestRuntimeConsoleHealth(t *testing.T) {
 	}
 }
 
+func TestRuntimeCPURequestValidation(t *testing.T) {
+	valid := runtimeOperationRequest(shared.RuntimeActionCPUApply)
+	valid.CPU = &shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyExclusive, LogicalCPUIds: []int{0, 1}}
+	if err := validateRuntimeOperationRequest(string(valid.Action), valid, 30, time.Now().UTC()); err != nil {
+		t.Fatalf("valid CPU request rejected: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*shared.RuntimeOperationRequest)
+	}{
+		{name: "missing payload", mutate: func(request *shared.RuntimeOperationRequest) { request.CPU = nil }},
+		{name: "none with CPUs", mutate: func(request *shared.RuntimeOperationRequest) {
+			request.CPU = &shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyNone, LogicalCPUIds: []int{0}}
+		}},
+		{name: "duplicate CPUs", mutate: func(request *shared.RuntimeOperationRequest) {
+			request.CPU = &shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyShared, LogicalCPUIds: []int{1, 1}}
+		}},
+		{name: "unrelated payload", mutate: func(request *shared.RuntimeOperationRequest) {
+			request.Console = &shared.RuntimeConsoleRequest{Mode: shared.ConsoleModeManaged, Command: "c_save()"}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := valid
+			cpu := *valid.CPU
+			cpu.LogicalCPUIds = append([]int(nil), valid.CPU.LogicalCPUIds...)
+			request.CPU = &cpu
+			test.mutate(&request)
+			if err := validateRuntimeOperationRequest(string(request.Action), request, 30, time.Now().UTC()); err == nil {
+				t.Fatal("invalid CPU request accepted")
+			}
+		})
+	}
+
+	observe := valid
+	observe.Action = shared.RuntimeActionCPUObserve
+	observe.OperationKey, observe.LeaseID, observe.FencingToken, observe.LeaseExpiresAt = "", "", 0, nil
+	if err := validateRuntimeOperationRequest(string(observe.Action), observe, 30, time.Now().UTC()); err != nil {
+		t.Fatalf("read-only CPU observation rejected: %v", err)
+	}
+}
+
 func TestRememberedRuntimeOperationsAreBounded(t *testing.T) {
 	values := make(map[string]rememberedRuntimeOperation)
 	for index := 0; index < maximumRememberedOperationsPerRoom+10; index++ {

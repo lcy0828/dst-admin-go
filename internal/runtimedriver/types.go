@@ -133,6 +133,15 @@ type GameVersionDriver interface {
 	UpdateGameVersion(context.Context, Target, Operation, string, bool) (shared.RuntimeGameVersionResult, error)
 }
 
+// CPUDriver is separate from Driver because CPU enforcement is optional and
+// only available when a Runtime can prove the effective process/container
+// resource boundary.
+type CPUDriver interface {
+	PrepareCPU(context.Context, Target, Operation, shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error)
+	ApplyCPU(context.Context, Target, Operation, shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error)
+	ObserveCPU(context.Context, Target, shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error)
+}
+
 type Driver interface {
 	Kind() Kind
 	Capabilities() []Capability
