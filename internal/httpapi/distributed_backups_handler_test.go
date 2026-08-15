@@ -18,7 +18,8 @@ import (
 )
 
 type distributedBackupHTTPFixture struct {
-	value distributedbackup.Set
+	value      distributedbackup.Set
+	operations []distributedbackup.Operation
 }
 
 func (f *distributedBackupHTTPFixture) List(string) ([]distributedbackup.Set, error) {
@@ -29,6 +30,19 @@ func (f *distributedBackupHTTPFixture) Get(string) (distributedbackup.Set, error
 	return f.value, nil
 }
 
+func (f *distributedBackupHTTPFixture) Operations(string) ([]distributedbackup.Operation, error) {
+	return append([]distributedbackup.Operation(nil), f.operations...), nil
+}
+
+func (f *distributedBackupHTTPFixture) Operation(id string) (distributedbackup.Operation, error) {
+	for _, operation := range f.operations {
+		if operation.ID == id {
+			return operation, nil
+		}
+	}
+	return distributedbackup.Operation{}, distributedbackup.ErrNotFound
+}
+
 func (f *distributedBackupHTTPFixture) Create(_ context.Context, roomID, name, kind, jobID string) (distributedbackup.Set, error) {
 	f.value.RoomID, f.value.Name, f.value.Kind, f.value.SourceJobID = roomID, name, kind, jobID
 	f.value.Status = distributedbackup.StatusVerified
@@ -36,7 +50,25 @@ func (f *distributedBackupHTTPFixture) Create(_ context.Context, roomID, name, k
 }
 
 func (f *distributedBackupHTTPFixture) Restore(_ context.Context, setID, _ string, _ string) (distributedbackup.RestoreResult, error) {
-	return distributedbackup.RestoreResult{SetID: setID, OperationID: "operation", ProtectionSetID: "protection"}, nil
+	operationID := "00000000-0000-4000-8000-000000000001"
+	f.operations = []distributedbackup.Operation{{
+		ID: operationID, SetID: setID, RoomID: f.value.RoomID, Kind: "restore", Phase: "completed", Status: distributedbackup.OperationRecoveryRequired,
+		Failure: "清理待重试", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}}
+	return distributedbackup.RestoreResult{SetID: setID, OperationID: operationID, ProtectionSetID: "protection", Warnings: []string{"清理待重试"}}, nil
+}
+
+func (f *distributedBackupHTTPFixture) RecoverOperation(_ context.Context, id string) (distributedbackup.Operation, error) {
+	for index, operation := range f.operations {
+		if operation.ID != id {
+			continue
+		}
+		operation.Status, operation.Phase, operation.Failure = distributedbackup.OperationSucceeded, "completed", ""
+		operation.UpdatedAt = time.Now().UTC()
+		f.operations[index] = operation
+		return operation, nil
+	}
+	return distributedbackup.Operation{}, distributedbackup.ErrNotFound
 }
 
 func TestDistributedBackupHandlerCreatesAndRestoresJobs(t *testing.T) {
@@ -80,6 +112,21 @@ func TestDistributedBackupHandlerCreatesAndRestoresJobs(t *testing.T) {
 	restoreJob := waitDistributedBackupJob(t, jobService, distributedBackupJobID(t, restored.Body.Bytes()))
 	if restoreJob.Status != jobs.StatusSucceeded || restoreJob.Kind != "backup-set.restore" {
 		t.Fatalf("restore job=%#v", restoreJob)
+	}
+
+	operations := performDistributedBackupRequest(t, router, http.MethodGet, "/api/v2/rooms/room/backup-operations", nil)
+	if operations.Code != http.StatusOK ||
+		!bytes.Contains(operations.Body.Bytes(), []byte(`"status":"recovery_required"`)) ||
+		!bytes.Contains(operations.Body.Bytes(), []byte(`"fencingToken":0`)) {
+		t.Fatalf("operations status=%d body=%s", operations.Code, operations.Body.String())
+	}
+	recovered := performDistributedBackupRequest(t, router, http.MethodPost, "/api/v2/backup-operations/00000000-0000-4000-8000-000000000001/actions/recover", nil)
+	if recovered.Code != http.StatusAccepted {
+		t.Fatalf("recover status=%d body=%s", recovered.Code, recovered.Body.String())
+	}
+	recoverJob := waitDistributedBackupJob(t, jobService, distributedBackupJobID(t, recovered.Body.Bytes()))
+	if recoverJob.Status != jobs.StatusSucceeded || recoverJob.Kind != "backup-set.recover" {
+		t.Fatalf("recover job=%#v", recoverJob)
 	}
 }
 

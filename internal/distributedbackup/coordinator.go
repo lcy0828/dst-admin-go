@@ -84,6 +84,12 @@ func (c *Coordinator) List(roomID string) ([]Set, error) { return c.store.ListSe
 
 func (c *Coordinator) Get(id string) (Set, error) { return c.store.GetSet(id) }
 
+func (c *Coordinator) Operations(roomID string) ([]Operation, error) {
+	return c.store.ListOperations(roomID)
+}
+
+func (c *Coordinator) Operation(id string) (Operation, error) { return c.store.Operation(id) }
+
 func (c *Coordinator) Create(ctx context.Context, roomID, name, kind, sourceJobID string) (Set, error) {
 	ctx, releaseRoom, err := roomops.Acquire(ctx, roomID)
 	if err != nil {

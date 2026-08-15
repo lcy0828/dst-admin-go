@@ -532,6 +532,41 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/backup-operations:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Backups]
+      operationId: listDistributedBackupOperations
+      summary: List durable create and restore operations, including recovery-required state
+      responses:
+        "200":
+          description: Backup operations ordered by most recent update
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DistributedBackupOperationListEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /backup-operations/{backupOperationId}/actions/recover:
+    parameters:
+      - name: backupOperationId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Backups, Jobs]
+      operationId: recoverDistributedBackupOperation
+      summary: Idempotently resume or roll back a recovery-required backup operation
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Backup recovery job accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /runtime-infrastructure:
     get:
       tags: [Topology, Runtime]
@@ -8488,6 +8523,42 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/DistributedBackupSetList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    DistributedBackupOperationStatus:
+      type: string
+      enum: [running, succeeded, rolled_back, recovery_required, failed]
+    DistributedBackupOperation:
+      type: object
+      additionalProperties: false
+      required: [id, setId, roomId, kind, phase, status, topologyRevision, fencingToken, originalRunningWorlds, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        setId: { type: string, format: uuid }
+        protectionSetId: { type: string, format: uuid }
+        roomId: { type: string }
+        kind: { type: string, enum: [create, restore] }
+        phase: { type: string }
+        status: { $ref: "#/components/schemas/DistributedBackupOperationStatus" }
+        topologyRevision: { type: string }
+        leaseId: { type: string, format: uuid }
+        fencingToken: { type: integer, format: int64, minimum: 0 }
+        originalRunningWorlds: { type: array, uniqueItems: true, items: { type: string } }
+        failure: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    DistributedBackupOperationList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/DistributedBackupOperation" } }
+        total: { type: integer, minimum: 0 }
+    DistributedBackupOperationListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/DistributedBackupOperationList" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     RuntimeProvider:

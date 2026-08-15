@@ -28,6 +28,20 @@ func (c *Coordinator) Recover(ctx context.Context) error {
 	return failures
 }
 
+func (c *Coordinator) RecoverOperation(ctx context.Context, operationID string) (Operation, error) {
+	operation, err := c.store.Operation(operationID)
+	if err != nil {
+		return Operation{}, err
+	}
+	if operation.Status != OperationRunning && operation.Status != OperationRecoveryRequired {
+		return operation, nil
+	}
+	if err := c.recoverOperation(ctx, operation); err != nil {
+		return Operation{}, err
+	}
+	return c.store.Operation(operationID)
+}
+
 func (c *Coordinator) recoverOperation(ctx context.Context, operation Operation) error {
 	ctx, releaseRoom, err := roomops.Acquire(ctx, operation.RoomID)
 	if err != nil {

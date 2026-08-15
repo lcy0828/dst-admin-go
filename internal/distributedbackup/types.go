@@ -104,7 +104,7 @@ type Operation struct {
 	Status                OperationStatus `json:"status"`
 	TopologyRevision      string          `json:"topologyRevision"`
 	LeaseID               string          `json:"leaseId,omitempty"`
-	FencingToken          uint64          `json:"fencingToken,omitempty"`
+	FencingToken          uint64          `json:"fencingToken"`
 	OriginalRunningWorlds []string        `json:"originalRunningWorlds"`
 	Failure               string          `json:"failure,omitempty"`
 	CreatedAt             time.Time       `json:"createdAt"`

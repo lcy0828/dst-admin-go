@@ -246,6 +246,10 @@ func TestColdConsistentBackupAndCoordinatedRestoreAcrossTargets(t *testing.T) {
 	if result.ProtectionSetID == "" || len(result.Warnings) != 0 {
 		t.Fatalf("restore=%#v", result)
 	}
+	operations, err := fixture.coordinator.Operations("room")
+	if err != nil || len(operations) < 2 || operations[0].ID != result.OperationID || operations[0].Status != OperationSucceeded {
+		t.Fatalf("operations=%#v err=%v", operations, err)
+	}
 	assertTextFile(t, filepath.Join(fixture.masterRoot, "Cluster_1", "Master", "save", "session", "data"), "master-v1")
 	assertTextFile(t, filepath.Join(fixture.cavesRoot, "Cluster_1", "Caves", "save", "session", "data"), "caves-v1")
 	assertTextFile(t, filepath.Join(fixture.masterRoot, "Cluster_1", "cluster_token.txt"), "token-v1\n")
@@ -276,10 +280,7 @@ func TestRestoreRecoveryIsIdempotentAfterRuntimeCleanupCompleted(t *testing.T) {
 	if _, err := fixture.store.SaveOperation(operation); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.coordinator.Recover(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	recovered, err := fixture.store.Operation(result.OperationID)
+	recovered, err := fixture.coordinator.RecoverOperation(context.Background(), result.OperationID)
 	if err != nil {
 		t.Fatal(err)
 	}

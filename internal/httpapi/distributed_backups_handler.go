@@ -14,8 +14,11 @@ import (
 type DistributedBackupService interface {
 	List(string) ([]distributedbackup.Set, error)
 	Get(string) (distributedbackup.Set, error)
+	Operations(string) ([]distributedbackup.Operation, error)
+	Operation(string) (distributedbackup.Operation, error)
 	Create(context.Context, string, string, string, string) (distributedbackup.Set, error)
 	Restore(context.Context, string, string, string) (distributedbackup.RestoreResult, error)
+	RecoverOperation(context.Context, string) (distributedbackup.Operation, error)
 }
 
 type DistributedBackupHandler struct {
@@ -33,8 +36,19 @@ func NewDistributedBackupHandler(backups DistributedBackupService, jobs *jobs.Se
 func (h *DistributedBackupHandler) Register(v2 *gin.RouterGroup) {
 	v2.GET("/rooms/:roomId/backup-sets", h.list)
 	v2.POST("/rooms/:roomId/backup-sets", h.create)
+	v2.GET("/rooms/:roomId/backup-operations", h.listOperations)
 	v2.GET("/backup-sets/:backupSetId", h.get)
 	v2.POST("/backup-sets/:backupSetId/actions/restore", h.restore)
+	v2.POST("/backup-operations/:backupOperationId/actions/recover", h.recoverOperation)
+}
+
+func (h *DistributedBackupHandler) listOperations(c *gin.Context) {
+	values, err := h.backups.Operations(c.Param("roomId"))
+	if err != nil {
+		distributedBackupFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, gin.H{"items": values, "total": len(values)})
 }
 
 func (h *DistributedBackupHandler) list(c *gin.Context) {
@@ -120,6 +134,31 @@ func (h *DistributedBackupHandler) restore(c *gin.Context) {
 	Success(c, http.StatusAccepted, job)
 }
 
+func (h *DistributedBackupHandler) recoverOperation(c *gin.Context) {
+	operationID := c.Param("backupOperationId")
+	operation, err := h.backups.Operation(operationID)
+	if err != nil {
+		distributedBackupFailure(c, err)
+		return
+	}
+	job, err := h.jobs.SubmitFactory("backup-set.recover", operation.RoomID, "", []jobs.TargetSpec{{ID: operation.ID, Name: operation.Kind}}, func(jobs.Job) jobs.Runner {
+		return func(ctx context.Context, report func(jobs.TargetResult)) error {
+			recovered, recoverErr := h.backups.RecoverOperation(ctx, operation.ID)
+			if recoverErr != nil {
+				report(jobs.TargetResult{TargetID: operation.ID, Status: jobs.StatusFailed, Error: distributedBackupJobError(recoverErr)})
+				return nil
+			}
+			report(jobs.TargetResult{TargetID: operation.ID, Status: jobs.StatusSucceeded, Message: "备份恢复操作已完成：" + string(recovered.Status)})
+			return nil
+		}
+	})
+	if err != nil {
+		Failure(c, http.StatusInternalServerError, "JOB_CREATE_FAILED", "无法创建备份恢复任务", nil)
+		return
+	}
+	Success(c, http.StatusAccepted, job)
+}
+
 func distributedBackupJobError(err error) *jobs.Error {
 	code := "BACKUP_SET_OPERATION_FAILED"
 	switch {
@@ -133,6 +172,8 @@ func distributedBackupJobError(err error) *jobs.Error {
 		code = "BACKUP_SHARED_FILES_DIFFER"
 	case errors.Is(err, distributedbackup.ErrIncomplete):
 		code = "BACKUP_SET_INCOMPLETE"
+	case errors.Is(err, distributedbackup.ErrRecoveryIncomplete):
+		code = "BACKUP_RECOVERY_REQUIRED"
 	}
 	return &jobs.Error{Code: code, Message: err.Error()}
 }

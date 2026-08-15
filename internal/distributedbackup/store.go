@@ -261,6 +261,26 @@ func (s *Store) Operation(id string) (Operation, error) {
 	return operationFromRecord(record)
 }
 
+func (s *Store) ListOperations(roomID string) ([]Operation, error) {
+	var records []operationRecord
+	query := s.db.Table(s.operationTable)
+	if strings.TrimSpace(roomID) != "" {
+		query = query.Where("room_id = ?", roomID)
+	}
+	if err := query.Order("updated_at DESC, created_at DESC").Find(&records).Error; err != nil {
+		return nil, err
+	}
+	values := make([]Operation, 0, len(records))
+	for _, record := range records {
+		value, err := operationFromRecord(record)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}
+
 func (s *Store) ActiveOperations() ([]Operation, error) {
 	var records []operationRecord
 	if err := s.db.Table(s.operationTable).Where("status IN (?)", []string{string(OperationRunning), string(OperationRecoveryRequired)}).Order("created_at ASC").Find(&records).Error; err != nil {
@@ -344,6 +364,9 @@ func operationFromRecord(record operationRecord) (Operation, error) {
 	var running []string
 	if err := json.Unmarshal([]byte(record.OriginalRunningWorlds), &running); err != nil {
 		return Operation{}, err
+	}
+	if running == nil {
+		running = []string{}
 	}
 	return Operation{
 		ID: record.ID, SetID: record.SetID, ProtectionSetID: record.ProtectionSetID, RoomID: record.RoomID,
