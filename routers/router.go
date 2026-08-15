@@ -25,6 +25,7 @@ import (
 	"dont/internal/gameupdate"
 	"dont/internal/httpapi"
 	"dont/internal/jobs"
+	"dont/internal/kubernetesruntime"
 	"dont/internal/logstream"
 	"dont/internal/modcontrol"
 	"dont/internal/moddistribution"
@@ -225,6 +226,11 @@ func initApplication(manageBackground bool) (*Application, error) {
 		LuaBinary: luaBinary, LuaFallbackPath: luaFallbackPath, ServerMode: serverMode,
 	})
 	agentHandler := httpapi.NewAgentHandler(agentService)
+	kubernetesRuntimeService := kubernetesruntime.LoadExperimentalService()
+	kubernetesRuntimeHandler, err := httpapi.NewKubernetesRuntimeHandler(kubernetesRuntimeService)
+	if err != nil {
+		return nil, err
+	}
 	topologyStore := topology.NewStore(models.DB(), tablePrefix)
 	if err := topologyStore.Migrate(); err != nil {
 		return nil, err
@@ -808,6 +814,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		worldStateHandler.Register(v2)
 		automationHandler.Register(v2)
 		agentHandler.Register(v2)
+		kubernetesRuntimeHandler.Register(v2)
 		topologyHandler.Register(v2)
 		placementMigrationHandler.Register(v2)
 		systemStatusHandler.Register(v2)
