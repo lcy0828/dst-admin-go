@@ -4,7 +4,17 @@ set -eu
 repo=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 cd "$repo"
 
-go test ./agent ./server ./routers ./internal/agents ./internal/runtimedriver -count=1
+if command -v go >/dev/null 2>&1; then
+  go test ./agent ./server ./routers ./internal/agents ./internal/runtimedriver -count=1
+else
+  # Source tests model a native Agent; the Compose checks below validate the container profile.
+  docker run --rm \
+    --mount "type=bind,src=$repo,dst=/src,readonly" \
+    --workdir /src \
+    --env DST_ADMIN_AGENT_DEPLOYMENT=native \
+    golang:1.25-bookworm \
+    go test ./agent ./server ./routers ./internal/agents ./internal/runtimedriver -count=1
+fi
 grep -F 'USER 10000:10000' deploy/docker/Dockerfile.agent >/dev/null
 grep -F '/var/lib/dst-admin/unmanaged-saves' deploy/docker/Dockerfile.control-plane >/dev/null
 grep -F '/var/lib/dst-admin/unmanaged-server' deploy/docker/control-plane-entrypoint.sh >/dev/null
