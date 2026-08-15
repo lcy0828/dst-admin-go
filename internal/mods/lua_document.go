@@ -58,11 +58,18 @@ func loadModOverride(path string) (modOverrideDocument, error) {
 		data = []byte("return {}\n")
 		mode = 0640
 	}
-	root, err := parseLuaTable(data, filepath.Base(path))
+	return parseModOverrideContent(data, mode, exists, filepath.Base(path))
+}
+
+func parseModOverrideContent(data []byte, mode os.FileMode, exists bool, name string) (modOverrideDocument, error) {
+	if len(data) == 0 {
+		data = []byte("return {}\n")
+	}
+	root, err := parseLuaTable(data, name)
 	if err != nil {
 		return modOverrideDocument{}, err
 	}
-	return modOverrideDocument{root: root, data: data, mode: mode, exists: exists, revision: contentRevision(data)}, nil
+	return modOverrideDocument{root: root, data: append([]byte(nil), data...), mode: mode, exists: exists, revision: contentRevision(data)}, nil
 }
 
 func parseLuaTable(data []byte, name string) (*luaNode, error) {
