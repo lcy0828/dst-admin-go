@@ -193,6 +193,54 @@ func TestActivationFailurePreservesCommittedPublication(t *testing.T) {
 	}
 }
 
+func TestActivationRecoveryRestartsShardsFromPersistedRunningSnapshot(t *testing.T) {
+	worlds, placements := twoTargetWorlds()
+	worlds[0].IsMaster = true
+	activation := activationRuntimeFor(worlds)
+	app := newTestApplication(t, worlds, placements)
+	coordinator := coordinatorWithActivation(t, app, activation)
+	plan, err := coordinator.Preview(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication, err := coordinator.Publish(context.Background(), PublishRequest{ID: "publication-activation-crash", Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	publication.RestartRequired = true
+	publication.Activation = Activation{Policy: restartActivationPolicy(), Status: ActivationStatusRestarting, RequestedAt: &now, Shards: activationShards(plan, now)}
+	for index := range publication.Activation.Shards {
+		publication.Activation.Shards[index].WasRunning = true
+	}
+	if publication, err = app.store.Save(publication); err != nil {
+		t.Fatal(err)
+	}
+	activation.mu.Lock()
+	activation.calls = nil
+	for _, world := range worlds {
+		activation.states[world.WorldID] = ShardRuntimeObservation{State: "stopped"}
+	}
+	activation.mu.Unlock()
+
+	recovered, err := coordinator.RecoverOne(context.Background(), publication.ID)
+	if err != nil || recovered.Activation.Status != ActivationStatusSucceeded || recovered.RestartRequired {
+		t.Fatalf("recovered=%#v err=%v", recovered, err)
+	}
+	activation.mu.Lock()
+	calls := append([]activationCall(nil), activation.calls...)
+	activation.mu.Unlock()
+	expected := []activationCall{{"stop", "caves"}, {"stop", "master"}, {"start", "master"}, {"start", "caves"}}
+	if len(calls) != len(expected) {
+		t.Fatalf("activation recovery calls=%#v", calls)
+	}
+	for index := range expected {
+		if calls[index] != expected[index] {
+			t.Fatalf("activation recovery order=%#v", calls)
+		}
+	}
+}
+
 func TestManualActivationPolicyPreservesExistingPublicationFlow(t *testing.T) {
 	worlds, placements := twoTargetWorlds()
 	app := newTestApplication(t, worlds, placements)

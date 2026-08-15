@@ -108,6 +108,10 @@ func (c *Coordinator) Activate(ctx context.Context, publicationID, activationID 
 }
 
 func (c *Coordinator) activateCommitted(ctx context.Context, publication Publication, fences []Fence, policy ActivationPolicy) (Publication, error) {
+	return c.activateCommittedWithRunningSnapshot(ctx, publication, fences, policy, nil)
+}
+
+func (c *Coordinator) activateCommittedWithRunningSnapshot(ctx context.Context, publication Publication, fences []Fence, policy ActivationPolicy, originalRunning map[string]bool) (Publication, error) {
 	if c.activation == nil {
 		return c.failActivation(publication, nil, "ACTIVATION_UNAVAILABLE", errors.New("Mod activation runtime is unavailable"))
 	}
@@ -133,6 +137,7 @@ func (c *Coordinator) activateCommitted(ctx context.Context, publication Publica
 	running := make(map[string]bool, len(publication.Activation.Shards))
 	worlds := activationWorlds(publication.Plan)
 	for _, world := range worlds {
+		key := worldKey(world.RoomID, world.WorldID)
 		index := activationShardIndex(publication, world.RoomID, world.WorldID)
 		observation, statusErr := c.activation.Status(activationContext, world)
 		if statusErr != nil {
@@ -141,17 +146,20 @@ func (c *Coordinator) activateCommitted(ctx context.Context, publication Publica
 		result := &publication.Activation.Shards[index]
 		result.RuntimeState = observation.State
 		result.WasRunning = observation.SessionExists || observation.State == "running" || observation.State == "starting"
+		if originalRunning != nil {
+			result.WasRunning = originalRunning[key]
+		}
 		if !result.WasRunning {
 			result.Status, result.UpdatedAt = ActivationStatusSkipped, c.now().UTC()
 			continue
 		}
-		running[worldKey(world.RoomID, world.WorldID)] = true
+		running[key] = true
 		if policy.LoadConfirmation == LoadConfirmationLogs {
 			cursor, cursorErr := c.activation.CaptureLogCursor(activationContext, world)
 			if cursorErr != nil {
 				return c.failActivation(publication, result, "LOG_CURSOR_FAILED", cursorErr)
 			}
-			cursors[worldKey(world.RoomID, world.WorldID)] = cursor
+			cursors[key] = cursor
 		}
 	}
 	if len(running) == 0 {
@@ -250,6 +258,31 @@ func (c *Coordinator) activateCommitted(ctx context.Context, publication Publica
 	publication.Activation.FinishedAt = &finished
 	publication.RestartRequired, publication.UpdatedAt = false, finished
 	return c.store.Save(publication)
+}
+
+func activationRunningSnapshot(publication Publication) (map[string]bool, bool) {
+	worlds := activationWorlds(publication.Plan)
+	if len(worlds) == 0 || len(publication.Activation.Shards) != len(worlds) {
+		return nil, false
+	}
+	known := make(map[string]bool, len(worlds))
+	captured := false
+	for _, shard := range publication.Activation.Shards {
+		key := worldKey(shard.RoomID, shard.WorldID)
+		if _, exists := known[key]; exists {
+			return nil, false
+		}
+		known[key] = shard.WasRunning
+		if shard.WasRunning || shard.Status != ActivationStatusPending {
+			captured = true
+		}
+	}
+	for _, world := range worlds {
+		if _, exists := known[worldKey(world.RoomID, world.WorldID)]; !exists {
+			return nil, false
+		}
+	}
+	return known, captured
 }
 
 func (c *Coordinator) confirmShardLoaded(ctx context.Context, world WorldPlan, cursor LogCursor, confirmation LoadConfirmation) (string, string, error) {

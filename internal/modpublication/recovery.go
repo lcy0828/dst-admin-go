@@ -53,7 +53,11 @@ func (c *Coordinator) RecoverOne(ctx context.Context, publicationID string) (Pub
 	var recovered Publication
 	var recoverErr error
 	if activationRecovery {
-		recovered, recoverErr = c.activateCommitted(ctx, publication, fences, publication.Activation.Policy)
+		if originalRunning, captured := activationRunningSnapshot(publication); captured {
+			recovered, recoverErr = c.activateCommittedWithRunningSnapshot(ctx, publication, fences, publication.Activation.Policy, originalRunning)
+		} else {
+			recovered, recoverErr = c.activateCommitted(ctx, publication, fences, publication.Activation.Policy)
+		}
 	} else if publication.CommitDecision {
 		recovered, recoverErr = c.completeAndActivate(ctx, publication, fences)
 	} else {
