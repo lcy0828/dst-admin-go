@@ -42,8 +42,9 @@ func (r *applyRuntime) IsRunning(_ context.Context, _, world string) (bool, erro
 func (r *applyRuntime) Send(context.Context, string, string, string) error { return nil }
 
 type applyModDownloader struct {
-	root      string
-	downloads []string
+	root        string
+	downloads   []string
+	downloadErr error
 }
 
 type applyPortAllocator struct {
@@ -70,6 +71,9 @@ func (allocator *applyPortAllocator) ReleasePorts(_ context.Context, leaseID str
 
 func (d *applyModDownloader) Download(_ context.Context, request modapi.DownloadRequest, _ io.Writer) (modapi.ActionResult, error) {
 	d.downloads = append(d.downloads, request.ModID)
+	if d.downloadErr != nil {
+		return modapi.ActionResult{}, d.downloadErr
+	}
 	if err := os.MkdirAll(filepath.Join(d.root, request.ModID), 0750); err != nil {
 		return modapi.ActionResult{}, err
 	}
@@ -242,6 +246,49 @@ func TestApplyUsesDurablePortLeaseAndActivatesAfterPublication(t *testing.T) {
 	}
 	if cluster.Section("SHARD").Key("master_port").MustInt(0) != 11889 || server.Section("NETWORK").Key("server_port").MustInt(0) != 11999 {
 		t.Fatalf("allocated configuration cluster=%s server=%s", cluster.Section("SHARD").Key("master_port").String(), server.Section("NETWORK").Key("server_port").String())
+	}
+}
+
+func TestApplyReleasesPortLeaseWhenModInstallFails(t *testing.T) {
+	app := newApplyTestApp(t)
+	value := uploadAnalyzedImportWithMod(t, app, "mod-failure")
+	allocator := importTestPortAllocator()
+	if err := app.service.ConfigurePortAllocator(allocator); err != nil {
+		t.Fatal(err)
+	}
+	app.downloader.downloadErr = errors.New("steamcmd failed")
+	_, err := app.service.Apply(context.Background(), value.ID, "job-mod-failure", ApplyRequest{
+		CandidateID: value.Manifest.Candidates[0].ID, Mode: ApplyModeNew, DirectoryName: "FailedModImport",
+		RoomName: "Failed Mod Import", TokenPolicy: TokenSource, NetworkPolicy: NetworkAuto, ModPolicy: ModsInstallMissing,
+	})
+	if err == nil || !strings.Contains(err.Error(), "steamcmd failed") {
+		t.Fatalf("apply error=%v", err)
+	}
+	if allocator.released != allocator.allocation.LeaseID || allocator.activated != "" {
+		t.Fatalf("allocator after Mod failure=%#v", allocator)
+	}
+	if _, statErr := os.Stat(filepath.Join(app.saveRoot, "FailedModImport")); !os.IsNotExist(statErr) {
+		t.Fatalf("failed import was published: %v", statErr)
+	}
+}
+
+func TestApplyReleasesPortLeaseWhenModInstallIsCanceled(t *testing.T) {
+	app := newApplyTestApp(t)
+	value := uploadAnalyzedImportWithMod(t, app, "mod-cancel")
+	allocator := importTestPortAllocator()
+	if err := app.service.ConfigurePortAllocator(allocator); err != nil {
+		t.Fatal(err)
+	}
+	app.downloader.downloadErr = context.Canceled
+	_, err := app.service.Apply(context.Background(), value.ID, "job-cancel", ApplyRequest{
+		CandidateID: value.Manifest.Candidates[0].ID, Mode: ApplyModeNew, DirectoryName: "CanceledModImport",
+		RoomName: "Canceled Mod Import", TokenPolicy: TokenSource, NetworkPolicy: NetworkAuto, ModPolicy: ModsInstallMissing,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("apply error=%v want context cancellation", err)
+	}
+	if allocator.released != allocator.allocation.LeaseID || allocator.activated != "" {
+		t.Fatalf("allocator after cancellation=%#v", allocator)
 	}
 }
 
@@ -427,6 +474,32 @@ func TestApplyRejectsSourcePortsUsedByAnotherRoom(t *testing.T) {
 	}
 }
 
+func TestNetworkSourceAndPreserveRequestsAreStrict(t *testing.T) {
+	app := newApplyTestApp(t)
+	root := createRecoveryRoom(t, app.saveRoot, "StrictNetwork", "save")
+	requests, err := networkPortRequests(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) == 0 {
+		t.Fatalf("strict network requests=%#v", requests)
+	}
+	for _, request := range requests {
+		if !request.Strict {
+			t.Fatalf("source/preserve request was allowed to drift: %#v", request)
+		}
+	}
+	automatic, err := networkPortRequests(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range automatic {
+		if request.Strict {
+			t.Fatalf("automatic request unexpectedly strict: %#v", request)
+		}
+	}
+}
+
 func TestApplyPreservesPortsByShardIDWhenDirectoryNamesDiffer(t *testing.T) {
 	app := newApplyTestApp(t)
 	target := createManagedRoom(t, app, "Target", "Target Room", "target-token-1234567890", 12001, "old")
@@ -562,6 +635,49 @@ func TestServiceRecoveryUnmanagesInterruptedNewRoom(t *testing.T) {
 	}
 }
 
+func TestServiceReleasesInterruptedApplyLeaseAfterAllocatorIsConfigured(t *testing.T) {
+	app := newApplyTestApp(t)
+	value := analyzedImportForRecovery(t, app)
+	target := createRecoveryRoom(t, app.saveRoot, "ImportedLeaseRecovery", "new-save")
+	roomID := rooms.EncodeID(filepath.Base(target))
+	stagingName := ".dst-admin-import-interrupted-lease"
+	if err := app.store.BeginApply(value.ID, ApplyModeNew, roomID, filepath.Base(target), stagingName, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store.SetApplyPortLease(value.ID, "lease-restart"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.rooms.Adopt(roomID); err != nil {
+		t.Fatal(err)
+	}
+
+	service, err := NewService(
+		Config{SaveRoot: app.saveRoot, ImportRoot: app.importRoot, WorkshopRoot: app.workshopRoot},
+		app.store, app.rooms, app.runtime, app.backups, app.downloader,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeConfigure, err := app.store.Get(value.ID)
+	if err != nil || beforeConfigure.Status != StatusApplying {
+		t.Fatalf("lease recovery ran before allocator was available: value=%#v err=%v", beforeConfigure, err)
+	}
+	allocator := &applyPortAllocator{}
+	if err := service.ConfigurePortAllocator(allocator); err != nil {
+		t.Fatal(err)
+	}
+	if allocator.released != "lease-restart" || allocator.activated != "" {
+		t.Fatalf("allocator after restart recovery=%#v", allocator)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("interrupted imported room still exists: %v", err)
+	}
+	recovered, err := app.store.Get(value.ID)
+	if err != nil || recovered.Status != StatusReady || recovered.ErrorCode != "SERVER_RESTARTED" {
+		t.Fatalf("recovered import=%#v err=%v", recovered, err)
+	}
+}
+
 func TestServiceFinishesCommittedReplacementAfterRestart(t *testing.T) {
 	app := newApplyTestApp(t)
 	target := createManagedRoom(t, app, "Target", "Target Room", "target-token-1234567890", 12001, "old-save")
@@ -648,6 +764,36 @@ func analyzedImportForRecovery(t *testing.T, app applyTestApp) Session {
 		t.Fatal(err)
 	}
 	return value
+}
+
+func uploadAnalyzedImportWithMod(t *testing.T, app applyTestApp, name string) Session {
+	t.Helper()
+	archive := createZIP(t, []archiveTestEntry{
+		{name: "cluster.ini", content: clusterINI("Imported")},
+		{name: "cluster_token.txt", content: "source-token-1234567890\n"},
+		{name: "Master/server.ini", content: serverINI(true, 1, 10999)},
+		{name: "Master/save/session/source/0000000001", content: "save"},
+		{name: "Master/modoverrides.lua", content: `return {["workshop-1392778117"] = { enabled = true }}`},
+	})
+	value, err := app.service.Upload(context.Background(), name, name+".zip", bytes.NewReader(archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err = app.service.Analyze(context.Background(), value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func importTestPortAllocator() *applyPortAllocator {
+	masterID := rooms.EncodeID("Master")
+	return &applyPortAllocator{allocation: topology.PortAllocation{LeaseID: "lease-import", Reservations: []topology.PortReservation{
+		{WorldID: masterID, Purpose: topology.PortClusterMaster, Port: 11889},
+		{WorldID: masterID, Purpose: topology.PortDSTServer, Port: 11999},
+		{WorldID: masterID, Purpose: topology.PortSteamAuth, Port: 9767},
+		{WorldID: masterID, Purpose: topology.PortSteamMasterServer, Port: 28017},
+	}}}
 }
 
 func createRecoveryRoom(t *testing.T, saveRoot, name, save string) string {

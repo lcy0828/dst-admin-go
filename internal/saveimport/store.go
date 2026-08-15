@@ -202,7 +202,7 @@ func (s *Store) MarkApplyFailed(id, code, message string) error {
 	return s.db.Table(s.table).Where("id = ?", id).Updates(map[string]interface{}{
 		"status": StatusReady, "error_code": code, "error_message": message, "updated_at": now,
 		"apply_phase": "", "apply_mode": "", "apply_room_id": "", "apply_target": "",
-		"apply_staging": "", "apply_rollback": "",
+		"apply_staging": "", "apply_rollback": "", "apply_port_lease_id": "",
 	}).Error
 }
 

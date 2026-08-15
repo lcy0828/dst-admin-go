@@ -82,7 +82,7 @@ func (s *Service) ConfigurePortAllocator(allocator PortAllocator) error {
 		return errors.New("save import port allocator is required")
 	}
 	s.ports = allocator
-	return nil
+	return s.recoverInterrupted()
 }
 
 func NewService(config Config, store *Store, roomManager RoomManager, runtime Runtime, backupCreator BackupCreator, modDownloader ModDownloader, guards ...runtimeguard.MutationGuard) (*Service, error) {
@@ -389,6 +389,12 @@ func (s *Service) recoverInterrupted() error {
 		return err
 	}
 	for _, record := range records {
+		// The allocator is wired after Service construction. Keep the journal
+		// intact until its durable lease can be released or activated as part of
+		// the same recovery decision.
+		if strings.TrimSpace(record.ApplyPortLeaseID) != "" && s.ports == nil {
+			continue
+		}
 		switch Status(record.Status) {
 		case StatusAnalyzing:
 			if err := s.recoverAnalysis(record); err != nil {
