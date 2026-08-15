@@ -20,6 +20,7 @@ import (
 
 	"dont/internal/roomops"
 	"dont/internal/rooms"
+	"dont/internal/runtimeguard"
 
 	"github.com/google/uuid"
 	"github.com/shirou/gopsutil/v3/disk"
@@ -76,6 +77,11 @@ type Service struct {
 	saveSettle time.Duration
 	locksMu    sync.Mutex
 	roomLocks  map[string]*sync.Mutex
+	guard      runtimeguard.MutationGuard
+}
+
+func (s *Service) ConfigureMutationGuard(guard runtimeguard.MutationGuard) {
+	s.guard = guard
 }
 
 func NewService(saveRoot, backupRoot string, roomCatalog RoomCatalog, runtime Runtime, store *Store) (*Service, error) {
@@ -113,6 +119,9 @@ func (s *Service) List(roomID string) ([]Backup, error) {
 func (s *Service) Get(id string) (Backup, error) { return s.store.Get(id) }
 
 func (s *Service) Create(ctx context.Context, roomID, name string, kind Kind, sourceJobID string) (Backup, error) {
+	if err := s.requireLocalRoom(roomID); err != nil {
+		return Backup{}, err
+	}
 	ctx, release, err := roomops.Acquire(ctx, roomID)
 	if err != nil {
 		return Backup{}, err
@@ -223,6 +232,9 @@ func (s *Service) Delete(id string) (Backup, error) {
 	if err != nil {
 		return Backup{}, err
 	}
+	if err := s.requireLocalRoom(value.RoomID); err != nil {
+		return Backup{}, err
+	}
 	lock := s.roomLock(value.RoomID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -261,6 +273,9 @@ func (s *Service) Open(id string) (*os.File, os.FileInfo, Backup, error) {
 }
 
 func (s *Service) Restore(ctx context.Context, roomID, backupID, confirmation, sourceJobID string) (Backup, error) {
+	if err := s.requireLocalRoom(roomID); err != nil {
+		return Backup{}, err
+	}
 	ctx, release, err := roomops.Acquire(ctx, roomID)
 	if err != nil {
 		return Backup{}, err
@@ -344,6 +359,9 @@ func (s *Service) Restore(ctx context.Context, roomID, backupID, confirmation, s
 }
 
 func (s *Service) ValidateRestore(ctx context.Context, roomID, backupID, confirmation string) (rooms.Room, Backup, error) {
+	if err := s.requireLocalRoom(roomID); err != nil {
+		return rooms.Room{}, Backup{}, err
+	}
 	room, err := s.resolveRoom(roomID)
 	if err != nil {
 		return rooms.Room{}, Backup{}, err
@@ -437,6 +455,9 @@ func (s *Service) PruneSnapshots(roomID string, keep int) (int64, int, error) {
 	if err != nil {
 		return 0, 0, err
 	}
+	if err := s.requireLocalRoom(roomID); err != nil {
+		return 0, 0, err
+	}
 	lock := s.roomLock(roomID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -477,6 +498,13 @@ func (s *Service) PruneSnapshots(roomID string, keep int) (int64, int, error) {
 	}
 	_ = room
 	return bytes, removed, nil
+}
+
+func (s *Service) requireLocalRoom(roomID string) error {
+	if s.guard == nil {
+		return nil
+	}
+	return s.guard.RequireRoom(roomID)
 }
 
 func (s *Service) createArchiveLocked(ctx context.Context, room rooms.Room, name string, kind Kind, sourceJobID string) (Backup, error) {

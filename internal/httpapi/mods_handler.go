@@ -13,6 +13,7 @@ import (
 	"dont/internal/jobs"
 	"dont/internal/mods"
 	"dont/internal/rooms"
+	"dont/internal/runtimeguard"
 
 	"github.com/gin-gonic/gin"
 )
@@ -336,6 +337,8 @@ func modJobError(err error) *jobs.Error {
 		message = "请先将 Mod 下载到当前运行节点"
 	case errors.Is(err, mods.ErrNoChanges):
 		code = "NO_CHANGES"
+	case errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable):
+		code = runtimeguard.ErrorCode
 	}
 	return &jobs.Error{Code: code, Message: message}
 }
@@ -411,6 +414,8 @@ func modFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", "请输入完整房间名称确认此操作", nil)
 	case errors.Is(err, mods.ErrRoomNotManaged):
 		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "接管房间后才能管理 Mod", nil)
+	case errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable):
+		Failure(c, http.StatusConflict, runtimeguard.ErrorCode, "房间包含远程分片；分布式 Mod 发布尚未开放，已阻止修改控制端本机文件", nil)
 	case errors.Is(err, mods.ErrModNotConfigured):
 		Failure(c, http.StatusNotFound, "MOD_NOT_CONFIGURED", "所选世界未配置该 Mod", nil)
 	case errors.Is(err, mods.ErrModNotDownloaded):

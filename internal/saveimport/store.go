@@ -192,6 +192,19 @@ func (s *Store) MarkApplyFailed(id, code, message string) error {
 	}).Error
 }
 
+func (s *Store) MarkRecoveryBlocked(id, code, message string) error {
+	result := s.db.Table(s.table).Where("id = ? AND (status = ? OR apply_phase <> '')", id, StatusApplying).Updates(map[string]interface{}{
+		"error_code": code, "error_message": message, "updated_at": s.now().UTC(),
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrImportNotReady
+	}
+	return nil
+}
+
 func (s *Store) MarkApplied(id string) (Session, error) {
 	now := s.now().UTC()
 	result := s.db.Table(s.table).Where("id = ? AND status = ? AND apply_phase = ?", id, StatusApplying, applyPhaseCommitted).Updates(map[string]interface{}{

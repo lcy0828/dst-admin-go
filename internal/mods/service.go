@@ -15,6 +15,7 @@ import (
 	"dont/internal/backups"
 	"dont/internal/roomops"
 	"dont/internal/rooms"
+	"dont/internal/runtimeguard"
 	lua "github.com/yuin/gopher-lua"
 )
 
@@ -53,6 +54,11 @@ type Service struct {
 	locksMu   sync.Mutex
 	locks     map[string]*sync.Mutex
 	libraryMu sync.RWMutex
+	guard     runtimeguard.MutationGuard
+}
+
+func (s *Service) ConfigureMutationGuard(guard runtimeguard.MutationGuard) {
+	s.guard = guard
 }
 
 type modAggregate struct {
@@ -322,6 +328,9 @@ func mergeLocalModInfo(item *SteamMod, values map[string]interface{}) {
 }
 
 func (s *Service) Install(ctx context.Context, jobID, roomID string, request InstallRequest, output io.Writer) (ActionResult, error) {
+	if err := s.requireLocalRoom(roomID); err != nil {
+		return ActionResult{}, err
+	}
 	if _, err := s.Download(ctx, DownloadRequest{ModID: request.ModID, IncludeDependencies: request.IncludeDependencies}, output); err != nil {
 		return ActionResult{}, err
 	}
@@ -389,6 +398,9 @@ func (s *Service) EnsureLibrarySetup(modIDs []string) error {
 func (s *Service) AddToRoom(ctx context.Context, jobID, roomID, modID string, request AddToRoomRequest) (ActionResult, error) {
 	if !validModID(modID) {
 		return ActionResult{}, ErrInvalidModID
+	}
+	if err := s.requireLocalRoom(roomID); err != nil {
+		return ActionResult{}, err
 	}
 	ids, err := s.resolveDependencies(ctx, modID, request.IncludeDependencies)
 	if err != nil {
@@ -474,6 +486,9 @@ func (s *Service) UpdateLibrary(ctx context.Context, modID string, output io.Wri
 }
 
 func (s *Service) Update(ctx context.Context, roomID, modID string, output io.Writer) (ActionResult, error) {
+	if err := s.requireLocalRoom(roomID); err != nil {
+		return ActionResult{}, err
+	}
 	if _, _, err := s.resolveRoom(roomID); err != nil {
 		return ActionResult{}, err
 	}
@@ -483,6 +498,9 @@ func (s *Service) Update(ctx context.Context, roomID, modID string, output io.Wr
 func (s *Service) Enable(ctx context.Context, jobID, roomID, modID string, request EnableRequest) (ActionResult, error) {
 	if !validModID(modID) {
 		return ActionResult{}, ErrInvalidModID
+	}
+	if err := s.requireLocalRoom(roomID); err != nil {
+		return ActionResult{}, err
 	}
 	ctx, release, err := s.acquireRoom(ctx, roomID)
 	if err != nil {
@@ -542,6 +560,9 @@ func (s *Service) Enable(ctx context.Context, jobID, roomID, modID string, reque
 func (s *Service) Uninstall(ctx context.Context, jobID, roomID, modID string, request ModActionRequest) (ActionResult, error) {
 	if !validModID(modID) {
 		return ActionResult{}, ErrInvalidModID
+	}
+	if err := s.requireLocalRoom(roomID); err != nil {
+		return ActionResult{}, err
 	}
 	ctx, release, err := s.acquireRoom(ctx, roomID)
 	if err != nil {
@@ -614,6 +635,9 @@ func (s *Service) Uninstall(ctx context.Context, jobID, roomID, modID string, re
 func (s *Service) Repair(ctx context.Context, roomID, modID string, request ModActionRequest, output io.Writer) (ActionResult, error) {
 	if !validModID(modID) {
 		return ActionResult{}, ErrInvalidModID
+	}
+	if err := s.requireLocalRoom(roomID); err != nil {
+		return ActionResult{}, err
 	}
 	ctx, release, err := s.acquireRoom(ctx, roomID)
 	if err != nil {
@@ -696,6 +720,13 @@ func (s *Service) resolveDependencies(ctx context.Context, root string, include 
 		}
 	}
 	return result, nil
+}
+
+func (s *Service) requireLocalRoom(roomID string) error {
+	if s.guard == nil {
+		return nil
+	}
+	return s.guard.RequireRoom(roomID)
 }
 
 func (s *Service) verifyDownloads(ids []string) error {

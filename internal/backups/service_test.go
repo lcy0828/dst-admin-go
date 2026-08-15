@@ -13,6 +13,7 @@ import (
 
 	"dont/internal/jobs"
 	"dont/internal/rooms"
+	"dont/internal/runtimeguard"
 
 	"github.com/jinzhu/gorm"
 	_ "github.com/mattn/go-sqlite3"
@@ -29,6 +30,16 @@ func (c testCatalog) Worlds(string) ([]rooms.World, error) { return c.worlds, ni
 type testRuntime struct {
 	running map[string]bool
 	sent    []string
+}
+
+type deniedBackupMutationGuard struct{}
+
+func (deniedBackupMutationGuard) RequireRoom(string) error {
+	return runtimeguard.ErrRemoteMutationUnavailable
+}
+
+func (deniedBackupMutationGuard) RequireWorld(string, string) error {
+	return runtimeguard.ErrRemoteMutationUnavailable
 }
 
 func (r *testRuntime) IsRunning(_ context.Context, _, world string) (bool, error) {
@@ -285,5 +296,92 @@ func TestListAdoptsLegacyArchivesAndMarksInvalidFiles(t *testing.T) {
 	}
 	if statuses["legacy.zip"] != "verified" || statuses["broken.zip"] != "invalid" {
 		t.Fatalf("legacy statuses = %#v", statuses)
+	}
+}
+
+func TestRemoteRoomGuardBlocksBackupMutationsWithoutSideEffects(t *testing.T) {
+	service, runtime, roomPath, backupRoot := newBackupService(t)
+	roomID := rooms.EncodeID("room")
+	manual, err := service.Create(context.Background(), roomID, "可恢复", KindManual, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 2; index++ {
+		if _, err := service.Create(context.Background(), roomID, "快照", KindSnapshot, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archive, _, _, err := service.Open(manual.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveBytes, err := io.ReadAll(archive)
+	_ = archive.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeSource, err := os.ReadFile(filepath.Join(roomPath, "Master", "session-data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeFiles, err := filepath.Glob(filepath.Join(backupRoot, "room", "*.zip"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeItems, err := service.List(roomID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeCommands := len(runtime.sent)
+	service.ConfigureMutationGuard(deniedBackupMutationGuard{})
+
+	assertBlocked := func(operation string, err error) {
+		t.Helper()
+		if !errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable) {
+			t.Fatalf("%s error = %v", operation, err)
+		}
+	}
+	_, err = service.Create(context.Background(), roomID, "禁止创建", KindManual, "")
+	assertBlocked("create", err)
+	_, _, err = service.ValidateRestore(context.Background(), roomID, manual.ID, "Test Room")
+	assertBlocked("validate restore", err)
+	_, err = service.Restore(context.Background(), roomID, manual.ID, "Test Room", "")
+	assertBlocked("restore", err)
+	_, err = service.Delete(manual.ID)
+	assertBlocked("delete", err)
+	_, _, err = service.PruneSnapshots(roomID, 1)
+	assertBlocked("prune", err)
+
+	afterSource, err := os.ReadFile(filepath.Join(roomPath, "Master", "session-data"))
+	if err != nil || !bytes.Equal(afterSource, beforeSource) {
+		t.Fatalf("room files changed: before=%q after=%q err=%v", beforeSource, afterSource, err)
+	}
+	afterFiles, err := filepath.Glob(filepath.Join(backupRoot, "room", "*.zip"))
+	if err != nil || len(afterFiles) != len(beforeFiles) {
+		t.Fatalf("backup files changed: before=%v after=%v err=%v", beforeFiles, afterFiles, err)
+	}
+	afterItems, err := service.List(roomID)
+	if err != nil || len(afterItems) != len(beforeItems) {
+		t.Fatalf("backup records changed: before=%#v after=%#v err=%v", beforeItems, afterItems, err)
+	}
+	if len(runtime.sent) != beforeCommands {
+		t.Fatalf("runtime commands changed: before=%d after=%d", beforeCommands, len(runtime.sent))
+	}
+
+	if _, err := service.Get(manual.ID); err != nil {
+		t.Fatalf("get was blocked: %v", err)
+	}
+	opened, _, _, err := service.Open(manual.ID)
+	if err != nil {
+		t.Fatalf("open was blocked: %v", err)
+	}
+	_ = opened.Close()
+	renamed, err := service.Rename(manual.ID, "远端归档备注")
+	if err != nil || renamed.Name != "远端归档备注" {
+		t.Fatalf("rename result=%#v err=%v", renamed, err)
+	}
+	uploaded, err := service.Import(context.Background(), roomID, "离线上传", "backup.zip", bytes.NewReader(archiveBytes))
+	if err != nil || uploaded.Kind != KindUpload {
+		t.Fatalf("upload result=%#v err=%v", uploaded, err)
 	}
 }

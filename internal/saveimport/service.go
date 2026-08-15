@@ -16,6 +16,7 @@ import (
 	"dont/internal/backups"
 	"dont/internal/mods"
 	"dont/internal/rooms"
+	"dont/internal/runtimeguard"
 
 	"github.com/google/uuid"
 	"github.com/shirou/gopsutil/v3/disk"
@@ -38,6 +39,7 @@ type Service struct {
 	runtime       Runtime
 	backups       BackupCreator
 	mods          ModDownloader
+	guard         runtimeguard.MutationGuard
 	locksMu       sync.Mutex
 	locks         map[string]*sync.Mutex
 	activeMu      sync.Mutex
@@ -67,9 +69,16 @@ type ModDownloader interface {
 	EnsureLibrarySetup([]string) error
 }
 
-func NewService(config Config, store *Store, roomManager RoomManager, runtime Runtime, backupCreator BackupCreator, modDownloader ModDownloader) (*Service, error) {
+func NewService(config Config, store *Store, roomManager RoomManager, runtime Runtime, backupCreator BackupCreator, modDownloader ModDownloader, guards ...runtimeguard.MutationGuard) (*Service, error) {
 	if store == nil {
 		return nil, errors.New("save import store is required")
+	}
+	if len(guards) > 1 {
+		return nil, errors.New("save import accepts at most one runtime mutation guard")
+	}
+	var guard runtimeguard.MutationGuard
+	if len(guards) == 1 {
+		guard = guards[0]
 	}
 	var err error
 	config.SaveRoot, err = absoluteDirectory(config.SaveRoot)
@@ -85,7 +94,7 @@ func NewService(config Config, store *Store, roomManager RoomManager, runtime Ru
 	}
 	service := &Service{
 		config: config, store: store, scanner: NewScanner(config.WorkshopRoot), rooms: roomManager,
-		runtime: runtime, backups: backupCreator, mods: modDownloader, locks: make(map[string]*sync.Mutex),
+		runtime: runtime, backups: backupCreator, mods: modDownloader, guard: guard, locks: make(map[string]*sync.Mutex),
 		active: make(map[string]string), activeTargets: make(map[string]string), now: time.Now,
 	}
 	if err := service.recoverInterrupted(); err != nil {
@@ -373,12 +382,22 @@ func (s *Service) recoverInterrupted() error {
 				return err
 			}
 		case StatusApplying:
+			if blocked, err := s.markRemoteRecoveryBlocked(record); err != nil {
+				return err
+			} else if blocked {
+				continue
+			}
 			if err := s.recoverApply(record); err != nil {
 				return err
 			}
 		case StatusApplied:
 			if record.ApplyPhase != applyPhaseCommitted && record.ApplyPhase != applyPhaseApplied {
 				return fmt.Errorf("recover applied save import %s: invalid phase %q", record.ID, record.ApplyPhase)
+			}
+			if blocked, err := s.markRemoteRecoveryBlocked(record); err != nil {
+				return err
+			} else if blocked {
+				continue
 			}
 			if err := s.finalizeCommittedApply(record); err != nil {
 				return err
@@ -388,14 +407,49 @@ func (s *Service) recoverInterrupted() error {
 	return s.cleanupOrphanApplyStaging()
 }
 
+func (s *Service) markRemoteRecoveryBlocked(record importRecord) (bool, error) {
+	if s.guard == nil || ApplyMode(record.ApplyMode) != ApplyModeReplace {
+		return false, nil
+	}
+	roomID := strings.TrimSpace(record.ApplyRoomID)
+	if roomID == "" && directoryNamePattern.MatchString(record.ApplyTarget) {
+		roomID = rooms.EncodeID(record.ApplyTarget)
+	}
+	if roomID == "" {
+		return false, nil
+	}
+	err := s.guard.RequireRoom(roomID)
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable) {
+		return false, err
+	}
+	message := "目标房间包含远程分片；已暂停旧存档替换的本机恢复，待房间恢复为全本机部署后重启服务重试"
+	if err := s.store.MarkRecoveryBlocked(record.ID, runtimeguard.ErrorCode, message); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Service) cleanupOrphanApplyStaging() error {
+	records, err := s.store.RecoveryRecords()
+	if err != nil {
+		return err
+	}
+	retained := make(map[string]bool, len(records))
+	for _, record := range records {
+		if strings.HasPrefix(record.ApplyStaging, ".dst-admin-import-") && filepath.Base(record.ApplyStaging) == record.ApplyStaging {
+			retained[filepath.Join(s.config.SaveRoot, record.ApplyStaging)] = true
+		}
+	}
 	matches, err := filepath.Glob(filepath.Join(s.config.SaveRoot, ".dst-admin-import-*"))
 	if err != nil {
 		return err
 	}
 	for _, match := range matches {
 		name := filepath.Base(match)
-		if strings.HasPrefix(name, ".dst-admin-import-rollback-") || !contained(s.config.SaveRoot, match) {
+		if strings.HasPrefix(name, ".dst-admin-import-rollback-") || retained[match] || !contained(s.config.SaveRoot, match) {
 			continue
 		}
 		if err := os.RemoveAll(match); err != nil {

@@ -13,6 +13,7 @@ import (
 	backupapi "dont/internal/backups"
 	modapi "dont/internal/mods"
 	"dont/internal/rooms"
+	"dont/internal/runtimeguard"
 
 	"github.com/go-ini/ini"
 	"github.com/jinzhu/gorm"
@@ -21,6 +22,16 @@ import (
 
 type applyRuntime struct {
 	running map[string]bool
+}
+
+type deniedSaveImportMutationGuard struct{}
+
+func (deniedSaveImportMutationGuard) RequireRoom(string) error {
+	return runtimeguard.ErrRemoteMutationUnavailable
+}
+
+func (deniedSaveImportMutationGuard) RequireWorld(string, string) error {
+	return runtimeguard.ErrRemoteMutationUnavailable
 }
 
 func (r *applyRuntime) IsRunning(_ context.Context, _, world string) (bool, error) {
@@ -241,6 +252,81 @@ func TestApplyReplaceRefusesRunningRoomWithoutChangingFiles(t *testing.T) {
 	}
 }
 
+func TestRemoteRoomGuardBlocksReplaceButAllowsNewAndClone(t *testing.T) {
+	app := newApplyTestApp(t)
+	target := createManagedRoom(t, app, "Target", "Target Room", "target-token-1234567890", 12001, "old-save")
+	archive := createZIP(t, []archiveTestEntry{
+		{name: "cluster.ini", content: clusterINI("Source Room")},
+		{name: "cluster_token.txt", content: "source-token-1234567890\n"},
+		{name: "Master/server.ini", content: serverINI(true, 1, 10999)},
+		{name: "Master/save/session/source/0000000001", content: "new-save"},
+		{name: "Master/modoverrides.lua", content: `return {["workshop-1392778117"] = { enabled = true }}`},
+	})
+	value, err := app.service.Upload(context.Background(), "远端替换门禁", "source.zip", bytes.NewReader(archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err = app.service.Analyze(context.Background(), value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPath := filepath.Join(app.saveRoot, "Target", "Master", "save", "session", "old", "0000000001")
+	original, err := os.ReadFile(originalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.service.guard = deniedSaveImportMutationGuard{}
+
+	_, err = app.service.Apply(context.Background(), value.ID, "job-remote", ApplyRequest{
+		CandidateID: value.Manifest.Candidates[0].ID, Mode: ApplyModeReplace, TargetRoomID: target.ID,
+		Confirmation: target.Name, TokenPolicy: TokenPreserve, NetworkPolicy: NetworkPreserve, ModPolicy: ModsInstallMissing,
+	})
+	if !errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable) {
+		t.Fatalf("replace error = %v", err)
+	}
+	if code := ErrorCode(err); code != runtimeguard.ErrorCode {
+		t.Fatalf("replace error code = %q", code)
+	}
+	unchanged, err := os.ReadFile(originalPath)
+	if err != nil || string(unchanged) != string(original) {
+		t.Fatalf("target save changed: before=%q after=%q err=%v", original, unchanged, err)
+	}
+	backups, err := app.backups.List(target.ID)
+	if err != nil || len(backups) != 0 {
+		t.Fatalf("replace created backups: value=%#v err=%v", backups, err)
+	}
+	if len(app.downloader.downloads) != 0 {
+		t.Fatalf("replace downloaded Mods: %v", app.downloader.downloads)
+	}
+	staging, err := filepath.Glob(filepath.Join(app.saveRoot, ".dst-admin-import-*"))
+	if err != nil || len(staging) != 0 {
+		t.Fatalf("replace created staging directories: value=%v err=%v", staging, err)
+	}
+	stored, err := app.store.Get(value.ID)
+	if err != nil || stored.Status != StatusReady {
+		t.Fatalf("replace changed import record: value=%#v err=%v", stored, err)
+	}
+
+	for _, local := range []struct {
+		mode      ApplyMode
+		directory string
+	}{
+		{mode: ApplyModeNew, directory: "ImportedNew"},
+		{mode: ApplyModeClone, directory: "ImportedClone"},
+	} {
+		result, err := app.service.Apply(context.Background(), value.ID, "job-local", ApplyRequest{
+			CandidateID: value.Manifest.Candidates[0].ID, Mode: local.mode, DirectoryName: local.directory,
+			RoomName: local.directory, TokenPolicy: TokenSource, NetworkPolicy: NetworkAuto, ModPolicy: ModsPreserve,
+		})
+		if err != nil {
+			t.Fatalf("%s apply error = %v", local.mode, err)
+		}
+		if result.DirectoryName != local.directory {
+			t.Fatalf("%s result = %#v", local.mode, result)
+		}
+	}
+}
+
 func TestApplyRejectsSourcePortsUsedByAnotherRoom(t *testing.T) {
 	app := newApplyTestApp(t)
 	createManagedRoom(t, app, "Existing", "Existing Room", "target-token-1234567890", 10999, "old")
@@ -327,6 +413,46 @@ func TestServiceRecoversInterruptedReplacementByRestoringOriginalRoom(t *testing
 	recovered, err := app.store.Get(value.ID)
 	if err != nil || recovered.Status != StatusReady || recovered.ErrorCode != "SERVER_RESTARTED" {
 		t.Fatalf("recovered import = %#v, %v", recovered, err)
+	}
+}
+
+func TestServiceDefersRemoteReplacementRecoveryWithoutTouchingLocalPaths(t *testing.T) {
+	app := newApplyTestApp(t)
+	target := createManagedRoom(t, app, "Target", "Target Room", "target-token-1234567890", 12001, "old-save")
+	value := analyzedImportForRecovery(t, app)
+	staging := createRecoveryRoom(t, app.saveRoot, ".dst-admin-import-remote", "new-save")
+	rollback := filepath.Join(app.saveRoot, ".dst-admin-import-rollback-remote")
+	if err := app.store.BeginApply(value.ID, ApplyModeReplace, target.ID, "Target", filepath.Base(staging), filepath.Base(rollback)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(app.saveRoot, "Target"), rollback); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(staging, filepath.Join(app.saveRoot, "Target")); err != nil {
+		t.Fatal(err)
+	}
+
+	service, err := NewService(
+		Config{SaveRoot: app.saveRoot, ImportRoot: app.importRoot, WorkshopRoot: app.workshopRoot},
+		app.store, app.rooms, app.runtime, app.backups, app.downloader, deniedSaveImportMutationGuard{},
+	)
+	if err != nil || service == nil {
+		t.Fatalf("service startup failed: service=%v err=%v", service, err)
+	}
+	current, err := os.ReadFile(filepath.Join(app.saveRoot, "Target", "Master", "save", "session", "new", "0000000001"))
+	if err != nil || string(current) != "new-save" {
+		t.Fatalf("current target changed: value=%q err=%v", current, err)
+	}
+	original, err := os.ReadFile(filepath.Join(rollback, "Master", "save", "session", "old", "0000000001"))
+	if err != nil || string(original) != "old-save" {
+		t.Fatalf("rollback changed: value=%q err=%v", original, err)
+	}
+	var record importRecord
+	if err := app.store.db.Table(app.store.table).Where("id = ?", value.ID).First(&record).Error; err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != string(StatusApplying) || record.ApplyPhase != applyPhasePublishing || record.ErrorCode != runtimeguard.ErrorCode {
+		t.Fatalf("blocked recovery record = %#v", record)
 	}
 }
 

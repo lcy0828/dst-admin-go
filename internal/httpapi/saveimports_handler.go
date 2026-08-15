@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"dont/internal/jobs"
+	"dont/internal/runtimeguard"
 	"dont/internal/saveimport"
 
 	"github.com/gin-gonic/gin"
@@ -214,6 +215,8 @@ func saveImportFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusConflict, "WORLD_RUNNING", "停止目标房间的全部分片后才能导入", nil)
 	case errors.Is(err, saveimport.ErrTargetExists):
 		Failure(c, http.StatusConflict, "ROOM_EXISTS", "目标房间目录已经存在", nil)
+	case errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable):
+		Failure(c, http.StatusConflict, runtimeguard.ErrorCode, "目标房间包含远程分片；分布式存档替换尚未开放，已阻止修改控制端本机存档", nil)
 	case errors.Is(err, saveimport.ErrConfirmation):
 		Failure(c, http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", "请输入完整目标房间名称确认替换", nil)
 	case errors.Is(err, saveimport.ErrTokenRequired), errors.Is(err, saveimport.ErrMissingMods), errors.Is(err, saveimport.ErrPartialImport):

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"dont/internal/runtimeguard"
 )
 
 type lifecycleRunner struct {
@@ -26,6 +28,26 @@ type blockingLifecycleRunner struct {
 type existingDirectoryRunner struct {
 	root     string
 	observed bool
+}
+
+type deniedModMutationGuard struct{}
+
+func (deniedModMutationGuard) RequireRoom(string) error {
+	return runtimeguard.ErrRemoteMutationUnavailable
+}
+
+func (deniedModMutationGuard) RequireWorld(string, string) error {
+	return runtimeguard.ErrRemoteMutationUnavailable
+}
+
+type countingLifecycleRunner struct {
+	root  string
+	calls int
+}
+
+func (r *countingLifecycleRunner) Download(ctx context.Context, ids []string, validate bool, output io.Writer) error {
+	r.calls++
+	return lifecycleRunner{root: r.root, content: `name = "downloaded"`}.Download(ctx, ids, validate, output)
 }
 
 func (r *existingDirectoryRunner) Download(ctx context.Context, ids []string, validate bool, output io.Writer) error {
@@ -333,6 +355,110 @@ func TestMergeLocalModInfoPrefersPackagedMetadata(t *testing.T) {
 	})
 	if item.Name != "[DST] 棱镜" || item.Author != "ti_Tout" || item.Version != "7.6.5" || item.Description != "本地描述" {
 		t.Fatalf("local modinfo metadata was not preferred: %#v", item)
+	}
+}
+
+func TestRemoteRoomGuardBlocksModMutationsBeforeAnySideEffects(t *testing.T) {
+	service, backupService, overridesPath := newConfigTestService(t)
+	runner := &countingLifecycleRunner{root: service.config.WorkshopContentRoot}
+	service.runner = runner
+	configuration, err := service.Configuration(context.Background(), "room-1", "world-1", "378160973")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeOverrides, err := os.ReadFile(overridesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setupPath := service.setupPath()
+	beforeSetup, err := os.ReadFile(setupPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	beforeCache, err := os.ReadFile(filepath.Join(service.downloadedPath("378160973"), "modinfo.lua"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.ConfigureMutationGuard(deniedModMutationGuard{})
+
+	operations := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "install", run: func() error {
+			_, err := service.Install(context.Background(), "job", "room-1", InstallRequest{ModID: "123456789", WorldIDs: []string{"world-1"}, Enabled: true}, io.Discard)
+			return err
+		}},
+		{name: "add", run: func() error {
+			_, err := service.AddToRoom(context.Background(), "job", "room-1", "378160973", AddToRoomRequest{WorldIDs: []string{"world-1"}, Enabled: true})
+			return err
+		}},
+		{name: "update", run: func() error {
+			_, err := service.Update(context.Background(), "room-1", "378160973", io.Discard)
+			return err
+		}},
+		{name: "enable", run: func() error {
+			_, err := service.Enable(context.Background(), "job", "room-1", "378160973", EnableRequest{WorldIDs: []string{"world-1"}, Enabled: true})
+			return err
+		}},
+		{name: "uninstall", run: func() error {
+			_, err := service.Uninstall(context.Background(), "job", "room-1", "378160973", ModActionRequest{WorldIDs: []string{"world-1"}, Confirmation: "测试房间", RemoveFiles: true})
+			return err
+		}},
+		{name: "repair", run: func() error {
+			_, err := service.Repair(context.Background(), "room-1", "378160973", ModActionRequest{WorldIDs: []string{"world-1"}, Confirmation: "测试房间"}, io.Discard)
+			return err
+		}},
+		{name: "apply configuration", run: func() error {
+			_, err := service.ApplyConfiguration(context.Background(), "job", "room-1", "world-1", "378160973", ConfigUpdateRequest{
+				ExpectedRevision: configuration.Revision, Enabled: !configuration.Enabled,
+			})
+			return err
+		}},
+	}
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			if err := operation.run(); !errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+	if runner.calls != 0 {
+		t.Fatalf("room mutations invoked downloader %d times", runner.calls)
+	}
+	if backupService.count != 0 {
+		t.Fatalf("room mutations created %d protection backups", backupService.count)
+	}
+	afterOverrides, err := os.ReadFile(overridesPath)
+	if err != nil || string(afterOverrides) != string(beforeOverrides) {
+		t.Fatalf("modoverrides.lua changed: before=%q after=%q err=%v", beforeOverrides, afterOverrides, err)
+	}
+	afterSetup, err := os.ReadFile(setupPath)
+	if os.IsNotExist(err) {
+		afterSetup = nil
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterSetup) != string(beforeSetup) {
+		t.Fatalf("dedicated_server_mods_setup.lua changed: before=%q after=%q", beforeSetup, afterSetup)
+	}
+	afterCache, err := os.ReadFile(filepath.Join(service.downloadedPath("378160973"), "modinfo.lua"))
+	if err != nil || string(afterCache) != string(beforeCache) {
+		t.Fatalf("Workshop cache changed: before=%q after=%q err=%v", beforeCache, afterCache, err)
+	}
+	if _, err := service.Configuration(context.Background(), "room-1", "world-1", "378160973"); err != nil {
+		t.Fatalf("configuration read was blocked: %v", err)
+	}
+	if _, err := service.PreviewConfiguration(context.Background(), "room-1", "world-1", "378160973", ConfigUpdateRequest{
+		ExpectedRevision: configuration.Revision, Enabled: !configuration.Enabled,
+	}); err != nil {
+		t.Fatalf("configuration preview was blocked: %v", err)
+	}
+	if _, err := service.Download(context.Background(), DownloadRequest{ModID: "123456789"}, io.Discard); err != nil {
+		t.Fatalf("node-level download was blocked: %v", err)
+	}
+	if runner.calls != 1 {
+		t.Fatalf("node-level download calls = %d, want 1", runner.calls)
 	}
 }
 

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"dont/internal/jobs"
 	"dont/internal/mods"
+	"dont/internal/runtimeguard"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/gorm"
@@ -140,6 +142,29 @@ func TestModHTTPReadEndpointsAndValidation(t *testing.T) {
 		"expectedRevision": "stale", "enabled": true, "patch": map[string]interface{}{},
 	}, nil, "")
 	assertAPIError(t, response, http.StatusConflict, "CONFIG_REVISION_CONFLICT")
+}
+
+func TestRemoteMutationUsesStableHTTPAndJobErrorCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	guardErr := fmt.Errorf("wrapped: %w", runtimeguard.ErrRemoteMutationUnavailable)
+	if code := backupErrorCode(guardErr, "BACKUP_CREATE_FAILED"); code != runtimeguard.ErrorCode {
+		t.Fatalf("backup job code = %q", code)
+	}
+	if jobErr := modJobError(guardErr); jobErr.Code != runtimeguard.ErrorCode {
+		t.Fatalf("Mod job error = %#v", jobErr)
+	}
+	if code := saveImportErrorCode(guardErr); code != runtimeguard.ErrorCode {
+		t.Fatalf("save import job code = %q", code)
+	}
+
+	router := gin.New()
+	router.GET("/backup", func(c *gin.Context) { backupFailure(c, guardErr) })
+	router.GET("/mods", func(c *gin.Context) { modFailure(c, guardErr) })
+	router.GET("/save-import", func(c *gin.Context) { saveImportFailure(c, guardErr) })
+	for _, path := range []string{"/backup", "/mods", "/save-import"} {
+		response := performJSON(router, http.MethodGet, path, nil, nil, "")
+		assertAPIError(t, response, http.StatusConflict, runtimeguard.ErrorCode)
+	}
 }
 
 func TestModHTTPActionsUseJobs(t *testing.T) {

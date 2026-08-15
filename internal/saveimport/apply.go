@@ -15,6 +15,7 @@ import (
 	"dont/internal/mods"
 	"dont/internal/roomops"
 	"dont/internal/rooms"
+	"dont/internal/runtimeguard"
 
 	"github.com/go-ini/ini"
 	"github.com/google/uuid"
@@ -343,6 +344,11 @@ func (s *Service) resolveApplyTarget(ctx context.Context, request ApplyRequest) 
 		}
 		if request.Confirmation != room.Name {
 			return "", rooms.Room{}, ErrConfirmation
+		}
+		if s.guard != nil {
+			if err := s.guard.RequireRoom(room.ID); err != nil {
+				return "", rooms.Room{}, err
+			}
 		}
 		worlds, err := s.rooms.Worlds(room.ID)
 		if err != nil {
@@ -981,6 +987,8 @@ func ErrorCode(err error) string {
 		return "SAVE_IMPORT_BUSY"
 	case errors.Is(err, ErrPortConflict):
 		return "PORT_CONFLICT"
+	case errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable):
+		return runtimeguard.ErrorCode
 	default:
 		return "SAVE_IMPORT_APPLY_FAILED"
 	}

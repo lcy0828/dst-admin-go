@@ -13,6 +13,7 @@ import (
 	backupapi "dont/internal/backups"
 	"dont/internal/jobs"
 	"dont/internal/rooms"
+	"dont/internal/runtimeguard"
 
 	"github.com/gin-gonic/gin"
 )
@@ -79,7 +80,7 @@ func (h *BackupHandler) create(c *gin.Context) {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
 			value, createErr := h.backups.Create(ctx, roomID, request.Name, backupapi.KindManual, job.ID)
 			if createErr != nil {
-				report(jobs.TargetResult{TargetID: roomID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "BACKUP_CREATE_FAILED", Message: createErr.Error()}})
+				report(jobs.TargetResult{TargetID: roomID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: backupErrorCode(createErr, "BACKUP_CREATE_FAILED"), Message: createErr.Error()}})
 				return nil
 			}
 			report(jobs.TargetResult{TargetID: roomID, Status: jobs.StatusSucceeded, Message: "备份已创建：" + value.Name})
@@ -197,7 +198,7 @@ func (h *BackupHandler) restore(c *gin.Context) {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
 			protection, restoreErr := h.backups.Restore(ctx, roomID, backupID, request.Confirmation, job.ID)
 			if restoreErr != nil {
-				report(jobs.TargetResult{TargetID: backupID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "BACKUP_RESTORE_FAILED", Message: restoreErr.Error()}})
+				report(jobs.TargetResult{TargetID: backupID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: backupErrorCode(restoreErr, "BACKUP_RESTORE_FAILED"), Message: restoreErr.Error()}})
 				return nil
 			}
 			report(jobs.TargetResult{TargetID: backupID, Status: jobs.StatusSucceeded, Message: "恢复完成；保护性备份：" + protection.Name})
@@ -245,7 +246,7 @@ func (h *BackupHandler) prune(c *gin.Context) {
 	job, err := h.jobs.Submit("backup.prune", roomID, "", targets, func(_ context.Context, report func(jobs.TargetResult)) error {
 		bytes, count, pruneErr := h.backups.PruneSnapshots(roomID, policy.MaxSnapshots)
 		if pruneErr != nil {
-			report(jobs.TargetResult{TargetID: roomID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "BACKUP_PRUNE_FAILED", Message: pruneErr.Error()}})
+			report(jobs.TargetResult{TargetID: roomID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: backupErrorCode(pruneErr, "BACKUP_PRUNE_FAILED"), Message: pruneErr.Error()}})
 			return nil
 		}
 		report(jobs.TargetResult{TargetID: roomID, Status: jobs.StatusSucceeded, Message: fmt.Sprintf("已清理 %d 个快照，释放 %s", count, formatByteCount(bytes))})
@@ -278,6 +279,8 @@ func backupFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusConflict, "CONSISTENT_SAVE_UNAVAILABLE", "运行中的房间缺少 Master，无法创建一致性备份", nil)
 	case errors.Is(err, backupapi.ErrRoomNotManaged):
 		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "接管房间后才能管理备份", nil)
+	case errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable):
+		Failure(c, http.StatusConflict, runtimeguard.ErrorCode, "房间包含远程分片；分布式备份尚未开放，已阻止修改控制端本机存档", nil)
 	case errors.Is(err, backupapi.ErrBackupRoomMismatch), errors.Is(err, backupapi.ErrUnsafeBackupPath), errors.Is(err, rooms.ErrInvalidID), errors.Is(err, rooms.ErrUnsafePath):
 		Failure(c, http.StatusBadRequest, "INVALID_BACKUP_RESOURCE", "备份资源或路径无效", nil)
 	case errors.Is(err, rooms.ErrRoomNotFound):
@@ -285,6 +288,13 @@ func backupFailure(c *gin.Context, err error) {
 	default:
 		Failure(c, http.StatusInternalServerError, "BACKUP_OPERATION_FAILED", "备份操作失败", nil)
 	}
+}
+
+func backupErrorCode(err error, fallback string) string {
+	if errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable) {
+		return runtimeguard.ErrorCode
+	}
+	return fallback
 }
 
 func formatByteCount(value int64) string {

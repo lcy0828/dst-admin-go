@@ -77,6 +77,9 @@ func (s *Service) ApplyConfiguration(ctx context.Context, jobID, roomID, worldID
 	if !validModID(modID) {
 		return ConfigApplyResult{}, ErrInvalidModID
 	}
+	if err := s.requireLocalRoom(roomID); err != nil {
+		return ConfigApplyResult{}, err
+	}
 	ctx, release, err := s.acquireRoom(ctx, roomID)
 	if err != nil {
 		return ConfigApplyResult{}, err
