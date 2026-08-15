@@ -23,6 +23,7 @@ type ModPublicationService interface {
 	Preview(context.Context, string, modcontrol.Request) (modpublication.Plan, error)
 	Publish(context.Context, string, string, modcontrol.Request) (modpublication.Publication, error)
 	Retry(context.Context, string, string) (modpublication.Publication, error)
+	Activate(context.Context, string, string, modpublication.ActivationPolicy) (modpublication.Publication, error)
 	Get(string) (modpublication.Publication, error)
 	List(string, int, int) (modcontrol.ListResult, error)
 }
@@ -45,6 +46,7 @@ func (h *ModPublicationHandler) Register(v2 *gin.RouterGroup) {
 	v2.GET("/rooms/:roomId/mod-publications", h.list)
 	v2.GET("/mod-publications/:publicationId", h.get)
 	v2.POST("/mod-publications/:publicationId/actions/retry-failed", h.retry)
+	v2.POST("/mod-publications/:publicationId/actions/activate", h.activate)
 }
 
 func (h *ModPublicationHandler) preview(c *gin.Context) {
@@ -52,6 +54,12 @@ func (h *ModPublicationHandler) preview(c *gin.Context) {
 	if !bindModJSON(c, &request) {
 		return
 	}
+	policy, err := modpublication.NormalizeActivationPolicy(request.Activation)
+	if err != nil {
+		modPublicationFailure(c, err)
+		return
+	}
+	request.Activation = policy
 	plan, err := h.service.Preview(c.Request.Context(), c.Param("roomId"), request)
 	if err != nil {
 		modPublicationFailure(c, err)
@@ -65,6 +73,12 @@ func (h *ModPublicationHandler) publish(c *gin.Context) {
 	if !bindModJSON(c, &request) {
 		return
 	}
+	policy, err := modpublication.NormalizeActivationPolicy(request.Activation)
+	if err != nil {
+		modPublicationFailure(c, err)
+		return
+	}
+	request.Activation = policy
 	roomID := c.Param("roomId")
 	plan, err := h.service.Preview(c.Request.Context(), roomID, request)
 	if err != nil {
@@ -86,6 +100,11 @@ func (h *ModPublicationHandler) publish(c *gin.Context) {
 	targets := make([]jobs.TargetSpec, 0, len(plan.Targets))
 	for _, target := range plan.Targets {
 		targets = append(targets, jobs.TargetSpec{ID: publicationJobTarget(target.TargetID, target.InstallationID), Name: target.TargetID + " / " + target.InstallationID})
+		if request.Activation.Mode == modpublication.ActivationModeRestart {
+			for _, world := range target.Worlds {
+				targets = append(targets, jobs.TargetSpec{ID: publicationActivationJobTarget(world.RoomID, world.WorldID), Name: "激活 · " + world.RoomDirectory + " / " + world.WorldDirectory})
+			}
+		}
 	}
 	job, err := h.jobs.SubmitFactory("mod.publication", roomID, "", targets, func(job jobs.Job) jobs.Runner {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
@@ -93,11 +112,58 @@ func (h *ModPublicationHandler) publish(c *gin.Context) {
 			for _, target := range plan.Targets {
 				report(publicationTargetJobResult(publication, target.TargetID, target.InstallationID, publishErr, false, "Mod 已原子发布；重启分片后生效"))
 			}
+			if request.Activation.Mode == modpublication.ActivationModeRestart {
+				for _, target := range plan.Targets {
+					for _, world := range target.Worlds {
+						report(publicationActivationJobResult(publication, world.RoomID, world.WorldID, publishErr))
+					}
+				}
+			}
 			return nil
 		}
 	})
 	if err != nil {
 		Failure(c, http.StatusInternalServerError, "JOB_CREATE_FAILED", "无法创建 Mod 发布任务", nil)
+		return
+	}
+	Success(c, http.StatusAccepted, job)
+}
+
+func (h *ModPublicationHandler) activate(c *gin.Context) {
+	var policy modpublication.ActivationPolicy
+	if !bindModJSON(c, &policy) {
+		return
+	}
+	policy, err := modpublication.NormalizeActivationPolicy(policy)
+	if err != nil || policy.Mode != modpublication.ActivationModeRestart {
+		modPublicationFailure(c, modpublication.ErrInvalidInput)
+		return
+	}
+	publicationID := c.Param("publicationId")
+	current, err := h.service.Get(publicationID)
+	if err != nil {
+		modPublicationFailure(c, err)
+		return
+	}
+	targets := make([]jobs.TargetSpec, 0)
+	for _, target := range current.Plan.Targets {
+		for _, world := range target.Worlds {
+			targets = append(targets, jobs.TargetSpec{ID: publicationActivationJobTarget(world.RoomID, world.WorldID), Name: "激活 · " + world.RoomDirectory + " / " + world.WorldDirectory})
+		}
+	}
+	job, err := h.jobs.SubmitFactory("mod.publication.activation", current.RoomID, "", targets, func(job jobs.Job) jobs.Runner {
+		return func(ctx context.Context, report func(jobs.TargetResult)) error {
+			publication, activationErr := h.service.Activate(ctx, job.ID, publicationID, policy)
+			for _, target := range current.Plan.Targets {
+				for _, world := range target.Worlds {
+					report(publicationActivationJobResult(publication, world.RoomID, world.WorldID, activationErr))
+				}
+			}
+			return nil
+		}
+	})
+	if err != nil {
+		Failure(c, http.StatusInternalServerError, "JOB_CREATE_FAILED", "无法创建 Mod 激活任务", nil)
 		return
 	}
 	Success(c, http.StatusAccepted, job)
@@ -173,6 +239,10 @@ func modPublicationFailure(c *gin.Context, err error) {
 		status, code, message = http.StatusConflict, "MOD_PUBLICATION_IDEMPOTENCY_CONFLICT", "Mod 发布幂等键已用于其他计划"
 	case errors.Is(err, modpublication.ErrRecoveryRequired):
 		status, code, message = http.StatusConflict, "MOD_PUBLICATION_RECOVERY_REQUIRED", "Mod 发布需要继续恢复"
+	case errors.Is(err, modpublication.ErrActivationState):
+		status, code, message = http.StatusConflict, "MOD_ACTIVATION_STATE_INVALID", "当前 Mod 发布状态不允许激活"
+	case errors.Is(err, modpublication.ErrActivationFailed):
+		status, code, message = http.StatusConflict, "MOD_ACTIVATION_FAILED", "Mod 已发布，但分片激活未全部完成"
 	case errors.Is(err, modpublication.ErrVersionConflict):
 		status, code, message = http.StatusConflict, "MOD_VERSION_CONFLICT", "同一安装中的模组版本要求冲突"
 	case errors.Is(err, modpublication.ErrConflict), errors.Is(err, operationlease.ErrBusy), errors.Is(err, modcontrol.ErrPublicationState):
@@ -188,6 +258,11 @@ func modPublicationFailure(c *gin.Context, err error) {
 func publicationJobTarget(targetID, installationID string) string {
 	digest := sha256.Sum256([]byte(targetID + "\x00" + installationID))
 	return "mod-target-" + hex.EncodeToString(digest[:])
+}
+
+func publicationActivationJobTarget(roomID, worldID string) string {
+	digest := sha256.Sum256([]byte(roomID + "\x00" + worldID))
+	return "mod-activation-" + hex.EncodeToString(digest[:])
 }
 
 func publicationJobError(err error) *jobs.Error {
@@ -208,6 +283,10 @@ func publicationJobError(err error) *jobs.Error {
 		code = "MOD_PUBLICATION_IDEMPOTENCY_CONFLICT"
 	case errors.Is(err, modpublication.ErrRecoveryRequired):
 		code = "MOD_PUBLICATION_RECOVERY_REQUIRED"
+	case errors.Is(err, modpublication.ErrActivationFailed):
+		code = "MOD_ACTIVATION_FAILED"
+	case errors.Is(err, modpublication.ErrActivationState):
+		code = "MOD_ACTIVATION_STATE_INVALID"
 	case errors.Is(err, modpublication.ErrVersionConflict):
 		code = "MOD_VERSION_CONFLICT"
 	case errors.Is(err, modpublication.ErrConflict), errors.Is(err, operationlease.ErrBusy), errors.Is(err, modcontrol.ErrPublicationState):
@@ -230,7 +309,7 @@ func publicationTargetJobResult(publication modpublication.Publication, targetID
 		}
 		targetSucceeded := target.Status == modpublication.StatusSucceeded ||
 			(allowRolledBack && publication.Status == modpublication.StatusRolledBack && target.Status == modpublication.StatusRolledBack)
-		if targetSucceeded && (operationErr == nil || publicationHasIncompleteTarget(publication)) {
+		if targetSucceeded && (operationErr == nil || errors.Is(operationErr, modpublication.ErrActivationFailed) || publicationHasIncompleteTarget(publication)) {
 			return jobs.TargetResult{TargetID: id, Status: jobs.StatusSucceeded, Message: successMessage}
 		}
 		resultError := publicationJobError(operationErr)
@@ -241,6 +320,31 @@ func publicationTargetJobResult(publication modpublication.Publication, targetID
 			resultError.Message = message
 		}
 		return jobs.TargetResult{TargetID: id, Status: jobs.StatusFailed, Error: resultError}
+	}
+	return jobs.TargetResult{TargetID: id, Status: jobs.StatusFailed, Error: publicationJobError(operationErr)}
+}
+
+func publicationActivationJobResult(publication modpublication.Publication, roomID, worldID string, operationErr error) jobs.TargetResult {
+	id := publicationActivationJobTarget(roomID, worldID)
+	for _, shard := range publication.Activation.Shards {
+		if shard.RoomID != roomID || shard.WorldID != worldID {
+			continue
+		}
+		switch shard.Status {
+		case modpublication.ActivationStatusSucceeded:
+			return jobs.TargetResult{TargetID: id, Status: jobs.StatusSucceeded, Message: "分片已重启并确认加载完成"}
+		case modpublication.ActivationStatusSkipped:
+			return jobs.TargetResult{TargetID: id, Status: jobs.StatusSucceeded, Message: "分片原本未运行，无需重启"}
+		default:
+			resultError := publicationJobError(operationErr)
+			if shard.ErrorCode != "" {
+				resultError.Code = shard.ErrorCode
+			}
+			if shard.ErrorMessage != "" {
+				resultError.Message = shard.ErrorMessage
+			}
+			return jobs.TargetResult{TargetID: id, Status: jobs.StatusFailed, Error: resultError}
+		}
 	}
 	return jobs.TargetResult{TargetID: id, Status: jobs.StatusFailed, Error: publicationJobError(operationErr)}
 }

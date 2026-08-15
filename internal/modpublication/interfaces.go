@@ -26,6 +26,14 @@ type Runtime interface {
 	Complete(context.Context, TargetPlan, RuntimeOperation) error
 }
 
+type ActivationRuntime interface {
+	Status(context.Context, WorldPlan) (ShardRuntimeObservation, error)
+	CaptureLogCursor(context.Context, WorldPlan) (LogCursor, error)
+	Stop(context.Context, WorldPlan, RuntimeOperation) error
+	Start(context.Context, WorldPlan, RuntimeOperation) error
+	ReadLogs(context.Context, WorldPlan, LogCursor) (ShardLogObservation, error)
+}
+
 type Lease interface {
 	Acquire(context.Context, string, string, time.Duration) (Fence, error)
 	Renew(context.Context, Fence, time.Duration) (Fence, error)

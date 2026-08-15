@@ -101,7 +101,7 @@ func (p *Planner) Preview(ctx context.Context, roomID string) (Plan, error) {
 		}
 		worldPlan := WorldPlan{
 			RoomID: world.RoomID, RoomDirectory: world.RoomDirectory, WorldID: world.WorldID,
-			WorldDirectory: world.WorldDirectory, ModOverrides: append([]byte(nil), world.ModOverrides...),
+			WorldDirectory: world.WorldDirectory, IsMaster: world.IsMaster, ModOverrides: append([]byte(nil), world.ModOverrides...),
 		}
 		for _, requirement := range world.Mods {
 			cacheKey := requirement.WorkshopID + ":" + strings.ToLower(requirement.TreeSHA256)

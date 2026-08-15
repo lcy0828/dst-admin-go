@@ -24,6 +24,7 @@ type publicationRecord struct {
 	PlanJSON             string `gorm:"type:text;not null"`
 	ProtectionBackupJSON string `gorm:"type:text;not null"`
 	FencesJSON           string `gorm:"type:text;not null"`
+	ActivationJSON       string `gorm:"type:text"`
 	CommitDecision       bool   `gorm:"index;not null"`
 	RestartRequired      bool   `gorm:"not null"`
 	ErrorCode            string `gorm:"type:varchar(64)"`
@@ -203,7 +204,7 @@ func (s *Store) Save(value Publication) (Publication, error) {
 	}
 	updates := map[string]interface{}{
 		"status": record.Status, "outcome": record.Outcome, "protection_backup_json": record.ProtectionBackupJSON,
-		"fences_json": record.FencesJSON, "commit_decision": record.CommitDecision, "restart_required": record.RestartRequired,
+		"fences_json": record.FencesJSON, "activation_json": record.ActivationJSON, "commit_decision": record.CommitDecision, "restart_required": record.RestartRequired,
 		"error_code": record.ErrorCode, "error_message": record.ErrorMessage, "commit_decided_at": record.CommitDecidedAt,
 		"finished_at": record.FinishedAt, "updated_at": record.UpdatedAt,
 	}
@@ -269,7 +270,9 @@ func (s *Store) DecideCommit(id string, decidedAt time.Time) (Publication, error
 func (s *Store) Active() ([]Publication, error) {
 	var records []publicationRecord
 	terminal := []string{string(StatusSucceeded), string(StatusFailed), string(StatusRolledBack)}
-	if err := s.db.Table(s.publicationTable).Where("status NOT IN (?)", terminal).Order("created_at ASC").Find(&records).Error; err != nil {
+	if err := s.db.Table(s.publicationTable).
+		Where("status NOT IN (?) OR (status = ? AND restart_required = ?)", terminal, string(StatusSucceeded), true).
+		Order("created_at ASC").Find(&records).Error; err != nil {
 		return nil, err
 	}
 	values := make([]Publication, 0, len(records))
@@ -277,6 +280,10 @@ func (s *Store) Active() ([]Publication, error) {
 		value, err := s.Get(record.ID)
 		if err != nil {
 			return nil, err
+		}
+		if value.Status == StatusSucceeded && value.Activation.Status != ActivationStatusPending &&
+			value.Activation.Status != ActivationStatusRestarting && value.Activation.Status != ActivationStatusConfirming {
+			continue
 		}
 		values = append(values, value)
 	}
@@ -296,10 +303,15 @@ func publicationRecordFrom(value Publication) (publicationRecord, error) {
 	if err != nil {
 		return publicationRecord{}, err
 	}
+	activation := normalizedActivation(value.Activation)
+	activationJSON, err := json.Marshal(activation)
+	if err != nil {
+		return publicationRecord{}, err
+	}
 	return publicationRecord{
 		ID: value.ID, IdempotencyKey: publicationIdempotencyKey(value), SourceJobID: value.SourceJobID, RoomID: value.RoomID, Status: string(value.Status), Outcome: string(value.Outcome),
 		TopologyRevision: value.Plan.TopologyRevision, PlanHash: value.Plan.PlanHash, PlanJSON: string(plan),
-		ProtectionBackupJSON: string(backups), FencesJSON: string(fences), CommitDecision: value.CommitDecision,
+		ProtectionBackupJSON: string(backups), FencesJSON: string(fences), ActivationJSON: string(activationJSON), CommitDecision: value.CommitDecision,
 		RestartRequired: value.RestartRequired, ErrorCode: value.ErrorCode, ErrorMessage: value.ErrorMessage,
 		CommitDecidedAt: value.CommitDecidedAt, FinishedAt: value.FinishedAt,
 		CreatedAt: value.CreatedAt.UTC(), UpdatedAt: value.UpdatedAt.UTC(),
@@ -310,6 +322,7 @@ func publicationFromRecord(record publicationRecord) (Publication, error) {
 	var plan Plan
 	var backups []string
 	var fences []Fence
+	activation := initialActivation(ActivationPolicy{Mode: ActivationModeManual, LoadConfirmation: LoadConfirmationNone, TimeoutSeconds: defaultActivationTimeout})
 	if err := strictJSON(record.PlanJSON, &plan); err != nil {
 		return Publication{}, fmt.Errorf("decode publication plan: %w", err)
 	}
@@ -319,13 +332,18 @@ func publicationFromRecord(record publicationRecord) (Publication, error) {
 	if err := strictJSON(record.FencesJSON, &fences); err != nil {
 		return Publication{}, fmt.Errorf("decode publication fences: %w", err)
 	}
+	if strings.TrimSpace(record.ActivationJSON) != "" {
+		if err := strictJSON(record.ActivationJSON, &activation); err != nil {
+			return Publication{}, fmt.Errorf("decode publication activation: %w", err)
+		}
+	}
 	if err := validatePlan(plan); err != nil || plan.PlanHash != record.PlanHash || plan.TopologyRevision != record.TopologyRevision {
 		return Publication{}, errors.Join(ErrInvalidInput, err)
 	}
 	value := Publication{
 		ID: record.ID, SourceJobID: record.SourceJobID, RoomID: record.RoomID, Status: Status(record.Status), Outcome: Outcome(record.Outcome),
 		Plan: plan, ProtectionBackupIDs: backups, Fences: fences, CommitDecision: record.CommitDecision,
-		RestartRequired: record.RestartRequired, ErrorCode: record.ErrorCode, ErrorMessage: record.ErrorMessage,
+		RestartRequired: record.RestartRequired, Activation: activation, ErrorCode: record.ErrorCode, ErrorMessage: record.ErrorMessage,
 		CommitDecidedAt: utcPointer(record.CommitDecidedAt), FinishedAt: utcPointer(record.FinishedAt),
 		CreatedAt: record.CreatedAt.UTC(), UpdatedAt: record.UpdatedAt.UTC(),
 	}
@@ -360,7 +378,19 @@ func validatePublication(value Publication) error {
 	if !validID(value.ID) || value.SourceJobID != "" && !validID(value.SourceJobID) || value.RoomID != value.Plan.RoomID || !validStatus(value.Status) || !validOutcome(value.Outcome) {
 		return ErrInvalidInput
 	}
+	if err := validateActivation(normalizedActivation(value.Activation)); err != nil {
+		return err
+	}
 	return validatePlan(value.Plan)
+}
+
+func normalizedActivation(value Activation) Activation {
+	if value.Policy.Mode == "" && value.Policy.LoadConfirmation == "" && value.Policy.TimeoutSeconds == 0 && value.Status == "" &&
+		len(value.Shards) == 0 && value.RequestedAt == nil && value.FinishedAt == nil && value.ErrorCode == "" && value.ErrorMessage == "" {
+		policy, _ := NormalizeActivationPolicy(ActivationPolicy{})
+		return initialActivation(policy)
+	}
+	return value
 }
 
 func validStatus(value Status) bool {

@@ -20,17 +20,18 @@ var (
 )
 
 type Request struct {
-	Action                        string                     `json:"action"`
-	ModID                         string                     `json:"modId,omitempty"`
-	ModIDs                        []string                   `json:"modIds,omitempty"`
-	WorldIDs                      []string                   `json:"worldIds,omitempty"`
-	Enabled                       bool                       `json:"enabled"`
-	IncludeDependencies           bool                       `json:"includeDependencies"`
-	ExpectedConfigurationRevision string                     `json:"expectedConfigurationRevision,omitempty"`
-	ExpectedTopologyRevision      string                     `json:"expectedTopologyRevision,omitempty"`
-	Patch                         map[string]json.RawMessage `json:"patch,omitempty"`
-	PlanHash                      string                     `json:"planHash,omitempty"`
-	Confirmation                  string                     `json:"confirmation,omitempty"`
+	Action                        string                          `json:"action"`
+	ModID                         string                          `json:"modId,omitempty"`
+	ModIDs                        []string                        `json:"modIds,omitempty"`
+	WorldIDs                      []string                        `json:"worldIds,omitempty"`
+	Enabled                       bool                            `json:"enabled"`
+	IncludeDependencies           bool                            `json:"includeDependencies"`
+	ExpectedConfigurationRevision string                          `json:"expectedConfigurationRevision,omitempty"`
+	ExpectedTopologyRevision      string                          `json:"expectedTopologyRevision,omitempty"`
+	Patch                         map[string]json.RawMessage      `json:"patch,omitempty"`
+	PlanHash                      string                          `json:"planHash,omitempty"`
+	Confirmation                  string                          `json:"confirmation,omitempty"`
+	Activation                    modpublication.ActivationPolicy `json:"activation,omitempty"`
 }
 
 type ListResult struct {
@@ -64,6 +65,7 @@ type PublicationCoordinator interface {
 	List(string, int, int) ([]modpublication.Publication, int, error)
 	Recover(context.Context) ([]modpublication.Publication, error)
 	RecoverOne(context.Context, string) (modpublication.Publication, error)
+	Activate(context.Context, string, string, modpublication.ActivationPolicy) (modpublication.Publication, error)
 }
 
 type Clock func() time.Time

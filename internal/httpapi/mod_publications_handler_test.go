@@ -32,7 +32,7 @@ func (f *modPublicationHTTPFixture) Preview(context.Context, string, modcontrol.
 	return f.plan, nil
 }
 
-func (f *modPublicationHTTPFixture) Publish(_ context.Context, sourceJobID, roomID string, _ modcontrol.Request) (modpublication.Publication, error) {
+func (f *modPublicationHTTPFixture) Publish(_ context.Context, sourceJobID, roomID string, request modcontrol.Request) (modpublication.Publication, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.publishResult != nil {
@@ -48,6 +48,9 @@ func (f *modPublicationHTTPFixture) Publish(_ context.Context, sourceJobID, room
 			TargetID: "local", InstallationID: "default", Status: modpublication.StatusSucceeded,
 		}},
 	}
+	if request.Activation.Mode == modpublication.ActivationModeRestart {
+		value.Activation = successfulHTTPActivation(f.plan, request.Activation)
+	}
 	if f.publishErr != nil {
 		value.Status, value.Outcome = modpublication.StatusFailed, modpublication.OutcomeNone
 		value.Targets[0].Status = modpublication.StatusFailed
@@ -55,6 +58,21 @@ func (f *modPublicationHTTPFixture) Publish(_ context.Context, sourceJobID, room
 	}
 	f.publications = append([]modpublication.Publication{value}, f.publications...)
 	return value, f.publishErr
+}
+
+func successfulHTTPActivation(plan modpublication.Plan, policy modpublication.ActivationPolicy) modpublication.Activation {
+	now := time.Now().UTC()
+	value := modpublication.Activation{Policy: policy, Status: modpublication.ActivationStatusSucceeded, RequestedAt: &now, FinishedAt: &now}
+	for _, target := range plan.Targets {
+		for _, world := range target.Worlds {
+			value.Shards = append(value.Shards, modpublication.ShardActivationResult{
+				RoomID: world.RoomID, WorldID: world.WorldID, TargetID: target.TargetID, InstallationID: target.InstallationID,
+				Status: modpublication.ActivationStatusSucceeded, WasRunning: true, RuntimeState: "running",
+				LoadMarker: "dst-admin-runtime-ready", RestartedAt: &now, LoadConfirmedAt: &now, UpdatedAt: now,
+			})
+		}
+	}
+	return value
 }
 
 func (f *modPublicationHTTPFixture) Retry(_ context.Context, sourceJobID, publicationID string) (modpublication.Publication, error) {
@@ -76,6 +94,29 @@ func (f *modPublicationHTTPFixture) Retry(_ context.Context, sourceJobID, public
 	}
 	f.publications = append([]modpublication.Publication{value}, f.publications...)
 	return value, f.retryErr
+}
+
+func (f *modPublicationHTTPFixture) Activate(_ context.Context, sourceJobID, publicationID string, policy modpublication.ActivationPolicy) (modpublication.Publication, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, current := range f.publications {
+		if current.ID != publicationID {
+			continue
+		}
+		current.SourceJobID = sourceJobID
+		current.Activation = modpublication.Activation{Policy: policy, Status: modpublication.ActivationStatusSucceeded}
+		now := time.Now().UTC()
+		for _, target := range current.Plan.Targets {
+			for _, world := range target.Worlds {
+				current.Activation.Shards = append(current.Activation.Shards, modpublication.ShardActivationResult{
+					RoomID: world.RoomID, WorldID: world.WorldID, TargetID: target.TargetID, InstallationID: target.InstallationID,
+					Status: modpublication.ActivationStatusSucceeded, WasRunning: true, UpdatedAt: now,
+				})
+			}
+		}
+		return current, nil
+	}
+	return modpublication.Publication{}, modpublication.ErrNotFound
 }
 
 func (f *modPublicationHTTPFixture) Get(publicationID string) (modpublication.Publication, error) {
@@ -135,7 +176,40 @@ func publicationHTTPPlan() modpublication.Plan {
 	return modpublication.Plan{
 		Version: 1, RoomID: "room-one", TopologyRevision: "topology-one", PlanHash: publicationTestHash,
 		Ready: true, RestartRequired: true, CreatedAt: time.Now().UTC(),
-		Targets: []modpublication.TargetPlan{{TargetID: "local", NodeID: "local", InstallationID: "default"}},
+		Targets: []modpublication.TargetPlan{{
+			TargetID: "local", NodeID: "local", InstallationID: "default",
+			Worlds: []modpublication.WorldPlan{{RoomID: "room-one", RoomDirectory: "Cluster_1", WorldID: "master", WorldDirectory: "Master", IsMaster: true}},
+		}},
+	}
+}
+
+func TestModPublicationHTTPRestartActivationAndManualRetry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := &modPublicationHTTPFixture{plan: publicationHTTPPlan()}
+	router, jobService := newModPublicationHandlerApp(t, fixture)
+
+	response := performJSON(router, http.MethodPost, "/api/v2/rooms/room-one/mod-publications", map[string]interface{}{
+		"action": "reconcile", "planHash": publicationTestHash, "confirmation": publicationTestHash,
+		"activation": map[string]interface{}{"mode": "restart", "loadConfirmation": "logs", "timeoutSeconds": 30},
+	}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	job := waitForModJob(t, jobService, responseData(t, response)["id"].(string))
+	if job.Status != jobs.StatusSucceeded || len(job.Targets) != 2 {
+		t.Fatalf("restart activation targets were not reported: %#v", job)
+	}
+	for _, target := range job.Targets {
+		if target.Status != jobs.StatusSucceeded {
+			t.Fatalf("restart activation target failed: %#v", job.Targets)
+		}
+	}
+
+	response = performJSON(router, http.MethodPost, "/api/v2/mod-publications/publication-created/actions/activate", map[string]interface{}{
+		"mode": "restart", "loadConfirmation": "none", "timeoutSeconds": 30,
+	}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	job = waitForModJob(t, jobService, responseData(t, response)["id"].(string))
+	if job.Kind != "mod.publication.activation" || job.Status != jobs.StatusSucceeded || len(job.Targets) != 1 {
+		t.Fatalf("manual activation retry was not represented as a shard Job: %#v", job)
 	}
 }
 

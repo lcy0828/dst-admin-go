@@ -21,6 +21,8 @@ var (
 	ErrVersionConflict     = errors.New("one installation requires multiple versions of the same Workshop item")
 	ErrPreviewBlocked      = errors.New("mod publication preview contains blocking issues")
 	ErrRecoveryRequired    = errors.New("mod publication requires recovery")
+	ErrActivationFailed    = errors.New("mod publication activation failed")
+	ErrActivationState     = errors.New("mod publication cannot be activated from its current state")
 )
 
 type Status string
@@ -45,6 +47,78 @@ const (
 	OutcomePartial Outcome = "partial"
 	OutcomeNone    Outcome = "none"
 )
+
+type ActivationMode string
+
+const (
+	ActivationModeManual  ActivationMode = "manual"
+	ActivationModeRestart ActivationMode = "restart"
+)
+
+type LoadConfirmation string
+
+const (
+	LoadConfirmationNone LoadConfirmation = "none"
+	LoadConfirmationLogs LoadConfirmation = "logs"
+)
+
+type ActivationStatus string
+
+const (
+	ActivationStatusSkipped    ActivationStatus = "skipped"
+	ActivationStatusPending    ActivationStatus = "pending"
+	ActivationStatusRestarting ActivationStatus = "restarting"
+	ActivationStatusConfirming ActivationStatus = "confirming"
+	ActivationStatusSucceeded  ActivationStatus = "succeeded"
+	ActivationStatusFailed     ActivationStatus = "failed"
+)
+
+type ActivationPolicy struct {
+	Mode             ActivationMode   `json:"mode"`
+	LoadConfirmation LoadConfirmation `json:"loadConfirmation"`
+	TimeoutSeconds   int              `json:"timeoutSeconds"`
+}
+
+type LogCursor struct {
+	FileID string `json:"fileId,omitempty"`
+	Cursor int64  `json:"cursor"`
+}
+
+type ShardRuntimeObservation struct {
+	State         string
+	SessionExists bool
+}
+
+type ShardLogObservation struct {
+	Cursor LogCursor
+	Lines  []string
+}
+
+type ShardActivationResult struct {
+	RoomID          string           `json:"roomId"`
+	WorldID         string           `json:"worldId"`
+	TargetID        string           `json:"targetId"`
+	InstallationID  string           `json:"installationId"`
+	Status          ActivationStatus `json:"status"`
+	WasRunning      bool             `json:"wasRunning"`
+	RuntimeState    string           `json:"runtimeState,omitempty"`
+	LoadMarker      string           `json:"loadMarker,omitempty"`
+	ErrorCode       string           `json:"errorCode,omitempty"`
+	ErrorMessage    string           `json:"errorMessage,omitempty"`
+	RestartedAt     *time.Time       `json:"restartedAt,omitempty"`
+	LoadConfirmedAt *time.Time       `json:"loadConfirmedAt,omitempty"`
+	UpdatedAt       time.Time        `json:"updatedAt"`
+}
+
+type Activation struct {
+	Policy       ActivationPolicy        `json:"policy"`
+	Status       ActivationStatus        `json:"status"`
+	ErrorCode    string                  `json:"errorCode,omitempty"`
+	ErrorMessage string                  `json:"errorMessage,omitempty"`
+	Shards       []ShardActivationResult `json:"shards"`
+	RequestedAt  *time.Time              `json:"requestedAt,omitempty"`
+	FinishedAt   *time.Time              `json:"finishedAt,omitempty"`
+}
 
 type Blocker struct {
 	Code           string `json:"code"`
@@ -72,6 +146,7 @@ type ManagedWorld struct {
 	RoomDirectory  string           `json:"roomDirectory"`
 	WorldID        string           `json:"worldId"`
 	WorldDirectory string           `json:"worldDirectory"`
+	IsMaster       bool             `json:"isMaster"`
 	Mods           []ModRequirement `json:"mods"`
 	ModOverrides   []byte           `json:"modOverrides"`
 }
@@ -105,6 +180,7 @@ type WorldPlan struct {
 	RoomDirectory  string            `json:"roomDirectory"`
 	WorldID        string            `json:"worldId"`
 	WorldDirectory string            `json:"worldDirectory"`
+	IsMaster       bool              `json:"isMaster"`
 	Mods           []ContentArtifact `json:"mods"`
 	ModOverrides   []byte            `json:"modOverrides"`
 }
@@ -166,6 +242,7 @@ type Publication struct {
 	Fences              []Fence        `json:"fences"`
 	CommitDecision      bool           `json:"commitDecision"`
 	RestartRequired     bool           `json:"restartRequired"`
+	Activation          Activation     `json:"activation"`
 	ErrorCode           string         `json:"errorCode,omitempty"`
 	ErrorMessage        string         `json:"errorMessage,omitempty"`
 	Targets             []TargetResult `json:"targets"`
@@ -176,9 +253,10 @@ type Publication struct {
 }
 
 type PublishRequest struct {
-	ID          string `json:"id"`
-	SourceJobID string `json:"sourceJobId,omitempty"`
-	Plan        Plan   `json:"plan"`
+	ID          string           `json:"id"`
+	SourceJobID string           `json:"sourceJobId,omitempty"`
+	Plan        Plan             `json:"plan"`
+	Activation  ActivationPolicy `json:"activation"`
 }
 
 type Fence struct {

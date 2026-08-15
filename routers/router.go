@@ -524,9 +524,13 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	modActivationRuntime, err := modcontrol.NewActivationRuntime(runtimeDriverRouter)
+	if err != nil {
+		return nil, fmt.Errorf("initialize Mod activation runtime: %w", err)
+	}
 	modPublicationCoordinator, err := modpublication.NewCoordinator(
 		modPublicationPlanner, modPublicationRuntime, modLeaseAdapter, modBackupAdapter,
-		modPublicationStore, 5*time.Minute,
+		modPublicationStore, 5*time.Minute, modActivationRuntime,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("initialize Mod publication coordinator: %w", err)

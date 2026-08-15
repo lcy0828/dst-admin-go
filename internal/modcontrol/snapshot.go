@@ -262,7 +262,7 @@ func (s *SnapshotSource) build(ctx context.Context) (runtimeSnapshot, error) {
 			}
 			managed := modpublication.ManagedWorld{
 				RoomID: room.ID, RoomDirectory: room.DirectoryName, WorldID: world.ID,
-				WorldDirectory: world.DirectoryName, ModOverrides: append([]byte(nil), content...),
+				WorldDirectory: world.DirectoryName, IsMaster: world.IsMaster, ModOverrides: append([]byte(nil), content...),
 			}
 			for _, item := range snapshot.Mods {
 				managed.Mods = append(managed.Mods, modpublication.ModRequirement{WorkshopID: item.ModID})

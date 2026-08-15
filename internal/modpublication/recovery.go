@@ -32,7 +32,9 @@ func (c *Coordinator) RecoverOne(ctx context.Context, publicationID string) (Pub
 	if err != nil {
 		return Publication{}, err
 	}
-	if publication.Status == StatusSucceeded || publication.Status == StatusFailed || publication.Status == StatusRolledBack {
+	activationRecovery := publication.Status == StatusSucceeded && publication.RestartRequired &&
+		(publication.Activation.Status == ActivationStatusPending || publication.Activation.Status == ActivationStatusRestarting || publication.Activation.Status == ActivationStatusConfirming)
+	if publication.Status == StatusSucceeded && !activationRecovery || publication.Status == StatusFailed || publication.Status == StatusRolledBack {
 		return publication, ErrConflict
 	}
 	recoveryAttemptID := publication.ID + ":recover:" + uuid.NewString()
@@ -50,8 +52,10 @@ func (c *Coordinator) RecoverOne(ctx context.Context, publicationID string) (Pub
 	}
 	var recovered Publication
 	var recoverErr error
-	if publication.CommitDecision {
-		recovered, recoverErr = c.completeCommitted(ctx, publication, fences)
+	if activationRecovery {
+		recovered, recoverErr = c.activateCommitted(ctx, publication, fences, publication.Activation.Policy)
+	} else if publication.CommitDecision {
+		recovered, recoverErr = c.completeAndActivate(ctx, publication, fences)
 	} else {
 		recovered, recoverErr = c.recoverRollback(publication, fences)
 	}

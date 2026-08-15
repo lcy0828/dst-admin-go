@@ -10,23 +10,35 @@ import (
 )
 
 type Coordinator struct {
-	planner  *Planner
-	runtime  Runtime
-	leases   Lease
-	backups  Backup
-	store    *Store
-	leaseTTL time.Duration
-	now      func() time.Time
+	planner                *Planner
+	runtime                Runtime
+	activation             ActivationRuntime
+	leases                 Lease
+	backups                Backup
+	store                  *Store
+	leaseTTL               time.Duration
+	now                    func() time.Time
+	activationPollInterval time.Duration
 }
 
-func NewCoordinator(planner *Planner, runtime Runtime, leases Lease, backups Backup, store *Store, leaseTTL time.Duration) (*Coordinator, error) {
+func NewCoordinator(planner *Planner, runtime Runtime, leases Lease, backups Backup, store *Store, leaseTTL time.Duration, activations ...ActivationRuntime) (*Coordinator, error) {
 	if planner == nil || runtime == nil || leases == nil || backups == nil || store == nil {
+		return nil, ErrInvalidInput
+	}
+	if len(activations) > 1 {
 		return nil, ErrInvalidInput
 	}
 	if leaseTTL <= 0 {
 		leaseTTL = 5 * time.Minute
 	}
-	return &Coordinator{planner: planner, runtime: runtime, leases: leases, backups: backups, store: store, leaseTTL: leaseTTL, now: time.Now}, nil
+	coordinator := &Coordinator{
+		planner: planner, runtime: runtime, leases: leases, backups: backups, store: store,
+		leaseTTL: leaseTTL, now: time.Now, activationPollInterval: time.Second,
+	}
+	if len(activations) == 1 {
+		coordinator.activation = activations[0]
+	}
+	return coordinator, nil
 }
 
 func (c *Coordinator) Preview(ctx context.Context, roomID string) (Plan, error) {
@@ -40,11 +52,12 @@ func (c *Coordinator) List(roomID string, limit, offset int) ([]Publication, int
 }
 
 func (c *Coordinator) Publish(ctx context.Context, request PublishRequest) (Publication, error) {
-	if !validID(request.ID) || request.SourceJobID != "" && !validID(request.SourceJobID) || validatePlan(request.Plan) != nil {
+	activation, activationErr := NormalizeActivationPolicy(request.Activation)
+	if !validID(request.ID) || request.SourceJobID != "" && !validID(request.SourceJobID) || validatePlan(request.Plan) != nil || activationErr != nil {
 		return Publication{}, ErrInvalidInput
 	}
 	if existing, err := c.store.FindIdempotent(request.ID, request.SourceJobID); err == nil {
-		if existing.Plan.PlanHash != request.Plan.PlanHash || existing.ID != request.ID && request.SourceJobID == "" {
+		if existing.Plan.PlanHash != request.Plan.PlanHash || existing.Activation.Policy != activation || existing.ID != request.ID && request.SourceJobID == "" {
 			return existing, ErrIdempotencyConflict
 		}
 		return existing, nil
@@ -57,7 +70,7 @@ func (c *Coordinator) Publish(ctx context.Context, request PublishRequest) (Publ
 	}
 	defer c.releaseFences(fences)
 	if existing, err := c.store.FindIdempotent(request.ID, request.SourceJobID); err == nil {
-		if existing.Plan.PlanHash != request.Plan.PlanHash {
+		if existing.Plan.PlanHash != request.Plan.PlanHash || existing.Activation.Policy != activation {
 			return existing, ErrIdempotencyConflict
 		}
 		return existing, nil
@@ -68,7 +81,7 @@ func (c *Coordinator) Publish(ctx context.Context, request PublishRequest) (Publ
 	publication := Publication{
 		ID: request.ID, SourceJobID: request.SourceJobID, RoomID: request.Plan.RoomID,
 		Status: StatusPreviewed, Outcome: OutcomeNone, Plan: request.Plan, Fences: fences,
-		RestartRequired: request.Plan.RestartRequired, CreatedAt: now, UpdatedAt: now,
+		RestartRequired: request.Plan.RestartRequired, Activation: initialActivation(activation), CreatedAt: now, UpdatedAt: now,
 	}
 	for _, target := range request.Plan.Targets {
 		publication.Targets = append(publication.Targets, TargetResult{
@@ -79,7 +92,7 @@ func (c *Coordinator) Publish(ctx context.Context, request PublishRequest) (Publ
 	publication, err = c.store.Create(publication)
 	if err != nil {
 		if existing, findErr := c.store.FindIdempotent(request.ID, request.SourceJobID); findErr == nil {
-			if existing.Plan.PlanHash == request.Plan.PlanHash {
+			if existing.Plan.PlanHash == request.Plan.PlanHash && existing.Activation.Policy == activation {
 				return existing, nil
 			}
 			return existing, ErrIdempotencyConflict
@@ -205,11 +218,19 @@ func (c *Coordinator) Publish(ctx context.Context, request PublishRequest) (Publ
 	publication, err = c.store.DecideCommit(publication.ID, c.now().UTC())
 	if err != nil {
 		if current, readErr := c.store.Get(publication.ID); readErr == nil && current.CommitDecision {
-			return c.completeCommitted(ctx, current, fences)
+			return c.completeAndActivate(ctx, current, fences)
 		}
 		return c.rollbackAfterFailure(ctx, publication, fences, "COMMIT_DECISION_FAILED", err)
 	}
-	return c.completeCommitted(ctx, publication, fences)
+	return c.completeAndActivate(ctx, publication, fences)
+}
+
+func (c *Coordinator) completeAndActivate(ctx context.Context, publication Publication, fences []Fence) (Publication, error) {
+	completed, err := c.completeCommitted(ctx, publication, fences)
+	if err != nil || completed.Activation.Policy.Mode != ActivationModeRestart {
+		return completed, err
+	}
+	return c.activateCommitted(ctx, completed, fences, completed.Activation.Policy)
 }
 
 func (c *Coordinator) completeCommitted(ctx context.Context, publication Publication, fences []Fence) (Publication, error) {
@@ -336,11 +357,14 @@ func (c *Coordinator) operation(publication Publication, target TargetPlan, fenc
 }
 
 func (c *Coordinator) acquireFences(ctx context.Context, plan Plan, publicationID string) ([]Fence, error) {
+	return c.acquireFencesFor(ctx, plan, publicationOperationKey(publicationID))
+}
+
+func (c *Coordinator) acquireFencesFor(ctx context.Context, plan Plan, operationKey string) ([]Fence, error) {
 	resources := publicationLeaseResources(plan)
 	if len(resources) == 0 {
 		return nil, ErrInvalidInput
 	}
-	operationKey := publicationOperationKey(publicationID)
 	fences := make([]Fence, 0, len(resources))
 	for _, resourceID := range resources {
 		fence, err := c.leases.Acquire(ctx, resourceID, operationKey, c.leaseTTL)
@@ -355,6 +379,22 @@ func (c *Coordinator) acquireFences(ctx context.Context, plan Plan, publicationI
 		fences = append(fences, fence)
 	}
 	return fences, nil
+}
+
+func (c *Coordinator) activationOperation(publication Publication, world WorldPlan, fences []Fence, action string) RuntimeOperation {
+	attempt := ""
+	for _, fence := range fences {
+		if fence.RoomID == world.RoomID {
+			attempt = fence.OperationKey
+			break
+		}
+	}
+	return RuntimeOperation{
+		PublicationID: publication.ID, TopologyRevision: publication.Plan.TopologyRevision,
+		PlanHash: publication.Plan.PlanHash, Fences: append([]Fence(nil), fences...), Action: "activate-" + action,
+		IdempotencyKey: "mod-activation:" + hashBytes([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s", publication.ID, world.RoomID, world.WorldID, action, attempt))),
+		RenewFences:    c.renewFences,
+	}
 }
 
 func publicationOperationKey(publicationID string) string {

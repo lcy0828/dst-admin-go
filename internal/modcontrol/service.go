@@ -67,8 +67,12 @@ func (s *Service) Publish(ctx context.Context, sourceJobID, roomID string, reque
 		return modpublication.Publication{}, modpublication.ErrPreviewBlocked
 	}
 	return s.coordinator.Publish(withPublicationSnapshot(ctx, prepared), modpublication.PublishRequest{
-		ID: uuid.NewString(), SourceJobID: strings.TrimSpace(sourceJobID), Plan: plan,
+		ID: uuid.NewString(), SourceJobID: strings.TrimSpace(sourceJobID), Plan: plan, Activation: request.Activation,
 	})
+}
+
+func (s *Service) Activate(ctx context.Context, sourceJobID, publicationID string, policy modpublication.ActivationPolicy) (modpublication.Publication, error) {
+	return s.coordinator.Activate(ctx, strings.TrimSpace(publicationID), strings.TrimSpace(sourceJobID), policy)
 }
 
 func (s *Service) checkTopologyRevision(ctx context.Context, roomID, expected, planRevision string) error {
@@ -126,7 +130,7 @@ func (s *Service) Retry(ctx context.Context, sourceJobID, publicationID string) 
 		return modpublication.Publication{}, modpublication.ErrPreviewBlocked
 	}
 	return s.coordinator.Publish(withPublicationSnapshot(ctx, prepared), modpublication.PublishRequest{
-		ID: uuid.NewString(), SourceJobID: strings.TrimSpace(sourceJobID), Plan: plan,
+		ID: uuid.NewString(), SourceJobID: strings.TrimSpace(sourceJobID), Plan: plan, Activation: current.Activation.Policy,
 	})
 }
 

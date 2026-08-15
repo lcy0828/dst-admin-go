@@ -372,6 +372,13 @@ func (c *snapshotCoordinator) RecoverOne(_ context.Context, id string) (modpubli
 	return value, nil
 }
 
+func (c *snapshotCoordinator) Activate(_ context.Context, _, _ string, policy modpublication.ActivationPolicy) (modpublication.Publication, error) {
+	value := c.current
+	value.Activation.Policy = policy
+	value.Activation.Status = modpublication.ActivationStatusSucceeded
+	return value, nil
+}
+
 func testExecution(room rooms.Room, world rooms.World, revision, targetID, nodeID, installationID string) topology.ExecutionPlacement {
 	target := agents.RuntimeTarget{
 		ID: targetID, AgentID: nodeID, Online: true, Configured: true,
