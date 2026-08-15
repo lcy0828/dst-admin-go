@@ -452,6 +452,134 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/backup-sets:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Backups]
+      operationId: listDistributedBackupSets
+      summary: List coordinated backup sets for every Shard in a room
+      responses:
+        "200":
+          description: Coordinated backup sets ordered newest first
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DistributedBackupSetListEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Backups, Jobs]
+      operationId: createDistributedBackupSet
+      summary: Stop all Shards and create a verified cold-consistent backup set
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DistributedBackupSetCreateInput" }
+      responses:
+        "202":
+          description: Coordinated backup job accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /backup-sets/{backupSetId}:
+    parameters:
+      - name: backupSetId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Backups]
+      operationId: getDistributedBackupSet
+      summary: Inspect a coordinated backup set and every verified Shard part
+      responses:
+        "200":
+          description: Coordinated backup set
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DistributedBackupSetEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /backup-sets/{backupSetId}/actions/restore:
+    parameters:
+      - name: backupSetId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Backups, Jobs]
+      operationId: restoreDistributedBackupSet
+      summary: Create a protection set, then restore and publish every Shard atomically
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DistributedBackupSetRestoreInput" }
+      responses:
+        "202":
+          description: Coordinated restore job accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /runtime-infrastructure:
+    get:
+      tags: [Topology, Runtime]
+      operationId: getRuntimeInfrastructure
+      summary: Inspect Runtime providers, execution environments, network scopes, port reservations, and CPU allocations
+      responses:
+        "200": { description: Current Runtime infrastructure snapshot, content: { application/json: { schema: { $ref: "#/components/schemas/RuntimeInfrastructureEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /runtime-infrastructure/network-profiles/{profileId}:
+    parameters:
+      - name: profileId
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      tags: [Topology, Runtime]
+      operationId: updateRuntimeNetworkProfile
+      summary: Update one execution environment network identity
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuntimeNetworkProfileInput" }
+      responses:
+        "200": { description: Updated network profile, content: { application/json: { schema: { $ref: "#/components/schemas/RuntimeNetworkProfileEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /runtime-infrastructure/cpu-allocations:
+    put:
+      tags: [Topology, Runtime]
+      operationId: updateRuntimeCPUAllocation
+      summary: Configure optional shared or exclusive logical CPU affinity for one Shard
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuntimeCPUAllocationInput" }
+      responses:
+        "200": { description: Updated CPU allocation, content: { application/json: { schema: { $ref: "#/components/schemas/RuntimeCPUAllocationEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/recovery:
     get:
       tags: [Rooms]
@@ -641,6 +769,16 @@ paths:
       responses:
         "200": { description: Per-shard runtime status, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeReportListEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
+  /rooms/{roomId}/runtime/overview:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Runtime, Topology]
+      operationId: getRoomRuntimeOverview
+      summary: Inspect placement-aware Runtime, Agent, health, and diagnostic state for every shard
+      responses:
+        "200": { description: Room Runtime observability snapshot, content: { application/json: { schema: { $ref: "#/components/schemas/RuntimeOverviewEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
   /rooms/{roomId}/runtime-events:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -727,6 +865,33 @@ paths:
         "200": { description: Recent runtime events, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeEventBatchEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+
+  /rooms/{roomId}/worlds/{worldId}/runtime/events/stream:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    get:
+      tags: [Runtime]
+      operationId: streamWorldRuntimeEvents
+      summary: Stream bounded Runtime events and resume after the last delivered producer cursor
+      parameters:
+        - name: cursor
+          in: query
+          description: Opaque producer-instance and sequence cursor returned in an earlier SSE id field
+          schema: { type: string, maxLength: 277 }
+        - name: Last-Event-ID
+          in: header
+          description: Opaque cursor from the last SSE event received by the client; cursor query parameter takes precedence
+          schema: { type: string, maxLength: 277 }
+      responses:
+        "200":
+          description: Server-sent Runtime cursor, event, reset, gap, error, and heartbeat frames
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
 
   /rooms/{roomId}/worlds/{worldId}/runtime/diagnostics/latest:
     parameters:
@@ -4019,6 +4184,88 @@ components:
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
 
+    RuntimeOverviewProblem:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+
+    RuntimeOverviewStatus:
+      type: object
+      additionalProperties: false
+      required: [state, sessionExists]
+      properties:
+        state: { type: string, enum: [running, stopped, starting, failed, unknown] }
+        code: { type: string }
+        message: { type: string }
+        sessionExists: { type: boolean }
+
+    RuntimeOverviewArtifact:
+      type: object
+      additionalProperties: false
+      required: [available, freshness]
+      properties:
+        available: { type: boolean }
+        freshness: { type: string, enum: [live, stale, unavailable] }
+        ageSeconds: { type: integer, format: int64, minimum: 0 }
+        observedAt: { type: string, format: date-time }
+        health: { $ref: "#/components/schemas/DSTRuntimeHealth" }
+        diagnostic: { $ref: "#/components/schemas/DSTRuntimeDiagnostic" }
+        problem: { $ref: "#/components/schemas/RuntimeOverviewProblem" }
+
+    RuntimeOverviewShard:
+      type: object
+      additionalProperties: false
+      required: [worldId, worldName, worldRole, state, placement, runtime, health, latestDiagnostic]
+      properties:
+        worldId: { type: string }
+        worldName: { type: string }
+        worldRole: { type: string, enum: [master, caves, custom] }
+        state: { type: string, enum: [healthy, degraded, unavailable] }
+        placement: { $ref: "#/components/schemas/TopologyPlacement" }
+        target: { $ref: "#/components/schemas/TopologyTargetSummary" }
+        runtime: { $ref: "#/components/schemas/RuntimeOverviewStatus" }
+        runtimeProblem: { $ref: "#/components/schemas/RuntimeOverviewProblem" }
+        health: { $ref: "#/components/schemas/RuntimeOverviewArtifact" }
+        latestDiagnostic: { $ref: "#/components/schemas/RuntimeOverviewArtifact" }
+
+    RuntimeOverviewSummary:
+      type: object
+      additionalProperties: false
+      required: [total, healthy, degraded, unavailable, running, stopped, planned]
+      properties:
+        total: { type: integer, minimum: 0 }
+        healthy: { type: integer, minimum: 0 }
+        degraded: { type: integer, minimum: 0 }
+        unavailable: { type: integer, minimum: 0 }
+        running: { type: integer, minimum: 0 }
+        stopped: { type: integer, minimum: 0 }
+        planned: { type: integer, minimum: 0 }
+
+    RuntimeOverview:
+      type: object
+      additionalProperties: false
+      required: [roomId, topologyRevision, remoteExecutionReady, summary, shards, targets, issues, observedAt]
+      properties:
+        roomId: { type: string }
+        topologyRevision: { type: string }
+        remoteExecutionReady: { type: boolean }
+        summary: { $ref: "#/components/schemas/RuntimeOverviewSummary" }
+        shards: { type: array, items: { $ref: "#/components/schemas/RuntimeOverviewShard" } }
+        targets: { type: array, items: { $ref: "#/components/schemas/TopologyTargetSummary" } }
+        issues: { type: array, items: { $ref: "#/components/schemas/TopologyIssue" } }
+        observedAt: { type: string, format: date-time }
+
+    RuntimeOverviewEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/RuntimeOverview" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+
     DSTRuntimeDiagnosticProfile:
       type: string
       enum: [summary, prefab, performance]
@@ -6986,12 +7233,23 @@ components:
     AgentInventoryCPU:
       type: object
       additionalProperties: false
-      required: [logical_processors, physical_cores, physical_core_source, physical_core_estimated]
+      required: [logical_processors, physical_cores, physical_core_source, physical_core_estimated, topology_available, smt_detected]
       properties:
         logical_processors: { type: integer, minimum: 1 }
         physical_cores: { type: integer, minimum: 0 }
         physical_core_source: { type: string }
         physical_core_estimated: { type: boolean }
+        topology_available: { type: boolean }
+        smt_detected: { type: boolean }
+        threads: { type: array, items: { $ref: "#/components/schemas/AgentInventoryCPUThread" } }
+    AgentInventoryCPUThread:
+      type: object
+      additionalProperties: false
+      required: [logical_id, package_id, core_id]
+      properties:
+        logical_id: { type: integer, minimum: 0 }
+        package_id: { type: string }
+        core_id: { type: string }
     AgentInventoryMemory:
       type: object
       additionalProperties: false
@@ -7082,6 +7340,251 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/AgentInventorySnapshot" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    DistributedBackupSetCreateInput:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, maxLength: 128 }
+    DistributedBackupSetRestoreInput:
+      type: object
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation:
+          type: string
+          description: Exact room name used as explicit destructive-action confirmation.
+    DistributedBackupPartStatus:
+      type: string
+      enum: [pending, staging, verified, failed]
+    DistributedBackupPart:
+      type: object
+      additionalProperties: false
+      required: [id, setId, roomId, worldId, worldName, worldRole, targetId, installationId, cluster, shard, topologyRevision, fileName, status, size, contentSize, fileCount, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        setId: { type: string, format: uuid }
+        roomId: { type: string }
+        worldId: { type: string }
+        worldName: { type: string }
+        worldRole: { type: string }
+        targetId: { type: string }
+        installationId: { type: string }
+        cluster: { type: string }
+        shard: { type: string }
+        topologyRevision: { type: string }
+        fileName: { type: string }
+        status: { $ref: "#/components/schemas/DistributedBackupPartStatus" }
+        size: { type: integer, format: int64, minimum: 0 }
+        contentSize: { type: integer, format: int64, minimum: 0 }
+        fileCount: { type: integer, minimum: 0 }
+        sha256: { type: string, pattern: "^[a-fA-F0-9]{64}$" }
+        sharedSha256: { type: string, pattern: "^[a-fA-F0-9]{64}$" }
+        failure: { type: string }
+        verifiedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    DistributedBackupSetStatus:
+      type: string
+      enum: [creating, verified, partial, failed, corrupt]
+    DistributedBackupSet:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, roomName, name, kind, mode, manifestVersion, topologyRevision, status, size, contentSize, fileCount, originalRunningWorlds, createdAt, updatedAt, parts]
+      properties:
+        id: { type: string, format: uuid }
+        roomId: { type: string }
+        roomName: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [manual, protection] }
+        mode: { type: string, const: cold-consistent }
+        manifestVersion: { type: integer, minimum: 1 }
+        topologyRevision: { type: string }
+        sharedSha256: { type: string, pattern: "^[a-fA-F0-9]{64}$" }
+        status: { $ref: "#/components/schemas/DistributedBackupSetStatus" }
+        size: { type: integer, format: int64, minimum: 0 }
+        contentSize: { type: integer, format: int64, minimum: 0 }
+        fileCount: { type: integer, minimum: 0 }
+        originalRunningWorlds: { type: array, uniqueItems: true, items: { type: string } }
+        manifestSha256: { type: string, pattern: "^[a-fA-F0-9]{64}$" }
+        failure: { type: string }
+        sourceJobId: { type: string, format: uuid }
+        verifiedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        parts: { type: array, items: { $ref: "#/components/schemas/DistributedBackupPart" } }
+    DistributedBackupSetList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/DistributedBackupSet" } }
+        total: { type: integer, minimum: 0 }
+    DistributedBackupSetEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/DistributedBackupSet" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    DistributedBackupSetListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/DistributedBackupSetList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    RuntimeProvider:
+      type: object
+      additionalProperties: false
+      required: [id, targetId, kind, displayName, os, arch, online, capabilities, updatedAt]
+      properties:
+        id: { type: string }
+        targetId: { type: string }
+        kind: { type: string, enum: [local, agent] }
+        displayName: { type: string }
+        os: { type: string }
+        arch: { type: string }
+        online: { type: boolean }
+        capabilities: { type: array, items: { type: string } }
+        observedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    RuntimeExecutionEnvironment:
+      type: object
+      additionalProperties: false
+      required: [id, providerId, targetId, kind, driver, networkProfileId, cpu, updatedAt]
+      properties:
+        id: { type: string }
+        providerId: { type: string }
+        targetId: { type: string }
+        kind: { type: string, enum: [native, container] }
+        driver: { type: string }
+        networkProfileId: { type: string }
+        cpu: { $ref: "#/components/schemas/AgentInventoryCPU" }
+        observedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    RuntimeNetworkProfile:
+      type: object
+      additionalProperties: false
+      required: [id, environmentId, name, mode, scopeId, bindAddress, advertiseAddress, updatedAt]
+      properties:
+        id: { type: string }
+        environmentId: { type: string }
+        name: { type: string }
+        mode: { type: string, enum: [host, bridge] }
+        scopeId: { type: string }
+        bindAddress: { type: string }
+        advertiseAddress: { type: string }
+        updatedAt: { type: string, format: date-time }
+    RuntimeNetworkProfileInput:
+      type: object
+      additionalProperties: false
+      required: [name, bindAddress, advertiseAddress]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        bindAddress: { type: string }
+        advertiseAddress: { type: string, maxLength: 255 }
+    RuntimePortReservation:
+      type: object
+      additionalProperties: false
+      required: [id, environmentId, networkProfileId, scopeId, targetId, cluster, shard, purpose, protocol, bindAddress, port, state, managed, updatedAt]
+      properties:
+        id: { type: string }
+        environmentId: { type: string }
+        networkProfileId: { type: string }
+        scopeId: { type: string }
+        targetId: { type: string }
+        roomId: { type: string }
+        worldId: { type: string }
+        cluster: { type: string }
+        shard: { type: string }
+        purpose: { type: string, enum: [dst_server, cluster_master, steam_authentication, steam_master_server] }
+        protocol: { type: string, const: udp }
+        bindAddress: { type: string }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        state: { type: string, enum: [active, planned, observed] }
+        managed: { type: boolean }
+        updatedAt: { type: string, format: date-time }
+    RuntimeCPUAllocation:
+      type: object
+      additionalProperties: false
+      required: [id, environmentId, targetId, roomId, worldId, policy, logicalCpuIds, physicalCoreKeys, allowSmtSiblingRisk, warnings, updatedAt]
+      properties:
+        id: { type: string }
+        environmentId: { type: string }
+        targetId: { type: string }
+        roomId: { type: string }
+        worldId: { type: string }
+        policy: { type: string, enum: [none, shared, exclusive] }
+        logicalCpuIds: { type: array, uniqueItems: true, items: { type: integer, minimum: 0 } }
+        physicalCoreKeys: { type: array, uniqueItems: true, items: { type: string } }
+        allowSmtSiblingRisk: { type: boolean }
+        warnings: { type: array, items: { type: string } }
+        updatedAt: { type: string, format: date-time }
+    RuntimeCPUAllocationInput:
+      type: object
+      additionalProperties: false
+      required: [roomId, worldId, environmentId, policy, logicalCpuIds, allowSmtSiblingRisk]
+      properties:
+        roomId: { type: string }
+        worldId: { type: string }
+        environmentId: { type: string }
+        policy: { type: string, enum: [none, shared, exclusive] }
+        logicalCpuIds: { type: array, uniqueItems: true, items: { type: integer, minimum: 0 } }
+        allowSmtSiblingRisk: { type: boolean }
+    RuntimeResourceConflict:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        scopeId: { type: string }
+        port: { type: integer }
+        targetId: { type: string }
+        roomId: { type: string }
+        worldId: { type: string }
+    RuntimeResourcePreflight:
+      type: object
+      additionalProperties: false
+      required: [ready, warnings, conflicts]
+      properties:
+        ready: { type: boolean }
+        warnings: { type: array, items: { type: string } }
+        conflicts: { type: array, items: { $ref: "#/components/schemas/RuntimeResourceConflict" } }
+    RuntimeInfrastructure:
+      type: object
+      additionalProperties: false
+      required: [providers, environments, networkProfiles, portReservations, cpuAllocations, preflight, capacityPolicy, observedAt]
+      properties:
+        providers: { type: array, items: { $ref: "#/components/schemas/RuntimeProvider" } }
+        environments: { type: array, items: { $ref: "#/components/schemas/RuntimeExecutionEnvironment" } }
+        networkProfiles: { type: array, items: { $ref: "#/components/schemas/RuntimeNetworkProfile" } }
+        portReservations: { type: array, items: { $ref: "#/components/schemas/RuntimePortReservation" } }
+        cpuAllocations: { type: array, items: { $ref: "#/components/schemas/RuntimeCPUAllocation" } }
+        preflight: { $ref: "#/components/schemas/RuntimeResourcePreflight" }
+        capacityPolicy: { $ref: "#/components/schemas/TopologyCapacityPolicy" }
+        observedAt: { type: string, format: date-time }
+    RuntimeInfrastructureEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/RuntimeInfrastructure" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    RuntimeNetworkProfileEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/RuntimeNetworkProfile" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    RuntimeCPUAllocationEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/RuntimeCPUAllocation" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     TopologyPlacementInput:

@@ -19,6 +19,7 @@ import (
 	"dont/internal/configuration"
 	consoleapi "dont/internal/console"
 	"dont/internal/containers"
+	"dont/internal/distributedbackup"
 	"dont/internal/dstruntime"
 	dstinstall "dont/internal/dstserver"
 	"dont/internal/gameupdate"
@@ -32,6 +33,9 @@ import (
 	"dont/internal/rooms"
 	"dont/internal/runtimeaudit"
 	"dont/internal/runtimedriver"
+	"dont/internal/runtimeevents"
+	"dont/internal/runtimeguard"
+	"dont/internal/runtimeoverview"
 	"dont/internal/saveimport"
 	"dont/internal/shards"
 	"dont/internal/structuredlogs"
@@ -337,6 +341,10 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	localMutationGuard, err := runtimeguard.New(roomService, runtimeDriverRouter)
+	if err != nil {
+		return nil, err
+	}
 	placementMigrationService, err := placementmigration.New(topologyService, runtimeDriverRouter, operationLeaseService)
 	if err != nil {
 		return nil, err
@@ -350,6 +358,18 @@ func initApplication(manageBackground bool) (*Application, error) {
 		return nil, err
 	}
 	distributedRuntimeBridge, err := dstruntime.NewDistributedBridge(runtimeBridge, runtimeDriverRouter)
+	if err != nil {
+		return nil, err
+	}
+	runtimeEventService, err := runtimeevents.New(distributedRuntimeBridge)
+	if err != nil {
+		return nil, err
+	}
+	runtimeOverviewService, err := runtimeoverview.New(topologyService, runtimeDriverRouter, distributedRuntimeBridge)
+	if err != nil {
+		return nil, err
+	}
+	runtimeObservabilityHandler, err := httpapi.NewRuntimeObservabilityHandler(runtimeEventService, runtimeOverviewService)
 	if err != nil {
 		return nil, err
 	}
@@ -409,7 +429,25 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	backupService.ConfigureMutationGuard(localMutationGuard)
 	backupHandler := httpapi.NewBackupHandler(backupService, jobService)
+	distributedBackupStore := distributedbackup.NewStore(models.DB(), tablePrefix)
+	if err := distributedBackupStore.Migrate(); err != nil {
+		return nil, err
+	}
+	distributedBackupService, err := distributedbackup.NewCoordinator(backupPath, roomService, runtimeDriverRouter, operationLeaseService, distributedBackupStore)
+	if err != nil {
+		return nil, err
+	}
+	distributedBackupHandler, err := httpapi.NewDistributedBackupHandler(distributedBackupService, jobService)
+	if err != nil {
+		return nil, err
+	}
+	if backgroundEnabled {
+		hooks.workers = append(hooks.workers, func(ctx context.Context) {
+			distributedBackupService.RunRecovery(ctx, time.Minute)
+		})
+	}
 	saveImportStore := saveimport.NewStore(models.DB(), tablePrefix)
 	if err := saveImportStore.Migrate(); err != nil {
 		return nil, err
@@ -437,6 +475,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	modService.ConfigureMutationGuard(localMutationGuard)
 	modHandler := httpapi.NewModHandler(modService, jobService)
 	playerStore := playerapi.NewStore(models.DB(), tablePrefix)
 	if err := playerStore.Migrate(); err != nil {
@@ -579,7 +618,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	}
 	saveImportService, err := saveimport.NewService(saveimport.Config{
 		SaveRoot: savePath, ImportRoot: filepath.Join(backupPath, ".imports"), WorkshopRoot: workshopContentPath,
-	}, saveImportStore, roomService, shardControl, backupService, modService)
+	}, saveImportStore, roomService, shardControl, backupService, modService, localMutationGuard)
 	if err != nil {
 		return nil, err
 	}
@@ -684,6 +723,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		roomHandler.Register(v2)
 		runtimeAuditHandler.Register(v2)
 		runtimeHandler.Register(v2)
+		runtimeObservabilityHandler.Register(v2)
 		jobHandler.Register(v2)
 		logHandler.Register(v2)
 		structuredLogHandler.Register(v2)
@@ -698,6 +738,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		systemSettingsHandler.Register(v2)
 		containerHandler.Register(v2)
 		backupHandler.Register(v2)
+		distributedBackupHandler.Register(v2)
 		saveImportHandler.Register(v2)
 		configurationHandler.Register(v2)
 		modHandler.Register(v2)
