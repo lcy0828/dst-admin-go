@@ -290,6 +290,42 @@ paths:
           $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/actions/{action}:
+    parameters:
+      - name: action
+        in: path
+        required: true
+        schema:
+          type: string
+          enum: [start, stop, restart]
+    post:
+      tags: [Rooms, Jobs]
+      operationId: runBatchRoomAction
+      summary: Start, stop, or restart selected worlds across multiple rooms through one persistent job
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchRoomActionInput"
+      responses:
+        "202":
+          description: Batch operation accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
   /rooms/{roomId}:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -3057,6 +3093,12 @@ components:
       required: true
       schema: { type: string, pattern: '^[a-f0-9]{12,64}$' }
   responses:
+    BadRequest:
+      description: The request body or resource identifier is malformed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
     Unauthorized:
       description: A valid administrator session is required
       content:
@@ -3383,6 +3425,37 @@ components:
           uniqueItems: true
           items:
             type: string
+        allowCapacityRisk:
+          type: boolean
+          default: false
+    BatchRoomActionSelection:
+      type: object
+      additionalProperties: false
+      required: [roomId]
+      properties:
+        roomId:
+          type: string
+        worldIds:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        allowCapacityRisk:
+          type: boolean
+          default: false
+    BatchRoomActionInput:
+      type: object
+      additionalProperties: false
+      required: [rooms]
+      properties:
+        rooms:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/BatchRoomActionSelection"
+        allowCapacityRisk:
+          type: boolean
+          default: false
     RoomEnvelope:
       type: object
       required: [data, error, meta]
