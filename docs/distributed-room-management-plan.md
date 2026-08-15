@@ -221,7 +221,8 @@ Agent enroll
 
 ```text
 Discover / Inventory / Status
-Start / Stop / Restart / Save
+Start / Stop / Restart / Save / SendConsole
+ConsoleHealth / ConfirmCommand
 StreamLogs / ReadArtifacts
 StageBackup / RestoreBackup
 PrepareMod / PublishConfig / VerifyRuntime
@@ -232,11 +233,14 @@ Driver 输入只引用已登记的 `environmentId`、`installationId`、Room、S
 实现顺序：
 
 1. 把现有 tmux 分片控制封装为 `native` Driver，API 与行为保持完全等价。
-2. 房间操作、日志、备份、Mod 和 Runtime 诊断全部改为依赖 Driver 契约。
-3. 增加 `container` Driver，容器内不启动 tmux。
-4. 最后增加 `kubernetes` Driver，不在控制器中拼接 kubectl Shell 命令。
+2. 将现有“tmux 已接收”状态映射为 transport acknowledgement；日志采集消费 `START/DONE` marker 后再实现 `ConfirmCommand`，超时或实例变化返回 `unknown`。
+3. 房间操作、日志、备份、Mod 和 Runtime 诊断全部改为依赖 Driver 契约。
+4. 增加 `container` Driver；首版保留 Shard 容器内 `tmux-compat` console transport，Agent 仍独立运行。
+5. 最后增加 `kubernetes` Driver，不在控制器中拼接 kubectl Shell 命令。
 
-每个 Driver 必须声明 capability。缺少 `exclusiveCpu`、`volumeSnapshot`、`publishedUdpEndpoint` 等能力时，UI 显示不支持或明确降级选项，不能假定所有平台等价。
+每个 Driver 必须声明 capability。缺少 `consoleInput`、`consoleAck`、`exclusiveCpu`、`volumeSnapshot`、`publishedUdpEndpoint` 等能力时，UI 显示不支持或明确降级选项，不能假定所有平台等价。
+
+`SendConsole` 必须写入正在运行的 DST 主进程 stdin。`docker exec` 只会创建新进程，不能直接作为实现；它仅可调用固定的 tmux/console client。每个请求携带 command ID、目标实例 ID、deadline 和 fencing token，同一 Shard 串行发送。transport 接受与日志 marker 确认分开记录；Agent/Engine 重启或实例变化造成结果不确定时返回 `unknown`，危险命令不自动重放。
 
 ## 7. 分布式生命周期
 
@@ -418,6 +422,8 @@ Mod 管理继续区分：
 | 主服务容器直接接管宿主 | 默认禁用 host PID/DST 路径/Docker Socket，改由 Agent 控制 |
 | Agent 容器状态卷丢失 | 持久化身份/fencing/幂等状态，丢失后阻止自动接管 |
 | Agent 容器越权控制宿主 native DST | 单独 host-integration profile、最小 bind mount 和高风险确认 |
+| 容器能启停但不能发送 DST 命令 | Runtime Driver 强制 `consoleInput/consoleAck` capability 和等价验收 |
+| 命令在重启边界发给错误实例 | instance ID、fencing、单 Shard 串行和 marker 确认 |
 | 容器可写层或 Pod 消失导致存档丢失 | 显式 volume/PVC、回收策略和恢复前校验 |
 | K8s 节点失联后重复调度写同一存档 | Room lease、fencing、Pod UID、PVC 所有权与旧实例终止确认 |
 | 部分成功 | 逐目标结果、补偿步骤和显式降级状态 |
@@ -479,7 +485,8 @@ Mod 管理继续区分：
 - 交付 Agent 非 root OCI 镜像，并把 Agent ID、密钥、Runtime 注册表、最高 fencing token 和幂等结果放入持久状态卷。
 - Agent capability 分成 `container-runtime` 和 `native-host-integration`；前者为推荐容器模式，后者在 Linux 实机验证前保持高风险实验状态。
 - `native-host-integration` 明确要求同 UID/GID、最小受信路径、tmux socket/运行目录和宿主进程可见性；缺少任一能力时不得报告 native control 可用。
-- 交付一个 Shard 一个容器的 Runtime profile、非 root 镜像和持久 volume 契约。
+- 交付一个 Shard 一个容器的 Runtime profile、非 root 镜像和持久 volume 契约；Shard 容器首版保留 `tmux-compat`，Agent 不与 DST 合并。
+- container Driver 交付 `SendConsole/ConsoleHealth/ConfirmCommand`；固定 tmux client 动作是兼容基线，Docker attach/stdin 通过专项验证后才可设为默认。
 - 支持 bridge/host 网络、UDP published endpoint、优雅停止和容器退出审计。
 - 支持 CPU quota 与 cpuset，明确区分限制份额和独占核心。
 - 同一宿主的 native/container 资源合并预检，容器 OOM kill 单独审计；默认不设置未经用户确认的低内存硬上限。
@@ -514,6 +521,7 @@ Mod 管理继续区分：
 - 支持普通 CPU request/limit；只有集群满足 CPU Manager static 等前提时开放 exclusive。
 - 支持保存屏障后的 CSI snapshot adapter，并保持 manifest/上传备份作为通用 fallback。
 - Placement 默认交给 scheduler 在允许节点池内选择，固定 Worker 只在高级模式开放；按 Worker 批量停止只作用于实际位于该节点的受管 Shard，不等同于 drain 或迁移。
+- Pod Runtime 提供与 native/container 相同的 `SendConsole/ConsoleHealth/ConfirmCommand`，控制台不可用时不允许保存屏障或危险命令。
 
 完成故障注入和至少两个 Kubernetes/CSI 组合验证前，界面固定标记“实验能力”，不宣称生产可用。
 
@@ -526,6 +534,9 @@ Mod 管理继续区分：
 - 主服务容器 + 远程裸机 Agent + 裸机 DST，反向代理/WebSocket 重连和错误 localhost 配置提示。
 - 主服务容器 + 容器 Agent + 容器 DST，Agent 状态卷保留和重建后幂等恢复。
 - 容器 Agent 的 native host-integration 在缺少 PID/tmux/path 能力时拒绝控制，状态卷丢失时拒绝接管。
+- container Runtime 分别验证保存、优雅停止、玩家命令、命令目录、自动化和 `customcommands.lua` 热激活。
+- tmux-compat 在 Agent 重启后继续发送命令；attach/stdin 在反复 attach、Docker 重启、高日志量和并发请求下不关闭 DST stdin。
+- 命令发送后 Shard 恰好重启时返回 `unknown`，不会把危险命令重放给新实例。
 - 两节点、一个房间、Master 与 Caves 分离。
 - 三节点、一个房间、三个自定义分片。
 - 一个节点运行多个房间。

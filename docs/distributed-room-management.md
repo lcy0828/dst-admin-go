@@ -309,14 +309,27 @@ SERVER_MODE = 64
 
 ```text
 discover, status, start, stop, restart, save
-inventory, logs, backupStage, modPrepare, health
+sendConsole, consoleHealth, inventory, logs
+backupStage, modPrepare, health
 ```
 
 - `native` Driver：当前 tmux 实现先迁入该边界，未来可增加 systemd/launchd profile。
-- `container` Driver：通过 Docker/Podman API 管理带受管标签的容器，不向请求开放任意镜像、挂载或命令。
+- `container` Driver：通过 Docker/Podman API 管理带受管标签的容器和固定控制台 transport，不向请求开放任意镜像、挂载或宿主命令。
 - `kubernetes` Driver：以独立 RuntimeProvider 身份，通过受限 ServiceAccount 管理指定 namespace 和 label 范围内的工作负载、Service、PVC、Job 与 Secret 引用。
 
-容器和 Pod 内不运行 tmux。Driver 返回统一状态，但必须保留原始来源，如 PID、container ID、Pod UID、restart count 和退出原因，避免把不同平台的故障压扁成一个 `stopped`。
+`sendConsole` 是必需能力，不是附加功能。保存、优雅停止、玩家管理、命令目录、自动化和 `customcommands.lua` 激活/诊断都依赖它。请求至少包含 `commandId`、目标 Shard 实例、Lua script、deadline 和 fencing token；Driver 串行写入同一 Shard，并区分“transport 已接受”和“日志 marker 已确认执行”。实例 ID 在发送前后变化时结果为 `unknown`，不得向新进程重放危险命令。
+
+当前实现只完成了 transport 层：命令会输出 `START/DONE` marker，但 `internal/console/service.go` 在 `Send` 返回后即把任务记为 `sent`，尚未根据日志中的 `DONE` 更新执行结果。因此 `ConfirmCommand` 是待实现的 Runtime 能力，不能把当前“已发送”解释为“DST 已执行”。
+
+控制台 transport：
+
+- native Runtime 继续使用当前 tmux `send-keys`，这是已实现基线。
+- container Runtime 初始使用 `tmux-compat`：tmux 位于 DST Shard 容器内，仅作为 DST stdin/会话代理；Agent 与 DST 仍是不同容器。Agent 通过 container Driver 执行固定 tmux 客户端动作，不开放任意 `docker exec`。
+- Docker Engine attach/stdin 是后续候选：容器必须配置 `OpenStdin=true`、`StdinOnce=false`、`Tty=false`，Driver 只 attach stdin。它通过重连、并发、Engine/Agent 重启、高日志量和命令 marker 验证后才能成为默认 transport。
+- `docker exec <lua>` 不能直接替代控制台输入，因为 exec 创建的是新进程，不会把 Lua 写入正在运行的 DST 主进程。exec 只有在调用受管 tmux 客户端或未来固定 console client 时才合法。
+- Kubernetes 也必须提供等价 console transport；不能把 Pod Running 或 `kubectl exec` 可用误认为 DST 控制台可用。
+
+tmux 不放进 Agent 容器，也不把 Agent 与 DST 打进同一容器。`tmux-compat` 是 Shard Runtime 的内部实现。Driver 返回统一状态，但保留 tmux session、PID、container ID、Pod UID、restart count、console transport 和退出原因，避免把不同平台故障压扁成一个 `stopped`。
 
 ## 7. 生命周期协调
 
@@ -423,12 +436,14 @@ Agent 容器重建后必须保留同一 Agent ID 和最高 fencing token；状�
 ### 11.3 DST Runtime 部署
 
 - `native`：DST 直接运行在 Linux/macOS，继续由 native/tmux Driver 控制。CPU `exclusive` 仅 Linux 探测通过时开放；macOS 保持建议模式。
-- `container`：推荐一个 Shard 一个容器，不在容器中运行 tmux；使用非 root 用户、只读基础镜像、明确的存档/Mod/日志 volume 和 graceful stop timeout。
+- `container`：推荐一个 Shard 一个容器，使用非 root 用户、只读基础镜像、明确的存档/Mod/日志 volume 和 graceful stop timeout。首版在 Shard 容器内保留 `tmux-compat` 控制台代理；这不改变 Agent 独立部署，也不允许一个容器承载多个 Shard。
 - container bridge 与 host 网络都可作为 profile，但必须展示真实 UDP 对外映射；跨机器 Master 使用可路由地址。
 - DST 二进制采用“受控可变安装卷”或“不可变版本镜像”二选一，同一发布计划不得静默混用。
 - 内存默认只预检和告警。启用硬限制后，Driver 必须把 OOM kill 与普通退出分开审计，并为备份压缩和临时文件保留资源。
 
 CPU 绑核和 DST 四类 UDP 端口都附着在 Shard Runtime/Node 上，不附着在主服务或 Agent 容器上。主服务和 Agent 只计入系统预留资源。
+
+容器停止顺序必须是：`sendConsole(c_shutdown(true)) -> 等待 marker/进程退出 -> container stop -> 超时后强制终止`。备份保存屏障先验证所有目标 `consoleHealth=ready`；任一 Shard 控制台不可用时不得把备份标记为一致。
 
 ### 11.4 Kubernetes（未来）
 
@@ -441,6 +456,7 @@ CPU 绑核和 DST 四类 UDP 端口都附着在 Shard Runtime/Node 上，不附�
 - 一致性备份使用保存屏障后协调各 PVC snapshot/上传；单个 PVC 快照不能宣称为完整 Room 备份。
 - K8s Placement 默认由 scheduler 在允许节点池中选择，页面显示期望节点池和实际 Worker；“停止某台服务器上的分片”只操作当前实际位于该 Worker 的受管 Shard，不等同于 drain、关机或迁移。
 - 主服务可以作为单副本 Deployment + PVC 运行；需要控制 Pod Shard 时由 Kubernetes Provider 使用受限 ServiceAccount。只有需要宿主级清单或 native Runtime 控制时才部署 Agent DaemonSet，不能默认给 DaemonSet 特权。
+- Pod Runtime 必须声明 console transport；初期可沿用 Shard 容器内 `tmux-compat`，或在 Kubernetes attach/stdin 通过同一等价矩阵后切换。Pod Running 但 console 不健康时，保存、备份和命令操作必须阻止。
 
 ### 11.5 配置体验
 

@@ -182,6 +182,34 @@ Docker 官方资料同时说明：bind mount 默认可写宿主文件并与宿�
 
 访问日期：2026-08-15。可信度：当前代码与 Docker 平台语义高；容器 Agent 的 native host-integration 仍需 Linux 实机验证。
 
+### 1.11 tmux 当前承担 DST 控制台输入，容器化不能删除该能力
+
+当前代码核验：
+
+- `internal/shards/tmux_control.go` 的 `Send` 最终调用 `tmux.DSTServer.SendCommand`。
+- `tmux/tmux.go` 使用 `tmux send-keys ... C-m` 把 Lua 输入正在运行的 DST 会话。
+- 保存、优雅停止、玩家管理、命令目录、自动化、运行时激活和 console fallback 都依赖统一 `Send` 接口。
+- `internal/console/service.go` 会在脚本前后打印 `START/DONE` marker，但当前 `Store.Complete` 在 `Send` 返回后就将状态记为 `sent`；尚无日志消费者用 `DONE` 确认 DST 已实际执行。
+
+因此“容器能启动/停止”不等于 Runtime 功能等价。Docker 官方说明，`docker exec` 会在运行容器内启动一个新进程；它不能直接向已有 DST 主进程 stdin 写入 Lua。Docker attach 可以连接运行容器主进程的 stdin/stdout/stderr，Engine API 也提供 `AttachStdin`、`OpenStdin` 和 `StdinOnce`，但 attached client 断开、日志缓冲、Engine 重启和并发写入仍需实机验证。
+
+产品结论：
+
+- native Runtime 继续使用 tmux。
+- container Runtime 首版在每个 Shard 容器内保留 `tmux-compat`，Agent 通过固定 container Driver 动作调用 tmux client；Agent 与 DST 仍不放在同一容器。
+- attach/stdin 作为后续候选 transport，要求 `OpenStdin=true`、`StdinOnce=false`、`Tty=false` 并只 attach stdin；完成等价矩阵前不替换 tmux。
+- Runtime Driver 必须提供 `SendConsole`、`ConsoleHealth` 和命令 marker 确认，区分“已写入 transport”和“DST 已执行”。
+- 目标实例变化或确认中断时结果为 `unknown`；保存、关服等危险命令不得自动重放到新实例。
+
+来源：
+
+- 当前代码：`internal/shards/tmux_control.go`、`tmux/tmux.go`、`internal/console/service.go`。
+- Docker Docs, `docker container attach`：<https://docs.docker.com/reference/cli/docker/container/attach/>
+- Docker Docs, `docker container exec`：<https://docs.docker.com/reference/cli/docker/container/exec/>
+- Docker Engine API container configuration and attach endpoint：<https://docs.docker.com/reference/api/engine/>
+
+访问日期：2026-08-15。可信度：当前 tmux 与 Docker API 语义高；DST attach/stdin 的长期可靠性需实机验证。
+
 ## 2. CPU 容量规则
 
 用户产品要求：同一服务器允许运行多个世界，但必须提醒用户“一核心最多安排一层世界”，避免卡顿。
@@ -223,6 +251,9 @@ Docker 官方资料同时说明：bind mount 默认可写宿主文件并与宿�
 13. 主服务容器经反向代理连接同宿主/远程裸机 Agent 时的 WebSocket 重连、真实来源地址和健康检查。
 14. 容器 Agent 在同 UID/GID、受限 bind mount、tmux socket 和宿主进程视图下控制 native DST 的完整生命周期。
 15. Agent 容器状态卷丢失、回滚或复制后，identity/fencing 防止重复接管的行为。
+16. container tmux-compat 在 Agent/Engine 重启、Shard 高日志量和多次命令发送后的控制台可用性。
+17. Docker attach/stdin 的断开重连、并发串行、stdin 是否保持打开，以及 Lua 换行/编码行为。
+18. 命令 transport 成功但 marker 未出现、命令执行中 Shard 重启和危险命令去重语义。
 
 ## 4. 实机测试记录格式
 
