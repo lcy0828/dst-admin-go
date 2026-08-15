@@ -12,7 +12,10 @@ import (
 	"github.com/go-ini/ini"
 )
 
-var runtimeInstallationID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var (
+	agentIdentityPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	runtimeInstallationID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+)
 
 // RuntimeInstallation is configured on the Agent host. Controllers refer to
 // it by ID and cannot override these trusted paths in an operation request.

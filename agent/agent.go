@@ -116,6 +116,11 @@ func isINIConfigPath(path string) bool {
 
 // NewAgent 创建一个新的代理实例
 func NewAgent(config *Config) (*Agent, error) {
+	config.AgentID = strings.TrimSpace(config.AgentID)
+	if config.AgentID != "" && !agentIdentityPattern.MatchString(config.AgentID) {
+		return nil, fmt.Errorf("Agent ID 无效")
+	}
+
 	// 生成密钥对
 	keyPair, err := shared.GenerateKeyPair()
 	if err != nil {
@@ -1142,12 +1147,19 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 func (a *Agent) getOrCreateAgentUUID() (string, error) {
 	// 尝试从配置文件读取UUID
 	configFile := a.Config.KeyFile
+	configuredID := strings.TrimSpace(a.Config.AgentID)
+	newIdentity := func() string {
+		if configuredID != "" {
+			return configuredID
+		}
+		return shared.GenerateUUID()
+	}
 
 	// 确保配置文件存在
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		// 如果配置文件不存在，先创建包含UUID的配置
-		uuid := shared.GenerateUUID()
-		log.Printf("生成新的Agent UUID: %s", uuid)
+		uuid := newIdentity()
+		log.Printf("初始化新的 Agent ID: %s", uuid)
 
 		// 确保目录存在
 		dir := filepath.Dir(configFile)
@@ -1176,8 +1188,8 @@ func (a *Agent) getOrCreateAgentUUID() (string, error) {
 	cfg, err := ini.Load(configFile)
 	if err != nil {
 		// 如果读取配置失败，生成新的UUID并返回，但不保存
-		uuid := shared.GenerateUUID()
-		log.Printf("读取配置文件失败，生成临时UUID: %s", uuid)
+		uuid := newIdentity()
+		log.Printf("读取配置文件失败，使用临时 Agent ID: %s", uuid)
 		return uuid, nil
 	}
 	if err := shared.EnsurePrivateFile(configFile); err != nil {
@@ -1195,8 +1207,8 @@ func (a *Agent) getOrCreateAgentUUID() (string, error) {
 	}
 
 	// 如果UUID不存在，生成新的并保存
-	uuid := shared.GenerateUUID()
-	log.Printf("配置文件中未找到UUID，生成新的: %s", uuid)
+	uuid := newIdentity()
+	log.Printf("配置文件中未找到 Agent ID，初始化为: %s", uuid)
 
 	// 更新配置文件
 	section.Key("AGENT_UUID").SetValue(uuid)

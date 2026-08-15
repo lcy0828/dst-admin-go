@@ -91,6 +91,38 @@ func TestAgentConnectUsesBearerWithoutLeakingKey(t *testing.T) {
 	}
 }
 
+func TestConfiguredAgentIDIsPersistedOnlyOnFirstRegistration(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "agent.conf")
+	key := agentTestKey()
+	if err := os.WriteFile(configPath, []byte("[agent]\nSECURITY_KEY = "+key+"\nSERVER_URL = ws://127.0.0.1/agent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := NewAgent(&Config{AgentID: "debian42-container", SecurityKey: key, KeyFile: configPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := first.getOrCreateAgentUUID()
+	if err != nil || identity != "debian42-container" {
+		t.Fatalf("first identity = %q, err=%v", identity, err)
+	}
+	second, err := NewAgent(&Config{AgentID: "replacement-id", SecurityKey: key, KeyFile: configPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err = second.getOrCreateAgentUUID()
+	if err != nil || identity != "debian42-container" {
+		t.Fatalf("persisted identity = %q, err=%v", identity, err)
+	}
+}
+
+func TestAgentRejectsUnsafeIdentity(t *testing.T) {
+	_, err := NewAgent(&Config{AgentID: "../../node", KeyFile: filepath.Join(t.TempDir(), "agent.conf")})
+	if err == nil {
+		t.Fatal("unsafe Agent ID was accepted")
+	}
+}
+
 func TestAgentConfigWritesArePrivateAndPreserveOtherSections(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.conf")
 	key := agentTestKey()

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +22,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
+
+var agentIdentityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // 常量
 const (
@@ -449,9 +452,9 @@ func (s *Server) handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 		agentID = msg.AgentID
 	}
 
-	// 检查是否是有效的UUID格式（至少要求有一定长度）
-	if len(agentID) < 10 {
-		log.Printf("错误: Agent提供的UUID无效: %s，连接将被拒绝", agentID)
+	// Agent identity is stable and human-readable; legacy numeric UUIDs remain valid.
+	if !agentIdentityPattern.MatchString(agentID) {
+		log.Printf("错误: Agent提供的 ID 无效，连接将被拒绝")
 		conn.Close()
 		return
 	}
