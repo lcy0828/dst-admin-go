@@ -143,6 +143,31 @@ func TestExecuteRuntimeBindsTrustedInstallationAndCapability(t *testing.T) {
 	}
 }
 
+func TestExecuteRuntimeAllowsBoundedGameUpdateTimeout(t *testing.T) {
+	service, _, _, _ := newAgentTestService(t)
+	config := RuntimeConfig{InstallationID: "primary", DisplayName: "运行节点", SavePath: "/srv/dst/save", ServerPath: "/srv/dst/server", ServerMode: "64"}
+	if _, err := service.SaveRuntimeConfig("agent-primary", config); err != nil {
+		t.Fatal(err)
+	}
+	request := shared.RuntimeOperationRequest{
+		ProtocolVersion: shared.RuntimeOperationProtocolVersion, OperationID: "operation-game-update-1",
+		Action: shared.RuntimeActionGameVersionUpdate, Cluster: "Cluster_1", Shard: "Master", TopologyRevision: "revision-1",
+		GameVersion: &shared.RuntimeGameVersionRequest{ExpectedVersion: "747465"},
+	}
+	result, err := service.ExecuteRuntime(context.Background(), "agent:agent-primary", request, 1800)
+	if err != nil || result.Result.GameVersion == nil || result.Result.GameVersion.CurrentVersion != "747465" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if _, err := service.ExecuteRuntime(context.Background(), "agent:agent-primary", request, 1801); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("oversized timeout error=%v", err)
+	}
+	request.Action = shared.RuntimeActionConsoleHealth
+	request.GameVersion = nil
+	if _, err := service.ExecuteRuntime(context.Background(), "agent:agent-primary", request, 301); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("ordinary runtime timeout error=%v", err)
+	}
+}
+
 func TestRuntimeTargetInventoriesCollectsConfiguredLocalTarget(t *testing.T) {
 	service, _, _, _ := newAgentTestService(t)
 	localRoot := t.TempDir()

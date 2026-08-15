@@ -24,6 +24,7 @@ type RuntimeInstallation struct {
 	Driver              string
 	SavePath            string
 	ServerPath          string
+	SteamCMDPath        string
 	UGCPath             string
 	WorkshopContentPath string
 	ModCachePath        string
@@ -61,6 +62,7 @@ func loadRuntimeInstallations(configPath string) ([]RuntimeInstallation, error) 
 		values = append(values, RuntimeInstallation{
 			ID: installationID, Driver: section.Key("DRIVER").String(), SavePath: section.Key("SAVE_PATH").String(),
 			ServerPath: section.Key("SERVER_PATH").String(), UGCPath: section.Key("UGC_PATH").String(),
+			SteamCMDPath:        section.Key("STEAMCMD_PATH").String(),
 			WorkshopContentPath: section.Key("WORKSHOP_CONTENT_PATH").String(), ModCachePath: section.Key("MOD_CACHE_PATH").String(),
 			ModStatePath: section.Key("MOD_STATE_PATH").String(),
 			ServerMode:   section.Key("SERVER_MODE").String(), ContainerEngine: section.Key("CONTAINER_ENGINE").String(),
@@ -96,6 +98,10 @@ func normalizeRuntimeInstallations(values []RuntimeInstallation) ([]RuntimeInsta
 		}
 		value.SavePath = filepath.Clean(strings.TrimSpace(value.SavePath))
 		value.ServerPath = filepath.Clean(strings.TrimSpace(value.ServerPath))
+		value.SteamCMDPath = strings.TrimSpace(value.SteamCMDPath)
+		if value.SteamCMDPath != "" {
+			value.SteamCMDPath = filepath.Clean(value.SteamCMDPath)
+		}
 		value.UGCPath = strings.TrimSpace(value.UGCPath)
 		if value.UGCPath != "" {
 			value.UGCPath = filepath.Clean(value.UGCPath)
@@ -143,9 +149,10 @@ func normalizeRuntimeInstallations(values []RuntimeInstallation) ([]RuntimeInsta
 			return nil, fmt.Errorf("DST 安装 %s 的 DRIVER 必须为 native 或 container", value.ID)
 		}
 		if !trustedAbsolutePath(value.SavePath) || !trustedAbsolutePath(value.ServerPath) ||
+			(value.SteamCMDPath != "" && !trustedAbsolutePath(value.SteamCMDPath)) ||
 			(value.UGCPath != "" && !trustedAbsolutePath(value.UGCPath)) || !trustedAbsolutePath(value.WorkshopContentPath) ||
 			!trustedAbsolutePath(value.ModCachePath) || !trustedAbsolutePath(value.ModStatePath) ||
-			strings.ContainsAny(value.SavePath+value.ServerPath+value.UGCPath+value.WorkshopContentPath+value.ModCachePath+value.ModStatePath+value.ConsoleSocket, "\x00\r\n") {
+			strings.ContainsAny(value.SavePath+value.ServerPath+value.SteamCMDPath+value.UGCPath+value.WorkshopContentPath+value.ModCachePath+value.ModStatePath+value.ConsoleSocket, "\x00\r\n") {
 			return nil, fmt.Errorf("DST 安装 %s 包含无效路径", value.ID)
 		}
 		if pathsOverlap(value.ModCachePath, value.ModStatePath) {

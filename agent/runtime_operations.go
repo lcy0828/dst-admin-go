@@ -65,6 +65,9 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 		if isModAction(request.Action) {
 			return a.observeModAction(operationContext, installation, *request)
 		}
+		if request.Action == shared.RuntimeActionGameVersionObserve {
+			return a.observeGameVersion(operationContext, installation, *request)
+		}
 		control, err := a.runtimeControl(installation)
 		if err != nil {
 			return shared.RuntimeOperationResult{}, err
@@ -74,6 +77,8 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 	lockKey := request.InstallationID + "\x00" + request.Cluster
 	if isModAction(request.Action) {
 		lockKey = request.InstallationID + "\x00mods"
+	} else if request.Action == shared.RuntimeActionGameVersionUpdate {
+		lockKey = request.InstallationID + "\x00game-version"
 	}
 	operationContext, release, err := roomops.Acquire(operationContext, lockKey)
 	if err != nil {
@@ -89,6 +94,8 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 	var operationErr error
 	if isModAction(request.Action) {
 		result, operationErr = a.executeModAction(operationContext, installation, *request)
+	} else if request.Action == shared.RuntimeActionGameVersionUpdate {
+		result, operationErr = a.updateGameVersion(operationContext, installation, *request)
 	} else if request.Action == shared.RuntimeActionConsoleSend {
 		control, controlErr := a.runtimeControl(installation)
 		if controlErr != nil {
@@ -109,7 +116,7 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 
 func validateRuntimeOperationRequest(commandType string, request shared.RuntimeOperationRequest, timeout int, now time.Time) error {
 	if request.ProtocolVersion != shared.RuntimeOperationProtocolVersion || !shared.IsRuntimeAction(request.Action) ||
-		commandType != string(request.Action) || timeout < 5 || timeout > 300 ||
+		commandType != string(request.Action) || timeout < 5 || timeout > runtimeOperationTimeoutLimit(request.Action) ||
 		!runtimeInstallationID.MatchString(request.InstallationID) || !shardResourceName.MatchString(request.Cluster) ||
 		!shardResourceName.MatchString(request.Shard) || !operationIdentity.MatchString(request.OperationID) ||
 		len(request.TopologyRevision) < 1 || len(request.TopologyRevision) > 128 || strings.ContainsAny(request.TopologyRevision, "\x00\r\n") {
@@ -124,11 +131,11 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 	}
 	switch request.Action {
 	case shared.RuntimeActionConsoleHealth:
-		if request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil {
+		if request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil {
 			return errors.New("控制台健康请求包含无关负载")
 		}
 	case shared.RuntimeActionConsoleSend:
-		if request.Console == nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil {
+		if request.Console == nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil {
 			return errors.New("控制台请求负载无效")
 		}
 		console := request.Console
@@ -139,7 +146,7 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 			return errors.New("控制台请求内容无效")
 		}
 	case shared.RuntimeActionReadLogs:
-		if request.Logs == nil || request.Console != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil ||
+		if request.Logs == nil || request.Console != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil ||
 			request.Logs.Cursor < -1 || request.Logs.MaxBytes < 1 || request.Logs.MaxBytes > runtimefiles.MaximumLogBytes ||
 			(request.Logs.Raw && request.Logs.MaxLines != 0 || !request.Logs.Raw && (request.Logs.MaxLines < 1 || request.Logs.MaxLines > 2000)) ||
 			request.Logs.Raw && strings.TrimSpace(request.Logs.Query) != "" || len([]rune(request.Logs.Query)) > 256 ||
@@ -147,11 +154,11 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 			return errors.New("日志读取请求无效")
 		}
 	case shared.RuntimeActionReadArtifacts:
-		if request.Artifacts == nil || request.Console != nil || request.Logs != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || !runtimefiles.IsArtifactKind(request.Artifacts.Kind) {
+		if request.Artifacts == nil || request.Console != nil || request.Logs != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil || !runtimefiles.IsArtifactKind(request.Artifacts.Kind) {
 			return errors.New("Runtime 制品读取请求无效")
 		}
 	case shared.RuntimeActionObserveOperation:
-		if request.Observation == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil ||
+		if request.Observation == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil ||
 			!operationIdentity.MatchString(request.Observation.ObservedOperationID) ||
 			request.Observation.ObservedOperationKey != "" && !operationIdentity.MatchString(request.Observation.ObservedOperationKey) {
 			return errors.New("Runtime 操作观察请求无效")
@@ -160,7 +167,7 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 		shared.RuntimeActionMigrationImportBegin, shared.RuntimeActionMigrationImportWrite, shared.RuntimeActionMigrationImportCommit,
 		shared.RuntimeActionMigrationTargetRollback, shared.RuntimeActionMigrationTargetComplete,
 		shared.RuntimeActionMigrationSourceFinalize, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeActionMigrationSourceComplete:
-		if request.Migration == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Backup != nil || request.Mod != nil ||
+		if request.Migration == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil ||
 			!operationIdentity.MatchString(request.Migration.MigrationID) || request.Migration.Offset < 0 || request.Migration.Size < 0 ||
 			len(request.Migration.Data) > shardtransfer.MaxChunkBytes || len(request.Migration.SHA256) > 64 {
 			return errors.New("分片迁移请求无效")
@@ -173,6 +180,10 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 		shared.RuntimeActionModReleasePrepare, shared.RuntimeActionModReleasePublish, shared.RuntimeActionModReleaseRollback,
 		shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState, shared.RuntimeActionModOverridesRead:
 		if err := validateModOperationPayload(request); err != nil {
+			return err
+		}
+	case shared.RuntimeActionGameVersionObserve, shared.RuntimeActionGameVersionUpdate:
+		if err := validateGameVersionPayload(request); err != nil {
 			return err
 		}
 	default:
@@ -354,7 +365,7 @@ func backupDescriptor(request shared.RuntimeOperationRequest) shardtransfer.Back
 
 func validateBackupOperationPayload(request shared.RuntimeOperationRequest) error {
 	backup := request.Backup
-	if backup == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Mod != nil ||
+	if backup == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Mod != nil || request.GameVersion != nil ||
 		!operationIdentity.MatchString(backup.BackupID) || backup.Offset < 0 || backup.Size < 0 || backup.ContentSize < 0 || backup.FileCount < 0 ||
 		len(backup.Data) > shardtransfer.MaxChunkBytes || len(backup.SHA256) > 64 || len(backup.SharedSHA256) > 64 {
 		return errors.New("备份 Runtime 请求无效")
@@ -451,9 +462,18 @@ func runtimeActionRequiresExistingShard(action shared.RuntimeAction) bool {
 		shared.RuntimeActionModReleaseRollback, shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState,
 		shared.RuntimeActionModOverridesRead:
 		return false
+	case shared.RuntimeActionGameVersionObserve, shared.RuntimeActionGameVersionUpdate:
+		return false
 	default:
 		return true
 	}
+}
+
+func runtimeOperationTimeoutLimit(action shared.RuntimeAction) int {
+	if action == shared.RuntimeActionGameVersionUpdate {
+		return 1800
+	}
+	return 300
 }
 
 func executeConsoleSend(ctx context.Context, control shardRuntimeControl, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {

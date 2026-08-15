@@ -49,6 +49,8 @@ const (
 	RuntimeActionModReleaseComplete      RuntimeAction = "runtime.mods.release.complete"
 	RuntimeActionModReleaseState         RuntimeAction = "runtime.mods.release.state"
 	RuntimeActionModOverridesRead        RuntimeAction = "runtime.mods.overrides.read"
+	RuntimeActionGameVersionObserve      RuntimeAction = "runtime.game.version.observe"
+	RuntimeActionGameVersionUpdate       RuntimeAction = "runtime.game.version.update"
 )
 
 type ConsoleMode string
@@ -167,6 +169,14 @@ type RuntimeModRequest struct {
 	WorldDirectory     string               `json:"world_directory,omitempty"`
 }
 
+// RuntimeGameVersionRequest contains only update intent. Executable paths,
+// installation roots and the fixed DST App ID are resolved by the Agent from
+// its trusted local installation configuration.
+type RuntimeGameVersionRequest struct {
+	ExpectedVersion string `json:"expected_version,omitempty"`
+	CleanCache      bool   `json:"clean_cache,omitempty"`
+}
+
 // RuntimeOperationRequest references a trusted installation and a managed
 // Shard. It never accepts a host path, executable, container specification or
 // shell command.
@@ -189,6 +199,7 @@ type RuntimeOperationRequest struct {
 	Migration        *RuntimeMigrationRequest   `json:"migration,omitempty"`
 	Backup           *RuntimeBackupRequest      `json:"backup,omitempty"`
 	Mod              *RuntimeModRequest         `json:"mod,omitempty"`
+	GameVersion      *RuntimeGameVersionRequest `json:"game_version,omitempty"`
 }
 
 type RuntimeOutcome string
@@ -347,6 +358,16 @@ type RuntimeModResult struct {
 	RuntimeVersion string                    `json:"runtime_version,omitempty"`
 }
 
+type RuntimeGameVersionResult struct {
+	Installed         bool      `json:"installed"`
+	CurrentVersion    string    `json:"current_version,omitempty"`
+	AvailableBytes    uint64    `json:"available_bytes"`
+	SteamCMDAvailable bool      `json:"steamcmd_available"`
+	UpdateSupported   bool      `json:"update_supported"`
+	Log               string    `json:"log,omitempty"`
+	ObservedAt        time.Time `json:"observed_at"`
+}
+
 type RuntimeOperationResult struct {
 	ProtocolVersion  int                       `json:"protocol_version"`
 	OperationID      string                    `json:"operation_id"`
@@ -370,6 +391,7 @@ type RuntimeOperationResult struct {
 	Migration        *RuntimeMigrationResult   `json:"migration,omitempty"`
 	Backup           *RuntimeBackupResult      `json:"backup,omitempty"`
 	Mod              *RuntimeModResult         `json:"mod,omitempty"`
+	GameVersion      *RuntimeGameVersionResult `json:"game_version,omitempty"`
 }
 
 func IsRuntimeAction(value RuntimeAction) bool {
@@ -388,6 +410,8 @@ func IsRuntimeAction(value RuntimeAction) bool {
 		RuntimeActionModReleasePlanBegin, RuntimeActionModReleasePlanWrite, RuntimeActionModReleasePlanCommit,
 		RuntimeActionModReleasePrepare, RuntimeActionModReleasePublish, RuntimeActionModReleaseRollback,
 		RuntimeActionModReleaseComplete, RuntimeActionModReleaseState, RuntimeActionModOverridesRead:
+		return true
+	case RuntimeActionGameVersionObserve, RuntimeActionGameVersionUpdate:
 		return true
 	default:
 		return false
@@ -409,6 +433,8 @@ func RuntimeActionMutates(value RuntimeAction) bool {
 		RuntimeActionModReleasePlanBegin, RuntimeActionModReleasePlanWrite, RuntimeActionModReleasePlanCommit,
 		RuntimeActionModReleasePrepare, RuntimeActionModReleasePublish, RuntimeActionModReleaseRollback,
 		RuntimeActionModReleaseComplete:
+		return true
+	case RuntimeActionGameVersionUpdate:
 		return true
 	default:
 		return false

@@ -38,6 +38,7 @@ const (
 	CapabilityBackupRestore   Capability = "backupRestore"
 	CapabilityModPrepare      Capability = "modPrepare"
 	CapabilityModPublish      Capability = "modPublish"
+	CapabilityGameUpdate      Capability = "gameUpdate"
 	CapabilityExclusiveCPU    Capability = "exclusiveCpu"
 	CapabilityPublishedUDP    Capability = "publishedUdpEndpoint"
 )
@@ -122,6 +123,14 @@ type ModDriver interface {
 	CompleteModRelease(context.Context, Target, Operation, string) (shared.RuntimeModReleaseState, error)
 	ModReleaseState(context.Context, Target, string) (shared.RuntimeModReleaseState, error)
 	ReadModOverrides(context.Context, Target, string, string, int64) (shared.RuntimeModOverridesChunk, error)
+}
+
+// GameVersionDriver is installation-scoped and intentionally separate from
+// Driver because lifecycle targets and game installations have different
+// capability boundaries.
+type GameVersionDriver interface {
+	ObserveGameVersion(context.Context, Target) (shared.RuntimeGameVersionResult, error)
+	UpdateGameVersion(context.Context, Target, Operation, string, bool) (shared.RuntimeGameVersionResult, error)
 }
 
 type Driver interface {

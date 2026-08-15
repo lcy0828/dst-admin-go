@@ -20,8 +20,9 @@ type Agent struct {
 }
 
 var (
-	_ Driver    = (*Agent)(nil)
-	_ ModDriver = (*Agent)(nil)
+	_ Driver            = (*Agent)(nil)
+	_ ModDriver         = (*Agent)(nil)
+	_ GameVersionDriver = (*Agent)(nil)
 )
 
 func NewAgent(executor AgentExecutor) (*Agent, error) {
@@ -38,8 +39,32 @@ func (d *Agent) Capabilities() []Capability {
 		CapabilityLifecycle, CapabilityConsoleInput, CapabilityConsoleHealth, CapabilityRawConsole,
 		CapabilityOperationProof, CapabilityLogContinuation, CapabilityArtifacts,
 		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore,
-		CapabilityModPrepare, CapabilityModPublish,
+		CapabilityModPrepare, CapabilityModPublish, CapabilityGameUpdate,
 	}
+}
+
+func (d *Agent) ObserveGameVersion(ctx context.Context, target Target) (shared.RuntimeGameVersionResult, error) {
+	request := runtimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionGameVersionObserve)
+	request.GameVersion = &shared.RuntimeGameVersionRequest{}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 60)
+	return checkedGameVersionResult(result.Result, err)
+}
+
+func (d *Agent) UpdateGameVersion(ctx context.Context, target Target, operation Operation, expectedVersion string, cleanCache bool) (shared.RuntimeGameVersionResult, error) {
+	request := runtimeRequest(target, operation, shared.RuntimeActionGameVersionUpdate)
+	request.GameVersion = &shared.RuntimeGameVersionRequest{ExpectedVersion: expectedVersion, CleanCache: cleanCache}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 1800)
+	return checkedGameVersionResult(result.Result, err)
+}
+
+func checkedGameVersionResult(result shared.RuntimeOperationResult, err error) (shared.RuntimeGameVersionResult, error) {
+	if result.GameVersion == nil {
+		if err != nil {
+			return shared.RuntimeGameVersionResult{}, err
+		}
+		return shared.RuntimeGameVersionResult{}, errors.New("Agent 未返回有效的游戏版本结果")
+	}
+	return *result.GameVersion, err
 }
 
 func (d *Agent) Status(ctx context.Context, target Target) (shared.ShardRuntimeStatus, error) {

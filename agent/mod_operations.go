@@ -137,7 +137,7 @@ func (a *Agent) observeModAction(ctx context.Context, installation RuntimeInstal
 
 func validateModOperationPayload(request shared.RuntimeOperationRequest) error {
 	mod := request.Mod
-	if mod == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil {
+	if mod == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.GameVersion != nil {
 		return errors.New("Mod Runtime 请求负载无效")
 	}
 	validUpload := operationIdentity.MatchString(mod.UploadID)

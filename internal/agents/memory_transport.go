@@ -27,7 +27,7 @@ func NewMemoryTransport() *MemoryTransport {
 			"agent-primary": {
 				ID: "agent-primary", Status: StatusOnline, Hostname: "林火节点", OS: "linux", Arch: "amd64", Version: "2.0.0-test",
 				IPAddresses: []string{"192.168.2.12"}, LastHeartbeat: now, LastReportAt: utcTimePointer(now),
-				Capabilities: []string{"system.report", "command.exec", "disk.inspect", "runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read", "shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1", "runtime.migration.v1", "runtime.backup.v1", "runtime.mods.v1"},
+				Capabilities: []string{"system.report", "command.exec", "disk.inspect", "runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read", "shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1", "runtime.migration.v1", "runtime.backup.v1", "runtime.mods.v1", "runtime.game-update.v1"},
 				Metrics:      Metrics{CPUCount: 16, LogicalProcessors: 16, PhysicalCores: 8, PhysicalCoreSource: "test", RunningShardCount: 2, MemoryUsed: 3 * 1024 * 1024 * 1024, MemoryTotal: 8 * 1024 * 1024 * 1024, UptimeSeconds: 86400, ObservedAt: utcTimePointer(now)},
 				Details:      map[string]interface{}{"goVersion": "go1.25", "currentDirectory": "/opt/dst-admin-agent"},
 			},
@@ -173,6 +173,19 @@ func (m *MemoryTransport) ExecuteRuntime(ctx context.Context, agentID string, re
 	}
 	if request.Action == shared.RuntimeActionConsoleSend {
 		result.Outcome = shared.RuntimeOutcomeSent
+	}
+	if request.Action == shared.RuntimeActionGameVersionObserve || request.Action == shared.RuntimeActionGameVersionUpdate {
+		version := "747465"
+		if request.GameVersion != nil && request.GameVersion.ExpectedVersion != "" {
+			version = request.GameVersion.ExpectedVersion
+		}
+		result.GameVersion = &shared.RuntimeGameVersionResult{
+			Installed: true, CurrentVersion: version, AvailableBytes: 16 * 1024 * 1024 * 1024,
+			SteamCMDAvailable: true, UpdateSupported: true, ObservedAt: m.now().UTC(),
+		}
+		if request.Action == shared.RuntimeActionGameVersionUpdate {
+			result.Outcome = shared.RuntimeOutcomeConfirmed
+		}
 	}
 	return RuntimeExecutionResult{RemoteID: "memory-" + request.OperationID, Result: result}, nil
 }

@@ -70,6 +70,7 @@ type Agent struct {
 	shardTransfers    map[string]*shardtransfer.Manager
 	modDistributionMu sync.Mutex
 	modDistributions  map[string]*moddistribution.Manager
+	gameVersionRunner gameVersionCommandRunner
 	now               func() time.Time
 }
 
@@ -205,6 +206,7 @@ func NewAgent(config *Config) (*Agent, error) {
 	agent.shardRuntimes = make(map[string]shardRuntimeControl)
 	agent.shardTransfers = make(map[string]*shardtransfer.Manager)
 	agent.modDistributions = make(map[string]*moddistribution.Manager)
+	agent.gameVersionRunner = execGameVersionCommand{}
 
 	return agent, nil
 }
@@ -1052,7 +1054,7 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 	if len(a.Config.RuntimeInstallations) > 0 && runtime.GOOS != "windows" {
 		capabilities = append(capabilities,
 			"shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1", "runtime.migration.v1",
-			"runtime.backup.v1", "runtime.mods.v1",
+			"runtime.backup.v1", "runtime.mods.v1", "runtime.game-update.v1",
 		)
 		for _, installation := range a.Config.RuntimeInstallations {
 			if installation.Driver == "container" {

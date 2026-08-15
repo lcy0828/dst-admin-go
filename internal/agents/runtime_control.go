@@ -32,7 +32,7 @@ func (s *Service) ExecuteRuntime(ctx context.Context, targetID string, request s
 		return RuntimeExecutionResult{}, ErrInvalidInput
 	}
 	request.InstallationID = config.InstallationID
-	if timeoutSeconds < 5 || timeoutSeconds > 300 || !shared.IsRuntimeAction(request.Action) {
+	if timeoutSeconds < 5 || timeoutSeconds > runtimeTimeoutLimit(request.Action) || !shared.IsRuntimeAction(request.Action) {
 		return RuntimeExecutionResult{}, ErrInvalidInput
 	}
 	result, err := s.transport.ExecuteRuntime(ctx, agentID, request, timeoutSeconds)
@@ -71,7 +71,16 @@ func runtimeCapability(action shared.RuntimeAction) string {
 		shared.RuntimeActionModReleasePrepare, shared.RuntimeActionModReleasePublish, shared.RuntimeActionModReleaseRollback,
 		shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState, shared.RuntimeActionModOverridesRead:
 		return "runtime.mods.v1"
+	case shared.RuntimeActionGameVersionObserve, shared.RuntimeActionGameVersionUpdate:
+		return "runtime.game-update.v1"
 	default:
 		return ""
 	}
+}
+
+func runtimeTimeoutLimit(action shared.RuntimeAction) int {
+	if action == shared.RuntimeActionGameVersionUpdate {
+		return 1800
+	}
+	return 300
 }
