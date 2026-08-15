@@ -133,8 +133,10 @@ if [ "${DST_ADMIN_SMOKE_BUILD:-0}" = "1" ]; then
       test "$(stat -c %u /var/lib/dst-admin)" = 10001
       test "$(stat -c %u /var/lib/dst-admin/workshop)" = 10001
     '
-    compose run --rm --no-deps --entrypoint /bin/sh agent -ec '
+    compose run --rm --no-deps agent /bin/sh -ec '
       test "$(id -u)" = 10000
+      test -f /var/lib/dst-admin-agent/agent.conf
+      test "$(stat -c %a /var/lib/dst-admin-agent/agent.conf)" = 600
       test -w /var/lib/dst-admin-agent
       test -w /srv/dst/saves
       test -w /srv/dst/server/mods
@@ -145,7 +147,7 @@ if [ "${DST_ADMIN_SMOKE_BUILD:-0}" = "1" ]; then
       test "$(stat -c %u /srv/dst/workshop)" = 10000
     '
     if [ "$smoke_case" = legacy ]; then
-      compose run --rm --no-deps --entrypoint /bin/sh agent -ec '
+      compose run --rm --no-deps agent /bin/sh -ec '
         test -f /srv/dst/server/mods/dedicated_server_mods_setup.lua
         test "$(cat /srv/dst/server/mods/dedicated_server_mods_setup.lua)" = legacy-setup
       '
@@ -155,7 +157,7 @@ if [ "${DST_ADMIN_SMOKE_BUILD:-0}" = "1" ]; then
     compose run --rm --no-deps control-data-init
     compose run --rm --no-deps volume-init
     compose run --rm --no-deps control-plane /bin/sh -ec 'test -w /var/lib/dst-admin && test -f /var/lib/dst-admin/app.conf'
-    compose run --rm --no-deps --entrypoint /bin/sh agent -ec 'test -w /var/lib/dst-admin-agent && test -w /srv/dst/server/mods'
+    compose run --rm --no-deps agent /bin/sh -ec 'test -w /var/lib/dst-admin-agent && test -w /srv/dst/server/mods && test -f /var/lib/dst-admin-agent/agent.conf'
     compose run --rm --no-deps \
       -e DST_CLUSTER=Smoke \
       -e DST_SHARD=Master \
