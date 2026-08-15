@@ -380,7 +380,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if os.Getenv("DST_ADMIN_ENV") != "test" {
 		shardOperations = shards.NewOperations(roomService, shardControl, runtimeManager)
 	}
-	if err := shardOperations.ConfigureDistributed(topologyService, agentService, operationLeaseService); err != nil {
+	if err := shardOperations.ConfigureRuntime(topologyService, runtimeDriverRouter, operationLeaseService); err != nil {
 		return nil, err
 	}
 	runtimeAuditStore := runtimeaudit.NewStore(models.DB(), tablePrefix)

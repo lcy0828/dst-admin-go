@@ -10,6 +10,7 @@ import (
 
 var (
 	ErrInvalidTarget      = errors.New("runtime driver target is invalid")
+	ErrTopologyChanged    = errors.New("runtime target topology revision changed")
 	ErrCapabilityMissing  = errors.New("runtime driver capability is unavailable")
 	ErrUnsupportedRuntime = errors.New("runtime driver kind is unsupported")
 )

@@ -75,6 +75,28 @@ type fakeRemoteExecutor struct {
 	err      error
 }
 
+type fakePlacedRuntime struct {
+	status  shared.ShardRuntimeStatus
+	request shared.ShardOperationRequest
+	roomID  string
+	worldID string
+	calls   int
+	err     error
+}
+
+func (runtime *fakePlacedRuntime) Status(context.Context, string, string) (shared.ShardRuntimeStatus, error) {
+	return runtime.status, runtime.err
+}
+
+func (runtime *fakePlacedRuntime) ExecutePlacedShard(_ context.Context, roomID, worldID string, request shared.ShardOperationRequest, _ time.Duration) (shared.ShardOperationResult, error) {
+	runtime.roomID, runtime.worldID, runtime.request = roomID, worldID, request
+	runtime.calls++
+	if runtime.err != nil {
+		return shared.ShardOperationResult{}, runtime.err
+	}
+	return shared.ShardOperationResult{ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: request.OperationID, Action: request.Action, Message: "Runtime 完成"}, nil
+}
+
 func (executor *fakeRemoteExecutor) ExecuteShard(_ context.Context, targetID string, request shared.ShardOperationRequest, _ int) (agents.ShardExecutionResult, error) {
 	executor.targetID, executor.request = targetID, request
 	executor.calls++
@@ -797,5 +819,36 @@ func TestDistributedStatusIsReadOnlyAndLeaseBusyBlocksExecution(t *testing.T) {
 	_ = runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) })
 	if len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "ROOM_LEASE_BUSY" || remote.calls != 0 {
 		t.Fatalf("results=%#v remote calls=%d", results, remote.calls)
+	}
+}
+
+func TestRuntimeConfigurationRoutesLocalLifecycleThroughPlacedDriver(t *testing.T) {
+	control := &fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}}
+	operations := testOperations(control)
+	roomID, worldID := rooms.EncodeID("summer_2026"), rooms.EncodeID("Master")
+	resolver := &fakePlacementResolver{applied: topology.ExecutionPlacement{Revision: "revision-local", AppliedTargetID: "local"}}
+	runtime := &fakePlacedRuntime{status: shared.ShardRuntimeStatus{State: string(RuntimeRunning), SessionExists: true}}
+	leaseService := &fakeLeaseService{lease: operationlease.Lease{
+		RoomID: roomID, LeaseID: "lease-local", FencingToken: 9, ExpiresAt: time.Now().UTC().Add(time.Minute),
+	}}
+	if err := operations.ConfigureRuntime(resolver, runtime, leaseService); err != nil {
+		t.Fatal(err)
+	}
+	_, runner, err := operations.Plan(ActionSave, roomID, []string{worldID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []jobs.TargetResult
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != jobs.StatusSucceeded || runtime.calls != 1 {
+		t.Fatalf("results=%#v runtime=%#v", results, runtime)
+	}
+	if runtime.roomID != roomID || runtime.worldID != worldID || runtime.request.TopologyRevision != "revision-local" || runtime.request.FencingToken != 9 {
+		t.Fatalf("placed request=%#v", runtime.request)
+	}
+	if len(control.calls) != 0 {
+		t.Fatalf("local control bypassed Runtime Driver: %v", control.calls)
 	}
 }

@@ -153,6 +153,31 @@ func (r *Router) Status(ctx context.Context, roomID, worldID string) (shared.Sha
 	return driver.Status(ctx, target)
 }
 
+// ExecutePlacedShard executes a lifecycle action against the currently
+// applied Placement. The caller owns the room operation lease and passes its
+// fencing proof in request, so this method must not acquire a second lease.
+func (r *Router) ExecutePlacedShard(ctx context.Context, roomID, worldID string, request shared.ShardOperationRequest, timeout time.Duration) (shared.ShardOperationResult, error) {
+	driver, target, err := r.DriverTarget(ctx, roomID, worldID)
+	if err != nil {
+		return shared.ShardOperationResult{}, err
+	}
+	if request.ProtocolVersion != shared.ShardOperationProtocolVersion || strings.TrimSpace(request.OperationID) == "" || !shared.IsShardAction(request.Action) {
+		return shared.ShardOperationResult{}, ErrInvalidTarget
+	}
+	if request.TopologyRevision != "" && request.TopologyRevision != target.TopologyRevision {
+		return shared.ShardOperationResult{}, ErrTopologyChanged
+	}
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	operation := Operation{
+		ID: request.OperationID, Key: request.OperationKey, LeaseID: request.LeaseID,
+		FencingToken: request.FencingToken, LeaseExpiresAt: request.LeaseExpiresAt,
+	}
+	result, err := driver.ExecuteShard(ctx, target, operation, request.Action, timeout)
+	return result, err
+}
+
 func (r *Router) ConsoleHealth(ctx context.Context, roomID, worldID string) (shared.RuntimeConsoleHealth, error) {
 	driver, target, err := r.DriverTarget(ctx, roomID, worldID)
 	if err != nil {

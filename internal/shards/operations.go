@@ -125,6 +125,11 @@ type remoteShardExecutor interface {
 	ExecuteShard(context.Context, string, shared.ShardOperationRequest, int) (agents.ShardExecutionResult, error)
 }
 
+type placedRuntimeExecutor interface {
+	Status(context.Context, string, string) (shared.ShardRuntimeStatus, error)
+	ExecutePlacedShard(context.Context, string, string, shared.ShardOperationRequest, time.Duration) (shared.ShardOperationResult, error)
+}
+
 type operationLeaseService interface {
 	Acquire(context.Context, string, string, time.Duration) (operationlease.Lease, error)
 	Renew(context.Context, operationlease.Lease, time.Duration) (operationlease.Lease, error)
@@ -172,6 +177,7 @@ type Operations struct {
 	stopTimeout  time.Duration
 	placements   executionPlacementResolver
 	remote       remoteShardExecutor
+	runtime      placedRuntimeExecutor
 	leases       operationLeaseService
 	leaseTTL     time.Duration
 	observer     OperationObserver
@@ -201,6 +207,16 @@ func (o *Operations) ConfigureDistributed(placements executionPlacementResolver,
 		return errors.New("distributed shard control dependencies are required")
 	}
 	o.placements, o.remote, o.leases = placements, remote, leases
+	return nil
+}
+
+// ConfigureRuntime routes local and remote lifecycle operations through one
+// Runtime Driver boundary while retaining ConfigureDistributed for legacy tests.
+func (o *Operations) ConfigureRuntime(placements executionPlacementResolver, runtime placedRuntimeExecutor, leases operationLeaseService) error {
+	if placements == nil || runtime == nil || leases == nil {
+		return errors.New("runtime shard control dependencies are required")
+	}
+	o.placements, o.runtime, o.leases = placements, runtime, leases
 	return nil
 }
 
@@ -630,6 +646,13 @@ func (o *Operations) StatusFor(ctx context.Context, roomID, worldID string) (Run
 	if o.placements == nil {
 		return o.Status(ctx, room.DirectoryName, world.DirectoryName)
 	}
+	if o.runtime != nil {
+		status, err := o.runtime.Status(ctx, room.ID, world.ID)
+		if err != nil {
+			return RuntimeStatus{State: RuntimeUnknown}, err
+		}
+		return runtimeStatusFromShared(status), nil
+	}
 	applied, err := o.placements.AppliedPlacement(room.ID, world.ID)
 	if err != nil {
 		return RuntimeStatus{State: RuntimeUnknown}, err
@@ -662,6 +685,29 @@ func (o *Operations) executePlaced(ctx context.Context, action Action, room room
 		return "", err
 	}
 	o.observeOperation(ctx, action, room.ID, world.ID, applied, lease, operationID)
+	if o.runtime != nil && action != ActionCleanup {
+		shardAction, timeoutSeconds, err := remoteAction(action, o.startTimeout, o.stopTimeout)
+		if err != nil {
+			return "", err
+		}
+		request := shared.ShardOperationRequest{
+			ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: operationID, OperationKey: operationID,
+			Action: shardAction, Cluster: room.DirectoryName, Shard: world.DirectoryName, TopologyRevision: applied.Revision,
+		}
+		if lease != nil {
+			expiresAt := lease.ExpiresAt.UTC()
+			request.LeaseID, request.FencingToken, request.LeaseExpiresAt = lease.LeaseID, lease.FencingToken, &expiresAt
+		}
+		result, err := o.runtime.ExecutePlacedShard(ctx, room.ID, world.ID, request, time.Duration(timeoutSeconds)*time.Second)
+		if err != nil {
+			return "", err
+		}
+		message := strings.TrimSpace(result.Message)
+		if message == "" {
+			message = "分片操作已完成"
+		}
+		return message, nil
+	}
 	if applied.AppliedTargetID == "local" {
 		return o.execute(ctx, action, room.DirectoryName, world.DirectoryName)
 	}
