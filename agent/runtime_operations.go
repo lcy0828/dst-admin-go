@@ -82,8 +82,10 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 	var operationErr error
 	if request.Action == shared.RuntimeActionConsoleSend {
 		result, operationErr = executeConsoleSend(operationContext, control, *request)
-	} else {
+	} else if isMigrationAction(request.Action) {
 		result, operationErr = a.executeMigrationAction(operationContext, installation, *request)
+	} else {
+		result, operationErr = a.executeBackupAction(operationContext, installation, *request)
 	}
 	if finishErr := a.shardState.finishRuntime(*request, result, operationErr); finishErr != nil {
 		return shared.RuntimeOperationResult{}, fmt.Errorf("保存 Agent Runtime 操作结果: %w", finishErr)
@@ -108,11 +110,11 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 	}
 	switch request.Action {
 	case shared.RuntimeActionConsoleHealth:
-		if request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil {
+		if request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil {
 			return errors.New("控制台健康请求包含无关负载")
 		}
 	case shared.RuntimeActionConsoleSend:
-		if request.Console == nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil {
+		if request.Console == nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil {
 			return errors.New("控制台请求负载无效")
 		}
 		console := request.Console
@@ -123,7 +125,7 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 			return errors.New("控制台请求内容无效")
 		}
 	case shared.RuntimeActionReadLogs:
-		if request.Logs == nil || request.Console != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil ||
+		if request.Logs == nil || request.Console != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil ||
 			request.Logs.Cursor < -1 || request.Logs.MaxBytes < 1 || request.Logs.MaxBytes > runtimefiles.MaximumLogBytes ||
 			(request.Logs.Raw && request.Logs.MaxLines != 0 || !request.Logs.Raw && (request.Logs.MaxLines < 1 || request.Logs.MaxLines > 2000)) ||
 			request.Logs.Raw && strings.TrimSpace(request.Logs.Query) != "" || len([]rune(request.Logs.Query)) > 256 ||
@@ -131,23 +133,30 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 			return errors.New("日志读取请求无效")
 		}
 	case shared.RuntimeActionReadArtifacts:
-		if request.Artifacts == nil || request.Console != nil || request.Logs != nil || request.Observation != nil || request.Migration != nil || !runtimefiles.IsArtifactKind(request.Artifacts.Kind) {
+		if request.Artifacts == nil || request.Console != nil || request.Logs != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || !runtimefiles.IsArtifactKind(request.Artifacts.Kind) {
 			return errors.New("Runtime 制品读取请求无效")
 		}
 	case shared.RuntimeActionObserveOperation:
-		if request.Observation == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Migration != nil ||
+		if request.Observation == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Migration != nil || request.Backup != nil ||
 			!operationIdentity.MatchString(request.Observation.ObservedOperationID) ||
 			request.Observation.ObservedOperationKey != "" && !operationIdentity.MatchString(request.Observation.ObservedOperationKey) {
 			return errors.New("Runtime 操作观察请求无效")
 		}
-	default:
-		if request.Migration == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil ||
+	case shared.RuntimeActionMigrationExportPrepare, shared.RuntimeActionMigrationExportRead, shared.RuntimeActionMigrationExportRelease,
+		shared.RuntimeActionMigrationImportBegin, shared.RuntimeActionMigrationImportWrite, shared.RuntimeActionMigrationImportCommit,
+		shared.RuntimeActionMigrationTargetRollback, shared.RuntimeActionMigrationTargetComplete,
+		shared.RuntimeActionMigrationSourceFinalize, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeActionMigrationSourceComplete:
+		if request.Migration == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Backup != nil ||
 			!operationIdentity.MatchString(request.Migration.MigrationID) || request.Migration.Offset < 0 || request.Migration.Size < 0 ||
 			len(request.Migration.Data) > shardtransfer.MaxChunkBytes || len(request.Migration.SHA256) > 64 {
 			return errors.New("分片迁移请求无效")
 		}
 		if request.Action == shared.RuntimeActionMigrationImportWrite && len(request.Migration.Data) == 0 {
 			return errors.New("分片迁移块为空")
+		}
+	default:
+		if err := validateBackupOperationPayload(request); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -186,6 +195,17 @@ func (a *Agent) observeRuntimeAction(ctx context.Context, control shardRuntimeCo
 		chunk, err := transfer.ReadExport(ctx, request.Migration.MigrationID, request.Migration.Offset)
 		result.Migration = &shared.RuntimeMigrationResult{
 			MigrationID: request.Migration.MigrationID, Offset: chunk.Offset, NextOffset: chunk.NextOffset,
+			Size: chunk.Size, SHA256: chunk.SHA256, Data: chunk.Data, Complete: chunk.Complete,
+		}
+		return result, err
+	case shared.RuntimeActionBackupRead:
+		transfer, err := a.transferManager(installation)
+		if err != nil {
+			return result, err
+		}
+		chunk, err := transfer.ReadBackup(ctx, request.Backup.BackupID, request.Backup.Offset)
+		result.Backup = &shared.RuntimeBackupResult{
+			BackupID: request.Backup.BackupID, Offset: chunk.Offset, NextOffset: chunk.NextOffset,
 			Size: chunk.Size, SHA256: chunk.SHA256, Data: chunk.Data, Complete: chunk.Complete,
 		}
 		return result, err
@@ -248,6 +268,125 @@ func (a *Agent) executeMigrationAction(ctx context.Context, installation Runtime
 	return result, err
 }
 
+func (a *Agent) executeBackupAction(ctx context.Context, installation RuntimeInstallation, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
+	transfer, err := a.transferManager(installation)
+	result := runtimeResult(request, shared.RuntimeOutcomeConfirmed, "备份 Runtime 步骤已完成")
+	if err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+		return result, err
+	}
+	backup := *request.Backup
+	response := &shared.RuntimeBackupResult{BackupID: backup.BackupID}
+	result.Backup = response
+	switch request.Action {
+	case shared.RuntimeActionBackupStage:
+		descriptor, stepErr := transfer.PrepareBackup(ctx, backup.BackupID, request.Cluster, request.Shard)
+		response.Size, response.ContentSize, response.FileCount = descriptor.Size, descriptor.ContentSize, descriptor.FileCount
+		response.SHA256, response.SharedSHA256, response.Complete = descriptor.SHA256, descriptor.SharedSHA256, stepErr == nil
+		err = stepErr
+	case shared.RuntimeActionBackupRelease:
+		err = transfer.ReleaseBackup(backup.BackupID)
+		response.Complete = err == nil
+	case shared.RuntimeActionRestoreBegin:
+		descriptor, stepErr := transfer.BeginRestore(backupDescriptor(request))
+		response.Size, response.ContentSize, response.FileCount = descriptor.Size, descriptor.ContentSize, descriptor.FileCount
+		response.SHA256, response.SharedSHA256, response.Complete = descriptor.SHA256, descriptor.SharedSHA256, stepErr == nil
+		err = stepErr
+	case shared.RuntimeActionRestoreWrite:
+		response.NextOffset, err = transfer.WriteRestore(backup.BackupID, backup.Offset, backup.Data)
+		response.Offset, response.Size, response.SHA256 = backup.Offset, backup.Size, backup.SHA256
+		response.Complete = err == nil && response.NextOffset == backup.Size
+	case shared.RuntimeActionRestorePrepare:
+		descriptor, stepErr := transfer.PrepareRestore(ctx, backup.BackupID)
+		response.Size, response.ContentSize, response.FileCount = descriptor.Size, descriptor.ContentSize, descriptor.FileCount
+		response.SHA256, response.SharedSHA256, response.Complete = descriptor.SHA256, descriptor.SharedSHA256, stepErr == nil
+		err = stepErr
+	case shared.RuntimeActionRestorePublish:
+		response.RecoveryRef, err = transfer.PublishRestore(backup.BackupID, backup.PublishShared)
+		response.Complete = err == nil
+	case shared.RuntimeActionRestoreRollback:
+		err = transfer.RollbackRestore(backup.BackupID)
+		response.Complete = err == nil
+	case shared.RuntimeActionRestoreComplete:
+		response.RecoveryRef, err = transfer.CompleteRestore(backup.BackupID)
+		response.Complete = err == nil
+	default:
+		err = errors.New("备份 Runtime 动作不受支持")
+	}
+	if err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+	}
+	return result, err
+}
+
+func backupDescriptor(request shared.RuntimeOperationRequest) shardtransfer.BackupDescriptor {
+	backup := request.Backup
+	return shardtransfer.BackupDescriptor{
+		BackupID: backup.BackupID, Cluster: request.Cluster, Shard: request.Shard,
+		Size: backup.Size, ContentSize: backup.ContentSize, FileCount: backup.FileCount,
+		SHA256: backup.SHA256, SharedSHA256: backup.SharedSHA256,
+	}
+}
+
+func validateBackupOperationPayload(request shared.RuntimeOperationRequest) error {
+	backup := request.Backup
+	if backup == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil ||
+		!operationIdentity.MatchString(backup.BackupID) || backup.Offset < 0 || backup.Size < 0 || backup.ContentSize < 0 || backup.FileCount < 0 ||
+		len(backup.Data) > shardtransfer.MaxChunkBytes || len(backup.SHA256) > 64 || len(backup.SharedSHA256) > 64 {
+		return errors.New("备份 Runtime 请求无效")
+	}
+	emptyDescriptor := func() bool {
+		return backup.Size == 0 && backup.ContentSize == 0 && backup.FileCount == 0 && backup.SHA256 == "" && backup.SharedSHA256 == "" && len(backup.Data) == 0
+	}
+	switch request.Action {
+	case shared.RuntimeActionBackupStage, shared.RuntimeActionBackupRelease, shared.RuntimeActionRestorePrepare,
+		shared.RuntimeActionRestoreRollback, shared.RuntimeActionRestoreComplete:
+		if backup.Offset != 0 || backup.PublishShared || !emptyDescriptor() {
+			return errors.New("备份 Runtime 请求包含无关负载")
+		}
+	case shared.RuntimeActionBackupRead:
+		if backup.PublishShared || !emptyDescriptor() {
+			return errors.New("备份读取请求包含无关负载")
+		}
+	case shared.RuntimeActionRestoreBegin:
+		if backup.Offset != 0 || backup.PublishShared || len(backup.Data) != 0 || backup.Size < 1 || backup.Size > shardtransfer.MaximumTransferBytes ||
+			backup.ContentSize < 1 || backup.ContentSize > shardtransfer.MaximumTransferBytes || backup.FileCount < 2 || backup.FileCount > shardtransfer.MaximumTransferEntries ||
+			!validRuntimeDigest(backup.SHA256) || !validRuntimeDigest(backup.SharedSHA256) {
+			return errors.New("恢复描述无效")
+		}
+	case shared.RuntimeActionRestoreWrite:
+		if backup.PublishShared || len(backup.Data) < 1 || backup.Size < 1 || backup.Size > shardtransfer.MaximumTransferBytes ||
+			backup.Offset > backup.Size || int64(len(backup.Data)) > backup.Size-backup.Offset || !validRuntimeDigest(backup.SHA256) ||
+			backup.ContentSize != 0 || backup.FileCount != 0 || backup.SharedSHA256 != "" {
+			return errors.New("恢复数据块无效")
+		}
+	case shared.RuntimeActionRestorePublish:
+		if backup.Offset != 0 || !emptyDescriptor() {
+			return errors.New("恢复发布请求包含无关负载")
+		}
+	default:
+		return errors.New("备份 Runtime 动作无效")
+	}
+	return nil
+}
+
+func validRuntimeDigest(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size
+}
+
+func isMigrationAction(action shared.RuntimeAction) bool {
+	switch action {
+	case shared.RuntimeActionMigrationExportPrepare, shared.RuntimeActionMigrationExportRead, shared.RuntimeActionMigrationExportRelease,
+		shared.RuntimeActionMigrationImportBegin, shared.RuntimeActionMigrationImportWrite, shared.RuntimeActionMigrationImportCommit,
+		shared.RuntimeActionMigrationTargetRollback, shared.RuntimeActionMigrationTargetComplete,
+		shared.RuntimeActionMigrationSourceFinalize, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeActionMigrationSourceComplete:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *Agent) transferManager(installation RuntimeInstallation) (*shardtransfer.Manager, error) {
 	a.shardTransferMu.Lock()
 	defer a.shardTransferMu.Unlock()
@@ -266,7 +405,10 @@ func runtimeActionRequiresExistingShard(action shared.RuntimeAction) bool {
 	switch action {
 	case shared.RuntimeActionMigrationImportBegin, shared.RuntimeActionMigrationImportWrite, shared.RuntimeActionMigrationImportCommit,
 		shared.RuntimeActionMigrationTargetRollback, shared.RuntimeActionMigrationTargetComplete,
-		shared.RuntimeActionMigrationExportRelease, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeActionMigrationSourceComplete:
+		shared.RuntimeActionMigrationExportRelease, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeActionMigrationSourceComplete,
+		shared.RuntimeActionBackupRead, shared.RuntimeActionBackupRelease,
+		shared.RuntimeActionRestoreBegin, shared.RuntimeActionRestoreWrite, shared.RuntimeActionRestorePrepare,
+		shared.RuntimeActionRestorePublish, shared.RuntimeActionRestoreRollback, shared.RuntimeActionRestoreComplete:
 		return false
 	default:
 		return true

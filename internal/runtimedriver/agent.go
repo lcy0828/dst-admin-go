@@ -32,6 +32,7 @@ func (d *Agent) Capabilities() []Capability {
 	return []Capability{
 		CapabilityLifecycle, CapabilityConsoleInput, CapabilityConsoleHealth, CapabilityRawConsole,
 		CapabilityOperationProof, CapabilityLogContinuation, CapabilityArtifacts,
+		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore,
 	}
 }
 
@@ -185,6 +186,133 @@ func (d *Agent) CompleteMigrationSource(ctx context.Context, target Target, oper
 		return "", errors.New("Agent 未确认源迁移恢复记录")
 	}
 	return value.RecoveryRef, nil
+}
+
+func (d *Agent) StageBackup(ctx context.Context, target Target, operation Operation, backupID string) (BackupDescriptor, error) {
+	result, err := d.executeBackup(ctx, target, operation, shared.RuntimeActionBackupStage, shared.RuntimeBackupRequest{BackupID: backupID}, 5*time.Minute)
+	value, err := checkedBackupResult(result, backupID, err)
+	if err != nil {
+		return BackupDescriptor{}, err
+	}
+	if !value.Complete || value.Size < 1 || value.ContentSize < 1 || value.FileCount < 2 || len(value.SHA256) != 64 || len(value.SharedSHA256) != 64 {
+		return BackupDescriptor{}, errors.New("Agent 返回了无效的备份描述")
+	}
+	return backupDescriptor(result), nil
+}
+
+func (d *Agent) ReadBackup(ctx context.Context, target Target, backupID string, offset int64) (BackupChunk, error) {
+	result, err := d.executeBackup(ctx, target, Operation{ID: newOperationID()}, shared.RuntimeActionBackupRead, shared.RuntimeBackupRequest{BackupID: backupID, Offset: offset}, time.Minute)
+	value, err := checkedBackupResult(result, backupID, err)
+	if err != nil {
+		return BackupChunk{}, err
+	}
+	return BackupChunk{Offset: value.Offset, NextOffset: value.NextOffset, Size: value.Size, SHA256: value.SHA256, Data: value.Data, Complete: value.Complete}, nil
+}
+
+func (d *Agent) ReleaseBackup(ctx context.Context, target Target, operation Operation, backupID string) error {
+	result, err := d.executeBackup(ctx, target, operation, shared.RuntimeActionBackupRelease, shared.RuntimeBackupRequest{BackupID: backupID}, time.Minute)
+	return checkedCompletedBackup(result, backupID, err)
+}
+
+func (d *Agent) BeginRestore(ctx context.Context, target Target, operation Operation, descriptor BackupDescriptor) error {
+	result, err := d.executeBackup(ctx, target, operation, shared.RuntimeActionRestoreBegin, backupRequest(descriptor), time.Minute)
+	value, err := checkedBackupResult(result, descriptor.BackupID, err)
+	if err != nil {
+		return err
+	}
+	if !value.Complete || value.Size != descriptor.Size || value.SHA256 != descriptor.SHA256 || value.SharedSHA256 != descriptor.SharedSHA256 {
+		return errors.New("Agent 未确认恢复描述")
+	}
+	return nil
+}
+
+func (d *Agent) WriteRestore(ctx context.Context, target Target, operation Operation, descriptor BackupDescriptor, offset int64, data []byte) (int64, error) {
+	request := shared.RuntimeBackupRequest{BackupID: descriptor.BackupID, Offset: offset, Size: descriptor.Size, SHA256: descriptor.SHA256, Data: data}
+	result, err := d.executeBackup(ctx, target, operation, shared.RuntimeActionRestoreWrite, request, time.Minute)
+	value, err := checkedBackupResult(result, descriptor.BackupID, err)
+	if err != nil {
+		return offset, err
+	}
+	return value.NextOffset, nil
+}
+
+func (d *Agent) PrepareRestore(ctx context.Context, target Target, operation Operation, backupID string) error {
+	result, err := d.executeBackup(ctx, target, operation, shared.RuntimeActionRestorePrepare, shared.RuntimeBackupRequest{BackupID: backupID}, 5*time.Minute)
+	return checkedCompletedBackup(result, backupID, err)
+}
+
+func (d *Agent) PublishRestore(ctx context.Context, target Target, operation Operation, backupID string, publishShared bool) (string, error) {
+	result, err := d.executeBackup(ctx, target, operation, shared.RuntimeActionRestorePublish, shared.RuntimeBackupRequest{BackupID: backupID, PublishShared: publishShared}, 5*time.Minute)
+	value, err := checkedBackupResult(result, backupID, err)
+	if err != nil {
+		return "", err
+	}
+	if !value.Complete || value.RecoveryRef == "" {
+		return "", errors.New("Agent 未确认恢复发布")
+	}
+	return value.RecoveryRef, nil
+}
+
+func (d *Agent) RollbackRestore(ctx context.Context, target Target, operation Operation, backupID string) error {
+	result, err := d.executeBackup(ctx, target, operation, shared.RuntimeActionRestoreRollback, shared.RuntimeBackupRequest{BackupID: backupID}, 5*time.Minute)
+	return checkedCompletedBackup(result, backupID, err)
+}
+
+func (d *Agent) CompleteRestore(ctx context.Context, target Target, operation Operation, backupID string) (string, error) {
+	result, err := d.executeBackup(ctx, target, operation, shared.RuntimeActionRestoreComplete, shared.RuntimeBackupRequest{BackupID: backupID}, 5*time.Minute)
+	value, err := checkedBackupResult(result, backupID, err)
+	if err != nil {
+		return "", err
+	}
+	if !value.Complete || value.RecoveryRef == "" {
+		return "", errors.New("Agent 未确认恢复清理")
+	}
+	return value.RecoveryRef, nil
+}
+
+func (d *Agent) executeBackup(ctx context.Context, target Target, operation Operation, action shared.RuntimeAction, backup shared.RuntimeBackupRequest, timeout time.Duration) (shared.RuntimeOperationResult, error) {
+	request := runtimeRequest(target, operation, action)
+	request.Backup = &backup
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, timeoutSeconds(timeout))
+	return result.Result, err
+}
+
+func backupRequest(value BackupDescriptor) shared.RuntimeBackupRequest {
+	return shared.RuntimeBackupRequest{
+		BackupID: value.BackupID, Size: value.Size, ContentSize: value.ContentSize, FileCount: value.FileCount,
+		SHA256: value.SHA256, SharedSHA256: value.SharedSHA256,
+	}
+}
+
+func backupDescriptor(result shared.RuntimeOperationResult) BackupDescriptor {
+	if result.Backup == nil {
+		return BackupDescriptor{}
+	}
+	return BackupDescriptor{
+		BackupID: result.Backup.BackupID, Size: result.Backup.Size, ContentSize: result.Backup.ContentSize,
+		FileCount: result.Backup.FileCount, SHA256: result.Backup.SHA256, SharedSHA256: result.Backup.SharedSHA256,
+	}
+}
+
+func checkedBackupResult(result shared.RuntimeOperationResult, backupID string, err error) (*shared.RuntimeBackupResult, error) {
+	if err != nil {
+		return nil, err
+	}
+	if result.Backup == nil || result.Backup.BackupID != backupID {
+		return nil, fmt.Errorf("Agent 未返回备份 %s 的有效结果", backupID)
+	}
+	return result.Backup, nil
+}
+
+func checkedCompletedBackup(result shared.RuntimeOperationResult, backupID string, err error) error {
+	value, err := checkedBackupResult(result, backupID, err)
+	if err != nil {
+		return err
+	}
+	if !value.Complete {
+		return fmt.Errorf("Agent 未确认备份步骤 %s 已完成", backupID)
+	}
+	return nil
 }
 
 func (d *Agent) executeMigration(ctx context.Context, target Target, operation Operation, action shared.RuntimeAction, migration shared.RuntimeMigrationRequest, timeout time.Duration) (shared.RuntimeOperationResult, error) {

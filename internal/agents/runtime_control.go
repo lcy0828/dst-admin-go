@@ -62,6 +62,10 @@ func runtimeCapability(action shared.RuntimeAction) string {
 		shared.RuntimeActionMigrationTargetRollback, shared.RuntimeActionMigrationTargetComplete,
 		shared.RuntimeActionMigrationSourceFinalize, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeActionMigrationSourceComplete:
 		return "runtime.migration.v1"
+	case shared.RuntimeActionBackupStage, shared.RuntimeActionBackupRead, shared.RuntimeActionBackupRelease,
+		shared.RuntimeActionRestoreBegin, shared.RuntimeActionRestoreWrite, shared.RuntimeActionRestorePrepare,
+		shared.RuntimeActionRestorePublish, shared.RuntimeActionRestoreRollback, shared.RuntimeActionRestoreComplete:
+		return "runtime.backup.v1"
 	default:
 		return ""
 	}

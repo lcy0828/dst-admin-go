@@ -1,0 +1,512 @@
+package distributedbackup
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"dont/internal/operationlease"
+	"dont/internal/roomops"
+	"dont/internal/rooms"
+	"dont/internal/runtimedriver"
+	"dont/internal/shards"
+	"dont/shared"
+
+	"github.com/google/uuid"
+)
+
+const (
+	manifestVersion = 1
+	leaseTTL        = 5 * time.Minute
+	stopTimeout     = 2 * time.Minute
+)
+
+type RoomCatalog interface {
+	Room(string) (rooms.Room, error)
+	Worlds(string) ([]rooms.World, error)
+}
+
+type RuntimeRouter interface {
+	DriverTarget(context.Context, string, string) (runtimedriver.Driver, runtimedriver.Target, error)
+}
+
+type LeaseService interface {
+	Acquire(context.Context, string, string, time.Duration) (operationlease.Lease, error)
+	Renew(context.Context, operationlease.Lease, time.Duration) (operationlease.Lease, error)
+	Release(operationlease.Lease) error
+}
+
+type Coordinator struct {
+	root     string
+	rooms    RoomCatalog
+	runtimes RuntimeRouter
+	leases   LeaseService
+	store    *Store
+	now      func() time.Time
+}
+
+type runtimePart struct {
+	part   Part
+	driver runtimedriver.Driver
+	target runtimedriver.Target
+}
+
+func NewCoordinator(root string, rooms RoomCatalog, runtimes RuntimeRouter, leases LeaseService, store *Store) (*Coordinator, error) {
+	root = strings.TrimSpace(root)
+	if root == "" || rooms == nil || runtimes == nil || leases == nil || store == nil {
+		return nil, errors.New("distributed backup dependencies are required")
+	}
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(absolute, 0o700); err != nil {
+		return nil, err
+	}
+	return &Coordinator{root: filepath.Clean(absolute), rooms: rooms, runtimes: runtimes, leases: leases, store: store, now: time.Now}, nil
+}
+
+func (c *Coordinator) List(roomID string) ([]Set, error) { return c.store.ListSets(roomID) }
+
+func (c *Coordinator) Get(id string) (Set, error) { return c.store.GetSet(id) }
+
+func (c *Coordinator) Create(ctx context.Context, roomID, name, kind, sourceJobID string) (Set, error) {
+	ctx, releaseRoom, err := roomops.Acquire(ctx, roomID)
+	if err != nil {
+		return Set{}, err
+	}
+	defer releaseRoom()
+	operationID := uuid.NewString()
+	lease, err := c.leases.Acquire(ctx, roomID, "backup-set.create:"+operationID, leaseTTL)
+	if err != nil {
+		return Set{}, err
+	}
+	defer c.leases.Release(lease)
+	room, runtimeParts, revision, running, err := c.plan(ctx, roomID)
+	if err != nil {
+		return Set{}, err
+	}
+	set, operation, err := c.initializeSet(room, runtimeParts, revision, running, name, kind, sourceJobID, operationID, lease)
+	if err != nil {
+		return Set{}, err
+	}
+	return c.createWithPlan(ctx, set, operation, runtimeParts, &lease, true)
+}
+
+func (c *Coordinator) createWithPlan(ctx context.Context, set Set, operation Operation, runtimeParts []runtimePart, lease *operationlease.Lease, restart bool) (result Set, returnErr error) {
+	result = set
+	originalRunning := append([]string(nil), operation.OriginalRunningWorlds...)
+	defer func() {
+		if restart {
+			if restartErr := c.restartWorlds(context.Background(), runtimeParts, originalRunning, operation, lease); restartErr != nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("restore original running shards: %w", restartErr))
+			}
+		}
+	}()
+	if err := c.saveOperationPhase(&operation, "stopping", OperationRunning, ""); err != nil {
+		return result, err
+	}
+	if err := c.stopAll(ctx, runtimeParts, operation, lease); err != nil {
+		return c.failCreate(result, operation, err)
+	}
+	if err := c.saveOperationPhase(&operation, "staging", OperationRunning, ""); err != nil {
+		return c.failCreate(result, operation, err)
+	}
+	var sharedSHA string
+	verified := 0
+	for index := range runtimeParts {
+		if err := c.renewLease(ctx, lease); err != nil {
+			return c.failCreate(result, operation, err)
+		}
+		current, err := c.stagePart(ctx, runtimeParts[index], operation, lease, index)
+		runtimeParts[index].part = current
+		if err != nil {
+			return c.failCreate(result, operation, err)
+		}
+		if sharedSHA == "" {
+			sharedSHA = current.SharedSHA256
+		} else if !strings.EqualFold(sharedSHA, current.SharedSHA256) {
+			return c.failCreate(result, operation, ErrSharedFilesDiffer)
+		}
+		verified++
+	}
+	if verified != len(runtimeParts) {
+		return c.failCreate(result, operation, ErrIncomplete)
+	}
+	result, err := c.finalizeSet(result.ID, sharedSHA)
+	if err != nil {
+		return c.failCreate(result, operation, err)
+	}
+	operation.SetID = result.ID
+	if err := c.saveOperationPhase(&operation, "completed", OperationSucceeded, ""); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (c *Coordinator) plan(ctx context.Context, roomID string) (rooms.Room, []runtimePart, string, []string, error) {
+	room, err := c.rooms.Room(roomID)
+	if err != nil {
+		return rooms.Room{}, nil, "", nil, err
+	}
+	if !room.Managed {
+		return rooms.Room{}, nil, "", nil, ErrInvalidInput
+	}
+	worlds, err := c.rooms.Worlds(roomID)
+	if err != nil || len(worlds) == 0 {
+		return rooms.Room{}, nil, "", nil, errors.Join(err, ErrInvalidInput)
+	}
+	now := c.now().UTC()
+	parts := make([]runtimePart, 0, len(worlds))
+	running := make([]string, 0)
+	revision := ""
+	setID := uuid.NewString()
+	for index, world := range worlds {
+		driver, target, resolveErr := c.runtimes.DriverTarget(ctx, roomID, world.ID)
+		if resolveErr != nil {
+			return rooms.Room{}, nil, "", nil, resolveErr
+		}
+		if !runtimedriver.HasCapability(driver, runtimedriver.CapabilityBackupStage) || !runtimedriver.HasCapability(driver, runtimedriver.CapabilityBackupRestore) {
+			return rooms.Room{}, nil, "", nil, ErrTargetUnavailable
+		}
+		if revision == "" {
+			revision = target.TopologyRevision
+		} else if revision != target.TopologyRevision {
+			return rooms.Room{}, nil, "", nil, ErrTopologyChanged
+		}
+		status, statusErr := driver.Status(ctx, target)
+		if statusErr != nil {
+			return rooms.Room{}, nil, "", nil, statusErr
+		}
+		if status.State == string(shards.RuntimeRunning) || status.State == string(shards.RuntimeStarting) {
+			running = append(running, world.ID)
+		}
+		partID := fmt.Sprintf("backup-%s-%02d", setID, index)
+		parts = append(parts, runtimePart{
+			driver: driver, target: target,
+			part: Part{
+				ID: partID, SetID: setID, RoomID: roomID, WorldID: world.ID, WorldName: world.Name, WorldRole: string(world.Role),
+				TargetID: target.TargetID, InstallationID: target.InstallationID, Cluster: target.Cluster, Shard: target.Shard,
+				TopologyRevision: target.TopologyRevision, FileName: partID + ".zip", Status: PartPending, CreatedAt: now, UpdatedAt: now,
+			},
+		})
+	}
+	sort.Strings(running)
+	return room, parts, revision, running, nil
+}
+
+func (c *Coordinator) initializeSet(room rooms.Room, parts []runtimePart, revision string, running []string, name, kind, sourceJobID, operationID string, lease operationlease.Lease) (Set, Operation, error) {
+	now := c.now().UTC()
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "一致性备份 " + now.Format("2006-01-02 15:04:05")
+	}
+	if len([]rune(name)) > 128 || strings.ContainsAny(name, "\x00\r\n") {
+		return Set{}, Operation{}, ErrInvalidInput
+	}
+	if kind == "" {
+		kind = "manual"
+	}
+	setID := parts[0].part.SetID
+	set := Set{
+		ID: setID, RoomID: room.ID, RoomName: room.Name, Name: name, Kind: kind, Mode: "cold-consistent",
+		ManifestVersion: manifestVersion, TopologyRevision: revision, Status: StatusCreating,
+		OriginalRunningWorlds: append([]string(nil), running...), SourceJobID: sourceJobID, CreatedAt: now, UpdatedAt: now,
+	}
+	partValues := make([]Part, 0, len(parts))
+	for _, part := range parts {
+		partValues = append(partValues, part.part)
+	}
+	created, err := c.store.CreateSet(set, partValues)
+	if err != nil {
+		return Set{}, Operation{}, err
+	}
+	operation := Operation{
+		ID: operationID, SetID: setID, RoomID: room.ID, Kind: "create", Phase: "planned", Status: OperationRunning,
+		TopologyRevision: revision, LeaseID: lease.LeaseID, FencingToken: lease.FencingToken,
+		OriginalRunningWorlds: append([]string(nil), running...), CreatedAt: now, UpdatedAt: now,
+	}
+	operation, err = c.store.CreateOperation(operation)
+	return created, operation, err
+}
+
+func (c *Coordinator) stagePart(ctx context.Context, current runtimePart, operation Operation, lease *operationlease.Lease, index int) (Part, error) {
+	part := current.part
+	part.Status, part.Failure = PartStaging, ""
+	if _, err := c.store.SavePart(part); err != nil {
+		return part, err
+	}
+	step := c.runtimeOperation(*lease, operation.ID, "stage", index, 0)
+	descriptor, err := current.driver.StageBackup(ctx, current.target, step, part.ID)
+	if err != nil {
+		return c.failPart(part, err)
+	}
+	if descriptor.BackupID != part.ID || descriptor.Size < 1 || descriptor.ContentSize < 1 || descriptor.FileCount < 2 ||
+		len(descriptor.SHA256) != 64 || len(descriptor.SharedSHA256) != 64 {
+		return c.failPart(part, ErrIntegrity)
+	}
+	defer func() {
+		_ = current.driver.ReleaseBackup(context.Background(), current.target, c.runtimeOperation(*lease, operation.ID, "release", index, 0), part.ID)
+	}()
+	path, err := c.partPath(part)
+	if err != nil {
+		return c.failPart(part, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return c.failPart(part, err)
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".part-*.tmp")
+	if err != nil {
+		return c.failPart(part, err)
+	}
+	temporaryPath := temporary.Name()
+	published := false
+	defer func() {
+		_ = temporary.Close()
+		if !published {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	hash := sha256.New()
+	written := int64(0)
+	for written < descriptor.Size {
+		if err := c.renewLease(ctx, lease); err != nil {
+			return c.failPart(part, err)
+		}
+		chunk, readErr := current.driver.ReadBackup(ctx, current.target, part.ID, written)
+		if readErr != nil {
+			return c.failPart(part, readErr)
+		}
+		if chunk.Offset != written || chunk.NextOffset != written+int64(len(chunk.Data)) || chunk.NextOffset <= written ||
+			chunk.NextOffset > descriptor.Size || chunk.Size != descriptor.Size || !strings.EqualFold(chunk.SHA256, descriptor.SHA256) ||
+			chunk.Complete != (chunk.NextOffset == descriptor.Size) {
+			return c.failPart(part, ErrIntegrity)
+		}
+		count, writeErr := io.MultiWriter(temporary, hash).Write(chunk.Data)
+		if writeErr != nil || count != len(chunk.Data) {
+			return c.failPart(part, errors.Join(writeErr, io.ErrShortWrite))
+		}
+		written = chunk.NextOffset
+	}
+	if written != descriptor.Size || !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), descriptor.SHA256) {
+		return c.failPart(part, ErrIntegrity)
+	}
+	if err := temporary.Sync(); err != nil {
+		return c.failPart(part, err)
+	}
+	if err := temporary.Close(); err != nil {
+		return c.failPart(part, err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return c.failPart(part, err)
+	}
+	published = true
+	now := c.now().UTC()
+	part.Status, part.Size, part.ContentSize, part.FileCount = PartVerified, descriptor.Size, descriptor.ContentSize, descriptor.FileCount
+	part.SHA256, part.SharedSHA256, part.VerifiedAt, part.Failure = strings.ToLower(descriptor.SHA256), strings.ToLower(descriptor.SharedSHA256), &now, ""
+	return c.store.SavePart(part)
+}
+
+func (c *Coordinator) finalizeSet(setID, sharedSHA string) (Set, error) {
+	value, err := c.store.GetSet(setID)
+	if err != nil {
+		return Set{}, err
+	}
+	for _, part := range value.Parts {
+		if part.Status != PartVerified || !strings.EqualFold(part.SharedSHA256, sharedSHA) {
+			return Set{}, ErrIncomplete
+		}
+		value.Size += part.Size
+		value.ContentSize += part.ContentSize
+		value.FileCount += part.FileCount
+	}
+	value.SharedSHA256 = strings.ToLower(sharedSHA)
+	value.Status, value.Failure = StatusVerified, ""
+	now := c.now().UTC()
+	value.VerifiedAt, value.UpdatedAt = &now, now
+	manifestSHA, err := c.writeManifest(value)
+	if err != nil {
+		return Set{}, err
+	}
+	value.ManifestSHA256 = manifestSHA
+	return c.store.SaveSet(value)
+}
+
+func (c *Coordinator) failPart(part Part, cause error) (Part, error) {
+	part.Status, part.Failure = PartFailed, cause.Error()
+	_, _ = c.store.SavePart(part)
+	return part, cause
+}
+
+func (c *Coordinator) failCreate(value Set, operation Operation, cause error) (Set, error) {
+	current, _ := c.store.GetSet(value.ID)
+	verified := 0
+	for _, part := range current.Parts {
+		if part.Status == PartVerified {
+			verified++
+		}
+	}
+	current.Status = StatusFailed
+	if verified > 0 {
+		current.Status = StatusPartial
+	}
+	current.Failure, current.UpdatedAt = cause.Error(), c.now().UTC()
+	saved, saveErr := c.store.SaveSet(current)
+	_ = c.saveOperationPhase(&operation, "failed", OperationFailed, cause.Error())
+	return saved, errors.Join(cause, saveErr)
+}
+
+func (c *Coordinator) stopAll(ctx context.Context, parts []runtimePart, operation Operation, lease *operationlease.Lease) error {
+	for index, part := range parts {
+		status, err := part.driver.Status(ctx, part.target)
+		if err != nil {
+			return err
+		}
+		if status.SessionExists || status.State != string(shards.RuntimeStopped) {
+			if _, err := part.driver.ExecuteShard(ctx, part.target, c.runtimeOperation(*lease, operation.ID, "stop", index, 0), shared.ShardActionStop, stopTimeout); err != nil {
+				return err
+			}
+		}
+	}
+	deadline := time.NewTimer(stopTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		allStopped := true
+		for _, part := range parts {
+			status, err := part.driver.Status(ctx, part.target)
+			if err != nil {
+				return err
+			}
+			if status.SessionExists || status.State != string(shards.RuntimeStopped) {
+				allStopped = false
+			}
+		}
+		if allStopped {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return errors.New("等待全部分片停止超时")
+		case <-ticker.C:
+		}
+	}
+}
+
+func (c *Coordinator) restartWorlds(ctx context.Context, parts []runtimePart, worldIDs []string, operation Operation, lease *operationlease.Lease) error {
+	selected := make(map[string]bool, len(worldIDs))
+	for _, id := range worldIDs {
+		selected[id] = true
+	}
+	var failures error
+	for index, part := range parts {
+		if !selected[part.part.WorldID] {
+			continue
+		}
+		if err := c.renewLease(ctx, lease); err != nil {
+			failures = errors.Join(failures, err)
+			continue
+		}
+		_, err := part.driver.ExecuteShard(ctx, part.target, c.runtimeOperation(*lease, operation.ID, "restart", index, 0), shared.ShardActionStart, stopTimeout)
+		failures = errors.Join(failures, err)
+	}
+	return failures
+}
+
+func (c *Coordinator) renewLease(ctx context.Context, lease *operationlease.Lease) error {
+	if time.Until(lease.ExpiresAt) > time.Minute {
+		return nil
+	}
+	renewed, err := c.leases.Renew(ctx, *lease, leaseTTL)
+	if err == nil {
+		*lease = renewed
+	}
+	return err
+}
+
+func (c *Coordinator) runtimeOperation(lease operationlease.Lease, operationID, phase string, index int, offset int64) runtimedriver.Operation {
+	key := fmt.Sprintf("b.%s.%d.%s.%d.%d", operationID, lease.FencingToken, phase, index, offset)
+	expires := lease.ExpiresAt.UTC()
+	return runtimedriver.Operation{ID: key, Key: key, LeaseID: lease.LeaseID, FencingToken: lease.FencingToken, LeaseExpiresAt: &expires}
+}
+
+func (c *Coordinator) saveOperationPhase(value *Operation, phase string, status OperationStatus, failure string) error {
+	value.Phase, value.Status, value.Failure, value.UpdatedAt = phase, status, failure, c.now().UTC()
+	saved, err := c.store.SaveOperation(*value)
+	if err == nil {
+		*value = saved
+	}
+	return err
+}
+
+func (c *Coordinator) partPath(part Part) (string, error) {
+	if part.SetID == "" || part.FileName != part.ID+".zip" || strings.ContainsAny(part.SetID+part.ID+part.FileName, "\x00/\\\r\n") {
+		return "", ErrInvalidInput
+	}
+	path := filepath.Join(c.root, "sets", part.SetID, "parts", part.FileName)
+	if !containedPath(c.root, path) {
+		return "", ErrInvalidInput
+	}
+	return path, nil
+}
+
+func (c *Coordinator) writeManifest(value Set) (string, error) {
+	value.ManifestSHA256 = ""
+	sort.Slice(value.Parts, func(i, j int) bool { return value.Parts[i].WorldID < value.Parts[j].WorldID })
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	checksum := hex.EncodeToString(sum[:])
+	manifest := struct {
+		SHA256 string `json:"sha256"`
+		Set    Set    `json:"set"`
+	}{SHA256: checksum, Set: value}
+	payload, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	directory := filepath.Join(c.root, "sets", value.ID)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return "", err
+	}
+	temporary, err := os.CreateTemp(directory, ".manifest-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if _, err := temporary.Write(payload); err != nil {
+		_ = temporary.Close()
+		return "", err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return "", err
+	}
+	if err := temporary.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(temporaryPath, filepath.Join(directory, "manifest.json")); err != nil {
+		return "", err
+	}
+	return checksum, nil
+}
+
+func containedPath(root, target string) bool {
+	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(target))
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)) && !filepath.IsAbs(relative)
+}

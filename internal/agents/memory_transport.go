@@ -27,7 +27,7 @@ func NewMemoryTransport() *MemoryTransport {
 			"agent-primary": {
 				ID: "agent-primary", Status: StatusOnline, Hostname: "林火节点", OS: "linux", Arch: "amd64", Version: "2.0.0-test",
 				IPAddresses: []string{"192.168.2.12"}, LastHeartbeat: now, LastReportAt: utcTimePointer(now),
-				Capabilities: []string{"system.report", "command.exec", "disk.inspect", "runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read", "shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1", "runtime.migration.v1"},
+				Capabilities: []string{"system.report", "command.exec", "disk.inspect", "runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read", "shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1", "runtime.migration.v1", "runtime.backup.v1"},
 				Metrics:      Metrics{CPUCount: 16, LogicalProcessors: 16, PhysicalCores: 8, PhysicalCoreSource: "test", RunningShardCount: 2, MemoryUsed: 3 * 1024 * 1024 * 1024, MemoryTotal: 8 * 1024 * 1024 * 1024, UptimeSeconds: 86400, ObservedAt: utcTimePointer(now)},
 				Details:      map[string]interface{}{"goVersion": "go1.25", "currentDirectory": "/opt/dst-admin-agent"},
 			},
@@ -65,8 +65,8 @@ func (m *MemoryTransport) Inventory(ctx context.Context, agentID string, config 
 		Rooms: []shared.RoomInventoryReport{{
 			Directory: "Cluster_1", Name: "测试房间", ConfigPath: config.SavePath + "/Cluster_1/cluster.ini", MasterPort: 10889,
 			Shards: []shared.ShardInventoryReport{
-				{Directory: "Master", Name: "Master", ID: 1, Role: "master", ServerPort: 10999},
-				{Directory: "Caves", Name: "Caves", ID: 2, Role: "secondary", ServerPort: 10998},
+				{Directory: "Master", Name: "Master", ID: 1, Role: "master", ServerPort: 10999, AuthenticationPort: 8767, MasterServerPort: 27017},
+				{Directory: "Caves", Name: "Caves", ID: 2, Role: "secondary", ServerPort: 10998, AuthenticationPort: 8768, MasterServerPort: 27018},
 			},
 		}},
 		Processes: []shared.ShardProcessReport{

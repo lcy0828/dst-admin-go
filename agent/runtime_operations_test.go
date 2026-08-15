@@ -36,6 +36,49 @@ func TestRuntimeConsoleSendIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestRuntimeOperationRejectsStaleFencingToken(t *testing.T) {
+	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}}
+	agent, _ := newShardOperationAgent(t, runtimeControl)
+
+	current := runtimeOperationRequest(shared.RuntimeActionConsoleSend)
+	current.OperationID, current.OperationKey = "runtime-operation-current", "runtime-key-current"
+	current.LeaseID, current.FencingToken = "lease-current", 2
+	current.Console = &shared.RuntimeConsoleRequest{Mode: shared.ConsoleModeManaged, Command: "c_announce(\"current\")"}
+	if _, err := agent.executeRuntimeOperation(string(current.Action), &current, 10); err != nil {
+		t.Fatalf("current fencing operation failed: %v", err)
+	}
+
+	stale := runtimeOperationRequest(shared.RuntimeActionConsoleSend)
+	stale.OperationID, stale.OperationKey = "runtime-operation-stale", "runtime-key-stale"
+	stale.Console = &shared.RuntimeConsoleRequest{Mode: shared.ConsoleModeManaged, Command: "c_announce(\"stale\")"}
+	if _, err := agent.executeRuntimeOperation(string(stale.Action), &stale, 10); err == nil || !strings.Contains(err.Error(), "fencing token") {
+		t.Fatalf("stale fencing error=%v", err)
+	}
+	if len(runtimeControl.calls) != 1 {
+		t.Fatalf("stale operation reached runtime: calls=%v", runtimeControl.calls)
+	}
+}
+
+func TestRuntimeOperationRejectsIdempotencyKeyReuseWithDifferentPayload(t *testing.T) {
+	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}}
+	agent, _ := newShardOperationAgent(t, runtimeControl)
+	request := runtimeOperationRequest(shared.RuntimeActionConsoleSend)
+	request.Console = &shared.RuntimeConsoleRequest{Mode: shared.ConsoleModeManaged, Command: "c_announce(\"first\")"}
+	if _, err := agent.executeRuntimeOperation(string(request.Action), &request, 10); err != nil {
+		t.Fatalf("first operation failed: %v", err)
+	}
+
+	conflict := request
+	conflict.OperationID = "runtime-operation-conflict"
+	conflict.Console = &shared.RuntimeConsoleRequest{Mode: shared.ConsoleModeManaged, Command: "c_announce(\"different\")"}
+	if _, err := agent.executeRuntimeOperation(string(conflict.Action), &conflict, 10); err == nil || !strings.Contains(err.Error(), "幂等键") {
+		t.Fatalf("idempotency conflict error=%v", err)
+	}
+	if len(runtimeControl.calls) != 1 {
+		t.Fatalf("conflicting operation reached runtime: calls=%v", runtimeControl.calls)
+	}
+}
+
 func TestRuntimeReadsLogsAndFixedArtifacts(t *testing.T) {
 	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}}
 	agent, installation := newShardOperationAgent(t, runtimeControl)
@@ -110,6 +153,50 @@ func TestRememberedRuntimeOperationsAreBounded(t *testing.T) {
 	}
 	if _, exists := values["operation-000"]; exists {
 		t.Fatal("oldest runtime operation was not trimmed")
+	}
+}
+
+func TestRuntimeRestoreKeepsOffsetSafetyAfterIdempotencyHistoryIsTrimmed(t *testing.T) {
+	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeStopped}}
+	agent, _ := newShardOperationAgent(t, runtimeControl)
+	const transferSize = maximumRememberedOperationsPerRoom + 1
+	backupID := "restore-agent-offset-0001"
+	digest := strings.Repeat("a", 64)
+	sharedDigest := strings.Repeat("b", 64)
+
+	begin := runtimeOperationRequest(shared.RuntimeActionRestoreBegin)
+	begin.OperationID, begin.OperationKey = "restore-begin-operation", "restore-begin-key"
+	begin.Cluster = "Cluster_2"
+	begin.Backup = &shared.RuntimeBackupRequest{
+		BackupID: backupID, Size: transferSize, ContentSize: 1, FileCount: 2,
+		SHA256: digest, SharedSHA256: sharedDigest,
+	}
+	if _, err := agent.executeRuntimeOperation(string(begin.Action), &begin, 30); err != nil {
+		t.Fatalf("begin restore failed: %v", err)
+	}
+
+	var first shared.RuntimeOperationRequest
+	for offset := 0; offset < transferSize; offset++ {
+		write := runtimeOperationRequest(shared.RuntimeActionRestoreWrite)
+		write.OperationID = fmt.Sprintf("restore-write-operation-%03d", offset)
+		write.OperationKey = fmt.Sprintf("restore-write-key-%03d", offset)
+		write.Cluster = "Cluster_2"
+		write.Backup = &shared.RuntimeBackupRequest{
+			BackupID: backupID, Offset: int64(offset), Size: transferSize, SHA256: digest, Data: []byte{'x'},
+		}
+		if offset == 0 {
+			first = write
+		}
+		result, err := agent.executeRuntimeOperation(string(write.Action), &write, 30)
+		if err != nil || result.Backup == nil || result.Backup.NextOffset != int64(offset+1) {
+			t.Fatalf("write %d result=%#v err=%v", offset, result.Backup, err)
+		}
+	}
+
+	// The first write is older than the bounded idempotency history. The
+	// transfer file's offset check remains the authoritative replay guard.
+	if _, err := agent.executeRuntimeOperation(string(first.Action), &first, 30); err == nil || !strings.Contains(err.Error(), "conflict") {
+		t.Fatalf("evicted chunk replay error=%v", err)
 	}
 }
 

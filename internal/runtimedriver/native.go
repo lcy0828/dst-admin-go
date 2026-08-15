@@ -98,12 +98,68 @@ func (d *Native) CompleteMigrationSource(_ context.Context, _ Target, _ Operatio
 	return d.transfer.CompleteSource(migrationID)
 }
 
+func (d *Native) StageBackup(ctx context.Context, target Target, _ Operation, backupID string) (BackupDescriptor, error) {
+	value, err := d.transfer.PrepareBackup(ctx, backupID, target.Cluster, target.Shard)
+	return backupDescriptorFromTransfer(value), err
+}
+
+func (d *Native) ReadBackup(ctx context.Context, _ Target, backupID string, offset int64) (BackupChunk, error) {
+	value, err := d.transfer.ReadBackup(ctx, backupID, offset)
+	return BackupChunk{Offset: value.Offset, NextOffset: value.NextOffset, Size: value.Size, SHA256: value.SHA256, Data: value.Data, Complete: value.Complete}, err
+}
+
+func (d *Native) ReleaseBackup(_ context.Context, _ Target, _ Operation, backupID string) error {
+	return d.transfer.ReleaseBackup(backupID)
+}
+
+func (d *Native) BeginRestore(_ context.Context, target Target, _ Operation, descriptor BackupDescriptor) error {
+	_, err := d.transfer.BeginRestore(backupDescriptorToTransfer(target, descriptor))
+	return err
+}
+
+func (d *Native) WriteRestore(_ context.Context, _ Target, _ Operation, descriptor BackupDescriptor, offset int64, data []byte) (int64, error) {
+	return d.transfer.WriteRestore(descriptor.BackupID, offset, data)
+}
+
+func (d *Native) PrepareRestore(ctx context.Context, _ Target, _ Operation, backupID string) error {
+	_, err := d.transfer.PrepareRestore(ctx, backupID)
+	return err
+}
+
+func (d *Native) PublishRestore(_ context.Context, _ Target, _ Operation, backupID string, publishShared bool) (string, error) {
+	return d.transfer.PublishRestore(backupID, publishShared)
+}
+
+func (d *Native) RollbackRestore(_ context.Context, _ Target, _ Operation, backupID string) error {
+	return d.transfer.RollbackRestore(backupID)
+}
+
+func (d *Native) CompleteRestore(_ context.Context, _ Target, _ Operation, backupID string) (string, error) {
+	return d.transfer.CompleteRestore(backupID)
+}
+
+func backupDescriptorFromTransfer(value shardtransfer.BackupDescriptor) BackupDescriptor {
+	return BackupDescriptor{
+		BackupID: value.BackupID, Size: value.Size, ContentSize: value.ContentSize, FileCount: value.FileCount,
+		SHA256: value.SHA256, SharedSHA256: value.SharedSHA256,
+	}
+}
+
+func backupDescriptorToTransfer(target Target, value BackupDescriptor) shardtransfer.BackupDescriptor {
+	return shardtransfer.BackupDescriptor{
+		BackupID: value.BackupID, Cluster: target.Cluster, Shard: target.Shard,
+		Size: value.Size, ContentSize: value.ContentSize, FileCount: value.FileCount,
+		SHA256: value.SHA256, SharedSHA256: value.SharedSHA256,
+	}
+}
+
 func (d *Native) Kind() Kind { return KindNative }
 
 func (d *Native) Capabilities() []Capability {
 	return []Capability{
 		CapabilityLifecycle, CapabilityConsoleInput, CapabilityConsoleHealth, CapabilityRawConsole,
 		CapabilityOperationProof, CapabilityLogContinuation, CapabilityArtifacts,
+		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore,
 	}
 }
 

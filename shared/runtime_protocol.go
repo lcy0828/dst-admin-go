@@ -2,7 +2,7 @@ package shared
 
 import "time"
 
-const RuntimeOperationProtocolVersion = 1
+const RuntimeOperationProtocolVersion = 2
 
 type RuntimeAction string
 
@@ -23,6 +23,15 @@ const (
 	RuntimeActionMigrationSourceFinalize RuntimeAction = "runtime.migration.source.finalize"
 	RuntimeActionMigrationSourceRollback RuntimeAction = "runtime.migration.source.rollback"
 	RuntimeActionMigrationSourceComplete RuntimeAction = "runtime.migration.source.complete"
+	RuntimeActionBackupStage             RuntimeAction = "runtime.backup.stage"
+	RuntimeActionBackupRead              RuntimeAction = "runtime.backup.read"
+	RuntimeActionBackupRelease           RuntimeAction = "runtime.backup.release"
+	RuntimeActionRestoreBegin            RuntimeAction = "runtime.restore.begin"
+	RuntimeActionRestoreWrite            RuntimeAction = "runtime.restore.write"
+	RuntimeActionRestorePrepare          RuntimeAction = "runtime.restore.prepare"
+	RuntimeActionRestorePublish          RuntimeAction = "runtime.restore.publish"
+	RuntimeActionRestoreRollback         RuntimeAction = "runtime.restore.rollback"
+	RuntimeActionRestoreComplete         RuntimeAction = "runtime.restore.complete"
 )
 
 type ConsoleMode string
@@ -76,6 +85,18 @@ type RuntimeMigrationRequest struct {
 	Data        []byte `json:"data,omitempty"`
 }
 
+type RuntimeBackupRequest struct {
+	BackupID      string `json:"backup_id"`
+	Offset        int64  `json:"offset,omitempty"`
+	Size          int64  `json:"size,omitempty"`
+	ContentSize   int64  `json:"content_size,omitempty"`
+	FileCount     int    `json:"file_count,omitempty"`
+	SHA256        string `json:"sha256,omitempty"`
+	SharedSHA256  string `json:"shared_sha256,omitempty"`
+	Data          []byte `json:"data,omitempty"`
+	PublishShared bool   `json:"publish_shared,omitempty"`
+}
+
 // RuntimeOperationRequest references a trusted installation and a managed
 // Shard. It never accepts a host path, executable, container specification or
 // shell command.
@@ -96,6 +117,7 @@ type RuntimeOperationRequest struct {
 	Artifacts        *RuntimeArtifactRequest    `json:"artifacts,omitempty"`
 	Observation      *RuntimeObservationRequest `json:"observation,omitempty"`
 	Migration        *RuntimeMigrationRequest   `json:"migration,omitempty"`
+	Backup           *RuntimeBackupRequest      `json:"backup,omitempty"`
 }
 
 type RuntimeOutcome string
@@ -169,6 +191,20 @@ type RuntimeMigrationResult struct {
 	RecoveryRef string `json:"recovery_ref,omitempty"`
 }
 
+type RuntimeBackupResult struct {
+	BackupID     string `json:"backup_id"`
+	Offset       int64  `json:"offset,omitempty"`
+	NextOffset   int64  `json:"next_offset,omitempty"`
+	Size         int64  `json:"size,omitempty"`
+	ContentSize  int64  `json:"content_size,omitempty"`
+	FileCount    int    `json:"file_count,omitempty"`
+	SHA256       string `json:"sha256,omitempty"`
+	SharedSHA256 string `json:"shared_sha256,omitempty"`
+	Data         []byte `json:"data,omitempty"`
+	Complete     bool   `json:"complete"`
+	RecoveryRef  string `json:"recovery_ref,omitempty"`
+}
+
 type RuntimeOperationResult struct {
 	ProtocolVersion  int                       `json:"protocol_version"`
 	OperationID      string                    `json:"operation_id"`
@@ -190,6 +226,7 @@ type RuntimeOperationResult struct {
 	Artifacts        *RuntimeArtifactBundle    `json:"artifacts,omitempty"`
 	Evidence         *RuntimeOperationEvidence `json:"evidence,omitempty"`
 	Migration        *RuntimeMigrationResult   `json:"migration,omitempty"`
+	Backup           *RuntimeBackupResult      `json:"backup,omitempty"`
 }
 
 func IsRuntimeAction(value RuntimeAction) bool {
@@ -199,6 +236,10 @@ func IsRuntimeAction(value RuntimeAction) bool {
 		RuntimeActionMigrationImportBegin, RuntimeActionMigrationImportWrite, RuntimeActionMigrationImportCommit,
 		RuntimeActionMigrationTargetRollback, RuntimeActionMigrationTargetComplete,
 		RuntimeActionMigrationSourceFinalize, RuntimeActionMigrationSourceRollback, RuntimeActionMigrationSourceComplete:
+		return true
+	case RuntimeActionBackupStage, RuntimeActionBackupRead, RuntimeActionBackupRelease,
+		RuntimeActionRestoreBegin, RuntimeActionRestoreWrite, RuntimeActionRestorePrepare,
+		RuntimeActionRestorePublish, RuntimeActionRestoreRollback, RuntimeActionRestoreComplete:
 		return true
 	default:
 		return false
@@ -211,6 +252,10 @@ func RuntimeActionMutates(value RuntimeAction) bool {
 		RuntimeActionMigrationImportBegin, RuntimeActionMigrationImportWrite, RuntimeActionMigrationImportCommit,
 		RuntimeActionMigrationTargetRollback, RuntimeActionMigrationTargetComplete,
 		RuntimeActionMigrationSourceFinalize, RuntimeActionMigrationSourceRollback, RuntimeActionMigrationSourceComplete:
+		return true
+	case RuntimeActionBackupStage, RuntimeActionBackupRelease,
+		RuntimeActionRestoreBegin, RuntimeActionRestoreWrite, RuntimeActionRestorePrepare,
+		RuntimeActionRestorePublish, RuntimeActionRestoreRollback, RuntimeActionRestoreComplete:
 		return true
 	default:
 		return false

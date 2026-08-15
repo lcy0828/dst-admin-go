@@ -28,7 +28,7 @@ import (
 
 // 常量
 const (
-	AgentVersion = "2.4.0"
+	AgentVersion = "2.5.0"
 	// 心跳间隔
 	HeartbeatInterval = 30 * time.Second
 	// 重连间隔
@@ -1043,6 +1043,7 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 	if len(a.Config.RuntimeInstallations) > 0 && runtime.GOOS != "windows" {
 		capabilities = append(capabilities,
 			"shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1", "runtime.migration.v1",
+			"runtime.backup.v1",
 		)
 		for _, installation := range a.Config.RuntimeInstallations {
 			if installation.Driver == "container" {

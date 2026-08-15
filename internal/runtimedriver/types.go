@@ -75,6 +75,24 @@ type MigrationChunk struct {
 	Complete   bool
 }
 
+type BackupDescriptor struct {
+	BackupID     string
+	Size         int64
+	ContentSize  int64
+	FileCount    int
+	SHA256       string
+	SharedSHA256 string
+}
+
+type BackupChunk struct {
+	Offset     int64
+	NextOffset int64
+	Size       int64
+	SHA256     string
+	Data       []byte
+	Complete   bool
+}
+
 type Driver interface {
 	Kind() Kind
 	Capabilities() []Capability
@@ -96,6 +114,15 @@ type Driver interface {
 	FinalizeMigrationSource(context.Context, Target, Operation, string) (string, error)
 	RollbackMigrationSource(context.Context, Target, Operation, string) error
 	CompleteMigrationSource(context.Context, Target, Operation, string) (string, error)
+	StageBackup(context.Context, Target, Operation, string) (BackupDescriptor, error)
+	ReadBackup(context.Context, Target, string, int64) (BackupChunk, error)
+	ReleaseBackup(context.Context, Target, Operation, string) error
+	BeginRestore(context.Context, Target, Operation, BackupDescriptor) error
+	WriteRestore(context.Context, Target, Operation, BackupDescriptor, int64, []byte) (int64, error)
+	PrepareRestore(context.Context, Target, Operation, string) error
+	PublishRestore(context.Context, Target, Operation, string, bool) (string, error)
+	RollbackRestore(context.Context, Target, Operation, string) error
+	CompleteRestore(context.Context, Target, Operation, string) (string, error)
 }
 
 func HasCapability(driver Driver, expected Capability) bool {

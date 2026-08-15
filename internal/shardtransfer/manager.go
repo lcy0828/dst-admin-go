@@ -22,6 +22,11 @@ const (
 	maxEntryCount = 100000
 )
 
+const (
+	MaximumTransferBytes   = maxTotalBytes
+	MaximumTransferEntries = maxEntryCount
+)
+
 var (
 	ErrInvalidRequest = errors.New("shard transfer request is invalid")
 	ErrConflict       = errors.New("shard transfer target conflicts with existing data")
@@ -242,7 +247,7 @@ func (m *Manager) WriteImport(id string, offset int64, data []byte) (int64, erro
 	if err != nil || info.Size() != offset {
 		return info.Size(), ErrConflict
 	}
-	written, err := file.Write(data)
+	written, err := file.WriteAt(data, offset)
 	if err != nil || written != len(data) {
 		return offset + int64(written), errors.Join(err, io.ErrShortWrite)
 	}
