@@ -168,6 +168,31 @@ func (s *Store) FindIdempotent(id, sourceJobID string) (Publication, error) {
 	return s.Get(record.ID)
 }
 
+func (s *Store) List(roomID string, limit, offset int) ([]Publication, int, error) {
+	roomID = strings.TrimSpace(roomID)
+	if !validID(roomID) || limit < 1 || limit > 100 || offset < 0 {
+		return nil, 0, ErrInvalidInput
+	}
+	query := s.db.Table(s.publicationTable).Where("room_id = ?", roomID)
+	var total int
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var records []publicationRecord
+	if err := query.Order("created_at DESC, id DESC").Limit(limit).Offset(offset).Find(&records).Error; err != nil {
+		return nil, 0, err
+	}
+	values := make([]Publication, 0, len(records))
+	for _, record := range records {
+		value, err := s.Get(record.ID)
+		if err != nil {
+			return nil, 0, err
+		}
+		values = append(values, value)
+	}
+	return values, total, nil
+}
+
 func (s *Store) Save(value Publication) (Publication, error) {
 	if err := validatePublication(value); err != nil {
 		return Publication{}, err

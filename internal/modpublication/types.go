@@ -183,6 +183,7 @@ type PublishRequest struct {
 type Fence struct {
 	RoomID       string    `json:"roomId"`
 	LeaseID      string    `json:"leaseId"`
+	OperationKey string    `json:"operationKey"`
 	FencingToken uint64    `json:"fencingToken"`
 	ExpiresAt    time.Time `json:"expiresAt"`
 }

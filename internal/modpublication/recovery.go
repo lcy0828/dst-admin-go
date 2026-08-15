@@ -16,32 +16,43 @@ func (c *Coordinator) Recover(ctx context.Context) ([]Publication, error) {
 		if err := ctx.Err(); err != nil {
 			return results, errors.Join(combined, err)
 		}
-		fences, acquireErr := c.acquireFences(ctx, publication.Plan.AffectedRoomIDs, publication.ID+":recover")
-		if acquireErr != nil {
-			combined = errors.Join(combined, acquireErr)
-			continue
+		recovered, recoverErr := c.RecoverOne(ctx, publication.ID)
+		if recoverErr != nil {
+			combined = errors.Join(combined, recoverErr)
 		}
-		publication.Fences = fences
-		publication.UpdatedAt = c.now().UTC()
-		if saved, saveErr := c.store.Save(publication); saveErr == nil {
-			publication = saved
-		} else {
-			c.releaseFences(fences)
-			combined = errors.Join(combined, saveErr)
-			continue
-		}
-		var recovered Publication
-		var recoverErr error
-		if publication.CommitDecision {
-			recovered, recoverErr = c.completeCommitted(ctx, publication, fences)
-		} else {
-			recovered, recoverErr = c.recoverRollback(publication, fences)
-		}
-		c.releaseFences(fences)
 		results = append(results, recovered)
-		combined = errors.Join(combined, recoverErr)
 	}
 	return results, combined
+}
+
+func (c *Coordinator) RecoverOne(ctx context.Context, publicationID string) (Publication, error) {
+	publication, err := c.store.Get(publicationID)
+	if err != nil {
+		return Publication{}, err
+	}
+	if publication.Status == StatusSucceeded || publication.Status == StatusFailed || publication.Status == StatusRolledBack {
+		return publication, ErrConflict
+	}
+	fences, acquireErr := c.acquireFences(ctx, publication.Plan, publication.ID+":recover")
+	if acquireErr != nil {
+		return publication, acquireErr
+	}
+	defer c.releaseFences(fences)
+	publication.Fences = fences
+	publication.UpdatedAt = c.now().UTC()
+	if saved, saveErr := c.store.Save(publication); saveErr == nil {
+		publication = saved
+	} else {
+		return publication, saveErr
+	}
+	var recovered Publication
+	var recoverErr error
+	if publication.CommitDecision {
+		recovered, recoverErr = c.completeCommitted(ctx, publication, fences)
+	} else {
+		recovered, recoverErr = c.recoverRollback(publication, fences)
+	}
+	return recovered, recoverErr
 }
 
 func (c *Coordinator) recoverRollback(publication Publication, fences []Fence) (Publication, error) {

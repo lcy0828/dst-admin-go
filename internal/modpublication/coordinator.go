@@ -35,6 +35,10 @@ func (c *Coordinator) Preview(ctx context.Context, roomID string) (Plan, error) 
 
 func (c *Coordinator) Get(id string) (Publication, error) { return c.store.Get(id) }
 
+func (c *Coordinator) List(roomID string, limit, offset int) ([]Publication, int, error) {
+	return c.store.List(roomID, limit, offset)
+}
+
 func (c *Coordinator) Publish(ctx context.Context, request PublishRequest) (Publication, error) {
 	if !validID(request.ID) || request.SourceJobID != "" && !validID(request.SourceJobID) || validatePlan(request.Plan) != nil {
 		return Publication{}, ErrInvalidInput
@@ -47,7 +51,7 @@ func (c *Coordinator) Publish(ctx context.Context, request PublishRequest) (Publ
 	} else if !errors.Is(err, ErrNotFound) {
 		return Publication{}, err
 	}
-	fences, err := c.acquireFences(ctx, request.Plan.AffectedRoomIDs, request.ID)
+	fences, err := c.acquireFences(ctx, request.Plan, request.ID)
 	if err != nil {
 		return Publication{}, err
 	}
@@ -325,25 +329,43 @@ func (c *Coordinator) operation(publication Publication, target TargetPlan, fenc
 	}
 }
 
-func (c *Coordinator) acquireFences(ctx context.Context, roomIDs []string, publicationID string) ([]Fence, error) {
-	roomIDs = normalizedStrings(roomIDs)
-	if len(roomIDs) == 0 {
+func (c *Coordinator) acquireFences(ctx context.Context, plan Plan, publicationID string) ([]Fence, error) {
+	resources := publicationLeaseResources(plan)
+	if len(resources) == 0 {
 		return nil, ErrInvalidInput
 	}
-	fences := make([]Fence, 0, len(roomIDs))
-	for _, roomID := range roomIDs {
-		fence, err := c.leases.Acquire(ctx, roomID, "mod.publish:"+publicationID, c.leaseTTL)
+	operationKey := publicationOperationKey(publicationID)
+	fences := make([]Fence, 0, len(resources))
+	for _, resourceID := range resources {
+		fence, err := c.leases.Acquire(ctx, resourceID, operationKey, c.leaseTTL)
 		if err != nil {
 			c.releaseFences(fences)
 			return nil, err
 		}
-		if fence.RoomID != roomID || !validID(fence.LeaseID) || fence.FencingToken == 0 {
+		if fence.RoomID != resourceID || fence.OperationKey != operationKey || !validID(fence.LeaseID) || fence.FencingToken == 0 {
 			c.releaseFences(append(fences, fence))
 			return nil, ErrInvalidInput
 		}
 		fences = append(fences, fence)
 	}
 	return fences, nil
+}
+
+func publicationOperationKey(publicationID string) string {
+	value := "mod.publish:" + publicationID
+	if len(value) <= 128 {
+		return value
+	}
+	return "mod.publish:" + hashBytes([]byte(publicationID))
+}
+
+func publicationLeaseResources(plan Plan) []string {
+	resources := normalizedStrings(plan.AffectedRoomIDs)
+	for _, target := range plan.Targets {
+		digest := hashBytes([]byte(target.TargetID + "\x00" + target.InstallationID))
+		resources = append(resources, "@mod-installation/"+digest)
+	}
+	return normalizedStrings(resources)
 }
 
 func (c *Coordinator) renewFences(ctx context.Context, fences []Fence) ([]Fence, error) {
@@ -353,7 +375,8 @@ func (c *Coordinator) renewFences(ctx context.Context, fences []Fence) ([]Fence,
 		if err != nil {
 			return updated, err
 		}
-		if fence.RoomID != updated[index].RoomID || fence.LeaseID != updated[index].LeaseID || fence.FencingToken != updated[index].FencingToken {
+		if fence.RoomID != updated[index].RoomID || fence.LeaseID != updated[index].LeaseID ||
+			fence.OperationKey != updated[index].OperationKey || fence.FencingToken != updated[index].FencingToken {
 			return updated, ErrConflict
 		}
 		updated[index] = fence

@@ -134,7 +134,7 @@ func (f *fakeLease) Acquire(_ context.Context, roomID, owner string, ttl time.Du
 		return Fence{}, ErrConflict
 	}
 	f.next++
-	fence := Fence{RoomID: roomID, LeaseID: fmt.Sprintf("lease-%08d", f.next), FencingToken: f.next, ExpiresAt: time.Now().Add(ttl)}
+	fence := Fence{RoomID: roomID, LeaseID: fmt.Sprintf("lease-%08d", f.next), OperationKey: owner, FencingToken: f.next, ExpiresAt: time.Now().Add(ttl)}
 	f.active[roomID] = fence
 	return fence, nil
 }
@@ -539,6 +539,58 @@ func TestActiveRoomLeaseRejectsConcurrentPublication(t *testing.T) {
 	}
 	if _, err := app.store.Get("publication-concurrent-room"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("blocked publication should not be persisted: %v", err)
+	}
+}
+
+func TestInstallationLeaseRejectsPublicationFromAnotherRoom(t *testing.T) {
+	worlds := []ManagedWorld{
+		{RoomID: "room-a", RoomDirectory: "Cluster_A", WorldID: "master-a", WorldDirectory: "Master", ModOverrides: []byte("return {}\n")},
+		{RoomID: "room-b", RoomDirectory: "Cluster_B", WorldID: "master-b", WorldDirectory: "Master", ModOverrides: []byte("return {}\n")},
+	}
+	placements := []AppliedPlacement{
+		{RoomID: "room-a", WorldID: "master-a", TargetID: "target-shared", NodeID: "node-a", InstallationID: "install-shared"},
+		{RoomID: "room-b", WorldID: "master-b", TargetID: "target-shared", NodeID: "node-a", InstallationID: "install-shared"},
+	}
+	app := newTestApplication(t, worlds, placements)
+	plan, err := app.coordinator.Preview(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installationResource := ""
+	for _, resource := range publicationLeaseResources(plan) {
+		if strings.HasPrefix(resource, "@mod-installation/") {
+			installationResource = resource
+		}
+	}
+	if installationResource == "" {
+		t.Fatal("installation lease resource missing")
+	}
+	fence, err := app.leases.Acquire(context.Background(), installationResource, "other-publication", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.leases.Release(fence)
+	if _, err := app.coordinator.Publish(context.Background(), PublishRequest{ID: "publication-installation-conflict", Plan: plan}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected installation conflict, got %v", err)
+	}
+}
+
+func TestPublicationListIsRoomScopedAndNewestFirst(t *testing.T) {
+	worlds, placements := twoTargetWorlds()
+	app := newTestApplication(t, worlds, placements)
+	plan, err := app.coordinator.Preview(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"publication-list-old", "publication-list-new"} {
+		if _, err := app.coordinator.Publish(context.Background(), PublishRequest{ID: id, Plan: plan}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	items, total, err := app.coordinator.List("room-a", 1, 0)
+	if err != nil || total != 2 || len(items) != 1 || items[0].ID != "publication-list-new" {
+		t.Fatalf("items=%#v total=%d err=%v", items, total, err)
 	}
 }
 
