@@ -53,14 +53,28 @@ assert_mount_mode() {
   '
 }
 
+assert_compose_user() {
+  block=$1
+  expected=$2
+  echo "$block" | awk -v expected="$expected" '
+    $1 == "user:" {
+      value=$2
+      gsub(/["\047]/, "", value)
+      if (value == expected) matched=1
+    }
+    END { if (!matched) exit 1 }
+  '
+}
+
 assert_mount_mode "$agent_config" /srv/dst/server readonly
 assert_mount_mode "$agent_config" /srv/dst/server/mods writable
 echo "$agent_config" | grep -F 'hostname: smoke-agent' >/dev/null
 echo "$agent_config" | grep -A1 -F -- '- -id' | grep -F -- '- smoke-agent' >/dev/null
 assert_mount_mode "$runtime_config" /opt/dst/server readonly
 assert_mount_mode "$runtime_config" /opt/dst/server/mods readonly
-echo "$volume_init_config" | grep -F 'user: "0:0"' >/dev/null
+assert_compose_user "$volume_init_config" 0:0
 echo "$volume_init_config" | grep -F 'install -d -o 10000 -g 10000 -m 0755 /srv/dst/server/mods' >/dev/null
+echo "$volume_init_config" | grep -F 'install -d -o 10000 -g 10000 -m 0755 /srv/dst/server/bin64' >/dev/null
 echo "$volume_init_config" | grep -F 'chown -R 10000:10000 /srv/dst/saves' >/dev/null
 if echo "$control_config" | grep -E '/srv/dst|docker\.sock|dst-mods' >/dev/null; then
   echo "control-plane unexpectedly received a DST or Docker mount" >&2
@@ -70,7 +84,7 @@ echo "$control_config" | grep -F 'DST_ADMIN_AGENT_SECURITY_KEY:' >/dev/null
 echo "$control_config" | grep -F 'DST_ADMIN_STEAMCMD_PATH: /usr/games/steamcmd' >/dev/null
 echo "$control_config" | grep -F 'DST_ADMIN_WORKSHOP_DOWNLOAD: /var/lib/dst-admin/workshop' >/dev/null
 echo "$control_config" | grep -F 'DST_ADMIN_WORKSHOP_CONTENT: /var/lib/dst-admin/workshop/steamapps/workshop/content/322330' >/dev/null
-echo "$control_init_config" | grep -F 'user: "0:0"' >/dev/null
+assert_compose_user "$control_init_config" 0:0
 echo "$control_init_config" | grep -F 'chown -R 10001:10001 /var/lib/dst-admin' >/dev/null
 echo "$control_init_config" | grep -F 'workshop/steamapps/workshop/downloads/322330' >/dev/null
 if echo "$control_config" | grep -F 'DST_ADMIN_AGENT_SECURITY_KEY: ""' >/dev/null; then
@@ -140,6 +154,8 @@ if [ "${DST_ADMIN_SMOKE_BUILD:-0}" = "1" ]; then
       test -w /var/lib/dst-admin-agent
       test -w /srv/dst/saves
       test -w /srv/dst/server/mods
+      test -d /srv/dst/server/bin64
+      test "$(stat -c %u /srv/dst/server/bin64)" = 10000
       test -w /srv/dst/workshop
       test "$(stat -c %u /var/lib/dst-admin-agent)" = 10000
       test "$(stat -c %u /srv/dst/saves)" = 10000
@@ -157,7 +173,7 @@ if [ "${DST_ADMIN_SMOKE_BUILD:-0}" = "1" ]; then
     compose run --rm --no-deps control-data-init
     compose run --rm --no-deps volume-init
     compose run --rm --no-deps control-plane /bin/sh -ec 'test -w /var/lib/dst-admin && test -f /var/lib/dst-admin/app.conf'
-    compose run --rm --no-deps agent /bin/sh -ec 'test -w /var/lib/dst-admin-agent && test -w /srv/dst/server/mods && test -f /var/lib/dst-admin-agent/agent.conf'
+    compose run --rm --no-deps agent /bin/sh -ec 'test -w /var/lib/dst-admin-agent && test -w /srv/dst/server/mods && test -d /srv/dst/server/bin64 && test -f /var/lib/dst-admin-agent/agent.conf'
     compose run --rm --no-deps \
       -e DST_CLUSTER=Smoke \
       -e DST_SHARD=Master \

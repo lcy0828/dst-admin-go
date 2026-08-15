@@ -99,7 +99,7 @@ Compose 中各 volume 的边界如下：
 
 Compose 使用嵌套的 `dst-mods` volume，只给 Agent 的 `/srv/dst/server/mods` 写权限；`dst-server` 的其余内容始终只读。DST Shard 在 `/opt/dst/server/mods` 只读查看同一 volume，因此 Agent 可以原子执行 Mod `prepare/publish`，但不能通过这条挂载修改服务端二进制。cache/state 仍位于 `agent-data`，不落入安装卷。
 
-Agent 和 DST 镜像固定使用同一非 root UID/GID `10000:10000`，但仍运行在不同容器、拥有不同进程和密钥边界。`volume-init` 只以 root 运行一次，用于迁移/初始化 `agent-data`、`dst-saves`、`dst-mods` 和 `dst-workshop` 的所有权，完成后退出；它是唯一临时可写挂载 `dst-server` 的容器，仅用于保证空安装卷存在 `server/mods` 挂载点。首次创建 `dst-mods` 时还会复制已有 `server/mods` 内容，避免嵌套挂载隐藏旧的 setup 或本地 Mod。常驻 Agent 和 DST 对 `dst-server` 仍只有只读权限，控制面也不依赖或挂载这些 volume。不要使用 `chmod -R 777`，也不要让两个 Shard 同时无约束地写同一个私有世界目录。
+Agent 和 DST 镜像固定使用同一非 root UID/GID `10000:10000`，但仍运行在不同容器、拥有不同进程和密钥边界。`volume-init` 只以 root 运行一次，用于迁移/初始化 `agent-data`、`dst-saves`、`dst-mods` 和 `dst-workshop` 的所有权，完成后退出；它是唯一临时可写挂载 `dst-server` 的容器，仅用于保证空安装卷存在 `server/mods` 嵌套挂载点和只读 Runtime 所需的 `server/bin64` 工作目录。首次创建 `dst-mods` 时还会复制已有 `server/mods` 内容，避免嵌套挂载隐藏旧的 setup 或本地 Mod。常驻 Agent 和 DST 对 `dst-server` 仍只有只读权限，控制面也不依赖或挂载这些 volume。不要使用 `chmod -R 777`，也不要让两个 Shard 同时无约束地写同一个私有世界目录。
 
 控制面以 UID/GID `10001:10001` 运行。`control-data-init` 只在卷布局 marker 缺失时以 root 创建目录并修正旧卷所有权，随后退出；这同时解决旧版本由 root 创建 Workshop 父目录后 SteamCMD 报 `Staging folder not writable` 的升级问题。升级前必须对整个 `control-data` 做一致性备份，至少包含 SQLite 主文件及 WAL/SHM、配置、备份索引和 Workshop 状态；不能在数据库仍写入时只复制 `go-dont.db`。首次升级后应确认 marker、目录所有者、剩余空间，以及 `/var/lib/dst-admin/workshop/steamapps/workshop/{content,downloads}/322330` 可由 UID 10001 写入。
 

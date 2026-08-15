@@ -140,6 +140,9 @@ services:
         if [ ! -d /srv/dst/server/mods ]; then
           install -d -o 10000 -g 10000 -m 0755 /srv/dst/server/mods
         fi
+        if [ ! -d /srv/dst/server/bin64 ]; then
+          install -d -o 10000 -g 10000 -m 0755 /srv/dst/server/bin64
+        fi
         if [ ! -e "$$mods_marker" ]; then
           if [ -d /srv/dst/server/mods ] && [ -z "$$(find /srv/dst/mods -mindepth 1 -maxdepth 1 -print -quit)" ]; then
             cp -a /srv/dst/server/mods/. /srv/dst/mods/
