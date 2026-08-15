@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.3.0"
+local PRODUCER_VERSION = "2.3.1"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 
 local state = {

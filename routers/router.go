@@ -403,7 +403,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		if probeErr != nil {
 			return nil, probeErr
 		}
-		playerProbe, err = playerapi.NewTelemetryProbe(nativeProbe, runtimeManager, fallbackProbe)
+		playerProbe, err = playerapi.NewTelemetryProbe(nativeProbe, runtimeBridge, fallbackProbe)
 		if err != nil {
 			return nil, err
 		}
@@ -433,7 +433,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		if samplerErr != nil {
 			return nil, samplerErr
 		}
-		worldStateSampler, err = worldstate.NewRuntimeSampler(runtimeManager, fallbackSampler)
+		worldStateSampler, err = worldstate.NewRuntimeSampler(runtimeBridge, fallbackSampler)
 		if err != nil {
 			return nil, err
 		}

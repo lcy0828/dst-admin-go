@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 2
-local PRODUCER_VERSION = "2.3.0"
+local PRODUCER_VERSION = "2.3.1"
 local SNAPSHOT_INTERVAL = 5
 local READY_RETRY_SECONDS = 1
 local READY_RETRY_LIMIT = 60
@@ -153,8 +153,18 @@ local function write_health()
     end
 end
 
-function M.EmitOnce()
+local function complete(callback, written)
+    if type(callback) == "function" then
+        local ok, callback_error = xpcall(function() callback(written) end, debug.traceback)
+        if not ok then
+            print("[DST-ADMIN-RUNTIME ERROR] code=TELEMETRY_CALLBACK_FAILED message=" .. safe_text(callback_error, 1024))
+        end
+    end
+end
+
+function M.EmitOnce(callback)
     if not state.running or not state.ready or state.writing then
+        complete(callback, false)
         return false
     end
     state.writing = true
@@ -191,6 +201,7 @@ function M.EmitOnce()
         state.lastError = safe_text(payload, 1024)
         state.consecutiveFailures = state.consecutiveFailures + 1
         write_health()
+        complete(callback, false)
         return false
     end
     local encoded_ok, encoded = pcall(json.encode, payload)
@@ -199,6 +210,7 @@ function M.EmitOnce()
         state.lastError = "snapshot JSON encoding failed"
         state.consecutiveFailures = state.consecutiveFailures + 1
         write_health()
+        complete(callback, false)
         return false
     end
     local slot = state.nextSlot
@@ -216,6 +228,7 @@ function M.EmitOnce()
             state.consecutiveFailures = state.consecutiveFailures + 1
         end
         write_health()
+        complete(callback, written == true)
     end)
     return true
 end
@@ -233,7 +246,6 @@ local function await_world()
     if ready_for_capture() then
         state.ready = true
         state.readyTask = nil
-        M.EmitOnce()
         state.periodicTask = TheWorld:DoPeriodicTask(SNAPSHOT_INTERVAL, M.EmitOnce)
         return
     end
@@ -254,7 +266,7 @@ function M.Start()
     state.ready = false
     state.readyAttempts = 0
     state.lastError = nil
-    state.readyTask = scheduler:ExecuteInTime(0, await_world, "dst-admin-telemetry-ready")
+    await_world()
     return true
 end
 

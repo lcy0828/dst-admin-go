@@ -20,6 +20,18 @@ func (r *runtimeWorldStateReader) ReadWorldState(context.Context, string, string
 	return r.snapshot, r.err
 }
 
+type refreshableWorldStateReader struct {
+	*runtimeWorldStateReader
+	refresh      dstruntime.SnapshotRefreshResult
+	refreshErr   error
+	refreshCalls int
+}
+
+func (r *refreshableWorldStateReader) RefreshSnapshots(context.Context, string, string) (dstruntime.SnapshotRefreshResult, error) {
+	r.refreshCalls++
+	return r.refresh, r.refreshErr
+}
+
 type countingWorldStateSampler struct {
 	observation Observation
 	err         error
@@ -74,6 +86,22 @@ func TestRuntimeSamplerFallsBackExactlyOnceForUnavailableSnapshot(t *testing.T) 
 	value, err := sampler.Snapshot(context.Background(), "room", "world")
 	if err != nil || reader.calls != 1 || fallback.calls != 1 || value.Season != "winter" {
 		t.Fatalf("fallback observation = %#v, reader calls = %d, fallback calls = %d, error = %v", value, reader.calls, fallback.calls, err)
+	}
+}
+
+func TestRuntimeSamplerActivelyRefreshesStaleSnapshotBeforeFallback(t *testing.T) {
+	reader := &refreshableWorldStateReader{
+		runtimeWorldStateReader: &runtimeWorldStateReader{err: dstruntime.ErrSnapshotStale},
+		refresh:                 dstruntime.SnapshotRefreshResult{WorldState: dstruntime.WorldStateSnapshot{Season: "summer", Phase: "day"}},
+	}
+	fallback := &countingWorldStateSampler{err: errors.New("fallback must not be called")}
+	sampler, err := NewRuntimeSampler(reader, fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := sampler.Snapshot(context.Background(), "room", "world")
+	if err != nil || value.Season != "summer" || reader.refreshCalls != 1 || fallback.calls != 0 {
+		t.Fatalf("observation = %#v, error = %v, refresh calls = %d, fallback calls = %d", value, err, reader.refreshCalls, fallback.calls)
 	}
 }
 

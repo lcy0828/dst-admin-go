@@ -7,7 +7,7 @@ import (
 
 const (
 	ProtocolVersion = 2
-	RuntimeVersion  = "2.3.0"
+	RuntimeVersion  = "2.3.1"
 )
 
 var (
@@ -24,6 +24,7 @@ var (
 	ErrRuntimeResultInvalid  = errors.New("DST Admin runtime result is invalid")
 	ErrRuntimeRequestInvalid = errors.New("DST Admin runtime request is invalid")
 	ErrRuntimeActivation     = errors.New("DST Admin runtime activation failed")
+	ErrRuntimeRefresh        = errors.New("DST Admin runtime snapshot refresh failed")
 )
 
 type InstallState string
@@ -115,6 +116,12 @@ type SnapshotPlayer struct {
 	SanityPercent *float64 `json:"sanityPercent,omitempty"`
 	Temperature   *float64 `json:"temperature,omitempty"`
 	Moisture      *float64 `json:"moisture,omitempty"`
+}
+
+type SnapshotRefreshResult struct {
+	Players    Snapshot           `json:"players"`
+	WorldState WorldStateSnapshot `json:"worldState"`
+	Health     Health             `json:"health"`
 }
 
 type WorldStateSnapshot struct {

@@ -11,6 +11,10 @@ type RuntimeSnapshotReader interface {
 	ReadWorldState(context.Context, string, string) (dstruntime.WorldStateSnapshot, error)
 }
 
+type runtimeSnapshotRefresher interface {
+	RefreshSnapshots(context.Context, string, string) (dstruntime.SnapshotRefreshResult, error)
+}
+
 type RuntimeSampler struct {
 	runtime  RuntimeSnapshotReader
 	fallback Sampler
@@ -38,10 +42,25 @@ func (s *RuntimeSampler) Snapshot(ctx context.Context, roomID, worldID string) (
 // console fallback. It is suitable for read-only current-state views.
 func (s *RuntimeSampler) CurrentSnapshot(ctx context.Context, roomID, worldID string) (Observation, error) {
 	snapshot, err := s.runtime.ReadWorldState(ctx, roomID, worldID)
+	if err != nil && refreshableSnapshotError(err) {
+		if refresher, ok := s.runtime.(runtimeSnapshotRefresher); ok {
+			refreshed, refreshErr := refresher.RefreshSnapshots(ctx, roomID, worldID)
+			if refreshErr == nil {
+				snapshot = refreshed.WorldState
+				err = nil
+			} else {
+				err = errors.Join(err, refreshErr)
+			}
+		}
+	}
 	if err != nil {
 		return Observation{}, err
 	}
 	return observationFromRuntime(snapshot), nil
+}
+
+func refreshableSnapshotError(err error) bool {
+	return errors.Is(err, dstruntime.ErrSnapshotUnavailable) || errors.Is(err, dstruntime.ErrSnapshotStale)
 }
 
 func contextError(ctx context.Context, err error) error {

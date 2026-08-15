@@ -25,6 +25,7 @@ const (
 	defaultLifecycleTimeout  = 10 * time.Second
 	defaultPollInterval      = 100 * time.Millisecond
 	managedActivationScript  = `TheSim:GetPersistentString("../dst-admin/bootstrap.lua",function(ok,source) if not ok or type(source)~="string" then print("[DST-ADMIN-RUNTIME ERROR] code=BOOTSTRAP_UNAVAILABLE") return end local chunk,compile_error=loadstring(source) if chunk==nil then print("[DST-ADMIN-RUNTIME ERROR] code=BOOTSTRAP_COMPILE_FAILED message="..tostring(compile_error)) return end local executed,runtime_error=xpcall(chunk,debug.traceback) if not executed then print("[DST-ADMIN-RUNTIME ERROR] code=BOOTSTRAP_EXECUTE_FAILED message="..tostring(runtime_error)) end end)`
+	managedRefreshScript     = `local runtime=rawget(_G,"DSTAdmin"); if runtime~=nil and type(runtime.Refresh)=="function" then runtime.Refresh() else print("[DST-ADMIN-RUNTIME ERROR] code=REFRESH_UNAVAILABLE") end`
 )
 
 var (
@@ -141,6 +142,109 @@ func (b *Bridge) Reload(ctx context.Context, roomID, worldID string) (LifecycleR
 	}, nil
 }
 
+func (b *Bridge) ReadPlayers(ctx context.Context, roomID, worldID string) (Snapshot, error) {
+	return b.manager.ReadPlayers(ctx, roomID, worldID)
+}
+
+func (b *Bridge) ReadWorldState(ctx context.Context, roomID, worldID string) (WorldStateSnapshot, error) {
+	return b.manager.ReadWorldState(ctx, roomID, worldID)
+}
+
+// RefreshSnapshots bypasses DST's paused simulation scheduler and asks the
+// managed runtime to publish both snapshots immediately. Fresh health and
+// advancing module sequences are the acknowledgement; the Lua command itself
+// is deliberately not retried because it may already have executed.
+func (b *Bridge) RefreshSnapshots(ctx context.Context, roomID, worldID string) (SnapshotRefreshResult, error) {
+	room, world, worldPath, err := b.resolveWorld(roomID, worldID)
+	if err != nil {
+		return SnapshotRefreshResult{}, err
+	}
+	lock := b.worldLock(worldPath)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if err := b.lifecycleReady(ctx, room, world, worldPath); err != nil {
+		return SnapshotRefreshResult{}, err
+	}
+	expectedSession := currentSessionID(worldPath)
+	if expectedSession == "" {
+		return SnapshotRefreshResult{}, fmt.Errorf("%w: current DST session is unavailable", ErrRuntimeRefresh)
+	}
+	expectedShard, err := configuredShardID(worldPath)
+	if err != nil {
+		return SnapshotRefreshResult{}, fmt.Errorf("%w: read shard identity: %v", ErrRuntimeRefresh, err)
+	}
+	if expectedShard == "" {
+		return SnapshotRefreshResult{}, fmt.Errorf("%w: configured shard identity is unavailable", ErrRuntimeRefresh)
+	}
+
+	previous, previousErr := b.manager.Health(room.ID, world.ID)
+	if previousErr != nil || previous.SessionID != expectedSession || previous.ShardID != expectedShard || previous.ProducerVersion != RuntimeVersion {
+		previous = Health{}
+	}
+	startedAt := b.now().UTC()
+	if err := b.sender.Send(ctx, room.DirectoryName, world.DirectoryName, managedRefreshScript); err != nil {
+		return SnapshotRefreshResult{}, fmt.Errorf("%w: send managed refresh: %v", ErrRuntimeRefresh, err)
+	}
+	return b.waitForSnapshotRefresh(ctx, room.ID, world.ID, expectedSession, expectedShard, startedAt, previous)
+}
+
+func (b *Bridge) waitForSnapshotRefresh(ctx context.Context, roomID, worldID, expectedSession, expectedShard string, startedAt time.Time, previous Health) (SnapshotRefreshResult, error) {
+	deadline := time.NewTimer(b.timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(b.pollInterval)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		health, healthErr := b.manager.Health(roomID, worldID)
+		if healthErr == nil && validRefreshHealth(health, expectedSession, expectedShard, startedAt, previous) {
+			players, playersErr := b.manager.ReadPlayers(ctx, roomID, worldID)
+			worldState, worldErr := b.manager.ReadWorldState(ctx, roomID, worldID)
+			if playersErr == nil && worldErr == nil && refreshOutputsMatch(health, players, worldState, expectedSession, expectedShard) {
+				return SnapshotRefreshResult{Players: players, WorldState: worldState, Health: health}, nil
+			}
+			lastErr = errors.Join(playersErr, worldErr)
+		} else {
+			lastErr = healthErr
+		}
+		select {
+		case <-ctx.Done():
+			return SnapshotRefreshResult{}, ctx.Err()
+		case <-deadline.C:
+			if lastErr != nil {
+				return SnapshotRefreshResult{}, fmt.Errorf("%w: managed runtime did not publish coherent fresh snapshots: %v", ErrRuntimeRefresh, lastErr)
+			}
+			return SnapshotRefreshResult{}, fmt.Errorf("%w: managed runtime did not advance both snapshot sequences", ErrRuntimeRefresh)
+		case <-ticker.C:
+		}
+	}
+}
+
+func validRefreshHealth(health Health, expectedSession, expectedShard string, startedAt time.Time, previous Health) bool {
+	world, exists := health.Modules["worldstate"]
+	if health.ProducerVersion != RuntimeVersion || health.ProducerInstanceID == "" || health.SessionID != expectedSession || health.ShardID != expectedShard ||
+		!health.Running || !health.Ready || health.Writing || health.LastError != nil || health.ConsecutiveFailures != 0 ||
+		!exists || !world.Running || !world.Ready || world.Busy || world.LastError != nil || world.ConsecutiveFailures != 0 {
+		return false
+	}
+	if health.ReadAt.Before(startedAt) {
+		return false
+	}
+	if previous.ProducerInstanceID == "" || previous.ProducerInstanceID != health.ProducerInstanceID {
+		return health.Sequence > 0 && world.Sequence > 0
+	}
+	previousWorld := previous.Modules["worldstate"]
+	return health.Sequence > previous.Sequence && world.Sequence > previousWorld.Sequence
+}
+
+func refreshOutputsMatch(health Health, players Snapshot, worldState WorldStateSnapshot, expectedSession, expectedShard string) bool {
+	world := health.Modules["worldstate"]
+	return players.ProducerVersion == RuntimeVersion && players.ProducerInstanceID == health.ProducerInstanceID &&
+		players.SessionID == expectedSession && players.ShardID == expectedShard && players.Sequence == health.Sequence &&
+		worldState.ProducerVersion == RuntimeVersion && worldState.SessionID == expectedSession && worldState.ShardID == expectedShard &&
+		worldState.Sequence == world.Sequence
+}
+
 func (b *Bridge) lifecycleReady(ctx context.Context, room rooms.Room, world rooms.World, worldPath string) error {
 	running, err := b.process.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
 	if err != nil {
@@ -221,6 +325,7 @@ func (b *Bridge) ExecuteCommand(ctx context.Context, roomID, worldID string, req
 		return CommandReceipt{}, fmt.Errorf("runtime command request is invalid: %w", err)
 	}
 	script := `DSTAdmin.Commands.ExecuteJSON(` + quoteRuntimeLua(string(payload)) + `)`
+	sentAt := b.now().UTC()
 	if err := b.sender.Send(ctx, room.DirectoryName, world.DirectoryName, script); err != nil {
 		return CommandReceipt{}, fmt.Errorf("send runtime command: %w", err)
 	}
@@ -231,7 +336,7 @@ func (b *Bridge) ExecuteCommand(ctx context.Context, roomID, worldID string, req
 	ticker := time.NewTicker(b.pollInterval)
 	defer ticker.Stop()
 	for {
-		receipt, readErr := readCommandReceipt(worldPath, expectedSession, request, b.now().UTC())
+		receipt, readErr := readCommandReceipt(worldPath, expectedSession, request, b.now().UTC(), sentAt)
 		if readErr == nil {
 			return receipt, nil
 		}
@@ -266,6 +371,7 @@ func (b *Bridge) CaptureDiagnostic(ctx context.Context, roomID, worldID string, 
 	if err != nil || len(payload) > maxRuntimeRequestBytes {
 		return DiagnosticReport{}, errors.New("runtime diagnostic request is invalid")
 	}
+	sentAt := b.now().UTC()
 	if err := b.sender.Send(ctx, room.DirectoryName, world.DirectoryName, `DSTAdmin.Diagnostics.CaptureJSON(`+quoteRuntimeLua(string(payload))+`)`); err != nil {
 		return DiagnosticReport{}, fmt.Errorf("send runtime diagnostic: %w", err)
 	}
@@ -275,7 +381,7 @@ func (b *Bridge) CaptureDiagnostic(ctx context.Context, roomID, worldID string, 
 	ticker := time.NewTicker(b.pollInterval)
 	defer ticker.Stop()
 	for {
-		report, readErr := readDiagnosticReport(worldPath, expectedSession, request, b.now().UTC())
+		report, readErr := readDiagnosticReport(worldPath, expectedSession, request, b.now().UTC(), sentAt)
 		if readErr == nil {
 			return report, nil
 		}
@@ -406,12 +512,12 @@ func validateCommandRequest(request CommandRequest) error {
 	return nil
 }
 
-func readCommandReceipt(worldPath, expectedSession string, request CommandRequest, now time.Time) (CommandReceipt, error) {
+func readCommandReceipt(worldPath, expectedSession string, request CommandRequest, now, notBefore time.Time) (CommandReceipt, error) {
 	candidates := make([]CommandReceipt, 0, 2)
 	var invalid error
 	root := filepath.Join(worldPath, "save", "mod_config_data", "dst-admin")
 	for _, name := range []string{"command-receipt-a.json", "command-receipt-b.json"} {
-		value, err := decodeCommandReceipt(filepath.Join(root, name), expectedSession, request, now)
+		value, err := decodeCommandReceipt(filepath.Join(root, name), expectedSession, request, now, notBefore)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, ErrRuntimeResultAbsent) {
 				invalid = errors.Join(invalid, fmt.Errorf("%s: %w", name, err))
@@ -430,7 +536,7 @@ func readCommandReceipt(worldPath, expectedSession string, request CommandReques
 	return candidates[0], nil
 }
 
-func decodeCommandReceipt(path, expectedSession string, request CommandRequest, now time.Time) (CommandReceipt, error) {
+func decodeCommandReceipt(path, expectedSession string, request CommandRequest, now, notBefore time.Time) (CommandReceipt, error) {
 	data, _, exists, err := readRegular(path, maxRuntimeResultBytes)
 	if err != nil {
 		return CommandReceipt{}, err
@@ -450,6 +556,9 @@ func decodeCommandReceipt(path, expectedSession string, request CommandRequest, 
 		return CommandReceipt{}, ErrRuntimeResultInvalid
 	}
 	value.CompletedAt = time.Unix(value.CompletedAtUnix, 0).UTC()
+	if !notBefore.IsZero() && value.CompletedAt.Before(notBefore.Truncate(time.Second)) {
+		return CommandReceipt{}, ErrRuntimeResultAbsent
+	}
 	if value.CompletedAt.After(now.Add(maxFutureSkew)) || now.Sub(value.CompletedAt) > 2*time.Minute {
 		return CommandReceipt{}, ErrRuntimeResultStale
 	}
@@ -559,24 +668,24 @@ func decodeEventBatch(path, expectedSession string, now time.Time) (EventBatch, 
 	return value, nil
 }
 
-func readDiagnosticReport(worldPath, expectedSession string, request DiagnosticRequest, now time.Time) (DiagnosticReport, error) {
-	return readDiagnosticReports(worldPath, expectedSession, now, func(value DiagnosticReport) bool {
+func readDiagnosticReport(worldPath, expectedSession string, request DiagnosticRequest, now, notBefore time.Time) (DiagnosticReport, error) {
+	return readDiagnosticReports(worldPath, expectedSession, now, notBefore, func(value DiagnosticReport) bool {
 		return value.RequestID == request.RequestID && value.Profile == request.Profile
 	})
 }
 
 func readLatestDiagnosticReport(worldPath, expectedSession string, now time.Time) (DiagnosticReport, error) {
-	return readDiagnosticReports(worldPath, expectedSession, now, func(DiagnosticReport) bool { return true })
+	return readDiagnosticReports(worldPath, expectedSession, now, time.Time{}, func(DiagnosticReport) bool { return true })
 }
 
-func readDiagnosticReports(worldPath, expectedSession string, now time.Time, accept func(DiagnosticReport) bool) (DiagnosticReport, error) {
+func readDiagnosticReports(worldPath, expectedSession string, now, notBefore time.Time, accept func(DiagnosticReport) bool) (DiagnosticReport, error) {
 	candidates := make([]DiagnosticReport, 0, 2)
 	var invalid error
 	root := filepath.Join(worldPath, "save", "mod_config_data", "dst-admin")
 	for _, name := range []string{"diagnostic-a.json", "diagnostic-b.json"} {
-		value, err := decodeDiagnosticReport(filepath.Join(root, name), expectedSession, now)
+		value, err := decodeDiagnosticReport(filepath.Join(root, name), expectedSession, now, notBefore)
 		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
+			if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, ErrRuntimeResultAbsent) {
 				invalid = errors.Join(invalid, fmt.Errorf("%s: %w", name, err))
 			}
 			continue
@@ -600,7 +709,7 @@ func readDiagnosticReports(worldPath, expectedSession string, now time.Time, acc
 	return candidates[0], nil
 }
 
-func decodeDiagnosticReport(path, expectedSession string, now time.Time) (DiagnosticReport, error) {
+func decodeDiagnosticReport(path, expectedSession string, now, notBefore time.Time) (DiagnosticReport, error) {
 	data, _, exists, err := readRegular(path, maxRuntimeResultBytes)
 	if err != nil {
 		return DiagnosticReport{}, err
@@ -620,6 +729,9 @@ func decodeDiagnosticReport(path, expectedSession string, now time.Time) (Diagno
 		return DiagnosticReport{}, ErrRuntimeResultInvalid
 	}
 	value.CompletedAt = time.Unix(value.CompletedAtUnix, 0).UTC()
+	if !notBefore.IsZero() && value.CompletedAt.Before(notBefore.Truncate(time.Second)) {
+		return DiagnosticReport{}, ErrRuntimeResultAbsent
+	}
 	if value.CompletedAt.After(now.Add(maxFutureSkew)) || now.Sub(value.CompletedAt) > 24*time.Hour || expectedSession != "" && value.SessionID != expectedSession {
 		return DiagnosticReport{}, ErrRuntimeResultStale
 	}

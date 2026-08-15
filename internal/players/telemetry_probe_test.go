@@ -48,6 +48,18 @@ func (r *telemetryTestReader) ReadPlayers(context.Context, string, string) (dstr
 	return r.snapshot, r.err
 }
 
+type refreshableTelemetryTestReader struct {
+	*telemetryTestReader
+	refresh      dstruntime.SnapshotRefreshResult
+	refreshErr   error
+	refreshCalls int
+}
+
+func (r *refreshableTelemetryTestReader) RefreshSnapshots(context.Context, string, string) (dstruntime.SnapshotRefreshResult, error) {
+	r.refreshCalls++
+	return r.refresh, r.refreshErr
+}
+
 func TestTelemetryProbeUsesRuntimeWithoutCallingFallback(t *testing.T) {
 	capturedAt := time.Date(2026, 8, 12, 10, 0, 0, 0, time.UTC)
 	native := &telemetryTestProbe{items: []Observation{
@@ -99,6 +111,26 @@ func TestTelemetryProbeFallsBackOnlyWhenRuntimeFails(t *testing.T) {
 	}
 	if len(result.Observations) != 1 || result.Observations[0].Name != "Fallback" || result.Observations[0].Prefab != "willow" {
 		t.Fatalf("fallback did not retain native identity: %#v", result.Observations)
+	}
+}
+
+func TestTelemetryProbeActivelyRefreshesStaleRuntimeBeforeFallback(t *testing.T) {
+	capturedAt := time.Date(2026, 8, 12, 10, 0, 0, 0, time.UTC)
+	native := &telemetryTestProbe{items: []Observation{{ID: "KU_ONE", Prefab: "willow"}}}
+	runtime := &refreshableTelemetryTestReader{
+		telemetryTestReader: &telemetryTestReader{err: dstruntime.ErrSnapshotStale},
+		refresh: dstruntime.SnapshotRefreshResult{Players: dstruntime.Snapshot{
+			CapturedAt: capturedAt, Players: []dstruntime.SnapshotPlayer{{ID: "KU_ONE", Name: "Willow"}},
+		}},
+	}
+	fallback := &telemetryTestProbe{err: errors.New("fallback must not be called")}
+	probe, err := NewTelemetryProbe(native, runtime, fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := probe.SnapshotDetailed(context.Background(), "room", "master")
+	if err != nil || runtime.refreshCalls != 1 || fallback.calls != 0 || result.Source != SourceRuntime || result.Degraded {
+		t.Fatalf("result = %#v, error = %v, refresh calls = %d, fallback calls = %d", result, err, runtime.refreshCalls, fallback.calls)
 	}
 }
 

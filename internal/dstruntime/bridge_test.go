@@ -200,6 +200,132 @@ func TestBridgeDoesNotRetryAfterReceiptTimeout(t *testing.T) {
 	}
 }
 
+func TestBridgeIgnoresMatchingReceiptCreatedBeforeThisSend(t *testing.T) {
+	manager, catalog, root := newRuntimeTestManager(t)
+	now := time.Now().UTC()
+	manager.now = func() time.Time { return now }
+	if _, err := manager.InstallWorld(context.Background(), catalog.room.ID, catalog.worlds[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	writeRuntimeSessionAndHealth(t, root, now)
+	request := CommandRequest{RequestID: "request-1234567890", Action: "player.kick", Arguments: map[string]interface{}{"userId": "KU_TEST"}}
+	old := CommandReceipt{
+		SchemaVersion: 1, ProducerVersion: RuntimeVersion, ProducerInstanceID: "instance", SessionID: "SESSION", ShardID: "1",
+		Sequence: 7, RequestID: request.RequestID, Action: request.Action, OK: true, Code: "ACTION_COMPLETE", CompletedAtUnix: now.Add(-30 * time.Second).Unix(),
+	}
+	output := filepath.Join(root, "Cluster_1", "Master", "save", "mod_config_data", "dst-admin")
+	writeJSONFile(t, filepath.Join(output, "command-receipt-a.json"), old)
+	sender := &bridgeSender{}
+	bridge, _ := NewBridge(manager, bridgeProcess{running: true}, sender)
+	bridge.now = func() time.Time { return now }
+	bridge.pollInterval = time.Millisecond
+	bridge.timeout = 5 * time.Millisecond
+	_, err := bridge.ExecuteCommand(context.Background(), catalog.room.ID, catalog.worlds[0].ID, request)
+	if !errors.Is(err, ErrRuntimeResultAbsent) || len(sender.scripts) != 1 {
+		t.Fatalf("old receipt error = %v, scripts = %#v", err, sender.scripts)
+	}
+}
+
+func TestBridgeRefreshesStaleSnapshotsWithoutRequiringFreshHealth(t *testing.T) {
+	manager, catalog, root := newRuntimeTestManager(t)
+	now := time.Unix(1_786_500_100, 0).UTC()
+	manager.now = func() time.Time { return now }
+	if _, err := manager.InstallWorld(context.Background(), catalog.room.ID, catalog.worlds[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	worldPath := filepath.Join(root, "Cluster_1", "Master")
+	if err := os.WriteFile(filepath.Join(worldPath, "server.ini"), []byte("[SHARD]\nid = 1\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(worldPath, "save", "session", "SESSION"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(worldPath, "save", "mod_config_data", "dst-admin")
+	previous := Health{
+		SchemaVersion: 1, ProducerVersion: RuntimeVersion, ProducerInstanceID: "instance", SessionID: "SESSION", ShardID: "1",
+		Running: true, Ready: true, Sequence: 3, Modules: map[string]ModuleHealth{
+			"worldstate": {Running: true, Ready: true, Sequence: 7}, "commands": {Running: true, Ready: true},
+			"events": {Running: true, Ready: true}, "diagnostics": {Running: true, Ready: true},
+		},
+	}
+	writeJSONFile(t, filepath.Join(output, "health.json"), previous)
+	if err := os.Chtimes(filepath.Join(output, "health.json"), now.Add(-time.Minute), now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	sender := &bridgeSender{onSend: func(script string) {
+		if script != managedRefreshScript {
+			t.Fatalf("refresh script = %q", script)
+		}
+		players := Snapshot{
+			SchemaVersion: ProtocolVersion, ProducerVersion: RuntimeVersion, ProducerInstanceID: "instance", SessionID: "SESSION", ShardID: "1",
+			Sequence: 4, CapturedAtUnix: now.Unix(), Complete: true, Players: []SnapshotPlayer{},
+		}
+		worldState := WorldStateSnapshot{
+			SchemaVersion: ProtocolVersion, ProducerVersion: RuntimeVersion, ProducerInstanceID: "world-instance", SessionID: "SESSION", ShardID: "1",
+			Sequence: 8, CapturedAtUnix: now.Unix(), Complete: true, Season: "autumn", Phase: "day", Precipitation: "none",
+		}
+		fresh := previous
+		fresh.Sequence = 4
+		fresh.Modules["worldstate"] = ModuleHealth{Running: true, Ready: true, Sequence: 8}
+		writeJSONFile(t, filepath.Join(output, "players-a.json"), players)
+		writeJSONFile(t, filepath.Join(output, "worldstate-a.json"), worldState)
+		writeJSONFile(t, filepath.Join(output, "health.json"), fresh)
+		if err := os.Chtimes(filepath.Join(output, "health.json"), now, now); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	bridge, err := NewBridge(manager, bridgeProcess{running: true}, sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge.now = func() time.Time { return now }
+	bridge.pollInterval = time.Millisecond
+	bridge.timeout = 100 * time.Millisecond
+	result, err := bridge.RefreshSnapshots(context.Background(), catalog.room.ID, catalog.worlds[0].ID)
+	if err != nil || result.Players.Sequence != 4 || result.WorldState.Sequence != 8 || result.Health.Sequence != 4 {
+		t.Fatalf("refresh result = %#v, error = %v", result, err)
+	}
+	if len(sender.scripts) != 1 {
+		t.Fatalf("refresh sent %d scripts, want 1", len(sender.scripts))
+	}
+}
+
+func TestBridgeRefreshRequiresBothSequencesToAdvanceAndDoesNotRetry(t *testing.T) {
+	manager, catalog, root := newRuntimeTestManager(t)
+	now := time.Now().UTC()
+	manager.now = func() time.Time { return now }
+	if _, err := manager.InstallWorld(context.Background(), catalog.room.ID, catalog.worlds[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	worldPath := filepath.Join(root, "Cluster_1", "Master")
+	if err := os.WriteFile(filepath.Join(worldPath, "server.ini"), []byte("[SHARD]\nid = 1\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(worldPath, "save", "session", "SESSION"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	previous := Health{
+		SchemaVersion: 1, ProducerVersion: RuntimeVersion, ProducerInstanceID: "instance", SessionID: "SESSION", ShardID: "1",
+		Running: true, Ready: true, Sequence: 2, Modules: map[string]ModuleHealth{"worldstate": {Running: true, Ready: true, Sequence: 5}},
+	}
+	output := filepath.Join(worldPath, "save", "mod_config_data", "dst-admin")
+	writeJSONFile(t, filepath.Join(output, "health.json"), previous)
+	sender := &bridgeSender{onSend: func(string) {
+		unchangedWorld := previous
+		unchangedWorld.Sequence = 3
+		writeJSONFile(t, filepath.Join(output, "health.json"), unchangedWorld)
+	}}
+	bridge, _ := NewBridge(manager, bridgeProcess{running: true}, sender)
+	bridge.now = func() time.Time { return now }
+	bridge.pollInterval = time.Millisecond
+	bridge.timeout = 5 * time.Millisecond
+	_, err := bridge.RefreshSnapshots(context.Background(), catalog.room.ID, catalog.worlds[0].ID)
+	if !errors.Is(err, ErrRuntimeRefresh) || len(sender.scripts) != 1 {
+		t.Fatalf("refresh error = %v, scripts = %#v", err, sender.scripts)
+	}
+}
+
 func TestRuntimeResultReadersFallBackFromCorruptSlotAndValidateSequences(t *testing.T) {
 	_, _, root := newRuntimeTestManager(t)
 	now := time.Unix(1_786_500_100, 0).UTC()

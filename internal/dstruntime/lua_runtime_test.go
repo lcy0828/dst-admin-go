@@ -125,12 +125,15 @@ func TestWorldStateLuaWritesAllMetricsAndRotatesSlots(t *testing.T) {
 	module := loadLuaModule(t, state, "worldstate.lua")
 	callLuaMethod(t, state, module, "Start", true)
 	callLuaMethod(t, state, module, "Start", true)
-	if len(scheduled) != 1 {
-		t.Fatalf("Start scheduled %d readiness tasks, want 1", len(scheduled))
+	if len(scheduled) != 0 {
+		t.Fatalf("ready world scheduled %d readiness tasks, want 0", len(scheduled))
 	}
-	callLuaFunction(t, state, scheduled[0])
-	if len(writtenPaths) != 1 || writtenPaths[0] != "mod_config_data/dst-admin/worldstate-a.json" || periodicCallback == nil {
-		t.Fatalf("initial world state writes = %#v, periodic callback = %v", writtenPaths, periodicCallback != nil)
+	if len(writtenPaths) != 0 || periodicCallback == nil {
+		t.Fatalf("module start writes = %#v, periodic callback = %v", writtenPaths, periodicCallback != nil)
+	}
+	callLuaFunction(t, state, periodicCallback)
+	if len(writtenPaths) != 1 || writtenPaths[0] != "mod_config_data/dst-admin/worldstate-a.json" {
+		t.Fatalf("first periodic world state writes = %#v", writtenPaths)
 	}
 	if encodedPayload == nil {
 		t.Fatal("world state payload was not encoded")
@@ -269,10 +272,9 @@ func TestEventsLuaLifecycleDoesNotLeakTasksOrListeners(t *testing.T) {
 	module := loadLuaModule(t, state, "events.lua")
 	callLuaMethod(t, state, module, "Start", true)
 	callLuaMethod(t, state, module, "Start", true)
-	if len(scheduled) != 1 {
-		t.Fatalf("Start scheduled %d readiness tasks, want 1", len(scheduled))
+	if len(scheduled) != 0 {
+		t.Fatalf("ready world scheduled %d readiness tasks, want 0", len(scheduled))
 	}
-	callLuaFunction(t, state, scheduled[0])
 	if listenersAdded != 5 || watchesAdded != 4 {
 		t.Fatalf("capture registered listeners=%d watches=%d, want 5 and 4", listenersAdded, watchesAdded)
 	}
@@ -291,7 +293,6 @@ func TestEventsLuaLifecycleDoesNotLeakTasksOrListeners(t *testing.T) {
 	}
 
 	callLuaMethod(t, state, module, "Start", true)
-	callLuaFunction(t, state, scheduled[1])
 	callLuaMethod(t, state, module, "Stop", true)
 	if listenersAdded != 10 || listenersRemoved != 10 || watchesAdded != 8 || watchesRemoved != 8 {
 		t.Fatalf("restart lifecycle leaked handlers: listeners=%d/%d watches=%d/%d", listenersAdded, listenersRemoved, watchesAdded, watchesRemoved)
@@ -361,7 +362,6 @@ func TestDiagnosticsLuaCancelsReadinessAndAutomaticallyStopsPerformanceSampling(
 
 	state.SetField(theWorld, "ismastersim", lua.LTrue)
 	callLuaMethod(t, state, module, "Start", true)
-	callLuaFunction(t, state, scheduled[1])
 	request := state.NewTable()
 	state.SetField(request, "requestId", lua.LString("request-1234567890"))
 	state.SetField(request, "profile", lua.LString("performance"))
@@ -471,6 +471,12 @@ func TestBootstrapLuaReloadSwapsOnlyAStartedCandidate(t *testing.T) {
 	telemetrySource := runtimeTelemetryHarnessSource(false)
 	commandsSource := "return { Execute = function() return { ok = true } end }"
 	lifecycleSource := `local running=false; return { Start=function() running=true; return true end, Stop=function() running=false; return true end, Status=function() return {running=running} end }`
+	worldStateSource := `local running=false; return {
+Start=function() running=true; return true end,
+Stop=function() running=false; return true end,
+Status=function() return {running=running} end,
+EmitOnce=function(callback) refresh_order=(refresh_order or "").."worldstate,"; if callback then callback(true) end; return true end
+}`
 	theSim := state.NewTable()
 	state.SetField(theSim, "GetPersistentString", state.NewFunction(func(L *lua.LState) int {
 		path := L.CheckString(2)
@@ -478,6 +484,8 @@ func TestBootstrapLuaReloadSwapsOnlyAStartedCandidate(t *testing.T) {
 		source := lifecycleSource
 		if path == "../dst-admin/telemetry.lua" {
 			source = telemetrySource
+		} else if path == "../dst-admin/worldstate.lua" {
+			source = worldStateSource
 		} else if path == "../dst-admin/commands.lua" {
 			source = commandsSource
 		}
@@ -499,6 +507,10 @@ func TestBootstrapLuaReloadSwapsOnlyAStartedCandidate(t *testing.T) {
 	if luaInt(state, "runtime_generation") != 1 || luaInt(state, "runtime_starts") != 1 {
 		t.Fatalf("initial counters: generation=%d starts=%d", luaInt(state, "runtime_generation"), luaInt(state, "runtime_starts"))
 	}
+	if state.GetGlobal("refresh_order").String() != "worldstate,telemetry," {
+		t.Fatalf("initial refresh order = %q", state.GetGlobal("refresh_order").String())
+	}
+	state.SetGlobal("refresh_order", lua.LString(""))
 	callLuaMethod(t, state, first, "Start", true)
 	if luaInt(state, "runtime_starts") != 1 {
 		t.Fatalf("duplicate Start called telemetry again: %d", luaInt(state, "runtime_starts"))
@@ -508,6 +520,14 @@ func TestBootstrapLuaReloadSwapsOnlyAStartedCandidate(t *testing.T) {
 	second := requireLuaTable(t, state.GetGlobal("DSTAdmin"), "reloaded DSTAdmin")
 	if second == first || luaInt(state, "runtime_generation") != 2 || luaInt(state, "runtime_starts") != 2 || luaInt(state, "runtime_stops") != 1 {
 		t.Fatalf("successful reload did not swap cleanly: generation=%d starts=%d stops=%d", luaInt(state, "runtime_generation"), luaInt(state, "runtime_starts"), luaInt(state, "runtime_stops"))
+	}
+	if state.GetGlobal("refresh_order").String() != "worldstate,telemetry," {
+		t.Fatalf("reload refresh order = %q", state.GetGlobal("refresh_order").String())
+	}
+	state.SetGlobal("refresh_order", lua.LString(""))
+	callLuaMethod(t, state, second, "Refresh", true)
+	if state.GetGlobal("refresh_order").String() != "worldstate,telemetry," {
+		t.Fatalf("refresh order = %q", state.GetGlobal("refresh_order").String())
 	}
 
 	telemetrySource = "local broken = ("
@@ -545,6 +565,11 @@ function M.Stop()
     return true
 end
 function M.Status() return { running = running } end
+function M.EmitOnce(callback)
+    refresh_order = (refresh_order or "") .. "telemetry,"
+    if callback then callback(true) end
+    return true
+end
 return M
 `, failStart)
 }

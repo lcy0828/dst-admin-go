@@ -33,6 +33,10 @@ type RuntimeSnapshotReader interface {
 	ReadPlayers(context.Context, string, string) (dstruntime.Snapshot, error)
 }
 
+type runtimeSnapshotRefresher interface {
+	RefreshSnapshots(context.Context, string, string) (dstruntime.SnapshotRefreshResult, error)
+}
+
 type TelemetryProbe struct {
 	native   Probe
 	runtime  RuntimeSnapshotReader
@@ -57,6 +61,17 @@ func (p *TelemetryProbe) SnapshotDetailed(ctx context.Context, roomID, worldID s
 	nativeAt := p.now().UTC()
 	native = stampNativeObservations(native, nativeAt)
 	snapshot, runtimeErr := p.runtime.ReadPlayers(ctx, roomID, worldID)
+	if runtimeErr != nil && refreshableSnapshotError(runtimeErr) {
+		if refresher, ok := p.runtime.(runtimeSnapshotRefresher); ok {
+			refreshed, refreshErr := refresher.RefreshSnapshots(ctx, roomID, worldID)
+			if refreshErr == nil {
+				snapshot = refreshed.Players
+				runtimeErr = nil
+			} else {
+				runtimeErr = errors.Join(runtimeErr, fmt.Errorf("active runtime refresh: %w", refreshErr))
+			}
+		}
+	}
 	if runtimeErr == nil {
 		observations := observationsFromRuntime(snapshot)
 		return SnapshotResult{
@@ -77,6 +92,10 @@ func (p *TelemetryProbe) SnapshotDetailed(ctx context.Context, roomID, worldID s
 	return SnapshotResult{
 		Observations: mergeSnapshotIdentities(native, fallback), Source: SourceConsoleFallback, ObservedAt: fallbackAt, Degraded: true, Warning: warning,
 	}, nil
+}
+
+func refreshableSnapshotError(err error) bool {
+	return errors.Is(err, dstruntime.ErrSnapshotUnavailable) || errors.Is(err, dstruntime.ErrSnapshotStale)
 }
 
 func (p *TelemetryProbe) HistorySnapshot(ctx context.Context, roomID, worldID string) ([]Observation, error) {

@@ -1,4 +1,4 @@
-local VERSION = "2.3.0"
+local VERSION = "2.3.1"
 local PROTOCOL_VERSION = 2
 local MODULE_ROOT = "../dst-admin/"
 
@@ -152,6 +152,33 @@ local function new_candidate()
         return true
     end
 
+    function candidate.Refresh()
+        if candidate.state ~= "running" or candidate.WorldState == nil or candidate.Telemetry == nil then
+            return false
+        end
+        local function emit_telemetry()
+            local ok, accepted = xpcall(candidate.Telemetry.EmitOnce, debug.traceback)
+            if not ok or accepted ~= true then
+                emit_error("REFRESH_TELEMETRY_FAILED", accepted)
+                return false
+            end
+            return true
+        end
+        local ok, accepted = xpcall(function()
+            return candidate.WorldState.EmitOnce(function(written)
+                if written ~= true then
+                    emit_error("REFRESH_WORLDSTATE_FAILED", "world state snapshot was not written")
+                end
+                emit_telemetry()
+            end)
+        end, debug.traceback)
+        if not ok or accepted ~= true then
+            emit_error("REFRESH_WORLDSTATE_FAILED", accepted)
+            return false
+        end
+        return true
+    end
+
     return candidate
 end
 
@@ -206,6 +233,9 @@ activate_candidate = function(previous, candidate, operation)
 
     if candidate.Start() then
         rawset(_G, "DSTAdmin", candidate)
+        if not candidate.Refresh() then
+            emit_error(operation .. "_INITIAL_REFRESH_FAILED", "runtime started without coherent initial snapshots")
+        end
         print(string.format("[DST-ADMIN-RUNTIME READY] version=%s protocol=%d", VERSION, PROTOCOL_VERSION))
         return true
     end
@@ -215,6 +245,11 @@ activate_candidate = function(previous, candidate, operation)
         local restored, restore_result = xpcall(previous.Start, debug.traceback)
         if not restored or restore_result == false then
             emit_error(operation .. "_ROLLBACK_FAILED", restore_result)
+        elseif type(previous.Refresh) == "function" then
+            local refreshed, refresh_result = xpcall(previous.Refresh, debug.traceback)
+            if not refreshed or refresh_result == false then
+                emit_error(operation .. "_ROLLBACK_REFRESH_FAILED", refresh_result)
+            end
         end
     end
     return false

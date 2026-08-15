@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.3.0"
+local PRODUCER_VERSION = "2.3.1"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local MAX_SAMPLES = 50
 local READY_RETRY_SECONDS = 1
@@ -208,7 +208,7 @@ function M.Start()
         end
         state.readyTask = scheduler:ExecuteInTime(READY_RETRY_SECONDS, await_world, "dst-admin-diagnostics-ready")
     end
-    state.readyTask = scheduler:ExecuteInTime(0, await_world, "dst-admin-diagnostics-ready")
+    await_world()
     return true
 end
 
