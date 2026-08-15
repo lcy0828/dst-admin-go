@@ -93,6 +93,35 @@ type BackupChunk struct {
 	Complete   bool
 }
 
+type ModUploadDescriptor struct {
+	UploadID           string
+	Kind               shared.RuntimeModUploadKind
+	OperationID        string
+	WorkshopID         string
+	ExpectedTreeSHA256 string
+	Size               int64
+	SHA256             string
+	Metadata           shared.RuntimeModMetadata
+}
+
+// ModDriver is intentionally separate from Driver so existing runtime
+// providers do not acquire Mod distribution methods they cannot implement.
+type ModDriver interface {
+	InspectModCache(context.Context, Target, string, string) (shared.RuntimeModCacheManifest, error)
+	BeginModUpload(context.Context, Target, Operation, ModUploadDescriptor) (int64, error)
+	WriteModUpload(context.Context, Target, Operation, ModUploadDescriptor, int64, []byte) (int64, error)
+	CommitModUpload(context.Context, Target, Operation, ModUploadDescriptor) (shared.RuntimeModCacheManifest, error)
+	BeginModReleasePlan(context.Context, Target, Operation, ModUploadDescriptor) (int64, error)
+	WriteModReleasePlan(context.Context, Target, Operation, ModUploadDescriptor, int64, []byte) (int64, error)
+	CommitModReleasePlan(context.Context, Target, Operation, ModUploadDescriptor) (shared.RuntimeModReleaseState, error)
+	PrepareModRelease(context.Context, Target, Operation, string) (shared.RuntimeModReleaseState, error)
+	PublishModRelease(context.Context, Target, Operation, string) (shared.RuntimeModReleaseState, error)
+	RollbackModRelease(context.Context, Target, Operation, string) (shared.RuntimeModReleaseState, error)
+	CompleteModRelease(context.Context, Target, Operation, string) (shared.RuntimeModReleaseState, error)
+	ModReleaseState(context.Context, Target, string) (shared.RuntimeModReleaseState, error)
+	ReadModOverrides(context.Context, Target, string, string, int64) (shared.RuntimeModOverridesChunk, error)
+}
+
 type Driver interface {
 	Kind() Kind
 	Capabilities() []Capability

@@ -17,15 +17,18 @@ var runtimeInstallationID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}
 // RuntimeInstallation is configured on the Agent host. Controllers refer to
 // it by ID and cannot override these trusted paths in an operation request.
 type RuntimeInstallation struct {
-	ID              string
-	Driver          string
-	SavePath        string
-	ServerPath      string
-	UGCPath         string
-	ServerMode      string
-	ContainerEngine string
-	ConsoleSocket   string
-	ConsoleSession  string
+	ID                  string
+	Driver              string
+	SavePath            string
+	ServerPath          string
+	UGCPath             string
+	WorkshopContentPath string
+	ModCachePath        string
+	ModStatePath        string
+	ServerMode          string
+	ContainerEngine     string
+	ConsoleSocket       string
+	ConsoleSession      string
 }
 
 func loadRuntimeInstallations(configPath string) ([]RuntimeInstallation, error) {
@@ -55,7 +58,9 @@ func loadRuntimeInstallations(configPath string) ([]RuntimeInstallation, error) 
 		values = append(values, RuntimeInstallation{
 			ID: installationID, Driver: section.Key("DRIVER").String(), SavePath: section.Key("SAVE_PATH").String(),
 			ServerPath: section.Key("SERVER_PATH").String(), UGCPath: section.Key("UGC_PATH").String(),
-			ServerMode: section.Key("SERVER_MODE").String(), ContainerEngine: section.Key("CONTAINER_ENGINE").String(),
+			WorkshopContentPath: section.Key("WORKSHOP_CONTENT_PATH").String(), ModCachePath: section.Key("MOD_CACHE_PATH").String(),
+			ModStatePath: section.Key("MOD_STATE_PATH").String(),
+			ServerMode:   section.Key("SERVER_MODE").String(), ContainerEngine: section.Key("CONTAINER_ENGINE").String(),
 			ConsoleSocket: section.Key("CONSOLE_SOCKET").String(), ConsoleSession: section.Key("CONSOLE_SESSION").String(),
 		})
 	}
@@ -92,6 +97,24 @@ func normalizeRuntimeInstallations(values []RuntimeInstallation) ([]RuntimeInsta
 		if value.UGCPath != "" {
 			value.UGCPath = filepath.Clean(value.UGCPath)
 		}
+		value.WorkshopContentPath = strings.TrimSpace(value.WorkshopContentPath)
+		if value.WorkshopContentPath == "" {
+			value.WorkshopContentPath = value.UGCPath
+			if value.WorkshopContentPath == "" {
+				value.WorkshopContentPath = filepath.Join(value.ServerPath, "ugc_mods", "content", "322330")
+			}
+		}
+		value.WorkshopContentPath = filepath.Clean(value.WorkshopContentPath)
+		value.ModCachePath = strings.TrimSpace(value.ModCachePath)
+		if value.ModCachePath == "" {
+			value.ModCachePath = filepath.Join(value.ServerPath, ".dst-admin", "mod-cache")
+		}
+		value.ModCachePath = filepath.Clean(value.ModCachePath)
+		value.ModStatePath = strings.TrimSpace(value.ModStatePath)
+		if value.ModStatePath == "" {
+			value.ModStatePath = filepath.Join(value.ServerPath, ".dst-admin", "mod-state")
+		}
+		value.ModStatePath = filepath.Clean(value.ModStatePath)
 		value.ServerMode = strings.TrimSpace(value.ServerMode)
 		if value.ServerMode == "" {
 			value.ServerMode = "64"
@@ -117,9 +140,13 @@ func normalizeRuntimeInstallations(values []RuntimeInstallation) ([]RuntimeInsta
 			return nil, fmt.Errorf("DST 安装 %s 的 DRIVER 必须为 native 或 container", value.ID)
 		}
 		if !trustedAbsolutePath(value.SavePath) || !trustedAbsolutePath(value.ServerPath) ||
-			(value.UGCPath != "" && !trustedAbsolutePath(value.UGCPath)) ||
-			strings.ContainsAny(value.SavePath+value.ServerPath+value.UGCPath+value.ConsoleSocket, "\x00\r\n") {
+			(value.UGCPath != "" && !trustedAbsolutePath(value.UGCPath)) || !trustedAbsolutePath(value.WorkshopContentPath) ||
+			!trustedAbsolutePath(value.ModCachePath) || !trustedAbsolutePath(value.ModStatePath) ||
+			strings.ContainsAny(value.SavePath+value.ServerPath+value.UGCPath+value.WorkshopContentPath+value.ModCachePath+value.ModStatePath+value.ConsoleSocket, "\x00\r\n") {
 			return nil, fmt.Errorf("DST 安装 %s 包含无效路径", value.ID)
+		}
+		if pathsOverlap(value.ModCachePath, value.ModStatePath) {
+			return nil, fmt.Errorf("DST 安装 %s 的 MOD_CACHE_PATH 与 MOD_STATE_PATH 不能重叠", value.ID)
 		}
 		if value.ServerMode != "32" && value.ServerMode != "64" {
 			return nil, fmt.Errorf("DST 安装 %s 的 SERVER_MODE 必须为 32 或 64", value.ID)
@@ -134,6 +161,15 @@ func normalizeRuntimeInstallations(values []RuntimeInstallation) ([]RuntimeInsta
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
+}
+
+func pathsOverlap(first, second string) bool {
+	return pathWithinRoot(first, second) || pathWithinRoot(second, first)
+}
+
+func pathWithinRoot(path, root string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
 }
 
 func trustedAbsolutePath(value string) bool {

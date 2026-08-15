@@ -58,17 +58,24 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 			return shared.RuntimeOperationResult{}, err
 		}
 	}
-	control, err := a.runtimeControl(installation)
-	if err != nil {
-		return shared.RuntimeOperationResult{}, err
-	}
 	operationContext, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 
 	if !shared.RuntimeActionMutates(request.Action) {
+		if isModAction(request.Action) {
+			return a.observeModAction(operationContext, installation, *request)
+		}
+		control, err := a.runtimeControl(installation)
+		if err != nil {
+			return shared.RuntimeOperationResult{}, err
+		}
 		return a.observeRuntimeAction(operationContext, control, installation, *request)
 	}
-	operationContext, release, err := roomops.Acquire(operationContext, request.InstallationID+"\x00"+request.Cluster)
+	lockKey := request.InstallationID + "\x00" + request.Cluster
+	if isModAction(request.Action) {
+		lockKey = request.InstallationID + "\x00mods"
+	}
+	operationContext, release, err := roomops.Acquire(operationContext, lockKey)
 	if err != nil {
 		return shared.RuntimeOperationResult{}, err
 	}
@@ -80,8 +87,15 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 	}
 	var result shared.RuntimeOperationResult
 	var operationErr error
-	if request.Action == shared.RuntimeActionConsoleSend {
-		result, operationErr = executeConsoleSend(operationContext, control, *request)
+	if isModAction(request.Action) {
+		result, operationErr = a.executeModAction(operationContext, installation, *request)
+	} else if request.Action == shared.RuntimeActionConsoleSend {
+		control, controlErr := a.runtimeControl(installation)
+		if controlErr != nil {
+			result, operationErr = runtimeResult(*request, shared.RuntimeOutcomeFailed, controlErr.Error()), controlErr
+		} else {
+			result, operationErr = executeConsoleSend(operationContext, control, *request)
+		}
 	} else if isMigrationAction(request.Action) {
 		result, operationErr = a.executeMigrationAction(operationContext, installation, *request)
 	} else {
@@ -110,11 +124,11 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 	}
 	switch request.Action {
 	case shared.RuntimeActionConsoleHealth:
-		if request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil {
+		if request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil {
 			return errors.New("控制台健康请求包含无关负载")
 		}
 	case shared.RuntimeActionConsoleSend:
-		if request.Console == nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil {
+		if request.Console == nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil {
 			return errors.New("控制台请求负载无效")
 		}
 		console := request.Console
@@ -125,7 +139,7 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 			return errors.New("控制台请求内容无效")
 		}
 	case shared.RuntimeActionReadLogs:
-		if request.Logs == nil || request.Console != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil ||
+		if request.Logs == nil || request.Console != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil ||
 			request.Logs.Cursor < -1 || request.Logs.MaxBytes < 1 || request.Logs.MaxBytes > runtimefiles.MaximumLogBytes ||
 			(request.Logs.Raw && request.Logs.MaxLines != 0 || !request.Logs.Raw && (request.Logs.MaxLines < 1 || request.Logs.MaxLines > 2000)) ||
 			request.Logs.Raw && strings.TrimSpace(request.Logs.Query) != "" || len([]rune(request.Logs.Query)) > 256 ||
@@ -133,11 +147,11 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 			return errors.New("日志读取请求无效")
 		}
 	case shared.RuntimeActionReadArtifacts:
-		if request.Artifacts == nil || request.Console != nil || request.Logs != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || !runtimefiles.IsArtifactKind(request.Artifacts.Kind) {
+		if request.Artifacts == nil || request.Console != nil || request.Logs != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || !runtimefiles.IsArtifactKind(request.Artifacts.Kind) {
 			return errors.New("Runtime 制品读取请求无效")
 		}
 	case shared.RuntimeActionObserveOperation:
-		if request.Observation == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Migration != nil || request.Backup != nil ||
+		if request.Observation == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil ||
 			!operationIdentity.MatchString(request.Observation.ObservedOperationID) ||
 			request.Observation.ObservedOperationKey != "" && !operationIdentity.MatchString(request.Observation.ObservedOperationKey) {
 			return errors.New("Runtime 操作观察请求无效")
@@ -146,13 +160,20 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 		shared.RuntimeActionMigrationImportBegin, shared.RuntimeActionMigrationImportWrite, shared.RuntimeActionMigrationImportCommit,
 		shared.RuntimeActionMigrationTargetRollback, shared.RuntimeActionMigrationTargetComplete,
 		shared.RuntimeActionMigrationSourceFinalize, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeActionMigrationSourceComplete:
-		if request.Migration == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Backup != nil ||
+		if request.Migration == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Backup != nil || request.Mod != nil ||
 			!operationIdentity.MatchString(request.Migration.MigrationID) || request.Migration.Offset < 0 || request.Migration.Size < 0 ||
 			len(request.Migration.Data) > shardtransfer.MaxChunkBytes || len(request.Migration.SHA256) > 64 {
 			return errors.New("分片迁移请求无效")
 		}
 		if request.Action == shared.RuntimeActionMigrationImportWrite && len(request.Migration.Data) == 0 {
 			return errors.New("分片迁移块为空")
+		}
+	case shared.RuntimeActionModCacheInspect, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite, shared.RuntimeActionModUploadCommit,
+		shared.RuntimeActionModReleasePlanBegin, shared.RuntimeActionModReleasePlanWrite, shared.RuntimeActionModReleasePlanCommit,
+		shared.RuntimeActionModReleasePrepare, shared.RuntimeActionModReleasePublish, shared.RuntimeActionModReleaseRollback,
+		shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState, shared.RuntimeActionModOverridesRead:
+		if err := validateModOperationPayload(request); err != nil {
+			return err
 		}
 	default:
 		if err := validateBackupOperationPayload(request); err != nil {
@@ -330,7 +351,7 @@ func backupDescriptor(request shared.RuntimeOperationRequest) shardtransfer.Back
 
 func validateBackupOperationPayload(request shared.RuntimeOperationRequest) error {
 	backup := request.Backup
-	if backup == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil ||
+	if backup == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Mod != nil ||
 		!operationIdentity.MatchString(backup.BackupID) || backup.Offset < 0 || backup.Size < 0 || backup.ContentSize < 0 || backup.FileCount < 0 ||
 		len(backup.Data) > shardtransfer.MaxChunkBytes || len(backup.SHA256) > 64 || len(backup.SharedSHA256) > 64 {
 		return errors.New("备份 Runtime 请求无效")
@@ -387,6 +408,18 @@ func isMigrationAction(action shared.RuntimeAction) bool {
 	}
 }
 
+func isModAction(action shared.RuntimeAction) bool {
+	switch action {
+	case shared.RuntimeActionModCacheInspect, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite, shared.RuntimeActionModUploadCommit,
+		shared.RuntimeActionModReleasePlanBegin, shared.RuntimeActionModReleasePlanWrite, shared.RuntimeActionModReleasePlanCommit,
+		shared.RuntimeActionModReleasePrepare, shared.RuntimeActionModReleasePublish, shared.RuntimeActionModReleaseRollback,
+		shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState, shared.RuntimeActionModOverridesRead:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *Agent) transferManager(installation RuntimeInstallation) (*shardtransfer.Manager, error) {
 	a.shardTransferMu.Lock()
 	defer a.shardTransferMu.Unlock()
@@ -408,7 +441,12 @@ func runtimeActionRequiresExistingShard(action shared.RuntimeAction) bool {
 		shared.RuntimeActionMigrationExportRelease, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeActionMigrationSourceComplete,
 		shared.RuntimeActionBackupRead, shared.RuntimeActionBackupRelease,
 		shared.RuntimeActionRestoreBegin, shared.RuntimeActionRestoreWrite, shared.RuntimeActionRestorePrepare,
-		shared.RuntimeActionRestorePublish, shared.RuntimeActionRestoreRollback, shared.RuntimeActionRestoreComplete:
+		shared.RuntimeActionRestorePublish, shared.RuntimeActionRestoreRollback, shared.RuntimeActionRestoreComplete,
+		shared.RuntimeActionModCacheInspect, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite,
+		shared.RuntimeActionModUploadCommit, shared.RuntimeActionModReleasePlanBegin, shared.RuntimeActionModReleasePlanWrite,
+		shared.RuntimeActionModReleasePlanCommit, shared.RuntimeActionModReleasePrepare, shared.RuntimeActionModReleasePublish,
+		shared.RuntimeActionModReleaseRollback, shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState,
+		shared.RuntimeActionModOverridesRead:
 		return false
 	default:
 		return true
@@ -449,7 +487,7 @@ func sharedRuntimeStatus(status shards.RuntimeStatus) shared.ShardRuntimeStatus 
 func (state *shardOperationState) beginRuntime(request shared.RuntimeOperationRequest, now time.Time) (*shared.RuntimeOperationResult, error) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	roomKey := request.InstallationID + "\x00" + strings.ToLower(request.Cluster)
+	roomKey := runtimeOperationRoomKey(request)
 	originalRoom, roomExisted := state.Rooms[roomKey]
 	room := cloneShardRoomState(originalRoom)
 	if room.RuntimeOperations == nil {
@@ -498,7 +536,7 @@ func (state *shardOperationState) beginRuntime(request shared.RuntimeOperationRe
 func (state *shardOperationState) finishRuntime(request shared.RuntimeOperationRequest, result shared.RuntimeOperationResult, operationErr error) error {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	roomKey := request.InstallationID + "\x00" + strings.ToLower(request.Cluster)
+	roomKey := runtimeOperationRoomKey(request)
 	room := state.Rooms[roomKey]
 	remembered, exists := room.RuntimeOperations[request.OperationKey]
 	if !exists {
@@ -512,6 +550,13 @@ func (state *shardOperationState) finishRuntime(request shared.RuntimeOperationR
 	trimRememberedRuntimeOperations(room.RuntimeOperations)
 	state.Rooms[roomKey] = room
 	return state.persistLocked()
+}
+
+func runtimeOperationRoomKey(request shared.RuntimeOperationRequest) string {
+	if isModAction(request.Action) {
+		return request.InstallationID + "\x00mods"
+	}
+	return request.InstallationID + "\x00" + strings.ToLower(request.Cluster)
 }
 
 func trimRememberedRuntimeOperations(values map[string]rememberedRuntimeOperation) {

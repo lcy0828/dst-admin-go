@@ -2,7 +2,10 @@ package shared
 
 import "time"
 
-const RuntimeOperationProtocolVersion = 2
+const (
+	RuntimeOperationProtocolVersion = 2
+	MaxChunkBytes                   = 256 * 1024
+)
 
 type RuntimeAction string
 
@@ -32,6 +35,19 @@ const (
 	RuntimeActionRestorePublish          RuntimeAction = "runtime.restore.publish"
 	RuntimeActionRestoreRollback         RuntimeAction = "runtime.restore.rollback"
 	RuntimeActionRestoreComplete         RuntimeAction = "runtime.restore.complete"
+	RuntimeActionModCacheInspect         RuntimeAction = "runtime.mods.cache.inspect"
+	RuntimeActionModUploadBegin          RuntimeAction = "runtime.mods.upload.begin"
+	RuntimeActionModUploadWrite          RuntimeAction = "runtime.mods.upload.write"
+	RuntimeActionModUploadCommit         RuntimeAction = "runtime.mods.upload.commit"
+	RuntimeActionModReleasePlanBegin     RuntimeAction = "runtime.mods.release.plan.begin"
+	RuntimeActionModReleasePlanWrite     RuntimeAction = "runtime.mods.release.plan.write"
+	RuntimeActionModReleasePlanCommit    RuntimeAction = "runtime.mods.release.plan.commit"
+	RuntimeActionModReleasePrepare       RuntimeAction = "runtime.mods.release.prepare"
+	RuntimeActionModReleasePublish       RuntimeAction = "runtime.mods.release.publish"
+	RuntimeActionModReleaseRollback      RuntimeAction = "runtime.mods.release.rollback"
+	RuntimeActionModReleaseComplete      RuntimeAction = "runtime.mods.release.complete"
+	RuntimeActionModReleaseState         RuntimeAction = "runtime.mods.release.state"
+	RuntimeActionModOverridesRead        RuntimeAction = "runtime.mods.overrides.read"
 )
 
 type ConsoleMode string
@@ -97,6 +113,59 @@ type RuntimeBackupRequest struct {
 	PublishShared bool   `json:"publish_shared,omitempty"`
 }
 
+type RuntimeModUploadKind string
+
+const (
+	RuntimeModUploadCacheBundle RuntimeModUploadKind = "cache_bundle"
+	RuntimeModUploadReleasePlan RuntimeModUploadKind = "release_plan"
+)
+
+type RuntimeModMetadata struct {
+	Title             string    `json:"title,omitempty"`
+	Version           string    `json:"version,omitempty"`
+	PublishedFileSize int64     `json:"published_file_size,omitempty"`
+	SteamUpdatedAt    time.Time `json:"steam_updated_at,omitempty"`
+}
+
+type RuntimeModVersion struct {
+	WorkshopID string `json:"workshop_id"`
+	TreeSHA256 string `json:"tree_sha256"`
+}
+
+type RuntimeModShardRelease struct {
+	InstallationID string              `json:"installation_id"`
+	RoomID         string              `json:"room_id"`
+	RoomDirectory  string              `json:"room_directory"`
+	WorldID        string              `json:"world_id"`
+	WorldDirectory string              `json:"world_directory"`
+	Mods           []RuntimeModVersion `json:"mods"`
+	ModOverrides   []byte              `json:"mod_overrides"`
+}
+
+// RuntimeModPlanInput is the JSON value uploaded by the release-plan chunk
+// actions. It deliberately contains identities and directory names, never
+// host paths.
+type RuntimeModPlanInput struct {
+	OperationID string                   `json:"operation_id"`
+	NodeID      string                   `json:"node_id"`
+	Shards      []RuntimeModShardRelease `json:"shards"`
+}
+
+type RuntimeModRequest struct {
+	Kind               RuntimeModUploadKind `json:"kind,omitempty"`
+	UploadID           string               `json:"upload_id,omitempty"`
+	OperationID        string               `json:"release_operation_id,omitempty"`
+	WorkshopID         string               `json:"workshop_id,omitempty"`
+	ExpectedTreeSHA256 string               `json:"expected_tree_sha256,omitempty"`
+	Offset             int64                `json:"offset,omitempty"`
+	Size               int64                `json:"size,omitempty"`
+	SHA256             string               `json:"sha256,omitempty"`
+	Data               []byte               `json:"data,omitempty"`
+	Metadata           RuntimeModMetadata   `json:"metadata,omitempty"`
+	RoomDirectory      string               `json:"room_directory,omitempty"`
+	WorldDirectory     string               `json:"world_directory,omitempty"`
+}
+
 // RuntimeOperationRequest references a trusted installation and a managed
 // Shard. It never accepts a host path, executable, container specification or
 // shell command.
@@ -118,6 +187,7 @@ type RuntimeOperationRequest struct {
 	Observation      *RuntimeObservationRequest `json:"observation,omitempty"`
 	Migration        *RuntimeMigrationRequest   `json:"migration,omitempty"`
 	Backup           *RuntimeBackupRequest      `json:"backup,omitempty"`
+	Mod              *RuntimeModRequest         `json:"mod,omitempty"`
 }
 
 type RuntimeOutcome string
@@ -205,6 +275,67 @@ type RuntimeBackupResult struct {
 	RecoveryRef  string `json:"recovery_ref,omitempty"`
 }
 
+type RuntimeModCacheManifest struct {
+	Version        int                `json:"version"`
+	WorkshopID     string             `json:"workshop_id"`
+	TreeSHA256     string             `json:"tree_sha256"`
+	ManifestSHA256 string             `json:"manifest_sha256"`
+	Size           int64              `json:"size"`
+	FileCount      int                `json:"file_count"`
+	Metadata       RuntimeModMetadata `json:"metadata"`
+	CreatedAt      time.Time          `json:"created_at"`
+}
+
+type RuntimeModShardState struct {
+	RoomID         string              `json:"room_id"`
+	RoomDirectory  string              `json:"room_directory"`
+	WorldID        string              `json:"world_id"`
+	WorldDirectory string              `json:"world_directory"`
+	Mods           []RuntimeModVersion `json:"mods"`
+	ConfigSHA256   string              `json:"config_sha256"`
+}
+
+type RuntimeModInstallationState struct {
+	InstallationID     string                          `json:"installation_id"`
+	LastOperationID    string                          `json:"last_operation_id"`
+	Mods               map[string]string               `json:"mods"`
+	ManagedSetupSHA256 string                          `json:"managed_setup_sha256"`
+	Shards             map[string]RuntimeModShardState `json:"shards"`
+	UpdatedAt          time.Time                       `json:"updated_at"`
+}
+
+type RuntimeModReleaseState struct {
+	OperationID string                       `json:"operation_id"`
+	Phase       string                       `json:"phase"`
+	UpdatedAt   time.Time                    `json:"updated_at"`
+	State       *RuntimeModInstallationState `json:"state,omitempty"`
+}
+
+type RuntimeModOverridesChunk struct {
+	RoomDirectory  string `json:"room_directory"`
+	WorldDirectory string `json:"world_directory"`
+	Offset         int64  `json:"offset"`
+	NextOffset     int64  `json:"next_offset"`
+	Size           int64  `json:"size"`
+	SHA256         string `json:"sha256"`
+	Data           []byte `json:"data,omitempty"`
+	Complete       bool   `json:"complete"`
+}
+
+type RuntimeModResult struct {
+	Kind          RuntimeModUploadKind      `json:"kind,omitempty"`
+	UploadID      string                    `json:"upload_id,omitempty"`
+	OperationID   string                    `json:"release_operation_id,omitempty"`
+	Offset        int64                     `json:"offset,omitempty"`
+	NextOffset    int64                     `json:"next_offset,omitempty"`
+	Size          int64                     `json:"size,omitempty"`
+	SHA256        string                    `json:"sha256,omitempty"`
+	Complete      bool                      `json:"complete"`
+	CacheManifest *RuntimeModCacheManifest  `json:"cache_manifest,omitempty"`
+	Release       *RuntimeModReleaseState   `json:"release,omitempty"`
+	Overrides     *RuntimeModOverridesChunk `json:"overrides,omitempty"`
+}
+
 type RuntimeOperationResult struct {
 	ProtocolVersion  int                       `json:"protocol_version"`
 	OperationID      string                    `json:"operation_id"`
@@ -227,6 +358,7 @@ type RuntimeOperationResult struct {
 	Evidence         *RuntimeOperationEvidence `json:"evidence,omitempty"`
 	Migration        *RuntimeMigrationResult   `json:"migration,omitempty"`
 	Backup           *RuntimeBackupResult      `json:"backup,omitempty"`
+	Mod              *RuntimeModResult         `json:"mod,omitempty"`
 }
 
 func IsRuntimeAction(value RuntimeAction) bool {
@@ -240,6 +372,11 @@ func IsRuntimeAction(value RuntimeAction) bool {
 	case RuntimeActionBackupStage, RuntimeActionBackupRead, RuntimeActionBackupRelease,
 		RuntimeActionRestoreBegin, RuntimeActionRestoreWrite, RuntimeActionRestorePrepare,
 		RuntimeActionRestorePublish, RuntimeActionRestoreRollback, RuntimeActionRestoreComplete:
+		return true
+	case RuntimeActionModCacheInspect, RuntimeActionModUploadBegin, RuntimeActionModUploadWrite, RuntimeActionModUploadCommit,
+		RuntimeActionModReleasePlanBegin, RuntimeActionModReleasePlanWrite, RuntimeActionModReleasePlanCommit,
+		RuntimeActionModReleasePrepare, RuntimeActionModReleasePublish, RuntimeActionModReleaseRollback,
+		RuntimeActionModReleaseComplete, RuntimeActionModReleaseState, RuntimeActionModOverridesRead:
 		return true
 	default:
 		return false
@@ -256,6 +393,11 @@ func RuntimeActionMutates(value RuntimeAction) bool {
 	case RuntimeActionBackupStage, RuntimeActionBackupRelease,
 		RuntimeActionRestoreBegin, RuntimeActionRestoreWrite, RuntimeActionRestorePrepare,
 		RuntimeActionRestorePublish, RuntimeActionRestoreRollback, RuntimeActionRestoreComplete:
+		return true
+	case RuntimeActionModUploadBegin, RuntimeActionModUploadWrite, RuntimeActionModUploadCommit,
+		RuntimeActionModReleasePlanBegin, RuntimeActionModReleasePlanWrite, RuntimeActionModReleasePlanCommit,
+		RuntimeActionModReleasePrepare, RuntimeActionModReleasePublish, RuntimeActionModReleaseRollback,
+		RuntimeActionModReleaseComplete:
 		return true
 	default:
 		return false

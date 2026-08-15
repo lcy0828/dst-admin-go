@@ -19,6 +19,11 @@ type Agent struct {
 	executor AgentExecutor
 }
 
+var (
+	_ Driver    = (*Agent)(nil)
+	_ ModDriver = (*Agent)(nil)
+)
+
 func NewAgent(executor AgentExecutor) (*Agent, error) {
 	if executor == nil {
 		return nil, ErrInvalidTarget
@@ -33,6 +38,7 @@ func (d *Agent) Capabilities() []Capability {
 		CapabilityLifecycle, CapabilityConsoleInput, CapabilityConsoleHealth, CapabilityRawConsole,
 		CapabilityOperationProof, CapabilityLogContinuation, CapabilityArtifacts,
 		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore,
+		CapabilityModPrepare, CapabilityModPublish,
 	}
 }
 
@@ -95,6 +101,168 @@ func (d *Agent) ReadArtifacts(ctx context.Context, target Target, kind shared.Ar
 		return shared.RuntimeArtifactBundle{}, err
 	}
 	return *result.Result.Artifacts, err
+}
+
+func (d *Agent) InspectModCache(ctx context.Context, target Target, workshopID, treeSHA string) (shared.RuntimeModCacheManifest, error) {
+	request := modRuntimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionModCacheInspect)
+	request.Mod = &shared.RuntimeModRequest{WorkshopID: workshopID, ExpectedTreeSHA256: treeSHA}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 60)
+	value, err := checkedModResult(result.Result, err)
+	if err != nil {
+		return shared.RuntimeModCacheManifest{}, err
+	}
+	if value.CacheManifest == nil {
+		return shared.RuntimeModCacheManifest{}, errors.New("Agent 未返回 Mod 缓存 manifest")
+	}
+	return *value.CacheManifest, nil
+}
+
+func (d *Agent) BeginModUpload(ctx context.Context, target Target, operation Operation, descriptor ModUploadDescriptor) (int64, error) {
+	descriptor.Kind = shared.RuntimeModUploadCacheBundle
+	return d.beginModTransfer(ctx, target, operation, shared.RuntimeActionModUploadBegin, descriptor)
+}
+
+func (d *Agent) WriteModUpload(ctx context.Context, target Target, operation Operation, descriptor ModUploadDescriptor, offset int64, data []byte) (int64, error) {
+	descriptor.Kind = shared.RuntimeModUploadCacheBundle
+	return d.writeModTransfer(ctx, target, operation, shared.RuntimeActionModUploadWrite, descriptor, offset, data)
+}
+
+func (d *Agent) CommitModUpload(ctx context.Context, target Target, operation Operation, descriptor ModUploadDescriptor) (shared.RuntimeModCacheManifest, error) {
+	descriptor.Kind = shared.RuntimeModUploadCacheBundle
+	result, err := d.executeMod(ctx, target, operation, shared.RuntimeActionModUploadCommit, modUploadRequest(descriptor), 5*time.Minute)
+	value, err := checkedModResult(result, err)
+	if err != nil {
+		return shared.RuntimeModCacheManifest{}, err
+	}
+	if value.CacheManifest == nil || !value.Complete {
+		return shared.RuntimeModCacheManifest{}, errors.New("Agent 未确认 Mod 缓存提交")
+	}
+	return *value.CacheManifest, nil
+}
+
+func (d *Agent) BeginModReleasePlan(ctx context.Context, target Target, operation Operation, descriptor ModUploadDescriptor) (int64, error) {
+	descriptor.Kind = shared.RuntimeModUploadReleasePlan
+	return d.beginModTransfer(ctx, target, operation, shared.RuntimeActionModReleasePlanBegin, descriptor)
+}
+
+func (d *Agent) WriteModReleasePlan(ctx context.Context, target Target, operation Operation, descriptor ModUploadDescriptor, offset int64, data []byte) (int64, error) {
+	descriptor.Kind = shared.RuntimeModUploadReleasePlan
+	return d.writeModTransfer(ctx, target, operation, shared.RuntimeActionModReleasePlanWrite, descriptor, offset, data)
+}
+
+func (d *Agent) CommitModReleasePlan(ctx context.Context, target Target, operation Operation, descriptor ModUploadDescriptor) (shared.RuntimeModReleaseState, error) {
+	descriptor.Kind = shared.RuntimeModUploadReleasePlan
+	result, err := d.executeMod(ctx, target, operation, shared.RuntimeActionModReleasePlanCommit, modUploadRequest(descriptor), 5*time.Minute)
+	return checkedModRelease(result, descriptor.OperationID, err)
+}
+
+func (d *Agent) PrepareModRelease(ctx context.Context, target Target, operation Operation, operationID string) (shared.RuntimeModReleaseState, error) {
+	return d.executeModRelease(ctx, target, operation, shared.RuntimeActionModReleasePrepare, operationID)
+}
+
+func (d *Agent) PublishModRelease(ctx context.Context, target Target, operation Operation, operationID string) (shared.RuntimeModReleaseState, error) {
+	return d.executeModRelease(ctx, target, operation, shared.RuntimeActionModReleasePublish, operationID)
+}
+
+func (d *Agent) RollbackModRelease(ctx context.Context, target Target, operation Operation, operationID string) (shared.RuntimeModReleaseState, error) {
+	return d.executeModRelease(ctx, target, operation, shared.RuntimeActionModReleaseRollback, operationID)
+}
+
+func (d *Agent) CompleteModRelease(ctx context.Context, target Target, operation Operation, operationID string) (shared.RuntimeModReleaseState, error) {
+	return d.executeModRelease(ctx, target, operation, shared.RuntimeActionModReleaseComplete, operationID)
+}
+
+func (d *Agent) ModReleaseState(ctx context.Context, target Target, operationID string) (shared.RuntimeModReleaseState, error) {
+	request := modRuntimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionModReleaseState)
+	request.Mod = &shared.RuntimeModRequest{OperationID: operationID}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 60)
+	return checkedModRelease(result.Result, operationID, err)
+}
+
+func (d *Agent) ReadModOverrides(ctx context.Context, target Target, roomDirectory, worldDirectory string, offset int64) (shared.RuntimeModOverridesChunk, error) {
+	request := modRuntimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionModOverridesRead)
+	request.Mod = &shared.RuntimeModRequest{RoomDirectory: roomDirectory, WorldDirectory: worldDirectory, Offset: offset}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 60)
+	value, err := checkedModResult(result.Result, err)
+	if err != nil {
+		return shared.RuntimeModOverridesChunk{}, err
+	}
+	if value.Overrides == nil {
+		return shared.RuntimeModOverridesChunk{}, errors.New("Agent 未返回 modoverrides.lua 数据块")
+	}
+	return *value.Overrides, nil
+}
+
+func (d *Agent) beginModTransfer(ctx context.Context, target Target, operation Operation, action shared.RuntimeAction, descriptor ModUploadDescriptor) (int64, error) {
+	result, err := d.executeMod(ctx, target, operation, action, modUploadRequest(descriptor), time.Minute)
+	value, err := checkedModResult(result, err)
+	if err != nil {
+		return 0, err
+	}
+	return value.NextOffset, nil
+}
+
+func (d *Agent) writeModTransfer(ctx context.Context, target Target, operation Operation, action shared.RuntimeAction, descriptor ModUploadDescriptor, offset int64, data []byte) (int64, error) {
+	request := modUploadRequest(descriptor)
+	request.Offset, request.Data = offset, data
+	result, err := d.executeMod(ctx, target, operation, action, request, time.Minute)
+	value, err := checkedModResult(result, err)
+	if err != nil {
+		return offset, err
+	}
+	return value.NextOffset, nil
+}
+
+func (d *Agent) executeModRelease(ctx context.Context, target Target, operation Operation, action shared.RuntimeAction, operationID string) (shared.RuntimeModReleaseState, error) {
+	result, err := d.executeMod(ctx, target, operation, action, shared.RuntimeModRequest{OperationID: operationID}, 5*time.Minute)
+	return checkedModRelease(result, operationID, err)
+}
+
+func (d *Agent) executeMod(ctx context.Context, target Target, operation Operation, action shared.RuntimeAction, mod shared.RuntimeModRequest, timeout time.Duration) (shared.RuntimeOperationResult, error) {
+	request := modRuntimeRequest(target, operation, action)
+	request.Mod = &mod
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, timeoutSeconds(timeout))
+	return result.Result, err
+}
+
+func modUploadRequest(value ModUploadDescriptor) shared.RuntimeModRequest {
+	return shared.RuntimeModRequest{
+		Kind: value.Kind, UploadID: value.UploadID, OperationID: value.OperationID,
+		WorkshopID: value.WorkshopID, ExpectedTreeSHA256: value.ExpectedTreeSHA256,
+		Size: value.Size, SHA256: value.SHA256, Metadata: value.Metadata,
+	}
+}
+
+func checkedModResult(result shared.RuntimeOperationResult, err error) (*shared.RuntimeModResult, error) {
+	if err != nil {
+		return nil, err
+	}
+	if result.Mod == nil {
+		return nil, errors.New("Agent 未返回有效的 Mod Runtime 结果")
+	}
+	return result.Mod, nil
+}
+
+func checkedModRelease(result shared.RuntimeOperationResult, operationID string, err error) (shared.RuntimeModReleaseState, error) {
+	value, err := checkedModResult(result, err)
+	if err != nil {
+		return shared.RuntimeModReleaseState{}, err
+	}
+	if value.Release == nil || value.Release.OperationID != operationID {
+		return shared.RuntimeModReleaseState{}, errors.New("Agent 未返回匹配的 Mod 发布状态")
+	}
+	return *value.Release, nil
+}
+
+func modRuntimeRequest(target Target, operation Operation, action shared.RuntimeAction) shared.RuntimeOperationRequest {
+	// Mod cache and release state are installation-scoped, so every room on
+	// the installation shares one fencing and idempotency domain.
+	target.Cluster = "Mods"
+	target.Shard = "Installation"
+	if target.TopologyRevision == "" {
+		target.TopologyRevision = "runtime-mods-v1"
+	}
+	return runtimeRequest(target, operation, action)
 }
 
 func (d *Agent) PrepareMigrationExport(ctx context.Context, target Target, operation Operation, migrationID string) (MigrationDescriptor, error) {
