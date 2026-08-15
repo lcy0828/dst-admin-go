@@ -77,5 +77,6 @@ func isTopologyControlPath(value string) bool {
 	relative := strings.Trim(strings.TrimPrefix(value, "/api/v2/rooms/"), "/")
 	parts := strings.Split(relative, "/")
 	return (len(parts) == 2 && parts[1] == "topology") ||
-		(len(parts) == 3 && parts[1] == "topology" && parts[2] == "preview")
+		(len(parts) == 3 && parts[1] == "topology" && parts[2] == "preview") ||
+		(len(parts) == 4 && parts[1] == "topology" && parts[2] == "actions" && parts[3] == "apply")
 }

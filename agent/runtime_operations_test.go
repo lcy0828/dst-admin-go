@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,5 +92,104 @@ func TestRuntimeConsoleHealth(t *testing.T) {
 	result, err := agent.executeRuntimeOperation(string(request.Action), &request, 10)
 	if err != nil || result.ConsoleHealth == nil || !result.ConsoleHealth.Available || result.ConsoleHealth.Runtime.State != "running" {
 		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+func TestRememberedRuntimeOperationsAreBounded(t *testing.T) {
+	values := make(map[string]rememberedRuntimeOperation)
+	for index := 0; index < maximumRememberedOperationsPerRoom+10; index++ {
+		key := fmt.Sprintf("operation-%03d", index)
+		values[key] = rememberedRuntimeOperation{
+			Completed: true,
+			Result:    shared.RuntimeOperationResult{ObservedAt: time.Unix(int64(index), 0).UTC()},
+		}
+	}
+	trimRememberedRuntimeOperations(values)
+	if len(values) != maximumRememberedOperationsPerRoom {
+		t.Fatalf("remembered runtime operations=%d", len(values))
+	}
+	if _, exists := values["operation-000"]; exists {
+		t.Fatal("oldest runtime operation was not trimmed")
+	}
+}
+
+func TestAgentRuntimeMigrationActionsMoveShardEndToEnd(t *testing.T) {
+	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeStopped}}
+	agent, installation := newShardOperationAgent(t, runtimeControl)
+	sourceFile := filepath.Join(installation.SavePath, "Cluster_1", "Master", "save", "session", "world-data")
+	if err := os.MkdirAll(filepath.Dir(sourceFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourceFile, []byte("agent-migration-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	migrationID := "migration-agent-e2e-0001"
+	sequence := 0
+	mutate := func(action shared.RuntimeAction, cluster string, migration shared.RuntimeMigrationRequest) shared.RuntimeOperationResult {
+		t.Helper()
+		sequence++
+		request := runtimeOperationRequest(action)
+		request.OperationID = fmt.Sprintf("runtime-migration-%03d", sequence)
+		request.OperationKey = fmt.Sprintf("runtime-migration-key-%03d", sequence)
+		request.Cluster = cluster
+		request.Migration = &migration
+		result, err := agent.executeRuntimeOperation(string(action), &request, 30)
+		if err != nil {
+			t.Fatalf("%s failed: %v", action, err)
+		}
+		return result
+	}
+	observe := func(action shared.RuntimeAction, cluster string, migration shared.RuntimeMigrationRequest) shared.RuntimeOperationResult {
+		t.Helper()
+		sequence++
+		request := runtimeOperationRequest(action)
+		request.OperationID = fmt.Sprintf("runtime-migration-%03d", sequence)
+		request.OperationKey, request.LeaseID, request.FencingToken, request.LeaseExpiresAt = "", "", 0, nil
+		request.Cluster = cluster
+		request.Migration = &migration
+		result, err := agent.executeRuntimeOperation(string(action), &request, 30)
+		if err != nil {
+			t.Fatalf("%s failed: %v", action, err)
+		}
+		return result
+	}
+
+	prepared := mutate(shared.RuntimeActionMigrationExportPrepare, "Cluster_1", shared.RuntimeMigrationRequest{MigrationID: migrationID})
+	if prepared.Migration == nil || prepared.Migration.Size == 0 || len(prepared.Migration.SHA256) != 64 {
+		t.Fatalf("prepared migration=%#v", prepared.Migration)
+	}
+	descriptor := *prepared.Migration
+	mutate(shared.RuntimeActionMigrationImportBegin, "Cluster_2", shared.RuntimeMigrationRequest{
+		MigrationID: migrationID, Size: descriptor.Size, SHA256: descriptor.SHA256,
+	})
+	for offset := int64(0); offset < descriptor.Size; {
+		chunk := observe(shared.RuntimeActionMigrationExportRead, "Cluster_1", shared.RuntimeMigrationRequest{MigrationID: migrationID, Offset: offset})
+		if chunk.Migration == nil || len(chunk.Migration.Data) == 0 {
+			t.Fatalf("migration chunk=%#v", chunk.Migration)
+		}
+		written := mutate(shared.RuntimeActionMigrationImportWrite, "Cluster_2", shared.RuntimeMigrationRequest{
+			MigrationID: migrationID, Offset: offset, Size: descriptor.Size, SHA256: descriptor.SHA256, Data: chunk.Migration.Data,
+		})
+		if written.Migration == nil || written.Migration.NextOffset <= offset {
+			t.Fatalf("migration write=%#v", written.Migration)
+		}
+		offset = written.Migration.NextOffset
+	}
+	mutate(shared.RuntimeActionMigrationImportCommit, "Cluster_2", shared.RuntimeMigrationRequest{MigrationID: migrationID})
+	finalized := mutate(shared.RuntimeActionMigrationSourceFinalize, "Cluster_1", shared.RuntimeMigrationRequest{MigrationID: migrationID})
+	if finalized.Migration == nil || finalized.Migration.RecoveryRef == "" {
+		t.Fatalf("source finalize=%#v", finalized.Migration)
+	}
+	mutate(shared.RuntimeActionMigrationTargetComplete, "Cluster_2", shared.RuntimeMigrationRequest{MigrationID: migrationID})
+	mutate(shared.RuntimeActionMigrationSourceComplete, "Cluster_1", shared.RuntimeMigrationRequest{MigrationID: migrationID})
+	mutate(shared.RuntimeActionMigrationExportRelease, "Cluster_1", shared.RuntimeMigrationRequest{MigrationID: migrationID})
+
+	targetData, err := os.ReadFile(filepath.Join(installation.SavePath, "Cluster_2", "Master", "save", "session", "world-data"))
+	if err != nil || string(targetData) != "agent-migration-data" {
+		t.Fatalf("target data=%q err=%v", targetData, err)
+	}
+	if _, err := os.Stat(filepath.Join(installation.SavePath, "Cluster_1", "Master")); !os.IsNotExist(err) {
+		t.Fatalf("source shard remained active: %v", err)
 	}
 }

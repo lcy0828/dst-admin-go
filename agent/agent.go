@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"dont/internal/shardtransfer"
 	"dont/shared"
 	"github.com/go-ini/ini"
 	"github.com/gorilla/websocket"
@@ -48,23 +49,25 @@ var startTime = time.Now()
 
 // Agent 表示一个代理实例
 type Agent struct {
-	Config         *Config
-	keyPair        *shared.KeyPair
-	serverPubKey   [32]byte
-	conn           *shared.SecureConnection
-	isConnected    bool
-	connMutex      sync.Mutex
-	reconnecting   bool
-	stopChan       chan struct{}
-	wg             sync.WaitGroup
-	reportInterval time.Duration
-	reportMutex    sync.Mutex
-	keyManager     *shared.KeyManager // 添加密钥管理器
-	shardState     *shardOperationState
-	shardRuntime   shardRuntimeFactory
-	shardRuntimeMu sync.Mutex
-	shardRuntimes  map[string]shardRuntimeControl
-	now            func() time.Time
+	Config          *Config
+	keyPair         *shared.KeyPair
+	serverPubKey    [32]byte
+	conn            *shared.SecureConnection
+	isConnected     bool
+	connMutex       sync.Mutex
+	reconnecting    bool
+	stopChan        chan struct{}
+	wg              sync.WaitGroup
+	reportInterval  time.Duration
+	reportMutex     sync.Mutex
+	keyManager      *shared.KeyManager // 添加密钥管理器
+	shardState      *shardOperationState
+	shardRuntime    shardRuntimeFactory
+	shardRuntimeMu  sync.Mutex
+	shardRuntimes   map[string]shardRuntimeControl
+	shardTransferMu sync.Mutex
+	shardTransfers  map[string]*shardtransfer.Manager
+	now             func() time.Time
 }
 
 // Config 代理配置
@@ -183,6 +186,7 @@ func NewAgent(config *Config) (*Agent, error) {
 	agent.shardState = state
 	agent.shardRuntime = newTmuxShardRuntime
 	agent.shardRuntimes = make(map[string]shardRuntimeControl)
+	agent.shardTransfers = make(map[string]*shardtransfer.Manager)
 
 	return agent, nil
 }
@@ -1028,7 +1032,7 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 	}
 	if len(a.Config.RuntimeInstallations) > 0 && runtime.GOOS != "windows" {
 		capabilities = append(capabilities,
-			"shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1",
+			"shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1", "runtime.migration.v1",
 		)
 	}
 	info := map[string]interface{}{

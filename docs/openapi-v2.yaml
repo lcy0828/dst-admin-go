@@ -428,6 +428,30 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/topology/actions/apply:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Topology, Jobs]
+      operationId: applyRoomTopologyPlacement
+      summary: Move one stopped Shard to its desired target and atomically activate the placement
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlacementMigrationInput" }
+      responses:
+        "202":
+          description: Placement migration job accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/recovery:
     get:
       tags: [Rooms]
@@ -7078,6 +7102,16 @@ components:
         placements:
           type: array
           items: { $ref: "#/components/schemas/TopologyPlacementInput" }
+    PlacementMigrationInput:
+      type: object
+      additionalProperties: false
+      required: [worldId, expectedRevision, confirmation]
+      properties:
+        worldId: { type: string }
+        expectedRevision: { type: string, format: uuid }
+        confirmation:
+          type: string
+          description: Exact room name used as explicit confirmation.
     TopologyPlacementState:
       type: string
       enum: [aligned, planned, target_offline, inventory_stale, inventory_missing, shard_missing, conflict]
@@ -7145,11 +7179,11 @@ components:
       properties:
         roomId: { type: string }
         revision: { type: string, format: uuid }
-        mode: { type: string, const: planning_only }
+        mode: { type: string, const: applied_placement }
         remoteExecutionReady:
           type: boolean
-          const: false
-          description: Remote desired placement is not active until typed control, leases, and fencing are implemented.
+          const: true
+          description: Desired placement can be activated through a verified stopped-Shard migration job.
         placements: { type: array, items: { $ref: "#/components/schemas/TopologyPlacement" } }
         targets: { type: array, items: { $ref: "#/components/schemas/TopologyTargetSummary" } }
         issues: { type: array, items: { $ref: "#/components/schemas/TopologyIssue" } }

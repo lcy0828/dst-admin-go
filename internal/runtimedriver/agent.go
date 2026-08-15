@@ -2,6 +2,8 @@ package runtimedriver
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"dont/internal/agents"
@@ -92,6 +94,135 @@ func (d *Agent) ReadArtifacts(ctx context.Context, target Target, kind shared.Ar
 		return shared.RuntimeArtifactBundle{}, err
 	}
 	return *result.Result.Artifacts, err
+}
+
+func (d *Agent) PrepareMigrationExport(ctx context.Context, target Target, operation Operation, migrationID string) (MigrationDescriptor, error) {
+	result, err := d.executeMigration(ctx, target, operation, shared.RuntimeActionMigrationExportPrepare, shared.RuntimeMigrationRequest{MigrationID: migrationID}, 5*time.Minute)
+	value, err := checkedMigrationResult(result, migrationID, err)
+	if err != nil {
+		return MigrationDescriptor{}, err
+	}
+	if value.Size < 1 || len(value.SHA256) != 64 || !value.Complete {
+		return MigrationDescriptor{}, errors.New("Agent 返回了无效的迁移导出描述")
+	}
+	return migrationDescriptor(result), nil
+}
+
+func (d *Agent) ReadMigrationExport(ctx context.Context, target Target, migrationID string, offset int64) (MigrationChunk, error) {
+	result, err := d.executeMigration(ctx, target, Operation{ID: newOperationID()}, shared.RuntimeActionMigrationExportRead, shared.RuntimeMigrationRequest{MigrationID: migrationID, Offset: offset}, time.Minute)
+	value, err := checkedMigrationResult(result, migrationID, err)
+	if err != nil {
+		return MigrationChunk{}, err
+	}
+	return MigrationChunk{Offset: value.Offset, NextOffset: value.NextOffset, Size: value.Size, SHA256: value.SHA256, Data: value.Data, Complete: value.Complete}, err
+}
+
+func (d *Agent) ReleaseMigrationExport(ctx context.Context, target Target, operation Operation, migrationID string) error {
+	result, err := d.executeMigration(ctx, target, operation, shared.RuntimeActionMigrationExportRelease, shared.RuntimeMigrationRequest{MigrationID: migrationID}, time.Minute)
+	return checkedCompletedMigration(result, migrationID, err)
+}
+
+func (d *Agent) BeginMigrationImport(ctx context.Context, target Target, operation Operation, descriptor MigrationDescriptor) error {
+	result, err := d.executeMigration(ctx, target, operation, shared.RuntimeActionMigrationImportBegin, shared.RuntimeMigrationRequest{MigrationID: descriptor.MigrationID, Size: descriptor.Size, SHA256: descriptor.SHA256}, time.Minute)
+	value, err := checkedMigrationResult(result, descriptor.MigrationID, err)
+	if err != nil {
+		return err
+	}
+	if value.Size != descriptor.Size || value.SHA256 != descriptor.SHA256 {
+		return errors.New("Agent 未确认迁移导入描述")
+	}
+	return nil
+}
+
+func (d *Agent) WriteMigrationImport(ctx context.Context, target Target, operation Operation, descriptor MigrationDescriptor, offset int64, data []byte) (int64, error) {
+	result, err := d.executeMigration(ctx, target, operation, shared.RuntimeActionMigrationImportWrite, shared.RuntimeMigrationRequest{MigrationID: descriptor.MigrationID, Offset: offset, Size: descriptor.Size, SHA256: descriptor.SHA256, Data: data}, time.Minute)
+	value, err := checkedMigrationResult(result, descriptor.MigrationID, err)
+	if err != nil {
+		return offset, err
+	}
+	return value.NextOffset, nil
+}
+
+func (d *Agent) CommitMigrationImport(ctx context.Context, target Target, operation Operation, migrationID string) error {
+	result, err := d.executeMigration(ctx, target, operation, shared.RuntimeActionMigrationImportCommit, shared.RuntimeMigrationRequest{MigrationID: migrationID}, 5*time.Minute)
+	return checkedCompletedMigration(result, migrationID, err)
+}
+
+func (d *Agent) RollbackMigrationTarget(ctx context.Context, target Target, operation Operation, migrationID string) error {
+	result, err := d.executeMigration(ctx, target, operation, shared.RuntimeActionMigrationTargetRollback, shared.RuntimeMigrationRequest{MigrationID: migrationID}, 5*time.Minute)
+	return checkedCompletedMigration(result, migrationID, err)
+}
+
+func (d *Agent) CompleteMigrationTarget(ctx context.Context, target Target, operation Operation, migrationID string) error {
+	result, err := d.executeMigration(ctx, target, operation, shared.RuntimeActionMigrationTargetComplete, shared.RuntimeMigrationRequest{MigrationID: migrationID}, time.Minute)
+	return checkedCompletedMigration(result, migrationID, err)
+}
+
+func (d *Agent) FinalizeMigrationSource(ctx context.Context, target Target, operation Operation, migrationID string) (string, error) {
+	result, err := d.executeMigration(ctx, target, operation, shared.RuntimeActionMigrationSourceFinalize, shared.RuntimeMigrationRequest{MigrationID: migrationID}, 5*time.Minute)
+	value, err := checkedMigrationResult(result, migrationID, err)
+	if err != nil {
+		return "", err
+	}
+	if !value.Complete || value.RecoveryRef == "" {
+		return "", errors.New("Agent 未返回源迁移恢复位置")
+	}
+	return value.RecoveryRef, nil
+}
+
+func (d *Agent) RollbackMigrationSource(ctx context.Context, target Target, operation Operation, migrationID string) error {
+	result, err := d.executeMigration(ctx, target, operation, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeMigrationRequest{MigrationID: migrationID}, 5*time.Minute)
+	return checkedCompletedMigration(result, migrationID, err)
+}
+
+func (d *Agent) CompleteMigrationSource(ctx context.Context, target Target, operation Operation, migrationID string) (string, error) {
+	result, err := d.executeMigration(ctx, target, operation, shared.RuntimeActionMigrationSourceComplete, shared.RuntimeMigrationRequest{MigrationID: migrationID}, time.Minute)
+	value, err := checkedMigrationResult(result, migrationID, err)
+	if err != nil {
+		return "", err
+	}
+	if !value.Complete || value.RecoveryRef == "" {
+		return "", errors.New("Agent 未确认源迁移恢复记录")
+	}
+	return value.RecoveryRef, nil
+}
+
+func (d *Agent) executeMigration(ctx context.Context, target Target, operation Operation, action shared.RuntimeAction, migration shared.RuntimeMigrationRequest, timeout time.Duration) (shared.RuntimeOperationResult, error) {
+	request := runtimeRequest(target, operation, action)
+	request.Migration = &migration
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, timeoutSeconds(timeout))
+	return result.Result, err
+}
+
+func migrationDescriptor(result shared.RuntimeOperationResult) MigrationDescriptor {
+	if result.Migration == nil {
+		return MigrationDescriptor{}
+	}
+	return MigrationDescriptor{
+		MigrationID: result.Migration.MigrationID, Size: result.Migration.Size,
+		SHA256: result.Migration.SHA256, RecoveryRef: result.Migration.RecoveryRef,
+	}
+}
+
+func checkedMigrationResult(result shared.RuntimeOperationResult, migrationID string, err error) (*shared.RuntimeMigrationResult, error) {
+	if err != nil {
+		return nil, err
+	}
+	if result.Migration == nil || result.Migration.MigrationID != migrationID {
+		return nil, fmt.Errorf("Agent 未返回迁移 %s 的有效结果", migrationID)
+	}
+	return result.Migration, nil
+}
+
+func checkedCompletedMigration(result shared.RuntimeOperationResult, migrationID string, err error) error {
+	value, err := checkedMigrationResult(result, migrationID, err)
+	if err != nil {
+		return err
+	}
+	if !value.Complete {
+		return fmt.Errorf("Agent 未确认迁移步骤 %s 已完成", migrationID)
+	}
+	return nil
 }
 
 func runtimeRequest(target Target, operation Operation, action shared.RuntimeAction) shared.RuntimeOperationRequest {

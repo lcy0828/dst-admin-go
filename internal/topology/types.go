@@ -9,11 +9,12 @@ import (
 )
 
 var (
-	ErrInvalidInput     = errors.New("topology input is invalid")
-	ErrRevisionConflict = errors.New("topology revision has changed")
-	ErrRoomNotManaged   = errors.New("room must be managed before topology can be changed")
-	ErrOvercommit       = errors.New("topology exceeds the recommended shard capacity")
-	ErrExecutionBlocked = errors.New("topology does not allow shard execution")
+	ErrInvalidInput         = errors.New("topology input is invalid")
+	ErrRevisionConflict     = errors.New("topology revision has changed")
+	ErrRoomNotManaged       = errors.New("room must be managed before topology can be changed")
+	ErrOvercommit           = errors.New("topology exceeds the recommended shard capacity")
+	ErrExecutionBlocked     = errors.New("topology does not allow shard execution")
+	ErrMigrationNotRequired = errors.New("shard placement is already applied")
 )
 
 type ExecutionError struct {
@@ -173,6 +174,18 @@ type ExecutionPlacement struct {
 	AppliedTargetID string
 	Target          agents.RuntimeTarget
 	Inventory       agents.RuntimeTargetInventory
+}
+
+type MigrationPlacement struct {
+	Room            rooms.Room
+	World           rooms.World
+	Revision        string
+	SourceTargetID  string
+	TargetTargetID  string
+	Source          agents.RuntimeTarget
+	Target          agents.RuntimeTarget
+	SourceInventory agents.RuntimeTargetInventory
+	TargetInventory agents.RuntimeTargetInventory
 }
 
 type storedPlacement struct {

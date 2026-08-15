@@ -60,6 +60,36 @@ func (r *Router) DriverTarget(ctx context.Context, roomID, worldID string) (Driv
 	}, nil
 }
 
+func (r *Router) MigrationTargets(plan topology.MigrationPlacement) (Driver, Target, Driver, Target, error) {
+	if plan.SourceTargetID == "" || plan.TargetTargetID == "" || plan.SourceTargetID == plan.TargetTargetID {
+		return nil, Target{}, nil, Target{}, ErrInvalidTarget
+	}
+	sourceDriver, targetDriver := r.remote, r.remote
+	if plan.SourceTargetID == "local" {
+		sourceDriver = r.local
+	}
+	if plan.TargetTargetID == "local" {
+		targetDriver = r.local
+	}
+	source := Target{
+		TargetID: plan.SourceTargetID, InstallationID: plan.Source.Config.InstallationID,
+		RoomID: plan.Room.ID, WorldID: plan.World.ID, Cluster: plan.Room.DirectoryName,
+		Shard: plan.World.DirectoryName, TopologyRevision: plan.Revision,
+	}
+	target := Target{
+		TargetID: plan.TargetTargetID, InstallationID: plan.Target.Config.InstallationID,
+		RoomID: plan.Room.ID, WorldID: plan.World.ID, Cluster: plan.Room.DirectoryName,
+		Shard: plan.World.DirectoryName, TopologyRevision: plan.Revision,
+	}
+	if err := validateTarget(source); err != nil {
+		return nil, Target{}, nil, Target{}, err
+	}
+	if err := validateTarget(target); err != nil {
+		return nil, Target{}, nil, Target{}, err
+	}
+	return sourceDriver, source, targetDriver, target, nil
+}
+
 // Send keeps the established console sender contract while resolving the
 // current applied Placement from the stable encoded room/world identifiers.
 func (r *Router) Send(ctx context.Context, roomName, worldName, command string) error {

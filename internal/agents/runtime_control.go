@@ -57,6 +57,11 @@ func runtimeCapability(action shared.RuntimeAction) string {
 		return "runtime.artifacts.v1"
 	case shared.RuntimeActionObserveOperation:
 		return "runtime.driver.v1"
+	case shared.RuntimeActionMigrationExportPrepare, shared.RuntimeActionMigrationExportRead, shared.RuntimeActionMigrationExportRelease,
+		shared.RuntimeActionMigrationImportBegin, shared.RuntimeActionMigrationImportWrite, shared.RuntimeActionMigrationImportCommit,
+		shared.RuntimeActionMigrationTargetRollback, shared.RuntimeActionMigrationTargetComplete,
+		shared.RuntimeActionMigrationSourceFinalize, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeActionMigrationSourceComplete:
+		return "runtime.migration.v1"
 	default:
 		return ""
 	}

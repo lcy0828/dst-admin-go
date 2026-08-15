@@ -101,8 +101,8 @@ func TestTopologyAggregatesRoomsAndRequiresExplicitOvercommit(t *testing.T) {
 	if placement.DesiredTargetID != "agent:node-a" || placement.AppliedTargetID != localTargetID || placement.State != PlacementPlanned {
 		t.Fatalf("placement=%#v", placement)
 	}
-	if updated.RemoteExecutionReady || updated.Mode != "planning_only" || updated.CapacityPolicy.Enforced {
-		t.Fatalf("unsafe topology mode=%#v", updated)
+	if !updated.RemoteExecutionReady || updated.Mode != "applied_placement" || updated.CapacityPolicy.Enforced {
+		t.Fatalf("topology execution mode=%#v", updated)
 	}
 }
 
@@ -470,4 +470,54 @@ func TestResolveExecutionRequiresFreshAppliedAgentAndRejectsConflict(t *testing.
 func executionErrorCode(err error, code string) bool {
 	var executionError *ExecutionError
 	return errors.As(err, &executionError) && executionError.Code == code
+}
+
+func TestPrepareAndApplyMigrationMovesOnlyAppliedPlacement(t *testing.T) {
+	now := time.Now().UTC()
+	room := rooms.Room{ID: "room-migrate", DirectoryName: "Cluster_Migrate", Name: "迁移房间", Managed: true}
+	world := rooms.World{ID: "world-master", RoomID: room.ID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}
+	local := runtimeInventory(
+		agents.RuntimeTarget{ID: localTargetID, Name: "本机", Kind: agents.RuntimeKindLocal, Status: agents.RuntimeStatusReady, Online: true, Configured: true},
+		4, 4, []shared.RoomInventoryReport{inventoryRoom(room.DirectoryName, world.DirectoryName)}, nil, now,
+	)
+	remote := runtimeInventory(
+		agents.RuntimeTarget{ID: "agent:node", AgentID: "node", Name: "节点", Kind: agents.RuntimeKindAgent, Status: agents.RuntimeStatusReady, Online: true, Configured: true, Capabilities: []string{"runtime.migration.v1"}},
+		4, 4, nil, nil, now,
+	)
+	store := newTopologyTestStore(t)
+	service, err := NewService(
+		topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {world}}},
+		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{local, remote}}, store,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := service.Topology(context.Background(), room.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := service.Update(context.Background(), room.ID, UpdateRequest{
+		ExpectedRevision: current.Revision,
+		Placements:       []PlacementInput{{WorldID: world.ID, TargetID: remote.Target.ID}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := service.PrepareMigration(context.Background(), room.ID, world.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.SourceTargetID != localTargetID || plan.TargetTargetID != remote.Target.ID || plan.Revision != planned.Revision {
+		t.Fatalf("migration plan=%#v", plan)
+	}
+	applied, err := service.ApplyMigration(room.ID, world.ID, plan.Revision, plan.TargetTargetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.AppliedTargetID != remote.Target.ID || applied.DesiredTargetID != remote.Target.ID || applied.Revision == plan.Revision {
+		t.Fatalf("applied placement=%#v", applied)
+	}
+	if _, err := service.ApplyMigration(room.ID, world.ID, plan.Revision, plan.TargetTargetID); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale apply error=%v", err)
+	}
 }

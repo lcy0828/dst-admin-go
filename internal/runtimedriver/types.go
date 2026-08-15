@@ -59,6 +59,22 @@ type Operation struct {
 	LeaseExpiresAt *time.Time
 }
 
+type MigrationDescriptor struct {
+	MigrationID string
+	Size        int64
+	SHA256      string
+	RecoveryRef string
+}
+
+type MigrationChunk struct {
+	Offset     int64
+	NextOffset int64
+	Size       int64
+	SHA256     string
+	Data       []byte
+	Complete   bool
+}
+
 type Driver interface {
 	Kind() Kind
 	Capabilities() []Capability
@@ -69,6 +85,17 @@ type Driver interface {
 	ObserveOperation(context.Context, Target, string, string) (shared.RuntimeOperationEvidence, error)
 	ReadLogs(context.Context, Target, shared.RuntimeLogRequest) (shared.RuntimeLogChunk, error)
 	ReadArtifacts(context.Context, Target, shared.ArtifactKind) (shared.RuntimeArtifactBundle, error)
+	PrepareMigrationExport(context.Context, Target, Operation, string) (MigrationDescriptor, error)
+	ReadMigrationExport(context.Context, Target, string, int64) (MigrationChunk, error)
+	ReleaseMigrationExport(context.Context, Target, Operation, string) error
+	BeginMigrationImport(context.Context, Target, Operation, MigrationDescriptor) error
+	WriteMigrationImport(context.Context, Target, Operation, MigrationDescriptor, int64, []byte) (int64, error)
+	CommitMigrationImport(context.Context, Target, Operation, string) error
+	RollbackMigrationTarget(context.Context, Target, Operation, string) error
+	CompleteMigrationTarget(context.Context, Target, Operation, string) error
+	FinalizeMigrationSource(context.Context, Target, Operation, string) (string, error)
+	RollbackMigrationSource(context.Context, Target, Operation, string) error
+	CompleteMigrationSource(context.Context, Target, Operation, string) (string, error)
 }
 
 func HasCapability(driver Driver, expected Capability) bool {

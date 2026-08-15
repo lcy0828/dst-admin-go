@@ -181,6 +181,110 @@ func (s *Service) AppliedPlacement(roomID, worldID string) (ExecutionPlacement, 
 	}, nil
 }
 
+func (s *Service) PrepareMigration(ctx context.Context, roomID, worldID string) (MigrationPlacement, error) {
+	result, err := s.plan(ctx, roomID, nil)
+	if err != nil {
+		return MigrationPlacement{}, err
+	}
+	selected := result.plans[roomID]
+	worlds := worldsByID(selected.worlds)
+	world, exists := worlds[worldID]
+	if !exists {
+		return MigrationPlacement{}, rooms.ErrWorldNotFound
+	}
+	placement, exists := placementsByWorld(selected.record.Placements)[worldID]
+	if !exists {
+		return MigrationPlacement{}, executionBlocked("PLACEMENT_MISSING", "世界没有可迁移的 Placement")
+	}
+	if placement.DesiredTargetID == placement.AppliedTargetID {
+		return MigrationPlacement{}, ErrMigrationNotRequired
+	}
+	inventories := make(map[string]agents.RuntimeTargetInventory, len(result.inventories))
+	for _, inventory := range result.inventories {
+		inventories[inventory.Target.ID] = inventory
+	}
+	source, sourceOK := inventories[placement.AppliedTargetID]
+	target, targetOK := inventories[placement.DesiredTargetID]
+	if !sourceOK || !targetOK || !source.Target.Configured || !target.Target.Configured {
+		return MigrationPlacement{}, executionBlocked("MIGRATION_TARGET_MISSING", "迁移源或目标运行节点不存在或尚未配置")
+	}
+	for _, candidate := range []agents.RuntimeTargetInventory{source, target} {
+		if !candidate.Target.Online {
+			return MigrationPlacement{}, executionBlocked("MIGRATION_TARGET_OFFLINE", "迁移源和目标节点必须同时在线")
+		}
+		if !candidate.Available || candidate.Stale {
+			return MigrationPlacement{}, executionBlocked("MIGRATION_INVENTORY_STALE", "迁移源和目标节点必须具有最新运行时清单")
+		}
+		if candidate.Target.Kind == agents.RuntimeKindAgent && !containsCapability(candidate.Target.Capabilities, "runtime.migration.v1") {
+			return MigrationPlacement{}, executionBlocked("AGENT_CAPABILITY_MISSING", "远程节点 Agent 版本不支持分片迁移")
+		}
+	}
+	identity := identityFor(selected.room.DirectoryName, world.DirectoryName)
+	if !inventoryHasShard(source.Inventory, identity) {
+		return MigrationPlacement{}, executionBlocked("MIGRATION_SOURCE_MISSING", "迁移源节点未发现分片文件")
+	}
+	if inventoryHasShard(target.Inventory, identity) {
+		return MigrationPlacement{}, executionBlocked("MIGRATION_TARGET_EXISTS", "迁移目标已经存在同名分片，不能覆盖")
+	}
+	if currentlyRunning(source, identity.cluster, identity.shard) || currentlyRunning(target, identity.cluster, identity.shard) {
+		return MigrationPlacement{}, executionBlocked("MIGRATION_SHARD_RUNNING", "迁移前必须停止源和目标上的分片进程")
+	}
+	return MigrationPlacement{
+		Room: selected.room, World: world, Revision: selected.record.Revision,
+		SourceTargetID: placement.AppliedTargetID, TargetTargetID: placement.DesiredTargetID,
+		Source: source.Target, Target: target.Target, SourceInventory: source, TargetInventory: target,
+	}, nil
+}
+
+func (s *Service) ApplyMigration(roomID, worldID, expectedRevision, targetID string) (ExecutionPlacement, error) {
+	selected, err := s.store.load(roomID)
+	if err != nil {
+		return ExecutionPlacement{}, err
+	}
+	if selected.Revision != expectedRevision {
+		return ExecutionPlacement{}, &RevisionConflictError{CurrentRevision: selected.Revision}
+	}
+	placements := normalizedPlacements(selected.Placements)
+	changed := false
+	for index := range placements {
+		if placements[index].WorldID != worldID {
+			continue
+		}
+		if placements[index].DesiredTargetID != targetID {
+			return ExecutionPlacement{}, &RevisionConflictError{CurrentRevision: selected.Revision}
+		}
+		if placements[index].AppliedTargetID == targetID {
+			return ExecutionPlacement{}, ErrMigrationNotRequired
+		}
+		placements[index].AppliedTargetID = targetID
+		changed = true
+		break
+	}
+	if !changed {
+		return ExecutionPlacement{}, rooms.ErrWorldNotFound
+	}
+	saved, err := s.store.Save(roomID, expectedRevision, placements)
+	if err != nil {
+		return ExecutionPlacement{}, err
+	}
+	room, err := s.rooms.Room(roomID)
+	if err != nil {
+		return ExecutionPlacement{}, err
+	}
+	worlds, err := s.rooms.Worlds(roomID)
+	if err != nil {
+		return ExecutionPlacement{}, err
+	}
+	world, exists := worldsByID(worlds)[worldID]
+	if !exists {
+		return ExecutionPlacement{}, rooms.ErrWorldNotFound
+	}
+	return ExecutionPlacement{
+		Room: room, World: world, Revision: saved.Revision,
+		DesiredTargetID: targetID, AppliedTargetID: targetID,
+	}, nil
+}
+
 func (s *Service) PreviewStartCapacity(ctx context.Context, roomID string, selectedWorldIDs []string) (StartCapacityPreview, error) {
 	batch, err := s.PreviewBatchStartCapacity(ctx, []StartCapacitySelection{{RoomID: roomID, WorldIDs: selectedWorldIDs}})
 	if err != nil {
@@ -628,7 +732,7 @@ func buildSnapshot(roomID string, plans map[string]roomPlan, inventories []agent
 	}
 
 	return Snapshot{
-		RoomID: roomID, Revision: selected.record.Revision, Mode: "planning_only", RemoteExecutionReady: false,
+		RoomID: roomID, Revision: selected.record.Revision, Mode: "applied_placement", RemoteExecutionReady: true,
 		Placements: placements, Targets: targets, Issues: issues,
 		RequiresOvercommitConfirmation: requiresConfirmation,
 		CapacityPolicy: CapacityPolicy{

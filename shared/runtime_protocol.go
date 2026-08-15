@@ -7,11 +7,22 @@ const RuntimeOperationProtocolVersion = 1
 type RuntimeAction string
 
 const (
-	RuntimeActionConsoleHealth    RuntimeAction = "runtime.console.health"
-	RuntimeActionConsoleSend      RuntimeAction = "runtime.console.send"
-	RuntimeActionObserveOperation RuntimeAction = "runtime.operation.observe"
-	RuntimeActionReadLogs         RuntimeAction = "runtime.logs.read"
-	RuntimeActionReadArtifacts    RuntimeAction = "runtime.artifacts.read"
+	RuntimeActionConsoleHealth           RuntimeAction = "runtime.console.health"
+	RuntimeActionConsoleSend             RuntimeAction = "runtime.console.send"
+	RuntimeActionObserveOperation        RuntimeAction = "runtime.operation.observe"
+	RuntimeActionReadLogs                RuntimeAction = "runtime.logs.read"
+	RuntimeActionReadArtifacts           RuntimeAction = "runtime.artifacts.read"
+	RuntimeActionMigrationExportPrepare  RuntimeAction = "runtime.migration.export.prepare"
+	RuntimeActionMigrationExportRead     RuntimeAction = "runtime.migration.export.read"
+	RuntimeActionMigrationExportRelease  RuntimeAction = "runtime.migration.export.release"
+	RuntimeActionMigrationImportBegin    RuntimeAction = "runtime.migration.import.begin"
+	RuntimeActionMigrationImportWrite    RuntimeAction = "runtime.migration.import.write"
+	RuntimeActionMigrationImportCommit   RuntimeAction = "runtime.migration.import.commit"
+	RuntimeActionMigrationTargetRollback RuntimeAction = "runtime.migration.target.rollback"
+	RuntimeActionMigrationTargetComplete RuntimeAction = "runtime.migration.target.complete"
+	RuntimeActionMigrationSourceFinalize RuntimeAction = "runtime.migration.source.finalize"
+	RuntimeActionMigrationSourceRollback RuntimeAction = "runtime.migration.source.rollback"
+	RuntimeActionMigrationSourceComplete RuntimeAction = "runtime.migration.source.complete"
 )
 
 type ConsoleMode string
@@ -56,6 +67,14 @@ type RuntimeObservationRequest struct {
 	ObservedOperationKey string `json:"observed_operation_key,omitempty"`
 }
 
+type RuntimeMigrationRequest struct {
+	MigrationID string `json:"migration_id"`
+	Offset      int64  `json:"offset,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+	SHA256      string `json:"sha256,omitempty"`
+	Data        []byte `json:"data,omitempty"`
+}
+
 // RuntimeOperationRequest references a trusted installation and a managed
 // Shard. It never accepts a host path, executable, container specification or
 // shell command.
@@ -75,6 +94,7 @@ type RuntimeOperationRequest struct {
 	Logs             *RuntimeLogRequest         `json:"logs,omitempty"`
 	Artifacts        *RuntimeArtifactRequest    `json:"artifacts,omitempty"`
 	Observation      *RuntimeObservationRequest `json:"observation,omitempty"`
+	Migration        *RuntimeMigrationRequest   `json:"migration,omitempty"`
 }
 
 type RuntimeOutcome string
@@ -136,6 +156,17 @@ type RuntimeOperationEvidence struct {
 	ObservedAt  time.Time      `json:"observed_at"`
 }
 
+type RuntimeMigrationResult struct {
+	MigrationID string `json:"migration_id"`
+	Offset      int64  `json:"offset,omitempty"`
+	NextOffset  int64  `json:"next_offset,omitempty"`
+	Size        int64  `json:"size,omitempty"`
+	SHA256      string `json:"sha256,omitempty"`
+	Data        []byte `json:"data,omitempty"`
+	Complete    bool   `json:"complete"`
+	RecoveryRef string `json:"recovery_ref,omitempty"`
+}
+
 type RuntimeOperationResult struct {
 	ProtocolVersion int                       `json:"protocol_version"`
 	OperationID     string                    `json:"operation_id"`
@@ -153,11 +184,16 @@ type RuntimeOperationResult struct {
 	Logs            *RuntimeLogChunk          `json:"logs,omitempty"`
 	Artifacts       *RuntimeArtifactBundle    `json:"artifacts,omitempty"`
 	Evidence        *RuntimeOperationEvidence `json:"evidence,omitempty"`
+	Migration       *RuntimeMigrationResult   `json:"migration,omitempty"`
 }
 
 func IsRuntimeAction(value RuntimeAction) bool {
 	switch value {
-	case RuntimeActionConsoleHealth, RuntimeActionConsoleSend, RuntimeActionObserveOperation, RuntimeActionReadLogs, RuntimeActionReadArtifacts:
+	case RuntimeActionConsoleHealth, RuntimeActionConsoleSend, RuntimeActionObserveOperation, RuntimeActionReadLogs, RuntimeActionReadArtifacts,
+		RuntimeActionMigrationExportPrepare, RuntimeActionMigrationExportRead, RuntimeActionMigrationExportRelease,
+		RuntimeActionMigrationImportBegin, RuntimeActionMigrationImportWrite, RuntimeActionMigrationImportCommit,
+		RuntimeActionMigrationTargetRollback, RuntimeActionMigrationTargetComplete,
+		RuntimeActionMigrationSourceFinalize, RuntimeActionMigrationSourceRollback, RuntimeActionMigrationSourceComplete:
 		return true
 	default:
 		return false
@@ -165,5 +201,13 @@ func IsRuntimeAction(value RuntimeAction) bool {
 }
 
 func RuntimeActionMutates(value RuntimeAction) bool {
-	return value == RuntimeActionConsoleSend
+	switch value {
+	case RuntimeActionConsoleSend, RuntimeActionMigrationExportPrepare, RuntimeActionMigrationExportRelease,
+		RuntimeActionMigrationImportBegin, RuntimeActionMigrationImportWrite, RuntimeActionMigrationImportCommit,
+		RuntimeActionMigrationTargetRollback, RuntimeActionMigrationTargetComplete,
+		RuntimeActionMigrationSourceFinalize, RuntimeActionMigrationSourceRollback, RuntimeActionMigrationSourceComplete:
+		return true
+	default:
+		return false
+	}
 }

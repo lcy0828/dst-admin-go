@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -15,6 +17,7 @@ import (
 	"dont/internal/roomops"
 	"dont/internal/runtimefiles"
 	"dont/internal/shards"
+	"dont/internal/shardtransfer"
 	"dont/shared"
 )
 
@@ -50,8 +53,10 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 	if !exists {
 		return shared.RuntimeOperationResult{}, errors.New("Agent 未登记该 DST 安装")
 	}
-	if err := validateShardOwnership(installation, request.Cluster, request.Shard); err != nil {
-		return shared.RuntimeOperationResult{}, err
+	if runtimeActionRequiresExistingShard(request.Action) {
+		if err := validateShardOwnership(installation, request.Cluster, request.Shard); err != nil {
+			return shared.RuntimeOperationResult{}, err
+		}
 	}
 	control, err := a.runtimeControl(installation)
 	if err != nil {
@@ -73,7 +78,13 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 	} else if beginErr != nil {
 		return shared.RuntimeOperationResult{}, beginErr
 	}
-	result, operationErr := executeConsoleSend(operationContext, control, *request)
+	var result shared.RuntimeOperationResult
+	var operationErr error
+	if request.Action == shared.RuntimeActionConsoleSend {
+		result, operationErr = executeConsoleSend(operationContext, control, *request)
+	} else {
+		result, operationErr = a.executeMigrationAction(operationContext, installation, *request)
+	}
 	if finishErr := a.shardState.finishRuntime(*request, result, operationErr); finishErr != nil {
 		return shared.RuntimeOperationResult{}, fmt.Errorf("保存 Agent Runtime 操作结果: %w", finishErr)
 	}
@@ -97,11 +108,11 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 	}
 	switch request.Action {
 	case shared.RuntimeActionConsoleHealth:
-		if request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil {
+		if request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil {
 			return errors.New("控制台健康请求包含无关负载")
 		}
 	case shared.RuntimeActionConsoleSend:
-		if request.Console == nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil {
+		if request.Console == nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil {
 			return errors.New("控制台请求负载无效")
 		}
 		console := request.Console
@@ -112,21 +123,30 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 			return errors.New("控制台请求内容无效")
 		}
 	case shared.RuntimeActionReadLogs:
-		if request.Logs == nil || request.Console != nil || request.Artifacts != nil || request.Observation != nil ||
+		if request.Logs == nil || request.Console != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil ||
 			request.Logs.Cursor < -1 || request.Logs.MaxBytes < 1 || request.Logs.MaxBytes > runtimefiles.MaximumLogBytes ||
 			request.Logs.MaxLines < 1 || request.Logs.MaxLines > 2000 || len([]rune(request.Logs.Query)) > 256 ||
 			len(request.Logs.FileID) > 128 || strings.ContainsAny(request.Logs.FileID, "\x00\r\n") {
 			return errors.New("日志读取请求无效")
 		}
 	case shared.RuntimeActionReadArtifacts:
-		if request.Artifacts == nil || request.Console != nil || request.Logs != nil || request.Observation != nil || !runtimefiles.IsArtifactKind(request.Artifacts.Kind) {
+		if request.Artifacts == nil || request.Console != nil || request.Logs != nil || request.Observation != nil || request.Migration != nil || !runtimefiles.IsArtifactKind(request.Artifacts.Kind) {
 			return errors.New("Runtime 制品读取请求无效")
 		}
 	case shared.RuntimeActionObserveOperation:
-		if request.Observation == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil ||
+		if request.Observation == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Migration != nil ||
 			!operationIdentity.MatchString(request.Observation.ObservedOperationID) ||
 			request.Observation.ObservedOperationKey != "" && !operationIdentity.MatchString(request.Observation.ObservedOperationKey) {
 			return errors.New("Runtime 操作观察请求无效")
+		}
+	default:
+		if request.Migration == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil ||
+			!operationIdentity.MatchString(request.Migration.MigrationID) || request.Migration.Offset < 0 || request.Migration.Size < 0 ||
+			len(request.Migration.Data) > shardtransfer.MaxChunkBytes || len(request.Migration.SHA256) > 64 {
+			return errors.New("分片迁移请求无效")
+		}
+		if request.Action == shared.RuntimeActionMigrationImportWrite && len(request.Migration.Data) == 0 {
+			return errors.New("分片迁移块为空")
 		}
 	}
 	return nil
@@ -157,8 +177,98 @@ func (a *Agent) observeRuntimeAction(ctx context.Context, control shardRuntimeCo
 		evidence, err := a.shardState.observeRuntime(request.InstallationID, request.Cluster, *request.Observation)
 		result.Evidence = &evidence
 		return result, err
+	case shared.RuntimeActionMigrationExportRead:
+		transfer, err := a.transferManager(installation)
+		if err != nil {
+			return result, err
+		}
+		chunk, err := transfer.ReadExport(ctx, request.Migration.MigrationID, request.Migration.Offset)
+		result.Migration = &shared.RuntimeMigrationResult{
+			MigrationID: request.Migration.MigrationID, Offset: chunk.Offset, NextOffset: chunk.NextOffset,
+			Size: chunk.Size, SHA256: chunk.SHA256, Data: chunk.Data, Complete: chunk.Complete,
+		}
+		return result, err
 	default:
 		return result, errors.New("Runtime 操作不受支持")
+	}
+}
+
+func (a *Agent) executeMigrationAction(ctx context.Context, installation RuntimeInstallation, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
+	transfer, err := a.transferManager(installation)
+	result := runtimeResult(request, shared.RuntimeOutcomeConfirmed, "分片迁移步骤已完成")
+	if err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+		return result, err
+	}
+	migration := *request.Migration
+	response := &shared.RuntimeMigrationResult{MigrationID: migration.MigrationID}
+	result.Migration = response
+	switch request.Action {
+	case shared.RuntimeActionMigrationExportPrepare:
+		descriptor, stepErr := transfer.PrepareExport(ctx, migration.MigrationID, request.Cluster, request.Shard)
+		response.Size, response.SHA256, response.Complete = descriptor.Size, descriptor.SHA256, stepErr == nil
+		err = stepErr
+	case shared.RuntimeActionMigrationExportRelease:
+		err = transfer.ReleaseExport(migration.MigrationID)
+		response.Complete = err == nil
+	case shared.RuntimeActionMigrationImportBegin:
+		descriptor, stepErr := transfer.BeginImport(migration.MigrationID, migration.Size, migration.SHA256)
+		response.Size, response.SHA256 = descriptor.Size, descriptor.SHA256
+		err = stepErr
+	case shared.RuntimeActionMigrationImportWrite:
+		next, stepErr := transfer.WriteImport(migration.MigrationID, migration.Offset, migration.Data)
+		response.Offset, response.NextOffset, response.Size = migration.Offset, next, migration.Size
+		response.Complete, err = migration.Size > 0 && next == migration.Size, stepErr
+	case shared.RuntimeActionMigrationImportCommit:
+		descriptor, stepErr := transfer.CommitImport(ctx, migration.MigrationID, request.Cluster, request.Shard)
+		response.Size, response.SHA256, response.Complete = descriptor.Size, descriptor.SHA256, stepErr == nil
+		err = stepErr
+	case shared.RuntimeActionMigrationTargetRollback:
+		err = transfer.RollbackTarget(migration.MigrationID)
+		response.Complete = err == nil
+	case shared.RuntimeActionMigrationTargetComplete:
+		err = transfer.CompleteTarget(migration.MigrationID)
+		response.Complete = err == nil
+	case shared.RuntimeActionMigrationSourceFinalize:
+		response.RecoveryRef, err = transfer.FinalizeSource(migration.MigrationID, request.Cluster, request.Shard)
+		response.Complete = err == nil
+	case shared.RuntimeActionMigrationSourceRollback:
+		err = transfer.RollbackSource(migration.MigrationID)
+		response.Complete = err == nil
+	case shared.RuntimeActionMigrationSourceComplete:
+		response.RecoveryRef, err = transfer.CompleteSource(migration.MigrationID)
+		response.Complete = err == nil
+	default:
+		err = errors.New("分片迁移动作不受支持")
+	}
+	if err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+	}
+	return result, err
+}
+
+func (a *Agent) transferManager(installation RuntimeInstallation) (*shardtransfer.Manager, error) {
+	a.shardTransferMu.Lock()
+	defer a.shardTransferMu.Unlock()
+	if existing := a.shardTransfers[installation.ID]; existing != nil {
+		return existing, nil
+	}
+	created, err := shardtransfer.New(installation.SavePath, filepath.Join(a.Config.OperationStateFile+".transfers", installation.ID))
+	if err != nil {
+		return nil, err
+	}
+	a.shardTransfers[installation.ID] = created
+	return created, nil
+}
+
+func runtimeActionRequiresExistingShard(action shared.RuntimeAction) bool {
+	switch action {
+	case shared.RuntimeActionMigrationImportBegin, shared.RuntimeActionMigrationImportWrite, shared.RuntimeActionMigrationImportCommit,
+		shared.RuntimeActionMigrationTargetRollback, shared.RuntimeActionMigrationTargetComplete,
+		shared.RuntimeActionMigrationExportRelease, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeActionMigrationSourceComplete:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -256,8 +366,32 @@ func (state *shardOperationState) finishRuntime(request shared.RuntimeOperationR
 		remembered.ErrorMessage = operationErr.Error()
 	}
 	room.RuntimeOperations[request.OperationKey] = remembered
+	trimRememberedRuntimeOperations(room.RuntimeOperations)
 	state.Rooms[roomKey] = room
 	return state.persistLocked()
+}
+
+func trimRememberedRuntimeOperations(values map[string]rememberedRuntimeOperation) {
+	if len(values) <= maximumRememberedOperationsPerRoom {
+		return
+	}
+	type operationTime struct {
+		key string
+		at  time.Time
+	}
+	completed := make([]operationTime, 0, len(values))
+	for key, value := range values {
+		if value.Completed {
+			completed = append(completed, operationTime{key: key, at: value.Result.ObservedAt})
+		}
+	}
+	sort.Slice(completed, func(i, j int) bool { return completed[i].at.Before(completed[j].at) })
+	for _, item := range completed {
+		if len(values) <= maximumRememberedOperationsPerRoom {
+			break
+		}
+		delete(values, item.key)
+	}
 }
 
 func (state *shardOperationState) observeRuntime(installationID, cluster string, request shared.RuntimeObservationRequest) (shared.RuntimeOperationEvidence, error) {

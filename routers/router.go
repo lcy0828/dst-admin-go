@@ -27,6 +27,7 @@ import (
 	"dont/internal/logstream"
 	modservice "dont/internal/mods"
 	"dont/internal/operationlease"
+	"dont/internal/placementmigration"
 	playerapi "dont/internal/players"
 	"dont/internal/rooms"
 	"dont/internal/runtimeaudit"
@@ -306,6 +307,14 @@ func initApplication(manageBackground bool) (*Application, error) {
 		return nil, err
 	}
 	runtimeDriverRouter, err := runtimedriver.NewRouter(topologyService, operationLeaseService, nativeRuntimeDriver, agentRuntimeDriver)
+	if err != nil {
+		return nil, err
+	}
+	placementMigrationService, err := placementmigration.New(topologyService, runtimeDriverRouter, operationLeaseService)
+	if err != nil {
+		return nil, err
+	}
+	placementMigrationHandler, err := httpapi.NewPlacementMigrationHandler(placementMigrationService, roomService, jobService)
 	if err != nil {
 		return nil, err
 	}
@@ -650,6 +659,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		automationHandler.Register(v2)
 		agentHandler.Register(v2)
 		topologyHandler.Register(v2)
+		placementMigrationHandler.Register(v2)
 		systemStatusHandler.Register(v2)
 		systemSettingsHandler.Register(v2)
 		containerHandler.Register(v2)

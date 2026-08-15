@@ -3,6 +3,7 @@ package runtimedriver
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"dont/internal/consoledispatch"
 	"dont/internal/runtimefiles"
 	"dont/internal/shards"
+	"dont/internal/shardtransfer"
 	"dont/shared"
 )
 
@@ -31,6 +33,7 @@ type nativeConsoleHealth interface {
 type Native struct {
 	saveRoot string
 	control  NativeControl
+	transfer *shardtransfer.Manager
 
 	mu       sync.Mutex
 	evidence map[string]shared.RuntimeOperationEvidence
@@ -40,7 +43,59 @@ func NewNative(saveRoot string, control NativeControl) (*Native, error) {
 	if strings.TrimSpace(saveRoot) == "" || control == nil {
 		return nil, ErrInvalidTarget
 	}
-	return &Native{saveRoot: saveRoot, control: control, evidence: make(map[string]shared.RuntimeOperationEvidence)}, nil
+	transfer, err := shardtransfer.New(saveRoot, filepath.Join(saveRoot, ".dst-admin-transfers"))
+	if err != nil {
+		return nil, err
+	}
+	return &Native{saveRoot: saveRoot, control: control, transfer: transfer, evidence: make(map[string]shared.RuntimeOperationEvidence)}, nil
+}
+
+func (d *Native) PrepareMigrationExport(ctx context.Context, target Target, _ Operation, migrationID string) (MigrationDescriptor, error) {
+	value, err := d.transfer.PrepareExport(ctx, migrationID, target.Cluster, target.Shard)
+	return MigrationDescriptor{MigrationID: value.MigrationID, Size: value.Size, SHA256: value.SHA256}, err
+}
+
+func (d *Native) ReadMigrationExport(ctx context.Context, _ Target, migrationID string, offset int64) (MigrationChunk, error) {
+	value, err := d.transfer.ReadExport(ctx, migrationID, offset)
+	return MigrationChunk{Offset: value.Offset, NextOffset: value.NextOffset, Size: value.Size, SHA256: value.SHA256, Data: value.Data, Complete: value.Complete}, err
+}
+
+func (d *Native) ReleaseMigrationExport(_ context.Context, _ Target, _ Operation, migrationID string) error {
+	return d.transfer.ReleaseExport(migrationID)
+}
+
+func (d *Native) BeginMigrationImport(_ context.Context, _ Target, _ Operation, descriptor MigrationDescriptor) error {
+	_, err := d.transfer.BeginImport(descriptor.MigrationID, descriptor.Size, descriptor.SHA256)
+	return err
+}
+
+func (d *Native) WriteMigrationImport(_ context.Context, _ Target, _ Operation, descriptor MigrationDescriptor, offset int64, data []byte) (int64, error) {
+	return d.transfer.WriteImport(descriptor.MigrationID, offset, data)
+}
+
+func (d *Native) CommitMigrationImport(ctx context.Context, target Target, _ Operation, migrationID string) error {
+	_, err := d.transfer.CommitImport(ctx, migrationID, target.Cluster, target.Shard)
+	return err
+}
+
+func (d *Native) RollbackMigrationTarget(_ context.Context, _ Target, _ Operation, migrationID string) error {
+	return d.transfer.RollbackTarget(migrationID)
+}
+
+func (d *Native) CompleteMigrationTarget(_ context.Context, _ Target, _ Operation, migrationID string) error {
+	return d.transfer.CompleteTarget(migrationID)
+}
+
+func (d *Native) FinalizeMigrationSource(_ context.Context, target Target, _ Operation, migrationID string) (string, error) {
+	return d.transfer.FinalizeSource(migrationID, target.Cluster, target.Shard)
+}
+
+func (d *Native) RollbackMigrationSource(_ context.Context, _ Target, _ Operation, migrationID string) error {
+	return d.transfer.RollbackSource(migrationID)
+}
+
+func (d *Native) CompleteMigrationSource(_ context.Context, _ Target, _ Operation, migrationID string) (string, error) {
+	return d.transfer.CompleteSource(migrationID)
 }
 
 func (d *Native) Kind() Kind { return KindNative }

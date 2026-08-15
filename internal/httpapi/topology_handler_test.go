@@ -79,7 +79,7 @@ func TestTopologyHTTPPreviewRevisionAndOvercommit(t *testing.T) {
 	response := performJSON(router, http.MethodGet, "/api/v2/rooms/room/topology", nil, nil, "")
 	assertStatus(t, response, http.StatusOK)
 	revision, _ := responseData(t, response)["revision"].(string)
-	if revision == "" || responseData(t, response)["remoteExecutionReady"] != false {
+	if revision == "" || responseData(t, response)["remoteExecutionReady"] != true || responseData(t, response)["mode"] != "applied_placement" {
 		t.Fatalf("topology=%s", response.Body.String())
 	}
 	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room/topology/preview", map[string]interface{}{
