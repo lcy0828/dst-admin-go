@@ -10,25 +10,26 @@ import (
 )
 
 type importRecord struct {
-	ID            string    `gorm:"primary_key;type:char(36)"`
-	Name          string    `gorm:"type:varchar(128);not null"`
-	SourceName    string    `gorm:"type:varchar(255);not null"`
-	ArtifactName  string    `gorm:"type:varchar(255);not null"`
-	Status        string    `gorm:"type:varchar(24);index;not null"`
-	Size          int64     `gorm:"not null"`
-	SHA256        string    `gorm:"type:char(64)"`
-	ManifestJSON  string    `gorm:"type:text"`
-	ErrorCode     string    `gorm:"type:varchar(64)"`
-	ErrorMessage  string    `gorm:"type:text"`
-	CreatedAt     time.Time `gorm:"index;not null"`
-	UpdatedAt     time.Time `gorm:"not null"`
-	AppliedAt     *time.Time
-	ApplyPhase    string `gorm:"type:varchar(24)"`
-	ApplyMode     string `gorm:"type:varchar(16)"`
-	ApplyRoomID   string `gorm:"type:varchar(128)"`
-	ApplyTarget   string `gorm:"type:varchar(255)"`
-	ApplyStaging  string `gorm:"type:varchar(255)"`
-	ApplyRollback string `gorm:"type:varchar(255)"`
+	ID               string    `gorm:"primary_key;type:char(36)"`
+	Name             string    `gorm:"type:varchar(128);not null"`
+	SourceName       string    `gorm:"type:varchar(255);not null"`
+	ArtifactName     string    `gorm:"type:varchar(255);not null"`
+	Status           string    `gorm:"type:varchar(24);index;not null"`
+	Size             int64     `gorm:"not null"`
+	SHA256           string    `gorm:"type:char(64)"`
+	ManifestJSON     string    `gorm:"type:text"`
+	ErrorCode        string    `gorm:"type:varchar(64)"`
+	ErrorMessage     string    `gorm:"type:text"`
+	CreatedAt        time.Time `gorm:"index;not null"`
+	UpdatedAt        time.Time `gorm:"not null"`
+	AppliedAt        *time.Time
+	ApplyPhase       string `gorm:"type:varchar(24)"`
+	ApplyMode        string `gorm:"type:varchar(16)"`
+	ApplyRoomID      string `gorm:"type:varchar(128)"`
+	ApplyTarget      string `gorm:"type:varchar(255)"`
+	ApplyStaging     string `gorm:"type:varchar(255)"`
+	ApplyRollback    string `gorm:"type:varchar(255)"`
+	ApplyPortLeaseID string `gorm:"type:varchar(64)"`
 }
 
 const (
@@ -170,6 +171,19 @@ func (s *Store) BeginApply(id string, mode ApplyMode, roomID, target, staging, r
 	return nil
 }
 
+func (s *Store) SetApplyPortLease(id, leaseID string) error {
+	result := s.db.Table(s.table).Where("id = ? AND status = ?", id, StatusApplying).Updates(map[string]interface{}{
+		"apply_port_lease_id": strings.TrimSpace(leaseID), "updated_at": s.now().UTC(),
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrImportNotReady
+	}
+	return nil
+}
+
 func (s *Store) MarkApplyCommitted(id string) error {
 	result := s.db.Table(s.table).Where("id = ? AND status = ? AND apply_phase = ?", id, StatusApplying, applyPhasePublishing).Updates(map[string]interface{}{
 		"apply_phase": applyPhaseCommitted, "updated_at": s.now().UTC(),
@@ -223,7 +237,7 @@ func (s *Store) MarkApplied(id string) (Session, error) {
 func (s *Store) ClearApplyJournal(id string) error {
 	result := s.db.Table(s.table).Where("id = ? AND status = ? AND apply_phase IN (?)", id, StatusApplied, []string{applyPhaseCommitted, applyPhaseApplied}).Updates(map[string]interface{}{
 		"apply_phase": "", "apply_mode": "", "apply_room_id": "", "apply_target": "",
-		"apply_staging": "", "apply_rollback": "", "updated_at": s.now().UTC(),
+		"apply_staging": "", "apply_rollback": "", "apply_port_lease_id": "", "updated_at": s.now().UTC(),
 	})
 	if result.Error != nil {
 		return result.Error

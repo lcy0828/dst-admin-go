@@ -31,9 +31,13 @@ const (
 )
 
 var (
-	ErrInvalidProvider = errors.New("kubernetes runtime provider is invalid")
-	ErrPreflight       = errors.New("kubernetes runtime preflight failed")
-	ErrObservation     = errors.New("kubernetes runtime observation is invalid")
+	ErrInvalidProvider  = errors.New("kubernetes runtime provider is invalid")
+	ErrPreflight        = errors.New("kubernetes runtime preflight failed")
+	ErrObservation      = errors.New("kubernetes runtime observation is invalid")
+	ErrDisabled         = errors.New("experimental kubernetes runtime provider is disabled")
+	ErrUnavailable      = errors.New("experimental kubernetes runtime provider is unavailable")
+	ErrProviderMissing  = errors.New("kubernetes runtime provider not found")
+	ErrMutationDisabled = errors.New("experimental kubernetes runtime mutations are disabled")
 )
 
 type ReleaseStatus string
@@ -313,4 +317,13 @@ type TypedMutation struct {
 type Client interface {
 	Observe(context.Context, ShardRef) (Observation, error)
 	Apply(context.Context, TypedMutation) (Observation, error)
+}
+
+// Preview is a read-only result. Mutation is present only when every
+// preflight gate passes; callers still cannot apply it through the public API.
+type Preview struct {
+	Observation  Observation     `json:"observation"`
+	Preflight    PreflightReport `json:"preflight"`
+	Mutation     *TypedMutation  `json:"mutation,omitempty"`
+	ApplyAllowed bool            `json:"applyAllowed"`
 }

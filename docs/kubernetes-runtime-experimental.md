@@ -2,17 +2,44 @@
 
 ## 1. 当前状态
 
-本能力固定标记为 `experimental`，尚未接入生产路由、OpenAPI 或现有
-`runtimedriver.Driver`。当前交付的是独立的类型化安全内核和最小权限 RBAC，
-用于验证 Kubernetes 运行模型，不能据此宣称已经支持生产服。
+本能力固定标记为 `experimental`。控制面会注册 Provider 状态、资源观察和预检
+API，但默认关闭，并且不提供 Apply、生命周期、Console、Mod 发布或备份恢复 API。
+当前交付用于验证 Kubernetes 运行模型，不能据此宣称已经支持生产服。
 
 代码边界：
 
-- `internal/kubernetesruntime`：Provider、预检、类型化资源和 Client 边界。
+- `internal/kubernetesruntime`：Provider、只读 Kubernetes REST adapter、预检、
+  类型化资源和 Client 边界。
 - `deploy/kubernetes`：独立 namespace、Provider ServiceAccount、无权限的
   Shard ServiceAccount 和 namespace Role。
 - 不提供 `kubectl` Shell adapter，不接受任意 YAML、镜像、命令、路径、挂载、
   Node selector、StorageClass 或 hostPort。
+
+控制面始终注册以下认证接口，便于 UI 稳定展示禁用或配置错误状态：
+
+```text
+GET  /api/v2/runtime-providers/kubernetes
+POST /api/v2/runtime-providers/kubernetes/{providerId}/shards/observe
+POST /api/v2/runtime-providers/kubernetes/{providerId}/shards/preflight
+```
+
+不存在 Apply 路由。`preflight` 即使生成类型化 mutation preview，也始终返回
+`applyAllowed=false`。REST adapter 只读取 StatefulSet、Pod、PVC、内部/公网 Service
+和 NetworkPolicy；连接只接受 HTTPS origin、绝对路径 CA 与 bearer token 文件，
+禁用代理并限制超时、Token、响应和 Provider 配置大小。
+
+默认状态由下列环境变量控制：
+
+```sh
+export DST_ADMIN_KUBERNETES_EXPERIMENTAL_ENABLED=true
+export DST_ADMIN_KUBERNETES_PROVIDER_CONFIG=/absolute/path/provider.json
+```
+
+可修改的完整配置见 `deploy/kubernetes/provider.example.json`。其中
+`minimumLeaseRemaining` 和 `maximumObservationAge` 当前按 Go `time.Duration` 的纳秒值
+编码，例如 30 秒为 `30000000000`。能力 attestation 在完成对应集群实测前必须保持
+`false`。配置无效、CA/Token 不可读或 Kubernetes API 离线只会降级此 Provider，
+不会阻止本机和 Agent Runtime 启动。
 
 ## 2. 资源模型
 
@@ -122,7 +149,11 @@ hostPath、hostPID、privileged 或 cluster-admin 权限。
 
 ## 6. 已知限制
 
-- 没有 Kubernetes API Client adapter，没有 Router/API/UI 注册。
+- 当前 API Client adapter 仅观察并生成只读预检计划，没有 Apply 实现或公网上线能力。
+- 核心 Kubernetes API 无法证明物理核心和 SMT 分配，REST observation 会明确把 CPU
+  标记为 stale，因此 `provision/start` 会保持阻断，直到接入可信节点观察 adapter。
+- namespace Role 无法读取 cluster-scoped PV reclaim policy；已有 PVC 的 Retain 证明
+  不会被猜测，相关启动会保持阻断。
 - 没有可用的 lease-aware supervisor 镜像和 admission 实现。
 - 没有实现 console transport、日志 continuation、保存回执和操作证据。
 - 没有实现 Secret delivery、Config 发布、Mod 分发和 DST 二进制/镜像发布流程。
@@ -131,6 +162,7 @@ hostPath、hostPID、privileged 或 cluster-admin 权限。
 - 没有实现跨 Shard 保存屏障、CSI snapshot adapter 或恢复流程。
 - 未验证 Klei 的公网端口公布、NodePort/LB 源地址和 Service DNS `master_ip` 行为。
 - 未对任何 Kubernetes/CSI/CNI 组合完成故障注入，因此不能开启生产声明。
+- 当前 SQLite 控制面必须保持单副本运行；本方案不提供、也不宣称控制面 HA。
 
 ## 7. 进入生产前的验收
 
@@ -152,3 +184,35 @@ hostPath、hostPID、privileged 或 cluster-admin 权限。
 
 在上述矩阵通过、Client/admission/supervisor 均交付前，功能状态必须持续显示
 “实验能力”，默认不可供普通用户创建运行中的 Shard。
+
+## 8. Debian 12 / kind 端到端验证
+
+以下步骤只验证默认关闭、配置降级、只读观察和门禁输出，不会启动 DST：
+
+1. 使用 `kubectl apply -k deploy/kubernetes` 创建隔离 namespace 和只读身份。
+2. 为 `dst-admin-kubernetes-provider` 签发短期 Token，并把 Token 与集群 CA 以仅控制面
+   用户可读的权限写入配置中列出的绝对路径。
+3. 复制并修改 `deploy/kubernetes/provider.example.json`；镜像必须换成真实、固定
+   `@sha256:` 摘要，但所有未经实测的 capability 保持 `false`。
+4. 设置两个环境变量并以单副本启动 API，读取 Provider 状态。
+5. 对一个测试 Room/World 调用 observe，再调用 preflight；确认 start 被
+   lease supervisor/admission、网络、CPU 或存储证明门禁阻止。
+6. 确认不存在 Apply endpoint，并在配置路径错误、CA 错误和 API Server 离线时验证
+   本机/Agent 管理仍正常。
+
+示例请求：
+
+```sh
+curl -fsS -b cookie.txt http://127.0.0.1:8000/api/v2/runtime-providers/kubernetes
+
+curl -fsS -b cookie.txt \
+  -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: $DST_CSRF_TOKEN" \
+  -H "Idempotency-Key: k8s-observe-0001" \
+  -d '{"roomId":"room-1","worldId":"master"}' \
+  http://127.0.0.1:8000/api/v2/runtime-providers/kubernetes/k8s-lab/shards/observe
+```
+
+正式可用前仍需在至少两个 Kubernetes/CSI 组合上完成 admission、lease-aware
+supervisor、CPU/PV 可信观察、CNI NetworkPolicy、UDP/Steam、Console、Mod 分发、
+一致性备份恢复和故障注入验证。

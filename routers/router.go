@@ -694,6 +694,9 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := saveImportService.ConfigurePortAllocator(topologyService); err != nil {
+		return nil, err
+	}
 	saveImportHandler := httpapi.NewSaveImportHandler(saveImportService, jobService)
 	automationHandler := httpapi.NewAutomationHandler(automationService, automationScheduler)
 	if backgroundEnabled {

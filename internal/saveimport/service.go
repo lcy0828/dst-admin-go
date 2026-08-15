@@ -17,6 +17,7 @@ import (
 	"dont/internal/mods"
 	"dont/internal/rooms"
 	"dont/internal/runtimeguard"
+	"dont/internal/topology"
 
 	"github.com/google/uuid"
 	"github.com/shirou/gopsutil/v3/disk"
@@ -40,6 +41,7 @@ type Service struct {
 	backups       BackupCreator
 	mods          ModDownloader
 	guard         runtimeguard.MutationGuard
+	ports         PortAllocator
 	locksMu       sync.Mutex
 	locks         map[string]*sync.Mutex
 	activeMu      sync.Mutex
@@ -67,6 +69,20 @@ type BackupCreator interface {
 type ModDownloader interface {
 	Download(context.Context, mods.DownloadRequest, io.Writer) (mods.ActionResult, error)
 	EnsureLibrarySetup([]string) error
+}
+
+type PortAllocator interface {
+	ReservePorts(context.Context, topology.PortAllocationRequest) (topology.PortAllocation, error)
+	ActivatePorts(context.Context, string) error
+	ReleasePorts(context.Context, string) error
+}
+
+func (s *Service) ConfigurePortAllocator(allocator PortAllocator) error {
+	if allocator == nil {
+		return errors.New("save import port allocator is required")
+	}
+	s.ports = allocator
+	return nil
 }
 
 func NewService(config Config, store *Store, roomManager RoomManager, runtime Runtime, backupCreator BackupCreator, modDownloader ModDownloader, guards ...runtimeguard.MutationGuard) (*Service, error) {

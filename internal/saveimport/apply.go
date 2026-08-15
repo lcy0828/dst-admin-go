@@ -10,12 +10,14 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"dont/internal/backups"
 	"dont/internal/mods"
 	"dont/internal/roomops"
 	"dont/internal/rooms"
 	"dont/internal/runtimeguard"
+	"dont/internal/topology"
 
 	"github.com/go-ini/ini"
 	"github.com/google/uuid"
@@ -106,9 +108,16 @@ func (s *Service) Apply(ctx context.Context, id, jobID string, request ApplyRequ
 	if err := s.applyTokenPolicy(staging, target, request); err != nil {
 		return ApplyResult{}, err
 	}
-	if err := s.applyNetworkPolicy(staging, target, request.NetworkPolicy); err != nil {
+	portLeaseID, err := s.applyNetworkPolicy(ctx, id, operationRoomID, staging, target, request.NetworkPolicy)
+	if err != nil {
 		return ApplyResult{}, err
 	}
+	keepPortLease := false
+	defer func() {
+		if portLeaseID != "" && !keepPortLease && s.ports != nil {
+			_ = s.ports.ReleasePorts(context.Background(), portLeaseID)
+		}
+	}()
 	installedMods, warnings, err := s.reconcileMods(ctx, candidate, request.ModPolicy)
 	if err != nil {
 		return ApplyResult{}, err
@@ -135,10 +144,16 @@ func (s *Service) Apply(ctx context.Context, id, jobID string, request ApplyRequ
 	recovery := importRecord{
 		ID: id, Status: string(StatusApplying), ApplyPhase: applyPhasePublishing, ApplyMode: string(request.Mode),
 		ApplyRoomID: operationRoomID, ApplyTarget: filepath.Base(target), ApplyStaging: filepath.Base(staging),
-		ApplyRollback: pathBaseOrEmpty(rollback),
+		ApplyRollback:    pathBaseOrEmpty(rollback),
+		ApplyPortLeaseID: portLeaseID,
 	}
 	if err := s.store.BeginApply(id, request.Mode, operationRoomID, recovery.ApplyTarget, recovery.ApplyStaging, recovery.ApplyRollback); err != nil {
 		return ApplyResult{}, err
+	}
+	if portLeaseID != "" {
+		if err := s.store.SetApplyPortLease(id, portLeaseID); err != nil {
+			return ApplyResult{}, err
+		}
 	}
 	committed := false
 	defer func() {
@@ -172,11 +187,17 @@ func (s *Service) Apply(ctx context.Context, id, jobID string, request ApplyRequ
 			return ApplyResult{}, fmt.Errorf("adopt imported room: %w", err)
 		}
 	}
+	if portLeaseID != "" && s.ports != nil {
+		if err := s.ports.ActivatePorts(ctx, portLeaseID); err != nil {
+			return ApplyResult{}, fmt.Errorf("activate imported room port reservations: %w", err)
+		}
+	}
 	if err := s.store.MarkApplyCommitted(id); err != nil {
 		return ApplyResult{}, err
 	}
 	recovery.ApplyPhase = applyPhaseCommitted
 	committed = true
+	keepPortLease = true
 	if err := s.finalizeCommittedApply(recovery); err != nil {
 		return ApplyResult{}, err
 	}
@@ -204,6 +225,11 @@ func (s *Service) recoverApply(record importRecord) error {
 	}
 	if err := s.rollbackApply(record); err != nil {
 		return err
+	}
+	if record.ApplyPortLeaseID != "" && s.ports != nil {
+		if err := s.ports.ReleasePorts(context.Background(), record.ApplyPortLeaseID); err != nil {
+			return fmt.Errorf("release interrupted import ports: %w", err)
+		}
 	}
 	_, staging, _, err := s.applyRecoveryPaths(record)
 	if err != nil {
@@ -268,6 +294,11 @@ func (s *Service) finalizeCommittedApply(record importRecord) error {
 	}
 	if !regularDirectory(target) {
 		return errors.New("committed import target is missing")
+	}
+	if record.ApplyPortLeaseID != "" && s.ports != nil {
+		if err := s.ports.ActivatePorts(context.Background(), record.ApplyPortLeaseID); err != nil && !errors.Is(err, topology.ErrResourceNotFound) {
+			return fmt.Errorf("activate committed import ports: %w", err)
+		}
 	}
 	if ApplyMode(record.ApplyMode) != ApplyModeReplace && s.rooms != nil {
 		room, roomErr := s.rooms.Room(record.ApplyRoomID)
@@ -453,32 +484,164 @@ func (s *Service) applyTokenPolicy(staging, target string, request ApplyRequest)
 	return nil
 }
 
-func (s *Service) applyNetworkPolicy(staging, target string, policy NetworkPolicy) error {
+func (s *Service) applyNetworkPolicy(ctx context.Context, importID, roomID, staging, target string, policy NetworkPolicy) (string, error) {
+	if policy == NetworkPreserve {
+		if err := preserveNetworkConfiguration(target, staging); err != nil {
+			return "", err
+		}
+	}
+	if s.ports != nil {
+		requests, err := networkPortRequests(staging, policy == NetworkAuto)
+		if err != nil {
+			return "", err
+		}
+		allocation, err := s.ports.ReservePorts(ctx, topology.PortAllocationRequest{
+			OwnerID: "save-import:" + importID, TargetID: "local", RoomID: roomID,
+			Cluster: filepath.Base(target), TTL: 15 * time.Minute, Requests: requests,
+		})
+		if err != nil {
+			return "", err
+		}
+		if err := applyAllocatedNetworkConfiguration(staging, allocation.Reservations); err != nil {
+			_ = s.ports.ReleasePorts(context.Background(), allocation.LeaseID)
+			return "", err
+		}
+		return allocation.LeaseID, nil
+	}
 	switch policy {
 	case NetworkSource:
 		used, err := usedPorts(s.config.SaveRoot, target)
 		if err != nil {
-			return err
+			return "", err
 		}
-		return validateNetworkConfiguration(staging, used)
+		return "", validateNetworkConfiguration(staging, used)
 	case NetworkPreserve:
-		if err := preserveNetworkConfiguration(target, staging); err != nil {
-			return err
-		}
 		used, err := usedPorts(s.config.SaveRoot, target)
 		if err != nil {
-			return err
+			return "", err
 		}
-		return validateNetworkConfiguration(staging, used)
+		return "", validateNetworkConfiguration(staging, used)
 	case NetworkAuto:
 		used, err := usedPorts(s.config.SaveRoot, target)
 		if err != nil {
+			return "", err
+		}
+		return "", allocateNetworkConfiguration(staging, used)
+	default:
+		return "", ErrInvalidRequest
+	}
+}
+
+func networkPortRequests(root string, automatic bool) ([]topology.PortRequest, error) {
+	cluster, err := ini.Load(filepath.Join(root, "cluster.ini"))
+	if err != nil {
+		return nil, err
+	}
+	worlds, err := readNetworkWorlds(root)
+	if err != nil {
+		return nil, err
+	}
+	requests := make([]topology.PortRequest, 0, len(worlds)*3+1)
+	masterWorldID, masterShard := "", ""
+	for _, world := range worlds {
+		if world.master || masterWorldID == "" {
+			masterWorldID, masterShard = rooms.EncodeID(world.directory), world.directory
+			if world.master {
+				break
+			}
+		}
+	}
+	clusterPort := cluster.Section("SHARD").Key("master_port").MustInt(0)
+	if automatic {
+		clusterPort = 10889
+	}
+	if clusterPort > 0 && masterWorldID != "" {
+		requests = append(requests, topology.PortRequest{WorldID: masterWorldID, Shard: masterShard, Purpose: topology.PortClusterMaster, Preferred: clusterPort, Strict: !automatic})
+	}
+	serverPort, authPort, steamMasterPort := 10999, 8767, 27017
+	for _, world := range worlds {
+		if !automatic {
+			serverPort = world.config.Section("NETWORK").Key("server_port").MustInt(0)
+			authPort = world.config.Section("STEAM").Key("authentication_port").MustInt(0)
+			steamMasterPort = world.config.Section("STEAM").Key("master_server_port").MustInt(0)
+		}
+		worldID := rooms.EncodeID(world.directory)
+		for _, item := range []struct {
+			purpose topology.PortPurpose
+			port    int
+		}{{topology.PortDSTServer, serverPort}, {topology.PortSteamAuth, authPort}, {topology.PortSteamMasterServer, steamMasterPort}} {
+			if item.port > 0 {
+				requests = append(requests, topology.PortRequest{WorldID: worldID, Shard: world.directory, Purpose: item.purpose, Preferred: item.port, Strict: !automatic})
+			}
+		}
+		if automatic {
+			serverPort++
+			authPort++
+			steamMasterPort++
+		}
+	}
+	if len(requests) == 0 {
+		return nil, ErrPortConflict
+	}
+	return requests, nil
+}
+
+func applyAllocatedNetworkConfiguration(root string, reservations []topology.PortReservation) error {
+	clusterPath := filepath.Join(root, "cluster.ini")
+	cluster, err := ini.Load(clusterPath)
+	if err != nil {
+		return err
+	}
+	worlds, err := readNetworkWorlds(root)
+	if err != nil {
+		return err
+	}
+	worldByID := make(map[string]*networkWorld, len(worlds))
+	for index := range worlds {
+		worldByID[rooms.EncodeID(worlds[index].directory)] = &worlds[index]
+	}
+	clusterChanged := false
+	changedWorlds := make(map[string]bool)
+	for _, reservation := range reservations {
+		if reservation.Purpose == topology.PortClusterMaster {
+			cluster.Section("SHARD").Key("master_port").SetValue(fmt.Sprintf("%d", reservation.Port))
+			clusterChanged = true
+			continue
+		}
+		world := worldByID[reservation.WorldID]
+		if world == nil {
+			return ErrInvalidRequest
+		}
+		switch reservation.Purpose {
+		case topology.PortDSTServer:
+			world.config.Section("NETWORK").Key("server_port").SetValue(fmt.Sprintf("%d", reservation.Port))
+		case topology.PortSteamAuth:
+			world.config.Section("STEAM").Key("authentication_port").SetValue(fmt.Sprintf("%d", reservation.Port))
+		case topology.PortSteamMasterServer:
+			world.config.Section("STEAM").Key("master_server_port").SetValue(fmt.Sprintf("%d", reservation.Port))
+		default:
+			return ErrInvalidRequest
+		}
+		changedWorlds[reservation.WorldID] = true
+	}
+	if clusterChanged {
+		if err := cluster.SaveTo(clusterPath); err != nil {
 			return err
 		}
-		return allocateNetworkConfiguration(staging, used)
-	default:
-		return ErrInvalidRequest
+		if err := os.Chmod(clusterPath, 0640); err != nil {
+			return err
+		}
 	}
+	for worldID := range changedWorlds {
+		world := worldByID[worldID]
+		if err := world.config.SaveTo(world.path); err != nil {
+			return err
+		}
+		if err := os.Chmod(world.path, 0640); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) reconcileMods(ctx context.Context, candidate Candidate, policy ModPolicy) ([]string, []Diagnostic, error) {

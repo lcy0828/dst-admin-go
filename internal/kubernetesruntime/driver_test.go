@@ -12,14 +12,16 @@ import (
 )
 
 type memoryClient struct {
-	observation Observation
-	observeErr  error
-	applyErr    error
-	applied     *TypedMutation
-	applyResult *Observation
+	observation  Observation
+	observeErr   error
+	observeCalls int
+	applyErr     error
+	applied      *TypedMutation
+	applyResult  *Observation
 }
 
 func (client *memoryClient) Observe(context.Context, ShardRef) (Observation, error) {
+	client.observeCalls++
 	return client.observation, client.observeErr
 }
 
@@ -149,6 +151,22 @@ func TestProviderConfigurationIsDefensivelyCopied(t *testing.T) {
 	copy.ComputeProfiles["general"].NodeSelector["dst-admin.io/runtime"] = "also-changed"
 	if got := driver.Provider().ComputeProfiles["general"].NodeSelector["dst-admin.io/runtime"]; got != "enabled" {
 		t.Fatalf("Provider node selector was mutated: %q", got)
+	}
+}
+
+func TestObserveRejectsInvalidShardBeforeCallingKubernetes(t *testing.T) {
+	provider := testProvider()
+	client := &memoryClient{}
+	driver, err := NewDriver(provider, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = driver.Observe(context.Background(), ShardRef{ProviderID: provider.ID, RoomID: "room", WorldID: ""})
+	if !errors.Is(err, ErrObservation) {
+		t.Fatalf("Observe error = %v", err)
+	}
+	if client.observeCalls != 0 {
+		t.Fatalf("invalid Shard triggered %d Kubernetes calls", client.observeCalls)
 	}
 }
 

@@ -26,6 +26,7 @@ tags:
   - name: WorldState
   - name: Automation
   - name: Agents
+  - name: Kubernetes
   - name: Topology
   - name: Containers
   - name: Jobs
@@ -2961,6 +2962,51 @@ paths:
       responses:
         "200": { description: Imported rule count and the applied preview, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleMigrationResultEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
+  /runtime-providers/kubernetes:
+    get:
+      tags: [Kubernetes]
+      operationId: getExperimentalKubernetesRuntimeProvider
+      summary: Inspect the default-off experimental Kubernetes Provider and its read-only capabilities
+      description: This endpoint is always registered. Configuration failures degrade only this Provider; they do not disable local or Agent runtimes.
+      responses:
+        "200": { description: Experimental Provider state, content: { application/json: { schema: { $ref: "#/components/schemas/KubernetesRuntimeServiceEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /runtime-providers/kubernetes/{providerId}/shards/observe:
+    parameters: [{ $ref: "#/components/parameters/KubernetesProviderID" }]
+    post:
+      tags: [Kubernetes]
+      operationId: observeExperimentalKubernetesShard
+      summary: Observe the fixed managed resources for one Kubernetes Shard
+      description: Performs namespace-scoped Kubernetes GET requests only. It cannot exec a Pod, read Secrets, or mutate cluster state.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KubernetesShardObserveInput" }
+      responses:
+        "200": { description: Typed resource observation, content: { application/json: { schema: { $ref: "#/components/schemas/KubernetesObservationEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /runtime-providers/kubernetes/{providerId}/shards/preflight:
+    parameters: [{ $ref: "#/components/parameters/KubernetesProviderID" }]
+    post:
+      tags: [Kubernetes]
+      operationId: preflightExperimentalKubernetesShard
+      summary: Observe one Shard and preview its fixed typed resource plan
+      description: Returns a generated plan only when all safety gates pass. applyAllowed is always false and no Apply operation is exposed.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KubernetesPreflightInput" }
+      responses:
+        "200": { description: Observation, safety report, and optional server-generated typed plan, content: { application/json: { schema: { $ref: "#/components/schemas/KubernetesPreviewEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /runtime-targets:
     get:
       tags: [Agents]
@@ -3349,6 +3395,14 @@ components:
       schema:
         type: string
         pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+    KubernetesProviderID:
+      name: providerId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
     AnnouncementID:
       name: announcementId
       in: path
@@ -7210,6 +7264,299 @@ components:
     AgentStatus:
       type: string
       enum: [online, offline]
+    KubernetesRuntimeService:
+      type: object
+      additionalProperties: false
+      required: [release, enabled, configured, status, applyAllowed, features, safetyGates]
+      properties:
+        release: { type: string, const: experimental }
+        enabled: { type: boolean, description: Controlled by DST_ADMIN_KUBERNETES_EXPERIMENTAL_ENABLED and false by default }
+        configured: { type: boolean }
+        status: { type: string, enum: [disabled, configuration_required, available] }
+        applyAllowed: { type: boolean, const: false }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        provider: { $ref: "#/components/schemas/KubernetesProviderSummary" }
+        features:
+          type: array
+          items: { $ref: "#/components/schemas/KubernetesFeature" }
+        safetyGates:
+          type: array
+          items: { $ref: "#/components/schemas/KubernetesSafetyGate" }
+    KubernetesRuntimeServiceEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/KubernetesRuntimeService" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    KubernetesFeature:
+      type: object
+      additionalProperties: false
+      required: [id, available]
+      properties:
+        id: { type: string, enum: [observe, preflight, typed_plan, apply, lifecycle, console, mods, backup_restore] }
+        available: { type: boolean }
+        code: { type: string }
+    KubernetesSafetyGate:
+      type: object
+      additionalProperties: false
+      required: [id, satisfied]
+      properties:
+        id: { type: string, enum: [lease_fencing_admission, lease_aware_supervisor, pod_uid_ownership, pvc_uid_ownership, network_policy, secondary_master_dns, published_udp, exclusive_cpu] }
+        satisfied: { type: boolean }
+    KubernetesProviderSummary:
+      type: object
+      additionalProperties: false
+      required: [id, namespace, runtimeImage, maximumObservationSeconds, capabilities, storageProfiles, computeProfiles]
+      properties:
+        id: { type: string }
+        namespace: { type: string }
+        runtimeImage: { type: string, pattern: '^.+@sha256:[a-f0-9]{64}$' }
+        maximumObservationSeconds: { type: integer, format: int64, minimum: 1, maximum: 300 }
+        capabilities: { $ref: "#/components/schemas/KubernetesCapabilities" }
+        storageProfiles:
+          type: array
+          items: { $ref: "#/components/schemas/KubernetesStorageProfile" }
+        computeProfiles:
+          type: array
+          items: { $ref: "#/components/schemas/KubernetesComputeProfile" }
+    KubernetesCapabilities:
+      type: object
+      additionalProperties: false
+      required: [leaseFencingAdmission, leaseAwareRuntimeSupervisor, podUidOwnershipGate, pvcUidOwnershipGate, networkPolicyEnforced, secondaryMasterDnsVerified, udpNodePortVerified, udpLoadBalancerVerified, publishedUdpEndpointVerified, cpuManagerStatic, fullPhysicalCoreOnly, smtTopologyKnown]
+      properties:
+        leaseFencingAdmission: { type: boolean }
+        leaseAwareRuntimeSupervisor: { type: boolean }
+        podUidOwnershipGate: { type: boolean }
+        pvcUidOwnershipGate: { type: boolean }
+        networkPolicyEnforced: { type: boolean }
+        secondaryMasterDnsVerified: { type: boolean }
+        udpNodePortVerified: { type: boolean }
+        udpLoadBalancerVerified: { type: boolean }
+        publishedUdpEndpointVerified: { type: boolean }
+        cpuManagerStatic: { type: boolean }
+        fullPhysicalCoreOnly: { type: boolean }
+        smtTopologyKnown: { type: boolean }
+    KubernetesStorageProfile:
+      type: object
+      additionalProperties: false
+      required: [id, storageClassName, accessMode, reclaimPolicy, bindingMode, dynamicProvisioning, minimumGiB, maximumGiB, snapshotCapable]
+      properties:
+        id: { type: string }
+        storageClassName: { type: string }
+        accessMode: { type: string, enum: [ReadWriteOnce, ReadWriteOncePod] }
+        reclaimPolicy: { type: string, const: Retain }
+        bindingMode: { type: string, enum: [Immediate, WaitForFirstConsumer] }
+        dynamicProvisioning: { type: boolean }
+        minimumGiB: { type: integer, format: int64, minimum: 1 }
+        maximumGiB: { type: integer, format: int64, minimum: 1 }
+        snapshotCapable: { type: boolean }
+    KubernetesComputeProfile:
+      type: object
+      additionalProperties: false
+      required: [id]
+      properties:
+        id: { type: string }
+        nodeSelector: { type: object, additionalProperties: { type: string } }
+    KubernetesShardRef:
+      type: object
+      additionalProperties: false
+      required: [providerId, roomId, worldId]
+      properties:
+        providerId: { type: string }
+        roomId: { type: string, minLength: 1 }
+        worldId: { type: string, minLength: 1 }
+    KubernetesShardObserveInput:
+      type: object
+      additionalProperties: false
+      required: [roomId, worldId]
+      properties:
+        roomId: { type: string, minLength: 1 }
+        worldId: { type: string, minLength: 1 }
+    KubernetesLeaseProof:
+      type: object
+      additionalProperties: false
+      required: [operationId, leaseId, fencingToken, topologyRevision, expiresAt]
+      properties:
+        operationId: { type: string, minLength: 1 }
+        leaseId: { type: string, minLength: 1 }
+        fencingToken: { type: integer, format: int64, minimum: 1 }
+        topologyRevision: { type: string, minLength: 1 }
+        expiresAt: { type: string, format: date-time }
+    KubernetesCPURequest:
+      type: object
+      additionalProperties: false
+      required: [policy, requestMilli, limitMilli, memoryRequestMiB, memoryLimitMiB]
+      properties:
+        policy: { type: string, enum: [shared, exclusive] }
+        requestMilli: { type: integer, format: int64, minimum: 1 }
+        limitMilli: { type: integer, format: int64, minimum: 1 }
+        memoryRequestMiB: { type: integer, format: int64, minimum: 1 }
+        memoryLimitMiB: { type: integer, format: int64, minimum: 1 }
+    KubernetesNetworkRequest:
+      type: object
+      additionalProperties: false
+      required: [exposure, ports]
+      properties:
+        exposure: { type: string, enum: [internal, node_port, load_balancer] }
+        ports:
+          type: object
+          additionalProperties: { type: integer, format: int32, minimum: 1, maximum: 65535 }
+          description: Must contain dst_server, cluster_master, steam_authentication, and steam_master_server.
+        nodePorts:
+          type: object
+          additionalProperties: { type: integer, format: int32, minimum: 1, maximum: 65535 }
+        advertiseAddress: { type: string }
+    KubernetesStorageRequest:
+      type: object
+      additionalProperties: false
+      required: [profileId, sizeGiB]
+      properties:
+        profileId: { type: string }
+        sizeGiB: { type: integer, format: int64, minimum: 1 }
+    KubernetesPreflightInput:
+      type: object
+      additionalProperties: false
+      required: [action, ref, lease]
+      properties:
+        action: { type: string, enum: [provision, start, stop] }
+        ref: { $ref: "#/components/schemas/KubernetesShardRef" }
+        role: { type: string, enum: [master, secondary] }
+        clusterName: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$' }
+        shardDirectory: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$' }
+        masterWorldId: { type: string }
+        computeProfileId: { type: string }
+        lease: { $ref: "#/components/schemas/KubernetesLeaseProof" }
+        cpu: { $ref: "#/components/schemas/KubernetesCPURequest" }
+        network: { $ref: "#/components/schemas/KubernetesNetworkRequest" }
+        storage: { $ref: "#/components/schemas/KubernetesStorageRequest" }
+        expectedPodUid: { type: string }
+        expectedPvcUid: { type: string }
+    KubernetesResourceObservation:
+      type: object
+      additionalProperties: false
+      required: [exists]
+      properties:
+        exists: { type: boolean }
+        uid: { type: string }
+        resourceVersion: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+        annotations: { type: object, additionalProperties: { type: string } }
+    KubernetesPodObservation:
+      type: object
+      additionalProperties: false
+      required: [exists]
+      properties:
+        exists: { type: boolean }
+        uid: { type: string }
+        resourceVersion: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+        annotations: { type: object, additionalProperties: { type: string } }
+        phase: { type: string }
+        deletionTimestamp: { type: string, format: date-time }
+    KubernetesPVCObservation:
+      type: object
+      additionalProperties: false
+      required: [exists]
+      properties:
+        exists: { type: boolean }
+        uid: { type: string }
+        resourceVersion: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+        annotations: { type: object, additionalProperties: { type: string } }
+        phase: { type: string }
+        storageClassName: { type: string }
+        accessModes: { type: array, items: { type: string, enum: [ReadWriteOnce, ReadWriteOncePod] } }
+        reclaimPolicy: { type: string, enum: [Retain] }
+        capacityGiB: { type: integer, format: int64, minimum: 0 }
+    KubernetesCPUObservation:
+      type: object
+      additionalProperties: false
+      required: [computeProfileId, physicalCores, logicalProcessors, threadsPerCore, allocatedCpuRequestMilli, allocatedExclusivePhysicalCores, systemReservedPhysicalCores, observedAt, stale]
+      properties:
+        computeProfileId: { type: string }
+        physicalCores: { type: integer, minimum: 0 }
+        logicalProcessors: { type: integer, minimum: 0 }
+        threadsPerCore: { type: integer, minimum: 0 }
+        allocatedCpuRequestMilli: { type: integer, format: int64, minimum: 0 }
+        allocatedExclusivePhysicalCores: { type: integer, minimum: 0 }
+        systemReservedPhysicalCores: { type: integer, minimum: 0 }
+        observedAt: { type: string, format: date-time }
+        stale: { type: boolean }
+    KubernetesObservation:
+      type: object
+      additionalProperties: false
+      required: [ref, statefulSet, pod, pvc, service, publishedService, networkPolicy, cpu, observedAt, stale]
+      properties:
+        ref: { $ref: "#/components/schemas/KubernetesShardRef" }
+        statefulSet: { $ref: "#/components/schemas/KubernetesResourceObservation" }
+        pod: { $ref: "#/components/schemas/KubernetesPodObservation" }
+        pvc: { $ref: "#/components/schemas/KubernetesPVCObservation" }
+        service: { $ref: "#/components/schemas/KubernetesResourceObservation" }
+        publishedService: { $ref: "#/components/schemas/KubernetesResourceObservation" }
+        networkPolicy: { $ref: "#/components/schemas/KubernetesResourceObservation" }
+        cpu: { $ref: "#/components/schemas/KubernetesCPUObservation" }
+        observedAt: { type: string, format: date-time }
+        stale: { type: boolean }
+    KubernetesObservationEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/KubernetesObservation" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    KubernetesPreflightIssue:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: { type: string }
+        field: { type: string }
+        message: { type: string }
+    KubernetesPreflightReport:
+      type: object
+      additionalProperties: false
+      required: [release, ready, issues, warnings]
+      properties:
+        release: { type: string, const: experimental }
+        ready: { type: boolean }
+        issues: { type: array, items: { $ref: "#/components/schemas/KubernetesPreflightIssue" } }
+        warnings: { type: array, items: { $ref: "#/components/schemas/KubernetesPreflightIssue" } }
+    KubernetesTypedMutationPreview:
+      type: object
+      additionalProperties: false
+      readOnly: true
+      description: A server-generated, fixed typed plan. It is never accepted by an Apply API.
+      required: [release, action, ref, namespace, lease, preconditions, statefulSet]
+      properties:
+        release: { type: string, const: experimental }
+        action: { type: string, enum: [provision, start, stop] }
+        ref: { $ref: "#/components/schemas/KubernetesShardRef" }
+        namespace: { type: string }
+        lease: { $ref: "#/components/schemas/KubernetesLeaseProof" }
+        preconditions: { type: object, readOnly: true, additionalProperties: { type: string } }
+        statefulSet: { type: object, readOnly: true, additionalProperties: true }
+        pvc: { type: object, readOnly: true, additionalProperties: true }
+        service: { type: object, readOnly: true, additionalProperties: true }
+        publishedService: { type: object, readOnly: true, additionalProperties: true }
+        networkPolicy: { type: object, readOnly: true, additionalProperties: true }
+    KubernetesPreview:
+      type: object
+      additionalProperties: false
+      required: [observation, preflight, applyAllowed]
+      properties:
+        observation: { $ref: "#/components/schemas/KubernetesObservation" }
+        preflight: { $ref: "#/components/schemas/KubernetesPreflightReport" }
+        mutation: { $ref: "#/components/schemas/KubernetesTypedMutationPreview" }
+        applyAllowed: { type: boolean, const: false }
+    KubernetesPreviewEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/KubernetesPreview" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     RuntimeKind:
       type: string
       enum: [local, agent]

@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// Driver constructs only fixed, typed Kubernetes mutations. It is not wired
-// to the production runtime router while the capability remains experimental.
+// Driver constructs only fixed, typed Kubernetes mutations. The production
+// experimental API exposes Observe and Preview, never Apply.
 type Driver struct {
 	provider Provider
 	client   Client
@@ -32,16 +32,57 @@ func (d *Driver) Preflight(request Request, observation Observation) PreflightRe
 	return preflight(d.provider, request, observation, d.now().UTC())
 }
 
-func (d *Driver) Plan(ctx context.Context, request Request) (TypedMutation, error) {
-	observation, err := d.client.Observe(ctx, request.Ref)
+func (d *Driver) Observe(ctx context.Context, ref ShardRef) (Observation, error) {
+	observation, err := d.observe(ctx, ref)
 	if err != nil {
-		return TypedMutation{}, fmt.Errorf("%w: observe Shard: %v", ErrObservation, err)
+		return Observation{}, err
+	}
+	if err := validateAppliedObservation(d.provider, ref, observation); err != nil {
+		return Observation{}, err
+	}
+	return observation, nil
+}
+
+func (d *Driver) observe(ctx context.Context, ref ShardRef) (Observation, error) {
+	if ref.ProviderID != d.provider.ID {
+		return Observation{}, fmt.Errorf("%w: provider scope mismatch", ErrObservation)
+	}
+	if !validOpaqueID(ref.RoomID) || !validOpaqueID(ref.WorldID) {
+		return Observation{}, fmt.Errorf("%w: room and world ids are required", ErrObservation)
+	}
+	observation, err := d.client.Observe(ctx, ref)
+	if err != nil {
+		return Observation{}, fmt.Errorf("%w: observe Shard: %v", ErrObservation, err)
+	}
+	if observation.Ref != ref {
+		return Observation{}, fmt.Errorf("%w: observed Shard is outside the requested scope", ErrObservation)
+	}
+	return observation, nil
+}
+
+func (d *Driver) Preview(ctx context.Context, request Request) (Preview, error) {
+	observation, err := d.observe(ctx, request.Ref)
+	if err != nil {
+		return Preview{}, err
 	}
 	report := d.Preflight(request, observation)
-	if !report.Ready {
-		return TypedMutation{}, &PreflightError{Report: report}
+	result := Preview{Observation: observation, Preflight: report, ApplyAllowed: false}
+	if report.Ready {
+		mutation := buildMutation(d.provider, request, observation)
+		result.Mutation = &mutation
 	}
-	return buildMutation(d.provider, request, observation), nil
+	return result, nil
+}
+
+func (d *Driver) Plan(ctx context.Context, request Request) (TypedMutation, error) {
+	preview, err := d.Preview(ctx, request)
+	if err != nil {
+		return TypedMutation{}, err
+	}
+	if !preview.Preflight.Ready || preview.Mutation == nil {
+		return TypedMutation{}, &PreflightError{Report: preview.Preflight}
+	}
+	return *preview.Mutation, nil
 }
 
 func (d *Driver) Apply(ctx context.Context, request Request) (Observation, error) {

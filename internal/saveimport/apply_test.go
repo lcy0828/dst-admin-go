@@ -14,6 +14,7 @@ import (
 	modapi "dont/internal/mods"
 	"dont/internal/rooms"
 	"dont/internal/runtimeguard"
+	"dont/internal/topology"
 
 	"github.com/go-ini/ini"
 	"github.com/jinzhu/gorm"
@@ -43,6 +44,28 @@ func (r *applyRuntime) Send(context.Context, string, string, string) error { ret
 type applyModDownloader struct {
 	root      string
 	downloads []string
+}
+
+type applyPortAllocator struct {
+	allocation topology.PortAllocation
+	request    topology.PortAllocationRequest
+	activated  string
+	released   string
+}
+
+func (allocator *applyPortAllocator) ReservePorts(_ context.Context, request topology.PortAllocationRequest) (topology.PortAllocation, error) {
+	allocator.request = request
+	return allocator.allocation, nil
+}
+
+func (allocator *applyPortAllocator) ActivatePorts(_ context.Context, leaseID string) error {
+	allocator.activated = leaseID
+	return nil
+}
+
+func (allocator *applyPortAllocator) ReleasePorts(_ context.Context, leaseID string) error {
+	allocator.released = leaseID
+	return nil
 }
 
 func (d *applyModDownloader) Download(_ context.Context, request modapi.DownloadRequest, _ io.Writer) (modapi.ActionResult, error) {
@@ -170,6 +193,55 @@ func TestApplyCreatesManagedRoomAndAllocatesConflictFreePorts(t *testing.T) {
 	modContent, err := os.ReadFile(filepath.Join(app.saveRoot, "Imported", "Master", "modoverrides.lua"))
 	if err != nil || !bytes.Contains(modContent, []byte("workshop-1392778117")) {
 		t.Fatalf("mod config = %q, %v", modContent, err)
+	}
+}
+
+func TestApplyUsesDurablePortLeaseAndActivatesAfterPublication(t *testing.T) {
+	app := newApplyTestApp(t)
+	archive := createZIP(t, []archiveTestEntry{
+		{name: "Cluster_1/cluster.ini", content: clusterINI("Source Room")},
+		{name: "Cluster_1/cluster_token.txt", content: "source-token-1234567890\n"},
+		{name: "Cluster_1/Master/server.ini", content: serverINI(true, 1, 10999)},
+		{name: "Cluster_1/Master/save/session/source/0000000001", content: "save"},
+	})
+	value, err := app.service.Upload(context.Background(), "带端口租约", "Cluster_1.zip", bytes.NewReader(archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err = app.service.Analyze(context.Background(), value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	masterID := rooms.EncodeID("Master")
+	allocator := &applyPortAllocator{allocation: topology.PortAllocation{LeaseID: "lease-import", Reservations: []topology.PortReservation{
+		{WorldID: masterID, Purpose: topology.PortClusterMaster, Port: 11889},
+		{WorldID: masterID, Purpose: topology.PortDSTServer, Port: 11999},
+		{WorldID: masterID, Purpose: topology.PortSteamAuth, Port: 9767},
+		{WorldID: masterID, Purpose: topology.PortSteamMasterServer, Port: 28017},
+	}}}
+	if err := app.service.ConfigurePortAllocator(allocator); err != nil {
+		t.Fatal(err)
+	}
+	result, err := app.service.Apply(context.Background(), value.ID, "job", ApplyRequest{
+		CandidateID: value.Manifest.Candidates[0].ID, Mode: ApplyModeNew, DirectoryName: "ImportedLease",
+		RoomName: "Imported Lease", TokenPolicy: TokenSource, NetworkPolicy: NetworkAuto, ModPolicy: ModsPreserve,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allocator.activated != "lease-import" || allocator.released != "" || allocator.request.RoomID != result.RoomID || allocator.request.TargetID != "local" {
+		t.Fatalf("allocator=%#v result=%#v", allocator, result)
+	}
+	cluster, err := ini.Load(filepath.Join(app.saveRoot, "ImportedLease", "cluster.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := ini.Load(filepath.Join(app.saveRoot, "ImportedLease", "Master", "server.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cluster.Section("SHARD").Key("master_port").MustInt(0) != 11889 || server.Section("NETWORK").Key("server_port").MustInt(0) != 11999 {
+		t.Fatalf("allocated configuration cluster=%s server=%s", cluster.Section("SHARD").Key("master_port").String(), server.Section("NETWORK").Key("server_port").String())
 	}
 }
 

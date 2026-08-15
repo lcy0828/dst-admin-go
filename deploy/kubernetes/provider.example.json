@@ -1,0 +1,62 @@
+{
+  "provider": {
+    "id": "k8s-lab",
+    "namespace": "dst-admin-runtime",
+    "runtimeServiceAccountName": "dst-admin-runtime",
+    "runtimeImage": "registry.example.com/dst/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "credentialSecretPrefix": "dst-room",
+    "minimumLeaseRemaining": 30000000000,
+    "maximumObservationAge": 30000000000,
+    "nodePortRange": {
+      "first": 30000,
+      "last": 32767
+    },
+    "resources": {
+      "minimumCpuRequestMilli": 250,
+      "maximumCpuRequestMilli": 8000,
+      "minimumMemoryMiB": 512,
+      "maximumMemoryMiB": 16384
+    },
+    "capabilities": {
+      "leaseFencingAdmission": false,
+      "leaseAwareRuntimeSupervisor": false,
+      "podUidOwnershipGate": false,
+      "pvcUidOwnershipGate": false,
+      "networkPolicyEnforced": false,
+      "secondaryMasterDnsVerified": false,
+      "udpNodePortVerified": false,
+      "udpLoadBalancerVerified": false,
+      "publishedUdpEndpointVerified": false,
+      "cpuManagerStatic": false,
+      "fullPhysicalCoreOnly": false,
+      "smtTopologyKnown": false
+    },
+    "storageProfiles": {
+      "retained": {
+        "id": "retained",
+        "storageClassName": "local-retain",
+        "accessMode": "ReadWriteOncePod",
+        "reclaimPolicy": "Retain",
+        "bindingMode": "WaitForFirstConsumer",
+        "dynamicProvisioning": true,
+        "minimumGiB": 10,
+        "maximumGiB": 200,
+        "snapshotCapable": false
+      }
+    },
+    "computeProfiles": {
+      "general": {
+        "id": "general",
+        "nodeSelector": {
+          "dst-admin.io/runtime": "enabled"
+        }
+      }
+    }
+  },
+  "connection": {
+    "apiServer": "https://127.0.0.1:6443",
+    "bearerTokenFile": "/var/lib/dst-admin/kubernetes/provider.token",
+    "caFile": "/var/lib/dst-admin/kubernetes/ca.crt",
+    "timeoutSeconds": 15
+  }
+}
