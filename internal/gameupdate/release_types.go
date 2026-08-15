@@ -27,6 +27,7 @@ var (
 	ErrDesiredVersionChanged  = errors.New("desired Steam build changed")
 	ErrReleaseRecoveryNeeded  = errors.New("game release requires recovery")
 	ErrReleaseTopologyChanged = errors.New("game release topology changed")
+	ErrReleaseConfirmation    = errors.New("game release confirmation is invalid")
 )
 
 type ReleaseStage string
@@ -69,6 +70,13 @@ type ReleasePolicyInput struct {
 type ReleasePreviewRequest struct {
 	DesiredVersion string             `json:"desiredVersion,omitempty"`
 	Policy         ReleasePolicyInput `json:"policy"`
+}
+
+type ReleaseCreateRequest struct {
+	DesiredVersion string             `json:"desiredVersion,omitempty"`
+	Policy         ReleasePolicyInput `json:"policy"`
+	PlanHash       string             `json:"planHash"`
+	Confirmation   string             `json:"confirmation"`
 }
 
 type ReleaseBlocker struct {
@@ -215,4 +223,8 @@ type ReleaseLeaseService interface {
 	Acquire(context.Context, string, string, time.Duration) (operationlease.Lease, error)
 	Renew(context.Context, operationlease.Lease, time.Duration) (operationlease.Lease, error)
 	Release(operationlease.Lease) error
+}
+
+type ReleaseProtectionService interface {
+	CreateProtection(context.Context, string, string, string, *operationlease.Lease) (string, error)
 }

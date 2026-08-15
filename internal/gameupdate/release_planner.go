@@ -83,7 +83,7 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 	}
 	plan := ReleasePlan{
 		Version: ReleasePlanVersion, DesiredVersion: desired, TopologyRevision: snapshot.TopologyRevision,
-		Policy: policy, Ready: true, CreatedAt: p.now().UTC(),
+		Policy: policy, Blockers: []ReleaseBlocker{}, Ready: true, CreatedAt: p.now().UTC(),
 	}
 	targets := make(map[string]*ReleaseInstallationPlan)
 	roomIDs := make(map[string]bool)
@@ -103,6 +103,7 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 				TargetID: targetID, TargetName: observed.Target.Name, InstallationID: installationID,
 				Online: observed.Target.Online || targetID == "local", InventoryFresh: observed.InventoryAvailable && !observed.InventoryStale,
 				Capabilities: normalizedReleaseStrings(observed.Target.Capabilities), DesiredVersion: desired, RequiredBytes: p.minimumFree,
+				Blockers: []ReleaseBlocker{},
 			}
 			targets[key] = target
 		}
@@ -201,9 +202,15 @@ func (p *ReleasePlanner) finishReleaseTarget(ctx context.Context, target *Releas
 }
 
 func calculateReleasePlanHash(plan ReleasePlan) (string, error) {
+	type canonicalShard struct {
+		RoomID, RoomDirectory, WorldID, WorldDirectory string
+		IsMaster                                       bool
+		TargetID, InstallationID, TopologyRevision     string
+		WasRunning                                     bool
+	}
 	type canonicalTarget struct {
 		TargetID, InstallationID, CurrentVersion, DesiredVersion string
-		Shards                                                   []ReleaseShardPlan
+		Shards                                                   []canonicalShard
 	}
 	payload := struct {
 		Version                          int
@@ -216,10 +223,19 @@ func calculateReleasePlanHash(plan ReleasePlan) (string, error) {
 		Policy: plan.Policy, AffectedRoomIDs: append([]string(nil), plan.AffectedRoomIDs...),
 	}
 	for _, target := range plan.Installations {
-		payload.Targets = append(payload.Targets, canonicalTarget{
+		canonical := canonicalTarget{
 			TargetID: target.TargetID, InstallationID: target.InstallationID, CurrentVersion: target.CurrentVersion,
-			DesiredVersion: target.DesiredVersion, Shards: append([]ReleaseShardPlan(nil), target.Shards...),
-		})
+			DesiredVersion: target.DesiredVersion,
+		}
+		for _, shard := range target.Shards {
+			canonical.Shards = append(canonical.Shards, canonicalShard{
+				RoomID: shard.RoomID, RoomDirectory: shard.RoomDirectory, WorldID: shard.WorldID,
+				WorldDirectory: shard.WorldDirectory, IsMaster: shard.IsMaster, TargetID: shard.TargetID,
+				InstallationID: shard.InstallationID, TopologyRevision: shard.TopologyRevision,
+				WasRunning: shard.WasRunning,
+			})
+		}
+		payload.Targets = append(payload.Targets, canonical)
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

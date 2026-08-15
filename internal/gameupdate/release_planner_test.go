@@ -167,6 +167,27 @@ func TestReleasePlannerRejectsChangedDesiredBuild(t *testing.T) {
 	}
 }
 
+func TestReleasePlanHashIgnoresObservedRuntimeStateButPreservesRestartIntent(t *testing.T) {
+	plan := readyReleasePlanForStore(t)
+	original := plan.PlanHash
+	plan.Installations[0].Shards[0].RuntimeState = "starting"
+	hash, err := calculateReleasePlanHash(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hash != original {
+		t.Fatalf("runtime observation changed plan hash: original=%s current=%s", original, hash)
+	}
+	plan.Installations[0].Shards[0].WasRunning = false
+	hash, err = calculateReleasePlanHash(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hash == original {
+		t.Fatal("restart intent did not change plan hash")
+	}
+}
+
 func TestReleaseStoreRecoversInterruptedStages(t *testing.T) {
 	db := openGameUpdateTestDB(t)
 	store := NewReleaseStore(db, "release_test_")

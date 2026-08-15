@@ -167,22 +167,30 @@ func (s *ReleaseStore) Save(value Release) (Release, error) {
 	}
 	for _, installation := range value.Installations {
 		record := releaseInstallationRecordFrom(value.ID, installation, value.CreatedAt)
-		if err := tx.Table(s.installationTable).Where("id = ? AND release_id = ?", record.ID, value.ID).Updates(map[string]interface{}{
+		result := tx.Table(s.installationTable).Where("id = ? AND release_id = ?", record.ID, value.ID).Updates(map[string]interface{}{
 			"stage": record.Stage, "before_version": record.BeforeVersion, "after_version": record.AfterVersion, "log": record.Log,
 			"error_code": record.ErrorCode, "error_message": record.ErrorMessage, "started_at": record.StartedAt,
 			"finished_at": record.FinishedAt, "updated_at": record.UpdatedAt,
-		}).Error; err != nil {
-			return rollback(err)
+		})
+		if result.Error != nil {
+			return rollback(result.Error)
+		}
+		if result.RowsAffected != 1 {
+			return rollback(ErrReleaseNotFound)
 		}
 	}
 	for _, shard := range value.Shards {
 		record := releaseShardRecordFrom(value.ID, shard, value.CreatedAt)
-		if err := tx.Table(s.shardTable).Where("id = ? AND release_id = ?", record.ID, value.ID).Updates(map[string]interface{}{
+		result := tx.Table(s.shardTable).Where("id = ? AND release_id = ?", record.ID, value.ID).Updates(map[string]interface{}{
 			"stage": record.Stage, "runtime_state": record.RuntimeState, "load_marker": record.LoadMarker,
 			"error_code": record.ErrorCode, "error_message": record.ErrorMessage, "stopped_at": record.StoppedAt,
 			"started_at": record.StartedAt, "load_confirmed_at": record.LoadConfirmedAt, "updated_at": record.UpdatedAt,
-		}).Error; err != nil {
-			return rollback(err)
+		})
+		if result.Error != nil {
+			return rollback(result.Error)
+		}
+		if result.RowsAffected != 1 {
+			return rollback(ErrReleaseNotFound)
 		}
 	}
 	if err := tx.Commit().Error; err != nil {
