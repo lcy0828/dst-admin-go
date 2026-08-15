@@ -241,6 +241,13 @@ func TestSchedulerSubmitsPersistentSnapshotJobAndAdvancesPolicy(t *testing.T) {
 			if getErr != nil {
 				t.Fatal(getErr)
 			}
+			if job.Status == jobs.StatusQueued || job.Status == jobs.StatusRunning {
+				if time.Now().After(deadline) {
+					t.Fatalf("snapshot job did not finish: %#v", job)
+				}
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
 			if job.Status != jobs.StatusSucceeded || policy.NextRunAt == nil {
 				t.Fatalf("job = %#v, policy = %#v", job, policy)
 			}
