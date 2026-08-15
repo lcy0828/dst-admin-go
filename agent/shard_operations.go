@@ -54,9 +54,10 @@ type rememberedShardOperation struct {
 }
 
 type shardRoomState struct {
-	FencingToken uint64                              `json:"fencing_token"`
-	LeaseID      string                              `json:"lease_id"`
-	Operations   map[string]rememberedShardOperation `json:"operations"`
+	FencingToken      uint64                                `json:"fencing_token"`
+	LeaseID           string                                `json:"lease_id"`
+	Operations        map[string]rememberedShardOperation   `json:"operations"`
+	RuntimeOperations map[string]rememberedRuntimeOperation `json:"runtime_operations,omitempty"`
 }
 
 type shardOperationState struct {
@@ -142,6 +143,11 @@ func cloneShardRoomState(value shardRoomState) shardRoomState {
 		operations[key] = operation
 	}
 	value.Operations = operations
+	runtimeOperations := make(map[string]rememberedRuntimeOperation, len(value.RuntimeOperations))
+	for key, operation := range value.RuntimeOperations {
+		runtimeOperations[key] = operation
+	}
+	value.RuntimeOperations = runtimeOperations
 	return value
 }
 
@@ -211,7 +217,7 @@ func (a *Agent) executeShardOperation(commandType string, request *shared.ShardO
 	if err := validateShardOwnership(installation, request.Cluster, request.Shard); err != nil {
 		return shared.ShardOperationResult{}, err
 	}
-	runtimeControl, err := a.shardRuntime(installation)
+	runtimeControl, err := a.runtimeControl(installation)
 	if err != nil {
 		return shared.ShardOperationResult{}, err
 	}
@@ -235,6 +241,20 @@ func (a *Agent) executeShardOperation(commandType string, request *shared.ShardO
 		return shared.ShardOperationResult{}, fmt.Errorf("保存 Agent 分片操作结果: %w", finishErr)
 	}
 	return result, operationErr
+}
+
+func (a *Agent) runtimeControl(installation RuntimeInstallation) (shardRuntimeControl, error) {
+	a.shardRuntimeMu.Lock()
+	defer a.shardRuntimeMu.Unlock()
+	if existing := a.shardRuntimes[installation.ID]; existing != nil {
+		return existing, nil
+	}
+	created, err := a.shardRuntime(installation)
+	if err != nil {
+		return nil, err
+	}
+	a.shardRuntimes[installation.ID] = created
+	return created, nil
 }
 
 func validateShardOperationRequest(commandType string, request shared.ShardOperationRequest, timeout int, now time.Time) error {

@@ -27,7 +27,7 @@ import (
 
 // 常量
 const (
-	AgentVersion = "2.2.0"
+	AgentVersion = "2.3.0"
 	// 心跳间隔
 	HeartbeatInterval = 30 * time.Second
 	// 重连间隔
@@ -62,6 +62,8 @@ type Agent struct {
 	keyManager     *shared.KeyManager // 添加密钥管理器
 	shardState     *shardOperationState
 	shardRuntime   shardRuntimeFactory
+	shardRuntimeMu sync.Mutex
+	shardRuntimes  map[string]shardRuntimeControl
 	now            func() time.Time
 }
 
@@ -180,6 +182,7 @@ func NewAgent(config *Config) (*Agent, error) {
 	}
 	agent.shardState = state
 	agent.shardRuntime = newTmuxShardRuntime
+	agent.shardRuntimes = make(map[string]shardRuntimeControl)
 
 	return agent, nil
 }
@@ -722,6 +725,21 @@ func (a *Agent) handleCommand(msg *shared.Message) {
 			if !success {
 				exitCode = 1
 			}
+		} else if shared.IsRuntimeAction(shared.RuntimeAction(cmdPayload.Type)) {
+			result, operationErr := a.executeRuntimeOperation(cmdPayload.Type, cmdPayload.RuntimeOperation, cmdPayload.Timeout)
+			encoded, encodeErr := json.Marshal(result)
+			if encodeErr != nil {
+				errMsg = encodeErr.Error()
+			} else {
+				output = string(encoded)
+			}
+			if operationErr != nil {
+				errMsg = operationErr.Error()
+			}
+			success = operationErr == nil && encodeErr == nil
+			if !success {
+				exitCode = 1
+			}
 		} else {
 			errMsg = fmt.Sprintf("不支持的命令类型: %s", cmdPayload.Type)
 			success = false
@@ -1009,7 +1027,9 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 		"runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read",
 	}
 	if len(a.Config.RuntimeInstallations) > 0 && runtime.GOOS != "windows" {
-		capabilities = append(capabilities, "shard.control.v1")
+		capabilities = append(capabilities,
+			"shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1",
+		)
 	}
 	info := map[string]interface{}{
 		"hostname":      "unknown",

@@ -43,3 +43,23 @@ func TestRuntimeTargetBoundaryKeepsLocalDefaultAndBlocksRemoteFallthrough(t *tes
 	router.ServeHTTP(response, request)
 	assertStatus(t, response, http.StatusOK)
 }
+
+func TestRuntimeTargetBoundaryAllowsPlacementAwareRuntimeDomains(t *testing.T) {
+	router := gin.New()
+	router.Use(RequestContext(), RuntimeTargetBoundary())
+	for _, path := range []string{
+		"/api/v2/rooms/room-one/worlds/master/logs",
+		"/api/v2/rooms/room-one/worlds/master/logs/events",
+		"/api/v2/rooms/room-one/worlds/master/commands",
+		"/api/v2/rooms/room-one/structured-logs",
+	} {
+		router.GET(path, func(c *gin.Context) { c.Status(http.StatusNoContent) })
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set(RuntimeTargetHeader, "agent:node-one")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("path=%s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+}

@@ -66,11 +66,12 @@ type RegisterAckPayload struct {
 
 // CommandPayload 是命令消息的负载
 type CommandPayload struct {
-	CommandID      string                 `json:"command_id"` // 命令ID
-	Type           string                 `json:"type"`       // 固定领域动作；不接受任意 Shell
-	Content        string                 `json:"content,omitempty"`
-	ShardOperation *ShardOperationRequest `json:"shard_operation,omitempty"`
-	Timeout        int                    `json:"timeout"` // 超时时间(秒)
+	CommandID        string                   `json:"command_id"` // 命令ID
+	Type             string                   `json:"type"`       // 固定领域动作；不接受任意 Shell
+	Content          string                   `json:"content,omitempty"`
+	ShardOperation   *ShardOperationRequest   `json:"shard_operation,omitempty"`
+	RuntimeOperation *RuntimeOperationRequest `json:"runtime_operation,omitempty"`
+	Timeout          int                      `json:"timeout"` // 超时时间(秒)
 }
 
 // CommandResponsePayload 是命令响应消息的负载

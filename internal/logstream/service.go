@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"dont/internal/rooms"
+	"dont/internal/runtimefiles"
+	"dont/shared"
 )
 
 const (
@@ -49,13 +51,18 @@ type Event struct {
 	Snapshot *Snapshot `json:"snapshot,omitempty"`
 }
 
+type DistributedReader interface {
+	ReadLogs(context.Context, string, string, shared.RuntimeLogRequest) (shared.RuntimeLogChunk, error)
+}
+
 type Service struct {
 	root         string
 	rooms        RoomCatalog
 	pollInterval time.Duration
+	distributed  DistributedReader
 }
 
-func NewService(saveRoot string, roomCatalog RoomCatalog) (*Service, error) {
+func NewService(saveRoot string, roomCatalog RoomCatalog, readers ...DistributedReader) (*Service, error) {
 	absolute, err := filepath.Abs(strings.TrimSpace(saveRoot))
 	if err != nil || strings.TrimSpace(saveRoot) == "" {
 		return nil, fmt.Errorf("resolve save root: %w", err)
@@ -63,10 +70,17 @@ func NewService(saveRoot string, roomCatalog RoomCatalog) (*Service, error) {
 	if roomCatalog == nil {
 		return nil, errors.New("room catalog is required")
 	}
-	return &Service{root: filepath.Clean(absolute), rooms: roomCatalog, pollInterval: 500 * time.Millisecond}, nil
+	service := &Service{root: filepath.Clean(absolute), rooms: roomCatalog, pollInterval: 500 * time.Millisecond}
+	if len(readers) > 0 {
+		service.distributed = readers[0]
+	}
+	return service, nil
 }
 
 func (s *Service) Snapshot(roomID, worldID string, limit int, query string) (Snapshot, error) {
+	if s.distributed != nil {
+		return s.distributedSnapshot(roomID, worldID, limit, query)
+	}
 	path, info, err := s.locate(roomID, worldID)
 	if err != nil {
 		return Snapshot{}, err
@@ -100,6 +114,9 @@ func (s *Service) Open(roomID, worldID string) (*os.File, os.FileInfo, error) {
 func (s *Service) Follow(ctx context.Context, roomID, worldID string, tail int, emit func(Event) error) error {
 	if emit == nil {
 		return errors.New("log event emitter is required")
+	}
+	if s.distributed != nil {
+		return s.followDistributed(ctx, roomID, worldID, tail, emit)
 	}
 	path, info, err := s.locate(roomID, worldID)
 	if err != nil {
@@ -161,6 +178,84 @@ func (s *Service) Follow(ctx context.Context, roomID, worldID string, tail int, 
 		}
 	}
 }
+
+func (s *Service) distributedSnapshot(roomID, worldID string, limit int, query string) (Snapshot, error) {
+	if limit <= 0 || limit > 2000 {
+		limit = 500
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	chunk, err := s.distributed.ReadLogs(ctx, roomID, worldID, shared.RuntimeLogRequest{
+		Cursor: -1, MaxBytes: runtimefiles.MaximumLogBytes, MaxLines: limit, Query: strings.TrimSpace(query),
+	})
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Snapshot{}, ErrLogNotFound
+		}
+		return Snapshot{}, err
+	}
+	return snapshotFromChunk(chunk), nil
+}
+
+func (s *Service) followDistributed(ctx context.Context, roomID, worldID string, tail int, emit func(Event) error) error {
+	if tail <= 0 || tail > 2000 {
+		tail = 200
+	}
+	chunk, err := s.distributed.ReadLogs(ctx, roomID, worldID, shared.RuntimeLogRequest{
+		Cursor: -1, MaxBytes: runtimefiles.MaximumLogBytes, MaxLines: tail,
+	})
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrLogNotFound
+		}
+		return err
+	}
+	if err := emit(Event{Type: "connected", Snapshot: snapshotPointer(snapshotFromChunk(chunk))}); err != nil {
+		return err
+	}
+	fileID, cursor := chunk.FileID, chunk.Cursor
+	ticker := time.NewTicker(s.pollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			next, readErr := s.distributed.ReadLogs(ctx, roomID, worldID, shared.RuntimeLogRequest{
+				FileID: fileID, Cursor: cursor, MaxBytes: runtimefiles.MaximumLogBytes, MaxLines: 2000,
+			})
+			if readErr != nil {
+				return readErr
+			}
+			if next.Reset || next.FileID != fileID {
+				reset := Snapshot{FileName: next.FileName, Size: next.Size, UpdatedAt: next.UpdatedAt}
+				if err := emit(Event{Type: "reset", Snapshot: &reset}); err != nil {
+					return err
+				}
+			}
+			fileID, cursor = next.FileID, next.Cursor
+			for _, line := range next.Lines {
+				current := Line{Cursor: line.Cursor, Text: line.Text}
+				if err := emit(Event{Type: "line", Line: &current}); err != nil {
+					return err
+				}
+			}
+		}
+	}
+}
+
+func snapshotFromChunk(chunk shared.RuntimeLogChunk) Snapshot {
+	lines := make([]Line, 0, len(chunk.Lines))
+	for _, line := range chunk.Lines {
+		lines = append(lines, Line{Cursor: line.Cursor, Text: line.Text})
+	}
+	return Snapshot{
+		FileName: chunk.FileName, Size: chunk.Size, UpdatedAt: chunk.UpdatedAt,
+		Truncated: chunk.Truncated, Lines: lines,
+	}
+}
+
+func snapshotPointer(value Snapshot) *Snapshot { return &value }
 
 func (s *Service) locate(roomID, worldID string) (string, os.FileInfo, error) {
 	room, err := s.rooms.Room(roomID)

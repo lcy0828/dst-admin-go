@@ -251,6 +251,11 @@ type ShardExecutionResult struct {
 	Result   shared.ShardOperationResult
 }
 
+type RuntimeExecutionResult struct {
+	RemoteID string
+	Result   shared.RuntimeOperationResult
+}
+
 type InventorySnapshot struct {
 	AgentID     string                        `json:"agentId"`
 	Inventory   shared.RuntimeInventoryReport `json:"inventory"`
@@ -266,6 +271,7 @@ type Transport interface {
 	Snapshots() ([]TransportSnapshot, error)
 	Execute(context.Context, string, Action, int) (ExecutionResult, error)
 	ExecuteShard(context.Context, string, shared.ShardOperationRequest, int) (ShardExecutionResult, error)
+	ExecuteRuntime(context.Context, string, shared.RuntimeOperationRequest, int) (RuntimeExecutionResult, error)
 	Inventory(context.Context, string, RuntimeConfig, int) (shared.RuntimeInventoryReport, error)
 	CurrentKey() (string, error)
 	RotateKey(context.Context) (string, error)

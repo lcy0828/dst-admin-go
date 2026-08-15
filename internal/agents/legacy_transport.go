@@ -146,6 +146,43 @@ func (t *LegacyTransport) ExecuteShard(ctx context.Context, agentID string, requ
 	}
 }
 
+func (t *LegacyTransport) ExecuteRuntime(ctx context.Context, agentID string, request shared.RuntimeOperationRequest, timeout int) (RuntimeExecutionResult, error) {
+	server := t.current()
+	if server == nil {
+		return RuntimeExecutionResult{}, ErrUnavailable
+	}
+	remoteID, err := server.SendRuntimeOperation(agentID, request, timeout)
+	if err != nil {
+		return RuntimeExecutionResult{}, err
+	}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return RuntimeExecutionResult{RemoteID: remoteID}, ctx.Err()
+		case <-ticker.C:
+			command, resultErr := server.GetCommandResult(remoteID)
+			if resultErr != nil || command.Status == "pending" || command.Status == "received" {
+				continue
+			}
+			result := RuntimeExecutionResult{RemoteID: remoteID}
+			if strings.TrimSpace(command.Output) != "" {
+				if decodeErr := json.Unmarshal([]byte(command.Output), &result.Result); decodeErr != nil {
+					return result, fmt.Errorf("解析 Agent Runtime 操作结果: %w", decodeErr)
+				}
+			}
+			if !command.Success || command.Status == "failed" {
+				return result, errors.New(nonEmpty(command.ErrorMsg, "Agent Runtime 操作失败"))
+			}
+			if result.Result.ProtocolVersion != shared.RuntimeOperationProtocolVersion || result.Result.OperationID != request.OperationID {
+				return result, errors.New("Agent 返回的 Runtime 操作结果无效")
+			}
+			return result, nil
+		}
+	}
+}
+
 func (t *LegacyTransport) Inventory(ctx context.Context, agentID string, config RuntimeConfig, _ int) (shared.RuntimeInventoryReport, error) {
 	server := t.current()
 	if server == nil {

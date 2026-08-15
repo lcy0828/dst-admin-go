@@ -30,6 +30,7 @@ import (
 	playerapi "dont/internal/players"
 	"dont/internal/rooms"
 	"dont/internal/runtimeaudit"
+	"dont/internal/runtimedriver"
 	"dont/internal/saveimport"
 	"dont/internal/shards"
 	"dont/internal/structuredlogs"
@@ -288,12 +289,25 @@ func initApplication(manageBackground bool) (*Application, error) {
 	var shardControl interface {
 		shards.Control
 		consoleapi.Sender
+		Status(context.Context, string, string) (shards.RuntimeStatus, error)
 	} = tmuxControl
 	if driver := os.Getenv("DST_ADMIN_TEST_CONTROL"); driver != "" {
 		if os.Getenv("DST_ADMIN_ENV") != "test" || driver != "memory" {
 			return nil, fmt.Errorf("DST_ADMIN_TEST_CONTROL is only available as memory in the test environment")
 		}
 		shardControl = shards.NewMemoryControlWithLogRoot(savePath)
+	}
+	nativeRuntimeDriver, err := runtimedriver.NewNative(savePath, shardControl)
+	if err != nil {
+		return nil, err
+	}
+	agentRuntimeDriver, err := runtimedriver.NewAgent(agentService)
+	if err != nil {
+		return nil, err
+	}
+	runtimeDriverRouter, err := runtimedriver.NewRouter(topologyService, operationLeaseService, nativeRuntimeDriver, agentRuntimeDriver)
+	if err != nil {
+		return nil, err
 	}
 	runtimeBridge, err := dstruntime.NewBridge(runtimeManager, shardControl, shardControl)
 	if err != nil {
@@ -324,7 +338,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	runtimeAuditHandler := httpapi.NewRuntimeAuditHandler(runtimeAuditService)
 	runtimeHandler := httpapi.NewDSTRuntimeHandler(runtimeManager, roomService, shardControl, runtimeBridge)
 	jobHandler := httpapi.NewJobHandler(jobService)
-	logService, err := logstream.NewService(savePath, roomService)
+	logService, err := logstream.NewService(savePath, roomService, runtimeDriverRouter)
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +356,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err := commandStore.Migrate(); err != nil {
 		return nil, err
 	}
-	commandService, err := consoleapi.NewService(roomService, shardControl, commandStore)
+	commandService, err := consoleapi.NewService(roomService, runtimeDriverRouter, commandStore)
 	if err != nil {
 		return nil, err
 	}

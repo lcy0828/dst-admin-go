@@ -205,3 +205,25 @@ func TestRuntimeInstallationsLoadNamedSections(t *testing.T) {
 		t.Fatalf("installations=%#v err=%v", values, err)
 	}
 }
+
+func TestAgentReusesRuntimeControlPerInstallation(t *testing.T) {
+	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}}
+	agent, _ := newShardOperationAgent(t, runtimeControl)
+	var creations int
+	agent.shardRuntime = func(RuntimeInstallation) (shardRuntimeControl, error) {
+		creations++
+		return runtimeControl, nil
+	}
+	first := shardOperationRequest(shared.ShardActionStatus, 0)
+	first.OperationKey, first.LeaseID, first.LeaseExpiresAt = "", "", nil
+	second := first
+	second.OperationID = "operation-2"
+	for _, request := range []shared.ShardOperationRequest{first, second} {
+		if _, err := agent.executeShardOperation(string(request.Action), &request, 10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if creations != 1 {
+		t.Fatalf("runtime creations=%d", creations)
+	}
+}

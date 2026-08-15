@@ -1,0 +1,199 @@
+package runtimedriver
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync"
+	"time"
+
+	"dont/internal/consoledispatch"
+	"dont/internal/runtimefiles"
+	"dont/internal/shards"
+	"dont/shared"
+)
+
+type NativeControl interface {
+	Status(context.Context, string, string) (shards.RuntimeStatus, error)
+	Start(context.Context, string, string) error
+	Stop(context.Context, string, string) error
+	Send(context.Context, string, string, string) error
+}
+
+type nativeBackgroundSender interface {
+	SendBackground(context.Context, string, string, string, string) error
+}
+
+type nativeConsoleHealth interface {
+	ConsoleHealth(string, string) consoledispatch.Health
+}
+
+type Native struct {
+	saveRoot string
+	control  NativeControl
+
+	mu       sync.Mutex
+	evidence map[string]shared.RuntimeOperationEvidence
+}
+
+func NewNative(saveRoot string, control NativeControl) (*Native, error) {
+	if strings.TrimSpace(saveRoot) == "" || control == nil {
+		return nil, ErrInvalidTarget
+	}
+	return &Native{saveRoot: saveRoot, control: control, evidence: make(map[string]shared.RuntimeOperationEvidence)}, nil
+}
+
+func (d *Native) Kind() Kind { return KindNative }
+
+func (d *Native) Capabilities() []Capability {
+	return []Capability{
+		CapabilityLifecycle, CapabilityConsoleInput, CapabilityConsoleHealth, CapabilityRawConsole,
+		CapabilityOperationProof, CapabilityLogContinuation, CapabilityArtifacts,
+	}
+}
+
+func (d *Native) Status(ctx context.Context, target Target) (shared.ShardRuntimeStatus, error) {
+	if err := validateTarget(target); err != nil {
+		return shared.ShardRuntimeStatus{}, err
+	}
+	status, err := d.control.Status(ctx, target.Cluster, target.Shard)
+	return nativeStatus(status), err
+}
+
+func (d *Native) ExecuteShard(ctx context.Context, target Target, operation Operation, action shared.ShardAction, timeout time.Duration) (shared.ShardOperationResult, error) {
+	if err := validateTarget(target); err != nil || !shared.IsShardAction(action) {
+		return shared.ShardOperationResult{}, ErrInvalidTarget
+	}
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	operationContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	status, err := d.control.Status(operationContext, target.Cluster, target.Shard)
+	if err == nil {
+		switch action {
+		case shared.ShardActionStart:
+			if status.State != shards.RuntimeRunning && status.State != shards.RuntimeStarting {
+				err = d.control.Start(operationContext, target.Cluster, target.Shard)
+			}
+		case shared.ShardActionStop:
+			if status.SessionExists {
+				err = d.control.Stop(operationContext, target.Cluster, target.Shard)
+			}
+		case shared.ShardActionRestart:
+			if status.SessionExists {
+				err = d.control.Stop(operationContext, target.Cluster, target.Shard)
+			}
+			if err == nil {
+				err = d.control.Start(operationContext, target.Cluster, target.Shard)
+			}
+		case shared.ShardActionSave:
+			if status.State != shards.RuntimeRunning {
+				err = errors.New("分片未运行，无法保存")
+			} else {
+				err = d.control.Send(operationContext, target.Cluster, target.Shard, "c_save()")
+			}
+		}
+	}
+	observed, statusErr := d.control.Status(operationContext, target.Cluster, target.Shard)
+	if err == nil {
+		err = statusErr
+	}
+	result := shared.ShardOperationResult{
+		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: operation.ID, OperationKey: operation.Key,
+		InstallationID: target.InstallationID, Action: action, Cluster: target.Cluster, Shard: target.Shard,
+		FencingToken: operation.FencingToken, Status: nativeStatus(observed), ObservedAt: time.Now().UTC(),
+	}
+	if err != nil {
+		result.Message = err.Error()
+	}
+	return result, err
+}
+
+func (d *Native) SendConsole(ctx context.Context, target Target, operation Operation, request shared.RuntimeConsoleRequest, timeout time.Duration) (shared.RuntimeOperationResult, error) {
+	if err := validateTarget(target); err != nil {
+		return shared.RuntimeOperationResult{}, err
+	}
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	sendContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var err error
+	if request.Mode == shared.ConsoleModeProbe && strings.TrimSpace(request.CoalesceKey) != "" {
+		if background, ok := d.control.(nativeBackgroundSender); ok {
+			err = background.SendBackground(sendContext, target.Cluster, target.Shard, request.CoalesceKey, request.Command)
+		} else {
+			err = d.control.Send(sendContext, target.Cluster, target.Shard, request.Command)
+		}
+	} else {
+		err = d.control.Send(sendContext, target.Cluster, target.Shard, request.Command)
+	}
+	result := shared.RuntimeOperationResult{
+		ProtocolVersion: shared.RuntimeOperationProtocolVersion, OperationID: operation.ID, OperationKey: operation.Key,
+		InstallationID: target.InstallationID, Action: shared.RuntimeActionConsoleSend, Cluster: target.Cluster, Shard: target.Shard,
+		FencingToken: operation.FencingToken, Outcome: shared.RuntimeOutcomeSent,
+		Message: "控制台命令已发送；是否执行成功需要对应回执或状态证据", ObservedAt: time.Now().UTC(),
+	}
+	if err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+	}
+	d.remember(result)
+	return result, err
+}
+
+func (d *Native) ConsoleHealth(ctx context.Context, target Target) (shared.RuntimeConsoleHealth, error) {
+	status, err := d.Status(ctx, target)
+	health := shared.RuntimeConsoleHealth{Available: true, Accepting: status.State == string(shards.RuntimeRunning), Runtime: status}
+	if provider, ok := d.control.(nativeConsoleHealth); ok {
+		current := provider.ConsoleHealth(target.Cluster, target.Shard)
+		health.Accepting, health.Busy, health.Pending = current.Accepting, current.Busy, current.Pending
+		health.Class, health.CoalesceKey, health.StartedAt = string(current.Class), current.CoalesceKey, current.StartedAt
+	}
+	return health, err
+}
+
+func (d *Native) ObserveOperation(_ context.Context, _ Target, operationID, _ string) (shared.RuntimeOperationEvidence, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	evidence, exists := d.evidence[operationID]
+	if !exists {
+		return shared.RuntimeOperationEvidence{}, errors.New("未找到需要观察的本机 Runtime 操作")
+	}
+	return evidence, nil
+}
+
+func (d *Native) ReadLogs(ctx context.Context, target Target, request shared.RuntimeLogRequest) (shared.RuntimeLogChunk, error) {
+	if err := validateTarget(target); err != nil {
+		return shared.RuntimeLogChunk{}, err
+	}
+	return runtimefiles.ReadLogs(ctx, d.saveRoot, target.Cluster, target.Shard, request)
+}
+
+func (d *Native) ReadArtifacts(ctx context.Context, target Target, kind shared.ArtifactKind) (shared.RuntimeArtifactBundle, error) {
+	if err := validateTarget(target); err != nil {
+		return shared.RuntimeArtifactBundle{}, err
+	}
+	return runtimefiles.ReadArtifacts(ctx, d.saveRoot, target.Cluster, target.Shard, kind)
+}
+
+func (d *Native) remember(result shared.RuntimeOperationResult) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.evidence[result.OperationID] = shared.RuntimeOperationEvidence{
+		OperationID: result.OperationID, Action: string(result.Action), Completed: true,
+		Outcome: result.Outcome, Message: result.Message, ObservedAt: result.ObservedAt,
+	}
+}
+
+func validateTarget(target Target) error {
+	if strings.TrimSpace(target.TargetID) == "" || strings.TrimSpace(target.InstallationID) == "" ||
+		strings.TrimSpace(target.Cluster) == "" || strings.TrimSpace(target.Shard) == "" {
+		return ErrInvalidTarget
+	}
+	return nil
+}
+
+func nativeStatus(status shards.RuntimeStatus) shared.ShardRuntimeStatus {
+	return shared.ShardRuntimeStatus{State: string(status.State), Code: status.Code, Message: status.Message, SessionExists: status.SessionExists}
+}

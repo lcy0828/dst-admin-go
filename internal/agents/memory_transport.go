@@ -27,7 +27,7 @@ func NewMemoryTransport() *MemoryTransport {
 			"agent-primary": {
 				ID: "agent-primary", Status: StatusOnline, Hostname: "林火节点", OS: "linux", Arch: "amd64", Version: "2.0.0-test",
 				IPAddresses: []string{"192.168.2.12"}, LastHeartbeat: now, LastReportAt: utcTimePointer(now),
-				Capabilities: []string{"system.report", "command.exec", "disk.inspect", "runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read", "shard.control.v1"},
+				Capabilities: []string{"system.report", "command.exec", "disk.inspect", "runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read", "shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1"},
 				Metrics:      Metrics{CPUCount: 16, LogicalProcessors: 16, PhysicalCores: 8, PhysicalCoreSource: "test", RunningShardCount: 2, MemoryUsed: 3 * 1024 * 1024 * 1024, MemoryTotal: 8 * 1024 * 1024 * 1024, UptimeSeconds: 86400, ObservedAt: utcTimePointer(now)},
 				Details:      map[string]interface{}{"goVersion": "go1.25", "currentDirectory": "/opt/dst-admin-agent"},
 			},
@@ -149,6 +149,32 @@ func (m *MemoryTransport) ExecuteShard(ctx context.Context, agentID string, requ
 		FencingToken: request.FencingToken, Status: shared.ShardRuntimeStatus{State: state, SessionExists: state == "running"},
 		Message: "测试分片操作已完成", ObservedAt: m.now().UTC(),
 	}}, nil
+}
+
+func (m *MemoryTransport) ExecuteRuntime(ctx context.Context, agentID string, request shared.RuntimeOperationRequest, _ int) (RuntimeExecutionResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	snapshot, exists := m.snapshots[agentID]
+	if !exists || snapshot.Status != StatusOnline {
+		return RuntimeExecutionResult{}, ErrAgentOffline
+	}
+	select {
+	case <-ctx.Done():
+		return RuntimeExecutionResult{}, ctx.Err()
+	default:
+	}
+	if !shared.IsRuntimeAction(request.Action) {
+		return RuntimeExecutionResult{}, ErrUnsupportedAction
+	}
+	result := shared.RuntimeOperationResult{
+		ProtocolVersion: shared.RuntimeOperationProtocolVersion, OperationID: request.OperationID, OperationKey: request.OperationKey,
+		InstallationID: request.InstallationID, Action: request.Action, Cluster: request.Cluster, Shard: request.Shard,
+		FencingToken: request.FencingToken, Outcome: shared.RuntimeOutcomeObserved, Message: "测试 Runtime 操作已完成", ObservedAt: m.now().UTC(),
+	}
+	if request.Action == shared.RuntimeActionConsoleSend {
+		result.Outcome = shared.RuntimeOutcomeSent
+	}
+	return RuntimeExecutionResult{RemoteID: "memory-" + request.OperationID, Result: result}, nil
 }
 
 func (m *MemoryTransport) CurrentKey() (string, error) {

@@ -841,6 +841,26 @@ func (s *Server) SendShardOperation(agentID string, request shared.ShardOperatio
 	}, string(content))
 }
 
+func (s *Server) SendRuntimeOperation(agentID string, request shared.RuntimeOperationRequest, timeout int) (string, error) {
+	if request.ProtocolVersion != shared.RuntimeOperationProtocolVersion || !shared.IsRuntimeAction(request.Action) ||
+		timeout < 5 || timeout > 300 || strings.TrimSpace(request.InstallationID) == "" ||
+		strings.TrimSpace(request.Cluster) == "" || strings.TrimSpace(request.Shard) == "" ||
+		strings.ContainsAny(request.InstallationID+request.Cluster+request.Shard+request.TopologyRevision, "\x00\r\n") {
+		return "", fmt.Errorf("Agent Runtime 操作请求无效")
+	}
+	if shared.RuntimeActionMutates(request.Action) && (request.FencingToken == 0 || request.LeaseExpiresAt == nil || strings.TrimSpace(request.LeaseID) == "") {
+		return "", fmt.Errorf("Agent Runtime 操作缺少租约或 fencing token")
+	}
+	content, err := json.Marshal(request)
+	if err != nil {
+		return "", err
+	}
+	requestCopy := request
+	return s.sendCommandPayload(agentID, shared.CommandPayload{
+		Type: string(request.Action), RuntimeOperation: &requestCopy, Timeout: timeout,
+	}, string(content))
+}
+
 func (s *Server) sendCommandPayload(agentID string, payload shared.CommandPayload, auditContent string) (string, error) {
 
 	// 查找Agent

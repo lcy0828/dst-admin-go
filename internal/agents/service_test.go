@@ -121,6 +121,28 @@ func TestRuntimeTargetsPreferLocalAndKeepRemoteConfigurationIsolated(t *testing.
 	}
 }
 
+func TestExecuteRuntimeBindsTrustedInstallationAndCapability(t *testing.T) {
+	service, _, _, _ := newAgentTestService(t)
+	config := RuntimeConfig{
+		InstallationID: "primary", DisplayName: "运行节点", SavePath: "/srv/dst/save",
+		ServerPath: "/srv/dst/server", ServerMode: "64",
+	}
+	if _, err := service.SaveRuntimeConfig("agent-primary", config); err != nil {
+		t.Fatal(err)
+	}
+	request := shared.RuntimeOperationRequest{
+		ProtocolVersion: shared.RuntimeOperationProtocolVersion, OperationID: "operation-runtime-1",
+		Action: shared.RuntimeActionConsoleHealth, Cluster: "Cluster_1", Shard: "Master", TopologyRevision: "revision-1",
+	}
+	result, err := service.ExecuteRuntime(context.Background(), "agent:agent-primary", request, 30)
+	if err != nil || result.Result.InstallationID != "primary" || result.Result.Action != shared.RuntimeActionConsoleHealth {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if _, err := service.ExecuteRuntime(context.Background(), "local", request, 30); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("local target error=%v", err)
+	}
+}
+
 func TestRuntimeTargetInventoriesCollectsConfiguredLocalTarget(t *testing.T) {
 	service, _, _, _ := newAgentTestService(t)
 	localRoot := t.TempDir()
