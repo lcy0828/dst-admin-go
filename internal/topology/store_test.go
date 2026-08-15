@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"dont/internal/rooms"
 
@@ -58,6 +59,57 @@ func TestStoreEnsureReturnsPersistentCreateError(t *testing.T) {
 	_, err := store.Ensure("room", []string{"master"})
 	if err == nil || !strings.Contains(err.Error(), "forced insert failure") {
 		t.Fatalf("persistent create error=%v", err)
+	}
+}
+
+func TestStoreMigratePreservesLegacyCPUAllocation(t *testing.T) {
+	db, err := gorm.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SingularTable(true)
+	db.LogMode(false)
+	db.DB().SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+
+	store := NewStore(db, "legacy_test_")
+	if err := db.Exec(`CREATE TABLE legacy_test_cpu_allocation (
+		id varchar(64) PRIMARY KEY,
+		environment_id varchar(64) NOT NULL,
+		target_id varchar(160) NOT NULL,
+		room_id varchar(255) NOT NULL,
+		world_id varchar(255) NOT NULL,
+		policy varchar(24) NOT NULL,
+		logical_cpu_ids TEXT NOT NULL,
+		physical_core_keys TEXT NOT NULL,
+		allow_smt_sibling_risk bool,
+		warnings TEXT NOT NULL,
+		created_at datetime,
+		updated_at datetime
+	)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 16, 10, 0, 0, 0, time.UTC)
+	if err := db.Exec(`INSERT INTO legacy_test_cpu_allocation (
+		id, environment_id, target_id, room_id, world_id, policy,
+		logical_cpu_ids, physical_core_keys, allow_smt_sibling_risk,
+		warnings, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		allocationResourceID("room", "master"), "environment-local", localTargetID,
+		"room", "master", string(CPUPolicyShared), "[]", "[]", false, "[]", now, now,
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate legacy CPU allocation: %v", err)
+	}
+	allocation, err := store.CPUAllocation("room", "master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allocation.Policy != CPUPolicyShared || allocation.ExecutionState != CPUExecutionDesired || allocation.Observed != nil || allocation.ExecutionError != "" {
+		t.Fatalf("migrated allocation=%#v", allocation)
 	}
 }
 

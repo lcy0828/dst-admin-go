@@ -96,9 +96,9 @@ type cpuAllocationRecord struct {
 	PhysicalCoreKeys    string `gorm:"type:text;not null"`
 	AllowSMTSiblingRisk bool
 	Warnings            string `gorm:"type:text;not null"`
-	ExecutionState      string `gorm:"type:varchar(24);not null"`
-	Observed            string `gorm:"type:text;not null"`
-	ExecutionError      string `gorm:"type:text;not null"`
+	ExecutionState      string `gorm:"type:varchar(24);not null;default:''"`
+	Observed            string `gorm:"type:text;not null;default:''"`
+	ExecutionError      string `gorm:"type:text;not null;default:''"`
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 }
