@@ -1,3 +1,5 @@
+//go:build legacy_tmux
+
 package parser
 
 import (

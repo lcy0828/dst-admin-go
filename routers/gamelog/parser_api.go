@@ -3,11 +3,12 @@ package gamelog
 import (
 	"dont/models"
 	"dont/service/logparser"
-	"dont/tmux"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -95,57 +96,26 @@ func GetParsedLogs(c *gin.Context) {
 
 	log.Printf("[GameLog] GetParsedLogs: 查询成功，返回 %d 条记录，总数 %d", len(logs), total)
 
-	// 如果没有日志数据，尝试手动解析日志文件
-	if len(logs) == 0 && total == 0 {
-		log.Printf("[GameLog] GetParsedLogs: 没有日志数据，尝试手动解析日志文件")
-
-		// 获取服务器列表
-		// 使用silent=false参数，输出正常日志
-		servers := tmux.GetRunningServers(false)
-		log.Printf("[GameLog] GetParsedLogs: 获取到 %d 个运行中的服务器", len(servers))
-
-		// 手动解析日志文件
-		for _, server := range servers {
-			// 构建日志文件路径
-			logFilePath := "/Users/lcy/DoNotStarveTogether/" + server.ArchiveName + "/" + server.WorldName + "/server_log.txt"
-			log.Printf("[GameLog] GetParsedLogs: 尝试解析日志文件: %s", logFilePath)
-
-			// 检查文件是否存在
-			if _, err := os.Stat(logFilePath); os.IsNotExist(err) {
-				log.Printf("[GameLog] GetParsedLogs: 日志文件不存在: %s", logFilePath)
-				continue
+	// The legacy parser may backfill one explicitly selected log file. Runtime
+	// discovery belongs to the managed log service and must not scan tmux.
+	if len(logs) == 0 && total == 0 && safeLogPathSegment(archiveName) && safeLogPathSegment(worldName) {
+		logFilePath := filepath.Join(dstSavePath, archiveName, worldName, "server_log.txt")
+		log.Printf("[GameLog] GetParsedLogs: 尝试回填日志文件: %s", logFilePath)
+		if logContent, readErr := os.ReadFile(logFilePath); readErr == nil {
+			parser, parserErr := logparser.NewLogParser(archiveName, worldName)
+			if parserErr == nil {
+				parserErr = parser.ProcessAndSaveLog(string(logContent))
 			}
-
-			// 读取日志文件内容
-			logContent, err := os.ReadFile(logFilePath)
-			if err != nil {
-				log.Printf("[GameLog] GetParsedLogs: 读取日志文件失败: %v", err)
-				continue
-			}
-
-			log.Printf("[GameLog] GetParsedLogs: 成功读取日志文件，大小: %d 字节", len(logContent))
-
-			// 创建日志解析器
-			parser, err := logparser.NewLogParser(server.ArchiveName, server.WorldName)
-			if err != nil {
-				log.Printf("[GameLog] GetParsedLogs: 创建日志解析器失败: %v", err)
-				continue
-			}
-
-			// 解析日志内容
-			if err := parser.ProcessAndSaveLog(string(logContent)); err != nil {
-				log.Printf("[GameLog] GetParsedLogs: 解析日志内容失败: %v", err)
+			if parserErr != nil {
+				log.Printf("[GameLog] GetParsedLogs: 回填日志失败: %v", parserErr)
 			} else {
-				log.Printf("[GameLog] GetParsedLogs: 成功解析日志内容")
+				logs, total, err = models.GetGameLogs(archiveName, worldName, logType, startupVersion, startTime, endTime, page, pageSize)
+				if err != nil {
+					log.Printf("[GameLog] GetParsedLogs: 回填后重新查询失败: %v", err)
+				}
 			}
-		}
-
-		// 重新查询数据库
-		logs, total, err = models.GetGameLogs(archiveName, worldName, logType, startupVersion, startTime, endTime, page, pageSize)
-		if err != nil {
-			log.Printf("[GameLog] GetParsedLogs: 重新查询数据库失败: %v", err)
-		} else {
-			log.Printf("[GameLog] GetParsedLogs: 重新查询数据库成功，返回 %d 条记录，总数 %d", len(logs), total)
+		} else if !os.IsNotExist(readErr) {
+			log.Printf("[GameLog] GetParsedLogs: 读取回填日志失败: %v", readErr)
 		}
 	}
 
@@ -161,6 +131,11 @@ func GetParsedLogs(c *gin.Context) {
 	})
 
 	log.Printf("[GameLog] GetParsedLogs: 已返回响应")
+}
+
+func safeLogPathSegment(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && value != "." && value != ".." && filepath.Base(value) == value && !strings.ContainsAny(value, `/\\\x00\r\n`)
 }
 
 // GetLogTypes 获取日志类型统计
