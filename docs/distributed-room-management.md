@@ -1,10 +1,10 @@
 # 多节点房间集中管理设计
 
-> 状态：Phase 1-4 实现基线 + 后续平台扩展设计
+> 状态：Phase 1-9 已实现；Kubernetes 为默认关闭的只读实验能力
 > 更新日期：2026-08-16
 > 依赖：`distributed-room-management-plan.md`、`multi-node-dst-research.md`
 
-实现状态说明：仓库已经交付控制面、Agent 和单 Shard DST 的 OCI/Compose 基线，Agent 支持 `native` 与受管 `container` Runtime；容器 Driver 通过 label 识别目标，并在 DST 容器内使用固定 tmux transport。控制面与 Agent 已共同交付 `runtime.mods.v1` 的 Placement-aware 预检、分块分发、保护备份、原子多节点发布、回滚和重启恢复。CPU 绑核、完整端口租约以及 Kubernetes 生产 Driver 尚未实现。`internal/kubernetesruntime` 和 `deploy/kubernetes` 只是独立实验安全内核/RBAC，未接入生产路由。本文明确标注“未来/目标”的部分不代表已经可用。
+实现状态说明：仓库已经交付控制面、Agent 和单 Shard DST 的 OCI/Compose 基线，Agent 支持 `native` 与受管 `container` Runtime；容器 Driver 通过 label 识别目标，并在 DST 容器内使用固定 tmux transport。控制面与 Agent 已交付 Placement-aware 生命周期、日志/玩家/诊断聚合、cold-consistent 备份、`runtime.mods.v1` 分块分发与原子发布、发布后重启/加载确认，以及 DST 多节点版本计划、保护备份、精确 build 校验和失败恢复。端口租约已按网络作用域持久化；Linux native cgroup v2 和 Docker CPU policy 已执行并回读，macOS 对不支持的策略明确拒绝。Kubernetes 仅接入默认关闭的 status/observe/preflight API 与实验 UI，固定 `applyAllowed=false`，没有生产 Driver 或 Apply 路由。本文明确标注“未来/目标”的部分不代表已经可用。
 
 ## 1. 产品边界
 
@@ -285,7 +285,7 @@ preconditions, parameters, deadline
 
 Agent 的 Mod Runtime capability 为 `runtime.mods.v1`，包括缓存检查、cache bundle 分块上传、release plan 分块上传、`prepare/publish/rollback/complete/state` 以及 `modoverrides.lua` 分块读取。单条数据块上限 256 KiB；所有 mutation 继续经过 lease、fencing 和持久化幂等。
 
-控制面已经在该执行边界上完成跨节点编排：一次预览使用同一不可变快照读取全部 Placement 与配置；发布前再次计算 `planHash` 和拓扑版本；共享同一 Installation 的其他房间会被纳入目标并先创建 cold-consistent 保护备份。所有节点 Prepare 成功后才进入 Publish，全部 Publish 成功后先持久化 commit decision 再清理；commit 前失败逆序回滚，commit 后中断进入 `recovery_required` 并由持久恢复任务继续完成。发布只返回 `restartRequired`，不会擅自重启正在运行的分片。
+控制面已经在该执行边界上完成跨节点编排：一次预览使用同一不可变快照读取全部 Placement 与配置；发布前再次计算 `planHash` 和拓扑版本；共享同一 Installation 的其他房间会被纳入目标并先创建 cold-consistent 保护备份。所有节点 Prepare 成功后才进入 Publish，全部 Publish 成功后先持久化 commit decision 再清理；commit 前失败逆序回滚，commit 后中断进入 `recovery_required` 并由持久恢复任务继续完成。需要重启时按策略协调运行中分片，等待新实例日志确认加载；失败保留可恢复状态和逐目标证据。
 
 Agent 不接受任意 Shell 字符串。路径必须落入已登记 RuntimeInstallation 的允许根目录。
 
@@ -328,7 +328,7 @@ backupStage, health
 
 - `native` Driver：当前 tmux 实现先迁入该边界，未来可增加 systemd/launchd profile。
 - `container` Driver：通过 Docker/Podman API 管理带受管标签的容器和固定控制台 transport，不向请求开放任意镜像、挂载或宿主命令。
-- `kubernetes` Driver：以独立 RuntimeProvider 身份，通过受限 ServiceAccount 管理指定 namespace 和 label 范围内的工作负载、Service、PVC、Job 与 Secret 引用。
+- `kubernetes` 实验 Provider：当前只通过受限 ServiceAccount 读取指定 namespace/label 范围内的 StatefulSet、Pod、PVC、Service 和 NetworkPolicy，并生成类型化预检计划；不提供 Apply、生命周期或 Console。
 
 `sendConsole` 是必需能力，不是附加功能。保存、优雅停止、玩家管理、命令目录、自动化和 `customcommands.lua` 激活/诊断都依赖它。请求至少包含 `operationId`、`operationKind`、目标 Shard instance ID、受限 payload、deadline、lease 和 fencing token。Driver 返回的阶段统一为 `accepted/sent/confirmed/failed/unknown`，但 `confirmed` 必须引用与操作类型匹配的完成证据，不能只表示 tmux 或容器 API 调用成功。
 
@@ -427,7 +427,7 @@ resolve desired mod lock
 
 任何目标准备失败时，默认不发布配置。UI 分开展示“已下载到节点”和“已在 Shard 启用”。
 
-当前 Agent 执行器把每个 installation 的发布作为一个 fencing/idempotency 域：cache bundle 与 release plan 只通过 256 KiB 分块传输，每个 begin、write offset 和 commit 使用独立幂等身份但共享同一有效租约与 fencing token。Agent 落盘并验证 SHA、tree/manifest、UTF-8/单 JSON 值、tar 路径/文件类型和磁盘空间后才导入。控制面已实现“全部目标 prepare 后再 publish、commit decision 持久化、commit 前失败逆序 rollback、commit 后只向前恢复”的房间级协调器，发布依次进入 `planned -> prepared -> published -> committed`，中断 journal 在 Manager 初始化时恢复或回滚。当前仍不自动重启房间或依据加载日志确认 Mod 生效，完成发布只返回 `restartRequired`。
+当前 Agent 执行器把每个 installation 的发布作为一个 fencing/idempotency 域：cache bundle 与 release plan 只通过 256 KiB 分块传输，每个 begin、write offset 和 commit 使用独立幂等身份但共享同一有效租约与 fencing token。Agent 落盘并验证 SHA、tree/manifest、UTF-8/单 JSON 值、tar 路径/文件类型和磁盘空间后才导入。控制面已实现“全部目标 prepare 后再 publish、commit decision 持久化、commit 前失败逆序 rollback、commit 后只向前恢复”的房间级协调器，发布依次进入 `planned -> prepared -> published -> committed`，中断 journal 在 Manager 初始化时恢复或回滚。运行中的目标在策略允许时自动协调重启，并以新实例加载日志确认 Mod 生效；任一确认失败都会保留可诊断、可恢复的 Publication 状态，而不是只返回一个布尔提示。
 
 ## 10. 看板与控制范围
 
@@ -488,7 +488,9 @@ CPU 绑核和 DST 四类 UDP 端口都附着在 Shard Runtime/Node 上，不附�
 
 容器停止顺序必须是：`sendConsole(c_shutdown(true)) -> 等待目标进程退出 -> container stop/supervisor exit -> 超时后强制终止`。marker 只作诊断，进程退出才是停止完成证据。若 Agent 未能先协调，PID 1 supervisor 收到 SIGTERM 且 console health 为 ready 时执行同一有界优雅关服；控制台 dirty/unavailable 时进入信号 fallback 并明确记录未保存风险，不能把 Lua 拼到未知输入后。SIGKILL 始终记为未保存风险。热备份先验证所有目标 `consoleHealth=ready`；任一 Shard 控制台或保存证据不可用时改用 cold fallback 或生成非 complete 结果。
 
-### 11.4 Kubernetes（未来）
+### 11.4 Kubernetes（只读实验能力）
+
+当前控制面始终注册 Provider 状态、observe 和 preflight 接口，功能默认关闭；启用并提供受信配置后也只能观察和生成类型化计划，`applyAllowed=false`，前端固定展示“实验能力”。以下内容仍是生产 Driver 的目标设计：
 
 - 一个 Shard 一个有状态工作负载，副本数固定为 1，使用稳定身份和独立 PVC；不把多个 Shard 塞入同一个 Pod。
 - Master Shard 通信优先通过稳定 Service ClusterIP；DNS 写入 `master_ip` 需验证后开放。玩家 UDP、Steam 端口使用明确的 hostPort、NodePort 或 LoadBalancer profile，不能由前端猜测可达地址，也不能假设端口转换后 Steam 会公布正确外部端点。
@@ -525,8 +527,8 @@ CPU 绑核和 DST 四类 UDP 端口都附着在 Shard Runtime/Node 上，不附�
 7. 先建立统一 console dispatcher、按操作完成证据、安装级 tmux socket/pane identity 和类型化 Artifact API；迁移所有直接 tmux/savePath 旁路。
 8. 已交付“主服务容器 + 裸机 Agent + native DST”的部署基线；完整功能等价矩阵继续回归。
 9. 已交付容器 Agent 持久状态和带 PID 1 supervisor 的 Docker Shard Runtime 基线；Podman 与 native host-integration 尚未完成实机验证。
-10. 已交付 cold-consistent 跨 Shard 备份集与跨节点 Mod 原子发布编排；hot backup 和发布后自动协调重启/加载确认仍是后续能力。
-11. 迁移玩家、日志、世界状态和诊断到带来源的新鲜度模型。
-12. 已交付独立 Kubernetes 类型化安全内核和 RBAC；仍需接入 Driver/API，并通过存储、网络、CPU Manager 和故障注入矩阵后才能标记生产可用。
+10. 已交付 cold-consistent 跨 Shard 备份集、跨节点 Mod 原子发布、自动协调重启和加载日志确认；hot backup 仍需可证明的跨分片保存屏障。
+11. 已交付玩家、日志、世界状态和诊断的 Placement 聚合与来源/新鲜度模型。
+12. 已交付独立 Kubernetes 类型化安全内核、只读 REST adapter、status/observe/preflight API、OpenAPI、RBAC 和实验 UI；仍需 Apply、lease-aware supervisor、Console、Mod、备份恢复，并通过存储、网络、CPU Manager 和故障注入矩阵后才能标记生产可用。
 
 任何阶段都不得让远程选择回退到本地执行。旧 Agent 缺少能力时保持只读或显示升级要求。

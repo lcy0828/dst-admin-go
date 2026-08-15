@@ -26,7 +26,7 @@
 | 容器 | 裸机 | 裸机 | 推荐；同机 Agent 连接 `ws://127.0.0.1:8000/agent`，跨机使用控制面实际可达地址 |
 | 容器 | 容器 | Shard 容器 | 支持的容器 Runtime 形态；Agent 通过 Docker/Podman CLI 和受管 label 控制 |
 | 容器 | 容器 | 裸机 | 当前 Compose 不支持；不要通过 host PID、宿主 tmux 和大范围 hostPath 拼出兼容模式 |
-| Kubernetes | 外部 Provider | Pod | 实验安全内核，尚未接入生产 Driver、API 或 UI |
+| Kubernetes | 外部 Provider | Pod | 默认关闭的只读实验能力；已有 status/observe/preflight API 与 UI，无 Apply 或生产 Driver |
 
 Agent 和 DST 始终是不同容器。tmux session 与 socket 位于每个 DST Shard 容器内；容器 Driver 执行固定的 `docker exec ... tmux` 客户端参数，Agent 不接管 DST 的 PID namespace，也不把任意 exec 暴露给控制面。`CONSOLE_SOCKET` 是 Shard 容器内的路径，不是要求挂载到 Agent 容器的 Unix socket。
 
@@ -175,7 +175,7 @@ docker logs <container-id>
 
 控制面数据库和 `agent-data` 属于平台灾备：应与房间备份分开保护。`MOD_STATE_PATH` 和 Agent runtime state 决定中断恢复、fencing 与幂等语义，恢复 Agent 时必须作为同一节点身份的一组状态处理；不能只恢复旧 Agent ID 而丢弃更高 fencing token。`MOD_CACHE_PATH`、Workshop 内容和 DST 二进制原则上可重建，但保留 cache 能保证精确版本回滚和 Steam 不可用时恢复。
 
-Kubernetes 的 PVC/CSI snapshot 只能替代单卷复制，不能替代跨 Shard 保存屏障、manifest 和集中校验。当前 `deploy/kubernetes` 只有 namespace RBAC 与类型化实验内核，没有可部署的 Provider、lease-aware supervisor、Mod 分发、备份或恢复链路，不能作为生产安装步骤。
+Kubernetes 的 PVC/CSI snapshot 只能替代单卷复制，不能替代跨 Shard 保存屏障、manifest 和集中校验。当前已提供默认关闭的 Provider 状态、只读 REST observation、类型化 preflight API/UI、namespace RBAC 与实验安全内核，但固定 `applyAllowed=false`，没有 Apply 路由、lease-aware supervisor、Console、Mod 分发、备份或恢复链路，不能作为生产安装步骤。
 
 ## Debian 12 实机证据
 

@@ -1,10 +1,10 @@
 # 多节点集中管理执行计划
 
-> 状态：核心集中管理链路已交付，剩余高级调度能力按阶段继续推进
+> 状态：Phase 1-9 的可交付范围已完成；Kubernetes 保持默认关闭的只读实验能力
 > 更新日期：2026-08-16
 > 范围：多台服务器集中管理、一个房间跨节点运行多个世界分片、主服务/Agent/DST Runtime 独立部署、集中操作与可观测性
 
-当前进度：Phase 1 至 Phase 4 已完成；Placement apply 已具备停服预检、跨文件系统传输、目标校验、原子切换、源恢复点和 `appliedTargetId` 提交。仓库已交付非 root 控制面/Agent/DST Runtime OCI 镜像、Compose、Linux systemd 与 macOS launchd Agent、native/container Runtime Driver、cold-consistent 分布式备份和 Placement-aware 跨节点 Mod 原子发布。2026-08-15 至 2026-08-16 已在全新 Debian 12 上完成容器控制面、裸机 Agent、容器 Agent、分片迁移、SteamCMD 下载、保护备份、110 MB Mod 分块发布以及禁用/启用/配置/移除和 Placement 回读实测。仍未交付的是完整端口租约、可执行 CPU quota/cpuset、发布后自动重启与加载确认、玩家/日志跨节点聚合以及 Kubernetes 生产 Driver；实验 Kubernetes 安全内核不能视为生产能力。
+当前进度：Phase 1-9 的既定可交付范围已完成。Placement apply 已具备停服预检、跨文件系统传输、目标校验、原子切换、源恢复点和 `appliedTargetId` 提交；仓库已交付非 root 控制面/Agent/DST Runtime OCI 镜像、Compose、Linux systemd 与 macOS launchd Agent、native/container Runtime Driver、cold-consistent 分布式备份、Placement-aware 跨节点 Mod 原子发布与自动重启/加载确认，以及带保护备份、版本矩阵和失败恢复的 DST 多节点版本发布。端口租约、网络作用域、跨节点 Master 端点预检、Linux cgroup v2 与 Docker CPU policy 执行/回读、玩家/日志/诊断聚合均已接入运行链路。2026-08-15 至 2026-08-16 已在全新 Debian 12 上完成容器控制面、裸机 Agent、容器 Agent、分片迁移、SteamCMD 下载、保护备份、110 MB Mod 分块发布以及 Mod 禁用/启用/配置/移除和 Placement 回读实测。保留的明确边界是：`hot-consistent` 备份仍未取得跨分片保存屏障证据；Kubernetes 只有默认关闭的 status/observe/preflight API 与 UI，没有 Apply、生命周期、Console、Mod 或备份恢复能力，不能视为生产 Driver。
 
 ## 1. 目标
 
@@ -32,15 +32,17 @@ DST Admin 需要从“管理当前机器上的 DST”扩展为“本地优先、
 - 房间租约、fencing token、幂等结果、操作审计和 Agent 断线语义。
 - 单房间和跨房间的启动容量预检、批量 Job、逐 Shard 结果和恢复入口。
 - `master_port`、`server_port`、`authentication_port`、`master_server_port` 采集。
+- 按网络作用域持久化端口租约，并在导入失败、取消、恢复和过期计划时释放或回收。
+- 跨节点 `bind_ip/master_ip`、地址新鲜度和 Master 地址/端口一致性预检。
+- Linux native cgroup v2 与 Docker `reserved/exclusive` CPU policy 执行、回读和生命周期释放；macOS 对不支持策略明确拒绝。
+- 按 Placement 聚合玩家、日志、世界状态与 Runtime 诊断，并携带来源、新鲜度、stale 和冲突信息。
+- 跨节点 Mod 发布后的协调重启与加载日志确认，以及 DST 二进制多节点版本发布、保护备份和原地恢复/重试。
 
 当前不足：
 
-- 四类端口已经采集并进入拓扑诊断，但完整网络作用域、端口租约、对外地址和跨节点 Master 可达性预检尚未交付。
-- CPU 已提供“一核一层”的建议容量、物理核心识别和超配确认，quota、cpuset、SMT sibling 与 NUMA 执行分配尚未交付。
 - cold-consistent 分布式备份已交付；hot-consistent 保存屏障仍未达到可证明的一致性标准。
-- 跨节点 Mod 内容与配置原子发布已交付；发布后自动协调重启、加载日志确认和 DST 二进制多节点版本发布尚未交付。
-- 玩家、日志和世界诊断尚未完成按 Placement 的房间级聚合。
-- Kubernetes 只有类型化实验安全内核与 RBAC，尚无生产 Provider、工作负载、存储和网络交付。
+- Kubernetes 只提供默认关闭的只读 Provider 状态、资源观察、类型化预检计划、安全内核、RBAC 和 UI；没有 Apply 路由、生产工作负载、lease-aware supervisor、Console、Mod、备份恢复或故障注入结论。
+- Podman、macOS 容器以及 Kubernetes/CSI/CNI 生产矩阵仍未实机验收，不能从 Docker/Debian 结果外推兼容性。
 
 ## 3. 资料核验原则
 
@@ -488,7 +490,7 @@ Mod 管理继续区分：
 
 已交付说明：`POST /api/v2/rooms/:roomId/actions/:action` 在启动和重启前按 `appliedTargetId` 计算启动后容量，首次超配或容量未知时返回 `CAPACITY_RISK_CONFIRMATION_REQUIRED`，确认后允许继续但不提供性能保证。整房间在任一世界预检失败时不会先操作其他世界。`POST /api/v2/rooms/actions/:action` 支持多个房间合并预览容量，并用 `roomId:worldId` 作为 Job 目标标识；不同房间使用独立租约，单个房间失败不阻塞其他房间。前端已统一所有单房间、单世界和跨房间启动、重启入口的 shadcn-vue 风险确认；批量界面按房间选择世界，显示每层世界的当前生效节点和运行状态，完整展示部分或全部失败的逐世界结果，并在重新读取拓扑与状态后只重试未成功项。同一台服务器可以承载同一房间或不同房间的多层世界，但界面固定提醒“一颗物理核心最多运行一层世界，并额外预留 1 核”；这是可确认绕过的保守告警，不是硬限制。
 
-### Phase 5：主服务容器 + 裸机 Agent + native 基线（核心基线已完成）
+### Phase 5：主服务容器 + 裸机 Agent + native 基线（已完成）
 
 - 新增 ControlPlaneDeployment、ProviderDeployment 和 RuntimeExecution 三个独立 profile，禁止用一个 `containerized` 字段代替。
 - 交付主服务非 root OCI 镜像与 Compose：持久化数据库/WAL、配置和密钥引用；默认不挂 host PID、DST 路径或 Docker Socket。
@@ -524,25 +526,32 @@ Mod 管理继续区分：
 - Agent 只管理有受信标签、镜像和挂载的容器；控制器容器默认不挂 Docker Socket。
 - 完成裸机/容器混合 Room，以及同一宿主同时运行 native 与 container Shard 的端口/容量合并预检。
 
-### Phase 7：一致性备份与恢复（cold-consistent 已完成）
+### Phase 7：一致性备份与恢复（cold-consistent profile 已完成）
 
 - 先实现 `cold-consistent`：协调停止、确认无写入、分片快照、manifest、逻辑备份集和可选恢复原运行状态。
 - `hot-consistent` 只有在游戏事件、Runtime 回执和故障注入证明跨分片 snapshot 屏障后开放；固定等待与 mtime 稳定不算证据。
 - 完成整套恢复、失败恢复和完整性校验。
 - native 与 container Driver 使用同一备份协议；容器存档只从受管 volume staging，不从可写层提取。
 
-### Phase 8：Mod 与版本发布（Mod 原子发布已完成）
+### Phase 8：Mod 与版本发布（已完成）
 
-- 已实现跨节点预下载、校验、配置原子发布和故障恢复；协调重启与加载日志确认仍待实现。
-- 实现 DST 版本一致性检查和安全更新计划。
-- 明确受控可变 Installation 和不可变版本镜像两种 profile，同一发布计划不混用。
+- 已实现跨节点预下载、校验、配置原子发布、协调重启、加载日志确认和故障恢复。
+- 已实现 DST 版本一致性预览和安全更新计划：保护备份，Secondary 到 Master 停服，逐 Installation 更新并精确校验 build，Master 到 Secondary 恢复，最后确认新实例加载日志。
+- 发布使用 `planHash` 防止陈旧确认；原发布记录原地恢复/重试，已更新目标不会重复执行 SteamCMD，逐 Installation 与逐 Shard 保留证据。
+- 受控可变 Installation 已进入可执行发布链路；不可变版本镜像保持独立 profile，同一发布计划禁止静默混用。
 
-### Phase 9：玩家、日志与诊断聚合
+### Phase 9：玩家、日志与诊断聚合（已完成）
 
 - 按房间聚合玩家、日志、世界状态和 Runtime 诊断。
 - 实现跨分片迁移去重、stale 和冲突展示。
+- 日志读取按当前 Placement 路由，房间快照按世界保留 continuation、截断/轮转与部分失败；不会回退读取控制器本机的旧目录。
+- 玩家 presence 按用户与分片观测合并，跨分片迁移去重；状态返回来源、观察时间和过期语义，节点离线或数据陈旧不会伪装成实时结果。
 
-### Phase 10：Kubernetes 实验能力
+### Phase 10：Kubernetes 实验能力（只读观察与预检已完成）
+
+已交付并默认关闭：Provider 状态、只读 Kubernetes REST observation、类型化 mutation preview、启动安全门禁、OpenAPI、最小 namespace RBAC 和前端实验状态页。`preflight` 固定返回 `applyAllowed=false`，不存在 Apply 路由。
+
+以下内容仍是生产化前置条件，不属于当前可用能力：
 
 - 主服务以单副本 Deployment + PVC 运行；SQLite 阶段不宣称多副本 HA。
 - Kubernetes Driver 使用受限 ServiceAccount 管理指定 namespace/label 范围。
@@ -555,7 +564,7 @@ Mod 管理继续区分：
 - Placement 默认交给 scheduler 在允许节点池内选择，固定 Worker 只在高级模式开放；按 Worker 批量停止只作用于实际位于该节点的受管 Shard，不等同于 drain 或迁移。
 - Pod Runtime 提供与 native/container 相同的 `SendConsole/ConsoleHealth/ObserveOperation`，控制台不可用时不允许热保存屏障或危险命令。
 
-完成故障注入和至少两个 Kubernetes/CSI 组合验证前，界面固定标记“实验能力”，不宣称生产可用。
+完成上述实现、故障注入和至少两个 Kubernetes/CSI/CNI 组合验证前，界面固定标记“实验能力”，默认关闭且不宣称生产可用。
 
 ## 14. 验收矩阵
 
