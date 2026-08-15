@@ -988,6 +988,34 @@ paths:
           $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/logs:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Logs]
+      operationId: getRoomLogs
+      summary: Read bounded log tails from every world in the room
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 2000
+            default: 500
+        - name: query
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Room log snapshot retaining successful worlds when another world is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomLogSnapshotEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /rooms/{roomId}/worlds/{worldId}/logs:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -4561,6 +4589,50 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/LogLine"
+    RoomLogProblem:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+    WorldLogSnapshot:
+      type: object
+      additionalProperties: false
+      required: [worldId, worldName, worldRole, readAt]
+      properties:
+        worldId: { type: string }
+        worldName: { type: string }
+        worldRole: { type: string, enum: [master, caves, custom] }
+        readAt: { type: string, format: date-time }
+        snapshot:
+          $ref: "#/components/schemas/LogSnapshot"
+        problem:
+          $ref: "#/components/schemas/RoomLogProblem"
+    RoomLogSnapshot:
+      type: object
+      additionalProperties: false
+      required: [roomId, readAt, partial, available, unavailable, worlds]
+      properties:
+        roomId: { type: string }
+        readAt: { type: string, format: date-time }
+        partial: { type: boolean }
+        available: { type: integer, minimum: 0 }
+        unavailable: { type: integer, minimum: 0 }
+        worlds:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorldLogSnapshot"
+    RoomLogSnapshotEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/RoomLogSnapshot"
+        error:
+          type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
     LogEvent:
       type: object
       additionalProperties: false
