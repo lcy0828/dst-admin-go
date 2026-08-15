@@ -88,6 +88,7 @@ services:
       volume-init:
         condition: service_completed_successfully
     environment:
+      DST_ADMIN_AGENT_DEPLOYMENT: container
       DST_ADMIN_AGENT_SERVER_URL: ws://control-plane:8000/agent
       DST_ADMIN_AGENT_SECURITY_KEY: ${DST_ADMIN_AGENT_SECURITY_KEY:?set DST_ADMIN_AGENT_SECURITY_KEY}
       DST_ADMIN_AGENT_STATE_FILE: /var/lib/dst-admin-agent/runtime-state.json

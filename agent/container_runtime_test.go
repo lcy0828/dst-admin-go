@@ -41,7 +41,15 @@ func (f *fakeContainerCLI) Run(ctx context.Context, arguments ...string) ([]byte
 	if index < len(f.errors) {
 		err = f.errors[index]
 	}
-	block := f.blockExec != nil && len(arguments) > 0 && arguments[0] == "exec"
+	block := false
+	if f.blockExec != nil && len(arguments) > 0 && arguments[0] == "exec" {
+		for _, argument := range arguments {
+			if argument == "send-keys" {
+				block = true
+				break
+			}
+		}
+	}
 	f.mu.Unlock()
 	if block {
 		select {
@@ -68,11 +76,27 @@ func containerCPUInspect(id, cluster, shard, cpuset string, nanoCPUs int64, runn
 	return []byte(`{"Id":"` + id + `","Config":{"Labels":{"com.dst-admin.managed":"true","com.dst-admin.installation":"runtime-a","com.dst-admin.cluster":"` + cluster + `","com.dst-admin.shard":"` + shard + `"}},"State":{"Running":` + strconv.FormatBool(running) + `},"HostConfig":{"NanoCpus":` + strconv.FormatInt(nanoCPUs, 10) + `,"CpusetCpus":"` + cpuset + `"}}`)
 }
 
+func containerExitInspect(exitCode int, oomKilled, dead bool) []byte {
+	return []byte(`{"Status":"exited","Running":false,"Restarting":false,"OOMKilled":` + strconv.FormatBool(oomKilled) + `,"Dead":` + strconv.FormatBool(dead) + `,"ExitCode":` + strconv.Itoa(exitCode) + `,"Error":"","FinishedAt":"2026-08-16T00:00:00Z"}`)
+}
+
+func containerConsolePane() []byte {
+	return []byte("0\tdontstarve_dedicated_server_nullrenderer_x64\t123\n")
+}
+
+func containerStartedAt(value string) []byte {
+	return []byte(value + "\n")
+}
+
+const containerStartTime = "2026-08-16T02:00:00.123456789Z"
+
 func TestContainerRuntimeUsesTrustedLabelsAndFixedConsoleArguments(t *testing.T) {
 	id := strings.Repeat("a", 64)
 	cli := &fakeContainerCLI{available: true, responses: [][]byte{
 		containerListLine(id, "running", "Cluster_1", "Master"),
-		containerListLine(id, "running", "Cluster_1", "Master"), nil,
+		containerConsolePane(), nil,
+		containerStartedAt(containerStartTime), containerListLine(id, "running", "Cluster_1", "Master"),
+		containerStartedAt(containerStartTime), nil,
 	}}
 	runtime, err := newContainerShardRuntime(containerTestInstallation(), cli)
 	if err != nil {
@@ -83,10 +107,10 @@ func TestContainerRuntimeUsesTrustedLabelsAndFixedConsoleArguments(t *testing.T)
 	}
 	wantList := []string{"ps", "-a", "--no-trunc", "--filter", "label=com.dst-admin.managed=true", "--filter", "label=com.dst-admin.installation=runtime-a", "--filter", "label=com.dst-admin.cluster=Cluster_1", "--filter", "label=com.dst-admin.shard=Master", "--format", "{{json .}}"}
 	wantExec := []string{"exec", id, "tmux", "-S", "/run/dst-admin/tmux/tmux.sock", "send-keys", "-t", "=dst:0.0", "-l", "--", "c_announce('hello')", ";", "send-keys", "-t", "=dst:0.0", "Enter"}
-	if !reflect.DeepEqual(cli.calls[0].arguments, wantList) || !reflect.DeepEqual(cli.calls[1].arguments, wantList) || !reflect.DeepEqual(cli.calls[2].arguments, wantExec) {
+	if !reflect.DeepEqual(cli.calls[0].arguments, wantList) || !reflect.DeepEqual(cli.calls[4].arguments, wantList) || !reflect.DeepEqual(cli.calls[6].arguments, wantExec) {
 		t.Fatalf("calls=%#v", cli.calls)
 	}
-	for _, argument := range cli.calls[2].arguments {
+	for _, argument := range cli.calls[6].arguments {
 		if argument == "sh" || argument == "bash" || argument == "-c" {
 			t.Fatalf("shell argument found: %#v", cli.calls[2].arguments)
 		}
@@ -99,7 +123,14 @@ func TestContainerRuntimeStatusMappingAndStart(t *testing.T) {
 		"created": shards.RuntimeStopped, "exited": shards.RuntimeStopped, "restarting": shards.RuntimeStarting, "dead": shards.RuntimeFailed,
 	} {
 		t.Run(state, func(t *testing.T) {
-			cli := &fakeContainerCLI{available: true, responses: [][]byte{containerListLine(id, state, "Cluster_1", "Caves")}}
+			responses := [][]byte{containerListLine(id, state, "Cluster_1", "Caves")}
+			if state == "exited" {
+				responses = append(responses, containerExitInspect(0, false, false))
+			}
+			if state == "dead" {
+				responses = append(responses, containerExitInspect(1, false, true))
+			}
+			cli := &fakeContainerCLI{available: true, responses: responses}
 			runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
 			status, err := runtime.Status(context.Background(), "Cluster_1", "Caves")
 			if err != nil || status.State != expected {
@@ -107,7 +138,7 @@ func TestContainerRuntimeStatusMappingAndStart(t *testing.T) {
 			}
 		})
 	}
-	cli := &fakeContainerCLI{available: true, responses: [][]byte{containerListLine(id, "exited", "Cluster_1", "Master"), nil}}
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{containerListLine(id, "exited", "Cluster_1", "Master"), nil, containerStartedAt(containerStartTime)}}
 	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
 	if err := runtime.Start(context.Background(), "Cluster_1", "Master"); err != nil {
 		t.Fatal(err)
@@ -117,11 +148,88 @@ func TestContainerRuntimeStatusMappingAndStart(t *testing.T) {
 	}
 }
 
+func TestContainerRuntimeReportsDistinctExitCauses(t *testing.T) {
+	tests := []struct {
+		name   string
+		state  containerExitState
+		code   string
+		status shards.RuntimeState
+	}{
+		{name: "clean", state: containerExitState{ExitCode: 0}, status: shards.RuntimeStopped},
+		{name: "oom", state: containerExitState{ExitCode: 137, OOMKilled: true}, code: "CONTAINER_OOM_KILLED", status: shards.RuntimeFailed},
+		{name: "sigkill", state: containerExitState{ExitCode: 137}, code: "CONTAINER_SIGKILL", status: shards.RuntimeFailed},
+		{name: "crash", state: containerExitState{ExitCode: 42}, code: "CONTAINER_EXIT_NONZERO", status: shards.RuntimeFailed},
+		{name: "dead", state: containerExitState{Dead: true, ExitCode: 1}, code: "CONTAINER_DEAD", status: shards.RuntimeFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status := containerExitRuntimeStatus(test.state)
+			if status.State != test.status || status.Code != test.code {
+				t.Fatalf("status=%#v", status)
+			}
+		})
+	}
+}
+
+func TestContainerRuntimeStopWaitsForRealExit(t *testing.T) {
+	id := strings.Repeat("4", 64)
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{
+		containerListLine(id, "running", "Cluster_1", "Master"), nil,
+		containerListLine(id, "exited", "Cluster_1", "Master"),
+	}}
+	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
+	runtime.gracePeriod, runtime.pollInterval = 20*time.Millisecond, time.Millisecond
+	if err := runtime.Stop(context.Background(), "Cluster_1", "Master"); err != nil {
+		t.Fatal(err)
+	}
+	if len(cli.calls) != 3 || cli.calls[1].arguments[0] != "exec" {
+		t.Fatalf("calls=%#v", cli.calls)
+	}
+}
+
+func TestContainerRuntimeStopUsesAuditedTermFallbackWhenConsoleFails(t *testing.T) {
+	id := strings.Repeat("5", 64)
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{
+		containerListLine(id, "running", "Cluster_1", "Master"), nil, nil,
+		containerListLine(id, "exited", "Cluster_1", "Master"),
+	}, errors: []error{nil, errors.New("tmux socket unavailable")}}
+	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
+	runtime.gracePeriod, runtime.pollInterval = time.Millisecond, time.Millisecond
+	err := runtime.Stop(context.Background(), "Cluster_1", "Master")
+	var fallback *ContainerStopFallbackError
+	if !errors.As(err, &fallback) || fallback.Forced {
+		t.Fatalf("error=%v", err)
+	}
+	wantStop := []string{"stop", "--time", "1", id}
+	if !reflect.DeepEqual(cli.calls[2].arguments, wantStop) {
+		t.Fatalf("calls=%#v", cli.calls)
+	}
+}
+
+func TestContainerRuntimeStopEscalatesToKillAndReportsUnsavedRisk(t *testing.T) {
+	id := strings.Repeat("6", 64)
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{
+		containerListLine(id, "running", "Cluster_1", "Master"), nil, nil, nil,
+		containerListLine(id, "exited", "Cluster_1", "Master"),
+	}, errors: []error{nil, errors.New("console unavailable"), errors.New("stop failed")}}
+	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
+	runtime.gracePeriod, runtime.pollInterval = time.Millisecond, time.Millisecond
+	err := runtime.Stop(context.Background(), "Cluster_1", "Master")
+	var fallback *ContainerStopFallbackError
+	if !errors.As(err, &fallback) || !fallback.Forced {
+		t.Fatalf("error=%v", err)
+	}
+	wantKill := []string{"kill", "--signal", "KILL", id}
+	if !reflect.DeepEqual(cli.calls[3].arguments, wantKill) {
+		t.Fatalf("calls=%#v", cli.calls)
+	}
+}
+
 func TestContainerRuntimeRunningRequiresConsoleAndReportsInventory(t *testing.T) {
 	id := strings.Repeat("c", 64)
 	cli := &fakeContainerCLI{available: true, responses: [][]byte{
-		containerListLine(id, "running", "Cluster_1", "Master"), nil,
-		containerListLine(id, "running", "Cluster_1", "Master"),
+		containerListLine(id, "running", "Cluster_1", "Master"), nil, containerStartedAt(containerStartTime),
+		containerListLine(id, "running", "Cluster_1", "Master"), containerStartedAt(containerStartTime),
 	}}
 	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
 	status, err := runtime.Status(context.Background(), "Cluster_1", "Master")
@@ -129,7 +237,7 @@ func TestContainerRuntimeRunningRequiresConsoleAndReportsInventory(t *testing.T)
 		t.Fatalf("status=%#v err=%v", status, err)
 	}
 	processes, err := runtime.ContainerProcesses(context.Background())
-	if err != nil || len(processes) != 1 || processes[0].RuntimeKind != "container" || processes[0].InstanceID != id || processes[0].PID <= 0 {
+	if err != nil || len(processes) != 1 || processes[0].RuntimeKind != "container" || processes[0].InstanceID != id+"@"+containerStartTime || processes[0].PID <= 0 {
 		t.Fatalf("processes=%#v err=%v", processes, err)
 	}
 }
@@ -137,8 +245,8 @@ func TestContainerRuntimeRunningRequiresConsoleAndReportsInventory(t *testing.T)
 func TestContainerRuntimeAppliesAndVerifiesCPUWithTrustedIdentity(t *testing.T) {
 	id := strings.Repeat("9", 64)
 	cli := &fakeContainerCLI{available: true, responses: [][]byte{
-		containerListLine(id, "running", "Cluster_1", "Master"), nil,
-		containerListLine(id, "running", "Cluster_1", "Master"),
+		containerListLine(id, "running", "Cluster_1", "Master"), containerStartedAt(containerStartTime), nil,
+		containerListLine(id, "running", "Cluster_1", "Master"), containerStartedAt(containerStartTime),
 		containerCPUInspect(id, "Cluster_1", "Master", "2-3", 2_000_000_000, true),
 	}}
 	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
@@ -148,7 +256,7 @@ func TestContainerRuntimeAppliesAndVerifiesCPUWithTrustedIdentity(t *testing.T) 
 	}
 	wantUpdate := []string{"update", "--cpus", "2", "--cpuset-cpus", "2-3", id}
 	wantInspect := []string{"inspect", "--format", "{{json .}}", id}
-	if !reflect.DeepEqual(cli.calls[1].arguments, wantUpdate) || !reflect.DeepEqual(cli.calls[3].arguments, wantInspect) {
+	if !reflect.DeepEqual(cli.calls[2].arguments, wantUpdate) || !reflect.DeepEqual(cli.calls[5].arguments, wantInspect) {
 		t.Fatalf("calls=%#v", cli.calls)
 	}
 }
@@ -156,8 +264,21 @@ func TestContainerRuntimeAppliesAndVerifiesCPUWithTrustedIdentity(t *testing.T) 
 func TestContainerRuntimeRejectsCPUResultForChangedInstance(t *testing.T) {
 	first, second := strings.Repeat("7", 64), strings.Repeat("8", 64)
 	cli := &fakeContainerCLI{available: true, responses: [][]byte{
-		containerListLine(first, "running", "Cluster_1", "Master"), nil,
+		containerListLine(first, "running", "Cluster_1", "Master"), containerStartedAt(containerStartTime), nil,
 		containerListLine(second, "running", "Cluster_1", "Master"),
+	}}
+	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
+	_, err := runtime.ExecuteCPU(context.Background(), "Cluster_1", "Master", shared.RuntimeActionCPUApply, shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyShared, LogicalCPUIds: []int{0}})
+	if !errors.Is(err, runtimecpu.ErrInstanceChanged) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestContainerRuntimeRejectsCPUResultAfterSameContainerRestart(t *testing.T) {
+	id := strings.Repeat("3", 64)
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{
+		containerListLine(id, "running", "Cluster_1", "Master"), containerStartedAt(containerStartTime), nil,
+		containerListLine(id, "running", "Cluster_1", "Master"), containerStartedAt("2026-08-16T02:01:00Z"),
 	}}
 	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
 	_, err := runtime.ExecuteCPU(context.Background(), "Cluster_1", "Master", shared.RuntimeActionCPUApply, shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyShared, LogicalCPUIds: []int{0}})
@@ -193,7 +314,9 @@ func TestContainerRuntimeCoalescesBackgroundConsoleProbes(t *testing.T) {
 	release := make(chan struct{})
 	cli := &fakeContainerCLI{available: true, responses: [][]byte{
 		containerListLine(id, "running", "Cluster_1", "Master"),
-		containerListLine(id, "running", "Cluster_1", "Master"), nil,
+		containerStartedAt(containerStartTime), containerConsolePane(), nil,
+		containerListLine(id, "running", "Cluster_1", "Master"), containerStartedAt(containerStartTime), nil,
+		containerListLine(id, "running", "Cluster_1", "Master"), containerStartedAt(containerStartTime), containerConsolePane(), nil,
 	}, blockExec: release}
 	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
 	errorsSeen := make(chan error, 2)
@@ -204,7 +327,7 @@ func TestContainerRuntimeCoalescesBackgroundConsoleProbes(t *testing.T) {
 		cli.mu.Lock()
 		calls := len(cli.calls)
 		cli.mu.Unlock()
-		if calls == 3 {
+		if calls == 7 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -224,8 +347,19 @@ func TestContainerRuntimeCoalescesBackgroundConsoleProbes(t *testing.T) {
 	}
 	cli.mu.Lock()
 	defer cli.mu.Unlock()
-	if len(cli.calls) != 3 {
+	// The joined caller still performs read-only identity/health checks but
+	// does not write a second payload to the pane.
+	if len(cli.calls) != 11 {
 		t.Fatalf("coalesced calls=%#v", cli.calls)
+	}
+	writes := 0
+	for _, call := range cli.calls {
+		if len(call.arguments) > 5 && call.arguments[0] == "exec" && call.arguments[2] == "tmux" && call.arguments[5] == "send-keys" {
+			writes++
+		}
+	}
+	if writes != 1 {
+		t.Fatalf("console writes=%d calls=%#v", writes, cli.calls)
 	}
 }
 
@@ -234,14 +368,53 @@ func TestContainerRuntimeRejectsInstanceChangeBeforeConsoleWrite(t *testing.T) {
 	newID := strings.Repeat("b", 64)
 	cli := &fakeContainerCLI{available: true, responses: [][]byte{
 		containerListLine(oldID, "running", "Cluster_1", "Master"),
-		containerListLine(newID, "running", "Cluster_1", "Master"),
+		containerConsolePane(), nil,
+		containerStartedAt(containerStartTime), containerListLine(newID, "running", "Cluster_1", "Master"),
+		containerStartedAt("2026-08-16T02:01:00Z"),
 	}}
 	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
 	err := runtime.Send(context.Background(), "Cluster_1", "Master", "c_save()")
 	if !errors.Is(err, consoledispatch.ErrInstanceChanged) {
 		t.Fatalf("send after instance change=%v", err)
 	}
-	if len(cli.calls) != 2 {
+	if len(cli.calls) != 5 {
 		t.Fatalf("unexpected console write: %#v", cli.calls)
+	}
+}
+
+func TestContainerRuntimeRejectsSameContainerAfterRuntimeRestart(t *testing.T) {
+	id := strings.Repeat("2", 64)
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{
+		containerListLine(id, "running", "Cluster_1", "Master"), containerConsolePane(), nil,
+		containerStartedAt(containerStartTime), containerListLine(id, "running", "Cluster_1", "Master"),
+		containerStartedAt("2026-08-16T02:01:00Z"),
+	}}
+	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
+	err := runtime.Send(context.Background(), "Cluster_1", "Master", "c_save()")
+	if !errors.Is(err, consoledispatch.ErrInstanceChanged) {
+		t.Fatalf("send after runtime restart=%v", err)
+	}
+	for _, call := range cli.calls {
+		for _, argument := range call.arguments {
+			if argument == "send-keys" {
+				t.Fatalf("command crossed runtime restart: %#v", cli.calls)
+			}
+		}
+	}
+}
+
+func TestContainerRuntimeBuildsFixedReadOnlyAttachCommand(t *testing.T) {
+	id := strings.Repeat("1", 64)
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{
+		containerListLine(id, "running", "Cluster_1", "Master"), containerConsolePane(), nil, containerStartedAt(containerStartTime),
+	}}
+	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
+	spec, err := runtime.ConsoleAttach("Cluster_1", "Master", true)
+	want := []string{"docker", "exec", "-it", id, "tmux", "-S", "/run/dst-admin/tmux/tmux.sock", "attach-session", "-r", "-t", "=dst"}
+	if err != nil || !reflect.DeepEqual(spec.Command, want) || spec.InstanceID != id+"@"+containerStartTime {
+		t.Fatalf("spec=%#v err=%v", spec, err)
+	}
+	if err := validateAttachCommand(spec.Command); err != nil {
+		t.Fatal(err)
 	}
 }

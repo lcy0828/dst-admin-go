@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"dont/internal/consoledispatch"
 	"dont/internal/shards"
@@ -64,6 +66,31 @@ type containerShardRuntime struct {
 	installation RuntimeInstallation
 	cli          containerCLI
 	dispatcher   *consoledispatch.Dispatcher
+	gracePeriod  time.Duration
+	pollInterval time.Duration
+}
+
+type containerExitState struct {
+	Status     string `json:"Status"`
+	Running    bool   `json:"Running"`
+	Restarting bool   `json:"Restarting"`
+	OOMKilled  bool   `json:"OOMKilled"`
+	Dead       bool   `json:"Dead"`
+	ExitCode   int    `json:"ExitCode"`
+	Error      string `json:"Error"`
+	FinishedAt string `json:"FinishedAt"`
+}
+
+type ContainerStopFallbackError struct {
+	Reason string
+	Forced bool
+}
+
+func (e *ContainerStopFallbackError) Error() string {
+	if e.Forced {
+		return "容器未在优雅停止期限内退出，已强制终止；最后一次存档无法确认: " + e.Reason
+	}
+	return "控制台优雅关服不可用，已通过容器 TERM fallback 停止；最后一次存档无法确认: " + e.Reason
 }
 
 type containerInventoryProvider interface {
@@ -74,7 +101,10 @@ func newContainerShardRuntime(installation RuntimeInstallation, cli containerCLI
 	if installation.Driver != "container" || cli == nil || !cli.Available() {
 		return nil, errors.New("容器 Runtime 未正确配置或容器 CLI 不可用")
 	}
-	return &containerShardRuntime{installation: installation, cli: cli, dispatcher: consoledispatch.New()}, nil
+	return &containerShardRuntime{
+		installation: installation, cli: cli, dispatcher: consoledispatch.New(),
+		gracePeriod: 30 * time.Second, pollInterval: 500 * time.Millisecond,
+	}, nil
 }
 
 func (c *containerShardRuntime) Status(ctx context.Context, cluster, shard string) (shards.RuntimeStatus, error) {
@@ -88,11 +118,20 @@ func (c *containerShardRuntime) Status(ctx context.Context, cluster, shard strin
 		if healthErr != nil {
 			return shards.RuntimeStatus{State: shards.RuntimeStarting, Code: "CONSOLE_STARTING", Message: "容器已运行，等待 tmux 与 DST 会话就绪", SessionExists: true}, nil
 		}
+		if _, identityErr := c.runtimeInstanceID(ctx, instance.ID); identityErr != nil {
+			return shards.RuntimeStatus{State: shards.RuntimeStarting, Code: "INSTANCE_IDENTITY_PENDING", Message: "容器已运行，等待 Runtime 实例身份就绪", SessionExists: true}, nil
+		}
 		return shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}, nil
 	case "restarting":
 		return shards.RuntimeStatus{State: shards.RuntimeStarting, Message: "容器正在启动", SessionExists: true}, nil
-	case "created", "exited":
+	case "created":
 		return shards.RuntimeStatus{State: shards.RuntimeStopped}, nil
+	case "exited", "dead":
+		exit, inspectErr := c.inspectExit(ctx, instance.ID)
+		if inspectErr != nil {
+			return shards.RuntimeStatus{State: shards.RuntimeUnknown, Code: "CONTAINER_EXIT_INSPECT_FAILED", Message: inspectErr.Error()}, inspectErr
+		}
+		return containerExitRuntimeStatus(exit), nil
 	default:
 		return shards.RuntimeStatus{State: shards.RuntimeFailed, Code: "CONTAINER_" + strings.ToUpper(instance.State), Message: "分片容器状态异常: " + instance.State, SessionExists: instance.State != "dead"}, nil
 	}
@@ -106,7 +145,11 @@ func (c *containerShardRuntime) Start(ctx context.Context, cluster, shard string
 		return err
 	}
 	if instance.State == "running" || instance.State == "restarting" {
-		if err := c.dispatcher.BindInstance(key, instance.ID); err != nil {
+		instanceID, identityErr := c.runtimeInstanceID(ctx, instance.ID)
+		if identityErr != nil {
+			return identityErr
+		}
+		if err := c.dispatcher.BindInstance(key, instanceID); err != nil {
 			return err
 		}
 		return c.dispatcher.Resume(key)
@@ -115,7 +158,11 @@ func (c *containerShardRuntime) Start(ctx context.Context, cluster, shard string
 		_ = c.dispatcher.Pause(context.Background(), key)
 		return fmt.Errorf("启动分片容器: %w", err)
 	}
-	if err := c.dispatcher.BindInstance(key, instance.ID); err != nil {
+	instanceID, err := c.waitForRuntimeInstance(ctx, instance.ID, c.gracePeriod)
+	if err != nil {
+		return err
+	}
+	if err := c.dispatcher.BindInstance(key, instanceID); err != nil {
 		return err
 	}
 	return c.dispatcher.Resume(key)
@@ -134,11 +181,107 @@ func (c *containerShardRuntime) Stop(ctx context.Context, cluster, shard string)
 	if instance.State != "running" {
 		return nil
 	}
-	if err := c.sendToInstance(ctx, instance.ID, "c_shutdown(true)"); err != nil {
-		_ = c.dispatcher.Resume(key)
-		return fmt.Errorf("向分片容器发送优雅停止命令: %w", err)
+	sendErr := c.sendToInstance(ctx, instance.ID, "c_shutdown(true)")
+	if sendErr == nil {
+		if err := c.waitForExit(ctx, cluster, shard, instance.ID, c.gracePeriod); err == nil {
+			return nil
+		} else if !errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+	} else {
+		c.dispatcher.MarkInputDirty(key)
 	}
-	return nil
+	reason := "DST 未在优雅停止期限内退出"
+	if sendErr != nil {
+		reason = sendErr.Error()
+	}
+	stopSeconds := int(c.gracePeriod / time.Second)
+	if stopSeconds < 1 {
+		stopSeconds = 1
+	}
+	if _, stopErr := c.cli.Run(ctx, "stop", "--time", strconv.Itoa(stopSeconds), instance.ID); stopErr == nil {
+		if waitErr := c.waitForExit(ctx, cluster, shard, instance.ID, c.gracePeriod); waitErr == nil {
+			return &ContainerStopFallbackError{Reason: reason}
+		}
+	} else {
+		reason = errors.Join(errors.New(reason), stopErr).Error()
+	}
+	if _, killErr := c.cli.Run(ctx, "kill", "--signal", "KILL", instance.ID); killErr != nil {
+		return errors.Join(&ContainerStopFallbackError{Reason: reason, Forced: true}, killErr)
+	}
+	if waitErr := c.waitForExit(ctx, cluster, shard, instance.ID, c.gracePeriod); waitErr != nil {
+		return errors.Join(&ContainerStopFallbackError{Reason: reason, Forced: true}, waitErr)
+	}
+	return &ContainerStopFallbackError{Reason: reason, Forced: true}
+}
+
+func (c *containerShardRuntime) waitForExit(ctx context.Context, cluster, shard, instanceID string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = time.Second
+	}
+	interval := c.pollInterval
+	if interval <= 0 {
+		interval = 100 * time.Millisecond
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		current, err := c.find(ctx, cluster, shard)
+		if err != nil {
+			return err
+		}
+		if current.ID != instanceID {
+			return consoledispatch.ErrInstanceChanged
+		}
+		if current.State != "running" && current.State != "restarting" {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return context.DeadlineExceeded
+		case <-ticker.C:
+		}
+	}
+}
+
+func (c *containerShardRuntime) inspectExit(ctx context.Context, id string) (containerExitState, error) {
+	if !managedContainerID.MatchString(id) {
+		return containerExitState{}, errors.New("容器 ID 不受信")
+	}
+	output, err := c.cli.Run(ctx, "inspect", "--format", "{{json .State}}", id)
+	if err != nil {
+		return containerExitState{}, err
+	}
+	var state containerExitState
+	if err := json.Unmarshal(output, &state); err != nil {
+		return containerExitState{}, errors.New("容器 Engine 返回了无效退出状态")
+	}
+	return state, nil
+}
+
+func containerExitRuntimeStatus(state containerExitState) shards.RuntimeStatus {
+	switch {
+	case state.Running || state.Restarting:
+		return shards.RuntimeStatus{State: shards.RuntimeStarting, Code: "CONTAINER_RESTARTING", Message: "容器正在恢复", SessionExists: true}
+	case state.OOMKilled:
+		return shards.RuntimeStatus{State: shards.RuntimeFailed, Code: "CONTAINER_OOM_KILLED", Message: "DST 分片容器被 OOM Killer 终止"}
+	case state.Dead:
+		return shards.RuntimeStatus{State: shards.RuntimeFailed, Code: "CONTAINER_DEAD", Message: "DST 分片容器进入 dead 状态"}
+	case state.ExitCode == 137:
+		return shards.RuntimeStatus{State: shards.RuntimeFailed, Code: "CONTAINER_SIGKILL", Message: "DST 分片容器被 SIGKILL 终止，存档可能未完成"}
+	case state.ExitCode != 0:
+		message := fmt.Sprintf("DST 分片容器异常退出（exit %d）", state.ExitCode)
+		if strings.TrimSpace(state.Error) != "" {
+			message += ": " + strings.TrimSpace(state.Error)
+		}
+		return shards.RuntimeStatus{State: shards.RuntimeFailed, Code: "CONTAINER_EXIT_NONZERO", Message: message}
+	default:
+		return shards.RuntimeStatus{State: shards.RuntimeStopped}
+	}
 }
 
 func (c *containerShardRuntime) Send(ctx context.Context, cluster, shard, command string) error {
@@ -150,16 +293,30 @@ func (c *containerShardRuntime) Send(ctx context.Context, cluster, shard, comman
 		return errors.New("分片容器未运行")
 	}
 	key := c.shardKey(cluster, shard)
-	if err := c.dispatcher.BindInstance(key, instance.ID); err != nil {
+	if err := c.guardContainerConsole(ctx, instance, key); err != nil {
+		return err
+	}
+	instanceID, err := c.runtimeInstanceID(ctx, instance.ID)
+	if err != nil {
+		return err
+	}
+	if err := c.dispatcher.BindInstance(key, instanceID); err != nil {
 		return err
 	}
 	writeAttempted := false
-	err = c.dispatcher.Dispatch(ctx, key, consoledispatch.Request{InstanceID: instance.ID, Execute: func(sendContext context.Context) error {
+	err = c.dispatcher.Dispatch(ctx, key, consoledispatch.Request{InstanceID: instanceID, Execute: func(sendContext context.Context) error {
 		current, err := c.find(sendContext, cluster, shard)
 		if err != nil {
 			return err
 		}
 		if current.ID != instance.ID {
+			return consoledispatch.ErrInstanceChanged
+		}
+		currentInstanceID, err := c.runtimeInstanceID(sendContext, current.ID)
+		if err != nil {
+			return err
+		}
+		if currentInstanceID != instanceID {
 			return consoledispatch.ErrInstanceChanged
 		}
 		if current.State != "running" {
@@ -177,28 +334,41 @@ func (c *containerShardRuntime) Send(ctx context.Context, cluster, shard, comman
 func (c *containerShardRuntime) SendBackground(ctx context.Context, cluster, shard, coalesceKey, command string) error {
 	key := c.shardKey(cluster, shard)
 	instanceID := c.dispatcher.Health(key).InstanceID
+	instance, err := c.find(ctx, cluster, shard)
+	if err != nil {
+		return err
+	}
+	if instance.State != "running" {
+		return errors.New("分片容器未运行")
+	}
+	observedInstanceID, err := c.runtimeInstanceID(ctx, instance.ID)
+	if err != nil {
+		return err
+	}
 	if instanceID == "" {
-		instance, err := c.find(ctx, cluster, shard)
-		if err != nil {
-			return err
-		}
-		if instance.State != "running" {
-			return errors.New("分片容器未运行")
-		}
-		instanceID = instance.ID
+		instanceID = observedInstanceID
 		if err := c.dispatcher.BindInstance(key, instanceID); err != nil {
 			return err
 		}
+	} else if instanceID != observedInstanceID {
+		return consoledispatch.ErrInstanceChanged
+	}
+	if err := c.guardContainerConsole(ctx, instance, key); err != nil {
+		return err
 	}
 	writeAttempted := false
-	err := c.dispatcher.Dispatch(ctx, key, consoledispatch.Request{
+	err = c.dispatcher.Dispatch(ctx, key, consoledispatch.Request{
 		Class: consoledispatch.ClassBackground, CoalesceKey: coalesceKey, InstanceID: instanceID,
 		Execute: func(sendContext context.Context) error {
 			current, err := c.find(sendContext, cluster, shard)
 			if err != nil {
 				return err
 			}
-			if current.ID != instanceID {
+			currentInstanceID, identityErr := c.runtimeInstanceID(sendContext, current.ID)
+			if identityErr != nil {
+				return identityErr
+			}
+			if current.ID != instance.ID || currentInstanceID != instanceID {
 				return consoledispatch.ErrInstanceChanged
 			}
 			if current.State != "running" {
@@ -215,7 +385,164 @@ func (c *containerShardRuntime) SendBackground(ctx context.Context, cluster, sha
 }
 
 func (c *containerShardRuntime) ConsoleHealth(cluster, shard string) consoledispatch.Health {
-	return c.dispatcher.Health(c.shardKey(cluster, shard))
+	key := c.shardKey(cluster, shard)
+	current := c.dispatcher.Health(key)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	instance, err := c.find(ctx, cluster, shard)
+	if err != nil || instance.State != "running" {
+		current.Status, current.Accepting = "not_found", false
+		return current
+	}
+	status, external := c.probeContainerConsole(ctx, instance)
+	if external && !current.Maintenance {
+		c.dispatcher.MarkExternalWriter(key)
+		return c.dispatcher.Health(key)
+	}
+	if status != "ready" {
+		current.Status, current.Accepting = status, false
+	}
+	return current
+}
+
+func (c *containerShardRuntime) guardContainerConsole(ctx context.Context, instance managedContainer, key string) error {
+	status, external := c.probeContainerConsole(ctx, instance)
+	if external {
+		c.dispatcher.MarkExternalWriter(key)
+		return consoledispatch.ErrExternalWriter
+	}
+	if status != "ready" {
+		return fmt.Errorf("container console transport is %s", status)
+	}
+	return nil
+}
+
+func (c *containerShardRuntime) probeContainerConsole(ctx context.Context, instance managedContainer) (string, bool) {
+	output, err := c.cli.Run(ctx, "exec", instance.ID, "tmux", "-S", c.installation.ConsoleSocket,
+		"display-message", "-p", "-t", "="+c.installation.ConsoleSession+":0.0", "#{pane_dead}\t#{pane_current_command}\t#{pane_pid}")
+	if err != nil {
+		return classifyContainerConsoleError(err.Error()), false
+	}
+	fields := strings.Split(strings.TrimSpace(string(output)), "\t")
+	if len(fields) != 3 {
+		return "process_mismatch", false
+	}
+	if fields[0] == "1" {
+		return "pane_dead", false
+	}
+	pid, parseErr := strconv.ParseInt(strings.TrimSpace(fields[2]), 10, 64)
+	if parseErr != nil || pid <= 0 || !strings.Contains(strings.ToLower(fields[1]), "dontstarve") {
+		return "process_mismatch", false
+	}
+	clients, err := c.cli.Run(ctx, "exec", instance.ID, "tmux", "-S", c.installation.ConsoleSocket,
+		"list-clients", "-F", "#{client_session}\t#{client_readonly}")
+	if err != nil {
+		return classifyContainerConsoleError(err.Error()), false
+	}
+	for _, line := range strings.Split(string(clients), "\n") {
+		fields := strings.Split(strings.TrimSpace(line), "\t")
+		if len(fields) == 2 && fields[0] == c.installation.ConsoleSession && fields[1] != "1" {
+			return "ready", true
+		}
+	}
+	return "ready", false
+}
+
+func classifyContainerConsoleError(message string) string {
+	message = strings.ToLower(message)
+	switch {
+	case strings.Contains(message, "permission denied"), strings.Contains(message, "operation not permitted"):
+		return "permission_denied"
+	case strings.Contains(message, "can't find session"), strings.Contains(message, "no sessions"):
+		return "not_found"
+	case strings.Contains(message, "pane is dead"):
+		return "pane_dead"
+	default:
+		return "socket_unavailable"
+	}
+}
+
+func (c *containerShardRuntime) ConsoleAttach(cluster, shard string, readOnly bool) (shards.ConsoleAttachSpec, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	instance, err := c.find(ctx, cluster, shard)
+	if err != nil {
+		return shards.ConsoleAttachSpec{}, err
+	}
+	if instance.State != "running" {
+		return shards.ConsoleAttachSpec{}, errors.New("分片容器未运行")
+	}
+	status, external := c.probeContainerConsole(ctx, instance)
+	if status != "ready" {
+		return shards.ConsoleAttachSpec{}, fmt.Errorf("container console transport is %s", status)
+	}
+	if external && !readOnly {
+		return shards.ConsoleAttachSpec{}, consoledispatch.ErrExternalWriter
+	}
+	instanceID, err := c.runtimeInstanceID(ctx, instance.ID)
+	if err != nil {
+		return shards.ConsoleAttachSpec{}, err
+	}
+	command := []string{c.installation.ContainerEngine, "exec", "-it", instance.ID, "tmux", "-S", c.installation.ConsoleSocket, "attach-session"}
+	if readOnly {
+		command = append(command, "-r")
+	}
+	command = append(command, "-t", "="+c.installation.ConsoleSession)
+	return shards.ConsoleAttachSpec{Command: command, InstanceID: instanceID}, nil
+}
+
+func (c *containerShardRuntime) BeginConsoleMaintenance(ctx context.Context, cluster, shard, owner string) (shards.ConsoleAttachSpec, *consoledispatch.MaintenanceLease, error) {
+	spec, err := c.ConsoleAttach(cluster, shard, false)
+	if err != nil {
+		return shards.ConsoleAttachSpec{}, nil, err
+	}
+	key := c.shardKey(cluster, shard)
+	if err := c.dispatcher.BindInstance(key, spec.InstanceID); err != nil {
+		return shards.ConsoleAttachSpec{}, nil, err
+	}
+	lease, err := c.dispatcher.BeginMaintenance(ctx, key, owner, spec.InstanceID)
+	return spec, lease, err
+}
+
+func (c *containerShardRuntime) EndConsoleMaintenance(cluster, shard string, lease *consoledispatch.MaintenanceLease) error {
+	if lease == nil {
+		return consoledispatch.ErrInvalidRequest
+	}
+	key := c.shardKey(cluster, shard)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	instance, err := c.find(ctx, cluster, shard)
+	if err != nil {
+		c.dispatcher.MarkInputDirty(key)
+	} else if status, external := c.probeContainerConsole(ctx, instance); status != "ready" {
+		c.dispatcher.MarkInputDirty(key)
+	} else if external {
+		c.dispatcher.MarkExternalWriter(key)
+	}
+	return errors.Join(err, lease.Release())
+}
+
+func (c *containerShardRuntime) RecoverConsoleHazard(ctx context.Context, cluster, shard string) error {
+	instance, err := c.find(ctx, cluster, shard)
+	if err != nil {
+		if strings.Contains(err.Error(), "未找到受管分片容器") {
+			return nil
+		}
+		return err
+	}
+	if instance.State != "running" && instance.State != "restarting" {
+		return nil
+	}
+	instanceID, err := c.runtimeInstanceID(ctx, instance.ID)
+	if err != nil {
+		return err
+	}
+	key := c.shardKey(cluster, shard)
+	if err := c.dispatcher.BindInstance(key, instanceID); err != nil {
+		return err
+	}
+	c.dispatcher.MarkInputDirty(key)
+	return nil
 }
 
 func (c *containerShardRuntime) ContainerProcesses(ctx context.Context) ([]shared.ShardProcessReport, error) {
@@ -228,12 +555,64 @@ func (c *containerShardRuntime) ContainerProcesses(ctx context.Context) ([]share
 		if instance.State != "running" && instance.State != "restarting" {
 			continue
 		}
+		instanceID, identityErr := c.runtimeInstanceID(ctx, instance.ID)
+		if identityErr != nil {
+			return nil, identityErr
+		}
 		result = append(result, shared.ShardProcessReport{
-			PID: containerPseudoPID(instance.ID), RuntimeKind: "container", InstanceID: instance.ID,
+			PID: containerPseudoPID(instance.ID), RuntimeKind: "container", InstanceID: instanceID,
 			Executable: "container:" + instance.Name, Cluster: instance.Cluster, Shard: instance.Shard,
 		})
 	}
 	return result, nil
+}
+
+func (c *containerShardRuntime) ManagedRuntimeExists(ctx context.Context, cluster, shard string) (bool, error) {
+	items, err := c.list(ctx, cluster, shard)
+	return len(items) > 0, err
+}
+
+func (c *containerShardRuntime) runtimeInstanceID(ctx context.Context, containerID string) (string, error) {
+	if !managedContainerID.MatchString(containerID) {
+		return "", errors.New("容器 ID 不受信")
+	}
+	output, err := c.cli.Run(ctx, "inspect", "--format", "{{.State.StartedAt}}", containerID)
+	if err != nil {
+		return "", err
+	}
+	startedAt := strings.TrimSpace(string(output))
+	instant, err := time.Parse(time.RFC3339Nano, startedAt)
+	if err != nil || instant.IsZero() || instant.Year() <= 1 {
+		return "", errors.New("容器 Runtime 启动身份无效")
+	}
+	return containerID + "@" + instant.UTC().Format(time.RFC3339Nano), nil
+}
+
+func (c *containerShardRuntime) waitForRuntimeInstance(ctx context.Context, containerID string, timeout time.Duration) (string, error) {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	interval := c.pollInterval
+	if interval <= 0 {
+		interval = 100 * time.Millisecond
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		instanceID, err := c.runtimeInstanceID(ctx, containerID)
+		if err == nil {
+			return instanceID, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-deadline.C:
+			return "", errors.New("等待容器 Runtime 实例身份超时")
+		case <-ticker.C:
+		}
+	}
 }
 
 func (c *containerShardRuntime) sendToInstance(ctx context.Context, id, command string) error {

@@ -480,7 +480,7 @@ Mod 管理继续区分：
 - 增加幂等、租约、fencing、审计和断线恢复。
 - 保持本机操作路径兼容。
 
-已交付说明：Agent 2.2.0 支持 `shard.status/start/stop/restart/save` 固定动作，不接受任意 Shell 或请求内路径；Agent 从本地受信安装注册表解析路径，并持久化最高 fencing token、完成结果和中断后的 `unknown` 状态。控制器使用持久化房间租约和单调 token，Job 保留逐世界结果，运行审计记录 target、Agent、operation、lease、fencing 和拓扑 revision。执行器只使用 `appliedTargetId`；节点离线、清单过期、文件缺失或运行冲突时拒绝操作，不自动改在本机执行。
+已交付说明：Agent 2.5.1 支持 `shard.status/start/stop/restart/save` 固定动作，不接受任意 Shell 或请求内路径；Agent 从本地受信安装注册表解析路径，并持久化最高 fencing token、完成结果和中断后的 `unknown` 状态。控制器使用持久化房间租约和单调 token，Job 保留逐世界结果，运行审计记录 target、Agent、operation、lease、fencing 和拓扑 revision。执行器只使用 `appliedTargetId`；节点离线、清单过期、文件缺失或运行冲突时拒绝操作，不自动改在本机执行。
 
 ### Phase 4：房间级协调与批量操作（已完成）
 

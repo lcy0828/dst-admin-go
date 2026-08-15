@@ -127,6 +127,27 @@ journalctl -u dst-admin-agent -n 100 --no-pager
 
 systemd unit 只允许写 `/var/lib/dst-admin-agent` 和 `/srv/dst`。若把 `WORKSHOP_CONTENT_PATH`、`MOD_CACHE_PATH` 或 `MOD_STATE_PATH` 改到其他根，必须同步收紧地更新 unit 的 `ReadWritePaths`，否则 systemd sandbox 会正确拒绝写入。运行用户必须拥有 cache/state，且能按所启用功能读写 `server/mods` 和目标 Shard 的 `modoverrides.lua`。
 
+Agent 2.5.1 为每个 native Installation 在 Agent 状态目录下生成稳定、私有的 tmux socket，相同 Cluster/Shard 名称在不同 Installation 中不会串服。升级时如发现同名会话仍在旧的默认 socket 运行，Agent 返回 `LEGACY_TMUX_SOCKET_CONFLICT` 并拒绝启动第二个实例。先用旧版管理方式正常停止该 Shard，再由新 Agent 启动一次即完成迁移。
+
+本机排障可以使用同一 Agent 二进制的受控 attach。默认只读，不会暂停自动命令：
+
+```bash
+sudo -u dst /usr/local/bin/dst-admin-agent \
+  -attach -state /var/lib/dst-admin-agent/runtime-state.json \
+  -installation native -cluster Cluster_1 -shard Master
+```
+
+可写 attach 必须提供操作者并获取 1 分钟至 1 小时的 maintenance lease；租约期间 dispatcher 拒绝自动命令，进程退出、连接中断或超时都会结束租约：
+
+```bash
+sudo -u dst /usr/local/bin/dst-admin-agent \
+  -attach -write -owner "$USER" -lease 10m \
+  -state /var/lib/dst-admin-agent/runtime-state.json \
+  -installation native -cluster Cluster_1 -shard Master
+```
+
+未经 Agent CLI 直接建立的可写 tmux client 会将 ConsoleHealth 标记为 `external_writer`，并阻止后续自动输入直到新 Runtime instance 建立。Web UI 不提供宿主 Shell 或 attach 入口。
+
 重复运行安装脚本会原位升级二进制和 service。卸载默认保留配置、Agent ID、最高 fencing token 和幂等状态，防止重装后失去操作历史；只有确认节点不再被控制面管理时才清除状态：
 
 ```bash
@@ -148,6 +169,8 @@ launchctl print "gui/$(id -u)/top.luocaiyi.dst-admin-agent"
 
 配置、密钥和幂等状态保存在 `~/Library/Application Support/DST Admin Agent`，日志位于 `~/Library/Logs/DST Admin Agent`。卸载同样默认保留状态：
 
+macOS attach 不需要 `sudo`，`-state` 指向 `~/Library/Application Support/DST Admin Agent/runtime-state.json`。由于 macOS 对 Unix socket 路径长度限制更严，Agent 在当前用户的临时目录中使用基于状态目录哈希的短路径，目录权限固定为 `0700`。
+
 ```bash
 deploy/scripts/uninstall-macos-agent.sh
 deploy/scripts/uninstall-macos-agent.sh --purge-state
@@ -168,6 +191,12 @@ docker logs <container-id>
 ```
 
 停止通过控制台发送 `c_shutdown(true)`，由 DST 自己完成存档并退出。不要用通用 `docker kill` 作为正常停止路径；强制退出必须显示未保存风险并进入异常退出审计。
+
+Agent 会等待容器真实退出，超时才依次使用 Engine `stop` 和 `kill --signal KILL`。Engine 退出观察区分正常退出、非零退出、SIGKILL、dead 和 `CONTAINER_OOM_KILLED`；进入 fallback 即使最终停止也不会伪装成已确认保存。
+
+容器 Agent 可以用同一 attach CLI 连接 container Runtime，但只会生成受管 label 目标的固定 `docker/podman exec ... tmux attach-session` 参数，不接受 Shell 字符串。容器 Agent 会报告 `provider.container-runtime.v1`；它不会因为看到 bind mount 或 Docker Socket 就报告 native host integration。容器内配置 `DRIVER=native` 会返回 `NATIVE_HOST_INTEGRATION_UNAVAILABLE`，裸机 DST 仍必须使用裸机 Agent。
+
+`agent-data` 卷是容器控制权的一部分。如果状态文件丢失但 Agent 发现已有受管容器，所有变更返回 `CONTAINER_OWNERSHIP_STATE_LOST`，只读观察仍可用。优先恢复原状态卷；只有在核对不存在旧 Agent、旧实例或更高 fencing token 后，才可单次设置 `DST_ADMIN_ADOPT_EXISTING_CONTAINERS=true` 建立新哨兵，成功后立即移除该环境变量。
 
 ## 备份边界
 

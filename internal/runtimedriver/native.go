@@ -303,6 +303,7 @@ func (d *Native) ConsoleHealth(ctx context.Context, target Target) (shared.Runti
 		health.Class, health.CoalesceKey, health.StartedAt = string(current.Class), current.CoalesceKey, current.StartedAt
 		health.Maintenance, health.MaintenanceOwner, health.MaintenanceStartedAt = current.Maintenance, current.MaintenanceOwner, current.MaintenanceStartedAt
 		health.InputDirty, health.ExternalWriter = current.InputDirty, current.ExternalWriter
+		health.Available = current.Status == "ready" || current.Status == "maintenance"
 	}
 	return health, err
 }

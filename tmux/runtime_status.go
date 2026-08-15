@@ -259,7 +259,7 @@ func runtimeLogSignalOverlap() int {
 }
 
 func (s *DSTServer) SessionExists() (bool, error) {
-	command := exec.Command("tmux", "has-session", "-t", "="+s.SessionName)
+	command := exec.Command("tmux", s.tmuxArguments("has-session", "-t", "="+s.SessionName)...)
 	if err := command.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -270,8 +270,23 @@ func (s *DSTServer) SessionExists() (bool, error) {
 	return true, nil
 }
 
+func (s *DSTServer) DefaultSocketSessionExists() (bool, error) {
+	if strings.TrimSpace(s.SocketPath) == "" {
+		return false, nil
+	}
+	command := exec.Command("tmux", "has-session", "-t", "="+s.SessionName)
+	if err := command.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return false, nil
+		}
+		return false, fmt.Errorf("check legacy tmux session: %w", err)
+	}
+	return true, nil
+}
+
 func (s *DSTServer) sessionCreatedAt() (time.Time, error) {
-	output, err := exec.Command("tmux", "display-message", "-p", "-t", s.SessionName, "#{session_created}").Output()
+	output, err := exec.Command("tmux", s.tmuxArguments("display-message", "-p", "-t", s.SessionName, "#{session_created}")...).Output()
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -282,14 +297,125 @@ func (s *DSTServer) sessionCreatedAt() (time.Time, error) {
 	return time.Unix(timestamp, 0), nil
 }
 
+func (s *DSTServer) tmuxArguments(arguments ...string) []string {
+	if strings.TrimSpace(s.SocketPath) == "" {
+		return arguments
+	}
+	return append([]string{"-S", s.SocketPath}, arguments...)
+}
+
+// ConsoleTransportHealth reports transport failures separately from the DST
+// lifecycle state. It never writes to the pane.
+func (s *DSTServer) ConsoleTransportHealth() (string, bool, error) {
+	configPath := filepath.Join(s.StorageRoot, s.ConfDir, s.ArchiveName, "cluster.ini")
+	if config, err := ini.Load(configPath); err == nil {
+		value := strings.TrimSpace(config.Section("MISC").Key("console_enabled").String())
+		if strings.EqualFold(value, "false") {
+			return "disabled", false, nil
+		}
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return "not_found", false, nil
+	}
+	if s.SocketPath != "" {
+		if _, err := os.Stat(s.SocketPath); err != nil {
+			if os.IsPermission(err) {
+				return "permission_denied", false, nil
+			}
+			if os.IsNotExist(err) {
+				return "socket_unavailable", false, nil
+			}
+			return "socket_unavailable", false, err
+		}
+	}
+	output, err := exec.Command("tmux", s.tmuxArguments(
+		"display-message", "-p", "-t", "="+s.SessionName+":0.0",
+		"#{pane_dead}\t#{pane_current_command}\t#{pane_pid}",
+	)...).CombinedOutput()
+	if err != nil {
+		return classifyConsoleCommandError(string(output), s.SocketPath != ""), false, nil
+	}
+	fields := strings.Split(strings.TrimSpace(string(output)), "\t")
+	if len(fields) != 3 {
+		return "process_mismatch", false, nil
+	}
+	if fields[0] == "1" {
+		return "pane_dead", false, nil
+	}
+	command := strings.ToLower(strings.TrimSpace(fields[1]))
+	pid, parseErr := strconv.ParseInt(strings.TrimSpace(fields[2]), 10, 64)
+	if parseErr != nil || pid <= 0 || !strings.Contains(command, "dontstarve") {
+		return "process_mismatch", false, nil
+	}
+	clients, err := s.tmux.ListClients()
+	if err != nil {
+		return "socket_unavailable", false, nil
+	}
+	for _, client := range clients {
+		if client != nil && client.Session == s.SessionName && !client.Readonly {
+			return "ready", true, nil
+		}
+	}
+	return "ready", false, nil
+}
+
+func classifyConsoleCommandError(output string, privateSocket bool) string {
+	message := strings.ToLower(output)
+	switch {
+	case strings.Contains(message, "permission denied") || strings.Contains(message, "operation not permitted"):
+		return "permission_denied"
+	case strings.Contains(message, "can't find session") || strings.Contains(message, "no sessions"):
+		return "not_found"
+	case privateSocket || strings.Contains(message, "no server running") || strings.Contains(message, "connection refused"):
+		return "socket_unavailable"
+	default:
+		return "not_found"
+	}
+}
+
+func (s *DSTServer) ConsoleAttachCommand(readOnly bool) ([]string, error) {
+	status, externalWriter, err := s.ConsoleTransportHealth()
+	if err != nil {
+		return nil, err
+	}
+	if status != "ready" {
+		return nil, fmt.Errorf("console transport is %s", status)
+	}
+	if externalWriter && !readOnly {
+		return nil, fmt.Errorf("console already has an unmanaged writer")
+	}
+	arguments := []string{"tmux"}
+	if s.SocketPath != "" {
+		arguments = append(arguments, "-S", s.SocketPath)
+	}
+	arguments = append(arguments, "attach-session")
+	if readOnly {
+		arguments = append(arguments, "-r")
+	}
+	arguments = append(arguments, "-t", "="+s.SessionName)
+	return arguments, nil
+}
+
 // RuntimeInstanceID identifies one concrete tmux session lifetime. A session
 // recreated with the same name receives a different identity.
 func (s *DSTServer) RuntimeInstanceID() (string, error) {
-	createdAt, err := s.sessionCreatedAt()
+	output, err := exec.Command("tmux", s.tmuxArguments(
+		"display-message", "-p", "-t", "="+s.SessionName,
+		"#{session_created}\t#{session_id}\t#{pid}",
+	)...).Output()
 	if err != nil {
 		return "", err
 	}
-	return s.SessionName + "@" + strconv.FormatInt(createdAt.Unix(), 10), nil
+	fields := strings.Split(strings.TrimSpace(string(output)), "\t")
+	if len(fields) != 3 {
+		return "", errors.New("tmux runtime instance identity is invalid")
+	}
+	created, createdErr := strconv.ParseInt(fields[0], 10, 64)
+	pid, pidErr := strconv.ParseInt(fields[2], 10, 64)
+	if createdErr != nil || created <= 0 || pidErr != nil || pid <= 0 || !strings.HasPrefix(fields[1], "$") || len(fields[1]) > 32 {
+		return "", errors.New("tmux runtime instance identity is invalid")
+	}
+	return fmt.Sprintf("%s@%d/%s/%d", s.SessionName, created, fields[1], pid), nil
 }
 
 func (s *DSTServer) runtimeLogPath() string {

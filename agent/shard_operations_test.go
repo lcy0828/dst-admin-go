@@ -21,6 +21,25 @@ type fakeShardRuntime struct {
 	fail   error
 }
 
+type fakeContainerOwnershipRuntime struct {
+	*fakeShardRuntime
+	exists bool
+}
+
+type fakeConsoleRecoveryRuntime struct {
+	*fakeShardRuntime
+	recovered []consoleHazard
+}
+
+func (f *fakeConsoleRecoveryRuntime) RecoverConsoleHazard(_ context.Context, cluster, shard string) error {
+	f.recovered = append(f.recovered, consoleHazard{Cluster: cluster, Shard: shard})
+	return nil
+}
+
+func (f *fakeContainerOwnershipRuntime) ManagedRuntimeExists(context.Context, string, string) (bool, error) {
+	return f.exists, nil
+}
+
 func (runtime *fakeShardRuntime) Status(context.Context, string, string) (shards.RuntimeStatus, error) {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
@@ -254,5 +273,53 @@ func TestAgentReusesRuntimeControlPerInstallation(t *testing.T) {
 	}
 	if creations != 1 {
 		t.Fatalf("runtime creations=%d", creations)
+	}
+}
+
+func TestContainerRuntimeRefusesTakeoverAfterStateVolumeLoss(t *testing.T) {
+	base := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeStopped}}
+	agent, installation := newShardOperationAgent(t, base)
+	installation.Driver = "container"
+	installation.ContainerEngine = "docker"
+	installation.ConsoleSocket = "/run/dst-admin/tmux/tmux.sock"
+	installation.ConsoleSession = "dst"
+	agent.Config.RuntimeInstallations = []RuntimeInstallation{installation}
+	agent.shardState = &shardOperationState{path: filepath.Join(t.TempDir(), "lost-state.json"), fresh: true, Version: 1, Rooms: make(map[string]shardRoomState)}
+	control := &fakeContainerOwnershipRuntime{fakeShardRuntime: base, exists: true}
+	agent.shardRuntimes = map[string]shardRuntimeControl{installation.ID: control}
+	request := shardOperationRequest(shared.ShardActionStart, 1)
+	if _, err := agent.executeShardOperation(string(request.Action), &request, 10); err == nil || !strings.Contains(err.Error(), "CONTAINER_OWNERSHIP_STATE_LOST") {
+		t.Fatalf("takeover error=%v", err)
+	}
+	t.Setenv("DST_ADMIN_ADOPT_EXISTING_CONTAINERS", "true")
+	if _, err := agent.executeShardOperation(string(request.Action), &request, 10); err != nil {
+		t.Fatalf("explicit adoption failed: %v", err)
+	}
+	if !agent.shardState.ownershipInitialized() {
+		t.Fatal("ownership sentinel was not persisted")
+	}
+}
+
+func TestAgentRecoversPersistedIncompleteConsoleOperationAsHazard(t *testing.T) {
+	state := &shardOperationState{Version: 1, Rooms: map[string]shardRoomState{
+		"native\x00cluster_1": {RuntimeOperations: map[string]rememberedRuntimeOperation{
+			"pending":  {Action: shared.RuntimeActionConsoleSend, Cluster: "Cluster_1", Shard: "Master", Completed: false},
+			"complete": {Action: shared.RuntimeActionConsoleSend, Cluster: "Cluster_1", Shard: "Caves", Completed: true},
+		}},
+	}}
+	hazards := state.pendingConsoleHazards()
+	if len(hazards["native"]) != 1 || hazards["native"][0].Shard != "Master" {
+		t.Fatalf("hazards=%#v", hazards)
+	}
+	control := &fakeConsoleRecoveryRuntime{fakeShardRuntime: &fakeShardRuntime{}}
+	agent := &Agent{
+		Config: &Config{}, shardRuntime: func(RuntimeInstallation) (shardRuntimeControl, error) { return control, nil },
+		shardRuntimes: make(map[string]shardRuntimeControl), consoleHazards: hazards,
+	}
+	if _, err := agent.runtimeControl(RuntimeInstallation{ID: "native", Driver: "native"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(control.recovered) != 1 || control.recovered[0].Cluster != "Cluster_1" || len(agent.consoleHazards) != 0 {
+		t.Fatalf("recovered=%#v remaining=%#v", control.recovered, agent.consoleHazards)
 	}
 }

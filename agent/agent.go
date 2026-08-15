@@ -29,7 +29,7 @@ import (
 
 // 常量
 const (
-	AgentVersion = "2.5.0"
+	AgentVersion = "2.5.1"
 	// 心跳间隔
 	HeartbeatInterval = 30 * time.Second
 	// 重连间隔
@@ -66,11 +66,15 @@ type Agent struct {
 	shardRuntime      shardRuntimeFactory
 	shardRuntimeMu    sync.Mutex
 	shardRuntimes     map[string]shardRuntimeControl
+	consoleHazards    map[string][]consoleHazard
 	shardTransferMu   sync.Mutex
 	shardTransfers    map[string]*shardtransfer.Manager
 	modDistributionMu sync.Mutex
 	modDistributions  map[string]*moddistribution.Manager
 	gameVersionRunner gameVersionCommandRunner
+	attachListener    net.Listener
+	attachMutex       sync.Mutex
+	attachConnections map[net.Conn]struct{}
 	now               func() time.Time
 }
 
@@ -197,16 +201,22 @@ func NewAgent(config *Config) (*Agent, error) {
 			config.OperationStateFile = config.KeyFile + ".runtime-state.json"
 		}
 	}
+	config.RuntimeInstallations, err = configureNativeConsoleSockets(config.RuntimeInstallations, config.OperationStateFile)
+	if err != nil {
+		return nil, err
+	}
 	state, err := loadShardOperationState(config.OperationStateFile)
 	if err != nil {
 		return nil, fmt.Errorf("加载分片操作状态失败: %w", err)
 	}
 	agent.shardState = state
+	agent.consoleHazards = state.pendingConsoleHazards()
 	agent.shardRuntime = newShardRuntimeControl
 	agent.shardRuntimes = make(map[string]shardRuntimeControl)
 	agent.shardTransfers = make(map[string]*shardtransfer.Manager)
 	agent.modDistributions = make(map[string]*moddistribution.Manager)
 	agent.gameVersionRunner = execGameVersionCommand{}
+	agent.initializeFreshRuntimeOwnership()
 
 	return agent, nil
 }
@@ -214,6 +224,9 @@ func NewAgent(config *Config) (*Agent, error) {
 // Start 启动代理
 func (a *Agent) Start() error {
 	log.Println("Agent开始启动...")
+	if err := a.startConsoleAttachServer(); err != nil {
+		return fmt.Errorf("启动本地 console attach 服务: %w", err)
+	}
 
 	// 连接到服务器
 	err := a.Connect()
@@ -254,6 +267,15 @@ func (a *Agent) Start() error {
 func (a *Agent) Stop() {
 	log.Println("Agent正在停止...")
 	close(a.stopChan)
+	a.attachMutex.Lock()
+	if a.attachListener != nil {
+		_ = a.attachListener.Close()
+		a.attachListener = nil
+	}
+	for connection := range a.attachConnections {
+		_ = connection.Close()
+	}
+	a.attachMutex.Unlock()
 
 	a.connMutex.Lock()
 	if a.conn != nil {
@@ -1051,27 +1073,26 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 		"system.report", "command.exec", "disk.inspect",
 		"runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read",
 	}
-	if len(a.Config.RuntimeInstallations) > 0 && runtime.GOOS != "windows" {
+	deploymentCapabilities, runtimeProfiles, capabilityIssues := runtimeDeploymentCapabilities(a.Config.RuntimeInstallations)
+	capabilities = append(capabilities, deploymentCapabilities...)
+	if len(runtimeProfiles) > 0 && runtime.GOOS != "windows" {
 		capabilities = append(capabilities,
 			"shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1", "runtime.migration.v1",
 			"runtime.backup.v1", "runtime.mods.v1", "runtime.game-update.v1",
 		)
-		for _, installation := range a.Config.RuntimeInstallations {
-			if installation.Driver == "container" {
-				capabilities = append(capabilities, "runtime.container.v1")
-				break
-			}
-		}
 	}
 	info := map[string]interface{}{
-		"hostname":      "unknown",
-		"os":            runtime.GOOS,
-		"arch":          runtime.GOARCH,
-		"agent_version": AgentVersion,
-		"cpu_count":     cpuInfo.LogicalProcessors,
-		"cpu":           cpuInfo,
-		"capabilities":  capabilities,
-		"timestamp":     time.Now().Unix(),
+		"hostname":           "unknown",
+		"os":                 runtime.GOOS,
+		"arch":               runtime.GOARCH,
+		"agent_version":      AgentVersion,
+		"cpu_count":          cpuInfo.LogicalProcessors,
+		"cpu":                cpuInfo,
+		"capabilities":       capabilities,
+		"deployment_profile": agentDeploymentProfile(),
+		"runtime_profiles":   runtimeProfiles,
+		"capability_issues":  capabilityIssues,
+		"timestamp":          time.Now().Unix(),
 	}
 
 	hostname, err := os.Hostname()

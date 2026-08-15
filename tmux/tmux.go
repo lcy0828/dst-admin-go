@@ -28,23 +28,45 @@ type DSTServer struct {
 	SessionName    string // tmux会话名称
 	StartDirectory string // 启动目录
 	ServerMode     string // 服务器启动模式，32或64
+	SocketPath     string // 受管 tmux socket；空值表示兼容旧的默认 socket
 	tmux           *gotmux.Tmux
 }
 
 // NewDSTServer 创建一个新的饥荒服务器实例
 func NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir string, startDirectory string, serverMode ...string) (*DSTServer, error) {
+	return newDSTServer(archiveName, worldName, "", "", ugcDirectory, storageRoot, confDir, startDirectory, serverMode...)
+}
+
+func newDSTServer(archiveName, worldName, sessionName, socketPath, ugcDirectory, storageRoot, confDir string, startDirectory string, serverMode ...string) (*DSTServer, error) {
 	log.Printf("[TMUX] 创建饥荒服务器实例 存档: %s, 世界: %s", archiveName, worldName)
 
 	// 初始化tmux客户端
 	log.Printf("[TMUX] 初始化tmux客户端")
-	tmux, err := gotmux.DefaultTmux()
+	socketPath = strings.TrimSpace(socketPath)
+	var tmux *gotmux.Tmux
+	var err error
+	if socketPath == "" {
+		tmux, err = gotmux.DefaultTmux()
+	} else {
+		if !filepath.IsAbs(socketPath) || strings.ContainsAny(socketPath, "\x00\r\n") {
+			return nil, fmt.Errorf("无效的 tmux socket 路径")
+		}
+		// gotmux.NewTmux requires an already-running server. A private socket
+		// must also be usable for the first new-session command.
+		tmux = &gotmux.Tmux{Socket: &gotmux.Socket{Path: filepath.Clean(socketPath)}}
+	}
 	if err != nil {
 		log.Printf("[TMUX][错误] 初始化tmux失败: %v", err)
 		return nil, fmt.Errorf("初始化tmux失败: %v", err)
 	}
 
 	// 创建会话名称
-	sessionName := fmt.Sprintf("dstserver_%s_%s", archiveName, worldName)
+	if strings.TrimSpace(sessionName) == "" {
+		sessionName = fmt.Sprintf("dstserver_%s_%s", archiveName, worldName)
+	}
+	if strings.ContainsAny(sessionName, ":.\x00\r\n") {
+		return nil, fmt.Errorf("无效的 tmux 会话名称")
+	}
 	log.Printf("[TMUX] 创建会话名称: %s", sessionName)
 
 	// 如果提供了启动目录，则使用提供的启动目录
@@ -81,6 +103,7 @@ func NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir str
 		SessionName:    sessionName,
 		StartDirectory: startDir,
 		ServerMode:     mode,
+		SocketPath:     socketPath,
 		tmux:           tmux,
 	}
 
@@ -89,15 +112,11 @@ func NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir str
 }
 
 func NewDSTServerWithSessionName(archiveName, worldName, sessionName, ugcDirectory, storageRoot, confDir string, startDirectory string, serverMode ...string) (*DSTServer, error) {
-	server, err := NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir, startDirectory, serverMode...)
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(sessionName) == "" || strings.ContainsAny(sessionName, ":.\x00\r\n") {
-		return nil, fmt.Errorf("无效的 tmux 会话名称")
-	}
-	server.SessionName = sessionName
-	return server, nil
+	return newDSTServer(archiveName, worldName, sessionName, "", ugcDirectory, storageRoot, confDir, startDirectory, serverMode...)
+}
+
+func NewDSTServerWithSocketAndSessionName(archiveName, worldName, sessionName, socketPath, ugcDirectory, storageRoot, confDir string, startDirectory string, serverMode ...string) (*DSTServer, error) {
+	return newDSTServer(archiveName, worldName, sessionName, socketPath, ugcDirectory, storageRoot, confDir, startDirectory, serverMode...)
 }
 
 // IsRunning 检查服务器是否正在运行
@@ -260,7 +279,8 @@ func (s *DSTServer) sendCommand(command string, requireRunning bool) error {
 	// 向面板发送命令
 	// 使用gotmux的Command方法发送命令
 	log.Printf("[TMUX] 发送命令 会话名: %s, 命令: %s", s.SessionName, command)
-	output, err := s.tmux.Command("send-keys", "-t", s.SessionName, command, "C-m")
+	pane := "=" + s.SessionName + ":0.0"
+	output, err := s.tmux.Command(consoleSendArguments(pane, command)...)
 	if err != nil {
 		log.Printf("[TMUX][错误] 发送命令失败: %v, 输出: %s", err, output)
 		return fmt.Errorf("发送命令失败: %v", err)
@@ -269,6 +289,13 @@ func (s *DSTServer) sendCommand(command string, requireRunning bool) error {
 	elapsedTime := time.Since(startTime)
 	log.Printf("[TMUX] 已发送命令到服务器: %s, 命令: %s, 耗时: %v", s.SessionName, command, elapsedTime)
 	return nil
+}
+
+func consoleSendArguments(pane, command string) []string {
+	return []string{
+		"send-keys", "-t", pane, "-l", "--", command,
+		";", "send-keys", "-t", pane, "Enter",
+	}
 }
 
 // KillSession 强制终止会话
@@ -313,6 +340,7 @@ func (s *DSTServer) Restart() error {
 		SessionName:    s.SessionName,
 		StartDirectory: s.StartDirectory,
 		ServerMode:     s.ServerMode,
+		SocketPath:     s.SocketPath,
 		tmux:           s.tmux,
 	}
 

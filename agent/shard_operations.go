@@ -38,7 +38,7 @@ type shardRuntimeFactory func(RuntimeInstallation) (shardRuntimeControl, error)
 func newTmuxShardRuntime(installation RuntimeInstallation) (shardRuntimeControl, error) {
 	return shards.NewTmuxControl(shards.TmuxConfig{
 		SaveRoot: installation.SavePath, UGCDirectory: installation.UGCPath,
-		ServerPath: installation.ServerPath, ServerMode: installation.ServerMode,
+		ServerPath: installation.ServerPath, ServerMode: installation.ServerMode, ConsoleSocket: installation.ConsoleSocket,
 	})
 }
 
@@ -68,14 +68,22 @@ type shardRoomState struct {
 }
 
 type shardOperationState struct {
-	mu      sync.Mutex                `json:"-"`
-	path    string                    `json:"-"`
-	Version int                       `json:"version"`
-	Rooms   map[string]shardRoomState `json:"rooms"`
+	mu            sync.Mutex                `json:"-"`
+	path          string                    `json:"-"`
+	fresh         bool                      `json:"-"`
+	Version       int                       `json:"version"`
+	Initialized   bool                      `json:"initialized"`
+	InitializedAt *time.Time                `json:"initialized_at,omitempty"`
+	Rooms         map[string]shardRoomState `json:"rooms"`
+}
+
+type consoleHazard struct {
+	Cluster string
+	Shard   string
 }
 
 func loadShardOperationState(path string) (*shardOperationState, error) {
-	state := &shardOperationState{path: path, Version: 1, Rooms: make(map[string]shardRoomState)}
+	state := &shardOperationState{path: path, fresh: true, Version: 1, Rooms: make(map[string]shardRoomState)}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return state, nil
@@ -87,13 +95,65 @@ func loadShardOperationState(path string) (*shardOperationState, error) {
 		return nil, fmt.Errorf("解析 Agent 分片操作状态: %w", err)
 	}
 	state.path = path
+	state.fresh = false
 	if state.Version != 1 || state.Rooms == nil {
 		return nil, errors.New("Agent 分片操作状态版本无效")
+	}
+	// Version 1 state written before the ownership sentinel is trusted because
+	// its persisted fencing/idempotency history proves this is not a new volume.
+	if !state.Initialized {
+		state.Initialized = true
 	}
 	if err := shared.EnsurePrivateFile(path); err != nil {
 		return nil, err
 	}
 	return state, nil
+}
+
+func (state *shardOperationState) ownershipInitialized() bool {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.Initialized
+}
+
+func (state *shardOperationState) initializeOwnership(now time.Time) error {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.Initialized {
+		return nil
+	}
+	instant := now.UTC()
+	state.Initialized, state.InitializedAt, state.fresh = true, &instant, false
+	if err := state.persistLocked(); err != nil {
+		state.Initialized, state.InitializedAt, state.fresh = false, nil, true
+		return err
+	}
+	return nil
+}
+
+func (state *shardOperationState) pendingConsoleHazards() map[string][]consoleHazard {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	result := make(map[string][]consoleHazard)
+	seen := make(map[string]bool)
+	for roomKey, room := range state.Rooms {
+		installationID, _, ok := strings.Cut(roomKey, "\x00")
+		if !ok {
+			continue
+		}
+		for _, operation := range room.RuntimeOperations {
+			if operation.Completed || operation.Action != shared.RuntimeActionConsoleSend {
+				continue
+			}
+			identity := installationID + "\x00" + operation.Cluster + "\x00" + operation.Shard
+			if seen[identity] {
+				continue
+			}
+			seen[identity] = true
+			result[installationID] = append(result[installationID], consoleHazard{Cluster: operation.Cluster, Shard: operation.Shard})
+		}
+	}
+	return result
 }
 
 func (state *shardOperationState) begin(request shared.ShardOperationRequest, now time.Time) (*shared.ShardOperationResult, error) {
@@ -228,6 +288,14 @@ func (a *Agent) executeShardOperation(commandType string, request *shared.ShardO
 	if err != nil {
 		return shared.ShardOperationResult{}, err
 	}
+	if installation.Driver == "container" && shared.ShardActionMutates(request.Action) {
+		ownershipContext, cancelOwnership := context.WithTimeout(context.Background(), 5*time.Second)
+		err := a.ensureContainerOwnership(ownershipContext, runtimeControl, request.Cluster, request.Shard)
+		cancelOwnership()
+		if err != nil {
+			return shared.ShardOperationResult{}, err
+		}
+	}
 	operationContext, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
 	if request.Action == shared.ShardActionStatus {
@@ -250,7 +318,70 @@ func (a *Agent) executeShardOperation(commandType string, request *shared.ShardO
 	return result, operationErr
 }
 
+type containerOwnershipProbe interface {
+	ManagedRuntimeExists(context.Context, string, string) (bool, error)
+}
+
+type consoleHazardRecovery interface {
+	RecoverConsoleHazard(context.Context, string, string) error
+}
+
+func (a *Agent) ensureContainerOwnership(ctx context.Context, control shardRuntimeControl, cluster, shard string) error {
+	if a.shardState.ownershipInitialized() {
+		return nil
+	}
+	probe, ok := control.(containerOwnershipProbe)
+	if !ok {
+		return errors.New("CONTAINER_OWNERSHIP_UNVERIFIED: 容器 Runtime 无法证明本地所有权")
+	}
+	exists, err := probe.ManagedRuntimeExists(ctx, cluster, shard)
+	if err != nil {
+		return fmt.Errorf("CONTAINER_OWNERSHIP_UNVERIFIED: %w", err)
+	}
+	if exists && !strings.EqualFold(strings.TrimSpace(os.Getenv("DST_ADMIN_ADOPT_EXISTING_CONTAINERS")), "true") {
+		return errors.New("CONTAINER_OWNERSHIP_STATE_LOST: Agent 状态卷缺少但已发现受管容器；已拒绝接管，请恢复状态卷或在核对唯一实例后临时设置 DST_ADMIN_ADOPT_EXISTING_CONTAINERS=true")
+	}
+	if err := a.shardState.initializeOwnership(a.now()); err != nil {
+		return fmt.Errorf("建立容器 Runtime 所有权哨兵: %w", err)
+	}
+	return nil
+}
+
+func (a *Agent) initializeFreshRuntimeOwnership() {
+	if a == nil || a.shardState == nil || a.shardState.ownershipInitialized() {
+		return
+	}
+	hasContainer, allObserved, existing := false, true, false
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, installation := range a.Config.RuntimeInstallations {
+		if installation.Driver != "container" {
+			continue
+		}
+		hasContainer = true
+		control, err := a.runtimeControl(installation)
+		probe, ok := control.(containerOwnershipProbe)
+		if err != nil || !ok {
+			allObserved = false
+			continue
+		}
+		found, err := probe.ManagedRuntimeExists(ctx, "", "")
+		if err != nil {
+			allObserved = false
+			continue
+		}
+		existing = existing || found
+	}
+	adopt := strings.EqualFold(strings.TrimSpace(os.Getenv("DST_ADMIN_ADOPT_EXISTING_CONTAINERS")), "true")
+	if !hasContainer || allObserved && (!existing || adopt) {
+		_ = a.shardState.initializeOwnership(a.now())
+	}
+}
+
 func (a *Agent) runtimeControl(installation RuntimeInstallation) (shardRuntimeControl, error) {
+	if err := validateRuntimeDeployment(installation); err != nil {
+		return nil, err
+	}
 	a.shardRuntimeMu.Lock()
 	defer a.shardRuntimeMu.Unlock()
 	if existing := a.shardRuntimes[installation.ID]; existing != nil {
@@ -259,6 +390,21 @@ func (a *Agent) runtimeControl(installation RuntimeInstallation) (shardRuntimeCo
 	created, err := a.shardRuntime(installation)
 	if err != nil {
 		return nil, err
+	}
+	if hazards := a.consoleHazards[installation.ID]; len(hazards) > 0 {
+		recovery, ok := created.(consoleHazardRecovery)
+		if !ok {
+			return nil, errors.New("CONSOLE_RECOVERY_UNAVAILABLE: Agent 无法恢复中断的控制台输入状态")
+		}
+		for _, hazard := range hazards {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := recovery.RecoverConsoleHazard(ctx, hazard.Cluster, hazard.Shard)
+			cancel()
+			if err != nil {
+				return nil, fmt.Errorf("CONSOLE_RECOVERY_FAILED: %w", err)
+			}
+		}
+		delete(a.consoleHazards, installation.ID)
 	}
 	a.shardRuntimes[installation.ID] = created
 	return created, nil

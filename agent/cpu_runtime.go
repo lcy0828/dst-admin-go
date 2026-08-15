@@ -81,6 +81,13 @@ func (c *containerShardRuntime) ExecuteCPU(ctx context.Context, cluster, shard s
 	if err != nil {
 		return shared.RuntimeCPUResult{}, err
 	}
+	beforeInstanceID := before.ID
+	if before.State == "running" || before.State == "restarting" {
+		beforeInstanceID, err = c.runtimeInstanceID(ctx, before.ID)
+		if err != nil {
+			return shared.RuntimeCPUResult{}, err
+		}
+	}
 	if action == shared.RuntimeActionCPUPrepare || action == shared.RuntimeActionCPUApply {
 		cpus, cpuset := "0", ""
 		if request.Policy != shared.RuntimeCPUPolicyNone {
@@ -95,6 +102,16 @@ func (c *containerShardRuntime) ExecuteCPU(ctx context.Context, cluster, shard s
 		return shared.RuntimeCPUResult{}, err
 	}
 	if before.ID != after.ID {
+		return shared.RuntimeCPUResult{}, runtimecpu.ErrInstanceChanged
+	}
+	afterInstanceID := after.ID
+	if after.State == "running" || after.State == "restarting" {
+		afterInstanceID, err = c.runtimeInstanceID(ctx, after.ID)
+		if err != nil {
+			return shared.RuntimeCPUResult{}, err
+		}
+	}
+	if beforeInstanceID != afterInstanceID {
 		return shared.RuntimeCPUResult{}, runtimecpu.ErrInstanceChanged
 	}
 	output, err := c.cli.Run(ctx, "inspect", "--format", "{{json .}}", after.ID)
@@ -131,7 +148,7 @@ func (c *containerShardRuntime) ExecuteCPU(ctx context.Context, cluster, shard s
 	}
 	return shared.RuntimeCPUResult{
 		Policy: request.Policy, LogicalCPUIds: request.LogicalCPUIds, EffectiveCPUIds: effective,
-		State: state, RuntimeKind: "container", InstanceID: after.ID,
+		State: state, RuntimeKind: "container", InstanceID: afterInstanceID,
 		QuotaMicros: int64(len(request.LogicalCPUIds)) * 100000, PeriodMicros: 100000,
 		Enforced: enforced, InstanceRunning: inspect.State.Running, ObservedAt: time.Now().UTC(),
 	}, nil

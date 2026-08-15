@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -141,6 +143,8 @@ func normalizeRuntimeInstallations(values []RuntimeInstallation) ([]RuntimeInsta
 			if value.ConsoleSession == "" {
 				value.ConsoleSession = "dst"
 			}
+		} else if value.ConsoleSocket == "." {
+			value.ConsoleSocket = ""
 		}
 		if !runtimeInstallationID.MatchString(value.ID) || seen[value.ID] {
 			return nil, fmt.Errorf("DST 安装 ID 无效或重复: %s", value.ID)
@@ -161,6 +165,9 @@ func normalizeRuntimeInstallations(values []RuntimeInstallation) ([]RuntimeInsta
 		if value.ServerMode != "32" && value.ServerMode != "64" {
 			return nil, fmt.Errorf("DST 安装 %s 的 SERVER_MODE 必须为 32 或 64", value.ID)
 		}
+		if value.ConsoleSocket != "" && !trustedAbsolutePath(value.ConsoleSocket) {
+			return nil, fmt.Errorf("DST 安装 %s 的 CONSOLE_SOCKET 必须是绝对路径", value.ID)
+		}
 		if value.Driver == "container" && (!trustedAbsolutePath(value.ConsoleSocket) ||
 			(value.ContainerEngine != "docker" && value.ContainerEngine != "podman") ||
 			!runtimeInstallationID.MatchString(value.ConsoleSession)) {
@@ -171,6 +178,40 @@ func normalizeRuntimeInstallations(values []RuntimeInstallation) ([]RuntimeInsta
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
+}
+
+func configureNativeConsoleSockets(values []RuntimeInstallation, stateFile string) ([]RuntimeInstallation, error) {
+	stateFile = filepath.Clean(strings.TrimSpace(stateFile))
+	if !trustedAbsolutePath(stateFile) {
+		absolute, err := filepath.Abs(stateFile)
+		if err != nil {
+			return nil, err
+		}
+		stateFile = absolute
+	}
+	directory := filepath.Join(filepath.Dir(stateFile), "tmux")
+	if runtime.GOOS == "darwin" {
+		digest := sha256.Sum256([]byte(filepath.Dir(stateFile)))
+		directory = filepath.Join(os.TempDir(), fmt.Sprintf("dst-admin-agent-%d-%s", os.Getuid(), hex.EncodeToString(digest[:6])))
+	}
+	needsDirectory := false
+	for index := range values {
+		if values[index].Driver != "native" || values[index].ConsoleSocket != "" {
+			continue
+		}
+		digest := sha256.Sum256([]byte(values[index].ID))
+		values[index].ConsoleSocket = filepath.Join(directory, "runtime-"+hex.EncodeToString(digest[:8])+".sock")
+		needsDirectory = true
+	}
+	if needsDirectory {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return nil, fmt.Errorf("创建 Agent tmux socket 目录: %w", err)
+		}
+		if err := os.Chmod(directory, 0o700); err != nil {
+			return nil, fmt.Errorf("收紧 Agent tmux socket 目录权限: %w", err)
+		}
+	}
+	return values, nil
 }
 
 func pathsOverlap(first, second string) bool {

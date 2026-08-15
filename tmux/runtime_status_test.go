@@ -10,6 +10,45 @@ import (
 	dstinstall "dont/internal/dstserver"
 )
 
+func TestClassifyConsoleCommandError(t *testing.T) {
+	tests := []struct {
+		output  string
+		private bool
+		want    string
+	}{
+		{"permission denied", true, "permission_denied"},
+		{"can't find session: dst", false, "not_found"},
+		{"connection refused", true, "socket_unavailable"},
+		{"", true, "socket_unavailable"},
+	}
+	for _, test := range tests {
+		if got := classifyConsoleCommandError(test.output, test.private); got != test.want {
+			t.Fatalf("classify(%q)=%q want=%q", test.output, got, test.want)
+		}
+	}
+}
+
+func TestConsoleTransportHealthHonorsDisabledAndPrivateSocketState(t *testing.T) {
+	root := t.TempDir()
+	cluster := filepath.Join(root, "DoNotStarveTogether", "Cluster_1")
+	if err := os.MkdirAll(cluster, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := &DSTServer{StorageRoot: root, ConfDir: "DoNotStarveTogether", ArchiveName: "Cluster_1", SessionName: "dst", SocketPath: filepath.Join(root, "missing.sock")}
+	if err := os.WriteFile(filepath.Join(cluster, "cluster.ini"), []byte("[MISC]\nconsole_enabled=false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if status, _, err := server.ConsoleTransportHealth(); err != nil || status != "disabled" {
+		t.Fatalf("disabled status=%q err=%v", status, err)
+	}
+	if err := os.WriteFile(filepath.Join(cluster, "cluster.ini"), []byte("[MISC]\nconsole_enabled=true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if status, _, err := server.ConsoleTransportHealth(); err != nil || status != "socket_unavailable" {
+		t.Fatalf("socket status=%q err=%v", status, err)
+	}
+}
+
 func TestClassifyRuntimeLogRejectsExpiredToken(t *testing.T) {
 	status := classifyRuntimeLog(`[00:00:03]: [200] Account Failed (6): "E_EXPIRED_TOKEN"
 [00:00:03]: !!!! Your Server Will Not Start !!!!`, RuntimeStatus{State: RuntimeStarting, SessionExists: true})
