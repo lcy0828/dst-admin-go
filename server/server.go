@@ -366,6 +366,7 @@ func (s *Server) handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 		log.Printf("升级连接失败: %v", err)
 		return
 	}
+	conn.SetReadLimit(shared.MaximumRegistrationMessageBytes)
 
 	log.Printf("新的WebSocket连接: %s", conn.RemoteAddr())
 

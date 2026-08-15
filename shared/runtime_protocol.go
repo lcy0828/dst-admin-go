@@ -56,6 +56,7 @@ type RuntimeLogRequest struct {
 	MaxBytes int    `json:"max_bytes"`
 	MaxLines int    `json:"max_lines"`
 	Query    string `json:"query,omitempty"`
+	Raw      bool   `json:"raw,omitempty"`
 }
 
 type RuntimeArtifactRequest struct {
@@ -132,6 +133,7 @@ type RuntimeLogChunk struct {
 	Truncated bool             `json:"truncated"`
 	UpdatedAt time.Time        `json:"updated_at"`
 	Lines     []RuntimeLogLine `json:"lines"`
+	Data      []byte           `json:"data,omitempty"`
 }
 
 type RuntimeArtifact struct {
@@ -168,23 +170,26 @@ type RuntimeMigrationResult struct {
 }
 
 type RuntimeOperationResult struct {
-	ProtocolVersion int                       `json:"protocol_version"`
-	OperationID     string                    `json:"operation_id"`
-	OperationKey    string                    `json:"operation_key,omitempty"`
-	InstallationID  string                    `json:"installation_id"`
-	Action          RuntimeAction             `json:"action"`
-	Cluster         string                    `json:"cluster"`
-	Shard           string                    `json:"shard"`
-	FencingToken    uint64                    `json:"fencing_token,omitempty"`
-	Outcome         RuntimeOutcome            `json:"outcome"`
-	Message         string                    `json:"message,omitempty"`
-	Idempotent      bool                      `json:"idempotent"`
-	ObservedAt      time.Time                 `json:"observed_at"`
-	ConsoleHealth   *RuntimeConsoleHealth     `json:"console_health,omitempty"`
-	Logs            *RuntimeLogChunk          `json:"logs,omitempty"`
-	Artifacts       *RuntimeArtifactBundle    `json:"artifacts,omitempty"`
-	Evidence        *RuntimeOperationEvidence `json:"evidence,omitempty"`
-	Migration       *RuntimeMigrationResult   `json:"migration,omitempty"`
+	ProtocolVersion  int                       `json:"protocol_version"`
+	OperationID      string                    `json:"operation_id"`
+	OperationKey     string                    `json:"operation_key,omitempty"`
+	InstallationID   string                    `json:"installation_id"`
+	Action           RuntimeAction             `json:"action"`
+	Cluster          string                    `json:"cluster"`
+	Shard            string                    `json:"shard"`
+	FencingToken     uint64                    `json:"fencing_token,omitempty"`
+	Outcome          RuntimeOutcome            `json:"outcome"`
+	Message          string                    `json:"message,omitempty"`
+	Idempotent       bool                      `json:"idempotent"`
+	ObservedAt       time.Time                 `json:"observed_at"`
+	TargetID         string                    `json:"target_id,omitempty"`
+	AgentID          string                    `json:"agent_id,omitempty"`
+	TopologyRevision string                    `json:"topology_revision,omitempty"`
+	ConsoleHealth    *RuntimeConsoleHealth     `json:"console_health,omitempty"`
+	Logs             *RuntimeLogChunk          `json:"logs,omitempty"`
+	Artifacts        *RuntimeArtifactBundle    `json:"artifacts,omitempty"`
+	Evidence         *RuntimeOperationEvidence `json:"evidence,omitempty"`
+	Migration        *RuntimeMigrationResult   `json:"migration,omitempty"`
 }
 
 func IsRuntimeAction(value RuntimeAction) bool {

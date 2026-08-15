@@ -2,12 +2,43 @@ package runtimefiles
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"dont/shared"
 )
+
+func TestValidateRemoteRuntimePayloads(t *testing.T) {
+	now := time.Now().UTC()
+	data := []byte(`{"ready":true}`)
+	sum := sha256.Sum256(data)
+	bundle := shared.RuntimeArtifactBundle{Kind: shared.ArtifactRuntimeHealth, Artifacts: []shared.RuntimeArtifact{{
+		Name: "health.json", Size: int64(len(data)), SHA256: hex.EncodeToString(sum[:]), UpdatedAt: now, Data: data,
+	}}}
+	if err := ValidateArtifactBundle(shared.ArtifactRuntimeHealth, bundle); err != nil {
+		t.Fatalf("validate artifact bundle: %v", err)
+	}
+	bundle.Artifacts[0].Size++
+	if err := ValidateArtifactBundle(shared.ArtifactRuntimeHealth, bundle); err == nil {
+		t.Fatal("expected truncated artifact to be rejected")
+	}
+
+	request := shared.RuntimeLogRequest{Cursor: 10, MaxBytes: 16, Raw: true}
+	chunk := shared.RuntimeLogChunk{
+		FileName: "server_log.txt", FileID: "file-1", Size: 20, Cursor: 13, UpdatedAt: now, Data: []byte("abc"),
+	}
+	if err := ValidateLogChunk(request, chunk); err != nil {
+		t.Fatalf("validate raw log chunk: %v", err)
+	}
+	chunk.Cursor++
+	if err := ValidateLogChunk(request, chunk); err == nil {
+		t.Fatal("expected inconsistent cursor to be rejected")
+	}
+}
 
 func TestReadLogsContinuesByFileIdentityAndResetsAfterRotation(t *testing.T) {
 	root := t.TempDir()

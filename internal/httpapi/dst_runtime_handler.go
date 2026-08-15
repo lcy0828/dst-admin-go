@@ -10,6 +10,7 @@ import (
 
 	"dont/internal/dstruntime"
 	"dont/internal/rooms"
+	"dont/internal/shards"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -33,6 +34,11 @@ type DSTRuntimeBridge interface {
 	CaptureDiagnostic(context.Context, string, string, dstruntime.DiagnosticRequest) (dstruntime.DiagnosticReport, error)
 }
 
+type distributedDSTRuntimeBridge interface {
+	Health(context.Context, string, string) (dstruntime.Health, error)
+	IsLocalPlacement(string, string) (bool, error)
+}
+
 type DSTRuntimeCatalog interface {
 	Room(string) (rooms.Room, error)
 	World(string, string) (rooms.World, error)
@@ -40,6 +46,10 @@ type DSTRuntimeCatalog interface {
 
 type DSTRuntimeProcess interface {
 	IsRunning(context.Context, string, string) (bool, error)
+}
+
+type identifiedDSTRuntimeProcess interface {
+	StatusFor(context.Context, string, string) (shards.RuntimeStatus, error)
 }
 
 type DSTRuntimeHandler struct {
@@ -174,12 +184,40 @@ func (h *DSTRuntimeHandler) status(c *gin.Context) {
 		report := dstruntime.WorldReport{WorldStatus: status, HealthState: dstruntime.HealthStateUnavailable}
 		world, worldErr := h.rooms.World(room.ID, status.WorldID)
 		if worldErr == nil {
-			report.ProcessRunning, worldErr = h.process.IsRunning(c.Request.Context(), room.DirectoryName, world.DirectoryName)
+			report.ProcessRunning, worldErr = h.processRunning(c.Request.Context(), room, world)
 		}
 		if worldErr != nil {
 			report.HealthMessage = "无法确认分片进程状态：" + worldErr.Error()
 			items = append(items, report)
 			continue
+		}
+		if bridge, ok := h.bridge.(distributedDSTRuntimeBridge); ok {
+			local, localityErr := bridge.IsLocalPlacement(room.ID, status.WorldID)
+			if localityErr != nil {
+				report.HealthMessage = "无法解析分片执行位置：" + localityErr.Error()
+				items = append(items, report)
+				continue
+			}
+			if !local {
+				health, healthErr := bridge.Health(c.Request.Context(), room.ID, status.WorldID)
+				if healthErr != nil {
+					status.State = dstruntime.InstallStateMissing
+					status.Version = ""
+					status.Message = "目标 Agent 未提供可用的 Runtime 制品"
+					report.WorldStatus = status
+					report.HealthMessage = healthErr.Error()
+					items = append(items, report)
+					continue
+				}
+				status.State, status.Version, status.Protocol = dstruntime.InstallStateInstalled, health.ProducerVersion, dstruntime.ProtocolVersion
+				report.WorldStatus, report.Health = status, &health
+				report.HealthState = runtimeHealthState(health, report.ProcessRunning)
+				if health.LastError != nil {
+					report.HealthMessage = *health.LastError
+				}
+				items = append(items, report)
+				continue
+			}
 		}
 		if status.State != dstruntime.InstallStateInstalled {
 			report.HealthMessage = "运行时尚未安装或需要修复"
@@ -206,6 +244,24 @@ func (h *DSTRuntimeHandler) status(c *gin.Context) {
 }
 
 func (h *DSTRuntimeHandler) installRoom(c *gin.Context) {
+	if bridge, ok := h.bridge.(distributedDSTRuntimeBridge); ok {
+		statuses, err := h.runtime.StatusRoom(c.Param("roomId"))
+		if err != nil {
+			dstRuntimeFailure(c, err)
+			return
+		}
+		for _, status := range statuses {
+			local, localityErr := bridge.IsLocalPlacement(c.Param("roomId"), status.WorldID)
+			if localityErr != nil {
+				dstRuntimeFailure(c, localityErr)
+				return
+			}
+			if !local {
+				Failure(c, http.StatusConflict, "REMOTE_RUNTIME_MUTATION_UNAVAILABLE", "房间包含远程分片；请在拓扑中逐个管理 Runtime，当前版本不会修改控制端同名路径", nil)
+				return
+			}
+		}
+	}
 	statuses, err := h.runtime.InstallRoom(c.Request.Context(), c.Param("roomId"))
 	if err != nil {
 		dstRuntimeFailure(c, err)
@@ -215,6 +271,9 @@ func (h *DSTRuntimeHandler) installRoom(c *gin.Context) {
 }
 
 func (h *DSTRuntimeHandler) installWorld(c *gin.Context) {
+	if !h.allowLocalRuntimeMutation(c, c.Param("roomId"), c.Param("worldId")) {
+		return
+	}
 	status, err := h.runtime.InstallWorld(c.Request.Context(), c.Param("roomId"), c.Param("worldId"))
 	if err != nil {
 		dstRuntimeFailure(c, err)
@@ -224,6 +283,9 @@ func (h *DSTRuntimeHandler) installWorld(c *gin.Context) {
 }
 
 func (h *DSTRuntimeHandler) backups(c *gin.Context) {
+	if !h.allowLocalRuntimeMutation(c, c.Param("roomId"), c.Param("worldId")) {
+		return
+	}
 	values, err := h.runtime.Backups(c.Param("roomId"), c.Param("worldId"))
 	if err != nil {
 		dstRuntimeFailure(c, err)
@@ -239,6 +301,9 @@ func (h *DSTRuntimeHandler) rollback(c *gin.Context) {
 		return
 	}
 	roomID, worldID := c.Param("roomId"), c.Param("worldId")
+	if !h.allowLocalRuntimeMutation(c, roomID, worldID) {
+		return
+	}
 	if !h.allowStoppedMutation(c, roomID, worldID, request.Confirmation) {
 		return
 	}
@@ -257,6 +322,9 @@ func (h *DSTRuntimeHandler) uninstall(c *gin.Context) {
 		return
 	}
 	roomID, worldID := c.Param("roomId"), c.Param("worldId")
+	if !h.allowLocalRuntimeMutation(c, roomID, worldID) {
+		return
+	}
 	if !h.allowStoppedMutation(c, roomID, worldID, request.Confirmation) {
 		return
 	}
@@ -266,6 +334,23 @@ func (h *DSTRuntimeHandler) uninstall(c *gin.Context) {
 		return
 	}
 	Success(c, http.StatusOK, status)
+}
+
+func (h *DSTRuntimeHandler) allowLocalRuntimeMutation(c *gin.Context, roomID, worldID string) bool {
+	bridge, ok := h.bridge.(distributedDSTRuntimeBridge)
+	if !ok {
+		return true
+	}
+	local, err := bridge.IsLocalPlacement(roomID, worldID)
+	if err != nil {
+		dstRuntimeFailure(c, err)
+		return false
+	}
+	if !local {
+		Failure(c, http.StatusConflict, "REMOTE_RUNTIME_MUTATION_UNAVAILABLE", "该分片运行在远程 Agent；当前操作不会回落到控制端本机路径", nil)
+		return false
+	}
+	return true
 }
 
 func (h *DSTRuntimeHandler) allowStoppedMutation(c *gin.Context, roomID, worldID, confirmation string) bool {
@@ -283,7 +368,7 @@ func (h *DSTRuntimeHandler) allowStoppedMutation(c *gin.Context, roomID, worldID
 		dstRuntimeFailure(c, err)
 		return false
 	}
-	running, err := h.process.IsRunning(c.Request.Context(), room.DirectoryName, world.DirectoryName)
+	running, err := h.processRunning(c.Request.Context(), room, world)
 	if err != nil {
 		dstRuntimeFailure(c, err)
 		return false
@@ -293,6 +378,14 @@ func (h *DSTRuntimeHandler) allowStoppedMutation(c *gin.Context, roomID, worldID
 		return false
 	}
 	return true
+}
+
+func (h *DSTRuntimeHandler) processRunning(ctx context.Context, room rooms.Room, world rooms.World) (bool, error) {
+	if runtime, ok := h.process.(identifiedDSTRuntimeProcess); ok {
+		status, err := runtime.StatusFor(ctx, room.ID, world.ID)
+		return status.State == shards.RuntimeRunning, err
+	}
+	return h.process.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
 }
 
 func runtimeHealthState(health dstruntime.Health, processRunning bool) dstruntime.HealthState {

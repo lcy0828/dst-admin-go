@@ -43,22 +43,42 @@ const (
 )
 
 type Run struct {
-	ID           string                 `json:"id"`
-	RoomID       string                 `json:"roomId"`
-	WorldID      string                 `json:"worldId"`
-	Mode         string                 `json:"mode"`
-	CommandID    string                 `json:"commandId,omitempty"`
-	Name         string                 `json:"name"`
-	Risk         Risk                   `json:"risk"`
-	Arguments    map[string]interface{} `json:"arguments,omitempty"`
-	RawCommand   string                 `json:"rawCommand,omitempty"`
-	Status       RunStatus              `json:"status"`
-	Message      string                 `json:"message,omitempty"`
-	ErrorCode    string                 `json:"errorCode,omitempty"`
-	ErrorMessage string                 `json:"errorMessage,omitempty"`
-	LogQuery     string                 `json:"logQuery"`
-	CreatedAt    time.Time              `json:"createdAt"`
-	FinishedAt   *time.Time             `json:"finishedAt,omitempty"`
+	ID               string                 `json:"id"`
+	RoomID           string                 `json:"roomId"`
+	WorldID          string                 `json:"worldId"`
+	Mode             string                 `json:"mode"`
+	CommandID        string                 `json:"commandId,omitempty"`
+	Name             string                 `json:"name"`
+	Risk             Risk                   `json:"risk"`
+	Arguments        map[string]interface{} `json:"arguments,omitempty"`
+	RawCommand       string                 `json:"rawCommand,omitempty"`
+	Status           RunStatus              `json:"status"`
+	Message          string                 `json:"message,omitempty"`
+	ErrorCode        string                 `json:"errorCode,omitempty"`
+	ErrorMessage     string                 `json:"errorMessage,omitempty"`
+	LogQuery         string                 `json:"logQuery"`
+	CreatedAt        time.Time              `json:"createdAt"`
+	FinishedAt       *time.Time             `json:"finishedAt,omitempty"`
+	TransportOutcome string                 `json:"transportOutcome,omitempty"`
+	ExecutionOutcome string                 `json:"executionOutcome,omitempty"`
+	OperationID      string                 `json:"operationId,omitempty"`
+	OperationKey     string                 `json:"operationKey,omitempty"`
+	TargetID         string                 `json:"targetId,omitempty"`
+	AgentID          string                 `json:"agentId,omitempty"`
+	TopologyRevision string                 `json:"topologyRevision,omitempty"`
+	ObservedAt       *time.Time             `json:"observedAt,omitempty"`
+}
+
+type Delivery struct {
+	TransportOutcome string
+	ExecutionOutcome string
+	Message          string
+	OperationID      string
+	OperationKey     string
+	TargetID         string
+	AgentID          string
+	TopologyRevision string
+	ObservedAt       *time.Time
 }
 
 type ExecuteRequest struct {

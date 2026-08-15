@@ -16,21 +16,29 @@ var ErrRunNotFound = errors.New("command run not found")
 var ErrDefinitionNotFound = errors.New("command definition not found")
 
 type runRecord struct {
-	ID           string    `gorm:"primary_key;type:char(36)"`
-	RoomID       string    `gorm:"type:varchar(255);index;not null"`
-	WorldID      string    `gorm:"type:varchar(255);index;not null"`
-	Mode         string    `gorm:"type:varchar(16);not null"`
-	CommandID    string    `gorm:"type:varchar(64)"`
-	Name         string    `gorm:"type:varchar(128);not null"`
-	Risk         string    `gorm:"type:varchar(16);not null"`
-	Arguments    string    `gorm:"type:text"`
-	RawCommand   string    `gorm:"type:text"`
-	Status       string    `gorm:"type:varchar(16);index;not null"`
-	Message      string    `gorm:"type:text"`
-	ErrorCode    string    `gorm:"type:varchar(64)"`
-	ErrorMessage string    `gorm:"type:text"`
-	CreatedAt    time.Time `gorm:"index;not null"`
-	FinishedAt   *time.Time
+	ID               string    `gorm:"primary_key;type:char(36)"`
+	RoomID           string    `gorm:"type:varchar(255);index;not null"`
+	WorldID          string    `gorm:"type:varchar(255);index;not null"`
+	Mode             string    `gorm:"type:varchar(16);not null"`
+	CommandID        string    `gorm:"type:varchar(64)"`
+	Name             string    `gorm:"type:varchar(128);not null"`
+	Risk             string    `gorm:"type:varchar(16);not null"`
+	Arguments        string    `gorm:"type:text"`
+	RawCommand       string    `gorm:"type:text"`
+	Status           string    `gorm:"type:varchar(16);index;not null"`
+	Message          string    `gorm:"type:text"`
+	ErrorCode        string    `gorm:"type:varchar(64)"`
+	ErrorMessage     string    `gorm:"type:text"`
+	CreatedAt        time.Time `gorm:"index;not null"`
+	FinishedAt       *time.Time
+	TransportOutcome string `gorm:"type:varchar(16)"`
+	ExecutionOutcome string `gorm:"type:varchar(16)"`
+	OperationID      string `gorm:"type:varchar(80);index"`
+	OperationKey     string `gorm:"type:varchar(80)"`
+	TargetID         string `gorm:"type:varchar(255);index"`
+	AgentID          string `gorm:"type:varchar(255);index"`
+	TopologyRevision string `gorm:"type:varchar(80)"`
+	ObservedAt       *time.Time
 }
 
 type definitionRecord struct {
@@ -85,13 +93,28 @@ func (s *Store) Create(run Run) (Run, error) {
 }
 
 func (s *Store) Complete(runID string, sendErr error) (Run, error) {
+	return s.CompleteDelivery(runID, Delivery{TransportOutcome: "sent", ExecutionOutcome: "unknown"}, sendErr)
+}
+
+func (s *Store) CompleteDelivery(runID string, delivery Delivery, sendErr error) (Run, error) {
 	now := s.now().UTC()
-	updates := map[string]interface{}{"status": RunSent, "message": "命令已发送到分片控制台", "finished_at": now, "error_code": "", "error_message": ""}
+	message := strings.TrimSpace(delivery.Message)
+	if message == "" {
+		message = "分片控制台已接收命令；DST 业务执行结果未知"
+	}
+	updates := map[string]interface{}{
+		"status": RunSent, "message": message, "finished_at": now, "error_code": "", "error_message": "",
+		"transport_outcome": delivery.TransportOutcome, "execution_outcome": delivery.ExecutionOutcome,
+		"operation_id": delivery.OperationID, "operation_key": delivery.OperationKey, "target_id": delivery.TargetID,
+		"agent_id": delivery.AgentID, "topology_revision": delivery.TopologyRevision, "observed_at": delivery.ObservedAt,
+	}
 	if sendErr != nil {
 		updates["status"] = RunFailed
 		updates["message"] = "命令发送失败"
 		updates["error_code"] = "COMMAND_SEND_FAILED"
 		updates["error_message"] = sendErr.Error()
+		updates["transport_outcome"] = "failed"
+		updates["execution_outcome"] = "none"
 	}
 	result := s.db.Table(s.runsTable).Where("id = ? AND status = ?", runID, RunSending).Updates(updates)
 	if result.Error != nil {
@@ -256,7 +279,9 @@ func recordFromRun(run Run, arguments string) runRecord {
 		ID: run.ID, RoomID: run.RoomID, WorldID: run.WorldID, Mode: run.Mode, CommandID: run.CommandID,
 		Name: run.Name, Risk: string(run.Risk), Arguments: arguments, RawCommand: run.RawCommand,
 		Status: string(run.Status), Message: run.Message, ErrorCode: run.ErrorCode, ErrorMessage: run.ErrorMessage,
-		CreatedAt: run.CreatedAt, FinishedAt: run.FinishedAt,
+		CreatedAt: run.CreatedAt, FinishedAt: run.FinishedAt, TransportOutcome: run.TransportOutcome,
+		ExecutionOutcome: run.ExecutionOutcome, OperationID: run.OperationID, OperationKey: run.OperationKey,
+		TargetID: run.TargetID, AgentID: run.AgentID, TopologyRevision: run.TopologyRevision, ObservedAt: run.ObservedAt,
 	}
 }
 
@@ -272,5 +297,8 @@ func runFromRecord(record runRecord) (Run, error) {
 		Name: record.Name, Risk: Risk(record.Risk), Arguments: arguments, RawCommand: record.RawCommand,
 		Status: RunStatus(record.Status), Message: record.Message, ErrorCode: record.ErrorCode, ErrorMessage: record.ErrorMessage,
 		LogQuery: record.ID, CreatedAt: record.CreatedAt, FinishedAt: record.FinishedAt,
+		TransportOutcome: record.TransportOutcome, ExecutionOutcome: record.ExecutionOutcome,
+		OperationID: record.OperationID, OperationKey: record.OperationKey, TargetID: record.TargetID,
+		AgentID: record.AgentID, TopologyRevision: record.TopologyRevision, ObservedAt: record.ObservedAt,
 	}, nil
 }

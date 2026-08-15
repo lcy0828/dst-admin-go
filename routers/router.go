@@ -349,6 +349,10 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	distributedRuntimeBridge, err := dstruntime.NewDistributedBridge(runtimeBridge, runtimeDriverRouter)
+	if err != nil {
+		return nil, err
+	}
 	shardOperations := shards.NewOperations(roomService, shardControl)
 	if os.Getenv("DST_ADMIN_ENV") != "test" {
 		shardOperations = shards.NewOperations(roomService, shardControl, runtimeManager)
@@ -372,7 +376,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	}
 	roomHandler := httpapi.NewRoomHandler(roomService, shardOperations, jobService, runtimeAuditService)
 	runtimeAuditHandler := httpapi.NewRuntimeAuditHandler(runtimeAuditService)
-	runtimeHandler := httpapi.NewDSTRuntimeHandler(runtimeManager, roomService, shardControl, runtimeBridge)
+	runtimeHandler := httpapi.NewDSTRuntimeHandler(runtimeManager, roomService, shardOperations, distributedRuntimeBridge)
 	jobHandler := httpapi.NewJobHandler(jobService)
 	logService, err := logstream.NewService(savePath, roomService, runtimeDriverRouter)
 	if err != nil {
@@ -453,12 +457,12 @@ func initApplication(manageBackground bool) (*Application, error) {
 		if probeErr != nil {
 			return nil, probeErr
 		}
-		playerProbe, err = playerapi.NewTelemetryProbe(nativeProbe, runtimeBridge, fallbackProbe)
+		playerProbe, err = playerapi.NewTelemetryProbe(nativeProbe, distributedRuntimeBridge, fallbackProbe, runtimeDriverRouter)
 		if err != nil {
 			return nil, err
 		}
 	}
-	playerService, err := playerapi.NewService(roomService, shardControl, shardControl, configurationService, playerStore, playerProbe, runtimeBridge)
+	playerService, err := playerapi.NewService(roomService, shardOperations, runtimeDriverRouter, configurationService, playerStore, playerProbe, distributedRuntimeBridge)
 	if err != nil {
 		return nil, err
 	}
@@ -483,12 +487,12 @@ func initApplication(manageBackground bool) (*Application, error) {
 		if samplerErr != nil {
 			return nil, samplerErr
 		}
-		worldStateSampler, err = worldstate.NewRuntimeSampler(runtimeBridge, fallbackSampler)
+		worldStateSampler, err = worldstate.NewRuntimeSampler(distributedRuntimeBridge, fallbackSampler, runtimeDriverRouter)
 		if err != nil {
 			return nil, err
 		}
 	}
-	worldStateService, err := worldstate.NewService(roomService, shardControl, worldStateStore, worldStateSampler)
+	worldStateService, err := worldstate.NewService(roomService, shardOperations, worldStateStore, worldStateSampler)
 	if err != nil {
 		return nil, err
 	}

@@ -544,6 +544,10 @@ func decodeCommandReceipt(path, expectedSession string, request CommandRequest, 
 	if !exists {
 		return CommandReceipt{}, os.ErrNotExist
 	}
+	return decodeCommandReceiptData(data, expectedSession, "", request, now, notBefore)
+}
+
+func decodeCommandReceiptData(data []byte, expectedSession, expectedShard string, request CommandRequest, now, notBefore time.Time) (CommandReceipt, error) {
 	var value CommandReceipt
 	if err := decodeStrictJSON(data, &value); err != nil {
 		return CommandReceipt{}, fmt.Errorf("%w: decode command receipt: %v", ErrRuntimeResultInvalid, err)
@@ -563,6 +567,9 @@ func decodeCommandReceipt(path, expectedSession string, request CommandRequest, 
 		return CommandReceipt{}, ErrRuntimeResultStale
 	}
 	if expectedSession != "" && value.SessionID != expectedSession {
+		return CommandReceipt{}, ErrRuntimeResultStale
+	}
+	if expectedShard != "" && value.ShardID != expectedShard {
 		return CommandReceipt{}, ErrRuntimeResultStale
 	}
 	return value, nil
@@ -634,6 +641,19 @@ func decodeEventBatch(path, expectedSession string, now time.Time) (EventBatch, 
 	if !exists {
 		return EventBatch{}, os.ErrNotExist
 	}
+	value, err := decodeEventBatchData(data, expectedSession, "", now)
+	if err != nil {
+		return EventBatch{}, err
+	}
+	if info, statErr := os.Stat(path); statErr == nil {
+		value.ReadAt = info.ModTime().UTC()
+	} else {
+		value.ReadAt = now
+	}
+	return value, nil
+}
+
+func decodeEventBatchData(data []byte, expectedSession, expectedShard string, now time.Time) (EventBatch, error) {
 	var value EventBatch
 	if err := decodeStrictJSON(data, &value); err != nil {
 		return EventBatch{}, fmt.Errorf("%w: decode event batch: %v", ErrRuntimeResultInvalid, err)
@@ -643,6 +663,9 @@ func decodeEventBatch(path, expectedSession string, now time.Time) (EventBatch, 
 		return EventBatch{}, ErrRuntimeResultInvalid
 	}
 	if expectedSession != "" && value.SessionID != expectedSession {
+		return EventBatch{}, ErrRuntimeResultStale
+	}
+	if expectedShard != "" && value.ShardID != expectedShard {
 		return EventBatch{}, ErrRuntimeResultStale
 	}
 	previous := value.FirstSequence - 1
@@ -659,11 +682,6 @@ func decodeEventBatch(path, expectedSession string, now time.Time) (EventBatch, 
 	}
 	if previous != value.LastSequence {
 		return EventBatch{}, ErrRuntimeResultInvalid
-	}
-	if info, statErr := os.Stat(path); statErr == nil {
-		value.ReadAt = info.ModTime().UTC()
-	} else {
-		value.ReadAt = now
 	}
 	return value, nil
 }
@@ -717,6 +735,10 @@ func decodeDiagnosticReport(path, expectedSession string, now, notBefore time.Ti
 	if !exists {
 		return DiagnosticReport{}, os.ErrNotExist
 	}
+	return decodeDiagnosticReportData(data, expectedSession, "", now, notBefore)
+}
+
+func decodeDiagnosticReportData(data []byte, expectedSession, expectedShard string, now, notBefore time.Time) (DiagnosticReport, error) {
 	var value DiagnosticReport
 	if err := decodeStrictJSON(data, &value); err != nil {
 		return DiagnosticReport{}, fmt.Errorf("%w: decode diagnostic report: %v", ErrRuntimeResultInvalid, err)
@@ -732,7 +754,8 @@ func decodeDiagnosticReport(path, expectedSession string, now, notBefore time.Ti
 	if !notBefore.IsZero() && value.CompletedAt.Before(notBefore.Truncate(time.Second)) {
 		return DiagnosticReport{}, ErrRuntimeResultAbsent
 	}
-	if value.CompletedAt.After(now.Add(maxFutureSkew)) || now.Sub(value.CompletedAt) > 24*time.Hour || expectedSession != "" && value.SessionID != expectedSession {
+	if value.CompletedAt.After(now.Add(maxFutureSkew)) || now.Sub(value.CompletedAt) > 24*time.Hour ||
+		expectedSession != "" && value.SessionID != expectedSession || expectedShard != "" && value.ShardID != expectedShard {
 		return DiagnosticReport{}, ErrRuntimeResultStale
 	}
 	return value, nil

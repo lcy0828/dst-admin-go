@@ -10,6 +10,14 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	MaximumRegistrationMessageBytes int64 = 64 * 1024
+	// Runtime artifacts are JSON/base64 encoded inside an encrypted command
+	// response. Eight MiB covers the 4 MiB artifact contract plus framing while
+	// keeping an authenticated peer from allocating an unbounded message.
+	MaximumSecureMessageBytes int64 = 8 * 1024 * 1024
+)
+
 // SecureConnection 提供加密的WebSocket连接
 type SecureConnection struct {
 	conn            *websocket.Conn
@@ -23,6 +31,7 @@ type SecureConnection struct {
 
 // NewSecureConnection 创建新的安全连接
 func NewSecureConnection(conn *websocket.Conn, localKeyPair *KeyPair, isServer bool) *SecureConnection {
+	conn.SetReadLimit(MaximumSecureMessageBytes)
 	return &SecureConnection{
 		conn:         conn,
 		localKeyPair: localKeyPair,
@@ -121,11 +130,11 @@ func (s *SecureConnection) StartHeartbeat(agentID string, interval time.Duration
 func (s *SecureConnection) Close() error {
 	s.closedMutex.Lock()
 	defer s.closedMutex.Unlock()
-	
+
 	if s.closed {
 		return nil
 	}
-	
+
 	s.closed = true
 	return s.conn.Close()
 }
@@ -133,4 +142,4 @@ func (s *SecureConnection) Close() error {
 // GetRawConnection 获取底层的WebSocket连接
 func (s *SecureConnection) GetRawConnection() *websocket.Conn {
 	return s.conn
-} 
+}

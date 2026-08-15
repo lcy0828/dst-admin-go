@@ -51,6 +51,12 @@ type Event struct {
 	Snapshot *Snapshot `json:"snapshot,omitempty"`
 }
 
+type DownloadInfo struct {
+	FileName  string
+	Size      int64
+	UpdatedAt time.Time
+}
+
 type DistributedReader interface {
 	ReadLogs(context.Context, string, string, shared.RuntimeLogRequest) (shared.RuntimeLogChunk, error)
 }
@@ -109,6 +115,61 @@ func (s *Service) Open(roomID, worldID string) (*os.File, os.FileInfo, error) {
 		return nil, nil, fmt.Errorf("open world log: %w", err)
 	}
 	return file, info, nil
+}
+
+func (s *Service) Download(ctx context.Context, roomID, worldID string, emit func(DownloadInfo, []byte) error) error {
+	if emit == nil {
+		return errors.New("log download emitter is required")
+	}
+	if s.distributed == nil {
+		file, info, err := s.Open(roomID, worldID)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		buffer := make([]byte, runtimefiles.MaximumLogBytes)
+		metadata := DownloadInfo{FileName: info.Name(), Size: info.Size(), UpdatedAt: info.ModTime().UTC()}
+		for {
+			count, readErr := file.Read(buffer)
+			if count > 0 {
+				if err := emit(metadata, buffer[:count]); err != nil {
+					return err
+				}
+			}
+			if errors.Is(readErr, io.EOF) {
+				return nil
+			}
+			if readErr != nil {
+				return readErr
+			}
+		}
+	}
+	var fileID string
+	var cursor int64
+	for {
+		chunk, err := s.distributed.ReadLogs(ctx, roomID, worldID, shared.RuntimeLogRequest{
+			FileID: fileID, Cursor: cursor, MaxBytes: runtimefiles.MaximumLogBytes, Raw: true,
+		})
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return ErrLogNotFound
+			}
+			return err
+		}
+		if fileID != "" && (chunk.Reset || chunk.FileID != fileID) {
+			return errors.New("服务器日志在下载期间发生轮转，请重新下载")
+		}
+		if chunk.Cursor < cursor || chunk.Cursor > chunk.Size || chunk.Cursor == cursor && cursor < chunk.Size {
+			return errors.New("远程日志下载游标没有继续前进")
+		}
+		fileID, cursor = chunk.FileID, chunk.Cursor
+		if err := emit(DownloadInfo{FileName: chunk.FileName, Size: chunk.Size, UpdatedAt: chunk.UpdatedAt}, chunk.Data); err != nil {
+			return err
+		}
+		if cursor >= chunk.Size {
+			return nil
+		}
+	}
 }
 
 func (s *Service) Follow(ctx context.Context, roomID, worldID string, tail int, emit func(Event) error) error {

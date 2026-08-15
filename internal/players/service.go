@@ -14,6 +14,7 @@ import (
 	"dont/internal/configuration"
 	"dont/internal/dstruntime"
 	"dont/internal/rooms"
+	"dont/internal/shards"
 
 	"github.com/google/uuid"
 )
@@ -28,6 +29,10 @@ type RoomCatalog interface {
 
 type Runtime interface {
 	IsRunning(context.Context, string, string) (bool, error)
+}
+
+type identifiedRuntime interface {
+	StatusFor(context.Context, string, string) (shards.RuntimeStatus, error)
 }
 
 type Sender interface {
@@ -194,7 +199,7 @@ func (s *Service) AnyWorldRunning(ctx context.Context, roomID string, worldIDs [
 			continue
 		}
 		found = true
-		running, runningErr := s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
+		running, runningErr := s.worldRunning(ctx, room, world)
 		if runningErr != nil {
 			return false, runningErr
 		}
@@ -257,7 +262,7 @@ func (s *Service) collectWorldSnapshot(ctx context.Context, room rooms.Room, wor
 		outcome.Err = err
 		return outcome, worldSnapshot{}
 	}
-	running, err := s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
+	running, err := s.worldRunning(ctx, room, world)
 	if err != nil {
 		outcome.Err = err
 		return outcome, worldSnapshot{}
@@ -437,7 +442,7 @@ func (s *Service) Act(ctx context.Context, jobID, roomID, playerID string, actio
 			script = `TheNet:Unban(` + quoteLua(player.ID) + `)`
 			result.Message = "玩家已从封禁名单移除"
 		}
-		running, runtimeErr := s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
+		running, runtimeErr := s.worldRunning(ctx, room, world)
 		if runtimeErr != nil {
 			result.Warning = "名单已保存，但无法确认分片状态：" + runtimeErr.Error()
 		} else if running {
@@ -523,7 +528,7 @@ func (s *Service) updateBlocklist(ctx context.Context, jobID string, room rooms.
 }
 
 func (s *Service) sendToRunningWorld(ctx context.Context, room rooms.Room, world rooms.World, script string) error {
-	running, err := s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
+	running, err := s.worldRunning(ctx, room, world)
 	if err != nil {
 		return err
 	}
@@ -531,6 +536,14 @@ func (s *Service) sendToRunningWorld(ctx context.Context, room rooms.Room, world
 		return ErrWorldNotRunning
 	}
 	return s.sender.Send(ctx, room.DirectoryName, world.DirectoryName, markedPlayerScript("action", "", script))
+}
+
+func (s *Service) worldRunning(ctx context.Context, room rooms.Room, world rooms.World) (bool, error) {
+	if runtime, ok := s.runtime.(identifiedRuntime); ok {
+		status, err := runtime.StatusFor(ctx, room.ID, world.ID)
+		return status.State == shards.RuntimeRunning, err
+	}
+	return s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
 }
 
 func (s *Service) sendPlayerAction(ctx context.Context, room rooms.Room, world rooms.World, request dstruntime.CommandRequest, runtimeSupported bool, fallback string) error {

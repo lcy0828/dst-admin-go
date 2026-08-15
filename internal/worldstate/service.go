@@ -26,6 +26,10 @@ type statusRuntime interface {
 	Status(context.Context, string, string) (shards.RuntimeStatus, error)
 }
 
+type identifiedRuntime interface {
+	StatusFor(context.Context, string, string) (shards.RuntimeStatus, error)
+}
+
 const liveObservationWindow = 2 * time.Minute
 
 type CurrentSampler interface {
@@ -69,7 +73,7 @@ func (s *Service) List(ctx context.Context, roomID string) (List, error) {
 			if err := ctx.Err(); err != nil {
 				return List{}, err
 			}
-			running, runningErr := s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
+			running, runningErr := s.worldRunning(ctx, room, world)
 			if runningErr != nil || !running {
 				continue
 			}
@@ -103,7 +107,12 @@ func (s *Service) List(ctx context.Context, roomID string) (List, error) {
 			continue
 		}
 		state := shards.RuntimeUnknown
-		if runtime, ok := s.runtime.(statusRuntime); ok {
+		if runtime, ok := s.runtime.(identifiedRuntime); ok {
+			status, statusErr := runtime.StatusFor(ctx, room.ID, world.ID)
+			if statusErr == nil {
+				state = status.State
+			}
+		} else if runtime, ok := s.runtime.(statusRuntime); ok {
 			status, statusErr := runtime.Status(ctx, room.DirectoryName, world.DirectoryName)
 			if statusErr == nil {
 				state = status.State
@@ -170,7 +179,11 @@ func (s *Service) History(roomID, worldID string, limit int) (History, error) {
 	}
 	state := shards.RuntimeUnknown
 	if room.Managed {
-		if runtime, ok := s.runtime.(statusRuntime); ok {
+		if runtime, ok := s.runtime.(identifiedRuntime); ok {
+			if status, statusErr := runtime.StatusFor(context.Background(), room.ID, world.ID); statusErr == nil {
+				state = status.State
+			}
+		} else if runtime, ok := s.runtime.(statusRuntime); ok {
 			if status, statusErr := runtime.Status(context.Background(), room.DirectoryName, world.DirectoryName); statusErr == nil {
 				state = status.State
 			}
@@ -211,7 +224,7 @@ func (s *Service) RefreshWorld(ctx context.Context, roomID, worldID string) (Ref
 	if err != nil {
 		return RefreshResult{}, err
 	}
-	running, err := s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
+	running, err := s.worldRunning(ctx, room, world)
 	if err != nil {
 		return RefreshResult{}, fmt.Errorf("inspect world runtime: %w", err)
 	}
@@ -235,6 +248,14 @@ func (s *Service) RefreshWorld(ctx context.Context, roomID, worldID string) (Ref
 		return RefreshResult{}, err
 	}
 	return RefreshResult{WorldID: world.ID, WorldName: world.Name, ObservedAt: stored.ObservedAt, Message: "世界状态已采样"}, nil
+}
+
+func (s *Service) worldRunning(ctx context.Context, room rooms.Room, world rooms.World) (bool, error) {
+	if runtime, ok := s.runtime.(identifiedRuntime); ok {
+		status, err := runtime.StatusFor(ctx, room.ID, world.ID)
+		return status.State == shards.RuntimeRunning, err
+	}
+	return s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
 }
 
 func snapshotFromObservation(roomID string, world rooms.World, observation Observation, fallbackTime time.Time) Snapshot {

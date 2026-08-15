@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	maximumArtifactBytes = int64(1024 * 1024)
-	maximumBundleBytes   = int64(4 * 1024 * 1024)
+	MaximumArtifactBytes = int64(1024 * 1024)
+	MaximumBundleBytes   = int64(4 * 1024 * 1024)
 	MaximumLogBytes      = 512 * 1024
 )
 
@@ -52,7 +52,7 @@ func ReadArtifacts(ctx context.Context, saveRoot, cluster, shard string, kind sh
 			return bundle, err
 		}
 		path := filepath.Join(root, name)
-		data, info, exists, err := readTrustedRegular(path, maximumArtifactBytes)
+		data, info, exists, err := readTrustedRegular(path, MaximumArtifactBytes)
 		if err != nil {
 			return bundle, err
 		}
@@ -60,7 +60,7 @@ func ReadArtifacts(ctx context.Context, saveRoot, cluster, shard string, kind sh
 			continue
 		}
 		total += int64(len(data))
-		if total > maximumBundleBytes {
+		if total > MaximumBundleBytes {
 			return bundle, errors.New("Runtime 制品集合超过 4 MiB")
 		}
 		sum := sha256.Sum256(data)
@@ -72,6 +72,81 @@ func ReadArtifacts(ctx context.Context, saveRoot, cluster, shard string, kind sh
 		return bundle, os.ErrNotExist
 	}
 	return bundle, nil
+}
+
+// ValidateArtifactBundle treats Driver output as untrusted even when it came
+// from an authenticated Agent. This catches transport truncation and a
+// compromised or stale Agent before Runtime JSON is decoded by callers.
+func ValidateArtifactBundle(kind shared.ArtifactKind, bundle shared.RuntimeArtifactBundle) error {
+	names, exists := artifactNames[kind]
+	if !exists || bundle.Kind != kind || len(bundle.Artifacts) < 1 || len(bundle.Artifacts) > len(names) {
+		return errors.New("Runtime 制品集合元数据无效")
+	}
+	allowed := make(map[string]bool, len(names))
+	for _, name := range names {
+		allowed[name] = true
+	}
+	seen := make(map[string]bool, len(bundle.Artifacts))
+	var total int64
+	for _, artifact := range bundle.Artifacts {
+		if !allowed[artifact.Name] || seen[artifact.Name] || artifact.Size < 1 || artifact.Size > MaximumArtifactBytes ||
+			artifact.Size != int64(len(artifact.Data)) || artifact.UpdatedAt.IsZero() || len(artifact.SHA256) != sha256.Size*2 {
+			return errors.New("Runtime 制品元数据无效")
+		}
+		sum := sha256.Sum256(artifact.Data)
+		if !strings.EqualFold(artifact.SHA256, hex.EncodeToString(sum[:])) {
+			return errors.New("Runtime 制品校验和不匹配")
+		}
+		total += artifact.Size
+		if total > MaximumBundleBytes {
+			return errors.New("Runtime 制品集合超过 4 MiB")
+		}
+		seen[artifact.Name] = true
+	}
+	return nil
+}
+
+// ValidateLogChunk verifies cursor and payload invariants without trusting
+// the remote filesystem metadata returned by an Agent.
+func ValidateLogChunk(request shared.RuntimeLogRequest, chunk shared.RuntimeLogChunk) error {
+	if filepath.Base(chunk.FileName) != chunk.FileName ||
+		(chunk.FileName != "server_log.txt" && chunk.FileName != "forest_server_log.txt") ||
+		chunk.FileID == "" || len(chunk.FileID) > 128 || strings.ContainsAny(chunk.FileID, "\x00\r\n") ||
+		chunk.Size < 0 || chunk.Cursor < 0 || chunk.Cursor > chunk.Size || chunk.UpdatedAt.IsZero() {
+		return errors.New("Runtime 日志块元数据无效")
+	}
+	if request.FileID != "" && request.FileID != chunk.FileID && !chunk.Reset {
+		return errors.New("Runtime 日志轮转标识无效")
+	}
+	if request.Raw {
+		if len(chunk.Lines) != 0 || chunk.Truncated || len(chunk.Data) > request.MaxBytes {
+			return errors.New("Runtime 原始日志块负载无效")
+		}
+		start := request.Cursor
+		if chunk.Reset {
+			start = 0
+		} else if start < 0 {
+			start = chunk.Size - int64(request.MaxBytes)
+			if start < 0 {
+				start = 0
+			}
+		}
+		if start < 0 || chunk.Cursor-start != int64(len(chunk.Data)) {
+			return errors.New("Runtime 原始日志块游标与数据长度不一致")
+		}
+		return nil
+	}
+	if len(chunk.Data) != 0 || len(chunk.Lines) > request.MaxLines {
+		return errors.New("Runtime 日志行负载无效")
+	}
+	previous := int64(-1)
+	for _, line := range chunk.Lines {
+		if line.Cursor < 0 || line.Cursor > chunk.Cursor || line.Cursor <= previous || strings.ContainsAny(line.Text, "\r\n") {
+			return errors.New("Runtime 日志行游标无效")
+		}
+		previous = line.Cursor
+	}
+	return nil
 }
 
 func ReadLogs(ctx context.Context, saveRoot, cluster, shard string, request shared.RuntimeLogRequest) (shared.RuntimeLogChunk, error) {
@@ -133,6 +208,12 @@ func ReadLogs(ctx context.Context, saveRoot, cluster, shard string, request shar
 	}
 	if err := ctx.Err(); err != nil {
 		return shared.RuntimeLogChunk{}, err
+	}
+	if request.Raw {
+		return shared.RuntimeLogChunk{
+			FileName: filepath.Base(path), FileID: fileID, Size: info.Size(), Cursor: start + int64(len(data)),
+			Reset: reset, UpdatedAt: info.ModTime().UTC(), Lines: []shared.RuntimeLogLine{}, Data: data,
+		}, nil
 	}
 	if skipPartial {
 		if index := bytes.IndexByte(data, '\n'); index >= 0 {

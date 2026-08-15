@@ -308,6 +308,7 @@ func (a *Agent) Connect() error {
 		}
 		return fmt.Errorf("WebSocket 连接失败: %w", err)
 	}
+	c.SetReadLimit(shared.MaximumRegistrationMessageBytes)
 
 	log.Println("WebSocket连接已建立，准备进行身份验证")
 

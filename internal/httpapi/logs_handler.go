@@ -37,16 +37,23 @@ func (h *LogHandler) snapshot(c *gin.Context) {
 }
 
 func (h *LogHandler) download(c *gin.Context) {
-	file, info, err := h.logs.Open(c.Param("roomId"), c.Param("worldId"))
-	if err != nil {
+	wroteHeader := false
+	err := h.logs.Download(c.Request.Context(), c.Param("roomId"), c.Param("worldId"), func(info logstream.DownloadInfo, data []byte) error {
+		if !wroteHeader {
+			c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, info.FileName))
+			c.Header("Content-Type", "text/plain; charset=utf-8")
+			c.Header("Content-Length", strconv.FormatInt(info.Size, 10))
+			c.Header("Last-Modified", info.UpdatedAt.UTC().Format(http.TimeFormat))
+			c.Header("X-Content-Type-Options", "nosniff")
+			c.Status(http.StatusOK)
+			wroteHeader = true
+		}
+		_, writeErr := c.Writer.Write(data)
+		return writeErr
+	})
+	if err != nil && !wroteHeader {
 		logFailure(c, err)
-		return
 	}
-	defer file.Close()
-	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, info.Name()))
-	c.Header("Content-Type", "text/plain; charset=utf-8")
-	c.Header("X-Content-Type-Options", "nosniff")
-	http.ServeContent(c.Writer, c.Request, info.Name(), info.ModTime(), file)
 }
 
 func (h *LogHandler) events(c *gin.Context) {

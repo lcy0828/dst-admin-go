@@ -37,18 +37,27 @@ type runtimeSnapshotRefresher interface {
 	RefreshSnapshots(context.Context, string, string) (dstruntime.SnapshotRefreshResult, error)
 }
 
+type placementLocality interface {
+	IsLocalPlacement(string, string) (bool, error)
+}
+
 type TelemetryProbe struct {
 	native   Probe
 	runtime  RuntimeSnapshotReader
 	fallback Probe
+	locality placementLocality
 	now      func() time.Time
 }
 
-func NewTelemetryProbe(native Probe, runtime RuntimeSnapshotReader, fallback Probe) (*TelemetryProbe, error) {
+func NewTelemetryProbe(native Probe, runtime RuntimeSnapshotReader, fallback Probe, localities ...placementLocality) (*TelemetryProbe, error) {
 	if native == nil || runtime == nil || fallback == nil {
 		return nil, errors.New("native, runtime, and fallback probes are required")
 	}
-	return &TelemetryProbe{native: native, runtime: runtime, fallback: fallback, now: time.Now}, nil
+	probe := &TelemetryProbe{native: native, runtime: runtime, fallback: fallback, now: time.Now}
+	if len(localities) > 0 {
+		probe.locality = localities[0]
+	}
+	return probe, nil
 }
 
 func (p *TelemetryProbe) Snapshot(ctx context.Context, roomID, worldID string) ([]Observation, error) {
@@ -57,7 +66,15 @@ func (p *TelemetryProbe) Snapshot(ctx context.Context, roomID, worldID string) (
 }
 
 func (p *TelemetryProbe) SnapshotDetailed(ctx context.Context, roomID, worldID string) (SnapshotResult, error) {
-	native, nativeErr := p.native.Snapshot(ctx, roomID, worldID)
+	local, err := p.isLocal(roomID, worldID)
+	if err != nil {
+		return SnapshotResult{}, err
+	}
+	var native []Observation
+	var nativeErr error
+	if local {
+		native, nativeErr = p.native.Snapshot(ctx, roomID, worldID)
+	}
 	nativeAt := p.now().UTC()
 	native = stampNativeObservations(native, nativeAt)
 	snapshot, runtimeErr := p.runtime.ReadPlayers(ctx, roomID, worldID)
@@ -79,6 +96,9 @@ func (p *TelemetryProbe) SnapshotDetailed(ctx context.Context, roomID, worldID s
 			Degraded: nativeErr != nil, Warning: errorMessage(nativeErr),
 		}, nil
 	}
+	if !local {
+		return SnapshotResult{}, fmt.Errorf("remote runtime telemetry: %w", runtimeErr)
+	}
 	fallback, fallbackErr := p.fallback.Snapshot(ctx, roomID, worldID)
 	if fallbackErr != nil {
 		return SnapshotResult{}, errors.Join(fmt.Errorf("runtime telemetry: %w", runtimeErr), fmt.Errorf("console fallback: %w", fallbackErr), nativeErr)
@@ -99,10 +119,24 @@ func refreshableSnapshotError(err error) bool {
 }
 
 func (p *TelemetryProbe) HistorySnapshot(ctx context.Context, roomID, worldID string) ([]Observation, error) {
+	local, err := p.isLocal(roomID, worldID)
+	if err != nil {
+		return nil, err
+	}
+	if !local {
+		return []Observation{}, nil
+	}
 	if history, ok := p.native.(HistoryProbe); ok {
 		return history.HistorySnapshot(ctx, roomID, worldID)
 	}
 	return []Observation{}, nil
+}
+
+func (p *TelemetryProbe) isLocal(roomID, worldID string) (bool, error) {
+	if p.locality == nil {
+		return true, nil
+	}
+	return p.locality.IsLocalPlacement(roomID, worldID)
 }
 
 func observationsFromRuntime(snapshot dstruntime.Snapshot) []Observation {

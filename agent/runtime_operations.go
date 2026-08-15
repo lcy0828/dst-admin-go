@@ -125,7 +125,8 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 	case shared.RuntimeActionReadLogs:
 		if request.Logs == nil || request.Console != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil ||
 			request.Logs.Cursor < -1 || request.Logs.MaxBytes < 1 || request.Logs.MaxBytes > runtimefiles.MaximumLogBytes ||
-			request.Logs.MaxLines < 1 || request.Logs.MaxLines > 2000 || len([]rune(request.Logs.Query)) > 256 ||
+			(request.Logs.Raw && request.Logs.MaxLines != 0 || !request.Logs.Raw && (request.Logs.MaxLines < 1 || request.Logs.MaxLines > 2000)) ||
+			request.Logs.Raw && strings.TrimSpace(request.Logs.Query) != "" || len([]rune(request.Logs.Query)) > 256 ||
 			len(request.Logs.FileID) > 128 || strings.ContainsAny(request.Logs.FileID, "\x00\r\n") {
 			return errors.New("日志读取请求无效")
 		}

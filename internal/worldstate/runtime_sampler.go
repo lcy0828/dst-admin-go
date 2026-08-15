@@ -15,16 +15,25 @@ type runtimeSnapshotRefresher interface {
 	RefreshSnapshots(context.Context, string, string) (dstruntime.SnapshotRefreshResult, error)
 }
 
+type placementLocality interface {
+	IsLocalPlacement(string, string) (bool, error)
+}
+
 type RuntimeSampler struct {
 	runtime  RuntimeSnapshotReader
 	fallback Sampler
+	locality placementLocality
 }
 
-func NewRuntimeSampler(runtime RuntimeSnapshotReader, fallback Sampler) (*RuntimeSampler, error) {
+func NewRuntimeSampler(runtime RuntimeSnapshotReader, fallback Sampler, localities ...placementLocality) (*RuntimeSampler, error) {
 	if runtime == nil || fallback == nil {
 		return nil, errors.New("runtime reader and fallback sampler are required")
 	}
-	return &RuntimeSampler{runtime: runtime, fallback: fallback}, nil
+	sampler := &RuntimeSampler{runtime: runtime, fallback: fallback}
+	if len(localities) > 0 {
+		sampler.locality = localities[0]
+	}
+	return sampler, nil
 }
 
 func (s *RuntimeSampler) Snapshot(ctx context.Context, roomID, worldID string) (Observation, error) {
@@ -34,6 +43,15 @@ func (s *RuntimeSampler) Snapshot(ctx context.Context, roomID, worldID string) (
 	}
 	if contextErr := contextError(ctx, err); contextErr != nil {
 		return Observation{}, contextErr
+	}
+	if s.locality != nil {
+		local, localityErr := s.locality.IsLocalPlacement(roomID, worldID)
+		if localityErr != nil {
+			return Observation{}, localityErr
+		}
+		if !local {
+			return Observation{}, err
+		}
 	}
 	return s.fallback.Snapshot(ctx, roomID, worldID)
 }

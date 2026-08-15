@@ -167,33 +167,19 @@ func (m *Manager) Health(roomID, worldID string) (Health, error) {
 	if err != nil {
 		return Health{}, err
 	}
-	data, _, exists, err := readRegular(filepath.Join(worldPath, "save", "mod_config_data", "dst-admin", "health.json"), maxHealthBytes)
+	healthPath := filepath.Join(worldPath, "save", "mod_config_data", "dst-admin", "health.json")
+	data, _, exists, err := readRegular(healthPath, maxHealthBytes)
 	if err != nil {
 		return Health{}, err
 	}
 	if !exists {
 		return Health{}, ErrSnapshotUnavailable
 	}
-	var health Health
-	if err := decodeStrictJSON(data, &health); err != nil {
-		return Health{}, fmt.Errorf("%w: decode health: %v", ErrSnapshotInvalid, err)
+	readAt := time.Now().UTC()
+	if info, statErr := os.Stat(healthPath); statErr == nil {
+		readAt = info.ModTime().UTC()
 	}
-	if health.SchemaVersion != 1 || health.ProducerVersion == "" || health.ProducerInstanceID == "" || health.SessionID == "" || health.ShardID == "" || health.Sequence < 0 || health.ConsecutiveFailures < 0 {
-		return Health{}, ErrSnapshotInvalid
-	}
-	for _, module := range health.Modules {
-		if module.Sequence < 0 || module.ConsecutiveFailures < 0 || !validMetric(module.LastDurationMilliseconds) || module.LastCapturedAtUnix != nil && *module.LastCapturedAtUnix < 1 || module.LastWrittenAtUnix != nil && *module.LastWrittenAtUnix < 1 {
-			return Health{}, ErrSnapshotInvalid
-		}
-	}
-	if expectedSession := currentSessionID(worldPath); expectedSession != "" && health.SessionID != expectedSession {
-		return Health{}, fmt.Errorf("%w: health session %q does not match %q", ErrSnapshotStale, health.SessionID, expectedSession)
-	}
-	health.ReadAt = time.Now().UTC()
-	if info, statErr := os.Stat(filepath.Join(worldPath, "save", "mod_config_data", "dst-admin", "health.json")); statErr == nil {
-		health.ReadAt = info.ModTime().UTC()
-	}
-	return health, nil
+	return decodeHealthData(data, currentSessionID(worldPath), "", readAt)
 }
 
 func readSnapshot(path, expectedSession string, now time.Time) (Snapshot, error) {
@@ -204,6 +190,10 @@ func readSnapshot(path, expectedSession string, now time.Time) (Snapshot, error)
 	if !exists {
 		return Snapshot{}, os.ErrNotExist
 	}
+	return decodeSnapshotData(data, expectedSession, "", now)
+}
+
+func decodeSnapshotData(data []byte, expectedSession, expectedShard string, now time.Time) (Snapshot, error) {
 	var value Snapshot
 	if err := decodeStrictJSON(data, &value); err != nil {
 		return Snapshot{}, fmt.Errorf("%w: decode JSON: %v", ErrSnapshotInvalid, err)
@@ -220,6 +210,9 @@ func readSnapshot(path, expectedSession string, now time.Time) (Snapshot, error)
 	}
 	if expectedSession != "" && value.SessionID != expectedSession {
 		return Snapshot{}, fmt.Errorf("%w: session %q does not match %q", ErrSnapshotStale, value.SessionID, expectedSession)
+	}
+	if expectedShard != "" && value.ShardID != expectedShard {
+		return Snapshot{}, fmt.Errorf("%w: shard %q does not match %q", ErrSnapshotStale, value.ShardID, expectedShard)
 	}
 	if len(value.Players) > 64 {
 		return Snapshot{}, fmt.Errorf("%w: too many players", ErrSnapshotInvalid)
@@ -249,6 +242,10 @@ func readWorldStateSnapshot(path, expectedSession, expectedShard string, now tim
 	if !exists {
 		return WorldStateSnapshot{}, os.ErrNotExist
 	}
+	return decodeWorldStateData(data, expectedSession, expectedShard, now)
+}
+
+func decodeWorldStateData(data []byte, expectedSession, expectedShard string, now time.Time) (WorldStateSnapshot, error) {
 	var value WorldStateSnapshot
 	if err := decodeStrictJSON(data, &value); err != nil {
 		return WorldStateSnapshot{}, fmt.Errorf("%w: decode JSON: %v", ErrSnapshotInvalid, err)
@@ -294,6 +291,29 @@ func readWorldStateSnapshot(path, expectedSession, expectedShard string, now tim
 		return WorldStateSnapshot{}, fmt.Errorf("%w: shard %q does not match %q", ErrSnapshotStale, value.ShardID, expectedShard)
 	}
 	return value, nil
+}
+
+func decodeHealthData(data []byte, expectedSession, expectedShard string, readAt time.Time) (Health, error) {
+	var health Health
+	if err := decodeStrictJSON(data, &health); err != nil {
+		return Health{}, fmt.Errorf("%w: decode health: %v", ErrSnapshotInvalid, err)
+	}
+	if health.SchemaVersion != 1 || health.ProducerVersion == "" || health.ProducerInstanceID == "" || health.SessionID == "" || health.ShardID == "" || health.Sequence < 0 || health.ConsecutiveFailures < 0 {
+		return Health{}, ErrSnapshotInvalid
+	}
+	for _, module := range health.Modules {
+		if module.Sequence < 0 || module.ConsecutiveFailures < 0 || !validMetric(module.LastDurationMilliseconds) || module.LastCapturedAtUnix != nil && *module.LastCapturedAtUnix < 1 || module.LastWrittenAtUnix != nil && *module.LastWrittenAtUnix < 1 {
+			return Health{}, ErrSnapshotInvalid
+		}
+	}
+	if expectedSession != "" && health.SessionID != expectedSession {
+		return Health{}, fmt.Errorf("%w: health session %q does not match %q", ErrSnapshotStale, health.SessionID, expectedSession)
+	}
+	if expectedShard != "" && health.ShardID != expectedShard {
+		return Health{}, fmt.Errorf("%w: health shard %q does not match %q", ErrSnapshotStale, health.ShardID, expectedShard)
+	}
+	health.ReadAt = readAt.UTC()
+	return health, nil
 }
 
 func decodeStrictJSON(data []byte, destination interface{}) error {

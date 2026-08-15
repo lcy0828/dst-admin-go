@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"dont/internal/rooms"
+	"dont/shared"
 )
 
 var (
@@ -29,6 +30,10 @@ var prefabPattern = regexp.MustCompile(`^[a-z0-9_]{1,80}$`)
 
 type Sender interface {
 	Send(context.Context, string, string, string) error
+}
+
+type routedSender interface {
+	SendID(context.Context, string, string, shared.RuntimeConsoleRequest) (shared.RuntimeOperationResult, error)
 }
 
 type RoomCatalog interface {
@@ -156,8 +161,8 @@ func (s *Service) Execute(ctx context.Context, roomID, worldID string, request E
 	if err != nil {
 		return Run{}, err
 	}
-	sendErr := s.sender.Send(ctx, room.DirectoryName, world.DirectoryName, markedScript(run.ID, script))
-	completed, completeErr := s.store.Complete(run.ID, sendErr)
+	delivery, sendErr := s.send(ctx, room, world, markedScript(run.ID, script), shared.ConsoleModeManaged)
+	completed, completeErr := s.store.CompleteDelivery(run.ID, delivery, sendErr)
 	if completeErr != nil {
 		return Run{}, completeErr
 	}
@@ -182,12 +187,31 @@ func (s *Service) ExecuteRaw(ctx context.Context, roomID, worldID string, reques
 	if err != nil {
 		return Run{}, err
 	}
-	sendErr := s.sender.Send(ctx, room.DirectoryName, world.DirectoryName, markedScript(run.ID, command))
-	completed, completeErr := s.store.Complete(run.ID, sendErr)
+	delivery, sendErr := s.send(ctx, room, world, markedScript(run.ID, command), shared.ConsoleModeRaw)
+	completed, completeErr := s.store.CompleteDelivery(run.ID, delivery, sendErr)
 	if completeErr != nil {
 		return Run{}, completeErr
 	}
 	return completed, sendErr
+}
+
+func (s *Service) send(ctx context.Context, room rooms.Room, world rooms.World, command string, mode shared.ConsoleMode) (Delivery, error) {
+	if sender, ok := s.sender.(routedSender); ok {
+		result, err := sender.SendID(ctx, room.ID, world.ID, shared.RuntimeConsoleRequest{Mode: mode, Command: command})
+		observedAt := result.ObservedAt.UTC()
+		delivery := Delivery{
+			TransportOutcome: string(result.Outcome), ExecutionOutcome: "unknown", Message: result.Message,
+			OperationID: result.OperationID, OperationKey: result.OperationKey, TargetID: result.TargetID,
+			AgentID: result.AgentID, TopologyRevision: result.TopologyRevision,
+		}
+		if !observedAt.IsZero() {
+			delivery.ObservedAt = &observedAt
+		}
+		return delivery, err
+	}
+	err := s.sender.Send(ctx, room.DirectoryName, world.DirectoryName, command)
+	delivery := Delivery{TransportOutcome: "sent", ExecutionOutcome: "unknown"}
+	return delivery, err
 }
 
 func (s *Service) Runs(filter ListFilter) ([]Run, int, error) { return s.store.List(filter) }

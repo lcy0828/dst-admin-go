@@ -8,6 +8,7 @@ import (
 
 	"dont/internal/operationlease"
 	"dont/internal/rooms"
+	"dont/internal/runtimefiles"
 	"dont/internal/topology"
 	"dont/shared"
 
@@ -58,6 +59,14 @@ func (r *Router) DriverTarget(ctx context.Context, roomID, worldID string) (Driv
 		RoomID: roomID, WorldID: worldID, Cluster: placement.Room.DirectoryName, Shard: placement.World.DirectoryName,
 		TopologyRevision: placement.Revision,
 	}, nil
+}
+
+func (r *Router) IsLocalPlacement(roomID, worldID string) (bool, error) {
+	applied, err := r.placements.AppliedPlacement(roomID, worldID)
+	if err != nil {
+		return false, err
+	}
+	return applied.AppliedTargetID == "local", nil
 }
 
 func (r *Router) MigrationTargets(plan topology.MigrationPlacement) (Driver, Target, Driver, Target, error) {
@@ -119,7 +128,13 @@ func (r *Router) SendID(ctx context.Context, roomID, worldID string, request sha
 		expires := lease.ExpiresAt.UTC()
 		operation.Key, operation.LeaseID, operation.FencingToken, operation.LeaseExpiresAt = operation.ID, lease.LeaseID, lease.FencingToken, &expires
 	}
-	return driver.SendConsole(ctx, target, operation, request, 30*time.Second)
+	result, sendErr := driver.SendConsole(ctx, target, operation, request, 30*time.Second)
+	result.TargetID = target.TargetID
+	result.TopologyRevision = target.TopologyRevision
+	if strings.HasPrefix(target.TargetID, "agent:") {
+		result.AgentID = strings.TrimPrefix(target.TargetID, "agent:")
+	}
+	return result, sendErr
 }
 
 func (r *Router) Status(ctx context.Context, roomID, worldID string) (shared.ShardRuntimeStatus, error) {
@@ -143,7 +158,14 @@ func (r *Router) ReadLogs(ctx context.Context, roomID, worldID string, request s
 	if err != nil {
 		return shared.RuntimeLogChunk{}, err
 	}
-	return driver.ReadLogs(ctx, target, request)
+	chunk, err := driver.ReadLogs(ctx, target, request)
+	if err != nil {
+		return shared.RuntimeLogChunk{}, err
+	}
+	if err := runtimefiles.ValidateLogChunk(request, chunk); err != nil {
+		return shared.RuntimeLogChunk{}, err
+	}
+	return chunk, nil
 }
 
 func (r *Router) ReadArtifacts(ctx context.Context, roomID, worldID string, kind shared.ArtifactKind) (shared.RuntimeArtifactBundle, error) {
@@ -151,7 +173,14 @@ func (r *Router) ReadArtifacts(ctx context.Context, roomID, worldID string, kind
 	if err != nil {
 		return shared.RuntimeArtifactBundle{}, err
 	}
-	return driver.ReadArtifacts(ctx, target, kind)
+	bundle, err := driver.ReadArtifacts(ctx, target, kind)
+	if err != nil {
+		return shared.RuntimeArtifactBundle{}, err
+	}
+	if err := runtimefiles.ValidateArtifactBundle(kind, bundle); err != nil {
+		return shared.RuntimeArtifactBundle{}, err
+	}
+	return bundle, nil
 }
 
 func newOperationID() string { return strings.ToLower(uuid.NewString()) }
