@@ -390,7 +390,7 @@ func appendManagedReservations(values []PortReservation, environment ExecutionEn
 		if item.port < 1 || item.port > 65535 {
 			continue
 		}
-		identity := targetID + "\x00" + roomID + "\x00" + world.ID + "\x00" + string(item.purpose) + "\x00" + string(state)
+		identity := targetID + "\x00" + roomID + "\x00" + world.ID + "\x00" + string(item.purpose)
 		values = append(values, PortReservation{ID: stableResourceID("port", identity), EnvironmentID: environment.ID, NetworkProfileID: profile.ID, ScopeID: profile.ScopeID, TargetID: targetID, RoomID: roomID, WorldID: world.ID, Cluster: cluster, Shard: world.DirectoryName, Purpose: item.purpose, Protocol: "udp", BindAddress: profile.BindAddress, Port: item.port, State: state, Managed: true})
 	}
 	return values

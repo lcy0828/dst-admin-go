@@ -70,8 +70,19 @@ type portReservationRecord struct {
 	Port             int    `gorm:"not null;index"`
 	State            string `gorm:"type:varchar(24);not null;index"`
 	Managed          bool
+	LeaseID          string `gorm:"type:varchar(64);index"`
+	OwnerID          string `gorm:"type:varchar(255);index"`
+	ExpiresAt        *time.Time
+	ActivatedAt      *time.Time
+	ReleasedAt       *time.Time
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+}
+
+type portAllocationLockRecord struct {
+	ScopeID   string `gorm:"type:varchar(160);primary_key"`
+	Revision  uint64 `gorm:"not null"`
+	UpdatedAt time.Time
 }
 
 type cpuAllocationRecord struct {
@@ -275,14 +286,46 @@ func (s *Store) ReplacePortReservations(values []PortReservation) error {
 	if tx.Error != nil {
 		return tx.Error
 	}
-	if err := tx.Table(s.portReservationsTable).Delete(&portReservationRecord{}).Error; err != nil {
+	var existing []portReservationRecord
+	if err := tx.Table(s.portReservationsTable).Find(&existing).Error; err != nil {
 		tx.Rollback()
 		return err
 	}
+	byID := make(map[string]portReservationRecord, len(existing))
+	for _, record := range existing {
+		byID[record.ID] = record
+	}
+	desired := make(map[string]bool, len(values))
 	for _, value := range values {
+		desired[value.ID] = true
 		record := portRecordFromReservation(value)
-		record.CreatedAt, record.UpdatedAt = now, now
-		if err := tx.Table(s.portReservationsTable).Create(&record).Error; err != nil {
+		if current, ok := byID[value.ID]; ok {
+			record.CreatedAt = current.CreatedAt
+			if record.LeaseID == "" && current.LeaseID != "" {
+				record.LeaseID, record.OwnerID = current.LeaseID, current.OwnerID
+				record.ExpiresAt, record.ActivatedAt = current.ExpiresAt, current.ActivatedAt
+			}
+		} else {
+			record.CreatedAt = now
+		}
+		record.UpdatedAt = now
+		if err := tx.Table(s.portReservationsTable).Save(&record).Error; err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	for _, record := range existing {
+		if desired[record.ID] || record.State == string(ReservationReleased) {
+			continue
+		}
+		if record.LeaseID != "" && record.State == string(ReservationPlanned) && record.ExpiresAt != nil && record.ExpiresAt.After(now) {
+			continue
+		}
+		updates := map[string]interface{}{"state": string(ReservationReleasing), "updated_at": now}
+		if record.State == string(ReservationReleasing) {
+			updates["state"], updates["released_at"] = string(ReservationReleased), now
+		}
+		if err := tx.Table(s.portReservationsTable).Where("id = ?", record.ID).Updates(updates).Error; err != nil {
 			tx.Rollback()
 			return err
 		}
@@ -363,11 +406,19 @@ func (s *Store) UpdateNetworkProfile(id string, input NetworkProfileUpdate) (Net
 }
 
 func reservationFromRecord(record portReservationRecord) PortReservation {
-	return PortReservation{ID: record.ID, EnvironmentID: record.EnvironmentID, NetworkProfileID: record.NetworkProfileID, ScopeID: record.ScopeID, TargetID: record.TargetID, RoomID: record.RoomID, WorldID: record.WorldID, Cluster: record.Cluster, Shard: record.Shard, Purpose: PortPurpose(record.Purpose), Protocol: record.Protocol, BindAddress: record.BindAddress, Port: record.Port, State: ReservationState(record.State), Managed: record.Managed, UpdatedAt: record.UpdatedAt.UTC()}
+	return PortReservation{ID: record.ID, EnvironmentID: record.EnvironmentID, NetworkProfileID: record.NetworkProfileID, ScopeID: record.ScopeID, TargetID: record.TargetID, RoomID: record.RoomID, WorldID: record.WorldID, Cluster: record.Cluster, Shard: record.Shard, Purpose: PortPurpose(record.Purpose), Protocol: record.Protocol, BindAddress: record.BindAddress, Port: record.Port, State: ReservationState(record.State), Managed: record.Managed, LeaseID: record.LeaseID, OwnerID: record.OwnerID, ExpiresAt: utcTimePointer(record.ExpiresAt), ActivatedAt: utcTimePointer(record.ActivatedAt), ReleasedAt: utcTimePointer(record.ReleasedAt), UpdatedAt: record.UpdatedAt.UTC()}
 }
 
 func portRecordFromReservation(value PortReservation) portReservationRecord {
-	return portReservationRecord{ID: value.ID, EnvironmentID: value.EnvironmentID, NetworkProfileID: value.NetworkProfileID, ScopeID: value.ScopeID, TargetID: value.TargetID, RoomID: value.RoomID, WorldID: value.WorldID, Cluster: value.Cluster, Shard: value.Shard, Purpose: string(value.Purpose), Protocol: value.Protocol, BindAddress: value.BindAddress, Port: value.Port, State: string(value.State), Managed: value.Managed}
+	return portReservationRecord{ID: value.ID, EnvironmentID: value.EnvironmentID, NetworkProfileID: value.NetworkProfileID, ScopeID: value.ScopeID, TargetID: value.TargetID, RoomID: value.RoomID, WorldID: value.WorldID, Cluster: value.Cluster, Shard: value.Shard, Purpose: string(value.Purpose), Protocol: value.Protocol, BindAddress: value.BindAddress, Port: value.Port, State: string(value.State), Managed: value.Managed, LeaseID: value.LeaseID, OwnerID: value.OwnerID, ExpiresAt: value.ExpiresAt, ActivatedAt: value.ActivatedAt, ReleasedAt: value.ReleasedAt}
+}
+
+func utcTimePointer(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	result := value.UTC()
+	return &result
 }
 
 func allocationFromRecord(record cpuAllocationRecord) CPUAllocation {

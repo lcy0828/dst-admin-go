@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"dont/internal/rooms"
@@ -28,8 +29,10 @@ type Store struct {
 	environmentsTable     string
 	networkProfilesTable  string
 	portReservationsTable string
+	portLocksTable        string
 	cpuAllocationsTable   string
 	now                   func() time.Time
+	portMu                sync.Mutex
 }
 
 func NewStore(db *gorm.DB, tablePrefix string) *Store {
@@ -38,6 +41,7 @@ func NewStore(db *gorm.DB, tablePrefix string) *Store {
 		db: db, table: prefix + "room_topology", providersTable: prefix + "runtime_provider",
 		environmentsTable: prefix + "execution_environment", networkProfilesTable: prefix + "network_profile",
 		portReservationsTable: prefix + "port_reservation", cpuAllocationsTable: prefix + "cpu_allocation", now: time.Now,
+		portLocksTable: prefix + "port_allocation_lock",
 	}
 }
 
@@ -53,6 +57,7 @@ func (s *Store) Migrate() error {
 		{s.environmentsTable, &executionEnvironmentRecord{}},
 		{s.networkProfilesTable, &networkProfileRecord{}},
 		{s.portReservationsTable, &portReservationRecord{}},
+		{s.portLocksTable, &portAllocationLockRecord{}},
 		{s.cpuAllocationsTable, &cpuAllocationRecord{}},
 	} {
 		if err := s.db.Table(migration.table).AutoMigrate(migration.model).Error; err != nil {

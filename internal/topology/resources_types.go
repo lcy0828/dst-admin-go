@@ -47,9 +47,11 @@ const (
 type ReservationState string
 
 const (
-	ReservationActive   ReservationState = "active"
-	ReservationPlanned  ReservationState = "planned"
-	ReservationObserved ReservationState = "observed"
+	ReservationActive    ReservationState = "active"
+	ReservationPlanned   ReservationState = "planned"
+	ReservationObserved  ReservationState = "observed"
+	ReservationReleasing ReservationState = "releasing"
+	ReservationReleased  ReservationState = "released"
 )
 
 type CPUPolicy string
@@ -112,7 +114,35 @@ type PortReservation struct {
 	Port             int              `json:"port"`
 	State            ReservationState `json:"state"`
 	Managed          bool             `json:"managed"`
+	LeaseID          string           `json:"leaseId,omitempty"`
+	OwnerID          string           `json:"ownerId,omitempty"`
+	ExpiresAt        *time.Time       `json:"expiresAt,omitempty"`
+	ActivatedAt      *time.Time       `json:"activatedAt,omitempty"`
+	ReleasedAt       *time.Time       `json:"releasedAt,omitempty"`
 	UpdatedAt        time.Time        `json:"updatedAt"`
+}
+
+type PortRequest struct {
+	WorldID   string      `json:"worldId"`
+	Shard     string      `json:"shard"`
+	Purpose   PortPurpose `json:"purpose"`
+	Preferred int         `json:"preferred"`
+	Strict    bool        `json:"strict"`
+}
+
+type PortAllocationRequest struct {
+	OwnerID  string        `json:"ownerId"`
+	TargetID string        `json:"targetId"`
+	RoomID   string        `json:"roomId"`
+	Cluster  string        `json:"cluster"`
+	TTL      time.Duration `json:"-"`
+	Requests []PortRequest `json:"requests"`
+}
+
+type PortAllocation struct {
+	LeaseID      string            `json:"leaseId"`
+	Reservations []PortReservation `json:"reservations"`
+	ExpiresAt    time.Time         `json:"expiresAt"`
 }
 
 type CPUAllocation struct {
