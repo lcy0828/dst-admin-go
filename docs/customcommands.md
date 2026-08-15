@@ -1,20 +1,21 @@
 # DST `customcommands.lua` 能力与集成设计
 
-> 文档状态：设计与实现基线 v1.3
-> 更新时间：2026-08-12
+> 文档状态：设计与实现基线 v1.4
+> 更新时间：2026-08-15
 > 适用仓库：`dst-admin-go`、`dst-admin-vue`
 > 目标：明确 `customcommands.lua` 能做什么、适合做什么，以及 DST Admin 应如何安全使用它
 
 ## 0. 当前实现状态
 
-截至 2026-08-12，阶段 A 至阶段 E 已完成代码实现和自动化验收：
+截至 2026-08-15，阶段 A 至阶段 E 已完成代码实现和自动化验收：
 
-- Runtime `2.3.0` 以唯一受管块接入每个分片，不覆盖用户已有脚本。
+- Runtime `2.3.1` 以唯一受管块接入每个分片，不覆盖用户已有脚本。
 - 安装、升级、状态、卸载、完整备份和校验回滚 API 已接通；卸载和回滚要求分片停止及精确房间名确认。
 - `Start/Stop` 幂等，`Reload` 重新读取受管模块；候选加载或启动失败时保留或恢复旧实例。
 - 玩家 A/B JSON 快照、健康信标、Session/Shard/sequence/时间校验和损坏槽回退已实现。
 - 房间级多分片一次事务刷新、字段级 `live/stale/unavailable`、原生日志补充及旧控制台探针 fallback 已实现。
 - 世界状态每 5 秒写入 A/B JSON 快照，完整保留 17 项季节、昼夜、天气、环境与洞穴指标；Go 严格校验版本、Session、Shard、实例、sequence、时间和有限字段，快照有效时不发送控制台 Lua。
+- `pause_when_empty=true` 造成模拟暂停时，DST 的普通和 static scheduler 都不会继续周期任务；快照过期后 Go 发送短入口 `DSTAdmin.Refresh()`，等待玩家、世界和 Health sequence 同时前进，再读取一致结果。
 - Runtime 未安装、版本过旧、快照缺失、损坏、错 Session/Shard 或过期时，世界状态刷新只执行一次原 nonce 日志探针 fallback；请求取消或超时后不会再触发 fallback。
 - 玩家页已展示 Runtime 正常、fallback、降级和不可用状态，并提供安装或修复入口。
 - 玩家操作已迁移到固定允许列表短命令，使用 A/B 结构化回执；发送后未收到回执时不会自动重试，避免重复执行危险动作。
@@ -22,9 +23,11 @@
 - 世界诊断只开放 `summary`、`prefab`、`performance` 三种档位；实体样本最多 50 条，性能采样 1 至 5 秒且最多 50 个样本，完成或停止时自动取消任务。
 - 世界状态页已接入最近事件、最近诊断和手动诊断入口。
 
+真实 Linux 空服验收已在 Debian 12、DST build `747465` 上完成：分片保持 `Sim paused` 25 秒后，玩家和世界快照均会过期；短刷新可同步推进两个快照和 Health sequence，且不需要解除暂停。
+
 当前尚未完成：
 
-- 真实 DST 在 macOS、Linux、空服、满员及代表性 Mod 组合上的上线验收。自动化测试已覆盖跨平台路径处理和 Lua 生命周期，但不能替代真实游戏进程验证。
+- 真实 DST 在 macOS、满员及代表性 Mod 组合上的上线验收。自动化测试与 Debian 空服验收不能替代剩余平台和 Mod 组合验证。
 
 ## 1. 结论
 
@@ -373,7 +376,7 @@ dst-admin/
 
 ```lua
 _G.DSTAdmin = {
-    version = "2.3.0",
+    version = "2.3.1",
     protocolVersion = 2,
     Telemetry = {},
     WorldState = {},
@@ -390,6 +393,7 @@ DSTAdmin.Start()
 DSTAdmin.Stop()
 DSTAdmin.Status()
 DSTAdmin.Reload()
+DSTAdmin.Refresh()
 
 DSTAdmin.Telemetry.EmitOnce()
 DSTAdmin.WorldState.EmitOnce()
@@ -406,8 +410,8 @@ DSTAdmin.Diagnostics.Capture(request_json)
 `customcommands.lua` 加载早于 `TheWorld` 就绪。受管加载块应：
 
 1. 异步加载 DST Admin `bootstrap.lua`。
-2. 使用 `scheduler:ExecuteInTime()` 做有限次数的就绪检查。
-3. 确认 `TheWorld.ismastersim`、`TheNet` 和持久化能力可用。
+2. 同步检查 `TheWorld.ismastersim`、`TheNet` 和持久化能力；已经就绪时直接启动，避免空服暂停后 scheduler 永远不回调。
+3. 尚未就绪时使用 `scheduler:ExecuteInTime()` 做有限次数的重试。
 4. 调用幂等的 `DSTAdmin.Start()`。
 5. 超过等待上限后只记录一次结构化错误，不无限重试。
 
@@ -430,6 +434,17 @@ DSTAdmin.Diagnostics.Capture(request_json)
 3. 新模块启动失败时尝试恢复旧实例。
 4. Go 记录升级结果；无法安全恢复时提示重启目标分片。
 
+### 8.4 空服暂停与主动刷新
+
+周期任务只用于服务器未暂停时降低控制台调用频率，不能作为读取当前状态的可靠前提。玩家或世界快照过期时：
+
+1. Go 校验目标进程、Runtime 安装状态、当前 Session 和 Shard 身份，但不要求旧 Health 新鲜。
+2. Go 只发送 `DSTAdmin.Refresh()`；Lua 先完成世界快照，再完成玩家快照并发布包含两个最新 sequence 的 Health。
+3. Go 只有在玩家、世界和 Health 的 Session/Shard 匹配且两个 sequence 都前进后才返回成功。
+4. 主动刷新失败或 Runtime 不兼容时，玩家和世界采样继续使用原有长 Lua nonce 探针 fallback。
+
+单分片房间在 `cluster.ini [SHARD] shard_enabled=false` 时，DST 的 `TheShard:GetShardId()` 返回 `0`，即使 `server.ini` 仍保留 `id=1`；Go 按运行时真实身份 `0` 校验。启用分片时才使用各 `server.ini [SHARD].id`。
+
 ## 9. 文件协议
 
 ### 9.1 玩家 A/B 快照
@@ -437,7 +452,7 @@ DSTAdmin.Diagnostics.Capture(request_json)
 ```json
 {
   "schemaVersion": 2,
-  "producerVersion": "2.3.0",
+  "producerVersion": "2.3.1",
   "producerInstanceId": "runtime-random-id",
   "sessionId": "dst-session-id",
   "shardId": "1",
@@ -459,7 +474,7 @@ players-b.json
 
 ### 9.2 世界状态 A/B 快照
 
-`worldstate-a.json` 与 `worldstate-b.json` 每 5 秒轮换一次，信封字段与玩家快照一致，并固定承载以下 17 项业务字段：
+`worldstate-a.json` 与 `worldstate-b.json` 在模拟未暂停时每 5 秒轮换一次；暂停期间由读取请求触发主动刷新。信封字段与玩家快照一致，并固定承载以下 17 项业务字段：
 
 ```text
 season, phase, cycles
@@ -471,7 +486,7 @@ nightmarePhase, nightmareProgress
 
 Lua 优先读取 `TheWorld.state`；季节进度、噩梦阶段和噩梦进度在对应字段缺失时，分别尝试 `seasonmanager` 与 `nightmareclock` 的只读方法。单项不存在时省略数值或返回空文本，不伪装为零。采集不遍历 `Ents`，只做有限字段读取、JSON 编码和一次异步持久化。
 
-Go 只接受 Runtime `2.3.0`、协议 2、当前 Session 和当前 `server.ini [SHARD].id` 的新鲜完整快照；拒绝未知 JSON 字段、尾随 JSON、NaN/Inf、负计数、超长文本与未来时间。A/B 中一槽损坏时读取另一槽；两槽都不可用时才调用旧 nonce 控制台探针，保证旧 Runtime、特殊环境和代表性 Mod 仍有恢复路径。
+Go 只接受 Runtime `2.3.1`、协议 2、当前 Session 和当前运行时 Shard 身份的新鲜完整快照；拒绝未知 JSON 字段、尾随 JSON、NaN/Inf、负计数、超长文本与未来时间。A/B 中一槽损坏时读取另一槽；快照缺失或过期时先调用短刷新，短刷新不可用时才调用旧 nonce 控制台探针，保证旧 Runtime、特殊环境和代表性 Mod 仍有恢复路径。
 
 ### 9.3 事件批次
 
@@ -628,7 +643,7 @@ Go 安装器必须遵守：
 1. 增加稳定事件的小型批次协议。
 2. 增加有限、按需、自动停止的诊断采样。
 3. 世界状态页展示最近事件、历史诊断与结构化诊断结果。
-4. 后续与地图和专门性能页面关联属于产品增强，不阻塞 Runtime 2.3.0 发布。
+4. 后续与地图和专门性能页面关联属于产品增强，不阻塞 Runtime 2.3.1 发布。
 
 ### 阶段 E：世界状态无日志采集（代码已完成）
 
