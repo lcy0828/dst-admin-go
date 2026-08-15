@@ -19,12 +19,13 @@ import (
 const publicationTestHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 type modPublicationHTTPFixture struct {
-	mu           sync.Mutex
-	plan         modpublication.Plan
-	publications []modpublication.Publication
-	publishErr   error
-	retryErr     error
-	retryResult  *modpublication.Publication
+	mu            sync.Mutex
+	plan          modpublication.Plan
+	publications  []modpublication.Publication
+	publishErr    error
+	publishResult *modpublication.Publication
+	retryErr      error
+	retryResult   *modpublication.Publication
 }
 
 func (f *modPublicationHTTPFixture) Preview(context.Context, string, modcontrol.Request) (modpublication.Plan, error) {
@@ -34,6 +35,12 @@ func (f *modPublicationHTTPFixture) Preview(context.Context, string, modcontrol.
 func (f *modPublicationHTTPFixture) Publish(_ context.Context, sourceJobID, roomID string, _ modcontrol.Request) (modpublication.Publication, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.publishResult != nil {
+		value := *f.publishResult
+		value.SourceJobID, value.RoomID = sourceJobID, roomID
+		f.publications = append([]modpublication.Publication{value}, f.publications...)
+		return value, f.publishErr
+	}
 	value := modpublication.Publication{
 		ID: "publication-created", SourceJobID: sourceJobID, RoomID: roomID,
 		Status: modpublication.StatusSucceeded, Outcome: modpublication.OutcomeFull, Plan: f.plan,
@@ -222,6 +229,35 @@ func TestModPublicationHTTPFailureAndRetryJobs(t *testing.T) {
 	job = waitForModJob(t, jobService, responseData(t, response)["id"].(string))
 	if job.Kind != "mod.publication.retry" || job.Status != jobs.StatusSucceeded {
 		t.Fatalf("unexpected retry job: %#v", job)
+	}
+}
+
+func TestModPublicationHTTPInitialRollbackRemainsFailed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	plan := publicationHTTPPlan()
+	fixture := &modPublicationHTTPFixture{
+		plan:       plan,
+		publishErr: errors.New("node disconnected during publish"),
+		publishResult: &modpublication.Publication{
+			ID: "publication-rolled-back", Status: modpublication.StatusRolledBack,
+			Outcome: modpublication.OutcomeNone, Plan: plan,
+			ErrorCode: "TARGET_PUBLISH_FAILED", ErrorMessage: "node disconnected during publish",
+			Targets: []modpublication.TargetResult{{
+				TargetID: "local", InstallationID: "default", Status: modpublication.StatusRolledBack, RolledBack: true,
+			}},
+		},
+	}
+	router, jobService := newModPublicationHandlerApp(t, fixture)
+
+	response := performJSON(router, http.MethodPost, "/api/v2/rooms/room-one/mod-publications", map[string]interface{}{
+		"action": "reconcile", "planHash": publicationTestHash, "confirmation": publicationTestHash,
+	}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	job := waitForModJob(t, jobService, responseData(t, response)["id"].(string))
+	if job.Status != jobs.StatusFailed || job.Outcome != jobs.OutcomeNone || len(job.Targets) != 1 ||
+		job.Targets[0].Status != jobs.StatusFailed || job.Targets[0].Error == nil ||
+		job.Targets[0].Error.Code != "TARGET_PUBLISH_FAILED" {
+		t.Fatalf("rolled-back initial publication was reported as successful: %#v", job)
 	}
 }
 

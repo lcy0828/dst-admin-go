@@ -91,7 +91,7 @@ func (h *ModPublicationHandler) publish(c *gin.Context) {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
 			publication, publishErr := h.service.Publish(ctx, job.ID, roomID, request)
 			for _, target := range plan.Targets {
-				report(publicationTargetJobResult(publication, target.TargetID, target.InstallationID, publishErr, "Mod 已原子发布；重启分片后生效"))
+				report(publicationTargetJobResult(publication, target.TargetID, target.InstallationID, publishErr, false, "Mod 已原子发布；重启分片后生效"))
 			}
 			return nil
 		}
@@ -118,7 +118,7 @@ func (h *ModPublicationHandler) retry(c *gin.Context) {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
 			publication, retryErr := h.service.Retry(ctx, job.ID, publicationID)
 			for _, target := range current.Plan.Targets {
-				report(publicationTargetJobResult(publication, target.TargetID, target.InstallationID, retryErr, "Mod 发布恢复已完成"))
+				report(publicationTargetJobResult(publication, target.TargetID, target.InstallationID, retryErr, true, "Mod 发布恢复已完成"))
 			}
 			return nil
 		}
@@ -222,14 +222,14 @@ func publicationJobError(err error) *jobs.Error {
 	return &jobs.Error{Code: code, Message: err.Error()}
 }
 
-func publicationTargetJobResult(publication modpublication.Publication, targetID, installationID string, operationErr error, successMessage string) jobs.TargetResult {
+func publicationTargetJobResult(publication modpublication.Publication, targetID, installationID string, operationErr error, allowRolledBack bool, successMessage string) jobs.TargetResult {
 	id := publicationJobTarget(targetID, installationID)
 	for _, target := range publication.Targets {
 		if target.TargetID != targetID || target.InstallationID != installationID {
 			continue
 		}
 		targetSucceeded := target.Status == modpublication.StatusSucceeded ||
-			(publication.Status == modpublication.StatusRolledBack && target.Status == modpublication.StatusRolledBack)
+			(allowRolledBack && publication.Status == modpublication.StatusRolledBack && target.Status == modpublication.StatusRolledBack)
 		if targetSucceeded && (operationErr == nil || publicationHasIncompleteTarget(publication)) {
 			return jobs.TargetResult{TargetID: id, Status: jobs.StatusSucceeded, Message: successMessage}
 		}
