@@ -1993,6 +1993,109 @@ paths:
                 $ref: "#/components/schemas/GameVersionEnvelope"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /game/releases/preview:
+    post:
+      tags: [Game]
+      operationId: previewGameRelease
+      summary: Preflight every affected installation and shard without changing runtime state
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GameReleasePreviewInput"
+      responses:
+        "200":
+          description: Immutable release plan with per-installation blockers and restart intent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameReleasePlanEnvelope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /game/releases:
+    get:
+      tags: [Game]
+      operationId: listGameReleases
+      summary: List durable distributed game release and recovery records
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 10 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: Paginated game release records
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameReleaseListEnvelope"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+    post:
+      tags: [Game, Jobs]
+      operationId: publishGameRelease
+      summary: Revalidate a confirmed plan, protect all rooms, update every installation, and restore prior shard state
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GameReleaseCreateInput"
+      responses:
+        "202":
+          description: Distributed game release Job accepted; the Job ID is also the release ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+  /game/releases/{releaseId}:
+    parameters:
+      - $ref: "#/components/parameters/GameReleaseID"
+    get:
+      tags: [Game]
+      operationId: getGameRelease
+      summary: Read one durable release including backups, installation results, shard state, and recovery diagnostics
+      responses:
+        "200":
+          description: Distributed game release record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameReleaseEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /game/releases/{releaseId}/actions/retry:
+    parameters:
+      - $ref: "#/components/parameters/GameReleaseID"
+    post:
+      tags: [Game, Jobs]
+      operationId: retryGameRelease
+      summary: Resume a failed or recovery-required release while skipping installations already at the exact target version
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Release recovery Job accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
   /rooms/{roomId}/maps:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -2513,9 +2616,22 @@ paths:
       summary: Resume post-commit recovery or create a new publication from a failed pre-commit desired state
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
-        "202": { description: Publication recovery job accepted; in-place recovery keeps the original publication ID, while a retry of failed or rolled-back state creates a new publication resolved by sourceJobId, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "202": { description: "Publication recovery job accepted; in-place recovery keeps the original publication ID, while a retry of failed or rolled-back state creates a new publication resolved by sourceJobId", content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /mod-publications/{publicationId}/actions/activate:
+    parameters: [{ $ref: "#/components/parameters/ModPublicationID" }]
+    post:
+      tags: [Mods, Jobs]
+      operationId: activateModPublication
+      summary: Restart the shards that were running before a committed Mod publication and confirm they load
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModPublicationActivationPolicyInput" } } } }
+      responses:
+        "202": { description: Mod activation Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/players:
     parameters: [{ $ref: "#/components/parameters/RoomID" }]
     get:
@@ -3031,7 +3147,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/KubernetesPreflightInput" }
       responses:
-        "200": { description: Observation, safety report, and optional server-generated typed plan, content: { application/json: { schema: { $ref: "#/components/schemas/KubernetesPreviewEnvelope" } } } }
+        "200": { description: "Observation, safety report, and optional server-generated typed plan", content: { application/json: { schema: { $ref: "#/components/schemas/KubernetesPreviewEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
@@ -3382,6 +3498,13 @@ components:
         format: uuid
     JobID:
       name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    GameReleaseID:
+      name: releaseId
       in: path
       required: true
       schema:
@@ -5209,6 +5332,193 @@ components:
           type: "null"
         meta:
           $ref: "#/components/schemas/Meta"
+    GameReleaseLoadConfirmation:
+      type: string
+      enum: [logs, none]
+    GameReleasePolicyInput:
+      type: object
+      additionalProperties: false
+      properties:
+        cleanCache: { type: boolean, default: false }
+        restartRunning: { type: boolean, default: true }
+        loadConfirmation: { $ref: "#/components/schemas/GameReleaseLoadConfirmation" }
+        timeoutSeconds: { type: integer, minimum: 30, maximum: 900, default: 300 }
+    GameReleasePolicy:
+      type: object
+      additionalProperties: false
+      required: [cleanCache, restartRunning, loadConfirmation, timeoutSeconds]
+      properties:
+        cleanCache: { type: boolean }
+        restartRunning: { type: boolean }
+        loadConfirmation: { $ref: "#/components/schemas/GameReleaseLoadConfirmation" }
+        timeoutSeconds: { type: integer, minimum: 30, maximum: 900 }
+    GameReleasePreviewInput:
+      type: object
+      additionalProperties: false
+      properties:
+        desiredVersion: { type: string, pattern: '^[0-9]{1,64}$' }
+        policy: { $ref: "#/components/schemas/GameReleasePolicyInput" }
+    GameReleaseCreateInput:
+      type: object
+      additionalProperties: false
+      required: [planHash, confirmation]
+      properties:
+        desiredVersion: { type: string, pattern: '^[0-9]{1,64}$' }
+        policy: { $ref: "#/components/schemas/GameReleasePolicyInput" }
+        planHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        confirmation: { type: string, pattern: '^[a-f0-9]{64}$' }
+    GameReleaseBlocker:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        targetId: { type: string }
+        installationId: { type: string }
+        roomId: { type: string }
+        worldId: { type: string }
+    GameReleaseShardPlan:
+      type: object
+      additionalProperties: false
+      required: [roomId, roomName, roomDirectory, worldId, worldName, worldDirectory, isMaster, targetId, installationId, topologyRevision, wasRunning]
+      properties:
+        roomId: { type: string }
+        roomName: { type: string }
+        roomDirectory: { type: string }
+        worldId: { type: string }
+        worldName: { type: string }
+        worldDirectory: { type: string }
+        isMaster: { type: boolean }
+        targetId: { type: string }
+        installationId: { type: string }
+        topologyRevision: { type: string }
+        runtimeState: { type: string }
+        wasRunning: { type: boolean }
+    GameReleaseInstallationPlan:
+      type: object
+      additionalProperties: false
+      required: [targetId, targetName, installationId, online, inventoryFresh, capabilities, installed, desiredVersion, upToDate, availableBytes, requiredBytes, steamcmdAvailable, updateSupported, runningShards, shards, blockers]
+      properties:
+        targetId: { type: string }
+        targetName: { type: string }
+        installationId: { type: string }
+        online: { type: boolean }
+        inventoryFresh: { type: boolean }
+        capabilities: { type: array, items: { type: string } }
+        installed: { type: boolean }
+        currentVersion: { type: string }
+        desiredVersion: { type: string, pattern: '^[0-9]{1,64}$' }
+        upToDate: { type: boolean }
+        availableBytes: { type: integer, minimum: 0 }
+        requiredBytes: { type: integer, minimum: 0 }
+        steamcmdAvailable: { type: boolean }
+        updateSupported: { type: boolean }
+        runningShards: { type: integer, minimum: 0 }
+        shards: { type: array, items: { $ref: "#/components/schemas/GameReleaseShardPlan" } }
+        blockers: { type: array, items: { $ref: "#/components/schemas/GameReleaseBlocker" } }
+    GameReleasePlan:
+      type: object
+      additionalProperties: false
+      required: [version, desiredVersion, topologyRevision, planHash, policy, affectedRoomIds, installations, blockers, ready, updateRequired, createdAt]
+      properties:
+        version: { type: integer, enum: [1] }
+        desiredVersion: { type: string, pattern: '^[0-9]{1,64}$' }
+        topologyRevision: { type: string, pattern: '^[a-f0-9]{64}$' }
+        planHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        policy: { $ref: "#/components/schemas/GameReleasePolicy" }
+        affectedRoomIds: { type: array, items: { type: string } }
+        installations: { type: array, items: { $ref: "#/components/schemas/GameReleaseInstallationPlan" } }
+        blockers: { type: array, items: { $ref: "#/components/schemas/GameReleaseBlocker" } }
+        ready: { type: boolean }
+        updateRequired: { type: boolean }
+        createdAt: { type: string, format: date-time }
+    GameReleasePlanEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/GameReleasePlan" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    GameReleaseStage:
+      type: string
+      enum: [previewed, protecting, stopping, staged, updating, verified, restarting, confirming, succeeded, failed, recovery_required]
+    GameReleaseInstallationResult:
+      type: object
+      additionalProperties: false
+      required: [targetId, installationId, stage, updatedAt]
+      properties:
+        targetId: { type: string }
+        installationId: { type: string }
+        stage: { $ref: "#/components/schemas/GameReleaseStage" }
+        beforeVersion: { type: string }
+        afterVersion: { type: string }
+        log: { type: string, maxLength: 2097152 }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    GameReleaseShardResult:
+      type: object
+      additionalProperties: false
+      required: [roomId, worldId, targetId, installationId, isMaster, wasRunning, stage, updatedAt]
+      properties:
+        roomId: { type: string }
+        worldId: { type: string }
+        targetId: { type: string }
+        installationId: { type: string }
+        isMaster: { type: boolean }
+        wasRunning: { type: boolean }
+        stage: { $ref: "#/components/schemas/GameReleaseStage" }
+        runtimeState: { type: string }
+        loadMarker: { type: string }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        stoppedAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        loadConfirmedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    GameRelease:
+      type: object
+      additionalProperties: false
+      required: [id, stage, plan, protectionBackupIds, installations, shards, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        sourceJobId: { type: string, format: uuid }
+        stage: { $ref: "#/components/schemas/GameReleaseStage" }
+        plan: { $ref: "#/components/schemas/GameReleasePlan" }
+        protectionBackupIds: { type: array, items: { type: string } }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        installations: { type: array, items: { $ref: "#/components/schemas/GameReleaseInstallationResult" } }
+        shards: { type: array, items: { $ref: "#/components/schemas/GameReleaseShardResult" } }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+    GameReleaseEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/GameRelease" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    GameReleaseList:
+      type: object
+      additionalProperties: false
+      required: [items, total, limit, offset]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/GameRelease" } }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        offset: { type: integer, minimum: 0 }
+    GameReleaseListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/GameReleaseList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     MapLayer:
       type: string
       enum: [terrain, features, worldState]
@@ -6184,14 +6494,72 @@ components:
         expectedConfigurationRevision: { type: string }
         expectedTopologyRevision: { type: string }
         patch: { type: object, additionalProperties: true }
+        activation: { $ref: "#/components/schemas/ModPublicationActivationPolicyInput" }
+    ModPublicationActivationPolicyInput:
+      type: object
+      additionalProperties: false
+      properties:
+        mode: { type: string, enum: [manual, restart] }
+        loadConfirmation: { type: string, enum: [none, logs] }
+        timeoutSeconds: { type: integer, minimum: 30, maximum: 900 }
+    ModPublicationActivationPolicy:
+      type: object
+      additionalProperties: false
+      required: [mode, loadConfirmation, timeoutSeconds]
+      properties:
+        mode: { type: string, enum: [manual, restart] }
+        loadConfirmation: { type: string, enum: [none, logs] }
+        timeoutSeconds: { type: integer, minimum: 30, maximum: 900 }
+    ModPublicationActivationStatus:
+      type: string
+      enum: [skipped, pending, restarting, confirming, succeeded, failed]
+    ModPublicationShardActivationResult:
+      type: object
+      additionalProperties: false
+      required: [roomId, worldId, targetId, installationId, status, wasRunning, updatedAt]
+      properties:
+        roomId: { type: string }
+        worldId: { type: string }
+        targetId: { type: string }
+        installationId: { type: string }
+        status: { $ref: "#/components/schemas/ModPublicationActivationStatus" }
+        wasRunning: { type: boolean }
+        runtimeState: { type: string }
+        loadMarker: { type: string }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        restartedAt: { type: string, format: date-time }
+        loadConfirmedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ModPublicationActivation:
+      type: object
+      additionalProperties: false
+      required: [policy, status, shards]
+      properties:
+        policy: { $ref: "#/components/schemas/ModPublicationActivationPolicy" }
+        status: { $ref: "#/components/schemas/ModPublicationActivationStatus" }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        shards: { type: array, items: { $ref: "#/components/schemas/ModPublicationShardActivationResult" } }
+        requestedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
     ModPublicationConfirmedRequest:
-      allOf:
-        - $ref: "#/components/schemas/ModPublicationRequest"
-        - type: object
-          required: [planHash, confirmation]
-          properties:
-            planHash: { type: string, pattern: '^[a-f0-9]{64}$' }
-            confirmation: { type: string, pattern: '^[a-f0-9]{64}$' }
+      type: object
+      additionalProperties: false
+      required: [action, planHash, confirmation]
+      properties:
+        action: { type: string, enum: [reconcile, add, enable, remove, configure] }
+        modId: { type: string, pattern: '^[0-9]{1,20}$' }
+        modIds: { type: array, items: { type: string, pattern: '^[0-9]{1,20}$' } }
+        worldIds: { type: array, uniqueItems: true, items: { type: string } }
+        enabled: { type: boolean }
+        includeDependencies: { type: boolean }
+        expectedConfigurationRevision: { type: string }
+        expectedTopologyRevision: { type: string }
+        patch: { type: object, additionalProperties: true }
+        activation: { $ref: "#/components/schemas/ModPublicationActivationPolicyInput" }
+        planHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        confirmation: { type: string, pattern: '^[a-f0-9]{64}$' }
     ModPublicationBlocker:
       type: object
       additionalProperties: false
@@ -6298,7 +6666,7 @@ components:
     ModPublication:
       type: object
       additionalProperties: false
-      required: [id, roomId, status, outcome, plan, protectionBackupIds, fences, commitDecision, restartRequired, targets, createdAt, updatedAt]
+      required: [id, roomId, status, outcome, plan, protectionBackupIds, fences, commitDecision, restartRequired, activation, targets, createdAt, updatedAt]
       properties:
         id: { type: string, format: uuid }
         sourceJobId: { type: string, format: uuid }
@@ -6310,6 +6678,7 @@ components:
         fences: { type: array, items: { $ref: "#/components/schemas/ModPublicationFence" } }
         commitDecision: { type: boolean }
         restartRequired: { type: boolean }
+        activation: { $ref: "#/components/schemas/ModPublicationActivation" }
         errorCode: { type: string }
         errorMessage: { type: string }
         targets: { type: array, items: { $ref: "#/components/schemas/ModPublicationTargetResult" } }

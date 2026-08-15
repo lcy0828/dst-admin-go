@@ -1,0 +1,181 @@
+package httpapi
+
+import (
+	"context"
+	"net/http"
+	"sync"
+	"testing"
+	"time"
+
+	"dont/internal/gameupdate"
+	"dont/internal/jobs"
+
+	"github.com/gin-gonic/gin"
+	"github.com/jinzhu/gorm"
+	_ "github.com/mattn/go-sqlite3"
+)
+
+const releaseHTTPPlanHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+type gameReleaseHTTPFixture struct {
+	mu       sync.Mutex
+	plan     gameupdate.ReleasePlan
+	releases map[string]gameupdate.Release
+}
+
+func (f *gameReleaseHTTPFixture) Preview(context.Context, gameupdate.ReleasePreviewRequest) (gameupdate.ReleasePlan, error) {
+	return f.plan, nil
+}
+
+func (f *gameReleaseHTTPFixture) Publish(_ context.Context, request gameupdate.ReleasePublishRequest) (gameupdate.Release, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	value := successfulHTTPGameRelease(request.ID, request.SourceJobID, request.Plan)
+	f.releases[value.ID] = value
+	return value, nil
+}
+
+func (f *gameReleaseHTTPFixture) Retry(_ context.Context, id string) (gameupdate.Release, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	value, found := f.releases[id]
+	if !found {
+		return gameupdate.Release{}, gameupdate.ErrReleaseNotFound
+	}
+	value = successfulHTTPGameRelease(value.ID, value.SourceJobID, value.Plan)
+	f.releases[id] = value
+	return value, nil
+}
+
+func (f *gameReleaseHTTPFixture) Get(id string) (gameupdate.Release, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	value, found := f.releases[id]
+	if !found {
+		return gameupdate.Release{}, gameupdate.ErrReleaseNotFound
+	}
+	return value, nil
+}
+
+func (f *gameReleaseHTTPFixture) List(limit, offset int) ([]gameupdate.Release, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	values := make([]gameupdate.Release, 0, len(f.releases))
+	for _, value := range f.releases {
+		values = append(values, value)
+	}
+	total := len(values)
+	if offset >= total {
+		return nil, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return values[offset:end], total, nil
+}
+
+func gameReleaseHTTPPlan() gameupdate.ReleasePlan {
+	return gameupdate.ReleasePlan{
+		Version: 1, DesiredVersion: "701", TopologyRevision: releaseHTTPPlanHash, PlanHash: releaseHTTPPlanHash,
+		Policy:          gameupdate.ReleasePolicy{RestartRunning: true, LoadConfirmation: gameupdate.ReleaseLoadConfirmationLogs, TimeoutSeconds: 300},
+		AffectedRoomIDs: []string{"room-one"}, Ready: true, UpdateRequired: true, CreatedAt: time.Now().UTC(),
+		Installations: []gameupdate.ReleaseInstallationPlan{{
+			TargetID: "agent:node-a", TargetName: "Node A", InstallationID: "primary", CurrentVersion: "700", DesiredVersion: "701",
+			Shards: []gameupdate.ReleaseShardPlan{{
+				RoomID: "room-one", RoomName: "Room One", WorldID: "Master", WorldName: "Master",
+				TargetID: "agent:node-a", InstallationID: "primary", WasRunning: true,
+			}},
+		}},
+	}
+}
+
+func successfulHTTPGameRelease(id, sourceJobID string, plan gameupdate.ReleasePlan) gameupdate.Release {
+	now := time.Now().UTC()
+	return gameupdate.Release{
+		ID: id, SourceJobID: sourceJobID, Stage: gameupdate.ReleaseStageSucceeded, Plan: plan,
+		Installations: []gameupdate.ReleaseInstallationResult{{
+			TargetID: "agent:node-a", InstallationID: "primary", Stage: gameupdate.ReleaseStageSucceeded,
+			BeforeVersion: "700", AfterVersion: "701", FinishedAt: &now, UpdatedAt: now,
+		}},
+		Shards: []gameupdate.ReleaseShardResult{{
+			RoomID: "room-one", WorldID: "Master", TargetID: "agent:node-a", InstallationID: "primary",
+			IsMaster: true, WasRunning: true, Stage: gameupdate.ReleaseStageSucceeded, RuntimeState: "running", UpdatedAt: now,
+		}},
+		CreatedAt: now, UpdatedAt: now, FinishedAt: &now,
+	}
+}
+
+func newGameReleaseHandlerApp(t *testing.T, fixture *gameReleaseHTTPFixture) (*gin.Engine, *jobs.Service) {
+	t.Helper()
+	db, err := gorm.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SingularTable(true)
+	db.LogMode(false)
+	db.DB().SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	store := jobs.NewStore(db, "game_release_http_")
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	jobService, err := jobs.NewService(store, jobs.NewBroker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewGameUpdateHandler(nil, jobService)
+	if err := handler.ConfigureReleases(fixture); err != nil {
+		t.Fatal(err)
+	}
+	router := gin.New()
+	handler.Register(router.Group("/api/v2"))
+	return router, jobService
+}
+
+func TestGameReleaseHTTPRequiresCurrentPlanHashConfirmationAndReportsJob(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := &gameReleaseHTTPFixture{plan: gameReleaseHTTPPlan(), releases: make(map[string]gameupdate.Release)}
+	router, jobService := newGameReleaseHandlerApp(t, fixture)
+
+	response := performJSON(router, http.MethodPost, "/api/v2/game/releases", map[string]interface{}{
+		"planHash": releaseHTTPPlanHash, "confirmation": "wrong",
+	}, nil, "")
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+
+	response = performJSON(router, http.MethodPost, "/api/v2/game/releases", map[string]interface{}{
+		"planHash":     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"confirmation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}, nil, "")
+	assertStatus(t, response, http.StatusConflict)
+
+	response = performJSON(router, http.MethodPost, "/api/v2/game/releases", map[string]interface{}{
+		"desiredVersion": "701", "planHash": releaseHTTPPlanHash, "confirmation": releaseHTTPPlanHash,
+		"policy": map[string]interface{}{"restartRunning": true, "loadConfirmation": "logs", "timeoutSeconds": 300},
+	}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	jobID := responseData(t, response)["id"].(string)
+	waitForJobStatus(t, jobService, jobID, jobs.StatusSucceeded)
+	job, err := jobService.Get(jobID)
+	if err != nil || len(job.Targets) != 2 {
+		t.Fatalf("job=%#v error=%v", job, err)
+	}
+	for _, target := range job.Targets {
+		if target.Status != jobs.StatusSucceeded {
+			t.Fatalf("target=%#v", target)
+		}
+	}
+	response = performJSON(router, http.MethodGet, "/api/v2/game/releases/"+jobID, nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+}
+
+func TestGameReleaseHTTPRetryRejectsTerminalSuccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	plan := gameReleaseHTTPPlan()
+	fixture := &gameReleaseHTTPFixture{plan: plan, releases: map[string]gameupdate.Release{
+		"release-success": successfulHTTPGameRelease("release-success", "", plan),
+	}}
+	router, _ := newGameReleaseHandlerApp(t, fixture)
+	response := performJSON(router, http.MethodPost, "/api/v2/game/releases/release-success/actions/retry", map[string]interface{}{}, nil, "")
+	assertStatus(t, response, http.StatusConflict)
+}

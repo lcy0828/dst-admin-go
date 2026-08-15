@@ -755,6 +755,35 @@ func initApplication(manageBackground bool) (*Application, error) {
 		return nil, err
 	}
 	gameUpdateHandler := httpapi.NewGameUpdateHandler(gameUpdateService, jobService)
+	gameReleaseStore := gameupdate.NewReleaseStore(models.DB(), tablePrefix)
+	if err := gameReleaseStore.Migrate(); err != nil {
+		return nil, err
+	}
+	gameReleaseSnapshot, err := gameupdate.NewTopologyReleaseSnapshot(roomService, topologyService, agentService)
+	if err != nil {
+		return nil, fmt.Errorf("initialize game release topology snapshot: %w", err)
+	}
+	gameReleaseRuntime, err := gameupdate.NewDriverReleaseRuntime(runtimeDriverRouter, gameUpdateService)
+	if err != nil {
+		return nil, fmt.Errorf("initialize game release runtime: %w", err)
+	}
+	gameReleaseProtection, err := gameupdate.NewDistributedReleaseProtection(distributedBackupService)
+	if err != nil {
+		return nil, fmt.Errorf("initialize game release protection: %w", err)
+	}
+	gameReleasePlanner, err := gameupdate.NewReleasePlanner(gameReleaseSnapshot, gameReleaseRuntime, latestChecker, gameupdate.DefaultUpdateHeadroom)
+	if err != nil {
+		return nil, fmt.Errorf("initialize game release planner: %w", err)
+	}
+	gameReleaseCoordinator, err := gameupdate.NewReleaseCoordinator(
+		gameReleasePlanner, gameReleaseRuntime, operationLeaseService, gameReleaseProtection, gameReleaseStore,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("initialize game release coordinator: %w", err)
+	}
+	if err := gameUpdateHandler.ConfigureReleases(gameReleaseCoordinator); err != nil {
+		return nil, err
+	}
 	worldMapStore := worldmap.NewStore(models.DB(), tablePrefix)
 	if err := worldMapStore.Migrate(); err != nil {
 		return nil, err
