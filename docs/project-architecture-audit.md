@@ -74,7 +74,7 @@ DST 运行时
 | 已完成，部分实机通过 | Runtime 2.3.1 与字段级新鲜度 | 保留完整指标且消除周期性长 Lua 命令日志 | L | Debian 空服已通过，继续 macOS/满员/Mod 验收 |
 | 已完成 | v2 日志事实源与 Placement 聚合 | 避免双链重复采集和状态不一致 | M | 保持回归 |
 | 已完成 | 房间操作租约和 Mod 两阶段发布 | 避免跨领域覆盖、部分发布和节点间不一致 | L | 保持故障注入 |
-| 已完成 | 能力清单与前端质量门禁 | 防止文档和功能再次漂移 | M | 继续扩充浏览器 E2E |
+| 部分完成 | 分布式能力声明与前端质量门禁 | 防止关键远程合同和界面再次漂移 | M | 仍需为正式路由建立完整机器可读清单与浏览器 E2E |
 | 已完成 | 页面级 shadcn-vue 组件收敛 | 提高一致性、可访问性和表单维护性 | M | 按正式设计系统维护 |
 | 已完成 | 测试领域覆盖与关键单元测试 | 缩短定位时间并支持选择性回归 | M | 保持回归 |
 | 已完成 | ECharts 路由隔离与可测量包体预算 | 防止世界状态页与入口体积无界增长 | S-M | 持续监测 |
@@ -306,7 +306,7 @@ typed query key factory
 
 ### 6.6 建立可验证的 Capability Manifest
 
-> 落地状态：已完成。前端仓库 `docs/capability-manifest.yaml` 当前登记 25 个产品能力域，并显式区分 `closed`、`backend-only`、`experimental` 和 `frozen`。校验器使用 TypeScript AST 检查生成契约中的 operationId、API client 方法、Vue 路由和前端测试；相邻后端仓库存在时继续核对 Go 测试函数。CI 已将该校验放在 lint、unit 和 build 之前，并有负向测试证明伪造 operationId、API、路由、测试或 backend-only 前端入口会失败。
+> 落地状态：部分完成。正式前端通过 `BACKEND_CAPABILITIES.distributedManagement`、手写类型声明和 Node 回归测试约束 Phase 1-10 的关键合同，后端路由测试持续核对 OpenAPI 与实际注册路由。旧实验分支中的 `docs/capability-manifest.yaml`、TypeScript AST 校验器和 Playwright 证据没有迁入正式 `master`，不能把那套 25 项清单写成当前能力。完整机器可读清单仍应按正式路由、JavaScript client 和现有测试重新建立。
 
 当前功能事实表曾出现“后端无公告/存档导入未记录”等漂移。机器可读清单按以下关系表达：
 
@@ -331,7 +331,7 @@ CI 检查：
 
 ### 6.7 UI 按功能页面渐进收敛
 
-当前 Vue 3 + Vite + shadcn-vue `new-york` 基线无需重写。剩余问题主要是原始 `label/select/checkbox/file input`、手工空状态/错误状态、直接使用 `reka-ui` primitive 和不一致的语义色。
+当前 Vue 3 + Vite + shadcn-vue `reka-nova` 基线无需重写。剩余问题主要是原始 `label/select/checkbox/file input`、手工空状态/错误状态、直接使用 `reka-ui` primitive 和不一致的语义色。
 
 推荐在每个功能闭环批次内顺手改造对应页面：
 

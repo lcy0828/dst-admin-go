@@ -504,9 +504,11 @@ Mod 管理继续区分：
 - 迁移 cron/taskbridge、动态日志监控、日志解析和旧 tmux API 旁路，并增加直接 tmux import 的架构回归检查。
 - 新增 NetworkProfile、PortReservation、四类 UDP 端点和作用域冲突预检。
 - 新增 CPU policy；先交付 `none`、拓扑观察和能力展示，再在 Linux 交付 `reserved/exclusive`。
+- 生命周期只在明确停服后释放 CPU 约束；控制器重启后本地立即回读、远程等待可用清单再逐项恢复，并用 CAS 防止旧观测覆盖新配置。
 - 前端拓扑和执行确认展示环境、内外端点、CPU 策略、实际 cpuset 和最近校验时间。
 - 把当前 local/Agent target 回填为 RuntimeProvider + Node + `native/default` 环境；旧 API 在兼容期从新模型投影返回。
 - 把存档导入的全局端口重写改为基于目标 NetworkScope 的分配器；native 单节点行为保持不变。
+- 存档导入原子持久化 apply journal 与端口 lease；回滚或释放失败保留 journal，重启后继续清理。
 
 完成标准：本机和现有 Agent 的所有已交付功能无回归；旧配置自动映射为 `native/default` 环境；未配置高级策略时运行行为不变。主服务容器 + 同宿主/远程裸机 Agent + 裸机 DST 可以完成发现、启动、停止、保存、命令、自动化、玩家/世界探针、Runtime 激活、日志、Artifact 回执和审计，且主服务容器没有宿主控制权限或远程路径读取旁路。
 
@@ -531,6 +533,7 @@ Mod 管理继续区分：
 - 先实现 `cold-consistent`：协调停止、确认无写入、分片快照、manifest、逻辑备份集和可选恢复原运行状态。
 - `hot-consistent` 只有在游戏事件、Runtime 回执和故障注入证明跨分片 snapshot 屏障后开放；固定等待与 mtime 稳定不算证据。
 - 完成整套恢复、失败恢复和完整性校验。
+- 持久化创建/恢复操作阶段、保护备份与失败原因；后台自动恢复中断操作，并提供操作历史和幂等人工重试入口。
 - native 与 container Driver 使用同一备份协议；容器存档只从受管 volume staging，不从可写层提取。
 
 ### Phase 8：Mod 与版本发布（已完成）

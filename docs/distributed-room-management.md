@@ -212,6 +212,8 @@ DST 每层世界是独立进程；一核心承载多层世界可能造成 tick �
 - 同一 Node 上的 native、host-network 和 bridge container Shard 共同占用宿主 CPU 预算，不能按环境各算一份可用核心。
 - Kubernetes 普通调度以 Worker `allocatable` 和 requests 为准；独占模式还必须读取 kubelet 实际 cpuset。产品的“一核一层”仍是额外的 DST 预警，不替代 Kubernetes admission。
 
+当前运行链路在启动和重启前准备 CPU 策略，并在实例就绪后回读实际结果；策略应用失败会停止新实例。停止、回滚或异常恢复只有收到 `stopped` 且 `sessionExists=false` 的明确状态后才释放 cgroup/cpuset，超时、空结果和 `unknown` 都保留约束并记录失败。控制器重启时先恢复本地分配；远程分配等待 Agent 在线且清单新鲜后逐项观测，每项使用独立超时，观测写回通过目标、策略、CPU 集合和更新时间 CAS，不能覆盖并发修改。
+
 CPU 设置需要同时展示“请求/上限”“实际可用 CPU 集合”和“最近校验时间”。绑核不能替代负载监控：大型 Mod 或高玩家 Shard 仍可能需要超过一个核心预算，并可能被 quota 节流。
 
 ## 5. 网络与端口模型
@@ -251,6 +253,8 @@ allocationMode(manual|automatic), observedAt
 - Master 的 `master_port` 只由 Master 环境声明监听租约；Secondary 保存目标引用，不重复占用 Master 的监听端口。
 
 端口转发“配置成功”不等于 DST 可被正确发现。Docker bridge 默认让 `publishedPort == server_port`；Kubernetes NodePort/LoadBalancer 如果改变玩家外部端口，必须通过 Steam 列表与公网连接验证，未验证前标为实验网络配置。Master 端点优先使用稳定 Service ClusterIP；Kubernetes DNS 名是否可直接写入 `master_ip` 也必须实机验证。
+
+存档导入使用自动端口时，apply journal 与端口 lease ID 在一次数据库更新中持久化。发布前或激活失败后的清理顺序固定为文件回滚、端口释放、清 journal；任一步失败都会保留 `applying` 状态和 lease 引用，服务重启后继续恢复，不能先清记录再留下无归属的 active lease。
 
 启动预检必须同时检查：租约冲突、实际 UDP 监听冲突、Master 地址可达性、Cluster key/身份、Shard ID 唯一性、防火墙或 NetworkPolicy、端口观察数据是否过期。UDP “未探测到响应”不能单独证明端口空闲，必须结合操作系统监听表、受管进程和租约登记。
 
@@ -399,6 +403,8 @@ save barrier -> every shard acknowledges snapshot
 - `hot-consistent`：只有 `customcommands.lua`/游戏事件和实机故障注入能证明所有必需 Shard 到达同一保存点后才开放。固定等待、文件 mtime 稳定或 Master 控制台出现 `DONE` 都不足以证明完成。
 
 恢复顺序：停止整房间、验证目标拓扑和容量、创建恢复前保护备份、分发全部子快照、校验、启动并确认 Shard 注册。单分片恢复只作为高级实验能力。
+
+每次备份创建和存档恢复都写入持久操作记录，包含阶段、拓扑 revision、lease/fencing、原运行世界、保护备份和失败原因。控制器启动后及运行期间会恢复 `running/recovery_required` 操作；正式 API 同时提供按房间读取操作历史和对单个操作立即重试。恢复已发布的存档时只继续完成清理和原运行状态恢复，发布前中断则回滚；重复恢复终态操作不会再次发布存档。前端把“Job 已结束”和“持久操作已完成”分开显示，无法读取操作记录时不会误报恢复成功。
 
 存储边界按部署形态实现，但备份 manifest 保持一致：
 
