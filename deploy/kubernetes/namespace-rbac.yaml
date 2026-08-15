@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dst-admin-runtime
+  labels:
+    app.kubernetes.io/managed-by: dst-admin
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dst-admin-kubernetes-provider
+  namespace: dst-admin-runtime
+  labels:
+    app.kubernetes.io/managed-by: dst-admin
+automountServiceAccountToken: false
+---
+# Shard Pods use this unbound account and also disable token automount.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dst-admin-runtime
+  namespace: dst-admin-runtime
+  labels:
+    app.kubernetes.io/managed-by: dst-admin
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dst-admin-kubernetes-provider
+  namespace: dst-admin-runtime
+  labels:
+    app.kubernetes.io/managed-by: dst-admin
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/scale"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dst-admin-kubernetes-provider
+  namespace: dst-admin-runtime
+  labels:
+    app.kubernetes.io/managed-by: dst-admin
+subjects:
+  - kind: ServiceAccount
+    name: dst-admin-kubernetes-provider
+    namespace: dst-admin-runtime
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dst-admin-kubernetes-provider
