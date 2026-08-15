@@ -64,6 +64,32 @@ journalctl -u dst-admin-agent -n 100 --no-pager
 
 原生模式的 Agent 与 DST 必须使用同一用户或具备明确的 tmux/文件权限。不要通过放宽整个存档目录为全局可写来解决权限问题。
 
+重复运行安装脚本会原位升级二进制和 service。卸载默认保留配置、Agent ID、最高 fencing token 和幂等状态，防止重装后失去操作历史；只有确认节点不再被控制面管理时才清除状态：
+
+```bash
+sudo deploy/scripts/uninstall-native-agent.sh
+sudo deploy/scripts/uninstall-native-agent.sh --purge-state
+```
+
+## macOS launchd Agent
+
+Agent 应以运行 DST 和 tmux 的同一 macOS 用户安装为 LaunchAgent，不使用 root LaunchDaemon。构建后安装或升级：
+
+```bash
+go build -trimpath -o dist/dst-admin-agent ./agent/cmd/agent
+deploy/scripts/install-macos-agent.sh \
+  --binary "$PWD/dist/dst-admin-agent" \
+  --config "$PWD/deploy/systemd/agent.conf.example"
+launchctl print "gui/$(id -u)/top.luocaiyi.dst-admin-agent"
+```
+
+配置、密钥和幂等状态保存在 `~/Library/Application Support/DST Admin Agent`，日志位于 `~/Library/Logs/DST Admin Agent`。卸载同样默认保留状态：
+
+```bash
+deploy/scripts/uninstall-macos-agent.sh
+deploy/scripts/uninstall-macos-agent.sh --purge-state
+```
+
 ## 验证与故障处理
 
 ```bash
