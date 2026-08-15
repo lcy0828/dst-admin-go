@@ -2,7 +2,7 @@
 
 ## 1. 范围
 
-`/api/v2` Mod 模块把运行节点的 Workshop 文件库与房间配置分开管理。节点级能力负责元数据、下载和更新；房间级能力负责选择使用哪些 Mod、分片启停、UGC/加载状态和 `modoverrides.lua` 配置编辑。所有修改动作通过 Job 执行，终态由认证 SSE 发布。
+`/api/v2` Mod 模块把控制器 Workshop 内容库、节点安装和房间配置分开管理。控制器内容库负责元数据、下载和更新；房间级能力负责选择使用哪些 Mod、分片启停、UGC/加载状态和 `modoverrides.lua` 配置编辑；Placement 发布把内容与配置原子分发到本机或远程节点。所有修改动作通过 Job 执行，终态由认证 SSE 发布。
 
 生命周期状态相互独立：
 
@@ -15,10 +15,18 @@
 
 作用域固定如下：
 
-- `/mods/library` 是当前运行节点共享的已下载文件库，不按房间区分。
+- `/mods/library` 是控制器共享的已下载内容库，不按节点或房间区分，也不继承手动 Runtime Target。
 - `/rooms/{roomId}/mods` 只列出该房间 `modoverrides.lua` 实际引用的 Mod。
 - `configuration_options` 属于单个房间的单个世界；不同房间以及同一房间的地面/洞穴都允许采用不同配置。
 - `dedicated_server_mods_setup.lua` 属于节点上的 DST 安装目录，保存所有受管房间引用 Mod 的并集；它负责启动时下载，不决定房间是否启用。
+
+房间写操作统一使用两阶段发布：
+
+1. `POST /rooms/{roomId}/mod-publications/preview` 读取同一批 Placement 和 `modoverrides.lua`，返回 `planHash`、拓扑版本、目标节点、空间和阻断项。
+2. `POST /rooms/{roomId}/mod-publications` 必须回传同一个 `planHash` 作为 `confirmation`。服务端重新构建快照，任何拓扑、配置或内容漂移都会拒绝发布。
+3. 创建接口返回持久 Job。客户端等待 Job 终态，再通过 Publication 的 `sourceJobId` 解析最终发布记录；不能把 Job 当成 Publication。`recovery_required` 等未终结状态会在原 Publication 上继续，重试成功后按原 ID 回读；只有 `failed`/`rolled_back` 的重新尝试会创建带新 `sourceJobId` 的 Publication。
+
+正式 Router 启用 Placement 读取后，旧的房间 add/install/update/enable/repair/uninstall/configuration-apply 写接口返回 `MOD_PUBLICATION_REQUIRED`，防止远程目标失败时退回控制器本地写入。内容库 download/update 接口继续独立可用。
 
 ## 2. 生产配置
 
@@ -99,8 +107,21 @@ Go 解析失败时才进入兼容 fallback，顺序固定为外部 Lua、Python/
 - 配置修改先创建保护备份，再原子写入；多文件写入失败会回滚已写文件。
 - 无语义变化的启停、配置或卸载返回 `NO_CHANGES`，不制造空保护备份。
 - 房间级锁串行化列表与修改，页面不会观察到修复或更新中的暂存状态。
+- 一次发布按 `targetId + installationId` 取得独立持久 lease；共享 Installation 的不同房间不会产生相互覆盖的 setup 文件。
+- 共享 Installation 上的全部受管房间都会进入同一个期望状态快照和保护备份范围，避免只发布当前房间时删除其他房间依赖。
+- 全部目标 Prepare 成功后才 Publish；commit 前失败逆序回滚，commit decision 持久化后只允许向前恢复，不执行危险的跨节点反向回滚。
+- 发布完成只标记 `restartRequired`。系统不会为应用 Mod 自动重启 DST；操作员可在核对在线玩家后使用房间/分片控制。
 
-## 6. 下载、修复与卸载恢复
+## 6. 分发、恢复与可观察性
+
+- 本地与远程使用同一计划语义。本地由 `moddistribution.Manager` 执行，远程由 Agent 的 `runtime.mods.v1` typed protocol 执行。
+- cache bundle 与 release plan 都以最多 256 KiB 的块传输，支持 offset 续传；传输包校验大小与 SHA256，节点导入后校验 tree SHA、总大小和文件数。tree SHA 覆盖路径、类型、规范化 mode、大小和逐文件 SHA，是跨节点内容身份；每个节点仍独立校验自己的 manifest SHA，但 v1 manifest 含本地 `CreatedAt`/元数据，不能把它误作跨节点相等条件。
+- Agent 只接受本地登记的 Installation ID。服务端、存档、cache/state 路径必须是绝对受信目录，符号链接、tar 路径逃逸、硬链接和特殊文件都会被拒绝。
+- 控制面重启后自动恢复 `committed`、`completing` 和 `recovery_required` 发布；失败/已回滚记录可从原完整世界配置生成一个新的发布。
+- Publication 持久记录目标阶段、保护备份、fence、commit decision、错误和 `sourceJobId`。前端展示节点/Installation 结果，并允许重试可恢复状态。
+- 配置读取、配置预览和房间 Mod 列表均按当前 Placement 读取真实节点文件，不再假定所有世界都位于控制器本机。
+
+## 7. 下载、修复与卸载恢复
 
 - 下载、更新和修复会复制已有 Workshop 缓存作为保护快照，同时保留原目录供 SteamCMD 与 ACF 清单核对。
 - 下载失败、取消、缺少目录或缺少安全 `modinfo.lua` 时，删除半成品并恢复原缓存。
@@ -109,12 +130,12 @@ Go 解析失败时才进入兼容 fallback，顺序固定为外部 Lua、Python/
 - 从房间移除只修改所选世界，不删除节点下载文件；只要其他房间、其他世界或人工 `ServerModSetup` 仍引用 Mod，就保留 setup 记录与 Workshop/UGC 文件。
 - 删除前验证目标必须位于配置根目录内，且必须是非符号链接目录。
 
-## 7. 验收
+## 8. 验收
 
 后端门禁：
 
 ```bash
-go test -race ./internal/mods ./internal/httpapi ./routers -count=1
+go test -race ./internal/mods ./internal/moddistribution ./internal/modpublication ./internal/modcontrol ./internal/httpapi ./routers -count=1
 ```
 
 前端门禁：
@@ -126,3 +147,5 @@ npm run build
 ```
 
 当前仓库尚未提供浏览器 E2E 脚本。发布前人工浏览器验收需覆盖普通 Go parser Mod、递归依赖、配置预览/应用/回读、Lua fallback 原因，以及 390/768/1024/1440 四档无横向溢出。生命周期自动测试覆盖下载失败恢复、半成品清理、更新并发隔离、人工 setup 保留和无变化卸载。
+
+Debian 12 实机验收已覆盖一个迁移到容器 Agent、控制器本机不再保留 Shard 目录的房间。Workshop `1392778117` 的 110 MB/1433 文件内容完成跨节点发布后，房间列表能返回真实作者、版本、评分与 Placement 状态，配置接口能解析完整中文 schema。随后禁用、启用、配置 `AutoStackedLoot=true` 和移除均取得 `succeeded/full` Job 与 Publication，并以目标 `modoverrides.lua`、setup 托管段和不可变 cache 回读作为完成证据。

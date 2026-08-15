@@ -1,10 +1,10 @@
 # 多节点房间集中管理设计
 
 > 状态：Phase 1-4 实现基线 + 后续平台扩展设计
-> 更新日期：2026-08-15
+> 更新日期：2026-08-16
 > 依赖：`distributed-room-management-plan.md`、`multi-node-dst-research.md`
 
-实现状态说明：当前代码的主服务和 Agent 尚无仓库内 OCI 镜像/Compose 交付；DST 只支持 `native` 执行环境，本机和 Agent 都通过受信路径及 tmux 控制。代码已经采集四类 DST 端口和 CPU 容量，但尚未实现执行环境、端口租约、CPU 绑核、container Runtime Driver 或 Kubernetes Driver。本文后续对应能力均为目标设计，不代表已经可用。
+实现状态说明：仓库已经交付控制面、Agent 和单 Shard DST 的 OCI/Compose 基线，Agent 支持 `native` 与受管 `container` Runtime；容器 Driver 通过 label 识别目标，并在 DST 容器内使用固定 tmux transport。控制面与 Agent 已共同交付 `runtime.mods.v1` 的 Placement-aware 预检、分块分发、保护备份、原子多节点发布、回滚和重启恢复。CPU 绑核、完整端口租约以及 Kubernetes 生产 Driver 尚未实现。`internal/kubernetesruntime` 和 `deploy/kubernetes` 只是独立实验安全内核/RBAC，未接入生产路由。本文明确标注“未来/目标”的部分不代表已经可用。
 
 ## 1. 产品边界
 
@@ -96,7 +96,7 @@ capabilities, observedAt, health
 ```text
 id, nodeId, environmentId, displayName
 serverPath, executablePath, saveRoot, backupRoot
-steamcmdPath, workshopContentPath, ugcPath
+steamcmdPath, workshopContentPath, ugcPath, modCachePath, modStatePath
 platform, serverMode, buildId
 observedAt, health
 ```
@@ -277,11 +277,15 @@ preconditions, parameters, deadline
 
 - `shard.status`、`shard.start`、`shard.stop`、`shard.restart`、`shard.save`
 
-后续房间与资源控制能力：
+后续房间级聚合能力：
 
 - `room.start`、`room.stop`、`room.restart`、`room.save`
-- `backup.stage`、`backup.upload`、`backup.restore`
-- `mod.prepare`、`mod.publish`、`mod.verify`
+- 跨 Shard 的完整备份集编排与集中存储策略
+- 跨节点 Mod 预检、协调重启和加载日志确认
+
+Agent 的 Mod Runtime capability 为 `runtime.mods.v1`，包括缓存检查、cache bundle 分块上传、release plan 分块上传、`prepare/publish/rollback/complete/state` 以及 `modoverrides.lua` 分块读取。单条数据块上限 256 KiB；所有 mutation 继续经过 lease、fencing 和持久化幂等。
+
+控制面已经在该执行边界上完成跨节点编排：一次预览使用同一不可变快照读取全部 Placement 与配置；发布前再次计算 `planHash` 和拓扑版本；共享同一 Installation 的其他房间会被纳入目标并先创建 cold-consistent 保护备份。所有节点 Prepare 成功后才进入 Publish，全部 Publish 成功后先持久化 commit decision 再清理；commit 前失败逆序回滚，commit 后中断进入 `recovery_required` 并由持久恢复任务继续完成。发布只返回 `restartRequired`，不会擅自重启正在运行的分片。
 
 Agent 不接受任意 Shell 字符串。路径必须落入已登记 RuntimeInstallation 的允许根目录。
 
@@ -293,15 +297,21 @@ INSTALLATION_ID = default
 SAVE_PATH = /srv/dst/.klei/DoNotStarveTogether
 SERVER_PATH = /srv/dst/server
 UGC_PATH = /srv/dst/server/ugc_mods
+WORKSHOP_CONTENT_PATH = /srv/dst/server/ugc_mods/content/322330
+MOD_CACHE_PATH = /var/lib/dst-admin-agent/mod-cache
+MOD_STATE_PATH = /var/lib/dst-admin-agent/mod-state
 SERVER_MODE = 64
 
 [runtime.secondary]
 SAVE_PATH = /srv/dst-secondary/.klei/DoNotStarveTogether
 SERVER_PATH = /srv/dst-secondary/server
+WORKSHOP_CONTENT_PATH = /srv/dst-secondary/workshop
+MOD_CACHE_PATH = /var/lib/dst-admin-agent/secondary-mod-cache
+MOD_STATE_PATH = /var/lib/dst-admin-agent/secondary-mod-state
 SERVER_MODE = 64
 ```
 
-`[runtime]` 默认 ID 为 `default`，额外安装使用 `[runtime.<id>]`。Agent 在启动、停止、重启或保存前重新检查 Cluster 与 Shard 名称、真实路径、`cluster.ini`、`server.ini` 和服务端路径；符号链接不能越出对应的受信 Cluster。Agent 将最高 fencing token 和最近的幂等结果持久化到私有状态文件。若进程在接收操作后、记录结果前中断，重复请求返回 `unknown`，不会盲目再次执行。
+`[runtime]` 默认 ID 为 `default`，额外安装使用 `[runtime.<id>]`。`WORKSHOP_CONTENT_PATH` 是受信 Workshop 内容根；`MOD_CACHE_PATH` 保存不可变 tree-SHA cache；`MOD_STATE_PATH` 保存上传断点、发布计划和 journal。cache/state 必须绝对、持久、由 Agent 私有写入，且不能相同或互相嵌套。Agent 在启动、停止、重启或保存前重新检查 Cluster 与 Shard 名称、真实路径、`cluster.ini`、`server.ini` 和服务端路径；符号链接不能越出对应的受信 Cluster。Agent 将最高 fencing token 和最近的幂等结果持久化到私有状态文件。若进程在接收操作后、记录结果前中断，重复请求返回 `unknown`，不会盲目再次执行。
 
 ### 6.1 Runtime Driver
 
@@ -311,8 +321,10 @@ SERVER_MODE = 64
 discover, status, start, stop, restart, save
 sendConsole, consoleHealth, observeOperation
 inventory, streamLogs, readArtifacts
-backupStage, modPrepare, health
+backupStage, health
 ```
+
+现有 `runtimedriver.Driver` 保持生命周期、控制台、迁移和备份契约；Mod 分发没有强迫所有 Provider 扩张该接口，而是使用独立 `runtimedriver.ModDriver`。Agent adapter 同时实现两者，Mod Driver 暴露 cache inspect/upload、release plan upload、prepare/publish/rollback/complete/state 和 overrides continuation。Kubernetes 实验 Provider 尚未实现 `ModDriver`。
 
 - `native` Driver：当前 tmux 实现先迁入该边界，未来可增加 systemd/launchd profile。
 - `container` Driver：通过 Docker/Podman API 管理带受管标签的容器和固定控制台 transport，不向请求开放任意镜像、挂载或宿主命令。
@@ -331,7 +343,7 @@ backupStage, modPrepare, health
 
 原始 Lua 不强制包装进 `loadstring/xpcall`，因为包装会改变语法环境、错误传播、`return` 和部分 Mod 命令的行为，与完整兼容目标冲突。需要可靠执行结果的产品功能必须进入 `customcommands.lua` 受管 allowlist；原始 Lua 是高风险兼容通道，不自动重放，也不伪装成已执行。
 
-当前实现只完成了部分 transport：`internal/console/service.go` 会添加 `START/DONE` marker，但 `Store.Complete` 在 `Send` 返回后即记为 `sent`；备份发送 `c_save()` 后也只固定等待 2 秒。迁移时先保持 UI 的“已发送”语义，再按上表逐类增加证据，不能把一个通用 `ConfirmCommand` 当成所有操作的完成条件。
+控制台仍只完成了部分操作证据：原始 Lua 写入 transport 后最高为 `sent`，不能当作游戏逻辑已执行。类型化 Shard migration、backup 与 Mod Runtime 已有独立协议和持久化步骤，但房间级一致性仍必须由上层协调，不能把一个通用 `ConfirmCommand` 当成所有操作的完成条件。
 
 Agent 内建立唯一的 per-Shard console dispatcher。命令页、自动化、备份、玩家/世界探针、Runtime Bridge 和生命周期都必须使用同一个 dispatcher，禁止各模块自建互不相知的锁。dispatcher 以稳定的 `provider/environment/installation/room/shard` 为键，每个队列项再绑定 instance ID，避免重启边界出现两套并发 dispatcher。它提供有界排队、过期丢弃和生命周期门禁：停止开始后拒绝普通命令和探针；低优先级重复探针可以合并；已经写入 transport 后即使调用方取消也返回 `sent/unknown`，不能假装撤销。每次发送前后重验 instance 与 fencing，变化时不得把 payload 送到新进程。Agent 在写入前持久化 in-flight 状态，重启后未完成项恢复为 `unknown/input_dirty` 而不是重新发送。
 
@@ -349,7 +361,7 @@ tmux transport 必须使用 literal payload、固定 pane、明确最大字节�
 
 `streamLogs/readArtifacts` 接受受信的 artifact 类型、offset/generation 和大小限制，不接受控制器传入任意远程路径。日志、`customcommands.lua` 回执、诊断和 snapshot manifest 都由所在 Runtime 的 Driver/Agent 读取；主服务不能继续拿全局 `savePath` 去读取远程 Shard。
 
-tmux 不放进 Agent 容器，也不把 Agent 与 DST 打进同一容器。`tmux-compat` 是 Shard Runtime 的内部实现。Driver 返回统一状态，但保留 tmux socket/session/pane、PID/start identity、container ID、Pod UID、restart count、console transport 和退出原因，避免把不同平台故障压扁成一个 `stopped`。审计默认保存操作类型、模板/参数摘要、payload hash、长度和证据引用；敏感参数与完整原始 Lua 不写普通服务日志。Web UI 只提供结构化命令和日志流，不提供宿主终端。
+Agent 与 DST 不打进同一容器。`tmux-compat` session/socket 属于 Shard Runtime；容器 Driver 通过固定 `docker exec ... tmux` 参数访问它，不能把 Agent 镜像里是否存在 tmux 客户端误解为两者共享会话。Compose 只把独立 `dst-mods` volume 以 Agent 读写、DST 只读方式挂到各自安装路径的 `mods` 子目录，服务端安装卷的其余部分对两者保持只读；Agent identity/cache/state 只在 `agent-data`。Driver 返回统一状态，但保留 tmux socket/session/pane、PID/start identity、container ID、Pod UID、restart count、console transport 和退出原因，避免把不同平台故障压扁成一个 `stopped`。审计默认保存操作类型、模板/参数摘要、payload hash、长度和证据引用；敏感参数与完整原始 Lua 不写普通服务日志。Web UI 只提供结构化命令和日志流，不提供宿主终端。
 
 ## 7. 生命周期协调
 
@@ -394,6 +406,8 @@ save barrier -> every shard acknowledges snapshot
 - 容器：Shard 存档、备份 staging 和运行安装使用显式 volume；禁止依赖容器可写层保存数据。
 - Kubernetes：每个 Shard 使用独立 PVC 或经过验证的等价持久卷；默认 `Retain` 数据语义。完整备份仍需游戏保存屏障，CSI VolumeSnapshot 只能替代复制步骤，不能替代一致性协调。
 
+Agent 平台状态与房间数据分开备份：runtime state、Agent ID、fencing/幂等记录和 `MOD_STATE_PATH` 属于节点控制状态；Shard saves 属于房间数据；`MOD_CACHE_PATH`、Workshop 内容和 DST 安装可重建，但精确离线回滚依赖保留的 cache。容器部署不得把任何一类状态留在容器可写层。
+
 不得让两个 Shard 容器/Pod 无约束地同时写同一个 Cluster 根目录。Cluster 公共配置生成后分别下发，Shard 私有存档独立挂载，再由备份集在逻辑上合并。
 
 ## 9. Mod 发布
@@ -412,6 +426,8 @@ resolve desired mod lock
 ```
 
 任何目标准备失败时，默认不发布配置。UI 分开展示“已下载到节点”和“已在 Shard 启用”。
+
+当前 Agent 执行器把每个 installation 的发布作为一个 fencing/idempotency 域：cache bundle 与 release plan 只通过 256 KiB 分块传输，每个 begin、write offset 和 commit 使用独立幂等身份但共享同一有效租约与 fencing token。Agent 落盘并验证 SHA、tree/manifest、UTF-8/单 JSON 值、tar 路径/文件类型和磁盘空间后才导入。控制面已实现“全部目标 prepare 后再 publish、commit decision 持久化、commit 前失败逆序 rollback、commit 后只向前恢复”的房间级协调器，发布依次进入 `planned -> prepared -> published -> committed`，中断 journal 在 Manager 初始化时恢复或回滚。当前仍不自动重启房间或依据加载日志确认 Mod 生效，完成发布只返回 `restartRequired`。
 
 ## 10. 看板与控制范围
 
@@ -453,7 +469,7 @@ resolve desired mod lock
 容器 Agent 必须持久化身份、配置、密钥和 operation/fencing state，并根据目标 Runtime 选择权限 profile：
 
 - `container-runtime`：管理容器化 Shard。推荐使用 rootless Podman 或受限 Docker Socket Proxy；只允许受管 label、镜像、网络和挂载，不把原始 Docker Socket 暴露给主服务。
-- `native-host-integration`：管理宿主裸机 Shard。由于当前实现依赖绝对路径、tmux 和进程观察，需要同 UID/GID、受信路径 bind mount、tmux socket/运行目录、宿主进程可见性和持久 Agent state。这相当于授予较高宿主权限，必须单独安装、显式确认并先完成 Linux 实机验证；macOS Docker Desktop 不作为该模式的目标。
+- `native-host-integration`：仅是目标设计，仓库当前没有该容器 profile。管理宿主裸机 Shard 需要同 UID/GID、受信路径 bind mount、tmux socket/运行目录、宿主进程可见性和持久 Agent state，相当于授予较高宿主权限；完成 Linux 实机验证前统一使用裸机 Agent，macOS Docker Desktop 不作为该模式的目标。
 - capability 必须来自实测环境。未取得宿主进程/tmux 能力时，容器 Agent 可保持只读或只管理容器 Runtime，不能报告 native 控制可用。
 
 Agent 容器重建后必须保留同一 Agent ID 和最高 fencing token；状态卷丢失时进入 `identity_lost/operation_state_unknown`，禁止直接接管原 Shard。
@@ -507,10 +523,10 @@ CPU 绑核和 DST 四类 UDP 端口都附着在 Shard Runtime/Node 上，不附�
 5. 增加房间租约、幂等和 fencing 后开放房间级远程操作。
 6. 拆分主服务、Provider/Agent 和 DST Runtime 三层 deployment profile；引入 `ExecutionEnvironment`、Runtime Driver、NetworkProfile、PortReservation 和 CPU policy。
 7. 先建立统一 console dispatcher、按操作完成证据、安装级 tmux socket/pane identity 和类型化 Artifact API；迁移所有直接 tmux/savePath 旁路。
-8. 交付“主服务容器 + 裸机 Agent + native DST”，并证明命令、自动化、玩家、日志、Runtime、备份与现状功能等价。
-9. 交付容器 Agent 的持久状态和 capability，再交付带 PID 1 supervisor 的 Docker/Podman Shard Runtime；native host-integration 保持实验模式。
-10. 建立 cold/hot 备份集与 Mod 发布协议，所有文件操作从 Runtime Driver 进入。
+8. 已交付“主服务容器 + 裸机 Agent + native DST”的部署基线；完整功能等价矩阵继续回归。
+9. 已交付容器 Agent 持久状态和带 PID 1 supervisor 的 Docker Shard Runtime 基线；Podman 与 native host-integration 尚未完成实机验证。
+10. 已交付 cold-consistent 跨 Shard 备份集与跨节点 Mod 原子发布编排；hot backup 和发布后自动协调重启/加载确认仍是后续能力。
 11. 迁移玩家、日志、世界状态和诊断到带来源的新鲜度模型。
-12. 在独立实验能力中交付 Kubernetes Driver，通过存储、网络、CPU Manager 和故障注入矩阵后再标记生产可用。
+12. 已交付独立 Kubernetes 类型化安全内核和 RBAC；仍需接入 Driver/API，并通过存储、网络、CPU Manager 和故障注入矩阵后才能标记生产可用。
 
 任何阶段都不得让远程选择回退到本地执行。旧 Agent 缺少能力时保持只读或显示升级要求。
