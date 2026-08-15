@@ -54,11 +54,19 @@ func (r *Router) DriverTarget(ctx context.Context, roomID, worldID string) (Driv
 		}
 		driver = r.remote
 	}
-	return driver, Target{
-		TargetID: placement.AppliedTargetID, InstallationID: placement.Target.Config.InstallationID,
+	return driver, targetFromPlacement(placement, roomID, worldID), nil
+}
+
+func targetFromPlacement(placement topology.ExecutionPlacement, roomID, worldID string) Target {
+	installationID := strings.TrimSpace(placement.Target.Config.InstallationID)
+	if placement.AppliedTargetID == "local" && installationID == "" {
+		installationID = "default"
+	}
+	return Target{
+		TargetID: placement.AppliedTargetID, InstallationID: installationID,
 		RoomID: roomID, WorldID: worldID, Cluster: placement.Room.DirectoryName, Shard: placement.World.DirectoryName,
 		TopologyRevision: placement.Revision,
-	}, nil
+	}
 }
 
 func (r *Router) IsLocalPlacement(roomID, worldID string) (bool, error) {
