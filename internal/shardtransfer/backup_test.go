@@ -95,6 +95,41 @@ func TestBackupRestoreCompleteKeepsPublishedData(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(targetRoot, filepath.FromSlash(recovery))); !os.IsNotExist(err) {
 		t.Fatalf("recovery directory remains: %v", err)
 	}
+	repeated, err := target.CompleteRestore(id)
+	if err != nil || repeated != recovery {
+		t.Fatalf("repeated complete=%q recovery=%q err=%v", repeated, recovery, err)
+	}
+}
+
+func TestBackupRestoreCompleteResumesAfterMarkerRemoval(t *testing.T) {
+	_, targetRoot, source, target := prepareTransferRoots(t)
+	populateRestoreTarget(t, targetRoot)
+	id := "backup-restore-completing-0001"
+	copyBackupForRestore(t, id, source, target)
+	recovery, err := target.PublishRestore(id, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := target.restoreReceipt(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.Phase = "completing"
+	if err := writeJSON(target.restoreReceiptPath(id), receipt); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(targetRoot, "Cluster_1", "Master", ".dst-admin-restore-id")
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := target.CompleteRestore(id)
+	if err != nil || completed != recovery {
+		t.Fatalf("resumed complete=%q recovery=%q err=%v", completed, recovery, err)
+	}
+	state, err := target.restoreReceipt(id)
+	if err != nil || state.Phase != "completed" {
+		t.Fatalf("receipt=%#v err=%v", state, err)
+	}
 }
 
 func TestBackupRestoreRejectsCorruptArchive(t *testing.T) {

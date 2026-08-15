@@ -121,6 +121,9 @@ func (m *Manager) PrepareRestore(ctx context.Context, id string) (BackupDescript
 	if err != nil {
 		return BackupDescriptor{}, err
 	}
+	if descriptor.Phase == "completed" {
+		return descriptor, nil
+	}
 	if descriptor.Phase == "prepared" || descriptor.Phase == "published" {
 		if err := m.validateRestoreStage(descriptor); err == nil || descriptor.Phase == "published" {
 			return descriptor, nil
@@ -170,7 +173,7 @@ func (m *Manager) PublishRestore(id string, publishShared bool) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	if descriptor.Phase == "published" {
+	if descriptor.Phase == "published" || descriptor.Phase == "completed" {
 		receipt, readErr := m.restoreReceipt(id)
 		return receipt.RecoveryRef, readErr
 	}
@@ -217,6 +220,9 @@ func (m *Manager) RollbackRestore(id string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if receipt.Phase == "completing" || receipt.Phase == "completed" {
+		return ErrConflict
 	}
 	roomPath, err := m.targetRoomPath(receipt.Cluster)
 	if err != nil {
@@ -266,6 +272,13 @@ func (m *Manager) CompleteRestore(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if receipt.Phase == "completed" {
+		return receipt.RecoveryRef, nil
+	}
+	descriptor, err := m.restoreDescriptor(id)
+	if err != nil {
+		return "", err
+	}
 	roomPath, err := m.targetRoomPath(receipt.Cluster)
 	if err != nil {
 		return "", err
@@ -275,16 +288,35 @@ func (m *Manager) CompleteRestore(id string) (string, error) {
 		return "", err
 	}
 	marker := filepath.Join(roomPath, receipt.Shard, ".dst-admin-restore-id")
-	data, err := os.ReadFile(marker)
-	if err != nil || strings.TrimSpace(string(data)) != id {
-		return "", ErrConflict
+	if receipt.Phase != "completing" {
+		if receipt.Phase != "published" {
+			return "", ErrConflict
+		}
+		data, readErr := os.ReadFile(marker)
+		if readErr != nil || strings.TrimSpace(string(data)) != id {
+			return "", ErrConflict
+		}
+		receipt.Phase = "completing"
+		if err := writeJSON(m.restoreReceiptPath(id), receipt); err != nil {
+			return "", err
+		}
 	}
-	if err := os.Remove(marker); err != nil {
+	if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
 		return "", err
 	}
 	recoveryRoot := filepath.Join(m.saveRoot, filepath.FromSlash(receipt.RecoveryRef))
-	err = errors.Join(os.RemoveAll(recoveryRoot), os.RemoveAll(stage), removeIfExists(m.restoreReceiptPath(id)), removeIfExists(m.restoreArchivePath(id)), removeIfExists(m.restoreMetaPath(id)))
-	return receipt.RecoveryRef, err
+	if err := errors.Join(os.RemoveAll(recoveryRoot), os.RemoveAll(stage), removeIfExists(m.restoreArchivePath(id))); err != nil {
+		return receipt.RecoveryRef, err
+	}
+	descriptor.Phase = "completed"
+	if err := writeJSON(m.restoreMetaPath(id), descriptor); err != nil {
+		return receipt.RecoveryRef, err
+	}
+	receipt.Phase = "completed"
+	if err := writeJSON(m.restoreReceiptPath(id), receipt); err != nil {
+		return receipt.RecoveryRef, err
+	}
+	return receipt.RecoveryRef, nil
 }
 
 func (m *Manager) prepareRestoreReceipt(descriptor BackupDescriptor, publishShared bool, roomPath string) (RestoreReceipt, error) {
@@ -396,7 +428,7 @@ func (m *Manager) restoreDescriptor(id string) (BackupDescriptor, error) {
 		return BackupDescriptor{}, err
 	}
 	if value.BackupID != id || validateBackupDescriptor(value) != nil ||
-		(value.Phase != "receiving" && value.Phase != "prepared" && value.Phase != "published") {
+		(value.Phase != "receiving" && value.Phase != "prepared" && value.Phase != "published" && value.Phase != "completed") {
 		return BackupDescriptor{}, ErrIntegrity
 	}
 	return value, nil
@@ -408,7 +440,7 @@ func (m *Manager) restoreReceipt(id string) (RestoreReceipt, error) {
 		return RestoreReceipt{}, err
 	}
 	if value.BackupID != id || !migrationID.MatchString(id) || !resourceName.MatchString(value.Cluster) || !resourceName.MatchString(value.Shard) ||
-		(value.Phase != "publishing" && value.Phase != "published") || value.RecoveryRef == "" {
+		(value.Phase != "publishing" && value.Phase != "published" && value.Phase != "completing" && value.Phase != "completed") || value.RecoveryRef == "" {
 		return RestoreReceipt{}, ErrIntegrity
 	}
 	return value, nil

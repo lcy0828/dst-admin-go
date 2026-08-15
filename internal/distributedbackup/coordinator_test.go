@@ -258,6 +258,38 @@ func TestColdConsistentBackupAndCoordinatedRestoreAcrossTargets(t *testing.T) {
 	}
 }
 
+func TestRestoreRecoveryIsIdempotentAfterRuntimeCleanupCompleted(t *testing.T) {
+	fixture := newDistributedBackupFixture(t)
+	created, err := fixture.coordinator.Create(context.Background(), "room", "恢复幂等备份", "manual", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.coordinator.Restore(context.Background(), created.ID, "测试房间", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err := fixture.store.Operation(result.OperationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation.Phase, operation.Status, operation.Failure = "published", OperationRunning, ""
+	if _, err := fixture.store.SaveOperation(operation); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.coordinator.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := fixture.store.Operation(result.OperationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Phase != "completed" || recovered.Status != OperationSucceeded || recovered.Failure != "" {
+		t.Fatalf("recovered operation=%#v", recovered)
+	}
+	assertControlRunning(t, fixture.master, "Master")
+	assertControlRunning(t, fixture.caves, "Caves")
+}
+
 func TestRestoreRejectsTamperedPartBeforeStoppingOrPublishing(t *testing.T) {
 	fixture := newDistributedBackupFixture(t)
 	created, err := fixture.coordinator.Create(context.Background(), "room", "备份", "manual", "")
