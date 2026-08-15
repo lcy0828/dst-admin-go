@@ -45,7 +45,7 @@ Klei 的 Dedicated Server 命令行文档用独立命令分别启动 `Master` �
 
 Klei 命令行文档说明，多层 Cluster 的每个专服进程必须使用不同的玩家 UDP 端口。同机运行时，Steam authentication/master server 相关端口也必须避免冲突。
 
-因此端口预检的唯一性范围是“节点”，而不是“房间”。两个不同房间放在同一节点时也不能复用被占用的监听端口。
+因此在裸机或共享宿主网络中，端口预检的唯一性范围是“节点网络作用域”，而不是“房间”。两个不同房间放在同一节点时也不能复用被占用的监听端口。容器或 Pod 拥有独立网络命名空间时，内部端口可以重复，但映射到宿主、NodePort 或其他共享地址的端口仍须在各自作用域内唯一。
 
 来源：Klei Support Dedicated Server Command Line Options Guide。
 
@@ -87,6 +87,76 @@ DST 的 Mod 相关边界：
 
 可信度：高。
 
+### 1.6 容器 CPU 配额不等于核心绑定
+
+Docker 官方文档区分：
+
+- `--cpus`/`--cpu-quota` 是容器可使用的 CPU 时间上限，达到上限会被节流。
+- `--cpu-shares` 只在 CPU 竞争时调整相对权重，不保证预留份额。
+- `--cpuset-cpus` 才是限制容器只能在指定逻辑 CPU 集合运行。
+
+因此产品不能把“1 CPU 配额”显示成“独占 1 个物理核心”。独占策略还必须结合宿主物理核心与 SMT sibling 拓扑，避免给两个 Shard 分配同一个物理核心的两个超线程。
+
+来源：
+
+- Docker Docs, Resource constraints：<https://docs.docker.com/engine/containers/resource_constraints/>
+
+访问日期：2026-08-15。可信度：高。
+
+### 1.7 Kubernetes 独占 CPU 有严格前置条件
+
+Kubernetes 官方 CPU Manager 文档说明，`static` 策略下只有 Guaranteed Pod 中具有整数 CPU request 的容器才会获得 exclusive CPU；系统还必须预留 CPU。普通 CPU request 用于调度和份额保障，CPU limit 由内核节流执行，都不能自动等价为固定核心。
+
+因此 Kubernetes Driver 只有确认以下条件时才能报告 `exclusive`：
+
+- Worker 的 kubelet CPU Manager policy 为 `static`。
+- Shard 容器 CPU request 与 limit 相等且为整数，使 Pod 满足 Guaranteed QoS。
+- kubelet 已为系统预留 CPU，Pod 实际取得的 cpuset 可被观察。
+
+否则只能提供 `reserved` 或 `none`，不能静默把独占请求降级后仍显示“绑核成功”。
+
+来源：
+
+- Kubernetes, Control CPU Management Policies on the Node：<https://kubernetes.io/docs/tasks/administer-cluster/cpu-management-policies/>
+- Kubernetes, Resource Management for Pods and Containers：<https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/>
+
+访问日期：2026-08-15。可信度：高。
+
+### 1.8 Kubernetes 的网络和持久化必须显式建模
+
+Kubernetes 官方资料确认：
+
+- StatefulSet 适用于需要稳定网络身份和持久存储的工作负载。
+- PVC/PV 把持久存储从 Pod 生命周期中分离，访问模式与回收策略需要单独声明。
+- Service 的 `ClusterIP`、`NodePort` 和 `LoadBalancer` 具有不同的可达范围；UDP 端口也必须显式声明。
+- NetworkPolicy 分别控制 ingress 和 egress，实际执行能力依赖集群网络插件。
+
+对 DST 的产品推论是：一个 Pod 一个 Shard、一个 Shard 独立 PVC 是安全默认值；Master 优先使用稳定 Service ClusterIP 供 Secondary 连接，玩家与 Steam UDP 端点按部署环境显式暴露。Kubernetes 能转发 UDP 并不能证明 DST/Steam 会公布端口转换后的外部端点，因此 NodePort/LoadBalancer 的发现、连接和源地址行为仍需实机验证。Kubernetes DNS 名能否直接用于 `master_ip` 也不得在验证前假定。CSI snapshot 只能提供卷级快照能力，完整 Room 备份仍需 DST 保存屏障和所有 Shard manifest。
+
+“一个 Pod 一个 Shard”是本项目为隔离故障、CPU、端口和存档所有权作出的设计选择，不是 Kubernetes 或 Klei 的强制规则。
+
+来源：
+
+- Kubernetes, StatefulSets：<https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/>
+- Kubernetes, Persistent Volumes：<https://kubernetes.io/docs/concepts/storage/persistent-volumes/>
+- Kubernetes, Service：<https://kubernetes.io/docs/concepts/services-networking/service/>
+- Kubernetes, Network Policies：<https://kubernetes.io/docs/concepts/services-networking/network-policies/>
+
+访问日期：2026-08-15。可信度：官方平台语义高；DST 组合方案需要实机验证。
+
+### 1.9 Docker 的发布端口和数据卷是独立边界
+
+Docker 官方资料说明，bridge 网络中的端口默认不会从宿主对外开放；`--publish` 会把容器端口映射到指定宿主地址和 TCP/UDP 端口。Volume 的生命周期独立于容器可写层，容器删除后仍可保留数据。
+
+因此容器 Driver 必须分别登记 container endpoint 与 host published endpoint，并显式指定 UDP。DST 存档、Mod、日志和备份 staging 必须落在受管 volume/bind mount，不能依赖容器可写层。Docker 支持端口转换不代表 DST/Steam 会公布转换后的外部端口，这部分仍按 1.8 的原则实机验证。
+
+来源：
+
+- Docker Docs, Port publishing and mapping：<https://docs.docker.com/engine/network/port-publishing/>
+- Docker Docs, Volumes：<https://docs.docker.com/engine/storage/volumes/>
+
+访问日期：2026-08-15。可信度：Docker 平台语义高；DST 外部发现行为需要实机验证。
+
 ## 2. CPU 容量规则
 
 用户产品要求：同一服务器允许运行多个世界，但必须提醒用户“一核心最多安排一层世界”，避免卡顿。
@@ -100,6 +170,8 @@ DST 的 Mod 相关边界：
 - `runningShards >= recommendedLimit` 时为容量已满；`runningShards > recommendedLimit` 时为超配。
 - 启动预检按“启动后的 Shard 数”计算，超配时要求显式确认，但不强行禁止手动放置。
 - 自动放置不把新 Shard 分配到容量已满的节点。
+- CPU 策略默认 `none`；只有平台能力和核心拓扑均可验证时才提供独占绑核。
+- Linux 裸机优先通过 cgroup/cpuset，Docker 通过 `cpuset-cpus`，Kubernetes 通过 CPU Manager static policy；macOS 不宣称支持可靠的独占绑核。
 
 这不是 Klei 的性能保证。大型世界、高玩家数、洞穴蠕虫潮、复杂世界生成或高负载 Mod 都可能让单个 Shard 消耗超过一个核心预算。
 
@@ -118,7 +190,11 @@ DST 的 Mod 相关边界：
 5. 单 Shard 恢复到多 Shard Cluster 的可接受边界。
 6. 同一 KU ID 在迁移窗口被两个 Shard 短暂报告在线时的去重窗口。
 7. SteamCMD/UGC 在不同平台对同一 Workshop item 的落盘目录和完成标记。
-8. 物理核心、性能核/能效核和容器 CPU quota 下的容量换算。
+8. 物理核心、SMT、性能核/能效核和容器 CPU quota 下的容量换算。
+9. Docker bridge/host 网络下四类 UDP 端口的暴露、Steam 列表可见性和跨宿主 Master 连接。
+10. Kubernetes ClusterIP/NodePort/LoadBalancer 下玩家连接、Steam 列表、Shard 注册和源地址行为。
+11. Shard Pod 被强制删除、Worker 失联、PVC 重挂载时，lease/fencing 是否能阻止双实例写入。
+12. 保存屏障完成后使用不同 CSI snapshot provider 生成一致备份集的时序和失败语义。
 
 ## 4. 实机测试记录格式
 

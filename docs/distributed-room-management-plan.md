@@ -2,9 +2,9 @@
 
 > 状态：已批准，进入资料核验与实现阶段
 > 更新日期：2026-08-15
-> 范围：多台服务器集中管理、一个房间跨节点运行多个世界分片、集中操作与可观测性
+> 范围：多台服务器集中管理、一个房间跨节点运行多个世界分片、裸机/容器/Kubernetes 执行环境、集中操作与可观测性
 
-当前进度：Phase 1 至 Phase 4 已完成。节点清单、容量、新鲜度、房间拓扑与 Placement 规划已交付；单 Shard 类型化控制、控制面房间租约、Agent fencing/幂等保护和运行审计也已交付。Phase 4 已交付单房间与跨房间启动容量预检、结构化风险确认、房间内全量预检、跨房间批量 Job、集中看板的批量选择和未成功项重试入口。Placement 当前仍只保存期望位置，不会迁移分片；只有后续迁移流程成功写入 `appliedTargetId` 后才能对远程目标执行，失败时不会回落本机。下一阶段是跨节点一致性备份与恢复。
+当前进度：Phase 1 至 Phase 4 已完成。节点清单、容量、新鲜度、房间拓扑与 Placement 规划已交付；单 Shard 类型化控制、控制面房间租约、Agent fencing/幂等保护和运行审计也已交付。Phase 4 已交付单房间与跨房间启动容量预检、结构化风险确认、房间内全量预检、跨房间批量 Job、集中看板的批量选择和未成功项重试入口。Placement 当前仍只保存期望位置，不会迁移分片；只有后续迁移流程成功写入 `appliedTargetId` 后才能对远程目标执行，失败时不会回落本机。当前 Runtime 仍是裸机/虚拟机上的 tmux 实现；执行环境、端口租约、CPU 绑核、容器和 Kubernetes 均未实现。下一阶段先完成平台抽象与网络/CPU 基线，再继续跨节点一致性备份。
 
 ## 1. 目标
 
@@ -14,28 +14,31 @@ DST Admin 需要从“管理当前机器上的 DST”扩展为“本地优先、
 - 用户拥有多台服务器时，可以在每台机器安装 Agent 并接入同一个控制中心。
 - 一个节点可以运行多个房间或多个世界分片。
 - 一个房间可以把不同世界分片放置在不同节点，以分摊 CPU、内存和磁盘负载。
+- 同一领域模型支持裸机、Docker/Podman 容器，并为未来 Kubernetes 预留明确 Driver；容器化不减少房间、Mod、日志、备份或控制能力。
 - 用户可以控制单个节点、单个分片、整个房间或一组房间。
 - 玩家、日志、世界状态、Mod、备份和操作结果在控制中心聚合展示。
 - 网络分区、节点离线和部分失败时，系统必须避免双启动、错误恢复和静默数据损坏。
 
 ## 2. 当前基线
 
-现有 Agent 已提供：
+当前代码已提供：
 
-- WebSocket 连接、注册、心跳和节点信息上报。
-- 节点运行路径的独立配置。
-- Agent 命令记录和 Job 包装。
-- 安全密钥轮换和离线节点遗忘。
-- `system.refresh` 与 `disk.inspect` 两个受控动作。
+- WebSocket 连接、注册、心跳、节点资源和受信 RuntimeInstallation 清单。
+- 房间/世界/进程清单、CPU 容量与数据新鲜度。
+- Room/Shard Placement 期望位置、拓扑 revision 和冲突诊断。
+- `shard.status/start/stop/restart/save` 类型化远程操作。
+- 房间租约、fencing token、幂等结果、操作审计和 Agent 断线语义。
+- 单房间和跨房间的启动容量预检、批量 Job、逐 Shard 结果和恢复入口。
+- `master_port`、`server_port`、`authentication_port`、`master_server_port` 采集。
 
 当前不足：
 
-- Agent 是主机信息和有限命令通道，不是完整 DST 运行时节点。
-- 房间目录、世界发现、分片进程、备份、Mod 和玩家服务仍主要绑定控制器本地路径。
-- 没有“一个房间跨多个节点”的拓扑、放置、所有权和一致性模型。
-- 没有跨节点房间级操作协议、保存屏障、备份集或 Mod 分发协议。
-- 前端可以选择 Agent 执行通用批量动作，但不能按房间拓扑控制分片。
-- 远程能力此前处于 `experimental/frozen`，不能直接宣称为生产可用。
+- Runtime 只实现 `native + tmux`，尚无统一 Driver 和 ExecutionEnvironment。
+- 四类端口只被读取或在本地导入时重写，尚无网络作用域、端口租约、对外地址和 Master 可达性预检。
+- CPU 只提供“一核一层”的建议容量与超配确认，尚无 quota、cpuset、SMT sibling 或 NUMA 分配。
+- Placement 仍是规划能力，尚无 Shard 文件迁移、切换和回滚流程。
+- 跨节点一致性备份、Mod/DST 发布、玩家/日志聚合尚未交付。
+- 容器和 Kubernetes Driver、部署模板、持久卷、Service、RBAC 与 NetworkPolicy 尚未交付。
 
 ## 3. 资料核验原则
 
@@ -76,34 +79,43 @@ DST Admin 需要从“管理当前机器上的 DST”扩展为“本地优先、
 
 ```text
 Control Plane（控制中心）
-  -> Node（物理机或虚拟机）
-      -> Runtime Installation（DST 安装实例）
-          -> Room / Cluster（逻辑房间）
-              -> Shard / World（逻辑世界分片）
-                  -> Process Instance（实际进程）
+  -> Runtime Provider（local/agent/kubernetes）
+      -> Node（物理机、虚拟机或 Kubernetes Worker）
+          -> Execution Environment（native/container/kubernetes）
+              -> Runtime Installation（DST 安装实例）
+                  -> Shard Placement（逻辑世界的生效位置）
+                      -> Process Instance（进程/容器/Pod 实例）
 ```
+
+Room / Cluster 与 Shard / World 是控制面的逻辑对象，不从属于某一 Node；Placement 把 Shard 映射到具体执行环境。
 
 ### 4.1 核心对象
 
 | 对象 | 职责 |
 | --- | --- |
 | Control Plane | 保存期望拓扑、编排操作、聚合状态、审计和授权 |
-| Node | 一台安装 Agent 的运行机器，报告资源、能力和健康状态 |
-| Runtime Installation | 节点上的 DST 二进制、SteamCMD、Workshop 和 UGC 路径集合 |
+| Runtime Provider | 本机、Agent 或 Kubernetes 集群的连接、凭证和能力边界 |
+| Node | 一台运行机器或 Kubernetes Worker，作为容量和故障域 |
+| Execution Environment | 稳定的逻辑执行边界，保存网络/CPU/挂载期望和当前实际 Node |
+| Runtime Installation | 执行环境中的 DST 二进制、SteamCMD、Workshop、UGC 和路径集合 |
 | Room | 一个 DST Cluster，包含共享配置、Token、名单和多个分片 |
 | Shard | Master、Caves 或自定义世界，拥有独立目录和运行配置 |
-| Placement | 指定某个 Shard 应运行在哪个 Node/Installation |
-| Process Instance | Agent 实际观察到的运行进程，包含 PID、启动时间和版本 |
+| Placement | 指定 Shard 的 Provider/Environment/Installation，以及固定节点或调度范围 |
+| Process Instance | 实际观察到的 PID/container ID/Pod UID、启动时间、版本和退出来源 |
+| NetworkProfile | 描述 bind、advertise、internal、published 地址和端口 |
+| PortReservation | 在正确网络作用域登记端口所有权和生命周期 |
+| CPUAllocation | 描述容量预算、quota/request 或独占 cpuset |
 | Artifact | Cluster 公共配置、Shard 存档、Mod 配置或备份分片 |
 | Operation Plan | 对一个或多个目标执行的类型化、可审计操作 |
 
 ### 4.2 状态所有权
 
 - 控制中心保存期望状态：拓扑、放置、配置版本和操作计划。
-- Agent 保存并上报观察状态：本地文件、进程、资源和任务进度。
+- Runtime Provider/Agent adapter 上报观察状态：实际 Node、本地文件、进程、资源和任务进度。
 - 观察状态不能自动覆盖期望状态。
 - 控制中心不能在 Agent 离线时假设操作已成功。
 - 同一 Shard 在任一拓扑版本中只能有一个有效 Placement。
+- 进程、容器、Pod、端口和 PVC 等观察状态都不能替代控制面的 Shard lease 与 fencing 所有权。
 
 ## 5. 操作范围
 
@@ -147,8 +159,29 @@ Control Plane（控制中心）
 - 批量启动前展示每个节点的当前 Shard 数、启动后 Shard 数和建议上限。
 - 自动放置默认拒绝把新 Shard 调度到已达到建议上限的节点。
 - 实际负载、Mod 复杂度和玩家数量可能使单个 Shard 需要超过一个核心的性能预算，不能把“每核一层”解释为性能保证。
+- 容量建议、CPU request/quota 和独占核心分配必须分开存储与展示。
+- CPU 策略默认为 `none`；`reserved` 表示份额/上限但不保证固定核心；`exclusive` 必须验证物理核心拓扑并保证 CPU 集合不重叠。
+- Linux 裸机优先用 cgroup v2/cpuset，Docker/Podman 用 quota 与 `cpuset-cpus`，Kubernetes 独占模式要求 CPU Manager static、Guaranteed QoS 和整数 CPU request；macOS 不宣称支持可移植的独占绑核。
+- 默认系统预留核心不进入独占分配池，SteamCMD、备份与压缩任务使用共享池或独立低优先级配额。
+- 同一物理/虚拟 Node 上的 native 与所有 container Shard 合并计算容量，不能按 ExecutionEnvironment 重复计算核心。
+- Kubernetes 普通模式以 Worker `allocatable` 和 requests 做调度预检，exclusive 还必须校验 kubelet 返回的实际 cpuset。
 
 DST 的线程利用、物理核心/逻辑核心差异和平台表现需要在资料及实机阶段继续核验；在取得证据前使用上述保守预警规则。
+
+### 5.2 网络与端口约束
+
+系统必须分别管理 Shard 通信 `master_port`、玩家 `server_port`、Steam `authentication_port` 和 `master_server_port`，并区分监听地址、其他 Shard 使用的 Master 地址、容器/Pod 内部端口和对外发布端口。
+
+- 裸机和 host network 按 Node/地址/协议判冲突。
+- bridge 网络允许不同容器复用内部端口，但宿主 published UDP 端口必须唯一。
+- Kubernetes Pod 端口可以跨 Pod 复用；`hostPort` 按 Worker Node、`NodePort` 按 Cluster 判冲突，独立 Service 可复用相同 Service port。
+- 同机裸机 Shard、容器 Shard 和 host-network 容器共享宿主作用域时必须统一判冲突，不能各管一份。
+- Master 的监听端口由 Master Placement 占有；Secondary 保存可达 Master Endpoint 引用。跨 Node、容器或 Pod 的 `master_ip` 禁止使用 loopback。
+- 自动端口分配先创建带 topology revision 的 PortReservation，再写配置；失败或迁移后按状态释放，不能靠扫描一个数字范围后直接写文件。
+
+启动预检检查租约、实际监听、Master 可达性、Shard ID、Cluster key、对外映射、防火墙/NetworkPolicy 和观察数据新鲜度。由于 UDP 无响应不能证明端口空闲，必须组合租约、系统 socket 清单和进程归属判断。
+
+Docker bridge 默认保持 `publishedPort == server_port`。Kubernetes NodePort/LoadBalancer 若发生端口转换，必须验证 Steam 列表公布端点和真实公网连接；验证前只作为实验 profile。Master 连接优先使用稳定 Service ClusterIP，DNS 是否可写入 `master_ip` 需实机确认。
 
 ## 6. Agent 协议方向
 
@@ -173,6 +206,29 @@ Agent enroll
 - Agent 重连后上报仍在执行、已完成和未知结果，控制中心进行恢复。
 - Agent 版本和协议版本不兼容时进入只读或升级要求状态。
 - 任意命令执行只保留为受限诊断能力，不作为产品操作主路径。
+
+### 6.1 Runtime Driver 契约
+
+控制面和 Agent 内部先建立一个统一 Driver 边界：
+
+```text
+Discover / Inventory / Status
+Start / Stop / Restart / Save
+StreamLogs / ReadArtifacts
+StageBackup / RestoreBackup
+PrepareMod / PublishConfig / VerifyRuntime
+```
+
+Driver 输入只引用已登记的 `environmentId`、`installationId`、Room、Shard、配置版本、租约和 fencing token，不接受任意命令、镜像、路径、挂载或 Kubernetes manifest。Driver 输出保留平台原始身份：native PID/tmux session、container ID、Pod UID 和 restart count。
+
+实现顺序：
+
+1. 把现有 tmux 分片控制封装为 `native` Driver，API 与行为保持完全等价。
+2. 房间操作、日志、备份、Mod 和 Runtime 诊断全部改为依赖 Driver 契约。
+3. 增加 `container` Driver，容器内不启动 tmux。
+4. 最后增加 `kubernetes` Driver，不在控制器中拼接 kubectl Shell 命令。
+
+每个 Driver 必须声明 capability。缺少 `exclusiveCpu`、`volumeSnapshot`、`publishedUdpEndpoint` 等能力时，UI 显示不支持或明确降级选项，不能假定所有平台等价。
 
 ## 7. 分布式生命周期
 
@@ -281,6 +337,7 @@ Mod 管理继续区分：
 - `roomId`
 - `worldId/shardId`
 - `nodeId`
+- `environmentId`
 - `installationId`
 - `observedAt`
 - `freshness/stale`
@@ -301,21 +358,25 @@ Mod 管理继续区分：
 
 核心是拓扑表，而不是节点卡片堆叠：
 
-| 分片 | 角色 | 所在节点 | 运行状态 | 玩家 | 资源 | Mod | 数据时间 | 操作 |
-| --- | --- | --- | --- | ---: | --- | --- | --- | --- |
+| 分片 | 角色 | 执行位置 | 端点 | CPU | 运行状态 | 玩家 | 数据时间 | 操作 |
+| --- | --- | --- | --- | --- | --- | ---: | --- | --- |
 
 支持：
 
 - 选择部分分片执行操作。
 - 房间整体启动、停止、重启、保存和备份。
 - 查看依赖、网络和版本异常。
+- 查看期望节点/节点池与实际 Worker、内外 UDP 端点、CPU 策略和能力降级。
 - 进入玩家、日志、世界状态、Mod 和备份页面时保留房间上下文。
+
+默认只展示“运行位置、可达端点、容量结论和异常”。bind address、network namespace、cpuset、PVC 等细节进入高级抽屉，避免个人服主必须先理解基础设施；商家和多机用户可保存并复用 Network/CPU/Storage profile。
 
 ### 11.3 节点看板
 
 展示：
 
 - CPU、内存、磁盘、网络、系统与 Agent 版本。
+- Runtime Provider、执行环境、网络作用域、CPU 分配和端口租约。
 - DST 安装和 Workshop 缓存。
 - 当前运行的房间分片和资源占用。
 - 待执行、运行中和失败任务。
@@ -341,6 +402,12 @@ Mod 管理继续区分：
 | Master 异常退出 | 明确依赖状态、恢复计划和实机故障验证 |
 | Mod 或 DST 版本不一致 | 发布前预检、全目标准备和版本锁 |
 | 单节点分片数超过 CPU 容量 | 每 Shard 一核的保守预算、系统预留和启动警告 |
+| CPU 配额被误认为独占核心 | 三档 CPU policy、cpuset 观察值和能力校验 |
+| 绑核重叠或硬件拓扑变化 | 持久化分配、SMT/NUMA 拓扑、启动前重验 |
+| 容器内部端口与宿主端口混淆 | NetworkProfile、网络作用域和 PortReservation |
+| Docker Socket 导致宿主越权 | 标签/镜像/挂载白名单、最小权限代理、禁止任意容器参数 |
+| 容器可写层或 Pod 消失导致存档丢失 | 显式 volume/PVC、回收策略和恢复前校验 |
+| K8s 节点失联后重复调度写同一存档 | Room lease、fencing、Pod UID、PVC 所有权与旧实例终止确认 |
 | 部分成功 | 逐目标结果、补偿步骤和显式降级状态 |
 | Agent 凭证泄露 | 独立节点身份、轮换、撤销和最小权限 |
 | 任意远程执行 | 类型化动作、本地二次校验和审计 |
@@ -380,20 +447,55 @@ Mod 管理继续区分：
 
 已交付说明：`POST /api/v2/rooms/:roomId/actions/:action` 在启动和重启前按 `appliedTargetId` 计算启动后容量，首次超配或容量未知时返回 `CAPACITY_RISK_CONFIRMATION_REQUIRED`，确认后允许继续但不提供性能保证。整房间在任一世界预检失败时不会先操作其他世界。`POST /api/v2/rooms/actions/:action` 支持多个房间合并预览容量，并用 `roomId:worldId` 作为 Job 目标标识；不同房间使用独立租约，单个房间失败不阻塞其他房间。前端已统一所有单房间、单世界和跨房间启动、重启入口的 shadcn-vue 风险确认；批量界面按房间选择世界，显示每层世界的当前生效节点和运行状态，完整展示部分或全部失败的逐世界结果，并在重新读取拓扑与状态后只重试未成功项。同一台服务器可以承载同一房间或不同房间的多层世界，但界面固定提醒“一颗物理核心最多运行一层世界，并额外预留 1 核”；这是可确认绕过的保守告警，不是硬限制。
 
-### Phase 5：一致性备份与恢复
+### Phase 5：执行环境、网络与 CPU 基线
+
+- 新增 ExecutionEnvironment、Runtime Driver capability 和统一观察身份。
+- 把现有 tmux 实现迁入 `native` Driver，并用现有 API/测试证明行为等价。
+- 新增 NetworkProfile、PortReservation、四类 UDP 端点和作用域冲突预检。
+- 新增 CPU policy；先交付 `none`、拓扑观察和能力展示，再在 Linux 交付 `reserved/exclusive`。
+- 前端拓扑和执行确认展示环境、内外端点、CPU 策略、实际 cpuset 和最近校验时间。
+- 把当前 local/Agent target 回填为 RuntimeProvider + Node + `native/default` 环境；旧 API 在兼容期从新模型投影返回。
+- 把存档导入的全局端口重写改为基于目标 NetworkScope 的分配器；native 单节点行为保持不变。
+
+完成标准：本机和现有 Agent 的所有已交付功能无回归；旧配置自动映射为 `native/default` 环境；未配置高级策略时运行行为不变。
+
+### Phase 6：Docker/Podman 执行环境
+
+- 交付一个 Shard 一个容器的 Runtime profile、非 root 镜像和持久 volume 契约。
+- 支持 bridge/host 网络、UDP published endpoint、优雅停止和容器退出审计。
+- 支持 CPU quota 与 cpuset，明确区分限制份额和独占核心。
+- 同一宿主的 native/container 资源合并预检，容器 OOM kill 单独审计；默认不设置未经用户确认的低内存硬上限。
+- Agent 只管理有受信标签、镜像和挂载的容器；控制器容器默认不挂 Docker Socket。
+- 完成裸机/容器混合 Room，以及同一宿主同时运行 native 与 container Shard 的端口/容量合并预检。
+
+### Phase 7：一致性备份与恢复
 
 - 实现保存屏障、分片快照、manifest 和逻辑备份集。
 - 完成整套恢复、失败恢复和完整性校验。
+- native 与 container Driver 使用同一备份协议；容器存档只从受管 volume staging，不从可写层提取。
 
-### Phase 6：Mod 与版本发布
+### Phase 8：Mod 与版本发布
 
 - 实现跨节点预下载、校验、配置发布、重启和加载确认。
 - 实现 DST 版本一致性检查和安全更新计划。
+- 明确受控可变 Installation 和不可变版本镜像两种 profile，同一发布计划不混用。
 
-### Phase 7：玩家、日志与诊断聚合
+### Phase 9：玩家、日志与诊断聚合
 
 - 按房间聚合玩家、日志、世界状态和 Runtime 诊断。
 - 实现跨分片迁移去重、stale 和冲突展示。
+
+### Phase 10：Kubernetes 实验能力
+
+- Kubernetes Driver 使用受限 ServiceAccount 管理指定 namespace/label 范围。
+- 一个 Shard 一个副本为 1 的有状态工作负载，独立 PVC、稳定 Master Service ClusterIP 和显式 UDP 暴露策略。
+- Secret 保存 Token/cluster key，ConfigMap 只保存非敏感生成配置。
+- Readiness 以 DST 世界加载和 Shard 注册为准；节点失联后结合 lease、fencing、Pod UID 和 PVC 所有权决定是否可重调度。
+- 支持普通 CPU request/limit；只有集群满足 CPU Manager static 等前提时开放 exclusive。
+- 支持保存屏障后的 CSI snapshot adapter，并保持 manifest/上传备份作为通用 fallback。
+- Placement 默认交给 scheduler 在允许节点池内选择，固定 Worker 只在高级模式开放；按 Worker 批量停止只作用于实际位于该节点的受管 Shard，不等同于 drain 或迁移。
+
+完成故障注入和至少两个 Kubernetes/CSI 组合验证前，界面固定标记“实验能力”，不宣称生产可用。
 
 ## 14. 验收矩阵
 
@@ -404,6 +506,11 @@ Mod 管理继续区分：
 - 三节点、一个房间、三个自定义分片。
 - 一个节点运行多个房间。
 - 单节点在建议核心容量以内和超过容量时的启动预检。
+- Linux native 的 `none/reserved/exclusive`，SMT sibling 不重复分配，以及重启后 cpuset 重验。
+- macOS 明确不提供 exclusive，选择后返回能力不支持而不是假成功。
+- Docker bridge 下容器内部端口复用、宿主 UDP 映射唯一和跨宿主 Master 可达。
+- Docker host network 与同机 native Shard 的端口、CPU 和进程冲突合并判断。
+- 容器强制退出、优雅停止超时、volume 缺失、镜像版本不一致和 Agent 重启后的归属恢复。
 - Master 节点异常退出和恢复。
 - Secondary 节点异常退出和恢复。
 - Agent 断线、网络分区和控制中心重启。
@@ -412,6 +519,8 @@ Mod 管理继续区分：
 - Mod 下载失败、版本不一致、配置发布失败和回滚。
 - 磁盘不足、端口冲突和 DST 版本不一致。
 - Linux/Linux 与 macOS/Linux 组合。
+- Kubernetes Master Service、玩家 UDP 暴露、NodePort 冲突、NetworkPolicy 阻断和 Endpoint 过期。
+- Kubernetes CPU Manager static 可用/不可用、PVC Retain、Worker NotReady、旧 Pod 未终止和 CSI snapshot 部分失败。
 
 每个场景必须验证：观察状态、用户提示、Job 结果、审计、数据安全和恢复路径。
 
