@@ -1,6 +1,6 @@
 # DST Admin Go
 
-DST Admin Go 是《饥荒联机版》专用的服务器管理 API。当前 release 只发布同源、会话认证的 `/api/v2`，配套前端位于 `dst-admin-vue`。
+DST Admin Go 是《饥荒联机版》专用的服务器管理 API。当前 release 只发布同源、会话认证的 `/api/v2`，配套前端位于 `dst-admin-vue-v3`。
 
 ## 当前能力
 

@@ -2,9 +2,9 @@
 
 ## 1. 适用范围
 
-本文适用于 Vue 3 静态前端和 Go 管理 API 的同源生产部署。示例目录使用 `/opt/dst-admin`，服务用户使用 `dstadmin`；实际路径必须与系统设置和 DST 专用用户一致。远程 Agent 当前冻结，不属于本地优先版本的部署范围。
+本文适用于 Vue 3 静态前端和 Go 管理 API 的同源生产部署。示例目录使用 `/opt/dst-admin`，服务用户使用 `dstadmin`；实际路径必须与系统设置和 DST 专用用户一致。控制面默认管理本机；远程 Agent 是显式启用的可选运行目标，部署方式见 `docs/container-and-native-deployment.md`。
 
-生产切换必须满足：后端全量测试、前端 OpenAPI 生成/lint/unit/build、适用的浏览器 E2E、真实后端核心流程人工验收、数据库备份校验、配置备份和上一版本产物均已完成。不要在没有可恢复数据库副本时直接启动新版本迁移。
+生产切换必须满足：后端全量测试、竞态测试和 `go vet`，前端 lint/unit/build，真实后端核心流程人工验收、数据库备份校验、配置备份和上一版本产物均已完成。当前仓库没有浏览器 E2E 或 OpenAPI 代码生成脚本，不能把不存在的命令伪装成发布门禁。不要在没有可恢复数据库副本时直接启动新版本迁移。
 
 ## 2. 发布目录
 
@@ -62,21 +62,19 @@ release_commit="$(git rev-parse HEAD)"
 release_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 CGO_ENABLED=1 go build -trimpath \
   -ldflags "-X dont/internal/buildinfo.Version=${release_version} -X dont/internal/buildinfo.Commit=${release_commit} -X dont/internal/buildinfo.BuildTime=${release_time}" \
-  -o dist/dst-admin .
+  -o dist/dst-admin ./cmd/admin-api
 
-cd ../dst-admin-vue
+cd ../dst-admin-vue-v3
 npm ci
 npm audit --registry=https://registry.npmjs.org --audit-level=moderate
-npm run api:generate
-npm run lint
+npm run lint -- --no-fix
 npm test
 npm run build
-npm run test:e2e
 ```
 
 把 `dist/dst-admin` 和前端 `dist/` 放入新的 release 目录，校验 SHA-256 后再切换。部署探针还要确认 `/api/v2/system/status` 返回的 `application.version` 和 `application.commit` 与本次 release 一致。不要把 `.env`、数据库、`app.conf`、Agent 密钥或 Steam API Key 打进前端产物。
 
-前端 API 方法由手写 client 维护，类型由本仓库 `docs/openapi-v2.yaml` 通过 `npm run api:generate` 生成。生成后必须确认 `src/api/schema.d.ts` 无非预期差异，并按前端 `docs/DST_ADMIN_FUNCTION_TRUTH.md` 的发布清单完成真实后端验收。
+前端 API 方法和分布式类型目前由手写 client/声明维护。后端 `docs/openapi-v2.yaml`、前端 `src/api/v2.js` 与 `src/api/distributedManagement.d.ts` 必须在评审和测试中保持一致，并按前端 `docs/DST_ADMIN_FUNCTION_TRUTH.md` 的发布清单完成真实后端验收。
 
 ## 5. 服务启动
 
@@ -172,13 +170,13 @@ Job 和日志 SSE 都位于 `/api/v2` 下，必须关闭代理缓冲并放宽读
 
 ## 9. 密钥轮换
 
-本节仅适用于已经部署旧 Agent 的兼容环境。远程节点冻结期间，新部署不启用 Agent，也不把本节纳入本地版本发布门禁。
+本节适用于启用了远程 Agent 的部署。本地单节点部署不要求安装 Agent；一旦启用远程节点，密钥轮换、Agent 重连和 capability 回读都属于发布门禁。
 
 - 常规读取 `GET /api/v2/agents/security` 只返回掩码和 SHA-256 指纹。
 - 轮换必须在前端输入 `ROTATE AGENT KEY`，调用 `/api/v2/agents/security/actions/rotate`。
 - 新密钥只在轮换响应和对应前端结果中显示一次；立即更新离线 Agent 的 `0600` 配置。
 - 旧 `/api/agent/security/key/generate`、`/update` 及其余 legacy API 不再注册并返回 `404 Not Found`，不得用于部署脚本。
-- 轮换完成后检查所有 Agent 重新上线，再销毁临时记录，不把密钥写进命令历史、工单或 URL。
+- 轮换完成后检查所有 Agent 重新上线，并确认 Runtime inventory、Placement、Console、备份、Mod 和游戏更新所需 capability 没有降级，再销毁临时记录，不把密钥写进命令历史、工单或 URL。
 
 ## 10. 回滚
 

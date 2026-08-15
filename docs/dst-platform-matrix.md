@@ -2,7 +2,7 @@
 
 > 文档状态：实施基线 v1.0  
 > 更新时间：2026-08-10  
-> 适用仓库：`dst-admin-go`、`dst-admin-vue`、Beacon Archive  
+> 适用仓库：`dst-admin-go`、`dst-admin-vue-v3`、Beacon Archive
 > 目标：面向个人玩家、社区服主和商用自建服的本地优先 DST 管理与分析平台
 
 ## 1. 产品结论
@@ -86,7 +86,7 @@
 
 ### 3.2 当前禁止直接合并
 
-`/Users/lcy/dst`、`dst-admin-go` 和 `dst-admin-vue` 根目录当前都没有明确许可证文件。这是 GitHub 公开发布前的 P0 阻断项：
+`/Users/lcy/dst`、`dst-admin-go` 和 `dst-admin-vue-v3` 根目录当前都没有明确许可证文件。这是 GitHub 公开发布前的 P0 阻断项：
 
 - 在来源和许可证确认前，不跨仓库复制代码。
 - `dst-admin-go` 若继承了 GPL-3.0 项目代码，分发义务必须按实际代码来源审计，不能靠换仓库消除。

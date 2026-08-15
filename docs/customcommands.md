@@ -2,7 +2,7 @@
 
 > 文档状态：设计与实现基线 v1.4
 > 更新时间：2026-08-15
-> 适用仓库：`dst-admin-go`、`dst-admin-vue`
+> 适用仓库：`dst-admin-go`、`dst-admin-vue-v3`
 > 目标：明确 `customcommands.lua` 能做什么、适合做什么，以及 DST Admin 应如何安全使用它
 
 ## 0. 当前实现状态
