@@ -1,0 +1,10 @@
+[agent]
+SERVER_URL = wss://dst.example.com/agent
+SECURITY_KEY =
+
+[runtime.native]
+DRIVER = native
+SAVE_PATH = /srv/dst/.klei/DoNotStarveTogether
+SERVER_PATH = /srv/dst/server
+UGC_PATH = /srv/dst/workshop
+SERVER_MODE = 64

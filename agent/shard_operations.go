@@ -42,6 +42,13 @@ func newTmuxShardRuntime(installation RuntimeInstallation) (shardRuntimeControl,
 	})
 }
 
+func newShardRuntimeControl(installation RuntimeInstallation) (shardRuntimeControl, error) {
+	if installation.Driver == "container" {
+		return newContainerShardRuntime(installation, newExecContainerCLI(installation.ContainerEngine))
+	}
+	return newTmuxShardRuntime(installation)
+}
+
 type rememberedShardOperation struct {
 	InstallationID string                      `json:"installation_id"`
 	Action         shared.ShardAction          `json:"action"`

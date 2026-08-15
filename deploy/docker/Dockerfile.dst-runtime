@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1.7
+FROM debian:12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libcurl3-gnutls procps tini tmux tzdata && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10000 dst && useradd --uid 10000 --gid 10000 --create-home --shell /bin/bash dst \
+    && install -d -o dst -g dst -m 0700 /run/dst-admin /run/dst-admin/tmux /data /opt/dst/server
+COPY deploy/docker/dst-runtime-wrapper.sh /usr/local/bin/dst-runtime-wrapper
+COPY deploy/docker/dst-runtime-supervisor.sh /usr/local/bin/dst-runtime-supervisor
+USER 10000:10000
+WORKDIR /opt/dst/server/bin64
+VOLUME ["/data", "/opt/dst/server"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/dst-runtime-supervisor"]

@@ -16,6 +16,8 @@ var (
 	agentID        = flag.String("id", "", "代理唯一标识")
 	reportInterval = flag.Duration("report", 5*time.Minute, "主动上报间隔")
 	securityKey    = flag.String("key", "", "通信安全密钥")
+	configPath     = flag.String("config", "./conf/app.conf", "Agent 配置文件路径")
+	statePath      = flag.String("state", "", "幂等操作状态文件路径")
 )
 
 func main() {
@@ -32,10 +34,12 @@ func main() {
 
 	// 创建Agent配置
 	config := &agent.Config{
-		ServerURL:      *serverURL,
-		AgentID:        *agentID,
-		ReportInterval: *reportInterval,
-		SecurityKey:    *securityKey,
+		ServerURL:          *serverURL,
+		AgentID:            *agentID,
+		ReportInterval:     *reportInterval,
+		SecurityKey:        *securityKey,
+		KeyFile:            *configPath,
+		OperationStateFile: *statePath,
 	}
 
 	// 创建并启动Agent
@@ -57,4 +61,4 @@ func main() {
 
 	log.Println("收到退出信号，正在关闭Agent...")
 	a.Stop()
-} 
+}

@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1.7
+FROM golang:1.25-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/dst-admin-agent ./agent/cmd/agent
+
+FROM docker:27-cli AS docker_cli
+
+FROM debian:12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates procps tmux tzdata && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 dstagent && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin dstagent \
+    && install -d -o dstagent -g dstagent -m 0700 /var/lib/dst-admin-agent
+COPY --from=build /out/dst-admin-agent /usr/local/bin/dst-admin-agent
+COPY --from=docker_cli /usr/local/bin/docker /usr/local/bin/docker
+COPY deploy/docker/config/agent.conf /usr/local/share/dst-admin/agent.conf
+COPY deploy/docker/agent-entrypoint.sh /usr/local/bin/agent-entrypoint
+USER 10001:10001
+WORKDIR /var/lib/dst-admin-agent
+ENTRYPOINT ["/usr/local/bin/agent-entrypoint"]
+CMD ["/usr/local/bin/dst-admin-agent", "-config", "/var/lib/dst-admin-agent/agent.conf", "-state", "/var/lib/dst-admin-agent/runtime-state.json"]

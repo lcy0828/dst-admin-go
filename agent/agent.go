@@ -28,7 +28,7 @@ import (
 
 // 常量
 const (
-	AgentVersion = "2.3.0"
+	AgentVersion = "2.4.0"
 	// 心跳间隔
 	HeartbeatInterval = 30 * time.Second
 	// 重连间隔
@@ -176,15 +176,24 @@ func NewAgent(config *Config) (*Agent, error) {
 		}
 		config.RuntimeInstallations = installations
 	}
+	if value := strings.TrimSpace(os.Getenv("DST_ADMIN_AGENT_SERVER_URL")); value != "" {
+		config.ServerURL = value
+	}
+	if value := strings.TrimSpace(os.Getenv("DST_ADMIN_AGENT_SECURITY_KEY")); value != "" {
+		config.SecurityKey = value
+	}
 	if config.OperationStateFile == "" {
-		config.OperationStateFile = config.KeyFile + ".runtime-state.json"
+		config.OperationStateFile = strings.TrimSpace(os.Getenv("DST_ADMIN_AGENT_STATE_FILE"))
+		if config.OperationStateFile == "" {
+			config.OperationStateFile = config.KeyFile + ".runtime-state.json"
+		}
 	}
 	state, err := loadShardOperationState(config.OperationStateFile)
 	if err != nil {
 		return nil, fmt.Errorf("加载分片操作状态失败: %w", err)
 	}
 	agent.shardState = state
-	agent.shardRuntime = newTmuxShardRuntime
+	agent.shardRuntime = newShardRuntimeControl
 	agent.shardRuntimes = make(map[string]shardRuntimeControl)
 	agent.shardTransfers = make(map[string]*shardtransfer.Manager)
 
@@ -1034,6 +1043,12 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 		capabilities = append(capabilities,
 			"shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1", "runtime.migration.v1",
 		)
+		for _, installation := range a.Config.RuntimeInstallations {
+			if installation.Driver == "container" {
+				capabilities = append(capabilities, "runtime.container.v1")
+				break
+			}
+		}
 	}
 	info := map[string]interface{}{
 		"hostname":      "unknown",

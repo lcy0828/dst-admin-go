@@ -336,13 +336,19 @@ func normalizeInventory(report shared.RuntimeInventoryReport, config RuntimeConf
 	report.Installation.ServerMode = trimLimit(report.Installation.ServerMode, 16)
 	report.CPU.PhysicalCoreSource = trimLimit(report.CPU.PhysicalCoreSource, 64)
 	report.Warnings = cleanStrings(report.Warnings, 64, 240)
-	seenProcesses := make(map[int32]bool)
+	seenProcesses := make(map[string]bool)
 	processes := make([]shared.ShardProcessReport, 0, len(report.Processes))
 	for _, process := range report.Processes {
-		if process.PID <= 0 || seenProcesses[process.PID] {
+		process.RuntimeKind = strings.ToLower(trimLimit(process.RuntimeKind, 24))
+		process.InstanceID = trimLimit(process.InstanceID, 128)
+		identity := fmt.Sprintf("native:%d", process.PID)
+		if process.RuntimeKind == "container" {
+			identity = "container:" + process.InstanceID
+		}
+		if process.PID <= 0 || process.RuntimeKind == "container" && process.InstanceID == "" || seenProcesses[identity] {
 			continue
 		}
-		seenProcesses[process.PID] = true
+		seenProcesses[identity] = true
 		process.Executable = trimLimit(process.Executable, 2048)
 		process.Cluster = trimLimit(process.Cluster, 255)
 		process.Shard = trimLimit(process.Shard, 255)

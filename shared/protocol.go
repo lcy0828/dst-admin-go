@@ -210,6 +210,8 @@ type ShardInventoryReport struct {
 
 type ShardProcessReport struct {
 	PID             int32      `json:"pid"`
+	RuntimeKind     string     `json:"runtime_kind,omitempty"`
+	InstanceID      string     `json:"instance_id,omitempty"`
 	Executable      string     `json:"executable"`
 	Cluster         string     `json:"cluster"`
 	Shard           string     `json:"shard"`

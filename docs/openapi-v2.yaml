@@ -7042,6 +7042,8 @@ components:
       required: [pid, executable, cluster, shard]
       properties:
         pid: { type: integer, format: int32, minimum: 1 }
+        runtime_kind: { type: string, enum: [native, container] }
+        instance_id: { type: string }
         executable: { type: string }
         cluster: { type: string }
         shard: { type: string }

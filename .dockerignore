@@ -1,0 +1,10 @@
+.git
+.github
+.DS_Store
+.tmp-runtime-lab
+go-dont.db*
+dist
+node_modules
+coverage
+*.log
+*.zip

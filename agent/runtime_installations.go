@@ -17,11 +17,15 @@ var runtimeInstallationID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}
 // RuntimeInstallation is configured on the Agent host. Controllers refer to
 // it by ID and cannot override these trusted paths in an operation request.
 type RuntimeInstallation struct {
-	ID         string
-	SavePath   string
-	ServerPath string
-	UGCPath    string
-	ServerMode string
+	ID              string
+	Driver          string
+	SavePath        string
+	ServerPath      string
+	UGCPath         string
+	ServerMode      string
+	ContainerEngine string
+	ConsoleSocket   string
+	ConsoleSession  string
 }
 
 func loadRuntimeInstallations(configPath string) ([]RuntimeInstallation, error) {
@@ -49,9 +53,10 @@ func loadRuntimeInstallations(configPath string) ([]RuntimeInstallation, error) 
 			installationID = explicitID
 		}
 		values = append(values, RuntimeInstallation{
-			ID: installationID, SavePath: section.Key("SAVE_PATH").String(),
+			ID: installationID, Driver: section.Key("DRIVER").String(), SavePath: section.Key("SAVE_PATH").String(),
 			ServerPath: section.Key("SERVER_PATH").String(), UGCPath: section.Key("UGC_PATH").String(),
-			ServerMode: section.Key("SERVER_MODE").String(),
+			ServerMode: section.Key("SERVER_MODE").String(), ContainerEngine: section.Key("CONTAINER_ENGINE").String(),
+			ConsoleSocket: section.Key("CONSOLE_SOCKET").String(), ConsoleSession: section.Key("CONSOLE_SESSION").String(),
 		})
 	}
 	return normalizeRuntimeInstallations(values)
@@ -77,6 +82,10 @@ func normalizeRuntimeInstallations(values []RuntimeInstallation) ([]RuntimeInsta
 	result := make([]RuntimeInstallation, 0, len(values))
 	for _, value := range values {
 		value.ID = strings.TrimSpace(value.ID)
+		value.Driver = strings.ToLower(strings.TrimSpace(value.Driver))
+		if value.Driver == "" {
+			value.Driver = "native"
+		}
 		value.SavePath = filepath.Clean(strings.TrimSpace(value.SavePath))
 		value.ServerPath = filepath.Clean(strings.TrimSpace(value.ServerPath))
 		value.UGCPath = strings.TrimSpace(value.UGCPath)
@@ -87,16 +96,38 @@ func normalizeRuntimeInstallations(values []RuntimeInstallation) ([]RuntimeInsta
 		if value.ServerMode == "" {
 			value.ServerMode = "64"
 		}
+		value.ContainerEngine = strings.TrimSpace(value.ContainerEngine)
+		value.ConsoleSocket = filepath.Clean(strings.TrimSpace(value.ConsoleSocket))
+		value.ConsoleSession = strings.TrimSpace(value.ConsoleSession)
+		if value.Driver == "container" {
+			if value.ContainerEngine == "" {
+				value.ContainerEngine = "docker"
+			}
+			if value.ConsoleSocket == "." {
+				value.ConsoleSocket = "/run/dst-admin/tmux/tmux.sock"
+			}
+			if value.ConsoleSession == "" {
+				value.ConsoleSession = "dst"
+			}
+		}
 		if !runtimeInstallationID.MatchString(value.ID) || seen[value.ID] {
 			return nil, fmt.Errorf("DST 安装 ID 无效或重复: %s", value.ID)
 		}
+		if value.Driver != "native" && value.Driver != "container" {
+			return nil, fmt.Errorf("DST 安装 %s 的 DRIVER 必须为 native 或 container", value.ID)
+		}
 		if !trustedAbsolutePath(value.SavePath) || !trustedAbsolutePath(value.ServerPath) ||
 			(value.UGCPath != "" && !trustedAbsolutePath(value.UGCPath)) ||
-			strings.ContainsAny(value.SavePath+value.ServerPath+value.UGCPath, "\x00\r\n") {
+			strings.ContainsAny(value.SavePath+value.ServerPath+value.UGCPath+value.ConsoleSocket, "\x00\r\n") {
 			return nil, fmt.Errorf("DST 安装 %s 包含无效路径", value.ID)
 		}
 		if value.ServerMode != "32" && value.ServerMode != "64" {
 			return nil, fmt.Errorf("DST 安装 %s 的 SERVER_MODE 必须为 32 或 64", value.ID)
+		}
+		if value.Driver == "container" && (!trustedAbsolutePath(value.ConsoleSocket) ||
+			(value.ContainerEngine != "docker" && value.ContainerEngine != "podman") ||
+			!runtimeInstallationID.MatchString(value.ConsoleSession)) {
+			return nil, fmt.Errorf("DST 安装 %s 的容器 Runtime 配置无效", value.ID)
 		}
 		seen[value.ID] = true
 		result = append(result, value)
@@ -113,6 +144,9 @@ func trustedAbsolutePath(value string) bool {
 }
 
 func (a *Agent) runtimeInstallation(id string) (RuntimeInstallation, bool) {
+	if a == nil || a.Config == nil {
+		return RuntimeInstallation{}, false
+	}
 	for _, installation := range a.Config.RuntimeInstallations {
 		if installation.ID == id {
 			return installation, true

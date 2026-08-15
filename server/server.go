@@ -90,6 +90,7 @@ type Server struct {
 	keyUpdateSessions *KeyUpdateSessionManager  // 密钥更新会话管理器
 	commandResults    map[string]*CommandResult // 存储命令执行结果
 	commandMutex      sync.RWMutex              // 命令结果互斥锁
+	stopOnce          sync.Once
 }
 
 // Config 服务器配置
@@ -148,6 +149,12 @@ func NewKeyUpdateSessionManager() *KeyUpdateSessionManager {
 
 // NewServer 创建新的服务器实例
 func NewServer(config *Config) (*Server, error) {
+	if config == nil {
+		return nil, errors.New("Agent 网关配置不能为空")
+	}
+	if strings.TrimSpace(config.KeyFile) == "" {
+		config.KeyFile = "./conf/app.conf"
+	}
 	// 生成密钥对
 	keyPair, err := shared.GenerateKeyPair()
 	if err != nil {
@@ -162,6 +169,13 @@ func NewServer(config *Config) (*Server, error) {
 	}
 
 	currentKey := keyManager.GetKey()
+	if configured := strings.TrimSpace(config.SecurityKey); configured != "" && configured != currentKey {
+		if err := keyManager.SetKey(configured); err != nil {
+			keyManager.StopWatching()
+			return nil, fmt.Errorf("应用 Agent 网关通信密钥: %w", err)
+		}
+		currentKey = configured
+	}
 	log.Printf("服务器通信密钥已加载")
 
 	// 同步服务器配置中的密钥
@@ -235,8 +249,9 @@ func (s *Server) Start() error {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// 设置HTTP处理函数
-	http.HandleFunc("/agent", s.handleAgentConnection)
+	mux := http.NewServeMux()
+	mux.Handle("/agent", s.Handler())
+	httpServer.Handler = mux
 
 	// 创建错误通道
 	errChan := make(chan error, 1)
@@ -284,27 +299,51 @@ func (s *Server) Start() error {
 
 // Stop 停止服务器
 func (s *Server) Stop() {
-	log.Println("服务器正在停止...")
-	close(s.stopChan)
+	s.stopOnce.Do(func() {
+		log.Println("服务器正在停止...")
+		close(s.stopChan)
 
-	// 停止密钥文件监控
-	if s.keyManager != nil {
-		s.keyManager.StopWatching()
-	}
-
-	// 关闭所有agent连接
-	s.agentMutex.Lock()
-	for _, agent := range s.agents {
-		agent.Mutex.Lock()
-		if agent.Connection != nil {
-			agent.Connection.Close()
+		// 停止密钥文件监控
+		if s.keyManager != nil {
+			s.keyManager.StopWatching()
 		}
-		agent.Mutex.Unlock()
-	}
-	s.agents = make(map[string]*AgentConnection)
-	s.agentMutex.Unlock()
 
-	log.Println("服务器已停止")
+		// 关闭所有agent连接
+		s.agentMutex.Lock()
+		for _, agent := range s.agents {
+			agent.Mutex.Lock()
+			if agent.Connection != nil {
+				agent.Connection.Close()
+			}
+			agent.Mutex.Unlock()
+		}
+		s.agents = make(map[string]*AgentConnection)
+		s.agentMutex.Unlock()
+
+		log.Println("服务器已停止")
+	})
+}
+
+// Handler exposes the authenticated Agent WebSocket on the control-plane
+// HTTP server without starting a second listener.
+func (s *Server) Handler() http.Handler {
+	return http.HandlerFunc(s.handleAgentConnection)
+}
+
+// Maintain runs connection expiry under the owning Application lifecycle.
+func (s *Server) Maintain(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.stopChan:
+			return
+		case <-ticker.C:
+			s.expireConnections(time.Now())
+		}
+	}
 }
 
 // 处理Agent连接
@@ -769,36 +808,36 @@ func (s *Server) cleanupExpiredConnections() {
 		case <-s.stopChan:
 			return
 		case <-ticker.C:
-			now := time.Now()
-			expiredAgents := []string{}
+			s.expireConnections(time.Now())
+		}
+	}
+}
 
-			s.agentMutex.RLock()
-			for id, agent := range s.agents {
-				agent.Mutex.Lock()
-				// 如果超过2分钟没收到心跳，认为连接已断开
-				if agent.LastHeartbeat.Add(2 * time.Minute).Before(now) {
-					expiredAgents = append(expiredAgents, id)
-				}
-				agent.Mutex.Unlock()
+func (s *Server) expireConnections(now time.Time) {
+	expiredAgents := []string{}
+	s.agentMutex.RLock()
+	for id, agent := range s.agents {
+		agent.Mutex.Lock()
+		if agent.LastHeartbeat.Add(2 * time.Minute).Before(now) {
+			expiredAgents = append(expiredAgents, id)
+		}
+		agent.Mutex.Unlock()
+	}
+	s.agentMutex.RUnlock()
+	if len(expiredAgents) == 0 {
+		return
+	}
+	s.agentMutex.Lock()
+	defer s.agentMutex.Unlock()
+	for _, id := range expiredAgents {
+		if agent, exists := s.agents[id]; exists {
+			agent.Mutex.Lock()
+			if agent.Connection != nil {
+				agent.Connection.Close()
 			}
-			s.agentMutex.RUnlock()
-
-			// 删除过期连接
-			if len(expiredAgents) > 0 {
-				s.agentMutex.Lock()
-				for _, id := range expiredAgents {
-					if agent, exists := s.agents[id]; exists {
-						agent.Mutex.Lock()
-						if agent.Connection != nil {
-							agent.Connection.Close()
-						}
-						agent.Mutex.Unlock()
-						delete(s.agents, id)
-						log.Printf("移除过期Agent连接: %s", id)
-					}
-				}
-				s.agentMutex.Unlock()
-			}
+			agent.Mutex.Unlock()
+			delete(s.agents, id)
+			log.Printf("移除过期Agent连接: %s", id)
 		}
 	}
 }

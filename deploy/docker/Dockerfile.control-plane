@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1.7
+FROM golang:1.25-bookworm AS build
+WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates git && rm -rf /var/lib/apt/lists/*
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+RUN CGO_ENABLED=1 go build -trimpath \
+    -ldflags "-s -w -X dont/internal/buildinfo.Version=${VERSION} -X dont/internal/buildinfo.Commit=${COMMIT} -X dont/internal/buildinfo.BuildTime=${BUILD_TIME}" \
+    -o /out/dst-admin ./cmd/admin-api
+
+FROM debian:12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tzdata && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 dstadmin && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin dstadmin \
+    && install -d -o dstadmin -g dstadmin -m 0700 /var/lib/dst-admin /var/lib/dst-admin/backups /var/lib/dst-admin/maps
+COPY --from=build /out/dst-admin /usr/local/bin/dst-admin
+COPY deploy/docker/config/control-plane.conf /usr/local/share/dst-admin/control-plane.conf
+COPY deploy/docker/control-plane-entrypoint.sh /usr/local/bin/control-plane-entrypoint
+USER 10001:10001
+WORKDIR /var/lib/dst-admin
+ENV DST_ADMIN_CONFIG=/var/lib/dst-admin/app.conf
+EXPOSE 8000
+ENTRYPOINT ["/usr/local/bin/control-plane-entrypoint"]
+CMD ["/usr/local/bin/dst-admin", "-addr", "0.0.0.0:8000"]

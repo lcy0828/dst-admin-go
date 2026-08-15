@@ -206,6 +206,35 @@ func TestRuntimeInstallationsLoadNamedSections(t *testing.T) {
 	}
 }
 
+func TestRuntimeInstallationsNormalizeContainerDriver(t *testing.T) {
+	root := t.TempDir()
+	values, err := normalizeRuntimeInstallations([]RuntimeInstallation{{
+		ID: "container-a", Driver: "container", SavePath: root, ServerPath: root,
+	}})
+	if err != nil || len(values) != 1 {
+		t.Fatalf("installations=%#v err=%v", values, err)
+	}
+	value := values[0]
+	if value.ContainerEngine != "docker" || value.ConsoleSocket != "/run/dst-admin/tmux/tmux.sock" || value.ConsoleSession != "dst" {
+		t.Fatalf("container defaults=%#v", value)
+	}
+	for _, test := range []RuntimeInstallation{
+		{ID: "bad-engine", Driver: "container", SavePath: root, ServerPath: root, ContainerEngine: "sh"},
+		{ID: "bad-socket", Driver: "container", SavePath: root, ServerPath: root, ConsoleSocket: "relative.sock"},
+		{ID: "bad-driver", Driver: "remote", SavePath: root, ServerPath: root},
+	} {
+		if _, err := normalizeRuntimeInstallations([]RuntimeInstallation{test}); err == nil {
+			t.Fatalf("invalid installation accepted: %#v", test)
+		}
+	}
+	if _, err := normalizeRuntimeInstallations([]RuntimeInstallation{
+		{ID: "duplicate", SavePath: root, ServerPath: root},
+		{ID: "duplicate", SavePath: root, ServerPath: root},
+	}); err == nil {
+		t.Fatal("duplicate installation accepted")
+	}
+}
+
 func TestAgentReusesRuntimeControlPerInstallation(t *testing.T) {
 	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}}
 	agent, _ := newShardOperationAgent(t, runtimeControl)

@@ -174,7 +174,34 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err := agentStore.Migrate(); err != nil {
 		return nil, err
 	}
-	var agentTransport agentservice.Transport = agentservice.NewLegacyTransport(func() *legacyserver.Server { return controller.AgentServer })
+	var agentGateway *legacyserver.Server
+	if backgroundEnabled {
+		agentGateway, err = legacyserver.NewServer(&legacyserver.Config{
+			KeyFile: setting.ConfigPath, SecurityKey: setting.String("server", "SECURITY_KEY", "DST_ADMIN_AGENT_SECURITY_KEY"),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("initialize embedded Agent gateway: %w", err)
+		}
+		defer func() {
+			if completed {
+				return
+			}
+			agentGateway.Stop()
+			if controller.AgentServer == agentGateway {
+				controller.AgentServer = nil
+			}
+		}()
+		controller.AgentServer = agentGateway
+		hooks.workers = append(hooks.workers, agentGateway.Maintain)
+		hooks.stop = append(hooks.stop, func(context.Context) error {
+			agentGateway.Stop()
+			if controller.AgentServer == agentGateway {
+				controller.AgentServer = nil
+			}
+			return nil
+		})
+	}
+	var agentTransport agentservice.Transport = agentservice.NewLegacyTransport(func() *legacyserver.Server { return agentGateway })
 	if driver := os.Getenv("DST_ADMIN_TEST_AGENTS"); driver != "" {
 		if os.Getenv("DST_ADMIN_ENV") != "test" || driver != "memory" {
 			return nil, fmt.Errorf("DST_ADMIN_TEST_AGENTS is only available as memory in the test environment")
@@ -625,6 +652,9 @@ func initApplication(manageBackground bool) (*Application, error) {
 		httpapi.SameOrigin(),
 	)
 	router.NoRoute(httpapi.NotFound)
+	if agentGateway != nil {
+		router.GET("/agent", gin.WrapH(agentGateway.Handler()))
+	}
 
 	api := router.Group("/api", httpapi.AdminIPPolicy(func() string {
 		preferences, runtimeErr := systemSettingsService.Runtime()

@@ -1,0 +1,88 @@
+name: dst-admin
+
+services:
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.control-plane
+      args:
+        VERSION: ${DST_ADMIN_VERSION:-dev}
+        COMMIT: ${DST_ADMIN_COMMIT:-unknown}
+        BUILD_TIME: ${DST_ADMIN_BUILD_TIME:-unknown}
+    image: dst-admin/control-plane:${DST_ADMIN_VERSION:-dev}
+    restart: unless-stopped
+    ports:
+      - "${DST_ADMIN_HTTP_BIND:-127.0.0.1:8000}:8000"
+    volumes:
+      - control-data:/var/lib/dst-admin
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v2/auth/session"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  agent:
+    profiles: ["container-control"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.agent
+    image: dst-admin/agent:${DST_ADMIN_VERSION:-dev}
+    restart: unless-stopped
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    environment:
+      DST_ADMIN_AGENT_SERVER_URL: ws://control-plane:8000/agent
+      DST_ADMIN_AGENT_SECURITY_KEY: ${DST_ADMIN_AGENT_SECURITY_KEY:?set DST_ADMIN_AGENT_SECURITY_KEY}
+      DST_ADMIN_AGENT_STATE_FILE: /var/lib/dst-admin-agent/runtime-state.json
+    group_add:
+      - "${DOCKER_GID:-0}"
+    volumes:
+      - agent-data:/var/lib/dst-admin-agent
+      - dst-saves:/srv/dst/saves
+      - dst-server:/srv/dst/server:ro
+      - dst-workshop:/srv/dst/workshop
+      - /var/run/docker.sock:/var/run/docker.sock
+    security_opt:
+      - no-new-privileges:true
+
+  dst-master:
+    profiles: ["dst-runtime"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.dst-runtime
+    image: dst-admin/dst-runtime:${DST_ADMIN_VERSION:-dev}
+    restart: "no"
+    environment:
+      DST_CLUSTER: ${DST_CLUSTER:-Cluster_1}
+      DST_SHARD: Master
+      DST_STORAGE_ROOT: /data
+      DST_CONF_DIR: DoNotStarveTogether
+    labels:
+      com.dst-admin.managed: "true"
+      com.dst-admin.installation: container
+      com.dst-admin.cluster: ${DST_CLUSTER:-Cluster_1}
+      com.dst-admin.shard: Master
+    volumes:
+      - dst-saves:/data
+      - dst-server:/opt/dst/server:ro
+    ports:
+      - "${DST_MASTER_SERVER_PORT:-10999}:10999/udp"
+      - "${DST_MASTER_AUTH_PORT:-8768}:8768/udp"
+      - "${DST_MASTER_STEAM_PORT:-27018}:27018/udp"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  control-data:
+  agent-data:
+  dst-saves:
+  dst-server:
+  dst-workshop:
