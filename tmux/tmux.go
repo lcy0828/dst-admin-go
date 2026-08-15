@@ -12,6 +12,7 @@ import (
 	"time"
 
 	dstinstall "dont/internal/dstserver"
+	"dont/pkg/configpath"
 
 	"github.com/GianlucaP106/gotmux/gotmux"
 	"github.com/go-ini/ini"
@@ -699,7 +700,7 @@ func ListDSTServers(silent ...bool) ([]ServerInfo, error) {
 
 				// 尝试从存档目录中找到server.ini文件
 				// 首先尝试从配置文件中获取存档路径
-				configFile := "./conf/app.conf"
+				configFile := configpath.Current()
 				dstSavePath := "./Klei/DoNotStarveTogether"
 				if _, err := os.Stat(configFile); !os.IsNotExist(err) {
 					if cfg, err := ini.Load(configFile); err == nil {

@@ -1,6 +1,7 @@
 package dstserver
 
 import (
+	"dont/pkg/configpath"
 	"dont/tmux"
 	"fmt"
 	"log"
@@ -19,7 +20,7 @@ import (
 // 获取steamcmd路径
 func getSteamCmdPath() string {
 	// 首先从 mod 部分获取
-	configFile := "./conf/app.conf"
+	configFile := configpath.Current()
 	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
 		if cfg, err := ini.Load(configFile); err == nil {
 			modSection := cfg.Section("mod")
@@ -38,7 +39,7 @@ func getSteamCmdPath() string {
 // 获取游戏服务器路径
 func getDstServerPath() string {
 	// 从 paths 部分获取
-	configFile := "./conf/app.conf"
+	configFile := configpath.Current()
 	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
 		if cfg, err := ini.Load(configFile); err == nil {
 			pathsSection := cfg.Section("paths")

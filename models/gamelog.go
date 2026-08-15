@@ -2,6 +2,7 @@ package models
 
 import (
 	"bufio"
+	"dont/pkg/configpath"
 	"fmt"
 	"github.com/go-ini/ini"
 	"log"
@@ -644,7 +645,7 @@ func GetArchivePath(archiveName string) string {
 	dstSavePath := "./Klei/DoNotStarveTogether" // 默认路径
 
 	// 尝试从配置文件读取
-	configFile := "./conf/app.conf"
+	configFile := configpath.Current()
 	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
 		if cfg, err := ini.Load(configFile); err == nil {
 			// 读取路径配置

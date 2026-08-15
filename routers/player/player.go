@@ -3,6 +3,7 @@ package player
 import (
 	"dont/cron"
 	"dont/models"
+	"dont/pkg/configpath"
 	"dont/pkg/e"
 	"dont/pkg/types"
 	"github.com/gin-gonic/gin"
@@ -427,7 +428,7 @@ func getDstSavePath() string {
 	dstSavePath := "./Klei/DoNotStarveTogether"
 
 	// 直接使用配置文件中的路径
-	configFile := "./conf/app.conf"
+	configFile := configpath.Current()
 	log.Printf("[API][getDstSavePath] 尝试读取配置文件: %s", configFile)
 
 	if _, err := os.Stat(configFile); !os.IsNotExist(err) {

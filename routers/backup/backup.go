@@ -2,6 +2,7 @@ package backup
 
 import (
 	"archive/zip"
+	"dont/pkg/configpath"
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/go-ini/ini"
@@ -27,9 +28,9 @@ func init() {
 	// 默认配置
 	DstSavePath = "./Klei/DoNotStarveTogether"
 	DstBackupPath = "./Klei/dst-archive"
-	
+
 	// 尝试从配置文件读取
-	configFile := "./conf/app.conf"
+	configFile := configpath.Current()
 	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
 		if cfg, err := ini.Load(configFile); err == nil {
 			// 读取路径配置
@@ -37,7 +38,7 @@ func init() {
 				DstSavePath = cfg.Section("paths").Key("DST_SAVE_PATH").String()
 				log.Printf("从配置文件加载DST存档路径: %s", DstSavePath)
 			}
-			
+
 			if cfg.Section("paths").HasKey("DST_BACKUP_PATH") {
 				DstBackupPath = cfg.Section("paths").Key("DST_BACKUP_PATH").String()
 				log.Printf("从配置文件加载DST备份路径: %s", DstBackupPath)
@@ -59,11 +60,11 @@ type ArchiveBackupResponse struct {
 
 // BackupInfo 备份信息结构
 type BackupInfo struct {
-	Name         string `json:"name"`         // 备份文件名
-	ArchiveName  string `json:"archive_name"` // 存档名称
-	Size         int64  `json:"size"`         // 文件大小(字节)
+	Name          string `json:"name"`           // 备份文件名
+	ArchiveName   string `json:"archive_name"`   // 存档名称
+	Size          int64  `json:"size"`           // 文件大小(字节)
 	SizeFormatted string `json:"size_formatted"` // 格式化的大小
-	CreateTime   string `json:"create_time"`  // 创建时间
+	CreateTime    string `json:"create_time"`    // 创建时间
 }
 
 // CreateBackup 创建存档备份
@@ -73,9 +74,9 @@ func CreateBackup() gin.HandlerFunc {
 		type CreateBackupRequest struct {
 			ArchiveName string `json:"archive" binding:"required"`
 		}
-		
+
 		var req CreateBackupRequest
-		
+
 		// 从请求体中获取参数
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusOK, ArchiveBackupResponse{
@@ -84,7 +85,7 @@ func CreateBackup() gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		// 获取存档名称
 		archiveName := req.ArchiveName
 		if archiveName == "" {
@@ -215,10 +216,10 @@ func CreateBackup() gin.HandlerFunc {
 			Status: 200,
 			Msg:    "备份创建成功",
 			Data: map[string]interface{}{
-				"backup_file": backupFileName,
-				"size":        fileInfo.Size(),
+				"backup_file":    backupFileName,
+				"size":           fileInfo.Size(),
 				"size_formatted": formatFileSize(fileInfo.Size()),
-				"create_time": fileInfo.ModTime().Format("2006-01-02 15:04:05"),
+				"create_time":    fileInfo.ModTime().Format("2006-01-02 15:04:05"),
 			},
 		})
 	}
@@ -229,7 +230,7 @@ func ListBackups() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 获取存档名称(可选参数)
 		archiveName := c.Query("archive")
-		
+
 		// 检查备份根目录是否存在
 		if _, err := os.Stat(DstBackupPath); os.IsNotExist(err) {
 			// 目录不存在，返回空列表
@@ -240,7 +241,7 @@ func ListBackups() gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		// 如果指定了存档名称，仅获取该存档的备份
 		if archiveName != "" {
 			backupDir := filepath.Join(DstBackupPath, archiveName)
@@ -253,7 +254,7 @@ func ListBackups() gin.HandlerFunc {
 				})
 				return
 			}
-			
+
 			// 获取指定存档的备份
 			backups, err := getArchiveBackups(archiveName)
 			if err != nil {
@@ -264,7 +265,7 @@ func ListBackups() gin.HandlerFunc {
 				})
 				return
 			}
-			
+
 			// 返回结果，按存档名称归组
 			c.JSON(http.StatusOK, ArchiveBackupResponse{
 				Status: 200,
@@ -273,10 +274,10 @@ func ListBackups() gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		// 如果未指定存档名称，获取所有存档的备份
 		archivesMap := make(map[string][]BackupInfo)
-		
+
 		// 读取备份根目录下的所有存档目录
 		archives, err := ioutil.ReadDir(DstBackupPath)
 		if err != nil {
@@ -287,7 +288,7 @@ func ListBackups() gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		// 遍历每个存档目录
 		for _, archive := range archives {
 			if archive.IsDir() {
@@ -298,14 +299,14 @@ func ListBackups() gin.HandlerFunc {
 					log.Printf("读取存档 %s 的备份失败: %v", archive.Name(), err)
 					continue
 				}
-				
+
 				// 只有当有备份时才添加到结果中
 				if len(backups) > 0 {
 					archivesMap[archive.Name()] = backups
 				}
 			}
 		}
-		
+
 		// 返回所有存档的备份，按存档名称归组
 		c.JSON(http.StatusOK, ArchiveBackupResponse{
 			Status: 200,
@@ -318,13 +319,13 @@ func ListBackups() gin.HandlerFunc {
 // getArchiveBackups 获取指定存档的所有备份
 func getArchiveBackups(archiveName string) ([]BackupInfo, error) {
 	backupDir := filepath.Join(DstBackupPath, archiveName)
-	
+
 	// 读取备份目录
 	files, err := ioutil.ReadDir(backupDir)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// 提取zip文件信息
 	var backups []BackupInfo
 	for _, file := range files {
@@ -338,12 +339,12 @@ func getArchiveBackups(archiveName string) ([]BackupInfo, error) {
 			})
 		}
 	}
-	
+
 	// 按创建时间倒序排序
 	sort.Slice(backups, func(i, j int) bool {
 		return backups[i].CreateTime > backups[j].CreateTime
 	})
-	
+
 	return backups, nil
 }
 
@@ -370,7 +371,7 @@ func DownloadBackup() gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		// 防止路径遍历攻击
 		if strings.Contains(backupName, "..") || strings.Contains(archiveName, "..") {
 			c.JSON(http.StatusOK, ArchiveBackupResponse{
@@ -431,14 +432,14 @@ func RestoreBackup() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 定义请求参数结构体
 		type RestoreBackupRequest struct {
-			ArchiveName     string `json:"archive" binding:"required"`    // 源存档名称
-			BackupName      string `json:"backup" binding:"required"`     // 备份文件名
-			TargetName      string `json:"target_name,omitempty"`         // 目标存档名称（可选）
-			OverwriteTarget bool   `json:"overwrite_target,omitempty"`    // 是否覆盖目标目录（如果存在）
+			ArchiveName     string `json:"archive" binding:"required"` // 源存档名称
+			BackupName      string `json:"backup" binding:"required"`  // 备份文件名
+			TargetName      string `json:"target_name,omitempty"`      // 目标存档名称（可选）
+			OverwriteTarget bool   `json:"overwrite_target,omitempty"` // 是否覆盖目标目录（如果存在）
 		}
-		
+
 		var req RestoreBackupRequest
-		
+
 		// 从请求体中获取参数
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusOK, ArchiveBackupResponse{
@@ -447,7 +448,7 @@ func RestoreBackup() gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		// 验证备份文件名
 		if !strings.HasSuffix(req.BackupName, ".zip") {
 			c.JSON(http.StatusOK, ArchiveBackupResponse{
@@ -456,7 +457,7 @@ func RestoreBackup() gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		// 防止路径遍历攻击
 		if strings.Contains(req.BackupName, "..") || strings.Contains(req.ArchiveName, "..") {
 			c.JSON(http.StatusOK, ArchiveBackupResponse{
@@ -465,10 +466,10 @@ func RestoreBackup() gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		// 构建备份文件路径
 		backupFilePath := filepath.Join(DstBackupPath, req.ArchiveName, req.BackupName)
-		
+
 		// 检查备份文件是否存在
 		if _, err := os.Stat(backupFilePath); os.IsNotExist(err) {
 			c.JSON(http.StatusOK, ArchiveBackupResponse{
@@ -477,7 +478,7 @@ func RestoreBackup() gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		// 确定目标目录
 		var targetPath string
 		if req.TargetName == "" {
@@ -487,7 +488,7 @@ func RestoreBackup() gin.HandlerFunc {
 			// 目标为新指定的目录
 			targetPath = filepath.Join(DstSavePath, req.TargetName)
 		}
-		
+
 		// 检查目标目录是否存在
 		targetExists := false
 		if _, err := os.Stat(targetPath); err == nil {
@@ -500,7 +501,7 @@ func RestoreBackup() gin.HandlerFunc {
 				})
 				return
 			}
-			
+
 			// 如果允许覆盖，则清空目标目录（但保留目录本身）
 			if err := clearDirectory(targetPath); err != nil {
 				c.JSON(http.StatusOK, ArchiveBackupResponse{
@@ -510,7 +511,7 @@ func RestoreBackup() gin.HandlerFunc {
 				return
 			}
 		}
-		
+
 		// 如果目标目录不存在，创建它
 		if !targetExists {
 			if err := os.MkdirAll(targetPath, 0755); err != nil {
@@ -521,7 +522,7 @@ func RestoreBackup() gin.HandlerFunc {
 				return
 			}
 		}
-		
+
 		// 打开zip文件
 		zipReader, err := zip.OpenReader(backupFilePath)
 		if err != nil {
@@ -532,17 +533,17 @@ func RestoreBackup() gin.HandlerFunc {
 			return
 		}
 		defer zipReader.Close()
-		
+
 		// 解压文件
 		for _, file := range zipReader.File {
 			// 构建完整的目标路径
 			filePath := filepath.Join(targetPath, file.Name)
-			
+
 			// 跳过目录创建（我们会在需要时创建它们）
 			if file.FileInfo().IsDir() {
 				continue
 			}
-			
+
 			// 确保目标文件的目录存在
 			if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 				c.JSON(http.StatusOK, ArchiveBackupResponse{
@@ -551,7 +552,7 @@ func RestoreBackup() gin.HandlerFunc {
 				})
 				return
 			}
-			
+
 			// 创建目标文件
 			destFile, err := os.Create(filePath)
 			if err != nil {
@@ -561,7 +562,7 @@ func RestoreBackup() gin.HandlerFunc {
 				})
 				return
 			}
-			
+
 			// 打开源文件
 			srcFile, err := file.Open()
 			if err != nil {
@@ -572,7 +573,7 @@ func RestoreBackup() gin.HandlerFunc {
 				})
 				return
 			}
-			
+
 			// 复制内容
 			if _, err := io.Copy(destFile, srcFile); err != nil {
 				destFile.Close()
@@ -583,18 +584,18 @@ func RestoreBackup() gin.HandlerFunc {
 				})
 				return
 			}
-			
+
 			// 关闭文件
 			destFile.Close()
 			srcFile.Close()
 		}
-		
+
 		// 构建响应信息
 		targetName := req.ArchiveName
 		if req.TargetName != "" {
 			targetName = req.TargetName
 		}
-		
+
 		c.JSON(http.StatusOK, ArchiveBackupResponse{
 			Status: 200,
 			Msg:    "备份恢复成功",
@@ -615,7 +616,7 @@ func clearDirectory(dir string) error {
 	if err != nil {
 		return err
 	}
-	
+
 	// 删除每个条目
 	for _, entry := range dirEntries {
 		entryPath := filepath.Join(dir, entry.Name())
@@ -631,7 +632,7 @@ func clearDirectory(dir string) error {
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -716,4 +717,4 @@ func DeleteBackup() gin.HandlerFunc {
 			},
 		})
 	}
-} 
+}

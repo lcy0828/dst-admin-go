@@ -1,6 +1,7 @@
 package serverlog
 
 import (
+	"dont/pkg/configpath"
 	"fmt"
 	"log"
 	"net/http"
@@ -26,7 +27,7 @@ func init() {
 	DstServerLogPath = "./Klei/DoNotStarveTogether/02/Forest1/server_log.txt"
 
 	// 尝试从配置文件读取
-	configFile := "./conf/app.conf"
+	configFile := configpath.Current()
 	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
 		if cfg, err := ini.Load(configFile); err == nil {
 			// 读取路径配置

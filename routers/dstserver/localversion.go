@@ -1,6 +1,7 @@
 package dstserver
 
 import (
+	"dont/pkg/configpath"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -24,7 +25,7 @@ func init() {
 	dstServerPath = "./dstserver"
 
 	// 尝试从配置文件读取
-	configFile := "./conf/app.conf"
+	configFile := configpath.Current()
 	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
 		if cfg, err := ini.Load(configFile); err == nil {
 			// 读取路径配置

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"dont/pkg/configpath"
 	"dont/service/logparser"
 
 	"github.com/fsnotify/fsnotify"
@@ -34,7 +35,7 @@ func init() {
 	dstSavePath = "./Klei/DoNotStarveTogether"
 
 	// 尝试从配置文件读取
-	configFile := "./conf/app.conf"
+	configFile := configpath.Current()
 	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
 		if cfg, err := ini.Load(configFile); err == nil {
 			// 读取路径配置

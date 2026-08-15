@@ -3,6 +3,7 @@ package cron
 import (
 	"crypto/md5"
 	"dont/models"
+	"dont/pkg/configpath"
 	"dont/pkg/types"
 	"encoding/hex"
 	"fmt"
@@ -450,7 +451,7 @@ func getDstSavePath() string {
 	}
 
 	// 首先尝试从配置文件读取
-	configFile := "./conf/app.conf"
+	configFile := configpath.Current()
 	// 减少日志输出，只在首次读取时输出
 	// log.Printf("[PlayerConfigTask] 尝试读取配置文件: %s", configFile)
 

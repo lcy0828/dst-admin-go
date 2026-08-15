@@ -1,7 +1,7 @@
 package setting
 
 import (
-	"fmt"
+	"dont/pkg/configpath"
 	"log"
 	"os"
 	"path/filepath"
@@ -66,32 +66,7 @@ func Path(section, key, environment string) string {
 }
 
 func findConfigPath() (string, error) {
-	if configured := os.Getenv("DST_ADMIN_CONFIG"); configured != "" {
-		absolute, err := filepath.Abs(configured)
-		if err != nil {
-			return "", err
-		}
-		if _, err := os.Stat(absolute); err != nil {
-			return "", err
-		}
-		return absolute, nil
-	}
-	current, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	for {
-		candidate := filepath.Join(current, "conf", "app.conf")
-		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
-			return candidate, nil
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-	return "", fmt.Errorf("conf/app.conf was not found from the working directory or its parents; set DST_ADMIN_CONFIG")
+	return configpath.Find()
 }
 
 func LoadBase() {

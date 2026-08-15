@@ -3,6 +3,7 @@ package mod
 import (
 	"bytes"
 	"dont/models"
+	"dont/pkg/configpath"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -61,7 +62,7 @@ func init() {
 	fileName = "/root/Steam/logs/workshop_log.txt"
 
 	// 从配置文件读取
-	configFile := "./conf/app.conf"
+	configFile := configpath.Current()
 	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
 		if cfg, err := ini.Load(configFile); err == nil {
 			// 读取模组相关配置

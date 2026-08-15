@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"dont/models"
+	"dont/pkg/configpath"
 	"dont/tmux"
 	"log"
 	"net/http"
@@ -31,7 +32,7 @@ func init() {
 	dstServerMode = "64" // 默认使用 64 位模式
 
 	// 尝试从配置文件读取
-	configFile := "./conf/app.conf"
+	configFile := configpath.Current()
 	if _, err := os.Stat(configFile); !os.IsNotExist(err) {
 		if cfg, err := ini.Load(configFile); err == nil {
 			// 读取路径配置
