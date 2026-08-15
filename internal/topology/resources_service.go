@@ -67,7 +67,7 @@ func (s *Service) UpdateNetworkProfile(ctx context.Context, profileID string, in
 	if net.ParseIP(input.BindAddress) == nil {
 		fields["bindAddress"] = "监听地址必须是有效 IPv4 或 IPv6 地址"
 	}
-	if len(input.AdvertiseAddress) > 255 || strings.ContainsAny(input.AdvertiseAddress, "\x00\r\n \t/\\") {
+	if input.AdvertiseAddress != "" && !validEndpointAddress(input.AdvertiseAddress) {
 		fields["advertiseAddress"] = "公布地址必须是有效的单个 IP 或主机名"
 	}
 	if len(fields) > 0 {
@@ -352,6 +352,7 @@ func (s *Service) buildRuntimeResources(plans map[string]roomPlan, inventories [
 			})
 		}
 	}
+	appendCrossNodeMasterPreflight(&build, plans, inventories, profileByTarget, scope)
 	for _, inventory := range inventories {
 		if !inventory.Available || inventory.Stale || !inventory.Target.Online {
 			continue
@@ -382,6 +383,192 @@ func (s *Service) buildRuntimeResources(plans map[string]roomPlan, inventories [
 		return left.ID < right.ID
 	})
 	return build, nil
+}
+
+func appendCrossNodeMasterPreflight(build *resourceBuild, plans map[string]roomPlan, inventories []agents.RuntimeTargetInventory, profiles map[string]NetworkProfile, scope *resourcePreflightScope) {
+	inventoryByID := inventoryByTarget(inventories)
+	for roomID, plan := range plans {
+		if len(plan.worlds) < 2 || scope != nil && !scopeIncludesRoom(scope, roomID, plan.worlds) {
+			continue
+		}
+		placements := placementsByWorld(plan.record.Placements)
+		var master rooms.World
+		masterCount := 0
+		worldsByTarget := map[string][]rooms.World{}
+		for _, world := range plan.worlds {
+			if world.Role == rooms.WorldRoleMaster || world.IsMaster {
+				master = world
+				masterCount++
+			}
+			if placement, ok := placements[world.ID]; ok && strings.TrimSpace(placement.AppliedTargetID) != "" {
+				worldsByTarget[placement.AppliedTargetID] = append(worldsByTarget[placement.AppliedTargetID], world)
+			}
+		}
+		if len(worldsByTarget) < 2 {
+			continue
+		}
+		strict := scope != nil
+		add := func(code, message, targetID, worldID string, port int) {
+			conflict := ResourceConflict{Code: code, Message: message, TargetID: targetID, RoomID: roomID, WorldID: worldID, Port: port}
+			if strict {
+				build.preflight.Conflicts = append(build.preflight.Conflicts, conflict)
+			} else {
+				build.preflight.Warnings = append(build.preflight.Warnings, "["+code+"] "+message)
+			}
+		}
+		if masterCount != 1 {
+			add("MASTER_SHARD_MISSING", "跨节点房间没有唯一可识别的 Master 分片", "", "", 0)
+			continue
+		}
+		masterPlacement, ok := placements[master.ID]
+		if !ok || strings.TrimSpace(masterPlacement.AppliedTargetID) == "" {
+			add("MASTER_TARGET_MISSING", "Master 分片没有已生效的运行目标", "", master.ID, 0)
+			continue
+		}
+		masterTargetID := masterPlacement.AppliedTargetID
+		masterInventory, masterUsable := usableEndpointInventory(inventoryByID, masterTargetID, "MASTER", master.ID, add)
+		profile, profileOK := profiles[masterTargetID]
+		advertiseAddress := ""
+		if !profileOK {
+			add("MASTER_NETWORK_PROFILE_MISSING", "Master 节点缺少网络 Profile", masterTargetID, master.ID, 0)
+		} else {
+			advertiseAddress = strings.TrimSpace(profile.AdvertiseAddress)
+			if advertiseAddress == "" {
+				add("MASTER_ADVERTISE_ADDRESS_MISSING", "跨节点房间必须配置 Master 公布地址", masterTargetID, master.ID, 0)
+			} else if !validEndpointAddress(advertiseAddress) || advertiseAddressUnroutable(advertiseAddress) {
+				add("MASTER_ADVERTISE_ADDRESS_UNROUTABLE", "Master 公布地址不能是 loopback、未指定、组播或无作用域的链路本地地址", masterTargetID, master.ID, 0)
+			}
+		}
+		masterPort := 0
+		if masterUsable {
+			masterRoom, exists := inventoryRoomByDirectory(masterInventory.Inventory.Rooms, plan.room.DirectoryName)
+			if !exists {
+				add("MASTER_ROOM_CONFIG_MISSING", "Master 节点清单中没有该房间的 cluster.ini", masterTargetID, master.ID, 0)
+			} else {
+				masterPort = masterRoom.MasterPort
+				if masterPort < 1 || masterPort > 65535 {
+					add("MASTER_PORT_MISSING", "Master 节点缺少有效的 master_port", masterTargetID, master.ID, masterPort)
+				}
+				if strings.TrimSpace(masterRoom.BindIP) == "" || bindAddressLocalOnly(masterRoom.BindIP) {
+					add("MASTER_BIND_ADDRESS_LOCAL", "跨节点 Master 的 bind_ip 必须监听可被其他节点访问的地址或 0.0.0.0/::", masterTargetID, master.ID, masterPort)
+				}
+			}
+		}
+		for targetID, targetWorlds := range worldsByTarget {
+			if targetID == masterTargetID {
+				continue
+			}
+			worldID := targetWorlds[0].ID
+			secondaryInventory, usable := usableEndpointInventory(inventoryByID, targetID, "SECONDARY", worldID, add)
+			if !usable {
+				continue
+			}
+			secondaryRoom, exists := inventoryRoomByDirectory(secondaryInventory.Inventory.Rooms, plan.room.DirectoryName)
+			if !exists {
+				add("SECONDARY_ROOM_CONFIG_MISSING", "Secondary 节点清单中没有该房间的 cluster.ini", targetID, worldID, masterPort)
+				continue
+			}
+			secondaryMasterIP := strings.TrimSpace(secondaryRoom.MasterIP)
+			switch {
+			case secondaryMasterIP == "":
+				add("SECONDARY_MASTER_ADDRESS_MISSING", "Secondary 的 cluster.ini 缺少 master_ip", targetID, worldID, masterPort)
+			case advertiseAddressUnroutable(secondaryMasterIP):
+				add("SECONDARY_MASTER_ADDRESS_LOCAL", "跨节点 Secondary 的 master_ip 不能使用本机或不可路由地址", targetID, worldID, masterPort)
+			case advertiseAddress != "" && validEndpointAddress(advertiseAddress) && !sameEndpointAddress(secondaryMasterIP, advertiseAddress):
+				add("SECONDARY_MASTER_ENDPOINT_MISMATCH", "Secondary 的 master_ip 与 Master 公布地址不一致", targetID, worldID, masterPort)
+			}
+			if masterPort > 0 && secondaryRoom.MasterPort != masterPort {
+				add("MASTER_PORT_INCONSISTENT", "Secondary 的 master_port 与 Master 监听端口不一致", targetID, worldID, secondaryRoom.MasterPort)
+			}
+		}
+	}
+}
+
+func scopeIncludesRoom(scope *resourcePreflightScope, roomID string, worlds []rooms.World) bool {
+	for _, world := range worlds {
+		if scope.owners[resourceOwnerKey(roomID, world.ID)] {
+			return true
+		}
+	}
+	return false
+}
+
+func usableEndpointInventory(inventories map[string]agents.RuntimeTargetInventory, targetID, role, worldID string, add func(string, string, string, string, int)) (agents.RuntimeTargetInventory, bool) {
+	inventory, exists := inventories[targetID]
+	if !exists || !inventory.Target.Configured {
+		add(role+"_TARGET_MISSING", role+" 节点不存在或尚未配置", targetID, worldID, 0)
+		return agents.RuntimeTargetInventory{}, false
+	}
+	if !inventory.Target.Online {
+		add(role+"_TARGET_OFFLINE", role+" 节点当前离线，无法确认分片互联配置", targetID, worldID, 0)
+		return inventory, false
+	}
+	if !inventory.Available || inventory.Stale || inventory.ObservedAt == nil {
+		add(role+"_TARGET_INVENTORY_STALE", role+" 节点缺少最新运行时清单，无法确认分片互联配置", targetID, worldID, 0)
+		return inventory, false
+	}
+	return inventory, true
+}
+
+func inventoryRoomByDirectory(values []shared.RoomInventoryReport, directory string) (shared.RoomInventoryReport, bool) {
+	for _, value := range values {
+		if strings.EqualFold(value.Directory, directory) {
+			return value, true
+		}
+	}
+	return shared.RoomInventoryReport{}, false
+}
+
+func validEndpointAddress(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.ContainsAny(value, "\x00\r\n \t/\\") || len(value) > 255 {
+		return false
+	}
+	if net.ParseIP(value) != nil {
+		return true
+	}
+	host := strings.TrimSuffix(value, ".")
+	if len(host) == 0 || len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for index := 0; index < len(label); index++ {
+			character := label[index]
+			if character != '-' && (character < '0' || character > '9') && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func advertiseAddressUnroutable(value string) bool {
+	value = strings.TrimSpace(strings.Trim(value, "[]"))
+	if ip := net.ParseIP(value); ip != nil {
+		return ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast()
+	}
+	host := strings.TrimSuffix(strings.ToLower(value), ".")
+	return host == "localhost" || strings.HasSuffix(host, ".localhost") || !validEndpointAddress(value)
+}
+
+func bindAddressLocalOnly(value string) bool {
+	value = strings.TrimSpace(strings.Trim(value, "[]"))
+	if ip := net.ParseIP(value); ip != nil {
+		return ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast()
+	}
+	host := strings.TrimSuffix(strings.ToLower(value), ".")
+	return host == "localhost" || strings.HasSuffix(host, ".localhost") || !validEndpointAddress(value)
+}
+
+func sameEndpointAddress(left, right string) bool {
+	leftIP, rightIP := net.ParseIP(strings.TrimSpace(left)), net.ParseIP(strings.TrimSpace(right))
+	if leftIP != nil && rightIP != nil {
+		return leftIP.Equal(rightIP)
+	}
+	return strings.EqualFold(strings.TrimSuffix(strings.TrimSpace(left), "."), strings.TrimSuffix(strings.TrimSpace(right), "."))
 }
 
 func resolveShardPorts(inventories []agents.RuntimeTargetInventory, cluster, shard string) (shardPortSet, []ResourceConflict) {

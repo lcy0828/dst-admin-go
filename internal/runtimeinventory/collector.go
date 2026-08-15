@@ -159,6 +159,8 @@ func scanRooms(saveRoot string) ([]shared.RoomInventoryReport, []string, error) 
 			Directory:     entry.Name(),
 			Name:          strings.TrimSpace(clusterConfig.Section("NETWORK").Key("cluster_name").String()),
 			ConfigPath:    clusterPath,
+			BindIP:        strings.TrimSpace(clusterConfig.Section("SHARD").Key("bind_ip").String()),
+			MasterIP:      strings.TrimSpace(clusterConfig.Section("SHARD").Key("master_ip").String()),
 			MasterPort:    clusterConfig.Section("SHARD").Key("master_port").MustInt(0),
 			ClusterKeySet: strings.TrimSpace(clusterConfig.Section("SHARD").Key("cluster_key").String()) != "",
 			Shards:        []shared.ShardInventoryReport{},

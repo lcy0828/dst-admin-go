@@ -204,6 +204,8 @@ type RoomInventoryReport struct {
 	Directory     string                 `json:"directory"`
 	Name          string                 `json:"name"`
 	ConfigPath    string                 `json:"config_path"`
+	BindIP        string                 `json:"bind_ip,omitempty"`
+	MasterIP      string                 `json:"master_ip,omitempty"`
 	MasterPort    int                    `json:"master_port,omitempty"`
 	ClusterKeySet bool                   `json:"cluster_key_set"`
 	Shards        []ShardInventoryReport `json:"shards"`

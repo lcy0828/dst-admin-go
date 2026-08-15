@@ -7961,6 +7961,8 @@ components:
         directory: { type: string }
         name: { type: string }
         config_path: { type: string }
+        bind_ip: { type: string }
+        master_ip: { type: string }
         master_port: { type: integer, minimum: 0, maximum: 65535 }
         cluster_key_set: { type: boolean }
         shards: { type: array, items: { $ref: "#/components/schemas/AgentShardInventory" } }
@@ -8179,7 +8181,7 @@ components:
     RuntimeCPUAllocation:
       type: object
       additionalProperties: false
-      required: [id, environmentId, targetId, roomId, worldId, policy, logicalCpuIds, physicalCoreKeys, allowSmtSiblingRisk, warnings, updatedAt]
+      required: [id, environmentId, targetId, roomId, worldId, policy, logicalCpuIds, physicalCoreKeys, allowSmtSiblingRisk, warnings, executionState, updatedAt]
       properties:
         id: { type: string }
         environmentId: { type: string }
@@ -8191,7 +8193,27 @@ components:
         physicalCoreKeys: { type: array, uniqueItems: true, items: { type: string } }
         allowSmtSiblingRisk: { type: boolean }
         warnings: { type: array, items: { type: string } }
+        executionState: { type: string, enum: [desired, prepared, applied, released, failed] }
+        observed: { $ref: "#/components/schemas/RuntimeCPUObservation" }
+        executionError: { type: string }
         updatedAt: { type: string, format: date-time }
+    RuntimeCPUObservation:
+      type: object
+      additionalProperties: false
+      required: [policy, state, runtime_kind, enforced, instance_running, observed_at]
+      properties:
+        policy: { type: string, enum: [none, shared, exclusive] }
+        logical_cpu_ids: { type: array, uniqueItems: true, items: { type: integer, minimum: 0 } }
+        effective_cpu_ids: { type: array, uniqueItems: true, items: { type: integer, minimum: 0 } }
+        state: { type: string, enum: [prepared, applied, released, unknown] }
+        runtime_kind: { type: string, enum: [native, container, memory] }
+        instance_id: { type: string }
+        pid: { type: integer, format: int32, minimum: 1 }
+        quota_micros: { type: integer, format: int64, minimum: 0 }
+        period_micros: { type: integer, format: int64, minimum: 0 }
+        enforced: { type: boolean }
+        instance_running: { type: boolean }
+        observed_at: { type: string, format: date-time }
     RuntimeCPUAllocationInput:
       type: object
       additionalProperties: false

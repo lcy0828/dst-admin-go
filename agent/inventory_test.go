@@ -18,7 +18,7 @@ func TestRuntimeInventoryDiscoversRoomsAndShards(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	writeInventoryFixture(t, filepath.Join(roomRoot, "cluster.ini"), "[NETWORK]\ncluster_name = 朋友世界\n[SHARD]\nmaster_port = 10889\ncluster_key = secret-present\n")
+	writeInventoryFixture(t, filepath.Join(roomRoot, "cluster.ini"), "[NETWORK]\ncluster_name = 朋友世界\n[SHARD]\nbind_ip = 0.0.0.0\nmaster_ip = 192.0.2.10\nmaster_port = 10889\ncluster_key = secret-present\n")
 	writeInventoryFixture(t, filepath.Join(roomRoot, "Master", "server.ini"), "[NETWORK]\nserver_port = 10999\n[SHARD]\nis_master = true\nname = 地表\nid = 1\n[STEAM]\nmaster_server_port = 27018\nauthentication_port = 8768\n")
 	writeInventoryFixture(t, filepath.Join(roomRoot, "Caves", "server.ini"), "[NETWORK]\nserver_port = 10998\n[SHARD]\nis_master = false\nname = 洞穴\nid = 2\n")
 
@@ -34,6 +34,9 @@ func TestRuntimeInventoryDiscoversRoomsAndShards(t *testing.T) {
 	room := value.Rooms[0]
 	if room.Name != "朋友世界" || room.MasterPort != 10889 || !room.ClusterKeySet {
 		t.Fatalf("room=%#v", room)
+	}
+	if room.BindIP != "0.0.0.0" || room.MasterIP != "192.0.2.10" {
+		t.Fatalf("room network=%#v", room)
 	}
 	if room.Shards[0].Directory != "Caves" || room.Shards[0].Role != "secondary" || room.Shards[1].Role != "master" {
 		t.Fatalf("shards=%#v", room.Shards)
