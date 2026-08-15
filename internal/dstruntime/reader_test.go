@@ -279,6 +279,39 @@ func TestDecodeStrictJSONSupportsKLEIPersistentHeader(t *testing.T) {
 	}
 }
 
+func TestConfiguredShardIDUsesRuntimeIdentityForUnshardedWorld(t *testing.T) {
+	root := t.TempDir()
+	worldRoot := filepath.Join(root, "Cluster_1", "Master")
+	if err := os.MkdirAll(worldRoot, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worldRoot, "server.ini"), []byte("[SHARD]\nid = 1\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, testCase := range map[string]struct {
+		cluster  string
+		expected string
+	}{
+		"sharding disabled": {cluster: "[SHARD]\nshard_enabled = false\n", expected: "0"},
+		"sharding enabled":  {cluster: "[SHARD]\nshard_enabled = true\n", expected: "1"},
+		"setting absent":    {cluster: "[NETWORK]\ncluster_name = Legacy\n", expected: "1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(root, "Cluster_1", "cluster.ini"), []byte(testCase.cluster), 0640); err != nil {
+				t.Fatal(err)
+			}
+			actual, err := configuredShardID(worldRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if actual != testCase.expected {
+				t.Fatalf("configured shard ID = %q, want %q", actual, testCase.expected)
+			}
+		})
+	}
+}
+
 func writeSnapshot(t *testing.T, path string, value interface{}) {
 	t.Helper()
 	data, err := json.Marshal(value)

@@ -350,6 +350,26 @@ func isJSONHeaderSpace(value byte) bool {
 }
 
 func configuredShardID(worldPath string) (string, error) {
+	clusterData, _, clusterExists, err := readRegular(filepath.Join(filepath.Dir(worldPath), "cluster.ini"), 256*1024)
+	if err != nil {
+		return "", err
+	}
+	if clusterExists {
+		cluster, loadErr := ini.Load(clusterData)
+		if loadErr != nil {
+			return "", fmt.Errorf("parse cluster.ini shard identity: %w", loadErr)
+		}
+		shardEnabled := cluster.Section("SHARD").Key("shard_enabled")
+		if shardEnabled.String() != "" {
+			enabled, boolErr := shardEnabled.Bool()
+			if boolErr != nil {
+				return "", fmt.Errorf("parse cluster.ini shard_enabled: %w", boolErr)
+			}
+			if !enabled {
+				return "0", nil
+			}
+		}
+	}
 	data, _, exists, err := readRegular(filepath.Join(worldPath, "server.ini"), 256*1024)
 	if err != nil {
 		return "", err
