@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"dont/internal/operationlease"
+	"dont/internal/roomops"
 	"dont/internal/rooms"
 	"dont/internal/runtimedriver"
 	"dont/internal/shards"
@@ -87,10 +89,46 @@ func (c *backupTestControl) Send(context.Context, string, string, string) error 
 type distributedBackupFixture struct {
 	coordinator *Coordinator
 	store       *Store
+	leases      *backupTestLeases
 	masterRoot  string
 	cavesRoot   string
 	master      *backupTestControl
 	caves       *backupTestControl
+}
+
+type backupTestLeases struct {
+	service  *operationlease.Service
+	mu       sync.Mutex
+	acquires int
+	renews   int
+	releases int
+}
+
+func (l *backupTestLeases) Acquire(ctx context.Context, roomID, operationKey string, ttl time.Duration) (operationlease.Lease, error) {
+	l.mu.Lock()
+	l.acquires++
+	l.mu.Unlock()
+	return l.service.Acquire(ctx, roomID, operationKey, ttl)
+}
+
+func (l *backupTestLeases) Renew(ctx context.Context, lease operationlease.Lease, ttl time.Duration) (operationlease.Lease, error) {
+	l.mu.Lock()
+	l.renews++
+	l.mu.Unlock()
+	return l.service.Renew(ctx, lease, ttl)
+}
+
+func (l *backupTestLeases) Release(lease operationlease.Lease) error {
+	l.mu.Lock()
+	l.releases++
+	l.mu.Unlock()
+	return l.service.Release(lease)
+}
+
+func (l *backupTestLeases) counts() (int, int, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.acquires, l.renews, l.releases
 }
 
 func newDistributedBackupFixture(t *testing.T) distributedBackupFixture {
@@ -107,10 +145,11 @@ func newDistributedBackupFixture(t *testing.T) distributedBackupFixture {
 	if err := store.Migrate(); err != nil {
 		t.Fatal(err)
 	}
-	leases := operationlease.NewService(db, "distributed_test_")
-	if err := leases.Migrate(); err != nil {
+	leaseService := operationlease.NewService(db, "distributed_test_")
+	if err := leaseService.Migrate(); err != nil {
 		t.Fatal(err)
 	}
+	leases := &backupTestLeases{service: leaseService}
 	masterRoot := filepath.Join(t.TempDir(), "master-node")
 	cavesRoot := filepath.Join(t.TempDir(), "caves-node")
 	writeShardFixture(t, masterRoot, "Master", "master-v1")
@@ -144,7 +183,7 @@ func newDistributedBackupFixture(t *testing.T) distributedBackupFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return distributedBackupFixture{coordinator: coordinator, store: store, masterRoot: masterRoot, cavesRoot: cavesRoot, master: masterControl, caves: cavesControl}
+	return distributedBackupFixture{coordinator: coordinator, store: store, leases: leases, masterRoot: masterRoot, cavesRoot: cavesRoot, master: masterControl, caves: cavesControl}
 }
 
 func writeShardFixture(t *testing.T, root, shard, worldData string) {
@@ -255,6 +294,79 @@ func TestCoordinatedStopAndStartOrdersMasterAtTheSafeBoundary(t *testing.T) {
 	}
 	if got := []string{starting[0].part.Shard, starting[1].part.Shard, starting[2].part.Shard}; got[0] != "Master" {
 		t.Fatalf("start order=%v", got)
+	}
+}
+
+func TestCreateProtectedBorrowsAndRenewsCallerLeaseWithoutReleasing(t *testing.T) {
+	fixture := newDistributedBackupFixture(t)
+	ctx, releaseRoom, err := roomops.Acquire(context.Background(), "room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseRoom()
+	lease, err := fixture.leases.Acquire(ctx, "room", "mod.publish:publication-one", 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = fixture.leases.Release(lease) }()
+	acquiresBefore, renewsBefore, releasesBefore := fixture.leases.counts()
+	expiresBefore := lease.ExpiresAt
+	created, err := fixture.coordinator.CreateProtected(ctx, "room", "Mod 发布前保护备份", "job-protected", &lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != StatusVerified || created.Kind != "protection" || created.SourceJobID != "job-protected" {
+		t.Fatalf("created=%#v", created)
+	}
+	acquiresAfter, renewsAfter, releasesAfter := fixture.leases.counts()
+	if acquiresAfter != acquiresBefore || renewsAfter <= renewsBefore || releasesAfter != releasesBefore {
+		t.Fatalf("lease ownership changed: before=%d/%d/%d after=%d/%d/%d", acquiresBefore, renewsBefore, releasesBefore, acquiresAfter, renewsAfter, releasesAfter)
+	}
+	if !lease.ExpiresAt.After(expiresBefore) {
+		t.Fatalf("renewed lease expiry was not returned to owner: before=%s after=%s", expiresBefore, lease.ExpiresAt)
+	}
+	if _, err := fixture.leases.Acquire(ctx, "room", "another-operation", 30*time.Second); !errors.Is(err, operationlease.ErrBusy) {
+		t.Fatalf("borrowed lease was released by backup: %v", err)
+	}
+	if err := fixture.leases.Release(lease); err != nil {
+		t.Fatal(err)
+	}
+	next, err := fixture.leases.Acquire(ctx, "room", "another-operation", 30*time.Second)
+	if err != nil {
+		t.Fatalf("owner could not release renewed lease: %v", err)
+	}
+	if next.FencingToken <= lease.FencingToken {
+		t.Fatalf("fencing token did not advance: old=%d new=%d", lease.FencingToken, next.FencingToken)
+	}
+	lease = next
+}
+
+func TestCreateProtectedFailureStillLeavesCallerLeaseOwned(t *testing.T) {
+	fixture := newDistributedBackupFixture(t)
+	if err := os.WriteFile(filepath.Join(fixture.cavesRoot, "Cluster_1", "cluster_token.txt"), []byte("different\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, releaseRoom, err := roomops.Acquire(context.Background(), "room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseRoom()
+	lease, err := fixture.leases.Acquire(ctx, "room", "mod.publish:publication-failure", 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = fixture.leases.Release(lease) }()
+	_, _, releasesBefore := fixture.leases.counts()
+	created, err := fixture.coordinator.CreateProtected(ctx, "room", "失败保护备份", "", &lease)
+	if !errors.Is(err, ErrSharedFilesDiffer) || created.Status == StatusVerified {
+		t.Fatalf("created=%#v err=%v", created, err)
+	}
+	_, renewsAfter, releasesAfter := fixture.leases.counts()
+	if renewsAfter == 0 || releasesAfter != releasesBefore {
+		t.Fatalf("failed backup changed lease ownership: renews=%d releases=%d/%d", renewsAfter, releasesBefore, releasesAfter)
+	}
+	if _, err := fixture.leases.Acquire(ctx, "room", "another-operation", 30*time.Second); !errors.Is(err, operationlease.ErrBusy) {
+		t.Fatalf("failed backup released caller lease: %v", err)
 	}
 }
 

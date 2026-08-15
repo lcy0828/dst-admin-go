@@ -90,16 +90,40 @@ func (c *Coordinator) Create(ctx context.Context, roomID, name, kind, sourceJobI
 	if err != nil {
 		return Set{}, err
 	}
-	defer c.leases.Release(lease)
+	defer func() { _ = c.leases.Release(lease) }()
+	return c.createUsingLease(ctx, roomID, name, kind, sourceJobID, operationID, &lease)
+}
+
+// CreateProtected creates a cold-consistent protection backup while borrowing
+// a room operation lease owned by the caller. Renewals update lease in place so
+// the owner keeps the current expiry. This method never releases the lease.
+func (c *Coordinator) CreateProtected(ctx context.Context, roomID, name, sourceJobID string, lease *operationlease.Lease) (Set, error) {
+	roomID = strings.TrimSpace(roomID)
+	ctx, releaseRoom, err := roomops.Acquire(ctx, roomID)
+	if err != nil {
+		return Set{}, err
+	}
+	defer releaseRoom()
+	if lease == nil || lease.RoomID != roomID || strings.TrimSpace(lease.LeaseID) == "" ||
+		strings.TrimSpace(lease.OperationKey) == "" || lease.FencingToken == 0 {
+		return Set{}, ErrInvalidInput
+	}
+	if err := c.renewLease(ctx, lease); err != nil {
+		return Set{}, err
+	}
+	return c.createUsingLease(ctx, roomID, name, "protection", sourceJobID, uuid.NewString(), lease)
+}
+
+func (c *Coordinator) createUsingLease(ctx context.Context, roomID, name, kind, sourceJobID, operationID string, lease *operationlease.Lease) (Set, error) {
 	room, runtimeParts, revision, running, err := c.plan(ctx, roomID)
 	if err != nil {
 		return Set{}, err
 	}
-	set, operation, err := c.initializeSet(room, runtimeParts, revision, running, name, kind, sourceJobID, operationID, lease)
+	set, operation, err := c.initializeSet(room, runtimeParts, revision, running, name, kind, sourceJobID, operationID, *lease)
 	if err != nil {
 		return Set{}, err
 	}
-	return c.createWithPlan(ctx, set, operation, runtimeParts, &lease, true)
+	return c.createWithPlan(ctx, set, operation, runtimeParts, lease, true)
 }
 
 func (c *Coordinator) createWithPlan(ctx context.Context, set Set, operation Operation, runtimeParts []runtimePart, lease *operationlease.Lease, restart bool) (result Set, returnErr error) {
