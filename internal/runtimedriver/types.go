@@ -9,10 +9,11 @@ import (
 )
 
 var (
-	ErrInvalidTarget      = errors.New("runtime driver target is invalid")
-	ErrTopologyChanged    = errors.New("runtime target topology revision changed")
-	ErrCapabilityMissing  = errors.New("runtime driver capability is unavailable")
-	ErrUnsupportedRuntime = errors.New("runtime driver kind is unsupported")
+	ErrInvalidTarget          = errors.New("runtime driver target is invalid")
+	ErrTopologyChanged        = errors.New("runtime target topology revision changed")
+	ErrCapabilityMissing      = errors.New("runtime driver capability is unavailable")
+	ErrUnsupportedRuntime     = errors.New("runtime driver kind is unsupported")
+	ErrOperationNotDispatched = errors.New("runtime operation was not dispatched")
 )
 
 type Kind string
@@ -140,6 +141,34 @@ type CPUDriver interface {
 	PrepareCPU(context.Context, Target, Operation, shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error)
 	ApplyCPU(context.Context, Target, Operation, shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error)
 	ObserveCPU(context.Context, Target, shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error)
+}
+
+type SnapshotBarrierReceipt struct {
+	SchemaVersion      int       `json:"schemaVersion"`
+	ProducerVersion    string    `json:"producerVersion"`
+	ProducerInstanceID string    `json:"producerInstanceId"`
+	BarrierID          string    `json:"barrierId"`
+	State              string    `json:"state"`
+	SessionID          string    `json:"sessionId"`
+	ShardID            string    `json:"shardId"`
+	SnapshotBefore     int64     `json:"snapshotBefore"`
+	SnapshotAfter      int64     `json:"snapshotAfter,omitempty"`
+	PreparedAtUnix     int64     `json:"preparedAtUnix"`
+	CompletedAtUnix    int64     `json:"completedAtUnix,omitempty"`
+	ReleasedAtUnix     int64     `json:"releasedAtUnix,omitempty"`
+	Proof              string    `json:"proof,omitempty"`
+	Message            string    `json:"message,omitempty"`
+	ReadAt             time.Time `json:"-"`
+}
+
+// SnapshotBarrierDriver is optional because a provider may support cold
+// staging without having a running DST Runtime capable of proving hot saves.
+type SnapshotBarrierDriver interface {
+	PrepareSnapshotBarrier(context.Context, Target, Operation, string) (SnapshotBarrierReceipt, error)
+	CommitSnapshotBarrier(context.Context, Target, Operation, string) error
+	SnapshotBarrier(context.Context, Target, string) (SnapshotBarrierReceipt, error)
+	ReleaseSnapshotBarrier(context.Context, Target, Operation, string) error
+	CancelSnapshotBarrier(context.Context, Target, Operation, string) error
 }
 
 type Driver interface {

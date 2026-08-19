@@ -76,6 +76,39 @@ func (r *Router) DriverTarget(ctx context.Context, roomID, worldID string) (Driv
 	return driver, targetFromPlacement(placement, roomID, worldID), nil
 }
 
+func (r *Router) ProvisionTarget(placement topology.ExecutionPlacement) (Driver, Target, error) {
+	if strings.TrimSpace(placement.DesiredTargetID) == "" || placement.Target.ID != placement.DesiredTargetID {
+		return nil, Target{}, ErrInvalidTarget
+	}
+	driver := r.remote
+	installationID := strings.TrimSpace(placement.Target.Config.InstallationID)
+	if placement.DesiredTargetID == "local" {
+		driver = r.local
+		if installationID == "" {
+			installationID = "default"
+		}
+	}
+	if installationID == "" {
+		return nil, Target{}, ErrInvalidTarget
+	}
+	return driver, Target{
+		TargetID: placement.DesiredTargetID, InstallationID: installationID,
+		RoomID: placement.Room.ID, WorldID: placement.World.ID,
+		Cluster: placement.Room.DirectoryName, Shard: placement.World.DirectoryName,
+		TopologyRevision: placement.Revision,
+	}, nil
+}
+
+func (r *Router) TrustedTarget(target Target) (Driver, error) {
+	if err := validateTarget(target); err != nil {
+		return nil, err
+	}
+	if target.TargetID == "local" {
+		return r.local, nil
+	}
+	return r.remote, nil
+}
+
 func targetFromPlacement(placement topology.ExecutionPlacement, roomID, worldID string) Target {
 	installationID := strings.TrimSpace(placement.Target.Config.InstallationID)
 	if placement.AppliedTargetID == "local" && installationID == "" {

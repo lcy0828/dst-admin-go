@@ -299,6 +299,87 @@ func (s *Service) ResolveRoomExecutions(ctx context.Context, roomID string) ([]E
 	return resolved, nil
 }
 
+// ResolveDesiredRoomExecutions resolves planned targets without requiring the
+// Shard files to exist there yet. It is used only by trusted provisioning
+// coordinators; normal lifecycle operations must continue using applied
+// placements through ResolveRoomExecutions.
+func (s *Service) ResolveDesiredRoomExecutions(ctx context.Context, roomID string) ([]ExecutionPlacement, error) {
+	result, err := s.plan(ctx, roomID, nil)
+	if err != nil {
+		return nil, err
+	}
+	selected, exists := result.plans[roomID]
+	if !exists {
+		return nil, rooms.ErrRoomNotFound
+	}
+	placements := placementsByWorld(selected.record.Placements)
+	inventories := make(map[string]agents.RuntimeTargetInventory, len(result.inventories))
+	for _, inventory := range result.inventories {
+		inventories[inventory.Target.ID] = inventory
+	}
+	resolved := make([]ExecutionPlacement, 0, len(selected.worlds))
+	for _, world := range selected.worlds {
+		placement, ok := placements[world.ID]
+		if !ok || strings.TrimSpace(placement.DesiredTargetID) == "" {
+			return nil, executionBlocked("DESIRED_TARGET_MISSING", "世界没有计划运行目标")
+		}
+		inventory, ok := inventories[placement.DesiredTargetID]
+		if !ok || !inventory.Target.Configured {
+			return nil, executionBlocked("PROVISION_TARGET_MISSING", "计划运行节点不存在或尚未配置")
+		}
+		if !inventory.Target.Online {
+			return nil, executionBlocked("PROVISION_TARGET_OFFLINE", "计划运行节点当前离线")
+		}
+		if !inventory.Available || inventory.Stale {
+			return nil, executionBlocked("PROVISION_INVENTORY_STALE", "计划运行节点的清单不可用或已过期")
+		}
+		if inventory.Target.Kind == agents.RuntimeKindAgent && !containsCapability(inventory.Target.Capabilities, "runtime.migration.v1") {
+			return nil, executionBlocked("AGENT_CAPABILITY_MISSING", "Agent 版本不支持受管配置投放")
+		}
+		resolved = append(resolved, ExecutionPlacement{
+			Room: selected.room, World: world, Revision: selected.record.Revision,
+			DesiredTargetID: placement.DesiredTargetID, AppliedTargetID: placement.AppliedTargetID,
+			Target: inventory.Target, Inventory: inventory,
+		})
+	}
+	return resolved, nil
+}
+
+// ApplyProvision atomically advances every provisioned world from its old
+// applied target to the already-planned desired target.
+func (s *Service) ApplyProvision(roomID, expectedRevision string, values []PlacementInput) (string, error) {
+	selected, err := s.store.load(roomID)
+	if err != nil {
+		return "", err
+	}
+	if selected.Revision != expectedRevision {
+		return "", &RevisionConflictError{CurrentRevision: selected.Revision}
+	}
+	requested := make(map[string]string, len(values))
+	for _, value := range values {
+		if value.WorldID == "" || value.TargetID == "" || requested[value.WorldID] != "" {
+			return "", ErrInvalidInput
+		}
+		requested[value.WorldID] = value.TargetID
+	}
+	placements := normalizedPlacements(selected.Placements)
+	if len(requested) != len(placements) {
+		return "", ErrInvalidInput
+	}
+	for index := range placements {
+		targetID, ok := requested[placements[index].WorldID]
+		if !ok || placements[index].DesiredTargetID != targetID {
+			return "", &RevisionConflictError{CurrentRevision: selected.Revision}
+		}
+		placements[index].AppliedTargetID = targetID
+	}
+	saved, err := s.store.Save(roomID, expectedRevision, placements)
+	if err != nil {
+		return "", err
+	}
+	return saved.Revision, nil
+}
+
 func resolveExecution(result planResult, roomID, worldID string) (ExecutionPlacement, error) {
 	selected := result.plans[roomID]
 	var world rooms.World

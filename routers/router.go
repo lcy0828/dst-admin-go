@@ -34,6 +34,7 @@ import (
 	"dont/internal/operationlease"
 	"dont/internal/placementmigration"
 	playerapi "dont/internal/players"
+	"dont/internal/roomprovision"
 	"dont/internal/rooms"
 	"dont/internal/runtimeaudit"
 	"dont/internal/runtimecpu"
@@ -376,6 +377,23 @@ func initApplication(manageBackground bool) (*Application, error) {
 	placementMigrationHandler, err := httpapi.NewPlacementMigrationHandler(placementMigrationService, roomService, jobService)
 	if err != nil {
 		return nil, err
+	}
+	roomProvisionStore := roomprovision.NewStore(models.DB(), tablePrefix)
+	if err := roomProvisionStore.Migrate(); err != nil {
+		return nil, err
+	}
+	roomProvisionService, err := roomprovision.NewCoordinator(roomService, topologyService, runtimeDriverRouter, operationLeaseService, roomProvisionStore)
+	if err != nil {
+		return nil, err
+	}
+	roomProvisionHandler, err := httpapi.NewRoomProvisionHandler(roomProvisionService, roomService, jobService)
+	if err != nil {
+		return nil, err
+	}
+	if backgroundEnabled {
+		hooks.workers = append(hooks.workers, func(ctx context.Context) {
+			roomProvisionService.RunRecovery(ctx, time.Minute)
+		})
 	}
 	runtimeBridge, err := dstruntime.NewBridge(runtimeManager, shardControl, shardControl)
 	if err != nil {
@@ -861,6 +879,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		kubernetesRuntimeHandler.Register(v2)
 		topologyHandler.Register(v2)
 		placementMigrationHandler.Register(v2)
+		roomProvisionHandler.Register(v2)
 		systemStatusHandler.Register(v2)
 		systemSettingsHandler.Register(v2)
 		containerHandler.Register(v2)

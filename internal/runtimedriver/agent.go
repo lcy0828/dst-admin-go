@@ -358,8 +358,11 @@ func (d *Agent) ReleaseMigrationExport(ctx context.Context, target Target, opera
 }
 
 func (d *Agent) BeginMigrationImport(ctx context.Context, target Target, operation Operation, descriptor MigrationDescriptor) error {
-	result, err := d.executeMigration(ctx, target, operation, shared.RuntimeActionMigrationImportBegin, shared.RuntimeMigrationRequest{MigrationID: descriptor.MigrationID, Size: descriptor.Size, SHA256: descriptor.SHA256}, time.Minute)
-	value, err := checkedMigrationResult(result, descriptor.MigrationID, err)
+	request := runtimeRequest(target, operation, shared.RuntimeActionMigrationImportBegin)
+	request.Migration = &shared.RuntimeMigrationRequest{MigrationID: descriptor.MigrationID, Size: descriptor.Size, SHA256: descriptor.SHA256}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, timeoutSeconds(time.Minute))
+	err = markOperationNotDispatched(result, err)
+	value, err := checkedMigrationResult(result.Result, descriptor.MigrationID, err)
 	if err != nil {
 		return err
 	}
@@ -367,6 +370,21 @@ func (d *Agent) BeginMigrationImport(ctx context.Context, target Target, operati
 		return errors.New("Agent 未确认迁移导入描述")
 	}
 	return nil
+}
+
+func markOperationNotDispatched(result agents.RuntimeExecutionResult, err error) error {
+	if err == nil || result.RemoteID != "" {
+		return err
+	}
+	if errors.Is(err, agents.ErrRuntimeInstallationNotRegistered) ||
+		errors.Is(err, agents.ErrRuntimeNotConfigured) ||
+		errors.Is(err, agents.ErrAgentNotFound) ||
+		errors.Is(err, agents.ErrAgentOffline) ||
+		errors.Is(err, agents.ErrUnsupportedAction) ||
+		errors.Is(err, agents.ErrInvalidInput) {
+		return errors.Join(ErrOperationNotDispatched, err)
+	}
+	return err
 }
 
 func (d *Agent) WriteMigrationImport(ctx context.Context, target Target, operation Operation, descriptor MigrationDescriptor, offset int64, data []byte) (int64, error) {
