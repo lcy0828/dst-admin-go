@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -25,6 +26,7 @@ const (
 )
 
 var agentIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var runtimeInstallationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 var windowsAbsolutePathPattern = regexp.MustCompile(`(?i)^(?:[a-z]:[\\/]|\\\\)`)
 
 type Service struct {
@@ -82,6 +84,10 @@ func (s *Service) SaveRuntimeConfig(agentID string, input RuntimeConfig) (Runtim
 	config := normalizeRuntimeConfig(input)
 	if config.DisplayName == "" {
 		config.DisplayName = agent.Hostname
+	}
+	config, err = bindAdvertisedRuntimeInstallation(agent, config)
+	if err != nil {
+		return RuntimeTarget{}, err
 	}
 	if err := validateRuntimeConfig(config, agent.OS); err != nil {
 		return RuntimeTarget{}, err
@@ -482,7 +488,7 @@ func normalizeRuntimeConfig(config RuntimeConfig) RuntimeConfig {
 }
 
 func validateRuntimeConfig(config RuntimeConfig, platform string) error {
-	if !agentIDPattern.MatchString(config.InstallationID) || utf8.RuneCountInString(config.InstallationID) > 64 ||
+	if !runtimeInstallationIDPattern.MatchString(config.InstallationID) ||
 		config.DisplayName == "" || utf8.RuneCountInString(config.DisplayName) > 100 ||
 		config.SavePath == "" || config.ServerPath == "" ||
 		utf8.RuneCountInString(config.LuaBinary) > 255 ||
@@ -519,6 +525,8 @@ func runtimeTargetFromAgent(agent Agent, config RuntimeConfig, configured bool) 
 		status = RuntimeStatusReady
 		if agent.Status != StatusOnline {
 			status = RuntimeStatusOffline
+		} else if _, err := bindAdvertisedRuntimeInstallation(agent, config); err != nil {
+			status = RuntimeStatusConfigurationRequired
 		}
 	}
 	name := agent.Hostname
@@ -532,6 +540,109 @@ func runtimeTargetFromAgent(agent Agent, config RuntimeConfig, configured bool) 
 		Configured: configured, Online: agent.Status == StatusOnline,
 		Capabilities: append([]string(nil), agent.Capabilities...), LastHeartbeat: &heartbeat, Config: config,
 	}
+}
+
+func (s *Service) runtimeConfigForAgent(agent Agent) (RuntimeConfig, error) {
+	config, err := s.store.RuntimeConfig(agent.ID)
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	return bindAdvertisedRuntimeInstallation(agent, config)
+}
+
+func advertisedRuntimeInstallations(details map[string]interface{}) []RuntimeInstallation {
+	if details == nil || details["runtime_installations"] == nil {
+		return []RuntimeInstallation{}
+	}
+	type report struct {
+		ID                  string `json:"id"`
+		Driver              string `json:"driver"`
+		SavePath            string `json:"save_path"`
+		ServerPath          string `json:"server_path"`
+		SteamCMDPath        string `json:"steamcmd_path"`
+		UGCPath             string `json:"ugc_path"`
+		WorkshopContentPath string `json:"workshop_content_path"`
+		ServerMode          string `json:"server_mode"`
+	}
+	encoded, err := json.Marshal(details["runtime_installations"])
+	if err != nil {
+		return []RuntimeInstallation{}
+	}
+	var reports []report
+	if err := json.Unmarshal(encoded, &reports); err != nil {
+		return []RuntimeInstallation{}
+	}
+	result := make([]RuntimeInstallation, 0, len(reports))
+	seen := make(map[string]bool, len(reports))
+	for _, value := range reports {
+		value.ID = strings.TrimSpace(value.ID)
+		value.Driver = strings.ToLower(strings.TrimSpace(value.Driver))
+		value.ServerMode = strings.TrimSpace(value.ServerMode)
+		if !runtimeInstallationIDPattern.MatchString(value.ID) || seen[value.ID] || (value.Driver != "native" && value.Driver != "container") ||
+			(value.ServerMode != "32" && value.ServerMode != "64") {
+			continue
+		}
+		paths := []*string{&value.SavePath, &value.ServerPath, &value.SteamCMDPath, &value.UGCPath, &value.WorkshopContentPath}
+		valid := true
+		for _, path := range paths {
+			*path = strings.TrimSpace(*path)
+			if *path != "" && (utf8.RuneCountInString(*path) > 2048 || strings.ContainsAny(*path, "\x00\r\n")) {
+				valid = false
+			}
+		}
+		if !valid || value.SavePath == "" || value.ServerPath == "" {
+			continue
+		}
+		seen[value.ID] = true
+		result = append(result, RuntimeInstallation{
+			ID: value.ID, Driver: value.Driver, SavePath: value.SavePath, ServerPath: value.ServerPath,
+			SteamCMDPath: value.SteamCMDPath, UGCPath: value.UGCPath,
+			WorkshopContentPath: value.WorkshopContentPath, ServerMode: value.ServerMode,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result
+}
+
+func runtimeInstallationRegistrySupported(details map[string]interface{}) bool {
+	if details == nil {
+		return false
+	}
+	_, exists := details["runtime_installations"]
+	return exists
+}
+
+func bindAdvertisedRuntimeInstallation(agent Agent, config RuntimeConfig) (RuntimeConfig, error) {
+	if !agent.InstallationRegistrySupported {
+		return config, nil
+	}
+	var selected *RuntimeInstallation
+	for index := range agent.Installations {
+		if agent.Installations[index].ID == config.InstallationID {
+			selected = &agent.Installations[index]
+			break
+		}
+	}
+	if selected == nil {
+		return RuntimeConfig{}, ErrRuntimeInstallationNotRegistered
+	}
+	bindings := []struct {
+		configured *string
+		advertised string
+	}{
+		{&config.SavePath, selected.SavePath}, {&config.ServerPath, selected.ServerPath},
+		{&config.SteamCMDPath, selected.SteamCMDPath}, {&config.UGCPath, selected.UGCPath},
+		{&config.WorkshopContentPath, selected.WorkshopContentPath}, {&config.ServerMode, selected.ServerMode},
+	}
+	for _, binding := range bindings {
+		if *binding.configured != "" && *binding.configured != binding.advertised {
+			return RuntimeConfig{}, ErrRuntimeInstallationNotRegistered
+		}
+		if *binding.configured == "" {
+			*binding.configured = binding.advertised
+		}
+	}
+	return config, nil
 }
 
 func existingDirectory(path string) bool {

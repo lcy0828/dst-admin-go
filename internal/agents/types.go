@@ -9,16 +9,17 @@ import (
 )
 
 var (
-	ErrUnavailable          = errors.New("agent transport is unavailable")
-	ErrAgentNotFound        = errors.New("agent not found")
-	ErrAgentOffline         = errors.New("agent is offline")
-	ErrAgentOnline          = errors.New("online agent cannot be forgotten")
-	ErrCommandNotFound      = errors.New("agent command not found")
-	ErrInvalidInput         = errors.New("agent input is invalid")
-	ErrUnsupportedAction    = errors.New("agent action is not supported")
-	ErrConfirmationRequired = errors.New("agent key rotation confirmation is required")
-	ErrRuntimeNotConfigured = errors.New("agent runtime is not configured")
-	ErrInventoryNotFound    = errors.New("agent runtime inventory not found")
+	ErrUnavailable                      = errors.New("agent transport is unavailable")
+	ErrAgentNotFound                    = errors.New("agent not found")
+	ErrAgentOffline                     = errors.New("agent is offline")
+	ErrAgentOnline                      = errors.New("online agent cannot be forgotten")
+	ErrCommandNotFound                  = errors.New("agent command not found")
+	ErrInvalidInput                     = errors.New("agent input is invalid")
+	ErrUnsupportedAction                = errors.New("agent action is not supported")
+	ErrConfirmationRequired             = errors.New("agent key rotation confirmation is required")
+	ErrRuntimeNotConfigured             = errors.New("agent runtime is not configured")
+	ErrRuntimeInstallationNotRegistered = errors.New("agent runtime installation is not registered")
+	ErrInventoryNotFound                = errors.New("agent runtime inventory not found")
 )
 
 type Status string
@@ -81,23 +82,36 @@ type Capacity struct {
 }
 
 type Agent struct {
-	ID            string                 `json:"id"`
-	Hostname      string                 `json:"hostname"`
-	OS            string                 `json:"os"`
-	Arch          string                 `json:"arch"`
-	Version       string                 `json:"version"`
-	IPAddresses   []string               `json:"ipAddresses"`
-	Status        Status                 `json:"status"`
-	LastHeartbeat time.Time              `json:"lastHeartbeat"`
-	LastReportAt  *time.Time             `json:"lastReportAt,omitempty"`
-	Capabilities  []string               `json:"capabilities"`
-	Metrics       Metrics                `json:"metrics"`
-	Capacity      Capacity               `json:"capacity"`
-	MetricsStale  bool                   `json:"metricsStale"`
-	StaleReason   string                 `json:"staleReason,omitempty"`
-	Details       map[string]interface{} `json:"details"`
-	CreatedAt     time.Time              `json:"createdAt"`
-	UpdatedAt     time.Time              `json:"updatedAt"`
+	ID                            string                 `json:"id"`
+	Hostname                      string                 `json:"hostname"`
+	OS                            string                 `json:"os"`
+	Arch                          string                 `json:"arch"`
+	Version                       string                 `json:"version"`
+	IPAddresses                   []string               `json:"ipAddresses"`
+	Status                        Status                 `json:"status"`
+	LastHeartbeat                 time.Time              `json:"lastHeartbeat"`
+	LastReportAt                  *time.Time             `json:"lastReportAt,omitempty"`
+	Capabilities                  []string               `json:"capabilities"`
+	Metrics                       Metrics                `json:"metrics"`
+	Capacity                      Capacity               `json:"capacity"`
+	MetricsStale                  bool                   `json:"metricsStale"`
+	StaleReason                   string                 `json:"staleReason,omitempty"`
+	InstallationRegistrySupported bool                   `json:"installationRegistrySupported"`
+	Installations                 []RuntimeInstallation  `json:"installations"`
+	Details                       map[string]interface{} `json:"details"`
+	CreatedAt                     time.Time              `json:"createdAt"`
+	UpdatedAt                     time.Time              `json:"updatedAt"`
+}
+
+type RuntimeInstallation struct {
+	ID                  string `json:"id"`
+	Driver              string `json:"driver"`
+	SavePath            string `json:"savePath"`
+	ServerPath          string `json:"serverPath"`
+	SteamCMDPath        string `json:"steamcmdPath"`
+	UGCPath             string `json:"ugcPath"`
+	WorkshopContentPath string `json:"workshopContentPath"`
+	ServerMode          string `json:"serverMode"`
 }
 
 type RuntimeKind string

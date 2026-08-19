@@ -121,7 +121,7 @@ func (s *Service) RefreshInventory(agentID string) (jobs.Job, error) {
 	if !containsString(agent.Capabilities, "runtime.inventory.read") {
 		return jobs.Job{}, ErrUnsupportedAction
 	}
-	config, err := s.store.RuntimeConfig(agentID)
+	config, err := s.runtimeConfigForAgent(agent)
 	if err != nil {
 		return jobs.Job{}, err
 	}
@@ -193,6 +193,12 @@ func (s *Service) refreshConfiguredInventories(ctx context.Context, notify func(
 		if !configured || item.Status != StatusOnline || !containsString(item.Capabilities, "runtime.inventory.read") {
 			continue
 		}
+		item = s.decorateAgent(item)
+		var bindErr error
+		config, bindErr = bindAdvertisedRuntimeInstallation(item, config)
+		if bindErr != nil {
+			continue
+		}
 		item := item
 		waitGroup.Add(1)
 		go func() {
@@ -217,6 +223,8 @@ func (s *Service) refreshConfiguredInventories(ctx context.Context, notify func(
 }
 
 func (s *Service) decorateAgent(agent Agent) Agent {
+	agent.InstallationRegistrySupported = runtimeInstallationRegistrySupported(agent.Details)
+	agent.Installations = advertisedRuntimeInstallations(agent.Details)
 	observedAt := agent.Metrics.ObservedAt
 	if observedAt == nil {
 		observedAt = agent.LastReportAt

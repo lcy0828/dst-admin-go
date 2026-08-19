@@ -24,7 +24,7 @@ func (s *Service) ExecuteShard(ctx context.Context, targetID string, request sha
 	if !containsString(agent.Capabilities, "shard.control.v1") {
 		return ShardExecutionResult{}, ErrUnsupportedAction
 	}
-	config, err := s.store.RuntimeConfig(agentID)
+	config, err := s.runtimeConfigForAgent(agent)
 	if err != nil {
 		return ShardExecutionResult{}, err
 	}

@@ -121,6 +121,61 @@ func TestRuntimeTargetsPreferLocalAndKeepRemoteConfigurationIsolated(t *testing.
 	}
 }
 
+func TestRuntimeConfigBindsOnlyAgentAdvertisedInstallation(t *testing.T) {
+	service, _, _, transport := newAgentTestService(t)
+	transport.mu.Lock()
+	snapshot := transport.snapshots["agent-primary"]
+	snapshot.Details["runtime_installations"] = []map[string]string{{
+		"id": "container", "driver": "container", "save_path": "/srv/dst/saves", "server_path": "/srv/dst/server",
+		"steamcmd_path": "/usr/games/steamcmd", "ugc_path": "/srv/dst/workshop", "workshop_content_path": "/srv/dst/workshop/content", "server_mode": "64",
+	}}
+	transport.snapshots["agent-primary"] = snapshot
+	transport.mu.Unlock()
+
+	agent, err := service.Agent("agent-primary")
+	if err != nil || !agent.InstallationRegistrySupported || len(agent.Installations) != 1 || agent.Installations[0].ID != "container" {
+		t.Fatalf("agent=%#v err=%v", agent, err)
+	}
+	target, err := service.SaveRuntimeConfig("agent-primary", RuntimeConfig{
+		InstallationID: "container", DisplayName: "容器节点", BackupPath: "/srv/dst/backups", LuaBinary: "lua",
+	})
+	if err != nil || target.Status != RuntimeStatusReady || target.Config.SavePath != "/srv/dst/saves" || target.Config.ServerPath != "/srv/dst/server" {
+		t.Fatalf("target=%#v err=%v", target, err)
+	}
+	if _, err := service.SaveRuntimeConfig("agent-primary", RuntimeConfig{InstallationID: "missing", DisplayName: "错误节点"}); !errors.Is(err, ErrRuntimeInstallationNotRegistered) {
+		t.Fatalf("missing installation error=%v", err)
+	}
+	if _, err := service.SaveRuntimeConfig("agent-primary", RuntimeConfig{
+		InstallationID: "container", DisplayName: "错误路径", SavePath: "/other/saves", ServerPath: "/srv/dst/server", ServerMode: "64",
+	}); !errors.Is(err, ErrRuntimeInstallationNotRegistered) {
+		t.Fatalf("mismatched path error=%v", err)
+	}
+	if _, err := service.SaveRuntimeConfig("agent-primary", RuntimeConfig{
+		InstallationID: "container", DisplayName: "错误 SteamCMD", SteamCMDPath: "/other/steamcmd",
+	}); !errors.Is(err, ErrRuntimeInstallationNotRegistered) {
+		t.Fatalf("unadvertised optional path error=%v", err)
+	}
+}
+
+func TestRuntimeConfigRejectsAgentWithSupportedButEmptyInstallationRegistry(t *testing.T) {
+	service, _, _, transport := newAgentTestService(t)
+	transport.mu.Lock()
+	snapshot := transport.snapshots["agent-primary"]
+	snapshot.Details["runtime_installations"] = []map[string]string{}
+	transport.snapshots["agent-primary"] = snapshot
+	transport.mu.Unlock()
+
+	agent, err := service.Agent("agent-primary")
+	if err != nil || !agent.InstallationRegistrySupported || len(agent.Installations) != 0 {
+		t.Fatalf("agent=%#v err=%v", agent, err)
+	}
+	if _, err := service.SaveRuntimeConfig("agent-primary", RuntimeConfig{
+		InstallationID: "default", DisplayName: "未登记节点", SavePath: "/srv/dst/saves", ServerPath: "/srv/dst/server",
+	}); !errors.Is(err, ErrRuntimeInstallationNotRegistered) {
+		t.Fatalf("empty registry error=%v", err)
+	}
+}
+
 func TestExecuteRuntimeBindsTrustedInstallationAndCapability(t *testing.T) {
 	service, _, _, _ := newAgentTestService(t)
 	config := RuntimeConfig{

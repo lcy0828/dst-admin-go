@@ -24,7 +24,7 @@ func (s *Service) ExecuteRuntime(ctx context.Context, targetID string, request s
 	if !containsString(agent.Capabilities, "runtime.driver.v1") || !containsString(agent.Capabilities, runtimeCapability(request.Action)) {
 		return RuntimeExecutionResult{}, ErrUnsupportedAction
 	}
-	config, err := s.store.RuntimeConfig(agentID)
+	config, err := s.runtimeConfigForAgent(agent)
 	if err != nil {
 		return RuntimeExecutionResult{}, err
 	}

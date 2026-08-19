@@ -37,6 +37,23 @@ type RuntimeInstallation struct {
 	ConsoleSession      string
 }
 
+func runtimeInstallationReports(values []RuntimeInstallation) []map[string]string {
+	result := make([]map[string]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, map[string]string{
+			"id":                    value.ID,
+			"driver":                value.Driver,
+			"save_path":             value.SavePath,
+			"server_path":           value.ServerPath,
+			"steamcmd_path":         value.SteamCMDPath,
+			"ugc_path":              value.UGCPath,
+			"workshop_content_path": value.WorkshopContentPath,
+			"server_mode":           value.ServerMode,
+		})
+	}
+	return result
+}
+
 func loadRuntimeInstallations(configPath string) ([]RuntimeInstallation, error) {
 	if !isINIConfigPath(configPath) {
 		return nil, nil

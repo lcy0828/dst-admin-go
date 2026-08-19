@@ -44,3 +44,19 @@ func TestContainerRuntimeAndNativeAgentCapabilitiesAreSeparate(t *testing.T) {
 		t.Fatalf("capabilities=%#v profiles=%#v issues=%#v", capabilities, profiles, issues)
 	}
 }
+
+func TestRuntimeInstallationReportsExposeTrustedSelectionWithoutControlInternals(t *testing.T) {
+	reports := runtimeInstallationReports([]RuntimeInstallation{{
+		ID: "container", Driver: "container", SavePath: "/srv/dst/saves", ServerPath: "/srv/dst/server",
+		SteamCMDPath: "/usr/games/steamcmd", UGCPath: "/srv/dst/workshop", WorkshopContentPath: "/srv/dst/workshop/content", ServerMode: "64",
+		ModCachePath: "/private/cache", ModStatePath: "/private/state", ConsoleSocket: "/run/private.sock", ConsoleSession: "dst",
+	}})
+	if len(reports) != 1 || reports[0]["id"] != "container" || reports[0]["save_path"] != "/srv/dst/saves" {
+		t.Fatalf("reports=%#v", reports)
+	}
+	for _, internal := range []string{"mod_cache_path", "mod_state_path", "console_socket", "console_session"} {
+		if _, exists := reports[0][internal]; exists {
+			t.Fatalf("report exposed %s: %#v", internal, reports[0])
+		}
+	}
+}

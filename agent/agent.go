@@ -29,7 +29,7 @@ import (
 
 // 常量
 const (
-	AgentVersion = "2.5.1"
+	AgentVersion = "2.5.2"
 	// 心跳间隔
 	HeartbeatInterval = 30 * time.Second
 	// 重连间隔
@@ -1082,17 +1082,18 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 		)
 	}
 	info := map[string]interface{}{
-		"hostname":           "unknown",
-		"os":                 runtime.GOOS,
-		"arch":               runtime.GOARCH,
-		"agent_version":      AgentVersion,
-		"cpu_count":          cpuInfo.LogicalProcessors,
-		"cpu":                cpuInfo,
-		"capabilities":       capabilities,
-		"deployment_profile": agentDeploymentProfile(),
-		"runtime_profiles":   runtimeProfiles,
-		"capability_issues":  capabilityIssues,
-		"timestamp":          time.Now().Unix(),
+		"hostname":              "unknown",
+		"os":                    runtime.GOOS,
+		"arch":                  runtime.GOARCH,
+		"agent_version":         AgentVersion,
+		"cpu_count":             cpuInfo.LogicalProcessors,
+		"cpu":                   cpuInfo,
+		"capabilities":          capabilities,
+		"deployment_profile":    agentDeploymentProfile(),
+		"runtime_profiles":      runtimeProfiles,
+		"runtime_installations": runtimeInstallationReports(a.Config.RuntimeInstallations),
+		"capability_issues":     capabilityIssues,
+		"timestamp":             time.Now().Unix(),
 	}
 
 	hostname, err := os.Hostname()

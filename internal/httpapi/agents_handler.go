@@ -222,6 +222,8 @@ func agentFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusServiceUnavailable, "AGENT_TRANSPORT_UNAVAILABLE", "Agent 通信服务未启用", nil)
 	case errors.Is(err, agents.ErrConfirmationRequired):
 		Failure(c, http.StatusUnprocessableEntity, "AGENT_KEY_CONFIRMATION_REQUIRED", "请输入 ROTATE AGENT KEY 确认轮换", map[string]string{"confirmation": "确认短语不匹配"})
+	case errors.Is(err, agents.ErrRuntimeInstallationNotRegistered):
+		Failure(c, http.StatusUnprocessableEntity, "RUNTIME_INSTALLATION_NOT_REGISTERED", "所选 DST 安装未在 Agent 上登记，或路径与 Agent 受信配置不一致", nil)
 	case errors.Is(err, agents.ErrInvalidInput), errors.Is(err, agents.ErrUnsupportedAction):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_AGENT_INPUT", "Agent 参数或动作无效", nil)
 	default:
