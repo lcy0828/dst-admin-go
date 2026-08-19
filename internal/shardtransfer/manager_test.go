@@ -1,6 +1,7 @@
 package shardtransfer
 
 import (
+	"archive/zip"
 	"context"
 	"errors"
 	"os"
@@ -165,6 +166,77 @@ func TestTransferRejectsSymlinkedTargetStageRoot(t *testing.T) {
 	}
 	if _, err := target.targetStagePath("Cluster_1", "migration", "migration-stage-link-0001"); !errors.Is(err, ErrIntegrity) {
 		t.Fatalf("symlinked stage error=%v", err)
+	}
+}
+
+func TestExtractArchiveCreatesRuntimeOutputDirectory(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "provision.zip")
+	writeTestArchive(t, archivePath, []testArchiveEntry{
+		{name: "shared/cluster.ini", mode: 0o600, data: "[NETWORK]\n"},
+		{name: "shard/server.ini", mode: 0o600, data: "[SHARD]\n"},
+		{name: "shard/save/mod_config_data/dst-admin/", mode: os.ModeDir | 0o700},
+	})
+	staging := t.TempDir()
+	if err := extractArchive(context.Background(), archivePath, staging); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(staging, "shard", "save", "mod_config_data", "dst-admin"))
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("runtime output=%#v err=%v", info, err)
+	}
+}
+
+func TestExtractArchiveRejectsUnsafeDirectoryEntries(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry testArchiveEntry
+	}{
+		{name: "path traversal", entry: testArchiveEntry{name: "shard/../../outside/", mode: os.ModeDir | 0o700}},
+		{name: "symlink", entry: testArchiveEntry{name: "shard/runtime-link", mode: os.ModeSymlink | 0o777, data: "outside"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			archivePath := filepath.Join(t.TempDir(), "unsafe.zip")
+			writeTestArchive(t, archivePath, []testArchiveEntry{
+				{name: "shared/cluster.ini", mode: 0o600, data: "[NETWORK]\n"},
+				{name: "shard/server.ini", mode: 0o600, data: "[SHARD]\n"},
+				test.entry,
+			})
+			if err := extractArchive(context.Background(), archivePath, t.TempDir()); !errors.Is(err, ErrIntegrity) {
+				t.Fatalf("unsafe entry error=%v", err)
+			}
+		})
+	}
+}
+
+type testArchiveEntry struct {
+	name string
+	mode os.FileMode
+	data string
+}
+
+func writeTestArchive(t *testing.T, path string, entries []testArchiveEntry) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := zip.NewWriter(file)
+	for _, entry := range entries {
+		header := &zip.FileHeader{Name: entry.name, Method: zip.Store}
+		header.SetMode(entry.mode)
+		writer, createErr := archive.CreateHeader(header)
+		if createErr == nil && entry.data != "" {
+			_, createErr = writer.Write([]byte(entry.data))
+		}
+		if createErr != nil {
+			_ = archive.Close()
+			_ = file.Close()
+			t.Fatal(createErr)
+		}
+	}
+	if err := errors.Join(archive.Close(), file.Close()); err != nil {
+		t.Fatal(err)
 	}
 }
 

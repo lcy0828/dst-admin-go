@@ -82,6 +82,7 @@ echo "$agent_config" | grep -F 'hostname: smoke-agent' >/dev/null
 echo "$agent_config" | grep -A1 -F -- '- -id' | grep -F -- '- smoke-agent' >/dev/null
 assert_mount_mode "$runtime_config" /opt/dst/server readonly
 assert_mount_mode "$runtime_config" /opt/dst/server/mods readonly
+echo "$runtime_config" | grep -F 'DST_CONF_DIR: .' >/dev/null
 assert_compose_user "$volume_init_config" 0:0
 echo "$volume_init_config" | grep -F 'install -d -o 10000 -g 10000 -m 0755 /srv/dst/server/mods' >/dev/null
 echo "$volume_init_config" | grep -F 'install -d -o 10000 -g 10000 -m 0755 /srv/dst/server/bin64' >/dev/null
@@ -187,7 +188,7 @@ if [ "${DST_ADMIN_SMOKE_BUILD:-0}" = "1" ]; then
     compose run --rm --no-deps \
       -e DST_CLUSTER=Smoke \
       -e DST_SHARD=Master \
-      -e DST_CONF_DIR=DoNotStarveTogether \
+      -e DST_CONF_DIR=. \
       -e DST_ADMIN_VALIDATE_ONLY=1 \
       dst-master
 

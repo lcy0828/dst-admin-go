@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -566,6 +567,12 @@ func (c *Coordinator) requireRecovery(operation Operation, cause error) (Operati
 func buildProvisionArchive(operationID string, index int, shared, world []rooms.ProvisionFile) ([]byte, runtimedriver.MigrationDescriptor, error) {
 	var buffer bytes.Buffer
 	archive := zip.NewWriter(&buffer)
+	runtimeOutput := &zip.FileHeader{Name: "shard/save/mod_config_data/dst-admin/", Method: zip.Store}
+	runtimeOutput.SetMode(os.ModeDir | 0o700)
+	if _, err := archive.CreateHeader(runtimeOutput); err != nil {
+		_ = archive.Close()
+		return nil, runtimedriver.MigrationDescriptor{}, err
+	}
 	write := func(prefix string, files []rooms.ProvisionFile) error {
 		for _, file := range files {
 			name := filepath.ToSlash(filepath.Join(prefix, filepath.FromSlash(file.Name)))

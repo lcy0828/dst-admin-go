@@ -68,7 +68,7 @@ Agent 在另一台机器时，`127.0.0.1` 不可用。应让控制面的 `/agent
 
 ### Agent 容器 + DST 容器
 
-容器 Runtime 模式需要先填充 `dst-server` 和 `dst-saves` volumes，确认 Cluster 配置中的 UDP 端口和 compose 映射一致。每台节点必须设置一个全局唯一、重建后保持不变的 `DST_ADMIN_AGENT_ID`；控制面以该 ID 保存拓扑、fencing 和审计记录，不能使用临时容器 ID。然后显式启动：
+容器 Runtime 模式需要先填充 `dst-server` 和 `dst-saves` volumes，确认 Cluster 配置中的 UDP 端口和 compose 映射一致。`dst-saves` 的卷根就是 Cluster 目录的父目录，因此 Compose 固定使用 `DST_STORAGE_ROOT=/data` 和 `DST_CONF_DIR=.`；例如房间 `Cluster_1` 必须位于 `/data/Cluster_1`，不能额外嵌套一层 `DoNotStarveTogether`。每台节点必须设置一个全局唯一、重建后保持不变的 `DST_ADMIN_AGENT_ID`；控制面以该 ID 保存拓扑、fencing 和审计记录，不能使用临时容器 ID。然后显式启动：
 
 ```bash
 export DST_ADMIN_AGENT_SECURITY_KEY='base64-key-from-control-plane'

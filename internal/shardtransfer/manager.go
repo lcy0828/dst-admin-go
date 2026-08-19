@@ -624,17 +624,26 @@ func extractArchive(ctx context.Context, path, staging string) error {
 			return err
 		}
 		clean := filepath.Clean(filepath.FromSlash(entry.Name))
+		mode := entry.Mode()
+		isDirectory := entry.FileInfo().IsDir()
 		if filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) ||
 			!(strings.HasPrefix(filepath.ToSlash(clean), "shared/") || strings.HasPrefix(filepath.ToSlash(clean), "shard/")) ||
-			entry.Mode()&os.ModeSymlink != 0 || !entry.Mode().IsRegular() || entry.UncompressedSize64 > uint64(maxEntryBytes) {
-			return ErrIntegrity
-		}
-		total += int64(entry.UncompressedSize64)
-		if total > maxTotalBytes {
+			mode&os.ModeSymlink != 0 || (!isDirectory && !mode.IsRegular()) ||
+			(isDirectory && entry.UncompressedSize64 != 0) || (!isDirectory && entry.UncompressedSize64 > uint64(maxEntryBytes)) {
 			return ErrIntegrity
 		}
 		target := filepath.Join(staging, clean)
 		if !contained(staging, target) {
+			return ErrIntegrity
+		}
+		if isDirectory {
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				return err
+			}
+			continue
+		}
+		total += int64(entry.UncompressedSize64)
+		if total > maxTotalBytes {
 			return ErrIntegrity
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {

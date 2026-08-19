@@ -179,7 +179,7 @@ services:
       DST_CLUSTER: ${DST_CLUSTER:-Cluster_1}
       DST_SHARD: Master
       DST_STORAGE_ROOT: /data
-      DST_CONF_DIR: DoNotStarveTogether
+      DST_CONF_DIR: "."
     labels:
       com.dst-admin.managed: "true"
       com.dst-admin.installation: container

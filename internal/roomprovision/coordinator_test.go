@@ -306,6 +306,10 @@ func TestCoordinatorProvisionsRoomAcrossRemoteTargets(t *testing.T) {
 		if _, statErr := os.Stat(filepath.Join(root, "Cluster_1", shard, "server.ini")); statErr != nil {
 			t.Fatalf("target=%s shard=%s: %v", targetID, shard, statErr)
 		}
+		runtimeOutput, statErr := os.Stat(filepath.Join(root, "Cluster_1", shard, "save", "mod_config_data", "dst-admin"))
+		if statErr != nil || !runtimeOutput.IsDir() {
+			t.Fatalf("target=%s shard=%s runtime output=%#v err=%v", targetID, shard, runtimeOutput, statErr)
+		}
 		cluster, readErr := os.ReadFile(filepath.Join(root, "Cluster_1", "cluster.ini"))
 		config, parseErr := ini.Load(cluster)
 		if readErr != nil || parseErr != nil || config.Section("SHARD").Key("master_ip").String() != "192.0.2.10" || config.Section("SHARD").Key("bind_ip").String() != "0.0.0.0" {
