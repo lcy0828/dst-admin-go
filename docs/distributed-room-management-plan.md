@@ -614,6 +614,14 @@ Mod 管理继续区分：
 
 每个场景必须验证：观察状态、用户提示、Job 结果、审计、数据安全和恢复路径。
 
+### 14.1 Debian 12 真实双分片验收（2026-08-19）
+
+已在全新 Debian 12 的隔离 Compose 项目中使用真实 DST 运行 Master 与 Caves，两个分片由容器 Agent 识别为同一房间的两个 `aligned` Placement。运行期间通过正式 API 创建 `hot-consistent` 备份集，结果为 `verified`：两个分片均从 snapshot 8 前进到相同的 snapshot 9，回执均为 `proof=save_current_callback`，producer instance 互不相同；两个 part 的 ZIP CRC、64 位 SHA256、共享文件 SHA256 和 `shared/`、`shard/` 内容边界全部通过校验，分片在备份期间没有停止或重启。
+
+本次实机验收同时暴露并修复了三个仅靠模拟测试未覆盖的兼容问题：Compose 的 `dst-saves` 卷根已经是 Cluster 父目录，必须使用 `DST_CONF_DIR=.`；远程配置投放必须显式保留每个分片的 `save/mod_config_data/dst-admin/` 空目录；真实 tmux 会把格式字符串中的 Tab 渲染为下划线，控制台进程与客户端探针改用受约束的 `|` 分隔。另将 DST `SetPersistentString` 写出的 `KLEI     1 ` JSON 头纳入统一严格解析，否则 snapshot 屏障已准备成功但控制面会持续判定回执不可读。
+
+验收结束后已删除两个临时 DST 容器和临时 Cluster Token，按原始 SHA256 恢复 `cluster.ini`，清理认证 Session；旧 E2E 栈和既有真实 DST 容器启动时间未变化。隔离控制面保留已验证备份集作为验收证据，Agent inventory 已刷新为零临时进程。
+
 ## 15. 交付文档
 
 - `docs/distributed-room-management-plan.md`：本执行计划。
