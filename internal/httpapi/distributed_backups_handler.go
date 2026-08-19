@@ -21,6 +21,10 @@ type DistributedBackupService interface {
 	RecoverOperation(context.Context, string) (distributedbackup.Operation, error)
 }
 
+type DistributedHotBackupService interface {
+	CreateWithMode(context.Context, string, string, string, string, string) (distributedbackup.Set, error)
+}
+
 type DistributedBackupHandler struct {
 	backups DistributedBackupService
 	jobs    *jobs.Service
@@ -78,9 +82,28 @@ func (h *DistributedBackupHandler) create(c *gin.Context) {
 		}
 	}
 	roomID := c.Param("roomId")
+	mode := request.Mode
+	if mode == "" {
+		mode = distributedbackup.ModeCold
+	}
+	if mode != distributedbackup.ModeCold && mode != distributedbackup.ModeHot {
+		Failure(c, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "备份模式无效", nil)
+		return
+	}
 	job, err := h.jobs.SubmitFactory("backup-set.create", roomID, "", []jobs.TargetSpec{{ID: roomID, Name: "全部分片"}}, func(job jobs.Job) jobs.Runner {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
-			value, createErr := h.backups.Create(ctx, roomID, request.Name, "manual", job.ID)
+			var value distributedbackup.Set
+			var createErr error
+			if mode == distributedbackup.ModeHot {
+				service, ok := h.backups.(DistributedHotBackupService)
+				if !ok {
+					createErr = distributedbackup.ErrHotUnavailable
+				} else {
+					value, createErr = service.CreateWithMode(ctx, roomID, request.Name, "manual", job.ID, mode)
+				}
+			} else {
+				value, createErr = h.backups.Create(ctx, roomID, request.Name, "manual", job.ID)
+			}
 			if createErr != nil {
 				report(jobs.TargetResult{TargetID: roomID, Status: jobs.StatusFailed, Error: distributedBackupJobError(createErr)})
 				return nil
@@ -174,6 +197,10 @@ func distributedBackupJobError(err error) *jobs.Error {
 		code = "BACKUP_SET_INCOMPLETE"
 	case errors.Is(err, distributedbackup.ErrRecoveryIncomplete):
 		code = "BACKUP_RECOVERY_REQUIRED"
+	case errors.Is(err, distributedbackup.ErrHotUnavailable):
+		code = "BACKUP_HOT_UNAVAILABLE"
+	case errors.Is(err, distributedbackup.ErrBarrierFailed):
+		code = "BACKUP_SNAPSHOT_BARRIER_FAILED"
 	}
 	return &jobs.Error{Code: code, Message: err.Error()}
 }
@@ -188,6 +215,8 @@ func distributedBackupFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusConflict, "BACKUP_TOPOLOGY_UNAVAILABLE", err.Error(), nil)
 	case errors.Is(err, distributedbackup.ErrIntegrity), errors.Is(err, distributedbackup.ErrIncomplete):
 		Failure(c, http.StatusUnprocessableEntity, "BACKUP_SET_INVALID", err.Error(), nil)
+	case errors.Is(err, distributedbackup.ErrHotUnavailable), errors.Is(err, distributedbackup.ErrBarrierFailed):
+		Failure(c, http.StatusConflict, "BACKUP_HOT_UNAVAILABLE", err.Error(), nil)
 	default:
 		Failure(c, http.StatusInternalServerError, "BACKUP_SET_OPERATION_FAILED", "备份集操作失败", nil)
 	}

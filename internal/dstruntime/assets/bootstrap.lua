@@ -1,4 +1,4 @@
-local VERSION = "2.3.1"
+local VERSION = "2.4.0"
 local PROTOCOL_VERSION = 2
 local MODULE_ROOT = "../dst-admin/"
 
@@ -43,6 +43,7 @@ local function new_candidate()
         local commands = candidate.Commands ~= nil and candidate.Commands.Status() or nil
         local events = candidate.Events ~= nil and candidate.Events.Status() or nil
         local diagnostics = candidate.Diagnostics ~= nil and candidate.Diagnostics.Status() or nil
+        local barriers = candidate.Barriers ~= nil and candidate.Barriers.Status() or nil
         return {
             version = candidate.version,
             protocolVersion = candidate.protocolVersion,
@@ -53,6 +54,7 @@ local function new_candidate()
             commands = commands,
             events = events,
             diagnostics = diagnostics,
+            barriers = barriers,
         }
     end
 
@@ -60,7 +62,7 @@ local function new_candidate()
         if candidate.state == "running" or candidate.state == "starting" then
             return true
         end
-        if candidate.Telemetry == nil or candidate.WorldState == nil or candidate.Commands == nil or candidate.Events == nil or candidate.Diagnostics == nil then
+        if candidate.Telemetry == nil or candidate.WorldState == nil or candidate.Commands == nil or candidate.Events == nil or candidate.Diagnostics == nil or candidate.Barriers == nil then
             candidate.state = "failed"
             emit_error("START_FAILED", "runtime module is unavailable")
             return false
@@ -96,6 +98,16 @@ local function new_candidate()
             emit_error("START_FAILED", started)
             return false
         end
+        ok, started = xpcall(candidate.Barriers.Start, debug.traceback)
+        if not ok or started == false then
+            candidate.Diagnostics.Stop()
+            candidate.Events.Stop()
+            candidate.WorldState.Stop()
+            candidate.Telemetry.Stop()
+            candidate.state = "failed"
+            emit_error("START_FAILED", started)
+            return false
+        end
         candidate.state = "running"
         return true
     end
@@ -106,6 +118,13 @@ local function new_candidate()
         end
         if candidate.Diagnostics ~= nil then
             local ok, stopped = xpcall(candidate.Diagnostics.Stop, debug.traceback)
+            if not ok or stopped == false then
+                emit_error("STOP_FAILED", stopped)
+                return false
+            end
+        end
+        if candidate.Barriers ~= nil then
+            local ok, stopped = xpcall(candidate.Barriers.Stop, debug.traceback)
             if not ok or stopped == false then
                 emit_error("STOP_FAILED", stopped)
                 return false
@@ -214,7 +233,14 @@ build_candidate = function(callback)
                             return
                         end
                         candidate.Diagnostics = diagnostics
-                        callback(candidate, nil)
+                        load_module("barriers", function(barriers, barriers_error)
+                            if barriers == nil then
+                                callback(nil, barriers_error)
+                                return
+                            end
+                            candidate.Barriers = barriers
+                            callback(candidate, nil)
+                        end)
                     end)
                 end)
             end)

@@ -7,7 +7,7 @@ import (
 
 const (
 	ProtocolVersion = 2
-	RuntimeVersion  = "2.3.1"
+	RuntimeVersion  = "2.4.0"
 )
 
 var (
@@ -182,6 +182,24 @@ type ModuleHealth struct {
 	LastDurationMilliseconds *float64 `json:"lastDurationMilliseconds,omitempty"`
 	ConsecutiveFailures      int      `json:"consecutiveFailures,omitempty"`
 	LastError                *string  `json:"lastError,omitempty"`
+}
+
+type SnapshotBarrierReceipt struct {
+	SchemaVersion      int       `json:"schemaVersion"`
+	ProducerVersion    string    `json:"producerVersion"`
+	ProducerInstanceID string    `json:"producerInstanceId"`
+	BarrierID          string    `json:"barrierId"`
+	State              string    `json:"state"`
+	SessionID          string    `json:"sessionId"`
+	ShardID            string    `json:"shardId"`
+	SnapshotBefore     int64     `json:"snapshotBefore"`
+	SnapshotAfter      int64     `json:"snapshotAfter,omitempty"`
+	PreparedAtUnix     int64     `json:"preparedAtUnix"`
+	CompletedAtUnix    int64     `json:"completedAtUnix,omitempty"`
+	ReleasedAtUnix     int64     `json:"releasedAtUnix,omitempty"`
+	Proof              string    `json:"proof,omitempty"`
+	Message            string    `json:"message,omitempty"`
+	ReadAt             time.Time `json:"-"`
 }
 
 type CommandRequest struct {

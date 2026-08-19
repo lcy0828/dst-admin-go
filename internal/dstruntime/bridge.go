@@ -296,7 +296,7 @@ func (b *Bridge) validLifecycleHealth(worldPath string, health Health, startedAt
 	if shardID, err := configuredShardID(worldPath); err != nil || shardID != "" && health.ShardID != shardID {
 		return false
 	}
-	for _, name := range []string{"worldstate", "commands", "events", "diagnostics"} {
+	for _, name := range []string{"worldstate", "commands", "events", "diagnostics", "barriers"} {
 		module, exists := health.Modules[name]
 		if !exists || !module.Running || !module.Ready || module.Busy || module.LastError != nil {
 			return false

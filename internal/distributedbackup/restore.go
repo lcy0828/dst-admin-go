@@ -85,7 +85,7 @@ func (c *Coordinator) Restore(ctx context.Context, setID, confirmation, sourceJo
 	protectionParts := rekeyParts(currentParts, protectionID, now)
 	protection, protectionOperation, err := c.initializeSet(
 		room, protectionParts, revision, running, "恢复前保护备份 "+now.Format("2006-01-02 15:04:05"), "protection", sourceJobID,
-		uuid.NewString(), lease,
+		uuid.NewString(), lease, ModeCold,
 	)
 	if err != nil {
 		return result, c.failRestore(&operation, nil, &lease, err)

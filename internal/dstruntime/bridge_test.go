@@ -127,7 +127,7 @@ func writeHealthyRuntime(t *testing.T, worldPath string, modifiedAt time.Time, i
 		SchemaVersion: 1, ProducerVersion: RuntimeVersion, ProducerInstanceID: instanceID, SessionID: "SESSION", ShardID: "1",
 		Running: true, Ready: true, Sequence: 1, Modules: map[string]ModuleHealth{
 			"worldstate": {Running: true, Ready: true}, "commands": {Running: true, Ready: true},
-			"events": {Running: true, Ready: true}, "diagnostics": {Running: true, Ready: true},
+			"events": {Running: true, Ready: true}, "diagnostics": {Running: true, Ready: true}, "barriers": {Running: true, Ready: true},
 		},
 	}
 	output := filepath.Join(worldPath, "save", "mod_config_data", "dst-admin")

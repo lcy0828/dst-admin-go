@@ -14,6 +14,8 @@ var (
 	ErrIncomplete         = errors.New("backup set is not complete")
 	ErrSharedFilesDiffer  = errors.New("cluster shared files differ across runtime targets")
 	ErrRecoveryIncomplete = errors.New("backup recovery requires operator attention")
+	ErrHotUnavailable     = errors.New("hot-consistent backup is unavailable for this room")
+	ErrBarrierFailed      = errors.New("cross-shard snapshot barrier failed")
 )
 
 type Status string
@@ -44,6 +46,8 @@ type Set struct {
 	Mode                  string     `json:"mode"`
 	ManifestVersion       int        `json:"manifestVersion"`
 	TopologyRevision      string     `json:"topologyRevision"`
+	BarrierID             string     `json:"barrierId,omitempty"`
+	Snapshot              int64      `json:"snapshot,omitempty"`
 	SharedSHA256          string     `json:"sharedSha256,omitempty"`
 	Status                Status     `json:"status"`
 	Size                  int64      `json:"size"`
@@ -71,6 +75,12 @@ type Part struct {
 	Cluster          string     `json:"cluster"`
 	Shard            string     `json:"shard"`
 	TopologyRevision string     `json:"topologyRevision"`
+	BarrierSessionID string     `json:"barrierSessionId,omitempty"`
+	BarrierShardID   string     `json:"barrierShardId,omitempty"`
+	BarrierInstance  string     `json:"barrierInstanceId,omitempty"`
+	SnapshotBefore   int64      `json:"snapshotBefore,omitempty"`
+	SnapshotAfter    int64      `json:"snapshotAfter,omitempty"`
+	BarrierCompleted *time.Time `json:"barrierCompletedAt,omitempty"`
 	FileName         string     `json:"fileName"`
 	Status           PartStatus `json:"status"`
 	Size             int64      `json:"size"`
@@ -113,6 +123,7 @@ type Operation struct {
 
 type CreateRequest struct {
 	Name string `json:"name"`
+	Mode string `json:"mode,omitempty"`
 }
 
 type RestoreRequest struct {

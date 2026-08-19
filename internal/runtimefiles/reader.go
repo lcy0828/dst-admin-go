@@ -29,6 +29,7 @@ var artifactNames = map[shared.ArtifactKind][]string{
 	shared.ArtifactRuntimeEvents:      {"events-a.json", "events-b.json"},
 	shared.ArtifactRuntimeCommand:     {"command-receipt-a.json", "command-receipt-b.json"},
 	shared.ArtifactRuntimeDiagnostics: {"diagnostic-a.json", "diagnostic-b.json"},
+	shared.ArtifactRuntimeBarrier:     {"snapshot-barrier.json"},
 }
 
 func IsArtifactKind(kind shared.ArtifactKind) bool {

@@ -19,6 +19,8 @@ type setRecord struct {
 	Mode                  string `gorm:"type:varchar(32);not null"`
 	ManifestVersion       int    `gorm:"not null"`
 	TopologyRevision      string `gorm:"type:varchar(128);index;not null"`
+	BarrierID             string `gorm:"type:varchar(128);index"`
+	Snapshot              int64  `gorm:"not null"`
 	SharedSHA256          string `gorm:"type:char(64)"`
 	Status                string `gorm:"type:varchar(24);index;not null"`
 	Size                  int64  `gorm:"not null"`
@@ -45,6 +47,12 @@ type partRecord struct {
 	Cluster          string `gorm:"type:varchar(64);not null"`
 	Shard            string `gorm:"type:varchar(64);not null"`
 	TopologyRevision string `gorm:"type:varchar(128);not null"`
+	BarrierSessionID string `gorm:"type:varchar(128)"`
+	BarrierShardID   string `gorm:"type:varchar(64)"`
+	BarrierInstance  string `gorm:"type:varchar(128)"`
+	SnapshotBefore   int64  `gorm:"not null"`
+	SnapshotAfter    int64  `gorm:"not null"`
+	BarrierCompleted *time.Time
 	FileName         string `gorm:"type:varchar(255);not null"`
 	Status           string `gorm:"type:varchar(24);index;not null"`
 	Size             int64  `gorm:"not null"`
@@ -183,6 +191,7 @@ func (s *Store) SaveSet(value Set) (Set, error) {
 	updates := map[string]interface{}{
 		"shared_sha256": record.SharedSHA256, "status": record.Status, "size": record.Size,
 		"content_size": record.ContentSize, "file_count": record.FileCount, "manifest_sha256": record.ManifestSHA256,
+		"barrier_id": record.BarrierID, "snapshot": record.Snapshot,
 		"failure": record.Failure, "verified_at": record.VerifiedAt, "updated_at": record.UpdatedAt,
 	}
 	result := s.db.Table(s.setTable).Where("id = ?", value.ID).Updates(updates)
@@ -201,6 +210,9 @@ func (s *Store) SavePart(value Part) (Part, error) {
 	updates := map[string]interface{}{
 		"status": record.Status, "size": record.Size, "content_size": record.ContentSize, "file_count": record.FileCount,
 		"sha256": record.SHA256, "shared_sha256": record.SharedSHA256, "failure": record.Failure,
+		"barrier_session_id": record.BarrierSessionID, "barrier_shard_id": record.BarrierShardID,
+		"barrier_instance": record.BarrierInstance, "snapshot_before": record.SnapshotBefore,
+		"snapshot_after": record.SnapshotAfter, "barrier_completed": record.BarrierCompleted,
 		"verified_at": record.VerifiedAt, "updated_at": record.UpdatedAt,
 	}
 	result := s.db.Table(s.partTable).Where("id = ? AND set_id = ?", value.ID, value.SetID).Updates(updates)
@@ -305,6 +317,7 @@ func setRecordFrom(value Set) (setRecord, error) {
 	return setRecord{
 		ID: value.ID, RoomID: value.RoomID, RoomName: value.RoomName, Name: value.Name, Kind: value.Kind, Mode: value.Mode,
 		ManifestVersion: value.ManifestVersion, TopologyRevision: value.TopologyRevision, SharedSHA256: value.SharedSHA256,
+		BarrierID: value.BarrierID, Snapshot: value.Snapshot,
 		Status: string(value.Status), Size: value.Size, ContentSize: value.ContentSize, FileCount: value.FileCount,
 		OriginalRunningWorlds: string(running), ManifestSHA256: value.ManifestSHA256, Failure: value.Failure,
 		SourceJobID: value.SourceJobID, VerifiedAt: value.VerifiedAt, CreatedAt: value.CreatedAt.UTC(), UpdatedAt: value.UpdatedAt.UTC(),
@@ -319,6 +332,7 @@ func setFromRecord(record setRecord) (Set, error) {
 	return Set{
 		ID: record.ID, RoomID: record.RoomID, RoomName: record.RoomName, Name: record.Name, Kind: record.Kind, Mode: record.Mode,
 		ManifestVersion: record.ManifestVersion, TopologyRevision: record.TopologyRevision, SharedSHA256: record.SharedSHA256,
+		BarrierID: record.BarrierID, Snapshot: record.Snapshot,
 		Status: Status(record.Status), Size: record.Size, ContentSize: record.ContentSize, FileCount: record.FileCount,
 		OriginalRunningWorlds: running, ManifestSHA256: record.ManifestSHA256, Failure: record.Failure, SourceJobID: record.SourceJobID,
 		VerifiedAt: record.VerifiedAt, CreatedAt: record.CreatedAt.UTC(), UpdatedAt: record.UpdatedAt.UTC(),
@@ -330,6 +344,8 @@ func partRecordFrom(value Part) partRecord {
 		ID: value.ID, SetID: value.SetID, RoomID: value.RoomID, WorldID: value.WorldID, WorldName: value.WorldName,
 		WorldRole: value.WorldRole, TargetID: value.TargetID, InstallationID: value.InstallationID, Cluster: value.Cluster,
 		Shard: value.Shard, TopologyRevision: value.TopologyRevision, FileName: value.FileName, Status: string(value.Status),
+		BarrierSessionID: value.BarrierSessionID, BarrierShardID: value.BarrierShardID, BarrierInstance: value.BarrierInstance,
+		SnapshotBefore: value.SnapshotBefore, SnapshotAfter: value.SnapshotAfter, BarrierCompleted: value.BarrierCompleted,
 		Size: value.Size, ContentSize: value.ContentSize, FileCount: value.FileCount, SHA256: value.SHA256,
 		SharedSHA256: value.SharedSHA256, Failure: value.Failure, VerifiedAt: value.VerifiedAt,
 		CreatedAt: value.CreatedAt.UTC(), UpdatedAt: value.UpdatedAt.UTC(),
@@ -341,6 +357,8 @@ func partFromRecord(record partRecord) Part {
 		ID: record.ID, SetID: record.SetID, RoomID: record.RoomID, WorldID: record.WorldID, WorldName: record.WorldName,
 		WorldRole: record.WorldRole, TargetID: record.TargetID, InstallationID: record.InstallationID, Cluster: record.Cluster,
 		Shard: record.Shard, TopologyRevision: record.TopologyRevision, FileName: record.FileName, Status: PartStatus(record.Status),
+		BarrierSessionID: record.BarrierSessionID, BarrierShardID: record.BarrierShardID, BarrierInstance: record.BarrierInstance,
+		SnapshotBefore: record.SnapshotBefore, SnapshotAfter: record.SnapshotAfter, BarrierCompleted: record.BarrierCompleted,
 		Size: record.Size, ContentSize: record.ContentSize, FileCount: record.FileCount, SHA256: record.SHA256,
 		SharedSHA256: record.SharedSHA256, Failure: record.Failure, VerifiedAt: record.VerifiedAt,
 		CreatedAt: record.CreatedAt.UTC(), UpdatedAt: record.UpdatedAt.UTC(),

@@ -412,7 +412,7 @@ func (b *DistributedBridge) lifecycleHealthReady(health Health, startedAt time.T
 	if !startedAt.IsZero() && health.ReadAt.Before(startedAt) || b.now().UTC().Sub(health.ReadAt) > defaultFreshFor {
 		return false
 	}
-	for _, name := range []string{"worldstate", "commands", "events", "diagnostics"} {
+	for _, name := range []string{"worldstate", "commands", "events", "diagnostics", "barriers"} {
 		module, exists := health.Modules[name]
 		if !exists || !module.Running || !module.Ready || module.Busy || module.LastError != nil {
 			return false

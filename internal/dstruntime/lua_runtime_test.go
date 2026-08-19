@@ -397,6 +397,122 @@ func TestDiagnosticsLuaCancelsReadinessAndAutomaticallyStopsPerformanceSampling(
 	}
 }
 
+func TestBarriersLuaProvesSaveCallbackAndPreservesDelayedShutdown(t *testing.T) {
+	state := lua.NewState()
+	defer state.Close()
+
+	var receipt *lua.LTable
+	state.PreloadModule("json", func(L *lua.LState) int {
+		module := L.NewTable()
+		state.SetField(module, "encode", state.NewFunction(func(L *lua.LState) int {
+			receipt = L.CheckTable(1)
+			L.Push(lua.LString("{}"))
+			return 1
+		}))
+		L.Push(module)
+		return 1
+	})
+	theSim := state.NewTable()
+	state.SetField(theSim, "SetPersistentString", state.NewFunction(func(L *lua.LState) int {
+		if path := L.CheckString(2); path != "mod_config_data/dst-admin/snapshot-barrier.json" {
+			L.RaiseError("unexpected receipt path %s", path)
+		}
+		callback := L.CheckFunction(5)
+		if err := L.CallByParam(lua.P{Fn: callback, NRet: 0, Protect: true}, lua.LTrue); err != nil {
+			L.RaiseError("receipt callback: %v", err)
+		}
+		return 0
+	}))
+	state.SetGlobal("TheSim", theSim)
+	snapshot := 40
+	theNet := state.NewTable()
+	state.SetField(theNet, "GetSessionIdentifier", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LString("SESSION")); return 1 }))
+	state.SetField(theNet, "GetCurrentSnapshot", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LNumber(snapshot)); return 1 }))
+	state.SetGlobal("TheNet", theNet)
+	theShard := state.NewTable()
+	state.SetField(theShard, "GetShardId", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LString("1")); return 1 }))
+	state.SetGlobal("TheShard", theShard)
+
+	var timeoutCallback *lua.LFunction
+	timeoutCanceled := 0
+	theWorld := state.NewTable()
+	state.SetField(theWorld, "ismastersim", lua.LTrue)
+	state.SetField(theWorld, "ismastershard", lua.LTrue)
+	state.SetField(theWorld, "DoTaskInTime", state.NewFunction(func(L *lua.LState) int {
+		timeoutCallback = L.CheckFunction(3)
+		L.Push(luaTask(state, &timeoutCanceled))
+		return 1
+	}))
+	state.SetGlobal("TheWorld", theWorld)
+
+	saveCalls := 0
+	shutdownValues := make([]bool, 0, 2)
+	shardGameIndex := state.NewTable()
+	originalSave := state.NewFunction(func(L *lua.LState) int {
+		saveCalls++
+		shutdownValues = append(shutdownValues, lua.LVAsBool(L.Get(3)))
+		snapshot++
+		if callback, ok := L.Get(2).(*lua.LFunction); ok {
+			if err := L.CallByParam(lua.P{Fn: callback, NRet: 0, Protect: true}); err != nil {
+				L.RaiseError("save callback: %v", err)
+			}
+		}
+		return 0
+	})
+	state.SetField(shardGameIndex, "SaveCurrent", originalSave)
+	state.SetGlobal("ShardGameIndex", shardGameIndex)
+	state.SetField(theWorld, "PushEvent", state.NewFunction(func(L *lua.LState) int {
+		if L.CheckString(2) != "ms_save" {
+			L.RaiseError("unexpected world event")
+		}
+		save := requireLuaFunction(t, state.GetField(shardGameIndex, "SaveCurrent"), "wrapped SaveCurrent")
+		if err := L.CallByParam(lua.P{Fn: save, NRet: 0, Protect: true}, shardGameIndex, lua.LNil, lua.LFalse); err != nil {
+			L.RaiseError("trigger save: %v", err)
+		}
+		return 0
+	}))
+
+	module := loadLuaModule(t, state, "barriers.lua")
+	callLuaMethod(t, state, module, "Start", true)
+	callLuaMethodWithString(t, state, module, "Prepare", "hot-barrier-123", true)
+	if receipt == nil || state.GetField(receipt, "state").String() != "prepared" || timeoutCallback == nil {
+		t.Fatalf("prepared receipt=%v timeout=%v", receipt, timeoutCallback != nil)
+	}
+	callLuaMethodWithString(t, state, module, "Commit", "hot-barrier-123", true)
+	if saveCalls != 1 || state.GetField(receipt, "state").String() != "completed" || state.GetField(receipt, "proof").String() != "save_current_callback" || luaIntField(state, receipt, "snapshotAfter") != 41 {
+		t.Fatalf("saveCalls=%d receipt=%v", saveCalls, receipt)
+	}
+	status := callLuaTableMethod(t, state, module, "Status")
+	if !lua.LVAsBool(state.GetField(status, "holding")) {
+		t.Fatalf("barrier status=%v", status)
+	}
+
+	delayedCallbackCalls := 0
+	delayedCallback := state.NewFunction(func(L *lua.LState) int { delayedCallbackCalls++; return 0 })
+	wrappedSave := requireLuaFunction(t, state.GetField(shardGameIndex, "SaveCurrent"), "wrapped SaveCurrent")
+	if err := state.CallByParam(lua.P{Fn: wrappedSave, NRet: 0, Protect: true}, shardGameIndex, delayedCallback, lua.LTrue); err != nil {
+		t.Fatal(err)
+	}
+	if saveCalls != 1 {
+		t.Fatalf("held shutdown save reached original SaveCurrent: %d", saveCalls)
+	}
+	callLuaMethodWithString(t, state, module, "Release", "hot-barrier-123", true)
+	if saveCalls != 2 || delayedCallbackCalls != 1 || len(shutdownValues) != 2 || !shutdownValues[1] || timeoutCanceled == 0 {
+		t.Fatalf("saveCalls=%d callback=%d shutdown=%v timeoutCanceled=%d", saveCalls, delayedCallbackCalls, shutdownValues, timeoutCanceled)
+	}
+
+	callLuaMethodWithString(t, state, module, "Prepare", "hot-timeout-456", true)
+	callLuaFunction(t, state, timeoutCallback)
+	status = callLuaTableMethod(t, state, module, "Status")
+	if lua.LVAsBool(state.GetField(status, "busy")) || state.GetField(receipt, "state").String() != "cancelled" {
+		t.Fatalf("timeout status=%v receipt=%v", status, receipt)
+	}
+	callLuaMethod(t, state, module, "Stop", true)
+	if state.GetField(shardGameIndex, "SaveCurrent") != originalSave {
+		t.Fatal("Stop did not restore the original SaveCurrent function")
+	}
+}
+
 func preloadStaticJSONHarness(state *lua.LState) {
 	state.PreloadModule("json", func(L *lua.LState) int {
 		module := L.NewTable()
@@ -606,6 +722,19 @@ func callLuaMethod(t *testing.T, state *lua.LState, table *lua.LTable, name stri
 		t.Fatalf("%s is not a function", name)
 	}
 	if err := state.CallByParam(lua.P{Fn: function, NRet: 1, Protect: true}); err != nil {
+		t.Fatalf("call %s: %v", name, err)
+	}
+	actual := lua.LVAsBool(state.Get(-1))
+	state.Pop(1)
+	if actual != expected {
+		t.Fatalf("%s returned %v, want %v", name, actual, expected)
+	}
+}
+
+func callLuaMethodWithString(t *testing.T, state *lua.LState, table *lua.LTable, name, value string, expected bool) {
+	t.Helper()
+	function := requireLuaFunction(t, state.GetField(table, name), name)
+	if err := state.CallByParam(lua.P{Fn: function, NRet: 1, Protect: true}, lua.LString(value)); err != nil {
 		t.Fatalf("call %s: %v", name, err)
 	}
 	actual := lua.LVAsBool(state.Get(-1))

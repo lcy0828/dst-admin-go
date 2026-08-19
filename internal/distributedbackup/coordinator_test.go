@@ -36,9 +36,117 @@ type backupTestPlacements struct {
 func (f backupTestPlacements) ResolveRoomExecutions(_ context.Context, roomID string) ([]topology.ExecutionPlacement, error) {
 	result := make([]topology.ExecutionPlacement, 0, len(f.worlds))
 	for _, world := range f.worlds {
-		result = append(result, topology.ExecutionPlacement{Room: f.room, World: world, Revision: f.revision, AppliedTargetID: "local"})
+		targetID := "agent:caves-node"
+		if world.Role == rooms.WorldRoleMaster {
+			targetID = "agent:master-node"
+		}
+		result = append(result, topology.ExecutionPlacement{Room: f.room, World: world, Revision: f.revision, AppliedTargetID: targetID})
 	}
 	return result, nil
+}
+
+type hotBarrierHarness struct {
+	mu        sync.Mutex
+	drivers   []*hotBarrierDriver
+	snapshots []int64
+}
+
+type hotBarrierDriver struct {
+	runtimedriver.Driver
+	harness        *hotBarrierHarness
+	receipt        runtimedriver.SnapshotBarrierReceipt
+	released       bool
+	stageErr       error
+	backupReleases int
+}
+
+func (d *hotBarrierDriver) StageBackup(ctx context.Context, target runtimedriver.Target, operation runtimedriver.Operation, backupID string) (runtimedriver.BackupDescriptor, error) {
+	if d.stageErr != nil {
+		return runtimedriver.BackupDescriptor{}, d.stageErr
+	}
+	return d.Driver.StageBackup(ctx, target, operation, backupID)
+}
+
+func (d *hotBarrierDriver) ReleaseBackup(ctx context.Context, target runtimedriver.Target, operation runtimedriver.Operation, backupID string) error {
+	d.harness.mu.Lock()
+	d.backupReleases++
+	d.harness.mu.Unlock()
+	return d.Driver.ReleaseBackup(ctx, target, operation, backupID)
+}
+
+func (d *hotBarrierDriver) PrepareSnapshotBarrier(_ context.Context, target runtimedriver.Target, _ runtimedriver.Operation, barrierID string) (runtimedriver.SnapshotBarrierReceipt, error) {
+	d.harness.mu.Lock()
+	defer d.harness.mu.Unlock()
+	d.receipt = runtimedriver.SnapshotBarrierReceipt{
+		SchemaVersion: 1, ProducerVersion: "2.4.0", ProducerInstanceID: "instance-" + target.Shard,
+		BarrierID: barrierID, State: "prepared", SessionID: "session-" + target.Shard, ShardID: target.Shard,
+		SnapshotBefore: 40, PreparedAtUnix: time.Now().Unix(),
+	}
+	return d.receipt, nil
+}
+
+func (d *hotBarrierDriver) CommitSnapshotBarrier(_ context.Context, _ runtimedriver.Target, _ runtimedriver.Operation, barrierID string) error {
+	d.harness.mu.Lock()
+	defer d.harness.mu.Unlock()
+	for index, current := range d.harness.drivers {
+		if current.receipt.BarrierID != barrierID {
+			return errors.New("barrier was not prepared on every shard")
+		}
+		snapshot := int64(41)
+		if index < len(d.harness.snapshots) {
+			snapshot = d.harness.snapshots[index]
+		}
+		current.receipt.State = "completed"
+		current.receipt.SnapshotAfter = snapshot
+		current.receipt.CompletedAtUnix = current.receipt.PreparedAtUnix + 1
+		current.receipt.Proof = "save_current_callback"
+	}
+	return nil
+}
+
+func (d *hotBarrierDriver) SnapshotBarrier(_ context.Context, _ runtimedriver.Target, barrierID string) (runtimedriver.SnapshotBarrierReceipt, error) {
+	d.harness.mu.Lock()
+	defer d.harness.mu.Unlock()
+	if d.receipt.BarrierID != barrierID {
+		return runtimedriver.SnapshotBarrierReceipt{}, errors.New("barrier receipt missing")
+	}
+	return d.receipt, nil
+}
+
+func (d *hotBarrierDriver) ReleaseSnapshotBarrier(_ context.Context, _ runtimedriver.Target, _ runtimedriver.Operation, barrierID string) error {
+	d.harness.mu.Lock()
+	defer d.harness.mu.Unlock()
+	if d.receipt.BarrierID != barrierID || d.receipt.State != "completed" {
+		return errors.New("barrier is not complete")
+	}
+	d.released = true
+	d.receipt.State = "released"
+	return nil
+}
+
+func (d *hotBarrierDriver) CancelSnapshotBarrier(_ context.Context, _ runtimedriver.Target, _ runtimedriver.Operation, barrierID string) error {
+	d.harness.mu.Lock()
+	defer d.harness.mu.Unlock()
+	if d.receipt.BarrierID == barrierID {
+		d.released = true
+	}
+	return nil
+}
+
+func installHotBarrierDrivers(t *testing.T, fixture distributedBackupFixture, snapshots []int64) []*hotBarrierDriver {
+	t.Helper()
+	router := fixture.coordinator.runtimes.(backupTestRouter)
+	harness := &hotBarrierHarness{snapshots: snapshots}
+	drivers := make([]*hotBarrierDriver, 0, len(router.values))
+	for _, worldID := range []string{"master", "caves"} {
+		value := router.values[worldID]
+		driver := &hotBarrierDriver{Driver: value.driver, harness: harness}
+		value.driver = driver
+		router.values[worldID] = value
+		drivers = append(drivers, driver)
+	}
+	harness.drivers = drivers
+	return drivers
 }
 
 type backupTestRouter struct {
@@ -259,6 +367,72 @@ func TestColdConsistentBackupAndCoordinatedRestoreAcrossTargets(t *testing.T) {
 	protection, err := fixture.store.GetSet(result.ProtectionSetID)
 	if err != nil || protection.Status != StatusVerified || protection.Kind != "protection" {
 		t.Fatalf("protection=%#v err=%v", protection, err)
+	}
+}
+
+func TestHotConsistentBackupStagesAUnifiedSnapshotWithoutStoppingShards(t *testing.T) {
+	fixture := newDistributedBackupFixture(t)
+	drivers := installHotBarrierDrivers(t, fixture, []int64{41, 41})
+	created, err := fixture.coordinator.CreateWithMode(context.Background(), "room", "在线一致备份", "manual", "job-hot", ModeHot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != StatusVerified || created.Mode != ModeHot || created.BarrierID == "" || created.Snapshot != 41 || len(created.Parts) != 2 {
+		t.Fatalf("created=%#v", created)
+	}
+	for _, part := range created.Parts {
+		if part.SnapshotAfter != 41 || part.SnapshotBefore != 40 || part.BarrierSessionID == "" || part.BarrierInstance == "" || part.BarrierCompleted == nil {
+			t.Fatalf("part lacks barrier proof: %#v", part)
+		}
+	}
+	for _, driver := range drivers {
+		if !driver.released {
+			t.Fatal("snapshot hold was not released after immutable staging")
+		}
+	}
+	fixture.master.mu.Lock()
+	masterStops := fixture.master.stops["Cluster_1\x00Master"]
+	fixture.master.mu.Unlock()
+	fixture.caves.mu.Lock()
+	cavesStops := fixture.caves.stops["Cluster_1\x00Caves"]
+	fixture.caves.mu.Unlock()
+	if masterStops != 0 || cavesStops != 0 {
+		t.Fatalf("hot backup stopped shards: master=%d caves=%d", masterStops, cavesStops)
+	}
+}
+
+func TestHotConsistentBackupRejectsConflictingShardSnapshots(t *testing.T) {
+	fixture := newDistributedBackupFixture(t)
+	installHotBarrierDrivers(t, fixture, []int64{41, 42})
+	created, err := fixture.coordinator.CreateWithMode(context.Background(), "room", "冲突热备份", "manual", "", ModeHot)
+	if !errors.Is(err, ErrBarrierFailed) {
+		t.Fatalf("create error=%v set=%#v", err, created)
+	}
+	stored, loadErr := fixture.store.GetSet(created.ID)
+	if loadErr != nil || stored.Status == StatusVerified || stored.Snapshot != 0 {
+		t.Fatalf("stored=%#v err=%v", stored, loadErr)
+	}
+}
+
+func TestHotConsistentBackupReleasesEveryStagedPartWhenLaterStageFails(t *testing.T) {
+	fixture := newDistributedBackupFixture(t)
+	drivers := installHotBarrierDrivers(t, fixture, []int64{41, 41})
+	drivers[1].stageErr = errors.New("forced caves staging failure")
+	created, err := fixture.coordinator.CreateWithMode(context.Background(), "room", "失败热备份", "manual", "", ModeHot)
+	if err == nil || created.Status == StatusVerified {
+		t.Fatalf("create error=%v set=%#v", err, created)
+	}
+	drivers[0].harness.mu.Lock()
+	masterReleases := drivers[0].backupReleases
+	cavesReleases := drivers[1].backupReleases
+	drivers[0].harness.mu.Unlock()
+	if masterReleases == 0 || cavesReleases == 0 {
+		t.Fatalf("staged backup releases master=%d caves=%d", masterReleases, cavesReleases)
+	}
+	for _, driver := range drivers {
+		if !driver.released {
+			t.Fatal("snapshot barrier was not released after staging failure")
+		}
 	}
 }
 

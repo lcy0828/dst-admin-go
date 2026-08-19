@@ -73,6 +73,7 @@ const (
 	ArtifactRuntimeEvents      ArtifactKind = "runtime.events"
 	ArtifactRuntimeCommand     ArtifactKind = "runtime.command_receipt"
 	ArtifactRuntimeDiagnostics ArtifactKind = "runtime.diagnostics"
+	ArtifactRuntimeBarrier     ArtifactKind = "runtime.snapshot_barrier"
 )
 
 type RuntimeConsoleRequest struct {

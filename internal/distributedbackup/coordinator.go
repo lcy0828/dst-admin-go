@@ -29,6 +29,8 @@ const (
 	manifestVersion = 1
 	leaseTTL        = 5 * time.Minute
 	stopTimeout     = 2 * time.Minute
+	ModeCold        = "cold-consistent"
+	ModeHot         = "hot-consistent"
 )
 
 type RoomCatalog interface {
@@ -63,6 +65,7 @@ type runtimePart struct {
 	part   Part
 	driver runtimedriver.Driver
 	target runtimedriver.Target
+	state  string
 }
 
 func NewCoordinator(root string, rooms RoomCatalog, placements PlacementResolver, runtimes RuntimeRouter, leases LeaseService, store *Store) (*Coordinator, error) {
@@ -91,6 +94,16 @@ func (c *Coordinator) Operations(roomID string) ([]Operation, error) {
 func (c *Coordinator) Operation(id string) (Operation, error) { return c.store.Operation(id) }
 
 func (c *Coordinator) Create(ctx context.Context, roomID, name, kind, sourceJobID string) (Set, error) {
+	return c.CreateWithMode(ctx, roomID, name, kind, sourceJobID, ModeCold)
+}
+
+func (c *Coordinator) CreateWithMode(ctx context.Context, roomID, name, kind, sourceJobID, mode string) (Set, error) {
+	if mode == "" {
+		mode = ModeCold
+	}
+	if mode != ModeCold && mode != ModeHot {
+		return Set{}, ErrInvalidInput
+	}
 	ctx, releaseRoom, err := roomops.Acquire(ctx, roomID)
 	if err != nil {
 		return Set{}, err
@@ -102,7 +115,7 @@ func (c *Coordinator) Create(ctx context.Context, roomID, name, kind, sourceJobI
 		return Set{}, err
 	}
 	defer func() { _ = c.leases.Release(lease) }()
-	return c.createUsingLease(ctx, roomID, name, kind, sourceJobID, operationID, &lease)
+	return c.createUsingLease(ctx, roomID, name, kind, sourceJobID, operationID, &lease, mode)
 }
 
 // CreateProtected creates a cold-consistent protection backup while borrowing
@@ -122,17 +135,20 @@ func (c *Coordinator) CreateProtected(ctx context.Context, roomID, name, sourceJ
 	if err := c.renewLease(ctx, lease); err != nil {
 		return Set{}, err
 	}
-	return c.createUsingLease(ctx, roomID, name, "protection", sourceJobID, uuid.NewString(), lease)
+	return c.createUsingLease(ctx, roomID, name, "protection", sourceJobID, uuid.NewString(), lease, ModeCold)
 }
 
-func (c *Coordinator) createUsingLease(ctx context.Context, roomID, name, kind, sourceJobID, operationID string, lease *operationlease.Lease) (Set, error) {
+func (c *Coordinator) createUsingLease(ctx context.Context, roomID, name, kind, sourceJobID, operationID string, lease *operationlease.Lease, mode string) (Set, error) {
 	room, runtimeParts, revision, running, err := c.plan(ctx, roomID)
 	if err != nil {
 		return Set{}, err
 	}
-	set, operation, err := c.initializeSet(room, runtimeParts, revision, running, name, kind, sourceJobID, operationID, *lease)
+	set, operation, err := c.initializeSet(room, runtimeParts, revision, running, name, kind, sourceJobID, operationID, *lease, mode)
 	if err != nil {
 		return Set{}, err
+	}
+	if mode == ModeHot {
+		return c.createHotWithPlan(ctx, set, operation, runtimeParts, lease)
 	}
 	return c.createWithPlan(ctx, set, operation, runtimeParts, lease, true)
 }
@@ -231,7 +247,7 @@ func (c *Coordinator) plan(ctx context.Context, roomID string) (rooms.Room, []ru
 		}
 		partID := fmt.Sprintf("backup-%s-%02d", setID, index)
 		parts = append(parts, runtimePart{
-			driver: driver, target: target,
+			driver: driver, target: target, state: status.State,
 			part: Part{
 				ID: partID, SetID: setID, RoomID: roomID, WorldID: world.ID, WorldName: world.Name, WorldRole: string(world.Role),
 				TargetID: target.TargetID, InstallationID: target.InstallationID, Cluster: target.Cluster, Shard: target.Shard,
@@ -243,7 +259,7 @@ func (c *Coordinator) plan(ctx context.Context, roomID string) (rooms.Room, []ru
 	return room, parts, revision, running, nil
 }
 
-func (c *Coordinator) initializeSet(room rooms.Room, parts []runtimePart, revision string, running []string, name, kind, sourceJobID, operationID string, lease operationlease.Lease) (Set, Operation, error) {
+func (c *Coordinator) initializeSet(room rooms.Room, parts []runtimePart, revision string, running []string, name, kind, sourceJobID, operationID string, lease operationlease.Lease, mode string) (Set, Operation, error) {
 	now := c.now().UTC()
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -257,7 +273,7 @@ func (c *Coordinator) initializeSet(room rooms.Room, parts []runtimePart, revisi
 	}
 	setID := parts[0].part.SetID
 	set := Set{
-		ID: setID, RoomID: room.ID, RoomName: room.Name, Name: name, Kind: kind, Mode: "cold-consistent",
+		ID: setID, RoomID: room.ID, RoomName: room.Name, Name: name, Kind: kind, Mode: mode,
 		ManifestVersion: manifestVersion, TopologyRevision: revision, Status: StatusCreating,
 		OriginalRunningWorlds: append([]string(nil), running...), SourceJobID: sourceJobID, CreatedAt: now, UpdatedAt: now,
 	}
@@ -279,23 +295,39 @@ func (c *Coordinator) initializeSet(room rooms.Room, parts []runtimePart, revisi
 }
 
 func (c *Coordinator) stagePart(ctx context.Context, current runtimePart, operation Operation, lease *operationlease.Lease, index int) (Part, error) {
-	part := current.part
-	part.Status, part.Failure = PartStaging, ""
-	if _, err := c.store.SavePart(part); err != nil {
-		return part, err
-	}
-	step := c.runtimeOperation(*lease, operation.ID, "stage", index, 0)
-	descriptor, err := current.driver.StageBackup(ctx, current.target, step, part.ID)
+	descriptor, part, err := c.stageDescriptor(ctx, current, operation, lease, index)
 	if err != nil {
-		return c.failPart(part, err)
-	}
-	if descriptor.BackupID != part.ID || descriptor.Size < 1 || descriptor.ContentSize < 1 || descriptor.FileCount < 2 ||
-		len(descriptor.SHA256) != 64 || len(descriptor.SharedSHA256) != 64 {
-		return c.failPart(part, ErrIntegrity)
+		return part, err
 	}
 	defer func() {
 		_ = current.driver.ReleaseBackup(context.Background(), current.target, c.runtimeOperation(*lease, operation.ID, "release", index, 0), part.ID)
 	}()
+	return c.collectStagedPart(ctx, current, operation, lease, index, descriptor, part)
+}
+
+func (c *Coordinator) stageDescriptor(ctx context.Context, current runtimePart, operation Operation, lease *operationlease.Lease, index int) (runtimedriver.BackupDescriptor, Part, error) {
+	part := current.part
+	part.Status, part.Failure = PartStaging, ""
+	if _, err := c.store.SavePart(part); err != nil {
+		return runtimedriver.BackupDescriptor{}, part, err
+	}
+	step := c.runtimeOperation(*lease, operation.ID, "stage", index, 0)
+	descriptor, err := current.driver.StageBackup(ctx, current.target, step, part.ID)
+	if err != nil {
+		_ = current.driver.ReleaseBackup(context.Background(), current.target, c.runtimeOperation(*lease, operation.ID, "stage-failed-release", index, 0), part.ID)
+		failed, cause := c.failPart(part, err)
+		return runtimedriver.BackupDescriptor{}, failed, cause
+	}
+	if descriptor.BackupID != part.ID || descriptor.Size < 1 || descriptor.ContentSize < 1 || descriptor.FileCount < 2 ||
+		len(descriptor.SHA256) != 64 || len(descriptor.SharedSHA256) != 64 {
+		_ = current.driver.ReleaseBackup(context.Background(), current.target, c.runtimeOperation(*lease, operation.ID, "stage-invalid-release", index, 0), part.ID)
+		failed, cause := c.failPart(part, ErrIntegrity)
+		return runtimedriver.BackupDescriptor{}, failed, cause
+	}
+	return descriptor, part, nil
+}
+
+func (c *Coordinator) collectStagedPart(ctx context.Context, current runtimePart, operation Operation, lease *operationlease.Lease, index int, descriptor runtimedriver.BackupDescriptor, part Part) (Part, error) {
 	path, err := c.partPath(part)
 	if err != nil {
 		return c.failPart(part, err)
