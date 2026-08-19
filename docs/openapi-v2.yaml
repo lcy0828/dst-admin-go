@@ -453,6 +453,66 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/topology/actions/provision:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Topology, Jobs]
+      operationId: provisionRoomTopology
+      summary: Publish a stopped locally managed room configuration to every planned runtime target
+      description: Uses a fixed configuration allowlist, chunk hashes, atomic target publication, and durable rollback markers. It does not expose arbitrary paths, file writes, or shell execution. Existing remote Shards must use placement migration instead.
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RoomProvisionInput" }
+      responses:
+        "202":
+          description: Room configuration provision job accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/provision-operations:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Topology]
+      operationId: listRoomProvisionOperations
+      summary: List durable room configuration publication operations and per-Shard phases
+      responses:
+        "200":
+          description: Room provision operations ordered newest first
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoomProvisionOperationListEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /provision-operations/{provisionOperationId}/actions/recover:
+    parameters:
+      - name: provisionOperationId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Topology, Jobs]
+      operationId: recoverRoomProvisionOperation
+      summary: Resume a committed publication or roll back an operation interrupted before its durable commit decision
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202":
+          description: Room provision recovery job accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /rooms/{roomId}/backup-sets:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -470,7 +530,7 @@ paths:
     post:
       tags: [Backups, Jobs]
       operationId: createDistributedBackupSet
-      summary: Stop all Shards and create a verified cold-consistent backup set
+      summary: Create a verified cold-consistent or hot-consistent backup set for every Shard
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -8056,8 +8116,9 @@ components:
     RuntimeConfig:
       type: object
       additionalProperties: false
-      required: [displayName, savePath, backupPath, serverPath, ugcPath, steamcmdPath, workshopContentPath, luaBinary, luaFallbackPath, serverMode]
+      required: [installationId, displayName, savePath, backupPath, serverPath, ugcPath, steamcmdPath, workshopContentPath, luaBinary, luaFallbackPath, serverMode]
       properties:
+        installationId: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' }
         displayName: { type: string, maxLength: 100 }
         savePath: { type: string, maxLength: 2048 }
         backupPath: { type: string, maxLength: 2048 }
@@ -8072,8 +8133,9 @@ components:
     RuntimeConfigInput:
       type: object
       additionalProperties: false
-      required: [savePath, serverPath]
+      required: [installationId]
       properties:
+        installationId: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$', description: Must match an installation advertised by current Agents; older Agents accept a manually configured ID. }
         displayName: { type: string, maxLength: 100 }
         savePath: { type: string, minLength: 1, maxLength: 2048 }
         backupPath: { type: string, maxLength: 2048 }
@@ -8164,10 +8226,23 @@ components:
         runningShards: { type: integer, minimum: 0 }
         availableSlots: { type: integer, minimum: 0 }
         message: { type: string }
+    AgentRuntimeInstallation:
+      type: object
+      additionalProperties: false
+      required: [id, driver, savePath, serverPath, steamcmdPath, ugcPath, workshopContentPath, serverMode]
+      properties:
+        id: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' }
+        driver: { type: string, enum: [native, container] }
+        savePath: { type: string }
+        serverPath: { type: string }
+        steamcmdPath: { type: string }
+        ugcPath: { type: string }
+        workshopContentPath: { type: string }
+        serverMode: { type: string, enum: ["32", "64"] }
     Agent:
       type: object
       additionalProperties: false
-      required: [id, hostname, os, arch, version, ipAddresses, status, lastHeartbeat, capabilities, metrics, capacity, metricsStale, details, createdAt, updatedAt]
+      required: [id, hostname, os, arch, version, ipAddresses, status, lastHeartbeat, capabilities, metrics, capacity, metricsStale, installationRegistrySupported, installations, details, createdAt, updatedAt]
       properties:
         id: { type: string }
         hostname: { type: string }
@@ -8183,6 +8258,8 @@ components:
         capacity: { $ref: "#/components/schemas/AgentCapacity" }
         metricsStale: { type: boolean }
         staleReason: { type: string, enum: [agent_offline, report_missing, report_expired, clock_skew] }
+        installationRegistrySupported: { type: boolean, description: True when the Agent explicitly reports its trusted runtime installation registry, including an empty registry. }
+        installations: { type: array, items: { $ref: "#/components/schemas/AgentRuntimeInstallation" } }
         details: { type: object, additionalProperties: true }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
@@ -8437,6 +8514,10 @@ components:
       additionalProperties: false
       properties:
         name: { type: string, maxLength: 128 }
+        mode:
+          type: string
+          enum: [cold-consistent, hot-consistent]
+          default: cold-consistent
     DistributedBackupSetRestoreInput:
       type: object
       additionalProperties: false
@@ -8464,6 +8545,12 @@ components:
         cluster: { type: string }
         shard: { type: string }
         topologyRevision: { type: string }
+        barrierSessionId: { type: string }
+        barrierShardId: { type: string }
+        barrierInstanceId: { type: string }
+        snapshotBefore: { type: integer, format: int64, minimum: 0 }
+        snapshotAfter: { type: integer, format: int64, minimum: 0 }
+        barrierCompletedAt: { type: string, format: date-time }
         fileName: { type: string }
         status: { $ref: "#/components/schemas/DistributedBackupPartStatus" }
         size: { type: integer, format: int64, minimum: 0 }
@@ -8488,9 +8575,11 @@ components:
         roomName: { type: string }
         name: { type: string }
         kind: { type: string, enum: [manual, protection] }
-        mode: { type: string, const: cold-consistent }
+        mode: { type: string, enum: [cold-consistent, hot-consistent] }
         manifestVersion: { type: integer, minimum: 1 }
         topologyRevision: { type: string }
+        barrierId: { type: string }
+        snapshot: { type: integer, format: int64, minimum: 0 }
         sharedSha256: { type: string, pattern: "^[a-fA-F0-9]{64}$" }
         status: { $ref: "#/components/schemas/DistributedBackupSetStatus" }
         size: { type: integer, format: int64, minimum: 0 }
@@ -8763,6 +8852,70 @@ components:
         confirmation:
           type: string
           description: Exact room name used as explicit confirmation.
+    RoomProvisionInput:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision, confirmation]
+      properties:
+        expectedRevision: { type: string, format: uuid }
+        confirmation:
+          type: string
+          description: Exact room name used as explicit confirmation.
+    RoomProvisionStatus:
+      type: string
+      enum: [running, succeeded, rolled_back, recovery_required, failed]
+    RoomProvisionStep:
+      type: object
+      additionalProperties: false
+      required: [id, operationId, worldId, worldName, targetId, installationId, cluster, shard, phase, size, updatedAt]
+      properties:
+        id: { type: string }
+        operationId: { type: string, format: uuid }
+        worldId: { type: string }
+        worldName: { type: string }
+        targetId: { type: string }
+        installationId: { type: string }
+        cluster: { type: string }
+        shard: { type: string }
+        migrationId: { type: string }
+        phase: { type: string, enum: [not_started, planned, uploading, published, existing, completed, rolled_back] }
+        size: { type: integer, format: int64, minimum: 0 }
+        sha256: { type: string, pattern: "^[a-fA-F0-9]{64}$" }
+        failure: { type: string }
+        updatedAt: { type: string, format: date-time }
+    RoomProvisionOperation:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, roomName, topologyRevision, fencingToken, phase, status, createdAt, updatedAt, steps]
+      properties:
+        id: { type: string, format: uuid }
+        roomId: { type: string }
+        roomName: { type: string }
+        topologyRevision: { type: string }
+        appliedRevision: { type: string }
+        leaseId: { type: string }
+        fencingToken: { type: integer, format: int64, minimum: 0 }
+        phase: { type: string }
+        status: { $ref: "#/components/schemas/RoomProvisionStatus" }
+        failure: { type: string }
+        sourceJobId: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        steps: { type: array, items: { $ref: "#/components/schemas/RoomProvisionStep" } }
+    RoomProvisionOperationList:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/RoomProvisionOperation" } }
+        total: { type: integer, minimum: 0 }
+    RoomProvisionOperationListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/RoomProvisionOperationList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     TopologyPlacementState:
       type: string
       enum: [aligned, planned, target_offline, inventory_stale, inventory_missing, shard_missing, conflict]

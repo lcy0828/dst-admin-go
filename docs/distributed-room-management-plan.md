@@ -1,10 +1,10 @@
 # 多节点集中管理执行计划
 
-> 状态：Phase 1-9 的可交付范围已完成；Kubernetes 保持默认关闭的只读实验能力
-> 更新日期：2026-08-16
+> 状态：Phase 1-9、受管远程配置投放和 cold/hot-consistent 备份已完成；Kubernetes 保持默认关闭的只读实验能力
+> 更新日期：2026-08-19
 > 范围：多台服务器集中管理、一个房间跨节点运行多个世界分片、主服务/Agent/DST Runtime 独立部署、集中操作与可观测性
 
-当前进度：Phase 1-9 的既定可交付范围已完成。Placement apply 已具备停服预检、跨文件系统传输、目标校验、原子切换、源恢复点和 `appliedTargetId` 提交；仓库已交付非 root 控制面/Agent/DST Runtime OCI 镜像、Compose、Linux systemd 与 macOS launchd Agent、native/container Runtime Driver、cold-consistent 分布式备份、Placement-aware 跨节点 Mod 原子发布与自动重启/加载确认，以及带保护备份、版本矩阵和失败恢复的 DST 多节点版本发布。端口租约、网络作用域、跨节点 Master 端点预检、Linux cgroup v2 与 Docker CPU policy 执行/回读、玩家/日志/诊断聚合均已接入运行链路。2026-08-15 至 2026-08-16 已在全新 Debian 12 上完成容器控制面、裸机 Agent、容器 Agent、分片迁移、SteamCMD 下载、保护备份、110 MB Mod 分块发布以及 Mod 禁用/启用/配置/移除和 Placement 回读实测。保留的明确边界是：`hot-consistent` 备份仍未取得跨分片保存屏障证据；Kubernetes 只有默认关闭的 status/observe/preflight API 与 UI，没有 Apply、生命周期、Console、Mod 或备份恢复能力，不能视为生产 Driver。
+当前进度：Phase 1-9 的既定可交付范围已完成。Placement apply 已具备停服预检、跨文件系统传输、目标校验、原子切换、源恢复点和 `appliedTargetId` 提交；首次把本机受管房间规划到一个或多个 Agent 时，可通过固定配置白名单、分块校验、原子发布和持久恢复操作投放 Cluster/Shard 配置，已有远程分片换节点仍必须走 migration。仓库已交付非 root 控制面/Agent/DST Runtime OCI 镜像、Compose、Linux systemd 与 macOS launchd Agent、native/container Runtime Driver、cold-consistent 与带可验证同 snapshot 屏障证据的 hot-consistent 分布式备份、Placement-aware 跨节点 Mod 原子发布与自动重启/加载确认，以及带保护备份、版本矩阵和失败恢复的 DST 多节点版本发布。端口租约、网络作用域、跨节点 Master 端点预检、Linux cgroup v2 与 Docker CPU policy 执行/回读、玩家/日志/诊断聚合均已接入运行链路。2026-08-15 至 2026-08-16 已在全新 Debian 12 上完成容器控制面、裸机 Agent、容器 Agent、分片迁移、SteamCMD 下载、保护备份、110 MB Mod 分块发布以及 Mod 禁用/启用/配置/移除和 Placement 回读实测。Kubernetes 仍只有默认关闭的 status/observe/preflight API 与 UI，没有 Apply、生命周期、Console、Mod 或备份恢复能力，不能视为生产 Driver。
 
 ## 1. 目标
 
@@ -37,10 +37,11 @@ DST Admin 需要从“管理当前机器上的 DST”扩展为“本地优先、
 - Linux native cgroup v2 与 Docker `reserved/exclusive` CPU policy 执行、回读和生命周期释放；macOS 对不支持策略明确拒绝。
 - 按 Placement 聚合玩家、日志、世界状态与 Runtime 诊断，并携带来源、新鲜度、stale 和冲突信息。
 - 跨节点 Mod 发布后的协调重启与加载日志确认，以及 DST 二进制多节点版本发布、保护备份和原地恢复/重试。
+- 首次远程房间配置投放：只读取受管房间固定白名单文件，按计划 Placement 写入受信安装根，逐分片校验 SHA，并在整体提交前失败时回滚。
+- `hot-consistent` 分布式备份：Runtime 2.4.0 在所有运行分片准备屏障，由 Master 触发一次 `ms_save`，只有每个分片返回相同 snapshot、相同运行实例身份和 `save_current_callback` 证据后才进入 staging。
 
 当前不足：
 
-- cold-consistent 分布式备份已交付；hot-consistent 保存屏障仍未达到可证明的一致性标准。
 - Kubernetes 只提供默认关闭的只读 Provider 状态、资源观察、类型化预检计划、安全内核、RBAC 和 UI；没有 Apply 路由、生产工作负载、lease-aware supervisor、Console、Mod、备份恢复或故障注入结论。
 - Podman、macOS 容器以及 Kubernetes/CSI/CNI 生产矩阵仍未实机验收，不能从 Docker/Debian 结果外推兼容性。
 
@@ -528,10 +529,10 @@ Mod 管理继续区分：
 - Agent 只管理有受信标签、镜像和挂载的容器；控制器容器默认不挂 Docker Socket。
 - 完成裸机/容器混合 Room，以及同一宿主同时运行 native 与 container Shard 的端口/容量合并预检。
 
-### Phase 7：一致性备份与恢复（cold-consistent profile 已完成）
+### Phase 7：一致性备份与恢复（cold-consistent 与 hot-consistent 已完成）
 
 - 先实现 `cold-consistent`：协调停止、确认无写入、分片快照、manifest、逻辑备份集和可选恢复原运行状态。
-- `hot-consistent` 只有在游戏事件、Runtime 回执和故障注入证明跨分片 snapshot 屏障后开放；固定等待与 mtime 稳定不算证据。
+- `hot-consistent` 已通过 Runtime 2.4.0 保存屏障开放：所有运行分片先固定 session/shard/producer instance 与 snapshot，Master 统一触发 `ms_save`；每个分片必须由 `ShardGameIndex.SaveCurrent` 回调证明 snapshot 前进且最终 snapshot 完全相同。证据不足、超时、拓扑或 Runtime 实例变化均失败，不降级成普通在线打包。
 - 完成整套恢复、失败恢复和完整性校验。
 - 持久化创建/恢复操作阶段、保护备份与失败原因；后台自动恢复中断操作，并提供操作历史和幂等人工重试入口。
 - native 与 container Driver 使用同一备份协议；容器存档只从受管 volume staging，不从可写层提取。

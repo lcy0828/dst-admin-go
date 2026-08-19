@@ -400,7 +400,7 @@ save barrier -> every shard acknowledges snapshot
 备份提供两种明确模式：
 
 - `cold-consistent`：协调停止整个 Room、确认所有 instance 不再写盘、校验 Session/snapshot 后 staging；这是无法证明热保存屏障时的安全 fallback，可按用户选择在备份后恢复原运行状态。
-- `hot-consistent`：只有 `customcommands.lua`/游戏事件和实机故障注入能证明所有必需 Shard 到达同一保存点后才开放。固定等待、文件 mtime 稳定或 Master 控制台出现 `DONE` 都不足以证明完成。
+- `hot-consistent`：Runtime 2.4.0 在每个运行分片准备 snapshot 屏障并记录 session、Shard、producer instance 和初始 snapshot；随后只由 Master 触发一次 `ms_save`。每个分片必须从实际 `ShardGameIndex.SaveCurrent` 回调返回前进后的相同 snapshot，控制面再次校验拓扑、目标和 Runtime 实例未变化后才允许 staging。证据不足、超时、拓扑变化或 Runtime 重启均使整套备份失败，不会降级为普通在线打包。屏障持有期间到达的额外保存或关服保存会延迟到释放后执行。
 
 恢复顺序：停止整房间、验证目标拓扑和容量、创建恢复前保护备份、分发全部子快照、校验、启动并确认 Shard 注册。单分片恢复只作为高级实验能力。
 
@@ -415,6 +415,8 @@ save barrier -> every shard acknowledges snapshot
 Agent 平台状态与房间数据分开备份：runtime state、Agent ID、fencing/幂等记录和 `MOD_STATE_PATH` 属于节点控制状态；Shard saves 属于房间数据；`MOD_CACHE_PATH`、Workshop 内容和 DST 安装可重建，但精确离线回滚依赖保留的 cache。容器部署不得把任何一类状态留在容器可写层。
 
 不得让两个 Shard 容器/Pod 无约束地同时写同一个 Cluster 根目录。Cluster 公共配置生成后分别下发，Shard 私有存档独立挂载，再由备份集在逻辑上合并。
+
+首次把本机受管房间规划到远程 Agent 时，控制面可以投放创建远程 Cluster/Shard 配置。该流程不是任意文件同步：共享文件仅允许 `cluster.ini`、`cluster_token.txt`、三类名单，分片文件仅允许 `server.ini`、世界生成/覆盖、Mod 覆盖和受管 `customcommands.lua`；目标路径只能由 Agent 受信 RuntimeInstallation 和 Cluster/Shard 标识解析。投放使用分块 SHA 校验、目标原子发布、持久 commit decision 与整体回滚；步骤以 `not_started`、`planned`、`uploading` 区分确定未派发、Begin 结果不确定和 Begin 已确认，恢复器只对可能已触达远端的步骤调用 Agent 回滚；已有远程分片换节点仍走带源恢复点的 Placement migration。
 
 ## 9. Mod 发布
 

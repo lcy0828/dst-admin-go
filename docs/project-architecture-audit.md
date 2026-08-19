@@ -58,9 +58,9 @@ DST 运行时
 1. HTTP、后台任务和数据库已经由 Application 管理生命周期。
 2. SQLite 已启用 WAL、5 秒 busy timeout、foreign keys、保守连接池和迁移版本状态。
 3. Job SSE 已具备水位、断线补偿、过期游标 reset、保留策略和声明式前端刷新。
-4. Runtime 2.3.1 已取代默认持续长探针；空服暂停时使用短主动刷新，并保留旧控制台 fallback。
+4. Runtime 2.4.0 已取代默认持续长探针；空服暂停时使用短主动刷新，并保留旧控制台 fallback；新增跨分片 snapshot 保存屏障。
 
-存档导入、世界/房间生命周期、SMTP 测试和正式 Vue 3 页面已经交付。当前主要边界是跨分片 `hot-consistent` 保存屏障、远程通用配置文件分发、Kubernetes 生产 Driver、浏览器 E2E，以及更完整的真实 DST/Mod/容器故障注入矩阵。
+存档导入、世界/房间生命周期、SMTP 测试、正式 Vue 3 页面、受管远程房间配置投放和跨分片 `hot-consistent` 保存屏障已经交付。当前主要边界是 Kubernetes 生产 Driver、浏览器 E2E，以及更完整的真实 DST/Mod/容器故障注入矩阵。
 
 ## 4. 决策总表
 
@@ -364,8 +364,8 @@ CI 检查：
 产品仍然本地优先，但远程节点已经解除冻结并完成 Phase 1-9。远程 Agent 单独配置，Room/Shard Placement 在控制面选择；正式布局不再把整套应用切换到某一节点。保留 `RuntimeTarget` 安全边界，防止尚未 Placement-aware 的文件操作错误回落到本机。
 
 - 本地房间不依赖 Agent 在线。
-- 远程生命周期、Console、日志/玩家/世界状态、冷一致备份、Mod 原子发布和游戏版本发布走 typed Driver。
-- 远程通用配置文件分发、直接远程房间创建、`hot-consistent` 保存屏障仍明确阻止。
+- 远程生命周期、Console、日志/玩家/世界状态、冷/热一致备份、Mod 原子发布和游戏版本发布走 typed Driver。
+- 首次把本机受管房间规划到 Agent 时支持固定白名单配置投放和远程 Cluster/Shard 目录创建；不开放任意远程路径、任意文件上传或 Shell。已有远程分片换节点继续使用 Placement migration。
 - Kubernetes 保持默认关闭、只读和 `experimental`，不从 Debian/Docker 结果外推生产可用性。
 
 ### 7.2 暂不更换的技术
