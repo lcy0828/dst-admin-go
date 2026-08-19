@@ -419,11 +419,11 @@ func (c *containerShardRuntime) guardContainerConsole(ctx context.Context, insta
 
 func (c *containerShardRuntime) probeContainerConsole(ctx context.Context, instance managedContainer) (string, bool) {
 	output, err := c.cli.Run(ctx, "exec", instance.ID, "tmux", "-S", c.installation.ConsoleSocket,
-		"display-message", "-p", "-t", "="+c.installation.ConsoleSession+":0.0", "#{pane_dead}\t#{pane_current_command}\t#{pane_pid}")
+		"display-message", "-p", "-t", "="+c.installation.ConsoleSession+":0.0", "#{pane_dead}|#{pane_current_command}|#{pane_pid}")
 	if err != nil {
 		return classifyContainerConsoleError(err.Error()), false
 	}
-	fields := strings.Split(strings.TrimSpace(string(output)), "\t")
+	fields := strings.Split(strings.TrimSpace(string(output)), "|")
 	if len(fields) != 3 {
 		return "process_mismatch", false
 	}
@@ -435,12 +435,12 @@ func (c *containerShardRuntime) probeContainerConsole(ctx context.Context, insta
 		return "process_mismatch", false
 	}
 	clients, err := c.cli.Run(ctx, "exec", instance.ID, "tmux", "-S", c.installation.ConsoleSocket,
-		"list-clients", "-F", "#{client_session}\t#{client_readonly}")
+		"list-clients", "-F", "#{client_session}|#{client_readonly}")
 	if err != nil {
 		return classifyContainerConsoleError(err.Error()), false
 	}
 	for _, line := range strings.Split(string(clients), "\n") {
-		fields := strings.Split(strings.TrimSpace(line), "\t")
+		fields := strings.Split(strings.TrimSpace(line), "|")
 		if len(fields) == 2 && fields[0] == c.installation.ConsoleSession && fields[1] != "1" {
 			return "ready", true
 		}

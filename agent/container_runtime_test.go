@@ -81,7 +81,7 @@ func containerExitInspect(exitCode int, oomKilled, dead bool) []byte {
 }
 
 func containerConsolePane() []byte {
-	return []byte("0\tdontstarve_dedicated_server_nullrenderer_x64\t123\n")
+	return []byte("0|dontstarve_dedicated_server_nullrenderer_x64|123\n")
 }
 
 func containerStartedAt(value string) []byte {
@@ -106,14 +106,34 @@ func TestContainerRuntimeUsesTrustedLabelsAndFixedConsoleArguments(t *testing.T)
 		t.Fatal(err)
 	}
 	wantList := []string{"ps", "-a", "--no-trunc", "--filter", "label=com.dst-admin.managed=true", "--filter", "label=com.dst-admin.installation=runtime-a", "--filter", "label=com.dst-admin.cluster=Cluster_1", "--filter", "label=com.dst-admin.shard=Master", "--format", "{{json .}}"}
+	wantProbe := []string{"exec", id, "tmux", "-S", "/run/dst-admin/tmux/tmux.sock", "display-message", "-p", "-t", "=dst:0.0", "#{pane_dead}|#{pane_current_command}|#{pane_pid}"}
+	wantClients := []string{"exec", id, "tmux", "-S", "/run/dst-admin/tmux/tmux.sock", "list-clients", "-F", "#{client_session}|#{client_readonly}"}
 	wantExec := []string{"exec", id, "tmux", "-S", "/run/dst-admin/tmux/tmux.sock", "send-keys", "-t", "=dst:0.0", "-l", "--", "c_announce('hello')", ";", "send-keys", "-t", "=dst:0.0", "Enter"}
-	if !reflect.DeepEqual(cli.calls[0].arguments, wantList) || !reflect.DeepEqual(cli.calls[4].arguments, wantList) || !reflect.DeepEqual(cli.calls[6].arguments, wantExec) {
+	if !reflect.DeepEqual(cli.calls[0].arguments, wantList) || !reflect.DeepEqual(cli.calls[1].arguments, wantProbe) ||
+		!reflect.DeepEqual(cli.calls[2].arguments, wantClients) || !reflect.DeepEqual(cli.calls[4].arguments, wantList) ||
+		!reflect.DeepEqual(cli.calls[6].arguments, wantExec) {
 		t.Fatalf("calls=%#v", cli.calls)
 	}
 	for _, argument := range cli.calls[6].arguments {
 		if argument == "sh" || argument == "bash" || argument == "-c" {
 			t.Fatalf("shell argument found: %#v", cli.calls[2].arguments)
 		}
+	}
+}
+
+func TestContainerRuntimeDetectsWritableExternalClient(t *testing.T) {
+	id := strings.Repeat("b", 64)
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{
+		containerListLine(id, "running", "Cluster_1", "Master"),
+		containerConsolePane(), []byte("dst|0\n"),
+	}}
+	runtime, err := newContainerShardRuntime(containerTestInstallation(), cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	health := runtime.ConsoleHealth("Cluster_1", "Master")
+	if health.Status != "external_writer" || health.Accepting || !health.ExternalWriter {
+		t.Fatalf("health=%#v", health)
 	}
 }
 

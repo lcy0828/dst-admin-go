@@ -330,12 +330,12 @@ func (s *DSTServer) ConsoleTransportHealth() (string, bool, error) {
 	}
 	output, err := exec.Command("tmux", s.tmuxArguments(
 		"display-message", "-p", "-t", "="+s.SessionName+":0.0",
-		"#{pane_dead}\t#{pane_current_command}\t#{pane_pid}",
+		"#{pane_dead}|#{pane_current_command}|#{pane_pid}",
 	)...).CombinedOutput()
 	if err != nil {
 		return classifyConsoleCommandError(string(output), s.SocketPath != ""), false, nil
 	}
-	fields := strings.Split(strings.TrimSpace(string(output)), "\t")
+	fields := strings.Split(strings.TrimSpace(string(output)), "|")
 	if len(fields) != 3 {
 		return "process_mismatch", false, nil
 	}
