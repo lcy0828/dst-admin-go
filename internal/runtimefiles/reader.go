@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -105,6 +106,62 @@ func ValidateArtifactBundle(kind shared.ArtifactKind, bundle shared.RuntimeArtif
 		seen[artifact.Name] = true
 	}
 	return nil
+}
+
+// DecodeJSONArtifact accepts the optional header written by DST's
+// SetPersistentString while preserving strict JSON field and trailing-data
+// checks for Runtime artifacts.
+func DecodeJSONArtifact(data []byte, destination interface{}) error {
+	payload, err := persistentJSONPayload(data)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("trailing JSON content")
+		}
+		return err
+	}
+	return nil
+}
+
+func persistentJSONPayload(data []byte) ([]byte, error) {
+	data = bytes.TrimSpace(data)
+	if !bytes.HasPrefix(data, []byte("KLEI")) {
+		return data, nil
+	}
+	index := len("KLEI")
+	if index >= len(data) || !isJSONHeaderSpace(data[index]) {
+		return nil, errors.New("invalid KLEI persistent JSON header")
+	}
+	for index < len(data) && isJSONHeaderSpace(data[index]) {
+		index++
+	}
+	versionStart := index
+	for index < len(data) && data[index] >= '0' && data[index] <= '9' {
+		index++
+	}
+	if versionStart == index || index-versionStart > 10 || index >= len(data) || !isJSONHeaderSpace(data[index]) {
+		return nil, errors.New("invalid KLEI persistent JSON header")
+	}
+	for index < len(data) && isJSONHeaderSpace(data[index]) {
+		index++
+	}
+	payload := bytes.TrimSpace(data[index:])
+	if len(payload) == 0 || payload[0] != '{' {
+		return nil, errors.New("invalid KLEI persistent JSON payload")
+	}
+	return payload, nil
+}
+
+func isJSONHeaderSpace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n'
 }
 
 // ValidateLogChunk verifies cursor and payload invariants without trusting

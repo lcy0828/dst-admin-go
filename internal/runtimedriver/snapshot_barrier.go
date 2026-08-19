@@ -1,9 +1,7 @@
 package runtimedriver
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -109,9 +107,7 @@ func observeSnapshotBarrier(ctx context.Context, driver Driver, target Target, b
 		return SnapshotBarrierReceipt{}, err
 	}
 	var receipt SnapshotBarrierReceipt
-	decoder := json.NewDecoder(bytes.NewReader(bundle.Artifacts[0].Data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&receipt); err != nil {
+	if err := runtimefiles.DecodeJSONArtifact(bundle.Artifacts[0].Data, &receipt); err != nil {
 		return SnapshotBarrierReceipt{}, err
 	}
 	receipt.ReadAt = bundle.Artifacts[0].UpdatedAt

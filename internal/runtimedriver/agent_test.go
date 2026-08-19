@@ -2,6 +2,8 @@ package runtimedriver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -20,6 +22,19 @@ func (emptyMigrationExecutor) ExecuteShard(context.Context, string, shared.Shard
 type failedMigrationExecutor struct {
 	result agents.RuntimeExecutionResult
 	err    error
+}
+
+type barrierArtifactExecutor struct {
+	emptyMigrationExecutor
+	data []byte
+}
+
+func (f barrierArtifactExecutor) ExecuteRuntime(context.Context, string, shared.RuntimeOperationRequest, int) (agents.RuntimeExecutionResult, error) {
+	sum := sha256.Sum256(f.data)
+	bundle := shared.RuntimeArtifactBundle{Kind: shared.ArtifactRuntimeBarrier, Artifacts: []shared.RuntimeArtifact{{
+		Name: "snapshot-barrier.json", Size: int64(len(f.data)), SHA256: hex.EncodeToString(sum[:]), UpdatedAt: time.Now().UTC(), Data: f.data,
+	}}}
+	return agents.RuntimeExecutionResult{Result: shared.RuntimeOperationResult{Artifacts: &bundle}}, nil
 }
 
 func (f failedMigrationExecutor) ExecuteShard(context.Context, string, shared.ShardOperationRequest, int) (agents.ShardExecutionResult, error) {
@@ -71,5 +86,17 @@ func TestAgentDriverMarksOnlyPreDispatchMigrationBeginFailures(t *testing.T) {
 	err = driver.BeginMigrationImport(context.Background(), target, Operation{ID: "operation"}, descriptor)
 	if errors.Is(err, ErrOperationNotDispatched) || !errors.Is(err, agents.ErrAgentOffline) {
 		t.Fatalf("possibly dispatched error=%v", err)
+	}
+}
+
+func TestSnapshotBarrierAcceptsRealKLEIPersistentJSON(t *testing.T) {
+	data := []byte(`KLEI     1 {"schemaVersion":1,"producerVersion":"2.4.0","producerInstanceId":"barrier-instance","barrierId":"hot-test-0001","state":"prepared","sessionId":"SESSION","shardId":"2","snapshotBefore":7,"preparedAtUnix":1787118371}`)
+	driver, err := NewAgent(barrierArtifactExecutor{data: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := driver.SnapshotBarrier(context.Background(), Target{TargetID: "agent:node", InstallationID: "container", Cluster: "Cluster", Shard: "Caves"}, "hot-test-0001")
+	if err != nil || receipt.State != "prepared" || receipt.SnapshotBefore != 7 || receipt.ProducerInstanceID != "barrier-instance" {
+		t.Fatalf("receipt=%#v err=%v", receipt, err)
 	}
 }
