@@ -188,6 +188,14 @@ func (s *Service) recordTransition(room rooms.Room, world rooms.World, before, c
 			base.OperationID, base.OperationKey = expected.OperationID, expected.OperationKey
 			base.LeaseID, base.FencingToken, base.TopologyRevision = expected.LeaseID, expected.FencingToken, expected.TopologyRevision
 			base.ReasonCode, base.Message = "EXPECTED_EXIT", "分片在停止、重启或清理请求后退出"
+		} else if status.Code == "CONTAINER_EXIT_CLEAN" {
+			base.Type, base.Action, base.Source = EventStopped, "external_shutdown", SourceExternal
+			base.ReasonCode, base.Message = status.Code, status.Message
+			base.ExpectedExit, base.ExpectedObserved = true, true
+		} else if status.Code == "CONTAINER_CREATED" {
+			base.Type, base.Action, base.Source = EventStopped, "external_recreate", SourceExternal
+			base.ReasonCode = "CONTAINER_REPLACED"
+			base.Message = "检测到分片容器已重新创建；旧实例的退出状态未被观测，不能判定为异常退出"
 		} else {
 			base.Type, base.Source = EventUnexpectedExit, SourceExternal
 			base.ReasonCode, base.Message = "SESSION_DISAPPEARED", "未发现对应的停止、重启或清理请求，tmux 会话已消失"

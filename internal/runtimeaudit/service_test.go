@@ -117,3 +117,37 @@ func TestUnexpectedExitIsMarkedExternal(t *testing.T) {
 		t.Fatalf("events = %#v", list.Items)
 	}
 }
+
+func TestCleanContainerExitIsRecordedAsExternalGracefulStop(t *testing.T) {
+	service, _, room, world := newAuditService(t)
+	status := shards.RuntimeStatus{State: shards.RuntimeStopped, Code: "CONTAINER_EXIT_CLEAN", Message: "DST 分片容器已完成优雅停止"}
+	service.recordTransition(room, world,
+		observedRuntime{state: shards.RuntimeRunning, sessionExists: true},
+		observedRuntime{state: shards.RuntimeStopped, sessionExists: false}, status)
+	list, err := service.List(room.ID, ListFilter{WorldID: world.ID, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 || list.Items[0].Type != EventStopped || list.Items[0].Source != SourceExternal ||
+		list.Items[0].ReasonCode != "CONTAINER_EXIT_CLEAN" || list.Items[0].Action != "external_shutdown" ||
+		!list.Items[0].ExpectedExit || !list.Items[0].ExpectedObserved {
+		t.Fatalf("events = %#v", list.Items)
+	}
+}
+
+func TestRecreatedContainerDoesNotClaimUnexpectedOrCleanExit(t *testing.T) {
+	service, _, room, world := newAuditService(t)
+	status := shards.RuntimeStatus{State: shards.RuntimeStopped, Code: "CONTAINER_CREATED", Message: "容器已创建但尚未启动"}
+	service.recordTransition(room, world,
+		observedRuntime{state: shards.RuntimeRunning, sessionExists: true},
+		observedRuntime{state: shards.RuntimeStopped, sessionExists: false}, status)
+	list, err := service.List(room.ID, ListFilter{WorldID: world.ID, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 || list.Items[0].Type != EventStopped || list.Items[0].Source != SourceExternal ||
+		list.Items[0].ReasonCode != "CONTAINER_REPLACED" || list.Items[0].Action != "external_recreate" ||
+		list.Items[0].ExpectedExit || list.Items[0].ExpectedObserved {
+		t.Fatalf("events = %#v", list.Items)
+	}
+}
