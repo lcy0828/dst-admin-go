@@ -221,22 +221,35 @@ func (d *Native) ExecuteShard(ctx context.Context, target Target, operation Oper
 	operationContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	status, err := d.control.Status(operationContext, target.Cluster, target.Shard)
+	observed := status
 	if err == nil {
 		switch action {
 		case shared.ShardActionStart:
 			if status.State != shards.RuntimeRunning && status.State != shards.RuntimeStarting {
 				err = d.control.Start(operationContext, target.Cluster, target.Shard)
 			}
+			if err == nil {
+				observed, err = waitForNativeShardState(operationContext, d.control, target.Cluster, target.Shard, true)
+			}
 		case shared.ShardActionStop:
 			if status.SessionExists {
 				err = d.control.Stop(operationContext, target.Cluster, target.Shard)
+			}
+			if err == nil {
+				observed, err = waitForNativeShardState(operationContext, d.control, target.Cluster, target.Shard, false)
 			}
 		case shared.ShardActionRestart:
 			if status.SessionExists {
 				err = d.control.Stop(operationContext, target.Cluster, target.Shard)
 			}
 			if err == nil {
+				observed, err = waitForNativeShardState(operationContext, d.control, target.Cluster, target.Shard, false)
+			}
+			if err == nil {
 				err = d.control.Start(operationContext, target.Cluster, target.Shard)
+			}
+			if err == nil {
+				observed, err = waitForNativeShardState(operationContext, d.control, target.Cluster, target.Shard, true)
 			}
 		case shared.ShardActionSave:
 			if status.State != shards.RuntimeRunning {
@@ -244,11 +257,10 @@ func (d *Native) ExecuteShard(ctx context.Context, target Target, operation Oper
 			} else {
 				err = d.control.Send(operationContext, target.Cluster, target.Shard, "c_save()")
 			}
+			if err == nil {
+				observed, err = d.control.Status(operationContext, target.Cluster, target.Shard)
+			}
 		}
-	}
-	observed, statusErr := d.control.Status(operationContext, target.Cluster, target.Shard)
-	if err == nil {
-		err = statusErr
 	}
 	result := shared.ShardOperationResult{
 		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: operation.ID, OperationKey: operation.Key,
@@ -259,6 +271,35 @@ func (d *Native) ExecuteShard(ctx context.Context, target Target, operation Oper
 		result.Message = err.Error()
 	}
 	return result, err
+}
+
+func waitForNativeShardState(ctx context.Context, control NativeControl, cluster, shard string, running bool) (shards.RuntimeStatus, error) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		status, err := control.Status(ctx, cluster, shard)
+		if err != nil {
+			return status, err
+		}
+		if running && status.State == shards.RuntimeRunning {
+			return status, nil
+		}
+		if running && status.State == shards.RuntimeFailed {
+			message := strings.TrimSpace(status.Message)
+			if message == "" {
+				message = "DST 分片启动失败"
+			}
+			return status, errors.New(message)
+		}
+		if !running && status.State == shards.RuntimeStopped && !status.SessionExists {
+			return status, nil
+		}
+		select {
+		case <-ctx.Done():
+			return status, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (d *Native) SendConsole(ctx context.Context, target Target, operation Operation, request shared.RuntimeConsoleRequest, timeout time.Duration) (shared.RuntimeOperationResult, error) {
