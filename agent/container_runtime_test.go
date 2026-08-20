@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -156,6 +158,9 @@ func TestContainerRuntimeStatusMappingAndStart(t *testing.T) {
 			if err != nil || status.State != expected {
 				t.Fatalf("status=%#v err=%v", status, err)
 			}
+			if state == "created" && status.Code != "CONTAINER_CREATED" {
+				t.Fatalf("created status=%#v", status)
+			}
 		})
 	}
 	cli := &fakeContainerCLI{available: true, responses: [][]byte{containerListLine(id, "exited", "Cluster_1", "Master"), nil, containerStartedAt(containerStartTime)}}
@@ -175,7 +180,7 @@ func TestContainerRuntimeReportsDistinctExitCauses(t *testing.T) {
 		code   string
 		status shards.RuntimeState
 	}{
-		{name: "clean", state: containerExitState{ExitCode: 0}, status: shards.RuntimeStopped},
+		{name: "clean", state: containerExitState{ExitCode: 0}, code: "CONTAINER_EXIT_CLEAN", status: shards.RuntimeStopped},
 		{name: "oom", state: containerExitState{ExitCode: 137, OOMKilled: true}, code: "CONTAINER_OOM_KILLED", status: shards.RuntimeFailed},
 		{name: "sigkill", state: containerExitState{ExitCode: 137}, code: "CONTAINER_SIGKILL", status: shards.RuntimeFailed},
 		{name: "crash", state: containerExitState{ExitCode: 42}, code: "CONTAINER_EXIT_NONZERO", status: shards.RuntimeFailed},
@@ -247,11 +252,14 @@ func TestContainerRuntimeStopEscalatesToKillAndReportsUnsavedRisk(t *testing.T) 
 
 func TestContainerRuntimeRunningRequiresConsoleAndReportsInventory(t *testing.T) {
 	id := strings.Repeat("c", 64)
+	installation := containerTestInstallation()
+	installation.SavePath = t.TempDir()
+	writeContainerRuntimeLog(t, installation.SavePath, "Cluster_1", "Master", containerStartTime, "[00:00:35]: [DST-ADMIN-RUNTIME READY] version=2.4.0 protocol=2")
 	cli := &fakeContainerCLI{available: true, responses: [][]byte{
 		containerListLine(id, "running", "Cluster_1", "Master"), nil, containerStartedAt(containerStartTime),
 		containerListLine(id, "running", "Cluster_1", "Master"), containerStartedAt(containerStartTime),
 	}}
-	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
+	runtime, _ := newContainerShardRuntime(installation, cli)
 	status, err := runtime.Status(context.Background(), "Cluster_1", "Master")
 	if err != nil || status.State != shards.RuntimeRunning {
 		t.Fatalf("status=%#v err=%v", status, err)
@@ -259,6 +267,42 @@ func TestContainerRuntimeRunningRequiresConsoleAndReportsInventory(t *testing.T)
 	processes, err := runtime.ContainerProcesses(context.Background())
 	if err != nil || len(processes) != 1 || processes[0].RuntimeKind != "container" || processes[0].InstanceID != id+"@"+containerStartTime || processes[0].PID <= 0 {
 		t.Fatalf("processes=%#v err=%v", processes, err)
+	}
+}
+
+func TestContainerRuntimeRemainsStartingUntilCurrentLogIsReady(t *testing.T) {
+	id := strings.Repeat("7", 64)
+	installation := containerTestInstallation()
+	installation.SavePath = t.TempDir()
+	writeContainerRuntimeLog(t, installation.SavePath, "Cluster_1", "Master", containerStartTime, "[00:00:01]: Starting Up")
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{
+		containerListLine(id, "running", "Cluster_1", "Master"), nil, containerStartedAt(containerStartTime),
+	}}
+	runtime, _ := newContainerShardRuntime(installation, cli)
+	status, err := runtime.Status(context.Background(), "Cluster_1", "Master")
+	if err != nil || status.State != shards.RuntimeStarting || status.Code != "DST_WORLD_LOADING" {
+		t.Fatalf("status=%#v err=%v", status, err)
+	}
+}
+
+func writeContainerRuntimeLog(t *testing.T, root, cluster, shard, startedAt, line string) {
+	t.Helper()
+	instant, err := time.Parse(time.RFC3339Nano, startedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(root, cluster, shard)
+	if err := os.MkdirAll(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	content := "[00:00:00]: Current time: " + instant.In(time.Local).Format("Mon Jan 2 15:04:05 2006") + "\n" + line + "\n"
+	path := filepath.Join(directory, "server_log.txt")
+	if err := os.WriteFile(path, []byte(content), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	modified := instant.Add(time.Minute)
+	if err := os.Chtimes(path, modified, modified); err != nil {
+		t.Fatal(err)
 	}
 }
 

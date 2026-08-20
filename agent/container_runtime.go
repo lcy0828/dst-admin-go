@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -14,8 +15,10 @@ import (
 	"time"
 
 	"dont/internal/consoledispatch"
+	"dont/internal/runtimefiles"
 	"dont/internal/shards"
 	"dont/shared"
+	dsttmux "dont/tmux"
 )
 
 const maximumContainerCLIOutput = 256 * 1024
@@ -118,14 +121,15 @@ func (c *containerShardRuntime) Status(ctx context.Context, cluster, shard strin
 		if healthErr != nil {
 			return shards.RuntimeStatus{State: shards.RuntimeStarting, Code: "CONSOLE_STARTING", Message: "容器已运行，等待 tmux 与 DST 会话就绪", SessionExists: true}, nil
 		}
-		if _, identityErr := c.runtimeInstanceID(ctx, instance.ID); identityErr != nil {
+		startedAt, identityErr := c.runtimeStartedAt(ctx, instance.ID)
+		if identityErr != nil {
 			return shards.RuntimeStatus{State: shards.RuntimeStarting, Code: "INSTANCE_IDENTITY_PENDING", Message: "容器已运行，等待 Runtime 实例身份就绪", SessionExists: true}, nil
 		}
-		return shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}, nil
+		return c.runtimeLogStatus(ctx, cluster, shard, startedAt)
 	case "restarting":
 		return shards.RuntimeStatus{State: shards.RuntimeStarting, Message: "容器正在启动", SessionExists: true}, nil
 	case "created":
-		return shards.RuntimeStatus{State: shards.RuntimeStopped}, nil
+		return shards.RuntimeStatus{State: shards.RuntimeStopped, Code: "CONTAINER_CREATED", Message: "容器已创建但尚未启动"}, nil
 	case "exited", "dead":
 		exit, inspectErr := c.inspectExit(ctx, instance.ID)
 		if inspectErr != nil {
@@ -280,7 +284,7 @@ func containerExitRuntimeStatus(state containerExitState) shards.RuntimeStatus {
 		}
 		return shards.RuntimeStatus{State: shards.RuntimeFailed, Code: "CONTAINER_EXIT_NONZERO", Message: message}
 	default:
-		return shards.RuntimeStatus{State: shards.RuntimeStopped}
+		return shards.RuntimeStatus{State: shards.RuntimeStopped, Code: "CONTAINER_EXIT_CLEAN", Message: "DST 分片容器已完成优雅停止"}
 	}
 }
 
@@ -573,19 +577,56 @@ func (c *containerShardRuntime) ManagedRuntimeExists(ctx context.Context, cluste
 }
 
 func (c *containerShardRuntime) runtimeInstanceID(ctx context.Context, containerID string) (string, error) {
+	instant, err := c.runtimeStartedAt(ctx, containerID)
+	if err != nil {
+		return "", err
+	}
+	return containerID + "@" + instant.UTC().Format(time.RFC3339Nano), nil
+}
+
+func (c *containerShardRuntime) runtimeStartedAt(ctx context.Context, containerID string) (time.Time, error) {
 	if !managedContainerID.MatchString(containerID) {
-		return "", errors.New("容器 ID 不受信")
+		return time.Time{}, errors.New("容器 ID 不受信")
 	}
 	output, err := c.cli.Run(ctx, "inspect", "--format", "{{.State.StartedAt}}", containerID)
 	if err != nil {
-		return "", err
+		return time.Time{}, err
 	}
 	startedAt := strings.TrimSpace(string(output))
 	instant, err := time.Parse(time.RFC3339Nano, startedAt)
 	if err != nil || instant.IsZero() || instant.Year() <= 1 {
-		return "", errors.New("容器 Runtime 启动身份无效")
+		return time.Time{}, errors.New("容器 Runtime 启动身份无效")
 	}
-	return containerID + "@" + instant.UTC().Format(time.RFC3339Nano), nil
+	return instant.UTC(), nil
+}
+
+func (c *containerShardRuntime) runtimeLogStatus(ctx context.Context, cluster, shard string, startedAt time.Time) (shards.RuntimeStatus, error) {
+	starting := shards.RuntimeStatus{
+		State: shards.RuntimeStarting, Code: "DST_WORLD_LOADING", Message: "等待 DST 完成世界加载和服务注册", SessionExists: true,
+	}
+	chunk, err := runtimefiles.ReadLogs(ctx, c.installation.SavePath, cluster, shard, shared.RuntimeLogRequest{
+		Source: shared.RuntimeLogSourceServer, Cursor: -1, MaxBytes: int(runtimefiles.MaximumLogBytes), Raw: true,
+	})
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return starting, nil
+		}
+		return shards.RuntimeStatus{State: shards.RuntimeUnknown, Code: "RUNTIME_LOG_UNAVAILABLE", Message: err.Error(), SessionExists: true}, err
+	}
+	// DST logs wall-clock time to whole seconds, while the container identity
+	// includes nanoseconds. A two-second tolerance rejects a previous run
+	// without treating the current log as stale.
+	if chunk.StartedAt.IsZero() || chunk.StartedAt.Before(startedAt.Add(-2*time.Second)) || chunk.UpdatedAt.Before(startedAt) {
+		return starting, nil
+	}
+	classified := dsttmux.ClassifyRuntimeLog(string(chunk.Data))
+	if classified.State == dsttmux.RuntimeStarting {
+		return starting, nil
+	}
+	return shards.RuntimeStatus{
+		State: shards.RuntimeState(classified.State), Code: classified.Code,
+		Message: classified.Message, SessionExists: classified.SessionExists,
+	}, nil
 }
 
 func (c *containerShardRuntime) waitForRuntimeInstance(ctx context.Context, containerID string, timeout time.Duration) (string, error) {

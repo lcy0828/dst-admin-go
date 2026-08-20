@@ -7,6 +7,8 @@ storage_root=${DST_STORAGE_ROOT:-/data}
 conf_dir=${DST_CONF_DIR:-DoNotStarveTogether}
 server_root=${DST_SERVER_ROOT:-/opt/dst/server}
 executable=${DST_EXECUTABLE:-$server_root/bin64/dontstarve_dedicated_server_nullrenderer_x64}
+state_dir=${DST_RUNTIME_STATE_DIR:-/run/dst-admin}
+exit_status_file=$state_dir/runtime-exit-status
 
 case "$cluster:$shard:$conf_dir" in
   *[!A-Za-z0-9_.:-]*) echo "cluster, shard or conf dir contains unsafe characters" >&2; exit 64 ;;
@@ -29,9 +31,16 @@ fi
 
 export LD_LIBRARY_PATH="$server_root/bin64/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 cd "$(dirname "$executable")"
-exec "$executable" \
+set +e
+"$executable" \
   -persistent_storage_root "$storage_root" \
   -conf_dir "$conf_dir" \
   -cluster "$cluster" \
-  -shard "$shard" \
-  -console
+  -shard "$shard"
+runtime_status=$?
+set -e
+
+status_tmp=$exit_status_file.$$
+printf '%s\n' "$runtime_status" > "$status_tmp"
+mv "$status_tmp" "$exit_status_file"
+exit "$runtime_status"

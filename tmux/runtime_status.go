@@ -57,6 +57,7 @@ var runtimeFailureSignals = []struct {
 }
 
 var runtimeReadySignals = []string{
+	"[DST-ADMIN-RUNTIME READY]",
 	"Server registered via geo DNS",
 	"Registering master server in lobby",
 	"Shard server ready",
@@ -66,6 +67,14 @@ var runtimeReadySignals = []string{
 	"[Shard] secondary shard LUA is now ready!",
 	"Sim paused",
 	"Serializing world:",
+}
+
+// ClassifyRuntimeLog exposes the same readiness and startup-failure semantics
+// to non-tmux Runtime drivers without coupling them to a DSTServer instance.
+func ClassifyRuntimeLog(content string) RuntimeStatus {
+	return classifyRuntimeLog(content, RuntimeStatus{
+		State: RuntimeStarting, Message: "等待 DST 完成世界加载和服务注册", SessionExists: true,
+	})
 }
 
 func (s *DSTServer) RuntimeStatus() (RuntimeStatus, error) {
