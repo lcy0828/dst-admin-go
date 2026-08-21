@@ -49,6 +49,18 @@ func TestServerExecutableCheckRecognizesMacApplication(t *testing.T) {
 	}
 }
 
+func TestDiskCheckDoesNotBlockWhenHighUsageStillHasEnoughFreeSpace(t *testing.T) {
+	const gib = uint64(1024 * 1024 * 1024)
+	status, _, _ := classifyDiskUsage(23*gib, 95)
+	if status != CheckWarning {
+		t.Fatalf("status = %q, want warning", status)
+	}
+	status, _, _ = classifyDiskUsage(gib, 50)
+	if status != CheckFail {
+		t.Fatalf("status = %q, want fail", status)
+	}
+}
+
 func TestConfiguredMacDeploymentProbe(t *testing.T) {
 	serverPath := os.Getenv("DST_ADMIN_TEST_REAL_SERVER_PATH")
 	if serverPath == "" {

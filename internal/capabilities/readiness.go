@@ -236,24 +236,23 @@ func diskCheck(savePath string) Check {
 		check.Remediation = "确认服务账号有权读取文件系统信息"
 		return check
 	}
-	const gib = uint64(1024 * 1024 * 1024)
 	check.Details = map[string]interface{}{
 		"path": probePath, "freeBytes": usage.Free, "totalBytes": usage.Total, "usedPercent": usage.UsedPercent,
 	}
-	switch {
-	case usage.Free < 2*gib || usage.UsedPercent >= 95:
-		check.Status = CheckFail
-		check.Summary = "磁盘空间已达到危险阈值"
-		check.Remediation = "清理磁盘或迁移存档后再执行开服、更新和备份"
-	case usage.Free < 10*gib || usage.UsedPercent >= 80:
-		check.Status = CheckWarning
-		check.Summary = "磁盘使用率较高"
-		check.Remediation = "建议清理旧日志和备份，并保持至少 20% 可用空间"
-	default:
-		check.Status = CheckPass
-		check.Summary = "磁盘空间充足"
-	}
+	check.Status, check.Summary, check.Remediation = classifyDiskUsage(usage.Free, usage.UsedPercent)
 	return check
+}
+
+func classifyDiskUsage(free uint64, usedPercent float64) (CheckStatus, string, string) {
+	const gib = uint64(1024 * 1024 * 1024)
+	switch {
+	case free < 2*gib:
+		return CheckFail, "可用磁盘空间不足 2 GB", "清理磁盘或迁移存档后再执行开服、更新和备份"
+	case free < 10*gib || usedPercent >= 95:
+		return CheckWarning, "磁盘使用率较高", "建议清理旧日志和备份，并保持至少 10 GB 可用空间"
+	default:
+		return CheckPass, "磁盘空间充足", ""
+	}
 }
 
 func nearestExistingDirectory(value string) string {
