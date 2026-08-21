@@ -57,7 +57,7 @@ func (h *GameUpdateHandler) Register(v2 *gin.RouterGroup) {
 func (h *GameUpdateHandler) releasePreview(c *gin.Context) {
 	var request gameupdate.ReleasePreviewRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的版本发布配置", nil)
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "游戏更新配置无效", nil)
 		return
 	}
 	plan, err := h.releases.Preview(c.Request.Context(), request)
@@ -71,7 +71,7 @@ func (h *GameUpdateHandler) releasePreview(c *gin.Context) {
 func (h *GameUpdateHandler) releasePublish(c *gin.Context) {
 	var request gameupdate.ReleaseCreateRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的版本发布确认", nil)
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "游戏更新确认信息无效", nil)
 		return
 	}
 	plan, err := h.releases.Preview(c.Request.Context(), gameupdate.ReleasePreviewRequest{
@@ -103,7 +103,7 @@ func (h *GameUpdateHandler) releasePublish(c *gin.Context) {
 		}
 	})
 	if err != nil {
-		Failure(c, http.StatusInternalServerError, "JOB_CREATE_FAILED", "无法创建游戏版本发布任务", nil)
+		Failure(c, http.StatusInternalServerError, "JOB_CREATE_FAILED", "无法创建游戏更新任务", nil)
 		return
 	}
 	Success(c, http.StatusAccepted, job)
@@ -196,7 +196,7 @@ func gameReleaseReport(report func(jobs.TargetResult), plan gameupdate.ReleasePl
 			target := jobs.TargetResult{TargetID: gameReleaseJobTarget("shard", shard.RoomID, shard.WorldID)}
 			switch {
 			case !shard.WasRunning && shardResult != nil && shardResult.Stage == gameupdate.ReleaseStageSucceeded:
-				target.Status, target.Message = jobs.StatusSucceeded, "发布前已停止，保持停止"
+				target.Status, target.Message = jobs.StatusSucceeded, "更新前已停止，保持停止"
 			case shardResult != nil && shardResult.Stage == gameupdate.ReleaseStageSucceeded:
 				target.Status, target.Message = jobs.StatusSucceeded, "分片已恢复运行并完成加载确认"
 			default:
@@ -248,32 +248,34 @@ func gameReleaseJobError(releaseErr error, code, message string) *jobs.Error {
 		message = releaseErr.Error()
 	}
 	if message == "" {
-		message = "游戏版本发布未完成，请检查发布记录"
+		message = "游戏更新未完成，请检查更新记录"
 	}
 	return &jobs.Error{Code: code, Message: message}
 }
 
 func gameReleaseFailure(c *gin.Context, err error) {
-	status, code, message := http.StatusInternalServerError, "GAME_RELEASE_FAILED", "游戏版本发布操作失败"
+	status, code, message := http.StatusInternalServerError, "GAME_RELEASE_FAILED", "游戏更新操作失败"
 	switch {
 	case errors.Is(err, gameupdate.ErrReleaseNotFound):
-		status, code, message = http.StatusNotFound, "GAME_RELEASE_NOT_FOUND", "游戏版本发布记录不存在"
+		status, code, message = http.StatusNotFound, "GAME_RELEASE_NOT_FOUND", "游戏更新记录不存在"
+	case errors.Is(err, gameupdate.ErrLatestBuildUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "STEAM_BUILD_UNAVAILABLE", "暂时无法从 Steam 获取最新 build，请稍后重试"
 	case errors.Is(err, gameupdate.ErrReleaseInvalid):
-		status, code, message = http.StatusUnprocessableEntity, "INVALID_GAME_RELEASE", "游戏版本发布请求无效"
+		status, code, message = http.StatusUnprocessableEntity, "INVALID_GAME_RELEASE", "游戏更新请求无效"
 	case errors.Is(err, gameupdate.ErrReleaseConfirmation):
-		status, code, message = http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", "必须使用当前 planHash 确认发布"
+		status, code, message = http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", "必须使用当前检查计划确认更新"
 	case errors.Is(err, gameupdate.ErrReleasePreviewBlocked):
-		status, code, message = http.StatusConflict, "PREVIEW_BLOCKED", "游戏版本发布预检存在阻断项"
+		status, code, message = http.StatusConflict, "PREVIEW_BLOCKED", "游戏更新检查存在阻断项"
 	case errors.Is(err, gameupdate.ErrDesiredVersionChanged):
-		status, code, message = http.StatusConflict, "DESIRED_VERSION_CHANGED", "Steam 目标版本已变化，请重新预览"
+		status, code, message = http.StatusConflict, "DESIRED_VERSION_CHANGED", "Steam 目标版本已变化，请重新检查"
 	case errors.Is(err, gameupdate.ErrReleasePlanChanged):
-		status, code, message = http.StatusConflict, "PLAN_CHANGED", "游戏版本发布计划已变化，请重新预览"
+		status, code, message = http.StatusConflict, "PLAN_CHANGED", "游戏更新计划已变化，请重新检查"
 	case errors.Is(err, gameupdate.ErrReleaseTopologyChanged):
-		status, code, message = http.StatusConflict, "TOPOLOGY_CHANGED", "运行拓扑已变化，请重新预览"
+		status, code, message = http.StatusConflict, "TOPOLOGY_CHANGED", "运行拓扑已变化，请重新检查"
 	case errors.Is(err, gameupdate.ErrReleaseConflict):
-		status, code, message = http.StatusConflict, "GAME_RELEASE_CONFLICT", "游戏版本发布状态冲突"
+		status, code, message = http.StatusConflict, "GAME_RELEASE_CONFLICT", "游戏更新状态冲突"
 	case errors.Is(err, gameupdate.ErrReleaseRecoveryNeeded):
-		status, code, message = http.StatusConflict, "GAME_RELEASE_RECOVERY_REQUIRED", "游戏版本发布需要人工检查或恢复"
+		status, code, message = http.StatusConflict, "GAME_RELEASE_RECOVERY_REQUIRED", "游戏更新需要人工检查或恢复"
 	}
 	Failure(c, status, code, message, nil)
 }

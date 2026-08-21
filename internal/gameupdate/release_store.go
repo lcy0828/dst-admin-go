@@ -100,7 +100,7 @@ func (s *ReleaseStore) Migrate() error {
 	}
 	if err := s.db.Table(s.releaseTable).Where("stage IN (?)", active).Updates(map[string]interface{}{
 		"stage": string(ReleaseStageRecoveryRequired), "error_code": "SERVICE_RESTARTED",
-		"error_message": "服务重启中断了版本发布，请检查各节点版本后执行恢复", "updated_at": now,
+		"error_message": "服务重启中断了游戏更新，请检查各节点版本后执行恢复", "updated_at": now,
 	}).Error; err != nil {
 		return err
 	}

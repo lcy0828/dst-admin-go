@@ -65,8 +65,11 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 		return ReleasePlan{}, err
 	}
 	desired, _, err := p.latest.Check(ctx, "343050", "0")
-	if err != nil || !releaseVersionPattern.MatchString(strings.TrimSpace(desired)) {
-		return ReleasePlan{}, errors.Join(err, ErrReleaseInvalid)
+	if err != nil {
+		return ReleasePlan{}, errors.Join(ErrLatestBuildUnavailable, err)
+	}
+	if !releaseVersionPattern.MatchString(strings.TrimSpace(desired)) {
+		return ReleasePlan{}, errors.Join(ErrLatestBuildUnavailable, errors.New("Steam did not return a valid public build"))
 	}
 	desired = strings.TrimSpace(desired)
 	if requested := strings.TrimSpace(request.DesiredVersion); requested != "" {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	dstinstall "dont/internal/dstserver"
 )
@@ -92,5 +93,41 @@ func TestSteamVersionCheckerRejectsUnsuccessfulOrMalformedResponses(t *testing.T
 		if _, _, err := checker.Check(context.Background(), "343050", "1"); err == nil {
 			t.Fatalf("response %s was accepted", body)
 		}
+	}
+}
+
+func TestSteamVersionCheckerFallsBackToCachedSteamCMDPublicBuild(t *testing.T) {
+	now := time.Date(2026, time.August, 22, 0, 0, 0, 0, time.UTC)
+	lookups := 0
+	checker := &SteamVersionChecker{
+		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"response":{"success":true,"up_to_date":false,"version_is_listable":false}}`)),
+				Header:     make(http.Header),
+			}, nil
+		})},
+		resolveAppInfo: func(context.Context, string) (string, error) {
+			lookups++
+			return "24700372", nil
+		},
+		now: func() time.Time { return now }, cacheTTL: 5 * time.Minute,
+		cache: make(map[string]steamBuildCacheEntry),
+	}
+	version, current, err := checker.Check(context.Background(), "343050", "24700371")
+	if err != nil || version != "24700372" || current {
+		t.Fatalf("fallback check = %q, %t, %v", version, current, err)
+	}
+	version, current, err = checker.Check(context.Background(), "343050", "24700372")
+	if err != nil || version != "24700372" || !current || lookups != 1 {
+		t.Fatalf("cached check = %q, %t, %v, lookups=%d", version, current, err, lookups)
+	}
+}
+
+func TestParseSteamCMDPublicBuildIgnoresOtherBranches(t *testing.T) {
+	output := []byte(`"branches" { "beforemacoschanges" { "buildid" "12576213" } "public" { "buildid" "24700372" } "updatebeta" { "buildid" "23604590" } }`)
+	version, err := parseSteamCMDPublicBuild(output)
+	if err != nil || version != "24700372" {
+		t.Fatalf("public build = %q, %v", version, err)
 	}
 }

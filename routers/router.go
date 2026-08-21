@@ -883,7 +883,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		return nil, err
 	}
 	var updateRunner gameupdate.CommandRunner = gameupdate.ExecRunner{}
-	var latestChecker gameupdate.LatestChecker = gameupdate.NewSteamVersionChecker()
+	var latestChecker gameupdate.LatestChecker = gameupdate.NewSteamVersionChecker(steamCMDPath)
 	var officialReleaseChecker gameupdate.OfficialReleaseChecker = gameupdate.NewKleiReleaseChecker()
 	if driver := os.Getenv("DST_ADMIN_TEST_UPDATE"); driver != "" {
 		if os.Getenv("DST_ADMIN_ENV") != "test" || driver != "memory" {

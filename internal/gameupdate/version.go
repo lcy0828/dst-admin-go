@@ -16,24 +16,70 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	dstinstall "dont/internal/dstserver"
 )
 
 var buildIDPattern = regexp.MustCompile(`(?m)"buildid"\s+"([0-9]+)"`)
+var publicBranchBuildIDPattern = regexp.MustCompile(`(?s)"branches"\s*\{.*?"public"\s*\{.*?"buildid"\s*"([0-9]+)"`)
 
 type LatestChecker interface {
 	Check(context.Context, string, string) (string, bool, error)
 }
 
-type SteamVersionChecker struct{ client *http.Client }
+type steamBuildCacheEntry struct {
+	version   string
+	expiresAt time.Time
+}
 
-func NewSteamVersionChecker() *SteamVersionChecker {
-	return &SteamVersionChecker{client: &http.Client{Timeout: 8 * time.Second}}
+type SteamVersionChecker struct {
+	client         *http.Client
+	resolveAppInfo func(context.Context, string) (string, error)
+	now            func() time.Time
+	cacheTTL       time.Duration
+	mu             sync.Mutex
+	cache          map[string]steamBuildCacheEntry
+}
+
+func NewSteamVersionChecker(steamCMDPaths ...string) *SteamVersionChecker {
+	configuredPath := ""
+	if len(steamCMDPaths) > 0 {
+		configuredPath = steamCMDPaths[0]
+	}
+	checker := &SteamVersionChecker{
+		client: &http.Client{Timeout: 8 * time.Second}, now: time.Now, cacheTTL: 5 * time.Minute,
+		cache: make(map[string]steamBuildCacheEntry),
+	}
+	checker.resolveAppInfo = func(ctx context.Context, appID string) (string, error) {
+		return resolveSteamCMDPublicBuild(ctx, configuredPath, appID)
+	}
+	return checker
 }
 
 func (c *SteamVersionChecker) Check(ctx context.Context, appID, localVersion string) (string, bool, error) {
+	required, upToDate, apiErr := c.checkSteamAPI(ctx, appID, localVersion)
+	if apiErr == nil {
+		if required != "" {
+			return required, upToDate, nil
+		}
+		localVersion = strings.TrimSpace(localVersion)
+		if upToDate && releaseVersionPattern.MatchString(localVersion) && localVersion != "0" {
+			return localVersion, true, nil
+		}
+	}
+	latest, fallbackErr := c.latestFromAppInfo(ctx, appID)
+	if fallbackErr != nil {
+		if apiErr != nil {
+			return "", false, errors.Join(apiErr, fallbackErr)
+		}
+		return "", false, fallbackErr
+	}
+	return latest, strings.TrimSpace(localVersion) == latest, nil
+}
+
+func (c *SteamVersionChecker) checkSteamAPI(ctx context.Context, appID, localVersion string) (string, bool, error) {
 	endpoint := "https://api.steampowered.com/ISteamApps/UpToDateCheck/v1/"
 	query := url.Values{"appid": {appID}, "version": {localVersion}}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil)
@@ -66,6 +112,62 @@ func (c *SteamVersionChecker) Check(ctx context.Context, appID, localVersion str
 		return "", false, err
 	}
 	return required, payload.Response.UpToDate, nil
+}
+
+func (c *SteamVersionChecker) latestFromAppInfo(ctx context.Context, appID string) (string, error) {
+	if c.resolveAppInfo == nil {
+		return "", errors.New("Steam version API omitted the required build and SteamCMD fallback is unavailable")
+	}
+	if c.now == nil {
+		c.now = time.Now
+	}
+	if c.cacheTTL <= 0 {
+		c.cacheTTL = 5 * time.Minute
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	if cached, ok := c.cache[appID]; ok && now.Before(cached.expiresAt) {
+		return cached.version, nil
+	}
+	version, err := c.resolveAppInfo(ctx, appID)
+	if err != nil {
+		return "", err
+	}
+	version = strings.TrimSpace(version)
+	if !releaseVersionPattern.MatchString(version) {
+		return "", errors.New("SteamCMD returned an invalid public build")
+	}
+	if c.cache == nil {
+		c.cache = make(map[string]steamBuildCacheEntry)
+	}
+	c.cache[appID] = steamBuildCacheEntry{version: version, expiresAt: now.Add(c.cacheTTL)}
+	return version, nil
+}
+
+func resolveSteamCMDPublicBuild(ctx context.Context, configuredPath, appID string) (string, error) {
+	executable := findSteamCMD(configuredPath)
+	if executable == "" {
+		return "", errors.New("SteamCMD is unavailable for the latest build lookup")
+	}
+	commandContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(
+		commandContext, executable,
+		"+login", "anonymous", "+app_info_update", "1", "+app_info_print", appID, "+quit",
+	).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("SteamCMD app info lookup failed: %w", err)
+	}
+	return parseSteamCMDPublicBuild(output)
+}
+
+func parseSteamCMDPublicBuild(output []byte) (string, error) {
+	match := publicBranchBuildIDPattern.FindSubmatch(output)
+	if len(match) != 2 {
+		return "", errors.New("SteamCMD app info omitted the public build")
+	}
+	return string(match[1]), nil
 }
 
 func parseRequiredVersion(raw json.RawMessage) (string, error) {

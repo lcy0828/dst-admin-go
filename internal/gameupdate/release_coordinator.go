@@ -245,7 +245,7 @@ func (c *ReleaseCoordinator) createProtectionBackups(ctx context.Context, value 
 		if !found {
 			return value, ErrReleaseInvalid
 		}
-		backupID, backupErr := c.backups.CreateProtection(ctx, roomID, "DST 版本发布前保护备份", value.ID, &lease)
+		backupID, backupErr := c.backups.CreateProtection(ctx, roomID, "DST 更新前保护备份", value.ID, &lease)
 		if backupErr != nil {
 			return value, backupErr
 		}

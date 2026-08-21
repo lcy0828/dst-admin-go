@@ -167,6 +167,14 @@ func TestReleasePlannerRejectsChangedDesiredBuild(t *testing.T) {
 	}
 }
 
+func TestReleasePlannerClassifiesLatestBuildLookupFailures(t *testing.T) {
+	planner, _ := NewReleasePlanner(fakeReleaseSnapshots{}, &fakeReleaseRuntime{}, fixedLatest{err: errors.New("Steam unavailable")}, 1)
+	_, err := planner.Preview(context.Background(), ReleasePreviewRequest{})
+	if !errors.Is(err, ErrLatestBuildUnavailable) || errors.Is(err, ErrReleaseInvalid) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestReleasePlanHashIgnoresObservedRuntimeStateButPreservesRestartIntent(t *testing.T) {
 	plan := readyReleasePlanForStore(t)
 	original := plan.PlanHash

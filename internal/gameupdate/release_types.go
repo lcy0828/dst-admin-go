@@ -28,6 +28,7 @@ var (
 	ErrReleaseRecoveryNeeded  = errors.New("game release requires recovery")
 	ErrReleaseTopologyChanged = errors.New("game release topology changed")
 	ErrReleaseConfirmation    = errors.New("game release confirmation is invalid")
+	ErrLatestBuildUnavailable = errors.New("latest Steam build is unavailable")
 )
 
 type ReleaseStage string

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,12 +21,13 @@ const releaseHTTPPlanHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 type gameReleaseHTTPFixture struct {
 	mu               sync.Mutex
 	plan             gameupdate.ReleasePlan
+	previewErr       error
 	releases         map[string]gameupdate.Release
 	retrySourceJobID string
 }
 
 func (f *gameReleaseHTTPFixture) Preview(context.Context, gameupdate.ReleasePreviewRequest) (gameupdate.ReleasePlan, error) {
-	return f.plan, nil
+	return f.plan, f.previewErr
 }
 
 func (f *gameReleaseHTTPFixture) Publish(_ context.Context, request gameupdate.ReleasePublishRequest) (gameupdate.Release, error) {
@@ -171,6 +173,24 @@ func TestGameReleaseHTTPRequiresCurrentPlanHashConfirmationAndReportsJob(t *test
 	}
 	response = performJSON(router, http.MethodGet, "/api/v2/game/releases/"+jobID, nil, nil, "")
 	assertStatus(t, response, http.StatusOK)
+}
+
+func TestGameReleaseHTTPUsesUpdateTerminologyAndClassifiesSteamLookupFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := &gameReleaseHTTPFixture{previewErr: gameupdate.ErrLatestBuildUnavailable, releases: make(map[string]gameupdate.Release)}
+	router, _ := newGameReleaseHandlerApp(t, fixture)
+	response := performJSON(router, http.MethodPost, "/api/v2/game/releases/preview", map[string]interface{}{}, nil, "")
+	assertStatus(t, response, http.StatusServiceUnavailable)
+	if body := response.Body.String(); !strings.Contains(body, `"code":"STEAM_BUILD_UNAVAILABLE"`) || strings.Contains(body, "发布") {
+		t.Fatalf("unexpected response: %s", body)
+	}
+
+	fixture.previewErr = gameupdate.ErrReleaseInvalid
+	response = performJSON(router, http.MethodPost, "/api/v2/game/releases/preview", map[string]interface{}{}, nil, "")
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+	if body := response.Body.String(); !strings.Contains(body, "游戏更新请求无效") || strings.Contains(body, "发布") {
+		t.Fatalf("unexpected response: %s", body)
+	}
 }
 
 func TestGameReleaseHTTPRetryRejectsTerminalSuccess(t *testing.T) {
