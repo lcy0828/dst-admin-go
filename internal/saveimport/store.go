@@ -30,12 +30,14 @@ type importRecord struct {
 	ApplyStaging     string `gorm:"type:varchar(255)"`
 	ApplyRollback    string `gorm:"type:varchar(255)"`
 	ApplyPortLeaseID string `gorm:"type:varchar(64)"`
+	ApplyBackupSetID string `gorm:"type:char(36);index"`
 }
 
 const (
-	applyPhasePublishing = "publishing"
-	applyPhaseCommitted  = "committed"
-	applyPhaseApplied    = "applied"
+	applyPhasePublishing  = "publishing"
+	applyPhaseCommitted   = "committed"
+	applyPhaseApplied     = "applied"
+	applyPhaseCoordinated = "coordinated"
 )
 
 type Store struct {
@@ -162,6 +164,7 @@ func (s *Store) BeginApply(id string, mode ApplyMode, roomID, target, staging, r
 		"apply_phase": applyPhasePublishing, "apply_mode": mode, "apply_room_id": roomID,
 		"apply_target": target, "apply_staging": staging, "apply_rollback": rollback,
 		"apply_port_lease_id": strings.TrimSpace(portLeaseID),
+		"apply_backup_set_id": "",
 	})
 	if result.Error != nil {
 		return result.Error
@@ -170,6 +173,39 @@ func (s *Store) BeginApply(id string, mode ApplyMode, roomID, target, staging, r
 		return ErrImportNotReady
 	}
 	return nil
+}
+
+func (s *Store) BeginCoordinatedApply(id, roomID, backupSetID string) error {
+	now := s.now().UTC()
+	result := s.db.Table(s.table).Where("id = ? AND status IN (?)", id, []Status{StatusReady, StatusApplied}).Updates(map[string]interface{}{
+		"status": StatusApplying, "error_code": "", "error_message": "", "updated_at": now,
+		"apply_phase": applyPhaseCoordinated, "apply_mode": ApplyModeReplace, "apply_room_id": roomID,
+		"apply_target": "", "apply_staging": "", "apply_rollback": "", "apply_port_lease_id": "",
+		"apply_backup_set_id": strings.TrimSpace(backupSetID),
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrImportNotReady
+	}
+	return nil
+}
+
+func (s *Store) MarkCoordinatedApplied(id string) (Session, error) {
+	now := s.now().UTC()
+	result := s.db.Table(s.table).Where("id = ? AND status = ? AND apply_phase = ?", id, StatusApplying, applyPhaseCoordinated).Updates(map[string]interface{}{
+		"status": StatusApplied, "error_code": "", "error_message": "", "applied_at": now, "updated_at": now,
+		"apply_phase": "", "apply_mode": "", "apply_room_id": "", "apply_target": "",
+		"apply_staging": "", "apply_rollback": "", "apply_port_lease_id": "", "apply_backup_set_id": "",
+	})
+	if result.Error != nil {
+		return Session{}, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return Session{}, ErrImportNotReady
+	}
+	return s.Get(id)
 }
 
 func (s *Store) MarkApplyCommitted(id string) error {
@@ -190,7 +226,7 @@ func (s *Store) MarkApplyFailed(id, code, message string) error {
 	return s.db.Table(s.table).Where("id = ?", id).Updates(map[string]interface{}{
 		"status": StatusReady, "error_code": code, "error_message": message, "updated_at": now,
 		"apply_phase": "", "apply_mode": "", "apply_room_id": "", "apply_target": "",
-		"apply_staging": "", "apply_rollback": "", "apply_port_lease_id": "",
+		"apply_staging": "", "apply_rollback": "", "apply_port_lease_id": "", "apply_backup_set_id": "",
 	}).Error
 }
 
@@ -225,7 +261,7 @@ func (s *Store) MarkApplied(id string) (Session, error) {
 func (s *Store) ClearApplyJournal(id string) error {
 	result := s.db.Table(s.table).Where("id = ? AND status = ? AND apply_phase IN (?)", id, StatusApplied, []string{applyPhaseCommitted, applyPhaseApplied}).Updates(map[string]interface{}{
 		"apply_phase": "", "apply_mode": "", "apply_room_id": "", "apply_target": "",
-		"apply_staging": "", "apply_rollback": "", "apply_port_lease_id": "", "updated_at": s.now().UTC(),
+		"apply_staging": "", "apply_rollback": "", "apply_port_lease_id": "", "apply_backup_set_id": "", "updated_at": s.now().UTC(),
 	})
 	if result.Error != nil {
 		return result.Error

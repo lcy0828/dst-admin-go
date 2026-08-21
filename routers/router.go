@@ -784,9 +784,9 @@ func initApplication(manageBackground bool) (*Application, error) {
 			}
 		})
 	}
-	saveImportService, err := saveimport.NewService(saveimport.Config{
+	saveImportService, err := saveimport.NewServiceWithCoordinator(saveimport.Config{
 		SaveRoot: savePath, ImportRoot: filepath.Join(backupPath, ".imports"), WorkshopRoot: workshopContentPath,
-	}, saveImportStore, roomService, shardControl, backupService, modService, localMutationGuard)
+	}, saveImportStore, roomService, shardControl, backupService, modService, distributedBackupService, localMutationGuard)
 	if err != nil {
 		return nil, err
 	}

@@ -221,6 +221,8 @@ func saveImportFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", "请输入完整目标房间名称确认替换", nil)
 	case errors.Is(err, saveimport.ErrTokenRequired), errors.Is(err, saveimport.ErrMissingMods), errors.Is(err, saveimport.ErrPartialImport):
 		Failure(c, http.StatusUnprocessableEntity, saveImportErrorCode(err), "存档部署前仍有必须处理的兼容问题", nil)
+	case errors.Is(err, saveimport.ErrWorldMismatch):
+		Failure(c, http.StatusUnprocessableEntity, "WORLD_TOPOLOGY_MISMATCH", "导入存档的世界与目标房间不一致", nil)
 	default:
 		Failure(c, http.StatusInternalServerError, "SAVE_IMPORT_OPERATION_FAILED", "存档导入操作失败", nil)
 	}

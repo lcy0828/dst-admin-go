@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"dont/internal/backups"
+	"dont/internal/distributedbackup"
 	"dont/internal/mods"
 	"dont/internal/rooms"
 	"dont/internal/runtimeguard"
@@ -42,6 +43,7 @@ type Service struct {
 	mods          ModDownloader
 	guard         runtimeguard.MutationGuard
 	ports         PortAllocator
+	coordinated   CoordinatedRestorer
 	locksMu       sync.Mutex
 	locks         map[string]*sync.Mutex
 	activeMu      sync.Mutex
@@ -77,6 +79,13 @@ type PortAllocator interface {
 	ReleasePorts(context.Context, string) error
 }
 
+type CoordinatedRestorer interface {
+	ImportDirectory(context.Context, distributedbackup.DirectoryImportRequest) (distributedbackup.Set, error)
+	Restore(context.Context, string, string, string) (distributedbackup.RestoreResult, error)
+	Operations(string) ([]distributedbackup.Operation, error)
+	RecoverOperation(context.Context, string) (distributedbackup.Operation, error)
+}
+
 func (s *Service) ConfigurePortAllocator(allocator PortAllocator) error {
 	if allocator == nil {
 		return errors.New("save import port allocator is required")
@@ -86,6 +95,17 @@ func (s *Service) ConfigurePortAllocator(allocator PortAllocator) error {
 }
 
 func NewService(config Config, store *Store, roomManager RoomManager, runtime Runtime, backupCreator BackupCreator, modDownloader ModDownloader, guards ...runtimeguard.MutationGuard) (*Service, error) {
+	return newService(config, store, roomManager, runtime, backupCreator, modDownloader, nil, guards...)
+}
+
+func NewServiceWithCoordinator(config Config, store *Store, roomManager RoomManager, runtime Runtime, backupCreator BackupCreator, modDownloader ModDownloader, coordinated CoordinatedRestorer, guards ...runtimeguard.MutationGuard) (*Service, error) {
+	if coordinated == nil {
+		return nil, errors.New("save import coordinated restorer is required")
+	}
+	return newService(config, store, roomManager, runtime, backupCreator, modDownloader, coordinated, guards...)
+}
+
+func newService(config Config, store *Store, roomManager RoomManager, runtime Runtime, backupCreator BackupCreator, modDownloader ModDownloader, coordinated CoordinatedRestorer, guards ...runtimeguard.MutationGuard) (*Service, error) {
 	if store == nil {
 		return nil, errors.New("save import store is required")
 	}
@@ -110,7 +130,7 @@ func NewService(config Config, store *Store, roomManager RoomManager, runtime Ru
 	}
 	service := &Service{
 		config: config, store: store, scanner: NewScanner(config.WorkshopRoot), rooms: roomManager,
-		runtime: runtime, backups: backupCreator, mods: modDownloader, guard: guard, locks: make(map[string]*sync.Mutex),
+		runtime: runtime, backups: backupCreator, mods: modDownloader, guard: guard, coordinated: coordinated, locks: make(map[string]*sync.Mutex),
 		active: make(map[string]string), activeTargets: make(map[string]string), now: time.Now,
 	}
 	if err := service.recoverInterrupted(); err != nil {
@@ -404,6 +424,12 @@ func (s *Service) recoverInterrupted() error {
 				return err
 			}
 		case StatusApplying:
+			if record.ApplyPhase == applyPhaseCoordinated {
+				if err := s.recoverCoordinatedApply(record); err != nil {
+					return err
+				}
+				continue
+			}
 			if blocked, err := s.markRemoteRecoveryBlocked(record); err != nil {
 				return err
 			} else if blocked {

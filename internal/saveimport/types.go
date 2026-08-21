@@ -29,6 +29,7 @@ var (
 	ErrImportBusy        = errors.New("save import already has an active operation")
 	ErrPortConflict      = errors.New("save import network ports conflict with local rooms")
 	ErrInsufficientSpace = errors.New("insufficient space for save import")
+	ErrWorldMismatch     = errors.New("imported worlds do not match the target room")
 )
 
 type Status string

@@ -57,6 +57,9 @@ func (s *Service) Apply(ctx context.Context, id, jobID string, request ApplyRequ
 	if err := validateApplyPolicies(request); err != nil {
 		return ApplyResult{}, err
 	}
+	if request.Mode == ApplyModeReplace && request.NetworkPolicy == NetworkPreserve && s.coordinated != nil {
+		return s.applyCoordinatedReplacement(ctx, id, jobID, value, candidate, request)
+	}
 
 	operationRoomID := strings.TrimSpace(request.TargetRoomID)
 	if request.Mode != ApplyModeReplace {
@@ -1158,6 +1161,8 @@ func ErrorCode(err error) string {
 		return "SAVE_IMPORT_BUSY"
 	case errors.Is(err, ErrPortConflict):
 		return "PORT_CONFLICT"
+	case errors.Is(err, ErrWorldMismatch):
+		return "WORLD_TOPOLOGY_MISMATCH"
 	case errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable):
 		return runtimeguard.ErrorCode
 	default:
