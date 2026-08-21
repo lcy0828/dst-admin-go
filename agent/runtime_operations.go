@@ -63,6 +63,9 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 	defer cancel()
 
 	if !shared.RuntimeActionMutates(request.Action) {
+		if isMapAction(request.Action) {
+			return a.observeMapAction(operationContext, installation, *request)
+		}
 		if isCPUAction(request.Action) {
 			return a.executeCPUAction(operationContext, installation, *request)
 		}
@@ -113,6 +116,8 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 		result, operationErr = a.executeMigrationAction(operationContext, installation, *request)
 	} else if isConfigurationAction(request.Action) {
 		result, operationErr = a.executeConfigurationAction(operationContext, installation, *request)
+	} else if isMapAction(request.Action) {
+		result, operationErr = a.executeMapAction(operationContext, installation, *request)
 	} else {
 		result, operationErr = a.executeBackupAction(operationContext, installation, *request)
 	}
@@ -139,6 +144,12 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 	}
 	if !isCPUAction(request.Action) && request.CPU != nil {
 		return errors.New("Runtime 操作包含无关 CPU 负载")
+	}
+	if isMapAction(request.Action) {
+		return validateMapOperationPayload(request)
+	}
+	if request.Map != nil {
+		return errors.New("Runtime 操作包含无关地图负载")
 	}
 	if isConfigurationAction(request.Action) {
 		return validateConfigurationOperationPayload(request)
@@ -237,7 +248,7 @@ func validateCPUOperationPayload(request shared.RuntimeOperationRequest) error {
 func validateConfigurationOperationPayload(request shared.RuntimeOperationRequest) error {
 	value := request.Configuration
 	if value == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil ||
-		request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil || request.CPU != nil ||
+		request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil || request.CPU != nil || request.Map != nil ||
 		!operationIdentity.MatchString(value.PublicationID) || value.Scope != string(configpublication.ScopeShared) && value.Scope != string(configpublication.ScopeWorld) ||
 		value.Offset < 0 || value.Size < 0 || len(value.SHA256) > 64 || len(value.Data) > configpublication.MaxChunkBytes {
 		return errors.New("配置发布 Runtime 请求无效")
@@ -253,6 +264,60 @@ func validateConfigurationOperationPayload(request shared.RuntimeOperationReques
 		return errors.New("配置发布步骤包含无关负载")
 	}
 	return nil
+}
+
+func validateMapOperationPayload(request shared.RuntimeOperationRequest) error {
+	value := request.Map
+	if value == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil ||
+		request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil || request.CPU != nil || request.Configuration != nil ||
+		value.Offset < 0 || len(value.Layers) > 4 {
+		return errors.New("地图 Runtime 请求无效")
+	}
+	validTransfer := operationIdentity.MatchString(value.TransferID)
+	validSession := safeRuntimeMapComponent(value.SessionID) && safeRuntimeMapComponent(value.FileName)
+	switch request.Action {
+	case shared.RuntimeActionMapSessions, shared.RuntimeActionMapStatus:
+		if value.TransferID != "" || value.SessionID != "" || value.FileName != "" || value.Offset != 0 || len(value.Layers) != 0 {
+			return errors.New("地图 Session 请求包含无关负载")
+		}
+	case shared.RuntimeActionMapSnapshotPrepare:
+		if !validTransfer || !validSession || value.Offset != 0 || len(value.Layers) != 0 {
+			return errors.New("地图 Session 准备请求无效")
+		}
+	case shared.RuntimeActionMapRender:
+		if !validTransfer || !validSession || value.Offset != 0 || !validRuntimeMapLayers(value.Layers) {
+			return errors.New("地图渲染请求无效")
+		}
+	case shared.RuntimeActionMapRead:
+		if !validTransfer || value.SessionID != "" || value.FileName != "" || len(value.Layers) != 0 {
+			return errors.New("地图读取请求无效")
+		}
+	case shared.RuntimeActionMapRelease:
+		if !validTransfer || value.SessionID != "" || value.FileName != "" || value.Offset != 0 || len(value.Layers) != 0 {
+			return errors.New("地图释放请求无效")
+		}
+	default:
+		return errors.New("地图 Runtime 动作无效")
+	}
+	return nil
+}
+
+func safeRuntimeMapComponent(value string) bool {
+	return value != "" && value != "." && value != ".." && filepath.Base(value) == value && !strings.ContainsAny(value, "/\\\x00\r\n") && len(value) <= 255
+}
+
+func validRuntimeMapLayers(values []string) bool {
+	if len(values) == 0 {
+		return true
+	}
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		if value != "terrain" && value != "features" && value != "worldState" || seen[value] {
+			return false
+		}
+		seen[value] = true
+	}
+	return true
 }
 
 func (a *Agent) observeRuntimeAction(ctx context.Context, control shardRuntimeControl, installation RuntimeInstallation, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
@@ -550,6 +615,16 @@ func isConfigurationAction(action shared.RuntimeAction) bool {
 	}
 }
 
+func isMapAction(action shared.RuntimeAction) bool {
+	switch action {
+	case shared.RuntimeActionMapSessions, shared.RuntimeActionMapStatus, shared.RuntimeActionMapSnapshotPrepare, shared.RuntimeActionMapRender,
+		shared.RuntimeActionMapRead, shared.RuntimeActionMapRelease:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *Agent) transferManager(installation RuntimeInstallation) (*shardtransfer.Manager, error) {
 	a.shardTransferMu.Lock()
 	defer a.shardTransferMu.Unlock()
@@ -577,6 +652,8 @@ func runtimeActionRequiresExistingShard(action shared.RuntimeAction) bool {
 		shared.RuntimeActionModReleasePlanCommit, shared.RuntimeActionModReleasePrepare, shared.RuntimeActionModReleasePublish,
 		shared.RuntimeActionModReleaseRollback, shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState,
 		shared.RuntimeActionModOverridesRead:
+		return false
+	case shared.RuntimeActionMapRead, shared.RuntimeActionMapRelease:
 		return false
 	case shared.RuntimeActionGameVersionObserve, shared.RuntimeActionGameVersionUpdate:
 		return false

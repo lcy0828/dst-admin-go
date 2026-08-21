@@ -874,6 +874,9 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := worldMapService.ConfigureRemote(runtimeDriverRouter, operationLeaseService); err != nil {
+		return nil, err
+	}
 	worldMapHandler := httpapi.NewWorldMapHandler(worldMapService, jobService)
 	if err := models.RecordMigration(models.CurrentMigrationVersion); err != nil {
 		return nil, err

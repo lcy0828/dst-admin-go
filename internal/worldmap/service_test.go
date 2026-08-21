@@ -1,6 +1,8 @@
 package worldmap
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,7 +16,10 @@ import (
 	"time"
 
 	"dont/internal/maprenderer"
+	"dont/internal/operationlease"
 	"dont/internal/rooms"
+	"dont/internal/runtimedriver"
+	"dont/shared"
 
 	"github.com/jinzhu/gorm"
 	_ "github.com/mattn/go-sqlite3"
@@ -141,6 +146,177 @@ func TestGenerateValidatesLayersPublishesAtomicallyAndPrunes(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(mapRoot, first.ID)); !os.IsNotExist(err) {
 		t.Fatalf("old map directory still exists: %v", err)
 	}
+}
+
+type remoteMapTestDriver struct {
+	runtimedriver.Driver
+	source    []byte
+	modified  time.Time
+	transfers map[string]remoteMapTestTransfer
+	released  int
+}
+
+type remoteMapTestTransfer struct {
+	descriptor runtimedriver.MapDescriptor
+	data       []byte
+}
+
+func (d *remoteMapTestDriver) Capabilities() []runtimedriver.Capability {
+	return []runtimedriver.Capability{runtimedriver.CapabilityMapRender}
+}
+
+func (d *remoteMapTestDriver) ListMapSessions(context.Context, runtimedriver.Target) ([]shared.RuntimeMapSession, error) {
+	return []shared.RuntimeMapSession{{SessionID: "REMOTE", FileName: "0000000099", Size: int64(len(d.source)), PlayerCount: 2, ModifiedAt: d.modified}}, nil
+}
+
+func (d *remoteMapTestDriver) MapRendererStatus(context.Context, runtimedriver.Target) (shared.RuntimeMapRenderer, error) {
+	return shared.RuntimeMapRenderer{
+		Available: true, ProtocolVersion: maprenderer.ProtocolVersion, Version: "test",
+		Artifacts: []string{maprenderer.TerrainFileName, maprenderer.IconsFileName, maprenderer.ManifestFileName, maprenderer.FeaturesFileName},
+	}, nil
+}
+
+func (d *remoteMapTestDriver) PrepareMapSnapshot(_ context.Context, _ runtimedriver.Target, _ runtimedriver.Operation, transferID, _, _ string) (runtimedriver.MapDescriptor, error) {
+	descriptor := runtimedriver.MapDescriptor{TransferID: transferID, Size: int64(len(d.source)), SHA256: testDigest(d.source), SourceSHA256: testDigest(d.source)}
+	d.transfers[transferID] = remoteMapTestTransfer{descriptor: descriptor, data: append([]byte(nil), d.source...)}
+	return descriptor, nil
+}
+
+func (d *remoteMapTestDriver) RenderMap(ctx context.Context, _ runtimedriver.Target, _ runtimedriver.Operation, transferID, _, _ string, layers []string) (runtimedriver.MapDescriptor, error) {
+	root := os.TempDir()
+	work, err := os.MkdirTemp(root, "worldmap-remote-test-")
+	if err != nil {
+		return runtimedriver.MapDescriptor{}, err
+	}
+	defer os.RemoveAll(work)
+	input, output := filepath.Join(work, "session"), filepath.Join(work, "artifacts")
+	if err := os.WriteFile(input, d.source, 0o440); err != nil {
+		return runtimedriver.MapDescriptor{}, err
+	}
+	if err := os.Mkdir(output, 0o700); err != nil {
+		return runtimedriver.MapDescriptor{}, err
+	}
+	requested := make([]Layer, len(layers))
+	for index := range layers {
+		requested[index] = Layer(layers[index])
+	}
+	if err := NewMemoryRenderer().Render(ctx, input, output, requested, io.Discard); err != nil {
+		return runtimedriver.MapDescriptor{}, err
+	}
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	for _, name := range []string{maprenderer.TerrainFileName, maprenderer.IconsFileName, maprenderer.ManifestFileName, maprenderer.FeaturesFileName} {
+		entry, err := writer.Create(name)
+		if err != nil {
+			return runtimedriver.MapDescriptor{}, err
+		}
+		data, err := os.ReadFile(filepath.Join(output, name))
+		if err != nil {
+			return runtimedriver.MapDescriptor{}, err
+		}
+		if _, err := entry.Write(data); err != nil {
+			return runtimedriver.MapDescriptor{}, err
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return runtimedriver.MapDescriptor{}, err
+	}
+	data := archive.Bytes()
+	descriptor := runtimedriver.MapDescriptor{
+		TransferID: transferID, Size: int64(len(data)), SHA256: testDigest(data),
+		SourceSHA256: testDigest(d.source), Log: "remote renderer ready",
+	}
+	d.transfers[transferID] = remoteMapTestTransfer{descriptor: descriptor, data: append([]byte(nil), data...)}
+	return descriptor, nil
+}
+
+func (d *remoteMapTestDriver) ReadMapTransfer(_ context.Context, _ runtimedriver.Target, transferID string, offset int64) (runtimedriver.MapChunk, error) {
+	transfer, exists := d.transfers[transferID]
+	if !exists || offset < 0 || offset >= int64(len(transfer.data)) {
+		return runtimedriver.MapChunk{}, errors.New("transfer unavailable")
+	}
+	end := offset + shared.MaxChunkBytes
+	if end > int64(len(transfer.data)) {
+		end = int64(len(transfer.data))
+	}
+	return runtimedriver.MapChunk{
+		MapDescriptor: transfer.descriptor, Offset: offset, NextOffset: end,
+		Data: append([]byte(nil), transfer.data[offset:end]...), Complete: end == int64(len(transfer.data)),
+	}, nil
+}
+
+func (d *remoteMapTestDriver) ReleaseMapTransfer(_ context.Context, _ runtimedriver.Target, _ runtimedriver.Operation, transferID string) error {
+	delete(d.transfers, transferID)
+	d.released++
+	return nil
+}
+
+type remoteMapTestRouter struct{ driver *remoteMapTestDriver }
+
+func (r remoteMapTestRouter) DriverTarget(context.Context, string, string) (runtimedriver.Driver, runtimedriver.Target, error) {
+	return r.driver, runtimedriver.Target{
+		TargetID: "agent-1", InstallationID: "default", RoomID: "room", WorldID: "world",
+		Cluster: "Cluster", Shard: "Master", TopologyRevision: "revision-1",
+	}, nil
+}
+
+type remoteMapTestLeases struct{ token uint64 }
+
+func (l *remoteMapTestLeases) Acquire(_ context.Context, roomID, key string, ttl time.Duration) (operationlease.Lease, error) {
+	l.token++
+	return operationlease.Lease{RoomID: roomID, LeaseID: "lease-map-test", OperationKey: key, FencingToken: l.token, ExpiresAt: time.Now().Add(ttl)}, nil
+}
+
+func (l *remoteMapTestLeases) Renew(_ context.Context, lease operationlease.Lease, ttl time.Duration) (operationlease.Lease, error) {
+	lease.ExpiresAt = time.Now().Add(ttl)
+	return lease, nil
+}
+
+func (*remoteMapTestLeases) Release(operationlease.Lease) error { return nil }
+
+func TestRemoteRuntimeSessionsDownloadAndGeneration(t *testing.T) {
+	service, _, mapRoot := newMapService(t, failingRenderer{err: errors.New("local renderer must not run")}, 3)
+	driver := &remoteMapTestDriver{
+		source: []byte("remote immutable Session"), modified: time.Now().UTC(),
+		transfers: make(map[string]remoteMapTestTransfer),
+	}
+	if err := service.ConfigureRemote(remoteMapTestRouter{driver: driver}, &remoteMapTestLeases{}); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := service.SessionsContext(context.Background(), "room", "world")
+	if err != nil || len(sessions) != 1 || sessions[0].SessionID != "REMOTE" || sessions[0].PlayerCount != 2 || !sessions[0].Latest {
+		t.Fatalf("remote sessions=%#v err=%v", sessions, err)
+	}
+	if status := service.RendererStatusForWorld(context.Background(), "room", "world"); !status.Available || status.ProtocolVersion != maprenderer.ProtocolVersion {
+		t.Fatalf("remote renderer status=%#v", status)
+	}
+	file, _, _, cleanup, err := service.OpenSessionContext(context.Background(), sessions[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloaded, readErr := io.ReadAll(file)
+	_ = file.Close()
+	cleanup()
+	if readErr != nil || !bytes.Equal(downloaded, driver.source) {
+		t.Fatalf("downloaded=%q err=%v", downloaded, readErr)
+	}
+	value, err := service.Generate(context.Background(), "job-remote", "room", "world", sessions[0].ID, nil)
+	if err != nil || value.Status != "succeeded" || value.RendererVersion != "test" || value.SourceSHA256 != testDigest(driver.source) {
+		t.Fatalf("remote map=%#v err=%v", value, err)
+	}
+	for _, name := range []string{maprenderer.TerrainFileName, maprenderer.IconsFileName, maprenderer.ManifestFileName, maprenderer.FeaturesFileName} {
+		if _, err := os.Stat(filepath.Join(mapRoot, value.ID, name)); err != nil {
+			t.Fatalf("missing remote artifact %s: %v", name, err)
+		}
+	}
+	if driver.released != 2 || len(driver.transfers) != 0 {
+		t.Fatalf("released=%d transfers=%d", driver.released, len(driver.transfers))
+	}
+}
+
+func testDigest(value []byte) string {
+	sum := sha256.Sum256(value)
+	return hex.EncodeToString(sum[:])
 }
 
 func TestFailedGenerationKeepsPreviousMapAndPersistsFailureStage(t *testing.T) {

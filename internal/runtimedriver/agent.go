@@ -25,6 +25,7 @@ var (
 	_ GameVersionDriver   = (*Agent)(nil)
 	_ CPUDriver           = (*Agent)(nil)
 	_ ConfigurationDriver = (*Agent)(nil)
+	_ MapDriver           = (*Agent)(nil)
 )
 
 func NewAgent(executor AgentExecutor) (*Agent, error) {
@@ -44,6 +45,99 @@ func (d *Agent) Capabilities() []Capability {
 		CapabilityModPrepare, CapabilityModPublish, CapabilityGameUpdate,
 		CapabilityExclusiveCPU,
 		CapabilityConfigPublish,
+		CapabilityMapRender,
+	}
+}
+
+func (d *Agent) ListMapSessions(ctx context.Context, target Target) ([]shared.RuntimeMapSession, error) {
+	request := runtimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionMapSessions)
+	request.Map = &shared.RuntimeMapRequest{}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 60)
+	value, err := checkedMapResult(result.Result, "", err)
+	if err != nil {
+		return nil, err
+	}
+	return append([]shared.RuntimeMapSession(nil), value.Sessions...), nil
+}
+
+func (d *Agent) MapRendererStatus(ctx context.Context, target Target) (shared.RuntimeMapRenderer, error) {
+	request := runtimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionMapStatus)
+	request.Map = &shared.RuntimeMapRequest{}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 60)
+	value, err := checkedMapResult(result.Result, "", err)
+	if err != nil {
+		return shared.RuntimeMapRenderer{}, err
+	}
+	if value.Renderer == nil {
+		return shared.RuntimeMapRenderer{}, errors.New("Agent 未返回地图渲染器状态")
+	}
+	return *value.Renderer, nil
+}
+
+func (d *Agent) PrepareMapSnapshot(ctx context.Context, target Target, operation Operation, transferID, sessionID, fileName string) (MapDescriptor, error) {
+	return d.prepareMap(ctx, target, operation, shared.RuntimeActionMapSnapshotPrepare, transferID, sessionID, fileName, nil)
+}
+
+func (d *Agent) RenderMap(ctx context.Context, target Target, operation Operation, transferID, sessionID, fileName string, layers []string) (MapDescriptor, error) {
+	return d.prepareMap(ctx, target, operation, shared.RuntimeActionMapRender, transferID, sessionID, fileName, layers)
+}
+
+func (d *Agent) prepareMap(ctx context.Context, target Target, operation Operation, action shared.RuntimeAction, transferID, sessionID, fileName string, layers []string) (MapDescriptor, error) {
+	request := runtimeRequest(target, operation, action)
+	request.Map = &shared.RuntimeMapRequest{TransferID: transferID, SessionID: sessionID, FileName: fileName, Layers: layers}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 300)
+	value, err := checkedMapResult(result.Result, transferID, err)
+	if err != nil {
+		return MapDescriptor{}, err
+	}
+	if !value.Complete || value.Size <= 0 || value.SHA256 == "" || value.SourceSHA256 == "" {
+		return MapDescriptor{}, errors.New("Agent 未返回有效的地图传输描述")
+	}
+	return mapDescriptor(*value), nil
+}
+
+func (d *Agent) ReadMapTransfer(ctx context.Context, target Target, transferID string, offset int64) (MapChunk, error) {
+	request := runtimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionMapRead)
+	request.Map = &shared.RuntimeMapRequest{TransferID: transferID, Offset: offset}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 60)
+	value, err := checkedMapResult(result.Result, transferID, err)
+	if err != nil {
+		return MapChunk{}, err
+	}
+	return MapChunk{
+		MapDescriptor: mapDescriptor(*value), Offset: value.Offset, NextOffset: value.NextOffset,
+		Data: value.Data, Complete: value.Complete,
+	}, nil
+}
+
+func (d *Agent) ReleaseMapTransfer(ctx context.Context, target Target, operation Operation, transferID string) error {
+	request := runtimeRequest(target, operation, shared.RuntimeActionMapRelease)
+	request.Map = &shared.RuntimeMapRequest{TransferID: transferID}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 60)
+	value, err := checkedMapResult(result.Result, transferID, err)
+	if err != nil {
+		return err
+	}
+	if !value.Complete {
+		return errors.New("Agent 未确认地图临时文件已释放")
+	}
+	return nil
+}
+
+func checkedMapResult(result shared.RuntimeOperationResult, transferID string, err error) (*shared.RuntimeMapResult, error) {
+	if err != nil {
+		return nil, err
+	}
+	if result.Map == nil || transferID != "" && result.Map.TransferID != transferID {
+		return nil, errors.New("Agent 未返回有效的地图结果")
+	}
+	return result.Map, nil
+}
+
+func mapDescriptor(value shared.RuntimeMapResult) MapDescriptor {
+	return MapDescriptor{
+		TransferID: value.TransferID, Size: value.Size, SHA256: value.SHA256,
+		SourceSHA256: value.SourceSHA256, Log: value.Log,
 	}
 }
 

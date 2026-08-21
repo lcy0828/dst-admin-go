@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"dont/internal/maptransfer"
 	"dont/internal/moddistribution"
 	"dont/internal/shardtransfer"
 	"dont/shared"
@@ -29,7 +30,7 @@ import (
 
 // 常量
 const (
-	AgentVersion = "2.5.3"
+	AgentVersion = "2.6.0"
 	// 心跳间隔
 	HeartbeatInterval = 30 * time.Second
 	// 重连间隔
@@ -83,6 +84,8 @@ type Agent struct {
 	shardTransfers     map[string]*shardtransfer.Manager
 	modDistributionMu  sync.Mutex
 	modDistributions   map[string]*moddistribution.Manager
+	mapTransferMu      sync.Mutex
+	mapTransfers       map[string]*maptransfer.Manager
 	gameVersionRunner  gameVersionCommandRunner
 	attachListener     net.Listener
 	attachMutex        sync.Mutex
@@ -1191,7 +1194,7 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 	if len(runtimeProfiles) > 0 && runtime.GOOS != "windows" {
 		capabilities = append(capabilities,
 			"shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1", "runtime.migration.v1",
-			"runtime.backup.v1", "runtime.mods.v1", "runtime.game-update.v1", "runtime.cpu.v1", "runtime.configuration.v1",
+			"runtime.backup.v1", "runtime.mods.v1", "runtime.game-update.v1", "runtime.cpu.v1", "runtime.configuration.v1", "runtime.maps.v1",
 		)
 	}
 	info := map[string]interface{}{

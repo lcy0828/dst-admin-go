@@ -78,6 +78,9 @@ func runtimeCapability(action shared.RuntimeAction) string {
 	case shared.RuntimeActionConfigurationBegin, shared.RuntimeActionConfigurationWrite, shared.RuntimeActionConfigurationPrepare,
 		shared.RuntimeActionConfigurationPublish, shared.RuntimeActionConfigurationRollback, shared.RuntimeActionConfigurationComplete:
 		return "runtime.configuration.v1"
+	case shared.RuntimeActionMapSessions, shared.RuntimeActionMapStatus, shared.RuntimeActionMapSnapshotPrepare, shared.RuntimeActionMapRender,
+		shared.RuntimeActionMapRead, shared.RuntimeActionMapRelease:
+		return "runtime.maps.v1"
 	default:
 		return ""
 	}

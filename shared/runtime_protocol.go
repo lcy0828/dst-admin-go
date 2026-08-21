@@ -62,6 +62,12 @@ const (
 	RuntimeActionConfigurationPublish    RuntimeAction = "runtime.configuration.publish"
 	RuntimeActionConfigurationRollback   RuntimeAction = "runtime.configuration.rollback"
 	RuntimeActionConfigurationComplete   RuntimeAction = "runtime.configuration.complete"
+	RuntimeActionMapSessions             RuntimeAction = "runtime.maps.sessions"
+	RuntimeActionMapStatus               RuntimeAction = "runtime.maps.status"
+	RuntimeActionMapSnapshotPrepare      RuntimeAction = "runtime.maps.snapshot.prepare"
+	RuntimeActionMapRender               RuntimeAction = "runtime.maps.render"
+	RuntimeActionMapRead                 RuntimeAction = "runtime.maps.read"
+	RuntimeActionMapRelease              RuntimeAction = "runtime.maps.release"
 )
 
 const (
@@ -208,6 +214,14 @@ type RuntimeConfigurationRequest struct {
 	Data          []byte `json:"data,omitempty"`
 }
 
+type RuntimeMapRequest struct {
+	TransferID string   `json:"transfer_id,omitempty"`
+	SessionID  string   `json:"session_id,omitempty"`
+	FileName   string   `json:"file_name,omitempty"`
+	Offset     int64    `json:"offset,omitempty"`
+	Layers     []string `json:"layers,omitempty"`
+}
+
 // RuntimeOperationRequest references a trusted installation and a managed
 // Shard. It never accepts a host path, executable, container specification or
 // shell command.
@@ -233,6 +247,7 @@ type RuntimeOperationRequest struct {
 	GameVersion      *RuntimeGameVersionRequest   `json:"game_version,omitempty"`
 	CPU              *RuntimeCPURequest           `json:"cpu,omitempty"`
 	Configuration    *RuntimeConfigurationRequest `json:"configuration,omitempty"`
+	Map              *RuntimeMapRequest           `json:"map,omitempty"`
 }
 
 type RuntimeOutcome string
@@ -411,6 +426,36 @@ type RuntimeConfigurationResult struct {
 	Complete      bool   `json:"complete"`
 }
 
+type RuntimeMapSession struct {
+	SessionID   string    `json:"session_id"`
+	FileName    string    `json:"file_name"`
+	Size        int64     `json:"size"`
+	PlayerCount int       `json:"player_count"`
+	ModifiedAt  time.Time `json:"modified_at"`
+}
+
+type RuntimeMapResult struct {
+	TransferID   string              `json:"transfer_id,omitempty"`
+	Sessions     []RuntimeMapSession `json:"sessions,omitempty"`
+	Offset       int64               `json:"offset,omitempty"`
+	NextOffset   int64               `json:"next_offset,omitempty"`
+	Size         int64               `json:"size,omitempty"`
+	SHA256       string              `json:"sha256,omitempty"`
+	SourceSHA256 string              `json:"source_sha256,omitempty"`
+	Data         []byte              `json:"data,omitempty"`
+	Complete     bool                `json:"complete"`
+	Log          string              `json:"log,omitempty"`
+	Renderer     *RuntimeMapRenderer `json:"renderer,omitempty"`
+}
+
+type RuntimeMapRenderer struct {
+	Available       bool     `json:"available"`
+	ProtocolVersion string   `json:"protocol_version,omitempty"`
+	Version         string   `json:"version,omitempty"`
+	Artifacts       []string `json:"artifacts"`
+	Error           string   `json:"error,omitempty"`
+}
+
 type RuntimeOperationResult struct {
 	ProtocolVersion  int                         `json:"protocol_version"`
 	OperationID      string                      `json:"operation_id"`
@@ -437,6 +482,7 @@ type RuntimeOperationResult struct {
 	GameVersion      *RuntimeGameVersionResult   `json:"game_version,omitempty"`
 	CPU              *RuntimeCPUResult           `json:"cpu,omitempty"`
 	Configuration    *RuntimeConfigurationResult `json:"configuration,omitempty"`
+	Map              *RuntimeMapResult           `json:"map,omitempty"`
 }
 
 func IsRuntimeAction(value RuntimeAction) bool {
@@ -462,6 +508,8 @@ func IsRuntimeAction(value RuntimeAction) bool {
 		return true
 	case RuntimeActionConfigurationBegin, RuntimeActionConfigurationWrite, RuntimeActionConfigurationPrepare,
 		RuntimeActionConfigurationPublish, RuntimeActionConfigurationRollback, RuntimeActionConfigurationComplete:
+		return true
+	case RuntimeActionMapSessions, RuntimeActionMapStatus, RuntimeActionMapSnapshotPrepare, RuntimeActionMapRender, RuntimeActionMapRead, RuntimeActionMapRelease:
 		return true
 	default:
 		return false
@@ -490,6 +538,8 @@ func RuntimeActionMutates(value RuntimeAction) bool {
 		return true
 	case RuntimeActionConfigurationBegin, RuntimeActionConfigurationWrite, RuntimeActionConfigurationPrepare,
 		RuntimeActionConfigurationPublish, RuntimeActionConfigurationRollback, RuntimeActionConfigurationComplete:
+		return true
+	case RuntimeActionMapSnapshotPrepare, RuntimeActionMapRender, RuntimeActionMapRelease:
 		return true
 	default:
 		return false

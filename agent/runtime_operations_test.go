@@ -198,6 +198,52 @@ func TestRuntimeCPURequestValidation(t *testing.T) {
 	}
 }
 
+func TestRuntimeMapRequestValidation(t *testing.T) {
+	sessions := runtimeOperationRequest(shared.RuntimeActionMapSessions)
+	sessions.OperationKey, sessions.LeaseID, sessions.FencingToken, sessions.LeaseExpiresAt = "", "", 0, nil
+	sessions.Map = &shared.RuntimeMapRequest{}
+	if err := validateRuntimeOperationRequest(string(sessions.Action), sessions, 30, time.Now().UTC()); err != nil {
+		t.Fatalf("valid Session request rejected: %v", err)
+	}
+
+	render := runtimeOperationRequest(shared.RuntimeActionMapRender)
+	render.Map = &shared.RuntimeMapRequest{
+		TransferID: "map-transfer-0001", SessionID: "ABC123", FileName: "0000000010",
+		Layers: []string{"terrain", "features", "worldState"},
+	}
+	if err := validateRuntimeOperationRequest(string(render.Action), render, 300, time.Now().UTC()); err != nil {
+		t.Fatalf("valid render request rejected: %v", err)
+	}
+
+	read := runtimeOperationRequest(shared.RuntimeActionMapRead)
+	read.OperationKey, read.LeaseID, read.FencingToken, read.LeaseExpiresAt = "", "", 0, nil
+	read.Map = &shared.RuntimeMapRequest{TransferID: "map-transfer-0001", Offset: 1024}
+	if err := validateRuntimeOperationRequest(string(read.Action), read, 30, time.Now().UTC()); err != nil {
+		t.Fatalf("valid map read rejected: %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*shared.RuntimeOperationRequest)
+	}{
+		{name: "path escape", mutate: func(request *shared.RuntimeOperationRequest) { request.Map.FileName = "../snapshot" }},
+		{name: "duplicate layer", mutate: func(request *shared.RuntimeOperationRequest) { request.Map.Layers = []string{"terrain", "terrain"} }},
+		{name: "unknown layer", mutate: func(request *shared.RuntimeOperationRequest) { request.Map.Layers = []string{"players"} }},
+		{name: "unrelated payload", mutate: func(request *shared.RuntimeOperationRequest) { request.Logs = &shared.RuntimeLogRequest{} }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := render
+			value := *render.Map
+			value.Layers = append([]string(nil), render.Map.Layers...)
+			request.Map = &value
+			test.mutate(&request)
+			if err := validateRuntimeOperationRequest(string(request.Action), request, 300, time.Now().UTC()); err == nil {
+				t.Fatal("invalid map request accepted")
+			}
+		})
+	}
+}
+
 func TestRuntimeConfigurationPublicationWritesManagedFiles(t *testing.T) {
 	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeStopped}}
 	agent, installation := newShardOperationAgent(t, runtimeControl)

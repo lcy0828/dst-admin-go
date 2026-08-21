@@ -1,6 +1,7 @@
 package worldmap
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -22,7 +23,10 @@ import (
 
 	"dont/internal/jobs"
 	"dont/internal/maprenderer"
+	"dont/internal/operationlease"
 	"dont/internal/rooms"
+	"dont/internal/runtimedriver"
+	"dont/shared"
 
 	"github.com/google/uuid"
 )
@@ -57,6 +61,16 @@ type RoomCatalog interface {
 	World(string, string) (rooms.World, error)
 }
 
+type RuntimeRouter interface {
+	DriverTarget(context.Context, string, string) (runtimedriver.Driver, runtimedriver.Target, error)
+}
+
+type LeaseService interface {
+	Acquire(context.Context, string, string, time.Duration) (operationlease.Lease, error)
+	Renew(context.Context, operationlease.Lease, time.Duration) (operationlease.Lease, error)
+	Release(operationlease.Lease) error
+}
+
 type Config struct {
 	SaveRoot      string
 	MapRoot       string
@@ -78,6 +92,19 @@ type Service struct {
 	renderer Renderer
 	mu       sync.Mutex
 	active   map[string]bool
+	runtimes RuntimeRouter
+	leases   LeaseService
+}
+
+type remoteMapRuntime struct {
+	driver runtimedriver.MapDriver
+	target runtimedriver.Target
+}
+
+type sessionLocation struct {
+	path    string
+	session Session
+	remote  *remoteMapRuntime
 }
 
 func NewService(config Config, roomCatalog RoomCatalog, store *Store, renderer Renderer) (*Service, error) {
@@ -111,12 +138,38 @@ func NewService(config Config, roomCatalog RoomCatalog, store *Store, renderer R
 	return &Service{config: config, rooms: roomCatalog, store: store, renderer: renderer, active: make(map[string]bool)}, nil
 }
 
+func (s *Service) ConfigureRemote(runtimes RuntimeRouter, leases LeaseService) error {
+	if runtimes == nil || leases == nil {
+		return errors.New("map runtime router and lease service are required")
+	}
+	s.runtimes, s.leases = runtimes, leases
+	return nil
+}
+
 func (s *Service) RendererStatus() RendererInfo {
 	if renderer, ok := s.renderer.(interface{ Info() RendererInfo }); ok {
 		return renderer.Info()
 	}
 	available, path := s.renderer.Available()
 	return RendererInfo{Available: available, Path: path, Artifacts: []string{}}
+}
+
+func (s *Service) RendererStatusForWorld(ctx context.Context, roomID, worldID string) RendererInfo {
+	remote, err := s.remoteRuntime(ctx, roomID, worldID)
+	if err != nil {
+		return RendererInfo{Artifacts: []string{}, Error: err.Error()}
+	}
+	if remote == nil {
+		return s.RendererStatus()
+	}
+	status, err := remote.driver.MapRendererStatus(ctx, remote.target)
+	if err != nil {
+		return RendererInfo{Artifacts: []string{}, Error: err.Error()}
+	}
+	return RendererInfo{
+		Available: status.Available, ProtocolVersion: status.ProtocolVersion, Version: status.Version,
+		Artifacts: append([]string(nil), status.Artifacts...), Error: status.Error,
+	}
 }
 
 func (s *Service) List(roomID string) ([]Map, error) {
@@ -129,9 +182,20 @@ func (s *Service) List(roomID string) ([]Map, error) {
 func (s *Service) Get(id string) (Map, error) { return s.store.Get(id) }
 
 func (s *Service) Sessions(roomID, worldID string) ([]Session, error) {
+	return s.SessionsContext(context.Background(), roomID, worldID)
+}
+
+func (s *Service) SessionsContext(ctx context.Context, roomID, worldID string) ([]Session, error) {
 	room, world, err := s.resolveWorld(roomID, worldID)
 	if err != nil {
 		return nil, err
+	}
+	remote, err := s.remoteRuntime(ctx, roomID, worldID)
+	if err != nil {
+		return nil, err
+	}
+	if remote != nil {
+		return s.remoteSessions(ctx, roomID, worldID, remote)
 	}
 	root, err := s.sessionRoot(room, world)
 	if err != nil {
@@ -199,6 +263,41 @@ func (s *Service) Sessions(roomID, worldID string) ([]Session, error) {
 	return result, nil
 }
 
+func (s *Service) remoteSessions(ctx context.Context, roomID, worldID string, remote *remoteMapRuntime) ([]Session, error) {
+	items, err := remote.driver.ListMapSessions(ctx, remote.target)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Session, 0, len(items))
+	for _, item := range items {
+		if !safeComponent(item.SessionID) || !safeComponent(item.FileName) || item.Size <= 0 || item.Size > maxSnapshotSize || item.PlayerCount < 0 || item.ModifiedAt.IsZero() {
+			return nil, ErrUnsafeSessionPath
+		}
+		reference := sessionReference{RoomID: roomID, WorldID: worldID, Session: item.SessionID, File: item.FileName}
+		id, err := encodeSessionReference(reference)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, Session{
+			ID: id, RoomID: roomID, WorldID: worldID, SessionID: item.SessionID, FileName: item.FileName,
+			Size: item.Size, PlayerCount: item.PlayerCount, ModifiedAt: item.ModifiedAt.UTC(),
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].ModifiedAt.Equal(result[j].ModifiedAt) {
+			return result[i].ID > result[j].ID
+		}
+		return result[i].ModifiedAt.After(result[j].ModifiedAt)
+	})
+	if len(result) > maxSessions {
+		result = result[:maxSessions]
+	}
+	if len(result) > 0 {
+		result[0].Latest = true
+	}
+	return result, nil
+}
+
 func (s *Service) OpenSession(id string) (*os.File, os.FileInfo, Session, error) {
 	path, session, err := s.resolveSession(id, "", "")
 	if err != nil {
@@ -218,17 +317,43 @@ func (s *Service) OpenSession(id string) (*os.File, os.FileInfo, Session, error)
 	return file, info, session, nil
 }
 
+func (s *Service) OpenSessionContext(ctx context.Context, id string) (*os.File, os.FileInfo, Session, func(), error) {
+	location, err := s.resolveSessionLocation(ctx, id, "", "")
+	if err != nil {
+		return nil, nil, Session{}, nil, err
+	}
+	if location.remote == nil {
+		file, err := os.Open(location.path)
+		if err != nil {
+			return nil, nil, Session{}, nil, err
+		}
+		info, err := file.Stat()
+		if err != nil {
+			_ = file.Close()
+			return nil, nil, Session{}, nil, err
+		}
+		return file, info, location.session, func() {}, nil
+	}
+	return s.downloadRemoteSession(ctx, location)
+}
+
 func (s *Service) Prepare(roomID string, request GenerateRequest) ([]jobs.TargetSpec, func(jobs.Job) jobs.Runner, func(), error) {
+	return s.PrepareContext(context.Background(), roomID, request)
+}
+
+func (s *Service) PrepareContext(ctx context.Context, roomID string, request GenerateRequest) ([]jobs.TargetSpec, func(jobs.Job) jobs.Runner, func(), error) {
 	layers, err := normalizeLayers(request.Layers)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	_, session, err := s.resolveSession(request.SessionID, roomID, request.WorldID)
+	location, err := s.resolveSessionLocation(ctx, request.SessionID, roomID, request.WorldID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if available, _ := s.renderer.Available(); !available {
-		return nil, nil, nil, ErrRendererUnavailable
+	if location.remote == nil {
+		if available, _ := s.renderer.Available(); !available {
+			return nil, nil, nil, ErrRendererUnavailable
+		}
 	}
 	key := roomID + "\x00" + request.WorldID
 	s.mu.Lock()
@@ -243,7 +368,7 @@ func (s *Service) Prepare(roomID string, request GenerateRequest) ([]jobs.Target
 		delete(s.active, key)
 		s.mu.Unlock()
 	})
-	targets := []jobs.TargetSpec{{ID: request.WorldID, Name: "渲染 " + session.SessionID + " / " + session.FileName}}
+	targets := []jobs.TargetSpec{{ID: request.WorldID, Name: "渲染 " + location.session.SessionID + " / " + location.session.FileName}}
 	factory := func(job jobs.Job) jobs.Runner {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
 			defer release()
@@ -270,18 +395,22 @@ func (s *Service) Generate(ctx context.Context, jobID, roomID, worldID, sessionI
 	if err != nil {
 		return Map{}, err
 	}
-	input, session, err := s.resolveSession(sessionID, roomID, worldID)
+	location, err := s.resolveSessionLocation(ctx, sessionID, roomID, worldID)
 	if err != nil {
 		return Map{}, err
 	}
 	id := uuid.NewString()
 	value, err := s.store.Begin(Map{
 		ID: id, RoomID: roomID, WorldID: worldID, SessionID: sessionID,
-		SessionLabel: session.SessionID + " / " + session.FileName, Layers: layers, SourceJobID: jobID,
+		SessionLabel: location.session.SessionID + " / " + location.session.FileName, Layers: layers, SourceJobID: jobID,
 	})
 	if err != nil {
 		return Map{}, err
 	}
+	if location.remote != nil {
+		return s.generateRemote(ctx, value, location, layers)
+	}
+	input := location.path
 	if err := os.MkdirAll(s.config.MapRoot, 0750); err != nil {
 		return s.fail(value, "staging", "", err)
 	}
@@ -337,6 +466,302 @@ func (s *Service) Generate(ctx context.Context, jobID, roomID, worldID, sessionI
 	}
 	_ = s.prune(roomID, worldID)
 	return completed, nil
+}
+
+func (s *Service) remoteRuntime(ctx context.Context, roomID, worldID string) (*remoteMapRuntime, error) {
+	if s.runtimes == nil {
+		return nil, nil
+	}
+	driver, target, err := s.runtimes.DriverTarget(ctx, roomID, worldID)
+	if err != nil {
+		return nil, err
+	}
+	if target.TargetID == "local" {
+		return nil, nil
+	}
+	remote, ok := driver.(runtimedriver.MapDriver)
+	if !ok || !runtimedriver.HasCapability(driver, runtimedriver.CapabilityMapRender) {
+		return nil, ErrRendererUnavailable
+	}
+	return &remoteMapRuntime{driver: remote, target: target}, nil
+}
+
+func (s *Service) resolveSessionLocation(ctx context.Context, id, expectedRoomID, expectedWorldID string) (sessionLocation, error) {
+	reference, err := decodeSessionReference(id)
+	if err != nil || expectedRoomID != "" && reference.RoomID != expectedRoomID || expectedWorldID != "" && reference.WorldID != expectedWorldID {
+		return sessionLocation{}, ErrSessionNotFound
+	}
+	if _, _, err := s.resolveWorld(reference.RoomID, reference.WorldID); err != nil {
+		return sessionLocation{}, err
+	}
+	remote, err := s.remoteRuntime(ctx, reference.RoomID, reference.WorldID)
+	if err != nil {
+		return sessionLocation{}, err
+	}
+	if remote == nil {
+		path, session, err := s.resolveSession(id, expectedRoomID, expectedWorldID)
+		return sessionLocation{path: path, session: session}, err
+	}
+	sessions, err := s.remoteSessions(ctx, reference.RoomID, reference.WorldID, remote)
+	if err != nil {
+		return sessionLocation{}, err
+	}
+	for _, session := range sessions {
+		if session.ID == id {
+			return sessionLocation{session: session, remote: remote}, nil
+		}
+	}
+	return sessionLocation{}, ErrSessionNotFound
+}
+
+func (s *Service) generateRemote(ctx context.Context, value Map, location sessionLocation, layers []Layer) (Map, error) {
+	if s.leases == nil || location.remote == nil {
+		return s.fail(value, "runtime", "", ErrRendererUnavailable)
+	}
+	if err := os.MkdirAll(s.config.MapRoot, 0o750); err != nil {
+		return s.fail(value, "staging", "", err)
+	}
+	workDirectory, err := os.MkdirTemp(s.config.MapRoot, ".map-render-")
+	if err != nil {
+		return s.fail(value, "staging", "", err)
+	}
+	defer os.RemoveAll(workDirectory)
+	artifactDirectory := filepath.Join(workDirectory, "artifacts")
+	if err := os.Mkdir(artifactDirectory, 0o750); err != nil {
+		return s.fail(value, "staging", "", err)
+	}
+	lease, err := s.leases.Acquire(ctx, value.RoomID, "map.render:"+value.ID, 5*time.Minute)
+	if err != nil {
+		return s.fail(value, "runtime", "", err)
+	}
+	defer func() { _ = s.leases.Release(lease) }()
+	if err := s.store.Stage(value.ID, "renderer"); err != nil {
+		return Map{}, err
+	}
+	requestedLayers := make([]string, len(layers))
+	for index := range layers {
+		requestedLayers[index] = string(layers[index])
+	}
+	renderContext, cancel := context.WithTimeout(ctx, s.config.RenderTimeout)
+	descriptor, renderErr := location.remote.driver.RenderMap(
+		renderContext, location.remote.target, mapOperation(lease, value.ID, "render"), value.ID,
+		location.session.SessionID, location.session.FileName, requestedLayers,
+	)
+	cancel()
+	sanitizedLog := sanitizeRendererText(descriptor.Log, s.config.SaveRoot, s.config.MapRoot)
+	if renderErr != nil {
+		return s.fail(value, "renderer", sanitizedLog, renderErr)
+	}
+	cleanupNeeded := true
+	defer func() {
+		if cleanupNeeded {
+			_ = s.releaseRemoteTransfer(context.WithoutCancel(ctx), location.remote, &lease, value.ID)
+		}
+	}()
+	if err := validateMapDescriptor(descriptor, value.ID); err != nil {
+		return s.fail(value, "transfer", sanitizedLog, err)
+	}
+	if err := s.store.Stage(value.ID, "transfer"); err != nil {
+		return Map{}, err
+	}
+	archivePath := filepath.Join(workDirectory, "artifacts.zip")
+	if err := readRemoteTransfer(ctx, location.remote.driver, location.remote.target, descriptor, archivePath); err != nil {
+		return s.fail(value, "transfer", sanitizedLog, err)
+	}
+	if err := extractArtifactArchive(archivePath, artifactDirectory); err != nil {
+		return s.fail(value, "validate", sanitizedLog, err)
+	}
+	cleanupErr := s.releaseRemoteTransfer(context.WithoutCancel(ctx), location.remote, &lease, value.ID)
+	cleanupNeeded = false
+	if cleanupErr != nil {
+		sanitizedLog = strings.TrimSpace(sanitizedLog + "\n[DST Admin] temporary map cleanup failed: " + sanitizeRendererText(cleanupErr.Error()))
+	}
+	if err := s.store.Stage(value.ID, "validate"); err != nil {
+		return Map{}, err
+	}
+	manifest, err := validateRendererArtifacts(artifactDirectory, descriptor.SourceSHA256)
+	if err != nil {
+		return s.fail(value, "validate", sanitizedLog, err)
+	}
+	final := filepath.Join(s.config.MapRoot, value.ID)
+	if err := s.store.Stage(value.ID, "publish"); err != nil {
+		return Map{}, err
+	}
+	if err := os.Rename(artifactDirectory, final); err != nil {
+		return s.fail(value, "publish", sanitizedLog, err)
+	}
+	value.Width, value.Height = manifest.Map.ImageWidth, manifest.Map.ImageHeight
+	value.FeatureCount, value.WarningCount = manifest.Statistics.FeatureCount, len(manifest.Warnings)
+	value.SourceSHA256, value.RendererVersion = descriptor.SourceSHA256, manifest.RendererVersion
+	completed, err := s.store.Complete(value.ID, "succeeded", "complete", sanitizedLog, "", value)
+	if err != nil {
+		_ = os.RemoveAll(final)
+		return Map{}, err
+	}
+	_ = s.prune(value.RoomID, value.WorldID)
+	return completed, nil
+}
+
+func (s *Service) downloadRemoteSession(ctx context.Context, location sessionLocation) (*os.File, os.FileInfo, Session, func(), error) {
+	if s.leases == nil || location.remote == nil {
+		return nil, nil, Session{}, nil, ErrRendererUnavailable
+	}
+	transferID := uuid.NewString()
+	lease, err := s.leases.Acquire(ctx, location.session.RoomID, "map.snapshot:"+transferID, 5*time.Minute)
+	if err != nil {
+		return nil, nil, Session{}, nil, err
+	}
+	defer func() { _ = s.leases.Release(lease) }()
+	descriptor, err := location.remote.driver.PrepareMapSnapshot(
+		ctx, location.remote.target, mapOperation(lease, transferID, "prepare"), transferID,
+		location.session.SessionID, location.session.FileName,
+	)
+	if err != nil {
+		return nil, nil, Session{}, nil, err
+	}
+	cleanupNeeded := true
+	defer func() {
+		if cleanupNeeded {
+			_ = s.releaseRemoteTransfer(context.WithoutCancel(ctx), location.remote, &lease, transferID)
+		}
+	}()
+	if err := validateMapDescriptor(descriptor, transferID); err != nil || descriptor.SHA256 != descriptor.SourceSHA256 {
+		return nil, nil, Session{}, nil, errors.Join(err, ErrRendererOutput)
+	}
+	workDirectory, err := os.MkdirTemp(s.config.MapRoot, ".map-download-")
+	if err != nil {
+		return nil, nil, Session{}, nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(workDirectory) }
+	path := filepath.Join(workDirectory, "session.snapshot")
+	if err := readRemoteTransfer(ctx, location.remote.driver, location.remote.target, descriptor, path); err != nil {
+		cleanup()
+		return nil, nil, Session{}, nil, err
+	}
+	if err := s.releaseRemoteTransfer(context.WithoutCancel(ctx), location.remote, &lease, transferID); err != nil {
+		cleanupNeeded = false
+		cleanup()
+		return nil, nil, Session{}, nil, err
+	}
+	cleanupNeeded = false
+	file, err := os.Open(path)
+	if err != nil {
+		cleanup()
+		return nil, nil, Session{}, nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		cleanup()
+		return nil, nil, Session{}, nil, err
+	}
+	location.session.Size, location.session.ModifiedAt = info.Size(), info.ModTime().UTC()
+	return file, info, location.session, cleanup, nil
+}
+
+func (s *Service) releaseRemoteTransfer(ctx context.Context, remote *remoteMapRuntime, lease *operationlease.Lease, transferID string) error {
+	renewed, err := s.leases.Renew(ctx, *lease, 5*time.Minute)
+	if err != nil {
+		return err
+	}
+	*lease = renewed
+	return remote.driver.ReleaseMapTransfer(ctx, remote.target, mapOperation(*lease, transferID, "release"), transferID)
+}
+
+func mapOperation(lease operationlease.Lease, transferID, phase string) runtimedriver.Operation {
+	expiresAt := lease.ExpiresAt.UTC()
+	return runtimedriver.Operation{
+		ID: transferID, Key: transferID + "-" + phase, LeaseID: lease.LeaseID,
+		FencingToken: lease.FencingToken, LeaseExpiresAt: &expiresAt,
+	}
+}
+
+func validateMapDescriptor(value runtimedriver.MapDescriptor, transferID string) error {
+	if value.TransferID != transferID || value.Size <= 0 || value.Size > 256*1024*1024 || len(value.SHA256) != 64 || len(value.SourceSHA256) != 64 {
+		return ErrRendererOutput
+	}
+	if _, err := hex.DecodeString(value.SHA256); err != nil {
+		return ErrRendererOutput
+	}
+	if _, err := hex.DecodeString(value.SourceSHA256); err != nil {
+		return ErrRendererOutput
+	}
+	return nil
+}
+
+func readRemoteTransfer(ctx context.Context, driver runtimedriver.MapDriver, target runtimedriver.Target, descriptor runtimedriver.MapDescriptor, destination string) error {
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	hash := sha256.New()
+	offset := int64(0)
+	for offset < descriptor.Size {
+		chunk, readErr := driver.ReadMapTransfer(ctx, target, descriptor.TransferID, offset)
+		if readErr != nil {
+			_ = output.Close()
+			return readErr
+		}
+		if chunk.TransferID != descriptor.TransferID || chunk.Size != descriptor.Size || chunk.SHA256 != descriptor.SHA256 || chunk.SourceSHA256 != descriptor.SourceSHA256 ||
+			chunk.Offset != offset || chunk.NextOffset <= offset || chunk.NextOffset > descriptor.Size || int64(len(chunk.Data)) != chunk.NextOffset-offset || len(chunk.Data) > shared.MaxChunkBytes || chunk.Complete != (chunk.NextOffset == descriptor.Size) {
+			_ = output.Close()
+			return ErrRendererOutput
+		}
+		if _, err := io.MultiWriter(output, hash).Write(chunk.Data); err != nil {
+			_ = output.Close()
+			return err
+		}
+		offset = chunk.NextOffset
+	}
+	if err := output.Close(); err != nil {
+		return err
+	}
+	if hex.EncodeToString(hash.Sum(nil)) != descriptor.SHA256 {
+		return ErrRendererOutput
+	}
+	return nil
+}
+
+func extractArtifactArchive(archivePath, destination string) error {
+	archiveInfo, err := os.Stat(archivePath)
+	if err != nil {
+		return err
+	}
+	reader, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return errors.Join(ErrRendererOutput, err)
+	}
+	defer reader.Close()
+	expected := map[string]int64{
+		maprenderer.TerrainFileName: maxLayerImageSize, maprenderer.IconsFileName: maxLayerImageSize,
+		maprenderer.ManifestFileName: maxManifestSize, maprenderer.FeaturesFileName: maxFeaturesSize,
+	}
+	if archiveInfo.Size() <= 0 || len(reader.File) != len(expected) {
+		return ErrRendererOutput
+	}
+	seen := make(map[string]bool, len(expected))
+	for _, entry := range reader.File {
+		limit, ok := expected[entry.Name]
+		if !ok || seen[entry.Name] || entry.FileInfo().IsDir() || entry.Mode()&os.ModeSymlink != 0 || int64(entry.UncompressedSize64) <= 0 || int64(entry.UncompressedSize64) > limit {
+			return ErrRendererOutput
+		}
+		seen[entry.Name] = true
+		input, err := entry.Open()
+		if err != nil {
+			return err
+		}
+		output, err := os.OpenFile(filepath.Join(destination, entry.Name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			_ = input.Close()
+			return err
+		}
+		written, copyErr := io.Copy(output, io.LimitReader(input, limit+1))
+		closeErr := errors.Join(input.Close(), output.Close())
+		if copyErr != nil || closeErr != nil || written != int64(entry.UncompressedSize64) || written > limit {
+			return errors.Join(ErrRendererOutput, copyErr, closeErr)
+		}
+	}
+	return nil
 }
 
 func (s *Service) OpenImage(id string, layer Layer) (*os.File, os.FileInfo, Map, error) {

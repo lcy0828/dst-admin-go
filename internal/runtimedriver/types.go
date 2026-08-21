@@ -43,6 +43,7 @@ const (
 	CapabilityExclusiveCPU    Capability = "exclusiveCpu"
 	CapabilityPublishedUDP    Capability = "publishedUdpEndpoint"
 	CapabilityConfigPublish   Capability = "configPublish"
+	CapabilityMapRender       Capability = "mapRender"
 )
 
 type Target struct {
@@ -160,6 +161,33 @@ type ConfigurationDriver interface {
 	PublishConfiguration(context.Context, Target, Operation, string, string) error
 	RollbackConfiguration(context.Context, Target, Operation, string, string) error
 	CompleteConfiguration(context.Context, Target, Operation, string, string) error
+}
+
+type MapDescriptor struct {
+	TransferID   string
+	Size         int64
+	SHA256       string
+	SourceSHA256 string
+	Log          string
+}
+
+type MapChunk struct {
+	MapDescriptor
+	Offset     int64
+	NextOffset int64
+	Data       []byte
+	Complete   bool
+}
+
+// MapDriver keeps Session files and official game assets on the Runtime node.
+// The controller receives only bounded Session metadata or verified artifacts.
+type MapDriver interface {
+	ListMapSessions(context.Context, Target) ([]shared.RuntimeMapSession, error)
+	MapRendererStatus(context.Context, Target) (shared.RuntimeMapRenderer, error)
+	PrepareMapSnapshot(context.Context, Target, Operation, string, string, string) (MapDescriptor, error)
+	RenderMap(context.Context, Target, Operation, string, string, string, []string) (MapDescriptor, error)
+	ReadMapTransfer(context.Context, Target, string, int64) (MapChunk, error)
+	ReleaseMapTransfer(context.Context, Target, Operation, string) error
 }
 
 type SnapshotBarrierReceipt struct {

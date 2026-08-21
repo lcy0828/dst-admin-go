@@ -47,12 +47,13 @@ func (h *WorldMapHandler) list(c *gin.Context) {
 }
 
 func (h *WorldMapHandler) sessions(c *gin.Context) {
-	items, err := h.maps.Sessions(c.Param("roomId"), c.Param("worldId"))
+	items, err := h.maps.SessionsContext(c.Request.Context(), c.Param("roomId"), c.Param("worldId"))
 	if err != nil {
 		worldMapFailure(c, err)
 		return
 	}
-	Success(c, http.StatusOK, gin.H{"items": items, "total": len(items)})
+	renderer := h.maps.RendererStatusForWorld(c.Request.Context(), c.Param("roomId"), c.Param("worldId"))
+	Success(c, http.StatusOK, gin.H{"items": items, "total": len(items), "renderer": renderer})
 }
 
 func (h *WorldMapHandler) generate(c *gin.Context) {
@@ -61,7 +62,7 @@ func (h *WorldMapHandler) generate(c *gin.Context) {
 		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的地图生成配置", nil)
 		return
 	}
-	targets, factory, release, err := h.maps.Prepare(c.Param("roomId"), request)
+	targets, factory, release, err := h.maps.PrepareContext(c.Request.Context(), c.Param("roomId"), request)
 	if err != nil {
 		worldMapFailure(c, err)
 		return
@@ -76,12 +77,13 @@ func (h *WorldMapHandler) generate(c *gin.Context) {
 }
 
 func (h *WorldMapHandler) downloadSession(c *gin.Context) {
-	file, info, session, err := h.maps.OpenSession(c.Param("sessionId"))
+	file, info, session, cleanup, err := h.maps.OpenSessionContext(c.Request.Context(), c.Param("sessionId"))
 	if err != nil {
 		worldMapFailure(c, err)
 		return
 	}
 	defer file.Close()
+	defer cleanup()
 	name := "dst-session-" + session.SessionID + "-" + session.FileName + ".bin"
 	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
 	c.Header("Content-Type", "application/octet-stream")
