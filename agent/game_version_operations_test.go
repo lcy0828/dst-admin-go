@@ -90,7 +90,8 @@ func TestGameVersionObserveDoesNotRequireExistingShard(t *testing.T) {
 	request := gameVersionRequest(shared.RuntimeActionGameVersionObserve, "")
 	request.Cluster, request.Shard = "MissingCluster", "MissingShard"
 	result, err := agent.executeRuntimeOperation(string(request.Action), &request, 30)
-	if err != nil || result.GameVersion == nil || !result.GameVersion.Installed || result.GameVersion.CurrentVersion != "747465" {
+	if err != nil || result.GameVersion == nil || !result.GameVersion.Installed || result.GameVersion.CurrentVersion != "747465" ||
+		result.GameVersion.AppID != "343050" || result.GameVersion.UpdateMethod != "steamcmd" {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }

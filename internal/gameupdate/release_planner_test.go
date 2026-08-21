@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"dont/internal/agents"
+	dstinstall "dont/internal/dstserver"
 	"dont/internal/rooms"
 	"dont/internal/runtimedriver"
 	"dont/shared"
@@ -160,7 +161,16 @@ func TestReleasePlannerReportsIndependentPreflightBlockers(t *testing.T) {
 }
 
 func TestReleasePlannerRejectsChangedDesiredBuild(t *testing.T) {
-	planner, _ := NewReleasePlanner(fakeReleaseSnapshots{}, &fakeReleaseRuntime{}, fixedLatest{version: "701"}, 1)
+	snapshot := ReleasePlacementSnapshot{TopologyRevision: string(make([]byte, 64)), Shards: []ReleaseShardSnapshot{
+		releaseSnapshotShard("room-a", "Master", "agent:node-a", "primary", true),
+	}}
+	runtime := &fakeReleaseRuntime{
+		observations: map[string]shared.RuntimeGameVersionResult{
+			releaseInstallationKey("agent:node-a", "primary"): {Installed: true, CurrentVersion: "699", AvailableBytes: 8 << 30, SteamCMDAvailable: true, UpdateSupported: true},
+		},
+		statuses: map[string]shared.ShardRuntimeStatus{"room-a\x00Master": {State: "stopped"}}, errors: map[string]error{},
+	}
+	planner, _ := NewReleasePlanner(fakeReleaseSnapshots{snapshot}, runtime, fixedLatest{version: "701"}, 1)
 	_, err := planner.Preview(context.Background(), ReleasePreviewRequest{DesiredVersion: "700"})
 	if !errors.Is(err, ErrDesiredVersionChanged) {
 		t.Fatalf("error=%v", err)
@@ -168,10 +178,46 @@ func TestReleasePlannerRejectsChangedDesiredBuild(t *testing.T) {
 }
 
 func TestReleasePlannerClassifiesLatestBuildLookupFailures(t *testing.T) {
-	planner, _ := NewReleasePlanner(fakeReleaseSnapshots{}, &fakeReleaseRuntime{}, fixedLatest{err: errors.New("Steam unavailable")}, 1)
+	snapshot := ReleasePlacementSnapshot{TopologyRevision: string(make([]byte, 64)), Shards: []ReleaseShardSnapshot{
+		releaseSnapshotShard("room-a", "Master", "agent:node-a", "primary", true),
+	}}
+	runtime := &fakeReleaseRuntime{
+		observations: map[string]shared.RuntimeGameVersionResult{
+			releaseInstallationKey("agent:node-a", "primary"): {Installed: true, CurrentVersion: "700", AvailableBytes: 8 << 30, SteamCMDAvailable: true, UpdateSupported: true},
+		},
+		statuses: map[string]shared.ShardRuntimeStatus{"room-a\x00Master": {State: "stopped"}}, errors: map[string]error{},
+	}
+	planner, _ := NewReleasePlanner(fakeReleaseSnapshots{snapshot}, runtime, fixedLatest{err: errors.New("Steam unavailable")}, 1)
 	_, err := planner.Preview(context.Background(), ReleasePreviewRequest{})
 	if !errors.Is(err, ErrLatestBuildUnavailable) || errors.Is(err, ErrReleaseInvalid) {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestReleasePlannerTreatsCurrentSteamClientInstallationAsInformational(t *testing.T) {
+	snapshot := ReleasePlacementSnapshot{TopologyRevision: string(make([]byte, 64)), Shards: []ReleaseShardSnapshot{
+		releaseSnapshotShard("room-a", "Master", "local", "default", true),
+	}}
+	runtime := &fakeReleaseRuntime{
+		observations: map[string]shared.RuntimeGameVersionResult{
+			releaseInstallationKey("local", "default"): {
+				Installed: true, AppID: dstinstall.AppIDGame, UpdateMethod: dstinstall.UpdateMethodSteamClient,
+				CurrentVersion: "24700692", AvailableBytes: 23 << 30, UpdateSupported: false,
+			},
+		},
+		statuses: map[string]shared.ShardRuntimeStatus{"room-a\x00Master": {State: "running", SessionExists: true}}, errors: map[string]error{},
+	}
+	planner, _ := NewReleasePlanner(fakeReleaseSnapshots{snapshot}, runtime, fixedLatest{version: "24700692"}, 2<<30)
+	plan, err := planner.Preview(context.Background(), ReleasePreviewRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Ready || plan.UpdateRequired || plan.DesiredVersion != "24700692" || len(plan.Blockers) != 0 {
+		t.Fatalf("plan = %#v", plan)
+	}
+	target := plan.Installations[0]
+	if !target.UpToDate || target.AppID != dstinstall.AppIDGame || target.UpdateMethod != dstinstall.UpdateMethodSteamClient || target.UpdateSupported {
+		t.Fatalf("target = %#v", target)
 	}
 }
 

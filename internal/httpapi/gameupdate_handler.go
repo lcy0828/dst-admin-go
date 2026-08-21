@@ -185,7 +185,11 @@ func gameReleaseReport(report func(jobs.TargetResult), plan gameupdate.ReleasePl
 		result := findGameReleaseInstallation(value, installation.TargetID, installation.InstallationID)
 		target := jobs.TargetResult{TargetID: gameReleaseJobTarget("installation", installation.TargetID, installation.InstallationID)}
 		if result != nil && (result.Stage == gameupdate.ReleaseStageVerified || result.Stage == gameupdate.ReleaseStageSucceeded) {
-			target.Status, target.Message = jobs.StatusSucceeded, "安装已更新并验证为 "+plan.DesiredVersion
+			desiredVersion := installation.DesiredVersion
+			if desiredVersion == "" {
+				desiredVersion = plan.DesiredVersion
+			}
+			target.Status, target.Message = jobs.StatusSucceeded, "安装已验证为 "+desiredVersion
 		} else {
 			code, message := releaseError(result)
 			target.Status, target.Error = jobs.StatusFailed, gameReleaseJobError(releaseErr, code, message)

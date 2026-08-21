@@ -63,10 +63,12 @@ func (a *Agent) observeGameVersion(ctx context.Context, installation RuntimeInst
 	result := runtimeResult(request, shared.RuntimeOutcomeObserved, "游戏版本状态已读取")
 	version, installed := readInstalledGameVersion(installation)
 	steamcmd := findAgentSteamCMD(installation.SteamCMDPath)
+	appID, updateMethod := gameVersionInstallationMetadata(installation)
 	available, diskErr := availableGameBytes(gameInstallRoot(installation))
 	value := shared.RuntimeGameVersionResult{
-		Installed: installed, CurrentVersion: version, AvailableBytes: available,
-		SteamCMDAvailable: steamcmd != "", UpdateSupported: steamcmd != "",
+		Installed: installed, AppID: appID, UpdateMethod: updateMethod,
+		CurrentVersion: version, AvailableBytes: available,
+		SteamCMDAvailable: steamcmd != "", UpdateSupported: updateMethod == dstinstall.UpdateMethodSteamCMD && steamcmd != "",
 		ObservedAt: a.now().UTC(),
 	}
 	result.GameVersion = &value
@@ -83,6 +85,13 @@ func (a *Agent) observeGameVersion(ctx context.Context, installation RuntimeInst
 
 func (a *Agent) updateGameVersion(ctx context.Context, installation RuntimeInstallation, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
 	result := runtimeResult(request, shared.RuntimeOutcomeConfirmed, "DST 服务端版本已更新并校验")
+	_, updateMethod := gameVersionInstallationMetadata(installation)
+	if updateMethod != dstinstall.UpdateMethodSteamCMD {
+		err := errors.New("该 DST 安装由 Steam 客户端管理，Agent 不能自动更新")
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+		result.GameVersion = gameVersionResult(a.now, installation, "", "")
+		return result, err
+	}
 	steamcmd := findAgentSteamCMD(installation.SteamCMDPath)
 	if steamcmd == "" {
 		err := errors.New("Agent 本机 SteamCMD 不可用")
@@ -117,12 +126,21 @@ func (a *Agent) updateGameVersion(ctx context.Context, installation RuntimeInsta
 
 func gameVersionResult(now func() time.Time, installation RuntimeInstallation, steamcmd, logText string) *shared.RuntimeGameVersionResult {
 	version, installed := readInstalledGameVersion(installation)
+	appID, updateMethod := gameVersionInstallationMetadata(installation)
 	available, _ := availableGameBytes(gameInstallRoot(installation))
 	return &shared.RuntimeGameVersionResult{
-		Installed: installed, CurrentVersion: version, AvailableBytes: available,
-		SteamCMDAvailable: steamcmd != "", UpdateSupported: steamcmd != "", Log: logText,
+		Installed: installed, AppID: appID, UpdateMethod: updateMethod,
+		CurrentVersion: version, AvailableBytes: available,
+		SteamCMDAvailable: steamcmd != "", UpdateSupported: updateMethod == dstinstall.UpdateMethodSteamCMD && steamcmd != "", Log: logText,
 		ObservedAt: now().UTC(),
 	}
+}
+
+func gameVersionInstallationMetadata(installation RuntimeInstallation) (string, string) {
+	if layout, ok := dstinstall.Resolve(installation.ServerPath, installation.ServerMode); ok {
+		return layout.AppID, layout.UpdateMethod
+	}
+	return dstDedicatedServerAppID, dstinstall.UpdateMethodSteamCMD
 }
 
 func gameInstallRoot(installation RuntimeInstallation) string {
@@ -134,7 +152,8 @@ func gameInstallRoot(installation RuntimeInstallation) string {
 
 func readInstalledGameVersion(installation RuntimeInstallation) (string, bool) {
 	root := gameInstallRoot(installation)
-	candidates := gameManifestCandidates(root)
+	appID, _ := gameVersionInstallationMetadata(installation)
+	candidates := gameManifestCandidates(root, appID)
 	candidates = append(candidates, filepath.Join(root, "version.txt"), filepath.Join(installation.ServerPath, "version.txt"))
 	seen := make(map[string]bool, len(candidates))
 	for _, candidate := range candidates {
@@ -164,10 +183,10 @@ func readInstalledGameVersion(installation RuntimeInstallation) (string, bool) {
 	return "", false
 }
 
-func gameManifestCandidates(root string) []string {
+func gameManifestCandidates(root, appID string) []string {
 	result := make([]string, 0, 12)
 	for current, depth := filepath.Clean(root), 0; depth < 6; depth++ {
-		name := "appmanifest_" + dstDedicatedServerAppID + ".acf"
+		name := "appmanifest_" + appID + ".acf"
 		result = append(result, filepath.Join(current, name), filepath.Join(current, "steamapps", name))
 		parent := filepath.Dir(current)
 		if parent == current {

@@ -175,7 +175,8 @@ func (c *ReleaseCoordinator) execute(ctx context.Context, value Release, fences 
 		now := c.now().UTC()
 		value.Stage, value.FinishedAt, value.UpdatedAt = ReleaseStageSucceeded, &now, now
 		for index := range value.Installations {
-			value.Installations[index].Stage, value.Installations[index].AfterVersion = ReleaseStageSucceeded, value.Plan.DesiredVersion
+			value.Installations[index].Stage = ReleaseStageSucceeded
+			value.Installations[index].AfterVersion = releaseTargetDesiredVersion(value.Plan.Installations[index], value.Plan.DesiredVersion)
 			value.Installations[index].FinishedAt, value.Installations[index].UpdatedAt = &now, now
 		}
 		for index := range value.Shards {
@@ -317,13 +318,14 @@ func (c *ReleaseCoordinator) updateInstallations(ctx context.Context, value Rele
 	}
 	var failures error
 	for index, target := range value.Plan.Installations {
+		desiredVersion := releaseTargetDesiredVersion(target, value.Plan.DesiredVersion)
 		result := releaseInstallationResult(&value, target.TargetID, target.InstallationID)
 		if result == nil {
 			failures = errors.Join(failures, ErrReleaseInvalid)
 			continue
 		}
 		observation, observeErr := c.runtime.ObserveInstallation(ctx, target)
-		if observeErr == nil && observation.Installed && observation.CurrentVersion == value.Plan.DesiredVersion {
+		if observeErr == nil && observation.Installed && observation.CurrentVersion == desiredVersion {
 			now := c.now().UTC()
 			result.Stage, result.AfterVersion, result.ErrorCode, result.ErrorMessage = ReleaseStageVerified, observation.CurrentVersion, "", ""
 			result.FinishedAt, result.UpdatedAt = &now, now
@@ -348,9 +350,9 @@ func (c *ReleaseCoordinator) updateInstallations(ctx context.Context, value Rele
 			failures = errors.Join(failures, operationErr)
 			continue
 		}
-		updated, updateErr := c.runtime.UpdateInstallation(ctx, target, operation, value.Plan.DesiredVersion, value.Plan.Policy.CleanCache)
+		updated, updateErr := c.runtime.UpdateInstallation(ctx, target, operation, desiredVersion, value.Plan.Policy.CleanCache)
 		result.AfterVersion, result.Log = updated.CurrentVersion, updated.Log
-		if updateErr == nil && updated.CurrentVersion != value.Plan.DesiredVersion {
+		if updateErr == nil && updated.CurrentVersion != desiredVersion {
 			updateErr = errors.New("运行目标返回的安装版本与目标版本不一致")
 		}
 		if updateErr != nil {
@@ -711,6 +713,13 @@ func sameReleaseStructure(left, right ReleasePlan) bool {
 		}
 	}
 	return true
+}
+
+func releaseTargetDesiredVersion(target ReleaseInstallationPlan, fallback string) string {
+	if value := strings.TrimSpace(target.DesiredVersion); value != "" {
+		return value
+	}
+	return strings.TrimSpace(fallback)
 }
 
 func releaseInstallationResult(value *Release, targetID, installationID string) *ReleaseInstallationResult {

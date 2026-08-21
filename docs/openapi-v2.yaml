@@ -5603,6 +5603,8 @@ components:
         targetId: { type: string }
         targetName: { type: string }
         installationId: { type: string }
+        appId: { type: string, pattern: '^[0-9]{1,20}$', description: Steam application ID detected for this installation }
+        updateMethod: { type: string, enum: [steamcmd, steam-client], description: Component responsible for updating this installation }
         online: { type: boolean }
         inventoryFresh: { type: boolean }
         capabilities: { type: array, items: { type: string } }

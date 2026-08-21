@@ -12,11 +12,14 @@ import (
 	"strings"
 	"time"
 
+	dstinstall "dont/internal/dstserver"
 	"dont/internal/shards"
+	"dont/shared"
 )
 
 var releaseIdentityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 var releaseVersionPattern = regexp.MustCompile(`^[0-9]{1,64}$`)
+var releaseAppIDPattern = regexp.MustCompile(`^[0-9]{1,20}$`)
 
 type ReleasePlanner struct {
 	snapshots   ReleaseSnapshotSource
@@ -64,28 +67,16 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 	if err != nil {
 		return ReleasePlan{}, err
 	}
-	desired, _, err := p.latest.Check(ctx, "343050", "0")
-	if err != nil {
-		return ReleasePlan{}, errors.Join(ErrLatestBuildUnavailable, err)
-	}
-	if !releaseVersionPattern.MatchString(strings.TrimSpace(desired)) {
-		return ReleasePlan{}, errors.Join(ErrLatestBuildUnavailable, errors.New("Steam did not return a valid public build"))
-	}
-	desired = strings.TrimSpace(desired)
-	if requested := strings.TrimSpace(request.DesiredVersion); requested != "" {
-		if !releaseVersionPattern.MatchString(requested) {
-			return ReleasePlan{}, ErrReleaseInvalid
-		}
-		if requested != desired {
-			return ReleasePlan{}, ErrDesiredVersionChanged
-		}
+	requested := strings.TrimSpace(request.DesiredVersion)
+	if requested != "" && !releaseVersionPattern.MatchString(requested) {
+		return ReleasePlan{}, ErrReleaseInvalid
 	}
 	snapshot, err := p.snapshots.Snapshot(ctx)
 	if err != nil {
 		return ReleasePlan{}, err
 	}
 	plan := ReleasePlan{
-		Version: ReleasePlanVersion, DesiredVersion: desired, TopologyRevision: snapshot.TopologyRevision,
+		Version: ReleasePlanVersion, DesiredVersion: requested, TopologyRevision: snapshot.TopologyRevision,
 		Policy: policy, Blockers: []ReleaseBlocker{}, Ready: true, CreatedAt: p.now().UTC(),
 	}
 	targets := make(map[string]*ReleaseInstallationPlan)
@@ -105,7 +96,7 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 			target = &ReleaseInstallationPlan{
 				TargetID: targetID, TargetName: observed.Target.Name, InstallationID: installationID,
 				Online: observed.Target.Online || targetID == "local", InventoryFresh: observed.InventoryAvailable && !observed.InventoryStale,
-				Capabilities: normalizedReleaseStrings(observed.Target.Capabilities), DesiredVersion: desired, RequiredBytes: p.minimumFree,
+				Capabilities: normalizedReleaseStrings(observed.Target.Capabilities), RequiredBytes: p.minimumFree,
 				Blockers: []ReleaseBlocker{},
 			}
 			targets[key] = target
@@ -126,7 +117,9 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 	}
 	sort.Strings(plan.AffectedRoomIDs)
 	for _, target := range targets {
-		p.finishReleaseTarget(ctx, target)
+		if err := p.finishReleaseTarget(ctx, target, requested); err != nil {
+			return ReleasePlan{}, err
+		}
 		plan.Installations = append(plan.Installations, *target)
 		plan.Blockers = append(plan.Blockers, target.Blockers...)
 		if !target.UpToDate {
@@ -136,6 +129,19 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 	sort.Slice(plan.Installations, func(i, j int) bool {
 		return releaseInstallationKey(plan.Installations[i].TargetID, plan.Installations[i].InstallationID) < releaseInstallationKey(plan.Installations[j].TargetID, plan.Installations[j].InstallationID)
 	})
+	if plan.DesiredVersion == "" {
+		plan.DesiredVersion = preferredReleaseVersion(plan.Installations)
+	}
+	if plan.DesiredVersion == "" {
+		desired, _, latestErr := p.latest.Check(ctx, dstinstall.AppIDDedicatedServer, "0")
+		if latestErr != nil {
+			return ReleasePlan{}, errors.Join(ErrLatestBuildUnavailable, latestErr)
+		}
+		plan.DesiredVersion = strings.TrimSpace(desired)
+	}
+	if !releaseVersionPattern.MatchString(plan.DesiredVersion) {
+		return ReleasePlan{}, errors.Join(ErrLatestBuildUnavailable, errors.New("Steam did not return a valid public build"))
+	}
 	sortReleaseBlockers(plan.Blockers)
 	plan.Ready = len(plan.Blockers) == 0
 	plan.PlanHash, err = calculateReleasePlanHash(plan)
@@ -145,7 +151,7 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 	return plan, nil
 }
 
-func (p *ReleasePlanner) finishReleaseTarget(ctx context.Context, target *ReleaseInstallationPlan) {
+func (p *ReleasePlanner) finishReleaseTarget(ctx context.Context, target *ReleaseInstallationPlan, requested string) error {
 	sort.Slice(target.Shards, func(i, j int) bool { return releaseShardKey(target.Shards[i]) < releaseShardKey(target.Shards[j]) })
 	add := func(code, message string) {
 		target.Blockers = append(target.Blockers, ReleaseBlocker{Code: code, Message: message, TargetID: target.TargetID, InstallationID: target.InstallationID})
@@ -163,25 +169,56 @@ func (p *ReleasePlanner) finishReleaseTarget(ctx context.Context, target *Releas
 		add("CAPABILITY_MISSING", "运行目标不支持 "+RequiredUpdateCapability)
 	}
 	canObserve := target.Online && target.InventoryFresh && (target.TargetID == "local" || containsReleaseString(target.Capabilities, RequiredUpdateCapability))
+	target.AppID, target.UpdateMethod = dstinstall.AppIDDedicatedServer, dstinstall.UpdateMethodSteamCMD
+	observedSuccessfully := false
 	if canObserve {
 		observation, err := p.runtime.ObserveInstallation(ctx, *target)
 		if err != nil {
 			add("VERSION_OBSERVE_FAILED", "读取安装版本失败: "+err.Error())
 		} else {
+			observedSuccessfully = true
 			target.Installed, target.CurrentVersion = observation.Installed, strings.TrimSpace(observation.CurrentVersion)
+			target.AppID, target.UpdateMethod = normalizeReleaseInstallationMetadata(observation)
 			target.AvailableBytes, target.SteamCMDAvailable, target.UpdateSupported = observation.AvailableBytes, observation.SteamCMDAvailable, observation.UpdateSupported
-			target.UpToDate = target.Installed && target.CurrentVersion == target.DesiredVersion
-			if !target.Installed {
-				add("INSTALLATION_MISSING", "未发现 DST 专用服务器安装版本")
-			}
-			if !target.SteamCMDAvailable {
-				add("STEAMCMD_UNAVAILABLE", "运行目标未配置可执行的 SteamCMD")
-			}
-			if !target.UpdateSupported {
-				add("UPDATE_UNSUPPORTED", "该运行目标不支持自动更新 DST")
-			}
-			if target.AvailableBytes < target.RequiredBytes {
-				add("DISK_INSUFFICIENT", "DST 安装所在磁盘可用空间不足")
+		}
+	}
+	queryVersion := target.CurrentVersion
+	if queryVersion == "" {
+		queryVersion = "0"
+	}
+	desired, upToDate, err := p.latest.Check(ctx, target.AppID, queryVersion)
+	if err != nil {
+		return errors.Join(ErrLatestBuildUnavailable, err)
+	}
+	target.DesiredVersion = strings.TrimSpace(desired)
+	if !releaseVersionPattern.MatchString(target.DesiredVersion) {
+		return errors.Join(ErrLatestBuildUnavailable, errors.New("Steam did not return a valid public build"))
+	}
+	if requested != "" && target.AppID == dstinstall.AppIDDedicatedServer {
+		if requested != target.DesiredVersion {
+			return ErrDesiredVersionChanged
+		}
+		target.DesiredVersion = requested
+	}
+	target.UpToDate = target.Installed && (upToDate || target.CurrentVersion == target.DesiredVersion)
+	if observedSuccessfully {
+		if !target.Installed {
+			add("INSTALLATION_MISSING", "未发现 DST 专用服务器安装版本")
+		}
+		if !target.UpToDate {
+			switch target.UpdateMethod {
+			case dstinstall.UpdateMethodSteamClient:
+				add("STEAM_CLIENT_UPDATE_REQUIRED", "该安装由 Steam 客户端管理，请先在 Steam 中完成更新")
+			default:
+				if !target.SteamCMDAvailable {
+					add("STEAMCMD_UNAVAILABLE", "运行目标未配置可执行的 SteamCMD")
+				}
+				if !target.UpdateSupported {
+					add("UPDATE_UNSUPPORTED", "该运行目标不支持自动更新 DST")
+				}
+				if target.AvailableBytes < target.RequiredBytes {
+					add("DISK_INSUFFICIENT", "DST 安装所在磁盘可用空间不足")
+				}
 			}
 		}
 	}
@@ -202,6 +239,37 @@ func (p *ReleasePlanner) finishReleaseTarget(ctx context.Context, target *Releas
 		}
 	}
 	sortReleaseBlockers(target.Blockers)
+	return nil
+}
+
+func normalizeReleaseInstallationMetadata(value shared.RuntimeGameVersionResult) (string, string) {
+	appID := strings.TrimSpace(value.AppID)
+	if !releaseAppIDPattern.MatchString(appID) {
+		appID = dstinstall.AppIDDedicatedServer
+	}
+	method := strings.TrimSpace(value.UpdateMethod)
+	if method == "" {
+		if appID == dstinstall.AppIDGame {
+			method = dstinstall.UpdateMethodSteamClient
+		} else {
+			method = dstinstall.UpdateMethodSteamCMD
+		}
+	}
+	return appID, method
+}
+
+func preferredReleaseVersion(values []ReleaseInstallationPlan) string {
+	for _, value := range values {
+		if value.AppID == dstinstall.AppIDDedicatedServer && releaseVersionPattern.MatchString(value.DesiredVersion) {
+			return value.DesiredVersion
+		}
+	}
+	for _, value := range values {
+		if releaseVersionPattern.MatchString(value.DesiredVersion) {
+			return value.DesiredVersion
+		}
+	}
+	return ""
 }
 
 func calculateReleasePlanHash(plan ReleasePlan) (string, error) {
@@ -213,6 +281,8 @@ func calculateReleasePlanHash(plan ReleasePlan) (string, error) {
 	}
 	type canonicalTarget struct {
 		TargetID, InstallationID, CurrentVersion, DesiredVersion string
+		AppID                                                    string `json:",omitempty"`
+		UpdateMethod                                             string `json:",omitempty"`
 		Shards                                                   []canonicalShard
 	}
 	payload := struct {
@@ -228,7 +298,7 @@ func calculateReleasePlanHash(plan ReleasePlan) (string, error) {
 	for _, target := range plan.Installations {
 		canonical := canonicalTarget{
 			TargetID: target.TargetID, InstallationID: target.InstallationID, CurrentVersion: target.CurrentVersion,
-			DesiredVersion: target.DesiredVersion,
+			DesiredVersion: target.DesiredVersion, AppID: target.AppID, UpdateMethod: target.UpdateMethod,
 		}
 		for _, shard := range target.Shards {
 			canonical.Shards = append(canonical.Shards, canonicalShard{
@@ -261,7 +331,10 @@ func validateReleasePlan(plan ReleasePlan) error {
 	rooms := make(map[string]bool)
 	for _, target := range plan.Installations {
 		key := releaseInstallationKey(target.TargetID, target.InstallationID)
-		if seenInstallations[key] || len(target.Shards) == 0 || target.DesiredVersion != plan.DesiredVersion || len(target.Blockers) != 0 || !target.Online || !target.InventoryFresh || !target.Installed || !target.SteamCMDAvailable || !target.UpdateSupported || target.AvailableBytes < target.RequiredBytes {
+		metadataPresent := target.AppID != "" || target.UpdateMethod != ""
+		metadataInvalid := metadataPresent && (!releaseAppIDPattern.MatchString(target.AppID) || target.UpdateMethod != dstinstall.UpdateMethodSteamCMD && target.UpdateMethod != dstinstall.UpdateMethodSteamClient)
+		updateBlocked := !target.UpToDate && (!target.SteamCMDAvailable || !target.UpdateSupported || target.AvailableBytes < target.RequiredBytes)
+		if seenInstallations[key] || len(target.Shards) == 0 || !releaseVersionPattern.MatchString(target.DesiredVersion) || metadataInvalid || len(target.Blockers) != 0 || !target.Online || !target.InventoryFresh || !target.Installed || updateBlocked {
 			return ErrReleaseInvalid
 		}
 		seenInstallations[key] = true

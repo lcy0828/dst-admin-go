@@ -108,6 +108,8 @@ type ReleaseInstallationPlan struct {
 	TargetID          string             `json:"targetId"`
 	TargetName        string             `json:"targetName"`
 	InstallationID    string             `json:"installationId"`
+	AppID             string             `json:"appId,omitempty"`
+	UpdateMethod      string             `json:"updateMethod,omitempty"`
 	Online            bool               `json:"online"`
 	InventoryFresh    bool               `json:"inventoryFresh"`
 	Capabilities      []string           `json:"capabilities"`

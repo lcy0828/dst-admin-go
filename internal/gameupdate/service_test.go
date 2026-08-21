@@ -392,6 +392,10 @@ func TestSteamClientInstallReportsExternalUpdateAndRejectsPrepare(t *testing.T) 
 	if latest.appID != dstinstall.AppIDGame {
 		t.Fatalf("latest checker app ID = %q", latest.appID)
 	}
+	observation, err := service.ObserveReleaseInstallation(context.Background())
+	if err != nil || observation.AppID != dstinstall.AppIDGame || observation.UpdateMethod != dstinstall.UpdateMethodSteamClient || observation.UpdateSupported {
+		t.Fatalf("release observation = %#v, error = %v", observation, err)
+	}
 	if _, _, _, err := service.Prepare(context.Background(), UpdateRequest{Confirmation: "更新游戏"}); !errors.Is(err, ErrSteamClientManaged) {
 		t.Fatalf("prepare error = %v", err)
 	}

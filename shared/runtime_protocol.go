@@ -409,6 +409,8 @@ type RuntimeModResult struct {
 
 type RuntimeGameVersionResult struct {
 	Installed         bool      `json:"installed"`
+	AppID             string    `json:"app_id,omitempty"`
+	UpdateMethod      string    `json:"update_method,omitempty"`
 	CurrentVersion    string    `json:"current_version,omitempty"`
 	AvailableBytes    uint64    `json:"available_bytes"`
 	SteamCMDAvailable bool      `json:"steamcmd_available"`

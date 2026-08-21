@@ -24,7 +24,8 @@ func (s *Service) ObserveReleaseInstallation(ctx context.Context) (shared.Runtim
 	}
 	supported := !s.config.DisableUpdate && s.config.UpdateMethod == dstinstall.UpdateMethodSteamCMD && executable != ""
 	result := shared.RuntimeGameVersionResult{
-		Installed: installed, CurrentVersion: current, AvailableBytes: available,
+		Installed: installed, AppID: s.config.AppID, UpdateMethod: s.config.UpdateMethod,
+		CurrentVersion: current, AvailableBytes: available,
 		SteamCMDAvailable: executable != "", UpdateSupported: supported, ObservedAt: s.now().UTC(),
 	}
 	return result, usageErr
@@ -80,7 +81,8 @@ func (s *Service) releaseVersionResult(logText string) shared.RuntimeGameVersion
 		available = usage.Free
 	}
 	return shared.RuntimeGameVersionResult{
-		Installed: installed, CurrentVersion: current, AvailableBytes: available,
+		Installed: installed, AppID: s.config.AppID, UpdateMethod: s.config.UpdateMethod,
+		CurrentVersion: current, AvailableBytes: available,
 		SteamCMDAvailable: executable != "", UpdateSupported: !s.config.DisableUpdate && s.config.UpdateMethod == dstinstall.UpdateMethodSteamCMD && executable != "",
 		Log: logText, ObservedAt: s.now().UTC(),
 	}
