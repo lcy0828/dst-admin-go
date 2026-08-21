@@ -1111,6 +1111,42 @@ paths:
                 $ref: "#/components/schemas/RoomLogSnapshotEnvelope"
         "404":
           $ref: "#/components/responses/NotFound"
+  /rooms/{roomId}/chat-logs:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Logs]
+      operationId: listRoomChatLogs
+      summary: Read and deduplicate room chat records from every world shard
+      parameters:
+        - name: query
+          in: query
+          schema: { type: string, maxLength: 256 }
+        - name: worldId
+          in: query
+          schema: { type: string }
+        - name: kind
+          in: query
+          schema: { $ref: "#/components/schemas/ChatLogKind" }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Newest room chat records with matching cross-shard copies merged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatLogListEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
   /rooms/{roomId}/worlds/{worldId}/logs:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -4851,6 +4887,79 @@ components:
           type: "null"
         meta:
           $ref: "#/components/schemas/Meta"
+    ChatLogKind:
+      type: string
+      enum: [say, whisper, announcement]
+    ChatLogSource:
+      type: object
+      additionalProperties: false
+      required: [worldId, worldName, worldRole]
+      properties:
+        worldId: { type: string }
+        worldName: { type: string }
+        worldRole: { type: string, enum: [master, caves, custom] }
+    ChatLogProblem:
+      type: object
+      additionalProperties: false
+      required: [worldId, worldName, code, message]
+      properties:
+        worldId: { type: string }
+        worldName: { type: string }
+        code: { type: string }
+        message: { type: string }
+    ChatLogEntry:
+      type: object
+      additionalProperties: false
+      required: [id, kind, content, sourceTimestamp, sources]
+      properties:
+        id: { type: string }
+        kind: { $ref: "#/components/schemas/ChatLogKind" }
+        announcementType: { type: string }
+        playerId: { type: string }
+        playerName: { type: string }
+        content: { type: string }
+        sourceTimestamp: { type: string, pattern: '^[0-9]{2,}:[0-9]{2}:[0-9]{2}$' }
+        occurredAt: { type: string, format: date-time }
+        sources:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/ChatLogSource" }
+    ChatLogCounts:
+      type: object
+      additionalProperties: false
+      required: [say, whisper, announcement]
+      properties:
+        say: { type: integer, minimum: 0 }
+        whisper: { type: integer, minimum: 0 }
+        announcement: { type: integer, minimum: 0 }
+    ChatLogList:
+      type: object
+      additionalProperties: false
+      required: [items, total, counts, limit, offset, partial, truncated, availableWorlds, unavailableWorlds, problems]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ChatLogEntry" }
+        total: { type: integer, minimum: 0 }
+        counts: { $ref: "#/components/schemas/ChatLogCounts" }
+        limit: { type: integer, minimum: 1, maximum: 500 }
+        offset: { type: integer, minimum: 0 }
+        partial: { type: boolean }
+        truncated: { type: boolean }
+        availableWorlds: { type: integer, minimum: 0 }
+        unavailableWorlds: { type: integer, minimum: 0 }
+        startedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        problems:
+          type: array
+          items: { $ref: "#/components/schemas/ChatLogProblem" }
+    ChatLogListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ChatLogList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     LogEvent:
       type: object
       additionalProperties: false
@@ -8215,7 +8324,7 @@ components:
     AgentCapacity:
       type: object
       additionalProperties: false
-      required: [state, logicalProcessors, physicalCores, physicalCoreEstimated, reservedPhysicalCores, recommendedShardLimit, runningShards, availableSlots, message]
+      required: [state, logicalProcessors, physicalCores, physicalCoreEstimated, reservedPhysicalCores, recommendedShardLimit, runningShards, availableSlots, memoryState, message]
       properties:
         state: { $ref: "#/components/schemas/AgentCapacityState" }
         logicalProcessors: { type: integer, minimum: 0 }
@@ -8225,6 +8334,11 @@ components:
         recommendedShardLimit: { type: integer, minimum: 0 }
         runningShards: { type: integer, minimum: 0 }
         availableSlots: { type: integer, minimum: 0 }
+        memoryState: { type: string, enum: [healthy, tight, critical, unknown] }
+        memoryTotalBytes: { type: integer, format: int64, minimum: 0 }
+        memoryAvailableBytes: { type: integer, format: int64, minimum: 0 }
+        estimatedAdditionalMemoryBytes: { type: integer, format: int64, minimum: 0 }
+        projectedMemoryAvailableBytes: { type: integer, format: int64, minimum: 0 }
         message: { type: string }
     AgentRuntimeInstallation:
       type: object
@@ -8532,7 +8646,7 @@ components:
     DistributedBackupPart:
       type: object
       additionalProperties: false
-      required: [id, setId, roomId, worldId, worldName, worldRole, targetId, installationId, cluster, shard, topologyRevision, fileName, status, size, contentSize, fileCount, createdAt, updatedAt]
+      required: [id, setId, roomId, worldId, worldName, worldRole, targetId, installationId, cluster, shard, topologyRevision, fileName, status, size, contentSize, fileCount, contentKind, restorable, hasShardIndex, createdAt, updatedAt]
       properties:
         id: { type: string }
         setId: { type: string, format: uuid }
@@ -8556,6 +8670,12 @@ components:
         size: { type: integer, format: int64, minimum: 0 }
         contentSize: { type: integer, format: int64, minimum: 0 }
         fileCount: { type: integer, minimum: 0 }
+        contentKind: { type: string, enum: [game-save, configuration-only, unknown] }
+        restorable: { type: boolean }
+        sessionId: { type: string }
+        latestSnapshot: { type: string }
+        hasShardIndex: { type: boolean }
+        validationError: { type: string }
         sha256: { type: string, pattern: "^[a-fA-F0-9]{64}$" }
         sharedSha256: { type: string, pattern: "^[a-fA-F0-9]{64}$" }
         failure: { type: string }
@@ -8568,7 +8688,7 @@ components:
     DistributedBackupSet:
       type: object
       additionalProperties: false
-      required: [id, roomId, roomName, name, kind, mode, manifestVersion, topologyRevision, status, size, contentSize, fileCount, originalRunningWorlds, createdAt, updatedAt, parts]
+      required: [id, roomId, roomName, name, kind, mode, manifestVersion, topologyRevision, status, size, contentSize, fileCount, contentKind, restorable, originalRunningWorlds, createdAt, updatedAt, parts]
       properties:
         id: { type: string, format: uuid }
         roomId: { type: string }
@@ -8585,6 +8705,9 @@ components:
         size: { type: integer, format: int64, minimum: 0 }
         contentSize: { type: integer, format: int64, minimum: 0 }
         fileCount: { type: integer, minimum: 0 }
+        contentKind: { type: string, enum: [game-save, configuration-only, unknown] }
+        restorable: { type: boolean }
+        validationError: { type: string }
         originalRunningWorlds: { type: array, uniqueItems: true, items: { type: string } }
         manifestSha256: { type: string, pattern: "^[a-fA-F0-9]{64}$" }
         failure: { type: string }
@@ -8968,9 +9091,9 @@ components:
       additionalProperties: false
       required: [basis, shardsPerPhysicalCore, reservedPhysicalCores, enforced, message]
       properties:
-        basis: { type: string, enum: [physical_cores] }
+        basis: { type: string, enum: [effective_cpu] }
         shardsPerPhysicalCore: { type: integer, const: 1 }
-        reservedPhysicalCores: { type: integer, minimum: 1 }
+        reservedPhysicalCores: { type: integer, minimum: 0 }
         enforced:
           type: boolean
           const: false

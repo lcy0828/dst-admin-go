@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	runtimeagent "dont/agent"
 	"dont/controller"
 	agentservice "dont/internal/agents"
 	"dont/internal/announcements"
@@ -16,12 +17,14 @@ import (
 	"dont/internal/automation"
 	backupapi "dont/internal/backups"
 	"dont/internal/capabilities"
+	"dont/internal/chatlogs"
 	"dont/internal/configuration"
 	consoleapi "dont/internal/console"
 	"dont/internal/containers"
 	"dont/internal/distributedbackup"
 	"dont/internal/dstruntime"
 	dstinstall "dont/internal/dstserver"
+	"dont/internal/fleetmember"
 	"dont/internal/gameupdate"
 	"dont/internal/httpapi"
 	"dont/internal/jobs"
@@ -155,6 +158,14 @@ func initApplication(manageBackground bool) (*Application, error) {
 		serverInstallRoot = layout.InstallRoot
 		serverContentRoot = layout.ContentRoot
 	}
+	runtimeWorkshopContentPath := ""
+	if ugcPath != "" {
+		runtimeWorkshopContentPath = filepath.Join(ugcPath, "content", steamAppID)
+	}
+	deploymentProfile, err := configuredDeploymentProfile(backupPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve deployment profile: %w", err)
+	}
 	roomCatalog, err := rooms.NewCatalog(savePath, roomStore)
 	if err != nil {
 		return nil, err
@@ -185,7 +196,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		return nil, err
 	}
 	var agentGateway *legacyserver.Server
-	if backgroundEnabled {
+	if backgroundEnabled && deploymentProfile.ControllerEnabled {
 		agentGateway, err = legacyserver.NewServer(&legacyserver.Config{
 			KeyFile: setting.ConfigPath, SecurityKey: setting.String("server", "SECURITY_KEY", "DST_ADMIN_AGENT_SECURITY_KEY"),
 		})
@@ -211,6 +222,31 @@ func initApplication(manageBackground bool) (*Application, error) {
 			return nil
 		})
 	}
+	var embeddedFleetMember *fleetmember.Member
+	if backgroundEnabled && deploymentProfile.MemberEnabled {
+		memberWorkshopContentPath := runtimeWorkshopContentPath
+		if memberWorkshopContentPath == "" {
+			memberWorkshopContentPath = workshopContentPath
+		}
+		embeddedFleetMember, err = fleetmember.New(fleetmember.Config{
+			ControllerURL: deploymentProfile.ControllerURL, SecurityKey: deploymentProfile.MemberKey,
+			NodeID: deploymentProfile.NodeID, StatePath: deploymentProfile.StatePath,
+			Runtime: runtimeagent.RuntimeInstallation{
+				ID: "default", Driver: "native", SavePath: savePath, ServerPath: serverPath,
+				SteamCMDPath: steamCMDPath, UGCPath: ugcPath, WorkshopContentPath: memberWorkshopContentPath,
+				ModCachePath: filepath.Join(deploymentProfile.StatePath, "mod-cache"),
+				ModStatePath: filepath.Join(deploymentProfile.StatePath, "mod-state"), ServerMode: serverMode,
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("initialize embedded Fleet member: %w", err)
+		}
+		hooks.start = append(hooks.start, embeddedFleetMember.Start)
+		hooks.stop = append(hooks.stop, func(context.Context) error {
+			embeddedFleetMember.Stop()
+			return nil
+		})
+	}
 	var agentTransport agentservice.Transport = agentservice.NewLegacyTransport(func() *legacyserver.Server { return agentGateway })
 	if driver := os.Getenv("DST_ADMIN_TEST_AGENTS"); driver != "" {
 		if os.Getenv("DST_ADMIN_ENV") != "test" || driver != "memory" {
@@ -222,11 +258,15 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
-	agentService.ConfigureLocalRuntime(agentservice.RuntimeConfig{
-		DisplayName: "本机", SavePath: savePath, BackupPath: backupPath, ServerPath: serverPath,
-		UGCPath: ugcPath, SteamCMDPath: steamCMDPath, WorkshopContentPath: workshopContentPath,
-		LuaBinary: luaBinary, LuaFallbackPath: luaFallbackPath, ServerMode: serverMode,
-	})
+	if deploymentProfile.LocalExecutorEnabled {
+		agentService.ConfigureLocalRuntime(agentservice.RuntimeConfig{
+			DisplayName: "本机", SavePath: savePath, BackupPath: backupPath, ServerPath: serverPath,
+			UGCPath: ugcPath, SteamCMDPath: steamCMDPath, WorkshopContentPath: workshopContentPath,
+			LuaBinary: luaBinary, LuaFallbackPath: luaFallbackPath, ServerMode: serverMode,
+		})
+	} else {
+		agentService.DisableLocalRuntime()
+	}
 	agentHandler := httpapi.NewAgentHandler(agentService)
 	kubernetesRuntimeService := kubernetesruntime.LoadExperimentalService()
 	kubernetesRuntimeHandler, err := httpapi.NewKubernetesRuntimeHandler(kubernetesRuntimeService)
@@ -445,6 +485,11 @@ func initApplication(manageBackground bool) (*Application, error) {
 		return nil, err
 	}
 	logHandler := httpapi.NewLogHandler(logService)
+	chatLogService, err := chatlogs.NewService(roomService, logService)
+	if err != nil {
+		return nil, err
+	}
+	chatLogHandler := httpapi.NewChatLogHandler(chatLogService)
 	structuredLogStore := structuredlogs.NewStore(models.DB(), tablePrefix)
 	if err := structuredLogStore.Migrate(); err != nil {
 		return nil, err
@@ -525,6 +570,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		NodeID: "local", ReserveBytes: 16 << 20,
 		Installations: []moddistribution.TrustedInstallation{{
 			ID: "default", NodeID: "local", ServerPath: serverContentRoot, SavePath: savePath,
+			WorkshopContentPath: runtimeWorkshopContentPath,
 		}},
 	})
 	if err != nil {
@@ -825,6 +871,10 @@ func initApplication(manageBackground bool) (*Application, error) {
 		SavePath: savePath, BackupPath: backupPath, ServerPath: serverPath, ServerMode: serverMode, SteamCMDPath: steamCMDPath,
 		LuaBinary: luaBinary, PythonBinary: pythonBinary, LuaFallbackPath: luaFallbackPath,
 		MapRendererPath: mapRendererPath, MapPath: mapPath,
+		DeploymentProfile: deploymentProfile,
+	}
+	if embeddedFleetMember != nil {
+		capabilityConfig.FleetMemberConnected = embeddedFleetMember.Connected
 	}
 	idempotencyStore := httpapi.NewIdempotencyStore(15*time.Minute, 2048)
 	router := gin.New()
@@ -851,7 +901,9 @@ func initApplication(manageBackground bool) (*Application, error) {
 		return preferences.IPWhitelist
 	}), httpapi.RequireSession(authService))
 	{
-		v2 := api.Group("/v2", idempotencyStore.Middleware())
+		// Reject local Member mutations before validating write-specific headers so
+		// every blocked request reports the same read-only contract.
+		v2 := api.Group("/v2", httpapi.FleetMemberPolicy(deploymentProfile.MemberEnabled), idempotencyStore.Middleware())
 		v2.Use(httpapi.RuntimeTargetBoundary())
 		authHandler.Register(v2.Group("/auth"))
 		announcementHandler.Register(v2)
@@ -870,6 +922,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		runtimeObservabilityHandler.Register(v2)
 		jobHandler.Register(v2)
 		logHandler.Register(v2)
+		chatLogHandler.Register(v2)
 		structuredLogHandler.Register(v2)
 		consoleHandler.Register(v2)
 		playerHandler.Register(v2)
