@@ -70,13 +70,21 @@ func (s *Service) RuntimeTargetInventories(ctx context.Context) ([]RuntimeTarget
 				continue
 			}
 			report, collectErr := runtimeinventory.Collect(ctx, shared.RuntimeInventoryRequest{
-				InstallationID: "local", DisplayName: target.Name,
+				InstallationID: target.Config.InstallationID, DisplayName: target.Name,
 				SavePath: target.Config.SavePath, ServerPath: target.Config.ServerPath, ServerMode: target.Config.ServerMode,
 			})
 			if collectErr != nil {
 				item.StaleReason = "collection_failed"
 				items = append(items, item)
 				continue
+			}
+			if s.localProcesses != nil {
+				processes, processErr := s.localProcesses.ContainerProcesses(ctx)
+				if processErr != nil {
+					report.Warnings = append(report.Warnings, "无法读取本机容器分片状态: "+processErr.Error())
+				} else {
+					report.Processes = processes
+				}
 			}
 			report, collectErr = normalizeInventory(report, target.Config)
 			if collectErr != nil {

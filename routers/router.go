@@ -141,6 +141,42 @@ func initApplication(manageBackground bool) (*Application, error) {
 		mapPath = backupPath + string(os.PathSeparator) + "maps"
 	}
 	serverMode := setting.String("paths", "DST_SERVER_MODE", "DST_ADMIN_SERVER_MODE")
+	localRuntimeDriver := strings.ToLower(strings.TrimSpace(setting.String("runtime", "DRIVER", "DST_ADMIN_LOCAL_RUNTIME_DRIVER")))
+	if localRuntimeDriver == "" {
+		localRuntimeDriver = "native"
+	}
+	localInstallationID := strings.TrimSpace(setting.String("runtime", "INSTALLATION_ID", "DST_ADMIN_LOCAL_INSTALLATION_ID"))
+	if localInstallationID == "" {
+		localInstallationID = "default"
+	}
+	localContainerEngine := strings.TrimSpace(setting.String("runtime", "CONTAINER_ENGINE", "DST_ADMIN_LOCAL_CONTAINER_ENGINE"))
+	if localContainerEngine == "" {
+		localContainerEngine = "docker"
+	}
+	localContainerImage := strings.TrimSpace(setting.String("runtime", "CONTAINER_IMAGE", "DST_ADMIN_LOCAL_CONTAINER_IMAGE"))
+	if localContainerImage == "" {
+		localContainerImage = "dst-admin/dst-runtime:dev"
+	}
+	localContainerHostSavePath := strings.TrimSpace(setting.String("runtime", "CONTAINER_HOST_SAVE_PATH", "DST_ADMIN_LOCAL_CONTAINER_SAVE_SOURCE"))
+	if localContainerHostSavePath == "" {
+		localContainerHostSavePath = savePath
+	}
+	localContainerHostServerPath := strings.TrimSpace(setting.String("runtime", "CONTAINER_HOST_SERVER_PATH", "DST_ADMIN_LOCAL_CONTAINER_SERVER_SOURCE"))
+	if localContainerHostServerPath == "" {
+		localContainerHostServerPath = serverPath
+	}
+	localContainerHostUGCPath := strings.TrimSpace(setting.String("runtime", "CONTAINER_HOST_UGC_PATH", "DST_ADMIN_LOCAL_CONTAINER_UGC_SOURCE"))
+	if localContainerHostUGCPath == "" {
+		localContainerHostUGCPath = ugcPath
+	}
+	localConsoleSocket := strings.TrimSpace(setting.String("runtime", "CONSOLE_SOCKET", "DST_ADMIN_LOCAL_CONSOLE_SOCKET"))
+	if localConsoleSocket == "" {
+		localConsoleSocket = "/run/dst-admin/tmux/tmux.sock"
+	}
+	localConsoleSession := strings.TrimSpace(setting.String("runtime", "CONSOLE_SESSION", "DST_ADMIN_LOCAL_CONSOLE_SESSION"))
+	if localConsoleSession == "" {
+		localConsoleSession = "dst"
+	}
 	serverExecutablePath := serverPath
 	serverInstallRoot := serverPath
 	serverContentRoot := serverPath
@@ -251,7 +287,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	}
 	if deploymentProfile.LocalExecutorEnabled {
 		agentService.ConfigureLocalRuntime(agentservice.RuntimeConfig{
-			DisplayName: "本机", SavePath: savePath, BackupPath: backupPath, ServerPath: serverPath,
+			InstallationID: localInstallationID, DisplayName: "本机", SavePath: savePath, BackupPath: backupPath, ServerPath: serverPath,
 			UGCPath: ugcPath, SteamCMDPath: steamCMDPath, WorkshopContentPath: workshopContentPath,
 			LuaBinary: luaBinary, LuaFallbackPath: luaFallbackPath, ServerMode: serverMode,
 		})
@@ -354,17 +390,43 @@ func initApplication(manageBackground bool) (*Application, error) {
 		return nil, err
 	}
 	containerHandler := httpapi.NewContainerHandler(containerService)
-	tmuxControl, err := shards.NewTmuxControl(shards.TmuxConfig{
-		SaveRoot: savePath, UGCDirectory: ugcPath, ServerPath: serverPath, ServerMode: serverMode,
-	})
-	if err != nil {
-		return nil, err
-	}
 	var shardControl interface {
 		shards.Control
 		consoleapi.Sender
 		Status(context.Context, string, string) (shards.RuntimeStatus, error)
-	} = tmuxControl
+	}
+	var localCPUBackend runtimedriver.NativeCPUBackend
+	switch localRuntimeDriver {
+	case "native":
+		tmuxControl, controlErr := shards.NewTmuxControl(shards.TmuxConfig{
+			SaveRoot: savePath, UGCDirectory: ugcPath, ServerPath: serverPath, ServerMode: serverMode,
+		})
+		if controlErr != nil {
+			return nil, controlErr
+		}
+		shardControl = tmuxControl
+	case "container":
+		stateRoot := filepath.Join(backupPath, ".dst-admin-container-runtime")
+		containerHost, controlErr := runtimeagent.NewContainerRuntimeHost(runtimeagent.ContainerRuntimeHostConfig{
+			Installation: runtimeagent.RuntimeInstallation{
+				ID: localInstallationID, Driver: "container", SavePath: savePath, ServerPath: serverPath,
+				SteamCMDPath: steamCMDPath, UGCPath: ugcPath, WorkshopContentPath: runtimeWorkshopContentPath,
+				ModCachePath: filepath.Join(stateRoot, "mod-cache"), ModStatePath: filepath.Join(stateRoot, "mod-state"),
+				ServerMode: serverMode, ContainerEngine: localContainerEngine,
+				ConsoleSocket: localConsoleSocket, ConsoleSession: localConsoleSession,
+			},
+			Image: localContainerImage, HostSavePath: localContainerHostSavePath,
+			HostServerPath: localContainerHostServerPath, HostUGCPath: localContainerHostUGCPath,
+			Timezone: os.Getenv("TZ"),
+		})
+		if controlErr != nil {
+			return nil, fmt.Errorf("initialize local container Runtime: %w", controlErr)
+		}
+		agentService.ConfigureLocalContainerProcesses(containerHost)
+		shardControl, localCPUBackend = containerHost, containerHost
+	default:
+		return nil, fmt.Errorf("unsupported local Runtime driver %q", localRuntimeDriver)
+	}
 	if driver := os.Getenv("DST_ADMIN_TEST_CONTROL"); driver != "" {
 		if os.Getenv("DST_ADMIN_ENV") != "test" || driver != "memory" {
 			return nil, fmt.Errorf("DST_ADMIN_TEST_CONTROL is only available as memory in the test environment")
@@ -379,11 +441,13 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
-	nativeCPUExecutor, err := runtimecpu.NewNative(runtimecpu.NativeConfig{ServerRoot: trustedServerRoot})
-	if err != nil {
-		return nil, err
+	if localCPUBackend == nil {
+		localCPUBackend, err = runtimecpu.NewNative(runtimecpu.NativeConfig{ServerRoot: trustedServerRoot})
+		if err != nil {
+			return nil, err
+		}
 	}
-	if err := nativeRuntimeDriver.ConfigureCPU(nativeCPUExecutor); err != nil {
+	if err := nativeRuntimeDriver.ConfigureCPU(localCPUBackend); err != nil {
 		return nil, err
 	}
 	agentRuntimeDriver, err := runtimedriver.NewAgent(agentService)

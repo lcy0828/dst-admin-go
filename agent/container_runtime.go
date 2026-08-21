@@ -25,6 +25,8 @@ const maximumContainerCLIOutput = 256 * 1024
 
 var managedContainerID = regexp.MustCompile(`^[a-f0-9]{12,64}$`)
 
+var errManagedContainerNotFound = errors.New("未找到受管分片容器")
+
 type containerCLI interface {
 	Available() bool
 	Run(context.Context, ...string) ([]byte, error)
@@ -529,7 +531,7 @@ func (c *containerShardRuntime) EndConsoleMaintenance(cluster, shard string, lea
 func (c *containerShardRuntime) RecoverConsoleHazard(ctx context.Context, cluster, shard string) error {
 	instance, err := c.find(ctx, cluster, shard)
 	if err != nil {
-		if strings.Contains(err.Error(), "未找到受管分片容器") {
+		if errors.Is(err, errManagedContainerNotFound) {
 			return nil
 		}
 		return err
@@ -669,7 +671,7 @@ func (c *containerShardRuntime) find(ctx context.Context, cluster, shard string)
 		return managedContainer{}, err
 	}
 	if len(items) == 0 {
-		return managedContainer{}, errors.New("未找到受管分片容器")
+		return managedContainer{}, errManagedContainerNotFound
 	}
 	if len(items) != 1 {
 		return managedContainer{}, errors.New("发现多个相同 Placement 的受管分片容器")

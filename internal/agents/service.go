@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"dont/internal/jobs"
+	"dont/shared"
 
 	"github.com/google/uuid"
 )
@@ -30,11 +31,14 @@ var runtimeInstallationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-
 var windowsAbsolutePathPattern = regexp.MustCompile(`(?i)^(?:[a-z]:[\\/]|\\\\)`)
 
 type Service struct {
-	store        *Store
-	jobs         *jobs.Service
-	transport    Transport
-	now          func() time.Time
-	local        RuntimeConfig
+	store          *Store
+	jobs           *jobs.Service
+	transport      Transport
+	now            func() time.Time
+	local          RuntimeConfig
+	localProcesses interface {
+		ContainerProcesses(context.Context) ([]shared.ShardProcessReport, error)
+	}
 	localEnabled bool
 }
 
@@ -45,10 +49,19 @@ func (s *Service) ConfigureLocalRuntime(config RuntimeConfig) {
 	s.localEnabled = true
 }
 
+// ConfigureLocalContainerProcesses lets an embedded container Runtime report
+// Shards that run outside the management container's process namespace.
+func (s *Service) ConfigureLocalContainerProcesses(provider interface {
+	ContainerProcesses(context.Context) ([]shared.ShardProcessReport, error)
+}) {
+	s.localProcesses = provider
+}
+
 // DisableLocalRuntime keeps control-plane APIs available without advertising
 // a controller-local DST installation.
 func (s *Service) DisableLocalRuntime() {
 	s.local = RuntimeConfig{}
+	s.localProcesses = nil
 	s.localEnabled = false
 }
 

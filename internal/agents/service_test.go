@@ -289,6 +289,46 @@ func TestRuntimeTargetInventoriesCollectsConfiguredLocalTarget(t *testing.T) {
 	}
 }
 
+type localContainerProcessProvider struct {
+	processes []shared.ShardProcessReport
+	err       error
+}
+
+func (p localContainerProcessProvider) ContainerProcesses(context.Context) ([]shared.ShardProcessReport, error) {
+	return append([]shared.ShardProcessReport(nil), p.processes...), p.err
+}
+
+func TestRuntimeTargetInventoriesUsesEmbeddedContainerProcesses(t *testing.T) {
+	service, _, _, _ := newAgentTestService(t)
+	localRoot := t.TempDir()
+	service.ConfigureLocalRuntime(RuntimeConfig{
+		InstallationID: "default", DisplayName: "本机容器", SavePath: localRoot,
+		ServerPath: localRoot, LuaBinary: "lua", ServerMode: "64",
+	})
+	service.ConfigureLocalContainerProcesses(localContainerProcessProvider{processes: []shared.ShardProcessReport{{
+		PID: 42, RuntimeKind: "container", InstanceID: "container@2026-08-22T00:00:00Z",
+		Cluster: "Cluster_1", Shard: "Master",
+	}}})
+
+	items, err := service.RuntimeTargetInventories(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var local *RuntimeTargetInventory
+	for index := range items {
+		if items[index].Target.ID == "local" {
+			local = &items[index]
+			break
+		}
+	}
+	if local == nil || len(local.Inventory.Processes) != 1 || local.Inventory.Processes[0].RuntimeKind != "container" {
+		t.Fatalf("local container inventory=%#v", items)
+	}
+	if local.Inventory.Installation.ID != "default" || local.Capacity.RunningShards != 1 {
+		t.Fatalf("local inventory=%#v", *local)
+	}
+}
+
 func TestNormalizeInventoryAcceptsEquivalentWindowsPathSeparators(t *testing.T) {
 	now := time.Now().UTC()
 	report := shared.RuntimeInventoryReport{
