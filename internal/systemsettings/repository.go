@@ -38,6 +38,12 @@ var fieldDefinitions = []fieldDefinition{
 	{ID: "lua.fallback", Group: "lua", Label: "Lua 兼容模块目录（可选）", Kind: "path", Section: "mod", Key: "LUA_SH_PATH", Environment: "DST_ADMIN_LUA_PATH", RestartRequired: true},
 	{ID: "map.renderer", Group: "map", Label: "地图渲染器路径", Kind: "path", Section: "map", Key: "RENDERER_PATH", Environment: "DST_ADMIN_MAP_RENDERER_PATH", RestartRequired: true},
 	{ID: "misc.logLevel", Group: "misc", Label: "日志级别", Kind: "select", Section: "misc", Key: "LOG_LEVEL", Environment: "DST_ADMIN_LOG_LEVEL", Default: "info", Options: []string{"debug", "info", "warn", "error"}, Required: true, RestartRequired: true},
+	{ID: "deployment.packaging", Group: "fleet", Label: "部署封装", Kind: "select", Section: "deployment", Key: "PACKAGING", Environment: "DST_ADMIN_PACKAGING", Default: "native", Options: []string{"native", "all_in_one", "control_plane"}, Required: true, ReadOnly: true},
+	{ID: "fleet.localExecutorEnabled", Group: "fleet", Label: "本地执行器", Kind: "boolean", Section: "fleet", Key: "LOCAL_EXECUTOR_ENABLED", Environment: "DST_ADMIN_LOCAL_EXECUTOR_ENABLED", Default: "true", Required: true, RestartRequired: true},
+	{ID: "fleet.controllerEnabled", Group: "fleet", Label: "集中管理控制器", Kind: "boolean", Section: "fleet", Key: "CONTROLLER_ENABLED", Environment: "DST_ADMIN_FLEET_CONTROLLER_ENABLED", Default: "true", Required: true, RestartRequired: true},
+	{ID: "fleet.memberEnabled", Group: "fleet", Label: "加入上级管理中心", Kind: "boolean", Section: "fleet", Key: "MEMBER_ENABLED", Environment: "DST_ADMIN_FLEET_MEMBER_ENABLED", Default: "false", Required: true, RestartRequired: true},
+	{ID: "fleet.controllerUrl", Group: "fleet", Label: "上级管理中心地址", Kind: "text", Section: "agent", Key: "SERVER_URL", Environment: "DST_ADMIN_FLEET_CONTROLLER_URL", RestartRequired: true},
+	{ID: "fleet.memberKey", Group: "fleet", Label: "节点连接密钥", Kind: "secret", Section: "agent", Key: "SECURITY_KEY", Environment: "DST_ADMIN_FLEET_MEMBER_KEY", Sensitive: true, RestartRequired: true},
 
 	{ID: "ui.systemName", Group: "ui", Label: "管理系统名称", Kind: "text", Section: "ui", Key: "SYSTEM_NAME", Environment: "DST_ADMIN_SYSTEM_NAME", Default: "饥荒管理系统", Required: true},
 	{ID: "ui.adminEmail", Group: "ui", Label: "管理员联系邮箱", Kind: "email", Section: "ui", Key: "ADMIN_EMAIL", Environment: "DST_ADMIN_ADMIN_EMAIL"},

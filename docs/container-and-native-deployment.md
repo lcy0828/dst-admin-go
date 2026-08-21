@@ -1,6 +1,6 @@
 # 裸机与容器部署
 
-> 实现状态：控制面容器、Agent 容器/裸机服务和一 Shard 一容器 Runtime 已交付。Kubernetes 仍属于实验阶段，不能把本页的 Docker 能力等同于 Kubernetes 能力。
+> 本页记录拆分式 Agent 和一 Shard 一容器的高级兼容拓扑。新安装应先阅读 `deployment-profiles.md`，优先使用裸机或 All-in-One 的内置本地执行器，再按需把同一实例切换为 Controller 或 Member。Kubernetes 仍属于实验阶段，不能把本页的 Docker 能力等同于 Kubernetes 能力。
 
 ## 安全边界
 
@@ -18,12 +18,12 @@
 
 ## 部署组合与权限
 
-主服务、Agent 和 DST Runtime 是三个独立部署维度。当前已交付的组合是：
+在高级拆分拓扑中，主服务、独立 Agent 和 DST Runtime 是三个部署维度。当前保留的组合是：
 
 | 主服务 | Agent | DST | 当前支持情况 |
 | --- | --- | --- | --- |
 | 裸机 | 裸机 | 裸机 | 支持；Agent 与 DST 使用同一账号或等价的受控文件/tmux 权限 |
-| 容器 | 裸机 | 裸机 | 推荐；同机 Agent 连接 `ws://127.0.0.1:8000/agent`，跨机使用控制面实际可达地址 |
+| 容器 | 裸机 | 裸机 | 兼容；新部署优先使用 native Member，独立 Agent 用于需要分离生命周期的高级场景 |
 | 容器 | 容器 | Shard 容器 | 支持的容器 Runtime 形态；Agent 通过 Docker/Podman CLI 和受管 label 控制 |
 | 容器 | 容器 | 裸机 | 当前 Compose 不支持；不要通过 host PID、宿主 tmux 和大范围 hostPath 拼出兼容模式 |
 | Kubernetes | 外部 Provider | Pod | 默认关闭的只读实验能力；已有 status/observe/preflight API 与 UI，无 Apply 或生产 Driver |
@@ -62,7 +62,7 @@ docker compose build control-plane agent
 
 ### 主服务容器 + 裸机 Agent
 
-这是管理宿主机裸机 DST 的推荐组合。同一宿主上把 `/etc/dst-admin/agent.conf` 的 `SERVER_URL` 设为 `ws://127.0.0.1:8000/agent`，Runtime 使用 `[runtime.native]`；只启动 Compose 的 `control-plane`，不要再启动 `container-control` profile 中的 Agent，避免同一安装出现两个控制者。
+这是保留给需要把控制端和执行进程完全分离的兼容组合。同一宿主上把 `/etc/dst-admin/agent.conf` 的 `SERVER_URL` 设为 `ws://127.0.0.1:8000/agent`，Runtime 使用 `[runtime.native]`；只启动 Compose 的 `control-plane`，不要再启动 `container-control` profile 中的 Agent，避免同一安装出现两个控制者。一般用户应直接安装 native 管理程序并选择“加入管理中心”。
 
 Agent 在另一台机器时，`127.0.0.1` 不可用。应让控制面的 `/agent` WebSocket 经 TLS 反向代理或受信内网地址可达，并在裸机 Agent 使用 `wss://`/实际地址。不要为了远程 Agent 挂载控制面容器的 Docker socket、DST 目录或宿主 PID。
 

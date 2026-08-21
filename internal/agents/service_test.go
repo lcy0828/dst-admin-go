@@ -121,6 +121,21 @@ func TestRuntimeTargetsPreferLocalAndKeepRemoteConfigurationIsolated(t *testing.
 	}
 }
 
+func TestRuntimeTargetsCanRunWithoutControllerLocalInstallation(t *testing.T) {
+	service, _, _, _ := newAgentTestService(t)
+	service.DisableLocalRuntime()
+	items, err := service.RuntimeTargets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].Kind != RuntimeKindAgent {
+		t.Fatalf("controller-only targets = %#v", items)
+	}
+	if targetID := service.DefaultRuntimeTargetID(items); targetID != "" {
+		t.Fatalf("default target = %q, want empty without an online configured Agent", targetID)
+	}
+}
+
 func TestRuntimeConfigBindsOnlyAgentAdvertisedInstallation(t *testing.T) {
 	service, _, _, transport := newAgentTestService(t)
 	transport.mu.Lock()
@@ -464,6 +479,8 @@ func TestCapacityUsesOnePhysicalCorePerShardBudget(t *testing.T) {
 		{name: "full", logical: 16, physical: 8, running: 7, state: CapacityFull, limit: 7},
 		{name: "overcommitted", logical: 16, physical: 8, running: 8, state: CapacityOvercommitted, limit: 7},
 		{name: "estimated physical cores", logical: 12, running: 4, state: CapacityAvailable, limit: 5},
+		{name: "two core default room", logical: 2, physical: 2, running: 2, state: CapacityFull, limit: 2},
+		{name: "two vcpu one reported physical core", logical: 2, physical: 1, running: 2, state: CapacityFull, limit: 2},
 		{name: "stale", logical: 16, physical: 8, running: 2, stale: true, state: CapacityUnknown},
 	}
 	for _, test := range tests {

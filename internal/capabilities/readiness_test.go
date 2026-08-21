@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"dont/internal/deploymentprofile"
 )
 
 func TestFindDSTExecutableAndReadinessRoomCount(t *testing.T) {
@@ -71,6 +73,20 @@ func TestConfiguredMacDeploymentProbe(t *testing.T) {
 		t.Fatalf("macOS Steam update policy is incorrect: %#v", check.Details)
 	}
 	t.Logf("macOS deployment ready: executable=%s tmux=%s steamcmd=%s", check.Details["executable"], report.Tools["tmux"].Path, report.Tools["steamcmd"].Path)
+}
+
+func TestProbeReportsDeploymentRoleWithoutHidingFleetManagement(t *testing.T) {
+	profile, err := deploymentprofile.Resolve(deploymentprofile.Values{ControllerEnabled: "false"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := Probe(Config{DeploymentProfile: profile})
+	if !report.Features["agentControl"] || !report.Features["fleetManagement"] {
+		t.Fatal("Fleet configuration must remain available in standalone mode")
+	}
+	if report.Features["fleetController"] || report.Deployment.Role != deploymentprofile.RoleStandalone {
+		t.Fatalf("deployment report = %#v", report.Deployment)
+	}
 }
 
 func TestLuaFallbackCheckUsesInterpreterConfigAndDiagnosesMissingModulePath(t *testing.T) {

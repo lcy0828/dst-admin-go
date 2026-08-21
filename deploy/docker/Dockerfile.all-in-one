@@ -1,0 +1,63 @@
+# syntax=docker/dockerfile:1.7
+FROM --platform=$TARGETPLATFORM node:24-bookworm-slim AS web-build
+WORKDIR /src
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+FROM --platform=$TARGETPLATFORM golang:1.25-bookworm AS go-build
+WORKDIR /src
+COPY backend/go.mod backend/go.sum ./
+RUN go mod download
+COPY backend/ ./
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+RUN CGO_ENABLED=1 go build -trimpath \
+      -ldflags "-s -w -X dont/internal/buildinfo.Version=${VERSION} -X dont/internal/buildinfo.Commit=${COMMIT} -X dont/internal/buildinfo.BuildTime=${BUILD_TIME}" \
+      -o /out/dst-admin ./cmd/admin-api \
+    && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/dst-map-renderer ./cmd/dst-map-renderer
+
+# Klei only publishes the Linux server for amd64. The architecture-specific
+# official image also prevents cross-platform builders from reusing a 386 rootfs.
+FROM --platform=$TARGETPLATFORM amd64/debian:12-slim
+ARG TARGETARCH
+ARG DEBIAN_MIRROR=http://deb.debian.org/debian
+ARG DEBIAN_SECURITY_MIRROR=http://deb.debian.org/debian-security
+COPY --from=go-build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN test "$(dpkg --print-architecture)" = "$TARGETARCH" \
+    && sed -i \
+      -e "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+      -e "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
+      /etc/apt/sources.list.d/debian.sources \
+    && if [ "$TARGETARCH" = "amd64" ]; then \
+      dpkg --add-architecture i386; \
+      sed -i 's/^Components: main$/Components: main contrib non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
+    && if [ "$TARGETARCH" = "amd64" ]; then \
+      echo 'steamcmd steam/question select I AGREE' | debconf-set-selections; \
+      DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends ca-certificates curl gosu libcurl3-gnutls lua5.1 procps steamcmd tini tmux tzdata; \
+    else \
+      DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends ca-certificates curl gosu libcurl3-gnutls lua5.1 procps tini tmux tzdata; \
+    fi \
+    && rm -rf /var/lib/apt/lists/* \
+    && test "$(dpkg --print-architecture)" = "$TARGETARCH" \
+    && test -x /lib64/ld-linux-x86-64.so.2 \
+    && groupadd --gid 10000 dstadmin \
+    && useradd --uid 10000 --gid 10000 --home-dir /data/control --shell /usr/sbin/nologin dstadmin \
+    && install -d -o dstadmin -g dstadmin -m 0700 /data /data/control
+COPY --from=go-build /out/dst-admin /usr/local/bin/dst-admin
+COPY --from=go-build /out/dst-map-renderer /usr/local/bin/dst-map-renderer
+COPY --from=web-build /src/dist /usr/share/dst-admin/web
+COPY backend/deploy/docker/config/all-in-one.conf /usr/local/share/dst-admin/all-in-one.conf
+COPY backend/deploy/docker/all-in-one-entrypoint.sh /usr/local/bin/all-in-one-entrypoint
+RUN chmod 0755 /usr/local/bin/all-in-one-entrypoint /usr/local/bin/dst-admin /usr/local/bin/dst-map-renderer
+ENV DST_ADMIN_CONFIG=/data/control/app.conf \
+    DST_ADMIN_WEB_ROOT=/usr/share/dst-admin/web \
+    HOME=/data/control
+VOLUME ["/data"]
+EXPOSE 8080/tcp 10999-11020/udp 8766-8790/udp 27016-27040/udp
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/all-in-one-entrypoint"]
+CMD ["/usr/local/bin/dst-admin", "-addr", "0.0.0.0:8080"]

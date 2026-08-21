@@ -47,6 +47,10 @@ COPY deploy/docker/control-plane-entrypoint.sh /usr/local/bin/control-plane-entr
 USER 10001:10001
 WORKDIR /var/lib/dst-admin
 ENV DST_ADMIN_CONFIG=/var/lib/dst-admin/app.conf \
+    DST_ADMIN_PACKAGING=control_plane \
+    DST_ADMIN_LOCAL_EXECUTOR_ENABLED=false \
+    DST_ADMIN_FLEET_CONTROLLER_ENABLED=true \
+    DST_ADMIN_FLEET_MEMBER_ENABLED=false \
     HOME=/var/lib/dst-admin
 EXPOSE 8000
 ENTRYPOINT ["/usr/local/bin/control-plane-entrypoint"]

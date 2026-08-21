@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>top.luocaiyi.dst-admin-local</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__BINARY__</string>
+    <string>-addr</string>
+    <string>127.0.0.1:8000</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DST_ADMIN_CONFIG</key>
+    <string>__CONFIG__</string>
+    <key>DST_ADMIN_WEB_ROOT</key>
+    <string>__WEB_ROOT__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>__STATE_DIR__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__STDOUT__</string>
+  <key>StandardErrorPath</key>
+  <string>__STDERR__</string>
+</dict>
+</plist>

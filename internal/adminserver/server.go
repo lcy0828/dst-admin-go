@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
+	"dont/internal/webui"
 	"dont/routers"
 )
 
@@ -21,9 +24,14 @@ func Run(ctx context.Context, address string) error {
 		closeErr := application.Close(context.Background())
 		return errors.Join(fmt.Errorf("start application: %w", err), closeErr)
 	}
+	handler, err := webui.Wrap(application.HTTPHandler(), strings.TrimSpace(os.Getenv("DST_ADMIN_WEB_ROOT")))
+	if err != nil {
+		closeErr := application.Close(context.Background())
+		return errors.Join(fmt.Errorf("initialize web UI: %w", err), closeErr)
+	}
 	server := &http.Server{
 		Addr:              address,
-		Handler:           application.HTTPHandler(),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      0,

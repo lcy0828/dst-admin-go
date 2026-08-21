@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 
+	"dont/internal/deploymentprofile"
 	dstinstall "dont/internal/dstserver"
 	"dont/internal/modruntime"
 	"dont/internal/worldmap"
@@ -28,27 +29,49 @@ type Path struct {
 }
 
 type Report struct {
-	Platform string          `json:"platform"`
-	Arch     string          `json:"arch"`
-	Tools    map[string]Tool `json:"tools"`
-	Paths    map[string]Path `json:"paths"`
-	Features map[string]bool `json:"features"`
+	Platform   string          `json:"platform"`
+	Arch       string          `json:"arch"`
+	Deployment Deployment      `json:"deployment"`
+	Tools      map[string]Tool `json:"tools"`
+	Paths      map[string]Path `json:"paths"`
+	Features   map[string]bool `json:"features"`
+}
+
+type Deployment struct {
+	Packaging            deploymentprofile.Packaging `json:"packaging"`
+	Role                 deploymentprofile.Role      `json:"role"`
+	LocalExecutorEnabled bool                        `json:"localExecutorEnabled"`
+	ControllerEnabled    bool                        `json:"controllerEnabled"`
+	MemberEnabled        bool                        `json:"memberEnabled"`
+	MemberConnected      bool                        `json:"memberConnected"`
+	ControllerURL        string                      `json:"controllerUrl,omitempty"`
+	MemberKeyConfigured  bool                        `json:"memberKeyConfigured"`
 }
 
 type Config struct {
-	SavePath        string
-	BackupPath      string
-	ServerPath      string
-	ServerMode      string
-	SteamCMDPath    string
-	LuaBinary       string
-	PythonBinary    string
-	LuaFallbackPath string
-	MapRendererPath string
-	MapPath         string
+	SavePath             string
+	BackupPath           string
+	ServerPath           string
+	ServerMode           string
+	SteamCMDPath         string
+	LuaBinary            string
+	PythonBinary         string
+	LuaFallbackPath      string
+	MapRendererPath      string
+	MapPath              string
+	DeploymentProfile    deploymentprofile.Profile
+	FleetMemberConnected func() bool
 }
 
 func Probe(config Config) Report {
+	profile := config.DeploymentProfile
+	if profile.Packaging == "" {
+		profile, _ = deploymentprofile.Resolve(deploymentprofile.Values{})
+	}
+	memberConnected := false
+	if config.FleetMemberConnected != nil {
+		memberConnected = config.FleetMemberConnected()
+	}
 	tmux := findTool("tmux", "")
 	fallbackDiscovery := modruntime.Discover(config.LuaBinary, config.PythonBinary)
 	fallback := fallbackTool(fallbackDiscovery)
@@ -76,6 +99,12 @@ func Probe(config Config) Report {
 	return Report{
 		Platform: runtime.GOOS,
 		Arch:     runtime.GOARCH,
+		Deployment: Deployment{
+			Packaging: profile.Packaging, Role: profile.Role, LocalExecutorEnabled: profile.LocalExecutorEnabled,
+			ControllerEnabled: profile.ControllerEnabled, MemberEnabled: profile.MemberEnabled,
+			MemberConnected: memberConnected, ControllerURL: profile.ControllerURL,
+			MemberKeyConfigured: profile.MemberKeyConfigured,
+		},
 		Tools: map[string]Tool{
 			"tmux": tmux, "luaFallback": fallback, "docker": docker, "steamcmd": steamcmd, "mapRenderer": mapRenderer, "steamClientLibrary": steamClientLibrary,
 		},
@@ -85,10 +114,14 @@ func Probe(config Config) Report {
 			"externalLuaFallback": containsRuntime(fallbackDiscovery, modruntime.KindLua),
 			"pythonLupaFallback":  fallbackDiscovery.PythonLupa,
 			"modFallback":         fallback.Available,
-			"localShardControl":   tmux.Available && serverAvailable,
+			"localShardControl":   profile.LocalExecutorEnabled && tmux.Available && serverAvailable,
 			"backupRestore":       paths["saves"].Exists && paths["backups"].Configured,
 			"dockerControl":       docker.Available,
 			"agentControl":        true,
+			"fleetManagement":     true,
+			"fleetController":     profile.ControllerEnabled,
+			"fleetMember":         profile.MemberEnabled,
+			"localExecutor":       profile.LocalExecutorEnabled,
 			"mapGeneration":       mapRenderer.Available && paths["maps"].Configured,
 			"macSteamIntegration": layout.Kind != dstinstall.LayoutMac || steamClientLibrary.Available,
 		},

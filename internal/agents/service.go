@@ -30,17 +30,26 @@ var runtimeInstallationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-
 var windowsAbsolutePathPattern = regexp.MustCompile(`(?i)^(?:[a-z]:[\\/]|\\\\)`)
 
 type Service struct {
-	store     *Store
-	jobs      *jobs.Service
-	transport Transport
-	now       func() time.Time
-	local     RuntimeConfig
+	store        *Store
+	jobs         *jobs.Service
+	transport    Transport
+	now          func() time.Time
+	local        RuntimeConfig
+	localEnabled bool
 }
 
 // ConfigureLocalRuntime sets the controller-local paths. It is intentionally
 // separate from persisted Agent runtime configuration.
 func (s *Service) ConfigureLocalRuntime(config RuntimeConfig) {
 	s.local = normalizeRuntimeConfig(config)
+	s.localEnabled = true
+}
+
+// DisableLocalRuntime keeps control-plane APIs available without advertising
+// a controller-local DST installation.
+func (s *Service) DisableLocalRuntime() {
+	s.local = RuntimeConfig{}
+	s.localEnabled = false
 }
 
 func (s *Service) RuntimeTargets() ([]RuntimeTarget, error) {
@@ -53,12 +62,26 @@ func (s *Service) RuntimeTargets() ([]RuntimeTarget, error) {
 		return nil, err
 	}
 	items := make([]RuntimeTarget, 0, len(agentItems)+1)
-	items = append(items, s.localRuntimeTarget())
+	if s.localEnabled {
+		items = append(items, s.localRuntimeTarget())
+	}
 	for _, agent := range agentItems {
 		config, configured := configs[agent.ID]
 		items = append(items, runtimeTargetFromAgent(agent, config, configured))
 	}
 	return items, nil
+}
+
+func (s *Service) DefaultRuntimeTargetID(items []RuntimeTarget) string {
+	if s.localEnabled {
+		return "local"
+	}
+	for _, item := range items {
+		if item.Configured && item.Online {
+			return item.ID
+		}
+	}
+	return ""
 }
 
 func (s *Service) RuntimeTarget(agentID string) (RuntimeTarget, error) {

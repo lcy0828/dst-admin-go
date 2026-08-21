@@ -1,5 +1,11 @@
 name: dst-admin
 
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   control-plane:
     build:
@@ -13,19 +19,21 @@ services:
         DEBIAN_SECURITY_MIRROR: ${DEBIAN_SECURITY_MIRROR:-http://deb.debian.org/debian-security}
     image: dst-admin/control-plane:${DST_ADMIN_VERSION:-dev}
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       control-data-init:
         condition: service_completed_successfully
     ports:
       - "${DST_ADMIN_HTTP_BIND:-127.0.0.1:8000}:8000"
     environment:
+      TZ: ${TZ:-Asia/Shanghai}
       DST_ADMIN_AGENT_SECURITY_KEY: ${DST_ADMIN_AGENT_SECURITY_KEY:?set DST_ADMIN_AGENT_SECURITY_KEY}
       DST_ADMIN_STEAMCMD_PATH: ${DST_ADMIN_STEAMCMD_PATH:-/usr/games/steamcmd}
       DST_ADMIN_WORKSHOP_DOWNLOAD: ${DST_ADMIN_WORKSHOP_DOWNLOAD:-/var/lib/dst-admin/workshop}
       DST_ADMIN_WORKSHOP_CONTENT: ${DST_ADMIN_WORKSHOP_CONTENT:-/var/lib/dst-admin/workshop/steamapps/workshop/content/322330}
       DST_ADMIN_DISABLE_LOCAL_GAME_UPDATE: "true"
     volumes:
-      - control-data:/var/lib/dst-admin
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/control:/var/lib/dst-admin
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v2/auth/session"]
       interval: 15s
@@ -67,7 +75,7 @@ services:
           touch "$$marker"
         fi
     volumes:
-      - control-data:/var/lib/dst-admin
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/control:/var/lib/dst-admin
     security_opt:
       - no-new-privileges:true
 
@@ -82,12 +90,14 @@ services:
     image: dst-admin/agent:${DST_ADMIN_VERSION:-dev}
     hostname: ${DST_ADMIN_AGENT_ID:-dst-admin-agent}
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       control-plane:
         condition: service_healthy
       volume-init:
         condition: service_completed_successfully
     environment:
+      TZ: ${TZ:-Asia/Shanghai}
       DST_ADMIN_AGENT_DEPLOYMENT: container
       DST_ADMIN_AGENT_SERVER_URL: ws://control-plane:8000/agent
       DST_ADMIN_AGENT_SECURITY_KEY: ${DST_ADMIN_AGENT_SECURITY_KEY:?set DST_ADMIN_AGENT_SECURITY_KEY}
@@ -103,11 +113,11 @@ services:
     group_add:
       - "${DOCKER_GID:-0}"
     volumes:
-      - agent-data:/var/lib/dst-admin-agent
-      - dst-saves:/srv/dst/saves
-      - dst-server:/srv/dst/server:ro
-      - dst-mods:/srv/dst/server/mods
-      - dst-workshop:/srv/dst/workshop
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/agent:/var/lib/dst-admin-agent
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/saves:/srv/dst/saves
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/server:/srv/dst/server:ro
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/mods:/srv/dst/server/mods
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/workshop:/srv/dst/workshop
       - /var/run/docker.sock:/var/run/docker.sock
     security_opt:
       - no-new-privileges:true
@@ -157,11 +167,11 @@ services:
         fi
         chmod 0700 /var/lib/dst-admin-agent /srv/dst/saves /srv/dst/mods /srv/dst/workshop
     volumes:
-      - agent-data:/var/lib/dst-admin-agent
-      - dst-saves:/srv/dst/saves
-      - dst-server:/srv/dst/server
-      - dst-mods:/srv/dst/mods
-      - dst-workshop:/srv/dst/workshop
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/agent:/var/lib/dst-admin-agent
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/saves:/srv/dst/saves
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/server:/srv/dst/server
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/mods:/srv/dst/mods
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/workshop:/srv/dst/workshop
     security_opt:
       - no-new-privileges:true
 
@@ -172,10 +182,12 @@ services:
       dockerfile: deploy/docker/Dockerfile.dst-runtime
     image: dst-admin/dst-runtime:${DST_ADMIN_VERSION:-dev}
     restart: "no"
+    logging: *default-logging
     depends_on:
       volume-init:
         condition: service_completed_successfully
     environment:
+      TZ: ${TZ:-Asia/Shanghai}
       DST_CLUSTER: ${DST_CLUSTER:-Cluster_1}
       DST_SHARD: Master
       DST_STORAGE_ROOT: /data
@@ -186,9 +198,9 @@ services:
       com.dst-admin.cluster: ${DST_CLUSTER:-Cluster_1}
       com.dst-admin.shard: Master
     volumes:
-      - dst-saves:/data
-      - dst-server:/opt/dst/server:ro
-      - dst-mods:/opt/dst/server/mods:ro
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/saves:/data
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/server:/opt/dst/server:ro
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/mods:/opt/dst/server/mods:ro
     ports:
       - "${DST_MASTER_SERVER_PORT:-10999}:10999/udp"
       - "${DST_MASTER_AUTH_PORT:-8768}:8768/udp"
@@ -197,11 +209,3 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-
-volumes:
-  control-data:
-  agent-data:
-  dst-saves:
-  dst-server:
-  dst-mods:
-  dst-workshop:

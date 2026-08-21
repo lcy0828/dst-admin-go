@@ -93,6 +93,43 @@ func TestSettingsExposeFieldKindsAndNumericBounds(t *testing.T) {
 	if language.Editable || len(language.Options) != 2 || language.Options[0] != "zh-CN" || language.Options[1] != "en-US" {
 		t.Fatalf("language capability metadata=%#v", language)
 	}
+	packaging := fieldByID(t, settings, "deployment.packaging")
+	if packaging.Editable || packaging.Kind != "select" || len(packaging.Options) != 3 {
+		t.Fatalf("deployment packaging metadata=%#v", packaging)
+	}
+	memberKey := fieldByID(t, settings, "fleet.memberKey")
+	if !memberKey.Sensitive || memberKey.Value != "" || !memberKey.RestartRequired {
+		t.Fatalf("Fleet member key metadata=%#v", memberKey)
+	}
+}
+
+func TestFleetRoleSettingsRequireSafeMemberConfiguration(t *testing.T) {
+	service, err := NewService(NewMemoryRepository())
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := service.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := service.Preview(Input{Revision: settings.Revision, Values: map[string]string{
+		"fleet.controllerEnabled": "false",
+		"fleet.memberEnabled":     "true",
+		"fleet.controllerUrl":     "wss://controller.example/agent",
+	}})
+	if err != nil || preview.Valid {
+		t.Fatalf("member without key preview=%#v err=%v", preview, err)
+	}
+	key := "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY="
+	preview, err = service.Preview(Input{Revision: settings.Revision, Values: map[string]string{
+		"fleet.controllerEnabled": "false",
+		"fleet.memberEnabled":     "true",
+		"fleet.controllerUrl":     "wss://controller.example/agent",
+		"fleet.memberKey":         key,
+	}})
+	if err != nil || !preview.Valid || !preview.RestartRequired {
+		t.Fatalf("valid member preview=%#v err=%v", preview, err)
+	}
 }
 
 func TestIPWhitelistValidationAndMatching(t *testing.T) {

@@ -1,0 +1,46 @@
+name: dst-admin-all-in-one
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  dst-admin:
+    image: ${DST_ADMIN_IMAGE:-dst-admin/all-in-one:dev}
+    platform: linux/amd64
+    restart: unless-stopped
+    logging: *default-logging
+    stop_grace_period: 90s
+    environment:
+      DST_ADMIN_BOOTSTRAP_DST: ${DST_ADMIN_BOOTSTRAP_DST:-true}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}:/data
+    ports:
+      - "${DST_ADMIN_HTTP_BIND:-0.0.0.0:8080}:8080/tcp"
+      - "${DST_SERVER_PORT_RANGE:-10999-11020}:10999-11020/udp"
+      - "${DST_AUTH_PORT_RANGE:-8766-8790}:8766-8790/udp"
+      - "${DST_STEAM_PORT_RANGE:-27016-27040}:27016-27040/udp"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/v2/auth/session"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20m
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run:size=16m,mode=0755
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - KILL
+      - SETGID
+      - SETUID

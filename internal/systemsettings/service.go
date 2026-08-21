@@ -1,6 +1,7 @@
 package systemsettings
 
 import (
+	"errors"
 	"fmt"
 	"net/mail"
 	"net/netip"
@@ -11,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"dont/internal/deploymentprofile"
 )
 
 var digitsPattern = regexp.MustCompile(`^[0-9]{1,20}$`)
@@ -292,6 +295,18 @@ func validateValues(values map[string]string) []Issue {
 				definition, _ := definitionByID(id)
 				issues = append(issues, Issue{FieldID: id, Severity: "error", Message: definition.Label + "不能为空"})
 			}
+		}
+	}
+	if _, err := deploymentprofile.Resolve(deploymentprofile.Values{
+		Packaging: values["deployment.packaging"], LocalExecutorEnabled: values["fleet.localExecutorEnabled"],
+		ControllerEnabled: values["fleet.controllerEnabled"], MemberEnabled: values["fleet.memberEnabled"],
+		ControllerURL: values["fleet.controllerUrl"], MemberKey: values["fleet.memberKey"],
+	}); err != nil {
+		var validation *deploymentprofile.ValidationError
+		if errors.As(err, &validation) {
+			issues = append(issues, Issue{FieldID: validation.Field, Severity: "error", Message: validation.Message})
+		} else {
+			issues = append(issues, Issue{Severity: "error", Message: err.Error()})
 		}
 	}
 	return issues

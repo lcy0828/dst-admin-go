@@ -309,6 +309,17 @@ func (a *Agent) Stop() {
 	log.Println("Agent已停止")
 }
 
+// Connected reports whether the Agent currently has an authenticated control
+// channel. It does not imply that any advertised Runtime is ready.
+func (a *Agent) Connected() bool {
+	if a == nil {
+		return false
+	}
+	a.connMutex.Lock()
+	defer a.connMutex.Unlock()
+	return a.isConnected && a.conn != nil
+}
+
 // Connect 连接到服务器
 func (a *Agent) Connect() error {
 	a.connMutex.Lock()

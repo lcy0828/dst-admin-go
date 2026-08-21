@@ -43,7 +43,7 @@ func (h *AgentHandler) runtimeTargets(c *gin.Context) {
 		agentFailure(c, err)
 		return
 	}
-	Success(c, http.StatusOK, gin.H{"items": items, "total": len(items), "defaultTargetId": "local"})
+	Success(c, http.StatusOK, gin.H{"items": items, "total": len(items), "defaultTargetId": h.service.DefaultRuntimeTargetID(items)})
 }
 
 func (h *AgentHandler) runtimeTarget(c *gin.Context) {
