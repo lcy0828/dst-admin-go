@@ -3,7 +3,7 @@ set -eu
 umask 077
 
 if [ "$(id -u)" = "0" ]; then
-  for directory in control saves server workshop backups maps
+  for directory in control saves server workshop workshop/steamapps/workshop backups maps
   do
     install -d -o 10000 -g 10000 -m 0700 "/data/$directory"
   done
@@ -12,7 +12,17 @@ if [ "$(id -u)" = "0" ]; then
     chown -R 10000:10000 /data
     install -o 10000 -g 10000 -m 0600 /dev/null "$marker"
   fi
-  exec gosu dstadmin "$0" "$@"
+  runtime_identity=dstadmin
+  if [ -S /var/run/docker.sock ]; then
+    socket_gid=$(stat -c '%g' /var/run/docker.sock)
+    case "$socket_gid" in
+      ""|*[!0-9]*) echo "invalid Docker socket group" >&2; exit 65 ;;
+    esac
+    # The root filesystem is read-only, so use the socket group as the
+    # process primary group instead of editing /etc/group at startup.
+    runtime_identity="10000:$socket_gid"
+  fi
+  exec gosu "$runtime_identity" "$0" "$@"
 fi
 
 config=${DST_ADMIN_CONFIG:-/data/control/app.conf}
@@ -22,7 +32,7 @@ if [ ! -e "$config" ]; then
 fi
 
 server_binary=/data/server/bin64/dontstarve_dedicated_server_nullrenderer_x64
-if [ "${DST_ADMIN_BOOTSTRAP_DST:-true}" = "true" ] && [ ! -x "$server_binary" ]; then
+if [ "${DST_ADMIN_BOOTSTRAP_DST:-false}" = "true" ] && [ ! -x "$server_binary" ]; then
   if [ ! -x /usr/games/steamcmd ]; then
     echo "SteamCMD is unavailable on this architecture; mount a prepared DST server at /data/server" >&2
     exit 69

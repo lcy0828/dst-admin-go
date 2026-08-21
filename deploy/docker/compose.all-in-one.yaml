@@ -14,7 +14,7 @@ services:
     logging: *default-logging
     stop_grace_period: 90s
     environment:
-      DST_ADMIN_BOOTSTRAP_DST: ${DST_ADMIN_BOOTSTRAP_DST:-true}
+      DST_ADMIN_BOOTSTRAP_DST: ${DST_ADMIN_BOOTSTRAP_DST:-false}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ${DST_ADMIN_DATA_ROOT:-/opt/dst}:/data
@@ -28,7 +28,7 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 20m
+      start_period: 30s
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777

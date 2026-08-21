@@ -7,6 +7,7 @@ storage_root=${DST_STORAGE_ROOT:-/data}
 conf_dir=${DST_CONF_DIR:-DoNotStarveTogether}
 server_root=${DST_SERVER_ROOT:-/opt/dst/server}
 executable=${DST_EXECUTABLE:-$server_root/bin64/dontstarve_dedicated_server_nullrenderer_x64}
+ugc_directory=${DST_UGC_DIRECTORY:-}
 state_dir=${DST_RUNTIME_STATE_DIR:-/run/dst-admin}
 exit_status_file=$state_dir/runtime-exit-status
 
@@ -18,6 +19,12 @@ case "$storage_root:$server_root:$executable" in
   *"
 "*|*""*) echo "runtime path contains a newline" >&2; exit 64 ;;
 esac
+if [ -n "$ugc_directory" ]; then
+  case "$ugc_directory" in
+    /*) ;;
+    *) echo "UGC directory must be absolute" >&2; exit 64 ;;
+  esac
+fi
 case "$storage_root:$server_root:$executable" in
   /*:/*:/*) ;;
   *) echo "runtime paths must be absolute" >&2; exit 64 ;;
@@ -31,12 +38,16 @@ fi
 
 export LD_LIBRARY_PATH="$server_root/bin64/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 cd "$(dirname "$executable")"
-set +e
-"$executable" \
+set -- "$executable" \
   -persistent_storage_root "$storage_root" \
   -conf_dir "$conf_dir" \
   -cluster "$cluster" \
   -shard "$shard"
+if [ -n "$ugc_directory" ]; then
+  set -- "$@" -ugc_directory "$ugc_directory"
+fi
+set +e
+"$@"
 runtime_status=$?
 set -e
 

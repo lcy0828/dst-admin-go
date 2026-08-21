@@ -19,6 +19,8 @@ RUN CGO_ENABLED=1 go build -trimpath \
       -o /out/dst-admin ./cmd/admin-api \
     && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/dst-map-renderer ./cmd/dst-map-renderer
 
+FROM docker:27-cli AS docker-cli
+
 # Klei only publishes the Linux server for amd64. The architecture-specific
 # official image also prevents cross-platform builders from reusing a 386 rootfs.
 FROM --platform=$TARGETPLATFORM amd64/debian:12-slim
@@ -50,6 +52,7 @@ RUN test "$(dpkg --print-architecture)" = "$TARGETARCH" \
     && install -d -o dstadmin -g dstadmin -m 0700 /data /data/control
 COPY --from=go-build /out/dst-admin /usr/local/bin/dst-admin
 COPY --from=go-build /out/dst-map-renderer /usr/local/bin/dst-map-renderer
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=web-build /src/dist /usr/share/dst-admin/web
 COPY backend/deploy/docker/config/all-in-one.conf /usr/local/share/dst-admin/all-in-one.conf
 COPY backend/deploy/docker/all-in-one-entrypoint.sh /usr/local/bin/all-in-one-entrypoint

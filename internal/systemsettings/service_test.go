@@ -94,7 +94,7 @@ func TestSettingsExposeFieldKindsAndNumericBounds(t *testing.T) {
 		t.Fatalf("language capability metadata=%#v", language)
 	}
 	packaging := fieldByID(t, settings, "deployment.packaging")
-	if packaging.Editable || packaging.Kind != "select" || len(packaging.Options) != 3 {
+	if packaging.Editable || packaging.Kind != "select" || len(packaging.Options) != 4 {
 		t.Fatalf("deployment packaging metadata=%#v", packaging)
 	}
 	memberKey := fieldByID(t, settings, "fleet.memberKey")

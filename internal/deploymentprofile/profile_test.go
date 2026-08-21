@@ -20,6 +20,7 @@ func TestResolveDeploymentRoles(t *testing.T) {
 	}{
 		{name: "legacy controller worker", values: Values{}, role: RoleControllerWorker},
 		{name: "standalone", values: Values{ControllerEnabled: "false"}, role: RoleStandalone},
+		{name: "container shards", values: Values{Packaging: "container", ControllerEnabled: "false"}, role: RoleStandalone},
 		{name: "controller only", values: Values{Packaging: "control_plane", LocalExecutorEnabled: "false", ControllerEnabled: "true"}, role: RoleControllerOnly},
 		{name: "managed worker", values: Values{
 			ControllerEnabled: "false", MemberEnabled: "true", ControllerURL: "wss://dst.example.com",

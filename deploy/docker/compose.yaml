@@ -7,205 +7,58 @@ x-default-logging: &default-logging
     max-file: "3"
 
 services:
-  control-plane:
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.control-plane
-      args:
-        VERSION: ${DST_ADMIN_VERSION:-dev}
-        COMMIT: ${DST_ADMIN_COMMIT:-unknown}
-        BUILD_TIME: ${DST_ADMIN_BUILD_TIME:-unknown}
-        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-http://deb.debian.org/debian}
-        DEBIAN_SECURITY_MIRROR: ${DEBIAN_SECURITY_MIRROR:-http://deb.debian.org/debian-security}
-    image: dst-admin/control-plane:${DST_ADMIN_VERSION:-dev}
+  dst-admin:
+    image: ${DST_ADMIN_IMAGE:-dst-admin/all-in-one:dev}
+    platform: linux/amd64
     restart: unless-stopped
     logging: *default-logging
-    depends_on:
-      control-data-init:
-        condition: service_completed_successfully
-    ports:
-      - "${DST_ADMIN_HTTP_BIND:-127.0.0.1:8000}:8000"
+    stop_grace_period: 90s
     environment:
+      DST_ADMIN_BOOTSTRAP_DST: ${DST_ADMIN_BOOTSTRAP_DST:-false}
+      DST_ADMIN_PACKAGING: container
+      DST_ADMIN_LOCAL_EXECUTOR_ENABLED: "true"
+      DST_ADMIN_LOCAL_RUNTIME_DRIVER: container
+      DST_ADMIN_LOCAL_INSTALLATION_ID: default
+      DST_ADMIN_LOCAL_CONTAINER_ENGINE: docker
+      DST_ADMIN_LOCAL_CONTAINER_IMAGE: ${DST_ADMIN_RUNTIME_IMAGE:-dst-admin/dst-runtime:dev}
+      DST_ADMIN_LOCAL_CONTAINER_SAVE_SOURCE: ${DST_ADMIN_DATA_ROOT:-/opt/dst}/saves
+      DST_ADMIN_LOCAL_CONTAINER_SERVER_SOURCE: ${DST_ADMIN_DATA_ROOT:-/opt/dst}/server
+      DST_ADMIN_LOCAL_CONTAINER_UGC_SOURCE: ${DST_ADMIN_DATA_ROOT:-/opt/dst}/workshop/steamapps/workshop
+      DST_ADMIN_FLEET_CONTROLLER_ENABLED: ${DST_ADMIN_FLEET_CONTROLLER_ENABLED:-false}
+      DST_ADMIN_AGENT_SECURITY_KEY: ${DST_ADMIN_AGENT_SECURITY_KEY:-}
       TZ: ${TZ:-Asia/Shanghai}
-      DST_ADMIN_AGENT_SECURITY_KEY: ${DST_ADMIN_AGENT_SECURITY_KEY:?set DST_ADMIN_AGENT_SECURITY_KEY}
-      DST_ADMIN_STEAMCMD_PATH: ${DST_ADMIN_STEAMCMD_PATH:-/usr/games/steamcmd}
-      DST_ADMIN_WORKSHOP_DOWNLOAD: ${DST_ADMIN_WORKSHOP_DOWNLOAD:-/var/lib/dst-admin/workshop}
-      DST_ADMIN_WORKSHOP_CONTENT: ${DST_ADMIN_WORKSHOP_CONTENT:-/var/lib/dst-admin/workshop/steamapps/workshop/content/322330}
-      DST_ADMIN_DISABLE_LOCAL_GAME_UPDATE: "true"
     volumes:
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/control:/var/lib/dst-admin
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "${DST_ADMIN_HTTP_BIND:-0.0.0.0:8080}:8080/tcp"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v2/auth/session"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/v2/auth/session"]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      start_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run:size=16m,mode=0755
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - KILL
+      - SETGID
+      - SETUID
 
-  control-data-init:
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.control-plane
-      args:
-        VERSION: ${DST_ADMIN_VERSION:-dev}
-        COMMIT: ${DST_ADMIN_COMMIT:-unknown}
-        BUILD_TIME: ${DST_ADMIN_BUILD_TIME:-unknown}
-        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-http://deb.debian.org/debian}
-        DEBIAN_SECURITY_MIRROR: ${DEBIAN_SECURITY_MIRROR:-http://deb.debian.org/debian-security}
-    image: dst-admin/control-plane:${DST_ADMIN_VERSION:-dev}
-    user: "0:0"
-    restart: "no"
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - |
-        marker=/var/lib/dst-admin/.volume-layout-uid10001-v1
-        if [ ! -e "$$marker" ]; then
-          install -d -o 10001 -g 10001 -m 0700 \
-            /var/lib/dst-admin/backups \
-            /var/lib/dst-admin/maps \
-            /var/lib/dst-admin/unmanaged-saves \
-            /var/lib/dst-admin/unmanaged-server \
-            /var/lib/dst-admin/unmanaged-ugc \
-            /var/lib/dst-admin/workshop/steamapps/workshop/content/322330 \
-            /var/lib/dst-admin/workshop/steamapps/workshop/downloads/322330
-          chown -R 10001:10001 /var/lib/dst-admin
-          touch "$$marker"
-        fi
-    volumes:
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/control:/var/lib/dst-admin
-    security_opt:
-      - no-new-privileges:true
-
-  agent:
-    profiles: ["container-control"]
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.agent
-      args:
-        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-http://deb.debian.org/debian}
-        DEBIAN_SECURITY_MIRROR: ${DEBIAN_SECURITY_MIRROR:-http://deb.debian.org/debian-security}
-    image: dst-admin/agent:${DST_ADMIN_VERSION:-dev}
-    hostname: ${DST_ADMIN_AGENT_ID:-dst-admin-agent}
-    restart: unless-stopped
-    logging: *default-logging
-    depends_on:
-      control-plane:
-        condition: service_healthy
-      volume-init:
-        condition: service_completed_successfully
-    environment:
-      TZ: ${TZ:-Asia/Shanghai}
-      DST_ADMIN_AGENT_DEPLOYMENT: container
-      DST_ADMIN_AGENT_SERVER_URL: ws://control-plane:8000/agent
-      DST_ADMIN_AGENT_SECURITY_KEY: ${DST_ADMIN_AGENT_SECURITY_KEY:?set DST_ADMIN_AGENT_SECURITY_KEY}
-      DST_ADMIN_AGENT_STATE_FILE: /var/lib/dst-admin-agent/runtime-state.json
-    command:
-      - /usr/local/bin/dst-admin-agent
-      - -id
-      - ${DST_ADMIN_AGENT_ID:-dst-admin-agent}
-      - -config
-      - /var/lib/dst-admin-agent/agent.conf
-      - -state
-      - /var/lib/dst-admin-agent/runtime-state.json
-    group_add:
-      - "${DOCKER_GID:-0}"
-    volumes:
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/agent:/var/lib/dst-admin-agent
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/saves:/srv/dst/saves
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/server:/srv/dst/server:ro
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/mods:/srv/dst/server/mods
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/workshop:/srv/dst/workshop
-      - /var/run/docker.sock:/var/run/docker.sock
-    security_opt:
-      - no-new-privileges:true
-
-  volume-init:
-    profiles: ["container-control", "dst-runtime"]
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.agent
-      args:
-        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-http://deb.debian.org/debian}
-        DEBIAN_SECURITY_MIRROR: ${DEBIAN_SECURITY_MIRROR:-http://deb.debian.org/debian-security}
-    image: dst-admin/agent:${DST_ADMIN_VERSION:-dev}
-    user: "0:0"
-    restart: "no"
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - |
-        agent_marker=/var/lib/dst-admin-agent/.volume-layout-uid10000-v1
-        saves_marker=/srv/dst/saves/.volume-layout-uid10000-v1
-        mods_marker=/srv/dst/mods/.volume-layout-uid10000-v1
-        workshop_marker=/srv/dst/workshop/.volume-layout-uid10000-v1
-        if [ ! -e "$$agent_marker" ]; then
-          chown -R 10000:10000 /var/lib/dst-admin-agent
-          touch "$$agent_marker"
-        fi
-        if [ ! -e "$$saves_marker" ]; then
-          chown -R 10000:10000 /srv/dst/saves
-          touch "$$saves_marker"
-        fi
-        if [ ! -d /srv/dst/server/mods ]; then
-          install -d -o 10000 -g 10000 -m 0755 /srv/dst/server/mods
-        fi
-        if [ ! -d /srv/dst/server/bin64 ]; then
-          install -d -o 10000 -g 10000 -m 0755 /srv/dst/server/bin64
-        fi
-        if [ ! -e "$$mods_marker" ]; then
-          if [ -d /srv/dst/server/mods ] && [ -z "$$(find /srv/dst/mods -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-            cp -a /srv/dst/server/mods/. /srv/dst/mods/
-          fi
-          chown -R 10000:10000 /srv/dst/mods
-          touch "$$mods_marker"
-        fi
-        if [ ! -e "$$workshop_marker" ]; then
-          chown -R 10000:10000 /srv/dst/workshop
-          touch "$$workshop_marker"
-        fi
-        chmod 0700 /var/lib/dst-admin-agent /srv/dst/saves /srv/dst/mods /srv/dst/workshop
-    volumes:
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/agent:/var/lib/dst-admin-agent
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/saves:/srv/dst/saves
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/server:/srv/dst/server
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/mods:/srv/dst/mods
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/workshop:/srv/dst/workshop
-    security_opt:
-      - no-new-privileges:true
-
-  dst-master:
-    profiles: ["dst-runtime"]
+  dst-runtime-image:
+    profiles: ["build"]
+    platform: linux/amd64
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.dst-runtime
-    image: dst-admin/dst-runtime:${DST_ADMIN_VERSION:-dev}
-    restart: "no"
-    logging: *default-logging
-    depends_on:
-      volume-init:
-        condition: service_completed_successfully
-    environment:
-      TZ: ${TZ:-Asia/Shanghai}
-      DST_CLUSTER: ${DST_CLUSTER:-Cluster_1}
-      DST_SHARD: Master
-      DST_STORAGE_ROOT: /data
-      DST_CONF_DIR: "."
-    labels:
-      com.dst-admin.managed: "true"
-      com.dst-admin.installation: container
-      com.dst-admin.cluster: ${DST_CLUSTER:-Cluster_1}
-      com.dst-admin.shard: Master
-    volumes:
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/saves:/data
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/server:/opt/dst/server:ro
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}/mods:/opt/dst/server/mods:ro
-    ports:
-      - "${DST_MASTER_SERVER_PORT:-10999}:10999/udp"
-      - "${DST_MASTER_AUTH_PORT:-8768}:8768/udp"
-      - "${DST_MASTER_STEAM_PORT:-27018}:27018/udp"
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
+    image: ${DST_ADMIN_RUNTIME_IMAGE:-dst-admin/dst-runtime:dev}
+    entrypoint: ["/bin/true"]

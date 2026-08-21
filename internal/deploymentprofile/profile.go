@@ -15,6 +15,7 @@ type Packaging string
 const (
 	PackagingNative       Packaging = "native"
 	PackagingAllInOne     Packaging = "all_in_one"
+	PackagingContainer    Packaging = "container"
 	PackagingControlPlane Packaging = "control_plane"
 )
 
@@ -138,10 +139,10 @@ func parsePackaging(value string) (Packaging, error) {
 	}
 	value = strings.ReplaceAll(value, "-", "_")
 	switch Packaging(value) {
-	case PackagingNative, PackagingAllInOne, PackagingControlPlane:
+	case PackagingNative, PackagingAllInOne, PackagingContainer, PackagingControlPlane:
 		return Packaging(value), nil
 	default:
-		return "", invalid("deployment.packaging", "部署封装必须为 native、all_in_one 或 control_plane")
+		return "", invalid("deployment.packaging", "部署封装必须为 native、all_in_one、container 或 control_plane")
 	}
 }
 
