@@ -1,3 +1,7 @@
 *.db
 *.sqlite
 *.sqlite3
+*.db-shm
+*.db-wal
+.DS_Store
+.tmp-*
