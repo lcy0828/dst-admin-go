@@ -84,7 +84,7 @@ func (h *DistributedBackupHandler) create(c *gin.Context) {
 	roomID := c.Param("roomId")
 	mode := request.Mode
 	if mode == "" {
-		mode = distributedbackup.ModeCold
+		mode = distributedbackup.ModeHot
 	}
 	if mode != distributedbackup.ModeCold && mode != distributedbackup.ModeHot {
 		Failure(c, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "备份模式无效", nil)

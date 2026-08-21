@@ -18,9 +18,12 @@ import (
 )
 
 type distributedBackupHTTPFixture struct {
-	value      distributedbackup.Set
-	operations []distributedbackup.Operation
+	value       distributedbackup.Set
+	operations  []distributedbackup.Operation
+	createdMode string
 }
+
+type coldOnlyDistributedBackupService struct{ DistributedBackupService }
 
 func (f *distributedBackupHTTPFixture) List(string) ([]distributedbackup.Set, error) {
 	return []distributedbackup.Set{f.value}, nil
@@ -45,7 +48,17 @@ func (f *distributedBackupHTTPFixture) Operation(id string) (distributedbackup.O
 
 func (f *distributedBackupHTTPFixture) Create(_ context.Context, roomID, name, kind, jobID string) (distributedbackup.Set, error) {
 	f.value.RoomID, f.value.Name, f.value.Kind, f.value.SourceJobID = roomID, name, kind, jobID
+	f.value.Mode = distributedbackup.ModeCold
 	f.value.Status = distributedbackup.StatusVerified
+	f.createdMode = distributedbackup.ModeCold
+	return f.value, nil
+}
+
+func (f *distributedBackupHTTPFixture) CreateWithMode(_ context.Context, roomID, name, kind, jobID, mode string) (distributedbackup.Set, error) {
+	f.value.RoomID, f.value.Name, f.value.Kind, f.value.SourceJobID = roomID, name, kind, jobID
+	f.value.Mode = mode
+	f.value.Status = distributedbackup.StatusVerified
+	f.createdMode = mode
 	return f.value, nil
 }
 
@@ -103,6 +116,35 @@ func TestDistributedBackupHandlerCreatesAndRestoresJobs(t *testing.T) {
 	createJob := waitDistributedBackupJob(t, jobService, createJobID)
 	if createJob.Status != jobs.StatusSucceeded || createJob.Kind != "backup-set.create" {
 		t.Fatalf("create job=%#v", createJob)
+	}
+	if fixture.createdMode != distributedbackup.ModeHot {
+		t.Fatalf("default create mode=%q, want %q", fixture.createdMode, distributedbackup.ModeHot)
+	}
+
+	coldCreated := performDistributedBackupRequest(t, router, http.MethodPost, "/api/v2/rooms/room/backup-sets", map[string]string{"name": "停服备份", "mode": distributedbackup.ModeCold})
+	if coldCreated.Code != http.StatusAccepted {
+		t.Fatalf("cold create status=%d body=%s", coldCreated.Code, coldCreated.Body.String())
+	}
+	coldCreateJob := waitDistributedBackupJob(t, jobService, distributedBackupJobID(t, coldCreated.Body.Bytes()))
+	if coldCreateJob.Status != jobs.StatusSucceeded || fixture.createdMode != distributedbackup.ModeCold {
+		t.Fatalf("cold create job=%#v mode=%q", coldCreateJob, fixture.createdMode)
+	}
+
+	fixture.createdMode = ""
+	coldOnlyHandler, err := NewDistributedBackupHandler(coldOnlyDistributedBackupService{DistributedBackupService: fixture}, jobService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldOnlyRouter := gin.New()
+	coldOnlyHandler.Register(coldOnlyRouter.Group("/api/v2"))
+	unsupported := performDistributedBackupRequest(t, coldOnlyRouter, http.MethodPost, "/api/v2/rooms/room/backup-sets", map[string]string{"name": "不支持热备份"})
+	if unsupported.Code != http.StatusAccepted {
+		t.Fatalf("unsupported create status=%d body=%s", unsupported.Code, unsupported.Body.String())
+	}
+	unsupportedJob := waitDistributedBackupJob(t, jobService, distributedBackupJobID(t, unsupported.Body.Bytes()))
+	if unsupportedJob.Status != jobs.StatusFailed || fixture.createdMode != "" || len(unsupportedJob.Targets) != 1 ||
+		unsupportedJob.Targets[0].Error == nil || unsupportedJob.Targets[0].Error.Code != "BACKUP_HOT_UNAVAILABLE" {
+		t.Fatalf("unsupported create job=%#v mode=%q", unsupportedJob, fixture.createdMode)
 	}
 
 	restored := performDistributedBackupRequest(t, router, http.MethodPost, "/api/v2/backup-sets/set-1/actions/restore", map[string]string{"confirmation": "测试房间"})
