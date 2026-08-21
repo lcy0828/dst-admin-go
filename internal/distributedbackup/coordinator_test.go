@@ -371,6 +371,60 @@ func TestColdConsistentBackupAndCoordinatedRestoreAcrossTargets(t *testing.T) {
 	}
 }
 
+func TestImportedDirectoryRestoresAcrossCurrentPlacements(t *testing.T) {
+	fixture := newDistributedBackupFixture(t)
+	sourceRoot := filepath.Join(t.TempDir(), "ImportedCluster")
+	for path, value := range map[string]string{
+		filepath.Join(sourceRoot, "cluster.ini"):                                       "[NETWORK]\ncluster_name = Imported\n",
+		filepath.Join(sourceRoot, "cluster_token.txt"):                                 "import-token\n",
+		filepath.Join(sourceRoot, "Forest", "server.ini"):                              "[SHARD]\nis_master = true\nid = 1\n",
+		filepath.Join(sourceRoot, "Forest", "save", "shardindex"):                      "forest-index",
+		filepath.Join(sourceRoot, "Forest", "save", "session", "NEW", "0000000042"):    "imported-master",
+		filepath.Join(sourceRoot, "CaveWorld", "server.ini"):                           "[SHARD]\nis_master = false\nid = 2\n",
+		filepath.Join(sourceRoot, "CaveWorld", "save", "shardindex"):                   "caves-index",
+		filepath.Join(sourceRoot, "CaveWorld", "save", "session", "NEW", "0000000042"): "imported-caves",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	imported, err := fixture.coordinator.ImportDirectory(context.Background(), DirectoryImportRequest{
+		RoomID: "room", SourceRoot: sourceRoot, Name: "上传的房间存档", SourceJobID: "job-import",
+		Worlds: []DirectoryImportWorld{{WorldID: "master", DirectoryName: "Forest"}, {WorldID: "caves", DirectoryName: "CaveWorld"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imported.Status != StatusVerified || !imported.Restorable || imported.Kind != "import" || len(imported.Parts) != 2 {
+		t.Fatalf("imported=%#v", imported)
+	}
+	fixture.master.mu.Lock()
+	masterStops := fixture.master.stops["Cluster_1\x00Master"]
+	fixture.master.mu.Unlock()
+	fixture.caves.mu.Lock()
+	cavesStops := fixture.caves.stops["Cluster_1\x00Caves"]
+	fixture.caves.mu.Unlock()
+	if masterStops != 0 || cavesStops != 0 {
+		t.Fatalf("directory import stopped runtimes: master=%d caves=%d", masterStops, cavesStops)
+	}
+
+	result, err := fixture.coordinator.Restore(context.Background(), imported.ID, "测试房间", "job-import-restore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ProtectionSetID == "" {
+		t.Fatalf("restore=%#v", result)
+	}
+	assertTextFile(t, filepath.Join(fixture.masterRoot, "Cluster_1", "Master", "save", "session", "NEW", "0000000042"), "imported-master")
+	assertTextFile(t, filepath.Join(fixture.cavesRoot, "Cluster_1", "Caves", "save", "session", "NEW", "0000000042"), "imported-caves")
+	assertTextFile(t, filepath.Join(fixture.masterRoot, "Cluster_1", "cluster_token.txt"), "import-token\n")
+	assertTextFile(t, filepath.Join(fixture.cavesRoot, "Cluster_1", "cluster_token.txt"), "import-token\n")
+}
+
 func TestConfigurationOnlyBackupCannotRestoreOrStopRoom(t *testing.T) {
 	fixture := newDistributedBackupFixture(t)
 	if err := os.RemoveAll(filepath.Join(fixture.masterRoot, "Cluster_1", "Master", "save")); err != nil {

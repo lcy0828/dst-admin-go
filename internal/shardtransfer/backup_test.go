@@ -183,6 +183,27 @@ func TestBackupInspectionAndRestoreRejectConfigurationOnlyArchive(t *testing.T) 
 	}
 }
 
+func TestCreateBackupArchiveUsesTheRuntimeRestoreFormat(t *testing.T) {
+	sourceRoot, _, _, _ := prepareTransferRoots(t)
+	clusterRoot := filepath.Join(sourceRoot, "Cluster_1")
+	destination := filepath.Join(t.TempDir(), "imported-master.zip")
+	descriptor, err := CreateBackupArchive(
+		context.Background(), "backup-imported-master-0001", "Cluster_1", "Master",
+		clusterRoot, filepath.Join(clusterRoot, "Master"), destination,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := InspectBackupArchive(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if descriptor.Size < 1 || descriptor.FileCount < 2 || descriptor.SHA256 == "" ||
+		descriptor.SharedSHA256 != inspection.SharedSHA256 || !inspection.Restorable {
+		t.Fatalf("descriptor=%#v inspection=%#v", descriptor, inspection)
+	}
+}
+
 func assertFileContent(t *testing.T, path, expected string) {
 	t.Helper()
 	data, err := os.ReadFile(path)

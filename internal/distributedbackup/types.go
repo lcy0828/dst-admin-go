@@ -6,17 +6,18 @@ import (
 )
 
 var (
-	ErrNotFound           = errors.New("distributed backup set not found")
-	ErrInvalidInput       = errors.New("distributed backup input is invalid")
-	ErrTopologyChanged    = errors.New("room topology does not match the backup set")
-	ErrTargetUnavailable  = errors.New("backup runtime target is unavailable")
-	ErrIntegrity          = errors.New("backup set integrity verification failed")
-	ErrIncomplete         = errors.New("backup set is not complete")
-	ErrSharedFilesDiffer  = errors.New("cluster shared files differ across runtime targets")
-	ErrRecoveryIncomplete = errors.New("backup recovery requires operator attention")
-	ErrHotUnavailable     = errors.New("hot-consistent backup is unavailable for this room")
-	ErrBarrierFailed      = errors.New("cross-shard snapshot barrier failed")
-	ErrNotRestorable      = errors.New("backup set does not contain restorable game save data")
+	ErrNotFound            = errors.New("distributed backup set not found")
+	ErrInvalidInput        = errors.New("distributed backup input is invalid")
+	ErrTopologyChanged     = errors.New("room topology does not match the backup set")
+	ErrTargetUnavailable   = errors.New("backup runtime target is unavailable")
+	ErrIntegrity           = errors.New("backup set integrity verification failed")
+	ErrIncomplete          = errors.New("backup set is not complete")
+	ErrSharedFilesDiffer   = errors.New("cluster shared files differ across runtime targets")
+	ErrRecoveryIncomplete  = errors.New("backup recovery requires operator attention")
+	ErrHotUnavailable      = errors.New("hot-consistent backup is unavailable for this room")
+	ErrBarrierFailed       = errors.New("cross-shard snapshot barrier failed")
+	ErrNotRestorable       = errors.New("backup set does not contain restorable game save data")
+	ErrImportWorldMismatch = errors.New("imported save worlds do not match the target room")
 )
 
 type Status string
@@ -145,4 +146,18 @@ type RestoreResult struct {
 	OperationID     string   `json:"operationId"`
 	ProtectionSetID string   `json:"protectionSetId"`
 	Warnings        []string `json:"warnings"`
+}
+
+type DirectoryImportWorld struct {
+	WorldID       string
+	DirectoryName string
+}
+
+type DirectoryImportRequest struct {
+	RoomID      string
+	SourceRoot  string
+	Name        string
+	Kind        string
+	SourceJobID string
+	Worlds      []DirectoryImportWorld
 }

@@ -56,6 +56,91 @@ type RestoreReceipt struct {
 	RecoveryRef    string   `json:"recoveryRef"`
 }
 
+// CreateBackupArchive converts one controller-side Cluster directory and one
+// of its Shards into the same bounded archive used by Runtime backup transfer.
+// The destination is published atomically only after the archive is complete.
+func CreateBackupArchive(ctx context.Context, id, cluster, shard, clusterPath, shardPath, destination string) (BackupDescriptor, error) {
+	if err := validateIdentity(id, cluster, shard); err != nil {
+		return BackupDescriptor{}, err
+	}
+	clusterPath = strings.TrimSpace(clusterPath)
+	if clusterPath == "" {
+		return BackupDescriptor{}, ErrInvalidRequest
+	}
+	clusterPath, err := filepath.Abs(clusterPath)
+	if err != nil {
+		return BackupDescriptor{}, ErrInvalidRequest
+	}
+	shardPath = strings.TrimSpace(shardPath)
+	if shardPath == "" {
+		return BackupDescriptor{}, ErrInvalidRequest
+	}
+	shardPath, err = filepath.Abs(shardPath)
+	if err != nil || !contained(clusterPath, shardPath) || filepath.Clean(clusterPath) == filepath.Clean(shardPath) {
+		return BackupDescriptor{}, ErrInvalidRequest
+	}
+	for _, root := range []string{clusterPath, shardPath} {
+		info, statErr := os.Lstat(root)
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return BackupDescriptor{}, errors.Join(statErr, ErrIntegrity)
+		}
+	}
+	destination = strings.TrimSpace(destination)
+	if destination == "" {
+		return BackupDescriptor{}, ErrInvalidRequest
+	}
+	destination, err = filepath.Abs(destination)
+	if err != nil {
+		return BackupDescriptor{}, ErrInvalidRequest
+	}
+	if _, statErr := os.Lstat(destination); statErr == nil {
+		return BackupDescriptor{}, ErrConflict
+	} else if !os.IsNotExist(statErr) {
+		return BackupDescriptor{}, statErr
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		return BackupDescriptor{}, err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(destination), ".backup-import-*.tmp")
+	if err != nil {
+		return BackupDescriptor{}, err
+	}
+	temporaryPath := temporary.Name()
+	published := false
+	defer func() {
+		_ = temporary.Close()
+		if !published {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := writeBackupArchive(ctx, temporary, clusterPath, shardPath); err != nil {
+		return BackupDescriptor{}, err
+	}
+	if err := temporary.Sync(); err != nil {
+		return BackupDescriptor{}, err
+	}
+	if err := temporary.Close(); err != nil {
+		return BackupDescriptor{}, err
+	}
+	fileDescriptor, err := describeFile(id, temporaryPath)
+	if err != nil {
+		return BackupDescriptor{}, err
+	}
+	inspection, err := InspectBackupArchive(temporaryPath)
+	if err != nil {
+		return BackupDescriptor{}, err
+	}
+	if err := os.Rename(temporaryPath, destination); err != nil {
+		return BackupDescriptor{}, err
+	}
+	published = true
+	return BackupDescriptor{
+		BackupID: id, Size: fileDescriptor.Size, ContentSize: inspection.ContentSize,
+		FileCount: inspection.FileCount, SHA256: fileDescriptor.SHA256,
+		SharedSHA256: inspection.SharedSHA256, Cluster: cluster, Shard: shard, Phase: "staged",
+	}, nil
+}
+
 func (m *Manager) PrepareBackup(ctx context.Context, id, cluster, shard string) (BackupDescriptor, error) {
 	value, err := m.PrepareExport(ctx, id, cluster, shard)
 	if err != nil {

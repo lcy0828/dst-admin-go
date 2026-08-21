@@ -106,7 +106,33 @@ func (m *Manager) PrepareExport(ctx context.Context, id, cluster, shard string) 
 			_ = os.Remove(temporaryPath)
 		}
 	}()
-	archive := zip.NewWriter(temporary)
+	if err := writeBackupArchive(ctx, temporary, clusterPath, shardPath); err != nil {
+		return Descriptor{}, err
+	}
+	if err := temporary.Sync(); err != nil {
+		return Descriptor{}, err
+	}
+	if err := temporary.Close(); err != nil {
+		return Descriptor{}, err
+	}
+	descriptor, err := describeFile(id, temporaryPath)
+	if err != nil {
+		return Descriptor{}, err
+	}
+	finalPath := m.exportPath(id)
+	if err := os.Rename(temporaryPath, finalPath); err != nil {
+		return Descriptor{}, err
+	}
+	if err := writeJSON(m.exportMetaPath(id), descriptor); err != nil {
+		_ = os.Remove(finalPath)
+		return Descriptor{}, err
+	}
+	published = true
+	return descriptor, nil
+}
+
+func writeBackupArchive(ctx context.Context, output io.Writer, clusterPath, shardPath string) error {
+	archive := zip.NewWriter(output)
 	for _, name := range sortedSharedNames() {
 		path := filepath.Join(clusterPath, name)
 		if _, statErr := os.Lstat(path); os.IsNotExist(statErr) {
@@ -114,11 +140,11 @@ func (m *Manager) PrepareExport(ctx context.Context, id, cluster, shard string) 
 		}
 		if err := addRegularFile(ctx, archive, path, "shared/"+name); err != nil {
 			_ = archive.Close()
-			return Descriptor{}, err
+			return err
 		}
 	}
 	entries, total := 0, int64(0)
-	err = filepath.Walk(shardPath, func(path string, info os.FileInfo, walkErr error) error {
+	err := filepath.Walk(shardPath, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -150,31 +176,12 @@ func (m *Manager) PrepareExport(ctx context.Context, id, cluster, shard string) 
 	})
 	if err != nil {
 		_ = archive.Close()
-		return Descriptor{}, err
+		return err
 	}
 	if err := archive.Close(); err != nil {
-		return Descriptor{}, err
+		return err
 	}
-	if err := temporary.Sync(); err != nil {
-		return Descriptor{}, err
-	}
-	if err := temporary.Close(); err != nil {
-		return Descriptor{}, err
-	}
-	descriptor, err := describeFile(id, temporaryPath)
-	if err != nil {
-		return Descriptor{}, err
-	}
-	finalPath := m.exportPath(id)
-	if err := os.Rename(temporaryPath, finalPath); err != nil {
-		return Descriptor{}, err
-	}
-	if err := writeJSON(m.exportMetaPath(id), descriptor); err != nil {
-		_ = os.Remove(finalPath)
-		return Descriptor{}, err
-	}
-	published = true
-	return descriptor, nil
+	return nil
 }
 
 func (m *Manager) ReadExport(ctx context.Context, id string, offset int64) (Chunk, error) {
