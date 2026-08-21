@@ -304,11 +304,37 @@ func (h *GameUpdateHandler) update(c *gin.Context) {
 
 func (h *GameUpdateHandler) run(c *gin.Context) {
 	value, err := h.updates.Run(c.Param("jobId"))
+	if errors.Is(err, gameupdate.ErrRunNotFound) {
+		if job, jobErr := h.jobs.Get(c.Param("jobId")); jobErr == nil {
+			if pending, ok := gameUpdateRunFromJob(job); ok {
+				Success(c, http.StatusOK, pending)
+				return
+			}
+		}
+	}
 	if err != nil {
 		gameUpdateFailure(c, err)
 		return
 	}
 	Success(c, http.StatusOK, value)
+}
+
+func gameUpdateRunFromJob(job jobs.Job) (gameupdate.Run, bool) {
+	if job.Kind != "game.update" {
+		return gameupdate.Run{}, false
+	}
+	startedAt := job.CreatedAt
+	if job.StartedAt != nil {
+		startedAt = *job.StartedAt
+	}
+	errorMessage := ""
+	if job.Error != nil {
+		errorMessage = job.Error.Message
+	}
+	return gameupdate.Run{
+		JobID: job.ID, Status: string(job.Status), ErrorMessage: errorMessage,
+		StartedAt: startedAt, FinishedAt: job.FinishedAt,
+	}, true
 }
 
 func gameUpdateFailure(c *gin.Context, err error) {

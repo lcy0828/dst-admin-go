@@ -203,3 +203,15 @@ func TestGameReleaseHTTPRetryPassesCurrentJobID(t *testing.T) {
 		t.Fatalf("retry source job=%q want %q", fixture.retrySourceJobID, jobID)
 	}
 }
+
+func TestGameUpdateRunFallsBackToJobBeforeSteamCMDRunExists(t *testing.T) {
+	now := time.Now().UTC()
+	job := jobs.Job{ID: "update-job", Kind: "game.update", Status: jobs.StatusQueued, CreatedAt: now}
+	value, ok := gameUpdateRunFromJob(job)
+	if !ok || value.JobID != job.ID || value.Status != string(jobs.StatusQueued) || !value.StartedAt.Equal(now) {
+		t.Fatalf("run=%#v ok=%v", value, ok)
+	}
+	if _, ok := gameUpdateRunFromJob(jobs.Job{ID: "other", Kind: "room.start"}); ok {
+		t.Fatal("non-update job must not be exposed as an update run")
+	}
+}
