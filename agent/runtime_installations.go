@@ -127,8 +127,9 @@ func normalizeRuntimeInstallations(values []RuntimeInstallation) ([]RuntimeInsta
 		}
 		value.WorkshopContentPath = strings.TrimSpace(value.WorkshopContentPath)
 		if value.WorkshopContentPath == "" {
-			value.WorkshopContentPath = value.UGCPath
-			if value.WorkshopContentPath == "" {
+			if value.UGCPath != "" {
+				value.WorkshopContentPath = filepath.Join(value.UGCPath, "content", "322330")
+			} else {
 				value.WorkshopContentPath = filepath.Join(value.ServerPath, "ugc_mods", "content", "322330")
 			}
 		}

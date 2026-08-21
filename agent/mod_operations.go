@@ -232,6 +232,7 @@ func (a *Agent) modManager(installation RuntimeInstallation) (*moddistribution.M
 		Installations: []moddistribution.TrustedInstallation{{
 			ID: installation.ID, NodeID: a.Config.AgentID,
 			ServerPath: installation.ServerPath, SavePath: installation.SavePath,
+			WorkshopContentPath: runtimeWorkshopContentPath(installation),
 		}},
 		ReserveBytes: modDiskReserveBytes,
 	})
@@ -243,6 +244,13 @@ func (a *Agent) modManager(installation RuntimeInstallation) (*moddistribution.M
 	}
 	a.modDistributions[installation.ID] = created
 	return created, nil
+}
+
+func runtimeWorkshopContentPath(installation RuntimeInstallation) string {
+	if strings.TrimSpace(installation.UGCPath) == "" {
+		return ""
+	}
+	return installation.WorkshopContentPath
 }
 
 func (a *Agent) beginModUpload(installation RuntimeInstallation, request shared.RuntimeModRequest) (shared.RuntimeModResult, error) {

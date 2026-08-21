@@ -54,10 +54,11 @@ type Manifest struct {
 }
 
 type TrustedInstallation struct {
-	ID         string `json:"id"`
-	NodeID     string `json:"nodeId"`
-	ServerPath string `json:"serverPath"`
-	SavePath   string `json:"savePath"`
+	ID                  string `json:"id"`
+	NodeID              string `json:"nodeId"`
+	ServerPath          string `json:"serverPath"`
+	SavePath            string `json:"savePath"`
+	WorkshopContentPath string `json:"workshopContentPath,omitempty"`
 }
 
 type Config struct {

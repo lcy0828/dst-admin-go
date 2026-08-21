@@ -199,6 +199,84 @@ func TestPublishKeepsRoomWorldOverridesIndependent(t *testing.T) {
 	}
 }
 
+func TestPublishUsesWorkshopContentRootWhenUGCIsManaged(t *testing.T) {
+	environment := newTestEnvironment(t, 0)
+	workshopContent := filepath.Join(environment.root, "ugc", "content", "322330")
+	if err := os.MkdirAll(workshopContent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = makeTreeWritable(workshopContent) })
+	environment.config.Installations[0].WorkshopContentPath = workshopContent
+	manager, err := New(environment.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment.manager = manager
+	manifest := environment.importMod(t, "301", map[string]string{"modinfo.lua": "version='1'"})
+	plan, err := environment.manager.BuildPlan(context.Background(), release("release-ugc-0001", manifest, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Installations) != 1 || len(plan.Installations[0].ManagedSetup) != 0 {
+		t.Fatalf("UGC plan should not manage dedicated_server_mods_setup.lua: %#v", plan.Installations)
+	}
+	journal, err := environment.manager.Prepare(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mutation := range journal.Mutations {
+		if mutation.Kind == MutationSetup {
+			t.Fatal("UGC publication must not include a setup-file mutation")
+		}
+	}
+	if _, err := environment.manager.Publish(context.Background(), plan.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.manager.Complete(context.Background(), plan.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, filepath.Join(workshopContent, "301", "modinfo.lua"), []byte("version='1'"))
+	if _, err := os.Stat(filepath.Join(environment.server, "mods", "workshop-301")); !os.IsNotExist(err) {
+		t.Fatalf("legacy server Mod target should not be created: %v", err)
+	}
+}
+
+func TestRenameMutationTargetPreservesReadOnlyDirectoryMode(t *testing.T) {
+	root := t.TempDir()
+	t.Cleanup(func() { _ = makeTreeWritable(root) })
+	source := filepath.Join(root, "source")
+	destination := filepath.Join(root, "destination")
+	if err := os.Mkdir(source, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "modinfo.lua"), []byte("version='1'"), 0o440); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(source, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := renameMutationTarget(source, destination, true); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o555 {
+		t.Fatalf("destination mode=%#o, expected read-only mode", info.Mode().Perm())
+	}
+	if err := renameMutationTarget(destination, source, true); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o555 {
+		t.Fatalf("restored source mode=%#o, expected read-only mode", info.Mode().Perm())
+	}
+}
+
 func TestRollbackRestoresModAndWorldConfigurations(t *testing.T) {
 	environment := newTestEnvironment(t, 0)
 	manifest := environment.importMod(t, "400", map[string]string{"modinfo.lua": "version='new'", "new.lua": "new"})

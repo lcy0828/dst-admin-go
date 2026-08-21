@@ -63,10 +63,18 @@ func New(config Config) (*Manager, error) {
 		if err != nil {
 			return nil, err
 		}
-		if pathWithin(server, cacheRoot) || pathWithin(save, cacheRoot) || pathWithin(server, stateRoot) || pathWithin(save, stateRoot) {
+		workshopContent := strings.TrimSpace(input.WorkshopContentPath)
+		if workshopContent != "" {
+			workshopContent, err = cleanConfiguredRoot(workshopContent, true)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if pathWithin(server, cacheRoot) || pathWithin(save, cacheRoot) || pathWithin(server, stateRoot) || pathWithin(save, stateRoot) ||
+			workshopContent != "" && (pathWithin(workshopContent, cacheRoot) || pathWithin(workshopContent, stateRoot)) {
 			return nil, ErrUnsafePath
 		}
-		input.ServerPath, input.SavePath, input.NodeID = server, save, nodeID
+		input.ServerPath, input.SavePath, input.WorkshopContentPath, input.NodeID = server, save, workshopContent, nodeID
 		manager.installations[input.ID] = input
 	}
 	if len(manager.installations) == 0 {
@@ -155,7 +163,12 @@ func (m *Manager) BuildPlan(ctx context.Context, input PlanInput) (Plan, error) 
 			}
 			return group.Shards[i].RoomDirectory < group.Shards[j].RoomDirectory
 		})
-		setupPath := filepath.Join(m.installations[group.InstallationID].ServerPath, "mods", "dedicated_server_mods_setup.lua")
+		installation := m.installations[group.InstallationID]
+		if installation.WorkshopContentPath != "" {
+			plan.Installations = append(plan.Installations, *group)
+			continue
+		}
+		setupPath := filepath.Join(installation.ServerPath, "mods", "dedicated_server_mods_setup.lua")
 		current, err := readOptionalRegular(setupPath)
 		if err != nil {
 			return Plan{}, err

@@ -254,6 +254,21 @@ func TestRuntimeInstallationsNormalizeContainerDriver(t *testing.T) {
 	}
 }
 
+func TestRuntimeInstallationsDeriveWorkshopContentPathFromUGCPath(t *testing.T) {
+	root := t.TempDir()
+	ugcPath := filepath.Join(root, "steamapps", "workshop")
+	values, err := normalizeRuntimeInstallations([]RuntimeInstallation{{
+		ID: "default", SavePath: root, ServerPath: root, UGCPath: ugcPath,
+	}})
+	if err != nil || len(values) != 1 {
+		t.Fatalf("installations=%#v err=%v", values, err)
+	}
+	expected := filepath.Join(ugcPath, "content", "322330")
+	if values[0].WorkshopContentPath != expected {
+		t.Fatalf("workshop content path=%q expected=%q", values[0].WorkshopContentPath, expected)
+	}
+}
+
 func TestAgentReusesRuntimeControlPerInstallation(t *testing.T) {
 	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}}
 	agent, _ := newShardOperationAgent(t, runtimeControl)

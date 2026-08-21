@@ -190,7 +190,7 @@ func (m *Manager) buildMutations(ctx context.Context, plan Plan) ([]Mutation, er
 	for _, installationPlan := range plan.Installations {
 		installation := m.installations[installationPlan.InstallationID]
 		for _, mod := range installationPlan.Mods {
-			target := filepath.Join(installation.ServerPath, "mods", "workshop-"+mod.WorkshopID)
+			target := installationModTarget(installation, mod.WorkshopID)
 			hadOriginal, err := inspectTarget(target, true)
 			if err != nil {
 				return nil, err
@@ -204,22 +204,24 @@ func (m *Manager) buildMutations(ctx context.Context, plan Plan) ([]Mutation, er
 				WorkshopID: mod.WorkshopID, TreeSHA256: mod.TreeSHA256, HadOriginal: hadOriginal, OriginalSHA256: originalSHA,
 			})
 		}
-		setupTarget := filepath.Join(installation.ServerPath, "mods", "dedicated_server_mods_setup.lua")
-		setupOriginal, err := inspectTarget(setupTarget, false)
-		if err != nil {
-			return nil, err
+		if installation.WorkshopContentPath == "" {
+			setupTarget := filepath.Join(installation.ServerPath, "mods", "dedicated_server_mods_setup.lua")
+			setupOriginal, err := inspectTarget(setupTarget, false)
+			if err != nil {
+				return nil, err
+			}
+			setupOriginalSHA, err := targetDigest(ctx, setupTarget, false, setupOriginal)
+			if err != nil {
+				return nil, err
+			}
+			if setupOriginalSHA != installationPlan.SetupBaseSHA256 {
+				return nil, ErrConflict
+			}
+			mutations = append(mutations, Mutation{
+				Kind: MutationSetup, InstallationID: installationPlan.InstallationID,
+				ConfigSHA256: shaBytes(installationPlan.ManagedSetup), HadOriginal: setupOriginal, OriginalSHA256: setupOriginalSHA,
+			})
 		}
-		setupOriginalSHA, err := targetDigest(ctx, setupTarget, false, setupOriginal)
-		if err != nil {
-			return nil, err
-		}
-		if setupOriginalSHA != installationPlan.SetupBaseSHA256 {
-			return nil, ErrConflict
-		}
-		mutations = append(mutations, Mutation{
-			Kind: MutationSetup, InstallationID: installationPlan.InstallationID,
-			ConfigSHA256: shaBytes(installationPlan.ManagedSetup), HadOriginal: setupOriginal, OriginalSHA256: setupOriginalSHA,
-		})
 		for _, shard := range installationPlan.Shards {
 			target := filepath.Join(installation.SavePath, shard.RoomDirectory, shard.WorldDirectory, "modoverrides.lua")
 			hadOriginal, err := inspectTarget(target, false)
@@ -336,7 +338,7 @@ func (m *Manager) publishMutation(journal Journal, mutation Mutation) error {
 		if currentSHA != mutation.OriginalSHA256 {
 			return ErrConflict
 		}
-		if err := os.Rename(target, backup); err != nil {
+		if err := renameMutationTarget(target, backup, mutation.Kind == MutationMod); err != nil {
 			return err
 		}
 		targetExists = false
@@ -347,7 +349,7 @@ func (m *Manager) publishMutation(journal Journal, mutation Mutation) error {
 	if targetExists {
 		return ErrConflict
 	}
-	if err := os.Rename(stage, target); err != nil {
+	if err := renameMutationTarget(stage, target, mutation.Kind == MutationMod); err != nil {
 		return err
 	}
 	if mutation.Kind == MutationMod {
@@ -390,7 +392,7 @@ func (m *Manager) rollbackJournal(ctx context.Context, journal *Journal) error {
 				result = errors.Join(result, err)
 				continue
 			}
-			if err := os.Rename(backup, target); err != nil {
+			if err := renameMutationTarget(backup, target, mutation.Kind == MutationMod); err != nil {
 				result = errors.Join(result, err)
 				continue
 			}
@@ -460,8 +462,8 @@ func (m *Manager) mutationPaths(journal Journal, mutation Mutation) (string, str
 	suffix := fmt.Sprintf("%s-%03d", journal.OperationID, mutation.Index)
 	var target, stage, backup string
 	if mutation.Kind == MutationMod && validWorkshopID(mutation.WorkshopID) && validSHA256(mutation.TreeSHA256) {
-		parent := filepath.Join(installation.ServerPath, "mods")
-		target = filepath.Join(parent, "workshop-"+mutation.WorkshopID)
+		parent := filepath.Dir(installationModTarget(installation, mutation.WorkshopID))
+		target = installationModTarget(installation, mutation.WorkshopID)
 		stage = filepath.Join(parent, ".dst-admin-mod-stage-"+suffix)
 		backup = filepath.Join(parent, ".dst-admin-mod-backup-"+suffix)
 	} else if mutation.Kind == MutationSetup && validSHA256(mutation.ConfigSHA256) {
@@ -478,7 +480,9 @@ func (m *Manager) mutationPaths(journal Journal, mutation Mutation) (string, str
 		return "", "", "", ErrIntegrity
 	}
 	trustedRoot := installation.SavePath
-	if mutation.Kind == MutationMod || mutation.Kind == MutationSetup {
+	if mutation.Kind == MutationMod && installation.WorkshopContentPath != "" {
+		trustedRoot = installation.WorkshopContentPath
+	} else if mutation.Kind == MutationMod || mutation.Kind == MutationSetup {
 		trustedRoot = installation.ServerPath
 	}
 	for _, path := range []string{target, stage, backup} {
@@ -487,6 +491,13 @@ func (m *Manager) mutationPaths(journal Journal, mutation Mutation) (string, str
 		}
 	}
 	return target, stage, backup, nil
+}
+
+func installationModTarget(installation TrustedInstallation, workshopID string) string {
+	if installation.WorkshopContentPath != "" {
+		return filepath.Join(installation.WorkshopContentPath, workshopID)
+	}
+	return filepath.Join(installation.ServerPath, "mods", "workshop-"+workshopID)
 }
 
 func inspectTarget(path string, directory bool) (bool, error) {
@@ -546,6 +557,35 @@ func removeTarget(path string, directory bool) error {
 		return os.RemoveAll(path)
 	}
 	return os.Remove(path)
+}
+
+func renameMutationTarget(source, destination string, directory bool) error {
+	if !directory {
+		return os.Rename(source, destination)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		return err
+	}
+	originalMode := info.Mode().Perm()
+	modeChanged := originalMode&0o200 == 0
+	if modeChanged {
+		// macOS refuses to rename a read-only directory even when its parent is
+		// writable. Keep the writable window limited to the atomic rename.
+		if err := os.Chmod(source, originalMode|0o200); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(source, destination); err != nil {
+		if modeChanged {
+			return errors.Join(err, os.Chmod(source, originalMode))
+		}
+		return err
+	}
+	if modeChanged {
+		return os.Chmod(destination, originalMode)
+	}
+	return nil
 }
 
 func makeTreeWritable(root string) error {
