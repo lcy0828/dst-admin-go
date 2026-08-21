@@ -342,6 +342,54 @@ func (s *Service) RunTask(roomID, taskID string, trigger Trigger) (jobs.Job, err
 	return job, nil
 }
 
+// RunScheduledTask keeps the high-frequency built-in player collector out of
+// durable Job and automation-run history. User-created schedules and manual
+// runs retain the normal audited execution path.
+func (s *Service) RunScheduledTask(roomID, taskID string) error {
+	task, err := s.store.Task(roomID, taskID)
+	if err != nil {
+		return err
+	}
+	if !isDefaultPlayerRefresh(task) {
+		_, err = s.RunTask(roomID, taskID, TriggerSchedule)
+		return err
+	}
+	if preflight, ok := s.executor.(scheduledPreflight); ok {
+		shouldRun, preflightErr := preflight.ShouldRunScheduled(context.Background(), task)
+		if preflightErr != nil {
+			return preflightErr
+		}
+		if !shouldRun {
+			return ErrNoRunningWorlds
+		}
+	}
+	s.activeMu.Lock()
+	if s.active[task.ID] {
+		s.activeMu.Unlock()
+		return ErrTaskRunning
+	}
+	s.active[task.ID] = true
+	s.activeMu.Unlock()
+	defer func() {
+		s.activeMu.Lock()
+		delete(s.active, task.ID)
+		s.activeMu.Unlock()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(task.TimeoutSeconds)*time.Second)
+	defer cancel()
+	_, executeErr := s.executor.Execute(ctx, task, "")
+	status := RunSucceeded
+	if executeErr != nil {
+		status = RunFailed
+		if errors.Is(executeErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			status = RunCanceled
+		}
+	}
+	recordErr := s.store.RecordTaskExecution(task.ID, status, s.now().UTC())
+	return errors.Join(executeErr, recordErr)
+}
+
 func (s *Service) Export(roomID string) (Document, error) {
 	groups, err := s.Groups(roomID)
 	if err != nil {

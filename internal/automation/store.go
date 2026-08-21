@@ -309,6 +309,19 @@ func (s *Store) FinishRun(runID string, status RunStatus, output, errorMessage s
 	return tx.Commit().Error
 }
 
+func (s *Store) RecordTaskExecution(taskID string, status RunStatus, finishedAt time.Time) error {
+	result := s.db.Table(s.tasksTable).Where("id = ?", taskID).Updates(map[string]interface{}{
+		"last_run_at": finishedAt.UTC(), "last_status": string(status), "last_job_id": "",
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrTaskNotFound
+	}
+	return nil
+}
+
 func (s *Store) RecoverRuns() error {
 	now := s.now().UTC()
 	return s.db.Table(s.runsTable).Where("status IN (?)", []string{string(RunQueued), string(RunRunning)}).Updates(map[string]interface{}{

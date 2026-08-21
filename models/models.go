@@ -19,9 +19,9 @@ import (
 
 const (
 	CurrentMigrationVersion = "20260812-v2"
-	fileMaxOpenConnections  = 8
-	fileMaxIdleConnections  = 4
-	busyTimeoutMilliseconds = 5000
+	fileMaxOpenConnections  = 4
+	fileMaxIdleConnections  = 2
+	busyTimeoutMilliseconds = 15000
 )
 
 var (
@@ -142,6 +142,10 @@ func sqliteDSN(path string, memory bool) (string, error) {
 		"_busy_timeout": []string{fmt.Sprint(busyTimeoutMilliseconds)},
 		"_foreign_keys": []string{"on"},
 		"_synchronous":  []string{"NORMAL"},
+		// All application transactions write state. Acquiring the reserved write
+		// lock at BEGIN lets SQLite's busy handler wait instead of failing while
+		// a deferred transaction is being promoted from read to write.
+		"_txlock": []string{"immediate"},
 	}
 	if memory {
 		query.Set("cache", "shared")

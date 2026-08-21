@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 
 	"dont/internal/rooms"
@@ -97,7 +98,12 @@ func (s *Scheduler) build() (*cron.Cron, error) {
 		}
 		taskID, roomID := task.ID, task.RoomID
 		spec := "CRON_TZ=" + task.Timezone + " " + task.Schedule
-		if _, err := engine.AddFunc(spec, func() { _, _ = s.service.RunTask(roomID, taskID, TriggerSchedule) }); err != nil {
+		if _, err := engine.AddFunc(spec, func() {
+			if runErr := s.service.RunScheduledTask(roomID, taskID); runErr != nil &&
+				!errors.Is(runErr, ErrNoRunningWorlds) && !errors.Is(runErr, ErrTaskRunning) {
+				log.Printf("[AutomationScheduler] room=%s task=%s: %v", roomID, taskID, runErr)
+			}
+		}); err != nil {
 			return nil, fmt.Errorf("schedule automation task %s: %w", task.ID, err)
 		}
 	}

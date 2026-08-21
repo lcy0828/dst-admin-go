@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -67,5 +68,20 @@ func TestOpenSQLiteKeepsMemoryDatabaseOnOneConnection(t *testing.T) {
 	}
 	if status.JournalMode != "memory" || status.MaxOpenConnections != 1 || !status.ForeignKeys {
 		t.Fatalf("memory database status = %#v", status)
+	}
+}
+
+func TestSQLiteDSNAcquiresWriteLockAtTransactionStart(t *testing.T) {
+	dsn, err := sqliteDSN(filepath.Join(t.TempDir(), "state.db"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	if query.Get("_txlock") != "immediate" || query.Get("_busy_timeout") != fmt.Sprint(busyTimeoutMilliseconds) {
+		t.Fatalf("sqlite DSN query = %#v", query)
 	}
 }

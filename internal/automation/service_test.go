@@ -295,6 +295,33 @@ func TestScheduledPlayerRefreshSkipsBeforePersistingRunOrJob(t *testing.T) {
 	}
 }
 
+func TestDefaultScheduledPlayerRefreshUsesLightweightExecution(t *testing.T) {
+	executor := &automationPreflightExecutor{shouldRun: true}
+	service, store, jobService := newAutomationTestService(t, executor)
+	task, _, err := service.EnsureDefaultPlayerRefresh("room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RunScheduledTask("room", task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if executor.checks != 1 || executor.attempts != 1 {
+		t.Fatalf("preflight checks=%d execute attempts=%d", executor.checks, executor.attempts)
+	}
+	runs, err := service.Runs("room", RunFilter{Limit: 25})
+	if err != nil || runs.Total != 0 {
+		t.Fatalf("system refresh persisted automation runs: %#v err=%v", runs, err)
+	}
+	jobsList, total, err := jobService.List(jobs.ListFilter{Limit: 25})
+	if err != nil || total != 0 || len(jobsList) != 0 {
+		t.Fatalf("system refresh persisted jobs: total=%d jobs=%#v err=%v", total, jobsList, err)
+	}
+	updated, err := store.Task("room", task.ID)
+	if err != nil || updated.LastRunAt == nil || updated.LastStatus != RunSucceeded || updated.LastJobID != "" {
+		t.Fatalf("system refresh task state=%#v err=%v", updated, err)
+	}
+}
+
 func TestEnsureDefaultPlayerRefreshReactivatesBuiltInTaskAndGroup(t *testing.T) {
 	service, store, _ := newAutomationTestService(t, &automationTestExecutor{})
 	task, _, err := service.EnsureDefaultPlayerRefresh("room")
