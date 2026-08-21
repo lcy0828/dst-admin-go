@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"dont/internal/backups"
 	"dont/internal/console"
@@ -62,6 +63,10 @@ type WorldStateRefresher interface {
 	RefreshWorld(context.Context, string, string) (worldstate.RefreshResult, error)
 }
 
+type NotificationSender interface {
+	SendAutomation(context.Context, string, string, string) (int, int, int, error)
+}
+
 type DomainExecutor struct {
 	roomActions    RoomActionPlanner
 	backups        BackupExecutor
@@ -69,9 +74,18 @@ type DomainExecutor struct {
 	players        PlayerRefresher
 	structuredLogs StructuredLogRefresher
 	worldStates    WorldStateRefresher
+	notifications  NotificationSender
 	audit          interface {
 		RecordAction(runtimeaudit.ActionRequest) error
 	}
+}
+
+func (e *DomainExecutor) ConfigureNotifications(sender NotificationSender) error {
+	if sender == nil {
+		return errors.New("automation notification sender is required")
+	}
+	e.notifications = sender
+	return nil
 }
 
 func NewDomainExecutor(roomActions RoomActionPlanner, backupService BackupExecutor, commands CommandExecutor, playerService PlayerRefresher, logs StructuredLogRefresher, states WorldStateRefresher, audits ...interface {
@@ -103,6 +117,15 @@ func (e *DomainExecutor) Validate(task Task) error {
 	case ActionBackupPrune:
 		if _, err := integerParameter(task.Parameters, "keep", 1, 100); err != nil {
 			return &FieldError{Fields: map[string]string{"parameters.keep": "保留数量必须在 1-100 之间"}}
+		}
+	case ActionNotificationSend:
+		message, ok := task.Parameters["message"].(string)
+		message = strings.TrimSpace(message)
+		if !ok || message == "" || !utf8.ValidString(message) || utf8.RuneCountInString(message) > 500 || strings.ContainsRune(message, '\x00') {
+			return &FieldError{Fields: map[string]string{"parameters.message": "游戏通知必须是 1-500 个字符的有效文本"}}
+		}
+		if e.notifications == nil {
+			return ErrDependencies
 		}
 	case ActionCommandExecute:
 		if len(task.WorldIDs) != 1 {
@@ -166,6 +189,17 @@ func (e *DomainExecutor) Execute(ctx context.Context, task Task, jobID string) (
 			return ExecutionResult{}, err
 		}
 		return ExecutionResult{Message: fmt.Sprintf("已清理 %d 个旧快照", removed)}, nil
+	case ActionNotificationSend:
+		message := strings.TrimSpace(task.Parameters["message"].(string))
+		success, failure, skipped, err := e.notifications.SendAutomation(ctx, task.RoomID, message, jobID)
+		result := ExecutionResult{Message: fmt.Sprintf("游戏通知：成功 %d，失败 %d，跳过 %d", success, failure, skipped)}
+		if err != nil {
+			return result, err
+		}
+		if failure > 0 {
+			return result, fmt.Errorf("%d 个分片未能收到游戏通知", failure)
+		}
+		return result, nil
 	case ActionCommandExecute:
 		commandID := strings.TrimSpace(task.Parameters["commandId"].(string))
 		arguments, _ := task.Parameters["arguments"].(map[string]interface{})
@@ -250,6 +284,9 @@ func (e *DomainExecutor) executeRoomAction(ctx context.Context, task Task, jobID
 			log.Printf("[RuntimeAudit] record automation action room=%s action=%s: %v", task.RoomID, action, err)
 		}
 	}
+	ctx = shards.WithOperationAudit(ctx, shards.OperationAuditMetadata{
+		JobID: jobID, Source: string(runtimeaudit.SourceAutomation),
+	})
 	targets, runner, err := e.roomActions.Plan(action, task.RoomID, task.WorldIDs)
 	if err != nil {
 		return ExecutionResult{}, err
@@ -362,6 +399,7 @@ func ActionDefinitions() []ActionDefinition {
 		{ID: ActionBackupCreate, Name: "创建快照", Description: "创建一致性房间快照", Parameters: []string{"name"}},
 		{ID: ActionBackupPrune, Name: "清理快照", Description: "按保留数量清理旧快照", Parameters: []string{"keep"}},
 		{ID: ActionCommandExecute, Name: "执行内建命令", Description: "执行低或中风险参数化命令", NeedsWorld: true, Parameters: []string{"commandId", "arguments"}},
+		{ID: ActionNotificationSend, Name: "发送游戏通知", Description: "向房间内当前运行中的所有分片发送游戏内消息", Parameters: []string{"message"}},
 		{ID: ActionPlayerRefresh, Name: "刷新玩家", Description: "采样分片玩家状态", Parameters: []string{}},
 		{ID: ActionStructuredLogRefresh, Name: "刷新结构化日志", Description: "刷新分片结构化日志快照", Parameters: []string{}},
 		{ID: ActionWorldStateRefresh, Name: "刷新世界状态", Description: "采样分片世界状态", Parameters: []string{}},

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"dont/internal/agents"
 	"dont/internal/operationlease"
 	"dont/internal/rooms"
 	"dont/internal/topology"
@@ -56,27 +57,40 @@ func (p *cpuLifecyclePlacement) RecordCPUFailure(_ string, _ string, cause error
 	return p.allocation, nil
 }
 
-type cpuLifecycleLease struct{}
-
-func (cpuLifecycleLease) Acquire(context.Context, string, string, time.Duration) (operationlease.Lease, error) {
-	return operationlease.Lease{LeaseID: "lease", FencingToken: 1, ExpiresAt: time.Now().UTC().Add(time.Minute)}, nil
+type cpuLifecycleLease struct {
+	acquires *int
+	releases *int
 }
 
-func (cpuLifecycleLease) Release(operationlease.Lease) error { return nil }
+func (l cpuLifecycleLease) Acquire(_ context.Context, roomID, operationKey string, _ time.Duration) (operationlease.Lease, error) {
+	if l.acquires != nil {
+		*l.acquires++
+	}
+	return operationlease.Lease{RoomID: roomID, OperationKey: operationKey, LeaseID: "lease", FencingToken: 1, ExpiresAt: time.Now().UTC().Add(time.Minute)}, nil
+}
+
+func (l cpuLifecycleLease) Release(operationlease.Lease) error {
+	if l.releases != nil {
+		*l.releases++
+	}
+	return nil
+}
 
 type cpuLifecycleDriver struct {
 	Driver
-	events          []string
-	applyErr        error
-	releaseErr      error
-	lifecycleErr    error
-	lifecycleStatus *shared.ShardRuntimeStatus
-	status          shared.ShardRuntimeStatus
-	statusErr       error
-	stopStatus      *shared.ShardRuntimeStatus
-	stopAtDeadline  bool
-	releaseEntryErr error
-	cpuCap          bool
+	events           []string
+	applyErr         error
+	releaseErr       error
+	lifecycleErr     error
+	lifecycleStatus  *shared.ShardRuntimeStatus
+	status           shared.ShardRuntimeStatus
+	statusErr        error
+	stopStatus       *shared.ShardRuntimeStatus
+	stopAtDeadline   bool
+	releaseEntryErr  error
+	cpuCap           bool
+	consoleOperation Operation
+	consoleRequest   shared.RuntimeConsoleRequest
 }
 
 func (d *cpuLifecycleDriver) Kind() Kind { return KindNative }
@@ -138,6 +152,44 @@ func (d *cpuLifecycleDriver) ApplyCPU(ctx context.Context, _ Target, _ Operation
 }
 func (d *cpuLifecycleDriver) ObserveCPU(context.Context, Target, shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error) {
 	return shared.RuntimeCPUResult{}, nil
+}
+
+func (d *cpuLifecycleDriver) SendConsole(_ context.Context, _ Target, operation Operation, request shared.RuntimeConsoleRequest, _ time.Duration) (shared.RuntimeOperationResult, error) {
+	d.consoleOperation, d.consoleRequest = operation, request
+	return shared.RuntimeOperationResult{Message: "sent"}, nil
+}
+
+func TestRemoteConsoleReusesBorrowedRoomLease(t *testing.T) {
+	placement := &cpuLifecyclePlacement{placement: topology.ExecutionPlacement{
+		Room: rooms.Room{DirectoryName: "Cluster_1"}, World: rooms.World{DirectoryName: "Master"},
+		Revision: "revision-1", AppliedTargetID: "agent:node-a",
+		Target: agents.RuntimeTarget{ID: "agent:node-a", AgentID: "node-a", Config: agents.RuntimeConfig{InstallationID: "primary"}},
+	}}
+	acquires, releases := 0, 0
+	leases := cpuLifecycleLease{acquires: &acquires, releases: &releases}
+	driver := &cpuLifecycleDriver{}
+	router, err := NewRouter(placement, leases, driver, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	borrowed := operationlease.Lease{
+		RoomID: "room-1", OperationKey: "mod.activate:job-1", LeaseID: "borrowed-lease",
+		FencingToken: 7, ExpiresAt: time.Now().UTC().Add(time.Minute),
+	}
+	ctx := operationlease.WithBorrowedLeases(context.Background(), borrowed)
+	if _, err := router.SendID(ctx, "room-1", "world-1", shared.RuntimeConsoleRequest{Mode: shared.ConsoleModeManaged, Command: `c_announce("test")`}); err != nil {
+		t.Fatal(err)
+	}
+	if acquires != 0 || releases != 0 || driver.consoleOperation.Key == "" || driver.consoleOperation.LeaseID != borrowed.LeaseID || driver.consoleOperation.FencingToken != borrowed.FencingToken {
+		t.Fatalf("acquires=%d releases=%d operation=%#v", acquires, releases, driver.consoleOperation)
+	}
+
+	if _, err := router.SendID(context.Background(), "room-1", "world-1", shared.RuntimeConsoleRequest{Mode: shared.ConsoleModeManaged, Command: `c_announce("test")`}); err != nil {
+		t.Fatal(err)
+	}
+	if acquires != 1 || releases != 1 {
+		t.Fatalf("ordinary send acquires=%d releases=%d", acquires, releases)
+	}
 }
 
 func newCPULifecycleRouter(t *testing.T, applyErr error) (*Router, *cpuLifecyclePlacement, *cpuLifecycleDriver) {

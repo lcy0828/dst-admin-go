@@ -322,6 +322,7 @@ type snapshotCoordinator struct {
 	previewPlan  *modpublication.Plan
 	published    []modpublication.PublishRequest
 	recoveredIDs []string
+	recoveryJobs []string
 }
 
 func (c *snapshotCoordinator) Preview(ctx context.Context, roomID string) (modpublication.Plan, error) {
@@ -365,8 +366,11 @@ func (c *snapshotCoordinator) Recover(context.Context) ([]modpublication.Publica
 	return nil, nil
 }
 
-func (c *snapshotCoordinator) RecoverOne(_ context.Context, id string) (modpublication.Publication, error) {
+func (c *snapshotCoordinator) RecoverOne(_ context.Context, id string, sourceJobIDs ...string) (modpublication.Publication, error) {
 	c.recoveredIDs = append(c.recoveredIDs, id)
+	if len(sourceJobIDs) > 0 {
+		c.recoveryJobs = append(c.recoveryJobs, sourceJobIDs[0])
+	}
 	value := c.current
 	value.Status = modpublication.StatusSucceeded
 	return value, nil

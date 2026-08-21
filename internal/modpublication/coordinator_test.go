@@ -130,9 +130,10 @@ func (f *fakeRuntime) has(action, target string) bool {
 }
 
 type fakeLease struct {
-	mu     sync.Mutex
-	next   uint64
-	active map[string]Fence
+	mu       sync.Mutex
+	next     uint64
+	active   map[string]Fence
+	renewals int
 }
 
 func (f *fakeLease) Acquire(_ context.Context, roomID, owner string, ttl time.Duration) (Fence, error) {
@@ -156,7 +157,14 @@ func (f *fakeLease) Renew(_ context.Context, fence Fence, ttl time.Duration) (Fe
 	}
 	current.ExpiresAt = time.Now().Add(ttl)
 	f.active[fence.RoomID] = current
+	f.renewals++
 	return current, nil
+}
+
+func (f *fakeLease) renewalCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.renewals
 }
 
 func (f *fakeLease) Release(fence Fence) error {

@@ -19,6 +19,11 @@ type Coordinator struct {
 	leaseTTL               time.Duration
 	now                    func() time.Time
 	activationPollInterval time.Duration
+	notifier               LifecycleNotifier
+}
+
+func (c *Coordinator) ConfigureNotifier(notifier LifecycleNotifier) {
+	c.notifier = notifier
 }
 
 func NewCoordinator(planner *Planner, runtime Runtime, leases Lease, backups Backup, store *Store, leaseTTL time.Duration, activations ...ActivationRuntime) (*Coordinator, error) {
@@ -230,7 +235,7 @@ func (c *Coordinator) completeAndActivate(ctx context.Context, publication Publi
 	if err != nil || completed.Activation.Policy.Mode != ActivationModeRestart {
 		return completed, err
 	}
-	return c.activateCommitted(ctx, completed, fences, completed.Activation.Policy)
+	return c.activateCommitted(ctx, completed, fences, completed.Activation.Policy, completed.SourceJobID)
 }
 
 func (c *Coordinator) completeCommitted(ctx context.Context, publication Publication, fences []Fence) (Publication, error) {

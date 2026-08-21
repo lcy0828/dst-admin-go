@@ -11,6 +11,7 @@ import (
 
 	"dont/internal/operationlease"
 	"dont/internal/roomops"
+	"dont/internal/runtimeaudit"
 	"dont/internal/runtimedriver"
 	"dont/internal/shards"
 )
@@ -26,6 +27,7 @@ type ReleaseCoordinator struct {
 	now           func() time.Time
 	pollInterval  time.Duration
 	renewInterval time.Duration
+	notifier      LifecycleNotifier
 }
 
 func NewReleaseCoordinator(planner *ReleasePlanner, runtime ReleaseRuntime, leases ReleaseLeaseService, backups ReleaseProtectionService, store *ReleaseStore) (*ReleaseCoordinator, error) {
@@ -36,6 +38,10 @@ func NewReleaseCoordinator(planner *ReleasePlanner, runtime ReleaseRuntime, leas
 		planner: planner, runtime: runtime, leases: leases, backups: backups, store: store,
 		now: time.Now, pollInterval: time.Second, renewInterval: time.Minute,
 	}, nil
+}
+
+func (c *ReleaseCoordinator) ConfigureNotifier(notifier LifecycleNotifier) {
+	c.notifier = notifier
 }
 
 func (c *ReleaseCoordinator) Preview(ctx context.Context, request ReleasePreviewRequest) (ReleasePlan, error) {
@@ -68,6 +74,9 @@ func (c *ReleaseCoordinator) Publish(ctx context.Context, request ReleasePublish
 		if fresh.PlanHash != request.Plan.PlanHash {
 			return Release{}, ErrReleasePlanChanged
 		}
+		if err := c.notifyBeforeRelease(runContext, request.Plan, request.SourceJobID); err != nil {
+			return Release{}, err
+		}
 		now := c.now().UTC()
 		value := Release{
 			ID: request.ID, SourceJobID: request.SourceJobID, Stage: ReleaseStagePreviewed, Plan: request.Plan,
@@ -97,13 +106,17 @@ func (c *ReleaseCoordinator) Publish(ctx context.Context, request ReleasePublish
 	})
 }
 
-func (c *ReleaseCoordinator) Retry(ctx context.Context, id string) (Release, error) {
+func (c *ReleaseCoordinator) Retry(ctx context.Context, id string, sourceJobIDs ...string) (Release, error) {
 	value, err := c.store.Get(strings.TrimSpace(id))
 	if err != nil {
 		return Release{}, err
 	}
 	if value.Stage != ReleaseStageFailed && value.Stage != ReleaseStageRecoveryRequired {
 		return value, ErrReleaseConflict
+	}
+	notificationJobID := value.SourceJobID
+	if len(sourceJobIDs) > 0 && strings.TrimSpace(sourceJobIDs[0]) != "" {
+		notificationJobID = strings.TrimSpace(sourceJobIDs[0])
 	}
 	return c.withReleaseLocks(ctx, value.Plan, value.ID+":retry", func(runContext context.Context, fences *releaseFenceSet) (Release, error) {
 		value, err = c.store.Get(strings.TrimSpace(id))
@@ -120,6 +133,9 @@ func (c *ReleaseCoordinator) Retry(ctx context.Context, id string) (Release, err
 		if !fresh.Ready || !sameReleaseStructure(value.Plan, fresh) {
 			return c.failRelease(value, "TOPOLOGY_CHANGED", ErrReleaseTopologyChanged, ReleaseStageRecoveryRequired)
 		}
+		if err := c.notifyBeforeRelease(runContext, value.Plan, notificationJobID); err != nil {
+			return value, err
+		}
 		value.ErrorCode, value.ErrorMessage, value.FinishedAt, value.UpdatedAt = "", "", nil, c.now().UTC()
 		if saved, saveErr := c.store.Save(value); saveErr == nil {
 			value = saved
@@ -128,6 +144,30 @@ func (c *ReleaseCoordinator) Retry(ctx context.Context, id string) (Release, err
 		}
 		return c.execute(runContext, value, fences, true)
 	})
+}
+
+func (c *ReleaseCoordinator) notifyBeforeRelease(ctx context.Context, plan ReleasePlan, jobID string) error {
+	if c.notifier == nil || !plan.UpdateRequired {
+		return nil
+	}
+	roomIDs := make([]string, 0, len(plan.AffectedRoomIDs))
+	seen := make(map[string]bool, len(plan.AffectedRoomIDs))
+	for _, installation := range plan.Installations {
+		for _, shard := range installation.Shards {
+			if shard.WasRunning && !seen[shard.RoomID] {
+				seen[shard.RoomID] = true
+				roomIDs = append(roomIDs, shard.RoomID)
+			}
+		}
+	}
+	if len(roomIDs) == 0 {
+		return nil
+	}
+	action := string(shards.ActionStop)
+	if plan.Policy.RestartRunning {
+		action = string(shards.ActionRestart)
+	}
+	return c.notifier.BeforeOperations(ctx, roomIDs, action, string(runtimeaudit.SourceGameUpdate), jobID)
 }
 
 func (c *ReleaseCoordinator) execute(ctx context.Context, value Release, fences *releaseFenceSet, recovery bool) (Release, error) {
@@ -530,7 +570,8 @@ func (c *ReleaseCoordinator) withReleaseLocks(ctx context.Context, plan ReleaseP
 		fences.values = append(fences.values, lease)
 	}
 	defer fences.releaseAll(c.leases)
-	runContext, cancel := context.WithCancel(ctx)
+	leaseContext := operationlease.WithBorrowedLeaseProvider(ctx, fences.forRoom)
+	runContext, cancel := context.WithCancel(leaseContext)
 	done := make(chan struct{})
 	renewed := make(chan error, 1)
 	go func() {

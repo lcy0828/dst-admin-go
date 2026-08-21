@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -193,6 +194,8 @@ func newReleaseCoordinatorFixture(t *testing.T, confirmation ReleaseLoadConfirma
 
 func TestReleaseCoordinatorOrdersStopUpdateAndRestart(t *testing.T) {
 	fixture := newReleaseCoordinatorFixture(t, ReleaseLoadConfirmationNone)
+	notifier := &updateNotifier{}
+	fixture.coordinator.ConfigureNotifier(notifier)
 	value, err := fixture.coordinator.Publish(context.Background(), ReleasePublishRequest{ID: "release-order", Plan: fixture.plan})
 	if err != nil || value.Stage != ReleaseStageSucceeded {
 		t.Fatalf("release=%#v error=%v", value, err)
@@ -206,6 +209,10 @@ func TestReleaseCoordinatorOrdersStopUpdateAndRestart(t *testing.T) {
 		if event == "start:room-b\x00Archive" {
 			t.Fatalf("originally stopped shard was started: %v", events)
 		}
+	}
+	if len(notifier.calls) != 1 || notifier.calls[0].source != "game_update" || notifier.calls[0].action != "restart" ||
+		!reflect.DeepEqual(notifier.calls[0].roomIDs, []string{"room-a", "room-b"}) {
+		t.Fatalf("notifier calls=%#v", notifier.calls)
 	}
 }
 
@@ -251,13 +258,18 @@ func TestReleaseCoordinatorRetrySkipsVerifiedInstallation(t *testing.T) {
 	if _, err := fixture.coordinator.Publish(context.Background(), ReleasePublishRequest{ID: "release-retry", Plan: fixture.plan}); !errors.Is(err, ErrReleaseRecoveryNeeded) {
 		t.Fatalf("first publish error=%v", err)
 	}
+	notifier := &updateNotifier{}
+	fixture.coordinator.ConfigureNotifier(notifier)
 	delete(fixture.runtime.updateErrors, failedKey)
-	value, err := fixture.coordinator.Retry(context.Background(), "release-retry")
+	value, err := fixture.coordinator.Retry(context.Background(), "release-retry", "retry-job")
 	if err != nil || value.Stage != ReleaseStageSucceeded {
 		t.Fatalf("retry release=%#v error=%v", value, err)
 	}
 	if fixture.runtime.updateCounts[firstKey] != 1 || fixture.runtime.updateCounts[failedKey] != 2 {
 		t.Fatalf("update counts=%v", fixture.runtime.updateCounts)
+	}
+	if len(notifier.calls) != 1 || notifier.calls[0].jobID != "retry-job" {
+		t.Fatalf("retry notifier calls=%#v", notifier.calls)
 	}
 }
 

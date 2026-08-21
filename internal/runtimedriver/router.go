@@ -180,11 +180,15 @@ func (r *Router) SendID(ctx context.Context, roomID, worldID string, request sha
 	}
 	operation := Operation{ID: newOperationID()}
 	if target.TargetID != "local" {
-		lease, leaseErr := r.leases.Acquire(ctx, roomID, "runtime.console.send:"+worldID, r.leaseTTL)
-		if leaseErr != nil {
-			return shared.RuntimeOperationResult{}, leaseErr
+		lease, borrowed := operationlease.BorrowedLease(ctx, roomID)
+		if !borrowed || lease.ExpiresAt.Before(time.Now().UTC()) {
+			var leaseErr error
+			lease, leaseErr = r.leases.Acquire(ctx, roomID, "runtime.console.send:"+worldID, r.leaseTTL)
+			if leaseErr != nil {
+				return shared.RuntimeOperationResult{}, leaseErr
+			}
+			defer r.leases.Release(lease)
 		}
-		defer r.leases.Release(lease)
 		expires := lease.ExpiresAt.UTC()
 		operation.Key, operation.LeaseID, operation.FencingToken, operation.LeaseExpiresAt = operation.ID, lease.LeaseID, lease.FencingToken, &expires
 	}

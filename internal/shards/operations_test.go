@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -125,6 +126,16 @@ type fakeOperationObserver struct{ items []OperationAudit }
 func (observer *fakeOperationObserver) ObserveOperation(_ context.Context, audit OperationAudit) error {
 	observer.items = append(observer.items, audit)
 	return nil
+}
+
+type fakeOperationNotifier struct {
+	calls []string
+	err   error
+}
+
+func (notifier *fakeOperationNotifier) BeforeOperation(_ context.Context, roomID, action, source, jobID string) error {
+	notifier.calls = append(notifier.calls, roomID+":"+action+":"+source+":"+jobID)
+	return notifier.err
 }
 
 func (service *fakeLeaseService) Acquire(context.Context, string, string, time.Duration) (operationlease.Lease, error) {
@@ -303,6 +314,47 @@ func TestStartOrdersMasterFirstAndPreservesUnderscoreRoomName(t *testing.T) {
 	}
 	if len(results) != 2 || results[0].Status != jobs.StatusSucceeded || results[1].Status != jobs.StatusSucceeded {
 		t.Fatalf("results = %#v", results)
+	}
+}
+
+func TestStopRunsNotificationHookBeforeLifecycleControl(t *testing.T) {
+	control := &fakeControl{
+		running: map[string]bool{"summer_2026/Master": true, "summer_2026/Caves": true},
+		fail:    map[string]error{},
+	}
+	operations := testOperations(control)
+	notifier := &fakeOperationNotifier{}
+	operations.ConfigureNotifier(notifier)
+	_, runner, err := operations.Plan(ActionStop, rooms.EncodeID("summer_2026"), []string{rooms.EncodeID("Master")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithOperationAudit(context.Background(), OperationAuditMetadata{JobID: "job-stop"})
+	if err := runner(ctx, func(jobs.TargetResult) {}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{rooms.EncodeID("summer_2026") + ":stop::job-stop"}
+	if !reflect.DeepEqual(notifier.calls, want) || fmt.Sprint(control.calls) != "[stop:Master]" {
+		t.Fatalf("notifier=%v control=%v", notifier.calls, control.calls)
+	}
+}
+
+func TestNotificationCountdownCancellationPreventsLifecycleControl(t *testing.T) {
+	control := &fakeControl{
+		running: map[string]bool{"summer_2026/Master": true}, fail: map[string]error{},
+	}
+	operations := testOperations(control)
+	operations.ConfigureNotifier(&fakeOperationNotifier{err: context.Canceled})
+	_, runner, err := operations.Plan(ActionStop, rooms.EncodeID("summer_2026"), []string{rooms.EncodeID("Master")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []jobs.TargetResult
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(control.calls) != 0 || len(results) != 1 || results[0].Status != jobs.StatusCanceled {
+		t.Fatalf("control=%v results=%#v", control.calls, results)
 	}
 }
 

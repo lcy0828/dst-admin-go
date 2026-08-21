@@ -12,7 +12,6 @@ import (
 	runtimeagent "dont/agent"
 	"dont/controller"
 	agentservice "dont/internal/agents"
-	"dont/internal/announcements"
 	"dont/internal/authn"
 	"dont/internal/automation"
 	backupapi "dont/internal/backups"
@@ -25,6 +24,7 @@ import (
 	"dont/internal/dstruntime"
 	dstinstall "dont/internal/dstserver"
 	"dont/internal/fleetmember"
+	"dont/internal/gamenotifications"
 	"dont/internal/gameupdate"
 	"dont/internal/httpapi"
 	"dont/internal/jobs"
@@ -112,15 +112,6 @@ func initApplication(manageBackground bool) (*Application, error) {
 		return nil, err
 	}
 	authHandler := httpapi.NewAuthHandler(authService)
-	announcementStore := announcements.NewStore(models.DB(), tablePrefix)
-	if err := announcementStore.Migrate(); err != nil {
-		return nil, err
-	}
-	announcementService, err := announcements.NewService(announcementStore)
-	if err != nil {
-		return nil, err
-	}
-	announcementHandler := httpapi.NewAnnouncementHandler(announcementService)
 	roomStore := rooms.NewStore(models.DB(), tablePrefix)
 	if err := roomStore.Migrate(); err != nil {
 		return nil, err
@@ -462,6 +453,22 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err := shardOperations.ConfigureRuntime(topologyService, runtimeDriverRouter, operationLeaseService); err != nil {
 		return nil, err
 	}
+	gameNotificationStore := gamenotifications.NewStore(models.DB(), tablePrefix)
+	if err := gameNotificationStore.Migrate(); err != nil {
+		return nil, err
+	}
+	if err := gameNotificationStore.RecoverInterrupted(); err != nil {
+		return nil, fmt.Errorf("recover interrupted game notifications: %w", err)
+	}
+	gameNotificationService, err := gamenotifications.NewService(roomService, runtimeDriverRouter, gameNotificationStore)
+	if err != nil {
+		return nil, err
+	}
+	shardOperations.ConfigureNotifier(gameNotificationService)
+	gameNotificationHandler, err := httpapi.NewGameNotificationHandler(gameNotificationService, jobService)
+	if err != nil {
+		return nil, err
+	}
 	runtimeAuditStore := runtimeaudit.NewStore(models.DB(), tablePrefix)
 	if err := runtimeAuditStore.Migrate(); err != nil {
 		return nil, err
@@ -631,6 +638,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initialize Mod publication coordinator: %w", err)
 	}
+	modPublicationCoordinator.ConfigureNotifier(gameNotificationService)
 	modControlService, err := modcontrol.NewService(modSnapshotSource, modService, modPublicationCoordinator)
 	if err != nil {
 		return nil, fmt.Errorf("initialize Mod publication service: %w", err)
@@ -673,6 +681,10 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	gameNotificationService.ConfigureOnlineCounter(gamenotifications.OnlineCounterFunc(func(_ context.Context, roomID string) (int, error) {
+		result, listErr := playerService.List(roomID, playerapi.ListFilter{Limit: 1})
+		return result.Online + result.StaleOnline, listErr
+	}))
 	if backgroundEnabled {
 		hooks.workers = append(hooks.workers, func(ctx context.Context) {
 			playerService.RunBanExpiryScheduler(ctx, time.Minute)
@@ -710,6 +722,9 @@ func initApplication(manageBackground bool) (*Application, error) {
 	}
 	automationExecutor, err := automation.NewDomainExecutor(shardOperations, backupService, commandService, playerService, structuredLogService, worldStateService, runtimeAuditService)
 	if err != nil {
+		return nil, err
+	}
+	if err := automationExecutor.ConfigureNotifications(gameNotificationService); err != nil {
 		return nil, err
 	}
 	automationService, err := automation.NewService(roomService, automationStore, jobService, automationExecutor)
@@ -829,6 +844,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	gameUpdateService.ConfigureNotifier(gameNotificationService)
 	gameUpdateHandler := httpapi.NewGameUpdateHandler(gameUpdateService, jobService)
 	gameReleaseStore := gameupdate.NewReleaseStore(models.DB(), tablePrefix)
 	if err := gameReleaseStore.Migrate(); err != nil {
@@ -856,6 +872,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initialize game release coordinator: %w", err)
 	}
+	gameReleaseCoordinator.ConfigureNotifier(gameNotificationService)
 	if err := gameUpdateHandler.ConfigureReleases(gameReleaseCoordinator); err != nil {
 		return nil, err
 	}
@@ -920,7 +937,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		v2 := api.Group("/v2", httpapi.FleetMemberPolicy(deploymentProfile.MemberEnabled), idempotencyStore.Middleware())
 		v2.Use(httpapi.RuntimeTargetBoundary())
 		authHandler.Register(v2.Group("/auth"))
-		announcementHandler.Register(v2)
+		gameNotificationHandler.Register(v2)
 		v2.GET("/system/capabilities", httpapi.CapabilitiesProvider(func() capabilities.Report {
 			return capabilities.Probe(capabilityConfig)
 		}))

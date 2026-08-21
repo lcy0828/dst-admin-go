@@ -162,6 +162,10 @@ type OperationObserver interface {
 	ObserveOperation(context.Context, OperationAudit) error
 }
 
+type OperationNotifier interface {
+	BeforeOperation(context.Context, string, string, string, string) error
+}
+
 type operationAuditContextKey struct{}
 
 func WithOperationAudit(ctx context.Context, metadata OperationAuditMetadata) context.Context {
@@ -181,6 +185,7 @@ type Operations struct {
 	leases       operationLeaseService
 	leaseTTL     time.Duration
 	observer     OperationObserver
+	notifier     OperationNotifier
 	activeMu     sync.Mutex
 	activeSeq    uint64
 	activeStarts map[string]map[uint64]context.CancelFunc
@@ -190,6 +195,10 @@ type Operations struct {
 
 func (o *Operations) ConfigureObserver(observer OperationObserver) {
 	o.observer = observer
+}
+
+func (o *Operations) ConfigureNotifier(notifier OperationNotifier) {
+	o.notifier = notifier
 }
 
 func NewOperations(roomCatalog RoomCatalog, control Control, preparers ...RuntimePreparer) *Operations {
@@ -279,6 +288,17 @@ func (o *Operations) PlanWithOptions(action Action, roomID string, selectedWorld
 			return err
 		}
 		defer release()
+		if o.notifier != nil && (action == ActionStop || action == ActionRestart) {
+			metadata, _ := ctx.Value(operationAuditContextKey{}).(OperationAuditMetadata)
+			if notifyErr := o.notifier.BeforeOperation(ctx, room.ID, string(action), metadata.Source, metadata.JobID); notifyErr != nil {
+				if errors.Is(notifyErr, context.Canceled) || errors.Is(notifyErr, context.DeadlineExceeded) {
+					for _, world := range worlds {
+						report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusCanceled, Error: &jobs.Error{Code: "JOB_CANCELED", Message: "操作通知倒计时已取消"}})
+					}
+					return nil
+				}
+			}
+		}
 		var activeLease *operationlease.Lease
 		if o.leases != nil {
 			lease, leaseErr := o.leases.Acquire(ctx, room.ID, leaseOperationKey, o.leaseTTL)

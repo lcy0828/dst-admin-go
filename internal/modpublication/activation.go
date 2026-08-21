@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"dont/internal/operationlease"
 )
 
 const (
@@ -104,14 +107,14 @@ func (c *Coordinator) Activate(ctx context.Context, publicationID, activationID 
 		return publication, err
 	}
 	defer c.releaseFences(fences)
-	return c.activateCommitted(ctx, publication, fences, policy)
+	return c.activateCommitted(ctx, publication, fences, policy, activationID)
 }
 
-func (c *Coordinator) activateCommitted(ctx context.Context, publication Publication, fences []Fence, policy ActivationPolicy) (Publication, error) {
-	return c.activateCommittedWithRunningSnapshot(ctx, publication, fences, policy, nil)
+func (c *Coordinator) activateCommitted(ctx context.Context, publication Publication, fences []Fence, policy ActivationPolicy, notificationJobID string) (Publication, error) {
+	return c.activateCommittedWithRunningSnapshot(ctx, publication, fences, policy, nil, notificationJobID)
 }
 
-func (c *Coordinator) activateCommittedWithRunningSnapshot(ctx context.Context, publication Publication, fences []Fence, policy ActivationPolicy, originalRunning map[string]bool) (Publication, error) {
+func (c *Coordinator) activateCommittedWithRunningSnapshot(ctx context.Context, publication Publication, fences []Fence, policy ActivationPolicy, originalRunning map[string]bool, notificationJobID string) (Publication, error) {
 	if c.activation == nil {
 		return c.failActivation(publication, nil, "ACTIVATION_UNAVAILABLE", errors.New("Mod activation runtime is unavailable"))
 	}
@@ -131,15 +134,13 @@ func (c *Coordinator) activateCommittedWithRunningSnapshot(ctx context.Context, 
 		return publication, err
 	}
 
-	activationContext, cancel := context.WithTimeout(ctx, time.Duration(policy.TimeoutSeconds)*time.Second)
-	defer cancel()
 	cursors := make(map[string]LogCursor, len(publication.Activation.Shards))
 	running := make(map[string]bool, len(publication.Activation.Shards))
 	worlds := activationWorlds(publication.Plan)
 	for _, world := range worlds {
 		key := worldKey(world.RoomID, world.WorldID)
 		index := activationShardIndex(publication, world.RoomID, world.WorldID)
-		observation, statusErr := c.activation.Status(activationContext, world)
+		observation, statusErr := c.activation.Status(ctx, world)
 		if statusErr != nil {
 			return c.failActivation(publication, &publication.Activation.Shards[index], "SHARD_STATUS_FAILED", statusErr)
 		}
@@ -154,13 +155,6 @@ func (c *Coordinator) activateCommittedWithRunningSnapshot(ctx context.Context, 
 			continue
 		}
 		running[key] = true
-		if policy.LoadConfirmation == LoadConfirmationLogs {
-			cursor, cursorErr := c.activation.CaptureLogCursor(activationContext, world)
-			if cursorErr != nil {
-				return c.failActivation(publication, result, "LOG_CURSOR_FAILED", cursorErr)
-			}
-			cursors[key] = cursor
-		}
 	}
 	if len(running) == 0 {
 		finished := c.now().UTC()
@@ -171,6 +165,48 @@ func (c *Coordinator) activateCommittedWithRunningSnapshot(ctx context.Context, 
 	publication, err = c.store.Save(publication)
 	if err != nil {
 		return publication, err
+	}
+	if c.notifier != nil {
+		roomIDs := make([]string, 0, len(publication.Plan.AffectedRoomIDs))
+		seen := make(map[string]bool, len(publication.Plan.AffectedRoomIDs))
+		for _, world := range worlds {
+			if running[worldKey(world.RoomID, world.WorldID)] && !seen[world.RoomID] {
+				seen[world.RoomID] = true
+				roomIDs = append(roomIDs, world.RoomID)
+			}
+		}
+		jobID := strings.TrimSpace(notificationJobID)
+		if jobID == "" {
+			jobID = publication.SourceJobID
+		}
+		if jobID == "" {
+			jobID = publication.ID
+		}
+		var notifyErr, leaseErr error
+		fences, notifyErr, leaseErr = c.notifyActivationWithRenewal(ctx, fences, roomIDs, jobID)
+		if leaseErr != nil {
+			return c.failActivation(publication, nil, "ACTIVATION_LEASE_LOST", leaseErr)
+		}
+		if notifyErr != nil {
+			return publication, notifyErr
+		}
+	}
+
+	activationContext, cancel := context.WithTimeout(ctx, time.Duration(policy.TimeoutSeconds)*time.Second)
+	defer cancel()
+	if policy.LoadConfirmation == LoadConfirmationLogs {
+		for _, world := range worlds {
+			key := worldKey(world.RoomID, world.WorldID)
+			if !running[key] {
+				continue
+			}
+			index := activationShardIndex(publication, world.RoomID, world.WorldID)
+			cursor, cursorErr := c.activation.CaptureLogCursor(activationContext, world)
+			if cursorErr != nil {
+				return c.failActivation(publication, &publication.Activation.Shards[index], "LOG_CURSOR_FAILED", cursorErr)
+			}
+			cursors[key] = cursor
+		}
 	}
 
 	stopped := make([]WorldPlan, 0, len(running))
@@ -258,6 +294,88 @@ func (c *Coordinator) activateCommittedWithRunningSnapshot(ctx context.Context, 
 	publication.Activation.FinishedAt = &finished
 	publication.RestartRequired, publication.UpdatedAt = false, finished
 	return c.store.Save(publication)
+}
+
+type activationFenceState struct {
+	mu     sync.Mutex
+	values []Fence
+}
+
+func (s *activationFenceState) borrowed(roomID string) (operationlease.Lease, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, fence := range s.values {
+		if fence.RoomID == roomID {
+			return operationlease.Lease{
+				RoomID: fence.RoomID, LeaseID: fence.LeaseID, OperationKey: fence.OperationKey,
+				FencingToken: fence.FencingToken, ExpiresAt: fence.ExpiresAt,
+			}, true
+		}
+	}
+	return operationlease.Lease{}, false
+}
+
+func (s *activationFenceState) renew(ctx context.Context, coordinator *Coordinator) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	updated, err := coordinator.renewFences(ctx, s.values)
+	if err == nil {
+		s.values = updated
+	}
+	return err
+}
+
+func (s *activationFenceState) snapshot() []Fence {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Fence(nil), s.values...)
+}
+
+func (c *Coordinator) notifyActivationWithRenewal(ctx context.Context, fences []Fence, roomIDs []string, jobID string) ([]Fence, error, error) {
+	state := &activationFenceState{values: append([]Fence(nil), fences...)}
+	if err := state.renew(ctx, c); err != nil {
+		return state.snapshot(), nil, err
+	}
+	notificationContext, cancel := context.WithCancel(ctx)
+	notificationContext = operationlease.WithBorrowedLeaseProvider(notificationContext, state.borrowed)
+	done := make(chan struct{})
+	renewed := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(activationLeaseRenewInterval(c.leaseTTL))
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				renewed <- nil
+				return
+			case <-notificationContext.Done():
+				renewed <- nil
+				return
+			case <-ticker.C:
+				if err := state.renew(notificationContext, c); err != nil {
+					renewed <- err
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	notifyErr := c.notifier.BeforeOperations(notificationContext, roomIDs, "restart", "mod_sync", jobID)
+	close(done)
+	renewErr := <-renewed
+	cancel()
+	return state.snapshot(), notifyErr, renewErr
+}
+
+func activationLeaseRenewInterval(ttl time.Duration) time.Duration {
+	interval := ttl / 3
+	if interval < 10*time.Millisecond {
+		return 10 * time.Millisecond
+	}
+	if interval > time.Minute {
+		return time.Minute
+	}
+	return interval
 }
 
 func activationRunningSnapshot(publication Publication) (map[string]bool, bool) {

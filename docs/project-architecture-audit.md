@@ -1,7 +1,7 @@
 # DST Admin 现存设计与实现改造审计
 
-> 版本：1.3
-> 审计日期：2026-08-16
+> 版本：1.4
+> 审计日期：2026-08-21
 > 范围：`dst-admin-go` 的 `feature/v2-rebuild` 与 `dst-admin-vue-v3` 的 `master`
 > 关联文档：`docs/customcommands.md`、`docs/dst-platform-matrix.md`、前端 `docs/DST_ADMIN_FUNCTION_TRUTH.md`
 > 多节点状态：本文早期“远程冻结”决策已被 `docs/distributed-room-management.md` 的 Phase 1-9 实现取代；Kubernetes 仍是只读实验边界
@@ -26,7 +26,7 @@
 
 本轮检查覆盖：
 
-- Go 生产入口、路由组装、后台调度器、SQLite、Job/SSE、房间操作锁、日志、Mod、存档导入、公告和 OpenAPI。
+- Go 生产入口、路由组装、后台调度器、SQLite、Job/SSE、房间操作锁、日志、Mod、存档导入、游戏通知和 OpenAPI。
 - Vue 路由、手写 API client/类型、Job 完成同步、功能页面、shadcn-vue 使用、测试和构建配置。
 - 后端全量测试、竞态测试和 `go vet`，前端 lint、Node unit 和生产构建均通过。
 - 后端 OpenAPI 路由契约与前端 `src/api/v2.js`、`src/api/distributedManagement.d.ts` 保持一致。
@@ -242,7 +242,7 @@ typed query key factory
 2. 房间删除：沿用后端已实现的 `.dst-admin-trash` 可恢复移动，前端必须展示恢复位置、运行中保护和精确确认；不要新增默认永久删除。
 3. SMTP 测试：设置保存前后都可执行，并展示 DNS、连接、TLS 和认证失败阶段。
 
-公告 CRUD 虽然也已存在，但当前只是数据库中的系统公告记录，不会向 DST 玩家广播，也不是系统事件通知。应先定义产品语义，再决定放入后台通知中心、游戏广播还是通知规则，不能只因为后端有接口就增加菜单。
+> 落地状态：旧公告 CRUD 已从产品路由撤下，替换为真实游戏通知。手动通知、自动化通知，以及停止、重启、游戏更新和 Mod 重启生效前的倒计时均通过 Placement 感知的 Runtime Driver 向运行中分片执行 `c_announce`；逐分片结果和来源保留在不可编辑历史中。通知失败不阻止维护操作，取消 Job 会终止倒计时和后续操作。旧表与代码暂留作数据识别，不再初始化或对外提供。
 
 ### 6.2 实施 Telemetry V2，而不是恢复持续长探针
 
@@ -308,7 +308,7 @@ typed query key factory
 
 > 落地状态：部分完成。正式前端通过 `BACKEND_CAPABILITIES.distributedManagement`、手写类型声明和 Node 回归测试约束 Phase 1-10 的关键合同，后端路由测试持续核对 OpenAPI 与实际注册路由。旧实验分支中的 `docs/capability-manifest.yaml`、TypeScript AST 校验器和 Playwright 证据没有迁入正式 `master`，不能把那套 25 项清单写成当前能力。完整机器可读清单仍应按正式路由、JavaScript client 和现有测试重新建立。
 
-当前功能事实表曾出现“后端无公告/存档导入未记录”等漂移。机器可读清单按以下关系表达：
+当前功能事实表曾出现“游戏通知被误写成公告 CRUD/存档导入未记录”等漂移。机器可读清单按以下关系表达：
 
 ```text
 capability
@@ -383,7 +383,7 @@ CI 检查：
 - 不为了统一 ORM 而全量迁移 GORM v2。当前主链仍广泛使用 jinzhu/gorm；只有 legacy `routers/mod` 使用 `gorm.io/gorm`，应在隔离 legacy 后单独评估移除依赖。
 - 不从零重写前端或后端。
 - 不删除 Lua fallback，也不把 customcommands 做成侵入式服务端 Mod。
-- 不把公告 CRUD 直接包装成“游戏公告”或“邮件通知”，因为当前没有对应发送语义。
+- 不恢复旧公告 CRUD；游戏内消息统一通过带实际分片投递结果的游戏通知服务，邮件或后台消息若后续需要应使用独立产品语义。
 
 ## 9. 分批实施与提交边界
 

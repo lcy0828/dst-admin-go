@@ -102,7 +102,7 @@ func (s *Service) Retry(ctx context.Context, sourceJobID, publicationID string) 
 	case modpublication.StatusPreviewed, modpublication.StatusPreparing, modpublication.StatusPrepared,
 		modpublication.StatusPublishing, modpublication.StatusCommitted, modpublication.StatusCompleting,
 		modpublication.StatusRecoveryRequired:
-		return s.coordinator.RecoverOne(ctx, publicationID)
+		return s.coordinator.RecoverOne(ctx, publicationID, strings.TrimSpace(sourceJobID))
 	case modpublication.StatusFailed, modpublication.StatusRolledBack:
 		// A terminal failed attempt may be retried below, but it must still
 		// describe the exact plan the operator originally confirmed.

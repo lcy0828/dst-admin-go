@@ -34,6 +34,10 @@ type ActivationRuntime interface {
 	ReadLogs(context.Context, WorldPlan, LogCursor) (ShardLogObservation, error)
 }
 
+type LifecycleNotifier interface {
+	BeforeOperations(context.Context, []string, string, string, string) error
+}
+
 type Lease interface {
 	Acquire(context.Context, string, string, time.Duration) (Fence, error)
 	Renew(context.Context, Fence, time.Duration) (Fence, error)

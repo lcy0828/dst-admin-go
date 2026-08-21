@@ -36,6 +36,7 @@ const (
 	ActionBackupCreate         Action = "backup.create"
 	ActionBackupPrune          Action = "backup.prune"
 	ActionCommandExecute       Action = "command.execute"
+	ActionNotificationSend     Action = "notification.send"
 	ActionPlayerRefresh        Action = "player.refresh"
 	ActionStructuredLogRefresh Action = "log.structured.refresh"
 	ActionWorldStateRefresh    Action = "world.state.refresh"

@@ -47,6 +47,10 @@ type CommandRunner interface {
 	Run(context.Context, string, []string, io.Writer) error
 }
 
+type LifecycleNotifier interface {
+	BeforeOperations(context.Context, []string, string, string, string) error
+}
+
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, executable string, arguments []string, output io.Writer) error {
@@ -91,6 +95,11 @@ type Service struct {
 	audit        interface {
 		RecordAction(runtimeaudit.ActionRequest) error
 	}
+	notifier LifecycleNotifier
+}
+
+func (s *Service) ConfigureNotifier(notifier LifecycleNotifier) {
+	s.notifier = notifier
 }
 
 func NewService(config Config, roomCatalog RoomCatalog, control shards.Control, backups BackupCreator, store *Store, runner CommandRunner, latest LatestChecker, audits ...interface {
@@ -259,6 +268,23 @@ func (s *Service) execute(ctx context.Context, jobID string, request UpdateReque
 		return err
 	}
 	defer releaseRooms()
+	if s.notifier != nil && len(running) > 0 {
+		action := string(shards.ActionStop)
+		if request.RestartRunning {
+			action = string(shards.ActionRestart)
+		}
+		roomIDs := make([]string, 0, len(running))
+		seenRooms := make(map[string]bool, len(running))
+		for _, world := range running {
+			if !seenRooms[world.roomID] {
+				seenRooms[world.roomID] = true
+				roomIDs = append(roomIDs, world.roomID)
+			}
+		}
+		if err := s.notifier.BeforeOperations(ctx, roomIDs, action, string(runtimeaudit.SourceGameUpdate), jobID); err != nil {
+			return err
+		}
+	}
 	currentManaged, currentRunning, err := s.captureState(ctx)
 	if err != nil {
 		return err

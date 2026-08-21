@@ -64,7 +64,7 @@ type PublicationCoordinator interface {
 	Get(string) (modpublication.Publication, error)
 	List(string, int, int) ([]modpublication.Publication, int, error)
 	Recover(context.Context) ([]modpublication.Publication, error)
-	RecoverOne(context.Context, string) (modpublication.Publication, error)
+	RecoverOne(context.Context, string, ...string) (modpublication.Publication, error)
 	Activate(context.Context, string, string, modpublication.ActivationPolicy) (modpublication.Publication, error)
 }
 

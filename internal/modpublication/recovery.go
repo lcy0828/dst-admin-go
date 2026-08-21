@@ -3,6 +3,7 @@ package modpublication
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -27,7 +28,7 @@ func (c *Coordinator) Recover(ctx context.Context) ([]Publication, error) {
 	return results, combined
 }
 
-func (c *Coordinator) RecoverOne(ctx context.Context, publicationID string) (Publication, error) {
+func (c *Coordinator) RecoverOne(ctx context.Context, publicationID string, sourceJobIDs ...string) (Publication, error) {
 	publication, err := c.store.Get(publicationID)
 	if err != nil {
 		return Publication{}, err
@@ -52,11 +53,15 @@ func (c *Coordinator) RecoverOne(ctx context.Context, publicationID string) (Pub
 	}
 	var recovered Publication
 	var recoverErr error
+	notificationJobID := publication.SourceJobID
+	if len(sourceJobIDs) > 0 && strings.TrimSpace(sourceJobIDs[0]) != "" {
+		notificationJobID = strings.TrimSpace(sourceJobIDs[0])
+	}
 	if activationRecovery {
 		if originalRunning, captured := activationRunningSnapshot(publication); captured {
-			recovered, recoverErr = c.activateCommittedWithRunningSnapshot(ctx, publication, fences, publication.Activation.Policy, originalRunning)
+			recovered, recoverErr = c.activateCommittedWithRunningSnapshot(ctx, publication, fences, publication.Activation.Policy, originalRunning, notificationJobID)
 		} else {
-			recovered, recoverErr = c.activateCommitted(ctx, publication, fences, publication.Activation.Policy)
+			recovered, recoverErr = c.activateCommitted(ctx, publication, fences, publication.Activation.Policy, notificationJobID)
 		}
 	} else if publication.CommitDecision {
 		recovered, recoverErr = c.completeAndActivate(ctx, publication, fences)

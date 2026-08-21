@@ -536,6 +536,9 @@ func TestRetrySeparatesRecoveryAndExactTerminalRetry(t *testing.T) {
 	if value, err := service.Retry(context.Background(), "job-1", "publication-1"); err != nil || value.Status != modpublication.StatusSucceeded || len(coordinator.recoveredIDs) != 1 {
 		t.Fatalf("active recovery failed: value=%#v err=%v", value, err)
 	}
+	if len(coordinator.recoveryJobs) != 1 || coordinator.recoveryJobs[0] != "job-1" {
+		t.Fatalf("active recovery source jobs=%#v", coordinator.recoveryJobs)
+	}
 
 	coordinator.current.Status = modpublication.StatusFailed
 	coordinator.previewPlan = &basePlan

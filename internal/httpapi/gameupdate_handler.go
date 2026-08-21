@@ -24,7 +24,7 @@ type GameUpdateHandler struct {
 type GameReleaseService interface {
 	Preview(context.Context, gameupdate.ReleasePreviewRequest) (gameupdate.ReleasePlan, error)
 	Publish(context.Context, gameupdate.ReleasePublishRequest) (gameupdate.Release, error)
-	Retry(context.Context, string) (gameupdate.Release, error)
+	Retry(context.Context, string, ...string) (gameupdate.Release, error)
 	Get(string) (gameupdate.Release, error)
 	List(int, int) ([]gameupdate.Release, int, error)
 }
@@ -120,9 +120,9 @@ func (h *GameUpdateHandler) releaseRetry(c *gin.Context) {
 		gameReleaseFailure(c, gameupdate.ErrReleaseConflict)
 		return
 	}
-	job, err := h.jobs.SubmitFactory("game.release.retry", "", "", gameReleaseJobTargets(current.Plan), func(jobs.Job) jobs.Runner {
+	job, err := h.jobs.SubmitFactory("game.release.retry", "", "", gameReleaseJobTargets(current.Plan), func(job jobs.Job) jobs.Runner {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
-			value, retryErr := h.releases.Retry(ctx, id)
+			value, retryErr := h.releases.Retry(ctx, id, job.ID)
 			gameReleaseReport(report, current.Plan, value, retryErr)
 			return nil
 		}

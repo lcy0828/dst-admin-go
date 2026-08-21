@@ -28,6 +28,7 @@ tags:
   - name: Agents
   - name: Kubernetes
   - name: Topology
+  - name: GameNotifications
   - name: Containers
   - name: Jobs
   - name: Save Imports
@@ -3482,66 +3483,69 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
-  /announcements:
+  /game-notifications:
     get:
-      tags: [Announcements]
-      operationId: listAnnouncements
-      summary: List persisted system announcements
+      tags: [GameNotifications]
+      operationId: listGameNotifications
+      summary: List immutable game notification delivery history
+      parameters:
+        - { name: roomId, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
       responses:
         "200":
-          description: Announcements ordered by importance and publication time
+          description: Game notification history ordered by creation time
           headers:
             Cache-Control: { schema: { type: string }, description: Always no-store }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/AnnouncementListEnvelope" }
+              schema: { $ref: "#/components/schemas/GameNotificationListEnvelope" }
     post:
-      tags: [Announcements]
-      operationId: createAnnouncement
-      summary: Publish a system announcement
+      tags: [GameNotifications, Jobs]
+      operationId: sendGameNotification
+      summary: Send one notification to every running Shard in a room
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/AnnouncementInput" }
+            schema: { $ref: "#/components/schemas/GameNotificationInput" }
       responses:
-        "201": { description: Announcement created, content: { application/json: { schema: { $ref: "#/components/schemas/AnnouncementEnvelope" } } } }
+        "202": { description: Game notification Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
-  /announcements/{announcementId}:
-    parameters: [{ $ref: "#/components/parameters/AnnouncementID" }]
+  /rooms/{roomId}/game-notification-policy:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
     get:
-      tags: [Announcements]
-      operationId: getAnnouncement
+      tags: [GameNotifications]
+      operationId: getGameNotificationPolicy
+      summary: Get maintenance countdown notification policy
       responses:
         "200":
-          description: Persisted announcement
+          description: Room game notification policy
           headers:
             Cache-Control: { schema: { type: string }, description: Always no-store }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/AnnouncementEnvelope" }
+              schema: { $ref: "#/components/schemas/GameNotificationPolicyEnvelope" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
     put:
-      tags: [Announcements]
-      operationId: updateAnnouncement
+      tags: [GameNotifications]
+      operationId: updateGameNotificationPolicy
+      summary: Update maintenance countdown notification policy
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/AnnouncementInput" }
+            schema: { $ref: "#/components/schemas/GameNotificationPolicyInput" }
       responses:
-        "200": { description: Announcement updated, content: { application/json: { schema: { $ref: "#/components/schemas/AnnouncementEnvelope" } } } }
+        "200": { description: Policy updated, content: { application/json: { schema: { $ref: "#/components/schemas/GameNotificationPolicyEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
-    delete:
-      tags: [Announcements]
-      operationId: deleteAnnouncement
-      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
-      responses:
-        "200": { description: Announcement deleted, content: { application/json: { schema: { $ref: "#/components/schemas/AnnouncementDeleteEnvelope" } } } }
-        "404": { $ref: "#/components/responses/NotFound" }
   /containers:
     get:
       tags: [Containers]
@@ -3685,14 +3689,6 @@ components:
         type: string
         minLength: 1
         maxLength: 128
-    AnnouncementID:
-      name: announcementId
-      in: path
-      required: true
-      schema:
-        type: integer
-        format: int64
-        minimum: 1
     ContainerID:
       name: containerId
       in: path
@@ -7081,7 +7077,7 @@ components:
         meta: { $ref: "#/components/schemas/Meta" }
     AutomationAction:
       type: string
-      enum: [room.start, room.stop, room.restart, backup.create, backup.prune, command.execute, player.refresh, log.structured.refresh, world.state.refresh]
+      enum: [room.start, room.stop, room.restart, backup.create, backup.prune, command.execute, notification.send, player.refresh, log.structured.refresh, world.state.refresh]
     AutomationActionDefinition:
       type: object
       additionalProperties: false
@@ -9124,65 +9120,87 @@ components:
         data: { $ref: "#/components/schemas/Topology" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
-    AnnouncementTarget:
-      type: string
-      enum: [all, online, admins]
-    AnnouncementStatus:
-      type: string
-      enum: [active, expired]
-    AnnouncementInput:
+    GameNotificationInput:
       type: object
       additionalProperties: false
-      required: [title, content, expireTime, target, important]
+      required: [roomId, message]
       properties:
-        title: { type: string, minLength: 2, maxLength: 50 }
-        content: { type: string, minLength: 1, maxLength: 10000 }
-        expireTime: { type: string, format: date-time }
-        target: { $ref: "#/components/schemas/AnnouncementTarget" }
-        important: { type: boolean }
-    Announcement:
+        roomId: { type: string }
+        message: { type: string, minLength: 1, maxLength: 500 }
+    GameNotificationDelivery:
       type: object
       additionalProperties: false
-      required: [id, title, content, publishTime, expireTime, target, important, status, updatedAt]
+      required: [id, notificationId, worldId, worldName, status]
       properties:
         id: { type: integer, format: int64, minimum: 1 }
-        title: { type: string }
-        content: { type: string }
-        publishTime: { type: string, format: date-time }
-        expireTime: { type: string, format: date-time }
-        target: { $ref: "#/components/schemas/AnnouncementTarget" }
-        important: { type: boolean }
-        status: { $ref: "#/components/schemas/AnnouncementStatus" }
+        notificationId: { type: string, format: uuid }
+        worldId: { type: string }
+        worldName: { type: string }
+        targetId: { type: string }
+        agentId: { type: string }
+        status: { type: string, enum: [queued, succeeded, failed, skipped, canceled] }
+        message: { type: string }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        topologyRevision: { type: string }
+        sentAt: { type: string, format: date-time }
+        observedAt: { type: string, format: date-time }
+    GameNotification:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, roomName, message, source, status, successCount, failureCount, skippedCount, canceledCount, createdAt, deliveries]
+      properties:
+        id: { type: string, format: uuid }
+        roomId: { type: string }
+        roomName: { type: string }
+        message: { type: string }
+        source: { type: string, enum: [manual, room_stop, room_restart, game_update, mod_sync, automation] }
+        status: { type: string, enum: [queued, sending, succeeded, partial, failed, skipped, canceled] }
+        jobId: { type: string, format: uuid }
+        successCount: { type: integer, minimum: 0 }
+        failureCount: { type: integer, minimum: 0 }
+        skippedCount: { type: integer, minimum: 0 }
+        canceledCount: { type: integer, minimum: 0 }
+        createdAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+        deliveries: { type: array, items: { $ref: "#/components/schemas/GameNotificationDelivery" } }
+    GameNotificationList:
+      type: object
+      additionalProperties: false
+      required: [items, total, limit, offset]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/GameNotification" } }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        offset: { type: integer, minimum: 0 }
+    GameNotificationListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/GameNotificationList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    GameNotificationPolicyInput:
+      type: object
+      additionalProperties: false
+      required: [enabled, countdownSeconds]
+      properties:
+        enabled: { type: boolean }
+        countdownSeconds: { type: integer, minimum: 10, maximum: 600 }
+    GameNotificationPolicy:
+      type: object
+      additionalProperties: false
+      required: [roomId, enabled, countdownSeconds, updatedAt]
+      properties:
+        roomId: { type: string }
+        enabled: { type: boolean }
+        countdownSeconds: { type: integer, minimum: 10, maximum: 600 }
         updatedAt: { type: string, format: date-time }
-    AnnouncementList:
-      type: array
-      items: { $ref: "#/components/schemas/Announcement" }
-    AnnouncementEnvelope:
+    GameNotificationPolicyEnvelope:
       type: object
       required: [data, error, meta]
       properties:
-        data: { $ref: "#/components/schemas/Announcement" }
-        error: { type: "null" }
-        meta: { $ref: "#/components/schemas/Meta" }
-    AnnouncementListEnvelope:
-      type: object
-      required: [data, error, meta]
-      properties:
-        data: { $ref: "#/components/schemas/AnnouncementList" }
-        error: { type: "null" }
-        meta: { $ref: "#/components/schemas/Meta" }
-    AnnouncementDeleteResult:
-      type: object
-      additionalProperties: false
-      required: [id, deleted]
-      properties:
-        id: { type: integer, format: int64, minimum: 1 }
-        deleted: { type: boolean, enum: [true] }
-    AnnouncementDeleteEnvelope:
-      type: object
-      required: [data, error, meta]
-      properties:
-        data: { $ref: "#/components/schemas/AnnouncementDeleteResult" }
+        data: { $ref: "#/components/schemas/GameNotificationPolicy" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     JobStatus:

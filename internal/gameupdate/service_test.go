@@ -128,6 +128,23 @@ func (f officialReleaseCheckerFunc) Check(ctx context.Context) (OfficialRelease,
 	return f(ctx)
 }
 
+type updateNotifierCall struct {
+	roomIDs []string
+	action  string
+	source  string
+	jobID   string
+}
+
+type updateNotifier struct {
+	calls []updateNotifierCall
+	err   error
+}
+
+func (n *updateNotifier) BeforeOperations(_ context.Context, roomIDs []string, action, source, jobID string) error {
+	n.calls = append(n.calls, updateNotifierCall{roomIDs: append([]string(nil), roomIDs...), action: action, source: source, jobID: jobID})
+	return n.err
+}
+
 func newUpdateService(t *testing.T, runner CommandRunner) (*Service, *Store, updateCatalog, *updateControl, *[]string, string) {
 	t.Helper()
 	db, err := gorm.Open("sqlite3", ":memory:")
@@ -201,6 +218,33 @@ func TestExecuteProtectsThenStopsAndRestartsInShardOrder(t *testing.T) {
 		if !control.running[world] {
 			t.Fatalf("%s was not restarted", world)
 		}
+	}
+}
+
+func TestExecuteNotifiesOnceBeforeGameUpdateMutations(t *testing.T) {
+	service, _, catalog, _, events, _ := newUpdateService(t, nil)
+	notifier := &updateNotifier{}
+	service.ConfigureNotifier(notifier)
+	running := []plannedWorld{
+		{roomID: "room", roomName: "Cluster", worldID: "master", worldName: "Master", isMaster: true},
+		{roomID: "room", roomName: "Cluster", worldID: "caves", worldName: "Caves"},
+	}
+	if err := service.execute(context.Background(), "job-notify", UpdateRequest{RestartRunning: true}, "/tmp/steamcmd", catalog.rooms, running, func(jobs.TargetResult) {}); err != nil {
+		t.Fatal(err)
+	}
+	want := []updateNotifierCall{{roomIDs: []string{"room"}, action: "restart", source: "game_update", jobID: "job-notify"}}
+	if !reflect.DeepEqual(notifier.calls, want) || len(*events) == 0 {
+		t.Fatalf("notifier=%#v events=%#v", notifier.calls, *events)
+	}
+}
+
+func TestExecuteCancellationDuringUpdateNotificationPreventsMutations(t *testing.T) {
+	service, _, catalog, _, events, _ := newUpdateService(t, nil)
+	service.ConfigureNotifier(&updateNotifier{err: context.Canceled})
+	running := []plannedWorld{{roomID: "room", roomName: "Cluster", worldID: "master", worldName: "Master", isMaster: true}}
+	err := service.execute(context.Background(), "job-canceled", UpdateRequest{RestartRunning: true}, "/tmp/steamcmd", catalog.rooms, running, func(jobs.TargetResult) {})
+	if !errors.Is(err, context.Canceled) || len(*events) != 0 {
+		t.Fatalf("err=%v events=%#v", err, *events)
 	}
 }
 

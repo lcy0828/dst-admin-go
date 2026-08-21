@@ -18,9 +18,10 @@ import (
 const releaseHTTPPlanHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 type gameReleaseHTTPFixture struct {
-	mu       sync.Mutex
-	plan     gameupdate.ReleasePlan
-	releases map[string]gameupdate.Release
+	mu               sync.Mutex
+	plan             gameupdate.ReleasePlan
+	releases         map[string]gameupdate.Release
+	retrySourceJobID string
 }
 
 func (f *gameReleaseHTTPFixture) Preview(context.Context, gameupdate.ReleasePreviewRequest) (gameupdate.ReleasePlan, error) {
@@ -35,12 +36,15 @@ func (f *gameReleaseHTTPFixture) Publish(_ context.Context, request gameupdate.R
 	return value, nil
 }
 
-func (f *gameReleaseHTTPFixture) Retry(_ context.Context, id string) (gameupdate.Release, error) {
+func (f *gameReleaseHTTPFixture) Retry(_ context.Context, id string, sourceJobIDs ...string) (gameupdate.Release, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	value, found := f.releases[id]
 	if !found {
 		return gameupdate.Release{}, gameupdate.ErrReleaseNotFound
+	}
+	if len(sourceJobIDs) > 0 {
+		f.retrySourceJobID = sourceJobIDs[0]
 	}
 	value = successfulHTTPGameRelease(value.ID, value.SourceJobID, value.Plan)
 	f.releases[id] = value
@@ -178,4 +182,24 @@ func TestGameReleaseHTTPRetryRejectsTerminalSuccess(t *testing.T) {
 	router, _ := newGameReleaseHandlerApp(t, fixture)
 	response := performJSON(router, http.MethodPost, "/api/v2/game/releases/release-success/actions/retry", map[string]interface{}{}, nil, "")
 	assertStatus(t, response, http.StatusConflict)
+}
+
+func TestGameReleaseHTTPRetryPassesCurrentJobID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	plan := gameReleaseHTTPPlan()
+	failed := successfulHTTPGameRelease("release-failed", "original-job", plan)
+	failed.Stage = gameupdate.ReleaseStageFailed
+	fixture := &gameReleaseHTTPFixture{plan: plan, releases: map[string]gameupdate.Release{failed.ID: failed}}
+	router, jobService := newGameReleaseHandlerApp(t, fixture)
+
+	response := performJSON(router, http.MethodPost, "/api/v2/game/releases/release-failed/actions/retry", map[string]interface{}{}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	jobID := responseData(t, response)["id"].(string)
+	waitForJobStatus(t, jobService, jobID, jobs.StatusSucceeded)
+
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if fixture.retrySourceJobID != jobID {
+		t.Fatalf("retry source job=%q want %q", fixture.retrySourceJobID, jobID)
+	}
 }

@@ -6,11 +6,49 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"dont/internal/operationlease"
 )
 
 type activationCall struct {
 	action  string
 	worldID string
+}
+
+type activationNotifier struct {
+	roomIDs       []string
+	action        string
+	source        string
+	jobID         string
+	calls         int
+	borrowedLease bool
+	wait          time.Duration
+	afterWait     func()
+	err           error
+}
+
+func (n *activationNotifier) BeforeOperations(ctx context.Context, roomIDs []string, action, source, jobID string) error {
+	n.roomIDs = append([]string(nil), roomIDs...)
+	n.action, n.source, n.jobID = action, source, jobID
+	for _, roomID := range roomIDs {
+		if _, ok := operationlease.BorrowedLease(ctx, roomID); ok {
+			n.borrowedLease = true
+		}
+	}
+	n.calls++
+	if n.wait > 0 {
+		timer := time.NewTimer(n.wait)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	if n.afterWait != nil {
+		n.afterWait()
+	}
+	return n.err
 }
 
 type fakeActivationRuntime struct {
@@ -109,6 +147,8 @@ func TestPublicationActivationCoordinatesShardOrderAndConfirmsLogs(t *testing.T)
 	activation := activationRuntimeFor(worlds)
 	app := newTestApplication(t, worlds, placements)
 	coordinator := coordinatorWithActivation(t, app, activation)
+	notifier := &activationNotifier{}
+	coordinator.ConfigureNotifier(notifier)
 	plan, err := coordinator.Preview(context.Background(), "room-a")
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +180,28 @@ func TestPublicationActivationCoordinatesShardOrderAndConfirmsLogs(t *testing.T)
 	}
 	if markers["master"] != "master-shard-server-started" || markers["caves"] != "secondary-shard-lua-ready" {
 		t.Fatalf("unexpected load markers: %#v", markers)
+	}
+	if notifier.calls != 1 || notifier.action != "restart" || notifier.source != "mod_sync" || notifier.jobID != "job-publication-activated" || !notifier.borrowedLease || len(notifier.roomIDs) != 1 || notifier.roomIDs[0] != "room-a" {
+		t.Fatalf("notifier=%#v", notifier)
+	}
+}
+
+func TestPublicationActivationCancellationPreventsShardRestart(t *testing.T) {
+	worlds, placements := twoTargetWorlds()
+	worlds[0].IsMaster = true
+	activation := activationRuntimeFor(worlds)
+	app := newTestApplication(t, worlds, placements)
+	coordinator := coordinatorWithActivation(t, app, activation)
+	coordinator.ConfigureNotifier(&activationNotifier{err: context.Canceled})
+	plan, err := coordinator.Preview(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication, err := coordinator.Publish(context.Background(), PublishRequest{
+		ID: "publication-notification-canceled", Plan: plan, Activation: restartActivationPolicy(),
+	})
+	if !errors.Is(err, context.Canceled) || len(activation.calls) != 0 || publication.Status != StatusSucceeded || !publication.RestartRequired {
+		t.Fatalf("publication=%#v calls=%#v err=%v", publication, activation.calls, err)
 	}
 }
 
@@ -199,6 +261,8 @@ func TestActivationRecoveryRestartsShardsFromPersistedRunningSnapshot(t *testing
 	activation := activationRuntimeFor(worlds)
 	app := newTestApplication(t, worlds, placements)
 	coordinator := coordinatorWithActivation(t, app, activation)
+	notifier := &activationNotifier{}
+	coordinator.ConfigureNotifier(notifier)
 	plan, err := coordinator.Preview(context.Background(), "room-a")
 	if err != nil {
 		t.Fatal(err)
@@ -223,7 +287,7 @@ func TestActivationRecoveryRestartsShardsFromPersistedRunningSnapshot(t *testing
 	}
 	activation.mu.Unlock()
 
-	recovered, err := coordinator.RecoverOne(context.Background(), publication.ID)
+	recovered, err := coordinator.RecoverOne(context.Background(), publication.ID, "job-activation-recovery")
 	if err != nil || recovered.Activation.Status != ActivationStatusSucceeded || recovered.RestartRequired {
 		t.Fatalf("recovered=%#v err=%v", recovered, err)
 	}
@@ -238,6 +302,65 @@ func TestActivationRecoveryRestartsShardsFromPersistedRunningSnapshot(t *testing
 		if calls[index] != expected[index] {
 			t.Fatalf("activation recovery order=%#v", calls)
 		}
+	}
+	if notifier.calls != 1 || notifier.jobID != "job-activation-recovery" {
+		t.Fatalf("recovery notifier=%#v", notifier)
+	}
+}
+
+func TestManualActivationUsesActivationJobIDForNotification(t *testing.T) {
+	worlds, placements := twoTargetWorlds()
+	worlds[0].IsMaster = true
+	activation := activationRuntimeFor(worlds)
+	app := newTestApplication(t, worlds, placements)
+	coordinator := coordinatorWithActivation(t, app, activation)
+	notifier := &activationNotifier{}
+	coordinator.ConfigureNotifier(notifier)
+	plan, err := coordinator.Preview(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication, err := coordinator.Publish(context.Background(), PublishRequest{ID: "publication-manual-restart", SourceJobID: "original-publication-job", Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication, err = coordinator.Activate(context.Background(), publication.ID, "activation-job", restartActivationPolicy())
+	if err != nil || publication.Activation.Status != ActivationStatusSucceeded {
+		t.Fatalf("publication=%#v err=%v", publication, err)
+	}
+	if notifier.calls != 1 || notifier.jobID != "activation-job" {
+		t.Fatalf("activation notifier=%#v", notifier)
+	}
+}
+
+func TestActivationNotificationRenewsBorrowedLeaseDuringCountdown(t *testing.T) {
+	worlds, placements := twoTargetWorlds()
+	worlds[0].IsMaster = true
+	activation := activationRuntimeFor(worlds)
+	app := newTestApplication(t, worlds, placements)
+	coordinator := coordinatorWithActivation(t, app, activation)
+	coordinator.leaseTTL = 30 * time.Millisecond
+	plan, err := coordinator.Preview(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication, err := coordinator.Publish(context.Background(), PublishRequest{ID: "publication-lease-renewal", Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := app.leases.renewalCount()
+	renewalsDuringNotification := 0
+	coordinator.ConfigureNotifier(&activationNotifier{
+		wait: 35 * time.Millisecond,
+		afterWait: func() {
+			renewalsDuringNotification = app.leases.renewalCount() - baseline
+		},
+	})
+	if _, err := coordinator.Activate(context.Background(), publication.ID, "activation-renewal-job", restartActivationPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	if renewalsDuringNotification < 2 {
+		t.Fatalf("lease was not renewed throughout notification wait: %d renewals", renewalsDuringNotification)
 	}
 }
 
