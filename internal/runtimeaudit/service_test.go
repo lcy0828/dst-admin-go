@@ -151,3 +151,49 @@ func TestRecreatedContainerDoesNotClaimUnexpectedOrCleanExit(t *testing.T) {
 		t.Fatalf("events = %#v", list.Items)
 	}
 }
+
+func TestAdaptivePollDelay(t *testing.T) {
+	service, _, _, _ := newAuditService(t)
+	now := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	fast := 5 * time.Second
+
+	tests := []struct {
+		name   string
+		states map[string]observedRuntime
+		want   time.Duration
+	}{
+		{name: "empty", states: nil, want: fast},
+		{name: "running", states: map[string]observedRuntime{"master": {state: shards.RuntimeRunning, sessionExists: true}}, want: 30 * time.Second},
+		{name: "stopped", states: map[string]observedRuntime{"master": {state: shards.RuntimeStopped}}, want: time.Minute},
+		{name: "mixed stable", states: map[string]observedRuntime{
+			"master": {state: shards.RuntimeRunning, sessionExists: true}, "caves": {state: shards.RuntimeStopped},
+		}, want: 30 * time.Second},
+		{name: "starting", states: map[string]observedRuntime{"master": {state: shards.RuntimeStarting, sessionExists: true}}, want: fast},
+		{name: "unknown", states: map[string]observedRuntime{"master": {state: shards.RuntimeUnknown}}, want: fast},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := service.pollDelay(test.states, fast); got != test.want {
+				t.Fatalf("poll delay = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+func TestActionRequestsFastPollingWindow(t *testing.T) {
+	service, _, room, world := newAuditService(t)
+	now := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	if err := service.RecordAction(ActionRequest{RoomID: room.ID, WorldIDs: []string{world.ID}, Action: "restart", Source: SourceAPI}); err != nil {
+		t.Fatal(err)
+	}
+	states := map[string]observedRuntime{"master": {state: shards.RuntimeRunning, sessionExists: true}}
+	if got := service.pollDelay(states, 5*time.Second); got != 5*time.Second {
+		t.Fatalf("poll delay during action window = %s", got)
+	}
+	now = now.Add(fastPollingWindow + time.Second)
+	if got := service.pollDelay(states, 5*time.Second); got != 30*time.Second {
+		t.Fatalf("poll delay after action window = %s", got)
+	}
+}

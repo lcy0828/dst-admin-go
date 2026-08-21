@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"dont/internal/rooms"
@@ -34,17 +35,22 @@ type observedRuntime struct {
 }
 
 type Service struct {
-	rooms   RoomCatalog
-	runtime Runtime
-	store   *Store
-	now     func() time.Time
+	rooms     RoomCatalog
+	runtime   Runtime
+	store     *Store
+	now       func() time.Time
+	wake      chan struct{}
+	watchMu   sync.Mutex
+	fastUntil time.Time
 }
+
+const fastPollingWindow = 2 * time.Minute
 
 func NewService(roomCatalog RoomCatalog, runtime Runtime, store *Store) (*Service, error) {
 	if roomCatalog == nil || runtime == nil || store == nil {
 		return nil, errors.New("runtime audit dependencies are required")
 	}
-	return &Service{rooms: roomCatalog, runtime: runtime, store: store, now: time.Now}, nil
+	return &Service{rooms: roomCatalog, runtime: runtime, store: store, now: time.Now, wake: make(chan struct{}, 1)}, nil
 }
 
 func (s *Service) RecordAction(request ActionRequest) error {
@@ -78,6 +84,7 @@ func (s *Service) RecordAction(request ActionRequest) error {
 			return err
 		}
 	}
+	s.requestFastPolling()
 	return nil
 }
 
@@ -101,12 +108,16 @@ func (s *Service) LatestExit(roomID, worldID string) (*Event, error) {
 }
 
 func (s *Service) ObserveOperation(_ context.Context, audit shards.OperationAudit) error {
-	return s.store.AnnotateAction(Event{
+	err := s.store.AnnotateAction(Event{
 		RoomID: audit.RoomID, WorldID: audit.WorldID, Action: string(audit.Action), Source: Source(audit.Source),
 		JobID: audit.JobID, RequestID: audit.RequestID, TargetID: audit.TargetID, AgentID: audit.AgentID,
 		OperationID: audit.OperationID, OperationKey: audit.OperationKey, LeaseID: audit.LeaseID,
 		FencingToken: audit.FencingToken, TopologyRevision: audit.TopologyRevision,
 	})
+	if err == nil {
+		s.requestFastPolling()
+	}
+	return err
 }
 
 func (s *Service) Watch(ctx context.Context, interval time.Duration) {
@@ -114,16 +125,69 @@ func (s *Service) Watch(ctx context.Context, interval time.Duration) {
 		interval = 5 * time.Second
 	}
 	previous := s.observe(ctx, nil, false)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	timer := time.NewTimer(s.pollDelay(previous, interval))
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-s.wake:
+			previous = s.observe(ctx, previous, true)
+		case <-timer.C:
 			previous = s.observe(ctx, previous, true)
 		}
+		resetTimer(timer, s.pollDelay(previous, interval))
 	}
+}
+
+func (s *Service) requestFastPolling() {
+	now := s.now().UTC()
+	s.watchMu.Lock()
+	until := now.Add(fastPollingWindow)
+	if until.After(s.fastUntil) {
+		s.fastUntil = until
+	}
+	s.watchMu.Unlock()
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Service) pollDelay(states map[string]observedRuntime, fast time.Duration) time.Duration {
+	if fast <= 0 {
+		fast = 5 * time.Second
+	}
+	s.watchMu.Lock()
+	fastUntil := s.fastUntil
+	s.watchMu.Unlock()
+	if s.now().UTC().Before(fastUntil) || len(states) == 0 {
+		return fast
+	}
+	allStopped := true
+	for _, state := range states {
+		switch state.state {
+		case shards.RuntimeRunning:
+			allStopped = false
+		case shards.RuntimeStopped:
+		default:
+			return fast
+		}
+	}
+	if allStopped {
+		return 12 * fast
+	}
+	return 6 * fast
+}
+
+func resetTimer(timer *time.Timer, delay time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(delay)
 }
 
 func (s *Service) observe(ctx context.Context, previous map[string]observedRuntime, emit bool) map[string]observedRuntime {

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"dont/internal/dstruntime"
 	"dont/internal/runtimeevents"
@@ -124,6 +125,23 @@ func TestRuntimeResetAndGapSignalsDoNotAdvanceEventID(t *testing.T) {
 				t.Fatalf("event ids = %v, expected %v", got, want)
 			}
 		})
+	}
+}
+
+func TestRuntimeEventPollDelayBacksOffWhileIdle(t *testing.T) {
+	for _, test := range []struct {
+		emptyPolls int
+		want       time.Duration
+	}{
+		{emptyPolls: 0, want: time.Second},
+		{emptyPolls: 4, want: time.Second},
+		{emptyPolls: 5, want: 5 * time.Second},
+		{emptyPolls: 11, want: 5 * time.Second},
+		{emptyPolls: 12, want: 15 * time.Second},
+	} {
+		if got := runtimeEventPollDelay(test.emptyPolls); got != test.want {
+			t.Fatalf("empty polls %d delay = %s, want %s", test.emptyPolls, got, test.want)
+		}
 	}
 }
 

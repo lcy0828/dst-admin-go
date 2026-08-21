@@ -77,9 +77,10 @@ func (h *RuntimeObservabilityHandler) eventStream(c *gin.Context) {
 	}
 	flusher.Flush()
 	heartbeat := time.NewTicker(15 * time.Second)
-	poll := time.NewTicker(time.Second)
+	poll := time.NewTimer(runtimeEventPollDelay(0))
 	defer heartbeat.Stop()
 	defer poll.Stop()
+	emptyPolls := 0
 	for {
 		select {
 		case <-c.Request.Context().Done():
@@ -97,14 +98,29 @@ func (h *RuntimeObservabilityHandler) eventStream(c *gin.Context) {
 				return
 			}
 			if len(next.Events) == 0 && !next.Reset && !next.Gap {
+				emptyPolls++
+				poll.Reset(runtimeEventPollDelay(emptyPolls))
 				continue
 			}
+			emptyPolls = 0
 			cursor, err = writeRuntimeWindow(c.Writer, next, false)
 			if err != nil {
 				return
 			}
 			flusher.Flush()
+			poll.Reset(runtimeEventPollDelay(emptyPolls))
 		}
+	}
+}
+
+func runtimeEventPollDelay(emptyPolls int) time.Duration {
+	switch {
+	case emptyPolls < 5:
+		return time.Second
+	case emptyPolls < 12:
+		return 5 * time.Second
+	default:
+		return 15 * time.Second
 	}
 }
 
