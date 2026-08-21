@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"dont/internal/dsttime"
 	"dont/internal/rooms"
 	"dont/internal/runtimefiles"
 	"dont/shared"
@@ -42,6 +43,7 @@ type Line struct {
 type Snapshot struct {
 	FileName  string    `json:"fileName"`
 	Size      int64     `json:"size"`
+	StartedAt time.Time `json:"startedAt,omitempty"`
 	UpdatedAt time.Time `json:"updatedAt"`
 	Truncated bool      `json:"truncated"`
 	Lines     []Line    `json:"lines"`
@@ -115,13 +117,27 @@ func (s *Service) Snapshot(roomID, worldID string, limit int, query string) (Sna
 }
 
 func (s *Service) SnapshotContext(ctx context.Context, roomID, worldID string, limit int, query string) (Snapshot, error) {
+	return s.snapshotContext(ctx, roomID, worldID, shared.RuntimeLogSourceServer, limit, query)
+}
+
+func (s *Service) ChatSnapshot(roomID, worldID string, limit int, query string) (Snapshot, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return s.ChatSnapshotContext(ctx, roomID, worldID, limit, query)
+}
+
+func (s *Service) ChatSnapshotContext(ctx context.Context, roomID, worldID string, limit int, query string) (Snapshot, error) {
+	return s.snapshotContext(ctx, roomID, worldID, shared.RuntimeLogSourceChat, limit, query)
+}
+
+func (s *Service) snapshotContext(ctx context.Context, roomID, worldID string, source shared.RuntimeLogSource, limit int, query string) (Snapshot, error) {
 	if s.distributed != nil {
-		return s.distributedSnapshot(ctx, roomID, worldID, limit, query)
+		return s.distributedSnapshot(ctx, roomID, worldID, source, limit, query)
 	}
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
 	}
-	path, info, err := s.locate(roomID, worldID)
+	path, info, err := s.locateSource(roomID, worldID, source)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -129,6 +145,14 @@ func (s *Service) SnapshotContext(ctx context.Context, roomID, worldID string, l
 }
 
 func (s *Service) RoomSnapshot(ctx context.Context, roomID string, limit int, query string) (RoomSnapshot, error) {
+	return s.roomSnapshot(ctx, roomID, shared.RuntimeLogSourceServer, limit, query)
+}
+
+func (s *Service) RoomChatSnapshot(ctx context.Context, roomID string, limit int, query string) (RoomSnapshot, error) {
+	return s.roomSnapshot(ctx, roomID, shared.RuntimeLogSourceChat, limit, query)
+}
+
+func (s *Service) roomSnapshot(ctx context.Context, roomID string, source shared.RuntimeLogSource, limit int, query string) (RoomSnapshot, error) {
 	worlds, err := s.rooms.Worlds(roomID)
 	if err != nil {
 		return RoomSnapshot{}, err
@@ -153,16 +177,16 @@ func (s *Service) RoomSnapshot(ctx context.Context, roomID string, limit int, qu
 				defer func() { <-semaphore }()
 			case <-ctx.Done():
 				item.ReadAt = time.Now().UTC()
-				item.Problem = logProblem(ctx.Err())
+				item.Problem = logProblem(ctx.Err(), source)
 				result.Worlds[index] = item
 				return
 			}
 			worldContext, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
-			snapshot, snapshotErr := s.SnapshotContext(worldContext, roomID, world.ID, limit, query)
+			snapshot, snapshotErr := s.snapshotContext(worldContext, roomID, world.ID, source, limit, query)
 			item.ReadAt = time.Now().UTC()
 			if snapshotErr != nil {
-				item.Problem = logProblem(snapshotErr)
+				item.Problem = logProblem(snapshotErr, source)
 			} else {
 				item.Snapshot = &snapshot
 			}
@@ -192,7 +216,7 @@ func snapshotAt(path string, info os.FileInfo, limit int, query string) (Snapsho
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return Snapshot{FileName: filepath.Base(path), Size: info.Size(), UpdatedAt: info.ModTime().UTC(), Truncated: truncated, Lines: lines}, nil
+	return Snapshot{FileName: filepath.Base(path), Size: info.Size(), StartedAt: snapshotStartTime(path), UpdatedAt: info.ModTime().UTC(), Truncated: truncated, Lines: lines}, nil
 }
 
 func (s *Service) Open(roomID, worldID string) (*os.File, os.FileInfo, error) {
@@ -308,7 +332,12 @@ func (s *Service) Follow(ctx context.Context, roomID, worldID string, tail int, 
 				identity = current
 				position = 0
 				pending = ""
-				reset := Snapshot{FileName: filepath.Base(path), Size: current.Size(), UpdatedAt: current.ModTime().UTC()}
+				reset := Snapshot{
+					FileName:  filepath.Base(path),
+					Size:      current.Size(),
+					StartedAt: snapshotStartTime(path),
+					UpdatedAt: current.ModTime().UTC(),
+				}
 				if err := emit(Event{Type: "reset", Snapshot: &reset}); err != nil {
 					return err
 				}
@@ -330,12 +359,12 @@ func (s *Service) Follow(ctx context.Context, roomID, worldID string, tail int, 
 	}
 }
 
-func (s *Service) distributedSnapshot(ctx context.Context, roomID, worldID string, limit int, query string) (Snapshot, error) {
+func (s *Service) distributedSnapshot(ctx context.Context, roomID, worldID string, source shared.RuntimeLogSource, limit int, query string) (Snapshot, error) {
 	if limit <= 0 || limit > 2000 {
 		limit = 500
 	}
 	chunk, err := s.distributed.ReadLogs(ctx, roomID, worldID, shared.RuntimeLogRequest{
-		Cursor: -1, MaxBytes: runtimefiles.MaximumLogBytes, MaxLines: limit, Query: strings.TrimSpace(query),
+		Source: source, Cursor: -1, MaxBytes: runtimefiles.MaximumLogBytes, MaxLines: limit, Query: strings.TrimSpace(query),
 	})
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -346,10 +375,14 @@ func (s *Service) distributedSnapshot(ctx context.Context, roomID, worldID strin
 	return snapshotFromChunk(chunk), nil
 }
 
-func logProblem(err error) *Problem {
+func logProblem(err error, source shared.RuntimeLogSource) *Problem {
+	resourceName := "服务器日志"
+	if source == shared.RuntimeLogSourceChat {
+		resourceName = "聊天日志"
+	}
 	switch {
 	case errors.Is(err, ErrLogNotFound), errors.Is(err, os.ErrNotExist):
-		return &Problem{Code: "LOG_NOT_FOUND", Message: "该分片还没有生成服务器日志"}
+		return &Problem{Code: "LOG_NOT_FOUND", Message: "该分片还没有生成" + resourceName}
 	case errors.Is(err, context.DeadlineExceeded):
 		return &Problem{Code: "LOG_READ_TIMEOUT", Message: "读取分片日志超时"}
 	case errors.Is(err, context.Canceled):
@@ -359,7 +392,7 @@ func logProblem(err error) *Problem {
 	case errors.Is(err, rooms.ErrRoomNotFound), errors.Is(err, rooms.ErrWorldNotFound):
 		return &Problem{Code: "RESOURCE_NOT_FOUND", Message: "房间或世界不存在"}
 	default:
-		return &Problem{Code: "LOG_READ_FAILED", Message: "读取服务器日志失败"}
+		return &Problem{Code: "LOG_READ_FAILED", Message: "读取" + resourceName + "失败"}
 	}
 }
 
@@ -394,7 +427,12 @@ func (s *Service) followDistributed(ctx context.Context, roomID, worldID string,
 				return readErr
 			}
 			if next.Reset || next.FileID != fileID {
-				reset := Snapshot{FileName: next.FileName, Size: next.Size, UpdatedAt: next.UpdatedAt}
+				reset := Snapshot{
+					FileName:  next.FileName,
+					Size:      next.Size,
+					StartedAt: next.StartedAt,
+					UpdatedAt: next.UpdatedAt,
+				}
 				if err := emit(Event{Type: "reset", Snapshot: &reset}); err != nil {
 					return err
 				}
@@ -416,14 +454,52 @@ func snapshotFromChunk(chunk shared.RuntimeLogChunk) Snapshot {
 		lines = append(lines, Line{Cursor: line.Cursor, Text: line.Text})
 	}
 	return Snapshot{
-		FileName: chunk.FileName, Size: chunk.Size, UpdatedAt: chunk.UpdatedAt,
+		FileName: chunk.FileName, Size: chunk.Size, StartedAt: chunk.StartedAt, UpdatedAt: chunk.UpdatedAt,
 		Truncated: chunk.Truncated, Lines: lines,
 	}
+}
+
+func readLogStartTime(path string) time.Time {
+	file, err := os.Open(path)
+	if err != nil {
+		return time.Time{}
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 64*1024))
+	if err != nil {
+		return time.Time{}
+	}
+	startedAt, ok := dsttime.FindStartTime(string(data))
+	if !ok {
+		return time.Time{}
+	}
+	return startedAt
+}
+
+func snapshotStartTime(path string) time.Time {
+	if filepath.Base(path) != "server_chat_log.txt" {
+		return readLogStartTime(path)
+	}
+	for _, name := range []string{"server_log.txt", "forest_server_log.txt"} {
+		candidate := filepath.Join(filepath.Dir(path), name)
+		info, err := os.Lstat(candidate)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			continue
+		}
+		if startedAt := readLogStartTime(candidate); !startedAt.IsZero() {
+			return startedAt
+		}
+	}
+	return time.Time{}
 }
 
 func snapshotPointer(value Snapshot) *Snapshot { return &value }
 
 func (s *Service) locate(roomID, worldID string) (string, os.FileInfo, error) {
+	return s.locateSource(roomID, worldID, shared.RuntimeLogSourceServer)
+}
+
+func (s *Service) locateSource(roomID, worldID string, source shared.RuntimeLogSource) (string, os.FileInfo, error) {
 	room, err := s.rooms.Room(roomID)
 	if err != nil {
 		return "", nil, err
@@ -441,7 +517,11 @@ func (s *Service) locate(roomID, worldID string) (string, os.FileInfo, error) {
 		info os.FileInfo
 	}
 	var candidates []candidate
-	for _, name := range []string{"server_log.txt", "forest_server_log.txt"} {
+	names := []string{"server_log.txt", "forest_server_log.txt"}
+	if source == shared.RuntimeLogSourceChat {
+		names = []string{"server_chat_log.txt"}
+	}
+	for _, name := range names {
 		path := filepath.Join(worldPath, name)
 		info, statErr := os.Lstat(path)
 		if os.IsNotExist(statErr) {

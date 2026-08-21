@@ -60,7 +60,7 @@ func isPlacementAwareRuntimePath(value string) bool {
 	if len(parts) < 2 {
 		return false
 	}
-	if parts[1] == "command-runs" || parts[1] == "logs" || parts[1] == "players" || parts[1] == "world-states" || parts[1] == "structured-logs" || parts[1] == "log-rules" {
+	if parts[1] == "command-runs" || parts[1] == "logs" || parts[1] == "chat-logs" || parts[1] == "players" || parts[1] == "world-states" || parts[1] == "structured-logs" || parts[1] == "log-rules" {
 		return true
 	}
 	if len(parts) >= 4 && parts[1] == "worlds" {

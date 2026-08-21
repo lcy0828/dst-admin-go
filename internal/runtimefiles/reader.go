@@ -13,7 +13,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"time"
 
+	"dont/internal/dsttime"
 	"dont/shared"
 )
 
@@ -167,8 +169,9 @@ func isJSONHeaderSpace(value byte) bool {
 // ValidateLogChunk verifies cursor and payload invariants without trusting
 // the remote filesystem metadata returned by an Agent.
 func ValidateLogChunk(request shared.RuntimeLogRequest, chunk shared.RuntimeLogChunk) error {
+	allowedNames, validSource := runtimeLogNames(request.Source)
 	if filepath.Base(chunk.FileName) != chunk.FileName ||
-		(chunk.FileName != "server_log.txt" && chunk.FileName != "forest_server_log.txt") ||
+		!validSource || !containsRuntimeLogName(allowedNames, chunk.FileName) ||
 		chunk.FileID == "" || len(chunk.FileID) > 128 || strings.ContainsAny(chunk.FileID, "\x00\r\n") ||
 		chunk.Size < 0 || chunk.Cursor < 0 || chunk.Cursor > chunk.Size || chunk.UpdatedAt.IsZero() {
 		return errors.New("Runtime 日志块元数据无效")
@@ -208,13 +211,17 @@ func ValidateLogChunk(request shared.RuntimeLogRequest, chunk shared.RuntimeLogC
 }
 
 func ReadLogs(ctx context.Context, saveRoot, cluster, shard string, request shared.RuntimeLogRequest) (shared.RuntimeLogChunk, error) {
+	logNames, validSource := runtimeLogNames(request.Source)
+	if !validSource {
+		return shared.RuntimeLogChunk{}, errors.New("Runtime 日志来源不受支持")
+	}
 	worldRoot, err := trustedShardPath(saveRoot, cluster, shard)
 	if err != nil {
 		return shared.RuntimeLogChunk{}, err
 	}
 	var path string
 	var info os.FileInfo
-	for _, name := range []string{"server_log.txt", "forest_server_log.txt"} {
+	for _, name := range logNames {
 		candidate := filepath.Join(worldRoot, name)
 		current, statErr := os.Lstat(candidate)
 		if os.IsNotExist(statErr) {
@@ -242,6 +249,7 @@ func ReadLogs(ctx context.Context, saveRoot, cluster, shard string, request shar
 	if err != nil {
 		return shared.RuntimeLogChunk{}, err
 	}
+	startedAt := runtimeLogStartTime(worldRoot, request.Source, file)
 	start := request.Cursor
 	reset, truncated, skipPartial := false, false, false
 	if request.FileID != "" && request.FileID != fileID {
@@ -270,7 +278,7 @@ func ReadLogs(ctx context.Context, saveRoot, cluster, shard string, request shar
 	if request.Raw {
 		return shared.RuntimeLogChunk{
 			FileName: filepath.Base(path), FileID: fileID, Size: info.Size(), Cursor: start + int64(len(data)),
-			Reset: reset, UpdatedAt: info.ModTime().UTC(), Lines: []shared.RuntimeLogLine{}, Data: data,
+			Reset: reset, StartedAt: startedAt, UpdatedAt: info.ModTime().UTC(), Lines: []shared.RuntimeLogLine{}, Data: data,
 		}, nil
 	}
 	if skipPartial {
@@ -315,8 +323,71 @@ func ReadLogs(ctx context.Context, saveRoot, cluster, shard string, request shar
 	}
 	return shared.RuntimeLogChunk{
 		FileName: filepath.Base(path), FileID: fileID, Size: info.Size(), Cursor: cursor, Reset: reset,
-		Truncated: truncated, UpdatedAt: info.ModTime().UTC(), Lines: lines,
+		Truncated: truncated, StartedAt: startedAt, UpdatedAt: info.ModTime().UTC(), Lines: lines,
 	}, nil
+}
+
+func runtimeLogNames(source shared.RuntimeLogSource) ([]string, bool) {
+	switch source {
+	case "", shared.RuntimeLogSourceServer:
+		return []string{"server_log.txt", "forest_server_log.txt"}, true
+	case shared.RuntimeLogSourceChat:
+		return []string{"server_chat_log.txt"}, true
+	default:
+		return nil, false
+	}
+}
+
+func containsRuntimeLogName(names []string, value string) bool {
+	for _, name := range names {
+		if name == value {
+			return true
+		}
+	}
+	return false
+}
+
+func readLogStartTime(file *os.File) time.Time {
+	position, err := file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return time.Time{}
+	}
+	defer func() { _, _ = file.Seek(position, io.SeekStart) }()
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return time.Time{}
+	}
+	data, err := io.ReadAll(io.LimitReader(file, 64*1024))
+	if err != nil {
+		return time.Time{}
+	}
+	startedAt, ok := dsttime.FindStartTime(string(data))
+	if !ok {
+		return time.Time{}
+	}
+	return startedAt
+}
+
+func runtimeLogStartTime(worldRoot string, source shared.RuntimeLogSource, selected *os.File) time.Time {
+	if source != shared.RuntimeLogSourceChat {
+		return readLogStartTime(selected)
+	}
+	for _, name := range []string{"server_log.txt", "forest_server_log.txt"} {
+		path := filepath.Join(worldRoot, name)
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			continue
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		startedAt := readLogStartTime(file)
+		_ = file.Close()
+		if !startedAt.IsZero() {
+			return startedAt
+		}
+	}
+	return time.Time{}
 }
 
 func trustedShardPath(saveRoot, cluster, shard string) (string, error) {

@@ -155,6 +155,7 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 		}
 	case shared.RuntimeActionReadLogs:
 		if request.Logs == nil || request.Console != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil ||
+			!shared.IsRuntimeLogSource(request.Logs.Source) ||
 			request.Logs.Cursor < -1 || request.Logs.MaxBytes < 1 || request.Logs.MaxBytes > runtimefiles.MaximumLogBytes ||
 			(request.Logs.Raw && request.Logs.MaxLines != 0 || !request.Logs.Raw && (request.Logs.MaxLines < 1 || request.Logs.MaxLines > 2000)) ||
 			request.Logs.Raw && strings.TrimSpace(request.Logs.Query) != "" || len([]rune(request.Logs.Query)) > 256 ||

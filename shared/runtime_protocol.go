@@ -9,6 +9,8 @@ const (
 
 type RuntimeAction string
 
+type RuntimeLogSource string
+
 const (
 	RuntimeActionConsoleHealth           RuntimeAction = "runtime.console.health"
 	RuntimeActionConsoleSend             RuntimeAction = "runtime.console.send"
@@ -56,6 +58,11 @@ const (
 	RuntimeActionCPUObserve              RuntimeAction = "runtime.cpu.observe"
 )
 
+const (
+	RuntimeLogSourceServer RuntimeLogSource = "server"
+	RuntimeLogSourceChat   RuntimeLogSource = "chat"
+)
+
 type ConsoleMode string
 
 const (
@@ -83,12 +90,17 @@ type RuntimeConsoleRequest struct {
 }
 
 type RuntimeLogRequest struct {
-	FileID   string `json:"file_id,omitempty"`
-	Cursor   int64  `json:"cursor"`
-	MaxBytes int    `json:"max_bytes"`
-	MaxLines int    `json:"max_lines"`
-	Query    string `json:"query,omitempty"`
-	Raw      bool   `json:"raw,omitempty"`
+	Source   RuntimeLogSource `json:"source,omitempty"`
+	FileID   string           `json:"file_id,omitempty"`
+	Cursor   int64            `json:"cursor"`
+	MaxBytes int              `json:"max_bytes"`
+	MaxLines int              `json:"max_lines"`
+	Query    string           `json:"query,omitempty"`
+	Raw      bool             `json:"raw,omitempty"`
+}
+
+func IsRuntimeLogSource(value RuntimeLogSource) bool {
+	return value == "" || value == RuntimeLogSourceServer || value == RuntimeLogSourceChat
 }
 
 type RuntimeArtifactRequest struct {
@@ -248,6 +260,7 @@ type RuntimeLogChunk struct {
 	Cursor    int64            `json:"cursor"`
 	Reset     bool             `json:"reset"`
 	Truncated bool             `json:"truncated"`
+	StartedAt time.Time        `json:"started_at,omitempty"`
 	UpdatedAt time.Time        `json:"updated_at"`
 	Lines     []RuntimeLogLine `json:"lines"`
 	Data      []byte           `json:"data,omitempty"`

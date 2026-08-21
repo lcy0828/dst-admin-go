@@ -110,6 +110,65 @@ func TestSnapshotFiltersAndDoesNotCreateMissingLogs(t *testing.T) {
 	}
 }
 
+func TestRoomChatSnapshotReadsDedicatedChatLogs(t *testing.T) {
+	root := t.TempDir()
+	masterID := rooms.EncodeID("Master")
+	cavesID := rooms.EncodeID("Caves")
+	for _, name := range []string{"Master", "Caves"} {
+		worldPath := filepath.Join(root, "room", name)
+		if err := os.MkdirAll(worldPath, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		serverLog := "server only\n"
+		if name == "Master" {
+			serverLog = "[00:00:00]: Current time: Wed Aug 19 19:56:40 2026\n"
+		}
+		if err := os.WriteFile(filepath.Join(worldPath, "server_log.txt"), []byte(serverLog), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "room", "Master", "server_chat_log.txt"), []byte("[00:00:01]: [Say] (KU_ONE) Willow: hello\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	catalog := roomSnapshotCatalog{testCatalog: testCatalog{
+		room: rooms.Room{ID: rooms.EncodeID("room"), DirectoryName: "room"},
+		worlds: []rooms.World{
+			{ID: masterID, DirectoryName: "Master", Name: "地面", Role: rooms.WorldRoleMaster},
+			{ID: cavesID, DirectoryName: "Caves", Name: "洞穴", Role: rooms.WorldRoleCaves},
+		},
+	}}
+	service, err := NewService(root, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.RoomChatSnapshot(context.Background(), catalog.room.ID, 10, "")
+	if err != nil || !result.Partial || result.Available != 1 || result.Worlds[0].Snapshot == nil {
+		t.Fatalf("chat room snapshot=%#v err=%v", result, err)
+	}
+	if result.Worlds[0].Snapshot.FileName != "server_chat_log.txt" || result.Worlds[1].Problem == nil {
+		t.Fatalf("chat world snapshots=%#v", result.Worlds)
+	}
+	wantStartedAt := time.Date(2026, time.August, 19, 19, 56, 40, 0, time.Local)
+	if !result.Worlds[0].Snapshot.StartedAt.Equal(wantStartedAt) {
+		t.Fatalf("chat startedAt=%s want=%s", result.Worlds[0].Snapshot.StartedAt, wantStartedAt)
+	}
+}
+
+func TestChatSnapshotStartTimeFallsBackToForestServerLog(t *testing.T) {
+	worldPath := t.TempDir()
+	chatPath := filepath.Join(worldPath, "server_chat_log.txt")
+	if err := os.WriteFile(chatPath, []byte("[00:00:01]: [Say] (KU_ONE) Willow: hello\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worldPath, "forest_server_log.txt"), []byte("[00:00:00]: Current time: Wed Aug 19 19:56:40 2026\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, time.August, 19, 19, 56, 40, 0, time.Local)
+	if startedAt := snapshotStartTime(chatPath); !startedAt.Equal(want) {
+		t.Fatalf("chat startedAt=%s want=%s", startedAt, want)
+	}
+}
+
 func TestReadTailStopsAtCapturedFileSize(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "server_log.txt")
 	first := "first line\n"

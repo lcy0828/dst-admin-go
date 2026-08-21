@@ -218,7 +218,7 @@ func (s *AutoParserService) processAllServerLogs() {
 					matches := timeRegex.FindStringSubmatch(string(logContent))
 					if len(matches) > 1 {
 						// 解析时间
-						parsedTime, err := time.Parse("Mon Jan 2 15:04:05 2006", matches[1])
+						parsedTime, err := ParseDSTStartTime(matches[1])
 						if err == nil {
 							// 设置服务器启动时间
 							parser.realStartTime = parsedTime

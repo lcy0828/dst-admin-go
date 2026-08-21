@@ -85,7 +85,7 @@ func NewLogParser(archiveName, worldName string) (*LogParser, error) {
 			matches := timeRegex.FindStringSubmatch(logContent)
 			if len(matches) > 1 {
 				// 解析时间
-				parsedTime, err := time.Parse("Mon Jan 2 15:04:05 2006", matches[1])
+				parsedTime, err := ParseDSTStartTime(matches[1])
 				if err == nil {
 					// 设置服务器启动时间
 					parser.realStartTime = parsedTime
@@ -625,7 +625,7 @@ func (p *LogParser) ParseLogLineWithRule(line string) (ParseLogLineResult, error
 		if len(realTimeMatches) > 1 {
 			// 解析真实时间
 			realTimeStr := realTimeMatches[1]
-			realTime, err := time.Parse("Mon Jan 2 15:04:05 2006", realTimeStr)
+			realTime, err := ParseDSTStartTime(realTimeStr)
 			if err == nil {
 				p.realStartTime = realTime
 				p.realTimeDetected = true
@@ -661,62 +661,22 @@ func (p *LogParser) ParseLogLineWithRule(line string) (ParseLogLineResult, error
 		}
 	}
 
-	// 提取日志中的相对时间
-	// 确保时区信息正确（东八区）
-	cst := time.FixedZone("CST", 8*3600)
-	// 默认使用当前时间，但不进行时区转换，只确保时区信息正确
+	// 提取日志中的相对时间。DST 的时间戳是进程启动后的运行时长。
 	timestamp := time.Now()
-	if timestamp.Location().String() == "UTC" {
-		timestamp = time.Date(
-			timestamp.Year(), timestamp.Month(), timestamp.Day(),
-			timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
-			timestamp.Nanosecond(), cst,
-		)
-	}
 	timeMatches := p.timeRegex.FindStringSubmatch(line)
 	if len(timeMatches) > 1 {
-		// 解析时间
 		timeStr := timeMatches[1]
-		relativeTime, err := time.Parse("15:04:05", timeStr)
+		_, err := time.ParseInLocation("15:04:05", timeStr, time.UTC)
 		if err == nil {
-			// 如果已检测到真实时间，则计算真实时间
 			if p.realTimeDetected {
-				// 计算相对于服务器启动的时间差
-				relativeSeconds := relativeTime.Hour()*3600 + relativeTime.Minute()*60 + relativeTime.Second()
-				// 将相对时间添加到真实启动时间上
-				timestamp = p.realStartTime.Add(time.Duration(relativeSeconds) * time.Second)
-				// 打印日志以便调试
-				log.Printf("[LogParser] 计算时间戳: 启动时间=%s, 相对时间=%s, 计算结果=%s",
-					p.realStartTime.Format("2006-01-02 15:04:05"),
-					timeStr,
-					timestamp.Format("2006-01-02 15:04:05"))
-				// 确保时区信息正确
-				if timestamp.Location().String() == "UTC" {
-					timestamp = time.Date(
-						timestamp.Year(), timestamp.Month(), timestamp.Day(),
-						timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
-						timestamp.Nanosecond(), cst,
-					)
+				timestamp, err = ResolveDSTTimestamp(p.realStartTime, timeStr)
+				if err != nil {
+					timestamp = time.Now()
 				}
 			} else {
-				// 如果未检测到真实时间，使用当前日期和提取的时间
-				// 注意：这里我们使用当前时间，但在检测到真实时间后应该重新计算
-				// 这个问题将在ProcessAndSaveLog函数中解决
 				now := time.Now()
-				// 确保时区信息正确
-				if now.Location().String() == "UTC" {
-					timestamp = time.Date(
-						now.Year(), now.Month(), now.Day(),
-						relativeTime.Hour(), relativeTime.Minute(), relativeTime.Second(),
-						0, cst,
-					)
-				} else {
-					timestamp = time.Date(
-						now.Year(), now.Month(), now.Day(),
-						relativeTime.Hour(), relativeTime.Minute(), relativeTime.Second(),
-						0, now.Location(),
-					)
-				}
+				clock, _ := time.ParseInLocation("15:04:05", timeStr, time.Local)
+				timestamp = time.Date(now.Year(), now.Month(), now.Day(), clock.Hour(), clock.Minute(), clock.Second(), 0, now.Location())
 			}
 		}
 	}
@@ -828,14 +788,9 @@ func (p *LogParser) SaveLogToDatabase(logType, content string, timestamp time.Ti
 		}
 	}
 
-	// 确保时间戳有正确的时区信息（东八区）
-	if timestamp.Location().String() == "UTC" {
-		cst := time.FixedZone("CST", 8*3600)
-		timestamp = time.Date(
-			timestamp.Year(), timestamp.Month(), timestamp.Day(),
-			timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
-			timestamp.Nanosecond(), cst,
-		)
+	// 统一输出到 DST 进程的本地时区；不要把 UTC 的墙上时间直接改名为 CST。
+	if !timestamp.IsZero() {
+		timestamp = timestamp.In(time.Local)
 	}
 
 	// 获取启动版本（使用服务器启动时间作为版本标识）
@@ -1019,8 +974,6 @@ func (p *LogParser) SaveLogToDatabaseBatch(entries []LogEntry) error {
 
 	// 准备批量插入的日志记录
 	logs := make([]models.GameLog, 0, len(entries))
-	cst := time.FixedZone("CST", 8*3600)
-
 	for _, entry := range entries {
 		// 分离原始内容和处理后的内容
 		rawContent := entry.Content
@@ -1032,14 +985,9 @@ func (p *LogParser) SaveLogToDatabaseBatch(entries []LogEntry) error {
 			}
 		}
 
-		// 确保时间戳有正确的时区信息
 		timestamp := entry.Timestamp
 		if timestamp.Location().String() == "UTC" {
-			timestamp = time.Date(
-				timestamp.Year(), timestamp.Month(), timestamp.Day(),
-				timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
-				timestamp.Nanosecond(), cst,
-			)
+			timestamp = timestamp.In(time.Local)
 		}
 
 		// 获取启动版本（使用服务器启动时间作为版本标识）
@@ -1082,7 +1030,7 @@ func (p *LogParser) SaveLogToDatabaseBatch(entries []LogEntry) error {
 						matches := timeRegex.FindStringSubmatch(logContent)
 						if len(matches) > 1 {
 							// 解析时间
-							parsedTime, err := time.Parse("Mon Jan 2 15:04:05 2006", matches[1])
+							parsedTime, err := ParseDSTStartTime(matches[1])
 							if err == nil {
 								// 设置服务器启动时间
 								p.realStartTime = parsedTime
@@ -1173,9 +1121,6 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 	// 创建一个数组来跟踪已经处理过的行索引，避免重复处理
 	processedLines := make(map[int]bool)
 
-	// 确保时区信息正确（东八区）
-	cst := time.FixedZone("CST", 8*3600)
-
 	// 第一次扫描，收集日志行和查找真实时间
 	for i := 0; i < len(lines); i++ {
 	NextLine:
@@ -1216,7 +1161,7 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 			timeMatches := p.realTimeRegex.FindStringSubmatch(line)
 			if len(timeMatches) > 1 {
 				// 解析时间
-				parsedTime, err := time.Parse("Mon Jan 2 15:04:05 2006", timeMatches[1])
+				parsedTime, err := ParseDSTStartTime(timeMatches[1])
 				if err == nil {
 					// 设置服务器启动时间
 					p.realStartTime = parsedTime
@@ -1433,48 +1378,31 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 			var timestamp time.Time
 
 			if entry.RelativeTime != "" {
-				relativeTime, err := time.Parse("15:04:05", entry.RelativeTime)
+				resolved, err := ResolveDSTTimestamp(realTime, entry.RelativeTime)
+				timestamp = resolved
 				if err == nil {
-					// 计算相对于服务器启动的时间差
-					relativeSeconds := relativeTime.Hour()*3600 + relativeTime.Minute()*60 + relativeTime.Second()
 					// 将相对时间添加到真实启动时间上
-					timestamp = realTime.Add(time.Duration(relativeSeconds) * time.Second)
 					// 打印日志以便调试
 					log.Printf("[LogParser] ProcessAndSaveLog: 日志[%d] 计算时间戳: 启动时间=%s, 相对时间=%s, 计算结果=%s",
 						i,
 						realTime.Format("2006-01-02 15:04:05"),
 						entry.RelativeTime,
 						timestamp.Format("2006-01-02 15:04:05"))
-					// 确保时区信息正确
-					if timestamp.Location().String() == "UTC" {
-						timestamp = time.Date(
-							timestamp.Year(), timestamp.Month(), timestamp.Day(),
-							timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
-							timestamp.Nanosecond(), cst,
-						)
+					if !timestamp.IsZero() {
+						timestamp = timestamp.In(time.Local)
 					}
 				} else {
 					// 如果解析时间失败，使用原始时间戳
 					timestamp = entry.Timestamp
-					// 确保时区信息正确
-					if timestamp.Location().String() == "UTC" {
-						timestamp = time.Date(
-							timestamp.Year(), timestamp.Month(), timestamp.Day(),
-							timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
-							timestamp.Nanosecond(), cst,
-						)
+					if !timestamp.IsZero() {
+						timestamp = timestamp.In(time.Local)
 					}
 				}
 			} else {
 				// 如果没有相对时间，使用原始时间戳
 				timestamp = entry.Timestamp
-				// 确保时区信息正确
-				if timestamp.Location().String() == "UTC" {
-					timestamp = time.Date(
-						timestamp.Year(), timestamp.Month(), timestamp.Day(),
-						timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
-						timestamp.Nanosecond(), cst,
-					)
+				if !timestamp.IsZero() {
+					timestamp = timestamp.In(time.Local)
 				}
 			}
 
@@ -1516,12 +1444,8 @@ func (p *LogParser) ProcessAndSaveLog(content string) error {
 		for _, entry := range logEntries {
 			// 确保时区信息正确
 			timestamp := entry.Timestamp
-			if timestamp.Location().String() == "UTC" {
-				timestamp = time.Date(
-					timestamp.Year(), timestamp.Month(), timestamp.Day(),
-					timestamp.Hour(), timestamp.Minute(), timestamp.Second(),
-					timestamp.Nanosecond(), cst,
-				)
+			if !timestamp.IsZero() {
+				timestamp = timestamp.In(time.Local)
 			}
 			// 根据服务器类型添加标记
 			var serverTypeTag string

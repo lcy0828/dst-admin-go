@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,6 +73,61 @@ func TestReadLogsContinuesByFileIdentityAndResetsAfterRotation(t *testing.T) {
 	rotated, err := ReadLogs(context.Background(), root, "Cluster_1", "Master", shared.RuntimeLogRequest{FileID: first.FileID, Cursor: continued.Cursor, MaxBytes: 1024, MaxLines: 10})
 	if err != nil || !rotated.Reset || len(rotated.Lines) != 1 || rotated.Lines[0].Text != "rotated" {
 		t.Fatalf("rotated=%#v err=%v", rotated, err)
+	}
+}
+
+func TestReadLogsSelectsChatSourceWithoutFallingBackToServerLog(t *testing.T) {
+	root := t.TempDir()
+	world := filepath.Join(root, "Cluster_1", "Master")
+	if err := os.MkdirAll(world, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(world, "server_log.txt"), []byte("[00:00:00]: Current time: Wed Aug 19 19:56:40 2026\nserver only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chatPath := filepath.Join(world, "server_chat_log.txt")
+	if err := os.WriteFile(chatPath, []byte("[00:00:01]: [Say] (KU_ONE) Willow: hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := shared.RuntimeLogRequest{Source: shared.RuntimeLogSourceChat, Cursor: -1, MaxBytes: 1024, MaxLines: 10}
+	chunk, err := ReadLogs(context.Background(), root, "Cluster_1", "Master", request)
+	if err != nil || chunk.FileName != "server_chat_log.txt" || len(chunk.Lines) != 1 || !strings.Contains(chunk.Lines[0].Text, "Willow") {
+		t.Fatalf("chat chunk=%#v err=%v", chunk, err)
+	}
+	if err := ValidateLogChunk(request, chunk); err != nil {
+		t.Fatalf("validate chat chunk: %v", err)
+	}
+	wantStartedAt := time.Date(2026, time.August, 19, 19, 56, 40, 0, time.Local)
+	if !chunk.StartedAt.Equal(wantStartedAt) {
+		t.Fatalf("chat startedAt=%s want=%s", chunk.StartedAt, wantStartedAt)
+	}
+	serverRequest := request
+	serverRequest.Source = shared.RuntimeLogSourceServer
+	if err := ValidateLogChunk(serverRequest, chunk); err == nil {
+		t.Fatal("server log request accepted a chat log chunk")
+	}
+}
+
+func TestReadChatLogsUsesForestServerLogAsStartupFallback(t *testing.T) {
+	root := t.TempDir()
+	world := filepath.Join(root, "Cluster_1", "Master")
+	if err := os.MkdirAll(world, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(world, "forest_server_log.txt"), []byte("[00:00:00]: Current time: Wed Aug 19 19:56:40 2026\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(world, "server_chat_log.txt"), []byte("[00:00:01]: [Say] (KU_ONE) Willow: hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := shared.RuntimeLogRequest{Source: shared.RuntimeLogSourceChat, Cursor: -1, MaxBytes: 1024, MaxLines: 10}
+	chunk, err := ReadLogs(context.Background(), root, "Cluster_1", "Master", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, time.August, 19, 19, 56, 40, 0, time.Local)
+	if !chunk.StartedAt.Equal(want) {
+		t.Fatalf("chat startedAt=%s want=%s", chunk.StartedAt, want)
 	}
 }
 

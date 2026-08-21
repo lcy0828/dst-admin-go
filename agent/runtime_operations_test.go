@@ -83,7 +83,10 @@ func TestRuntimeReadsLogsAndFixedArtifacts(t *testing.T) {
 	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}}
 	agent, installation := newShardOperationAgent(t, runtimeControl)
 	worldRoot := filepath.Join(installation.SavePath, "Cluster_1", "Master")
-	if err := os.WriteFile(filepath.Join(worldRoot, "server_log.txt"), []byte("first\nsecond needle\nthird\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(worldRoot, "server_log.txt"), []byte("[00:00:00]: Current time: Wed Aug 19 19:56:40 2026\nfirst\nsecond needle\nthird\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worldRoot, "server_chat_log.txt"), []byte("[00:00:01]: [Say] (KU_ONE) Willow: hello\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	artifactRoot := filepath.Join(worldRoot, "save", "mod_config_data", "dst-admin")
@@ -100,6 +103,16 @@ func TestRuntimeReadsLogsAndFixedArtifacts(t *testing.T) {
 	logResult, err := agent.executeRuntimeOperation(string(logs.Action), &logs, 10)
 	if err != nil || logResult.Logs == nil || len(logResult.Logs.Lines) != 1 || !strings.Contains(logResult.Logs.Lines[0].Text, "needle") {
 		t.Fatalf("logs=%#v err=%v", logResult.Logs, err)
+	}
+	logs.OperationID = "runtime-operation-chat"
+	logs.Logs = &shared.RuntimeLogRequest{Source: shared.RuntimeLogSourceChat, Cursor: -1, MaxBytes: 1024, MaxLines: 10}
+	chatResult, err := agent.executeRuntimeOperation(string(logs.Action), &logs, 10)
+	if err != nil || chatResult.Logs == nil || chatResult.Logs.FileName != "server_chat_log.txt" || len(chatResult.Logs.Lines) != 1 {
+		t.Fatalf("chat logs=%#v err=%v", chatResult.Logs, err)
+	}
+	wantStartedAt := time.Date(2026, time.August, 19, 19, 56, 40, 0, time.Local)
+	if !chatResult.Logs.StartedAt.Equal(wantStartedAt) {
+		t.Fatalf("chat startedAt=%s want=%s", chatResult.Logs.StartedAt, wantStartedAt)
 	}
 
 	artifacts := runtimeOperationRequest(shared.RuntimeActionReadArtifacts)

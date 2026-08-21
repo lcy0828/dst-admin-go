@@ -14,6 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"dont/internal/dsttime"
 	"dont/internal/logstream"
 	"dont/internal/rooms"
 )
@@ -113,7 +114,7 @@ func (s *Service) RefreshWorld(ctx context.Context, roomID, worldID string) (Ref
 		return RefreshResult{}, err
 	}
 	observedAt := s.now().UTC()
-	entries, err := classifySnapshot(ctx, snapshot.Lines, world, rules, observedAt)
+	entries, err := classifySnapshot(ctx, snapshot.Lines, world, rules, observedAt, snapshot.StartedAt)
 	if err != nil {
 		return RefreshResult{}, err
 	}
@@ -321,8 +322,12 @@ func (s *Service) lock(key string) *sync.Mutex {
 	return s.locks[key]
 }
 
-func classifySnapshot(ctx context.Context, lines []logstream.Line, world rooms.World, rules []compiledRule, observedAt time.Time) ([]Entry, error) {
+func classifySnapshot(ctx context.Context, lines []logstream.Line, world rooms.World, rules []compiledRule, observedAt, startedAt time.Time) ([]Entry, error) {
 	entries := make([]Entry, 0, len(lines))
+	startTime := startedAt
+	if startTime.IsZero() {
+		startTime = snapshotStartTime(lines)
+	}
 	for index := 0; index < len(lines); index++ {
 		if index%100 == 0 {
 			if err := ctx.Err(); err != nil {
@@ -332,7 +337,7 @@ func classifySnapshot(ctx context.Context, lines []logstream.Line, world rooms.W
 		if isStructuredLogNoise(lines[index].Text) {
 			continue
 		}
-		entry, rule := classifyLine(lines[index], world, rules, observedAt)
+		entry, rule := classifyLine(lines[index], world, rules, observedAt, startTime)
 		if rule == nil || rule.rule.MatchMode == MatchModeSingle {
 			entries = append(entries, entry)
 			continue
@@ -345,7 +350,7 @@ func classifySnapshot(ctx context.Context, lines []logstream.Line, world rooms.W
 				if strings.TrimSpace(lines[next].Text) == "" {
 					break
 				}
-				nextEntry, nextRule := classifyLine(lines[next], world, rules, observedAt)
+				nextEntry, nextRule := classifyLine(lines[next], world, rules, observedAt, startTime)
 				if nextRule == nil || nextRule.rule.LogType != rule.rule.LogType {
 					break
 				}
@@ -373,11 +378,24 @@ func classifySnapshot(ctx context.Context, lines []logstream.Line, world rooms.W
 	return entries, nil
 }
 
-func classifyLine(line logstream.Line, world rooms.World, rules []compiledRule, observedAt time.Time) (Entry, *compiledRule) {
+func snapshotStartTime(lines []logstream.Line) time.Time {
+	var content strings.Builder
+	for _, line := range lines {
+		content.WriteString(line.Text)
+		content.WriteByte('\n')
+	}
+	latest, _ := dsttime.FindStartTime(content.String())
+	return latest
+}
+
+func classifyLine(line logstream.Line, world rooms.World, rules []compiledRule, observedAt time.Time, startTime time.Time) (Entry, *compiledRule) {
 	entry := Entry{RoomID: world.RoomID, WorldID: world.ID, WorldName: world.Name, Type: TypeUnknown, Content: stripSourcePrefix(line.Text), RawContent: line.Text, SourceCursor: line.Cursor, ObservedAt: observedAt}
 	if match := sourcePrefix.FindStringSubmatch(line.Text); len(match) == 2 {
 		entry.SourceTimestamp = match[1]
 		if value, err := time.Parse(time.RFC3339, match[1]); err == nil {
+			value = value.UTC()
+			entry.OccurredAt = &value
+		} else if value, err := dsttime.ResolveTimestamp(startTime, match[1]); err == nil {
 			value = value.UTC()
 			entry.OccurredAt = &value
 		}

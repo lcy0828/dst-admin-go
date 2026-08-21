@@ -49,6 +49,7 @@ func TestRuntimeTargetBoundaryAllowsPlacementAwareRuntimeDomains(t *testing.T) {
 	router.Use(RequestContext(), RuntimeTargetBoundary())
 	for _, path := range []string{
 		"/api/v2/rooms/room-one/logs",
+		"/api/v2/rooms/room-one/chat-logs",
 		"/api/v2/rooms/room-one/players",
 		"/api/v2/rooms/room-one/players/actions/refresh",
 		"/api/v2/rooms/room-one/world-states",
