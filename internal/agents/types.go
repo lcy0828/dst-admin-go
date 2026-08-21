@@ -62,23 +62,35 @@ type Metrics struct {
 
 type CapacityState string
 
+type MemoryCapacityState string
+
 const (
 	CapacityAvailable     CapacityState = "available"
 	CapacityFull          CapacityState = "full"
 	CapacityOvercommitted CapacityState = "overcommitted"
 	CapacityUnknown       CapacityState = "unknown"
+
+	MemoryCapacityUnknown  MemoryCapacityState = "unknown"
+	MemoryCapacityHealthy  MemoryCapacityState = "healthy"
+	MemoryCapacityTight    MemoryCapacityState = "tight"
+	MemoryCapacityCritical MemoryCapacityState = "critical"
 )
 
 type Capacity struct {
-	State                 CapacityState `json:"state"`
-	LogicalProcessors     int           `json:"logicalProcessors"`
-	PhysicalCores         int           `json:"physicalCores"`
-	PhysicalCoreEstimated bool          `json:"physicalCoreEstimated"`
-	ReservedPhysicalCores int           `json:"reservedPhysicalCores"`
-	RecommendedShardLimit int           `json:"recommendedShardLimit"`
-	RunningShards         int           `json:"runningShards"`
-	AvailableSlots        int           `json:"availableSlots"`
-	Message               string        `json:"message"`
+	State                          CapacityState       `json:"state"`
+	LogicalProcessors              int                 `json:"logicalProcessors"`
+	PhysicalCores                  int                 `json:"physicalCores"`
+	PhysicalCoreEstimated          bool                `json:"physicalCoreEstimated"`
+	ReservedPhysicalCores          int                 `json:"reservedPhysicalCores"`
+	RecommendedShardLimit          int                 `json:"recommendedShardLimit"`
+	RunningShards                  int                 `json:"runningShards"`
+	AvailableSlots                 int                 `json:"availableSlots"`
+	MemoryState                    MemoryCapacityState `json:"memoryState"`
+	MemoryTotalBytes               uint64              `json:"memoryTotalBytes,omitempty"`
+	MemoryAvailableBytes           uint64              `json:"memoryAvailableBytes,omitempty"`
+	EstimatedAdditionalMemoryBytes uint64              `json:"estimatedAdditionalMemoryBytes,omitempty"`
+	ProjectedMemoryAvailableBytes  uint64              `json:"projectedMemoryAvailableBytes,omitempty"`
+	Message                        string              `json:"message"`
 }
 
 type Agent struct {

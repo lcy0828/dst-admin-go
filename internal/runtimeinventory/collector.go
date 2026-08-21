@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"dont/internal/hostresource"
 	"dont/shared"
 
 	"github.com/go-ini/ini"
@@ -71,6 +72,10 @@ func HostResources() (shared.CPUInventory, shared.MemoryInventory) {
 	if err != nil || logical < 1 {
 		logical = 1
 	}
+	hostLogical := logical
+	limits := hostresource.Detect()
+	logical = hostresource.EffectiveCPUCount(hostLogical, limits)
+	constrainedCPU := logical < hostLogical
 	physical, err := cpu.Counts(false)
 	source := "gopsutil"
 	estimated := false
@@ -82,30 +87,36 @@ func HostResources() (shared.CPUInventory, shared.MemoryInventory) {
 		source = "logical_estimate"
 		estimated = true
 	}
-	if physical > logical {
+	if constrainedCPU {
+		physical = logical
+		source = "cgroup_limit"
+		estimated = true
+	} else if physical > logical {
 		physical = logical
 	}
 	cpuInfo := shared.CPUInventory{
 		LogicalProcessors: logical, PhysicalCores: physical,
 		PhysicalCoreSource: source, PhysicalCoreEstimated: estimated,
 	}
-	if threads, topologyOK := cpuTopology(logical); topologyOK {
-		cpuInfo.TopologyAvailable = true
-		cpuInfo.Threads = threads
-		groups := make(map[string]int, len(threads))
-		for _, thread := range threads {
-			key := thread.PackageID + "\x00" + thread.CoreID
-			groups[key]++
-			if groups[key] > 1 {
-				cpuInfo.SMTDetected = true
+	if !constrainedCPU {
+		if threads, topologyOK := cpuTopology(logical); topologyOK {
+			cpuInfo.TopologyAvailable = true
+			cpuInfo.Threads = threads
+			groups := make(map[string]int, len(threads))
+			for _, thread := range threads {
+				key := thread.PackageID + "\x00" + thread.CoreID
+				groups[key]++
+				if groups[key] > 1 {
+					cpuInfo.SMTDetected = true
+				}
 			}
 		}
 	}
 	memoryInfo := shared.MemoryInventory{}
 	if value, memoryErr := mem.VirtualMemory(); memoryErr == nil && value != nil {
-		memoryInfo.TotalBytes = value.Total
-		memoryInfo.UsedBytes = value.Used
-		memoryInfo.AvailableBytes = value.Available
+		memoryInfo.TotalBytes, memoryInfo.UsedBytes, memoryInfo.AvailableBytes = hostresource.EffectiveMemory(
+			value.Total, value.Used, value.Available, limits,
+		)
 	}
 	return cpuInfo, memoryInfo
 }

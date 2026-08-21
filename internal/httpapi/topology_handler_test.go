@@ -66,7 +66,7 @@ func TestTopologyHTTPPreviewRevisionAndOvercommit(t *testing.T) {
 	)
 	remote := httpTargetInventory(
 		agents.RuntimeTarget{ID: "agent:node", AgentID: "node", Name: "节点", Kind: agents.RuntimeKindAgent, Status: agents.RuntimeStatusReady, Online: true, Configured: true},
-		2, []shared.RoomInventoryReport{{Directory: "Cluster", MasterPort: 10889, Shards: []shared.ShardInventoryReport{{Directory: "Master", Role: "master", ServerPort: 10999, AuthenticationPort: 8767, MasterServerPort: 27017}}}},
+		1, []shared.RoomInventoryReport{{Directory: "Cluster", MasterPort: 10889, Shards: []shared.ShardInventoryReport{{Directory: "Master", Role: "master", ServerPort: 10999, AuthenticationPort: 8767, MasterServerPort: 27017}}}},
 		[]shared.ShardProcessReport{{PID: 42, Cluster: "Other", Shard: "Master"}}, now,
 	)
 	service, err := topology.NewService(httpTopologyRooms{room: room, world: world}, httpTopologyTargets{items: []agents.RuntimeTargetInventory{local, remote}}, store)

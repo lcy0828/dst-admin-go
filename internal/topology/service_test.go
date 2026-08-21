@@ -60,7 +60,7 @@ func TestTopologyAggregatesRoomsAndRequiresExplicitOvercommit(t *testing.T) {
 	)
 	remoteInventory := runtimeInventory(
 		agents.RuntimeTarget{ID: "agent:node-a", AgentID: "node-a", Name: "节点 A", Kind: agents.RuntimeKindAgent, Status: agents.RuntimeStatusReady, Online: true, Configured: true},
-		2, 2, []shared.RoomInventoryReport{inventoryRoom("Cluster_A", "Caves")},
+		1, 1, []shared.RoomInventoryReport{inventoryRoom("Cluster_A", "Caves")},
 		[]shared.ShardProcessReport{{PID: 900, Cluster: "Unmanaged", Shard: "Master"}}, now,
 	)
 	service, err := NewService(catalog, topologyTargetCatalog{items: []agents.RuntimeTargetInventory{localInventory, remoteInventory}}, newTopologyTestStore(t))
@@ -147,7 +147,7 @@ func TestPreviewStartCapacityCountsRunningShardsAcrossRooms(t *testing.T) {
 	if target.Capacity.State != agents.CapacityFull || preview.RequiresRiskConfirmation {
 		t.Fatalf("full capacity should be allowed without risk confirmation: %#v", preview)
 	}
-	if preview.Policy.ShardsPerPhysicalCore != 1 || preview.Policy.ReservedPhysicalCores != 1 || preview.Policy.Enforced {
+	if preview.Policy.ShardsPerPhysicalCore != 1 || preview.Policy.ReservedPhysicalCores != 0 || preview.Policy.Enforced {
 		t.Fatalf("policy = %#v", preview.Policy)
 	}
 
@@ -163,6 +163,61 @@ func TestPreviewStartCapacityCountsRunningShardsAcrossRooms(t *testing.T) {
 	target = preview.Targets[0]
 	if target.CurrentRunningShards != 2 || target.StartingShards != 1 || target.ProjectedRunningShards != 3 {
 		t.Fatalf("already-running shard was counted twice: %#v", target)
+	}
+}
+
+func TestPreviewStartCapacityAllowsTwoShardsOnTwoCoreFourGiBNode(t *testing.T) {
+	now := time.Now().UTC()
+	room := rooms.Room{ID: "room-low-spec", DirectoryName: "LowSpec", Name: "低配房间", Managed: true}
+	master := rooms.World{ID: "master", RoomID: room.ID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}
+	caves := rooms.World{ID: "caves", RoomID: room.ID, DirectoryName: "Caves", Name: "洞穴", Role: rooms.WorldRoleCaves}
+	local := runtimeInventory(
+		agents.RuntimeTarget{ID: localTargetID, Name: "本机", Kind: agents.RuntimeKindLocal, Status: agents.RuntimeStatusReady, Online: true, Configured: true},
+		2, 2, []shared.RoomInventoryReport{inventoryRoom(room.DirectoryName, "Master", "Caves")}, nil, now,
+	)
+	local.Inventory.Memory = shared.MemoryInventory{TotalBytes: 4 << 30, AvailableBytes: 3500 << 20}
+	service, err := NewService(
+		topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {master, caves}}},
+		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{local}}, newTopologyTestStore(t),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := service.PreviewStartCapacity(context.Background(), room.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.RequiresRiskConfirmation || len(preview.Targets) != 1 {
+		t.Fatalf("2C4G default room should start without confirmation: %#v", preview)
+	}
+	capacity := preview.Targets[0].Capacity
+	if capacity.State != agents.CapacityFull || capacity.MemoryState != agents.MemoryCapacityTight || capacity.ReservedPhysicalCores != 0 {
+		t.Fatalf("unexpected 2C4G capacity: %#v", capacity)
+	}
+}
+
+func TestPreviewStartCapacityRequiresConfirmationForCriticalMemory(t *testing.T) {
+	now := time.Now().UTC()
+	room := rooms.Room{ID: "room-memory-risk", DirectoryName: "MemoryRisk", Name: "内存风险", Managed: true}
+	master := rooms.World{ID: "master", RoomID: room.ID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}
+	local := runtimeInventory(
+		agents.RuntimeTarget{ID: localTargetID, Name: "本机", Kind: agents.RuntimeKindLocal, Status: agents.RuntimeStatusReady, Online: true, Configured: true},
+		2, 2, []shared.RoomInventoryReport{inventoryRoom(room.DirectoryName, "Master")}, nil, now,
+	)
+	local.Inventory.Memory = shared.MemoryInventory{TotalBytes: 4 << 30, AvailableBytes: 1600 << 20}
+	service, err := NewService(
+		topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {master}}},
+		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{local}}, newTopologyTestStore(t),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := service.PreviewStartCapacity(context.Background(), room.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.RequiresRiskConfirmation || preview.Targets[0].Capacity.MemoryState != agents.MemoryCapacityCritical {
+		t.Fatalf("critical memory must require confirmation: %#v", preview)
 	}
 }
 

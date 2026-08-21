@@ -860,5 +860,5 @@ func intersectsStrings(left, right []string) bool {
 }
 
 func defaultCapacityPolicy() CapacityPolicy {
-	return CapacityPolicy{Basis: "physical_cores", ShardsPerPhysicalCore: 1, ReservedPhysicalCores: 1, Enforced: false, Message: "保守建议一颗物理核心最多运行一层世界，并额外为系统和运维任务预留 1 核；超出只告警并要求确认。"}
+	return CapacityPolicy{Basis: "effective_cpu", ShardsPerPhysicalCore: 1, ReservedPhysicalCores: 0, Enforced: false, Message: "建议每个有效 CPU 最多运行一层世界；2 核及以下不额外预留整核，3 核及以上为系统和运维任务预留 1 核。内存余量不足时会单独提醒。"}
 }

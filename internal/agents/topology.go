@@ -18,6 +18,10 @@ import (
 
 const (
 	defaultReservedPhysicalCores = 1
+	lowCoreThreshold             = 2
+	defaultShardMemoryEstimate   = 1400 * 1024 * 1024
+	memoryWarningHeadroom        = 768 * 1024 * 1024
+	memoryCriticalHeadroom       = 384 * 1024 * 1024
 	metricsFreshnessWindow       = 90 * time.Second
 	inventoryFreshnessWindow     = 90 * time.Second
 	maximumReportedRooms         = 256
@@ -35,12 +39,15 @@ func (s *Service) Inventory(agentID string) (InventorySnapshot, error) {
 		return InventorySnapshot{}, err
 	}
 	snapshot.Stale, snapshot.StaleReason = s.inventoryFreshness(agent, snapshot)
-	snapshot.Capacity = capacityFor(
+	snapshot.Capacity = capacityForResources(
 		snapshot.Inventory.CPU.LogicalProcessors,
 		snapshot.Inventory.CPU.PhysicalCores,
 		snapshot.Inventory.CPU.PhysicalCoreEstimated,
 		len(snapshot.Inventory.Processes),
 		snapshot.Stale,
+		snapshot.Inventory.Memory.TotalBytes,
+		snapshot.Inventory.Memory.AvailableBytes,
+		0,
 	)
 	return snapshot, nil
 }
@@ -81,7 +88,10 @@ func (s *Service) RuntimeTargetInventories(ctx context.Context) ([]RuntimeTarget
 			item.Available, item.Stale = true, false
 			item.Inventory = report
 			item.ObservedAt, item.ReceivedAt = &observedAt, &observedAt
-			item.Capacity = capacityFor(report.CPU.LogicalProcessors, report.CPU.PhysicalCores, report.CPU.PhysicalCoreEstimated, len(report.Processes), false)
+			item.Capacity = capacityForResources(
+				report.CPU.LogicalProcessors, report.CPU.PhysicalCores, report.CPU.PhysicalCoreEstimated,
+				len(report.Processes), false, report.Memory.TotalBytes, report.Memory.AvailableBytes, 0,
+			)
 			items = append(items, item)
 			continue
 		}
@@ -230,21 +240,27 @@ func (s *Service) decorateAgent(agent Agent) Agent {
 		observedAt = agent.LastReportAt
 	}
 	agent.MetricsStale, agent.StaleReason = observationStaleness(s.now().UTC(), agent.Status, observedAt, metricsFreshnessWindow)
-	agent.Capacity = capacityFor(
+	agent.Capacity = capacityForResources(
 		agent.Metrics.LogicalProcessors,
 		agent.Metrics.PhysicalCores,
 		agent.Metrics.PhysicalCoreEstimated,
 		agent.Metrics.RunningShardCount,
 		agent.MetricsStale,
+		uint64(maxInt64(agent.Metrics.MemoryTotal)),
+		uint64(maxInt64(agent.Metrics.MemoryAvailable)),
+		0,
 	)
 	if snapshot, err := s.store.Inventory(agent.ID); err == nil {
 		inventoryStale, _ := s.inventoryFreshness(agent, snapshot)
-		agent.Capacity = capacityFor(
+		agent.Capacity = capacityForResources(
 			snapshot.Inventory.CPU.LogicalProcessors,
 			snapshot.Inventory.CPU.PhysicalCores,
 			snapshot.Inventory.CPU.PhysicalCoreEstimated,
 			len(snapshot.Inventory.Processes),
 			inventoryStale,
+			snapshot.Inventory.Memory.TotalBytes,
+			snapshot.Inventory.Memory.AvailableBytes,
+			0,
 		)
 	}
 	return agent
@@ -284,6 +300,7 @@ func capacityFor(logicalProcessors, physicalCores int, estimated bool, runningSh
 		State: CapacityUnknown, LogicalProcessors: logicalProcessors, PhysicalCores: physicalCores,
 		PhysicalCoreEstimated: estimated, ReservedPhysicalCores: defaultReservedPhysicalCores,
 		RunningShards: runningShards,
+		MemoryState:   MemoryCapacityUnknown,
 	}
 	if stale || logicalProcessors < 1 {
 		capacity.Message = "节点容量数据已过期，无法判断可安全启动的世界数量"
@@ -297,7 +314,20 @@ func capacityFor(logicalProcessors, physicalCores int, estimated bool, runningSh
 		capacity.PhysicalCores = physicalCores
 		capacity.PhysicalCoreEstimated = true
 	}
-	limit := physicalCores - defaultReservedPhysicalCores
+	budgetCores := physicalCores
+	// Small VPS plans are sold and scheduled as vCPUs. Treat up to four
+	// schedulable CPUs as the practical Shard budget even when the host exposes
+	// them as SMT siblings; larger hosts keep the conservative physical-core
+	// budget unless their topology is estimated from an effective cgroup limit.
+	if logicalProcessors <= 4 || estimated {
+		budgetCores = logicalProcessors
+	}
+	reserved := defaultReservedPhysicalCores
+	if budgetCores <= lowCoreThreshold {
+		reserved = 0
+	}
+	capacity.ReservedPhysicalCores = reserved
+	limit := budgetCores - reserved
 	if limit < 1 {
 		limit = 1
 	}
@@ -320,8 +350,65 @@ func capacityFor(logicalProcessors, physicalCores int, estimated bool, runningSh
 	return capacity
 }
 
+func capacityForResources(
+	logicalProcessors, physicalCores int,
+	estimated bool,
+	runningShards int,
+	stale bool,
+	memoryTotal, memoryAvailable uint64,
+	additionalShards int,
+) Capacity {
+	capacity := capacityFor(logicalProcessors, physicalCores, estimated, runningShards, stale)
+	capacity.MemoryTotalBytes = memoryTotal
+	capacity.MemoryAvailableBytes = memoryAvailable
+	if stale || memoryTotal == 0 {
+		return capacity
+	}
+	if additionalShards < 0 {
+		additionalShards = 0
+	}
+	capacity.EstimatedAdditionalMemoryBytes = uint64(additionalShards) * defaultShardMemoryEstimate
+	if capacity.EstimatedAdditionalMemoryBytes >= memoryAvailable {
+		capacity.ProjectedMemoryAvailableBytes = 0
+	} else {
+		capacity.ProjectedMemoryAvailableBytes = memoryAvailable - capacity.EstimatedAdditionalMemoryBytes
+	}
+	switch {
+	case capacity.EstimatedAdditionalMemoryBytes > memoryAvailable || capacity.ProjectedMemoryAvailableBytes < memoryCriticalHeadroom:
+		capacity.MemoryState = MemoryCapacityCritical
+		capacity.Message += fmt.Sprintf("；预计启动后可用内存不足 %d MiB", memoryCriticalHeadroom/(1024*1024))
+	case capacity.ProjectedMemoryAvailableBytes < memoryWarningHeadroom:
+		capacity.MemoryState = MemoryCapacityTight
+		capacity.Message += fmt.Sprintf("；预计启动后可用内存低于 %d MiB", memoryWarningHeadroom/(1024*1024))
+	default:
+		capacity.MemoryState = MemoryCapacityHealthy
+	}
+	return capacity
+}
+
+func maxInt64(value int64) int64 {
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
 func CapacityFor(logicalProcessors, physicalCores int, estimated bool, runningShards int, stale bool) Capacity {
 	return capacityFor(logicalProcessors, physicalCores, estimated, runningShards, stale)
+}
+
+func CapacityForResources(
+	logicalProcessors, physicalCores int,
+	estimated bool,
+	runningShards int,
+	stale bool,
+	memoryTotal, memoryAvailable uint64,
+	additionalShards int,
+) Capacity {
+	return capacityForResources(
+		logicalProcessors, physicalCores, estimated, runningShards, stale,
+		memoryTotal, memoryAvailable, additionalShards,
+	)
 }
 
 func normalizeInventory(report shared.RuntimeInventoryReport, config RuntimeConfig) (shared.RuntimeInventoryReport, error) {

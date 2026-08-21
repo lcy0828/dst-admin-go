@@ -659,11 +659,12 @@ func (s *Service) PreviewBatchStartCapacity(ctx context.Context, selections []St
 			stale = !inventory.Available || inventory.Stale || !inventory.Target.Online
 		}
 		projected := current + startingShards
-		capacity := agents.CapacityFor(
+		capacity := agents.CapacityForResources(
 			inventory.Inventory.CPU.LogicalProcessors, inventory.Inventory.CPU.PhysicalCores,
 			inventory.Inventory.CPU.PhysicalCoreEstimated, projected, stale,
+			inventory.Inventory.Memory.TotalBytes, inventory.Inventory.Memory.AvailableBytes, startingShards,
 		)
-		requiresRisk := capacity.State == agents.CapacityOvercommitted || capacity.State == agents.CapacityUnknown
+		requiresRisk := capacity.State == agents.CapacityOvercommitted || capacity.State == agents.CapacityUnknown || capacity.MemoryState == agents.MemoryCapacityCritical
 		requiresConfirmation = requiresConfirmation || requiresRisk
 		targets = append(targets, StartCapacityTarget{
 			TargetID: targetID, TargetName: name, CurrentRunningShards: current, StartingShards: startingShards,
@@ -984,16 +985,26 @@ func buildSnapshot(roomID string, plans map[string]roomPlan, inventories []agent
 		}
 		projected := plannedCounts[targetID] + unmanaged
 		stale := inventory.Stale || !inventory.Available || !inventory.Target.Online
-		projectedCapacity := agents.CapacityFor(
+		additionalShards := projected - observed
+		if additionalShards < 0 {
+			additionalShards = 0
+		}
+		projectedCapacity := agents.CapacityForResources(
 			inventory.Inventory.CPU.LogicalProcessors,
 			inventory.Inventory.CPU.PhysicalCores,
 			inventory.Inventory.CPU.PhysicalCoreEstimated,
 			projected,
 			stale,
+			inventory.Inventory.Memory.TotalBytes,
+			inventory.Inventory.Memory.AvailableBytes,
+			additionalShards,
 		)
 		overcommitted := projectedCapacity.State == agents.CapacityOvercommitted
-		if overcommitted {
+		memoryCritical := projectedCapacity.MemoryState == agents.MemoryCapacityCritical
+		if overcommitted || memoryCritical {
 			requiresConfirmation = true
+		}
+		if overcommitted {
 			issues = append(issues, Issue{
 				Code: "TARGET_OVERCOMMITTED", Severity: SeverityWarning, TargetID: targetID,
 				Message: fmt.Sprintf("节点 %s 计划承载 %d 个世界分片，超过建议上限 %d；同一核心运行多层世界可能造成卡顿", inventory.Target.Name, projected, projectedCapacity.RecommendedShardLimit),
@@ -1009,6 +1020,17 @@ func buildSnapshot(roomID string, plans map[string]roomPlan, inventories []agent
 				Message: fmt.Sprintf("节点 %s 的容量数据不可用，无法判断 %d 个计划分片是否会造成卡顿", inventory.Target.Name, projected),
 			})
 		}
+		if memoryCritical {
+			issues = append(issues, Issue{
+				Code: "TARGET_MEMORY_CRITICAL", Severity: SeverityWarning, TargetID: targetID,
+				Message: fmt.Sprintf("节点 %s 启动计划世界后预计可用内存不足 384 MiB，可能触发 OOM", inventory.Target.Name),
+			})
+		} else if projectedCapacity.MemoryState == agents.MemoryCapacityTight {
+			issues = append(issues, Issue{
+				Code: "TARGET_MEMORY_TIGHT", Severity: SeverityWarning, TargetID: targetID,
+				Message: fmt.Sprintf("节点 %s 启动计划世界后预计可用内存低于 768 MiB，建议避免同时执行更新、地图或压缩任务", inventory.Target.Name),
+			})
+		}
 		targets = append(targets, TargetSummary{
 			ID: targetID, Name: inventory.Target.Name, Kind: inventory.Target.Kind, Status: inventory.Target.Status,
 			Online: inventory.Target.Online, Configured: inventory.Target.Configured,
@@ -1016,7 +1038,7 @@ func buildSnapshot(roomID string, plans map[string]roomPlan, inventories []agent
 			ObservedAt: inventory.ObservedAt, ObservedRunningShards: observed, UnmanagedRunningShards: unmanaged,
 			PlannedShards: plannedCounts[targetID], ProjectedShards: projected,
 			CurrentCapacity: inventory.Capacity, ProjectedCapacity: projectedCapacity,
-			RequiresOvercommitConfirmation: overcommitted,
+			RequiresOvercommitConfirmation: overcommitted || memoryCritical,
 		})
 	}
 	sort.Slice(targets, func(i, j int) bool {

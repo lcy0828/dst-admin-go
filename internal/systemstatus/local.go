@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"dont/internal/hostresource"
+
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
@@ -56,6 +58,8 @@ func (p *LocalProvider) collectHost(value *Status) {
 func (p *LocalProvider) collectCPU(value *Status) {
 	cores, coreErr := cpu.Counts(false)
 	threads, threadErr := cpu.Counts(true)
+	limits := hostresource.Detect()
+	threads = hostresource.EffectiveCPUCount(threads, limits)
 	usage, usageErr := cpu.Percent(100*time.Millisecond, true)
 	if coreErr != nil || threadErr != nil || usageErr != nil {
 		value.CPU.Error = firstError(coreErr, threadErr, usageErr)
@@ -74,6 +78,9 @@ func (p *LocalProvider) collectCPU(value *Status) {
 	if len(usage) > 0 {
 		average /= float64(len(usage))
 	}
+	if cores > threads {
+		cores = threads
+	}
 	value.CPU = CPUStatus{Available: true, Model: model, Cores: cores, Threads: threads, Usage: percent(average), CoreUsage: usage}
 	if average, err := load.Avg(); err == nil {
 		value.CPU.Load1, value.CPU.Load5, value.CPU.Load15, value.CPU.LoadSupport = average.Load1, average.Load5, average.Load15, true
@@ -87,7 +94,12 @@ func (p *LocalProvider) collectMemory(value *Status) {
 		value.Warnings = append(value.Warnings, "无法读取内存指标")
 		return
 	}
-	value.Memory = MemoryStatus{Available: true, TotalBytes: info.Total, UsedBytes: info.Used, AvailableBytes: info.Available, Usage: percent(info.UsedPercent)}
+	total, used, available := hostresource.EffectiveMemory(info.Total, info.Used, info.Available, hostresource.Detect())
+	usage := 0.0
+	if total > 0 {
+		usage = float64(used) * 100 / float64(total)
+	}
+	value.Memory = MemoryStatus{Available: true, TotalBytes: total, UsedBytes: used, AvailableBytes: available, Usage: percent(usage)}
 }
 
 func (p *LocalProvider) collectDisk(value *Status) {
