@@ -513,6 +513,51 @@ func TestBarriersLuaProvesSaveCallbackAndPreservesDelayedShutdown(t *testing.T) 
 	}
 }
 
+func TestBarriersLuaWaitsForWorldBeforeWrappingSave(t *testing.T) {
+	state := lua.NewState()
+	defer state.Close()
+
+	preloadStaticJSONHarness(state)
+	theSim := state.NewTable()
+	state.SetField(theSim, "SetPersistentString", state.NewFunction(func(L *lua.LState) int { return 0 }))
+	state.SetGlobal("TheSim", theSim)
+
+	readyCallbacks := make([]*lua.LFunction, 0, 1)
+	readyCanceled := 0
+	scheduler := state.NewTable()
+	state.SetField(scheduler, "ExecuteInTime", state.NewFunction(func(L *lua.LState) int {
+		readyCallbacks = append(readyCallbacks, L.CheckFunction(3))
+		L.Push(luaTask(state, &readyCanceled))
+		return 1
+	}))
+	state.SetGlobal("scheduler", scheduler)
+
+	module := loadLuaModule(t, state, "barriers.lua")
+	callLuaMethod(t, state, module, "Start", true)
+	status := callLuaTableMethod(t, state, module, "Status")
+	if !lua.LVAsBool(state.GetField(status, "running")) || lua.LVAsBool(state.GetField(status, "ready")) || len(readyCallbacks) != 1 {
+		t.Fatalf("waiting barrier status=%v callbacks=%d", status, len(readyCallbacks))
+	}
+
+	theWorld := state.NewTable()
+	state.SetField(theWorld, "ismastersim", lua.LTrue)
+	state.SetGlobal("TheWorld", theWorld)
+	originalSave := state.NewFunction(func(L *lua.LState) int { return 0 })
+	shardGameIndex := state.NewTable()
+	state.SetField(shardGameIndex, "SaveCurrent", originalSave)
+	state.SetGlobal("ShardGameIndex", shardGameIndex)
+	callLuaFunction(t, state, readyCallbacks[0])
+
+	status = callLuaTableMethod(t, state, module, "Status")
+	if !lua.LVAsBool(state.GetField(status, "ready")) || state.GetField(shardGameIndex, "SaveCurrent") == originalSave {
+		t.Fatalf("ready barrier status=%v wrapped=%v", status, state.GetField(shardGameIndex, "SaveCurrent") != originalSave)
+	}
+	callLuaMethod(t, state, module, "Stop", true)
+	if state.GetField(shardGameIndex, "SaveCurrent") != originalSave || readyCanceled != 0 {
+		t.Fatalf("barrier stop restored=%v canceled=%d", state.GetField(shardGameIndex, "SaveCurrent") == originalSave, readyCanceled)
+	}
+}
+
 func preloadStaticJSONHarness(state *lua.LState) {
 	state.PreloadModule("json", func(L *lua.LState) int {
 		module := L.NewTable()

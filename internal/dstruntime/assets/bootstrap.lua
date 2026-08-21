@@ -1,6 +1,7 @@
 local VERSION = "2.4.0"
 local PROTOCOL_VERSION = 2
 local MODULE_ROOT = "../dst-admin/"
+local READY_RETRY_SECONDS = 0.5
 
 local function emit_error(code, message)
     print(string.format("[DST-ADMIN-RUNTIME ERROR] code=%s message=%s", tostring(code), tostring(message)))
@@ -29,12 +30,33 @@ end
 local build_candidate
 local activate_candidate
 
+local function module_ready(module)
+	if module == nil then return false end
+	if type(module.Status) ~= "function" then return true end
+    local ok, status = xpcall(module.Status, debug.traceback)
+    if not ok or type(status) ~= "table" then return false end
+    -- Runtime 2.4 modules expose ready explicitly. Treat an omitted field as
+    -- ready so older compatible modules can still be hot-reloaded.
+    return status.running ~= false and status.ready ~= false
+end
+
+local function candidate_ready(candidate)
+    return module_ready(candidate.Telemetry)
+        and module_ready(candidate.WorldState)
+        and module_ready(candidate.Commands)
+        and module_ready(candidate.Events)
+        and module_ready(candidate.Diagnostics)
+        and module_ready(candidate.Barriers)
+end
+
 local function new_candidate()
     local candidate = {
         version = VERSION,
         protocolVersion = PROTOCOL_VERSION,
         state = "loading",
         reloadInProgress = false,
+        readinessTask = nil,
+        readyAnnounced = false,
     }
 
     function candidate.Status()
@@ -108,13 +130,17 @@ local function new_candidate()
             emit_error("START_FAILED", started)
             return false
         end
-        candidate.state = "running"
+        candidate.state = candidate_ready(candidate) and "running" or "waiting_for_world"
         return true
     end
 
     function candidate.Stop()
         if candidate.state == "stopped" then
             return true
+        end
+        if candidate.readinessTask ~= nil then
+            candidate.readinessTask:Cancel()
+            candidate.readinessTask = nil
         end
         if candidate.Diagnostics ~= nil then
             local ok, stopped = xpcall(candidate.Diagnostics.Stop, debug.traceback)
@@ -172,6 +198,9 @@ local function new_candidate()
     end
 
     function candidate.Refresh()
+        if candidate.state == "waiting_for_world" and candidate_ready(candidate) then
+            candidate.state = "running"
+        end
         if candidate.state ~= "running" or candidate.WorldState == nil or candidate.Telemetry == nil then
             return false
         end
@@ -195,6 +224,49 @@ local function new_candidate()
             emit_error("REFRESH_WORLDSTATE_FAILED", accepted)
             return false
         end
+        return true
+    end
+
+    local function announce_ready()
+        if candidate.readyAnnounced then return end
+        candidate.readyAnnounced = true
+        print(string.format("[DST-ADMIN-RUNTIME READY] version=%s protocol=%d", VERSION, PROTOCOL_VERSION))
+    end
+
+    local function await_world()
+        if rawget(_G, "DSTAdmin") ~= candidate or candidate.state == "stopped" or candidate.state == "failed" then
+            candidate.readinessTask = nil
+            return
+        end
+        if candidate_ready(candidate) then
+            candidate.readinessTask = nil
+            candidate.state = "running"
+            if not candidate.Refresh() then
+                emit_error("INITIAL_REFRESH_FAILED", "runtime became ready without coherent initial snapshots")
+                return
+            end
+            announce_ready()
+            return
+        end
+        candidate.state = "waiting_for_world"
+        if scheduler ~= nil and type(scheduler.ExecuteInTime) == "function" then
+            candidate.readinessTask = scheduler:ExecuteInTime(READY_RETRY_SECONDS, await_world, "dst-admin-bootstrap-ready")
+        end
+    end
+
+    function candidate.Activate()
+        if candidate_ready(candidate) then
+            candidate.state = "running"
+            if not candidate.Refresh() then
+                emit_error("INITIAL_REFRESH_FAILED", "runtime started without coherent initial snapshots")
+                return false
+            end
+            announce_ready()
+            return true
+        end
+        candidate.state = "waiting_for_world"
+        print(string.format("[DST-ADMIN-RUNTIME WAITING] state=waiting_for_world version=%s protocol=%d", VERSION, PROTOCOL_VERSION))
+        await_world()
         return true
     end
 
@@ -259,11 +331,7 @@ activate_candidate = function(previous, candidate, operation)
 
     if candidate.Start() then
         rawset(_G, "DSTAdmin", candidate)
-        if not candidate.Refresh() then
-            emit_error(operation .. "_INITIAL_REFRESH_FAILED", "runtime started without coherent initial snapshots")
-        end
-        print(string.format("[DST-ADMIN-RUNTIME READY] version=%s protocol=%d", VERSION, PROTOCOL_VERSION))
-        return true
+        return candidate.Activate()
     end
 
     candidate.Stop()

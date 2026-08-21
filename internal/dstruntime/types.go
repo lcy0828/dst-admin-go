@@ -176,6 +176,9 @@ type ModuleHealth struct {
 	Running                  bool     `json:"running"`
 	Ready                    bool     `json:"ready"`
 	Busy                     bool     `json:"busy,omitempty"`
+	Writing                  bool     `json:"writing,omitempty"`
+	Holding                  bool     `json:"holding,omitempty"`
+	BarrierID                string   `json:"barrierId,omitempty"`
 	Sequence                 int64    `json:"sequence,omitempty"`
 	LastCapturedAtUnix       *int64   `json:"lastCapturedAtUnix,omitempty"`
 	LastWrittenAtUnix        *int64   `json:"lastWrittenAtUnix,omitempty"`

@@ -219,6 +219,17 @@ func TestHealthRejectsUnknownOrInvalidPayload(t *testing.T) {
 	if err != nil || !value.Ready || value.Sequence != 2 {
 		t.Fatalf("health = %#v, error = %v", value, err)
 	}
+	valid.Modules = map[string]ModuleHealth{"barriers": {
+		Running: true, Ready: true, Busy: true, Writing: true, Holding: true, BarrierID: "backup-1",
+	}}
+	data, _ = json.Marshal(valid)
+	if err := os.WriteFile(filepath.Join(output, "health.json"), data, 0640); err != nil {
+		t.Fatal(err)
+	}
+	value, err = manager.Health(catalog.room.ID, catalog.worlds[0].ID)
+	if err != nil || !value.Modules["barriers"].Holding || value.Modules["barriers"].BarrierID != "backup-1" {
+		t.Fatalf("barrier health = %#v, error = %v", value.Modules["barriers"], err)
+	}
 	if err := os.WriteFile(filepath.Join(output, "health.json"), []byte(`{"schemaVersion":1,"producerVersion":"2","producerInstanceId":"x","sequence":1,"unknown":true}`), 0640); err != nil {
 		t.Fatal(err)
 	}

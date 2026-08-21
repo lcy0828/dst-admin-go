@@ -6,6 +6,8 @@ local PRODUCER_VERSION = "2.4.0"
 local OUTPUT_PATH = "mod_config_data/dst-admin/snapshot-barrier.json"
 local ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]+$"
 local BARRIER_TIMEOUT = 180
+local READY_RETRY_SECONDS = 1
+local READY_RETRY_LIMIT = 60
 
 local state = {
     running = false,
@@ -21,6 +23,8 @@ local state = {
     wrappedSaveCurrent = nil,
     lastError = nil,
     timeoutTask = nil,
+    readyAttempts = 0,
+    readyTask = nil,
 }
 
 local instance_id = string.format("barrier-%d-%06d", os.time(), math.random(0, 999999))
@@ -171,17 +175,41 @@ local function wrap_save_current()
     return true
 end
 
+local function ready_to_wrap()
+    return TheWorld ~= nil
+        and TheWorld.ismastersim == true
+        and TheSim ~= nil
+        and TheSim.SetPersistentString ~= nil
+        and ShardGameIndex ~= nil
+        and type(ShardGameIndex.SaveCurrent) == "function"
+end
+
+local function await_world()
+    if not state.running then return end
+    if ready_to_wrap() then
+        state.readyTask = nil
+        if not wrap_save_current() then return end
+        state.ready = true
+        state.lastError = nil
+        persist_receipt(new_receipt("runtime-start", "idle", ""))
+        return
+    end
+    state.readyAttempts = state.readyAttempts + 1
+    if state.readyAttempts >= READY_RETRY_LIMIT then
+        state.readyTask = nil
+        state.lastError = "world readiness timed out"
+        return
+    end
+    state.readyTask = scheduler:ExecuteInTime(READY_RETRY_SECONDS, await_world, "dst-admin-barriers-ready")
+end
+
 function M.Start()
     if state.running then return true end
-    if TheWorld == nil or TheWorld.ismastersim ~= true or TheSim == nil or TheSim.SetPersistentString == nil then
-        state.lastError = "world is not ready for snapshot barriers"
-        return false
-    end
-    if not wrap_save_current() then return false end
     state.running = true
-    state.ready = true
+    state.ready = false
+    state.readyAttempts = 0
     state.lastError = nil
-    persist_receipt(new_receipt("runtime-start", "idle", ""))
+    await_world()
     return true
 end
 
@@ -194,6 +222,10 @@ function M.Stop()
     state.running = false
     state.ready = false
     state.pending = nil
+    if state.readyTask ~= nil then
+        state.readyTask:Cancel()
+        state.readyTask = nil
+    end
     cancel_timeout()
     state.originalSaveCurrent = nil
     state.wrappedSaveCurrent = nil
