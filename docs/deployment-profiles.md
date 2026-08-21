@@ -11,6 +11,9 @@ Packaging describes how the same application is delivered:
 - `native`: the application runs directly on Linux or macOS.
 - `all_in_one`: the application, Vue UI, SteamCMD, tmux, and DST run in one OCI
   container without a Docker socket.
+- `container`: one management container directly controls one container per
+  local Shard. It uses no local Agent container and all Shards share one
+  host-mounted DST installation.
 - `control_plane`: the application is installed without a local DST executor.
 
 The management role describes which machines this instance controls:
@@ -24,7 +27,7 @@ The management role describes which machines this instance controls:
 - `controller_only`: manages Fleet Members and has no local DST executor.
 
 An instance cannot be both an upstream Controller and a downstream Member.
-Both native and All-in-One installations can use `standalone`,
+Native, All-in-One, and container-Shard installations can use `standalone`,
 `controller_worker`, or `managed_worker`. Agent is therefore a transport
 capability, not a deployment profile.
 
@@ -151,9 +154,10 @@ DST_ADMIN_IMAGE=dst-admin/all-in-one:dev \
 In regions where the official Debian mirror is slow, the build script accepts
 `--debian-mirror` and `--debian-security-mirror`, or the equivalent
 `DST_ADMIN_DEBIAN_MIRROR` and `DST_ADMIN_DEBIAN_SECURITY_MIRROR` environment
-variables. The first start downloads the DST dedicated server into the named
-`/data` volume. `DST_ADMIN_BOOTSTRAP_DST=false` is only for smoke tests or a
-volume that already contains `/data/server`.
+variables. The management UI starts before DST is installed and displays an
+`Install game server` action backed by the normal Game Update Job. Set
+`DST_ADMIN_BOOTSTRAP_DST=true` only when an unattended deployment must finish
+the SteamCMD download before the API starts.
 
 Open `http://HOST:8080` after the health check passes. Allocate at least one
 physical CPU core per concurrently running Shard; placing multiple active
@@ -167,13 +171,43 @@ reduce the scheduler's ability to use short idle periods. The capacity preview
 does not reserve a complete CPU on a two-CPU host, but it warns when projected
 free memory drops below 768 MiB and requires confirmation below 384 MiB.
 
-Running each Shard in its own container is an advanced isolation profile, not
-the default installation. It can enforce a separate cpuset, CPU quota, memory
-limit, and OOM boundary for every Shard, and it allows replacing one Shard
-container without replacing the others. It also adds images, volumes,
-networking, port mapping, health reconciliation, and backup coordination that
-make first-time operation harder. Prefer it only on 4+ CPU hosts when explicit
-resource isolation is more valuable than the single-container experience.
+## Container Shards
+
+The `container` profile keeps the UI, API, SteamCMD, files, and scheduling in
+one management container. It does not run a second local Agent. The management
+container uses the Docker socket only to discover and control containers with
+the fixed `com.dst-admin.*` labels.
+
+No Room is hard-coded in Compose. The first Start action for a Shard creates its
+container from the configured trusted image; later actions start or stop the
+same container. Every Shard receives the shared server and Workshop roots
+read-only and its shared save root read-write. Runtime-specific tmux state stays
+inside that Shard container. This permits separate CPU policy and failure
+isolation without duplicating the DST binary.
+
+Klei distributes the Linux dedicated server for amd64 only, so both images in
+this profile are built for `linux/amd64`. Debian or Ubuntu x86_64 is the
+recommended host. Apple Silicon can emulate the profile for compatibility
+testing, but should use the native macOS Runtime for actual gameplay.
+
+Build and start the local container profile with:
+
+```sh
+deploy/scripts/build-all-in-one-image.sh --tag dst-admin/all-in-one:dev
+docker compose -f deploy/docker/compose.yaml --profile build build dst-runtime-image
+docker compose -f deploy/docker/compose.yaml up -d dst-admin
+```
+
+The default host data root is `/opt/dst`. Open `http://HOST:8080`, install the
+game server from the dashboard, create a Room, then start Master and Caves. The
+Docker socket grants host-level control, so this profile is only appropriate on
+a trusted single-user server. Remote machines still connect through the Agent
+protocol; they never receive this host's Docker socket.
+
+For a 2 vCPU / 4 GiB server, All-in-One remains the simplest default. Use
+container Shards when independent world restart or CPU isolation is worth the
+extra image and Docker-socket boundary. In both profiles, run no more active
+Shards than the host can support; Master plus Caves is the practical default.
 
 ## Fleet roles
 

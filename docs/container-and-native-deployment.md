@@ -1,107 +1,73 @@
 # 裸机与容器部署
 
-> 本页记录拆分式 Agent 和一 Shard 一容器的高级兼容拓扑。新安装应先阅读 `deployment-profiles.md`，优先使用裸机或 All-in-One 的内置本地执行器，再按需把同一实例切换为 Controller 或 Member。Kubernetes 仍属于实验阶段，不能把本页的 Docker 能力等同于 Kubernetes 能力。
+> 新安装优先选择裸机或 All-in-One。需要每个世界独立容器时，管理容器直接承担本机 Runtime，不再额外运行本机 Agent 容器。Agent 只用于远程机器。
 
-## 安全边界
+## 支持的简单模型
 
-- 控制面容器不挂 Docker socket、宿主 PID、DST 服务端或存档目录。管理本机裸机 DST 也通过外部 Agent。
-- Agent 与 DST 不放在同一容器。Agent 升级、重连或崩溃不会直接终止 DST；DST Shard 也不能读取 Agent 密钥。
-- 一个 DST 容器只运行一个 Shard。每个容器必须带四个受管 label，Agent 逐条复核，不通过名称猜测归属。
-- 挂载 Docker socket 的 Agent 等价于拥有宿主 root 级控制权，只能在可信节点显式启用 `container-control` profile。不要把该 Agent 暴露到公网。
-- DST 镜像不包含 Klei 专有文件。`dst-server` volume 必须由管理员通过 SteamCMD 合法安装并以只读方式挂载。
-- `linux/amd64` 控制面镜像通过 Debian `non-free` 包安装 `/usr/games/steamcmd`，仅用于维护控制器 Workshop 内容库；内容库位于持久卷 `/var/lib/dst-admin/workshop`。控制面不挂载 Docker socket、DST 存档或 DST 服务端目录。
-- Compose 固定设置 `DST_ADMIN_DISABLE_LOCAL_GAME_UPDATE=true`。版本查询仍可使用 Steam/Klei 数据源，但控制面容器不会把“镜像中存在 SteamCMD”误判为可更新本地 DST，也不会向 `unmanaged-server` 下载一份无人管理的服务端。DST 二进制更新必须由对应 Runtime 节点执行。
-- 控制面镜像在所有架构安装 Lua 5.1，作为 Go `modinfo.lua` 解析器的兼容 fallback；是否使用 fallback 仍由解析结果和诊断信息明确标记。
-- 控制面镜像保留 `tmux` 客户端，用于判断其容器内部本地 Runtime 是否已停止以及执行迁移前保护；它没有宿主 PID namespace、宿主 tmux socket 或 Docker socket，不能借此控制宿主 DST。
-- Valve 没有提供 ARM Linux SteamCMD。ARM 控制面仍可管理房间和节点，但 Workshop 下载会报告 SteamCMD 不可用；需要完整 Mod 流程时，应部署 `linux/amd64` 控制面镜像（ARM 主机需具备 amd64 模拟）或通过自定义镜像提供经过验证的 SteamCMD。DST Linux Runtime 同样以 x86_64 为生产目标。
-- 默认建议一颗物理核心最多运行一个 Shard，并至少为系统、Agent、SteamCMD 和备份预留一核。
-
-## 部署组合与权限
-
-在高级拆分拓扑中，主服务、独立 Agent 和 DST Runtime 是三个部署维度。当前保留的组合是：
-
-| 主服务 | Agent | DST | 当前支持情况 |
-| --- | --- | --- | --- |
-| 裸机 | 裸机 | 裸机 | 支持；Agent 与 DST 使用同一账号或等价的受控文件/tmux 权限 |
-| 容器 | 裸机 | 裸机 | 兼容；新部署优先使用 native Member，独立 Agent 用于需要分离生命周期的高级场景 |
-| 容器 | 容器 | Shard 容器 | 支持的容器 Runtime 形态；Agent 通过 Docker/Podman CLI 和受管 label 控制 |
-| 容器 | 容器 | 裸机 | 当前 Compose 不支持；不要通过 host PID、宿主 tmux 和大范围 hostPath 拼出兼容模式 |
-| Kubernetes | 外部 Provider | Pod | 默认关闭的只读实验能力；已有 status/observe/preflight API 与 UI，无 Apply 或生产 Driver |
-
-Agent 和 DST 始终是不同容器。tmux session 与 socket 位于每个 DST Shard 容器内；容器 Driver 执行固定的 `docker exec ... tmux` 客户端参数，Agent 不接管 DST 的 PID namespace，也不把任意 exec 暴露给控制面。`CONSOLE_SOCKET` 是 Shard 容器内的路径，不是要求挂载到 Agent 容器的 Unix socket。
-
-每个 Runtime installation 的 Mod 路径由 Agent 本地配置固定：
-
-| 配置 | 内容 | 持久化和权限 |
+| 场景 | 本机控制方式 | 远程扩展 |
 | --- | --- | --- |
-| `WORKSHOP_CONTENT_PATH` | 受信 Steam Workshop 内容根 | 可重建的下载源；不能由远程请求覆盖 |
-| `MOD_CACHE_PATH` | 按 tree SHA 保存的不可变发布缓存 | 需要 Agent 可写并持久化；丢失后需重新分发，离线回滚会受影响 |
-| `MOD_STATE_PATH` | 上传断点、发布计划、journal 和 installation state | 必须私有、可写、持久化；不能与 cache 路径相同或互相嵌套 |
+| 裸机 | 管理程序直接控制本机 tmux 和 DST 文件 | 可开启管理中心并添加 Agent |
+| All-in-One | 管理程序与全部 DST Shard 在同一容器 | 可开启管理中心并添加 Agent |
+| Docker 独立世界 | 管理容器通过 Docker socket 直接控制每个 Shard 容器 | 可开启管理中心并添加 Agent |
+| 仅控制端 | 不运行本机 DST | 只管理 Agent |
 
-裸机模板把 cache/state 放在 `/var/lib/dst-admin-agent`。容器模板也放在 `agent-data` volume，而不是默认的 `SERVER_PATH/.dst-admin`，避免状态落入只读安装卷。三个路径必须是绝对路径；cache/state 初始化和后续文件操作会拒绝不安全的符号链接或越界目标，Workshop 根也不应配置为可被其他用户替换的链接。
+同一台机器只有一个本地管理者。不要同时让管理容器和另一个本机 Agent 控制相同存档、容器或 tmux 会话。远程 Agent 仍通过类型化操作、Placement、租约和审计接入，不接受任意 Shell。
 
-## Docker Compose
+## Docker 独立世界
 
-先构建并启动无宿主控制权的控制面：
-
-```bash
-cd deploy/docker
-docker compose up -d control-plane
-docker compose ps
-```
-
-首次启动会在 `control-data` 中生成 `app.conf` 和 SQLite 数据库。启动前必须通过安全的 secret 管理方式提供 `DST_ADMIN_AGENT_SECURITY_KEY`；Compose 会把同一个密钥同时注入控制面网关和 Agent，任一侧缺失都会在配置展开阶段失败。不要把密钥写进 Compose 文件或 URL。
-
-镜像默认从 Debian 官方源安装运行依赖。在官方源访问较慢的网络中，可以在构建时临时设置 `DEBIAN_MIRROR` 和 `DEBIAN_SECURITY_MIRROR`；这两个参数只改变 Debian 包下载地址，不改变 Go 模块、Steam Workshop 或应用运行时网络。镜像必须使用可信、同步完整且支持 HTTPS 的 Debian 镜像站，例如：
+`deploy/docker/compose.yaml` 只常驻一个 `dst-admin` 管理容器。`dst-runtime-image` 是构建占位服务，不会常驻。Compose 不预先写死房间，也不会在启动后台时自动启动 Master/Caves。
 
 ```bash
-DEBIAN_MIRROR=https://mirrors.aliyun.com/debian \
-DEBIAN_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security \
-docker compose build control-plane agent
+deploy/scripts/build-all-in-one-image.sh --tag dst-admin/all-in-one:dev
+docker compose -f deploy/docker/compose.yaml --profile build build dst-runtime-image
+docker compose -f deploy/docker/compose.yaml up -d dst-admin
 ```
 
-### 主服务容器 + 裸机 Agent
+打开 `http://HOST:8080`。未安装 DST 时，服务总览会显示“安装游戏服务端”；安装由普通 Job 执行，Web 不会因 SteamCMD 下载失败而无法启动。也可以设置 `DST_ADMIN_BOOTSTRAP_DST=true`，让无人值守部署在 API 启动前完成下载。
 
-这是保留给需要把控制端和执行进程完全分离的兼容组合。同一宿主上把 `/etc/dst-admin/agent.conf` 的 `SERVER_URL` 设为 `ws://127.0.0.1:8000/agent`，Runtime 使用 `[runtime.native]`；只启动 Compose 的 `control-plane`，不要再启动 `container-control` profile 中的 Agent，避免同一安装出现两个控制者。一般用户应直接安装 native 管理程序并选择“加入管理中心”。
-
-Agent 在另一台机器时，`127.0.0.1` 不可用。应让控制面的 `/agent` WebSocket 经 TLS 反向代理或受信内网地址可达，并在裸机 Agent 使用 `wss://`/实际地址。不要为了远程 Agent 挂载控制面容器的 Docker socket、DST 目录或宿主 PID。
-
-### Agent 容器 + DST 容器
-
-容器 Runtime 模式需要先填充 `dst-server` 和 `dst-saves` volumes，确认 Cluster 配置中的 UDP 端口和 compose 映射一致。`dst-saves` 的卷根就是 Cluster 目录的父目录，因此 Compose 固定使用 `DST_STORAGE_ROOT=/data` 和 `DST_CONF_DIR=.`；例如房间 `Cluster_1` 必须位于 `/data/Cluster_1`，不能额外嵌套一层 `DoNotStarveTogether`。每台节点必须设置一个全局唯一、重建后保持不变的 `DST_ADMIN_AGENT_ID`；控制面以该 ID 保存拓扑、fencing 和审计记录，不能使用临时容器 ID。然后显式启动：
-
-```bash
-export DST_ADMIN_AGENT_SECURITY_KEY='base64-key-from-control-plane'
-export DST_ADMIN_AGENT_ID='node-shanghai-01'
-export DOCKER_GID="$(stat -c '%g' /var/run/docker.sock)"
-docker compose --profile container-control --profile dst-runtime up -d agent dst-master
-```
-
-Agent 只控制以下 label 同时匹配的容器：
+用户第一次启动任意世界时，管理程序会创建对应容器。之后启动、停止、控制台命令和 CPU 策略都复用该容器。容器只能由以下四个标签识别：
 
 ```text
 com.dst-admin.managed=true
-com.dst-admin.installation=<Runtime installation ID>
+com.dst-admin.installation=default
 com.dst-admin.cluster=<Cluster directory>
 com.dst-admin.shard=<Shard directory>
 ```
 
-Compose 示例只展示 Master。增加 Caves 时复制 Shard 服务并使用独立 `server_port`、`authentication_port`、`master_server_port`，不要复用 UDP 映射。分片互联参数仍由 DST 的 `cluster.ini` 和 `server.ini` 决定。
+管理程序不会根据容器名称猜测归属，也不会控制缺少标签或标签重复的容器。每个 Runtime 内部使用私有 tmux socket；控制台命令使用固定 `docker exec ... tmux` 参数，不向 Web 暴露宿主 Shell。
 
-Compose 中各 volume 的边界如下：
+## 数据目录
 
-- `control-data`：控制面数据库/WAL、`app.conf`、备份集、地图制品、控制器 Workshop 内容库、SteamCMD HOME，以及兼容本地接口使用的 `unmanaged-saves`、`unmanaged-server`、`unmanaged-ugc`。它不挂给 Agent 或 DST，但容量不能只按 SQLite 估算；Workshop、备份和地图可能成为主要占用。
-- `agent-data`：Agent ID、fencing/幂等状态以及 `MOD_CACHE_PATH`、`MOD_STATE_PATH`，不挂给 DST。
-- `dst-saves`：Cluster/Shard 存档和 `modoverrides.lua`；DST 需要读写，启用 Mod 发布和恢复时 Agent 也需要读写。
-- `dst-server`：DST 二进制安装卷；Agent 和 DST 都只读挂载。
-- `dst-mods`：覆盖安装卷的 `mods` 子目录；Agent 读写，DST 只读，用于 `workshop-*` 和 `dedicated_server_mods_setup.lua` 的原子发布。
-- `dst-workshop`：Steam Workshop 下载内容，对应 `WORKSHOP_CONTENT_PATH`；它不是房间存档。
+默认宿主根目录是 `/opt/dst`：
 
-Compose 使用嵌套的 `dst-mods` volume，只给 Agent 的 `/srv/dst/server/mods` 写权限；`dst-server` 的其余内容始终只读。DST Shard 在 `/opt/dst/server/mods` 只读查看同一 volume，因此 Agent 可以原子执行 Mod `prepare/publish`，但不能通过这条挂载修改服务端二进制。cache/state 仍位于 `agent-data`，不落入安装卷。
+| 路径 | 内容 | 世界容器权限 |
+| --- | --- | --- |
+| `/opt/dst/control` | 配置、SQLite 数据库和管理状态 | 不挂载 |
+| `/opt/dst/server` | 一份共享 DST 二进制和 `mods` | 只读 |
+| `/opt/dst/saves` | 房间公共配置和各 Shard 存档 | 读写 |
+| `/opt/dst/workshop` | SteamCMD Workshop 内容 | UGC 根只读 |
+| `/opt/dst/backups` | 存档备份和系统快照 | 不挂载 |
+| `/opt/dst/maps` | 地图渲染制品 | 不挂载 |
 
-Agent 和 DST 镜像固定使用同一非 root UID/GID `10000:10000`，但仍运行在不同容器、拥有不同进程和密钥边界。`volume-init` 只以 root 运行一次，用于迁移/初始化 `agent-data`、`dst-saves`、`dst-mods` 和 `dst-workshop` 的所有权，完成后退出；它是唯一临时可写挂载 `dst-server` 的容器，仅用于保证空安装卷存在 `server/mods` 嵌套挂载点和只读 Runtime 所需的 `server/bin64` 工作目录。首次创建 `dst-mods` 时还会复制已有 `server/mods` 内容，避免嵌套挂载隐藏旧的 setup 或本地 Mod。常驻 Agent 和 DST 对 `dst-server` 仍只有只读权限，控制面也不依赖或挂载这些 volume。不要使用 `chmod -R 777`，也不要让两个 Shard 同时无约束地写同一个私有世界目录。
+Master、Caves 和其他世界不会各下载一份服务端。SteamCMD 只更新 `/opt/dst/server`；世界重启后读取同一版本。模组由管理容器写入共享服务端/Workshop 目录，世界容器通过只读挂载和 `-ugc_directory` 使用这些文件。每个 Shard 只写自己的存档目录，房间备份仍由应用协调全部世界，不用逐容器复制代替。
 
-控制面以 UID/GID `10001:10001` 运行。`control-data-init` 只在卷布局 marker 缺失时以 root 创建目录并修正旧卷所有权，随后退出；这同时解决旧版本由 root 创建 Workshop 父目录后 SteamCMD 报 `Staging folder not writable` 的升级问题。升级前必须对整个 `control-data` 做一致性备份，至少包含 SQLite 主文件及 WAL/SHM、配置、备份索引和 Workshop 状态；不能在数据库仍写入时只复制 `go-dont.db`。首次升级后应确认 marker、目录所有者、剩余空间，以及 `/var/lib/dst-admin/workshop/steamapps/workshop/{content,downloads}/322330` 可由 UID 10001 写入。
+Klei 的 Linux 专服只提供 amd64 二进制，因此管理镜像和世界运行时镜像固定构建为 `linux/amd64`。Debian/Ubuntu x86_64 是该模式的推荐宿主；macOS 默认继续使用本机 Runtime，Apple Silicon 上的容器模式仅适合兼容性测试，不适合作为高性能游戏宿主。
+
+## 安全与资源边界
+
+- Docker socket 等价于宿主机 root 级控制权，只能部署在可信服务器；不要把它交给远程 Agent 或第三方容器。
+- 管理容器启动时会读取 Docker socket 的实际 GID，再以非 root UID `10000` 和该 GID 运行；无需手动设置 `DOCKER_GID`。
+- 世界容器以 UID/GID `10000:10000`、只读根文件系统、全部 capability 删除和 `no-new-privileges` 运行。
+- 服务端和 UGC 只读，只有存档目录可写；tmux 状态位于容器临时文件系统。
+- 世界使用 host network，玩家端口、Steam 端口和 Master 分片端口仍以后台生成的 `cluster.ini`/`server.ini` 为准。创建前必须通过端口检查。
+- 一颗物理核心最多运行一个活跃 Shard。2C4G 默认只建议 Master+Caves，不默认绑定 CPU；4C8G 及以上才建议按需要启用独立 CPU 策略。
+- 管理容器重启不会主动杀死正在运行的世界容器；恢复后会按受管标签重新发现。正常停止世界仍先发送 `c_shutdown(true)`，超时才进入有审计的容器停止 fallback。
+
+## 远程 Agent
+
+远程 Linux/macOS 机器继续安装独立 Agent，因为管理中心不能直接访问另一台机器的文件、tmux 或 Docker Engine。开启本实例的“本机 + 集中管理”角色后，远程 Agent 使用 `ws://`/`wss://HOST/agent` 连接。Agent 配置只登记该远程主机的受信安装路径。
+
+本机不需要 Agent 容器。只有在明确要求管理服务与本机 Docker 权限分离时，才保留外置 Agent 作为高级兼容部署；它不是默认安装流程。
 
 ## Debian 12 裸机 Agent
 
@@ -183,7 +149,7 @@ deploy/scripts/smoke-deployment.sh
 DST_ADMIN_SMOKE_BUILD=1 deploy/scripts/smoke-deployment.sh
 ```
 
-验证项包括 Agent WebSocket 注册、心跳、Runtime inventory、类型化 Shard 操作、容器 label 过滤、固定 tmux socket 和 Compose 解析。若容器显示 running 但控制台健康为 starting，进入容器检查：
+验证项包括容器 label 过滤、首次创建参数、固定 tmux socket、远程 Agent 类型化操作和 Compose 解析。若容器显示 running 但控制台健康为 starting，进入容器检查：
 
 ```bash
 docker exec <container-id> tmux -S /run/dst-admin/tmux/tmux.sock has-session -t =dst
@@ -192,23 +158,19 @@ docker logs <container-id>
 
 停止通过控制台发送 `c_shutdown(true)`，由 DST 自己完成存档并退出。不要用通用 `docker kill` 作为正常停止路径；强制退出必须显示未保存风险并进入异常退出审计。
 
-Agent 会等待容器真实退出，超时才依次使用 Engine `stop` 和 `kill --signal KILL`。Engine 退出观察区分正常退出、非零退出、SIGKILL、dead 和 `CONTAINER_OOM_KILLED`；进入 fallback 即使最终停止也不会伪装成已确认保存。
-
-容器 Agent 可以用同一 attach CLI 连接 container Runtime，但只会生成受管 label 目标的固定 `docker/podman exec ... tmux attach-session` 参数，不接受 Shell 字符串。容器 Agent 会报告 `provider.container-runtime.v1`；它不会因为看到 bind mount 或 Docker Socket 就报告 native host integration。容器内配置 `DRIVER=native` 会返回 `NATIVE_HOST_INTEGRATION_UNAVAILABLE`，裸机 DST 仍必须使用裸机 Agent。
-
-`agent-data` 卷是容器控制权的一部分。如果状态文件丢失但 Agent 发现已有受管容器，所有变更返回 `CONTAINER_OWNERSHIP_STATE_LOST`，只读观察仍可用。优先恢复原状态卷；只有在核对不存在旧 Agent、旧实例或更高 fencing token 后，才可单次设置 `DST_ADMIN_ADOPT_EXISTING_CONTAINERS=true` 建立新哨兵，成功后立即移除该环境变量。
+本机容器 Runtime 会等待容器真实退出，超时才依次使用 Engine `stop` 和 `kill --signal KILL`。Engine 退出观察区分正常退出、非零退出、SIGKILL、dead 和 `CONTAINER_OOM_KILLED`；进入 fallback 即使最终停止也不会伪装成已确认保存。
 
 ## 备份边界
 
 房间备份以 `dst-saves` 中的 Cluster 公共文件和各 Shard 私有存档为数据面，必须先经过保存/停服一致性协调。不要把 Docker volume 的逐卷复制直接声明为完整房间备份。
 
-控制面数据库和 `agent-data` 属于平台灾备：应与房间备份分开保护。`MOD_STATE_PATH` 和 Agent runtime state 决定中断恢复、fencing 与幂等语义，恢复 Agent 时必须作为同一节点身份的一组状态处理；不能只恢复旧 Agent ID 而丢弃更高 fencing token。`MOD_CACHE_PATH`、Workshop 内容和 DST 二进制原则上可重建，但保留 cache 能保证精确版本回滚和 Steam 不可用时恢复。
+`/opt/dst/control` 属于平台灾备，应与房间备份分开保护。远程 Agent 的 runtime state 决定 fencing 与幂等语义，恢复远程节点时必须保留；本机容器通过数据库、受管标签和固定 installation ID 重新发现。Mod cache、Workshop 内容和 DST 二进制原则上可重建，但保留 cache 能保证精确版本回滚和 Steam 不可用时恢复。
 
 Kubernetes 的 PVC/CSI snapshot 只能替代单卷复制，不能替代跨 Shard 保存屏障、manifest 和集中校验。当前已提供默认关闭的 Provider 状态、只读 REST observation、类型化 preflight API/UI、namespace RBAC 与实验安全内核，但固定 `applyAllowed=false`，没有 Apply 路由、lease-aware supervisor、Console、Mod 分发、备份或恢复链路，不能作为生产安装步骤。
 
-## Debian 12 实机证据
+## 历史 Debian 12 实机证据
 
-2026-08-15 在全新 Debian 12 / Docker 环境完成以下真实链路，测试工作区与既有 DST 环境隔离：
+2026-08-15 在全新 Debian 12 / Docker 环境完成以下远程 Agent 链路，测试工作区与既有 DST 环境隔离。它证明远程协议与跨节点数据链路，不替代当前“管理容器直控本机 Shard”的重新验收：
 
 - 非 root 控制面首次启动与旧 `control-data` 权限迁移，控制面健康检查和两个 Agent 重连。
 - 裸机 Agent 与容器 Agent 同时注册，Runtime inventory、物理核心容量和受管容器 label 识别正常。
