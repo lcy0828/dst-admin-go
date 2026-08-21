@@ -43,39 +43,56 @@ const (
 	TypeSecurityKeyUpdateProposal = "security_key_update_proposal"
 	// 密钥更新准备类型
 	TypeSecurityKeyUpdateReady = "security_key_update_ready"
+	statusCommandQueueSize     = 32
+	generalCommandQueueSize    = 64
+	statusCommandWorkerCount   = 2
+	generalCommandWorkerCount  = 4
 )
+
+const agentCommandBusyMessage = "AGENT_COMMAND_BUSY: Agent 命令队列已满，请稍后重试"
+
+type commandWorkItem struct {
+	payload      shared.CommandPayload
+	connection   *shared.SecureConnection
+	acknowledged chan struct{}
+}
 
 // 记录启动时间
 var startTime = time.Now()
 
 // Agent 表示一个代理实例
 type Agent struct {
-	Config            *Config
-	keyPair           *shared.KeyPair
-	serverPubKey      [32]byte
-	conn              *shared.SecureConnection
-	isConnected       bool
-	connMutex         sync.Mutex
-	reconnecting      bool
-	stopChan          chan struct{}
-	wg                sync.WaitGroup
-	reportInterval    time.Duration
-	reportMutex       sync.Mutex
-	keyManager        *shared.KeyManager // 添加密钥管理器
-	shardState        *shardOperationState
-	shardRuntime      shardRuntimeFactory
-	shardRuntimeMu    sync.Mutex
-	shardRuntimes     map[string]shardRuntimeControl
-	consoleHazards    map[string][]consoleHazard
-	shardTransferMu   sync.Mutex
-	shardTransfers    map[string]*shardtransfer.Manager
-	modDistributionMu sync.Mutex
-	modDistributions  map[string]*moddistribution.Manager
-	gameVersionRunner gameVersionCommandRunner
-	attachListener    net.Listener
-	attachMutex       sync.Mutex
-	attachConnections map[net.Conn]struct{}
-	now               func() time.Time
+	Config             *Config
+	keyPair            *shared.KeyPair
+	serverPubKey       [32]byte
+	conn               *shared.SecureConnection
+	isConnected        bool
+	connMutex          sync.Mutex
+	reconnecting       bool
+	stopChan           chan struct{}
+	wg                 sync.WaitGroup
+	reportInterval     time.Duration
+	reportMutex        sync.Mutex
+	keyManager         *shared.KeyManager // 添加密钥管理器
+	shardState         *shardOperationState
+	shardRuntime       shardRuntimeFactory
+	shardRuntimeMu     sync.Mutex
+	shardRuntimes      map[string]shardRuntimeControl
+	consoleHazards     map[string][]consoleHazard
+	shardTransferMu    sync.Mutex
+	shardTransfers     map[string]*shardtransfer.Manager
+	modDistributionMu  sync.Mutex
+	modDistributions   map[string]*moddistribution.Manager
+	gameVersionRunner  gameVersionCommandRunner
+	attachListener     net.Listener
+	attachMutex        sync.Mutex
+	attachConnections  map[net.Conn]struct{}
+	now                func() time.Time
+	statusCommands     chan commandWorkItem
+	generalCommands    chan commandWorkItem
+	commandWorkersOnce sync.Once
+	commandWorkerWG    sync.WaitGroup
+	commandHandler     func(commandWorkItem)
 }
 
 // Config 代理配置
@@ -150,13 +167,15 @@ func NewAgent(config *Config) (*Agent, error) {
 	}
 
 	agent := &Agent{
-		Config:         config,
-		keyPair:        keyPair,
-		isConnected:    false,
-		reconnecting:   false,
-		stopChan:       make(chan struct{}),
-		reportInterval: config.ReportInterval,
-		now:            time.Now,
+		Config:          config,
+		keyPair:         keyPair,
+		isConnected:     false,
+		reconnecting:    false,
+		stopChan:        make(chan struct{}),
+		reportInterval:  config.ReportInterval,
+		now:             time.Now,
+		statusCommands:  make(chan commandWorkItem, statusCommandQueueSize),
+		generalCommands: make(chan commandWorkItem, generalCommandQueueSize),
 	}
 
 	// 从配置文件加载配置
@@ -227,6 +246,7 @@ func (a *Agent) Start() error {
 	if err := a.startConsoleAttachServer(); err != nil {
 		return fmt.Errorf("启动本地 console attach 服务: %w", err)
 	}
+	a.startCommandWorkers()
 
 	// 连接到服务器
 	err := a.Connect()
@@ -285,6 +305,7 @@ func (a *Agent) Stop() {
 	a.connMutex.Unlock()
 
 	a.wg.Wait()
+	a.commandWorkerWG.Wait()
 	log.Println("Agent已停止")
 }
 
@@ -688,7 +709,7 @@ func (a *Agent) handleMessages() {
 func (a *Agent) processMessage(msg *shared.Message) {
 	switch msg.Type {
 	case shared.TypeCommand:
-		a.handleCommand(msg)
+		a.dispatchCommand(msg)
 
 	case shared.TypeHeartbeatAck:
 		// 心跳确认，不需要特殊处理
@@ -718,9 +739,68 @@ func (a *Agent) processMessage(msg *shared.Message) {
 	}
 }
 
-// 处理命令消息
-func (a *Agent) handleCommand(msg *shared.Message) {
-	// 解析命令负载
+func (a *Agent) startCommandWorkers() {
+	a.commandWorkersOnce.Do(func() {
+		for index := 0; index < statusCommandWorkerCount; index++ {
+			a.commandWorkerWG.Add(1)
+			go a.commandWorker(a.statusCommands)
+		}
+		for index := 0; index < generalCommandWorkerCount; index++ {
+			a.commandWorkerWG.Add(1)
+			go a.commandWorker(a.generalCommands)
+		}
+	})
+}
+
+func (a *Agent) commandWorker(queue <-chan commandWorkItem) {
+	defer a.commandWorkerWG.Done()
+	for {
+		select {
+		case <-a.stopChan:
+			return
+		case item := <-queue:
+			select {
+			case <-a.stopChan:
+				return
+			case <-item.acknowledged:
+			}
+			if a.commandHandler != nil {
+				a.commandHandler(item)
+			} else {
+				a.executeCommand(item.payload, item.connection)
+			}
+		}
+	}
+}
+
+func commandUsesStatusQueue(payload shared.CommandPayload) bool {
+	return payload.Type == string(shared.ShardActionStatus)
+}
+
+func (a *Agent) enqueueCommand(item commandWorkItem) bool {
+	queue := a.generalCommands
+	if commandUsesStatusQueue(item.payload) {
+		queue = a.statusCommands
+	}
+	select {
+	case <-a.stopChan:
+		return false
+	case queue <- item:
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *Agent) currentCommandConnection() *shared.SecureConnection {
+	a.connMutex.Lock()
+	defer a.connMutex.Unlock()
+	return a.conn
+}
+
+// dispatchCommand only validates and queues work so the WebSocket read loop
+// remains responsive while a shard start waits for DST readiness.
+func (a *Agent) dispatchCommand(msg *shared.Message) {
 	var cmdPayload shared.CommandPayload
 	if err := json.Unmarshal(msg.Payload, &cmdPayload); err != nil {
 		log.Printf("解析命令负载失败: %v", err)
@@ -734,19 +814,35 @@ func (a *Agent) handleCommand(msg *shared.Message) {
 		// 老版本格式的命令ID，为兼容性考虑继续处理
 		log.Printf("警告: 收到旧格式的命令ID: %s", cmdPayload.CommandID)
 	}
+	item := commandWorkItem{
+		payload: cmdPayload, connection: a.currentCommandConnection(), acknowledged: make(chan struct{}),
+	}
+	if !a.enqueueCommand(item) {
+		a.sendCommandAck(item.connection, cmdPayload.CommandID, "rejected")
+		a.sendCommandResponse(item.connection, shared.CommandResponsePayload{
+			CommandID: cmdPayload.CommandID, Success: false, ErrorMsg: agentCommandBusyMessage, ExitCode: 1,
+		})
+		return
+	}
+	a.sendCommandAck(item.connection, cmdPayload.CommandID, "received")
+	close(item.acknowledged)
+}
 
-	// 发送命令确认
+func (a *Agent) sendCommandAck(connection *shared.SecureConnection, commandID, status string) {
 	ackMsg, _ := shared.CreateMessage(shared.TypeCommandAck, a.Config.AgentID, map[string]string{
-		"command_id": cmdPayload.CommandID,
-		"status":     "received",
+		"command_id": commandID,
+		"status":     status,
 	})
-
-	// 发送确认
-	if err := a.conn.SendEncrypted(ackMsg); err != nil {
+	if connection == nil {
+		log.Printf("发送命令确认失败: 连接不可用")
+		return
+	}
+	if err := connection.SendEncrypted(ackMsg); err != nil {
 		log.Printf("发送命令确认失败: %v", err)
 	}
+}
 
-	// 根据命令类型处理命令
+func (a *Agent) executeCommand(cmdPayload shared.CommandPayload, connection *shared.SecureConnection) {
 	var output string
 	var errMsg string
 	var exitCode int
@@ -803,14 +899,20 @@ func (a *Agent) handleCommand(msg *shared.Message) {
 		ExitCode:  exitCode,
 	}
 
-	respMsg, err := shared.CreateMessage(shared.TypeCommandResp, a.Config.AgentID, respPayload)
+	a.sendCommandResponse(connection, respPayload)
+}
+
+func (a *Agent) sendCommandResponse(connection *shared.SecureConnection, payload shared.CommandResponsePayload) {
+	respMsg, err := shared.CreateMessage(shared.TypeCommandResp, a.Config.AgentID, payload)
 	if err != nil {
 		log.Printf("创建命令响应失败: %v", err)
 		return
 	}
-
-	// 发送响应
-	if err := a.conn.SendEncrypted(respMsg); err != nil {
+	if connection == nil {
+		log.Printf("发送命令响应失败: 连接不可用")
+		return
+	}
+	if err := connection.SendEncrypted(respMsg); err != nil {
 		log.Printf("发送命令响应失败: %v", err)
 	}
 }
