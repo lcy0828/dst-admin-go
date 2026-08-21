@@ -35,6 +35,13 @@ func (c *Coordinator) Restore(ctx context.Context, setID, confirmation, sourceJo
 	if err != nil {
 		return RestoreResult{}, err
 	}
+	backupSet = c.classifySet(backupSet)
+	if !backupSet.Restorable {
+		if backupSet.ContentKind == "unknown" {
+			return RestoreResult{}, errors.Join(ErrIntegrity, errors.New(backupSet.ValidationError))
+		}
+		return RestoreResult{}, errors.Join(ErrNotRestorable, errors.New(backupSet.ValidationError))
+	}
 	ctx, releaseRoom, err := roomops.Acquire(ctx, backupSet.RoomID)
 	if err != nil {
 		return RestoreResult{}, err
@@ -147,6 +154,13 @@ func (c *Coordinator) Restore(ctx context.Context, setID, confirmation, sourceJo
 }
 
 func (c *Coordinator) verifySet(value Set, current []runtimePart, revision string) error {
+	value = c.classifySet(value)
+	if !value.Restorable {
+		if value.ContentKind == "unknown" {
+			return errors.Join(ErrIntegrity, errors.New(value.ValidationError))
+		}
+		return errors.Join(ErrNotRestorable, errors.New(value.ValidationError))
+	}
 	if value.Status != StatusVerified || value.VerifiedAt == nil || value.ManifestVersion != manifestVersion || len(value.Parts) != len(current) ||
 		value.TopologyRevision != revision || len(value.ManifestSHA256) != 64 || len(value.SharedSHA256) != 64 {
 		return ErrIncomplete
@@ -190,6 +204,10 @@ func (c *Coordinator) verifySet(value Set, current []runtimePart, revision strin
 		}
 		if err := verifyRegularFile(path, part.Size, part.SHA256); err != nil {
 			return err
+		}
+		inspection, inspectErr := shardtransfer.InspectBackupArchive(path)
+		if inspectErr != nil || !inspection.Restorable {
+			return errors.Join(ErrNotRestorable, inspectErr, errors.New(inspection.ValidationError))
 		}
 	}
 	return nil

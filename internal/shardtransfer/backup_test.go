@@ -150,6 +150,39 @@ func TestBackupRestoreRejectsCorruptArchive(t *testing.T) {
 	}
 }
 
+func TestBackupInspectionAndRestoreRejectConfigurationOnlyArchive(t *testing.T) {
+	sourceRoot, _, source, target := prepareTransferRoots(t)
+	if err := os.RemoveAll(filepath.Join(sourceRoot, "Cluster_1", "Master", "save")); err != nil {
+		t.Fatal(err)
+	}
+	id := "backup-config-only-0001"
+	descriptor, err := source.PrepareBackup(context.Background(), id, "Cluster_1", "Master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := InspectBackupArchive(source.exportPath(id))
+	if err != nil || inspection.Restorable || inspection.ContentKind != BackupContentConfigurationOnly || inspection.ValidationError == "" {
+		t.Fatalf("inspection=%#v err=%v", inspection, err)
+	}
+	if _, err := target.BeginRestore(descriptor); err != nil {
+		t.Fatal(err)
+	}
+	for offset := int64(0); offset < descriptor.Size; {
+		chunk, readErr := source.ReadBackup(context.Background(), id, offset)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		next, writeErr := target.WriteRestore(id, offset, chunk.Data)
+		if writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		offset = next
+	}
+	if _, err := target.PrepareRestore(context.Background(), id); !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("configuration-only restore error=%v", err)
+	}
+}
+
 func assertFileContent(t *testing.T, path, expected string) {
 	t.Helper()
 	data, err := os.ReadFile(path)

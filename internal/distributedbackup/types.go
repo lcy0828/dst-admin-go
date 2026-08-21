@@ -16,6 +16,7 @@ var (
 	ErrRecoveryIncomplete = errors.New("backup recovery requires operator attention")
 	ErrHotUnavailable     = errors.New("hot-consistent backup is unavailable for this room")
 	ErrBarrierFailed      = errors.New("cross-shard snapshot barrier failed")
+	ErrNotRestorable      = errors.New("backup set does not contain restorable game save data")
 )
 
 type Status string
@@ -53,6 +54,9 @@ type Set struct {
 	Size                  int64      `json:"size"`
 	ContentSize           int64      `json:"contentSize"`
 	FileCount             int        `json:"fileCount"`
+	ContentKind           string     `json:"contentKind"`
+	Restorable            bool       `json:"restorable"`
+	ValidationError       string     `json:"validationError,omitempty"`
 	OriginalRunningWorlds []string   `json:"originalRunningWorlds"`
 	ManifestSHA256        string     `json:"manifestSha256,omitempty"`
 	Failure               string     `json:"failure,omitempty"`
@@ -86,6 +90,12 @@ type Part struct {
 	Size             int64      `json:"size"`
 	ContentSize      int64      `json:"contentSize"`
 	FileCount        int        `json:"fileCount"`
+	ContentKind      string     `json:"contentKind"`
+	Restorable       bool       `json:"restorable"`
+	SessionID        string     `json:"sessionId,omitempty"`
+	LatestSnapshot   string     `json:"latestSnapshot,omitempty"`
+	HasShardIndex    bool       `json:"hasShardIndex"`
+	ValidationError  string     `json:"validationError,omitempty"`
 	SHA256           string     `json:"sha256,omitempty"`
 	SharedSHA256     string     `json:"sharedSha256,omitempty"`
 	Failure          string     `json:"failure,omitempty"`

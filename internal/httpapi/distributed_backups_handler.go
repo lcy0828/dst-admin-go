@@ -135,6 +135,10 @@ func (h *DistributedBackupHandler) restore(c *gin.Context) {
 		Failure(c, http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", "请输入完整房间名确认恢复", nil)
 		return
 	}
+	if !value.Restorable {
+		Failure(c, http.StatusUnprocessableEntity, "BACKUP_NOT_RESTORABLE", "该记录仅包含配置或缺少完整世界存档，不能用于恢复世界", gin.H{"validationError": value.ValidationError})
+		return
+	}
 	job, err := h.jobs.SubmitFactory("backup-set.restore", value.RoomID, "", []jobs.TargetSpec{{ID: setID, Name: value.Name}}, func(job jobs.Job) jobs.Runner {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
 			result, restoreErr := h.backups.Restore(ctx, setID, request.Confirmation, job.ID)
@@ -201,6 +205,8 @@ func distributedBackupJobError(err error) *jobs.Error {
 		code = "BACKUP_HOT_UNAVAILABLE"
 	case errors.Is(err, distributedbackup.ErrBarrierFailed):
 		code = "BACKUP_SNAPSHOT_BARRIER_FAILED"
+	case errors.Is(err, distributedbackup.ErrNotRestorable):
+		code = "BACKUP_NOT_RESTORABLE"
 	}
 	return &jobs.Error{Code: code, Message: err.Error()}
 }
@@ -213,7 +219,7 @@ func distributedBackupFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "备份集请求无效", nil)
 	case errors.Is(err, distributedbackup.ErrTopologyChanged), errors.Is(err, distributedbackup.ErrTargetUnavailable):
 		Failure(c, http.StatusConflict, "BACKUP_TOPOLOGY_UNAVAILABLE", err.Error(), nil)
-	case errors.Is(err, distributedbackup.ErrIntegrity), errors.Is(err, distributedbackup.ErrIncomplete):
+	case errors.Is(err, distributedbackup.ErrIntegrity), errors.Is(err, distributedbackup.ErrIncomplete), errors.Is(err, distributedbackup.ErrNotRestorable):
 		Failure(c, http.StatusUnprocessableEntity, "BACKUP_SET_INVALID", err.Error(), nil)
 	case errors.Is(err, distributedbackup.ErrHotUnavailable), errors.Is(err, distributedbackup.ErrBarrierFailed):
 		Failure(c, http.StatusConflict, "BACKUP_HOT_UNAVAILABLE", err.Error(), nil)

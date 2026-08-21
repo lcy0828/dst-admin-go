@@ -26,6 +26,25 @@ type BackupDescriptor struct {
 	Phase        string `json:"phase,omitempty"`
 }
 
+const (
+	BackupContentGameSave          = "game-save"
+	BackupContentConfigurationOnly = "configuration-only"
+)
+
+// BackupInspection describes whether an otherwise valid backup archive also
+// contains the minimum DST save evidence required for a world restore.
+type BackupInspection struct {
+	ContentSize     int64
+	FileCount       int
+	SharedSHA256    string
+	ContentKind     string
+	Restorable      bool
+	SessionID       string
+	LatestSnapshot  string
+	HasShardIndex   bool
+	ValidationError string
+}
+
 type RestoreReceipt struct {
 	BackupID       string   `json:"backupId"`
 	Cluster        string   `json:"cluster"`
@@ -42,13 +61,13 @@ func (m *Manager) PrepareBackup(ctx context.Context, id, cluster, shard string) 
 	if err != nil {
 		return BackupDescriptor{}, err
 	}
-	contentSize, fileCount, sharedSHA, err := inspectBackupArchive(m.exportPath(id))
+	inspection, err := InspectBackupArchive(m.exportPath(id))
 	if err != nil {
 		return BackupDescriptor{}, err
 	}
 	return BackupDescriptor{
-		BackupID: id, Size: value.Size, ContentSize: contentSize, FileCount: fileCount,
-		SHA256: value.SHA256, SharedSHA256: sharedSHA, Cluster: cluster, Shard: shard, Phase: "staged",
+		BackupID: id, Size: value.Size, ContentSize: inspection.ContentSize, FileCount: inspection.FileCount,
+		SHA256: value.SHA256, SharedSHA256: inspection.SharedSHA256, Cluster: cluster, Shard: shard, Phase: "staged",
 	}, nil
 }
 
@@ -419,6 +438,9 @@ func (m *Manager) validateRestoreStage(descriptor BackupDescriptor) error {
 	if err != nil || !strings.EqualFold(sharedSHA, descriptor.SharedSHA256) {
 		return ErrIntegrity
 	}
+	if evidence := inspectSaveDirectory(filepath.Join(stage, "shard", "save")); !evidence.restorable() {
+		return ErrIntegrity
+	}
 	return nil
 }
 
@@ -461,43 +483,134 @@ func sameBackupDescriptor(left, right BackupDescriptor) bool {
 		strings.EqualFold(left.SHA256, right.SHA256) && strings.EqualFold(left.SharedSHA256, right.SharedSHA256)
 }
 
-func inspectBackupArchive(path string) (int64, int, string, error) {
+// InspectBackupArchive verifies the bounded archive structure and classifies
+// its restore capability without extracting it.
+func InspectBackupArchive(path string) (BackupInspection, error) {
 	archive, err := zip.OpenReader(path)
 	if err != nil {
-		return 0, 0, "", ErrIntegrity
+		return BackupInspection{}, ErrIntegrity
 	}
 	defer archive.Close()
 	if len(archive.File) < 2 || len(archive.File) > maxEntryCount {
-		return 0, 0, "", ErrIntegrity
+		return BackupInspection{}, ErrIntegrity
 	}
 	var contentSize int64
 	shared := make(map[string][]byte)
+	evidence := saveEvidence{}
 	for _, entry := range archive.File {
 		if entry.UncompressedSize64 > uint64(maxEntryBytes) || contentSize > maxTotalBytes-int64(entry.UncompressedSize64) {
-			return 0, 0, "", ErrIntegrity
+			return BackupInspection{}, ErrIntegrity
 		}
 		contentSize += int64(entry.UncompressedSize64)
 		name := filepath.ToSlash(filepath.Clean(filepath.FromSlash(entry.Name)))
+		if name == "shard/save/shardindex" && entry.Mode().IsRegular() && entry.UncompressedSize64 > 0 {
+			evidence.HasShardIndex = true
+		}
+		if sessionID, snapshot, ok := archiveSnapshotEvidence(name, entry); ok {
+			evidence.addSnapshot(sessionID, snapshot)
+		}
 		if !strings.HasPrefix(name, "shared/") {
 			continue
 		}
 		base := strings.TrimPrefix(name, "shared/")
 		if !sharedFileNames[base] || strings.Contains(base, "/") {
-			return 0, 0, "", ErrIntegrity
+			return BackupInspection{}, ErrIntegrity
 		}
 		reader, err := entry.Open()
 		if err != nil {
-			return 0, 0, "", err
+			return BackupInspection{}, err
 		}
 		data, readErr := io.ReadAll(io.LimitReader(reader, maxEntryBytes+1))
 		closeErr := reader.Close()
 		if readErr != nil || closeErr != nil || int64(len(data)) != int64(entry.UncompressedSize64) {
-			return 0, 0, "", errors.Join(readErr, closeErr, ErrIntegrity)
+			return BackupInspection{}, errors.Join(readErr, closeErr, ErrIntegrity)
 		}
 		shared[base] = data
 	}
-	checksum := hashNamedData(shared)
-	return contentSize, len(archive.File), checksum, nil
+	return evidence.inspection(contentSize, len(archive.File), hashNamedData(shared)), nil
+}
+
+type saveEvidence struct {
+	HasShardIndex  bool
+	SessionID      string
+	LatestSnapshot string
+}
+
+func (e saveEvidence) restorable() bool {
+	return e.HasShardIndex && e.LatestSnapshot != ""
+}
+
+func (e *saveEvidence) addSnapshot(sessionID, snapshot string) {
+	if e.LatestSnapshot == "" || snapshot > e.LatestSnapshot || snapshot == e.LatestSnapshot && sessionID < e.SessionID {
+		e.SessionID, e.LatestSnapshot = sessionID, snapshot
+	}
+}
+
+func (e saveEvidence) inspection(contentSize int64, fileCount int, sharedSHA string) BackupInspection {
+	value := BackupInspection{
+		ContentSize: contentSize, FileCount: fileCount, SharedSHA256: sharedSHA,
+		ContentKind: BackupContentConfigurationOnly, SessionID: e.SessionID,
+		LatestSnapshot: e.LatestSnapshot, HasShardIndex: e.HasShardIndex,
+	}
+	switch {
+	case !e.HasShardIndex && e.LatestSnapshot == "":
+		value.ValidationError = "备份不包含 save/shardindex 和 Session 快照"
+	case !e.HasShardIndex:
+		value.ValidationError = "备份不包含 save/shardindex"
+	case e.LatestSnapshot == "":
+		value.ValidationError = "备份不包含有效的 Session 快照"
+	default:
+		value.ContentKind, value.Restorable = BackupContentGameSave, true
+	}
+	return value
+}
+
+func archiveSnapshotEvidence(name string, entry *zip.File) (string, string, bool) {
+	parts := strings.Split(name, "/")
+	if len(parts) != 5 || parts[0] != "shard" || parts[1] != "save" || parts[2] != "session" ||
+		parts[3] == "" || !entry.Mode().IsRegular() || entry.UncompressedSize64 == 0 || !snapshotName(parts[4]) {
+		return "", "", false
+	}
+	return parts[3], parts[4], true
+}
+
+func inspectSaveDirectory(saveRoot string) saveEvidence {
+	value := saveEvidence{}
+	if info, err := os.Lstat(filepath.Join(saveRoot, "shardindex")); err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+		value.HasShardIndex = true
+	}
+	sessions, err := os.ReadDir(filepath.Join(saveRoot, "session"))
+	if err != nil {
+		return value
+	}
+	for _, session := range sessions {
+		if !session.IsDir() || session.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		entries, readErr := os.ReadDir(filepath.Join(saveRoot, "session", session.Name()))
+		if readErr != nil {
+			continue
+		}
+		for _, entry := range entries {
+			info, infoErr := entry.Info()
+			if infoErr == nil && info.Mode().IsRegular() && info.Size() > 0 && snapshotName(entry.Name()) {
+				value.addSnapshot(session.Name(), entry.Name())
+			}
+		}
+	}
+	return value
+}
+
+func snapshotName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func hashSharedDirectory(root string) (string, error) {

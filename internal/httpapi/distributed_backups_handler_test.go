@@ -87,7 +87,7 @@ func TestDistributedBackupHandlerCreatesAndRestoresJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := &distributedBackupHTTPFixture{value: distributedbackup.Set{ID: "set-1", RoomID: "room", RoomName: "测试房间", Name: "备份集"}}
+	fixture := &distributedBackupHTTPFixture{value: distributedbackup.Set{ID: "set-1", RoomID: "room", RoomName: "测试房间", Name: "备份集", Restorable: true, ContentKind: "game-save"}}
 	handler, err := NewDistributedBackupHandler(fixture, jobService)
 	if err != nil {
 		t.Fatal(err)

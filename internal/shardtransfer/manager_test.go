@@ -26,6 +26,7 @@ func prepareTransferRoots(t *testing.T) (string, string, *Manager, *Manager) {
 		filepath.Join(cluster, "cluster.ini"):                            "[NETWORK]\ncluster_name = Test\n",
 		filepath.Join(cluster, "cluster_token.txt"):                      "token-value\n",
 		filepath.Join(cluster, "Master", "server.ini"):                   "[SHARD]\nis_master = true\n",
+		filepath.Join(cluster, "Master", "save", "shardindex"):           "shard-index",
 		filepath.Join(cluster, "Master", "save", "session", "0001", "1"): "world-data",
 	}
 	for path, content := range files {

@@ -11,21 +11,27 @@ import (
 )
 
 type setRecord struct {
-	ID                    string `gorm:"primary_key;type:char(36)"`
-	RoomID                string `gorm:"type:varchar(255);index;not null"`
-	RoomName              string `gorm:"type:varchar(128);not null"`
-	Name                  string `gorm:"type:varchar(128);not null"`
-	Kind                  string `gorm:"type:varchar(24);index;not null"`
-	Mode                  string `gorm:"type:varchar(32);not null"`
-	ManifestVersion       int    `gorm:"not null"`
-	TopologyRevision      string `gorm:"type:varchar(128);index;not null"`
-	BarrierID             string `gorm:"type:varchar(128);index"`
-	Snapshot              int64  `gorm:"not null"`
+	ID               string `gorm:"primary_key;type:char(36)"`
+	RoomID           string `gorm:"type:varchar(255);index;not null"`
+	RoomName         string `gorm:"type:varchar(128);not null"`
+	Name             string `gorm:"type:varchar(128);not null"`
+	Kind             string `gorm:"type:varchar(24);index;not null"`
+	Mode             string `gorm:"type:varchar(32);not null"`
+	ManifestVersion  int    `gorm:"not null"`
+	TopologyRevision string `gorm:"type:varchar(128);index;not null"`
+	BarrierID        string `gorm:"type:varchar(128);index"`
+	// Snapshot was added after the initial backup-set schema. The default keeps
+	// SQLite migrations compatible with existing rows; zero means unavailable
+	// for a legacy backup.
+	Snapshot              int64  `gorm:"not null;default:0"`
 	SharedSHA256          string `gorm:"type:char(64)"`
 	Status                string `gorm:"type:varchar(24);index;not null"`
 	Size                  int64  `gorm:"not null"`
 	ContentSize           int64  `gorm:"not null"`
 	FileCount             int    `gorm:"not null"`
+	ContentKind           string `gorm:"type:varchar(32);not null;default:'unknown'"`
+	Restorable            bool   `gorm:"not null;default:false"`
+	ValidationError       string `gorm:"type:text"`
 	OriginalRunningWorlds string `gorm:"type:text;not null"`
 	ManifestSHA256        string `gorm:"type:char(64)"`
 	Failure               string `gorm:"type:text"`
@@ -50,14 +56,20 @@ type partRecord struct {
 	BarrierSessionID string `gorm:"type:varchar(128)"`
 	BarrierShardID   string `gorm:"type:varchar(64)"`
 	BarrierInstance  string `gorm:"type:varchar(128)"`
-	SnapshotBefore   int64  `gorm:"not null"`
-	SnapshotAfter    int64  `gorm:"not null"`
+	SnapshotBefore   int64  `gorm:"not null;default:0"`
+	SnapshotAfter    int64  `gorm:"not null;default:0"`
 	BarrierCompleted *time.Time
 	FileName         string `gorm:"type:varchar(255);not null"`
 	Status           string `gorm:"type:varchar(24);index;not null"`
 	Size             int64  `gorm:"not null"`
 	ContentSize      int64  `gorm:"not null"`
 	FileCount        int    `gorm:"not null"`
+	ContentKind      string `gorm:"type:varchar(32);not null;default:'unknown'"`
+	Restorable       bool   `gorm:"not null;default:false"`
+	SessionID        string `gorm:"type:varchar(128)"`
+	LatestSnapshot   string `gorm:"type:varchar(64)"`
+	HasShardIndex    bool   `gorm:"not null;default:false"`
+	ValidationError  string `gorm:"type:text"`
 	SHA256           string `gorm:"type:char(64)"`
 	SharedSHA256     string `gorm:"type:char(64)"`
 	Failure          string `gorm:"type:text"`
@@ -191,6 +203,7 @@ func (s *Store) SaveSet(value Set) (Set, error) {
 	updates := map[string]interface{}{
 		"shared_sha256": record.SharedSHA256, "status": record.Status, "size": record.Size,
 		"content_size": record.ContentSize, "file_count": record.FileCount, "manifest_sha256": record.ManifestSHA256,
+		"content_kind": record.ContentKind, "restorable": record.Restorable, "validation_error": record.ValidationError,
 		"barrier_id": record.BarrierID, "snapshot": record.Snapshot,
 		"failure": record.Failure, "verified_at": record.VerifiedAt, "updated_at": record.UpdatedAt,
 	}
@@ -210,6 +223,8 @@ func (s *Store) SavePart(value Part) (Part, error) {
 	updates := map[string]interface{}{
 		"status": record.Status, "size": record.Size, "content_size": record.ContentSize, "file_count": record.FileCount,
 		"sha256": record.SHA256, "shared_sha256": record.SharedSHA256, "failure": record.Failure,
+		"content_kind": record.ContentKind, "restorable": record.Restorable, "session_id": record.SessionID,
+		"latest_snapshot": record.LatestSnapshot, "has_shard_index": record.HasShardIndex, "validation_error": record.ValidationError,
 		"barrier_session_id": record.BarrierSessionID, "barrier_shard_id": record.BarrierShardID,
 		"barrier_instance": record.BarrierInstance, "snapshot_before": record.SnapshotBefore,
 		"snapshot_after": record.SnapshotAfter, "barrier_completed": record.BarrierCompleted,
@@ -319,6 +334,7 @@ func setRecordFrom(value Set) (setRecord, error) {
 		ManifestVersion: value.ManifestVersion, TopologyRevision: value.TopologyRevision, SharedSHA256: value.SharedSHA256,
 		BarrierID: value.BarrierID, Snapshot: value.Snapshot,
 		Status: string(value.Status), Size: value.Size, ContentSize: value.ContentSize, FileCount: value.FileCount,
+		ContentKind: value.ContentKind, Restorable: value.Restorable, ValidationError: value.ValidationError,
 		OriginalRunningWorlds: string(running), ManifestSHA256: value.ManifestSHA256, Failure: value.Failure,
 		SourceJobID: value.SourceJobID, VerifiedAt: value.VerifiedAt, CreatedAt: value.CreatedAt.UTC(), UpdatedAt: value.UpdatedAt.UTC(),
 	}, nil
@@ -334,6 +350,7 @@ func setFromRecord(record setRecord) (Set, error) {
 		ManifestVersion: record.ManifestVersion, TopologyRevision: record.TopologyRevision, SharedSHA256: record.SharedSHA256,
 		BarrierID: record.BarrierID, Snapshot: record.Snapshot,
 		Status: Status(record.Status), Size: record.Size, ContentSize: record.ContentSize, FileCount: record.FileCount,
+		ContentKind: record.ContentKind, Restorable: record.Restorable, ValidationError: record.ValidationError,
 		OriginalRunningWorlds: running, ManifestSHA256: record.ManifestSHA256, Failure: record.Failure, SourceJobID: record.SourceJobID,
 		VerifiedAt: record.VerifiedAt, CreatedAt: record.CreatedAt.UTC(), UpdatedAt: record.UpdatedAt.UTC(),
 	}, nil
@@ -347,6 +364,8 @@ func partRecordFrom(value Part) partRecord {
 		BarrierSessionID: value.BarrierSessionID, BarrierShardID: value.BarrierShardID, BarrierInstance: value.BarrierInstance,
 		SnapshotBefore: value.SnapshotBefore, SnapshotAfter: value.SnapshotAfter, BarrierCompleted: value.BarrierCompleted,
 		Size: value.Size, ContentSize: value.ContentSize, FileCount: value.FileCount, SHA256: value.SHA256,
+		ContentKind: value.ContentKind, Restorable: value.Restorable, SessionID: value.SessionID,
+		LatestSnapshot: value.LatestSnapshot, HasShardIndex: value.HasShardIndex, ValidationError: value.ValidationError,
 		SharedSHA256: value.SharedSHA256, Failure: value.Failure, VerifiedAt: value.VerifiedAt,
 		CreatedAt: value.CreatedAt.UTC(), UpdatedAt: value.UpdatedAt.UTC(),
 	}
@@ -360,6 +379,8 @@ func partFromRecord(record partRecord) Part {
 		BarrierSessionID: record.BarrierSessionID, BarrierShardID: record.BarrierShardID, BarrierInstance: record.BarrierInstance,
 		SnapshotBefore: record.SnapshotBefore, SnapshotAfter: record.SnapshotAfter, BarrierCompleted: record.BarrierCompleted,
 		Size: record.Size, ContentSize: record.ContentSize, FileCount: record.FileCount, SHA256: record.SHA256,
+		ContentKind: record.ContentKind, Restorable: record.Restorable, SessionID: record.SessionID,
+		LatestSnapshot: record.LatestSnapshot, HasShardIndex: record.HasShardIndex, ValidationError: record.ValidationError,
 		SharedSHA256: record.SharedSHA256, Failure: record.Failure, VerifiedAt: record.VerifiedAt,
 		CreatedAt: record.CreatedAt.UTC(), UpdatedAt: record.UpdatedAt.UTC(),
 	}

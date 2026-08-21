@@ -310,10 +310,11 @@ func writeShardFixture(t *testing.T, root, shard, worldData string) {
 	t.Helper()
 	cluster := filepath.Join(root, "Cluster_1")
 	files := map[string]string{
-		filepath.Join(cluster, "cluster.ini"):                    "[NETWORK]\ncluster_name = Test\n",
-		filepath.Join(cluster, "cluster_token.txt"):              "token-v1\n",
-		filepath.Join(cluster, shard, "server.ini"):              "[SHARD]\nname = " + shard + "\n",
-		filepath.Join(cluster, shard, "save", "session", "data"): worldData,
+		filepath.Join(cluster, "cluster.ini"):                                     "[NETWORK]\ncluster_name = Test\n",
+		filepath.Join(cluster, "cluster_token.txt"):                               "token-v1\n",
+		filepath.Join(cluster, shard, "server.ini"):                               "[SHARD]\nname = " + shard + "\n",
+		filepath.Join(cluster, shard, "save", "shardindex"):                       "shard-index-" + shard,
+		filepath.Join(cluster, shard, "save", "session", "SESSION", "0000000001"): worldData,
 	}
 	for path, value := range files {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -341,10 +342,10 @@ func TestColdConsistentBackupAndCoordinatedRestoreAcrossTargets(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(fixture.masterRoot, "Cluster_1", "Master", "save", "session", "data"), []byte("master-mutated"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(fixture.masterRoot, "Cluster_1", "Master", "save", "session", "SESSION", "0000000001"), []byte("master-mutated"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(fixture.cavesRoot, "Cluster_1", "Caves", "save", "session", "data"), []byte("caves-mutated"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(fixture.cavesRoot, "Cluster_1", "Caves", "save", "session", "SESSION", "0000000001"), []byte("caves-mutated"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	result, err := fixture.coordinator.Restore(context.Background(), created.ID, "测试房间", "job-restore")
@@ -358,8 +359,8 @@ func TestColdConsistentBackupAndCoordinatedRestoreAcrossTargets(t *testing.T) {
 	if err != nil || len(operations) < 2 || operations[0].ID != result.OperationID || operations[0].Status != OperationSucceeded {
 		t.Fatalf("operations=%#v err=%v", operations, err)
 	}
-	assertTextFile(t, filepath.Join(fixture.masterRoot, "Cluster_1", "Master", "save", "session", "data"), "master-v1")
-	assertTextFile(t, filepath.Join(fixture.cavesRoot, "Cluster_1", "Caves", "save", "session", "data"), "caves-v1")
+	assertTextFile(t, filepath.Join(fixture.masterRoot, "Cluster_1", "Master", "save", "session", "SESSION", "0000000001"), "master-v1")
+	assertTextFile(t, filepath.Join(fixture.cavesRoot, "Cluster_1", "Caves", "save", "session", "SESSION", "0000000001"), "caves-v1")
 	assertTextFile(t, filepath.Join(fixture.masterRoot, "Cluster_1", "cluster_token.txt"), "token-v1\n")
 	assertTextFile(t, filepath.Join(fixture.cavesRoot, "Cluster_1", "cluster_token.txt"), "token-v1\n")
 	assertControlRunning(t, fixture.master, "Master")
@@ -367,6 +368,39 @@ func TestColdConsistentBackupAndCoordinatedRestoreAcrossTargets(t *testing.T) {
 	protection, err := fixture.store.GetSet(result.ProtectionSetID)
 	if err != nil || protection.Status != StatusVerified || protection.Kind != "protection" {
 		t.Fatalf("protection=%#v err=%v", protection, err)
+	}
+}
+
+func TestConfigurationOnlyBackupCannotRestoreOrStopRoom(t *testing.T) {
+	fixture := newDistributedBackupFixture(t)
+	if err := os.RemoveAll(filepath.Join(fixture.masterRoot, "Cluster_1", "Master", "save")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(fixture.cavesRoot, "Cluster_1", "Caves", "save")); err != nil {
+		t.Fatal(err)
+	}
+	created, err := fixture.coordinator.Create(context.Background(), "room", "仅配置备份", "manual", "job-config-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != StatusVerified || created.Restorable || created.ContentKind != "configuration-only" || created.ValidationError == "" {
+		t.Fatalf("configuration-only backup=%#v", created)
+	}
+	fixture.master.mu.Lock()
+	masterStops := fixture.master.stops["Cluster_1\x00Master"]
+	fixture.master.mu.Unlock()
+	fixture.caves.mu.Lock()
+	cavesStops := fixture.caves.stops["Cluster_1\x00Caves"]
+	fixture.caves.mu.Unlock()
+	if _, err := fixture.coordinator.Restore(context.Background(), created.ID, "测试房间", "job-restore-config-only"); !errors.Is(err, ErrNotRestorable) {
+		t.Fatalf("configuration-only restore error=%v", err)
+	}
+	fixture.master.mu.Lock()
+	defer fixture.master.mu.Unlock()
+	fixture.caves.mu.Lock()
+	defer fixture.caves.mu.Unlock()
+	if fixture.master.stops["Cluster_1\x00Master"] != masterStops || fixture.caves.stops["Cluster_1\x00Caves"] != cavesStops {
+		t.Fatal("non-restorable backup stopped a running shard")
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"dont/internal/rooms"
 	"dont/internal/runtimedriver"
 	"dont/internal/shards"
+	"dont/internal/shardtransfer"
 	"dont/internal/topology"
 	"dont/shared"
 
@@ -83,9 +84,24 @@ func NewCoordinator(root string, rooms RoomCatalog, placements PlacementResolver
 	return &Coordinator{root: filepath.Clean(absolute), rooms: rooms, placements: placements, runtimes: runtimes, leases: leases, store: store, now: time.Now}, nil
 }
 
-func (c *Coordinator) List(roomID string) ([]Set, error) { return c.store.ListSets(roomID) }
+func (c *Coordinator) List(roomID string) ([]Set, error) {
+	values, err := c.store.ListSets(roomID)
+	if err != nil {
+		return nil, err
+	}
+	for index := range values {
+		values[index] = c.classifySet(values[index])
+	}
+	return values, nil
+}
 
-func (c *Coordinator) Get(id string) (Set, error) { return c.store.GetSet(id) }
+func (c *Coordinator) Get(id string) (Set, error) {
+	value, err := c.store.GetSet(id)
+	if err != nil {
+		return Set{}, err
+	}
+	return c.classifySet(value), nil
+}
 
 func (c *Coordinator) Operations(roomID string) ([]Operation, error) {
 	return c.store.ListOperations(roomID)
@@ -381,9 +397,16 @@ func (c *Coordinator) collectStagedPart(ctx context.Context, current runtimePart
 		return c.failPart(part, err)
 	}
 	published = true
+	inspection, err := shardtransfer.InspectBackupArchive(path)
+	if err != nil {
+		return c.failPart(part, errors.Join(ErrIntegrity, err))
+	}
 	now := c.now().UTC()
 	part.Status, part.Size, part.ContentSize, part.FileCount = PartVerified, descriptor.Size, descriptor.ContentSize, descriptor.FileCount
 	part.SHA256, part.SharedSHA256, part.VerifiedAt, part.Failure = strings.ToLower(descriptor.SHA256), strings.ToLower(descriptor.SharedSHA256), &now, ""
+	part.ContentKind, part.Restorable = inspection.ContentKind, inspection.Restorable
+	part.SessionID, part.LatestSnapshot, part.HasShardIndex = inspection.SessionID, inspection.LatestSnapshot, inspection.HasShardIndex
+	part.ValidationError = inspection.ValidationError
 	return c.store.SavePart(part)
 }
 
@@ -399,6 +422,14 @@ func (c *Coordinator) finalizeSet(setID, sharedSHA string) (Set, error) {
 		value.Size += part.Size
 		value.ContentSize += part.ContentSize
 		value.FileCount += part.FileCount
+		if !part.Restorable {
+			value.ValidationError = appendValidation(value.ValidationError, part.WorldName+": "+part.ValidationError)
+		}
+	}
+	value.ContentKind = shardtransfer.BackupContentConfigurationOnly
+	value.Restorable = len(value.Parts) > 0 && value.ValidationError == ""
+	if value.Restorable {
+		value.ContentKind = shardtransfer.BackupContentGameSave
 	}
 	value.SharedSHA256 = strings.ToLower(sharedSHA)
 	value.Status, value.Failure = StatusVerified, ""
@@ -410,6 +441,48 @@ func (c *Coordinator) finalizeSet(setID, sharedSHA string) (Set, error) {
 	}
 	value.ManifestSHA256 = manifestSHA
 	return c.store.SaveSet(value)
+}
+
+func (c *Coordinator) classifySet(value Set) Set {
+	value.ValidationError = ""
+	value.Restorable = len(value.Parts) > 0
+	value.ContentKind = shardtransfer.BackupContentGameSave
+	unknown := false
+	for index := range value.Parts {
+		part := &value.Parts[index]
+		path, err := c.partPath(*part)
+		if err != nil {
+			part.ContentKind, part.Restorable, part.ValidationError = "unknown", false, err.Error()
+		} else if inspection, inspectErr := shardtransfer.InspectBackupArchive(path); inspectErr != nil {
+			part.ContentKind, part.Restorable, part.ValidationError = "unknown", false, inspectErr.Error()
+		} else {
+			part.ContentKind, part.Restorable = inspection.ContentKind, inspection.Restorable
+			part.SessionID, part.LatestSnapshot, part.HasShardIndex = inspection.SessionID, inspection.LatestSnapshot, inspection.HasShardIndex
+			part.ValidationError = inspection.ValidationError
+		}
+		if !part.Restorable {
+			value.Restorable = false
+			unknown = unknown || part.ContentKind == "unknown"
+			value.ValidationError = appendValidation(value.ValidationError, part.WorldName+": "+part.ValidationError)
+		}
+	}
+	if unknown {
+		value.ContentKind = "unknown"
+	} else if !value.Restorable {
+		value.ContentKind = shardtransfer.BackupContentConfigurationOnly
+	}
+	return value
+}
+
+func appendValidation(current, message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "缺少可恢复的世界存档证据"
+	}
+	if current == "" {
+		return message
+	}
+	return current + "; " + message
 }
 
 func (c *Coordinator) failPart(part Part, cause error) (Part, error) {
