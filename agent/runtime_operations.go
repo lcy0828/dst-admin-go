@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"dont/internal/configpublication"
 	"dont/internal/consoledispatch"
 	"dont/internal/roomops"
 	"dont/internal/runtimefiles"
@@ -110,6 +111,8 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 		}
 	} else if isMigrationAction(request.Action) {
 		result, operationErr = a.executeMigrationAction(operationContext, installation, *request)
+	} else if isConfigurationAction(request.Action) {
+		result, operationErr = a.executeConfigurationAction(operationContext, installation, *request)
 	} else {
 		result, operationErr = a.executeBackupAction(operationContext, installation, *request)
 	}
@@ -136,6 +139,12 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 	}
 	if !isCPUAction(request.Action) && request.CPU != nil {
 		return errors.New("Runtime 操作包含无关 CPU 负载")
+	}
+	if isConfigurationAction(request.Action) {
+		return validateConfigurationOperationPayload(request)
+	}
+	if request.Configuration != nil {
+		return errors.New("Runtime 操作包含无关配置发布负载")
 	}
 	switch request.Action {
 	case shared.RuntimeActionConsoleHealth:
@@ -221,6 +230,27 @@ func validateCPUOperationPayload(request shared.RuntimeOperationRequest) error {
 			return errors.New("CPU Runtime 逻辑 CPU 列表无效")
 		}
 		seen[id] = true
+	}
+	return nil
+}
+
+func validateConfigurationOperationPayload(request shared.RuntimeOperationRequest) error {
+	value := request.Configuration
+	if value == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil ||
+		request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil || request.CPU != nil ||
+		!operationIdentity.MatchString(value.PublicationID) || value.Scope != string(configpublication.ScopeShared) && value.Scope != string(configpublication.ScopeWorld) ||
+		value.Offset < 0 || value.Size < 0 || len(value.SHA256) > 64 || len(value.Data) > configpublication.MaxChunkBytes {
+		return errors.New("配置发布 Runtime 请求无效")
+	}
+	if request.Action == shared.RuntimeActionConfigurationBegin && (value.Size < 1 || len(value.SHA256) != 64 || len(value.Data) != 0) {
+		return errors.New("配置发布开始请求无效")
+	}
+	if request.Action == shared.RuntimeActionConfigurationWrite && (len(value.Data) == 0 || value.Size < 1) {
+		return errors.New("配置发布块为空")
+	}
+	if request.Action != shared.RuntimeActionConfigurationBegin && request.Action != shared.RuntimeActionConfigurationWrite &&
+		(value.Offset != 0 || value.Size != 0 || value.SHA256 != "" || len(value.Data) != 0) {
+		return errors.New("配置发布步骤包含无关负载")
 	}
 	return nil
 }
@@ -327,6 +357,47 @@ func (a *Agent) executeMigrationAction(ctx context.Context, installation Runtime
 		response.Complete = err == nil
 	default:
 		err = errors.New("分片迁移动作不受支持")
+	}
+	if err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+	}
+	return result, err
+}
+
+func (a *Agent) executeConfigurationAction(ctx context.Context, installation RuntimeInstallation, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
+	manager, err := configpublication.New(installation.SavePath, filepath.Join(a.Config.OperationStateFile+".configurations", installation.ID))
+	result := runtimeResult(request, shared.RuntimeOutcomeConfirmed, "配置发布步骤已完成")
+	value := *request.Configuration
+	response := &shared.RuntimeConfigurationResult{PublicationID: value.PublicationID, Size: value.Size, SHA256: value.SHA256}
+	result.Configuration = response
+	if err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+		return result, err
+	}
+	switch request.Action {
+	case shared.RuntimeActionConfigurationBegin:
+		response.NextOffset, err = manager.Begin(configpublication.Descriptor{
+			PublicationID: value.PublicationID, Cluster: request.Cluster, Shard: request.Shard,
+			Scope: configpublication.Scope(value.Scope), Size: value.Size, SHA256: value.SHA256,
+		})
+	case shared.RuntimeActionConfigurationWrite:
+		response.Offset = value.Offset
+		response.NextOffset, err = manager.Write(value.PublicationID, value.Offset, value.Data)
+		response.Complete = err == nil && response.NextOffset == value.Size
+	case shared.RuntimeActionConfigurationPrepare:
+		err = manager.Prepare(ctx, value.PublicationID)
+		response.Complete = err == nil
+	case shared.RuntimeActionConfigurationPublish:
+		err = manager.Publish(value.PublicationID)
+		response.Complete = err == nil
+	case shared.RuntimeActionConfigurationRollback:
+		err = manager.Rollback(value.PublicationID)
+		response.Complete = err == nil
+	case shared.RuntimeActionConfigurationComplete:
+		err = manager.Complete(value.PublicationID)
+		response.Complete = err == nil
+	default:
+		err = errors.New("配置发布动作不受支持")
 	}
 	if err != nil {
 		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
@@ -467,6 +538,16 @@ func isModAction(action shared.RuntimeAction) bool {
 
 func isCPUAction(action shared.RuntimeAction) bool {
 	return action == shared.RuntimeActionCPUPrepare || action == shared.RuntimeActionCPUApply || action == shared.RuntimeActionCPUObserve
+}
+
+func isConfigurationAction(action shared.RuntimeAction) bool {
+	switch action {
+	case shared.RuntimeActionConfigurationBegin, shared.RuntimeActionConfigurationWrite, shared.RuntimeActionConfigurationPrepare,
+		shared.RuntimeActionConfigurationPublish, shared.RuntimeActionConfigurationRollback, shared.RuntimeActionConfigurationComplete:
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *Agent) transferManager(installation RuntimeInstallation) (*shardtransfer.Manager, error) {

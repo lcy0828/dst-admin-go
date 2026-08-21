@@ -539,8 +539,19 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err := saveImportStore.Migrate(); err != nil {
 		return nil, err
 	}
-	configurationService, err := configuration.NewService(savePath, roomService, backupService)
+	configurationBackups, err := configuration.NewHybridBackupCreator(backupService, distributedBackupService)
 	if err != nil {
+		return nil, err
+	}
+	configurationService, err := configuration.NewService(savePath, roomService, configurationBackups)
+	if err != nil {
+		return nil, err
+	}
+	configurationPublisher, err := configuration.NewRemotePublisher(roomService, topologyService, runtimeDriverRouter, operationLeaseService)
+	if err != nil {
+		return nil, err
+	}
+	if err := configurationService.ConfigurePublisher(configurationPublisher); err != nil {
 		return nil, err
 	}
 	configurationHandler := httpapi.NewConfigurationHandler(configurationService, jobService)

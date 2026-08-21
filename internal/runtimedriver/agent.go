@@ -20,10 +20,11 @@ type Agent struct {
 }
 
 var (
-	_ Driver            = (*Agent)(nil)
-	_ ModDriver         = (*Agent)(nil)
-	_ GameVersionDriver = (*Agent)(nil)
-	_ CPUDriver         = (*Agent)(nil)
+	_ Driver              = (*Agent)(nil)
+	_ ModDriver           = (*Agent)(nil)
+	_ GameVersionDriver   = (*Agent)(nil)
+	_ CPUDriver           = (*Agent)(nil)
+	_ ConfigurationDriver = (*Agent)(nil)
 )
 
 func NewAgent(executor AgentExecutor) (*Agent, error) {
@@ -42,7 +43,54 @@ func (d *Agent) Capabilities() []Capability {
 		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore,
 		CapabilityModPrepare, CapabilityModPublish, CapabilityGameUpdate,
 		CapabilityExclusiveCPU,
+		CapabilityConfigPublish,
 	}
+}
+
+func (d *Agent) BeginConfiguration(ctx context.Context, target Target, operation Operation, descriptor ConfigurationDescriptor) (int64, error) {
+	result, err := d.executeConfiguration(ctx, target, operation, shared.RuntimeActionConfigurationBegin, descriptor, 0, nil)
+	return result.NextOffset, err
+}
+
+func (d *Agent) WriteConfiguration(ctx context.Context, target Target, operation Operation, descriptor ConfigurationDescriptor, offset int64, data []byte) (int64, error) {
+	result, err := d.executeConfiguration(ctx, target, operation, shared.RuntimeActionConfigurationWrite, descriptor, offset, data)
+	return result.NextOffset, err
+}
+
+func (d *Agent) PrepareConfiguration(ctx context.Context, target Target, operation Operation, publicationID, scope string) error {
+	_, err := d.executeConfiguration(ctx, target, operation, shared.RuntimeActionConfigurationPrepare, ConfigurationDescriptor{PublicationID: publicationID, Scope: scope}, 0, nil)
+	return err
+}
+
+func (d *Agent) PublishConfiguration(ctx context.Context, target Target, operation Operation, publicationID, scope string) error {
+	_, err := d.executeConfiguration(ctx, target, operation, shared.RuntimeActionConfigurationPublish, ConfigurationDescriptor{PublicationID: publicationID, Scope: scope}, 0, nil)
+	return err
+}
+
+func (d *Agent) RollbackConfiguration(ctx context.Context, target Target, operation Operation, publicationID, scope string) error {
+	_, err := d.executeConfiguration(ctx, target, operation, shared.RuntimeActionConfigurationRollback, ConfigurationDescriptor{PublicationID: publicationID, Scope: scope}, 0, nil)
+	return err
+}
+
+func (d *Agent) CompleteConfiguration(ctx context.Context, target Target, operation Operation, publicationID, scope string) error {
+	_, err := d.executeConfiguration(ctx, target, operation, shared.RuntimeActionConfigurationComplete, ConfigurationDescriptor{PublicationID: publicationID, Scope: scope}, 0, nil)
+	return err
+}
+
+func (d *Agent) executeConfiguration(ctx context.Context, target Target, operation Operation, action shared.RuntimeAction, descriptor ConfigurationDescriptor, offset int64, data []byte) (shared.RuntimeConfigurationResult, error) {
+	request := runtimeRequest(target, operation, action)
+	request.Configuration = &shared.RuntimeConfigurationRequest{
+		PublicationID: descriptor.PublicationID, Scope: descriptor.Scope, Offset: offset,
+		Size: descriptor.Size, SHA256: descriptor.SHA256, Data: data,
+	}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 300)
+	if result.Result.Configuration == nil {
+		if err != nil {
+			return shared.RuntimeConfigurationResult{}, err
+		}
+		return shared.RuntimeConfigurationResult{}, errors.New("Agent 未返回有效的配置发布结果")
+	}
+	return *result.Result.Configuration, err
 }
 
 func (d *Agent) PrepareCPU(ctx context.Context, target Target, operation Operation, cpu shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error) {

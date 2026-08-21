@@ -28,10 +28,27 @@ type BackupCreator interface {
 }
 
 type Service struct {
-	saveRoot string
-	rooms    RoomCatalog
-	backups  BackupCreator
-	now      func() time.Time
+	saveRoot  string
+	rooms     RoomCatalog
+	backups   BackupCreator
+	publisher Publisher
+	now       func() time.Time
+}
+
+func (s *Service) ConfigurePublisher(publisher Publisher) error {
+	if publisher == nil {
+		return errors.New("configuration publisher is required")
+	}
+	s.publisher = publisher
+	return nil
+}
+
+func (s *Service) publish(ctx context.Context, request PublicationRequest) (int, error) {
+	if s.publisher == nil {
+		return 0, nil
+	}
+	result, err := s.publisher.Publish(ctx, request)
+	return result.PublishedCount, err
 }
 
 func NewService(saveRoot string, roomCatalog RoomCatalog, backupCreator BackupCreator) (*Service, error) {

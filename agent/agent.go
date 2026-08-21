@@ -29,7 +29,7 @@ import (
 
 // 常量
 const (
-	AgentVersion = "2.5.2"
+	AgentVersion = "2.5.3"
 	// 心跳间隔
 	HeartbeatInterval = 30 * time.Second
 	// 重连间隔
@@ -1191,7 +1191,7 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 	if len(runtimeProfiles) > 0 && runtime.GOOS != "windows" {
 		capabilities = append(capabilities,
 			"shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1", "runtime.migration.v1",
-			"runtime.backup.v1", "runtime.mods.v1", "runtime.game-update.v1", "runtime.cpu.v1",
+			"runtime.backup.v1", "runtime.mods.v1", "runtime.game-update.v1", "runtime.cpu.v1", "runtime.configuration.v1",
 		)
 	}
 	info := map[string]interface{}{

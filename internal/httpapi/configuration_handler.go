@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"dont/internal/configuration"
@@ -216,7 +217,11 @@ func (h *ConfigurationHandler) submitConfiguration(c *gin.Context, kind, roomID,
 				report(jobs.TargetResult{TargetID: targetID, Status: jobs.StatusFailed, Error: configurationJobError(applyErr)})
 				return nil
 			}
-			report(jobs.TargetResult{TargetID: targetID, Status: jobs.StatusSucceeded, Message: "配置已应用；保护备份 ID：" + result.ProtectionBackupID})
+			message := "配置已应用；保护备份 ID：" + result.ProtectionBackupID
+			if result.PublishedTargets > 0 {
+				message += fmt.Sprintf("；已同步到 %d 个远程运行目标", result.PublishedTargets)
+			}
+			report(jobs.TargetResult{TargetID: targetID, Status: jobs.StatusSucceeded, Message: message})
 			return nil
 		}
 	})

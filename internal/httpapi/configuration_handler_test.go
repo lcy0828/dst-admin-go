@@ -40,6 +40,12 @@ type configurationHandlerBackups struct {
 	count int
 }
 
+type configurationHandlerPublisher struct{}
+
+func (configurationHandlerPublisher) Publish(context.Context, configuration.PublicationRequest) (configuration.PublicationResult, error) {
+	return configuration.PublicationResult{PublicationID: "publication", PublishedCount: 2}, nil
+}
+
 func (b *configurationHandlerBackups) Create(_ context.Context, roomID, _ string, kind backups.Kind, jobID string) (backups.Backup, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -106,6 +112,9 @@ func newConfigurationHandlerApp(t *testing.T) configurationHandlerApp {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := service.ConfigurePublisher(configurationHandlerPublisher{}); err != nil {
+		t.Fatal(err)
+	}
 	router := gin.New()
 	v2 := router.Group("/api/v2")
 	NewConfigurationHandler(service, jobService).Register(v2)
@@ -156,7 +165,10 @@ func TestConfigurationHTTPRevisionFieldsAndApplyJob(t *testing.T) {
 	}, nil, "")
 	assertStatus(t, response, http.StatusAccepted)
 	jobID, _ := responseData(t, response)["id"].(string)
-	waitForConfigurationJob(t, app.jobs, jobID)
+	job := waitForConfigurationJob(t, app.jobs, jobID)
+	if len(job.Targets) != 1 || !strings.Contains(job.Targets[0].Message, "已同步到 2 个远程运行目标") {
+		t.Fatalf("configuration job did not report remote publication: %#v", job.Targets)
+	}
 	if app.backups.Count() != 1 {
 		t.Fatalf("protection backups = %d, want 1", app.backups.Count())
 	}

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"dont/internal/configpublication"
 	"dont/internal/consoledispatch"
 	"dont/internal/runtimefiles"
 	"dont/internal/shards"
@@ -34,6 +35,7 @@ type Native struct {
 	saveRoot string
 	control  NativeControl
 	transfer *shardtransfer.Manager
+	configs  *configpublication.Manager
 	cpu      NativeCPUBackend
 
 	mu       sync.Mutex
@@ -54,7 +56,38 @@ func NewNative(saveRoot string, control NativeControl) (*Native, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Native{saveRoot: saveRoot, control: control, transfer: transfer, evidence: make(map[string]shared.RuntimeOperationEvidence)}, nil
+	configs, err := configpublication.New(saveRoot, filepath.Join(saveRoot, ".dst-admin-config-publications"))
+	if err != nil {
+		return nil, err
+	}
+	return &Native{saveRoot: saveRoot, control: control, transfer: transfer, configs: configs, evidence: make(map[string]shared.RuntimeOperationEvidence)}, nil
+}
+
+func (d *Native) BeginConfiguration(_ context.Context, target Target, _ Operation, descriptor ConfigurationDescriptor) (int64, error) {
+	return d.configs.Begin(configpublication.Descriptor{
+		PublicationID: descriptor.PublicationID, Cluster: target.Cluster, Shard: target.Shard,
+		Scope: configpublication.Scope(descriptor.Scope), Size: descriptor.Size, SHA256: descriptor.SHA256,
+	})
+}
+
+func (d *Native) WriteConfiguration(_ context.Context, _ Target, _ Operation, descriptor ConfigurationDescriptor, offset int64, data []byte) (int64, error) {
+	return d.configs.Write(descriptor.PublicationID, offset, data)
+}
+
+func (d *Native) PrepareConfiguration(ctx context.Context, _ Target, _ Operation, publicationID, _ string) error {
+	return d.configs.Prepare(ctx, publicationID)
+}
+
+func (d *Native) PublishConfiguration(_ context.Context, _ Target, _ Operation, publicationID, _ string) error {
+	return d.configs.Publish(publicationID)
+}
+
+func (d *Native) RollbackConfiguration(_ context.Context, _ Target, _ Operation, publicationID, _ string) error {
+	return d.configs.Rollback(publicationID)
+}
+
+func (d *Native) CompleteConfiguration(_ context.Context, _ Target, _ Operation, publicationID, _ string) error {
+	return d.configs.Complete(publicationID)
 }
 
 func (d *Native) ConfigureCPU(backend NativeCPUBackend) error {
@@ -195,7 +228,7 @@ func (d *Native) Capabilities() []Capability {
 	result := []Capability{
 		CapabilityLifecycle, CapabilityConsoleInput, CapabilityConsoleHealth, CapabilityRawConsole,
 		CapabilityOperationProof, CapabilityLogContinuation, CapabilityArtifacts,
-		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore,
+		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore, CapabilityConfigPublish,
 	}
 	if d.cpu != nil {
 		result = append(result, CapabilityExclusiveCPU)

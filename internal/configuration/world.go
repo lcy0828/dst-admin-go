@@ -3,6 +3,7 @@ package configuration
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -156,7 +157,15 @@ func (s *Service) ApplyWorld(ctx context.Context, jobID, roomID, worldID string,
 	if err := atomicWriteSet(worldPath, previous, []fileWrite{{name: "server.ini", data: serverData}, {name: "leveldataoverride.lua", data: luaData}}); err != nil {
 		return ApplyResult{}, wrapApplyError("world", err)
 	}
-	return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, ProtectionBackupID: backup.ID}, nil
+	published, err := s.publish(ctx, PublicationRequest{
+		RoomID: roomID, WorldID: worldID, Scope: PublicationWorld,
+		Files: []string{"server.ini", "leveldataoverride.lua"},
+	})
+	if err != nil {
+		rollbackErr := rollbackWrites(worldPath, previous, []string{"server.ini", "leveldataoverride.lua"})
+		return ApplyResult{}, wrapApplyError("world publication", errors.Join(err, rollbackErr))
+	}
+	return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, ProtectionBackupID: backup.ID, PublishedTargets: published}, nil
 }
 
 func loadWorldDocument(worldPath string) (worldDocument, error) {

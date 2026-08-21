@@ -56,6 +56,12 @@ const (
 	RuntimeActionCPUPrepare              RuntimeAction = "runtime.cpu.prepare"
 	RuntimeActionCPUApply                RuntimeAction = "runtime.cpu.apply"
 	RuntimeActionCPUObserve              RuntimeAction = "runtime.cpu.observe"
+	RuntimeActionConfigurationBegin      RuntimeAction = "runtime.configuration.begin"
+	RuntimeActionConfigurationWrite      RuntimeAction = "runtime.configuration.write"
+	RuntimeActionConfigurationPrepare    RuntimeAction = "runtime.configuration.prepare"
+	RuntimeActionConfigurationPublish    RuntimeAction = "runtime.configuration.publish"
+	RuntimeActionConfigurationRollback   RuntimeAction = "runtime.configuration.rollback"
+	RuntimeActionConfigurationComplete   RuntimeAction = "runtime.configuration.complete"
 )
 
 const (
@@ -193,30 +199,40 @@ type RuntimeGameVersionRequest struct {
 	CleanCache      bool   `json:"clean_cache,omitempty"`
 }
 
+type RuntimeConfigurationRequest struct {
+	PublicationID string `json:"publication_id"`
+	Scope         string `json:"scope"`
+	Offset        int64  `json:"offset,omitempty"`
+	Size          int64  `json:"size,omitempty"`
+	SHA256        string `json:"sha256,omitempty"`
+	Data          []byte `json:"data,omitempty"`
+}
+
 // RuntimeOperationRequest references a trusted installation and a managed
 // Shard. It never accepts a host path, executable, container specification or
 // shell command.
 type RuntimeOperationRequest struct {
-	ProtocolVersion  int                        `json:"protocol_version"`
-	OperationID      string                     `json:"operation_id"`
-	OperationKey     string                     `json:"operation_key,omitempty"`
-	InstallationID   string                     `json:"installation_id"`
-	Action           RuntimeAction              `json:"action"`
-	Cluster          string                     `json:"cluster"`
-	Shard            string                     `json:"shard"`
-	TopologyRevision string                     `json:"topology_revision"`
-	LeaseID          string                     `json:"lease_id,omitempty"`
-	FencingToken     uint64                     `json:"fencing_token,omitempty"`
-	LeaseExpiresAt   *time.Time                 `json:"lease_expires_at,omitempty"`
-	Console          *RuntimeConsoleRequest     `json:"console,omitempty"`
-	Logs             *RuntimeLogRequest         `json:"logs,omitempty"`
-	Artifacts        *RuntimeArtifactRequest    `json:"artifacts,omitempty"`
-	Observation      *RuntimeObservationRequest `json:"observation,omitempty"`
-	Migration        *RuntimeMigrationRequest   `json:"migration,omitempty"`
-	Backup           *RuntimeBackupRequest      `json:"backup,omitempty"`
-	Mod              *RuntimeModRequest         `json:"mod,omitempty"`
-	GameVersion      *RuntimeGameVersionRequest `json:"game_version,omitempty"`
-	CPU              *RuntimeCPURequest         `json:"cpu,omitempty"`
+	ProtocolVersion  int                          `json:"protocol_version"`
+	OperationID      string                       `json:"operation_id"`
+	OperationKey     string                       `json:"operation_key,omitempty"`
+	InstallationID   string                       `json:"installation_id"`
+	Action           RuntimeAction                `json:"action"`
+	Cluster          string                       `json:"cluster"`
+	Shard            string                       `json:"shard"`
+	TopologyRevision string                       `json:"topology_revision"`
+	LeaseID          string                       `json:"lease_id,omitempty"`
+	FencingToken     uint64                       `json:"fencing_token,omitempty"`
+	LeaseExpiresAt   *time.Time                   `json:"lease_expires_at,omitempty"`
+	Console          *RuntimeConsoleRequest       `json:"console,omitempty"`
+	Logs             *RuntimeLogRequest           `json:"logs,omitempty"`
+	Artifacts        *RuntimeArtifactRequest      `json:"artifacts,omitempty"`
+	Observation      *RuntimeObservationRequest   `json:"observation,omitempty"`
+	Migration        *RuntimeMigrationRequest     `json:"migration,omitempty"`
+	Backup           *RuntimeBackupRequest        `json:"backup,omitempty"`
+	Mod              *RuntimeModRequest           `json:"mod,omitempty"`
+	GameVersion      *RuntimeGameVersionRequest   `json:"game_version,omitempty"`
+	CPU              *RuntimeCPURequest           `json:"cpu,omitempty"`
+	Configuration    *RuntimeConfigurationRequest `json:"configuration,omitempty"`
 }
 
 type RuntimeOutcome string
@@ -386,31 +402,41 @@ type RuntimeGameVersionResult struct {
 	ObservedAt        time.Time `json:"observed_at"`
 }
 
+type RuntimeConfigurationResult struct {
+	PublicationID string `json:"publication_id"`
+	Offset        int64  `json:"offset,omitempty"`
+	NextOffset    int64  `json:"next_offset,omitempty"`
+	Size          int64  `json:"size,omitempty"`
+	SHA256        string `json:"sha256,omitempty"`
+	Complete      bool   `json:"complete"`
+}
+
 type RuntimeOperationResult struct {
-	ProtocolVersion  int                       `json:"protocol_version"`
-	OperationID      string                    `json:"operation_id"`
-	OperationKey     string                    `json:"operation_key,omitempty"`
-	InstallationID   string                    `json:"installation_id"`
-	Action           RuntimeAction             `json:"action"`
-	Cluster          string                    `json:"cluster"`
-	Shard            string                    `json:"shard"`
-	FencingToken     uint64                    `json:"fencing_token,omitempty"`
-	Outcome          RuntimeOutcome            `json:"outcome"`
-	Message          string                    `json:"message,omitempty"`
-	Idempotent       bool                      `json:"idempotent"`
-	ObservedAt       time.Time                 `json:"observed_at"`
-	TargetID         string                    `json:"target_id,omitempty"`
-	AgentID          string                    `json:"agent_id,omitempty"`
-	TopologyRevision string                    `json:"topology_revision,omitempty"`
-	ConsoleHealth    *RuntimeConsoleHealth     `json:"console_health,omitempty"`
-	Logs             *RuntimeLogChunk          `json:"logs,omitempty"`
-	Artifacts        *RuntimeArtifactBundle    `json:"artifacts,omitempty"`
-	Evidence         *RuntimeOperationEvidence `json:"evidence,omitempty"`
-	Migration        *RuntimeMigrationResult   `json:"migration,omitempty"`
-	Backup           *RuntimeBackupResult      `json:"backup,omitempty"`
-	Mod              *RuntimeModResult         `json:"mod,omitempty"`
-	GameVersion      *RuntimeGameVersionResult `json:"game_version,omitempty"`
-	CPU              *RuntimeCPUResult         `json:"cpu,omitempty"`
+	ProtocolVersion  int                         `json:"protocol_version"`
+	OperationID      string                      `json:"operation_id"`
+	OperationKey     string                      `json:"operation_key,omitempty"`
+	InstallationID   string                      `json:"installation_id"`
+	Action           RuntimeAction               `json:"action"`
+	Cluster          string                      `json:"cluster"`
+	Shard            string                      `json:"shard"`
+	FencingToken     uint64                      `json:"fencing_token,omitempty"`
+	Outcome          RuntimeOutcome              `json:"outcome"`
+	Message          string                      `json:"message,omitempty"`
+	Idempotent       bool                        `json:"idempotent"`
+	ObservedAt       time.Time                   `json:"observed_at"`
+	TargetID         string                      `json:"target_id,omitempty"`
+	AgentID          string                      `json:"agent_id,omitempty"`
+	TopologyRevision string                      `json:"topology_revision,omitempty"`
+	ConsoleHealth    *RuntimeConsoleHealth       `json:"console_health,omitempty"`
+	Logs             *RuntimeLogChunk            `json:"logs,omitempty"`
+	Artifacts        *RuntimeArtifactBundle      `json:"artifacts,omitempty"`
+	Evidence         *RuntimeOperationEvidence   `json:"evidence,omitempty"`
+	Migration        *RuntimeMigrationResult     `json:"migration,omitempty"`
+	Backup           *RuntimeBackupResult        `json:"backup,omitempty"`
+	Mod              *RuntimeModResult           `json:"mod,omitempty"`
+	GameVersion      *RuntimeGameVersionResult   `json:"game_version,omitempty"`
+	CPU              *RuntimeCPUResult           `json:"cpu,omitempty"`
+	Configuration    *RuntimeConfigurationResult `json:"configuration,omitempty"`
 }
 
 func IsRuntimeAction(value RuntimeAction) bool {
@@ -433,6 +459,9 @@ func IsRuntimeAction(value RuntimeAction) bool {
 	case RuntimeActionGameVersionObserve, RuntimeActionGameVersionUpdate:
 		return true
 	case RuntimeActionCPUPrepare, RuntimeActionCPUApply, RuntimeActionCPUObserve:
+		return true
+	case RuntimeActionConfigurationBegin, RuntimeActionConfigurationWrite, RuntimeActionConfigurationPrepare,
+		RuntimeActionConfigurationPublish, RuntimeActionConfigurationRollback, RuntimeActionConfigurationComplete:
 		return true
 	default:
 		return false
@@ -458,6 +487,9 @@ func RuntimeActionMutates(value RuntimeAction) bool {
 	case RuntimeActionGameVersionUpdate:
 		return true
 	case RuntimeActionCPUPrepare, RuntimeActionCPUApply:
+		return true
+	case RuntimeActionConfigurationBegin, RuntimeActionConfigurationWrite, RuntimeActionConfigurationPrepare,
+		RuntimeActionConfigurationPublish, RuntimeActionConfigurationRollback, RuntimeActionConfigurationComplete:
 		return true
 	default:
 		return false

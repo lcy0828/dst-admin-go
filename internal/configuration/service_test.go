@@ -30,6 +30,18 @@ type configurationBackups struct {
 	err      error
 }
 
+type configurationPublisher struct {
+	requests []PublicationRequest
+	count    int
+	err      error
+}
+
+func (p *configurationPublisher) Publish(_ context.Context, request PublicationRequest) (PublicationResult, error) {
+	p.requests = append(p.requests, request)
+	p.count++
+	return PublicationResult{PublicationID: "publication-id", PublishedCount: p.count}, p.err
+}
+
 func (b *configurationBackups) Create(ctx context.Context, roomID, _ string, kind backups.Kind, jobID string) (backups.Backup, error) {
 	acquireCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
@@ -205,6 +217,38 @@ func TestConfigurationRechecksRevisionAfterProtectionBackup(t *testing.T) {
 	written, _ := os.ReadFile(filepath.Join(roomPath, "cluster.ini"))
 	if !strings.Contains(string(written), "external edit") || strings.Contains(string(written), "max_players = 12") {
 		t.Fatalf("external edit was overwritten: %s", written)
+	}
+}
+
+func TestRoomConfigurationRollsBackLocalFileWhenRemotePublicationFails(t *testing.T) {
+	service, roomPath, _ := newConfigurationService(t)
+	publisher := &configurationPublisher{err: errors.New("remote publication failed")}
+	if err := service.ConfigurePublisher(publisher); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(roomPath, "cluster.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := service.RoomConfig("room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := current.Values
+	next.MaxPlayers = 12
+	_, err = service.ApplyRoom(context.Background(), "job-publication-failure", "room", RoomUpdateRequest{ExpectedRevision: current.Revision, Values: next})
+	if err == nil || !strings.Contains(err.Error(), "remote publication failed") {
+		t.Fatalf("ApplyRoom error=%v", err)
+	}
+	after, err := os.ReadFile(filepath.Join(roomPath, "cluster.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("local desired configuration was not rolled back:\n%s", after)
+	}
+	if len(publisher.requests) != 1 || publisher.requests[0].Scope != PublicationShared || !reflect.DeepEqual(publisher.requests[0].Files, []string{"cluster.ini"}) {
+		t.Fatalf("publication requests=%#v", publisher.requests)
 	}
 }
 

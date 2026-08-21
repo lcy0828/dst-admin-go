@@ -1,6 +1,10 @@
 package agent
 
 import (
+	"archive/zip"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -191,6 +195,59 @@ func TestRuntimeCPURequestValidation(t *testing.T) {
 	observe.OperationKey, observe.LeaseID, observe.FencingToken, observe.LeaseExpiresAt = "", "", 0, nil
 	if err := validateRuntimeOperationRequest(string(observe.Action), observe, 30, time.Now().UTC()); err != nil {
 		t.Fatalf("read-only CPU observation rejected: %v", err)
+	}
+}
+
+func TestRuntimeConfigurationPublicationWritesManagedFiles(t *testing.T) {
+	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeStopped}}
+	agent, installation := newShardOperationAgent(t, runtimeControl)
+	roomRoot := filepath.Join(installation.SavePath, "Cluster_1")
+	clusterPath := filepath.Join(roomRoot, "cluster.ini")
+	if err := os.WriteFile(clusterPath, []byte("old\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	var archive bytes.Buffer
+	writer := zip.NewWriter(&archive)
+	entry, err := writer.Create("cluster.ini")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write([]byte("new\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	payload := archive.Bytes()
+	digest := sha256.Sum256(payload)
+	publicationID := "configuration-publication-0001"
+	scope := "shared"
+	steps := []struct {
+		action shared.RuntimeAction
+		value  shared.RuntimeConfigurationRequest
+	}{
+		{shared.RuntimeActionConfigurationBegin, shared.RuntimeConfigurationRequest{PublicationID: publicationID, Scope: scope, Size: int64(len(payload)), SHA256: hex.EncodeToString(digest[:])}},
+		{shared.RuntimeActionConfigurationWrite, shared.RuntimeConfigurationRequest{PublicationID: publicationID, Scope: scope, Size: int64(len(payload)), SHA256: hex.EncodeToString(digest[:]), Data: payload}},
+		{shared.RuntimeActionConfigurationPrepare, shared.RuntimeConfigurationRequest{PublicationID: publicationID, Scope: scope}},
+		{shared.RuntimeActionConfigurationPublish, shared.RuntimeConfigurationRequest{PublicationID: publicationID, Scope: scope}},
+		{shared.RuntimeActionConfigurationComplete, shared.RuntimeConfigurationRequest{PublicationID: publicationID, Scope: scope}},
+	}
+	for index, step := range steps {
+		request := runtimeOperationRequest(step.action)
+		request.OperationID = fmt.Sprintf("configuration-operation-%d", index)
+		request.OperationKey = fmt.Sprintf("configuration-key-%d", index)
+		request.Configuration = &step.value
+		result, err := agent.executeRuntimeOperation(string(request.Action), &request, 30)
+		if err != nil || result.Configuration == nil {
+			t.Fatalf("step %s result=%#v error=%v", step.action, result, err)
+		}
+	}
+	written, err := os.ReadFile(clusterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(written) != "new\n" {
+		t.Fatalf("cluster.ini=%q", written)
 	}
 }
 

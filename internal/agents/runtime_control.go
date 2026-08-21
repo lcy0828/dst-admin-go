@@ -75,6 +75,9 @@ func runtimeCapability(action shared.RuntimeAction) string {
 		return "runtime.game-update.v1"
 	case shared.RuntimeActionCPUPrepare, shared.RuntimeActionCPUApply, shared.RuntimeActionCPUObserve:
 		return "runtime.cpu.v1"
+	case shared.RuntimeActionConfigurationBegin, shared.RuntimeActionConfigurationWrite, shared.RuntimeActionConfigurationPrepare,
+		shared.RuntimeActionConfigurationPublish, shared.RuntimeActionConfigurationRollback, shared.RuntimeActionConfigurationComplete:
+		return "runtime.configuration.v1"
 	default:
 		return ""
 	}

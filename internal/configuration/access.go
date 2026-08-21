@@ -125,7 +125,16 @@ func (s *Service) ApplyAccess(ctx context.Context, jobID, roomID string, request
 	if err := atomicWriteSet(roomPath, latest.files, writes); err != nil {
 		return ApplyResult{}, wrapApplyError("access lists", err)
 	}
-	return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, ProtectionBackupID: backup.ID}, nil
+	names := make([]string, 0, len(writes))
+	for _, write := range writes {
+		names = append(names, write.name)
+	}
+	published, err := s.publish(ctx, PublicationRequest{RoomID: roomID, Scope: PublicationShared, Files: names})
+	if err != nil {
+		rollbackErr := rollbackWrites(roomPath, latest.files, names)
+		return ApplyResult{}, wrapApplyError("access list publication", errors.Join(err, rollbackErr))
+	}
+	return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, ProtectionBackupID: backup.ID, PublishedTargets: published}, nil
 }
 
 func loadAccessDocument(roomPath string) (accessDocument, error) {
@@ -419,14 +428,20 @@ func (s *Service) ApplyToken(ctx context.Context, jobID, roomID string, request 
 		data = []byte(token + "\n")
 	}
 	path := filepath.Join(roomPath, "cluster_token.txt")
-	_, mode, _, _, err := readConfiguration(path, true)
+	previousData, mode, _, previousExists, err := readConfiguration(path, true)
 	if err != nil {
 		return ApplyResult{}, err
 	}
 	if err := atomicWrite(path, data, mode); err != nil {
 		return ApplyResult{}, wrapApplyError("cluster token", err)
 	}
-	return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, ProtectionBackupID: backup.ID}, nil
+	published, err := s.publish(ctx, PublicationRequest{RoomID: roomID, Scope: PublicationShared, Files: []string{"cluster_token.txt"}})
+	if err != nil {
+		previous := map[string]fileSnapshot{"cluster_token.txt": {data: previousData, mode: mode, exists: previousExists}}
+		rollbackErr := rollbackWrites(roomPath, previous, []string{"cluster_token.txt"})
+		return ApplyResult{}, wrapApplyError("cluster token publication", errors.Join(err, rollbackErr))
+	}
+	return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, ProtectionBackupID: backup.ID, PublishedTargets: published}, nil
 }
 
 func loadTokenStatus(roomPath string) (TokenStatus, error) {

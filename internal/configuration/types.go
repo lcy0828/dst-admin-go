@@ -69,6 +69,7 @@ type ApplyResult struct {
 	Revision           string   `json:"revision"`
 	Changes            []Change `json:"changes"`
 	ProtectionBackupID string   `json:"protectionBackupId"`
+	PublishedTargets   int      `json:"publishedTargets"`
 }
 
 type RoomValues struct {

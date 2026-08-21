@@ -3,6 +3,7 @@ package configuration
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -147,7 +148,12 @@ func (s *Service) ApplyRoom(ctx context.Context, jobID, roomID string, request R
 	if err := atomicWrite(filepath.Join(roomPath, "cluster.ini"), next, latest.mode); err != nil {
 		return ApplyResult{}, wrapApplyError("room", err)
 	}
-	return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, ProtectionBackupID: backup.ID}, nil
+	published, err := s.publish(ctx, PublicationRequest{RoomID: roomID, Scope: PublicationShared, Files: []string{"cluster.ini"}})
+	if err != nil {
+		rollbackErr := atomicWrite(filepath.Join(roomPath, "cluster.ini"), latest.data, latest.mode)
+		return ApplyResult{}, wrapApplyError("room publication", errors.Join(err, rollbackErr))
+	}
+	return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, ProtectionBackupID: backup.ID, PublishedTargets: published}, nil
 }
 
 func loadRoomDocument(roomPath string) (roomDocument, error) {

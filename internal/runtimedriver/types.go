@@ -42,6 +42,7 @@ const (
 	CapabilityGameUpdate      Capability = "gameUpdate"
 	CapabilityExclusiveCPU    Capability = "exclusiveCpu"
 	CapabilityPublishedUDP    Capability = "publishedUdpEndpoint"
+	CapabilityConfigPublish   Capability = "configPublish"
 )
 
 type Target struct {
@@ -141,6 +142,24 @@ type CPUDriver interface {
 	PrepareCPU(context.Context, Target, Operation, shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error)
 	ApplyCPU(context.Context, Target, Operation, shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error)
 	ObserveCPU(context.Context, Target, shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error)
+}
+
+type ConfigurationDescriptor struct {
+	PublicationID string
+	Scope         string
+	Size          int64
+	SHA256        string
+}
+
+// ConfigurationDriver is separate because older Agents may support lifecycle
+// operations without supporting transactional configuration publication.
+type ConfigurationDriver interface {
+	BeginConfiguration(context.Context, Target, Operation, ConfigurationDescriptor) (int64, error)
+	WriteConfiguration(context.Context, Target, Operation, ConfigurationDescriptor, int64, []byte) (int64, error)
+	PrepareConfiguration(context.Context, Target, Operation, string, string) error
+	PublishConfiguration(context.Context, Target, Operation, string, string) error
+	RollbackConfiguration(context.Context, Target, Operation, string, string) error
+	CompleteConfiguration(context.Context, Target, Operation, string, string) error
 }
 
 type SnapshotBarrierReceipt struct {

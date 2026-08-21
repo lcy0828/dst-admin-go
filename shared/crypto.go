@@ -69,4 +69,4 @@ func DecodePublicKey(encoded string) ([32]byte, error) {
 	}
 	copy(key[:], decoded)
 	return key, nil
-} 
+}
