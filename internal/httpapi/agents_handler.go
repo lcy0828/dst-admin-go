@@ -13,11 +13,16 @@ import (
 
 type AgentHandler struct{ service *agents.Service }
 
+type renameRuntimeTargetInput struct {
+	DisplayName string `json:"displayName"`
+}
+
 func NewAgentHandler(service *agents.Service) *AgentHandler { return &AgentHandler{service: service} }
 
 func (h *AgentHandler) Register(v2 *gin.RouterGroup) {
 	runtimes := v2.Group("/runtime-targets")
 	runtimes.GET("", h.runtimeTargets)
+	runtimes.PATCH("/:targetId", h.renameRuntimeTarget)
 	runtimes.GET("/agents/:agentId", h.runtimeTarget)
 	runtimes.PUT("/agents/:agentId", h.saveRuntimeConfig)
 	runtimes.DELETE("/agents/:agentId", h.deleteRuntimeConfig)
@@ -35,6 +40,20 @@ func (h *AgentHandler) Register(v2 *gin.RouterGroup) {
 	group.DELETE("/:agentId", h.forget)
 	group.GET("/:agentId/commands", h.agentCommands)
 	group.POST("/:agentId/commands", h.runCommand)
+}
+
+func (h *AgentHandler) renameRuntimeTarget(c *gin.Context) {
+	var input renameRuntimeTargetInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "机器名称不是有效 JSON", nil)
+		return
+	}
+	item, err := h.service.RenameRuntimeTarget(c.Param("targetId"), input.DisplayName)
+	if err != nil {
+		agentFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, item)
 }
 
 func (h *AgentHandler) runtimeTargets(c *gin.Context) {
@@ -212,7 +231,7 @@ func (h *AgentHandler) rotateKey(c *gin.Context) {
 
 func agentFailure(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, agents.ErrAgentNotFound), errors.Is(err, agents.ErrCommandNotFound), errors.Is(err, agents.ErrRuntimeNotConfigured), errors.Is(err, agents.ErrInventoryNotFound):
+	case errors.Is(err, agents.ErrAgentNotFound), errors.Is(err, agents.ErrCommandNotFound), errors.Is(err, agents.ErrRuntimeNotConfigured), errors.Is(err, agents.ErrRuntimeTargetNotFound), errors.Is(err, agents.ErrInventoryNotFound):
 		NotFound(c)
 	case errors.Is(err, agents.ErrAgentOffline):
 		Failure(c, http.StatusConflict, "AGENT_OFFLINE", "Agent 当前离线，无法执行命令", nil)

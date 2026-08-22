@@ -46,7 +46,7 @@ func newAgentTestService(t *testing.T) (*Service, *Store, *jobs.Service, *Memory
 }
 
 func TestAgentSyncOfflineProtectionAndForget(t *testing.T) {
-	service, _, _, _ := newAgentTestService(t)
+	service, store, _, _ := newAgentTestService(t)
 	items, available, err := service.Agents()
 	if err != nil || !available || len(items) != 2 {
 		t.Fatalf("agents=%#v available=%v err=%v", items, available, err)
@@ -64,8 +64,18 @@ func TestAgentSyncOfflineProtectionAndForget(t *testing.T) {
 	if _, err := service.RunCommand("agent-offline", CommandInput{Action: ActionSystemRefresh, TimeoutSeconds: 30}); !errors.Is(err, ErrAgentOffline) {
 		t.Fatalf("offline command error=%v", err)
 	}
+	if _, err := service.RenameRuntimeTarget("agent:agent-offline", "退役机器"); err != nil {
+		t.Fatal(err)
+	}
 	if err := service.Forget("agent-offline"); err != nil {
 		t.Fatal(err)
+	}
+	displayNames, err := store.NodeDisplayNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := displayNames["agent:agent-offline"]; exists {
+		t.Fatalf("forgotten Agent display name must be removed: %#v", displayNames)
 	}
 	items, _, _ = service.Agents()
 	if len(items) != 1 || items[0].ID != "agent-primary" {
@@ -102,6 +112,9 @@ func TestRuntimeTargetsPreferLocalAndKeepRemoteConfigurationIsolated(t *testing.
 	if target.ID != "agent:agent-primary" || target.Default || !target.Configured || target.Status != RuntimeStatusReady {
 		t.Fatalf("configured target=%#v", target)
 	}
+	if target.Name != "林火节点" || target.Config.DisplayName != "生产节点" {
+		t.Fatalf("machine name must remain separate from runtime name: %#v", target)
+	}
 	if target.Config.SavePath != input.SavePath || items[0].Config.SavePath != localRoot {
 		t.Fatalf("remote config leaked into local target: local=%#v remote=%#v", items[0].Config, target.Config)
 	}
@@ -118,6 +131,65 @@ func TestRuntimeTargetsPreferLocalAndKeepRemoteConfigurationIsolated(t *testing.
 	target, err = service.RuntimeTarget("agent-primary")
 	if err != nil || target.Configured || target.Status != RuntimeStatusConfigurationRequired {
 		t.Fatalf("deleted target=%#v err=%v", target, err)
+	}
+}
+
+func TestRuntimeTargetMachineNamesPersistIndependentlyFromRuntimeConfiguration(t *testing.T) {
+	service, _, _, _ := newAgentTestService(t)
+	localRoot := t.TempDir()
+	service.ConfigureLocalRuntime(RuntimeConfig{
+		DisplayName: "本机运行环境", SavePath: localRoot, ServerPath: localRoot, LuaBinary: "lua", ServerMode: "64",
+	})
+
+	local, err := service.RenameRuntimeTarget("local", "书房主机")
+	if err != nil || local.Name != "书房主机" || local.Hostname == "" {
+		t.Fatalf("renamed local target=%#v err=%v", local, err)
+	}
+	remote, err := service.RenameRuntimeTarget("agent:agent-primary", "云服务器 A")
+	if err != nil || remote.Name != "云服务器 A" || remote.Hostname == "" {
+		t.Fatalf("renamed remote target=%#v err=%v", remote, err)
+	}
+	agent, err := service.Agent("agent-primary")
+	if err != nil || agent.DisplayName != "云服务器 A" || agent.Hostname != "林火节点" {
+		t.Fatalf("agent machine name=%#v err=%v", agent, err)
+	}
+
+	config := RuntimeConfig{
+		DisplayName: "远程 DST 安装", SavePath: "/srv/dst/save", ServerPath: "/srv/dst/server", ServerMode: "64",
+	}
+	remote, err = service.SaveRuntimeConfig("agent-primary", config)
+	if err != nil || remote.Name != "云服务器 A" || remote.Config.DisplayName != "远程 DST 安装" {
+		t.Fatalf("machine alias must remain independent from runtime config: target=%#v err=%v", remote, err)
+	}
+
+	items, err := service.RuntimeTargets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[0].Name != "书房主机" || items[1].Name != "云服务器 A" {
+		t.Fatalf("persisted machine names missing: %#v", items)
+	}
+	if items[1].Hostname == items[1].Name {
+		t.Fatalf("hostname must remain a separate technical identifier: %#v", items[1])
+	}
+
+	for _, invalid := range []struct {
+		targetID string
+		name     string
+	}{
+		{"local", ""},
+		{"local", "bad\nname"},
+		{"missing", "有效名称"},
+		{"agent:missing", "有效名称"},
+	} {
+		_, err := service.RenameRuntimeTarget(invalid.targetID, invalid.name)
+		if invalid.targetID == "local" {
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("rename %q to %q error=%v", invalid.targetID, invalid.name, err)
+			}
+		} else if !errors.Is(err, ErrRuntimeTargetNotFound) {
+			t.Fatalf("rename missing target %q error=%v", invalid.targetID, err)
+		}
 	}
 }
 

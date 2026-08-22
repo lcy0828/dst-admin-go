@@ -58,11 +58,29 @@ func TestAgentHTTPListCommandFailureAndKeyRotation(t *testing.T) {
 	if localTarget["id"] != "local" || localTarget["default"] != true {
 		t.Fatalf("local runtime is not first/default: %s", response.Body.String())
 	}
+	response = performJSON(router, http.MethodPatch, "/api/v2/runtime-targets/local", map[string]interface{}{
+		"displayName": "本地游戏机",
+	}, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if data := responseData(t, response); data["name"] != "本地游戏机" || data["hostname"] == "" {
+		t.Fatalf("unexpected renamed local machine: %s", response.Body.String())
+	}
+	response = performJSON(router, http.MethodPatch, "/api/v2/runtime-targets/agent%3Aagent-primary", map[string]interface{}{
+		"displayName": "远程游戏机",
+	}, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if data := responseData(t, response); data["name"] != "远程游戏机" || data["hostname"] == "" {
+		t.Fatalf("unexpected renamed remote machine: %s", response.Body.String())
+	}
+	response = performJSON(router, http.MethodPatch, "/api/v2/runtime-targets/local", map[string]interface{}{
+		"displayName": "bad\nname",
+	}, nil, "")
+	assertStatus(t, response, http.StatusUnprocessableEntity)
 	response = performJSON(router, http.MethodPut, "/api/v2/runtime-targets/agents/agent-primary", map[string]interface{}{
 		"displayName": "远程生产节点", "savePath": "/srv/dst/save", "serverPath": "/srv/dst/server", "serverMode": "64",
 	}, nil, "")
 	assertStatus(t, response, http.StatusOK)
-	if data := responseData(t, response); data["id"] != "agent:agent-primary" || data["configured"] != true {
+	if data := responseData(t, response); data["id"] != "agent:agent-primary" || data["configured"] != true || data["name"] != "远程游戏机" {
 		t.Fatalf("unexpected saved runtime: %s", response.Body.String())
 	}
 	response = performJSON(router, http.MethodGet, "/api/v2/agents/agent-primary/inventory", nil, nil, "")

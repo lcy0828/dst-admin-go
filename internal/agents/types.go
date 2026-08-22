@@ -19,6 +19,7 @@ var (
 	ErrConfirmationRequired             = errors.New("agent key rotation confirmation is required")
 	ErrRuntimeNotConfigured             = errors.New("agent runtime is not configured")
 	ErrRuntimeInstallationNotRegistered = errors.New("agent runtime installation is not registered")
+	ErrRuntimeTargetNotFound            = errors.New("runtime target not found")
 	ErrInventoryNotFound                = errors.New("agent runtime inventory not found")
 )
 
@@ -95,6 +96,7 @@ type Capacity struct {
 
 type Agent struct {
 	ID                            string                 `json:"id"`
+	DisplayName                   string                 `json:"displayName"`
 	Hostname                      string                 `json:"hostname"`
 	OS                            string                 `json:"os"`
 	Arch                          string                 `json:"arch"`

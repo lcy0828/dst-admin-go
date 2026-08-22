@@ -77,6 +77,13 @@ type inventoryRecord struct {
 	UpdatedAt  time.Time
 }
 
+type nodeDisplayNameRecord struct {
+	TargetID    string `gorm:"type:varchar(160);primary_key"`
+	DisplayName string `gorm:"type:varchar(100);not null"`
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 type Store struct {
 	db             *gorm.DB
 	agentsTable    string
@@ -84,6 +91,7 @@ type Store struct {
 	securityTable  string
 	runtimeTable   string
 	inventoryTable string
+	nodeNamesTable string
 	now            func() time.Time
 }
 
@@ -92,7 +100,7 @@ func NewStore(db *gorm.DB, prefix string) *Store {
 	return &Store{
 		db: db, agentsTable: prefix + "agent", commandsTable: prefix + "agent_command",
 		securityTable: prefix + "agent_security", runtimeTable: prefix + "agent_runtime",
-		inventoryTable: prefix + "agent_inventory", now: time.Now,
+		inventoryTable: prefix + "agent_inventory", nodeNamesTable: prefix + "node_display_name", now: time.Now,
 	}
 }
 
@@ -100,7 +108,7 @@ func (s *Store) Migrate() error {
 	for _, migration := range []struct {
 		table string
 		model interface{}
-	}{{s.agentsTable, &agentRecord{}}, {s.commandsTable, &commandRecord{}}, {s.securityTable, &securityRecord{}}, {s.runtimeTable, &runtimeRecord{}}, {s.inventoryTable, &inventoryRecord{}}} {
+	}{{s.agentsTable, &agentRecord{}}, {s.commandsTable, &commandRecord{}}, {s.securityTable, &securityRecord{}}, {s.runtimeTable, &runtimeRecord{}}, {s.inventoryTable, &inventoryRecord{}}, {s.nodeNamesTable, &nodeDisplayNameRecord{}}} {
 		if err := s.db.Table(migration.table).AutoMigrate(migration.model).Error; err != nil {
 			return fmt.Errorf("migrate %s: %w", migration.table, err)
 		}
@@ -230,7 +238,39 @@ func (s *Store) DeleteAgent(id string) error {
 		tx.Rollback()
 		return err
 	}
+	if err := tx.Table(s.nodeNamesTable).Where("target_id = ?", "agent:"+id).Delete(&nodeDisplayNameRecord{}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
 	return tx.Commit().Error
+}
+
+func (s *Store) NodeDisplayNames() (map[string]string, error) {
+	var records []nodeDisplayNameRecord
+	if err := s.db.Table(s.nodeNamesTable).Find(&records).Error; err != nil {
+		return nil, err
+	}
+	result := make(map[string]string, len(records))
+	for _, record := range records {
+		result[record.TargetID] = record.DisplayName
+	}
+	return result, nil
+}
+
+func (s *Store) SaveNodeDisplayName(targetID, displayName string) error {
+	now := s.now().UTC()
+	var count int
+	if err := s.db.Table(s.nodeNamesTable).Where("target_id = ?", targetID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		return s.db.Table(s.nodeNamesTable).Create(&nodeDisplayNameRecord{
+			TargetID: targetID, DisplayName: displayName, CreatedAt: now, UpdatedAt: now,
+		}).Error
+	}
+	return s.db.Table(s.nodeNamesTable).Where("target_id = ?", targetID).Updates(map[string]interface{}{
+		"display_name": displayName, "updated_at": now,
+	}).Error
 }
 
 func (s *Store) RuntimeConfigs() (map[string]RuntimeConfig, error) {

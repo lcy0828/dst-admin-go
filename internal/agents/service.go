@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"dont/internal/jobs"
@@ -74,13 +75,17 @@ func (s *Service) RuntimeTargets() ([]RuntimeTarget, error) {
 	if err != nil {
 		return nil, err
 	}
+	displayNames, err := s.store.NodeDisplayNames()
+	if err != nil {
+		return nil, err
+	}
 	items := make([]RuntimeTarget, 0, len(agentItems)+1)
 	if s.localEnabled {
-		items = append(items, s.localRuntimeTarget())
+		items = append(items, applyRuntimeTargetDisplayName(s.localRuntimeTarget(), displayNames))
 	}
 	for _, agent := range agentItems {
 		config, configured := configs[agent.ID]
-		items = append(items, runtimeTargetFromAgent(agent, config, configured))
+		items = append(items, applyRuntimeTargetDisplayName(runtimeTargetFromAgent(agent, config, configured), displayNames))
 	}
 	return items, nil
 }
@@ -104,12 +109,12 @@ func (s *Service) RuntimeTarget(agentID string) (RuntimeTarget, error) {
 	}
 	config, err := s.store.RuntimeConfig(agentID)
 	if errors.Is(err, ErrRuntimeNotConfigured) {
-		return runtimeTargetFromAgent(agent, RuntimeConfig{}, false), nil
+		return s.applyStoredRuntimeTargetDisplayName(runtimeTargetFromAgent(agent, RuntimeConfig{}, false))
 	}
 	if err != nil {
 		return RuntimeTarget{}, err
 	}
-	return runtimeTargetFromAgent(agent, config, true), nil
+	return s.applyStoredRuntimeTargetDisplayName(runtimeTargetFromAgent(agent, config, true))
 }
 
 func (s *Service) SaveRuntimeConfig(agentID string, input RuntimeConfig) (RuntimeTarget, error) {
@@ -135,7 +140,45 @@ func (s *Service) SaveRuntimeConfig(agentID string, input RuntimeConfig) (Runtim
 	if err := s.store.DeleteInventory(agentID); err != nil {
 		return RuntimeTarget{}, err
 	}
-	return runtimeTargetFromAgent(agent, config, true), nil
+	return s.applyStoredRuntimeTargetDisplayName(runtimeTargetFromAgent(agent, config, true))
+}
+
+func (s *Service) RenameRuntimeTarget(targetID, displayName string) (RuntimeTarget, error) {
+	targetID = strings.TrimSpace(targetID)
+	displayName = strings.TrimSpace(displayName)
+	if !validNodeDisplayName(displayName) {
+		return RuntimeTarget{}, ErrInvalidInput
+	}
+
+	var target RuntimeTarget
+	switch {
+	case targetID == "local":
+		if !s.localEnabled {
+			return RuntimeTarget{}, ErrRuntimeTargetNotFound
+		}
+		target = s.localRuntimeTarget()
+	case strings.HasPrefix(targetID, "agent:"):
+		agentID := strings.TrimPrefix(targetID, "agent:")
+		if !agentIDPattern.MatchString(agentID) {
+			return RuntimeTarget{}, ErrRuntimeTargetNotFound
+		}
+		var err error
+		target, err = s.RuntimeTarget(agentID)
+		if errors.Is(err, ErrAgentNotFound) {
+			return RuntimeTarget{}, ErrRuntimeTargetNotFound
+		}
+		if err != nil {
+			return RuntimeTarget{}, err
+		}
+	default:
+		return RuntimeTarget{}, ErrRuntimeTargetNotFound
+	}
+
+	if err := s.store.SaveNodeDisplayName(targetID, displayName); err != nil {
+		return RuntimeTarget{}, err
+	}
+	target.Name = displayName
+	return target, nil
 }
 
 func (s *Service) DeleteRuntimeConfig(agentID string) error {
@@ -161,6 +204,43 @@ func (s *Service) localRuntimeTarget() RuntimeTarget {
 		Default: true, Configured: configured, Online: true,
 		Capabilities: []string{"runtime.local"}, Config: s.local,
 	}
+}
+
+func (s *Service) applyStoredRuntimeTargetDisplayName(target RuntimeTarget) (RuntimeTarget, error) {
+	displayNames, err := s.store.NodeDisplayNames()
+	if err != nil {
+		return RuntimeTarget{}, err
+	}
+	return applyRuntimeTargetDisplayName(target, displayNames), nil
+}
+
+func applyRuntimeTargetDisplayName(target RuntimeTarget, displayNames map[string]string) RuntimeTarget {
+	if displayName := strings.TrimSpace(displayNames[target.ID]); displayName != "" {
+		target.Name = displayName
+	}
+	return target
+}
+
+func effectiveAgentDisplayName(agent Agent, displayNames map[string]string) string {
+	if displayName := strings.TrimSpace(displayNames["agent:"+agent.ID]); displayName != "" {
+		return displayName
+	}
+	if hostname := strings.TrimSpace(agent.Hostname); hostname != "" {
+		return hostname
+	}
+	return agent.ID
+}
+
+func validNodeDisplayName(value string) bool {
+	if value == "" || utf8.RuneCountInString(value) > 100 {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func NewService(store *Store, jobService *jobs.Service, transport Transport) (*Service, error) {
@@ -225,7 +305,12 @@ func (s *Service) Agents() ([]Agent, bool, error) {
 	if syncErr != nil && len(items) == 0 {
 		return nil, s.transport.Available(), syncErr
 	}
+	displayNames, err := s.store.NodeDisplayNames()
+	if err != nil {
+		return nil, s.transport.Available(), err
+	}
 	for index := range items {
+		items[index].DisplayName = effectiveAgentDisplayName(items[index], displayNames)
 		items[index] = s.decorateAgent(items[index])
 	}
 	return items, s.transport.Available(), nil
@@ -240,6 +325,11 @@ func (s *Service) Agent(id string) (Agent, error) {
 	if err != nil {
 		return Agent{}, err
 	}
+	displayNames, err := s.store.NodeDisplayNames()
+	if err != nil {
+		return Agent{}, err
+	}
+	item.DisplayName = effectiveAgentDisplayName(item, displayNames)
 	return s.decorateAgent(item), nil
 }
 
@@ -282,11 +372,11 @@ func (s *Service) RunCommand(agentID string, input CommandInput) (jobs.Job, erro
 		return jobs.Job{}, ErrInvalidInput
 	}
 	now := s.now().UTC()
-	command := Command{ID: uuid.NewString(), AgentID: agent.ID, AgentName: agent.Hostname, Action: input.Action, Status: CommandQueued, CreatedAt: now}
+	command := Command{ID: uuid.NewString(), AgentID: agent.ID, AgentName: agent.DisplayName, Action: input.Action, Status: CommandQueued, CreatedAt: now}
 	if err := s.store.CreateCommand(command); err != nil {
 		return jobs.Job{}, err
 	}
-	job, err := s.jobs.SubmitFactory("agent.command", "", "", []jobs.TargetSpec{{ID: agent.ID, Name: agent.Hostname}}, func(job jobs.Job) jobs.Runner {
+	job, err := s.jobs.SubmitFactory("agent.command", "", "", []jobs.TargetSpec{{ID: agent.ID, Name: agent.DisplayName}}, func(job jobs.Job) jobs.Runner {
 		_ = s.store.AttachJob(command.ID, job.ID)
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
 			started := s.now().UTC()
@@ -565,9 +655,12 @@ func runtimeTargetFromAgent(agent Agent, config RuntimeConfig, configured bool) 
 			status = RuntimeStatusConfigurationRequired
 		}
 	}
-	name := agent.Hostname
-	if config.DisplayName != "" {
-		name = config.DisplayName
+	name := strings.TrimSpace(agent.DisplayName)
+	if name == "" {
+		name = strings.TrimSpace(agent.Hostname)
+	}
+	if name == "" {
+		name = agent.ID
 	}
 	heartbeat := agent.LastHeartbeat.UTC()
 	return RuntimeTarget{

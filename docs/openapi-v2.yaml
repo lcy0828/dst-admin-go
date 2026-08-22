@@ -3295,6 +3295,27 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/RuntimeTargetListEnvelope" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /runtime-targets/{targetId}:
+    parameters:
+      - name: targetId
+        in: path
+        required: true
+        schema: { type: string, pattern: '^(local|agent:[A-Za-z0-9][A-Za-z0-9._-]{0,127})$' }
+    patch:
+      tags: [Agents]
+      operationId: renameRuntimeTarget
+      summary: Set the user-facing machine name without changing its hostname or runtime installation name
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuntimeTargetNameInput" }
+      responses:
+        "200": { description: Renamed runtime target, content: { application/json: { schema: { $ref: "#/components/schemas/RuntimeTargetEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /runtime-targets/agents/{agentId}:
     parameters: [{ $ref: "#/components/parameters/AgentID" }]
     get:
@@ -8253,6 +8274,16 @@ components:
         luaBinary: { type: string, maxLength: 255, default: lua }
         luaFallbackPath: { type: string, maxLength: 2048 }
         serverMode: { type: string, enum: ["32", "64", luajit], default: "64" }
+    RuntimeTargetNameInput:
+      type: object
+      additionalProperties: false
+      required: [displayName]
+      properties:
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: User-facing machine name. Control characters are rejected.
     RuntimeTarget:
       type: object
       additionalProperties: false
@@ -8261,7 +8292,7 @@ components:
         id: { type: string, description: local or agent followed by a colon and Agent ID }
         kind: { $ref: "#/components/schemas/RuntimeKind" }
         agentId: { type: string }
-        name: { type: string }
+        name: { type: string, description: Effective user-facing machine name. This is separate from hostname and RuntimeConfig.displayName. }
         hostname: { type: string }
         os: { type: string }
         arch: { type: string }
@@ -8354,9 +8385,10 @@ components:
     Agent:
       type: object
       additionalProperties: false
-      required: [id, hostname, os, arch, version, ipAddresses, status, lastHeartbeat, capabilities, metrics, capacity, metricsStale, installationRegistrySupported, installations, details, createdAt, updatedAt]
+      required: [id, displayName, hostname, os, arch, version, ipAddresses, status, lastHeartbeat, capabilities, metrics, capacity, metricsStale, installationRegistrySupported, installations, details, createdAt, updatedAt]
       properties:
         id: { type: string }
+        displayName: { type: string, description: Effective user-facing machine name; falls back to hostname when no alias was saved. }
         hostname: { type: string }
         os: { type: string }
         arch: { type: string }
