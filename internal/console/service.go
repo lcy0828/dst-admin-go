@@ -139,6 +139,20 @@ func (s *Service) DeleteDefinition(id string) error {
 	return s.store.DeleteDefinition(id)
 }
 
+// ExecuteScheduled executes a command authorized by an administrator when saving
+// an automation task. Interactive requests retain their confirmation contract.
+func (s *Service) ExecuteScheduled(ctx context.Context, roomID, worldID string, request ExecuteRequest, raw string) (Run, error) {
+	room, _, err := s.resolve(roomID, worldID)
+	if err != nil {
+		return Run{}, err
+	}
+	if raw != "" {
+		return s.ExecuteRaw(ctx, roomID, worldID, RawRequest{Command: raw, Confirmation: room.Name})
+	}
+	request.Confirmation = room.Name
+	return s.Execute(ctx, roomID, worldID, request)
+}
+
 func (s *Service) Execute(ctx context.Context, roomID, worldID string, request ExecuteRequest) (Run, error) {
 	commandID := strings.TrimSpace(request.CommandID)
 	tmpl, builtin := s.templates[commandID]
