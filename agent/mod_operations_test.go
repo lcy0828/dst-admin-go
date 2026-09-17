@@ -22,7 +22,7 @@ import (
 
 func newModOperationAgent(t *testing.T) (*Agent, RuntimeInstallation) {
 	t.Helper()
-	root, err := filepath.EvalSymlinks(t.TempDir())
+	root, err := filepath.EvalSymlinks(shortRuntimeRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -145,7 +145,7 @@ func (runtime *fakeShardRuntime) Send(context.Context, string, string, string) e
 
 func newShardOperationAgent(t *testing.T, runtimeControl shardRuntimeControl) (*Agent, RuntimeInstallation) {
 	t.Helper()
-	root := t.TempDir()
+	root := shortRuntimeRoot(t)
 	serverPath := filepath.Join(root, "server")
 	masterPath := filepath.Join(root, "saves", "Cluster_1", "Master")
 	cavesPath := filepath.Join(root, "saves", "Cluster_1", "Caves")

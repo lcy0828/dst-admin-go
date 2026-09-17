@@ -15,9 +15,24 @@ import (
 	dsttmux "dont/tmux"
 )
 
+// Native sockets must fit the Unix path limit even when a test has a long name.
+func shortSaveRootForTest(t *testing.T) string {
+	t.Helper()
+	root, err := os.MkdirTemp("", "dst-shards-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove temporary save root: %v", err)
+		}
+	})
+	return root
+}
+
 func newTmuxControlForCacheTest(t *testing.T) *TmuxControl {
 	t.Helper()
-	root := t.TempDir()
+	root := shortSaveRootForTest(t)
 	control, err := NewTmuxControl(TmuxConfig{
 		SaveRoot: root, ServerMode: "64",
 	})
@@ -38,7 +53,7 @@ func shortLegacySocketForTest(t *testing.T) string {
 }
 
 func TestNativeConsoleSocketPathUsesSaveRootIdentity(t *testing.T) {
-	root := t.TempDir()
+	root := shortSaveRootForTest(t)
 	first, err := NativeConsoleSocketPath(root)
 	if err != nil {
 		t.Fatal(err)
@@ -47,14 +62,14 @@ func TestNativeConsoleSocketPathUsesSaveRootIdentity(t *testing.T) {
 	if err != nil || first != second {
 		t.Fatalf("first=%q second=%q error=%v", first, second, err)
 	}
-	other, err := NativeConsoleSocketPath(t.TempDir())
+	other, err := NativeConsoleSocketPath(shortSaveRootForTest(t))
 	if err != nil || other == first {
 		t.Fatalf("other=%q first=%q error=%v", other, first, err)
 	}
 }
 
 func TestTmuxControlClaimsOneOwnerPerSaveRoot(t *testing.T) {
-	root := t.TempDir()
+	root := shortSaveRootForTest(t)
 	first, err := NewTmuxControl(TmuxConfig{SaveRoot: root, ServerMode: "64", OwnerLabel: "first"})
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +91,7 @@ func TestTmuxControlClaimsOneOwnerPerSaveRoot(t *testing.T) {
 }
 
 func TestExplicitTmuxSocketDoesNotRequirePrivateParent(t *testing.T) {
-	root := t.TempDir()
+	root := shortSaveRootForTest(t)
 	directory, err := os.MkdirTemp("/tmp", "dst-socket-")
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +114,7 @@ func TestExplicitTmuxSocketDoesNotRequirePrivateParent(t *testing.T) {
 }
 
 func TestTmuxControlDetectsUnmanagedShardProcess(t *testing.T) {
-	root := t.TempDir()
+	root := shortSaveRootForTest(t)
 	control, err := NewTmuxControl(TmuxConfig{
 		SaveRoot: root, ServerMode: "64",
 		ProcessProbe: func(context.Context) ([]shared.ShardProcessReport, error) {
@@ -121,7 +136,7 @@ func TestTmuxControlDetectsUnmanagedShardProcess(t *testing.T) {
 }
 
 func TestTmuxControlStopsSingleOwnedLegacySession(t *testing.T) {
-	root := t.TempDir()
+	root := shortSaveRootForTest(t)
 	legacySocket := shortLegacySocketForTest(t)
 	control, err := NewTmuxControl(TmuxConfig{
 		SaveRoot: root, ServerMode: "64", LegacyConsoleSockets: []string{legacySocket},
@@ -153,7 +168,7 @@ func TestTmuxControlStopsSingleOwnedLegacySession(t *testing.T) {
 }
 
 func TestTmuxControlStopsDefaultSocketFromPreviousMountNamespace(t *testing.T) {
-	root := t.TempDir()
+	root := shortSaveRootForTest(t)
 	legacySocket := "/proc/77/root/tmp/tmux-1000/default"
 	control, err := NewTmuxControl(TmuxConfig{
 		SaveRoot: root, ServerMode: "64",
@@ -201,7 +216,7 @@ func TestParseLinuxProcessIdentity(t *testing.T) {
 }
 
 func TestTmuxControlRefusesAmbiguousLegacyStop(t *testing.T) {
-	root := t.TempDir()
+	root := shortSaveRootForTest(t)
 	legacySocket := shortLegacySocketForTest(t)
 	control, err := NewTmuxControl(TmuxConfig{
 		SaveRoot: root, ServerMode: "64", LegacyConsoleSockets: []string{legacySocket},
@@ -233,7 +248,7 @@ func TestTmuxControlRefusesAmbiguousLegacyStop(t *testing.T) {
 }
 
 func TestTmuxControlDetectsDuplicateShardProcesses(t *testing.T) {
-	root := t.TempDir()
+	root := shortSaveRootForTest(t)
 	control, err := NewTmuxControl(TmuxConfig{
 		SaveRoot: root, ServerMode: "64",
 		ProcessProbe: func(context.Context) ([]shared.ShardProcessReport, error) {
@@ -259,7 +274,7 @@ func TestTmuxControlDetectsDuplicateShardProcesses(t *testing.T) {
 
 func TestTmuxControlFailsClosedWhenOwnershipCannotBeInspected(t *testing.T) {
 	control, err := NewTmuxControl(TmuxConfig{
-		SaveRoot: t.TempDir(), ServerMode: "64",
+		SaveRoot: shortSaveRootForTest(t), ServerMode: "64",
 		ProcessProbe: func(context.Context) ([]shared.ShardProcessReport, error) {
 			return nil, fmt.Errorf("process list unavailable")
 		},
@@ -279,7 +294,7 @@ func TestTmuxControlFailsClosedWhenOwnershipCannotBeInspected(t *testing.T) {
 }
 
 func TestNewTmuxControlRejectsRuntimeNameAsServerArchitecture(t *testing.T) {
-	_, err := NewTmuxControl(TmuxConfig{SaveRoot: t.TempDir(), ServerMode: "luajit"})
+	_, err := NewTmuxControl(TmuxConfig{SaveRoot: shortSaveRootForTest(t), ServerMode: "luajit"})
 	if err == nil {
 		t.Fatal("expected invalid server architecture to be rejected")
 	}

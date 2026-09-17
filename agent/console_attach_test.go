@@ -104,7 +104,7 @@ func TestConsoleAttachProtocolGatesWritableClientWithMaintenanceLease(t *testing
 }
 
 func TestNativeInstallationsReceiveStablePrivateSockets(t *testing.T) {
-	root := t.TempDir()
+	root := shortRuntimeRoot(t)
 	values, err := normalizeRuntimeInstallations([]RuntimeInstallation{
 		{ID: "primary", SavePath: filepath.Join(root, "save-a"), ServerPath: filepath.Join(root, "server-a")},
 		{ID: "secondary", SavePath: filepath.Join(root, "save-b"), ServerPath: filepath.Join(root, "server-b")},
@@ -132,7 +132,7 @@ func TestNativeInstallationsReceiveStablePrivateSockets(t *testing.T) {
 }
 
 func TestRenamedNativeInstallationKeepsOwnershipSocket(t *testing.T) {
-	root := t.TempDir()
+	root := shortRuntimeRoot(t)
 	saveRoot := filepath.Join(root, "save")
 	values := make([]RuntimeInstallation, 0, 2)
 	for _, installation := range []RuntimeInstallation{

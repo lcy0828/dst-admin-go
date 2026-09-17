@@ -759,7 +759,9 @@ func TestRuntimeTargetInventoriesCollectsConfiguredLocalTarget(t *testing.T) {
 	if items[0].Inventory.Installation.SavePath != localRoot || items[0].Inventory.Installation.ServerPath != localRoot {
 		t.Fatalf("local paths were not normalized: %#v", items[0].Inventory.Installation)
 	}
-	if items[0].Capacity.PhysicalCores < 1 || items[0].Capacity.ReservedPhysicalCores != 1 {
+	// Reservation policy is covered by the capacity table tests; small CI
+	// runners legitimately reserve no core so Master and Caves can both fit.
+	if items[0].Capacity.PhysicalCores < 1 || items[0].Capacity.RecommendedShardLimit < 1 || items[0].Capacity.AvailableSlots != items[0].Capacity.RecommendedShardLimit {
 		t.Fatalf("local capacity=%#v", items[0].Capacity)
 	}
 }

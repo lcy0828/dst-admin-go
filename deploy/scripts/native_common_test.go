@@ -23,7 +23,7 @@ func TestNativeCommonCreatesStableSteamCMDEntry(t *testing.T) {
 	if err := os.WriteFile(config, []byte("[runtime.native]\nSTEAMCMD_PATH = "+configured+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	script := filepath.Join("native-common.sh")
+	script := "./native-common.sh"
 	command := exec.Command("sh", "-c", `. "$1"; ensure_configured_steamcmd "$2"`, "test", script, config)
 	command.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin")
 	output, err := command.CombinedOutput()
@@ -43,7 +43,7 @@ func TestNativeCommonRejectsMissingConfiguredSteamCMD(t *testing.T) {
 	if err := os.WriteFile(config, []byte("[runtime.native]\nSTEAMCMD_PATH = "+missing+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("sh", "-c", `. "$1"; ensure_configured_steamcmd "$2"`, "test", "native-common.sh", config)
+	command := exec.Command("sh", "-c", `. "$1"; ensure_configured_steamcmd "$2"`, "test", "./native-common.sh", config)
 	command.Env = append(os.Environ(), "PATH=/usr/bin:/bin")
 	output, err := command.CombinedOutput()
 	if err == nil || !strings.Contains(string(output), "no executable SteamCMD was found") {
