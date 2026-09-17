@@ -5,3 +5,4 @@
 *.db-wal
 .DS_Store
 .tmp-*
+/deploy/docker/.env

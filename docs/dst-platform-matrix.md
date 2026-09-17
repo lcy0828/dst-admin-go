@@ -273,7 +273,22 @@ Build 不一致时可以展示名称和图标，但数值、生成规则、资�
 
 ## 9. Performance Lab 与 LuaJIT
 
-`/Users/lcy/dst/p0/reports` 中的 LuaJIT 研究可作为路线依据，但不是当前产品已经具备的能力。正确实施顺序是：
+`/Users/lcy/dst/p0/reports` 中的 LuaJIT 研究是路线依据。当前管理端已经具备按次启动选择 Lua 运行时的安全闭环：
+
+- `serverMode` 只表示 32/64 位服务端架构，不再把 `luajit` 伪装成另一个可执行位数。
+- 本机 Runtime 与新版 Agent 安装会只读检测 `DontStarveLuaJIT2` 的注入壳、原始程序、Injector、VM、配套 Mod、签名版本、Klei 游戏版本和二进制摘要。
+- 检测状态固定为 `not_installed`、`detected_unverified`、`incompatible`、`ready`；只有 `ready` 可以进入后续启用流程。
+- 固定签名包只有在签名版本与当前 Klei 游戏版本完全一致时才可启用；不一致时显示 `incompatible` 并阻止启用。
+- `2026-08-22` 发布的 `Preview v3.0.0 (fa2b27c)` 改为插件化布局：游戏目录只保留注入 Stub，`data/unsafedata/ds_luajit_injector.path` 指向 Mod 根目录的真实 Injector，VM 位于 `plugins/plugin_core_vm`，依赖位于 `deps`。
+- v3 由 `plugin_core_vm` 按当前 `version.txt` 使用 Function Relocation/Nucleus 生成签名。Linux 自动签名修复已合并到 DontStarveLuaJIT2 v3 的 `master`，Debian 12 完成构建、48 项测试、冷/热签名、存档载入和双分片基础验证。
+- 稳定版 v3 直接使用上游的 VM 选项，不要求私有契约文件。安装前在目标节点检查系统依赖；官方包与 Debian 12 兼容构建在页面明确区分。
+- Controller 对远程报告采用 fail-closed：`ready` 必须由 Agent 明确声明可启用，固定签名版本匹配当前游戏版本或包声明经过验证的自动签名能力，支持 Game Lua 和 LuaJIT，且不存在未知问题码。
+- 启动选择是进程级参数，不写入 `cluster.ini`、`server.ini`、`modoverrides.lua`。同一次房间启动的全部所选世界使用同一模式；默认始终为原版 Game Lua。
+- 只有本机或声明 `shard.runtime-mode.v1` 能力的 Agent，且目标安装报告存在共同支持的 LuaJIT 配置时，前端才允许选择 LuaJIT。实验性分代 GC 收在高级设置中，JIT 行为沿用上游配置；任何未验证或旧版节点都只能选择 Game Lua，不允许静默使用 LuaJIT。
+- 启动弹窗单独展示运行时包版本：`V2.9.2 Preview` 作为旧版兼容路线可见但不声明支持进程级模式，`V3.0.0` 稳定版在检测通过的安装上可选。客户端提交所选版本，Controller 再次核对每个 Placement 的实际安装版本，禁止页面选择与实际启动版本不一致。
+- 默认由 Agent / 本机 Runtime 管理包与安装，用户主动检查上游、下载或安装时才执行；不在后台自动更新，也不会注入运行中的世界。切换模式必须通过启动或重启创建新进程。
+
+后续正确实施顺序是：
 
 ### P0：可信性能事实
 
@@ -285,7 +300,7 @@ Build 不一致时可以展示名称和图标，但数值、生成规则、资�
 
 ### P1：可交付的 VM 选择
 
-- 对同一工作负载比较 GameLua、LuaJIT JIT-off、LuaJIT JIT-on 和 Arena GC。
+- 对同一工作负载比较 Game Lua、LuaJIT 默认配置、LuaJIT 关闭 JIT 和实验性分代 GC。
 - 策略绑定 `gameBuildId + modSetHash + configHash`。
 - 未识别 Build 默认不注入；启动失败或正确性门禁失败自动回退。
 - 管理端展示“当前 VM、为何选择、证据时间、回退入口”。
@@ -300,7 +315,7 @@ Build 不一致时可以展示名称和图标，但数值、生成规则、资�
 ### P3：已验证优化
 
 - Linux Fork Save 先做保存停顿、总时长和 Copy-on-Write 峰值实验。
-- Concurrent GC 作为独立实验变体，不与 Arena GC 混称。
+- Concurrent GC 作为独立实验变体，不与上游分代 GC 混称。
 - 显式 Worker API 只接受版本化纯数据，不传 `lua_State`、Entity、Lua table 或 userdata。
 - 共享内存仅在测出重复数据成本后实施，禁止两个 Master 写同一 Shard。
 

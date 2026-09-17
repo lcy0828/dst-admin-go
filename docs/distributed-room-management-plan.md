@@ -443,7 +443,7 @@ Mod 管理继续区分：
 | 命令在重启边界发给错误实例 | instance ID、fencing、per-Shard dispatcher 和操作类型证据 |
 | 原始 Lua 被包装后与 Mod 行为不同 | 原始 Lua 只报告 sent；可靠产品动作进入受管 Runtime allowlist |
 | 多来源控制台输入交叉 | Agent per-Shard dispatcher、有界队列、停止门禁和输入 dirty 状态 |
-| 同宿主多个 Installation 的 tmux session 冲突 | 安装级私有 tmux socket、稳定 session identity 和固定 pane ID |
+| 同宿主多个 Installation 的 tmux session 冲突 | 按物理存档根目录派生私有 tmux socket、内核独占 owner lock、稳定 session identity、进程归属预检和固定 pane ID |
 | tmux 返回权限/socket 错误却被当成 stopped | ConsoleHealth 细分错误，只有明确 not_found 才是不存在 |
 | 服主手动 attach 与自动命令交叉 | 只读 attach；可写 attach 获取 maintenance lease，未知 writer 时阻止 dispatcher |
 | 容器用空闲进程保活，DST 已退但容器仍 Running | init + runtime supervisor 作为 PID 1，退出码和 instance observation 绑定 DST |
@@ -473,7 +473,7 @@ Mod 管理继续区分：
 - 控制中心保存拓扑快照并展示数据新鲜度。
 - 前端提供集中总览、房间拓扑和节点详情。
 
-已交付说明：支持同一节点规划多个房间，也支持同一房间的多个世界分片放在同一节点；容量按该节点运行中的 Shard 总数而非房间数计算，默认每个 Shard 占用 1 个物理核心预算并额外预留 1 核。界面明确提示“一核心最多运行一层世界”，超出建议值只要求用户确认并告警，不构成硬限制或性能保证。
+已交付说明：支持同一节点规划多个房间，也支持同一房间的多个世界分片放在同一节点；容量按该节点运行中的 Shard 总数而非房间数计算。2 个及以下有效 CPU 不额外预留整核，保证常见 2C4G 主机可以运行 Master+Caves；3 个及以上有效 CPU 默认预留 1 核。界面明确提示“一有效 CPU 最多运行一层世界”，超出建议值只要求用户确认并告警，不构成硬限制或性能保证。
 
 ### Phase 3：类型化分片控制（已完成）
 
@@ -489,7 +489,7 @@ Mod 管理继续区分：
 - 支持选择多个房间、节点或分片分批执行。
 - 建立部分失败和恢复入口。
 
-已交付说明：`POST /api/v2/rooms/:roomId/actions/:action` 在启动和重启前按 `appliedTargetId` 计算启动后容量，首次超配或容量未知时返回 `CAPACITY_RISK_CONFIRMATION_REQUIRED`，确认后允许继续但不提供性能保证。整房间在任一世界预检失败时不会先操作其他世界。`POST /api/v2/rooms/actions/:action` 支持多个房间合并预览容量，并用 `roomId:worldId` 作为 Job 目标标识；不同房间使用独立租约，单个房间失败不阻塞其他房间。前端已统一所有单房间、单世界和跨房间启动、重启入口的 shadcn-vue 风险确认；批量界面按房间选择世界，显示每层世界的当前生效节点和运行状态，完整展示部分或全部失败的逐世界结果，并在重新读取拓扑与状态后只重试未成功项。同一台服务器可以承载同一房间或不同房间的多层世界，但界面固定提醒“一颗物理核心最多运行一层世界，并额外预留 1 核”；这是可确认绕过的保守告警，不是硬限制。
+已交付说明：`POST /api/v2/rooms/:roomId/actions/:action` 在启动和重启前按 `appliedTargetId` 计算启动后容量，首次超配或容量未知时返回 `CAPACITY_RISK_CONFIRMATION_REQUIRED`，确认后允许继续但不提供性能保证。整房间在任一世界预检失败时不会先操作其他世界。`POST /api/v2/rooms/actions/:action` 支持多个房间合并预览容量，并用 `roomId:worldId` 作为 Job 目标标识；不同房间使用独立租约，单个房间失败不阻塞其他房间。前端已统一所有单房间、单世界和跨房间启动、重启入口的 shadcn-vue 风险确认；批量界面按房间选择世界，显示每层世界的当前生效节点和运行状态，完整展示部分或全部失败的逐世界结果，并在重新读取拓扑与状态后只重试未成功项。同一台服务器可以承载同一房间或不同房间的多层世界；2 个及以下有效 CPU 不预留整核，3 个及以上默认预留 1 核，超出动态建议值才需要确认。这是可确认绕过的保守告警，不是硬限制。
 
 ### Phase 5：主服务容器 + 裸机 Agent + native 基线（已完成）
 
@@ -582,7 +582,7 @@ Mod 管理继续区分：
 - container Runtime 分别验证保存、优雅停止、玩家命令、命令目录、自动化和 `customcommands.lua` 热激活。
 - tmux-compat 在 Agent 重启后继续发送命令；attach/stdin 在反复 attach、Docker 重启、高日志量和并发请求下不关闭 DST stdin。
 - 命令发送后 Shard 恰好重启时返回 `unknown`，不会把危险命令重放给新实例。
-- 同一宿主两个 Installation 使用相同 Cluster/Shard 名仍落到不同 tmux socket/pane，命令不会串服。
+- 同一宿主不同存档根目录中的相同 Cluster/Shard 名落到不同 tmux socket/pane；指向同一存档根目录的 Installation 不能同时配置，第二套 Controller/Agent 无法取得 owner lock，且重复 DST 进程会被拒绝。
 - 多来源并发发送时严格串行；停止开始后拒绝探针，队列满/过期可观察，partial send 进入 input_dirty 后不会拼接下一条命令。
 - raw Lua 的分号、引号、UTF-8、最大长度、换行拒绝和 Mod 自定义全局函数不因 transport 包装改变；UI 只显示 sent。
 - ConsoleHealth 分别验证 disabled、not_found、socket_unavailable、permission_denied、pane_dead、process_mismatch 和 input_dirty。

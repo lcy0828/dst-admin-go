@@ -4,6 +4,9 @@
 > 更新日期：2026-08-16
 > 依赖：`distributed-room-management-plan.md`、`multi-node-dst-research.md`
 
+首次接入请阅读[远程 Agent 启动指南](startup-guide.md#接入远程-agent)。本文主要记录架构与协议，
+部署优先级以[真实用户场景](product-usage-scenarios.md)为准；下方未来设计不构成已发布功能承诺。
+
 实现状态说明：仓库已经交付控制面、Agent 和单 Shard DST 的 OCI/Compose 基线，Agent 支持 `native` 与受管 `container` Runtime；容器 Driver 通过 label 识别目标，并在 DST 容器内使用固定 tmux transport。控制面与 Agent 已交付 Placement-aware 生命周期、日志/玩家/诊断聚合、cold-consistent 备份、`runtime.mods.v1` 分块分发与原子发布、发布后重启/加载确认，以及 DST 多节点版本计划、保护备份、精确 build 校验和失败恢复。端口租约已按网络作用域持久化；Linux native cgroup v2 和 Docker CPU policy 已执行并回读，macOS 对不支持的策略明确拒绝。Kubernetes 仅接入默认关闭的 status/observe/preflight API 与实验 UI，固定 `applyAllowed=false`，没有生产 Driver 或 Apply 路由。本文明确标注“未来/目标”的部分不代表已经可用。
 
 ## 1. 产品边界
@@ -29,17 +32,22 @@
 
 | 主服务 | Agent | DST Runtime | 定位 |
 | --- | --- | --- | --- |
-| 裸机 | 内置本机/裸机 Agent | 裸机 | 当前基线 |
-| 容器 | 裸机 Agent | 裸机 | 推荐主路径；主服务与宿主控制权限分离 |
-| 容器 | 容器 Agent | 容器 | 推荐完整容器路径；Agent 通过受限容器 Runtime Driver 管理 Shard |
+| 裸机 | 本机进程内 Runtime；远端可选 Agent | 裸机 | 当前单机基线 |
+| All-in-One | 本机进程内 Runtime；远端可选 Agent | 同容器内原生进程 | 2C4G 默认推荐 |
+| 容器 | 远端裸机 Agent | 远端裸机 | 远程扩展；本机仍按部署类型管理 |
+| 容器 | 本机直接控制或远端 Agent | 独立世界容器 | 高级路径；按可信标签识别目标 |
 | 容器 | 容器 Agent | 裸机 | 高权限兼容模式；验证前不作为默认方案 |
 | Kubernetes | Kubernetes Provider/外部 Agent/可选 DaemonSet | Pod 或外部裸机 | 未来实验能力 |
 
 同一 Room 仍可把 Shard 放在不同 Node 或 Runtime，但只有各目标版本、网络、存储和 Mod 预检全部通过后才允许启动。
 
-控制器的部署位置和 Shard 的执行形态相互独立。主服务容器默认不取得宿主 PID、tmux socket、DST 目录、Docker Socket 或 Kubernetes 凭证；需要管理同宿主裸机 DST 时，也应通过该宿主注册的 Agent 完成。
+控制器部署位置与 Shard 执行形态相互独立。All-in-One 使用本容器内的进程和持久目录；
+独立世界容器部署显式使用宿主 Docker socket；仅控制端不运行本机 DST。
+本机默认由进程内 Runtime 直接管理，不增加回环 Agent。外置 Agent 只用于远端或明确隔离控制权限的高级部署，
+同一存档不能同时交给两个控制者。
 
-同机多 Shard 是合法能力，但默认容量策略为“每个运行中的 Shard 预留一个物理核心预算单位，并给系统至少预留一个核心”。
+同机多 Shard 是合法能力。默认容量按本节第 4 部分计算：有效 CPU 不超过 2 个时不整核预留，
+3 个及以上时为系统保留 1 核；2C4G 可运行 Master+Caves，不默认绑核，内存风险独立检查。
 
 这里的 Shard 统计跨房间累计：同一台服务器既可以承载一个房间的多层世界，也可以承载多个房间的多个世界。界面必须明确提醒用户“一核心最多规划一层运行中的世界”，超过时提示可能卡顿；该规则是保守容量建议，不是硬限制，也不是性能保证。
 
@@ -159,11 +167,13 @@ native Driver 通过进程参数中的 `-cluster`、`-shard` 和 `-persistent_st
 effectivePhysicalCores = reportedPhysicalCores
   or max(1, floor(logicalProcessors / 2)) when unknown
 
-recommendedShardLimit = max(1, effectivePhysicalCores - reservedCores)
+effectiveCPUBudget = logicalProcessors when logicalProcessors <= 4
+  or effectivePhysicalCores on larger hosts
+recommendedShardLimit = max(1, effectiveCPUBudget - reservedCores)
 projectedShardCount = observedRunningShards + shardsInStartPlan
 ```
 
-默认 `reservedCores=1`，允许管理员按节点调整。容量状态：
+`effectiveCPUBudget <= 2` 时 `reservedCores=0`，保证常见 2C4G 主机可以运行 Master+Caves；3 个及以上有效 CPU 时默认 `reservedCores=1`。共享 VPS 的小规格 vCPU 拓扑经常把可调度 vCPU 标记成 SMT sibling，因此 4 个及以下逻辑 CPU 直接作为实用预算。容量状态：
 
 - `available`：`projectedShardCount < recommendedShardLimit`
 - `full`：`projectedShardCount == recommendedShardLimit`
@@ -287,7 +297,7 @@ preconditions, parameters, deadline
 - 跨 Shard 的完整备份集编排与集中存储策略
 - 跨节点 Mod 预检、协调重启和加载日志确认
 
-Agent 的 Mod Runtime capability 为 `runtime.mods.v1`，包括缓存检查、cache bundle 分块上传、release plan 分块上传、`prepare/publish/rollback/complete/state` 以及 `modoverrides.lua` 分块读取。单条数据块上限 256 KiB；所有 mutation 继续经过 lease、fencing 和持久化幂等。
+Agent 的 Mod Runtime 以能力拆分：`runtime.mods.v1` 负责发布事务和旧分块兼容，`runtime.mods.state.v1` 读取已提交安装状态，`runtime.mods.files.v1` 只读实际安装文件且不依赖发布记录，`runtime.mods.fetch.v2` 让节点自行从 Steam 或 HTTP Range 精确制品收敛，启用 `runtime.mods.peer.v1` 的 Agent 还可向其他节点签发短期 Peer 下载授权。旧协议单条数据块上限 256 KiB；所有 mutation 继续经过 lease、fencing 和持久化幂等。
 
 控制面已经在该执行边界上完成跨节点编排：一次预览使用同一不可变快照读取全部 Placement 与配置；发布前再次计算 `planHash` 和拓扑版本；共享同一 Installation 的其他房间会被纳入目标并先创建 cold-consistent 保护备份。所有节点 Prepare 成功后才进入 Publish，全部 Publish 成功后先持久化 commit decision 再清理；commit 前失败逆序回滚，commit 后中断进入 `recovery_required` 并由持久恢复任务继续完成。需要重启时按策略协调运行中分片，等待新实例日志确认加载；失败保留可恢复状态和逐目标证据。
 
@@ -298,24 +308,26 @@ Agent 主机在自己的 `app.conf` 中登记受信安装，控制中心只能�
 ```ini
 [runtime]
 INSTALLATION_ID = default
-SAVE_PATH = /srv/dst/.klei/DoNotStarveTogether
-SERVER_PATH = /srv/dst/server
-UGC_PATH = /srv/dst/server/ugc_mods
-WORKSHOP_CONTENT_PATH = /srv/dst/server/ugc_mods/content/322330
+SAVE_PATH = /opt/dst/saves
+SERVER_PATH = /opt/dst/server
+UGC_PATH = /opt/dst/workshop/steamapps/workshop
+WORKSHOP_CONTENT_PATH = /opt/dst/workshop/steamapps/workshop/content/322330
 MOD_CACHE_PATH = /var/lib/dst-admin-agent/mod-cache
 MOD_STATE_PATH = /var/lib/dst-admin-agent/mod-state
 SERVER_MODE = 64
 
 [runtime.secondary]
-SAVE_PATH = /srv/dst-secondary/.klei/DoNotStarveTogether
-SERVER_PATH = /srv/dst-secondary/server
-WORKSHOP_CONTENT_PATH = /srv/dst-secondary/workshop
+SAVE_PATH = /opt/dst-secondary/saves
+SERVER_PATH = /opt/dst-secondary/server
+WORKSHOP_CONTENT_PATH = /opt/dst-secondary/workshop
 MOD_CACHE_PATH = /var/lib/dst-admin-agent/secondary-mod-cache
 MOD_STATE_PATH = /var/lib/dst-admin-agent/secondary-mod-state
 SERVER_MODE = 64
 ```
 
 `[runtime]` 默认 ID 为 `default`，额外安装使用 `[runtime.<id>]`。`WORKSHOP_CONTENT_PATH` 是受信 Workshop 内容根；`MOD_CACHE_PATH` 保存不可变 tree-SHA cache；`MOD_STATE_PATH` 保存上传断点、发布计划和 journal。cache/state 必须绝对、持久、由 Agent 私有写入，且不能相同或互相嵌套。Agent 在启动、停止、重启或保存前重新检查 Cluster 与 Shard 名称、真实路径、`cluster.ini`、`server.ini` 和服务端路径；符号链接不能越出对应的受信 Cluster。Agent 将最高 fencing token 和最近的幂等结果持久化到私有状态文件。若进程在接收操作后、记录结果前中断，重复请求返回 `unknown`，不会盲目再次执行。
+
+控制中心始终将连接状态与 Runtime 就绪状态分开展示。在线 Agent 只上报一个有效安装时，控制中心会把该安装自动认领为 `discovered` 配置，并立即发起 inventory 采集；同一安装 ID 后续上报了新的可信路径时，`discovered` 配置会同步更新并重新采集，已经存在的人工配置永远不会被覆盖。上报多个安装时必须由用户选择，上报空清单时显示“已连接、未登记安装”。用户主动删除 Runtime 配置会同时关闭该 Agent 的自动认领，避免同一配置被立即恢复；下一次人工保存会重新启用正常认领策略。该状态保存在控制中心数据库，切换到新的控制中心时会根据 Agent 当前上报的唯一安装重新建立配置。
 
 ### 6.1 Runtime Driver
 
@@ -353,7 +365,7 @@ Agent 内建立唯一的 per-Shard console dispatcher。命令页、自动化、
 
 控制台 transport：
 
-- native Runtime 继续使用 tmux，但每个 RuntimeInstallation 使用 Agent 私有 `0700` 短路径运行目录中的哈希命名独立 tmux socket；session identity 同时绑定 environment、installation、Room 和 Shard，避免同宿主同名 Cluster 冲突和 Unix socket 路径超长。启动时记录固定 pane ID，发送前校验 pane 未 dead、当前进程属于目标 DST instance，不能只向当前活动 pane 发送。
+- native Runtime 继续使用 tmux，但 socket 身份绑定规范化后的物理存档根目录；本机 Runtime 与 Agent 使用同一派生规则，Installation 改名或状态文件迁移不会丢失已有会话。不同存档根目录使用独立 socket，session identity 绑定 Room 和 Shard。每个物理 `SAVE_PATH` 同时持有一个内核独占 owner lock，阻止同宿主的第二套 Controller/Agent 双写；控制进程退出会释放锁，但 tmux/DST 保持运行供新进程接回。启动前同时校验默认 socket、受管 socket 和实际 DST 进程，发送前校验 pane 未 dead、当前进程属于目标 DST instance，不能只向当前活动 pane 发送。
 - container Runtime 初始使用 `tmux-compat`：tmux 位于 DST Shard 容器内，仅作为 DST stdin/会话代理；Agent 与 DST 仍是不同容器。Agent 通过 container Driver 执行固定 tmux 客户端动作，不开放任意 `docker exec`。
 - Docker Engine attach/stdin 是后续候选：容器必须配置 `OpenStdin=true`、`StdinOnce=false`、`Tty=false`，Driver 只 attach stdin。它通过重连、并发、Engine/Agent 重启、高日志量和命令 marker 验证后才能成为默认 transport。
 - `docker exec <lua>` 不能直接替代控制台输入，因为 exec 创建的是新进程，不会把 Lua 写入正在运行的 DST 主进程。exec 只有在调用受管 tmux 客户端或未来固定 console client 时才合法。
@@ -435,7 +447,7 @@ resolve desired mod lock
 
 任何目标准备失败时，默认不发布配置。UI 分开展示“已下载到节点”和“已在 Shard 启用”。
 
-当前 Agent 执行器把每个 installation 的发布作为一个 fencing/idempotency 域：cache bundle 与 release plan 只通过 256 KiB 分块传输，每个 begin、write offset 和 commit 使用独立幂等身份但共享同一有效租约与 fencing token。Agent 落盘并验证 SHA、tree/manifest、UTF-8/单 JSON 值、tar 路径/文件类型和磁盘空间后才导入。控制面已实现“全部目标 prepare 后再 publish、commit decision 持久化、commit 前失败逆序 rollback、commit 后只向前恢复”的房间级协调器，发布依次进入 `planned -> prepared -> published -> committed`，中断 journal 在 Manager 初始化时恢复或回滚。运行中的目标在策略允许时自动协调重启，并以新实例加载日志确认 Mod 生效；任一确认失败都会保留可诊断、可恢复的 Publication 状态，而不是只返回一个布尔提示。
+当前 Agent 执行器把每个 installation 的发布作为一个 fencing/idempotency 域。精确内容按“目标缓存、节点 Steam、最多两个 Peer、Controller HTTP Range、旧 256 KiB 分块上传”依次收敛；release plan 体积很小，继续使用 offset 分块。每个 begin、write offset 和 commit 使用独立幂等身份但共享同一有效租约与 fencing token。Agent 落盘并验证 Bundle SHA、tree/manifest、UTF-8/单 JSON 值、tar 路径/文件类型和磁盘空间后才导入。控制面已实现“全部目标 prepare 后再 publish、commit decision 持久化、commit 前失败逆序 rollback、commit 后只向前恢复”的房间级协调器，发布依次进入 `planned -> prepared -> published -> committed`，中断 journal 在 Manager 初始化时恢复或回滚。运行中的目标在策略允许时自动协调重启，并以新实例加载日志确认 Mod 生效；任一确认失败都会保留可诊断、可恢复的 Publication 状态，而不是只返回一个布尔提示。
 
 ## 10. 看板与控制范围
 
@@ -452,7 +464,7 @@ resolve desired mod lock
 
 执行确认页展示每个节点启动前/后的 Shard 数和 CPU 建议上限。
 
-跨房间批量操作已在房间拓扑页交付：用户选择启动、停止、重启或保存后，可按房间勾选任意世界分片，并看到每层世界当前生效的本机或 Agent 节点。后端按节点合并统计所有房间的运行中和待启动 Shard；同机多层世界合法，但超过“一颗物理核心最多一层世界并额外预留 1 核”的建议值时必须再次确认。批量 Job 即使全部失败也保留逐世界结果，恢复入口会刷新拓扑和运行状态，并只重试仍可操作的未成功项。
+跨房间批量操作已在房间拓扑页交付：用户选择启动、停止、重启或保存后，可按房间勾选任意世界分片，并看到每层世界当前生效的本机或 Agent 节点。后端按节点合并统计所有房间的运行中和待启动 Shard；同机多层世界合法，2 个及以下有效 CPU 不额外预留整核，3 个及以上有效 CPU 默认预留 1 核；超过动态建议值时必须再次确认。批量 Job 即使全部失败也保留逐世界结果，恢复入口会刷新拓扑和运行状态，并只重试仍可操作的未成功项。
 
 ## 11. 部署形态
 
@@ -515,7 +527,7 @@ CPU 绑核和 DST 四类 UDP 端口都附着在 Shard Runtime/Node 上，不附�
 
 默认流程面向个人服主，不要求理解容器网络或 Kubernetes：
 
-1. 安装向导先选择主服务部署方式，再登记 Agent；不会把“主服务使用 Docker”自动推导为“DST 使用 Docker”。
+1. 单机先完成本机部署和游戏安装；有远程需求时才开启集中管理并登记 Agent。不会把“主服务使用 Docker”自动推导为“DST 使用独立世界容器”。
 2. 新增运行目标时选择“本机”“远程服务器”“容器 Runtime”或“Kubernetes 集群（实验）”，并显示 Agent 的实际 capability。
 3. 创建/放置 Shard 时选择 DST Runtime；系统自动生成不冲突的推荐端口和 `none` CPU 策略。
 4. “网络高级设置”才展示 bind、对外地址、端口映射和网络作用域；跨节点时必须确认 Master 实际可达地址。

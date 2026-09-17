@@ -5,8 +5,10 @@ info:
   description: >-
     Contract for the authenticated DST Admin management API. JSON fields use
     camelCase. Authenticated state-changing requests require X-CSRF-Token and
-    Idempotency-Key headers. Clients send X-DST-Runtime-Target with local or an
-    agent-prefixed target ID; unsupported remote domain operations fail closed.
+    Idempotency-Key headers. Fleet views select a machine with explicit targetId
+    query or targetIds body fields; room and world operations resolve their runtime
+    target from persisted Placement. X-DST-Runtime-Target remains a legacy fail-closed
+    guard for older clients and does not route requests to an Agent.
 servers:
   - url: /api/v2
 tags:
@@ -32,6 +34,7 @@ tags:
   - name: Containers
   - name: Jobs
   - name: Save Imports
+  - name: Entity Catalog
 paths:
   /auth/session:
     get:
@@ -112,6 +115,19 @@ paths:
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
         - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                region:
+                  type: string
+                  enum: [cn, global]
+                  default: global
+                  description: Use fixed mainland-China providers for cn and international providers for global
       responses:
         "200":
           description: Session revoked
@@ -160,6 +176,47 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+  /auth/onboarding:
+    put:
+      tags: [Auth]
+      operationId: saveInitialSetupProgress
+      summary: Save administrator setup progress without changing game or save data
+      description: Existing administrators are not enrolled during migration. Completing the wizard records UI progress only and does not certify game readiness. Delayed progress writes cannot reopen a completed wizard.
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [step]
+              properties:
+                step:
+                  type: string
+                  enum: [deployment, environment, game, room, review, complete]
+      responses:
+        "200":
+          description: Persisted setup progress
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, error, meta]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/InitialSetupProgress"
+                  error:
+                    type: "null"
+                  meta:
+                    $ref: "#/components/schemas/Meta"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
   /system/capabilities:
     get:
       tags: [System]
@@ -196,6 +253,25 @@ paths:
       responses:
         "200": { description: Current system status, content: { application/json: { schema: { $ref: "#/components/schemas/SystemStatusEnvelope" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /system/resources:
+    get:
+      tags: [System, Agents]
+      operationId: getNodeResources
+      summary: Read normalized resource metrics for the controller and remote Agents
+      parameters:
+        - name: targetId
+          in: query
+          required: false
+          schema: { type: string, pattern: "^(local|agent:[A-Za-z0-9][A-Za-z0-9._-]{0,127})$" }
+        - name: refresh
+          in: query
+          required: false
+          description: Request a new report from online Agents in the selected scope. Collection failures retain the previous sample time and are returned as per-node warnings.
+          schema: { type: boolean, default: false }
+      responses:
+        "200": { description: Normalized node resource snapshots, content: { application/json: { schema: { $ref: "#/components/schemas/NodeResourceSnapshotEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /system/settings:
     get:
       tags: [System]
@@ -283,7 +359,7 @@ paths:
               $ref: "#/components/schemas/CreateRoomInput"
       responses:
         "201":
-          description: Room created and adopted
+          description: Room created and registered
           content:
             application/json:
               schema:
@@ -430,6 +506,55 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/topology/shard-links/actions/discover:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Topology]
+      operationId: discoverRoomShardLinks
+      summary: Probe every candidate Master UDP endpoint from each planned Secondary runtime machine
+      description: Runs only on demand. The Master runtime target temporarily listens on the real Shard port while each Secondary target probes every reported, configured, detected, or manually supplied address. No DST log entry is written.
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ShardLinkDiscoveryInput" }
+      responses:
+        "200":
+          description: Candidate endpoints and per-Secondary reachability results
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ShardLinkDiscoveryEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/topology/shard-links/actions/apply:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Topology]
+      operationId: applyRoomShardLinks
+      summary: Transactionally apply a route-only Shard topology change without restarting worlds
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ShardLinkApplyInput" }
+      responses:
+        "200":
+          description: Applied route topology and refreshed room topology
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TopologyEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /rooms/{roomId}/topology/actions/apply:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -636,6 +761,81 @@ paths:
       responses:
         "200": { description: Current Runtime infrastructure snapshot, content: { application/json: { schema: { $ref: "#/components/schemas/RuntimeInfrastructureEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
+  /runtime-overview:
+    get:
+      tags: [Topology, Runtime]
+      operationId: getFleetRuntimeOverview
+      summary: Read current managed rooms and their applied Runtime placements from the fleet or one target
+      parameters:
+        - name: targetId
+          in: query
+          required: false
+          schema: { type: string }
+          description: Runtime target ID. Omit to return the complete fleet.
+        - name: detail
+          in: query
+          required: false
+          schema: { type: string, enum: [full, inventory], default: full }
+          description: Inventory reads current process state once per machine without per-world log and health probes. Intended for running counts; full includes detailed world status.
+      responses:
+        "200":
+          description: Fleet Runtime overview projected to the requested management scope
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetRuntimeOverviewEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /runtime-observations/stream:
+    get:
+      tags: [Topology, Runtime]
+      operationId: streamRuntimeObservations
+      summary: Keep the selected Runtime targets actively observed while the page is visible
+      parameters:
+        - name: targetId
+          in: query
+          required: false
+          schema: { type: string }
+        - name: roomId
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Server-sent observation snapshots, refresh transitions, inventory updates, and errors. observation.refreshed updates timestamps and observation status without requiring another overview fetch; inventory.updated is emitted only when content or availability changes. topology.changed also notifies views after explicit runtime operations, which can change readiness or files without changing process identities.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /runtime-observations/actions/refresh:
+    post:
+      tags: [Topology, Runtime]
+      operationId: refreshRuntimeObservations
+      summary: Actively refresh the selected Runtime targets without creating a persistent Job
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                targetId: { type: string }
+                roomId: { type: string }
+      responses:
+        "200":
+          description: Endpoint-level refresh results
+          content:
+            application/json:
+              schema:
+                type: object
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /runtime-infrastructure/network-profiles/{profileId}:
     parameters:
       - name: profileId
@@ -659,6 +859,24 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /runtime-infrastructure/network-profiles/{profileId}/actions/detect-egress:
+    parameters:
+      - name: profileId
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Topology, Runtime]
+      operationId: detectRuntimeNetworkProfileEgress
+      summary: Detect the public egress IP on the Runtime target associated with a network profile
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200": { description: Detected public egress address, content: { application/json: { schema: { $ref: "#/components/schemas/RuntimeEgressDetectionEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /runtime-infrastructure/cpu-allocations:
     put:
       tags: [Topology, Runtime]
@@ -722,25 +940,6 @@ paths:
         "200": { description: Recovery item removed }
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
-  /rooms/{roomId}/adopt:
-    parameters:
-      - $ref: "#/components/parameters/RoomID"
-    post:
-      tags: [Rooms]
-      operationId: adoptRoom
-      summary: Mark a discovered room as managed
-      parameters:
-        - $ref: "#/components/parameters/CSRFToken"
-        - $ref: "#/components/parameters/IdempotencyKey"
-      responses:
-        "200":
-          description: Adopted room
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RoomEnvelope"
-        "404":
-          $ref: "#/components/responses/NotFound"
   /rooms/{roomId}/worlds:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -1084,6 +1283,30 @@ paths:
           $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/runtime-modes:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Rooms]
+      operationId: getRoomRuntimeModes
+      summary: List Lua runtime modes supported by every selected world target
+      parameters:
+        - name: worldIds
+          in: query
+          description: Comma-separated world IDs; omitted means every world in the room.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Runtime mode intersection for the selected targets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeModeAvailabilityEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
   /rooms/{roomId}/logs:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -1112,13 +1335,34 @@ paths:
                 $ref: "#/components/schemas/RoomLogSnapshotEnvelope"
         "404":
           $ref: "#/components/responses/NotFound"
+  /rooms/{roomId}/chat-logs/actions/repair:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    post:
+      tags: [Logs]
+      operationId: repairRoomChatHistory
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      summary: Restore archived announcements and verify message dates in a cancellable job
+      description: Coalesces active jobs per room. Committed batches resume after interruption; unavailable source logs retain saved messages and report review status.
+      responses:
+        "202":
+          description: Chat history repair job accepted or already running
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobEnvelope" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
   /rooms/{roomId}/chat-logs:
     parameters:
       - $ref: "#/components/parameters/RoomID"
     get:
       tags: [Logs]
       operationId: listRoomChatLogs
-      summary: Read and deduplicate room chat records from every world shard
+      summary: Read persisted room chat history and synchronize available world logs
       parameters:
         - name: query
           in: query
@@ -1137,7 +1381,7 @@ paths:
           schema: { type: integer, minimum: 0, default: 0 }
       responses:
         "200":
-          description: Newest room chat records with matching cross-shard copies merged
+          description: Persisted room chat records with matching cross-shard copies merged and synchronization state included
           content:
             application/json:
               schema:
@@ -2115,6 +2359,15 @@ paths:
     get:
       tags: [Game]
       operationId: getGameVersion
+      parameters:
+        - name: steam
+          in: query
+          description: Set false for installed metadata and official stable version only; does not launch SteamCMD or preflight worlds.
+          schema: { type: boolean, default: true }
+        - name: refresh
+          in: query
+          description: With steam=false, bypass the official release cache for an explicit refresh.
+          schema: { type: boolean, default: false }
       summary: Inspect the local Steam build, Steam update state, official Klei PC release, and update capability
       responses:
         "200":
@@ -2125,6 +2378,38 @@ paths:
                 $ref: "#/components/schemas/GameVersionEnvelope"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /game/installed-versions:
+    get:
+      tags: [Game]
+      operationId: getInstalledGameVersions
+      summary: Read each managed installation once from its applied Runtime target without Steam queries or update preflight
+      parameters:
+        - name: targetIds
+          in: query
+          description: Comma-separated Runtime target IDs; omitted means all managed targets.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Fresh installed metadata, with per-installation errors for offline or failed reads
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, error, meta]
+                properties:
+                  data:
+                    type: object
+                    required: [installations]
+                    properties:
+                      installations:
+                        type: array
+                        items: { $ref: "#/components/schemas/InstalledGameVersion" }
+                  error: { type: "null" }
+                  meta: { $ref: "#/components/schemas/Meta" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
   /game/releases/preview:
     post:
       tags: [Game]
@@ -2517,6 +2802,19 @@ paths:
                 type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /entity-catalog/entities:
+    get:
+      tags: [Entity Catalog]
+      operationId: searchEntityCatalog
+      summary: Search built-in common entities and the optional Beacon catalog
+      parameters:
+        - { name: q, in: query, schema: { type: string, maxLength: 100, default: "" } }
+        - { name: kind, in: query, schema: { type: string, enum: [give, spawn, remove] } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 120, default: 120 } }
+      responses:
+        "200": { description: Entity search results, content: { application/json: { schema: { $ref: "#/components/schemas/EntityCatalogEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "502": { $ref: "#/components/responses/BadGateway" }
   /mods/search:
     get:
       tags: [Mods]
@@ -2532,6 +2830,26 @@ paths:
         "200": { description: Workshop search results, content: { application/json: { schema: { $ref: "#/components/schemas/ModSearchEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /mods/metadata:
+    get:
+      tags: [Mods]
+      operationId: getModMetadata
+      summary: Read Workshop metadata independently from Runtime file observations
+      description: Includes localized names and authors from the same source as Mod details. Load separately from Runtime facts; versions in this response are Workshop versions, not installed disk versions.
+      parameters:
+        - name: ids
+          in: query
+          required: true
+          description: Comma-separated Workshop IDs, at most 100 per request.
+          schema: { type: string, pattern: '^[0-9]+(,[0-9]+){0,99}$' }
+        - name: cached
+          in: query
+          description: Return only stored display names, authors and images. Makes no Steam request and returns no version evidence.
+          schema: { type: boolean, default: false }
+      responses:
+        "200": { description: Metadata keyed by Workshop ID; warning reports partial or complete Steam failure, content: { application/json: { schema: { $ref: "#/components/schemas/ModMetadataEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /mods/library:
     get:
       tags: [Mods]
@@ -2565,26 +2883,146 @@ paths:
       responses:
         "200": { description: Workshop item, content: { application/json: { schema: { $ref: "#/components/schemas/SteamModEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
+  /runtime-targets/{targetId}/installations/{installationId}/mods:
+    parameters:
+      - name: targetId
+        in: path
+        required: true
+        schema: { type: string, pattern: '^(local|agent:[A-Za-z0-9][A-Za-z0-9._-]{0,127})$' }
+      - name: installationId
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' }
+    get:
+      tags: [Mods, Agents]
+      operationId: listRuntimeInstallationMods
+      summary: Read the Mod files currently present in one runtime installation
+      description: Performs one demand-driven, side-effect-free filesystem inventory. Offline Agent data is not served from a stale snapshot.
+      parameters:
+        - { name: view, in: query, description: The facts view omits Steam metadata and cross-room references; version comparison remains unknown until enriched., schema: { type: string, enum: [full, facts], default: full } }
+      responses:
+        "200": { description: Actual Mod content on the selected installation, content: { application/json: { schema: { $ref: "#/components/schemas/RuntimeInstallationModInventoryEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /runtime-targets/{targetId}/installations/{installationId}/mods/{modId}/actions/download:
+    parameters:
+      - name: targetId
+        in: path
+        required: true
+        schema: { type: string, pattern: '^(local|agent:[A-Za-z0-9][A-Za-z0-9._-]{0,127})$' }
+      - name: installationId
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' }
+      - $ref: "#/components/parameters/ModID"
+    post:
+      tags: [Mods, Agents, Jobs]
+      operationId: downloadRuntimeInstallationMod
+      summary: Download one Mod directly on a runtime installation without changing any room configuration
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Runtime installation Mod download Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /runtime-targets/{targetId}/installations/{installationId}/mods/{modId}/actions/update:
+    parameters:
+      - name: targetId
+        in: path
+        required: true
+        schema: { type: string, pattern: '^(local|agent:[A-Za-z0-9][A-Za-z0-9._-]{0,127})$' }
+      - name: installationId
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' }
+      - $ref: "#/components/parameters/ModID"
+    post:
+      tags: [Mods, Agents, Jobs]
+      operationId: updateRuntimeInstallationMod
+      summary: Update one Mod in a runtime installation without changing room configuration or world processes
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Runtime installation Mod update Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /runtime-targets/{targetId}/installations/{installationId}/mods/actions/update-outdated:
+    parameters:
+      - name: targetId
+        in: path
+        required: true
+        schema: { type: string, pattern: '^(local|agent:[A-Za-z0-9][A-Za-z0-9._-]{0,127})$' }
+      - name: installationId
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' }
+    post:
+      tags: [Mods, Agents, Jobs]
+      operationId: updateOutdatedRuntimeInstallationMods
+      summary: Update every outdated Mod in one runtime installation without changing room configuration or world processes
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Runtime installation Mod batch update Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /rooms/{roomId}/mods:
     parameters: [{ $ref: "#/components/parameters/RoomID" }]
     get:
       tags: [Mods]
       operationId: listRoomMods
+      parameters:
+        - { name: view, in: query, description: The facts view reads Runtime state and configuration without waiting for Steam. Missing official metadata never implies the installed version is current., schema: { type: string, enum: [full, facts], default: full } }
       responses:
         "200": { description: Room Mod health inventory, content: { application/json: { schema: { $ref: "#/components/schemas/ModListEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /rooms/{roomId}/mod-profile:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Mods]
+      operationId: getRoomModProfile
+      summary: Derive room-default and per-world Mod configuration exceptions from the current Runtime files
+      responses:
+        "200": { description: Runtime-derived room Mod profile, content: { application/json: { schema: { $ref: "#/components/schemas/RoomModProfileEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
   /rooms/{roomId}/mods/actions/install:
     parameters: [{ $ref: "#/components/parameters/RoomID" }]
     post:
       tags: [Mods]
       operationId: installMod
-      deprecated: true
-      summary: Legacy local room mutation; production Placement-aware deployments return MOD_PUBLICATION_REQUIRED
+      summary: Download a Mod on the selected worlds' runtime installations and add it to their room configuration
+      description: Reads each target installation in real time. A current ready copy skips SteamCMD; missing, invalid, outdated, or unconfirmed content is downloaded on that target. The selected worlds' modoverrides.lua files are then updated directly without a full room Mod publication.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModInstallInput" } } } }
       responses:
         "202": { description: Install job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/mods/{modId}/configuration-mode:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
+    put:
+      tags: [Mods]
+      operationId: setRoomModConfigurationMode
+      summary: Persist the shared or separate editor preference without changing game files
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [mode]
+              properties:
+                mode: { type: string, enum: [shared, separate] }
+      responses:
+        "200": { description: Editor mode saved }
+        "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/mods/{modId}/actions/add:
     parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
@@ -2622,13 +3060,13 @@ paths:
     post:
       tags: [Mods]
       operationId: setModEnabled
-      deprecated: true
-      summary: Legacy local room mutation; production deployments require a Mod publication
+      summary: Directly enable or disable a Mod in the selected Runtime world configuration files
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModEnableInput" } } } }
       responses:
-        "202": { description: Enable job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "200": { description: Selected Runtime world configuration files updated, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationApplyEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/mods/{modId}/actions/repair:
     parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
     post:
@@ -2687,12 +3125,11 @@ paths:
     post:
       tags: [Mods]
       operationId: applyModConfiguration
-      deprecated: true
-      summary: Legacy local configuration write; production deployments require a configure publication
+      summary: Merge owned Mod fields into the latest Runtime modoverrides.lua and atomically write the selected worlds
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationInput" } } } }
       responses:
-        "202": { description: Configuration job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "200": { description: Configuration written directly to the selected Runtime worlds, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationApplyEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/mod-publications/preview:
@@ -2731,6 +3168,71 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/mod-replicas:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Mods]
+      operationId: getRoomModReplicas
+      summary: Read the persisted desired and observed Mod state for every installation and world in the applied Placement
+      responses:
+        "200": { description: Placement-aware Mod replica coverage, content: { application/json: { schema: { $ref: "#/components/schemas/RoomModReplicaEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /rooms/{roomId}/mod-update:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Mods]
+      operationId: getRoomModUpdate
+      summary: Read the unattended update policy and its durable convergence state
+      responses:
+        "200": { description: Room Mod update policy and state, content: { application/json: { schema: { $ref: "#/components/schemas/ModUpdateOverviewEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /rooms/{roomId}/mod-update/policy:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    put:
+      tags: [Mods]
+      operationId: updateRoomModUpdatePolicy
+      summary: Configure event-driven update checks, prefetch, and empty-room activation
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModUpdatePolicyInput" } } } }
+      responses:
+        "200": { description: Updated policy and state, content: { application/json: { schema: { $ref: "#/components/schemas/ModUpdateOverviewEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/mod-update/actions/check:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Mods, Jobs]
+      operationId: checkRoomModUpdate
+      summary: Check Workshop now; automatic policies may also prepare exact node caches
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Mod update check Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/mod-update/actions/apply-when-empty:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Mods, Jobs]
+      operationId: applyRoomModUpdateWhenEmpty
+      summary: Resume a prepared update after fresh telemetry confirms the room is empty
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Empty-room activation Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/mod-update/actions/apply:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Mods, Jobs]
+      operationId: applyRoomModUpdateNow
+      summary: Recheck, download, atomically publish, and restart worlds that were running after an explicit operator confirmation
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Manual Mod update and restart Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /mod-publications/{publicationId}:
     parameters: [{ $ref: "#/components/parameters/ModPublicationID" }]
     get:
@@ -2775,6 +3277,7 @@ paths:
         - { name: status, in: query, schema: { type: string, enum: [online, offline] } }
         - { name: worldId, in: query, schema: { type: string } }
         - { name: prefab, in: query, schema: { type: string, maxLength: 128 } }
+        - { name: includeAccessLists, in: query, description: Include ban and access-list state; dashboards may disable this to avoid Runtime configuration reads, schema: { type: boolean, default: true } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
         - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
       responses:
@@ -2944,7 +3447,7 @@ paths:
     get:
       tags: [WorldState]
       operationId: listWorldStates
-      summary: Read the latest persisted world-state snapshot for each room shard
+      summary: Read the latest world-state files from each shard runtime without triggering collection
       responses:
         "200": { description: Latest world-state snapshots, content: { application/json: { schema: { $ref: "#/components/schemas/WorldStateListEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -2964,14 +3467,26 @@ paths:
   /rooms/{roomId}/world-states/actions/refresh:
     parameters: [{ $ref: "#/components/parameters/RoomID" }]
     post:
-      tags: [WorldState, Jobs]
+      tags: [WorldState]
       operationId: refreshWorldStates
-      summary: Probe every running shard and append a world-state snapshot
+      summary: Read each shard's current world-state files without creating a job
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
-        "202": { description: World-state refresh job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "200": { description: Current world-state file results, content: { application/json: { schema: { $ref: "#/components/schemas/WorldStateListEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/world-states/{worldId}/actions/refresh:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }]
+    post:
+      tags: [WorldState]
+      operationId: refreshWorldState
+      summary: Read one shard's latest world-state files without console input or history writes
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Latest world-state file result or first-sample pending state, content: { application/json: { schema: { $ref: "#/components/schemas/WorldStateRefreshResultEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "504": { $ref: "#/components/responses/GatewayTimeout" }
   /rooms/{roomId}/automation/actions:
     parameters: [{ $ref: "#/components/parameters/RoomID" }]
     get:
@@ -3283,6 +3798,161 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /runtime-targets/game-installations:
+    get:
+      tags: [Runtime]
+      operationId: listGameInstallations
+      summary: Inspect all registered game installations, including nodes with no rooms
+      parameters:
+        - { name: targetId, in: query, schema: { type: string } }
+      responses:
+        "200": { description: "Installation rows with exact targetId and installationId, online status, installed flag, gameVersion, serverPath, resolvedPath, savePath, SteamCMD availability, supported actions and per-node errors" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /runtime-targets/game-installations/probe:
+    post:
+      tags: [Runtime]
+      operationId: probeExistingGameInstallation
+      summary: Inspect an existing directory on the selected node without installing or moving files
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetId, installationId, path]
+              properties:
+                targetId: { type: string }
+                installationId: { type: string }
+                path: { type: string, maxLength: 4096 }
+      responses:
+        "200": { description: "Detected game version, canonical source directory and content fingerprint for explicit adoption" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /runtime-targets/game-installations/actions/install:
+    post:
+      tags: [Runtime]
+      operationId: installGameOnRuntime
+      summary: Install or validate DST with SteamCMD at a registered node location; all worlds must be stopped
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetId, installationId]
+              properties:
+                targetId: { type: string }
+                installationId: { type: string }
+      responses:
+        "202": { description: "Tracked installation Job; execution and downloads belong to the selected Runtime" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /runtime-targets/game-installations/actions/adopt:
+    post:
+      tags: [Runtime]
+      operationId: adoptExistingGameInstallation
+      summary: Connect an inspected game directory to an empty registered installation location, preserving saves
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetId, installationId, path, fingerprint]
+              properties:
+                targetId: { type: string }
+                installationId: { type: string }
+                path: { type: string, maxLength: 4096 }
+                fingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
+      responses:
+        "202": { description: "Tracked adoption Job; nonempty destination and changed source are rejected" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /runtime-targets/luajit:
+    get:
+      tags: [Runtime]
+      operationId: listLuaJITPackagesAndInstallations
+      summary: List compatible LuaJIT packages and exact runtime installations
+      parameters:
+        - { name: targetId, in: query, schema: { type: string } }
+      responses:
+        "200": { description: "Envelope containing optional controller transfers and installations; local installation includes its own releases, remote releases are fetched through the selected installation status endpoint" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /runtime-targets/luajit/status:
+    get:
+      tags: [Runtime]
+      operationId: inspectLuaJITInstallation
+      summary: Read fresh LuaJIT readiness from the selected local or Agent installation
+      parameters:
+        - { name: targetId, in: query, required: true, schema: { type: string } }
+        - { name: installationId, in: query, required: true, schema: { type: string } }
+        - { name: refreshUpstream, in: query, schema: { type: boolean, default: false }, description: Explicitly refresh upstream release metadata on the selected Runtime; never downloads or installs a package. }
+      responses:
+        "200": { description: Envelope containing the selected installation, its own available releases and current performance report }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /runtime-targets/luajit/packages:
+    post:
+      tags: [Runtime]
+      operationId: uploadLuaJITPackage
+      summary: Upload a compatible ZIP to the optional controller transfer store, maximum 256 MiB
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        "201": { description: "Package metadata: id, version, revision, os, arch, sha256, size, optional channel and sourceUrl" }
+        "400": { description: Invalid upload or size limit exceeded }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /runtime-targets/luajit/actions/download:
+    post:
+      tags: [Runtime]
+      operationId: downloadLuaJITPackage
+      summary: Have the selected Runtime download an HTTPS package directly and cache it after SHA-256 verification
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetId, installationId, url, sha256]
+              properties:
+                targetId: { type: string }
+                installationId: { type: string }
+                url: { type: string, format: uri, pattern: '^https://' }
+                sha256: { type: string, pattern: '^[a-fA-F0-9]{64}$' }
+      responses:
+        "202": { description: LuaJIT download Job; poll the control-plane jobs endpoint }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /runtime-targets/luajit/actions/install:
+    post:
+      tags: [Runtime]
+      operationId: installLuaJITPackage
+      summary: Install or repair LuaJIT on one stopped DST installation with backup and rollback
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetId, installationId, releaseId]
+              properties:
+                targetId: { type: string }
+                installationId: { type: string }
+                releaseId: { type: string, pattern: '^[a-f0-9]{64}$' }
+                source: { type: string, enum: [runtime, controller], default: runtime, description: 'Use node-owned packages by default; controller explicitly transfers an uploaded package' }
+      responses:
+        "202": { description: LuaJIT installation Job; success requires a confirmed readiness report }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /runtime-targets:
     get:
       tags: [Agents]
@@ -3343,6 +4013,7 @@ paths:
       tags: [Agents]
       operationId: unconfigureAgentRuntimeTarget
       summary: Remove only the Agent runtime paths without forgetting the Agent
+      description: Also suppresses automatic adoption for this Agent so the same discovered installation is not recreated immediately. A later manual PUT clears the suppression.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "200": { description: Remote runtime configuration removed }
@@ -3359,6 +4030,44 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AgentListEnvelope" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /agent-releases:
+    get:
+      tags: [Agents]
+      operationId: listAgentReleases
+      summary: List uploaded Agent binaries and detected target platforms
+      responses:
+        "200": { description: Agent releases, content: { application/json: { schema: { $ref: "#/components/schemas/AgentReleaseListEnvelope" } } } }
+    post:
+      tags: [Agents]
+      operationId: uploadAgentRelease
+      summary: Upload a versioned Go Agent binary for page-controlled upgrades
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [version, file]
+              properties:
+                version: { type: string, pattern: "^[0-9][0-9A-Za-z._+-]{0,63}$" }
+                file: { type: string, format: binary }
+      responses:
+        "201": { description: Agent release stored, content: { application/json: { schema: { $ref: "#/components/schemas/AgentReleaseEnvelope" } } } }
+        "413": { description: Agent binary exceeds the 128 MiB upload limit }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /agent-releases/{releaseId}:
+    parameters:
+      - { name: releaseId, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      tags: [Agents]
+      operationId: deleteAgentRelease
+      summary: Delete an Agent binary that is not being downloaded
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Agent release deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /agents/actions:
     get:
       tags: [Agents]
@@ -3445,6 +4154,22 @@ paths:
       responses:
         "200": { description: Agent runtime inventory snapshot, content: { application/json: { schema: { $ref: "#/components/schemas/AgentInventorySnapshotEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
+  /agents/{agentId}/actions/upgrade:
+    parameters: [{ $ref: "#/components/parameters/AgentID" }]
+    post:
+      tags: [Agents, Jobs]
+      operationId: upgradeAgent
+      summary: Upgrade a compatible native Agent and wait for the expected version to reconnect
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentUpgradeInput" }
+      responses:
+        "202": { description: Agent upgrade Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /agents/{agentId}/inventory/actions/refresh:
     parameters: [{ $ref: "#/components/parameters/AgentID" }]
     post:
@@ -3524,7 +4249,7 @@ paths:
     post:
       tags: [GameNotifications, Jobs]
       operationId: sendGameNotification
-      summary: Send one notification to every running Shard in a room
+      summary: Broadcast once through a running Shard, preferring the Master; DST forwards to connected Shards
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -3536,6 +4261,33 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/maintenance-preview:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [GameNotifications]
+      operationId: previewRoomMaintenance
+      summary: Read the current game roster and notification policy on demand
+      description: Queries applied runtime placements in parallel with a six-second total deadline. No stored online count is used. Does not announce or change world state. An unavailable count is null, never zero.
+      responses:
+        "200":
+          description: Current player count or an explicit unknown result, plus the saved notification policy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [policy, onlinePlayers, checkedAt]
+                    properties:
+                      policy: { $ref: "#/components/schemas/GameNotificationPolicy" }
+                      onlinePlayers: { type: [integer, "null"], minimum: 0 }
+                      checkedAt: { type: string, format: date-time }
+                      warning: { type: string }
+                  error: { type: "null" }
+                  meta: { $ref: "#/components/schemas/Meta" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /rooms/{roomId}/game-notification-policy:
     parameters: [{ $ref: "#/components/parameters/RoomID" }]
     get:
@@ -3758,6 +4510,18 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
+    GatewayTimeout:
+      description: A runtime probe did not publish a fresh snapshot before its deadline
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    BadGateway:
+      description: An upstream service returned an invalid response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
   schemas:
     Meta:
       type: object
@@ -3765,6 +4529,45 @@ components:
       properties:
         requestId:
           type: string
+    EntityCapability:
+      type: string
+      enum: [give, spawn, remove]
+    CatalogEntity:
+      type: object
+      additionalProperties: false
+      required: [key, namespace, id, nameZhCN, nameEn, type, capabilities, common, source]
+      properties:
+        key: { type: string }
+        namespace: { type: string }
+        id: { type: string, pattern: '^[A-Za-z0-9_]+$' }
+        nameZhCN: { type: string }
+        nameEn: { type: string }
+        type: { type: string }
+        artworkUrl: { type: string, format: uri }
+        capabilities:
+          type: array
+          items: { $ref: "#/components/schemas/EntityCapability" }
+        common: { type: boolean }
+        source: { type: string, enum: [builtin, beacon] }
+    EntityCatalogSearchResult:
+      type: object
+      additionalProperties: false
+      required: [items, query, source, remoteAvailable]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/CatalogEntity" }
+        query: { type: string }
+        source: { type: string, enum: [builtin, beacon] }
+        remoteAvailable: { type: boolean }
+        releaseId: { type: string }
+    EntityCatalogEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/EntityCatalogSearchResult" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     APIError:
       type: object
       additionalProperties: false
@@ -3827,6 +4630,15 @@ components:
           type: boolean
         setupRequired:
           type: boolean
+        onboarding:
+          $ref: "#/components/schemas/InitialSetupProgress"
+        passwordPolicy:
+          type: object
+          description: Present before administrator creation; no credentials are included.
+          properties:
+            minimumLength: { type: integer, minimum: 6, maximum: 20 }
+            maximumBytes: { type: integer, const: 72 }
+            requireComplexity: { type: boolean }
         user:
           $ref: "#/components/schemas/Admin"
         expiresAt:
@@ -3838,6 +4650,14 @@ components:
           type: boolean
         preferences:
           $ref: "#/components/schemas/UIPreferences"
+    InitialSetupProgress:
+      type: object
+      required: [required, step]
+      properties:
+        required: { type: boolean }
+        step:
+          type: string
+          enum: ["", deployment, environment, game, room, review, complete]
     UIPreferences:
       type: object
       additionalProperties: false
@@ -3945,7 +4765,7 @@ components:
     Readiness:
       type: object
       additionalProperties: false
-      required: [ready, checks]
+      required: [ready, checks, onboarding]
       properties:
         ready:
           type: boolean
@@ -3953,6 +4773,18 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SetupCheck"
+        onboarding:
+          $ref: "#/components/schemas/OnboardingStatus"
+    OnboardingStatus:
+      type: object
+      additionalProperties: false
+      required: [firstStartCompleted]
+      properties:
+        firstStartCompleted:
+          type: boolean
+        completedAt:
+          type: string
+          format: date-time
     ReadinessEnvelope:
       type: object
       required: [data, error, meta]
@@ -3976,7 +4808,11 @@ components:
         - pvp
         - passwordProtected
         - managed
+        - controlState
+        - controlAvailable
         - worldCount
+        - targetIds
+        - availableTargetIds
         - updatedAt
       properties:
         id:
@@ -3998,8 +4834,25 @@ components:
           type: boolean
         managed:
           type: boolean
+          deprecated: true
+          description: Compatibility field; discovered rooms are registered automatically
+        controlState:
+          type: string
+          enum: [ready, degraded, offline, unavailable]
+        controlAvailable:
+          type: boolean
         worldCount:
           type: integer
+        targetIds:
+          type: array
+          uniqueItems: true
+          items: { type: string }
+          description: Runtime targets where this logical room was discovered
+        availableTargetIds:
+          type: array
+          uniqueItems: true
+          items: { type: string }
+          description: Online targets with a fresh inventory for this room
         updatedAt:
           type: string
           format: date-time
@@ -4043,6 +4896,10 @@ components:
       type: object
       additionalProperties: false
       properties:
+        immediate:
+          type: boolean
+          default: false
+          description: Explicitly skip notification and countdown for this stop or restart only. Does not change room policy.
         worldIds:
           type: array
           uniqueItems: true
@@ -4051,6 +4908,13 @@ components:
         allowCapacityRisk:
           type: boolean
           default: false
+        runtimeMode:
+          $ref: "#/components/schemas/RuntimePerformanceMode"
+          description: Process-scoped Lua runtime for start and restart actions. Defaults to game.
+        runtimeVersion:
+          type: string
+          pattern: '^(game|[0-9]+\.[0-9]+\.[0-9]+)$'
+          description: Exact LuaJIT package version shown to the user. Omit for legacy clients or use game with the game runtime.
     BatchRoomActionSelection:
       type: object
       additionalProperties: false
@@ -4066,6 +4930,13 @@ components:
         allowCapacityRisk:
           type: boolean
           default: false
+        runtimeMode:
+          $ref: "#/components/schemas/RuntimePerformanceMode"
+          description: Process-scoped Lua runtime for this room selection. Defaults to game.
+        runtimeVersion:
+          type: string
+          pattern: '^(game|[0-9]+\.[0-9]+\.[0-9]+)$'
+          description: Exact LuaJIT package version shown to the user.
     BatchRoomActionInput:
       type: object
       additionalProperties: false
@@ -4153,8 +5024,12 @@ components:
         - directoryName
         - name
         - role
+        - type
         - isMaster
+        - shardId
         - serverPort
+        - targetIds
+        - availableTargetIds
         - updatedAt
         - status
         - controlAvailable
@@ -4170,10 +5045,23 @@ components:
         role:
           type: string
           enum: [master, caves, custom]
+        type:
+          type: string
+          enum: [forest, cave, unknown]
         isMaster:
           type: boolean
+        shardId:
+          type: integer
         serverPort:
           type: integer
+        targetIds:
+          type: array
+          uniqueItems: true
+          items: { type: string }
+        availableTargetIds:
+          type: array
+          uniqueItems: true
+          items: { type: string }
         updatedAt:
           type: string
           format: date-time
@@ -4184,18 +5072,27 @@ components:
           type: boolean
         statusMessage:
           type: string
+        statusCode:
+          type: string
+        paused:
+          type: boolean
+          description: Latest simulation pause observation from the current running process log. Omitted when unknown; does not change lifecycle status.
     WorldRecord:
       type: object
       additionalProperties: false
-      required: [id, roomId, directoryName, name, role, isMaster, serverPort, updatedAt]
+      required: [id, roomId, directoryName, name, role, type, isMaster, shardId, serverPort, targetIds, availableTargetIds, updatedAt]
       properties:
         id: { type: string }
         roomId: { type: string }
         directoryName: { type: string }
         name: { type: string }
         role: { type: string, enum: [master, caves, custom] }
+        type: { type: string, enum: [forest, cave, unknown] }
         isMaster: { type: boolean }
+        shardId: { type: integer }
         serverPort: { type: integer }
+        targetIds: { type: array, uniqueItems: true, items: { type: string } }
+        availableTargetIds: { type: array, uniqueItems: true, items: { type: string } }
         updatedAt: { type: string, format: date-time }
     CreateWorldInput:
       type: object
@@ -4635,6 +5532,7 @@ components:
         code: { type: string }
         message: { type: string }
         sessionExists: { type: boolean }
+        paused: { type: boolean, description: "Current process simulation pause state; omitted when unknown." }
 
     RuntimeOverviewArtifact:
       type: object
@@ -4937,6 +5835,9 @@ components:
         content: { type: string }
         sourceTimestamp: { type: string, pattern: '^[0-9]{2,}:[0-9]{2}:[0-9]{2}$' }
         occurredAt: { type: string, format: date-time }
+        timeEstimated:
+          type: boolean
+          description: True when the wall-clock timestamp was reconstructed from archive metadata because the paired DST startup log was unavailable
         sources:
           type: array
           minItems: 1
@@ -4952,7 +5853,7 @@ components:
     ChatLogList:
       type: object
       additionalProperties: false
-      required: [items, total, counts, limit, offset, partial, truncated, availableWorlds, unavailableWorlds, problems]
+      required: [items, total, counts, limit, offset, partial, truncated, availableWorlds, unavailableWorlds, problems, historyAvailable]
       properties:
         items:
           type: array
@@ -4967,6 +5868,18 @@ components:
         unavailableWorlds: { type: integer, minimum: 0 }
         startedAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+        historyAvailable: { type: boolean }
+        syncState: { type: string, enum: [pending, catching_up, ready, partial, review] }
+        pendingGenerations: { type: integer, minimum: 0 }
+        unavailableGenerations: { type: integer, minimum: 0 }
+        parseErrors: { type: integer, minimum: 0 }
+        uncertainTimes: { type: integer, minimum: 0 }
+        parseProblems:
+          type: array
+          nullable: true
+          items: { type: string }
+        syncMessage: { type: string }
+        lastSyncedAt: { type: string, format: date-time }
         problems:
           type: array
           items: { $ref: "#/components/schemas/ChatLogProblem" }
@@ -5146,11 +6059,11 @@ components:
           type: string
     CommandRunStatus:
       type: string
-      enum: [sending, sent, failed]
+      enum: [sending, sent, succeeded, failed, uncertain, unresponsive]
     CommandRun:
       type: object
       additionalProperties: false
-      required: [id, roomId, worldId, mode, name, risk, status, logQuery, createdAt]
+      required: [id, roomId, worldId, mode, name, risk, status, mayHaveExecuted, logQuery, createdAt]
       properties:
         id:
           type: string
@@ -5175,6 +6088,18 @@ components:
           type: string
         status:
           $ref: "#/components/schemas/CommandRunStatus"
+        transportOutcome:
+          type: string
+          description: 命令是否已发送到目标 Runtime。
+        executionOutcome:
+          type: string
+          description: DST 对命令执行结果的确认状态。
+        mayHaveExecuted:
+          type: boolean
+          description: 无法确认终态时，命令是否可能已经执行。
+        recoveryOutcome:
+          type: string
+          description: 原命令回执缺失后单次恢复探针的结果。
         message:
           type: string
         errorCode:
@@ -5189,6 +6114,10 @@ components:
         finishedAt:
           type: string
           format: date-time
+        observedAt:
+          type: string
+          format: date-time
+          description: DST Runtime 产生执行证据或恢复探针结果的时间。
     CommandRunEnvelope:
       type: object
       required: [data, error, meta]
@@ -5429,6 +6358,27 @@ components:
           type: "null"
         meta:
           $ref: "#/components/schemas/Meta"
+    InstalledGameVersion:
+      type: object
+      additionalProperties: false
+      required: [targetId, targetName, installationId, os, arch, online, installed, appId, updateMethod, gameVersion, steamBuild, branch, checkedAt]
+      properties:
+        targetId: { type: string }
+        targetName: { type: string }
+        installationId: { type: string }
+        os: { type: string }
+        arch: { type: string }
+        online: { type: boolean }
+        installed: { type: boolean }
+        appId: { type: string }
+        updateMethod: { type: string }
+        gameVersion: { type: string }
+        steamBuild: { type: string }
+        branch:
+          type: string
+          description: Installed Steam branch (public, updatebeta, custom, or empty when unknown).
+        checkedAt: { type: string, format: date-time }
+        error: { type: string }
     GameVersion:
       type: object
       additionalProperties: false
@@ -5441,6 +6391,12 @@ components:
           enum: ["343050", "322330"]
         localVersion:
           type: string
+        gameVersion:
+          type: string
+          description: Game version read from the local installation, not a Steam Build ID.
+        branch:
+          type: string
+          description: Installed Steam branch, empty when unknown.
         latestVersion:
           type: string
         upToDate:
@@ -5464,7 +6420,7 @@ components:
           $ref: "#/components/schemas/OfficialGameRelease"
         officialCheckError:
           type: string
-          description: Klei RSS check error; officialRelease may contain the last successful stale result
+          description: Klei Release list check error; officialRelease may contain the last successful stale result
         checkedAt:
           type: string
           format: date-time
@@ -5487,7 +6443,10 @@ components:
           format: uri
         source:
           type: string
-          enum: [klei-forums-rss]
+          enum: [klei-forums-release]
+        testRelease:
+          description: Optional newer Test release for display only; never used as the stable update target.
+          $ref: "#/components/schemas/OfficialGameRelease"
         checkedAt:
           type: string
           format: date-time
@@ -5619,10 +6578,12 @@ components:
     GameReleaseInstallationPlan:
       type: object
       additionalProperties: false
-      required: [targetId, targetName, installationId, online, inventoryFresh, capabilities, installed, desiredVersion, upToDate, availableBytes, requiredBytes, steamcmdAvailable, updateSupported, runningShards, shards, blockers]
+      required: [targetId, targetName, os, arch, installationId, online, inventoryFresh, capabilities, installed, desiredVersion, upToDate, availableBytes, requiredBytes, steamcmdAvailable, updateSupported, runningShards, shards, blockers]
       properties:
         targetId: { type: string }
         targetName: { type: string }
+        os: { type: string, description: Operating system reported by the runtime target }
+        arch: { type: string, description: CPU architecture reported by the runtime target }
         installationId: { type: string }
         appId: { type: string, pattern: '^[0-9]{1,20}$', description: Steam application ID detected for this installation }
         updateMethod: { type: string, enum: [steamcmd, steam-client], description: Component responsible for updating this installation }
@@ -5630,8 +6591,10 @@ components:
         inventoryFresh: { type: boolean }
         capabilities: { type: array, items: { type: string } }
         installed: { type: boolean }
-        currentVersion: { type: string }
-        desiredVersion: { type: string, pattern: '^[0-9]{1,64}$' }
+        gameVersion: { type: string, pattern: '^[0-9]{1,64}$', description: DST game version reported by version.txt or a world log }
+        steamBuild: { type: string, pattern: '^[0-9]{1,64}$', description: Installed Steam build for this AppID }
+        currentVersion: { type: string, description: Backward-compatible alias for the installed Steam build }
+        desiredVersion: { type: string, pattern: '^[0-9]{1,64}$', description: Latest Steam build for this installation's AppID }
         upToDate: { type: boolean }
         availableBytes: { type: integer, minimum: 0 }
         requiredBytes: { type: integer, minimum: 0 }
@@ -6499,6 +7462,7 @@ components:
         name: { type: string }
         authorId: { type: string }
         author: { type: string }
+        metadataWarning: { type: string, description: Display metadata refresh failure; existing details may still be returned. }
         version: { type: string }
         description: { type: string }
         previewUrl: { type: string, format: uri }
@@ -6512,6 +7476,18 @@ components:
         updatedAt: { type: string, format: date-time }
         dependencies: { type: array, items: { type: string } }
         tags: { type: array, items: { type: string } }
+    ModMetadataEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          type: object
+          required: [items, warning]
+          properties:
+            items: { type: object, additionalProperties: { $ref: "#/components/schemas/SteamMod" } }
+            warning: { type: string }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     SteamModEnvelope:
       type: object
       required: [data, error, meta]
@@ -6519,10 +7495,63 @@ components:
         data: { $ref: "#/components/schemas/SteamMod" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
+    RuntimeModRoomReference:
+      type: object
+      additionalProperties: false
+      required: [roomId, roomName, worldId, worldName]
+      properties:
+        roomId: { type: string }
+        roomName: { type: string }
+        worldId: { type: string }
+        worldName: { type: string }
+    RuntimeInstallationMod:
+      allOf:
+        - $ref: "#/components/schemas/SteamMod"
+        - type: object
+          required: [versionStatus, fileStatus, installedSize, roomReferences]
+          properties:
+            currentVersion: { type: string }
+            latestVersion: { type: string }
+            versionStatus: { type: string, enum: [current, outdated, unknown, invalid] }
+            fileStatus: { type: string, enum: [ready, invalid] }
+            fileReason: { type: string }
+            installedSize: { type: integer, format: int64, minimum: 0 }
+            steamManifestId: { type: string }
+            steamUpdatedAt: { type: string, format: date-time }
+            metadataReason: { type: string }
+            roomReferences:
+              type: array
+              items: { $ref: "#/components/schemas/RuntimeModRoomReference" }
+    RuntimeInstallationModInventory:
+      type: object
+      additionalProperties: false
+      required: [targetId, installationId, items, total, current, outdated, unknown, invalid, observedAt]
+      properties:
+        targetId: { type: string }
+        installationId: { type: string }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/RuntimeInstallationMod" }
+        total: { type: integer, minimum: 0 }
+        current: { type: integer, minimum: 0 }
+        outdated: { type: integer, minimum: 0 }
+        unknown: { type: integer, minimum: 0 }
+        invalid: { type: integer, minimum: 0 }
+        observedAt: { type: string, format: date-time }
+        metadataWarning: { type: string }
+        referencesWarning: { type: string }
+    RuntimeInstallationModInventoryEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/RuntimeInstallationModInventory" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     ModSearchResult:
       type: object
       required: [items, total, page, pageSize]
       properties:
+        warning: { type: string }
         items: { type: array, items: { $ref: "#/components/schemas/SteamMod" } }
         total: { type: integer }
         page: { type: integer }
@@ -6541,8 +7570,19 @@ components:
       allOf:
         - $ref: "#/components/schemas/SteamMod"
         - type: object
-          required: [configured, downloaded, installed, loaded, enabled, configuredWorlds, enabledWorlds, installedWorlds, loadedWorlds, workshopManifest, health, healthMessage, fallbackUsed, warnings]
+          required: [runtimeObserved, runtimeReadyTargets, runtimePendingTargets, runtimeUnavailableTargets, runtimeTotalTargets, configured, downloaded, installed, loaded, enabled, configuredWorlds, enabledWorlds, installedWorlds, loadedWorlds, workshopManifest, health, healthMessage, fallbackUsed, warnings]
           properties:
+            runtimeObserved:
+              type: boolean
+              description: True only when file and load state were read from the room's actual Runtime filesystem.
+            runtimeFileStatus:
+              type: string
+              enum: [ready, pending, unavailable, disabled]
+              description: Aggregated actual-file status for the runtime installations selected by the room Placement.
+            runtimeReadyTargets: { type: integer, minimum: 0 }
+            runtimePendingTargets: { type: integer, minimum: 0 }
+            runtimeUnavailableTargets: { type: integer, minimum: 0 }
+            runtimeTotalTargets: { type: integer, minimum: 0 }
             configured: { type: boolean }
             downloaded: { type: boolean }
             installed: { type: boolean }
@@ -6572,6 +7612,7 @@ components:
         attention: { type: integer }
         checkedAt: { type: string, format: date-time }
         metadataWarning: { type: string }
+        profile: { $ref: "#/components/schemas/RoomModProfile" }
     ModListEnvelope:
       type: object
       required: [data, error, meta]
@@ -6610,6 +7651,9 @@ components:
       properties:
         worldIds: { type: array, items: { type: string } }
         enabled: { type: boolean }
+        expectedRevision: { type: string, description: Required for a single-world write }
+        expectedRevisions: { type: object, additionalProperties: { type: string }, description: Required for a multi-world write }
+        expectedTopologyRevision: { type: string }
     ModActionInput:
       type: object
       additionalProperties: false
@@ -6648,7 +7692,9 @@ components:
         fallbackUsed: { type: boolean }
         fallbackReason: { type: string }
         warnings: { type: array, items: { type: string } }
-        rawPreserved: { type: boolean }
+        rawPreserved:
+          type: boolean
+          description: 未知 Lua 配置值会按语义保留；文件实际修改时不保证注释、空白或原始排版不变。
         schemaVersion: { type: string }
         fields: { type: array, items: { $ref: "#/components/schemas/ModConfigField" } }
         values: { type: object, additionalProperties: true }
@@ -6685,6 +7731,11 @@ components:
       required: [expectedRevision, enabled, patch]
       properties:
         expectedRevision: { type: string }
+        expectedRevisions: { type: object, additionalProperties: { type: string } }
+        expectedTopologyRevision: { type: string }
+        worldIds: { type: array, uniqueItems: true, items: { type: string } }
+        sourceWorldId: { type: string, description: Copy this selected world's configuration options, including custom options, before applying the patch. All selected revisions are required. }
+        preserveEnabled: { type: boolean, default: false }
         enabled: { type: boolean }
         patch: { type: object, additionalProperties: true }
     ModConfigurationPreview:
@@ -6695,12 +7746,145 @@ components:
         nextRevision: { type: string }
         changes: { type: array, items: { $ref: "#/components/schemas/ConfigurationChange" } }
         warnings: { type: array, items: { type: string } }
-        rawPreserved: { type: boolean }
+        rawPreserved:
+          type: boolean
+          description: 未知 Lua 配置值会按语义保留；文件实际修改时不保证注释、空白或原始排版不变。
     ModConfigurationPreviewEnvelope:
       type: object
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/ModConfigurationPreview" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    ModConfigurationApply:
+      type: object
+      additionalProperties: false
+      required: [revision, changes, warnings, protectionBackupId, worldIds, publishedTargets]
+      properties:
+        revision: { type: string, description: Populated for a single-world write }
+        revisions: { type: object, additionalProperties: { type: string }, description: Current revision for every written world }
+        changes: { type: array, items: { $ref: "#/components/schemas/ConfigurationChange" } }
+        warnings: { type: array, items: { type: string } }
+        protectionBackupId: { type: string }
+        worldIds: { type: array, items: { type: string } }
+        publishedTargets: { type: integer, minimum: 0 }
+    ModConfigurationApplyEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ModConfigurationApply" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    RoomModProfileWorld:
+      type: object
+      additionalProperties: false
+      required: [worldId, name, master, revision]
+      properties:
+        worldId: { type: string }
+        name: { type: string }
+        master: { type: boolean }
+        revision: { type: string }
+    RoomModProfileWorldState:
+      type: object
+      additionalProperties: false
+      required: [worldId, name, master, configured, enabled, inherited]
+      properties:
+        worldId: { type: string }
+        name: { type: string }
+        master: { type: boolean }
+        configured: { type: boolean }
+        enabled: { type: boolean }
+        inherited: { type: boolean }
+        difference: { type: string, enum: [configured, enabled, configuration] }
+        entryRevision: { type: string }
+    RoomModProfileItem:
+      type: object
+      additionalProperties: false
+      required: [modId, defaultConfigured, defaultEnabled, inheritedWorldIds, exceptionWorldIds, worlds]
+      properties:
+        modId: { type: string }
+        defaultConfigured: { type: boolean }
+        defaultEnabled: { type: boolean }
+        defaultRevision: { type: string }
+        configurationMode: { type: string, enum: [shared, separate], default: shared }
+        configurationMixed: { type: boolean, description: Configured worlds have different configuration options; enabled state is compared separately. }
+        inheritedWorldIds: { type: array, items: { type: string } }
+        exceptionWorldIds: { type: array, items: { type: string } }
+        worlds: { type: array, items: { $ref: "#/components/schemas/RoomModProfileWorldState" } }
+    RoomModProfile:
+      type: object
+      additionalProperties: false
+      required: [roomId, revision, defaultWorldId, worlds, items]
+      properties:
+        roomId: { type: string }
+        revision: { type: string }
+        defaultWorldId: { type: string }
+        worlds: { type: array, items: { $ref: "#/components/schemas/RoomModProfileWorld" } }
+        items: { type: array, items: { $ref: "#/components/schemas/RoomModProfileItem" } }
+    RoomModProfileEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/RoomModProfile" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    ModUpdatePolicyInput:
+      type: object
+      additionalProperties: false
+      required: [autoCheck, autoPrepare, applyWhenEmpty, restartWithPlayers, gameAnnouncement, emptyGraceSeconds, checkIntervalMinutes]
+      properties:
+        autoCheck: { type: boolean }
+        autoPrepare: { type: boolean }
+        applyWhenEmpty: { type: boolean }
+        restartWithPlayers: { type: boolean, enum: [false] }
+        gameAnnouncement: { type: boolean }
+        emptyGraceSeconds: { type: integer, minimum: 30, maximum: 1800 }
+        checkIntervalMinutes: { type: integer, minimum: 5, maximum: 1440, default: 5 }
+        expectedRevision: { type: string }
+    ModUpdatePolicy:
+      allOf:
+        - $ref: "#/components/schemas/ModUpdatePolicyInput"
+        - type: object
+          required: [roomId]
+          properties:
+            roomId: { type: string }
+            revision: { type: string }
+            createdAt: { type: string, format: date-time }
+            updatedAt: { type: string, format: date-time }
+    ModUpdateState:
+      type: object
+      additionalProperties: false
+      required: [roomId, status, availableModIds, onlinePlayers, staleOnlinePlayers, presenceFresh, updatedAt]
+      properties:
+        roomId: { type: string }
+        status: { type: string, enum: [idle, checking, available, preparing, prepared, waiting_for_players, scheduled, activating, verifying, loaded, blocked, rolled_back] }
+        availableModIds: { type: array, items: { type: string } }
+        preparedPlanHash: { type: string }
+        publicationId: { type: string }
+        onlinePlayers: { type: integer, minimum: 0 }
+        staleOnlinePlayers: { type: integer, minimum: 0 }
+        presenceFresh: { type: boolean }
+        announcementPlanHash: { type: string }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        lastCheckedAt: { type: string, format: date-time }
+        preparedAt: { type: string, format: date-time }
+        emptySince: { type: string, format: date-time }
+        nextCheckAt: { type: string, format: date-time }
+        nextActionAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ModUpdateOverview:
+      type: object
+      additionalProperties: false
+      required: [policy, state]
+      properties:
+        policy: { $ref: "#/components/schemas/ModUpdatePolicy" }
+        state: { $ref: "#/components/schemas/ModUpdateState" }
+    ModUpdateOverviewEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ModUpdateOverview" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     ModPublicationRequest:
@@ -6853,6 +8037,96 @@ components:
         data: { $ref: "#/components/schemas/ModPublicationPlan" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
+    ModReplicaCoverage:
+      type: object
+      additionalProperties: false
+      required: [readyTargets, totalTargets, cachedTargets, publishedTargets, configuredWorlds, loadedWorlds, totalWorlds]
+      properties:
+        readyTargets: { type: integer, minimum: 0 }
+        totalTargets: { type: integer, minimum: 0 }
+        cachedTargets: { type: integer, minimum: 0 }
+        publishedTargets: { type: integer, minimum: 0 }
+        configuredWorlds: { type: integer, minimum: 0 }
+        loadedWorlds: { type: integer, minimum: 0 }
+        totalWorlds: { type: integer, minimum: 0 }
+    ModReplicaWorldState:
+      type: object
+      additionalProperties: false
+      required: [roomId, worldId, configured, loaded, configSha256]
+      properties:
+        roomId: { type: string }
+        worldId: { type: string }
+        configured: { type: boolean }
+        loaded: { type: boolean }
+        configSha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        observedRevision: { type: string, pattern: '^[a-f0-9]{64}$' }
+        observedAt: { type: string, format: date-time }
+        errorStage: { type: string, enum: [desired, cache, publish, complete, activate, rollback, observe] }
+        errorMessage: { type: string }
+    ModReplicaFetchAttempt:
+      type: object
+      additionalProperties: false
+      required: [source, feasibility, status]
+      properties:
+        source: { type: string, enum: [cache, steam, peer, controller, legacy_upload] }
+        feasibility: { type: string, enum: [available, unavailable, unknown] }
+        status: { type: string, enum: [succeeded, failed, unavailable, skipped] }
+        selected: { type: boolean }
+        bytes: { type: integer, format: int64, minimum: 0, description: Bytes newly transferred during this observation; resumed bytes are excluded. }
+        durationMs: { type: integer, format: int64, minimum: 0 }
+        bytesPerSecond: { type: integer, format: int64, minimum: 0, description: Effective throughput observed during the real transfer; this is not a synthetic bandwidth test. }
+        errorCode: { type: string }
+        errorMessage: { type: string }
+        observedAt: { type: string, format: date-time }
+    ModReplicaTargetState:
+      type: object
+      additionalProperties: false
+      required: [targetId, installationId, treeSha256, size, fileCount, cached, published, ready, worlds]
+      properties:
+        targetId: { type: string }
+        installationId: { type: string }
+        treeSha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        manifestSha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        size: { type: integer, format: int64, minimum: 0 }
+        fileCount: { type: integer, minimum: 0 }
+        cached: { type: boolean }
+        published: { type: boolean }
+        ready: { type: boolean }
+        worlds: { type: array, items: { $ref: "#/components/schemas/ModReplicaWorldState" } }
+        observedAt: { type: string, format: date-time }
+        errorStage: { type: string, enum: [desired, cache, publish, complete, activate, rollback, observe] }
+        errorMessage: { type: string }
+        fetchSource: { type: string, enum: [cache, steam, peer, controller, legacy_upload] }
+        fetchAttempts: { type: array, maxItems: 5, items: { $ref: "#/components/schemas/ModReplicaFetchAttempt" } }
+    ModReplicaItem:
+      type: object
+      additionalProperties: false
+      required: [workshopId, readyTargets, totalTargets, configuredWorlds, loadedWorlds, totalWorlds, targets]
+      properties:
+        workshopId: { type: string, pattern: '^[0-9]{1,20}$' }
+        readyTargets: { type: integer, minimum: 0 }
+        totalTargets: { type: integer, minimum: 0 }
+        configuredWorlds: { type: integer, minimum: 0 }
+        loadedWorlds: { type: integer, minimum: 0 }
+        totalWorlds: { type: integer, minimum: 0 }
+        targets: { type: array, items: { $ref: "#/components/schemas/ModReplicaTargetState" } }
+    RoomModReplicaState:
+      type: object
+      additionalProperties: false
+      required: [roomId, coverage, items]
+      properties:
+        roomId: { type: string }
+        desiredRevision: { type: string, pattern: '^[a-f0-9]{64}$' }
+        coverage: { $ref: "#/components/schemas/ModReplicaCoverage" }
+        items: { type: array, items: { $ref: "#/components/schemas/ModReplicaItem" } }
+        updatedAt: { type: string, format: date-time }
+    RoomModReplicaEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/RoomModReplicaState" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     ModPublicationStatus:
       type: string
       enum: [previewed, preparing, prepared, publishing, committed, completing, succeeded, failed, rolled_back, recovery_required]
@@ -6941,6 +8215,7 @@ components:
         roomId: { type: string }
         worldId: { type: string }
         worldName: { type: string }
+        worldConfirmed: { type: boolean, description: True only when local entity or native connection events establish the world; a cluster-wide client list alone is insufficient }
         name: { type: string }
         prefab: { type: string }
         online: { type: boolean }
@@ -6960,6 +8235,9 @@ components:
         moisture: { type: number }
         firstSeenAt: { type: string, format: date-time }
         lastSeenAt: { type: string, format: date-time }
+        lastSeenSource: { $ref: "#/components/schemas/PlayerDataSource" }
+        lastConnectedAt: { type: string, format: date-time, description: Latest authenticated connection event across room shards }
+        lastDisconnectedAt: { type: string, format: date-time, description: Latest shard disconnect event; includes shard migration and is not necessarily a room exit }
         statusChangedAt: { type: string, format: date-time }
         lastRefreshedAt: { type: string, format: date-time }
         presenceStatus: { $ref: "#/components/schemas/PlayerFreshnessStatus" }
@@ -7062,9 +8340,20 @@ components:
         precipitationRate: { type: number }
         nightmarePhase: { type: string }
         nightmareProgress: { type: number }
+        hostPerformance:
+          type: integer
+          minimum: 0
+          maximum: 2
+          description: DST in-game host performance rating where 0 is good, 1 is fair, and 2 is poor.
         observedAt: { type: string, format: date-time }
         runtimeState: { type: string, enum: [stopped, starting, running, failed, unknown] }
-        freshness: { type: string, enum: [live, delayed, stopped, unavailable] }
+        runtimeCode: { type: string }
+        runtimeMessage: { type: string }
+        observationError: { type: string }
+        paused: { type: boolean, description: "Current process simulation pause state; omitted when unknown." }
+        observationState: { type: string, enum: [pending, deferred, failed] }
+        observationCode: { type: string }
+        freshness: { type: string, enum: [live, paused, delayed, stopped, unavailable] }
         ageSeconds: { type: integer, minimum: 0 }
         stale: { type: boolean }
     WorldStateList:
@@ -7096,6 +8385,23 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/WorldStateHistory" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    WorldStateRefreshResult:
+      type: object
+      additionalProperties: false
+      required: [worldId, worldName, observedAt, message, snapshot]
+      properties:
+        worldId: { type: string }
+        worldName: { type: string }
+        observedAt: { type: string, format: date-time }
+        message: { type: string }
+        snapshot: { $ref: "#/components/schemas/WorldStateSnapshot" }
+    WorldStateRefreshResultEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/WorldStateRefreshResult" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     AutomationAction:
@@ -7644,9 +8950,10 @@ components:
     SystemCPUStatus:
       type: object
       additionalProperties: false
-      required: [available, model, cores, threads, usage, coreUsage, load1, load5, load15, loadSupported]
+      required: [available, usageAvailable, model, cores, threads, usage, coreUsage, load1, load5, load15, loadSupported]
       properties:
         available: { type: boolean }
+        usageAvailable: { type: boolean }
         error: { type: string }
         model: { type: string }
         cores: { type: integer, minimum: 0 }
@@ -7760,6 +9067,40 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/SystemStatus" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    NodeResource:
+      type: object
+      additionalProperties: false
+      required: [targetId, name, kind, online, stale, host, cpu, memory, disk, warnings]
+      properties:
+        targetId: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [local, agent] }
+        online: { type: boolean }
+        stale: { type: boolean }
+        staleReason: { type: string, enum: [agent_offline, clock_skew, report_expired, report_missing] }
+        agentVersion: { type: string }
+        observedAt: { type: string, format: date-time }
+        receivedAt: { type: string, format: date-time }
+        host: { $ref: "#/components/schemas/SystemHostStatus" }
+        cpu: { $ref: "#/components/schemas/SystemCPUStatus" }
+        memory: { $ref: "#/components/schemas/SystemMemoryStatus" }
+        disk: { $ref: "#/components/schemas/SystemDiskStatus" }
+        warnings: { type: array, items: { type: string } }
+    NodeResourceSnapshot:
+      type: object
+      additionalProperties: false
+      required: [items, total, observedAt]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/NodeResource" } }
+        total: { type: integer, minimum: 0 }
+        observedAt: { type: string, format: date-time }
+    NodeResourceSnapshotEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/NodeResourceSnapshot" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     SystemSettingSource:
@@ -8244,7 +9585,7 @@ components:
     RuntimeConfig:
       type: object
       additionalProperties: false
-      required: [installationId, displayName, savePath, backupPath, serverPath, ugcPath, steamcmdPath, workshopContentPath, luaBinary, luaFallbackPath, serverMode]
+      required: [installationId, displayName, savePath, backupPath, serverPath, ugcPath, steamcmdPath, workshopContentPath, luaBinary, luaFallbackPath, serverMode, source]
       properties:
         installationId: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$' }
         displayName: { type: string, maxLength: 100 }
@@ -8256,7 +9597,8 @@ components:
         workshopContentPath: { type: string, maxLength: 2048 }
         luaBinary: { type: string, maxLength: 255, default: lua }
         luaFallbackPath: { type: string, maxLength: 2048 }
-        serverMode: { type: string, enum: ["32", "64", luajit], default: "64" }
+        serverMode: { type: string, enum: ["32", "64"], default: "64", description: Executable architecture only; native performance runtimes are modeled separately. }
+        source: { type: string, enum: [manual, discovered], readOnly: true, description: Whether the controller saved this configuration explicitly or adopted the only trusted installation advertised by the Agent. }
         updatedAt: { type: string, format: date-time, readOnly: true }
     RuntimeConfigInput:
       type: object
@@ -8273,7 +9615,7 @@ components:
         workshopContentPath: { type: string, maxLength: 2048 }
         luaBinary: { type: string, maxLength: 255, default: lua }
         luaFallbackPath: { type: string, maxLength: 2048 }
-        serverMode: { type: string, enum: ["32", "64", luajit], default: "64" }
+        serverMode: { type: string, enum: ["32", "64"], default: "64", description: Executable architecture only; native performance runtimes are modeled separately. }
     RuntimeTargetNameInput:
       type: object
       additionalProperties: false
@@ -8287,7 +9629,7 @@ components:
     RuntimeTarget:
       type: object
       additionalProperties: false
-      required: [id, kind, name, hostname, os, arch, status, default, configured, online, capabilities, config]
+      required: [id, kind, name, hostname, os, arch, ipAddresses, status, default, configured, online, capabilities, config, defaultInstallationId, installations]
       properties:
         id: { type: string, description: local or agent followed by a colon and Agent ID }
         kind: { $ref: "#/components/schemas/RuntimeKind" }
@@ -8296,6 +9638,7 @@ components:
         hostname: { type: string }
         os: { type: string }
         arch: { type: string }
+        ipAddresses: { type: array, items: { type: string }, description: Active non-loopback addresses reported by the Runtime machine }
         status: { $ref: "#/components/schemas/RuntimeStatus" }
         default: { type: boolean }
         configured: { type: boolean }
@@ -8303,6 +9646,13 @@ components:
         capabilities: { type: array, items: { type: string } }
         lastHeartbeat: { type: string, format: date-time }
         config: { $ref: "#/components/schemas/RuntimeConfig" }
+        performance: { $ref: "#/components/schemas/RuntimePerformanceReport" }
+        defaultInstallationId:
+          type: string
+          description: Installation selected when a caller omits installationId.
+        installations:
+          type: array
+          items: { $ref: "#/components/schemas/AgentRuntimeInstallation" }
     RuntimeTargetEnvelope:
       type: object
       required: [data, error, meta]
@@ -8382,10 +9732,102 @@ components:
         ugcPath: { type: string }
         workshopContentPath: { type: string }
         serverMode: { type: string, enum: ["32", "64"] }
+        performance: { $ref: "#/components/schemas/RuntimePerformanceReport" }
+    RuntimePerformanceStatus:
+      type: string
+      enum: [not_installed, detected_unverified, incompatible, ready]
+    RuntimePerformanceMode:
+      type: string
+      enum: [game, luajit, arena-gc]
+    RuntimePerformanceReport:
+      type: object
+      additionalProperties: false
+      required: [provider, status, canEnable, supportedModes, issues]
+      properties:
+        provider: { type: string, enum: [game, dontstarve-luajit2] }
+        status: { $ref: "#/components/schemas/RuntimePerformanceStatus" }
+        canEnable: { type: boolean, description: True only when the reporting Runtime explicitly authorized enablement and the provider, game/signature versions, binary digest, required modes and issue set passed all compatibility gates. This field does not select or activate the runtime. }
+        packageVersion: { type: string }
+        gameVersion: { type: string }
+        signatureVersion: { type: string }
+        binarySha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        automaticSignatures: { type: boolean, description: The verified package can generate signatures for the installed DST build at startup. }
+        supportedModes:
+          type: array
+          items: { $ref: "#/components/schemas/RuntimePerformanceMode" }
+        issues:
+          type: array
+          items:
+            type: string
+            enum: [server_architecture_unsupported, architecture_unsupported, platform_not_verified, installation_incomplete, injector_wrapper_invalid, signature_unreadable, game_version_unknown, signature_version_mismatch, package_version_unknown, binary_hash_unavailable, plugin_layout_unverified, injector_marker_invalid, legacy_layout_unverified]
+    RuntimeModeTarget:
+      type: object
+      additionalProperties: false
+      required: [targetId, installationId, targetName, supportedModes]
+      properties:
+        targetId: { type: string }
+        installationId: { type: string }
+        targetName: { type: string }
+        os: { type: string, enum: [darwin, linux, windows] }
+        arch: { type: string }
+        packageVersion: { type: string }
+        gameVersion: { type: string }
+        compatibilityStatus: { $ref: "#/components/schemas/RuntimePerformanceStatus" }
+        supportedModes:
+          type: array
+          items: { $ref: "#/components/schemas/RuntimePerformanceMode" }
+        issues:
+          type: array
+          items:
+            type: string
+            enum: [server_architecture_unsupported, architecture_unsupported, platform_not_verified, installation_incomplete, injector_wrapper_invalid, signature_unreadable, game_version_unknown, signature_version_mismatch, package_version_unknown, binary_hash_unavailable, plugin_layout_unverified, injector_marker_invalid, legacy_layout_unverified]
+        reasonCode:
+          type: string
+          enum: [agent_runtime_mode_unsupported, inspection_unavailable, runtime_not_installed, runtime_unverified, runtime_incompatible, runtime_unavailable]
+        reason: { type: string }
+    RuntimePackageOption:
+      type: object
+      additionalProperties: false
+      required: [id, provider, channel, platforms, processScopedModes]
+      properties:
+        id: { type: string }
+        provider: { type: string, enum: [game, dontstarve-luajit2] }
+        version: { type: string }
+        channel: { type: string, enum: [bundled, preview, upstream, installed] }
+        platforms:
+          type: array
+          items: { type: string, enum: [darwin, linux, windows] }
+        processScopedModes: { type: boolean }
+    RuntimeModeAvailability:
+      type: object
+      additionalProperties: false
+      required: [roomId, worldIds, defaultMode, modes, targets, packages]
+      properties:
+        roomId: { type: string }
+        worldIds:
+          type: array
+          items: { type: string }
+        defaultMode: { $ref: "#/components/schemas/RuntimePerformanceMode" }
+        modes:
+          type: array
+          items: { $ref: "#/components/schemas/RuntimePerformanceMode" }
+        targets:
+          type: array
+          items: { $ref: "#/components/schemas/RuntimeModeTarget" }
+        packages:
+          type: array
+          items: { $ref: "#/components/schemas/RuntimePackageOption" }
+    RuntimeModeAvailabilityEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/RuntimeModeAvailability" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     Agent:
       type: object
       additionalProperties: false
-      required: [id, displayName, hostname, os, arch, version, ipAddresses, status, lastHeartbeat, capabilities, metrics, capacity, metricsStale, installationRegistrySupported, installations, details, createdAt, updatedAt]
+      required: [id, displayName, hostname, os, arch, version, ipAddresses, status, lastHeartbeat, capabilities, metrics, capacity, metricsStale, installationRegistrySupported, installations, runtimeAutoAdoptDisabled, update, details, createdAt, updatedAt]
       properties:
         id: { type: string }
         displayName: { type: string, description: Effective user-facing machine name; falls back to hostname when no alias was saved. }
@@ -8404,9 +9846,63 @@ components:
         staleReason: { type: string, enum: [agent_offline, report_missing, report_expired, clock_skew] }
         installationRegistrySupported: { type: boolean, description: True when the Agent explicitly reports its trusted runtime installation registry, including an empty registry. }
         installations: { type: array, items: { $ref: "#/components/schemas/AgentRuntimeInstallation" } }
+        runtimeAutoAdoptDisabled: { type: boolean, description: True after an operator removes the Runtime configuration; prevents automatic recreation until a manual configuration is saved. }
+        update: { $ref: "#/components/schemas/AgentUpdateStatus" }
         details: { type: object, additionalProperties: true }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+    AgentRelease:
+      type: object
+      additionalProperties: false
+      required: [id, version, os, arch, fileName, size, sha256, uploadedAt]
+      properties:
+        id: { type: string, format: uuid }
+        version: { type: string }
+        os: { type: string, enum: [linux, darwin, windows] }
+        arch: { type: string, enum: [amd64, arm64] }
+        fileName: { type: string }
+        size: { type: integer, format: int64, minimum: 1, maximum: 134217728 }
+        sha256: { type: string, pattern: "^[a-f0-9]{64}$" }
+        uploadedAt: { type: string, format: date-time }
+    AgentUpdateStatus:
+      type: object
+      additionalProperties: false
+      required: [mode, supported, currentVersion, updateAvailable]
+      properties:
+        mode: { type: string, enum: [self, container, migration, unsupported] }
+        supported: { type: boolean }
+        currentVersion: { type: string }
+        latestVersion: { type: string }
+        updateAvailable: { type: boolean }
+        reason: { type: string }
+        release: { $ref: "#/components/schemas/AgentRelease" }
+    AgentUpgradeInput:
+      type: object
+      additionalProperties: false
+      properties:
+        releaseId: { type: string, format: uuid, description: Omit to select the latest compatible release. }
+    AgentReleaseEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AgentRelease" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    AgentReleaseList:
+      type: object
+      additionalProperties: false
+      required: [items, total, maxUploadBytes]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AgentRelease" } }
+        total: { type: integer, minimum: 0 }
+        maxUploadBytes: { type: integer, format: int64, minimum: 1 }
+    AgentReleaseListEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/AgentReleaseList" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     AgentEnvelope:
       type: object
       required: [data, error, meta]
@@ -8637,9 +10133,10 @@ components:
     AgentInventorySnapshot:
       type: object
       additionalProperties: false
-      required: [agentId, inventory, capacity, observedAt, receivedAt, stale]
+      required: [agentId, installationId, inventory, capacity, observedAt, receivedAt, stale]
       properties:
         agentId: { type: string }
+        installationId: { type: string }
         inventory: { $ref: "#/components/schemas/AgentRuntimeInventory" }
         capacity: { $ref: "#/components/schemas/AgentCapacity" }
         observedAt: { type: string, format: date-time }
@@ -8806,7 +10303,7 @@ components:
     RuntimeProvider:
       type: object
       additionalProperties: false
-      required: [id, targetId, kind, displayName, os, arch, online, capabilities, updatedAt]
+      required: [id, targetId, kind, displayName, os, arch, ipAddresses, online, capabilities, updatedAt]
       properties:
         id: { type: string }
         targetId: { type: string }
@@ -8814,6 +10311,7 @@ components:
         displayName: { type: string }
         os: { type: string }
         arch: { type: string }
+        ipAddresses: { type: array, items: { type: string }, description: Current or cached addresses reported by this Runtime target }
         online: { type: boolean }
         capabilities: { type: array, items: { type: string } }
         observedAt: { type: string, format: date-time }
@@ -8853,6 +10351,16 @@ components:
         name: { type: string, minLength: 1, maxLength: 100 }
         bindAddress: { type: string }
         advertiseAddress: { type: string, maxLength: 255 }
+    RuntimeEgressDetection:
+      type: object
+      additionalProperties: false
+      required: [profileId, targetId, address, region, observedAt]
+      properties:
+        profileId: { type: string }
+        targetId: { type: string }
+        address: { type: string }
+        region: { type: string, enum: [cn, global] }
+        observedAt: { type: string, format: date-time }
     RuntimePortReservation:
       type: object
       additionalProperties: false
@@ -8871,7 +10379,7 @@ components:
         protocol: { type: string, const: udp }
         bindAddress: { type: string }
         port: { type: integer, minimum: 1, maximum: 65535 }
-        state: { type: string, enum: [active, planned, observed] }
+        state: { type: string, enum: [configured, active, planned, observed, releasing, released] }
         managed: { type: boolean }
         updatedAt: { type: string, format: date-time }
     RuntimeCPUAllocation:
@@ -8936,10 +10444,11 @@ components:
     RuntimeResourcePreflight:
       type: object
       additionalProperties: false
-      required: [ready, warnings, conflicts]
+      required: [ready, warnings, advisories, conflicts]
       properties:
         ready: { type: boolean }
         warnings: { type: array, items: { type: string } }
+        advisories: { type: array, items: { $ref: "#/components/schemas/RuntimeResourceConflict" } }
         conflicts: { type: array, items: { $ref: "#/components/schemas/RuntimeResourceConflict" } }
     RuntimeInfrastructure:
       type: object
@@ -8968,6 +10477,13 @@ components:
         data: { $ref: "#/components/schemas/RuntimeNetworkProfile" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
+    RuntimeEgressDetectionEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/RuntimeEgressDetection" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     RuntimeCPUAllocationEnvelope:
       type: object
       required: [data, error, meta]
@@ -8982,6 +10498,9 @@ components:
       properties:
         worldId: { type: string }
         targetId: { type: string, description: local or agent followed by a colon and Agent ID }
+        installationId:
+          type: string
+          description: Runtime installation on the selected machine. Omission resolves to that machine's current default for backward compatibility.
     TopologyUpdateInput:
       type: object
       additionalProperties: false
@@ -8995,6 +10514,115 @@ components:
         placements:
           type: array
           items: { $ref: "#/components/schemas/TopologyPlacementInput" }
+        shardLinks:
+          type: array
+          description: One selected Master route for each Secondary runtime endpoint. Send an empty array when every world is on the Master machine.
+          items: { $ref: "#/components/schemas/ShardLinkInput" }
+    ShardLinkMode:
+      type: string
+      enum: [lan, overlay, tunnel, public, configured, manual]
+    ShardLinkApplyInput:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision]
+      properties:
+        expectedRevision: { type: string, format: uuid }
+    ShardLinkInput:
+      type: object
+      additionalProperties: false
+      required: [sourceTargetId, address, port, mode]
+      properties:
+        sourceTargetId: { type: string }
+        sourceInstallationId: { type: string }
+        address: { type: string, minLength: 1, maxLength: 253 }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        mode: { $ref: "#/components/schemas/ShardLinkMode" }
+    ShardLink:
+      type: object
+      additionalProperties: false
+      required: [sourceTargetId, sourceInstallationId, masterTargetId, masterInstallationId, address, port, mode]
+      properties:
+        sourceTargetId: { type: string }
+        sourceInstallationId: { type: string }
+        masterTargetId: { type: string }
+        masterInstallationId: { type: string }
+        address: { type: string, minLength: 1, maxLength: 253 }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        mode: { $ref: "#/components/schemas/ShardLinkMode" }
+    ShardLinkCandidateInput:
+      type: object
+      additionalProperties: false
+      required: [address, port]
+      properties:
+        address: { type: string, minLength: 1, maxLength: 253 }
+        port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          description: Zero uses the actual Master Shard port.
+        name: { type: string, maxLength: 100 }
+    ShardLinkDiscoveryInput:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision, placements]
+      properties:
+        expectedRevision: { type: string, format: uuid }
+        placements:
+          type: array
+          items: { $ref: "#/components/schemas/TopologyPlacementInput" }
+        manualCandidates:
+          type: array
+          maxItems: 16
+          items: { $ref: "#/components/schemas/ShardLinkCandidateInput" }
+    ShardLinkCandidate:
+      type: object
+      additionalProperties: false
+      required: [address, port, kind, name, reachable, status]
+      properties:
+        address: { type: string }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        kind: { type: string, enum: [lan, overlay, public, configured, manual, interface] }
+        name: { type: string }
+        reachable: { type: boolean }
+        latencyMillis: { type: integer, format: int64, minimum: 0 }
+        status: { type: string, enum: [pending, reachable, unreachable, unverified] }
+        error: { type: string }
+    ShardLinkDiscovery:
+      type: object
+      additionalProperties: false
+      required: [sourceTargetId, sourceInstallationId, sourceTargetName, candidates]
+      properties:
+        sourceTargetId: { type: string }
+        sourceInstallationId: { type: string }
+        sourceTargetName: { type: string }
+        candidates:
+          type: array
+          items: { $ref: "#/components/schemas/ShardLinkCandidate" }
+        autoSelected: { $ref: "#/components/schemas/ShardLinkCandidate" }
+    ShardLinkDiscoveryResult:
+      type: object
+      additionalProperties: false
+      required: [roomId, revision, masterTargetId, masterInstallationId, masterTargetName, masterPort, links, activeProbe, observedAt]
+      properties:
+        roomId: { type: string }
+        revision: { type: string, format: uuid }
+        masterTargetId: { type: string }
+        masterInstallationId: { type: string }
+        masterTargetName: { type: string }
+        masterPort: { type: integer, minimum: 1, maximum: 65535 }
+        links:
+          type: array
+          items: { $ref: "#/components/schemas/ShardLinkDiscovery" }
+        activeProbe: { type: boolean }
+        activeProbeUnavailableReason: { type: string }
+        observedAt: { type: string, format: date-time }
+    ShardLinkDiscoveryEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ShardLinkDiscoveryResult" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     PlacementMigrationInput:
       type: object
       additionalProperties: false
@@ -9020,12 +10648,14 @@ components:
     RoomProvisionStep:
       type: object
       additionalProperties: false
-      required: [id, operationId, worldId, worldName, targetId, installationId, cluster, shard, phase, size, updatedAt]
+      required: [id, operationId, worldId, worldName, sourceTargetId, sourceInstallationId, targetId, installationId, cluster, shard, phase, size, wasRunning, runtimeRestored, updatedAt]
       properties:
         id: { type: string }
         operationId: { type: string, format: uuid }
         worldId: { type: string }
         worldName: { type: string }
+        sourceTargetId: { type: string }
+        sourceInstallationId: { type: string }
         targetId: { type: string }
         installationId: { type: string }
         cluster: { type: string }
@@ -9034,6 +10664,8 @@ components:
         phase: { type: string, enum: [not_started, planned, uploading, published, existing, completed, rolled_back] }
         size: { type: integer, format: int64, minimum: 0 }
         sha256: { type: string, pattern: "^[a-fA-F0-9]{64}$" }
+        wasRunning: { type: boolean }
+        runtimeRestored: { type: boolean }
         failure: { type: string }
         updatedAt: { type: string, format: date-time }
     RoomProvisionOperation:
@@ -9075,19 +10707,42 @@ components:
     TopologyPlacement:
       type: object
       additionalProperties: false
-      required: [worldId, worldName, worldRole, desiredTargetId, appliedTargetId, state, observedTargetIds]
+      required: [worldId, worldName, worldRole, desiredTargetId, appliedTargetId, desiredInstallationId, appliedInstallationId, state, running, observedTargetIds, observedLocations]
       properties:
         worldId: { type: string }
         worldName: { type: string }
         worldRole: { type: string, enum: [master, caves, custom] }
         desiredTargetId: { type: string }
         appliedTargetId: { type: string }
+        desiredInstallationId: { type: string }
+        appliedInstallationId: { type: string }
         state: { $ref: "#/components/schemas/TopologyPlacementState" }
+        running: { type: boolean }
         observedTargetIds: { type: array, items: { type: string } }
+        observedLocations:
+          type: array
+          items: { $ref: "#/components/schemas/TopologyPlacementLocation" }
+    TopologyPlacementLocation:
+      type: object
+      additionalProperties: false
+      required: [targetId, installationId]
+      properties:
+        targetId: { type: string }
+        installationId: { type: string }
+    TopologyTargetInstallationSummary:
+      type: object
+      additionalProperties: false
+      required: [id, driver, default, available, stale]
+      properties:
+        id: { type: string }
+        driver: { type: string }
+        default: { type: boolean }
+        available: { type: boolean }
+        stale: { type: boolean }
     TopologyTargetSummary:
       type: object
       additionalProperties: false
-      required: [id, name, kind, status, online, configured, inventoryAvailable, inventoryStale, observedRunningShards, unmanagedRunningShards, plannedShards, projectedShards, currentCapacity, projectedCapacity, requiresOvercommitConfirmation]
+      required: [id, name, kind, status, online, configured, inventoryAvailable, inventoryStale, observedRunningShards, unmanagedRunningShards, plannedShards, projectedShards, currentCapacity, projectedCapacity, requiresOvercommitConfirmation, defaultInstallationId, installations]
       properties:
         id: { type: string }
         name: { type: string }
@@ -9098,6 +10753,9 @@ components:
         inventoryAvailable: { type: boolean }
         inventoryStale: { type: boolean }
         staleReason: { type: string }
+        observationState: { type: string, enum: [fresh, refreshing, stale, offline, unavailable, error] }
+        observationError: { type: string }
+        refreshStartedAt: { type: string, format: date-time }
         observedAt: { type: string, format: date-time }
         observedRunningShards: { type: integer, minimum: 0 }
         unmanagedRunningShards: { type: integer, minimum: 0 }
@@ -9106,6 +10764,10 @@ components:
         currentCapacity: { $ref: "#/components/schemas/AgentCapacity" }
         projectedCapacity: { $ref: "#/components/schemas/AgentCapacity" }
         requiresOvercommitConfirmation: { type: boolean }
+        defaultInstallationId: { type: string }
+        installations:
+          type: array
+          items: { $ref: "#/components/schemas/TopologyTargetInstallationSummary" }
     TopologyIssue:
       type: object
       additionalProperties: false
@@ -9132,7 +10794,7 @@ components:
     Topology:
       type: object
       additionalProperties: false
-      required: [roomId, revision, mode, remoteExecutionReady, placements, targets, issues, requiresOvercommitConfirmation, capacityPolicy, updatedAt]
+      required: [roomId, revision, mode, remoteExecutionReady, placements, shardLinks, appliedShardLinks, targets, issues, requiresOvercommitConfirmation, capacityPolicy, updatedAt]
       properties:
         roomId: { type: string }
         revision: { type: string, format: uuid }
@@ -9142,6 +10804,11 @@ components:
           const: true
           description: Desired placement can be activated through a verified stopped-Shard migration job.
         placements: { type: array, items: { $ref: "#/components/schemas/TopologyPlacement" } }
+        shardLinks: { type: array, items: { $ref: "#/components/schemas/ShardLink" } }
+        appliedShardLinks:
+          type: array
+          description: Routes confirmed as published for the currently applied world placements.
+          items: { $ref: "#/components/schemas/ShardLink" }
         targets: { type: array, items: { $ref: "#/components/schemas/TopologyTargetSummary" } }
         issues: { type: array, items: { $ref: "#/components/schemas/TopologyIssue" } }
         requiresOvercommitConfirmation: { type: boolean }
@@ -9152,6 +10819,102 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/Topology" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    FleetRuntimeScope:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind: { type: string, enum: [all, target] }
+        targetId: { type: string }
+    FleetRuntimeSummary:
+      type: object
+      additionalProperties: false
+      required: [targets, onlineTargets, rooms, mixedRooms, worlds, running, stopped, attention]
+      properties:
+        targets: { type: integer, minimum: 0 }
+        onlineTargets: { type: integer, minimum: 0 }
+        rooms: { type: integer, minimum: 0 }
+        mixedRooms: { type: integer, minimum: 0 }
+        worlds: { type: integer, minimum: 0 }
+        running: { type: integer, minimum: 0 }
+        stopped: { type: integer, minimum: 0 }
+        attention: { type: integer, minimum: 0 }
+    FleetRuntimeProblem:
+      type: object
+      additionalProperties: false
+      required: [code, message, severity]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        targetId: { type: string }
+        roomId: { type: string }
+        worldId: { type: string }
+        severity: { type: string, enum: [info, warning, error] }
+    FleetRuntimeWorld:
+      type: object
+      additionalProperties: false
+      required: [id, roomId, directoryName, name, role, type, isMaster, shardId, serverPort, targetIds, availableTargetIds, updatedAt, status, controlAvailable, placement]
+      properties:
+        id: { type: string }
+        roomId: { type: string }
+        directoryName: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [master, caves, custom] }
+        type: { type: string, enum: [forest, cave, unknown] }
+        isMaster: { type: boolean }
+        shardId: { type: integer }
+        serverPort: { type: integer }
+        targetIds: { type: array, uniqueItems: true, items: { type: string } }
+        availableTargetIds: { type: array, uniqueItems: true, items: { type: string } }
+        updatedAt: { type: string, format: date-time }
+        status: { type: string, enum: [running, stopped, failed, unknown, unmanaged] }
+        controlAvailable: { type: boolean }
+        statusMessage: { type: string }
+        statusCode: { type: string }
+        paused: { type: boolean, description: "Current process simulation pause state; omitted when unknown." }
+        placement: { $ref: "#/components/schemas/TopologyPlacement" }
+        target: { $ref: "#/components/schemas/TopologyTargetSummary" }
+    FleetRuntimeRoom:
+      type: object
+      additionalProperties: false
+      required: [id, directoryName, name, description, gameMode, maxPlayers, pvp, passwordProtected, managed, controlState, controlAvailable, worldCount, targetIds, availableTargetIds, updatedAt, worlds, mixedPlacement, topologyRevision]
+      properties:
+        id: { type: string }
+        directoryName: { type: string }
+        name: { type: string }
+        description: { type: string }
+        gameMode: { type: string }
+        maxPlayers: { type: integer }
+        pvp: { type: boolean }
+        passwordProtected: { type: boolean }
+        managed: { type: boolean }
+        controlState: { type: string, enum: [ready, degraded, offline, unavailable] }
+        controlAvailable: { type: boolean }
+        worldCount: { type: integer }
+        updatedAt: { type: string, format: date-time }
+        worlds: { type: array, items: { $ref: "#/components/schemas/FleetRuntimeWorld" } }
+        targetIds: { type: array, uniqueItems: true, items: { type: string } }
+        availableTargetIds: { type: array, uniqueItems: true, items: { type: string } }
+        mixedPlacement: { type: boolean }
+        topologyRevision: { type: string }
+    FleetRuntimeOverview:
+      type: object
+      additionalProperties: false
+      required: [scope, summary, targets, rooms, issues, observedAt]
+      properties:
+        scope: { $ref: "#/components/schemas/FleetRuntimeScope" }
+        summary: { $ref: "#/components/schemas/FleetRuntimeSummary" }
+        targets: { type: array, items: { $ref: "#/components/schemas/TopologyTargetSummary" } }
+        rooms: { type: array, items: { $ref: "#/components/schemas/FleetRuntimeRoom" } }
+        issues: { type: array, items: { $ref: "#/components/schemas/FleetRuntimeProblem" } }
+        observedAt: { type: string, format: date-time }
+    FleetRuntimeOverviewEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/FleetRuntimeOverview" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     GameNotificationInput:
@@ -9308,6 +11071,10 @@ components:
           maximum: 100
         message:
           type: string
+        transfer:
+          $ref: "#/components/schemas/JobTransferProgress"
+        progressDetail:
+          $ref: "#/components/schemas/JobProgressDetail"
         error:
           $ref: "#/components/schemas/JobError"
         cancelRequested:
@@ -9325,6 +11092,75 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/JobTarget"
+    JobProgressDetail:
+      type: object
+      additionalProperties: false
+      description: Current phase and cumulative per-Mod/world results. Transfer bytes describe the current Mod, not the whole batch.
+      properties:
+        stage:
+          type: string
+        workshopId:
+          type: string
+        currentItem:
+          type: integer
+        totalItems:
+          type: integer
+        targetId:
+          type: string
+        installationId:
+          type: string
+        items:
+          type: array
+          description: Cumulative per-mod download results, retained through later job phases and completion. An unstarted item remains queued if the job fails.
+          items:
+            $ref: "#/components/schemas/ModDownloadProgress"
+        worlds:
+          type: array
+          description: Per-world start/restart milestones from existing lifecycle/readiness observations; retained through task completion. Batch tasks use room-scoped world IDs and readable room/world names. Percent estimates stage completion, not elapsed or remaining time.
+          items:
+            $ref: "#/components/schemas/WorldOperationProgress"
+    WorldOperationProgress:
+      type: object
+      additionalProperties: false
+      required: [worldId, name, stage, percent]
+      properties:
+        worldId: { type: string }
+        name: { type: string }
+        isMaster: { type: boolean }
+        stage: { type: string, enum: [queued, stopping, stopped, starting, initializing, loading_mods, generating_world, loading_world, connecting, ready, failed, canceled, unconfirmed] }
+        percent: { type: integer, minimum: 0, maximum: 100 }
+        message: { type: string }
+    ModDownloadProgress:
+      type: object
+      additionalProperties: false
+      required: [workshopId, status]
+      properties:
+        workshopId: { type: string }
+        targetId: { type: string }
+        installationId: { type: string }
+        status: { type: string, enum: [queued, downloading, succeeded, failed] }
+        message: { type: string }
+        currentBytes: { type: integer, format: int64, minimum: 0 }
+        totalBytes: { type: integer, format: int64, minimum: 0 }
+        bytesPerSecond: { type: integer, format: int64, minimum: 0 }
+    JobTransferProgress:
+      type: object
+      additionalProperties: false
+      required: [currentBytes, totalBytes]
+      properties:
+        currentBytes:
+          type: integer
+          format: int64
+          minimum: 0
+        totalBytes:
+          type: integer
+          format: int64
+          minimum: 0
+        bytesPerSecond:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Approximate throughput reported by the active transfer source.
     JobEvent:
       type: object
       additionalProperties: false
