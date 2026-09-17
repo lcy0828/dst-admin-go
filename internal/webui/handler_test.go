@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 func TestWrapServesAPIAssetsAndSPAFallback(t *testing.T) {
@@ -38,6 +39,8 @@ func TestWrapServesAPIAssetsAndSPAFallback(t *testing.T) {
 		{path: "/api/v2/auth/session", status: http.StatusTeapot, body: "/api/v2/auth/session"},
 		{path: "/agent", status: http.StatusTeapot, body: "/agent"},
 		{path: "/assets/app.js", status: http.StatusOK, body: "window.app=true", cacheMatch: "immutable"},
+		{path: "/", status: http.StatusOK, body: "<main>app</main>", cacheMatch: "no-cache"},
+		{path: "/index.html", status: http.StatusOK, body: "<main>app</main>", cacheMatch: "no-cache"},
 		{path: "/servers/commands", status: http.StatusOK, body: "<main>app</main>", cacheMatch: "no-cache"},
 		{path: "/assets/missing.js", status: http.StatusNotFound},
 	} {
@@ -52,6 +55,56 @@ func TestWrapServesAPIAssetsAndSPAFallback(t *testing.T) {
 				t.Fatalf("cache-control=%q", response.Header().Get("Cache-Control"))
 			}
 		})
+	}
+}
+
+func TestFilesystemSPAHandlesHeadAndPreservesAPIRouting(t *testing.T) {
+	assets := fstest.MapFS{
+		"index.html":    {Data: []byte("<main>embedded</main>")},
+		"assets/app.js": {Data: []byte("console.log('app')")},
+	}
+	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) })
+	handler, err := wrapFS(api, assets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		method, path string
+		status       int
+	}{
+		{http.MethodGet, "/setup", http.StatusOK},
+		{http.MethodHead, "/rooms/settings", http.StatusOK},
+		{http.MethodGet, "/missing.js", http.StatusNotFound},
+		{http.MethodGet, "/assets/missing", http.StatusNotFound},
+		{http.MethodGet, "/api/v2/auth/session", http.StatusTeapot},
+		{http.MethodGet, "/agent/connect", http.StatusTeapot},
+		{http.MethodPost, "/setup", http.StatusTeapot},
+	} {
+		t.Run(item.method+item.path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(item.method, item.path, nil))
+			if response.Code != item.status {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			if item.method == http.MethodHead && response.Body.Len() != 0 {
+				t.Fatal("HEAD returned a body")
+			}
+		})
+	}
+}
+
+func TestReleaseServesEmbeddedFrontendWithoutExternalDirectory(t *testing.T) {
+	if !Embedded() {
+		t.Skip("release assets are prepared by the packaging workflow")
+	}
+	handler, err := Wrap(http.NotFoundHandler(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/setup", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "/assets/") {
+		t.Fatalf("embedded frontend is unavailable: status=%d", response.Code)
 	}
 }
 

@@ -2,6 +2,7 @@ package setting
 
 import (
 	"dont/pkg/configpath"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -25,17 +26,26 @@ var (
 	JwtSecret   string
 	ConfigPath  string
 	ProjectRoot string
+	loadError   error
 )
 
 func init() {
 	var err error
 	ConfigPath, err = findConfigPath()
 	if err != nil {
-		log.Fatalf("Fail to locate config: %v", err)
+		loadError = fmt.Errorf("locate configuration: %w", err)
+		return
 	}
 	Cfg, err = ini.Load(ConfigPath)
 	if err != nil {
-		log.Fatalf("Fail to parse %q: %v", ConfigPath, err)
+		loadError = fmt.Errorf("parse configuration %q: %w", ConfigPath, err)
+		return
+	}
+	for _, section := range []string{"server", "app"} {
+		if _, err := Cfg.GetSection(section); err != nil {
+			loadError = fmt.Errorf("read configuration section %q: %w", section, err)
+			return
+		}
 	}
 	ProjectRoot = filepath.Dir(ConfigPath)
 	if filepath.Base(ProjectRoot) == "conf" {
@@ -46,6 +56,10 @@ func init() {
 	LoadServer()
 	LoadApp()
 }
+
+// Validate is called before starting the service. Metadata-only CLI commands
+// must work from an unpacked release without loading a deployment configuration.
+func Validate() error { return loadError }
 
 func ResolvePath(value string) string {
 	if value == "" || value == ":memory:" || filepath.IsAbs(value) {

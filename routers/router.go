@@ -118,6 +118,9 @@ func InitApplication() (*Application, error) {
 }
 
 func initApplication(manageBackground bool) (*Application, error) {
+	if err := setting.Validate(); err != nil {
+		return nil, err
+	}
 	if err := validateTestAdapters(); err != nil {
 		return nil, err
 	}

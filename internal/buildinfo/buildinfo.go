@@ -6,20 +6,23 @@ import (
 )
 
 var (
-	Version   = "dev"
-	Commit    = ""
-	BuildTime = ""
+	Version        = "dev"
+	Commit         = ""
+	BuildTime      = ""
+	FrontendCommit = ""
 )
 
 type Info struct {
-	Version   string `json:"version"`
-	Commit    string `json:"commit"`
-	BuildTime string `json:"buildTime"`
-	Dirty     bool   `json:"dirty"`
+	Version        string `json:"version"`
+	Commit         string `json:"commit"`
+	BuildTime      string `json:"buildTime"`
+	Dirty          bool   `json:"dirty"`
+	FrontendCommit string `json:"frontendCommit,omitempty"`
 }
 
 func Current() Info {
 	result := Info{Version: clean(Version, "dev"), Commit: clean(Commit, "unknown"), BuildTime: clean(BuildTime, "unknown")}
+	result.FrontendCommit = strings.TrimSpace(FrontendCommit)
 	if details, ok := debug.ReadBuildInfo(); ok {
 		if result.Version == "dev" && details.Main.Version != "" && details.Main.Version != "(devel)" {
 			result.Version = details.Main.Version

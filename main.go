@@ -13,6 +13,9 @@ import (
 )
 
 func main() {
+	if err := setting.Validate(); err != nil {
+		log.Fatal(err)
+	}
 	defaultAddress := fmt.Sprintf("127.0.0.1:%d", setting.HTTPPort)
 	address := flag.String("addr", defaultAddress, "HTTP listen address")
 	flag.Parse()
