@@ -23,7 +23,14 @@ import (
 func TestRuntimeHostAppliesPathsAndRolesAndRestoresFailedConfiguration(t *testing.T) {
 	configureRouterTestEnvironment(t)
 	t.Setenv("DST_ADMIN_TEST_SYSTEM_SETTINGS", "")
-	root, err := filepath.EvalSymlinks(t.TempDir())
+	// The Runtime uses a Unix socket under saves. t.TempDir includes the test
+	// name, which exceeds the socket path limit for this integration test.
+	root, err := os.MkdirTemp("/tmp", "dst-rt-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +40,10 @@ func TestRuntimeHostAppliesPathsAndRolesAndRestoresFailedConfiguration(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	saves := os.Getenv("DST_ADMIN_SAVE_PATH")
+	saves := filepath.Join(root, "saves")
+	if err := os.MkdirAll(saves, 0700); err != nil {
+		t.Fatal(err)
+	}
 	file.Section("paths").Key("DST_SAVE_PATH").SetValue(saves)
 	file.Section("fleet").Key("LOCAL_EXECUTOR_ENABLED").SetValue("true")
 	file.Section("fleet").Key("CONTROLLER_ENABLED").SetValue("true")
