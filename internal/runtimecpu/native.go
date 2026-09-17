@@ -333,6 +333,14 @@ func (n *Native) cgroupPath(installationID, cluster, shard string) string {
 }
 
 func (n *Native) removeCgroup(path string) error {
+	// Unconfined games have no managed cgroup. On a read-only cgroup mount,
+	// unlink of even a nonexistent path returns EROFS instead of ENOENT.
+	if _, err := os.Lstat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
 	if n.regularFilesystem {
 		return os.RemoveAll(path)
 	}
