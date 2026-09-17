@@ -3,6 +3,7 @@ package gamenotifications
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -233,7 +234,7 @@ func TestStoreRecoversInterruptedNotificationHistory(t *testing.T) {
 func TestServicePolicyAndLifecycleCountdown(t *testing.T) {
 	service, _, runtime, catalog := newNotificationTestService(t)
 	policy, err := service.Policy(catalog.room.ID)
-	if err != nil || !policy.Enabled || policy.CountdownSeconds != 60 || policy.UpdatedAt.IsZero() {
+	if err != nil || !policy.Enabled || policy.CountdownSeconds != 30 || policy.UpdatedAt.IsZero() {
 		t.Fatalf("default policy=%#v err=%v", policy, err)
 	}
 	if _, err := service.SavePolicy(catalog.room.ID, PolicyInput{Enabled: true, CountdownSeconds: 9}); err == nil {
@@ -313,6 +314,59 @@ func TestServiceCoordinatesMultiRoomCountdownAndPreservesTriggerSource(t *testin
 		if notification.Source != SourceGameUpdate || notification.JobID != "update-job" {
 			t.Fatalf("notification=%#v", notification)
 		}
+	}
+}
+
+func TestMaintenancePreviewUnknownCountPreservesConfiguredCountdown(t *testing.T) {
+	service, _, _, catalog := newNotificationTestService(t)
+	service.ConfigureOnlineCounter(notificationTestOnline{err: errors.New("agent timeout")})
+	preview, err := service.PreviewMaintenance(context.Background(), catalog.room.ID)
+	if err != nil || preview.OnlinePlayers != nil || preview.Warning == "" || preview.Policy.CountdownSeconds != 30 {
+		t.Fatalf("unknown count was hidden: %+v err=%v", preview, err)
+	}
+	waited := time.Duration(0)
+	service.wait = func(_ context.Context, duration time.Duration) error { waited += duration; return nil }
+	if err := service.BeforeOperation(context.Background(), catalog.room.ID, "stop", "", "job"); err != nil || waited != 30*time.Second {
+		t.Fatalf("unknown count skipped notices: waited=%v err=%v", waited, err)
+	}
+	service.ConfigureOnlineCounter(notificationTestOnline{count: 0})
+	preview, err = service.PreviewMaintenance(context.Background(), catalog.room.ID)
+	if err != nil || preview.OnlinePlayers == nil || *preview.OnlinePlayers != 0 || preview.Warning != "" {
+		t.Fatalf("empty roster not confirmed: %+v err=%v", preview, err)
+	}
+}
+
+func TestRoomBroadcastSubmitsOncePreferringRunningMaster(t *testing.T) {
+	for _, masterRunning := range []bool{true, false} {
+		t.Run(fmt.Sprint(masterRunning), func(t *testing.T) {
+			service, _, runtime, catalog := newNotificationTestService(t)
+			master, caves := catalog.worlds[0], catalog.worlds[1]
+			master.IsMaster = true
+			catalog.worlds = []rooms.World{caves, master}
+			service.rooms = catalog
+			runtime.statuses[caves.ID] = shared.ShardRuntimeStatus{State: "running", SessionExists: true}
+			if !masterRunning {
+				runtime.statuses[master.ID] = shared.ShardRuntimeStatus{State: "stopped"}
+			}
+			value, err := service.sendDirect(context.Background(), catalog.room.ID, "维护提醒", SourceRoomStop, "job")
+			want := master.ID
+			if !masterRunning {
+				want = caves.ID
+			}
+			if err != nil || len(runtime.commands) != 1 || runtime.commands[want] == "" || value.SuccessCount != 1 || value.SkippedCount != 1 {
+				t.Fatalf("duplicate or missing broadcast: commands=%v value=%+v err=%v", runtime.commands, value, err)
+			}
+		})
+	}
+}
+
+func TestFailedBroadcastIsNotSubmittedAgainToAnotherShard(t *testing.T) {
+	service, _, runtime, catalog := newNotificationTestService(t)
+	runtime.statuses[catalog.worlds[1].ID] = shared.ShardRuntimeStatus{State: "running", SessionExists: true}
+	runtime.sendErrs = map[string]error{catalog.worlds[0].ID: errors.New("response lost after submission")}
+	value, err := service.sendDirect(context.Background(), catalog.room.ID, "维护提醒", SourceRoomStop, "job")
+	if err != nil || len(runtime.commands) != 1 || value.FailureCount != 1 || value.SuccessCount != 0 {
+		t.Fatalf("uncertain submission duplicated or hidden: commands=%v value=%+v err=%v", runtime.commands, value, err)
 	}
 }
 

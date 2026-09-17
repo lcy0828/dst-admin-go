@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -19,6 +20,7 @@ type GameNotificationService interface {
 	List(gamenotifications.ListFilter) (gamenotifications.List, error)
 	Policy(string) (gamenotifications.Policy, error)
 	SavePolicy(string, gamenotifications.PolicyInput) (gamenotifications.Policy, error)
+	PreviewMaintenance(context.Context, string) (gamenotifications.MaintenancePreview, error)
 }
 
 type GameNotificationHandler struct {
@@ -38,6 +40,17 @@ func (h *GameNotificationHandler) Register(v2 *gin.RouterGroup) {
 	v2.POST("/game-notifications", h.send)
 	v2.GET("/rooms/:roomId/game-notification-policy", h.policy)
 	v2.PUT("/rooms/:roomId/game-notification-policy", h.savePolicy)
+	v2.GET("/rooms/:roomId/maintenance-preview", h.maintenancePreview)
+}
+
+func (h *GameNotificationHandler) maintenancePreview(c *gin.Context) {
+	value, err := h.service.PreviewMaintenance(c.Request.Context(), c.Param("roomId"))
+	if err != nil {
+		gameNotificationFailure(c, err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	Success(c, http.StatusOK, value)
 }
 
 func (h *GameNotificationHandler) list(c *gin.Context) {
@@ -110,7 +123,7 @@ func gameNotificationFailure(c *gin.Context, err error) {
 	case errors.As(err, &fieldErr):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_GAME_NOTIFICATION", "游戏通知参数校验失败", fieldErr.Fields)
 	case errors.Is(err, gamenotifications.ErrRoomUnmanaged), errors.Is(err, rooms.ErrRoomNotManaged):
-		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "接管房间后才能发送游戏通知", nil)
+		Failure(c, http.StatusConflict, "ROOM_UNAVAILABLE", "房间当前不可用，请检查运行节点与拓扑状态", nil)
 	case errors.Is(err, rooms.ErrInvalidID), errors.Is(err, rooms.ErrUnsafePath):
 		Failure(c, http.StatusBadRequest, "INVALID_RESOURCE_ID", "房间标识无效", nil)
 	case errors.Is(err, rooms.ErrRoomNotFound), errors.Is(err, rooms.ErrWorldNotFound):

@@ -1,6 +1,7 @@
 package dstruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -31,11 +32,12 @@ func TestReadPlayersChoosesNewestValidSlotAndFallsBackFromCorruption(t *testing.
 	b := a
 	b.Sequence = 5
 	b.CapturedAtUnix = 1_786_500_005
-	b.Players = []SnapshotPlayer{{ID: "KU_TWO", Name: "Wendy", Age: 5}}
+	health, healthMax := 53.75, 150.0
+	b.Players = []SnapshotPlayer{{ID: "KU_TWO", Name: "Wendy", Age: 5, GameplayState: "ghost", Health: &health, HealthMax: &healthMax}}
 	writeSnapshot(t, filepath.Join(output, "players-a.json"), a)
 	writeSnapshot(t, filepath.Join(output, "players-b.json"), b)
 	value, err := manager.ReadPlayers(context.Background(), catalog.room.ID, catalog.worlds[0].ID)
-	if err != nil || value.Sequence != 5 || len(value.Players) != 1 || value.Players[0].ID != "KU_TWO" {
+	if err != nil || value.Sequence != 5 || len(value.Players) != 1 || value.Players[0].ID != "KU_TWO" || value.Players[0].GameplayState != "ghost" || value.Players[0].Health == nil || *value.Players[0].Health != health || value.Players[0].HealthMax == nil || *value.Players[0].HealthMax != healthMax {
 		t.Fatalf("selected snapshot = %#v, error = %v", value, err)
 	}
 	if err := os.WriteFile(filepath.Join(output, "players-b.json"), []byte("{"), 0640); err != nil {
@@ -107,6 +109,7 @@ func TestReadWorldStateChoosesNewestValidSlotAndPreservesEveryMetric(t *testing.
 		ElapsedDaysInSeason: integer(6), RemainingDaysInSeason: integer(14), SeasonProgress: number(.3), DayProgress: number(.34),
 		PhaseProgress: number(.57), Precipitation: "acid_rain", MoonPhase: "new", Temperature: number(18.5), Wetness: number(.18),
 		Moisture: number(18), MoistureCeil: number(100), PrecipitationRate: number(.25), NightmarePhase: "warn", NightmareProgress: number(.46),
+		HostPerformance: integer(1),
 	}
 	b := a
 	b.Sequence = 5
@@ -119,7 +122,7 @@ func TestReadWorldStateChoosesNewestValidSlotAndPreservesEveryMetric(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value.Sequence != 5 || value.Phase != "dusk" || value.Cycles == nil || *value.Cycles != 48 || value.ElapsedDaysInSeason == nil || *value.ElapsedDaysInSeason != 6 || value.RemainingDaysInSeason == nil || *value.RemainingDaysInSeason != 14 || value.SeasonProgress == nil || *value.SeasonProgress != .3 || value.DayProgress == nil || *value.DayProgress != .34 || value.PhaseProgress == nil || *value.PhaseProgress != .57 || value.Precipitation != "acid_rain" || value.MoonPhase != "new" || value.Temperature == nil || *value.Temperature != 18.5 || value.Wetness == nil || *value.Wetness != .18 || value.Moisture == nil || *value.Moisture != 18 || value.MoistureCeil == nil || *value.MoistureCeil != 100 || value.PrecipitationRate == nil || *value.PrecipitationRate != .25 || value.NightmarePhase != "warn" || value.NightmareProgress == nil || *value.NightmareProgress != .46 {
+	if value.Sequence != 5 || value.Phase != "dusk" || value.Cycles == nil || *value.Cycles != 48 || value.ElapsedDaysInSeason == nil || *value.ElapsedDaysInSeason != 6 || value.RemainingDaysInSeason == nil || *value.RemainingDaysInSeason != 14 || value.SeasonProgress == nil || *value.SeasonProgress != .3 || value.DayProgress == nil || *value.DayProgress != .34 || value.PhaseProgress == nil || *value.PhaseProgress != .57 || value.Precipitation != "acid_rain" || value.MoonPhase != "new" || value.Temperature == nil || *value.Temperature != 18.5 || value.Wetness == nil || *value.Wetness != .18 || value.Moisture == nil || *value.Moisture != 18 || value.MoistureCeil == nil || *value.MoistureCeil != 100 || value.PrecipitationRate == nil || *value.PrecipitationRate != .25 || value.NightmarePhase != "warn" || value.NightmareProgress == nil || *value.NightmareProgress != .46 || value.HostPerformance == nil || *value.HostPerformance != 1 {
 		t.Fatalf("world state fields were not preserved: %#v", value)
 	}
 	if err := os.WriteFile(filepath.Join(output, "worldstate-b.json"), []byte("{"), 0640); err != nil {
@@ -219,16 +222,29 @@ func TestHealthRejectsUnknownOrInvalidPayload(t *testing.T) {
 	if err != nil || !value.Ready || value.Sequence != 2 {
 		t.Fatalf("health = %#v, error = %v", value, err)
 	}
-	valid.Modules = map[string]ModuleHealth{"barriers": {
-		Running: true, Ready: true, Busy: true, Writing: true, Holding: true, BarrierID: "backup-1",
-	}}
+	valid.Modules = map[string]ModuleHealth{
+		"barriers": {
+			Running: true, Ready: true, Busy: true, Writing: true, Holding: true, BarrierID: "backup-1",
+		},
+		"commands": {
+			Running: true, Ready: true, Busy: true, Pending: 2, Sequence: 3,
+		},
+	}
 	data, _ = json.Marshal(valid)
 	if err := os.WriteFile(filepath.Join(output, "health.json"), data, 0640); err != nil {
 		t.Fatal(err)
 	}
 	value, err = manager.Health(catalog.room.ID, catalog.worlds[0].ID)
-	if err != nil || !value.Modules["barriers"].Holding || value.Modules["barriers"].BarrierID != "backup-1" {
-		t.Fatalf("barrier health = %#v, error = %v", value.Modules["barriers"], err)
+	if err != nil || !value.Modules["barriers"].Holding || value.Modules["barriers"].BarrierID != "backup-1" || value.Modules["commands"].Pending != 2 {
+		t.Fatalf("module health = %#v, error = %v", value.Modules, err)
+	}
+	data = bytes.Replace(data, []byte(`"pending":2`), []byte(`"pending":2,"futureCommandMetric":7`), 1)
+	if err := os.WriteFile(filepath.Join(output, "health.json"), data, 0640); err != nil {
+		t.Fatal(err)
+	}
+	value, err = manager.Health(catalog.room.ID, catalog.worlds[0].ID)
+	if err != nil || value.Modules["commands"].Pending != 2 {
+		t.Fatalf("extended module health = %#v, error = %v", value.Modules["commands"], err)
 	}
 	if err := os.WriteFile(filepath.Join(output, "health.json"), []byte(`{"schemaVersion":1,"producerVersion":"2","producerInstanceId":"x","sequence":1,"unknown":true}`), 0640); err != nil {
 		t.Fatal(err)

@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.0"
+local PRODUCER_VERSION = "2.4.6"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local MAX_SAMPLES = 50
 local READY_RETRY_SECONDS = 1
@@ -65,7 +65,7 @@ local function persist(request, report)
         result = report.result,
         completedAtUnix = os.time(),
     }
-    local encoded_ok, encoded = pcall(json.encode, payload)
+    local encoded_ok, encoded = pcall(json.encode_compliant, payload)
     if not encoded_ok or type(encoded) ~= "string" then
         state.lastError = "diagnostic JSON encoding failed"
         state.busy = false

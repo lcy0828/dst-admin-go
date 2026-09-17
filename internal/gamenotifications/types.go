@@ -7,7 +7,7 @@ import (
 
 const (
 	MaxMessageRunes        = 500
-	DefaultCountdownSecond = 60
+	DefaultCountdownSecond = 30
 	MinCountdownSeconds    = 10
 	MaxCountdownSeconds    = 600
 )

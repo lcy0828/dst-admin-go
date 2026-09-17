@@ -31,7 +31,8 @@ func TestStoreKeepsLatestStateAndBoundedHistory(t *testing.T) {
 	base := time.Date(2026, 8, 8, 10, 0, 0, 0, time.UTC)
 	for index := 0; index < 3; index++ {
 		cycles := index + 40
-		if _, err := store.Append(Snapshot{RoomID: "room", WorldID: "master", WorldName: "Master", WorldRole: "master", Season: "autumn", Cycles: &cycles, ObservedAt: base.Add(time.Duration(index) * time.Minute)}); err != nil {
+		performance := index
+		if _, err := store.Append(Snapshot{RoomID: "room", WorldID: "master", WorldName: "Master", WorldRole: "master", Season: "autumn", Cycles: &cycles, HostPerformance: &performance, ObservedAt: base.Add(time.Duration(index) * time.Minute)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -48,7 +49,7 @@ func TestStoreKeepsLatestStateAndBoundedHistory(t *testing.T) {
 			master = item
 		}
 	}
-	if master.Cycles == nil || *master.Cycles != 42 {
+	if master.Cycles == nil || *master.Cycles != 42 || master.HostPerformance == nil || *master.HostPerformance != 2 {
 		t.Fatalf("latest master state = %#v", master)
 	}
 	history, total, err := store.History("room", "master", 10)

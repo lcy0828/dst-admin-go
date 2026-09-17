@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 2
-local PRODUCER_VERSION = "2.4.0"
+local PRODUCER_VERSION = "2.4.6"
 local SNAPSHOT_INTERVAL = 5
 local READY_RETRY_SECONDS = 1
 local READY_RETRY_LIMIT = 60
@@ -90,6 +90,19 @@ local function precipitation(values)
     return "none"
 end
 
+local function host_performance()
+    if TheNet == nil or type(TheNet.GetClientTable) ~= "function" then return nil end
+    local ok, clients = pcall(TheNet.GetClientTable, TheNet)
+    if not ok or type(clients) ~= "table" then return nil end
+    for _, client in ipairs(clients) do
+        local value = client ~= nil and tonumber(client.performance) or nil
+        if finite_number(value) and value >= 0 and value <= 2 then
+            return math.floor(value)
+        end
+    end
+    return nil
+end
+
 local function capture_world_state()
     local values = TheWorld ~= nil and TheWorld.state or {}
     local components = TheWorld ~= nil and TheWorld.components or {}
@@ -120,6 +133,7 @@ local function capture_world_state()
         precipitationRate = read_number(function() return values.precipitationrate end),
         nightmarePhase = nightmare_phase,
         nightmareProgress = nightmare_progress,
+        hostPerformance = host_performance(),
     }
 end
 
@@ -161,7 +175,7 @@ function M.EmitOnce(callback)
         complete(callback, false)
         return false
     end
-    local encoded_ok, encoded = pcall(json.encode, payload)
+    local encoded_ok, encoded = pcall(json.encode_compliant, payload)
     if not encoded_ok or type(encoded) ~= "string" then
         state.writing = false
         state.lastError = "world state JSON encoding failed"

@@ -50,58 +50,45 @@ func TestRuntimeSamplerPreservesEveryMetricWithoutCallingFallback(t *testing.T) 
 		Season: "autumn", Phase: "day", Cycles: integer(48), ElapsedDaysInSeason: integer(6), RemainingDaysInSeason: integer(14),
 		SeasonProgress: number(.3), DayProgress: number(.34), PhaseProgress: number(.57), Precipitation: "acid_rain", MoonPhase: "new",
 		Temperature: number(18.5), Wetness: number(.18), Moisture: number(18), MoistureCeil: number(100), PrecipitationRate: number(.25),
-		NightmarePhase: "warn", NightmareProgress: number(.46),
+		NightmarePhase: "warn", NightmareProgress: number(.46), HostPerformance: integer(1),
 		CapturedAt: time.Date(2026, 8, 12, 10, 0, 0, 0, time.UTC),
 	}}
 	fallback := &countingWorldStateSampler{err: errors.New("fallback must not be called")}
-	sampler, err := NewRuntimeSampler(reader, fallback)
+	sampler, err := NewRuntimeSampler(reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	value, err := sampler.Snapshot(context.Background(), "room", "world")
-	if err != nil || fallback.calls != 0 || value.Cycles == nil || *value.Cycles != 48 || value.ElapsedDaysInSeason == nil || *value.ElapsedDaysInSeason != 6 || value.RemainingDaysInSeason == nil || *value.RemainingDaysInSeason != 14 || value.SeasonProgress == nil || *value.SeasonProgress != .3 || value.DayProgress == nil || *value.DayProgress != .34 || value.PhaseProgress == nil || *value.PhaseProgress != .57 || value.Precipitation != "acid_rain" || value.MoonPhase != "new" || value.Temperature == nil || *value.Temperature != 18.5 || value.Wetness == nil || *value.Wetness != .18 || value.Moisture == nil || *value.Moisture != 18 || value.MoistureCeil == nil || *value.MoistureCeil != 100 || value.PrecipitationRate == nil || *value.PrecipitationRate != .25 || value.NightmarePhase != "warn" || value.NightmareProgress == nil || *value.NightmareProgress != .46 || !value.CapturedAt.Equal(reader.snapshot.CapturedAt) {
+	if err != nil || fallback.calls != 0 || value.Cycles == nil || *value.Cycles != 48 || value.ElapsedDaysInSeason == nil || *value.ElapsedDaysInSeason != 6 || value.RemainingDaysInSeason == nil || *value.RemainingDaysInSeason != 14 || value.SeasonProgress == nil || *value.SeasonProgress != .3 || value.DayProgress == nil || *value.DayProgress != .34 || value.PhaseProgress == nil || *value.PhaseProgress != .57 || value.Precipitation != "acid_rain" || value.MoonPhase != "new" || value.Temperature == nil || *value.Temperature != 18.5 || value.Wetness == nil || *value.Wetness != .18 || value.Moisture == nil || *value.Moisture != 18 || value.MoistureCeil == nil || *value.MoistureCeil != 100 || value.PrecipitationRate == nil || *value.PrecipitationRate != .25 || value.NightmarePhase != "warn" || value.NightmareProgress == nil || *value.NightmareProgress != .46 || value.HostPerformance == nil || *value.HostPerformance != 1 || !value.CapturedAt.Equal(reader.snapshot.CapturedAt) {
 		t.Fatalf("runtime observation = %#v, fallback calls = %d, error = %v", value, fallback.calls, err)
 	}
 }
 
 func TestRuntimeSamplerCurrentSnapshotNeverCallsFallback(t *testing.T) {
-	reader := &runtimeWorldStateReader{err: dstruntime.ErrSnapshotUnavailable}
+	reader := &refreshableWorldStateReader{runtimeWorldStateReader: &runtimeWorldStateReader{err: dstruntime.ErrSnapshotUnavailable}}
 	fallback := &countingWorldStateSampler{observation: Observation{Season: "winter"}}
-	sampler, err := NewRuntimeSampler(reader, fallback)
+	sampler, err := NewRuntimeSampler(reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sampler.CurrentSnapshot(context.Background(), "room", "world"); !errors.Is(err, dstruntime.ErrSnapshotUnavailable) || fallback.calls != 0 {
-		t.Fatalf("current snapshot error = %v, fallback calls = %d", err, fallback.calls)
+	if _, err := sampler.CurrentSnapshot(context.Background(), "room", "world"); !errors.Is(err, dstruntime.ErrSnapshotUnavailable) || reader.refreshCalls != 0 || fallback.calls != 0 {
+		t.Fatalf("current snapshot error = %v, refresh calls = %d, fallback calls = %d", err, reader.refreshCalls, fallback.calls)
 	}
 }
 
-func TestRuntimeSamplerFallsBackExactlyOnceForUnavailableSnapshot(t *testing.T) {
-	reader := &runtimeWorldStateReader{err: dstruntime.ErrSnapshotUnavailable}
-	fallback := &countingWorldStateSampler{observation: Observation{Season: "winter"}}
-	sampler, err := NewRuntimeSampler(reader, fallback)
-	if err != nil {
-		t.Fatal(err)
-	}
-	value, err := sampler.Snapshot(context.Background(), "room", "world")
-	if err != nil || reader.calls != 1 || fallback.calls != 1 || value.Season != "winter" {
-		t.Fatalf("fallback observation = %#v, reader calls = %d, fallback calls = %d, error = %v", value, reader.calls, fallback.calls, err)
-	}
-}
-
-func TestRuntimeSamplerActivelyRefreshesStaleSnapshotBeforeFallback(t *testing.T) {
-	reader := &refreshableWorldStateReader{
-		runtimeWorldStateReader: &runtimeWorldStateReader{err: dstruntime.ErrSnapshotStale},
-		refresh:                 dstruntime.SnapshotRefreshResult{WorldState: dstruntime.WorldStateSnapshot{Season: "summer", Phase: "day"}},
-	}
-	fallback := &countingWorldStateSampler{err: errors.New("fallback must not be called")}
-	sampler, err := NewRuntimeSampler(reader, fallback)
-	if err != nil {
-		t.Fatal(err)
-	}
-	value, err := sampler.Snapshot(context.Background(), "room", "world")
-	if err != nil || value.Season != "summer" || reader.refreshCalls != 1 || fallback.calls != 0 {
-		t.Fatalf("observation = %#v, error = %v, refresh calls = %d, fallback calls = %d", value, err, reader.refreshCalls, fallback.calls)
+func TestRuntimeSamplerNeverProbesWhenFilesAreMissingOrStale(t *testing.T) {
+	for _, failure := range []error{dstruntime.ErrSnapshotUnavailable, dstruntime.ErrSnapshotStale} {
+		reader := &refreshableWorldStateReader{
+			runtimeWorldStateReader: &runtimeWorldStateReader{err: failure},
+		}
+		sampler, err := NewRuntimeSampler(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = sampler.Snapshot(context.Background(), "room", "world")
+		if !errors.Is(err, failure) || reader.calls != 1 || reader.refreshCalls != 0 {
+			t.Fatalf("file failure triggered a probe: calls=%d refresh=%d error=%v", reader.calls, reader.refreshCalls, err)
+		}
 	}
 }
 
@@ -110,7 +97,7 @@ func TestRuntimeSamplerDoesNotFallbackAfterContextCancellation(t *testing.T) {
 	cancel()
 	reader := &runtimeWorldStateReader{err: context.Canceled}
 	fallback := &countingWorldStateSampler{}
-	sampler, err := NewRuntimeSampler(reader, fallback)
+	sampler, err := NewRuntimeSampler(reader)
 	if err != nil {
 		t.Fatal(err)
 	}

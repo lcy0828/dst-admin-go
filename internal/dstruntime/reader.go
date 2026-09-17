@@ -86,6 +86,15 @@ func (m *Manager) ReadPlayers(ctx context.Context, roomID, worldID string) (Snap
 }
 
 func (m *Manager) ReadWorldState(ctx context.Context, roomID, worldID string) (WorldStateSnapshot, error) {
+	return m.readWorldState(ctx, roomID, worldID, true)
+}
+
+// ReadStoppedWorldState reads the last output without requiring a live producer.
+func (m *Manager) ReadStoppedWorldState(ctx context.Context, roomID, worldID string) (WorldStateSnapshot, error) {
+	return m.readWorldState(ctx, roomID, worldID, false)
+}
+
+func (m *Manager) readWorldState(ctx context.Context, roomID, worldID string, requireFresh bool) (WorldStateSnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return WorldStateSnapshot{}, err
 	}
@@ -104,12 +113,11 @@ func (m *Manager) ReadWorldState(ctx context.Context, roomID, worldID string) (W
 	if err != nil {
 		return WorldStateSnapshot{}, err
 	}
-	status := m.inspectAt(room, world, worldPath)
-	if status.State == InstallStateMissing {
-		return WorldStateSnapshot{}, ErrRuntimeNotInstalled
-	}
-	if status.State != InstallStateInstalled {
-		return WorldStateSnapshot{}, fmt.Errorf("%w: %s", ErrRuntimeNotInstalled, status.Message)
+	if requireFresh {
+		status := m.inspectAt(room, world, worldPath)
+		if status.State != InstallStateInstalled {
+			return WorldStateSnapshot{}, fmt.Errorf("%w: %s", ErrRuntimeNotInstalled, status.Message)
+		}
 	}
 	expectedShard, err := configuredShardID(worldPath)
 	if err != nil {
@@ -124,6 +132,7 @@ func (m *Manager) ReadWorldState(ctx context.Context, roomID, worldID string) (W
 			expectedSession,
 			expectedShard,
 			m.now().UTC(),
+			requireFresh,
 		)
 		if readErr != nil {
 			if !errors.Is(readErr, os.ErrNotExist) {
@@ -218,13 +227,17 @@ func decodeSnapshotData(data []byte, expectedSession, expectedShard string, now 
 	seen := make(map[string]bool, len(value.Players))
 	for index := range value.Players {
 		player := &value.Players[index]
-		if !snapshotPlayerID.MatchString(player.ID) || seen[player.ID] || strings.TrimSpace(player.Name) == "" || len([]rune(player.Name)) > 256 || len([]rune(player.Prefab)) > 128 || len([]rune(player.NetID)) > 128 || player.Age < 0 {
+		if !snapshotPlayerID.MatchString(player.ID) || seen[player.ID] || strings.TrimSpace(player.Name) == "" || len([]rune(player.Name)) > 256 || len([]rune(player.Prefab)) > 128 || len([]rune(player.GameplayState)) > 32 || len([]rune(player.NetID)) > 128 || player.Age < 0 {
 			return Snapshot{}, fmt.Errorf("%w: invalid player identity", ErrSnapshotInvalid)
 		}
 		if player.NetScore != nil && *player.NetScore < 0 {
 			return Snapshot{}, fmt.Errorf("%w: invalid network score", ErrSnapshotInvalid)
 		}
-		if !validMetric(player.HealthPercent) || !validMetric(player.HungerPercent) || !validMetric(player.SanityPercent) || !validMetric(player.Temperature) || !validMetric(player.Moisture) {
+		if !validMetric(player.HealthPercent) || !validMetric(player.HungerPercent) || !validMetric(player.SanityPercent) ||
+			!validNonNegativeMetric(player.Health) || !validPositiveMetric(player.HealthMax) ||
+			!validNonNegativeMetric(player.Hunger) || !validPositiveMetric(player.HungerMax) ||
+			!validNonNegativeMetric(player.Sanity) || !validPositiveMetric(player.SanityMax) ||
+			!validMetric(player.Temperature) || !validMetric(player.Moisture) {
 			return Snapshot{}, fmt.Errorf("%w: invalid player metric", ErrSnapshotInvalid)
 		}
 		seen[player.ID] = true
@@ -232,7 +245,7 @@ func decodeSnapshotData(data []byte, expectedSession, expectedShard string, now 
 	return value, nil
 }
 
-func readWorldStateSnapshot(path, expectedSession, expectedShard string, now time.Time) (WorldStateSnapshot, error) {
+func readWorldStateSnapshot(path, expectedSession, expectedShard string, now time.Time, requireFresh bool) (WorldStateSnapshot, error) {
 	data, _, exists, err := readRegular(path, maxSnapshotBytes)
 	if err != nil {
 		return WorldStateSnapshot{}, err
@@ -240,15 +253,15 @@ func readWorldStateSnapshot(path, expectedSession, expectedShard string, now tim
 	if !exists {
 		return WorldStateSnapshot{}, os.ErrNotExist
 	}
-	return decodeWorldStateData(data, expectedSession, expectedShard, now)
+	return decodeWorldStateData(data, expectedSession, expectedShard, now, requireFresh)
 }
 
-func decodeWorldStateData(data []byte, expectedSession, expectedShard string, now time.Time) (WorldStateSnapshot, error) {
+func decodeWorldStateData(data []byte, expectedSession, expectedShard string, now time.Time, requireFresh bool) (WorldStateSnapshot, error) {
 	var value WorldStateSnapshot
 	if err := decodeStrictJSON(data, &value); err != nil {
 		return WorldStateSnapshot{}, fmt.Errorf("%w: decode JSON: %v", ErrSnapshotInvalid, err)
 	}
-	if value.SchemaVersion != ProtocolVersion || value.ProducerVersion != RuntimeVersion || value.ProducerInstanceID == "" || value.SessionID == "" || value.ShardID == "" || value.Sequence < 1 || value.CapturedAtUnix < 1 || !value.Complete {
+	if value.SchemaVersion != ProtocolVersion || value.ProducerVersion == "" || requireFresh && value.ProducerVersion != RuntimeVersion || value.ProducerInstanceID == "" || value.SessionID == "" || value.ShardID == "" || value.Sequence < 1 || value.CapturedAtUnix < 1 || !value.Complete {
 		return WorldStateSnapshot{}, ErrSnapshotInvalid
 	}
 	for _, text := range []struct {
@@ -267,6 +280,9 @@ func decodeWorldStateData(data []byte, expectedSession, expectedShard string, no
 			return WorldStateSnapshot{}, fmt.Errorf("%w: invalid world counter", ErrSnapshotInvalid)
 		}
 	}
+	if value.HostPerformance != nil && (*value.HostPerformance < 0 || *value.HostPerformance > 2) {
+		return WorldStateSnapshot{}, fmt.Errorf("%w: invalid host performance", ErrSnapshotInvalid)
+	}
 	for _, metric := range []*float64{
 		value.SeasonProgress, value.DayProgress, value.PhaseProgress, value.Temperature, value.Wetness,
 		value.Moisture, value.MoistureCeil, value.PrecipitationRate, value.NightmareProgress,
@@ -279,7 +295,7 @@ func decodeWorldStateData(data []byte, expectedSession, expectedShard string, no
 	if value.CapturedAt.After(now.Add(maxFutureSkew)) {
 		return WorldStateSnapshot{}, fmt.Errorf("%w: capture time is in the future", ErrSnapshotInvalid)
 	}
-	if now.Sub(value.CapturedAt) > defaultFreshFor {
+	if requireFresh && now.Sub(value.CapturedAt) > defaultFreshFor {
 		return WorldStateSnapshot{}, fmt.Errorf("%w: captured at %s", ErrSnapshotStale, value.CapturedAt.Format(time.RFC3339))
 	}
 	if expectedSession != "" && value.SessionID != expectedSession {
@@ -300,7 +316,7 @@ func decodeHealthData(data []byte, expectedSession, expectedShard string, readAt
 		return Health{}, ErrSnapshotInvalid
 	}
 	for _, module := range health.Modules {
-		if module.Sequence < 0 || module.ConsecutiveFailures < 0 || !validMetric(module.LastDurationMilliseconds) || module.LastCapturedAtUnix != nil && *module.LastCapturedAtUnix < 1 || module.LastWrittenAtUnix != nil && *module.LastWrittenAtUnix < 1 {
+		if module.Sequence < 0 || module.Pending < 0 || module.ConsecutiveFailures < 0 || !validMetric(module.LastDurationMilliseconds) || module.LastCapturedAtUnix != nil && *module.LastCapturedAtUnix < 1 || module.LastWrittenAtUnix != nil && *module.LastWrittenAtUnix < 1 {
 			return Health{}, ErrSnapshotInvalid
 		}
 	}
@@ -355,6 +371,14 @@ func configuredShardID(worldPath string) (string, error) {
 
 func validMetric(value *float64) bool {
 	return value == nil || !math.IsNaN(*value) && !math.IsInf(*value, 0)
+}
+
+func validNonNegativeMetric(value *float64) bool {
+	return validMetric(value) && (value == nil || *value >= 0)
+}
+
+func validPositiveMetric(value *float64) bool {
+	return validMetric(value) && (value == nil || *value > 0)
 }
 
 func currentSessionID(worldPath string) string {

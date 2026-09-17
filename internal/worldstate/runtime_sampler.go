@@ -5,90 +5,66 @@ import (
 	"errors"
 
 	"dont/internal/dstruntime"
+	"dont/internal/shards"
 )
 
 type RuntimeSnapshotReader interface {
 	ReadWorldState(context.Context, string, string) (dstruntime.WorldStateSnapshot, error)
 }
 
-type runtimeSnapshotRefresher interface {
-	RefreshSnapshots(context.Context, string, string) (dstruntime.SnapshotRefreshResult, error)
-}
-
-type placementLocality interface {
-	IsLocalPlacement(string, string) (bool, error)
-}
-
 type RuntimeSampler struct {
-	runtime  RuntimeSnapshotReader
-	fallback Sampler
-	locality placementLocality
+	runtime RuntimeSnapshotReader
 }
 
-func NewRuntimeSampler(runtime RuntimeSnapshotReader, fallback Sampler, localities ...placementLocality) (*RuntimeSampler, error) {
-	if runtime == nil || fallback == nil {
-		return nil, errors.New("runtime reader and fallback sampler are required")
+func NewRuntimeSampler(runtime RuntimeSnapshotReader) (*RuntimeSampler, error) {
+	if runtime == nil {
+		return nil, errors.New("runtime reader is required")
 	}
-	sampler := &RuntimeSampler{runtime: runtime, fallback: fallback}
-	if len(localities) > 0 {
-		sampler.locality = localities[0]
-	}
-	return sampler, nil
+	return &RuntimeSampler{runtime: runtime}, nil
 }
 
 func (s *RuntimeSampler) Snapshot(ctx context.Context, roomID, worldID string) (Observation, error) {
-	observation, err := s.CurrentSnapshot(ctx, roomID, worldID)
-	if err == nil {
-		return observation, nil
-	}
-	if contextErr := contextError(ctx, err); contextErr != nil {
-		return Observation{}, contextErr
-	}
-	if s.locality != nil {
-		local, localityErr := s.locality.IsLocalPlacement(roomID, worldID)
-		if localityErr != nil {
-			return Observation{}, localityErr
-		}
-		if !local {
-			return Observation{}, err
-		}
-	}
-	return s.fallback.Snapshot(ctx, roomID, worldID)
+	return s.CurrentSnapshot(ctx, roomID, worldID)
 }
 
 // CurrentSnapshot reads only the managed runtime output and never invokes the
 // console fallback. It is suitable for read-only current-state views.
 func (s *RuntimeSampler) CurrentSnapshot(ctx context.Context, roomID, worldID string) (Observation, error) {
 	snapshot, err := s.runtime.ReadWorldState(ctx, roomID, worldID)
-	if err != nil && refreshableSnapshotError(err) {
-		if refresher, ok := s.runtime.(runtimeSnapshotRefresher); ok {
-			refreshed, refreshErr := refresher.RefreshSnapshots(ctx, roomID, worldID)
-			if refreshErr == nil {
-				snapshot = refreshed.WorldState
-				err = nil
-			} else {
-				err = errors.Join(err, refreshErr)
-			}
-		}
-	}
 	if err != nil {
 		return Observation{}, err
 	}
 	return observationFromRuntime(snapshot), nil
 }
 
-func refreshableSnapshotError(err error) bool {
-	return errors.Is(err, dstruntime.ErrSnapshotUnavailable) || errors.Is(err, dstruntime.ErrSnapshotStale)
+func (s *RuntimeSampler) CurrentWorld(ctx context.Context, roomID, worldID string) (Observation, shards.RuntimeStatus, error) {
+	reader, ok := s.runtime.(interface {
+		ReadCurrentWorldState(context.Context, string, string) (dstruntime.CurrentWorldState, error)
+	})
+	if !ok {
+		return Observation{}, shards.RuntimeStatus{}, dstruntime.ErrWorldStateReadUnsupported
+	}
+	value, err := reader.ReadCurrentWorldState(ctx, roomID, worldID)
+	status := shards.RuntimeStatus{
+		State: shards.RuntimeState(value.Runtime.State), Code: value.Runtime.Code,
+		Message: value.Runtime.Message, SessionExists: value.Runtime.SessionExists, Paused: value.Runtime.Paused,
+	}
+	return observationFromRuntime(value.Snapshot), status, err
 }
 
-func contextError(ctx context.Context, err error) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
+// StoppedSnapshot never refreshes the runtime or sends console input.
+func (s *RuntimeSampler) StoppedSnapshot(ctx context.Context, roomID, worldID string) (Observation, error) {
+	reader, ok := s.runtime.(interface {
+		ReadStoppedWorldState(context.Context, string, string) (dstruntime.WorldStateSnapshot, error)
+	})
+	if !ok {
+		return Observation{}, dstruntime.ErrSnapshotUnavailable
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
+	snapshot, err := reader.ReadStoppedWorldState(ctx, roomID, worldID)
+	if err != nil {
+		return Observation{}, err
 	}
-	return nil
+	return observationFromRuntime(snapshot), nil
 }
 
 func observationFromRuntime(snapshot dstruntime.WorldStateSnapshot) Observation {
@@ -99,7 +75,8 @@ func observationFromRuntime(snapshot dstruntime.WorldStateSnapshot) Observation 
 		Precipitation: snapshot.Precipitation, MoonPhase: snapshot.MoonPhase, Temperature: snapshot.Temperature,
 		Wetness: snapshot.Wetness, Moisture: snapshot.Moisture, MoistureCeil: snapshot.MoistureCeil,
 		PrecipitationRate: snapshot.PrecipitationRate, NightmarePhase: snapshot.NightmarePhase,
-		NightmareProgress: snapshot.NightmareProgress, CapturedAt: snapshot.CapturedAt,
+		NightmareProgress: snapshot.NightmareProgress, HostPerformance: snapshot.HostPerformance,
+		CapturedAt: snapshot.CapturedAt,
 	}
 }
 

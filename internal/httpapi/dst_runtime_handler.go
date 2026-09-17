@@ -183,8 +183,10 @@ func (h *DSTRuntimeHandler) status(c *gin.Context) {
 	for _, status := range statuses {
 		report := dstruntime.WorldReport{WorldStatus: status, HealthState: dstruntime.HealthStateUnavailable}
 		world, worldErr := h.rooms.World(room.ID, status.WorldID)
+		processStatus := shards.RuntimeStatus{State: shards.RuntimeUnknown}
 		if worldErr == nil {
-			report.ProcessRunning, worldErr = h.processRunning(c.Request.Context(), room, world)
+			processStatus, worldErr = h.processStatus(c.Request.Context(), room, world)
+			report.ProcessRunning = processStatus.State == shards.RuntimeRunning
 		}
 		if worldErr != nil {
 			report.HealthMessage = "无法确认分片进程状态：" + worldErr.Error()
@@ -211,10 +213,7 @@ func (h *DSTRuntimeHandler) status(c *gin.Context) {
 				}
 				status.State, status.Version, status.Protocol = dstruntime.InstallStateInstalled, health.ProducerVersion, dstruntime.ProtocolVersion
 				report.WorldStatus, report.Health = status, &health
-				report.HealthState = runtimeHealthState(health, report.ProcessRunning)
-				if health.LastError != nil {
-					report.HealthMessage = *health.LastError
-				}
+				report.HealthState, report.HealthMessage = h.describeHealth(c.Request.Context(), room.ID, status.WorldID, health, processStatus)
 				items = append(items, report)
 				continue
 			}
@@ -231,12 +230,10 @@ func (h *DSTRuntimeHandler) status(c *gin.Context) {
 			continue
 		}
 		report.Health = &health
-		report.HealthState = runtimeHealthState(health, report.ProcessRunning)
+		report.HealthState, report.HealthMessage = h.describeHealth(c.Request.Context(), room.ID, status.WorldID, health, processStatus)
 		if report.ProcessRunning && status.Version != "" && health.ProducerVersion != status.Version {
 			report.HealthState = dstruntime.HealthStateDegraded
 			report.HealthMessage = "运行中的版本为 " + health.ProducerVersion + "，已安装版本为 " + status.Version + "；请激活以应用新版本"
-		} else if health.LastError != nil {
-			report.HealthMessage = *health.LastError
 		}
 		items = append(items, report)
 	}
@@ -381,14 +378,57 @@ func (h *DSTRuntimeHandler) allowStoppedMutation(c *gin.Context, roomID, worldID
 }
 
 func (h *DSTRuntimeHandler) processRunning(ctx context.Context, room rooms.Room, world rooms.World) (bool, error) {
-	if runtime, ok := h.process.(identifiedDSTRuntimeProcess); ok {
-		status, err := runtime.StatusFor(ctx, room.ID, world.ID)
-		return status.State == shards.RuntimeRunning, err
-	}
-	return h.process.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
+	status, err := h.processStatus(ctx, room, world)
+	return status.State == shards.RuntimeRunning, err
 }
 
-func runtimeHealthState(health dstruntime.Health, processRunning bool) dstruntime.HealthState {
+func (h *DSTRuntimeHandler) processStatus(ctx context.Context, room rooms.Room, world rooms.World) (shards.RuntimeStatus, error) {
+	if runtime, ok := h.process.(identifiedDSTRuntimeProcess); ok {
+		return runtime.StatusFor(ctx, room.ID, world.ID)
+	}
+	running, err := h.process.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
+	if err != nil {
+		return shards.RuntimeStatus{State: shards.RuntimeUnknown}, err
+	}
+	if running {
+		return shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}, nil
+	}
+	return shards.RuntimeStatus{State: shards.RuntimeStopped}, nil
+}
+
+func (h *DSTRuntimeHandler) describeHealth(ctx context.Context, roomID, worldID string, health dstruntime.Health, process shards.RuntimeStatus) (dstruntime.HealthState, string) {
+	currentBoot := false
+	if process.State == shards.RuntimeRunning && process.Paused != nil && *process.Paused &&
+		health.Running && health.Ready && health.LastError == nil && health.ConsecutiveFailures == 0 && runtimeHealthIsStale(health) {
+		reader, ok := h.bridge.(interface {
+			HealthMatchesCurrentProcess(context.Context, string, string, dstruntime.Health) (bool, error)
+		})
+		if !ok {
+			return dstruntime.HealthStateUnavailable, "分片已暂停，但尚未确认本次启动的 Runtime 健康数据"
+		}
+		var err error
+		currentBoot, err = reader.HealthMatchesCurrentProcess(ctx, roomID, worldID, health)
+		if err != nil {
+			return dstruntime.HealthStateUnavailable, "无法确认 Runtime 健康数据是否来自本次启动：" + err.Error()
+		}
+		if !currentBoot {
+			return dstruntime.HealthStateUnavailable, "分片已暂停，但尚未确认本次启动的 Runtime 健康数据"
+		}
+	}
+	state := runtimeHealthState(health, process.State == shards.RuntimeRunning, process.Paused, currentBoot)
+	if health.LastError != nil {
+		return state, *health.LastError
+	}
+	if health.ConsecutiveFailures > 0 {
+		return state, "Runtime 采集连续失败"
+	}
+	if state == dstruntime.HealthStateDegraded && runtimeHealthIsStale(health) {
+		return state, "Runtime 健康数据已超过 20 秒未更新"
+	}
+	return state, ""
+}
+
+func runtimeHealthState(health dstruntime.Health, processRunning bool, processPaused *bool, currentBoot bool) dstruntime.HealthState {
 	if health.LastError != nil || health.ConsecutiveFailures > 0 {
 		return dstruntime.HealthStateDegraded
 	}
@@ -396,12 +436,16 @@ func runtimeHealthState(health dstruntime.Health, processRunning bool) dstruntim
 		return dstruntime.HealthStateStopped
 	}
 	if health.Ready {
-		if !health.ReadAt.IsZero() && time.Since(health.ReadAt) > 20*time.Second {
+		if runtimeHealthIsStale(health) && (processPaused == nil || !*processPaused || !currentBoot) {
 			return dstruntime.HealthStateDegraded
 		}
 		return dstruntime.HealthStateReady
 	}
 	return dstruntime.HealthStateStarting
+}
+
+func runtimeHealthIsStale(health dstruntime.Health) bool {
+	return !health.ReadAt.IsZero() && time.Since(health.ReadAt) > 20*time.Second
 }
 
 func dstRuntimeFailure(c *gin.Context, err error) {
@@ -411,7 +455,7 @@ func dstRuntimeFailure(c *gin.Context, err error) {
 	case errors.Is(err, rooms.ErrRoomNotFound), errors.Is(err, rooms.ErrWorldNotFound), errors.Is(err, os.ErrNotExist):
 		Failure(c, http.StatusNotFound, "RUNTIME_RESOURCE_NOT_FOUND", "房间、分片或运行时备份不存在", nil)
 	case errors.Is(err, rooms.ErrRoomNotManaged):
-		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "接管房间后才能管理运行时", nil)
+		Failure(c, http.StatusConflict, "ROOM_UNAVAILABLE", "房间当前不可用，请检查运行节点与拓扑状态", nil)
 	case errors.Is(err, dstruntime.ErrManagedBlockInvalid), errors.Is(err, dstruntime.ErrManagedFileChanged):
 		Failure(c, http.StatusConflict, "RUNTIME_CONFLICT", "检测到用户修改或损坏的运行时文件，已停止操作", nil)
 	case errors.Is(err, dstruntime.ErrRuntimeRequestInvalid):

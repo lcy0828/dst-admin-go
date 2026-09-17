@@ -183,6 +183,28 @@ func TestInstallRejectsBrokenMarkersAndModifiedManagedAsset(t *testing.T) {
 	}
 }
 
+func TestPublishedRuntimeHotfixRequiresExactKnownArtifact(t *testing.T) {
+	const (
+		manifestSHA256  = "e671232815e918cfa2a6db84c802345afac2063611816ca2bcd84e698eb28e5e"
+		publishedSHA256 = "83f9b869ea8b7ef9f08a8cdbfcab32b5c0dcad3300b7b7b7b5c47cd8cc2323cb"
+	)
+	if !matchesPublishedRuntimeHotfix("2.4.0", "bootstrap.lua", manifestSHA256, publishedSHA256) {
+		t.Fatal("published 2.4.0 readiness hotfix was not accepted")
+	}
+	for _, value := range []struct {
+		version, name, manifest, actual string
+	}{
+		{"2.4.1", "bootstrap.lua", manifestSHA256, publishedSHA256},
+		{"2.4.0", "commands.lua", manifestSHA256, publishedSHA256},
+		{"2.4.0", "bootstrap.lua", "different", publishedSHA256},
+		{"2.4.0", "bootstrap.lua", manifestSHA256, "different"},
+	} {
+		if matchesPublishedRuntimeHotfix(value.version, value.name, value.manifest, value.actual) {
+			t.Fatalf("unexpected hotfix match: %#v", value)
+		}
+	}
+}
+
 func TestUninstallRemovesOnlyManagedContentAndCreatesBackup(t *testing.T) {
 	manager, catalog, root := newRuntimeTestManager(t)
 	custom := filepath.Join(root, "Cluster_1", "Master", customCommandsName)

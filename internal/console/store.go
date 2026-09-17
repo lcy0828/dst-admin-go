@@ -33,6 +33,8 @@ type runRecord struct {
 	FinishedAt       *time.Time
 	TransportOutcome string `gorm:"type:varchar(16)"`
 	ExecutionOutcome string `gorm:"type:varchar(16)"`
+	MayHaveExecuted  bool
+	RecoveryOutcome  string `gorm:"type:varchar(16)"`
 	OperationID      string `gorm:"type:varchar(80);index"`
 	OperationKey     string `gorm:"type:varchar(80)"`
 	TargetID         string `gorm:"type:varchar(255);index"`
@@ -115,6 +117,40 @@ func (s *Store) CompleteDelivery(runID string, delivery Delivery, sendErr error)
 		updates["error_message"] = sendErr.Error()
 		updates["transport_outcome"] = "failed"
 		updates["execution_outcome"] = "none"
+	}
+	result := s.db.Table(s.runsTable).Where("id = ? AND status = ?", runID, RunSending).Updates(updates)
+	if result.Error != nil {
+		return Run{}, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return Run{}, ErrRunNotFound
+	}
+	return s.Get(runID)
+}
+
+func (s *Store) CompleteExecution(runID string, completion ExecutionCompletion) (Run, error) {
+	status := completion.Status
+	if status != RunSucceeded && status != RunFailed && status != RunUncertain && status != RunUnresponsive {
+		return Run{}, errors.New("command execution completion status is invalid")
+	}
+	now := s.now().UTC()
+	message := strings.TrimSpace(completion.Message)
+	if message == "" {
+		message = map[RunStatus]string{
+			RunSucceeded:    "命令已由 DST 执行并返回确认",
+			RunFailed:       "DST 拒绝或未能执行命令",
+			RunUncertain:    "命令可能已经执行，但未收到对应回执",
+			RunUnresponsive: "分片控制台未响应命令和恢复探针",
+		}[status]
+	}
+	updates := map[string]interface{}{
+		"status": status, "message": message, "finished_at": now,
+		"error_code": strings.TrimSpace(completion.ErrorCode), "error_message": strings.TrimSpace(completion.ErrorMessage),
+		"transport_outcome": strings.TrimSpace(completion.TransportOutcome),
+		"execution_outcome": strings.TrimSpace(completion.ExecutionOutcome),
+		"may_have_executed": completion.MayHaveExecuted,
+		"recovery_outcome":  strings.TrimSpace(completion.RecoveryOutcome),
+		"observed_at":       completion.ObservedAt,
 	}
 	result := s.db.Table(s.runsTable).Where("id = ? AND status = ?", runID, RunSending).Updates(updates)
 	if result.Error != nil {
@@ -280,7 +316,8 @@ func recordFromRun(run Run, arguments string) runRecord {
 		Name: run.Name, Risk: string(run.Risk), Arguments: arguments, RawCommand: run.RawCommand,
 		Status: string(run.Status), Message: run.Message, ErrorCode: run.ErrorCode, ErrorMessage: run.ErrorMessage,
 		CreatedAt: run.CreatedAt, FinishedAt: run.FinishedAt, TransportOutcome: run.TransportOutcome,
-		ExecutionOutcome: run.ExecutionOutcome, OperationID: run.OperationID, OperationKey: run.OperationKey,
+		ExecutionOutcome: run.ExecutionOutcome, MayHaveExecuted: run.MayHaveExecuted, RecoveryOutcome: run.RecoveryOutcome,
+		OperationID: run.OperationID, OperationKey: run.OperationKey,
 		TargetID: run.TargetID, AgentID: run.AgentID, TopologyRevision: run.TopologyRevision, ObservedAt: run.ObservedAt,
 	}
 }
@@ -298,6 +335,7 @@ func runFromRecord(record runRecord) (Run, error) {
 		Status: RunStatus(record.Status), Message: record.Message, ErrorCode: record.ErrorCode, ErrorMessage: record.ErrorMessage,
 		LogQuery: record.ID, CreatedAt: record.CreatedAt, FinishedAt: record.FinishedAt,
 		TransportOutcome: record.TransportOutcome, ExecutionOutcome: record.ExecutionOutcome,
+		MayHaveExecuted: record.MayHaveExecuted, RecoveryOutcome: record.RecoveryOutcome,
 		OperationID: record.OperationID, OperationKey: record.OperationKey, TargetID: record.TargetID,
 		AgentID: record.AgentID, TopologyRevision: record.TopologyRevision, ObservedAt: record.ObservedAt,
 	}, nil

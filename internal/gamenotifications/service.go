@@ -61,6 +61,34 @@ func (s *Service) ConfigureOnlineCounter(counter OnlineCounter) {
 	s.online = counter
 }
 
+type MaintenancePreview struct {
+	Policy        Policy    `json:"policy"`
+	OnlinePlayers *int      `json:"onlinePlayers"`
+	CheckedAt     time.Time `json:"checkedAt"`
+	Warning       string    `json:"warning,omitempty"`
+}
+
+func (s *Service) PreviewMaintenance(ctx context.Context, roomID string) (MaintenancePreview, error) {
+	policy, err := s.Policy(roomID)
+	if err != nil {
+		return MaintenancePreview{}, err
+	}
+	value := MaintenancePreview{Policy: policy}
+	if s.online != nil {
+		count, countErr := s.online.OnlinePlayers(ctx, roomID)
+		if countErr == nil {
+			value.OnlinePlayers = &count
+		} else {
+			log.Printf("[GameNotification] preview online players room=%s: %v", roomID, countErr)
+		}
+	}
+	value.CheckedAt = s.now().UTC()
+	if value.OnlinePlayers == nil {
+		value.Warning = "暂时无法确认在线人数，不会按空服处理"
+	}
+	return value, nil
+}
+
 func (s *Service) Prepare(roomID, message string, source Source) (SendPlan, error) {
 	room, worlds, message, err := s.validateSend(roomID, message, source)
 	if err != nil {
@@ -287,6 +315,11 @@ func (s *Service) deliver(ctx context.Context, notificationID string, room rooms
 	if err := s.store.MarkSending(notificationID); err != nil {
 		return Notification{}, err
 	}
+	// The game forwards c_announce between shards, including across machines.
+	// Submit once, preferring the Master, and record other shards as skipped.
+	worlds = append([]rooms.World(nil), worlds...)
+	sort.SliceStable(worlds, func(i, j int) bool { return worlds[i].IsMaster && !worlds[j].IsMaster })
+	broadcastWorld := ""
 	success, failure, skipped, canceled := 0, 0, 0, 0
 	for index, world := range worlds {
 		if err := ctx.Err(); err != nil {
@@ -318,7 +351,12 @@ func (s *Service) deliver(ctx context.Context, notificationID string, room rooms
 			delivery.Status, delivery.Message = DeliverySkipped, "分片未运行，未发送"
 			skipped++
 			targetResult = jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusSucceeded, Message: delivery.Message}
+		} else if broadcastWorld != "" {
+			delivery.Status, delivery.Message = DeliverySkipped, "已向「"+broadcastWorld+"」提交房间广播，此分片未重复发送"
+			skipped++
+			targetResult = jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusSucceeded, Message: delivery.Message}
 		} else {
+			broadcastWorld = world.Name
 			result, sendErr := s.runtime.SendID(ctx, room.ID, world.ID, shared.RuntimeConsoleRequest{
 				Mode: shared.ConsoleModeManaged, Command: "c_announce(" + quoteLua(notification.Message) + ")",
 			})

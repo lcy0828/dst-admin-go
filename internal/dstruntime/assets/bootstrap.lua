@@ -1,4 +1,4 @@
-local VERSION = "2.4.0"
+local VERSION = "2.4.6"
 local PROTOCOL_VERSION = 2
 local MODULE_ROOT = "../dst-admin/"
 local READY_RETRY_SECONDS = 0.5

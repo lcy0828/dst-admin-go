@@ -15,7 +15,7 @@ func TestTelemetryLuaStartAndStopAreIdempotent(t *testing.T) {
 	scheduled, canceled, writes := 0, 0, 0
 	state.PreloadModule("json", func(L *lua.LState) int {
 		module := L.NewTable()
-		L.SetField(module, "encode", L.NewFunction(func(L *lua.LState) int {
+		L.SetField(module, "encode_compliant", L.NewFunction(func(L *lua.LState) int {
 			L.Push(lua.LString("{}"))
 			return 1
 		}))
@@ -65,7 +65,7 @@ func TestWorldStateLuaWritesAllMetricsAndRotatesSlots(t *testing.T) {
 	var encodedPayload *lua.LTable
 	state.PreloadModule("json", func(L *lua.LState) int {
 		module := L.NewTable()
-		state.SetField(module, "encode", state.NewFunction(func(L *lua.LState) int {
+		state.SetField(module, "encode_compliant", state.NewFunction(func(L *lua.LState) int {
 			encodedPayload = L.CheckTable(1)
 			L.Push(lua.LString("{}"))
 			return 1
@@ -85,6 +85,14 @@ func TestWorldStateLuaWritesAllMetricsAndRotatesSlots(t *testing.T) {
 	state.SetGlobal("TheSim", theSim)
 	theNet := state.NewTable()
 	state.SetField(theNet, "GetSessionIdentifier", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LString("SESSION")); return 1 }))
+	state.SetField(theNet, "GetClientTable", state.NewFunction(func(L *lua.LState) int {
+		clients := L.NewTable()
+		host := L.NewTable()
+		L.SetField(host, "performance", lua.LNumber(1))
+		clients.Append(host)
+		L.Push(clients)
+		return 1
+	}))
 	state.SetGlobal("TheNet", theNet)
 	theShard := state.NewTable()
 	state.SetField(theShard, "GetShardId", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LString("1")); return 1 }))
@@ -149,7 +157,7 @@ func TestWorldStateLuaWritesAllMetricsAndRotatesSlots(t *testing.T) {
 	for name, expected := range map[string]float64{
 		"cycles": 48, "elapsedDaysInSeason": 6, "remainingDaysInSeason": 14, "seasonProgress": .3,
 		"dayProgress": .34, "phaseProgress": .57, "temperature": 18.5, "wetness": .18, "moisture": 18,
-		"moistureCeil": 100, "precipitationRate": .25, "nightmareProgress": .46,
+		"moistureCeil": 100, "precipitationRate": .25, "nightmareProgress": .46, "hostPerformance": 1,
 	} {
 		if actual := float64(lua.LVAsNumber(state.GetField(encodedPayload, name))); actual != expected {
 			t.Fatalf("payload %s = %v, want %v", name, actual, expected)
@@ -217,6 +225,239 @@ func TestCommandsLuaUsesAllowlistAndWritesStructuredReceipt(t *testing.T) {
 	deniedResult := requireLuaTable(t, state.Get(-1), "denied result")
 	if lua.LVAsBool(state.GetField(deniedResult, "ok")) || state.GetField(deniedResult, "code").String() != "ACTION_NOT_ALLOWED" {
 		t.Fatalf("denied result = %v", deniedResult)
+	}
+}
+
+func TestCommandsLuaExecutesManagedScriptAndKeepsSuccessOutOfServerLog(t *testing.T) {
+	state := lua.NewState()
+	defer state.Close()
+	preloadJSONHarness(state)
+	printed := 0
+	state.SetGlobal("print", state.NewFunction(func(L *lua.LState) int { printed++; return 0 }))
+	theSim := state.NewTable()
+	state.SetField(theSim, "SetPersistentString", state.NewFunction(func(L *lua.LState) int {
+		if callback, ok := L.Get(5).(*lua.LFunction); ok {
+			if err := L.CallByParam(lua.P{Fn: callback, NRet: 0, Protect: true}, lua.LTrue); err != nil {
+				L.RaiseError("write callback: %v", err)
+			}
+		}
+		return 0
+	}))
+	state.SetGlobal("TheSim", theSim)
+	theNet := state.NewTable()
+	state.SetField(theNet, "GetSessionIdentifier", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LString("SESSION")); return 1 }))
+	state.SetGlobal("TheNet", theNet)
+	theShard := state.NewTable()
+	state.SetField(theShard, "GetShardId", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LString("1")); return 1 }))
+	state.SetGlobal("TheShard", theShard)
+
+	module := loadLuaModule(t, state, "commands.lua")
+	execute := requireLuaFunction(t, state.GetField(module, "Execute"), "Execute")
+	request := state.NewTable()
+	state.SetField(request, "requestId", lua.LString("managed-script-1234"))
+	state.SetField(request, "action", lua.LString("console.execute"))
+	arguments := state.NewTable()
+	state.SetField(arguments, "script", lua.LString(`DST_ADMIN_MANAGED_TEST = "executed"`))
+	state.SetField(request, "arguments", arguments)
+	if err := state.CallByParam(lua.P{Fn: execute, NRet: 1, Protect: true}, request); err != nil {
+		t.Fatal(err)
+	}
+	result := requireLuaTable(t, state.Get(-1), "managed command result")
+	if !lua.LVAsBool(state.GetField(result, "ok")) || state.GetField(result, "code").String() != "COMMAND_EXECUTED" || state.GetGlobal("DST_ADMIN_MANAGED_TEST").String() != "executed" {
+		t.Fatalf("managed result=%v value=%v", result, state.GetGlobal("DST_ADMIN_MANAGED_TEST"))
+	}
+	state.Pop(1)
+	if printed != 0 {
+		t.Fatalf("successful managed command printed %d server log lines", printed)
+	}
+}
+
+func TestCommandsLuaLoadsCommandDocumentAndKeepsReceiptIdentity(t *testing.T) {
+	state := lua.NewState()
+	defer state.Close()
+	preloadJSONHarness(state)
+	writtenPath, writtenJSON, loadedPath, erasedPath := "", "", "", ""
+	theSim := state.NewTable()
+	state.SetField(theSim, "GetPersistentString", state.NewFunction(func(L *lua.LState) int {
+		loadedPath = L.CheckString(2)
+		callback := L.CheckFunction(3)
+		source := `{"requestId":"file-command-1234","action":"console.execute","arguments":{"script":"DST_ADMIN_FILE_TEST=true"}}`
+		if err := L.CallByParam(lua.P{Fn: callback, NRet: 0, Protect: true}, lua.LTrue, lua.LString(source)); err != nil {
+			L.RaiseError("read callback: %v", err)
+		}
+		return 0
+	}))
+	state.SetField(theSim, "ErasePersistentString", state.NewFunction(func(L *lua.LState) int {
+		erasedPath = L.CheckString(2)
+		callback := L.CheckFunction(3)
+		if err := L.CallByParam(lua.P{Fn: callback, NRet: 0, Protect: true}, lua.LTrue); err != nil {
+			L.RaiseError("erase callback: %v", err)
+		}
+		return 0
+	}))
+	state.SetField(theSim, "SetPersistentString", state.NewFunction(func(L *lua.LState) int {
+		writtenPath, writtenJSON = L.CheckString(2), L.CheckString(3)
+		callback := L.CheckFunction(5)
+		if err := L.CallByParam(lua.P{Fn: callback, NRet: 0, Protect: true}, lua.LTrue); err != nil {
+			L.RaiseError("write callback: %v", err)
+		}
+		return 0
+	}))
+	state.SetGlobal("TheSim", theSim)
+	theNet := state.NewTable()
+	state.SetField(theNet, "GetSessionIdentifier", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LString("SESSION")); return 1 }))
+	state.SetGlobal("TheNet", theNet)
+	theShard := state.NewTable()
+	state.SetField(theShard, "GetShardId", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LString("1")); return 1 }))
+	state.SetGlobal("TheShard", theShard)
+
+	module := loadLuaModule(t, state, "commands.lua")
+	executeFile := requireLuaFunction(t, state.GetField(module, "ExecuteFile"), "ExecuteFile")
+	if err := state.CallByParam(lua.P{Fn: executeFile, NRet: 1, Protect: true}, lua.LString("file-command-1234"), lua.LString("console.execute")); err != nil {
+		t.Fatal(err)
+	}
+	result := requireLuaTable(t, state.Get(-1), "file command result")
+	if !lua.LVAsBool(state.GetField(result, "ok")) || state.GetGlobal("DST_ADMIN_FILE_TEST") != lua.LTrue ||
+		loadedPath != "../dst-admin/command-requests/file-command-1234.json" || erasedPath != loadedPath ||
+		writtenPath != "mod_config_data/dst-admin/command-receipt-a.json" ||
+		!strings.Contains(writtenJSON, `"requestId":"file-command-1234"`) || !strings.Contains(writtenJSON, `"action":"console.execute"`) {
+		t.Fatalf("result=%v loaded=%q erased=%q written=%q receipt=%s value=%v", result, loadedPath, erasedPath, writtenPath, writtenJSON, state.GetGlobal("DST_ADMIN_FILE_TEST"))
+	}
+}
+
+func TestCommandsLuaSerializesFileSignalsAndPersistsMismatch(t *testing.T) {
+	state := lua.NewState()
+	defer state.Close()
+	preloadJSONHarness(state)
+	readCallbacks := map[string]*lua.LFunction{}
+	erasedPaths := []string{}
+	writtenJSON := []string{}
+	writeCallbacks := []*lua.LFunction{}
+	theSim := state.NewTable()
+	state.SetField(theSim, "GetPersistentString", state.NewFunction(func(L *lua.LState) int {
+		readCallbacks[L.CheckString(2)] = L.CheckFunction(3)
+		return 0
+	}))
+	state.SetField(theSim, "ErasePersistentString", state.NewFunction(func(L *lua.LState) int {
+		erasedPaths = append(erasedPaths, L.CheckString(2))
+		callback := L.CheckFunction(3)
+		if err := L.CallByParam(lua.P{Fn: callback, NRet: 0, Protect: true}, lua.LTrue); err != nil {
+			L.RaiseError("erase callback: %v", err)
+		}
+		return 0
+	}))
+	state.SetField(theSim, "SetPersistentString", state.NewFunction(func(L *lua.LState) int {
+		writtenJSON = append(writtenJSON, L.CheckString(3))
+		writeCallbacks = append(writeCallbacks, L.CheckFunction(5))
+		return 0
+	}))
+	state.SetGlobal("TheSim", theSim)
+	theNet := state.NewTable()
+	state.SetField(theNet, "GetSessionIdentifier", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LString("SESSION")); return 1 }))
+	state.SetGlobal("TheNet", theNet)
+	theShard := state.NewTable()
+	state.SetField(theShard, "GetShardId", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LString("1")); return 1 }))
+	state.SetGlobal("TheShard", theShard)
+
+	module := loadLuaModule(t, state, "commands.lua")
+	executeFile := requireLuaFunction(t, state.GetField(module, "ExecuteFile"), "ExecuteFile")
+	firstID, secondID := "queued-file-command-1234", "queued-file-command-5678"
+	for _, requestID := range []string{firstID, secondID} {
+		if err := state.CallByParam(lua.P{Fn: executeFile, NRet: 1, Protect: true}, lua.LString(requestID), lua.LString("console.execute")); err != nil {
+			t.Fatal(err)
+		}
+		result := requireLuaTable(t, state.Get(-1), "queued file result")
+		if !lua.LVAsBool(state.GetField(result, "ok")) {
+			t.Fatalf("request %s was rejected: %v", requestID, result)
+		}
+		state.Pop(1)
+	}
+	firstPath := "../dst-admin/command-requests/" + firstID + ".json"
+	secondPath := "../dst-admin/command-requests/" + secondID + ".json"
+	if readCallbacks[firstPath] == nil || readCallbacks[secondPath] != nil {
+		t.Fatalf("initial reads=%v", readCallbacks)
+	}
+	firstSource := `{"requestId":"` + firstID + `","action":"console.execute","arguments":{"script":"DST_ADMIN_QUEUED_FILE=true"}}`
+	if err := state.CallByParam(lua.P{Fn: readCallbacks[firstPath], NRet: 0, Protect: true}, lua.LTrue, lua.LString(firstSource)); err != nil {
+		t.Fatal(err)
+	}
+	if state.GetGlobal("DST_ADMIN_QUEUED_FILE") != lua.LTrue || len(writtenJSON) != 1 || readCallbacks[secondPath] != nil {
+		t.Fatalf("first value=%v receipts=%v reads=%v", state.GetGlobal("DST_ADMIN_QUEUED_FILE"), writtenJSON, readCallbacks)
+	}
+	if err := state.CallByParam(lua.P{Fn: writeCallbacks[0], NRet: 0, Protect: true}, lua.LTrue); err != nil {
+		t.Fatal(err)
+	}
+	if readCallbacks[secondPath] == nil {
+		t.Fatalf("second document was not dispatched after first receipt: %v", readCallbacks)
+	}
+	secondSource := `{"requestId":"` + secondID + `","action":"system.ping","arguments":{}}`
+	if err := state.CallByParam(lua.P{Fn: readCallbacks[secondPath], NRet: 0, Protect: true}, lua.LTrue, lua.LString(secondSource)); err != nil {
+		t.Fatal(err)
+	}
+	if len(writtenJSON) != 2 || !strings.Contains(writtenJSON[0], `"code":"COMMAND_EXECUTED"`) ||
+		!strings.Contains(writtenJSON[1], `"code":"COMMAND_DOCUMENT_MISMATCH"`) || len(erasedPaths) != 2 {
+		t.Fatalf("receipts=%v erased=%v", writtenJSON, erasedPaths)
+	}
+	if err := state.CallByParam(lua.P{Fn: writeCallbacks[1], NRet: 0, Protect: true}, lua.LTrue); err != nil {
+		t.Fatal(err)
+	}
+	status := callLuaTableMethod(t, state, module, "Status")
+	if lua.LVAsBool(state.GetField(status, "busy")) || luaIntField(state, status, "pending") != 0 {
+		t.Fatalf("final status=%v", status)
+	}
+}
+
+func TestCommandsLuaDoesNotExecuteWhenDocumentCleanupFails(t *testing.T) {
+	state := lua.NewState()
+	defer state.Close()
+	preloadJSONHarness(state)
+	writtenJSON := ""
+	theSim := state.NewTable()
+	state.SetField(theSim, "GetPersistentString", state.NewFunction(func(L *lua.LState) int {
+		callback := L.CheckFunction(3)
+		source := `{"requestId":"cleanup-file-command-1234","action":"console.execute","arguments":{"script":"DST_ADMIN_CLEANUP_TEST=true"}}`
+		if err := L.CallByParam(lua.P{Fn: callback, NRet: 0, Protect: true}, lua.LTrue, lua.LString(source)); err != nil {
+			L.RaiseError("read callback: %v", err)
+		}
+		return 0
+	}))
+	state.SetField(theSim, "ErasePersistentString", state.NewFunction(func(L *lua.LState) int {
+		callback := L.CheckFunction(3)
+		if err := L.CallByParam(lua.P{Fn: callback, NRet: 0, Protect: true}, lua.LFalse); err != nil {
+			L.RaiseError("erase callback: %v", err)
+		}
+		return 0
+	}))
+	state.SetField(theSim, "SetPersistentString", state.NewFunction(func(L *lua.LState) int {
+		path := L.CheckString(2)
+		callback := L.CheckFunction(5)
+		if strings.Contains(path, "command-requests/") {
+			if err := L.CallByParam(lua.P{Fn: callback, NRet: 0, Protect: true}, lua.LFalse); err != nil {
+				L.RaiseError("blank callback: %v", err)
+			}
+			return 0
+		}
+		writtenJSON = L.CheckString(3)
+		if err := L.CallByParam(lua.P{Fn: callback, NRet: 0, Protect: true}, lua.LTrue); err != nil {
+			L.RaiseError("receipt callback: %v", err)
+		}
+		return 0
+	}))
+	state.SetGlobal("TheSim", theSim)
+	theNet := state.NewTable()
+	state.SetField(theNet, "GetSessionIdentifier", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LString("SESSION")); return 1 }))
+	state.SetGlobal("TheNet", theNet)
+	theShard := state.NewTable()
+	state.SetField(theShard, "GetShardId", state.NewFunction(func(L *lua.LState) int { L.Push(lua.LString("1")); return 1 }))
+	state.SetGlobal("TheShard", theShard)
+
+	module := loadLuaModule(t, state, "commands.lua")
+	executeFile := requireLuaFunction(t, state.GetField(module, "ExecuteFile"), "ExecuteFile")
+	if err := state.CallByParam(lua.P{Fn: executeFile, NRet: 1, Protect: true}, lua.LString("cleanup-file-command-1234"), lua.LString("console.execute")); err != nil {
+		t.Fatal(err)
+	}
+	if state.GetGlobal("DST_ADMIN_CLEANUP_TEST") == lua.LTrue || !strings.Contains(writtenJSON, `"code":"COMMAND_DOCUMENT_CLEANUP_FAILED"`) {
+		t.Fatalf("value=%v receipt=%s", state.GetGlobal("DST_ADMIN_CLEANUP_TEST"), writtenJSON)
 	}
 }
 
@@ -404,7 +645,7 @@ func TestBarriersLuaProvesSaveCallbackAndPreservesDelayedShutdown(t *testing.T) 
 	var receipt *lua.LTable
 	state.PreloadModule("json", func(L *lua.LState) int {
 		module := L.NewTable()
-		state.SetField(module, "encode", state.NewFunction(func(L *lua.LState) int {
+		state.SetField(module, "encode_compliant", state.NewFunction(func(L *lua.LState) int {
 			receipt = L.CheckTable(1)
 			L.Push(lua.LString("{}"))
 			return 1
@@ -561,7 +802,7 @@ func TestBarriersLuaWaitsForWorldBeforeWrappingSave(t *testing.T) {
 func preloadStaticJSONHarness(state *lua.LState) {
 	state.PreloadModule("json", func(L *lua.LState) int {
 		module := L.NewTable()
-		state.SetField(module, "encode", state.NewFunction(func(L *lua.LState) int {
+		state.SetField(module, "encode_compliant", state.NewFunction(func(L *lua.LState) int {
 			L.Push(lua.LString("{}"))
 			return 1
 		}))
@@ -582,7 +823,7 @@ func luaTask(state *lua.LState, canceled *int) *lua.LTable {
 func preloadJSONHarness(state *lua.LState) {
 	state.PreloadModule("json", func(L *lua.LState) int {
 		module := L.NewTable()
-		state.SetField(module, "encode", state.NewFunction(func(L *lua.LState) int {
+		state.SetField(module, "encode_compliant", state.NewFunction(func(L *lua.LState) int {
 			value := L.CheckTable(1)
 			requestID := state.GetField(value, "requestId").String()
 			action := state.GetField(value, "action").String()
@@ -606,6 +847,12 @@ func preloadJSONHarness(state *lua.LState) {
 			arguments := state.NewTable()
 			if strings.Contains(source, `"userId":"KU_TEST"`) {
 				state.SetField(arguments, "userId", lua.LString("KU_TEST"))
+			}
+			if marker := `"script":"`; strings.Contains(source, marker) {
+				value := source[strings.Index(source, marker)+len(marker):]
+				if end := strings.Index(value, `"`); end >= 0 {
+					state.SetField(arguments, "script", lua.LString(value[:end]))
+				}
 			}
 			state.SetField(request, "arguments", arguments)
 			L.Push(request)

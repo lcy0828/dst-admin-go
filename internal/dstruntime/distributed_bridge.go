@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"dont/internal/operationlease"
+	"dont/internal/requesttiming"
 	"dont/shared"
 )
 
@@ -60,6 +62,11 @@ func (b *DistributedBridge) ReadPlayers(ctx context.Context, roomID, worldID str
 	if err != nil {
 		return Snapshot{}, err
 	}
+	return b.readPlayersForHealth(ctx, roomID, worldID, health)
+}
+
+func (b *DistributedBridge) readPlayersForHealth(ctx context.Context, roomID, worldID string, health Health) (Snapshot, error) {
+	defer requesttiming.Start(ctx, "runtime.players_read")()
 	bundle, err := b.runtime.ReadArtifacts(ctx, roomID, worldID, shared.ArtifactRuntimePlayers)
 	if err != nil {
 		return Snapshot{}, artifactReadError(err, ErrSnapshotUnavailable)
@@ -95,10 +102,23 @@ func (b *DistributedBridge) ReadPlayers(ctx context.Context, roomID, worldID str
 }
 
 func (b *DistributedBridge) ReadWorldState(ctx context.Context, roomID, worldID string) (WorldStateSnapshot, error) {
-	health, err := b.Health(ctx, roomID, worldID)
+	return b.readWorldState(ctx, roomID, worldID, true)
+}
+
+func (b *DistributedBridge) ReadStoppedWorldState(ctx context.Context, roomID, worldID string) (WorldStateSnapshot, error) {
+	return b.readWorldState(ctx, roomID, worldID, false)
+}
+
+func (b *DistributedBridge) readWorldState(ctx context.Context, roomID, worldID string, requireFresh bool) (WorldStateSnapshot, error) {
+	health, err := b.readHealth(ctx, roomID, worldID, requireFresh)
 	if err != nil {
 		return WorldStateSnapshot{}, err
 	}
+	return b.readWorldStateForHealth(ctx, roomID, worldID, health, requireFresh)
+}
+
+func (b *DistributedBridge) readWorldStateForHealth(ctx context.Context, roomID, worldID string, health Health, requireFresh bool) (WorldStateSnapshot, error) {
+	defer requesttiming.Start(ctx, "runtime.worldstate_read")()
 	bundle, err := b.runtime.ReadArtifacts(ctx, roomID, worldID, shared.ArtifactRuntimeWorldState)
 	if err != nil {
 		return WorldStateSnapshot{}, artifactReadError(err, ErrSnapshotUnavailable)
@@ -111,12 +131,13 @@ func (b *DistributedBridge) ReadWorldState(ctx context.Context, roomID, worldID 
 	candidates := make([]WorldStateSnapshot, 0, len(artifacts))
 	var failures error
 	for _, artifact := range artifacts {
-		value, decodeErr := decodeWorldStateData(artifact.Data, health.SessionID, health.ShardID, b.now().UTC())
+		value, decodeErr := decodeWorldStateData(artifact.Data, health.SessionID, health.ShardID, b.now().UTC(), requireFresh)
 		if decodeErr != nil {
 			failures = errors.Join(failures, fmt.Errorf("%s: %w", artifact.Name, decodeErr))
 			continue
 		}
-		if value.ProducerVersion != RuntimeVersion || module.Sequence > 0 && value.Sequence != module.Sequence {
+		// Health can precede the final worldstate write during shutdown.
+		if requireFresh && (value.ProducerVersion != RuntimeVersion || module.Sequence > 0 && value.Sequence != module.Sequence) {
 			failures = errors.Join(failures, fmt.Errorf("%s: %w", artifact.Name, ErrSnapshotStale))
 			continue
 		}
@@ -126,7 +147,7 @@ func (b *DistributedBridge) ReadWorldState(ctx context.Context, roomID, worldID 
 		return WorldStateSnapshot{}, unavailableWithFailures(ErrSnapshotUnavailable, failures)
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].Sequence != candidates[j].Sequence {
+		if candidates[i].ProducerInstanceID == candidates[j].ProducerInstanceID && candidates[i].Sequence != candidates[j].Sequence {
 			return candidates[i].Sequence > candidates[j].Sequence
 		}
 		return candidates[i].CapturedAt.After(candidates[j].CapturedAt)
@@ -135,6 +156,10 @@ func (b *DistributedBridge) ReadWorldState(ctx context.Context, roomID, worldID 
 }
 
 func (b *DistributedBridge) Health(ctx context.Context, roomID, worldID string) (Health, error) {
+	return b.readHealth(ctx, roomID, worldID, true)
+}
+
+func (b *DistributedBridge) readHealth(ctx context.Context, roomID, worldID string, requireCurrentVersion bool) (Health, error) {
 	bundle, err := b.runtime.ReadArtifacts(ctx, roomID, worldID, shared.ArtifactRuntimeHealth)
 	if err != nil {
 		return Health{}, artifactReadError(err, ErrSnapshotUnavailable)
@@ -150,7 +175,7 @@ func (b *DistributedBridge) Health(ctx context.Context, roomID, worldID string) 
 	if err != nil {
 		return Health{}, err
 	}
-	if health.ProducerVersion != RuntimeVersion {
+	if requireCurrentVersion && health.ProducerVersion != RuntimeVersion {
 		return Health{}, fmt.Errorf("%w: runtime version %q does not match %q", ErrRuntimeUnavailable, health.ProducerVersion, RuntimeVersion)
 	}
 	return health, nil
@@ -217,16 +242,29 @@ func (b *DistributedBridge) Reload(ctx context.Context, roomID, worldID string) 
 }
 
 func (b *DistributedBridge) RefreshSnapshots(ctx context.Context, roomID, worldID string) (SnapshotRefreshResult, error) {
+	finishLock := requesttiming.Start(ctx, "refresh.lock_wait")
 	lock := b.worldLock(roomID, worldID)
 	lock.Lock()
+	finishLock()
 	defer lock.Unlock()
-	if err := b.requireRunning(ctx, roomID, worldID); err != nil {
-		return SnapshotRefreshResult{}, err
+	finishStatus := requesttiming.Start(ctx, "refresh.status")
+	statusErr := b.requireRunning(ctx, roomID, worldID)
+	finishStatus()
+	if statusErr != nil {
+		return SnapshotRefreshResult{}, statusErr
 	}
+	finishPrevious := requesttiming.Start(ctx, "refresh.previous_health")
 	previous, _ := b.Health(ctx, roomID, worldID)
+	finishPrevious()
 	startedAt := b.now().UTC()
-	if _, err := b.send(ctx, roomID, worldID, managedRefreshScript, shared.ConsoleModeProbe, "runtime.snapshot.refresh:"+worldID); err != nil {
-		return SnapshotRefreshResult{}, fmt.Errorf("%w: send managed refresh: %v", ErrRuntimeRefresh, err)
+	finishSend := requesttiming.Start(ctx, "refresh.console_send")
+	_, err := b.send(ctx, roomID, worldID, managedRefreshScript, shared.ConsoleModeProbe, "runtime.snapshot.refresh:"+worldID)
+	finishSend()
+	if err != nil {
+		if errors.Is(err, operationlease.ErrBusy) {
+			return SnapshotRefreshResult{}, fmt.Errorf("%w: room operation in progress: %w", ErrRuntimeRefreshDeferred, err)
+		}
+		return SnapshotRefreshResult{}, fmt.Errorf("%w: send managed refresh: %w", ErrRuntimeRefresh, err)
 	}
 	deadline := time.NewTimer(b.timeout)
 	defer deadline.Stop()
@@ -234,10 +272,22 @@ func (b *DistributedBridge) RefreshSnapshots(ctx context.Context, roomID, worldI
 	defer ticker.Stop()
 	var lastErr error
 	for {
+		finishHealth := requesttiming.Start(ctx, "refresh.health_read")
 		health, healthErr := b.Health(ctx, roomID, worldID)
+		finishHealth()
 		if healthErr == nil && validRefreshHealth(health, health.SessionID, health.ShardID, startedAt, previous) {
-			players, playersErr := b.ReadPlayers(ctx, roomID, worldID)
-			worldState, worldErr := b.ReadWorldState(ctx, roomID, worldID)
+			finishOutputs := requesttiming.Start(ctx, "refresh.parallel_outputs")
+			var players Snapshot
+			var playersErr error
+			var reads sync.WaitGroup
+			reads.Add(1)
+			go func() {
+				defer reads.Done()
+				players, playersErr = b.readPlayersForHealth(ctx, roomID, worldID, health)
+			}()
+			worldState, worldErr := b.readWorldStateForHealth(ctx, roomID, worldID, health, true)
+			reads.Wait()
+			finishOutputs()
 			if playersErr == nil && worldErr == nil && refreshOutputsMatch(health, players, worldState, health.SessionID, health.ShardID) {
 				return SnapshotRefreshResult{Players: players, WorldState: worldState, Health: health}, nil
 			}
@@ -245,12 +295,16 @@ func (b *DistributedBridge) RefreshSnapshots(ctx context.Context, roomID, worldI
 		} else {
 			lastErr = healthErr
 		}
+		finishWait := requesttiming.Start(ctx, "refresh.poll_wait")
 		select {
 		case <-ctx.Done():
+			finishWait()
 			return SnapshotRefreshResult{}, ctx.Err()
 		case <-deadline.C:
+			finishWait()
 			return SnapshotRefreshResult{}, fmt.Errorf("%w: target runtime did not publish coherent fresh snapshots: %v", ErrRuntimeRefresh, lastErr)
 		case <-ticker.C:
+			finishWait()
 		}
 	}
 }
@@ -270,8 +324,11 @@ func (b *DistributedBridge) ExecuteCommand(ctx context.Context, roomID, worldID 
 	if err != nil || len(payload) > maxRuntimeRequestBytes {
 		return CommandReceipt{}, fmt.Errorf("%w: invalid command payload", ErrRuntimeRequestInvalid)
 	}
+	command, document := commandDelivery(request, payload)
 	sentAt := b.now().UTC()
-	if _, err := b.send(ctx, roomID, worldID, `DSTAdmin.Commands.ExecuteJSON(`+quoteRuntimeLua(string(payload))+`)`, shared.ConsoleModeManaged, ""); err != nil {
+	if _, err := b.runtime.SendID(ctx, roomID, worldID, shared.RuntimeConsoleRequest{
+		Mode: shared.ConsoleModeManaged, Command: command, CommandDocument: document,
+	}); err != nil {
 		return CommandReceipt{}, fmt.Errorf("send runtime command: %w", err)
 	}
 	return b.waitForCommandReceipt(ctx, roomID, worldID, health, request, sentAt)

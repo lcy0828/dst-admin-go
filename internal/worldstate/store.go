@@ -33,6 +33,7 @@ type snapshotRecord struct {
 	PrecipitationRate     *float64
 	NightmarePhase        string `gorm:"type:varchar(64)"`
 	NightmareProgress     *float64
+	HostPerformance       *int
 	ObservedAt            time.Time `gorm:"not null;index:idx_world_state_room_world_observed"`
 }
 
@@ -134,7 +135,8 @@ func recordFromSnapshot(snapshot Snapshot) snapshotRecord {
 		Precipitation: snapshot.Precipitation, MoonPhase: snapshot.MoonPhase, Temperature: snapshot.Temperature,
 		Wetness: snapshot.Wetness, Moisture: snapshot.Moisture, MoistureCeil: snapshot.MoistureCeil,
 		PrecipitationRate: snapshot.PrecipitationRate, NightmarePhase: snapshot.NightmarePhase,
-		NightmareProgress: snapshot.NightmareProgress, ObservedAt: snapshot.ObservedAt.UTC(),
+		NightmareProgress: snapshot.NightmareProgress, HostPerformance: snapshot.HostPerformance,
+		ObservedAt: snapshot.ObservedAt.UTC(),
 	}
 }
 
@@ -147,6 +149,7 @@ func snapshotFromRecord(record snapshotRecord) Snapshot {
 		Precipitation: record.Precipitation, MoonPhase: record.MoonPhase, Temperature: record.Temperature,
 		Wetness: record.Wetness, Moisture: record.Moisture, MoistureCeil: record.MoistureCeil,
 		PrecipitationRate: record.PrecipitationRate, NightmarePhase: record.NightmarePhase,
-		NightmareProgress: record.NightmareProgress, ObservedAt: record.ObservedAt.UTC(),
+		NightmareProgress: record.NightmareProgress, HostPerformance: record.HostPerformance,
+		ObservedAt: record.ObservedAt.UTC(),
 	}
 }

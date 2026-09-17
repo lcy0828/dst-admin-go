@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"dont/internal/operationlease"
 	"dont/shared"
 )
 
@@ -19,6 +21,7 @@ type distributedRuntimeFixture struct {
 	bundles map[shared.ArtifactKind]shared.RuntimeArtifactBundle
 	sent    []shared.RuntimeConsoleRequest
 	onSend  func(shared.RuntimeConsoleRequest)
+	sendErr error
 }
 
 func (f *distributedRuntimeFixture) Status(context.Context, string, string) (shared.ShardRuntimeStatus, error) {
@@ -33,7 +36,7 @@ func (f *distributedRuntimeFixture) SendID(_ context.Context, _, _ string, reque
 	if onSend != nil {
 		onSend(request)
 	}
-	return shared.RuntimeOperationResult{Outcome: shared.RuntimeOutcomeSent}, nil
+	return shared.RuntimeOperationResult{Outcome: shared.RuntimeOutcomeSent}, f.sendErr
 }
 
 func (f *distributedRuntimeFixture) ReadArtifacts(_ context.Context, _, _ string, kind shared.ArtifactKind) (shared.RuntimeArtifactBundle, error) {
@@ -86,6 +89,44 @@ func TestDistributedBridgeExecutesManagedCommandAndWaitsForRemoteReceipt(t *test
 	}
 }
 
+func TestDistributedBridgeDefersSnapshotRefreshWhileRoomOperationHoldsLease(t *testing.T) {
+	bridge, fixture, roomID, worldID, _ := newDistributedBridgeFixture(t)
+	fixture.sendErr = operationlease.ErrBusy
+
+	_, err := bridge.RefreshSnapshots(context.Background(), roomID, worldID)
+	if !errors.Is(err, ErrRuntimeRefreshDeferred) || !errors.Is(err, operationlease.ErrBusy) {
+		t.Fatalf("refresh error = %v", err)
+	}
+	if errors.Is(err, ErrRuntimeRefresh) {
+		t.Fatalf("deferred refresh was classified as failed: %v", err)
+	}
+}
+
+func TestDistributedBridgePublishesLongCommandThroughTargetDocument(t *testing.T) {
+	bridge, fixture, roomID, worldID, now := newDistributedBridgeFixture(t)
+	request := CommandRequest{
+		RequestID: "remote-long-command-1234", Action: "console.execute",
+		Arguments: map[string]interface{}{"script": "local value=true;--" + strings.Repeat("x", 1800)},
+	}
+	fixture.onSend = func(console shared.RuntimeConsoleRequest) {
+		if console.CommandDocument == nil || console.CommandDocument.RequestID != request.RequestID ||
+			!strings.HasPrefix(console.Command, "DSTAdmin.Commands.ExecuteFile(") || len(console.Command) > maximumDirectRuntimeCommandBytes {
+			t.Errorf("console=%#v", console)
+		}
+		receipt := CommandReceipt{
+			SchemaVersion: 1, ProducerVersion: RuntimeVersion, ProducerInstanceID: "remote-instance", SessionID: "REMOTE_SESSION", ShardID: "2",
+			Sequence: 10, RequestID: request.RequestID, Action: request.Action, OK: true, Code: "COMMAND_EXECUTED", CompletedAtUnix: now.Unix(),
+		}
+		fixture.mu.Lock()
+		fixture.bundles[shared.ArtifactRuntimeCommand] = artifactBundle(shared.ArtifactRuntimeCommand, now, "command-receipt-a.json", receipt)
+		fixture.mu.Unlock()
+	}
+	receipt, err := bridge.ExecuteCommand(context.Background(), roomID, worldID, request)
+	if err != nil || !receipt.OK || receipt.RequestID != request.RequestID {
+		t.Fatalf("receipt=%#v err=%v", receipt, err)
+	}
+}
+
 func newDistributedBridgeFixture(t *testing.T) (*DistributedBridge, *distributedRuntimeFixture, string, string, time.Time) {
 	t.Helper()
 	manager, catalog, _ := newRuntimeTestManager(t)
@@ -133,4 +174,148 @@ func artifactBundle(kind shared.ArtifactKind, updatedAt time.Time, name string, 
 	return shared.RuntimeArtifactBundle{Kind: kind, Artifacts: []shared.RuntimeArtifact{{
 		Name: name, Size: int64(len(data)), SHA256: hex.EncodeToString(sum[:]), UpdatedAt: updatedAt, Data: data,
 	}}}
+}
+
+type refreshReadRuntime struct {
+	*distributedRuntimeFixture
+	readMu  sync.Mutex
+	reads   map[shared.ArtifactKind]int
+	started chan shared.ArtifactKind
+	release chan struct{}
+}
+
+func (r *refreshReadRuntime) ReadArtifacts(ctx context.Context, roomID, worldID string, kind shared.ArtifactKind) (shared.RuntimeArtifactBundle, error) {
+	r.readMu.Lock()
+	r.reads[kind]++
+	r.readMu.Unlock()
+	if r.started != nil && (kind == shared.ArtifactRuntimePlayers || kind == shared.ArtifactRuntimeWorldState) {
+		r.started <- kind
+		select {
+		case <-ctx.Done():
+			return shared.RuntimeArtifactBundle{}, ctx.Err()
+		case <-r.release:
+		}
+	}
+	return r.distributedRuntimeFixture.ReadArtifacts(ctx, roomID, worldID, kind)
+}
+
+func advanceRefreshFixture(t *testing.T, fixture *distributedRuntimeFixture, now time.Time) {
+	t.Helper()
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	for _, kind := range []shared.ArtifactKind{shared.ArtifactRuntimeHealth, shared.ArtifactRuntimePlayers, shared.ArtifactRuntimeWorldState} {
+		artifact := fixture.bundles[kind].Artifacts[0]
+		var value map[string]interface{}
+		if err := json.Unmarshal(artifact.Data, &value); err != nil {
+			t.Fatal(err)
+		}
+		value["sequence"] = value["sequence"].(float64) + 1
+		if kind == shared.ArtifactRuntimeHealth {
+			world := value["modules"].(map[string]interface{})["worldstate"].(map[string]interface{})
+			world["sequence"] = world["sequence"].(float64) + 1
+		}
+		fixture.bundles[kind] = artifactBundle(kind, now, artifact.Name, value)
+	}
+}
+
+func TestDistributedRefreshReusesHealthAndReadsOutputsConcurrently(t *testing.T) {
+	bridge, fixture, roomID, worldID, now := newDistributedBridgeFixture(t)
+	fixture.onSend = func(shared.RuntimeConsoleRequest) { advanceRefreshFixture(t, fixture, now) }
+	runtime := &refreshReadRuntime{
+		distributedRuntimeFixture: fixture, reads: make(map[shared.ArtifactKind]int),
+		started: make(chan shared.ArtifactKind, 2), release: make(chan struct{}),
+	}
+	bridge.runtime = runtime
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	type response struct {
+		value SnapshotRefreshResult
+		err   error
+	}
+	done := make(chan response, 1)
+	go func() {
+		value, err := bridge.RefreshSnapshots(ctx, roomID, worldID)
+		done <- response{value: value, err: err}
+	}()
+	started := make(map[shared.ArtifactKind]bool)
+	for range 2 {
+		select {
+		case kind := <-runtime.started:
+			started[kind] = true
+		case <-ctx.Done():
+			t.Fatal("player and world-state reads did not start concurrently")
+		}
+	}
+	close(runtime.release)
+	result := <-done
+	if result.err != nil || result.value.Players.Sequence != 4 || result.value.WorldState.Sequence != 5 {
+		t.Fatalf("refresh=%#v err=%v", result.value, result.err)
+	}
+	if len(started) != 2 || len(fixture.sent) != 1 {
+		t.Fatalf("started=%v sent=%d", started, len(fixture.sent))
+	}
+	runtime.readMu.Lock()
+	defer runtime.readMu.Unlock()
+	if runtime.reads[shared.ArtifactRuntimeHealth] != 2 || runtime.reads[shared.ArtifactRuntimePlayers] != 1 || runtime.reads[shared.ArtifactRuntimeWorldState] != 1 {
+		t.Fatalf("unexpected redundant artifact reads: %v", runtime.reads)
+	}
+}
+
+func TestDistributedRefreshStillRejectsMismatchedOrCorruptOutputs(t *testing.T) {
+	for _, kind := range []shared.ArtifactKind{shared.ArtifactRuntimePlayers, shared.ArtifactRuntimeWorldState} {
+		for _, corruption := range []string{"sequence", "checksum"} {
+			t.Run(string(kind)+"/"+corruption, func(t *testing.T) {
+				bridge, fixture, roomID, worldID, now := newDistributedBridgeFixture(t)
+				bridge.timeout = 10 * time.Millisecond
+				fixture.onSend = func(shared.RuntimeConsoleRequest) {
+					advanceRefreshFixture(t, fixture, now)
+					fixture.mu.Lock()
+					defer fixture.mu.Unlock()
+					bundle := fixture.bundles[kind]
+					if corruption == "checksum" {
+						bundle.Artifacts[0].SHA256 = "invalid"
+					} else {
+						var value map[string]interface{}
+						if err := json.Unmarshal(bundle.Artifacts[0].Data, &value); err != nil {
+							t.Fatal(err)
+						}
+						value["sequence"] = value["sequence"].(float64) + 1
+						bundle = artifactBundle(kind, now, bundle.Artifacts[0].Name, value)
+					}
+					fixture.bundles[kind] = bundle
+				}
+				if _, err := bridge.RefreshSnapshots(context.Background(), roomID, worldID); !errors.Is(err, ErrRuntimeRefresh) {
+					t.Fatalf("refresh accepted %s %s: %v", kind, corruption, err)
+				}
+			})
+		}
+	}
+}
+
+func TestDistributedRefreshCancelsBothPendingOutputReads(t *testing.T) {
+	bridge, fixture, roomID, worldID, now := newDistributedBridgeFixture(t)
+	fixture.onSend = func(shared.RuntimeConsoleRequest) { advanceRefreshFixture(t, fixture, now) }
+	runtime := &refreshReadRuntime{
+		distributedRuntimeFixture: fixture, reads: make(map[shared.ArtifactKind]int),
+		started: make(chan shared.ArtifactKind, 2), release: make(chan struct{}),
+	}
+	bridge.runtime = runtime
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := bridge.RefreshSnapshots(ctx, roomID, worldID); done <- err }()
+	select {
+	case <-runtime.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("output read did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("refresh cancellation = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh did not cancel both reads")
+	}
 }

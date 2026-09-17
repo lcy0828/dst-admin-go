@@ -37,6 +37,21 @@ func (s *bridgeSender) Send(_ context.Context, _, _ string, script string) error
 	}
 	requestID := extractJSONString(script, `\"requestId\":\"`)
 	action := extractJSONString(script, `\"action\":\"`)
+	if strings.HasPrefix(script, "DSTAdmin.Commands.ExecuteFile(") {
+		value := strings.TrimPrefix(script, `DSTAdmin.Commands.ExecuteFile("`)
+		if end := strings.IndexByte(value, '"'); end >= 0 {
+			requestID = value[:end]
+		}
+		data, err := os.ReadFile(filepath.Join(s.root, "Cluster_1", "Master", managedDirectory, "command-requests", requestID+".json"))
+		if err != nil {
+			return err
+		}
+		var request CommandRequest
+		if err := json.Unmarshal(data, &request); err != nil {
+			return err
+		}
+		requestID, action = request.RequestID, request.Action
+	}
 	receipt := CommandReceipt{
 		SchemaVersion: 1, ProducerVersion: RuntimeVersion, ProducerInstanceID: "instance", SessionID: "SESSION", ShardID: "1",
 		Sequence: 1, RequestID: requestID, Action: action, OK: true, Code: "ACTION_COMPLETE", Message: "", CompletedAtUnix: s.now.Unix(),
@@ -176,6 +191,66 @@ func TestBridgeExecutesShortAllowedCommandAndReadsReceipt(t *testing.T) {
 	}
 	if len(sender.scripts) != 1 || !strings.HasPrefix(sender.scripts[0], "DSTAdmin.Commands.ExecuteJSON(") || strings.Contains(sender.scripts[0], "TheNet:Kick") {
 		t.Fatalf("unexpected command script: %#v", sender.scripts)
+	}
+}
+
+func TestBridgePublishesLongCommandDocumentBeforeShortTrigger(t *testing.T) {
+	manager, catalog, root := newRuntimeTestManager(t)
+	now := time.Unix(1_786_500_100, 0).UTC()
+	manager.now = func() time.Time { return now }
+	if _, err := manager.InstallWorld(context.Background(), catalog.room.ID, catalog.worlds[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	writeRuntimeSessionAndHealth(t, root, now)
+	sender := &bridgeSender{manager: manager, root: root, now: now, reply: true}
+	bridge, err := NewBridge(manager, bridgeProcess{running: true}, sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge.now = func() time.Time { return now }
+	bridge.pollInterval = time.Millisecond
+	bridge.timeout = 100 * time.Millisecond
+	request := CommandRequest{
+		RequestID: "long-command-1234567890", Action: "console.execute",
+		Arguments: map[string]interface{}{"script": "local value=true;--" + strings.Repeat("x", 1800)},
+	}
+	receipt, err := bridge.ExecuteCommand(context.Background(), catalog.room.ID, catalog.worlds[0].ID, request)
+	if err != nil || !receipt.OK || receipt.RequestID != request.RequestID {
+		t.Fatalf("receipt=%#v err=%v", receipt, err)
+	}
+	if len(sender.scripts) != 1 || !strings.HasPrefix(sender.scripts[0], "DSTAdmin.Commands.ExecuteFile(") || len(sender.scripts[0]) > maximumDirectRuntimeCommandBytes {
+		t.Fatalf("long command trigger=%#v", sender.scripts)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "Cluster_1", "Master", managedDirectory, "command-requests", request.RequestID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published CommandRequest
+	if err := json.Unmarshal(data, &published); err != nil || published.RequestID != request.RequestID || published.Action != request.Action {
+		t.Fatalf("published=%#v err=%v", published, err)
+	}
+}
+
+func TestBridgeRejectsOversizedCommandWithStructuredError(t *testing.T) {
+	manager, catalog, root := newRuntimeTestManager(t)
+	now := time.Unix(1_786_500_100, 0).UTC()
+	manager.now = func() time.Time { return now }
+	if _, err := manager.InstallWorld(context.Background(), catalog.room.ID, catalog.worlds[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	writeRuntimeSessionAndHealth(t, root, now)
+	sender := &bridgeSender{manager: manager, root: root, now: now, reply: true}
+	bridge, err := NewBridge(manager, bridgeProcess{running: true}, sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge.now = func() time.Time { return now }
+	_, err = bridge.ExecuteCommand(context.Background(), catalog.room.ID, catalog.worlds[0].ID, CommandRequest{
+		RequestID: "oversized-command-1234", Action: "console.execute",
+		Arguments: map[string]interface{}{"script": strings.Repeat("x", maxRuntimeRequestBytes-30)},
+	})
+	if !errors.Is(err, ErrRuntimeRequestInvalid) || strings.Contains(err.Error(), "%!w") || len(sender.scripts) != 0 {
+		t.Fatalf("error=%v scripts=%v", err, sender.scripts)
 	}
 }
 

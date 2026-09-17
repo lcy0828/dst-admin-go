@@ -37,9 +37,12 @@ type Definition struct {
 type RunStatus string
 
 const (
-	RunSending RunStatus = "sending"
-	RunSent    RunStatus = "sent"
-	RunFailed  RunStatus = "failed"
+	RunSending      RunStatus = "sending"
+	RunSent         RunStatus = "sent" // Legacy transport-only records.
+	RunSucceeded    RunStatus = "succeeded"
+	RunFailed       RunStatus = "failed"
+	RunUncertain    RunStatus = "uncertain"
+	RunUnresponsive RunStatus = "unresponsive"
 )
 
 type Run struct {
@@ -61,6 +64,8 @@ type Run struct {
 	FinishedAt       *time.Time             `json:"finishedAt,omitempty"`
 	TransportOutcome string                 `json:"transportOutcome,omitempty"`
 	ExecutionOutcome string                 `json:"executionOutcome,omitempty"`
+	MayHaveExecuted  bool                   `json:"mayHaveExecuted"`
+	RecoveryOutcome  string                 `json:"recoveryOutcome,omitempty"`
 	OperationID      string                 `json:"operationId,omitempty"`
 	OperationKey     string                 `json:"operationKey,omitempty"`
 	TargetID         string                 `json:"targetId,omitempty"`
@@ -78,6 +83,18 @@ type Delivery struct {
 	TargetID         string
 	AgentID          string
 	TopologyRevision string
+	ObservedAt       *time.Time
+}
+
+type ExecutionCompletion struct {
+	Status           RunStatus
+	TransportOutcome string
+	ExecutionOutcome string
+	Message          string
+	ErrorCode        string
+	ErrorMessage     string
+	MayHaveExecuted  bool
+	RecoveryOutcome  string
 	ObservedAt       *time.Time
 }
 

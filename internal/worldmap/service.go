@@ -480,7 +480,7 @@ func (s *Service) remoteRuntime(ctx context.Context, roomID, worldID string) (*r
 		return nil, nil
 	}
 	remote, ok := driver.(runtimedriver.MapDriver)
-	if !ok || !runtimedriver.HasCapability(driver, runtimedriver.CapabilityMapRender) {
+	if !ok || !runtimedriver.HasTargetCapability(driver, target, runtimedriver.CapabilityMapRender) {
 		return nil, ErrRendererUnavailable
 	}
 	return &remoteMapRuntime{driver: remote, target: target}, nil

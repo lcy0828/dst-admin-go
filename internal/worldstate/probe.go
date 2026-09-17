@@ -103,9 +103,10 @@ func worldStateProbeScript(nonce string) string {
 		`local s=(TheWorld and TheWorld.state) or {}; local c=(TheWorld and TheWorld.components) or {}; ` +
 		`local sm=c.seasonmanager; local nc=c.nightmareclock; ` +
 		`local sp=s.seasonprogress or __call(sm,"GetPercentSeason"); local np=s.nightmaretimeinphase or __call(nc,"GetTimeInPhase"); ` +
-		`local nphase=s.nightmarephase or __call(nc,"GetPhase"); local precip="none"; ` +
+		`local nphase=s.nightmarephase or __call(nc,"GetPhase"); local precip="none"; local hp=nil; ` +
+		`for _,v in ipairs((TheNet and TheNet:GetClientTable()) or {}) do local p=tonumber(v and v.performance); if p and p>=0 and p<=2 then hp=math.floor(p); break end end; ` +
 		`if s.isacidraining then precip="acid_rain" elseif s.islunarhailing then precip="lunar_hail" elseif s.issnowing then precip="snow" elseif s.israining then precip="rain" end; ` +
-		`local values={__e(s.season),__e(s.phase),__e(s.cycles),__e(s.elapseddaysinseason),__e(s.remainingdaysinseason),__e(sp),__e(s.time),__e(s.timeinphase),__e(precip),__e(s.moonphase),__e(s.temperature),__e(s.wetness),__e(s.moisture),__e(s.moistureceil),__e(s.precipitationrate),__e(nphase),__e(np)}; ` +
+		`local values={__e(s.season),__e(s.phase),__e(s.cycles),__e(s.elapseddaysinseason),__e(s.remainingdaysinseason),__e(sp),__e(s.time),__e(s.timeinphase),__e(precip),__e(s.moonphase),__e(s.temperature),__e(s.wetness),__e(s.moisture),__e(s.moistureceil),__e(s.precipitationrate),__e(nphase),__e(np),__e(hp)}; ` +
 		`print(__p.." ITEM] "..table.concat(values,"\t")); print(__p.." DONE]")`
 }
 
@@ -186,7 +187,7 @@ func parseProbeOutput(output, nonce string) (Observation, bool, error) {
 			return Observation{}, false, errors.New("world state probe returned duplicate snapshots")
 		}
 		fields := strings.Split(strings.TrimSuffix(line[index+len(itemMarker):], "\r"), "\t")
-		if len(fields) != 17 {
+		if len(fields) != 18 {
 			return Observation{}, false, errors.New("world state probe returned malformed fields")
 		}
 		decoded := make([]string, len(fields))
@@ -222,6 +223,9 @@ func parseProbeOutput(output, nonce string) (Observation, bool, error) {
 		}
 		observation.Precipitation, observation.MoonPhase = decoded[8], decoded[9]
 		observation.NightmarePhase = decoded[15]
+		if observation.HostPerformance, parseErr = optionalInt(decoded[17]); parseErr != nil || observation.HostPerformance != nil && *observation.HostPerformance > 2 {
+			return Observation{}, false, errors.New("world state probe returned an invalid host performance")
+		}
 		found = true
 	}
 	if complete && !found {

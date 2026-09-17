@@ -30,7 +30,7 @@ const (
 	maxManagedBytes    = int64(2 * 1024 * 1024)
 )
 
-const managedLoader = `-- DST-ADMIN MANAGED BLOCK BEGIN protocol=2 version=2.4.0
+const managedLoader = `-- DST-ADMIN MANAGED BLOCK BEGIN protocol=2 version=2.4.6
 do
     TheSim:GetPersistentString("../dst-admin/bootstrap.lua", function(success, source)
         if not success or type(source) ~= "string" then
@@ -54,6 +54,23 @@ var (
 	beginMarker = regexp.MustCompile(`(?m)^-- DST-ADMIN MANAGED BLOCK BEGIN[^\r\n]*$`)
 	endMarker   = regexp.MustCompile(`(?m)^-- DST-ADMIN MANAGED BLOCK END[ \t]*$`)
 )
+
+type publishedRuntimeHotfixKey struct {
+	version        string
+	name           string
+	manifestSHA256 string
+}
+
+// Runtime 2.4.0 shipped a readiness hotfix without changing its version or
+// manifest. Accept only that exact published artifact so affected installs can
+// converge while arbitrary changes to managed files remain protected.
+var publishedRuntimeHotfixes = map[publishedRuntimeHotfixKey]string{
+	{
+		version:        "2.4.0",
+		name:           "bootstrap.lua",
+		manifestSHA256: "e671232815e918cfa2a6db84c802345afac2063611816ca2bcd84e698eb28e5e",
+	}: "83f9b869ea8b7ef9f08a8cdbfcab32b5c0dcad3300b7b7b7b5c47cd8cc2323cb",
+}
 
 type Catalog interface {
 	Room(string) (rooms.Room, error)
@@ -129,19 +146,6 @@ func (m *Manager) InstallWorld(ctx context.Context, roomID, worldID string) (Wor
 		return WorldStatus{}, err
 	}
 	return m.install(room, world)
-}
-
-func (m *Manager) Prepare(_ context.Context, roomName, worldName string) error {
-	room, err := m.rooms.Room(rooms.EncodeID(roomName))
-	if err != nil {
-		return err
-	}
-	world, err := m.rooms.World(room.ID, rooms.EncodeID(worldName))
-	if err != nil {
-		return err
-	}
-	_, err = m.install(room, world)
-	return err
 }
 
 func (m *Manager) StatusRoom(roomID string) ([]WorldStatus, error) {
@@ -543,11 +547,19 @@ func verifyManagedAssets(root string, current manifest) error {
 			return fmt.Errorf("%w: %s", ErrManagedFileChanged, name)
 		}
 		digest := sha256.Sum256(data)
-		if hex.EncodeToString(digest[:]) != expected {
+		actual := hex.EncodeToString(digest[:])
+		if actual != expected && !matchesPublishedRuntimeHotfix(current.Version, name, expected, actual) {
 			return fmt.Errorf("%w: %s", ErrManagedFileChanged, name)
 		}
 	}
 	return nil
+}
+
+func matchesPublishedRuntimeHotfix(version, name, manifestSHA256, actualSHA256 string) bool {
+	published, exists := publishedRuntimeHotfixes[publishedRuntimeHotfixKey{
+		version: version, name: name, manifestSHA256: manifestSHA256,
+	}]
+	return exists && published == actualSHA256
 }
 
 func readManifest(path string) (manifest, bool, error) {

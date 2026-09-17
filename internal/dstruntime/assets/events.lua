@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.0"
+local PRODUCER_VERSION = "2.4.6"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local FLUSH_DELAY = 1
 local MAX_BATCH = 128
@@ -85,7 +85,7 @@ flush = function()
         lastSequence = batch[#batch].sequence,
         events = batch,
     }
-    local encoded_ok, encoded = pcall(json.encode, payload)
+    local encoded_ok, encoded = pcall(json.encode_compliant, payload)
     if not encoded_ok or type(encoded) ~= "string" then
         state.lastError = "event batch JSON encoding failed"
         for _, event in ipairs(batch) do state.pending[#state.pending + 1] = event end

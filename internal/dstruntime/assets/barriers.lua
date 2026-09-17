@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.0"
+local PRODUCER_VERSION = "2.4.6"
 local OUTPUT_PATH = "mod_config_data/dst-admin/snapshot-barrier.json"
 local ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]+$"
 local BARRIER_TIMEOUT = 180
@@ -59,7 +59,7 @@ end
 
 local function persist_receipt(receipt)
     state.receipt = receipt
-    local ok, encoded = pcall(json.encode, receipt)
+    local ok, encoded = pcall(json.encode_compliant, receipt)
     if not ok or type(encoded) ~= "string" then
         state.lastError = "snapshot barrier JSON encoding failed"
         return false

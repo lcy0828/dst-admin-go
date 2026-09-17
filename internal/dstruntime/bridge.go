@@ -15,10 +15,11 @@ import (
 	"unicode/utf8"
 
 	"dont/internal/rooms"
+	"dont/internal/runtimefiles"
 )
 
 const (
-	maxRuntimeRequestBytes   = 4096
+	maxRuntimeRequestBytes   = 16 * 1024
 	maxRuntimeResultBytes    = int64(256 * 1024)
 	defaultCommandTimeout    = 5 * time.Second
 	defaultDiagnosticTimeout = 8 * time.Second
@@ -35,6 +36,8 @@ var (
 )
 
 var allowedRuntimeCommands = map[string]bool{
+	"system.ping":             true,
+	"console.execute":         true,
 	"telemetry.emit":          true,
 	"player.kick":             true,
 	"player.announce":         true,
@@ -148,6 +151,10 @@ func (b *Bridge) ReadPlayers(ctx context.Context, roomID, worldID string) (Snaps
 
 func (b *Bridge) ReadWorldState(ctx context.Context, roomID, worldID string) (WorldStateSnapshot, error) {
 	return b.manager.ReadWorldState(ctx, roomID, worldID)
+}
+
+func (b *Bridge) ReadStoppedWorldState(ctx context.Context, roomID, worldID string) (WorldStateSnapshot, error) {
+	return b.manager.ReadStoppedWorldState(ctx, roomID, worldID)
 }
 
 // RefreshSnapshots bypasses DST's paused simulation scheduler and asks the
@@ -321,10 +328,18 @@ func (b *Bridge) ExecuteCommand(ctx context.Context, roomID, worldID string, req
 		return CommandReceipt{}, err
 	}
 	payload, err := json.Marshal(request)
-	if err != nil || len(payload) > maxRuntimeRequestBytes {
-		return CommandReceipt{}, fmt.Errorf("runtime command request is invalid: %w", err)
+	if err != nil {
+		return CommandReceipt{}, fmt.Errorf("%w: encode command payload: %v", ErrRuntimeRequestInvalid, err)
 	}
-	script := `DSTAdmin.Commands.ExecuteJSON(` + quoteRuntimeLua(string(payload)) + `)`
+	if len(payload) > maxRuntimeRequestBytes {
+		return CommandReceipt{}, fmt.Errorf("%w: command payload exceeds %d bytes", ErrRuntimeRequestInvalid, maxRuntimeRequestBytes)
+	}
+	script, document := commandDelivery(request, payload)
+	if document != nil {
+		if err := runtimefiles.PublishCommandDocument(ctx, b.manager.root, room.DirectoryName, world.DirectoryName, *document); err != nil {
+			return CommandReceipt{}, fmt.Errorf("publish runtime command document: %w", err)
+		}
+	}
 	sentAt := b.now().UTC()
 	if err := b.sender.Send(ctx, room.DirectoryName, world.DirectoryName, script); err != nil {
 		return CommandReceipt{}, fmt.Errorf("send runtime command: %w", err)

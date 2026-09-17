@@ -60,12 +60,12 @@ func getBasicCommands() []*types.Command {
 		{
 			ID:          "rollback",
 			Name:        "回档",
-			Description: "将世界回退指定天数",
+			Description: "将世界回退指定数量的存档快照",
 			Category:    "基础操作",
 			IsBuiltin:   true,
 			Script:      "print('[DST-ADMIN-GO]','[Rollback]',c_rollback({1}))",
 			NeedsParams: true,
-			ParamDesc:   "回退的天数，例如：1",
+			ParamDesc:   "回退的快照数量，例如：1",
 			Example:     "1",
 		},
 	}

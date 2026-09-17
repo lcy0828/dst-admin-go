@@ -165,7 +165,7 @@ func consoleFailure(c *gin.Context, err error) {
 	case errors.Is(err, consoleapi.ErrConfirmationNeeded):
 		Failure(c, http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", "请输入完整房间名确认该命令", nil)
 	case errors.Is(err, consoleapi.ErrRoomNotManaged):
-		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "接管房间后才能发送命令", nil)
+		Failure(c, http.StatusConflict, "ROOM_UNAVAILABLE", "房间当前不可用，请检查运行节点与拓扑状态", nil)
 	case errors.Is(err, rooms.ErrInvalidID), errors.Is(err, rooms.ErrUnsafePath):
 		Failure(c, http.StatusBadRequest, "INVALID_RESOURCE_ID", "房间或世界标识无效", nil)
 	case errors.Is(err, rooms.ErrRoomNotFound), errors.Is(err, rooms.ErrWorldNotFound):

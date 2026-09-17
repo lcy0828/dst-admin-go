@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 2
-local PRODUCER_VERSION = "2.4.0"
+local PRODUCER_VERSION = "2.4.6"
 local SNAPSHOT_INTERVAL = 5
 local READY_RETRY_SECONDS = 1
 local READY_RETRY_LIMIT = 60
@@ -56,6 +56,28 @@ local function virtual_host(client)
         and (client.netid == nil or client.netid == "")
 end
 
+local function gameplay_state(client, player)
+    if player ~= nil then
+        if player.migration ~= nil then
+            return "migrating"
+        end
+        if player.HasTag ~= nil and player:HasTag("playerghost") then
+            return "ghost"
+        end
+        if player.components ~= nil and player.components.health ~= nil then
+            local ok, dead = pcall(player.components.health.IsDead, player.components.health)
+            if ok and dead then
+                return "dead"
+            end
+        end
+        return "alive"
+    end
+    if client.prefab == nil or client.prefab == "" then
+        return "selecting_character"
+    end
+    return "loading"
+end
+
 local function capture_player(client)
     if client == nil or virtual_host(client) then
         return nil
@@ -69,6 +91,7 @@ local function capture_player(client)
         id = user_id,
         name = safe_text(client.name, 256),
         prefab = safe_text(client.prefab, 128),
+        gameplayState = gameplay_state(client, player),
         admin = client.admin == true,
         age = math.max(0, tonumber(client.playerage) or 0),
         netId = safe_text(client.netid, 128),
@@ -76,19 +99,30 @@ local function capture_player(client)
     if record.name == "" then
         record.name = user_id
     end
-    local score = tonumber(client.performance)
+    local score = tonumber(client.netscore)
     if score ~= nil and score >= 0 then
         record.netScore = score
     end
     if player ~= nil and player.components ~= nil then
         if player.components.health ~= nil then
             record.healthPercent = read_number(function() return player.components.health:GetPercent() * 100 end)
+            record.health = read_number(function() return player.components.health.currenthealth end)
+            record.healthMax = read_number(function()
+                if type(player.components.health.GetMaxWithPenalty) == "function" then
+                    return player.components.health:GetMaxWithPenalty()
+                end
+                return player.components.health.maxhealth
+            end)
         end
         if player.components.hunger ~= nil then
             record.hungerPercent = read_number(function() return player.components.hunger:GetPercent() * 100 end)
+            record.hunger = read_number(function() return player.components.hunger.current end)
+            record.hungerMax = read_number(function() return player.components.hunger.max end)
         end
         if player.components.sanity ~= nil then
             record.sanityPercent = read_number(function() return player.components.sanity:GetPercent() * 100 end)
+            record.sanity = read_number(function() return player.components.sanity.current end)
+            record.sanityMax = read_number(function() return player.components.sanity.max end)
         end
         if player.components.temperature ~= nil then
             record.temperature = read_number(function() return player.components.temperature.current end)
@@ -147,7 +181,7 @@ local function health_payload()
 end
 
 local function write_health()
-    local ok, encoded = pcall(json.encode, health_payload())
+    local ok, encoded = pcall(json.encode_compliant, health_payload())
     if ok then
         TheSim:SetPersistentString(OUTPUT_ROOT .. "health.json", encoded, false)
     end
@@ -204,7 +238,7 @@ function M.EmitOnce(callback)
         complete(callback, false)
         return false
     end
-    local encoded_ok, encoded = pcall(json.encode, payload)
+    local encoded_ok, encoded = pcall(json.encode_compliant, payload)
     if not encoded_ok or type(encoded) ~= "string" then
         state.writing = false
         state.lastError = "snapshot JSON encoding failed"

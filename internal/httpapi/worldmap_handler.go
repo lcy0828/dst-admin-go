@@ -125,7 +125,7 @@ func worldMapFailure(c *gin.Context, err error) {
 	case errors.Is(err, worldmap.ErrMapNotFound), errors.Is(err, worldmap.ErrMapImageNotFound), errors.Is(err, worldmap.ErrSessionNotFound):
 		Failure(c, http.StatusNotFound, "MAP_RESOURCE_NOT_FOUND", "地图或 Session 资源不存在", nil)
 	case errors.Is(err, worldmap.ErrRoomNotManaged):
-		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "接管房间后才能使用地图功能", nil)
+		Failure(c, http.StatusConflict, "ROOM_UNAVAILABLE", "房间当前不可用，请检查运行节点与拓扑状态", nil)
 	case errors.Is(err, worldmap.ErrRendererUnavailable):
 		Failure(c, http.StatusConflict, "MAP_RENDERER_UNAVAILABLE", "地图渲染器不可用，请先完成节点配置", nil)
 	case errors.Is(err, worldmap.ErrGenerationInProgress):
