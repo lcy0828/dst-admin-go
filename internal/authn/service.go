@@ -32,12 +32,16 @@ var (
 	ErrPasswordComplexity = errors.New("password does not satisfy the configured complexity policy")
 	ErrPasswordTooLong    = errors.New("password must not exceed 72 bytes")
 	ErrPasswordUnchanged  = errors.New("new password must differ from current password")
+	ErrOnboardingStep     = errors.New("invalid onboarding step")
 )
 
 type Admin struct {
 	ID       int    `gorm:"primary_key" json:"id"`
 	Username string `gorm:"type:varchar(128);unique_index;not null" json:"username"`
 	Password string `gorm:"column:password;type:varchar(255);not null" json:"-"`
+	// Empty on upgraded installations: only newly created administrators enter
+	// the wizard automatically. This is UI progress, never game readiness.
+	OnboardingStep string `gorm:"type:varchar(32)" json:"-"`
 }
 
 func (Admin) TableName() string { return "auth" }
@@ -202,7 +206,7 @@ func (s *Service) Setup(username, password, ipAddress, userAgent string) (*Authe
 	}
 	// A fixed primary key makes concurrent first-run setup attempts converge on
 	// one database-enforced winner, even when they use different usernames.
-	admin := Admin{ID: 1, Username: username, Password: string(hash)}
+	admin := Admin{ID: 1, Username: username, Password: string(hash), OnboardingStep: "deployment"}
 	if err := tx.Table(s.adminTable).Create(&admin).Error; err != nil {
 		tx.Rollback()
 		return nil, "", err

@@ -73,6 +73,7 @@ func (h *AuthHandler) Register(group *gin.RouterGroup) {
 	group.POST("/login", h.Login)
 	group.POST("/logout", h.Logout)
 	group.PUT("/password", h.ChangePassword)
+	group.PUT("/onboarding", h.SaveOnboarding)
 }
 
 func (h *AuthHandler) Session(c *gin.Context) {
@@ -83,12 +84,17 @@ func (h *AuthHandler) Session(c *gin.Context) {
 		return
 	}
 	result := gin.H{"authenticated": false, "setupRequired": required, "preferences": h.ui()}
+	if required {
+		policy := h.service.PasswordPolicy()
+		result["passwordPolicy"] = gin.H{"minimumLength": policy.MinimumLength, "maximumBytes": 72, "requireComplexity": policy.RequireComplexity}
+	}
 	if rawToken, err := c.Cookie(authn.SessionCookieName); err == nil {
 		if authenticated, err := h.service.Authenticate(rawToken); err == nil {
 			result["authenticated"] = true
 			result["user"] = gin.H{"id": authenticated.Admin.ID, "username": authenticated.Admin.Username}
 			result["expiresAt"] = authenticated.Session.ExpiresAt
 			result["csrfToken"] = authenticated.Session.CSRFToken
+			result["onboarding"] = authn.OnboardingFor(authenticated.Admin)
 		}
 	}
 	Success(c, http.StatusOK, result)
@@ -106,6 +112,33 @@ func (h *AuthHandler) Setup(c *gin.Context) {
 		return
 	}
 	h.writeAuthenticated(c, authenticated, rawToken, http.StatusCreated)
+}
+
+func (h *AuthHandler) SaveOnboarding(c *gin.Context) {
+	value, ok := c.Get(authn.ContextAdminKey)
+	admin, valid := value.(authn.Admin)
+	if !ok || !valid {
+		Failure(c, http.StatusUnauthorized, "AUTH_REQUIRED", "请先登录", nil)
+		return
+	}
+	var input struct {
+		Step string `json:"step" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_REQUEST", "请指定初始化步骤", nil)
+		return
+	}
+	state, err := h.service.SaveOnboarding(admin.ID, input.Step)
+	if err != nil {
+		if errors.Is(err, authn.ErrOnboardingStep) {
+			Failure(c, http.StatusUnprocessableEntity, "INVALID_ONBOARDING_STEP", "初始化步骤无效", nil)
+		} else {
+			Failure(c, http.StatusInternalServerError, "AUTH_STORAGE_ERROR", "无法保存初始化进度", nil)
+		}
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	Success(c, http.StatusOK, state)
 }
 
 func (h *AuthHandler) Login(c *gin.Context) {
@@ -177,6 +210,7 @@ func (h *AuthHandler) writeAuthenticated(c *gin.Context, authenticated *authn.Au
 		"expiresAt":     authenticated.Session.ExpiresAt,
 		"csrfToken":     authenticated.CSRFToken,
 		"preferences":   h.ui(),
+		"onboarding":    authn.OnboardingFor(authenticated.Admin),
 	})
 }
 
