@@ -20,6 +20,7 @@
 </p>
 <p align="center">
   <a href="#docker-quick-start">Quick start</a> ·
+  <a href="#screenshots">Screenshots</a> ·
   <a href="docs/startup-guide.en.md">Deployment guide</a> ·
   <a href="docs/luajit-installation.en.md">LuaJIT2</a> ·
   <a href="https://github.com/lcy0828/dst-admin-go/issues">Report an issue</a>
@@ -39,6 +40,25 @@
 | **Connect remote machines**<br>Manage other hosts through Agents and check each node's installations and resources. | **See what's happening**<br>Check players, seasons, logs, and chat. Run commands from the console. |
 
 Images and native packages include the web UI. Chinese is the default; English and dark mode are available.
+
+## Screenshots
+
+Actual application screens with demo data. Click an image to enlarge.
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><strong>Create an administrator</strong><br><a href="docs/assets/readme/setup.en.webp"><img src="docs/assets/readme/setup.en.webp" alt="Create an administrator" width="100%"></a><br><sub>Create your administrator account on first launch.</sub></td>
+    <td width="50%" valign="top"><strong>Game server management</strong><br><a href="docs/assets/readme/game.en.webp"><img src="docs/assets/readme/game.en.webp" alt="Game server management" width="100%"></a><br><sub>Check installations, update the game, or connect an existing server.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><strong>LuaJIT2 installation</strong><br><a href="docs/assets/readme/luajit.en.webp"><img src="docs/assets/readme/luajit.en.webp" alt="LuaJIT2 installation" width="100%"></a><br><sub>Choose a version, check upstream releases, or import a package.</sub></td>
+    <td width="50%" valign="top"><strong>Room and world mods</strong><br><a href="docs/assets/readme/mods.en.webp"><img src="docs/assets/readme/mods.en.webp" alt="Room and world mods" width="100%"></a><br><sub>Manage enabled mods and shared or per-world configuration.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><strong>Save backups and restore</strong><br><a href="docs/assets/readme/backups.en.webp"><img src="docs/assets/readme/backups.en.webp" alt="Save backups and restore" width="100%"></a><br><sub>Browse room backups, restore a world, or import saves.</sub></td>
+    <td width="50%" valign="top"><strong>Player management</strong><br><a href="docs/assets/readme/players.en.webp"><img src="docs/assets/readme/players.en.webp" alt="Player management" width="100%"></a><br><sub>View characters, player presence, and play history.</sub></td>
+  </tr>
+</table>
 
 ## Docker quick start
 

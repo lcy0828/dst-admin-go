@@ -20,6 +20,7 @@
 </p>
 <p align="center">
   <a href="#docker-快速安装">快速安装</a> ·
+  <a href="#界面预览">界面预览</a> ·
   <a href="docs/startup-guide.md">部署指南</a> ·
   <a href="docs/luajit-installation.md">LuaJIT2</a> ·
   <a href="https://github.com/lcy0828/dst-admin-go/issues">反馈问题</a>
@@ -39,6 +40,25 @@
 | **接入远程机器**<br>通过 Agent 管理其他主机，查看各节点的安装与资源状态。 | **掌握游戏动态**<br>查看在线玩家、季节、日志与聊天记录，执行控制台命令。 |
 
 镜像和原生安装包均内置管理页面。默认中文，可切换英文与深色模式。
+
+## 界面预览
+
+真实产品界面，使用演示数据。点击图片查看大图。
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><strong>创建管理员</strong><br><a href="docs/assets/readme/setup.zh.webp"><img src="docs/assets/readme/setup.zh.webp" alt="创建管理员" width="100%"></a><br><sub>首次启动创建自己的管理账户。</sub></td>
+    <td width="50%" valign="top"><strong>游戏服务端管理</strong><br><a href="docs/assets/readme/game.zh.webp"><img src="docs/assets/readme/game.zh.webp" alt="游戏服务端管理" width="100%"></a><br><sub>查看安装状态，安装、更新或接入已有服务端。</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><strong>LuaJIT2 安装</strong><br><a href="docs/assets/readme/luajit.zh.webp"><img src="docs/assets/readme/luajit.zh.webp" alt="LuaJIT2 安装" width="100%"></a><br><sub>选择版本，检查上游更新，按需导入安装包。</sub></td>
+    <td width="50%" valign="top"><strong>房间与世界模组</strong><br><a href="docs/assets/readme/mods.zh.webp"><img src="docs/assets/readme/mods.zh.webp" alt="房间与世界模组" width="100%"></a><br><sub>查看各世界的启用状态，统一或分别配置模组。</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><strong>存档备份与恢复</strong><br><a href="docs/assets/readme/backups.zh.webp"><img src="docs/assets/readme/backups.zh.webp" alt="存档备份与恢复" width="100%"></a><br><sub>查看完整房间备份，按需恢复或导入存档。</sub></td>
+    <td width="50%" valign="top"><strong>玩家管理</strong><br><a href="docs/assets/readme/players.zh.webp"><img src="docs/assets/readme/players.zh.webp" alt="玩家管理" width="100%"></a><br><sub>查看角色、在线状态与游玩记录。</sub></td>
+  </tr>
+</table>
 
 ## Docker 快速安装
 
