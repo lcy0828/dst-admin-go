@@ -5,11 +5,13 @@ repo=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 cd "$repo"
 
 if command -v go >/dev/null 2>&1; then
-  go test ./agent ./server ./routers ./internal/agents ./internal/shards ./internal/worldstate ./internal/runtimedriver ./internal/deploymentprofile ./internal/topology ./internal/roomprovision ./internal/distributedbackup ./internal/gameupdate -count=1
+  DST_ADMIN_CONFIG="$repo/deploy/systemd/local.conf.example" \
+    go test ./agent ./server ./routers ./internal/agents ./internal/shards ./internal/worldstate ./internal/runtimedriver ./internal/deploymentprofile ./internal/topology ./internal/roomprovision ./internal/distributedbackup ./internal/gameupdate -count=1
 else
   docker run --rm \
     --mount "type=bind,src=$repo,dst=/src,readonly" \
     --workdir /src \
+    --env DST_ADMIN_CONFIG=/src/deploy/systemd/local.conf.example \
     golang:1.25-bookworm \
     go test ./agent ./server ./routers ./internal/agents ./internal/shards ./internal/worldstate ./internal/runtimedriver ./internal/deploymentprofile ./internal/topology ./internal/roomprovision ./internal/distributedbackup ./internal/gameupdate -count=1
 fi
