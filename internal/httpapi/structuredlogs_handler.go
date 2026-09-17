@@ -201,7 +201,7 @@ func structuredLogFailure(c *gin.Context, err error) {
 	case errors.Is(err, structuredlogs.ErrBuiltInRule):
 		Failure(c, http.StatusConflict, "BUILTIN_LOG_RULE", "内建日志规则不能删除，可以停用或调整", nil)
 	case errors.Is(err, structuredlogs.ErrRoomNotManaged):
-		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "接管房间后才能使用结构化日志", nil)
+		Failure(c, http.StatusConflict, "ROOM_UNAVAILABLE", "房间当前不可用，请检查运行节点与拓扑状态", nil)
 	case errors.Is(err, logstream.ErrLogNotFound):
 		Failure(c, http.StatusNotFound, "LOG_NOT_FOUND", "该分片还没有生成服务器日志", nil)
 	case errors.Is(err, logstream.ErrUnsafeLog), errors.Is(err, rooms.ErrUnsafePath), errors.Is(err, rooms.ErrInvalidID):

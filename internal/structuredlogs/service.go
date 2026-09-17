@@ -423,7 +423,8 @@ func stripSourcePrefixes(lines []string) string {
 
 func isStructuredLogNoise(value string) bool {
 	content := strings.TrimSpace(stripSourcePrefix(value))
-	return content == "" || strings.Trim(content, "#") == ""
+	return content == "" || strings.Trim(content, "#") == "" ||
+		strings.Contains(content, "RemoteCommandInput:") && strings.Contains(content, "DSTAdmin")
 }
 
 func matches(rule compiledRule, sample string) bool {

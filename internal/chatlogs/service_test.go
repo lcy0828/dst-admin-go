@@ -140,6 +140,44 @@ func TestListKeepsShardSpecificWhispersWhileMergingSharedMessages(t *testing.T) 
 	}
 }
 
+func TestListDeduplicatesSharedChatUsingRealTimeWhenShardUptimesDiffer(t *testing.T) {
+	masterStartedAt := time.Date(2026, time.August, 23, 11, 8, 35, 0, time.UTC)
+	cavesStartedAt := time.Date(2026, time.August, 23, 11, 10, 24, 0, time.UTC)
+	service, err := NewService(chatCatalog{managed: true}, chatSnapshots{value: logstream.RoomSnapshot{
+		RoomID: "room", Available: 2,
+		Worlds: []logstream.WorldSnapshot{
+			{
+				WorldID: "master", WorldName: "Master", WorldRole: rooms.WorldRoleMaster,
+				Snapshot: &logstream.Snapshot{StartedAt: masterStartedAt, Lines: []logstream.Line{
+					{Text: "[00:06:03]: [Say] (KU_ONE) lcy: 123"},
+				}},
+			},
+			{
+				WorldID: "caves", WorldName: "Caves", WorldRole: rooms.WorldRoleCaves,
+				Snapshot: &logstream.Snapshot{StartedAt: cavesStartedAt, Lines: []logstream.Line{
+					{Text: "[00:04:15]: [Say] (KU_ONE) lcy: 123"},
+				}},
+			},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := service.List(context.Background(), "room", Filter{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.Total != 1 || list.Counts[KindSay] != 1 || len(list.Items) != 1 {
+		t.Fatalf("chat list=%#v", list)
+	}
+	if len(list.Items[0].Sources) != 2 || list.Items[0].Sources[0].WorldRole != rooms.WorldRoleMaster {
+		t.Fatalf("sources=%#v", list.Items[0].Sources)
+	}
+	if list.Items[0].OccurredAt == nil || !list.Items[0].OccurredAt.Equal(masterStartedAt.Add(6*time.Minute+3*time.Second)) {
+		t.Fatalf("occurredAt=%v", list.Items[0].OccurredAt)
+	}
+}
+
 func TestListRequiresManagedRoom(t *testing.T) {
 	service, err := NewService(chatCatalog{managed: false}, chatSnapshots{})
 	if err != nil {

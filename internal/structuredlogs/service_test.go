@@ -79,6 +79,28 @@ func TestServiceRefreshClassifiesAndQueriesStructuredLogs(t *testing.T) {
 	}
 }
 
+func TestServiceIgnoresManagedCommandEchoButKeepsRuntimeErrorOutput(t *testing.T) {
+	store := newStructuredLogStore(t)
+	service, err := NewService(structuredLogCatalog{managed: true}, structuredRawLogs{snapshots: map[string]logstream.Snapshot{
+		"master": {Lines: []logstream.Line{
+			{Cursor: 10, Text: `[00:00:01]: RemoteCommandInput: "local runtime=rawget(_G,"DSTAdmin"); print("[DST-ADMIN-RUNTIME ERROR] code=REFRESH_UNAVAILABLE")"`},
+			{Cursor: 20, Text: "[00:00:02]: [DST-ADMIN-RUNTIME ERROR] code=REFRESH_UNAVAILABLE"},
+			{Cursor: 30, Text: "[00:00:03]: ordinary detail"},
+		}},
+	}}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.RefreshWorld(context.Background(), "room", "master")
+	if err != nil || result.Count != 2 {
+		t.Fatalf("refresh=%#v err=%v", result, err)
+	}
+	errorsList, err := service.List("room", ListFilter{Type: TypeError, Limit: 50})
+	if err != nil || errorsList.Total != 1 || errorsList.Items[0].SourceCursor != 20 {
+		t.Fatalf("errors=%#v err=%v", errorsList, err)
+	}
+}
+
 func TestServiceRuleValidationTestingAndCancellation(t *testing.T) {
 	store := newStructuredLogStore(t)
 	service, err := NewService(structuredLogCatalog{managed: true}, structuredRawLogs{snapshots: map[string]logstream.Snapshot{"master": {Lines: []logstream.Line{{Text: "spawned deerclops"}}}}}, store)

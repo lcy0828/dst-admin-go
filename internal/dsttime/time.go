@@ -11,7 +11,7 @@ import (
 const wallClockLayout = "Mon Jan 2 15:04:05 2006"
 
 var relativeClockPattern = regexp.MustCompile(`^(\d{2,}):([0-5]\d):([0-5]\d)$`)
-var startTimeLinePattern = regexp.MustCompile(`Current time:\s+([A-Za-z]+ [A-Za-z]+ \d{1,2} \d{2}:\d{2}:\d{2} \d{4})`)
+var startTimeLinePattern = regexp.MustCompile(`Current time:\s+([A-Za-z]+\s+[A-Za-z]+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})`)
 
 // ParseStartTime parses DST's timezone-less Current time wall clock in the
 // local timezone used by the DST process.

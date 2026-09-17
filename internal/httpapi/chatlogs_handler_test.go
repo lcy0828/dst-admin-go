@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"dont/internal/chatlogs"
+	"dont/internal/jobs"
+	"dont/internal/rooms"
 
 	"github.com/gin-gonic/gin"
 )
@@ -43,4 +45,52 @@ func TestChatLogHTTPListAndValidation(t *testing.T) {
 
 	response = performJSON(router, http.MethodGet, "/api/v2/rooms/room/chat-logs?kind=invalid", nil, nil, "")
 	assertAPIError(t, response, http.StatusUnprocessableEntity, "INVALID_CHAT_LOG_FILTER")
+}
+
+type blockingChatRepair struct {
+	chatLogHandlerService
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingChatRepair) RepairTarget(id string) (rooms.Room, error) {
+	return rooms.Room{ID: id, Name: "Room", Managed: true}, nil
+}
+func (s *blockingChatRepair) RepairRoom(ctx context.Context, id string) (chatlogs.SyncResult, error) {
+	close(s.started)
+	select {
+	case <-s.release:
+		return chatlogs.SyncResult{}, nil
+	case <-ctx.Done():
+		return chatlogs.SyncResult{}, ctx.Err()
+	}
+}
+func TestChatRepairHTTPCoalescesAndCancelsJob(t *testing.T) {
+	router, jobService := newStructuredLogHandlerApp(t)
+	repair := &blockingChatRepair{started: make(chan struct{}), release: make(chan struct{})}
+	NewChatLogHandler(repair, jobService).Register(router.Group("/api/v2"))
+	first := performJSON(router, http.MethodPost, "/api/v2/rooms/room/chat-logs/actions/repair", nil, nil, "")
+	assertStatus(t, first, http.StatusAccepted)
+	id := responseData(t, first)["id"].(string)
+	<-repair.started
+	second := performJSON(router, http.MethodPost, "/api/v2/rooms/room/chat-logs/actions/repair", nil, nil, "")
+	assertStatus(t, second, http.StatusAccepted)
+	if responseData(t, second)["id"] != id {
+		t.Fatal("duplicate job submitted")
+	}
+	if _, err := jobService.Cancel(id); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		job, err := jobService.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.Status == jobs.StatusCanceled {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("job did not cancel")
 }

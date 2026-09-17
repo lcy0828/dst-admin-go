@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -36,21 +37,40 @@ type SnapshotReader interface {
 }
 
 type Service struct {
-	rooms RoomCatalog
-	logs  SnapshotReader
+	rooms       RoomCatalog
+	logs        SnapshotReader
+	store       *Store
+	generations GenerationReader
+	syncLocksMu sync.Mutex
+	syncLocks   map[string]chan struct{}
+	attemptsMu  sync.Mutex
+	attempts    map[string]time.Time
 }
 
 type parsedEntry struct {
 	Entry
-	seconds     int
-	primaryRole rooms.WorldRole
+	seconds      int
+	sourceCursor int64
+	primaryRole  rooms.WorldRole
+	timeVersion  int
 }
 
-func NewService(roomCatalog RoomCatalog, logs SnapshotReader) (*Service, error) {
+func NewService(roomCatalog RoomCatalog, logs SnapshotReader, options ...ServiceOption) (*Service, error) {
 	if roomCatalog == nil || logs == nil {
 		return nil, errors.New("rooms and chat logs are required")
 	}
-	return &Service{rooms: roomCatalog, logs: logs}, nil
+	service := &Service{
+		rooms: roomCatalog, logs: logs, syncLocks: make(map[string]chan struct{}), attempts: make(map[string]time.Time),
+	}
+	for _, option := range options {
+		if option == nil {
+			return nil, errors.New("chat log service option is required")
+		}
+		if err := option(service); err != nil {
+			return nil, err
+		}
+	}
+	return service, nil
 }
 
 func (s *Service) List(ctx context.Context, roomID string, filter Filter) (List, error) {
@@ -64,6 +84,14 @@ func (s *Service) List(ctx context.Context, roomID string, filter Filter) (List,
 	filter, err = normalizeFilter(filter)
 	if err != nil {
 		return List{}, err
+	}
+	if s.store != nil {
+		if filter.Offset == 0 && s.shouldSync(room.ID, time.Now()) {
+			syncContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+			_, _, _ = s.syncRoom(syncContext, room.ID, false)
+			cancel()
+		}
+		return s.store.List(room.ID, filter)
 	}
 	snapshot, err := s.logs.RoomChatSnapshot(ctx, room.ID, chatSnapshotTail, "")
 	if err != nil {
@@ -158,6 +186,16 @@ func (s *Service) List(ctx context.Context, roomID string, filter Filter) (List,
 	}, nil
 }
 
+func (s *Service) shouldSync(roomID string, now time.Time) bool {
+	s.attemptsMu.Lock()
+	defer s.attemptsMu.Unlock()
+	if previous := s.attempts[roomID]; !previous.IsZero() && now.Sub(previous) < 2*time.Second {
+		return false
+	}
+	s.attempts[roomID] = now
+	return true
+}
+
 func normalizeFilter(filter Filter) (Filter, error) {
 	filter.Query = strings.TrimSpace(filter.Query)
 	filter.WorldID = strings.TrimSpace(filter.WorldID)
@@ -190,7 +228,7 @@ func parseLine(roomID string, world logstream.WorldSnapshot, line logstream.Line
 			Content: payload, SourceTimestamp: fmt.Sprintf("%02d:%02d:%02d", hour, minute, second),
 			Sources: []Source{{WorldID: world.WorldID, WorldName: world.WorldName, WorldRole: world.WorldRole}},
 		},
-		seconds: seconds, primaryRole: world.WorldRole,
+		seconds: seconds, sourceCursor: line.Cursor, primaryRole: world.WorldRole,
 	}
 	if world.Snapshot != nil {
 		if occurredAt, err := dsttime.ResolveTimestamp(world.Snapshot.StartedAt, entry.SourceTimestamp); err == nil {
@@ -203,6 +241,8 @@ func parseLine(roomID string, world logstream.WorldSnapshot, line logstream.Line
 		entry.Kind = KindSay
 	case "whisper":
 		entry.Kind = KindWhisper
+	case "announcement":
+		entry.Kind = KindAnnouncement
 	default:
 		lower := strings.ToLower(label)
 		if !strings.HasSuffix(lower, " announcement") {
@@ -250,6 +290,9 @@ func normalizeAnnouncementType(value string) string {
 
 func deduplicate(entries []parsedEntry) []parsedEntry {
 	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].OccurredAt != nil && entries[j].OccurredAt != nil && !entries[i].OccurredAt.Equal(*entries[j].OccurredAt) {
+			return entries[i].OccurredAt.Before(*entries[j].OccurredAt)
+		}
 		if entries[i].seconds != entries[j].seconds {
 			return entries[i].seconds < entries[j].seconds
 		}
@@ -264,10 +307,7 @@ func deduplicate(entries []parsedEntry) []parsedEntry {
 		for index := len(indices) - 1; index >= 0; index-- {
 			candidateIndex := indices[index]
 			candidate := unique[candidateIndex]
-			if entry.seconds-candidate.seconds > dedupWindow {
-				break
-			}
-			if !hasSource(candidate.Sources, entry.Sources[0].WorldID) {
+			if withinDedupWindow(candidate, entry) && !hasSource(candidate.Sources, entry.Sources[0].WorldID) {
 				matched = candidateIndex
 				break
 			}
@@ -288,6 +328,21 @@ func deduplicate(entries []parsedEntry) []parsedEntry {
 		}
 	}
 	return unique
+}
+
+func withinDedupWindow(left, right parsedEntry) bool {
+	if left.OccurredAt != nil && right.OccurredAt != nil {
+		delta := right.OccurredAt.Sub(*left.OccurredAt)
+		if delta < 0 {
+			delta = -delta
+		}
+		return delta <= time.Duration(dedupWindow)*time.Second
+	}
+	delta := right.seconds - left.seconds
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= dedupWindow
 }
 
 func entryIdentity(entry parsedEntry) string {

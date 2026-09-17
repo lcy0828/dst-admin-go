@@ -25,3 +25,14 @@ func TestResolveTimestampRejectsInvalidRuntime(t *testing.T) {
 		}
 	}
 }
+
+func TestFindStartTimeAcceptsSpacePaddedSingleDigitDay(t *testing.T) {
+	value, ok := FindStartTime("[00:00:00]: Current time: Sun Aug  9 22:14:38 2026\n")
+	if !ok {
+		t.Fatal("DST space-padded startup date was not parsed")
+	}
+	want := time.Date(2026, time.August, 9, 22, 14, 38, 0, time.Local)
+	if !value.Equal(want) {
+		t.Fatalf("start time=%s want=%s", value, want)
+	}
+}

@@ -50,10 +50,12 @@ type Entry struct {
 	Content          string     `json:"content"`
 	SourceTimestamp  string     `json:"sourceTimestamp"`
 	OccurredAt       *time.Time `json:"occurredAt,omitempty"`
+	TimeEstimated    bool       `json:"timeEstimated,omitempty"`
 	Sources          []Source   `json:"sources"`
 }
 
 type List struct {
+	HistoryHealth
 	Items             []Entry      `json:"items"`
 	Total             int          `json:"total"`
 	Counts            map[Kind]int `json:"counts"`
@@ -66,4 +68,8 @@ type List struct {
 	StartedAt         *time.Time   `json:"startedAt,omitempty"`
 	UpdatedAt         *time.Time   `json:"updatedAt,omitempty"`
 	Problems          []Problem    `json:"problems"`
+	HistoryAvailable  bool         `json:"historyAvailable"`
+	SyncState         string       `json:"syncState,omitempty"`
+	SyncMessage       string       `json:"syncMessage,omitempty"`
+	LastSyncedAt      *time.Time   `json:"lastSyncedAt,omitempty"`
 }
