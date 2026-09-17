@@ -33,6 +33,7 @@ const (
 	stopTimeout           = 2 * time.Minute
 	ModeCold              = "cold-consistent"
 	ModeHot               = "hot-consistent"
+	ModeAutomatic         = "automatic"
 )
 
 type RoomCatalog interface {
@@ -127,7 +128,7 @@ func (c *Coordinator) CreateWithMode(ctx context.Context, roomID, name, kind, so
 	if mode == "" {
 		mode = ModeCold
 	}
-	if mode != ModeCold && mode != ModeHot {
+	if mode != ModeCold && mode != ModeHot && mode != ModeAutomatic {
 		return Set{}, ErrInvalidInput
 	}
 	ctx, releaseRoom, err := roomops.Acquire(ctx, roomID)
@@ -168,6 +169,13 @@ func (c *Coordinator) createUsingLease(ctx context.Context, roomID, name, kind, 
 	room, runtimeParts, revision, running, err := c.plan(ctx, roomID)
 	if err != nil {
 		return Set{}, err
+	}
+	// Choose under the room lease so the observed running set stays authoritative.
+	if mode == ModeAutomatic {
+		mode = ModeCold
+		if len(runtimeParts) > 0 && len(running) == len(runtimeParts) {
+			mode = ModeHot
+		}
 	}
 	set, operation, err := c.initializeSet(room, runtimeParts, revision, running, name, kind, sourceJobID, operationID, *lease, mode)
 	if err != nil {
