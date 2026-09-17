@@ -47,6 +47,7 @@ type ProgressUpdate struct {
 
 // ProgressDetail describes the current item, independently of workflow progress.
 type ProgressDetail struct {
+	ObservedAt     *time.Time                      `json:"observedAt,omitempty"`
 	Stage          string                          `json:"stage,omitempty"`
 	WorkshopID     string                          `json:"workshopId,omitempty"`
 	CurrentItem    int                             `json:"currentItem,omitempty"`

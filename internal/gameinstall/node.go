@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 
 	"dont/internal/dstserver"
 	"dont/internal/installationlock"
@@ -353,9 +354,9 @@ func (o Options) Install(ctx context.Context) (shared.GameInstallationReport, er
 	if usage.Free < 6<<30 {
 		return before, errors.New("安装磁盘至少需要 6 GiB 可用空间")
 	}
-	operationprogress.Report(ctx, operationprogress.Update{Stage: "game.install", Percent: 10, Message: "正在运行 SteamCMD 下载并校验游戏服务端"})
+	operationprogress.Report(ctx, operationprogress.Update{Stage: "game.install", Percent: 0, Message: "正在连接 Steam 并准备安装"})
 	args := []string{"+force_install_dir", root, "+login", "anonymous", "+app_update", dstserver.AppIDDedicatedServer, "validate", "+quit"}
-	out := &limitedOutput{}
+	out := &installOutput{ctx: ctx, now: time.Now}
 	if o.Runner != nil {
 		err = o.Runner.Run(ctx, o.steamCMD(), args, out)
 	} else {
@@ -364,8 +365,9 @@ func (o Options) Install(ctx context.Context) (shared.GameInstallationReport, er
 		command.Stderr = out
 		err = command.Run()
 	}
+	logText := out.finish()
 	if err != nil {
-		return o.Inspect(), fmt.Errorf("SteamCMD 安装失败: %w\n%s", err, out.text)
+		return o.Inspect(), fmt.Errorf("SteamCMD 安装失败: %w\n%s", err, logText)
 	}
 	after := o.Inspect()
 	if !after.Installed || after.GameVersion == "" {

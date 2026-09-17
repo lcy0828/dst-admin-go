@@ -11097,6 +11097,10 @@ components:
       additionalProperties: false
       description: Current phase and cumulative per-Mod/world results. Transfer bytes describe the current Mod, not the whole batch.
       properties:
+        observedAt:
+          type: string
+          format: date-time
+          description: Time of the latest progress sample, used to hide stale throughput estimates.
         stage:
           type: string
         workshopId:
