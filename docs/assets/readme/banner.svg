@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-labelledby="title desc">
+  <title id="title">DST Admin</title>
+  <desc id="desc">Don't Starve Together server management. A campfire lights a forest beneath the stars.</desc>
+  <defs>
+    <linearGradient id="sky" x2="1" y2="1"><stop stop-color="#17251e"/><stop offset="1" stop-color="#101914"/></linearGradient>
+    <radialGradient id="glow"><stop stop-color="#eaa34c" stop-opacity=".2"/><stop offset="1" stop-color="#eaa34c" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect width="1200" height="300" rx="20" fill="url(#sky)"/>
+  <rect x=".5" y=".5" width="1199" height="299" rx="20" fill="none" stroke="#38463a"/>
+  <g fill="#c4b78e" opacity=".55">
+    <circle cx="698" cy="57" r="2"/><circle cx="758" cy="109" r="1.4"/><circle cx="875" cy="35" r="1.5"/>
+    <circle cx="977" cy="69" r="2"/><circle cx="1090" cy="39" r="1.5"/><circle cx="1118" cy="116" r="2"/>
+    <circle cx="832" cy="86" r="1.4"/><circle cx="1044" cy="145" r="1.4"/>
+  </g>
+  <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif">
+    <text x="66" y="79" fill="#d6b778" font-size="16" font-weight="600" letter-spacing="4">DON'T STARVE TOGETHER</text>
+    <text x="61" y="171" fill="#faf5e9" font-size="82" font-weight="750" letter-spacing="-3">DST Admin</text>
+    <path d="M66 203h42" stroke="#d6b778" stroke-width="3"/>
+    <text x="66" y="245" fill="#bbc5b8" font-size="22" letter-spacing=".5">Your worlds. One place.</text>
+  </g>
+  <ellipse cx="938" cy="217" rx="183" ry="83" fill="url(#glow)"/>
+  <g fill="#21362a" stroke="#476047" stroke-width="1.5" stroke-linejoin="round">
+    <path d="M734 231V115m0-22-33 52h17l-30 45h25l-25 35h92l-25-35h25l-30-45h17Z"/>
+    <path d="M820 242V143m0-29-27 44h14l-24 39h19l-23 36h82l-23-36h19l-24-39h14Z"/>
+    <path d="M1095 243V94m0-23-36 62h18l-33 53h25l-28 47h107l-28-47h25l-33-53h18Z"/>
+  </g>
+  <g fill="none" stroke="#60705a" stroke-width="1.5" stroke-linecap="round">
+    <path d="M672 248q89-19 164-3m187 1q70-13 119 0"/>
+    <path d="m867 245 3-9 5 7m155-6 5-10 4 9"/>
+  </g>
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <path d="m903 249 62-12m-61 0 60 12" fill="none" stroke="#a98053" stroke-width="8"/>
+    <path d="M935 230c-36-2-30-28-20-44 1 11 7 12 7 12 0-24 20-33 14-58 35 28 21 42 24 51 5-4 7-8 7-13 20 28 9 53-32 52Z" fill="#e5a451"/>
+    <path d="M937 229c-19 0-19-17-10-27 0 7 4 9 4 9 0-10 7-14 8-24 16 16 19 39-2 42Z" fill="#fbe0a2"/>
+    <path d="m935 126 3-10m20 18 4-7m-49 22-4-7" fill="none" stroke="#e5a451" stroke-width="3"/>
+  </g>
+</svg>
