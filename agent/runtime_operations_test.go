@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"dont/internal/runtimefiles"
 	"dont/internal/shards"
 	"dont/shared"
 )
@@ -22,6 +24,67 @@ func runtimeOperationRequest(action shared.RuntimeAction) shared.RuntimeOperatio
 		ProtocolVersion: shared.RuntimeOperationProtocolVersion, OperationID: "runtime-operation-1", OperationKey: "runtime-key-1",
 		InstallationID: "default", Action: action, Cluster: "Cluster_1", Shard: "Master", TopologyRevision: "revision-1",
 		LeaseID: "lease-1", FencingToken: 1, LeaseExpiresAt: &expires,
+	}
+}
+
+func TestRuntimeModConfigurationWritesDirectlyAndReportsRevisionConflict(t *testing.T) {
+	agent, installation := newShardOperationAgent(t, &fakeShardRuntime{})
+	root := filepath.Join(installation.SavePath, "Cluster_1", "Master")
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	before := []byte("return {}\n")
+	after := []byte("return { enabled = true }\n")
+	path := filepath.Join(root, "modoverrides.lua")
+	if err := os.WriteFile(path, before, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(before)
+	request := runtimeOperationRequest(shared.RuntimeActionModConfigurationWrite)
+	request.Configuration = &shared.RuntimeConfigurationRequest{
+		Scope: runtimefiles.ConfigurationScopeMod, ExpectedSHA256: hex.EncodeToString(digest[:]), Data: after,
+	}
+	result, err := agent.executeRuntimeOperation(string(request.Action), &request, 10)
+	if err != nil || result.Configuration == nil || !result.Configuration.Complete {
+		t.Fatalf("write result=%#v error=%v", result, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(data, after) {
+		t.Fatalf("written=%q error=%v", data, err)
+	}
+	if _, err := os.Stat(agent.Config.OperationStateFile + ".configurations"); !os.IsNotExist(err) {
+		t.Fatalf("direct write created a publication journal: %v", err)
+	}
+	replayed, err := agent.executeRuntimeOperation(string(request.Action), &request, 10)
+	if err != nil || !replayed.Idempotent {
+		t.Fatalf("replay=%#v error=%v", replayed, err)
+	}
+	request.OperationID, request.OperationKey = "stale-mod-config", "stale-mod-config-key"
+	result, err = agent.executeRuntimeOperation(string(request.Action), &request, 10)
+	if err == nil || result.Configuration == nil || !result.Configuration.RevisionConflict || result.Configuration.Complete {
+		t.Fatalf("conflict=%#v error=%v", result, err)
+	}
+	if result.Configuration.SHA256 == request.Configuration.ExpectedSHA256 {
+		t.Fatal("conflict did not report the current file revision")
+	}
+}
+
+func TestModConfigurationWriteRequiresRevisionAndDedicatedPayload(t *testing.T) {
+	request := runtimeOperationRequest(shared.RuntimeActionModConfigurationWrite)
+	request.Configuration = &shared.RuntimeConfigurationRequest{
+		Scope: runtimefiles.ConfigurationScopeMod, ExpectedSHA256: strings.Repeat("a", 64), Data: []byte("return {}"),
+	}
+	if err := validateConfigurationOperationPayload(request); err != nil {
+		t.Fatal(err)
+	}
+	request.Configuration.ExpectedSHA256 = ""
+	if err := validateConfigurationOperationPayload(request); err == nil {
+		t.Fatal("write without revision was accepted")
+	}
+	request.Configuration.ExpectedSHA256 = strings.Repeat("a", 64)
+	request.Configuration.PublicationID = "unexpected-publication"
+	if err := validateConfigurationOperationPayload(request); err == nil {
+		t.Fatal("mixed publication payload was accepted")
 	}
 }
 
@@ -37,6 +100,40 @@ func TestRuntimeConsoleSendIsIdempotent(t *testing.T) {
 	second, err := agent.executeRuntimeOperation(string(request.Action), &request, 10)
 	if err != nil || !second.Idempotent || len(runtimeControl.calls) != 1 {
 		t.Fatalf("second=%#v calls=%v err=%v", second, runtimeControl.calls, err)
+	}
+}
+
+func TestRuntimeConsoleSendPublishesCommandDocumentBeforeTrigger(t *testing.T) {
+	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}}
+	agent, installation := newShardOperationAgent(t, runtimeControl)
+	directory := filepath.Join(installation.SavePath, "Cluster_1", "Master", "dst-admin")
+	if err := os.MkdirAll(directory, 0750); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"requestId":"agent-document-1234","action":"console.execute","arguments":{"script":"return true"}}`)
+	digest := sha256.Sum256(data)
+	request := runtimeOperationRequest(shared.RuntimeActionConsoleSend)
+	request.Console = &shared.RuntimeConsoleRequest{
+		Mode: shared.ConsoleModeManaged, Command: `DSTAdmin.Commands.ExecuteFile("agent-document-1234","console.execute")`,
+		CommandDocument: &shared.RuntimeCommandDocument{RequestID: "agent-document-1234", SHA256: hex.EncodeToString(digest[:]), Data: data},
+	}
+	result, err := agent.executeRuntimeOperation(string(request.Action), &request, 10)
+	if err != nil || result.Outcome != shared.RuntimeOutcomeSent || len(runtimeControl.calls) != 1 {
+		t.Fatalf("result=%#v calls=%v err=%v", result, runtimeControl.calls, err)
+	}
+	written, err := os.ReadFile(filepath.Join(directory, "command-requests", "agent-document-1234.json"))
+	if err != nil || string(written) != string(data) {
+		t.Fatalf("written=%q err=%v", written, err)
+	}
+
+	invalid := runtimeOperationRequest(shared.RuntimeActionConsoleSend)
+	invalid.OperationID, invalid.OperationKey = "runtime-document-invalid", "runtime-document-invalid-key"
+	invalid.Console = &shared.RuntimeConsoleRequest{
+		Mode: shared.ConsoleModeManaged, Command: `DSTAdmin.Commands.ExecuteFile("agent-document-1234","console.execute")`,
+		CommandDocument: &shared.RuntimeCommandDocument{RequestID: "agent-document-1234", SHA256: "00", Data: data},
+	}
+	if _, err := agent.executeRuntimeOperation(string(invalid.Action), &invalid, 10); err == nil || len(runtimeControl.calls) != 1 {
+		t.Fatalf("invalid document err=%v calls=%v", err, runtimeControl.calls)
 	}
 }
 
@@ -118,6 +215,39 @@ func TestRuntimeReadsLogsAndFixedArtifacts(t *testing.T) {
 	if !chatResult.Logs.StartedAt.Equal(wantStartedAt) {
 		t.Fatalf("chat startedAt=%s want=%s", chatResult.Logs.StartedAt, wantStartedAt)
 	}
+	history := runtimeOperationRequest(shared.RuntimeActionChatLogsList)
+	history.OperationID = "runtime-operation-chat-history-list"
+	history.OperationKey, history.LeaseID, history.FencingToken, history.LeaseExpiresAt = "", "", 0, nil
+	history.ChatLogs = &shared.RuntimeChatLogRequest{}
+	historyResult, err := agent.executeRuntimeOperation(string(history.Action), &history, 10)
+	if err != nil || historyResult.ChatLogs == nil || len(historyResult.ChatLogs.Generations) != 1 {
+		t.Fatalf("chat history=%#v err=%v", historyResult.ChatLogs, err)
+	}
+	historyRead := runtimeOperationRequest(shared.RuntimeActionChatLogsRead)
+	historyRead.OperationID = "runtime-operation-chat-history-read"
+	historyRead.OperationKey, historyRead.LeaseID, historyRead.FencingToken, historyRead.LeaseExpiresAt = "", "", 0, nil
+	historyRead.ChatLogs = &shared.RuntimeChatLogRequest{
+		GenerationID: historyResult.ChatLogs.Generations[0].ID, Cursor: 0, MaxBytes: 1024, MaxLines: 10,
+	}
+	historyReadResult, err := agent.executeRuntimeOperation(string(historyRead.Action), &historyRead, 10)
+	if err != nil || historyReadResult.ChatLogs == nil || len(historyReadResult.ChatLogs.Lines) != 1 || !historyReadResult.ChatLogs.Complete {
+		t.Fatalf("chat history read=%#v err=%v", historyReadResult.ChatLogs, err)
+	}
+
+	// The timing extension travels through the same read-only Runtime action.
+	chatTime := wantStartedAt.Add(time.Minute)
+	if err := os.Chtimes(filepath.Join(worldRoot, "server_chat_log.txt"), chatTime, chatTime); err != nil {
+		t.Fatal(err)
+	}
+	historyRead.OperationID = "runtime-operation-chat-history-times"
+	historyRead.ChatLogs.ResolveTimes = true
+	timed, err := agent.executeRuntimeOperation(string(historyRead.Action), &historyRead, 10)
+	if err != nil || timed.ChatLogs == nil || timed.ChatLogs.TimeVersion != shared.ChatTimeVersion || !timed.ChatLogs.TimesReady || len(timed.ChatLogs.Times) != 1 {
+		t.Fatalf("timed chat=%#v err=%v", timed.ChatLogs, err)
+	}
+	if at := timed.ChatLogs.Times[0].OccurredAt; at == nil || !at.Equal(wantStartedAt.Add(time.Second)) {
+		t.Fatalf("timed chat date=%v", at)
+	}
 
 	artifacts := runtimeOperationRequest(shared.RuntimeActionReadArtifacts)
 	artifacts.OperationID = "runtime-operation-2"
@@ -126,6 +256,120 @@ func TestRuntimeReadsLogsAndFixedArtifacts(t *testing.T) {
 	artifactResult, err := agent.executeRuntimeOperation(string(artifacts.Action), &artifacts, 10)
 	if err != nil || artifactResult.Artifacts == nil || len(artifactResult.Artifacts.Artifacts) != 1 || string(artifactResult.Artifacts.Artifacts[0].Data) != `{"ready":true}` {
 		t.Fatalf("artifacts=%#v err=%v", artifactResult.Artifacts, err)
+	}
+}
+
+func TestRuntimeReadsAllowlistedConfigurationWithoutMutationLease(t *testing.T) {
+	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeStopped}}
+	agent, installation := newShardOperationAgent(t, runtimeControl)
+	roomRoot := filepath.Join(installation.SavePath, "Cluster_1")
+	if err := os.WriteFile(filepath.Join(roomRoot, "cluster.ini"), []byte("[NETWORK]\ncluster_name=Remote\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(roomRoot, "blocklist.txt"), []byte("KU_BLOCKED\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(roomRoot, "cluster_token.txt"), []byte("remote-secret-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := runtimeOperationRequest(shared.RuntimeActionConfigurationRead)
+	request.OperationKey, request.LeaseID, request.FencingToken, request.LeaseExpiresAt = "", "", 0, nil
+	request.Configuration = &shared.RuntimeConfigurationRequest{Scope: runtimefiles.ConfigurationScopeShared}
+	result, err := agent.executeRuntimeOperation(string(request.Action), &request, 10)
+	if err != nil || result.Outcome != shared.RuntimeOutcomeObserved || result.Configuration == nil {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if err := runtimefiles.ValidateConfiguration(runtimefiles.ConfigurationScopeShared, *result.Configuration); err != nil {
+		t.Fatal(err)
+	}
+
+	statusRequest := runtimeOperationRequest(shared.RuntimeActionConfigurationRead)
+	statusRequest.OperationKey, statusRequest.LeaseID, statusRequest.FencingToken, statusRequest.LeaseExpiresAt = "", "", 0, nil
+	statusRequest.Configuration = &shared.RuntimeConfigurationRequest{Scope: runtimefiles.ConfigurationScopeTokenStatus}
+	statusResult, err := agent.executeRuntimeOperation(string(statusRequest.Action), &statusRequest, 10)
+	if err != nil || statusResult.Configuration == nil || statusResult.Configuration.TokenStatus == nil {
+		t.Fatalf("token status=%#v err=%v", statusResult.Configuration, err)
+	}
+	if err := runtimefiles.ValidateConfiguration(runtimefiles.ConfigurationScopeTokenStatus, *statusResult.Configuration); err != nil {
+		t.Fatal(err)
+	}
+	if encoded, err := json.Marshal(statusResult); err != nil || strings.Contains(string(encoded), "remote-secret-token") {
+		t.Fatalf("token leaked through status response: %s, %v", encoded, err)
+	}
+
+	revealRequest := runtimeOperationRequest(shared.RuntimeActionClusterTokenReveal)
+	revealRequest.OperationKey, revealRequest.LeaseID, revealRequest.FencingToken, revealRequest.LeaseExpiresAt = "", "", 0, nil
+	revealResult, err := agent.executeRuntimeOperation(string(revealRequest.Action), &revealRequest, 10)
+	if err != nil || revealResult.ClusterToken == nil || revealResult.ClusterToken.Token != "remote-secret-token" {
+		t.Fatalf("token reveal=%#v err=%v", revealResult.ClusterToken, err)
+	}
+	if err := runtimefiles.ValidateClusterTokenReveal(*revealResult.ClusterToken); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeRoomRecoveryMovesTrustedRoomAndIsIdempotent(t *testing.T) {
+	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeStopped}}
+	agent, installation := newShardOperationAgent(t, runtimeControl)
+	request := runtimeOperationRequest(shared.RuntimeActionRoomRecoveryMove)
+
+	first, err := agent.executeRuntimeOperation(string(request.Action), &request, 10)
+	if err != nil || first.RoomRecovery == nil || first.RoomRecovery.RecoveryRef == "" || first.Idempotent {
+		t.Fatalf("first=%#v err=%v", first, err)
+	}
+	if _, err := os.Stat(filepath.Join(installation.SavePath, "Cluster_1")); !os.IsNotExist(err) {
+		t.Fatalf("source room still exists: %v", err)
+	}
+	recoveryPath := filepath.Join(installation.SavePath, filepath.FromSlash(first.RoomRecovery.RecoveryRef))
+	if info, err := os.Stat(recoveryPath); err != nil || !info.IsDir() {
+		t.Fatalf("recovery path=%q info=%#v err=%v", recoveryPath, info, err)
+	}
+
+	second, err := agent.executeRuntimeOperation(string(request.Action), &request, 10)
+	if err != nil || !second.Idempotent || second.RoomRecovery == nil || second.RoomRecovery.RecoveryRef != first.RoomRecovery.RecoveryRef {
+		t.Fatalf("second=%#v err=%v", second, err)
+	}
+
+	invalid := runtimeOperationRequest(shared.RuntimeActionRoomRecoveryMove)
+	invalid.OperationID, invalid.OperationKey = "runtime-room-invalid", "runtime-room-invalid-key"
+	invalid.Cluster = "../outside"
+	if _, err := agent.executeRuntimeOperation(string(invalid.Action), &invalid, 10); err == nil {
+		t.Fatal("path-escaping room recovery was accepted")
+	}
+}
+
+func TestRuntimeChatHistoryRequestRejectsUnrelatedPayloads(t *testing.T) {
+	valid := runtimeOperationRequest(shared.RuntimeActionChatLogsList)
+	valid.OperationKey, valid.LeaseID, valid.FencingToken, valid.LeaseExpiresAt = "", "", 0, nil
+	valid.ChatLogs = &shared.RuntimeChatLogRequest{}
+	if err := validateRuntimeOperationRequest(string(valid.Action), valid, 30, time.Now().UTC()); err != nil {
+		t.Fatalf("valid chat history request rejected: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*shared.RuntimeOperationRequest)
+	}{
+		{name: "network", mutate: func(request *shared.RuntimeOperationRequest) {
+			request.Network = &shared.RuntimeNetworkRequest{Region: shared.RuntimeNetworkRegionCN}
+		}},
+		{name: "cpu", mutate: func(request *shared.RuntimeOperationRequest) {
+			request.CPU = &shared.RuntimeCPURequest{Policy: shared.RuntimeCPUPolicyNone}
+		}},
+		{name: "configuration", mutate: func(request *shared.RuntimeOperationRequest) {
+			request.Configuration = &shared.RuntimeConfigurationRequest{PublicationID: "publication-1"}
+		}},
+		{name: "map", mutate: func(request *shared.RuntimeOperationRequest) {
+			request.Map = &shared.RuntimeMapRequest{}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := valid
+			test.mutate(&request)
+			if err := validateRuntimeOperationRequest(string(request.Action), request, 30, time.Now().UTC()); err == nil {
+				t.Fatal("chat history request accepted an unrelated payload")
+			}
+		})
 	}
 }
 
@@ -141,6 +385,18 @@ func TestRuntimeConsoleRequestRequiresLeaseAndRejectsNewlines(t *testing.T) {
 	request.LeaseID, request.LeaseExpiresAt = "", nil
 	if _, err := agent.executeRuntimeOperation(string(request.Action), &request, 10); err == nil || !strings.Contains(err.Error(), "租约") {
 		t.Fatalf("lease error=%v", err)
+	}
+}
+
+func TestRuntimeConsoleProbeDoesNotRequireMutationLease(t *testing.T) {
+	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}}
+	agent, _ := newShardOperationAgent(t, runtimeControl)
+	request := runtimeOperationRequest(shared.RuntimeActionConsoleSend)
+	request.OperationKey, request.LeaseID, request.FencingToken, request.LeaseExpiresAt = "", "", 0, nil
+	request.Console = &shared.RuntimeConsoleRequest{Mode: shared.ConsoleModeProbe, CoalesceKey: "world-state", Command: "DSTAdmin.Refresh()"}
+	result, err := agent.executeRuntimeOperation(string(request.Action), &request, 10)
+	if err != nil || result.Outcome != shared.RuntimeOutcomeSent || len(runtimeControl.calls) != 1 {
+		t.Fatalf("result=%#v calls=%v err=%v", result, runtimeControl.calls, err)
 	}
 }
 

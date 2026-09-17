@@ -39,6 +39,12 @@ type ContainerRuntimeHost struct {
 	createMu     sync.Mutex
 }
 
+const (
+	containerSaveRoot     = "/opt/dst/saves"
+	containerServerRoot   = "/opt/dst/server"
+	containerWorkshopRoot = "/opt/dst/workshop/steamapps/workshop"
+)
+
 func NewContainerRuntimeHost(config ContainerRuntimeHostConfig) (*ContainerRuntimeHost, error) {
 	return newContainerRuntimeHost(config, nil)
 }
@@ -64,6 +70,7 @@ func newContainerRuntimeHost(config ContainerRuntimeHostConfig, cli containerCLI
 		return nil, errors.New("容器 Runtime 镜像配置无效")
 	}
 	if !trustedHostRuntimePath(config.HostSavePath) || !trustedHostRuntimePath(config.HostServerPath) || !trustedHostRuntimePath(config.HostUGCPath) ||
+		!trustedHostRuntimePath(installation.WorkshopContentPath) ||
 		pathsOverlap(config.HostSavePath, config.HostServerPath) || pathsOverlap(config.HostSavePath, config.HostUGCPath) ||
 		pathsOverlap(config.HostServerPath, config.HostUGCPath) {
 		return nil, errors.New("容器 Runtime 宿主数据路径无效或重叠")
@@ -99,10 +106,18 @@ func (h *ContainerRuntimeHost) Status(ctx context.Context, cluster, shard string
 }
 
 func (h *ContainerRuntimeHost) Start(ctx context.Context, cluster, shard string) error {
-	if err := h.ensureContainer(ctx, cluster, shard); err != nil {
+	return h.StartWithRuntimeMode(ctx, cluster, shard, shared.RuntimePerformanceModeGame)
+}
+
+func (h *ContainerRuntimeHost) StartWithRuntimeMode(ctx context.Context, cluster, shard string, runtimeMode shared.RuntimePerformanceMode) error {
+	return h.StartWithRuntimeOptions(ctx, cluster, shard, runtimeMode, shared.RuntimeLaunchOptions{})
+}
+
+func (h *ContainerRuntimeHost) StartWithRuntimeOptions(ctx context.Context, cluster, shard string, runtimeMode shared.RuntimePerformanceMode, launchOptions shared.RuntimeLaunchOptions) error {
+	if err := h.ensureContainerForRuntimeMode(ctx, cluster, shard, runtimeMode, true); err != nil {
 		return err
 	}
-	return h.control.Start(ctx, cluster, shard)
+	return h.control.StartWithRuntimeOptions(ctx, cluster, shard, runtimeMode, launchOptions)
 }
 
 func (h *ContainerRuntimeHost) Stop(ctx context.Context, cluster, shard string) error {
@@ -131,6 +146,14 @@ func (h *ContainerRuntimeHost) Cleanup(ctx context.Context, cluster, shard strin
 }
 
 func (h *ContainerRuntimeHost) ensureContainer(ctx context.Context, cluster, shard string) error {
+	return h.ensureContainerForRuntimeMode(ctx, cluster, shard, shared.RuntimePerformanceModeGame, false)
+}
+
+func (h *ContainerRuntimeHost) ensureContainerForRuntimeMode(ctx context.Context, cluster, shard string, runtimeMode shared.RuntimePerformanceMode, enforce bool) error {
+	normalized, valid := shared.NormalizeRuntimePerformanceMode(runtimeMode)
+	if !valid {
+		return errors.New("Lua 运行时模式无效")
+	}
 	h.createMu.Lock()
 	defer h.createMu.Unlock()
 	items, err := h.control.list(ctx, cluster, shard)
@@ -138,7 +161,15 @@ func (h *ContainerRuntimeHost) ensureContainer(ctx context.Context, cluster, sha
 		return err
 	}
 	if len(items) == 1 {
-		return nil
+		if !enforce || items[0].RuntimeMode == normalized && items[0].LocalMods {
+			return nil
+		}
+		if items[0].State == "running" || items[0].State == "restarting" {
+			return errors.New("分片容器正在运行，不能更换运行时或模组目录；现有世界未改变")
+		}
+		if _, err := h.control.cli.Run(ctx, "rm", "--force", items[0].ID); err != nil {
+			return fmt.Errorf("重建分片容器以切换 Lua 运行时: %w", err)
+		}
 	}
 	if len(items) > 1 {
 		return errors.New("发现多个相同 Placement 的受管分片容器")
@@ -150,6 +181,8 @@ func (h *ContainerRuntimeHost) ensureContainer(ctx context.Context, cluster, sha
 		"--label", "com.dst-admin.installation=" + h.installation.ID,
 		"--label", "com.dst-admin.cluster=" + cluster,
 		"--label", "com.dst-admin.shard=" + shard,
+		"--label", "com.dst-admin.runtime-mode=" + string(normalized),
+		"--label", "com.dst-admin.local-mods=true",
 		"--network", "host",
 		"--restart", "no",
 		"--stop-timeout", "45",
@@ -159,17 +192,21 @@ func (h *ContainerRuntimeHost) ensureContainer(ctx context.Context, cluster, sha
 		"--pids-limit", "512",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
 		"--tmpfs", "/run/dst-admin:rw,noexec,nosuid,nodev,size=16m,uid=10000,gid=10000,mode=0700",
-		"--mount", "type=bind,src=" + h.config.HostSavePath + ",dst=/data",
-		"--mount", "type=bind,src=" + h.config.HostServerPath + ",dst=/opt/dst/server,readonly",
-		"--mount", "type=bind,src=" + h.config.HostUGCPath + ",dst=/workshop,readonly",
+		"--mount", "type=bind,src=" + h.config.HostSavePath + ",dst=" + containerSaveRoot,
+		"--mount", "type=bind,src=" + h.config.HostServerPath + ",dst=" + containerServerRoot + ",readonly",
+		"--mount", "type=bind,src=" + h.config.HostUGCPath + ",dst=" + containerWorkshopRoot + ",readonly",
 		"--env", "DST_CLUSTER=" + cluster,
 		"--env", "DST_SHARD=" + shard,
-		"--env", "DST_STORAGE_ROOT=/data",
+		"--env", "DST_STORAGE_ROOT=" + containerSaveRoot,
 		"--env", "DST_CONF_DIR=.",
-		"--env", "DST_UGC_DIRECTORY=/workshop",
+		"--env", "DST_UGC_DIRECTORY=" + filepath.Join(containerSaveRoot, ".dst-admin", "runtime", "workshop", cluster, shard),
+		"--env", "DST_RUNTIME_MODE=" + string(normalized),
 	}
 	if h.config.Timezone != "" {
 		arguments = append(arguments, "--env", "TZ="+h.config.Timezone)
+	}
+	if h.installation.WorkshopContentPath != filepath.Join(containerWorkshopRoot, "content", "322330") {
+		arguments = append(arguments, "--mount", "type=bind,src="+filepath.Join(h.config.HostUGCPath, "content", "322330")+",dst="+h.installation.WorkshopContentPath+",readonly")
 	}
 	arguments = append(arguments, h.config.Image)
 	if _, err := h.control.cli.Run(ctx, arguments...); err != nil {

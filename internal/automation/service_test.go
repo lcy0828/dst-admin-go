@@ -253,45 +253,58 @@ func TestTaskCollectionsRemainJSONCollectionsWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestEnsureDefaultPlayerRefreshIsIdempotent(t *testing.T) {
+func TestEnsureDefaultPlayerRefreshCreatesOneMinuteTask(t *testing.T) {
 	service, _, _ := newAutomationTestService(t, &automationTestExecutor{})
-	created, wasCreated, err := service.EnsureDefaultPlayerRefresh("room")
-	if err != nil || !wasCreated {
-		t.Fatalf("create default refresh: task=%#v created=%v err=%v", created, wasCreated, err)
+	task, changed, err := service.EnsureDefaultPlayerRefresh("room")
+	if err != nil || !changed {
+		t.Fatalf("create default refresh: task=%#v changed=%v err=%v", task, changed, err)
 	}
-	if created.Action != ActionPlayerRefresh || created.Schedule != defaultPlayerRefreshSchedule || len(created.WorldIDs) != 0 || !created.Enabled {
-		t.Fatalf("unexpected default task: %#v", created)
+	if !task.Enabled || task.Schedule != "* * * * *" || !isDefaultPlayerRefresh(task) || len(task.WorldIDs) != 0 {
+		t.Fatalf("unexpected default task: %#v", task)
 	}
-	repeated, wasCreated, err := service.EnsureDefaultPlayerRefresh("room")
-	if err != nil || wasCreated || repeated.ID != created.ID {
-		t.Fatalf("default refresh is not idempotent: first=%#v repeated=%#v created=%v err=%v", created, repeated, wasCreated, err)
-	}
-	groups, err := service.Groups("room")
-	if err != nil || len(groups) != 1 || groups[0].Name != playerManagementGroupName || groups[0].Type != "system" {
-		t.Fatalf("unexpected default group: groups=%#v err=%v", groups, err)
+	repeated, changed, err := service.EnsureDefaultPlayerRefresh("room")
+	if err != nil || changed || repeated.ID != task.ID {
+		t.Fatalf("default refresh is not idempotent: first=%#v repeated=%#v changed=%v err=%v", task, repeated, changed, err)
 	}
 }
 
-func TestScheduledPlayerRefreshSkipsBeforePersistingRunOrJob(t *testing.T) {
-	executor := &automationPreflightExecutor{}
-	service, _, jobService := newAutomationTestService(t, executor)
-	task, _, err := service.EnsureDefaultPlayerRefresh("room")
+func TestEnsureDefaultPlayerRefreshMigratesOnceAndPreservesUserSettings(t *testing.T) {
+	service, store, _ := newAutomationTestService(t, &automationTestExecutor{})
+	group, err := service.CreateGroup("room", GroupInput{Name: "player schedules", Enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.RunTask("room", task.ID, TriggerSchedule); !errors.Is(err, ErrNoRunningWorlds) {
-		t.Fatalf("scheduled preflight error = %v", err)
+	builtIn, err := service.CreateTask("room", TaskInput{
+		GroupID: group.ID, Name: defaultPlayerRefreshTaskName, Description: legacyPlayerRefreshDescription, Enabled: false, Schedule: legacyPlayerRefreshSchedule,
+		Timezone: "Asia/Shanghai", Action: ActionPlayerRefresh, Parameters: map[string]interface{}{}, TimeoutSeconds: 300,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if executor.checks != 1 || executor.attempts != 0 {
-		t.Fatalf("preflight checks=%d execute attempts=%d", executor.checks, executor.attempts)
+	custom, err := service.CreateTask("room", TaskInput{
+		GroupID: group.ID, Name: "自定义玩家刷新", Enabled: true, Schedule: "0 10 * * *",
+		Timezone: "Asia/Shanghai", Action: ActionPlayerRefresh, Parameters: map[string]interface{}{}, TimeoutSeconds: 300,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	runs, err := service.Runs("room", RunFilter{Limit: 25})
-	if err != nil || runs.Total != 0 {
-		t.Fatalf("stopped schedule persisted runs: %#v err=%v", runs, err)
+	migrated, changed, err := service.EnsureDefaultPlayerRefresh("room")
+	if err != nil || !changed || !migrated.Enabled || migrated.Schedule != defaultPlayerRefreshSchedule || !isDefaultPlayerRefresh(migrated) {
+		t.Fatalf("migrated=%#v changed=%v err=%v", migrated, changed, err)
 	}
-	jobsList, total, err := jobService.List(jobs.ListFilter{Limit: 25})
-	if err != nil || total != 0 || len(jobsList) != 0 {
-		t.Fatalf("stopped schedule persisted jobs: total=%d jobs=%#v err=%v", total, jobsList, err)
+	custom, err = store.Task("room", custom.ID)
+	if err != nil || !custom.Enabled || custom.Schedule != "0 10 * * *" {
+		t.Fatalf("custom task changed: task=%#v err=%v", custom, err)
+	}
+	migrated.Enabled = false
+	migrated.Schedule = "*/5 * * * *"
+	adjusted, err := service.updateTask(migrated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preserved, changed, err := service.EnsureDefaultPlayerRefresh("room")
+	if err != nil || changed || preserved.ID != builtIn.ID || preserved.Enabled || preserved.Schedule != adjusted.Schedule {
+		t.Fatalf("user setting was not preserved: task=%#v changed=%v err=%v", preserved, changed, err)
 	}
 }
 
@@ -310,7 +323,7 @@ func TestDefaultScheduledPlayerRefreshUsesLightweightExecution(t *testing.T) {
 	}
 	runs, err := service.Runs("room", RunFilter{Limit: 25})
 	if err != nil || runs.Total != 0 {
-		t.Fatalf("system refresh persisted automation runs: %#v err=%v", runs, err)
+		t.Fatalf("system refresh persisted runs: %#v err=%v", runs, err)
 	}
 	jobsList, total, err := jobService.List(jobs.ListFilter{Limit: 25})
 	if err != nil || total != 0 || len(jobsList) != 0 {
@@ -318,102 +331,32 @@ func TestDefaultScheduledPlayerRefreshUsesLightweightExecution(t *testing.T) {
 	}
 	updated, err := store.Task("room", task.ID)
 	if err != nil || updated.LastRunAt == nil || updated.LastStatus != RunSucceeded || updated.LastJobID != "" {
-		t.Fatalf("system refresh task state=%#v err=%v", updated, err)
+		t.Fatalf("system refresh state=%#v err=%v", updated, err)
 	}
 }
 
-func TestEnsureDefaultPlayerRefreshReactivatesBuiltInTaskAndGroup(t *testing.T) {
-	service, store, _ := newAutomationTestService(t, &automationTestExecutor{})
+func TestDefaultScheduledPlayerRefreshSkipsStoppedWorld(t *testing.T) {
+	executor := &automationPreflightExecutor{}
+	service, _, jobService := newAutomationTestService(t, executor)
 	task, _, err := service.EnsureDefaultPlayerRefresh("room")
 	if err != nil {
 		t.Fatal(err)
 	}
-	group, err := store.Group("room", task.GroupID)
-	if err != nil {
-		t.Fatal(err)
+	if err := service.RunScheduledTask("room", task.ID); !errors.Is(err, ErrNoRunningWorlds) {
+		t.Fatalf("scheduled preflight error = %v", err)
 	}
-	task, err = service.UpdateTask("room", task.ID, TaskInput{
-		GroupID: task.GroupID, Name: task.Name, Description: task.Description, Enabled: false,
-		Schedule: task.Schedule, Timezone: task.Timezone, Action: task.Action, WorldIDs: task.WorldIDs,
-		Parameters: task.Parameters, TimeoutSeconds: task.TimeoutSeconds, RetryTimes: task.RetryTimes,
-		RetryInterval: task.RetryInterval, Dependencies: task.Dependencies, ExpectedRevision: task.Revision,
-	})
-	if err != nil {
-		t.Fatal(err)
+	if executor.checks != 1 || executor.attempts != 0 {
+		t.Fatalf("preflight checks=%d execute attempts=%d", executor.checks, executor.attempts)
 	}
-	if _, err := service.UpdateGroup("room", group.ID, GroupInput{
-		Name: group.Name, Description: group.Description, Type: group.Type, Enabled: false, ExpectedRevision: group.Revision,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	restored, changed, err := service.EnsureDefaultPlayerRefresh("room")
-	if err != nil || !changed || !restored.Enabled {
-		t.Fatalf("restore default refresh: task=%#v changed=%v err=%v", restored, changed, err)
-	}
-	restoredGroup, err := store.Group("room", restored.GroupID)
-	if err != nil || !restoredGroup.Enabled {
-		t.Fatalf("default group was not restored: group=%#v err=%v", restoredGroup, err)
-	}
-	scheduled, err := store.ScheduledTasks()
-	if err != nil || len(scheduled) != 1 || scheduled[0].ID != restored.ID {
-		t.Fatalf("restored default is not schedulable: tasks=%#v err=%v", scheduled, err)
-	}
-}
-
-func TestEnsureDefaultPlayerRefreshDoesNotEnableDisabledCustomGroup(t *testing.T) {
-	service, store, _ := newAutomationTestService(t, &automationTestExecutor{})
-	custom, err := service.CreateGroup("room", GroupInput{Name: playerManagementGroupName, Type: "custom", Enabled: false})
-	if err != nil {
-		t.Fatal(err)
-	}
-	task, changed, err := service.EnsureDefaultPlayerRefresh("room")
-	if err != nil || !changed || task.GroupID == custom.ID {
-		t.Fatalf("default reused disabled custom group: task=%#v changed=%v err=%v", task, changed, err)
-	}
-	custom, err = store.Group("room", custom.ID)
-	if err != nil || custom.Enabled {
-		t.Fatalf("disabled custom group was modified: group=%#v err=%v", custom, err)
-	}
-	systemGroup, err := store.Group("room", task.GroupID)
-	if err != nil || !systemGroup.Enabled || systemGroup.Type != "system" || systemGroup.Name != playerRefreshSystemGroupName {
-		t.Fatalf("unexpected fallback group: group=%#v err=%v", systemGroup, err)
-	}
-}
-
-func TestEnsureDefaultPlayerRefreshReplacesMigratedLegacyRefresh(t *testing.T) {
-	service, store, _ := newAutomationTestService(t, &automationTestExecutor{})
-	group, err := service.CreateGroup("room", GroupInput{Name: legacyMigrationGroupName, Enabled: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacy, err := service.CreateTask("room", TaskInput{
-		GroupID: group.ID, Name: "Legacy player refresh", Description: "由旧版任务 #52 迁移", Enabled: true,
-		Schedule: "*/30 * * * * *", Timezone: "Asia/Shanghai", Action: ActionPlayerRefresh,
-		WorldIDs: []string{"Master"}, Parameters: map[string]interface{}{}, TimeoutSeconds: 30,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	current, changed, err := service.EnsureDefaultPlayerRefresh("room")
-	if err != nil || !changed || current.ID == legacy.ID || len(current.WorldIDs) != 0 {
-		t.Fatalf("legacy refresh was not replaced: task=%#v changed=%v err=%v", current, changed, err)
-	}
-	legacy, err = store.Task("room", legacy.ID)
-	if err != nil || legacy.Enabled {
-		t.Fatalf("legacy refresh remains enabled: task=%#v err=%v", legacy, err)
-	}
-	scheduled, err := store.ScheduledTasks()
-	if err != nil || len(scheduled) != 1 || scheduled[0].ID != current.ID {
-		t.Fatalf("unexpected scheduled refreshes: tasks=%#v err=%v", scheduled, err)
+	jobsList, total, err := jobService.List(jobs.ListFilter{Limit: 25})
+	if err != nil || total != 0 || len(jobsList) != 0 {
+		t.Fatalf("stopped refresh persisted jobs: total=%d jobs=%#v err=%v", total, jobsList, err)
 	}
 }
 
 func TestDeleteRoomTasksRemovesSchedulesAndGroups(t *testing.T) {
 	service, store, _ := newAutomationTestService(t, &automationTestExecutor{})
-	if _, _, err := service.EnsureDefaultPlayerRefresh("room"); err != nil {
-		t.Fatal(err)
-	}
+	createAutomationFixture(t, service)
 	if err := service.DeleteRoomTasks("room"); err != nil {
 		t.Fatal(err)
 	}

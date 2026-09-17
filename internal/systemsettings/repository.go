@@ -183,9 +183,9 @@ type MemoryRepository struct {
 
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{values: map[string]string{
-		"paths.save": "/srv/dst/saves", "paths.backup": "/srv/dst/backups", "paths.server": "/srv/dst/server", "paths.ugc": "/srv/dst/ugc", "paths.map": "/srv/dst/maps", "paths.serverMode": "64",
-		"mod.steamCMD": "/usr/local/bin/steamcmd", "mod.workshopDownload": "/srv/steam", "mod.workshopContent": "/srv/steam/steamapps/workshop/content/322330", "mod.steamAppID": "322330", "mod.steamAPIKey": "test-steam-api-key",
-		"lua.binary": "lua", "lua.pythonBinary": "python3", "lua.fallback": "/srv/dst/lua", "map.renderer": "/srv/dst/bin/map-renderer", "misc.logLevel": "info",
+		"paths.save": "/opt/dst/saves", "paths.backup": "/opt/dst/backups", "paths.server": "/opt/dst/server", "paths.ugc": "/opt/dst/workshop/steamapps/workshop", "paths.map": "/opt/dst/maps", "paths.serverMode": "64",
+		"mod.steamCMD": "/usr/local/bin/steamcmd", "mod.workshopDownload": "/opt/dst/workshop", "mod.workshopContent": "/opt/dst/workshop/steamapps/workshop/content/322330", "mod.steamAppID": "322330", "mod.steamAPIKey": "test-steam-api-key",
+		"lua.binary": "lua", "lua.pythonBinary": "python3", "lua.fallback": "/opt/dst/lua", "map.renderer": "/opt/dst/bin/map-renderer", "misc.logLevel": "info",
 	}}
 }
 

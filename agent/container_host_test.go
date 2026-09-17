@@ -50,11 +50,14 @@ func TestContainerRuntimeHostCreatesMissingShardFromTrustedConfig(t *testing.T) 
 		"com.dst-admin.installation=runtime-a",
 		"com.dst-admin.cluster=Cluster_1",
 		"com.dst-admin.shard=Caves",
-		"type=bind,src=/opt/dst/saves,dst=/data",
+		"type=bind,src=/opt/dst/saves,dst=/opt/dst/saves",
 		"type=bind,src=/opt/dst/server,dst=/opt/dst/server,readonly",
-		"type=bind,src=/opt/dst/workshop/steamapps/workshop,dst=/workshop,readonly",
+		"type=bind,src=/opt/dst/workshop/steamapps/workshop,dst=/opt/dst/workshop/steamapps/workshop,readonly",
 		"DST_CLUSTER=Cluster_1",
 		"DST_SHARD=Caves",
+		"DST_STORAGE_ROOT=/opt/dst/saves",
+		"DST_UGC_DIRECTORY=/opt/dst/saves/.dst-admin/runtime/workshop/Cluster_1/Caves",
+		"com.dst-admin.local-mods=true",
 		"dst-admin/dst-runtime:test",
 	} {
 		if !containsContainerArgument(arguments, required) {
@@ -80,6 +83,53 @@ func TestContainerRuntimeHostDoesNotRecreateExistingShard(t *testing.T) {
 	}
 	if len(cli.calls) != 1 || !reflect.DeepEqual(cli.calls[0].arguments[:2], []string{"ps", "-a"}) {
 		t.Fatalf("calls=%#v", cli.calls)
+	}
+}
+
+func TestContainerLocalModsMountConfiguredLinkTargetReadOnly(t *testing.T) {
+	config := containerHostTestConfig()
+	config.Installation.WorkshopContentPath = "/custom/steamapps/workshop/content/322330"
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{nil, []byte(strings.Repeat("a", 64))}}
+	host, err := newContainerRuntimeHost(config, cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.ensureContainer(context.Background(), "Cluster_1", "Caves"); err != nil {
+		t.Fatal(err)
+	}
+	expected := "type=bind,src=/opt/dst/workshop/steamapps/workshop/content/322330,dst=/custom/steamapps/workshop/content/322330,readonly"
+	if !containsContainerArgument(cli.calls[1].arguments, expected) {
+		t.Fatalf("missing read-only link target mount: %v", cli.calls)
+	}
+}
+
+func TestContainerLocalModUpgradeNeverRecreatesRunningWorld(t *testing.T) {
+	id := strings.Repeat("b", 64)
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{containerListLine(id, "running", "Cluster_1", "Master")}}
+	host, err := newContainerRuntimeHost(containerHostTestConfig(), cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.ensureContainerForRuntimeMode(context.Background(), "Cluster_1", "Master", shared.RuntimePerformanceModeGame, true); err == nil {
+		t.Fatal("running legacy container accepted a layout replacement")
+	}
+	if len(cli.calls) != 1 {
+		t.Fatalf("running container was changed: %#v", cli.calls)
+	}
+}
+
+func TestContainerLocalModUpgradeRecreatesOnlyStoppedContainer(t *testing.T) {
+	id := strings.Repeat("b", 64)
+	cli := &fakeContainerCLI{available: true, responses: [][]byte{containerListLine(id, "exited", "Cluster_1", "Master"), nil, []byte(id)}}
+	host, err := newContainerRuntimeHost(containerHostTestConfig(), cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.ensureContainerForRuntimeMode(context.Background(), "Cluster_1", "Master", shared.RuntimePerformanceModeGame, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(cli.calls) != 3 || cli.calls[1].arguments[0] != "rm" || cli.calls[2].arguments[0] != "create" {
+		t.Fatalf("stopped container layout was not replaced: %#v", cli.calls)
 	}
 }
 

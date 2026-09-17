@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -113,7 +112,8 @@ func TestNativeInstallationsReceiveStablePrivateSockets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	values, err = configureNativeConsoleSockets(values, filepath.Join(root, "state.json"))
+	stateFile := filepath.Join(root, "state", "runtime-state.json")
+	values, err = configureNativeConsoleSockets(values, stateFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,9 +121,36 @@ func TestNativeInstallationsReceiveStablePrivateSockets(t *testing.T) {
 		t.Fatalf("sockets=%#v", values)
 	}
 	for _, value := range values {
-		if !strings.Contains(filepath.Base(value.ConsoleSocket), "runtime-") {
-			t.Fatalf("socket=%q", value.ConsoleSocket)
+		want, pathErr := shards.NativeConsoleSocketPath(value.SavePath)
+		if pathErr != nil || value.ConsoleSocket != want {
+			t.Fatalf("socket=%q want=%q error=%v", value.ConsoleSocket, want, pathErr)
 		}
+		if len(value.LegacyConsoleSockets) != 1 {
+			t.Fatalf("legacy sockets=%#v", value.LegacyConsoleSockets)
+		}
+	}
+}
+
+func TestRenamedNativeInstallationKeepsOwnershipSocket(t *testing.T) {
+	root := t.TempDir()
+	saveRoot := filepath.Join(root, "save")
+	values := make([]RuntimeInstallation, 0, 2)
+	for _, installation := range []RuntimeInstallation{
+		{ID: "renamed-before", SavePath: saveRoot, ServerPath: filepath.Join(root, "server-a")},
+		{ID: "renamed-after", SavePath: saveRoot, ServerPath: filepath.Join(root, "server-b")},
+	} {
+		normalized, err := normalizeRuntimeInstallations([]RuntimeInstallation{installation})
+		if err != nil {
+			t.Fatal(err)
+		}
+		normalized, err = configureNativeConsoleSockets(normalized, filepath.Join(root, "runtime-state.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		values = append(values, normalized[0])
+	}
+	if values[0].ConsoleSocket == "" || values[0].ConsoleSocket != values[1].ConsoleSocket {
+		t.Fatalf("sockets=%#v", values)
 	}
 }
 

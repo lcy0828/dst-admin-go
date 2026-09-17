@@ -24,6 +24,9 @@ import (
 )
 
 var agentIdentityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var agentReleaseIDPattern = regexp.MustCompile(`^[a-f0-9-]{36}$`)
+var agentReleaseVersionPattern = regexp.MustCompile(`^[0-9][0-9A-Za-z._+-]{0,63}$`)
+var agentReleaseSHA256Pattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 // 常量
 const (
@@ -129,17 +132,19 @@ type KeyUpdateSessionManager struct {
 
 // CommandResult 命令执行结果
 type CommandResult struct {
-	AgentID   string `json:"agent_id"`   // 执行命令的Agent ID
-	CommandID string `json:"command_id"` // 命令ID
-	Type      string `json:"type"`       // 命令类型
-	Content   string `json:"content"`    // 命令内容
-	Output    string `json:"output"`     // 命令输出
-	ErrorMsg  string `json:"error_msg"`  // 错误信息
-	ExitCode  int    `json:"exit_code"`  // 退出码
-	Success   bool   `json:"success"`    // 是否成功
-	StartTime int64  `json:"start_time"` // 开始时间
-	EndTime   int64  `json:"end_time"`   // 结束时间
-	Status    string `json:"status"`     // 状态：pending, completed, failed
+	AgentID   string                         `json:"agent_id"`   // 执行命令的Agent ID
+	CommandID string                         `json:"command_id"` // 命令ID
+	Type      string                         `json:"type"`       // 命令类型
+	Content   string                         `json:"content"`    // 命令内容
+	Output    string                         `json:"output"`     // 命令输出
+	ErrorMsg  string                         `json:"error_msg"`  // 错误信息
+	ExitCode  int                            `json:"exit_code"`  // 退出码
+	Success   bool                           `json:"success"`    // 是否成功
+	StartTime int64                          `json:"start_time"` // 开始时间
+	EndTime   int64                          `json:"end_time"`   // 结束时间
+	Status    string                         `json:"status"`     // 状态：pending, completed, failed
+	Progress  *shared.CommandProgressPayload `json:"progress,omitempty"`
+	changed   chan struct{}
 }
 
 // NewKeyUpdateSessionManager 创建新的密钥更新会话管理器
@@ -510,8 +515,6 @@ func (s *Server) handleAgentConnection(w http.ResponseWriter, r *http.Request) {
 		if agentConn.Connection != nil {
 			if err := agentConn.Connection.SendEncrypted(requestMsg); err != nil {
 				log.Printf("发送上报请求失败: %v", err)
-			} else {
-				log.Printf("已请求Agent(%s)立即上报system_info", agentID)
 			}
 		}
 		agentConn.Mutex.Unlock()
@@ -595,6 +598,9 @@ func (s *Server) processAgentMessage(agent *AgentConnection, msg *shared.Message
 	case shared.TypeCommandResp:
 		s.handleCommandResponse(agent, msg)
 
+	case shared.TypeCommandProgress:
+		s.handleCommandProgress(agent, msg)
+
 	case shared.TypeCommandAck:
 		// 处理命令确认
 		s.handleCommandAck(agent, msg)
@@ -650,14 +656,60 @@ func (s *Server) handleCommandAck(agent *AgentConnection, msg *shared.Message) {
 		return
 	}
 
-	log.Printf("Agent(%s)已确认接收命令: %s, 状态: %s", agent.AgentID, ackPayload.CommandID, ackPayload.Status)
-
 	// 更新命令状态
 	s.commandMutex.Lock()
-	if result, exists := s.commandResults[ackPayload.CommandID]; exists {
-		result.Status = "received"
+	if result, exists := s.commandResults[ackPayload.CommandID]; exists && result.AgentID == agent.AgentID &&
+		result.Status != "completed" && result.Status != "failed" {
+		if ackPayload.Status == "rejected" {
+			result.Status = "failed"
+			result.ErrorMsg = "Agent 拒绝接收命令"
+			result.EndTime = time.Now().Unix()
+			notifyCommandResultLocked(result)
+		} else {
+			result.Status = "received"
+		}
 	}
 	s.commandMutex.Unlock()
+	if ackPayload.Status == "rejected" {
+		log.Printf("Agent命令被拒绝: AgentID=%s CommandID=%s", agent.AgentID, ackPayload.CommandID)
+	}
+}
+
+func (s *Server) handleCommandProgress(agent *AgentConnection, msg *shared.Message) {
+	var progress shared.CommandProgressPayload
+	if err := json.Unmarshal(msg.Payload, &progress); err != nil || !validCommandProgress(progress) {
+		return
+	}
+	s.commandMutex.Lock()
+	defer s.commandMutex.Unlock()
+	result, exists := s.commandResults[progress.CommandID]
+	if !exists || result.AgentID != agent.AgentID || result.Status == "completed" || result.Status == "failed" ||
+		result.Progress != nil && result.Progress.Sequence >= progress.Sequence {
+		return
+	}
+	value := progress
+	result.Progress = &value
+	notifyCommandResultLocked(result)
+}
+
+func validCommandProgress(progress shared.CommandProgressPayload) bool {
+	if len(progress.Items) > 4096 {
+		return false
+	}
+	for _, item := range progress.Items {
+		if item.WorkshopID == "" || len(item.WorkshopID) > 32 || len(item.Message) > 1000 ||
+			len(item.TargetID) > 256 || len(item.InstallationID) > 256 ||
+			(item.Status != "queued" && item.Status != "downloading" && item.Status != "succeeded" && item.Status != "failed") ||
+			item.CurrentBytes < 0 || item.TotalBytes < 0 || item.BytesPerSecond < 0 || item.TotalBytes > 0 && item.CurrentBytes > item.TotalBytes {
+			return false
+		}
+	}
+	message := strings.TrimSpace(progress.Message)
+	return strings.TrimSpace(progress.CommandID) != "" && len(progress.CommandID) <= 128 && progress.Sequence > 0 && progress.Percent >= 0 && progress.Percent <= 100 &&
+		message != "" && len(message) <= 1000 && len(progress.Stage) <= 128 && len(progress.WorkshopID) <= 32 &&
+		progress.CurrentItem >= 0 && progress.TotalItems >= 0 && (progress.TotalItems == 0 || progress.CurrentItem <= progress.TotalItems) &&
+		progress.CurrentBytes >= 0 && progress.TotalBytes >= 0 &&
+		progress.BytesPerSecond >= 0 && (progress.TotalBytes == 0 || progress.CurrentBytes <= progress.TotalBytes)
 }
 
 // 处理主动上报
@@ -668,14 +720,14 @@ func (s *Server) handleActiveReport(agent *AgentConnection, msg *shared.Message)
 		return
 	}
 
-	log.Printf("收到主动上报，AgentID: %s, ReportType: %s", agent.AgentID, reportPayload.ReportType)
-
 	// 存储上报数据（这里只是示例，实际应用可能需要存入数据库等）
 	agent.Mutex.Lock()
 	for k, v := range reportPayload.Data {
 		agent.Info[k] = v
 	}
-	agent.Info["_last_passive_report_at"] = time.Now().UnixNano()
+	if reportPayload.ReportType == "system_info" {
+		agent.Info["_last_system_report_at"] = time.Now().UnixNano()
+	}
 	agent.Mutex.Unlock()
 
 	// 发送确认
@@ -701,8 +753,6 @@ func (s *Server) handlePassiveReport(agent *AgentConnection, msg *shared.Message
 		return
 	}
 
-	log.Printf("收到被动上报，AgentID: %s, ReportType: %s", agent.AgentID, reportPayload.ReportType)
-
 	// 存储上报数据
 	agent.Mutex.Lock()
 	if reportPayload.ReportType == "dst_runtime_inventory" {
@@ -712,8 +762,14 @@ func (s *Server) handlePassiveReport(agent *AgentConnection, msg *shared.Message
 	for k, v := range reportPayload.Data {
 		agent.Info[k] = v
 	}
-	agent.Info["_last_passive_report_at"] = time.Now().UnixNano()
-	agent.Info["_last_report_type"] = reportPayload.ReportType
+	switch reportPayload.ReportType {
+	case "dst_runtime_inventory":
+		// Keep the receipt and its result together; unrelated reports share Info.
+		agent.Info["_last_inventory_report_at"] = time.Now().UnixNano()
+		agent.Info["_last_inventory_report"] = reportPayload.Data
+	case "system_info":
+		agent.Info["_last_system_report_at"] = time.Now().UnixNano()
+	}
 	agent.Mutex.Unlock()
 
 	// 发送确认
@@ -739,31 +795,26 @@ func (s *Server) handleCommandResponse(agent *AgentConnection, msg *shared.Messa
 		return
 	}
 
-	status := "成功"
 	if !respPayload.Success {
-		status = "失败"
-	}
-
-	log.Printf("收到命令响应，AgentID: %s, CommandID: %s, 状态: %s, 退出码: %d",
-		agent.AgentID, respPayload.CommandID, status, respPayload.ExitCode)
-
-	if respPayload.Output != "" {
-		output := respPayload.Output
-		if len(output) > 100 {
-			output = output[:100] + "..."
+		detail := strings.TrimSpace(respPayload.ErrorMsg)
+		if detail == "" {
+			detail = strings.TrimSpace(respPayload.Output)
+			if len(detail) > 200 {
+				detail = detail[:200] + "..."
+			}
 		}
-		log.Printf("命令输出 (前100字符): %s", output)
-	}
-
-	if respPayload.ErrorMsg != "" {
-		log.Printf("命令错误: %s", respPayload.ErrorMsg)
+		log.Printf("Agent命令执行失败: AgentID=%s CommandID=%s ExitCode=%d Error=%s",
+			agent.AgentID, respPayload.CommandID, respPayload.ExitCode, detail)
 	}
 
 	// 保存命令执行结果
 	s.commandMutex.Lock()
 	cmdResult, exists := s.commandResults[respPayload.CommandID]
 	if exists {
-		log.Printf("更新命令结果: %s", respPayload.CommandID)
+		if cmdResult.AgentID != agent.AgentID {
+			s.commandMutex.Unlock()
+			return
+		}
 		// 更新现有结果
 		cmdResult.Output = respPayload.Output
 		cmdResult.ErrorMsg = respPayload.ErrorMsg
@@ -774,8 +825,9 @@ func (s *Server) handleCommandResponse(agent *AgentConnection, msg *shared.Messa
 		if !respPayload.Success {
 			cmdResult.Status = "failed"
 		}
+		notifyCommandResultLocked(cmdResult)
 	} else {
-		log.Printf("未找到命令结果记录，创建新记录: %s", respPayload.CommandID)
+		log.Printf("Agent命令响应缺少本地记录，正在补建: AgentID=%s CommandID=%s", agent.AgentID, respPayload.CommandID)
 		// 创建新的结果记录
 		s.commandResults[respPayload.CommandID] = &CommandResult{
 			AgentID:   agent.AgentID,
@@ -791,13 +843,6 @@ func (s *Server) handleCommandResponse(agent *AgentConnection, msg *shared.Messa
 			s.commandResults[respPayload.CommandID].Status = "failed"
 		}
 	}
-
-	// 打印所有命令ID以便调试
-	var commandIDs []string
-	for id := range s.commandResults {
-		commandIDs = append(commandIDs, id)
-	}
-	log.Printf("当前有 %d 个命令结果", len(s.commandResults))
 
 	s.commandMutex.Unlock()
 }
@@ -886,22 +931,96 @@ func (s *Server) SendShardOperation(agentID string, request shared.ShardOperatio
 
 func (s *Server) SendRuntimeOperation(agentID string, request shared.RuntimeOperationRequest, timeout int) (string, error) {
 	if request.ProtocolVersion != shared.RuntimeOperationProtocolVersion || !shared.IsRuntimeAction(request.Action) ||
-		timeout < 5 || timeout > 300 || strings.TrimSpace(request.InstallationID) == "" ||
+		timeout < 5 || timeout > runtimeOperationTimeoutLimit(request.Action) || strings.TrimSpace(request.InstallationID) == "" ||
 		strings.TrimSpace(request.Cluster) == "" || strings.TrimSpace(request.Shard) == "" ||
 		strings.ContainsAny(request.InstallationID+request.Cluster+request.Shard+request.TopologyRevision, "\x00\r\n") {
 		return "", fmt.Errorf("Agent Runtime 操作请求无效")
 	}
-	if shared.RuntimeActionMutates(request.Action) && (request.FencingToken == 0 || request.LeaseExpiresAt == nil || strings.TrimSpace(request.LeaseID) == "") {
+	if shared.RuntimeOperationRequiresLease(request) && (request.FencingToken == 0 || request.LeaseExpiresAt == nil || strings.TrimSpace(request.LeaseID) == "") {
 		return "", fmt.Errorf("Agent Runtime 操作缺少租约或 fencing token")
 	}
-	content, err := json.Marshal(request)
+	content, err := runtimeOperationAuditContent(request)
 	if err != nil {
 		return "", err
 	}
 	requestCopy := request
 	return s.sendCommandPayload(agentID, shared.CommandPayload{
 		Type: string(request.Action), RuntimeOperation: &requestCopy, Timeout: timeout,
-	}, string(content))
+	}, content)
+}
+
+func runtimeOperationAuditContent(request shared.RuntimeOperationRequest) (string, error) {
+	audit := request
+	if request.Console != nil {
+		value := *request.Console
+		if request.Console.CommandDocument != nil {
+			document := *request.Console.CommandDocument
+			document.Data = nil
+			value.CommandDocument = &document
+		}
+		audit.Console = &value
+	}
+	if request.Migration != nil {
+		value := *request.Migration
+		value.Data = nil
+		value.FetchLocations = make([]shared.RuntimeMigrationFetchLocation, len(request.Migration.FetchLocations))
+		for index, location := range request.Migration.FetchLocations {
+			location.DownloadToken = ""
+			value.FetchLocations[index] = location
+		}
+		audit.Migration = &value
+	}
+	if request.Backup != nil {
+		value := *request.Backup
+		value.Data = nil
+		audit.Backup = &value
+	}
+	if request.Mod != nil {
+		value := *request.Mod
+		value.Data = nil
+		value.FetchSources = append([]shared.RuntimeModFetchSource(nil), request.Mod.FetchSources...)
+		value.FetchLocations = make([]shared.RuntimeModFetchLocation, len(request.Mod.FetchLocations))
+		for index, location := range request.Mod.FetchLocations {
+			location.DownloadToken = ""
+			value.FetchLocations[index] = location
+		}
+		audit.Mod = &value
+	}
+	if request.Configuration != nil {
+		value := *request.Configuration
+		value.Data = nil
+		audit.Configuration = &value
+	}
+	content, err := json.Marshal(audit)
+	return string(content), err
+}
+
+func runtimeOperationTimeoutLimit(action shared.RuntimeAction) int {
+	if action == shared.RuntimeActionGameVersionUpdate || action == shared.RuntimeActionMigrationFetch {
+		return 1800
+	}
+	return 300
+}
+
+func (s *Server) SendAgentUpgrade(agentID string, request shared.AgentUpgradeRequest, timeout int) (string, error) {
+	if request.ProtocolVersion != shared.AgentUpgradeProtocolVersion || timeout < 30 || timeout > 300 ||
+		!agentReleaseIDPattern.MatchString(request.ReleaseID) || !agentReleaseVersionPattern.MatchString(request.Version) ||
+		(request.OS != "linux" && request.OS != "darwin" && request.OS != "windows") ||
+		(request.Arch != "amd64" && request.Arch != "arm64") ||
+		request.DownloadPath != "/agent-updates/"+request.ReleaseID || strings.TrimSpace(request.DownloadToken) == "" ||
+		len(request.DownloadToken) > 256 || !agentReleaseSHA256Pattern.MatchString(request.SHA256) ||
+		request.Size < 1 || request.Size > 128*1024*1024 ||
+		strings.ContainsAny(request.DownloadToken, "\x00\r\n") {
+		return "", fmt.Errorf("Agent 升级请求无效")
+	}
+	requestCopy := request
+	audit, _ := json.Marshal(map[string]interface{}{
+		"release_id": request.ReleaseID, "version": request.Version, "os": request.OS,
+		"arch": request.Arch, "sha256": request.SHA256, "size": request.Size,
+	})
+	return s.sendCommandPayload(agentID, shared.CommandPayload{
+		Type: shared.AgentUpgradeCommand, AgentUpgrade: &requestCopy, Timeout: timeout,
+	}, string(audit))
 }
 
 func (s *Server) sendCommandPayload(agentID string, payload shared.CommandPayload, auditContent string) (string, error) {
@@ -918,8 +1037,6 @@ func (s *Server) sendCommandPayload(agentID string, payload shared.CommandPayloa
 
 	// 创建命令ID
 	commandID := shared.GenerateCommandID() // 使用专用的命令ID生成函数
-	log.Printf("为Agent %s 生成新的命令ID: %s", agentID, commandID)
-
 	// 创建命令负载
 	payload.CommandID = commandID
 
@@ -981,19 +1098,6 @@ func (s *Server) sendCommandPayload(agentID string, payload shared.CommandPayloa
 
 		log.Printf("发送命令失败: %v, 命令ID: %s", err, commandID)
 		return "", fmt.Errorf("发送命令失败: %v", err)
-	}
-
-	log.Printf("已成功向Agent %s 发送命令: CommandID: %s, Type: %s", agentID, commandID, payload.Type)
-
-	// 添加额外日志，确认命令结果已保存
-	s.commandMutex.RLock()
-	_, resultExists := s.commandResults[commandID]
-	s.commandMutex.RUnlock()
-
-	if resultExists {
-		log.Printf("已确认命令结果已保存: %s", commandID)
-	} else {
-		log.Printf("警告: 命令结果可能未正确保存: %s", commandID)
 	}
 
 	return commandID, nil
@@ -1075,7 +1179,6 @@ func (s *Server) RequestPassiveReport(agentID, reportType string, params map[str
 		return fmt.Errorf("发送被动上报请求失败: %v", err)
 	}
 
-	log.Printf("向Agent请求被动上报: %s, ReportType: %s", agentID, reportType)
 	return nil
 }
 
@@ -1101,29 +1204,35 @@ func (s *Server) GetAllAgentInfo() map[string]map[string]interface{} {
 	defer s.agentMutex.RUnlock()
 
 	for id, agent := range s.agents {
-		agent.Mutex.Lock()
-
-		// 复制信息以避免并发问题
-		info := make(map[string]interface{})
-		for k, v := range agent.Info {
-			info[k] = v
-		}
-
-		// 添加连接信息
-		info["last_heartbeat"] = agent.LastHeartbeat.Unix()
-		info["connected"] = agent.Connection != nil
-
-		// 确保agent_uuid存在（这是客户端的唯一标识）
-		if _, exists := info["agent_uuid"]; !exists {
-			info["agent_uuid"] = id // 使用agentID作为唯一标识符
-		}
-
-		agent.Mutex.Unlock()
-
-		result[id] = info
+		result[id] = copyAgentInfo(id, agent)
 	}
 
 	return result
+}
+
+func (s *Server) GetAgentInfo(agentID string) (map[string]interface{}, bool) {
+	s.agentMutex.RLock()
+	defer s.agentMutex.RUnlock()
+	agent, exists := s.agents[agentID]
+	if !exists {
+		return nil, false
+	}
+	return copyAgentInfo(agentID, agent), true
+}
+
+func copyAgentInfo(agentID string, agent *AgentConnection) map[string]interface{} {
+	agent.Mutex.Lock()
+	defer agent.Mutex.Unlock()
+	info := make(map[string]interface{}, len(agent.Info)+3)
+	for key, value := range agent.Info {
+		info[key] = value
+	}
+	info["last_heartbeat"] = agent.LastHeartbeat.Unix()
+	info["connected"] = agent.Connection != nil
+	if _, exists := info["agent_uuid"]; !exists {
+		info["agent_uuid"] = agentID
+	}
+	return info
 }
 
 // GetSecurityKey 获取当前的通信安全密钥
@@ -1443,7 +1552,7 @@ func (s *Server) GetCommandResult(commandID string) (*CommandResult, error) {
 	// 直接通过命令ID查找结果
 	result, exists := s.commandResults[commandID]
 	if exists {
-		value := *result
+		value := commandResultSnapshot(result)
 		return &value, nil
 	}
 
@@ -1462,6 +1571,55 @@ func (s *Server) GetCommandResult(commandID string) (*CommandResult, error) {
 	return nil, fmt.Errorf("未找到命令结果: %s", commandID)
 }
 
+// WaitCommandResult returns as soon as a result arrives. Progress callbacks run
+// outside commandMutex, so they cannot block Agent message processing.
+func (s *Server) WaitCommandResult(ctx context.Context, commandID string, onProgress func(shared.CommandProgressPayload)) (*CommandResult, error) {
+	var progressSequence uint64
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		s.commandMutex.Lock()
+		result, exists := s.commandResults[commandID]
+		if !exists {
+			s.commandMutex.Unlock()
+			return nil, fmt.Errorf("未找到命令结果: %s", commandID)
+		}
+		completed := result.Status == "completed" || result.Status == "failed"
+		if !completed && result.changed == nil {
+			result.changed = make(chan struct{})
+		}
+		// Capture the result and notification together to avoid missing a reply
+		// between checking its status and starting to wait.
+		changed := result.changed
+		value := commandResultSnapshot(result)
+		s.commandMutex.Unlock()
+
+		if onProgress != nil && value.Progress != nil && value.Progress.Sequence > progressSequence {
+			progressSequence = value.Progress.Sequence
+			onProgress(*value.Progress)
+		}
+		if completed {
+			return &value, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-s.stopChan:
+			return nil, errors.New("Agent 网关已停止")
+		case <-changed:
+		}
+	}
+}
+
+// commandMutex must be held. Only active waiters allocate a notification channel.
+func notifyCommandResultLocked(result *CommandResult) {
+	if result.changed != nil {
+		close(result.changed)
+		result.changed = nil
+	}
+}
+
 // 获取命令执行结果列表
 func (s *Server) GetCommandResults(agentID string, limit int) []*CommandResult {
 	s.commandMutex.RLock()
@@ -1469,19 +1627,13 @@ func (s *Server) GetCommandResults(agentID string, limit int) []*CommandResult {
 
 	var results []*CommandResult
 
-	// 记录日志
-	log.Printf("获取命令结果列表, AgentID=%s, Limit=%d, 当前结果数量: %d", agentID, limit, len(s.commandResults))
-
 	// 复制结果到临时切片，如果指定了agentID则只返回该agent的结果
-	for id, result := range s.commandResults {
+	for _, result := range s.commandResults {
 		if agentID == "" || result.AgentID == agentID {
-			value := *result
+			value := commandResultSnapshot(result)
 			results = append(results, &value)
-			log.Printf("添加命令结果: ID=%s, AgentID=%s, Status=%s", id, result.AgentID, result.Status)
 		}
 	}
-
-	log.Printf("找到符合条件的命令结果: %d 条", len(results))
 
 	// 按时间倒序排序
 	sort.Slice(results, func(i, j int) bool {
@@ -1494,6 +1646,16 @@ func (s *Server) GetCommandResults(agentID string, limit int) []*CommandResult {
 	}
 
 	return results
+}
+
+func commandResultSnapshot(result *CommandResult) CommandResult {
+	value := *result
+	value.changed = nil
+	if result.Progress != nil {
+		progress := *result.Progress
+		value.Progress = &progress
+	}
+	return value
 }
 
 // 清理老旧命令结果
@@ -1512,6 +1674,7 @@ func (s *Server) cleanupCommandResults() {
 			s.commandMutex.Lock()
 			for id, result := range s.commandResults {
 				if result.EndTime < cutoffTime {
+					notifyCommandResultLocked(result)
 					delete(s.commandResults, id)
 				}
 			}

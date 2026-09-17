@@ -8,10 +8,12 @@ import (
 	"hash/fnv"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"dont/internal/consoledispatch"
@@ -60,11 +62,13 @@ func (c *execContainerCLI) Run(ctx context.Context, arguments ...string) ([]byte
 }
 
 type managedContainer struct {
-	ID      string
-	Name    string
-	State   string
-	Cluster string
-	Shard   string
+	ID          string
+	Name        string
+	State       string
+	Cluster     string
+	Shard       string
+	RuntimeMode shared.RuntimePerformanceMode
+	LocalMods   bool
 }
 
 type containerShardRuntime struct {
@@ -73,6 +77,7 @@ type containerShardRuntime struct {
 	dispatcher   *consoledispatch.Dispatcher
 	gracePeriod  time.Duration
 	pollInterval time.Duration
+	pauseLogs    sync.Map
 }
 
 type containerExitState struct {
@@ -144,11 +149,33 @@ func (c *containerShardRuntime) Status(ctx context.Context, cluster, shard strin
 }
 
 func (c *containerShardRuntime) Start(ctx context.Context, cluster, shard string) error {
+	return c.StartWithRuntimeMode(ctx, cluster, shard, shared.RuntimePerformanceModeGame)
+}
+
+func (c *containerShardRuntime) StartWithRuntimeMode(ctx context.Context, cluster, shard string, runtimeMode shared.RuntimePerformanceMode) error {
+	return c.StartWithRuntimeOptions(ctx, cluster, shard, runtimeMode, shared.RuntimeLaunchOptions{})
+}
+
+func (c *containerShardRuntime) StartWithRuntimeOptions(ctx context.Context, cluster, shard string, runtimeMode shared.RuntimePerformanceMode, launchOptions shared.RuntimeLaunchOptions) error {
+	marker, err := c.writeLaunchOptions(cluster, shard, launchOptions)
+	if err != nil {
+		return err
+	}
+	if marker != "" {
+		defer os.Remove(marker)
+	}
+	normalized, valid := shared.NormalizeRuntimePerformanceMode(runtimeMode)
+	if !valid {
+		return errors.New("Lua 运行时模式无效")
+	}
 	key := c.shardKey(cluster, shard)
 	instance, err := c.find(ctx, cluster, shard)
 	if err != nil {
 		_ = c.dispatcher.Pause(context.Background(), key)
 		return err
+	}
+	if instance.RuntimeMode != "" && instance.RuntimeMode != normalized || instance.RuntimeMode == "" && normalized != shared.RuntimePerformanceModeGame {
+		return fmt.Errorf("RUNTIME_MODE_UNAVAILABLE: 分片容器配置为 %s，无法按 %s 启动", instance.RuntimeMode, normalized)
 	}
 	if instance.State == "running" || instance.State == "restarting" {
 		instanceID, identityErr := c.runtimeInstanceID(ctx, instance.ID)
@@ -172,6 +199,20 @@ func (c *containerShardRuntime) Start(ctx context.Context, cluster, shard string
 		return err
 	}
 	return c.dispatcher.Resume(key)
+}
+
+func (c *containerShardRuntime) writeLaunchOptions(cluster, shard string, _ shared.RuntimeLaunchOptions) (string, error) {
+	if !shardResourceName.MatchString(cluster) || !shardResourceName.MatchString(shard) {
+		return "", errors.New("容器启动目标无效")
+	}
+	path := filepath.Join(c.installation.SavePath, cluster, shard, "save", "mod_config_data", "dst-admin", "launch-options")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", fmt.Errorf("创建容器启动选项目录: %w", err)
+	}
+	if err := shared.WritePrivateFile(path, []byte("skip_update_server_mods=1\n")); err != nil {
+		return "", fmt.Errorf("写入容器启动选项: %w", err)
+	}
+	return path, nil
 }
 
 func (c *containerShardRuntime) Stop(ctx context.Context, cluster, shard string) error {
@@ -621,13 +662,27 @@ func (c *containerShardRuntime) runtimeLogStatus(ctx context.Context, cluster, s
 	if chunk.StartedAt.IsZero() || chunk.StartedAt.Before(startedAt.Add(-2*time.Second)) || chunk.UpdatedAt.Before(startedAt) {
 		return starting, nil
 	}
+	logPath := filepath.Join(c.installation.SavePath, cluster, shard, chunk.FileName)
+	var paused *bool
+	if info, statErr := os.Lstat(logPath); statErr == nil && info.Size() == chunk.Size && info.ModTime().Equal(chunk.UpdatedAt) {
+		reader, _ := c.pauseLogs.LoadOrStore(logPath, &runtimefiles.SimulationPauseLog{})
+		paused = reader.(*runtimefiles.SimulationPauseLog).Read(logPath,
+			startedAt.Format(time.RFC3339Nano)+"/"+chunk.StartedAt.Format(time.RFC3339Nano), info, chunk.Data)
+	}
 	classified := dsttmux.ClassifyRuntimeLog(string(chunk.Data))
+	if classified.State == dsttmux.RuntimeStarting && paused != nil {
+		classified.State, classified.Message = dsttmux.RuntimeRunning, ""
+	}
 	if classified.State == dsttmux.RuntimeStarting {
+		starting.StartupStage = classified.StartupStage
 		return starting, nil
+	}
+	if classified.State != dsttmux.RuntimeRunning {
+		paused = nil
 	}
 	return shards.RuntimeStatus{
 		State: shards.RuntimeState(classified.State), Code: classified.Code,
-		Message: classified.Message, SessionExists: classified.SessionExists,
+		Message: classified.Message, SessionExists: classified.SessionExists, Paused: paused,
 	}, nil
 }
 
@@ -660,6 +715,8 @@ func (c *containerShardRuntime) waitForRuntimeInstance(ctx context.Context, cont
 
 func (c *containerShardRuntime) sendToInstance(ctx context.Context, id, command string) error {
 	_, err := c.cli.Run(ctx, "exec", id, "tmux", "-S", c.installation.ConsoleSocket,
+		"send-keys", "-t", "="+c.installation.ConsoleSession+":0.0", "C-q", "C-u",
+		";",
 		"send-keys", "-t", "="+c.installation.ConsoleSession+":0.0", "-l", "--", command,
 		";", "send-keys", "-t", "="+c.installation.ConsoleSession+":0.0", "Enter")
 	return err
@@ -710,7 +767,8 @@ func (c *containerShardRuntime) list(ctx context.Context, cluster, shard string)
 		if !managedContainerID.MatchString(id) || labels["com.dst-admin.managed"] != "true" || labels["com.dst-admin.installation"] != c.installation.ID {
 			return nil, errors.New("容器清单包含不受信目标")
 		}
-		item := managedContainer{ID: id, Name: strings.TrimSpace(raw["Names"]), State: strings.ToLower(strings.TrimSpace(raw["State"])), Cluster: labels["com.dst-admin.cluster"], Shard: labels["com.dst-admin.shard"]}
+		item := managedContainer{ID: id, Name: strings.TrimSpace(raw["Names"]), State: strings.ToLower(strings.TrimSpace(raw["State"])), Cluster: labels["com.dst-admin.cluster"], Shard: labels["com.dst-admin.shard"], RuntimeMode: shared.RuntimePerformanceMode(labels["com.dst-admin.runtime-mode"])}
+		item.LocalMods = labels["com.dst-admin.local-mods"] == "true"
 		if item.Cluster == "" || item.Shard == "" {
 			return nil, errors.New("受管容器缺少 Cluster 或 Shard 标签")
 		}

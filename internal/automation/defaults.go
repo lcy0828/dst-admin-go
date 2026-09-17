@@ -6,11 +6,14 @@ const (
 	playerManagementGroupName       = "player-management"
 	playerRefreshSystemGroupName    = "player-refresh-system"
 	defaultPlayerRefreshTaskName    = "自动刷新玩家数据"
-	defaultPlayerRefreshSchedule    = "*/30 * * * * *"
-	defaultPlayerRefreshDescription = "系统默认任务：每 30 秒刷新所有运行中分片的玩家状态"
+	defaultPlayerRefreshSchedule    = "* * * * *"
+	defaultPlayerRefreshDescription = "系统默认任务：每分钟刷新所有运行中分片的玩家状态"
+	legacyPlayerRefreshSchedule     = "*/30 * * * * *"
+	legacyPlayerRefreshDescription  = "系统默认任务：每 30 秒刷新所有运行中分片的玩家状态"
 )
 
-// EnsureDefaultPlayerRefresh guarantees one schedulable all-world refresh.
+// EnsureDefaultPlayerRefresh creates the built-in collector or migrates the
+// old built-in 30-second collector once. Any later user changes are retained.
 func (s *Service) EnsureDefaultPlayerRefresh(roomID string) (Task, bool, error) {
 	s.defaultsMu.Lock()
 	defer s.defaultsMu.Unlock()
@@ -28,67 +31,36 @@ func (s *Service) EnsureDefaultPlayerRefresh(roomID string) (Task, bool, error) 
 		groupsByID[group.ID] = group
 	}
 
-	changed := false
-	for index := range tasks {
-		if !isLegacyPlayerRefresh(tasks[index]) || !tasks[index].Enabled {
-			continue
-		}
-		tasks[index], err = s.setTaskEnabled(tasks[index], false)
-		if err != nil {
-			return Task{}, changed, err
-		}
-		changed = true
-	}
-
+	var current Task
 	for _, task := range tasks {
-		group := groupsByID[task.GroupID]
-		if task.Action == ActionPlayerRefresh && len(task.WorldIDs) == 0 && task.Enabled && group.Enabled {
-			return task, changed, nil
+		if current.ID == "" && isDefaultPlayerRefresh(task) {
+			current = task
 		}
 	}
-
-	var defaultTask Task
-	for _, task := range tasks {
-		if isDefaultPlayerRefresh(task) {
-			defaultTask = task
-			break
-		}
+	if current.ID != "" && !needsDefaultPlayerRefreshMigration(current) {
+		return current, false, nil
 	}
 
-	group, groupChanged, err := s.ensurePlayerRefreshGroup(roomID, groups, groupsByID[defaultTask.GroupID])
+	group, _, err := s.ensurePlayerRefreshGroup(roomID, groups, groupsByID[current.GroupID])
 	if err != nil {
-		return Task{}, changed, err
+		return Task{}, false, err
 	}
-	changed = changed || groupChanged
-
-	if defaultTask.ID != "" {
-		if defaultTask.GroupID != group.ID {
-			defaultTask.GroupID = group.ID
-			changed = true
-		}
-		if !defaultTask.Enabled {
-			defaultTask.Enabled = true
-			changed = true
-		}
-		if changed {
-			defaultTask, err = s.updateTask(defaultTask)
-			if err != nil {
-				return Task{}, true, err
-			}
-		}
-		return defaultTask, changed, nil
+	if current.ID != "" {
+		current.GroupID = group.ID
+		current.Description = defaultPlayerRefreshDescription
+		current.Enabled = true
+		current.Schedule = defaultPlayerRefreshSchedule
+		updated, updateErr := s.updateTask(current)
+		return updated, true, updateErr
 	}
 
 	task, err := s.CreateTask(roomID, TaskInput{
 		GroupID: group.ID, Name: defaultPlayerRefreshTaskName, Description: defaultPlayerRefreshDescription,
 		Enabled: true, Schedule: defaultPlayerRefreshSchedule, Timezone: "Asia/Shanghai",
 		Action: ActionPlayerRefresh, WorldIDs: []string{}, Parameters: map[string]interface{}{},
-		TimeoutSeconds: 300, RetryInterval: 60,
+		TimeoutSeconds: 60, RetryInterval: 60,
 	})
-	if err != nil {
-		return Task{}, changed, err
-	}
-	return task, true, nil
+	return task, err == nil, err
 }
 
 func (s *Service) ensurePlayerRefreshGroup(roomID string, groups []Group, current Group) (Group, bool, error) {
@@ -98,7 +70,6 @@ func (s *Service) ensurePlayerRefreshGroup(roomID string, groups []Group, curren
 	if current.ID != "" && current.Type == "system" {
 		return s.enableGroup(current)
 	}
-
 	for _, candidate := range groups {
 		if isPlayerManagementGroup(candidate.Name) && candidate.Enabled {
 			return candidate, false, nil
@@ -121,7 +92,7 @@ func (s *Service) ensurePlayerRefreshGroup(roomID string, groups []Group, curren
 		}
 	}
 	group, err := s.CreateGroup(roomID, GroupInput{
-		Name: name, Description: "用于执行定时玩家信息刷新。", Type: "system", Enabled: true,
+		Name: name, Description: "用于定时刷新玩家状态。", Type: "system", Enabled: true,
 	})
 	return group, err == nil, err
 }
@@ -131,11 +102,6 @@ func (s *Service) enableGroup(group Group) (Group, bool, error) {
 		Name: group.Name, Description: group.Description, Type: group.Type, Enabled: true, ExpectedRevision: group.Revision,
 	})
 	return group, err == nil, err
-}
-
-func (s *Service) setTaskEnabled(task Task, enabled bool) (Task, error) {
-	task.Enabled = enabled
-	return s.updateTask(task)
 }
 
 func (s *Service) updateTask(task Task) (Task, error) {
@@ -151,8 +117,8 @@ func isDefaultPlayerRefresh(task Task) bool {
 	return task.Action == ActionPlayerRefresh && len(task.WorldIDs) == 0 && task.Name == defaultPlayerRefreshTaskName
 }
 
-func isLegacyPlayerRefresh(task Task) bool {
-	return task.Action == ActionPlayerRefresh && strings.Contains(task.Description, "由旧版任务 #")
+func needsDefaultPlayerRefreshMigration(task Task) bool {
+	return isDefaultPlayerRefresh(task) && task.Schedule == legacyPlayerRefreshSchedule && task.Description == legacyPlayerRefreshDescription
 }
 
 func isPlayerManagementGroup(name string) bool {

@@ -70,6 +70,36 @@ func containerTestInstallation() RuntimeInstallation {
 	}
 }
 
+func TestContainerRuntimeWritesPrivateOneShotLaunchOptions(t *testing.T) {
+	installation := containerTestInstallation()
+	installation.SavePath = t.TempDir()
+	runtime, err := newContainerShardRuntime(installation, &fakeContainerCLI{available: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := runtime.writeLaunchOptions("Cluster_1", "Master", shared.RuntimeLaunchOptions{SkipUpdateServerMods: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "skip_update_server_mods=1\n" {
+		t.Fatalf("launch options=%q err=%v", data, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("launch option mode=%v", info.Mode().Perm())
+	}
+	if _, err := runtime.writeLaunchOptions("Cluster_1", "Master", shared.RuntimeLaunchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "skip_update_server_mods=1\n" {
+		t.Fatalf("default launch must also skip downloads on older images: %q err=%v", data, err)
+	}
+}
+
 func containerListLine(id, state, cluster, shard string) []byte {
 	return []byte(`{"ID":"` + id + `","Names":"dst-` + shard + `","State":"` + state + `","Labels":"com.dst-admin.managed=true,com.dst-admin.installation=runtime-a,com.dst-admin.cluster=` + cluster + `,com.dst-admin.shard=` + shard + `"}` + "\n")
 }
@@ -110,7 +140,12 @@ func TestContainerRuntimeUsesTrustedLabelsAndFixedConsoleArguments(t *testing.T)
 	wantList := []string{"ps", "-a", "--no-trunc", "--filter", "label=com.dst-admin.managed=true", "--filter", "label=com.dst-admin.installation=runtime-a", "--filter", "label=com.dst-admin.cluster=Cluster_1", "--filter", "label=com.dst-admin.shard=Master", "--format", "{{json .}}"}
 	wantProbe := []string{"exec", id, "tmux", "-S", "/run/dst-admin/tmux/tmux.sock", "display-message", "-p", "-t", "=dst:0.0", "#{pane_dead}|#{pane_current_command}|#{pane_pid}"}
 	wantClients := []string{"exec", id, "tmux", "-S", "/run/dst-admin/tmux/tmux.sock", "list-clients", "-F", "#{client_session}|#{client_readonly}"}
-	wantExec := []string{"exec", id, "tmux", "-S", "/run/dst-admin/tmux/tmux.sock", "send-keys", "-t", "=dst:0.0", "-l", "--", "c_announce('hello')", ";", "send-keys", "-t", "=dst:0.0", "Enter"}
+	wantExec := []string{
+		"exec", id, "tmux", "-S", "/run/dst-admin/tmux/tmux.sock",
+		"send-keys", "-t", "=dst:0.0", "C-q", "C-u", ";",
+		"send-keys", "-t", "=dst:0.0", "-l", "--", "c_announce('hello')", ";",
+		"send-keys", "-t", "=dst:0.0", "Enter",
+	}
 	if !reflect.DeepEqual(cli.calls[0].arguments, wantList) || !reflect.DeepEqual(cli.calls[1].arguments, wantProbe) ||
 		!reflect.DeepEqual(cli.calls[2].arguments, wantClients) || !reflect.DeepEqual(cli.calls[4].arguments, wantList) ||
 		!reflect.DeepEqual(cli.calls[6].arguments, wantExec) {
@@ -164,7 +199,12 @@ func TestContainerRuntimeStatusMappingAndStart(t *testing.T) {
 		})
 	}
 	cli := &fakeContainerCLI{available: true, responses: [][]byte{containerListLine(id, "exited", "Cluster_1", "Master"), nil, containerStartedAt(containerStartTime)}}
-	runtime, _ := newContainerShardRuntime(containerTestInstallation(), cli)
+	installation := containerTestInstallation()
+	installation.SavePath = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(installation.SavePath, "Cluster_1", "Master"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtime, _ := newContainerShardRuntime(installation, cli)
 	if err := runtime.Start(context.Background(), "Cluster_1", "Master"); err != nil {
 		t.Fatal(err)
 	}
@@ -282,6 +322,25 @@ func TestContainerRuntimeRemainsStartingUntilCurrentLogIsReady(t *testing.T) {
 	status, err := runtime.Status(context.Background(), "Cluster_1", "Master")
 	if err != nil || status.State != shards.RuntimeStarting || status.Code != "DST_WORLD_LOADING" {
 		t.Fatalf("status=%#v err=%v", status, err)
+	}
+}
+
+func TestContainerRuntimeReadsCurrentPauseBeyondTheLogTail(t *testing.T) {
+	installation := containerTestInstallation()
+	installation.SavePath = t.TempDir()
+	writeContainerRuntimeLog(t, installation.SavePath, "Cluster_1", "Master", containerStartTime,
+		"[00:01:00]: Sim paused\n"+strings.Repeat("mod output\n", 80000))
+	reader, _ := newContainerShardRuntime(installation, &fakeContainerCLI{available: true})
+	startedAt, _ := time.Parse(time.RFC3339Nano, containerStartTime)
+	for range 2 {
+		status, err := reader.runtimeLogStatus(context.Background(), "Cluster_1", "Master", startedAt)
+		if err != nil || status.State != shards.RuntimeRunning || status.Paused == nil || !*status.Paused {
+			t.Fatalf("paused container=%+v error=%v", status, err)
+		}
+	}
+	status, err := reader.runtimeLogStatus(context.Background(), "Cluster_1", "Master", startedAt.Add(time.Hour))
+	if err != nil || status.State != shards.RuntimeStarting || status.Paused != nil {
+		t.Fatalf("new container accepted previous process pause=%+v error=%v", status, err)
 	}
 }
 

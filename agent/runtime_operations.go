@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -15,6 +17,7 @@ import (
 
 	"dont/internal/configpublication"
 	"dont/internal/consoledispatch"
+	"dont/internal/networkprobe"
 	"dont/internal/roomops"
 	"dont/internal/runtimefiles"
 	"dont/internal/shards"
@@ -43,6 +46,10 @@ type consoleHealthRuntime interface {
 }
 
 func (a *Agent) executeRuntimeOperation(commandType string, request *shared.RuntimeOperationRequest, timeout int) (shared.RuntimeOperationResult, error) {
+	return a.executeRuntimeOperationContext(context.Background(), commandType, request, timeout)
+}
+
+func (a *Agent) executeRuntimeOperationContext(parent context.Context, commandType string, request *shared.RuntimeOperationRequest, timeout int) (shared.RuntimeOperationResult, error) {
 	if request == nil {
 		return shared.RuntimeOperationResult{}, errors.New("Runtime 操作负载缺失")
 	}
@@ -59,10 +66,20 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 			return shared.RuntimeOperationResult{}, err
 		}
 	}
-	operationContext, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	if parent == nil {
+		parent = context.Background()
+	}
+	operationContext, cancel := context.WithTimeout(parent, time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	if !shared.RuntimeActionMutates(request.Action) {
+	if !shared.RuntimeOperationRequiresLease(*request) {
+		if request.Action == shared.RuntimeActionConsoleSend {
+			control, err := a.runtimeControl(installation)
+			if err != nil {
+				return shared.RuntimeOperationResult{}, err
+			}
+			return executeConsoleSend(operationContext, control, installation, *request)
+		}
 		if isMapAction(request.Action) {
 			return a.observeMapAction(operationContext, installation, *request)
 		}
@@ -72,8 +89,32 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 		if isModAction(request.Action) {
 			return a.observeModAction(operationContext, installation, *request)
 		}
+		if request.Action == shared.RuntimeActionMigrationPeerGrant {
+			return a.observeMigrationPeerGrant(installation, *request)
+		}
+		if shared.IsGameInstallationAction(request.Action) {
+			return a.executeGameInstallation(operationContext, installation, *request)
+		}
+		if request.Action == shared.RuntimeActionLuaJITObserve {
+			return a.executeLuaJITAction(operationContext, installation, *request)
+		}
 		if request.Action == shared.RuntimeActionGameVersionObserve {
 			return a.observeGameVersion(operationContext, installation, *request)
+		}
+		if request.Action == shared.RuntimeActionNetworkEgressObserve {
+			return observeNetworkEgress(operationContext, *request)
+		}
+		if request.Action == shared.RuntimeActionNetworkEndpointListen {
+			return listenNetworkEndpoint(operationContext, *request)
+		}
+		if request.Action == shared.RuntimeActionNetworkEndpointProbe {
+			return probeNetworkEndpoints(operationContext, *request)
+		}
+		if request.Action == shared.RuntimeActionConfigurationRead {
+			return readConfigurationAction(operationContext, installation, *request)
+		}
+		if request.Action == shared.RuntimeActionClusterTokenReveal {
+			return revealClusterTokenAction(operationContext, installation, *request)
 		}
 		control, err := a.runtimeControl(installation)
 		if err != nil {
@@ -84,7 +125,9 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 	lockKey := request.InstallationID + "\x00" + request.Cluster
 	if isModAction(request.Action) {
 		lockKey = request.InstallationID + "\x00mods"
-	} else if request.Action == shared.RuntimeActionGameVersionUpdate {
+	} else if request.Action == shared.RuntimeActionLuaJITInstall || request.Action == shared.RuntimeActionLuaJITDownload {
+		lockKey = request.InstallationID + "\x00game-version"
+	} else if shared.IsGameInstallationAction(request.Action) || request.Action == shared.RuntimeActionGameVersionUpdate {
 		lockKey = request.InstallationID + "\x00game-version"
 	}
 	operationContext, release, err := roomops.Acquire(operationContext, lockKey)
@@ -99,7 +142,11 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 	}
 	var result shared.RuntimeOperationResult
 	var operationErr error
-	if isModAction(request.Action) {
+	if shared.IsGameInstallationAction(request.Action) {
+		result, operationErr = a.executeGameInstallation(operationContext, installation, *request)
+	} else if request.Action == shared.RuntimeActionLuaJITInstall || request.Action == shared.RuntimeActionLuaJITDownload {
+		result, operationErr = a.executeLuaJITAction(operationContext, installation, *request)
+	} else if isModAction(request.Action) {
 		result, operationErr = a.executeModAction(operationContext, installation, *request)
 	} else if request.Action == shared.RuntimeActionGameVersionUpdate {
 		result, operationErr = a.updateGameVersion(operationContext, installation, *request)
@@ -110,12 +157,14 @@ func (a *Agent) executeRuntimeOperation(commandType string, request *shared.Runt
 		if controlErr != nil {
 			result, operationErr = runtimeResult(*request, shared.RuntimeOutcomeFailed, controlErr.Error()), controlErr
 		} else {
-			result, operationErr = executeConsoleSend(operationContext, control, *request)
+			result, operationErr = executeConsoleSend(operationContext, control, installation, *request)
 		}
 	} else if isMigrationAction(request.Action) {
 		result, operationErr = a.executeMigrationAction(operationContext, installation, *request)
 	} else if isConfigurationAction(request.Action) {
 		result, operationErr = a.executeConfigurationAction(operationContext, installation, *request)
+	} else if request.Action == shared.RuntimeActionRoomRecoveryMove {
+		result, operationErr = moveRoomToRecovery(installation, *request)
 	} else if isMapAction(request.Action) {
 		result, operationErr = a.executeMapAction(operationContext, installation, *request)
 	} else {
@@ -135,15 +184,35 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 		len(request.TopologyRevision) < 1 || len(request.TopologyRevision) > 128 || strings.ContainsAny(request.TopologyRevision, "\x00\r\n") {
 		return errors.New("Runtime 操作请求无效")
 	}
-	if shared.RuntimeActionMutates(request.Action) {
+	if shared.RuntimeOperationRequiresLease(request) {
 		if !operationIdentity.MatchString(request.OperationKey) || !operationIdentity.MatchString(request.LeaseID) ||
 			request.FencingToken == 0 || request.LeaseExpiresAt == nil || request.LeaseExpiresAt.Before(now.Add(-30*time.Second)) ||
 			request.LeaseExpiresAt.After(now.Add(10*time.Minute)) {
 			return errors.New("Runtime 操作租约无效或已过期")
 		}
 	}
+	if shared.IsGameInstallationAction(request.Action) {
+		return validateGameInstallationPayload(request)
+	}
+	if request.GameInstallation != nil {
+		return errors.New("Runtime 操作包含无关游戏安装负载")
+	}
+	if (request.Action == shared.RuntimeActionLuaJITInstall || request.Action == shared.RuntimeActionLuaJITDownload) || request.Action == shared.RuntimeActionLuaJITObserve {
+		return validateLuaJITPayload(request)
+	}
+	if request.LuaJIT != nil {
+		return errors.New("Runtime 操作包含无关 LuaJIT 负载")
+	}
 	if !isCPUAction(request.Action) && request.CPU != nil {
 		return errors.New("Runtime 操作包含无关 CPU 负载")
+	}
+	if request.Action == shared.RuntimeActionClusterTokenReveal {
+		if request.Console != nil || request.Logs != nil || request.ChatLogs != nil || request.Artifacts != nil || request.Observation != nil ||
+			request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil || request.Network != nil || request.CPU != nil ||
+			request.Configuration != nil || request.Map != nil {
+			return errors.New("Cluster Token 读取请求包含无关负载")
+		}
+		return nil
 	}
 	if isMapAction(request.Action) {
 		return validateMapOperationPayload(request)
@@ -157,8 +226,21 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 	if request.Configuration != nil {
 		return errors.New("Runtime 操作包含无关配置发布负载")
 	}
+	if request.Action == shared.RuntimeActionRoomRecoveryMove {
+		if request.Console != nil || request.Logs != nil || request.ChatLogs != nil || request.Artifacts != nil || request.Observation != nil ||
+			request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil || request.Network != nil || request.CPU != nil || request.Map != nil {
+			return errors.New("房间回收请求包含无关负载")
+		}
+		return nil
+	}
+	if !isNetworkAction(request.Action) && request.Network != nil {
+		return errors.New("Runtime 操作包含无关网络探测负载")
+	}
+	if request.Action != shared.RuntimeActionChatLogsList && request.Action != shared.RuntimeActionChatLogsRead && request.ChatLogs != nil {
+		return errors.New("Runtime 操作包含无关聊天历史负载")
+	}
 	switch request.Action {
-	case shared.RuntimeActionConsoleHealth:
+	case shared.RuntimeActionConsoleHealth, shared.RuntimeActionWorldStateRead:
 		if request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil {
 			return errors.New("控制台健康请求包含无关负载")
 		}
@@ -168,10 +250,16 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 		}
 		console := request.Console
 		if console.Mode != shared.ConsoleModeManaged && console.Mode != shared.ConsoleModeProbe && console.Mode != shared.ConsoleModeRaw ||
-			strings.TrimSpace(console.Command) == "" || len(console.Command) > 4096 || !utf8.ValidString(console.Command) ||
+			strings.TrimSpace(console.Command) == "" || len(console.Command) > shared.MaximumRuntimeConsoleCommandBytes || !utf8.ValidString(console.Command) ||
 			strings.ContainsAny(console.Command, "\x00\r\n") || len(console.CoalesceKey) > 80 || strings.ContainsAny(console.CoalesceKey, "\x00\r\n") ||
-			console.Mode != shared.ConsoleModeProbe && strings.TrimSpace(console.CoalesceKey) != "" {
+			console.Mode != shared.ConsoleModeProbe && strings.TrimSpace(console.CoalesceKey) != "" ||
+			console.CommandDocument != nil && (console.Mode != shared.ConsoleModeManaged || strings.TrimSpace(console.CoalesceKey) != "") {
 			return errors.New("控制台请求内容无效")
+		}
+		if console.CommandDocument != nil {
+			if err := runtimefiles.ValidateCommandDocument(*console.CommandDocument); err != nil {
+				return err
+			}
 		}
 	case shared.RuntimeActionReadLogs:
 		if request.Logs == nil || request.Console != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil ||
@@ -181,6 +269,17 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 			request.Logs.Raw && strings.TrimSpace(request.Logs.Query) != "" || len([]rune(request.Logs.Query)) > 256 ||
 			len(request.Logs.FileID) > 128 || strings.ContainsAny(request.Logs.FileID, "\x00\r\n") {
 			return errors.New("日志读取请求无效")
+		}
+	case shared.RuntimeActionChatLogsList:
+		if request.ChatLogs == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil ||
+			request.ChatLogs.GenerationID != "" || request.ChatLogs.Cursor != 0 || request.ChatLogs.MaxBytes != 0 || request.ChatLogs.MaxLines != 0 {
+			return errors.New("聊天历史代次请求无效")
+		}
+	case shared.RuntimeActionChatLogsRead:
+		if request.ChatLogs == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil ||
+			request.ChatLogs.GenerationID == "" || len(request.ChatLogs.GenerationID) > 128 || strings.ContainsAny(request.ChatLogs.GenerationID, "\x00\r\n") ||
+			request.ChatLogs.Cursor < 0 || request.ChatLogs.MaxBytes < 1 || request.ChatLogs.MaxBytes > runtimefiles.MaximumLogBytes || request.ChatLogs.MaxLines < 1 || request.ChatLogs.MaxLines > 2000 {
+			return errors.New("聊天历史读取请求无效")
 		}
 	case shared.RuntimeActionReadArtifacts:
 		if request.Artifacts == nil || request.Console != nil || request.Logs != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil || !runtimefiles.IsArtifactKind(request.Artifacts.Kind) {
@@ -193,26 +292,39 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 			return errors.New("Runtime 操作观察请求无效")
 		}
 	case shared.RuntimeActionMigrationExportPrepare, shared.RuntimeActionMigrationExportRead, shared.RuntimeActionMigrationExportRelease,
+		shared.RuntimeActionMigrationPeerGrant, shared.RuntimeActionMigrationFetch,
 		shared.RuntimeActionMigrationImportBegin, shared.RuntimeActionMigrationImportWrite, shared.RuntimeActionMigrationImportCommit,
 		shared.RuntimeActionMigrationTargetRollback, shared.RuntimeActionMigrationTargetComplete,
 		shared.RuntimeActionMigrationSourceFinalize, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeActionMigrationSourceComplete:
-		if request.Migration == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil ||
-			!operationIdentity.MatchString(request.Migration.MigrationID) || request.Migration.Offset < 0 || request.Migration.Size < 0 ||
-			len(request.Migration.Data) > shardtransfer.MaxChunkBytes || len(request.Migration.SHA256) > 64 {
-			return errors.New("分片迁移请求无效")
-		}
-		if request.Action == shared.RuntimeActionMigrationImportWrite && len(request.Migration.Data) == 0 {
-			return errors.New("分片迁移块为空")
-		}
-	case shared.RuntimeActionModTargetObserve, shared.RuntimeActionModCacheInspect, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite, shared.RuntimeActionModUploadCommit,
+		return validateMigrationOperationPayload(request, now)
+	case shared.RuntimeActionModTargetObserve, shared.RuntimeActionModCacheInspect, shared.RuntimeActionModPeerGrant, shared.RuntimeActionModFetch, shared.RuntimeActionModDownload, shared.RuntimeActionModLink, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite, shared.RuntimeActionModUploadCommit,
 		shared.RuntimeActionModReleasePlanBegin, shared.RuntimeActionModReleasePlanWrite, shared.RuntimeActionModReleasePlanCommit,
 		shared.RuntimeActionModReleasePrepare, shared.RuntimeActionModReleasePublish, shared.RuntimeActionModReleaseRollback,
-		shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState, shared.RuntimeActionModOverridesRead:
+		shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState, shared.RuntimeActionModInstallationState, shared.RuntimeActionModFilesObserve, shared.RuntimeActionModFilesInventory, shared.RuntimeActionModSchemaRead, shared.RuntimeActionModOverridesRead:
 		if err := validateModOperationPayload(request); err != nil {
 			return err
 		}
 	case shared.RuntimeActionGameVersionObserve, shared.RuntimeActionGameVersionUpdate:
 		if err := validateGameVersionPayload(request); err != nil {
+			return err
+		}
+	case shared.RuntimeActionNetworkEgressObserve:
+		if request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil {
+			return errors.New("公网出口探测请求包含无关负载")
+		}
+		if request.Network == nil || !shared.IsRuntimeNetworkRegion(request.Network.Region) {
+			return errors.New("公网出口探测区域无效")
+		}
+		if request.Network.BindAddress != "" || request.Network.Port != 0 || len(request.Network.Tokens) != 0 ||
+			len(request.Network.Endpoints) != 0 || request.Network.TimeoutMillis != 0 {
+			return errors.New("公网出口探测请求包含无关端点参数")
+		}
+	case shared.RuntimeActionNetworkEndpointListen:
+		if err := validateNetworkEndpointListen(request); err != nil {
+			return err
+		}
+	case shared.RuntimeActionNetworkEndpointProbe:
+		if err := validateNetworkEndpointProbe(request); err != nil {
 			return err
 		}
 	case shared.RuntimeActionCPUPrepare, shared.RuntimeActionCPUApply, shared.RuntimeActionCPUObserve:
@@ -247,10 +359,51 @@ func validateCPUOperationPayload(request shared.RuntimeOperationRequest) error {
 
 func validateConfigurationOperationPayload(request shared.RuntimeOperationRequest) error {
 	value := request.Configuration
+	if request.Action == shared.RuntimeActionConfigurationApply {
+		if value == nil || value.ExpectedSHA256 != "" || value.Offset != 0 ||
+			request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil ||
+			request.Backup != nil || request.Mod != nil || request.GameVersion != nil || request.Network != nil || request.CPU != nil || request.Map != nil {
+			return errors.New("配置保存 Runtime 请求无效")
+		}
+		return configpublication.ValidateApply(configpublication.Descriptor{
+			PublicationID: value.PublicationID, Cluster: request.Cluster, Shard: request.Shard,
+			Scope: configpublication.Scope(value.Scope), Size: value.Size, SHA256: value.SHA256,
+		}, value.Data, value.ExpectedFiles)
+	}
+	if value != nil && len(value.ExpectedFiles) != 0 {
+		return errors.New("配置 Runtime 请求包含无关文件 revision")
+	}
+	if request.Action == shared.RuntimeActionModConfigurationWrite {
+		if value == nil || value.Scope != runtimefiles.ConfigurationScopeMod || value.PublicationID != "" || value.Offset != 0 || value.Size != 0 || value.SHA256 != "" ||
+			len(value.Data) == 0 || len(value.Data) > shared.MaximumRuntimeModOverridesBytes ||
+			request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil ||
+			request.Backup != nil || request.Mod != nil || request.GameVersion != nil || request.Network != nil || request.CPU != nil || request.Map != nil {
+			return errors.New("Mod 配置写入请求无效")
+		}
+		digest, err := hex.DecodeString(value.ExpectedSHA256)
+		if err != nil || len(digest) != sha256.Size {
+			return errors.New("Mod 配置写入缺少有效的文件 revision")
+		}
+		return nil
+	}
 	if value == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil ||
 		request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil || request.CPU != nil || request.Map != nil ||
-		!operationIdentity.MatchString(value.PublicationID) || value.Scope != string(configpublication.ScopeShared) && value.Scope != string(configpublication.ScopeWorld) ||
-		value.Offset < 0 || value.Size < 0 || len(value.SHA256) > 64 || len(value.Data) > configpublication.MaxChunkBytes {
+		value.ExpectedSHA256 != "" || value.Offset < 0 || value.Size < 0 || len(value.SHA256) > 64 || len(value.Data) > configpublication.MaxChunkBytes {
+		return errors.New("配置发布 Runtime 请求无效")
+	}
+	if request.Action == shared.RuntimeActionConfigurationRead {
+		if value.Scope != runtimefiles.ConfigurationScopeShared && value.Scope != runtimefiles.ConfigurationScopeWorld && value.Scope != runtimefiles.ConfigurationScopeMod && value.Scope != runtimefiles.ConfigurationScopeTokenStatus {
+			return errors.New("配置读取 Runtime 范围无效")
+		}
+		if value.PublicationID != "" || value.Offset != 0 || value.Size != 0 || value.SHA256 != "" || len(value.Data) != 0 {
+			return errors.New("配置读取 Runtime 请求无效")
+		}
+		return nil
+	}
+	if value.Scope != string(configpublication.ScopeShared) && value.Scope != string(configpublication.ScopeWorld) && value.Scope != string(configpublication.ScopeMod) {
+		return errors.New("配置发布 Runtime 范围无效")
+	}
+	if !operationIdentity.MatchString(value.PublicationID) {
 		return errors.New("配置发布 Runtime 请求无效")
 	}
 	if request.Action == shared.RuntimeActionConfigurationBegin && (value.Size < 1 || len(value.SHA256) != 64 || len(value.Data) != 0) {
@@ -264,6 +417,26 @@ func validateConfigurationOperationPayload(request shared.RuntimeOperationReques
 		return errors.New("配置发布步骤包含无关负载")
 	}
 	return nil
+}
+
+func readConfigurationAction(ctx context.Context, installation RuntimeInstallation, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
+	configuration, err := runtimefiles.ReadConfiguration(ctx, installation.SavePath, request.Cluster, request.Shard, request.Configuration.Scope)
+	result := runtimeResult(request, shared.RuntimeOutcomeObserved, "Runtime 配置已读取")
+	result.Configuration = &configuration
+	if err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+	}
+	return result, err
+}
+
+func revealClusterTokenAction(ctx context.Context, installation RuntimeInstallation, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
+	token, err := runtimefiles.ReadClusterToken(ctx, installation.SavePath, request.Cluster, request.Shard)
+	result := runtimeResult(request, shared.RuntimeOutcomeObserved, "Cluster Token 已读取")
+	result.ClusterToken = &token
+	if err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+	}
+	return result, err
 }
 
 func validateMapOperationPayload(request shared.RuntimeOperationRequest) error {
@@ -340,9 +513,25 @@ func (a *Agent) observeRuntimeAction(ctx context.Context, control shardRuntimeCo
 		chunk, err := runtimefiles.ReadLogs(ctx, installation.SavePath, request.Cluster, request.Shard, *request.Logs)
 		result.Logs = &chunk
 		return result, err
+	case shared.RuntimeActionChatLogsList:
+		generations, err := runtimefiles.ListChatLogGenerations(ctx, installation.SavePath, request.Cluster, request.Shard)
+		result.ChatLogs = &shared.RuntimeChatLogResult{Generations: generations}
+		return result, err
+	case shared.RuntimeActionChatLogsRead:
+		chatLogs, err := runtimefiles.ReadChatLogGeneration(ctx, installation.SavePath, request.Cluster, request.Shard, *request.ChatLogs)
+		result.ChatLogs = &chatLogs
+		return result, err
 	case shared.RuntimeActionReadArtifacts:
 		bundle, err := runtimefiles.ReadArtifacts(ctx, installation.SavePath, request.Cluster, request.Shard, request.Artifacts.Kind)
 		result.Artifacts = &bundle
+		return result, err
+	case shared.RuntimeActionWorldStateRead:
+		status, err := control.Status(ctx, request.Cluster, request.Shard)
+		if err != nil {
+			return result, err
+		}
+		value, err := runtimefiles.ReadWorldState(ctx, installation.SavePath, request.Cluster, request.Shard, sharedRuntimeStatus(status))
+		result.WorldState = &value
 		return result, err
 	case shared.RuntimeActionObserveOperation:
 		evidence, err := a.shardState.observeRuntime(request.InstallationID, request.Cluster, *request.Observation)
@@ -392,9 +581,19 @@ func (a *Agent) executeMigrationAction(ctx context.Context, installation Runtime
 		err = stepErr
 	case shared.RuntimeActionMigrationExportRelease:
 		err = transfer.ReleaseExport(migration.MigrationID)
+		if err == nil {
+			a.revokeMigrationPeerGrants(installation.ID, migration.MigrationID)
+		}
 		response.Complete = err == nil
+	case shared.RuntimeActionMigrationFetch:
+		response.NextOffset, err = a.fetchMigrationImport(ctx, installation, migration)
+		response.Offset, response.Size, response.SHA256 = migration.Offset, migration.Size, migration.SHA256
+		response.Complete = err == nil && response.NextOffset == migration.Size
 	case shared.RuntimeActionMigrationImportBegin:
-		descriptor, stepErr := transfer.BeginImport(migration.MigrationID, migration.Size, migration.SHA256)
+		descriptor, stepErr := transfer.BeginImportWithShardEndpoint(
+			migration.MigrationID, migration.Size, migration.SHA256,
+			migration.ShardBindAll, migration.ShardMasterAddress, migration.ShardMasterPort,
+		)
 		response.Size, response.SHA256 = descriptor.Size, descriptor.SHA256
 		err = stepErr
 	case shared.RuntimeActionMigrationImportWrite:
@@ -430,6 +629,18 @@ func (a *Agent) executeMigrationAction(ctx context.Context, installation Runtime
 }
 
 func (a *Agent) executeConfigurationAction(ctx context.Context, installation RuntimeInstallation, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
+	if request.Action == shared.RuntimeActionModConfigurationWrite {
+		value := request.Configuration
+		revision, err := runtimefiles.PublishModOverrides(ctx, installation.SavePath, request.Cluster, request.Shard, value.ExpectedSHA256, value.Data)
+		result := runtimeResult(request, shared.RuntimeOutcomeConfirmed, "Mod 配置已保存")
+		result.Configuration = &shared.RuntimeConfigurationResult{SHA256: revision, Complete: err == nil}
+		if err != nil {
+			var conflict *runtimefiles.ConfigurationConflictError
+			result.Configuration.RevisionConflict = errors.As(err, &conflict)
+			result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+		}
+		return result, err
+	}
 	manager, err := configpublication.New(installation.SavePath, filepath.Join(a.Config.OperationStateFile+".configurations", installation.ID))
 	result := runtimeResult(request, shared.RuntimeOutcomeConfirmed, "配置发布步骤已完成")
 	value := *request.Configuration
@@ -440,6 +651,13 @@ func (a *Agent) executeConfigurationAction(ctx context.Context, installation Run
 		return result, err
 	}
 	switch request.Action {
+	case shared.RuntimeActionConfigurationApply:
+		response.Warnings, err = manager.Apply(ctx, configpublication.Descriptor{
+			PublicationID: value.PublicationID, Cluster: request.Cluster, Shard: request.Shard,
+			Scope: configpublication.Scope(value.Scope), Size: value.Size, SHA256: value.SHA256,
+		}, value.Data, value.ExpectedFiles)
+		response.Complete = err == nil
+		response.RevisionConflict = errors.Is(err, configpublication.ErrRevisionConflict)
 	case shared.RuntimeActionConfigurationBegin:
 		response.NextOffset, err = manager.Begin(configpublication.Descriptor{
 			PublicationID: value.PublicationID, Cluster: request.Cluster, Shard: request.Shard,
@@ -577,9 +795,68 @@ func validRuntimeDigest(value string) bool {
 	return err == nil && len(decoded) == sha256.Size
 }
 
+func validateMigrationOperationPayload(request shared.RuntimeOperationRequest, now time.Time) error {
+	migration := request.Migration
+	if migration == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil ||
+		request.Backup != nil || request.Mod != nil || request.GameVersion != nil || !operationIdentity.MatchString(migration.MigrationID) ||
+		migration.Offset < 0 || migration.Size < 0 || len(migration.Data) > shardtransfer.MaxChunkBytes || len(migration.SHA256) > 64 {
+		return errors.New("分片迁移请求无效")
+	}
+	emptyData := migration.Offset == 0 && migration.Size == 0 && migration.SHA256 == "" && len(migration.Data) == 0
+	emptyPeer := migration.PeerSubject == "" && len(migration.FetchLocations) == 0
+	emptyRouting := !migration.ShardBindAll && migration.ShardMasterAddress == "" && migration.ShardMasterPort == 0
+	switch request.Action {
+	case shared.RuntimeActionMigrationExportPrepare, shared.RuntimeActionMigrationExportRelease,
+		shared.RuntimeActionMigrationImportCommit, shared.RuntimeActionMigrationTargetRollback, shared.RuntimeActionMigrationTargetComplete,
+		shared.RuntimeActionMigrationSourceFinalize, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeActionMigrationSourceComplete:
+		if !emptyData || !emptyPeer || !emptyRouting {
+			return errors.New("分片迁移步骤包含无关负载")
+		}
+	case shared.RuntimeActionMigrationExportRead:
+		if migration.Size != 0 || migration.SHA256 != "" || len(migration.Data) != 0 || !emptyPeer || !emptyRouting {
+			return errors.New("分片迁移读取请求无效")
+		}
+	case shared.RuntimeActionMigrationPeerGrant:
+		if migration.Offset != 0 || migration.Size < 1 || migration.Size > shardtransfer.MaximumTransferBytes ||
+			!validRuntimeDigest(migration.SHA256) || len(migration.Data) != 0 || !validModPeerSubject(migration.PeerSubject) ||
+			len(migration.FetchLocations) != 0 || !emptyRouting {
+			return errors.New("分片迁移 Peer 授权请求无效")
+		}
+	case shared.RuntimeActionMigrationFetch:
+		if migration.Offset != 0 || migration.Size < 1 || migration.Size > shardtransfer.MaximumTransferBytes ||
+			!validRuntimeDigest(migration.SHA256) || len(migration.Data) != 0 || migration.PeerSubject != "" ||
+			len(migration.FetchLocations) < 1 || len(migration.FetchLocations) > 2 || !emptyRouting {
+			return errors.New("分片迁移 Peer 获取请求无效")
+		}
+		for _, location := range migration.FetchLocations {
+			if !validMigrationFetchLocation(location, *migration, now) {
+				return errors.New("分片迁移 Peer 获取位置无效")
+			}
+		}
+	case shared.RuntimeActionMigrationImportBegin:
+		address := strings.TrimSpace(strings.Trim(migration.ShardMasterAddress, "[]"))
+		if migration.Offset != 0 || migration.Size < 1 || migration.Size > shardtransfer.MaximumTransferBytes ||
+			!validRuntimeDigest(migration.SHA256) || len(migration.Data) != 0 || !emptyPeer ||
+			address != "" && (!validNetworkEndpointAddress(address) || migration.ShardMasterPort < 1 || migration.ShardMasterPort > 65535) ||
+			address == "" && migration.ShardMasterPort != 0 {
+			return errors.New("分片迁移目标导入描述无效")
+		}
+	case shared.RuntimeActionMigrationImportWrite:
+		if migration.Size < 1 || migration.Size > shardtransfer.MaximumTransferBytes || !validRuntimeDigest(migration.SHA256) ||
+			len(migration.Data) < 1 || migration.Offset > migration.Size || int64(len(migration.Data)) > migration.Size-migration.Offset ||
+			!emptyPeer || !emptyRouting {
+			return errors.New("分片迁移数据块无效")
+		}
+	default:
+		return errors.New("分片迁移动作无效")
+	}
+	return nil
+}
+
 func isMigrationAction(action shared.RuntimeAction) bool {
 	switch action {
 	case shared.RuntimeActionMigrationExportPrepare, shared.RuntimeActionMigrationExportRead, shared.RuntimeActionMigrationExportRelease,
+		shared.RuntimeActionMigrationPeerGrant, shared.RuntimeActionMigrationFetch,
 		shared.RuntimeActionMigrationImportBegin, shared.RuntimeActionMigrationImportWrite, shared.RuntimeActionMigrationImportCommit,
 		shared.RuntimeActionMigrationTargetRollback, shared.RuntimeActionMigrationTargetComplete,
 		shared.RuntimeActionMigrationSourceFinalize, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeActionMigrationSourceComplete:
@@ -591,10 +868,10 @@ func isMigrationAction(action shared.RuntimeAction) bool {
 
 func isModAction(action shared.RuntimeAction) bool {
 	switch action {
-	case shared.RuntimeActionModTargetObserve, shared.RuntimeActionModCacheInspect, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite, shared.RuntimeActionModUploadCommit,
+	case shared.RuntimeActionModTargetObserve, shared.RuntimeActionModCacheInspect, shared.RuntimeActionModPeerGrant, shared.RuntimeActionModFetch, shared.RuntimeActionModDownload, shared.RuntimeActionModLink, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite, shared.RuntimeActionModUploadCommit,
 		shared.RuntimeActionModReleasePlanBegin, shared.RuntimeActionModReleasePlanWrite, shared.RuntimeActionModReleasePlanCommit,
 		shared.RuntimeActionModReleasePrepare, shared.RuntimeActionModReleasePublish, shared.RuntimeActionModReleaseRollback,
-		shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState, shared.RuntimeActionModOverridesRead:
+		shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState, shared.RuntimeActionModInstallationState, shared.RuntimeActionModFilesObserve, shared.RuntimeActionModFilesInventory, shared.RuntimeActionModSchemaRead, shared.RuntimeActionModOverridesRead:
 		return true
 	default:
 		return false
@@ -607,7 +884,7 @@ func isCPUAction(action shared.RuntimeAction) bool {
 
 func isConfigurationAction(action shared.RuntimeAction) bool {
 	switch action {
-	case shared.RuntimeActionConfigurationBegin, shared.RuntimeActionConfigurationWrite, shared.RuntimeActionConfigurationPrepare,
+	case shared.RuntimeActionConfigurationRead, shared.RuntimeActionConfigurationApply, shared.RuntimeActionModConfigurationWrite, shared.RuntimeActionConfigurationBegin, shared.RuntimeActionConfigurationWrite, shared.RuntimeActionConfigurationPrepare,
 		shared.RuntimeActionConfigurationPublish, shared.RuntimeActionConfigurationRollback, shared.RuntimeActionConfigurationComplete:
 		return true
 	default:
@@ -640,45 +917,193 @@ func (a *Agent) transferManager(installation RuntimeInstallation) (*shardtransfe
 }
 
 func runtimeActionRequiresExistingShard(action shared.RuntimeAction) bool {
+	if shared.IsGameInstallationAction(action) {
+		return false
+	}
 	switch action {
 	case shared.RuntimeActionMigrationImportBegin, shared.RuntimeActionMigrationImportWrite, shared.RuntimeActionMigrationImportCommit,
+		shared.RuntimeActionMigrationFetch,
 		shared.RuntimeActionMigrationTargetRollback, shared.RuntimeActionMigrationTargetComplete,
 		shared.RuntimeActionMigrationExportRelease, shared.RuntimeActionMigrationSourceRollback, shared.RuntimeActionMigrationSourceComplete,
 		shared.RuntimeActionBackupRead, shared.RuntimeActionBackupRelease,
 		shared.RuntimeActionRestoreBegin, shared.RuntimeActionRestoreWrite, shared.RuntimeActionRestorePrepare,
 		shared.RuntimeActionRestorePublish, shared.RuntimeActionRestoreRollback, shared.RuntimeActionRestoreComplete,
-		shared.RuntimeActionModTargetObserve, shared.RuntimeActionModCacheInspect, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite,
-		shared.RuntimeActionModUploadCommit, shared.RuntimeActionModReleasePlanBegin, shared.RuntimeActionModReleasePlanWrite,
+		shared.RuntimeActionModTargetObserve, shared.RuntimeActionModCacheInspect, shared.RuntimeActionModPeerGrant, shared.RuntimeActionModFetch, shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite,
+		shared.RuntimeActionModUploadCommit, shared.RuntimeActionModDownload, shared.RuntimeActionModLink, shared.RuntimeActionModReleasePlanBegin, shared.RuntimeActionModReleasePlanWrite,
 		shared.RuntimeActionModReleasePlanCommit, shared.RuntimeActionModReleasePrepare, shared.RuntimeActionModReleasePublish,
-		shared.RuntimeActionModReleaseRollback, shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState,
-		shared.RuntimeActionModOverridesRead:
+		shared.RuntimeActionModReleaseRollback, shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState, shared.RuntimeActionModInstallationState, shared.RuntimeActionModFilesObserve, shared.RuntimeActionModFilesInventory,
+		shared.RuntimeActionModSchemaRead, shared.RuntimeActionModOverridesRead:
 		return false
 	case shared.RuntimeActionMapRead, shared.RuntimeActionMapRelease:
 		return false
-	case shared.RuntimeActionGameVersionObserve, shared.RuntimeActionGameVersionUpdate:
+	case shared.RuntimeActionLuaJITObserve, shared.RuntimeActionLuaJITInstall, shared.RuntimeActionLuaJITDownload, shared.RuntimeActionGameVersionObserve, shared.RuntimeActionGameVersionUpdate:
+		return false
+	case shared.RuntimeActionNetworkEgressObserve, shared.RuntimeActionNetworkEndpointListen, shared.RuntimeActionNetworkEndpointProbe:
+		return false
+	case shared.RuntimeActionRoomRecoveryMove:
 		return false
 	default:
 		return true
 	}
 }
 
+func moveRoomToRecovery(installation RuntimeInstallation, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
+	result := runtimeResult(request, shared.RuntimeOutcomeConfirmed, "房间已移入运行节点回收目录")
+	source := filepath.Join(installation.SavePath, request.Cluster)
+	if !pathWithinRoot(source, installation.SavePath) {
+		return runtimeResult(request, shared.RuntimeOutcomeFailed, "房间目录越出受信存档根目录"), errors.New("房间目录越出受信存档根目录")
+	}
+	info, err := os.Lstat(source)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		if err == nil {
+			err = errors.New("房间目录不是受信普通目录")
+		}
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, "房间目录不存在或不受信"
+		return result, err
+	}
+	trashRoot := filepath.Join(installation.SavePath, ".dst-admin-trash")
+	if err := os.MkdirAll(trashRoot, 0o750); err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+		return result, err
+	}
+	trashInfo, err := os.Lstat(trashRoot)
+	if err != nil || !trashInfo.IsDir() || trashInfo.Mode()&os.ModeSymlink != 0 {
+		if err == nil {
+			err = errors.New("房间回收根目录不受信")
+		}
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, "房间回收根目录不可用"
+		return result, err
+	}
+	trashName := fmt.Sprintf("%d-%s", time.Now().UTC().UnixNano(), request.Cluster)
+	target := filepath.Join(trashRoot, trashName)
+	if err := os.Rename(source, target); err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+		return result, err
+	}
+	result.RoomRecovery = &shared.RuntimeRoomRecoveryResult{RecoveryRef: filepath.ToSlash(filepath.Join(".dst-admin-trash", trashName))}
+	return result, nil
+}
+
+func observeNetworkEgress(ctx context.Context, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
+	address, err := networkprobe.Detect(ctx, request.Network.Region)
+	result := runtimeResult(request, shared.RuntimeOutcomeObserved, "已探测运行节点的公网出口地址")
+	if err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+		return result, err
+	}
+	result.Network = &shared.RuntimeNetworkResult{Address: address.String(), Region: request.Network.Region, ObservedAt: time.Now().UTC()}
+	return result, nil
+}
+
+func listenNetworkEndpoint(ctx context.Context, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
+	timeout := time.Duration(request.Network.TimeoutMillis) * time.Millisecond
+	received, err := networkprobe.ListenEndpoint(ctx, request.Network.BindAddress, request.Network.Port, request.Network.Tokens, timeout)
+	result := runtimeResult(request, shared.RuntimeOutcomeObserved, "端点监听探测已完成")
+	result.Network = &shared.RuntimeNetworkResult{ReceivedTokens: received, ObservedAt: time.Now().UTC()}
+	if err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+		return result, err
+	}
+	return result, nil
+}
+
+func probeNetworkEndpoints(ctx context.Context, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
+	timeout := time.Duration(request.Network.TimeoutMillis) * time.Millisecond
+	probes := networkprobe.ProbeEndpoints(ctx, request.Network.Endpoints, timeout)
+	result := runtimeResult(request, shared.RuntimeOutcomeObserved, "候选端点探测已完成")
+	result.Network = &shared.RuntimeNetworkResult{EndpointProbes: probes, ObservedAt: time.Now().UTC()}
+	return result, nil
+}
+
+func isNetworkAction(action shared.RuntimeAction) bool {
+	return action == shared.RuntimeActionNetworkEgressObserve || action == shared.RuntimeActionNetworkEndpointListen ||
+		action == shared.RuntimeActionNetworkEndpointProbe
+}
+
+func validateNetworkEndpointListen(request shared.RuntimeOperationRequest) error {
+	if request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil ||
+		request.Backup != nil || request.Mod != nil || request.GameVersion != nil || request.Network == nil {
+		return errors.New("端点监听探测请求包含无关负载")
+	}
+	value := request.Network
+	if value.Region != "" || net.ParseIP(strings.TrimSpace(value.BindAddress)) == nil || value.Port < 1 || value.Port > 65535 ||
+		len(value.Tokens) < 1 || len(value.Tokens) > 64 || len(value.Endpoints) != 0 || value.TimeoutMillis < 500 || value.TimeoutMillis > 15_000 {
+		return errors.New("端点监听探测参数无效")
+	}
+	seen := make(map[string]bool, len(value.Tokens))
+	for _, token := range value.Tokens {
+		if len(token) < 16 || len(token) > 128 || !operationIdentity.MatchString(token) || seen[token] {
+			return errors.New("端点监听探测令牌无效")
+		}
+		seen[token] = true
+	}
+	return nil
+}
+
+func validateNetworkEndpointProbe(request shared.RuntimeOperationRequest) error {
+	if request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil ||
+		request.Backup != nil || request.Mod != nil || request.GameVersion != nil || request.Network == nil {
+		return errors.New("端点连通探测请求包含无关负载")
+	}
+	value := request.Network
+	if value.Region != "" || value.BindAddress != "" || value.Port != 0 || len(value.Tokens) != 0 ||
+		len(value.Endpoints) < 1 || len(value.Endpoints) > 64 || value.TimeoutMillis < 500 || value.TimeoutMillis > 15_000 {
+		return errors.New("端点连通探测参数无效")
+	}
+	for _, endpoint := range value.Endpoints {
+		if !validNetworkEndpointAddress(endpoint.Address) || endpoint.Port < 1 || endpoint.Port > 65535 ||
+			len(endpoint.Token) < 16 || len(endpoint.Token) > 128 || !operationIdentity.MatchString(endpoint.Token) {
+			return errors.New("端点连通探测候选无效")
+		}
+	}
+	return nil
+}
+
+func validNetworkEndpointAddress(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 253 || strings.ContainsAny(value, "\x00\r\n \t/\\") {
+		return false
+	}
+	if net.ParseIP(strings.Trim(value, "[]")) != nil {
+		return true
+	}
+	for _, label := range strings.Split(strings.TrimSuffix(value, "."), ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for index := range len(label) {
+			character := label[index]
+			if character != '-' && (character < '0' || character > '9') && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func runtimeOperationTimeoutLimit(action shared.RuntimeAction) int {
-	if action == shared.RuntimeActionGameVersionUpdate {
+	if action == shared.RuntimeActionGameInstallationInstall {
+		return 1800
+	}
+	if (action == shared.RuntimeActionLuaJITInstall || action == shared.RuntimeActionLuaJITDownload) || action == shared.RuntimeActionGameVersionUpdate || action == shared.RuntimeActionMigrationFetch {
 		return 1800
 	}
 	return 300
 }
 
-func executeConsoleSend(ctx context.Context, control shardRuntimeControl, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
+func executeConsoleSend(ctx context.Context, control shardRuntimeControl, installation RuntimeInstallation, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
 	console := *request.Console
 	var err error
-	if console.Mode == shared.ConsoleModeProbe && strings.TrimSpace(console.CoalesceKey) != "" {
+	if console.CommandDocument != nil {
+		err = runtimefiles.PublishCommandDocument(ctx, installation.SavePath, request.Cluster, request.Shard, *console.CommandDocument)
+	}
+	if err == nil && console.Mode == shared.ConsoleModeProbe && strings.TrimSpace(console.CoalesceKey) != "" {
 		if background, ok := control.(backgroundConsoleRuntime); ok {
 			err = background.SendBackground(ctx, request.Cluster, request.Shard, console.CoalesceKey, console.Command)
 		} else {
 			err = control.Send(ctx, request.Cluster, request.Shard, console.Command)
 		}
-	} else {
+	} else if err == nil {
 		err = control.Send(ctx, request.Cluster, request.Shard, console.Command)
 	}
 	result := runtimeResult(request, shared.RuntimeOutcomeSent, "控制台命令已发送；是否执行成功需要对应回执或状态证据")
@@ -697,7 +1122,7 @@ func runtimeResult(request shared.RuntimeOperationRequest, outcome shared.Runtim
 }
 
 func sharedRuntimeStatus(status shards.RuntimeStatus) shared.ShardRuntimeStatus {
-	return shared.ShardRuntimeStatus{State: string(status.State), Code: status.Code, Message: status.Message, SessionExists: status.SessionExists}
+	return shared.ShardRuntimeStatus{State: string(status.State), Code: status.Code, Message: status.Message, SessionExists: status.SessionExists, Paused: status.Paused}
 }
 
 func (state *shardOperationState) beginRuntime(request shared.RuntimeOperationRequest, now time.Time) (*shared.RuntimeOperationResult, error) {

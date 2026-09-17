@@ -10,14 +10,17 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"dont/internal/agents"
 	"dont/internal/backups"
 	"dont/internal/console"
 	"dont/internal/jobs"
 	"dont/internal/players"
 	"dont/internal/rooms"
 	"dont/internal/runtimeaudit"
+	"dont/internal/runtimeobservation"
 	"dont/internal/shards"
 	"dont/internal/structuredlogs"
+	"dont/internal/topology"
 	"dont/internal/worldstate"
 )
 
@@ -49,8 +52,12 @@ type playerBatchRefresher interface {
 	RefreshWorlds(context.Context, string, []string) ([]players.RefreshOutcome, error)
 }
 
+type playerScheduledRefresher interface {
+	RefreshScheduledWorlds(context.Context, string, []string) ([]players.RefreshOutcome, error)
+}
+
 type playerRuntimePreflight interface {
-	AnyWorldRunning(context.Context, string, []string) (bool, error)
+	PrepareScheduledRefresh(context.Context, string, []string) (bool, error)
 }
 
 type StructuredLogRefresher interface {
@@ -60,7 +67,7 @@ type StructuredLogRefresher interface {
 
 type WorldStateRefresher interface {
 	WorldTargets(string) ([]rooms.World, error)
-	RefreshWorld(context.Context, string, string) (worldstate.RefreshResult, error)
+	SampleWorld(context.Context, string, string) (worldstate.RefreshResult, error)
 }
 
 type NotificationSender interface {
@@ -161,10 +168,47 @@ func (e *DomainExecutor) ShouldRunScheduled(ctx context.Context, task Task) (boo
 	if !ok {
 		return true, nil
 	}
-	return preflight.AnyWorldRunning(ctx, task.RoomID, task.WorldIDs)
+	running, err := preflight.PrepareScheduledRefresh(ctx, task.RoomID, task.WorldIDs)
+	if scheduledRuntimeUnavailable(err) {
+		return running, nil
+	}
+	return running, err
+}
+
+func scheduledRuntimeUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, runtimeobservation.ErrObservationUnavailable) ||
+		errors.Is(err, agents.ErrUnavailable) ||
+		errors.Is(err, agents.ErrAgentOffline) ||
+		errors.Is(err, agents.ErrRuntimeNotConfigured) ||
+		errors.Is(err, agents.ErrRuntimeInstallationNotRegistered) {
+		return true
+	}
+	var execution *topology.ExecutionError
+	if !errors.As(err, &execution) {
+		return false
+	}
+	switch execution.Code {
+	case "APPLIED_TARGET_MISSING", "APPLIED_TARGET_OFFLINE", "APPLIED_TARGET_INVALID",
+		"APPLIED_INVENTORY_MISSING", "APPLIED_INVENTORY_STALE", "APPLIED_SHARD_MISSING",
+		"AGENT_CAPABILITY_MISSING":
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *DomainExecutor) Execute(ctx context.Context, task Task, jobID string) (ExecutionResult, error) {
+	return e.execute(ctx, task, jobID, false)
+}
+
+func (e *DomainExecutor) ExecuteScheduled(ctx context.Context, task Task, jobID string) (ExecutionResult, error) {
+	return e.execute(ctx, task, jobID, true)
+}
+
+func (e *DomainExecutor) execute(ctx context.Context, task Task, jobID string, scheduled bool) (ExecutionResult, error) {
 	if err := e.Validate(task); err != nil {
 		return ExecutionResult{}, err
 	}
@@ -225,7 +269,11 @@ func (e *DomainExecutor) Execute(ctx context.Context, task Task, jobID string) (
 			return ExecutionResult{}, err
 		}
 		if batch, supported := e.players.(playerBatchRefresher); supported {
-			outcomes, refreshErr := batch.RefreshWorlds(ctx, task.RoomID, selected)
+			refresh := batch.RefreshWorlds
+			if sampler, ok := e.players.(playerScheduledRefresher); scheduled && ok {
+				refresh = sampler.RefreshScheduledWorlds
+			}
+			outcomes, refreshErr := refresh(ctx, task.RoomID, selected)
 			if refreshErr != nil {
 				return ExecutionResult{}, refreshErr
 			}
@@ -267,7 +315,7 @@ func (e *DomainExecutor) Execute(ctx context.Context, task Task, jobID string) (
 			available = append(available, target.ID)
 		}
 		return executeRefresh(ctx, task.WorldIDs, available, func(worldID string) (string, error) {
-			result, refreshErr := e.worldStates.RefreshWorld(ctx, task.RoomID, worldID)
+			result, refreshErr := e.worldStates.SampleWorld(ctx, task.RoomID, worldID)
 			return result.Message, refreshErr
 		})
 	default:

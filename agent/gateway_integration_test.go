@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -97,6 +99,57 @@ func TestProductionAgentGatewayRoundTrip(t *testing.T) {
 			t.Fatalf("typed action did not complete: result=%#v err=%v", result, resultErr)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestAgentKeepsReconnectingUntilGatewayReturns(t *testing.T) {
+	root := t.TempDir()
+	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	configPath := filepath.Join(root, "agent.conf")
+	if err := os.WriteFile(configPath, []byte("[server]\nSECURITY_KEY = "+key+"\n[agent]\nSECURITY_KEY = "+key+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := reserved.Addr().String()
+	if err := reserved.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	agent, err := NewAgent(&Config{
+		ServerURL: "ws://" + address + "/agent", AgentID: "reconnecting-agent",
+		SecurityKey: key, KeyFile: configPath, OperationStateFile: filepath.Join(root, "operations.json"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent.reconnectInterval = time.Millisecond
+	agent.reconnectMaxInterval = 2 * time.Millisecond
+	if err := agent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Stop()
+
+	// The previous implementation stopped permanently after ten attempts.
+	time.Sleep(40 * time.Millisecond)
+	gateway, err := legacyserver.NewServer(&legacyserver.Config{KeyFile: configPath, SecurityKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Stop()
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := &http.Server{Handler: gateway.Handler()}
+	go func() { _ = httpServer.Serve(listener) }()
+	defer func() { _ = httpServer.Close() }()
+
+	waitForRegisteredAgent(t, gateway)
+	if !agent.Connected() {
+		t.Fatal("Agent did not reconnect after the gateway returned")
 	}
 }
 

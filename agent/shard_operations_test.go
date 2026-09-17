@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"dont/internal/operationprogress"
 	"dont/internal/shards"
 	"dont/shared"
 )
@@ -21,6 +22,34 @@ type fakeShardRuntime struct {
 	fail   error
 }
 
+type startupProgressRuntime struct {
+	*fakeShardRuntime
+	reads int
+}
+
+func (r *startupProgressRuntime) Status(context.Context, string, string) (shards.RuntimeStatus, error) {
+	r.reads++
+	if r.reads == 3 {
+		return shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}, nil
+	}
+	return shards.RuntimeStatus{State: shards.RuntimeStarting, StartupStage: "loading_world", SessionExists: true}, nil
+}
+
+func TestAgentStartupProgressReusesReadinessReads(t *testing.T) {
+	runtime := &startupProgressRuntime{fakeShardRuntime: &fakeShardRuntime{}}
+	var updates []operationprogress.Update
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ctx = operationprogress.WithReporter(ctx, func(update operationprogress.Update) { updates = append(updates, update) })
+	status, err := waitForShardState(ctx, runtime, "room", "Master", true)
+	if err != nil || status.State != shards.RuntimeRunning || runtime.reads != 3 {
+		t.Fatalf("status=%+v reads=%d err=%v", status, runtime.reads, err)
+	}
+	if len(updates) != 1 || updates[0].Stage != "world.start.loading_world" || updates[0].Percent != 80 {
+		t.Fatalf("stage updates=%+v", updates)
+	}
+}
+
 type fakeContainerOwnershipRuntime struct {
 	*fakeShardRuntime
 	exists bool
@@ -29,6 +58,45 @@ type fakeContainerOwnershipRuntime struct {
 type fakeConsoleRecoveryRuntime struct {
 	*fakeShardRuntime
 	recovered []consoleHazard
+}
+
+type stagedAgentStartRuntime struct {
+	mu      sync.Mutex
+	states  map[string]shards.RuntimeStatus
+	started chan string
+}
+
+func (runtime *stagedAgentStartRuntime) Status(_ context.Context, _, shard string) (shards.RuntimeStatus, error) {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	return runtime.states[shard], nil
+}
+
+func (runtime *stagedAgentStartRuntime) Start(_ context.Context, _, shard string) error {
+	runtime.mu.Lock()
+	runtime.states[shard] = shards.RuntimeStatus{State: shards.RuntimeStarting, SessionExists: true}
+	runtime.mu.Unlock()
+	runtime.started <- shard
+	return nil
+}
+
+func (runtime *stagedAgentStartRuntime) Stop(_ context.Context, _, shard string) error {
+	runtime.mu.Lock()
+	runtime.states[shard] = shards.RuntimeStatus{State: shards.RuntimeStopped}
+	runtime.mu.Unlock()
+	return nil
+}
+
+func (runtime *stagedAgentStartRuntime) Send(context.Context, string, string, string) error {
+	return nil
+}
+
+func (runtime *stagedAgentStartRuntime) markRunning(shardsToMark ...string) {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	for _, shard := range shardsToMark {
+		runtime.states[shard] = shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}
+	}
 }
 
 func (f *fakeConsoleRecoveryRuntime) RecoverConsoleHazard(_ context.Context, cluster, shard string) error {
@@ -75,17 +143,22 @@ func (runtime *fakeShardRuntime) Send(context.Context, string, string, string) e
 	return runtime.fail
 }
 
-func newShardOperationAgent(t *testing.T, runtimeControl *fakeShardRuntime) (*Agent, RuntimeInstallation) {
+func newShardOperationAgent(t *testing.T, runtimeControl shardRuntimeControl) (*Agent, RuntimeInstallation) {
 	t.Helper()
 	root := t.TempDir()
 	serverPath := filepath.Join(root, "server")
-	shardPath := filepath.Join(root, "saves", "Cluster_1", "Master")
-	for _, path := range []string{serverPath, shardPath} {
+	masterPath := filepath.Join(root, "saves", "Cluster_1", "Master")
+	cavesPath := filepath.Join(root, "saves", "Cluster_1", "Caves")
+	for _, path := range []string{serverPath, masterPath, cavesPath} {
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, path := range []string{filepath.Join(root, "saves", "Cluster_1", "cluster.ini"), filepath.Join(shardPath, "server.ini")} {
+	for _, path := range []string{
+		filepath.Join(root, "saves", "Cluster_1", "cluster.ini"),
+		filepath.Join(masterPath, "server.ini"),
+		filepath.Join(cavesPath, "server.ini"),
+	} {
 		if err := os.WriteFile(path, []byte("[NETWORK]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -136,6 +209,106 @@ func TestShardOperationIsIdempotentAcrossAgentRestart(t *testing.T) {
 	result, err = restarted.executeShardOperation(string(request.Action), &request, 10)
 	if err != nil || !result.Idempotent || len(restartedRuntime.calls) != 0 {
 		t.Fatalf("restart result=%#v calls=%v err=%v", result, restartedRuntime.calls, err)
+	}
+}
+
+func TestShardStartPreservesCurrentDiskRuntimeAssets(t *testing.T) {
+	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeStopped}}
+	agent, installation := newShardOperationAgent(t, runtimeControl)
+	customCommandsPath := filepath.Join(installation.SavePath, "Cluster_1", "Master", "customcommands.lua")
+	customCommands := []byte("-- user managed\nreturn {}\n")
+	if err := os.WriteFile(customCommandsPath, customCommands, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := shardOperationRequest(shared.ShardActionStart, 1)
+	if _, err := agent.executeShardOperation(string(request.Action), &request, 10); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(customCommandsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(customCommands) {
+		t.Fatalf("customcommands.lua was modified: %q", after)
+	}
+	runtimeRoot := filepath.Join(installation.SavePath, "Cluster_1", "Master", "dst-admin")
+	if _, err := os.Stat(runtimeRoot); !os.IsNotExist(err) {
+		t.Fatalf("start published Runtime assets: stat error=%v", err)
+	}
+}
+
+func TestShardStartDoesNotPublishRuntimeIntoRunningWorld(t *testing.T) {
+	runtimeControl := &fakeShardRuntime{status: shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}}
+	agent, installation := newShardOperationAgent(t, runtimeControl)
+	request := shardOperationRequest(shared.ShardActionStart, 1)
+	if _, err := agent.executeShardOperation(string(request.Action), &request, 10); err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot := filepath.Join(installation.SavePath, "Cluster_1", "Master", "dst-admin")
+	if _, err := os.Stat(runtimeRoot); !os.IsNotExist(err) {
+		t.Fatalf("running world was modified: stat error=%v", err)
+	}
+	if len(runtimeControl.calls) != 0 {
+		t.Fatalf("running world was restarted: calls=%v", runtimeControl.calls)
+	}
+}
+
+func TestSiblingShardStartsLaunchBeforeEitherShardIsReady(t *testing.T) {
+	runtimeControl := &stagedAgentStartRuntime{
+		states: map[string]shards.RuntimeStatus{
+			"Master": {State: shards.RuntimeStopped},
+			"Caves":  {State: shards.RuntimeStopped},
+		},
+		started: make(chan string, 2),
+	}
+	agent, _ := newShardOperationAgent(t, runtimeControl)
+	master := shardOperationRequest(shared.ShardActionStart, 1)
+	master.OperationID, master.OperationKey = "operation-master", "key-master"
+	caves := master
+	caves.OperationID, caves.OperationKey, caves.Shard = "operation-caves", "key-caves", "Caves"
+
+	type outcome struct {
+		result shared.ShardOperationResult
+		err    error
+	}
+	masterDone := make(chan outcome, 1)
+	go func() {
+		result, err := agent.executeShardOperation(string(master.Action), &master, 10)
+		masterDone <- outcome{result: result, err: err}
+	}()
+	select {
+	case shard := <-runtimeControl.started:
+		if shard != "Master" {
+			t.Fatalf("first launched shard = %s", shard)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Master start was not dispatched")
+	}
+
+	cavesDone := make(chan outcome, 1)
+	go func() {
+		result, err := agent.executeShardOperation(string(caves.Action), &caves, 10)
+		cavesDone <- outcome{result: result, err: err}
+	}()
+	select {
+	case shard := <-runtimeControl.started:
+		if shard != "Caves" {
+			t.Fatalf("second launched shard = %s", shard)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Caves waited for Master readiness")
+	}
+
+	runtimeControl.markRunning("Master", "Caves")
+	for name, completed := range map[string]<-chan outcome{"Master": masterDone, "Caves": cavesDone} {
+		select {
+		case value := <-completed:
+			if value.err != nil || value.result.Status.State != string(shards.RuntimeRunning) {
+				t.Fatalf("%s result=%#v err=%v", name, value.result, value.err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s readiness was not observed", name)
+		}
 	}
 }
 
@@ -251,6 +424,12 @@ func TestRuntimeInstallationsNormalizeContainerDriver(t *testing.T) {
 		{ID: "duplicate", SavePath: root, ServerPath: root},
 	}); err == nil {
 		t.Fatal("duplicate installation accepted")
+	}
+	if _, err := normalizeRuntimeInstallations([]RuntimeInstallation{
+		{ID: "first", SavePath: root, ServerPath: filepath.Join(root, "server-a")},
+		{ID: "second", SavePath: root, ServerPath: filepath.Join(root, "server-b")},
+	}); err == nil || !strings.Contains(err.Error(), "一个存档只能配置一个 Runtime 所有者") {
+		t.Fatalf("duplicate SAVE_PATH error=%v", err)
 	}
 }
 

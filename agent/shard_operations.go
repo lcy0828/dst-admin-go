@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"dont/internal/roomops"
+	"dont/internal/runtimeperformance"
 	"dont/internal/shards"
 	"dont/shared"
 )
@@ -33,12 +35,22 @@ type shardRuntimeControl interface {
 	Send(context.Context, string, string, string) error
 }
 
+type shardRuntimeModeControl interface {
+	StartWithRuntimeMode(context.Context, string, string, shared.RuntimePerformanceMode) error
+}
+
+type shardRuntimeLaunchControl interface {
+	StartWithRuntimeOptions(context.Context, string, string, shared.RuntimePerformanceMode, shared.RuntimeLaunchOptions) error
+}
+
 type shardRuntimeFactory func(RuntimeInstallation) (shardRuntimeControl, error)
 
 func newTmuxShardRuntime(installation RuntimeInstallation) (shardRuntimeControl, error) {
 	return shards.NewTmuxControl(shards.TmuxConfig{
 		SaveRoot: installation.SavePath, UGCDirectory: installation.UGCPath,
 		ServerPath: installation.ServerPath, ServerMode: installation.ServerMode, ConsoleSocket: installation.ConsoleSocket,
+		LegacyConsoleSockets: installation.LegacyConsoleSockets,
+		OwnerLabel:           "Agent Runtime " + installation.ID,
 	})
 }
 
@@ -50,14 +62,16 @@ func newShardRuntimeControl(installation RuntimeInstallation) (shardRuntimeContr
 }
 
 type rememberedShardOperation struct {
-	InstallationID string                      `json:"installation_id"`
-	Action         shared.ShardAction          `json:"action"`
-	Cluster        string                      `json:"cluster"`
-	Shard          string                      `json:"shard"`
-	Completed      bool                        `json:"completed"`
-	ErrorMessage   string                      `json:"error_message,omitempty"`
-	AcceptedAt     time.Time                   `json:"accepted_at"`
-	Result         shared.ShardOperationResult `json:"result"`
+	InstallationID string                        `json:"installation_id"`
+	Action         shared.ShardAction            `json:"action"`
+	Cluster        string                        `json:"cluster"`
+	Shard          string                        `json:"shard"`
+	RuntimeMode    shared.RuntimePerformanceMode `json:"runtime_mode,omitempty"`
+	LaunchOptions  shared.RuntimeLaunchOptions   `json:"launch_options,omitempty"`
+	Completed      bool                          `json:"completed"`
+	ErrorMessage   string                        `json:"error_message,omitempty"`
+	AcceptedAt     time.Time                     `json:"accepted_at"`
+	Result         shared.ShardOperationResult   `json:"result"`
 }
 
 type shardRoomState struct {
@@ -167,7 +181,8 @@ func (state *shardOperationState) begin(request shared.ShardOperationRequest, no
 	}
 	if remembered, exists := room.Operations[request.OperationKey]; exists {
 		if remembered.InstallationID != request.InstallationID || remembered.Action != request.Action ||
-			remembered.Cluster != request.Cluster || remembered.Shard != request.Shard {
+			remembered.Cluster != request.Cluster || remembered.Shard != request.Shard || remembered.RuntimeMode != request.RuntimeMode ||
+			remembered.LaunchOptions != request.LaunchOptions {
 			return nil, errors.New("幂等键已被另一项分片操作使用")
 		}
 		if !remembered.Completed {
@@ -190,7 +205,7 @@ func (state *shardOperationState) begin(request shared.ShardOperationRequest, no
 	room.LeaseID = request.LeaseID
 	room.Operations[request.OperationKey] = rememberedShardOperation{
 		InstallationID: request.InstallationID, Action: request.Action, Cluster: request.Cluster,
-		Shard: request.Shard, AcceptedAt: now.UTC(),
+		Shard: request.Shard, RuntimeMode: request.RuntimeMode, LaunchOptions: request.LaunchOptions, AcceptedAt: now.UTC(),
 	}
 	state.Rooms[roomKey] = room
 	if err := state.persistLocked(); err != nil {
@@ -270,8 +285,24 @@ func trimRememberedOperations(values map[string]rememberedShardOperation) {
 }
 
 func (a *Agent) executeShardOperation(commandType string, request *shared.ShardOperationRequest, timeout int) (shared.ShardOperationResult, error) {
+	return a.executeShardOperationContext(context.Background(), commandType, request, timeout)
+}
+
+func (a *Agent) executeShardOperationContext(ctx context.Context, commandType string, request *shared.ShardOperationRequest, timeout int) (shared.ShardOperationResult, error) {
 	if request == nil {
 		return shared.ShardOperationResult{}, errors.New("分片操作负载缺失")
+	}
+	runtimeMode, runtimeModeValid := shared.NormalizeRuntimePerformanceMode(request.RuntimeMode)
+	if !runtimeModeValid {
+		return shared.ShardOperationResult{}, errors.New("Lua 运行时模式无效")
+	}
+	if request.Action == shared.ShardActionStart || request.Action == shared.ShardActionRestart {
+		request.RuntimeMode = runtimeMode
+	} else if runtimeMode == shared.RuntimePerformanceModeGame {
+		// Older callers can reuse a normalized start request for a later stop
+		// operation. Treat the universal default as unspecified while keeping
+		// explicit LuaJIT modes invalid for non-start actions.
+		request.RuntimeMode = ""
 	}
 	now := a.now().UTC()
 	if err := validateShardOperationRequest(commandType, *request, timeout, now); err != nil {
@@ -282,6 +313,9 @@ func (a *Agent) executeShardOperation(commandType string, request *shared.ShardO
 		return shared.ShardOperationResult{}, errors.New("Agent 未登记该 DST 安装")
 	}
 	if err := validateShardOwnership(installation, request.Cluster, request.Shard); err != nil {
+		return shared.ShardOperationResult{}, err
+	}
+	if err := validateRuntimeModeForInstallation(installation, request.Action, request.RuntimeMode); err != nil {
 		return shared.ShardOperationResult{}, err
 	}
 	runtimeControl, err := a.runtimeControl(installation)
@@ -296,12 +330,12 @@ func (a *Agent) executeShardOperation(commandType string, request *shared.ShardO
 			return shared.ShardOperationResult{}, err
 		}
 	}
-	operationContext, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	operationContext, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 	if request.Action == shared.ShardActionStatus {
 		return observeShardOperation(operationContext, runtimeControl, *request, now)
 	}
-	operationContext, release, err := roomops.Acquire(operationContext, request.InstallationID+"\x00"+request.Cluster)
+	operationContext, release, err := roomops.Acquire(operationContext, request.InstallationID+"\x00"+request.Cluster+"\x00"+request.Shard)
 	if err != nil {
 		return shared.ShardOperationResult{}, err
 	}
@@ -311,7 +345,13 @@ func (a *Agent) executeShardOperation(commandType string, request *shared.ShardO
 	} else if beginErr != nil {
 		return shared.ShardOperationResult{}, beginErr
 	}
-	result, operationErr := mutateShard(operationContext, runtimeControl, *request, now)
+	var afterLaunch func()
+	if request.Action == shared.ShardActionStart || request.Action == shared.ShardActionRestart {
+		// Release the per-Shard lifecycle lock after process creation so sibling
+		// Shards can launch while this request continues observing readiness.
+		afterLaunch = release
+	}
+	result, operationErr := mutateShard(operationContext, runtimeControl, *request, now, afterLaunch)
 	if finishErr := a.shardState.finish(*request, result, operationErr); finishErr != nil {
 		return shared.ShardOperationResult{}, fmt.Errorf("保存 Agent 分片操作结果: %w", finishErr)
 	}
@@ -339,7 +379,7 @@ func (a *Agent) ensureContainerOwnership(ctx context.Context, control shardRunti
 		return fmt.Errorf("CONTAINER_OWNERSHIP_UNVERIFIED: %w", err)
 	}
 	if exists && !strings.EqualFold(strings.TrimSpace(os.Getenv("DST_ADMIN_ADOPT_EXISTING_CONTAINERS")), "true") {
-		return errors.New("CONTAINER_OWNERSHIP_STATE_LOST: Agent 状态卷缺少但已发现受管容器；已拒绝接管，请恢复状态卷或在核对唯一实例后临时设置 DST_ADMIN_ADOPT_EXISTING_CONTAINERS=true")
+		return errors.New("CONTAINER_OWNERSHIP_STATE_LOST: Agent 状态卷缺少但已发现受管容器；已拒绝自动关联，请恢复状态卷，或在确认不存在重复实例后临时设置 DST_ADMIN_ADOPT_EXISTING_CONTAINERS=true")
 	}
 	if err := a.shardState.initializeOwnership(a.now()); err != nil {
 		return fmt.Errorf("建立容器 Runtime 所有权哨兵: %w", err)
@@ -411,12 +451,17 @@ func (a *Agent) runtimeControl(installation RuntimeInstallation) (shardRuntimeCo
 }
 
 func validateShardOperationRequest(commandType string, request shared.ShardOperationRequest, timeout int, now time.Time) error {
+	_, runtimeModeValid := shared.NormalizeRuntimePerformanceMode(request.RuntimeMode)
 	if request.ProtocolVersion != shared.ShardOperationProtocolVersion || !shared.IsShardAction(request.Action) ||
 		commandType != string(request.Action) || timeout < 5 || timeout > 300 ||
 		!runtimeInstallationID.MatchString(request.InstallationID) || !shardResourceName.MatchString(request.Cluster) ||
 		!shardResourceName.MatchString(request.Shard) || !operationIdentity.MatchString(request.OperationID) ||
-		len(request.TopologyRevision) < 1 || len(request.TopologyRevision) > 128 || strings.ContainsAny(request.TopologyRevision, "\x00\r\n") {
+		len(request.TopologyRevision) < 1 || len(request.TopologyRevision) > 128 || strings.ContainsAny(request.TopologyRevision, "\x00\r\n") || !runtimeModeValid {
 		return errors.New("分片操作请求无效")
+	}
+	if request.Action != shared.ShardActionStart && request.Action != shared.ShardActionRestart &&
+		(request.RuntimeMode != "" || request.LaunchOptions.SkipUpdateServerMods) {
+		return errors.New("只有启动或重启操作可以指定 Lua 运行时")
 	}
 	if !shared.ShardActionMutates(request.Action) {
 		return nil
@@ -425,6 +470,27 @@ func validateShardOperationRequest(commandType string, request shared.ShardOpera
 		request.FencingToken == 0 || request.LeaseExpiresAt == nil ||
 		request.LeaseExpiresAt.Before(now.Add(-30*time.Second)) || request.LeaseExpiresAt.After(now.Add(10*time.Minute)) {
 		return errors.New("分片操作租约无效或已过期")
+	}
+	return nil
+}
+
+func validateRuntimeModeForInstallation(installation RuntimeInstallation, action shared.ShardAction, mode shared.RuntimePerformanceMode) error {
+	if action != shared.ShardActionStart && action != shared.ShardActionRestart {
+		return nil
+	}
+	normalized, valid := shared.NormalizeRuntimePerformanceMode(mode)
+	if !valid {
+		return errors.New("Lua 运行时模式无效")
+	}
+	if normalized == shared.RuntimePerformanceModeGame {
+		return nil
+	}
+	report := runtimeperformance.Inspect(runtimeperformance.Options{
+		ServerPath: installation.ServerPath, ServerMode: installation.ServerMode,
+		WorkshopContentPath: installation.WorkshopContentPath,
+	})
+	if report.Status != shared.RuntimePerformanceReady || !report.CanEnable || !slices.Contains(report.SupportedModes, normalized) {
+		return fmt.Errorf("RUNTIME_MODE_UNAVAILABLE: 当前 DST 安装不支持 %s", normalized)
 	}
 	return nil
 }
@@ -478,7 +544,7 @@ func observeShardOperation(ctx context.Context, control shardRuntimeControl, req
 	return result, err
 }
 
-func mutateShard(ctx context.Context, control shardRuntimeControl, request shared.ShardOperationRequest, observedAt time.Time) (shared.ShardOperationResult, error) {
+func mutateShard(ctx context.Context, control shardRuntimeControl, request shared.ShardOperationRequest, observedAt time.Time, afterLaunch func()) (shared.ShardOperationResult, error) {
 	status, err := control.Status(ctx, request.Cluster, request.Shard)
 	if err != nil {
 		return shardResult(request, status, "检查分片状态失败", observedAt), err
@@ -487,9 +553,12 @@ func mutateShard(ctx context.Context, control shardRuntimeControl, request share
 	switch request.Action {
 	case shared.ShardActionStart:
 		if status.State != shards.RuntimeRunning && status.State != shards.RuntimeStarting {
-			err = control.Start(ctx, request.Cluster, request.Shard)
+			err = startShardWithRuntimeOptions(ctx, control, request.Cluster, request.Shard, request.RuntimeMode, request.LaunchOptions)
 		}
 		if err == nil {
+			if afterLaunch != nil {
+				afterLaunch()
+			}
 			status, err = waitForShardState(ctx, control, request.Cluster, request.Shard, true)
 		}
 		message = "分片已启动"
@@ -509,9 +578,12 @@ func mutateShard(ctx context.Context, control shardRuntimeControl, request share
 			}
 		}
 		if err == nil {
-			err = control.Start(ctx, request.Cluster, request.Shard)
+			err = startShardWithRuntimeOptions(ctx, control, request.Cluster, request.Shard, request.RuntimeMode, request.LaunchOptions)
 		}
 		if err == nil {
+			if afterLaunch != nil {
+				afterLaunch()
+			}
 			status, err = waitForShardState(ctx, control, request.Cluster, request.Shard, true)
 		}
 		message = "分片已重启"
@@ -529,13 +601,34 @@ func mutateShard(ctx context.Context, control shardRuntimeControl, request share
 	return shardResult(request, status, message, time.Now().UTC()), err
 }
 
+func startShardWithRuntimeOptions(ctx context.Context, control shardRuntimeControl, cluster, shard string, mode shared.RuntimePerformanceMode, options shared.RuntimeLaunchOptions) error {
+	normalized, valid := shared.NormalizeRuntimePerformanceMode(mode)
+	if !valid {
+		return errors.New("Lua 运行时模式无效")
+	}
+	if runtimeControl, ok := control.(shardRuntimeLaunchControl); ok {
+		return runtimeControl.StartWithRuntimeOptions(ctx, cluster, shard, normalized, options)
+	}
+	if runtimeControl, ok := control.(shardRuntimeModeControl); ok {
+		return runtimeControl.StartWithRuntimeMode(ctx, cluster, shard, normalized)
+	}
+	if normalized != shared.RuntimePerformanceModeGame {
+		return errors.New("RUNTIME_MODE_UNAVAILABLE: 当前 Runtime 不支持启动模式选择")
+	}
+	return control.Start(ctx, cluster, shard)
+}
+
 func waitForShardState(ctx context.Context, control shardRuntimeControl, cluster, shard string, running bool) (shards.RuntimeStatus, error) {
+	reportStartup := shards.StartupProgressReporter(ctx)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		status, err := control.Status(ctx, cluster, shard)
 		if err != nil {
 			return status, err
+		}
+		if running {
+			reportStartup(status)
 		}
 		if running && status.State == shards.RuntimeRunning {
 			return status, nil
@@ -562,8 +655,8 @@ func shardResult(request shared.ShardOperationRequest, status shards.RuntimeStat
 	return shared.ShardOperationResult{
 		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: request.OperationID,
 		OperationKey: request.OperationKey, InstallationID: request.InstallationID, Action: request.Action,
-		Cluster: request.Cluster, Shard: request.Shard, FencingToken: request.FencingToken,
-		Status:  shared.ShardRuntimeStatus{State: string(status.State), Code: status.Code, Message: status.Message, SessionExists: status.SessionExists},
+		Cluster: request.Cluster, Shard: request.Shard, RuntimeMode: request.RuntimeMode, LaunchOptions: request.LaunchOptions, FencingToken: request.FencingToken,
+		Status:  shared.ShardRuntimeStatus{State: string(status.State), StartupStage: status.StartupStage, Code: status.Code, Message: status.Message, SessionExists: status.SessionExists, Paused: status.Paused},
 		Message: message, ObservedAt: observedAt.UTC(),
 	}
 }

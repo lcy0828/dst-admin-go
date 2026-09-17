@@ -156,7 +156,7 @@ func legacyCandidate(record legacyCronTaskRecord, availableRooms []rooms.Room, c
 		}
 	}
 	if room.ID == "" {
-		return legacyTaskCandidate{}, fmt.Sprintf("目标房间 %q 不存在或尚未接管", roomName)
+		return legacyTaskCandidate{}, fmt.Sprintf("目标房间 %q 不存在或尚未登记", roomName)
 	}
 	worlds, err := catalog.Worlds(room.ID)
 	if err != nil {

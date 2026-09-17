@@ -116,6 +116,29 @@ func TestConfiguredAgentIDIsPersistedOnlyOnFirstRegistration(t *testing.T) {
 	}
 }
 
+func TestAgentUUIDIsReadOncePerProcess(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "agent.conf")
+	key := agentTestKey()
+	if err := os.WriteFile(configPath, []byte("[agent]\nAGENT_UUID = stable-agent\nSECURITY_KEY = "+key+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := NewAgent(&Config{AgentID: "configured-agent", SecurityKey: key, KeyFile: configPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := agent.getOrCreateAgentUUID()
+	if err != nil || identity != "stable-agent" {
+		t.Fatalf("initial identity = %q, err=%v", identity, err)
+	}
+	if err := os.WriteFile(configPath, []byte("[agent]\nAGENT_UUID = changed-on-disk\nSECURITY_KEY = "+key+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identity, err = agent.getOrCreateAgentUUID()
+	if err != nil || identity != "stable-agent" {
+		t.Fatalf("cached identity = %q, err=%v", identity, err)
+	}
+}
+
 func TestAgentRejectsUnsafeIdentity(t *testing.T) {
 	_, err := NewAgent(&Config{AgentID: "../../node", KeyFile: filepath.Join(t.TempDir(), "agent.conf")})
 	if err == nil {

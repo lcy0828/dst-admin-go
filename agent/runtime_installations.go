@@ -11,6 +11,9 @@ import (
 	"sort"
 	"strings"
 
+	"dont/internal/runtimeperformance"
+	"dont/internal/shards"
+
 	"github.com/go-ini/ini"
 )
 
@@ -22,25 +25,26 @@ var (
 // RuntimeInstallation is configured on the Agent host. Controllers refer to
 // it by ID and cannot override these trusted paths in an operation request.
 type RuntimeInstallation struct {
-	ID                  string
-	Driver              string
-	SavePath            string
-	ServerPath          string
-	SteamCMDPath        string
-	UGCPath             string
-	WorkshopContentPath string
-	ModCachePath        string
-	ModStatePath        string
-	ServerMode          string
-	ContainerEngine     string
-	ConsoleSocket       string
-	ConsoleSession      string
+	ID                   string
+	Driver               string
+	SavePath             string
+	ServerPath           string
+	SteamCMDPath         string
+	UGCPath              string
+	WorkshopContentPath  string
+	ModCachePath         string
+	ModStatePath         string
+	ServerMode           string
+	ContainerEngine      string
+	ConsoleSocket        string
+	ConsoleSession       string
+	LegacyConsoleSockets []string
 }
 
-func runtimeInstallationReports(values []RuntimeInstallation) []map[string]string {
-	result := make([]map[string]string, 0, len(values))
+func runtimeInstallationReports(values []RuntimeInstallation) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(values))
 	for _, value := range values {
-		result = append(result, map[string]string{
+		result = append(result, map[string]interface{}{
 			"id":                    value.ID,
 			"driver":                value.Driver,
 			"save_path":             value.SavePath,
@@ -49,6 +53,10 @@ func runtimeInstallationReports(values []RuntimeInstallation) []map[string]strin
 			"ugc_path":              value.UGCPath,
 			"workshop_content_path": value.WorkshopContentPath,
 			"server_mode":           value.ServerMode,
+			"performance": runtimeperformance.Inspect(runtimeperformance.Options{
+				ServerPath: value.ServerPath, ServerMode: value.ServerMode, WorkshopContentPath: value.WorkshopContentPath,
+				Platform: runtime.GOOS, Architecture: runtime.GOARCH,
+			}),
 		})
 	}
 	return result
@@ -108,6 +116,7 @@ func installationIDFromSection(section string) (string, bool) {
 
 func normalizeRuntimeInstallations(values []RuntimeInstallation) ([]RuntimeInstallation, error) {
 	seen := make(map[string]bool, len(values))
+	saveOwners := make(map[string]string, len(values))
 	result := make([]RuntimeInstallation, 0, len(values))
 	for _, value := range values {
 		value.ID = strings.TrimSpace(value.ID)
@@ -191,6 +200,11 @@ func normalizeRuntimeInstallations(values []RuntimeInstallation) ([]RuntimeInsta
 			!runtimeInstallationID.MatchString(value.ConsoleSession)) {
 			return nil, fmt.Errorf("DST 安装 %s 的容器 Runtime 配置无效", value.ID)
 		}
+		saveIdentity := canonicalRuntimePath(value.SavePath)
+		if owner := saveOwners[saveIdentity]; owner != "" {
+			return nil, fmt.Errorf("DST 安装 %s 与 %s 使用同一 SAVE_PATH；一个存档只能配置一个 Runtime 所有者", owner, value.ID)
+		}
+		saveOwners[saveIdentity] = value.ID
 		seen[value.ID] = true
 		result = append(result, value)
 	}
@@ -199,11 +213,42 @@ func normalizeRuntimeInstallations(values []RuntimeInstallation) ([]RuntimeInsta
 }
 
 func configureNativeConsoleSockets(values []RuntimeInstallation, stateFile string) ([]RuntimeInstallation, error) {
+	socketOwners := make(map[string]string, len(values))
+	for index := range values {
+		if values[index].Driver != "native" {
+			continue
+		}
+		if values[index].ConsoleSocket == "" {
+			path, err := shards.NativeConsoleSocketPath(values[index].SavePath)
+			if err != nil {
+				return nil, fmt.Errorf("生成 DST 安装 %s 的 tmux socket: %w", values[index].ID, err)
+			}
+			values[index].ConsoleSocket = path
+		}
+		legacySocket, err := legacyNativeConsoleSocketPath(stateFile, values[index].ID)
+		if err != nil {
+			return nil, fmt.Errorf("生成 DST 安装 %s 的旧版 tmux socket: %w", values[index].ID, err)
+		}
+		if canonicalRuntimePath(legacySocket) != canonicalRuntimePath(values[index].ConsoleSocket) {
+			values[index].LegacyConsoleSockets = []string{legacySocket}
+		}
+		socketIdentity := canonicalRuntimePath(values[index].ConsoleSocket)
+		if owner := socketOwners[socketIdentity]; owner != "" {
+			return nil, fmt.Errorf("DST 安装 %s 与 %s 使用同一 CONSOLE_SOCKET；不同 native Runtime 必须使用独立 tmux 通道", owner, values[index].ID)
+		}
+		socketOwners[socketIdentity] = values[index].ID
+	}
+	return values, nil
+}
+
+// legacyNativeConsoleSocketPath reproduces the pre-2.12 socket identity so a
+// newly upgraded Agent can gracefully stop a shard that survived the upgrade.
+func legacyNativeConsoleSocketPath(stateFile, installationID string) (string, error) {
 	stateFile = filepath.Clean(strings.TrimSpace(stateFile))
 	if !trustedAbsolutePath(stateFile) {
 		absolute, err := filepath.Abs(stateFile)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 		stateFile = absolute
 	}
@@ -212,24 +257,19 @@ func configureNativeConsoleSockets(values []RuntimeInstallation, stateFile strin
 		digest := sha256.Sum256([]byte(filepath.Dir(stateFile)))
 		directory = filepath.Join(os.TempDir(), fmt.Sprintf("dst-admin-agent-%d-%s", os.Getuid(), hex.EncodeToString(digest[:6])))
 	}
-	needsDirectory := false
-	for index := range values {
-		if values[index].Driver != "native" || values[index].ConsoleSocket != "" {
-			continue
-		}
-		digest := sha256.Sum256([]byte(values[index].ID))
-		values[index].ConsoleSocket = filepath.Join(directory, "runtime-"+hex.EncodeToString(digest[:8])+".sock")
-		needsDirectory = true
+	digest := sha256.Sum256([]byte(installationID))
+	return filepath.Join(directory, "runtime-"+hex.EncodeToString(digest[:8])+".sock"), nil
+}
+
+func canonicalRuntimePath(value string) string {
+	value = filepath.Clean(strings.TrimSpace(value))
+	if resolved, err := filepath.EvalSymlinks(value); err == nil {
+		value = resolved
 	}
-	if needsDirectory {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			return nil, fmt.Errorf("创建 Agent tmux socket 目录: %w", err)
-		}
-		if err := os.Chmod(directory, 0o700); err != nil {
-			return nil, fmt.Errorf("收紧 Agent tmux socket 目录权限: %w", err)
-		}
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		value = strings.ToLower(value)
 	}
-	return values, nil
+	return value
 }
 
 func pathsOverlap(first, second string) bool {

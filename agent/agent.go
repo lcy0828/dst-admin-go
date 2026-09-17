@@ -18,23 +18,30 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"dont/internal/luajit"
 	"dont/internal/maptransfer"
+	"dont/internal/modartifact"
 	"dont/internal/moddistribution"
+	"dont/internal/operationprogress"
 	"dont/internal/shardtransfer"
 	"dont/shared"
 	"github.com/go-ini/ini"
 	"github.com/gorilla/websocket"
 )
 
+var AgentVersion = "2.16.13"
+
 // 常量
 const (
-	AgentVersion = "2.6.0"
 	// 心跳间隔
 	HeartbeatInterval = 30 * time.Second
 	// 重连间隔
 	ReconnectInterval = 5 * time.Second
+	// 最大重连间隔
+	ReconnectMaxInterval = time.Minute
 	// 连接超时
 	ConnectionTimeout  = 10 * time.Second
 	CommandOutputLimit = 128 * 1024
@@ -63,39 +70,53 @@ var startTime = time.Now()
 
 // Agent 表示一个代理实例
 type Agent struct {
-	Config             *Config
-	keyPair            *shared.KeyPair
-	serverPubKey       [32]byte
-	conn               *shared.SecureConnection
-	isConnected        bool
-	connMutex          sync.Mutex
-	reconnecting       bool
-	stopChan           chan struct{}
-	wg                 sync.WaitGroup
-	reportInterval     time.Duration
-	reportMutex        sync.Mutex
-	keyManager         *shared.KeyManager // 添加密钥管理器
-	shardState         *shardOperationState
-	shardRuntime       shardRuntimeFactory
-	shardRuntimeMu     sync.Mutex
-	shardRuntimes      map[string]shardRuntimeControl
-	consoleHazards     map[string][]consoleHazard
-	shardTransferMu    sync.Mutex
-	shardTransfers     map[string]*shardtransfer.Manager
-	modDistributionMu  sync.Mutex
-	modDistributions   map[string]*moddistribution.Manager
-	mapTransferMu      sync.Mutex
-	mapTransfers       map[string]*maptransfer.Manager
-	gameVersionRunner  gameVersionCommandRunner
-	attachListener     net.Listener
-	attachMutex        sync.Mutex
-	attachConnections  map[net.Conn]struct{}
-	now                func() time.Time
-	statusCommands     chan commandWorkItem
-	generalCommands    chan commandWorkItem
-	commandWorkersOnce sync.Once
-	commandWorkerWG    sync.WaitGroup
-	commandHandler     func(commandWorkItem)
+	luaJITMu             sync.Mutex
+	luaJITStore          *luajit.Store
+	Config               *Config
+	keyPair              *shared.KeyPair
+	serverPubKey         [32]byte
+	conn                 *shared.SecureConnection
+	isConnected          bool
+	connMutex            sync.Mutex
+	reconnecting         bool
+	stopChan             chan struct{}
+	wg                   sync.WaitGroup
+	reportInterval       time.Duration
+	reportMutex          sync.Mutex
+	keyManager           *shared.KeyManager // 添加密钥管理器
+	shardState           *shardOperationState
+	shardRuntime         shardRuntimeFactory
+	shardRuntimeMu       sync.Mutex
+	shardRuntimes        map[string]shardRuntimeControl
+	consoleHazards       map[string][]consoleHazard
+	shardTransferMu      sync.Mutex
+	shardTransfers       map[string]*shardtransfer.Manager
+	modDistributionMu    sync.Mutex
+	modDistributions     map[string]*moddistribution.Manager
+	modFetchRunner       modFetchCommandRunner
+	modDownloadRunner    installationModDownloadRunner
+	modPeerMu            sync.Mutex
+	modPeerArtifacts     map[string]*modartifact.Service
+	migrationPeerGrants  map[string]migrationPeerGrant
+	modPeerServer        *http.Server
+	modPeerListener      net.Listener
+	mapTransferMu        sync.Mutex
+	mapTransfers         map[string]*maptransfer.Manager
+	gameVersionRunner    gameVersionCommandRunner
+	attachListener       net.Listener
+	attachMutex          sync.Mutex
+	attachConnections    map[net.Conn]struct{}
+	now                  func() time.Time
+	statusCommands       chan commandWorkItem
+	generalCommands      chan commandWorkItem
+	commandWorkersOnce   sync.Once
+	telemetryWorkersOnce sync.Once
+	commandWorkerWG      sync.WaitGroup
+	commandHandler       func(commandWorkItem)
+	agentUUIDMu          sync.Mutex
+	agentUUID            string
+	reconnectInterval    time.Duration
+	reconnectMaxInterval time.Duration
 }
 
 // Config 代理配置
@@ -107,6 +128,8 @@ type Config struct {
 	KeyFile              string        // 密钥存储文件路径
 	RuntimeInstallations []RuntimeInstallation
 	OperationStateFile   string
+	ModPeerListenAddr    string
+	ModPeerAdvertiseURL  string
 }
 
 func normalizedAgentURL(raw string) (string, error) {
@@ -217,6 +240,9 @@ func NewAgent(config *Config) (*Agent, error) {
 	if value := strings.TrimSpace(os.Getenv("DST_ADMIN_AGENT_SECURITY_KEY")); value != "" {
 		config.SecurityKey = value
 	}
+	if err := loadModPeerConfig(config); err != nil {
+		return nil, err
+	}
 	if config.OperationStateFile == "" {
 		config.OperationStateFile = strings.TrimSpace(os.Getenv("DST_ADMIN_AGENT_STATE_FILE"))
 		if config.OperationStateFile == "" {
@@ -237,7 +263,13 @@ func NewAgent(config *Config) (*Agent, error) {
 	agent.shardRuntimes = make(map[string]shardRuntimeControl)
 	agent.shardTransfers = make(map[string]*shardtransfer.Manager)
 	agent.modDistributions = make(map[string]*moddistribution.Manager)
+	agent.modPeerArtifacts = make(map[string]*modartifact.Service)
+	agent.migrationPeerGrants = make(map[string]migrationPeerGrant)
+	agent.modFetchRunner = steamModFetchCommandRunner{}
+	agent.modDownloadRunner = newSteamInstallationModDownloadRunner()
 	agent.gameVersionRunner = execGameVersionCommand{}
+	agent.reconnectInterval = ReconnectInterval
+	agent.reconnectMaxInterval = ReconnectMaxInterval
 	agent.initializeFreshRuntimeOwnership()
 
 	return agent, nil
@@ -246,10 +278,15 @@ func NewAgent(config *Config) (*Agent, error) {
 // Start 启动代理
 func (a *Agent) Start() error {
 	log.Println("Agent开始启动...")
+	if err := a.startModPeerServer(); err != nil {
+		return fmt.Errorf("启动 Mod Peer 服务: %w", err)
+	}
 	if err := a.startConsoleAttachServer(); err != nil {
+		a.stopModPeerServer()
 		return fmt.Errorf("启动本地 console attach 服务: %w", err)
 	}
 	a.startCommandWorkers()
+	a.startTelemetryWorkers()
 
 	// 连接到服务器
 	err := a.Connect()
@@ -257,28 +294,11 @@ func (a *Agent) Start() error {
 		log.Printf("连接服务器失败: %v, 将尝试重连", err)
 		go a.reconnect()
 	} else {
-		// 连接成功，保存当前使用的配置
-		if a.Config.SecurityKey != "" {
-			err := a.saveConfig(a.Config.KeyFile, a.Config.ServerURL, a.Config.SecurityKey)
-			if err != nil {
-				log.Printf("警告: 无法保存配置到文件: %v", err)
-			} else {
-				log.Printf("配置已成功保存到: %s", a.Config.KeyFile)
-			}
-		}
-
-		// 启动心跳机制
-		a.wg.Add(1)
-		go a.startHeartbeat()
-
 		// 启动消息处理循环
 		a.wg.Add(1)
 		go a.handleMessages()
-
-		// 启动主动上报循环
 		if a.reportInterval > 0 {
-			a.wg.Add(1)
-			go a.startActiveReporting()
+			a.sendActiveReport()
 		}
 	}
 
@@ -290,6 +310,7 @@ func (a *Agent) Start() error {
 func (a *Agent) Stop() {
 	log.Println("Agent正在停止...")
 	close(a.stopChan)
+	a.stopModPeerServer()
 	a.attachMutex.Lock()
 	if a.attachListener != nil {
 		_ = a.attachListener.Close()
@@ -306,9 +327,24 @@ func (a *Agent) Stop() {
 	}
 	a.isConnected = false
 	a.connMutex.Unlock()
+	if a.modDownloadRunner != nil {
+		if err := a.modDownloadRunner.Close(); err != nil {
+			log.Printf("关闭 SteamCMD 模组下载会话失败: %v", err)
+		}
+	}
 
 	a.wg.Wait()
 	a.commandWorkerWG.Wait()
+	a.shardRuntimeMu.Lock()
+	for installationID, runtimeControl := range a.shardRuntimes {
+		if closer, ok := runtimeControl.(interface{ Close() error }); ok {
+			if err := closer.Close(); err != nil {
+				log.Printf("释放 DST 安装 %s 的 Runtime 所有权失败: %v", installationID, err)
+			}
+		}
+	}
+	a.shardRuntimes = make(map[string]shardRuntimeControl)
+	a.shardRuntimeMu.Unlock()
 	log.Println("Agent已停止")
 }
 
@@ -511,179 +547,67 @@ func (a *Agent) reconnect() {
 	a.connMutex.Unlock()
 
 	log.Printf("开始使用已配置的通信密钥重连")
+	delay := a.reconnectInterval
+	if delay <= 0 {
+		delay = ReconnectInterval
+	}
+	maxDelay := a.reconnectMaxInterval
+	if maxDelay < delay {
+		maxDelay = delay
+	}
 
-	// 使用简单的重连延迟
-	baseDelay := 5 * time.Second
-	maxDelay := 60 * time.Second
-	factor := 1.5
-	delay := baseDelay
-	maxAttempts := 10
-
-	// 添加总重连时间限制（10分钟）
-	startTime := time.Now()
-	maxReconnectTime := 10 * time.Minute
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		// 检查是否超过了最大重连时间
-		if time.Since(startTime) > maxReconnectTime {
-			log.Printf("重连时间超过%v，停止重连", maxReconnectTime)
-			break
+	for attempt := 1; ; attempt++ {
+		log.Printf("尝试重连 #%d，等待 %v...", attempt, delay)
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-a.stopChan:
+			timer.Stop()
+			a.connMutex.Lock()
+			a.reconnecting = false
+			a.connMutex.Unlock()
+			return
 		}
 
-		// 检查是否应该停止重连
+		if err := a.Connect(); err != nil {
+			log.Printf("连接失败: %v", err)
+			delay *= 2
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+			continue
+		}
+
+		a.connMutex.Lock()
 		select {
 		case <-a.stopChan:
-			log.Printf("收到停止信号，终止重连")
-			a.connMutex.Lock()
+			if a.conn != nil {
+				_ = a.conn.Close()
+				a.conn = nil
+			}
+			a.isConnected = false
 			a.reconnecting = false
 			a.connMutex.Unlock()
 			return
 		default:
-			// 继续重连
 		}
-
-		log.Printf("尝试重连 #%d，等待 %v...", attempt, delay)
-
-		// 使用带有超时的等待，允许提前退出
-		select {
-		case <-time.After(delay):
-			// 继续执行
-		case <-a.stopChan:
-			log.Printf("等待期间收到停止信号，终止重连")
-			a.connMutex.Lock()
+		connected := a.isConnected && a.conn != nil
+		if connected {
 			a.reconnecting = false
-			a.connMutex.Unlock()
-			return
 		}
-
-		// 尝试连接
-		log.Printf("执行第 %d 次连接尝试", attempt)
-		err := a.Connect()
-
-		// 检查连接是否成功
-		a.connMutex.Lock()
-		isConnected := a.isConnected && a.conn != nil
 		a.connMutex.Unlock()
-
-		if err == nil && isConnected {
-			// 快速测试连接
-			log.Printf("WebSocket连接已建立，测试连接...")
-			connectSuccess := false
-
-			// 进行不超过2次的连接测试
-			for testAttempt := 1; testAttempt <= 2; testAttempt++ {
-				if a.testConnection() {
-					connectSuccess = true
-					break
-				}
-
-				if testAttempt < 2 {
-					log.Printf("连接测试失败，1秒后再次尝试测试")
-					time.Sleep(1 * time.Second)
-				}
-			}
-
-			if connectSuccess {
-				log.Printf("重连成功，连接已恢复")
-
-				// 启动所需的服务
-				a.wg.Add(1)
-				go a.handleMessages()
-
-				if a.reportInterval > 0 {
-					a.wg.Add(1)
-					go a.startActiveReporting()
-				}
-
-				a.wg.Add(1)
-				go a.startHeartbeat()
-
-				// 保存配置
-				if err := a.saveConfig(a.Config.KeyFile, a.Config.ServerURL, a.Config.SecurityKey); err != nil {
-					log.Printf("保存配置失败: %v", err)
-				}
-
-				// 重置重连状态
-				a.connMutex.Lock()
-				a.reconnecting = false
-				a.connMutex.Unlock()
-				return
-			}
-
-			// 连接测试失败，清理连接后继续重试
-			log.Printf("连接测试失败，清理连接后继续重试")
-			a.connMutex.Lock()
-			if a.conn != nil {
-				a.conn.Close()
-				a.conn = nil
-			}
-			a.isConnected = false
-			a.connMutex.Unlock()
-		} else if err != nil {
-			log.Printf("连接失败: %v", err)
+		if !connected {
+			continue
 		}
 
-		// 增加延迟
-		delay = time.Duration(float64(delay) * factor)
-		if delay > maxDelay {
-			delay = maxDelay
+		log.Printf("重连成功，连接已恢复")
+		a.wg.Add(1)
+		go a.handleMessages()
+		if a.reportInterval > 0 {
+			a.sendActiveReport()
 		}
+		return
 	}
-
-	log.Printf("达到最大重试次数或超时，停止重连")
-	a.connMutex.Lock()
-	a.reconnecting = false
-	a.connMutex.Unlock()
-}
-
-// 测试连接是否可用
-func (a *Agent) testConnection() bool {
-	a.connMutex.Lock()
-	conn := a.conn
-	isConnected := a.isConnected
-	a.connMutex.Unlock()
-
-	if !isConnected || conn == nil {
-		return false
-	}
-
-	log.Printf("开始测试连接是否可用...")
-
-	// 设置更短的超时时间，避免长时间等待
-	conn.SetTimeout(3 * time.Second)
-	defer conn.SetTimeout(0) // 重置超时
-
-	// 创建测试心跳消息
-	testMsg, err := shared.CreateMessage(shared.TypeHeartbeat, a.Config.AgentID, nil)
-	if err != nil {
-		log.Printf("创建测试心跳消息失败: %v", err)
-		return false
-	}
-
-	// 同步发送心跳消息
-	err = conn.SendEncrypted(testMsg)
-	if err != nil {
-		log.Printf("发送测试心跳失败: %v", err)
-		return false
-	}
-
-	log.Printf("测试心跳消息已发送，尝试读取响应(3秒超时)...")
-
-	// 直接尝试读取响应，这里利用了SetTimeout设置的超时
-	resp, err := conn.ReadEncrypted()
-	if err != nil {
-		log.Printf("接收测试心跳响应失败: %v", err)
-		return false
-	}
-
-	// 验证响应类型
-	if resp.Type != shared.TypeHeartbeatAck {
-		log.Printf("收到非预期的响应类型: %s，期望: %s", resp.Type, shared.TypeHeartbeatAck)
-		return false
-	}
-
-	log.Printf("连接测试成功，服务器已确认心跳")
-	return true
 }
 
 // 处理从服务器接收的消息
@@ -709,7 +633,7 @@ func (a *Agent) handleMessages() {
 			msg, err := conn.ReadEncrypted()
 			if err != nil {
 				log.Printf("读取消息错误: %v", err)
-				a.handleDisconnect()
+				a.handleDisconnect(conn)
 				return
 			}
 
@@ -762,6 +686,17 @@ func (a *Agent) startCommandWorkers() {
 		for index := 0; index < generalCommandWorkerCount; index++ {
 			a.commandWorkerWG.Add(1)
 			go a.commandWorker(a.generalCommands)
+		}
+	})
+}
+
+func (a *Agent) startTelemetryWorkers() {
+	a.telemetryWorkersOnce.Do(func() {
+		a.wg.Add(1)
+		go a.startHeartbeat()
+		if a.reportInterval > 0 {
+			a.wg.Add(1)
+			go a.startActiveReporting()
 		}
 	})
 }
@@ -821,8 +756,6 @@ func (a *Agent) dispatchCommand(msg *shared.Message) {
 		return
 	}
 
-	log.Printf("收到命令，ID: %s, 类型: %s", cmdPayload.CommandID, cmdPayload.Type)
-
 	// 检查命令ID格式
 	if !strings.HasPrefix(cmdPayload.CommandID, "CMD") && strings.Contains(cmdPayload.CommandID, "-") {
 		// 老版本格式的命令ID，为兼容性考虑继续处理
@@ -861,14 +794,38 @@ func (a *Agent) executeCommand(cmdPayload shared.CommandPayload, connection *sha
 	var errMsg string
 	var exitCode int
 	var success bool
+	var restartRequired bool
 
 	switch cmdPayload.Type {
 	case "exec":
 		output, errMsg, exitCode = a.executeArgumentCommand(cmdPayload.Content, cmdPayload.Timeout)
 		success = exitCode == 0 && errMsg == ""
 	default:
-		if shared.IsShardAction(shared.ShardAction(cmdPayload.Type)) {
-			result, operationErr := a.executeShardOperation(cmdPayload.Type, cmdPayload.ShardOperation, cmdPayload.Timeout)
+		if cmdPayload.Type == shared.AgentUpgradeCommand {
+			result, operationErr := a.executeAgentUpgrade(cmdPayload.AgentUpgrade, cmdPayload.Timeout)
+			encoded, encodeErr := json.Marshal(result)
+			if encodeErr != nil {
+				errMsg = encodeErr.Error()
+			} else {
+				output = string(encoded)
+			}
+			if operationErr != nil {
+				errMsg = operationErr.Error()
+			}
+			success = operationErr == nil && encodeErr == nil
+			restartRequired = success && result.RestartRequired
+			if !success {
+				exitCode = 1
+			}
+		} else if shared.IsShardAction(shared.ShardAction(cmdPayload.Type)) {
+			var progressSequence atomic.Uint64
+			operationContext := operationprogress.WithReporter(context.Background(), func(update operationprogress.Update) {
+				a.sendCommandProgress(connection, shared.CommandProgressPayload{
+					CommandID: cmdPayload.CommandID, Sequence: progressSequence.Add(1),
+					Stage: update.Stage, Percent: update.Percent, Message: update.Message,
+				})
+			})
+			result, operationErr := a.executeShardOperationContext(operationContext, cmdPayload.Type, cmdPayload.ShardOperation, cmdPayload.Timeout)
 			encoded, encodeErr := json.Marshal(result)
 			if encodeErr != nil {
 				errMsg = encodeErr.Error()
@@ -883,7 +840,24 @@ func (a *Agent) executeCommand(cmdPayload shared.CommandPayload, connection *sha
 				exitCode = 1
 			}
 		} else if shared.IsRuntimeAction(shared.RuntimeAction(cmdPayload.Type)) {
-			result, operationErr := a.executeRuntimeOperation(cmdPayload.Type, cmdPayload.RuntimeOperation, cmdPayload.Timeout)
+			var progressSequence atomic.Uint64
+			var progressItems []shared.ModDownloadProgress
+			var progressMu sync.Mutex
+			operationContext := operationprogress.WithReporter(context.Background(), func(update operationprogress.Update) {
+				progressMu.Lock()
+				defer progressMu.Unlock()
+				if len(update.Items) > 0 {
+					progressItems = update.Items
+				}
+				a.sendCommandProgress(connection, shared.CommandProgressPayload{
+					CommandID: cmdPayload.CommandID, Sequence: progressSequence.Add(1),
+					Stage: update.Stage, Percent: update.Percent, Message: update.Message,
+					WorkshopID: update.WorkshopID, CurrentItem: update.CurrentItem, TotalItems: update.TotalItems,
+					Items:        progressItems,
+					CurrentBytes: update.CurrentBytes, TotalBytes: update.TotalBytes, BytesPerSecond: update.BytesPerSecond,
+				})
+			})
+			result, operationErr := a.executeRuntimeOperationContext(operationContext, cmdPayload.Type, cmdPayload.RuntimeOperation, cmdPayload.Timeout)
 			encoded, encodeErr := json.Marshal(result)
 			if encodeErr != nil {
 				errMsg = encodeErr.Error()
@@ -914,6 +888,9 @@ func (a *Agent) executeCommand(cmdPayload shared.CommandPayload, connection *sha
 	}
 
 	a.sendCommandResponse(connection, respPayload)
+	if restartRequired {
+		go restartAgentAfterUpgrade()
+	}
 }
 
 func (a *Agent) sendCommandResponse(connection *shared.SecureConnection, payload shared.CommandResponsePayload) {
@@ -928,6 +905,16 @@ func (a *Agent) sendCommandResponse(connection *shared.SecureConnection, payload
 	}
 	if err := connection.SendEncrypted(respMsg); err != nil {
 		log.Printf("发送命令响应失败: %v", err)
+	}
+}
+
+func (a *Agent) sendCommandProgress(connection *shared.SecureConnection, payload shared.CommandProgressPayload) {
+	progressMessage, err := shared.CreateMessage(shared.TypeCommandProgress, a.Config.AgentID, payload)
+	if err != nil || connection == nil {
+		return
+	}
+	if err := connection.SendEncrypted(progressMessage); err != nil {
+		log.Printf("发送命令进度失败: %v", err)
 	}
 }
 
@@ -1035,6 +1022,10 @@ func (a *Agent) startActiveReporting() {
 
 // 发送主动上报数据
 func (a *Agent) sendActiveReport() {
+	if !a.Connected() {
+		return
+	}
+
 	// 收集系统信息
 	data := a.collectSystemInfo()
 
@@ -1074,17 +1065,16 @@ func (a *Agent) sendActiveReport() {
 
 	// 发送上报
 	a.connMutex.Lock()
-	defer a.connMutex.Unlock()
-
 	if !a.isConnected || a.conn == nil {
-		log.Println("未连接到服务器，无法发送上报")
+		a.connMutex.Unlock()
 		return
 	}
-
-	if err := a.conn.SendEncrypted(msg); err != nil {
+	conn := a.conn
+	err = conn.SendEncrypted(msg)
+	a.connMutex.Unlock()
+	if err != nil {
 		log.Printf("发送主动上报失败: %v", err)
-	} else {
-		log.Printf("已发送系统信息主动上报，包含 %d 项数据", len(data))
+		a.handleDisconnect(conn)
 	}
 }
 
@@ -1099,8 +1089,6 @@ func (a *Agent) handlePassiveReportRequest(msg *shared.Message) {
 		log.Printf("解析被动上报请求失败: %v", err)
 		return
 	}
-
-	log.Printf("收到被动上报请求: %s, 参数: %v", requestPayload.ReportType, requestPayload.Params)
 
 	// 收集数据
 	var data map[string]interface{}
@@ -1177,8 +1165,6 @@ func (a *Agent) handlePassiveReportRequest(msg *shared.Message) {
 	// 发送响应
 	if err := a.conn.SendEncrypted(respMsg); err != nil {
 		log.Printf("发送被动上报响应失败: %v", err)
-	} else {
-		log.Printf("已发送被动上报响应: %s, 包含 %d 项数据", requestPayload.ReportType, len(data))
 	}
 }
 
@@ -1189,13 +1175,22 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 		"system.report", "command.exec", "disk.inspect",
 		"runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read",
 	}
+	updateProfile := currentAgentUpdateProfile()
+	if updateProfile.Mode == "self" {
+		capabilities = append(capabilities, shared.AgentUpgradeCommand)
+	}
 	deploymentCapabilities, runtimeProfiles, capabilityIssues := runtimeDeploymentCapabilities(a.Config.RuntimeInstallations)
 	capabilities = append(capabilities, deploymentCapabilities...)
 	if len(runtimeProfiles) > 0 && runtime.GOOS != "windows" {
 		capabilities = append(capabilities,
-			"shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1", "runtime.migration.v1",
-			"runtime.backup.v1", "runtime.mods.v1", "runtime.game-update.v1", "runtime.cpu.v1", "runtime.configuration.v1", "runtime.maps.v1",
+			"runtime.mods.local-link.v1",
+			"shard.control.v1", "shard.control.v2", "shard.runtime-mode.v1", "shard.skip-mod-update.v1", "runtime.driver.v2", "runtime.console.v2", "runtime.logs.v1", "runtime.chat-history.v1", "runtime.artifacts.v1", "runtime.worldstate.read.v1", "runtime.migration.v1",
+			"runtime.backup.v1", "runtime.mods.v1", "runtime.mods.state.v1", "runtime.mods.files.v1", "runtime.mods.inventory.v1", "runtime.mods.schema.v1", "runtime.mods.fetch.v2", "runtime.mods.download.v1", "runtime.mods.content-publish.v1", "runtime.progress.v1", "runtime.game-update.v1", "runtime.game-install.v1", "runtime.luajit.v2", "runtime.cpu.v1", "runtime.configuration.v1", "runtime.configuration.read.v1", "runtime.configuration.mod-write.v1", "runtime.configuration.secrets.v1", "runtime.configuration.apply.v1", "runtime.maps.v1",
+			"runtime.network.v1", "runtime.network.endpoints.v1", "runtime.migration.shard-routing.v1", "runtime.room-recovery.v1",
 		)
+		if a.modPeerEnabled() {
+			capabilities = append(capabilities, "runtime.mods.peer.v1", "runtime.migration.peer.v1")
+		}
 	}
 	info := map[string]interface{}{
 		"hostname":              "unknown",
@@ -1209,8 +1204,10 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 		"runtime_profiles":      runtimeProfiles,
 		"runtime_installations": runtimeInstallationReports(a.Config.RuntimeInstallations),
 		"capability_issues":     capabilityIssues,
+		"agent_update":          updateProfile,
 		"timestamp":             time.Now().Unix(),
 	}
+	info["system_metrics"] = collectAgentSystemMetrics(a.Config.RuntimeInstallations)
 
 	hostname, err := os.Hostname()
 	if err == nil {
@@ -1285,6 +1282,18 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 
 // 获取或创建代理唯一标识符
 func (a *Agent) getOrCreateAgentUUID() (string, error) {
+	a.agentUUIDMu.Lock()
+	defer a.agentUUIDMu.Unlock()
+	if a.agentUUID != "" {
+		return a.agentUUID, nil
+	}
+	remember := func(identity string, err error) (string, error) {
+		if err == nil {
+			a.agentUUID = strings.TrimSpace(identity)
+		}
+		return identity, err
+	}
+
 	// 尝试从配置文件读取UUID
 	configFile := a.Config.KeyFile
 	configuredID := strings.TrimSpace(a.Config.AgentID)
@@ -1317,11 +1326,12 @@ func (a *Agent) getOrCreateAgentUUID() (string, error) {
 		if a.Config.ServerURL != "" {
 			section.Key("SERVER_URL").SetValue(a.Config.ServerURL)
 		}
+		a.persistModPeerConfig(section)
 
 		if err := savePrivateINI(configFile, cfg); err != nil {
 			return uuid, fmt.Errorf("保存UUID到配置文件失败: %v", err)
 		}
-		return uuid, nil
+		return remember(uuid, nil)
 	}
 
 	// 从现有配置文件中读取UUID
@@ -1330,7 +1340,7 @@ func (a *Agent) getOrCreateAgentUUID() (string, error) {
 		// 如果读取配置失败，生成新的UUID并返回，但不保存
 		uuid := newIdentity()
 		log.Printf("读取配置文件失败，使用临时 Agent ID: %s", uuid)
-		return uuid, nil
+		return remember(uuid, nil)
 	}
 	if err := shared.EnsurePrivateFile(configFile); err != nil {
 		return "", err
@@ -1342,7 +1352,7 @@ func (a *Agent) getOrCreateAgentUUID() (string, error) {
 		uuid := section.Key("AGENT_UUID").String()
 		if uuid != "" {
 			log.Printf("从配置文件加载Agent UUID: %s", uuid)
-			return uuid, nil
+			return remember(uuid, nil)
 		}
 	}
 
@@ -1356,7 +1366,7 @@ func (a *Agent) getOrCreateAgentUUID() (string, error) {
 		log.Printf("保存UUID到配置文件失败: %v", err)
 	}
 
-	return uuid, nil
+	return remember(uuid, nil)
 }
 
 func savePrivateINI(path string, config *ini.File) error {
@@ -1684,6 +1694,7 @@ func (a *Agent) saveConfig(configFile, serverURL, key string) error {
 				if uuid != "" {
 					section.Key("AGENT_UUID").SetValue(uuid)
 				}
+				a.persistModPeerConfig(section)
 
 				if err := savePrivateINI(configFile, cfg); err != nil {
 					return fmt.Errorf("创建新配置文件失败: %v", err)
@@ -1727,6 +1738,7 @@ func (a *Agent) saveConfig(configFile, serverURL, key string) error {
 			if uuid != "" {
 				section.Key("AGENT_UUID").SetValue(uuid)
 			}
+			a.persistModPeerConfig(section)
 
 			// 保存配置
 			if err := savePrivateINI(configFile, cfg); err != nil {
@@ -1765,6 +1777,7 @@ func (a *Agent) saveConfig(configFile, serverURL, key string) error {
 		if uuid != "" {
 			section.Key("AGENT_UUID").SetValue(uuid)
 		}
+		a.persistModPeerConfig(section)
 
 		// 保存配置
 		if err := savePrivateINI(configFile, cfg); err != nil {
@@ -1885,8 +1898,12 @@ func (a *Agent) handleSecurityKeyUpdate(msg *shared.Message) {
 }
 
 // 处理断开连接
-func (a *Agent) handleDisconnect() {
+func (a *Agent) handleDisconnect(failed *shared.SecureConnection) {
 	a.connMutex.Lock()
+	if failed != nil && a.conn != failed {
+		a.connMutex.Unlock()
+		return
+	}
 	a.isConnected = false
 	if a.conn != nil {
 		a.conn.Close()
@@ -1936,7 +1953,7 @@ func (a *Agent) sendHeartbeat() {
 	// 发送心跳
 	if err := conn.SendEncrypted(msg); err != nil {
 		log.Printf("发送心跳失败: %v", err)
-		a.handleDisconnect()
+		a.handleDisconnect(conn)
 	}
 }
 
@@ -2077,14 +2094,9 @@ func (a *Agent) handleSecurityKeyUpdateProposal(msg *shared.Message) {
 				// 启动必要的处理程序
 				a.wg.Add(1)
 				go a.handleMessages()
-
 				if a.reportInterval > 0 {
-					a.wg.Add(1)
-					go a.startActiveReporting()
+					a.sendActiveReport()
 				}
-
-				a.wg.Add(1)
-				go a.startHeartbeat()
 			} else {
 				log.Printf("连接看似建立但可能不完整，启动重连流程")
 				go a.reconnect()
@@ -2105,7 +2117,6 @@ func (a *Agent) handleReportAck(msg *shared.Message) {
 		return
 	}
 
-	log.Printf("服务器已确认接收上报，报告ID: %s, 状态: %s", ackPayload.ReportID, ackPayload.Status)
 }
 
 // 处理服务器请求上报
@@ -2119,8 +2130,6 @@ func (a *Agent) handleReportRequest(msg *shared.Message) {
 		log.Printf("解析上报请求失败: %v", err)
 		return
 	}
-
-	log.Printf("收到服务器上报请求: %s", requestPayload.ReportType)
 
 	// 收集数据
 	var data map[string]interface{}
@@ -2170,7 +2179,5 @@ func (a *Agent) handleReportRequest(msg *shared.Message) {
 	// 发送响应
 	if err := a.conn.SendEncrypted(respMsg); err != nil {
 		log.Printf("发送上报响应失败: %v", err)
-	} else {
-		log.Printf("已响应服务器上报请求: %s, 包含 %d 项数据", requestPayload.ReportType, len(data))
 	}
 }

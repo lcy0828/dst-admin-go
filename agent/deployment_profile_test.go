@@ -3,6 +3,8 @@ package agent
 import (
 	"strings"
 	"testing"
+
+	"dont/shared"
 )
 
 func hasCapability(values []string, expected string) bool {
@@ -53,6 +55,10 @@ func TestRuntimeInstallationReportsExposeTrustedSelectionWithoutControlInternals
 	}})
 	if len(reports) != 1 || reports[0]["id"] != "container" || reports[0]["save_path"] != "/srv/dst/saves" {
 		t.Fatalf("reports=%#v", reports)
+	}
+	performance, ok := reports[0]["performance"].(shared.RuntimePerformanceReport)
+	if !ok || performance.Status != shared.RuntimePerformanceNotInstalled || performance.CanEnable {
+		t.Fatalf("performance=%#v", reports[0]["performance"])
 	}
 	for _, internal := range []string{"mod_cache_path", "mod_state_path", "console_socket", "console_session"} {
 		if _, exists := reports[0][internal]; exists {

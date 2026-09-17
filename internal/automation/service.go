@@ -43,6 +43,17 @@ type scheduledPreflight interface {
 	ShouldRunScheduled(context.Context, Task) (bool, error)
 }
 
+type scheduledActionExecutor interface {
+	ExecuteScheduled(context.Context, Task, string) (ExecutionResult, error)
+}
+
+func (s *Service) execute(ctx context.Context, task Task, jobID string, trigger Trigger) (ExecutionResult, error) {
+	if executor, ok := s.executor.(scheduledActionExecutor); trigger == TriggerSchedule && ok {
+		return executor.ExecuteScheduled(ctx, task, jobID)
+	}
+	return s.executor.Execute(ctx, task, jobID)
+}
+
 func NewService(roomCatalog RoomCatalog, store *Store, jobService *jobs.Service, executor ActionExecutor) (*Service, error) {
 	if roomCatalog == nil || store == nil || jobService == nil || executor == nil {
 		return nil, errors.New("automation dependencies are required")
@@ -290,7 +301,7 @@ func (s *Service) RunTask(roomID, taskID string, trigger Trigger) (jobs.Job, err
 			var executeErr error
 			retryCount := 0
 			for attempt := 0; attempt <= task.RetryTimes; attempt++ {
-				result, executeErr = s.executor.Execute(taskCtx, task, job.ID)
+				result, executeErr = s.execute(taskCtx, task, job.ID, trigger)
 				if executeErr == nil || taskCtx.Err() != nil || attempt == task.RetryTimes {
 					break
 				}
@@ -342,9 +353,6 @@ func (s *Service) RunTask(roomID, taskID string, trigger Trigger) (jobs.Job, err
 	return job, nil
 }
 
-// RunScheduledTask keeps the high-frequency built-in player collector out of
-// durable Job and automation-run history. User-created schedules and manual
-// runs retain the normal audited execution path.
 func (s *Service) RunScheduledTask(roomID, taskID string) error {
 	task, err := s.store.Task(roomID, taskID)
 	if err != nil {
@@ -378,7 +386,7 @@ func (s *Service) RunScheduledTask(roomID, taskID string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(task.TimeoutSeconds)*time.Second)
 	defer cancel()
-	_, executeErr := s.executor.Execute(ctx, task, "")
+	_, executeErr := s.execute(ctx, task, "", TriggerSchedule)
 	status := RunSucceeded
 	if executeErr != nil {
 		status = RunFailed
