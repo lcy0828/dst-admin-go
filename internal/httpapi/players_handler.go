@@ -3,13 +3,18 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 
+	"dont/internal/agents"
 	"dont/internal/configuration"
+	"dont/internal/dstruntime"
 	"dont/internal/jobs"
 	"dont/internal/players"
 	"dont/internal/rooms"
+	"dont/internal/runtimedriver"
+	"dont/internal/topology"
 
 	"github.com/gin-gonic/gin"
 )
@@ -58,9 +63,18 @@ func (h *PlayerHandler) Register(v2 *gin.RouterGroup) {
 func (h *PlayerHandler) list(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "25"))
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	includeAccessLists := true
+	if raw, exists := c.GetQuery("includeAccessLists"); exists {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			playerFailure(c, players.ErrInvalidFilter)
+			return
+		}
+		includeAccessLists = parsed
+	}
 	value, err := h.players.List(c.Param("roomId"), players.ListFilter{
 		Query: c.Query("query"), Status: c.Query("status"), WorldID: c.Query("worldId"),
-		Prefab: c.Query("prefab"), Limit: limit, Offset: offset,
+		Prefab: c.Query("prefab"), Limit: limit, Offset: offset, SkipAccessLists: !includeAccessLists,
 	})
 	if err != nil {
 		playerFailure(c, err)
@@ -217,14 +231,29 @@ func playerFailure(c *gin.Context, err error) {
 	case errors.Is(err, players.ErrConfirmationRequired), errors.Is(err, configuration.ErrConfirmationNeeded):
 		Failure(c, http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", "确认内容不匹配", nil)
 	case errors.Is(err, players.ErrRoomNotManaged), errors.Is(err, configuration.ErrRoomNotManaged):
-		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "接管房间后才能管理玩家", nil)
+		Failure(c, http.StatusConflict, "ROOM_UNAVAILABLE", "房间当前不可用，请检查运行节点与拓扑状态", nil)
 	case errors.Is(err, players.ErrWorldNotRunning):
 		Failure(c, http.StatusConflict, "WORLD_NOT_RUNNING", "目标分片未运行", nil)
+	case errors.Is(err, agents.ErrAgentOffline), errors.Is(err, agents.ErrUnavailable):
+		Failure(c, http.StatusServiceUnavailable, "AGENT_UNAVAILABLE", "目标 Agent 当前离线或连接不可用", nil)
+	case agentUpgradeRequired(err):
+		Failure(c, http.StatusConflict, "AGENT_UPGRADE_REQUIRED", "目标 Agent 版本过旧，缺少玩家管理所需能力，请升级 Agent 后重试", nil)
+	case errors.Is(err, topology.ErrExecutionBlocked):
+		Failure(c, http.StatusConflict, "PLAYER_TARGET_UNAVAILABLE", err.Error(), nil)
+	case errors.Is(err, dstruntime.ErrRuntimeNotInstalled):
+		Failure(c, http.StatusConflict, "RUNTIME_NOT_INSTALLED", "目标分片尚未安装玩家采集 Runtime", nil)
+	case errors.Is(err, dstruntime.ErrRuntimeUnavailable):
+		Failure(c, http.StatusServiceUnavailable, "RUNTIME_UNAVAILABLE", "目标分片 Runtime 当前不可用", nil)
+	case errors.Is(err, dstruntime.ErrSnapshotUnavailable), errors.Is(err, dstruntime.ErrSnapshotStale):
+		Failure(c, http.StatusServiceUnavailable, "PLAYER_SNAPSHOT_UNAVAILABLE", "目标分片尚未产生可用的玩家快照，请确认游戏已启动后重试", nil)
+	case errors.Is(err, runtimedriver.ErrOperationNotDispatched):
+		Failure(c, http.StatusServiceUnavailable, "PLAYER_COMMAND_NOT_DISPATCHED", "玩家命令未能发送到目标运行节点", nil)
 	case errors.Is(err, rooms.ErrInvalidID), errors.Is(err, rooms.ErrUnsafePath):
 		Failure(c, http.StatusBadRequest, "INVALID_RESOURCE_ID", "房间或世界标识无效", nil)
 	case errors.Is(err, rooms.ErrRoomNotFound), errors.Is(err, rooms.ErrWorldNotFound):
 		Failure(c, http.StatusNotFound, "RESOURCE_NOT_FOUND", "房间或世界不存在", nil)
 	default:
+		log.Printf("[PlayersHTTP] request_id=%s method=%s path=%s error=%v", RequestID(c), c.Request.Method, c.Request.URL.Path, err)
 		Failure(c, http.StatusInternalServerError, "PLAYER_OPERATION_FAILED", "玩家操作失败", nil)
 	}
 }
@@ -240,6 +269,20 @@ func playerJobError(err error) *jobs.Error {
 		code = "CONFIRMATION_REQUIRED"
 	case errors.Is(err, players.ErrInvalidAction):
 		code = "INVALID_PLAYER_ACTION"
+	case errors.Is(err, agents.ErrAgentOffline), errors.Is(err, agents.ErrUnavailable):
+		code = "AGENT_UNAVAILABLE"
+	case agentUpgradeRequired(err):
+		code = "AGENT_UPGRADE_REQUIRED"
+	case errors.Is(err, topology.ErrExecutionBlocked):
+		code = "PLAYER_TARGET_UNAVAILABLE"
+	case errors.Is(err, dstruntime.ErrRuntimeNotInstalled):
+		code = "RUNTIME_NOT_INSTALLED"
+	case errors.Is(err, dstruntime.ErrRuntimeUnavailable):
+		code = "RUNTIME_UNAVAILABLE"
+	case errors.Is(err, dstruntime.ErrSnapshotUnavailable), errors.Is(err, dstruntime.ErrSnapshotStale):
+		code = "PLAYER_SNAPSHOT_UNAVAILABLE"
+	case errors.Is(err, runtimedriver.ErrOperationNotDispatched):
+		code = "PLAYER_COMMAND_NOT_DISPATCHED"
 	}
 	return &jobs.Error{Code: code, Message: err.Error()}
 }

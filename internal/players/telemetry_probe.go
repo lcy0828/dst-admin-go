@@ -42,11 +42,13 @@ type placementLocality interface {
 }
 
 type TelemetryProbe struct {
-	native   Probe
-	runtime  RuntimeSnapshotReader
-	fallback Probe
-	locality placementLocality
-	now      func() time.Time
+	native         Probe
+	runtime        RuntimeSnapshotReader
+	fallback       Probe
+	remoteFallback Probe
+	history        HistoryProbe
+	locality       placementLocality
+	now            func() time.Time
 }
 
 func NewTelemetryProbe(native Probe, runtime RuntimeSnapshotReader, fallback Probe, localities ...placementLocality) (*TelemetryProbe, error) {
@@ -63,6 +65,14 @@ func NewTelemetryProbe(native Probe, runtime RuntimeSnapshotReader, fallback Pro
 func (p *TelemetryProbe) Snapshot(ctx context.Context, roomID, worldID string) ([]Observation, error) {
 	result, err := p.SnapshotDetailed(ctx, roomID, worldID)
 	return result.Observations, err
+}
+
+func (p *TelemetryProbe) ConfigureRemoteFallback(probe Probe) {
+	p.remoteFallback = probe
+}
+
+func (p *TelemetryProbe) ConfigureHistory(probe HistoryProbe) {
+	p.history = probe
 }
 
 func (p *TelemetryProbe) SnapshotDetailed(ctx context.Context, roomID, worldID string) (SnapshotResult, error) {
@@ -96,10 +106,14 @@ func (p *TelemetryProbe) SnapshotDetailed(ctx context.Context, roomID, worldID s
 			Degraded: nativeErr != nil, Warning: errorMessage(nativeErr),
 		}, nil
 	}
+	fallbackProbe := p.fallback
 	if !local {
+		fallbackProbe = p.remoteFallback
+	}
+	if fallbackProbe == nil || !local && !refreshableSnapshotError(runtimeErr) || ctx.Err() != nil {
 		return SnapshotResult{}, fmt.Errorf("remote runtime telemetry: %w", runtimeErr)
 	}
-	fallback, fallbackErr := p.fallback.Snapshot(ctx, roomID, worldID)
+	fallback, fallbackErr := fallbackProbe.Snapshot(ctx, roomID, worldID)
 	if fallbackErr != nil {
 		return SnapshotResult{}, errors.Join(fmt.Errorf("runtime telemetry: %w", runtimeErr), fmt.Errorf("console fallback: %w", fallbackErr), nativeErr)
 	}
@@ -119,6 +133,9 @@ func refreshableSnapshotError(err error) bool {
 }
 
 func (p *TelemetryProbe) HistorySnapshot(ctx context.Context, roomID, worldID string) ([]Observation, error) {
+	if p.history != nil {
+		return p.history.HistorySnapshot(ctx, roomID, worldID)
+	}
 	local, err := p.isLocal(roomID, worldID)
 	if err != nil {
 		return nil, err
@@ -144,8 +161,11 @@ func observationsFromRuntime(snapshot dstruntime.Snapshot) []Observation {
 	for _, player := range snapshot.Players {
 		observation := Observation{
 			ID: player.ID, Name: player.Name, Prefab: player.Prefab, Admin: player.Admin, Age: player.Age,
-			NetID: player.NetID, NetScore: player.NetScore, HealthPercent: player.HealthPercent,
+			GameplayState: normalizeGameplayState(player.GameplayState),
+			NetID:         player.NetID, NetScore: player.NetScore, HealthPercent: player.HealthPercent,
 			HungerPercent: player.HungerPercent, SanityPercent: player.SanityPercent,
+			Health: player.Health, HealthMax: player.HealthMax, Hunger: player.Hunger, HungerMax: player.HungerMax,
+			Sanity: player.Sanity, SanityMax: player.SanityMax,
 			Temperature: player.Temperature, Moisture: player.Moisture,
 		}
 		result = append(result, stampTelemetryObservation(observation, SourceRuntime, snapshot.CapturedAt))
@@ -162,7 +182,7 @@ func stampNativeObservations(values []Observation, observedAt time.Time) []Obser
 		for _, field := range []string{"online", "name", "admin", "age"} {
 			value.Fields[field] = liveField(SourceNativeLog, observedAt)
 		}
-		for field, available := range map[string]bool{"prefab": value.Prefab != "", "netId": value.NetID != ""} {
+		for field, available := range map[string]bool{"prefab": value.Prefab != "", "netId": value.NetID != "", "gameplayState": false} {
 			status := FreshnessUnavailable
 			if available {
 				status = FreshnessLive
@@ -190,7 +210,7 @@ func stampTelemetryObservation(value Observation, source DataSource, observedAt 
 	for _, field := range []string{"online", "name", "admin", "age"} {
 		value.Fields[field] = liveField(source, observedAt)
 	}
-	for field, available := range map[string]bool{"prefab": value.Prefab != "", "netId": value.NetID != ""} {
+	for field, available := range map[string]bool{"prefab": value.Prefab != "", "netId": value.NetID != "", "gameplayState": value.GameplayState != ""} {
 		status := FreshnessUnavailable
 		if available {
 			status = FreshnessLive
@@ -201,6 +221,9 @@ func stampTelemetryObservation(value Observation, source DataSource, observedAt 
 	metrics := map[string]bool{
 		"netScore": value.NetScore != nil, "healthPercent": value.HealthPercent != nil,
 		"hungerPercent": value.HungerPercent != nil, "sanityPercent": value.SanityPercent != nil,
+		"health": value.Health != nil, "healthMax": value.HealthMax != nil,
+		"hunger": value.Hunger != nil, "hungerMax": value.HungerMax != nil,
+		"sanity": value.Sanity != nil, "sanityMax": value.SanityMax != nil,
 		"temperature": value.Temperature != nil, "moisture": value.Moisture != nil,
 	}
 	for field, available := range metrics {
@@ -217,6 +240,18 @@ func stampTelemetryObservation(value Observation, source DataSource, observedAt 
 func liveField(source DataSource, observedAt time.Time) FieldState {
 	instant := observedAt.UTC()
 	return FieldState{Source: source, ObservedAt: &instant, Status: FreshnessLive}
+}
+
+func normalizeGameplayState(value string) string {
+	switch value {
+	case GameplayStateSelectingCharacter, GameplayStateLoading, GameplayStateAlive, GameplayStateDead,
+		GameplayStateGhost, GameplayStateMigrating, GameplayStateUnknown:
+		return value
+	case "":
+		return ""
+	default:
+		return GameplayStateUnknown
+	}
 }
 
 func mergeSnapshotIdentities(identity, snapshot []Observation) []Observation {

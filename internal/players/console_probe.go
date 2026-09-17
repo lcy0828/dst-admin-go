@@ -82,13 +82,14 @@ func playerProbeScript(nonce string) string {
 	return `local __p="[DST-".."ADMIN-PLAYERS ` + nonce + `"; ` +
 		`local function __e(v) return (tostring(v or ""):gsub("([^%w%-%._])",function(c) return string.format("%%%02X",string.byte(c)) end)) end; ` +
 		`for _,v in ipairs(TheNet:GetClientTable() or {}) do local p=UserToPlayer(v.userid); ` +
+		`local g=p and (p.migration and "migrating" or (p.HasTag and p:HasTag("playerghost") and "ghost") or (p.components and p.components.health and p.components.health:IsDead() and "dead") or "alive") or ((v.prefab==nil or v.prefab=="") and "selecting_character" or "loading"); ` +
 		`local h=-1 local u=-1 local s=-1 local t=-999 local m=-1; ` +
 		`if p then if p.components.health then h=p.components.health:GetPercent()*100 end; ` +
 		`if p.components.hunger then u=p.components.hunger:GetPercent()*100 end; ` +
 		`if p.components.sanity then s=p.components.sanity:GetPercent()*100 end; ` +
 		`if p.components.temperature then t=p.components.temperature.current end; ` +
 		`if p.components.moisture then m=p.components.moisture:GetMoisture() end end; ` +
-		`print(__p.." ITEM] "..table.concat({__e(v.userid),__e(v.name),__e(v.prefab),tostring(v.playerage or 0),v.admin and "1" or "0",__e(v.netid),tostring(v.performance or -1),tostring(h),tostring(u),tostring(s),tostring(t),tostring(m)},"\t")) end; ` +
+		`print(__p.." ITEM] "..table.concat({__e(v.userid),__e(v.name),__e(v.prefab),tostring(v.playerage or 0),v.admin and "1" or "0",__e(v.netid),tostring(v.netscore or -1),tostring(h),tostring(u),tostring(s),tostring(t),tostring(m),__e(g)},"\t")) end; ` +
 		`print(__p.." DONE]")`
 }
 

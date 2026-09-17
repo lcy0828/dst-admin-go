@@ -91,9 +91,6 @@ func (s *Service) List(roomID string, filter ListFilter) (List, error) {
 	if err != nil {
 		return List{}, err
 	}
-	if err := s.expireRoomBans(room); err != nil {
-		return List{}, err
-	}
 	filter, err = s.normalizeFilter(room.ID, filter)
 	if err != nil {
 		return List{}, err
@@ -102,42 +99,116 @@ func (s *Service) List(roomID string, filter ListFilter) (List, error) {
 	if err != nil {
 		return List{}, err
 	}
-	access, err := s.access.AccessLists(room.ID)
-	if err != nil {
-		return List{}, err
-	}
-	blocked := make(map[string]bool, len(access.Blocked))
-	for _, id := range access.Blocked {
-		blocked[id] = true
-	}
-	for index := range items {
-		items[index].Banned = blocked[items[index].ID]
-	}
-	banDetails, err := s.store.Bans(room.ID)
-	if err != nil {
-		return List{}, err
-	}
-	for index := range items {
-		if details, exists := banDetails[items[index].ID]; items[index].Banned && exists {
-			applyBanDetails(&items[index], details)
+	blocked := make(map[string]bool)
+	accessAvailable := false
+	accessWarning := ""
+	if !filter.SkipAccessLists {
+		banDetails, banErr := s.store.Bans(room.ID)
+		if banErr != nil {
+			return List{}, banErr
+		}
+		access, available, warning := s.displayAccessLists(room.ID)
+		accessAvailable, accessWarning = available, warning
+		blocked = make(map[string]bool, len(access.Blocked)+len(banDetails))
+		if accessAvailable {
+			for _, id := range access.Blocked {
+				blocked[id] = true
+			}
+		} else {
+			// Controller-created ban records remain useful when the remote shared
+			// access files cannot be read, but they are not presented as complete.
+			for id := range banDetails {
+				blocked[id] = true
+			}
+		}
+		for index := range items {
+			items[index].AccessListsAvailable = accessAvailable
+			items[index].AccessWarning = accessWarning
+			items[index].Banned = blocked[items[index].ID]
+			if details, exists := banDetails[items[index].ID]; items[index].Banned && exists {
+				applyBanDetails(&items[index], details)
+			}
 		}
 	}
 	totalPlayers, online, staleOnline, refreshed, err := s.store.Counts(room.ID)
 	if err != nil {
 		return List{}, err
 	}
-	return List{
+	result := List{
 		Items: items, Total: total, Online: online, Offline: totalPlayers - online - staleOnline,
-		StaleOnline: staleOnline, Banned: len(access.Blocked), Limit: filter.Limit, Offset: filter.Offset, LastRefreshedAt: refreshed,
-	}, nil
+		StaleOnline: staleOnline, Banned: len(blocked), Limit: filter.Limit, Offset: filter.Offset, LastRefreshedAt: refreshed,
+		AccessListsAvailable: accessAvailable,
+	}
+	if accessWarning != "" {
+		result.Warnings = []string{accessWarning}
+	}
+	return result, nil
+}
+
+// OnlineCount avoids access-list maintenance for lifecycle notification checks.
+func (s *Service) OnlineCount(roomID string) (int, error) {
+	room, err := s.managedRoom(roomID)
+	if err != nil {
+		return 0, err
+	}
+	_, online, staleOnline, _, err := s.store.Counts(room.ID)
+	return online + staleOnline, err
+}
+
+// RefreshPresence actively samples every world and returns a conservative
+// room-level result suitable for unattended lifecycle decisions.
+func (s *Service) RefreshPresence(ctx context.Context, roomID string) (PresenceSnapshot, error) {
+	targets, err := s.WorldTargets(roomID)
+	result := PresenceSnapshot{RoomID: roomID, Fresh: true, CheckedAt: s.now().UTC()}
+	if err != nil {
+		return result, err
+	}
+	worldIDs := make([]string, 0, len(targets))
+	for _, target := range targets {
+		worldIDs = append(worldIDs, target.ID)
+	}
+	if len(worldIDs) == 0 {
+		return result, rooms.ErrWorldNotFound
+	}
+	outcomes, err := s.RefreshWorlds(ctx, roomID, worldIDs)
+	if err != nil {
+		return result, err
+	}
+	for _, outcome := range outcomes {
+		world := PresenceWorld{
+			WorldID: outcome.WorldID, Running: outcome.Result.Running, Count: outcome.Result.Count,
+			Status: outcome.Result.Status, ObservedAt: outcome.Result.ObservedAt, Warning: outcome.Result.Warning,
+		}
+		if outcome.Err != nil {
+			result.Fresh = false
+			world.Status = FreshnessUnavailable
+			world.Warning = outcome.Err.Error()
+			result.Warnings = append(result.Warnings, fmt.Sprintf("%s: %v", outcome.WorldID, outcome.Err))
+		} else if outcome.Deferred || outcome.Result.Running && outcome.Result.Status != FreshnessLive {
+			result.Fresh = false
+			warning := strings.TrimSpace(outcome.Result.Warning)
+			if warning == "" {
+				warning = "player telemetry is not fresh"
+			}
+			result.Warnings = append(result.Warnings, outcome.WorldID+": "+warning)
+		}
+		result.Worlds = append(result.Worlds, world)
+	}
+	_, online, staleOnline, _, err := s.store.Counts(roomID)
+	if err != nil {
+		return result, err
+	}
+	result.Online, result.StaleOnline = online+staleOnline, staleOnline
+	if staleOnline > 0 {
+		result.Fresh = false
+		result.Warnings = append(result.Warnings, "存在未确认离线的玩家记录")
+	}
+	return result, nil
 }
 
 func (s *Service) Player(roomID, playerID string) (Player, error) {
 	room, err := s.managedRoom(roomID)
 	if err != nil {
-		return Player{}, err
-	}
-	if err := s.expireRoomBans(room); err != nil {
 		return Player{}, err
 	}
 	playerID = strings.TrimSpace(playerID)
@@ -148,21 +219,27 @@ func (s *Service) Player(roomID, playerID string) (Player, error) {
 	if err != nil {
 		return Player{}, err
 	}
-	access, err := s.access.AccessLists(room.ID)
+	banDetails, err := s.store.Bans(room.ID)
 	if err != nil {
 		return Player{}, err
 	}
+	access, accessAvailable, accessWarning := s.displayAccessLists(room.ID)
+	player.AccessListsAvailable = accessAvailable
+	player.AccessWarning = accessWarning
 	player.Banned = contains(access.Blocked, player.ID)
-	if player.Banned {
-		banDetails, detailsErr := s.store.Bans(room.ID)
-		if detailsErr != nil {
-			return Player{}, detailsErr
-		}
-		if details, exists := banDetails[player.ID]; exists {
-			applyBanDetails(&player, details)
-		}
+	if details, exists := banDetails[player.ID]; exists && (player.Banned || !accessAvailable) {
+		player.Banned = true
+		applyBanDetails(&player, details)
 	}
 	return player, nil
+}
+
+func (s *Service) displayAccessLists(roomID string) (configuration.AccessLists, bool, string) {
+	access, err := s.access.AccessLists(roomID)
+	if err != nil {
+		return configuration.AccessLists{}, false, "玩家数据已读取；访问名单读取失败：" + err.Error()
+	}
+	return access, true, ""
 }
 
 func (s *Service) WorldTargets(roomID string) ([]WorldTarget, error) {
@@ -180,7 +257,14 @@ func (s *Service) WorldTargets(roomID string) ([]WorldTarget, error) {
 	return targets, nil
 }
 
-func (s *Service) AnyWorldRunning(ctx context.Context, roomID string, worldIDs []string) (bool, error) {
+// PrepareScheduledRefresh reconciles presence even when no world needs a game
+// sample. Stopped processes confirm offline; unreachable or starting processes
+// only invalidate the last observation. Paused worlds retain their snapshot as
+// last-known data, which may have been captured before a missed process restart.
+func (s *Service) PrepareScheduledRefresh(ctx context.Context, roomID string, worldIDs []string) (bool, error) {
+	lock := s.roomLock(roomID)
+	lock.Lock()
+	defer lock.Unlock()
 	room, err := s.managedRoom(roomID)
 	if err != nil {
 		return false, err
@@ -194,23 +278,50 @@ func (s *Service) AnyWorldRunning(ctx context.Context, roomID string, worldIDs [
 		selected[worldID] = true
 	}
 	found := len(selected) == 0
+	active := false
+	var stopped, unconfirmed []string
+	var statusErr error
 	for _, world := range worlds {
 		if len(selected) > 0 && !selected[world.ID] {
 			continue
 		}
 		found = true
-		running, runningErr := s.worldRunning(ctx, room, world)
-		if runningErr != nil {
-			return false, runningErr
+		status, runningErr := s.worldStatus(ctx, room, world)
+		if err := ctx.Err(); err != nil {
+			return false, err
 		}
-		if running {
-			return true, nil
+		if runningErr != nil {
+			unconfirmed = append(unconfirmed, world.ID)
+			if statusErr == nil {
+				statusErr = runningErr
+			}
+			continue
+		}
+		switch status.State {
+		case shards.RuntimeRunning:
+			if status.Paused != nil && *status.Paused {
+				// The last disconnect commonly triggers auto-pause. Merge its
+				// log evidence even though game telemetry no longer advances.
+				if _, err := s.mergeWorldHistory(ctx, room, world, s.now().UTC()); err != nil && statusErr == nil {
+					statusErr = err
+				}
+				unconfirmed = append(unconfirmed, world.ID)
+			} else {
+				active = true
+			}
+		case shards.RuntimeStopped, shards.RuntimeFailed:
+			stopped = append(stopped, world.ID)
+		default:
+			unconfirmed = append(unconfirmed, world.ID)
 		}
 	}
 	if !found {
 		return false, rooms.ErrWorldNotFound
 	}
-	return false, nil
+	if err := s.store.ObserveRuntimePresence(room.ID, stopped, unconfirmed, s.now().UTC()); err != nil {
+		return false, err
+	}
+	return active, statusErr
 }
 
 func (s *Service) RefreshWorld(ctx context.Context, roomID, worldID string) (RefreshResult, error) {
@@ -225,6 +336,16 @@ func (s *Service) RefreshWorld(ctx context.Context, roomID, worldID string) (Ref
 }
 
 func (s *Service) RefreshWorlds(ctx context.Context, roomID string, worldIDs []string) ([]RefreshOutcome, error) {
+	return s.refreshWorlds(ctx, roomID, worldIDs, false)
+}
+
+// RefreshScheduledWorlds retains paused snapshots as last-known data without
+// advancing observation timestamps. Explicit refreshes and actions stay available.
+func (s *Service) RefreshScheduledWorlds(ctx context.Context, roomID string, worldIDs []string) ([]RefreshOutcome, error) {
+	return s.refreshWorlds(ctx, roomID, worldIDs, true)
+}
+
+func (s *Service) refreshWorlds(ctx context.Context, roomID string, worldIDs []string, skipPaused bool) ([]RefreshOutcome, error) {
 	lock := s.roomLock(roomID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -243,9 +364,10 @@ func (s *Service) RefreshWorlds(ctx context.Context, roomID string, worldIDs []s
 			return nil, ErrInvalidFilter
 		}
 		seenWorlds[worldID] = true
-		outcome, snapshot := s.collectWorldSnapshot(ctx, room, worldID)
+		outcome, snapshot := s.collectWorldSnapshot(ctx, room, worldID, skipPaused)
 		outcomes = append(outcomes, outcome)
-		if outcome.Err == nil {
+		if !outcome.Deferred && (outcome.Err == nil || len(snapshot.History) > 0) {
+			snapshot.HistoryOnly = outcome.Err != nil
 			snapshots = append(snapshots, snapshot)
 		}
 	}
@@ -253,7 +375,7 @@ func (s *Service) RefreshWorlds(ctx context.Context, roomID string, worldIDs []s
 		return outcomes, err
 	}
 	for _, outcome := range outcomes {
-		if outcome.Err != nil {
+		if outcome.Err != nil && !outcome.Deferred {
 			if err := s.store.MarkWorldStale(room.ID, outcome.WorldID); err != nil {
 				return outcomes, err
 			}
@@ -262,16 +384,30 @@ func (s *Service) RefreshWorlds(ctx context.Context, roomID string, worldIDs []s
 	return outcomes, nil
 }
 
-func (s *Service) collectWorldSnapshot(ctx context.Context, room rooms.Room, worldID string) (RefreshOutcome, worldSnapshot) {
+func (s *Service) collectWorldSnapshot(ctx context.Context, room rooms.Room, worldID string, skipPaused bool) (RefreshOutcome, worldSnapshot) {
 	outcome := RefreshOutcome{WorldID: worldID}
 	world, err := s.rooms.World(room.ID, worldID)
 	if err != nil {
 		outcome.Err = err
 		return outcome, worldSnapshot{}
 	}
-	running, err := s.worldRunning(ctx, room, world)
+	runtimeStatus, err := s.worldStatus(ctx, room, world)
 	if err != nil {
 		outcome.Err = err
+		return outcome, worldSnapshot{}
+	}
+	running := runtimeStatus.State == shards.RuntimeRunning
+	if skipPaused && running && runtimeStatus.Paused != nil && *runtimeStatus.Paused {
+		outcome.Deferred = true
+		outcome.Err = s.store.MarkWorldStale(room.ID, world.ID)
+		outcome.Result = RefreshResult{
+			WorldID: world.ID, Running: true, Status: FreshnessStale,
+			Message: "世界已暂停，保留上次玩家数据；恢复运行后继续自动采集",
+		}
+		return outcome, worldSnapshot{}
+	}
+	if !running && runtimeStatus.State != shards.RuntimeStopped && runtimeStatus.State != shards.RuntimeFailed {
+		outcome.Err = fmt.Errorf("player presence is unconfirmed while world runtime state is %q", runtimeStatus.State)
 		return outcome, worldSnapshot{}
 	}
 	observedAt := s.now().UTC()
@@ -285,15 +421,23 @@ func (s *Service) collectWorldSnapshot(ctx context.Context, room rooms.Room, wor
 		}
 		warning := ""
 		if historyErr != nil {
-			warning = "历史玩家日志读取失败：" + historyErr.Error()
+			warning = historyWarning(historyErr)
 		}
 		outcome.Result = RefreshResult{WorldID: world.ID, Running: false, Source: SourceNativeLog, Status: FreshnessStale, Warning: warning, Message: message}
 		return outcome, snapshot
 	}
 	observations, source, status, warning, snapshotAt, err := s.readSnapshot(ctx, room.ID, world.ID, observedAt)
 	if err != nil {
+		if ctx.Err() == nil && errors.Is(err, dstruntime.ErrRuntimeRefreshDeferred) {
+			outcome.Deferred = true
+			outcome.Result = RefreshResult{
+				WorldID: world.ID, Running: true, Source: SourceRuntime, Status: FreshnessStale,
+				Warning: "房间操作中，玩家数据更新暂缓", Message: "已保留上次玩家采集结果",
+			}
+			return outcome, worldSnapshot{}
+		}
 		outcome.Err = err
-		return outcome, worldSnapshot{}
+		return outcome, snapshot
 	}
 	observedAt = snapshotAt
 	if err := validateObservations(observations); err != nil {
@@ -307,7 +451,7 @@ func (s *Service) collectWorldSnapshot(ctx context.Context, room rooms.Room, wor
 		if warning != "" {
 			warning += "；"
 		}
-		warning += "历史玩家日志读取失败：" + historyErr.Error()
+		warning += historyWarning(historyErr)
 	}
 	message := fmt.Sprintf("已通过 %s 读取 %d 个在线玩家", playerSourceLabel(source), len(observations))
 	outcome.Result = RefreshResult{
@@ -365,13 +509,41 @@ func (s *Service) readWorldHistory(ctx context.Context, roomID, worldID string) 
 		return []Observation{}, nil
 	}
 	observations, err := historyProbe.HistorySnapshot(ctx, roomID, worldID)
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrHistoryCatchingUp) {
 		return nil, err
 	}
-	if err := validateObservations(observations); err != nil {
+	if err := validateHistoryObservations(observations); err != nil {
 		return nil, err
 	}
-	return observations, nil
+	if len(observations) > 0 {
+		worlds, worldErr := s.rooms.Worlds(roomID)
+		if worldErr != nil {
+			return nil, worldErr
+		}
+		for index := range observations {
+			observation := &observations[index]
+			if observation.HistoryWorldName == "" {
+				continue
+			}
+			for _, world := range worlds {
+				if observation.HistoryWorldName == world.DirectoryName || observation.HistoryWorldName == world.Name {
+					observation.HistoryWorldID, observation.HistoryWorldName = world.ID, world.Name
+					break
+				}
+			}
+			if observation.HistoryWorldID == "" {
+				return nil, errors.New("玩家历史中的分片无法映射到房间世界")
+			}
+		}
+	}
+	return observations, err
+}
+
+func historyWarning(err error) string {
+	if errors.Is(err, ErrHistoryCatchingUp) {
+		return err.Error()
+	}
+	return "历史玩家日志读取失败：" + err.Error()
 }
 
 func (s *Service) Act(ctx context.Context, jobID, roomID, playerID string, action Action, request ActionRequest) (ActionResult, error) {
@@ -470,8 +642,7 @@ func (s *Service) Act(ctx context.Context, jobID, roomID, playerID string, actio
 		result.Message = "已向目标分片发送玩家死亡命令"
 	case ActionGodMode:
 		enabled := *request.Enabled
-		statement := `if p.components.health then p.components.health:SetInvincible(` + luaBoolean(enabled) + `) end; ` +
-			`if p.components.talker then p.components.talker:Say(` + quoteLua(toggleMessage("无敌模式", enabled)) + `) end`
+		statement := godModeStatement(enabled) + `;if p.components.talker then p.components.talker:Say(` + quoteLua(toggleMessage("无敌模式", enabled)) + `)end`
 		if err := s.sendPlayerAction(ctx, room, world, runtimeRequest, runtimeSupported, playerLookupScript(player.ID, statement)); err != nil {
 			return ActionResult{}, err
 		}
@@ -546,11 +717,20 @@ func (s *Service) sendToRunningWorld(ctx context.Context, room rooms.Room, world
 }
 
 func (s *Service) worldRunning(ctx context.Context, room rooms.Room, world rooms.World) (bool, error) {
+	status, err := s.worldStatus(ctx, room, world)
+	return status.State == shards.RuntimeRunning, err
+}
+
+func (s *Service) worldStatus(ctx context.Context, room rooms.Room, world rooms.World) (shards.RuntimeStatus, error) {
 	if runtime, ok := s.runtime.(identifiedRuntime); ok {
-		status, err := runtime.StatusFor(ctx, room.ID, world.ID)
-		return status.State == shards.RuntimeRunning, err
+		return runtime.StatusFor(ctx, room.ID, world.ID)
 	}
-	return s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
+	running, err := s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
+	state := shards.RuntimeStopped
+	if running {
+		state = shards.RuntimeRunning
+	}
+	return shards.RuntimeStatus{State: state}, err
 }
 
 func (s *Service) sendPlayerAction(ctx context.Context, room rooms.Room, world rooms.World, request dstruntime.CommandRequest, runtimeSupported bool, fallback string) error {
@@ -790,6 +970,17 @@ func playerLookupScript(playerID, statement string) string {
 	return `local p=UserToPlayer(` + quoteLua(playerID) + `); if p ~= nil then ` + statement + ` end`
 }
 
+func godModeStatement(enabled bool) string {
+	if enabled {
+		return `p:AddTag("dst_admin_god_mode");if p:HasTag("playerghost")then p:PushEvent("respawnfromghost");p.rezsource="DST-ADMIN-GO控制台"end;` +
+			`local function waterwalk(inst)inst:AddTag("dst_admin_waterwalk");if inst.Physics then inst.Physics:ClearCollidesWith(COLLISION.LIMITS)end;local d=inst.components and inst.components.drownable;if d then if inst._dst_admin_shoulddrown==nil then inst._dst_admin_shoulddrown=d.ShouldDrown end;d.ShouldDrown=function()return false end end end;` +
+			`if p._dst_admin_god_task then p._dst_admin_god_task:Cancel()end;p._dst_admin_god_task=p:DoPeriodicTask(.1,function(inst)local c=inst.components or {};if c.health then c.health:SetInvincible(true);c.health:SetPercent(1)end;if c.hunger then c.hunger:SetPercent(1)end;if c.sanity then c.sanity:SetPercent(1)end;if c.temperature then c.temperature:SetTemperature(35)end;if c.moisture then if c.moisture.waterproofnessmodifiers then c.moisture.waterproofnessmodifiers:SetModifier("dst_admin_god",TUNING.WATERPROOFNESS_ABSOLUTE)end;c.moisture:SetPercent(0)end;if c.inventory and c.inventory.isexternallyinsulated then c.inventory.isexternallyinsulated:SetModifier("dst_admin_god",true)end;waterwalk(inst);if RemovePhysicsColliders then RemovePhysicsColliders(inst)end end);waterwalk(p)`
+	}
+	return `if p._dst_admin_god_task then p._dst_admin_god_task:Cancel();p._dst_admin_god_task=nil end;p:RemoveTag("dst_admin_god_mode");` +
+		`local c=p.components or {};if c.health and not p._dst_admin_stealth_task then c.health:SetInvincible(false)end;if c.moisture and c.moisture.waterproofnessmodifiers then c.moisture.waterproofnessmodifiers:RemoveModifier("dst_admin_god")end;if c.inventory and c.inventory.isexternallyinsulated then c.inventory.isexternallyinsulated:SetModifier("dst_admin_god",false)end;` +
+		`p:RemoveTag("dst_admin_god_waterwalk");if p.Physics then if ChangeToCharacterPhysics then ChangeToCharacterPhysics(p)else p.Physics:CollidesWith(COLLISION.LIMITS)end;if p:HasTag("dst_admin_waterwalk_mode")then p:AddTag("dst_admin_waterwalk");p.Physics:ClearCollidesWith(COLLISION.LIMITS)else p:RemoveTag("dst_admin_waterwalk")end end;local d=c.drownable;if d then if p:HasTag("dst_admin_waterwalk_mode")then d.ShouldDrown=function()return false end elseif p._dst_admin_shoulddrown then d.ShouldDrown=p._dst_admin_shoulddrown;p._dst_admin_shoulddrown=nil end end`
+}
+
 func luaBoolean(value bool) string {
 	if value {
 		return "true"
@@ -811,6 +1002,13 @@ func toggleMessage(name string, enabled bool) string {
 func validateObservations(values []Observation) error {
 	if len(values) > 64 {
 		return errors.New("player snapshot exceeds room limit")
+	}
+	return validateHistoryObservations(values)
+}
+
+func validateHistoryObservations(values []Observation) error {
+	if len(values) > 4096 {
+		return errors.New("player history exceeds identity limit")
 	}
 	seen := make(map[string]bool, len(values))
 	for _, value := range values {

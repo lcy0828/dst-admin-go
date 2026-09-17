@@ -51,6 +51,45 @@ func TestStoreSnapshotPreservesHistoryAndMarksMissingPlayersOffline(t *testing.T
 	}
 }
 
+func TestStorePersistsGameplayStateAndMarksItStaleWhenPlayerLeaves(t *testing.T) {
+	store := newPlayerTestStore(t)
+	first := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	observation := stampTelemetryObservation(Observation{
+		ID: "KU_GHOST", Name: "Wendy", Prefab: "wendy", GameplayState: GameplayStateGhost,
+	}, SourceRuntime, first)
+	if err := store.ReplaceWorldSnapshot("room", "master", "地面", []Observation{observation}, first); err != nil {
+		t.Fatal(err)
+	}
+	player, err := store.Get("room", "KU_GHOST")
+	if err != nil || player.GameplayState != GameplayStateGhost || player.Fields["gameplayState"].Status != FreshnessLive {
+		t.Fatalf("stored gameplay state = %#v, error = %v", player, err)
+	}
+
+	if err := store.ReplaceWorldSnapshot("room", "master", "地面", []Observation{}, first.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	player, err = store.Get("room", "KU_GHOST")
+	if err != nil || player.Online || player.GameplayState != GameplayStateGhost || player.Fields["gameplayState"].Status != FreshnessStale {
+		t.Fatalf("offline gameplay state = %#v, error = %v", player, err)
+	}
+}
+
+func TestStorePersistsCurrentVitalsAndCharacterMaximums(t *testing.T) {
+	store := newPlayerTestStore(t)
+	observedAt := time.Date(2026, 8, 23, 11, 0, 0, 0, time.UTC)
+	health, healthMax, hunger, hungerMax, sanity, sanityMax := 53.75, 150.0, 124.5, 150.0, 193.8, 200.0
+	observation := stampTelemetryObservation(Observation{
+		ID: "KU_ONE", Name: "Winona", Health: &health, HealthMax: &healthMax, Hunger: &hunger, HungerMax: &hungerMax, Sanity: &sanity, SanityMax: &sanityMax,
+	}, SourceRuntime, observedAt)
+	if err := store.ReplaceWorldSnapshot("room", "master", "地面", []Observation{observation}, observedAt); err != nil {
+		t.Fatal(err)
+	}
+	player, err := store.Get("room", "KU_ONE")
+	if err != nil || player.Health == nil || *player.Health != health || player.HealthMax == nil || *player.HealthMax != healthMax || player.SanityMax == nil || *player.SanityMax != sanityMax {
+		t.Fatalf("stored vitals = %#v, error = %v", player, err)
+	}
+}
+
 func TestStoreMovesPlayerBetweenWorldsWithoutDuplicateIdentity(t *testing.T) {
 	store := newPlayerTestStore(t)
 	now := time.Now().UTC()
@@ -93,8 +132,8 @@ func TestRoomSnapshotsChooseNewestWorldForMigratingPlayer(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.ReplaceRoomSnapshots("room", []worldSnapshot{
-		{WorldID: "master", WorldName: "地面", ObservedAt: now.Add(time.Second), Observations: []Observation{{ID: "KU_ONE", Name: "Wilson"}}},
-		{WorldID: "caves", WorldName: "洞穴", ObservedAt: now.Add(2 * time.Second), Observations: []Observation{{ID: "KU_ONE", Name: "Wilson"}}},
+		{WorldID: "master", WorldName: "地面", ObservedAt: now.Add(time.Second), Observations: []Observation{{ID: "KU_ONE", Name: "Wilson", GameplayState: GameplayStateMigrating}}},
+		{WorldID: "caves", WorldName: "洞穴", ObservedAt: now.Add(2 * time.Second), Observations: []Observation{{ID: "KU_ONE", Name: "Wilson", GameplayState: GameplayStateAlive}}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -112,8 +151,8 @@ func TestRoomSnapshotsKeepExistingWorldWhenCaptureTimesTie(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.ReplaceRoomSnapshots("room", []worldSnapshot{
-		{WorldID: "caves", WorldName: "洞穴", ObservedAt: now.Add(time.Second), Observations: []Observation{{ID: "KU_ONE", Name: "Wilson"}}},
-		{WorldID: "master", WorldName: "地面", ObservedAt: now.Add(time.Second), Observations: []Observation{{ID: "KU_ONE", Name: "Wilson"}}},
+		{WorldID: "caves", WorldName: "洞穴", ObservedAt: now.Add(time.Second), Observations: []Observation{{ID: "KU_ONE", Name: "Wilson", GameplayState: GameplayStateAlive}}},
+		{WorldID: "master", WorldName: "地面", ObservedAt: now.Add(time.Second), Observations: []Observation{{ID: "KU_ONE", Name: "Wilson", GameplayState: GameplayStateAlive}}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -127,14 +166,34 @@ func TestRoomSnapshotsDoNotReportOldWorldAsPresenceConflict(t *testing.T) {
 	store := newPlayerTestStore(t)
 	now := time.Date(2026, 8, 12, 10, 0, 0, 0, time.UTC)
 	if err := store.ReplaceRoomSnapshots("room", []worldSnapshot{
-		{WorldID: "master", WorldName: "地面", ObservedAt: now, Observations: []Observation{{ID: "KU_ONE", Name: "Wilson"}}},
-		{WorldID: "caves", WorldName: "洞穴", ObservedAt: now.Add(30 * time.Second), Observations: []Observation{{ID: "KU_ONE", Name: "Wilson"}}},
+		{WorldID: "master", WorldName: "地面", ObservedAt: now, Observations: []Observation{{ID: "KU_ONE", Name: "Wilson", GameplayState: GameplayStateAlive}}},
+		{WorldID: "caves", WorldName: "洞穴", ObservedAt: now.Add(30 * time.Second), Observations: []Observation{{ID: "KU_ONE", Name: "Wilson", GameplayState: GameplayStateAlive}}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	player, err := store.Get("room", "KU_ONE")
 	if err != nil || player.WorldID != "caves" || player.PresenceConflict || len(player.ObservedWorldIDs) != 1 || player.ObservedWorldIDs[0] != "caves" {
 		t.Fatalf("old world was reported as a live conflict: player=%#v err=%v", player, err)
+	}
+}
+
+func TestRoomSnapshotsPreferLocalPlayerOverClusterWideLoadingClient(t *testing.T) {
+	store := newPlayerTestStore(t)
+	now := time.Date(2026, 8, 23, 9, 0, 0, 0, time.UTC)
+	if err := store.ReplaceRoomSnapshots("room", []worldSnapshot{
+		{WorldID: "master", WorldName: "地面", ObservedAt: now, Observations: []Observation{{
+			ID: "KU_ONE", Name: "Wendy", GameplayState: GameplayStateAlive,
+		}}},
+		{WorldID: "caves", WorldName: "洞穴", ObservedAt: now.Add(time.Second), Observations: []Observation{{
+			ID: "KU_ONE", Name: "Wendy", GameplayState: GameplayStateLoading,
+		}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	player, err := store.Get("room", "KU_ONE")
+	if err != nil || player.WorldID != "master" || player.GameplayState != GameplayStateAlive || player.PresenceConflict ||
+		len(player.ObservedWorldIDs) != 1 || player.ObservedWorldIDs[0] != "master" {
+		t.Fatalf("cluster-wide loading client overrode local player: player=%#v err=%v", player, err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -435,6 +436,9 @@ func mergeObservation(existing, update Observation) Observation {
 	if update.Prefab != "" {
 		existing.Prefab = update.Prefab
 	}
+	if update.GameplayState != "" {
+		existing.GameplayState = update.GameplayState
+	}
 	if update.NetID != "" {
 		existing.NetID = update.NetID
 	}
@@ -456,6 +460,24 @@ func mergeObservation(existing, update Observation) Observation {
 	if update.SanityPercent != nil {
 		existing.SanityPercent = update.SanityPercent
 	}
+	if update.Health != nil {
+		existing.Health = update.Health
+	}
+	if update.HealthMax != nil {
+		existing.HealthMax = update.HealthMax
+	}
+	if update.Hunger != nil {
+		existing.Hunger = update.Hunger
+	}
+	if update.HungerMax != nil {
+		existing.HungerMax = update.HungerMax
+	}
+	if update.Sanity != nil {
+		existing.Sanity = update.Sanity
+	}
+	if update.SanityMax != nil {
+		existing.SanityMax = update.SanityMax
+	}
 	if update.Temperature != nil {
 		existing.Temperature = update.Temperature
 	}
@@ -473,7 +495,7 @@ func mergeObservation(existing, update Observation) Observation {
 
 func parseProbeObservation(payload string, captureNetScore bool) (Observation, bool, error) {
 	fields := strings.Split(strings.TrimSpace(payload), "\t")
-	if len(fields) != 12 {
+	if len(fields) != 12 && len(fields) != 13 && len(fields) != 19 {
 		return Observation{}, false, errors.New("player probe returned malformed fields")
 	}
 	decoded := make([]string, 6)
@@ -501,6 +523,13 @@ func parseProbeObservation(payload string, captureNetScore bool) (Observation, b
 	observation := Observation{
 		ID: decoded[0], Name: decoded[1], Prefab: decoded[2], Age: age, Admin: fields[4] == "1", NetID: decoded[5],
 	}
+	if len(fields) >= 13 {
+		gameplayState, err := url.PathUnescape(fields[12])
+		if err != nil || len([]rune(gameplayState)) > 32 {
+			return Observation{}, false, errors.New("player probe returned invalid gameplay state")
+		}
+		observation.GameplayState = normalizeGameplayState(gameplayState)
+	}
 	if captureNetScore && netScore >= 0 {
 		observation.NetScore = &netScore
 	}
@@ -517,6 +546,19 @@ func parseProbeObservation(payload string, captureNetScore bool) (Observation, b
 		if !unavailable {
 			metric := value
 			*destination = &metric
+		}
+	}
+	if len(fields) == 19 {
+		vitals := []*(*float64){&observation.Health, &observation.HealthMax, &observation.Hunger, &observation.HungerMax, &observation.Sanity, &observation.SanityMax}
+		for metricIndex, destination := range vitals {
+			value, err := strconv.ParseFloat(fields[13+metricIndex], 64)
+			if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+				return Observation{}, false, errors.New("player probe returned invalid current metrics")
+			}
+			if value >= 0 && (metricIndex%2 == 0 || value > 0) {
+				metric := value
+				*destination = &metric
+			}
 		}
 	}
 	return observation, false, nil

@@ -2,21 +2,35 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
 
+	"dont/internal/agents"
+	"dont/internal/dstruntime"
 	"dont/internal/jobs"
 	"dont/internal/players"
+	"dont/internal/runtimedriver"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/gorm"
 	_ "github.com/mattn/go-sqlite3"
 )
 
-type playerHandlerService struct{}
+type playerHandlerService struct {
+	listErr    error
+	filterSink *players.ListFilter
+}
 
-func (playerHandlerService) List(string, players.ListFilter) (players.List, error) {
+func (s playerHandlerService) List(_ string, filter players.ListFilter) (players.List, error) {
+	if s.listErr != nil {
+		return players.List{}, s.listErr
+	}
+	if s.filterSink != nil {
+		*s.filterSink = filter
+	}
 	return players.List{Items: []players.Player{{ID: "KU_ONE", Name: "Willow", Online: true}}, Total: 1, Online: 1, Limit: 25}, nil
 }
 
@@ -73,6 +87,15 @@ func TestPlayerHTTPListRefreshAndActions(t *testing.T) {
 	if responseData(t, response)["online"] != float64(1) {
 		t.Fatalf("unexpected player list: %s", response.Body.String())
 	}
+	var lightweightFilter players.ListFilter
+	NewPlayerHandler(playerHandlerService{filterSink: &lightweightFilter}, jobsService).Register(router.Group("/dashboard/v2"))
+	response = performJSON(router, http.MethodGet, "/dashboard/v2/rooms/room/players?includeAccessLists=false", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if !lightweightFilter.SkipAccessLists {
+		t.Fatal("dashboard player query did not skip access-list reads")
+	}
+	response = performJSON(router, http.MethodGet, "/dashboard/v2/rooms/room/players?includeAccessLists=invalid", nil, nil, "")
+	assertStatus(t, response, http.StatusUnprocessableEntity)
 
 	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room/players/actions/refresh", map[string]interface{}{}, nil, "")
 	assertStatus(t, response, http.StatusAccepted)
@@ -111,6 +134,39 @@ func TestPlayerHTTPListRefreshAndActions(t *testing.T) {
 	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room/players/..%2Fbad/actions/kick", map[string]interface{}{}, nil, "")
 	if response.Code == http.StatusAccepted {
 		t.Fatalf("unsafe player ID was accepted: %s", response.Body.String())
+	}
+}
+
+func TestPlayerHTTPListReportsActionableRuntimeFailures(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, test := range []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{name: "runtime not installed", err: dstruntime.ErrRuntimeNotInstalled, status: http.StatusConflict, code: "RUNTIME_NOT_INSTALLED"},
+		{name: "snapshot unavailable", err: errors.Join(dstruntime.ErrSnapshotUnavailable, errors.New("artifact absent")), status: http.StatusServiceUnavailable, code: "PLAYER_SNAPSHOT_UNAVAILABLE"},
+		{name: "unsupported Agent action", err: agents.ErrUnsupportedAction, status: http.StatusConflict, code: "AGENT_UPGRADE_REQUIRED"},
+		{name: "missing Runtime capability", err: runtimedriver.ErrCapabilityMissing, status: http.StatusConflict, code: "AGENT_UPGRADE_REQUIRED"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			router, jobsService := newPlayerHandlerApp(t)
+			NewPlayerHandler(playerHandlerService{listErr: test.err}, jobsService).Register(router.Group("/failure/v2"))
+			response := performJSON(router, http.MethodGet, "/failure/v2/rooms/room/players", nil, nil, "")
+			assertStatus(t, response, test.status)
+			var body map[string]interface{}
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			failure, _ := body["error"].(map[string]interface{})
+			if failure["code"] != test.code {
+				t.Fatalf("failure code = %#v; body=%s", failure["code"], response.Body.String())
+			}
+			if jobError := playerJobError(test.err); jobError.Code != test.code {
+				t.Fatalf("job error code = %q, want %q", jobError.Code, test.code)
+			}
+		})
 	}
 }
 

@@ -24,6 +24,47 @@ func TestParseProbeOutputDecodesIdentityAndVitals(t *testing.T) {
 	}
 }
 
+func TestParseProbeOutputDecodesGameplayStateAndKeepsLegacyCompatibility(t *testing.T) {
+	nonce := "probe-state"
+	output := "[DST-ADMIN-PLAYERS probe-state ITEM] " + strings.Join([]string{
+		"KU_ONE", "Wendy", "wendy", "42", "0", "7656119", "0", "0", "61", "74", "31.2", "8", "ghost",
+	}, "\t") + "\n[DST-ADMIN-PLAYERS probe-state DONE]\n"
+	items, complete, err := parseProbeOutput(output, nonce)
+	if err != nil || !complete || len(items) != 1 || items[0].GameplayState != GameplayStateGhost {
+		t.Fatalf("gameplay probe result: complete=%v items=%#v err=%v", complete, items, err)
+	}
+
+	legacy, _, err := parseProbeOutput("[DST-ADMIN-PLAYERS legacy ITEM] "+strings.Join([]string{
+		"KU_OLD", "Wilson", "wilson", "1", "0", "7656111", "0", "90", "80", "70", "20", "0",
+	}, "\t")+"\n[DST-ADMIN-PLAYERS legacy DONE]\n", "legacy")
+	if err != nil || len(legacy) != 1 || legacy[0].GameplayState != "" {
+		t.Fatalf("legacy probe was not compatible: items=%#v err=%v", legacy, err)
+	}
+}
+
+func TestParseProbeOutputDecodesCurrentVitalsAndCharacterMaximums(t *testing.T) {
+	nonce := "probe-vitals"
+	output := "[DST-ADMIN-PLAYERS probe-vitals ITEM] " + strings.Join([]string{
+		"KU_ONE", "Winona", "winona", "42", "0", "7656119", "0", "35.8", "83", "96.9", "-9.9", "0", "alive",
+		"53.75", "150", "124.5", "150", "193.8", "200",
+	}, "\t") + "\n[DST-ADMIN-PLAYERS probe-vitals DONE]\n"
+	items, complete, err := parseProbeOutput(output, nonce)
+	if err != nil || !complete || len(items) != 1 || items[0].Health == nil || *items[0].Health != 53.75 ||
+		items[0].HealthMax == nil || *items[0].HealthMax != 150 || items[0].SanityMax == nil || *items[0].SanityMax != 200 {
+		t.Fatalf("current vitals result: complete=%v items=%#v err=%v", complete, items, err)
+	}
+}
+
+func TestPlayerProbeScriptStaysWithinDSTConsoleInputBudget(t *testing.T) {
+	script := playerProbeScript("00000000-0000-0000-0000-000000000000")
+	if length := len(script); length > 1800 {
+		t.Fatalf("fallback player probe is too long for the DST console: %d bytes", length)
+	}
+	if !strings.Contains(script, "v.netscore or -1") || strings.Contains(script, "v.performance or -1") {
+		t.Fatalf("fallback player probe does not separate client network score from host performance: %q", script)
+	}
+}
+
 func TestParseProbeOutputIgnoresDedicatedHostWithPlayerIdentity(t *testing.T) {
 	nonce := "probe-host"
 	lines := []string{

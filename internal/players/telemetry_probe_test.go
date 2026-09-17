@@ -3,6 +3,7 @@ package players
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,45 @@ func TestStampNativeObservationsMarksMissingIdentityFieldsUnavailable(t *testing
 	for _, field := range []string{"prefab", "netId"} {
 		if state := values[0].Fields[field]; state.Status != FreshnessUnavailable || state.Source != SourceNativeLog {
 			t.Fatalf("%s state = %#v", field, state)
+		}
+	}
+}
+
+func TestRuntimeGameplayStatesAreMappedAndMarkedLive(t *testing.T) {
+	capturedAt := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	states := []string{GameplayStateSelectingCharacter, GameplayStateLoading, GameplayStateAlive, GameplayStateDead, GameplayStateGhost, GameplayStateMigrating}
+	players := make([]dstruntime.SnapshotPlayer, 0, len(states)+1)
+	for index, state := range states {
+		players = append(players, dstruntime.SnapshotPlayer{ID: fmt.Sprintf("KU_%d", index), Name: state, GameplayState: state})
+	}
+	players = append(players, dstruntime.SnapshotPlayer{ID: "KU_MOD", Name: "mod state", GameplayState: "mod_spectating"})
+
+	observations := observationsFromRuntime(dstruntime.Snapshot{CapturedAt: capturedAt, Players: players})
+	if len(observations) != len(players) {
+		t.Fatalf("observations = %#v", observations)
+	}
+	for index, state := range states {
+		if observations[index].GameplayState != state || observations[index].Fields["gameplayState"].Status != FreshnessLive {
+			t.Fatalf("state %q observation = %#v", state, observations[index])
+		}
+	}
+	if observations[len(observations)-1].GameplayState != GameplayStateUnknown {
+		t.Fatalf("unknown runtime state was trusted: %#v", observations[len(observations)-1])
+	}
+}
+
+func TestRuntimeCurrentVitalsAreMappedAndMarkedLive(t *testing.T) {
+	capturedAt := time.Date(2026, 8, 23, 11, 0, 0, 0, time.UTC)
+	health, healthMax, hunger, hungerMax, sanity, sanityMax := 53.75, 150.0, 124.5, 150.0, 193.8, 200.0
+	observations := observationsFromRuntime(dstruntime.Snapshot{CapturedAt: capturedAt, Players: []dstruntime.SnapshotPlayer{{
+		ID: "KU_ONE", Name: "Winona", Health: &health, HealthMax: &healthMax, Hunger: &hunger, HungerMax: &hungerMax, Sanity: &sanity, SanityMax: &sanityMax,
+	}}})
+	if len(observations) != 1 || observations[0].Health == nil || *observations[0].Health != health || observations[0].SanityMax == nil || *observations[0].SanityMax != sanityMax {
+		t.Fatalf("runtime vitals = %#v", observations)
+	}
+	for _, field := range []string{"health", "healthMax", "hunger", "hungerMax", "sanity", "sanityMax"} {
+		if observations[0].Fields[field].Status != FreshnessLive {
+			t.Fatalf("%s field = %#v", field, observations[0].Fields[field])
 		}
 	}
 }

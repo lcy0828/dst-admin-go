@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"dont/internal/configuration"
+	"dont/internal/dstruntime"
 	"dont/internal/rooms"
 )
 
@@ -42,10 +43,20 @@ func (c playerTestCatalog) Worlds(roomID string) ([]rooms.World, error) {
 	return append([]rooms.World(nil), c.worlds...), nil
 }
 
-type playerTestRuntime struct{ running map[string]bool }
+type playerTestRuntime struct {
+	running map[string]bool
+	local   *bool
+}
 
 func (r *playerTestRuntime) IsRunning(_ context.Context, roomName, worldName string) (bool, error) {
 	return r.running[roomName+"/"+worldName], nil
+}
+
+func (r *playerTestRuntime) IsLocalPlacement(_, _ string) (bool, error) {
+	if r.local == nil {
+		return true, nil
+	}
+	return *r.local, nil
 }
 
 type playerTestSender struct {
@@ -61,10 +72,13 @@ func (s *playerTestSender) Send(_ context.Context, _, _ string, script string) e
 type playerTestAccess struct {
 	values      configuration.AccessLists
 	backupCount int
+	readCount   int
+	err         error
 }
 
 func (a *playerTestAccess) AccessLists(string) (configuration.AccessLists, error) {
-	return a.values, nil
+	a.readCount++
+	return a.values, a.err
 }
 
 func (a *playerTestAccess) ApplyAccess(_ context.Context, _ string, _ string, request configuration.AccessUpdateRequest) (configuration.ApplyResult, error) {
@@ -155,6 +169,96 @@ func TestRefreshDoesNotMarkPlayersOfflineWhenProbeFails(t *testing.T) {
 	}
 }
 
+func TestRefreshPresenceRequiresFreshTelemetryFromEveryRunningWorld(t *testing.T) {
+	service, _, _, _, probe := newPlayerTestService(t)
+	result, err := service.RefreshPresence(context.Background(), "room")
+	if err != nil || !result.Fresh || result.Online != 1 || result.StaleOnline != 0 || len(result.Worlds) != 2 {
+		t.Fatalf("fresh presence = %#v, error = %v", result, err)
+	}
+	probe.err = errors.New("runtime telemetry unavailable")
+	result, err = service.RefreshPresence(context.Background(), "room")
+	if err != nil || result.Fresh || result.Online != 1 || result.StaleOnline != 1 || len(result.Warnings) == 0 {
+		t.Fatalf("stale presence = %#v, error = %v", result, err)
+	}
+}
+
+func TestRefreshPresenceTreatsConfirmedStoppedWorldsAsEmpty(t *testing.T) {
+	service, runtime, _, _, probe := newPlayerTestService(t)
+	runtime.running["Cluster_1/Master"] = false
+	runtime.running["Cluster_1/Caves"] = false
+	probe.err = errors.New("probe must not be required for stopped worlds")
+	result, err := service.RefreshPresence(context.Background(), "room")
+	if err != nil || !result.Fresh || result.Online != 0 || result.StaleOnline != 0 {
+		t.Fatalf("stopped presence = %#v, error = %v", result, err)
+	}
+}
+
+func TestOnlineCountDoesNotReadAccessLists(t *testing.T) {
+	service, _, _, access, _ := newPlayerTestService(t)
+	if _, err := service.RefreshWorld(context.Background(), "room", "master"); err != nil {
+		t.Fatal(err)
+	}
+	count, err := service.OnlineCount("room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("online count = %d", count)
+	}
+	if access.readCount != 0 {
+		t.Fatalf("online count unexpectedly read access lists %d time(s)", access.readCount)
+	}
+}
+
+func TestListCanSkipAccessListsForDashboardSummary(t *testing.T) {
+	service, _, _, access, _ := newPlayerTestService(t)
+	if _, err := service.RefreshWorld(context.Background(), "room", "master"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := service.List("room", ListFilter{Limit: 25, SkipAccessLists: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if access.readCount != 0 {
+		t.Fatalf("lightweight list unexpectedly read access lists %d time(s)", access.readCount)
+	}
+	if list.Total != 1 || list.Online != 1 || len(list.Items) != 1 {
+		t.Fatalf("lightweight player list lost summary data: %#v", list)
+	}
+	if list.AccessListsAvailable || list.Items[0].AccessListsAvailable || list.Items[0].Banned {
+		t.Fatalf("lightweight list presented omitted access data as available: %#v", list)
+	}
+}
+
+func TestRemotePlayerReadsUsePlacementAwareAccessManager(t *testing.T) {
+	service, runtime, _, access, probe := newPlayerTestService(t)
+	remote := false
+	runtime.local = &remote
+	access.values = configuration.AccessLists{Revision: "remote", Blocked: []string{"KU_REMOTE"}}
+	probe.items = []Observation{{ID: "KU_REMOTE", Name: "Remote Willow", Prefab: "willow", Age: 12}}
+
+	if _, err := service.RefreshWorld(context.Background(), "room", "master"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := service.List("room", ListFilter{Limit: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if access.readCount != 1 {
+		t.Fatalf("remote list access reads = %d", access.readCount)
+	}
+	if !list.AccessListsAvailable || len(list.Items) != 1 || list.Items[0].ID != "KU_REMOTE" || !list.Items[0].Banned {
+		t.Fatalf("unexpected remote player list: %#v", list)
+	}
+	player, err := service.Player("room", "KU_REMOTE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !player.AccessListsAvailable || player.AccessWarning != "" || !player.Banned || access.readCount != 2 {
+		t.Fatalf("unexpected remote player: %#v reads=%d", player, access.readCount)
+	}
+}
+
 func TestRefreshWorldsCommitsSuccessfulShardsAndPreservesFailedShard(t *testing.T) {
 	catalog := playerTestCatalog{
 		room: rooms.Room{ID: "room", DirectoryName: "Cluster_1", Name: "测试房间", Managed: true},
@@ -198,6 +302,41 @@ func TestRefreshWorldsCommitsSuccessfulShardsAndPreservesFailedShard(t *testing.
 	caves, err := store.Get("room", "KU_CAVES")
 	if err != nil || !caves.Online || caves.WorldID != "caves" || caves.PresenceStatus != FreshnessStale {
 		t.Fatalf("failed shard state was cleared: player=%#v err=%v", caves, err)
+	}
+}
+
+func TestRefreshWorldsPreservesLivePlayersWhenRuntimeRefreshIsDeferred(t *testing.T) {
+	catalog := playerTestCatalog{
+		room: rooms.Room{ID: "room", DirectoryName: "Cluster_1", Name: "Room", Managed: true},
+		worlds: []rooms.World{
+			{ID: "master", RoomID: "room", DirectoryName: "Master", Name: "地面", IsMaster: true},
+		},
+	}
+	runtime := &playerTestRuntime{running: map[string]bool{"Cluster_1/Master": true}}
+	store := newPlayerTestStore(t)
+	now := time.Date(2026, 8, 30, 10, 0, 0, 0, time.UTC)
+	if err := store.ReplaceRoomSnapshots("room", []worldSnapshot{{
+		WorldID: "master", WorldName: "地面", ObservedAt: now,
+		Observations: stampNativeObservations([]Observation{{ID: "KU_CURRENT", Name: "Current player"}}, now),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	probe := &playerWorldProbe{errs: map[string]error{
+		"master": errors.Join(dstruntime.ErrSnapshotStale, dstruntime.ErrRuntimeRefreshDeferred),
+	}}
+	service, err := NewService(catalog, runtime, &playerTestSender{}, &playerTestAccess{}, store, probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return now.Add(time.Minute) }
+
+	outcomes, err := service.RefreshWorlds(context.Background(), "room", []string{"master"})
+	if err != nil || len(outcomes) != 1 || outcomes[0].Err != nil || !outcomes[0].Deferred {
+		t.Fatalf("deferred outcomes=%#v error=%v", outcomes, err)
+	}
+	player, err := store.Get("room", "KU_CURRENT")
+	if err != nil || !player.Online || player.PresenceStatus != FreshnessLive {
+		t.Fatalf("preserved player=%#v error=%v", player, err)
 	}
 }
 
@@ -269,8 +408,13 @@ func TestTemporaryBanExpiresAndPlayerCommandsAreFixedTemplates(t *testing.T) {
 	if _, err := service.Act(context.Background(), "job", "room", "KU_ONE", ActionGodMode, ActionRequest{WorldID: "master", Enabled: &enabled}); err != nil {
 		t.Fatal(err)
 	}
-	if len(sender.scripts) != 1 || !strings.Contains(sender.scripts[0], "SetInvincible(true)") {
+	if len(sender.scripts) != 1 {
 		t.Fatalf("god mode did not use the fixed server template: %q", sender.scripts)
+	}
+	for _, fragment := range []string{"_dst_admin_god_task", "SetInvincible(true)", "SetPercent(1)", "SetTemperature(35)", "WATERPROOFNESS_ABSOLUTE", "ClearCollidesWith(COLLISION.LIMITS)", `AddTag("dst_admin_god_mode")`} {
+		if !strings.Contains(sender.scripts[0], fragment) {
+			t.Fatalf("god mode template missing %q: %s", fragment, sender.scripts[0])
+		}
 	}
 	if _, err := service.Act(context.Background(), "job", "room", "KU_ONE", ActionCreativeMode, ActionRequest{WorldID: "master"}); err == nil {
 		t.Fatal("creative mode accepted a missing enabled value")
