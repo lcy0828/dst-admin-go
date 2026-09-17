@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -356,6 +357,9 @@ func validateRoomValues(values RoomValues) error {
 	}
 	if strings.ContainsAny(values.MasterIP, "\x00\r\n") || len(values.MasterIP) > 255 {
 		fields["masterIp"] = "主服务器 IP 格式无效"
+	}
+	if ip := net.ParseIP(strings.TrimSpace(values.MasterIP)); values.ShardEnabled && ip != nil && ip.IsUnspecified() {
+		fields["masterIp"] = "主服务器连接地址不能使用 0.0.0.0 或 ::；同机部署请使用 127.0.0.1，跨机器部署请填写可达地址"
 	}
 	if values.MasterPort < 1 || values.MasterPort > 65535 {
 		fields["masterPort"] = "主服务器端口必须在 1-65535 之间"
