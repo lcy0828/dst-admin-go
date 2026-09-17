@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM --platform=$TARGETPLATFORM node:24-bookworm-slim AS web-build
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS web-build
 WORKDIR /src
 COPY frontend/package*.json ./
 RUN npm ci
@@ -11,11 +11,13 @@ WORKDIR /src
 COPY backend/go.mod backend/go.sum ./
 RUN go mod download
 COPY backend/ ./
+COPY --from=web-build /src/dist ./internal/webui/dist
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_TIME=unknown
-RUN CGO_ENABLED=1 go build -trimpath \
-      -ldflags "-s -w -X dont/internal/buildinfo.Version=${VERSION} -X dont/internal/buildinfo.Commit=${COMMIT} -X dont/internal/buildinfo.BuildTime=${BUILD_TIME}" \
+ARG FRONTEND_COMMIT=unknown
+RUN CGO_ENABLED=1 go build -trimpath -tags webui \
+      -ldflags "-s -w -X dont/internal/buildinfo.Version=${VERSION} -X dont/internal/buildinfo.Commit=${COMMIT} -X dont/internal/buildinfo.BuildTime=${BUILD_TIME} -X dont/internal/buildinfo.FrontendCommit=${FRONTEND_COMMIT}" \
       -o /out/dst-admin ./cmd/admin-api \
     && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/dst-map-renderer ./cmd/dst-map-renderer \
     && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/mod-local-setup ./cmd/mod-local-setup
@@ -55,12 +57,10 @@ COPY --from=go-build /out/dst-admin /usr/local/bin/dst-admin
 COPY --from=go-build /out/dst-map-renderer /usr/local/bin/dst-map-renderer
 COPY --from=go-build /out/mod-local-setup /usr/local/bin/mod-local-setup
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
-COPY --from=web-build /src/dist /usr/share/dst-admin/web
 COPY backend/deploy/docker/config/all-in-one.conf /usr/local/share/dst-admin/all-in-one.conf
 COPY backend/deploy/docker/all-in-one-entrypoint.sh /usr/local/bin/all-in-one-entrypoint
 RUN chmod 0755 /usr/local/bin/all-in-one-entrypoint /usr/local/bin/dst-admin /usr/local/bin/dst-map-renderer
 ENV DST_ADMIN_CONFIG=/opt/dst/control/app.conf \
-    DST_ADMIN_WEB_ROOT=/usr/share/dst-admin/web \
     HOME=/opt/dst/control
 VOLUME ["/opt/dst"]
 EXPOSE 8080/tcp 10999-11020/udp 8766-8790/udp 27016-27040/udp

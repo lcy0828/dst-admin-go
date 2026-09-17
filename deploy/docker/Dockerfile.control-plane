@@ -1,14 +1,23 @@
 # syntax=docker/dockerfile:1.7
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS web-build
+WORKDIR /src
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
 FROM golang:1.25-bookworm AS build
 WORKDIR /src
-COPY go.mod go.sum ./
+COPY backend/go.mod backend/go.sum ./
 RUN go mod download
-COPY . .
+COPY backend/ ./
+COPY --from=web-build /src/dist ./internal/webui/dist
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_TIME=unknown
-RUN CGO_ENABLED=1 go build -trimpath \
-    -ldflags "-s -w -X dont/internal/buildinfo.Version=${VERSION} -X dont/internal/buildinfo.Commit=${COMMIT} -X dont/internal/buildinfo.BuildTime=${BUILD_TIME}" \
+ARG FRONTEND_COMMIT=unknown
+RUN CGO_ENABLED=1 go build -trimpath -tags webui \
+    -ldflags "-s -w -X dont/internal/buildinfo.Version=${VERSION} -X dont/internal/buildinfo.Commit=${COMMIT} -X dont/internal/buildinfo.BuildTime=${BUILD_TIME} -X dont/internal/buildinfo.FrontendCommit=${FRONTEND_COMMIT}" \
     -o /out/dst-admin ./cmd/admin-api
 
 FROM debian:12-slim
@@ -42,8 +51,8 @@ RUN sed -i \
         /var/lib/dst-admin/unmanaged-ugc \
         /var/lib/dst-admin/workshop/steamapps/workshop/content/322330
 COPY --from=build /out/dst-admin /usr/local/bin/dst-admin
-COPY deploy/docker/config/control-plane.conf /usr/local/share/dst-admin/control-plane.conf
-COPY deploy/docker/control-plane-entrypoint.sh /usr/local/bin/control-plane-entrypoint
+COPY backend/deploy/docker/config/control-plane.conf /usr/local/share/dst-admin/control-plane.conf
+COPY backend/deploy/docker/control-plane-entrypoint.sh /usr/local/bin/control-plane-entrypoint
 USER 10001:10001
 WORKDIR /var/lib/dst-admin
 ENV DST_ADMIN_CONFIG=/var/lib/dst-admin/app.conf \

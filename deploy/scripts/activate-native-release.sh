@@ -32,10 +32,16 @@ if [ "$rollback" = true ]; then
 fi
 case "$release" in ""|*[!A-Za-z0-9._+-]*|.|..) usage ;; esac
 selected="$root/releases/$release"
-[ ! -L "$selected" ] && [ -d "$selected" ] && [ -f "$selected/SHA256SUMS" ] && [ -x "$selected/dst-admin" ] && [ -f "$selected/public/index.html" ] || {
+[ ! -L "$selected" ] && [ -d "$selected" ] && [ -f "$selected/SHA256SUMS" ] && [ -x "$selected/dst-admin" ] || {
   echo "release is incomplete: $selected" >&2
   exit 66
 }
+if [ ! -f "$selected/public/index.html" ]; then
+  grep -Eq '"embeddedWebUI"[[:space:]]*:[[:space:]]*true' "$selected/manifest.json" || {
+    echo "release has no embedded or external UI: $selected" >&2
+    exit 66
+  }
+fi
 (
   cd "$selected"
   if command -v sha256sum >/dev/null 2>&1; then

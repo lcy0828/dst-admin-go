@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-  echo "usage: $0 --binary PATH --config PATH --web-root PATH [--renderer PATH]" >&2
+  echo "usage: $0 --binary PATH --config PATH [--web-root PATH] [--renderer PATH]" >&2
   exit 64
 }
 
@@ -25,7 +25,11 @@ done
 
 [ -f "$binary" ] && [ -x "$binary" ] || { echo "invalid DST Admin binary" >&2; exit 66; }
 [ -f "$config" ] || { echo "invalid local configuration" >&2; exit 66; }
-[ -f "$web_root/index.html" ] || { echo "web root does not contain index.html" >&2; exit 66; }
+if [ -n "$web_root" ]; then
+  [ -f "$web_root/index.html" ] || { echo "web root does not contain index.html" >&2; exit 66; }
+else
+  "$binary" -version | grep -Eq '"embeddedWebUI"[[:space:]]*:[[:space:]]*true' || { echo "binary has no embedded UI; pass --web-root" >&2; exit 66; }
+fi
 command -v tmux >/dev/null 2>&1 || { echo "tmux is required" >&2; exit 69; }
 
 label=top.luocaiyi.dst-admin-local
@@ -50,7 +54,7 @@ rotate_log() {
 install -d -m 0700 "$state_dir" "$bin_dir" "$installed_web" "$log_dir"
 install -m 0755 "$binary" "$bin_dir/dst-admin"
 install -m 0600 "$config" "$state_dir/app.conf"
-cp -a "$web_root/." "$installed_web/"
+if [ -n "$web_root" ]; then cp -a "$web_root/." "$installed_web/"; fi
 if [ -n "$renderer" ]; then
   [ -f "$renderer" ] && [ -x "$renderer" ] || { echo "invalid map renderer binary" >&2; exit 66; }
   install -m 0755 "$renderer" "$bin_dir/dst-map-renderer"
@@ -68,7 +72,9 @@ plutil -create xml1 "$plist"
 /usr/libexec/PlistBuddy -c "Add :ProgramArguments:2 string 127.0.0.1:8000" "$plist"
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" "$plist"
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DST_ADMIN_CONFIG string $state_dir/app.conf" "$plist"
-/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DST_ADMIN_WEB_ROOT string $installed_web" "$plist"
+if [ -n "$web_root" ]; then
+  /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DST_ADMIN_WEB_ROOT string $installed_web" "$plist"
+fi
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:GIN_MODE string release" "$plist"
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:PATH string /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" "$plist"
 /usr/libexec/PlistBuddy -c "Add :WorkingDirectory string $state_dir" "$plist"

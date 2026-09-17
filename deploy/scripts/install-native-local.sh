@@ -5,7 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$script_dir/native-common.sh"
 
 usage() {
-  echo "usage: $0 --binary PATH --config PATH --web-root PATH [--renderer PATH] [--user dst]" >&2
+  echo "usage: $0 --binary PATH --config PATH [--web-root PATH] [--renderer PATH] [--user dst]" >&2
   exit 64
 }
 
@@ -28,7 +28,11 @@ done
 [ "$(id -u)" = "0" ] || { echo "run as root" >&2; exit 77; }
 [ -f "$binary" ] && [ -x "$binary" ] || { echo "invalid DST Admin binary" >&2; exit 66; }
 [ -f "$config" ] || { echo "invalid local configuration" >&2; exit 66; }
-[ -f "$web_root/index.html" ] || { echo "web root does not contain index.html" >&2; exit 66; }
+if [ -n "$web_root" ]; then
+  [ -f "$web_root/index.html" ] || { echo "web root does not contain index.html" >&2; exit 66; }
+else
+  "$binary" -version | grep -Eq '"embeddedWebUI"[[:space:]]*:[[:space:]]*true' || { echo "binary has no embedded UI; pass --web-root" >&2; exit 66; }
+fi
 ensure_configured_steamcmd "$config"
 case "$service_user" in ""|*[!A-Za-z0-9_-]*) echo "invalid service user" >&2; exit 64 ;; esac
 id "$service_user" >/dev/null 2>&1 || { echo "service user does not exist: $service_user" >&2; exit 67; }
@@ -42,11 +46,13 @@ command -v tmux >/dev/null 2>&1 || { echo "tmux is required" >&2; exit 69; }
 
 install -d -o "$service_user" -g "$service_group" -m 0700 /var/lib/dst-admin
 install -d -o "$service_user" -g "$service_group" -m 0700 /var/lib/dst-admin/home
-install -d -o root -g root -m 0755 /usr/share/dst-admin/web
-cp -a "$web_root/." /usr/share/dst-admin/web/
-chown -R root:root /usr/share/dst-admin/web
-find /usr/share/dst-admin/web -type d -exec chmod 0755 {} +
-find /usr/share/dst-admin/web -type f -exec chmod 0644 {} +
+if [ -n "$web_root" ]; then
+  install -d -o root -g root -m 0755 /usr/share/dst-admin/web
+  cp -a "$web_root/." /usr/share/dst-admin/web/
+  chown -R root:root /usr/share/dst-admin/web
+  find /usr/share/dst-admin/web -type d -exec chmod 0755 {} +
+  find /usr/share/dst-admin/web -type f -exec chmod 0644 {} +
+fi
 
 install -o root -g root -m 0755 "$binary" /usr/local/bin/dst-admin
 install -o "$service_user" -g "$service_group" -m 0600 "$config" /var/lib/dst-admin/app.conf
@@ -59,6 +65,9 @@ sed \
   -e "s/^User=dst$/User=$service_user/" \
   -e "s/^Group=dst$/Group=$service_group/" \
   "$unit_template" >/etc/systemd/system/dst-admin-local.service
+if [ -n "$web_root" ]; then
+  sed -i '/^\[Service\]/a Environment=DST_ADMIN_WEB_ROOT=/usr/share/dst-admin/web' /etc/systemd/system/dst-admin-local.service
+fi
 chmod 0644 /etc/systemd/system/dst-admin-local.service
 systemctl daemon-reload
 echo "installed local mode; run: systemctl enable --now dst-admin-local"

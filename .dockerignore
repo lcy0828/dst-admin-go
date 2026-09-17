@@ -15,3 +15,11 @@ node_modules
 coverage
 *.log
 *.zip
+!internal/luajit/packages/*.zip
+.local-docs
+.codex-build
+Klei
+conf
+agent/conf
+deploy/docker/.env
+docs/research

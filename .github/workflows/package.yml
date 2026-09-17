@@ -1,0 +1,221 @@
+name: Package
+
+on:
+  push:
+    branches: [feature/v2-rebuild]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      frontend_ref:
+        description: 'Official frontend branch, tag, or commit'
+        default: master
+        type: string
+      publish_images:
+        description: 'Push tested images to GHCR'
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sources:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    outputs:
+      frontend: ${{ steps.source.outputs.frontend }}
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: lcy0828/dst-admin-vue
+          ref: ${{ inputs.frontend_ref || 'master' }}
+          path: .codex-build/frontend
+          ssh-key: ${{ secrets.FRONTEND_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .codex-build/frontend/package-lock.json
+      - name: Verify selected frontend
+        working-directory: .codex-build/frontend
+        run: |
+          npm ci
+          npm run lint -- --no-fix
+          npm test
+      - id: source
+        name: Pin source revisions
+        shell: bash
+        run: |
+          frontend=$(git -C .codex-build/frontend rev-parse HEAD)
+          version="preview-${GITHUB_SHA:0:12}"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then version="$GITHUB_REF_NAME"; fi
+          [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,79}$ ]]
+          echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Backend: $GITHUB_SHA; frontend: $frontend; version: $version" >> "$GITHUB_STEP_SUMMARY"
+
+  native:
+    needs: sources
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux-amd64
+          - runner: macos-14
+            platform: darwin-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: lcy0828/dst-admin-vue
+          ref: ${{ needs.sources.outputs.frontend }}
+          path: .codex-build/frontend
+          ssh-key: ${{ secrets.FRONTEND_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.25.13
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .codex-build/frontend/package-lock.json
+      - name: Build native package with embedded UI
+        env:
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+          FRONTEND_REF: ${{ needs.sources.outputs.frontend }}
+        run: >-
+          node deploy/scripts/build-native-release.mjs --version "$RELEASE_VERSION"
+          --platform "$RELEASE_PLATFORM" --frontend .codex-build/frontend
+          --frontend-ref "$FRONTEND_REF" --output dist
+      - name: Start packaged binary without external UI
+        env:
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+          FRONTEND_REF: ${{ needs.sources.outputs.frontend }}
+        run: >-
+          node deploy/scripts/smoke-package.mjs
+          --binary "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin"
+          --frontend-commit "$FRONTEND_REF" --duration 180
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dst-admin-${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  images:
+    needs: sources
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [all-in-one, control-plane, agent, dst-runtime]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        if: matrix.kind == 'all-in-one' || matrix.kind == 'control-plane'
+        with:
+          repository: lcy0828/dst-admin-vue
+          ref: ${{ needs.sources.outputs.frontend }}
+          path: .codex-build/frontend
+          ssh-key: ${{ secrets.FRONTEND_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name != 'workflow_dispatch' || inputs.publish_images
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build complete image
+        env:
+          IMAGE_KIND: ${{ matrix.kind }}
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+          FRONTEND_REF: ${{ needs.sources.outputs.frontend }}
+        run: >-
+          node deploy/scripts/build-image.mjs --kind "$IMAGE_KIND"
+          --tag "dst-admin-test:$IMAGE_KIND" --version "$RELEASE_VERSION"
+          --frontend .codex-build/frontend --frontend-ref "$FRONTEND_REF"
+          --cache-from "type=registry,ref=ghcr.io/${GITHUB_REPOSITORY,,}/$IMAGE_KIND:preview"
+          --cache-to type=inline --load
+      - name: Check embedded UI and startup
+        if: matrix.kind == 'all-in-one' || matrix.kind == 'control-plane'
+        env:
+          IMAGE_KIND: ${{ matrix.kind }}
+          FRONTEND_REF: ${{ needs.sources.outputs.frontend }}
+        run: >-
+          node deploy/scripts/smoke-package.mjs --image "dst-admin-test:$IMAGE_KIND"
+          --kind "$IMAGE_KIND" --frontend-commit "$FRONTEND_REF" --duration 180
+      - name: Check Agent startup and graceful shutdown
+        if: matrix.kind == 'agent'
+        run: node deploy/scripts/smoke-agent-image.mjs dst-admin-test:agent 180
+      - name: Check Runtime wrapper
+        if: matrix.kind == 'dst-runtime'
+        run: >-
+          docker run --rm --entrypoint /usr/local/bin/dst-runtime-wrapper
+          -e DST_ADMIN_VALIDATE_ONLY=1 -e DST_CLUSTER=Smoke -e DST_SHARD=Master
+          -e DST_CONF_DIR=. -e DST_UGC_DIRECTORY=/opt/dst/workshop/steamapps/workshop
+          dst-admin-test:dst-runtime
+      - name: Push tested images
+        if: github.event_name != 'workflow_dispatch' || inputs.publish_images
+        env:
+          IMAGE_KIND: ${{ matrix.kind }}
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+        shell: bash
+        run: |
+          target="ghcr.io/${GITHUB_REPOSITORY,,}/$IMAGE_KIND"
+          docker tag "dst-admin-test:$IMAGE_KIND" "$target:$RELEASE_VERSION"
+          docker push "$target:$RELEASE_VERSION"
+          docker tag "dst-admin-test:$IMAGE_KIND" "$target:sha-$GITHUB_SHA"
+          docker push "$target:sha-$GITHUB_SHA"
+          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
+            docker tag "dst-admin-test:$IMAGE_KIND" "$target:preview"
+            docker push "$target:preview"
+          fi
+          echo "Published $target:$RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [sources, native, images]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dst-admin-*
+          merge-multiple: true
+          path: release
+      - name: Publish versioned downloads in the main repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FRONTEND_REF: ${{ needs.sources.outputs.frontend }}
+        shell: bash
+        run: |
+          printf 'Backend: %s\nFrontend: %s\n\nWeb UI is embedded in the management binary.\n' "$GITHUB_SHA" "$FRONTEND_REF" > release-notes.md
+          args=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then args+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.sha256 \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md "${args[@]}"

@@ -14,8 +14,6 @@
   <dict>
     <key>DST_ADMIN_CONFIG</key>
     <string>__CONFIG__</string>
-    <key>DST_ADMIN_WEB_ROOT</key>
-    <string>__WEB_ROOT__</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
