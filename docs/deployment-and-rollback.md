@@ -29,7 +29,7 @@ node deploy/scripts/build-image.mjs --kind agent --tag dst-admin/agent:preview
 node deploy/scripts/build-image.mjs --kind dst-runtime --tag dst-admin/dst-runtime:preview
 ```
 
-默认从 GitHub 正式前端 `master` 获取最新已提交源码，并在本次构建中固定 SHA。前端下载、`npm ci` 或构建失败会让打包失败，不使用工作区旧 `dist/` 顶替。原生管理二进制使用 `webui` 构建标签内嵌页面，生成文件不会提交到 Git。
+默认从 [GitHub 前端仓库](https://github.com/lcy0828/dst-admin-vue)的 `master` 获取最新已提交源码，并在本次构建中固定 SHA。前端下载、`npm ci` 或构建失败会让打包失败，不使用工作区旧 `dist/` 顶替。原生管理二进制使用 `webui` 构建标签内嵌页面，生成文件不会提交到 Git。
 
 可选参数：
 

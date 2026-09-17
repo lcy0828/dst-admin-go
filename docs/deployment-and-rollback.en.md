@@ -24,7 +24,7 @@ node deploy/scripts/build-image.mjs --kind agent --tag dst-admin/agent:preview
 node deploy/scripts/build-image.mjs --kind dst-runtime --tag dst-admin/dst-runtime:preview
 ```
 
-The default source is the official GitHub frontend `master`. Its revision is fixed once per build. Fetch, `npm ci`, or frontend build failures abort packaging; an old working-directory `dist/` is never substituted. Native management binaries embed the UI using the `webui` build tag. Generated files are not committed.
+The default source is `master` in the [GitHub frontend repository](https://github.com/lcy0828/dst-admin-vue). Its revision is fixed once per build. Fetch, `npm ci`, or frontend build failures abort packaging; an old working-directory `dist/` is never substituted. Native management binaries embed the UI using the `webui` build tag. Generated files are not committed.
 
 | Option | Purpose |
 | --- | --- |

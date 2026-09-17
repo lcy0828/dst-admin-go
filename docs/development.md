@@ -11,7 +11,19 @@
 - Node.js 24 LTS、npm；使用仓库的 `package-lock.json` 执行 `npm ci`。
 - 本机 Runtime 需要 tmux、可读写的独立数据目录；Linux 下载游戏/模组需要 SteamCMD。
   依赖准备见[启动指南](startup-guide.md#linux-原生部署)。
-- 前后端放在相邻目录，后端 `feature/v2-rebuild`，前端 `master`：
+- 前后端放在相邻目录：[后端](https://github.com/lcy0828/dst-admin-go)使用 `feature/v2-rebuild`，[前端](https://github.com/lcy0828/dst-admin-vue)使用 `master`。
+
+从 GitHub 获取源码：
+
+```bash
+mkdir -p workspace
+cd workspace
+git clone --branch feature/v2-rebuild https://github.com/lcy0828/dst-admin-go.git
+git clone --branch master https://github.com/lcy0828/dst-admin-vue.git dst-admin-vue-v3
+cd dst-admin-go
+```
+
+下面的示例使用以下目录结构：
 
 ```text
 workspace/

@@ -10,7 +10,19 @@ Development runs the Go API and Vite separately. The paths below keep configurat
 - Use the Go toolchain specified in `go.mod` (currently `go1.25.13`). The management service needs CGO and a C compiler.
 - Use Node.js 24 LTS and npm; run `npm ci` with the repository's `package-lock.json`.
 - The local Runtime needs tmux and separate writable data directories. Linux game/mod downloads need SteamCMD. See [Linux prerequisites](startup-guide.en.md#linux-native-deployment).
-- Place the repositories side by side: backend `feature/v2-rebuild`, frontend `master`.
+- Place the repositories side by side: [backend](https://github.com/lcy0828/dst-admin-go) on `feature/v2-rebuild`, [frontend](https://github.com/lcy0828/dst-admin-vue) on `master`.
+
+Clone the source from GitHub:
+
+```bash
+mkdir -p workspace
+cd workspace
+git clone --branch feature/v2-rebuild https://github.com/lcy0828/dst-admin-go.git
+git clone --branch master https://github.com/lcy0828/dst-admin-vue.git dst-admin-vue-v3
+cd dst-admin-go
+```
+
+The examples below use this directory layout:
 
 ```text
 workspace/
