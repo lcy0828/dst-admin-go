@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="410" viewBox="0 0 1200 410" role="img" aria-labelledby="title description">
+  <title id="title">Star history · 1 Star</title>
+  <desc id="description">Based on current stargazers. 2025-04-04 — 2026-09-17. 1 Star.</desc>
+  <defs><linearGradient id="fill" x2="0" y2="1"><stop stop-color="#e7b76e" stop-opacity=".25"/><stop offset="1" stop-color="#e7b76e" stop-opacity=".02"/></linearGradient></defs>
+  <rect x=".5" y=".5" width="1199" height="409" rx="18" fill="#17251e" stroke="#384c3e"/>
+  <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif">
+    <text x="42" y="53" fill="#f5f1e6" font-size="25" font-weight="650">Star history</text>
+    <text x="42" y="84" fill="#b9c4b8" font-size="16">Every star is another adventurer along the way.</text>
+    <text x="1158" y="58" text-anchor="end" fill="#e7b76e" font-size="32" font-weight="700">1 <tspan font-size="16">Star</tspan></text>
+    <g fill="#b9c4b8" font-size="14"><path d="M76 310.0H1138" stroke="#344638" stroke-dasharray="4 7"/><text x="56" y="315.0" text-anchor="end">0</text><path d="M76 222.0H1138" stroke="#344638" stroke-dasharray="4 7"/><text x="56" y="227.0" text-anchor="end">2</text><path d="M76 134.0H1138" stroke="#344638" stroke-dasharray="4 7"/><text x="56" y="139.0" text-anchor="end">4</text><text x="76.0" y="339" text-anchor="start">2025-04-04</text><text x="608.0" y="339" text-anchor="middle">2025-12-26</text><text x="1138.0" y="339" text-anchor="end">2026-09-17</text></g>
+    <path d="M76.0,310.0 L80.0,310.0 L80.0,266.0 L1138.0,266.0 L1138,310 L76,310 Z" fill="url(#fill)"/>
+    <path d="M76.0,310.0 L80.0,310.0 L80.0,266.0 L1138.0,266.0" fill="none" stroke="#e7b76e" stroke-width="3" stroke-linejoin="round"/>
+    <circle cx="1138" cy="266.0" r="5" fill="#e7b76e" stroke="#17251e" stroke-width="3"/>
+    <text x="42" y="384" fill="#b9c4b8" font-size="13">Based on current stargazers</text>
+    <text x="1158" y="384" text-anchor="end" fill="#b9c4b8" font-size="13">Updated 2026-09-17 UTC</text>
+  </g>
+</svg>

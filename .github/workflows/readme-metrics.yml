@@ -1,0 +1,59 @@
+name: README metrics
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/scripts/readme_metrics.py'
+      - '.github/workflows/readme-metrics.yml'
+  workflow_run:
+    workflows: ['Backend CI', 'Package']
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: readme-metrics
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: >-
+      (github.event_name != 'push' || github.ref_name == github.event.repository.default_branch) &&
+      (github.event_name != 'workflow_run' ||
+        (github.event.workflow_run.event == 'push' &&
+         github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+         github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Render repository statistics
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/readme_metrics.py
+      - name: Publish updated assets
+        shell: bash
+        run: |
+          git add docs/assets/readme/metrics/
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'docs: refresh repository metrics'
+          git pull --rebase origin "$METRICS_BRANCH"
+          git push origin "HEAD:$METRICS_BRANCH"
+        env:
+          METRICS_BRANCH: ${{ github.event.repository.default_branch }}

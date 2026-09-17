@@ -2,6 +2,13 @@
   <img src="docs/assets/readme/banner.svg" alt="DST Admin — 饥荒联机版服务器管理面板" width="100%">
 </p>
 
+<p align="center">
+  <a href="https://github.com/lcy0828/dst-admin-go/stargazers"><img src="docs/assets/readme/metrics/stars.svg" alt="GitHub Stars"></a>
+  <a href="https://github.com/lcy0828/dst-admin-go/forks"><img src="docs/assets/readme/metrics/forks.svg" alt="GitHub Forks"></a>
+  <a href="https://github.com/lcy0828/dst-admin-go/actions/workflows/ci.yml"><img src="docs/assets/readme/metrics/ci.svg" alt="CI"></a>
+  <a href="https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml"><img src="docs/assets/readme/metrics/package.svg" alt="Package"></a>
+</p>
+
 <p align="center"><strong>从第一次开服，到每一天的冒险。</strong></p>
 <p align="center">
   在浏览器里管理《饥荒联机版》的世界、模组、玩家与存档。<br>
@@ -106,3 +113,9 @@ docker compose --env-file .env -f compose.all-in-one.yaml up -d
 
 - **开服与维护**：[游戏服务端安装](docs/game-installation-management.md) · [LuaJIT2 安装](docs/luajit-installation.md) · [升级与回滚](docs/deployment-and-rollback.md)
 - **参与开发**：[开发指南](docs/development.md) · [前端源码](https://github.com/lcy0828/dst-admin-vue) · [问题反馈](https://github.com/lcy0828/dst-admin-go/issues)
+
+## Star 趋势
+
+<p align="center">
+  <a href="https://github.com/lcy0828/dst-admin-go/stargazers"><img src="docs/assets/readme/metrics/stars.zh.svg" alt="GitHub Star 数量随时间的变化" width="100%"></a>
+</p>

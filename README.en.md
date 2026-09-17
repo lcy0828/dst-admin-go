@@ -2,6 +2,13 @@
   <img src="docs/assets/readme/banner.svg" alt="DST Admin — Don't Starve Together server management" width="100%">
 </p>
 
+<p align="center">
+  <a href="https://github.com/lcy0828/dst-admin-go/stargazers"><img src="docs/assets/readme/metrics/stars.svg" alt="GitHub Stars"></a>
+  <a href="https://github.com/lcy0828/dst-admin-go/forks"><img src="docs/assets/readme/metrics/forks.svg" alt="GitHub Forks"></a>
+  <a href="https://github.com/lcy0828/dst-admin-go/actions/workflows/ci.yml"><img src="docs/assets/readme/metrics/ci.svg" alt="CI"></a>
+  <a href="https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml"><img src="docs/assets/readme/metrics/package.svg" alt="Package"></a>
+</p>
+
 <p align="center"><strong>From your first server to your next adventure.</strong></p>
 <p align="center">
   Manage Don't Starve Together worlds, mods, players, and saves in your browser.<br>
@@ -106,3 +113,9 @@ For remote machines running native game processes, use the native Agent package.
 
 - **Run and maintain**: [Game server installation](docs/game-installation-management.en.md) · [LuaJIT2 installation](docs/luajit-installation.en.md) · [Upgrades and rollback](docs/deployment-and-rollback.en.md)
 - **Contribute**: [Development guide](docs/development.en.md) · [Frontend source](https://github.com/lcy0828/dst-admin-vue) · [Issue tracker](https://github.com/lcy0828/dst-admin-go/issues)
+
+## Star history
+
+<p align="center">
+  <a href="https://github.com/lcy0828/dst-admin-go/stargazers"><img src="docs/assets/readme/metrics/stars.en.svg" alt="GitHub Stars over time" width="100%"></a>
+</p>
