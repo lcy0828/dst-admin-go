@@ -58,6 +58,9 @@ export async function withSources(options, action) {
         !['docs', 'design-system', '.github', 'AGENTS.md', 'README.md', 'README.en.md'].includes(name) && !name.startsWith('.env'))
       const archive = execFileSync('git', ['archive', '--format=tar', frontendSource.commit, '--', ...inputs], { cwd: checkout, maxBuffer: 128 * 1024 * 1024 })
       execFileSync('tar', ['-xf', '-', '-C', frontend], { input: archive })
+      // Docker receives stage as its context. Remove the temporary clone so
+      // Git metadata, checkout credentials and excluded docs cannot be sent.
+      if (!options.frontend) await rm(checkout, { recursive: true, force: true })
       await readFile(path.join(frontend, 'package-lock.json'))
       console.log(`Frontend: ${frontendSource.commit} (${ref})`)
     }
