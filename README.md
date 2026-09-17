@@ -21,6 +21,7 @@
 <p align="center">
   <a href="#docker-快速安装">快速安装</a> ·
   <a href="#界面预览">界面预览</a> ·
+  <a href="#动态演示">动态演示</a> ·
   <a href="docs/startup-guide.md">部署指南</a> ·
   <a href="docs/luajit-installation.md">LuaJIT2</a> ·
   <a href="https://github.com/lcy0828/dst-admin-go/issues">反馈问题</a>
@@ -39,7 +40,7 @@
 | **配置世界与模组**<br>调整房间和世界设置，管理模组的启用、配置与更新。 | **备份与恢复存档**<br>创建备份、导入已有存档，需要时恢复世界。 |
 | **接入远程机器**<br>通过 Agent 管理其他主机，查看各节点的安装与资源状态。 | **掌握游戏动态**<br>查看在线玩家、季节、日志与聊天记录，执行控制台命令。 |
 
-镜像和原生安装包均内置管理页面。默认中文，可切换英文与深色模式。
+镜像和原生安装包均内置管理页面。默认中文，支持英文、多套配色与深色模式；动态天气可跟随游戏中的季节、昼夜和降水，也可手动预览。
 
 ## 界面预览
 
@@ -47,18 +48,50 @@
 
 <table>
   <tr>
-    <td width="50%" valign="top"><strong>创建管理员</strong><br><a href="docs/assets/readme/setup.zh.webp"><img src="docs/assets/readme/setup.zh.webp" alt="创建管理员" width="100%"></a><br><sub>首次启动创建自己的管理账户。</sub></td>
-    <td width="50%" valign="top"><strong>游戏服务端管理</strong><br><a href="docs/assets/readme/game.zh.webp"><img src="docs/assets/readme/game.zh.webp" alt="游戏服务端管理" width="100%"></a><br><sub>查看安装状态，安装、更新或接入已有服务端。</sub></td>
+    <td width="50%" valign="top"><strong>浏览创意工坊</strong><br><a href="docs/assets/readme/workshop.zh.webp"><img src="docs/assets/readme/workshop.zh.webp" alt="浏览创意工坊" width="100%"></a><br><sub>查看模组封面与简介，搜索、下载并添加到房间。</sub></td>
+    <td width="50%" valign="top"><strong>房间与世界模组</strong><br><a href="docs/assets/readme/mods.zh.webp"><img src="docs/assets/readme/mods.zh.webp" alt="房间与世界模组" width="100%"></a><br><sub>查看版本和世界启用状态，统一或分别配置模组。</sub></td>
   </tr>
   <tr>
+    <td width="50%" valign="top"><strong>游戏服务端管理</strong><br><a href="docs/assets/readme/game.zh.webp"><img src="docs/assets/readme/game.zh.webp" alt="游戏服务端管理" width="100%"></a><br><sub>查看安装状态，安装、更新或接入已有服务端。</sub></td>
     <td width="50%" valign="top"><strong>LuaJIT2 安装</strong><br><a href="docs/assets/readme/luajit.zh.webp"><img src="docs/assets/readme/luajit.zh.webp" alt="LuaJIT2 安装" width="100%"></a><br><sub>选择版本，检查上游更新，按需导入安装包。</sub></td>
-    <td width="50%" valign="top"><strong>房间与世界模组</strong><br><a href="docs/assets/readme/mods.zh.webp"><img src="docs/assets/readme/mods.zh.webp" alt="房间与世界模组" width="100%"></a><br><sub>查看各世界的启用状态，统一或分别配置模组。</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><strong>创建管理员</strong><br><a href="docs/assets/readme/setup.zh.webp"><img src="docs/assets/readme/setup.zh.webp" alt="创建管理员" width="100%"></a><br><sub>首次启动创建自己的管理账户。</sub></td>
+    <td width="50%" valign="top"><strong>主题配色与深色模式</strong><br><a href="docs/assets/readme/themes.zh.webp"><img src="docs/assets/readme/themes.zh.webp" alt="主题配色与深色模式" width="100%"></a><br><sub>浅色、深色与配色预设，也支持自定义主题色。</sub></td>
   </tr>
   <tr>
     <td width="50%" valign="top"><strong>存档备份与恢复</strong><br><a href="docs/assets/readme/backups.zh.webp"><img src="docs/assets/readme/backups.zh.webp" alt="存档备份与恢复" width="100%"></a><br><sub>查看完整房间备份，按需恢复或导入存档。</sub></td>
     <td width="50%" valign="top"><strong>玩家管理</strong><br><a href="docs/assets/readme/players.zh.webp"><img src="docs/assets/readme/players.zh.webp" alt="玩家管理" width="100%"></a><br><sub>查看角色、在线状态与游玩记录。</sub></td>
   </tr>
 </table>
+
+模组名称与封面来自对应的 Steam Workshop 页面，见[素材来源](docs/assets/readme/CREDITS.md)。
+
+## 动态演示
+
+真实界面录制，使用演示任务和版本数据。
+
+<details open>
+<summary><strong>更新模组并重启世界</strong></summary>
+
+确认更新 → 下载模组 → 查看 Master / Caves 重启进度 → 世界恢复运行。
+
+<p align="center">
+  <a href="docs/assets/readme/mod-update.zh.webp"><img src="docs/assets/readme/mod-update.zh.webp" alt="更新模组并重启世界" width="100%"></a>
+</p>
+
+</details>
+
+<details open>
+<summary><strong>主题切换与动态天气</strong></summary>
+
+切换深色模式，预览季节与昼夜光效、下雨和下雪；可调节强度、暂停或结束预览。
+
+<p align="center">
+  <a href="docs/assets/readme/weather.zh.webp"><img src="docs/assets/readme/weather.zh.webp" alt="主题切换与动态天气" width="100%"></a>
+</p>
+
+</details>
 
 ## Docker 快速安装
 
