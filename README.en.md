@@ -21,6 +21,7 @@
 <p align="center">
   <a href="#docker-quick-start">Quick start</a> ·
   <a href="#screenshots">Screenshots</a> ·
+  <a href="#animated-demos">Animated demos</a> ·
   <a href="docs/startup-guide.en.md">Deployment guide</a> ·
   <a href="docs/luajit-installation.en.md">LuaJIT2</a> ·
   <a href="https://github.com/lcy0828/dst-admin-go/issues">Report an issue</a>
@@ -39,7 +40,7 @@
 | **Configure worlds and mods**<br>Edit room and world settings. Enable, configure, and update mods. | **Back up and restore saves**<br>Create backups, import existing saves, and restore your worlds when needed. |
 | **Connect remote machines**<br>Manage other hosts through Agents and check each node's installations and resources. | **See what's happening**<br>Check players, seasons, logs, and chat. Run commands from the console. |
 
-Images and native packages include the web UI. Chinese is the default; English and dark mode are available.
+Images and native packages include the web UI. Chinese is the default, with English, color presets, and dark mode available. Animated weather can follow in-game seasons, time of day, and precipitation, or be previewed manually.
 
 ## Screenshots
 
@@ -47,18 +48,50 @@ Actual application screens with demo data. Click an image to enlarge.
 
 <table>
   <tr>
-    <td width="50%" valign="top"><strong>Create an administrator</strong><br><a href="docs/assets/readme/setup.en.webp"><img src="docs/assets/readme/setup.en.webp" alt="Create an administrator" width="100%"></a><br><sub>Create your administrator account on first launch.</sub></td>
-    <td width="50%" valign="top"><strong>Game server management</strong><br><a href="docs/assets/readme/game.en.webp"><img src="docs/assets/readme/game.en.webp" alt="Game server management" width="100%"></a><br><sub>Check installations, update the game, or connect an existing server.</sub></td>
+    <td width="50%" valign="top"><strong>Browse the Workshop</strong><br><a href="docs/assets/readme/workshop.en.webp"><img src="docs/assets/readme/workshop.en.webp" alt="Browse the Workshop" width="100%"></a><br><sub>Explore mod artwork and descriptions, download mods, and add them to a room.</sub></td>
+    <td width="50%" valign="top"><strong>Room and world mods</strong><br><a href="docs/assets/readme/mods.en.webp"><img src="docs/assets/readme/mods.en.webp" alt="Room and world mods" width="100%"></a><br><sub>Check versions and enabled worlds, with shared or per-world configuration.</sub></td>
   </tr>
   <tr>
+    <td width="50%" valign="top"><strong>Game server management</strong><br><a href="docs/assets/readme/game.en.webp"><img src="docs/assets/readme/game.en.webp" alt="Game server management" width="100%"></a><br><sub>Check installations, update the game, or connect an existing server.</sub></td>
     <td width="50%" valign="top"><strong>LuaJIT2 installation</strong><br><a href="docs/assets/readme/luajit.en.webp"><img src="docs/assets/readme/luajit.en.webp" alt="LuaJIT2 installation" width="100%"></a><br><sub>Choose a version, check upstream releases, or import a package.</sub></td>
-    <td width="50%" valign="top"><strong>Room and world mods</strong><br><a href="docs/assets/readme/mods.en.webp"><img src="docs/assets/readme/mods.en.webp" alt="Room and world mods" width="100%"></a><br><sub>Manage enabled mods and shared or per-world configuration.</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><strong>Create an administrator</strong><br><a href="docs/assets/readme/setup.en.webp"><img src="docs/assets/readme/setup.en.webp" alt="Create an administrator" width="100%"></a><br><sub>Create your administrator account on first launch.</sub></td>
+    <td width="50%" valign="top"><strong>Color themes and dark mode</strong><br><a href="docs/assets/readme/themes.en.webp"><img src="docs/assets/readme/themes.en.webp" alt="Color themes and dark mode" width="100%"></a><br><sub>Choose light or dark mode, a color preset, or your own theme color.</sub></td>
   </tr>
   <tr>
     <td width="50%" valign="top"><strong>Save backups and restore</strong><br><a href="docs/assets/readme/backups.en.webp"><img src="docs/assets/readme/backups.en.webp" alt="Save backups and restore" width="100%"></a><br><sub>Browse room backups, restore a world, or import saves.</sub></td>
     <td width="50%" valign="top"><strong>Player management</strong><br><a href="docs/assets/readme/players.en.webp"><img src="docs/assets/readme/players.en.webp" alt="Player management" width="100%"></a><br><sub>View characters, player presence, and play history.</sub></td>
   </tr>
 </table>
+
+Mod names and artwork come from their Steam Workshop pages. See [image credits](docs/assets/readme/CREDITS.md).
+
+## Animated demos
+
+Recorded in the current UI using demo task and version data.
+
+<details open>
+<summary><strong>Update mods and restart worlds</strong></summary>
+
+Confirm the update → download mods → follow Master / Caves restart progress → worlds return to running.
+
+<p align="center">
+  <a href="docs/assets/readme/mod-update.en.webp"><img src="docs/assets/readme/mod-update.en.webp" alt="Update mods and restart worlds" width="100%"></a>
+</p>
+
+</details>
+
+<details open>
+<summary><strong>Theme switching and animated weather</strong></summary>
+
+Switch to dark mode and preview seasonal lighting, time of day, rain, and snow. Adjust intensity, pause, or end the preview.
+
+<p align="center">
+  <a href="docs/assets/readme/weather.en.webp"><img src="docs/assets/readme/weather.en.webp" alt="Theme switching and animated weather" width="100%"></a>
+</p>
+
+</details>
 
 ## Docker quick start
 
