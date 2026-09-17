@@ -19,7 +19,11 @@ func TestV2SessionNameRoundTripAvoidsUnderscoreCollisions(t *testing.T) {
 
 func TestConsoleSendArgumentsKeepLuaAsOneLiteralArgument(t *testing.T) {
 	command := `dst_admin_custom("; ' 中文 Enter")`
-	want := []string{"send-keys", "-t", "=managed:0.0", "-l", "--", command, ";", "send-keys", "-t", "=managed:0.0", "Enter"}
+	want := []string{
+		"send-keys", "-t", "=managed:0.0", "C-q", "C-u", ";",
+		"send-keys", "-t", "=managed:0.0", "-l", "--", command, ";",
+		"send-keys", "-t", "=managed:0.0", "Enter",
+	}
 	if got := consoleSendArguments("=managed:0.0", command); !reflect.DeepEqual(got, want) {
 		t.Fatalf("arguments=%#v", got)
 	}

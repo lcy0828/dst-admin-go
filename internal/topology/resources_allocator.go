@@ -112,7 +112,7 @@ func (s *Store) ReservePorts(request PortAllocationRequest) (PortAllocation, err
 		candidate := item.Preferred
 		for candidate <= 65535 && reservationPortConflict(records, allocation.Reservations, request.RoomID, item, profile, candidate) {
 			if item.Strict {
-				return rollback(&ResourceConflictError{Preflight: ResourcePreflight{Ready: false, Conflicts: []ResourceConflict{{Code: "UDP_PORT_CONFLICT", ScopeID: profile.ScopeID, Port: candidate, TargetID: request.TargetID, RoomID: request.RoomID, WorldID: item.WorldID, Message: "请求的 UDP 端口已被当前网络作用域占用"}}}})
+				return rollback(&ResourceConflictError{Preflight: ResourcePreflight{Ready: false, Warnings: []string{}, Advisories: []ResourceConflict{}, Conflicts: []ResourceConflict{{Code: "UDP_PORT_CONFLICT", ScopeID: profile.ScopeID, Port: candidate, TargetID: request.TargetID, RoomID: request.RoomID, WorldID: item.WorldID, Message: "请求的 UDP 端口已被当前网络作用域占用"}}}})
 			}
 			candidate++
 		}

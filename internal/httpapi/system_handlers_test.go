@@ -1,15 +1,29 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
 
+	"dont/internal/agents"
 	"dont/internal/systemsettings"
 	"dont/internal/systemstatus"
 
 	"github.com/gin-gonic/gin"
 )
+
+type emptySystemAgentCatalog struct{}
+
+func (emptySystemAgentCatalog) Agents() ([]agents.Agent, bool, error) {
+	return []agents.Agent{}, true, nil
+}
+func (emptySystemAgentCatalog) Agent(string) (agents.Agent, error) {
+	return agents.Agent{}, agents.ErrAgentNotFound
+}
+func (emptySystemAgentCatalog) RefreshSystemInfo(context.Context, string) (agents.Agent, error) {
+	return agents.Agent{}, agents.ErrAgentNotFound
+}
 
 func TestSystemStatusAndSettingsHTTP(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -19,7 +33,12 @@ func TestSystemStatusAndSettingsHTTP(t *testing.T) {
 	}
 	router := gin.New()
 	v2 := router.Group("/api/v2")
-	NewSystemStatusHandler(systemstatus.NewService(systemstatus.NewMemoryProvider())).Register(v2)
+	statusService := systemstatus.NewService(systemstatus.NewMemoryProvider())
+	nodeResources, err := systemstatus.NewNodeResourceService(statusService, emptySystemAgentCatalog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	NewSystemStatusHandler(statusService, nodeResources).Register(v2)
 	NewSystemSettingsHandler(settingsService).Register(v2)
 
 	response := performJSON(router, http.MethodGet, "/api/v2/system/status", nil, nil, "")
@@ -30,6 +49,21 @@ func TestSystemStatusAndSettingsHTTP(t *testing.T) {
 	if application := responseData(t, response)["application"].(map[string]interface{}); application["version"] == "" || application["commit"] == "" {
 		t.Fatalf("system status did not expose build identity: %s", response.Body.String())
 	}
+	response = performJSON(router, http.MethodGet, "/api/v2/system/resources?targetId=local", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	resources := responseData(t, response)
+	if resources["total"] != float64(1) || resources["items"].([]interface{})[0].(map[string]interface{})["targetId"] != "local" {
+		t.Fatalf("unexpected node resources: %s", response.Body.String())
+	}
+	response = performJSON(router, http.MethodGet, "/api/v2/system/resources?targetId=local&refresh=true", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("live resources must not be cached by the browser")
+	}
+	response = performJSON(router, http.MethodGet, "/api/v2/system/resources?refresh=invalid", nil, nil, "")
+	assertAPIError(t, response, http.StatusBadRequest, "INVALID_REFRESH")
+	response = performJSON(router, http.MethodGet, "/api/v2/system/resources?targetId=agent:missing", nil, nil, "")
+	assertAPIError(t, response, http.StatusNotFound, "NODE_RESOURCE_NOT_FOUND")
 	response = performJSON(router, http.MethodGet, "/api/v2/system/settings", nil, nil, "")
 	assertStatus(t, response, http.StatusOK)
 	if response.Header().Get("Cache-Control") != "no-store" || strings.Contains(response.Body.String(), "test-steam-api-key") {

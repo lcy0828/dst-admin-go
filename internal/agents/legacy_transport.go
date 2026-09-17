@@ -7,16 +7,37 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"dont/internal/operationprogress"
+	"dont/internal/requesttiming"
 	legacyserver "dont/server"
 	"dont/shared"
 )
 
-type LegacyTransport struct{ server func() *legacyserver.Server }
+type LegacyTransport struct {
+	server       func() *legacyserver.Server
+	passiveMu    sync.Mutex
+	passiveLocks map[string]*sync.Mutex
+}
 
 func NewLegacyTransport(provider func() *legacyserver.Server) *LegacyTransport {
-	return &LegacyTransport{server: provider}
+	return &LegacyTransport{server: provider, passiveLocks: make(map[string]*sync.Mutex)}
+}
+
+func (t *LegacyTransport) passiveLock(agentID string) *sync.Mutex {
+	t.passiveMu.Lock()
+	defer t.passiveMu.Unlock()
+	if t.passiveLocks == nil {
+		t.passiveLocks = make(map[string]*sync.Mutex)
+	}
+	lock := t.passiveLocks[agentID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		t.passiveLocks[agentID] = lock
+	}
+	return lock
 }
 
 func (t *LegacyTransport) current() *legacyserver.Server {
@@ -49,7 +70,8 @@ func (t *LegacyTransport) Execute(ctx context.Context, agentID string, action Ac
 	}
 	switch action {
 	case ActionSystemRefresh:
-		before := legacyReportTimestamp(server.GetAllAgentInfo()[agentID])
+		info, _ := server.GetAgentInfo(agentID)
+		before := legacySystemReportTimestamp(info)
 		if err := server.RequestPassiveReport(agentID, "system_info", map[string]interface{}{}); err != nil {
 			return ExecutionResult{ExitCode: 1}, err
 		}
@@ -60,18 +82,18 @@ func (t *LegacyTransport) Execute(ctx context.Context, agentID string, action Ac
 			case <-ctx.Done():
 				return ExecutionResult{ExitCode: 1}, ctx.Err()
 			case <-ticker.C:
-				info, exists := server.GetAllAgentInfo()[agentID]
+				info, exists := server.GetAgentInfo(agentID)
 				if !exists {
 					return ExecutionResult{ExitCode: 1}, ErrAgentOffline
 				}
-				if after := legacyReportTimestamp(info); after > before {
+				if after := legacySystemReportTimestamp(info); after > before {
 					encoded, _ := json.Marshal(info)
 					return ExecutionResult{RemoteID: "report-" + agentID, Output: string(encoded), ExitCode: 0}, nil
 				}
 			}
 		}
 	case ActionDiskInspect:
-		info, exists := server.GetAllAgentInfo()[agentID]
+		info, exists := server.GetAgentInfo(agentID)
 		if !exists {
 			return ExecutionResult{ExitCode: 1}, ErrAgentOffline
 		}
@@ -110,6 +132,10 @@ func (t *LegacyTransport) Execute(ctx context.Context, agentID string, action Ac
 }
 
 func (t *LegacyTransport) ExecuteShard(ctx context.Context, agentID string, request shared.ShardOperationRequest, timeout int) (ShardExecutionResult, error) {
+	defer requesttiming.Start(ctx, "agent."+string(request.Action))()
+	if err := ctx.Err(); err != nil {
+		return ShardExecutionResult{}, err
+	}
 	server := t.current()
 	if server == nil {
 		return ShardExecutionResult{}, ErrUnavailable
@@ -118,35 +144,41 @@ func (t *LegacyTransport) ExecuteShard(ctx context.Context, agentID string, requ
 	if err != nil {
 		return ShardExecutionResult{}, err
 	}
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ShardExecutionResult{RemoteID: remoteID}, ctx.Err()
-		case <-ticker.C:
-			command, resultErr := server.GetCommandResult(remoteID)
-			if resultErr != nil || command.Status == "pending" || command.Status == "received" {
-				continue
-			}
-			result := ShardExecutionResult{RemoteID: remoteID}
-			if strings.TrimSpace(command.Output) != "" {
-				if decodeErr := json.Unmarshal([]byte(command.Output), &result.Result); decodeErr != nil {
-					return result, fmt.Errorf("解析 Agent 分片操作结果: %w", decodeErr)
-				}
-			}
-			if !command.Success || command.Status == "failed" {
-				return result, errors.New(nonEmpty(command.ErrorMsg, "Agent 分片操作失败"))
-			}
-			if result.Result.ProtocolVersion != shared.ShardOperationProtocolVersion || result.Result.OperationID != request.OperationID {
-				return result, errors.New("Agent 返回的分片操作结果无效")
-			}
-			return result, nil
+	command, err := server.WaitCommandResult(ctx, remoteID, func(progress shared.CommandProgressPayload) {
+		reportCommandProgress(ctx, progress)
+	})
+	result := ShardExecutionResult{RemoteID: remoteID}
+	if err != nil {
+		return result, err
+	}
+	if strings.TrimSpace(command.Output) != "" {
+		if decodeErr := json.Unmarshal([]byte(command.Output), &result.Result); decodeErr != nil {
+			return result, fmt.Errorf("解析 Agent 分片操作结果: %w", decodeErr)
 		}
 	}
+	if !command.Success || command.Status == "failed" {
+		return result, errors.New(nonEmpty(command.ErrorMsg, "Agent 分片操作失败"))
+	}
+	if result.Result.ProtocolVersion != shared.ShardOperationProtocolVersion || result.Result.OperationID != request.OperationID {
+		return result, errors.New("Agent 返回的分片操作结果无效")
+	}
+	return result, nil
+}
+
+func reportCommandProgress(ctx context.Context, progress shared.CommandProgressPayload) {
+	operationprogress.Report(ctx, operationprogress.Update{
+		Stage: progress.Stage, Percent: progress.Percent, Message: progress.Message,
+		WorkshopID: progress.WorkshopID, CurrentItem: progress.CurrentItem, TotalItems: progress.TotalItems,
+		Items:        progress.Items,
+		CurrentBytes: progress.CurrentBytes, TotalBytes: progress.TotalBytes, BytesPerSecond: progress.BytesPerSecond,
+	})
 }
 
 func (t *LegacyTransport) ExecuteRuntime(ctx context.Context, agentID string, request shared.RuntimeOperationRequest, timeout int) (RuntimeExecutionResult, error) {
+	defer requesttiming.Start(ctx, "agent."+string(request.Action))()
+	if err := ctx.Err(); err != nil {
+		return RuntimeExecutionResult{}, err
+	}
 	server := t.current()
 	if server == nil {
 		return RuntimeExecutionResult{}, ErrUnavailable
@@ -155,28 +187,58 @@ func (t *LegacyTransport) ExecuteRuntime(ctx context.Context, agentID string, re
 	if err != nil {
 		return RuntimeExecutionResult{}, err
 	}
+	command, err := server.WaitCommandResult(ctx, remoteID, func(progress shared.CommandProgressPayload) {
+		reportCommandProgress(ctx, progress)
+	})
+	result := RuntimeExecutionResult{RemoteID: remoteID}
+	if err != nil {
+		return result, err
+	}
+	if strings.TrimSpace(command.Output) != "" {
+		if decodeErr := json.Unmarshal([]byte(command.Output), &result.Result); decodeErr != nil {
+			return result, fmt.Errorf("解析 Agent Runtime 操作结果: %w", decodeErr)
+		}
+	}
+	if !command.Success || command.Status == "failed" {
+		return result, errors.New(nonEmpty(command.ErrorMsg, "Agent Runtime 操作失败"))
+	}
+	if result.Result.ProtocolVersion != shared.RuntimeOperationProtocolVersion || result.Result.OperationID != request.OperationID {
+		return result, errors.New("Agent 返回的 Runtime 操作结果无效")
+	}
+	return result, nil
+}
+
+func (t *LegacyTransport) ExecuteUpgrade(ctx context.Context, agentID string, request shared.AgentUpgradeRequest, timeout int) (AgentUpgradeExecutionResult, error) {
+	server := t.current()
+	if server == nil {
+		return AgentUpgradeExecutionResult{}, ErrUnavailable
+	}
+	remoteID, err := server.SendAgentUpgrade(agentID, request, timeout)
+	if err != nil {
+		return AgentUpgradeExecutionResult{}, err
+	}
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return RuntimeExecutionResult{RemoteID: remoteID}, ctx.Err()
+			return AgentUpgradeExecutionResult{RemoteID: remoteID}, ctx.Err()
 		case <-ticker.C:
 			command, resultErr := server.GetCommandResult(remoteID)
 			if resultErr != nil || command.Status == "pending" || command.Status == "received" {
 				continue
 			}
-			result := RuntimeExecutionResult{RemoteID: remoteID}
+			result := AgentUpgradeExecutionResult{RemoteID: remoteID}
 			if strings.TrimSpace(command.Output) != "" {
 				if decodeErr := json.Unmarshal([]byte(command.Output), &result.Result); decodeErr != nil {
-					return result, fmt.Errorf("解析 Agent Runtime 操作结果: %w", decodeErr)
+					return result, fmt.Errorf("解析 Agent 升级结果: %w", decodeErr)
 				}
 			}
 			if !command.Success || command.Status == "failed" {
-				return result, errors.New(nonEmpty(command.ErrorMsg, "Agent Runtime 操作失败"))
+				return result, errors.New(nonEmpty(command.ErrorMsg, "Agent 升级失败"))
 			}
-			if result.Result.ProtocolVersion != shared.RuntimeOperationProtocolVersion || result.Result.OperationID != request.OperationID {
-				return result, errors.New("Agent 返回的 Runtime 操作结果无效")
+			if result.Result.ProtocolVersion != shared.AgentUpgradeProtocolVersion || result.Result.ReleaseID != request.ReleaseID {
+				return result, errors.New("Agent 返回的升级结果无效")
 			}
 			return result, nil
 		}
@@ -188,7 +250,14 @@ func (t *LegacyTransport) Inventory(ctx context.Context, agentID string, config 
 	if server == nil {
 		return shared.RuntimeInventoryReport{}, ErrUnavailable
 	}
-	before := legacyReportTimestamp(server.GetAllAgentInfo()[agentID])
+	lock := t.passiveLock(agentID)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := ctx.Err(); err != nil {
+		return shared.RuntimeInventoryReport{}, err
+	}
+	info, _ := server.GetAgentInfo(agentID)
+	before := legacyInventoryReportTimestamp(info)
 	params := map[string]interface{}{
 		"installation_id": config.InstallationID, "display_name": config.DisplayName,
 		"save_path": config.SavePath, "server_path": config.ServerPath, "server_mode": config.ServerMode,
@@ -203,17 +272,18 @@ func (t *LegacyTransport) Inventory(ctx context.Context, agentID string, config 
 		case <-ctx.Done():
 			return shared.RuntimeInventoryReport{}, ctx.Err()
 		case <-ticker.C:
-			info, exists := server.GetAllAgentInfo()[agentID]
+			info, exists := server.GetAgentInfo(agentID)
 			if !exists {
 				return shared.RuntimeInventoryReport{}, ErrAgentOffline
 			}
-			if legacyReportTimestamp(info) <= before || stringValue(info["_last_report_type"]) != "dst_runtime_inventory" {
+			if legacyInventoryReportTimestamp(info) <= before {
 				continue
 			}
-			if message := stringValue(info["error"]); message != "" {
+			data := mapValue(info["_last_inventory_report"])
+			if message := stringValue(data["error"]); message != "" {
 				return shared.RuntimeInventoryReport{}, errors.New(message)
 			}
-			encoded, err := json.Marshal(info["inventory"])
+			encoded, err := json.Marshal(data["inventory"])
 			if err != nil {
 				return shared.RuntimeInventoryReport{}, err
 			}
@@ -281,6 +351,7 @@ func legacySnapshot(id string, info map[string]interface{}) TransportSnapshot {
 	}
 	memory := mapValue(info["memory"])
 	cpuInfo := mapValue(info["cpu"])
+	systemMetrics := mapValue(info["system_metrics"])
 	logicalProcessors := int(int64Value(cpuInfo["logical_processors"]))
 	if logicalProcessors < 1 {
 		logicalProcessors = int(int64Value(info["cpu_count"]))
@@ -309,8 +380,14 @@ func legacySnapshot(id string, info map[string]interface{}) TransportSnapshot {
 	return TransportSnapshot{ID: id, Status: StatusOnline, Hostname: stringValue(info["hostname"]), OS: stringValue(info["os"]), Arch: stringValue(info["arch"]), Version: nonEmpty(stringValue(info["agent_version"]), "legacy"), IPAddresses: stringSlice(info["ip_addresses"]), LastHeartbeat: heartbeat, LastReportAt: reportPointer, Capabilities: capabilities, Metrics: Metrics{
 		CPUCount: logicalProcessors, LogicalProcessors: logicalProcessors, PhysicalCores: physicalCores,
 		PhysicalCoreSource: stringValue(cpuInfo["physical_core_source"]), PhysicalCoreEstimated: boolValue(cpuInfo["physical_core_estimated"]),
+		CPUModel: stringValue(systemMetrics["cpu_model"]), CPUUsage: float64Value(systemMetrics["cpu_usage"]),
+		CPUCoreUsage: float64Slice(systemMetrics["cpu_core_usage"]), CPUUsageAvailable: boolValue(systemMetrics["cpu_usage_available"]),
+		Load1: float64Value(systemMetrics["load1"]), Load5: float64Value(systemMetrics["load5"]), Load15: float64Value(systemMetrics["load15"]), LoadSupported: boolValue(systemMetrics["load_supported"]),
 		RunningShardCount: int(int64Value(info["dst_process_count"])), MemoryUsed: memoryUsed, MemoryTotal: memoryTotal,
-		MemoryAvailable: int64Value(memory["available"]), UptimeSeconds: int64Value(info["uptime_seconds"]), ObservedAt: observedAt,
+		MemoryAvailable: int64Value(memory["available"]), DiskPath: stringValue(systemMetrics["disk_path"]),
+		DiskTotal: int64Value(systemMetrics["disk_total"]), DiskUsed: int64Value(systemMetrics["disk_used"]), DiskAvailable: int64Value(systemMetrics["disk_available"]),
+		DiskUsage: float64Value(systemMetrics["disk_usage"]), DiskUsageAvailable: boolValue(systemMetrics["disk_usage_available"]),
+		UptimeSeconds: int64Value(info["uptime_seconds"]), ObservedAt: observedAt,
 	}, Details: details}
 }
 
@@ -325,15 +402,14 @@ func diskCommand(platform string) (string, []string, error) {
 	}
 }
 
-func legacyReportTimestamp(info map[string]interface{}) int64 {
-	if info == nil {
-		return 0
-	}
-	if reportedAt := int64Value(info["_last_passive_report_at"]); reportedAt > 0 {
-		return reportedAt
-	}
-	return int64Value(info["timestamp"]) * int64(time.Second)
+func legacyInventoryReportTimestamp(info map[string]interface{}) int64 {
+	return int64Value(info["_last_inventory_report_at"])
 }
+
+func legacySystemReportTimestamp(info map[string]interface{}) int64 {
+	return int64Value(info["_last_system_report_at"])
+}
+
 func stringValue(value interface{}) string { text, _ := value.(string); return strings.TrimSpace(text) }
 func int64Value(value interface{}) int64 {
 	switch typed := value.(type) {
@@ -348,6 +424,34 @@ func int64Value(value interface{}) int64 {
 		return parsed
 	}
 	return 0
+}
+func float64Value(value interface{}) float64 {
+	switch typed := value.(type) {
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case float64:
+		return typed
+	case json.Number:
+		parsed, _ := typed.Float64()
+		return parsed
+	}
+	return 0
+}
+func float64Slice(value interface{}) []float64 {
+	switch typed := value.(type) {
+	case []float64:
+		return append([]float64(nil), typed...)
+	case []interface{}:
+		result := make([]float64, 0, len(typed))
+		for _, item := range typed {
+			result = append(result, float64Value(item))
+		}
+		return result
+	default:
+		return nil
+	}
 }
 func mapValue(value interface{}) map[string]interface{} {
 	typed, _ := value.(map[string]interface{})

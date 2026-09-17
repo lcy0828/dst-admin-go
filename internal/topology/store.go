@@ -15,11 +15,13 @@ import (
 )
 
 type topologyRecord struct {
-	RoomID     string `gorm:"type:varchar(255);primary_key"`
-	Revision   string `gorm:"type:char(36);not null;index"`
-	Placements string `gorm:"type:text;not null"`
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	RoomID            string `gorm:"type:varchar(255);primary_key"`
+	Revision          string `gorm:"type:char(36);not null;index"`
+	Placements        string `gorm:"type:text;not null"`
+	ShardLinks        string `gorm:"type:text"`
+	AppliedShardLinks string `gorm:"type:text"`
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 type Store struct {
@@ -122,15 +124,35 @@ func (s *Store) EnsureWorlds(roomID string, worlds []rooms.World) (record, error
 }
 
 func (s *Store) Save(roomID, expectedRevision string, placements []storedPlacement) (record, error) {
+	current, err := s.load(roomID)
+	if err != nil {
+		return record{}, err
+	}
+	if current.Revision != expectedRevision {
+		return record{}, &RevisionConflictError{CurrentRevision: current.Revision}
+	}
+	return s.SavePlan(roomID, expectedRevision, placements, current.ShardLinks, current.AppliedShardLinks)
+}
+
+func (s *Store) SavePlan(roomID, expectedRevision string, placements []storedPlacement, shardLinks, appliedShardLinks []storedShardLink) (record, error) {
 	placements = normalizedPlacements(placements)
 	payload, err := json.Marshal(placements)
+	if err != nil {
+		return record{}, err
+	}
+	linksPayload, err := json.Marshal(normalizedStoredShardLinks(shardLinks))
+	if err != nil {
+		return record{}, err
+	}
+	appliedLinksPayload, err := json.Marshal(normalizedStoredShardLinks(appliedShardLinks))
 	if err != nil {
 		return record{}, err
 	}
 	now := s.now().UTC()
 	nextRevision := uuid.NewString()
 	result := s.db.Table(s.table).Where("room_id = ? AND revision = ?", roomID, expectedRevision).Updates(map[string]interface{}{
-		"revision": nextRevision, "placements": string(payload), "updated_at": now,
+		"revision": nextRevision, "placements": string(payload), "shard_links": string(linksPayload),
+		"applied_shard_links": string(appliedLinksPayload), "updated_at": now,
 	})
 	if result.Error != nil {
 		return record{}, result.Error
@@ -170,9 +192,18 @@ func (s *Store) create(value record) error {
 	if err != nil {
 		return err
 	}
+	linksPayload, err := json.Marshal(normalizedStoredShardLinks(value.ShardLinks))
+	if err != nil {
+		return err
+	}
+	appliedLinksPayload, err := json.Marshal(normalizedStoredShardLinks(value.AppliedShardLinks))
+	if err != nil {
+		return err
+	}
 	return s.db.Table(s.table).Create(&topologyRecord{
-		RoomID: value.RoomID, Revision: value.Revision, Placements: string(payload),
-		CreatedAt: value.CreatedAt.UTC(), UpdatedAt: value.UpdatedAt.UTC(),
+		RoomID: value.RoomID, Revision: value.Revision, Placements: string(payload), ShardLinks: string(linksPayload),
+		AppliedShardLinks: string(appliedLinksPayload),
+		CreatedAt:         value.CreatedAt.UTC(), UpdatedAt: value.UpdatedAt.UTC(),
 	}).Error
 }
 
@@ -190,10 +221,54 @@ func recordFromDatabase(value topologyRecord) (record, error) {
 	if err := json.Unmarshal([]byte(value.Placements), &placements); err != nil {
 		return record{}, fmt.Errorf("decode room topology: %w", err)
 	}
+	var shardLinks []storedShardLink
+	if strings.TrimSpace(value.ShardLinks) != "" {
+		if err := json.Unmarshal([]byte(value.ShardLinks), &shardLinks); err != nil {
+			return record{}, fmt.Errorf("decode room shard links: %w", err)
+		}
+	}
+	var appliedShardLinks []storedShardLink
+	if strings.TrimSpace(value.AppliedShardLinks) != "" {
+		if err := json.Unmarshal([]byte(value.AppliedShardLinks), &appliedShardLinks); err != nil {
+			return record{}, fmt.Errorf("decode applied room shard links: %w", err)
+		}
+	} else if placementsAligned(placements) {
+		// Rows created before applied links were persisted are safe to inherit
+		// only when there is no unfinished placement transition.
+		appliedShardLinks = shardLinks
+	}
 	return record{
 		RoomID: value.RoomID, Revision: value.Revision, Placements: normalizedPlacements(placements),
+		ShardLinks: normalizedStoredShardLinks(shardLinks), AppliedShardLinks: normalizedStoredShardLinks(appliedShardLinks),
 		CreatedAt: value.CreatedAt.UTC(), UpdatedAt: value.UpdatedAt.UTC(),
 	}, nil
+}
+
+func placementsAligned(values []storedPlacement) bool {
+	for _, value := range values {
+		if !sameEndpoint(value.DesiredTargetID, value.DesiredInstallationID, value.AppliedTargetID, value.AppliedInstallationID) {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizedStoredShardLinks(values []storedShardLink) []storedShardLink {
+	result := append([]storedShardLink(nil), values...)
+	for index := range result {
+		result[index].SourceTargetID = strings.TrimSpace(result[index].SourceTargetID)
+		result[index].SourceInstallationID = strings.TrimSpace(result[index].SourceInstallationID)
+		result[index].MasterTargetID = strings.TrimSpace(result[index].MasterTargetID)
+		result[index].MasterInstallationID = strings.TrimSpace(result[index].MasterInstallationID)
+		result[index].Address = strings.TrimSpace(strings.Trim(result[index].Address, "[]"))
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].SourceTargetID != result[j].SourceTargetID {
+			return result[i].SourceTargetID < result[j].SourceTargetID
+		}
+		return result[i].SourceInstallationID < result[j].SourceInstallationID
+	})
+	return result
 }
 
 func normalizedWorldIDs(values []string) []string {
@@ -222,6 +297,8 @@ func normalizedPlacements(values []storedPlacement) []storedPlacement {
 		}
 		result[index].DesiredTargetID = strings.TrimSpace(result[index].DesiredTargetID)
 		result[index].AppliedTargetID = strings.TrimSpace(result[index].AppliedTargetID)
+		result[index].DesiredInstallationID = strings.TrimSpace(result[index].DesiredInstallationID)
+		result[index].AppliedInstallationID = strings.TrimSpace(result[index].AppliedInstallationID)
 		if result[index].DesiredTargetID == "" {
 			result[index].DesiredTargetID = "local"
 		}
@@ -259,7 +336,8 @@ func reconcileWorldPlacements(current []storedPlacement, worlds []rooms.World) (
 		delete(byWorld, world.ID)
 	}
 	for _, placement := range byWorld {
-		if placement.AppliedTargetID != localTargetID || placement.DesiredTargetID != localTargetID {
+		if placement.AppliedTargetID != localTargetID || placement.DesiredTargetID != localTargetID ||
+			placement.AppliedInstallationID != placement.DesiredInstallationID {
 			next = append(next, placement)
 		}
 	}
@@ -292,9 +370,31 @@ func normalizedWorlds(values []rooms.World) []rooms.World {
 }
 
 func placementForWorld(world rooms.World) storedPlacement {
+	targetID := defaultPlacementTarget(world.TargetIDs)
 	return mergeWorldMetadata(storedPlacement{
-		WorldID: world.ID, DesiredTargetID: localTargetID, AppliedTargetID: localTargetID,
+		WorldID: world.ID, DesiredTargetID: targetID, AppliedTargetID: targetID,
 	}, world)
+}
+
+func defaultPlacementTarget(targetIDs []string) string {
+	values := make([]string, 0, len(targetIDs))
+	seen := make(map[string]bool, len(targetIDs))
+	for _, targetID := range targetIDs {
+		targetID = strings.TrimSpace(targetID)
+		if targetID == "" || seen[targetID] {
+			continue
+		}
+		if targetID == localTargetID {
+			return localTargetID
+		}
+		seen[targetID] = true
+		values = append(values, targetID)
+	}
+	if len(values) == 0 {
+		return localTargetID
+	}
+	sort.Strings(values)
+	return values[0]
 }
 
 func mergeWorldMetadata(placement storedPlacement, world rooms.World) storedPlacement {

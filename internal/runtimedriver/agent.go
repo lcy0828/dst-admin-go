@@ -2,11 +2,16 @@ package runtimedriver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"dont/internal/agents"
+	"dont/internal/configpublication"
+	"dont/internal/runtimefiles"
 	"dont/shared"
 )
 
@@ -22,10 +27,17 @@ type Agent struct {
 var (
 	_ Driver              = (*Agent)(nil)
 	_ ModDriver           = (*Agent)(nil)
+	_ ModPeerDriver       = (*Agent)(nil)
 	_ GameVersionDriver   = (*Agent)(nil)
 	_ CPUDriver           = (*Agent)(nil)
+	_ ConfigurationReader = (*Agent)(nil)
+	_ ClusterTokenReader  = (*Agent)(nil)
 	_ ConfigurationDriver = (*Agent)(nil)
 	_ MapDriver           = (*Agent)(nil)
+	_ ChatLogDriver       = (*Agent)(nil)
+	_ MigrationPeerSource = (*Agent)(nil)
+	_ MigrationPeerTarget = (*Agent)(nil)
+	_ RoomRecoveryDriver  = (*Agent)(nil)
 )
 
 func NewAgent(executor AgentExecutor) (*Agent, error) {
@@ -40,13 +52,50 @@ func (d *Agent) Kind() Kind { return KindNative }
 func (d *Agent) Capabilities() []Capability {
 	return []Capability{
 		CapabilityLifecycle, CapabilityConsoleInput, CapabilityConsoleHealth, CapabilityRawConsole,
-		CapabilityOperationProof, CapabilityLogContinuation, CapabilityArtifacts,
+		CapabilityOperationProof, CapabilityLogContinuation, CapabilityChatHistory, CapabilityArtifacts, CapabilityWorldStateRead,
 		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore,
 		CapabilityModPrepare, CapabilityModPublish, CapabilityGameUpdate,
 		CapabilityExclusiveCPU,
-		CapabilityConfigPublish,
-		CapabilityMapRender,
+		CapabilityConfigRead, CapabilityConfigSecrets, CapabilityConfigPublish, CapabilityConfigApply,
+		CapabilityMapRender, CapabilityShardRouting, CapabilityMigrationPeer, CapabilityRoomRecovery,
 	}
+}
+
+func (d *Agent) MoveRoomToRecovery(ctx context.Context, target Target, operation Operation) (string, error) {
+	request := runtimeRequest(target, operation, shared.RuntimeActionRoomRecoveryMove)
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 60)
+	if err != nil {
+		return "", err
+	}
+	if result.Result.RoomRecovery == nil || strings.TrimSpace(result.Result.RoomRecovery.RecoveryRef) == "" {
+		return "", errors.New("Agent 未返回房间回收位置")
+	}
+	return result.Result.RoomRecovery.RecoveryRef, nil
+}
+
+func (d *Agent) ReadConfiguration(ctx context.Context, target Target, scope string) (shared.RuntimeConfigurationResult, error) {
+	request := runtimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionConfigurationRead)
+	request.Configuration = &shared.RuntimeConfigurationRequest{Scope: scope}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 30)
+	if err != nil {
+		return shared.RuntimeConfigurationResult{}, err
+	}
+	if result.Result.Configuration == nil {
+		return shared.RuntimeConfigurationResult{}, errors.New("Agent 未返回 Runtime 配置")
+	}
+	return *result.Result.Configuration, nil
+}
+
+func (d *Agent) RevealClusterToken(ctx context.Context, target Target) (shared.RuntimeClusterTokenReveal, error) {
+	request := runtimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionClusterTokenReveal)
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 30)
+	if err != nil {
+		return shared.RuntimeClusterTokenReveal{}, err
+	}
+	if result.Result.ClusterToken == nil {
+		return shared.RuntimeClusterTokenReveal{}, errors.New("Agent 未返回 Cluster Token")
+	}
+	return *result.Result.ClusterToken, nil
 }
 
 func (d *Agent) ListMapSessions(ctx context.Context, target Target) ([]shared.RuntimeMapSession, error) {
@@ -144,6 +193,46 @@ func mapDescriptor(value shared.RuntimeMapResult) MapDescriptor {
 func (d *Agent) BeginConfiguration(ctx context.Context, target Target, operation Operation, descriptor ConfigurationDescriptor) (int64, error) {
 	result, err := d.executeConfiguration(ctx, target, operation, shared.RuntimeActionConfigurationBegin, descriptor, 0, nil)
 	return result.NextOffset, err
+}
+
+func (d *Agent) ApplyConfiguration(ctx context.Context, target Target, operation Operation, descriptor ConfigurationDescriptor, data []byte, expected map[string]string) ([]string, error) {
+	request := runtimeRequest(target, operation, shared.RuntimeActionConfigurationApply)
+	request.Configuration = &shared.RuntimeConfigurationRequest{
+		PublicationID: descriptor.PublicationID, Scope: descriptor.Scope, Size: descriptor.Size, SHA256: descriptor.SHA256,
+		Data: data, ExpectedFiles: expected,
+	}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 30)
+	value := result.Result.Configuration
+	if value != nil && value.RevisionConflict {
+		return nil, configpublication.ErrRevisionConflict
+	}
+	if err != nil {
+		return nil, err
+	}
+	if value == nil || !value.Complete || value.PublicationID != descriptor.PublicationID || value.SHA256 != descriptor.SHA256 || value.Size != descriptor.Size {
+		return nil, errors.New("Agent 未确认配置保存结果，请刷新配置后确认")
+	}
+	return value.Warnings, nil
+}
+
+func (d *Agent) WriteModOverrides(ctx context.Context, target Target, operation Operation, expectedSHA256 string, content []byte) error {
+	request := runtimeRequest(target, operation, shared.RuntimeActionModConfigurationWrite)
+	request.Configuration = &shared.RuntimeConfigurationRequest{
+		Scope: runtimefiles.ConfigurationScopeMod, ExpectedSHA256: expectedSHA256, Data: content,
+	}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 30)
+	value := result.Result.Configuration
+	if value != nil && value.RevisionConflict {
+		return &runtimefiles.ConfigurationConflictError{CurrentSHA256: value.SHA256}
+	}
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(content)
+	if value == nil || !value.Complete || value.SHA256 != hex.EncodeToString(sum[:]) {
+		return errors.New("Agent did not confirm the Mod configuration write")
+	}
+	return nil
 }
 
 func (d *Agent) WriteConfiguration(ctx context.Context, target Target, operation Operation, descriptor ConfigurationDescriptor, offset int64, data []byte) (int64, error) {
@@ -246,6 +335,7 @@ func (d *Agent) ExecuteShard(ctx context.Context, target Target, operation Opera
 		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: operation.ID, OperationKey: operation.Key,
 		InstallationID: target.InstallationID, Action: action, Cluster: target.Cluster, Shard: target.Shard,
 		TopologyRevision: target.TopologyRevision, LeaseID: operation.LeaseID, FencingToken: operation.FencingToken, LeaseExpiresAt: operation.LeaseExpiresAt,
+		RuntimeMode: operation.RuntimeMode, LaunchOptions: operation.LaunchOptions,
 	}
 	result, err := d.executor.ExecuteShard(ctx, target.TargetID, request, timeoutSeconds(timeout))
 	return result.Result, err
@@ -287,6 +377,32 @@ func (d *Agent) ReadLogs(ctx context.Context, target Target, logs shared.Runtime
 	return *result.Result.Logs, err
 }
 
+func (d *Agent) ListChatLogGenerations(ctx context.Context, target Target) ([]shared.RuntimeChatLogGeneration, error) {
+	request := runtimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionChatLogsList)
+	request.ChatLogs = &shared.RuntimeChatLogRequest{}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 30)
+	if err != nil {
+		return nil, err
+	}
+	if result.Result.ChatLogs == nil {
+		return nil, errors.New("Agent 未返回聊天日志代次")
+	}
+	return append([]shared.RuntimeChatLogGeneration(nil), result.Result.ChatLogs.Generations...), nil
+}
+
+func (d *Agent) ReadChatLogGeneration(ctx context.Context, target Target, chatLogs shared.RuntimeChatLogRequest) (shared.RuntimeChatLogResult, error) {
+	request := runtimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionChatLogsRead)
+	request.ChatLogs = &chatLogs
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 30)
+	if err != nil {
+		return shared.RuntimeChatLogResult{}, err
+	}
+	if result.Result.ChatLogs == nil {
+		return shared.RuntimeChatLogResult{}, errors.New("Agent 未返回聊天日志块")
+	}
+	return *result.Result.ChatLogs, nil
+}
+
 func (d *Agent) ReadArtifacts(ctx context.Context, target Target, kind shared.ArtifactKind) (shared.RuntimeArtifactBundle, error) {
 	request := runtimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionReadArtifacts)
 	request.Artifacts = &shared.RuntimeArtifactRequest{Kind: kind}
@@ -295,6 +411,18 @@ func (d *Agent) ReadArtifacts(ctx context.Context, target Target, kind shared.Ar
 		return shared.RuntimeArtifactBundle{}, err
 	}
 	return *result.Result.Artifacts, err
+}
+
+func (d *Agent) ReadWorldState(ctx context.Context, target Target) (shared.RuntimeWorldStateRead, error) {
+	request := runtimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionWorldStateRead)
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 10)
+	if err != nil {
+		return shared.RuntimeWorldStateRead{}, err
+	}
+	if result.Result.WorldState == nil {
+		return shared.RuntimeWorldStateRead{}, errors.New("Agent did not return world state files")
+	}
+	return *result.Result.WorldState, nil
 }
 
 func (d *Agent) ObserveModTarget(ctx context.Context, target Target) (int64, string, error) {
@@ -323,6 +451,121 @@ func (d *Agent) InspectModCache(ctx context.Context, target Target, workshopID, 
 		return shared.RuntimeModCacheManifest{}, errors.New("Agent 未返回 Mod 缓存 manifest")
 	}
 	return *value.CacheManifest, nil
+}
+
+func (d *Agent) ReadModSchema(ctx context.Context, target Target, workshopID string) (shared.RuntimeModSchema, error) {
+	request := modRuntimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionModSchemaRead)
+	request.Mod = &shared.RuntimeModRequest{WorkshopID: workshopID}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 30)
+	value, err := checkedModResult(result.Result, err)
+	if err != nil {
+		return shared.RuntimeModSchema{}, err
+	}
+	if !value.Complete || value.Schema == nil || value.Schema.WorkshopID != workshopID || value.Schema.Parser == "" {
+		return shared.RuntimeModSchema{}, errors.New("Agent 未返回匹配的 Mod 配置声明")
+	}
+	return *value.Schema, nil
+}
+
+func (d *Agent) GrantModArtifact(ctx context.Context, target Target, subjectTargetID, workshopID, treeSHA string) (shared.RuntimeModFetchLocation, error) {
+	request := modRuntimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionModPeerGrant)
+	request.Mod = &shared.RuntimeModRequest{
+		WorkshopID: workshopID, ExpectedTreeSHA256: treeSHA, PeerSubject: subjectTargetID,
+	}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 60)
+	value, err := checkedModResult(result.Result, err)
+	if err != nil {
+		return shared.RuntimeModFetchLocation{}, err
+	}
+	if value.FetchLocation == nil || value.FetchLocation.Source != shared.RuntimeModFetchSourcePeer {
+		return shared.RuntimeModFetchLocation{}, errors.New("Agent 未返回有效的 Mod Peer 下载授权")
+	}
+	return *value.FetchLocation, nil
+}
+
+func (d *Agent) FetchModCache(ctx context.Context, target Target, operation Operation, workshopID, treeSHA string, metadata shared.RuntimeModMetadata, locations []shared.RuntimeModFetchLocation) (ModFetchResult, error) {
+	sources := []shared.RuntimeModFetchSource{shared.RuntimeModFetchSourceSteam}
+	if len(locations) > 0 {
+		sources = make([]shared.RuntimeModFetchSource, 0, len(locations))
+		for _, location := range locations {
+			sources = append(sources, location.Source)
+		}
+	}
+	request := shared.RuntimeModRequest{
+		WorkshopID: workshopID, ExpectedTreeSHA256: treeSHA, Metadata: metadata,
+		FetchSources: sources, FetchLocations: append([]shared.RuntimeModFetchLocation(nil), locations...),
+	}
+	started := time.Now()
+	result, err := d.executeMod(ctx, target, operation, shared.RuntimeActionModFetch, request, 5*time.Minute)
+	fetchResult := ModFetchResult{}
+	if result.Mod != nil {
+		fetchResult.Attempts = append([]shared.RuntimeModFetchAttempt(nil), result.Mod.FetchAttempts...)
+	}
+	value, err := checkedModResult(result, err)
+	if err != nil {
+		return fetchResult, err
+	}
+	if value.CacheManifest == nil || !value.Complete || !containsModFetchSource(sources, value.FetchSource) {
+		return fetchResult, errors.New("Agent 未确认 Mod 节点本地获取")
+	}
+	fetchResult.Manifest = *value.CacheManifest
+	if fetchResult.Manifest.WorkshopID != workshopID || fetchResult.Manifest.TreeSHA256 == "" ||
+		(treeSHA != "" && !strings.EqualFold(fetchResult.Manifest.TreeSHA256, treeSHA)) {
+		return fetchResult, errors.New("Agent 返回了不匹配的 Mod 缓存 manifest")
+	}
+	if len(fetchResult.Attempts) == 0 {
+		fetchResult.Attempts = []shared.RuntimeModFetchAttempt{{
+			Source: value.FetchSource, Feasibility: shared.RuntimeModFetchFeasibilityAvailable,
+			Status: shared.RuntimeModFetchStatusSucceeded, Selected: true,
+			DurationMillis: maxDurationMillis(time.Since(started)), ObservedAt: started.UTC(),
+		}}
+	}
+	return fetchResult, nil
+}
+
+func (d *Agent) DownloadMods(ctx context.Context, target Target, operation Operation, workshopIDs []string) error {
+	result, err := d.executeMod(ctx, target, operation, shared.RuntimeActionModDownload, shared.RuntimeModRequest{
+		WorkshopIDs: append([]string(nil), workshopIDs...),
+	}, 30*time.Minute)
+	value, err := checkedModResult(result, err)
+	if err != nil {
+		return err
+	}
+	if !value.Complete {
+		return errors.New("Agent 未确认 Workshop 模组下载完成")
+	}
+	return nil
+}
+
+func (d *Agent) LinkMods(ctx context.Context, target Target, operation Operation, workshopIDs []string) error {
+	result, err := d.executeMod(ctx, target, operation, shared.RuntimeActionModLink, shared.RuntimeModRequest{
+		WorkshopIDs: append([]string(nil), workshopIDs...),
+	}, 30*time.Second)
+	value, err := checkedModResult(result, err)
+	if err != nil {
+		return err
+	}
+	if !value.Complete {
+		return errors.New("Agent did not confirm local Workshop Mod links")
+	}
+	return nil
+}
+
+func maxDurationMillis(duration time.Duration) int64 {
+	millis := duration.Milliseconds()
+	if millis == 0 && duration > 0 {
+		return 1
+	}
+	return millis
+}
+
+func containsModFetchSource(values []shared.RuntimeModFetchSource, expected shared.RuntimeModFetchSource) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Agent) BeginModUpload(ctx context.Context, target Target, operation Operation, descriptor ModUploadDescriptor) (int64, error) {
@@ -385,6 +628,92 @@ func (d *Agent) ModReleaseState(ctx context.Context, target Target, operationID 
 	request.Mod = &shared.RuntimeModRequest{OperationID: operationID}
 	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 60)
 	return checkedModRelease(result.Result, operationID, err)
+}
+
+func (d *Agent) ModInstallationState(ctx context.Context, target Target) (*shared.RuntimeModInstallationState, error) {
+	request := modRuntimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionModInstallationState)
+	request.Mod = &shared.RuntimeModRequest{}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 60)
+	value, err := checkedModResult(result.Result, err)
+	if err != nil {
+		return nil, err
+	}
+	return value.Installation, nil
+}
+
+func (d *Agent) ObserveModFiles(ctx context.Context, target Target, workshopIDs []string, worlds []shared.RuntimeModObserveWorld) (*shared.RuntimeModFilesObservation, error) {
+	request := modRuntimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionModFilesObserve)
+	request.Mod = &shared.RuntimeModRequest{
+		WorkshopIDs: append([]string(nil), workshopIDs...),
+		Worlds:      append([]shared.RuntimeModObserveWorld(nil), worlds...),
+	}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 30)
+	value, err := checkedModResult(result.Result, err)
+	if err != nil {
+		return nil, err
+	}
+	if value.Files == nil || value.Files.InstallationID != target.InstallationID || len(value.Files.Mods) != len(workshopIDs) {
+		return nil, errors.New("Agent 返回的 Mod 文件观察结果不完整")
+	}
+	requestedIDs := make(map[string]bool, len(workshopIDs))
+	for _, workshopID := range workshopIDs {
+		if requestedIDs[workshopID] {
+			return nil, errors.New("Mod 文件观察请求包含重复项目")
+		}
+		requestedIDs[workshopID] = true
+		state, exists := value.Files.Mods[workshopID]
+		if !exists || state.Status != shared.RuntimeModFileReady && state.Status != shared.RuntimeModFileMissing && state.Status != shared.RuntimeModFileInvalid {
+			return nil, errors.New("Agent 返回的 Mod 文件状态无效")
+		}
+	}
+	if len(value.Files.Worlds) != len(worlds) {
+		return nil, errors.New("Agent 返回的 Mod 世界日志观察结果不完整")
+	}
+	for _, world := range worlds {
+		observed, exists := value.Files.Worlds[world.RoomID+"/"+world.WorldID]
+		if !exists || observed.RoomID != world.RoomID || observed.WorldID != world.WorldID {
+			return nil, errors.New("Agent 返回的 Mod 世界日志身份无效")
+		}
+		seenLoaded := make(map[string]bool, len(observed.LoadedModIDs))
+		for _, workshopID := range observed.LoadedModIDs {
+			if !requestedIDs[workshopID] || seenLoaded[workshopID] {
+				return nil, errors.New("Agent 返回的已加载 Mod 列表无效")
+			}
+			seenLoaded[workshopID] = true
+		}
+	}
+	return value.Files, nil
+}
+
+func (d *Agent) InventoryModFiles(ctx context.Context, target Target) (*shared.RuntimeModFilesObservation, error) {
+	request := modRuntimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionModFilesInventory)
+	request.Mod = &shared.RuntimeModRequest{}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 30)
+	value, err := checkedModResult(result.Result, err)
+	if err != nil {
+		return nil, err
+	}
+	if value.Files == nil || value.Files.InstallationID != target.InstallationID {
+		return nil, errors.New("Agent 返回的 Mod 安装目录清单无效")
+	}
+	for workshopID, state := range value.Files.Mods {
+		if !validRuntimeWorkshopID(workshopID) || state.Status != shared.RuntimeModFileReady && state.Status != shared.RuntimeModFileInvalid {
+			return nil, errors.New("Agent 返回的 Mod 安装目录项目无效")
+		}
+	}
+	return value.Files, nil
+}
+
+func validRuntimeWorkshopID(value string) bool {
+	if len(value) == 0 || len(value) > 20 || value[0] == '0' {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *Agent) ReadModOverrides(ctx context.Context, target Target, roomDirectory, worldDirectory string, offset int64) (shared.RuntimeModOverridesChunk, error) {
@@ -485,6 +814,21 @@ func (d *Agent) PrepareMigrationExport(ctx context.Context, target Target, opera
 	return migrationDescriptor(result), nil
 }
 
+func (d *Agent) GrantMigrationExport(ctx context.Context, target Target, descriptor MigrationDescriptor, subjectTargetID string) (shared.RuntimeMigrationFetchLocation, error) {
+	result, err := d.executeMigration(ctx, target, Operation{ID: newOperationID()}, shared.RuntimeActionMigrationPeerGrant, shared.RuntimeMigrationRequest{
+		MigrationID: descriptor.MigrationID, PeerSubject: subjectTargetID, Size: descriptor.Size, SHA256: descriptor.SHA256,
+	}, time.Minute)
+	value, err := checkedMigrationResult(result, descriptor.MigrationID, err)
+	if err != nil {
+		return shared.RuntimeMigrationFetchLocation{}, err
+	}
+	if !value.Complete || value.FetchLocation == nil || value.FetchLocation.Size != descriptor.Size ||
+		value.FetchLocation.SHA256 != descriptor.SHA256 {
+		return shared.RuntimeMigrationFetchLocation{}, errors.New("Agent 未返回有效的迁移 Peer 下载授权")
+	}
+	return *value.FetchLocation, nil
+}
+
 func (d *Agent) ReadMigrationExport(ctx context.Context, target Target, migrationID string, offset int64) (MigrationChunk, error) {
 	result, err := d.executeMigration(ctx, target, Operation{ID: newOperationID()}, shared.RuntimeActionMigrationExportRead, shared.RuntimeMigrationRequest{MigrationID: migrationID, Offset: offset}, time.Minute)
 	value, err := checkedMigrationResult(result, migrationID, err)
@@ -501,7 +845,10 @@ func (d *Agent) ReleaseMigrationExport(ctx context.Context, target Target, opera
 
 func (d *Agent) BeginMigrationImport(ctx context.Context, target Target, operation Operation, descriptor MigrationDescriptor) error {
 	request := runtimeRequest(target, operation, shared.RuntimeActionMigrationImportBegin)
-	request.Migration = &shared.RuntimeMigrationRequest{MigrationID: descriptor.MigrationID, Size: descriptor.Size, SHA256: descriptor.SHA256}
+	request.Migration = &shared.RuntimeMigrationRequest{
+		MigrationID: descriptor.MigrationID, Size: descriptor.Size, SHA256: descriptor.SHA256,
+		ShardBindAll: descriptor.ShardBindAll, ShardMasterAddress: descriptor.ShardMasterAddress, ShardMasterPort: descriptor.ShardMasterPort,
+	}
 	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, timeoutSeconds(time.Minute))
 	err = markOperationNotDispatched(result, err)
 	value, err := checkedMigrationResult(result.Result, descriptor.MigrationID, err)
@@ -512,6 +859,33 @@ func (d *Agent) BeginMigrationImport(ctx context.Context, target Target, operati
 		return errors.New("Agent 未确认迁移导入描述")
 	}
 	return nil
+}
+
+func (d *Agent) FetchMigrationImport(ctx context.Context, target Target, operation Operation, descriptor MigrationDescriptor, locations []shared.RuntimeMigrationFetchLocation) (int64, error) {
+	request := runtimeRequest(target, operation, shared.RuntimeActionMigrationFetch)
+	request.Migration = &shared.RuntimeMigrationRequest{
+		MigrationID: descriptor.MigrationID, Size: descriptor.Size, SHA256: descriptor.SHA256,
+		FetchLocations: append([]shared.RuntimeMigrationFetchLocation(nil), locations...),
+	}
+	execution, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 1800)
+	if err != nil {
+		if execution.Result.Migration != nil && execution.Result.Migration.MigrationID == descriptor.MigrationID {
+			return execution.Result.Migration.NextOffset, errors.Join(ErrMigrationPeerFallback, err)
+		}
+		dispatchErr := markOperationNotDispatched(execution, err)
+		if errors.Is(dispatchErr, ErrOperationNotDispatched) {
+			return 0, errors.Join(ErrMigrationPeerFallback, dispatchErr)
+		}
+		return 0, dispatchErr
+	}
+	value, err := checkedMigrationResult(execution.Result, descriptor.MigrationID, nil)
+	if err != nil {
+		return 0, err
+	}
+	if !value.Complete || value.NextOffset != descriptor.Size || value.Size != descriptor.Size || value.SHA256 != descriptor.SHA256 {
+		return value.NextOffset, errors.Join(ErrMigrationPeerFallback, errors.New("Agent 未确认迁移 Peer 制品获取完成"))
+	}
+	return value.NextOffset, nil
 }
 
 func markOperationNotDispatched(result agents.RuntimeExecutionResult, err error) error {

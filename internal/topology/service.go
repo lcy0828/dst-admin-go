@@ -26,11 +26,33 @@ type targetCatalog interface {
 	RuntimeTargetInventories(context.Context) ([]agents.RuntimeTargetInventory, error)
 }
 
+type runtimeTargetFreshener interface {
+	EnsureRuntimeTargetsFresh(context.Context, []string) error
+}
+
+type runtimeRoomCatalogSynchronizer interface {
+	SyncRuntimeCatalog([]rooms.RuntimeCatalogSource) error
+}
+
+type egressDetector interface {
+	DetectEgress(context.Context, string, shared.RuntimeNetworkRegion) (shared.RuntimeNetworkResult, error)
+}
+
+// NetworkDiscovery provides demand-driven network observations independently
+// from the cached Runtime inventory source.
+type NetworkDiscovery interface {
+	DetectEgress(context.Context, string, shared.RuntimeNetworkRegion) (shared.RuntimeNetworkResult, error)
+	ListenNetworkEndpoint(context.Context, string, string, int, []string, time.Duration) ([]string, error)
+	ProbeNetworkEndpoints(context.Context, string, []shared.RuntimeNetworkEndpointRequest, time.Duration) ([]shared.RuntimeNetworkEndpointResult, error)
+}
+
 type Service struct {
 	rooms              roomCatalog
 	targets            targetCatalog
 	store              *Store
 	cpu                CPUAllocationExecutor
+	egress             egressDetector
+	endpointProbe      endpointProber
 	cpuRecoveryMu      sync.Mutex
 	cpuRecoveryPending map[string]struct{}
 	cpuRecoveryTimeout time.Duration
@@ -143,8 +165,8 @@ func (s *Service) recoverPendingCPUExecutionState(ctx context.Context, inventori
 		return err
 	}
 	available := make(map[string]bool, len(inventories))
-	for _, inventory := range inventories {
-		available[inventory.Target.ID] = inventory.Target.Online && inventory.Available && !inventory.Stale
+	for targetID, inventory := range machineInventories(inventories) {
+		available[targetID] = inventory.Target.Online && inventory.Available && !inventory.Stale
 	}
 	sort.Slice(allocations, func(i, j int) bool {
 		if allocations[i].RoomID == allocations[j].RoomID {
@@ -210,14 +232,27 @@ type planResult struct {
 	changed     bool
 }
 
-func NewService(roomService roomCatalog, targetService targetCatalog, store *Store) (*Service, error) {
+func NewService(roomService roomCatalog, targetService targetCatalog, store *Store, networkDiscovery ...NetworkDiscovery) (*Service, error) {
 	if roomService == nil || targetService == nil || store == nil {
 		return nil, errors.New("topology dependencies are required")
 	}
-	return &Service{
+	if len(networkDiscovery) > 1 {
+		return nil, errors.New("only one topology network discovery source is supported")
+	}
+	service := &Service{
 		rooms: roomService, targets: targetService, store: store,
 		cpuRecoveryPending: make(map[string]struct{}), cpuRecoveryTimeout: 5 * time.Second,
-	}, nil
+	}
+	service.egress, _ = targetService.(egressDetector)
+	service.endpointProbe, _ = targetService.(endpointProber)
+	if len(networkDiscovery) == 1 {
+		if networkDiscovery[0] == nil {
+			return nil, errors.New("topology network discovery source is required")
+		}
+		service.egress = networkDiscovery[0]
+		service.endpointProbe = networkDiscovery[0]
+	}
+	return service, nil
 }
 
 func (s *Service) Topology(ctx context.Context, roomID string) (Snapshot, error) {
@@ -226,6 +261,97 @@ func (s *Service) Topology(ctx context.Context, roomID string) (Snapshot, error)
 		return Snapshot{}, err
 	}
 	return result.snapshot, nil
+}
+
+func (s *Service) ResolveDesiredShardLinks(ctx context.Context, roomID string) ([]ShardLink, error) {
+	result, err := s.plan(ctx, roomID, nil)
+	if err != nil {
+		return nil, err
+	}
+	return publicStoredShardLinks(result.record.ShardLinks), nil
+}
+
+func (s *Service) ResolveAppliedShardLinks(ctx context.Context, roomID string) ([]ShardLink, error) {
+	result, err := s.plan(ctx, roomID, nil)
+	if err != nil {
+		return nil, err
+	}
+	return publicStoredShardLinks(result.record.AppliedShardLinks), nil
+}
+
+func (s *Service) ShardLinkPlan(ctx context.Context, roomID string) (ShardLinkPlan, error) {
+	result, err := s.plan(ctx, roomID, nil)
+	if err != nil {
+		return ShardLinkPlan{}, err
+	}
+	return ShardLinkPlan{
+		Revision: result.record.Revision, Desired: publicStoredShardLinks(result.record.ShardLinks),
+		Applied:          publicStoredShardLinks(result.record.AppliedShardLinks),
+		PlacementPending: !placementsAligned(result.record.Placements),
+	}, nil
+}
+
+func (s *Service) CommitDesiredShardLinks(roomID, expectedRevision string) (string, error) {
+	selected, err := s.store.load(roomID)
+	if err != nil {
+		return "", err
+	}
+	if selected.Revision != expectedRevision {
+		return "", &RevisionConflictError{CurrentRevision: selected.Revision}
+	}
+	if !placementsAligned(selected.Placements) {
+		return "", executionBlocked("PLACEMENT_PENDING", "世界运行位置尚未全部生效，不能提前应用计划中的互联线路")
+	}
+	if sameStoredShardLinks(selected.ShardLinks, selected.AppliedShardLinks) {
+		return selected.Revision, nil
+	}
+	saved, err := s.store.SavePlan(
+		roomID, expectedRevision, selected.Placements, selected.ShardLinks, selected.ShardLinks,
+	)
+	if err != nil {
+		return "", err
+	}
+	return saved.Revision, nil
+}
+
+// FleetTopology builds every managed room topology from a single inventory
+// collection. It is the read boundary for machine-scoped control-plane views.
+func (s *Service) FleetTopology(ctx context.Context) (FleetSnapshot, error) {
+	inventories, err := s.targets.RuntimeTargetInventories(ctx)
+	if err != nil {
+		return FleetSnapshot{}, err
+	}
+	if err := s.syncRuntimeRoomCatalog(inventories); err != nil {
+		return FleetSnapshot{}, err
+	}
+	plans, err := s.reconcileAll("")
+	if err != nil {
+		return FleetSnapshot{}, err
+	}
+	plans = canonicalizePlanPlacements(plans, inventories)
+	if err := s.store.SyncRuntimeCatalog(inventories); err != nil {
+		return FleetSnapshot{}, err
+	}
+	roomIDs := make([]string, 0, len(plans))
+	for roomID := range plans {
+		roomIDs = append(roomIDs, roomID)
+	}
+	sort.Slice(roomIDs, func(i, j int) bool {
+		left, right := plans[roomIDs[i]].room, plans[roomIDs[j]].room
+		if !strings.EqualFold(left.Name, right.Name) {
+			return strings.ToLower(left.Name) < strings.ToLower(right.Name)
+		}
+		return left.ID < right.ID
+	})
+	base := buildSnapshot("", plans, inventories)
+	result := FleetSnapshot{
+		Targets: append([]TargetSummary(nil), base.Targets...),
+		Rooms:   make([]Snapshot, 0, len(roomIDs)), ObservedAt: time.Now().UTC(),
+	}
+	for _, roomID := range roomIDs {
+		result.Rooms = append(result.Rooms, buildSnapshot(roomID, plans, inventories))
+	}
+	return result, nil
 }
 
 func (s *Service) Preview(ctx context.Context, roomID string, request UpdateRequest) (Snapshot, error) {
@@ -252,7 +378,9 @@ func (s *Service) Update(ctx context.Context, roomID string, request UpdateReque
 		}
 		return result.snapshot, nil
 	}
-	saved, err := s.store.Save(roomID, request.ExpectedRevision, result.record.Placements)
+	saved, err := s.store.SavePlan(
+		roomID, request.ExpectedRevision, result.record.Placements, result.record.ShardLinks, result.record.AppliedShardLinks,
+	)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -269,28 +397,114 @@ func (s *Service) Update(ctx context.Context, roomID string, request UpdateReque
 // ResolveExecution returns the currently applied runtime target. Desired
 // placement is never used as an execution fallback while migration is pending.
 func (s *Service) ResolveExecution(ctx context.Context, roomID, worldID string) (ExecutionPlacement, error) {
-	result, err := s.plan(ctx, roomID, nil)
+	result, err := s.executionPlan(ctx, roomID)
 	if err != nil {
 		return ExecutionPlacement{}, err
 	}
+	resolved, err := resolveExecution(result, roomID, worldID)
+	if err == nil || !runtimeInventoryRefreshableError(err) {
+		return resolved, err
+	}
+	freshener, ok := s.targets.(runtimeTargetFreshener)
+	if !ok {
+		return ExecutionPlacement{}, err
+	}
+	applied, appliedErr := s.AppliedPlacement(roomID, worldID)
+	if appliedErr != nil || strings.TrimSpace(applied.AppliedTargetID) == "" {
+		return ExecutionPlacement{}, err
+	}
+	if refreshErr := freshener.EnsureRuntimeTargetsFresh(ctx, []string{applied.AppliedTargetID}); refreshErr != nil {
+		return ExecutionPlacement{}, refreshErr
+	}
+	result, planErr := s.executionPlan(ctx, roomID)
+	if planErr != nil {
+		return ExecutionPlacement{}, planErr
+	}
 	return resolveExecution(result, roomID, worldID)
+}
+
+func runtimeInventoryRefreshableError(err error) bool {
+	var execution *ExecutionError
+	if !errors.As(err, &execution) {
+		return false
+	}
+	return execution.Code == "APPLIED_INVENTORY_STALE" || execution.Code == "APPLIED_INVENTORY_MISSING"
 }
 
 // ResolveRoomExecutions resolves every applied world in a room from one
 // topology snapshot. Callers that need a room-wide consistent view should use
 // this method instead of resolving each world independently.
 func (s *Service) ResolveRoomExecutions(ctx context.Context, roomID string) ([]ExecutionPlacement, error) {
-	result, err := s.plan(ctx, roomID, nil)
+	result, err := s.executionPlan(ctx, roomID)
 	if err != nil {
+		return nil, err
+	}
+	resolved, err := resolveRoomExecutions(result, roomID)
+	if err == nil || !runtimeInventoryRefreshableError(err) {
+		return resolved, err
+	}
+	freshener, ok := s.targets.(runtimeTargetFreshener)
+	if !ok {
 		return nil, err
 	}
 	selected, exists := result.plans[roomID]
 	if !exists {
 		return nil, rooms.ErrRoomNotFound
 	}
+	inventories := endpointInventories(result.inventories)
+	targetIDs := make([]string, 0, len(selected.record.Placements))
+	seenTargets := make(map[string]bool, len(selected.record.Placements))
+	for _, placement := range selected.record.Placements {
+		targetID := strings.TrimSpace(placement.AppliedTargetID)
+		inventory, exists := inventories[endpointFor(targetID, placement.AppliedInstallationID)]
+		if targetID == "" || seenTargets[targetID] || (exists && inventory.Available && !inventory.Stale) {
+			continue
+		}
+		seenTargets[targetID] = true
+		targetIDs = append(targetIDs, targetID)
+	}
+	if refreshErr := freshener.EnsureRuntimeTargetsFresh(ctx, targetIDs); refreshErr != nil {
+		return nil, refreshErr
+	}
+	result, err = s.executionPlan(ctx, roomID)
+	if err != nil {
+		return nil, err
+	}
+	return resolveRoomExecutions(result, roomID)
+}
+
+// ResolveCachedRoomExecutions returns cached applied placements for read-only
+// views. It accepts stale inventory so rendering never waits for an Agent
+// refresh; control operations must continue using ResolveRoomExecutions.
+func (s *Service) ResolveCachedRoomExecutions(ctx context.Context, roomID string) ([]ExecutionPlacement, error) {
+	result, err := s.executionPlan(ctx, roomID)
+	if err != nil {
+		return nil, err
+	}
+	return resolveRoomExecutionsWithPolicy(result, roomID, true)
+}
+
+// ResolveCachedExecution leaves unrelated worlds out of a single-world read.
+func (s *Service) ResolveCachedExecution(ctx context.Context, roomID, worldID string) (ExecutionPlacement, error) {
+	result, err := s.executionPlan(ctx, roomID)
+	if err != nil {
+		return ExecutionPlacement{}, err
+	}
+	return resolveExecutionWithPolicy(result, roomID, worldID, true)
+}
+
+func resolveRoomExecutions(result planResult, roomID string) ([]ExecutionPlacement, error) {
+	return resolveRoomExecutionsWithPolicy(result, roomID, false)
+}
+
+func resolveRoomExecutionsWithPolicy(result planResult, roomID string, allowStaleInventory bool) ([]ExecutionPlacement, error) {
+	selected, exists := result.plans[roomID]
+	if !exists {
+		return nil, rooms.ErrRoomNotFound
+	}
 	resolved := make([]ExecutionPlacement, 0, len(selected.worlds))
 	for _, world := range selected.worlds {
-		placement, err := resolveExecution(result, roomID, world.ID)
+		placement, err := resolveExecutionWithPolicy(result, roomID, world.ID, allowStaleInventory)
 		if err != nil {
 			return nil, err
 		}
@@ -313,17 +527,14 @@ func (s *Service) ResolveDesiredRoomExecutions(ctx context.Context, roomID strin
 		return nil, rooms.ErrRoomNotFound
 	}
 	placements := placementsByWorld(selected.record.Placements)
-	inventories := make(map[string]agents.RuntimeTargetInventory, len(result.inventories))
-	for _, inventory := range result.inventories {
-		inventories[inventory.Target.ID] = inventory
-	}
+	inventories := endpointInventories(result.inventories)
 	resolved := make([]ExecutionPlacement, 0, len(selected.worlds))
 	for _, world := range selected.worlds {
 		placement, ok := placements[world.ID]
 		if !ok || strings.TrimSpace(placement.DesiredTargetID) == "" {
 			return nil, executionBlocked("DESIRED_TARGET_MISSING", "世界没有计划运行目标")
 		}
-		inventory, ok := inventories[placement.DesiredTargetID]
+		inventory, ok := inventories[endpointFor(placement.DesiredTargetID, placement.DesiredInstallationID)]
 		if !ok || !inventory.Target.Configured {
 			return nil, executionBlocked("PROVISION_TARGET_MISSING", "计划运行节点不存在或尚未配置")
 		}
@@ -339,6 +550,7 @@ func (s *Service) ResolveDesiredRoomExecutions(ctx context.Context, roomID strin
 		resolved = append(resolved, ExecutionPlacement{
 			Room: selected.room, World: world, Revision: selected.record.Revision,
 			DesiredTargetID: placement.DesiredTargetID, AppliedTargetID: placement.AppliedTargetID,
+			DesiredInstallationID: placement.DesiredInstallationID, AppliedInstallationID: placement.AppliedInstallationID,
 			Target: inventory.Target, Inventory: inventory,
 		})
 	}
@@ -355,25 +567,39 @@ func (s *Service) ApplyProvision(roomID, expectedRevision string, values []Place
 	if selected.Revision != expectedRevision {
 		return "", &RevisionConflictError{CurrentRevision: selected.Revision}
 	}
-	requested := make(map[string]string, len(values))
+	requested := make(map[string]PlacementInput, len(values))
 	for _, value := range values {
-		if value.WorldID == "" || value.TargetID == "" || requested[value.WorldID] != "" {
+		if value.WorldID == "" || value.TargetID == "" {
 			return "", ErrInvalidInput
 		}
-		requested[value.WorldID] = value.TargetID
+		if _, exists := requested[value.WorldID]; exists {
+			return "", ErrInvalidInput
+		}
+		requested[value.WorldID] = value
 	}
 	placements := normalizedPlacements(selected.Placements)
 	if len(requested) != len(placements) {
 		return "", ErrInvalidInput
 	}
 	for index := range placements {
-		targetID, ok := requested[placements[index].WorldID]
-		if !ok || placements[index].DesiredTargetID != targetID {
+		requestedPlacement, ok := requested[placements[index].WorldID]
+		if !ok {
 			return "", &RevisionConflictError{CurrentRevision: selected.Revision}
 		}
-		placements[index].AppliedTargetID = targetID
+		expectedInstallationID := placements[index].DesiredInstallationID
+		if expectedInstallationID == "" && placements[index].DesiredTargetID == requestedPlacement.TargetID {
+			expectedInstallationID = requestedPlacement.InstallationID
+		}
+		if !sameEndpoint(
+			placements[index].DesiredTargetID, expectedInstallationID,
+			requestedPlacement.TargetID, requestedPlacement.InstallationID,
+		) {
+			return "", &RevisionConflictError{CurrentRevision: selected.Revision}
+		}
+		placements[index].AppliedTargetID = requestedPlacement.TargetID
+		placements[index].AppliedInstallationID = requestedPlacement.InstallationID
 	}
-	saved, err := s.store.Save(roomID, expectedRevision, placements)
+	saved, err := s.store.SavePlan(roomID, expectedRevision, placements, selected.ShardLinks, selected.ShardLinks)
 	if err != nil {
 		return "", err
 	}
@@ -381,6 +607,10 @@ func (s *Service) ApplyProvision(roomID, expectedRevision string, values []Place
 }
 
 func resolveExecution(result planResult, roomID, worldID string) (ExecutionPlacement, error) {
+	return resolveExecutionWithPolicy(result, roomID, worldID, false)
+}
+
+func resolveExecutionWithPolicy(result planResult, roomID, worldID string, allowStaleInventory bool) (ExecutionPlacement, error) {
 	selected := result.plans[roomID]
 	var world rooms.World
 	worldFound := false
@@ -402,17 +632,15 @@ func resolveExecution(result planResult, roomID, worldID string) (ExecutionPlace
 			return ExecutionPlacement{}, executionBlocked("SHARD_RUNTIME_CONFLICT", "世界在多个位置或非生效目标上运行，已阻止控制操作")
 		}
 	}
-	inventories := make(map[string]agents.RuntimeTargetInventory, len(result.inventories))
-	for _, inventory := range result.inventories {
-		inventories[inventory.Target.ID] = inventory
-	}
-	inventory, exists := inventories[stored.AppliedTargetID]
+	inventories := endpointInventories(result.inventories)
+	inventory, exists := inventories[endpointFor(stored.AppliedTargetID, stored.AppliedInstallationID)]
 	if !exists || !inventory.Target.Configured {
 		return ExecutionPlacement{}, executionBlocked("APPLIED_TARGET_MISSING", "已生效运行目标不存在或尚未配置")
 	}
 	resolved := ExecutionPlacement{
 		Room: selected.room, World: world, Revision: selected.record.Revision,
 		DesiredTargetID: stored.DesiredTargetID, AppliedTargetID: stored.AppliedTargetID,
+		DesiredInstallationID: stored.DesiredInstallationID, AppliedInstallationID: stored.AppliedInstallationID,
 		Target: inventory.Target, Inventory: inventory,
 	}
 	if stored.AppliedTargetID == localTargetID {
@@ -427,10 +655,10 @@ func resolveExecution(result planResult, roomID, worldID string) (ExecutionPlace
 	if !containsCapability(inventory.Target.Capabilities, "shard.control.v1") {
 		return ExecutionPlacement{}, executionBlocked("AGENT_CAPABILITY_MISSING", "Agent 版本不支持类型化分片控制")
 	}
-	if !inventory.Available {
+	if !inventory.Available && !allowStaleInventory {
 		return ExecutionPlacement{}, executionBlocked("APPLIED_INVENTORY_MISSING", "已生效运行目标尚无运行时清单")
 	}
-	if inventory.Stale {
+	if inventory.Stale && !allowStaleInventory {
 		return ExecutionPlacement{}, executionBlocked("APPLIED_INVENTORY_STALE", "已生效运行目标的运行时清单已过期")
 	}
 	if !inventoryHasShard(inventory.Inventory, identityFor(selected.room.DirectoryName, world.DirectoryName)) {
@@ -442,11 +670,10 @@ func resolveExecution(result planResult, roomID, worldID string) (ExecutionPlace
 // AppliedPlacement is a lightweight lookup used to keep the established local
 // runtime path fast. Remote targets must still pass ResolveExecution before use.
 func (s *Service) AppliedPlacement(roomID, worldID string) (ExecutionPlacement, error) {
-	plans, err := s.reconcileAll(roomID)
+	selected, err := s.reconcileRoom(roomID)
 	if err != nil {
 		return ExecutionPlacement{}, err
 	}
-	selected := plans[roomID]
 	var world rooms.World
 	found := false
 	for _, item := range selected.worlds {
@@ -465,6 +692,7 @@ func (s *Service) AppliedPlacement(roomID, worldID string) (ExecutionPlacement, 
 	return ExecutionPlacement{
 		Room: selected.room, World: world, Revision: selected.record.Revision,
 		DesiredTargetID: stored.DesiredTargetID, AppliedTargetID: stored.AppliedTargetID,
+		DesiredInstallationID: stored.DesiredInstallationID, AppliedInstallationID: stored.AppliedInstallationID,
 	}, nil
 }
 
@@ -483,15 +711,12 @@ func (s *Service) PrepareMigration(ctx context.Context, roomID, worldID string) 
 	if !exists {
 		return MigrationPlacement{}, executionBlocked("PLACEMENT_MISSING", "世界没有可迁移的 Placement")
 	}
-	if placement.DesiredTargetID == placement.AppliedTargetID {
+	if sameEndpoint(placement.DesiredTargetID, placement.DesiredInstallationID, placement.AppliedTargetID, placement.AppliedInstallationID) {
 		return MigrationPlacement{}, ErrMigrationNotRequired
 	}
-	inventories := make(map[string]agents.RuntimeTargetInventory, len(result.inventories))
-	for _, inventory := range result.inventories {
-		inventories[inventory.Target.ID] = inventory
-	}
-	source, sourceOK := inventories[placement.AppliedTargetID]
-	target, targetOK := inventories[placement.DesiredTargetID]
+	inventories := endpointInventories(result.inventories)
+	source, sourceOK := inventories[endpointFor(placement.AppliedTargetID, placement.AppliedInstallationID)]
+	target, targetOK := inventories[endpointFor(placement.DesiredTargetID, placement.DesiredInstallationID)]
 	if !sourceOK || !targetOK || !source.Target.Configured || !target.Target.Configured {
 		return MigrationPlacement{}, executionBlocked("MIGRATION_TARGET_MISSING", "迁移源或目标运行节点不存在或尚未配置")
 	}
@@ -506,15 +731,18 @@ func (s *Service) PrepareMigration(ctx context.Context, roomID, worldID string) 
 			return MigrationPlacement{}, executionBlocked("AGENT_CAPABILITY_MISSING", "远程节点 Agent 版本不支持分片迁移")
 		}
 	}
+	for _, link := range selected.record.ShardLinks {
+		if link.SourceTargetID == placement.DesiredTargetID && link.SourceInstallationID == placement.DesiredInstallationID &&
+			target.Target.Kind == agents.RuntimeKindAgent && !containsCapability(target.Target.Capabilities, "runtime.migration.shard-routing.v1") {
+			return MigrationPlacement{}, executionBlocked("AGENT_SHARD_ROUTING_CAPABILITY_MISSING", "目标节点 Agent 版本不支持迁移时写入跨机器 Shard 互联线路，请先升级 Agent")
+		}
+	}
 	identity := identityFor(selected.room.DirectoryName, world.DirectoryName)
 	if !inventoryHasShard(source.Inventory, identity) {
 		return MigrationPlacement{}, executionBlocked("MIGRATION_SOURCE_MISSING", "迁移源节点未发现分片文件")
 	}
 	if inventoryHasShard(target.Inventory, identity) {
 		return MigrationPlacement{}, executionBlocked("MIGRATION_TARGET_EXISTS", "迁移目标已经存在同名分片，不能覆盖")
-	}
-	if currentlyRunning(source, identity.cluster, identity.shard) || currentlyRunning(target, identity.cluster, identity.shard) {
-		return MigrationPlacement{}, executionBlocked("MIGRATION_SHARD_RUNNING", "迁移前必须停止源和目标上的分片进程")
 	}
 	build, err := s.syncInfrastructureState(result.plans, result.inventories, &resourcePreflightScope{
 		owners: map[string]bool{resourceOwnerKey(roomID, worldID): true},
@@ -531,11 +759,14 @@ func (s *Service) PrepareMigration(ctx context.Context, roomID, worldID string) 
 	return MigrationPlacement{
 		Room: selected.room, World: world, Revision: selected.record.Revision,
 		SourceTargetID: placement.AppliedTargetID, TargetTargetID: placement.DesiredTargetID,
+		SourceInstallationID: placement.AppliedInstallationID, TargetInstallationID: placement.DesiredInstallationID,
 		Source: source.Target, Target: target.Target, SourceInventory: source, TargetInventory: target,
+		AppliedShardLinks: publicStoredShardLinks(selected.record.AppliedShardLinks),
 	}, nil
 }
 
-func (s *Service) ApplyMigration(roomID, worldID, expectedRevision, targetID string) (ExecutionPlacement, error) {
+func (s *Service) ApplyMigration(roomID, worldID, expectedRevision, targetID, installationID string) (ExecutionPlacement, error) {
+	installationID = strings.TrimSpace(installationID)
 	selected, err := s.store.load(roomID)
 	if err != nil {
 		return ExecutionPlacement{}, err
@@ -549,20 +780,25 @@ func (s *Service) ApplyMigration(roomID, worldID, expectedRevision, targetID str
 		if placements[index].WorldID != worldID {
 			continue
 		}
-		if placements[index].DesiredTargetID != targetID {
+		if installationID == "" {
+			installationID = placements[index].DesiredInstallationID
+		}
+		if !sameEndpoint(placements[index].DesiredTargetID, placements[index].DesiredInstallationID, targetID, installationID) {
 			return ExecutionPlacement{}, &RevisionConflictError{CurrentRevision: selected.Revision}
 		}
-		if placements[index].AppliedTargetID == targetID {
+		if sameEndpoint(placements[index].AppliedTargetID, placements[index].AppliedInstallationID, targetID, installationID) {
 			return ExecutionPlacement{}, ErrMigrationNotRequired
 		}
 		placements[index].AppliedTargetID = targetID
+		placements[index].AppliedInstallationID = installationID
 		changed = true
 		break
 	}
 	if !changed {
 		return ExecutionPlacement{}, rooms.ErrWorldNotFound
 	}
-	saved, err := s.store.Save(roomID, expectedRevision, placements)
+	appliedShardLinks := nextAppliedShardLinks(selected.AppliedShardLinks, selected.ShardLinks, placements)
+	saved, err := s.store.SavePlan(roomID, expectedRevision, placements, selected.ShardLinks, appliedShardLinks)
 	if err != nil {
 		return ExecutionPlacement{}, err
 	}
@@ -578,6 +814,61 @@ func (s *Service) ApplyMigration(roomID, worldID, expectedRevision, targetID str
 	return ExecutionPlacement{
 		Room: room, World: world, Revision: saved.Revision,
 		DesiredTargetID: targetID, AppliedTargetID: targetID,
+		DesiredInstallationID: installationID, AppliedInstallationID: installationID,
+	}, nil
+}
+
+func (s *Service) RollbackMigration(
+	roomID, worldID, expectedRevision, sourceTargetID, sourceInstallationID, targetTargetID, targetInstallationID string,
+	previousAppliedShardLinks []ShardLink,
+) (ExecutionPlacement, error) {
+	sourceTargetID = strings.TrimSpace(sourceTargetID)
+	sourceInstallationID = strings.TrimSpace(sourceInstallationID)
+	targetTargetID = strings.TrimSpace(targetTargetID)
+	targetInstallationID = strings.TrimSpace(targetInstallationID)
+	selected, err := s.store.load(roomID)
+	if err != nil {
+		return ExecutionPlacement{}, err
+	}
+	if selected.Revision != expectedRevision {
+		return ExecutionPlacement{}, &RevisionConflictError{CurrentRevision: selected.Revision}
+	}
+	placements := normalizedPlacements(selected.Placements)
+	changed := false
+	for index := range placements {
+		if placements[index].WorldID != worldID {
+			continue
+		}
+		if !sameEndpoint(placements[index].DesiredTargetID, placements[index].DesiredInstallationID, targetTargetID, targetInstallationID) ||
+			!sameEndpoint(placements[index].AppliedTargetID, placements[index].AppliedInstallationID, targetTargetID, targetInstallationID) {
+			return ExecutionPlacement{}, &RevisionConflictError{CurrentRevision: selected.Revision}
+		}
+		placements[index].AppliedTargetID = sourceTargetID
+		placements[index].AppliedInstallationID = sourceInstallationID
+		changed = true
+		break
+	}
+	if !changed {
+		return ExecutionPlacement{}, rooms.ErrWorldNotFound
+	}
+	saved, err := s.store.SavePlan(
+		roomID, expectedRevision, placements, selected.ShardLinks, storedPublicShardLinks(previousAppliedShardLinks),
+	)
+	if err != nil {
+		return ExecutionPlacement{}, err
+	}
+	room, err := s.rooms.Room(roomID)
+	if err != nil {
+		return ExecutionPlacement{}, err
+	}
+	placement, exists := placementsByWorld(saved.Placements)[worldID]
+	if !exists {
+		return ExecutionPlacement{}, rooms.ErrWorldNotFound
+	}
+	return ExecutionPlacement{
+		Room: room, World: worldFromStoredPlacement(roomID, placement), Revision: saved.Revision,
+		DesiredTargetID: targetTargetID, AppliedTargetID: sourceTargetID,
+		DesiredInstallationID: targetInstallationID, AppliedInstallationID: sourceInstallationID,
 	}, nil
 }
 
@@ -605,10 +896,8 @@ func (s *Service) PreviewBatchStartCapacity(ctx context.Context, selections []St
 	if err != nil {
 		return BatchStartCapacityPreview{}, err
 	}
-	inventories := make(map[string]agents.RuntimeTargetInventory, len(result.inventories))
-	for _, inventory := range result.inventories {
-		inventories[inventory.Target.ID] = inventory
-	}
+	endpointInventory := endpointInventories(result.inventories)
+	inventories := machineInventories(result.inventories)
 	starting := make(map[string]int)
 	normalizedSelections := make([]StartCapacitySelection, 0, len(selections))
 	seenRooms := make(map[string]bool, len(selections))
@@ -638,7 +927,7 @@ func (s *Service) PreviewBatchStartCapacity(ctx context.Context, selections []St
 				return BatchStartCapacityPreview{}, executionBlocked("APPLIED_TARGET_MISSING", "世界没有已生效的运行目标")
 			}
 			starting[placement.AppliedTargetID] += 0
-			inventory, available := inventories[placement.AppliedTargetID]
+			inventory, available := endpointInventory[endpointFor(placement.AppliedTargetID, placement.AppliedInstallationID)]
 			if !available || !currentlyRunning(inventory, selected.room.DirectoryName, world.DirectoryName) {
 				starting[placement.AppliedTargetID]++
 			}
@@ -738,18 +1027,43 @@ func containsCapability(values []string, expected string) bool {
 	return false
 }
 
-func (s *Service) plan(ctx context.Context, roomID string, request *UpdateRequest) (planResult, error) {
-	plans, err := s.reconcileAll(roomID)
-	if err != nil {
+// Ordinary Runtime calls resolve only their room. Directory discovery and
+// infrastructure synchronization belong to explicit topology operations.
+func (s *Service) executionPlan(ctx context.Context, roomID string) (planResult, error) {
+	if err := ctx.Err(); err != nil {
 		return planResult{}, err
 	}
-	selected, exists := plans[roomID]
-	if !exists {
-		return planResult{}, rooms.ErrRoomNotFound
+	selected, err := s.reconcileRoom(roomID)
+	if err != nil {
+		return planResult{}, err
 	}
 	inventories, err := s.targets.RuntimeTargetInventories(ctx)
 	if err != nil {
 		return planResult{}, err
+	}
+	plans := canonicalizePlanPlacements(map[string]roomPlan{roomID: selected}, inventories)
+	return planResult{
+		snapshot: buildSnapshot(roomID, plans, inventories), record: plans[roomID].record,
+		plans: plans, inventories: inventories,
+	}, nil
+}
+
+func (s *Service) plan(ctx context.Context, roomID string, request *UpdateRequest) (planResult, error) {
+	inventories, err := s.targets.RuntimeTargetInventories(ctx)
+	if err != nil {
+		return planResult{}, err
+	}
+	if err := s.syncRuntimeRoomCatalog(inventories); err != nil {
+		return planResult{}, err
+	}
+	plans, err := s.reconcileAll(roomID)
+	if err != nil {
+		return planResult{}, err
+	}
+	plans = canonicalizePlanPlacements(plans, inventories)
+	selected, exists := plans[roomID]
+	if !exists {
+		return planResult{}, rooms.ErrRoomNotFound
 	}
 	if err := s.store.SyncRuntimeCatalog(inventories); err != nil {
 		return planResult{}, err
@@ -759,14 +1073,23 @@ func (s *Service) plan(ctx context.Context, roomID string, request *UpdateReques
 	var resources resourceBuild
 	resourcesOK := false
 	if request != nil {
-		if err := validateRequest(*request, selected, inventories); err != nil {
+		placements, err := validateRequest(*request, selected, inventories)
+		if err != nil {
 			return planResult{}, err
 		}
 		if request.ExpectedRevision != selected.record.Revision {
 			return planResult{}, &RevisionConflictError{CurrentRevision: selected.record.Revision}
 		}
-		candidate.Placements = desiredPlacements(selected.record.Placements, request.Placements)
-		changed = !samePlacements(candidate.Placements, selected.record.Placements)
+		candidate.Placements = desiredPlacements(selected.record.Placements, placements)
+		if request.ShardLinks != nil {
+			candidate.ShardLinks, err = validateDesiredShardLinks(request.ShardLinks, candidate.Placements, selected.worlds, inventories)
+			if err != nil {
+				return planResult{}, err
+			}
+		} else {
+			candidate.ShardLinks = reconcileStoredShardLinks(candidate.ShardLinks, candidate.Placements, selected.worlds)
+		}
+		changed = !samePlacements(candidate.Placements, selected.record.Placements) || !sameStoredShardLinks(candidate.ShardLinks, selected.record.ShardLinks)
 		selected.record = candidate
 		plans[roomID] = selected
 		owners := make(map[string]bool, len(selected.worlds))
@@ -774,7 +1097,7 @@ func (s *Service) plan(ctx context.Context, roomID string, request *UpdateReques
 			owners[resourceOwnerKey(roomID, world.ID)] = true
 		}
 		resources, err = s.buildRuntimeResources(plans, inventories, &resourcePreflightScope{
-			owners: owners,
+			owners: owners, allowShardLinkConfigurationDrift: true,
 			states: map[ReservationState]bool{
 				ReservationActive: true, ReservationPlanned: true, ReservationObserved: true,
 			},
@@ -794,58 +1117,97 @@ func (s *Service) plan(ctx context.Context, roomID string, request *UpdateReques
 	}, nil
 }
 
-func (s *Service) reconcileAll(selectedRoomID string) (map[string]roomPlan, error) {
-	selectedRoom, err := s.rooms.Room(selectedRoomID)
-	if err != nil {
-		return nil, err
+func (s *Service) syncRuntimeRoomCatalog(inventories []agents.RuntimeTargetInventory) error {
+	catalog, ok := s.rooms.(runtimeRoomCatalogSynchronizer)
+	if !ok {
+		return nil
 	}
-	if !selectedRoom.Managed {
-		return nil, ErrRoomNotManaged
+	sources := make([]rooms.RuntimeCatalogSource, 0, len(inventories))
+	for _, inventory := range inventories {
+		observedAt := time.Time{}
+		if inventory.ObservedAt != nil {
+			observedAt = inventory.ObservedAt.UTC()
+		}
+		sources = append(sources, rooms.RuntimeCatalogSource{
+			TargetID: inventory.Target.ID, Online: inventory.Target.Online, Available: inventory.Available,
+			Stale: inventory.Stale, ObservedAt: observedAt, Inventory: inventory.Inventory,
+		})
+	}
+	return catalog.SyncRuntimeCatalog(sources)
+}
+
+func (s *Service) reconcileAll(selectedRoomID string) (map[string]roomPlan, error) {
+	var selectedRoom rooms.Room
+	if strings.TrimSpace(selectedRoomID) != "" {
+		var err error
+		selectedRoom, err = s.rooms.Room(selectedRoomID)
+		if err != nil {
+			return nil, err
+		}
+		if !selectedRoom.Managed {
+			return nil, ErrRoomNotManaged
+		}
 	}
 	items, err := s.rooms.List()
 	if err != nil {
 		return nil, err
 	}
 	seen := make(map[string]bool, len(items)+1)
-	items = append(items, selectedRoom)
+	if selectedRoom.ID != "" {
+		items = append(items, selectedRoom)
+	}
 	plans := make(map[string]roomPlan, len(items))
 	for _, room := range items {
 		if seen[room.ID] || !room.Managed {
 			continue
 		}
 		seen[room.ID] = true
-		worlds, worldsErr := s.rooms.Worlds(room.ID)
-		if worldsErr != nil {
-			return nil, worldsErr
+		selected, err := s.reconcileRoom(room.ID)
+		if err != nil {
+			return nil, err
 		}
-		stored, ensureErr := s.store.EnsureWorlds(room.ID, worlds)
-		if ensureErr != nil {
-			return nil, ensureErr
-		}
-		worlds = mergeStoredWorlds(room.ID, worlds, stored.Placements)
-		plans[room.ID] = roomPlan{room: room, worlds: worlds, record: stored}
+		plans[room.ID] = selected
 	}
 	return plans, nil
 }
 
-func validateRequest(request UpdateRequest, selected roomPlan, inventories []agents.RuntimeTargetInventory) error {
+func (s *Service) reconcileRoom(roomID string) (roomPlan, error) {
+	room, err := s.rooms.Room(roomID)
+	if err != nil {
+		return roomPlan{}, err
+	}
+	if !room.Managed {
+		return roomPlan{}, ErrRoomNotManaged
+	}
+	worlds, err := s.rooms.Worlds(roomID)
+	if err != nil {
+		return roomPlan{}, err
+	}
+	stored, err := s.store.EnsureWorlds(roomID, worlds)
+	if err != nil {
+		return roomPlan{}, err
+	}
+	return roomPlan{room: room, worlds: mergeStoredWorlds(roomID, worlds, stored.Placements), record: stored}, nil
+}
+
+func validateRequest(request UpdateRequest, selected roomPlan, inventories []agents.RuntimeTargetInventory) ([]PlacementInput, error) {
 	fields := make(map[string]string)
 	if strings.TrimSpace(request.ExpectedRevision) == "" {
 		fields["expectedRevision"] = "必须提供当前拓扑 revision"
 	}
-	targets := make(map[string]agents.RuntimeTarget, len(inventories))
-	for _, inventory := range inventories {
-		targets[inventory.Target.ID] = inventory.Target
-	}
+	targets := targetsByID(inventories)
 	worlds := make(map[string]bool, len(selected.worlds))
 	for _, world := range selected.worlds {
 		worlds[world.ID] = true
 	}
 	seen := make(map[string]bool, len(request.Placements))
-	for index, placement := range request.Placements {
+	placements := append([]PlacementInput(nil), request.Placements...)
+	for index := range placements {
+		placement := &placements[index]
 		path := fmt.Sprintf("placements.%d", index)
 		placement.WorldID = strings.TrimSpace(placement.WorldID)
 		placement.TargetID = strings.TrimSpace(placement.TargetID)
+		placement.InstallationID = strings.TrimSpace(placement.InstallationID)
 		if !worlds[placement.WorldID] {
 			fields[path+".worldId"] = "世界不存在或不属于当前房间"
 		} else if seen[placement.WorldID] {
@@ -857,27 +1219,49 @@ func validateRequest(request UpdateRequest, selected roomPlan, inventories []age
 			fields[path+".targetId"] = "运行目标不存在"
 		} else if !target.Configured {
 			fields[path+".targetId"] = "运行目标尚未完成路径配置"
+		} else if installationID, valid := canonicalInstallationID(target, placement.InstallationID); !valid {
+			fields[path+".installationId"] = "DST 安装实例不存在或未登记"
+		} else {
+			placement.InstallationID = installationID
 		}
 	}
 	if len(request.Placements) != len(selected.worlds) || len(seen) != len(selected.worlds) {
 		fields["placements"] = "必须为当前房间的每个世界指定一个运行目标"
 	}
 	if len(fields) > 0 {
-		return &FieldError{Fields: fields}
+		return nil, &FieldError{Fields: fields}
 	}
-	return nil
+	return placements, nil
 }
 
 func desiredPlacements(current []storedPlacement, input []PlacementInput) []storedPlacement {
-	targets := make(map[string]string, len(input))
+	targets := make(map[string]PlacementInput, len(input))
 	for _, placement := range input {
-		targets[strings.TrimSpace(placement.WorldID)] = strings.TrimSpace(placement.TargetID)
+		placement.WorldID = strings.TrimSpace(placement.WorldID)
+		placement.TargetID = strings.TrimSpace(placement.TargetID)
+		placement.InstallationID = strings.TrimSpace(placement.InstallationID)
+		targets[placement.WorldID] = placement
 	}
 	next := append([]storedPlacement(nil), current...)
 	for index := range next {
-		next[index].DesiredTargetID = targets[next[index].WorldID]
+		placement := targets[next[index].WorldID]
+		next[index].DesiredTargetID = placement.TargetID
+		next[index].DesiredInstallationID = placement.InstallationID
 	}
 	return normalizedPlacements(next)
+}
+
+func canonicalizePlanPlacements(plans map[string]roomPlan, inventories []agents.RuntimeTargetInventory) map[string]roomPlan {
+	targets := targetsByID(inventories)
+	for roomID, plan := range plans {
+		placements := append([]storedPlacement(nil), plan.record.Placements...)
+		for index := range placements {
+			placements[index] = canonicalStoredPlacement(placements[index], targets)
+		}
+		plan.record.Placements = normalizedPlacements(placements)
+		plans[roomID] = plan
+	}
+	return plans
 }
 
 func samePlacements(left, right []storedPlacement) bool {
@@ -899,17 +1283,15 @@ type shardIdentity struct {
 }
 
 type desiredShard struct {
-	targetID string
+	endpoint placementEndpoint
 	roomID   string
 	worldID  string
 }
 
 func buildSnapshot(roomID string, plans map[string]roomPlan, inventories []agents.RuntimeTargetInventory) Snapshot {
 	selected := plans[roomID]
-	targetInventories := make(map[string]agents.RuntimeTargetInventory, len(inventories))
-	for _, inventory := range inventories {
-		targetInventories[inventory.Target.ID] = inventory
-	}
+	targetInventories := machineInventories(inventories)
+	installationInventories := endpointInventories(inventories)
 	desired := make(map[shardIdentity]desiredShard)
 	plannedCounts := make(map[string]int)
 	for currentRoomID, plan := range plans {
@@ -920,12 +1302,15 @@ func buildSnapshot(roomID string, plans map[string]roomPlan, inventories []agent
 				continue
 			}
 			identity := identityFor(plan.room.DirectoryName, world.DirectoryName)
-			desired[identity] = desiredShard{targetID: placement.DesiredTargetID, roomID: currentRoomID, worldID: world.ID}
+			desired[identity] = desiredShard{
+				endpoint: endpointFor(placement.DesiredTargetID, placement.DesiredInstallationID),
+				roomID:   currentRoomID, worldID: world.ID,
+			}
 			plannedCounts[placement.DesiredTargetID]++
 		}
 	}
 
-	runtimes := make(map[shardIdentity]map[string]int)
+	runtimes := make(map[shardIdentity]map[placementEndpoint]int)
 	matched := make(map[string]map[shardIdentity]bool)
 	for _, inventory := range inventories {
 		// A retained snapshot is useful for diagnostics, but it is not current
@@ -939,10 +1324,11 @@ func buildSnapshot(roomID string, plans map[string]roomPlan, inventories []agent
 				continue
 			}
 			if runtimes[identity] == nil {
-				runtimes[identity] = make(map[string]int)
+				runtimes[identity] = make(map[placementEndpoint]int)
 			}
-			runtimes[identity][inventory.Target.ID]++
-			if expected, exists := desired[identity]; exists && expected.targetID == inventory.Target.ID {
+			endpoint := endpointFor(inventory.Target.ID, installationIDForInventory(inventory))
+			runtimes[identity][endpoint]++
+			if expected, exists := desired[identity]; exists && expected.endpoint == endpoint {
 				if matched[inventory.Target.ID] == nil {
 					matched[inventory.Target.ID] = make(map[shardIdentity]bool)
 				}
@@ -1035,10 +1421,14 @@ func buildSnapshot(roomID string, plans map[string]roomPlan, inventories []agent
 			ID: targetID, Name: inventory.Target.Name, Kind: inventory.Target.Kind, Status: inventory.Target.Status,
 			Online: inventory.Target.Online, Configured: inventory.Target.Configured,
 			InventoryAvailable: inventory.Available, InventoryStale: inventory.Stale, StaleReason: inventory.StaleReason,
-			ObservedAt: inventory.ObservedAt, ObservedRunningShards: observed, UnmanagedRunningShards: unmanaged,
+			ObservationState: inventory.ObservationState, ObservationError: inventory.ObservationError,
+			RefreshStartedAt: inventory.RefreshStartedAt,
+			ObservedAt:       inventory.ObservedAt, ObservedRunningShards: observed, UnmanagedRunningShards: unmanaged,
 			PlannedShards: plannedCounts[targetID], ProjectedShards: projected,
 			CurrentCapacity: inventory.Capacity, ProjectedCapacity: projectedCapacity,
 			RequiresOvercommitConfirmation: overcommitted || memoryCritical,
+			DefaultInstallationID:          defaultInstallationID(inventory.Target),
+			Installations:                  installationSummaries(inventory.Target, inventories),
 		})
 	}
 	sort.Slice(targets, func(i, j int) bool {
@@ -1056,37 +1446,51 @@ func buildSnapshot(roomID string, plans map[string]roomPlan, inventories []agent
 	for _, world := range selected.worlds {
 		value := stored[world.ID]
 		identity := identityFor(selected.room.DirectoryName, world.DirectoryName)
-		observedTargets, processCount := observedTargets(runtimes[identity])
-		state, issue := placementStatus(world, value, identity, targetInventories, observedTargets, processCount)
+		observedTargets, observedLocations, processCount := observedRuntimeLocations(runtimes[identity])
+		state, issue := placementStatus(world, value, identity, targetInventories, installationInventories, observedLocations, processCount)
 		if issue != nil {
 			issues = append(issues, *issue)
 		}
 		placements = append(placements, Placement{
 			WorldID: world.ID, WorldName: world.Name, WorldRole: world.Role,
 			DesiredTargetID: value.DesiredTargetID, AppliedTargetID: value.AppliedTargetID,
-			State: state, ObservedTargetIDs: observedTargets,
+			DesiredInstallationID: value.DesiredInstallationID, AppliedInstallationID: value.AppliedInstallationID,
+			State: state, Running: processCount > 0, ObservedTargetIDs: observedTargets, ObservedLocations: observedLocations,
 		})
 	}
 
 	return Snapshot{
 		RoomID: roomID, Revision: selected.record.Revision, Mode: "applied_placement", RemoteExecutionReady: true,
-		Placements: placements, Targets: targets, Issues: issues,
+		Placements: placements, ShardLinks: publicStoredShardLinks(selected.record.ShardLinks),
+		AppliedShardLinks: publicStoredShardLinks(selected.record.AppliedShardLinks), Targets: targets, Issues: issues,
 		RequiresOvercommitConfirmation: requiresConfirmation,
 		CapacityPolicy:                 defaultCapacityPolicy(),
 		UpdatedAt:                      selected.record.UpdatedAt,
 	}
 }
 
-func placementStatus(world rooms.World, placement storedPlacement, identity shardIdentity, inventories map[string]agents.RuntimeTargetInventory, observed []string, processCount int) (PlacementState, *Issue) {
-	if processCount > 1 || unexpectedRuntime(observed, placement.AppliedTargetID) {
+func placementStatus(
+	world rooms.World,
+	placement storedPlacement,
+	identity shardIdentity,
+	targets map[string]agents.RuntimeTargetInventory,
+	inventories map[placementEndpoint]agents.RuntimeTargetInventory,
+	observed []PlacementLocation,
+	processCount int,
+) (PlacementState, *Issue) {
+	if processCount > 1 || unexpectedRuntime(observed, endpointFor(placement.AppliedTargetID, placement.AppliedInstallationID)) {
 		return PlacementConflict, &Issue{
 			Code: "SHARD_RUNTIME_CONFLICT", Severity: SeverityError, WorldID: world.ID,
 			Message: fmt.Sprintf("世界 %s 在多个位置或非生效目标上被发现，继续启动可能造成双写存档", world.Name),
 		}
 	}
-	inventory, exists := inventories[placement.DesiredTargetID]
-	if !exists || inventory.StaleReason == "target_missing" {
+	target, targetExists := targets[placement.DesiredTargetID]
+	if !targetExists || target.StaleReason == "target_missing" {
 		return PlacementInventoryMissing, &Issue{Code: "TARGET_MISSING", Severity: SeverityWarning, WorldID: world.ID, TargetID: placement.DesiredTargetID, Message: "计划运行目标已不存在，请重新选择节点"}
+	}
+	inventory, exists := inventories[endpointFor(placement.DesiredTargetID, placement.DesiredInstallationID)]
+	if !exists {
+		return PlacementInventoryMissing, &Issue{Code: "INSTALLATION_MISSING", Severity: SeverityWarning, WorldID: world.ID, TargetID: placement.DesiredTargetID, Message: fmt.Sprintf("节点 %s 未登记安装实例 %s", target.Target.Name, placement.DesiredInstallationID)}
 	}
 	if !inventory.Target.Online {
 		return PlacementTargetOffline, &Issue{Code: "TARGET_OFFLINE", Severity: SeverityWarning, WorldID: world.ID, TargetID: placement.DesiredTargetID, Message: fmt.Sprintf("节点 %s 当前离线，计划可以保存但不能执行", inventory.Target.Name)}
@@ -1100,7 +1504,7 @@ func placementStatus(world rooms.World, placement storedPlacement, identity shar
 	if !inventoryHasShard(inventory.Inventory, identity) {
 		return PlacementShardMissing, &Issue{Code: "SHARD_MISSING", Severity: SeverityInfo, WorldID: world.ID, TargetID: placement.DesiredTargetID, Message: fmt.Sprintf("节点 %s 尚未准备世界 %s 的文件；后续迁移阶段需要先复制并校验", inventory.Target.Name, world.Name)}
 	}
-	if placement.DesiredTargetID != placement.AppliedTargetID {
+	if !sameEndpoint(placement.DesiredTargetID, placement.DesiredInstallationID, placement.AppliedTargetID, placement.AppliedInstallationID) {
 		return PlacementPlanned, nil
 	}
 	return PlacementAligned, nil
@@ -1120,20 +1524,32 @@ func inventoryHasShard(report shared.RuntimeInventoryReport, identity shardIdent
 	return false
 }
 
-func observedTargets(values map[string]int) ([]string, int) {
-	items := make([]string, 0, len(values))
+func observedRuntimeLocations(values map[placementEndpoint]int) ([]string, []PlacementLocation, int) {
+	targetSet := make(map[string]bool, len(values))
+	locations := make([]PlacementLocation, 0, len(values))
 	total := 0
-	for targetID, count := range values {
-		items = append(items, targetID)
+	for endpoint, count := range values {
+		targetSet[endpoint.targetID] = true
+		locations = append(locations, PlacementLocation{TargetID: endpoint.targetID, InstallationID: endpoint.installationID})
 		total += count
 	}
-	sort.Strings(items)
-	return items, total
+	targets := make([]string, 0, len(targetSet))
+	for targetID := range targetSet {
+		targets = append(targets, targetID)
+	}
+	sort.Strings(targets)
+	sort.Slice(locations, func(i, j int) bool {
+		if locations[i].TargetID == locations[j].TargetID {
+			return locations[i].InstallationID < locations[j].InstallationID
+		}
+		return locations[i].TargetID < locations[j].TargetID
+	})
+	return targets, locations, total
 }
 
-func unexpectedRuntime(observed []string, appliedTargetID string) bool {
-	for _, targetID := range observed {
-		if targetID != appliedTargetID {
+func unexpectedRuntime(observed []PlacementLocation, applied placementEndpoint) bool {
+	for _, location := range observed {
+		if endpointFor(location.TargetID, location.InstallationID) != applied {
 			return true
 		}
 	}

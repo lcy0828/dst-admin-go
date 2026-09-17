@@ -71,3 +71,57 @@ func TestSnapshotKeepsPartialShardFailuresVisible(t *testing.T) {
 		t.Fatalf("shards=%#v", result.Shards)
 	}
 }
+
+func TestSnapshotTreatsAlignedStoppedShardAsNeutral(t *testing.T) {
+	now := time.Now().UTC()
+	local := topology.TargetSummary{ID: "local", Name: "本机", Kind: agents.RuntimeKindLocal, Online: true, Configured: true}
+	topologySnapshot := topology.Snapshot{
+		RoomID: "room", Revision: "revision", Targets: []topology.TargetSummary{local},
+		Placements: []topology.Placement{
+			{WorldID: "master", WorldName: "Master", WorldRole: rooms.WorldRoleMaster, AppliedTargetID: "local", DesiredTargetID: "local", State: topology.PlacementAligned},
+		},
+	}
+	service, err := New(overviewTopology{snapshot: topologySnapshot}, overviewRuntime{
+		statuses: map[string]shared.ShardRuntimeStatus{"master": {State: "stopped"}},
+		failures: map[string]error{},
+	}, overviewArtifacts{now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return now }
+	result, err := service.Snapshot(context.Background(), "room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Shards[0].State != "stopped" || result.Summary.Stopped != 1 || result.Summary.Degraded != 0 {
+		t.Fatalf("snapshot=%#v", result)
+	}
+}
+
+func TestSnapshotTreatsRunningSaveFailureAsDegraded(t *testing.T) {
+	now := time.Now().UTC()
+	local := topology.TargetSummary{ID: "local", Name: "本机", Kind: agents.RuntimeKindLocal, Online: true, Configured: true}
+	service, err := New(overviewTopology{snapshot: topology.Snapshot{
+		RoomID: "room", Revision: "revision", Targets: []topology.TargetSummary{local},
+		Placements: []topology.Placement{{
+			WorldID: "master", WorldName: "Master", WorldRole: rooms.WorldRoleMaster,
+			AppliedTargetID: "local", DesiredTargetID: "local", State: topology.PlacementAligned,
+		}},
+	}}, overviewRuntime{
+		statuses: map[string]shared.ShardRuntimeStatus{"master": {
+			State: "running", Code: "SAVE_WRITE_FAILED", Message: "save failed", SessionExists: true,
+		}},
+		failures: map[string]error{},
+	}, overviewArtifacts{now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return now }
+	result, err := service.Snapshot(context.Background(), "room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Shards[0].State != "degraded" || result.Shards[0].Runtime.State != "running" || result.Summary.Degraded != 1 || result.Summary.Running != 1 {
+		t.Fatalf("snapshot=%#v", result)
+	}
+}

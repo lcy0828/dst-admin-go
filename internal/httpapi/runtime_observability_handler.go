@@ -4,32 +4,158 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	"dont/internal/fleetoverview"
 	"dont/internal/runtimeevents"
+	"dont/internal/runtimeobservation"
 	"dont/internal/runtimeoverview"
 
 	"github.com/gin-gonic/gin"
 )
 
 type RuntimeObservabilityHandler struct {
-	events   *runtimeevents.Service
-	overview *runtimeoverview.Service
+	events       *runtimeevents.Service
+	overview     *runtimeoverview.Service
+	fleet        *fleetoverview.Service
+	observations *runtimeobservation.Coordinator
 }
 
-func NewRuntimeObservabilityHandler(events *runtimeevents.Service, overview *runtimeoverview.Service) (*RuntimeObservabilityHandler, error) {
-	if events == nil || overview == nil {
+func NewRuntimeObservabilityHandler(events *runtimeevents.Service, overview *runtimeoverview.Service, fleet *fleetoverview.Service, observations ...*runtimeobservation.Coordinator) (*RuntimeObservabilityHandler, error) {
+	if events == nil || overview == nil || fleet == nil {
 		return nil, errors.New("runtime observability services are required")
 	}
-	return &RuntimeObservabilityHandler{events: events, overview: overview}, nil
+	handler := &RuntimeObservabilityHandler{events: events, overview: overview, fleet: fleet}
+	if len(observations) > 0 {
+		handler.observations = observations[0]
+	}
+	return handler, nil
 }
 
 func (h *RuntimeObservabilityHandler) Register(v2 *gin.RouterGroup) {
+	v2.GET("/runtime-overview", h.fleetOverview)
+	if h.observations != nil {
+		v2.GET("/runtime-observations/stream", h.observationStream)
+		v2.POST("/runtime-observations/actions/refresh", h.refreshObservations)
+	}
 	room := v2.Group("/rooms/:roomId")
 	room.GET("/runtime/overview", h.roomOverview)
 	room.GET("/worlds/:worldId/runtime/events/stream", h.eventStream)
+}
+
+type refreshRuntimeObservationsRequest struct {
+	TargetID string `json:"targetId"`
+	RoomID   string `json:"roomId"`
+}
+
+func (h *RuntimeObservabilityHandler) refreshObservations(c *gin.Context) {
+	var request refreshRuntimeObservationsRequest
+	if err := c.ShouldBindJSON(&request); err != nil && !errors.Is(err, io.EOF) {
+		Failure(c, http.StatusUnprocessableEntity, "INVALID_RUNTIME_OBSERVATION_REQUEST", "运行状态刷新参数无效", nil)
+		return
+	}
+	items, err := h.observations.Refresh(c.Request.Context(), runtimeobservation.Scope{
+		TargetID: strings.TrimSpace(request.TargetID), RoomID: strings.TrimSpace(request.RoomID),
+	})
+	if err != nil {
+		runtimeObservationFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, gin.H{"items": items})
+}
+
+func (h *RuntimeObservabilityHandler) observationStream(c *gin.Context) {
+	scope := runtimeobservation.Scope{
+		TargetID: strings.TrimSpace(c.Query("targetId")), RoomID: strings.TrimSpace(c.Query("roomId")),
+	}
+	updates, unsubscribe := h.observations.Subscribe()
+	defer unsubscribe()
+	release, err := h.observations.Acquire(c.Request.Context(), scope)
+	if err != nil {
+		runtimeObservationFailure(c, err)
+		return
+	}
+	defer release()
+	snapshot, err := h.observations.Snapshot(c.Request.Context(), scope)
+	if err != nil {
+		runtimeObservationFailure(c, err)
+		return
+	}
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		Failure(c, http.StatusInternalServerError, "STREAM_UNAVAILABLE", "当前响应器不支持运行状态事件流", nil)
+		return
+	}
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
+	c.Header("Cache-Control", "no-cache, no-transform")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+	if err := writeRuntimeSSE(c.Writer, "", "observation.snapshot", gin.H{"scope": scope, "items": snapshot}); err != nil {
+		return
+	}
+	flusher.Flush()
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(c.Writer, ": heartbeat\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case event := <-updates:
+			if scope.TargetID != "" && event.Observation.TargetID != scope.TargetID {
+				continue
+			}
+			if err := writeRuntimeSSE(c.Writer, fmt.Sprint(event.Sequence), event.Type, event); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func runtimeObservationFailure(c *gin.Context, err error) {
+	if errors.Is(err, runtimeobservation.ErrRuntimeTargetNotFound) {
+		Failure(c, http.StatusNotFound, "RUNTIME_TARGET_NOT_FOUND", "运行目标不存在", nil)
+		return
+	}
+	Failure(c, http.StatusServiceUnavailable, "RUNTIME_OBSERVATION_FAILED", "无法刷新运行状态: "+err.Error(), nil)
+}
+
+func (h *RuntimeObservabilityHandler) fleetOverview(c *gin.Context) {
+	targetID := strings.TrimSpace(c.Query("targetId"))
+	readOverview := h.fleet.Snapshot
+	switch strings.TrimSpace(c.Query("detail")) {
+	case "", "full":
+	case "inventory":
+		readOverview = h.fleet.InventorySnapshot
+	default:
+		Failure(c, http.StatusUnprocessableEntity, "INVALID_RUNTIME_OVERVIEW_DETAIL", "运行概览详细程度无效", nil)
+		return
+	}
+	if h.observations != nil {
+		if _, err := h.observations.Refresh(c.Request.Context(), runtimeobservation.Scope{TargetID: targetID}); err != nil {
+			runtimeObservationFailure(c, err)
+			return
+		}
+	}
+	value, err := readOverview(c.Request.Context(), targetID)
+	if err != nil {
+		if errors.Is(err, fleetoverview.ErrRuntimeTargetNotFound) {
+			Failure(c, http.StatusNotFound, "RUNTIME_TARGET_NOT_FOUND", "运行目标不存在", nil)
+			return
+		}
+		Failure(c, http.StatusInternalServerError, "RUNTIME_OVERVIEW_FAILED", "无法生成运行概览", nil)
+		return
+	}
+	Success(c, http.StatusOK, value)
 }
 
 func (h *RuntimeObservabilityHandler) roomOverview(c *gin.Context) {

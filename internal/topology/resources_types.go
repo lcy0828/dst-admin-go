@@ -8,10 +8,12 @@ import (
 )
 
 var (
-	ErrResourceConflict = errors.New("runtime resource preflight found a conflict")
-	ErrResourceNotFound = errors.New("runtime infrastructure resource not found")
-	ErrCPUNotSupported  = errors.New("requested CPU policy is not supported by the execution environment")
-	ErrCPUAllocation    = errors.New("CPU allocation is invalid or conflicts with another Shard")
+	ErrResourceConflict           = errors.New("runtime resource preflight found a conflict")
+	ErrResourceNotFound           = errors.New("runtime infrastructure resource not found")
+	ErrCPUNotSupported            = errors.New("requested CPU policy is not supported by the execution environment")
+	ErrCPUAllocation              = errors.New("CPU allocation is invalid or conflicts with another Shard")
+	ErrEgressDetectionUnavailable = errors.New("runtime target egress detection is unavailable")
+	ErrEgressDetectionFailed      = errors.New("runtime target egress detection failed")
 )
 
 type ProviderKind string
@@ -47,11 +49,12 @@ const (
 type ReservationState string
 
 const (
-	ReservationActive    ReservationState = "active"
-	ReservationPlanned   ReservationState = "planned"
-	ReservationObserved  ReservationState = "observed"
-	ReservationReleasing ReservationState = "releasing"
-	ReservationReleased  ReservationState = "released"
+	ReservationConfigured ReservationState = "configured"
+	ReservationActive     ReservationState = "active"
+	ReservationPlanned    ReservationState = "planned"
+	ReservationObserved   ReservationState = "observed"
+	ReservationReleasing  ReservationState = "releasing"
+	ReservationReleased   ReservationState = "released"
 )
 
 type CPUPolicy string
@@ -79,6 +82,7 @@ type RuntimeProvider struct {
 	DisplayName  string       `json:"displayName"`
 	OS           string       `json:"os"`
 	Arch         string       `json:"arch"`
+	IPAddresses  []string     `json:"ipAddresses"`
 	Online       bool         `json:"online"`
 	Capabilities []string     `json:"capabilities"`
 	ObservedAt   *time.Time   `json:"observedAt,omitempty"`
@@ -183,9 +187,10 @@ type ResourceConflict struct {
 }
 
 type ResourcePreflight struct {
-	Ready     bool               `json:"ready"`
-	Warnings  []string           `json:"warnings"`
-	Conflicts []ResourceConflict `json:"conflicts"`
+	Ready      bool               `json:"ready"`
+	Warnings   []string           `json:"warnings"`
+	Advisories []ResourceConflict `json:"advisories"`
+	Conflicts  []ResourceConflict `json:"conflicts"`
 }
 
 type InfrastructureSnapshot struct {
@@ -203,6 +208,14 @@ type NetworkProfileUpdate struct {
 	Name             string `json:"name"`
 	BindAddress      string `json:"bindAddress"`
 	AdvertiseAddress string `json:"advertiseAddress"`
+}
+
+type EgressDetection struct {
+	ProfileID  string                      `json:"profileId"`
+	TargetID   string                      `json:"targetId"`
+	Address    string                      `json:"address"`
+	Region     shared.RuntimeNetworkRegion `json:"region"`
+	ObservedAt time.Time                   `json:"observedAt"`
 }
 
 type CPUAllocationUpdate struct {

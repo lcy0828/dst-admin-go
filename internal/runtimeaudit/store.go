@@ -82,6 +82,21 @@ func (s *Store) List(roomID string, filter ListFilter) (List, error) {
 	return List{Items: items, Total: total}, nil
 }
 
+func (s *Store) FirstSuccessfulStart() (*Event, error) {
+	var record eventRecord
+	err := s.db.Table(s.table).
+		Where("type = ? OR previous_state = ?", string(EventRunning), "running").
+		Order("occurred_at ASC, id ASC").First(&record).Error
+	if gorm.IsRecordNotFoundError(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	event := eventFromRecord(record)
+	return &event, nil
+}
+
 func (s *Store) LatestExit(roomID, worldID string) (*Event, error) {
 	var record eventRecord
 	err := s.db.Table(s.table).

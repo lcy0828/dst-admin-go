@@ -7,16 +7,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"regexp"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"dont/internal/jobs"
+	"dont/internal/runtimeperformance"
 	"dont/shared"
 
 	"github.com/google/uuid"
@@ -30,24 +33,78 @@ const (
 var agentIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 var runtimeInstallationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 var windowsAbsolutePathPattern = regexp.MustCompile(`(?i)^(?:[a-z]:[\\/]|\\\\)`)
+var runtimePerformanceSHA256Pattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type Service struct {
-	store          *Store
-	jobs           *jobs.Service
-	transport      Transport
-	now            func() time.Time
-	local          RuntimeConfig
-	localProcesses interface {
+	store              *Store
+	jobs               *jobs.Service
+	transport          Transport
+	releases           *ReleaseStore
+	now                func() time.Time
+	localMu            sync.RWMutex
+	localInstallations map[string]RuntimeConfig
+	localDefaultID     string
+	localProcesses     interface {
 		ContainerProcesses(context.Context) ([]shared.ShardProcessReport, error)
 	}
-	localEnabled bool
+	localEnabled             bool
+	runtimeAdoptionMu        sync.Mutex
+	inventorySignalMu        sync.Mutex
+	inventorySignals         map[string]string
+	inventoryWake            chan struct{}
+	runtimeTopologyMu        sync.RWMutex
+	onRuntimeTopologyChanged []func()
+	upgradeMu                sync.Mutex
+	activeUpgrades           map[string]struct{}
+	systemReportMu           sync.Mutex
+	systemReports            map[string]*systemReportRequest
+}
+
+func (s *Service) ConfigureReleaseStore(store *ReleaseStore) error {
+	if s == nil || store == nil {
+		return errors.New("agent release store is required")
+	}
+	s.releases = store
+	return nil
 }
 
 // ConfigureLocalRuntime sets the controller-local paths. It is intentionally
 // separate from persisted Agent runtime configuration.
 func (s *Service) ConfigureLocalRuntime(config RuntimeConfig) {
-	s.local = normalizeRuntimeConfig(config)
+	config = normalizeRuntimeConfig(config)
+	if !runtimeInstallationIDPattern.MatchString(config.InstallationID) {
+		config.InstallationID = "default"
+	}
+	s.localMu.Lock()
+	if s.localInstallations == nil {
+		s.localInstallations = make(map[string]RuntimeConfig)
+	}
+	s.localInstallations[config.InstallationID] = config
+	s.localDefaultID = config.InstallationID
 	s.localEnabled = true
+	s.localMu.Unlock()
+	s.emitRuntimeTopologyChanged()
+}
+
+// ConfigureLocalRuntimeInstallation registers another DST installation on the
+// controller machine without turning it into a separate machine target.
+func (s *Service) ConfigureLocalRuntimeInstallation(config RuntimeConfig, makeDefault bool) error {
+	config = normalizeRuntimeConfig(config)
+	if !runtimeInstallationIDPattern.MatchString(config.InstallationID) {
+		return ErrInvalidInput
+	}
+	s.localMu.Lock()
+	if s.localInstallations == nil {
+		s.localInstallations = make(map[string]RuntimeConfig)
+	}
+	s.localInstallations[config.InstallationID] = config
+	if makeDefault || s.localDefaultID == "" {
+		s.localDefaultID = config.InstallationID
+	}
+	s.localEnabled = true
+	s.localMu.Unlock()
+	s.emitRuntimeTopologyChanged()
+	return nil
 }
 
 // ConfigureLocalContainerProcesses lets an embedded container Runtime report
@@ -61,9 +118,33 @@ func (s *Service) ConfigureLocalContainerProcesses(provider interface {
 // DisableLocalRuntime keeps control-plane APIs available without advertising
 // a controller-local DST installation.
 func (s *Service) DisableLocalRuntime() {
-	s.local = RuntimeConfig{}
+	s.localMu.Lock()
+	s.localInstallations = make(map[string]RuntimeConfig)
+	s.localDefaultID = ""
 	s.localProcesses = nil
 	s.localEnabled = false
+	s.localMu.Unlock()
+	s.emitRuntimeTopologyChanged()
+}
+
+// AddRuntimeTopologyListener subscribes control-plane projections to changes
+// in execution targets or their cached inventories.
+func (s *Service) AddRuntimeTopologyListener(callback func()) {
+	if callback == nil {
+		return
+	}
+	s.runtimeTopologyMu.Lock()
+	s.onRuntimeTopologyChanged = append(s.onRuntimeTopologyChanged, callback)
+	s.runtimeTopologyMu.Unlock()
+}
+
+func (s *Service) emitRuntimeTopologyChanged() {
+	s.runtimeTopologyMu.RLock()
+	listeners := append([]func(){}, s.onRuntimeTopologyChanged...)
+	s.runtimeTopologyMu.RUnlock()
+	for _, listener := range listeners {
+		listener()
+	}
 }
 
 func (s *Service) RuntimeTargets() ([]RuntimeTarget, error) {
@@ -118,11 +199,16 @@ func (s *Service) RuntimeTarget(agentID string) (RuntimeTarget, error) {
 }
 
 func (s *Service) SaveRuntimeConfig(agentID string, input RuntimeConfig) (RuntimeTarget, error) {
+	return s.saveRuntimeConfig(agentID, input, RuntimeConfigSourceManual)
+}
+
+func (s *Service) saveRuntimeConfig(agentID string, input RuntimeConfig, source RuntimeConfigSource) (RuntimeTarget, error) {
 	agent, err := s.Agent(agentID)
 	if err != nil {
 		return RuntimeTarget{}, err
 	}
 	config := normalizeRuntimeConfig(input)
+	config.Source = source
 	if config.DisplayName == "" {
 		config.DisplayName = agent.Hostname
 	}
@@ -140,6 +226,13 @@ func (s *Service) SaveRuntimeConfig(agentID string, input RuntimeConfig) (Runtim
 	if err := s.store.DeleteInventory(agentID); err != nil {
 		return RuntimeTarget{}, err
 	}
+	if source == RuntimeConfigSourceManual {
+		if err := s.store.SetRuntimeAutoAdoptDisabled(agentID, false); err != nil {
+			return RuntimeTarget{}, err
+		}
+	}
+	s.emitRuntimeTopologyChanged()
+	s.wakeInventoryRefresh()
 	return s.applyStoredRuntimeTargetDisplayName(runtimeTargetFromAgent(agent, config, true))
 }
 
@@ -185,25 +278,111 @@ func (s *Service) DeleteRuntimeConfig(agentID string) error {
 	if _, err := s.Agent(agentID); err != nil {
 		return err
 	}
-	if err := s.store.DeleteRuntimeConfig(agentID); err != nil {
+	if err := s.store.RemoveRuntimeConfiguration(agentID); err != nil {
 		return err
 	}
-	return s.store.DeleteInventory(agentID)
+	s.emitRuntimeTopologyChanged()
+	return nil
 }
 
 func (s *Service) localRuntimeTarget() RuntimeTarget {
-	configured := s.local.SavePath != "" && s.local.ServerPath != ""
-	ready := configured && existingDirectory(s.local.SavePath) && existingDirectory(s.local.ServerPath)
+	s.localMu.RLock()
+	defaultID := s.localDefaultID
+	config := s.localInstallations[defaultID]
+	configs := make([]RuntimeConfig, 0, len(s.localInstallations))
+	for _, installation := range s.localInstallations {
+		configs = append(configs, installation)
+	}
+	s.localMu.RUnlock()
+	sort.Slice(configs, func(i, j int) bool { return configs[i].InstallationID < configs[j].InstallationID })
+	configured := config.SavePath != "" && config.ServerPath != ""
+	ready := configured && existingDirectory(config.SavePath) && existingDirectory(config.ServerPath)
 	status := RuntimeStatusConfigurationRequired
 	if ready {
 		status = RuntimeStatusReady
 	}
 	hostname, _ := os.Hostname()
+	performance := runtimeperformance.Inspect(runtimeperformance.Options{
+		ServerPath: config.ServerPath, ServerMode: config.ServerMode, WorkshopContentPath: config.WorkshopContentPath,
+		Platform: runtime.GOOS, Architecture: runtime.GOARCH,
+	})
+	installations := make([]RuntimeInstallation, 0, len(configs))
+	for _, installation := range configs {
+		installationPerformance := runtimeperformance.Inspect(runtimeperformance.Options{
+			ServerPath: installation.ServerPath, ServerMode: installation.ServerMode, WorkshopContentPath: installation.WorkshopContentPath,
+			Platform: runtime.GOOS, Architecture: runtime.GOARCH,
+		})
+		installations = append(installations, RuntimeInstallation{
+			ID: installation.InstallationID, Driver: "native", SavePath: installation.SavePath,
+			ServerPath: installation.ServerPath, SteamCMDPath: installation.SteamCMDPath, UGCPath: installation.UGCPath,
+			WorkshopContentPath: installation.WorkshopContentPath, ServerMode: installation.ServerMode,
+			Performance: &installationPerformance,
+		})
+	}
 	return RuntimeTarget{
 		ID: "local", Kind: RuntimeKindLocal, Name: "本机", Hostname: hostname, OS: runtime.GOOS, Arch: runtime.GOARCH, Status: status,
-		Default: true, Configured: configured, Online: true,
-		Capabilities: []string{"runtime.local"}, Config: s.local,
+		Default: true, DefaultInstallationID: defaultID, Configured: configured, Online: true,
+		IPAddresses: localRuntimeIPAddresses(), Capabilities: localRuntimeCapabilities(), Config: config, Installations: installations, Performance: &performance,
 	}
+}
+
+func localRuntimeIPAddresses() []string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return []string{}
+	}
+	seen := make(map[string]bool)
+	addresses := make([]string, 0, len(interfaces))
+	for _, networkInterface := range interfaces {
+		if networkInterface.Flags&net.FlagUp == 0 || networkInterface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		values, err := networkInterface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, value := range values {
+			ip, _, err := net.ParseCIDR(value.String())
+			if err != nil {
+				ip = net.ParseIP(value.String())
+			}
+			if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+				continue
+			}
+			text := ip.String()
+			if !seen[text] {
+				seen[text] = true
+				addresses = append(addresses, text)
+			}
+		}
+	}
+	sort.Slice(addresses, func(i, j int) bool {
+		left, right := net.ParseIP(addresses[i]), net.ParseIP(addresses[j])
+		leftV4, rightV4 := left.To4() != nil, right.To4() != nil
+		if leftV4 != rightV4 {
+			return leftV4
+		}
+		return addresses[i] < addresses[j]
+	})
+	return addresses
+}
+
+func localRuntimeCapabilities() []string {
+	capabilities := []string{
+		"runtime.local", "system.report", "disk.inspect",
+		"runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read",
+	}
+	if runtime.GOOS == "windows" {
+		return capabilities
+	}
+	return append(capabilities,
+		"runtime.mods.local-link.v1",
+		"shard.control.v1", "shard.control.v2", "shard.runtime-mode.v1", "shard.skip-mod-update.v1", "runtime.driver.v2", "runtime.console.v2",
+		"runtime.logs.v1", "runtime.chat-history.v1", "runtime.artifacts.v1", "runtime.worldstate.read.v1", "runtime.migration.v1", "runtime.migration.peer.v1",
+		"runtime.backup.v1", "runtime.mods.v1", "runtime.mods.state.v1", "runtime.mods.files.v1", "runtime.mods.inventory.v1", "runtime.mods.fetch.v2", "runtime.mods.download.v1", "runtime.mods.content-publish.v1", "runtime.game-update.v1", "runtime.game-install.v1", "runtime.luajit.v2", "runtime.cpu.v1",
+		"runtime.configuration.v1", "runtime.configuration.read.v1", "runtime.configuration.secrets.v1", "runtime.configuration.apply.v1",
+		"runtime.maps.v1", "runtime.network.v1", "runtime.network.endpoints.v1", "runtime.migration.shard-routing.v1", "runtime.room-recovery.v1",
+	)
 }
 
 func (s *Service) applyStoredRuntimeTargetDisplayName(target RuntimeTarget) (RuntimeTarget, error) {
@@ -250,17 +429,32 @@ func NewService(store *Store, jobService *jobs.Service, transport Transport) (*S
 	if err := store.RecoverCommands(); err != nil {
 		return nil, fmt.Errorf("recover agent commands: %w", err)
 	}
-	return &Service{store: store, jobs: jobService, transport: transport, now: time.Now}, nil
+	return &Service{
+		store: store, jobs: jobService, transport: transport, now: time.Now,
+		localInstallations: make(map[string]RuntimeConfig),
+		inventorySignals:   make(map[string]string), inventoryWake: make(chan struct{}, 1),
+		activeUpgrades: make(map[string]struct{}),
+	}, nil
 }
 
 func (s *Service) Sync() (bool, error) {
 	if !s.transport.Available() {
-		return s.store.Sync(nil)
+		changed, err := s.store.Sync(nil)
+		if changed {
+			s.emitRuntimeTopologyChanged()
+		}
+		if err == nil && s.updateInventorySignals(nil) {
+			s.wakeInventoryRefresh()
+		}
+		return changed, err
 	}
 	snapshots, err := s.transport.Snapshots()
 	if err != nil {
-		_, _ = s.store.Sync(nil)
-		return false, err
+		changed, _ := s.store.Sync(nil)
+		if changed {
+			s.emitRuntimeTopologyChanged()
+		}
+		return changed, err
 	}
 	normalized := make([]TransportSnapshot, 0, len(snapshots))
 	seen := make(map[string]bool, len(snapshots))
@@ -293,7 +487,164 @@ func (s *Service) Sync() (bool, error) {
 		normalized = append(normalized, snapshot)
 	}
 	sort.Slice(normalized, func(i, j int) bool { return normalized[i].ID < normalized[j].ID })
-	return s.store.Sync(normalized)
+	changed, err := s.store.Sync(normalized)
+	if err != nil {
+		return false, err
+	}
+	inventoryChanged := s.updateInventorySignals(normalized)
+	adopted, err := s.adoptDiscoveredRuntimeConfigs()
+	if err != nil {
+		if changed {
+			s.emitRuntimeTopologyChanged()
+		}
+		return changed, err
+	}
+	for _, value := range adopted {
+		target := runtimeTargetFromAgent(value.agent, value.config, true)
+		_, _ = s.submitInventoryRefresh(value.agent, runtimeConfigsForTarget(target))
+	}
+	changed = changed || len(adopted) > 0
+	if changed {
+		s.emitRuntimeTopologyChanged()
+	}
+	if inventoryChanged || len(adopted) > 0 {
+		s.wakeInventoryRefresh()
+	}
+	return changed, nil
+}
+
+func (s *Service) updateInventorySignals(snapshots []TransportSnapshot) bool {
+	next := make(map[string]string, len(snapshots))
+	for _, snapshot := range snapshots {
+		relevant := struct {
+			Status        Status      `json:"status"`
+			Version       string      `json:"version"`
+			Capabilities  []string    `json:"capabilities"`
+			Installations interface{} `json:"installations"`
+		}{
+			Status: snapshot.Status, Version: snapshot.Version, Capabilities: snapshot.Capabilities,
+			Installations: snapshot.Details["runtime_installations"],
+		}
+		encoded, _ := json.Marshal(relevant)
+		digest := sha256.Sum256(encoded)
+		next[snapshot.ID] = hex.EncodeToString(digest[:])
+	}
+	s.inventorySignalMu.Lock()
+	defer s.inventorySignalMu.Unlock()
+	changed := len(next) != len(s.inventorySignals)
+	if !changed {
+		for agentID, signature := range next {
+			if s.inventorySignals[agentID] != signature {
+				changed = true
+				break
+			}
+		}
+	}
+	s.inventorySignals = next
+	return changed
+}
+
+func (s *Service) wakeInventoryRefresh() {
+	select {
+	case s.inventoryWake <- struct{}{}:
+	default:
+	}
+}
+
+type discoveredRuntimeAdoption struct {
+	agent  Agent
+	config RuntimeConfig
+}
+
+func (s *Service) adoptDiscoveredRuntimeConfigs() ([]discoveredRuntimeAdoption, error) {
+	s.runtimeAdoptionMu.Lock()
+	defer s.runtimeAdoptionMu.Unlock()
+
+	configs, err := s.store.RuntimeConfigs()
+	if err != nil {
+		return nil, err
+	}
+	agentItems, err := s.store.Agents()
+	if err != nil {
+		return nil, err
+	}
+	adopted := make([]discoveredRuntimeAdoption, 0)
+	for _, agent := range agentItems {
+		if agent.Status != StatusOnline {
+			continue
+		}
+		agent = s.decorateAgent(agent)
+		if !agent.InstallationRegistrySupported {
+			continue
+		}
+
+		previous, configured := configs[agent.ID]
+		var installation RuntimeInstallation
+		if configured {
+			if previous.Source != RuntimeConfigSourceDiscovered {
+				continue
+			}
+			var found bool
+			installation, found = advertisedRuntimeInstallation(agent, previous.InstallationID)
+			if !found {
+				continue
+			}
+		} else {
+			if agent.RuntimeAutoAdoptDisabled || len(agent.Installations) != 1 {
+				continue
+			}
+			installation = agent.Installations[0]
+		}
+
+		config := discoveredRuntimeConfig(agent, installation, previous)
+		if configured && config == normalizeRuntimeConfig(previous) {
+			continue
+		}
+		config, err = bindAdvertisedRuntimeInstallation(agent, config)
+		if err != nil || validateRuntimeConfig(config, agent.OS) != nil {
+			continue
+		}
+		config, err = s.store.SaveRuntimeConfig(agent.ID, config)
+		if err != nil {
+			return adopted, err
+		}
+		if err := s.store.DeleteInventory(agent.ID); err != nil {
+			return adopted, err
+		}
+		configs[agent.ID] = config
+		adopted = append(adopted, discoveredRuntimeAdoption{agent: agent, config: config})
+	}
+	return adopted, nil
+}
+
+func advertisedRuntimeInstallation(agent Agent, installationID string) (RuntimeInstallation, bool) {
+	for _, installation := range agent.Installations {
+		if installation.ID == installationID {
+			return installation, true
+		}
+	}
+	return RuntimeInstallation{}, false
+}
+
+func discoveredRuntimeConfig(agent Agent, installation RuntimeInstallation, previous RuntimeConfig) RuntimeConfig {
+	displayName := strings.TrimSpace(previous.DisplayName)
+	if displayName == "" {
+		displayName = nonEmpty(agent.Hostname, agent.ID)
+	}
+	return normalizeRuntimeConfig(RuntimeConfig{
+		InstallationID:      installation.ID,
+		DisplayName:         displayName,
+		SavePath:            installation.SavePath,
+		BackupPath:          previous.BackupPath,
+		ServerPath:          installation.ServerPath,
+		SteamCMDPath:        installation.SteamCMDPath,
+		UGCPath:             installation.UGCPath,
+		WorkshopContentPath: installation.WorkshopContentPath,
+		ServerMode:          installation.ServerMode,
+		LuaBinary:           nonEmpty(previous.LuaBinary, "lua"),
+		LuaFallbackPath:     previous.LuaFallbackPath,
+		Source:              RuntimeConfigSourceDiscovered,
+	})
 }
 
 func (s *Service) Agents() ([]Agent, bool, error) {
@@ -309,9 +660,10 @@ func (s *Service) Agents() ([]Agent, bool, error) {
 	if err != nil {
 		return nil, s.transport.Available(), err
 	}
+	latestByPlatform := s.latestAgentReleasesByPlatform()
 	for index := range items {
 		items[index].DisplayName = effectiveAgentDisplayName(items[index], displayNames)
-		items[index] = s.decorateAgent(items[index])
+		items[index] = s.decorateAgentWithRelease(items[index], latestByPlatform[agentReleasePlatformKey(items[index].OS, items[index].Arch)])
 	}
 	return items, s.transport.Available(), nil
 }
@@ -344,6 +696,7 @@ func (s *Service) Forget(id string) error {
 	if forgetter, ok := s.transport.(interface{ ForgetSnapshot(string) }); ok {
 		forgetter.ForgetSnapshot(id)
 	}
+	s.emitRuntimeTopologyChanged()
 	return nil
 }
 
@@ -603,6 +956,9 @@ func normalizeRuntimeConfig(config RuntimeConfig) RuntimeConfig {
 	config.LuaBinary = strings.TrimSpace(config.LuaBinary)
 	config.LuaFallbackPath = strings.TrimSpace(config.LuaFallbackPath)
 	config.ServerMode = strings.ToLower(strings.TrimSpace(config.ServerMode))
+	if config.Source != RuntimeConfigSourceDiscovered {
+		config.Source = RuntimeConfigSourceManual
+	}
 	if config.LuaBinary == "" {
 		config.LuaBinary = "lua"
 	}
@@ -618,7 +974,8 @@ func validateRuntimeConfig(config RuntimeConfig, platform string) error {
 		config.DisplayName == "" || utf8.RuneCountInString(config.DisplayName) > 100 ||
 		config.SavePath == "" || config.ServerPath == "" ||
 		utf8.RuneCountInString(config.LuaBinary) > 255 ||
-		(config.ServerMode != "32" && config.ServerMode != "64" && config.ServerMode != "luajit") {
+		(config.ServerMode != "32" && config.ServerMode != "64") ||
+		(config.Source != RuntimeConfigSourceManual && config.Source != RuntimeConfigSourceDiscovered) {
 		return ErrInvalidInput
 	}
 	if strings.ContainsAny(config.DisplayName+config.LuaBinary, "\x00\r\n") {
@@ -662,13 +1019,42 @@ func runtimeTargetFromAgent(agent Agent, config RuntimeConfig, configured bool) 
 	if name == "" {
 		name = agent.ID
 	}
+	var performance *shared.RuntimePerformanceReport
+	if configured {
+		for _, installation := range agent.Installations {
+			if installation.ID == config.InstallationID {
+				performance = cloneRuntimePerformance(installation.Performance)
+				break
+			}
+		}
+	}
 	heartbeat := agent.LastHeartbeat.UTC()
 	return RuntimeTarget{
 		ID: "agent:" + agent.ID, Kind: RuntimeKindAgent, AgentID: agent.ID, Name: name,
-		Hostname: agent.Hostname, OS: agent.OS, Arch: agent.Arch, Status: status,
-		Configured: configured, Online: agent.Status == StatusOnline,
+		Hostname: agent.Hostname, OS: agent.OS, Arch: agent.Arch, IPAddresses: append([]string{}, agent.IPAddresses...), Status: status,
+		DefaultInstallationID: config.InstallationID, Configured: configured, Online: agent.Status == StatusOnline,
 		Capabilities: append([]string(nil), agent.Capabilities...), LastHeartbeat: &heartbeat, Config: config,
+		Installations: cloneRuntimeInstallations(agent.Installations), Performance: performance,
 	}
+}
+
+func cloneRuntimeInstallations(values []RuntimeInstallation) []RuntimeInstallation {
+	result := make([]RuntimeInstallation, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].Performance = cloneRuntimePerformance(value.Performance)
+	}
+	return result
+}
+
+func cloneRuntimePerformance(value *shared.RuntimePerformanceReport) *shared.RuntimePerformanceReport {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	clone.SupportedModes = append([]shared.RuntimePerformanceMode(nil), value.SupportedModes...)
+	clone.Issues = append([]string(nil), value.Issues...)
+	return &clone
 }
 
 func (s *Service) runtimeConfigForAgent(agent Agent) (RuntimeConfig, error) {
@@ -684,14 +1070,15 @@ func advertisedRuntimeInstallations(details map[string]interface{}) []RuntimeIns
 		return []RuntimeInstallation{}
 	}
 	type report struct {
-		ID                  string `json:"id"`
-		Driver              string `json:"driver"`
-		SavePath            string `json:"save_path"`
-		ServerPath          string `json:"server_path"`
-		SteamCMDPath        string `json:"steamcmd_path"`
-		UGCPath             string `json:"ugc_path"`
-		WorkshopContentPath string `json:"workshop_content_path"`
-		ServerMode          string `json:"server_mode"`
+		ID                  string                           `json:"id"`
+		Driver              string                           `json:"driver"`
+		SavePath            string                           `json:"save_path"`
+		ServerPath          string                           `json:"server_path"`
+		SteamCMDPath        string                           `json:"steamcmd_path"`
+		UGCPath             string                           `json:"ugc_path"`
+		WorkshopContentPath string                           `json:"workshop_content_path"`
+		ServerMode          string                           `json:"server_mode"`
+		Performance         *shared.RuntimePerformanceReport `json:"performance"`
 	}
 	encoded, err := json.Marshal(details["runtime_installations"])
 	if err != nil {
@@ -726,11 +1113,122 @@ func advertisedRuntimeInstallations(details map[string]interface{}) []RuntimeIns
 		result = append(result, RuntimeInstallation{
 			ID: value.ID, Driver: value.Driver, SavePath: value.SavePath, ServerPath: value.ServerPath,
 			SteamCMDPath: value.SteamCMDPath, UGCPath: value.UGCPath,
-			WorkshopContentPath: value.WorkshopContentPath, ServerMode: value.ServerMode,
+			WorkshopContentPath: value.WorkshopContentPath, ServerMode: value.ServerMode, Performance: normalizeRuntimePerformance(value.Performance),
 		})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result
+}
+
+func normalizeRuntimePerformance(value *shared.RuntimePerformanceReport) *shared.RuntimePerformanceReport {
+	if value == nil || (value.Provider != "game" && value.Provider != "dontstarve-luajit2") || !validRuntimePerformanceStatus(value.Status) {
+		return nil
+	}
+	clone := *value
+	for _, text := range []*string{&clone.PackageVersion, &clone.GameVersion, &clone.SignatureVersion} {
+		*text = strings.TrimSpace(*text)
+		if utf8.RuneCountInString(*text) > 64 || strings.ContainsAny(*text, "\x00\r\n") {
+			return nil
+		}
+	}
+	clone.BinarySHA256 = strings.ToLower(strings.TrimSpace(clone.BinarySHA256))
+	if clone.BinarySHA256 != "" && !runtimePerformanceSHA256Pattern.MatchString(clone.BinarySHA256) {
+		return nil
+	}
+	var modesValid bool
+	clone.SupportedModes, modesValid = cleanRuntimePerformanceModes(clone.SupportedModes)
+	if !modesValid {
+		return nil
+	}
+	var issuesValid bool
+	clone.Issues, issuesValid = cleanRuntimePerformanceIssues(clone.Issues)
+	if !issuesValid {
+		return nil
+	}
+	if clone.Status != shared.RuntimePerformanceReady {
+		clone.CanEnable = false
+		return &clone
+	}
+	signatureReady := clone.SignatureVersion != "" && clone.GameVersion == clone.SignatureVersion
+	if clone.AutomaticSignatures {
+		signatureReady = true
+	}
+	if !clone.CanEnable || clone.Provider != "dontstarve-luajit2" || clone.PackageVersion == "" ||
+		clone.GameVersion == "" || !signatureReady ||
+		clone.BinarySHA256 == "" || len(clone.Issues) != 0 || !hasRequiredRuntimePerformanceModes(clone.SupportedModes) {
+		return nil
+	}
+	return &clone
+}
+
+func validRuntimePerformanceStatus(value shared.RuntimePerformanceStatus) bool {
+	return value == shared.RuntimePerformanceNotInstalled || value == shared.RuntimePerformanceDetectedUnverified ||
+		value == shared.RuntimePerformanceIncompatible || value == shared.RuntimePerformanceReady
+}
+
+func cleanRuntimePerformanceModes(values []shared.RuntimePerformanceMode) ([]shared.RuntimePerformanceMode, bool) {
+	seen := make(map[shared.RuntimePerformanceMode]bool, len(values))
+	result := make([]shared.RuntimePerformanceMode, 0, len(values))
+	for _, value := range values {
+		if value != shared.RuntimePerformanceModeGame && value != shared.RuntimePerformanceModeJITOff && value != shared.RuntimePerformanceModeJITOn && value != shared.RuntimePerformanceModeArenaGC {
+			return nil, false
+		}
+		if !seen[value] && len(result) < 4 {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result, true
+}
+
+func hasRequiredRuntimePerformanceModes(values []shared.RuntimePerformanceMode) bool {
+	required := map[shared.RuntimePerformanceMode]bool{
+		shared.RuntimePerformanceModeGame:   false,
+		shared.RuntimePerformanceModeJITOff: false,
+		shared.RuntimePerformanceModeJITOn:  false,
+	}
+	for _, value := range values {
+		if _, ok := required[value]; ok {
+			required[value] = true
+		}
+	}
+	for _, present := range required {
+		if !present {
+			return false
+		}
+	}
+	return true
+}
+
+func cleanRuntimePerformanceIssues(values []string) ([]string, bool) {
+	seen := make(map[string]bool, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if !validRuntimePerformanceIssue(value) {
+			return nil, false
+		}
+		if seen[value] {
+			continue
+		}
+		if len(result) >= 16 {
+			return nil, false
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result, true
+}
+
+func validRuntimePerformanceIssue(value string) bool {
+	switch value {
+	case "server_architecture_unsupported", "architecture_unsupported", "platform_not_verified", "installation_incomplete",
+		"injector_wrapper_invalid", "signature_unreadable", "game_version_unknown", "signature_version_mismatch",
+		"package_version_unknown", "binary_hash_unavailable", "plugin_layout_unverified", "injector_marker_invalid", "runtime_mode_contract_missing":
+		return true
+	default:
+		return false
+	}
 }
 
 func runtimeInstallationRegistrySupported(details map[string]interface{}) bool {

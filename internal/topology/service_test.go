@@ -41,6 +41,22 @@ func (c topologyTargetCatalog) RuntimeTargetInventories(context.Context) ([]agen
 	return append([]agents.RuntimeTargetInventory(nil), c.items...), nil
 }
 
+type refreshingTopologyTargetCatalog struct {
+	items      []agents.RuntimeTargetInventory
+	freshItems []agents.RuntimeTargetInventory
+	refreshes  [][]string
+}
+
+func (c *refreshingTopologyTargetCatalog) RuntimeTargetInventories(context.Context) ([]agents.RuntimeTargetInventory, error) {
+	return append([]agents.RuntimeTargetInventory(nil), c.items...), nil
+}
+
+func (c *refreshingTopologyTargetCatalog) EnsureRuntimeTargetsFresh(_ context.Context, targetIDs []string) error {
+	c.refreshes = append(c.refreshes, append([]string(nil), targetIDs...))
+	c.items = append([]agents.RuntimeTargetInventory(nil), c.freshItems...)
+	return nil
+}
+
 func TestTopologyAggregatesRoomsAndRequiresExplicitOvercommit(t *testing.T) {
 	now := time.Now().UTC()
 	roomA := rooms.Room{ID: "room-a", DirectoryName: "Cluster_A", Name: "A", Managed: true}
@@ -105,6 +121,79 @@ func TestTopologyAggregatesRoomsAndRequiresExplicitOvercommit(t *testing.T) {
 	}
 	if !updated.RemoteExecutionReady || updated.Mode != "applied_placement" || updated.CapacityPolicy.Enforced {
 		t.Fatalf("topology execution mode=%#v", updated)
+	}
+}
+
+func TestTopologyTreatsInstallationsAsEndpointsAndCapacityAsOneMachine(t *testing.T) {
+	now := time.Now().UTC()
+	room := rooms.Room{ID: "room-a", DirectoryName: "Cluster_A", Name: "A", Managed: true}
+	world := rooms.World{
+		ID: "master", RoomID: room.ID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster,
+		TargetIDs: []string{"agent:node-a"},
+	}
+	baseTarget := agents.RuntimeTarget{
+		ID: "agent:node-a", AgentID: "node-a", Name: "节点 A", Kind: agents.RuntimeKindAgent,
+		Status: agents.RuntimeStatusReady, Online: true, Configured: true,
+		Capabilities:          []string{"runtime.migration.v1", "shard.control.v1"},
+		DefaultInstallationID: "primary",
+		Installations: []agents.RuntimeInstallation{
+			{ID: "primary", Driver: "native"},
+			{ID: "testing", Driver: "native"},
+		},
+	}
+	primaryTarget := baseTarget
+	primaryTarget.Config.InstallationID = "primary"
+	testingTarget := baseTarget
+	testingTarget.Config.InstallationID = "testing"
+	primary := runtimeInventory(primaryTarget, 2, 2,
+		[]shared.RoomInventoryReport{inventoryRoom(room.DirectoryName, world.DirectoryName)},
+		[]shared.ShardProcessReport{{PID: 101, Cluster: room.DirectoryName, Shard: world.DirectoryName}}, now)
+	primary.Inventory.Installation.ID = "primary"
+	testing := runtimeInventory(testingTarget, 2, 2, nil, nil, now)
+	testing.Inventory.Installation.ID = "testing"
+	service, err := NewService(
+		topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {world}}},
+		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{primary, testing}}, newTopologyTestStore(t),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	current, err := service.Topology(context.Background(), room.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := topologyTarget(t, current, "agent:node-a")
+	if target.DefaultInstallationID != "primary" || len(target.Installations) != 2 ||
+		target.ObservedRunningShards != 1 || target.CurrentCapacity.RunningShards != 1 {
+		t.Fatalf("machine target=%#v", target)
+	}
+	placement := topologyPlacement(t, current, world.ID)
+	if placement.AppliedInstallationID != "primary" || placement.DesiredInstallationID != "primary" {
+		t.Fatalf("initial placement=%#v", placement)
+	}
+
+	updated, err := service.Update(context.Background(), room.ID, UpdateRequest{
+		ExpectedRevision: current.Revision,
+		Placements: []PlacementInput{{
+			WorldID: world.ID, TargetID: "agent:node-a", InstallationID: "testing",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	placement = topologyPlacement(t, updated, world.ID)
+	if placement.State != PlacementShardMissing || placement.DesiredInstallationID != "testing" || placement.AppliedInstallationID != "primary" {
+		t.Fatalf("planned placement=%#v", placement)
+	}
+	migration, err := service.PrepareMigration(context.Background(), room.ID, world.ID)
+	if err != nil || migration.SourceTargetID != migration.TargetTargetID ||
+		migration.SourceInstallationID != "primary" || migration.TargetInstallationID != "testing" {
+		t.Fatalf("migration=%#v err=%v", migration, err)
+	}
+	applied, err := service.ApplyMigration(room.ID, world.ID, updated.Revision, "agent:node-a", "testing")
+	if err != nil || applied.AppliedInstallationID != "testing" {
+		t.Fatalf("applied=%#v err=%v", applied, err)
 	}
 }
 
@@ -521,6 +610,89 @@ func TestResolveRoomExecutionsUsesOneConsistentTopologySnapshot(t *testing.T) {
 	}
 }
 
+func TestResolveRoomExecutionsRefreshesStaleAppliedTargetsOnce(t *testing.T) {
+	now := time.Now().UTC()
+	room := rooms.Room{ID: "room-refresh", DirectoryName: "Cluster_Refresh", Name: "Refresh", Managed: true}
+	master := rooms.World{ID: "master-refresh", RoomID: room.ID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}
+	caves := rooms.World{ID: "caves-refresh", RoomID: room.ID, DirectoryName: "Caves", Name: "洞穴", Role: rooms.WorldRoleCaves}
+	target := agents.RuntimeTarget{
+		ID: "agent:node", AgentID: "node", Name: "远程", Kind: agents.RuntimeKindAgent,
+		Status: agents.RuntimeStatusReady, Online: true, Configured: true, Capabilities: []string{"shard.control.v1"},
+	}
+	fresh := runtimeInventory(target, 4, 4,
+		[]shared.RoomInventoryReport{inventoryRoom(room.DirectoryName, master.DirectoryName, caves.DirectoryName)}, nil, now)
+	stale := fresh
+	stale.Stale, stale.StaleReason = true, "report_expired"
+	catalog := &refreshingTopologyTargetCatalog{
+		items: []agents.RuntimeTargetInventory{stale}, freshItems: []agents.RuntimeTargetInventory{fresh},
+	}
+	store := newTopologyTestStore(t)
+	record, err := store.Ensure(room.ID, []string{master.ID, caves.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range record.Placements {
+		record.Placements[index].DesiredTargetID = target.ID
+		record.Placements[index].AppliedTargetID = target.ID
+	}
+	if _, err := store.Save(room.ID, record.Revision, record.Placements); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(
+		topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {master, caves}}},
+		catalog, store,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := service.ResolveRoomExecutions(context.Background(), room.ID)
+	if err != nil || len(resolved) != 2 {
+		t.Fatalf("resolved=%#v err=%v", resolved, err)
+	}
+	if len(catalog.refreshes) != 1 || len(catalog.refreshes[0]) != 1 || catalog.refreshes[0][0] != target.ID {
+		t.Fatalf("refresh calls=%#v", catalog.refreshes)
+	}
+}
+
+func TestResolveCachedRoomExecutionsUsesStaleInventoryWithoutRefresh(t *testing.T) {
+	now := time.Now().UTC()
+	room := rooms.Room{ID: "room-cached", DirectoryName: "Cluster_Cached", Name: "Cached", Managed: true}
+	world := rooms.World{ID: "master-cached", RoomID: room.ID, DirectoryName: "Master", Name: "地表", Role: rooms.WorldRoleMaster}
+	target := agents.RuntimeTarget{
+		ID: "agent:node", AgentID: "node", Name: "远程", Kind: agents.RuntimeKindAgent,
+		Status: agents.RuntimeStatusReady, Online: true, Configured: true, Capabilities: []string{"shard.control.v1"},
+	}
+	stale := runtimeInventory(target, 4, 4,
+		[]shared.RoomInventoryReport{inventoryRoom(room.DirectoryName, world.DirectoryName)}, nil, now)
+	stale.Stale, stale.StaleReason = true, "report_expired"
+	catalog := &refreshingTopologyTargetCatalog{items: []agents.RuntimeTargetInventory{stale}}
+	store := newTopologyTestStore(t)
+	record, err := store.Ensure(room.ID, []string{world.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Placements[0].DesiredTargetID, record.Placements[0].AppliedTargetID = target.ID, target.ID
+	if _, err := store.Save(room.ID, record.Revision, record.Placements); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(
+		topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {world}}},
+		catalog, store,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := service.ResolveCachedRoomExecutions(context.Background(), room.ID)
+	if err != nil || len(resolved) != 1 || resolved[0].World.ID != world.ID {
+		t.Fatalf("resolved=%#v err=%v", resolved, err)
+	}
+	if len(catalog.refreshes) != 0 {
+		t.Fatalf("cached read unexpectedly refreshed targets: %#v", catalog.refreshes)
+	}
+}
+
 func TestResolveExecutionRequiresFreshAppliedAgentAndRejectsConflict(t *testing.T) {
 	now := time.Now().UTC()
 	room := rooms.Room{ID: "room-a", DirectoryName: "Cluster_A", Name: "A", Managed: true}
@@ -616,14 +788,24 @@ func TestPrepareAndApplyMigrationMovesOnlyAppliedPlacement(t *testing.T) {
 	if plan.SourceTargetID != localTargetID || plan.TargetTargetID != remote.Target.ID || plan.Revision != planned.Revision {
 		t.Fatalf("migration plan=%#v", plan)
 	}
-	applied, err := service.ApplyMigration(room.ID, world.ID, plan.Revision, plan.TargetTargetID)
+	applied, err := service.ApplyMigration(room.ID, world.ID, plan.Revision, plan.TargetTargetID, plan.TargetInstallationID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if applied.AppliedTargetID != remote.Target.ID || applied.DesiredTargetID != remote.Target.ID || applied.Revision == plan.Revision {
 		t.Fatalf("applied placement=%#v", applied)
 	}
-	if _, err := service.ApplyMigration(room.ID, world.ID, plan.Revision, plan.TargetTargetID); !errors.Is(err, ErrRevisionConflict) {
+	rolledBack, err := service.RollbackMigration(
+		room.ID, world.ID, applied.Revision, plan.SourceTargetID, plan.SourceInstallationID,
+		plan.TargetTargetID, plan.TargetInstallationID, plan.AppliedShardLinks,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rolledBack.AppliedTargetID != localTargetID || rolledBack.DesiredTargetID != remote.Target.ID || rolledBack.Revision == applied.Revision {
+		t.Fatalf("rolled back placement=%#v", rolledBack)
+	}
+	if _, err := service.ApplyMigration(room.ID, world.ID, plan.Revision, plan.TargetTargetID, plan.TargetInstallationID); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale apply error=%v", err)
 	}
 }
@@ -664,7 +846,7 @@ func TestAppliedRemoteWorldSurvivesMissingLocalDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	delete(catalog.worlds, room.ID)
-	applied, err := service.ApplyMigration(room.ID, world.ID, plan.Revision, remoteTarget.ID)
+	applied, err := service.ApplyMigration(room.ID, world.ID, plan.Revision, remoteTarget.ID, plan.TargetInstallationID)
 	if err != nil {
 		t.Fatalf("apply after source directory removal: %v", err)
 	}

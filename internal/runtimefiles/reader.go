@@ -26,13 +26,14 @@ const (
 )
 
 var artifactNames = map[shared.ArtifactKind][]string{
-	shared.ArtifactRuntimeHealth:      {"health.json"},
-	shared.ArtifactRuntimePlayers:     {"players-a.json", "players-b.json"},
-	shared.ArtifactRuntimeWorldState:  {"worldstate-a.json", "worldstate-b.json"},
-	shared.ArtifactRuntimeEvents:      {"events-a.json", "events-b.json"},
-	shared.ArtifactRuntimeCommand:     {"command-receipt-a.json", "command-receipt-b.json"},
-	shared.ArtifactRuntimeDiagnostics: {"diagnostic-a.json", "diagnostic-b.json"},
-	shared.ArtifactRuntimeBarrier:     {"snapshot-barrier.json"},
+	shared.ArtifactRuntimeHealth:        {"health.json"},
+	shared.ArtifactRuntimePlayers:       {"players-a.json", "players-b.json"},
+	shared.ArtifactRuntimePlayerHistory: {"player-history.json"},
+	shared.ArtifactRuntimeWorldState:    {"worldstate-a.json", "worldstate-b.json"},
+	shared.ArtifactRuntimeEvents:        {"events-a.json", "events-b.json"},
+	shared.ArtifactRuntimeCommand:       {"command-receipt-a.json", "command-receipt-b.json"},
+	shared.ArtifactRuntimeDiagnostics:   {"diagnostic-a.json", "diagnostic-b.json"},
+	shared.ArtifactRuntimeBarrier:       {"snapshot-barrier.json"},
 }
 
 func IsArtifactKind(kind shared.ArtifactKind) bool {
@@ -48,9 +49,13 @@ func ReadArtifacts(ctx context.Context, saveRoot, cluster, shard string, kind sh
 	if err != nil {
 		return shared.RuntimeArtifactBundle{}, err
 	}
+	if kind == shared.ArtifactRuntimePlayerHistory {
+		return readPlayerHistoryArtifact(ctx, root, shard)
+	}
 	root = filepath.Join(root, "save", "mod_config_data", "dst-admin")
 	bundle := shared.RuntimeArtifactBundle{Kind: kind, Artifacts: []shared.RuntimeArtifact{}}
 	var total int64
+	var readFailures error
 	for _, name := range artifactNames[kind] {
 		if err := ctx.Err(); err != nil {
 			return bundle, err
@@ -58,6 +63,10 @@ func ReadArtifacts(ctx context.Context, saveRoot, cluster, shard string, kind sh
 		path := filepath.Join(root, name)
 		data, info, exists, err := readTrustedRegular(path, MaximumArtifactBytes)
 		if err != nil {
+			if kind == shared.ArtifactRuntimeWorldState {
+				readFailures = errors.Join(readFailures, fmt.Errorf("%s: %w", name, err))
+				continue
+			}
 			return bundle, err
 		}
 		if !exists {
@@ -73,6 +82,9 @@ func ReadArtifacts(ctx context.Context, saveRoot, cluster, shard string, kind sh
 		})
 	}
 	if len(bundle.Artifacts) == 0 {
+		if readFailures != nil {
+			return bundle, readFailures
+		}
 		return bundle, os.ErrNotExist
 	}
 	return bundle, nil
@@ -92,8 +104,12 @@ func ValidateArtifactBundle(kind shared.ArtifactKind, bundle shared.RuntimeArtif
 	}
 	seen := make(map[string]bool, len(bundle.Artifacts))
 	var total int64
+	maximumArtifactBytes := MaximumArtifactBytes
+	if kind == shared.ArtifactRuntimePlayerHistory {
+		maximumArtifactBytes = MaximumBundleBytes
+	}
 	for _, artifact := range bundle.Artifacts {
-		if !allowed[artifact.Name] || seen[artifact.Name] || artifact.Size < 1 || artifact.Size > MaximumArtifactBytes ||
+		if !allowed[artifact.Name] || seen[artifact.Name] || artifact.Size < 1 || artifact.Size > maximumArtifactBytes ||
 			artifact.Size != int64(len(artifact.Data)) || artifact.UpdatedAt.IsZero() || len(artifact.SHA256) != sha256.Size*2 {
 			return errors.New("Runtime 制品元数据无效")
 		}

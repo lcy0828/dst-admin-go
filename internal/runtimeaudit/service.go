@@ -71,14 +71,10 @@ func (s *Service) RecordAction(request ActionRequest) error {
 		if len(selected) > 0 && !selected[world.ID] {
 			continue
 		}
-		status, statusErr := s.status(context.Background(), room, world)
-		if statusErr != nil {
-			status = shards.RuntimeStatus{State: shards.RuntimeUnknown}
-		}
 		_, err = s.store.Append(Event{
 			RoomID: room.ID, WorldID: world.ID, RoomDirectory: room.DirectoryName, WorldDirectory: world.DirectoryName,
-			Type: eventType, Action: request.Action, Source: request.Source, RuntimeState: string(status.State),
-			JobID: request.JobID, RequestID: request.RequestID, ExpectedExit: expectedExit && status.SessionExists, OccurredAt: s.now().UTC(),
+			Type: eventType, Action: request.Action, Source: request.Source,
+			JobID: request.JobID, RequestID: request.RequestID, ExpectedExit: expectedExit, OccurredAt: s.now().UTC(),
 		})
 		if err != nil {
 			return err
@@ -107,6 +103,10 @@ func (s *Service) LatestExit(roomID, worldID string) (*Event, error) {
 	return s.store.LatestExit(roomID, worldID)
 }
 
+func (s *Service) FirstSuccessfulStart() (*Event, error) {
+	return s.store.FirstSuccessfulStart()
+}
+
 func (s *Service) ObserveOperation(_ context.Context, audit shards.OperationAudit) error {
 	err := s.store.AnnotateAction(Event{
 		RoomID: audit.RoomID, WorldID: audit.WorldID, Action: string(audit.Action), Source: Source(audit.Source),
@@ -125,18 +125,40 @@ func (s *Service) Watch(ctx context.Context, interval time.Duration) {
 		interval = 5 * time.Second
 	}
 	previous := s.observe(ctx, nil, false)
-	timer := time.NewTimer(s.pollDelay(previous, interval))
-	defer timer.Stop()
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	schedule := func() {
+		delay := s.pollDelay(interval)
+		if delay <= 0 {
+			if timer != nil {
+				timer.Stop()
+			}
+			timerC = nil
+			return
+		}
+		if timer == nil {
+			timer = time.NewTimer(delay)
+		} else {
+			resetTimer(timer, delay)
+		}
+		timerC = timer.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-s.wake:
 			previous = s.observe(ctx, previous, true)
-		case <-timer.C:
+			schedule()
+		case <-timerC:
 			previous = s.observe(ctx, previous, true)
+			schedule()
 		}
-		resetTimer(timer, s.pollDelay(previous, interval))
 	}
 }
 
@@ -154,30 +176,21 @@ func (s *Service) requestFastPolling() {
 	}
 }
 
-func (s *Service) pollDelay(states map[string]observedRuntime, fast time.Duration) time.Duration {
-	if fast <= 0 {
-		fast = 5 * time.Second
+func (s *Service) pollDelay(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		interval = 5 * time.Second
 	}
 	s.watchMu.Lock()
 	fastUntil := s.fastUntil
 	s.watchMu.Unlock()
-	if s.now().UTC().Before(fastUntil) || len(states) == 0 {
-		return fast
+	remaining := fastUntil.Sub(s.now().UTC())
+	if remaining <= 0 {
+		return 0
 	}
-	allStopped := true
-	for _, state := range states {
-		switch state.state {
-		case shards.RuntimeRunning:
-			allStopped = false
-		case shards.RuntimeStopped:
-		default:
-			return fast
-		}
+	if remaining < interval {
+		return remaining
 	}
-	if allStopped {
-		return 12 * fast
-	}
-	return 6 * fast
+	return interval
 }
 
 func resetTimer(timer *time.Timer, delay time.Duration) {

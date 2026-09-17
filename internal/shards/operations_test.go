@@ -12,6 +12,7 @@ import (
 	"dont/internal/agents"
 	"dont/internal/jobs"
 	"dont/internal/operationlease"
+	"dont/internal/roomops"
 	"dont/internal/rooms"
 	"dont/internal/topology"
 	"dont/shared"
@@ -27,18 +28,6 @@ type fakePlacementResolver struct {
 	appliedByWorld  map[string]topology.ExecutionPlacement
 	resolvedByWorld map[string]topology.ExecutionPlacement
 	errByWorld      map[string]error
-}
-
-type preflightPlacementResolver struct {
-	*fakePlacementResolver
-	preflight    topology.ResourcePreflight
-	preflightErr error
-	calls        int
-}
-
-func (resolver *preflightPlacementResolver) PreflightExecution(context.Context, string, []string) (topology.ResourcePreflight, error) {
-	resolver.calls++
-	return resolver.preflight, resolver.preflightErr
 }
 
 func (resolver *fakePlacementResolver) AppliedPlacement(_ string, worldID string) (topology.ExecutionPlacement, error) {
@@ -133,6 +122,17 @@ type fakeOperationNotifier struct {
 	err   error
 }
 
+type roomLockOperationNotifier struct{}
+
+func (roomLockOperationNotifier) BeforeOperation(ctx context.Context, roomID, _, _, _ string) error {
+	_, release, err := roomops.Acquire(ctx, roomID)
+	if err != nil {
+		return err
+	}
+	release()
+	return nil
+}
+
 func (notifier *fakeOperationNotifier) BeforeOperation(_ context.Context, roomID, action, source, jobID string) error {
 	notifier.calls = append(notifier.calls, roomID+":"+action+":"+source+":"+jobID)
 	return notifier.err
@@ -189,15 +189,11 @@ func (f fakeRooms) Worlds(string) ([]rooms.World, error) {
 }
 
 type fakeControl struct {
+	mu      sync.Mutex
 	running map[string]bool
 	status  map[string]RuntimeStatus
 	calls   []string
 	fail    map[string]error
-}
-
-type fakePreparer struct {
-	calls []string
-	err   error
 }
 
 type interruptControl struct {
@@ -205,6 +201,57 @@ type interruptControl struct {
 	started chan struct{}
 	state   RuntimeStatus
 	calls   []string
+}
+
+type stagedStartControl struct {
+	mu               sync.Mutex
+	masterStarted    chan struct{}
+	dependentStarted chan struct{}
+	masterReady      chan struct{}
+	masterStartOnce  sync.Once
+	dependentOnce    sync.Once
+	states           map[string]RuntimeStatus
+	calls            []string
+}
+
+func (c *stagedStartControl) IsRunning(ctx context.Context, room, world string) (bool, error) {
+	status, err := c.Status(ctx, room, world)
+	return status.State == RuntimeRunning, err
+}
+
+func (c *stagedStartControl) Status(_ context.Context, _, world string) (RuntimeStatus, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.states[world], nil
+}
+
+func (c *stagedStartControl) Start(_ context.Context, _, world string) error {
+	c.mu.Lock()
+	c.calls = append(c.calls, "start:"+world)
+	if world == "Master" {
+		c.states[world] = RuntimeStatus{State: RuntimeStarting, SessionExists: true}
+		c.masterStartOnce.Do(func() { close(c.masterStarted) })
+		c.mu.Unlock()
+		go func() {
+			<-c.masterReady
+			c.mu.Lock()
+			c.states[world] = RuntimeStatus{State: RuntimeRunning, SessionExists: true}
+			c.mu.Unlock()
+		}()
+		return nil
+	}
+	c.states[world] = RuntimeStatus{State: RuntimeRunning, SessionExists: true}
+	c.dependentOnce.Do(func() { close(c.dependentStarted) })
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *stagedStartControl) Stop(_ context.Context, _, world string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, "stop:"+world)
+	c.states[world] = RuntimeStatus{State: RuntimeStopped}
+	return nil
 }
 
 func (c *interruptControl) IsRunning(ctx context.Context, room, world string) (bool, error) {
@@ -235,15 +282,14 @@ func (c *interruptControl) Stop(_ context.Context, _, world string) error {
 	return nil
 }
 
-func (f *fakePreparer) Prepare(_ context.Context, room, world string) error {
-	f.calls = append(f.calls, room+"/"+world)
-	return f.err
-}
-
 func (f *fakeControl) IsRunning(_ context.Context, room, world string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.running[room+"/"+world], nil
 }
 func (f *fakeControl) Status(_ context.Context, room, world string) (RuntimeStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	key := room + "/" + world
 	if status, ok := f.status[key]; ok {
 		return status, nil
@@ -254,6 +300,8 @@ func (f *fakeControl) Status(_ context.Context, room, world string) (RuntimeStat
 	return RuntimeStatus{State: RuntimeStopped}, nil
 }
 func (f *fakeControl) Start(_ context.Context, room, world string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	key := room + "/" + world
 	f.calls = append(f.calls, "start:"+world)
 	if err := f.fail["start:"+world]; err != nil {
@@ -263,6 +311,8 @@ func (f *fakeControl) Start(_ context.Context, room, world string) error {
 	return nil
 }
 func (f *fakeControl) Stop(_ context.Context, room, world string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	key := room + "/" + world
 	f.calls = append(f.calls, "stop:"+world)
 	if err := f.fail["stop:"+world]; err != nil {
@@ -273,6 +323,8 @@ func (f *fakeControl) Stop(_ context.Context, room, world string) error {
 	return nil
 }
 func (f *fakeControl) Cleanup(_ context.Context, room, world string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	key := room + "/" + world
 	f.calls = append(f.calls, "cleanup:"+world)
 	if err := f.fail["cleanup:"+world]; err != nil {
@@ -283,7 +335,7 @@ func (f *fakeControl) Cleanup(_ context.Context, room, world string) error {
 	return nil
 }
 
-func testOperations(control *fakeControl) *Operations {
+func testOperations(control Control) *Operations {
 	roomID := rooms.EncodeID("summer_2026")
 	operations := NewOperations(fakeRooms{
 		room: rooms.Room{ID: roomID, DirectoryName: "summer_2026", Managed: true},
@@ -298,7 +350,7 @@ func testOperations(control *fakeControl) *Operations {
 	return operations
 }
 
-func TestStartOrdersMasterFirstAndPreservesUnderscoreRoomName(t *testing.T) {
+func TestStartPlansMasterFirstAndLaunchesBothWorlds(t *testing.T) {
 	control := &fakeControl{running: map[string]bool{}, fail: map[string]error{}}
 	operations := testOperations(control)
 	targets, runner, err := operations.Plan(ActionStart, rooms.EncodeID("summer_2026"), nil)
@@ -309,7 +361,8 @@ func TestStartOrdersMasterFirstAndPreservesUnderscoreRoomName(t *testing.T) {
 	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(control.calls) != "[start:Master start:Caves]" {
+	calls := fmt.Sprint(control.calls)
+	if calls != "[start:Master start:Caves]" && calls != "[start:Caves start:Master]" {
 		t.Fatalf("start order = %v", control.calls)
 	}
 	if len(results) != 2 || results[0].Status != jobs.StatusSucceeded || results[1].Status != jobs.StatusSucceeded {
@@ -317,9 +370,134 @@ func TestStartOrdersMasterFirstAndPreservesUnderscoreRoomName(t *testing.T) {
 	}
 }
 
+func TestStartSupportsCaveMasterWithMultipleWorldTypes(t *testing.T) {
+	roomID := rooms.EncodeID("mixed_worlds")
+	control := &fakeControl{running: map[string]bool{}, fail: map[string]error{}}
+	operations := NewOperations(fakeRooms{
+		room: rooms.Room{ID: roomID, DirectoryName: "mixed_worlds", Managed: true},
+		worlds: []rooms.World{
+			{ID: "forest-3", RoomID: roomID, DirectoryName: "ForestThree", Name: "Forest Three", Role: rooms.WorldRoleCustom, Type: rooms.WorldTypeForest, ShardID: 3},
+			{ID: "cave-7", RoomID: roomID, DirectoryName: "CavePrime", Name: "Cave Prime", Role: rooms.WorldRoleMaster, Type: rooms.WorldTypeCave, IsMaster: true, ShardID: 7},
+			{ID: "cave-9", RoomID: roomID, DirectoryName: "DeepTwo", Name: "Deep Two", Role: rooms.WorldRoleCaves, Type: rooms.WorldTypeCave, ShardID: 9},
+		},
+	}, control)
+	operations.pollInterval = time.Millisecond
+	operations.startTimeout = 100 * time.Millisecond
+	_, runner, err := operations.Plan(ActionStart, roomID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner(context.Background(), func(jobs.TargetResult) {}); err != nil {
+		t.Fatal(err)
+	}
+	started := make(map[string]bool, len(control.calls))
+	for _, call := range control.calls {
+		started[call] = true
+	}
+	if len(control.calls) != 3 || !started["start:CavePrime"] || !started["start:ForestThree"] || !started["start:DeepTwo"] {
+		t.Fatalf("start calls=%v", control.calls)
+	}
+}
+
+func TestStartRejectsInvalidMasterCardinality(t *testing.T) {
+	tests := []struct {
+		name     string
+		worlds   []rooms.World
+		wantCode string
+	}{
+		{
+			name: "missing", wantCode: "ROOM_MASTER_MISSING",
+			worlds: []rooms.World{{ID: "forest", DirectoryName: "Forest", Name: "Forest", Role: rooms.WorldRoleCustom, Type: rooms.WorldTypeForest}},
+		},
+		{
+			name: "multiple", wantCode: "ROOM_MASTER_MULTIPLE",
+			worlds: []rooms.World{
+				{ID: "forest-master", DirectoryName: "ForestMaster", Name: "Forest Master", Role: rooms.WorldRoleMaster, Type: rooms.WorldTypeForest, IsMaster: true},
+				{ID: "cave-master", DirectoryName: "CaveMaster", Name: "Cave Master", Role: rooms.WorldRoleMaster, Type: rooms.WorldTypeCave, IsMaster: true},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			roomID := rooms.EncodeID("invalid_" + test.name)
+			for index := range test.worlds {
+				test.worlds[index].RoomID = roomID
+			}
+			control := &fakeControl{running: map[string]bool{}, fail: map[string]error{}}
+			operations := NewOperations(fakeRooms{
+				room: rooms.Room{ID: roomID, DirectoryName: "invalid_" + test.name, Managed: true}, worlds: test.worlds,
+			}, control)
+			_, runner, err := operations.Plan(ActionStart, roomID, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var results []jobs.TargetResult
+			if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+				t.Fatal(err)
+			}
+			if len(results) != len(test.worlds) || len(control.calls) != 0 {
+				t.Fatalf("results=%#v calls=%v", results, control.calls)
+			}
+			for _, result := range results {
+				if result.Error == nil || result.Error.Code != test.wantCode {
+					t.Fatalf("result=%#v wantCode=%s", result, test.wantCode)
+				}
+			}
+		})
+	}
+}
+
+func TestStartLaunchesSameEndpointDependentsBeforeMasterIsReady(t *testing.T) {
+	roomID := rooms.EncodeID("summer_2026")
+	control := &stagedStartControl{
+		masterStarted: make(chan struct{}), dependentStarted: make(chan struct{}), masterReady: make(chan struct{}),
+		states: map[string]RuntimeStatus{"Master": {State: RuntimeStopped}, "Caves": {State: RuntimeStopped}},
+	}
+	operations := NewOperations(fakeRooms{
+		room: rooms.Room{ID: roomID, DirectoryName: "summer_2026", Managed: true},
+		worlds: []rooms.World{
+			{ID: rooms.EncodeID("Master"), RoomID: roomID, DirectoryName: "Master", Name: "Master", Role: rooms.WorldRoleMaster},
+			{ID: rooms.EncodeID("Caves"), RoomID: roomID, DirectoryName: "Caves", Name: "Caves", Role: rooms.WorldRoleCaves},
+		},
+	}, control)
+	operations.pollInterval = time.Millisecond
+	operations.startTimeout = time.Second
+	_, runner, err := operations.Plan(ActionStart, roomID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan []jobs.TargetResult, 1)
+	go func() {
+		var results []jobs.TargetResult
+		_ = runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) })
+		done <- results
+	}()
+	select {
+	case <-control.masterStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Master was not launched")
+	}
+	select {
+	case <-control.dependentStarted:
+	case <-time.After(time.Second):
+		t.Fatal("dependent shard waited for Master readiness")
+	}
+	close(control.masterReady)
+	results := <-done
+	if len(results) != 2 || results[0].Status != jobs.StatusSucceeded || results[1].Status != jobs.StatusSucceeded {
+		t.Fatalf("results = %#v", results)
+	}
+	control.mu.Lock()
+	calls := fmt.Sprint(control.calls)
+	control.mu.Unlock()
+	if calls != "[start:Master start:Caves]" && calls != "[start:Caves start:Master]" {
+		t.Fatalf("calls = %s", calls)
+	}
+}
+
 func TestStopRunsNotificationHookBeforeLifecycleControl(t *testing.T) {
 	control := &fakeControl{
-		running: map[string]bool{"summer_2026/Master": true, "summer_2026/Caves": true},
+		running: map[string]bool{"summer_2026/Master": true},
 		fail:    map[string]error{},
 	}
 	operations := testOperations(control)
@@ -336,6 +514,58 @@ func TestStopRunsNotificationHookBeforeLifecycleControl(t *testing.T) {
 	want := []string{rooms.EncodeID("summer_2026") + ":stop::job-stop"}
 	if !reflect.DeepEqual(notifier.calls, want) || fmt.Sprint(control.calls) != "[stop:Master]" {
 		t.Fatalf("notifier=%v control=%v", notifier.calls, control.calls)
+	}
+}
+
+func TestStopNotificationRunsBeforeRoomLockAndThenStopsInDependencyOrder(t *testing.T) {
+	control := &fakeControl{
+		running: map[string]bool{"summer_2026/Master": true, "summer_2026/Caves": true},
+		fail:    map[string]error{},
+	}
+	operations := testOperations(control)
+	operations.ConfigureNotifier(roomLockOperationNotifier{})
+	_, runner, err := operations.Plan(ActionStop, rooms.EncodeID("summer_2026"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var results []jobs.TargetResult
+	if err := runner(ctx, func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(control.calls) != "[stop:Caves stop:Master]" {
+		t.Fatalf("stop order = %v", control.calls)
+	}
+	if len(results) != 2 || results[0].Status != jobs.StatusSucceeded || results[1].Status != jobs.StatusSucceeded {
+		t.Fatalf("results = %#v", results)
+	}
+}
+
+func TestImmediateStopSkipsOnlyThisOperationsNotice(t *testing.T) {
+	control := &fakeControl{running: map[string]bool{"summer_2026/Master": true}, fail: map[string]error{}}
+	operations := testOperations(control)
+	notifier := &fakeOperationNotifier{}
+	operations.ConfigureNotifier(notifier)
+	_, runner, err := operations.PlanWithOptions(ActionStop, rooms.EncodeID("summer_2026"), []string{rooms.EncodeID("Master")}, PlanOptions{Immediate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner(context.Background(), func(jobs.TargetResult) {}); err != nil {
+		t.Fatal(err)
+	}
+	if len(notifier.calls) != 0 || fmt.Sprint(control.calls) != "[stop:Master]" {
+		t.Fatalf("immediate stop: notices=%v control=%v", notifier.calls, control.calls)
+	}
+	_, runner, err = operations.Plan(ActionStop, rooms.EncodeID("summer_2026"), []string{rooms.EncodeID("Master")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner(context.Background(), func(jobs.TargetResult) {}); err != nil {
+		t.Fatal(err)
+	}
+	if len(notifier.calls) != 1 {
+		t.Fatalf("immediate mode leaked into next operation: %v", notifier.calls)
 	}
 }
 
@@ -358,30 +588,6 @@ func TestNotificationCountdownCancellationPreventsLifecycleControl(t *testing.T)
 	}
 }
 
-func TestStartDoesNotCallControlWhenRuntimePreparationFails(t *testing.T) {
-	control := &fakeControl{running: map[string]bool{}, fail: map[string]error{}}
-	operations := testOperations(control)
-	preparer := &fakePreparer{err: fmt.Errorf("customcommands.lua is invalid")}
-	operations.preparers = []RuntimePreparer{preparer}
-	_, runner, err := operations.Plan(ActionStart, rooms.EncodeID("summer_2026"), []string{rooms.EncodeID("Master")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var results []jobs.TargetResult
-	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
-		t.Fatal(err)
-	}
-	if fmt.Sprint(preparer.calls) != "[summer_2026/Master]" {
-		t.Fatalf("preparer calls = %v", preparer.calls)
-	}
-	if len(control.calls) != 0 {
-		t.Fatalf("control was called after preparation failed: %v", control.calls)
-	}
-	if len(results) != 1 || results[0].Status != jobs.StatusFailed || results[0].Error == nil || results[0].Error.Code != "START_FAILED" {
-		t.Fatalf("results = %#v", results)
-	}
-}
-
 func TestStopOrdersMasterLastAndReportsPerWorldFailure(t *testing.T) {
 	control := &fakeControl{
 		running: map[string]bool{"summer_2026/Master": true, "summer_2026/Caves": true},
@@ -399,6 +605,92 @@ func TestStopOrdersMasterLastAndReportsPerWorldFailure(t *testing.T) {
 	}
 	if len(results) != 2 || results[0].Status != jobs.StatusFailed || results[1].Status != jobs.StatusSucceeded {
 		t.Fatalf("results = %#v", results)
+	}
+}
+
+func TestRestartStopsDependencyBeforeMasterThenStartsWorldsConcurrently(t *testing.T) {
+	control := &fakeControl{
+		running: map[string]bool{"summer_2026/Master": true, "summer_2026/Caves": true},
+		fail:    map[string]error{},
+	}
+	operations := testOperations(control)
+	_, runner, err := operations.Plan(ActionRestart, rooms.EncodeID("summer_2026"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []jobs.TargetResult
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	calls := control.calls
+	if len(calls) != 4 || calls[0] != "stop:Caves" || calls[1] != "stop:Master" ||
+		!((calls[2] == "start:Master" && calls[3] == "start:Caves") || (calls[2] == "start:Caves" && calls[3] == "start:Master")) {
+		t.Fatalf("restart order = %v", control.calls)
+	}
+	if len(results) != 2 || results[0].Status != jobs.StatusSucceeded || results[1].Status != jobs.StatusSucceeded {
+		t.Fatalf("results = %#v", results)
+	}
+}
+
+func TestStartDependentRequiresMasterInSamePlanWhenMasterIsStopped(t *testing.T) {
+	control := &fakeControl{running: map[string]bool{}, fail: map[string]error{}}
+	operations := testOperations(control)
+	_, runner, err := operations.Plan(ActionStart, rooms.EncodeID("summer_2026"), []string{rooms.EncodeID("Caves")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []jobs.TargetResult
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(control.calls) != 0 || len(results) != 1 || results[0].Status != jobs.StatusFailed ||
+		results[0].Error == nil || results[0].Error.Code != "DEPENDENCY_SELECTION_INCOMPLETE" {
+		t.Fatalf("control=%v results=%#v", control.calls, results)
+	}
+}
+
+func TestStartDependentAloneIsAllowedWhenMasterIsAlreadyRunning(t *testing.T) {
+	control := &fakeControl{
+		running: map[string]bool{"summer_2026/Master": true},
+		fail:    map[string]error{},
+	}
+	operations := testOperations(control)
+	_, runner, err := operations.Plan(ActionStart, rooms.EncodeID("summer_2026"), []string{rooms.EncodeID("Caves")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []jobs.TargetResult
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(control.calls) != "[start:Caves]" || len(results) != 1 || results[0].Status != jobs.StatusSucceeded {
+		t.Fatalf("control=%v results=%#v", control.calls, results)
+	}
+}
+
+func TestStopOrRestartMasterRequiresActiveDependentsInSamePlan(t *testing.T) {
+	for _, action := range []Action{ActionStop, ActionRestart} {
+		t.Run(string(action), func(t *testing.T) {
+			control := &fakeControl{
+				running: map[string]bool{"summer_2026/Master": true, "summer_2026/Caves": true},
+				fail:    map[string]error{},
+			}
+			operations := testOperations(control)
+			notifier := &fakeOperationNotifier{}
+			operations.ConfigureNotifier(notifier)
+			_, runner, err := operations.Plan(action, rooms.EncodeID("summer_2026"), []string{rooms.EncodeID("Master")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var results []jobs.TargetResult
+			if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+				t.Fatal(err)
+			}
+			if len(control.calls) != 0 || len(notifier.calls) != 0 || len(results) != 1 || results[0].Status != jobs.StatusFailed ||
+				results[0].Error == nil || results[0].Error.Code != "DEPENDENCY_SELECTION_INCOMPLETE" {
+				t.Fatalf("control=%v notifier=%v results=%#v", control.calls, notifier.calls, results)
+			}
+		})
 	}
 }
 
@@ -634,7 +926,103 @@ func TestCapacityRiskRequiresExplicitConfirmation(t *testing.T) {
 	}
 }
 
-func TestRoomPreflightPreventsPartialStartWhenRemoteWorldIsUnavailable(t *testing.T) {
+func TestRuntimeModesIntersectEverySelectedTarget(t *testing.T) {
+	operations := testOperations(&fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}})
+	masterID, cavesID := rooms.EncodeID("Master"), rooms.EncodeID("Caves")
+	allModes := []shared.RuntimePerformanceMode{
+		shared.RuntimePerformanceModeGame,
+		shared.RuntimePerformanceModeLuaJIT,
+		shared.RuntimePerformanceModeArenaGC,
+	}
+	commonModes := allModes[:2]
+	resolver := &fakePlacementResolver{resolvedByWorld: map[string]topology.ExecutionPlacement{
+		masterID: {
+			AppliedTargetID: "local",
+			Target: agents.RuntimeTarget{Name: "本机", OS: "linux", Arch: "amd64", Performance: &shared.RuntimePerformanceReport{
+				Provider: "dontstarve-luajit2", Status: shared.RuntimePerformanceReady, CanEnable: true,
+				PackageVersion: "3.0.0", GameVersion: "747465", SupportedModes: allModes,
+			}},
+		},
+		cavesID: {
+			AppliedTargetID: "agent:node-a",
+			Target: agents.RuntimeTarget{Name: "节点 A", Capabilities: []string{"shard.runtime-mode.v1"}, Performance: &shared.RuntimePerformanceReport{
+				Provider: "dontstarve-luajit2", Status: shared.RuntimePerformanceReady, CanEnable: true,
+				PackageVersion: "3.0.0", SupportedModes: commonModes,
+			}},
+		},
+	}}
+	if err := operations.ConfigureDistributed(resolver, &fakeRemoteExecutor{}, &fakeLeaseService{}); err != nil {
+		t.Fatal(err)
+	}
+
+	availability, err := operations.RuntimeModes(context.Background(), rooms.EncodeID("summer_2026"), []string{masterID, cavesID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(availability.Modes, commonModes) || len(availability.Targets) != 2 || len(availability.Packages) != 3 {
+		t.Fatalf("availability=%#v", availability)
+	}
+	if availability.Targets[0].CompatibilityStatus != shared.RuntimePerformanceReady || availability.Targets[1].CompatibilityStatus != shared.RuntimePerformanceReady || availability.Targets[1].OS != "linux" || availability.Targets[1].Arch != "amd64" || availability.Targets[1].GameVersion != "747465" {
+		t.Fatalf("target compatibility evidence=%#v", availability.Targets)
+	}
+	if _, err := operations.RequireRuntimeSelection(context.Background(), rooms.EncodeID("summer_2026"), []string{masterID, cavesID}, shared.RuntimePerformanceModeLuaJIT, "3.0.0"); err != nil {
+		t.Fatalf("matching package version was rejected: %v", err)
+	}
+	if _, err := operations.RequireRuntimeSelection(context.Background(), rooms.EncodeID("summer_2026"), []string{masterID, cavesID}, shared.RuntimePerformanceModeLuaJIT, "2.9.2"); !errors.Is(err, ErrRuntimeVersionUnavailable) {
+		t.Fatalf("mismatched package version error=%v", err)
+	}
+	if _, err := operations.RequireRuntimeSelection(context.Background(), rooms.EncodeID("summer_2026"), []string{masterID, cavesID}, shared.RuntimePerformanceModeLuaJIT, "future"); !errors.Is(err, ErrInvalidRuntimeVersion) {
+		t.Fatalf("invalid package version error=%v", err)
+	}
+	if _, err := operations.RequireRuntimeMode(context.Background(), rooms.EncodeID("summer_2026"), []string{masterID, cavesID}, shared.RuntimePerformanceModeArenaGC); !errors.Is(err, ErrRuntimeModeUnavailable) {
+		t.Fatalf("arena-gc error=%v", err)
+	}
+}
+
+func TestRuntimeModesExposeIncompatibilityEvidence(t *testing.T) {
+	operations := testOperations(&fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}})
+	masterID := rooms.EncodeID("Master")
+	resolver := &fakePlacementResolver{resolvedByWorld: map[string]topology.ExecutionPlacement{
+		masterID: {
+			AppliedTargetID: "local",
+			Target: agents.RuntimeTarget{Name: "本机", Performance: &shared.RuntimePerformanceReport{
+				Provider: "dontstarve-luajit2", Status: shared.RuntimePerformanceIncompatible,
+				SupportedModes: []shared.RuntimePerformanceMode{shared.RuntimePerformanceModeGame},
+				Issues:         []string{"platform_not_verified", "installation_incomplete"},
+			}},
+		},
+	}}
+	if err := operations.ConfigureDistributed(resolver, &fakeRemoteExecutor{}, &fakeLeaseService{}); err != nil {
+		t.Fatal(err)
+	}
+
+	availability, err := operations.RuntimeModes(context.Background(), rooms.EncodeID("summer_2026"), []string{masterID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(availability.Targets) != 1 {
+		t.Fatalf("targets=%#v", availability.Targets)
+	}
+	target := availability.Targets[0]
+	if target.CompatibilityStatus != shared.RuntimePerformanceIncompatible || target.ReasonCode != "runtime_incompatible" ||
+		!reflect.DeepEqual(target.Issues, []string{"platform_not_verified", "installation_incomplete"}) {
+		t.Fatalf("target=%#v", target)
+	}
+}
+
+func TestGameRuntimeModeDoesNotMaskPlacementPreflight(t *testing.T) {
+	operations := testOperations(&fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}})
+	resolver := &fakePlacementResolver{err: errors.New("Agent 已离线")}
+	if err := operations.ConfigureDistributed(resolver, &fakeRemoteExecutor{}, &fakeLeaseService{}); err != nil {
+		t.Fatal(err)
+	}
+	availability, err := operations.RequireRuntimeMode(context.Background(), rooms.EncodeID("summer_2026"), nil, shared.RuntimePerformanceModeGame)
+	if err != nil || !reflect.DeepEqual(availability.Modes, []shared.RuntimePerformanceMode{shared.RuntimePerformanceModeGame}) {
+		t.Fatalf("availability=%#v err=%v", availability, err)
+	}
+}
+
+func TestStartAttemptsEachWorldAndReportsUnavailableRemoteTarget(t *testing.T) {
 	roomID := rooms.EncodeID("summer_2026")
 	masterID := rooms.EncodeID("Master")
 	cavesID := rooms.EncodeID("Caves")
@@ -665,60 +1053,18 @@ func TestRoomPreflightPreventsPartialStartWhenRemoteWorldIsUnavailable(t *testin
 	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
 		t.Fatal(err)
 	}
-	if len(control.calls) != 0 || remote.calls != 0 {
-		t.Fatalf("preflight allowed partial execution: local=%v remote=%d", control.calls, remote.calls)
+	if fmt.Sprint(control.calls) != "[start:Master]" || remote.calls != 0 {
+		t.Fatalf("direct start calls: local=%v remote=%d", control.calls, remote.calls)
 	}
 	if len(results) != 2 {
 		t.Fatalf("results = %#v", results)
 	}
-	codes := map[string]string{}
+	statuses := map[string]jobs.Status{}
 	for _, result := range results {
-		if result.Error == nil {
-			t.Fatalf("result = %#v", result)
-		}
-		codes[result.TargetID] = result.Error.Code
+		statuses[result.TargetID] = result.Status
 	}
-	if codes[masterID] != "ROOM_PREFLIGHT_ABORTED" || codes[cavesID] == "ROOM_PREFLIGHT_ABORTED" {
-		t.Fatalf("codes = %#v", codes)
-	}
-}
-
-func TestResourcePreflightPreventsEveryShardStart(t *testing.T) {
-	roomID := rooms.EncodeID("summer_2026")
-	control := &fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}}
-	operations := testOperations(control)
-	preflight := topology.ResourcePreflight{
-		Ready: false,
-		Conflicts: []topology.ResourceConflict{{
-			Code: "UDP_PORT_CONFLICT", Port: 10999, Message: "UDP 10999 已被其他 Shard 占用",
-		}},
-	}
-	resolver := &preflightPlacementResolver{
-		fakePlacementResolver: &fakePlacementResolver{applied: topology.ExecutionPlacement{AppliedTargetID: "local"}},
-		preflight:             preflight,
-		preflightErr:          &topology.ResourceConflictError{Preflight: preflight},
-	}
-	if err := operations.ConfigureDistributed(resolver, &fakeRemoteExecutor{}, &fakeLeaseService{lease: operationlease.Lease{
-		RoomID: roomID, LeaseID: "lease", OperationKey: "operation", FencingToken: 1,
-		ExpiresAt: time.Now().UTC().Add(time.Minute),
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	_, runner, err := operations.Plan(ActionStart, roomID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var results []jobs.TargetResult
-	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
-		t.Fatal(err)
-	}
-	if resolver.calls != 1 || len(control.calls) != 0 || len(results) != 2 {
-		t.Fatalf("preflight calls=%d control=%#v results=%#v", resolver.calls, control.calls, results)
-	}
-	for _, result := range results {
-		if result.Error == nil || result.Error.Code != "RESOURCE_PREFLIGHT_FAILED" || result.Error.Message != preflight.Conflicts[0].Message {
-			t.Fatalf("result=%#v", result)
-		}
+	if statuses[masterID] != jobs.StatusSucceeded || statuses[cavesID] != jobs.StatusFailed {
+		t.Fatalf("statuses = %#v results=%#v", statuses, results)
 	}
 }
 
@@ -754,7 +1100,7 @@ func TestBatchPlanUsesRoomScopedTargetsAndMergedCapacityConfirmation(t *testing.
 		t.Fatal(err)
 	}
 	selections := []BatchRoomSelection{{RoomID: roomAID}, {RoomID: roomBID}}
-	if _, _, err := operations.PlanBatch(ActionStart, []BatchRoomSelection{{RoomID: roomAID}, {RoomID: roomAID}}, BatchPlanOptions{}); !errors.Is(err, ErrInvalidBatch) {
+	if _, _, err := operations.PlanBatch(ActionStart, []BatchRoomSelection{{RoomID: roomAID}, {RoomID: roomAID}}); !errors.Is(err, ErrInvalidBatch) {
 		t.Fatalf("duplicate room error = %v", err)
 	}
 	err := operations.RequireBatchCapacityConfirmation(context.Background(), ActionStart, selections, false)
@@ -762,7 +1108,7 @@ func TestBatchPlanUsesRoomScopedTargetsAndMergedCapacityConfirmation(t *testing.
 	if !errors.As(err, &risk) || !risk.Preview.RequiresRiskConfirmation {
 		t.Fatalf("risk error = %#v", err)
 	}
-	targets, runner, err := operations.PlanBatch(ActionStart, selections, BatchPlanOptions{})
+	targets, runner, err := operations.PlanBatch(ActionStart, selections)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -770,19 +1116,6 @@ func TestBatchPlanUsesRoomScopedTargetsAndMergedCapacityConfirmation(t *testing.
 		t.Fatalf("targets = %#v", targets)
 	}
 	var results []jobs.TargetResult
-	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
-		t.Fatal(err)
-	}
-	if len(control.calls) != 0 || len(results) != 2 || results[0].Error == nil || results[0].Error.Code != "CAPACITY_RISK_CONFIRMATION_REQUIRED" {
-		t.Fatalf("unconfirmed batch executed: calls=%v results=%#v", control.calls, results)
-	}
-
-	resolver.batchPreview.RequiresRiskConfirmation = false
-	targets, runner, err = operations.PlanBatch(ActionStart, selections, BatchPlanOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	results = nil
 	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
 		t.Fatal(err)
 	}
@@ -821,7 +1154,7 @@ func TestDistributedOperationUsesAppliedRemoteTargetWithLeaseAndNoLocalFallback(
 	if err := runner(runnerContext, func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Status != jobs.StatusSucceeded || remote.calls != 2 || remote.targetID != "agent:node-a" {
+	if len(results) != 1 || results[0].Status != jobs.StatusSucceeded || remote.calls != 1 || remote.targetID != "agent:node-a" {
 		t.Fatalf("results=%#v remote=%#v", results, remote)
 	}
 	if remote.request.Action != shared.ShardActionStart || remote.request.FencingToken != 7 || remote.request.LeaseID != "lease-1" || remote.request.OperationKey == "" {
@@ -902,5 +1235,34 @@ func TestRuntimeConfigurationRoutesLocalLifecycleThroughPlacedDriver(t *testing.
 	}
 	if len(control.calls) != 0 {
 		t.Fatalf("local control bypassed Runtime Driver: %v", control.calls)
+	}
+}
+
+func TestStartUsesCurrentDiskStateWithoutManagedModLaunchOptions(t *testing.T) {
+	control := &fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}}
+	operations := testOperations(control)
+	roomID, worldID := rooms.EncodeID("summer_2026"), rooms.EncodeID("Master")
+	resolver := &fakePlacementResolver{applied: topology.ExecutionPlacement{Revision: "revision-local", AppliedTargetID: "local"}}
+	runtime := &fakePlacedRuntime{status: shared.ShardRuntimeStatus{State: string(RuntimeStopped)}}
+	leaseService := &fakeLeaseService{lease: operationlease.Lease{
+		RoomID: roomID, LeaseID: "lease-mod-start", OperationKey: "room-start", FencingToken: 11,
+		ExpiresAt: time.Now().UTC().Add(time.Minute),
+	}}
+	if err := operations.ConfigureRuntime(resolver, runtime, leaseService); err != nil {
+		t.Fatal(err)
+	}
+	_, runner, err := operations.Plan(ActionStart, roomID, []string{worldID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results []jobs.TargetResult
+	if err := runner(context.Background(), func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != jobs.StatusSucceeded {
+		t.Fatalf("results=%#v", results)
+	}
+	if runtime.request.LaunchOptions.SkipUpdateServerMods {
+		t.Fatalf("ordinary start overrode DST's on-disk Mod behavior: %#v", runtime.request)
 	}
 }

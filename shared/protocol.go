@@ -17,6 +17,9 @@ func init() {
 type MessageType string
 
 const (
+	DefaultSystemReportInterval = time.Minute
+	SystemReportFreshnessWindow = 90 * time.Second
+
 	// 注册和认证消息
 	TypeRegister     MessageType = "register"     // Agent注册
 	TypeRegisterAck  MessageType = "register_ack" // 服务器确认注册
@@ -29,9 +32,10 @@ const (
 	TypeReportRequest MessageType = "report_request" // 服务器请求数据上报
 
 	// 命令控制消息
-	TypeCommand     MessageType = "command"      // 服务器下发命令
-	TypeCommandAck  MessageType = "command_ack"  // Agent确认收到命令
-	TypeCommandResp MessageType = "command_resp" // Agent回复命令执行结果
+	TypeCommand         MessageType = "command"      // 服务器下发命令
+	TypeCommandAck      MessageType = "command_ack"  // Agent确认收到命令
+	TypeCommandResp     MessageType = "command_resp" // Agent回复命令执行结果
+	TypeCommandProgress MessageType = "command_progress"
 
 	// 心跳和状态消息
 	TypeHeartbeat    MessageType = "heartbeat"     // 心跳
@@ -71,6 +75,7 @@ type CommandPayload struct {
 	Content          string                   `json:"content,omitempty"`
 	ShardOperation   *ShardOperationRequest   `json:"shard_operation,omitempty"`
 	RuntimeOperation *RuntimeOperationRequest `json:"runtime_operation,omitempty"`
+	AgentUpgrade     *AgentUpgradeRequest     `json:"agent_upgrade,omitempty"`
 	Timeout          int                      `json:"timeout"` // 超时时间(秒)
 }
 
@@ -83,11 +88,77 @@ type CommandResponsePayload struct {
 	ExitCode  int    `json:"exit_code"`  // 退出码
 }
 
+type CommandProgressPayload struct {
+	CommandID      string                `json:"command_id"`
+	Sequence       uint64                `json:"sequence"`
+	Stage          string                `json:"stage,omitempty"`
+	Percent        int                   `json:"percent"`
+	Message        string                `json:"message"`
+	WorkshopID     string                `json:"workshop_id,omitempty"`
+	CurrentItem    int                   `json:"current_item,omitempty"`
+	TotalItems     int                   `json:"total_items,omitempty"`
+	Items          []ModDownloadProgress `json:"items,omitempty"`
+	CurrentBytes   int64                 `json:"current_bytes,omitempty"`
+	TotalBytes     int64                 `json:"total_bytes,omitempty"`
+	BytesPerSecond int64                 `json:"bytes_per_second,omitempty"`
+}
+
+// ModDownloadProgress is cumulative download evidence, not world-load status.
+// Sending all items keeps completed results when transport coalesces updates.
+type ModDownloadProgress struct {
+	WorkshopID     string `json:"workshopId"`
+	TargetID       string `json:"targetId,omitempty"`
+	InstallationID string `json:"installationId,omitempty"`
+	Status         string `json:"status"`
+	Message        string `json:"message,omitempty"`
+	CurrentBytes   int64  `json:"currentBytes,omitempty"`
+	TotalBytes     int64  `json:"totalBytes,omitempty"`
+	BytesPerSecond int64  `json:"bytesPerSecond,omitempty"`
+}
+
+// WorldOperationProgress describes observed lifecycle/log milestones. Percent
+// is a stage estimate, never a timer or a guarantee of remaining time.
+type WorldOperationProgress struct {
+	WorldID  string `json:"worldId"`
+	Name     string `json:"name"`
+	IsMaster bool   `json:"isMaster,omitempty"`
+	Stage    string `json:"stage"`
+	Percent  int    `json:"percent"`
+	Message  string `json:"message,omitempty"`
+}
+
 // ReportDataPayload 是数据上报消息的负载
 type ReportDataPayload struct {
 	ReportID   string                 `json:"report_id"`   // 上报ID
 	ReportType string                 `json:"report_type"` // 上报类型
 	Data       map[string]interface{} `json:"data"`        // 上报数据
+}
+
+const AgentUpgradeProtocolVersion = 1
+
+const AgentUpgradeCommand = "agent.upgrade.v1"
+
+// AgentUpgradeRequest contains an authenticated, short-lived controller
+// download path and immutable package metadata. It never carries shell input.
+type AgentUpgradeRequest struct {
+	ProtocolVersion int    `json:"protocol_version"`
+	ReleaseID       string `json:"release_id"`
+	Version         string `json:"version"`
+	OS              string `json:"os"`
+	Arch            string `json:"arch"`
+	DownloadPath    string `json:"download_path"`
+	DownloadToken   string `json:"download_token"`
+	SHA256          string `json:"sha256"`
+	Size            int64  `json:"size"`
+}
+
+type AgentUpgradeResult struct {
+	ProtocolVersion int       `json:"protocol_version"`
+	ReleaseID       string    `json:"release_id"`
+	PreviousVersion string    `json:"previous_version"`
+	Version         string    `json:"version"`
+	RestartRequired bool      `json:"restart_required"`
+	ObservedAt      time.Time `json:"observed_at"`
 }
 
 const RuntimeInventoryProtocolVersion = 1
@@ -107,39 +178,51 @@ const (
 // ShardOperationRequest contains identifiers only. Runtime paths are resolved
 // from the Agent's local trusted installation registry.
 type ShardOperationRequest struct {
-	ProtocolVersion  int         `json:"protocol_version"`
-	OperationID      string      `json:"operation_id"`
-	OperationKey     string      `json:"operation_key"`
-	InstallationID   string      `json:"installation_id"`
-	Action           ShardAction `json:"action"`
-	Cluster          string      `json:"cluster"`
-	Shard            string      `json:"shard"`
-	TopologyRevision string      `json:"topology_revision"`
-	LeaseID          string      `json:"lease_id,omitempty"`
-	FencingToken     uint64      `json:"fencing_token,omitempty"`
-	LeaseExpiresAt   *time.Time  `json:"lease_expires_at,omitempty"`
+	ProtocolVersion  int                    `json:"protocol_version"`
+	OperationID      string                 `json:"operation_id"`
+	OperationKey     string                 `json:"operation_key"`
+	InstallationID   string                 `json:"installation_id"`
+	Action           ShardAction            `json:"action"`
+	RuntimeMode      RuntimePerformanceMode `json:"runtime_mode,omitempty"`
+	LaunchOptions    RuntimeLaunchOptions   `json:"launch_options,omitempty"`
+	Cluster          string                 `json:"cluster"`
+	Shard            string                 `json:"shard"`
+	TopologyRevision string                 `json:"topology_revision"`
+	LeaseID          string                 `json:"lease_id,omitempty"`
+	FencingToken     uint64                 `json:"fencing_token,omitempty"`
+	LeaseExpiresAt   *time.Time             `json:"lease_expires_at,omitempty"`
 }
 
 type ShardRuntimeStatus struct {
 	State         string `json:"state"`
+	StartupStage  string `json:"startup_stage,omitempty"`
 	Code          string `json:"code,omitempty"`
 	Message       string `json:"message,omitempty"`
 	SessionExists bool   `json:"session_exists"`
+	Paused        *bool  `json:"paused,omitempty"`
 }
 
 type ShardOperationResult struct {
-	ProtocolVersion int                `json:"protocol_version"`
-	OperationID     string             `json:"operation_id"`
-	OperationKey    string             `json:"operation_key"`
-	InstallationID  string             `json:"installation_id"`
-	Action          ShardAction        `json:"action"`
-	Cluster         string             `json:"cluster"`
-	Shard           string             `json:"shard"`
-	FencingToken    uint64             `json:"fencing_token,omitempty"`
-	Status          ShardRuntimeStatus `json:"status"`
-	Message         string             `json:"message,omitempty"`
-	Idempotent      bool               `json:"idempotent"`
-	ObservedAt      time.Time          `json:"observed_at"`
+	ProtocolVersion int                    `json:"protocol_version"`
+	OperationID     string                 `json:"operation_id"`
+	OperationKey    string                 `json:"operation_key"`
+	InstallationID  string                 `json:"installation_id"`
+	Action          ShardAction            `json:"action"`
+	RuntimeMode     RuntimePerformanceMode `json:"runtime_mode,omitempty"`
+	LaunchOptions   RuntimeLaunchOptions   `json:"launch_options,omitempty"`
+	Cluster         string                 `json:"cluster"`
+	Shard           string                 `json:"shard"`
+	FencingToken    uint64                 `json:"fencing_token,omitempty"`
+	Status          ShardRuntimeStatus     `json:"status"`
+	Message         string                 `json:"message,omitempty"`
+	Idempotent      bool                   `json:"idempotent"`
+	ObservedAt      time.Time              `json:"observed_at"`
+}
+
+// RuntimeLaunchOptions retain the wire contract with older executors. Current
+// executors always skip Workshop updates during ordinary world start.
+type RuntimeLaunchOptions struct {
+	SkipUpdateServerMods bool `json:"skip_update_server_mods,omitempty"`
 }
 
 func IsShardAction(value ShardAction) bool {
@@ -200,6 +283,53 @@ type RuntimeInstallationReport struct {
 	ServerPathOK bool   `json:"server_path_ok"`
 }
 
+type RuntimePerformanceStatus string
+
+const (
+	RuntimePerformanceNotInstalled       RuntimePerformanceStatus = "not_installed"
+	RuntimePerformanceDetectedUnverified RuntimePerformanceStatus = "detected_unverified"
+	RuntimePerformanceIncompatible       RuntimePerformanceStatus = "incompatible"
+	RuntimePerformanceReady              RuntimePerformanceStatus = "ready"
+)
+
+type RuntimePerformanceMode string
+
+const (
+	RuntimePerformanceModeGame    RuntimePerformanceMode = "game"
+	RuntimePerformanceModeLuaJIT  RuntimePerformanceMode = "luajit"
+	RuntimePerformanceModeJITOff  RuntimePerformanceMode = "luajit-jit-off"
+	RuntimePerformanceModeJITOn   RuntimePerformanceMode = "luajit-jit-on"
+	RuntimePerformanceModeArenaGC RuntimePerformanceMode = "arena-gc"
+)
+
+// RuntimePerformanceReport describes native VM optimization availability for
+// one trusted DST installation. It is observational: reporting readiness never
+// installs an injector or changes the selected runtime mode.
+type RuntimePerformanceReport struct {
+	Provider            string                   `json:"provider"`
+	Status              RuntimePerformanceStatus `json:"status"`
+	CanEnable           bool                     `json:"canEnable"`
+	PackageVersion      string                   `json:"packageVersion,omitempty"`
+	GameVersion         string                   `json:"gameVersion,omitempty"`
+	SignatureVersion    string                   `json:"signatureVersion,omitempty"`
+	BinarySHA256        string                   `json:"binarySha256,omitempty"`
+	AutomaticSignatures bool                     `json:"automaticSignatures,omitempty"`
+	SupportedModes      []RuntimePerformanceMode `json:"supportedModes"`
+	Issues              []string                 `json:"issues"`
+}
+
+func NormalizeRuntimePerformanceMode(value RuntimePerformanceMode) (RuntimePerformanceMode, bool) {
+	if value == "" {
+		return RuntimePerformanceModeGame, true
+	}
+	switch value {
+	case RuntimePerformanceModeGame, RuntimePerformanceModeLuaJIT, RuntimePerformanceModeArenaGC:
+		return value, true
+	default:
+		return "", false
+	}
+}
+
 type RoomInventoryReport struct {
 	Directory     string                 `json:"directory"`
 	Name          string                 `json:"name"`
@@ -216,6 +346,7 @@ type ShardInventoryReport struct {
 	Name               string `json:"name"`
 	ID                 int    `json:"id,omitempty"`
 	Role               string `json:"role"`
+	Type               string `json:"type,omitempty"`
 	ConfigPath         string `json:"config_path"`
 	ServerPort         int    `json:"server_port,omitempty"`
 	MasterServerPort   int    `json:"master_server_port,omitempty"`

@@ -6,13 +6,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	dstinstall "dont/internal/dstserver"
+	"dont/internal/runtimefiles"
 	"dont/pkg/configpath"
+	"dont/shared"
 
 	"github.com/GianlucaP106/gotmux/gotmux"
 	"github.com/go-ini/ini"
@@ -30,6 +33,13 @@ type DSTServer struct {
 	ServerMode     string // 服务器启动模式，32或64
 	SocketPath     string // 受管 tmux socket；空值表示兼容旧的默认 socket
 	tmux           *gotmux.Tmux
+
+	// Startup evidence is stable for one tmux pane; save health remains tail-derived.
+	runtimeStatusMu        sync.Mutex
+	runtimeLogInstanceID   string
+	runtimeLogStartup      RuntimeStatus
+	runtimeLogStartupKnown bool
+	runtimePauseLog        runtimefiles.SimulationPauseLog
 }
 
 // NewDSTServer 创建一个新的饥荒服务器实例
@@ -38,10 +48,6 @@ func NewDSTServer(archiveName, worldName, ugcDirectory, storageRoot, confDir str
 }
 
 func newDSTServer(archiveName, worldName, sessionName, socketPath, ugcDirectory, storageRoot, confDir string, startDirectory string, serverMode ...string) (*DSTServer, error) {
-	log.Printf("[TMUX] 创建饥荒服务器实例 存档: %s, 世界: %s", archiveName, worldName)
-
-	// 初始化tmux客户端
-	log.Printf("[TMUX] 初始化tmux客户端")
 	socketPath = strings.TrimSpace(socketPath)
 	var tmux *gotmux.Tmux
 	var err error
@@ -67,16 +73,12 @@ func newDSTServer(archiveName, worldName, sessionName, socketPath, ugcDirectory,
 	if strings.ContainsAny(sessionName, ":.\x00\r\n") {
 		return nil, fmt.Errorf("无效的 tmux 会话名称")
 	}
-	log.Printf("[TMUX] 创建会话名称: %s", sessionName)
 
 	// 如果提供了启动目录，则使用提供的启动目录
 	// 否则使用默认目录
 	startDir := ""
 	if startDirectory != "" {
 		startDir = startDirectory
-		log.Printf("[TMUX] 使用指定的启动目录: %s", startDir)
-	} else {
-		log.Printf("[TMUX] 未指定启动目录，使用默认目录")
 	}
 
 	// 如果提供了启动模式，则使用提供的启动模式
@@ -86,12 +88,9 @@ func newDSTServer(archiveName, worldName, sessionName, socketPath, ugcDirectory,
 		// 验证启动模式是否有效
 		if serverMode[0] == "32" || serverMode[0] == "64" {
 			mode = serverMode[0]
-			log.Printf("[TMUX] 使用指定的启动模式: %s", mode)
 		} else {
-			log.Printf("[TMUX] 指定的启动模式无效: %s，将使用默认值64", serverMode[0])
+			return nil, fmt.Errorf("无效的 DST 服务端架构: %s", serverMode[0])
 		}
-	} else {
-		log.Printf("[TMUX] 未指定启动模式，使用默认模式: %s", mode)
 	}
 
 	server := &DSTServer{
@@ -107,7 +106,6 @@ func newDSTServer(archiveName, worldName, sessionName, socketPath, ugcDirectory,
 		tmux:           tmux,
 	}
 
-	log.Printf("[TMUX] 饥荒服务器实例创建成功 会话名: %s, 启动模式: %s", sessionName, mode)
 	return server, nil
 }
 
@@ -127,6 +125,14 @@ func (s *DSTServer) IsRunning() (bool, error) {
 
 // Start 启动饥荒服务器
 func (s *DSTServer) Start() error {
+	return s.StartWithRuntimeMode(shared.RuntimePerformanceModeGame)
+}
+
+func (s *DSTServer) StartWithRuntimeMode(runtimeMode shared.RuntimePerformanceMode) error {
+	return s.StartWithRuntimeOptions(runtimeMode, shared.RuntimeLaunchOptions{})
+}
+
+func (s *DSTServer) StartWithRuntimeOptions(runtimeMode shared.RuntimePerformanceMode, launchOptions shared.RuntimeLaunchOptions) error {
 	startTime := time.Now()
 	log.Printf("[TMUX] 开始启动饥荒服务器 会话名: %s, 存档: %s, 世界: %s",
 		s.SessionName, s.ArchiveName, s.WorldName)
@@ -148,6 +154,12 @@ func (s *DSTServer) Start() error {
 	if err := s.validateClusterAuth(); err != nil {
 		return err
 	}
+	if err := prepareStartPolicy(runtime.GOOS, macOSApplicationPolicyCommand); err != nil {
+		return err
+	}
+	if runtime.GOOS == "darwin" {
+		log.Printf("[TMUX] 已启用 macOS 应用级调度策略: %s -a", macOSApplicationPolicyCommand)
+	}
 
 	layout, ok := dstinstall.Resolve(s.StartDirectory, s.ServerMode)
 	if !ok {
@@ -155,13 +167,24 @@ func (s *DSTServer) Start() error {
 	}
 	log.Printf("[TMUX] 已识别服务端布局: %s, 可执行文件: %s", layout.Kind, layout.Executable)
 
-	startCmd := buildStartCommand(layout, layout.Executable, []string{
-		"-ugc_directory", s.UGCDirectory,
+	runtimeArguments, err := runtimeModeArguments(runtimeMode)
+	if err != nil {
+		return err
+	}
+	ugcDirectory := s.workshopStateDirectory()
+	if err := os.MkdirAll(ugcDirectory, 0o750); err != nil {
+		return fmt.Errorf("创建世界 Steam 状态目录: %w", err)
+	}
+	arguments := []string{
+		"-ugc_directory", ugcDirectory,
 		"-persistent_storage_root", s.StorageRoot,
 		"-conf_dir", s.ConfDir,
 		"-cluster", s.ArchiveName,
 		"-shard", s.WorldName,
-	})
+	}
+	arguments = append(arguments, runtimeLaunchArguments(launchOptions)...)
+	arguments = append(arguments, runtimeArguments...)
+	startCmd := buildStartCommand(layout, layout.Executable, arguments)
 	log.Printf("[TMUX] 构建启动命令: %s", startCmd)
 
 	// 使用gotmux的Command方法创建会话
@@ -184,6 +207,31 @@ func (s *DSTServer) Start() error {
 	SaveServerInfo(s)
 
 	return nil
+}
+
+func runtimeLaunchArguments(_ shared.RuntimeLaunchOptions) []string {
+	return []string{"-skip_update_server_mods"}
+}
+
+func (s *DSTServer) workshopStateDirectory() string {
+	return filepath.Join(s.StorageRoot, s.ConfDir, ".dst-admin", "runtime", "workshop", s.ArchiveName, s.WorldName)
+}
+
+func runtimeModeArguments(mode shared.RuntimePerformanceMode) ([]string, error) {
+	normalized, valid := shared.NormalizeRuntimePerformanceMode(mode)
+	if !valid {
+		return nil, fmt.Errorf("无效的 Lua 运行时模式: %s", mode)
+	}
+	switch normalized {
+	case shared.RuntimePerformanceModeGame:
+		return []string{"-lua_vm_type=game"}, nil
+	case shared.RuntimePerformanceModeLuaJIT:
+		return []string{"-lua_vm_type=jit"}, nil
+	case shared.RuntimePerformanceModeArenaGC:
+		return []string{"-lua_vm_type=jit_gen"}, nil
+	default:
+		return nil, fmt.Errorf("无效的 Lua 运行时模式: %s", mode)
+	}
 }
 
 func shellArg(value string) string {
@@ -293,6 +341,8 @@ func (s *DSTServer) sendCommand(command string, requireRunning bool) error {
 
 func consoleSendArguments(pane, command string) []string {
 	return []string{
+		"send-keys", "-t", pane, "C-q", "C-u",
+		";",
 		"send-keys", "-t", pane, "-l", "--", command,
 		";", "send-keys", "-t", pane, "Enter",
 	}
@@ -319,6 +369,7 @@ func (s *DSTServer) KillSession() error {
 		log.Printf("[TMUX][错误] 终止会话失败: %v, 输出: %s", err, output)
 		return fmt.Errorf("终止会话失败: %v", err)
 	}
+	s.resetRuntimeLogStartup()
 
 	elapsedTime := time.Since(startTime)
 	log.Printf("[TMUX] 已强制终止会话: %s, 耗时: %v", s.SessionName, elapsedTime)

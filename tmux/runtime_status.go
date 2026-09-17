@@ -8,13 +8,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	dstinstall "dont/internal/dstserver"
+	"dont/internal/installationlock"
 	"dont/internal/rooms"
+	"dont/internal/savehealth"
 
 	"github.com/go-ini/ini"
 )
@@ -30,13 +33,16 @@ const (
 
 type RuntimeStatus struct {
 	State         RuntimeState
+	StartupStage  string
 	Code          string
 	Message       string
 	SessionExists bool
+	Paused        *bool
 }
 
 const runtimeLogScanChunkBytes = 64 * 1024
 const runtimeLogTailBytes int64 = 256 * 1024
+const macOSApplicationPolicyCommand = "/usr/sbin/taskpolicy"
 
 var runtimeFailureSignals = []struct {
 	needle   string
@@ -54,6 +60,8 @@ var runtimeFailureSignals = []struct {
 	{`has no data! If preset`, "WORLDGEN_TASK_SET_INVALID", "世界配置引用的地图任务集不可用，请检查世界预设和相关模组", 3},
 	{`Worldgen had an error`, "WORLDGEN_FAILED", "世界生成失败，请检查世界配置和世界生成模组", 1},
 	{`Error loading worldgen_main.lua`, "WORLDGEN_FAILED", "世界生成失败，请检查世界配置和世界生成模组", 1},
+	{`DownloadServerMods timed out`, "WORKSHOP_DOWNLOAD_TIMEOUT", "Steam Workshop 模组下载超时，请检查模组目录写权限和网络", 2},
+	{`Failed to download mods from the workshop`, "WORKSHOP_DOWNLOAD_FAILED", "Steam Workshop 模组下载失败，请检查分片日志", 2},
 }
 
 var runtimeReadySignals = []string{
@@ -72,17 +80,22 @@ var runtimeReadySignals = []string{
 // ClassifyRuntimeLog exposes the same readiness and startup-failure semantics
 // to non-tmux Runtime drivers without coupling them to a DSTServer instance.
 func ClassifyRuntimeLog(content string) RuntimeStatus {
-	return classifyRuntimeLog(content, RuntimeStatus{
+	status := classifyRuntimeStartupLog(content, RuntimeStatus{
 		State: RuntimeStarting, Message: "等待 DST 完成世界加载和服务注册", SessionExists: true,
 	})
+	return applySaveHealth(status, []byte(content))
 }
 
 func (s *DSTServer) RuntimeStatus() (RuntimeStatus, error) {
+	s.runtimeStatusMu.Lock()
+	defer s.runtimeStatusMu.Unlock()
+
 	exists, err := s.SessionExists()
 	if err != nil {
 		return RuntimeStatus{}, err
 	}
 	if !exists {
+		s.clearRuntimeLogStartup()
 		return RuntimeStatus{State: RuntimeStopped}, nil
 	}
 
@@ -95,7 +108,13 @@ func (s *DSTServer) RuntimeStatus() (RuntimeStatus, error) {
 		}
 		return RuntimeStatus{}, fmt.Errorf("读取分片日志状态: %w", err)
 	}
-	createdAt, createdErr := s.sessionCreatedAt()
+	instanceID, createdAt, createdErr := s.runtimeInstance()
+	if createdErr != nil {
+		s.clearRuntimeLogStartup()
+	} else if instanceID != s.runtimeLogInstanceID {
+		s.clearRuntimeLogStartup()
+		s.runtimeLogInstanceID = instanceID
+	}
 	if createdErr == nil && !runtimeLogModifiedAfterSession(info.ModTime(), createdAt) {
 		return status, nil
 	}
@@ -110,14 +129,55 @@ func (s *DSTServer) RuntimeStatus() (RuntimeStatus, error) {
 	if err != nil {
 		return RuntimeStatus{}, fmt.Errorf("读取分片日志: %w", err)
 	}
-	if tailStatus := classifyRuntimeLog(string(tail), status); tailStatus.State != RuntimeStarting {
-		return tailStatus, nil
+	var paused *bool
+	if createdErr == nil && hasLogStart {
+		paused = s.runtimePauseLog.Read(logPath, instanceID+"/"+logStartedAt.Format(time.RFC3339Nano), info, tail)
+	} else {
+		s.runtimePauseLog.Reset()
 	}
-	classified, err := classifyRuntimeLogFile(logPath, status)
+	finish := func(value RuntimeStatus) RuntimeStatus {
+		value = applySaveHealth(value, tail)
+		if value.State == RuntimeRunning {
+			value.Paused = paused
+		}
+		return value
+	}
+	tailStatus := classifyRuntimeStartupLog(string(tail), status)
+	if tailStatus.State != RuntimeStarting {
+		if createdErr == nil {
+			s.runtimeLogStartup = tailStatus
+			s.runtimeLogStartupKnown = true
+		}
+		return finish(tailStatus), nil
+	}
+	if createdErr == nil && s.runtimeLogStartupKnown {
+		return finish(s.runtimeLogStartup), nil
+	}
+	if info.Size() <= runtimeLogTailBytes {
+		return finish(tailStatus), nil
+	}
+	classified, err := classifyRuntimeLogFile(logPath, tailStatus)
 	if err != nil {
 		return RuntimeStatus{}, fmt.Errorf("读取分片日志: %w", err)
 	}
-	return classified, nil
+	if createdErr == nil && classified.State != RuntimeStarting {
+		s.runtimeLogStartup = classified
+		s.runtimeLogStartupKnown = true
+	}
+	return finish(classified), nil
+}
+
+func (s *DSTServer) clearRuntimeLogStartup() {
+	s.runtimeLogInstanceID = ""
+	s.runtimeLogStartup = RuntimeStatus{}
+	s.runtimeLogStartupKnown = false
+	s.runtimePauseLog.Reset()
+}
+
+func (s *DSTServer) resetRuntimeLogStartup() {
+	s.runtimeStatusMu.Lock()
+	s.clearRuntimeLogStartup()
+	s.runtimeStatusMu.Unlock()
 }
 
 func runtimeLogModifiedAfterSession(logModified, sessionCreated time.Time) bool {
@@ -139,6 +199,10 @@ func runtimeLogStartedAt(content string) (time.Time, bool) {
 }
 
 func classifyRuntimeLog(content string, fallback RuntimeStatus) RuntimeStatus {
+	return applySaveHealth(classifyRuntimeStartupLog(content, fallback), []byte(content))
+}
+
+func classifyRuntimeStartupLog(content string, fallback RuntimeStatus) RuntimeStatus {
 	latestReady := -1
 	for _, signal := range runtimeReadySignals {
 		if index := strings.LastIndex(content, signal); index > latestReady {
@@ -167,7 +231,41 @@ func classifyRuntimeLog(content string, fallback RuntimeStatus) RuntimeStatus {
 		}
 		return RuntimeStatus{State: RuntimeRunning, Message: message, SessionExists: true}
 	}
+	// Reuse the bytes already read for readiness. Prefer the furthest milestone
+	// because ModIndex can print again while the world is being restored.
+	for _, signal := range runtimeStartupSignals {
+		if strings.Contains(content, signal.needle) {
+			fallback.StartupStage = signal.stage
+			break
+		}
+	}
 	return fallback
+}
+
+var runtimeStartupSignals = []struct{ needle, stage string }{
+	{"[Shard] Sending secondary shard information", "connecting"},
+	{"Obtaining secondary shard IP", "connecting"},
+	{"Starting to connect to master", "connecting"},
+	{"Loading world:", "loading_world"},
+	{"Load BE", "loading_world"},
+	{"Generating world", "generating_world"},
+	{"WORLD GEN", "generating_world"},
+	{"[Workshop]", "loading_mods"},
+	{"ModIndex:", "loading_mods"},
+	{"Mod: workshop-", "loading_mods"},
+	{"LOADING LUA", "initializing"},
+	{"Starting Up", "initializing"},
+}
+
+func applySaveHealth(status RuntimeStatus, tail []byte) RuntimeStatus {
+	if status.State != RuntimeRunning {
+		return status
+	}
+	if incident := savehealth.InspectLogTail(tail); incident != nil {
+		status.Code = incident.Code
+		status.Message = incident.Message
+	}
+	return status
 }
 
 func classifyRuntimeLogFile(path string, fallback RuntimeStatus) (RuntimeStatus, error) {
@@ -269,12 +367,17 @@ func runtimeLogSignalOverlap() int {
 
 func (s *DSTServer) SessionExists() (bool, error) {
 	command := exec.Command("tmux", s.tmuxArguments("has-session", "-t", "="+s.SessionName)...)
-	if err := command.Run(); err != nil {
+	output, err := command.CombinedOutput()
+	if err != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(err, &exitErr) && tmuxSessionAbsent(string(output)) {
 			return false, nil
 		}
-		return false, fmt.Errorf("检查 tmux 会话: %w", err)
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return false, fmt.Errorf("检查 tmux 会话: %s", message)
 	}
 	return true, nil
 }
@@ -284,26 +387,31 @@ func (s *DSTServer) DefaultSocketSessionExists() (bool, error) {
 		return false, nil
 	}
 	command := exec.Command("tmux", "has-session", "-t", "="+s.SessionName)
-	if err := command.Run(); err != nil {
+	output, err := command.CombinedOutput()
+	if err != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(err, &exitErr) && tmuxSessionAbsent(string(output)) {
 			return false, nil
 		}
-		return false, fmt.Errorf("check legacy tmux session: %w", err)
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return false, fmt.Errorf("check legacy tmux session: %s", message)
 	}
 	return true, nil
 }
 
-func (s *DSTServer) sessionCreatedAt() (time.Time, error) {
-	output, err := exec.Command("tmux", s.tmuxArguments("display-message", "-p", "-t", s.SessionName, "#{session_created}")...).Output()
-	if err != nil {
-		return time.Time{}, err
+func tmuxSessionAbsent(output string) bool {
+	value := strings.ToLower(strings.TrimSpace(output))
+	for _, marker := range []string{
+		"can't find session", "no server running", "no sessions", "no such file or directory",
+	} {
+		if strings.Contains(value, marker) {
+			return true
+		}
 	}
-	timestamp, err := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return time.Unix(timestamp, 0), nil
+	return false
 }
 
 func (s *DSTServer) tmuxArguments(arguments ...string) []string {
@@ -408,23 +516,47 @@ func (s *DSTServer) ConsoleAttachCommand(readOnly bool) ([]string, error) {
 // RuntimeInstanceID identifies one concrete tmux session lifetime. A session
 // recreated with the same name receives a different identity.
 func (s *DSTServer) RuntimeInstanceID() (string, error) {
+	identity, _, err := s.runtimeInstance()
+	return identity, err
+}
+
+func (s *DSTServer) runtimeInstance() (string, time.Time, error) {
 	output, err := exec.Command("tmux", s.tmuxArguments(
-		"display-message", "-p", "-t", "="+s.SessionName,
-		"#{session_created}\t#{session_id}\t#{pid}",
+		"display-message", "-p", "-t", "="+s.SessionName+":0.0",
+		"#{session_created}|#{session_id}|#{pane_pid}",
 	)...).Output()
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
-	fields := strings.Split(strings.TrimSpace(string(output)), "\t")
+	return parseRuntimeInstance(s.SessionName, string(output))
+}
+
+func parseRuntimeInstanceID(sessionName, output string) (string, error) {
+	identity, _, err := parseRuntimeInstance(sessionName, output)
+	return identity, err
+}
+
+func parseRuntimeInstance(sessionName, output string) (string, time.Time, error) {
+	fields := strings.Split(strings.TrimSpace(output), "|")
 	if len(fields) != 3 {
-		return "", errors.New("tmux runtime instance identity is invalid")
+		return "", time.Time{}, fmt.Errorf("tmux runtime instance identity is invalid: expected 3 fields, got %d", len(fields))
 	}
 	created, createdErr := strconv.ParseInt(fields[0], 10, 64)
-	pid, pidErr := strconv.ParseInt(fields[2], 10, 64)
-	if createdErr != nil || created <= 0 || pidErr != nil || pid <= 0 || !strings.HasPrefix(fields[1], "$") || len(fields[1]) > 32 {
-		return "", errors.New("tmux runtime instance identity is invalid")
+	if createdErr != nil || created <= 0 {
+		return "", time.Time{}, errors.New("tmux runtime instance identity is invalid: session creation time is invalid")
 	}
-	return fmt.Sprintf("%s@%d/%s/%d", s.SessionName, created, fields[1], pid), nil
+	if !strings.HasPrefix(fields[1], "$") || len(fields[1]) > 32 {
+		return "", time.Time{}, errors.New("tmux runtime instance identity is invalid: session id is invalid")
+	}
+	sessionID := strings.TrimPrefix(fields[1], "$")
+	if _, err := strconv.ParseUint(sessionID, 10, 64); err != nil || sessionID == "" {
+		return "", time.Time{}, errors.New("tmux runtime instance identity is invalid: session id is invalid")
+	}
+	pid, pidErr := strconv.ParseInt(fields[2], 10, 64)
+	if pidErr != nil || pid <= 0 {
+		return "", time.Time{}, errors.New("tmux runtime instance identity is invalid: pane pid is invalid")
+	}
+	return fmt.Sprintf("%s@%d/%s/%d", sessionName, created, fields[1], pid), time.Unix(created, 0), nil
 }
 
 func (s *DSTServer) runtimeLogPath() string {
@@ -485,8 +617,12 @@ func (s *DSTServer) validateClusterAuth() error {
 }
 
 func buildStartCommand(layout dstinstall.Layout, executable string, arguments []string) string {
+	return buildStartCommandForOS(runtime.GOOS, layout, executable, arguments)
+}
+
+func buildStartCommandForOS(goos string, layout dstinstall.Layout, executable string, arguments []string) string {
 	environment := startEnvironment(layout)
-	parts := make([]string, 0, len(environment)+len(arguments)+2)
+	parts := make([]string, 0, len(environment)+len(arguments)+4)
 	if len(environment) > 0 {
 		parts = append(parts, "env")
 		keys := make([]string, 0, len(environment))
@@ -498,11 +634,37 @@ func buildStartCommand(layout dstinstall.Layout, executable string, arguments []
 			parts = append(parts, key+"="+shellArg(environment[key]))
 		}
 	}
+	if goos == "darwin" {
+		// launchd Background jobs propagate their resource policy through tmux.
+		// DST needs application scheduling policy to meet simulation tick deadlines.
+		parts = append(parts, macOSApplicationPolicyCommand, "-a")
+	}
 	parts = append(parts, shellArg(executable))
 	for _, argument := range arguments {
 		parts = append(parts, shellArg(argument))
 	}
-	return strings.Join(parts, " ")
+	command := strings.Join(parts, " ")
+	if goos == "linux" && layout.InstallRoot != "" {
+		// Shared locks allow Master and Caves to launch concurrently and remain
+		// held by flock until the game exits. Package writes take an exclusive lock.
+		guarded := "test ! -d " + shellArg(filepath.Join(layout.InstallRoot, installationlock.Transaction)) + " && exec " + command
+		return "flock -s -n " + shellArg(filepath.Join(layout.InstallRoot, installationlock.Filename)) + " sh -c " + shellArg(guarded)
+	}
+	return command
+}
+
+func prepareStartPolicy(goos, command string) error {
+	if goos != "darwin" {
+		return nil
+	}
+	info, err := os.Stat(command)
+	if err != nil {
+		return fmt.Errorf("macOS 应用级调度策略不可用：%s: %w", command, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("macOS 应用级调度策略不可用：%s 不是可执行文件", command)
+	}
+	return nil
 }
 
 func startEnvironment(layout dstinstall.Layout) map[string]string {

@@ -29,8 +29,10 @@ type resourceBuild struct {
 }
 
 type resourcePreflightScope struct {
-	owners map[string]bool
-	states map[ReservationState]bool
+	owners                           map[string]bool
+	states                           map[ReservationState]bool
+	activateOwners                   bool
+	allowShardLinkConfigurationDrift bool
 }
 
 func (s *Service) Infrastructure(ctx context.Context) (InfrastructureSnapshot, error) {
@@ -49,11 +51,26 @@ func (s *Service) Infrastructure(ctx context.Context) (InfrastructureSnapshot, e
 	if err != nil {
 		return InfrastructureSnapshot{}, err
 	}
+	providers = enrichProviderIPAddresses(providers, inventories)
 	return InfrastructureSnapshot{
 		Providers: providers, Environments: environments, NetworkProfiles: profiles,
 		PortReservations: reservations, CPUAllocations: allocations, Preflight: build.preflight,
 		CapacityPolicy: defaultCapacityPolicy(), ObservedAt: time.Now().UTC(),
 	}, nil
+}
+
+func enrichProviderIPAddresses(providers []RuntimeProvider, inventories []agents.RuntimeTargetInventory) []RuntimeProvider {
+	addressesByTarget := make(map[string][]string, len(inventories))
+	for _, inventory := range inventories {
+		addressesByTarget[inventory.Target.ID] = append([]string(nil), inventory.Target.IPAddresses...)
+	}
+	for index := range providers {
+		providers[index].IPAddresses = addressesByTarget[providers[index].TargetID]
+		if providers[index].IPAddresses == nil {
+			providers[index].IPAddresses = []string{}
+		}
+	}
+	return providers
 }
 
 func (s *Service) UpdateNetworkProfile(ctx context.Context, profileID string, input NetworkProfileUpdate) (NetworkProfile, error) {
@@ -92,6 +109,59 @@ func (s *Service) UpdateNetworkProfile(ctx context.Context, profileID string, in
 		return NetworkProfile{}, err
 	}
 	return profile, nil
+}
+
+func (s *Service) DetectNetworkProfileEgress(ctx context.Context, profileID string, region shared.RuntimeNetworkRegion) (EgressDetection, error) {
+	profileID = strings.TrimSpace(profileID)
+	if region == "" {
+		region = shared.RuntimeNetworkRegionGlobal
+	}
+	if !shared.IsRuntimeNetworkRegion(region) {
+		return EgressDetection{}, &ResourceFieldError{Fields: map[string]string{"region": "探测区域必须为 cn 或 global"}}
+	}
+	if profileID == "" {
+		return EgressDetection{}, ErrResourceNotFound
+	}
+	infrastructure, err := s.Infrastructure(ctx)
+	if err != nil {
+		return EgressDetection{}, err
+	}
+	var profile NetworkProfile
+	for _, candidate := range infrastructure.NetworkProfiles {
+		if candidate.ID == profileID {
+			profile = candidate
+			break
+		}
+	}
+	if profile.ID == "" {
+		return EgressDetection{}, ErrResourceNotFound
+	}
+	targetID := ""
+	for _, environment := range infrastructure.Environments {
+		if environment.ID == profile.EnvironmentID {
+			targetID = environment.TargetID
+			break
+		}
+	}
+	if targetID == "" {
+		return EgressDetection{}, ErrResourceNotFound
+	}
+	if s.egress == nil {
+		return EgressDetection{}, ErrEgressDetectionUnavailable
+	}
+	probeContext, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	result, err := s.egress.DetectEgress(probeContext, targetID, region)
+	if err != nil {
+		return EgressDetection{}, fmt.Errorf("%w: %v", ErrEgressDetectionFailed, err)
+	}
+	observedAt := result.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
+	return EgressDetection{
+		ProfileID: profile.ID, TargetID: targetID, Address: strings.TrimSpace(result.Address), Region: region, ObservedAt: observedAt,
+	}, nil
 }
 
 func (s *Service) UpdateCPUAllocation(ctx context.Context, input CPUAllocationUpdate) (CPUAllocation, error) {
@@ -228,15 +298,63 @@ func (s *Service) PreflightExecution(ctx context.Context, roomID string, worldID
 	for _, world := range worlds {
 		owners[resourceOwnerKey(roomID, world.ID)] = true
 	}
-	build, err := s.syncInfrastructureState(plans, inventories, &resourcePreflightScope{
-		owners: owners,
-		states: map[ReservationState]bool{ReservationActive: true, ReservationObserved: true},
+	build, err := s.buildRuntimeResources(plans, inventories, &resourcePreflightScope{
+		owners:         owners,
+		states:         map[ReservationState]bool{ReservationActive: true, ReservationObserved: true},
+		activateOwners: true,
 	})
 	if err != nil {
 		return ResourcePreflight{}, err
 	}
 	if !build.preflight.Ready {
 		return build.preflight, &ResourceConflictError{Preflight: build.preflight}
+	}
+	// Lifecycle execution resolves the persisted CPU policy immediately after
+	// preflight. Ensure the derived defaults exist without requiring callers to
+	// open the infrastructure overview first.
+	if err := s.store.EnsureCPUAllocations(build.allocations); err != nil {
+		return ResourcePreflight{}, err
+	}
+	return build.preflight, nil
+}
+
+// PreflightBatchExecution validates every selected Shard as one start set so
+// cross-room batches cannot partially start before a duplicate port is found.
+func (s *Service) PreflightBatchExecution(ctx context.Context, selections []StartCapacitySelection) (ResourcePreflight, error) {
+	plans, inventories, err := s.resourceContext(ctx)
+	if err != nil {
+		return ResourcePreflight{}, err
+	}
+	owners := make(map[string]bool)
+	for _, selection := range selections {
+		selected, exists := plans[strings.TrimSpace(selection.RoomID)]
+		if !exists {
+			return ResourcePreflight{}, rooms.ErrRoomNotFound
+		}
+		worlds, selectErr := selectCapacityWorlds(selected.worlds, selection.WorldIDs)
+		if selectErr != nil {
+			return ResourcePreflight{}, selectErr
+		}
+		for _, world := range worlds {
+			owners[resourceOwnerKey(selection.RoomID, world.ID)] = true
+		}
+	}
+	if len(owners) == 0 {
+		return ResourcePreflight{}, ErrInvalidInput
+	}
+	build, err := s.buildRuntimeResources(plans, inventories, &resourcePreflightScope{
+		owners:         owners,
+		states:         map[ReservationState]bool{ReservationActive: true, ReservationObserved: true},
+		activateOwners: true,
+	})
+	if err != nil {
+		return ResourcePreflight{}, err
+	}
+	if !build.preflight.Ready {
+		return build.preflight, &ResourceConflictError{Preflight: build.preflight}
+	}
+	if err := s.store.EnsureCPUAllocations(build.allocations); err != nil {
+		return ResourcePreflight{}, err
 	}
 	return build.preflight, nil
 }
@@ -269,6 +387,7 @@ func (s *Service) resourceContext(ctx context.Context) (map[string]roomPlan, []a
 		worlds = mergeStoredWorlds(room.ID, worlds, record.Placements)
 		plans[room.ID] = roomPlan{room: room, worlds: worlds, record: record}
 	}
+	plans = canonicalizePlanPlacements(plans, inventories)
 	return plans, inventories, nil
 }
 
@@ -311,8 +430,9 @@ func (s *Service) buildRuntimeResources(plans map[string]roomPlan, inventories [
 			}
 		}
 	}
-	build := resourceBuild{preflight: ResourcePreflight{Ready: true, Warnings: []string{}, Conflicts: []ResourceConflict{}}}
+	build := resourceBuild{preflight: ResourcePreflight{Ready: true, Warnings: []string{}, Advisories: []ResourceConflict{}, Conflicts: []ResourceConflict{}}}
 	managedTargets := make(map[string]bool)
+	inventoriesByEndpoint := endpointInventories(inventories)
 	for roomID, plan := range plans {
 		placements := placementsByWorld(plan.record.Placements)
 		for _, world := range plan.worlds {
@@ -320,7 +440,7 @@ func (s *Service) buildRuntimeResources(plans map[string]roomPlan, inventories [
 			if !ok {
 				continue
 			}
-			ports, conflicts := resolveShardPorts(inventories, plan.room.DirectoryName, world.DirectoryName)
+			ports, conflicts := resolvePlacementShardPorts(inventoriesByEndpoint, placement, plan.room.DirectoryName, world.DirectoryName)
 			ownerStrict := scope != nil && scope.owners[resourceOwnerKey(roomID, world.ID)]
 			if scope == nil || ownerStrict {
 				for index := range conflicts {
@@ -351,19 +471,31 @@ func (s *Service) buildRuntimeResources(plans map[string]roomPlan, inventories [
 					}
 				}
 			}
+			appliedState := ReservationConfigured
+			if (scope != nil && scope.activateOwners && ownerStrict) || currentlyRunning(
+				inventoriesByEndpoint[endpointFor(placement.AppliedTargetID, placement.AppliedInstallationID)],
+				plan.room.DirectoryName, world.DirectoryName,
+			) {
+				appliedState = ReservationActive
+			}
 			targets := []struct {
-				id    string
-				state ReservationState
-			}{{placement.AppliedTargetID, ReservationActive}}
-			if placement.DesiredTargetID != placement.AppliedTargetID {
+				id             string
+				installationID string
+				state          ReservationState
+			}{{placement.AppliedTargetID, placement.AppliedInstallationID, appliedState}}
+			if !sameEndpoint(placement.DesiredTargetID, placement.DesiredInstallationID, placement.AppliedTargetID, placement.AppliedInstallationID) {
 				targets = append(targets, struct {
-					id    string
-					state ReservationState
-				}{placement.DesiredTargetID, ReservationPlanned})
+					id             string
+					installationID string
+					state          ReservationState
+				}{placement.DesiredTargetID, placement.DesiredInstallationID, ReservationPlanned})
 			}
 			for _, target := range targets {
-				managedTargets[target.id+"\x00"+identityKey(plan.room.DirectoryName, world.DirectoryName)] = true
-				build.reservations = appendManagedReservations(build.reservations, environmentByTarget[target.id], profileByTarget[target.id], target.id, roomID, world, plan.room.DirectoryName, ports, target.state)
+				managedTargets[target.id+"\x00"+target.installationID+"\x00"+identityKey(plan.room.DirectoryName, world.DirectoryName)] = true
+				build.reservations = appendManagedReservations(
+					build.reservations, environmentByTarget[target.id], profileByTarget[target.id], target.id,
+					target.installationID, roomID, world, plan.room.DirectoryName, ports, target.state,
+				)
 			}
 			environment := environmentByTarget[placement.AppliedTargetID]
 			build.allocations = append(build.allocations, CPUAllocation{
@@ -378,18 +510,29 @@ func (s *Service) buildRuntimeResources(plans map[string]roomPlan, inventories [
 			continue
 		}
 		targetID := inventory.Target.ID
+		installationID := installationIDForInventory(inventory)
 		for _, room := range inventory.Inventory.Rooms {
 			for _, shard := range room.Shards {
-				if managedTargets[targetID+"\x00"+identityKey(room.Directory, shard.Directory)] {
+				if managedTargets[targetID+"\x00"+installationID+"\x00"+identityKey(room.Directory, shard.Directory)] {
 					continue
 				}
 				ports := shardPortSet{clusterMaster: room.MasterPort, server: shard.ServerPort, steamAuth: shard.AuthenticationPort, steamMaster: shard.MasterServerPort}
-				build.reservations = appendObservedReservations(build.reservations, environmentByTarget[targetID], profileByTarget[targetID], targetID, room.Directory, shard, ports)
+				state := ReservationConfigured
+				if currentlyRunning(inventory, room.Directory, shard.Directory) {
+					state = ReservationObserved
+				}
+				build.reservations = appendObservedReservations(
+					build.reservations, environmentByTarget[targetID], profileByTarget[targetID], targetID,
+					installationID, room.Directory, shard, ports, state,
+				)
 			}
 		}
 	}
-	build.preflight.Conflicts = append(build.preflight.Conflicts, detectPortConflicts(build.reservations, scope)...)
+	portConflicts, portAdvisories := detectPortConflicts(build.reservations, scope)
+	build.preflight.Conflicts = append(build.preflight.Conflicts, portConflicts...)
+	build.preflight.Advisories = append(build.preflight.Advisories, portAdvisories...)
 	build.preflight.Warnings = uniqueSortedStrings(build.preflight.Warnings)
+	build.preflight.Advisories = uniqueResourceConflicts(build.preflight.Advisories)
 	build.preflight.Conflicts = uniqueResourceConflicts(build.preflight.Conflicts)
 	build.preflight.Ready = len(build.preflight.Conflicts) == 0
 	sort.Slice(build.reservations, func(i, j int) bool {
@@ -406,7 +549,7 @@ func (s *Service) buildRuntimeResources(plans map[string]roomPlan, inventories [
 }
 
 func appendCrossNodeMasterPreflight(build *resourceBuild, plans map[string]roomPlan, inventories []agents.RuntimeTargetInventory, profiles map[string]NetworkProfile, scope *resourcePreflightScope) {
-	inventoryByID := inventoryByTarget(inventories)
+	inventoryByEndpoint := endpointInventories(inventories)
 	for roomID, plan := range plans {
 		if len(plan.worlds) < 2 || scope != nil && !scopeIncludesRoom(scope, roomID, plan.worlds) {
 			continue
@@ -414,17 +557,20 @@ func appendCrossNodeMasterPreflight(build *resourceBuild, plans map[string]roomP
 		placements := placementsByWorld(plan.record.Placements)
 		var master rooms.World
 		masterCount := 0
-		worldsByTarget := map[string][]rooms.World{}
+		worldsByEndpoint := map[placementEndpoint][]rooms.World{}
+		machineIDs := map[string]bool{}
 		for _, world := range plan.worlds {
 			if world.Role == rooms.WorldRoleMaster || world.IsMaster {
 				master = world
 				masterCount++
 			}
 			if placement, ok := placements[world.ID]; ok && strings.TrimSpace(placement.AppliedTargetID) != "" {
-				worldsByTarget[placement.AppliedTargetID] = append(worldsByTarget[placement.AppliedTargetID], world)
+				endpoint := endpointFor(placement.AppliedTargetID, placement.AppliedInstallationID)
+				worldsByEndpoint[endpoint] = append(worldsByEndpoint[endpoint], world)
+				machineIDs[endpoint.targetID] = true
 			}
 		}
-		if len(worldsByTarget) < 2 {
+		if len(machineIDs) < 2 {
 			continue
 		}
 		strict := scope != nil
@@ -445,11 +591,24 @@ func appendCrossNodeMasterPreflight(build *resourceBuild, plans map[string]roomP
 			add("MASTER_TARGET_MISSING", "Master 分片没有已生效的运行目标", "", master.ID, 0)
 			continue
 		}
-		masterTargetID := masterPlacement.AppliedTargetID
-		masterInventory, masterUsable := usableEndpointInventory(inventoryByID, masterTargetID, "MASTER", master.ID, add)
+		masterEndpoint := endpointFor(masterPlacement.AppliedTargetID, masterPlacement.AppliedInstallationID)
+		masterTargetID := masterEndpoint.targetID
+		masterInventory, masterUsable := usableEndpointInventory(inventoryByEndpoint, masterEndpoint, "MASTER", master.ID, add)
+		activeLinks := plan.record.AppliedShardLinks
+		if scope != nil && scope.allowShardLinkConfigurationDrift {
+			activeLinks = plan.record.ShardLinks
+		}
+		linksByEndpoint := make(map[placementEndpoint]storedShardLink, len(activeLinks))
+		for _, link := range activeLinks {
+			if link.MasterTargetID == masterEndpoint.targetID && link.MasterInstallationID == masterEndpoint.installationID {
+				linksByEndpoint[endpointFor(link.SourceTargetID, link.SourceInstallationID)] = link
+			}
+		}
 		profile, profileOK := profiles[masterTargetID]
 		advertiseAddress := ""
-		if !profileOK {
+		if len(linksByEndpoint) > 0 {
+			// Explicit per-Secondary links replace the legacy machine-wide advertised address.
+		} else if !profileOK {
 			add("MASTER_NETWORK_PROFILE_MISSING", "Master 节点缺少网络 Profile", masterTargetID, master.ID, 0)
 		} else {
 			advertiseAddress = strings.TrimSpace(profile.AdvertiseAddress)
@@ -474,12 +633,13 @@ func appendCrossNodeMasterPreflight(build *resourceBuild, plans map[string]roomP
 				}
 			}
 		}
-		for targetID, targetWorlds := range worldsByTarget {
-			if targetID == masterTargetID {
+		for endpoint, targetWorlds := range worldsByEndpoint {
+			if endpoint.targetID == masterTargetID {
 				continue
 			}
+			targetID := endpoint.targetID
 			worldID := targetWorlds[0].ID
-			secondaryInventory, usable := usableEndpointInventory(inventoryByID, targetID, "SECONDARY", worldID, add)
+			secondaryInventory, usable := usableEndpointInventory(inventoryByEndpoint, endpoint, "SECONDARY", worldID, add)
 			if !usable {
 				continue
 			}
@@ -489,16 +649,30 @@ func appendCrossNodeMasterPreflight(build *resourceBuild, plans map[string]roomP
 				continue
 			}
 			secondaryMasterIP := strings.TrimSpace(secondaryRoom.MasterIP)
+			expectedAddress := advertiseAddress
+			expectedPort := masterPort
+			_, selectedLink := linksByEndpoint[endpoint]
+			if link, selected := linksByEndpoint[endpoint]; selected {
+				expectedAddress, expectedPort = link.Address, link.Port
+			}
+			addSecondaryConfigurationIssue := func(code, message string, port int) {
+				conflict := ResourceConflict{Code: code, Message: message, TargetID: targetID, RoomID: roomID, WorldID: worldID, Port: port}
+				if selectedLink && scope != nil && scope.allowShardLinkConfigurationDrift {
+					build.preflight.Advisories = append(build.preflight.Advisories, conflict)
+					return
+				}
+				add(code, message, targetID, worldID, port)
+			}
 			switch {
 			case secondaryMasterIP == "":
-				add("SECONDARY_MASTER_ADDRESS_MISSING", "Secondary 的 cluster.ini 缺少 master_ip", targetID, worldID, masterPort)
+				addSecondaryConfigurationIssue("SECONDARY_MASTER_ADDRESS_MISSING", "Secondary 的 cluster.ini 缺少 master_ip", masterPort)
 			case advertiseAddressUnroutable(secondaryMasterIP):
-				add("SECONDARY_MASTER_ADDRESS_LOCAL", "跨节点 Secondary 的 master_ip 不能使用本机或不可路由地址", targetID, worldID, masterPort)
-			case advertiseAddress != "" && validEndpointAddress(advertiseAddress) && !sameEndpointAddress(secondaryMasterIP, advertiseAddress):
-				add("SECONDARY_MASTER_ENDPOINT_MISMATCH", "Secondary 的 master_ip 与 Master 公布地址不一致", targetID, worldID, masterPort)
+				addSecondaryConfigurationIssue("SECONDARY_MASTER_ADDRESS_LOCAL", "跨节点 Secondary 的 master_ip 不能使用本机或不可路由地址", masterPort)
+			case expectedAddress != "" && validEndpointAddress(expectedAddress) && !sameEndpointAddress(secondaryMasterIP, expectedAddress):
+				addSecondaryConfigurationIssue("SECONDARY_MASTER_ENDPOINT_MISMATCH", "Secondary 的 master_ip 与已选择的 Master 互联地址不一致", expectedPort)
 			}
-			if masterPort > 0 && secondaryRoom.MasterPort != masterPort {
-				add("MASTER_PORT_INCONSISTENT", "Secondary 的 master_port 与 Master 监听端口不一致", targetID, worldID, secondaryRoom.MasterPort)
+			if expectedPort > 0 && secondaryRoom.MasterPort != expectedPort {
+				addSecondaryConfigurationIssue("MASTER_PORT_INCONSISTENT", "Secondary 的 master_port 与已选择的 Master 互联端口不一致", secondaryRoom.MasterPort)
 			}
 		}
 	}
@@ -513,8 +687,9 @@ func scopeIncludesRoom(scope *resourcePreflightScope, roomID string, worlds []ro
 	return false
 }
 
-func usableEndpointInventory(inventories map[string]agents.RuntimeTargetInventory, targetID, role, worldID string, add func(string, string, string, string, int)) (agents.RuntimeTargetInventory, bool) {
-	inventory, exists := inventories[targetID]
+func usableEndpointInventory(inventories map[placementEndpoint]agents.RuntimeTargetInventory, endpoint placementEndpoint, role, worldID string, add func(string, string, string, string, int)) (agents.RuntimeTargetInventory, bool) {
+	targetID := endpoint.targetID
+	inventory, exists := inventories[endpoint]
 	if !exists || !inventory.Target.Configured {
 		add(role+"_TARGET_MISSING", role+" 节点不存在或尚未配置", targetID, worldID, 0)
 		return agents.RuntimeTargetInventory{}, false
@@ -625,7 +800,25 @@ func resolveShardPorts(inventories []agents.RuntimeTargetInventory, cluster, sha
 	return result, conflicts
 }
 
-func appendManagedReservations(values []PortReservation, environment ExecutionEnvironment, profile NetworkProfile, targetID, roomID string, world rooms.World, cluster string, ports shardPortSet, state ReservationState) []PortReservation {
+func resolvePlacementShardPorts(inventories map[placementEndpoint]agents.RuntimeTargetInventory, placement storedPlacement, cluster, shard string) (shardPortSet, []ResourceConflict) {
+	values := make([]agents.RuntimeTargetInventory, 0, 2)
+	seen := make(map[placementEndpoint]bool)
+	for _, endpoint := range []placementEndpoint{
+		endpointFor(placement.AppliedTargetID, placement.AppliedInstallationID),
+		endpointFor(placement.DesiredTargetID, placement.DesiredInstallationID),
+	} {
+		if seen[endpoint] {
+			continue
+		}
+		seen[endpoint] = true
+		if inventory, exists := inventories[endpoint]; exists {
+			values = append(values, inventory)
+		}
+	}
+	return resolveShardPorts(values, cluster, shard)
+}
+
+func appendManagedReservations(values []PortReservation, environment ExecutionEnvironment, profile NetworkProfile, targetID, installationID, roomID string, world rooms.World, cluster string, ports shardPortSet, state ReservationState) []PortReservation {
 	items := []struct {
 		purpose PortPurpose
 		port    int
@@ -640,13 +833,13 @@ func appendManagedReservations(values []PortReservation, environment ExecutionEn
 		if item.port < 1 || item.port > 65535 {
 			continue
 		}
-		identity := targetID + "\x00" + roomID + "\x00" + world.ID + "\x00" + string(item.purpose)
+		identity := targetID + "\x00" + installationID + "\x00" + roomID + "\x00" + world.ID + "\x00" + string(item.purpose)
 		values = append(values, PortReservation{ID: stableResourceID("port", identity), EnvironmentID: environment.ID, NetworkProfileID: profile.ID, ScopeID: profile.ScopeID, TargetID: targetID, RoomID: roomID, WorldID: world.ID, Cluster: cluster, Shard: world.DirectoryName, Purpose: item.purpose, Protocol: "udp", BindAddress: profile.BindAddress, Port: item.port, State: state, Managed: true})
 	}
 	return values
 }
 
-func appendObservedReservations(values []PortReservation, environment ExecutionEnvironment, profile NetworkProfile, targetID, cluster string, shard shared.ShardInventoryReport, ports shardPortSet) []PortReservation {
+func appendObservedReservations(values []PortReservation, environment ExecutionEnvironment, profile NetworkProfile, targetID, installationID, cluster string, shard shared.ShardInventoryReport, ports shardPortSet, state ReservationState) []PortReservation {
 	items := []struct {
 		purpose PortPurpose
 		port    int
@@ -661,14 +854,15 @@ func appendObservedReservations(values []PortReservation, environment ExecutionE
 		if item.port < 1 || item.port > 65535 {
 			continue
 		}
-		identity := targetID + "\x00" + cluster + "\x00" + shard.Directory + "\x00" + string(item.purpose)
-		values = append(values, PortReservation{ID: stableResourceID("port-observed", identity), EnvironmentID: environment.ID, NetworkProfileID: profile.ID, ScopeID: profile.ScopeID, TargetID: targetID, Cluster: cluster, Shard: shard.Directory, Purpose: item.purpose, Protocol: "udp", BindAddress: profile.BindAddress, Port: item.port, State: ReservationObserved, Managed: false})
+		identity := targetID + "\x00" + installationID + "\x00" + cluster + "\x00" + shard.Directory + "\x00" + string(item.purpose)
+		values = append(values, PortReservation{ID: stableResourceID("port-observed", identity), EnvironmentID: environment.ID, NetworkProfileID: profile.ID, ScopeID: profile.ScopeID, TargetID: targetID, Cluster: cluster, Shard: shard.Directory, Purpose: item.purpose, Protocol: "udp", BindAddress: profile.BindAddress, Port: item.port, State: state, Managed: false})
 	}
 	return values
 }
 
-func detectPortConflicts(values []PortReservation, scope *resourcePreflightScope) []ResourceConflict {
+func detectPortConflicts(values []PortReservation, scope *resourcePreflightScope) ([]ResourceConflict, []ResourceConflict) {
 	conflicts := []ResourceConflict{}
+	advisories := []ResourceConflict{}
 	for leftIndex := range values {
 		left := values[leftIndex]
 		if scope != nil && !scope.states[left.State] {
@@ -688,10 +882,21 @@ func detectPortConflicts(values []PortReservation, scope *resourcePreflightScope
 			if scope != nil && !scope.owners[resourceOwnerKey(left.RoomID, left.WorldID)] && !scope.owners[resourceOwnerKey(right.RoomID, right.WorldID)] {
 				continue
 			}
-			conflicts = append(conflicts, ResourceConflict{Code: "UDP_PORT_CONFLICT", ScopeID: left.ScopeID, Port: left.Port, TargetID: left.TargetID, RoomID: left.RoomID, WorldID: left.WorldID, Message: fmt.Sprintf("网络作用域 %s 的 UDP %d 同时被 %s/%s(%s) 与 %s/%s(%s) 占用", left.ScopeID, left.Port, left.Cluster, left.Shard, left.Purpose, right.Cluster, right.Shard, right.Purpose)})
+			message := fmt.Sprintf("网络作用域 %s 的 UDP %d 同时配置给 %s/%s(%s) 与 %s/%s(%s)", left.ScopeID, left.Port, left.Cluster, left.Shard, left.Purpose, right.Cluster, right.Shard, right.Purpose)
+			value := ResourceConflict{Code: "UDP_PORT_CONFLICT", ScopeID: left.ScopeID, Port: left.Port, TargetID: left.TargetID, RoomID: left.RoomID, WorldID: left.WorldID, Message: message}
+			if scope == nil && (!reservationIsRunning(left.State) || !reservationIsRunning(right.State)) {
+				value.Code = "UDP_PORT_CONFIGURATION_OVERLAP"
+				advisories = append(advisories, value)
+				continue
+			}
+			conflicts = append(conflicts, value)
 		}
 	}
-	return conflicts
+	return conflicts, advisories
+}
+
+func reservationIsRunning(state ReservationState) bool {
+	return state == ReservationActive || state == ReservationObserved
 }
 
 func bindAddressesConflict(left, right string) bool {
@@ -786,7 +991,7 @@ func validateCPUAllocation(input CPUAllocationUpdate, room rooms.Room, world roo
 		}
 		coreOverlap := intersectsStrings(coreKeys, allocation.PhysicalCoreKeys)
 		if (input.Policy == CPUPolicyExclusive || allocation.Policy == CPUPolicyExclusive) && (logicalOverlap || coreOverlap) {
-			return CPUAllocation{}, &ResourceConflictError{Preflight: ResourcePreflight{Ready: false, Warnings: warnings, Conflicts: []ResourceConflict{{Code: "CPU_ALLOCATION_CONFLICT", TargetID: targetID, RoomID: room.ID, WorldID: world.ID, Message: "CPU 分配与同一执行环境中的另一 Shard 冲突"}}}}
+			return CPUAllocation{}, &ResourceConflictError{Preflight: ResourcePreflight{Ready: false, Warnings: warnings, Advisories: []ResourceConflict{}, Conflicts: []ResourceConflict{{Code: "CPU_ALLOCATION_CONFLICT", TargetID: targetID, RoomID: room.ID, WorldID: world.ID, Message: "CPU 分配与同一执行环境中的另一 Shard 冲突"}}}}
 		}
 	}
 	if input.Policy == CPUPolicyShared && !cpu.TopologyAvailable {
@@ -807,11 +1012,7 @@ func cpuCoreTopology(cpu shared.CPUInventory) (map[int]string, map[string][]int)
 }
 
 func inventoryByTarget(values []agents.RuntimeTargetInventory) map[string]agents.RuntimeTargetInventory {
-	result := make(map[string]agents.RuntimeTargetInventory, len(values))
-	for _, value := range values {
-		result[value.Target.ID] = value
-	}
-	return result
+	return machineInventories(values)
 }
 
 func resourceOwnerKey(roomID, worldID string) string { return roomID + "\x00" + worldID }

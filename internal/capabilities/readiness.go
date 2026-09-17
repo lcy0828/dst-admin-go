@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	dstinstall "dont/internal/dstserver"
 
@@ -31,8 +32,14 @@ type Check struct {
 }
 
 type Readiness struct {
-	Ready  bool    `json:"ready"`
-	Checks []Check `json:"checks"`
+	Ready      bool       `json:"ready"`
+	Checks     []Check    `json:"checks"`
+	Onboarding Onboarding `json:"onboarding"`
+}
+
+type Onboarding struct {
+	FirstStartCompleted bool       `json:"firstStartCompleted"`
+	CompletedAt         *time.Time `json:"completedAt,omitempty"`
 }
 
 type RoomCounter func() (int, error)
@@ -60,7 +67,7 @@ func ProbeReadiness(config Config, countRooms RoomCounter) Readiness {
 			roomCheck.Summary = "暂时无法扫描已有房间"
 			roomCheck.Remediation = "检查存档目录权限和 cluster.ini 文件"
 		} else if count > 0 {
-			roomCheck.Summary = fmt.Sprintf("发现 %d 个可接管房间", count)
+			roomCheck.Summary = fmt.Sprintf("发现 %d 个可自动登记房间", count)
 			roomCheck.Details = map[string]interface{}{"count": count}
 		}
 	}

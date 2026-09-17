@@ -3,9 +3,9 @@ package runtimedriver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"dont/internal/configpublication"
@@ -23,6 +23,14 @@ type NativeControl interface {
 	Send(context.Context, string, string, string) error
 }
 
+type nativeRuntimeModeControl interface {
+	StartWithRuntimeMode(context.Context, string, string, shared.RuntimePerformanceMode) error
+}
+
+type nativeRuntimeLaunchControl interface {
+	StartWithRuntimeOptions(context.Context, string, string, shared.RuntimePerformanceMode, shared.RuntimeLaunchOptions) error
+}
+
 type nativeBackgroundSender interface {
 	SendBackground(context.Context, string, string, string, string) error
 }
@@ -38,9 +46,14 @@ type Native struct {
 	configs  *configpublication.Manager
 	cpu      NativeCPUBackend
 
-	mu       sync.Mutex
-	evidence map[string]shared.RuntimeOperationEvidence
+	evidence *nativeEvidenceStore
 }
+
+var (
+	_ ChatLogDriver       = (*Native)(nil)
+	_ ConfigurationReader = (*Native)(nil)
+	_ ClusterTokenReader  = (*Native)(nil)
+)
 
 type NativeCPUBackend interface {
 	Prepare(context.Context, string, string, string, shared.RuntimeCPURequest) (shared.RuntimeCPUResult, error)
@@ -60,7 +73,29 @@ func NewNative(saveRoot string, control NativeControl) (*Native, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Native{saveRoot: saveRoot, control: control, transfer: transfer, configs: configs, evidence: make(map[string]shared.RuntimeOperationEvidence)}, nil
+	return &Native{saveRoot: saveRoot, control: control, transfer: transfer, configs: configs, evidence: newNativeEvidenceStore(saveRoot)}, nil
+}
+
+func (d *Native) ReadConfiguration(ctx context.Context, target Target, scope string) (shared.RuntimeConfigurationResult, error) {
+	if err := validateTarget(target); err != nil {
+		return shared.RuntimeConfigurationResult{}, err
+	}
+	return runtimefiles.ReadConfiguration(ctx, d.saveRoot, target.Cluster, target.Shard, scope)
+}
+
+func (d *Native) WriteModOverrides(ctx context.Context, target Target, _ Operation, expectedSHA256 string, content []byte) error {
+	if err := validateTarget(target); err != nil {
+		return err
+	}
+	_, err := runtimefiles.PublishModOverrides(ctx, d.saveRoot, target.Cluster, target.Shard, expectedSHA256, content)
+	return err
+}
+
+func (d *Native) RevealClusterToken(ctx context.Context, target Target) (shared.RuntimeClusterTokenReveal, error) {
+	if err := validateTarget(target); err != nil {
+		return shared.RuntimeClusterTokenReveal{}, err
+	}
+	return runtimefiles.ReadClusterToken(ctx, d.saveRoot, target.Cluster, target.Shard)
 }
 
 func (d *Native) BeginConfiguration(_ context.Context, target Target, _ Operation, descriptor ConfigurationDescriptor) (int64, error) {
@@ -68,6 +103,16 @@ func (d *Native) BeginConfiguration(_ context.Context, target Target, _ Operatio
 		PublicationID: descriptor.PublicationID, Cluster: target.Cluster, Shard: target.Shard,
 		Scope: configpublication.Scope(descriptor.Scope), Size: descriptor.Size, SHA256: descriptor.SHA256,
 	})
+}
+
+func (d *Native) ApplyConfiguration(ctx context.Context, target Target, _ Operation, descriptor ConfigurationDescriptor, data []byte, expected map[string]string) ([]string, error) {
+	if err := validateTarget(target); err != nil {
+		return nil, err
+	}
+	return d.configs.Apply(ctx, configpublication.Descriptor{
+		PublicationID: descriptor.PublicationID, Cluster: target.Cluster, Shard: target.Shard,
+		Scope: configpublication.Scope(descriptor.Scope), Size: descriptor.Size, SHA256: descriptor.SHA256,
+	}, data, expected)
 }
 
 func (d *Native) WriteConfiguration(_ context.Context, _ Target, _ Operation, descriptor ConfigurationDescriptor, offset int64, data []byte) (int64, error) {
@@ -134,7 +179,10 @@ func (d *Native) ReleaseMigrationExport(_ context.Context, _ Target, _ Operation
 }
 
 func (d *Native) BeginMigrationImport(_ context.Context, _ Target, _ Operation, descriptor MigrationDescriptor) error {
-	_, err := d.transfer.BeginImport(descriptor.MigrationID, descriptor.Size, descriptor.SHA256)
+	_, err := d.transfer.BeginImportWithShardEndpoint(
+		descriptor.MigrationID, descriptor.Size, descriptor.SHA256,
+		descriptor.ShardBindAll, descriptor.ShardMasterAddress, descriptor.ShardMasterPort,
+	)
 	return err
 }
 
@@ -227,8 +275,9 @@ func (d *Native) Kind() Kind { return KindNative }
 func (d *Native) Capabilities() []Capability {
 	result := []Capability{
 		CapabilityLifecycle, CapabilityConsoleInput, CapabilityConsoleHealth, CapabilityRawConsole,
-		CapabilityOperationProof, CapabilityLogContinuation, CapabilityArtifacts,
-		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore, CapabilityConfigPublish,
+		CapabilityOperationProof, CapabilityLogContinuation, CapabilityChatHistory, CapabilityArtifacts, CapabilityWorldStateRead,
+		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore, CapabilityConfigRead, CapabilityConfigSecrets, CapabilityConfigPublish, CapabilityConfigApply,
+		CapabilityShardRouting,
 	}
 	if d.cpu != nil {
 		result = append(result, CapabilityExclusiveCPU)
@@ -259,7 +308,7 @@ func (d *Native) ExecuteShard(ctx context.Context, target Target, operation Oper
 		switch action {
 		case shared.ShardActionStart:
 			if status.State != shards.RuntimeRunning && status.State != shards.RuntimeStarting {
-				err = d.control.Start(operationContext, target.Cluster, target.Shard)
+				err = startNativeShard(operationContext, d.control, target.Cluster, target.Shard, operation.RuntimeMode, operation.LaunchOptions)
 			}
 			if err == nil {
 				observed, err = waitForNativeShardState(operationContext, d.control, target.Cluster, target.Shard, true)
@@ -279,7 +328,7 @@ func (d *Native) ExecuteShard(ctx context.Context, target Target, operation Oper
 				observed, err = waitForNativeShardState(operationContext, d.control, target.Cluster, target.Shard, false)
 			}
 			if err == nil {
-				err = d.control.Start(operationContext, target.Cluster, target.Shard)
+				err = startNativeShard(operationContext, d.control, target.Cluster, target.Shard, operation.RuntimeMode, operation.LaunchOptions)
 			}
 			if err == nil {
 				observed, err = waitForNativeShardState(operationContext, d.control, target.Cluster, target.Shard, true)
@@ -298,21 +347,57 @@ func (d *Native) ExecuteShard(ctx context.Context, target Target, operation Oper
 	result := shared.ShardOperationResult{
 		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: operation.ID, OperationKey: operation.Key,
 		InstallationID: target.InstallationID, Action: action, Cluster: target.Cluster, Shard: target.Shard,
-		FencingToken: operation.FencingToken, Status: nativeStatus(observed), ObservedAt: time.Now().UTC(),
+		RuntimeMode:   operation.RuntimeMode,
+		LaunchOptions: operation.LaunchOptions,
+		FencingToken:  operation.FencingToken, Status: nativeStatus(observed), ObservedAt: time.Now().UTC(),
 	}
 	if err != nil {
 		result.Message = err.Error()
 	}
+	if shared.ShardActionMutates(action) {
+		outcome := shared.RuntimeOutcomeConfirmed
+		if err != nil {
+			outcome = shared.RuntimeOutcomeFailed
+		}
+		persistErr := d.remember(shared.RuntimeOperationEvidence{
+			OperationID: result.OperationID, Action: string(result.Action), Completed: true,
+			Outcome: outcome, Message: result.Message, ObservedAt: result.ObservedAt,
+		})
+		if persistErr != nil {
+			err = errors.Join(err, fmt.Errorf("保存本机 Runtime 操作证据: %w", persistErr))
+		}
+	}
 	return result, err
 }
 
+func startNativeShard(ctx context.Context, control NativeControl, cluster, shard string, mode shared.RuntimePerformanceMode, options shared.RuntimeLaunchOptions) error {
+	normalized, valid := shared.NormalizeRuntimePerformanceMode(mode)
+	if !valid {
+		return ErrInvalidTarget
+	}
+	if runtimeControl, ok := control.(nativeRuntimeLaunchControl); ok {
+		return runtimeControl.StartWithRuntimeOptions(ctx, cluster, shard, normalized, options)
+	}
+	if runtimeControl, ok := control.(nativeRuntimeModeControl); ok {
+		return runtimeControl.StartWithRuntimeMode(ctx, cluster, shard, normalized)
+	}
+	if normalized != shared.RuntimePerformanceModeGame {
+		return ErrCapabilityMissing
+	}
+	return control.Start(ctx, cluster, shard)
+}
+
 func waitForNativeShardState(ctx context.Context, control NativeControl, cluster, shard string, running bool) (shards.RuntimeStatus, error) {
+	reportStartup := shards.StartupProgressReporter(ctx)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		status, err := control.Status(ctx, cluster, shard)
 		if err != nil {
 			return status, err
+		}
+		if running {
+			reportStartup(status)
 		}
 		if running && status.State == shards.RuntimeRunning {
 			return status, nil
@@ -345,13 +430,22 @@ func (d *Native) SendConsole(ctx context.Context, target Target, operation Opera
 	sendContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var err error
-	if request.Mode == shared.ConsoleModeProbe && strings.TrimSpace(request.CoalesceKey) != "" {
+	if len(request.Command) > shared.MaximumRuntimeConsoleCommandBytes {
+		err = errors.New("控制台命令超过 DST 允许的 1023 字节")
+	} else if request.CommandDocument != nil {
+		if request.Mode != shared.ConsoleModeManaged || strings.TrimSpace(request.CoalesceKey) != "" {
+			err = errors.New("Runtime 命令请求文档只能用于托管控制台命令")
+		} else {
+			err = runtimefiles.PublishCommandDocument(sendContext, d.saveRoot, target.Cluster, target.Shard, *request.CommandDocument)
+		}
+	}
+	if err == nil && request.Mode == shared.ConsoleModeProbe && strings.TrimSpace(request.CoalesceKey) != "" {
 		if background, ok := d.control.(nativeBackgroundSender); ok {
 			err = background.SendBackground(sendContext, target.Cluster, target.Shard, request.CoalesceKey, request.Command)
 		} else {
 			err = d.control.Send(sendContext, target.Cluster, target.Shard, request.Command)
 		}
-	} else {
+	} else if err == nil {
 		err = d.control.Send(sendContext, target.Cluster, target.Shard, request.Command)
 	}
 	result := shared.RuntimeOperationResult{
@@ -363,7 +457,15 @@ func (d *Native) SendConsole(ctx context.Context, target Target, operation Opera
 	if err != nil {
 		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
 	}
-	d.remember(result)
+	if request.Mode != shared.ConsoleModeProbe {
+		persistErr := d.remember(shared.RuntimeOperationEvidence{
+			OperationID: result.OperationID, Action: string(result.Action), Completed: true,
+			Outcome: result.Outcome, Message: result.Message, ObservedAt: result.ObservedAt,
+		})
+		if persistErr != nil {
+			err = errors.Join(err, fmt.Errorf("保存本机 Runtime 操作证据: %w", persistErr))
+		}
+	}
 	return result, err
 }
 
@@ -383,9 +485,7 @@ func (d *Native) ConsoleHealth(ctx context.Context, target Target) (shared.Runti
 }
 
 func (d *Native) ObserveOperation(_ context.Context, _ Target, operationID, _ string) (shared.RuntimeOperationEvidence, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	evidence, exists := d.evidence[operationID]
+	evidence, exists := d.evidence.observe(operationID)
 	if !exists {
 		return shared.RuntimeOperationEvidence{}, errors.New("未找到需要观察的本机 Runtime 操作")
 	}
@@ -399,6 +499,20 @@ func (d *Native) ReadLogs(ctx context.Context, target Target, request shared.Run
 	return runtimefiles.ReadLogs(ctx, d.saveRoot, target.Cluster, target.Shard, request)
 }
 
+func (d *Native) ListChatLogGenerations(ctx context.Context, target Target) ([]shared.RuntimeChatLogGeneration, error) {
+	if err := validateTarget(target); err != nil {
+		return nil, err
+	}
+	return runtimefiles.ListChatLogGenerations(ctx, d.saveRoot, target.Cluster, target.Shard)
+}
+
+func (d *Native) ReadChatLogGeneration(ctx context.Context, target Target, request shared.RuntimeChatLogRequest) (shared.RuntimeChatLogResult, error) {
+	if err := validateTarget(target); err != nil {
+		return shared.RuntimeChatLogResult{}, err
+	}
+	return runtimefiles.ReadChatLogGeneration(ctx, d.saveRoot, target.Cluster, target.Shard, request)
+}
+
 func (d *Native) ReadArtifacts(ctx context.Context, target Target, kind shared.ArtifactKind) (shared.RuntimeArtifactBundle, error) {
 	if err := validateTarget(target); err != nil {
 		return shared.RuntimeArtifactBundle{}, err
@@ -406,13 +520,16 @@ func (d *Native) ReadArtifacts(ctx context.Context, target Target, kind shared.A
 	return runtimefiles.ReadArtifacts(ctx, d.saveRoot, target.Cluster, target.Shard, kind)
 }
 
-func (d *Native) remember(result shared.RuntimeOperationResult) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.evidence[result.OperationID] = shared.RuntimeOperationEvidence{
-		OperationID: result.OperationID, Action: string(result.Action), Completed: true,
-		Outcome: result.Outcome, Message: result.Message, ObservedAt: result.ObservedAt,
+func (d *Native) ReadWorldState(ctx context.Context, target Target) (shared.RuntimeWorldStateRead, error) {
+	status, err := d.Status(ctx, target)
+	if err != nil {
+		return shared.RuntimeWorldStateRead{}, err
 	}
+	return runtimefiles.ReadWorldState(ctx, d.saveRoot, target.Cluster, target.Shard, status)
+}
+
+func (d *Native) remember(evidence shared.RuntimeOperationEvidence) error {
+	return d.evidence.remember(evidence)
 }
 
 func validateTarget(target Target) error {
@@ -424,5 +541,5 @@ func validateTarget(target Target) error {
 }
 
 func nativeStatus(status shards.RuntimeStatus) shared.ShardRuntimeStatus {
-	return shared.ShardRuntimeStatus{State: string(status.State), Code: status.Code, Message: status.Message, SessionExists: status.SessionExists}
+	return shared.ShardRuntimeStatus{State: string(status.State), StartupStage: status.StartupStage, Code: status.Code, Message: status.Message, SessionExists: status.SessionExists, Paused: status.Paused}
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"dont/internal/dstruntime"
+	"dont/internal/savehealth"
 	"dont/internal/topology"
 	"dont/shared"
 )
@@ -35,6 +36,7 @@ type RuntimeStatus struct {
 	Code          string `json:"code,omitempty"`
 	Message       string `json:"message,omitempty"`
 	SessionExists bool   `json:"sessionExists"`
+	Paused        *bool  `json:"paused,omitempty"`
 }
 
 type ArtifactStatus struct {
@@ -139,6 +141,8 @@ func (s *Service) Snapshot(ctx context.Context, roomID string) (Snapshot, error)
 		switch shard.State {
 		case "healthy":
 			result.Summary.Healthy++
+		case "stopped":
+			// A deliberately stopped, correctly placed Shard is neutral rather than degraded.
 		case "unavailable":
 			result.Summary.Unavailable++
 		default:
@@ -150,7 +154,8 @@ func (s *Service) Snapshot(ctx context.Context, roomID string) (Snapshot, error)
 		if shard.Runtime.State == "stopped" {
 			result.Summary.Stopped++
 		}
-		if shard.Placement.DesiredTargetID != shard.Placement.AppliedTargetID {
+		if shard.Placement.DesiredTargetID != shard.Placement.AppliedTargetID ||
+			shard.Placement.DesiredInstallationID != shard.Placement.AppliedInstallationID {
 			result.Summary.Planned++
 		}
 	}
@@ -172,7 +177,7 @@ func (s *Service) inspectShard(ctx context.Context, roomID string, placement top
 		shard.Runtime.State = "unknown"
 		shard.RuntimeProblem = problem(statusErr, "RUNTIME_STATUS_UNAVAILABLE")
 	} else {
-		shard.Runtime = RuntimeStatus{State: status.State, Code: status.Code, Message: status.Message, SessionExists: status.SessionExists}
+		shard.Runtime = RuntimeStatus{State: status.State, Code: status.Code, Message: status.Message, SessionExists: status.SessionExists, Paused: status.Paused}
 	}
 	health, healthErr := s.artifacts.Health(ctx, roomID, placement.WorldID)
 	if healthErr != nil {
@@ -202,7 +207,16 @@ func shardState(shard Shard) string {
 	if shard.RuntimeProblem != nil || shard.Target == nil || !shard.Target.Online || !shard.Target.Configured {
 		return "unavailable"
 	}
-	if shard.Placement.State != topology.PlacementAligned || shard.Runtime.State != "running" {
+	if shard.Placement.State != topology.PlacementAligned {
+		return "degraded"
+	}
+	if shard.Runtime.State == "stopped" {
+		return "stopped"
+	}
+	if shard.Runtime.Code == savehealth.SaveWriteFailedCode {
+		return "degraded"
+	}
+	if shard.Runtime.State != "running" {
 		return "degraded"
 	}
 	if !shard.Health.Available || shard.Health.Freshness != "live" || shard.Health.Health == nil || !shard.Health.Health.Ready || shard.Health.Health.LastError != nil {

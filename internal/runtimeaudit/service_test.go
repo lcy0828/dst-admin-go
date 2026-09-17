@@ -29,9 +29,13 @@ func (c auditRooms) World(_, id string) (rooms.World, error) {
 	return rooms.World{}, rooms.ErrWorldNotFound
 }
 
-type auditRuntime struct{ status shards.RuntimeStatus }
+type auditRuntime struct {
+	status shards.RuntimeStatus
+	calls  int
+}
 
 func (r *auditRuntime) Status(context.Context, string, string) (shards.RuntimeStatus, error) {
+	r.calls++
 	return r.status, nil
 }
 
@@ -90,6 +94,18 @@ func TestExpectedExitPreservesActionSourceAndReferences(t *testing.T) {
 	}
 }
 
+func TestRecordActionDoesNotQueryRuntime(t *testing.T) {
+	service, runtime, room, world := newAuditService(t)
+	if err := service.RecordAction(ActionRequest{
+		RoomID: room.ID, WorldIDs: []string{world.ID}, Action: "start", Source: SourceAPI,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.calls != 0 {
+		t.Fatalf("runtime status calls = %d, want 0", runtime.calls)
+	}
+}
+
 func TestSaveActionUsesDedicatedAuditType(t *testing.T) {
 	service, _, room, world := newAuditService(t)
 	if err := service.RecordAction(ActionRequest{RoomID: room.ID, WorldIDs: []string{world.ID}, Action: "save", Source: SourceAPI}); err != nil {
@@ -101,6 +117,44 @@ func TestSaveActionUsesDedicatedAuditType(t *testing.T) {
 	}
 	if len(list.Items) != 1 || list.Items[0].Type != EventSaveRequested || list.Items[0].ExpectedExit {
 		t.Fatalf("events=%#v", list.Items)
+	}
+}
+
+func TestFirstSuccessfulStartUsesRunningTransition(t *testing.T) {
+	service, runtime, room, world := newAuditService(t)
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	if completed, err := service.FirstSuccessfulStart(); err != nil || completed != nil {
+		t.Fatalf("completion before running = %#v, err=%v", completed, err)
+	}
+
+	service.recordTransition(room, world,
+		observedRuntime{state: shards.RuntimeStarting, sessionExists: true},
+		observedRuntime{state: shards.RuntimeRunning, sessionExists: true}, runtime.status)
+	completed, err := service.FirstSuccessfulStart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed == nil || completed.Type != EventRunning || !completed.OccurredAt.Equal(now) {
+		t.Fatalf("completion = %#v", completed)
+	}
+}
+
+func TestFirstSuccessfulStartRecognizesRunningStateBeforeUpgrade(t *testing.T) {
+	service, _, room, world := newAuditService(t)
+	now := time.Date(2026, 8, 23, 12, 30, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	service.recordTransition(room, world,
+		observedRuntime{state: shards.RuntimeRunning, sessionExists: true},
+		observedRuntime{state: shards.RuntimeStopped, sessionExists: false},
+		shards.RuntimeStatus{State: shards.RuntimeStopped})
+
+	completed, err := service.FirstSuccessfulStart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed == nil || completed.PreviousState != string(shards.RuntimeRunning) || !completed.OccurredAt.Equal(now) {
+		t.Fatalf("completion = %#v", completed)
 	}
 }
 
@@ -152,32 +206,24 @@ func TestRecreatedContainerDoesNotClaimUnexpectedOrCleanExit(t *testing.T) {
 	}
 }
 
-func TestAdaptivePollDelay(t *testing.T) {
+func TestPollDelayOnlyRunsDuringActionWindow(t *testing.T) {
 	service, _, _, _ := newAuditService(t)
 	now := time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
-	fast := 5 * time.Second
-
-	tests := []struct {
-		name   string
-		states map[string]observedRuntime
-		want   time.Duration
-	}{
-		{name: "empty", states: nil, want: fast},
-		{name: "running", states: map[string]observedRuntime{"master": {state: shards.RuntimeRunning, sessionExists: true}}, want: 30 * time.Second},
-		{name: "stopped", states: map[string]observedRuntime{"master": {state: shards.RuntimeStopped}}, want: time.Minute},
-		{name: "mixed stable", states: map[string]observedRuntime{
-			"master": {state: shards.RuntimeRunning, sessionExists: true}, "caves": {state: shards.RuntimeStopped},
-		}, want: 30 * time.Second},
-		{name: "starting", states: map[string]observedRuntime{"master": {state: shards.RuntimeStarting, sessionExists: true}}, want: fast},
-		{name: "unknown", states: map[string]observedRuntime{"master": {state: shards.RuntimeUnknown}}, want: fast},
+	if got := service.pollDelay(5 * time.Second); got != 0 {
+		t.Fatalf("idle poll delay = %s, want disabled", got)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := service.pollDelay(test.states, fast); got != test.want {
-				t.Fatalf("poll delay = %s, want %s", got, test.want)
-			}
-		})
+	service.requestFastPolling()
+	if got := service.pollDelay(5 * time.Second); got != 5*time.Second {
+		t.Fatalf("active poll delay = %s, want 5s", got)
+	}
+	now = now.Add(fastPollingWindow - time.Second)
+	if got := service.pollDelay(5 * time.Second); got != time.Second {
+		t.Fatalf("final poll delay = %s, want 1s", got)
+	}
+	now = now.Add(time.Second)
+	if got := service.pollDelay(5 * time.Second); got != 0 {
+		t.Fatalf("expired poll delay = %s, want disabled", got)
 	}
 }
 
@@ -188,12 +234,11 @@ func TestActionRequestsFastPollingWindow(t *testing.T) {
 	if err := service.RecordAction(ActionRequest{RoomID: room.ID, WorldIDs: []string{world.ID}, Action: "restart", Source: SourceAPI}); err != nil {
 		t.Fatal(err)
 	}
-	states := map[string]observedRuntime{"master": {state: shards.RuntimeRunning, sessionExists: true}}
-	if got := service.pollDelay(states, 5*time.Second); got != 5*time.Second {
+	if got := service.pollDelay(5 * time.Second); got != 5*time.Second {
 		t.Fatalf("poll delay during action window = %s", got)
 	}
 	now = now.Add(fastPollingWindow + time.Second)
-	if got := service.pollDelay(states, 5*time.Second); got != 30*time.Second {
+	if got := service.pollDelay(5 * time.Second); got != 0 {
 		t.Fatalf("poll delay after action window = %s", got)
 	}
 }

@@ -60,7 +60,9 @@ func (p *LocalProvider) collectCPU(value *Status) {
 	threads, threadErr := cpu.Counts(true)
 	limits := hostresource.Detect()
 	threads = hostresource.EffectiveCPUCount(threads, limits)
-	usage, usageErr := cpu.Percent(100*time.Millisecond, true)
+	// A zero interval reports usage since the previous sample without blocking
+	// every HTTP request for an additional sampling window.
+	usage, usageErr := cpu.Percent(0, true)
 	if coreErr != nil || threadErr != nil || usageErr != nil {
 		value.CPU.Error = firstError(coreErr, threadErr, usageErr)
 		value.Warnings = append(value.Warnings, "无法完整读取 CPU 指标")
@@ -81,7 +83,7 @@ func (p *LocalProvider) collectCPU(value *Status) {
 	if cores > threads {
 		cores = threads
 	}
-	value.CPU = CPUStatus{Available: true, Model: model, Cores: cores, Threads: threads, Usage: percent(average), CoreUsage: usage}
+	value.CPU = CPUStatus{Available: true, UsageAvailable: true, Model: model, Cores: cores, Threads: threads, Usage: percent(average), CoreUsage: usage}
 	if average, err := load.Avg(); err == nil {
 		value.CPU.Load1, value.CPU.Load5, value.CPU.Load15, value.CPU.LoadSupport = average.Load1, average.Load5, average.Load15, true
 	}

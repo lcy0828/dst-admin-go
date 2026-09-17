@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"dont/internal/requesttiming"
 	"dont/shared"
 )
 
@@ -14,7 +15,9 @@ func (s *Service) ExecuteShard(ctx context.Context, targetID string, request sha
 		return ShardExecutionResult{}, ErrInvalidInput
 	}
 	agentID := strings.TrimPrefix(targetID, "agent:")
+	finishAgent := requesttiming.Start(ctx, "controller.agent_metadata")
 	agent, err := s.Agent(agentID)
+	finishAgent()
 	if err != nil {
 		return ShardExecutionResult{}, err
 	}
@@ -24,7 +27,12 @@ func (s *Service) ExecuteShard(ctx context.Context, targetID string, request sha
 	if !containsString(agent.Capabilities, "shard.control.v1") {
 		return ShardExecutionResult{}, ErrUnsupportedAction
 	}
+	if shared.ShardActionMutates(request.Action) && !containsString(agent.Capabilities, "shard.control.v2") {
+		return ShardExecutionResult{}, ErrUnsupportedAction
+	}
+	finishConfig := requesttiming.Start(ctx, "controller.agent_config")
 	config, err := s.runtimeConfigForAgent(agent)
+	finishConfig()
 	if err != nil {
 		return ShardExecutionResult{}, err
 	}

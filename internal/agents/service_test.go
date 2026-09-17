@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,9 @@ func TestRuntimeTargetsPreferLocalAndKeepRemoteConfigurationIsolated(t *testing.
 	if items[0].ID != "local" || !items[0].Default || items[0].Kind != RuntimeKindLocal || items[0].Status != RuntimeStatusReady {
 		t.Fatalf("local target=%#v", items[0])
 	}
+	if runtime.GOOS != "windows" && (!containsString(items[0].Capabilities, "runtime.game-update.v1") || !containsString(items[0].Capabilities, "shard.control.v1")) {
+		t.Fatalf("local product capabilities=%#v", items[0].Capabilities)
+	}
 	if items[1].Configured || items[1].Status != RuntimeStatusConfigurationRequired {
 		t.Fatalf("unconfigured remote target=%#v", items[1])
 	}
@@ -121,6 +125,9 @@ func TestRuntimeTargetsPreferLocalAndKeepRemoteConfigurationIsolated(t *testing.
 	if _, err := service.SaveRuntimeConfig("agent-primary", RuntimeConfig{DisplayName: "bad", SavePath: "relative", ServerPath: "/srv/dst"}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("relative remote path error=%v", err)
 	}
+	if _, err := service.SaveRuntimeConfig("agent-primary", RuntimeConfig{DisplayName: "bad", SavePath: "/srv/dst", ServerPath: "/srv/dst", ServerMode: "luajit"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("LuaJIT must not be accepted as a server architecture: %v", err)
+	}
 	offline, err := service.SaveRuntimeConfig("agent-offline", input)
 	if err != nil || offline.Status != RuntimeStatusOffline {
 		t.Fatalf("offline target=%#v err=%v", offline, err)
@@ -131,6 +138,41 @@ func TestRuntimeTargetsPreferLocalAndKeepRemoteConfigurationIsolated(t *testing.
 	target, err = service.RuntimeTarget("agent-primary")
 	if err != nil || target.Configured || target.Status != RuntimeStatusConfigurationRequired {
 		t.Fatalf("deleted target=%#v err=%v", target, err)
+	}
+}
+
+func TestLocalRuntimeInstallationsRemainOneMachineTarget(t *testing.T) {
+	service, _, _, _ := newAgentTestService(t)
+	defaultRoot := t.TempDir()
+	secondaryRoot := t.TempDir()
+	service.ConfigureLocalRuntime(RuntimeConfig{
+		InstallationID: "primary", DisplayName: "主安装", SavePath: defaultRoot, ServerPath: defaultRoot,
+	})
+	if err := service.ConfigureLocalRuntimeInstallation(RuntimeConfig{
+		InstallationID: "testing", DisplayName: "测试安装", SavePath: secondaryRoot, ServerPath: secondaryRoot,
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := service.RuntimeTargets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	localTargets := 0
+	for _, target := range targets {
+		if target.ID != "local" {
+			continue
+		}
+		localTargets++
+		if target.Config.InstallationID != "primary" || len(target.Installations) != 2 ||
+			target.Installations[0].ID != "primary" || target.Installations[1].ID != "testing" {
+			t.Fatalf("local target=%#v", target)
+		}
+	}
+	if localTargets != 1 {
+		t.Fatalf("local targets=%d", localTargets)
+	}
+	if err := service.ConfigureLocalRuntimeInstallation(RuntimeConfig{InstallationID: "bad id"}, false); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("invalid installation error=%v", err)
 	}
 }
 
@@ -208,25 +250,283 @@ func TestRuntimeTargetsCanRunWithoutControllerLocalInstallation(t *testing.T) {
 	}
 }
 
+func TestRuntimeTopologyListenerCoversTargetInventoryAndLifecycleChanges(t *testing.T) {
+	service, _, _, transport := newAgentTestService(t)
+	notifications := 0
+	service.AddRuntimeTopologyListener(func() { notifications++ })
+
+	changed, err := service.Sync()
+	if err != nil || !changed || notifications != 1 {
+		t.Fatalf("initial sync changed=%v notifications=%d err=%v", changed, notifications, err)
+	}
+	if changed, err = service.Sync(); err != nil || changed || notifications != 1 {
+		t.Fatalf("stable sync changed=%v notifications=%d err=%v", changed, notifications, err)
+	}
+
+	target, err := service.SaveRuntimeConfig("agent-primary", RuntimeConfig{
+		InstallationID: "default", DisplayName: "生产节点", SavePath: "/srv/dst/save",
+		ServerPath: "/srv/dst/server", LuaBinary: "lua", ServerMode: "64",
+	})
+	if err != nil || notifications != 2 {
+		t.Fatalf("save runtime target=%#v notifications=%d err=%v", target, notifications, err)
+	}
+	agent, err := service.Agent("agent-primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.observeInventory(context.Background(), agent, target.Config); err != nil || notifications != 3 {
+		t.Fatalf("observe inventory notifications=%d err=%v", notifications, err)
+	}
+
+	transport.mu.Lock()
+	snapshot := transport.snapshots["agent-primary"]
+	snapshot.Status = StatusOffline
+	transport.snapshots["agent-primary"] = snapshot
+	transport.mu.Unlock()
+	if changed, err = service.Sync(); err != nil || !changed || notifications != 4 {
+		t.Fatalf("offline sync changed=%v notifications=%d err=%v", changed, notifications, err)
+	}
+	if err := service.DeleteRuntimeConfig("agent-primary"); err != nil || notifications != 5 {
+		t.Fatalf("delete runtime notifications=%d err=%v", notifications, err)
+	}
+	if err := service.Forget("agent-primary"); err != nil || notifications != 6 {
+		t.Fatalf("forget notifications=%d err=%v", notifications, err)
+	}
+}
+
+func TestInventorySignalTracksRuntimeChangesWithoutFollowingMetrics(t *testing.T) {
+	service, _, _, _ := newAgentTestService(t)
+	now := time.Now().UTC()
+	snapshot := TransportSnapshot{
+		ID: "agent-a", Status: StatusOnline, Version: "2.9.0", LastHeartbeat: now,
+		Capabilities: []string{"runtime.inventory.read"},
+		Metrics:      Metrics{CPUUsage: 10},
+		Details: map[string]interface{}{"runtime_installations": []map[string]interface{}{{
+			"id": "default", "save_path": "/srv/dst/saves", "server_path": "/srv/dst/server",
+		}}},
+	}
+	if !service.updateInventorySignals([]TransportSnapshot{snapshot}) {
+		t.Fatal("initial signal was not detected")
+	}
+	snapshot.LastHeartbeat = now.Add(time.Minute)
+	snapshot.Metrics.CPUUsage = 95
+	if service.updateInventorySignals([]TransportSnapshot{snapshot}) {
+		t.Fatal("heartbeat or CPU metrics triggered inventory collection")
+	}
+	snapshot.Details["runtime_installations"] = []map[string]interface{}{{
+		"id": "default", "save_path": "/opt/dst/saves", "server_path": "/opt/dst/server",
+	}}
+	if !service.updateInventorySignals([]TransportSnapshot{snapshot}) {
+		t.Fatal("installation change did not trigger inventory collection")
+	}
+	snapshot.Capabilities = []string{"runtime.inventory.read", "runtime.backup.v1"}
+	if !service.updateInventorySignals([]TransportSnapshot{snapshot}) {
+		t.Fatal("capability change did not trigger inventory collection")
+	}
+}
+
+func TestInventoryWakeIsCoalesced(t *testing.T) {
+	service, _, _, _ := newAgentTestService(t)
+	service.wakeInventoryRefresh()
+	service.wakeInventoryRefresh()
+	if len(service.inventoryWake) != 1 {
+		t.Fatalf("wake count=%d", len(service.inventoryWake))
+	}
+}
+
+func TestControllerAgentScenarioReconnectWakesInventoryAndRefreshesCapabilities(t *testing.T) {
+	service, _, _, transport := newAgentTestService(t)
+	if _, err := service.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SaveRuntimeConfig("agent-primary", RuntimeConfig{
+		InstallationID: "default", DisplayName: "远程节点", SavePath: "/srv/dst/save", ServerPath: "/srv/dst/server",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for len(service.inventoryWake) > 0 {
+		<-service.inventoryWake
+	}
+
+	transport.mu.Lock()
+	snapshot := transport.snapshots["agent-primary"]
+	snapshot.Status = StatusOffline
+	transport.snapshots["agent-primary"] = snapshot
+	transport.mu.Unlock()
+	if changed, err := service.Sync(); err != nil || !changed {
+		t.Fatalf("offline sync changed=%v err=%v", changed, err)
+	}
+	offline, err := service.RuntimeTarget("agent-primary")
+	if err != nil || offline.Online || offline.Status != RuntimeStatusOffline {
+		t.Fatalf("offline target=%#v err=%v", offline, err)
+	}
+
+	transport.mu.Lock()
+	snapshot = transport.snapshots["agent-primary"]
+	snapshot.Status = StatusOnline
+	snapshot.Capabilities = []string{"system.report", "runtime.inventory.read", "shard.control.v1"}
+	transport.snapshots["agent-primary"] = snapshot
+	transport.mu.Unlock()
+	if changed, err := service.Sync(); err != nil || !changed {
+		t.Fatalf("reconnect sync changed=%v err=%v", changed, err)
+	}
+	reconnected, err := service.RuntimeTarget("agent-primary")
+	if err != nil || !reconnected.Online || containsString(reconnected.Capabilities, "runtime.backup.v1") {
+		t.Fatalf("reconnected target retained stale capabilities: %#v err=%v", reconnected, err)
+	}
+	if len(service.inventoryWake) != 1 {
+		t.Fatalf("reconnect inventory wake count=%d", len(service.inventoryWake))
+	}
+}
+
+func TestUniqueAdvertisedRuntimeIsDiscoveredAndCollected(t *testing.T) {
+	service, store, _, transport := newAgentTestService(t)
+	transport.mu.Lock()
+	snapshot := transport.snapshots["agent-primary"]
+	snapshot.Details["runtime_installations"] = []map[string]interface{}{{
+		"id": "default", "driver": "native", "save_path": "/srv/dst/saves", "server_path": "/srv/dst/server",
+		"steamcmd_path": "/usr/games/steamcmd", "ugc_path": "/srv/dst/workshop",
+		"workshop_content_path": "/srv/dst/workshop/content/322330", "server_mode": "64",
+	}}
+	transport.snapshots["agent-primary"] = snapshot
+	transport.mu.Unlock()
+
+	targets, err := service.RuntimeTargets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var discovered RuntimeTarget
+	for _, target := range targets {
+		if target.AgentID == "agent-primary" {
+			discovered = target
+			break
+		}
+	}
+	if !discovered.Configured || discovered.Status != RuntimeStatusReady || discovered.Config.Source != RuntimeConfigSourceDiscovered ||
+		discovered.Config.InstallationID != "default" || discovered.Config.SavePath != "/srv/dst/saves" {
+		t.Fatalf("discovered target=%#v", discovered)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		inventory, inventoryErr := store.Inventory("agent-primary")
+		if inventoryErr == nil {
+			if inventory.Inventory.Installation.ID != "default" {
+				t.Fatalf("inventory=%#v", inventory)
+			}
+			break
+		}
+		if !errors.Is(inventoryErr, ErrInventoryNotFound) || time.Now().After(deadline) {
+			t.Fatalf("automatic inventory error=%v", inventoryErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	transport.mu.Lock()
+	snapshot = transport.snapshots["agent-primary"]
+	snapshot.Details["runtime_installations"] = []map[string]interface{}{{
+		"id": "default", "driver": "native", "save_path": "/opt/dst/saves", "server_path": "/opt/dst/server",
+		"steamcmd_path": "/usr/games/steamcmd", "ugc_path": "/opt/dst/workshop",
+		"workshop_content_path": "/opt/dst/workshop/content/322330", "server_mode": "64",
+	}}
+	transport.snapshots["agent-primary"] = snapshot
+	transport.mu.Unlock()
+
+	target, err := service.RuntimeTarget("agent-primary")
+	if err != nil || target.Config.Source != RuntimeConfigSourceDiscovered || target.Config.SavePath != "/opt/dst/saves" ||
+		target.Config.ServerPath != "/opt/dst/server" {
+		t.Fatalf("updated discovered target=%#v err=%v", target, err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		inventory, inventoryErr := store.Inventory("agent-primary")
+		if inventoryErr == nil && inventory.Inventory.Installation.SavePath == "/opt/dst/saves" {
+			break
+		}
+		if inventoryErr != nil && !errors.Is(inventoryErr, ErrInventoryNotFound) {
+			t.Fatalf("updated automatic inventory error=%v", inventoryErr)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("updated automatic inventory was not collected: %#v err=%v", inventory, inventoryErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRuntimeDiscoveryRequiresUniqueInstallationAndHonorsRemoval(t *testing.T) {
+	service, _, _, transport := newAgentTestService(t)
+	transport.mu.Lock()
+	snapshot := transport.snapshots["agent-primary"]
+	snapshot.Details["runtime_installations"] = []map[string]interface{}{
+		{"id": "primary", "driver": "native", "save_path": "/srv/dst/saves-a", "server_path": "/srv/dst/server-a", "server_mode": "64"},
+		{"id": "secondary", "driver": "native", "save_path": "/srv/dst/saves-b", "server_path": "/srv/dst/server-b", "server_mode": "64"},
+	}
+	transport.snapshots["agent-primary"] = snapshot
+	transport.mu.Unlock()
+
+	target, err := service.RuntimeTarget("agent-primary")
+	if err != nil || target.Configured {
+		t.Fatalf("multiple-installation target=%#v err=%v", target, err)
+	}
+
+	transport.mu.Lock()
+	snapshot = transport.snapshots["agent-primary"]
+	snapshot.Details["runtime_installations"] = []map[string]interface{}{{
+		"id": "primary", "driver": "native", "save_path": "/srv/dst/saves-a", "server_path": "/srv/dst/server-a", "server_mode": "64",
+	}}
+	transport.snapshots["agent-primary"] = snapshot
+	transport.mu.Unlock()
+	target, err = service.RuntimeTarget("agent-primary")
+	if err != nil || !target.Configured || target.Config.Source != RuntimeConfigSourceDiscovered {
+		t.Fatalf("unique-installation target=%#v err=%v", target, err)
+	}
+
+	if err := service.DeleteRuntimeConfig("agent-primary"); err != nil {
+		t.Fatal(err)
+	}
+	target, err = service.RuntimeTarget("agent-primary")
+	if err != nil || target.Configured {
+		t.Fatalf("removed target was automatically recreated: %#v err=%v", target, err)
+	}
+	agent, err := service.Agent("agent-primary")
+	if err != nil || !agent.RuntimeAutoAdoptDisabled {
+		t.Fatalf("automatic discovery suppression missing: %#v err=%v", agent, err)
+	}
+
+	target, err = service.SaveRuntimeConfig("agent-primary", RuntimeConfig{InstallationID: "primary", DisplayName: "人工运行环境"})
+	if err != nil || !target.Configured || target.Config.Source != RuntimeConfigSourceManual {
+		t.Fatalf("manual target=%#v err=%v", target, err)
+	}
+	agent, err = service.Agent("agent-primary")
+	if err != nil || agent.RuntimeAutoAdoptDisabled {
+		t.Fatalf("manual save did not restore discovery policy: %#v err=%v", agent, err)
+	}
+}
+
 func TestRuntimeConfigBindsOnlyAgentAdvertisedInstallation(t *testing.T) {
 	service, _, _, transport := newAgentTestService(t)
 	transport.mu.Lock()
 	snapshot := transport.snapshots["agent-primary"]
-	snapshot.Details["runtime_installations"] = []map[string]string{{
+	snapshot.Details["runtime_installations"] = []map[string]interface{}{{
 		"id": "container", "driver": "container", "save_path": "/srv/dst/saves", "server_path": "/srv/dst/server",
 		"steamcmd_path": "/usr/games/steamcmd", "ugc_path": "/srv/dst/workshop", "workshop_content_path": "/srv/dst/workshop/content", "server_mode": "64",
+		"performance": shared.RuntimePerformanceReport{
+			Provider: "dontstarve-luajit2", Status: shared.RuntimePerformanceIncompatible,
+			GameVersion: "747465", SignatureVersion: "728321",
+			SupportedModes: []shared.RuntimePerformanceMode{shared.RuntimePerformanceModeGame}, Issues: []string{"signature_version_mismatch"},
+		},
 	}}
 	transport.snapshots["agent-primary"] = snapshot
 	transport.mu.Unlock()
 
 	agent, err := service.Agent("agent-primary")
-	if err != nil || !agent.InstallationRegistrySupported || len(agent.Installations) != 1 || agent.Installations[0].ID != "container" {
+	if err != nil || !agent.InstallationRegistrySupported || len(agent.Installations) != 1 || agent.Installations[0].ID != "container" || agent.Installations[0].Performance == nil || agent.Installations[0].Performance.Status != shared.RuntimePerformanceIncompatible {
 		t.Fatalf("agent=%#v err=%v", agent, err)
 	}
 	target, err := service.SaveRuntimeConfig("agent-primary", RuntimeConfig{
 		InstallationID: "container", DisplayName: "容器节点", BackupPath: "/srv/dst/backups", LuaBinary: "lua",
 	})
-	if err != nil || target.Status != RuntimeStatusReady || target.Config.SavePath != "/srv/dst/saves" || target.Config.ServerPath != "/srv/dst/server" {
+	if err != nil || target.Status != RuntimeStatusReady || target.Config.SavePath != "/srv/dst/saves" || target.Config.ServerPath != "/srv/dst/server" || target.Performance == nil || target.Performance.SignatureVersion != "728321" {
 		t.Fatalf("target=%#v err=%v", target, err)
 	}
 	if _, err := service.SaveRuntimeConfig("agent-primary", RuntimeConfig{InstallationID: "missing", DisplayName: "错误节点"}); !errors.Is(err, ErrRuntimeInstallationNotRegistered) {
@@ -241,6 +541,69 @@ func TestRuntimeConfigBindsOnlyAgentAdvertisedInstallation(t *testing.T) {
 		InstallationID: "container", DisplayName: "错误 SteamCMD", SteamCMDPath: "/other/steamcmd",
 	}); !errors.Is(err, ErrRuntimeInstallationNotRegistered) {
 		t.Fatalf("unadvertised optional path error=%v", err)
+	}
+}
+
+func TestNormalizeRuntimePerformanceRejectsUntrustedReadyReports(t *testing.T) {
+	valid := shared.RuntimePerformanceReport{
+		Provider: "dontstarve-luajit2", Status: shared.RuntimePerformanceReady, CanEnable: true,
+		PackageVersion: "2.9.1", GameVersion: "747465", SignatureVersion: "747465",
+		BinarySHA256: strings.Repeat("a", 64),
+		SupportedModes: []shared.RuntimePerformanceMode{
+			shared.RuntimePerformanceModeGame,
+			shared.RuntimePerformanceModeJITOff,
+			shared.RuntimePerformanceModeJITOn,
+		},
+		Issues: []string{},
+	}
+	if normalized := normalizeRuntimePerformance(&valid); normalized == nil || !normalized.CanEnable {
+		t.Fatalf("valid ready report was rejected: %#v", normalized)
+	}
+	v3 := valid
+	v3.PackageVersion = "3.0.0"
+	v3.SignatureVersion = ""
+	v3.AutomaticSignatures = true
+	if normalized := normalizeRuntimePerformance(&v3); normalized == nil || !normalized.CanEnable || !normalized.AutomaticSignatures {
+		t.Fatalf("automatic-signature report was rejected: %#v", normalized)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*shared.RuntimePerformanceReport)
+	}{
+		{name: "agent did not authorize enable", mutate: func(report *shared.RuntimePerformanceReport) { report.CanEnable = false }},
+		{name: "signature version mismatch", mutate: func(report *shared.RuntimePerformanceReport) { report.SignatureVersion = "728321" }},
+		{name: "required mode missing", mutate: func(report *shared.RuntimePerformanceReport) {
+			report.SupportedModes = []shared.RuntimePerformanceMode{shared.RuntimePerformanceModeGame, shared.RuntimePerformanceModeJITOn}
+		}},
+		{name: "unknown mode", mutate: func(report *shared.RuntimePerformanceReport) {
+			report.SupportedModes = append(report.SupportedModes, shared.RuntimePerformanceMode("future-mode"))
+		}},
+		{name: "unknown issue", mutate: func(report *shared.RuntimePerformanceReport) { report.Issues = []string{"future_untrusted_issue"} }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			report := valid
+			report.SupportedModes = append([]shared.RuntimePerformanceMode(nil), valid.SupportedModes...)
+			report.Issues = append([]string(nil), valid.Issues...)
+			test.mutate(&report)
+			if normalized := normalizeRuntimePerformance(&report); normalized != nil {
+				t.Fatalf("untrusted report must be rejected: %#v", normalized)
+			}
+		})
+	}
+}
+
+func TestNormalizeRuntimePerformanceKeepsNonReadyReportsDisabled(t *testing.T) {
+	report := shared.RuntimePerformanceReport{
+		Provider: "dontstarve-luajit2", Status: shared.RuntimePerformanceIncompatible, CanEnable: true,
+		GameVersion: "747465", SignatureVersion: "728321",
+		SupportedModes: []shared.RuntimePerformanceMode{shared.RuntimePerformanceModeGame},
+		Issues:         []string{"signature_version_mismatch"},
+	}
+	normalized := normalizeRuntimePerformance(&report)
+	if normalized == nil || normalized.CanEnable || len(normalized.Issues) != 1 {
+		t.Fatalf("non-ready report=%#v", normalized)
 	}
 }
 
@@ -282,6 +645,46 @@ func TestExecuteRuntimeBindsTrustedInstallationAndCapability(t *testing.T) {
 	}
 	if _, err := service.ExecuteRuntime(context.Background(), "local", request, 30); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("local target error=%v", err)
+	}
+}
+
+func TestExecuteRuntimeRejectsLegacyRuntimeCapability(t *testing.T) {
+	service, _, _, transport := newAgentTestService(t)
+	config := RuntimeConfig{
+		InstallationID: "primary", DisplayName: "运行节点", SavePath: "/srv/dst/save",
+		ServerPath: "/srv/dst/server", ServerMode: "64",
+	}
+	if _, err := service.SaveRuntimeConfig("agent-primary", config); err != nil {
+		t.Fatal(err)
+	}
+	transport.mu.Lock()
+	snapshot := transport.snapshots["agent-primary"]
+	for index, capability := range snapshot.Capabilities {
+		snapshot.Capabilities[index] = strings.ReplaceAll(strings.ReplaceAll(capability, "runtime.driver.v2", "runtime.driver.v1"), "runtime.console.v2", "runtime.console.v1")
+	}
+	transport.snapshots["agent-primary"] = snapshot
+	transport.mu.Unlock()
+	request := shared.RuntimeOperationRequest{
+		ProtocolVersion: shared.RuntimeOperationProtocolVersion, OperationID: "operation-runtime-legacy",
+		Action: shared.RuntimeActionConsoleHealth, Cluster: "Cluster_1", Shard: "Master", TopologyRevision: "revision-1",
+	}
+	if _, err := service.ExecuteRuntime(context.Background(), "agent:agent-primary", request, 30); !errors.Is(err, ErrUnsupportedAction) {
+		t.Fatalf("legacy runtime capability error=%v", err)
+	}
+}
+
+func TestDetectEgressRunsOnRemoteRuntimeTarget(t *testing.T) {
+	service, _, _, _ := newAgentTestService(t)
+	config := RuntimeConfig{
+		InstallationID: "primary", DisplayName: "运行节点", SavePath: "/srv/dst/save",
+		ServerPath: "/srv/dst/server", ServerMode: "64",
+	}
+	if _, err := service.SaveRuntimeConfig("agent-primary", config); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.DetectEgress(context.Background(), "agent:agent-primary", shared.RuntimeNetworkRegionCN)
+	if err != nil || result.Address != "203.0.113.42" || result.Region != shared.RuntimeNetworkRegionCN || result.ObservedAt.IsZero() {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
 
@@ -358,6 +761,37 @@ func TestRuntimeTargetInventoriesCollectsConfiguredLocalTarget(t *testing.T) {
 	}
 	if items[0].Capacity.PhysicalCores < 1 || items[0].Capacity.ReservedPhysicalCores != 1 {
 		t.Fatalf("local capacity=%#v", items[0].Capacity)
+	}
+}
+
+func TestRuntimeTargetInventoriesReturnsEveryLocalInstallation(t *testing.T) {
+	service, _, _, _ := newAgentTestService(t)
+	primaryRoot := t.TempDir()
+	testingRoot := t.TempDir()
+	service.ConfigureLocalRuntime(RuntimeConfig{
+		InstallationID: "primary", DisplayName: "主安装", SavePath: primaryRoot, ServerPath: primaryRoot, ServerMode: "64",
+	})
+	if err := service.ConfigureLocalRuntimeInstallation(RuntimeConfig{
+		InstallationID: "testing", DisplayName: "测试安装", SavePath: testingRoot, ServerPath: testingRoot, ServerMode: "64",
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := service.RuntimeTargetInventories(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := make(map[string]RuntimeTargetInventory)
+	for _, item := range items {
+		if item.Target.ID == "local" {
+			local[item.Target.Config.InstallationID] = item
+		}
+	}
+	if len(local) != 2 || !local["primary"].Available || !local["testing"].Available {
+		t.Fatalf("local inventories=%#v", local)
+	}
+	if local["primary"].Target.DefaultInstallationID != "primary" || len(local["testing"].Target.Installations) != 2 {
+		t.Fatalf("installation metadata=%#v", local)
 	}
 }
 
@@ -483,6 +917,36 @@ func TestExecuteShardUsesConfiguredInstallationAndTypedTransport(t *testing.T) {
 	}
 }
 
+func TestExecuteShardRequiresConfirmedLifecycleCapabilityForMutations(t *testing.T) {
+	service, _, _, transport := newAgentTestService(t)
+	_, err := service.SaveRuntimeConfig("agent-primary", RuntimeConfig{
+		InstallationID: "primary", DisplayName: "生产节点", SavePath: "/srv/dst/save", ServerPath: "/srv/dst/server", ServerMode: "64",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.mu.Lock()
+	snapshot := transport.snapshots["agent-primary"]
+	snapshot.Capabilities = []string{"shard.control.v1"}
+	transport.snapshots["agent-primary"] = snapshot
+	transport.mu.Unlock()
+	if _, err := service.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	status := shared.ShardOperationRequest{
+		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: "status-1",
+		Action: shared.ShardActionStatus, Cluster: "Cluster_1", Shard: "Caves",
+	}
+	if _, err := service.ExecuteShard(context.Background(), "agent:agent-primary", status, 30); err != nil {
+		t.Fatalf("read-only status should remain compatible: %v", err)
+	}
+	status.OperationID = "stop-1"
+	status.Action = shared.ShardActionStop
+	if _, err := service.ExecuteShard(context.Background(), "agent:agent-primary", status, 30); !errors.Is(err, ErrUnsupportedAction) {
+		t.Fatalf("legacy lifecycle mutation error=%v", err)
+	}
+}
+
 func TestAgentSecurityMasksAndRotatesOnce(t *testing.T) {
 	service, _, _, transport := newAgentTestService(t)
 	before, _ := transport.CurrentKey()
@@ -605,6 +1069,21 @@ func TestCapacityUsesOnePhysicalCorePerShardBudget(t *testing.T) {
 				t.Fatalf("estimated capacity=%#v", value)
 			}
 		})
+	}
+}
+
+func TestRuntimeTargetFromAgentPreservesReportedIPAddresses(t *testing.T) {
+	agent := Agent{
+		ID: "node-a", Hostname: "node-a", Status: StatusOnline, LastHeartbeat: time.Now().UTC(),
+		IPAddresses: []string{"192.168.2.42", "10.0.0.42"},
+	}
+	target := runtimeTargetFromAgent(agent, RuntimeConfig{}, false)
+	if len(target.IPAddresses) != 2 || target.IPAddresses[0] != "192.168.2.42" || target.IPAddresses[1] != "10.0.0.42" {
+		t.Fatalf("target IP addresses=%v", target.IPAddresses)
+	}
+	target.IPAddresses[0] = "changed"
+	if agent.IPAddresses[0] != "192.168.2.42" {
+		t.Fatal("runtime target aliases the Agent IP address slice")
 	}
 }
 

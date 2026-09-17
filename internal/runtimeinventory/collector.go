@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"dont/internal/hostresource"
+	"dont/internal/worldidentity"
 	"dont/shared"
 
 	"github.com/go-ini/ini"
@@ -63,8 +64,51 @@ func Collect(ctx context.Context, request shared.RuntimeInventoryRequest) (share
 	if !report.Installation.ServerPathOK {
 		report.Warnings = append(report.Warnings, "DST 服务端目录不存在或不可访问")
 	}
-	report.Processes = CollectDSTProcesses(ctx)
+	processes, processErr := ProbeDSTProcesses(ctx)
+	if processErr != nil {
+		report.Warnings = append(report.Warnings, "无法读取 DST 进程清单: "+processErr.Error())
+	} else {
+		report.Processes = installationProcesses(processes, report.Rooms, request.SavePath, request.ServerPath)
+	}
 	return report, nil
+}
+
+func installationProcesses(values []shared.ShardProcessReport, rooms []shared.RoomInventoryReport, savePath, serverPath string) []shared.ShardProcessReport {
+	identities := make(map[string]bool)
+	for _, room := range rooms {
+		for _, shard := range room.Shards {
+			identities[strings.ToLower(strings.TrimSpace(room.Directory))+"\x00"+strings.ToLower(strings.TrimSpace(shard.Directory))] = true
+		}
+	}
+	result := make([]shared.ShardProcessReport, 0, len(values))
+	for _, value := range values {
+		matches := false
+		if root := strings.TrimSpace(value.StorageRoot); root != "" {
+			processSavePath := root
+			if configDirectory := strings.TrimSpace(value.ConfigDirectory); configDirectory != "" {
+				processSavePath = filepath.Join(root, configDirectory)
+			}
+			matches = sameOrDescendantPath(processSavePath, savePath)
+		} else if executable := strings.TrimSpace(value.Executable); filepath.IsAbs(executable) {
+			matches = sameOrDescendantPath(executable, serverPath)
+		} else {
+			identity := strings.ToLower(strings.TrimSpace(value.Cluster)) + "\x00" + strings.ToLower(strings.TrimSpace(value.Shard))
+			matches = identities[identity]
+		}
+		if matches {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func sameOrDescendantPath(candidate, parent string) bool {
+	candidate, parent = filepath.Clean(strings.TrimSpace(candidate)), filepath.Clean(strings.TrimSpace(parent))
+	if candidate == "." || parent == "." {
+		return false
+	}
+	relative, err := filepath.Rel(parent, candidate)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func HostResources() (shared.CPUInventory, shared.MemoryInventory) {
@@ -209,7 +253,8 @@ func scanRooms(saveRoot string) ([]shared.RoomInventoryReport, []string, error) 
 			}
 			room.Shards = append(room.Shards, shared.ShardInventoryReport{
 				Directory: shardEntry.Name(), Name: name,
-				ID: serverConfig.Section("SHARD").Key("id").MustInt(0), Role: role, ConfigPath: serverPath,
+				ID: serverConfig.Section("SHARD").Key("id").MustInt(0), Role: role,
+				Type: string(worldidentity.ResolveType(filepath.Join(roomPath, shardEntry.Name()), shardEntry.Name())), ConfigPath: serverPath,
 				ServerPort:         serverConfig.Section("NETWORK").Key("server_port").MustInt(0),
 				MasterServerPort:   serverConfig.Section("STEAM").Key("master_server_port").MustInt(0),
 				AuthenticationPort: serverConfig.Section("STEAM").Key("authentication_port").MustInt(0),
@@ -223,14 +268,25 @@ func scanRooms(saveRoot string) ([]shared.RoomInventoryReport, []string, error) 
 }
 
 func CollectDSTProcesses(ctx context.Context) []shared.ShardProcessReport {
-	values, err := process.ProcessesWithContext(ctx)
+	items, err := ProbeDSTProcesses(ctx)
 	if err != nil {
 		return []shared.ShardProcessReport{}
+	}
+	return items
+}
+
+// ProbeDSTProcesses keeps failures visible for lifecycle preflight callers.
+// Inventory/reporting callers may still use CollectDSTProcesses when an empty
+// best-effort result is preferable to failing the whole report.
+func ProbeDSTProcesses(ctx context.Context) ([]shared.ShardProcessReport, error) {
+	values, err := process.ProcessesWithContext(ctx)
+	if err != nil {
+		return nil, err
 	}
 	items := make([]shared.ShardProcessReport, 0)
 	for _, value := range values {
 		if err := ctx.Err(); err != nil {
-			break
+			return nil, err
 		}
 		name, _ := value.NameWithContext(ctx)
 		arguments, _ := value.CmdlineSliceWithContext(ctx)
@@ -254,18 +310,27 @@ func CollectDSTProcesses(ctx context.Context) []shared.ShardProcessReport {
 		items = append(items, item)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].PID < items[j].PID })
-	return items
+	return items, nil
 }
 
 func IsDSTServerProcess(name string, arguments []string) bool {
-	candidates := append([]string{name}, arguments...)
+	candidates := []string{name}
+	if len(arguments) > 0 {
+		candidates = append(candidates, arguments[0])
+	}
 	for _, candidate := range candidates {
-		base := strings.ToLower(filepath.Base(strings.TrimSpace(candidate)))
-		if strings.Contains(base, "dontstarve_dedicated_server") {
+		if IsDSTExecutable(candidate) {
 			return true
 		}
 	}
 	return false
+}
+
+// IsDSTExecutable distinguishes the actual game process from supervisors such
+// as tmux whose command line embeds the full DST launch command.
+func IsDSTExecutable(value string) bool {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(value)))
+	return strings.Contains(base, "dontstarve_dedicated_server")
 }
 
 func ShardProcessFromArguments(pid int32, name string, arguments []string) shared.ShardProcessReport {

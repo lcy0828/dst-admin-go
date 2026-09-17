@@ -3,7 +3,9 @@ package agents
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"time"
@@ -27,9 +29,9 @@ func NewMemoryTransport() *MemoryTransport {
 			"agent-primary": {
 				ID: "agent-primary", Status: StatusOnline, Hostname: "林火节点", OS: "linux", Arch: "amd64", Version: "2.0.0-test",
 				IPAddresses: []string{"192.168.2.12"}, LastHeartbeat: now, LastReportAt: utcTimePointer(now),
-				Capabilities: []string{"system.report", "command.exec", "disk.inspect", "runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read", "shard.control.v1", "runtime.driver.v1", "runtime.console.v1", "runtime.logs.v1", "runtime.artifacts.v1", "runtime.migration.v1", "runtime.backup.v1", "runtime.mods.v1", "runtime.game-update.v1", "runtime.cpu.v1", "runtime.configuration.v1"},
+				Capabilities: []string{"system.report", "command.exec", "disk.inspect", "agent.upgrade.v1", "runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read", "shard.control.v1", "shard.control.v2", "shard.runtime-mode.v1", "shard.skip-mod-update.v1", "runtime.driver.v2", "runtime.console.v2", "runtime.logs.v1", "runtime.chat-history.v1", "runtime.artifacts.v1", "runtime.migration.v1", "runtime.migration.shard-routing.v1", "runtime.backup.v1", "runtime.mods.v1", "runtime.mods.state.v1", "runtime.mods.files.v1", "runtime.mods.inventory.v1", "runtime.mods.fetch.v2", "runtime.mods.download.v1", "runtime.mods.local-link.v1", "runtime.mods.content-publish.v1", "runtime.game-update.v1", "runtime.cpu.v1", "runtime.configuration.v1", "runtime.configuration.read.v1", "runtime.configuration.secrets.v1", "runtime.network.v1", "runtime.network.endpoints.v1", "runtime.room-recovery.v1"},
 				Metrics:      Metrics{CPUCount: 16, LogicalProcessors: 16, PhysicalCores: 8, PhysicalCoreSource: "test", RunningShardCount: 2, MemoryUsed: 3 * 1024 * 1024 * 1024, MemoryTotal: 8 * 1024 * 1024 * 1024, UptimeSeconds: 86400, ObservedAt: utcTimePointer(now)},
-				Details:      map[string]interface{}{"goVersion": "go1.25", "currentDirectory": "/opt/dst-admin-agent"},
+				Details:      map[string]interface{}{"goVersion": "go1.25", "currentDirectory": "/opt/dst-admin-agent", "deployment_profile": "native", "agent_update": map[string]interface{}{"mode": "self"}},
 			},
 			"agent-offline": {
 				ID: "agent-offline", Status: StatusOffline, Hostname: "离线节点", OS: "darwin", Arch: "arm64", Version: "1.9.0-test",
@@ -59,7 +61,7 @@ func (m *MemoryTransport) Inventory(ctx context.Context, agentID string, config 
 		CPU:             shared.CPUInventory{LogicalProcessors: 16, PhysicalCores: 8, PhysicalCoreSource: "test"},
 		Memory:          shared.MemoryInventory{TotalBytes: 8 * 1024 * 1024 * 1024, UsedBytes: 3 * 1024 * 1024 * 1024, AvailableBytes: 5 * 1024 * 1024 * 1024},
 		Installation: shared.RuntimeInstallationReport{
-			ID: "default", DisplayName: config.DisplayName, SavePath: config.SavePath, ServerPath: config.ServerPath,
+			ID: config.InstallationID, DisplayName: config.DisplayName, SavePath: config.SavePath, ServerPath: config.ServerPath,
 			ServerMode: config.ServerMode, SavePathOK: true, ServerPathOK: true,
 		},
 		Rooms: []shared.RoomInventoryReport{{
@@ -114,6 +116,7 @@ func (m *MemoryTransport) Execute(ctx context.Context, agentID string, action Ac
 		now := m.now().UTC()
 		snapshot.LastHeartbeat = now
 		snapshot.LastReportAt = utcTimePointer(now)
+		snapshot.Metrics.ObservedAt = utcTimePointer(now)
 		snapshot.Metrics.UptimeSeconds++
 		m.snapshots[agentID] = snapshot
 		return ExecutionResult{RemoteID: "memory-report", Output: "系统信息已刷新", ExitCode: 0}, nil
@@ -187,6 +190,28 @@ func (m *MemoryTransport) ExecuteRuntime(ctx context.Context, agentID string, re
 			result.Outcome = shared.RuntimeOutcomeConfirmed
 		}
 	}
+	if request.Action == shared.RuntimeActionNetworkEgressObserve {
+		if request.Network == nil || !shared.IsRuntimeNetworkRegion(request.Network.Region) {
+			return RuntimeExecutionResult{}, ErrInvalidInput
+		}
+		result.Network = &shared.RuntimeNetworkResult{Address: "203.0.113.42", Region: request.Network.Region, ObservedAt: m.now().UTC()}
+	}
+	if request.Action == shared.RuntimeActionNetworkEndpointListen {
+		if request.Network == nil || len(request.Network.Tokens) == 0 {
+			return RuntimeExecutionResult{}, ErrInvalidInput
+		}
+		result.Network = &shared.RuntimeNetworkResult{ReceivedTokens: append([]string(nil), request.Network.Tokens...), ObservedAt: m.now().UTC()}
+	}
+	if request.Action == shared.RuntimeActionNetworkEndpointProbe {
+		if request.Network == nil || len(request.Network.Endpoints) == 0 {
+			return RuntimeExecutionResult{}, ErrInvalidInput
+		}
+		probes := make([]shared.RuntimeNetworkEndpointResult, 0, len(request.Network.Endpoints))
+		for _, endpoint := range request.Network.Endpoints {
+			probes = append(probes, shared.RuntimeNetworkEndpointResult{Address: endpoint.Address, Port: endpoint.Port, Reachable: true, LatencyMillis: 2})
+		}
+		result.Network = &shared.RuntimeNetworkResult{EndpointProbes: probes, ObservedAt: m.now().UTC()}
+	}
 	if request.Action == shared.RuntimeActionCPUPrepare || request.Action == shared.RuntimeActionCPUApply || request.Action == shared.RuntimeActionCPUObserve {
 		if request.CPU == nil {
 			return RuntimeExecutionResult{}, ErrInvalidInput
@@ -208,7 +233,62 @@ func (m *MemoryTransport) ExecuteRuntime(ctx context.Context, agentID string, re
 			result.Outcome = shared.RuntimeOutcomeConfirmed
 		}
 	}
+	if request.Action == shared.RuntimeActionConfigurationRead {
+		if request.Configuration == nil {
+			return RuntimeExecutionResult{}, ErrInvalidInput
+		}
+		if request.Configuration.Scope == "token-status" {
+			digest := sha256.Sum256([]byte("memory-token"))
+			result.Configuration = &shared.RuntimeConfigurationResult{
+				Complete: true,
+				TokenStatus: &shared.RuntimeClusterTokenStatus{
+					Exists: true, Configured: true, MaskedValue: "****oken", SHA256: hex.EncodeToString(digest[:]), Mode: 0o600, UpdatedAt: m.now().UTC(),
+				},
+			}
+			return RuntimeExecutionResult{RemoteID: "memory-" + request.OperationID, Result: result}, nil
+		}
+		if request.Configuration.Scope != "shared" {
+			return RuntimeExecutionResult{}, ErrInvalidInput
+		}
+		data := []byte("[NETWORK]\ncluster_name=Memory Room\n")
+		digest := sha256.Sum256(data)
+		result.Configuration = &shared.RuntimeConfigurationResult{Complete: true, Files: []shared.RuntimeConfigurationFile{
+			{Name: "cluster.ini", Exists: true, Mode: 0o640, Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:]), UpdatedAt: m.now().UTC(), Data: data},
+			{Name: "adminlist.txt"}, {Name: "blocklist.txt"}, {Name: "whitelist.txt"},
+		}}
+	}
+	if request.Action == shared.RuntimeActionClusterTokenReveal {
+		token := "memory-token"
+		digest := sha256.Sum256([]byte(token))
+		result.ClusterToken = &shared.RuntimeClusterTokenReveal{Exists: true, Token: token, SHA256: hex.EncodeToString(digest[:]), UpdatedAt: m.now().UTC()}
+	}
 	return RuntimeExecutionResult{RemoteID: "memory-" + request.OperationID, Result: result}, nil
+}
+
+func (m *MemoryTransport) ExecuteUpgrade(ctx context.Context, agentID string, request shared.AgentUpgradeRequest, _ int) (AgentUpgradeExecutionResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	snapshot, exists := m.snapshots[agentID]
+	if !exists || snapshot.Status != StatusOnline {
+		return AgentUpgradeExecutionResult{}, ErrAgentOffline
+	}
+	select {
+	case <-ctx.Done():
+		return AgentUpgradeExecutionResult{}, ctx.Err()
+	default:
+	}
+	if request.ProtocolVersion != shared.AgentUpgradeProtocolVersion || request.OS != snapshot.OS || request.Arch != snapshot.Arch {
+		return AgentUpgradeExecutionResult{}, ErrInvalidInput
+	}
+	previous := snapshot.Version
+	snapshot.Version = request.Version
+	now := m.now().UTC()
+	snapshot.LastHeartbeat = now
+	m.snapshots[agentID] = snapshot
+	return AgentUpgradeExecutionResult{RemoteID: "memory-upgrade-" + request.ReleaseID, Result: shared.AgentUpgradeResult{
+		ProtocolVersion: shared.AgentUpgradeProtocolVersion, ReleaseID: request.ReleaseID,
+		PreviousVersion: previous, Version: request.Version, RestartRequired: true, ObservedAt: now,
+	}}, nil
 }
 
 func (m *MemoryTransport) CurrentKey() (string, error) {

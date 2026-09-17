@@ -1,6 +1,7 @@
 package topology
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -11,6 +12,55 @@ import (
 	"github.com/jinzhu/gorm"
 	_ "github.com/mattn/go-sqlite3"
 )
+
+func TestLegacyShardLinksOnlyBecomeAppliedForAlignedPlacements(t *testing.T) {
+	links := []storedShardLink{{
+		SourceTargetID: "agent:secondary", MasterTargetID: "local",
+		Address: "192.168.2.42", Port: 10889, Mode: ShardLinkLAN,
+	}}
+	linksJSON, err := json.Marshal(links)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name        string
+		placements  []storedPlacement
+		wantApplied int
+	}{
+		{
+			name: "aligned",
+			placements: []storedPlacement{
+				{WorldID: "master", DesiredTargetID: "local", AppliedTargetID: "local"},
+				{WorldID: "caves", DesiredTargetID: "agent:secondary", AppliedTargetID: "agent:secondary"},
+			},
+			wantApplied: 1,
+		},
+		{
+			name: "pending migration",
+			placements: []storedPlacement{
+				{WorldID: "master", DesiredTargetID: "local", AppliedTargetID: "local"},
+				{WorldID: "caves", DesiredTargetID: "agent:new", AppliedTargetID: "agent:secondary"},
+			},
+			wantApplied: 0,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			placementsJSON, marshalErr := json.Marshal(test.placements)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			value, parseErr := recordFromDatabase(topologyRecord{
+				RoomID: "room", Revision: "revision", Placements: string(placementsJSON), ShardLinks: string(linksJSON),
+			})
+			if parseErr != nil {
+				t.Fatal(parseErr)
+			}
+			if len(value.AppliedShardLinks) != test.wantApplied {
+				t.Fatalf("applied links=%#v", value.AppliedShardLinks)
+			}
+		})
+	}
+}
 
 func newTopologyTestStore(t *testing.T) *Store {
 	t.Helper()
@@ -143,5 +193,28 @@ func TestStoreReconcilesWorldsAndProtectsRevision(t *testing.T) {
 	}
 	if reconciled.Placements[1].DesiredTargetID != localTargetID || reconciled.Placements[1].AppliedTargetID != localTargetID {
 		t.Fatalf("new world placement=%#v", reconciled.Placements[1])
+	}
+}
+
+func TestStoreDefaultsNewDiscoveredWorldToItsRuntimeTarget(t *testing.T) {
+	store := newTopologyTestStore(t)
+	remote, err := store.EnsureWorlds("remote-room", []rooms.World{{
+		ID: "master", DirectoryName: "Master", TargetIDs: []string{"agent:debian12"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remote.Placements) != 1 || remote.Placements[0].DesiredTargetID != "agent:debian12" || remote.Placements[0].AppliedTargetID != "agent:debian12" {
+		t.Fatalf("remote placement=%#v", remote.Placements)
+	}
+
+	duplicate, err := store.EnsureWorlds("duplicate-room", []rooms.World{{
+		ID: "master", DirectoryName: "Master", TargetIDs: []string{"agent:z", "agent:a"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.Placements[0].AppliedTargetID != "agent:a" {
+		t.Fatalf("ambiguous placement must be deterministic and never fall back local: %#v", duplicate.Placements[0])
 	}
 }

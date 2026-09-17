@@ -67,44 +67,148 @@ const (
 )
 
 type PlacementInput struct {
-	WorldID  string `json:"worldId"`
-	TargetID string `json:"targetId"`
+	WorldID        string `json:"worldId"`
+	TargetID       string `json:"targetId"`
+	InstallationID string `json:"installationId,omitempty"`
 }
 
 type UpdateRequest struct {
 	ExpectedRevision string           `json:"expectedRevision"`
 	AllowOvercommit  bool             `json:"allowOvercommit"`
 	Placements       []PlacementInput `json:"placements"`
+	ShardLinks       []ShardLinkInput `json:"shardLinks,omitempty"`
+}
+
+type ShardLinkMode string
+
+const (
+	ShardLinkLAN        ShardLinkMode = "lan"
+	ShardLinkOverlay    ShardLinkMode = "overlay"
+	ShardLinkTunnel     ShardLinkMode = "tunnel"
+	ShardLinkPublic     ShardLinkMode = "public"
+	ShardLinkConfigured ShardLinkMode = "configured"
+	ShardLinkManual     ShardLinkMode = "manual"
+)
+
+type ShardLinkInput struct {
+	SourceTargetID       string        `json:"sourceTargetId"`
+	SourceInstallationID string        `json:"sourceInstallationId,omitempty"`
+	Address              string        `json:"address"`
+	Port                 int           `json:"port"`
+	Mode                 ShardLinkMode `json:"mode"`
+}
+
+type ShardLink struct {
+	SourceTargetID       string        `json:"sourceTargetId"`
+	SourceInstallationID string        `json:"sourceInstallationId"`
+	MasterTargetID       string        `json:"masterTargetId"`
+	MasterInstallationID string        `json:"masterInstallationId"`
+	Address              string        `json:"address"`
+	Port                 int           `json:"port"`
+	Mode                 ShardLinkMode `json:"mode"`
+}
+
+type ShardLinkPlan struct {
+	Revision         string
+	Desired          []ShardLink
+	Applied          []ShardLink
+	PlacementPending bool
+}
+
+type ShardLinkCandidateInput struct {
+	Address string `json:"address"`
+	Port    int    `json:"port"`
+	Name    string `json:"name,omitempty"`
+}
+
+type ShardLinkDiscoveryRequest struct {
+	ExpectedRevision string                    `json:"expectedRevision"`
+	Placements       []PlacementInput          `json:"placements"`
+	ManualCandidates []ShardLinkCandidateInput `json:"manualCandidates,omitempty"`
+}
+
+type ShardLinkCandidate struct {
+	Address       string `json:"address"`
+	Port          int    `json:"port"`
+	Kind          string `json:"kind"`
+	Name          string `json:"name"`
+	Reachable     bool   `json:"reachable"`
+	LatencyMillis int64  `json:"latencyMillis,omitempty"`
+	Status        string `json:"status"`
+	Error         string `json:"error,omitempty"`
+}
+
+type ShardLinkDiscovery struct {
+	SourceTargetID       string               `json:"sourceTargetId"`
+	SourceInstallationID string               `json:"sourceInstallationId"`
+	SourceTargetName     string               `json:"sourceTargetName"`
+	Candidates           []ShardLinkCandidate `json:"candidates"`
+	AutoSelected         *ShardLinkCandidate  `json:"autoSelected,omitempty"`
+}
+
+type ShardLinkDiscoveryResult struct {
+	RoomID                       string               `json:"roomId"`
+	Revision                     string               `json:"revision"`
+	MasterTargetID               string               `json:"masterTargetId"`
+	MasterInstallationID         string               `json:"masterInstallationId"`
+	MasterTargetName             string               `json:"masterTargetName"`
+	MasterPort                   int                  `json:"masterPort"`
+	Links                        []ShardLinkDiscovery `json:"links"`
+	ActiveProbe                  bool                 `json:"activeProbe"`
+	ActiveProbeUnavailableReason string               `json:"activeProbeUnavailableReason,omitempty"`
+	ObservedAt                   time.Time            `json:"observedAt"`
 }
 
 type Placement struct {
-	WorldID           string          `json:"worldId"`
-	WorldName         string          `json:"worldName"`
-	WorldRole         rooms.WorldRole `json:"worldRole"`
-	DesiredTargetID   string          `json:"desiredTargetId"`
-	AppliedTargetID   string          `json:"appliedTargetId"`
-	State             PlacementState  `json:"state"`
-	ObservedTargetIDs []string        `json:"observedTargetIds"`
+	WorldID               string              `json:"worldId"`
+	WorldName             string              `json:"worldName"`
+	WorldRole             rooms.WorldRole     `json:"worldRole"`
+	DesiredTargetID       string              `json:"desiredTargetId"`
+	AppliedTargetID       string              `json:"appliedTargetId"`
+	DesiredInstallationID string              `json:"desiredInstallationId"`
+	AppliedInstallationID string              `json:"appliedInstallationId"`
+	State                 PlacementState      `json:"state"`
+	Running               bool                `json:"running"`
+	ObservedTargetIDs     []string            `json:"observedTargetIds"`
+	ObservedLocations     []PlacementLocation `json:"observedLocations"`
+}
+
+type PlacementLocation struct {
+	TargetID       string `json:"targetId"`
+	InstallationID string `json:"installationId"`
+}
+
+type TargetInstallationSummary struct {
+	ID        string `json:"id"`
+	Driver    string `json:"driver"`
+	Default   bool   `json:"default"`
+	Available bool   `json:"available"`
+	Stale     bool   `json:"stale"`
 }
 
 type TargetSummary struct {
-	ID                             string               `json:"id"`
-	Name                           string               `json:"name"`
-	Kind                           agents.RuntimeKind   `json:"kind"`
-	Status                         agents.RuntimeStatus `json:"status"`
-	Online                         bool                 `json:"online"`
-	Configured                     bool                 `json:"configured"`
-	InventoryAvailable             bool                 `json:"inventoryAvailable"`
-	InventoryStale                 bool                 `json:"inventoryStale"`
-	StaleReason                    string               `json:"staleReason,omitempty"`
-	ObservedAt                     *time.Time           `json:"observedAt,omitempty"`
-	ObservedRunningShards          int                  `json:"observedRunningShards"`
-	UnmanagedRunningShards         int                  `json:"unmanagedRunningShards"`
-	PlannedShards                  int                  `json:"plannedShards"`
-	ProjectedShards                int                  `json:"projectedShards"`
-	CurrentCapacity                agents.Capacity      `json:"currentCapacity"`
-	ProjectedCapacity              agents.Capacity      `json:"projectedCapacity"`
-	RequiresOvercommitConfirmation bool                 `json:"requiresOvercommitConfirmation"`
+	ID                             string                      `json:"id"`
+	Name                           string                      `json:"name"`
+	Kind                           agents.RuntimeKind          `json:"kind"`
+	Status                         agents.RuntimeStatus        `json:"status"`
+	Online                         bool                        `json:"online"`
+	Configured                     bool                        `json:"configured"`
+	InventoryAvailable             bool                        `json:"inventoryAvailable"`
+	InventoryStale                 bool                        `json:"inventoryStale"`
+	StaleReason                    string                      `json:"staleReason,omitempty"`
+	ObservationState               string                      `json:"observationState,omitempty"`
+	ObservationError               string                      `json:"observationError,omitempty"`
+	RefreshStartedAt               *time.Time                  `json:"refreshStartedAt,omitempty"`
+	ObservedAt                     *time.Time                  `json:"observedAt,omitempty"`
+	ObservedRunningShards          int                         `json:"observedRunningShards"`
+	UnmanagedRunningShards         int                         `json:"unmanagedRunningShards"`
+	PlannedShards                  int                         `json:"plannedShards"`
+	ProjectedShards                int                         `json:"projectedShards"`
+	CurrentCapacity                agents.Capacity             `json:"currentCapacity"`
+	ProjectedCapacity              agents.Capacity             `json:"projectedCapacity"`
+	RequiresOvercommitConfirmation bool                        `json:"requiresOvercommitConfirmation"`
+	DefaultInstallationID          string                      `json:"defaultInstallationId"`
+	Installations                  []TargetInstallationSummary `json:"installations"`
 }
 
 type Issue struct {
@@ -159,6 +263,8 @@ type Snapshot struct {
 	Mode                           string          `json:"mode"`
 	RemoteExecutionReady           bool            `json:"remoteExecutionReady"`
 	Placements                     []Placement     `json:"placements"`
+	ShardLinks                     []ShardLink     `json:"shardLinks"`
+	AppliedShardLinks              []ShardLink     `json:"appliedShardLinks"`
 	Targets                        []TargetSummary `json:"targets"`
 	Issues                         []Issue         `json:"issues"`
 	RequiresOvercommitConfirmation bool            `json:"requiresOvercommitConfirmation"`
@@ -166,41 +272,69 @@ type Snapshot struct {
 	UpdatedAt                      time.Time       `json:"updatedAt"`
 }
 
+// FleetSnapshot is a control-plane view of every managed room built from one
+// runtime inventory observation. Targets are shared across room snapshots so
+// callers do not need to collect each Agent once per room.
+type FleetSnapshot struct {
+	Targets    []TargetSummary `json:"targets"`
+	Rooms      []Snapshot      `json:"rooms"`
+	ObservedAt time.Time       `json:"observedAt"`
+}
+
 type ExecutionPlacement struct {
-	Room            rooms.Room
-	World           rooms.World
-	Revision        string
-	DesiredTargetID string
-	AppliedTargetID string
-	Target          agents.RuntimeTarget
-	Inventory       agents.RuntimeTargetInventory
+	Room                  rooms.Room
+	World                 rooms.World
+	Revision              string
+	DesiredTargetID       string
+	AppliedTargetID       string
+	DesiredInstallationID string
+	AppliedInstallationID string
+	Target                agents.RuntimeTarget
+	Inventory             agents.RuntimeTargetInventory
 }
 
 type MigrationPlacement struct {
-	Room            rooms.Room
-	World           rooms.World
-	Revision        string
-	SourceTargetID  string
-	TargetTargetID  string
-	Source          agents.RuntimeTarget
-	Target          agents.RuntimeTarget
-	SourceInventory agents.RuntimeTargetInventory
-	TargetInventory agents.RuntimeTargetInventory
+	Room                 rooms.Room
+	World                rooms.World
+	Revision             string
+	SourceTargetID       string
+	TargetTargetID       string
+	SourceInstallationID string
+	TargetInstallationID string
+	Source               agents.RuntimeTarget
+	Target               agents.RuntimeTarget
+	SourceInventory      agents.RuntimeTargetInventory
+	TargetInventory      agents.RuntimeTargetInventory
+	AppliedShardLinks    []ShardLink
 }
 
 type storedPlacement struct {
-	WorldID            string          `json:"worldId"`
-	WorldDirectoryName string          `json:"worldDirectoryName,omitempty"`
-	WorldName          string          `json:"worldName,omitempty"`
-	WorldRole          rooms.WorldRole `json:"worldRole,omitempty"`
-	DesiredTargetID    string          `json:"desiredTargetId"`
-	AppliedTargetID    string          `json:"appliedTargetId"`
+	WorldID               string          `json:"worldId"`
+	WorldDirectoryName    string          `json:"worldDirectoryName,omitempty"`
+	WorldName             string          `json:"worldName,omitempty"`
+	WorldRole             rooms.WorldRole `json:"worldRole,omitempty"`
+	DesiredTargetID       string          `json:"desiredTargetId"`
+	AppliedTargetID       string          `json:"appliedTargetId"`
+	DesiredInstallationID string          `json:"desiredInstallationId,omitempty"`
+	AppliedInstallationID string          `json:"appliedInstallationId,omitempty"`
+}
+
+type storedShardLink struct {
+	SourceTargetID       string        `json:"sourceTargetId"`
+	SourceInstallationID string        `json:"sourceInstallationId,omitempty"`
+	MasterTargetID       string        `json:"masterTargetId"`
+	MasterInstallationID string        `json:"masterInstallationId,omitempty"`
+	Address              string        `json:"address"`
+	Port                 int           `json:"port"`
+	Mode                 ShardLinkMode `json:"mode"`
 }
 
 type record struct {
-	RoomID     string
-	Revision   string
-	Placements []storedPlacement
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	RoomID            string
+	Revision          string
+	Placements        []storedPlacement
+	ShardLinks        []storedShardLink
+	AppliedShardLinks []storedShardLink
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }

@@ -2,8 +2,11 @@ package httpapi
 
 import (
 	"errors"
+	"io"
+	"mime"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"dont/internal/agents"
@@ -40,6 +43,18 @@ func (h *AgentHandler) Register(v2 *gin.RouterGroup) {
 	group.DELETE("/:agentId", h.forget)
 	group.GET("/:agentId/commands", h.agentCommands)
 	group.POST("/:agentId/commands", h.runCommand)
+	group.POST("/:agentId/actions/upgrade", h.upgrade)
+
+	releases := v2.Group("/agent-releases")
+	releases.GET("", h.releases)
+	releases.POST("", h.uploadRelease)
+	releases.DELETE("/:releaseId", h.deleteRelease)
+}
+
+func (h *AgentHandler) RegisterDownloads(router *gin.Engine) {
+	if h != nil && router != nil {
+		router.GET("/agent-updates/:releaseId", h.downloadRelease)
+	}
 }
 
 func (h *AgentHandler) renameRuntimeTarget(c *gin.Context) {
@@ -158,6 +173,88 @@ func (h *AgentHandler) runCommand(c *gin.Context) {
 	Success(c, http.StatusAccepted, job)
 }
 
+func (h *AgentHandler) releases(c *gin.Context) {
+	items, err := h.service.Releases()
+	if err != nil {
+		agentFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, gin.H{"items": items, "total": len(items), "maxUploadBytes": agents.MaxAgentReleaseBytes})
+}
+
+func (h *AgentHandler) uploadRelease(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, agents.MaxAgentReleaseBytes+1024*1024)
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			Failure(c, http.StatusRequestEntityTooLarge, "AGENT_RELEASE_TOO_LARGE", "Agent 二进制文件超过 128 MiB 上传上限", nil)
+			return
+		}
+		Failure(c, http.StatusBadRequest, "AGENT_RELEASE_FILE_REQUIRED", "请选择 Agent 二进制文件", nil)
+		return
+	}
+	if fileHeader.Size > agents.MaxAgentReleaseBytes {
+		Failure(c, http.StatusRequestEntityTooLarge, "AGENT_RELEASE_TOO_LARGE", "Agent 二进制文件超过 128 MiB 上传上限", nil)
+		return
+	}
+	file, err := fileHeader.Open()
+	if err != nil {
+		Failure(c, http.StatusBadRequest, "AGENT_RELEASE_READ_FAILED", "无法读取 Agent 二进制文件", nil)
+		return
+	}
+	defer file.Close()
+	release, err := h.service.SaveRelease(c.PostForm("version"), fileHeader.Filename, file)
+	if err != nil {
+		agentFailure(c, err)
+		return
+	}
+	Success(c, http.StatusCreated, release)
+}
+
+func (h *AgentHandler) deleteRelease(c *gin.Context) {
+	if err := h.service.DeleteRelease(c.Param("releaseId")); err != nil {
+		agentFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, gin.H{"deleted": true})
+}
+
+func (h *AgentHandler) upgrade(c *gin.Context) {
+	var input agents.AgentUpgradeInput
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&input); err != nil {
+			Failure(c, http.StatusBadRequest, "INVALID_JSON", "Agent 升级请求不是有效 JSON", nil)
+			return
+		}
+	}
+	job, err := h.service.UpgradeAgent(c.Param("agentId"), input)
+	if err != nil {
+		agentFailure(c, err)
+		return
+	}
+	Success(c, http.StatusAccepted, job)
+}
+
+func (h *AgentHandler) downloadRelease(c *gin.Context) {
+	authorization := strings.Fields(strings.TrimSpace(c.GetHeader("Authorization")))
+	if len(authorization) != 2 || !strings.EqualFold(authorization[0], "Bearer") {
+		Failure(c, http.StatusUnauthorized, "AGENT_RELEASE_TOKEN_REQUIRED", "Agent 升级下载凭据无效", nil)
+		return
+	}
+	release, file, err := h.service.OpenReleaseDownload(c.Param("releaseId"), authorization[1])
+	if err != nil {
+		Failure(c, http.StatusUnauthorized, "AGENT_RELEASE_TOKEN_INVALID", "Agent 升级下载凭据无效或已过期", nil)
+		return
+	}
+	defer file.Close()
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("X-Agent-Release-SHA256", release.SHA256)
+	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": release.FileName}))
+	c.DataFromReader(http.StatusOK, release.Size, "application/octet-stream", io.Reader(file), nil)
+}
+
 func (h *AgentHandler) commands(c *gin.Context)      { h.commandList(c, c.Query("agentId")) }
 func (h *AgentHandler) agentCommands(c *gin.Context) { h.commandList(c, c.Param("agentId")) }
 
@@ -231,7 +328,7 @@ func (h *AgentHandler) rotateKey(c *gin.Context) {
 
 func agentFailure(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, agents.ErrAgentNotFound), errors.Is(err, agents.ErrCommandNotFound), errors.Is(err, agents.ErrRuntimeNotConfigured), errors.Is(err, agents.ErrRuntimeTargetNotFound), errors.Is(err, agents.ErrInventoryNotFound):
+	case errors.Is(err, agents.ErrAgentNotFound), errors.Is(err, agents.ErrCommandNotFound), errors.Is(err, agents.ErrRuntimeNotConfigured), errors.Is(err, agents.ErrRuntimeTargetNotFound), errors.Is(err, agents.ErrInventoryNotFound), errors.Is(err, agents.ErrReleaseNotFound):
 		NotFound(c)
 	case errors.Is(err, agents.ErrAgentOffline):
 		Failure(c, http.StatusConflict, "AGENT_OFFLINE", "Agent 当前离线，无法执行命令", nil)
@@ -243,6 +340,18 @@ func agentFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusUnprocessableEntity, "AGENT_KEY_CONFIRMATION_REQUIRED", "请输入 ROTATE AGENT KEY 确认轮换", map[string]string{"confirmation": "确认短语不匹配"})
 	case errors.Is(err, agents.ErrRuntimeInstallationNotRegistered):
 		Failure(c, http.StatusUnprocessableEntity, "RUNTIME_INSTALLATION_NOT_REGISTERED", "所选 DST 安装未在 Agent 上登记，或路径与 Agent 受信配置不一致", nil)
+	case errors.Is(err, agents.ErrUpgradeUnsupported):
+		Failure(c, http.StatusConflict, "AGENT_UPGRADE_UNSUPPORTED", "当前 Agent 安装方式不支持页面内升级", nil)
+	case errors.Is(err, agents.ErrUpgradeNotAvailable):
+		Failure(c, http.StatusConflict, "AGENT_UPGRADE_NOT_AVAILABLE", "没有适用于该机器的新版本 Agent 包", nil)
+	case errors.Is(err, agents.ErrUpgradeInProgress):
+		Failure(c, http.StatusConflict, "AGENT_UPGRADE_IN_PROGRESS", "该 Agent 已有升级任务正在执行", nil)
+	case errors.Is(err, agents.ErrReleaseInUse):
+		Failure(c, http.StatusConflict, "AGENT_RELEASE_IN_USE", "该 Agent 包正在用于升级，暂时不能删除", nil)
+	case errors.Is(err, agents.ErrReleaseTooLarge):
+		Failure(c, http.StatusRequestEntityTooLarge, "AGENT_RELEASE_TOO_LARGE", "Agent 二进制文件超过 128 MiB 上传上限", nil)
+	case errors.Is(err, agents.ErrInvalidRelease):
+		Failure(c, http.StatusUnprocessableEntity, "INVALID_AGENT_RELEASE", err.Error(), nil)
 	case errors.Is(err, agents.ErrInvalidInput), errors.Is(err, agents.ErrUnsupportedAction):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_AGENT_INPUT", "Agent 参数或动作无效", nil)
 	default:

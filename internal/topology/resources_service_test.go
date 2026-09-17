@@ -3,6 +3,7 @@ package topology
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 	"dont/shared"
 )
 
-func TestPlacementPreflightRejectsDuplicateUDPPortInOneHostScope(t *testing.T) {
+func TestStoppedRoomPortOverlapIsAdvisory(t *testing.T) {
 	now := time.Now().UTC()
 	roomA, worldA := resourceRoom("room-a", "Cluster_A")
 	roomB, worldB := resourceRoom("room-b", "Cluster_B")
@@ -30,12 +31,62 @@ func TestPlacementPreflightRejectsDuplicateUDPPortInOneHostScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.Preview(context.Background(), roomA.ID, UpdateRequest{
+	if _, err = service.Preview(context.Background(), roomA.ID, UpdateRequest{
 		ExpectedRevision: snapshot.Revision,
 		Placements:       []PlacementInput{{WorldID: worldA.ID, TargetID: localTargetID}},
-	})
+	}); err != nil {
+		t.Fatalf("stopped room overlap blocked planning: %v", err)
+	}
+	infrastructure, err := service.Infrastructure(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !infrastructure.Preflight.Ready || len(infrastructure.Preflight.Conflicts) != 0 || !hasResourceAdvisory(infrastructure.Preflight, "UDP_PORT_CONFIGURATION_OVERLAP", 10999) {
+		t.Fatalf("preflight=%#v", infrastructure.Preflight)
+	}
+	for _, reservation := range infrastructure.PortReservations {
+		if reservation.RoomID != "" && reservation.State != ReservationConfigured {
+			t.Fatalf("stopped reservation=%#v", reservation)
+		}
+	}
+}
+
+func TestEnrichProviderIPAddressesUsesCurrentRuntimeInventory(t *testing.T) {
+	providers := []RuntimeProvider{{TargetID: "local"}, {TargetID: "agent:node"}, {TargetID: "agent:missing"}}
+	inventories := []agents.RuntimeTargetInventory{
+		{Target: agents.RuntimeTarget{ID: "local", IPAddresses: []string{"192.168.2.10"}}},
+		{Target: agents.RuntimeTarget{ID: "agent:node", IPAddresses: []string{"10.0.0.12", "2001:db8::12"}}},
+	}
+	actual := enrichProviderIPAddresses(providers, inventories)
+	if len(actual[0].IPAddresses) != 1 || actual[0].IPAddresses[0] != "192.168.2.10" {
+		t.Fatalf("local addresses=%v", actual[0].IPAddresses)
+	}
+	if len(actual[1].IPAddresses) != 2 || actual[1].IPAddresses[0] != "10.0.0.12" {
+		t.Fatalf("agent addresses=%v", actual[1].IPAddresses)
+	}
+	if actual[2].IPAddresses == nil || len(actual[2].IPAddresses) != 0 {
+		t.Fatalf("missing addresses=%v", actual[2].IPAddresses)
+	}
+}
+
+func TestRunningRoomPortOverlapBlocksStart(t *testing.T) {
+	now := time.Now().UTC()
+	roomA, worldA := resourceRoom("room-a", "Cluster_A")
+	roomB, worldB := resourceRoom("room-b", "Cluster_B")
+	inventory := runtimeInventory(resourceLocalTarget(), 4, 4, []shared.RoomInventoryReport{
+		resourceInventoryRoom(roomA.DirectoryName, 10889, 10999, 8767, 27017),
+		resourceInventoryRoom(roomB.DirectoryName, 10890, 10999, 8768, 27018),
+	}, []shared.ShardProcessReport{{PID: 42, Cluster: roomB.DirectoryName, Shard: worldB.DirectoryName}}, now)
+	service, err := NewService(
+		topologyRoomCatalog{rooms: []rooms.Room{roomA, roomB}, worlds: map[string][]rooms.World{roomA.ID: {worldA}, roomB.ID: {worldB}}},
+		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{inventory}}, newTopologyTestStore(t),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflight, err := service.PreflightExecution(context.Background(), roomA.ID, []string{worldA.ID})
 	var conflict *ResourceConflictError
-	if !errors.As(err, &conflict) || conflict.Preflight.Ready || !hasResourceConflict(conflict.Preflight, "UDP_PORT_CONFLICT", 10999) {
+	if !errors.As(err, &conflict) || preflight.Ready || !hasResourceConflict(preflight, "UDP_PORT_CONFLICT", 10999) {
 		t.Fatalf("port conflict=%#v err=%v", conflict, err)
 	}
 }
@@ -112,7 +163,7 @@ func TestManagedReservationsPersistActiveAndPlannedStates(t *testing.T) {
 			states[reservation.State]++
 		}
 	}
-	if states[ReservationActive] != 4 || states[ReservationPlanned] != 4 {
+	if states[ReservationConfigured] != 4 || states[ReservationPlanned] != 4 {
 		t.Fatalf("reservation states=%#v reservations=%#v", states, reservations)
 	}
 	if len(allocations) != 1 || allocations[0].Policy != CPUPolicyNone || allocations[0].TargetID != localTargetID {
@@ -126,7 +177,7 @@ func TestUnmanagedObservedShardBlocksManagedStartPort(t *testing.T) {
 	inventory := runtimeInventory(resourceLocalTarget(), 4, 4, []shared.RoomInventoryReport{
 		resourceInventoryRoom(room.DirectoryName, 10889, 10999, 8767, 27017),
 		resourceInventoryRoom("Unmanaged", 10890, 10999, 8867, 28017),
-	}, nil, now)
+	}, []shared.ShardProcessReport{{PID: 42, Cluster: "Unmanaged", Shard: "Master"}}, now)
 	service, _ := NewService(
 		topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {world}}},
 		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{inventory}}, newTopologyTestStore(t),
@@ -143,13 +194,41 @@ func TestWildcardBindConflictsWithSpecificAddress(t *testing.T) {
 		{ID: "a", ScopeID: "host:local", Protocol: "udp", Port: 10999, BindAddress: "0.0.0.0", State: ReservationActive, RoomID: "a", WorldID: "master", Cluster: "A", Shard: "Master"},
 		{ID: "b", ScopeID: "host:local", Protocol: "udp", Port: 10999, BindAddress: "127.0.0.1", State: ReservationActive, RoomID: "b", WorldID: "master", Cluster: "B", Shard: "Master"},
 	}
-	conflicts := detectPortConflicts(values, nil)
+	conflicts, advisories := detectPortConflicts(values, nil)
 	if len(conflicts) != 1 || conflicts[0].Port != 10999 {
 		t.Fatalf("conflicts=%#v", conflicts)
 	}
+	if len(advisories) != 0 {
+		t.Fatalf("advisories=%#v", advisories)
+	}
 	values[0].BindAddress = "192.0.2.10"
-	if conflicts := detectPortConflicts(values, nil); len(conflicts) != 0 {
+	if conflicts, _ := detectPortConflicts(values, nil); len(conflicts) != 0 {
 		t.Fatalf("different specific binds conflicted: %#v", conflicts)
+	}
+}
+
+func TestBatchPreflightRejectsDuplicatePortsWithinSelectedStartSet(t *testing.T) {
+	now := time.Now().UTC()
+	roomA, worldA := resourceRoom("room-a", "Cluster_A")
+	roomB, worldB := resourceRoom("room-b", "Cluster_B")
+	inventory := runtimeInventory(resourceLocalTarget(), 4, 4, []shared.RoomInventoryReport{
+		resourceInventoryRoom(roomA.DirectoryName, 10889, 10999, 8767, 27017),
+		resourceInventoryRoom(roomB.DirectoryName, 10890, 10999, 8768, 27018),
+	}, nil, now)
+	service, err := NewService(
+		topologyRoomCatalog{rooms: []rooms.Room{roomA, roomB}, worlds: map[string][]rooms.World{roomA.ID: {worldA}, roomB.ID: {worldB}}},
+		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{inventory}}, newTopologyTestStore(t),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflight, err := service.PreflightBatchExecution(context.Background(), []StartCapacitySelection{
+		{RoomID: roomA.ID, WorldIDs: []string{worldA.ID}},
+		{RoomID: roomB.ID, WorldIDs: []string{worldB.ID}},
+	})
+	var conflict *ResourceConflictError
+	if !errors.As(err, &conflict) || preflight.Ready || !hasResourceConflict(preflight, "UDP_PORT_CONFLICT", 10999) {
+		t.Fatalf("batch preflight=%#v err=%v", preflight, err)
 	}
 }
 
@@ -200,6 +279,59 @@ func TestCrossNodeMasterEndpointRejectsStaleAndMismatchedSecondary(t *testing.T)
 	}
 }
 
+func TestTopologyPreviewAllowsSelectedShardLinkToReplaceObservedEndpoint(t *testing.T) {
+	service, inventories, room, master, caves := crossNodePreflightFixture(t, "192.0.2.10")
+	inventories[1].Inventory.Rooms[0].MasterIP = "192.0.2.11"
+	snapshot, err := service.Topology(context.Background(), room.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Preview(context.Background(), room.ID, UpdateRequest{
+		ExpectedRevision: snapshot.Revision,
+		Placements: []PlacementInput{
+			{WorldID: master.ID, TargetID: localTargetID},
+			{WorldID: caves.ID, TargetID: "agent:secondary"},
+		},
+		ShardLinks: []ShardLinkInput{{
+			SourceTargetID: "agent:secondary", Address: "192.0.2.10", Port: 10889, Mode: ShardLinkLAN,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("selected route should replace observed Secondary configuration after save: %v", err)
+	}
+}
+
+func TestTopologyRouteUpdateKeepsAppliedRouteSeparate(t *testing.T) {
+	service, _, room, master, caves := crossNodePreflightFixture(t, "192.0.2.10")
+	current, err := service.Topology(context.Background(), room.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := service.Update(context.Background(), room.ID, UpdateRequest{
+		ExpectedRevision: current.Revision,
+		Placements: []PlacementInput{
+			{WorldID: master.ID, TargetID: localTargetID},
+			{WorldID: caves.ID, TargetID: "agent:secondary"},
+		},
+		ShardLinks: []ShardLinkInput{{
+			SourceTargetID: "agent:secondary", Address: "192.0.2.20", Port: 10889, Mode: ShardLinkLAN,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.ShardLinks) != 1 || updated.ShardLinks[0].Address != "192.0.2.20" {
+		t.Fatalf("desired links=%#v", updated.ShardLinks)
+	}
+	if len(updated.AppliedShardLinks) != 0 {
+		t.Fatalf("route plan changed current route=%#v", updated.AppliedShardLinks)
+	}
+	resolved, err := service.ResolveAppliedShardLinks(context.Background(), room.ID)
+	if err != nil || len(resolved) != 0 {
+		t.Fatalf("resolved applied links=%#v err=%v", resolved, err)
+	}
+}
+
 func TestSameNodeRoomAllowsLocalMasterEndpoint(t *testing.T) {
 	now := time.Now().UTC()
 	room := rooms.Room{ID: "room-local", DirectoryName: "Cluster_Local", Name: "本机房间", Managed: true}
@@ -212,9 +344,10 @@ func TestSameNodeRoomAllowsLocalMasterEndpoint(t *testing.T) {
 			{Directory: "Caves", Role: "secondary", ServerPort: 10998, AuthenticationPort: 8768, MasterServerPort: 27018},
 		},
 	}}, nil, now)
+	store := newTopologyTestStore(t)
 	service, err := NewService(
 		topologyRoomCatalog{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {master, caves}}},
-		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{inventory}}, newTopologyTestStore(t),
+		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{inventory}}, store,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -222,6 +355,12 @@ func TestSameNodeRoomAllowsLocalMasterEndpoint(t *testing.T) {
 	preflight, err := service.PreflightExecution(context.Background(), room.ID, nil)
 	if err != nil || !preflight.Ready {
 		t.Fatalf("same-node preflight=%#v err=%v", preflight, err)
+	}
+	for _, world := range []rooms.World{master, caves} {
+		allocation, allocationErr := store.CPUAllocation(room.ID, world.ID)
+		if allocationErr != nil || allocation.Policy != CPUPolicyNone || allocation.TargetID != localTargetID {
+			t.Fatalf("world %s allocation=%#v err=%v", world.ID, allocation, allocationErr)
+		}
 	}
 }
 
@@ -696,6 +835,117 @@ func resourceRoom(id, directory string) (rooms.Room, rooms.World) {
 	return room, world
 }
 
+func TestPortPreflightSharesHostScopeAcrossInstallations(t *testing.T) {
+	now := time.Now().UTC()
+	roomA, worldA := resourceRoom("room-a", "Cluster_A")
+	roomB, worldB := resourceRoom("room-b", "Cluster_B")
+	worldA.TargetIDs = []string{"agent:node"}
+	worldB.TargetIDs = []string{"agent:node"}
+	target := agents.RuntimeTarget{
+		ID: "agent:node", AgentID: "node", Name: "Node", Kind: agents.RuntimeKindAgent,
+		Status: agents.RuntimeStatusReady, Online: true, Configured: true,
+		DefaultInstallationID: "primary",
+		Installations:         []agents.RuntimeInstallation{{ID: "primary", Driver: "native"}, {ID: "testing", Driver: "native"}},
+	}
+	primaryTarget := target
+	primaryTarget.Config.InstallationID = "primary"
+	testingTarget := target
+	testingTarget.Config.InstallationID = "testing"
+	primary := runtimeInventory(primaryTarget, 4, 4,
+		[]shared.RoomInventoryReport{resourceInventoryRoom(roomA.DirectoryName, 10888, 10999, 10998, 10997)}, nil, now)
+	primary.Inventory.Installation.ID = "primary"
+	testing := runtimeInventory(testingTarget, 4, 4,
+		[]shared.RoomInventoryReport{resourceInventoryRoom(roomB.DirectoryName, 10888, 10999, 10998, 10997)}, nil, now)
+	testing.Inventory.Installation.ID = "testing"
+	store := newTopologyTestStore(t)
+	for _, value := range []struct {
+		room         rooms.Room
+		world        rooms.World
+		installation string
+	}{{roomA, worldA, "primary"}, {roomB, worldB, "testing"}} {
+		record, err := store.EnsureWorlds(value.room.ID, []rooms.World{value.world})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = store.Save(value.room.ID, record.Revision, []storedPlacement{{
+			WorldID: value.world.ID, WorldDirectoryName: value.world.DirectoryName, WorldName: value.world.Name, WorldRole: value.world.Role,
+			DesiredTargetID: "agent:node", AppliedTargetID: "agent:node",
+			DesiredInstallationID: value.installation, AppliedInstallationID: value.installation,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	service, err := NewService(
+		topologyRoomCatalog{
+			rooms:  []rooms.Room{roomA, roomB},
+			worlds: map[string][]rooms.World{roomA.ID: {worldA}, roomB.ID: {worldB}},
+		},
+		topologyTargetCatalog{items: []agents.RuntimeTargetInventory{primary, testing}}, store,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflight, err := service.PreflightBatchExecution(context.Background(), []StartCapacitySelection{
+		{RoomID: roomA.ID}, {RoomID: roomB.ID},
+	})
+	if err == nil || !hasResourceConflict(preflight, "UDP_PORT_CONFLICT", 10999) {
+		t.Fatalf("host-scoped conflict missing: preflight=%#v err=%v", preflight, err)
+	}
+}
+
+func TestCrossNodePreflightReadsThePlacementInstallation(t *testing.T) {
+	now := time.Now().UTC()
+	room := rooms.Room{ID: "room", DirectoryName: "Cluster_1", Name: "Room", Managed: true}
+	master := rooms.World{ID: "master", RoomID: room.ID, DirectoryName: "Master", Role: rooms.WorldRoleMaster, IsMaster: true}
+	caves := rooms.World{ID: "caves", RoomID: room.ID, DirectoryName: "Caves", Role: rooms.WorldRoleCaves}
+	target := func(id, installationID string) agents.RuntimeTarget {
+		return agents.RuntimeTarget{
+			ID: id, AgentID: id, Name: id, Kind: agents.RuntimeKindAgent,
+			Status: agents.RuntimeStatusReady, Online: true, Configured: true,
+			Config: agents.RuntimeConfig{InstallationID: installationID},
+		}
+	}
+	inventory := func(runtimeTarget agents.RuntimeTarget, rooms []shared.RoomInventoryReport) agents.RuntimeTargetInventory {
+		observedAt := now
+		return agents.RuntimeTargetInventory{
+			Target: runtimeTarget, Available: true, ObservedAt: &observedAt, ReceivedAt: &observedAt,
+			Inventory: shared.RuntimeInventoryReport{
+				ProtocolVersion: shared.RuntimeInventoryProtocolVersion, ObservedAt: now,
+				Installation: shared.RuntimeInstallationReport{ID: runtimeTarget.Config.InstallationID}, Rooms: rooms,
+			},
+		}
+	}
+	masterRoom := resourceInventoryRoom(room.DirectoryName, 10888, 10999, 10998, 10997)
+	masterRoom.BindIP = "0.0.0.0"
+	secondaryRoom := resourceInventoryRoom(room.DirectoryName, 10888, 11099, 11098, 11097)
+	secondaryRoom.MasterIP = "10.0.0.10"
+	plans := map[string]roomPlan{room.ID: {
+		room:   room,
+		worlds: []rooms.World{master, caves},
+		record: record{Placements: []storedPlacement{
+			{WorldID: master.ID, AppliedTargetID: "agent:master", AppliedInstallationID: "primary"},
+			{WorldID: caves.ID, AppliedTargetID: "agent:secondary", AppliedInstallationID: "primary"},
+		}},
+	}}
+	inventories := []agents.RuntimeTargetInventory{
+		inventory(target("agent:master", "primary"), []shared.RoomInventoryReport{masterRoom}),
+		inventory(target("agent:master", "testing"), nil),
+		inventory(target("agent:secondary", "primary"), []shared.RoomInventoryReport{secondaryRoom}),
+	}
+	profiles := map[string]NetworkProfile{
+		"agent:master":    {AdvertiseAddress: "10.0.0.10"},
+		"agent:secondary": {},
+	}
+	build := resourceBuild{preflight: ResourcePreflight{Ready: true}}
+	appendCrossNodeMasterPreflight(&build, plans, inventories, profiles, nil)
+	for _, warning := range build.preflight.Warnings {
+		if strings.Contains(warning, "MASTER_ROOM_CONFIG_MISSING") || strings.Contains(warning, "MASTER_PORT_MISSING") {
+			t.Fatalf("preflight used the wrong installation: %#v", build.preflight)
+		}
+	}
+}
+
 func resourceLocalTarget() agents.RuntimeTarget {
 	return agents.RuntimeTarget{ID: localTargetID, Name: "本机", Kind: agents.RuntimeKindLocal, Status: agents.RuntimeStatusReady, Online: true, Configured: true, OS: "linux", Arch: "amd64"}
 }
@@ -713,6 +963,15 @@ func resourceInventoryRoom(cluster string, clusterPort, serverPort, authPort, st
 func hasResourceConflict(preflight ResourcePreflight, code string, port int) bool {
 	for _, conflict := range preflight.Conflicts {
 		if conflict.Code == code && conflict.Port == port {
+			return true
+		}
+	}
+	return false
+}
+
+func hasResourceAdvisory(preflight ResourcePreflight, code string, port int) bool {
+	for _, advisory := range preflight.Advisories {
+		if advisory.Code == code && advisory.Port == port {
 			return true
 		}
 	}

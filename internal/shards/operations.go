@@ -13,6 +13,7 @@ import (
 	"dont/internal/agents"
 	"dont/internal/jobs"
 	"dont/internal/operationlease"
+	"dont/internal/operationprogress"
 	"dont/internal/roomops"
 	"dont/internal/rooms"
 	"dont/internal/topology"
@@ -22,14 +23,18 @@ import (
 )
 
 var (
-	ErrRoomNotManaged = errors.New("room must be adopted before it can be controlled")
-	ErrNoWorlds       = errors.New("room has no controllable worlds")
-	ErrUnknownAction  = errors.New("unknown room action")
-	ErrUnsafeName     = errors.New("room or world name cannot be represented safely by tmux")
-	ErrCapacityRisk   = errors.New("shard start requires capacity risk confirmation")
-	ErrNoRooms        = errors.New("no rooms selected")
-	ErrInvalidBatch   = errors.New("batch room selection is invalid")
-	controlName       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+	ErrRoomNotManaged            = errors.New("room must be registered before it can be controlled")
+	ErrNoWorlds                  = errors.New("room has no controllable worlds")
+	ErrUnknownAction             = errors.New("unknown room action")
+	ErrUnsafeName                = errors.New("room or world name cannot be represented safely by tmux")
+	ErrCapacityRisk              = errors.New("shard start requires capacity risk confirmation")
+	ErrNoRooms                   = errors.New("no rooms selected")
+	ErrInvalidBatch              = errors.New("batch room selection is invalid")
+	ErrRuntimeModeUnavailable    = errors.New("selected Lua runtime mode is unavailable")
+	ErrInvalidRuntimeMode        = errors.New("selected Lua runtime mode is invalid")
+	ErrRuntimeVersionUnavailable = errors.New("selected Lua runtime version is unavailable")
+	ErrInvalidRuntimeVersion     = errors.New("selected Lua runtime version is invalid")
+	controlName                  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 )
 
 type Action string
@@ -54,9 +59,11 @@ const (
 
 type RuntimeStatus struct {
 	State         RuntimeState
+	StartupStage  string
 	Code          string
 	Message       string
 	SessionExists bool
+	Paused        *bool
 }
 
 type Control interface {
@@ -78,10 +85,6 @@ type RoomCatalog interface {
 	Worlds(string) ([]rooms.World, error)
 }
 
-type RuntimePreparer interface {
-	Prepare(context.Context, string, string) error
-}
-
 type CapacityRiskError struct {
 	Preview topology.StartCapacityPreview
 }
@@ -90,18 +93,68 @@ func (e *CapacityRiskError) Error() string { return ErrCapacityRisk.Error() }
 func (e *CapacityRiskError) Unwrap() error { return ErrCapacityRisk }
 
 type PlanOptions struct {
-	AllowCapacityRisk bool
+	RuntimeMode shared.RuntimePerformanceMode
+	Immediate   bool
 }
 
 type BatchRoomSelection struct {
-	RoomID            string
-	WorldIDs          []string
-	AllowCapacityRisk bool
+	RoomID      string
+	WorldIDs    []string
+	RuntimeMode shared.RuntimePerformanceMode
 }
 
-type BatchPlanOptions struct {
-	AllowCapacityRisk bool
+type RuntimeModeTarget struct {
+	TargetID            string                          `json:"targetId"`
+	InstallationID      string                          `json:"installationId"`
+	TargetName          string                          `json:"targetName"`
+	OS                  string                          `json:"os,omitempty"`
+	Arch                string                          `json:"arch,omitempty"`
+	PackageVersion      string                          `json:"packageVersion,omitempty"`
+	GameVersion         string                          `json:"gameVersion,omitempty"`
+	CompatibilityStatus shared.RuntimePerformanceStatus `json:"compatibilityStatus,omitempty"`
+	SupportedModes      []shared.RuntimePerformanceMode `json:"supportedModes"`
+	Issues              []string                        `json:"issues,omitempty"`
+	ReasonCode          string                          `json:"reasonCode,omitempty"`
+	Reason              string                          `json:"reason,omitempty"`
 }
+
+type RuntimePackageOption struct {
+	ID                 string   `json:"id"`
+	Provider           string   `json:"provider"`
+	Version            string   `json:"version,omitempty"`
+	Channel            string   `json:"channel"`
+	Platforms          []string `json:"platforms"`
+	ProcessScopedModes bool     `json:"processScopedModes"`
+}
+
+type RuntimeModeAvailability struct {
+	RoomID      string                          `json:"roomId"`
+	WorldIDs    []string                        `json:"worldIds"`
+	DefaultMode shared.RuntimePerformanceMode   `json:"defaultMode"`
+	Modes       []shared.RuntimePerformanceMode `json:"modes"`
+	Targets     []RuntimeModeTarget             `json:"targets"`
+	Packages    []RuntimePackageOption          `json:"packages"`
+}
+
+type RuntimeModeError struct {
+	Mode         shared.RuntimePerformanceMode
+	Availability RuntimeModeAvailability
+}
+
+func (e *RuntimeModeError) Error() string {
+	return fmt.Sprintf("所选 Lua 运行时 %s 在当前世界运行位置不可用", e.Mode)
+}
+func (e *RuntimeModeError) Unwrap() error { return ErrRuntimeModeUnavailable }
+
+type RuntimeVersionError struct {
+	Version      string
+	Availability RuntimeModeAvailability
+}
+
+func (e *RuntimeVersionError) Error() string {
+	return fmt.Sprintf("所选 LuaJIT 版本 %s 在当前世界运行位置不可用", e.Version)
+}
+func (e *RuntimeVersionError) Unwrap() error { return ErrRuntimeVersionUnavailable }
 
 type BatchCapacityRiskError struct {
 	Preview topology.BatchStartCapacityPreview
@@ -115,10 +168,6 @@ type executionPlacementResolver interface {
 	ResolveExecution(context.Context, string, string) (topology.ExecutionPlacement, error)
 	PreviewStartCapacity(context.Context, string, []string) (topology.StartCapacityPreview, error)
 	PreviewBatchStartCapacity(context.Context, []topology.StartCapacitySelection) (topology.BatchStartCapacityPreview, error)
-}
-
-type resourceExecutionPreflight interface {
-	PreflightExecution(context.Context, string, []string) (topology.ResourcePreflight, error)
 }
 
 type remoteShardExecutor interface {
@@ -175,7 +224,6 @@ func WithOperationAudit(ctx context.Context, metadata OperationAuditMetadata) co
 type Operations struct {
 	rooms        RoomCatalog
 	control      Control
-	preparers    []RuntimePreparer
 	pollInterval time.Duration
 	startTimeout time.Duration
 	stopTimeout  time.Duration
@@ -201,11 +249,11 @@ func (o *Operations) ConfigureNotifier(notifier OperationNotifier) {
 	o.notifier = notifier
 }
 
-func NewOperations(roomCatalog RoomCatalog, control Control, preparers ...RuntimePreparer) *Operations {
+func NewOperations(roomCatalog RoomCatalog, control Control) *Operations {
 	return &Operations{
-		rooms: roomCatalog, control: control, preparers: append([]RuntimePreparer(nil), preparers...),
-		pollInterval: 500 * time.Millisecond, startTimeout: 2 * time.Minute, stopTimeout: 60 * time.Second,
-		leaseTTL:     5 * time.Minute,
+		rooms: roomCatalog, control: control,
+		pollInterval: 500 * time.Millisecond, startTimeout: 5 * time.Minute, stopTimeout: 60 * time.Second,
+		leaseTTL:     6 * time.Minute,
 		activeStarts: make(map[string]map[uint64]context.CancelFunc),
 		stopEpoch:    make(map[string]uint64),
 	}
@@ -230,12 +278,25 @@ func (o *Operations) ConfigureRuntime(placements executionPlacementResolver, run
 }
 
 func (o *Operations) Plan(action Action, roomID string, selectedWorldIDs []string) ([]jobs.TargetSpec, jobs.Runner, error) {
-	return o.PlanWithOptions(action, roomID, selectedWorldIDs, PlanOptions{AllowCapacityRisk: true})
+	return o.PlanWithOptions(action, roomID, selectedWorldIDs, PlanOptions{})
 }
 
 func (o *Operations) PlanWithOptions(action Action, roomID string, selectedWorldIDs []string, options PlanOptions) ([]jobs.TargetSpec, jobs.Runner, error) {
+	return o.planWithOptions(action, roomID, selectedWorldIDs, options)
+}
+
+func (o *Operations) planWithOptions(action Action, roomID string, selectedWorldIDs []string, options PlanOptions) ([]jobs.TargetSpec, jobs.Runner, error) {
 	if action != ActionStart && action != ActionStop && action != ActionRestart && action != ActionSave && action != ActionCleanup {
 		return nil, nil, ErrUnknownAction
+	}
+	runtimeMode, runtimeModeValid := shared.NormalizeRuntimePerformanceMode(options.RuntimeMode)
+	if !runtimeModeValid {
+		return nil, nil, ErrInvalidRuntimeMode
+	}
+	if action == ActionStart || action == ActionRestart {
+		options.RuntimeMode = runtimeMode
+	} else if options.RuntimeMode != "" {
+		return nil, nil, ErrInvalidRuntimeMode
 	}
 	room, worlds, err := o.resolvePlan(roomID, selectedWorldIDs)
 	if err != nil {
@@ -258,6 +319,10 @@ func (o *Operations) PlanWithOptions(action Action, roomID string, selectedWorld
 		startEpoch = o.currentStopEpoch(room.ID)
 	}
 	runner := func(ctx context.Context, report func(jobs.TargetResult)) error {
+		if failure := o.validateDependencySelection(ctx, action, room, worlds); failure != nil {
+			reportDependencySelectionFailure(worlds, failure, report)
+			return nil
+		}
 		if action == ActionStop && ctx.Err() == nil {
 			o.interruptStarts(room.ID)
 		}
@@ -272,6 +337,17 @@ func (o *Operations) PlanWithOptions(action Action, roomID string, selectedWorld
 				cancel()
 			}
 			ctx = startContext
+		}
+		if o.notifier != nil && !options.Immediate && (action == ActionStop || action == ActionRestart) {
+			metadata, _ := ctx.Value(operationAuditContextKey{}).(OperationAuditMetadata)
+			if notifyErr := o.notifier.BeforeOperation(ctx, room.ID, string(action), metadata.Source, metadata.JobID); notifyErr != nil {
+				if errors.Is(notifyErr, context.Canceled) || errors.Is(notifyErr, context.DeadlineExceeded) {
+					for _, world := range worlds {
+						report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusCanceled, Error: &jobs.Error{Code: "JOB_CANCELED", Message: "操作通知倒计时已取消"}})
+					}
+					return nil
+				}
+			}
 		}
 		ctx, release, err := roomops.Acquire(ctx, room.ID)
 		if err != nil {
@@ -288,17 +364,6 @@ func (o *Operations) PlanWithOptions(action Action, roomID string, selectedWorld
 			return err
 		}
 		defer release()
-		if o.notifier != nil && (action == ActionStop || action == ActionRestart) {
-			metadata, _ := ctx.Value(operationAuditContextKey{}).(OperationAuditMetadata)
-			if notifyErr := o.notifier.BeforeOperation(ctx, room.ID, string(action), metadata.Source, metadata.JobID); notifyErr != nil {
-				if errors.Is(notifyErr, context.Canceled) || errors.Is(notifyErr, context.DeadlineExceeded) {
-					for _, world := range worlds {
-						report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusCanceled, Error: &jobs.Error{Code: "JOB_CANCELED", Message: "操作通知倒计时已取消"}})
-					}
-					return nil
-				}
-			}
-		}
 		var activeLease *operationlease.Lease
 		if o.leases != nil {
 			lease, leaseErr := o.leases.Acquire(ctx, room.ID, leaseOperationKey, o.leaseTTL)
@@ -324,70 +389,287 @@ func (o *Operations) PlanWithOptions(action Action, roomID string, selectedWorld
 		}
 		orderWorlds(currentWorlds, action)
 		if action == ActionStart || action == ActionRestart {
-			preview, previewErr := o.PreviewCapacity(ctx, action, room.ID, plannedWorldIDs)
-			if previewErr != nil {
-				for _, world := range currentWorlds {
-					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: operationErrorCode(action, previewErr), Message: previewErr.Error()}})
-				}
-				return nil
-			}
-			if preview.RequiresRiskConfirmation && !options.AllowCapacityRisk {
-				for _, world := range currentWorlds {
-					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "CAPACITY_RISK_CONFIRMATION_REQUIRED", Message: "启动后将超过建议核心容量或节点容量数据未知，请确认卡顿风险"}})
-				}
-				return nil
-			}
-			if preflight, ok := o.placements.(resourceExecutionPreflight); ok {
-				if _, preflightErr := preflight.PreflightExecution(ctx, room.ID, plannedWorldIDs); preflightErr != nil {
-					code, message := resourcePreflightFailure(action, preflightErr)
+			// Game Lua is supported by every DST installation. Only optional
+			// runtimes need an additional target capability check here.
+			if options.RuntimeMode != shared.RuntimePerformanceModeGame {
+				if _, modeErr := o.RequireRuntimeMode(ctx, currentRoom.ID, plannedWorldIDs, options.RuntimeMode); modeErr != nil {
 					for _, world := range currentWorlds {
-						report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: code, Message: message}})
+						report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "RUNTIME_MODE_UNAVAILABLE", Message: modeErr.Error()}})
 					}
 					return nil
 				}
 			}
 		}
-		if failures := o.preflightTargets(ctx, action, currentRoom, currentWorlds); len(failures) > 0 {
-			for _, world := range currentWorlds {
-				if failure := failures[world.ID]; failure != nil {
-					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: operationErrorCode(action, failure), Message: failure.Error()}})
-				} else {
-					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "ROOM_PREFLIGHT_ABORTED", Message: "房间内其他世界未通过执行预检，本次未操作任何世界"}})
-				}
-			}
-			return nil
-		}
-		for _, world := range currentWorlds {
-			if err := ctx.Err(); err != nil {
-				report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusCanceled, Error: &jobs.Error{Code: "JOB_CANCELED", Message: "任务已取消"}})
-				continue
-			}
-			if activeLease != nil {
-				renewed, renewErr := o.leases.Renew(ctx, *activeLease, o.leaseTTL)
-				if renewErr != nil {
+		if activeLease != nil {
+			renewed, renewErr := o.leases.Renew(ctx, *activeLease, o.leaseTTL)
+			if renewErr != nil {
+				for _, world := range currentWorlds {
 					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "ROOM_LEASE_LOST", Message: renewErr.Error()}})
-					continue
 				}
-				*activeLease = renewed
+				return nil
 			}
-			message, err := o.executePlaced(ctx, action, currentRoom, world, activeLease, operationIDs[world.ID])
-			if err != nil {
-				code := operationErrorCode(action, err)
-				if errors.Is(err, context.Canceled) {
-					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusCanceled, Error: &jobs.Error{Code: "JOB_CANCELED", Message: "任务已取消"}})
-					continue
-				}
-				report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: code, Message: err.Error()}})
-				continue
+			*activeLease = renewed
+		}
+		emit := func(result worldExecutionResult) {
+			report(targetResult(action, result))
+		}
+		switch action {
+		case ActionStart:
+			o.executeStartPhase(ctx, currentRoom, currentWorlds, activeLease, operationIDs, options.RuntimeMode, emit)
+		case ActionStop:
+			o.executeStopPhase(ctx, currentRoom, currentWorlds, activeLease, operationIDs, emit)
+		case ActionRestart:
+			o.executeRestartPlan(ctx, currentRoom, currentWorlds, activeLease, operationIDs, options.RuntimeMode, report)
+		default:
+			for _, world := range currentWorlds {
+				result := o.executeWorld(ctx, action, currentRoom, world, activeLease, operationIDs[world.ID], "")
+				emit(result)
 			}
-			report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusSucceeded, Message: message})
 		}
 		return nil
 	}
 	return targets, runner, nil
 }
 
-func (o *Operations) PlanBatch(action Action, selections []BatchRoomSelection, options BatchPlanOptions) ([]jobs.TargetSpec, jobs.Runner, error) {
+type worldExecutionResult struct {
+	world   rooms.World
+	message string
+	err     error
+}
+
+type dependencySelectionFailure struct {
+	code    string
+	message string
+}
+
+func (o *Operations) executeWorld(ctx context.Context, action Action, room rooms.Room, world rooms.World, lease *operationlease.Lease, operationID string, runtimeMode shared.RuntimePerformanceMode) worldExecutionResult {
+	return o.executeWorldWithProgress(ctx, action, func(ctx context.Context) worldExecutionResult {
+		message, err := o.executePlaced(ctx, action, room, world, lease, operationID, runtimeMode)
+		return worldExecutionResult{world: world, message: message, err: err}
+	}, shared.WorldOperationProgress{WorldID: world.ID, Name: world.Name, IsMaster: isMasterWorld(world)})
+}
+
+func (o *Operations) executeConcurrent(ctx context.Context, action Action, room rooms.Room, worlds []rooms.World, lease *operationlease.Lease, operationIDs map[string]string, runtimeMode shared.RuntimePerformanceMode, emit func(worldExecutionResult)) map[string]worldExecutionResult {
+	results := make(map[string]worldExecutionResult, len(worlds))
+	if len(worlds) == 0 {
+		return results
+	}
+	completed := make(chan worldExecutionResult, len(worlds))
+	for _, world := range worlds {
+		world := world
+		go func() {
+			completed <- o.executeWorld(ctx, action, room, world, lease, operationIDs[world.ID], runtimeMode)
+		}()
+	}
+	for range worlds {
+		result := <-completed
+		results[result.world.ID] = result
+		if emit != nil {
+			emit(result)
+		}
+	}
+	return results
+}
+
+// executeStartPhase submits every selected Shard without waiting for another
+// Shard to become ready. Each Shard reports readiness or failure independently.
+func (o *Operations) executeStartPhase(ctx context.Context, room rooms.Room, worlds []rooms.World, lease *operationlease.Lease, operationIDs map[string]string, runtimeMode shared.RuntimePerformanceMode, emit func(worldExecutionResult)) map[string]worldExecutionResult {
+	return o.executeConcurrent(ctx, ActionStart, room, worlds, lease, operationIDs, runtimeMode, emit)
+}
+
+func (o *Operations) executeStopPhase(ctx context.Context, room rooms.Room, worlds []rooms.World, lease *operationlease.Lease, operationIDs map[string]string, emit func(worldExecutionResult)) map[string]worldExecutionResult {
+	results := make(map[string]worldExecutionResult, len(worlds))
+	master, dependents := splitMaster(worlds)
+	for worldID, result := range o.executeConcurrent(ctx, ActionStop, room, dependents, lease, operationIDs, "", emit) {
+		results[worldID] = result
+	}
+	if master != nil {
+		result := o.executeWorld(ctx, ActionStop, room, *master, lease, operationIDs[master.ID], "")
+		results[master.ID] = result
+		if emit != nil {
+			emit(result)
+		}
+	}
+	return results
+}
+
+func (o *Operations) executeRestartPlan(ctx context.Context, room rooms.Room, worlds []rooms.World, lease *operationlease.Lease, startOperationIDs map[string]string, runtimeMode shared.RuntimePerformanceMode, report func(jobs.TargetResult)) {
+	stopOperationIDs := operationIDsFor(worlds)
+	stopped := o.executeStopPhase(ctx, room, worlds, lease, stopOperationIDs, func(result worldExecutionResult) {
+		if result.err != nil {
+			report(targetResult(ActionRestart, result))
+		}
+	})
+	restartable := make([]rooms.World, 0, len(worlds))
+	for _, world := range worlds {
+		if result := stopped[world.ID]; result.err == nil {
+			restartable = append(restartable, world)
+		}
+	}
+	o.executeStartPhase(ctx, room, restartable, lease, startOperationIDs, runtimeMode, func(result worldExecutionResult) {
+		if result.err == nil {
+			result.message = "分片已重启"
+		}
+		report(targetResult(ActionRestart, result))
+	})
+}
+
+func splitMaster(worlds []rooms.World) (*rooms.World, []rooms.World) {
+	dependents := make([]rooms.World, 0, len(worlds))
+	var master *rooms.World
+	for _, world := range worlds {
+		if isMasterWorld(world) && master == nil {
+			value := world
+			master = &value
+			continue
+		}
+		dependents = append(dependents, world)
+	}
+	return master, dependents
+}
+
+func isMasterWorld(world rooms.World) bool {
+	return world.IsMaster || world.Role == rooms.WorldRoleMaster
+}
+
+func masterCount(worlds []rooms.World) int {
+	count := 0
+	for _, world := range worlds {
+		if isMasterWorld(world) {
+			count++
+		}
+	}
+	return count
+}
+
+func (o *Operations) validateDependencySelection(ctx context.Context, action Action, room rooms.Room, selectedWorlds []rooms.World) *dependencySelectionFailure {
+	if action != ActionStart && action != ActionStop && action != ActionRestart {
+		return nil
+	}
+	allWorlds, err := o.rooms.Worlds(room.ID)
+	if err != nil {
+		return &dependencySelectionFailure{
+			code:    "DEPENDENCY_STATE_UNAVAILABLE",
+			message: fmt.Sprintf("无法读取房间世界依赖关系，已拒绝执行: %v", err),
+		}
+	}
+	if action == ActionStart || action == ActionRestart {
+		switch count := masterCount(allWorlds); {
+		case count == 0:
+			return &dependencySelectionFailure{code: "ROOM_MASTER_MISSING", message: "房间没有主分片，无法启动"}
+		case count > 1:
+			return &dependencySelectionFailure{code: "ROOM_MASTER_MULTIPLE", message: "房间存在多个主分片，无法启动"}
+		}
+	}
+	master, _ := splitMaster(allWorlds)
+	if master == nil {
+		return nil
+	}
+	selected := make(map[string]bool, len(selectedWorlds))
+	selectedMaster := false
+	selectedDependent := false
+	for _, world := range selectedWorlds {
+		selected[world.ID] = true
+		if world.ID == master.ID {
+			selectedMaster = true
+		} else {
+			selectedDependent = true
+		}
+	}
+
+	if (action == ActionStart || action == ActionRestart) && selectedDependent && !selectedMaster {
+		status, statusErr := o.StatusFor(ctx, room.ID, master.ID)
+		if statusErr != nil || status.State == RuntimeUnknown {
+			message := fmt.Sprintf("无法确认主世界“%s”的运行状态，已拒绝单独%s依赖世界", master.Name, dependencyActionLabel(action))
+			if statusErr != nil {
+				message += ": " + statusErr.Error()
+			}
+			return &dependencySelectionFailure{code: "DEPENDENCY_STATE_UNAVAILABLE", message: message}
+		}
+		if status.State != RuntimeRunning && status.State != RuntimeStarting {
+			return &dependencySelectionFailure{
+				code: "DEPENDENCY_SELECTION_INCOMPLETE",
+				message: fmt.Sprintf(
+					"主世界“%s”尚未运行；%s依赖世界时必须将主世界加入同一操作",
+					master.Name, dependencyActionLabel(action),
+				),
+			}
+		}
+	}
+
+	if (action == ActionStop || action == ActionRestart) && selectedMaster {
+		missing := make([]string, 0)
+		for _, world := range allWorlds {
+			if world.ID == master.ID || selected[world.ID] {
+				continue
+			}
+			status, statusErr := o.StatusFor(ctx, room.ID, world.ID)
+			if statusErr != nil || status.State == RuntimeUnknown {
+				message := fmt.Sprintf("无法确认依赖世界“%s”的运行状态，已拒绝%s主世界", world.Name, dependencyActionLabel(action))
+				if statusErr != nil {
+					message += ": " + statusErr.Error()
+				}
+				return &dependencySelectionFailure{code: "DEPENDENCY_STATE_UNAVAILABLE", message: message}
+			}
+			if status.State == RuntimeRunning || status.State == RuntimeStarting {
+				missing = append(missing, world.Name)
+			}
+		}
+		if len(missing) > 0 {
+			return &dependencySelectionFailure{
+				code: "DEPENDENCY_SELECTION_INCOMPLETE",
+				message: fmt.Sprintf(
+					"%s主世界前必须将正在运行的依赖世界加入同一操作: %s",
+					dependencyActionLabel(action), strings.Join(missing, "、"),
+				),
+			}
+		}
+	}
+	return nil
+}
+
+func dependencyActionLabel(action Action) string {
+	switch action {
+	case ActionStart:
+		return "启动"
+	case ActionStop:
+		return "停止"
+	case ActionRestart:
+		return "重启"
+	default:
+		return "操作"
+	}
+}
+
+func reportDependencySelectionFailure(worlds []rooms.World, failure *dependencySelectionFailure, report func(jobs.TargetResult)) {
+	for _, world := range worlds {
+		report(jobs.TargetResult{
+			TargetID: world.ID,
+			Status:   jobs.StatusFailed,
+			Error:    &jobs.Error{Code: failure.code, Message: failure.message},
+		})
+	}
+}
+
+func operationIDsFor(worlds []rooms.World) map[string]string {
+	values := make(map[string]string, len(worlds))
+	for _, world := range worlds {
+		values[world.ID] = uuid.NewString()
+	}
+	return values
+}
+
+func targetResult(action Action, result worldExecutionResult) jobs.TargetResult {
+	if result.err == nil {
+		return jobs.TargetResult{TargetID: result.world.ID, Status: jobs.StatusSucceeded, Message: result.message}
+	}
+	if errors.Is(result.err, context.Canceled) {
+		return jobs.TargetResult{TargetID: result.world.ID, Status: jobs.StatusCanceled, Error: &jobs.Error{Code: "JOB_CANCELED", Message: "任务已取消"}}
+	}
+	return jobs.TargetResult{TargetID: result.world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: operationErrorCode(action, result.err), Message: result.err.Error()}}
+}
+
+func (o *Operations) PlanBatch(action Action, selections []BatchRoomSelection) ([]jobs.TargetSpec, jobs.Runner, error) {
 	if action != ActionStart && action != ActionStop && action != ActionRestart && action != ActionSave {
 		return nil, nil, ErrUnknownAction
 	}
@@ -400,20 +682,9 @@ func (o *Operations) PlanBatch(action Action, selections []BatchRoomSelection, o
 		targets []jobs.TargetSpec
 		runner  jobs.Runner
 	}
-	riskAllowed := options.AllowCapacityRisk
-	if !riskAllowed {
-		riskAllowed = true
-		for _, selection := range selections {
-			if !selection.AllowCapacityRisk {
-				riskAllowed = false
-				break
-			}
-		}
-	}
 	seenRooms := make(map[string]bool, len(selections))
 	plans := make([]roomPlan, 0, len(selections))
 	batchTargets := make([]jobs.TargetSpec, 0)
-	normalized := make([]BatchRoomSelection, 0, len(selections))
 	for _, selection := range selections {
 		roomID := strings.TrimSpace(selection.RoomID)
 		if roomID == "" || seenRooms[roomID] {
@@ -428,7 +699,7 @@ func (o *Operations) PlanBatch(action Action, selections []BatchRoomSelection, o
 		for _, world := range worlds {
 			worldIDs = append(worldIDs, world.ID)
 		}
-		targets, runner, err := o.PlanWithOptions(action, roomID, worldIDs, PlanOptions{AllowCapacityRisk: riskAllowed})
+		targets, runner, err := o.planWithOptions(action, roomID, worldIDs, PlanOptions{RuntimeMode: selection.RuntimeMode})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -438,7 +709,6 @@ func (o *Operations) PlanBatch(action Action, selections []BatchRoomSelection, o
 			})
 		}
 		plans = append(plans, roomPlan{roomID: roomID, worlds: worldIDs, targets: targets, runner: runner})
-		normalized = append(normalized, BatchRoomSelection{RoomID: roomID, WorldIDs: worldIDs, AllowCapacityRisk: selection.AllowCapacityRisk})
 	}
 	runner := func(ctx context.Context, report func(jobs.TargetResult)) error {
 		if action == ActionStop && ctx.Err() == nil {
@@ -446,26 +716,20 @@ func (o *Operations) PlanBatch(action Action, selections []BatchRoomSelection, o
 				o.interruptStarts(plan.roomID)
 			}
 		}
-		if action == ActionStart || action == ActionRestart {
-			preview, err := o.PreviewBatchCapacity(ctx, action, normalized)
-			if err != nil {
-				for _, target := range batchTargets {
-					report(jobs.TargetResult{TargetID: target.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: operationErrorCode(action, err), Message: err.Error()}})
-				}
-				return nil
-			}
-			if preview.RequiresRiskConfirmation && !riskAllowed {
-				for _, target := range batchTargets {
-					report(jobs.TargetResult{TargetID: target.ID, Status: jobs.StatusFailed, Error: &jobs.Error{
-						Code: "CAPACITY_RISK_CONFIRMATION_REQUIRED", Message: "批量启动后将超过建议核心容量或节点容量数据未知，请确认卡顿风险",
-					}})
-				}
-				return nil
-			}
-		}
 		for _, plan := range plans {
 			reported := make(map[string]bool, len(plan.targets))
-			err := plan.runner(ctx, func(result jobs.TargetResult) {
+			roomCtx := ctx
+			if operationprogress.Enabled(ctx) {
+				roomCtx = operationprogress.WithReporter(ctx, func(update operationprogress.Update) {
+					worlds := append([]shared.WorldOperationProgress(nil), update.Worlds...)
+					for index := range worlds {
+						worlds[index].WorldID = batchTargetID(plan.roomID, worlds[index].WorldID)
+					}
+					update.Worlds = worlds
+					operationprogress.Report(ctx, update)
+				})
+			}
+			err := plan.runner(roomCtx, func(result jobs.TargetResult) {
 				reported[result.TargetID] = true
 				result.TargetID = batchTargetID(plan.roomID, result.TargetID)
 				report(result)
@@ -496,6 +760,226 @@ func (o *Operations) PreviewCapacity(ctx context.Context, action Action, roomID 
 		return topology.StartCapacityPreview{RoomID: roomID, WorldIDs: append([]string(nil), worldIDs...)}, nil
 	}
 	return o.placements.PreviewStartCapacity(ctx, roomID, worldIDs)
+}
+
+func (o *Operations) RuntimeModes(ctx context.Context, roomID string, worldIDs []string) (RuntimeModeAvailability, error) {
+	room, worlds, err := o.resolvePlan(roomID, worldIDs)
+	if err != nil {
+		return RuntimeModeAvailability{}, err
+	}
+	availability := RuntimeModeAvailability{
+		RoomID: room.ID, DefaultMode: shared.RuntimePerformanceModeGame,
+		Modes: []shared.RuntimePerformanceMode{
+			shared.RuntimePerformanceModeGame,
+			shared.RuntimePerformanceModeLuaJIT,
+			shared.RuntimePerformanceModeArenaGC,
+		},
+		Packages: runtimePackageOptions(),
+	}
+	for _, world := range worlds {
+		availability.WorldIDs = append(availability.WorldIDs, world.ID)
+	}
+	if o.placements == nil {
+		availability.Modes = []shared.RuntimePerformanceMode{shared.RuntimePerformanceModeGame}
+		return availability, nil
+	}
+	seenTargets := make(map[string]bool)
+	for _, world := range worlds {
+		placement, resolveErr := o.placements.ResolveExecution(ctx, room.ID, world.ID)
+		if resolveErr != nil {
+			return RuntimeModeAvailability{}, resolveErr
+		}
+		endpointKey := placement.AppliedTargetID + "\x00" + placement.AppliedInstallationID
+		if seenTargets[endpointKey] {
+			continue
+		}
+		seenTargets[endpointKey] = true
+		target := RuntimeModeTarget{
+			TargetID: placement.AppliedTargetID, InstallationID: placement.AppliedInstallationID,
+			TargetName: placement.Target.Name,
+			OS:         placement.Target.OS, Arch: placement.Target.Arch,
+			SupportedModes: []shared.RuntimePerformanceMode{shared.RuntimePerformanceModeGame},
+		}
+		performance := placement.Target.Performance
+		if placement.AppliedTargetID != "local" && !stringSliceContains(placement.Target.Capabilities, "shard.runtime-mode.v1") {
+			target.ReasonCode = "agent_runtime_mode_unsupported"
+			target.Reason = "Agent 版本不支持启动时选择 Lua 运行时"
+		} else if performance == nil {
+			target.ReasonCode = "inspection_unavailable"
+			target.Reason = "尚未取得该机器的 LuaJIT 检测结果"
+		} else {
+			target.PackageVersion = performance.PackageVersion
+			target.GameVersion = performance.GameVersion
+			target.CompatibilityStatus = performance.Status
+			target.Issues = append([]string(nil), performance.Issues...)
+			if performance.Status == shared.RuntimePerformanceReady && performance.CanEnable {
+				target.SupportedModes = normalizedRuntimeModes(performance.SupportedModes)
+			} else {
+				switch performance.Status {
+				case shared.RuntimePerformanceNotInstalled:
+					target.ReasonCode = "runtime_not_installed"
+				case shared.RuntimePerformanceDetectedUnverified:
+					target.ReasonCode = "runtime_unverified"
+				case shared.RuntimePerformanceIncompatible:
+					target.ReasonCode = "runtime_incompatible"
+				default:
+					target.ReasonCode = "runtime_unavailable"
+				}
+				target.Reason = "该机器尚未安装可启用的 DontStarveLuaJIT2"
+			}
+		}
+		if version, valid := normalizeRuntimePackageVersion(target.PackageVersion); valid && version != "game" {
+			known := false
+			for _, option := range availability.Packages {
+				if option.Version == version {
+					known = true
+					break
+				}
+			}
+			if !known {
+				availability.Packages = append(availability.Packages, RuntimePackageOption{ID: "dontstarve-luajit2-" + version, Provider: "dontstarve-luajit2", Version: version, Channel: "installed", Platforms: []string{"linux"}, ProcessScopedModes: false})
+			}
+		}
+		availability.Targets = append(availability.Targets, target)
+		availability.Modes = intersectRuntimeModes(availability.Modes, target.SupportedModes)
+	}
+	return availability, nil
+}
+
+func runtimePackageOptions() []RuntimePackageOption {
+	return []RuntimePackageOption{
+		{
+			ID: "game", Provider: "game", Channel: "bundled",
+			Platforms: []string{"darwin", "linux", "windows"}, ProcessScopedModes: true,
+		},
+		{
+			ID: "dontstarve-luajit2-v2", Provider: "dontstarve-luajit2", Version: "2.9.2", Channel: "preview",
+			Platforms: []string{"darwin", "linux", "windows"}, ProcessScopedModes: false,
+		},
+		{
+			ID: "dontstarve-luajit2-v3", Provider: "dontstarve-luajit2", Version: "3.0.0", Channel: "upstream",
+			Platforms: []string{"linux"}, ProcessScopedModes: false,
+		},
+	}
+}
+
+func (o *Operations) RequireRuntimeMode(ctx context.Context, roomID string, worldIDs []string, requested shared.RuntimePerformanceMode) (RuntimeModeAvailability, error) {
+	mode, valid := shared.NormalizeRuntimePerformanceMode(requested)
+	if !valid {
+		return RuntimeModeAvailability{}, ErrInvalidRuntimeMode
+	}
+	if mode == shared.RuntimePerformanceModeGame {
+		return RuntimeModeAvailability{
+			RoomID: roomID, WorldIDs: append([]string(nil), worldIDs...),
+			DefaultMode: shared.RuntimePerformanceModeGame,
+			Modes:       []shared.RuntimePerformanceMode{shared.RuntimePerformanceModeGame},
+		}, nil
+	}
+	availability, err := o.RuntimeModes(ctx, roomID, worldIDs)
+	if err != nil {
+		return RuntimeModeAvailability{}, err
+	}
+	for _, supported := range availability.Modes {
+		if supported == mode {
+			return availability, nil
+		}
+	}
+	return availability, &RuntimeModeError{Mode: mode, Availability: availability}
+}
+
+func (o *Operations) RequireRuntimeSelection(ctx context.Context, roomID string, worldIDs []string, requestedMode shared.RuntimePerformanceMode, requestedVersion string) (RuntimeModeAvailability, error) {
+	availability, err := o.RequireRuntimeMode(ctx, roomID, worldIDs, requestedMode)
+	if err != nil {
+		return availability, err
+	}
+	mode, _ := shared.NormalizeRuntimePerformanceMode(requestedMode)
+	version, valid := normalizeRuntimePackageVersion(requestedVersion)
+	if mode == shared.RuntimePerformanceModeGame {
+		if requestedVersion != "" && version != "game" {
+			return availability, ErrInvalidRuntimeVersion
+		}
+		return availability, nil
+	}
+	// Runtime version was added after runtimeMode. Keep older API clients
+	// compatible while new clients pin the version they displayed to the user.
+	if strings.TrimSpace(requestedVersion) == "" {
+		return availability, nil
+	}
+	if !valid || version == "game" {
+		return availability, ErrInvalidRuntimeVersion
+	}
+	for _, target := range availability.Targets {
+		installed, installedValid := normalizeRuntimePackageVersion(target.PackageVersion)
+		if !installedValid || installed != version {
+			return availability, &RuntimeVersionError{Version: version, Availability: availability}
+		}
+	}
+	return availability, nil
+}
+
+var runtimePackageVersionPattern = regexp.MustCompile(`^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$`)
+
+func normalizeRuntimePackageVersion(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	if strings.EqualFold(value, "game") {
+		return "game", true
+	}
+	value = strings.TrimPrefix(strings.TrimPrefix(value, "v"), "V")
+	if runtimePackageVersionPattern.MatchString(value) {
+		return value, true
+	}
+	return "", false
+}
+
+func normalizedRuntimeModes(values []shared.RuntimePerformanceMode) []shared.RuntimePerformanceMode {
+	result := make([]shared.RuntimePerformanceMode, 0, 4)
+	for _, candidate := range []shared.RuntimePerformanceMode{
+		shared.RuntimePerformanceModeGame,
+		shared.RuntimePerformanceModeLuaJIT,
+		shared.RuntimePerformanceModeArenaGC,
+	} {
+		for _, value := range values {
+			if value == candidate {
+				result = append(result, candidate)
+				break
+			}
+		}
+	}
+	if !stringRuntimeModeContains(result, shared.RuntimePerformanceModeGame) {
+		result = append([]shared.RuntimePerformanceMode{shared.RuntimePerformanceModeGame}, result...)
+	}
+	return result
+}
+
+func intersectRuntimeModes(left, right []shared.RuntimePerformanceMode) []shared.RuntimePerformanceMode {
+	result := make([]shared.RuntimePerformanceMode, 0, len(left))
+	for _, value := range left {
+		if stringRuntimeModeContains(right, value) {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func stringRuntimeModeContains(values []shared.RuntimePerformanceMode, expected shared.RuntimePerformanceMode) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSliceContains(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func (o *Operations) PreviewBatchCapacity(ctx context.Context, action Action, selections []BatchRoomSelection) (topology.BatchStartCapacityPreview, error) {
@@ -529,39 +1013,6 @@ func (o *Operations) RequireBatchCapacityConfirmation(ctx context.Context, actio
 		return &BatchCapacityRiskError{Preview: preview}
 	}
 	return nil
-}
-
-func (o *Operations) preflightTargets(ctx context.Context, action Action, room rooms.Room, worlds []rooms.World) map[string]error {
-	if o.placements == nil {
-		return nil
-	}
-	failures := make(map[string]error)
-	for _, world := range worlds {
-		applied, err := o.placements.AppliedPlacement(room.ID, world.ID)
-		if err != nil {
-			failures[world.ID] = err
-			continue
-		}
-		if applied.AppliedTargetID != "local" {
-			if action == ActionCleanup {
-				failures[world.ID] = errors.New("远程节点不开放强制清理")
-				continue
-			}
-			if _, err := o.placements.ResolveExecution(ctx, room.ID, world.ID); err != nil {
-				failures[world.ID] = err
-				continue
-			}
-		}
-		status, err := o.StatusFor(ctx, room.ID, world.ID)
-		if err != nil {
-			failures[world.ID] = err
-			continue
-		}
-		if action == ActionSave && status.State != RuntimeRunning {
-			failures[world.ID] = errors.New("分片未运行，无法保存")
-		}
-	}
-	return failures
 }
 
 func (o *Operations) currentStopEpoch(roomID string) uint64 {
@@ -696,15 +1147,16 @@ func (o *Operations) StatusFor(ctx context.Context, roomID, worldID string) (Run
 	return runtimeStatusFromShared(result.Result.Status), nil
 }
 
-func (o *Operations) executePlaced(ctx context.Context, action Action, room rooms.Room, world rooms.World, lease *operationlease.Lease, operationID string) (string, error) {
+func (o *Operations) executePlaced(ctx context.Context, action Action, room rooms.Room, world rooms.World, lease *operationlease.Lease, operationID string, runtimeMode shared.RuntimePerformanceMode) (string, error) {
 	if o.placements == nil {
-		return o.execute(ctx, action, room.DirectoryName, world.DirectoryName)
+		return o.execute(ctx, action, room.DirectoryName, world.DirectoryName, runtimeMode)
 	}
 	applied, err := o.placements.AppliedPlacement(room.ID, world.ID)
 	if err != nil {
 		return "", err
 	}
 	o.observeOperation(ctx, action, room.ID, world.ID, applied, lease, operationID)
+	launchOptions := shared.RuntimeLaunchOptions{}
 	if o.runtime != nil && action != ActionCleanup {
 		shardAction, timeoutSeconds, err := remoteAction(action, o.startTimeout, o.stopTimeout)
 		if err != nil {
@@ -713,6 +1165,7 @@ func (o *Operations) executePlaced(ctx context.Context, action Action, room room
 		request := shared.ShardOperationRequest{
 			ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: operationID, OperationKey: operationID,
 			Action: shardAction, Cluster: room.DirectoryName, Shard: world.DirectoryName, TopologyRevision: applied.Revision,
+			RuntimeMode: runtimeMode, LaunchOptions: launchOptions,
 		}
 		if lease != nil {
 			expiresAt := lease.ExpiresAt.UTC()
@@ -722,6 +1175,7 @@ func (o *Operations) executePlaced(ctx context.Context, action Action, room room
 		if err != nil {
 			return "", err
 		}
+		reportStartupResult(ctx, action, result.Status)
 		message := strings.TrimSpace(result.Message)
 		if message == "" {
 			message = "分片操作已完成"
@@ -729,7 +1183,11 @@ func (o *Operations) executePlaced(ctx context.Context, action Action, room room
 		return message, nil
 	}
 	if applied.AppliedTargetID == "local" {
-		return o.execute(ctx, action, room.DirectoryName, world.DirectoryName)
+		message, err := o.execute(ctx, action, room.DirectoryName, world.DirectoryName, runtimeMode)
+		if err == nil {
+			reportStartupResult(ctx, action, shared.ShardRuntimeStatus{State: "running"})
+		}
+		return message, err
 	}
 	if action == ActionCleanup {
 		return "", errors.New("远程节点不开放强制清理；请先诊断 Agent 和分片状态")
@@ -749,12 +1207,14 @@ func (o *Operations) executePlaced(ctx context.Context, action Action, room room
 	request := shared.ShardOperationRequest{
 		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: operationID, OperationKey: operationID,
 		Action: shardAction, Cluster: room.DirectoryName, Shard: world.DirectoryName, TopologyRevision: resolved.Revision,
+		RuntimeMode: runtimeMode, LaunchOptions: launchOptions,
 		LeaseID: lease.LeaseID, FencingToken: lease.FencingToken, LeaseExpiresAt: &expiresAt,
 	}
 	result, err := o.remote.ExecuteShard(ctx, resolved.AppliedTargetID, request, timeout)
 	if err != nil {
 		return "", err
 	}
+	reportStartupResult(ctx, action, result.Result.Status)
 	message := strings.TrimSpace(result.Result.Message)
 	if message == "" {
 		message = "远程分片操作已完成"
@@ -815,7 +1275,7 @@ func runtimeStatusFromShared(status shared.ShardRuntimeStatus) RuntimeStatus {
 	if state != RuntimeStopped && state != RuntimeStarting && state != RuntimeRunning && state != RuntimeFailed {
 		state = RuntimeUnknown
 	}
-	return RuntimeStatus{State: state, Code: status.Code, Message: status.Message, SessionExists: status.SessionExists}
+	return RuntimeStatus{State: state, StartupStage: status.StartupStage, Code: status.Code, Message: status.Message, SessionExists: status.SessionExists, Paused: status.Paused}
 }
 
 func operationErrorCode(action Action, err error) string {
@@ -837,20 +1297,7 @@ func operationErrorCode(action Action, err error) string {
 	}
 }
 
-func resourcePreflightFailure(action Action, err error) (string, string) {
-	code := operationErrorCode(action, err)
-	message := err.Error()
-	var conflict *topology.ResourceConflictError
-	if errors.As(err, &conflict) && len(conflict.Preflight.Conflicts) > 0 {
-		message = conflict.Preflight.Conflicts[0].Message
-		if len(conflict.Preflight.Conflicts) > 1 {
-			message += fmt.Sprintf("（另有 %d 项冲突）", len(conflict.Preflight.Conflicts)-1)
-		}
-	}
-	return code, message
-}
-
-func (o *Operations) execute(ctx context.Context, action Action, roomName, worldName string) (string, error) {
+func (o *Operations) execute(ctx context.Context, action Action, roomName, worldName string, runtimeMode shared.RuntimePerformanceMode) (string, error) {
 	status, err := o.Status(ctx, roomName, worldName)
 	if err != nil {
 		return "", fmt.Errorf("检查分片状态: %w", err)
@@ -867,13 +1314,7 @@ func (o *Operations) execute(ctx context.Context, action Action, roomName, world
 			if err := ctx.Err(); err != nil {
 				return "", err
 			}
-			if err := o.prepare(ctx, roomName, worldName); err != nil {
-				return "", fmt.Errorf("准备分片运行时: %w", err)
-			}
-			if err := ctx.Err(); err != nil {
-				return "", err
-			}
-			if err := o.control.Start(ctx, roomName, worldName); err != nil {
+			if err := startControlWithRuntimeMode(ctx, o.control, roomName, worldName, runtimeMode); err != nil {
 				return "", err
 			}
 		}
@@ -918,13 +1359,7 @@ func (o *Operations) execute(ctx context.Context, action Action, roomName, world
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		if err := o.prepare(ctx, roomName, worldName); err != nil {
-			return "", fmt.Errorf("准备分片运行时: %w", err)
-		}
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		if err := o.control.Start(ctx, roomName, worldName); err != nil {
+		if err := startControlWithRuntimeMode(ctx, o.control, roomName, worldName, runtimeMode); err != nil {
 			return "", err
 		}
 		if err := o.waitFor(ctx, roomName, worldName, true, o.startTimeout); err != nil {
@@ -948,19 +1383,24 @@ func (o *Operations) execute(ctx context.Context, action Action, roomName, world
 	}
 }
 
-func (o *Operations) prepare(ctx context.Context, roomName, worldName string) error {
-	for _, preparer := range o.preparers {
-		if preparer == nil {
-			continue
-		}
-		if err := preparer.Prepare(ctx, roomName, worldName); err != nil {
-			return err
-		}
+func startControlWithRuntimeMode(ctx context.Context, control Control, roomName, worldName string, mode shared.RuntimePerformanceMode) error {
+	normalized, valid := shared.NormalizeRuntimePerformanceMode(mode)
+	if !valid {
+		return ErrInvalidRuntimeMode
 	}
-	return nil
+	if runtimeControl, ok := control.(interface {
+		StartWithRuntimeMode(context.Context, string, string, shared.RuntimePerformanceMode) error
+	}); ok {
+		return runtimeControl.StartWithRuntimeMode(ctx, roomName, worldName, normalized)
+	}
+	if normalized != shared.RuntimePerformanceModeGame {
+		return ErrRuntimeModeUnavailable
+	}
+	return control.Start(ctx, roomName, worldName)
 }
 
 func (o *Operations) waitFor(ctx context.Context, roomName, worldName string, expected bool, timeout time.Duration) error {
+	reportStartup := StartupProgressReporter(ctx)
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(o.pollInterval)
@@ -983,6 +1423,9 @@ func (o *Operations) waitFor(ctx context.Context, roomName, worldName string, ex
 			status, err := o.Status(ctx, roomName, worldName)
 			if err != nil {
 				return err
+			}
+			if expected {
+				reportStartup(status)
 			}
 			if expected && status.State == RuntimeFailed {
 				if status.Message == "" {

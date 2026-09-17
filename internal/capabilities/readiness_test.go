@@ -32,6 +32,9 @@ func TestFindDSTExecutableAndReadinessRoomCount(t *testing.T) {
 	if !foundRooms {
 		t.Fatalf("room discovery check missing: %#v", readiness.Checks)
 	}
+	if readiness.Onboarding.FirstStartCompleted || readiness.Onboarding.CompletedAt != nil {
+		t.Fatalf("new installation onboarding must be incomplete: %#v", readiness.Onboarding)
+	}
 }
 
 func TestServerExecutableCheckRecognizesMacApplication(t *testing.T) {

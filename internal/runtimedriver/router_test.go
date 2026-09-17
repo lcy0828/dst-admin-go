@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,15 +15,32 @@ import (
 	"dont/shared"
 )
 
+type runtimeMutationRecorder struct{ targets []string }
+
+func (r *runtimeMutationRecorder) RuntimeTargetChanged(targetID string) {
+	r.targets = append(r.targets, targetID)
+}
+
+func TestNotifyRuntimeTargetsChangedDeduplicatesTargets(t *testing.T) {
+	recorder := &runtimeMutationRecorder{}
+	NotifyRuntimeTargetsChanged(recorder, " local ", "agent:node", "local", "", "agent:node")
+	if !reflect.DeepEqual(recorder.targets, []string{"local", "agent:node"}) {
+		t.Fatalf("targets=%v", recorder.targets)
+	}
+}
+
 func TestTargetFromLocalPlacementUsesDefaultInstallation(t *testing.T) {
 	target := targetFromPlacement(topology.ExecutionPlacement{
 		AppliedTargetID: "local",
 		Revision:        "revision-1",
 		Room:            rooms.Room{DirectoryName: "Cluster_1"},
 		World:           rooms.World{DirectoryName: "Master"},
+		Target: agents.RuntimeTarget{
+			Kind: agents.RuntimeKindLocal, Capabilities: []string{"runtime.backup.v1"},
+		},
 	}, "room-1", "world-1")
 
-	if target.InstallationID != "default" || target.TargetID != "local" || target.Cluster != "Cluster_1" || target.Shard != "Master" {
+	if target.InstallationID != "default" || target.TargetID != "local" || target.Cluster != "Cluster_1" || target.Shard != "Master" || !target.CapabilitiesKnown || len(target.Capabilities) != 3 {
 		t.Fatalf("unexpected local target: %#v", target)
 	}
 }
@@ -78,19 +96,56 @@ func (l cpuLifecycleLease) Release(operationlease.Lease) error {
 
 type cpuLifecycleDriver struct {
 	Driver
-	events           []string
-	applyErr         error
-	releaseErr       error
-	lifecycleErr     error
-	lifecycleStatus  *shared.ShardRuntimeStatus
-	status           shared.ShardRuntimeStatus
-	statusErr        error
-	stopStatus       *shared.ShardRuntimeStatus
-	stopAtDeadline   bool
-	releaseEntryErr  error
-	cpuCap           bool
-	consoleOperation Operation
-	consoleRequest   shared.RuntimeConsoleRequest
+	events             []string
+	applyErr           error
+	releaseErr         error
+	lifecycleErr       error
+	lifecycleStatus    *shared.ShardRuntimeStatus
+	status             shared.ShardRuntimeStatus
+	statusErr          error
+	stopStatus         *shared.ShardRuntimeStatus
+	stopAtDeadline     bool
+	releaseEntryErr    error
+	cpuCap             bool
+	consoleOperation   Operation
+	consoleRequest     shared.RuntimeConsoleRequest
+	lifecycleOperation Operation
+}
+
+type roomRecoveryTestDriver struct {
+	*cpuLifecycleDriver
+	targets    []Target
+	operations []Operation
+}
+
+func (d *roomRecoveryTestDriver) MoveRoomToRecovery(_ context.Context, target Target, operation Operation) (string, error) {
+	d.targets = append(d.targets, target)
+	d.operations = append(d.operations, operation)
+	return ".dst-admin-trash/room", nil
+}
+
+type roomRecoveryPlacement map[string]topology.ExecutionPlacement
+
+func (p roomRecoveryPlacement) AppliedPlacement(_ string, worldID string) (topology.ExecutionPlacement, error) {
+	return p[worldID], nil
+}
+
+func (p roomRecoveryPlacement) ResolveExecution(_ context.Context, _ string, worldID string) (topology.ExecutionPlacement, error) {
+	return p[worldID], nil
+}
+
+type chatValidationDriver struct {
+	*cpuLifecycleDriver
+	generations []shared.RuntimeChatLogGeneration
+	result      shared.RuntimeChatLogResult
+}
+
+func (d *chatValidationDriver) ListChatLogGenerations(context.Context, Target) ([]shared.RuntimeChatLogGeneration, error) {
+	return d.generations, nil
+}
+
+func (d *chatValidationDriver) ReadChatLogGeneration(context.Context, Target, shared.RuntimeChatLogRequest) (shared.RuntimeChatLogResult, error) {
+	return d.result, nil
 }
 
 func (d *cpuLifecycleDriver) Kind() Kind { return KindNative }
@@ -110,7 +165,8 @@ func (d *cpuLifecycleDriver) Status(context.Context, Target) (shared.ShardRuntim
 	}
 	return shared.ShardRuntimeStatus{State: "running", SessionExists: true}, nil
 }
-func (d *cpuLifecycleDriver) ExecuteShard(ctx context.Context, _ Target, _ Operation, action shared.ShardAction, _ time.Duration) (shared.ShardOperationResult, error) {
+func (d *cpuLifecycleDriver) ExecuteShard(ctx context.Context, _ Target, operation Operation, action shared.ShardAction, _ time.Duration) (shared.ShardOperationResult, error) {
+	d.lifecycleOperation = operation
 	d.events = append(d.events, string(action))
 	status := shared.ShardRuntimeStatus{State: "running", SessionExists: true}
 	if d.lifecycleStatus != nil {
@@ -192,6 +248,204 @@ func TestRemoteConsoleReusesBorrowedRoomLease(t *testing.T) {
 	}
 }
 
+func TestMoveRoomToRecoveryUsesOneRemoteInstallationAndRejectsSplitRoom(t *testing.T) {
+	execution := func(worldID, targetID, installationID string) topology.ExecutionPlacement {
+		return topology.ExecutionPlacement{
+			Room:  rooms.Room{ID: "room-1", DirectoryName: "Cluster_1"},
+			World: rooms.World{ID: worldID, DirectoryName: worldID}, Revision: "revision-1",
+			AppliedTargetID: targetID, AppliedInstallationID: installationID,
+			Target: agents.RuntimeTarget{
+				ID: targetID, AgentID: strings.TrimPrefix(targetID, "agent:"), Kind: agents.RuntimeKindAgent,
+				Config: agents.RuntimeConfig{InstallationID: installationID},
+			},
+		}
+	}
+	placements := roomRecoveryPlacement{
+		"Master": execution("Master", "agent:node-a", "primary"),
+		"Caves":  execution("Caves", "agent:node-a", "primary"),
+	}
+	acquires, releases := 0, 0
+	driver := &roomRecoveryTestDriver{cpuLifecycleDriver: &cpuLifecycleDriver{}}
+	router, err := NewRouter(placements, cpuLifecycleLease{acquires: &acquires, releases: &releases}, driver, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &runtimeMutationRecorder{}
+	if err := router.ConfigureMutationObserver(recorder); err != nil {
+		t.Fatal(err)
+	}
+	location, err := router.MoveRoomToRecovery(context.Background(), "room-1", []string{"Master", "Caves"})
+	if err != nil || location.TargetID != "agent:node-a" || location.InstallationID != "primary" || location.RecoveryRef == "" {
+		t.Fatalf("location=%#v err=%v", location, err)
+	}
+	if len(driver.targets) != 1 || acquires != 1 || releases != 1 || len(recorder.targets) != 1 || driver.operations[0].LeaseID == "" {
+		t.Fatalf("targets=%#v operations=%#v acquires=%d releases=%d notifications=%#v", driver.targets, driver.operations, acquires, releases, recorder.targets)
+	}
+
+	placements["Caves"] = execution("Caves", "agent:node-b", "primary")
+	if _, err := router.MoveRoomToRecovery(context.Background(), "room-1", []string{"Master", "Caves"}); !errors.Is(err, ErrRoomRecoveryMultiTarget) {
+		t.Fatalf("split room error=%v", err)
+	}
+	if len(driver.targets) != 1 || acquires != 1 {
+		t.Fatalf("split room reached mutation: targets=%#v acquires=%d", driver.targets, acquires)
+	}
+}
+
+func TestLocalManagedConsoleUsesRoomLeaseAndFencing(t *testing.T) {
+	placement := &cpuLifecyclePlacement{placement: topology.ExecutionPlacement{
+		Room: rooms.Room{DirectoryName: "Cluster_1"}, World: rooms.World{DirectoryName: "Master"},
+		Revision: "revision-1", AppliedTargetID: LocalTargetID,
+		Target: agents.RuntimeTarget{ID: LocalTargetID, Kind: agents.RuntimeKindLocal},
+	}}
+	acquires, releases := 0, 0
+	driver := &cpuLifecycleDriver{}
+	router, err := NewRouter(placement, cpuLifecycleLease{acquires: &acquires, releases: &releases}, driver, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := router.SendID(context.Background(), "room-1", "world-1", shared.RuntimeConsoleRequest{
+		Mode: shared.ConsoleModeManaged, Command: `c_announce("test")`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if acquires != 1 || releases != 1 || driver.consoleOperation.LeaseID != "lease" || driver.consoleOperation.FencingToken != 1 {
+		t.Fatalf("acquires=%d releases=%d operation=%#v", acquires, releases, driver.consoleOperation)
+	}
+}
+
+func TestLocalConsoleProbeAvoidsLeaseAndFencing(t *testing.T) {
+	placement := &cpuLifecyclePlacement{placement: topology.ExecutionPlacement{
+		Room: rooms.Room{DirectoryName: "Cluster_1"}, World: rooms.World{DirectoryName: "Master"},
+		Revision: "revision-1", AppliedTargetID: LocalTargetID,
+		Target: agents.RuntimeTarget{ID: LocalTargetID, Kind: agents.RuntimeKindLocal},
+	}}
+	acquires, releases := 0, 0
+	driver := &cpuLifecycleDriver{}
+	router, err := NewRouter(placement, cpuLifecycleLease{acquires: &acquires, releases: &releases}, driver, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := router.SendID(context.Background(), "room-1", "world-1", shared.RuntimeConsoleRequest{
+		Mode: shared.ConsoleModeProbe, CoalesceKey: "players", Command: `return true`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if acquires != 0 || releases != 0 || driver.consoleOperation.LeaseID != "" || driver.consoleOperation.FencingToken != 0 {
+		t.Fatalf("acquires=%d releases=%d operation=%#v", acquires, releases, driver.consoleOperation)
+	}
+}
+
+func TestRemoteConsoleProbeAvoidsLeaseAndFencing(t *testing.T) {
+	placement := &cpuLifecyclePlacement{placement: topology.ExecutionPlacement{
+		Room: rooms.Room{DirectoryName: "Cluster_1"}, World: rooms.World{DirectoryName: "Master"},
+		Revision: "revision-1", AppliedTargetID: "agent:node-a",
+		Target: agents.RuntimeTarget{ID: "agent:node-a", AgentID: "node-a", Kind: agents.RuntimeKindAgent, Config: agents.RuntimeConfig{InstallationID: "default"}},
+	}}
+	acquires, releases := 0, 0
+	driver := &cpuLifecycleDriver{}
+	router, err := NewRouter(placement, cpuLifecycleLease{acquires: &acquires, releases: &releases}, driver, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := router.SendID(context.Background(), "room-1", "world-1", shared.RuntimeConsoleRequest{
+		Mode: shared.ConsoleModeProbe, CoalesceKey: "players", Command: `return true`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if acquires != 0 || releases != 0 || driver.consoleOperation.LeaseID != "" || driver.consoleOperation.FencingToken != 0 {
+		t.Fatalf("acquires=%d releases=%d operation=%#v", acquires, releases, driver.consoleOperation)
+	}
+}
+
+func TestLocalManagedConsoleReusesBorrowedRoomLease(t *testing.T) {
+	placement := &cpuLifecyclePlacement{placement: topology.ExecutionPlacement{
+		Room: rooms.Room{DirectoryName: "Cluster_1"}, World: rooms.World{DirectoryName: "Master"},
+		Revision: "revision-1", AppliedTargetID: LocalTargetID,
+		Target: agents.RuntimeTarget{ID: LocalTargetID, Kind: agents.RuntimeKindLocal},
+	}}
+	acquires, releases := 0, 0
+	driver := &cpuLifecycleDriver{}
+	router, err := NewRouter(placement, cpuLifecycleLease{acquires: &acquires, releases: &releases}, driver, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	borrowed := operationlease.Lease{
+		RoomID: "room-1", OperationKey: "room.start", LeaseID: "borrowed-local",
+		FencingToken: 9, ExpiresAt: time.Now().UTC().Add(time.Minute),
+	}
+	if _, err := router.SendID(operationlease.WithBorrowedLeases(context.Background(), borrowed), "room-1", "world-1", shared.RuntimeConsoleRequest{
+		Mode: shared.ConsoleModeManaged, Command: `c_save()`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if acquires != 0 || releases != 0 || driver.consoleOperation.LeaseID != borrowed.LeaseID || driver.consoleOperation.FencingToken != borrowed.FencingToken {
+		t.Fatalf("acquires=%d releases=%d operation=%#v", acquires, releases, driver.consoleOperation)
+	}
+}
+
+func TestRouterRejectsInvalidChatHistoryFromRuntime(t *testing.T) {
+	placement := &cpuLifecyclePlacement{placement: topology.ExecutionPlacement{
+		Room: rooms.Room{DirectoryName: "Cluster_1"}, World: rooms.World{DirectoryName: "Master"},
+		Revision: "revision-1", AppliedTargetID: "local",
+	}}
+	driver := &chatValidationDriver{cpuLifecycleDriver: &cpuLifecycleDriver{}}
+	router, err := NewRouter(placement, cpuLifecycleLease{}, driver, driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	driver.generations = []shared.RuntimeChatLogGeneration{{
+		ID: "generation", FileName: "../server_chat_log.txt", Size: 20, UpdatedAt: now,
+	}}
+	if _, err := router.ListChatLogGenerations(context.Background(), "room", "world"); err == nil {
+		t.Fatal("router accepted an unsafe generation filename")
+	}
+
+	request := shared.RuntimeChatLogRequest{GenerationID: "generation", Cursor: 10, MaxBytes: 64, MaxLines: 10}
+	generation := shared.RuntimeChatLogGeneration{ID: "generation", FileName: "server_chat_log.txt", Size: 20, UpdatedAt: now}
+	driver.result = shared.RuntimeChatLogResult{
+		Generation: &generation, Cursor: 9, Lines: []shared.RuntimeLogLine{{Cursor: 9, Text: "invalid"}},
+	}
+	if _, err := router.ReadChatLogGeneration(context.Background(), "room", "world", request); err == nil {
+		t.Fatal("router accepted a regressing generation cursor")
+	}
+	driver.result = shared.RuntimeChatLogResult{
+		Generation: &generation, Cursor: 20, Complete: true,
+		Lines: []shared.RuntimeLogLine{{Cursor: 20, Text: "a response line larger than its cursor range"}},
+	}
+	if _, err := router.ReadChatLogGeneration(context.Background(), "room", "world", request); err == nil {
+		t.Fatal("router accepted a generation line outside its cursor range")
+	}
+}
+
+func TestRouterSelectsAnExactInstallationEndpoint(t *testing.T) {
+	placement := &cpuLifecyclePlacement{placement: topology.ExecutionPlacement{
+		Room: rooms.Room{DirectoryName: "Cluster_1"}, World: rooms.World{DirectoryName: "Master"},
+		Revision: "revision-1", AppliedTargetID: "local", AppliedInstallationID: "testing",
+	}}
+	defaultDriver := &cpuLifecycleDriver{}
+	testingDriver := &cpuLifecycleDriver{}
+	registry, err := NewEndpointRegistry(defaultDriver, defaultDriver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testingEndpoint, err := NewRuntimeEndpoint(testingDriver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RegisterInstallation("local", "testing", testingEndpoint); err != nil {
+		t.Fatal(err)
+	}
+	router, err := NewRouterWithEndpoints(placement, cpuLifecycleLease{}, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver, target, err := router.DriverTarget(context.Background(), "room", "world")
+	if err != nil || driver != testingDriver || target.InstallationID != "testing" {
+		t.Fatalf("driver=%T target=%#v err=%v", driver, target, err)
+	}
+}
+
 func newCPULifecycleRouter(t *testing.T, applyErr error) (*Router, *cpuLifecyclePlacement, *cpuLifecycleDriver) {
 	t.Helper()
 	placement := &cpuLifecyclePlacement{
@@ -226,6 +480,72 @@ func TestShardStartPreparesAndAppliesCPUAllocation(t *testing.T) {
 	}
 	if len(placement.recorded) != 2 || placement.recorded[0].State != shared.RuntimeCPUStatePrepared || placement.recorded[1].State != shared.RuntimeCPUStateApplied {
 		t.Fatalf("recorded=%#v", placement.recorded)
+	}
+}
+
+func TestShardStartSkipsCPULifecycleWithoutBinding(t *testing.T) {
+	router, placement, driver := newCPULifecycleRouter(t, nil)
+	placement.allocation.Policy = topology.CPUPolicyNone
+	placement.allocation.LogicalCPUIds = nil
+	request := shared.ShardOperationRequest{
+		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: "operation-unbound",
+		Action: shared.ShardActionStart, TopologyRevision: "revision-1",
+	}
+	if _, err := router.ExecutePlacedShard(context.Background(), "room-1", "world-1", request, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(driver.events, []string{string(shared.ShardActionStart)}) {
+		t.Fatalf("events=%v", driver.events)
+	}
+	if len(placement.recorded) != 0 {
+		t.Fatalf("unexpected CPU lifecycle results=%#v", placement.recorded)
+	}
+}
+
+func TestShardStartTreatsMissingCPUAllocationAsUnbound(t *testing.T) {
+	router, placement, driver := newCPULifecycleRouter(t, nil)
+	placement.allocationErr = topology.ErrResourceNotFound
+	request := shared.ShardOperationRequest{
+		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: "operation-no-allocation",
+		Action: shared.ShardActionStart, TopologyRevision: "revision-1",
+	}
+	if _, err := router.ExecutePlacedShard(context.Background(), "room-1", "world-1", request, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(driver.events, []string{string(shared.ShardActionStart)}) {
+		t.Fatalf("events=%v", driver.events)
+	}
+}
+
+func TestShardStartForwardsSelectedRuntimeMode(t *testing.T) {
+	router, _, driver := newCPULifecycleRouter(t, nil)
+	request := shared.ShardOperationRequest{
+		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: "operation-runtime-mode",
+		Action: shared.ShardActionStart, TopologyRevision: "revision-1",
+		RuntimeMode: shared.RuntimePerformanceModeLuaJIT,
+	}
+	if _, err := router.ExecutePlacedShard(context.Background(), "room-1", "world-1", request, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if driver.lifecycleOperation.RuntimeMode != shared.RuntimePerformanceModeLuaJIT {
+		t.Fatalf("runtime mode=%s", driver.lifecycleOperation.RuntimeMode)
+	}
+}
+
+func TestShardStartAcceptsAgentTimeoutAfterSessionLaunch(t *testing.T) {
+	router, placement, driver := newCPULifecycleRouter(t, nil)
+	driver.lifecycleErr = context.DeadlineExceeded
+	driver.lifecycleStatus = &shared.ShardRuntimeStatus{State: "starting", SessionExists: true}
+	request := shared.ShardOperationRequest{
+		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: "operation-starting-timeout",
+		Action: shared.ShardActionStart, TopologyRevision: "revision-1",
+	}
+	result, err := router.ExecutePlacedShard(context.Background(), "room-1", "world-1", request, time.Second)
+	if err != nil || result.Message != "分片进程已启动，DST 仍在加载" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if !reflect.DeepEqual(driver.events, []string{"cpu.prepare", string(shared.ShardActionStart), "cpu.apply"}) || len(placement.recorded) != 2 {
+		t.Fatalf("events=%v recorded=%#v", driver.events, placement.recorded)
 	}
 }
 
