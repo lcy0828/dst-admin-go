@@ -28,6 +28,7 @@ type ReleaseCoordinator struct {
 	pollInterval  time.Duration
 	renewInterval time.Duration
 	notifier      LifecycleNotifier
+	mutations     runtimedriver.RuntimeMutationObserver
 }
 
 func NewReleaseCoordinator(planner *ReleasePlanner, runtime ReleaseRuntime, leases ReleaseLeaseService, backups ReleaseProtectionService, store *ReleaseStore) (*ReleaseCoordinator, error) {
@@ -42,6 +43,14 @@ func NewReleaseCoordinator(planner *ReleasePlanner, runtime ReleaseRuntime, leas
 
 func (c *ReleaseCoordinator) ConfigureNotifier(notifier LifecycleNotifier) {
 	c.notifier = notifier
+}
+
+func (c *ReleaseCoordinator) ConfigureMutationObserver(observer runtimedriver.RuntimeMutationObserver) error {
+	if observer == nil {
+		return errors.New("game release mutation observer is required")
+	}
+	c.mutations = observer
+	return nil
 }
 
 func (c *ReleaseCoordinator) Preview(ctx context.Context, request ReleasePreviewRequest) (ReleasePlan, error) {
@@ -184,6 +193,13 @@ func (c *ReleaseCoordinator) execute(ctx context.Context, value Release, fences 
 		}
 		return c.store.Save(value)
 	}
+	defer func() {
+		targetIDs := make([]string, 0, len(value.Plan.Installations))
+		for _, installation := range value.Plan.Installations {
+			targetIDs = append(targetIDs, installation.TargetID)
+		}
+		runtimedriver.NotifyRuntimeTargetsChanged(c.mutations, targetIDs...)
+	}()
 	var err error
 	value, err = c.createProtectionBackups(ctx, value, fences)
 	if err != nil {
@@ -552,8 +568,22 @@ func (c *ReleaseCoordinator) previewStoredPlan(ctx context.Context, plan Release
 	restart := plan.Policy.RestartRunning
 	return c.planner.Preview(ctx, ReleasePreviewRequest{
 		DesiredVersion: plan.DesiredVersion,
+		TargetIDs:      releasePlanTargetIDs(plan),
 		Policy:         ReleasePolicyInput{CleanCache: plan.Policy.CleanCache, RestartRunning: &restart, LoadConfirmation: plan.Policy.LoadConfirmation, TimeoutSeconds: plan.Policy.TimeoutSeconds},
 	})
+}
+
+func releasePlanTargetIDs(plan ReleasePlan) []string {
+	targets := make([]string, 0, len(plan.Installations))
+	seen := make(map[string]bool, len(plan.Installations))
+	for _, installation := range plan.Installations {
+		if installation.TargetID != "" && !seen[installation.TargetID] {
+			seen[installation.TargetID] = true
+			targets = append(targets, installation.TargetID)
+		}
+	}
+	sort.Strings(targets)
+	return targets
 }
 
 func (c *ReleaseCoordinator) withReleaseLocks(ctx context.Context, plan ReleasePlan, operationKey string, run func(context.Context, *releaseFenceSet) (Release, error)) (Release, error) {

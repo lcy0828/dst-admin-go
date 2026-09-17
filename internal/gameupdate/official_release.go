@@ -2,7 +2,6 @@ package gameupdate
 
 import (
 	"context"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -12,11 +11,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/PuerkitoBio/goquery"
 )
 
 const (
-	kleiReleaseFeedURL = "https://kleiforums.com/rss/6-dont-starve-together-updates.xml/"
-	kleiReleaseSource  = "klei-forums-rss"
+	kleiReleaseFeedURL = "https://kleiforums.com/game-updates/dst/"
+	kleiReleaseSource  = "klei-forums-release"
 	kleiReleaseMaxBody = 4 * 1024 * 1024
 )
 
@@ -24,6 +25,11 @@ var kleiPCReleasePath = regexp.MustCompile(`^/game-updates/dst/([0-9]+)-r([0-9]+
 
 type OfficialReleaseChecker interface {
 	Check(context.Context) (OfficialRelease, error)
+}
+
+type OfficialReleaseCache interface {
+	LoadOfficialRelease() (OfficialRelease, bool, error)
+	SaveOfficialRelease(OfficialRelease) error
 }
 
 type KleiReleaseChecker struct {
@@ -34,43 +40,84 @@ type KleiReleaseChecker struct {
 
 	mu     sync.Mutex
 	cached *OfficialRelease
+	store  OfficialReleaseCache
+	loaded bool
 }
 
-func NewKleiReleaseChecker() *KleiReleaseChecker {
+func NewKleiReleaseChecker(caches ...OfficialReleaseCache) *KleiReleaseChecker {
 	return newKleiReleaseChecker(
 		&http.Client{Timeout: 5 * time.Second},
 		kleiReleaseFeedURL,
 		15*time.Minute,
 		time.Now,
+		caches...,
 	)
 }
 
-func newKleiReleaseChecker(client *http.Client, endpoint string, ttl time.Duration, now func() time.Time) *KleiReleaseChecker {
-	return &KleiReleaseChecker{client: client, endpoint: endpoint, ttl: ttl, now: now}
+func newKleiReleaseChecker(client *http.Client, endpoint string, ttl time.Duration, now func() time.Time, caches ...OfficialReleaseCache) *KleiReleaseChecker {
+	checker := &KleiReleaseChecker{client: client, endpoint: endpoint, ttl: ttl, now: now}
+	if len(caches) > 0 {
+		checker.store = caches[0]
+	}
+	return checker
 }
 
 func (c *KleiReleaseChecker) Check(ctx context.Context) (OfficialRelease, error) {
+	return c.check(ctx, false)
+}
+
+func (c *KleiReleaseChecker) Refresh(ctx context.Context) (OfficialRelease, error) {
+	return c.check(ctx, true)
+}
+
+func (c *KleiReleaseChecker) check(ctx context.Context, force bool) (OfficialRelease, error) {
+	started := c.now().UTC()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	now := c.now().UTC()
-	if c.cached != nil && now.Sub(c.cached.CheckedAt) < c.ttl {
+	c.loadCachedRelease()
+	if err := ctx.Err(); err != nil {
+		return OfficialRelease{}, err
+	}
+	if c.cached != nil && !c.cached.Stale && now.Sub(c.cached.CheckedAt) < c.ttl && (!force || c.cached.CheckedAt.After(started)) {
 		return *c.cached, nil
 	}
 
 	release, err := c.fetch(ctx)
 	if err != nil {
 		if c.cached != nil {
+			c.cached.Stale = true
 			stale := *c.cached
 			stale.Stale = true
 			return stale, err
 		}
 		return OfficialRelease{}, err
 	}
-	release.CheckedAt = now
+	release.CheckedAt = c.now().UTC()
 	release.Stale = false
+	if release.TestRelease != nil {
+		release.TestRelease.CheckedAt = release.CheckedAt
+	}
 	c.cached = &release
+	if c.store != nil {
+		_ = c.store.SaveOfficialRelease(release)
+	}
 	return release, nil
+}
+
+func (c *KleiReleaseChecker) loadCachedRelease() {
+	if c.loaded {
+		return
+	}
+	c.loaded = true
+	if c.store == nil {
+		return
+	}
+	release, found, err := c.store.LoadOfficialRelease()
+	if err == nil && found && release.Source == kleiReleaseSource && releaseVersionPattern.MatchString(strings.TrimSpace(release.Version)) {
+		c.cached = &release
+	}
 }
 
 func (c *KleiReleaseChecker) fetch(ctx context.Context) (OfficialRelease, error) {
@@ -78,7 +125,7 @@ func (c *KleiReleaseChecker) fetch(ctx context.Context) (OfficialRelease, error)
 	if err != nil {
 		return OfficialRelease{}, err
 	}
-	request.Header.Set("Accept", "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8")
+	request.Header.Set("Accept", "text/html")
 	request.Header.Set("User-Agent", "dst-admin-go game version checker")
 	response, err := c.client.Do(request)
 	if err != nil {
@@ -99,51 +146,54 @@ func (c *KleiReleaseChecker) fetch(ctx context.Context) (OfficialRelease, error)
 }
 
 func parseKleiReleaseFeed(data []byte) (OfficialRelease, error) {
-	var feed struct {
-		Channel struct {
-			Items []struct {
-				Link    string `xml:"link"`
-				PubDate string `xml:"pubDate"`
-			} `xml:"item"`
-		} `xml:"channel"`
+	document, err := goquery.NewDocumentFromReader(strings.NewReader(string(data)))
+	if err != nil {
+		return OfficialRelease{}, fmt.Errorf("parse Klei release list: %w", err)
 	}
-	if err := xml.Unmarshal(data, &feed); err != nil {
-		return OfficialRelease{}, fmt.Errorf("parse Klei release feed: %w", err)
-	}
-
-	var latest OfficialRelease
-	for _, item := range feed.Channel.Items {
-		link := strings.TrimSpace(item.Link)
+	var latest, test OfficialRelease
+	document.Find("a.cRelease[data-releaseid]").Each(func(_ int, item *goquery.Selection) {
+		link, _ := item.Attr("href")
 		parsedURL, err := url.Parse(link)
 		if err != nil || parsedURL.Scheme != "https" || (parsedURL.Hostname() != "kleiforums.com" && parsedURL.Hostname() != "www.kleiforums.com") {
-			continue
+			return
 		}
 		match := kleiPCReleasePath.FindStringSubmatch(parsedURL.Path)
 		if len(match) != 3 {
-			continue
+			return
 		}
-		publishedAt, err := parseKleiReleaseDate(strings.TrimSpace(item.PubDate))
-		if err != nil {
-			return OfficialRelease{}, fmt.Errorf("parse Klei release %s date: %w", match[1], err)
+		kind := strings.TrimSpace(item.Find("h3 .ipsBadge").Text())
+		if kind != "Release" && kind != "Test" {
+			return
 		}
-		if latest.Version == "" || publishedAt.After(latest.PublishedAt) {
-			latest = OfficialRelease{
-				Version: match[1], ReleaseID: match[2], PublishedAt: publishedAt.UTC(),
-				URL: link, Source: kleiReleaseSource,
+		selected := &latest
+		if kind == "Test" {
+			selected = &test
+		}
+		// The official list is not always ordered by version or release date.
+		if selected.Version == "" || newerGameVersion(match[1], selected.Version) {
+			date := releaseListDatePattern.FindString(item.Find(".ipsDataItem_meta").Text())
+			publishedAt, err := time.Parse("01/02/06", date)
+			if err != nil {
+				return
 			}
+			*selected = OfficialRelease{Version: match[1], ReleaseID: match[2], URL: link, Source: kleiReleaseSource, PublishedAt: publishedAt}
 		}
-	}
+	})
 	if latest.Version == "" {
-		return OfficialRelease{}, errors.New("Klei release feed contains no PC DST release")
+		return OfficialRelease{}, errors.New("Klei release list contains no confirmed PC DST Release")
+	}
+	if newerGameVersion(test.Version, latest.Version) {
+		latest.TestRelease = &test
 	}
 	return latest, nil
 }
 
-func parseKleiReleaseDate(value string) (time.Time, error) {
-	for _, layout := range []string{time.RFC1123Z, time.RFC1123} {
-		if parsed, err := time.Parse(layout, value); err == nil {
-			return parsed, nil
-		}
+var releaseListDatePattern = regexp.MustCompile(`\b[0-9]{2}/[0-9]{2}/[0-9]{2}\b`)
+
+func newerGameVersion(a, b string) bool {
+	if !releaseVersionPattern.MatchString(a) || !releaseVersionPattern.MatchString(b) {
+		return false
 	}
-	return time.Time{}, fmt.Errorf("invalid RSS date %q", value)
+	a, b = strings.TrimLeft(a, "0"), strings.TrimLeft(b, "0")
+	return len(a) > len(b) || len(a) == len(b) && a > b
 }

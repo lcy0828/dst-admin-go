@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -18,15 +19,42 @@ import (
 
 const releaseHTTPPlanHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
+type installedVersionsHTTPFixture struct {
+	targetIDs []string
+}
+
+func (f *installedVersionsHTTPFixture) Installed(_ context.Context, ids []string) ([]gameupdate.InstalledVersion, error) {
+	f.targetIDs = ids
+	return []gameupdate.InstalledVersion{{TargetID: "agent:node-a", InstallationID: "native", Online: true, Error: "读取游戏版本失败: context deadline exceeded"}}, nil
+}
+
+func TestInstalledVersionsHTTPReturnsScopedReadErrorsWithoutPreflight(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := &installedVersionsHTTPFixture{}
+	handler := NewGameUpdateHandler(nil, nil)
+	handler.ConfigureInstalledVersions(fixture)
+	router := gin.New()
+	handler.Register(router.Group("/api/v2"))
+	response := performJSON(router, http.MethodGet, "/api/v2/game/installed-versions?targetIds=agent:node-a,local", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if strings.Join(fixture.targetIDs, ",") != "agent:node-a,local" || !strings.Contains(response.Body.String(), "context deadline exceeded") {
+		t.Fatalf("targets=%v response=%s", fixture.targetIDs, response.Body.String())
+	}
+}
+
 type gameReleaseHTTPFixture struct {
 	mu               sync.Mutex
 	plan             gameupdate.ReleasePlan
 	previewErr       error
 	releases         map[string]gameupdate.Release
 	retrySourceJobID string
+	previewRequest   gameupdate.ReleasePreviewRequest
 }
 
-func (f *gameReleaseHTTPFixture) Preview(context.Context, gameupdate.ReleasePreviewRequest) (gameupdate.ReleasePlan, error) {
+func (f *gameReleaseHTTPFixture) Preview(_ context.Context, request gameupdate.ReleasePreviewRequest) (gameupdate.ReleasePlan, error) {
+	f.mu.Lock()
+	f.previewRequest = request
+	f.mu.Unlock()
 	return f.plan, f.previewErr
 }
 
@@ -157,7 +185,8 @@ func TestGameReleaseHTTPRequiresCurrentPlanHashConfirmationAndReportsJob(t *test
 
 	response = performJSON(router, http.MethodPost, "/api/v2/game/releases", map[string]interface{}{
 		"desiredVersion": "701", "planHash": releaseHTTPPlanHash, "confirmation": releaseHTTPPlanHash,
-		"policy": map[string]interface{}{"restartRunning": true, "loadConfirmation": "logs", "timeoutSeconds": 300},
+		"targetIds": []string{"agent:node-a"},
+		"policy":    map[string]interface{}{"restartRunning": true, "loadConfirmation": "logs", "timeoutSeconds": 300},
 	}, nil, "")
 	assertStatus(t, response, http.StatusAccepted)
 	jobID := responseData(t, response)["id"].(string)
@@ -171,6 +200,11 @@ func TestGameReleaseHTTPRequiresCurrentPlanHashConfirmationAndReportsJob(t *test
 			t.Fatalf("target=%#v", target)
 		}
 	}
+	fixture.mu.Lock()
+	if len(fixture.previewRequest.TargetIDs) != 1 || fixture.previewRequest.TargetIDs[0] != "agent:node-a" {
+		t.Fatalf("preview request=%#v", fixture.previewRequest)
+	}
+	fixture.mu.Unlock()
 	response = performJSON(router, http.MethodGet, "/api/v2/game/releases/"+jobID, nil, nil, "")
 	assertStatus(t, response, http.StatusOK)
 }
@@ -183,6 +217,13 @@ func TestGameReleaseHTTPUsesUpdateTerminologyAndClassifiesSteamLookupFailure(t *
 	assertStatus(t, response, http.StatusServiceUnavailable)
 	if body := response.Body.String(); !strings.Contains(body, `"code":"STEAM_BUILD_UNAVAILABLE"`) || strings.Contains(body, "发布") {
 		t.Fatalf("unexpected response: %s", body)
+	}
+
+	fixture.previewErr = errors.Join(gameupdate.ErrLatestBuildUnavailable, context.DeadlineExceeded)
+	response = performJSON(router, http.MethodPost, "/api/v2/game/releases/preview", map[string]interface{}{}, nil, "")
+	assertStatus(t, response, http.StatusGatewayTimeout)
+	if body := response.Body.String(); !strings.Contains(body, `"code":"GAME_RELEASE_PREVIEW_TIMEOUT"`) || strings.Contains(body, "无法连接") {
+		t.Fatalf("unexpected timeout response: %s", body)
 	}
 
 	fixture.previewErr = gameupdate.ErrReleaseInvalid

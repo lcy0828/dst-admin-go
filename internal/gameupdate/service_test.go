@@ -428,6 +428,28 @@ func TestVersionReportsSteamAndOfficialFailuresIndependently(t *testing.T) {
 	}
 }
 
+func TestVersionReturnsOfficialReleaseWhenSteamCheckExceedsBudget(t *testing.T) {
+	service, _, _, _, _, _ := newUpdateService(t, nil)
+	service.steamCheckTimeout = 20 * time.Millisecond
+	service.officialCheckTimeout = time.Second
+	service.latest = latestCheckerFunc(func(ctx context.Context, _, _ string) (string, bool, error) {
+		<-ctx.Done()
+		return "", false, ctx.Err()
+	})
+	service.official = officialReleaseCheckerFunc(func(context.Context) (OfficialRelease, error) {
+		return OfficialRelease{Version: "747465", ReleaseID: "2783"}, nil
+	})
+
+	startedAt := time.Now()
+	report := service.Version(context.Background())
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("bounded version check took %s", elapsed)
+	}
+	if report.OfficialRelease == nil || report.OfficialRelease.Version != "747465" || !strings.Contains(report.CheckError, "deadline exceeded") {
+		t.Fatalf("bounded version report = %#v", report)
+	}
+}
+
 func TestCleanSteamCacheOnlyRemovesApp343050(t *testing.T) {
 	root := t.TempDir()
 	executable := filepath.Join(root, "steamcmd")

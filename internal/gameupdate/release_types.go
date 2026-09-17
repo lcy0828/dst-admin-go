@@ -70,11 +70,13 @@ type ReleasePolicyInput struct {
 
 type ReleasePreviewRequest struct {
 	DesiredVersion string             `json:"desiredVersion,omitempty"`
+	TargetIDs      []string           `json:"targetIds,omitempty"`
 	Policy         ReleasePolicyInput `json:"policy"`
 }
 
 type ReleaseCreateRequest struct {
 	DesiredVersion string             `json:"desiredVersion,omitempty"`
+	TargetIDs      []string           `json:"targetIds,omitempty"`
 	Policy         ReleasePolicyInput `json:"policy"`
 	PlanHash       string             `json:"planHash"`
 	Confirmation   string             `json:"confirmation"`
@@ -107,6 +109,8 @@ type ReleaseShardPlan struct {
 type ReleaseInstallationPlan struct {
 	TargetID          string             `json:"targetId"`
 	TargetName        string             `json:"targetName"`
+	OS                string             `json:"os"`
+	Arch              string             `json:"arch"`
 	InstallationID    string             `json:"installationId"`
 	AppID             string             `json:"appId,omitempty"`
 	UpdateMethod      string             `json:"updateMethod,omitempty"`
@@ -114,6 +118,8 @@ type ReleaseInstallationPlan struct {
 	InventoryFresh    bool               `json:"inventoryFresh"`
 	Capabilities      []string           `json:"capabilities"`
 	Installed         bool               `json:"installed"`
+	GameVersion       string             `json:"gameVersion,omitempty"`
+	SteamBuild        string             `json:"steamBuild,omitempty"`
 	CurrentVersion    string             `json:"currentVersion,omitempty"`
 	DesiredVersion    string             `json:"desiredVersion"`
 	UpToDate          bool               `json:"upToDate"`

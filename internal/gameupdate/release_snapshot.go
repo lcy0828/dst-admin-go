@@ -48,9 +48,12 @@ func (s *TopologyReleaseSnapshot) Snapshot(ctx context.Context) (ReleasePlacemen
 	if err != nil {
 		return ReleasePlacementSnapshot{}, err
 	}
-	inventoryByTarget := make(map[string]agents.RuntimeTargetInventory, len(inventories))
+	inventoryByEndpoint := make(map[string]agents.RuntimeTargetInventory, len(inventories))
+	inventoriesByTarget := make(map[string][]agents.RuntimeTargetInventory)
 	for _, inventory := range inventories {
-		inventoryByTarget[inventory.Target.ID] = inventory
+		inventoryByEndpoint[releaseSnapshotEndpointKey(inventory.Target.ID, releaseSnapshotInstallationID(inventory))] = inventory
+		targetID := strings.TrimSpace(inventory.Target.ID)
+		inventoriesByTarget[targetID] = append(inventoriesByTarget[targetID], inventory)
 	}
 	sort.Slice(roomValues, func(i, j int) bool { return roomValues[i].ID < roomValues[j].ID })
 	result := ReleasePlacementSnapshot{}
@@ -78,10 +81,15 @@ func (s *TopologyReleaseSnapshot) Snapshot(ctx context.Context) (ReleasePlacemen
 			} else if roomRevision != placement.Revision {
 				return ReleasePlacementSnapshot{}, ErrReleaseTopologyChanged
 			}
-			inventory, available := inventoryByTarget[placement.AppliedTargetID]
+			inventory, installationID, available := releaseSnapshotInventory(
+				placement.AppliedTargetID, placement.AppliedInstallationID, inventoryByEndpoint, inventoriesByTarget,
+			)
 			target := inventory.Target
 			if !available {
-				target = agents.RuntimeTarget{ID: placement.AppliedTargetID, Name: placement.AppliedTargetID}
+				target = agents.RuntimeTarget{
+					ID: placement.AppliedTargetID, Name: placement.AppliedTargetID,
+					Config: agents.RuntimeConfig{InstallationID: installationID},
+				}
 			}
 			result.Shards = append(result.Shards, ReleaseShardSnapshot{
 				Room: room, World: world, Target: target, InventoryAvailable: available && inventory.Available,
@@ -100,6 +108,56 @@ func (s *TopologyReleaseSnapshot) Snapshot(ctx context.Context) (ReleasePlacemen
 	digest := sha256.Sum256([]byte(strings.Join(revisions, "\x00")))
 	result.TopologyRevision = hex.EncodeToString(digest[:])
 	return result, nil
+}
+
+func releaseSnapshotInstallationID(inventory agents.RuntimeTargetInventory) string {
+	for _, value := range []string{
+		inventory.Target.Config.InstallationID,
+		inventory.Inventory.Installation.ID,
+		inventory.Target.DefaultInstallationID,
+	} {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return "default"
+}
+
+func releaseSnapshotEndpointKey(targetID, installationID string) string {
+	return strings.TrimSpace(targetID) + "\x00" + strings.TrimSpace(installationID)
+}
+
+func releaseSnapshotInventory(
+	targetID, installationID string,
+	byEndpoint map[string]agents.RuntimeTargetInventory,
+	byTarget map[string][]agents.RuntimeTargetInventory,
+) (agents.RuntimeTargetInventory, string, bool) {
+	targetID, installationID = strings.TrimSpace(targetID), strings.TrimSpace(installationID)
+	if installationID != "" {
+		if inventory, ok := byEndpoint[releaseSnapshotEndpointKey(targetID, installationID)]; ok {
+			return inventory, releaseSnapshotInstallationID(inventory), true
+		}
+		if installationID != "default" {
+			return agents.RuntimeTargetInventory{}, installationID, false
+		}
+	}
+	candidates := byTarget[targetID]
+	if len(candidates) == 0 {
+		return agents.RuntimeTargetInventory{}, installationID, false
+	}
+	selected := candidates[0]
+	for _, candidate := range candidates {
+		candidateID := releaseSnapshotInstallationID(candidate)
+		defaultID := strings.TrimSpace(candidate.Target.DefaultInstallationID)
+		if defaultID != "" && candidateID == defaultID {
+			selected = candidate
+			break
+		}
+		if candidateID < releaseSnapshotInstallationID(selected) {
+			selected = candidate
+		}
+	}
+	return selected, releaseSnapshotInstallationID(selected), true
 }
 
 func inventoryContainsReleaseShard(inventory agents.RuntimeTargetInventory, cluster, shard string) bool {

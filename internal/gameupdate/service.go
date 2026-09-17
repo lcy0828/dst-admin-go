@@ -3,6 +3,7 @@ package gameupdate
 import (
 	"bytes"
 	"context"
+	"dont/internal/installationlock"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +33,11 @@ var (
 	ErrUpdateDisabled      = errors.New("local game update is disabled for this deployment")
 	ErrUnsafeCachePath     = errors.New("steam cache path is unsafe")
 	ErrRoomStateChanged    = errors.New("room runtime state changed while the game update was queued")
+)
+
+const (
+	defaultVersionSteamCheckTimeout    = 30 * time.Second
+	defaultVersionOfficialCheckTimeout = 6 * time.Second
 )
 
 type RoomCatalog interface {
@@ -78,21 +84,23 @@ type plannedWorld struct {
 }
 
 type Service struct {
-	config       Config
-	rooms        RoomCatalog
-	control      shards.Control
-	backups      BackupCreator
-	store        *Store
-	runner       CommandRunner
-	latest       LatestChecker
-	official     OfficialReleaseChecker
-	now          func() time.Time
-	pollInterval time.Duration
-	stopTimeout  time.Duration
-	startTimeout time.Duration
-	mu           sync.Mutex
-	active       bool
-	audit        interface {
+	config               Config
+	rooms                RoomCatalog
+	control              shards.Control
+	backups              BackupCreator
+	store                *Store
+	runner               CommandRunner
+	latest               LatestChecker
+	official             OfficialReleaseChecker
+	now                  func() time.Time
+	pollInterval         time.Duration
+	stopTimeout          time.Duration
+	startTimeout         time.Duration
+	steamCheckTimeout    time.Duration
+	officialCheckTimeout time.Duration
+	mu                   sync.Mutex
+	active               bool
+	audit                interface {
 		RecordAction(runtimeaudit.ActionRequest) error
 	}
 	notifier LifecycleNotifier
@@ -133,6 +141,7 @@ func NewService(config Config, roomCatalog RoomCatalog, control shards.Control, 
 		config: config, rooms: roomCatalog, control: control, backups: backups, store: store, runner: runner, latest: latest,
 		official: config.OfficialReleaseChecker,
 		now:      time.Now, pollInterval: 500 * time.Millisecond, stopTimeout: 60 * time.Second, startTimeout: 20 * time.Second,
+		steamCheckTimeout: defaultVersionSteamCheckTimeout, officialCheckTimeout: defaultVersionOfficialCheckTimeout,
 	}
 	if len(audits) > 0 {
 		service.audit = audits[0]
@@ -140,7 +149,7 @@ func NewService(config Config, roomCatalog RoomCatalog, control shards.Control, 
 	return service, nil
 }
 
-func (s *Service) Version(ctx context.Context) VersionReport {
+func (s *Service) localVersionReport() VersionReport {
 	local, installed := readLocalVersion(s.config.ServerPath, s.config.AppID)
 	executable := findSteamCMD(s.config.SteamCMDPath)
 	report := VersionReport{
@@ -151,6 +160,33 @@ func (s *Service) Version(ctx context.Context) VersionReport {
 	if s.config.DisableUpdate {
 		report.UpdateBlockedReason = "local_runtime_not_managed"
 	}
+	report.GameVersion, _ = readLocalGameVersion(s.config.ServerPath)
+	report.Branch = dstinstall.SteamBranch(steamManifestCandidates(installRoot(s.config.ServerPath), s.config.AppID)...)
+	return report
+}
+
+func (s *Service) VersionSummary(ctx context.Context, refresh bool) VersionReport {
+	report := s.localVersionReport()
+	release, err := s.OfficialVersion(ctx, refresh)
+	if release.Version != "" {
+		report.OfficialRelease = &release
+	}
+	if err != nil {
+		report.OfficialCheckError = err.Error()
+	}
+	if err == nil && !release.Stale && report.Installed && report.Branch == "public" && releaseVersionPattern.MatchString(report.GameVersion) && releaseVersionPattern.MatchString(release.Version) && !newerGameVersion(report.GameVersion, release.Version) {
+		current := report.GameVersion == release.Version
+		report.UpToDate = &current
+		if current {
+			report.LatestVersion = report.LocalVersion
+		}
+	}
+	return report
+}
+
+func (s *Service) Version(ctx context.Context) VersionReport {
+	report := s.localVersionReport()
+	local := report.LocalVersion
 	queryVersion := local
 	if queryVersion == "" {
 		queryVersion = "0"
@@ -161,8 +197,14 @@ func (s *Service) Version(ctx context.Context) VersionReport {
 		err      error
 	}
 	steamResults := make(chan steamResult, 1)
+	steamTimeout := s.steamCheckTimeout
+	if steamTimeout <= 0 {
+		steamTimeout = defaultVersionSteamCheckTimeout
+	}
+	steamContext, cancelSteam := context.WithTimeout(ctx, steamTimeout)
+	defer cancelSteam()
 	go func() {
-		latest, upToDate, err := s.latest.Check(ctx, s.config.AppID, queryVersion)
+		latest, upToDate, err := s.latest.Check(steamContext, s.config.AppID, queryVersion)
 		steamResults <- steamResult{latest: latest, upToDate: upToDate, err: err}
 	}()
 
@@ -171,15 +213,28 @@ func (s *Service) Version(ctx context.Context) VersionReport {
 		err     error
 	}
 	var officialResults chan officialResult
+	var officialContext context.Context
+	var cancelOfficial context.CancelFunc
 	if s.official != nil {
+		officialTimeout := s.officialCheckTimeout
+		if officialTimeout <= 0 {
+			officialTimeout = defaultVersionOfficialCheckTimeout
+		}
+		officialContext, cancelOfficial = context.WithTimeout(ctx, officialTimeout)
+		defer cancelOfficial()
 		officialResults = make(chan officialResult, 1)
 		go func() {
-			release, err := s.official.Check(ctx)
+			release, err := s.official.Check(officialContext)
 			officialResults <- officialResult{release: release, err: err}
 		}()
 	}
 
-	steam := <-steamResults
+	var steam steamResult
+	select {
+	case steam = <-steamResults:
+	case <-steamContext.Done():
+		steam.err = steamContext.Err()
+	}
 	if steam.err != nil {
 		report.CheckError = steam.err.Error()
 	} else {
@@ -190,7 +245,12 @@ func (s *Service) Version(ctx context.Context) VersionReport {
 		report.UpToDate = &steam.upToDate
 	}
 	if officialResults != nil {
-		official := <-officialResults
+		var official officialResult
+		select {
+		case official = <-officialResults:
+		case <-officialContext.Done():
+			official.err = officialContext.Err()
+		}
 		if official.release.Version != "" {
 			release := official.release
 			report.OfficialRelease = &release
@@ -401,6 +461,11 @@ func (s *Service) reportPlanChanged(request UpdateRequest, managed []rooms.Room,
 }
 
 func (s *Service) runSteamCMD(ctx context.Context, jobID string, cleanCache bool, executable string) error {
+	unlock, lockErr := installationlock.Acquire(installRoot(s.config.ServerPath))
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
 	before, _ := readLocalVersion(s.config.ServerPath, s.config.AppID)
 	if _, err := s.store.Begin(jobID, before, cleanCache); err != nil {
 		return err

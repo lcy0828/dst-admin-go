@@ -2,6 +2,7 @@ package gameupdate
 
 import (
 	"context"
+	"dont/internal/installationlock"
 	"errors"
 	"strings"
 
@@ -16,6 +17,7 @@ func (s *Service) ObserveReleaseInstallation(ctx context.Context) (shared.Runtim
 		return shared.RuntimeGameVersionResult{}, err
 	}
 	current, installed := readLocalVersion(s.config.ServerPath, s.config.AppID)
+	gameVersion, _ := readLocalGameVersion(s.config.ServerPath)
 	executable := findSteamCMD(s.config.SteamCMDPath)
 	available := uint64(0)
 	usage, usageErr := disk.Usage(installRoot(s.config.ServerPath))
@@ -25,7 +27,8 @@ func (s *Service) ObserveReleaseInstallation(ctx context.Context) (shared.Runtim
 	supported := !s.config.DisableUpdate && s.config.UpdateMethod == dstinstall.UpdateMethodSteamCMD && executable != ""
 	result := shared.RuntimeGameVersionResult{
 		Installed: installed, AppID: s.config.AppID, UpdateMethod: s.config.UpdateMethod,
-		CurrentVersion: current, AvailableBytes: available,
+		Branch:      dstinstall.SteamBranch(steamManifestCandidates(installRoot(s.config.ServerPath), s.config.AppID)...),
+		GameVersion: gameVersion, SteamBuild: current, CurrentVersion: current, AvailableBytes: available,
 		SteamCMDAvailable: executable != "", UpdateSupported: supported, ObservedAt: s.now().UTC(),
 	}
 	return result, usageErr
@@ -58,6 +61,11 @@ func (s *Service) UpdateReleaseInstallation(ctx context.Context, expectedVersion
 	if executable == "" {
 		return s.releaseVersionResult(""), ErrSteamCMDUnavailable
 	}
+	unlock, lockErr := installationlock.Acquire(installRoot(s.config.ServerPath))
+	if lockErr != nil {
+		return s.releaseVersionResult(""), lockErr
+	}
+	defer unlock()
 	if cleanCache {
 		if err := cleanSteamCache(executable, installRoot(s.config.ServerPath), dstinstall.AppIDDedicatedServer); err != nil {
 			return s.releaseVersionResult(""), err
@@ -75,6 +83,7 @@ func (s *Service) UpdateReleaseInstallation(ctx context.Context, expectedVersion
 
 func (s *Service) releaseVersionResult(logText string) shared.RuntimeGameVersionResult {
 	current, installed := readLocalVersion(s.config.ServerPath, s.config.AppID)
+	gameVersion, _ := readLocalGameVersion(s.config.ServerPath)
 	executable := findSteamCMD(s.config.SteamCMDPath)
 	available := uint64(0)
 	if usage, err := disk.Usage(installRoot(s.config.ServerPath)); err == nil {
@@ -82,7 +91,8 @@ func (s *Service) releaseVersionResult(logText string) shared.RuntimeGameVersion
 	}
 	return shared.RuntimeGameVersionResult{
 		Installed: installed, AppID: s.config.AppID, UpdateMethod: s.config.UpdateMethod,
-		CurrentVersion: current, AvailableBytes: available,
+		Branch:      dstinstall.SteamBranch(steamManifestCandidates(installRoot(s.config.ServerPath), s.config.AppID)...),
+		GameVersion: gameVersion, SteamBuild: current, CurrentVersion: current, AvailableBytes: available,
 		SteamCMDAvailable: executable != "", UpdateSupported: !s.config.DisableUpdate && s.config.UpdateMethod == dstinstall.UpdateMethodSteamCMD && executable != "",
 		Log: logText, ObservedAt: s.now().UTC(),
 	}

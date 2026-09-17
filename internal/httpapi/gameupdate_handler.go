@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"dont/internal/gameupdate"
 	"dont/internal/jobs"
@@ -19,7 +20,12 @@ type GameUpdateHandler struct {
 	updates  *gameupdate.Service
 	jobs     *jobs.Service
 	releases GameReleaseService
+	versions interface {
+		Installed(context.Context, []string) ([]gameupdate.InstalledVersion, error)
+	}
 }
+
+const gameReleasePreviewTimeout = 60 * time.Second
 
 type GameReleaseService interface {
 	Preview(context.Context, gameupdate.ReleasePreviewRequest) (gameupdate.ReleasePlan, error)
@@ -43,6 +49,9 @@ func (h *GameUpdateHandler) ConfigureReleases(service GameReleaseService) error 
 
 func (h *GameUpdateHandler) Register(v2 *gin.RouterGroup) {
 	v2.GET("/game/version", h.version)
+	if h.versions != nil {
+		v2.GET("/game/installed-versions", h.installedVersions)
+	}
 	v2.POST("/game/actions/update", h.update)
 	v2.GET("/game/update-runs/:jobId", h.run)
 	if h.releases != nil {
@@ -60,7 +69,9 @@ func (h *GameUpdateHandler) releasePreview(c *gin.Context) {
 		Failure(c, http.StatusBadRequest, "INVALID_JSON", "游戏更新配置无效", nil)
 		return
 	}
-	plan, err := h.releases.Preview(c.Request.Context(), request)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), gameReleasePreviewTimeout)
+	defer cancel()
+	plan, err := h.releases.Preview(ctx, request)
 	if err != nil {
 		gameReleaseFailure(c, err)
 		return
@@ -74,8 +85,11 @@ func (h *GameUpdateHandler) releasePublish(c *gin.Context) {
 		Failure(c, http.StatusBadRequest, "INVALID_JSON", "游戏更新确认信息无效", nil)
 		return
 	}
-	plan, err := h.releases.Preview(c.Request.Context(), gameupdate.ReleasePreviewRequest{
+	ctx, cancel := context.WithTimeout(c.Request.Context(), gameReleasePreviewTimeout)
+	defer cancel()
+	plan, err := h.releases.Preview(ctx, gameupdate.ReleasePreviewRequest{
 		DesiredVersion: request.DesiredVersion,
+		TargetIDs:      request.TargetIDs,
 		Policy:         request.Policy,
 	})
 	if err != nil {
@@ -260,6 +274,8 @@ func gameReleaseJobError(releaseErr error, code, message string) *jobs.Error {
 func gameReleaseFailure(c *gin.Context, err error) {
 	status, code, message := http.StatusInternalServerError, "GAME_RELEASE_FAILED", "游戏更新操作失败"
 	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		status, code, message = http.StatusGatewayTimeout, "GAME_RELEASE_PREVIEW_TIMEOUT", "版本检查超时，Steam 或运行节点响应过慢，请稍后重试"
 	case errors.Is(err, gameupdate.ErrReleaseNotFound):
 		status, code, message = http.StatusNotFound, "GAME_RELEASE_NOT_FOUND", "游戏更新记录不存在"
 	case errors.Is(err, gameupdate.ErrLatestBuildUnavailable):
@@ -285,7 +301,32 @@ func gameReleaseFailure(c *gin.Context, err error) {
 }
 
 func (h *GameUpdateHandler) version(c *gin.Context) {
+	if c.Query("steam") == "false" {
+		Success(c, http.StatusOK, h.updates.VersionSummary(c.Request.Context(), c.Query("refresh") == "true"))
+		return
+	}
 	Success(c, http.StatusOK, h.updates.Version(c.Request.Context()))
+}
+
+func (h *GameUpdateHandler) ConfigureInstalledVersions(service interface {
+	Installed(context.Context, []string) ([]gameupdate.InstalledVersion, error)
+}) {
+	h.versions = service
+}
+
+func (h *GameUpdateHandler) installedVersions(c *gin.Context) {
+	var ids []string
+	if raw := c.Query("targetIds"); raw != "" {
+		ids = strings.Split(raw, ",")
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	values, err := h.versions.Installed(ctx, ids)
+	if err != nil {
+		gameReleaseFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, gin.H{"installations": values})
 }
 
 func (h *GameUpdateHandler) update(c *gin.Context) {

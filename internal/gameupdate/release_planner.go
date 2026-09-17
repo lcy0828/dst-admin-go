@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	dstinstall "dont/internal/dstserver"
@@ -20,23 +21,45 @@ import (
 var releaseIdentityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 var releaseVersionPattern = regexp.MustCompile(`^[0-9]{1,64}$`)
 var releaseAppIDPattern = regexp.MustCompile(`^[0-9]{1,20}$`)
-
-type ReleasePlanner struct {
-	snapshots   ReleaseSnapshotSource
-	runtime     ReleaseRuntime
-	latest      LatestChecker
-	minimumFree uint64
-	now         func() time.Time
+var releaseGameVersionLogPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?m)Don't Starve Together:\s*([0-9]{1,64})(?:\s|$)`),
+	regexp.MustCompile(`(?m)(?:^|[\]\s])Version:\s*([0-9]{1,64})(?:\s|$)`),
 }
 
-func NewReleasePlanner(snapshots ReleaseSnapshotSource, runtime ReleaseRuntime, latest LatestChecker, minimumFree uint64) (*ReleasePlanner, error) {
+const (
+	defaultReleasePreviewConcurrency = 2
+	defaultReleaseTargetTimeout      = 45 * time.Second
+	defaultReleaseOfficialTimeout    = 6 * time.Second
+)
+
+type ReleasePlanner struct {
+	snapshots          ReleaseSnapshotSource
+	runtime            ReleaseRuntime
+	latest             LatestChecker
+	official           OfficialReleaseChecker
+	minimumFree        uint64
+	previewConcurrency int
+	targetTimeout      time.Duration
+	officialTimeout    time.Duration
+	now                func() time.Time
+}
+
+func NewReleasePlanner(snapshots ReleaseSnapshotSource, runtime ReleaseRuntime, latest LatestChecker, minimumFree uint64, official ...OfficialReleaseChecker) (*ReleasePlanner, error) {
 	if snapshots == nil || runtime == nil || latest == nil {
 		return nil, ErrReleaseInvalid
 	}
 	if minimumFree == 0 {
 		minimumFree = DefaultUpdateHeadroom
 	}
-	return &ReleasePlanner{snapshots: snapshots, runtime: runtime, latest: latest, minimumFree: minimumFree, now: time.Now}, nil
+	planner := &ReleasePlanner{
+		snapshots: snapshots, runtime: runtime, latest: latest, minimumFree: minimumFree,
+		previewConcurrency: defaultReleasePreviewConcurrency, targetTimeout: defaultReleaseTargetTimeout,
+		officialTimeout: defaultReleaseOfficialTimeout, now: time.Now,
+	}
+	if len(official) > 0 {
+		planner.official = official[0]
+	}
+	return planner, nil
 }
 
 func NormalizeReleasePolicy(value ReleasePolicyInput) (ReleasePolicy, error) {
@@ -71,6 +94,10 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 	if requested != "" && !releaseVersionPattern.MatchString(requested) {
 		return ReleasePlan{}, ErrReleaseInvalid
 	}
+	selectedTargets, err := normalizeReleaseTargetIDs(request.TargetIDs)
+	if err != nil {
+		return ReleasePlan{}, err
+	}
 	snapshot, err := p.snapshots.Snapshot(ctx)
 	if err != nil {
 		return ReleasePlan{}, err
@@ -83,6 +110,9 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 	roomIDs := make(map[string]bool)
 	for _, observed := range snapshot.Shards {
 		targetID := strings.TrimSpace(observed.Target.ID)
+		if len(selectedTargets) > 0 && !selectedTargets[targetID] {
+			continue
+		}
 		installationID := strings.TrimSpace(observed.Target.Config.InstallationID)
 		if targetID == "local" && installationID == "" {
 			installationID = "default"
@@ -94,8 +124,10 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 		target := targets[key]
 		if target == nil {
 			target = &ReleaseInstallationPlan{
-				TargetID: targetID, TargetName: observed.Target.Name, InstallationID: installationID,
-				Online: observed.Target.Online || targetID == "local", InventoryFresh: observed.InventoryAvailable && !observed.InventoryStale,
+				TargetID: targetID, TargetName: observed.Target.Name,
+				OS: strings.ToLower(strings.TrimSpace(observed.Target.OS)), Arch: strings.ToLower(strings.TrimSpace(observed.Target.Arch)),
+				InstallationID: installationID,
+				Online:         observed.Target.Online || targetID == "local", InventoryFresh: observed.InventoryAvailable && !observed.InventoryStale,
 				Capabilities: normalizedReleaseStrings(observed.Target.Capabilities), RequiredBytes: p.minimumFree,
 				Blockers: []ReleaseBlocker{},
 			}
@@ -116,13 +148,15 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 		plan.AffectedRoomIDs = append(plan.AffectedRoomIDs, roomID)
 	}
 	sort.Strings(plan.AffectedRoomIDs)
-	for _, target := range targets {
-		if err := p.finishReleaseTarget(ctx, target, requested); err != nil {
-			return ReleasePlan{}, err
-		}
-		plan.Installations = append(plan.Installations, *target)
+	officialVersion := p.latestOfficialGameVersion(ctx)
+	installations, err := p.finishReleaseTargets(ctx, targets, requested, officialVersion)
+	if err != nil {
+		return ReleasePlan{}, err
+	}
+	for _, target := range installations {
+		plan.Installations = append(plan.Installations, target)
 		plan.Blockers = append(plan.Blockers, target.Blockers...)
-		if !target.UpToDate {
+		if target.Installed && releaseVersionPattern.MatchString(target.DesiredVersion) && !target.UpToDate {
 			plan.UpdateRequired = true
 		}
 	}
@@ -132,18 +166,13 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 	if plan.DesiredVersion == "" {
 		plan.DesiredVersion = preferredReleaseVersion(plan.Installations)
 	}
-	if plan.DesiredVersion == "" {
-		desired, _, latestErr := p.latest.Check(ctx, dstinstall.AppIDDedicatedServer, "0")
-		if latestErr != nil {
-			return ReleasePlan{}, errors.Join(ErrLatestBuildUnavailable, latestErr)
-		}
-		plan.DesiredVersion = strings.TrimSpace(desired)
-	}
-	if !releaseVersionPattern.MatchString(plan.DesiredVersion) {
-		return ReleasePlan{}, errors.Join(ErrLatestBuildUnavailable, errors.New("Steam did not return a valid public build"))
+	if !releaseVersionPattern.MatchString(plan.DesiredVersion) && len(plan.Blockers) == 0 {
+		plan.Blockers = append(plan.Blockers, ReleaseBlocker{
+			Code: "LATEST_BUILD_UNAVAILABLE", Message: "Steam 未返回有效的最新 Build",
+		})
 	}
 	sortReleaseBlockers(plan.Blockers)
-	plan.Ready = len(plan.Blockers) == 0
+	plan.Ready = len(plan.Blockers) == 0 && releaseVersionPattern.MatchString(plan.DesiredVersion)
 	plan.PlanHash, err = calculateReleasePlanHash(plan)
 	if err != nil {
 		return ReleasePlan{}, err
@@ -151,7 +180,103 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 	return plan, nil
 }
 
-func (p *ReleasePlanner) finishReleaseTarget(ctx context.Context, target *ReleaseInstallationPlan, requested string) error {
+func (p *ReleasePlanner) latestOfficialGameVersion(ctx context.Context) string {
+	if p.official == nil {
+		return ""
+	}
+	timeout := p.officialTimeout
+	if timeout <= 0 {
+		timeout = defaultReleaseOfficialTimeout
+	}
+	officialContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	type result struct {
+		release OfficialRelease
+	}
+	values := make(chan result, 1)
+	go func() {
+		release, err := p.official.Check(officialContext)
+		if err != nil || release.Stale {
+			release = OfficialRelease{}
+		}
+		values <- result{release: release}
+	}()
+	select {
+	case value := <-values:
+		version := strings.TrimSpace(value.release.Version)
+		if releaseVersionPattern.MatchString(version) {
+			return version
+		}
+	case <-officialContext.Done():
+	}
+	return ""
+}
+
+func (p *ReleasePlanner) finishReleaseTargets(ctx context.Context, targets map[string]*ReleaseInstallationPlan, requested, officialVersion string) ([]ReleaseInstallationPlan, error) {
+	keys := make([]string, 0, len(targets))
+	for key := range targets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	results := make([]ReleaseInstallationPlan, len(keys))
+	errorsByTarget := make([]error, len(keys))
+	concurrency := p.previewConcurrency
+	if concurrency <= 0 {
+		concurrency = defaultReleasePreviewConcurrency
+	}
+	targetTimeout := p.targetTimeout
+	if targetTimeout <= 0 {
+		targetTimeout = defaultReleaseTargetTimeout
+	}
+	slots := make(chan struct{}, concurrency)
+	var wait sync.WaitGroup
+	for index, key := range keys {
+		index, target := index, *targets[key]
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			select {
+			case slots <- struct{}{}:
+				defer func() { <-slots }()
+			case <-ctx.Done():
+				errorsByTarget[index] = ctx.Err()
+				results[index] = target
+				return
+			}
+			targetContext, cancel := context.WithTimeout(ctx, targetTimeout)
+			defer cancel()
+			errorsByTarget[index] = p.finishReleaseTarget(targetContext, &target, requested, officialVersion)
+			results[index] = target
+		}()
+	}
+	wait.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	for _, err := range errorsByTarget {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return results, nil
+}
+
+func normalizeReleaseTargetIDs(values []string) (map[string]bool, error) {
+	if len(values) > 100 {
+		return nil, ErrReleaseInvalid
+	}
+	targets := make(map[string]bool, len(values))
+	for _, value := range values {
+		targetID := strings.TrimSpace(value)
+		if !releaseIdentityPattern.MatchString(targetID) {
+			return nil, ErrReleaseInvalid
+		}
+		targets[targetID] = true
+	}
+	return targets, nil
+}
+
+func (p *ReleasePlanner) finishReleaseTarget(ctx context.Context, target *ReleaseInstallationPlan, requested, officialVersion string) error {
 	sort.Slice(target.Shards, func(i, j int) bool { return releaseShardKey(target.Shards[i]) < releaseShardKey(target.Shards[j]) })
 	add := func(code, message string) {
 		target.Blockers = append(target.Blockers, ReleaseBlocker{Code: code, Message: message, TargetID: target.TargetID, InstallationID: target.InstallationID})
@@ -165,70 +290,101 @@ func (p *ReleasePlanner) finishReleaseTarget(ctx context.Context, target *Releas
 	if !target.InventoryFresh {
 		add("INVENTORY_STALE", "运行目标清单缺失或已过期")
 	}
-	if target.TargetID != "local" && !containsReleaseString(target.Capabilities, RequiredUpdateCapability) {
+	if !containsReleaseString(target.Capabilities, RequiredUpdateCapability) {
 		add("CAPABILITY_MISSING", "运行目标不支持 "+RequiredUpdateCapability)
 	}
-	canObserve := target.Online && target.InventoryFresh && (target.TargetID == "local" || containsReleaseString(target.Capabilities, RequiredUpdateCapability))
+	canObserve := target.Online && target.InventoryFresh && containsReleaseString(target.Capabilities, RequiredUpdateCapability)
 	target.AppID, target.UpdateMethod = dstinstall.AppIDDedicatedServer, dstinstall.UpdateMethodSteamCMD
-	observedSuccessfully := false
-	if canObserve {
-		observation, err := p.runtime.ObserveInstallation(ctx, *target)
-		if err != nil {
-			add("VERSION_OBSERVE_FAILED", "读取安装版本失败: "+err.Error())
-		} else {
-			observedSuccessfully = true
-			target.Installed, target.CurrentVersion = observation.Installed, strings.TrimSpace(observation.CurrentVersion)
-			target.AppID, target.UpdateMethod = normalizeReleaseInstallationMetadata(observation)
-			target.AvailableBytes, target.SteamCMDAvailable, target.UpdateSupported = observation.AvailableBytes, observation.SteamCMDAvailable, observation.UpdateSupported
-		}
+	if !canObserve {
+		sortReleaseBlockers(target.Blockers)
+		return nil
 	}
-	queryVersion := target.CurrentVersion
-	if queryVersion == "" {
-		queryVersion = "0"
-	}
-	desired, upToDate, err := p.latest.Check(ctx, target.AppID, queryVersion)
+	observation, err := p.runtime.ObserveInstallation(ctx, *target)
 	if err != nil {
-		return errors.Join(ErrLatestBuildUnavailable, err)
-	}
-	target.DesiredVersion = strings.TrimSpace(desired)
-	if !releaseVersionPattern.MatchString(target.DesiredVersion) {
-		return errors.Join(ErrLatestBuildUnavailable, errors.New("Steam did not return a valid public build"))
-	}
-	if requested != "" && target.AppID == dstinstall.AppIDDedicatedServer {
-		if requested != target.DesiredVersion {
-			return ErrDesiredVersionChanged
+		if releasePreviewTimedOut(ctx, err) {
+			add("VERSION_CHECK_TIMEOUT", "读取安装版本超时")
+		} else {
+			add("VERSION_OBSERVE_FAILED", "读取安装版本失败: "+err.Error())
 		}
-		target.DesiredVersion = requested
+		sortReleaseBlockers(target.Blockers)
+		return nil
 	}
-	target.UpToDate = target.Installed && (upToDate || target.CurrentVersion == target.DesiredVersion)
-	if observedSuccessfully {
-		if !target.Installed {
-			add("INSTALLATION_MISSING", "未发现 DST 专用服务器安装版本")
+	target.Installed, target.CurrentVersion = observation.Installed, strings.TrimSpace(observation.CurrentVersion)
+	target.SteamBuild = strings.TrimSpace(observation.SteamBuild)
+	if target.SteamBuild == "" {
+		target.SteamBuild = target.CurrentVersion
+	}
+	target.GameVersion = strings.TrimSpace(observation.GameVersion)
+	if target.GameVersion == "" {
+		target.GameVersion = p.observeReleaseGameVersion(ctx, target.Shards)
+	}
+	target.AppID, target.UpdateMethod = normalizeReleaseInstallationMetadata(observation)
+	target.AvailableBytes, target.SteamCMDAvailable, target.UpdateSupported = observation.AvailableBytes, observation.SteamCMDAvailable, observation.UpdateSupported
+	if observation.Branch != "" && observation.Branch != "public" {
+		add("BRANCH_UNSUPPORTED", "当前安装使用 "+observation.Branch+" 分支，不能按正式分支自动更新")
+		return nil
+	}
+	officiallyCurrent := requested == "" && target.Installed && releaseVersionPattern.MatchString(target.CurrentVersion) &&
+		releaseVersionPattern.MatchString(officialVersion) && target.GameVersion == officialVersion
+	if officiallyCurrent {
+		target.DesiredVersion = target.CurrentVersion
+		target.UpToDate = true
+	} else {
+		queryVersion := target.CurrentVersion
+		if queryVersion == "" {
+			queryVersion = "0"
 		}
-		if !target.UpToDate {
-			switch target.UpdateMethod {
-			case dstinstall.UpdateMethodSteamClient:
-				add("STEAM_CLIENT_UPDATE_REQUIRED", "该安装由 Steam 客户端管理，请先在 Steam 中完成更新")
-			default:
-				if !target.SteamCMDAvailable {
-					add("STEAMCMD_UNAVAILABLE", "运行目标未配置可执行的 SteamCMD")
-				}
-				if !target.UpdateSupported {
-					add("UPDATE_UNSUPPORTED", "该运行目标不支持自动更新 DST")
-				}
-				if target.AvailableBytes < target.RequiredBytes {
-					add("DISK_INSUFFICIENT", "DST 安装所在磁盘可用空间不足")
-				}
+		desired, upToDate, err := p.latest.Check(ctx, target.AppID, queryVersion)
+		if err != nil {
+			if releasePreviewTimedOut(ctx, err) {
+				add("VERSION_CHECK_TIMEOUT", "查询 Steam 最新 Build 超时")
+			} else {
+				add("LATEST_BUILD_UNAVAILABLE", "查询 Steam 最新 Build 失败: "+err.Error())
+			}
+			sortReleaseBlockers(target.Blockers)
+			return nil
+		}
+		target.DesiredVersion = strings.TrimSpace(desired)
+		if !releaseVersionPattern.MatchString(target.DesiredVersion) {
+			add("LATEST_BUILD_UNAVAILABLE", "Steam 未返回有效的最新 Build")
+			sortReleaseBlockers(target.Blockers)
+			return nil
+		}
+		if requested != "" && target.AppID == dstinstall.AppIDDedicatedServer {
+			if requested != target.DesiredVersion {
+				return ErrDesiredVersionChanged
+			}
+			target.DesiredVersion = requested
+		}
+		target.UpToDate = target.Installed && (upToDate || target.CurrentVersion == target.DesiredVersion)
+	}
+	if !target.Installed {
+		add("INSTALLATION_MISSING", "未发现 DST 专用服务器安装版本")
+	}
+	if !target.UpToDate {
+		switch target.UpdateMethod {
+		case dstinstall.UpdateMethodSteamClient:
+			add("STEAM_CLIENT_UPDATE_REQUIRED", "该安装由 Steam 客户端管理，请先在 Steam 中完成更新")
+		default:
+			if !target.SteamCMDAvailable {
+				add("STEAMCMD_UNAVAILABLE", "运行目标未配置可执行的 SteamCMD")
+			}
+			if !target.UpdateSupported {
+				add("UPDATE_UNSUPPORTED", "该运行目标不支持自动更新 DST")
+			}
+			if target.AvailableBytes < target.RequiredBytes {
+				add("DISK_INSUFFICIENT", "DST 安装所在磁盘可用空间不足")
 			}
 		}
 	}
 	for index := range target.Shards {
 		shard := &target.Shards[index]
-		if !canObserve {
-			continue
-		}
 		status, err := p.runtime.Status(ctx, *shard)
 		if err != nil {
+			if releasePreviewTimedOut(ctx, err) {
+				add("VERSION_CHECK_TIMEOUT", "读取运行中的世界状态超时")
+				break
+			}
 			target.Blockers = append(target.Blockers, releaseShardBlocker("SHARD_STATUS_FAILED", "读取分片状态失败: "+err.Error(), target.TargetID, target.InstallationID, shard.RoomID, shard.WorldID))
 			continue
 		}
@@ -240,6 +396,43 @@ func (p *ReleasePlanner) finishReleaseTarget(ctx context.Context, target *Releas
 	}
 	sortReleaseBlockers(target.Blockers)
 	return nil
+}
+
+func (p *ReleasePlanner) observeReleaseGameVersion(ctx context.Context, shards []ReleaseShardPlan) string {
+	for _, shard := range shards {
+		chunk, err := p.runtime.ReadLogs(ctx, shard, "", 0)
+		if err != nil {
+			continue
+		}
+		if version := parseReleaseGameVersionLog(chunk); version != "" {
+			return version
+		}
+	}
+	return ""
+}
+
+func parseReleaseGameVersionLog(chunk shared.RuntimeLogChunk) string {
+	var text strings.Builder
+	if len(chunk.Data) > 0 {
+		text.Write(chunk.Data)
+	}
+	for _, line := range chunk.Lines {
+		if text.Len() > 0 {
+			text.WriteByte('\n')
+		}
+		text.WriteString(line.Text)
+	}
+	value := text.String()
+	for _, pattern := range releaseGameVersionLogPatterns {
+		if match := pattern.FindStringSubmatch(value); len(match) == 2 && releaseVersionPattern.MatchString(match[1]) {
+			return match[1]
+		}
+	}
+	return ""
+}
+
+func releasePreviewTimedOut(ctx context.Context, err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded)
 }
 
 func normalizeReleaseInstallationMetadata(value shared.RuntimeGameVersionResult) (string, string) {

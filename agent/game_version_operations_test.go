@@ -84,13 +84,17 @@ func TestGameVersionUpdateFailsWhenInstalledVersionDoesNotMatch(t *testing.T) {
 
 func TestGameVersionObserveDoesNotRequireExistingShard(t *testing.T) {
 	agent, installation := newShardOperationAgent(t, &fakeShardRuntime{})
+	if err := os.WriteFile(filepath.Join(installation.ServerPath, "appmanifest_343050.acf"), []byte(`"AppState" { "buildid" "24700372" }`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(installation.ServerPath, "version.txt"), []byte("747465\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	request := gameVersionRequest(shared.RuntimeActionGameVersionObserve, "")
 	request.Cluster, request.Shard = "MissingCluster", "MissingShard"
 	result, err := agent.executeRuntimeOperation(string(request.Action), &request, 30)
-	if err != nil || result.GameVersion == nil || !result.GameVersion.Installed || result.GameVersion.CurrentVersion != "747465" ||
+	if err != nil || result.GameVersion == nil || !result.GameVersion.Installed || result.GameVersion.CurrentVersion != "24700372" ||
+		result.GameVersion.SteamBuild != "24700372" || result.GameVersion.GameVersion != "747465" ||
 		result.GameVersion.AppID != "343050" || result.GameVersion.UpdateMethod != "steamcmd" {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}

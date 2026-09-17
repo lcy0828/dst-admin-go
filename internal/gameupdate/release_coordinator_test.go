@@ -130,6 +130,17 @@ type coordinatorBackups struct {
 	ids []string
 }
 
+type releaseMutationObserver struct {
+	mu      sync.Mutex
+	targets []string
+}
+
+func (o *releaseMutationObserver) RuntimeTargetChanged(targetID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.targets = append(o.targets, targetID)
+}
+
 func (b *coordinatorBackups) CreateProtection(_ context.Context, roomID, _, _ string, _ *operationlease.Lease) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -196,6 +207,10 @@ func TestReleaseCoordinatorOrdersStopUpdateAndRestart(t *testing.T) {
 	fixture := newReleaseCoordinatorFixture(t, ReleaseLoadConfirmationNone)
 	notifier := &updateNotifier{}
 	fixture.coordinator.ConfigureNotifier(notifier)
+	mutations := &releaseMutationObserver{}
+	if err := fixture.coordinator.ConfigureMutationObserver(mutations); err != nil {
+		t.Fatal(err)
+	}
 	value, err := fixture.coordinator.Publish(context.Background(), ReleasePublishRequest{ID: "release-order", Plan: fixture.plan})
 	if err != nil || value.Stage != ReleaseStageSucceeded {
 		t.Fatalf("release=%#v error=%v", value, err)
@@ -214,10 +229,19 @@ func TestReleaseCoordinatorOrdersStopUpdateAndRestart(t *testing.T) {
 		!reflect.DeepEqual(notifier.calls[0].roomIDs, []string{"room-a", "room-b"}) {
 		t.Fatalf("notifier calls=%#v", notifier.calls)
 	}
+	mutations.mu.Lock()
+	defer mutations.mu.Unlock()
+	if !reflect.DeepEqual(mutations.targets, []string{"agent:node-a", "agent:node-b"}) {
+		t.Fatalf("mutation targets=%v", mutations.targets)
+	}
 }
 
 func TestReleaseCoordinatorKeepsAllShardsStoppedWhenAnyInstallationFails(t *testing.T) {
 	fixture := newReleaseCoordinatorFixture(t, ReleaseLoadConfirmationNone)
+	mutations := &releaseMutationObserver{}
+	if err := fixture.coordinator.ConfigureMutationObserver(mutations); err != nil {
+		t.Fatal(err)
+	}
 	failedKey := releaseInstallationKey("agent:node-b", "primary")
 	fixture.runtime.updateErrors[failedKey] = errors.New("steamcmd failed")
 	value, err := fixture.coordinator.Publish(context.Background(), ReleasePublishRequest{ID: "release-failure", Plan: fixture.plan})
@@ -233,6 +257,11 @@ func TestReleaseCoordinatorKeepsAllShardsStoppedWhenAnyInstallationFails(t *test
 		if key != "room-b\x00Archive" && (status.State != "stopped" || status.SessionExists) {
 			t.Fatalf("shard %q was not kept stopped: %#v", key, status)
 		}
+	}
+	mutations.mu.Lock()
+	defer mutations.mu.Unlock()
+	if !reflect.DeepEqual(mutations.targets, []string{"agent:node-a", "agent:node-b"}) {
+		t.Fatalf("failed release mutation targets=%v", mutations.targets)
 	}
 }
 

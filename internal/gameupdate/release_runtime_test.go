@@ -11,8 +11,8 @@ import (
 
 type failingReleaseRouter struct{ err error }
 
-func (r failingReleaseRouter) DriverTarget(context.Context, string, string) (runtimedriver.Driver, runtimedriver.Target, error) {
-	return nil, runtimedriver.Target{}, r.err
+func (r failingReleaseRouter) EndpointTarget(context.Context, string, string) (runtimedriver.RuntimeEndpoint, runtimedriver.Target, error) {
+	return runtimedriver.RuntimeEndpoint{}, runtimedriver.Target{}, r.err
 }
 
 type countingLocalRelease struct{ observations int }
@@ -28,8 +28,7 @@ func (*countingLocalRelease) UpdateReleaseInstallation(context.Context, string, 
 
 func TestDriverReleaseRuntimeNeverFallsBackRemoteInstallationToLocal(t *testing.T) {
 	expected := errors.New("remote target unavailable")
-	local := &countingLocalRelease{}
-	runtime, err := NewDriverReleaseRuntime(failingReleaseRouter{err: expected}, local)
+	runtime, err := NewDriverReleaseRuntime(failingReleaseRouter{err: expected})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +43,16 @@ func TestDriverReleaseRuntimeNeverFallsBackRemoteInstallationToLocal(t *testing.
 	if !errors.Is(err, expected) {
 		t.Fatalf("error=%v", err)
 	}
-	if local.observations != 0 {
-		t.Fatalf("remote resolution used local fallback %d times", local.observations)
+}
+
+func TestLocalGameVersionDriverAdaptsControllerService(t *testing.T) {
+	local := &countingLocalRelease{}
+	driver, err := NewLocalGameVersionDriver(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := driver.ObserveGameVersion(context.Background(), runtimedriver.Target{TargetID: "local", InstallationID: "default"})
+	if err != nil || result.CurrentVersion != "local" || local.observations != 1 {
+		t.Fatalf("result=%#v observations=%d err=%v", result, local.observations, err)
 	}
 }

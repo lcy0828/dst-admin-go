@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,10 +21,19 @@ import (
 	"time"
 
 	dstinstall "dont/internal/dstserver"
+	"dont/internal/steamvdf"
 )
 
 var buildIDPattern = regexp.MustCompile(`(?m)"buildid"\s+"([0-9]+)"`)
-var publicBranchBuildIDPattern = regexp.MustCompile(`(?s)"branches"\s*\{.*?"public"\s*\{.*?"buildid"\s*"([0-9]+)"`)
+var embeddedGameVersionPattern = regexp.MustCompile(`DontStarveTogether\x00SERVER\x00[^\x00]{1,256}\x00([0-9]{1,64})\x00`)
+
+const (
+	steamBuildCacheTTL        = 15 * time.Minute
+	steamBuildFailureTTL      = 30 * time.Second
+	steamBuildLookupTimeout   = 30 * time.Second
+	steamOnlineAppInfoTimeout = 30 * time.Second
+	maxEmbeddedVersionBinary  = 64 * 1024 * 1024
+)
 
 type LatestChecker interface {
 	Check(context.Context, string, string) (string, bool, error)
@@ -31,7 +41,14 @@ type LatestChecker interface {
 
 type steamBuildCacheEntry struct {
 	version   string
+	err       error
 	expiresAt time.Time
+}
+
+type steamBuildLookup struct {
+	done    chan struct{}
+	version string
+	err     error
 }
 
 type SteamVersionChecker struct {
@@ -39,8 +56,11 @@ type SteamVersionChecker struct {
 	resolveAppInfo func(context.Context, string) (string, error)
 	now            func() time.Time
 	cacheTTL       time.Duration
+	failureTTL     time.Duration
+	lookupTimeout  time.Duration
 	mu             sync.Mutex
 	cache          map[string]steamBuildCacheEntry
+	inflight       map[string]*steamBuildLookup
 }
 
 func NewSteamVersionChecker(steamCMDPaths ...string) *SteamVersionChecker {
@@ -49,8 +69,9 @@ func NewSteamVersionChecker(steamCMDPaths ...string) *SteamVersionChecker {
 		configuredPath = steamCMDPaths[0]
 	}
 	checker := &SteamVersionChecker{
-		client: &http.Client{Timeout: 8 * time.Second}, now: time.Now, cacheTTL: 5 * time.Minute,
-		cache: make(map[string]steamBuildCacheEntry),
+		client: &http.Client{Timeout: 8 * time.Second}, now: time.Now, cacheTTL: steamBuildCacheTTL,
+		failureTTL: steamBuildFailureTTL, lookupTimeout: steamBuildLookupTimeout,
+		cache: make(map[string]steamBuildCacheEntry), inflight: make(map[string]*steamBuildLookup),
 	}
 	checker.resolveAppInfo = func(ctx context.Context, appID string) (string, error) {
 		return resolveSteamCMDPublicBuild(ctx, configuredPath, appID)
@@ -59,13 +80,25 @@ func NewSteamVersionChecker(steamCMDPaths ...string) *SteamVersionChecker {
 }
 
 func (c *SteamVersionChecker) Check(ctx context.Context, appID, localVersion string) (string, bool, error) {
+	if !releaseAppIDPattern.MatchString(appID) {
+		return "", false, errors.New("invalid Steam application ID")
+	}
+	if cached, ok := c.cachedSuccess(appID); ok {
+		return cached, strings.TrimSpace(localVersion) == cached, nil
+	}
+	if appID == dstinstall.AppIDDedicatedServer {
+		latest, err := c.latestFromAppInfo(ctx, appID)
+		return latest, err == nil && strings.TrimSpace(localVersion) == latest, err
+	}
 	required, upToDate, apiErr := c.checkSteamAPI(ctx, appID, localVersion)
 	if apiErr == nil {
 		if required != "" {
+			c.rememberSuccess(appID, required)
 			return required, upToDate, nil
 		}
 		localVersion = strings.TrimSpace(localVersion)
 		if upToDate && releaseVersionPattern.MatchString(localVersion) && localVersion != "0" {
+			c.rememberSuccess(appID, localVersion)
 			return localVersion, true, nil
 		}
 	}
@@ -77,6 +110,30 @@ func (c *SteamVersionChecker) Check(ctx context.Context, appID, localVersion str
 		return "", false, fallbackErr
 	}
 	return latest, strings.TrimSpace(localVersion) == latest, nil
+}
+
+func (c *SteamVersionChecker) cachedSuccess(appID string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.cache[appID]
+	return entry.version, ok && entry.err == nil && c.cacheNow().Before(entry.expiresAt) && releaseVersionPattern.MatchString(entry.version)
+}
+
+func (c *SteamVersionChecker) rememberSuccess(appID, version string) {
+	version = strings.TrimSpace(version)
+	if !releaseVersionPattern.MatchString(version) {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cache == nil {
+		c.cache = make(map[string]steamBuildCacheEntry)
+	}
+	ttl := c.cacheTTL
+	if ttl <= 0 {
+		ttl = steamBuildCacheTTL
+	}
+	c.cache[appID] = steamBuildCacheEntry{version: version, expiresAt: c.cacheNow().Add(ttl)}
 }
 
 func (c *SteamVersionChecker) checkSteamAPI(ctx context.Context, appID, localVersion string) (string, bool, error) {
@@ -118,31 +175,73 @@ func (c *SteamVersionChecker) latestFromAppInfo(ctx context.Context, appID strin
 	if c.resolveAppInfo == nil {
 		return "", errors.New("Steam version API omitted the required build and SteamCMD fallback is unavailable")
 	}
-	if c.now == nil {
-		c.now = time.Now
-	}
-	if c.cacheTTL <= 0 {
-		c.cacheTTL = 5 * time.Minute
-	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := c.now()
+	now := c.cacheNow()
 	if cached, ok := c.cache[appID]; ok && now.Before(cached.expiresAt) {
-		return cached.version, nil
+		c.mu.Unlock()
+		return cached.version, cached.err
 	}
-	version, err := c.resolveAppInfo(ctx, appID)
-	if err != nil {
-		return "", err
+	if lookup := c.inflight[appID]; lookup != nil {
+		c.mu.Unlock()
+		select {
+		case <-lookup.done:
+			return lookup.version, lookup.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
+	lookup := &steamBuildLookup{done: make(chan struct{})}
+	if c.inflight == nil {
+		c.inflight = make(map[string]*steamBuildLookup)
+	}
+	c.inflight[appID] = lookup
+	lookupTimeout := c.lookupTimeout
+	if lookupTimeout <= 0 {
+		lookupTimeout = steamBuildLookupTimeout
+	}
+	c.mu.Unlock()
+
+	lookupContext, cancel := context.WithTimeout(ctx, lookupTimeout)
+	version, err := c.resolveAppInfo(lookupContext, appID)
+	if lookupErr := lookupContext.Err(); lookupErr != nil {
+		err = lookupErr
+	}
+	cancel()
 	version = strings.TrimSpace(version)
-	if !releaseVersionPattern.MatchString(version) {
-		return "", errors.New("SteamCMD returned an invalid public build")
+	if err == nil && !releaseVersionPattern.MatchString(version) {
+		err = errors.New("SteamCMD returned an invalid public build")
+		version = ""
 	}
+
+	c.mu.Lock()
 	if c.cache == nil {
 		c.cache = make(map[string]steamBuildCacheEntry)
 	}
-	c.cache[appID] = steamBuildCacheEntry{version: version, expiresAt: now.Add(c.cacheTTL)}
-	return version, nil
+	ttl := c.cacheTTL
+	if ttl <= 0 {
+		ttl = steamBuildCacheTTL
+	}
+	if err != nil {
+		ttl = c.failureTTL
+		if ttl <= 0 {
+			ttl = steamBuildFailureTTL
+		}
+	}
+	if err == nil || ctx.Err() == nil {
+		c.cache[appID] = steamBuildCacheEntry{version: version, err: err, expiresAt: c.cacheNow().Add(ttl)}
+	}
+	lookup.version, lookup.err = version, err
+	delete(c.inflight, appID)
+	close(lookup.done)
+	c.mu.Unlock()
+	return version, err
+}
+
+func (c *SteamVersionChecker) cacheNow() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 func resolveSteamCMDPublicBuild(ctx context.Context, configuredPath, appID string) (string, error) {
@@ -150,24 +249,53 @@ func resolveSteamCMDPublicBuild(ctx context.Context, configuredPath, appID strin
 	if executable == "" {
 		return "", errors.New("SteamCMD is unavailable for the latest build lookup")
 	}
-	commandContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+	started := time.Now()
+	defer func() {
+		log.Printf("[GameVersion] stage=steam_appinfo app_id=%s duration_ms=%d", appID, time.Since(started).Milliseconds())
+	}()
+	commandContext, cancel := context.WithTimeout(ctx, steamOnlineAppInfoTimeout)
 	defer cancel()
-	output, err := exec.CommandContext(
+	command := exec.CommandContext(
 		commandContext, executable,
 		"+login", "anonymous", "+app_info_update", "1", "+app_info_print", appID, "+quit",
-	).CombinedOutput()
+	)
+	configureVersionCommand(command)
+	output := &boundedBuffer{limit: 4 * 1024 * 1024}
+	command.Stdout, command.Stderr = output, output
+	err := command.Run()
+	if commandContext.Err() != nil {
+		return "", commandContext.Err()
+	}
 	if err != nil {
 		return "", fmt.Errorf("SteamCMD app info lookup failed: %w", err)
 	}
-	return parseSteamCMDPublicBuild(output)
+	return parseSteamCMDPublicBuild([]byte(output.String()), appID)
 }
 
-func parseSteamCMDPublicBuild(output []byte) (string, error) {
-	match := publicBranchBuildIDPattern.FindSubmatch(output)
-	if len(match) != 2 {
+func parseSteamCMDPublicBuild(output []byte, appIDs ...string) (string, error) {
+	key := "branches"
+	if len(appIDs) > 0 {
+		key = appIDs[0]
+	}
+	start, end := bytes.Index(output, []byte(`"`+key+`"`)), bytes.LastIndexByte(output, '}')
+	if start < 0 || end < start {
+		return "", errors.New("SteamCMD app info omitted the requested application")
+	}
+	root, err := steamvdf.Parse(output[start : end+1])
+	if err != nil {
+		return "", fmt.Errorf("parse SteamCMD app info: %w", err)
+	}
+	if len(appIDs) > 0 {
+		app, _ := root[key].(map[string]interface{})
+		root, _ = app["depots"].(map[string]interface{})
+	}
+	branches, _ := root["branches"].(map[string]interface{})
+	public, _ := branches["public"].(map[string]interface{})
+	version, _ := public["buildid"].(string)
+	if !releaseVersionPattern.MatchString(version) {
 		return "", errors.New("SteamCMD app info omitted the public build")
 	}
-	return string(match[1]), nil
+	return version, nil
 }
 
 func parseRequiredVersion(raw json.RawMessage) (string, error) {
@@ -192,10 +320,6 @@ func parseRequiredVersion(raw json.RawMessage) (string, error) {
 
 func readLocalVersion(serverPath string, requestedAppIDs ...string) (string, bool) {
 	root := installRoot(serverPath)
-	candidates := []string{
-		filepath.Join(root, "version.txt"),
-		filepath.Join(serverPath, "version.txt"),
-	}
 	appIDs := uniqueAppIDs(requestedAppIDs)
 	if len(appIDs) == 0 {
 		if layout, ok := dstinstall.Resolve(serverPath, "64"); ok {
@@ -204,7 +328,8 @@ func readLocalVersion(serverPath string, requestedAppIDs ...string) (string, boo
 			appIDs = []string{dstinstall.AppIDDedicatedServer}
 		}
 	}
-	candidates = append(candidates, steamManifestCandidates(root, appIDs...)...)
+	candidates := steamManifestCandidates(root, appIDs...)
+	candidates = append(candidates, filepath.Join(root, "version.txt"), filepath.Join(serverPath, "version.txt"))
 	seen := make(map[string]bool)
 	for _, candidate := range candidates {
 		candidate = filepath.Clean(candidate)
@@ -232,6 +357,52 @@ func readLocalVersion(serverPath string, requestedAppIDs ...string) (string, boo
 		}
 	}
 	return "", false
+}
+
+func readLocalGameVersion(serverPath string) (string, bool) {
+	root := installRoot(serverPath)
+	seen := make(map[string]bool, 2)
+	for _, candidate := range []string{filepath.Join(root, "version.txt"), filepath.Join(serverPath, "version.txt")} {
+		candidate = filepath.Clean(candidate)
+		if seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		data, err := os.ReadFile(candidate)
+		if err != nil || len(data) > 1024*1024 {
+			continue
+		}
+		scanner := bufio.NewScanner(strings.NewReader(string(data)))
+		if scanner.Scan() {
+			version := strings.TrimSpace(scanner.Text())
+			if releaseVersionPattern.MatchString(version) {
+				return version, true
+			}
+		}
+	}
+	if layout, ok := dstinstall.Resolve(serverPath, "64"); ok {
+		if version, found := readEmbeddedGameVersion(layout.Executable); found {
+			return version, true
+		}
+	}
+	return "", false
+}
+
+func readEmbeddedGameVersion(executable string) (string, bool) {
+	info, err := os.Stat(executable)
+	if err != nil || info.IsDir() || info.Size() <= 0 || info.Size() > maxEmbeddedVersionBinary {
+		return "", false
+	}
+	data, err := os.ReadFile(executable)
+	if err != nil {
+		return "", false
+	}
+	match := embeddedGameVersionPattern.FindSubmatch(data)
+	if len(match) != 2 {
+		return "", false
+	}
+	version := string(match[1])
+	return version, releaseVersionPattern.MatchString(version)
 }
 
 func steamManifestCandidates(root string, appIDs ...string) []string {

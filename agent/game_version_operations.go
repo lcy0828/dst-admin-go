@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"dont/internal/installationlock"
 	"errors"
 	"fmt"
 	"io"
@@ -62,12 +63,14 @@ func validateGameVersionPayload(request shared.RuntimeOperationRequest) error {
 func (a *Agent) observeGameVersion(ctx context.Context, installation RuntimeInstallation, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
 	result := runtimeResult(request, shared.RuntimeOutcomeObserved, "游戏版本状态已读取")
 	version, installed := readInstalledGameVersion(installation)
+	gameVersion, _ := readInstalledOfficialGameVersion(installation)
 	steamcmd := findAgentSteamCMD(installation.SteamCMDPath)
 	appID, updateMethod := gameVersionInstallationMetadata(installation)
 	available, diskErr := availableGameBytes(gameInstallRoot(installation))
 	value := shared.RuntimeGameVersionResult{
 		Installed: installed, AppID: appID, UpdateMethod: updateMethod,
-		CurrentVersion: version, AvailableBytes: available,
+		Branch:      dstinstall.SteamBranch(gameManifestCandidates(gameInstallRoot(installation), appID)...),
+		GameVersion: gameVersion, SteamBuild: version, CurrentVersion: version, AvailableBytes: available,
 		SteamCMDAvailable: steamcmd != "", UpdateSupported: updateMethod == dstinstall.UpdateMethodSteamCMD && steamcmd != "",
 		ObservedAt: a.now().UTC(),
 	}
@@ -100,6 +103,12 @@ func (a *Agent) updateGameVersion(ctx context.Context, installation RuntimeInsta
 		return result, err
 	}
 	root := gameInstallRoot(installation)
+	unlock, lockErr := installationlock.Acquire(root)
+	if lockErr != nil {
+		return result, lockErr
+	}
+	defer unlock()
+
 	if request.GameVersion.CleanCache {
 		if err := cleanAgentSteamCache(steamcmd, root); err != nil {
 			result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
@@ -112,7 +121,7 @@ func (a *Agent) updateGameVersion(ctx context.Context, installation RuntimeInsta
 	runErr := a.gameVersionRunner.Run(ctx, steamcmd, arguments, output)
 	current, installed := readInstalledGameVersion(installation)
 	value := gameVersionResult(a.now, installation, steamcmd, output.String())
-	value.CurrentVersion, value.Installed = current, installed
+	value.CurrentVersion, value.SteamBuild, value.Installed = current, current, installed
 	result.GameVersion = value
 	if runErr == nil && current != strings.TrimSpace(request.GameVersion.ExpectedVersion) {
 		runErr = fmt.Errorf("更新后版本 %q 与目标版本 %q 不一致", current, request.GameVersion.ExpectedVersion)
@@ -126,14 +135,40 @@ func (a *Agent) updateGameVersion(ctx context.Context, installation RuntimeInsta
 
 func gameVersionResult(now func() time.Time, installation RuntimeInstallation, steamcmd, logText string) *shared.RuntimeGameVersionResult {
 	version, installed := readInstalledGameVersion(installation)
+	gameVersion, _ := readInstalledOfficialGameVersion(installation)
 	appID, updateMethod := gameVersionInstallationMetadata(installation)
 	available, _ := availableGameBytes(gameInstallRoot(installation))
 	return &shared.RuntimeGameVersionResult{
 		Installed: installed, AppID: appID, UpdateMethod: updateMethod,
-		CurrentVersion: version, AvailableBytes: available,
+		Branch:      dstinstall.SteamBranch(gameManifestCandidates(gameInstallRoot(installation), appID)...),
+		GameVersion: gameVersion, SteamBuild: version, CurrentVersion: version, AvailableBytes: available,
 		SteamCMDAvailable: steamcmd != "", UpdateSupported: updateMethod == dstinstall.UpdateMethodSteamCMD && steamcmd != "", Log: logText,
 		ObservedAt: now().UTC(),
 	}
+}
+
+func readInstalledOfficialGameVersion(installation RuntimeInstallation) (string, bool) {
+	root := gameInstallRoot(installation)
+	seen := make(map[string]bool, 2)
+	for _, candidate := range []string{filepath.Join(root, "version.txt"), filepath.Join(installation.ServerPath, "version.txt")} {
+		candidate = filepath.Clean(candidate)
+		if seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		data, err := os.ReadFile(candidate)
+		if err != nil || len(data) > 1024*1024 {
+			continue
+		}
+		scanner := bufio.NewScanner(bytes.NewReader(data))
+		if scanner.Scan() {
+			value := strings.TrimSpace(scanner.Text())
+			if gameVersionPattern.MatchString(value) {
+				return value, true
+			}
+		}
+	}
+	return "", false
 }
 
 func gameVersionInstallationMetadata(installation RuntimeInstallation) (string, string) {

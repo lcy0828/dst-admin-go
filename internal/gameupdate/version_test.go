@@ -2,11 +2,13 @@ package gameupdate
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,7 +19,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
 
-func TestReadLocalVersionPrefersVersionFileAndFallsBackToManifest(t *testing.T) {
+func TestReadLocalVersionKeepsSteamBuildSeparateFromGameVersion(t *testing.T) {
 	root := t.TempDir()
 	manifest := filepath.Join(root, "steamapps", "appmanifest_343050.acf")
 	if err := os.MkdirAll(filepath.Dir(manifest), 0750); err != nil {
@@ -32,8 +34,11 @@ func TestReadLocalVersionPrefersVersionFileAndFallsBackToManifest(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(root, "version.txt"), []byte("123456\nignored\n"), 0640); err != nil {
 		t.Fatal(err)
 	}
-	if value, ok := readLocalVersion(root); !ok || value != "123456" {
-		t.Fatalf("version file = %q, %t", value, ok)
+	if value, ok := readLocalVersion(root); !ok || value != "987654" {
+		t.Fatalf("Steam build = %q, %t", value, ok)
+	}
+	if value, ok := readLocalGameVersion(root); !ok || value != "123456" {
+		t.Fatalf("game version = %q, %t", value, ok)
 	}
 }
 
@@ -59,6 +64,21 @@ func TestReadLocalVersionFromMacSteamApplication(t *testing.T) {
 	}
 }
 
+func TestReadLocalGameVersionFromEmbeddedExecutable(t *testing.T) {
+	gameRoot := filepath.Join(t.TempDir(), "Don't Starve Together")
+	executablePath := filepath.Join(gameRoot, "dontstarve_steam.app", "Contents", "MacOS", dstinstall.Binary)
+	if err := os.MkdirAll(filepath.Dir(executablePath), 0750); err != nil {
+		t.Fatal(err)
+	}
+	binary := []byte("noise\x00747000\x00PRODUCTION\x00DontStarveTogether\x00SERVER\x00%s %s@r%s cfg:%s\x00747465\x009921\x00release\x00")
+	if err := os.WriteFile(executablePath, binary, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if version, ok := readLocalGameVersion(gameRoot); !ok || version != "747465" {
+		t.Fatalf("embedded game version = %q, %t", version, ok)
+	}
+}
+
 func TestSteamVersionCheckerAcceptsNumericAndStringVersions(t *testing.T) {
 	responses := []struct {
 		body     string
@@ -79,6 +99,31 @@ func TestSteamVersionCheckerAcceptsNumericAndStringVersions(t *testing.T) {
 		if err != nil || version != test.expected || current != test.current {
 			t.Fatalf("check = %q, %t, %v", version, current, err)
 		}
+	}
+}
+
+func TestSteamVersionCheckerCachesSuccessfulAPILookup(t *testing.T) {
+	var requests atomic.Int32
+	checker := &SteamVersionChecker{
+		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			requests.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"response":{"success":true,"up_to_date":false,"required_version":"24700692"}}`)),
+				Header:     make(http.Header),
+			}, nil
+		})},
+		now:   func() time.Time { return time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC) },
+		cache: make(map[string]steamBuildCacheEntry),
+	}
+	for index := 0; index < 2; index++ {
+		version, current, err := checker.Check(context.Background(), "322330", "24700691")
+		if err != nil || version != "24700692" || current {
+			t.Fatalf("lookup %d = %q, %t, %v", index, version, current, err)
+		}
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("Steam API requests = %d, want 1", requests.Load())
 	}
 }
 
@@ -121,6 +166,135 @@ func TestSteamVersionCheckerFallsBackToCachedSteamCMDPublicBuild(t *testing.T) {
 	version, current, err = checker.Check(context.Background(), "343050", "24700372")
 	if err != nil || version != "24700372" || !current || lookups != 1 {
 		t.Fatalf("cached check = %q, %t, %v, lookups=%d", version, current, err, lookups)
+	}
+}
+
+func TestSteamVersionCheckerCoalescesConcurrentSteamCMDLookups(t *testing.T) {
+	var lookups atomic.Int32
+	checker := &SteamVersionChecker{
+		resolveAppInfo: func(context.Context, string) (string, error) {
+			lookups.Add(1)
+			time.Sleep(25 * time.Millisecond)
+			return "24700372", nil
+		},
+		cache: make(map[string]steamBuildCacheEntry), inflight: make(map[string]*steamBuildLookup),
+	}
+	results := make(chan error, 12)
+	for index := 0; index < cap(results); index++ {
+		go func() {
+			version, err := checker.latestFromAppInfo(context.Background(), "343050")
+			if err == nil && version != "24700372" {
+				err = errors.New("unexpected Steam build " + version)
+			}
+			results <- err
+		}()
+	}
+	for index := 0; index < cap(results); index++ {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if actual := lookups.Load(); actual != 1 {
+		t.Fatalf("SteamCMD lookups=%d, want 1", actual)
+	}
+}
+
+func TestSteamVersionCheckerCachesFallbackFailuresBriefly(t *testing.T) {
+	now := time.Date(2026, time.August, 27, 0, 0, 0, 0, time.UTC)
+	var lookups atomic.Int32
+	wantErr := errors.New("Steam is unavailable")
+	checker := &SteamVersionChecker{
+		resolveAppInfo: func(context.Context, string) (string, error) {
+			lookups.Add(1)
+			return "", wantErr
+		},
+		now: func() time.Time { return now }, failureTTL: 30 * time.Second,
+		cache: make(map[string]steamBuildCacheEntry),
+	}
+	for index := 0; index < 2; index++ {
+		if _, err := checker.latestFromAppInfo(context.Background(), "343050"); !errors.Is(err, wantErr) {
+			t.Fatalf("fallback error=%v, want %v", err, wantErr)
+		}
+	}
+	if actual := lookups.Load(); actual != 1 {
+		t.Fatalf("SteamCMD lookups=%d, want 1", actual)
+	}
+	now = now.Add(31 * time.Second)
+	_, _ = checker.latestFromAppInfo(context.Background(), "343050")
+	if actual := lookups.Load(); actual != 2 {
+		t.Fatalf("SteamCMD lookups after failure expiry=%d, want 2", actual)
+	}
+}
+
+func TestSteamVersionCheckerBoundsFallbackLookup(t *testing.T) {
+	checker := &SteamVersionChecker{
+		resolveAppInfo: func(ctx context.Context, _ string) (string, error) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+		lookupTimeout: 10 * time.Millisecond,
+		cache:         make(map[string]steamBuildCacheEntry),
+	}
+	startedAt := time.Now()
+	if _, err := checker.latestFromAppInfo(context.Background(), "343050"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("fallback error=%v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("bounded fallback took %s", elapsed)
+	}
+}
+
+func TestResolveSteamCMDPublicBuildQueriesOnlineEvenWithRecentUnrelatedAppCache(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(root, "steamcmd")
+	script := `#!/bin/sh
+if [ "$1" != "+login" ]; then
+  exit 9
+fi
+printf '%s\n' '"343050" { "depots" { "branches" { "public" { "buildid" "24700372" } } } }'
+`
+	if err := os.WriteFile(executable, []byte(script), 0750); err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(root, "appcache", "appinfo.vdf")
+	if err := os.MkdirAll(filepath.Dir(cache), 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cache, []byte("cached"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	version, err := resolveSteamCMDPublicBuild(context.Background(), executable, "343050")
+	if err != nil || version != "24700372" {
+		t.Fatalf("cached public build=%q, %v", version, err)
+	}
+}
+
+func TestSteamCMDVersionTimeoutDoesNotWaitForWrapperChild(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(root, "steamcmd")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nsleep 10 &\nwait\n"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := resolveSteamCMDPublicBuild(ctx, executable, "343050")
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 2*time.Second {
+		t.Fatalf("timeout duration=%s err=%v", time.Since(started), err)
+	}
+}
+
+func TestDedicatedServerBuildCheckSkipsUnusableUpToDateAPI(t *testing.T) {
+	checker := &SteamVersionChecker{
+		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			t.Fatal("unnecessary HTTP version lookup")
+			return nil, nil
+		})},
+		resolveAppInfo: func(context.Context, string) (string, error) { return "24700372", nil },
+	}
+	build, current, err := checker.Check(context.Background(), "343050", "24700372")
+	if err != nil || !current || build != "24700372" {
+		t.Fatalf("build=%s current=%t err=%v", build, current, err)
 	}
 }
 

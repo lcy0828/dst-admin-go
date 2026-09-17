@@ -6,6 +6,8 @@ type VersionReport struct {
 	Installed           bool             `json:"installed"`
 	AppID               string           `json:"appId"`
 	LocalVersion        string           `json:"localVersion,omitempty"`
+	GameVersion         string           `json:"gameVersion,omitempty"`
+	Branch              string           `json:"branch,omitempty"`
 	LatestVersion       string           `json:"latestVersion,omitempty"`
 	UpToDate            *bool            `json:"upToDate,omitempty"`
 	InstallPath         string           `json:"installPath"`
@@ -21,13 +23,14 @@ type VersionReport struct {
 }
 
 type OfficialRelease struct {
-	Version     string    `json:"version"`
-	ReleaseID   string    `json:"releaseId"`
-	PublishedAt time.Time `json:"publishedAt"`
-	URL         string    `json:"url"`
-	Source      string    `json:"source"`
-	CheckedAt   time.Time `json:"checkedAt"`
-	Stale       bool      `json:"stale"`
+	Version     string           `json:"version"`
+	ReleaseID   string           `json:"releaseId"`
+	PublishedAt time.Time        `json:"publishedAt"`
+	URL         string           `json:"url"`
+	Source      string           `json:"source"`
+	CheckedAt   time.Time        `json:"checkedAt"`
+	Stale       bool             `json:"stale"`
+	TestRelease *OfficialRelease `json:"testRelease,omitempty"`
 }
 
 type UpdateRequest struct {

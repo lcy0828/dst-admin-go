@@ -23,19 +23,36 @@ type runRecord struct {
 	FinishedAt    *time.Time
 }
 
+type officialReleaseRecord struct {
+	Source      string    `gorm:"primary_key;type:varchar(64)"`
+	Version     string    `gorm:"type:varchar(64);not null"`
+	ReleaseID   string    `gorm:"type:varchar(64)"`
+	PublishedAt time.Time `gorm:"not null"`
+	URL         string    `gorm:"type:text"`
+	CheckedAt   time.Time `gorm:"not null"`
+}
+
 type Store struct {
-	db    *gorm.DB
-	table string
-	now   func() time.Time
+	db                   *gorm.DB
+	table                string
+	officialReleaseTable string
+	now                  func() time.Time
 }
 
 func NewStore(db *gorm.DB, tablePrefix string) *Store {
-	return &Store{db: db, table: strings.TrimSpace(tablePrefix) + "game_update_run", now: time.Now}
+	prefix := strings.TrimSpace(tablePrefix)
+	return &Store{
+		db: db, table: prefix + "game_update_run", officialReleaseTable: prefix + "official_game_release",
+		now: time.Now,
+	}
 }
 
 func (s *Store) Migrate() error {
 	if err := s.db.Table(s.table).AutoMigrate(&runRecord{}).Error; err != nil {
 		return fmt.Errorf("migrate game update runs: %w", err)
+	}
+	if err := s.db.Table(s.officialReleaseTable).AutoMigrate(&officialReleaseRecord{}).Error; err != nil {
+		return fmt.Errorf("migrate official game release cache: %w", err)
 	}
 	now := s.now().UTC()
 	if err := s.db.Table(s.table).Where("status = ?", "running").Updates(map[string]interface{}{
@@ -44,6 +61,35 @@ func (s *Store) Migrate() error {
 		return fmt.Errorf("recover game update runs: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) LoadOfficialRelease() (OfficialRelease, bool, error) {
+	var record officialReleaseRecord
+	result := s.db.Table(s.officialReleaseTable).Where("source = ?", kleiReleaseSource).First(&record)
+	if gorm.IsRecordNotFoundError(result.Error) {
+		return OfficialRelease{}, false, nil
+	}
+	if result.Error != nil {
+		return OfficialRelease{}, false, result.Error
+	}
+	if !releaseVersionPattern.MatchString(record.Version) {
+		return OfficialRelease{}, false, nil
+	}
+	return OfficialRelease{
+		Version: record.Version, ReleaseID: record.ReleaseID, PublishedAt: record.PublishedAt.UTC(),
+		URL: record.URL, Source: record.Source, CheckedAt: record.CheckedAt.UTC(),
+	}, true, nil
+}
+
+func (s *Store) SaveOfficialRelease(release OfficialRelease) error {
+	if !releaseVersionPattern.MatchString(strings.TrimSpace(release.Version)) {
+		return errors.New("official game release version is invalid")
+	}
+	record := officialReleaseRecord{
+		Source: kleiReleaseSource, Version: strings.TrimSpace(release.Version), ReleaseID: strings.TrimSpace(release.ReleaseID),
+		PublishedAt: release.PublishedAt.UTC(), URL: strings.TrimSpace(release.URL), CheckedAt: release.CheckedAt.UTC(),
+	}
+	return s.db.Table(s.officialReleaseTable).Save(&record).Error
 }
 
 func (s *Store) Begin(jobID, before string, cleanCache bool) (Run, error) {
