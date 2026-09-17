@@ -6,10 +6,10 @@
 
 ## 下载与版本
 
-- [Package 工作流](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) 构建 Linux amd64 和 macOS arm64 原生包，并将测试通过的镜像推送到 GHCR；配置 Docker Hub 凭据后同步发布到 `lcy0828/dst-admin-go`，不重复构建。
+- [Package 工作流](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) 构建 Linux amd64 和 macOS arm64 原生包，并将测试通过的镜像推送到 GHCR；配置镜像仓库凭据后同步发布到 Docker Hub 和阿里云，不重复构建。
 - 正式部署使用 `ghcr.io/lcy0828/dst-admin-go/all-in-one:latest` 或 Docker Hub 的 `lcy0828/dst-admin-go:latest`，需要固定版本时将 `latest` 替换为 `vX.Y.Z`。Docker Hub 的控制端、Agent、Runtime 标签分别加 `controller-`、`agent-`、`runtime-` 前缀，例如 `agent-latest`、`agent-v1.0.0`。
 - 分支发布使用 `ghcr.io/lcy0828/dst-admin-go/all-in-one:preview`、`control-plane:preview`、`agent:preview` 和 `dst-runtime:preview`；同次构建另有 `sha-后端完整提交号` 标签。前端或手动重建仍可能改变同一后端提交的产物，精确复现请固定镜像 digest 与前端提交。
-- `vX.Y.Z` 标签触发正式发布：生成版本镜像，所有原生包与镜像检查通过后更新四类镜像的 `latest` 标签，并创建包含 `.tar.gz` 与 SHA-256 的 GitHub Release。`vX.Y.Z-rc.N` 等候选版只发布对应版本和预发布 Release，不覆盖 `latest`。首次成功发布前，正式标签尚不可拉取。
+- `vX.Y.Z` 标签触发正式发布：生成版本镜像，所有原生包与镜像检查通过后更新四类镜像的 `latest` 标签，并创建包含 `.tar.gz` 与 SHA-256 的 GitHub Release。`vX.Y.Z-rc.N` 等候选版只发布对应版本和预发布 Release，不覆盖 `latest`。
 - `dst-admin -version` 输出后端版本、提交、前端提交和 `embeddedWebUI`；原生 `manifest.json` 另记录工具链、锁文件哈希。镜像可通过 `docker image inspect` 查看 `io.dst-admin.frontend.commit`。
 
 ## 从一个仓库打包
@@ -65,7 +65,15 @@ node deploy/scripts/build-native-release.mjs --version preview-local \
 2. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加 `DOCKERHUB_TOKEN`。登录用户名默认 `lcy0828`；使用其他登录账号时添加 `DOCKERHUB_USERNAME` secret。目标命名空间由工作流中的 `DOCKERHUB_NAMESPACE` 指定。
 3. 推送正式版本标签，例如 `git tag v1.0.0 && git push origin v1.0.0`（`origin` 指向 GitHub 仓库）。
 
-未配置 Token 时仅发布 GHCR，并在 Actions 摘要中注明跳过 Docker Hub；凭据失效或推送失败会使任务失败。手动运行关闭 `publish_images` 时，两个仓库和 GitHub Release 均不发布。All-in-One、控制端和 Agent 的启动检查保持 180 秒，Runtime 检查启动包装器。
+启用阿里云 ACR 同步：
+
+1. 在杭州地域创建命名空间 `dstadmin` 和仓库 `dst-admin-go`。在 ACR **访问凭证** 中设置固定登录密码；这里使用的是镜像仓库登录密码。
+2. 在 GitHub Actions **Secrets** 添加 `ALIYUN_USERNAME`（ACR 登录用户名）和 `ALIYUN_PASSWORD`（固定登录密码）；在 **Variables** 添加 `ALIYUN_NAMESPACE=dstadmin`。
+3. 后续 Package 发布会同步到 `registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go`，服务标签与 Docker Hub 一致，如 `latest`、`agent-latest`、`agent-v1.0.0`。
+
+补传已有正式版时，在 Actions 运行 **Sync Alibaba Cloud images**，填写 `version=v1.0.0`。它直接复制 GHCR 中已发布的四种镜像，保留构建内容；正式版本号同时同步 GHCR 当前的 `latest`，候选版只同步对应版本。只填写 `latest` 时仅同步最新正式标签。拉取私有 ACR 仓库前，在部署机器运行 `docker login registry.cn-hangzhou.aliyuncs.com`。
+
+未配置某个镜像站的凭据时会跳过该镜像站，并在 Actions 摘要中注明；凭据失效或推送失败会使任务失败。手动运行关闭 `publish_images` 时，所有镜像仓库和 GitHub Release 均不发布。All-in-One、控制端和 Agent 的启动检查保持 180 秒，Runtime 检查启动包装器。
 
 前端提交不会直接修改已安装服务，也不会自动发布后端。需要新页面时运行主仓库 Package 工作流；也可用 `frontend_ref` 输入指定回滚版本。手动构建可选择是否发布镜像，默认发布；标签发布附件只有对应标签流水线成功后可下载。
 

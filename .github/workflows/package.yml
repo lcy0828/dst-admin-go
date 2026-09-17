@@ -11,7 +11,7 @@ on:
         default: master
         type: string
       publish_images:
-        description: 'Publish tested images to GHCR and configured Docker Hub'
+        description: 'Publish tested images to GHCR and configured mirrors'
         default: true
         type: boolean
 
@@ -20,6 +20,8 @@ permissions:
 
 env:
   DOCKERHUB_NAMESPACE: lcy0828
+  ALIYUN_REGISTRY: registry.cn-hangzhou.aliyuncs.com
+  ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
 
 concurrency:
   group: package-${{ github.ref }}
@@ -34,6 +36,7 @@ jobs:
       version: ${{ steps.source.outputs.version }}
       stable: ${{ steps.source.outputs.stable }}
       dockerhub: ${{ steps.registries.outputs.dockerhub }}
+      aliyun: ${{ steps.registries.outputs.aliyun }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -74,11 +77,13 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "stable=$stable" >> "$GITHUB_OUTPUT"
           echo "Backend: $GITHUB_SHA; frontend: $frontend; version: $version" >> "$GITHUB_STEP_SUMMARY"
-      - name: Check Docker Hub publishing configuration
+      - name: Check mirror publishing configuration
         id: registries
         if: github.event_name != 'workflow_dispatch' || inputs.publish_images
         env:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
+          ALIYUN_PASSWORD: ${{ secrets.ALIYUN_PASSWORD }}
         shell: bash
         run: |
           if [[ -n "$DOCKERHUB_TOKEN" ]]; then
@@ -86,6 +91,12 @@ jobs:
           else
             echo 'dockerhub=false' >> "$GITHUB_OUTPUT"
             echo 'Docker Hub skipped: configure the DOCKERHUB_TOKEN Actions secret to enable publication.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -n "$ALIYUN_USERNAME" && -n "$ALIYUN_PASSWORD" && -n "$ALIYUN_NAMESPACE" ]]; then
+            echo 'aliyun=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'aliyun=false' >> "$GITHUB_OUTPUT"
+            echo 'Alibaba Cloud skipped: configure ALIYUN_USERNAME and ALIYUN_PASSWORD secrets and the ALIYUN_NAMESPACE variable.' >> "$GITHUB_STEP_SUMMARY"
           fi
 
   native:
@@ -250,6 +261,35 @@ jobs:
             docker push "$target:$prefix$tag"
           done
           echo "Published $target:$prefix$RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+      - name: Log in to Alibaba Cloud ACR
+        if: needs.sources.outputs.aliyun == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+      - name: Push the same tested images to Alibaba Cloud
+        if: needs.sources.outputs.aliyun == 'true'
+        env:
+          IMAGE_KIND: ${{ matrix.kind }}
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+        shell: bash
+        run: |
+          case "$IMAGE_KIND" in
+            all-in-one) prefix='' ;;
+            control-plane) prefix='controller-' ;;
+            agent) prefix='agent-' ;;
+            dst-runtime) prefix='runtime-' ;;
+            *) echo "::error::Unknown image kind: $IMAGE_KIND"; exit 1 ;;
+          esac
+          target="$ALIYUN_REGISTRY/$ALIYUN_NAMESPACE/dst-admin-go"
+          tags=("$RELEASE_VERSION" "sha-$GITHUB_SHA")
+          if [[ "$GITHUB_REF_TYPE" != tag ]]; then tags+=(preview); fi
+          for tag in "${tags[@]}"; do
+            docker tag "dst-admin-test:$IMAGE_KIND" "$target:$prefix$tag"
+            docker push "$target:$prefix$tag"
+          done
+          echo "Published $target:$prefix$RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
 
   release:
     if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.publish_images)
@@ -304,6 +344,25 @@ jobs:
                 --tag "$target:${prefix}latest" "$target:$prefix$RELEASE_VERSION"
               echo "Published $target:${prefix}latest from $prefix$RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
             fi
+          done
+      - name: Log in to Alibaba Cloud for stable aliases
+        if: needs.sources.outputs.stable == 'true' && needs.sources.outputs.aliyun == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+      - name: Promote stable Alibaba Cloud images
+        if: needs.sources.outputs.stable == 'true' && needs.sources.outputs.aliyun == 'true'
+        env:
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+        shell: bash
+        run: |
+          target="$ALIYUN_REGISTRY/$ALIYUN_NAMESPACE/dst-admin-go"
+          for prefix in '' controller- agent- runtime-; do
+            docker buildx imagetools create --prefer-index=false \
+              --tag "$target:${prefix}latest" "$target:$prefix$RELEASE_VERSION"
+            echo "Published $target:${prefix}latest from $prefix$RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
           done
       - name: Publish versioned downloads in the main repository
         env:

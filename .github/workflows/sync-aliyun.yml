@@ -1,0 +1,78 @@
+name: Sync Alibaba Cloud images
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Existing GHCR version or latest; stable versions also sync current latest'
+        required: true
+        default: latest
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: sync-aliyun
+  cancel-in-progress: false
+
+env:
+  ALIYUN_REGISTRY: registry.cn-hangzhou.aliyuncs.com
+  ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - name: Check publishing configuration
+        env:
+          ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
+          ALIYUN_PASSWORD: ${{ secrets.ALIYUN_PASSWORD }}
+          IMAGE_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          if [[ -z "$ALIYUN_USERNAME" || -z "$ALIYUN_PASSWORD" || -z "$ALIYUN_NAMESPACE" ]]; then
+            echo '::error::Configure ALIYUN_USERNAME and ALIYUN_PASSWORD secrets and the ALIYUN_NAMESPACE variable.'
+            exit 1
+          fi
+          if [[ "$IMAGE_VERSION" != latest && ! "$IMAGE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo '::error::Choose latest or an existing vX.Y.Z / vX.Y.Z-rc.N release.'
+            exit 1
+          fi
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to Alibaba Cloud ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+      - name: Copy published images without rebuilding
+        env:
+          IMAGE_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          target="$ALIYUN_REGISTRY/$ALIYUN_NAMESPACE/dst-admin-go"
+          versions=("$IMAGE_VERSION")
+          if [[ "$IMAGE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then versions+=(latest); fi
+          for kind in all-in-one control-plane agent dst-runtime; do
+            case "$kind" in
+              all-in-one) prefix='' ;;
+              control-plane) prefix='controller-' ;;
+              agent) prefix='agent-' ;;
+              dst-runtime) prefix='runtime-' ;;
+            esac
+            for version in "${versions[@]}"; do
+              source="ghcr.io/${GITHUB_REPOSITORY,,}/$kind:$version"
+              docker pull "$source"
+              docker tag "$source" "$target:$prefix$version"
+              docker push "$target:$prefix$version"
+              echo "Synced $source to $target:$prefix$version" >> "$GITHUB_STEP_SUMMARY"
+            done
+          done
