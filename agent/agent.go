@@ -70,6 +70,9 @@ var startTime = time.Now()
 
 // Agent 表示一个代理实例
 type Agent struct {
+	commandAdmissionMu   sync.Mutex
+	commandsPaused       bool
+	commandsPending      int
 	luaJITMu             sync.Mutex
 	luaJITStore          *luajit.Store
 	Config               *Config
@@ -718,6 +721,9 @@ func (a *Agent) commandWorker(queue <-chan commandWorkItem) {
 			} else {
 				a.executeCommand(item.payload, item.connection)
 			}
+			a.commandAdmissionMu.Lock()
+			a.commandsPending--
+			a.commandAdmissionMu.Unlock()
 		}
 	}
 }
@@ -727,6 +733,11 @@ func commandUsesStatusQueue(payload shared.CommandPayload) bool {
 }
 
 func (a *Agent) enqueueCommand(item commandWorkItem) bool {
+	a.commandAdmissionMu.Lock()
+	defer a.commandAdmissionMu.Unlock()
+	if a.commandsPaused {
+		return false
+	}
 	queue := a.generalCommands
 	if commandUsesStatusQueue(item.payload) {
 		queue = a.statusCommands
@@ -735,10 +746,23 @@ func (a *Agent) enqueueCommand(item commandWorkItem) bool {
 	case <-a.stopChan:
 		return false
 	case queue <- item:
+		a.commandsPending++
 		return true
 	default:
 		return false
 	}
+}
+
+// PauseCommandsIfIdle prevents upstream commands racing a local settings change.
+// Already queued or running commands are never canceled.
+func (a *Agent) PauseCommandsIfIdle() (func(), error) {
+	a.commandAdmissionMu.Lock()
+	defer a.commandAdmissionMu.Unlock()
+	if a.commandsPaused || a.commandsPending != 0 {
+		return nil, errors.New("Agent 正在执行任务，请稍后重试")
+	}
+	a.commandsPaused = true
+	return func() { a.commandAdmissionMu.Lock(); a.commandsPaused = false; a.commandAdmissionMu.Unlock() }, nil
 }
 
 func (a *Agent) currentCommandConnection() *shared.SecureConnection {

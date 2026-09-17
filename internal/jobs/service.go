@@ -51,10 +51,12 @@ func (b *Broker) Publish() {
 }
 
 type Service struct {
-	store   *Store
-	broker  *Broker
-	mu      sync.Mutex
-	cancels map[string]context.CancelFunc
+	submitMu sync.Mutex
+	paused   bool
+	store    *Store
+	broker   *Broker
+	mu       sync.Mutex
+	cancels  map[string]context.CancelFunc
 }
 
 func NewService(store *Store, broker *Broker) (*Service, error) {
@@ -80,6 +82,11 @@ func (s *Service) Submit(kind, roomID, worldID string, targets []TargetSpec, run
 }
 
 func (s *Service) SubmitFactory(kind, roomID, worldID string, targets []TargetSpec, factory func(Job) Runner) (Job, error) {
+	s.submitMu.Lock()
+	defer s.submitMu.Unlock()
+	if s.paused {
+		return Job{}, ErrServiceBusy
+	}
 	if factory == nil {
 		return Job{}, errors.New("job runner factory is required")
 	}
@@ -100,6 +107,22 @@ func (s *Service) SubmitFactory(kind, roomID, worldID string, targets []TargetSp
 	s.mu.Unlock()
 	go s.run(ctx, job.ID, runner)
 	return job, nil
+}
+
+var ErrServiceBusy = errors.New("后台任务正在运行或系统正在应用配置，请稍后重试")
+
+// PauseIfIdle closes admission atomically with checking active runners. It
+// never cancels work and prevents schedulers racing a runtime replacement.
+func (s *Service) PauseIfIdle() (func(), error) {
+	s.submitMu.Lock()
+	defer s.submitMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.paused || len(s.cancels) != 0 {
+		return nil, ErrServiceBusy
+	}
+	s.paused = true
+	return func() { s.submitMu.Lock(); s.paused = false; s.submitMu.Unlock() }, nil
 }
 
 func (s *Service) Cancel(jobID string) (Job, error) {

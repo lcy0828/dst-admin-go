@@ -231,7 +231,7 @@ independent credentials remain a future hardening item and must not be claimed
 as implemented.
 
 Role changes are saved from the deployment role panel in Machine Management
-and require a process restart.
+and apply without a process restart once local worlds and background tasks are stopped.
 The deployment packaging is read-only at runtime because changing it requires
 reinstalling or replacing the deployment artifact.
 

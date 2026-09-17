@@ -16,7 +16,7 @@ import (
 const shutdownTimeout = 20 * time.Second
 
 func Run(ctx context.Context, address string) error {
-	application, err := routers.InitApplication()
+	application, err := routers.InitRuntimeHost()
 	if err != nil {
 		return fmt.Errorf("initialize application: %w", err)
 	}

@@ -1,6 +1,7 @@
 package systemsettings
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/mail"
@@ -11,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"dont/internal/deploymentprofile"
@@ -22,11 +24,20 @@ var colorPattern = regexp.MustCompile(`^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$`)
 var rgbaPattern = regexp.MustCompile(`^rgba\(\s*(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\s*,\s*(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\s*,\s*(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\s*,\s*(0|1|0?\.[0-9]+)\s*\)$`)
 
 type Service struct {
+	applyMu       sync.Mutex
+	baselineMu    sync.RWMutex
+	applier       RuntimeApplier
 	repository    Repository
 	startupValues map[string]string
 	lookupEnv     func(string) (string, bool)
 	now           func() time.Time
 }
+
+// RuntimeApplier runs persistence and runtime replacement within one admission
+// barrier. On failure it must restore the old runtime and call rollback if saved.
+type RuntimeApplier func(context.Context, func() error, func() error) error
+
+func (s *Service) SetRuntimeApplier(applier RuntimeApplier) { s.applier = applier }
 
 func NewService(repository Repository) (*Service, error) {
 	if repository == nil {
@@ -60,6 +71,14 @@ func (s *Service) Preview(input Input) (Preview, error) {
 }
 
 func (s *Service) Apply(input Input) (ApplyResult, error) {
+	return s.ApplyContext(context.Background(), input)
+}
+
+func (s *Service) ApplyContext(ctx context.Context, input Input) (ApplyResult, error) {
+	if !s.applyMu.TryLock() {
+		return ApplyResult{}, ErrRuntimeBusy
+	}
+	defer s.applyMu.Unlock()
 	if strings.TrimSpace(input.Confirmation) != ApplyConfirmation {
 		return ApplyResult{}, ErrConfirmationRequired
 	}
@@ -78,13 +97,59 @@ func (s *Service) Apply(input Input) (ApplyResult, error) {
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	if len(updates) > 0 {
-		snapshot, err = s.repository.Save(snapshot.Revision, updates)
-		if err != nil {
-			return ApplyResult{}, err
+	previous := snapshot
+	persist := func() error {
+		if len(updates) == 0 {
+			return nil
 		}
+		snapshot, err = s.repository.Save(previous.Revision, updates)
+		return err
+	}
+	rollback := func() error {
+		values := make(map[string]string, len(updates))
+		for id := range updates {
+			values[id] = previous.Values[id]
+		}
+		_, rollbackErr := s.repository.Save(snapshot.Revision, values)
+		return rollbackErr
+	}
+	combined := make(map[string]string, len(snapshot.Values))
+	for id, value := range snapshot.Values {
+		combined[id] = value
+	}
+	for id, value := range updates {
+		combined[id] = value
+	}
+	if s.applier != nil && s.runtimeChanged(combined) {
+		if err = s.applier(ctx, persist, rollback); err == nil {
+			s.baselineMu.Lock()
+			s.startupValues = combined
+			s.baselineMu.Unlock()
+		}
+	} else {
+		err = persist()
+	}
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	// Runtime initialization may persist generated node identity or gateway
+	// credentials in this file. Return the current revision for the next edit.
+	snapshot, err = s.repository.Snapshot()
+	if err != nil {
+		return ApplyResult{}, err
 	}
 	return ApplyResult{Settings: s.settingsFromSnapshot(snapshot), Changes: preview.Changes}, nil
+}
+
+func (s *Service) runtimeChanged(values map[string]string) bool {
+	s.baselineMu.RLock()
+	defer s.baselineMu.RUnlock()
+	for _, definition := range fieldDefinitions {
+		if definition.RestartRequired && s.effectiveValue(definition.ID, values[definition.ID]) != s.effectiveValue(definition.ID, s.startupValues[definition.ID]) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) preview(snapshot Snapshot, input Input) (Preview, error) {
@@ -125,7 +190,7 @@ func (s *Service) preview(snapshot Snapshot, input Input) (Preview, error) {
 	restartRequired := false
 	for _, change := range changes {
 		definition, _ := definitionByID(change.FieldID)
-		restartRequired = restartRequired || definition.RestartRequired
+		restartRequired = restartRequired || definition.RestartRequired && s.applier == nil
 	}
 	return Preview{Valid: valid, Revision: snapshot.Revision, Changes: changes, Issues: issues, RestartRequired: restartRequired}, nil
 }
@@ -175,16 +240,10 @@ func (s *Service) settingsFromSnapshot(snapshot Snapshot) Settings {
 		}
 		options := make([]string, len(definition.Options))
 		copy(options, definition.Options)
-		fields = append(fields, Field{ID: definition.ID, Group: definition.Group, Label: definition.Label, Kind: definition.Kind, Value: value, Options: options, Source: source, Environment: environment, Editable: source != SourceEnvironment && !definition.ReadOnly, Sensitive: definition.Sensitive, Configured: configured, RestartRequired: definition.RestartRequired, Minimum: definition.Minimum, Maximum: definition.Maximum})
+		fields = append(fields, Field{ID: definition.ID, Group: definition.Group, Label: definition.Label, Kind: definition.Kind, Value: value, Options: options, Source: source, Environment: environment, Editable: source != SourceEnvironment && !definition.ReadOnly, Sensitive: definition.Sensitive, Configured: configured, RestartRequired: definition.RestartRequired && s.applier == nil, Minimum: definition.Minimum, Maximum: definition.Maximum})
 	}
-	restartRequired := false
-	for _, definition := range fieldDefinitions {
-		if definition.RestartRequired && snapshot.Values[definition.ID] != s.startupValues[definition.ID] {
-			restartRequired = true
-			break
-		}
-	}
-	return Settings{Revision: snapshot.Revision, ConfigurationPath: snapshot.ConfigurationPath, BackupPath: snapshot.BackupPath, RestartRequired: restartRequired, Fields: fields, ReadAt: s.now().UTC()}
+	restartRequired := s.runtimeChanged(snapshot.Values)
+	return Settings{RuntimeApplySupported: s.applier != nil, Revision: snapshot.Revision, ConfigurationPath: snapshot.ConfigurationPath, BackupPath: snapshot.BackupPath, RestartRequired: restartRequired, Fields: fields, ReadAt: s.now().UTC()}
 }
 
 func (s *Service) editable(definition fieldDefinition) bool {

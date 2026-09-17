@@ -82,6 +82,8 @@ func (m *Member) Connected() bool {
 	return m != nil && m.agent != nil && m.agent.Connected()
 }
 
+func (m *Member) PauseIfIdle() (func(), error) { return m.agent.PauseCommandsIfIdle() }
+
 func prepareIdentity(path, controllerURL, securityKey, nodeID string) error {
 	configuration := ini.Empty()
 	if raw, err := os.ReadFile(path); err == nil {

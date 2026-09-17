@@ -9130,6 +9130,7 @@ components:
       additionalProperties: false
       required: [revision, configurationPath, backupPath, restartRequired, fields, readAt]
       properties:
+        runtimeApplySupported: { type: boolean, description: Whether idle runtime modules can apply settings without a process restart. }
         revision: { type: string, pattern: '^[a-f0-9]{64}$' }
         configurationPath: { type: string }
         backupPath: { type: string }
