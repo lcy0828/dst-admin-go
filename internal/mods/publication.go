@@ -1,6 +1,8 @@
 package mods
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"reflect"
 	"sort"
@@ -22,18 +24,22 @@ type OverrideModState struct {
 }
 
 type OverrideSnapshot struct {
-	Revision string             `json:"revision"`
-	Mods     []OverrideModState `json:"mods"`
+	Revision               string             `json:"revision"`
+	Mods                   []OverrideModState `json:"mods"`
+	EntryRevisions         map[string]string  `json:"entryRevisions,omitempty"`
+	ConfigurationRevisions map[string]string  `json:"configurationRevisions,omitempty"`
 }
 
 type OverrideMutation struct {
-	Action           OverrideAction
-	ModIDs           []string
-	ModID            string
-	Enabled          bool
-	ExpectedRevision string
-	Patch            map[string]json.RawMessage
-	Fields           []ConfigField
+	ConfigurationSource []byte
+	Action              OverrideAction
+	ModIDs              []string
+	ModID               string
+	Enabled             bool
+	PreserveEnabled     bool
+	ExpectedRevision    string
+	Patch               map[string]json.RawMessage
+	Fields              []ConfigField
 }
 
 type OverrideMutationResult struct {
@@ -110,6 +116,25 @@ func MutateModOverride(content []byte, mutation OverrideMutation) (OverrideMutat
 		if validationErr != nil {
 			return OverrideMutationResult{}, validationErr
 		}
+		if len(mutation.ConfigurationSource) > 0 {
+			source, sourceErr := parseModOverrideContent(mutation.ConfigurationSource, 0o640, true, "source-modoverrides.lua")
+			if sourceErr != nil {
+				return OverrideMutationResult{}, sourceErr
+			}
+			sourceEntry, sourceErr := requireOverrideEntry(source, mutation.ModID)
+			if sourceErr != nil {
+				return OverrideMutationResult{}, sourceErr
+			}
+			options, exists := modConfiguration(sourceEntry)
+			if !exists {
+				options = tableNode()
+			}
+			current, exists := modConfiguration(entry)
+			if !exists || modEntryRevision(current) != modEntryRevision(options) {
+				entry.setStringEntry("configuration_options", options)
+				changes = append(changes, ConfigChange{Path: "configuration_options", Label: "统一世界配置", Operation: "replace"})
+			}
+		}
 		configurationChanges, patchErr := applyOverrideConfiguration(entry, mutation)
 		if patchErr != nil {
 			return OverrideMutationResult{}, patchErr
@@ -156,7 +181,7 @@ func applyOverrideConfiguration(entry *luaNode, mutation OverrideMutation) ([]Co
 	}
 	changes := make([]ConfigChange, 0, len(mutation.Patch)+1)
 	currentEnabled := modEnabled(entry)
-	if currentEnabled != mutation.Enabled {
+	if !mutation.PreserveEnabled && currentEnabled != mutation.Enabled {
 		changes = append(changes, ConfigChange{Path: "enabled", Label: "启用状态", Before: currentEnabled, After: mutation.Enabled, Operation: "replace"})
 		entry.setStringEntry("enabled", boolNode(mutation.Enabled))
 	}
@@ -220,6 +245,8 @@ func applyOverrideConfiguration(entry *luaNode, mutation OverrideMutation) ([]Co
 
 func overrideSnapshot(document modOverrideDocument) OverrideSnapshot {
 	mods := make([]OverrideModState, 0)
+	entryRevisions := make(map[string]string)
+	configurationRevisions := make(map[string]string)
 	for _, entry := range document.root.entries {
 		if entry.key.kind.String() != "string" || !strings.HasPrefix(entry.key.text, "workshop-") {
 			continue
@@ -227,8 +254,23 @@ func overrideSnapshot(document modOverrideDocument) OverrideSnapshot {
 		modID := strings.TrimPrefix(entry.key.text, "workshop-")
 		if validModID(modID) {
 			mods = append(mods, OverrideModState{ModID: modID, Enabled: modEnabled(entry.value)})
+			entryRevisions[modID] = modEntryRevision(entry.value)
+			options, ok := modConfiguration(entry.value)
+			if !ok {
+				options = tableNode()
+			}
+			configurationRevisions[modID] = modEntryRevision(options)
 		}
 	}
 	sort.Slice(mods, func(i, j int) bool { return mods[i].ModID < mods[j].ModID })
-	return OverrideSnapshot{Revision: document.revision, Mods: mods}
+	return OverrideSnapshot{Revision: document.revision, Mods: mods, EntryRevisions: entryRevisions, ConfigurationRevisions: configurationRevisions}
+}
+
+func modEntryRevision(entry *luaNode) string {
+	var rendered strings.Builder
+	if err := writeLuaNode(&rendered, entry, 0); err != nil {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(rendered.String()))
+	return hex.EncodeToString(digest[:])
 }

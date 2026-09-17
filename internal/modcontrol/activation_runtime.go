@@ -63,7 +63,7 @@ func (r *ActivationRuntime) execute(ctx context.Context, world modpublication.Wo
 		return err
 	}
 	fence, found := activationFence(operation.Fences, world.RoomID)
-	if !found && target.TargetID != "local" {
+	if !found {
 		return modpublication.ErrInvalidInput
 	}
 	expires := fence.ExpiresAt.UTC()
@@ -71,8 +71,8 @@ func (r *ActivationRuntime) execute(ctx context.Context, world modpublication.Wo
 		ID: operation.IdempotencyKey, Key: fence.OperationKey, LeaseID: fence.LeaseID,
 		FencingToken: fence.FencingToken, LeaseExpiresAt: &expires,
 	}
-	if target.TargetID == "local" {
-		request.Key, request.LeaseID, request.FencingToken, request.LeaseExpiresAt = "", "", 0, nil
+	if action == shared.ShardActionStart {
+		request.LaunchOptions.SkipUpdateServerMods = true
 	}
 	_, err = driver.ExecuteShard(ctx, target, request, action, 60*time.Second)
 	return err

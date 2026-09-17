@@ -3,6 +3,7 @@ package modpublication
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -118,11 +119,16 @@ func activationRuntimeFor(worlds []ManagedWorld) *fakeActivationRuntime {
 	}
 	for _, world := range worlds {
 		runtime.states[world.WorldID] = ShardRuntimeObservation{State: "running", SessionExists: true}
-		if world.IsMaster {
-			runtime.markers[world.WorldID] = "[00:00:22]: [Shard] Shard server started on port: 10888"
-		} else {
-			runtime.markers[world.WorldID] = "[00:00:26]: [Shard] secondary shard LUA is now ready!"
+		lines := make([]string, 0, len(world.Mods)+1)
+		for _, mod := range world.Mods {
+			lines = append(lines, "[00:00:18]: Registering Mod workshop-"+mod.WorkshopID)
 		}
+		if world.IsMaster {
+			lines = append(lines, "[00:00:22]: [Shard] Shard server started on port: 10888")
+		} else {
+			lines = append(lines, "[00:00:26]: [Shard] secondary shard LUA is now ready!")
+		}
+		runtime.markers[world.WorldID] = strings.Join(lines, "\n")
 	}
 	return runtime
 }
@@ -178,11 +184,114 @@ func TestPublicationActivationCoordinatesShardOrderAndConfirmsLogs(t *testing.T)
 		}
 		markers[shard.WorldID] = shard.LoadMarker
 	}
-	if markers["master"] != "master-shard-server-started" || markers["caves"] != "secondary-shard-lua-ready" {
+	if markers["master"] != "master-shard-server-started;mods=1/1" || markers["caves"] != "secondary-shard-lua-ready;mods=1/1" {
 		t.Fatalf("unexpected load markers: %#v", markers)
 	}
 	if notifier.calls != 1 || notifier.action != "restart" || notifier.source != "mod_sync" || notifier.jobID != "job-publication-activated" || !notifier.borrowedLease || len(notifier.roomIDs) != 1 || notifier.roomIDs[0] != "room-a" {
 		t.Fatalf("notifier=%#v", notifier)
+	}
+}
+
+func TestOrdinaryStartConfirmationProjectsLoadedReplicaState(t *testing.T) {
+	worlds, placements := twoTargetWorlds()
+	worlds[0].IsMaster = true
+	activation := activationRuntimeFor(worlds)
+	app := newTestApplication(t, worlds, placements)
+	coordinator := coordinatorWithActivation(t, app, activation)
+	replicas := NewReplicaStore(app.db, "ordinary_start_loaded_")
+	if err := replicas.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.ConfigureReplicaStore(replicas); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := coordinator.Preview(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := replicas.SetDesired(plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range plan.Targets {
+		if err := replicas.MarkCompleted(target, plan.PlanHash); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := coordinator.ConfirmWorldLoaded(context.Background(), plan, worlds[0].RoomID, worlds[0].WorldID); err != nil {
+		t.Fatal(err)
+	}
+	state, err := replicas.Room(worlds[0].RoomID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded := false
+	for _, item := range state.Items {
+		for _, target := range item.Targets {
+			for _, world := range target.Worlds {
+				if world.WorldID == worlds[0].WorldID && world.Loaded && world.ObservedRevision == plan.PlanHash {
+					loaded = true
+				}
+			}
+		}
+	}
+	if !loaded {
+		t.Fatalf("ordinary start did not project loaded state: %#v", state)
+	}
+}
+
+func TestActivationLoadConfirmationRequiresEveryExpectedMod(t *testing.T) {
+	world := WorldPlan{
+		RoomID: "room-a", WorldID: "master", WorldDirectory: "Master", IsMaster: true,
+		Mods: []ContentArtifact{{WorkshopID: "111"}, {WorkshopID: "222"}},
+	}
+	runtime := &fakeActivationRuntime{
+		states: map[string]ShardRuntimeObservation{"master": {State: "running", SessionExists: true}},
+		markers: map[string]string{
+			"master": "[00:00:18]: Loading mod: workshop-111\n[00:00:22]: [Shard] Shard server started on port: 10888",
+		},
+		fail: make(map[string]error),
+	}
+	coordinator := &Coordinator{activation: runtime, activationPollInterval: time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	defer cancel()
+	startedAt := time.Now()
+	_, _, err := coordinator.confirmShardLoaded(ctx, world, LogCursor{}, LoadConfirmationLogs)
+	if err == nil || !strings.Contains(err.Error(), "222") || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("missing mod error=%v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 250*time.Millisecond {
+		t.Fatalf("ready shard waited for confirmation timeout before reporting missing mod: %s", elapsed)
+	}
+}
+
+func TestActivationLoadConfirmationRejectsNoModsRegistered(t *testing.T) {
+	world := WorldPlan{
+		RoomID: "room-a", WorldID: "master", WorldDirectory: "Master", IsMaster: true,
+		Mods: []ContentArtifact{{WorkshopID: "111"}},
+	}
+	runtime := &fakeActivationRuntime{
+		states:  map[string]ShardRuntimeObservation{"master": {State: "running", SessionExists: true}},
+		markers: map[string]string{"master": "[00:00:18]: No mods registered.\n[00:00:22]: [Shard] Shard server started on port: 10888"},
+		fail:    make(map[string]error),
+	}
+	coordinator := &Coordinator{activation: runtime, activationPollInterval: time.Millisecond}
+	_, _, err := coordinator.confirmShardLoaded(context.Background(), world, LogCursor{}, LoadConfirmationLogs)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "no registered mods") {
+		t.Fatalf("no-mod registration error=%v", err)
+	}
+}
+
+func TestActivationLoadConfirmationAllowsWorldWithoutMods(t *testing.T) {
+	world := WorldPlan{RoomID: "room-a", WorldID: "master", WorldDirectory: "Master", IsMaster: true}
+	runtime := &fakeActivationRuntime{
+		states:  map[string]ShardRuntimeObservation{"master": {State: "running", SessionExists: true}},
+		markers: map[string]string{"master": "[00:00:18]: No mods registered.\n[00:00:22]: [Shard] Shard server started on port: 10888"},
+		fail:    make(map[string]error),
+	}
+	coordinator := &Coordinator{activation: runtime, activationPollInterval: time.Millisecond}
+	marker, _, err := coordinator.confirmShardLoaded(context.Background(), world, LogCursor{}, LoadConfirmationLogs)
+	if err != nil || marker != "master-shard-server-started" {
+		t.Fatalf("marker=%q error=%v", marker, err)
 	}
 }
 

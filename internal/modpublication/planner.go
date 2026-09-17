@@ -334,7 +334,8 @@ func validatePlan(plan Plan) error {
 }
 
 func validateStoredArtifact(artifact ContentArtifact) error {
-	if !validWorkshopID(artifact.WorkshopID) || !validSHA(artifact.TreeSHA256) || !validSHA(artifact.ManifestSHA256) || artifact.Size < 0 || artifact.FileCount < 0 || strings.TrimSpace(artifact.SourceRef) == "" {
+	if !validWorkshopID(artifact.WorkshopID) || !validSHA(artifact.TreeSHA256) || !validSHA(artifact.ManifestSHA256) || artifact.Size < 0 || artifact.FileCount < 0 || strings.TrimSpace(artifact.SourceRef) == "" ||
+		artifact.SteamManifestID != "" && !validWorkshopID(artifact.SteamManifestID) {
 		return ErrInvalidInput
 	}
 	return nil
@@ -374,7 +375,8 @@ func validatePlacement(value AppliedPlacement) error {
 }
 
 func validateArtifact(requirement ModRequirement, artifact ContentArtifact) error {
-	if artifact.WorkshopID != requirement.WorkshopID || !validWorkshopID(artifact.WorkshopID) || !validSHA(artifact.TreeSHA256) || !validSHA(artifact.ManifestSHA256) || artifact.Size < 0 || artifact.FileCount < 0 || strings.TrimSpace(artifact.SourceRef) == "" {
+	if artifact.WorkshopID != requirement.WorkshopID || !validWorkshopID(artifact.WorkshopID) || !validSHA(artifact.TreeSHA256) || !validSHA(artifact.ManifestSHA256) || artifact.Size < 0 || artifact.FileCount < 0 || strings.TrimSpace(artifact.SourceRef) == "" ||
+		artifact.SteamManifestID != "" && !validWorkshopID(artifact.SteamManifestID) {
 		return ErrInvalidInput
 	}
 	if requirement.TreeSHA256 != "" && !strings.EqualFold(requirement.TreeSHA256, artifact.TreeSHA256) {

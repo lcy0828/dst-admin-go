@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -16,6 +17,8 @@ import (
 	"time"
 	"unicode"
 
+	"dont/internal/requesttiming"
+
 	"github.com/PuerkitoBio/goquery"
 )
 
@@ -23,10 +26,8 @@ const (
 	steamResponseLimit      = int64(16 * 1024 * 1024)
 	steamCommunityPageSize  = 30
 	steamCommunityUserAgent = "dst-admin-go/1.0 (+https://github.com/lcy0828/dst-admin-go)"
-	steamCommunityCacheTTL  = 6 * time.Hour
-	steamCommunityWorkers   = 6
-	steamCommunityAttempts  = 2
-	steamCommunityRetryWait = 150 * time.Millisecond
+	steamCommunityCacheTTL  = 7 * 24 * time.Hour
+	steamCommunityWorkers   = 2
 )
 
 var steamRatingImagePattern = regexp.MustCompile(`(?:^|/)([1-5])-star_large(?:[.?]|$)`)
@@ -37,15 +38,18 @@ type MetadataProvider interface {
 }
 
 type SteamProvider struct {
-	APIKey         string
-	AppID          string
-	HTTPClient     *http.Client
-	APIBase        string
-	CommunityBase  string
-	cacheMu        sync.Mutex
-	communityCache map[string]communityMetadataCache
-	communityCalls map[string]*communityMetadataCall
-	communitySlots chan struct{}
+	APIKey            string
+	AppID             string
+	HTTPClient        *http.Client
+	APIBase           string
+	CommunityBase     string
+	cacheMu           sync.Mutex
+	communityCache    map[string]communityMetadataCache
+	communityCalls    map[string]*communityMetadataCall
+	communitySlots    chan struct{}
+	communityCooldown time.Time
+	store             *MetadataStore
+	summarySlot       chan struct{}
 }
 
 type communityMetadataCall struct {
@@ -61,6 +65,7 @@ type communityMetadataCache struct {
 	Score       float64
 	RatingCount int64
 	ExpiresAt   time.Time
+	Err         error `json:"-"`
 }
 
 type steamInt64 int64
@@ -88,6 +93,7 @@ func NewSteamProvider(apiKey, appID string) *SteamProvider {
 		HTTPClient: &http.Client{Timeout: 12 * time.Second}, APIBase: "https://api.steampowered.com",
 		CommunityBase: "https://steamcommunity.com", communityCache: make(map[string]communityMetadataCache),
 		communityCalls: make(map[string]*communityMetadataCall), communitySlots: make(chan struct{}, steamCommunityWorkers),
+		summarySlot: make(chan struct{}, 1),
 	}
 }
 
@@ -99,14 +105,20 @@ func (p *SteamProvider) Search(ctx context.Context, options SearchOptions) (Sear
 	query, page, pageSize := options.Query, options.Page, options.PageSize
 	if validModID(query) {
 		details, err := p.Details(ctx, []string{query})
-		if err != nil {
+		if err != nil && len(details) == 0 {
 			return SearchResult{}, err
 		}
 		items := []SteamMod{}
 		if item, ok := details[query]; ok {
 			items = append(items, item)
 		}
-		return SearchResult{Items: items, Total: len(items), Page: 1, PageSize: pageSize}, nil
+		result := SearchResult{Items: items, Total: len(items), Page: 1, PageSize: pageSize}
+		if err != nil {
+			result.Warning = err.Error()
+		} else if len(items) > 0 && strings.TrimSpace(items[0].Author) == "" {
+			result.Warning = "工坊暂未返回作者资料，已保留现有信息；60 秒后可重试"
+		}
+		return result, nil
 	}
 	if p.APIKey == "" {
 		return p.searchCommunity(ctx, options)
@@ -141,7 +153,7 @@ func (p *SteamProvider) Search(ctx context.Context, options SearchOptions) (Sear
 		}
 	}
 	p.populateAuthors(ctx, items)
-	p.populateCommunityMetadata(ctx, items)
+	p.rememberSearch(items, displayLanguage)
 	return SearchResult{Items: items, Total: payload.Response.Total, Page: page, PageSize: pageSize}, nil
 }
 
@@ -187,7 +199,7 @@ func (p *SteamProvider) searchCommunity(ctx context.Context, options SearchOptio
 	for _, item := range items {
 		ids = append(ids, item.ID)
 	}
-	details, err := p.Details(ctx, ids)
+	details, err := p.Summaries(ctx, ids)
 	if err != nil {
 		return SearchResult{}, fmt.Errorf("load public Steam Workshop search details: %w", err)
 	}
@@ -208,10 +220,20 @@ func (p *SteamProvider) searchCommunity(ctx context.Context, options SearchOptio
 			items[index] = detail
 		}
 	}
+	p.rememberSearch(items, steamCommunityLanguage(options.Query))
 	return SearchResult{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
 }
 
 func (p *SteamProvider) searchCommunityPage(ctx context.Context, options SearchOptions, page int) ([]SteamMod, int, error) {
+	select {
+	case p.communitySlots <- struct{}{}:
+		defer func() { <-p.communitySlots }()
+	case <-ctx.Done():
+		return nil, -1, ctx.Err()
+	}
+	if err := p.communityLimit(); err != nil {
+		return nil, -1, err
+	}
 	parameters := url.Values{
 		"appid": {p.AppID}, "searchtext": {options.Query}, "browsesort": {steamCommunitySort(options.Sort)},
 		"section": {"readytouseitems"}, "p": {strconv.Itoa(page)},
@@ -228,6 +250,7 @@ func (p *SteamProvider) searchCommunityPage(ctx context.Context, options SearchO
 	}
 	request.Header.Set("User-Agent", steamCommunityUserAgent)
 	request.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	request.Header.Set("Accept", "text/html")
 	response, err := p.HTTPClient.Do(request)
 	if err != nil {
 		return nil, -1, fmt.Errorf("search public Steam Workshop: %w", err)
@@ -235,6 +258,10 @@ func (p *SteamProvider) searchCommunityPage(ctx context.Context, options SearchO
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		if response.StatusCode == http.StatusTooManyRequests {
+			p.limitCommunity(response.Header.Get("Retry-After"))
+			return nil, -1, p.communityLimit()
+		}
 		return nil, -1, fmt.Errorf("public Steam Workshop returned HTTP %d", response.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, steamResponseLimit+1))
@@ -247,6 +274,10 @@ func (p *SteamProvider) searchCommunityPage(ctx context.Context, options SearchO
 	document, err := goquery.NewDocumentFromReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, -1, fmt.Errorf("parse public Steam Workshop response: %w", err)
+	}
+	if body := strings.ToLower(document.Find("body").Text()); strings.Contains(body, "too many requests") || strings.Contains(body, "请求太多") {
+		p.limitCommunity(response.Header.Get("Retry-After"))
+		return nil, -1, p.communityLimit()
 	}
 	items := make([]SteamMod, 0, steamCommunityPageSize)
 	seen := make(map[string]bool, steamCommunityPageSize)
@@ -311,6 +342,20 @@ func steamCommunityLanguage(query string) string {
 }
 
 func (p *SteamProvider) Details(ctx context.Context, ids []string) (map[string]SteamMod, error) {
+	if p.store != nil {
+		return p.storedDetails(ctx, ids, true)
+	}
+	return p.details(ctx, ids, true)
+}
+
+// Summaries resolves the batch Workshop fields needed by runtime inventory.
+// Per-item community pages are intentionally skipped because they make a
+// machine content read scale linearly with the number of installed Mods.
+func (p *SteamProvider) Summaries(ctx context.Context, ids []string) (map[string]SteamMod, error) {
+	return p.details(ctx, ids, false)
+}
+
+func (p *SteamProvider) details(ctx context.Context, ids []string, enrichCommunity bool) (map[string]SteamMod, error) {
 	ids = uniqueModIDs(ids)
 	if len(ids) == 0 {
 		return map[string]SteamMod{}, nil
@@ -355,12 +400,31 @@ func (p *SteamProvider) Details(ctx context.Context, ids []string) (map[string]S
 		}
 		items = append(items, converted)
 	}
-	p.populateAuthors(ctx, items)
-	p.populateCommunityMetadata(ctx, items)
+	p.rememberSummaries(items)
+	var enrichmentErr error
+	if enrichCommunity {
+		p.populateAuthors(ctx, items)
+		enrichmentErr = p.populateCommunityMetadata(ctx, items)
+	} else {
+		for index := range items {
+			if cached, ok := p.cachedCommunityMetadata(items[index].ID); ok {
+				mergeCommunityMetadata(&items[index], cached)
+			}
+		}
+	}
 	for _, item := range items {
 		result[item.ID] = item
 	}
-	return result, nil
+	var missing []string
+	for _, id := range ids {
+		if _, ok := result[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		enrichmentErr = errors.Join(enrichmentErr, fmt.Errorf("Steam 未返回 Workshop 信息：%s", strings.Join(missing, ", ")))
+	}
+	return result, enrichmentErr
 }
 
 type steamDetailWire struct {
@@ -378,6 +442,7 @@ type steamDetailWire struct {
 	Favorites       steamInt64 `json:"favorited"`
 	Views           steamInt64 `json:"views"`
 	FileSize        steamInt64 `json:"file_size"`
+	SteamManifestID string     `json:"hcontent_file"`
 	Score           float64    `json:"score"`
 	VoteData        struct {
 		Score     float64    `json:"score"`
@@ -432,7 +497,7 @@ func (value steamDetailWire) mod(appID string) (SteamMod, bool) {
 		ID: value.ID, Name: value.Title, AuthorID: value.Creator, Description: description,
 		Version: version, PreviewURL: value.PreviewURL, Subscriptions: int64(value.Subscriptions), Score: score,
 		RatingCount: int64(value.VoteData.VotesUp + value.VoteData.VotesDown), Favorites: int64(value.Favorites),
-		Views: int64(value.Views), FileSize: int64(value.FileSize),
+		Views: int64(value.Views), FileSize: int64(value.FileSize), SteamManifestID: strings.TrimSpace(value.SteamManifestID),
 		Dependencies: uniqueModIDs(dependencies), Tags: tags,
 	}
 	if value.Created > 0 {
@@ -483,14 +548,25 @@ func (p *SteamProvider) populateAuthors(ctx context.Context, items []SteamMod) {
 	}
 }
 
-func (p *SteamProvider) populateCommunityMetadata(ctx context.Context, items []SteamMod) {
+func (p *SteamProvider) populateCommunityMetadata(ctx context.Context, items []SteamMod) error {
 	var wait sync.WaitGroup
+	var mu sync.Mutex
+	var failures []error
+	seenErrors := make(map[string]bool)
 	for index := range items {
 		index := index
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
 			metadata, ok := p.communityMetadata(ctx, items[index].ID)
+			if metadata.Err != nil {
+				mu.Lock()
+				if message := metadata.Err.Error(); !seenErrors[message] {
+					seenErrors[message] = true
+					failures = append(failures, metadata.Err)
+				}
+				mu.Unlock()
+			}
 			if !ok {
 				return
 			}
@@ -498,57 +574,59 @@ func (p *SteamProvider) populateCommunityMetadata(ctx context.Context, items []S
 		}()
 	}
 	wait.Wait()
+	return errors.Join(failures...)
 }
 
 func (p *SteamProvider) loadCommunityMetadata(ctx context.Context, id string) (communityMetadataCache, bool) {
-	for attempt := 0; attempt < steamCommunityAttempts; attempt++ {
-		metadata, ok := p.fetchCommunityMetadata(ctx, id)
-		if ok {
-			return metadata, true
-		}
-		if attempt == steamCommunityAttempts-1 {
-			break
-		}
-		timer := time.NewTimer(steamCommunityRetryWait)
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
-			return communityMetadataCache{}, false
-		}
-	}
-	return communityMetadataCache{}, false
+	return p.fetchCommunityMetadata(ctx, id)
 }
 
 func (p *SteamProvider) fetchCommunityMetadata(ctx context.Context, id string) (communityMetadataCache, bool) {
+	if err := p.communityLimit(); err != nil {
+		return communityMetadataCache{Err: err}, false
+	}
 	parameters := url.Values{"id": {id}, "l": {"schinese"}}
 	endpoint := strings.TrimRight(p.CommunityBase, "/") + "/sharedfiles/filedetails/?" + parameters.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return communityMetadataCache{}, false
+		return communityMetadataCache{Err: err}, false
 	}
 	request.Header.Set("User-Agent", steamCommunityUserAgent)
+	request.Header.Set("Accept", "text/html")
 	response, err := p.HTTPClient.Do(request)
 	if err != nil {
-		return communityMetadataCache{}, false
+		return communityMetadataCache{Err: fmt.Errorf("获取 Workshop %s 工坊页面：%w", id, err)}, false
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		return communityMetadataCache{}, false
+		if response.StatusCode == http.StatusTooManyRequests {
+			p.limitCommunity(response.Header.Get("Retry-After"))
+			return communityMetadataCache{Err: p.communityLimit()}, false
+		}
+		return communityMetadataCache{Err: fmt.Errorf("Workshop %s 工坊页面返回 HTTP %d", id, response.StatusCode)}, false
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, steamResponseLimit+1))
-	if err != nil || int64(len(data)) > steamResponseLimit {
-		return communityMetadataCache{}, false
+	if err != nil {
+		return communityMetadataCache{Err: err}, false
+	}
+	if int64(len(data)) > steamResponseLimit {
+		return communityMetadataCache{Err: fmt.Errorf("Workshop %s 工坊页面超过大小限制", id)}, false
 	}
 	document, err := goquery.NewDocumentFromReader(bytes.NewReader(data))
 	if err != nil {
-		return communityMetadataCache{}, false
+		return communityMetadataCache{Err: err}, false
 	}
 	metadata := communityMetadataCache{ExpiresAt: time.Now().Add(steamCommunityCacheTTL)}
 	metadata.Name = strings.TrimSpace(document.Find(".workshopItemTitle").First().Text())
+	if metadata.Name == "" {
+		body := strings.ToLower(document.Find("body").Text())
+		if strings.Contains(body, "too many requests") || strings.Contains(body, "请求太多") {
+			p.limitCommunity(response.Header.Get("Retry-After"))
+			return communityMetadataCache{Err: p.communityLimit()}, false
+		}
+		return communityMetadataCache{Err: fmt.Errorf("Workshop %s 未返回有效的工坊详情页面", id)}, false
+	}
 	metadata.Author = cleanCommunityAuthor(document.Find(`a[href*="/myworkshopfiles/"]`).First().Text())
 	description := document.Find("#highlightContent").First()
 	description.Find("br").Each(func(_ int, selection *goquery.Selection) {
@@ -576,17 +654,25 @@ func (p *SteamProvider) fetchCommunityMetadata(ctx context.Context, id string) (
 }
 
 func (p *SteamProvider) communityMetadata(ctx context.Context, id string) (communityMetadataCache, bool) {
-	if cached, ok := p.cachedCommunityMetadata(id); ok {
-		return cached, true
+	cached, cachedOK := p.cachedCommunityMetadata(id)
+	// Partial pages remain useful for summaries, but must not turn a metadata
+	// retry into a cache hit for the entire display TTL.
+	if cachedOK {
+		return cached, cached.Name != "" || cached.Author != ""
 	}
 	p.cacheMu.Lock()
+	previous := p.communityCache[id]
+	if time.Now().Before(previous.ExpiresAt) {
+		p.cacheMu.Unlock()
+		return previous, previous.Name != "" || previous.Author != ""
+	}
 	if call, ok := p.communityCalls[id]; ok {
 		p.cacheMu.Unlock()
 		select {
 		case <-call.done:
 			return call.metadata, call.ok
 		case <-ctx.Done():
-			return communityMetadataCache{}, false
+			return communityMetadataCache{Err: ctx.Err()}, false
 		}
 	}
 	call := &communityMetadataCall{done: make(chan struct{})}
@@ -598,10 +684,37 @@ func (p *SteamProvider) communityMetadata(ctx context.Context, id string) (commu
 		call.metadata, call.ok = p.loadCommunityMetadata(ctx, id)
 		<-p.communitySlots
 	case <-ctx.Done():
+		call.metadata.Err = ctx.Err()
 	}
 
-	p.cacheMu.Lock()
+	if !call.ok && (previous.Name != "" || previous.Author != "") {
+		err := call.metadata.Err
+		call.metadata, call.ok = previous, true
+		call.metadata.Err = err
+	}
 	if call.ok {
+		if call.metadata.Author == "" {
+			call.metadata.Author = previous.Author
+		}
+		if call.metadata.Description == "" {
+			call.metadata.Description = previous.Description
+		}
+		if call.metadata.Author == "" {
+			call.metadata.ExpiresAt = time.Now().Add(time.Minute)
+		}
+	}
+	if call.ok && call.metadata.Err == nil && p.store != nil {
+		if err := p.store.save(id, displayLanguage, nil, &call.metadata, time.Now()); err != nil {
+			log.Printf("[WorkshopMetadata] save display id=%s: %v", id, err)
+		}
+	}
+	p.cacheMu.Lock()
+	if call.metadata.Err != nil {
+		// Avoid repeated failed page loads as the user changes panels. This
+		// short backoff is display-only; version API calls never consult it.
+		call.metadata.ExpiresAt = time.Now().Add(time.Minute)
+		p.communityCache[id] = call.metadata
+	} else if call.ok {
 		p.communityCache[id] = call.metadata
 	}
 	delete(p.communityCalls, id)
@@ -610,12 +723,34 @@ func (p *SteamProvider) communityMetadata(ctx context.Context, id string) (commu
 	return call.metadata, call.ok
 }
 
+func (p *SteamProvider) limitCommunity(retryAfter string) {
+	until := time.Now().Add(time.Minute)
+	if seconds, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && seconds > 0 {
+		until = time.Now().Add(time.Duration(seconds) * time.Second)
+	} else if date, err := http.ParseTime(retryAfter); err == nil && date.After(until) {
+		until = date
+	}
+	p.cacheMu.Lock()
+	if until.After(p.communityCooldown) {
+		p.communityCooldown = until
+	}
+	p.cacheMu.Unlock()
+}
+
+func (p *SteamProvider) communityLimit() error {
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
+	if remaining := time.Until(p.communityCooldown); remaining > 0 {
+		return fmt.Errorf("Steam 暂时限制工坊资料查询，约 %d 秒后可重试；版本检查不受此限制", int(remaining.Seconds())+1)
+	}
+	return nil
+}
+
 func (p *SteamProvider) cachedCommunityMetadata(id string) (communityMetadataCache, bool) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
 	value, ok := p.communityCache[id]
 	if !ok || time.Now().After(value.ExpiresAt) {
-		delete(p.communityCache, id)
 		return communityMetadataCache{}, false
 	}
 	return value, true
@@ -625,7 +760,7 @@ func mergeCommunityMetadata(item *SteamMod, metadata communityMetadataCache) {
 	if metadata.Name != "" {
 		item.Name = metadata.Name
 	}
-	if item.Author == "" {
+	if metadata.Author != "" {
 		item.Author = metadata.Author
 	}
 	if metadata.Description != "" {
@@ -640,7 +775,9 @@ func mergeCommunityMetadata(item *SteamMod, metadata communityMetadataCache) {
 }
 
 func (p *SteamProvider) doJSON(request *http.Request, target interface{}) error {
+	finishHTTP := requesttiming.Start(request.Context(), "steam.response_headers")
 	response, err := p.HTTPClient.Do(request)
+	finishHTTP()
 	if err != nil {
 		return err
 	}
@@ -649,13 +786,16 @@ func (p *SteamProvider) doJSON(request *http.Request, target interface{}) error 
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		return fmt.Errorf("Steam API returned HTTP %d", response.StatusCode)
 	}
+	finishBody := requesttiming.Start(request.Context(), "steam.response_body")
 	data, err := io.ReadAll(io.LimitReader(response.Body, steamResponseLimit+1))
+	finishBody()
 	if err != nil {
 		return err
 	}
 	if int64(len(data)) > steamResponseLimit {
 		return fmt.Errorf("Steam API response exceeds %d bytes", steamResponseLimit)
 	}
+	defer requesttiming.Start(request.Context(), "steam.decode_json")()
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if err := decoder.Decode(target); err != nil {
 		return err

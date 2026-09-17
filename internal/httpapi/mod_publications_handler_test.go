@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"dont/internal/jobs"
 	"dont/internal/modcontrol"
 	"dont/internal/modpublication"
+	"dont/internal/operationprogress"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/gorm"
@@ -22,6 +24,8 @@ type modPublicationHTTPFixture struct {
 	mu            sync.Mutex
 	plan          modpublication.Plan
 	publications  []modpublication.Publication
+	replicas      modpublication.RoomReplicaState
+	replicaErr    error
 	publishErr    error
 	publishResult *modpublication.Publication
 	retryErr      error
@@ -32,9 +36,10 @@ func (f *modPublicationHTTPFixture) Preview(context.Context, string, modcontrol.
 	return f.plan, nil
 }
 
-func (f *modPublicationHTTPFixture) Publish(_ context.Context, sourceJobID, roomID string, request modcontrol.Request) (modpublication.Publication, error) {
+func (f *modPublicationHTTPFixture) Publish(ctx context.Context, sourceJobID, roomID string, request modcontrol.Request) (modpublication.Publication, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	operationprogress.Report(ctx, operationprogress.Update{Stage: operationprogress.StageModCache, Percent: 50, Message: "正在同步房间模组"})
 	if f.publishResult != nil {
 		value := *f.publishResult
 		value.SourceJobID, value.RoomID = sourceJobID, roomID
@@ -145,6 +150,20 @@ func (f *modPublicationHTTPFixture) List(_ string, limit, offset int) (modcontro
 	return modcontrol.ListResult{Items: items, Total: len(f.publications), Limit: limit, Offset: offset}, nil
 }
 
+func (f *modPublicationHTTPFixture) RoomReplicas(roomID string) (modpublication.RoomReplicaState, error) {
+	if f.replicaErr != nil {
+		return modpublication.RoomReplicaState{}, f.replicaErr
+	}
+	value := f.replicas
+	if value.RoomID == "" {
+		value.RoomID = roomID
+	}
+	if value.Items == nil {
+		value.Items = []modpublication.ReplicaModState{}
+	}
+	return value, nil
+}
+
 func newModPublicationHandlerApp(t *testing.T, fixture *modPublicationHTTPFixture) (*gin.Engine, *jobs.Service) {
 	t.Helper()
 	db, err := gorm.Open("sqlite3", ":memory:")
@@ -167,9 +186,51 @@ func newModPublicationHandlerApp(t *testing.T, fixture *modPublicationHTTPFixtur
 	if err != nil {
 		t.Fatal(err)
 	}
+	handler.ConfigureReplicaReader(fixture)
 	router := gin.New()
 	handler.Register(router.Group("/api/v2"))
 	return router, jobService
+}
+
+func TestModPublicationHTTPReturnsPlacementAwareReplicaCoverage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := &modPublicationHTTPFixture{
+		plan: publicationHTTPPlan(),
+		replicas: modpublication.RoomReplicaState{
+			RoomID: "room-one", DesiredRevision: publicationTestHash,
+			Coverage: modpublication.ReplicaCoverage{ReadyTargets: 1, TotalTargets: 2, ConfiguredWorlds: 1, TotalWorlds: 2},
+			Items: []modpublication.ReplicaModState{{
+				WorkshopID: "1392778117", ReadyTargets: 1, TotalTargets: 2, ConfiguredWorlds: 1, TotalWorlds: 2,
+				Targets: []modpublication.ReplicaTargetState{{
+					TargetID: "agent:node-one", InstallationID: "native", TreeSHA256: strings.Repeat("a", 64),
+					Cached: true, Published: true, Ready: true,
+					Worlds: []modpublication.ReplicaWorldState{{RoomID: "room-one", WorldID: "master", Configured: true}},
+				}},
+			}},
+		},
+	}
+	router, _ := newModPublicationHandlerApp(t, fixture)
+
+	response := performJSON(router, http.MethodGet, "/api/v2/rooms/room-one/mod-replicas", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	data := responseData(t, response)
+	if data["roomId"] != "room-one" || data["desiredRevision"] != publicationTestHash {
+		t.Fatalf("unexpected replica envelope: %s", response.Body.String())
+	}
+	coverage, _ := data["coverage"].(map[string]interface{})
+	items, _ := data["items"].([]interface{})
+	if coverage["readyTargets"] != float64(1) || coverage["totalTargets"] != float64(2) || len(items) != 1 {
+		t.Fatalf("replica coverage was not preserved: %s", response.Body.String())
+	}
+}
+
+func TestModPublicationHTTPReplicaReadFailureIsVisible(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := &modPublicationHTTPFixture{plan: publicationHTTPPlan(), replicaErr: modpublication.ErrInvalidInput}
+	router, _ := newModPublicationHandlerApp(t, fixture)
+
+	response := performJSON(router, http.MethodGet, "/api/v2/rooms/%20/mod-replicas", nil, nil, "")
+	assertAPIError(t, response, http.StatusUnprocessableEntity, "INVALID_MOD_PUBLICATION")
 }
 
 func publicationHTTPPlan() modpublication.Plan {
@@ -250,6 +311,7 @@ func TestModPublicationHTTPPreviewConfirmationAndJobResolution(t *testing.T) {
 	if job.Kind != "mod.publication" || job.RoomID != "room-one" || job.Status != jobs.StatusSucceeded {
 		t.Fatalf("unexpected publication job: %#v", job)
 	}
+	assertModJobProgressEvent(t, jobService, job.ID, 37, "正在同步房间模组")
 
 	response = performJSON(router, http.MethodGet, "/api/v2/rooms/room-one/mod-publications?limit=10&offset=0", nil, nil, "")
 	assertStatus(t, response, http.StatusOK)

@@ -171,7 +171,7 @@ func TestConfigurationPreviewApplyPreservesUnknownFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Revision != preview.NextRevision || backupService.count != 1 || result.ProtectionBackupID == "" {
+	if result.Revision != preview.NextRevision || backupService.count != 0 || result.ProtectionBackupID != "" {
 		t.Fatalf("unexpected apply result: %#v, backups=%d", result, backupService.count)
 	}
 	next, err := service.Configuration(ctx, "room-1", "world-1", "378160973")
@@ -202,7 +202,7 @@ func TestConfigurationPreviewApplyPreservesUnknownFields(t *testing.T) {
 	if _, err := service.ApplyConfiguration(ctx, "job-3", "room-1", "world-1", "378160973", noChange); !errors.Is(err, ErrNoChanges) {
 		t.Fatalf("expected no changes, got %v", err)
 	}
-	if backupService.count != 1 {
+	if backupService.count != 0 {
 		t.Fatalf("no-change request created a backup: %d", backupService.count)
 	}
 }
@@ -342,5 +342,29 @@ func TestEnableNoChangeDoesNotCreateBackup(t *testing.T) {
 	}
 	if backupService.count != 0 {
 		t.Fatalf("no-change enable created a backup: %d", backupService.count)
+	}
+}
+
+func TestEnableChangesOnlyModOverridesWithoutBackup(t *testing.T) {
+	service, backupService, overridesPath := newConfigTestService(t)
+	result, err := service.Enable(context.Background(), "job", "room-1", "378160973", EnableRequest{
+		WorldIDs: []string{"world-1"}, Enabled: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ProtectionBackupID != "" || backupService.count != 0 {
+		t.Fatalf("enable result=%#v backups=%d", result, backupService.count)
+	}
+	content, err := os.ReadFile(overridesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := InspectModOverride(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(configuration.Mods) != 1 || configuration.Mods[0].Enabled {
+		t.Fatalf("enabled flag was not updated: %#v", configuration.Mods)
 	}
 }

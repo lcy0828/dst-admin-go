@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"dont/internal/steamvdf"
 )
 
 func TestLoadWorkshopManifest(t *testing.T) {
@@ -30,7 +32,7 @@ func TestLoadWorkshopManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	item, ok := items["378160973"]
-	if !ok || item.Manifest != "12345" {
+	if !ok || item.ManifestID != "12345" {
 		t.Fatalf("unexpected item: %#v", item)
 	}
 	if want := time.Unix(1723082400, 0).UTC(); !item.UpdatedAt.Equal(want) {
@@ -43,7 +45,7 @@ func TestLoadWorkshopManifest(t *testing.T) {
 
 func TestParseValveKeyValuesRejectsMalformedInput(t *testing.T) {
 	for _, input := range []string{`"key" {`, `}`, `key value`, `"key" / bad`} {
-		if _, err := parseValveKeyValues([]byte(input)); err == nil {
+		if _, err := steamvdf.Parse([]byte(input)); err == nil {
 			t.Fatalf("expected malformed input to fail: %q", input)
 		}
 	}

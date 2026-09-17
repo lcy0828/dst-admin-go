@@ -20,15 +20,33 @@ var (
 )
 
 type Manager struct {
-	mu            sync.Mutex
-	cacheRoot     string
-	stateRoot     string
-	nodeID        string
-	reserveBytes  int64
-	installations map[string]TrustedInstallation
+	mu             sync.Mutex
+	cacheRoot      string
+	stateRoot      string
+	nodeID         string
+	reserveBytes   int64
+	installations  map[string]TrustedInstallation
+	recoveryIssues map[string]string
 }
 
 func New(config Config) (*Manager, error) {
+	manager, err := Open(config)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := manager.Recover(context.Background()); err != nil {
+		return nil, err
+	}
+	return manager, nil
+}
+
+// Open configures a manager without recovering publication journals. Callers
+// that need strict startup recovery should use New.
+func Open(config Config) (*Manager, error) {
+	return newManager(config)
+}
+
+func newManager(config Config) (*Manager, error) {
 	cacheRoot, err := cleanConfiguredRoot(config.CacheRoot, true)
 	if err != nil {
 		return nil, err
@@ -47,6 +65,7 @@ func New(config Config) (*Manager, error) {
 	manager := &Manager{
 		cacheRoot: cacheRoot, stateRoot: stateRoot, nodeID: nodeID,
 		reserveBytes: config.ReserveBytes, installations: make(map[string]TrustedInstallation, len(config.Installations)),
+		recoveryIssues: make(map[string]string),
 	}
 	for _, input := range config.Installations {
 		if !validIdentity(input.ID) || strings.TrimSpace(input.NodeID) != nodeID {
@@ -64,8 +83,13 @@ func New(config Config) (*Manager, error) {
 			return nil, err
 		}
 		workshopContent := strings.TrimSpace(input.WorkshopContentPath)
+		input.WorkshopManifestPath = ""
 		if workshopContent != "" {
 			workshopContent, err = cleanConfiguredRoot(workshopContent, true)
+			if err != nil {
+				return nil, err
+			}
+			input.WorkshopManifestPath, err = deriveWorkshopManifestPath(workshopContent)
 			if err != nil {
 				return nil, err
 			}
@@ -84,9 +108,6 @@ func New(config Config) (*Manager, error) {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return nil, err
 		}
-	}
-	if _, err := manager.Recover(context.Background()); err != nil {
-		return nil, err
 	}
 	return manager, nil
 }
@@ -126,32 +147,35 @@ func (m *Manager) BuildPlan(ctx context.Context, input PlanInput) (Plan, error) 
 			group = &InstallationPlan{InstallationID: raw.InstallationID, NodeID: installation.NodeID}
 			groups[raw.InstallationID] = group
 		}
-		seen := make(map[string]string, len(group.Mods)+len(raw.Mods))
+		seen := make(map[string]ModVersion, len(group.Mods)+len(raw.Mods))
 		for _, mod := range group.Mods {
-			seen[mod.WorkshopID] = mod.TreeSHA256
+			seen[mod.WorkshopID] = mod
 		}
 		normalizedMods := make([]ModVersion, 0, len(raw.Mods))
 		shardSeen := make(map[string]bool, len(raw.Mods))
 		for _, mod := range raw.Mods {
 			mod.TreeSHA256 = strings.ToLower(strings.TrimSpace(mod.TreeSHA256))
-			if !validWorkshopID(mod.WorkshopID) || !validSHA256(mod.TreeSHA256) || shardSeen[mod.WorkshopID] {
+			if !validWorkshopID(mod.WorkshopID) || !validSHA256(mod.TreeSHA256) || !validMetadata(mod.Metadata) || shardSeen[mod.WorkshopID] {
 				return Plan{}, ErrInvalidInput
 			}
-			if prior, exists := seen[mod.WorkshopID]; exists && prior != mod.TreeSHA256 {
-				return Plan{}, fmt.Errorf("%w: installation %s requests Workshop %s as both %s and %s", ErrConflict, raw.InstallationID, mod.WorkshopID, prior, mod.TreeSHA256)
+			if prior, exists := seen[mod.WorkshopID]; exists && prior.TreeSHA256 != mod.TreeSHA256 {
+				return Plan{}, fmt.Errorf("%w: installation %s requests Workshop %s as both %s and %s", ErrConflict, raw.InstallationID, mod.WorkshopID, prior.TreeSHA256, mod.TreeSHA256)
 			}
 			if _, err := m.Verify(ctx, mod.WorkshopID, mod.TreeSHA256); err != nil {
 				return Plan{}, err
 			}
-			seen[mod.WorkshopID], shardSeen[mod.WorkshopID] = mod.TreeSHA256, true
+			if prior, exists := seen[mod.WorkshopID]; exists {
+				mod.Metadata = mergeMetadata(prior.Metadata, mod.Metadata)
+			}
+			seen[mod.WorkshopID], shardSeen[mod.WorkshopID] = mod, true
 			normalizedMods = append(normalizedMods, mod)
 		}
 		sortMods(normalizedMods)
 		raw.Mods = normalizedMods
 		group.Shards = append(group.Shards, raw)
 		group.Mods = group.Mods[:0]
-		for id, hash := range seen {
-			group.Mods = append(group.Mods, ModVersion{WorkshopID: id, TreeSHA256: hash})
+		for _, mod := range seen {
+			group.Mods = append(group.Mods, mod)
 		}
 		sortMods(group.Mods)
 	}
@@ -164,10 +188,6 @@ func (m *Manager) BuildPlan(ctx context.Context, input PlanInput) (Plan, error) 
 			return group.Shards[i].RoomDirectory < group.Shards[j].RoomDirectory
 		})
 		installation := m.installations[group.InstallationID]
-		if installation.WorkshopContentPath != "" {
-			plan.Installations = append(plan.Installations, *group)
-			continue
-		}
 		setupPath := filepath.Join(installation.ServerPath, "mods", "dedicated_server_mods_setup.lua")
 		current, err := readOptionalRegular(setupPath)
 		if err != nil {
@@ -180,12 +200,93 @@ func (m *Manager) BuildPlan(ctx context.Context, input PlanInput) (Plan, error) 
 		if current != nil {
 			group.SetupBaseSHA256 = shaBytes(current)
 		}
+		if installation.WorkshopManifestPath != "" {
+			currentManifest, manifestErr := readOptionalRegular(installation.WorkshopManifestPath)
+			if manifestErr != nil {
+				return Plan{}, manifestErr
+			}
+			group.ManagedWorkshopManifest, manifestErr = composeWorkshopManifest(currentManifest, installation, group.Mods)
+			if manifestErr != nil {
+				return Plan{}, manifestErr
+			}
+			if currentManifest != nil {
+				group.WorkshopManifestBaseSHA256 = shaBytes(currentManifest)
+			}
+		}
 		plan.Installations = append(plan.Installations, *group)
 	}
 	sort.Slice(plan.Installations, func(i, j int) bool {
 		return plan.Installations[i].InstallationID < plan.Installations[j].InstallationID
 	})
 	return plan, nil
+}
+
+func (m *Manager) BuildContentPlan(ctx context.Context, input ContentPlanInput) (Plan, error) {
+	if !operationIDPattern.MatchString(input.OperationID) || input.NodeID != m.nodeID || len(input.Mods) == 0 {
+		return Plan{}, ErrInvalidInput
+	}
+	installation, exists := m.installations[input.InstallationID]
+	if !exists {
+		return Plan{}, ErrInvalidInput
+	}
+	mods := make([]ModVersion, 0, len(input.Mods))
+	seen := make(map[string]bool, len(input.Mods))
+	for _, mod := range input.Mods {
+		if err := ctx.Err(); err != nil {
+			return Plan{}, err
+		}
+		mod.TreeSHA256 = strings.ToLower(strings.TrimSpace(mod.TreeSHA256))
+		if !validWorkshopID(mod.WorkshopID) || !validSHA256(mod.TreeSHA256) || !validMetadata(mod.Metadata) || seen[mod.WorkshopID] {
+			return Plan{}, ErrInvalidInput
+		}
+		if _, err := m.Verify(ctx, mod.WorkshopID, mod.TreeSHA256); err != nil {
+			return Plan{}, err
+		}
+		seen[mod.WorkshopID] = true
+		mods = append(mods, mod)
+	}
+	sortMods(mods)
+
+	installationPlan := InstallationPlan{
+		InstallationID: input.InstallationID,
+		NodeID:         installation.NodeID,
+		Mods:           mods,
+	}
+	setupPath := filepath.Join(installation.ServerPath, "mods", "dedicated_server_mods_setup.lua")
+	currentSetup, err := readOptionalRegular(setupPath)
+	if err != nil {
+		return Plan{}, err
+	}
+	installationPlan.ManagedSetup = append([]byte(nil), currentSetup...)
+	if currentSetup != nil {
+		installationPlan.SetupBaseSHA256 = shaBytes(currentSetup)
+	}
+	if installation.WorkshopManifestPath != "" {
+		currentManifest, manifestErr := readOptionalRegular(installation.WorkshopManifestPath)
+		if manifestErr != nil {
+			return Plan{}, manifestErr
+		}
+		installationPlan.ManagedWorkshopManifest, manifestErr = composeWorkshopManifest(currentManifest, installation, mods)
+		if manifestErr != nil {
+			return Plan{}, manifestErr
+		}
+		if currentManifest != nil {
+			installationPlan.WorkshopManifestBaseSHA256 = shaBytes(currentManifest)
+		}
+	}
+	return Plan{
+		OperationID:   input.OperationID,
+		NodeID:        m.nodeID,
+		Mode:          PlanModeContent,
+		CreatedAt:     time.Now().UTC(),
+		Installations: []InstallationPlan{installationPlan},
+	}, nil
+}
+
+func validMetadata(value Metadata) bool {
+	return value.PublishedFileSize >= 0 && len(value.Title) <= 1024 && len(value.Version) <= 256 &&
+		!strings.ContainsAny(value.Title+value.Version, "\x00\r\n") &&
+		(value.SteamManifestID == "" || workshopIDPattern.MatchString(value.SteamManifestID))
 }
 
 func RenderDefaultOverrides(mods []ModVersion) []byte {

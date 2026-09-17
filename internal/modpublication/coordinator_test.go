@@ -276,6 +276,38 @@ func twoTargetWorlds() ([]ManagedWorld, []AppliedPlacement) {
 	return worlds, placements
 }
 
+func TestEnsureCachePreparesInstallationsWithoutPublishingOrBackingUp(t *testing.T) {
+	worlds, placements := twoTargetWorlds()
+	app := newTestApplication(t, worlds, placements)
+	plan, err := app.coordinator.Preview(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := app.coordinator.EnsureCache(context.Background(), plan)
+	if err != nil || !result.Ready || len(result.Targets) != 2 {
+		t.Fatalf("cache preparation = %#v, error = %v", result, err)
+	}
+	if app.runtime.count("ensure-cache") != 2 || app.runtime.count("prepare") != 0 || app.runtime.count("publish") != 0 {
+		t.Fatalf("unexpected runtime calls: %#v", app.runtime.calls)
+	}
+	if len(app.backups.calls) != 0 {
+		t.Fatalf("cache preparation created protection backups: %#v", app.backups.calls)
+	}
+	for _, call := range app.runtime.calls {
+		if call.action != "ensure-cache" || len(call.plan.Worlds) == 0 {
+			continue
+		}
+		if len(call.plan.Blockers) != 0 {
+			t.Fatalf("cache target unexpectedly blocked: %#v", call.plan.Blockers)
+		}
+	}
+	app.leases.mu.Lock()
+	defer app.leases.mu.Unlock()
+	if len(app.leases.active) != 0 {
+		t.Fatalf("installation leases were not released: %#v", app.leases.active)
+	}
+}
+
 func TestPrepareFailureRollsBackEveryTouchedTarget(t *testing.T) {
 	worlds, placements := twoTargetWorlds()
 	app := newTestApplication(t, worlds, placements)
@@ -307,6 +339,85 @@ func TestPartialPublishFailureRollsBackAllTargets(t *testing.T) {
 	}
 	if app.runtime.count("publish") != 2 || app.runtime.count("rollback") != 2 {
 		t.Fatalf("all prepared targets were not rolled back: %#v", app.runtime.calls)
+	}
+}
+
+func TestAutomaticPublicationBorrowsRoomFenceAndSkipsProtectionBackup(t *testing.T) {
+	worlds, placements := twoTargetWorlds()
+	app := newTestApplication(t, worlds, placements)
+	plan, err := app.coordinator.Preview(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	borrowed := Fence{
+		RoomID: "room-a", LeaseID: "lease-borrowed-0001", OperationKey: "placement.migrate:master",
+		FencingToken: 11, ExpiresAt: time.Now().UTC().Add(time.Minute),
+	}
+	app.leases.active[borrowed.RoomID] = borrowed
+	publication, err := app.coordinator.Publish(context.Background(), PublishRequest{
+		ID: "publication-automatic-sync", Plan: plan,
+		BorrowedFences: []Fence{borrowed}, SkipProtectionBackup: true,
+	})
+	if err != nil || publication.Status != StatusSucceeded || len(publication.ProtectionBackupIDs) != 0 || len(app.backups.calls) != 0 {
+		t.Fatalf("publication=%#v backupCalls=%#v err=%v", publication, app.backups.calls, err)
+	}
+	app.leases.mu.Lock()
+	retained, exists := app.leases.active[borrowed.RoomID]
+	app.leases.mu.Unlock()
+	if !exists || retained.LeaseID != borrowed.LeaseID || retained.FencingToken != borrowed.FencingToken {
+		t.Fatalf("borrowed room fence was released or replaced: %#v", retained)
+	}
+}
+
+func TestPreparedTransactionDefersPublishAndRemainsRollbackable(t *testing.T) {
+	worlds, placements := twoTargetWorlds()
+	app := newTestApplication(t, worlds, placements)
+	plan, err := app.coordinator.Preview(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction, err := app.coordinator.BeginTransaction(context.Background(), PublishRequest{
+		ID: "publication-staged-transaction", Plan: plan, SkipProtectionBackup: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transaction.Close()
+	if transaction.Publication().Status != StatusPrepared || app.runtime.count("prepare") != 2 || app.runtime.count("publish") != 0 {
+		t.Fatalf("transaction was not held at prepare boundary: publication=%#v calls=%#v", transaction.Publication(), app.runtime.calls)
+	}
+	if _, err := transaction.Publish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if app.runtime.count("publish") != 2 || transaction.Publication().CommitDecision {
+		t.Fatalf("transaction crossed commit boundary early: publication=%#v calls=%#v", transaction.Publication(), app.runtime.calls)
+	}
+	rolledBack, err := transaction.Rollback(context.Background(), "TEST_ROLLBACK", errors.New("forced rollback"))
+	if err == nil || rolledBack.Status != StatusRolledBack || rolledBack.CommitDecision || app.runtime.count("rollback") != 2 {
+		t.Fatalf("prepared transaction rollback=%#v calls=%#v err=%v", rolledBack, app.runtime.calls, err)
+	}
+}
+
+func TestPreparedTransactionCommitsOnlyAfterExplicitDecision(t *testing.T) {
+	worlds, placements := twoTargetWorlds()
+	app := newTestApplication(t, worlds, placements)
+	plan, err := app.coordinator.Preview(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction, err := app.coordinator.BeginTransaction(context.Background(), PublishRequest{
+		ID: "publication-explicit-commit", Plan: plan, SkipProtectionBackup: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transaction.Close()
+	if _, err := transaction.Publish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	committed, err := transaction.Commit(context.Background())
+	if err != nil || committed.Status != StatusSucceeded || !committed.CommitDecision || app.runtime.count("complete") != 2 {
+		t.Fatalf("committed transaction=%#v calls=%#v err=%v", committed, app.runtime.calls, err)
 	}
 }
 
@@ -550,6 +661,29 @@ func TestStoreRejectsTrailingPlanJSON(t *testing.T) {
 	}
 	if _, err := app.store.Get(publication.ID); err == nil {
 		t.Fatal("expected strict JSON failure")
+	}
+}
+
+func TestStoreActiveSkipsCompletedManualPublicationBeforeDecodingLegacyPlan(t *testing.T) {
+	worlds, placements := twoTargetWorlds()
+	app := newTestApplication(t, worlds, placements)
+	plan, err := app.coordinator.Preview(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication, err := app.coordinator.Publish(context.Background(), PublishRequest{ID: "publication-completed-manual", Plan: plan})
+	if err != nil || publication.Status != StatusSucceeded || publication.Activation.Status != ActivationStatusSkipped {
+		t.Fatalf("manual publication failed: %#v err=%v", publication, err)
+	}
+	if err := app.db.Table(app.store.publicationTable).Where("id = ?", publication.ID).UpdateColumn("plan_json", "{\"legacy\":true}").Error; err != nil {
+		t.Fatal(err)
+	}
+	active, err := app.store.Active()
+	if err != nil {
+		t.Fatalf("completed manual publication blocked startup recovery: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("completed manual publication remained active: %#v", active)
 	}
 }
 

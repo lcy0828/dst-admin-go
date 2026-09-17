@@ -127,6 +127,15 @@ func (m *Manager) Complete(ctx context.Context, operationID string) error {
 		if err := m.verifyPublished(ctx, journal); err != nil {
 			return err
 		}
+		for _, installation := range journal.Plan.Installations {
+			ids := make([]string, 0, len(installation.Mods))
+			for _, mod := range installation.Mods {
+				ids = append(ids, mod.WorkshopID)
+			}
+			if err := m.LinkLocalMods(ctx, installation.InstallationID, ids); err != nil {
+				return err
+			}
+		}
 		if err := m.writeInstallationStates(ctx, journal.Plan); err != nil {
 			return err
 		}
@@ -187,36 +196,69 @@ func (m *Manager) Apply(ctx context.Context, plan Plan) error {
 
 func (m *Manager) buildMutations(ctx context.Context, plan Plan) ([]Mutation, error) {
 	mutations := make([]Mutation, 0)
+	states, stateErr := m.readStates()
+	if stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) {
+		return nil, stateErr
+	}
 	for _, installationPlan := range plan.Installations {
 		installation := m.installations[installationPlan.InstallationID]
+		state := states[installationPlan.InstallationID]
 		for _, mod := range installationPlan.Mods {
 			target := installationModTarget(installation, mod.WorkshopID)
 			hadOriginal, err := inspectTarget(target, true)
 			if err != nil {
 				return nil, err
 			}
+			if hadOriginal && state.Mods[mod.WorkshopID] == mod.TreeSHA256 {
+				continue
+			}
 			originalSHA, err := targetDigest(ctx, target, true, hadOriginal)
 			if err != nil {
 				return nil, err
+			}
+			if originalSHA == mod.TreeSHA256 {
+				continue
 			}
 			mutations = append(mutations, Mutation{
 				Kind: MutationMod, InstallationID: installationPlan.InstallationID,
 				WorkshopID: mod.WorkshopID, TreeSHA256: mod.TreeSHA256, HadOriginal: hadOriginal, OriginalSHA256: originalSHA,
 			})
 		}
-		if installation.WorkshopContentPath == "" {
-			setupTarget := filepath.Join(installation.ServerPath, "mods", "dedicated_server_mods_setup.lua")
-			setupOriginal, err := inspectTarget(setupTarget, false)
+		if installation.WorkshopManifestPath != "" {
+			manifestOriginal, err := inspectTarget(installation.WorkshopManifestPath, false)
 			if err != nil {
 				return nil, err
 			}
-			setupOriginalSHA, err := targetDigest(ctx, setupTarget, false, setupOriginal)
+			manifestOriginalSHA, err := targetDigest(ctx, installation.WorkshopManifestPath, false, manifestOriginal)
 			if err != nil {
 				return nil, err
 			}
-			if setupOriginalSHA != installationPlan.SetupBaseSHA256 {
+			if manifestOriginalSHA != installationPlan.WorkshopManifestBaseSHA256 {
 				return nil, ErrConflict
 			}
+			if manifestOriginalSHA != shaBytes(installationPlan.ManagedWorkshopManifest) {
+				mutations = append(mutations, Mutation{
+					Kind: MutationWorkshopManifest, InstallationID: installationPlan.InstallationID,
+					ConfigSHA256: shaBytes(installationPlan.ManagedWorkshopManifest), HadOriginal: manifestOriginal, OriginalSHA256: manifestOriginalSHA,
+				})
+			}
+		}
+		if plan.Mode == PlanModeContent {
+			continue
+		}
+		setupTarget := filepath.Join(installation.ServerPath, "mods", "dedicated_server_mods_setup.lua")
+		setupOriginal, err := inspectTarget(setupTarget, false)
+		if err != nil {
+			return nil, err
+		}
+		setupOriginalSHA, err := targetDigest(ctx, setupTarget, false, setupOriginal)
+		if err != nil {
+			return nil, err
+		}
+		if setupOriginalSHA != installationPlan.SetupBaseSHA256 {
+			return nil, ErrConflict
+		}
+		if setupOriginalSHA != shaBytes(installationPlan.ManagedSetup) {
 			mutations = append(mutations, Mutation{
 				Kind: MutationSetup, InstallationID: installationPlan.InstallationID,
 				ConfigSHA256: shaBytes(installationPlan.ManagedSetup), HadOriginal: setupOriginal, OriginalSHA256: setupOriginalSHA,
@@ -231,6 +273,9 @@ func (m *Manager) buildMutations(ctx context.Context, plan Plan) ([]Mutation, er
 			originalSHA, err := targetDigest(ctx, target, false, hadOriginal)
 			if err != nil {
 				return nil, err
+			}
+			if originalSHA == shaBytes(shard.ModOverrides) {
+				continue
 			}
 			mutations = append(mutations, Mutation{
 				Kind: MutationOverrides, InstallationID: installationPlan.InstallationID,
@@ -274,9 +319,9 @@ func (m *Manager) stageMutation(ctx context.Context, journal Journal, mutation M
 		if err := copyManifestTree(ctx, filepath.Join(m.cacheVersionRoot(mutation.WorkshopID, mutation.TreeSHA256), "content"), stage, manifest); err != nil {
 			return err
 		}
-		// macOS requires the directory itself to be writable while it is
-		// renamed. It is sealed again immediately after atomic publication.
-		return os.Chmod(stage, 0o700)
+		// The cache is immutable, but the installed Workshop tree belongs to
+		// Steam/DST and must remain writable so their updater can replace files.
+		return makeTreeOwnerWritable(stage)
 	}
 	content, err := findMutationContent(journal.Plan, mutation)
 	if err != nil {
@@ -352,11 +397,6 @@ func (m *Manager) publishMutation(journal Journal, mutation Mutation) error {
 	if err := renameMutationTarget(stage, target, mutation.Kind == MutationMod); err != nil {
 		return err
 	}
-	if mutation.Kind == MutationMod {
-		if err := os.Chmod(target, 0o555); err != nil {
-			return err
-		}
-	}
 	return syncDirectory(filepath.Dir(target))
 }
 
@@ -388,6 +428,10 @@ func (m *Manager) rollbackJournal(ctx context.Context, journal *Journal) error {
 			continue
 		}
 		if backupExists {
+			if err := ensurePublishedTargetUnchanged(ctx, target, mutation); err != nil {
+				result = errors.Join(result, err)
+				continue
+			}
 			if err := removeTarget(target, mutation.Kind == MutationMod); err != nil {
 				result = errors.Join(result, err)
 				continue
@@ -397,6 +441,10 @@ func (m *Manager) rollbackJournal(ctx context.Context, journal *Journal) error {
 				continue
 			}
 		} else if !mutation.HadOriginal && !stageExists {
+			if err := ensurePublishedTargetUnchanged(ctx, target, mutation); err != nil {
+				result = errors.Join(result, err)
+				continue
+			}
 			result = errors.Join(result, removeTarget(target, mutation.Kind == MutationMod))
 		}
 		result = errors.Join(result, removeTarget(stage, mutation.Kind == MutationMod))
@@ -408,6 +456,26 @@ func (m *Manager) rollbackJournal(ctx context.Context, journal *Journal) error {
 		return err
 	}
 	return os.Remove(m.journalPath(journal.OperationID))
+}
+
+func ensurePublishedTargetUnchanged(ctx context.Context, target string, mutation Mutation) error {
+	directory := mutation.Kind == MutationMod
+	exists, err := inspectTarget(target, directory)
+	if err != nil || !exists {
+		return err
+	}
+	currentSHA, err := targetDigest(ctx, target, directory, true)
+	if err != nil {
+		return err
+	}
+	expectedSHA := mutation.ConfigSHA256
+	if directory {
+		expectedSHA = mutation.TreeSHA256
+	}
+	if currentSHA != expectedSHA {
+		return fmt.Errorf("%w: 回滚目标在发布后已被修改，已保留当前内容: %s", ErrConflict, target)
+	}
+	return nil
 }
 
 func (m *Manager) cleanupJournalArtifacts(journal Journal) error {
@@ -471,6 +539,11 @@ func (m *Manager) mutationPaths(journal Journal, mutation Mutation) (string, str
 		target = filepath.Join(parent, "dedicated_server_mods_setup.lua")
 		stage = filepath.Join(parent, ".dst-admin-setup-stage-"+suffix)
 		backup = filepath.Join(parent, ".dst-admin-setup-backup-"+suffix)
+	} else if mutation.Kind == MutationWorkshopManifest && installation.WorkshopManifestPath != "" && validSHA256(mutation.ConfigSHA256) {
+		parent := filepath.Dir(installation.WorkshopManifestPath)
+		target = installation.WorkshopManifestPath
+		stage = filepath.Join(parent, ".dst-admin-workshop-stage-"+suffix)
+		backup = filepath.Join(parent, ".dst-admin-workshop-backup-"+suffix)
 	} else if mutation.Kind == MutationOverrides && safeComponent(mutation.RoomDirectory) && safeComponent(mutation.WorldDirectory) && validSHA256(mutation.ConfigSHA256) {
 		parent := filepath.Join(installation.SavePath, mutation.RoomDirectory, mutation.WorldDirectory)
 		target = filepath.Join(parent, "modoverrides.lua")
@@ -480,7 +553,9 @@ func (m *Manager) mutationPaths(journal Journal, mutation Mutation) (string, str
 		return "", "", "", ErrIntegrity
 	}
 	trustedRoot := installation.SavePath
-	if mutation.Kind == MutationMod && installation.WorkshopContentPath != "" {
+	if mutation.Kind == MutationWorkshopManifest {
+		trustedRoot = filepath.Dir(installation.WorkshopManifestPath)
+	} else if mutation.Kind == MutationMod && installation.WorkshopContentPath != "" {
 		trustedRoot = installation.WorkshopContentPath
 	} else if mutation.Kind == MutationMod || mutation.Kind == MutationSetup {
 		trustedRoot = installation.ServerPath
@@ -603,6 +678,22 @@ func makeTreeWritable(root string) error {
 	})
 }
 
+func makeTreeOwnerWritable(root string) error {
+	return filepath.WalkDir(root, func(path string, item fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if item.Type()&os.ModeSymlink != 0 {
+			return ErrUnsafePath
+		}
+		info, err := item.Info()
+		if err != nil {
+			return err
+		}
+		return os.Chmod(path, info.Mode().Perm()|0o200)
+	})
+}
+
 func findMutationContent(plan Plan, mutation Mutation) ([]byte, error) {
 	for _, installation := range plan.Installations {
 		if installation.InstallationID != mutation.InstallationID {
@@ -610,6 +701,9 @@ func findMutationContent(plan Plan, mutation Mutation) ([]byte, error) {
 		}
 		if mutation.Kind == MutationSetup {
 			return append([]byte(nil), installation.ManagedSetup...), nil
+		}
+		if mutation.Kind == MutationWorkshopManifest {
+			return append([]byte(nil), installation.ManagedWorkshopManifest...), nil
 		}
 		for _, shard := range installation.Shards {
 			if shard.RoomDirectory == mutation.RoomDirectory && shard.WorldDirectory == mutation.WorldDirectory {
@@ -621,6 +715,26 @@ func findMutationContent(plan Plan, mutation Mutation) ([]byte, error) {
 }
 
 func (m *Manager) rebuildPlan(ctx context.Context, plan Plan) (Plan, error) {
+	if plan.Mode == PlanModeContent {
+		if len(plan.Installations) != 1 {
+			return Plan{}, ErrInvalidInput
+		}
+		installation := plan.Installations[0]
+		canonical, err := m.BuildContentPlan(ctx, ContentPlanInput{
+			OperationID:    plan.OperationID,
+			NodeID:         plan.NodeID,
+			InstallationID: installation.InstallationID,
+			Mods:           append([]ModVersion(nil), installation.Mods...),
+		})
+		if err != nil {
+			return Plan{}, err
+		}
+		canonical.CreatedAt = plan.CreatedAt
+		if canonical.CreatedAt.IsZero() {
+			canonical.CreatedAt = time.Now().UTC()
+		}
+		return canonical, nil
+	}
 	input := PlanInput{OperationID: plan.OperationID, NodeID: plan.NodeID}
 	for _, installation := range plan.Installations {
 		if installation.InstallationID == "" || installation.NodeID != plan.NodeID {

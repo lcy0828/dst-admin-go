@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type testEnvironment struct {
@@ -199,6 +200,269 @@ func TestPublishKeepsRoomWorldOverridesIndependent(t *testing.T) {
 	}
 }
 
+func TestPrepareSkipsUnchangedModContentAndConfiguration(t *testing.T) {
+	environment := newTestEnvironment(t, 0)
+	manifest := environment.importMod(t, "300", map[string]string{
+		"modinfo.lua": "version='1'", "modmain.lua": "return true",
+	})
+	master := []byte("return {[\"workshop-300\"]={enabled=true,configuration_options={difficulty=\"hard\"}}}\n")
+	caves := []byte("return {[\"workshop-300\"]={enabled=false,configuration_options={difficulty=\"easy\"}}}\n")
+	initial, err := environment.manager.BuildPlan(context.Background(), release("release-skip-base-01", manifest, master, caves))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.manager.Apply(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+
+	changedMaster := []byte("return {[\"workshop-300\"]={enabled=true,configuration_options={difficulty=\"normal\"}}}\n")
+	next, err := environment.manager.BuildPlan(context.Background(), release("release-skip-next-01", manifest, changedMaster, caves))
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := environment.manager.Prepare(context.Background(), next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = environment.manager.Rollback(context.Background(), next.OperationID) }()
+	if len(journal.Mutations) != 1 || journal.Mutations[0].Kind != MutationOverrides || journal.Mutations[0].WorldDirectory != "Master" {
+		t.Fatalf("unchanged content was staged again: %#v", journal.Mutations)
+	}
+}
+
+func TestContentPlanUpdatesInstallationWithoutChangingRoomConfiguration(t *testing.T) {
+	environment := newTestEnvironment(t, 0)
+	oldManifest := environment.importMod(t, "300", map[string]string{
+		"modinfo.lua":      "name='managed'\nversion='1.0'\n",
+		"scripts/main.lua": "return 'old'\n",
+	})
+	initial, err := environment.manager.BuildPlan(context.Background(), release(
+		"release-content-base-01",
+		oldManifest,
+		[]byte("return {master='unchanged'}\n"),
+		[]byte("return {caves='unchanged'}\n"),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.manager.Apply(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+
+	setupPath := filepath.Join(environment.server, "mods", "dedicated_server_mods_setup.lua")
+	masterPath := filepath.Join(environment.saves, "Cluster_1", "Master", "modoverrides.lua")
+	cavesPath := filepath.Join(environment.saves, "Cluster_1", "Caves", "modoverrides.lua")
+	setupBefore, err := os.ReadFile(setupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	masterBefore, err := os.ReadFile(masterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cavesBefore, err := os.ReadFile(cavesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updatedManifest := environment.importMod(t, "300", map[string]string{
+		"modinfo.lua":      "name='managed'\nversion='2.0'\n",
+		"scripts/main.lua": "return 'new'\n",
+	})
+	machineOnly := environment.importMod(t, "400", map[string]string{
+		"modinfo.lua": "name='machine only'\nversion='1.0'\n",
+	})
+	plan, err := environment.manager.BuildContentPlan(context.Background(), ContentPlanInput{
+		OperationID:    "content-update-0001",
+		NodeID:         "node-main",
+		InstallationID: "primary",
+		Mods: []ModVersion{
+			{WorkshopID: updatedManifest.WorkshopID, TreeSHA256: updatedManifest.TreeSHA256},
+			{WorkshopID: machineOnly.WorkshopID, TreeSHA256: machineOnly.TreeSHA256},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := environment.manager.Prepare(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mutation := range journal.Mutations {
+		if mutation.Kind == MutationSetup || mutation.Kind == MutationOverrides {
+			t.Fatalf("content-only plan changed room configuration: %#v", mutation)
+		}
+	}
+	if _, err := environment.manager.Publish(context.Background(), plan.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.manager.Complete(context.Background(), plan.OperationID); err != nil {
+		t.Fatal(err)
+	}
+
+	assertFileContent(t, setupPath, setupBefore)
+	assertFileContent(t, masterPath, masterBefore)
+	assertFileContent(t, cavesPath, cavesBefore)
+	assertFileContent(t, filepath.Join(environment.server, "mods", "workshop-300", "scripts", "main.lua"), []byte("return 'new'\n"))
+	assertFileContent(t, filepath.Join(environment.server, "mods", "workshop-400", "modinfo.lua"), []byte("name='machine only'\nversion='1.0'\n"))
+
+	states, err := environment.manager.readStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := states["primary"]
+	if state.Mods["300"] != updatedManifest.TreeSHA256 {
+		t.Fatalf("managed Mod state did not advance: %#v", state.Mods)
+	}
+	if _, managed := state.Mods["400"]; managed {
+		t.Fatalf("machine-only Mod leaked into managed room state: %#v", state.Mods)
+	}
+	for _, shard := range state.Shards {
+		if len(shard.Mods) != 1 || shard.Mods[0].WorkshopID != "300" || shard.Mods[0].TreeSHA256 != updatedManifest.TreeSHA256 {
+			t.Fatalf("managed shard state did not advance: %#v", shard)
+		}
+	}
+}
+
+func TestContentPlanRollbackRestoresPreviousInstallationContent(t *testing.T) {
+	environment := newTestEnvironment(t, 0)
+	oldManifest := environment.importMod(t, "300", map[string]string{
+		"modinfo.lua": "name='rollback'\nversion='1.0'\n",
+	})
+	initial, err := environment.manager.BuildPlan(context.Background(), release("release-content-base-02", oldManifest, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.manager.Apply(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	oldContent := []byte("name='rollback'\nversion='1.0'\n")
+	updatedManifest := environment.importMod(t, "300", map[string]string{
+		"modinfo.lua": "name='rollback'\nversion='2.0'\n",
+	})
+	plan, err := environment.manager.BuildContentPlan(context.Background(), ContentPlanInput{
+		OperationID:    "content-rollback-01",
+		NodeID:         "node-main",
+		InstallationID: "primary",
+		Mods:           []ModVersion{{WorkshopID: "300", TreeSHA256: updatedManifest.TreeSHA256}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.manager.Prepare(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.manager.Publish(context.Background(), plan.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.manager.Rollback(context.Background(), plan.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, filepath.Join(environment.server, "mods", "workshop-300", "modinfo.lua"), oldContent)
+}
+
+func TestObserveStateDetectsMissingTargetsAndConfigurationDrift(t *testing.T) {
+	environment := newTestEnvironment(t, 0)
+	manifest := environment.importMod(t, "303", map[string]string{"modinfo.lua": "version='1'", "modmain.lua": "return true"})
+	master := []byte("return {[\"workshop-303\"]={enabled=true}}\n")
+	caves := []byte("return {[\"workshop-303\"]={enabled=false}}\n")
+	plan, err := environment.manager.BuildPlan(context.Background(), release("release-observe-001", manifest, master, caves))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.manager.Apply(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	state, err := environment.manager.ObserveState(context.Background(), "primary")
+	if err != nil || state.LastOperationID != plan.OperationID || len(state.Mods) != 1 || len(state.Shards) != 2 {
+		t.Fatalf("state=%#v err=%v", state, err)
+	}
+
+	masterPath := filepath.Join(environment.saves, "Cluster_1", "Master", "modoverrides.lua")
+	if err := os.WriteFile(masterPath, []byte("return {}\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.manager.ObserveState(context.Background(), "primary"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected configuration drift, got %v", err)
+	}
+	if err := os.WriteFile(masterPath, master, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	modTarget := filepath.Join(environment.server, "mods", "workshop-303")
+	if err := makeTreeWritable(modTarget); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(modTarget); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.manager.ObserveState(context.Background(), "primary"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected missing Mod target, got %v", err)
+	}
+}
+
+func TestObserveStateTreatsMissingInstallationStateAsNotFound(t *testing.T) {
+	environment := newTestEnvironment(t, 0)
+	if _, err := environment.manager.ObserveState(context.Background(), "primary"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected an unpublished installation to be not found, got %v", err)
+	}
+}
+
+func TestObserveStateRejectsWorkshopInventoryDriftEvenWhenJournalHashMatches(t *testing.T) {
+	environment := newTestEnvironment(t, 0)
+	workshopContent := filepath.Join(environment.root, "ugc", "content", "322330")
+	if err := os.MkdirAll(workshopContent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = makeTreeWritable(workshopContent) })
+	environment.config.Installations[0].WorkshopContentPath = workshopContent
+	manager, err := New(environment.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment.manager = manager
+
+	manifest := environment.importMod(t, "3687959533", map[string]string{"modinfo.lua": "version='1'"})
+	input := release("release-observe-ugc-drift-001", manifest, nil, nil)
+	for index := range input.Shards {
+		input.Shards[index].Mods[0].Metadata = Metadata{
+			PublishedFileSize: manifest.Size,
+			SteamManifestID:   "5198458395439210153",
+			SteamUpdatedAt:    time.Unix(1779124745, 0).UTC(),
+		}
+	}
+	plan, err := environment.manager.BuildPlan(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := environment.manager.Apply(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+
+	missingInventory := []byte(`"AppWorkshop"
+{
+  "appid" "322330"
+  "WorkshopItemsInstalled" {}
+}`)
+	manifestPath := environment.manager.installations["primary"].WorkshopManifestPath
+	if err := os.WriteFile(manifestPath, missingInventory, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	states, err := environment.manager.readStates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := states["primary"]
+	state.WorkshopManifestSHA256 = shaBytes(missingInventory)
+	states["primary"] = state
+	if err := writeJSONAtomic(environment.manager.statePath(), states, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := environment.manager.ObserveState(context.Background(), "primary"); !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "3687959533") {
+		t.Fatalf("matching journal hash hid missing Workshop inventory: %v", err)
+	}
+}
+
 func TestPublishUsesWorkshopContentRootWhenUGCIsManaged(t *testing.T) {
 	environment := newTestEnvironment(t, 0)
 	workshopContent := filepath.Join(environment.root, "ugc", "content", "322330")
@@ -213,21 +477,32 @@ func TestPublishUsesWorkshopContentRootWhenUGCIsManaged(t *testing.T) {
 	}
 	environment.manager = manager
 	manifest := environment.importMod(t, "301", map[string]string{"modinfo.lua": "version='1'"})
-	plan, err := environment.manager.BuildPlan(context.Background(), release("release-ugc-0001", manifest, nil, nil))
+	input := release("release-ugc-0001", manifest, nil, nil)
+	for index := range input.Shards {
+		input.Shards[index].Mods[0].Metadata = Metadata{
+			PublishedFileSize: manifest.Size, SteamManifestID: "5198458395439210153",
+			SteamUpdatedAt: time.Unix(1779124745, 0).UTC(),
+		}
+	}
+	plan, err := environment.manager.BuildPlan(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Installations) != 1 || len(plan.Installations[0].ManagedSetup) != 0 {
-		t.Fatalf("UGC plan should not manage dedicated_server_mods_setup.lua: %#v", plan.Installations)
+	if len(plan.Installations) != 1 || !strings.Contains(string(plan.Installations[0].ManagedSetup), `ServerModSetup("301")`) {
+		t.Fatalf("UGC plan must retain the DST startup registration list: %#v", plan.Installations)
 	}
 	journal, err := environment.manager.Prepare(context.Background(), plan)
 	if err != nil {
 		t.Fatal(err)
 	}
+	setupMutation := false
 	for _, mutation := range journal.Mutations {
 		if mutation.Kind == MutationSetup {
-			t.Fatal("UGC publication must not include a setup-file mutation")
+			setupMutation = true
 		}
+	}
+	if !setupMutation {
+		t.Fatal("UGC publication must atomically publish the setup registration list")
 	}
 	if _, err := environment.manager.Publish(context.Background(), plan.OperationID); err != nil {
 		t.Fatal(err)
@@ -236,8 +511,33 @@ func TestPublishUsesWorkshopContentRootWhenUGCIsManaged(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFileContent(t, filepath.Join(workshopContent, "301", "modinfo.lua"), []byte("version='1'"))
-	if _, err := os.Stat(filepath.Join(environment.server, "mods", "workshop-301")); !os.IsNotExist(err) {
-		t.Fatalf("legacy server Mod target should not be created: %v", err)
+	modDirectoryInfo, err := os.Stat(filepath.Join(workshopContent, "301"))
+	if err != nil || modDirectoryInfo.Mode().Perm()&0o200 == 0 {
+		t.Fatalf("published UGC directory must be owner-writable: mode=%v err=%v", modDirectoryInfo.Mode(), err)
+	}
+	modFileInfo, err := os.Stat(filepath.Join(workshopContent, "301", "modinfo.lua"))
+	if err != nil || modFileInfo.Mode().Perm()&0o200 == 0 {
+		t.Fatalf("published UGC file must be owner-writable: mode=%v err=%v", modFileInfo.Mode(), err)
+	}
+	workshopManifest, err := os.ReadFile(filepath.Join(environment.root, "ugc", "appworkshop_322330.acf"))
+	if err != nil || !strings.Contains(string(workshopManifest), `"301"`) || !strings.Contains(string(workshopManifest), `"5198458395439210153"`) {
+		t.Fatalf("UGC Workshop registration was not published: %q err=%v", workshopManifest, err)
+	}
+	setup, err := os.ReadFile(filepath.Join(environment.server, "mods", "dedicated_server_mods_setup.lua"))
+	if err != nil || !strings.Contains(string(setup), `ServerModSetup("301")`) {
+		t.Fatalf("UGC setup registration was not published: %q err=%v", setup, err)
+	}
+	if _, err := environment.manager.ObserveState(context.Background(), "primary"); err != nil {
+		t.Fatalf("published UGC state was not observable: %v", err)
+	}
+	if err := os.Remove(filepath.Join(environment.server, "mods", "dedicated_server_mods_setup.lua")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.manager.ObserveState(context.Background(), "primary"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("missing UGC registration list must be detected as drift: %v", err)
+	}
+	if target, err := os.Readlink(filepath.Join(environment.server, "mods", "workshop-301")); err != nil || target != filepath.Join(workshopContent, "301") {
+		t.Fatalf("local Mod entry must reuse Workshop content: target=%q err=%v", target, err)
 	}
 }
 
@@ -357,6 +657,59 @@ func TestNewManagerRecoversUncommittedPublishByRollback(t *testing.T) {
 	assertFileContent(t, filepath.Join(environment.saves, "Cluster_1", "Master", "modoverrides.lua"), []byte("return {old=true}\n"))
 	if _, err := os.Stat(filepath.Join(environment.server, "mods", "workshop-500")); !os.IsNotExist(err) {
 		t.Fatalf("uncommitted mod was not removed: %v", err)
+	}
+}
+
+func TestOpenDefersBlockedJournalRecovery(t *testing.T) {
+	environment := newTestEnvironment(t, 0)
+	manifest := environment.importMod(t, "501", map[string]string{"modinfo.lua": "version='new'"})
+	plan, err := environment.manager.BuildPlan(context.Background(), release("release-blocked-01", manifest, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.manager.Prepare(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := environment.manager.journalPath(plan.OperationID)
+	file, err := os.OpenFile(journalPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("{}\n"); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	opened, openErr := Open(environment.config)
+	if openErr != nil || opened == nil {
+		t.Fatalf("open must return a usable manager without recovering journals: manager=%v err=%v", opened, openErr)
+	}
+	if _, err := os.Stat(journalPath); err != nil {
+		t.Fatalf("open unexpectedly processed the journal: %v", err)
+	}
+
+	results, recoveryErr := opened.Recover(context.Background())
+	if !errors.Is(recoveryErr, ErrIntegrity) {
+		t.Fatalf("explicit recovery did not return the journal error: %v", recoveryErr)
+	}
+	if len(results) != 1 || results[0].OperationID != plan.OperationID || results[0].Action != "blocked" || results[0].Error == "" {
+		t.Fatalf("unexpected recovery details: %#v", results)
+	}
+	strict, strictErr := New(environment.config)
+	if strict != nil || !errors.Is(strictErr, ErrIntegrity) {
+		t.Fatalf("strict constructor accepted a blocked journal: manager=%v err=%v", strict, strictErr)
+	}
+
+	next, err := opened.BuildPlan(context.Background(), release("release-after-blocked", manifest, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := opened.Prepare(context.Background(), next); !errors.Is(err, ErrOperationInProgress) ||
+		!strings.Contains(err.Error(), plan.OperationID) || !strings.Contains(err.Error(), ErrIntegrity.Error()) {
+		t.Fatalf("new operation did not expose the blocked recovery details: %v", err)
 	}
 }
 
@@ -647,9 +1000,10 @@ func TestCompleteDetectsPublishedTargetTampering(t *testing.T) {
 	if err := environment.manager.Complete(context.Background(), plan.OperationID); !errors.Is(err, ErrIntegrity) {
 		t.Fatalf("expected publish integrity failure, got %v", err)
 	}
-	if err := environment.manager.Rollback(context.Background(), plan.OperationID); err != nil {
-		t.Fatal(err)
+	if err := environment.manager.Rollback(context.Background(), plan.OperationID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("rollback overwrote a published target changed outside the manager: %v", err)
 	}
+	assertFileContent(t, target, []byte("tampered"))
 }
 
 func TestPublishRefusesExternalChangeAfterPrepare(t *testing.T) {
@@ -677,6 +1031,42 @@ func TestPublishRefusesExternalChangeAfterPrepare(t *testing.T) {
 	}
 	assertFileContent(t, master, []byte("return {operator_change=true}\n"))
 	_ = journal
+}
+
+func TestRollbackPreservesExternalChangeAfterPublish(t *testing.T) {
+	environment := newTestEnvironment(t, 0)
+	manifest := environment.importMod(t, "905", map[string]string{"modinfo.lua": "version='1'"})
+	writeWorldConfig(t, environment.saves, "Master", []byte("return {before=true}\n"))
+	writeWorldConfig(t, environment.saves, "Caves", []byte("return {before=true}\n"))
+	plan, err := environment.manager.BuildPlan(context.Background(), release(
+		"release-external-02",
+		manifest,
+		[]byte("return {published=true}\n"),
+		[]byte("return {published=true}\n"),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.manager.Prepare(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := environment.manager.Publish(context.Background(), plan.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	master := filepath.Join(environment.saves, "Cluster_1", "Master", "modoverrides.lua")
+	manual := []byte("return {operator_change_after_publish=true}\n")
+	if err := os.WriteFile(master, manual, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	err = environment.manager.Rollback(context.Background(), plan.OperationID)
+	if !errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), master) {
+		t.Fatalf("rollback did not report the external change: %v", err)
+	}
+	assertFileContent(t, master, manual)
+	if _, err := os.Stat(environment.manager.journalPath(plan.OperationID)); err != nil {
+		t.Fatalf("blocked rollback removed its recovery journal: %v", err)
+	}
 }
 
 func writeWorldConfig(t *testing.T, saveRoot, world string, content []byte) {

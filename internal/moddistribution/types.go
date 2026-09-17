@@ -17,19 +17,21 @@ const (
 )
 
 var (
-	ErrInvalidInput        = errors.New("mod distribution input is invalid")
-	ErrNotFound            = errors.New("mod content is not cached")
-	ErrConflict            = errors.New("mod distribution state conflicts with the requested release")
-	ErrIntegrity           = errors.New("mod content integrity verification failed")
-	ErrUnsafePath          = errors.New("mod distribution path is outside a trusted root or contains a symbolic link")
-	ErrInsufficientSpace   = errors.New("insufficient disk space for mod distribution")
-	ErrOperationInProgress = errors.New("another mod distribution operation is in progress")
+	ErrInvalidInput         = errors.New("mod distribution input is invalid")
+	ErrNotFound             = errors.New("mod content is not cached")
+	ErrConflict             = errors.New("mod distribution state conflicts with the requested release")
+	ErrIntegrity            = errors.New("mod content integrity verification failed")
+	ErrUnsafePath           = errors.New("mod distribution path is outside a trusted root or contains a symbolic link")
+	ErrInsufficientSpace    = errors.New("insufficient disk space for mod distribution")
+	ErrOperationInProgress  = errors.New("another mod distribution operation is in progress")
+	ErrWorkshopRegistration = errors.New("Steam Workshop registration metadata is missing")
 )
 
 type Metadata struct {
 	Title             string    `json:"title,omitempty"`
 	Version           string    `json:"version,omitempty"`
 	PublishedFileSize int64     `json:"publishedFileSize,omitempty"`
+	SteamManifestID   string    `json:"steamManifestId,omitempty"`
 	SteamUpdatedAt    time.Time `json:"steamUpdatedAt,omitempty"`
 }
 
@@ -54,11 +56,12 @@ type Manifest struct {
 }
 
 type TrustedInstallation struct {
-	ID                  string `json:"id"`
-	NodeID              string `json:"nodeId"`
-	ServerPath          string `json:"serverPath"`
-	SavePath            string `json:"savePath"`
-	WorkshopContentPath string `json:"workshopContentPath,omitempty"`
+	ID                   string `json:"id"`
+	NodeID               string `json:"nodeId"`
+	ServerPath           string `json:"serverPath"`
+	SavePath             string `json:"savePath"`
+	WorkshopContentPath  string `json:"workshopContentPath,omitempty"`
+	WorkshopManifestPath string `json:"workshopManifestPath,omitempty"`
 }
 
 type Config struct {
@@ -70,8 +73,49 @@ type Config struct {
 }
 
 type ModVersion struct {
-	WorkshopID string `json:"workshopId"`
-	TreeSHA256 string `json:"treeSha256"`
+	WorkshopID string   `json:"workshopId"`
+	TreeSHA256 string   `json:"treeSha256"`
+	Metadata   Metadata `json:"metadata,omitempty"`
+}
+
+type FileStatus string
+
+const (
+	FileReady   FileStatus = "ready"
+	FileMissing FileStatus = "missing"
+	FileInvalid FileStatus = "invalid"
+)
+
+type FileState struct {
+	Status          FileStatus
+	Reason          string
+	Name            string
+	Version         string
+	InstalledSize   int64
+	SteamManifestID string
+	SteamUpdatedAt  *time.Time
+	MetadataReason  string
+}
+
+type ObserveWorld struct {
+	RoomID         string
+	RoomDirectory  string
+	WorldID        string
+	WorldDirectory string
+}
+
+type WorldFileState struct {
+	RoomID       string
+	WorldID      string
+	LoadedModIDs []string
+	LogObserved  bool
+}
+
+type FilesObservation struct {
+	InstallationID string
+	Mods           map[string]FileState
+	Worlds         map[string]WorldFileState
+	ObservedAt     time.Time
 }
 
 // ShardRelease is one world's complete desired Mod state. ModOverrides is
@@ -96,18 +140,37 @@ type PlanInput struct {
 	Shards      []ShardRelease `json:"shards"`
 }
 
+type PlanMode string
+
+const (
+	PlanModeRelease PlanMode = ""
+	PlanModeContent PlanMode = "content"
+)
+
+// ContentPlanInput updates the shared Workshop content of one installation
+// without changing the setup file or any world's modoverrides.lua.
+type ContentPlanInput struct {
+	OperationID    string       `json:"operationId"`
+	NodeID         string       `json:"nodeId"`
+	InstallationID string       `json:"installationId"`
+	Mods           []ModVersion `json:"mods"`
+}
+
 type InstallationPlan struct {
-	InstallationID  string         `json:"installationId"`
-	NodeID          string         `json:"nodeId"`
-	Mods            []ModVersion   `json:"mods"`
-	Shards          []ShardRelease `json:"shards"`
-	ManagedSetup    []byte         `json:"managedSetup"`
-	SetupBaseSHA256 string         `json:"setupBaseSha256,omitempty"`
+	InstallationID             string         `json:"installationId"`
+	NodeID                     string         `json:"nodeId"`
+	Mods                       []ModVersion   `json:"mods"`
+	Shards                     []ShardRelease `json:"shards"`
+	ManagedSetup               []byte         `json:"managedSetup"`
+	SetupBaseSHA256            string         `json:"setupBaseSha256,omitempty"`
+	ManagedWorkshopManifest    []byte         `json:"managedWorkshopManifest,omitempty"`
+	WorkshopManifestBaseSHA256 string         `json:"workshopManifestBaseSha256,omitempty"`
 }
 
 type Plan struct {
 	OperationID   string             `json:"operationId"`
 	NodeID        string             `json:"nodeId"`
+	Mode          PlanMode           `json:"mode,omitempty"`
 	CreatedAt     time.Time          `json:"createdAt"`
 	Installations []InstallationPlan `json:"installations"`
 }
@@ -127,9 +190,10 @@ const (
 type MutationKind string
 
 const (
-	MutationMod       MutationKind = "mod"
-	MutationOverrides MutationKind = "modoverrides"
-	MutationSetup     MutationKind = "dedicated_server_mods_setup"
+	MutationMod              MutationKind = "mod"
+	MutationOverrides        MutationKind = "modoverrides"
+	MutationSetup            MutationKind = "dedicated_server_mods_setup"
+	MutationWorkshopManifest MutationKind = "steam_workshop_manifest"
 )
 
 type Mutation struct {
@@ -158,12 +222,13 @@ type Journal struct {
 }
 
 type InstallationState struct {
-	InstallationID     string                `json:"installationId"`
-	LastOperationID    string                `json:"lastOperationId"`
-	Mods               map[string]string     `json:"mods"`
-	ManagedSetupSHA256 string                `json:"managedSetupSha256"`
-	Shards             map[string]ShardState `json:"shards"`
-	UpdatedAt          time.Time             `json:"updatedAt"`
+	InstallationID         string                `json:"installationId"`
+	LastOperationID        string                `json:"lastOperationId"`
+	Mods                   map[string]string     `json:"mods"`
+	ManagedSetupSHA256     string                `json:"managedSetupSha256"`
+	WorkshopManifestSHA256 string                `json:"workshopManifestSha256,omitempty"`
+	Shards                 map[string]ShardState `json:"shards"`
+	UpdatedAt              time.Time             `json:"updatedAt"`
 }
 
 type ShardState struct {

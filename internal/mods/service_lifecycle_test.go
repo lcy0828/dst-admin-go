@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"dont/internal/rooms"
 	"dont/internal/runtimeguard"
 )
 
@@ -31,6 +32,12 @@ type existingDirectoryRunner struct {
 }
 
 type deniedModMutationGuard struct{}
+
+type modPlacementMap map[string]bool
+
+func (p modPlacementMap) IsLocalPlacement(_ string, worldID string) (bool, error) {
+	return p[worldID], nil
+}
 
 func (deniedModMutationGuard) RequireRoom(string) error {
 	return runtimeguard.ErrRemoteMutationUnavailable
@@ -66,7 +73,7 @@ func (r blockingLifecycleRunner) Download(_ context.Context, ids []string, _ boo
 	return lifecycleRunner{root: r.root, content: `name = "updated"`}.Download(context.Background(), ids, true, io.Discard)
 }
 
-func TestInstallFailureRestoresExistingCacheAndRemovesPartialDependencies(t *testing.T) {
+func TestInstallFailureLeavesSteamFilesInPlaceAndDoesNotChangeRoomConfiguration(t *testing.T) {
 	service, backupService, overridesPath := newConfigTestService(t)
 	originalCache, err := os.ReadFile(filepath.Join(service.downloadedPath("378160973"), "modinfo.lua"))
 	if err != nil {
@@ -84,12 +91,12 @@ func TestInstallFailureRestoresExistingCacheAndRemovesPartialDependencies(t *tes
 	if err == nil || !strings.Contains(err.Error(), "dependency download failed") {
 		t.Fatalf("expected install failure, got %v", err)
 	}
-	restoredCache, err := os.ReadFile(filepath.Join(service.downloadedPath("378160973"), "modinfo.lua"))
-	if err != nil || string(restoredCache) != string(originalCache) {
-		t.Fatalf("existing cache was not restored: value=%q err=%v", restoredCache, err)
+	currentCache, err := os.ReadFile(filepath.Join(service.downloadedPath("378160973"), "modinfo.lua"))
+	if err != nil || string(currentCache) != "partial" || string(currentCache) == string(originalCache) {
+		t.Fatalf("SteamCMD result was unexpectedly rolled back: value=%q err=%v", currentCache, err)
 	}
-	if _, err := os.Stat(service.downloadedPath("123456789")); !os.IsNotExist(err) {
-		t.Fatalf("partial dependency was not removed: %v", err)
+	if _, err := os.Stat(service.downloadedPath("123456789")); err != nil {
+		t.Fatalf("SteamCMD dependency result was unexpectedly removed: %v", err)
 	}
 	config, err := os.ReadFile(overridesPath)
 	if err != nil || string(config) != string(originalConfig) {
@@ -296,6 +303,11 @@ func TestNodeDownloadDoesNotChangeRoomConfiguration(t *testing.T) {
 
 func TestAddDownloadedModToRoomIsConfigurationOnly(t *testing.T) {
 	service, backupService, overridesPath := newConfigTestService(t)
+	setupPath := service.setupPath()
+	setupBefore, err := os.ReadFile(setupPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
 	modPath := service.downloadedPath("123456789")
 	if err := os.MkdirAll(modPath, 0750); err != nil {
 		t.Fatal(err)
@@ -306,17 +318,70 @@ func TestAddDownloadedModToRoomIsConfigurationOnly(t *testing.T) {
 	result, err := service.AddToRoom(context.Background(), "job", "room-1", "123456789", AddToRoomRequest{
 		WorldIDs: []string{"world-1"}, Enabled: true,
 	})
-	if err != nil || result.ProtectionBackupID == "" || backupService.count != 1 {
+	if err != nil || result.ProtectionBackupID != "" || backupService.count != 0 {
 		t.Fatalf("add result=%#v backups=%d err=%v", result, backupService.count, err)
 	}
 	overrides, _ := os.ReadFile(overridesPath)
-	setup, _ := os.ReadFile(service.setupPath())
-	if !strings.Contains(string(overrides), `workshop-123456789`) || !strings.Contains(string(setup), `ServerModSetup("123456789")`) {
-		t.Fatalf("room or server setup was not updated:\n%s\n%s", overrides, setup)
+	if !strings.Contains(string(overrides), `workshop-123456789`) {
+		t.Fatalf("room modoverrides.lua was not updated:\n%s", overrides)
+	}
+	setupAfter, err := os.ReadFile(setupPath)
+	if os.IsNotExist(err) {
+		setupAfter = nil
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	if string(setupAfter) != string(setupBefore) {
+		t.Fatalf("adding an already-downloaded Mod changed dedicated_server_mods_setup.lua:\nbefore=%s\nafter=%s", setupBefore, setupAfter)
 	}
 }
 
-func TestRoomListWaitsForCoherentNodeLibraryState(t *testing.T) {
+func TestLocalWorldModChangesWorkInMixedPlacementRoom(t *testing.T) {
+	service, backupService, _ := newConfigTestService(t)
+	catalog := service.rooms.(*testRoomCatalog)
+	catalog.worlds = append(catalog.worlds, rooms.World{
+		ID: "world-2", RoomID: "room-1", DirectoryName: "Caves", Name: "洞穴",
+	})
+	guard, err := runtimeguard.New(catalog, modPlacementMap{"world-1": true, "world-2": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.ConfigureMutationGuard(guard)
+
+	configuration, err := service.Configuration(context.Background(), "room-1", "world-1", "378160973")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ApplyConfiguration(context.Background(), "job-config", "room-1", "world-1", "378160973", ConfigUpdateRequest{
+		ExpectedRevision: configuration.Revision,
+		Enabled:          false,
+	}); err != nil {
+		t.Fatalf("configure local world in mixed room: %v", err)
+	}
+	if _, err := service.Enable(context.Background(), "job-enable", "room-1", "378160973", EnableRequest{
+		WorldIDs: []string{"world-1"}, Enabled: true,
+	}); err != nil {
+		t.Fatalf("enable Mod in local world of mixed room: %v", err)
+	}
+
+	modPath := service.downloadedPath("123456789")
+	if err := os.MkdirAll(modPath, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modPath, "modinfo.lua"), []byte(`name = "Local Mod"`), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AddToRoom(context.Background(), "job-add", "room-1", "123456789", AddToRoomRequest{
+		WorldIDs: []string{"world-1"}, Enabled: true,
+	}); err != nil {
+		t.Fatalf("add Mod to local world of mixed room: %v", err)
+	}
+	if backupService.count != 0 {
+		t.Fatalf("lightweight local Mod changes created %d backups", backupService.count)
+	}
+}
+
+func TestRoomListRemainsAvailableDuringNodeDownload(t *testing.T) {
 	service, _, _ := newConfigTestService(t)
 	runner := blockingLifecycleRunner{
 		root: service.config.WorkshopContentRoot, started: make(chan struct{}), release: make(chan struct{}),
@@ -336,14 +401,14 @@ func TestRoomListWaitsForCoherentNodeLibraryState(t *testing.T) {
 	}()
 	select {
 	case err := <-listDone:
-		t.Fatalf("room list observed an in-progress node update: %v", err)
+		if err != nil {
+			t.Fatalf("room list failed during node download: %v", err)
+		}
 	case <-time.After(50 * time.Millisecond):
+		t.Fatal("room list was blocked by an in-progress node download")
 	}
 	close(runner.release)
 	if err := <-updateDone; err != nil {
-		t.Fatal(err)
-	}
-	if err := <-listDone; err != nil {
 		t.Fatal(err)
 	}
 }

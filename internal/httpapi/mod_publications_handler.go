@@ -29,8 +29,13 @@ type ModPublicationService interface {
 }
 
 type ModPublicationHandler struct {
-	service ModPublicationService
-	jobs    *jobs.Service
+	service  ModPublicationService
+	replicas ModReplicaReader
+	jobs     *jobs.Service
+}
+
+type ModReplicaReader interface {
+	RoomReplicas(string) (modpublication.RoomReplicaState, error)
 }
 
 func NewModPublicationHandler(service ModPublicationService, jobService *jobs.Service) (*ModPublicationHandler, error) {
@@ -40,13 +45,31 @@ func NewModPublicationHandler(service ModPublicationService, jobService *jobs.Se
 	return &ModPublicationHandler{service: service, jobs: jobService}, nil
 }
 
+func (h *ModPublicationHandler) ConfigureReplicaReader(reader ModReplicaReader) {
+	h.replicas = reader
+}
+
 func (h *ModPublicationHandler) Register(v2 *gin.RouterGroup) {
 	v2.POST("/rooms/:roomId/mod-publications/preview", h.preview)
 	v2.POST("/rooms/:roomId/mod-publications", h.publish)
 	v2.GET("/rooms/:roomId/mod-publications", h.list)
+	v2.GET("/rooms/:roomId/mod-replicas", h.roomReplicas)
 	v2.GET("/mod-publications/:publicationId", h.get)
 	v2.POST("/mod-publications/:publicationId/actions/retry-failed", h.retry)
 	v2.POST("/mod-publications/:publicationId/actions/activate", h.activate)
+}
+
+func (h *ModPublicationHandler) roomReplicas(c *gin.Context) {
+	if h.replicas == nil {
+		Failure(c, http.StatusServiceUnavailable, "MOD_REPLICA_STATE_UNAVAILABLE", "Mod 节点状态服务尚未就绪", nil)
+		return
+	}
+	value, err := h.replicas.RoomReplicas(c.Param("roomId"))
+	if err != nil {
+		modPublicationFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
 }
 
 func (h *ModPublicationHandler) preview(c *gin.Context) {
@@ -108,6 +131,7 @@ func (h *ModPublicationHandler) publish(c *gin.Context) {
 	}
 	job, err := h.jobs.SubmitFactory("mod.publication", roomID, "", targets, func(job jobs.Job) jobs.Runner {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
+			ctx = attachModJobProgress(ctx, h.jobs, job.ID)
 			publication, publishErr := h.service.Publish(ctx, job.ID, roomID, request)
 			for _, target := range plan.Targets {
 				report(publicationTargetJobResult(publication, target.TargetID, target.InstallationID, publishErr, false, "Mod 已原子发布；重启分片后生效"))
@@ -153,6 +177,7 @@ func (h *ModPublicationHandler) activate(c *gin.Context) {
 	}
 	job, err := h.jobs.SubmitFactory("mod.publication.activation", current.RoomID, "", targets, func(job jobs.Job) jobs.Runner {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
+			ctx = attachModJobProgress(ctx, h.jobs, job.ID)
 			publication, activationErr := h.service.Activate(ctx, job.ID, publicationID, policy)
 			for _, target := range current.Plan.Targets {
 				for _, world := range target.Worlds {
@@ -182,6 +207,7 @@ func (h *ModPublicationHandler) retry(c *gin.Context) {
 	}
 	job, err := h.jobs.SubmitFactory("mod.publication.retry", current.RoomID, "", targets, func(job jobs.Job) jobs.Runner {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
+			ctx = attachModJobProgress(ctx, h.jobs, job.ID)
 			publication, retryErr := h.service.Retry(ctx, job.ID, publicationID)
 			for _, target := range current.Plan.Targets {
 				report(publicationTargetJobResult(publication, target.TargetID, target.InstallationID, retryErr, true, "Mod 发布恢复已完成"))

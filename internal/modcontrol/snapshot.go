@@ -25,16 +25,25 @@ type proposalContextKey struct{}
 type snapshotContextKey struct{}
 
 type proposal struct {
-	roomID    string
-	roomOnly  bool
-	action    mods.OverrideAction
-	modID     string
-	modIDs    []string
-	worldIDs  map[string]bool
-	enabled   bool
-	revision  string
-	patch     map[string]json.RawMessage
-	overrides map[string][]byte
+	configurationSourceWorldID string
+	configurationSource        []byte
+	roomID                     string
+	roomOnly                   bool
+	action                     mods.OverrideAction
+	modID                      string
+	modIDs                     []string
+	worldIDs                   map[string]bool
+	enabled                    bool
+	preserveEnabled            bool
+	revision                   string
+	revisions                  map[string]string
+	patch                      map[string]json.RawMessage
+	overrides                  map[string][]byte
+	placements                 map[string]modpublication.AppliedPlacement
+	executions                 map[string]topology.ExecutionPlacement
+	installationOnly           map[string]bool
+	artifacts                  map[string]modpublication.ContentArtifact
+	readOnly                   bool
 }
 
 type snapshotState struct {
@@ -52,6 +61,7 @@ type runtimeSnapshot struct {
 	roomRevisions map[string]string
 	executions    map[string]topology.ExecutionPlacement
 	contents      map[string][]byte
+	overrides     []runtimedriver.ModOverridesUpdate
 }
 
 type resolvedRoomSnapshot struct {
@@ -186,7 +196,12 @@ func (s *SnapshotSource) build(ctx context.Context) (runtimeSnapshot, error) {
 		if !room.Managed || request.roomOnly && room.ID != request.roomID {
 			continue
 		}
-		executions, err := s.topology.ResolveRoomExecutions(ctx, room.ID)
+		var executions []topology.ExecutionPlacement
+		if request.readOnly {
+			executions, err = s.topology.ResolveCachedRoomExecutions(ctx, room.ID)
+		} else {
+			executions, err = s.topology.ResolveRoomExecutions(ctx, room.ID)
+		}
 		if err != nil {
 			return runtimeSnapshot{}, err
 		}
@@ -200,6 +215,12 @@ func (s *SnapshotSource) build(ctx context.Context) (runtimeSnapshot, error) {
 				return runtimeSnapshot{}, ErrTopologyChanged
 			}
 			worldsSeen[execution.World.ID] = true
+			sourcePlacement := publicationPlacement(execution, room.ID, execution.World.ID)
+			sourceKey := sourcePlacement.TargetID + "\x00" + sourcePlacement.InstallationID
+			if prior, exists := result.executions[sourceKey]; exists && !sameRuntimeInstallation(prior, execution) {
+				return runtimeSnapshot{}, ErrTopologyChanged
+			}
+			result.executions[sourceKey] = execution
 			if roomRevision == "" {
 				roomRevision = execution.Revision
 			} else if roomRevision != execution.Revision {
@@ -212,15 +233,18 @@ func (s *SnapshotSource) build(ctx context.Context) (runtimeSnapshot, error) {
 		resolvedRooms = append(resolvedRooms, resolvedRoomSnapshot{room: room, revision: roomRevision, executions: executions})
 	}
 
-	filterInstallations := !request.roomOnly && request.roomID != ""
+	filterInstallations := len(request.installationOnly) > 0 || !request.roomOnly && request.roomID != ""
 	requestedInstallations := make(map[string]bool)
-	if filterInstallations {
+	for key := range request.installationOnly {
+		requestedInstallations[key] = true
+	}
+	if filterInstallations && len(request.installationOnly) == 0 {
 		for _, resolved := range resolvedRooms {
 			if resolved.room.ID != request.roomID {
 				continue
 			}
 			for _, execution := range resolved.executions {
-				placement := publicationPlacement(execution, resolved.room.ID, execution.World.ID)
+				placement := effectivePublicationPlacement(request, execution, resolved.room.ID, execution.World.ID)
 				requestedInstallations[placement.TargetID+"\x00"+placement.InstallationID] = true
 			}
 		}
@@ -231,30 +255,54 @@ func (s *SnapshotSource) build(ctx context.Context) (runtimeSnapshot, error) {
 	requestedMods := make(map[string]bool)
 	for _, resolved := range resolvedRooms {
 		roomIncluded := false
-		for _, execution := range resolved.executions {
+		executions := append([]topology.ExecutionPlacement(nil), resolved.executions...)
+		if request.configurationSourceWorldID != "" {
+			sort.SliceStable(executions, func(i, j int) bool {
+				return executions[i].World.ID == request.configurationSourceWorldID && executions[j].World.ID != request.configurationSourceWorldID
+			})
+		}
+		for _, execution := range executions {
 			if err := ctx.Err(); err != nil {
 				return runtimeSnapshot{}, err
 			}
 			world := execution.World
 			room := resolved.room
-			placement := publicationPlacement(execution, room.ID, world.ID)
+			if request.roomOnly && request.action != "reconcile" && len(request.worldIDs) > 0 && !request.worldIDs[world.ID] {
+				continue
+			}
+			sourcePlacement := publicationPlacement(execution, room.ID, world.ID)
+			placement := effectivePublicationPlacement(request, execution, room.ID, world.ID)
 			installationKey := placement.TargetID + "\x00" + placement.InstallationID
 			if filterInstallations && !requestedInstallations[installationKey] {
 				continue
 			}
 			roomIncluded = true
-			content, err := s.readOverrides(ctx, execution, placement)
+			content, err := s.readOverrides(ctx, execution, sourcePlacement)
 			if err != nil {
 				return runtimeSnapshot{}, fmt.Errorf("read room %s world %s modoverrides.lua: %w", room.ID, world.ID, err)
+			}
+			originalSHA256 := shaHex(content)
+			if room.ID == request.roomID && world.ID == request.configurationSourceWorldID {
+				request.configurationSource = append([]byte(nil), content...)
 			}
 			if next, ok := request.overrides[room.ID+"\x00"+world.ID]; ok {
 				content = append([]byte(nil), next...)
 			} else if room.ID == request.roomID && request.worldIDs[world.ID] {
 				selectedWorlds[world.ID] = true
-				content, err = s.applyProposal(ctx, request, world.ID, content)
+				content, err = s.applyProposal(ctx, request, execution, content)
 				if err != nil {
 					return runtimeSnapshot{}, err
 				}
+			}
+			if request.roomOnly && request.worldIDs[world.ID] && originalSHA256 != shaHex(content) {
+				result.overrides = append(result.overrides, runtimedriver.ModOverridesUpdate{
+					Target: runtimedriver.Target{
+						TargetID: sourcePlacement.TargetID, InstallationID: sourcePlacement.InstallationID,
+						RoomID: room.ID, WorldID: world.ID, Cluster: room.DirectoryName, Shard: world.DirectoryName,
+						TopologyRevision: execution.Revision,
+					},
+					ExpectedSHA256: originalSHA256, Content: content,
+				})
 			}
 			snapshot, err := mods.InspectModOverride(content)
 			if err != nil {
@@ -265,17 +313,25 @@ func (s *SnapshotSource) build(ctx context.Context) (runtimeSnapshot, error) {
 				WorldDirectory: world.DirectoryName, IsMaster: world.IsMaster, ModOverrides: append([]byte(nil), content...),
 			}
 			for _, item := range snapshot.Mods {
-				managed.Mods = append(managed.Mods, modpublication.ModRequirement{WorkshopID: item.ModID})
+				requirement := modpublication.ModRequirement{WorkshopID: item.ModID}
+				if artifact, exists := request.artifacts[proposalArtifactKey(placement.TargetID, placement.InstallationID, item.ModID)]; exists {
+					requirement.TreeSHA256 = artifact.TreeSHA256
+				}
+				managed.Mods = append(managed.Mods, requirement)
 				if room.ID == request.roomID {
 					requestedMods[item.ModID] = true
 				}
 			}
 			result.worlds = append(result.worlds, managed)
 			result.placements.Placements = append(result.placements.Placements, placement)
-			if prior, exists := result.executions[installationKey]; exists && !sameRuntimeInstallation(prior, execution) {
+			runtimeExecution := execution
+			if overridden, exists := request.executions[installationKey]; exists {
+				runtimeExecution = overridden
+			}
+			if prior, exists := result.executions[installationKey]; exists && !sameRuntimeInstallation(prior, runtimeExecution) {
 				return runtimeSnapshot{}, ErrTopologyChanged
 			}
-			result.executions[installationKey] = execution
+			result.executions[installationKey] = runtimeExecution
 			result.contents[room.ID+"\x00"+world.ID] = append([]byte(nil), content...)
 		}
 		if roomIncluded && resolved.revision != "" {
@@ -292,6 +348,27 @@ func (s *SnapshotSource) build(ctx context.Context) (runtimeSnapshot, error) {
 	digest := sha256.Sum256([]byte(strings.Join(revisions, "\x00")))
 	result.placements.TopologyRevision = hex.EncodeToString(digest[:])
 	return result, nil
+}
+
+func proposalArtifactKey(targetID, installationID, workshopID string) string {
+	return targetID + "\x00" + installationID + "\x00" + workshopID
+}
+
+func proposalArtifact(ctx context.Context, requirement modpublication.ModRequirement) (modpublication.ContentArtifact, bool) {
+	request, _ := ctx.Value(proposalContextKey{}).(proposal)
+	for _, artifact := range request.artifacts {
+		if artifact.WorkshopID == requirement.WorkshopID && strings.EqualFold(artifact.TreeSHA256, requirement.TreeSHA256) {
+			return artifact, true
+		}
+	}
+	return modpublication.ContentArtifact{}, false
+}
+
+func effectivePublicationPlacement(request proposal, execution topology.ExecutionPlacement, roomID, worldID string) modpublication.AppliedPlacement {
+	if placement, exists := request.placements[roomID+"\x00"+worldID]; exists {
+		return placement
+	}
+	return publicationPlacement(execution, roomID, worldID)
 }
 
 func sameStringSet(expected []string, actual map[string]bool) bool {
@@ -329,7 +406,8 @@ func publicationPlacement(execution topology.ExecutionPlacement, roomID, worldID
 	return modpublication.AppliedPlacement{RoomID: roomID, WorldID: worldID, TargetID: targetID, NodeID: nodeID, InstallationID: installationID}
 }
 
-func (s *SnapshotSource) applyProposal(ctx context.Context, request proposal, worldID string, content []byte) ([]byte, error) {
+func (s *SnapshotSource) applyProposal(ctx context.Context, request proposal, execution topology.ExecutionPlacement, content []byte) ([]byte, error) {
+	worldID := execution.World.ID
 	if request.action == "" {
 		return content, nil
 	}
@@ -342,15 +420,26 @@ func (s *SnapshotSource) applyProposal(ctx context.Context, request proposal, wo
 	}
 	mutation := mods.OverrideMutation{
 		Action: request.action, ModID: request.modID, ModIDs: append([]string(nil), request.modIDs...),
-		Enabled: request.enabled, ExpectedRevision: current.Revision,
+		Enabled: request.enabled, PreserveEnabled: request.preserveEnabled, ExpectedRevision: current.Revision,
+	}
+	if request.action == mods.OverrideActionEnable {
+		if expected := request.revisions[worldID]; expected != "" {
+			mutation.ExpectedRevision = expected
+		} else if request.revision != "" {
+			mutation.ExpectedRevision = request.revision
+		}
 	}
 	if request.action == mods.OverrideActionConfigure {
-		mutation.ExpectedRevision = request.revision
+		mutation.ConfigurationSource = request.configurationSource
+		mutation.ExpectedRevision = request.revisions[worldID]
+		if mutation.ExpectedRevision == "" {
+			mutation.ExpectedRevision = request.revision
+		}
 		mutation.Patch = make(map[string]json.RawMessage, len(request.patch))
 		for key, value := range request.patch {
 			mutation.Patch[key] = append(json.RawMessage(nil), value...)
 		}
-		configuration, err := s.mods.ConfigurationFromContent(ctx, request.roomID, worldID, request.modID, content)
+		configuration, err := s.configurationForExecution(ctx, execution, request.modID, content)
 		if err != nil {
 			return nil, err
 		}

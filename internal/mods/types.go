@@ -38,23 +38,25 @@ func (e *RevisionConflictError) Error() string { return ErrRevisionConflict.Erro
 func (e *RevisionConflictError) Unwrap() error { return ErrRevisionConflict }
 
 type SteamMod struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	AuthorID      string    `json:"authorId,omitempty"`
-	Author        string    `json:"author,omitempty"`
-	Version       string    `json:"version,omitempty"`
-	Description   string    `json:"description,omitempty"`
-	PreviewURL    string    `json:"previewUrl,omitempty"`
-	Subscriptions int64     `json:"subscriptions"`
-	Score         float64   `json:"score"`
-	RatingCount   int64     `json:"ratingCount"`
-	Favorites     int64     `json:"favorites"`
-	Views         int64     `json:"views"`
-	FileSize      int64     `json:"fileSize"`
-	CreatedAt     time.Time `json:"createdAt,omitempty"`
-	UpdatedAt     time.Time `json:"updatedAt,omitempty"`
-	Dependencies  []string  `json:"dependencies"`
-	Tags          []string  `json:"tags"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	AuthorID        string    `json:"authorId,omitempty"`
+	Author          string    `json:"author,omitempty"`
+	MetadataWarning string    `json:"metadataWarning,omitempty"`
+	Version         string    `json:"version,omitempty"`
+	Description     string    `json:"description,omitempty"`
+	PreviewURL      string    `json:"previewUrl,omitempty"`
+	Subscriptions   int64     `json:"subscriptions"`
+	Score           float64   `json:"score"`
+	RatingCount     int64     `json:"ratingCount"`
+	Favorites       int64     `json:"favorites"`
+	Views           int64     `json:"views"`
+	FileSize        int64     `json:"fileSize"`
+	SteamManifestID string    `json:"steamManifestId,omitempty"`
+	CreatedAt       time.Time `json:"createdAt,omitempty"`
+	UpdatedAt       time.Time `json:"updatedAt,omitempty"`
+	Dependencies    []string  `json:"dependencies"`
+	Tags            []string  `json:"tags"`
 }
 
 type SearchSort string
@@ -78,6 +80,7 @@ type SearchOptions struct {
 }
 
 type SearchResult struct {
+	Warning  string     `json:"warning,omitempty"`
 	Items    []SteamMod `json:"items"`
 	Total    int        `json:"total"`
 	Page     int        `json:"page"`
@@ -99,34 +102,94 @@ const (
 
 type ModState struct {
 	SteamMod
-	Configured        bool        `json:"configured"`
-	Downloaded        bool        `json:"downloaded"`
-	Installed         bool        `json:"installed"`
-	Loaded            bool        `json:"loaded"`
-	Enabled           bool        `json:"enabled"`
-	ConfiguredWorlds  []string    `json:"configuredWorlds"`
-	EnabledWorlds     []string    `json:"enabledWorlds"`
-	InstalledWorlds   []string    `json:"installedWorlds"`
-	LoadedWorlds      []string    `json:"loadedWorlds"`
-	LocalUpdatedAt    *time.Time  `json:"localUpdatedAt,omitempty"`
-	WorkshopManifest  bool        `json:"workshopManifest"`
-	ManifestUpdatedAt *time.Time  `json:"manifestUpdatedAt,omitempty"`
-	Health            HealthState `json:"health"`
-	HealthMessage     string      `json:"healthMessage"`
-	RepairAction      string      `json:"repairAction,omitempty"`
-	Parser            string      `json:"parser,omitempty"`
-	FallbackUsed      bool        `json:"fallbackUsed"`
-	FallbackReason    string      `json:"fallbackReason,omitempty"`
-	Warnings          []string    `json:"warnings"`
+	LatestVersion             string                    `json:"latestVersion,omitempty"`
+	RuntimeVersion            string                    `json:"runtimeVersion,omitempty"`
+	RuntimeVersionStatus      string                    `json:"runtimeVersionStatus,omitempty"`
+	RuntimeCurrentTargets     int                       `json:"runtimeCurrentTargets"`
+	RuntimeOutdatedTargets    int                       `json:"runtimeOutdatedTargets"`
+	RuntimeUnknownTargets     int                       `json:"runtimeUnknownVersionTargets"`
+	RuntimeVersions           []RuntimeModVersionTarget `json:"runtimeVersions"`
+	RuntimeObserved           bool                      `json:"runtimeObserved"`
+	RuntimeFileStatus         string                    `json:"runtimeFileStatus,omitempty"`
+	RuntimeReadyTargets       int                       `json:"runtimeReadyTargets"`
+	RuntimePendingTargets     int                       `json:"runtimePendingTargets"`
+	RuntimeUnavailableTargets int                       `json:"runtimeUnavailableTargets"`
+	RuntimeTotalTargets       int                       `json:"runtimeTotalTargets"`
+	Configured                bool                      `json:"configured"`
+	Downloaded                bool                      `json:"downloaded"`
+	Installed                 bool                      `json:"installed"`
+	Loaded                    bool                      `json:"loaded"`
+	Enabled                   bool                      `json:"enabled"`
+	ConfiguredWorlds          []string                  `json:"configuredWorlds"`
+	EnabledWorlds             []string                  `json:"enabledWorlds"`
+	InstalledWorlds           []string                  `json:"installedWorlds"`
+	LoadedWorlds              []string                  `json:"loadedWorlds"`
+	LocalUpdatedAt            *time.Time                `json:"localUpdatedAt,omitempty"`
+	WorkshopManifest          bool                      `json:"workshopManifest"`
+	ManifestUpdatedAt         *time.Time                `json:"manifestUpdatedAt,omitempty"`
+	Health                    HealthState               `json:"health"`
+	HealthMessage             string                    `json:"healthMessage"`
+	RepairAction              string                    `json:"repairAction,omitempty"`
+	Parser                    string                    `json:"parser,omitempty"`
+	FallbackUsed              bool                      `json:"fallbackUsed"`
+	FallbackReason            string                    `json:"fallbackReason,omitempty"`
+	Warnings                  []string                  `json:"warnings"`
+}
+
+type RuntimeModVersionTarget struct {
+	TargetID        string     `json:"targetId"`
+	InstallationID  string     `json:"installationId"`
+	Version         string     `json:"version,omitempty"`
+	SteamManifestID string     `json:"steamManifestId,omitempty"`
+	SteamUpdatedAt  *time.Time `json:"steamUpdatedAt,omitempty"`
+	Status          string     `json:"status"`
+	MetadataReason  string     `json:"metadataReason,omitempty"`
+}
+
+type RuntimeModRoomReference struct {
+	RoomID    string `json:"roomId"`
+	RoomName  string `json:"roomName"`
+	WorldID   string `json:"worldId"`
+	WorldName string `json:"worldName"`
+}
+
+type RuntimeInstallationMod struct {
+	SteamMod
+	CurrentVersion        string                    `json:"currentVersion,omitempty"`
+	LatestVersion         string                    `json:"latestVersion,omitempty"`
+	LatestSteamManifestID string                    `json:"latestSteamManifestId,omitempty"`
+	VersionStatus         string                    `json:"versionStatus"`
+	FileStatus            string                    `json:"fileStatus"`
+	FileReason            string                    `json:"fileReason,omitempty"`
+	InstalledSize         int64                     `json:"installedSize"`
+	SteamManifestID       string                    `json:"steamManifestId,omitempty"`
+	SteamUpdatedAt        *time.Time                `json:"steamUpdatedAt,omitempty"`
+	MetadataReason        string                    `json:"metadataReason,omitempty"`
+	RoomReferences        []RuntimeModRoomReference `json:"roomReferences"`
+}
+
+type RuntimeInstallationModInventory struct {
+	TargetID          string                   `json:"targetId"`
+	InstallationID    string                   `json:"installationId"`
+	Items             []RuntimeInstallationMod `json:"items"`
+	Total             int                      `json:"total"`
+	Current           int                      `json:"current"`
+	Outdated          int                      `json:"outdated"`
+	Unknown           int                      `json:"unknown"`
+	Invalid           int                      `json:"invalid"`
+	ObservedAt        time.Time                `json:"observedAt"`
+	MetadataWarning   string                   `json:"metadataWarning,omitempty"`
+	ReferencesWarning string                   `json:"referencesWarning,omitempty"`
 }
 
 type ModList struct {
-	Items           []ModState `json:"items"`
-	Total           int        `json:"total"`
-	Healthy         int        `json:"healthy"`
-	Attention       int        `json:"attention"`
-	CheckedAt       time.Time  `json:"checkedAt"`
-	MetadataWarning string     `json:"metadataWarning,omitempty"`
+	Profile         *RoomModProfile `json:"profile,omitempty"`
+	Items           []ModState      `json:"items"`
+	Total           int             `json:"total"`
+	Healthy         int             `json:"healthy"`
+	Attention       int             `json:"attention"`
+	CheckedAt       time.Time       `json:"checkedAt"`
+	MetadataWarning string          `json:"metadataWarning,omitempty"`
 }
 
 type InstallRequest struct {
@@ -154,14 +217,18 @@ type ModActionRequest struct {
 }
 
 type EnableRequest struct {
-	WorldIDs []string `json:"worldIds"`
-	Enabled  bool     `json:"enabled"`
+	WorldIDs                 []string          `json:"worldIds"`
+	Enabled                  bool              `json:"enabled"`
+	ExpectedRevision         string            `json:"expectedRevision,omitempty"`
+	ExpectedRevisions        map[string]string `json:"expectedRevisions,omitempty"`
+	ExpectedTopologyRevision string            `json:"expectedTopologyRevision,omitempty"`
 }
 
 type ActionResult struct {
 	ModIDs             []string `json:"modIds"`
 	ProtectionBackupID string   `json:"protectionBackupId,omitempty"`
 	Message            string   `json:"message"`
+	Warnings           []string `json:"warnings,omitempty"`
 }
 
 type ParserResult struct {
@@ -216,9 +283,14 @@ type ConfigurationFile struct {
 }
 
 type ConfigUpdateRequest struct {
-	ExpectedRevision string                     `json:"expectedRevision"`
-	Enabled          bool                       `json:"enabled"`
-	Patch            map[string]json.RawMessage `json:"patch"`
+	SourceWorldID            string                     `json:"sourceWorldId,omitempty"`
+	ExpectedRevision         string                     `json:"expectedRevision"`
+	ExpectedRevisions        map[string]string          `json:"expectedRevisions,omitempty"`
+	ExpectedTopologyRevision string                     `json:"expectedTopologyRevision,omitempty"`
+	WorldIDs                 []string                   `json:"worldIds,omitempty"`
+	Enabled                  bool                       `json:"enabled"`
+	PreserveEnabled          bool                       `json:"preserveEnabled,omitempty"`
+	Patch                    map[string]json.RawMessage `json:"patch"`
 }
 
 type ConfigChange struct {
@@ -238,8 +310,11 @@ type ConfigPreview struct {
 }
 
 type ConfigApplyResult struct {
-	Revision           string         `json:"revision"`
-	Changes            []ConfigChange `json:"changes"`
-	Warnings           []string       `json:"warnings"`
-	ProtectionBackupID string         `json:"protectionBackupId"`
+	Revision           string            `json:"revision"`
+	Revisions          map[string]string `json:"revisions,omitempty"`
+	Changes            []ConfigChange    `json:"changes"`
+	Warnings           []string          `json:"warnings"`
+	ProtectionBackupID string            `json:"protectionBackupId"`
+	WorldIDs           []string          `json:"worldIds,omitempty"`
+	PublishedTargets   int               `json:"publishedTargets,omitempty"`
 }

@@ -277,13 +277,25 @@ func (s *Store) Active() ([]Publication, error) {
 	}
 	values := make([]Publication, 0, len(records))
 	for _, record := range records {
+		if Status(record.Status) == StatusSucceeded {
+			var activationState struct {
+				Status ActivationStatus `json:"status"`
+			}
+			if strings.TrimSpace(record.ActivationJSON) == "" {
+				continue
+			}
+			if err := strictJSON(record.ActivationJSON, &activationState); err != nil {
+				return nil, fmt.Errorf("decode publication activation: %w", err)
+			}
+			switch activationState.Status {
+			case ActivationStatusPending, ActivationStatusRestarting, ActivationStatusConfirming:
+			default:
+				continue
+			}
+		}
 		value, err := s.Get(record.ID)
 		if err != nil {
 			return nil, err
-		}
-		if value.Status == StatusSucceeded && value.Activation.Status != ActivationStatusPending &&
-			value.Activation.Status != ActivationStatusRestarting && value.Activation.Status != ActivationStatusConfirming {
-			continue
 		}
 		values = append(values, value)
 	}

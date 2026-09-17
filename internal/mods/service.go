@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"dont/internal/backups"
+	"dont/internal/moddistribution"
+	"dont/internal/operationprogress"
+	"dont/internal/requesttiming"
 	"dont/internal/roomops"
 	"dont/internal/rooms"
 	"dont/internal/runtimeguard"
-	lua "github.com/yuin/gopher-lua"
 )
 
 type RoomCatalog interface {
@@ -188,6 +190,7 @@ func (s *Service) List(ctx context.Context, roomID string) (ModList, error) {
 // ListFromOverrides builds the room-level Mod view from placement-aware
 // modoverrides.lua bytes. Installed/loaded state remains empty because those
 // observations belong to each runtime target, not the controller filesystem.
+// Workshop metadata is optional enrichment and must not delay these facts.
 func (s *Service) ListFromOverrides(ctx context.Context, roomID string, contents map[string][]byte) (ModList, error) {
 	room, err := s.rooms.Room(roomID)
 	if err != nil {
@@ -196,6 +199,7 @@ func (s *Service) ListFromOverrides(ctx context.Context, roomID string, contents
 	if !room.Managed {
 		return ModList{}, ErrRoomNotManaged
 	}
+	finishParse := requesttiming.Start(ctx, "mods.overrides_parse")
 	aggregates := make(map[string]*modAggregate)
 	worldIDs := make([]string, 0, len(contents))
 	for worldID := range contents {
@@ -206,6 +210,7 @@ func (s *Service) ListFromOverrides(ctx context.Context, roomID string, contents
 		content := contents[worldID]
 		document, parseErr := parseModOverrideContent(content, 0o640, len(content) > 0, "modoverrides.lua")
 		if parseErr != nil {
+			finishParse()
 			return ModList{}, fmt.Errorf("read world %s modoverrides.lua: %w", worldID, parseErr)
 		}
 		for _, entry := range document.root.entries {
@@ -227,8 +232,19 @@ func (s *Service) ListFromOverrides(ctx context.Context, roomID string, contents
 			}
 		}
 	}
-	manifest, manifestErr := loadWorkshopManifest(s.workshopManifestPath())
-	return s.buildModList(ctx, aggregates, manifest, manifestErr)
+	finishParse()
+	items := make([]ModState, 0, len(aggregates))
+	for id, aggregate := range aggregates {
+		item := ModState{
+			SteamMod: SteamMod{ID: id}, Configured: len(aggregate.configured) > 0, Enabled: len(aggregate.enabled) > 0,
+			ConfiguredWorlds: uniqueStrings(aggregate.configured), EnabledWorlds: uniqueStrings(aggregate.enabled),
+			InstalledWorlds: []string{}, LoadedWorlds: []string{}, Warnings: []string{},
+		}
+		normalizeSteamModCollections(&item.SteamMod)
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
+	return ModList{Items: items, Total: len(items), CheckedAt: s.now().UTC()}, nil
 }
 
 func (s *Service) Library(ctx context.Context) (ModList, error) {
@@ -257,13 +273,108 @@ func (s *Service) Library(ctx context.Context) (ModList, error) {
 	return s.buildModList(ctx, aggregates, manifest, manifestErr)
 }
 
+// Describe resolves Workshop metadata for runtime-owned content without
+// assuming that the Controller has downloaded the same Mod.
+func (s *Service) Describe(ctx context.Context, modIDs []string) (map[string]SteamMod, error) {
+	return s.describe(ctx, modIDs, false)
+}
+
+// Metadata supplies the same localized display fields as Workshop details.
+// UI callers load it separately from disk facts; runtime operations use Describe.
+func (s *Service) Metadata(ctx context.Context, modIDs []string) (map[string]SteamMod, error) {
+	items, err := s.describe(ctx, modIDs, true)
+	var incomplete []string
+	for _, id := range uniqueModIDs(modIDs) {
+		item := items[id]
+		if strings.TrimSpace(item.Name) == "" || strings.TrimSpace(item.Author) == "" {
+			incomplete = append(incomplete, id)
+		}
+	}
+	if len(incomplete) > 0 {
+		err = errors.Join(err, fmt.Errorf("%d 个模组的工坊资料未补全 (Workshop %s)", len(incomplete), strings.Join(incomplete, ", ")))
+	}
+	return items, err
+}
+
+func (s *Service) CachedMetadata(ctx context.Context, modIDs []string) (map[string]SteamMod, error) {
+	if len(modIDs) > 100 {
+		return nil, ErrInvalidRequest
+	}
+	for _, id := range modIDs {
+		if !validModID(id) {
+			return nil, ErrInvalidModID
+		}
+	}
+	if reader, ok := s.metadata.(interface {
+		CachedMetadata(context.Context, []string) (map[string]SteamMod, error)
+	}); ok {
+		return reader.CachedMetadata(ctx, modIDs)
+	}
+	return map[string]SteamMod{}, nil
+}
+
+func (s *Service) describe(ctx context.Context, modIDs []string, displayMetadata bool) (map[string]SteamMod, error) {
+	defer requesttiming.Start(ctx, "mods.metadata")()
+	ids := uniqueModIDs(modIDs)
+	if len(ids) > 4096 {
+		return nil, ErrInvalidRequest
+	}
+	for _, id := range ids {
+		if !validModID(id) {
+			return nil, ErrInvalidModID
+		}
+	}
+	result := make(map[string]SteamMod, len(ids))
+	var failures []error
+	timeout := 5 * time.Second
+	if displayMetadata {
+		timeout = 12 * time.Second
+	}
+	metadataCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	summaryProvider, summarySupported := s.metadata.(interface {
+		Summaries(context.Context, []string) (map[string]SteamMod, error)
+	})
+	for start := 0; start < len(ids); start += 100 {
+		end := start + 100
+		if end > len(ids) {
+			end = len(ids)
+		}
+		var items map[string]SteamMod
+		var err error
+		if summarySupported && !displayMetadata {
+			items, err = summaryProvider.Summaries(metadataCtx, ids[start:end])
+		} else if display, ok := s.metadata.(interface {
+			DisplayMetadata(context.Context, []string) (map[string]SteamMod, error)
+		}); ok && displayMetadata {
+			items, err = display.DisplayMetadata(metadataCtx, ids[start:end])
+		} else {
+			items, err = s.metadata.Details(metadataCtx, ids[start:end])
+		}
+		if err != nil {
+			failures = append(failures, err)
+		}
+		for _, id := range ids[start:end] {
+			item := items[id]
+			item.ID = id
+			normalizeSteamModCollections(&item)
+			result[id] = item
+		}
+	}
+	if displayMetadata && metadataCtx.Err() != nil {
+		failures = append(failures, metadataCtx.Err())
+	}
+	return result, errors.Join(failures...)
+}
+
 func (s *Service) buildModList(ctx context.Context, aggregates map[string]*modAggregate, manifest map[string]workshopManifestItem, manifestErr error) (ModList, error) {
 	ids := make([]string, 0, len(aggregates))
 	for id := range aggregates {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	metadata, metadataErr := s.metadata.Details(ctx, ids)
+	metadata, metadataErr := s.Describe(ctx, ids)
+	defer requesttiming.Start(ctx, "mods.local_files_and_merge")()
 	items := make([]ModState, 0, len(ids))
 	for _, id := range ids {
 		aggregate := aggregates[id]
@@ -275,6 +386,7 @@ func (s *Service) buildModList(ctx context.Context, aggregates map[string]*modAg
 		}
 		state.ID = id
 		normalizeSteamModCollections(&state.SteamMod)
+		state.LatestVersion = state.Version
 		if manifestItem, ok := manifest[id]; ok {
 			state.WorkshopManifest = true
 			if !manifestItem.UpdatedAt.IsZero() {
@@ -300,17 +412,7 @@ func (s *Service) buildModList(ctx context.Context, aggregates map[string]*modAg
 			if _, statErr := safeRegularFile(modInfoPath); statErr != nil {
 				state.Warnings = append(state.Warnings, "已下载目录缺少安全可读的 modinfo.lua")
 			} else {
-				probeCtx, cancel := context.WithTimeout(ctx, embeddedParserTimeout+externalParserTimeout+time.Second)
-				if parsed, parseErr := s.parser.Parse(probeCtx, id, modInfoPath); parseErr == nil {
-					state.Parser = parsed.Parser
-					state.FallbackUsed = parsed.FallbackUsed
-					state.FallbackReason = parsed.FallbackReason
-					state.Warnings = append(state.Warnings, parsed.Warnings...)
-					mergeLocalModInfo(&state.SteamMod, parsed.Values)
-				} else {
-					state.Warnings = append(state.Warnings, "modinfo.lua 解析失败："+sanitizeParserError(parseErr))
-				}
-				cancel()
+				mergeLocalModInfo(&state.SteamMod, literalModMetadata(modInfoPath))
 			}
 		}
 		state.applyHealth()
@@ -389,31 +491,67 @@ func (s *Service) Download(ctx context.Context, request DownloadRequest, output 
 	if !validModID(request.ModID) {
 		return ActionResult{}, &FieldError{Fields: map[string]string{"modId": "Workshop ID 必须为数字"}}
 	}
+	operationprogress.Report(ctx, operationprogress.Update{Stage: operationprogress.StageModInspect, Percent: 0, Message: "正在检查模组及依赖"})
 	ids, err := s.resolveDependencies(ctx, request.ModID, request.IncludeDependencies)
 	if err != nil {
 		return ActionResult{}, err
 	}
-	s.libraryMu.Lock()
-	defer s.libraryMu.Unlock()
-	targets := make([]directoryTarget, 0, len(ids))
-	for _, id := range ids {
-		targets = append(targets, directoryTarget{root: s.config.WorkshopContentRoot, path: s.downloadedPath(id)})
+	operationprogress.Report(ctx, operationprogress.Update{Stage: operationprogress.StageModInspect, Percent: 100, Message: fmt.Sprintf("已确认 %d 个待下载模组", len(ids))})
+	return s.downloadLibraryMods(ctx, ids, output, "下载")
+}
+
+// DownloadLibraryMods downloads all requested Workshop items in one SteamCMD
+// request. It is the direct path used by installation-scoped user actions.
+func (s *Service) DownloadLibraryMods(ctx context.Context, modIDs []string, output io.Writer) (ActionResult, error) {
+	ids := uniqueModIDs(modIDs)
+	if len(ids) == 0 {
+		return ActionResult{}, ErrInvalidModID
 	}
-	staged, err := snapshotDirectories(targets)
+	for _, id := range ids {
+		if !validModID(id) {
+			return ActionResult{}, ErrInvalidModID
+		}
+	}
+	return s.downloadLibraryMods(ctx, ids, output, "更新")
+}
+
+func (s *Service) downloadLibraryMods(ctx context.Context, ids []string, output io.Writer, action string) (ActionResult, error) {
+	ctx, release, err := roomops.Acquire(ctx, "workshop:"+s.config.WorkshopContentRoot)
 	if err != nil {
 		return ActionResult{}, err
 	}
-	downloadErr := s.runner.Download(ctx, ids, false, output)
-	if downloadErr == nil {
-		downloadErr = s.verifyDownloads(ids)
+	defer release()
+	operationprogress.Report(ctx, operationprogress.Update{Stage: operationprogress.StageModCache, Percent: 1, Message: "正在通过 SteamCMD 直接" + action + "模组文件"})
+	if sessionRunner, ok := s.runner.(SessionDownloadRunner); ok {
+		err = sessionRunner.DownloadSession(ctx, ids, false, output)
+	} else {
+		err = s.runner.Download(ctx, ids, false, output)
 	}
-	if downloadErr != nil {
-		return ActionResult{}, errors.Join(downloadErr, restoreDirectories(staged))
+	if err != nil {
+		return ActionResult{}, err
 	}
-	if err := discardDirectories(staged); err != nil {
-		return ActionResult{}, fmt.Errorf("remove staged Mod cache: %w", err)
+	if err := s.LinkLibraryMods(ctx, ids); err != nil {
+		return ActionResult{}, err
 	}
-	return ActionResult{ModIDs: ids, Message: "Workshop 文件已下载到当前节点并完成校验"}, nil
+	operationprogress.Report(ctx, operationprogress.Update{Stage: operationprogress.StageModDone, Percent: 100, Message: fmt.Sprintf("%d 个模组已%s到当前节点", len(ids), action)})
+	return ActionResult{ModIDs: ids, Message: fmt.Sprintf("%d 个 Workshop 模组已%s到当前节点", len(ids), action)}, nil
+}
+
+func (s *Service) LinkLibraryMods(ctx context.Context, ids []string) error {
+	ctx, release, err := roomops.Acquire(ctx, "workshop:"+s.config.WorkshopContentRoot)
+	if err != nil {
+		return err
+	}
+	defer release()
+	server, err := filepath.EvalSymlinks(s.config.ServerRoot)
+	if err != nil {
+		return err
+	}
+	content, err := filepath.EvalSymlinks(s.config.WorkshopContentRoot)
+	if err != nil {
+		return err
+	}
+	return moddistribution.LinkWorkshopMods(ctx, server, content, ids)
 }
 
 func (s *Service) ResolveDependencies(ctx context.Context, modID string, include bool) ([]string, error) {
@@ -445,12 +583,9 @@ func (s *Service) EnsureLibrarySetup(modIDs []string) error {
 	return applyFileMutations(mutations)
 }
 
-func (s *Service) AddToRoom(ctx context.Context, jobID, roomID, modID string, request AddToRoomRequest) (ActionResult, error) {
+func (s *Service) AddToRoom(ctx context.Context, _ string, roomID, modID string, request AddToRoomRequest) (ActionResult, error) {
 	if !validModID(modID) {
 		return ActionResult{}, ErrInvalidModID
-	}
-	if err := s.requireLocalRoom(roomID); err != nil {
-		return ActionResult{}, err
 	}
 	ids, err := s.resolveDependencies(ctx, modID, request.IncludeDependencies)
 	if err != nil {
@@ -461,27 +596,24 @@ func (s *Service) AddToRoom(ctx context.Context, jobID, roomID, modID string, re
 		return ActionResult{}, err
 	}
 	defer release()
+	worlds, err := s.selectWorlds(roomID, request.WorldIDs)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	if err := s.requireLocalWorlds(roomID, worlds); err != nil {
+		return ActionResult{}, err
+	}
 	s.libraryMu.Lock()
 	defer s.libraryMu.Unlock()
 	if err := s.verifyDownloads(ids); err != nil {
 		return ActionResult{}, ErrModNotDownloaded
 	}
-	room, roomPath, err := s.resolveRoom(roomID)
+	_, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return ActionResult{}, err
 	}
-	worlds, err := s.selectWorlds(roomID, request.WorldIDs)
-	if err != nil {
-		return ActionResult{}, err
-	}
-	configurationChanged := false
 	mutations, err := s.modMutations(roomPath, worlds, func(document *modOverrideDocument) error {
 		for _, id := range ids {
-			entry, ok := document.mod(id)
-			_, hasConfiguration := modConfiguration(entry)
-			if !ok || entry.kind != lua.LTTable || modEnabled(entry) != request.Enabled || !hasConfiguration {
-				configurationChanged = true
-			}
 			ensureModEntry(document, id, request.Enabled)
 		}
 		return nil
@@ -489,26 +621,15 @@ func (s *Service) AddToRoom(ctx context.Context, jobID, roomID, modID string, re
 	if err != nil {
 		return ActionResult{}, err
 	}
-	if !configurationChanged {
-		mutations = nil
-	}
-	setupMutation, err := s.setupMutation(ids, nil)
-	if err != nil {
-		return ActionResult{}, err
-	}
-	mutations = changedMutations(append(mutations, setupMutation))
+	mutations = changedMutations(mutations)
 	if len(mutations) == 0 {
 		return ActionResult{}, ErrNoChanges
-	}
-	backup, err := s.protectionBackup(ctx, room, "添加房间 Mod", jobID)
-	if err != nil {
-		return ActionResult{}, err
 	}
 	if err := applyFileMutations(mutations); err != nil {
 		return ActionResult{}, err
 	}
 	return ActionResult{
-		ModIDs: ids, ProtectionBackupID: backup.ID, Message: "Mod 已添加到所选房间世界；各世界配置保持独立",
+		ModIDs: ids, Message: "Mod 已写入所选世界的 modoverrides.lua；运行中的世界将在下次重启后生效",
 	}, nil
 }
 
@@ -516,23 +637,15 @@ func (s *Service) UpdateLibrary(ctx context.Context, modID string, output io.Wri
 	if !validModID(modID) {
 		return ActionResult{}, ErrInvalidModID
 	}
-	s.libraryMu.Lock()
-	defer s.libraryMu.Unlock()
-	staged, err := snapshotDirectories([]directoryTarget{{root: s.config.WorkshopContentRoot, path: s.downloadedPath(modID)}})
-	if err != nil {
-		return ActionResult{}, err
+	operationprogress.Report(ctx, operationprogress.Update{Stage: operationprogress.StageModInspect, Percent: 100, Message: "正在准备模组更新"})
+	return s.DownloadLibraryMods(ctx, []string{modID}, output)
+}
+
+func (s *Service) Close() error {
+	if closer, ok := s.runner.(interface{ Close() error }); ok {
+		return closer.Close()
 	}
-	downloadErr := s.runner.Download(ctx, []string{modID}, true, output)
-	if downloadErr == nil {
-		downloadErr = s.verifyDownloads([]string{modID})
-	}
-	if downloadErr != nil {
-		return ActionResult{}, errors.Join(downloadErr, restoreDirectories(staged))
-	}
-	if err := discardDirectories(staged); err != nil {
-		return ActionResult{}, fmt.Errorf("remove staged Mod cache: %w", err)
-	}
-	return ActionResult{ModIDs: []string{modID}, Message: "当前节点的 Workshop 文件已更新并完成校验"}, nil
+	return nil
 }
 
 func (s *Service) Update(ctx context.Context, roomID, modID string, output io.Writer) (ActionResult, error) {
@@ -545,24 +658,24 @@ func (s *Service) Update(ctx context.Context, roomID, modID string, output io.Wr
 	return s.UpdateLibrary(ctx, modID, output)
 }
 
-func (s *Service) Enable(ctx context.Context, jobID, roomID, modID string, request EnableRequest) (ActionResult, error) {
+func (s *Service) Enable(ctx context.Context, _ string, roomID, modID string, request EnableRequest) (ActionResult, error) {
 	if !validModID(modID) {
 		return ActionResult{}, ErrInvalidModID
-	}
-	if err := s.requireLocalRoom(roomID); err != nil {
-		return ActionResult{}, err
 	}
 	ctx, release, err := s.acquireRoom(ctx, roomID)
 	if err != nil {
 		return ActionResult{}, err
 	}
 	defer release()
-	room, roomPath, err := s.resolveRoom(roomID)
+	_, roomPath, err := s.resolveRoom(roomID)
 	if err != nil {
 		return ActionResult{}, err
 	}
 	worlds, err := s.selectWorlds(roomID, request.WorldIDs)
 	if err != nil {
+		return ActionResult{}, err
+	}
+	if err := s.requireLocalWorlds(roomID, worlds); err != nil {
 		return ActionResult{}, err
 	}
 	found := false
@@ -593,10 +706,6 @@ func (s *Service) Enable(ctx context.Context, jobID, roomID, modID string, reque
 	if len(mutations) == 0 {
 		return ActionResult{}, ErrNoChanges
 	}
-	backup, err := s.protectionBackup(ctx, room, "Mod 启停", jobID)
-	if err != nil {
-		return ActionResult{}, err
-	}
 	if err := applyFileMutations(mutations); err != nil {
 		return ActionResult{}, err
 	}
@@ -604,7 +713,7 @@ func (s *Service) Enable(ctx context.Context, jobID, roomID, modID string, reque
 	if request.Enabled {
 		message = "Mod 已启用"
 	}
-	return ActionResult{ModIDs: []string{modID}, ProtectionBackupID: backup.ID, Message: message}, nil
+	return ActionResult{ModIDs: []string{modID}, Message: message + "；运行中的世界将在下次重启后生效"}, nil
 }
 
 func (s *Service) Uninstall(ctx context.Context, jobID, roomID, modID string, request ModActionRequest) (ActionResult, error) {
@@ -754,7 +863,7 @@ func (s *Service) resolveDependencies(ctx context.Context, root string, include 
 		if len(result) > 100 {
 			return nil, errors.New("Mod dependency graph exceeds 100 items")
 		}
-		details, err := s.metadata.Details(ctx, []string{result[index]})
+		details, err := s.Describe(ctx, []string{result[index]})
 		if err != nil {
 			return nil, err
 		}
@@ -777,6 +886,22 @@ func (s *Service) requireLocalRoom(roomID string) error {
 		return nil
 	}
 	return s.guard.RequireRoom(roomID)
+}
+
+func (s *Service) requireLocalWorld(roomID, worldID string) error {
+	if s.guard == nil {
+		return nil
+	}
+	return s.guard.RequireWorld(roomID, worldID)
+}
+
+func (s *Service) requireLocalWorlds(roomID string, worlds []rooms.World) error {
+	for _, world := range worlds {
+		if err := s.requireLocalWorld(roomID, world.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) verifyDownloads(ids []string) error {
@@ -1065,16 +1190,12 @@ func logContainsMod(path, modID string) bool {
 
 func latestModTime(root string) time.Time {
 	var latest time.Time
-	_ = filepath.WalkDir(root, func(_ string, entry os.DirEntry, err error) error {
-		if err != nil || entry.Type()&os.ModeSymlink != 0 {
-			return filepath.SkipDir
-		}
-		info, infoErr := entry.Info()
-		if infoErr == nil && info.ModTime().After(latest) {
+	for _, name := range []string{"modinfo.lua", "modmain.lua"} {
+		info, err := os.Lstat(filepath.Join(root, name))
+		if err == nil && info.Mode().IsRegular() && info.ModTime().After(latest) {
 			latest = info.ModTime()
 		}
-		return nil
-	})
+	}
 	return latest
 }
 

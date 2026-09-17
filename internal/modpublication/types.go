@@ -9,6 +9,8 @@ import (
 const (
 	PlanVersion        = 1
 	RequiredCapability = "runtime.mods.v1"
+	StateCapability    = "runtime.mods.state.v1"
+	FetchCapability    = "runtime.mods.fetch.v2"
 )
 
 var (
@@ -133,12 +135,14 @@ type ModRequirement struct {
 }
 
 type ContentArtifact struct {
-	WorkshopID     string `json:"workshopId"`
-	TreeSHA256     string `json:"treeSha256"`
-	ManifestSHA256 string `json:"manifestSha256"`
-	Size           int64  `json:"size"`
-	FileCount      int    `json:"fileCount"`
-	SourceRef      string `json:"sourceRef"`
+	WorkshopID      string    `json:"workshopId"`
+	TreeSHA256      string    `json:"treeSha256"`
+	ManifestSHA256  string    `json:"manifestSha256"`
+	Size            int64     `json:"size"`
+	FileCount       int       `json:"fileCount"`
+	SourceRef       string    `json:"sourceRef"`
+	SteamManifestID string    `json:"steamManifestId,omitempty"`
+	SteamUpdatedAt  time.Time `json:"steamUpdatedAt,omitempty"`
 }
 
 type ManagedWorld struct {
@@ -231,6 +235,26 @@ type TargetResult struct {
 	UpdatedAt      time.Time  `json:"updatedAt"`
 }
 
+// CacheTargetResult describes content readiness for one shared Runtime
+// installation. Preparing cache never changes active world configuration.
+type CacheTargetResult struct {
+	TargetID       string    `json:"targetId"`
+	InstallationID string    `json:"installationId"`
+	Prepared       bool      `json:"prepared"`
+	ErrorCode      string    `json:"errorCode,omitempty"`
+	ErrorMessage   string    `json:"errorMessage,omitempty"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
+type CachePreparation struct {
+	RoomID           string              `json:"roomId"`
+	TopologyRevision string              `json:"topologyRevision"`
+	PlanHash         string              `json:"planHash"`
+	Ready            bool                `json:"ready"`
+	Targets          []CacheTargetResult `json:"targets"`
+	PreparedAt       time.Time           `json:"preparedAt"`
+}
+
 type Publication struct {
 	ID                  string         `json:"id"`
 	SourceJobID         string         `json:"sourceJobId,omitempty"`
@@ -253,10 +277,12 @@ type Publication struct {
 }
 
 type PublishRequest struct {
-	ID          string           `json:"id"`
-	SourceJobID string           `json:"sourceJobId,omitempty"`
-	Plan        Plan             `json:"plan"`
-	Activation  ActivationPolicy `json:"activation"`
+	ID                   string           `json:"id"`
+	SourceJobID          string           `json:"sourceJobId,omitempty"`
+	Plan                 Plan             `json:"plan"`
+	Activation           ActivationPolicy `json:"activation"`
+	BorrowedFences       []Fence          `json:"-"`
+	SkipProtectionBackup bool             `json:"-"`
 }
 
 type Fence struct {

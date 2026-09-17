@@ -101,6 +101,14 @@ func (m *Manager) Import(ctx context.Context, workshopID, source string, metadat
 		if verifyErr := m.verifyManifest(ctx, current); verifyErr != nil {
 			return Manifest{}, verifyErr
 		}
+		merged := mergeMetadata(current.Metadata, metadata)
+		if merged != current.Metadata {
+			current.Metadata = merged
+			current.ManifestSHA256 = manifestDigest(current)
+			if writeErr := rewriteCachedManifest(versionRoot, current); writeErr != nil {
+				return Manifest{}, writeErr
+			}
+		}
 		return current, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Manifest{}, err
@@ -146,6 +154,45 @@ func (m *Manager) Import(ctx context.Context, workshopID, source string, metadat
 		return Manifest{}, err
 	}
 	return manifest, m.verifyManifest(ctx, manifest)
+}
+
+func mergeMetadata(current, incoming Metadata) Metadata {
+	if incoming.Title != "" {
+		current.Title = incoming.Title
+	}
+	if incoming.Version != "" {
+		current.Version = incoming.Version
+	}
+	if incoming.PublishedFileSize > 0 {
+		current.PublishedFileSize = incoming.PublishedFileSize
+	}
+	if incoming.SteamManifestID != "" && (current.SteamManifestID == "" || current.SteamUpdatedAt.IsZero() || !incoming.SteamUpdatedAt.Before(current.SteamUpdatedAt)) {
+		current.SteamManifestID = incoming.SteamManifestID
+		current.SteamUpdatedAt = incoming.SteamUpdatedAt
+	} else if current.SteamUpdatedAt.IsZero() && !incoming.SteamUpdatedAt.IsZero() {
+		current.SteamUpdatedAt = incoming.SteamUpdatedAt
+	}
+	return current
+}
+
+func rewriteCachedManifest(versionRoot string, manifest Manifest) (result error) {
+	info, err := os.Stat(versionRoot)
+	if err != nil {
+		return err
+	}
+	originalMode := info.Mode().Perm()
+	if err := os.Chmod(versionRoot, 0o700); err != nil {
+		return err
+	}
+	defer func() { result = errors.Join(result, os.Chmod(versionRoot, originalMode)) }()
+	path := filepath.Join(versionRoot, "manifest.json")
+	if err := writeJSONAtomic(path, manifest, 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o444); err != nil {
+		return err
+	}
+	return syncDirectory(versionRoot)
 }
 
 func (m *Manager) Verify(ctx context.Context, workshopID, treeSHA string) (Manifest, error) {

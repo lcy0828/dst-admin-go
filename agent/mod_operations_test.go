@@ -8,12 +8,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"dont/internal/operationprogress"
 	"dont/shared"
 )
 
@@ -59,6 +62,10 @@ func newModOperationAgent(t *testing.T) (*Agent, RuntimeInstallation) {
 }
 
 func executeModRequest(t *testing.T, agent *Agent, sequence *int, action shared.RuntimeAction, mod shared.RuntimeModRequest) (shared.RuntimeModResult, error) {
+	return executeModRequestContext(t, context.Background(), agent, sequence, action, mod)
+}
+
+func executeModRequestContext(t *testing.T, ctx context.Context, agent *Agent, sequence *int, action shared.RuntimeAction, mod shared.RuntimeModRequest) (shared.RuntimeModResult, error) {
 	t.Helper()
 	*sequence++
 	request := shared.RuntimeOperationRequest{
@@ -74,11 +81,29 @@ func executeModRequest(t *testing.T, agent *Agent, sequence *int, action shared.
 		request.FencingToken = uint64(*sequence)
 		request.LeaseExpiresAt = &expires
 	}
-	result, err := agent.executeRuntimeOperation(string(action), &request, 30)
+	result, err := agent.executeRuntimeOperationContext(ctx, string(action), &request, 30)
 	if result.Mod == nil {
 		return shared.RuntimeModResult{}, err
 	}
 	return *result.Mod, err
+}
+
+type fixtureModFetchRunner struct {
+	data  []byte
+	calls int
+	err   error
+}
+
+func (r *fixtureModFetchRunner) Download(_ context.Context, _ RuntimeInstallation, downloadRoot, workshopID string, _ bool) error {
+	r.calls++
+	if r.err != nil {
+		return r.err
+	}
+	target := filepath.Join(downloadRoot, "steamapps", "workshop", "content", "322330", workshopID)
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(target, "modinfo.lua"), r.data, 0o600)
 }
 
 func uploadCacheBundle(t *testing.T, agent *Agent, sequence *int, uploadID, workshopID string, archive []byte, expectedTree string) shared.RuntimeModCacheManifest {
@@ -160,6 +185,233 @@ func TestModCacheUploadInspectAndRestartResume(t *testing.T) {
 	}
 }
 
+func TestModFilesObserveReadsDiskWithoutInitializingPublicationState(t *testing.T) {
+	agent, installation := newModOperationAgent(t)
+	modRoot := filepath.Join(installation.ServerPath, "mods", "workshop-1392778117")
+	if err := os.MkdirAll(modRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modRoot, "modinfo.lua"), []byte("name='ready'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sequence := 0
+	result, err := executeModRequest(t, agent, &sequence, shared.RuntimeActionModFilesObserve, shared.RuntimeModRequest{
+		WorkshopIDs: []string{"1392778117"},
+	})
+	if err != nil || result.Files == nil || result.Files.Mods["1392778117"].Status != shared.RuntimeModFileReady {
+		t.Fatalf("files=%#v err=%v", result.Files, err)
+	}
+	if len(agent.modDistributions) != 0 {
+		t.Fatalf("file observation initialized publication managers: %d", len(agent.modDistributions))
+	}
+	if _, err := os.Stat(installation.ModStatePath); !os.IsNotExist(err) {
+		t.Fatalf("file observation created publication state: %v", err)
+	}
+}
+
+func TestModFilesInventoryEnumeratesInstallationWithoutPublicationState(t *testing.T) {
+	agent, installation := newModOperationAgent(t)
+	modRoot := filepath.Join(installation.ServerPath, "mods", "workshop-1392778117")
+	if err := os.MkdirAll(modRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modRoot, "modinfo.lua"), []byte("version='7.6.5'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sequence := 0
+	result, err := executeModRequest(t, agent, &sequence, shared.RuntimeActionModFilesInventory, shared.RuntimeModRequest{})
+	if err != nil || !result.Complete || result.Files == nil || result.Files.InstallationID != installation.ID {
+		t.Fatalf("inventory=%#v err=%v", result.Files, err)
+	}
+	state, exists := result.Files.Mods["1392778117"]
+	if !exists || state.Status != shared.RuntimeModFileReady || state.Version != "7.6.5" {
+		t.Fatalf("inventory state=%#v", state)
+	}
+	if len(agent.modDistributions) != 0 {
+		t.Fatalf("inventory initialized publication managers: %d", len(agent.modDistributions))
+	}
+	if _, err := os.Stat(installation.ModStatePath); !os.IsNotExist(err) {
+		t.Fatalf("inventory created publication state: %v", err)
+	}
+}
+
+func TestModFetchDownloadsIntoStagingAndImportsExactContent(t *testing.T) {
+	agent, installation := newModOperationAgent(t)
+	data := []byte("name = 'node fetched mod'\n")
+	runner := &fixtureModFetchRunner{data: data}
+	agent.modFetchRunner = runner
+	sequence := 0
+	treeSHA := testSingleFileTreeSHA("modinfo.lua", data)
+	result, err := executeModRequest(t, agent, &sequence, shared.RuntimeActionModFetch, shared.RuntimeModRequest{
+		WorkshopID: "1392778117", ExpectedTreeSHA256: treeSHA,
+		FetchSources: []shared.RuntimeModFetchSource{shared.RuntimeModFetchSourceSteam},
+		Metadata:     shared.RuntimeModMetadata{Title: "Node Fetch", PublishedFileSize: int64(len(data))},
+	})
+	if err != nil || !result.Complete || result.FetchSource != shared.RuntimeModFetchSourceSteam ||
+		result.CacheManifest == nil || result.CacheManifest.TreeSHA256 != treeSHA || runner.calls != 1 {
+		t.Fatalf("fetch result=%#v calls=%d err=%v", result, runner.calls, err)
+	}
+	if len(result.FetchAttempts) != 1 || result.FetchAttempts[0].Source != shared.RuntimeModFetchSourceSteam ||
+		!result.FetchAttempts[0].Selected || result.FetchAttempts[0].Bytes != int64(len(data)) ||
+		result.FetchAttempts[0].DurationMillis < 1 || result.FetchAttempts[0].BytesPerSecond < 1 {
+		t.Fatalf("Steam fetch observations=%#v", result.FetchAttempts)
+	}
+	manager, err := agent.modManager(installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Verify(context.Background(), "1392778117", treeSHA); err != nil {
+		t.Fatalf("fetched cache was not imported: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(installation.ModStatePath, "fetches"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("fetch staging was not cleaned: entries=%d err=%v", len(entries), err)
+	}
+}
+
+func TestModFetchDownloadsLatestSteamContentWithoutExpectedTree(t *testing.T) {
+	agent, installation := newModOperationAgent(t)
+	data := []byte("name = 'latest node fetched mod'\n")
+	runner := &fixtureModFetchRunner{data: data}
+	agent.modFetchRunner = runner
+	sequence := 0
+	wantTreeSHA := testSingleFileTreeSHA("modinfo.lua", data)
+	result, err := executeModRequest(t, agent, &sequence, shared.RuntimeActionModFetch, shared.RuntimeModRequest{
+		WorkshopID:   "1392778117",
+		FetchSources: []shared.RuntimeModFetchSource{shared.RuntimeModFetchSourceSteam},
+		Metadata:     shared.RuntimeModMetadata{Title: "Latest Node Fetch", PublishedFileSize: int64(len(data))},
+	})
+	if err != nil || !result.Complete || result.CacheManifest == nil ||
+		result.CacheManifest.TreeSHA256 != wantTreeSHA || runner.calls != 1 {
+		t.Fatalf("latest fetch result=%#v calls=%d err=%v", result, runner.calls, err)
+	}
+	manager, err := agent.modManager(installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Verify(context.Background(), "1392778117", wantTreeSHA); err != nil {
+		t.Fatalf("latest fetched cache was not imported: %v", err)
+	}
+}
+
+func TestModFetchWithoutExpectedTreeRejectsNonSteamSources(t *testing.T) {
+	agent, _ := newModOperationAgent(t)
+	sequence := 0
+	_, err := executeModRequest(t, agent, &sequence, shared.RuntimeActionModFetch, shared.RuntimeModRequest{
+		WorkshopID:   "1392778117",
+		FetchSources: []shared.RuntimeModFetchSource{shared.RuntimeModFetchSourceController},
+	})
+	if err == nil || !strings.Contains(err.Error(), "Mod 节点本地获取请求无效") {
+		t.Fatalf("non-Steam source without expected tree was accepted: %v", err)
+	}
+}
+
+func TestModFetchResumesControllerArtifactAndImportsExactTree(t *testing.T) {
+	agent, installation := newModOperationAgent(t)
+	data := []byte("name = 'controller artifact'\n")
+	archive := testModTar(t, []testTarEntry{{name: "modinfo.lua", data: data, kind: tar.TypeReg}})
+	treeSHA := testSingleFileTreeSHA("modinfo.lua", data)
+	digest := sha256.Sum256(archive)
+	bundleSHA := hex.EncodeToString(digest[:])
+	const resumeOffset = 37
+	gotRange := ""
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/mod-artifacts/1392778117/"+treeSHA || request.Header.Get("Authorization") != "Bearer range-token-0123456789abcdef01234567" {
+			http.Error(response, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		gotRange = request.Header.Get("Range")
+		if gotRange != fmt.Sprintf("bytes=%d-", resumeOffset) {
+			http.Error(response, "range required", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		response.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", resumeOffset, len(archive)-1, len(archive)))
+		response.WriteHeader(http.StatusPartialContent)
+		_, _ = response.Write(archive[resumeOffset:])
+	}))
+	defer server.Close()
+	agent.Config.ServerURL = "ws" + strings.TrimPrefix(server.URL, "http") + "/agent"
+	fetchRoot := filepath.Join(installation.ModStatePath, "fetches", "http")
+	if err := os.MkdirAll(fetchRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	partial := filepath.Join(fetchRoot, ".artifact-"+bundleSHA+".part")
+	if err := os.WriteFile(partial, archive[:resumeOffset], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sequence := 0
+	location := shared.RuntimeModFetchLocation{
+		Source: shared.RuntimeModFetchSourceController, DownloadPath: "/mod-artifacts/1392778117/" + treeSHA,
+		DownloadToken: "range-token-0123456789abcdef01234567", Size: int64(len(archive)), SHA256: bundleSHA,
+	}
+	var progress []operationprogress.Update
+	progressContext := operationprogress.WithReporter(context.Background(), func(update operationprogress.Update) {
+		progress = append(progress, update)
+	})
+	result, err := executeModRequestContext(t, progressContext, agent, &sequence, shared.RuntimeActionModFetch, shared.RuntimeModRequest{
+		WorkshopID: "1392778117", ExpectedTreeSHA256: treeSHA,
+		FetchSources:   []shared.RuntimeModFetchSource{shared.RuntimeModFetchSourceController},
+		FetchLocations: []shared.RuntimeModFetchLocation{location},
+		Metadata:       shared.RuntimeModMetadata{Title: "Controller Artifact", PublishedFileSize: int64(len(data))},
+	})
+	if err != nil || !result.Complete || result.FetchSource != shared.RuntimeModFetchSourceController ||
+		result.CacheManifest == nil || result.CacheManifest.TreeSHA256 != treeSHA {
+		t.Fatalf("controller fetch result=%#v range=%q err=%v", result, gotRange, err)
+	}
+	if len(result.FetchAttempts) != 1 || !result.FetchAttempts[0].Selected ||
+		result.FetchAttempts[0].Bytes != int64(len(archive)-resumeOffset) || result.FetchAttempts[0].BytesPerSecond < 1 {
+		t.Fatalf("controller fetch observations=%#v", result.FetchAttempts)
+	}
+	var sawTransfer, sawValidation, sawImport bool
+	for _, update := range progress {
+		if strings.Contains(update.Message, "Controller正在拉取") && update.CurrentBytes > resumeOffset &&
+			update.TotalBytes == int64(len(archive)) && update.BytesPerSecond > 0 {
+			sawTransfer = true
+		}
+		if strings.Contains(update.Message, "下载完成，正在校验") && update.BytesPerSecond == 0 {
+			sawValidation = true
+		}
+		if strings.Contains(update.Message, "已导入") && update.BytesPerSecond == 0 {
+			sawImport = true
+		}
+	}
+	if !sawTransfer || !sawValidation || !sawImport {
+		t.Fatalf("Controller progress missing transfer/validation/import phases: %#v", progress)
+	}
+	if _, err := os.Stat(partial); !os.IsNotExist(err) {
+		t.Fatalf("completed Range file was not removed: %v", err)
+	}
+	manager, err := agent.modManager(installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Verify(context.Background(), "1392778117", treeSHA); err != nil {
+		t.Fatalf("controller artifact was not imported: %v", err)
+	}
+}
+
+func TestModFetchRejectsSteamVersionDriftWithoutPublishingIt(t *testing.T) {
+	agent, installation := newModOperationAgent(t)
+	runner := &fixtureModFetchRunner{data: []byte("name = 'newer steam version'\n")}
+	agent.modFetchRunner = runner
+	sequence := 0
+	expected := strings.Repeat("a", 64)
+	result, err := executeModRequest(t, agent, &sequence, shared.RuntimeActionModFetch, shared.RuntimeModRequest{
+		WorkshopID: "1392778117", ExpectedTreeSHA256: expected,
+		FetchSources: []shared.RuntimeModFetchSource{shared.RuntimeModFetchSourceSteam},
+	})
+	if err == nil || !strings.Contains(err.Error(), "期望版本不一致") || result.Complete || result.CacheManifest == nil {
+		t.Fatalf("fetch drift result=%#v err=%v", result, err)
+	}
+	if len(result.FetchAttempts) != 1 || result.FetchAttempts[0].Status != shared.RuntimeModFetchStatusFailed ||
+		result.FetchAttempts[0].ErrorCode != "STEAM_VERSION_MISMATCH" || result.FetchAttempts[0].Selected {
+		t.Fatalf("Steam drift observations=%#v", result.FetchAttempts)
+	}
+	if _, statErr := os.Stat(filepath.Join(installation.ServerPath, "mods", "workshop-1392778117")); !os.IsNotExist(statErr) {
+		t.Fatalf("version drift changed published Mod directory: %v", statErr)
+	}
+}
+
 func TestModUploadSessionAcceptsDistinctIdempotencyKeysAcrossActions(t *testing.T) {
 	agent, _ := newModOperationAgent(t)
 	data := []byte("name = 'idempotency session test'\n")
@@ -234,6 +486,18 @@ func TestModTargetObservationReturnsUsableCapacity(t *testing.T) {
 	}
 }
 
+func TestModInstallationStateIsEmptyBeforeFirstPublication(t *testing.T) {
+	agent, _ := newModOperationAgent(t)
+	sequence := 0
+	result, err := executeModRequest(t, agent, &sequence, shared.RuntimeActionModInstallationState, shared.RuntimeModRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Complete || result.Installation != nil {
+		t.Fatalf("unexpected unpublished installation state: %#v", result)
+	}
+}
+
 func TestModReleasePlanLifecycleAndOverridesRead(t *testing.T) {
 	agent, installation := newModOperationAgent(t)
 	sequence := 0
@@ -289,6 +553,11 @@ func TestModReleasePlanLifecycleAndOverridesRead(t *testing.T) {
 	state, err := executeModRequest(t, agent, &sequence, shared.RuntimeActionModReleaseState, shared.RuntimeModRequest{OperationID: operationID})
 	if err != nil || state.Release == nil || state.Release.State == nil || state.Release.State.LastOperationID != operationID {
 		t.Fatalf("state=%#v err=%v", state, err)
+	}
+	installationState, err := executeModRequest(t, agent, &sequence, shared.RuntimeActionModInstallationState, shared.RuntimeModRequest{})
+	if err != nil || installationState.Installation == nil || installationState.Installation.LastOperationID != operationID ||
+		installationState.Installation.Mods["1392778117"] != treeSHA || len(installationState.Installation.Shards) != 1 {
+		t.Fatalf("installation state=%#v err=%v", installationState.Installation, err)
 	}
 	read, err := executeModRequest(t, agent, &sequence, shared.RuntimeActionModOverridesRead, shared.RuntimeModRequest{
 		RoomDirectory: "Cluster_1", WorldDirectory: "Master",
@@ -365,6 +634,21 @@ func TestModArchiveRejectsTraversalLinksAndSpecialFiles(t *testing.T) {
 		if err := extractModArchive(context.Background(), archivePath, target); err == nil {
 			t.Fatalf("unsafe tar entry accepted: %#v", entry)
 		}
+	}
+}
+
+func TestRuntimeWorkshopDownloadRootUsesConfiguredWorkshopTree(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workshop")
+	content := filepath.Join(root, "steamapps", "workshop", "content", "322330")
+	actual, err := runtimeWorkshopDownloadRoot(content, "322330")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual != root {
+		t.Fatalf("download root = %q, want %q", actual, root)
+	}
+	if _, err := runtimeWorkshopDownloadRoot(filepath.Join(root, "content", "322330"), "322330"); err == nil {
+		t.Fatal("invalid Workshop tree was accepted")
 	}
 }
 

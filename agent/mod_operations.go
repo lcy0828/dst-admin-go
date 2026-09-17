@@ -11,14 +11,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
+	"dont/internal/dstserver"
 	"dont/internal/moddistribution"
+	"dont/internal/mods"
+	"dont/internal/operationprogress"
+	"dont/internal/roomops"
 	"dont/shared"
 	"github.com/shirou/gopsutil/v3/disk"
 )
@@ -34,8 +43,9 @@ const (
 )
 
 var (
-	modWorkshopID = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
-	modReleaseID  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$`)
+	modWorkshopID   = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
+	modReleaseID    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$`)
+	modContentRange = regexp.MustCompile(`^bytes ([0-9]+)-([0-9]+)/([0-9]+)$`)
 )
 
 type modUploadState struct {
@@ -61,12 +71,101 @@ type persistedModReleaseState struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+type modFetchCommandRunner interface {
+	Download(context.Context, RuntimeInstallation, string, string, bool) error
+}
+
+type steamModFetchCommandRunner struct{}
+
+func (steamModFetchCommandRunner) Download(ctx context.Context, installation RuntimeInstallation, downloadRoot, workshopID string, validate bool) error {
+	runner := mods.NewSteamCMDRunner(installation.SteamCMDPath, downloadRoot, "322330")
+	return runner.Download(ctx, []string{workshopID}, validate, io.Discard)
+}
+
+type installationModDownloadRunner interface {
+	Download(context.Context, RuntimeInstallation, []string) error
+	Close() error
+}
+
+type steamInstallationModDownloadRunner struct {
+	mu      sync.Mutex
+	runners map[string]*mods.SteamCMDRunner
+}
+
+func newSteamInstallationModDownloadRunner() *steamInstallationModDownloadRunner {
+	return &steamInstallationModDownloadRunner{runners: make(map[string]*mods.SteamCMDRunner)}
+}
+
+func (r *steamInstallationModDownloadRunner) Download(ctx context.Context, installation RuntimeInstallation, workshopIDs []string) error {
+	downloadRoot, err := runtimeWorkshopDownloadRoot(installation.WorkshopContentPath, "322330")
+	if err != nil {
+		return err
+	}
+	key := downloadRoot
+	r.mu.Lock()
+	runner := r.runners[key]
+	if runner == nil {
+		runner = mods.NewSteamCMDRunner(installation.SteamCMDPath, downloadRoot, "322330")
+		r.runners[key] = runner
+	}
+	r.mu.Unlock()
+	return runner.DownloadSession(ctx, workshopIDs, false, io.Discard)
+}
+
+func (r *steamInstallationModDownloadRunner) Close() error {
+	r.mu.Lock()
+	runners := make([]*mods.SteamCMDRunner, 0, len(r.runners))
+	for _, runner := range r.runners {
+		runners = append(runners, runner)
+	}
+	r.runners = make(map[string]*mods.SteamCMDRunner)
+	r.mu.Unlock()
+	var result error
+	for _, runner := range runners {
+		result = errors.Join(result, runner.Close())
+	}
+	return result
+}
+
+func runtimeWorkshopDownloadRoot(contentPath, appID string) (string, error) {
+	appRoot := filepath.Clean(strings.TrimSpace(contentPath))
+	contentRoot := filepath.Dir(appRoot)
+	workshopRoot := filepath.Dir(contentRoot)
+	steamAppsRoot := filepath.Dir(workshopRoot)
+	downloadRoot := filepath.Dir(steamAppsRoot)
+	if !filepath.IsAbs(appRoot) || filepath.Base(appRoot) != appID || filepath.Base(contentRoot) != "content" ||
+		filepath.Base(workshopRoot) != "workshop" || filepath.Base(steamAppsRoot) != "steamapps" || downloadRoot == steamAppsRoot {
+		return "", errors.New("Workshop 内容目录必须使用 <下载根目录>/steamapps/workshop/content/322330")
+	}
+	return downloadRoot, nil
+}
+
 func (a *Agent) executeModAction(ctx context.Context, installation RuntimeInstallation, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
 	result := runtimeResult(request, shared.RuntimeOutcomeConfirmed, "Mod Runtime 步骤已完成")
 	response := &shared.RuntimeModResult{}
 	result.Mod = response
 	var err error
+	if request.Action == shared.RuntimeActionModDownload || request.Action == shared.RuntimeActionModLink {
+		var release func()
+		ctx, release, err = roomops.Acquire(ctx, "workshop:"+installation.WorkshopContentPath)
+		if err != nil {
+			result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+			return result, err
+		}
+		defer release()
+	}
 	switch request.Action {
+	case shared.RuntimeActionModFetch:
+		*response, err = a.fetchModCache(ctx, installation, *request.Mod)
+	case shared.RuntimeActionModDownload:
+		err = a.modDownloadRunner.Download(ctx, installation, request.Mod.WorkshopIDs)
+		if err == nil {
+			err = moddistribution.LinkWorkshopMods(ctx, runtimeModServerPath(installation), installation.WorkshopContentPath, request.Mod.WorkshopIDs)
+		}
+		response.Complete = err == nil
+	case shared.RuntimeActionModLink:
+		err = moddistribution.LinkWorkshopMods(ctx, runtimeModServerPath(installation), installation.WorkshopContentPath, request.Mod.WorkshopIDs)
+		response.Complete = err == nil
 	case shared.RuntimeActionModUploadBegin, shared.RuntimeActionModReleasePlanBegin:
 		*response, err = a.beginModUpload(installation, *request.Mod)
 	case shared.RuntimeActionModUploadWrite, shared.RuntimeActionModReleasePlanWrite:
@@ -94,6 +193,51 @@ func (a *Agent) observeModAction(ctx context.Context, installation RuntimeInstal
 	result := runtimeResult(request, shared.RuntimeOutcomeObserved, "Mod Runtime 状态已读取")
 	response := &shared.RuntimeModResult{}
 	result.Mod = response
+	if request.Action == shared.RuntimeActionModSchemaRead {
+		parsed, err := mods.ParseInstalledModInfo(ctx, mods.NewDualParser("", ""), installation.WorkshopContentPath, runtimeModServerPath(installation), request.Mod.WorkshopID)
+		if err == nil {
+			response.Schema = &shared.RuntimeModSchema{
+				WorkshopID: request.Mod.WorkshopID, Options: parsed.Values["configuration_options"],
+				Parser: parsed.Parser, FallbackUsed: parsed.FallbackUsed, FallbackReason: parsed.FallbackReason, Warnings: parsed.Warnings,
+			}
+			if encoded, encodeErr := json.Marshal(response.Schema); encodeErr != nil || len(encoded) > int(shared.MaximumSecureMessageBytes/2) {
+				err = errors.New("Mod 配置声明超过读取大小限制或无法编码")
+				response.Schema = nil
+			}
+		}
+		response.Complete = err == nil
+		if err != nil {
+			result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+		}
+		return result, err
+	}
+	if request.Action == shared.RuntimeActionModFilesObserve || request.Action == shared.RuntimeActionModFilesInventory {
+		worlds := make([]moddistribution.ObserveWorld, 0, len(request.Mod.Worlds))
+		for _, world := range request.Mod.Worlds {
+			worlds = append(worlds, moddistribution.ObserveWorld{
+				RoomID: world.RoomID, RoomDirectory: world.RoomDirectory,
+				WorldID: world.WorldID, WorldDirectory: world.WorldDirectory,
+			})
+		}
+		trusted := moddistribution.TrustedInstallation{
+			ID: installation.ID, ServerPath: runtimeModServerPath(installation), SavePath: installation.SavePath,
+			WorkshopContentPath: runtimeWorkshopContentPath(installation),
+		}
+		var observation moddistribution.FilesObservation
+		var err error
+		if request.Action == shared.RuntimeActionModFilesInventory {
+			observation, err = moddistribution.InventoryInstallationFiles(ctx, trusted)
+		} else {
+			observation, err = moddistribution.ObserveInstallationFiles(ctx, trusted, request.Mod.WorkshopIDs, worlds)
+		}
+		if err == nil {
+			response.Files = runtimeModFilesObservation(observation)
+			response.Complete = true
+			return result, nil
+		}
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+		return result, err
+	}
 	manager, err := a.modManager(installation)
 	if err != nil {
 		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
@@ -121,8 +265,25 @@ func (a *Agent) observeModAction(ctx context.Context, installation RuntimeInstal
 			response.Complete = true
 		}
 		err = inspectErr
+	case shared.RuntimeActionModPeerGrant:
+		location, grantErr := a.issueModPeerGrant(ctx, installation, request.Mod.PeerSubject, request.Mod.WorkshopID, request.Mod.ExpectedTreeSHA256)
+		if grantErr == nil {
+			response.FetchLocation = &location
+			response.Complete = true
+		}
+		err = grantErr
 	case shared.RuntimeActionModReleaseState:
 		*response, err = a.readModReleaseState(installation, manager, request.Mod.OperationID)
+	case shared.RuntimeActionModInstallationState:
+		state, stateErr := manager.ObserveState(ctx, installation.ID)
+		if stateErr == nil {
+			response.Installation = runtimeModInstallationState(state)
+			response.Complete = true
+		} else if errors.Is(stateErr, moddistribution.ErrNotFound) {
+			response.Complete = true
+		} else {
+			err = stateErr
+		}
 	case shared.RuntimeActionModOverridesRead:
 		response.Overrides, err = readModOverrides(ctx, installation, *request.Mod)
 		response.Complete = err == nil && response.Overrides.Complete
@@ -144,22 +305,63 @@ func validateModOperationPayload(request shared.RuntimeOperationRequest) error {
 	validOperation := modReleaseID.MatchString(mod.OperationID)
 	validMetadata := validRuntimeModMetadata(mod.Metadata)
 	emptyMetadata := mod.Metadata == (shared.RuntimeModMetadata{})
-	emptyTransfer := mod.Kind == "" && mod.UploadID == "" && mod.Size == 0 && mod.SHA256 == "" && len(mod.Data) == 0
+	emptyTransferCore := mod.Kind == "" && mod.UploadID == "" && mod.Size == 0 && mod.SHA256 == "" && len(mod.Data) == 0
+	emptyTransfer := emptyTransferCore && mod.PeerSubject == ""
+	emptyFetch := len(mod.FetchSources) == 0 && len(mod.FetchLocations) == 0 && !mod.Validate
+	if request.Action != shared.RuntimeActionModFilesObserve && request.Action != shared.RuntimeActionModDownload && request.Action != shared.RuntimeActionModLink && (len(mod.WorkshopIDs) != 0 || len(mod.Worlds) != 0) {
+		return errors.New("Mod 文件观察参数不能用于当前动作")
+	}
 	switch request.Action {
 	case shared.RuntimeActionModTargetObserve:
 		if !emptyTransfer || mod.OperationID != "" || mod.WorkshopID != "" || mod.ExpectedTreeSHA256 != "" || mod.Offset != 0 ||
-			!emptyMetadata || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
+			!emptyMetadata || !emptyFetch || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
 			return errors.New("Mod 运行目标观察请求无效")
+		}
+	case shared.RuntimeActionModInstallationState:
+		if !emptyTransfer || mod.OperationID != "" || mod.WorkshopID != "" || mod.ExpectedTreeSHA256 != "" || mod.Offset != 0 ||
+			!emptyMetadata || !emptyFetch || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
+			return errors.New("Mod 安装状态观察请求无效")
+		}
+	case shared.RuntimeActionModFilesObserve:
+		if !emptyTransfer || mod.OperationID != "" || mod.WorkshopID != "" || mod.ExpectedTreeSHA256 != "" || mod.Offset != 0 ||
+			!emptyMetadata || !emptyFetch || mod.RoomDirectory != "" || mod.WorldDirectory != "" || !validModFilesObservation(*mod) {
+			return errors.New("Mod 文件状态观察请求无效")
+		}
+	case shared.RuntimeActionModFilesInventory:
+		if !emptyTransfer || mod.OperationID != "" || mod.WorkshopID != "" || mod.ExpectedTreeSHA256 != "" || mod.Offset != 0 ||
+			!emptyMetadata || !emptyFetch || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
+			return errors.New("Mod 安装目录清单请求无效")
 		}
 	case shared.RuntimeActionModCacheInspect:
 		if !emptyTransfer || mod.OperationID != "" || !modWorkshopID.MatchString(mod.WorkshopID) || !validRuntimeDigest(mod.ExpectedTreeSHA256) ||
-			mod.Offset != 0 || !emptyMetadata || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
+			mod.Offset != 0 || !emptyMetadata || !emptyFetch || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
 			return errors.New("Mod 缓存检查请求无效")
+		}
+	case shared.RuntimeActionModSchemaRead:
+		if !emptyTransfer || mod.OperationID != "" || !modWorkshopID.MatchString(mod.WorkshopID) || mod.ExpectedTreeSHA256 != "" ||
+			mod.Offset != 0 || !emptyMetadata || !emptyFetch || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
+			return errors.New("Mod 配置声明读取请求无效")
+		}
+	case shared.RuntimeActionModPeerGrant:
+		if !emptyTransferCore || mod.OperationID != "" || !modWorkshopID.MatchString(mod.WorkshopID) || !validRuntimeDigest(mod.ExpectedTreeSHA256) ||
+			mod.Offset != 0 || !emptyMetadata || !emptyFetch || !validModPeerSubject(mod.PeerSubject) || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
+			return errors.New("Mod Peer 授权请求无效")
+		}
+	case shared.RuntimeActionModFetch:
+		latestFromSteam := mod.ExpectedTreeSHA256 == "" && len(mod.FetchSources) == 1 && mod.FetchSources[0] == shared.RuntimeModFetchSourceSteam && len(mod.FetchLocations) == 0
+		if !emptyTransfer || mod.OperationID != "" || !modWorkshopID.MatchString(mod.WorkshopID) || (!latestFromSteam && !validRuntimeDigest(mod.ExpectedTreeSHA256)) ||
+			mod.Offset != 0 || !validMetadata || !validModFetchSources(*mod) || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
+			return errors.New("Mod 节点本地获取请求无效")
+		}
+	case shared.RuntimeActionModDownload, shared.RuntimeActionModLink:
+		if !emptyTransfer || mod.OperationID != "" || mod.WorkshopID != "" || mod.ExpectedTreeSHA256 != "" || mod.Offset != 0 ||
+			!emptyMetadata || !emptyFetch || mod.RoomDirectory != "" || mod.WorldDirectory != "" || len(mod.Worlds) != 0 || !validModDownloadIDs(mod.WorkshopIDs) {
+			return errors.New("Mod 直接下载请求无效")
 		}
 	case shared.RuntimeActionModUploadBegin, shared.RuntimeActionModUploadWrite, shared.RuntimeActionModUploadCommit:
 		if mod.Kind != shared.RuntimeModUploadCacheBundle || !validUpload || mod.OperationID != "" || !modWorkshopID.MatchString(mod.WorkshopID) ||
 			!validRuntimeDigest(mod.ExpectedTreeSHA256) || mod.Size < 1 || mod.Size > modMaximumBundleBytes || !validRuntimeDigest(mod.SHA256) ||
-			!validMetadata || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
+			!validMetadata || !emptyFetch || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
 			return errors.New("Mod 缓存上传描述无效")
 		}
 		if err := validateModChunkAction(request.Action, mod.Offset, mod.Size, mod.Data); err != nil {
@@ -168,7 +370,7 @@ func validateModOperationPayload(request shared.RuntimeOperationRequest) error {
 	case shared.RuntimeActionModReleasePlanBegin, shared.RuntimeActionModReleasePlanWrite, shared.RuntimeActionModReleasePlanCommit:
 		if mod.Kind != shared.RuntimeModUploadReleasePlan || !validUpload || !validOperation || mod.WorkshopID != "" || mod.ExpectedTreeSHA256 != "" ||
 			mod.Size < 1 || mod.Size > modMaximumPlanBytes || !validRuntimeDigest(mod.SHA256) || !emptyMetadata ||
-			mod.RoomDirectory != "" || mod.WorldDirectory != "" {
+			!emptyFetch || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
 			return errors.New("Mod 发布计划上传描述无效")
 		}
 		if err := validateModChunkAction(request.Action, mod.Offset, mod.Size, mod.Data); err != nil {
@@ -177,18 +379,117 @@ func validateModOperationPayload(request shared.RuntimeOperationRequest) error {
 	case shared.RuntimeActionModReleasePrepare, shared.RuntimeActionModReleasePublish, shared.RuntimeActionModReleaseRollback,
 		shared.RuntimeActionModReleaseComplete, shared.RuntimeActionModReleaseState:
 		if !validOperation || !emptyTransfer || mod.WorkshopID != "" || mod.ExpectedTreeSHA256 != "" || mod.Offset != 0 ||
-			!emptyMetadata || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
+			!emptyMetadata || !emptyFetch || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
 			return errors.New("Mod 发布状态请求无效")
 		}
 	case shared.RuntimeActionModOverridesRead:
 		if mod.OperationID != "" || !emptyTransfer || mod.WorkshopID != "" || mod.ExpectedTreeSHA256 != "" || mod.Offset < 0 ||
-			!emptyMetadata || !safeModPathComponent(mod.RoomDirectory) || !safeModPathComponent(mod.WorldDirectory) {
+			!emptyMetadata || !emptyFetch || !safeModPathComponent(mod.RoomDirectory) || !safeModPathComponent(mod.WorldDirectory) {
 			return errors.New("modoverrides.lua 分块读取请求无效")
 		}
 	default:
 		return errors.New("Mod Runtime 动作无效")
 	}
 	return nil
+}
+
+func validModDownloadIDs(values []string) bool {
+	if len(values) < 1 || len(values) > 4096 {
+		return false
+	}
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		if !modWorkshopID.MatchString(value) || seen[value] {
+			return false
+		}
+		seen[value] = true
+	}
+	return true
+}
+
+func validModFilesObservation(mod shared.RuntimeModRequest) bool {
+	if len(mod.WorkshopIDs) < 1 || len(mod.WorkshopIDs) > 4096 || len(mod.Worlds) > 256 {
+		return false
+	}
+	ids := make(map[string]bool, len(mod.WorkshopIDs))
+	for _, workshopID := range mod.WorkshopIDs {
+		if !modWorkshopID.MatchString(workshopID) || ids[workshopID] {
+			return false
+		}
+		ids[workshopID] = true
+	}
+	worlds := make(map[string]bool, len(mod.Worlds))
+	for _, world := range mod.Worlds {
+		key := world.RoomID + "\x00" + world.WorldID
+		if !operationIdentity.MatchString(world.RoomID) || !operationIdentity.MatchString(world.WorldID) ||
+			!safeModPathComponent(world.RoomDirectory) || !safeModPathComponent(world.WorldDirectory) || worlds[key] {
+			return false
+		}
+		worlds[key] = true
+	}
+	return true
+}
+
+func validModFetchSources(mod shared.RuntimeModRequest) bool {
+	values, locations := mod.FetchSources, mod.FetchLocations
+	if len(values) < 1 || len(values) > 3 {
+		return false
+	}
+	if len(values) == 1 && values[0] == shared.RuntimeModFetchSourceSteam {
+		return len(locations) == 0
+	}
+	if len(values) != len(locations) {
+		return false
+	}
+	for index, location := range locations {
+		if location.Source != values[index] || !validModFetchLocation(mod, location) {
+			return false
+		}
+	}
+	return true
+}
+
+func validModFetchLocation(mod shared.RuntimeModRequest, location shared.RuntimeModFetchLocation) bool {
+	if !validModDownloadToken(location.DownloadToken) || location.Size < 1 || location.Size > modMaximumBundleBytes ||
+		!validRuntimeDigest(location.SHA256) || strings.ContainsAny(location.DownloadURL+location.DownloadPath+location.DownloadToken, "\x00\r\n") {
+		return false
+	}
+	expectedSuffix := "/" + mod.WorkshopID + "/" + strings.ToLower(mod.ExpectedTreeSHA256)
+	switch location.Source {
+	case shared.RuntimeModFetchSourceController:
+		return location.DownloadURL == "" && location.DownloadPath == "/mod-artifacts"+expectedSuffix
+	case shared.RuntimeModFetchSourcePeer:
+		parts := strings.Split(strings.Trim(location.DownloadPath, "/"), "/")
+		if len(parts) != 4 || parts[0] != "mod-peer" || parts[1] == "" ||
+			parts[2] != mod.WorkshopID || !strings.EqualFold(parts[3], mod.ExpectedTreeSHA256) {
+			return false
+		}
+		parsed, err := url.Parse(location.DownloadURL)
+		return err == nil && parsed.User == nil && parsed.Host != "" &&
+			(parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Path == location.DownloadPath &&
+			parsed.RawQuery == "" && parsed.Fragment == ""
+	default:
+		return false
+	}
+}
+
+func validModPeerSubject(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && len(value) <= 128 && utf8.ValidString(value) && !strings.ContainsAny(value, "\x00\r\n")
+}
+
+func validModDownloadToken(value string) bool {
+	if len(value) < 32 || len(value) > 256 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '-' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func safeModPathComponent(value string) bool {
@@ -216,7 +517,8 @@ func validateModChunkAction(action shared.RuntimeAction, offset, size int64, dat
 func validRuntimeModMetadata(value shared.RuntimeModMetadata) bool {
 	return value.PublishedFileSize >= 0 && value.PublishedFileSize <= modMaximumBundleBytes &&
 		len(value.Title) <= 1024 && len(value.Version) <= 256 && utf8.ValidString(value.Title) && utf8.ValidString(value.Version) &&
-		!strings.ContainsAny(value.Title+value.Version, "\x00\r\n")
+		!strings.ContainsAny(value.Title+value.Version, "\x00\r\n") &&
+		(value.SteamManifestID == "" || modWorkshopID.MatchString(value.SteamManifestID))
 }
 
 func (a *Agent) modManager(installation RuntimeInstallation) (*moddistribution.Manager, error) {
@@ -231,7 +533,7 @@ func (a *Agent) modManager(installation RuntimeInstallation) (*moddistribution.M
 		NodeID:    a.Config.AgentID,
 		Installations: []moddistribution.TrustedInstallation{{
 			ID: installation.ID, NodeID: a.Config.AgentID,
-			ServerPath: installation.ServerPath, SavePath: installation.SavePath,
+			ServerPath: runtimeModServerPath(installation), SavePath: installation.SavePath,
 			WorkshopContentPath: runtimeWorkshopContentPath(installation),
 		}},
 		ReserveBytes: modDiskReserveBytes,
@@ -246,11 +548,421 @@ func (a *Agent) modManager(installation RuntimeInstallation) (*moddistribution.M
 	return created, nil
 }
 
+func runtimeModServerPath(installation RuntimeInstallation) string {
+	if installation.Driver != "container" {
+		if layout, ok := dstserver.Resolve(installation.ServerPath, installation.ServerMode); ok {
+			return layout.ContentRoot
+		}
+	}
+	return installation.ServerPath
+}
+
 func runtimeWorkshopContentPath(installation RuntimeInstallation) string {
 	if strings.TrimSpace(installation.UGCPath) == "" {
 		return ""
 	}
 	return installation.WorkshopContentPath
+}
+
+func (a *Agent) fetchModCache(ctx context.Context, installation RuntimeInstallation, request shared.RuntimeModRequest) (shared.RuntimeModResult, error) {
+	manager, err := a.modManager(installation)
+	if err != nil {
+		return shared.RuntimeModResult{}, err
+	}
+	if request.ExpectedTreeSHA256 != "" {
+		if manifest, verifyErr := manager.Verify(ctx, request.WorkshopID, request.ExpectedTreeSHA256); verifyErr == nil {
+			result := shared.RuntimeModResult{FetchSource: request.FetchSources[0], CacheManifest: runtimeModManifest(manifest), Complete: true}
+			result.CacheManifest.FetchSource = shared.RuntimeModFetchSourceCache
+			result.FetchAttempts = []shared.RuntimeModFetchAttempt{successfulModFetchAttempt(shared.RuntimeModFetchSourceCache, time.Now().UTC(), 0, 0)}
+			return result, nil
+		}
+	}
+	switch request.FetchSources[0] {
+	case shared.RuntimeModFetchSourceSteam:
+		return a.fetchModCacheFromSteam(ctx, installation, manager, request)
+	case shared.RuntimeModFetchSourcePeer, shared.RuntimeModFetchSourceController:
+		var failures []error
+		var attempts []shared.RuntimeModFetchAttempt
+		for _, location := range request.FetchLocations {
+			result, fetchErr := a.fetchModCacheFromHTTP(ctx, installation, manager, request, location)
+			attempts = append(attempts, result.FetchAttempts...)
+			if fetchErr == nil {
+				result.FetchAttempts = attempts
+				return result, nil
+			}
+			failures = append(failures, fmt.Errorf("%s: %w", location.Source, fetchErr))
+			if ctx.Err() != nil {
+				return result, ctx.Err()
+			}
+		}
+		return shared.RuntimeModResult{FetchSource: request.FetchSources[0], FetchAttempts: attempts}, errors.Join(failures...)
+	default:
+		return shared.RuntimeModResult{}, errors.New("Agent 不支持指定的 Mod 获取来源")
+	}
+}
+
+func (a *Agent) fetchModCacheFromSteam(ctx context.Context, installation RuntimeInstallation, manager *moddistribution.Manager, request shared.RuntimeModRequest) (shared.RuntimeModResult, error) {
+	result := shared.RuntimeModResult{FetchSource: shared.RuntimeModFetchSourceSteam}
+	if a.modFetchRunner == nil {
+		return result, errors.New("Agent 未配置 Mod 节点下载器")
+	}
+	fetchRoot := filepath.Join(installation.ModStatePath, "fetches")
+	if err := ensureModDirectory(fetchRoot); err != nil {
+		return result, err
+	}
+	staging, err := os.MkdirTemp(fetchRoot, ".steam-")
+	if err != nil {
+		return result, err
+	}
+	defer os.RemoveAll(staging)
+	started := time.Now()
+	if err := a.modFetchRunner.Download(ctx, installation, staging, request.WorkshopID, request.Validate); err != nil {
+		result.FetchAttempts = []shared.RuntimeModFetchAttempt{failedModFetchAttempt(shared.RuntimeModFetchSourceSteam, started, directoryRegularBytes(staging), "STEAM_FETCH_FAILED", err)}
+		return result, fmt.Errorf("节点 Steam 下载 Workshop %s: %w", request.WorkshopID, err)
+	}
+	source := filepath.Join(staging, "steamapps", "workshop", "content", "322330", request.WorkshopID)
+	downloadedBytes := directoryRegularBytes(source)
+	duration := time.Since(started)
+	manifest, err := manager.Import(ctx, request.WorkshopID, source, moddistribution.Metadata{
+		Title: request.Metadata.Title, Version: request.Metadata.Version,
+		PublishedFileSize: request.Metadata.PublishedFileSize, SteamManifestID: request.Metadata.SteamManifestID,
+		SteamUpdatedAt: request.Metadata.SteamUpdatedAt,
+	})
+	if err != nil {
+		result.FetchAttempts = []shared.RuntimeModFetchAttempt{failedModFetchAttemptWithDuration(shared.RuntimeModFetchSourceSteam, started, downloadedBytes, duration, "MOD_IMPORT_FAILED", err)}
+		return result, fmt.Errorf("导入节点 Steam 模组 %s: %w", request.WorkshopID, err)
+	}
+	result.CacheManifest = runtimeModManifest(manifest)
+	result.CacheManifest.FetchSource = shared.RuntimeModFetchSourceSteam
+	if request.ExpectedTreeSHA256 != "" && !strings.EqualFold(manifest.TreeSHA256, request.ExpectedTreeSHA256) {
+		mismatch := fmt.Errorf("节点 Steam 当前内容与期望版本不一致: Workshop %s 期望 %s，实际 %s", request.WorkshopID, request.ExpectedTreeSHA256, manifest.TreeSHA256)
+		result.FetchAttempts = []shared.RuntimeModFetchAttempt{failedModFetchAttemptWithDuration(shared.RuntimeModFetchSourceSteam, started, downloadedBytes, duration, "STEAM_VERSION_MISMATCH", mismatch)}
+		return result, mismatch
+	}
+	result.FetchAttempts = []shared.RuntimeModFetchAttempt{successfulModFetchAttempt(shared.RuntimeModFetchSourceSteam, started.UTC(), downloadedBytes, duration)}
+	result.Complete = true
+	return result, nil
+}
+
+func (a *Agent) fetchModCacheFromHTTP(ctx context.Context, installation RuntimeInstallation, manager *moddistribution.Manager, request shared.RuntimeModRequest, location shared.RuntimeModFetchLocation) (shared.RuntimeModResult, error) {
+	result := shared.RuntimeModResult{FetchSource: location.Source}
+	fetchRoot := filepath.Join(installation.ModStatePath, "fetches", "http")
+	if err := ensureModDirectory(fetchRoot); err != nil {
+		return result, err
+	}
+	path, attempt, err := downloadModArtifact(ctx, a.Config.ServerURL, request.WorkshopID, location, fetchRoot)
+	result.FetchAttempts = []shared.RuntimeModFetchAttempt{attempt}
+	if err != nil {
+		return result, fmt.Errorf("下载 Mod 制品: %w", err)
+	}
+	operationprogress.Report(ctx, operationprogress.Update{
+		Stage: operationprogress.StageModCache, Percent: 90,
+		Message:    modArtifactProgressMessage(location.Source, request.WorkshopID, "校验完成，正在导入"),
+		WorkshopID: request.WorkshopID, CurrentBytes: location.Size, TotalBytes: location.Size,
+	})
+	state := modUploadState{
+		Version: modUploadStateVersion, UploadID: "fetch-" + location.SHA256[:32], Kind: shared.RuntimeModUploadCacheBundle,
+		WorkshopID: request.WorkshopID, ExpectedTreeSHA256: strings.ToLower(request.ExpectedTreeSHA256),
+		Size: location.Size, SHA256: strings.ToLower(location.SHA256), Metadata: request.Metadata, Offset: location.Size,
+	}
+	result, err = importModBundle(ctx, installation, manager, state, path)
+	result.FetchSource = location.Source
+	result.FetchAttempts = []shared.RuntimeModFetchAttempt{attempt}
+	if result.CacheManifest != nil {
+		result.CacheManifest.FetchSource = location.Source
+	}
+	if err != nil {
+		result.FetchAttempts[0].Status = shared.RuntimeModFetchStatusFailed
+		result.FetchAttempts[0].Feasibility = shared.RuntimeModFetchFeasibilityUnavailable
+		result.FetchAttempts[0].Selected = false
+		result.FetchAttempts[0].ErrorCode = "MOD_IMPORT_FAILED"
+		result.FetchAttempts[0].ErrorMessage = err.Error()
+		return result, err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return result, err
+	}
+	result.FetchAttempts[0].Selected = true
+	operationprogress.Report(ctx, operationprogress.Update{
+		Stage: operationprogress.StageModCache, Percent: 100,
+		Message:    modArtifactProgressMessage(location.Source, request.WorkshopID, "已导入"),
+		WorkshopID: request.WorkshopID, CurrentBytes: location.Size, TotalBytes: location.Size,
+	})
+	return result, nil
+}
+
+func downloadModArtifact(ctx context.Context, serverURL, workshopID string, location shared.RuntimeModFetchLocation, directory string) (downloadedPath string, attempt shared.RuntimeModFetchAttempt, err error) {
+	started := time.Now()
+	attempt = shared.RuntimeModFetchAttempt{
+		Source: location.Source, Feasibility: shared.RuntimeModFetchFeasibilityAvailable,
+		Status: shared.RuntimeModFetchStatusSucceeded, ObservedAt: started.UTC(),
+	}
+	defer func() {
+		attempt.DurationMillis = elapsedMilliseconds(time.Since(started))
+		if attempt.Bytes > 0 {
+			attempt.BytesPerSecond = bytesPerSecond(attempt.Bytes, attempt.DurationMillis)
+		}
+		if err != nil {
+			attempt.Feasibility = shared.RuntimeModFetchFeasibilityUnavailable
+			attempt.Status = shared.RuntimeModFetchStatusFailed
+			attempt.ErrorCode = fetchSourceErrorCode(location.Source)
+			attempt.ErrorMessage = err.Error()
+		}
+	}()
+	downloadURL, err := resolveModArtifactDownloadURL(serverURL, location)
+	if err != nil {
+		return "", attempt, err
+	}
+	path := filepath.Join(directory, ".artifact-"+strings.ToLower(location.SHA256)+".part")
+	if !pathWithinRoot(path, directory) {
+		return "", attempt, errors.New("Mod 制品暂存路径越界")
+	}
+	if info, statErr := os.Lstat(path); statErr == nil {
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > location.Size {
+			return "", attempt, errors.New("Mod 制品断点文件无效")
+		}
+	} else if !os.IsNotExist(statErr) {
+		return "", attempt, statErr
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return "", attempt, err
+	}
+	offset, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		file.Close()
+		return "", attempt, err
+	}
+	if offset < location.Size {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+		if err != nil {
+			file.Close()
+			return "", attempt, err
+		}
+		request.Header.Set("Authorization", "Bearer "+location.DownloadToken)
+		if offset > 0 {
+			request.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+		}
+		client := &http.Client{
+			Timeout: 5 * time.Minute,
+			Transport: &http.Transport{
+				Proxy:               http.ProxyFromEnvironment,
+				DialContext:         (&net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 10 * time.Second,
+				IdleConnTimeout: 30 * time.Second,
+			},
+			CheckRedirect: func(next *http.Request, previous []*http.Request) error {
+				if len(previous) == 0 || !strings.EqualFold(next.URL.Scheme, previous[0].URL.Scheme) || !strings.EqualFold(next.URL.Host, previous[0].URL.Host) {
+					return errors.New("Mod 制品下载不允许跨主机重定向")
+				}
+				return nil
+			},
+		}
+		response, requestErr := client.Do(request)
+		if requestErr != nil {
+			file.Close()
+			return "", attempt, requestErr
+		}
+		defer response.Body.Close()
+		if offset == 0 && response.StatusCode != http.StatusOK && response.StatusCode != http.StatusPartialContent ||
+			offset > 0 && response.StatusCode != http.StatusPartialContent {
+			file.Close()
+			return "", attempt, fmt.Errorf("Mod 制品下载 HTTP %d", response.StatusCode)
+		}
+		if response.StatusCode == http.StatusPartialContent && !validModRange(response.Header.Get("Content-Range"), offset, location.Size) {
+			file.Close()
+			return "", attempt, errors.New("Mod 制品 Content-Range 无效")
+		}
+		remaining := location.Size - offset
+		if response.ContentLength >= 0 && response.ContentLength != remaining {
+			file.Close()
+			return "", attempt, errors.New("Mod 制品响应长度与断点不一致")
+		}
+		progressWriter := &modArtifactProgressWriter{
+			ctx: ctx, writer: file, source: location.Source, workshopID: workshopID,
+			offset: offset, total: location.Size, startedAt: time.Now(),
+		}
+		progressWriter.report(progressWriter.startedAt, true)
+		written, copyErr := io.Copy(progressWriter, io.LimitReader(response.Body, remaining+1))
+		attempt.Bytes += written
+		syncErr := file.Sync()
+		if err := errors.Join(copyErr, syncErr); err != nil {
+			file.Close()
+			return "", attempt, err
+		}
+		if written != remaining {
+			file.Close()
+			if written > remaining {
+				_ = os.Remove(path)
+			}
+			return "", attempt, io.ErrUnexpectedEOF
+		}
+	}
+	if err := file.Close(); err != nil {
+		return "", attempt, err
+	}
+	operationprogress.Report(ctx, operationprogress.Update{
+		Stage: operationprogress.StageModCache, Percent: 85,
+		Message:    modArtifactProgressMessage(location.Source, workshopID, "下载完成，正在校验"),
+		WorkshopID: workshopID, CurrentBytes: location.Size, TotalBytes: location.Size,
+	})
+	digest, err := hashModFile(ctx, path)
+	if err != nil {
+		return "", attempt, err
+	}
+	if !strings.EqualFold(digest, location.SHA256) {
+		_ = os.Remove(path)
+		return "", attempt, errors.New("Mod 制品 SHA256 校验失败")
+	}
+	attempt.Selected = true
+	return path, attempt, nil
+}
+
+type modArtifactProgressWriter struct {
+	ctx        context.Context
+	writer     io.Writer
+	source     shared.RuntimeModFetchSource
+	workshopID string
+	offset     int64
+	total      int64
+	written    int64
+	startedAt  time.Time
+	lastAt     time.Time
+}
+
+func (w *modArtifactProgressWriter) Write(value []byte) (int, error) {
+	written, err := w.writer.Write(value)
+	w.written += int64(written)
+	w.report(time.Now(), w.offset+w.written >= w.total)
+	return written, err
+}
+
+func (w *modArtifactProgressWriter) report(now time.Time, force bool) {
+	if !force && !w.lastAt.IsZero() && now.Sub(w.lastAt) < 250*time.Millisecond {
+		return
+	}
+	w.lastAt = now
+	current := w.offset + w.written
+	if current > w.total {
+		current = w.total
+	}
+	percent := 0
+	if w.total > 0 {
+		percent = int(current * 80 / w.total)
+	}
+	rate := int64(0)
+	if elapsed := now.Sub(w.startedAt); w.written > 0 && elapsed > 0 {
+		rate = int64(float64(w.written) / elapsed.Seconds())
+	}
+	operationprogress.Report(w.ctx, operationprogress.Update{
+		Stage: operationprogress.StageModCache, Percent: percent,
+		Message:    modArtifactProgressMessage(w.source, w.workshopID, "正在拉取"),
+		WorkshopID: w.workshopID, CurrentBytes: current, TotalBytes: w.total, BytesPerSecond: rate,
+	})
+}
+
+func modArtifactProgressMessage(source shared.RuntimeModFetchSource, workshopID, action string) string {
+	label := "运行节点"
+	if source == shared.RuntimeModFetchSourceController {
+		label = "Controller"
+	}
+	return fmt.Sprintf("%s%s模组制品 · Workshop %s", label, action, workshopID)
+}
+
+func successfulModFetchAttempt(source shared.RuntimeModFetchSource, observedAt time.Time, bytes int64, duration time.Duration) shared.RuntimeModFetchAttempt {
+	millis := elapsedMilliseconds(duration)
+	return shared.RuntimeModFetchAttempt{
+		Source: source, Feasibility: shared.RuntimeModFetchFeasibilityAvailable,
+		Status: shared.RuntimeModFetchStatusSucceeded, Selected: true, Bytes: bytes,
+		DurationMillis: millis, BytesPerSecond: bytesPerSecond(bytes, millis), ObservedAt: observedAt.UTC(),
+	}
+}
+
+func failedModFetchAttempt(source shared.RuntimeModFetchSource, started time.Time, bytes int64, code string, cause error) shared.RuntimeModFetchAttempt {
+	return failedModFetchAttemptWithDuration(source, started, bytes, time.Since(started), code, cause)
+}
+
+func failedModFetchAttemptWithDuration(source shared.RuntimeModFetchSource, started time.Time, bytes int64, duration time.Duration, code string, cause error) shared.RuntimeModFetchAttempt {
+	millis := elapsedMilliseconds(duration)
+	message := ""
+	if cause != nil {
+		message = cause.Error()
+	}
+	return shared.RuntimeModFetchAttempt{
+		Source: source, Feasibility: shared.RuntimeModFetchFeasibilityUnavailable,
+		Status: shared.RuntimeModFetchStatusFailed, Bytes: bytes, DurationMillis: millis,
+		BytesPerSecond: bytesPerSecond(bytes, millis), ErrorCode: code, ErrorMessage: message, ObservedAt: started.UTC(),
+	}
+}
+
+func elapsedMilliseconds(duration time.Duration) int64 {
+	if duration <= 0 {
+		return 0
+	}
+	millis := duration.Milliseconds()
+	if millis == 0 {
+		return 1
+	}
+	return millis
+}
+
+func bytesPerSecond(bytes, durationMillis int64) int64 {
+	if bytes <= 0 || durationMillis <= 0 {
+		return 0
+	}
+	return bytes * 1000 / durationMillis
+}
+
+func directoryRegularBytes(root string) int64 {
+	var total int64
+	_ = filepath.Walk(root, func(_ string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info == nil {
+			return nil
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
+func fetchSourceErrorCode(source shared.RuntimeModFetchSource) string {
+	switch source {
+	case shared.RuntimeModFetchSourcePeer:
+		return "PEER_FETCH_FAILED"
+	case shared.RuntimeModFetchSourceController:
+		return "CONTROLLER_FETCH_FAILED"
+	default:
+		return "MOD_FETCH_FAILED"
+	}
+}
+
+func resolveModArtifactDownloadURL(serverURL string, location shared.RuntimeModFetchLocation) (string, error) {
+	if location.Source == shared.RuntimeModFetchSourcePeer {
+		parsed, err := url.Parse(location.DownloadURL)
+		if err != nil || parsed.User != nil || parsed.Host == "" ||
+			(parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Path != location.DownloadPath ||
+			parsed.RawQuery != "" || parsed.Fragment != "" {
+			return "", errors.New("Mod Peer 下载地址无效")
+		}
+		return parsed.String(), nil
+	}
+	if location.Source != shared.RuntimeModFetchSourceController || location.DownloadURL != "" {
+		return "", errors.New("Mod 制品下载来源无效")
+	}
+	return resolveControllerDownloadURL(serverURL, location.DownloadPath, "/mod-artifacts/")
+}
+
+func validModRange(value string, expectedOffset, expectedSize int64) bool {
+	parts := modContentRange.FindStringSubmatch(strings.TrimSpace(value))
+	if len(parts) != 4 {
+		return false
+	}
+	start, startErr := strconv.ParseInt(parts[1], 10, 64)
+	end, endErr := strconv.ParseInt(parts[2], 10, 64)
+	size, sizeErr := strconv.ParseInt(parts[3], 10, 64)
+	return startErr == nil && endErr == nil && sizeErr == nil && start == expectedOffset && end == expectedSize-1 && size == expectedSize
 }
 
 func (a *Agent) beginModUpload(installation RuntimeInstallation, request shared.RuntimeModRequest) (shared.RuntimeModResult, error) {
@@ -424,7 +1136,7 @@ func importModBundle(ctx context.Context, installation RuntimeInstallation, mana
 	}
 	manifest, err := manager.Import(ctx, state.WorkshopID, source, moddistribution.Metadata{
 		Title: state.Metadata.Title, Version: state.Metadata.Version, PublishedFileSize: state.Metadata.PublishedFileSize,
-		SteamUpdatedAt: state.Metadata.SteamUpdatedAt,
+		SteamManifestID: state.Metadata.SteamManifestID, SteamUpdatedAt: state.Metadata.SteamUpdatedAt,
 	})
 	if err != nil {
 		return modUploadResult(state), err
@@ -451,11 +1163,7 @@ func (a *Agent) importModReleasePlan(ctx context.Context, installation RuntimeIn
 	if err := decodeSingleModJSON(data, &wire); err != nil {
 		return modUploadResult(state), err
 	}
-	input, err := runtimeModPlanInput(wire, installation, a.Config.AgentID, state.OperationID)
-	if err != nil {
-		return modUploadResult(state), err
-	}
-	plan, err := manager.BuildPlan(ctx, input)
+	plan, err := buildRuntimeModPlan(ctx, manager, wire, installation, a.Config.AgentID, state.OperationID)
 	if err != nil {
 		return modUploadResult(state), err
 	}
@@ -469,6 +1177,24 @@ func (a *Agent) importModReleasePlan(ctx context.Context, installation RuntimeIn
 	result := modUploadResult(state)
 	result.Complete, result.OperationID, result.Release = true, state.OperationID, release
 	return result, nil
+}
+
+func buildRuntimeModPlan(ctx context.Context, manager *moddistribution.Manager, value shared.RuntimeModPlanInput, installation RuntimeInstallation, nodeID, operationID string) (moddistribution.Plan, error) {
+	if value.Mode == string(moddistribution.PlanModeContent) {
+		input, err := runtimeModContentPlanInput(value, installation, nodeID, operationID)
+		if err != nil {
+			return moddistribution.Plan{}, err
+		}
+		return manager.BuildContentPlan(ctx, input)
+	}
+	if value.Mode != "" {
+		return moddistribution.Plan{}, errors.New("Mod 发布计划模式不受支持")
+	}
+	input, err := runtimeModPlanInput(value, installation, nodeID, operationID)
+	if err != nil {
+		return moddistribution.Plan{}, err
+	}
+	return manager.BuildPlan(ctx, input)
 }
 
 func (a *Agent) prepareModRelease(ctx context.Context, installation RuntimeInstallation, operationID string) (shared.RuntimeModResult, error) {
@@ -599,7 +1325,7 @@ func reconcileModReleaseStates(installation RuntimeInstallation, manager *moddis
 }
 
 func runtimeModPlanInput(value shared.RuntimeModPlanInput, installation RuntimeInstallation, nodeID, operationID string) (moddistribution.PlanInput, error) {
-	if value.OperationID != operationID || value.NodeID != nodeID || len(value.Shards) == 0 {
+	if value.OperationID != operationID || value.NodeID != nodeID || value.Mode != "" || value.InstallationID != "" || len(value.Mods) != 0 || len(value.Shards) == 0 {
 		return moddistribution.PlanInput{}, errors.New("Mod 发布计划身份或分片列表无效")
 	}
 	result := moddistribution.PlanInput{OperationID: value.OperationID, NodeID: value.NodeID, Shards: make([]moddistribution.ShardRelease, 0, len(value.Shards))}
@@ -616,9 +1342,43 @@ func runtimeModPlanInput(value shared.RuntimeModPlanInput, installation RuntimeI
 			ModOverrides: append([]byte(nil), shard.ModOverrides...), Mods: make([]moddistribution.ModVersion, 0, len(shard.Mods)),
 		}
 		for _, mod := range shard.Mods {
-			converted.Mods = append(converted.Mods, moddistribution.ModVersion{WorkshopID: mod.WorkshopID, TreeSHA256: mod.TreeSHA256})
+			converted.Mods = append(converted.Mods, moddistribution.ModVersion{
+				WorkshopID: mod.WorkshopID, TreeSHA256: mod.TreeSHA256,
+				Metadata: moddistribution.Metadata{
+					Title: mod.Metadata.Title, Version: mod.Metadata.Version,
+					PublishedFileSize: mod.Metadata.PublishedFileSize, SteamManifestID: mod.Metadata.SteamManifestID,
+					SteamUpdatedAt: mod.Metadata.SteamUpdatedAt,
+				},
+			})
 		}
 		result.Shards = append(result.Shards, converted)
+	}
+	return result, nil
+}
+
+func runtimeModContentPlanInput(value shared.RuntimeModPlanInput, installation RuntimeInstallation, nodeID, operationID string) (moddistribution.ContentPlanInput, error) {
+	if value.OperationID != operationID || value.NodeID != nodeID || value.Mode != string(moddistribution.PlanModeContent) ||
+		value.InstallationID != installation.ID || len(value.Mods) == 0 || len(value.Shards) != 0 {
+		return moddistribution.ContentPlanInput{}, errors.New("Mod 安装内容发布计划无效")
+	}
+	result := moddistribution.ContentPlanInput{
+		OperationID:    value.OperationID,
+		NodeID:         value.NodeID,
+		InstallationID: value.InstallationID,
+		Mods:           make([]moddistribution.ModVersion, 0, len(value.Mods)),
+	}
+	for _, mod := range value.Mods {
+		result.Mods = append(result.Mods, moddistribution.ModVersion{
+			WorkshopID: mod.WorkshopID,
+			TreeSHA256: mod.TreeSHA256,
+			Metadata: moddistribution.Metadata{
+				Title:             mod.Metadata.Title,
+				Version:           mod.Metadata.Version,
+				PublishedFileSize: mod.Metadata.PublishedFileSize,
+				SteamManifestID:   mod.Metadata.SteamManifestID,
+				SteamUpdatedAt:    mod.Metadata.SteamUpdatedAt,
+			},
+		})
 	}
 	return result, nil
 }
@@ -839,7 +1599,7 @@ func runtimeModManifest(value moddistribution.Manifest) *shared.RuntimeModCacheM
 		ManifestSHA256: value.ManifestSHA256, Size: value.Size, FileCount: value.FileCount, CreatedAt: value.CreatedAt,
 		Metadata: shared.RuntimeModMetadata{
 			Title: value.Metadata.Title, Version: value.Metadata.Version, PublishedFileSize: value.Metadata.PublishedFileSize,
-			SteamUpdatedAt: value.Metadata.SteamUpdatedAt,
+			SteamManifestID: value.Metadata.SteamManifestID, SteamUpdatedAt: value.Metadata.SteamUpdatedAt,
 		},
 	}
 }
@@ -848,7 +1608,8 @@ func runtimeModInstallationState(value moddistribution.InstallationState) *share
 	result := &shared.RuntimeModInstallationState{
 		InstallationID: value.InstallationID, LastOperationID: value.LastOperationID,
 		Mods: make(map[string]string, len(value.Mods)), ManagedSetupSHA256: value.ManagedSetupSHA256,
-		Shards: make(map[string]shared.RuntimeModShardState, len(value.Shards)), UpdatedAt: value.UpdatedAt,
+		WorkshopManifestSHA256: value.WorkshopManifestSHA256,
+		Shards:                 make(map[string]shared.RuntimeModShardState, len(value.Shards)), UpdatedAt: value.UpdatedAt,
 	}
 	for id, hash := range value.Mods {
 		result.Mods[id] = hash
@@ -860,11 +1621,49 @@ func runtimeModInstallationState(value moddistribution.InstallationState) *share
 			Mods: make([]shared.RuntimeModVersion, 0, len(shard.Mods)),
 		}
 		for _, mod := range shard.Mods {
-			converted.Mods = append(converted.Mods, shared.RuntimeModVersion{WorkshopID: mod.WorkshopID, TreeSHA256: mod.TreeSHA256})
+			converted.Mods = append(converted.Mods, shared.RuntimeModVersion{
+				WorkshopID: mod.WorkshopID, TreeSHA256: mod.TreeSHA256,
+				Metadata: shared.RuntimeModMetadata{
+					Title: mod.Metadata.Title, Version: mod.Metadata.Version,
+					PublishedFileSize: mod.Metadata.PublishedFileSize, SteamManifestID: mod.Metadata.SteamManifestID,
+					SteamUpdatedAt: mod.Metadata.SteamUpdatedAt,
+				},
+			})
 		}
 		result.Shards[key] = converted
 	}
 	return result
+}
+
+func runtimeModFilesObservation(value moddistribution.FilesObservation) *shared.RuntimeModFilesObservation {
+	result := &shared.RuntimeModFilesObservation{
+		InstallationID: value.InstallationID,
+		Mods:           make(map[string]shared.RuntimeModFileState, len(value.Mods)),
+		Worlds:         make(map[string]shared.RuntimeModWorldFileState, len(value.Worlds)),
+		ObservedAt:     value.ObservedAt,
+	}
+	for workshopID, state := range value.Mods {
+		result.Mods[workshopID] = shared.RuntimeModFileState{
+			Status: shared.RuntimeModFileStatus(state.Status), Reason: state.Reason,
+			Name: state.Name, Version: state.Version, InstalledSize: state.InstalledSize, SteamManifestID: state.SteamManifestID,
+			SteamUpdatedAt: cloneObservedTime(state.SteamUpdatedAt), MetadataReason: state.MetadataReason,
+		}
+	}
+	for key, world := range value.Worlds {
+		result.Worlds[key] = shared.RuntimeModWorldFileState{
+			RoomID: world.RoomID, WorldID: world.WorldID,
+			LoadedModIDs: append([]string(nil), world.LoadedModIDs...), LogObserved: world.LogObserved,
+		}
+	}
+	return result
+}
+
+func cloneObservedTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := value.UTC()
+	return &cloned
 }
 
 func decodeSingleModJSON(data []byte, target any) error {

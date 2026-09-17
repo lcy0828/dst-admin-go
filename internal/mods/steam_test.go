@@ -152,11 +152,43 @@ func TestSteamDetailsWithoutKeyUsesPublicEndpoint(t *testing.T) {
 
 	provider := NewSteamProvider("", "322330")
 	provider.APIBase = server.URL
-	if _, err := provider.Details(context.Background(), []string{"378160973"}); err != nil {
-		t.Fatal(err)
+	if _, err := provider.Details(context.Background(), []string{"378160973"}); err == nil {
+		t.Fatal("omitted Workshop item must be reported as missing evidence")
 	}
 	if capturedPath != "/ISteamRemoteStorage/GetPublishedFileDetails/v1/" || itemCount != "1" {
 		t.Fatalf("unexpected public request: path=%q itemcount=%q", capturedPath, itemCount)
+	}
+}
+
+func TestSteamSummariesSkipPerItemCommunityRequests(t *testing.T) {
+	var communityRequests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/ISteamRemoteStorage/GetPublishedFileDetails/v1/":
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(writer, `{"response":{"publishedfiledetails":[{"publishedfileid":"378160973","result":1,"consumer_app_id":322330,"title":"Global Positions","preview_url":"preview","hcontent_file":"3421201230228906491","tags":[{"tag":"version:1.7.6"}]}]}}`)
+		case "/sharedfiles/filedetails/":
+			communityRequests.Add(1)
+			_, _ = fmt.Fprint(writer, `<html><body><div class="workshopItemTitle">localized</div></body></html>`)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	provider := NewSteamProvider("", "322330")
+	provider.APIBase = server.URL
+	provider.CommunityBase = server.URL
+	items, err := provider.Summaries(context.Background(), []string{"378160973"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := items["378160973"]
+	if item.Name != "Global Positions" || item.Version != "1.7.6" || item.PreviewURL != "preview" || item.SteamManifestID != "3421201230228906491" {
+		t.Fatalf("Workshop summary = %#v", item)
+	}
+	if communityRequests.Load() != 0 {
+		t.Fatalf("summary made %d per-item community requests", communityRequests.Load())
 	}
 }
 
@@ -165,6 +197,7 @@ func TestSteamDetailMapsVersionAndWorkshopStats(t *testing.T) {
 		ID: "1392778117", Result: 1, Creator: "76561198246008860", ConsumerAppID: 322330,
 		Title: "[DST] Legion", Created: 1527083092, Updated: 1779719397,
 		Subscriptions: 750761, Favorites: 39164, Views: 1098171, FileSize: 110354453,
+		SteamManifestID: "3421201230228906491",
 	}
 	value.Tags = append(value.Tags, struct {
 		Tag         string `json:"tag"`
@@ -177,7 +210,7 @@ func TestSteamDetailMapsVersionAndWorkshopStats(t *testing.T) {
 	if !ok {
 		t.Fatal("valid Workshop detail was rejected")
 	}
-	if item.Version != "7.6.5" || item.FileSize != 110354453 || item.Favorites != 39164 || item.Views != 1098171 {
+	if item.Version != "7.6.5" || item.FileSize != 110354453 || item.SteamManifestID != "3421201230228906491" || item.Favorites != 39164 || item.Views != 1098171 {
 		t.Fatalf("Workshop metadata was not mapped: %#v", item)
 	}
 	if item.Score != 0.96 || item.RatingCount != 8071 || item.CreatedAt.IsZero() || item.UpdatedAt.IsZero() {
@@ -213,7 +246,7 @@ func TestSteamCommunityParsesAuthorAndRating(t *testing.T) {
 	}
 }
 
-func TestSteamCommunityMetadataRetriesTransientFailures(t *testing.T) {
+func TestSteamCommunityMetadataDoesNotImmediatelyRetryTransientFailures(t *testing.T) {
 	var attempts atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		if attempts.Add(1) == 1 {
@@ -227,8 +260,8 @@ func TestSteamCommunityMetadataRetriesTransientFailures(t *testing.T) {
 	provider := NewSteamProvider("", "322330")
 	provider.CommunityBase = server.URL
 	metadata, ok := provider.loadCommunityMetadata(context.Background(), "2007975851")
-	if !ok || attempts.Load() != 2 || metadata.Score != 0.6 || metadata.RatingCount != 80 {
-		t.Fatalf("transient community failure was not recovered: attempts=%d metadata=%#v", attempts.Load(), metadata)
+	if ok || attempts.Load() != 1 || metadata.Err == nil {
+		t.Fatalf("transient community failure must be returned without retry: attempts=%d metadata=%#v", attempts.Load(), metadata)
 	}
 }
 

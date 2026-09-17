@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -11,6 +12,8 @@ import (
 
 	"dont/internal/operationlease"
 )
+
+var workshopLogIDPattern = regexp.MustCompile(`(?i)workshop[-_](\d+)`)
 
 const (
 	defaultActivationTimeout = 300
@@ -275,10 +278,19 @@ func (c *Coordinator) activateCommittedWithRunningSnapshot(ctx context.Context, 
 		if confirmErr != nil {
 			setActivationFailure(result, "SHARD_LOAD_CONFIRMATION_FAILED", confirmErr, c.now().UTC())
 			activationErr = errors.Join(activationErr, confirmErr)
+			if c.replicas != nil {
+				_ = c.replicas.MarkWorldLoaded(publication.Plan, world.RoomID, world.WorldID, false, confirmErr)
+			}
 		} else {
 			confirmedAt := c.now().UTC()
 			result.Status, result.RuntimeState, result.LoadMarker = ActivationStatusSucceeded, state, marker
 			result.LoadConfirmedAt, result.UpdatedAt = &confirmedAt, confirmedAt
+			if c.replicas != nil {
+				if replicaErr := c.replicas.MarkWorldLoaded(publication.Plan, world.RoomID, world.WorldID, true, nil); replicaErr != nil {
+					setActivationFailure(result, "REPLICA_ACTIVATION_STATE_FAILED", replicaErr, c.now().UTC())
+					activationErr = errors.Join(activationErr, replicaErr)
+				}
+			}
 		}
 		saved, saveErr := c.store.Save(publication)
 		if saveErr != nil {
@@ -407,6 +419,9 @@ func (c *Coordinator) confirmShardLoaded(ctx context.Context, world WorldPlan, c
 	ticker := time.NewTicker(c.activationPollInterval)
 	defer ticker.Stop()
 	current := cursor
+	expected := expectedWorkshopIDs(world)
+	confirmed := make(map[string]bool, len(expected))
+	readyMarker := ""
 	for {
 		status, err := c.activation.Status(ctx, world)
 		if err != nil {
@@ -425,17 +440,73 @@ func (c *Coordinator) confirmShardLoaded(ctx context.Context, world WorldPlan, c
 			}
 			current = logs.Cursor
 			for _, line := range logs.Lines {
+				lower := strings.ToLower(line)
+				if len(expected) > 0 && strings.Contains(lower, "no mods registered") {
+					return "", status.State, fmt.Errorf("DST reported no registered mods; expected Workshop IDs: %s", strings.Join(sortedWorkshopIDs(expected), ", "))
+				}
+				if strings.Contains(lower, "registering mod") || strings.Contains(lower, "loading mod:") {
+					for _, match := range workshopLogIDPattern.FindAllStringSubmatch(line, -1) {
+						if len(match) == 2 && expected[match[1]] {
+							confirmed[match[1]] = true
+						}
+					}
+				}
 				if marker := activationLoadMarker(world, line); marker != "" {
-					return marker, status.State, nil
+					readyMarker = marker
+				}
+			}
+			if readyMarker != "" && len(confirmed) == len(expected) {
+				if len(expected) == 0 {
+					return readyMarker, status.State, nil
+				}
+				return fmt.Sprintf("%s;mods=%d/%d", readyMarker, len(confirmed), len(expected)), status.State, nil
+			}
+			if readyMarker != "" {
+				missing := missingWorkshopIDs(expected, confirmed)
+				if len(missing) > 0 {
+					return readyMarker, status.State, fmt.Errorf("world became ready before expected mods were observed in startup logs: %s", strings.Join(missing, ", "))
 				}
 			}
 		}
 		select {
 		case <-ctx.Done():
+			missing := missingWorkshopIDs(expected, confirmed)
+			if len(missing) > 0 {
+				return "", status.State, fmt.Errorf("%w: expected mods were not observed in startup logs: %s", ctx.Err(), strings.Join(missing, ", "))
+			}
 			return "", status.State, ctx.Err()
 		case <-ticker.C:
 		}
 	}
+}
+
+func expectedWorkshopIDs(world WorldPlan) map[string]bool {
+	result := make(map[string]bool, len(world.Mods))
+	for _, mod := range world.Mods {
+		if workshopID := strings.TrimSpace(mod.WorkshopID); workshopID != "" {
+			result[workshopID] = true
+		}
+	}
+	return result
+}
+
+func sortedWorkshopIDs(values map[string]bool) []string {
+	result := make([]string, 0, len(values))
+	for workshopID := range values {
+		result = append(result, workshopID)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func missingWorkshopIDs(expected, confirmed map[string]bool) []string {
+	missing := make(map[string]bool, len(expected))
+	for workshopID := range expected {
+		if !confirmed[workshopID] {
+			missing[workshopID] = true
+		}
+	}
+	return sortedWorkshopIDs(missing)
 }
 
 func activationLoadMarker(world WorldPlan, line string) string {
@@ -457,6 +528,9 @@ func (c *Coordinator) failActivation(publication Publication, shard *ShardActiva
 	now := c.now().UTC()
 	if shard != nil {
 		setActivationFailure(shard, code, cause, now)
+		if c.replicas != nil {
+			_ = c.replicas.MarkWorldLoaded(publication.Plan, shard.RoomID, shard.WorldID, false, cause)
+		}
 	}
 	publication.Activation.Status, publication.Activation.ErrorCode = ActivationStatusFailed, code
 	publication.Activation.ErrorMessage, publication.Activation.FinishedAt = cause.Error(), &now
