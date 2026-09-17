@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -52,5 +53,89 @@ func TestRuntimeWrapperPersistsExecutableExitStatus(t *testing.T) {
 				t.Fatalf("persisted status = %q, want %d", got, wantExitCode)
 			}
 		})
+	}
+}
+
+func TestRuntimeWrapperForwardsSelectedLuaMode(t *testing.T) {
+	tests := map[string][]string{
+		"game":           {"-lua_vm_type=game"},
+		"luajit-jit-off": {"-lua_vm_type=jit", "-luajit_enabled_jit=false"},
+		"luajit-jit-on":  {"-lua_vm_type=jit", "-luajit_enabled_jit=true"},
+		"arena-gc":       {"-lua_vm_type=jit_gen", "-luajit_enabled_jit=false"},
+	}
+	for mode, expected := range tests {
+		t.Run(mode, func(t *testing.T) {
+			tempDir := t.TempDir()
+			executable := filepath.Join(tempDir, "fake-dst")
+			argumentsFile := filepath.Join(tempDir, "arguments")
+			contents := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$DST_ARGUMENTS_FILE\"\n"
+			if err := os.WriteFile(executable, []byte(contents), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("/bin/sh", "dst-runtime-wrapper.sh")
+			cmd.Dir = "."
+			cmd.Env = append(os.Environ(),
+				"DST_CLUSTER=test-cluster", "DST_SHARD=Master", "DST_CONF_DIR=DoNotStarveTogether",
+				"DST_STORAGE_ROOT="+tempDir, "DST_SERVER_ROOT="+tempDir, "DST_EXECUTABLE="+executable,
+				"DST_RUNTIME_STATE_DIR="+tempDir, "DST_RUNTIME_MODE="+mode, "DST_ARGUMENTS_FILE="+argumentsFile,
+				"DST_UGC_DIRECTORY="+filepath.Join(tempDir, "shared-workshop"),
+			)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("wrapper failed: %v: %s", err, output)
+			}
+			argumentData, err := os.ReadFile(argumentsFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			arguments := strings.Fields(string(argumentData))
+			for _, value := range expected {
+				if !slices.Contains(arguments, value) {
+					t.Fatalf("arguments=%v missing=%s", arguments, value)
+				}
+			}
+			ugc := filepath.Join(tempDir, "DoNotStarveTogether", ".dst-admin", "runtime", "workshop", "test-cluster", "Master")
+			index := slices.Index(arguments, "-ugc_directory")
+			if index < 0 || index+1 >= len(arguments) || filepath.Clean(arguments[index+1]) != ugc || !slices.Contains(arguments, "-skip_update_server_mods") {
+				t.Fatalf("ordinary launch did not isolate Workshop state and skip downloads: %v", arguments)
+			}
+			if info, err := os.Stat(ugc); err != nil || !info.IsDir() {
+				t.Fatalf("world Steam state directory not ready: %v", err)
+			}
+		})
+	}
+}
+
+func TestRuntimeWrapperConsumesOneShotSkipModUpdateOption(t *testing.T) {
+	tempDir := t.TempDir()
+	executable := filepath.Join(tempDir, "fake-dst")
+	argumentsFile := filepath.Join(tempDir, "arguments")
+	launchOptionsFile := filepath.Join(tempDir, "launch-options")
+	contents := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$DST_ARGUMENTS_FILE\"\n"
+	if err := os.WriteFile(executable, []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launchOptionsFile, []byte("skip_update_server_mods=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", "dst-runtime-wrapper.sh")
+	cmd.Dir = "."
+	cmd.Env = append(os.Environ(),
+		"DST_CLUSTER=test-cluster", "DST_SHARD=Master", "DST_CONF_DIR=DoNotStarveTogether",
+		"DST_STORAGE_ROOT="+tempDir, "DST_SERVER_ROOT="+tempDir, "DST_EXECUTABLE="+executable,
+		"DST_RUNTIME_STATE_DIR="+tempDir, "DST_ARGUMENTS_FILE="+argumentsFile,
+		"DST_LAUNCH_OPTIONS_FILE="+launchOptionsFile,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("wrapper failed: %v: %s", err, output)
+	}
+	data, err := os.ReadFile(argumentsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(strings.Fields(string(data)), "-skip_update_server_mods") {
+		t.Fatalf("arguments=%q", data)
+	}
+	if _, err := os.Stat(launchOptionsFile); !os.IsNotExist(err) {
+		t.Fatalf("one-shot launch option was not consumed: %v", err)
 	}
 }

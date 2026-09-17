@@ -5,21 +5,29 @@ repo=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 cd "$repo"
 
 if command -v go >/dev/null 2>&1; then
-  go test ./agent ./server ./routers ./internal/agents ./internal/runtimedriver ./internal/deploymentprofile -count=1
+  go test ./agent ./server ./routers ./internal/agents ./internal/shards ./internal/worldstate ./internal/runtimedriver ./internal/deploymentprofile ./internal/topology ./internal/roomprovision ./internal/distributedbackup ./internal/gameupdate -count=1
 else
   docker run --rm \
     --mount "type=bind,src=$repo,dst=/src,readonly" \
     --workdir /src \
     golang:1.25-bookworm \
-    go test ./agent ./server ./routers ./internal/agents ./internal/runtimedriver ./internal/deploymentprofile -count=1
+    go test ./agent ./server ./routers ./internal/agents ./internal/shards ./internal/worldstate ./internal/runtimedriver ./internal/deploymentprofile ./internal/topology ./internal/roomprovision ./internal/distributedbackup ./internal/gameupdate -count=1
 fi
 
 sh -n \
   deploy/docker/all-in-one-entrypoint.sh \
   deploy/docker/dst-runtime-supervisor.sh \
-  deploy/docker/dst-runtime-wrapper.sh
+  deploy/docker/dst-runtime-wrapper.sh \
+  deploy/scripts/install-native-agent.sh \
+  deploy/scripts/install-native-local.sh
 grep -F 'COPY --from=docker-cli /usr/local/bin/docker' deploy/docker/Dockerfile.all-in-one >/dev/null
 grep -F 'USER 10000:10000' deploy/docker/Dockerfile.dst-runtime >/dev/null
+grep -F 'install -o "$service_user" -g "$service_group" -m 0600 "$config" /var/lib/dst-admin-agent/agent.conf' deploy/scripts/install-native-agent.sh >/dev/null
+grep -F 'ExecStart=/var/lib/dst-admin-agent/bin/dst-admin-agent -config /var/lib/dst-admin-agent/agent.conf' deploy/systemd/dst-admin-agent.service >/dev/null
+grep -F 'KillMode=process' deploy/systemd/dst-admin-agent.service >/dev/null
+grep -F 'KillMode=process' deploy/systemd/dst-admin-local.service >/dev/null
+grep -F 'owner.lock' internal/shards/native_owner_lock_unix.go >/dev/null
+grep -F 'RUNTIME_OWNER_CONFLICT' internal/shards/native_owner_lock_unix.go >/dev/null
 
 default_services=$(docker compose -f deploy/docker/compose.yaml config --services)
 [ "$default_services" = "dst-admin" ] || {
@@ -69,13 +77,13 @@ if [ "${DST_ADMIN_SMOKE_BUILD:-0}" = "1" ]; then
     -e DST_CLUSTER=Smoke \
     -e DST_SHARD=Master \
     -e DST_CONF_DIR=. \
-    -e DST_UGC_DIRECTORY=/workshop \
+    -e DST_UGC_DIRECTORY=/opt/dst/workshop/steamapps/workshop \
     "$runtime_image" >/dev/null
   docker run --rm --platform linux/amd64 --entrypoint /bin/sh "$admin_image" -ec \
     'command -v docker >/dev/null && test -x /usr/games/steamcmd && command -v lua5.1 >/dev/null && command -v tmux >/dev/null'
   smoke_volume="dst-admin-smoke-data-$$"
   docker run --rm --platform linux/amd64 \
-    --mount "type=volume,src=$smoke_volume,dst=/data" \
+    --mount "type=volume,src=$smoke_volume,dst=/opt/dst" \
     --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
     -e DST_ADMIN_BOOTSTRAP_DST=false \
     "$admin_image" /bin/sh -ec \

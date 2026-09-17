@@ -9,6 +9,7 @@ Type=simple
 User=dst
 Group=dst
 WorkingDirectory=/var/lib/dst-admin
+Environment=HOME=/var/lib/dst-admin/home
 Environment=DST_ADMIN_CONFIG=/var/lib/dst-admin/app.conf
 Environment=DST_ADMIN_WEB_ROOT=/usr/share/dst-admin/web
 ExecStart=/usr/local/bin/dst-admin -addr 0.0.0.0:8000
@@ -19,9 +20,8 @@ KillMode=process
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
-ProtectSystem=strict
-ReadWritePaths=/var/lib/dst-admin /srv/dst
+ProtectHome=false
+ProtectSystem=full
 LockPersonality=true
 RestrictSUIDSGID=true
 

@@ -7,10 +7,15 @@ RUN test "$TARGETARCH" = amd64 \
     && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends ca-certificates libcurl3-gnutls procps tini tmux tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10000 dst && useradd --uid 10000 --gid 10000 --create-home --shell /bin/bash dst \
-    && install -d -o dst -g dst -m 0700 /run/dst-admin /run/dst-admin/tmux /data /opt/dst/server
+    && install -d -o dst -g dst -m 0700 \
+        /run/dst-admin \
+        /run/dst-admin/tmux \
+        /opt/dst/saves \
+        /opt/dst/server \
+        /opt/dst/workshop/steamapps/workshop
 COPY deploy/docker/dst-runtime-wrapper.sh /usr/local/bin/dst-runtime-wrapper
 COPY deploy/docker/dst-runtime-supervisor.sh /usr/local/bin/dst-runtime-supervisor
 USER 10000:10000
 WORKDIR /opt/dst/server/bin64
-VOLUME ["/data", "/opt/dst/server"]
+VOLUME ["/opt/dst/saves", "/opt/dst/server", "/opt/dst/workshop/steamapps/workshop"]
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/dst-runtime-supervisor"]

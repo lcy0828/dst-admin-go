@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$script_dir/native-common.sh"
+
 usage() {
   echo "usage: $0 --binary PATH --config PATH --web-root PATH [--renderer PATH] [--user dst]" >&2
   exit 64
@@ -26,16 +29,19 @@ done
 [ -f "$binary" ] && [ -x "$binary" ] || { echo "invalid DST Admin binary" >&2; exit 66; }
 [ -f "$config" ] || { echo "invalid local configuration" >&2; exit 66; }
 [ -f "$web_root/index.html" ] || { echo "web root does not contain index.html" >&2; exit 66; }
+ensure_configured_steamcmd "$config"
 case "$service_user" in ""|*[!A-Za-z0-9_-]*) echo "invalid service user" >&2; exit 64 ;; esac
 id "$service_user" >/dev/null 2>&1 || { echo "service user does not exist: $service_user" >&2; exit 67; }
 service_group=$(id -gn "$service_user")
+service_shell=$(getent passwd "$service_user" | awk -F: '{print $7}')
+case "$service_shell" in
+  ""|*/false|*/nologin) echo "service user must have an executable login shell for tmux: $service_user" >&2; exit 68 ;;
+esac
+[ -x "$service_shell" ] || { echo "service user shell is not executable: $service_shell" >&2; exit 68; }
 command -v tmux >/dev/null 2>&1 || { echo "tmux is required" >&2; exit 69; }
 
 install -d -o "$service_user" -g "$service_group" -m 0700 /var/lib/dst-admin
-for directory in saves server workshop backups maps
-do
-  install -d -o "$service_user" -g "$service_group" -m 0700 "/srv/dst/$directory"
-done
+install -d -o "$service_user" -g "$service_group" -m 0700 /var/lib/dst-admin/home
 install -d -o root -g root -m 0755 /usr/share/dst-admin/web
 cp -a "$web_root/." /usr/share/dst-admin/web/
 chown -R root:root /usr/share/dst-admin/web

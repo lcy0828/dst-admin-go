@@ -36,6 +36,17 @@ log_dir="$state_dir/logs"
 plist="$HOME/Library/LaunchAgents/$label.plist"
 domain="gui/$(id -u)"
 
+rotate_log() {
+  log_path=$1
+  [ -f "$log_path" ] || return 0
+  log_size=$(stat -f %z "$log_path")
+  [ "$log_size" -lt 20971520 ] || {
+    tail -c 20971520 "$log_path" >"$log_path.previous"
+    chmod 0600 "$log_path.previous"
+    : >"$log_path"
+  }
+}
+
 install -d -m 0700 "$state_dir" "$bin_dir" "$installed_web" "$log_dir"
 install -m 0755 "$binary" "$bin_dir/dst-admin"
 install -m 0600 "$config" "$state_dir/app.conf"
@@ -46,6 +57,8 @@ if [ -n "$renderer" ]; then
 fi
 install -d -m 0755 "$HOME/Library/LaunchAgents"
 launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
+rotate_log "$log_dir/stdout.log"
+rotate_log "$log_dir/stderr.log"
 rm -f "$plist"
 plutil -create xml1 "$plist"
 /usr/libexec/PlistBuddy -c "Add :Label string $label" "$plist"
@@ -56,6 +69,7 @@ plutil -create xml1 "$plist"
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables dict" "$plist"
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DST_ADMIN_CONFIG string $state_dir/app.conf" "$plist"
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:DST_ADMIN_WEB_ROOT string $installed_web" "$plist"
+/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:GIN_MODE string release" "$plist"
 /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:PATH string /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" "$plist"
 /usr/libexec/PlistBuddy -c "Add :WorkingDirectory string $state_dir" "$plist"
 /usr/libexec/PlistBuddy -c "Add :RunAtLoad bool true" "$plist"

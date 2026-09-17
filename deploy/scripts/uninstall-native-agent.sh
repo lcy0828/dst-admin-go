@@ -17,6 +17,8 @@ fi
 systemctl disable --now dst-admin-agent.service >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/dst-admin-agent.service
 systemctl daemon-reload
+# Remove both the current private binary and the pre-2.10 legacy location.
+rm -f /var/lib/dst-admin-agent/bin/dst-admin-agent /var/lib/dst-admin-agent/bin/dst-admin-agent.previous
 rm -f /usr/local/bin/dst-admin-agent
 if [ "$purge_state" = true ]; then
   rm -rf /var/lib/dst-admin-agent /etc/dst-admin/agent.conf /etc/dst-admin/agent.env

@@ -32,12 +32,25 @@ state_file="$state_dir/runtime-state.json"
 plist="$launch_agents/$label.plist"
 domain="gui/$(id -u)"
 
+rotate_log() {
+  log_path=$1
+  [ -f "$log_path" ] || return 0
+  log_size=$(stat -f %z "$log_path")
+  [ "$log_size" -lt 20971520 ] || {
+    tail -c 20971520 "$log_path" >"$log_path.previous"
+    chmod 0600 "$log_path.previous"
+    : >"$log_path"
+  }
+}
+
 mkdir -p "$state_dir/bin" "$log_dir" "$launch_agents"
 chmod 700 "$state_dir" "$state_dir/bin" "$log_dir"
 install -m 0755 "$binary" "$installed_binary"
 install -m 0600 "$config" "$installed_config"
 
 launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
+rotate_log "$log_dir/agent.log"
+rotate_log "$log_dir/agent-error.log"
 rm -f "$plist"
 plutil -create xml1 "$plist"
 /usr/libexec/PlistBuddy -c "Add :Label string $label" "$plist"

@@ -9,16 +9,17 @@ Type=simple
 User=dst
 Group=dst
 WorkingDirectory=/var/lib/dst-admin-agent
+Environment=HOME=/var/lib/dst-admin-agent/home
 EnvironmentFile=-/etc/dst-admin/agent.env
-ExecStart=/usr/local/bin/dst-admin-agent -config /etc/dst-admin/agent.conf -state /var/lib/dst-admin-agent/runtime-state.json
+ExecStart=/var/lib/dst-admin-agent/bin/dst-admin-agent -config /var/lib/dst-admin-agent/agent.conf -state /var/lib/dst-admin-agent/runtime-state.json
 Restart=on-failure
 RestartSec=5
+KillMode=process
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
-ProtectSystem=strict
-ReadWritePaths=/var/lib/dst-admin-agent /srv/dst
+ProtectHome=false
+ProtectSystem=full
 LockPersonality=true
 RestrictSUIDSGID=true
 

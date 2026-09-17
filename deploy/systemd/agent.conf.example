@@ -2,12 +2,18 @@
 SERVER_URL = wss://dst.example.com/agent
 SECURITY_KEY =
 
+; 可选：仅在节点间需要精确模组直传时同时启用。默认关闭。
+; 监听端口必须由防火墙限制为可信 Controller/Agent 网络。
+; MOD_PEER_LISTEN_ADDR = :18081
+; MOD_PEER_ADVERTISE_URL = http://192.168.2.23:18081
+
 [runtime.native]
 DRIVER = native
-SAVE_PATH = /srv/dst/.klei/DoNotStarveTogether
-SERVER_PATH = /srv/dst/server
-UGC_PATH = /srv/dst/workshop
-WORKSHOP_CONTENT_PATH = /srv/dst/workshop
+SAVE_PATH = /opt/dst/saves
+SERVER_PATH = /opt/dst/server
+STEAMCMD_PATH = /usr/games/steamcmd
+UGC_PATH = /opt/dst/workshop/steamapps/workshop
+WORKSHOP_CONTENT_PATH = /opt/dst/workshop/steamapps/workshop/content/322330
 MOD_CACHE_PATH = /var/lib/dst-admin-agent/mod-cache
 MOD_STATE_PATH = /var/lib/dst-admin-agent/mod-state
 SERVER_MODE = 64

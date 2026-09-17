@@ -34,7 +34,7 @@ shutdown_requested=0
 request_shutdown() {
   shutdown_requested=1
   if tmux -S "$socket" has-session -t "=$session" 2>/dev/null; then
-    tmux -S "$socket" send-keys -t "$pane" -l -- 'c_shutdown(true)' \; send-keys -t "$pane" Enter || true
+    tmux -S "$socket" send-keys -t "$pane" C-q C-u \; send-keys -t "$pane" -l -- 'c_shutdown(true)' \; send-keys -t "$pane" Enter || true
   fi
 }
 trap request_shutdown TERM INT

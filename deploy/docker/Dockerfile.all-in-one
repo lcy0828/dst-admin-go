@@ -17,7 +17,8 @@ ARG BUILD_TIME=unknown
 RUN CGO_ENABLED=1 go build -trimpath \
       -ldflags "-s -w -X dont/internal/buildinfo.Version=${VERSION} -X dont/internal/buildinfo.Commit=${COMMIT} -X dont/internal/buildinfo.BuildTime=${BUILD_TIME}" \
       -o /out/dst-admin ./cmd/admin-api \
-    && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/dst-map-renderer ./cmd/dst-map-renderer
+    && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/dst-map-renderer ./cmd/dst-map-renderer \
+    && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/mod-local-setup ./cmd/mod-local-setup
 
 FROM docker:27-cli AS docker-cli
 
@@ -48,19 +49,20 @@ RUN test "$(dpkg --print-architecture)" = "$TARGETARCH" \
     && test "$(dpkg --print-architecture)" = "$TARGETARCH" \
     && test -x /lib64/ld-linux-x86-64.so.2 \
     && groupadd --gid 10000 dstadmin \
-    && useradd --uid 10000 --gid 10000 --home-dir /data/control --shell /usr/sbin/nologin dstadmin \
-    && install -d -o dstadmin -g dstadmin -m 0700 /data /data/control
+    && useradd --uid 10000 --gid 10000 --home-dir /opt/dst/control --shell /usr/sbin/nologin dstadmin \
+    && install -d -o dstadmin -g dstadmin -m 0700 /opt/dst /opt/dst/control
 COPY --from=go-build /out/dst-admin /usr/local/bin/dst-admin
 COPY --from=go-build /out/dst-map-renderer /usr/local/bin/dst-map-renderer
+COPY --from=go-build /out/mod-local-setup /usr/local/bin/mod-local-setup
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=web-build /src/dist /usr/share/dst-admin/web
 COPY backend/deploy/docker/config/all-in-one.conf /usr/local/share/dst-admin/all-in-one.conf
 COPY backend/deploy/docker/all-in-one-entrypoint.sh /usr/local/bin/all-in-one-entrypoint
 RUN chmod 0755 /usr/local/bin/all-in-one-entrypoint /usr/local/bin/dst-admin /usr/local/bin/dst-map-renderer
-ENV DST_ADMIN_CONFIG=/data/control/app.conf \
+ENV DST_ADMIN_CONFIG=/opt/dst/control/app.conf \
     DST_ADMIN_WEB_ROOT=/usr/share/dst-admin/web \
-    HOME=/data/control
-VOLUME ["/data"]
+    HOME=/opt/dst/control
+VOLUME ["/opt/dst"]
 EXPOSE 8080/tcp 10999-11020/udp 8766-8790/udp 27016-27040/udp
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/all-in-one-entrypoint"]
 CMD ["/usr/local/bin/dst-admin", "-addr", "0.0.0.0:8080"]

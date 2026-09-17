@@ -31,11 +31,11 @@ PATH = /var/lib/dst-admin/go-dont.db
 TABLE_PREFIX = dont_
 
 [paths]
-DST_SAVE_PATH = /srv/dst/saves
-DST_BACKUP_PATH = /srv/dst/backups
-DST_SERVER_PATH = /srv/dst/server
-DST_UGC_PATH = /srv/dst/workshop/steamapps/workshop
-DST_MAP_PATH = /srv/dst/maps
+DST_SAVE_PATH = /opt/dst/saves
+DST_BACKUP_PATH = /opt/dst/backups
+DST_SERVER_PATH = /opt/dst/server
+DST_UGC_PATH = /opt/dst/workshop/steamapps/workshop
+DST_MAP_PATH = /opt/dst/maps
 DST_SERVER_MODE = 64
 
 [mod]
@@ -45,8 +45,8 @@ STEAM_WEB_API_KEY =
 LUA_BINARY = lua5.1
 PYTHON_BINARY = python3
 LUA_SH_PATH =
-WORKSHOP_MOD_PATH = /srv/dst/workshop
-WORKSHOP_CONTENT = /srv/dst/workshop/steamapps/workshop/content/322330
+WORKSHOP_MOD_PATH = /opt/dst/workshop
+WORKSHOP_CONTENT = /opt/dst/workshop/steamapps/workshop/content/322330
 
 [map]
 RENDERER_PATH = /usr/local/bin/dst-map-renderer

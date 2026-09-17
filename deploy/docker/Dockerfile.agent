@@ -5,7 +5,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/dst-admin-agent ./agent/cmd/agent \
-    && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/dst-map-renderer ./cmd/dst-map-renderer
+    && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/dst-map-renderer ./cmd/dst-map-renderer \
+    && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/mod-local-setup ./cmd/mod-local-setup
 
 FROM docker:27-cli AS docker_cli
 
@@ -22,6 +23,7 @@ RUN sed -i \
     && install -d -o dstagent -g dstagent -m 0700 /var/lib/dst-admin-agent
 COPY --from=build /out/dst-admin-agent /usr/local/bin/dst-admin-agent
 COPY --from=build /out/dst-map-renderer /usr/local/bin/dst-map-renderer
+COPY --from=build /out/mod-local-setup /usr/local/bin/mod-local-setup
 COPY --from=docker_cli /usr/local/bin/docker /usr/local/bin/docker
 COPY deploy/docker/config/agent.conf /usr/local/share/dst-admin/agent.conf
 COPY deploy/docker/agent-entrypoint.sh /usr/local/bin/agent-entrypoint

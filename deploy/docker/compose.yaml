@@ -28,7 +28,7 @@ services:
       DST_ADMIN_AGENT_SECURITY_KEY: ${DST_ADMIN_AGENT_SECURITY_KEY:-}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}:/data
+      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}:/opt/dst
       - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "${DST_ADMIN_HTTP_BIND:-0.0.0.0:8080}:8080/tcp"

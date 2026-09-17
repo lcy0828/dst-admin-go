@@ -5,11 +5,11 @@ umask 077
 if [ "$(id -u)" = "0" ]; then
   for directory in control saves server workshop workshop/steamapps/workshop backups maps
   do
-    install -d -o 10000 -g 10000 -m 0700 "/data/$directory"
+    install -d -o 10000 -g 10000 -m 0700 "/opt/dst/$directory"
   done
-  marker=/data/control/.all-in-one-layout-v1
+  marker=/opt/dst/control/.all-in-one-layout-v1
   if [ ! -e "$marker" ]; then
-    chown -R 10000:10000 /data
+    chown -R 10000:10000 /opt/dst
     install -o 10000 -g 10000 -m 0600 /dev/null "$marker"
   fi
   runtime_identity=dstadmin
@@ -25,20 +25,29 @@ if [ "$(id -u)" = "0" ]; then
   exec gosu "$runtime_identity" "$0" "$@"
 fi
 
-config=${DST_ADMIN_CONFIG:-/data/control/app.conf}
+config=${DST_ADMIN_CONFIG:-/opt/dst/control/app.conf}
 if [ ! -e "$config" ]; then
   cp /usr/local/share/dst-admin/all-in-one.conf "$config"
   chmod 0600 "$config"
 fi
 
-server_binary=/data/server/bin64/dontstarve_dedicated_server_nullrenderer_x64
+if grep -Eq '=[[:space:]]*/data(/|$)' "$config"; then
+  migrated_config=$config.opt-dst.$$
+  trap 'rm -f "$migrated_config"' EXIT HUP INT TERM
+  sed -E 's#(=[[:space:]]*)/data(/|$)#\1/opt/dst\2#' "$config" > "$migrated_config"
+  chmod 0600 "$migrated_config"
+  mv "$migrated_config" "$config"
+  trap - EXIT HUP INT TERM
+fi
+
+server_binary=/opt/dst/server/bin64/dontstarve_dedicated_server_nullrenderer_x64
 if [ "${DST_ADMIN_BOOTSTRAP_DST:-false}" = "true" ] && [ ! -x "$server_binary" ]; then
   if [ ! -x /usr/games/steamcmd ]; then
-    echo "SteamCMD is unavailable on this architecture; mount a prepared DST server at /data/server" >&2
+    echo "SteamCMD is unavailable on this architecture; mount a prepared DST server at /opt/dst/server" >&2
     exit 69
   fi
   /usr/games/steamcmd \
-    +force_install_dir /data/server \
+    +force_install_dir /opt/dst/server \
     +login anonymous \
     +app_update 343050 validate \
     +quit
@@ -59,6 +68,7 @@ shutdown_worlds() {
     case "$pane" in
       %*[!0-9]*|%) continue ;;
     esac
+    tmux send-keys -t "$pane" C-q C-u || true
     tmux send-keys -l -t "$pane" -- 'c_save(); c_shutdown(true)' || true
     tmux send-keys -t "$pane" Enter || true
   done
