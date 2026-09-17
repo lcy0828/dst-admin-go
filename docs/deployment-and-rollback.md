@@ -6,11 +6,11 @@
 
 ## 下载与版本
 
-- [Package 工作流](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) 构建 Linux amd64 和 macOS arm64 原生包，并推送 GHCR 镜像。
+- [Package 工作流](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) 构建 Linux amd64 和 macOS arm64 原生包，并将测试通过的镜像推送到 GHCR；配置 Docker Hub 凭据后同步发布到 `lcy0828/dst-admin-go`，不重复构建。
+- 正式部署使用 `ghcr.io/lcy0828/dst-admin-go/all-in-one:latest` 或 Docker Hub 的 `lcy0828/dst-admin-go:latest`，需要固定版本时将 `latest` 替换为 `vX.Y.Z`。Docker Hub 的控制端、Agent、Runtime 标签分别加 `controller-`、`agent-`、`runtime-` 前缀，例如 `agent-latest`、`agent-v1.0.0`。
 - 分支发布使用 `ghcr.io/lcy0828/dst-admin-go/all-in-one:preview`、`control-plane:preview`、`agent:preview` 和 `dst-runtime:preview`；同次构建另有 `sha-后端完整提交号` 标签。前端或手动重建仍可能改变同一后端提交的产物，精确复现请固定镜像 digest 与前端提交。
-- `v*` 标签触发版本镜像和本仓库 GitHub Release，附件包含 `.tar.gz` 与 SHA-256。正式发布前先完成目标环境验收。
+- `vX.Y.Z` 标签触发正式发布：生成版本镜像，所有原生包与镜像检查通过后更新四类镜像的 `latest` 标签，并创建包含 `.tar.gz` 与 SHA-256 的 GitHub Release。`vX.Y.Z-rc.N` 等候选版只发布对应版本和预发布 Release，不覆盖 `latest`。首次成功发布前，正式标签尚不可拉取。
 - `dst-admin -version` 输出后端版本、提交、前端提交和 `embeddedWebUI`；原生 `manifest.json` 另记录工具链、锁文件哈希。镜像可通过 `docker image inspect` 查看 `io.dst-admin.frontend.commit`。
-- 仓库和镜像是否公开取决于 GitHub 设置。私有包需认证，不把凭据写进配置示例或镜像层。
 
 ## 从一个仓库打包
 
@@ -57,7 +57,15 @@ node deploy/scripts/build-native-release.mjs --version preview-local \
 
 后端 CI 运行 Go 测试、race、vet、漏洞扫描及编译。Package 工作流在当前发布分支推送、`v*` 标签或手动运行时构建完整产物。它先解析前端提交，再让所有任务使用同一 SHA；原生包启动检查通过后上传附件，镜像启动检查通过后推送。
 
-前端私有仓库通过后端 Actions secret `FRONTEND_READ_KEY` 中的只读 deploy key 检出；公有仓库不需要该密钥。密钥只用于获取源码，不进入构建上下文。镜像推送使用当前仓库 `GITHUB_TOKEN` 的 `packages:write` 权限。更换前端仓库时同时调整工作流地址和授权。
+前端私有仓库通过后端 Actions secret `FRONTEND_READ_KEY` 中的只读 deploy key 检出；公有仓库不需要该密钥。密钥只用于获取源码，不进入构建上下文。GHCR 推送使用当前仓库 `GITHUB_TOKEN` 的 `packages:write` 权限。更换前端仓库时同时调整工作流地址和授权。
+
+启用 Docker Hub 同步：
+
+1. 在 Docker Hub 创建 `lcy0828/dst-admin-go` 仓库，并创建具有 Read & Write 权限的 Access Token。
+2. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加 `DOCKERHUB_TOKEN`。登录用户名默认 `lcy0828`；使用其他登录账号时添加 `DOCKERHUB_USERNAME` secret。目标命名空间由工作流中的 `DOCKERHUB_NAMESPACE` 指定。
+3. 推送正式版本标签，例如 `git tag v1.0.0 && git push origin v1.0.0`（`origin` 指向 GitHub 仓库）。
+
+未配置 Token 时仅发布 GHCR，并在 Actions 摘要中注明跳过 Docker Hub；凭据失效或推送失败会使任务失败。手动运行关闭 `publish_images` 时，两个仓库和 GitHub Release 均不发布。All-in-One、控制端和 Agent 的启动检查保持 180 秒，Runtime 检查启动包装器。
 
 前端提交不会直接修改已安装服务，也不会自动发布后端。需要新页面时运行主仓库 Package 工作流；也可用 `frontend_ref` 输入指定回滚版本。手动构建可选择是否发布镜像，默认发布；标签发布附件只有对应标签流水线成功后可下载。
 

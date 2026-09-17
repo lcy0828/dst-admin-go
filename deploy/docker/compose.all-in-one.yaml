@@ -8,7 +8,7 @@ x-default-logging: &default-logging
 
 services:
   dst-admin:
-    image: ${DST_ADMIN_IMAGE:-dst-admin/all-in-one:dev}
+    image: ${DST_ADMIN_IMAGE:-ghcr.io/lcy0828/dst-admin-go/all-in-one:latest}
     platform: linux/amd64
     restart: unless-stopped
     logging: *default-logging

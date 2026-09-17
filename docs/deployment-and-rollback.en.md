@@ -6,11 +6,11 @@ Start from the [main README](../README.en.md). Images and native packages embed 
 
 ## Downloads and versions
 
-- The [Package workflow](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) builds Linux amd64 and macOS arm64 native packages and pushes GHCR images.
+- The [Package workflow](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) builds Linux amd64 and macOS arm64 native packages and pushes tested images to GHCR. With Docker Hub credentials configured, it publishes the same images to `lcy0828/dst-admin-go` without rebuilding.
+- Stable deployments use `ghcr.io/lcy0828/dst-admin-go/all-in-one:latest` or Docker Hub's `lcy0828/dst-admin-go:latest`. Replace `latest` with `vX.Y.Z` to pin a release. Docker Hub prefixes Controller, Agent, and Runtime tags with `controller-`, `agent-`, and `runtime-`, for example `agent-latest` or `agent-v1.0.0`.
 - Branch images are `ghcr.io/lcy0828/dst-admin-go/all-in-one:preview`, `control-plane:preview`, `agent:preview`, and `dst-runtime:preview`. Builds also receive `sha-FULL_BACKEND_COMMIT` tags. Rebuilding the same backend with a different frontend can change these tags; pin the image digest and frontend SHA for exact provenance.
-- `v*` tags publish versioned images and a GitHub Release in this repository, with `.tar.gz` and SHA-256 files. Validate the target environment before a formal release.
+- `vX.Y.Z` tags publish stable versions: versioned images are pushed first, then all four `latest` aliases are updated after every native package and image check passes. A GitHub Release contains `.tar.gz` and SHA-256 files. Candidate tags such as `vX.Y.Z-rc.N` publish versioned images and a prerelease without updating `latest`. Stable tags cannot be pulled until the first successful release.
 - `dst-admin -version` reports backend version/commit, frontend commit, and `embeddedWebUI`. Native `manifest.json` also records tools and lockfile hashes. Images carry `io.dst-admin.frontend.commit`.
-- Private repositories and images require authentication. Credentials must not enter examples or image layers.
 
 ## Build from one repository
 
@@ -50,7 +50,15 @@ Native management uses CGO/SQLite: build on the target OS/architecture, or suppl
 
 Backend CI runs tests, race detection, vet, vulnerability scanning, and compilation. Package runs on release-branch pushes, `v*` tags, or manual dispatch. It resolves the frontend once and shares its SHA across jobs. Native packages are uploaded after startup smoke tests; images are pushed after startup checks.
 
-For private frontend source, store a read-only deploy key in backend secret `FRONTEND_READ_KEY`; public source needs no key. The key is used only for checkout and never enters build contexts. Images use this repository's `GITHUB_TOKEN` with `packages:write`. Update both repository settings and authorization when changing the frontend source.
+For private frontend source, store a read-only deploy key in backend secret `FRONTEND_READ_KEY`; public source needs no key. The key is used only for checkout and never enters build contexts. GHCR uses this repository's `GITHUB_TOKEN` with `packages:write`. Update both repository settings and authorization when changing the frontend source.
+
+To enable Docker Hub synchronization:
+
+1. Create the `lcy0828/dst-admin-go` repository on Docker Hub and an access token with Read & Write permissions.
+2. Add `DOCKERHUB_TOKEN` under the GitHub repository's **Settings → Secrets and variables → Actions**. The login username defaults to `lcy0828`; set the optional `DOCKERHUB_USERNAME` secret for a different login account. The workflow's `DOCKERHUB_NAMESPACE` sets the destination namespace.
+3. Push a stable version tag, for example `git tag v1.0.0 && git push origin v1.0.0`, where `origin` points to the GitHub repository.
+
+Without a token, only GHCR is published and the Actions summary notes that Docker Hub was skipped. Invalid credentials or failed pushes fail the job. Turning off `publish_images` on a manual run disables both registries and GitHub Release publication. All-in-One, Controller, and Agent startup checks still run for 180 seconds; Runtime validates its startup wrapper.
 
 Frontend commits do not update installed services or automatically publish the backend. Run Package to include new pages, or set the manual `frontend_ref` input to pin a revision. Manual runs may disable image publication; it is enabled by default. Tagged release assets exist only after the tag pipeline succeeds.
 
