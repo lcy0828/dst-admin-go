@@ -769,3 +769,20 @@ func TestCustomDefinitionRejectsUnknownPlaceholder(t *testing.T) {
 		t.Fatalf("create error = %v", err)
 	}
 }
+
+func TestScheduledAdminCommandsRetainAuditAndInteractiveConfirmation(t *testing.T) {
+	sender := &captureSender{}
+	service := newConsoleService(t, sender)
+	if _, err := service.Execute(context.Background(), "room", "world", ExecuteRequest{CommandID: "shutdown"}); !errors.Is(err, ErrConfirmationNeeded) {
+		t.Fatalf("interactive confirmation changed: %v", err)
+	}
+	for _, raw := range []string{"", "print('scheduled check')"} {
+		run, err := service.ExecuteScheduled(context.Background(), "room", "world", ExecuteRequest{CommandID: "shutdown"}, raw)
+		if err != nil || run.ID == "" || run.RoomID != "room" || run.WorldID != "world" {
+			t.Fatalf("run=%#v err=%v", run, err)
+		}
+		if raw != "" && (run.RawCommand != raw || !strings.Contains(sender.script, raw)) {
+			t.Fatalf("raw command not recorded/sent: %#v", run)
+		}
+	}
+}

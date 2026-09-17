@@ -40,7 +40,7 @@ type BackupExecutor interface {
 
 type CommandExecutor interface {
 	Definitions() []console.Definition
-	Execute(context.Context, string, string, console.ExecuteRequest) (console.Run, error)
+	ExecuteScheduled(context.Context, string, string, console.ExecuteRequest, string) (console.Run, error)
 }
 
 type PlayerRefresher interface {
@@ -136,18 +136,19 @@ func (e *DomainExecutor) Validate(task Task) error {
 		}
 	case ActionCommandExecute:
 		if len(task.WorldIDs) != 1 {
-			return &FieldError{Fields: map[string]string{"worldIds": "参数化命令必须且只能选择一个世界"}}
+			return &FieldError{Fields: map[string]string{"worldIds": "控制台命令必须且只能选择一个世界"}}
 		}
-		commandID, ok := task.Parameters["commandId"].(string)
-		if !ok || strings.TrimSpace(commandID) == "" {
-			return &FieldError{Fields: map[string]string{"parameters.commandId": "请选择内建命令"}}
-		}
-		definition, exists := e.commandDefinition(commandID)
-		if !exists {
-			return &FieldError{Fields: map[string]string{"parameters.commandId": "内建命令不存在"}}
-		}
-		if definition.Risk == console.RiskHigh || definition.Risk == console.RiskCritical {
-			return ErrUnsafeAction
+		commandID, _ := task.Parameters["commandId"].(string)
+		if raw, exists := task.Parameters["rawCommand"]; exists {
+			command, ok := raw.(string)
+			if !ok || strings.TrimSpace(command) == "" || len(command) > 4096 || !utf8.ValidString(command) || strings.ContainsRune(command, '\x00') {
+				return &FieldError{Fields: map[string]string{"parameters.rawCommand": "命令必须是 1-4096 字节的有效文本"}}
+			}
+			if strings.TrimSpace(commandID) != "" {
+				return &FieldError{Fields: map[string]string{"parameters.commandId": "自定义脚本不能同时指定命令模板"}}
+			}
+		} else if _, exists := e.commandDefinition(commandID); !exists {
+			return &FieldError{Fields: map[string]string{"parameters.commandId": "请选择已有命令或填写自定义 Lua 脚本"}}
 		}
 		if arguments, exists := task.Parameters["arguments"]; exists {
 			if _, ok := arguments.(map[string]interface{}); !ok {
@@ -245,12 +246,13 @@ func (e *DomainExecutor) execute(ctx context.Context, task Task, jobID string, s
 		}
 		return result, nil
 	case ActionCommandExecute:
-		commandID := strings.TrimSpace(task.Parameters["commandId"].(string))
+		commandID, _ := task.Parameters["commandId"].(string)
+		raw, _ := task.Parameters["rawCommand"].(string)
 		arguments, _ := task.Parameters["arguments"].(map[string]interface{})
 		if arguments == nil {
 			arguments = map[string]interface{}{}
 		}
-		run, err := e.commands.Execute(ctx, task.RoomID, task.WorldIDs[0], console.ExecuteRequest{CommandID: commandID, Arguments: arguments})
+		run, err := e.commands.ExecuteScheduled(ctx, task.RoomID, task.WorldIDs[0], console.ExecuteRequest{CommandID: strings.TrimSpace(commandID), Arguments: arguments}, raw)
 		if err != nil {
 			return ExecutionResult{}, err
 		}
@@ -446,7 +448,7 @@ func ActionDefinitions() []ActionDefinition {
 		{ID: ActionRoomRestart, Name: "重启分片", Description: "重启选中的分片；未选择时重启全部分片", Parameters: []string{}},
 		{ID: ActionBackupCreate, Name: "创建快照", Description: "创建一致性房间快照", Parameters: []string{"name"}},
 		{ID: ActionBackupPrune, Name: "清理快照", Description: "按保留数量清理旧快照", Parameters: []string{"keep"}},
-		{ID: ActionCommandExecute, Name: "执行内建命令", Description: "执行低或中风险参数化命令", NeedsWorld: true, Parameters: []string{"commandId", "arguments"}},
+		{ID: ActionCommandExecute, Name: "执行游戏命令", Description: "执行管理员选择的命令模板或自定义 Lua 脚本", NeedsWorld: true, Parameters: []string{"commandId", "arguments", "rawCommand"}},
 		{ID: ActionNotificationSend, Name: "发送游戏通知", Description: "向房间内当前运行中的所有分片发送游戏内消息", Parameters: []string{"message"}},
 		{ID: ActionPlayerRefresh, Name: "刷新玩家", Description: "采样分片玩家状态", Parameters: []string{}},
 		{ID: ActionStructuredLogRefresh, Name: "刷新结构化日志", Description: "刷新分片结构化日志快照", Parameters: []string{}},
