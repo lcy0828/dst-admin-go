@@ -43,20 +43,24 @@ type Operation struct {
 }
 
 type Step struct {
-	ID             string    `json:"id"`
-	OperationID    string    `json:"operationId"`
-	WorldID        string    `json:"worldId"`
-	WorldName      string    `json:"worldName"`
-	TargetID       string    `json:"targetId"`
-	InstallationID string    `json:"installationId"`
-	Cluster        string    `json:"cluster"`
-	Shard          string    `json:"shard"`
-	MigrationID    string    `json:"migrationId,omitempty"`
-	Phase          string    `json:"phase"`
-	Size           int64     `json:"size"`
-	SHA256         string    `json:"sha256,omitempty"`
-	Failure        string    `json:"failure,omitempty"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ID                   string    `json:"id"`
+	OperationID          string    `json:"operationId"`
+	WorldID              string    `json:"worldId"`
+	WorldName            string    `json:"worldName"`
+	SourceTargetID       string    `json:"sourceTargetId"`
+	SourceInstallationID string    `json:"sourceInstallationId"`
+	TargetID             string    `json:"targetId"`
+	InstallationID       string    `json:"installationId"`
+	Cluster              string    `json:"cluster"`
+	Shard                string    `json:"shard"`
+	MigrationID          string    `json:"migrationId,omitempty"`
+	Phase                string    `json:"phase"`
+	Size                 int64     `json:"size"`
+	SHA256               string    `json:"sha256,omitempty"`
+	WasRunning           bool      `json:"wasRunning"`
+	RuntimeRestored      bool      `json:"runtimeRestored"`
+	Failure              string    `json:"failure,omitempty"`
+	UpdatedAt            time.Time `json:"updatedAt"`
 }
 
 type Request struct {

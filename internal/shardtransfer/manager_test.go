@@ -2,12 +2,53 @@ package shardtransfer
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestPeerImportResumesAndVerifiesImmutableExport(t *testing.T) {
+	_, _, source, target := prepareTransferRoots(t)
+	id := "migration-peer-resume-0001"
+	descriptor, err := source.PrepareExport(context.Background(), id, "Cluster_1", "Master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, file, err := source.OpenExport(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(file)
+	_ = file.Close()
+	if err != nil || opened != descriptor || int64(len(data)) != descriptor.Size {
+		t.Fatalf("opened=%#v descriptor=%#v bytes=%d err=%v", opened, descriptor, len(data), err)
+	}
+	if _, err := target.BeginImport(id, descriptor.Size, descriptor.SHA256); err != nil {
+		t.Fatal(err)
+	}
+	half := len(data) / 2
+	next, err := target.ReceiveImport(context.Background(), id, 0, bytes.NewReader(data[:half]))
+	if !errors.Is(err, io.ErrUnexpectedEOF) || next != int64(half) {
+		t.Fatalf("partial next=%d err=%v", next, err)
+	}
+	progress, offset, err := target.ImportProgress(id)
+	if err != nil || progress != descriptor || offset != int64(half) {
+		t.Fatalf("progress=%#v offset=%d err=%v", progress, offset, err)
+	}
+	next, err = target.ReceiveImport(context.Background(), id, offset, bytes.NewReader(data[half:]))
+	if err != nil || next != descriptor.Size {
+		t.Fatalf("resume next=%d err=%v", next, err)
+	}
+	verified, err := target.VerifyImport(context.Background(), id)
+	if err != nil || verified != descriptor {
+		t.Fatalf("verified=%#v err=%v", verified, err)
+	}
+}
 
 func prepareTransferRoots(t *testing.T) (string, string, *Manager, *Manager) {
 	t.Helper()
@@ -95,6 +136,42 @@ func TestTransferPublishesTargetAndKeepsSourceRecovery(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(sourceRoot, filepath.FromSlash(recovery), "server.ini")); err != nil {
 		t.Fatalf("source recovery missing: %v", err)
+	}
+}
+
+func TestTransferAppliesTargetShardEndpointBeforePublish(t *testing.T) {
+	_, targetRoot, source, target := prepareTransferRoots(t)
+	id := "migration-endpoint-0001"
+	descriptor, err := source.PrepareExport(context.Background(), id, "Cluster_1", "Master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.BeginImportWithShardEndpoint(id, descriptor.Size, descriptor.SHA256, true, "100.64.0.10", 11889); err != nil {
+		t.Fatal(err)
+	}
+	for offset := int64(0); offset < descriptor.Size; {
+		chunk, err := source.ReadExport(context.Background(), id, offset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, err := target.WriteImport(id, offset, chunk.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		offset = next
+	}
+	if _, err := target.CommitImport(context.Background(), id, "Cluster_1", "Master"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(targetRoot, "Cluster_1", "cluster.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, expected := range []string{"bind_ip", "0.0.0.0", "master_ip", "100.64.0.10", "master_port", "11889"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("cluster.ini missing %q:\n%s", expected, text)
+		}
 	}
 }
 

@@ -33,7 +33,7 @@ func (c *Coordinator) createHotWithPlan(ctx context.Context, set Set, operation 
 		return c.failCreate(result, operation, ErrHotUnavailable)
 	}
 	for _, current := range runtimeParts {
-		if current.state != string(shards.RuntimeRunning) || !runtimedriver.HasCapability(current.driver, runtimedriver.CapabilitySnapshotBarrier) {
+		if current.state != string(shards.RuntimeRunning) || !runtimedriver.HasTargetCapability(current.driver, current.target, runtimedriver.CapabilitySnapshotBarrier) {
 			return c.failCreate(result, operation, ErrHotUnavailable)
 		}
 		if _, ok := current.driver.(runtimedriver.SnapshotBarrierDriver); !ok {
@@ -150,9 +150,13 @@ func (c *Coordinator) createHotWithPlan(ctx context.Context, set Set, operation 
 		if collectErr != nil {
 			return c.failCreate(result, operation, collectErr)
 		}
+		compatibleSHA, compatibilityErr := c.partSharedCompatibilitySHA(current)
+		if compatibilityErr != nil {
+			return c.failCreate(result, operation, compatibilityErr)
+		}
 		if sharedSHA == "" {
-			sharedSHA = current.SharedSHA256
-		} else if sharedSHA != current.SharedSHA256 {
+			sharedSHA = compatibleSHA
+		} else if sharedSHA != compatibleSHA {
 			return c.failCreate(result, operation, ErrSharedFilesDiffer)
 		}
 		verified++
@@ -227,7 +231,13 @@ func (c *Coordinator) revalidateHotPlan(ctx context.Context, revision string, pa
 	}
 	for _, execution := range executions {
 		planned, exists := byWorld[execution.World.ID]
-		if !exists || execution.Revision != revision || execution.AppliedTargetID != planned.target.TargetID {
+		appliedInstallationID := execution.AppliedInstallationID
+		if appliedInstallationID == "" && execution.AppliedTargetID == planned.target.TargetID {
+			appliedInstallationID = planned.target.InstallationID
+		}
+		if !exists || execution.Revision != revision ||
+			execution.AppliedTargetID != planned.target.TargetID ||
+			appliedInstallationID != planned.target.InstallationID {
 			return ErrTopologyChanged
 		}
 	}

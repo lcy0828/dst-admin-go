@@ -2,6 +2,7 @@ package shardtransfer
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/go-ini/ini"
 )
 
 type BackupDescriptor struct {
@@ -34,15 +37,16 @@ const (
 // BackupInspection describes whether an otherwise valid backup archive also
 // contains the minimum DST save evidence required for a world restore.
 type BackupInspection struct {
-	ContentSize     int64
-	FileCount       int
-	SharedSHA256    string
-	ContentKind     string
-	Restorable      bool
-	SessionID       string
-	LatestSnapshot  string
-	HasShardIndex   bool
-	ValidationError string
+	ContentSize               int64
+	FileCount                 int
+	SharedSHA256              string
+	SharedCompatibilitySHA256 string
+	ContentKind               string
+	Restorable                bool
+	SessionID                 string
+	LatestSnapshot            string
+	HasShardIndex             bool
+	ValidationError           string
 }
 
 type RestoreReceipt struct {
@@ -612,7 +616,41 @@ func InspectBackupArchive(path string) (BackupInspection, error) {
 		}
 		shared[base] = data
 	}
-	return evidence.inspection(contentSize, len(archive.File), hashNamedData(shared)), nil
+	compatibilitySHA, err := hashCompatibleSharedData(shared)
+	if err != nil {
+		return BackupInspection{}, errors.Join(ErrIntegrity, err)
+	}
+	inspection := evidence.inspection(contentSize, len(archive.File), hashNamedData(shared))
+	inspection.SharedCompatibilitySHA256 = compatibilitySHA
+	return inspection, nil
+}
+
+// hashCompatibleSharedData preserves exact per-part hashes for restore while
+// allowing the three cluster.ini fields that are intentionally rendered per
+// Runtime target in a split-room topology.
+func hashCompatibleSharedData(values map[string][]byte) (string, error) {
+	canonical := make(map[string][]byte, len(values))
+	for name, data := range values {
+		canonical[name] = append([]byte(nil), data...)
+	}
+	cluster, exists := canonical["cluster.ini"]
+	if !exists {
+		return "", ErrIntegrity
+	}
+	configuration, err := ini.Load(cluster)
+	if err != nil {
+		return "", err
+	}
+	shard := configuration.Section("SHARD")
+	for _, key := range []string{"bind_ip", "master_ip", "master_port"} {
+		shard.DeleteKey(key)
+	}
+	var rendered bytes.Buffer
+	if _, err := configuration.WriteTo(&rendered); err != nil {
+		return "", err
+	}
+	canonical["cluster.ini"] = rendered.Bytes()
+	return hashNamedData(canonical), nil
 }
 
 type saveEvidence struct {

@@ -188,7 +188,7 @@ func (s *Service) Apply(ctx context.Context, id, jobID string, request ApplyRequ
 	if request.Mode != ApplyModeReplace {
 		room, err = s.rooms.Adopt(roomID)
 		if err != nil {
-			return ApplyResult{}, fmt.Errorf("adopt imported room: %w", err)
+			return ApplyResult{}, fmt.Errorf("register imported room: %w", err)
 		}
 	}
 	if portLeaseID != "" && s.ports != nil {
@@ -262,7 +262,7 @@ func (s *Service) rollbackApply(record importRecord) error {
 	if mode != ApplyModeReplace {
 		if strings.TrimSpace(record.ApplyRoomID) != "" && s.rooms != nil {
 			if err := s.rooms.Unadopt(record.ApplyRoomID); err != nil {
-				return fmt.Errorf("remove interrupted room adoption: %w", err)
+				return fmt.Errorf("remove interrupted room registration: %w", err)
 			}
 		}
 		if regularDirectory(staging) {

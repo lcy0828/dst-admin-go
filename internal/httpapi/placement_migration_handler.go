@@ -73,7 +73,11 @@ func (h *PlacementMigrationHandler) apply(c *gin.Context) {
 			report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: placementMigrationErrorCode(migrationErr), Message: migrationErr.Error()}})
 			return migrationErr
 		}
-		message := fmt.Sprintf("分片已迁移至 %s，已传输 %d 字节；源恢复位置：%s", result.TargetTargetID, result.BytesTransferred, result.RecoveryRef)
+		transferLabel := "Controller 兼容中转"
+		if result.TransferSource == placementmigration.TransferSourcePeer {
+			transferLabel = "运行节点直传"
+		}
+		message := fmt.Sprintf("分片已迁移至 %s，通过%s传输 %d 字节；源恢复位置：%s", result.TargetTargetID, transferLabel, result.BytesTransferred, result.RecoveryRef)
 		if len(result.CleanupWarnings) > 0 {
 			message += "；" + strings.Join(result.CleanupWarnings, "；")
 		}
@@ -95,6 +99,8 @@ func placementMigrationErrorCode(err error) string {
 		return "TOPOLOGY_REVISION_CONFLICT"
 	case errors.Is(err, placementmigration.ErrShardRunning):
 		return "MIGRATION_SHARD_RUNNING"
+	case errors.Is(err, placementmigration.ErrRuntimeRestore):
+		return "MIGRATION_RUNTIME_RESTORE_FAILED"
 	case errors.As(err, &execution) && execution.Code != "":
 		return execution.Code
 	default:

@@ -215,6 +215,17 @@ type distributedBackupFixture struct {
 	caves       *backupTestControl
 }
 
+type backupMutationObserver struct {
+	mu      sync.Mutex
+	targets []string
+}
+
+func (o *backupMutationObserver) RuntimeTargetChanged(targetID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.targets = append(o.targets, targetID)
+}
+
 type backupTestLeases struct {
 	service  *operationlease.Service
 	mu       sync.Mutex
@@ -328,6 +339,10 @@ func writeShardFixture(t *testing.T, root, shard, worldData string) {
 
 func TestColdConsistentBackupAndCoordinatedRestoreAcrossTargets(t *testing.T) {
 	fixture := newDistributedBackupFixture(t)
+	mutations := &backupMutationObserver{}
+	if err := fixture.coordinator.ConfigureMutationObserver(mutations); err != nil {
+		t.Fatal(err)
+	}
 	created, err := fixture.coordinator.Create(context.Background(), "room", "跨节点备份", "manual", "job-create")
 	if err != nil {
 		t.Fatal(err)
@@ -368,6 +383,40 @@ func TestColdConsistentBackupAndCoordinatedRestoreAcrossTargets(t *testing.T) {
 	protection, err := fixture.store.GetSet(result.ProtectionSetID)
 	if err != nil || protection.Status != StatusVerified || protection.Kind != "protection" {
 		t.Fatalf("protection=%#v err=%v", protection, err)
+	}
+	mutations.mu.Lock()
+	defer mutations.mu.Unlock()
+	if len(mutations.targets) != 2 || mutations.targets[0] != "agent:master-node" || mutations.targets[1] != "agent:caves-node" {
+		t.Fatalf("mutation targets=%v", mutations.targets)
+	}
+}
+
+func TestSplitRoomBackupAllowsOnlyTopologySpecificClusterFields(t *testing.T) {
+	fixture := newDistributedBackupFixture(t)
+	masterConfig := "[NETWORK]\ncluster_name = Test\n[SHARD]\nshard_enabled = true\nbind_ip = 0.0.0.0\nmaster_port = 10888\ncluster_key = shared-key\n"
+	cavesConfig := "[NETWORK]\ncluster_name = Test\n[SHARD]\nshard_enabled = true\nbind_ip = 0.0.0.0\nmaster_ip = 192.168.2.24\nmaster_port = 10888\ncluster_key = shared-key\n"
+	if err := os.WriteFile(filepath.Join(fixture.masterRoot, "Cluster_1", "cluster.ini"), []byte(masterConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.cavesRoot, "Cluster_1", "cluster.ini"), []byte(cavesConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	created, err := fixture.coordinator.Create(context.Background(), "room", "跨机路由备份", "manual", "job-route-fields")
+	if err != nil || created.Status != StatusVerified || created.ManifestVersion != manifestVersion {
+		t.Fatalf("created=%#v error=%v", created, err)
+	}
+	if len(created.Parts) != 2 || created.Parts[0].SharedSHA256 == created.Parts[1].SharedSHA256 {
+		t.Fatalf("per-target exact shared hashes were not preserved: %#v", created.Parts)
+	}
+}
+
+func TestSplitRoomBackupStillRejectsNonTopologySharedDrift(t *testing.T) {
+	fixture := newDistributedBackupFixture(t)
+	if err := os.WriteFile(filepath.Join(fixture.cavesRoot, "Cluster_1", "cluster_token.txt"), []byte("different-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.coordinator.Create(context.Background(), "room", "非法配置漂移", "manual", "job-shared-drift"); !errors.Is(err, ErrSharedFilesDiffer) {
+		t.Fatalf("shared drift error=%v", err)
 	}
 }
 

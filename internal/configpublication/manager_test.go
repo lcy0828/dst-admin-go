@@ -92,6 +92,40 @@ func TestManagerCompletesWorldConfigurationPublication(t *testing.T) {
 	}
 }
 
+func TestManagerPublishesModOverrides(t *testing.T) {
+	saveRoot := t.TempDir()
+	worldRoot := filepath.Join(saveRoot, "Cluster_1", "Master")
+	if err := os.MkdirAll(worldRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(worldRoot, "modoverrides.lua")
+	if err := os.WriteFile(path, []byte("return {}\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := New(saveRoot, filepath.Join(t.TempDir(), "operations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := publicationArchive(t, map[string][]byte{"modoverrides.lua": []byte("return { changed = true }\n")})
+	descriptor := testDescriptor("publication-mod-0001", "Cluster_1", "Master", ScopeMod, payload)
+	if _, err := manager.Begin(descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Write(descriptor.PublicationID, 0, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Prepare(context.Background(), descriptor.PublicationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Publish(descriptor.PublicationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Complete(descriptor.PublicationID); err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, path, "return { changed = true }\n")
+}
+
 func TestManagerRejectsUnsafeOrOutOfScopeArchiveEntries(t *testing.T) {
 	saveRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(saveRoot, "Cluster_1", "Master"), 0o750); err != nil {

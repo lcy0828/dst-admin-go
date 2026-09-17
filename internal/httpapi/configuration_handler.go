@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net/http"
 
+	"dont/internal/agents"
 	"dont/internal/configuration"
 	"dont/internal/jobs"
 	"dont/internal/rooms"
+	"dont/internal/runtimedriver"
 
 	"github.com/gin-gonic/gin"
 )
@@ -40,7 +42,7 @@ func (h *ConfigurationHandler) Register(v2 *gin.RouterGroup) {
 }
 
 func (h *ConfigurationHandler) roomConfiguration(c *gin.Context) {
-	value, err := h.configuration.RoomConfig(c.Param("roomId"))
+	value, err := h.configuration.RoomConfigContext(c.Request.Context(), c.Param("roomId"))
 	if err != nil {
 		configurationFailure(c, err)
 		return
@@ -53,7 +55,7 @@ func (h *ConfigurationHandler) previewRoomConfiguration(c *gin.Context) {
 	if !bindConfigurationJSON(c, &request) {
 		return
 	}
-	value, err := h.configuration.PreviewRoom(c.Param("roomId"), request)
+	value, err := h.configuration.PreviewRoomContext(c.Request.Context(), c.Param("roomId"), request)
 	if err != nil {
 		configurationFailure(c, err)
 		return
@@ -67,7 +69,7 @@ func (h *ConfigurationHandler) applyRoomConfiguration(c *gin.Context) {
 		return
 	}
 	roomID := c.Param("roomId")
-	if _, err := h.configuration.PreviewRoom(roomID, request); err != nil {
+	if _, err := h.configuration.PreviewRoomContext(c.Request.Context(), roomID, request); err != nil {
 		configurationFailure(c, err)
 		return
 	}
@@ -77,7 +79,7 @@ func (h *ConfigurationHandler) applyRoomConfiguration(c *gin.Context) {
 }
 
 func (h *ConfigurationHandler) worldConfiguration(c *gin.Context) {
-	value, err := h.configuration.WorldConfig(c.Param("roomId"), c.Param("worldId"))
+	value, err := h.configuration.WorldConfigContext(c.Request.Context(), c.Param("roomId"), c.Param("worldId"))
 	if err != nil {
 		configurationFailure(c, err)
 		return
@@ -90,7 +92,7 @@ func (h *ConfigurationHandler) previewWorldConfiguration(c *gin.Context) {
 	if !bindConfigurationJSON(c, &request) {
 		return
 	}
-	value, err := h.configuration.PreviewWorld(c.Param("roomId"), c.Param("worldId"), request)
+	value, err := h.configuration.PreviewWorldContext(c.Request.Context(), c.Param("roomId"), c.Param("worldId"), request)
 	if err != nil {
 		configurationFailure(c, err)
 		return
@@ -104,7 +106,7 @@ func (h *ConfigurationHandler) applyWorldConfiguration(c *gin.Context) {
 		return
 	}
 	roomID, worldID := c.Param("roomId"), c.Param("worldId")
-	if _, err := h.configuration.PreviewWorld(roomID, worldID, request); err != nil {
+	if _, err := h.configuration.PreviewWorldContext(c.Request.Context(), roomID, worldID, request); err != nil {
 		configurationFailure(c, err)
 		return
 	}
@@ -151,7 +153,7 @@ func (h *ConfigurationHandler) applyAccess(c *gin.Context) {
 }
 
 func (h *ConfigurationHandler) tokenStatus(c *gin.Context) {
-	value, err := h.configuration.TokenStatus(c.Param("roomId"))
+	value, err := h.configuration.TokenStatusContext(c.Request.Context(), c.Param("roomId"))
 	if err != nil {
 		configurationFailure(c, err)
 		return
@@ -164,7 +166,7 @@ func (h *ConfigurationHandler) revealToken(c *gin.Context) {
 	if !bindConfigurationJSON(c, &request) {
 		return
 	}
-	value, err := h.configuration.RevealToken(c.Param("roomId"), request.Confirmation)
+	value, err := h.configuration.RevealTokenContext(c.Request.Context(), c.Param("roomId"), request.Confirmation)
 	if err != nil {
 		configurationFailure(c, err)
 		return
@@ -178,7 +180,7 @@ func (h *ConfigurationHandler) previewToken(c *gin.Context) {
 	if !bindConfigurationJSON(c, &request) {
 		return
 	}
-	value, err := h.configuration.PreviewToken(c.Param("roomId"), request)
+	value, err := h.configuration.PreviewTokenContext(c.Request.Context(), c.Param("roomId"), request)
 	if err != nil {
 		configurationFailure(c, err)
 		return
@@ -193,7 +195,7 @@ func (h *ConfigurationHandler) applyToken(c *gin.Context) {
 		return
 	}
 	roomID := c.Param("roomId")
-	if _, err := h.configuration.PreviewToken(roomID, request); err != nil {
+	if _, err := h.configuration.PreviewTokenContext(c.Request.Context(), roomID, request); err != nil {
 		configurationFailure(c, err)
 		return
 	}
@@ -217,9 +219,12 @@ func (h *ConfigurationHandler) submitConfiguration(c *gin.Context, kind, roomID,
 				report(jobs.TargetResult{TargetID: targetID, Status: jobs.StatusFailed, Error: configurationJobError(applyErr)})
 				return nil
 			}
-			message := "配置已应用；保护备份 ID：" + result.ProtectionBackupID
+			message := "配置已写入运行节点并完成磁盘回读校验"
+			if result.ProtectionBackupID != "" {
+				message += "；配置恢复点：" + result.ProtectionBackupID
+			}
 			if result.PublishedTargets > 0 {
-				message += fmt.Sprintf("；已同步到 %d 个远程运行目标", result.PublishedTargets)
+				message += fmt.Sprintf("；已应用到 %d 个 Runtime 目标", result.PublishedTargets)
 			}
 			report(jobs.TargetResult{TargetID: targetID, Status: jobs.StatusSucceeded, Message: message})
 			return nil
@@ -234,10 +239,11 @@ func (h *ConfigurationHandler) submitConfiguration(c *gin.Context, kind, roomID,
 
 func configurationJobError(err error) *jobs.Error {
 	code := "CONFIGURATION_APPLY_FAILED"
-	if errors.Is(err, configuration.ErrRevisionConflict) {
+	if agentUpgradeRequired(err) {
+		code = "AGENT_UPGRADE_REQUIRED"
+	} else if errors.Is(err, configuration.ErrRevisionConflict) {
 		code = "CONFIG_REVISION_CONFLICT"
-	}
-	if errors.Is(err, context.Canceled) {
+	} else if errors.Is(err, context.Canceled) {
 		code = "JOB_CANCELED"
 	}
 	return &jobs.Error{Code: code, Message: err.Error()}
@@ -262,9 +268,13 @@ func configurationFailure(c *gin.Context, err error) {
 	case errors.Is(err, configuration.ErrNoChanges):
 		Failure(c, http.StatusConflict, "NO_CONFIGURATION_CHANGES", "配置没有变化", nil)
 	case errors.Is(err, configuration.ErrConfirmationNeeded):
-		Failure(c, http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", "请输入完整房间名称确认此操作", nil)
+		Failure(c, http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", "请确认后继续此操作", nil)
+	case errors.Is(err, configuration.ErrTokenRevealUnavailable):
+		Failure(c, http.StatusConflict, "TOKEN_REVEAL_UNAVAILABLE", "目标 Agent 版本不支持安全读取 Cluster Token，请升级 Agent 后重试", nil)
+	case agentUpgradeRequired(err):
+		Failure(c, http.StatusConflict, "AGENT_UPGRADE_REQUIRED", "目标 Agent 版本过旧，缺少配置管理所需能力，请升级 Agent 后重试", nil)
 	case errors.Is(err, configuration.ErrRoomNotManaged):
-		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "接管房间后才能修改配置", nil)
+		Failure(c, http.StatusConflict, "ROOM_UNAVAILABLE", "房间当前不可用，请检查运行节点与拓扑状态", nil)
 	case errors.Is(err, configuration.ErrUnsafePath), errors.Is(err, rooms.ErrInvalidID), errors.Is(err, rooms.ErrUnsafePath):
 		Failure(c, http.StatusBadRequest, "INVALID_CONFIGURATION_PATH", "配置路径无效", nil)
 	case errors.Is(err, rooms.ErrRoomNotFound), errors.Is(err, rooms.ErrWorldNotFound):
@@ -272,4 +282,8 @@ func configurationFailure(c *gin.Context, err error) {
 	default:
 		Failure(c, http.StatusInternalServerError, "CONFIGURATION_OPERATION_FAILED", "配置操作失败", nil)
 	}
+}
+
+func agentUpgradeRequired(err error) bool {
+	return errors.Is(err, agents.ErrUnsupportedAction) || errors.Is(err, runtimedriver.ErrCapabilityMissing)
 }

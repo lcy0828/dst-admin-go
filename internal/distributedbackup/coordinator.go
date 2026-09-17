@@ -27,11 +27,12 @@ import (
 )
 
 const (
-	manifestVersion = 1
-	leaseTTL        = 5 * time.Minute
-	stopTimeout     = 2 * time.Minute
-	ModeCold        = "cold-consistent"
-	ModeHot         = "hot-consistent"
+	legacyManifestVersion = 1
+	manifestVersion       = 2
+	leaseTTL              = 5 * time.Minute
+	stopTimeout           = 2 * time.Minute
+	ModeCold              = "cold-consistent"
+	ModeHot               = "hot-consistent"
 )
 
 type RoomCatalog interface {
@@ -60,6 +61,7 @@ type Coordinator struct {
 	leases     LeaseService
 	store      *Store
 	now        func() time.Time
+	mutations  runtimedriver.RuntimeMutationObserver
 }
 
 type runtimePart struct {
@@ -82,6 +84,14 @@ func NewCoordinator(root string, rooms RoomCatalog, placements PlacementResolver
 		return nil, err
 	}
 	return &Coordinator{root: filepath.Clean(absolute), rooms: rooms, placements: placements, runtimes: runtimes, leases: leases, store: store, now: time.Now}, nil
+}
+
+func (c *Coordinator) ConfigureMutationObserver(observer runtimedriver.RuntimeMutationObserver) error {
+	if observer == nil {
+		return errors.New("distributed backup mutation observer is required")
+	}
+	c.mutations = observer
+	return nil
 }
 
 func (c *Coordinator) List(roomID string) ([]Set, error) {
@@ -199,9 +209,13 @@ func (c *Coordinator) createWithPlan(ctx context.Context, set Set, operation Ope
 		if err != nil {
 			return c.failCreate(result, operation, err)
 		}
+		compatibleSHA, compatibilityErr := c.partSharedCompatibilitySHA(current)
+		if compatibilityErr != nil {
+			return c.failCreate(result, operation, compatibilityErr)
+		}
 		if sharedSHA == "" {
-			sharedSHA = current.SharedSHA256
-		} else if !strings.EqualFold(sharedSHA, current.SharedSHA256) {
+			sharedSHA = compatibleSHA
+		} else if !strings.EqualFold(sharedSHA, compatibleSHA) {
 			return c.failCreate(result, operation, ErrSharedFilesDiffer)
 		}
 		verified++
@@ -243,7 +257,7 @@ func (c *Coordinator) plan(ctx context.Context, roomID string) (rooms.Room, []ru
 		if resolveErr != nil {
 			return rooms.Room{}, nil, "", nil, resolveErr
 		}
-		if !runtimedriver.HasCapability(driver, runtimedriver.CapabilityBackupStage) || !runtimedriver.HasCapability(driver, runtimedriver.CapabilityBackupRestore) {
+		if !runtimedriver.HasTargetCapability(driver, target, runtimedriver.CapabilityBackupStage) || !runtimedriver.HasTargetCapability(driver, target, runtimedriver.CapabilityBackupRestore) {
 			return rooms.Room{}, nil, "", nil, ErrTargetUnavailable
 		}
 		if target.TopologyRevision != execution.Revision {
@@ -416,8 +430,12 @@ func (c *Coordinator) finalizeSet(setID, sharedSHA string) (Set, error) {
 		return Set{}, err
 	}
 	for _, part := range value.Parts {
-		if part.Status != PartVerified || !strings.EqualFold(part.SharedSHA256, sharedSHA) {
+		if part.Status != PartVerified {
 			return Set{}, ErrIncomplete
+		}
+		compatibleSHA, compatibilityErr := c.partSharedCompatibilitySHA(part)
+		if compatibilityErr != nil || !strings.EqualFold(compatibleSHA, sharedSHA) {
+			return Set{}, errors.Join(ErrIncomplete, compatibilityErr)
 		}
 		value.Size += part.Size
 		value.ContentSize += part.ContentSize
@@ -441,6 +459,18 @@ func (c *Coordinator) finalizeSet(setID, sharedSHA string) (Set, error) {
 	}
 	value.ManifestSHA256 = manifestSHA
 	return c.store.SaveSet(value)
+}
+
+func (c *Coordinator) partSharedCompatibilitySHA(part Part) (string, error) {
+	path, err := c.partPath(part)
+	if err != nil {
+		return "", err
+	}
+	inspection, err := shardtransfer.InspectBackupArchive(path)
+	if err != nil || len(inspection.SharedCompatibilitySHA256) != 64 {
+		return "", errors.Join(ErrIntegrity, err)
+	}
+	return inspection.SharedCompatibilitySHA256, nil
 }
 
 func (c *Coordinator) classifySet(value Set) Set {

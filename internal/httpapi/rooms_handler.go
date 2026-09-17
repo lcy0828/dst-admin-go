@@ -8,9 +8,12 @@ import (
 	"strings"
 
 	"dont/internal/jobs"
+	"dont/internal/operationprogress"
 	"dont/internal/rooms"
 	"dont/internal/runtimeaudit"
+	"dont/internal/runtimedriver"
 	"dont/internal/shards"
+	"dont/shared"
 
 	"github.com/gin-gonic/gin"
 )
@@ -20,6 +23,11 @@ type RoomHandler struct {
 	operations *shards.Operations
 	jobs       *jobs.Service
 	audit      *runtimeaudit.Service
+	recovery   roomRecoveryMover
+}
+
+type roomRecoveryMover interface {
+	MoveRoomToRecovery(context.Context, string, []string) (runtimedriver.RoomRecoveryLocation, error)
 }
 
 func NewRoomHandler(roomService *rooms.Service, operations *shards.Operations, jobService *jobs.Service, audits ...*runtimeaudit.Service) *RoomHandler {
@@ -28,6 +36,14 @@ func NewRoomHandler(roomService *rooms.Service, operations *shards.Operations, j
 		handler.audit = audits[0]
 	}
 	return handler
+}
+
+func (h *RoomHandler) ConfigureRoomRecovery(mover roomRecoveryMover) error {
+	if mover == nil {
+		return errors.New("room recovery mover is required")
+	}
+	h.recovery = mover
+	return nil
 }
 
 func (h *RoomHandler) Register(v2 *gin.RouterGroup) {
@@ -39,8 +55,8 @@ func (h *RoomHandler) Register(v2 *gin.RouterGroup) {
 	group.POST("/recovery/:recoveryName/actions/restore", h.restoreRoom)
 	group.DELETE("/recovery/:recoveryName", h.purgeRoomRecovery)
 	group.GET("/:roomId", h.get)
+	group.GET("/:roomId/runtime-modes", h.runtimeModes)
 	group.DELETE("/:roomId", h.deleteRoom)
-	group.POST("/:roomId/adopt", h.adopt)
 	group.GET("/:roomId/worlds", h.worldsList)
 	group.POST("/:roomId/worlds", h.createWorld)
 	group.GET("/:roomId/worlds/recovery", h.worldRecoveries)
@@ -127,12 +143,60 @@ func (h *RoomHandler) deleteRoom(c *gin.Context) {
 		roomFailure(c, err)
 		return
 	}
-	result, err := h.rooms.DeleteRoom(c.Param("roomId"), request)
+	roomID := c.Param("roomId")
+	room, err := h.rooms.Room(roomID)
 	if err != nil {
 		roomFailure(c, err)
 		return
 	}
-	Success(c, http.StatusOK, result)
+	if request.Confirmation != room.Name {
+		roomFailure(c, rooms.ErrConfirmation)
+		return
+	}
+	local, err := h.rooms.HasLocalRoom(roomID)
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	if local {
+		if len(room.TargetIDs) != 1 || room.TargetIDs[0] != runtimedriver.LocalTargetID {
+			roomFailure(c, runtimedriver.ErrRoomRecoveryMultiTarget)
+			return
+		}
+		result, deleteErr := h.rooms.DeleteRoom(roomID, request)
+		if deleteErr != nil {
+			roomFailure(c, deleteErr)
+			return
+		}
+		Success(c, http.StatusOK, result)
+		return
+	}
+	if h.recovery == nil {
+		roomFailure(c, runtimedriver.ErrCapabilityMissing)
+		return
+	}
+	worlds, err := h.rooms.Worlds(roomID)
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	worldIDs := make([]string, 0, len(worlds))
+	for _, world := range worlds {
+		worldIDs = append(worldIDs, world.ID)
+	}
+	location, err := h.recovery.MoveRoomToRecovery(c.Request.Context(), roomID, worldIDs)
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	forgotten, err := h.rooms.FinalizeRemoteRoomRecovery(roomID)
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, rooms.DeleteRoomResult{
+		Room: forgotten, RecoveryName: location.TargetID + ":" + location.RecoveryRef,
+	})
 }
 
 func (h *RoomHandler) createWorld(c *gin.Context) {
@@ -227,20 +291,13 @@ func (h *RoomHandler) get(c *gin.Context) {
 	Success(c, http.StatusOK, result)
 }
 
-func (h *RoomHandler) adopt(c *gin.Context) {
-	result, err := h.rooms.Adopt(c.Param("roomId"))
-	if err != nil {
-		roomFailure(c, err)
-		return
-	}
-	Success(c, http.StatusOK, result)
-}
-
 type worldState struct {
 	rooms.World
 	Status           string              `json:"status"`
+	StatusCode       string              `json:"statusCode,omitempty"`
 	ControlAvailable bool                `json:"controlAvailable"`
 	StatusMessage    string              `json:"statusMessage,omitempty"`
+	Paused           *bool               `json:"paused,omitempty"`
 	LatestExit       *runtimeaudit.Event `json:"latestExit,omitempty"`
 }
 
@@ -257,20 +314,18 @@ func (h *RoomHandler) worldsList(c *gin.Context) {
 	}
 	result := make([]worldState, 0, len(worlds))
 	for _, world := range worlds {
-		state := worldState{World: world, Status: "unknown", ControlAvailable: room.Managed}
-		if !room.Managed {
-			state.StatusMessage = "接管房间后可执行运行操作"
-			result = append(result, state)
-			continue
-		}
+		state := worldState{World: world, Status: "unknown", ControlAvailable: true}
 		status, statusErr := h.operations.StatusFor(c.Request.Context(), room.ID, world.ID)
 		if statusErr != nil {
+			state.ControlAvailable = false
 			state.StatusMessage = statusErr.Error()
 			result = append(result, state)
 			continue
 		}
 		state.Status = string(status.State)
+		state.StatusCode = status.Code
 		state.StatusMessage = status.Message
+		state.Paused = status.Paused
 		if h.audit != nil {
 			state.LatestExit, _ = h.audit.LatestExit(room.ID, world.ID)
 		}
@@ -280,14 +335,36 @@ func (h *RoomHandler) worldsList(c *gin.Context) {
 }
 
 type roomActionRequest struct {
-	WorldIDs          []string `json:"worldIds"`
-	AllowCapacityRisk bool     `json:"allowCapacityRisk"`
+	Immediate         bool                          `json:"immediate"`
+	WorldIDs          []string                      `json:"worldIds"`
+	AllowCapacityRisk bool                          `json:"allowCapacityRisk"`
+	RuntimeMode       shared.RuntimePerformanceMode `json:"runtimeMode"`
+	RuntimeVersion    string                        `json:"runtimeVersion"`
 }
 
 type batchRoomActionSelection struct {
-	RoomID            string   `json:"roomId"`
-	WorldIDs          []string `json:"worldIds"`
-	AllowCapacityRisk bool     `json:"allowCapacityRisk"`
+	RoomID            string                        `json:"roomId"`
+	WorldIDs          []string                      `json:"worldIds"`
+	AllowCapacityRisk bool                          `json:"allowCapacityRisk"`
+	RuntimeMode       shared.RuntimePerformanceMode `json:"runtimeMode"`
+	RuntimeVersion    string                        `json:"runtimeVersion"`
+}
+
+func (h *RoomHandler) runtimeModes(c *gin.Context) {
+	worldIDs := make([]string, 0)
+	for _, value := range c.QueryArray("worldIds") {
+		for _, worldID := range strings.Split(value, ",") {
+			if worldID = strings.TrimSpace(worldID); worldID != "" {
+				worldIDs = append(worldIDs, worldID)
+			}
+		}
+	}
+	availability, err := h.operations.RuntimeModes(c.Request.Context(), c.Param("roomId"), worldIDs)
+	if err != nil {
+		roomFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, availability)
 }
 
 type batchRoomActionRequest struct {
@@ -305,12 +382,18 @@ func (h *RoomHandler) action(c *gin.Context) {
 		}
 	}
 	roomID := c.Param("roomId")
+	if action == shards.ActionStart || action == shards.ActionRestart {
+		if _, err := h.operations.RequireRuntimeSelection(c.Request.Context(), roomID, request.WorldIDs, request.RuntimeMode, request.RuntimeVersion); err != nil {
+			roomFailure(c, err)
+			return
+		}
+	}
 	if err := h.operations.RequireCapacityConfirmation(c.Request.Context(), action, roomID, request.WorldIDs, request.AllowCapacityRisk); err != nil {
 		roomFailure(c, err)
 		return
 	}
 	targets, runner, err := h.operations.PlanWithOptions(action, roomID, request.WorldIDs, shards.PlanOptions{
-		AllowCapacityRisk: request.AllowCapacityRisk,
+		RuntimeMode: request.RuntimeMode, Immediate: request.Immediate,
 	})
 	if err != nil {
 		roomFailure(c, err)
@@ -334,7 +417,7 @@ func (h *RoomHandler) action(c *gin.Context) {
 			ctx = shards.WithOperationAudit(ctx, shards.OperationAuditMetadata{
 				JobID: job.ID, RequestID: requestID, Source: string(runtimeaudit.SourceAPI),
 			})
-			return runner(ctx, report)
+			return h.runActionJob(ctx, job.ID, action, targets, runner, report)
 		}
 	})
 	if err != nil {
@@ -342,6 +425,57 @@ func (h *RoomHandler) action(c *gin.Context) {
 		return
 	}
 	Success(c, http.StatusAccepted, job)
+}
+
+func (h *RoomHandler) runActionJob(ctx context.Context, jobID string, action shards.Action, targets []jobs.TargetSpec, runner jobs.Runner, report func(jobs.TargetResult)) error {
+	if action != shards.ActionStart && action != shards.ActionRestart {
+		return runner(ctx, report)
+	}
+	ctx = operationprogress.WithReporter(ctx, func(update operationprogress.Update) {
+		progress := roomActionJobProgress(update)
+		if (progress > 0 || len(update.Worlds) > 0) && strings.TrimSpace(update.Message) != "" {
+			_, _ = h.jobs.UpdateProgressDetail(jobID, jobs.ProgressUpdate{
+				Progress: progress, Message: update.Message,
+				Detail:       &jobs.ProgressDetail{Stage: update.Stage, Worlds: update.Worlds},
+				CurrentBytes: update.CurrentBytes, TotalBytes: update.TotalBytes, BytesPerSecond: update.BytesPerSecond,
+			})
+		}
+	})
+	return shards.RunWithWorldProgress(ctx, action, targets, runner, report)
+}
+
+func roomActionJobProgress(update operationprogress.Update) int {
+	percent := update.Percent
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	switch update.Stage {
+	case "world.start", "world.restart":
+		return min(99, percent)
+	case operationprogress.StageStartConfiguration:
+		return 2
+	case operationprogress.StageStartRouting:
+		return 4
+	case operationprogress.StageStartMods:
+		return 5
+	case operationprogress.StageModInspect:
+		return 7
+	case operationprogress.StageModCache:
+		return 10 + percent*45/100
+	case operationprogress.StageModPrepare:
+		return 58
+	case operationprogress.StageModPublish:
+		return 63
+	case operationprogress.StageModComplete:
+		return 68
+	case operationprogress.StageModDone:
+		return 70
+	default:
+		return 0
+	}
 }
 
 func (h *RoomHandler) batchAction(c *gin.Context) {
@@ -363,11 +497,17 @@ func (h *RoomHandler) batchAction(c *gin.Context) {
 		}
 	}
 	for _, room := range request.Rooms {
+		if action == shards.ActionStart || action == shards.ActionRestart {
+			if _, err := h.operations.RequireRuntimeSelection(c.Request.Context(), room.RoomID, room.WorldIDs, room.RuntimeMode, room.RuntimeVersion); err != nil {
+				roomFailure(c, err)
+				return
+			}
+		}
 		selections = append(selections, shards.BatchRoomSelection{
-			RoomID: room.RoomID, WorldIDs: room.WorldIDs, AllowCapacityRisk: room.AllowCapacityRisk,
+			RoomID: room.RoomID, WorldIDs: room.WorldIDs, RuntimeMode: room.RuntimeMode,
 		})
 	}
-	targets, runner, err := h.operations.PlanBatch(action, selections, shards.BatchPlanOptions{AllowCapacityRisk: allowCapacityRisk})
+	targets, runner, err := h.operations.PlanBatch(action, selections)
 	if err != nil {
 		roomFailure(c, err)
 		return
@@ -392,7 +532,7 @@ func (h *RoomHandler) batchAction(c *gin.Context) {
 			ctx = shards.WithOperationAudit(ctx, shards.OperationAuditMetadata{
 				JobID: job.ID, RequestID: requestID, Source: string(runtimeaudit.SourceAPI),
 			})
-			return runner(ctx, report)
+			return h.runActionJob(ctx, job.ID, action, targets, runner, report)
 		}
 	})
 	if err != nil {
@@ -406,6 +546,8 @@ func roomFailure(c *gin.Context, err error) {
 	var validation *rooms.ValidationError
 	var capacityRisk *shards.CapacityRiskError
 	var batchCapacityRisk *shards.BatchCapacityRiskError
+	var runtimeMode *shards.RuntimeModeError
+	var runtimeVersion *shards.RuntimeVersionError
 	switch {
 	case errors.As(err, &validation):
 		Failure(c, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "房间配置校验失败", validation.Fields)
@@ -424,7 +566,7 @@ func roomFailure(c *gin.Context, err error) {
 	case errors.Is(err, rooms.ErrWorldExists):
 		Failure(c, http.StatusConflict, "WORLD_EXISTS", "世界目录已经存在", nil)
 	case errors.Is(err, rooms.ErrRoomNotManaged):
-		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "接管房间后才能修改世界", nil)
+		Failure(c, http.StatusConflict, "ROOM_UNAVAILABLE", "房间当前不可操作，请检查运行节点与拓扑状态", nil)
 	case errors.Is(err, rooms.ErrConfirmation):
 		Failure(c, http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", "请输入完整房间名称确认删除", nil)
 	case errors.Is(err, rooms.ErrRecoveryConfirmation):
@@ -434,17 +576,29 @@ func roomFailure(c *gin.Context, err error) {
 	case errors.Is(err, rooms.ErrInvalidRoom), errors.Is(err, rooms.ErrInvalidWorld):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_DST_CONFIG", "DST 房间或世界配置不完整", nil)
 	case errors.Is(err, shards.ErrRoomNotManaged):
-		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "请先接管房间再执行操作", nil)
+		Failure(c, http.StatusConflict, "ROOM_UNAVAILABLE", "房间当前不可操作，请检查运行节点与拓扑状态", nil)
 	case errors.Is(err, shards.ErrNoWorlds):
 		Failure(c, http.StatusUnprocessableEntity, "NO_WORLDS", "房间中没有可控制的世界", nil)
 	case errors.Is(err, shards.ErrNoRooms):
 		Failure(c, http.StatusUnprocessableEntity, "NO_ROOMS", "请至少选择一个房间", nil)
 	case errors.Is(err, shards.ErrInvalidBatch):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_BATCH_SELECTION", "批量操作中的房间不能为空或重复", nil)
+	case errors.As(err, &runtimeMode):
+		Failure(c, http.StatusUnprocessableEntity, "RUNTIME_MODE_UNAVAILABLE", runtimeMode.Error(), runtimeMode.Availability)
+	case errors.As(err, &runtimeVersion):
+		Failure(c, http.StatusUnprocessableEntity, "RUNTIME_VERSION_UNAVAILABLE", runtimeVersion.Error(), runtimeVersion.Availability)
+	case errors.Is(err, shards.ErrInvalidRuntimeMode):
+		Failure(c, http.StatusUnprocessableEntity, "INVALID_RUNTIME_MODE", "Lua 运行时模式无效", nil)
+	case errors.Is(err, shards.ErrInvalidRuntimeVersion):
+		Failure(c, http.StatusUnprocessableEntity, "INVALID_RUNTIME_VERSION", "Lua 运行时版本无效", nil)
 	case errors.Is(err, shards.ErrUnknownAction):
 		Failure(c, http.StatusNotFound, "ACTION_NOT_FOUND", "不支持该房间操作", nil)
 	case errors.Is(err, shards.ErrUnsafeName):
-		Failure(c, http.StatusUnprocessableEntity, "UNSUPPORTED_DIRECTORY_NAME", "目录名称不符合 tmux 安全规则，请重命名后再接管", nil)
+		Failure(c, http.StatusUnprocessableEntity, "UNSUPPORTED_DIRECTORY_NAME", "目录名称不符合运行时安全规则，请重命名后重试", nil)
+	case errors.Is(err, runtimedriver.ErrRoomRecoveryMultiTarget):
+		Failure(c, http.StatusConflict, "ROOM_RECOVERY_MULTI_TARGET", "房间分布在多个运行实例，当前不能整体移入回收站", nil)
+	case errors.Is(err, runtimedriver.ErrCapabilityMissing):
+		Failure(c, http.StatusConflict, "ROOM_RECOVERY_UNAVAILABLE", "运行节点版本不支持房间回收，请先升级 Agent", nil)
 	default:
 		Failure(c, http.StatusInternalServerError, "ROOM_OPERATION_FAILED", "房间操作失败", nil)
 	}

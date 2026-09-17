@@ -278,7 +278,7 @@ func backupFailure(c *gin.Context, err error) {
 	case errors.Is(err, backupapi.ErrConsistentSaveMissing):
 		Failure(c, http.StatusConflict, "CONSISTENT_SAVE_UNAVAILABLE", "运行中的房间缺少 Master，无法创建一致性备份", nil)
 	case errors.Is(err, backupapi.ErrRoomNotManaged):
-		Failure(c, http.StatusConflict, "ROOM_NOT_MANAGED", "接管房间后才能管理备份", nil)
+		Failure(c, http.StatusConflict, "ROOM_UNAVAILABLE", "房间当前不可用，请检查运行节点与拓扑状态", nil)
 	case errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable):
 		Failure(c, http.StatusConflict, runtimeguard.ErrorCode, "房间包含远程分片；分布式备份尚未开放，已阻止修改控制端本机存档", nil)
 	case errors.Is(err, backupapi.ErrBackupRoomMismatch), errors.Is(err, backupapi.ErrUnsafeBackupPath), errors.Is(err, rooms.ErrInvalidID), errors.Is(err, rooms.ErrUnsafePath):

@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,8 +19,11 @@ import (
 	"dont/internal/operationlease"
 	"dont/internal/rooms"
 	"dont/internal/runtimedriver"
+	"dont/internal/runtimefiles"
 	"dont/internal/topology"
+	"dont/shared"
 
+	"github.com/go-ini/ini"
 	"github.com/google/uuid"
 )
 
@@ -29,13 +34,19 @@ type PublicationScope string
 const (
 	PublicationShared PublicationScope = "shared"
 	PublicationWorld  PublicationScope = "world"
+	PublicationMod    PublicationScope = "mod"
 )
 
 type PublicationRequest struct {
-	RoomID  string
-	WorldID string
-	Scope   PublicationScope
-	Files   []string
+	RoomID        string
+	WorldID       string
+	Scope         PublicationScope
+	Files         []string
+	Payload       []rooms.ProvisionFile
+	ExpectedFiles map[string]string
+	IncludeLocal  bool
+	ShardLinks    []topology.ShardLink
+	UseShardLinks bool
 }
 
 type PublicationResult struct {
@@ -48,12 +59,12 @@ type Publisher interface {
 	Publish(context.Context, PublicationRequest) (PublicationResult, error)
 }
 
-type publicationCatalog interface {
-	ProvisionBundle(string) (rooms.ProvisionBundle, error)
-}
-
 type publicationPlacements interface {
 	ResolveRoomExecutions(context.Context, string) ([]topology.ExecutionPlacement, error)
+}
+
+type publicationShardLinks interface {
+	ResolveAppliedShardLinks(context.Context, string) ([]topology.ShardLink, error)
 }
 
 type publicationRuntimes interface {
@@ -67,26 +78,38 @@ type publicationLeases interface {
 }
 
 type RemotePublisher struct {
-	rooms      publicationCatalog
 	placements publicationPlacements
 	runtimes   publicationRuntimes
 	leases     publicationLeases
+	mutations  runtimedriver.RuntimeMutationObserver
 }
 
 type publicationTarget struct {
-	driver runtimedriver.ConfigurationDriver
-	target runtimedriver.Target
+	driver  runtimedriver.ConfigurationDriver
+	applier runtimedriver.ConfigurationApplier
+	reader  runtimedriver.ConfigurationReader
+	target  runtimedriver.Target
+	archive []byte
+	master  bool
 }
 
-func NewRemotePublisher(roomCatalog publicationCatalog, placements publicationPlacements, runtimes publicationRuntimes, leases publicationLeases) (*RemotePublisher, error) {
-	if roomCatalog == nil || placements == nil || runtimes == nil || leases == nil {
+func NewRemotePublisher(placements publicationPlacements, runtimes publicationRuntimes, leases publicationLeases) (*RemotePublisher, error) {
+	if placements == nil || runtimes == nil || leases == nil {
 		return nil, errors.New("configuration publication dependencies are required")
 	}
-	return &RemotePublisher{rooms: roomCatalog, placements: placements, runtimes: runtimes, leases: leases}, nil
+	return &RemotePublisher{placements: placements, runtimes: runtimes, leases: leases}, nil
+}
+
+func (p *RemotePublisher) ConfigureMutationObserver(observer runtimedriver.RuntimeMutationObserver) error {
+	if observer == nil {
+		return errors.New("configuration mutation observer is required")
+	}
+	p.mutations = observer
+	return nil
 }
 
 func (p *RemotePublisher) Publish(ctx context.Context, request PublicationRequest) (PublicationResult, error) {
-	archive, scope, err := p.archive(request)
+	baseArchive, scope, err := p.archive(request)
 	if err != nil {
 		return PublicationResult{}, err
 	}
@@ -98,24 +121,78 @@ func (p *RemotePublisher) Publish(ctx context.Context, request PublicationReques
 	if len(targets) == 0 {
 		return result, nil
 	}
+	links := []topology.ShardLink{}
+	if request.Scope == PublicationShared && containsPublicationFile(request.Files, "cluster.ini") {
+		if request.UseShardLinks {
+			links = append([]topology.ShardLink(nil), request.ShardLinks...)
+		} else if resolver, ok := p.placements.(publicationShardLinks); ok {
+			links, err = resolver.ResolveAppliedShardLinks(ctx, request.RoomID)
+			if err != nil {
+				return result, err
+			}
+		}
+	}
+	defer func() {
+		targetIDs := make([]string, 0, len(targets))
+		for _, target := range targets {
+			targetIDs = append(targetIDs, target.target.TargetID)
+		}
+		runtimedriver.NotifyRuntimeTargetsChanged(p.mutations, targetIDs...)
+	}()
 	lease, err := p.leases.Acquire(ctx, request.RoomID, "configuration.publish:"+result.PublicationID, configurationPublicationLeaseTTL)
 	if err != nil {
 		return result, err
 	}
 	defer func() { _ = p.leases.Release(lease) }()
-	sum := sha256.Sum256(archive)
-	descriptor := runtimedriver.ConfigurationDescriptor{
-		PublicationID: result.PublicationID, Scope: scope, Size: int64(len(archive)), SHA256: hex.EncodeToString(sum[:]),
-	}
 	started := make([]publicationTarget, 0, len(targets))
+	crossMachine := publicationCrossesMachines(targets)
 	for index, target := range targets {
+		var currentCluster []byte
+		if crossMachine && request.Scope == PublicationShared && containsPublicationFile(request.Files, "cluster.ini") {
+			current, readErr := target.reader.ReadConfiguration(ctx, target.target, scope)
+			if readErr != nil {
+				return result, errors.Join(readErr, p.rollback(ctx, lease, result.PublicationID, scope, started))
+			}
+			if validateErr := runtimefiles.ValidateConfiguration(scope, current); validateErr != nil {
+				return result, errors.Join(validateErr, p.rollback(ctx, lease, result.PublicationID, scope, started))
+			}
+			currentCluster, readErr = publishedConfigurationFile(current, "cluster.ini")
+			if readErr != nil {
+				return result, errors.Join(readErr, p.rollback(ctx, lease, result.PublicationID, scope, started))
+			}
+		}
+		archive, renderErr := renderPublicationArchiveForTarget(baseArchive, target.target, links, target.master, crossMachine, currentCluster)
+		if renderErr != nil {
+			return result, errors.Join(renderErr, p.rollback(ctx, lease, result.PublicationID, scope, started))
+		}
+		sum := sha256.Sum256(archive)
+		descriptor := runtimedriver.ConfigurationDescriptor{
+			PublicationID: result.PublicationID, Scope: scope, Size: int64(len(archive)), SHA256: hex.EncodeToString(sum[:]),
+		}
 		if err := p.renew(ctx, &lease); err != nil {
 			return result, errors.Join(err, p.rollback(ctx, lease, result.PublicationID, scope, started))
+		}
+		if len(targets) == 1 && target.applier != nil && len(request.ExpectedFiles) > 0 && len(archive) <= configpublication.MaxChunkBytes {
+			startedAt := time.Now()
+			warnings, applyErr := target.applier.ApplyConfiguration(ctx, target.target,
+				publicationOperation(lease, result.PublicationID, "apply", index, 0), descriptor, archive, request.ExpectedFiles)
+			log.Printf("[ConfigurationPublish] room_id=%s world_id=%s target_id=%s mode=inline duration_ms=%d failed=%t", request.RoomID, request.WorldID, target.target.TargetID, time.Since(startedAt).Milliseconds(), applyErr != nil)
+			if errors.Is(applyErr, configpublication.ErrRevisionConflict) {
+				return result, ErrRevisionConflict
+			}
+			if applyErr != nil {
+				return result, applyErr
+			}
+			result.PublishedCount = 1
+			result.Warnings = append(result.Warnings, warnings...)
+			return result, nil
 		}
 		offset, beginErr := target.driver.BeginConfiguration(ctx, target.target, publicationOperation(lease, result.PublicationID, "begin", index, 0), descriptor)
 		if beginErr != nil || offset < 0 || offset > int64(len(archive)) {
 			return result, errors.Join(beginErr, p.rollback(ctx, lease, result.PublicationID, scope, started))
 		}
+		target.archive = archive
+		targets[index] = target
 		started = append(started, target)
 		for offset < int64(len(archive)) {
 			if err := p.renew(ctx, &lease); err != nil {
@@ -147,6 +224,11 @@ func (p *RemotePublisher) Publish(ctx context.Context, request PublicationReques
 		}
 		result.PublishedCount++
 	}
+	for _, target := range targets {
+		if err := verifyPublishedConfiguration(ctx, target, scope); err != nil {
+			return result, errors.Join(err, p.rollback(ctx, lease, result.PublicationID, scope, started))
+		}
+	}
 	for index, target := range targets {
 		if err := p.renew(ctx, &lease); err != nil {
 			result.Warnings = append(result.Warnings, err.Error())
@@ -159,28 +241,255 @@ func (p *RemotePublisher) Publish(ctx context.Context, request PublicationReques
 	return result, nil
 }
 
-func (p *RemotePublisher) archive(request PublicationRequest) ([]byte, string, error) {
-	if strings.TrimSpace(request.RoomID) == "" || request.Scope != PublicationShared && request.Scope != PublicationWorld || len(request.Files) == 0 {
-		return nil, "", ErrInvalidConfiguration
+func (p *RemotePublisher) PublishModOverrides(ctx context.Context, roomID string, updates []runtimedriver.ModOverridesUpdate) (int, error) {
+	if len(updates) == 0 {
+		return 0, nil
 	}
-	bundle, err := p.rooms.ProvisionBundle(request.RoomID)
+	publicationID := uuid.NewString()
+	lease, err := p.leases.Acquire(ctx, roomID, "mod.configuration:"+publicationID, configurationPublicationLeaseTTL)
 	if err != nil {
-		return nil, "", err
+		return 0, err
 	}
-	available := make(map[string]rooms.ProvisionFile)
-	if request.Scope == PublicationShared {
-		for _, file := range bundle.Shared {
-			available[file.Name] = file
+	defer func() { _ = p.leases.Release(lease) }()
+	writers := make([]runtimedriver.ModOverridesWriter, len(updates))
+	for index, update := range updates {
+		if update.Target.RoomID != roomID || update.ExpectedSHA256 == "" {
+			return 0, ErrInvalidConfiguration
 		}
-	} else {
-		for _, world := range bundle.Worlds {
-			if world.World.ID != request.WorldID {
+		var driver runtimedriver.Driver
+		if placements, ok := p.placements.(interface {
+			AppliedPlacement(string, string) (topology.ExecutionPlacement, error)
+		}); ok {
+			current, err := placements.AppliedPlacement(roomID, update.Target.WorldID)
+			if err != nil {
+				return 0, err
+			}
+			currentTarget := runtimedriver.Target{
+				TargetID: current.AppliedTargetID, InstallationID: strings.TrimSpace(current.AppliedInstallationID),
+				TopologyRevision: current.Revision,
+			}
+			if currentTarget.InstallationID == "" {
+				// Legacy placements use the Runtime's default installation, just as reads do.
+				driver, currentTarget, err = p.runtimes.DriverTarget(ctx, roomID, update.Target.WorldID)
+				if err != nil {
+					return 0, err
+				}
+			}
+			if currentTarget.TopologyRevision != update.Target.TopologyRevision || currentTarget.TargetID != update.Target.TargetID || currentTarget.InstallationID != update.Target.InstallationID {
+				return 0, fmt.Errorf("Mod 配置的运行位置已改变，请刷新后重试: %w", runtimedriver.ErrTopologyChanged)
+			}
+		}
+		if driver == nil {
+			if runtimes, ok := p.runtimes.(interface {
+				TrustedTarget(runtimedriver.Target) (runtimedriver.Driver, error)
+			}); ok {
+				driver, err = runtimes.TrustedTarget(update.Target)
+			} else {
+				driver, _, err = p.runtimes.DriverTarget(ctx, roomID, update.Target.WorldID)
+			}
+			if err != nil {
+				return 0, err
+			}
+		}
+		writer, ok := driver.(runtimedriver.ModOverridesWriter)
+		if !ok {
+			return 0, errors.New("运行节点不支持直接保存 Mod 配置，请升级 Agent")
+		}
+		writers[index] = writer
+	}
+	published := 0
+	for index, update := range updates {
+		started := time.Now()
+		err := writers[index].WriteModOverrides(ctx, update.Target, publicationOperation(lease, publicationID, "mod-write", index, 0), update.ExpectedSHA256, update.Content)
+		log.Printf("[ModConfigWrite] room_id=%s world_id=%s target_id=%s installation_id=%s bytes=%d duration_ms=%d error=%v", roomID, update.Target.WorldID, update.Target.TargetID, update.Target.InstallationID, len(update.Content), time.Since(started).Milliseconds(), err)
+		if err != nil {
+			return published, fmt.Errorf("已保存 %d 个世界，写入 %s 的 modoverrides.lua 失败: %w", published, update.Target.Shard, err)
+		}
+		published++
+		runtimedriver.NotifyRuntimeTargetsChanged(p.mutations, update.Target.TargetID)
+	}
+	return published, nil
+}
+
+func containsPublicationFile(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func renderPublicationArchiveForTarget(
+	source []byte,
+	target runtimedriver.Target,
+	links []topology.ShardLink,
+	master bool,
+	crossMachine bool,
+	currentCluster []byte,
+) ([]byte, error) {
+	if !crossMachine {
+		return source, nil
+	}
+	var selected *topology.ShardLink
+	for index := range links {
+		link := &links[index]
+		if link.SourceTargetID == target.TargetID && link.SourceInstallationID == target.InstallationID {
+			selected = link
+			break
+		}
+	}
+	reader, err := zip.NewReader(bytes.NewReader(source), int64(len(source)))
+	if err != nil {
+		return nil, err
+	}
+	var output bytes.Buffer
+	writer := zip.NewWriter(&output)
+	foundCluster := false
+	for _, file := range reader.File {
+		entry, err := file.Open()
+		if err != nil {
+			_ = writer.Close()
+			return nil, err
+		}
+		data, readErr := io.ReadAll(io.LimitReader(entry, 4*1024*1024+1))
+		closeErr := entry.Close()
+		if readErr != nil || closeErr != nil || len(data) > 4*1024*1024 {
+			_ = writer.Close()
+			return nil, errors.Join(readErr, closeErr, ErrInvalidConfiguration)
+		}
+		if file.Name == "cluster.ini" {
+			foundCluster = true
+			config, loadErr := composeTargetRoomConfiguration(data, currentCluster)
+			if loadErr != nil {
+				_ = writer.Close()
+				return nil, loadErr
+			}
+			section := config.Section("SHARD")
+			switch {
+			case selected != nil:
+				section.Key("bind_ip").SetValue("0.0.0.0")
+				section.Key("master_ip").SetValue(selected.Address)
+				section.Key("master_port").SetValue(strconv.Itoa(selected.Port))
+			case master:
+				section.Key("bind_ip").SetValue("0.0.0.0")
+			default:
+				if len(currentCluster) == 0 {
+					_ = writer.Close()
+					return nil, fmt.Errorf("configuration publication target %s/%s has no applied Shard link or Runtime configuration", target.TargetID, target.InstallationID)
+				}
+				current, currentErr := ini.Load(currentCluster)
+				if currentErr != nil {
+					_ = writer.Close()
+					return nil, currentErr
+				}
+				preserveShardTopology(section, current.Section("SHARD"))
+			}
+			var rendered bytes.Buffer
+			if _, writeErr := config.WriteTo(&rendered); writeErr != nil {
+				_ = writer.Close()
+				return nil, writeErr
+			}
+			data = rendered.Bytes()
+		}
+		header := file.FileHeader
+		header.SetMode(0o600)
+		destination, createErr := writer.CreateHeader(&header)
+		if createErr != nil {
+			_ = writer.Close()
+			return nil, createErr
+		}
+		if _, writeErr := destination.Write(data); writeErr != nil {
+			_ = writer.Close()
+			return nil, writeErr
+		}
+	}
+	if !foundCluster {
+		_ = writer.Close()
+		return nil, ErrInvalidConfiguration
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
+}
+
+func composeTargetRoomConfiguration(source, current []byte) (*ini.File, error) {
+	sourceConfig, err := ini.Load(source)
+	if err != nil {
+		return nil, err
+	}
+	if len(current) == 0 {
+		return sourceConfig, nil
+	}
+	targetConfig, err := ini.Load(current)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(roomKnownKeys))
+	for _, section := range sourceConfig.Sections() {
+		for _, key := range section.Keys() {
+			identity := section.Name() + "\x00" + key.Name()
+			if !roomKnownKeys[identity] {
 				continue
 			}
-			for _, file := range world.Files {
-				available[file.Name] = file
-			}
+			seen[identity] = true
+			targetConfig.Section(section.Name()).Key(key.Name()).SetValue(key.String())
 		}
+	}
+	for identity := range roomKnownKeys {
+		if seen[identity] {
+			continue
+		}
+		sectionName, keyName, found := strings.Cut(identity, "\x00")
+		if !found {
+			continue
+		}
+		section, sectionErr := targetConfig.GetSection(sectionName)
+		if sectionErr == nil {
+			section.DeleteKey(keyName)
+		}
+	}
+	return targetConfig, nil
+}
+
+func preserveShardTopology(destination, source *ini.Section) {
+	for _, name := range []string{"bind_ip", "master_ip", "master_port"} {
+		if source.HasKey(name) {
+			destination.Key(name).SetValue(source.Key(name).String())
+		} else {
+			destination.DeleteKey(name)
+		}
+	}
+}
+
+func publishedConfigurationFile(result shared.RuntimeConfigurationResult, name string) ([]byte, error) {
+	for _, file := range result.Files {
+		if file.Name == name && file.Exists {
+			return append([]byte(nil), file.Data...), nil
+		}
+	}
+	return nil, fmt.Errorf("Runtime configuration file %s is missing", name)
+}
+
+func publicationCrossesMachines(targets []publicationTarget) bool {
+	values := make(map[string]bool, len(targets))
+	for _, target := range targets {
+		values[target.target.TargetID] = true
+	}
+	return len(values) > 1
+}
+
+func (p *RemotePublisher) archive(request PublicationRequest) ([]byte, string, error) {
+	if strings.TrimSpace(request.RoomID) == "" || request.Scope != PublicationShared && request.Scope != PublicationWorld && request.Scope != PublicationMod || len(request.Files) == 0 || len(request.Payload) == 0 {
+		return nil, "", ErrInvalidConfiguration
+	}
+	available := make(map[string]rooms.ProvisionFile)
+	for _, file := range request.Payload {
+		if _, exists := available[file.Name]; exists || !publicationFileAllowed(request.Scope, file.Name) || file.Mode.Perm() == 0 || len(file.Data) > 4*1024*1024 {
+			return nil, "", ErrInvalidConfiguration
+		}
+		available[file.Name] = rooms.ProvisionFile{Name: file.Name, Data: append([]byte(nil), file.Data...), Mode: file.Mode.Perm()}
 	}
 	names := append([]string(nil), request.Files...)
 	sort.Strings(names)
@@ -220,39 +529,119 @@ func (p *RemotePublisher) targets(ctx context.Context, request PublicationReques
 		return nil, err
 	}
 	result := make([]publicationTarget, 0, len(executions))
-	seen := make(map[string]bool)
+	seen := make(map[string]int)
 	for _, execution := range executions {
-		if request.Scope == PublicationWorld && execution.World.ID != request.WorldID {
+		if (request.Scope == PublicationWorld || request.Scope == PublicationMod) && execution.World.ID != request.WorldID {
 			continue
 		}
 		driver, target, err := p.runtimes.DriverTarget(ctx, request.RoomID, execution.World.ID)
 		if err != nil {
 			return nil, err
 		}
-		if target.TargetID == "local" {
+		if target.TargetID == "local" && !request.IncludeLocal {
 			continue
 		}
 		key := target.TargetID + "\x00" + target.InstallationID + "\x00" + target.Cluster
-		if request.Scope == PublicationWorld {
+		if request.Scope == PublicationWorld || request.Scope == PublicationMod {
 			key += "\x00" + target.Shard
 		}
-		if seen[key] {
+		if existing, ok := seen[key]; ok {
+			if execution.World.Role == rooms.WorldRoleMaster || execution.World.IsMaster {
+				result[existing].master = true
+			}
 			continue
 		}
-		publisher, ok := driver.(runtimedriver.ConfigurationDriver)
-		if !ok || !runtimedriver.HasCapability(driver, runtimedriver.CapabilityConfigPublish) {
+		publisher, publishOK := driver.(runtimedriver.ConfigurationDriver)
+		reader, readOK := driver.(runtimedriver.ConfigurationReader)
+		if !publishOK || !readOK || !runtimedriver.HasTargetCapability(driver, target, runtimedriver.CapabilityConfigPublish) ||
+			!runtimedriver.HasTargetCapability(driver, target, runtimedriver.CapabilityConfigRead) {
 			return nil, runtimedriver.ErrCapabilityMissing
 		}
-		seen[key] = true
-		result = append(result, publicationTarget{driver: publisher, target: target})
+		seen[key] = len(result)
+		var applier runtimedriver.ConfigurationApplier
+		if runtimedriver.HasTargetCapability(driver, target, runtimedriver.CapabilityConfigApply) {
+			applier, _ = driver.(runtimedriver.ConfigurationApplier)
+		}
+		result = append(result, publicationTarget{
+			driver: publisher, applier: applier, reader: reader, target: target,
+			master: execution.World.Role == rooms.WorldRoleMaster || execution.World.IsMaster,
+		})
 	}
-	if request.Scope == PublicationWorld && len(result) == 0 {
+	if (request.Scope == PublicationWorld || request.Scope == PublicationMod) && len(result) == 0 {
 		for _, execution := range executions {
 			if execution.World.ID == request.WorldID && execution.AppliedTargetID == "local" {
 				return result, nil
 			}
 		}
 		return nil, rooms.ErrWorldNotFound
+	}
+	return result, nil
+}
+
+func verifyPublishedConfiguration(ctx context.Context, target publicationTarget, scope string) error {
+	expected, err := publicationArchiveFiles(target.archive)
+	if err != nil {
+		return err
+	}
+	nonSecret := make(map[string][]byte, len(expected))
+	for name, data := range expected {
+		if name != "cluster_token.txt" {
+			nonSecret[name] = data
+		}
+	}
+	if len(nonSecret) > 0 {
+		observed, readErr := target.reader.ReadConfiguration(ctx, target.target, scope)
+		if readErr != nil {
+			return fmt.Errorf("发布后回读 %s/%s: %w", target.target.TargetID, target.target.InstallationID, readErr)
+		}
+		if err := runtimefiles.ValidateConfiguration(scope, observed); err != nil {
+			return err
+		}
+		actual := make(map[string][]byte, len(observed.Files))
+		for _, file := range observed.Files {
+			if file.Exists {
+				actual[file.Name] = file.Data
+			}
+		}
+		for name, data := range nonSecret {
+			if !bytes.Equal(actual[name], data) {
+				return fmt.Errorf("发布后回读 %s/%s 的 %s 内容不一致", target.target.TargetID, target.target.InstallationID, name)
+			}
+		}
+	}
+	if data, ok := expected["cluster_token.txt"]; ok {
+		observed, readErr := target.reader.ReadConfiguration(ctx, target.target, runtimefiles.ConfigurationScopeTokenStatus)
+		if readErr != nil {
+			return fmt.Errorf("发布后回读 %s/%s 的 Cluster Token: %w", target.target.TargetID, target.target.InstallationID, readErr)
+		}
+		if err := runtimefiles.ValidateConfiguration(runtimefiles.ConfigurationScopeTokenStatus, observed); err != nil {
+			return err
+		}
+		digest := sha256.Sum256([]byte(strings.TrimSpace(string(data))))
+		if observed.TokenStatus == nil || !observed.TokenStatus.Exists || !strings.EqualFold(observed.TokenStatus.SHA256, hex.EncodeToString(digest[:])) {
+			return fmt.Errorf("发布后回读 %s/%s 的 Cluster Token 内容不一致", target.target.TargetID, target.target.InstallationID)
+		}
+	}
+	return nil
+}
+
+func publicationArchiveFiles(data []byte) (map[string][]byte, error) {
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string][]byte, len(reader.File))
+	for _, file := range reader.File {
+		entry, openErr := file.Open()
+		if openErr != nil {
+			return nil, openErr
+		}
+		value, readErr := io.ReadAll(io.LimitReader(entry, 4*1024*1024+1))
+		closeErr := entry.Close()
+		if readErr != nil || closeErr != nil || len(value) > 4*1024*1024 {
+			return nil, errors.Join(readErr, closeErr, ErrInvalidConfiguration)
+		}
+		result[file.Name] = value
 	}
 	return result, nil
 }
@@ -295,5 +684,8 @@ func publicationFileAllowed(scope PublicationScope, name string) bool {
 		}
 		return false
 	}
-	return name == "server.ini" || name == "leveldataoverride.lua"
+	if scope == PublicationWorld {
+		return name == "server.ini" || name == "leveldataoverride.lua"
+	}
+	return scope == PublicationMod && name == "modoverrides.lua"
 }

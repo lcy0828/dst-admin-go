@@ -113,9 +113,54 @@ func luaValueNode(value lua.LValue, visiting map[*lua.LTable]bool, depth int, co
 			}
 			node.entries = append(node.entries, luaEntry{key: keyNode, value: valueNode})
 		})
+		if conversionErr == nil {
+			sort.Slice(node.entries, func(i, j int) bool {
+				return compareLuaTableKeys(node.entries[i].key, node.entries[j].key) < 0
+			})
+		}
 		return node, conversionErr
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedLuaValue, value.Type().String())
+	}
+}
+
+func compareLuaTableKeys(left, right *luaNode) int {
+	leftRank := luaTableKeyRank(left.kind)
+	rightRank := luaTableKeyRank(right.kind)
+	if leftRank != rightRank {
+		return leftRank - rightRank
+	}
+	switch left.kind {
+	case lua.LTNumber:
+		if left.number < right.number {
+			return -1
+		}
+		if left.number > right.number {
+			return 1
+		}
+	case lua.LTString:
+		return strings.Compare(left.text, right.text)
+	case lua.LTBool:
+		if !left.boolean && right.boolean {
+			return -1
+		}
+		if left.boolean && !right.boolean {
+			return 1
+		}
+	}
+	return 0
+}
+
+func luaTableKeyRank(kind lua.LValueType) int {
+	switch kind {
+	case lua.LTNumber:
+		return 0
+	case lua.LTString:
+		return 1
+	case lua.LTBool:
+		return 2
+	default:
+		return 3
 	}
 }
 

@@ -14,6 +14,8 @@ import (
 
 	"dont/internal/backups"
 	"dont/internal/rooms"
+	"dont/internal/runtimedriver"
+	"dont/shared"
 )
 
 const maxConfigurationBytes = int64(4 * 1024 * 1024)
@@ -32,7 +34,22 @@ type Service struct {
 	rooms     RoomCatalog
 	backups   BackupCreator
 	publisher Publisher
+	reader    ConfigurationSnapshotReader
+	tokens    ClusterTokenSnapshotReader
+	states    ConfigurationStateRepository
 	now       func() time.Time
+}
+
+type ConfigurationSnapshotReader interface {
+	ReadConfiguration(context.Context, string, string, string) (runtimedriver.ConfigurationSnapshot, error)
+}
+
+type ClusterTokenSnapshotReader interface {
+	RevealClusterToken(context.Context, string, string) (shared.RuntimeClusterTokenReveal, error)
+}
+
+type roomWorldCatalog interface {
+	Worlds(string) ([]rooms.World, error)
 }
 
 func (s *Service) ConfigurePublisher(publisher Publisher) error {
@@ -41,6 +58,128 @@ func (s *Service) ConfigurePublisher(publisher Publisher) error {
 	}
 	s.publisher = publisher
 	return nil
+}
+
+func (s *Service) ConfigureReader(reader ConfigurationSnapshotReader) error {
+	if reader == nil {
+		return errors.New("configuration reader is required")
+	}
+	if _, ok := s.rooms.(roomWorldCatalog); !ok {
+		return errors.New("configuration room catalog cannot enumerate worlds")
+	}
+	s.reader = reader
+	if tokens, ok := reader.(ClusterTokenSnapshotReader); ok {
+		s.tokens = tokens
+	}
+	return nil
+}
+
+func (s *Service) ConfigureStateRepository(repository ConfigurationStateRepository) error {
+	if repository == nil {
+		return errors.New("configuration state repository is required")
+	}
+	s.states = repository
+	return nil
+}
+
+func (s *Service) observedRuntimeConfiguration(roomID, worldID, scope string, readErr error) (runtimedriver.ConfigurationSnapshot, SyncState, error) {
+	if s.states == nil {
+		return runtimedriver.ConfigurationSnapshot{}, SyncState{}, readErr
+	}
+	state, err := s.states.Get(roomID, worldID, scope)
+	if err != nil {
+		return runtimedriver.ConfigurationSnapshot{}, SyncState{}, readErr
+	}
+	snapshot, ok := state.ObservedSnapshot()
+	if !ok {
+		return runtimedriver.ConfigurationSnapshot{}, SyncState{}, readErr
+	}
+	message := ""
+	if readErr != nil {
+		message = readErr.Error()
+	}
+	sync := syncStateFromStored(state, true, message)
+	return snapshot, sync, nil
+}
+
+func (s *Service) observeRuntimeConfiguration(roomID, worldID, scope string, snapshot runtimedriver.ConfigurationSnapshot, revision string, modified time.Time) SyncState {
+	observedAt := s.now().UTC()
+	if s.states == nil {
+		return SyncState{Status: "synced", Source: "runtime-disk", ObservedRevision: revision, ObservedAt: &observedAt}
+	}
+	state, err := s.states.Observe(roomID, worldID, scope, snapshot, revision, observedAt)
+	if err != nil {
+		return SyncState{Status: "untracked", Source: "runtime-disk", ObservedRevision: revision, LastError: err.Error()}
+	}
+	return syncStateFromStored(state, false, "")
+}
+
+func syncStateFromStored(state StoredConfigurationState, stale bool, lastError string) SyncState {
+	status := "synced"
+	if stale {
+		status = "stale"
+	}
+	return SyncState{
+		Status: status, Source: "runtime-disk", ObservedRevision: state.ObservedRevision,
+		TargetID: state.Observed.Target.TargetID, InstallationID: state.Observed.Target.InstallationID,
+		ObservedAt: state.ObservedAt, ReadOnly: stale, Stale: stale, LastError: lastError,
+	}
+}
+
+func (s *Service) readRuntimeConfiguration(ctx context.Context, roomID, worldID, scope string) (runtimedriver.ConfigurationSnapshot, error) {
+	if s.reader == nil {
+		return runtimedriver.ConfigurationSnapshot{}, errors.New("configuration reader is unavailable")
+	}
+	worldID, err := s.configurationTargetWorld(roomID, worldID)
+	if err != nil {
+		return runtimedriver.ConfigurationSnapshot{}, err
+	}
+	return s.reader.ReadConfiguration(ctx, roomID, worldID, scope)
+}
+
+// SharedConfigurationPayload reads cluster.ini from the Master Runtime. It is
+// used by topology repair so a start operation can render target-specific
+// Shard fields without ever falling back to Controller provisioning files.
+func (s *Service) SharedConfigurationPayload(ctx context.Context, roomID string) ([]rooms.ProvisionFile, error) {
+	snapshot, err := s.readRuntimeConfiguration(ctx, roomID, "", string(PublicationShared))
+	if err != nil {
+		return nil, err
+	}
+	file, _, err := configurationSnapshotFile(snapshot.Result.Files, "cluster.ini", false)
+	if err != nil {
+		return nil, err
+	}
+	return roomPublicationFiles(file.data, file.mode), nil
+}
+
+func (s *Service) configurationTargetWorld(roomID, worldID string) (string, error) {
+	if worldID != "" {
+		return worldID, nil
+	}
+	worlds, err := s.rooms.(roomWorldCatalog).Worlds(roomID)
+	if err != nil {
+		return "", err
+	}
+	for _, world := range worlds {
+		if world.IsMaster {
+			return world.ID, nil
+		}
+	}
+	if len(worlds) == 0 {
+		return "", rooms.ErrWorldNotFound
+	}
+	return worlds[0].ID, nil
+}
+
+func (s *Service) managedRoom(roomID string) (rooms.Room, error) {
+	room, err := s.rooms.Room(roomID)
+	if err != nil {
+		return rooms.Room{}, err
+	}
+	if !room.Managed {
+		return rooms.Room{}, ErrRoomNotManaged
+	}
+	return room, nil
 }
 
 func (s *Service) publish(ctx context.Context, request PublicationRequest) (int, error) {
@@ -143,6 +282,29 @@ func readConfiguration(path string, optional bool) ([]byte, os.FileMode, time.Ti
 	return data, info.Mode().Perm(), info.ModTime().UTC(), true, nil
 }
 
+func configurationSnapshotFile(files []shared.RuntimeConfigurationFile, name string, optional bool) (fileSnapshot, time.Time, error) {
+	for _, file := range files {
+		if file.Name != name {
+			continue
+		}
+		if !file.Exists {
+			if optional {
+				return fileSnapshot{mode: 0o640}, time.Time{}, nil
+			}
+			return fileSnapshot{}, time.Time{}, os.ErrNotExist
+		}
+		mode := os.FileMode(file.Mode).Perm()
+		if mode == 0 {
+			return fileSnapshot{}, time.Time{}, ErrUnsafePath
+		}
+		return fileSnapshot{data: append([]byte(nil), file.Data...), mode: mode, exists: true}, file.UpdatedAt.UTC(), nil
+	}
+	if optional {
+		return fileSnapshot{mode: 0o640}, time.Time{}, nil
+	}
+	return fileSnapshot{}, time.Time{}, os.ErrNotExist
+}
+
 func atomicWrite(path string, data []byte, mode os.FileMode) error {
 	if int64(len(data)) > maxConfigurationBytes {
 		return ErrFileTooLarge
@@ -199,6 +361,11 @@ func revision(parts ...revisionPart) string {
 		_, _ = hash.Write([]byte{0})
 	}
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func configurationFileDigest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 type revisionPart struct {

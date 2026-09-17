@@ -61,17 +61,113 @@ func TestCreateDiscoverAdoptAndReadWorlds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list worlds: %v", err)
 	}
-	if len(worlds) != 2 || worlds[0].Role != WorldRoleMaster || worlds[1].Role != WorldRoleCaves {
+	if len(worlds) != 2 || worlds[0].Role != WorldRoleMaster || worlds[0].Type != WorldTypeForest || worlds[1].Role != WorldRoleCaves || worlds[1].Type != WorldTypeCave {
 		t.Fatalf("unexpected worlds: %#v", worlds)
 	}
 	if mode := fileMode(t, filepath.Join(root, "summer_2026", "cluster_token.txt")); mode != 0600 {
 		t.Fatalf("cluster token mode = %o, want 600", mode)
+	}
+	cluster, err := ini.Load(filepath.Join(root, "summer_2026", "cluster.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if language := cluster.Section("NETWORK").Key("cluster_language").String(); language != "zh" {
+		t.Fatalf("cluster language = %q, want zh", language)
 	}
 	assertWorldGenerationDefaults(t, filepath.Join(root, "summer_2026", "Master", "leveldataoverride.lua"), "default", "default")
 	assertWorldGenerationDefaults(t, filepath.Join(root, "summer_2026", "Caves", "leveldataoverride.lua"), "cave_default", "caves")
 	rooms, err := service.List()
 	if err != nil || len(rooms) != 1 || !rooms[0].Managed {
 		t.Fatalf("list rooms = %#v, %v", rooms, err)
+	}
+}
+
+func TestWorldTypeIsIndependentFromMasterRole(t *testing.T) {
+	service, root := newTestService(t)
+	room, err := service.Create(CreateRequest{
+		DirectoryName: "identity", Name: "世界身份", GameMode: "survival", MaxPlayers: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forest, err := service.CreateWorld(room.ID, CreateWorldRequest{DirectoryName: "Forest1", Type: "forest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forest.IsMaster || forest.Role != WorldRoleCustom || forest.Type != WorldTypeForest {
+		t.Fatalf("secondary forest identity = %#v", forest)
+	}
+	masterPath := filepath.Join(root, room.DirectoryName, "Master", "leveldataoverride.lua")
+	if err := os.WriteFile(masterPath, []byte("return { location = \"cave\", id = \"DST_CAVE\" }\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	serverPath := filepath.Join(root, room.DirectoryName, "Master", "server.ini")
+	server, err := ini.Load(serverPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Section("SHARD").Key("id").SetValue("7")
+	if err := server.SaveTo(serverPath); err != nil {
+		t.Fatal(err)
+	}
+	master, err := service.World(room.ID, EncodeID("Master"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !master.IsMaster || master.Role != WorldRoleMaster || master.Type != WorldTypeCave || master.ShardID != 7 {
+		t.Fatalf("cave master identity = %#v", master)
+	}
+}
+
+func TestFirstAddedWorldCanBeACaveMaster(t *testing.T) {
+	service, root := newTestService(t)
+	room, err := service.Create(CreateRequest{
+		DirectoryName: "cave_master", Name: "洞穴主分片", GameMode: "survival", MaxPlayers: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverPath := filepath.Join(root, room.DirectoryName, "Master", "server.ini")
+	server, err := ini.Load(serverPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Section("SHARD").Key("is_master").SetValue("false")
+	if err := server.SaveTo(serverPath); err != nil {
+		t.Fatal(err)
+	}
+	cave, err := service.CreateWorld(room.ID, CreateWorldRequest{DirectoryName: "CavePrime", Type: "cave"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cave.IsMaster || cave.Role != WorldRoleMaster || cave.Type != WorldTypeCave {
+		t.Fatalf("new Cave Master=%#v", cave)
+	}
+}
+
+func TestCreateAndAddWorldAllocatePortsAcrossAllRooms(t *testing.T) {
+	service, root := newTestService(t)
+	first, err := service.Create(CreateRequest{
+		DirectoryName: "first_room", Name: "第一个房间", GameMode: "survival", MaxPlayers: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.Create(CreateRequest{
+		DirectoryName: "second_room", Name: "第二个房间", GameMode: "survival", MaxPlayers: 6, IncludeCaves: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateWorld(first.ID, CreateWorldRequest{DirectoryName: "Caves2", Type: "cave"}); err != nil {
+		t.Fatal(err)
+	}
+	firstPorts := configuredRoomPorts(t, root, first.ID, service)
+	secondPorts := configuredRoomPorts(t, root, second.ID, service)
+	for port := range firstPorts {
+		if secondPorts[port] {
+			t.Fatalf("UDP %d was allocated to both rooms: first=%#v second=%#v", port, firstPorts, secondPorts)
+		}
 	}
 }
 
@@ -86,7 +182,7 @@ func TestListTreatsUncreatedSaveRootAsEmpty(t *testing.T) {
 	}
 }
 
-func TestDiscoveredRoomRequiresExplicitAdoption(t *testing.T) {
+func TestDiscoveredRoomIsImmediatelyOperable(t *testing.T) {
 	service, root := newTestService(t)
 	roomPath := filepath.Join(root, "existing")
 	if err := os.MkdirAll(filepath.Join(roomPath, "Master"), 0750); err != nil {
@@ -99,12 +195,8 @@ func TestDiscoveredRoomRequiresExplicitAdoption(t *testing.T) {
 		t.Fatal(err)
 	}
 	rooms, err := service.List()
-	if err != nil || len(rooms) != 1 || rooms[0].Managed {
+	if err != nil || len(rooms) != 1 || !rooms[0].Managed || !rooms[0].ControlAvailable || rooms[0].ControlState != "ready" {
 		t.Fatalf("unexpected discovered rooms: %#v, %v", rooms, err)
-	}
-	adopted, err := service.Adopt(rooms[0].ID)
-	if err != nil || !adopted.Managed {
-		t.Fatalf("adopt room: %#v, %v", adopted, err)
 	}
 }
 
@@ -384,6 +476,43 @@ func fileMode(t *testing.T, path string) os.FileMode {
 		t.Fatal(err)
 	}
 	return info.Mode().Perm()
+}
+
+func configuredRoomPorts(t *testing.T, root, roomID string, service *Service) map[int]bool {
+	t.Helper()
+	room, err := service.Room(roomID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roomPath := filepath.Join(root, room.DirectoryName)
+	cluster, err := ini.Load(filepath.Join(roomPath, "cluster.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := map[int]bool{}
+	if port := cluster.Section("SHARD").Key("master_port").MustInt(0); port > 0 {
+		result[port] = true
+	}
+	worlds, err := service.Worlds(roomID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, world := range worlds {
+		config, loadErr := ini.Load(filepath.Join(roomPath, world.DirectoryName, "server.ini"))
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		for _, port := range []int{
+			config.Section("NETWORK").Key("server_port").MustInt(0),
+			config.Section("STEAM").Key("authentication_port").MustInt(0),
+			config.Section("STEAM").Key("master_server_port").MustInt(0),
+		} {
+			if port > 0 {
+				result[port] = true
+			}
+		}
+	}
+	return result
 }
 
 func assertWorldGenerationDefaults(t *testing.T, path, taskSet, startLocation string) {

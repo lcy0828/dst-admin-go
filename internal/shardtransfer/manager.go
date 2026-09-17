@@ -12,7 +12,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+
+	"github.com/go-ini/ini"
 )
 
 const (
@@ -41,9 +44,12 @@ var sharedFileNames = map[string]bool{
 }
 
 type Descriptor struct {
-	MigrationID string `json:"migrationId"`
-	Size        int64  `json:"size"`
-	SHA256      string `json:"sha256"`
+	MigrationID        string `json:"migrationId"`
+	Size               int64  `json:"size"`
+	SHA256             string `json:"sha256"`
+	ShardBindAll       bool   `json:"shardBindAll,omitempty"`
+	ShardMasterAddress string `json:"shardMasterAddress,omitempty"`
+	ShardMasterPort    int    `json:"shardMasterPort,omitempty"`
 }
 
 type Chunk struct {
@@ -61,6 +67,13 @@ type receipt struct {
 	Shard         string   `json:"shard"`
 	CreatedShared []string `json:"createdShared,omitempty"`
 	RecoveryRef   string   `json:"recoveryRef,omitempty"`
+}
+
+type verifiedImport struct {
+	MigrationID  string `json:"migrationId"`
+	Size         int64  `json:"size"`
+	SHA256       string `json:"sha256"`
+	ModifiedNano int64  `json:"modifiedNano"`
 }
 
 type Manager struct {
@@ -211,6 +224,28 @@ func (m *Manager) ReadExport(ctx context.Context, id string, offset int64) (Chun
 	return Chunk{Offset: offset, NextOffset: next, Size: descriptor.Size, SHA256: descriptor.SHA256, Data: data, Complete: next == descriptor.Size}, nil
 }
 
+// OpenExport returns only an immutable archive previously created by
+// PrepareExport. The caller must authenticate the request before serving it.
+func (m *Manager) OpenExport(id string) (Descriptor, *os.File, error) {
+	if !migrationID.MatchString(id) {
+		return Descriptor{}, nil, ErrInvalidRequest
+	}
+	descriptor, err := m.exportDescriptor(id)
+	if err != nil {
+		return Descriptor{}, nil, err
+	}
+	file, err := os.Open(m.exportPath(id))
+	if err != nil {
+		return Descriptor{}, nil, err
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() != descriptor.Size {
+		_ = file.Close()
+		return Descriptor{}, nil, errors.Join(ErrIntegrity, err)
+	}
+	return descriptor, file, nil
+}
+
 func (m *Manager) ReleaseExport(id string) error {
 	if !migrationID.MatchString(id) {
 		return ErrInvalidRequest
@@ -219,10 +254,25 @@ func (m *Manager) ReleaseExport(id string) error {
 }
 
 func (m *Manager) BeginImport(id string, size int64, checksum string) (Descriptor, error) {
+	return m.BeginImportWithShardEndpoint(id, size, checksum, false, "", 0)
+}
+
+func (m *Manager) BeginImportWithShardEndpoint(id string, size int64, checksum string, bindAll bool, masterAddress string, masterPort int) (Descriptor, error) {
 	if !migrationID.MatchString(id) || size < 1 || size > maxTotalBytes || !validSHA256(checksum) {
 		return Descriptor{}, ErrInvalidRequest
 	}
-	descriptor := Descriptor{MigrationID: id, Size: size, SHA256: strings.ToLower(checksum)}
+	masterAddress = strings.TrimSpace(strings.Trim(masterAddress, "[]"))
+	if masterAddress != "" && (len(masterAddress) > 253 || strings.ContainsAny(masterAddress, "\x00\r\n \t/\\") || masterPort < 1 || masterPort > 65535) ||
+		masterAddress == "" && masterPort != 0 {
+		return Descriptor{}, ErrInvalidRequest
+	}
+	descriptor := Descriptor{
+		MigrationID: id, Size: size, SHA256: strings.ToLower(checksum), ShardBindAll: bindAll,
+		ShardMasterAddress: masterAddress, ShardMasterPort: masterPort,
+	}
+	if err := removeIfExists(m.importVerifiedPath(id)); err != nil {
+		return Descriptor{}, err
+	}
 	file, err := os.OpenFile(m.importPath(id), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return Descriptor{}, err
@@ -245,6 +295,9 @@ func (m *Manager) WriteImport(id string, offset int64, data []byte) (int64, erro
 	if err != nil || offset > descriptor.Size || int64(len(data)) > descriptor.Size-offset {
 		return 0, ErrInvalidRequest
 	}
+	if err := removeIfExists(m.importVerifiedPath(id)); err != nil {
+		return 0, err
+	}
 	file, err := os.OpenFile(m.importPath(id), os.O_WRONLY, 0)
 	if err != nil {
 		return 0, err
@@ -264,17 +317,117 @@ func (m *Manager) WriteImport(id string, offset int64, data []byte) (int64, erro
 	return offset + int64(written), nil
 }
 
+func (m *Manager) ImportProgress(id string) (Descriptor, int64, error) {
+	if !migrationID.MatchString(id) {
+		return Descriptor{}, 0, ErrInvalidRequest
+	}
+	descriptor, err := m.importDescriptor(id)
+	if err != nil {
+		return Descriptor{}, 0, err
+	}
+	info, err := os.Lstat(m.importPath(id))
+	if err != nil {
+		return Descriptor{}, 0, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 0 || info.Size() > descriptor.Size {
+		return Descriptor{}, 0, ErrIntegrity
+	}
+	return descriptor, info.Size(), nil
+}
+
+// ReceiveImport streams a peer response directly into the existing import
+// staging file. A short write is retained so a later Range request can resume.
+func (m *Manager) ReceiveImport(ctx context.Context, id string, offset int64, source io.Reader) (int64, error) {
+	if source == nil || offset < 0 {
+		return offset, ErrInvalidRequest
+	}
+	descriptor, current, err := m.ImportProgress(id)
+	if err != nil {
+		return offset, err
+	}
+	if current != offset || offset >= descriptor.Size {
+		return current, ErrConflict
+	}
+	if err := removeIfExists(m.importVerifiedPath(id)); err != nil {
+		return current, err
+	}
+	file, err := os.OpenFile(m.importPath(id), os.O_WRONLY, 0)
+	if err != nil {
+		return current, err
+	}
+	defer file.Close()
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return current, err
+	}
+	remaining := descriptor.Size - offset
+	written, copyErr := io.Copy(file, &contextReader{ctx: ctx, source: io.LimitReader(source, remaining)})
+	next := offset + written
+	if syncErr := file.Sync(); syncErr != nil {
+		copyErr = errors.Join(copyErr, syncErr)
+	}
+	if copyErr != nil {
+		return next, copyErr
+	}
+	if written != remaining {
+		return next, io.ErrUnexpectedEOF
+	}
+	return next, nil
+}
+
+func (m *Manager) VerifyImport(ctx context.Context, id string) (Descriptor, error) {
+	descriptor, current, err := m.ImportProgress(id)
+	if err != nil {
+		return Descriptor{}, err
+	}
+	if current != descriptor.Size {
+		return Descriptor{}, ErrIntegrity
+	}
+	info, err := os.Lstat(m.importPath(id))
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return Descriptor{}, errors.Join(ErrIntegrity, err)
+	}
+	var verified verifiedImport
+	if readErr := readJSON(m.importVerifiedPath(id), &verified); readErr == nil &&
+		verified.MigrationID == id && verified.Size == descriptor.Size && verified.SHA256 == descriptor.SHA256 &&
+		verified.ModifiedNano == info.ModTime().UnixNano() {
+		return descriptor, nil
+	}
+	actual, err := describeFileContext(ctx, id, m.importPath(id))
+	if err != nil || actual.Size != descriptor.Size || actual.SHA256 != descriptor.SHA256 {
+		return Descriptor{}, errors.Join(ErrIntegrity, err)
+	}
+	after, err := os.Lstat(m.importPath(id))
+	if err != nil || !after.Mode().IsRegular() || after.Mode()&os.ModeSymlink != 0 ||
+		after.Size() != info.Size() || after.ModTime() != info.ModTime() {
+		return Descriptor{}, errors.Join(ErrConflict, err)
+	}
+	if err := writeJSON(m.importVerifiedPath(id), verifiedImport{
+		MigrationID: id, Size: descriptor.Size, SHA256: descriptor.SHA256, ModifiedNano: after.ModTime().UnixNano(),
+	}); err != nil {
+		return Descriptor{}, err
+	}
+	return descriptor, nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	source io.Reader
+}
+
+func (r *contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.source.Read(buffer)
+}
+
 func (m *Manager) CommitImport(ctx context.Context, id, cluster, shard string) (Descriptor, error) {
 	if err := validateIdentity(id, cluster, shard); err != nil {
 		return Descriptor{}, err
 	}
-	descriptor, err := m.importDescriptor(id)
+	descriptor, err := m.VerifyImport(ctx, id)
 	if err != nil {
 		return Descriptor{}, err
-	}
-	actual, err := describeFile(id, m.importPath(id))
-	if err != nil || actual.Size != descriptor.Size || actual.SHA256 != descriptor.SHA256 {
-		return Descriptor{}, ErrIntegrity
 	}
 	roomPath, err := m.targetRoomPath(cluster)
 	if err != nil {
@@ -305,6 +458,9 @@ func (m *Manager) CommitImport(ctx context.Context, id, cluster, shard string) (
 	}
 	if !regularExists(filepath.Join(staging, "shared", "cluster.ini")) || !regularExists(filepath.Join(staging, "shard", "server.ini")) {
 		return Descriptor{}, ErrIntegrity
+	}
+	if err := applyShardEndpointOverride(filepath.Join(staging, "shared", "cluster.ini"), descriptor); err != nil {
+		return Descriptor{}, err
 	}
 	createdShared := make([]string, 0)
 	for _, name := range sortedSharedNames() {
@@ -347,10 +503,32 @@ func (m *Manager) CommitImport(ctx context.Context, id, cluster, shard string) (
 	return descriptor, nil
 }
 
+func applyShardEndpointOverride(path string, descriptor Descriptor) error {
+	if !descriptor.ShardBindAll && descriptor.ShardMasterAddress == "" {
+		return nil
+	}
+	config, err := ini.LoadSources(ini.LoadOptions{Loose: false, Insensitive: false}, path)
+	if err != nil {
+		return ErrIntegrity
+	}
+	section := config.Section("SHARD")
+	if descriptor.ShardBindAll {
+		section.Key("bind_ip").SetValue("0.0.0.0")
+	}
+	if descriptor.ShardMasterAddress != "" {
+		section.Key("master_ip").SetValue(descriptor.ShardMasterAddress)
+		section.Key("master_port").SetValue(strconv.Itoa(descriptor.ShardMasterPort))
+	}
+	if err := config.SaveTo(path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
 func (m *Manager) RollbackTarget(id string) error {
 	value, err := m.readReceipt(m.targetReceiptPath(id))
 	if os.IsNotExist(err) {
-		return errors.Join(removeIfExists(m.importPath(id)), removeIfExists(m.importMetaPath(id)))
+		return errors.Join(removeIfExists(m.importPath(id)), removeIfExists(m.importMetaPath(id)), removeIfExists(m.importVerifiedPath(id)))
 	}
 	if err != nil {
 		return err
@@ -370,7 +548,7 @@ func (m *Manager) RollbackTarget(id string) error {
 	for _, name := range value.CreatedShared {
 		_ = os.Remove(filepath.Join(roomPath, name))
 	}
-	return errors.Join(removeIfExists(m.targetReceiptPath(id)), removeIfExists(m.importPath(id)), removeIfExists(m.importMetaPath(id)))
+	return errors.Join(removeIfExists(m.targetReceiptPath(id)), removeIfExists(m.importPath(id)), removeIfExists(m.importMetaPath(id)), removeIfExists(m.importVerifiedPath(id)))
 }
 
 func (m *Manager) CompleteTarget(id string) error {
@@ -387,7 +565,7 @@ func (m *Manager) CompleteTarget(id string) error {
 	if err != nil || strings.TrimSpace(string(data)) != id {
 		return ErrConflict
 	}
-	return errors.Join(os.Remove(marker), removeIfExists(m.targetReceiptPath(id)), removeIfExists(m.importPath(id)), removeIfExists(m.importMetaPath(id)))
+	return errors.Join(os.Remove(marker), removeIfExists(m.targetReceiptPath(id)), removeIfExists(m.importPath(id)), removeIfExists(m.importMetaPath(id)), removeIfExists(m.importVerifiedPath(id)))
 }
 
 func (m *Manager) FinalizeSource(id, cluster, shard string) (string, error) {
@@ -562,6 +740,9 @@ func (m *Manager) importPath(id string) string {
 func (m *Manager) importMetaPath(id string) string {
 	return filepath.Join(m.stateRoot, "import-"+id+".json")
 }
+func (m *Manager) importVerifiedPath(id string) string {
+	return filepath.Join(m.stateRoot, "import-"+id+".verified.json")
+}
 func (m *Manager) targetReceiptPath(id string) string {
 	return filepath.Join(m.stateRoot, "target-"+id+".json")
 }
@@ -699,13 +880,17 @@ func copyContext(ctx context.Context, destination io.Writer, source io.Reader) (
 }
 
 func describeFile(id, path string) (Descriptor, error) {
+	return describeFileContext(context.Background(), id, path)
+}
+
+func describeFileContext(ctx context.Context, id, path string) (Descriptor, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return Descriptor{}, err
 	}
 	defer file.Close()
 	hash := sha256.New()
-	size, err := io.Copy(hash, file)
+	size, err := io.Copy(hash, &contextReader{ctx: ctx, source: file})
 	if err != nil {
 		return Descriptor{}, err
 	}

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"dont/internal/roomops"
+	"dont/internal/rooms"
 
 	"github.com/go-ini/ini"
 	lua "github.com/yuin/gopher-lua"
@@ -24,7 +25,7 @@ var overrideKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_]{1,128}$`)
 
 var serverSchema = []FieldSchema{
 	{Key: "serverPort", Group: "network", Label: "游戏端口", Type: "number", Required: true, Minimum: intPointer(1), Maximum: intPointer(65535)},
-	{Key: "isMaster", Group: "shard", Label: "是否为主世界", Type: "boolean"},
+	{Key: "isMaster", Group: "shard", Label: "是否为主分片", Type: "boolean"},
 	{Key: "shardName", Group: "shard", Label: "世界名称", Type: "string"},
 	{Key: "shardId", Group: "shard", Label: "世界 ID", Type: "number", Required: true, Minimum: intPointer(1), Maximum: intPointer(999)},
 	{Key: "authenticationPort", Group: "steam", Label: "认证端口", Type: "number", Minimum: intPointer(0), Maximum: intPointer(65535)},
@@ -74,19 +75,17 @@ type worldDocument struct {
 	revision      string
 	modified      time.Time
 	unknownFields int
+	sync          SyncState
 }
 
 func (s *Service) WorldConfig(roomID, worldID string) (WorldConfig, error) {
-	_, release, err := roomops.Acquire(context.Background(), roomID)
-	if err != nil {
-		return WorldConfig{}, err
-	}
-	defer release()
-	_, _, worldPath, err := s.resolveWorld(roomID, worldID)
-	if err != nil {
-		return WorldConfig{}, err
-	}
-	document, err := loadWorldDocument(worldPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.WorldConfigContext(ctx, roomID, worldID)
+}
+
+func (s *Service) WorldConfigContext(ctx context.Context, roomID, worldID string) (WorldConfig, error) {
+	_, _, _, document, _, err := s.worldDocument(ctx, roomID, worldID, true)
 	if err != nil {
 		return WorldConfig{}, err
 	}
@@ -94,16 +93,13 @@ func (s *Service) WorldConfig(roomID, worldID string) (WorldConfig, error) {
 }
 
 func (s *Service) PreviewWorld(roomID, worldID string, request WorldUpdateRequest) (Preview, error) {
-	_, release, err := roomops.Acquire(context.Background(), roomID)
-	if err != nil {
-		return Preview{}, err
-	}
-	defer release()
-	_, _, worldPath, err := s.resolveWorld(roomID, worldID)
-	if err != nil {
-		return Preview{}, err
-	}
-	document, err := loadWorldDocument(worldPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.PreviewWorldContext(ctx, roomID, worldID, request)
+}
+
+func (s *Service) PreviewWorldContext(ctx context.Context, roomID, worldID string, request WorldUpdateRequest) (Preview, error) {
+	_, _, _, document, _, err := s.worldDocument(ctx, roomID, worldID, false)
 	if err != nil {
 		return Preview{}, err
 	}
@@ -120,11 +116,7 @@ func (s *Service) ApplyWorld(ctx context.Context, jobID, roomID, worldID string,
 		return ApplyResult{}, err
 	}
 	defer release()
-	room, _, worldPath, err := s.resolveWorld(roomID, worldID)
-	if err != nil {
-		return ApplyResult{}, err
-	}
-	document, err := loadWorldDocument(worldPath)
+	_, _, worldPath, document, routed, err := s.worldDocument(ctx, roomID, worldID, false)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -135,13 +127,12 @@ func (s *Service) ApplyWorld(ctx context.Context, jobID, roomID, worldID string,
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	backup, err := s.protectionBackup(ctx, room, "世界配置", jobID)
-	if err != nil {
-		return ApplyResult{}, wrapApplyError("world", err)
-	}
-	latest, err := loadWorldDocument(worldPath)
+	_, _, _, latest, latestRouted, err := s.worldDocument(ctx, roomID, worldID, false)
 	if err != nil {
 		return ApplyResult{}, err
+	}
+	if latestRouted != routed {
+		return ApplyResult{}, &RevisionConflictError{CurrentRevision: latest.revision}
 	}
 	if err := checkRevision(request.ExpectedRevision, latest.revision); err != nil {
 		return ApplyResult{}, err
@@ -154,18 +145,99 @@ func (s *Service) ApplyWorld(ctx context.Context, jobID, roomID, worldID string,
 		"server.ini":            {data: latest.serverData, mode: latest.serverMode, exists: true},
 		"leveldataoverride.lua": {data: latest.luaData, mode: latest.luaMode, exists: true},
 	}
+	if routed {
+		if s.publisher == nil {
+			return ApplyResult{}, wrapApplyError("world publication", errors.New("configuration publisher is unavailable"))
+		}
+		publicationFiles := worldPublicationFiles(serverData, latest.serverMode, luaData, latest.luaMode)
+		published, publishErr := s.publish(ctx, PublicationRequest{
+			RoomID: roomID, WorldID: worldID, Scope: PublicationWorld,
+			Files: []string{"server.ini", "leveldataoverride.lua"}, IncludeLocal: true,
+			Payload: publicationFiles,
+			ExpectedFiles: map[string]string{
+				"server.ini": configurationFileDigest(latest.serverData), "leveldataoverride.lua": configurationFileDigest(latest.luaData),
+			},
+		})
+		if publishErr != nil {
+			return ApplyResult{}, wrapApplyError("world publication", publishErr)
+		}
+		sync := SyncState{Status: "synced", Source: "runtime-disk", ObservedRevision: preview.NextRevision}
+		return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, PublishedTargets: published, Sync: sync}, nil
+	}
 	if err := atomicWriteSet(worldPath, previous, []fileWrite{{name: "server.ini", data: serverData}, {name: "leveldataoverride.lua", data: luaData}}); err != nil {
 		return ApplyResult{}, wrapApplyError("world", err)
 	}
 	published, err := s.publish(ctx, PublicationRequest{
 		RoomID: roomID, WorldID: worldID, Scope: PublicationWorld,
-		Files: []string{"server.ini", "leveldataoverride.lua"},
+		Files:   []string{"server.ini", "leveldataoverride.lua"},
+		Payload: worldPublicationFiles(serverData, latest.serverMode, luaData, latest.luaMode),
 	})
 	if err != nil {
 		rollbackErr := rollbackWrites(worldPath, previous, []string{"server.ini", "leveldataoverride.lua"})
 		return ApplyResult{}, wrapApplyError("world publication", errors.Join(err, rollbackErr))
 	}
-	return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, ProtectionBackupID: backup.ID, PublishedTargets: published}, nil
+	observed, err := loadWorldDocument(worldPath)
+	if err != nil || observed.revision != preview.NextRevision {
+		return ApplyResult{}, wrapApplyError("world verification", errors.Join(err, &RevisionConflictError{CurrentRevision: observed.revision}))
+	}
+	observedAt := observed.modified.UTC()
+	return ApplyResult{Revision: observed.revision, Changes: preview.Changes, PublishedTargets: published, Sync: SyncState{
+		Status: "synced", Source: "runtime-disk", ObservedRevision: observed.revision, ObservedAt: &observedAt,
+	}}, nil
+}
+
+func (s *Service) worldDocument(ctx context.Context, roomID, worldID string, allowStale bool) (rooms.Room, rooms.World, string, worldDocument, bool, error) {
+	if s.reader == nil {
+		room, world, worldPath, err := s.resolveWorld(roomID, worldID)
+		if err != nil {
+			return rooms.Room{}, rooms.World{}, "", worldDocument{}, false, err
+		}
+		document, err := loadWorldDocument(worldPath)
+		return room, world, worldPath, document, false, err
+	}
+	room, err := s.managedRoom(roomID)
+	if err != nil {
+		return rooms.Room{}, rooms.World{}, "", worldDocument{}, true, err
+	}
+	world, err := s.rooms.World(roomID, worldID)
+	if err != nil {
+		return rooms.Room{}, rooms.World{}, "", worldDocument{}, true, err
+	}
+	snapshot, err := s.readRuntimeConfiguration(ctx, roomID, worldID, string(PublicationWorld))
+	if err != nil {
+		if !allowStale {
+			return rooms.Room{}, rooms.World{}, "", worldDocument{}, true, err
+		}
+		cached, sync, cacheErr := s.observedRuntimeConfiguration(roomID, worldID, string(PublicationWorld), err)
+		if cacheErr != nil {
+			return rooms.Room{}, rooms.World{}, "", worldDocument{}, true, cacheErr
+		}
+		snapshot = cached
+		server, serverModified, fileErr := configurationSnapshotFile(snapshot.Result.Files, "server.ini", false)
+		if fileErr != nil {
+			return rooms.Room{}, rooms.World{}, "", worldDocument{}, true, fileErr
+		}
+		override, overrideModified, fileErr := configurationSnapshotFile(snapshot.Result.Files, "leveldataoverride.lua", false)
+		if fileErr != nil {
+			return rooms.Room{}, rooms.World{}, "", worldDocument{}, true, fileErr
+		}
+		document, parseErr := parseWorldDocument(server, serverModified, override, overrideModified)
+		document.sync = sync
+		return room, world, "", document, true, parseErr
+	}
+	server, serverModified, err := configurationSnapshotFile(snapshot.Result.Files, "server.ini", false)
+	if err != nil {
+		return rooms.Room{}, rooms.World{}, "", worldDocument{}, true, err
+	}
+	override, overrideModified, err := configurationSnapshotFile(snapshot.Result.Files, "leveldataoverride.lua", false)
+	if err != nil {
+		return rooms.Room{}, rooms.World{}, "", worldDocument{}, true, err
+	}
+	document, err := parseWorldDocument(server, serverModified, override, overrideModified)
+	if err == nil {
+		document.sync = s.observeRuntimeConfiguration(roomID, worldID, string(PublicationWorld), snapshot, document.revision, document.modified)
+	}
+	return room, world, "", document, true, err
 }
 
 func loadWorldDocument(worldPath string) (worldDocument, error) {
@@ -177,6 +249,15 @@ func loadWorldDocument(worldPath string) (worldDocument, error) {
 	if err != nil {
 		return worldDocument{}, err
 	}
+	return parseWorldDocument(
+		fileSnapshot{data: serverData, mode: serverMode, exists: serverExists}, serverModified,
+		fileSnapshot{data: luaData, mode: luaMode, exists: luaExists}, luaModified,
+	)
+}
+
+func parseWorldDocument(server fileSnapshot, serverModified time.Time, override fileSnapshot, overrideModified time.Time) (worldDocument, error) {
+	serverData, serverMode, serverExists := server.data, server.mode, server.exists
+	luaData, luaMode, luaExists := override.data, override.mode, override.exists
 	serverConfig, err := ini.Load(serverData)
 	if err != nil {
 		return worldDocument{}, fmt.Errorf("parse server.ini: %w", err)
@@ -200,8 +281,8 @@ func loadWorldDocument(worldPath string) (worldDocument, error) {
 		}
 	}
 	modified := serverModified
-	if luaModified.After(modified) {
-		modified = luaModified
+	if overrideModified.After(modified) {
+		modified = overrideModified
 	}
 	return worldDocument{
 		serverData: serverData, serverMode: serverMode,
@@ -234,7 +315,7 @@ func worldConfigFromDocument(document worldDocument) (WorldConfig, error) {
 	}
 	return WorldConfig{
 		Revision: document.revision, Server: document.serverValues, ServerSchema: append([]FieldSchema(nil), serverSchema...),
-		Overrides: overrides, OverrideSchema: append([]OverrideSchema(nil), overrideSchema...), UnknownFieldCount: document.unknownFields, ModifiedAt: document.modified,
+		Overrides: overrides, OverrideSchema: append([]OverrideSchema(nil), overrideSchema...), UnknownFieldCount: document.unknownFields, ModifiedAt: document.modified, Sync: document.sync,
 	}, nil
 }
 

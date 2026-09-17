@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"dont/internal/roomops"
+	"dont/internal/rooms"
 
 	"github.com/go-ini/ini"
 )
@@ -63,26 +64,25 @@ var roomKnownKeys = map[string]bool{
 }
 
 type roomDocument struct {
-	config   *ini.File
-	data     []byte
-	mode     os.FileMode
-	modified time.Time
-	revision string
-	values   RoomValues
-	unknown  int
+	config                    *ini.File
+	data                      []byte
+	mode                      os.FileMode
+	modified                  time.Time
+	revision                  string
+	values                    RoomValues
+	unknown                   int
+	clusterLanguageConfigured bool
+	sync                      SyncState
 }
 
 func (s *Service) RoomConfig(roomID string) (RoomConfig, error) {
-	_, release, err := roomops.Acquire(context.Background(), roomID)
-	if err != nil {
-		return RoomConfig{}, err
-	}
-	defer release()
-	_, roomPath, err := s.resolveRoom(roomID)
-	if err != nil {
-		return RoomConfig{}, err
-	}
-	document, err := loadRoomDocument(roomPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.RoomConfigContext(ctx, roomID)
+}
+
+func (s *Service) RoomConfigContext(ctx context.Context, roomID string) (RoomConfig, error) {
+	_, _, document, _, err := s.roomDocument(ctx, roomID, true)
 	if err != nil {
 		return RoomConfig{}, err
 	}
@@ -90,16 +90,13 @@ func (s *Service) RoomConfig(roomID string) (RoomConfig, error) {
 }
 
 func (s *Service) PreviewRoom(roomID string, request RoomUpdateRequest) (Preview, error) {
-	_, release, err := roomops.Acquire(context.Background(), roomID)
-	if err != nil {
-		return Preview{}, err
-	}
-	defer release()
-	_, roomPath, err := s.resolveRoom(roomID)
-	if err != nil {
-		return Preview{}, err
-	}
-	document, err := loadRoomDocument(roomPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.PreviewRoomContext(ctx, roomID, request)
+}
+
+func (s *Service) PreviewRoomContext(ctx context.Context, roomID string, request RoomUpdateRequest) (Preview, error) {
+	_, _, document, _, err := s.roomDocument(ctx, roomID, false)
 	if err != nil {
 		return Preview{}, err
 	}
@@ -115,11 +112,7 @@ func (s *Service) ApplyRoom(ctx context.Context, jobID, roomID string, request R
 		return ApplyResult{}, err
 	}
 	defer release()
-	room, roomPath, err := s.resolveRoom(roomID)
-	if err != nil {
-		return ApplyResult{}, err
-	}
-	document, err := loadRoomDocument(roomPath)
+	_, roomPath, document, routed, err := s.roomDocument(ctx, roomID, false)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -130,13 +123,12 @@ func (s *Service) ApplyRoom(ctx context.Context, jobID, roomID string, request R
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	backup, err := s.protectionBackup(ctx, room, "房间配置", jobID)
-	if err != nil {
-		return ApplyResult{}, wrapApplyError("room", err)
-	}
-	latest, err := loadRoomDocument(roomPath)
+	_, _, latest, latestRouted, err := s.roomDocument(ctx, roomID, false)
 	if err != nil {
 		return ApplyResult{}, err
+	}
+	if latestRouted != routed {
+		return ApplyResult{}, &RevisionConflictError{CurrentRevision: latest.revision}
 	}
 	if err := checkRevision(request.ExpectedRevision, latest.revision); err != nil {
 		return ApplyResult{}, err
@@ -145,15 +137,82 @@ func (s *Service) ApplyRoom(ctx context.Context, jobID, roomID string, request R
 	if err != nil {
 		return ApplyResult{}, err
 	}
+	if routed {
+		if s.publisher == nil {
+			return ApplyResult{}, wrapApplyError("room publication", errors.New("configuration publisher is unavailable"))
+		}
+		publicationFiles := roomPublicationFiles(next, latest.mode)
+		published, publishErr := s.publish(ctx, PublicationRequest{
+			RoomID: roomID, Scope: PublicationShared, Files: []string{"cluster.ini"}, IncludeLocal: true,
+			Payload: publicationFiles, ExpectedFiles: map[string]string{"cluster.ini": configurationFileDigest(latest.data)},
+		})
+		if publishErr != nil {
+			return ApplyResult{}, wrapApplyError("room publication", publishErr)
+		}
+		sync := SyncState{Status: "synced", Source: "runtime-disk", ObservedRevision: preview.NextRevision}
+		return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, PublishedTargets: published, Sync: sync}, nil
+	}
 	if err := atomicWrite(filepath.Join(roomPath, "cluster.ini"), next, latest.mode); err != nil {
 		return ApplyResult{}, wrapApplyError("room", err)
 	}
-	published, err := s.publish(ctx, PublicationRequest{RoomID: roomID, Scope: PublicationShared, Files: []string{"cluster.ini"}})
+	published, err := s.publish(ctx, PublicationRequest{
+		RoomID: roomID, Scope: PublicationShared, Files: []string{"cluster.ini"},
+		Payload: roomPublicationFiles(next, latest.mode),
+	})
 	if err != nil {
 		rollbackErr := atomicWrite(filepath.Join(roomPath, "cluster.ini"), latest.data, latest.mode)
 		return ApplyResult{}, wrapApplyError("room publication", errors.Join(err, rollbackErr))
 	}
-	return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, ProtectionBackupID: backup.ID, PublishedTargets: published}, nil
+	observed, err := loadRoomDocument(roomPath)
+	if err != nil || observed.revision != preview.NextRevision {
+		return ApplyResult{}, wrapApplyError("room verification", errors.Join(err, &RevisionConflictError{CurrentRevision: observed.revision}))
+	}
+	observedAt := observed.modified.UTC()
+	return ApplyResult{Revision: observed.revision, Changes: preview.Changes, PublishedTargets: published, Sync: SyncState{
+		Status: "synced", Source: "runtime-disk", ObservedRevision: observed.revision, ObservedAt: &observedAt,
+	}}, nil
+}
+
+func (s *Service) roomDocument(ctx context.Context, roomID string, allowStale bool) (rooms.Room, string, roomDocument, bool, error) {
+	if s.reader == nil {
+		room, roomPath, err := s.resolveRoom(roomID)
+		if err != nil {
+			return rooms.Room{}, "", roomDocument{}, false, err
+		}
+		document, err := loadRoomDocument(roomPath)
+		return room, roomPath, document, false, err
+	}
+	room, err := s.managedRoom(roomID)
+	if err != nil {
+		return rooms.Room{}, "", roomDocument{}, true, err
+	}
+	snapshot, err := s.readRuntimeConfiguration(ctx, roomID, "", string(PublicationShared))
+	if err != nil {
+		if !allowStale {
+			return rooms.Room{}, "", roomDocument{}, true, err
+		}
+		cached, sync, cacheErr := s.observedRuntimeConfiguration(roomID, "", string(PublicationShared), err)
+		if cacheErr != nil {
+			return rooms.Room{}, "", roomDocument{}, true, cacheErr
+		}
+		snapshot = cached
+		file, modified, fileErr := configurationSnapshotFile(snapshot.Result.Files, "cluster.ini", false)
+		if fileErr != nil {
+			return rooms.Room{}, "", roomDocument{}, true, fileErr
+		}
+		document, parseErr := parseRoomDocument(file.data, file.mode, modified, file.exists)
+		document.sync = sync
+		return room, "", document, true, parseErr
+	}
+	file, modified, err := configurationSnapshotFile(snapshot.Result.Files, "cluster.ini", false)
+	if err != nil {
+		return rooms.Room{}, "", roomDocument{}, true, err
+	}
+	document, err := parseRoomDocument(file.data, file.mode, modified, file.exists)
+	if err == nil {
+		document.sync = s.observeRuntimeConfiguration(roomID, "", string(PublicationShared), snapshot, document.revision, modified)
+	}
+	return room, "", document, true, err
 }
 
 func loadRoomDocument(roomPath string) (roomDocument, error) {
@@ -162,10 +221,15 @@ func loadRoomDocument(roomPath string) (roomDocument, error) {
 	if err != nil {
 		return roomDocument{}, err
 	}
+	return parseRoomDocument(data, mode, modified, exists)
+}
+
+func parseRoomDocument(data []byte, mode os.FileMode, modified time.Time, exists bool) (roomDocument, error) {
 	config, err := ini.Load(data)
 	if err != nil {
 		return roomDocument{}, fmt.Errorf("parse cluster.ini: %w", err)
 	}
+	clusterLanguageConfigured := config.Section("NETWORK").HasKey("cluster_language")
 	values := RoomValues{
 		ClusterName:        strings.TrimSpace(config.Section("NETWORK").Key("cluster_name").String()),
 		ClusterDescription: config.Section("NETWORK").Key("cluster_description").String(),
@@ -203,11 +267,20 @@ func loadRoomDocument(roomPath string) (roomDocument, error) {
 			}
 		}
 	}
-	return roomDocument{config: config, data: data, mode: mode, modified: modified, revision: revision(revisionPart{name: "cluster.ini", data: data, exists: exists}), values: values, unknown: unknown}, nil
+	return roomDocument{
+		config:                    config,
+		data:                      data,
+		mode:                      mode,
+		modified:                  modified,
+		revision:                  revision(revisionPart{name: "cluster.ini", data: data, exists: exists}),
+		values:                    values,
+		unknown:                   unknown,
+		clusterLanguageConfigured: clusterLanguageConfigured,
+	}, nil
 }
 
 func roomConfigFromDocument(document roomDocument) RoomConfig {
-	return RoomConfig{Revision: document.revision, Values: document.values, Schema: append([]FieldSchema(nil), roomSchema...), UnknownFieldCount: document.unknown, ModifiedAt: document.modified}
+	return RoomConfig{Revision: document.revision, Values: document.values, Schema: append([]FieldSchema(nil), roomSchema...), UnknownFieldCount: document.unknown, ModifiedAt: document.modified, Sync: document.sync}
 }
 
 func prepareRoomUpdate(document roomDocument, values RoomValues) (Preview, error) {
@@ -231,11 +304,14 @@ func renderRoomDocument(document roomDocument, values RoomValues) ([]byte, []Cha
 		return nil, nil, err
 	}
 	setRoomValues(config, document.values, values)
+	if !document.clusterLanguageConfigured {
+		config.Section("NETWORK").Key("cluster_language").SetValue(values.ClusterLanguage)
+	}
 	var output bytes.Buffer
 	if _, err := config.WriteTo(&output); err != nil {
 		return nil, nil, err
 	}
-	changes := roomChanges(document.values, values)
+	changes := roomChanges(document, values)
 	return output.Bytes(), changes, nil
 }
 
@@ -337,7 +413,8 @@ func setRoomValues(config *ini.File, before, after RoomValues) {
 	}
 }
 
-func roomChanges(before, after RoomValues) []Change {
+func roomChanges(document roomDocument, after RoomValues) []Change {
+	before := document.values
 	valuesBefore := map[string]interface{}{
 		"clusterName": before.ClusterName, "clusterDescription": before.ClusterDescription, "clusterPassword": before.ClusterPassword,
 		"clusterIntention": before.ClusterIntention, "clusterLanguage": before.ClusterLanguage,
@@ -367,10 +444,15 @@ func roomChanges(before, after RoomValues) []Change {
 	sort.Strings(keys)
 	changes := make([]Change, 0)
 	for _, key := range keys {
-		if reflect.DeepEqual(valuesBefore[key], valuesAfter[key]) {
+		isMissingLanguage := key == "clusterLanguage" && !document.clusterLanguageConfigured
+		if reflect.DeepEqual(valuesBefore[key], valuesAfter[key]) && !isMissingLanguage {
 			continue
 		}
 		change := Change{Path: "cluster." + key, Label: fieldLabel(roomSchema, key), Before: valuesBefore[key], After: valuesAfter[key], Operation: "replace"}
+		if isMissingLanguage {
+			change.Before = nil
+			change.Operation = "add"
+		}
 		if key == "clusterPassword" || key == "clusterKey" {
 			change.Sensitive = true
 			if key == "clusterPassword" {

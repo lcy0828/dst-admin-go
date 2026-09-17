@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"dont/internal/worldidentity"
+
 	"github.com/go-ini/ini"
 )
 
@@ -22,7 +24,7 @@ var (
 	ErrInvalidWorld         = errors.New("world configuration is invalid")
 	ErrRoomExists           = errors.New("room already exists")
 	ErrWorldExists          = errors.New("world already exists")
-	ErrRoomNotManaged       = errors.New("room must be adopted before it can be changed")
+	ErrRoomNotManaged       = errors.New("room must be registered before it can be changed")
 	ErrConfirmation         = errors.New("exact room name confirmation is required")
 	ErrRecoveryConfirmation = errors.New("exact recovery name confirmation is required")
 	ErrRecoveryNotFound     = errors.New("recovery item not found")
@@ -30,17 +32,23 @@ var (
 )
 
 type Room struct {
-	ID                string    `json:"id"`
-	DirectoryName     string    `json:"directoryName"`
-	Name              string    `json:"name"`
-	Description       string    `json:"description"`
-	GameMode          string    `json:"gameMode"`
-	MaxPlayers        int       `json:"maxPlayers"`
-	PvP               bool      `json:"pvp"`
-	PasswordProtected bool      `json:"passwordProtected"`
-	Managed           bool      `json:"managed"`
-	WorldCount        int       `json:"worldCount"`
-	UpdatedAt         time.Time `json:"updatedAt"`
+	ID                string `json:"id"`
+	DirectoryName     string `json:"directoryName"`
+	Name              string `json:"name"`
+	Description       string `json:"description"`
+	GameMode          string `json:"gameMode"`
+	MaxPlayers        int    `json:"maxPlayers"`
+	PvP               bool   `json:"pvp"`
+	PasswordProtected bool   `json:"passwordProtected"`
+	// Managed is retained for API compatibility. Every discovered room is now
+	// registered automatically; callers must use ControlState for availability.
+	Managed            bool      `json:"managed"`
+	ControlState       string    `json:"controlState"`
+	ControlAvailable   bool      `json:"controlAvailable"`
+	WorldCount         int       `json:"worldCount"`
+	TargetIDs          []string  `json:"targetIds"`
+	AvailableTargetIDs []string  `json:"availableTargetIds"`
+	UpdatedAt          time.Time `json:"updatedAt"`
 }
 
 type WorldRole string
@@ -51,15 +59,27 @@ const (
 	WorldRoleCustom WorldRole = "custom"
 )
 
+type WorldType string
+
+const (
+	WorldTypeForest  WorldType = "forest"
+	WorldTypeCave    WorldType = "cave"
+	WorldTypeUnknown WorldType = "unknown"
+)
+
 type World struct {
-	ID            string    `json:"id"`
-	RoomID        string    `json:"roomId"`
-	DirectoryName string    `json:"directoryName"`
-	Name          string    `json:"name"`
-	Role          WorldRole `json:"role"`
-	IsMaster      bool      `json:"isMaster"`
-	ServerPort    int       `json:"serverPort"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	ID                 string    `json:"id"`
+	RoomID             string    `json:"roomId"`
+	DirectoryName      string    `json:"directoryName"`
+	Name               string    `json:"name"`
+	Role               WorldRole `json:"role"`
+	Type               WorldType `json:"type"`
+	IsMaster           bool      `json:"isMaster"`
+	ShardID            int       `json:"shardId"`
+	ServerPort         int       `json:"serverPort"`
+	TargetIDs          []string  `json:"targetIds"`
+	AvailableTargetIDs []string  `json:"availableTargetIds"`
+	UpdatedAt          time.Time `json:"updatedAt"`
 }
 
 type ManagedRooms interface {
@@ -197,11 +217,9 @@ func (c *Catalog) roomFromName(directoryName string) (Room, error) {
 		return Room{}, fmt.Errorf("inspect %s: %w", clusterPath, err)
 	}
 	roomID := EncodeID(directoryName)
-	managed := false
 	if c.managed != nil {
-		managed, err = c.managed.IsManaged(roomID)
-		if err != nil {
-			return Room{}, fmt.Errorf("inspect managed room: %w", err)
+		if _, err = c.managed.IsManaged(roomID); err != nil {
+			return Room{}, fmt.Errorf("inspect registered room: %w", err)
 		}
 	}
 	worlds, err := c.Worlds(roomID)
@@ -221,7 +239,7 @@ func (c *Catalog) roomFromName(directoryName string) (Room, error) {
 		MaxPlayers:        config.Section("GAMEPLAY").Key("max_players").MustInt(6),
 		PvP:               config.Section("GAMEPLAY").Key("pvp").MustBool(false),
 		PasswordProtected: config.Section("NETWORK").Key("cluster_password").String() != "",
-		Managed:           managed,
+		Managed:           true,
 		WorldCount:        len(worlds),
 		UpdatedAt:         info.ModTime(),
 	}, nil
@@ -245,10 +263,11 @@ func (c *Catalog) worldFromName(roomID, roomPath, directoryName string) (World, 
 		return World{}, fmt.Errorf("inspect %s: %w", serverPath, err)
 	}
 	isMaster := config.Section("SHARD").Key("is_master").MustBool(false)
+	worldType := WorldType(worldidentity.ResolveType(worldPath, directoryName))
 	role := WorldRoleCustom
 	if isMaster {
 		role = WorldRoleMaster
-	} else if strings.Contains(strings.ToLower(directoryName), "cave") {
+	} else if worldType == WorldTypeCave {
 		role = WorldRoleCaves
 	}
 	return World{
@@ -257,7 +276,9 @@ func (c *Catalog) worldFromName(roomID, roomPath, directoryName string) (World, 
 		DirectoryName: directoryName,
 		Name:          directoryName,
 		Role:          role,
+		Type:          worldType,
 		IsMaster:      isMaster,
+		ShardID:       config.Section("SHARD").Key("id").MustInt(0),
 		ServerPort:    config.Section("NETWORK").Key("server_port").MustInt(0),
 		UpdatedAt:     info.ModTime(),
 	}, nil

@@ -39,6 +39,8 @@ type RoomCatalog interface {
 
 type Topology interface {
 	ResolveDesiredRoomExecutions(context.Context, string) ([]topology.ExecutionPlacement, error)
+	ResolveDesiredShardLinks(context.Context, string) ([]topology.ShardLink, error)
+	VerifyDesiredShardLinks(context.Context, string) error
 	ApplyProvision(string, string, []topology.PlacementInput) (string, error)
 	Infrastructure(context.Context) (topology.InfrastructureSnapshot, error)
 }
@@ -114,7 +116,11 @@ func (c *Coordinator) provision(ctx context.Context, roomID, expectedRevision, s
 			return Operation{}, ErrTopologyChanged
 		}
 	}
-	shared, localClusterChange, err := c.renderSharedConfiguration(ctx, bundle.Shared, placements)
+	links, err := c.topology.ResolveDesiredShardLinks(ctx, roomID)
+	if err != nil {
+		return Operation{}, err
+	}
+	sharedByEndpoint, localShared, localClusterChange, err := c.renderSharedConfigurations(ctx, bundle.Shared, placements, links)
 	if err != nil {
 		return Operation{}, err
 	}
@@ -132,14 +138,16 @@ func (c *Coordinator) provision(ctx context.Context, roomID, expectedRevision, s
 		if !ok {
 			return Operation{}, ErrInvalidInput
 		}
-		inputs = append(inputs, topology.PlacementInput{WorldID: placement.World.ID, TargetID: placement.DesiredTargetID})
+		inputs = append(inputs, topology.PlacementInput{
+			WorldID: placement.World.ID, TargetID: placement.DesiredTargetID, InstallationID: placement.DesiredInstallationID,
+		})
 		appliedDriver, appliedTarget, resolveErr := c.runtimes.DriverTarget(ctx, roomID, placement.World.ID)
 		if resolveErr != nil {
 			return Operation{}, resolveErr
 		}
 		status, statusErr := appliedDriver.Status(ctx, appliedTarget)
-		if statusErr != nil || status.SessionExists || status.State != string(shards.RuntimeStopped) {
-			return Operation{}, errors.Join(rooms.ErrWorldRunning, statusErr)
+		if statusErr != nil {
+			return Operation{}, statusErr
 		}
 		driver, target, resolveErr := c.runtimes.ProvisionTarget(placement)
 		if resolveErr != nil {
@@ -147,11 +155,16 @@ func (c *Coordinator) provision(ctx context.Context, roomID, expectedRevision, s
 		}
 		step := Step{
 			ID: fmt.Sprintf("%s-%02d", operationID, index), OperationID: operationID,
-			WorldID: world.World.ID, WorldName: world.World.Name, TargetID: target.TargetID,
+			WorldID: world.World.ID, WorldName: world.World.Name,
+			SourceTargetID: appliedTarget.TargetID, SourceInstallationID: appliedTarget.InstallationID,
+			TargetID:       target.TargetID,
 			InstallationID: target.InstallationID, Cluster: target.Cluster, Shard: target.Shard,
-			Phase: "not_started", UpdatedAt: now,
+			Phase:      "not_started",
+			WasRunning: status.State == string(shards.RuntimeRunning) || status.State == string(shards.RuntimeStarting),
+			UpdatedAt:  now,
 		}
-		if placement.DesiredTargetID == placement.AppliedTargetID {
+		if placement.DesiredTargetID == placement.AppliedTargetID &&
+			placement.DesiredInstallationID == placement.AppliedInstallationID {
 			step.Phase = "existing"
 			steps = append(steps, step)
 			continue
@@ -162,6 +175,7 @@ func (c *Coordinator) provision(ctx context.Context, roomID, expectedRevision, s
 		if placement.DesiredTargetID == "local" || inventoryContainsShard(placement, target.Cluster, target.Shard) {
 			return Operation{}, ErrTargetExists
 		}
+		shared := sharedByEndpoint[provisionEndpointKey(placement.DesiredTargetID, placement.DesiredInstallationID)]
 		archive, descriptor, archiveErr := buildProvisionArchive(operationID, index, shared, world.Files)
 		if archiveErr != nil {
 			return Operation{}, archiveErr
@@ -182,9 +196,15 @@ func (c *Coordinator) provision(ctx context.Context, roomID, expectedRevision, s
 	if err != nil {
 		return Operation{}, err
 	}
+	if err := c.stopSources(ctx, &operation, lease); err != nil {
+		return c.failBeforeDecision(ctx, operation, lease, err, false)
+	}
+	if err := c.topology.VerifyDesiredShardLinks(ctx, roomID); err != nil {
+		return c.failBeforeDecision(ctx, operation, lease, err, false)
+	}
 	localStaged := false
 	if localClusterChange {
-		cluster := provisionFile(shared, "cluster.ini")
+		cluster := provisionFile(localShared, "cluster.ini")
 		localStaged, err = c.rooms.StageProvisionCluster(roomID, operation.ID, cluster)
 		if err != nil {
 			return c.failBeforeDecision(ctx, operation, lease, err, false)
@@ -227,6 +247,9 @@ func (c *Coordinator) provision(ctx context.Context, roomID, expectedRevision, s
 		if err := c.rooms.CompleteProvisionCluster(roomID, operation.ID); err != nil {
 			return c.requireRecovery(operation, err)
 		}
+	}
+	if err := c.restoreRuntimeState(ctx, &operation, lease, true); err != nil {
+		return c.requireRecovery(operation, err)
 	}
 	if err := c.savePhase(&operation, "completed", StatusSucceeded, ""); err != nil {
 		return operation, err
@@ -303,6 +326,7 @@ func (c *Coordinator) failBeforeDecision(ctx context.Context, operation Operatio
 	if localStaged {
 		rollbackErr = errors.Join(rollbackErr, c.rooms.RollbackProvisionCluster(operation.RoomID, operation.ID))
 	}
+	rollbackErr = errors.Join(rollbackErr, c.restoreRuntimeState(ctx, &operation, lease, false))
 	if rollbackErr != nil {
 		operation, _ = c.requireRecovery(operation, errors.Join(cause, rollbackErr))
 		return operation, errors.Join(cause, rollbackErr, ErrRecoveryNeeded)
@@ -363,9 +387,10 @@ func (c *Coordinator) RecoverOperation(ctx context.Context, operationID string) 
 	}
 	defer func() { _ = c.leases.Release(lease) }()
 	operation.LeaseID, operation.FencingToken = lease.LeaseID, lease.FencingToken
-	if operation.Phase != "commit_decided" && operation.Phase != "topology_committed" {
+	if operation.Phase != "commit_decided" && operation.Phase != "topology_committed" && operation.Phase != "runtime_restore_target" {
 		rollbackErr := c.rollbackTargets(ctx, &operation, &lease)
 		rollbackErr = errors.Join(rollbackErr, c.rooms.RollbackProvisionCluster(operation.RoomID, operation.ID))
+		rollbackErr = errors.Join(rollbackErr, c.restoreRuntimeState(ctx, &operation, &lease, false))
 		if rollbackErr != nil {
 			return c.requireRecovery(operation, rollbackErr)
 		}
@@ -376,12 +401,17 @@ func (c *Coordinator) RecoverOperation(ctx context.Context, operationID string) 
 	if resolveErr != nil {
 		return c.requireRecovery(operation, resolveErr)
 	}
-	expectedTargets := make(map[string]string, len(operation.Steps))
+	expectedTargets := make(map[string]topology.PlacementInput, len(operation.Steps))
 	for _, step := range operation.Steps {
-		if step.WorldID == "" || step.TargetID == "" || expectedTargets[step.WorldID] != "" {
+		if step.WorldID == "" || step.TargetID == "" {
 			return c.requireRecovery(operation, ErrTopologyChanged)
 		}
-		expectedTargets[step.WorldID] = step.TargetID
+		if _, exists := expectedTargets[step.WorldID]; exists {
+			return c.requireRecovery(operation, ErrTopologyChanged)
+		}
+		expectedTargets[step.WorldID] = topology.PlacementInput{
+			WorldID: step.WorldID, TargetID: step.TargetID, InstallationID: step.InstallationID,
+		}
 	}
 	if len(placements) != len(expectedTargets) {
 		return c.requireRecovery(operation, ErrTopologyChanged)
@@ -389,12 +419,20 @@ func (c *Coordinator) RecoverOperation(ctx context.Context, operationID string) 
 	allApplied := true
 	inputs := make([]topology.PlacementInput, 0, len(placements))
 	for _, placement := range placements {
-		targetID, ok := expectedTargets[placement.World.ID]
-		if !ok || placement.DesiredTargetID != targetID {
+		target, ok := expectedTargets[placement.World.ID]
+		desiredInstallationID := placement.DesiredInstallationID
+		if desiredInstallationID == "" {
+			desiredInstallationID = target.InstallationID
+		}
+		appliedInstallationID := placement.AppliedInstallationID
+		if appliedInstallationID == "" && placement.AppliedTargetID == target.TargetID {
+			appliedInstallationID = target.InstallationID
+		}
+		if !ok || placement.DesiredTargetID != target.TargetID || desiredInstallationID != target.InstallationID {
 			return c.requireRecovery(operation, ErrTopologyChanged)
 		}
-		inputs = append(inputs, topology.PlacementInput{WorldID: placement.World.ID, TargetID: targetID})
-		allApplied = allApplied && placement.AppliedTargetID == targetID
+		inputs = append(inputs, target)
+		allApplied = allApplied && placement.AppliedTargetID == target.TargetID && appliedInstallationID == target.InstallationID
 	}
 	if !allApplied {
 		for _, placement := range placements {
@@ -413,6 +451,9 @@ func (c *Coordinator) RecoverOperation(ctx context.Context, operationID string) 
 		return c.requireRecovery(operation, err)
 	}
 	_ = c.rooms.CompleteProvisionCluster(operation.RoomID, operation.ID)
+	if err := c.restoreRuntimeState(ctx, &operation, &lease, true); err != nil {
+		return c.requireRecovery(operation, err)
+	}
 	if err := c.savePhase(&operation, "completed", StatusSucceeded, ""); err != nil {
 		return operation, err
 	}
@@ -432,72 +473,97 @@ func (c *Coordinator) RecoverPending(ctx context.Context) error {
 	return result
 }
 
-func (c *Coordinator) RunRecovery(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		interval = time.Minute
-	}
-	_ = c.RecoverPending(ctx)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			_ = c.RecoverPending(ctx)
-		}
-	}
-}
-
-func (c *Coordinator) renderSharedConfiguration(ctx context.Context, files []rooms.ProvisionFile, placements []topology.ExecutionPlacement) ([]rooms.ProvisionFile, bool, error) {
+func (c *Coordinator) renderSharedConfigurations(ctx context.Context, files []rooms.ProvisionFile, placements []topology.ExecutionPlacement, links []topology.ShardLink) (map[string][]rooms.ProvisionFile, []rooms.ProvisionFile, bool, error) {
 	targets := make(map[string]bool)
-	local := false
-	masterTarget := ""
+	endpoints := make(map[string]topology.ExecutionPlacement)
+	masterTarget, masterInstallation := "", ""
 	for _, placement := range placements {
 		targets[placement.DesiredTargetID] = true
-		local = local || placement.DesiredTargetID == "local"
+		endpoints[provisionEndpointKey(placement.DesiredTargetID, placement.DesiredInstallationID)] = placement
 		if placement.World.Role == rooms.WorldRoleMaster || placement.World.IsMaster {
 			if masterTarget != "" {
-				return nil, false, ErrInvalidInput
+				return nil, nil, false, ErrInvalidInput
 			}
-			masterTarget = placement.DesiredTargetID
+			masterTarget, masterInstallation = placement.DesiredTargetID, placement.DesiredInstallationID
 		}
 	}
-	result := cloneProvisionFiles(files)
+	result := make(map[string][]rooms.ProvisionFile, len(endpoints))
 	if len(targets) < 2 {
-		return result, false, nil
+		for key := range endpoints {
+			result[key] = cloneProvisionFiles(files)
+		}
+		return result, nil, false, nil
 	}
 	if masterTarget == "" {
-		return nil, false, ErrInvalidInput
+		return nil, nil, false, ErrInvalidInput
 	}
-	infrastructure, err := c.topology.Infrastructure(ctx)
-	if err != nil {
-		return nil, false, err
+	linkByEndpoint := make(map[string]topology.ShardLink, len(links))
+	for _, link := range links {
+		if link.MasterTargetID != masterTarget || link.MasterInstallationID != masterInstallation {
+			continue
+		}
+		linkByEndpoint[provisionEndpointKey(link.SourceTargetID, link.SourceInstallationID)] = link
 	}
-	profiles := profilesByTarget(infrastructure)
-	profile, ok := profiles[masterTarget]
-	masterIP := strings.TrimSpace(profile.AdvertiseAddress)
-	if !ok || !routableAddress(masterIP) {
-		return nil, false, fmt.Errorf("%w: Master 节点必须配置可路由的公布地址", ErrTargetNotReady)
-	}
-	cluster := provisionFile(result, "cluster.ini")
-	config, err := ini.Load(cluster)
-	if err != nil {
-		return nil, false, err
-	}
-	section := config.Section("SHARD")
-	section.Key("bind_ip").SetValue("0.0.0.0")
-	section.Key("master_ip").SetValue(masterIP)
-	var encoded bytes.Buffer
-	if _, err := config.WriteTo(&encoded); err != nil {
-		return nil, false, err
-	}
-	for index := range result {
-		if result[index].Name == "cluster.ini" {
-			result[index].Data = encoded.Bytes()
+	legacyMasterIP := ""
+	for key, placement := range endpoints {
+		if placement.DesiredTargetID != masterTarget {
+			if _, ok := linkByEndpoint[key]; !ok {
+				infrastructure, err := c.topology.Infrastructure(ctx)
+				if err != nil {
+					return nil, nil, false, err
+				}
+				profile, exists := profilesByTarget(infrastructure)[masterTarget]
+				legacyMasterIP = strings.TrimSpace(profile.AdvertiseAddress)
+				if !exists || !routableAddress(legacyMasterIP) {
+					return nil, nil, false, fmt.Errorf("%w: 必须为 Secondary 选择可达的 Master 互联地址", ErrTargetNotReady)
+				}
+				break
+			}
 		}
 	}
-	return result, local && !bytes.Equal(cluster, encoded.Bytes()), nil
+	originalCluster := provisionFile(files, "cluster.ini")
+	var localShared []rooms.ProvisionFile
+	localChanged := false
+	for key, placement := range endpoints {
+		rendered := cloneProvisionFiles(files)
+		cluster := provisionFile(rendered, "cluster.ini")
+		config, err := ini.Load(cluster)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		section := config.Section("SHARD")
+		section.Key("bind_ip").SetValue("0.0.0.0")
+		if placement.DesiredTargetID != masterTarget {
+			address, port := legacyMasterIP, section.Key("master_port").MustInt(0)
+			if link, exists := linkByEndpoint[key]; exists {
+				address, port = strings.TrimSpace(link.Address), link.Port
+			}
+			if !routableAddress(address) || port < 1 || port > 65535 {
+				return nil, nil, false, fmt.Errorf("%w: Secondary 的 Master 互联端点无效", ErrTargetNotReady)
+			}
+			section.Key("master_ip").SetValue(address)
+			section.Key("master_port").SetValue(fmt.Sprintf("%d", port))
+		}
+		var encoded bytes.Buffer
+		if _, err := config.WriteTo(&encoded); err != nil {
+			return nil, nil, false, err
+		}
+		for index := range rendered {
+			if rendered[index].Name == "cluster.ini" {
+				rendered[index].Data = append([]byte(nil), encoded.Bytes()...)
+			}
+		}
+		result[key] = rendered
+		if placement.DesiredTargetID == "local" {
+			localShared = rendered
+			localChanged = !bytes.Equal(originalCluster, encoded.Bytes())
+		}
+	}
+	return result, localShared, localChanged, nil
+}
+
+func provisionEndpointKey(targetID, installationID string) string {
+	return strings.TrimSpace(targetID) + "\x00" + strings.TrimSpace(installationID)
 }
 
 func (c *Coordinator) revalidate(ctx context.Context, revision string, expected []topology.ExecutionPlacement) error {
@@ -511,7 +577,9 @@ func (c *Coordinator) revalidate(ctx context.Context, revision string, expected 
 	}
 	for _, placement := range current {
 		previous, ok := byWorld[placement.World.ID]
-		if !ok || placement.Revision != revision || placement.DesiredTargetID != previous.DesiredTargetID {
+		if !ok || placement.Revision != revision ||
+			placement.DesiredTargetID != previous.DesiredTargetID ||
+			placement.DesiredInstallationID != previous.DesiredInstallationID {
 			return ErrTopologyChanged
 		}
 	}
@@ -529,10 +597,86 @@ func (c *Coordinator) renewLease(ctx context.Context, lease *operationlease.Leas
 	return err
 }
 
+func (c *Coordinator) stopSources(ctx context.Context, operation *Operation, lease *operationlease.Lease) error {
+	if err := c.savePhase(operation, "stopping", StatusRunning, ""); err != nil {
+		return err
+	}
+	for index := range operation.Steps {
+		step := &operation.Steps[index]
+		target := sourceTargetFromStep(*operation, *step)
+		driver, err := c.runtimes.TrustedTarget(target)
+		if err != nil {
+			return err
+		}
+		status, err := driver.Status(ctx, target)
+		if err != nil {
+			return err
+		}
+		if status.State == string(shards.RuntimeStopped) && !status.SessionExists {
+			continue
+		}
+		if err := c.renewLease(ctx, lease); err != nil {
+			return err
+		}
+		if _, err := driver.ExecuteShard(ctx, target, c.runtimeOperation(*lease, operation.ID, "stop", step.WorldID, 0), shared.ShardActionStop, 2*time.Minute); err != nil {
+			return fmt.Errorf("停止世界 %s: %w", step.WorldName, err)
+		}
+	}
+	return c.savePhase(operation, "stopped", StatusRunning, "")
+}
+
+func (c *Coordinator) restoreRuntimeState(ctx context.Context, operation *Operation, lease *operationlease.Lease, onTarget bool) error {
+	phase := "runtime_restore_source"
+	if onTarget {
+		phase = "runtime_restore_target"
+	}
+	if err := c.savePhase(operation, phase, StatusRunning, ""); err != nil {
+		return err
+	}
+	for index := range operation.Steps {
+		step := &operation.Steps[index]
+		if !step.WasRunning || step.RuntimeRestored {
+			continue
+		}
+		if err := c.renewLease(ctx, lease); err != nil {
+			return err
+		}
+		target := sourceTargetFromStep(*operation, *step)
+		if onTarget {
+			target = targetFromStep(*operation, *step)
+			target.TopologyRevision = operation.AppliedRevision
+		}
+		driver, err := c.runtimes.TrustedTarget(target)
+		if err == nil {
+			_, err = driver.ExecuteShard(ctx, target, c.runtimeOperation(*lease, operation.ID, "start", step.WorldID, 0), shared.ShardActionStart, 2*time.Minute)
+		}
+		if err != nil {
+			step.Failure = fmt.Sprintf("恢复世界运行状态: %v", err)
+			_, _ = c.store.SaveStep(*step)
+			return errors.Join(ErrRecoveryNeeded, err)
+		}
+		step.RuntimeRestored, step.Failure = true, ""
+		saved, err := c.store.SaveStep(*step)
+		if err != nil {
+			return err
+		}
+		*step = saved
+	}
+	return nil
+}
+
 func (c *Coordinator) runtimeOperation(lease operationlease.Lease, operationID, phase, worldID string, offset int64) runtimedriver.Operation {
 	key := fmt.Sprintf("p.%s.%d.%s.%s.%d", operationID, lease.FencingToken, phase, shortIdentity(worldID), offset)
 	expires := lease.ExpiresAt.UTC()
 	return runtimedriver.Operation{ID: key, Key: key, LeaseID: lease.LeaseID, FencingToken: lease.FencingToken, LeaseExpiresAt: &expires}
+}
+
+func sourceTargetFromStep(operation Operation, step Step) runtimedriver.Target {
+	return runtimedriver.Target{
+		TargetID: step.SourceTargetID, InstallationID: step.SourceInstallationID,
+		RoomID: operation.RoomID, WorldID: step.WorldID, Cluster: step.Cluster, Shard: step.Shard,
+		TopologyRevision: operation.TopologyRevision,
+	}
 }
 
 func (c *Coordinator) savePhase(operation *Operation, phase string, status Status, failure string) error {

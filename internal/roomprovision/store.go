@@ -25,20 +25,24 @@ type operationRecord struct {
 }
 
 type stepRecord struct {
-	ID             string    `gorm:"primary_key;type:varchar(128)"`
-	OperationID    string    `gorm:"type:char(36);index;not null"`
-	WorldID        string    `gorm:"type:varchar(255);index;not null"`
-	WorldName      string    `gorm:"type:varchar(128);not null"`
-	TargetID       string    `gorm:"type:varchar(128);index;not null"`
-	InstallationID string    `gorm:"type:varchar(64);not null"`
-	Cluster        string    `gorm:"type:varchar(64);not null"`
-	Shard          string    `gorm:"type:varchar(64);not null"`
-	MigrationID    string    `gorm:"type:varchar(128);index"`
-	Phase          string    `gorm:"type:varchar(32);index;not null"`
-	Size           int64     `gorm:"not null"`
-	SHA256         string    `gorm:"type:char(64)"`
-	Failure        string    `gorm:"type:text"`
-	UpdatedAt      time.Time `gorm:"not null"`
+	ID                   string    `gorm:"primary_key;type:varchar(128)"`
+	OperationID          string    `gorm:"type:char(36);index;not null"`
+	WorldID              string    `gorm:"type:varchar(255);index;not null"`
+	WorldName            string    `gorm:"type:varchar(128);not null"`
+	SourceTargetID       string    `gorm:"type:varchar(128);index"`
+	SourceInstallationID string    `gorm:"type:varchar(64)"`
+	TargetID             string    `gorm:"type:varchar(128);index;not null"`
+	InstallationID       string    `gorm:"type:varchar(64);not null"`
+	Cluster              string    `gorm:"type:varchar(64);not null"`
+	Shard                string    `gorm:"type:varchar(64);not null"`
+	MigrationID          string    `gorm:"type:varchar(128);index"`
+	Phase                string    `gorm:"type:varchar(32);index;not null"`
+	Size                 int64     `gorm:"not null"`
+	SHA256               string    `gorm:"type:char(64)"`
+	WasRunning           bool      `gorm:"not null;default:false"`
+	RuntimeRestored      bool      `gorm:"not null;default:false"`
+	Failure              string    `gorm:"type:text"`
+	UpdatedAt            time.Time `gorm:"not null"`
 }
 
 type Store struct {
@@ -164,7 +168,8 @@ func (s *Store) SaveStep(value Step) (Step, error) {
 	record := stepRecordFrom(value)
 	result := s.db.Table(s.stepTable).Where("id = ? AND operation_id = ?", value.ID, value.OperationID).Updates(map[string]interface{}{
 		"migration_id": record.MigrationID, "phase": record.Phase, "size": record.Size,
-		"sha256": record.SHA256, "failure": record.Failure, "updated_at": record.UpdatedAt,
+		"sha256": record.SHA256, "was_running": record.WasRunning, "runtime_restored": record.RuntimeRestored,
+		"failure": record.Failure, "updated_at": record.UpdatedAt,
 	})
 	if result.Error != nil {
 		return Step{}, result.Error
@@ -200,8 +205,10 @@ func operationFromRecord(value operationRecord) Operation {
 func stepRecordFrom(value Step) stepRecord {
 	return stepRecord{
 		ID: value.ID, OperationID: value.OperationID, WorldID: value.WorldID, WorldName: value.WorldName,
+		SourceTargetID: value.SourceTargetID, SourceInstallationID: value.SourceInstallationID,
 		TargetID: value.TargetID, InstallationID: value.InstallationID, Cluster: value.Cluster, Shard: value.Shard,
 		MigrationID: value.MigrationID, Phase: value.Phase, Size: value.Size, SHA256: value.SHA256,
+		WasRunning: value.WasRunning, RuntimeRestored: value.RuntimeRestored,
 		Failure: value.Failure, UpdatedAt: value.UpdatedAt.UTC(),
 	}
 }
@@ -209,8 +216,10 @@ func stepRecordFrom(value Step) stepRecord {
 func stepFromRecord(value stepRecord) Step {
 	return Step{
 		ID: value.ID, OperationID: value.OperationID, WorldID: value.WorldID, WorldName: value.WorldName,
+		SourceTargetID: value.SourceTargetID, SourceInstallationID: value.SourceInstallationID,
 		TargetID: value.TargetID, InstallationID: value.InstallationID, Cluster: value.Cluster, Shard: value.Shard,
 		MigrationID: value.MigrationID, Phase: value.Phase, Size: value.Size, SHA256: value.SHA256,
+		WasRunning: value.WasRunning, RuntimeRestored: value.RuntimeRestored,
 		Failure: value.Failure, UpdatedAt: value.UpdatedAt.UTC(),
 	}
 }

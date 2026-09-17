@@ -7,14 +7,15 @@ import (
 )
 
 var (
-	ErrRoomNotManaged       = errors.New("room must be managed before configuration can be changed")
-	ErrRevisionConflict     = errors.New("configuration revision has changed")
-	ErrNoChanges            = errors.New("configuration has no changes")
-	ErrConfirmationNeeded   = errors.New("exact room name confirmation is required")
-	ErrInvalidConfiguration = errors.New("configuration is invalid")
-	ErrUnsafePath           = errors.New("configuration path is unsafe")
-	ErrFileTooLarge         = errors.New("configuration file exceeds the size limit")
-	ErrUnsupportedLuaValue  = errors.New("leveldataoverride contains an unsupported Lua value")
+	ErrRoomNotManaged         = errors.New("room must be managed before configuration can be changed")
+	ErrRevisionConflict       = errors.New("configuration revision has changed")
+	ErrNoChanges              = errors.New("configuration has no changes")
+	ErrConfirmationNeeded     = errors.New("explicit confirmation is required")
+	ErrTokenRevealUnavailable = errors.New("cluster token reveal is unavailable on the target runtime")
+	ErrInvalidConfiguration   = errors.New("configuration is invalid")
+	ErrUnsafePath             = errors.New("configuration path is unsafe")
+	ErrFileTooLarge           = errors.New("configuration file exceeds the size limit")
+	ErrUnsupportedLuaValue    = errors.New("leveldataoverride contains an unsupported Lua value")
 )
 
 type FieldError struct {
@@ -66,10 +67,23 @@ type Preview struct {
 }
 
 type ApplyResult struct {
-	Revision           string   `json:"revision"`
-	Changes            []Change `json:"changes"`
-	ProtectionBackupID string   `json:"protectionBackupId"`
-	PublishedTargets   int      `json:"publishedTargets"`
+	Revision           string    `json:"revision"`
+	Changes            []Change  `json:"changes"`
+	ProtectionBackupID string    `json:"protectionBackupId,omitempty"`
+	PublishedTargets   int       `json:"publishedTargets"`
+	Sync               SyncState `json:"sync"`
+}
+
+type SyncState struct {
+	Status           string     `json:"status"`
+	Source           string     `json:"source,omitempty"`
+	TargetID         string     `json:"targetId,omitempty"`
+	InstallationID   string     `json:"installationId,omitempty"`
+	ObservedRevision string     `json:"observedRevision,omitempty"`
+	ObservedAt       *time.Time `json:"observedAt,omitempty"`
+	ReadOnly         bool       `json:"readOnly"`
+	Stale            bool       `json:"stale"`
+	LastError        string     `json:"lastError,omitempty"`
 }
 
 type RoomValues struct {
@@ -108,6 +122,7 @@ type RoomConfig struct {
 	Schema            []FieldSchema `json:"schema"`
 	UnknownFieldCount int           `json:"unknownFieldCount"`
 	ModifiedAt        time.Time     `json:"modifiedAt"`
+	Sync              SyncState     `json:"sync"`
 }
 
 type RoomUpdateRequest struct {
@@ -142,6 +157,7 @@ type WorldConfig struct {
 	OverrideSchema    []OverrideSchema       `json:"overrideSchema"`
 	UnknownFieldCount int                    `json:"unknownFieldCount"`
 	ModifiedAt        time.Time              `json:"modifiedAt"`
+	Sync              SyncState              `json:"sync"`
 }
 
 type WorldUpdateRequest struct {

@@ -2,6 +2,8 @@ package configuration
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -9,9 +11,12 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"dont/internal/roomops"
 	"dont/internal/rooms"
+	"dont/internal/runtimefiles"
+	"dont/shared"
 )
 
 var accessIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
@@ -29,16 +34,13 @@ type fileSnapshot struct {
 }
 
 func (s *Service) AccessLists(roomID string) (AccessLists, error) {
-	_, release, err := roomops.Acquire(context.Background(), roomID)
-	if err != nil {
-		return AccessLists{}, err
-	}
-	defer release()
-	_, roomPath, err := s.resolveRoom(roomID)
-	if err != nil {
-		return AccessLists{}, err
-	}
-	document, err := loadAccessDocument(roomPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.AccessListsContext(ctx, roomID)
+}
+
+func (s *Service) AccessListsContext(ctx context.Context, roomID string) (AccessLists, error) {
+	_, _, document, _, err := s.accessDocument(ctx, roomID)
 	if err != nil {
 		return AccessLists{}, err
 	}
@@ -46,16 +48,7 @@ func (s *Service) AccessLists(roomID string) (AccessLists, error) {
 }
 
 func (s *Service) PreviewAccess(roomID string, request AccessUpdateRequest) (Preview, error) {
-	_, release, err := roomops.Acquire(context.Background(), roomID)
-	if err != nil {
-		return Preview{}, err
-	}
-	defer release()
-	room, roomPath, err := s.resolveRoom(roomID)
-	if err != nil {
-		return Preview{}, err
-	}
-	document, err := loadAccessDocument(roomPath)
+	room, _, document, _, err := s.accessDocument(context.Background(), roomID)
 	if err != nil {
 		return Preview{}, err
 	}
@@ -66,16 +59,7 @@ func (s *Service) PreviewAccess(roomID string, request AccessUpdateRequest) (Pre
 }
 
 func (s *Service) ValidateAccessApply(roomID string, request AccessUpdateRequest) (Preview, error) {
-	_, release, err := roomops.Acquire(context.Background(), roomID)
-	if err != nil {
-		return Preview{}, err
-	}
-	defer release()
-	room, roomPath, err := s.resolveRoom(roomID)
-	if err != nil {
-		return Preview{}, err
-	}
-	document, err := loadAccessDocument(roomPath)
+	room, _, document, _, err := s.accessDocument(context.Background(), roomID)
 	if err != nil {
 		return Preview{}, err
 	}
@@ -91,11 +75,7 @@ func (s *Service) ApplyAccess(ctx context.Context, jobID, roomID string, request
 		return ApplyResult{}, err
 	}
 	defer release()
-	room, roomPath, err := s.resolveRoom(roomID)
-	if err != nil {
-		return ApplyResult{}, err
-	}
-	document, err := loadAccessDocument(roomPath)
+	room, roomPath, document, routed, err := s.accessDocument(ctx, roomID)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -106,13 +86,12 @@ func (s *Service) ApplyAccess(ctx context.Context, jobID, roomID string, request
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	backup, err := s.protectionBackup(ctx, room, "访问名单", jobID)
-	if err != nil {
-		return ApplyResult{}, wrapApplyError("access lists", err)
-	}
-	latest, err := loadAccessDocument(roomPath)
+	_, _, latest, latestRouted, err := s.accessDocument(ctx, roomID)
 	if err != nil {
 		return ApplyResult{}, err
+	}
+	if latestRouted != routed {
+		return ApplyResult{}, &RevisionConflictError{CurrentRevision: latest.revision}
 	}
 	if err := checkRevision(request.ExpectedRevision, latest.revision); err != nil {
 		return ApplyResult{}, err
@@ -122,6 +101,32 @@ func (s *Service) ApplyAccess(ctx context.Context, jobID, roomID string, request
 		return ApplyResult{}, err
 	}
 	writes := accessWrites(latest, next)
+	if routed {
+		if s.publisher == nil {
+			return ApplyResult{}, wrapApplyError("access list publication", errors.New("configuration publisher is unavailable"))
+		}
+		files := make([]rooms.ProvisionFile, 0, len(writes))
+		for _, write := range writes {
+			mode := latest.files[write.name].mode
+			if mode == 0 {
+				mode = 0o640
+			}
+			files = append(files, rooms.ProvisionFile{Name: write.name, Data: write.data, Mode: mode})
+		}
+		names := make([]string, 0, len(files))
+		for _, file := range files {
+			names = append(names, file.Name)
+		}
+		published, publishErr := s.publish(ctx, PublicationRequest{
+			RoomID: roomID, Scope: PublicationShared, Files: names, Payload: files, IncludeLocal: true,
+		})
+		if publishErr != nil {
+			return ApplyResult{}, wrapApplyError("access list publication", publishErr)
+		}
+		return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, PublishedTargets: published, Sync: SyncState{
+			Status: "synced", Source: "runtime-disk", ObservedRevision: preview.NextRevision,
+		}}, nil
+	}
 	if err := atomicWriteSet(roomPath, latest.files, writes); err != nil {
 		return ApplyResult{}, wrapApplyError("access lists", err)
 	}
@@ -129,12 +134,80 @@ func (s *Service) ApplyAccess(ctx context.Context, jobID, roomID string, request
 	for _, write := range writes {
 		names = append(names, write.name)
 	}
-	published, err := s.publish(ctx, PublicationRequest{RoomID: roomID, Scope: PublicationShared, Files: names})
+	files := make([]rooms.ProvisionFile, 0, len(writes))
+	for _, write := range writes {
+		mode := latest.files[write.name].mode
+		if mode == 0 {
+			mode = 0o640
+		}
+		files = append(files, rooms.ProvisionFile{Name: write.name, Data: write.data, Mode: mode})
+	}
+	published, err := s.publish(ctx, PublicationRequest{RoomID: roomID, Scope: PublicationShared, Files: names, Payload: files})
 	if err != nil {
 		rollbackErr := rollbackWrites(roomPath, latest.files, names)
 		return ApplyResult{}, wrapApplyError("access list publication", errors.Join(err, rollbackErr))
 	}
-	return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, ProtectionBackupID: backup.ID, PublishedTargets: published}, nil
+	observed, err := loadAccessDocument(roomPath)
+	if err != nil || observed.revision != preview.NextRevision {
+		return ApplyResult{}, wrapApplyError("access list verification", errors.Join(err, &RevisionConflictError{CurrentRevision: observed.revision}))
+	}
+	return ApplyResult{Revision: observed.revision, Changes: preview.Changes, PublishedTargets: published, Sync: SyncState{
+		Status: "synced", Source: "runtime-disk", ObservedRevision: observed.revision,
+	}}, nil
+}
+
+func (s *Service) accessDocument(ctx context.Context, roomID string) (rooms.Room, string, accessDocument, bool, error) {
+	if s.reader == nil {
+		room, roomPath, err := s.resolveRoom(roomID)
+		if err != nil {
+			return rooms.Room{}, "", accessDocument{}, false, err
+		}
+		document, err := loadAccessDocument(roomPath)
+		return room, roomPath, document, false, err
+	}
+	room, err := s.managedRoom(roomID)
+	if err != nil {
+		return rooms.Room{}, "", accessDocument{}, true, err
+	}
+	snapshot, err := s.readRuntimeConfiguration(ctx, roomID, "", string(PublicationShared))
+	if err != nil {
+		return rooms.Room{}, "", accessDocument{}, true, err
+	}
+	document, err := loadAccessSnapshot(snapshot.Result.Files)
+	return room, "", document, true, err
+}
+
+func loadAccessSnapshot(values []shared.RuntimeConfigurationFile) (accessDocument, error) {
+	files := make(map[string]fileSnapshot, 3)
+	for _, file := range values {
+		switch file.Name {
+		case "adminlist.txt", "blocklist.txt", "whitelist.txt":
+			files[file.Name] = fileSnapshot{data: append([]byte(nil), file.Data...), mode: os.FileMode(file.Mode).Perm(), exists: file.Exists}
+		}
+	}
+	parts := make([]revisionPart, 0, 3)
+	result := AccessLists{}
+	for _, name := range []string{"adminlist.txt", "blocklist.txt", "whitelist.txt"} {
+		file, exists := files[name]
+		if !exists {
+			return accessDocument{}, errors.New("Runtime 访问名单快照不完整")
+		}
+		parts = append(parts, revisionPart{name: name, data: file.data, exists: file.exists})
+		list, err := decodeAccessList(file.data)
+		if err != nil {
+			return accessDocument{}, fmt.Errorf("parse %s: %w", name, err)
+		}
+		switch name {
+		case "adminlist.txt":
+			result.Admins = list
+		case "blocklist.txt":
+			result.Blocked = list
+		case "whitelist.txt":
+			result.Whitelist = list
+		}
+	}
+	result.Revision = revision(parts...)
+	return accessDocument{values: result, files: files, revision: result.Revision}, nil
 }
 
 func loadAccessDocument(roomPath string) (accessDocument, error) {
@@ -352,49 +425,71 @@ func rollbackWrites(directory string, previous map[string]fileSnapshot, names []
 }
 
 func (s *Service) TokenStatus(roomID string) (TokenStatus, error) {
-	_, release, err := roomops.Acquire(context.Background(), roomID)
-	if err != nil {
-		return TokenStatus{}, err
-	}
-	defer release()
-	_, roomPath, err := s.resolveRoom(roomID)
-	if err != nil {
-		return TokenStatus{}, err
-	}
-	return loadTokenStatus(roomPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.TokenStatusContext(ctx, roomID)
+}
+
+func (s *Service) TokenStatusContext(ctx context.Context, roomID string) (TokenStatus, error) {
+	_, _, document, _, err := s.tokenDocument(ctx, roomID)
+	return document.status, err
 }
 
 func (s *Service) RevealToken(roomID, confirmation string) (TokenReveal, error) {
-	_, release, err := roomops.Acquire(context.Background(), roomID)
-	if err != nil {
-		return TokenReveal{}, err
-	}
-	defer release()
-	room, roomPath, err := s.resolveRoom(roomID)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.RevealTokenContext(ctx, roomID, confirmation)
+}
+
+func (s *Service) RevealTokenContext(ctx context.Context, roomID, confirmation string) (TokenReveal, error) {
+	room, err := s.managedRoom(roomID)
 	if err != nil {
 		return TokenReveal{}, err
 	}
 	if confirmation != room.Name {
 		return TokenReveal{}, ErrConfirmationNeeded
 	}
+	if s.reader != nil {
+		if s.tokens == nil {
+			return TokenReveal{}, ErrTokenRevealUnavailable
+		}
+		worldID, err := s.configurationTargetWorld(roomID, "")
+		if err != nil {
+			return TokenReveal{}, err
+		}
+		result, err := s.tokens.RevealClusterToken(ctx, roomID, worldID)
+		if err != nil {
+			return TokenReveal{}, err
+		}
+		if err := runtimefiles.ValidateClusterTokenReveal(result); err != nil {
+			return TokenReveal{}, err
+		}
+		return TokenReveal{Revision: tokenStatusRevision(result.Exists, result.SHA256), Token: result.Token}, nil
+	}
+	_, roomPath, err := s.resolveRoom(roomID)
+	if err != nil {
+		return TokenReveal{}, err
+	}
 	data, _, _, exists, err := readConfiguration(filepath.Join(roomPath, "cluster_token.txt"), true)
 	if err != nil {
 		return TokenReveal{}, err
 	}
-	return TokenReveal{Revision: revision(revisionPart{name: "cluster_token.txt", data: data, exists: exists}), Token: strings.TrimSpace(string(data))}, nil
+	token := strings.TrimSpace(string(data))
+	return TokenReveal{Revision: tokenStatusRevision(exists, tokenDigest(token)), Token: token}, nil
 }
 
 func (s *Service) PreviewToken(roomID string, request TokenUpdateRequest) (Preview, error) {
-	_, release, err := roomops.Acquire(context.Background(), roomID)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.PreviewTokenContext(ctx, roomID, request)
+}
+
+func (s *Service) PreviewTokenContext(ctx context.Context, roomID string, request TokenUpdateRequest) (Preview, error) {
+	room, _, document, _, err := s.tokenDocument(ctx, roomID)
 	if err != nil {
 		return Preview{}, err
 	}
-	defer release()
-	room, roomPath, err := s.resolveRoom(roomID)
-	if err != nil {
-		return Preview{}, err
-	}
-	return prepareTokenUpdate(room, roomPath, request)
+	return prepareTokenUpdate(room, document, request)
 }
 
 func (s *Service) ApplyToken(ctx context.Context, jobID, roomID string, request TokenUpdateRequest) (ApplyResult, error) {
@@ -403,53 +498,121 @@ func (s *Service) ApplyToken(ctx context.Context, jobID, roomID string, request 
 		return ApplyResult{}, err
 	}
 	defer release()
-	room, roomPath, err := s.resolveRoom(roomID)
+	room, roomPath, document, routed, err := s.tokenDocument(ctx, roomID)
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	preview, err := prepareTokenUpdate(room, roomPath, request)
+	preview, err := prepareTokenUpdate(room, document, request)
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	backup, err := s.protectionBackup(ctx, room, "Cluster Token", jobID)
-	if err != nil {
-		return ApplyResult{}, wrapApplyError("cluster token", err)
-	}
-	status, err := loadTokenStatus(roomPath)
+	_, _, latest, latestRouted, err := s.tokenDocument(ctx, roomID)
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	if err := checkRevision(request.ExpectedRevision, status.Revision); err != nil {
+	if latestRouted != routed {
+		return ApplyResult{}, &RevisionConflictError{CurrentRevision: latest.status.Revision}
+	}
+	if err := checkRevision(request.ExpectedRevision, latest.status.Revision); err != nil {
 		return ApplyResult{}, err
 	}
-	token := strings.TrimSpace(request.Token)
-	data := []byte{}
-	if token != "" {
-		data = []byte(token + "\n")
+	data := normalizedTokenData(request.Token)
+	mode := latest.mode
+	if !latest.exists || mode == 0 {
+		mode = 0o600
+	}
+	if routed {
+		if s.publisher == nil {
+			return ApplyResult{}, wrapApplyError("cluster token publication", errors.New("configuration publisher is unavailable"))
+		}
+		published, publishErr := s.publish(ctx, PublicationRequest{
+			RoomID: roomID, Scope: PublicationShared, Files: []string{"cluster_token.txt"}, IncludeLocal: true,
+			Payload: []rooms.ProvisionFile{{Name: "cluster_token.txt", Data: data, Mode: mode}},
+		})
+		if publishErr != nil {
+			return ApplyResult{}, wrapApplyError("cluster token publication", publishErr)
+		}
+		return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, PublishedTargets: published, Sync: SyncState{
+			Status: "synced", Source: "runtime-disk", ObservedRevision: preview.NextRevision,
+		}}, nil
 	}
 	path := filepath.Join(roomPath, "cluster_token.txt")
-	previousData, mode, _, previousExists, err := readConfiguration(path, true)
-	if err != nil {
-		return ApplyResult{}, err
-	}
 	if err := atomicWrite(path, data, mode); err != nil {
 		return ApplyResult{}, wrapApplyError("cluster token", err)
 	}
-	published, err := s.publish(ctx, PublicationRequest{RoomID: roomID, Scope: PublicationShared, Files: []string{"cluster_token.txt"}})
+	published, err := s.publish(ctx, PublicationRequest{
+		RoomID: roomID, Scope: PublicationShared, Files: []string{"cluster_token.txt"},
+		Payload: []rooms.ProvisionFile{{Name: "cluster_token.txt", Data: data, Mode: mode}},
+	})
 	if err != nil {
-		previous := map[string]fileSnapshot{"cluster_token.txt": {data: previousData, mode: mode, exists: previousExists}}
+		previous := map[string]fileSnapshot{"cluster_token.txt": {data: latest.data, mode: latest.mode, exists: latest.exists}}
 		rollbackErr := rollbackWrites(roomPath, previous, []string{"cluster_token.txt"})
 		return ApplyResult{}, wrapApplyError("cluster token publication", errors.Join(err, rollbackErr))
 	}
-	return ApplyResult{Revision: preview.NextRevision, Changes: preview.Changes, ProtectionBackupID: backup.ID, PublishedTargets: published}, nil
+	observed, err := loadTokenDocument(roomPath)
+	if err != nil || observed.status.Revision != preview.NextRevision {
+		return ApplyResult{}, wrapApplyError("cluster token verification", errors.Join(err, &RevisionConflictError{CurrentRevision: observed.status.Revision}))
+	}
+	return ApplyResult{Revision: observed.status.Revision, Changes: preview.Changes, PublishedTargets: published, Sync: SyncState{
+		Status: "synced", Source: "runtime-disk", ObservedRevision: observed.status.Revision,
+	}}, nil
+}
+
+type tokenDocument struct {
+	status TokenStatus
+	digest string
+	data   []byte
+	mode   os.FileMode
+	exists bool
+}
+
+func (s *Service) tokenDocument(ctx context.Context, roomID string) (rooms.Room, string, tokenDocument, bool, error) {
+	if s.reader == nil {
+		room, roomPath, err := s.resolveRoom(roomID)
+		if err != nil {
+			return rooms.Room{}, "", tokenDocument{}, false, err
+		}
+		document, err := loadTokenDocument(roomPath)
+		return room, roomPath, document, false, err
+	}
+	room, err := s.managedRoom(roomID)
+	if err != nil {
+		return rooms.Room{}, "", tokenDocument{}, true, err
+	}
+	snapshot, err := s.readRuntimeConfiguration(ctx, roomID, "", runtimefiles.ConfigurationScopeTokenStatus)
+	if err != nil {
+		return rooms.Room{}, "", tokenDocument{}, true, err
+	}
+	status := snapshot.Result.TokenStatus
+	if status == nil {
+		return rooms.Room{}, "", tokenDocument{}, true, errors.New("Runtime 未返回 Cluster Token 状态")
+	}
+	mode := os.FileMode(status.Mode).Perm()
+	if mode == 0 {
+		mode = 0o600
+	}
+	document := tokenDocument{
+		digest: status.SHA256, mode: mode, exists: status.Exists,
+		status: TokenStatus{
+			Revision:   tokenStatusRevision(status.Exists, status.SHA256),
+			Configured: status.Configured, MaskedValue: status.MaskedValue,
+		},
+	}
+	return room, "", document, true, nil
 }
 
 func loadTokenStatus(roomPath string) (TokenStatus, error) {
-	data, _, _, exists, err := readConfiguration(filepath.Join(roomPath, "cluster_token.txt"), true)
+	document, err := loadTokenDocument(roomPath)
+	return document.status, err
+}
+
+func loadTokenDocument(roomPath string) (tokenDocument, error) {
+	data, mode, _, exists, err := readConfiguration(filepath.Join(roomPath, "cluster_token.txt"), true)
 	if err != nil {
-		return TokenStatus{}, err
+		return tokenDocument{}, err
 	}
 	token := strings.TrimSpace(string(data))
+	digest := tokenDigest(token)
 	masked := ""
 	if token != "" {
 		tail := token
@@ -458,42 +621,71 @@ func loadTokenStatus(roomPath string) (TokenStatus, error) {
 		}
 		masked = "****" + tail
 	}
-	return TokenStatus{Revision: revision(revisionPart{name: "cluster_token.txt", data: data, exists: exists}), Configured: token != "", MaskedValue: masked}, nil
+	if !exists || mode == 0 {
+		mode = 0o600
+	}
+	return tokenDocument{
+		status: TokenStatus{Revision: tokenStatusRevision(exists, digest), Configured: token != "", MaskedValue: masked},
+		digest: digest, data: data, mode: mode, exists: exists,
+	}, nil
 }
 
-func prepareTokenUpdate(room rooms.Room, roomPath string, request TokenUpdateRequest) (Preview, error) {
+func prepareTokenUpdate(room rooms.Room, document tokenDocument, request TokenUpdateRequest) (Preview, error) {
 	if request.Confirmation != room.Name {
 		return Preview{}, ErrConfirmationNeeded
 	}
 	if err := rooms.ValidateClusterToken(request.Token, true); err != nil {
 		return Preview{}, &FieldError{Fields: map[string]string{"token": err.Error()}}
 	}
-	data, _, _, exists, err := readConfiguration(filepath.Join(roomPath, "cluster_token.txt"), true)
-	if err != nil {
-		return Preview{}, err
-	}
-	currentRevision := revision(revisionPart{name: "cluster_token.txt", data: data, exists: exists})
+	currentRevision := document.status.Revision
 	if err := checkRevision(request.ExpectedRevision, currentRevision); err != nil {
 		return Preview{}, err
 	}
-	before := strings.TrimSpace(string(data))
 	after := strings.TrimSpace(request.Token)
-	if before == after {
+	afterDigest := tokenDigest(after)
+	if document.digest == afterDigest {
 		return Preview{}, ErrNoChanges
 	}
-	next := []byte{}
-	if after != "" {
-		next = []byte(after + "\n")
-	}
 	change := Change{
-		Path: "clusterToken", Label: "Cluster Token", Before: configuredLabel(before), After: configuredLabel(after),
-		Sensitive: true, Operation: operation(optionalSecret(before), optionalSecret(after)),
+		Path: "clusterToken", Label: "Cluster Token", Before: configuredLabelFromBool(document.status.Configured), After: configuredLabel(after),
+		Sensitive: true, Operation: operation(optionalConfigured(document.status.Configured), optionalSecret(after)),
 	}
 	return Preview{
 		Revision:     currentRevision,
-		NextRevision: revision(revisionPart{name: "cluster_token.txt", data: next, exists: true}),
+		NextRevision: tokenStatusRevision(true, afterDigest),
 		Changes:      []Change{change}, RequiresConfirmation: true,
 	}, nil
+}
+
+func normalizedTokenData(value string) []byte {
+	token := strings.TrimSpace(value)
+	if token == "" {
+		return []byte{}
+	}
+	return []byte(token + "\n")
+}
+
+func tokenDigest(value string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	return hex.EncodeToString(sum[:])
+}
+
+func tokenStatusRevision(exists bool, digest string) string {
+	return revision(revisionPart{name: "cluster_token.txt", data: []byte(digest), exists: exists})
+}
+
+func configuredLabelFromBool(configured bool) string {
+	if configured {
+		return "已配置"
+	}
+	return "未配置"
+}
+
+func optionalConfigured(configured bool) interface{} {
+	if !configured {
+		return nil
+	}
+	return true
 }
 
 func optionalSecret(value string) interface{} {

@@ -85,8 +85,8 @@ func (c *Coordinator) ImportDirectory(ctx context.Context, request DirectoryImpo
 			return c.failDirectoryImport(set, errors.Join(ErrNotRestorable, errors.New(inspection.ValidationError)))
 		}
 		if sharedSHA == "" {
-			sharedSHA = descriptor.SharedSHA256
-		} else if !strings.EqualFold(sharedSHA, descriptor.SharedSHA256) {
+			sharedSHA = inspection.SharedCompatibilitySHA256
+		} else if !strings.EqualFold(sharedSHA, inspection.SharedCompatibilitySHA256) {
 			return c.failDirectoryImport(set, ErrSharedFilesDiffer)
 		}
 		verifiedAt := c.now().UTC()

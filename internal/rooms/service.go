@@ -73,17 +73,62 @@ type PurgeRecoveryRequest struct {
 }
 
 type Service struct {
-	catalog     *Catalog
-	store       *Store
-	worldMu     sync.Mutex
-	lifecycleMu sync.RWMutex
-	onManaged   []func(string)
-	onUnmanaged []func(string)
-	onWorld     []func(string, string)
+	catalog        *Catalog
+	store          *Store
+	localDiscovery bool
+	worldMu        sync.Mutex
+	lifecycleMu    sync.RWMutex
+	onManaged      []func(string)
+	onUnmanaged    []func(string)
+	onWorld        []func(string, string)
 }
 
 func NewService(catalog *Catalog, store *Store) *Service {
-	return &Service{catalog: catalog, store: store}
+	return &Service{catalog: catalog, store: store, localDiscovery: true}
+}
+
+// ConfigureLocalDiscovery controls whether the controller's save path is a
+// runtime source. Controller-only deployments keep the local file catalog out
+// of the fleet while still retaining discovered Agent rooms in the database.
+func (s *Service) ConfigureLocalDiscovery(enabled bool) {
+	s.localDiscovery = enabled
+}
+
+func (s *Service) localRoomValue(room Room) Room {
+	room.TargetIDs, room.AvailableTargetIDs = []string{}, []string{}
+	if s.localDiscovery {
+		room.TargetIDs, room.AvailableTargetIDs = []string{"local"}, []string{"local"}
+	}
+	return decorateRoomControl(room)
+}
+
+func (s *Service) localWorldValue(world World) World {
+	world.TargetIDs, world.AvailableTargetIDs = []string{}, []string{}
+	if s.localDiscovery {
+		world.TargetIDs, world.AvailableTargetIDs = []string{"local"}, []string{"local"}
+	}
+	return world
+}
+
+func (s *Service) persistLocalCatalogRoom(roomID string) error {
+	room, err := s.catalog.Room(roomID)
+	if err != nil {
+		return err
+	}
+	worlds, err := s.catalog.Worlds(roomID)
+	if err != nil {
+		return err
+	}
+	room = s.localRoomValue(room)
+	quality := make(map[string]int, len(worlds))
+	for index := range worlds {
+		worlds[index] = s.localWorldValue(worlds[index])
+		quality[worlds[index].ID] = 100
+	}
+	room.WorldCount = len(worlds)
+	return s.store.SaveRuntimeCatalogRoom(catalogRoomValue{
+		Room: room, Worlds: worlds, MetadataQuality: 100, WorldQuality: quality,
+	})
 }
 
 func (s *Service) SetManagedRoomLifecycle(onManaged, onUnmanaged func(string)) {
@@ -113,30 +158,226 @@ func (s *Service) AddWorldLifecycle(onCreated func(string, string)) {
 	s.lifecycleMu.Unlock()
 }
 
-func (s *Service) List() ([]Room, error) { return s.catalog.List() }
+func (s *Service) SyncRuntimeCatalog(sources []RuntimeCatalogSource) error {
+	local := []sourceRoomValue{}
+	if s.localDiscovery {
+		for _, source := range sources {
+			if source.TargetID != "local" || !source.Available {
+				continue
+			}
+			items, err := localSourceRooms(s.catalog)
+			if err != nil {
+				return err
+			}
+			local = items
+			break
+		}
+	}
+	values := mergeRuntimeSources(sources, local)
+	confirmedTargets := make(map[string]bool, len(sources))
+	for _, source := range sources {
+		if source.Online && source.Available && !source.Stale {
+			confirmedTargets[source.TargetID] = true
+		}
+	}
+	newlyRegistered := make([]string, 0, len(values))
+	for _, value := range values {
+		registered, err := s.store.IsManaged(value.Room.ID)
+		if err != nil {
+			return err
+		}
+		if !registered {
+			newlyRegistered = append(newlyRegistered, value.Room.ID)
+		}
+	}
+	removedRooms, err := s.store.ReplaceRuntimeCatalog(values, confirmedTargets)
+	if err != nil {
+		return err
+	}
+	for _, value := range values {
+		if err := s.store.Adopt(value.Room); err != nil {
+			return err
+		}
+	}
+	for _, roomID := range newlyRegistered {
+		s.notifyManagedRoom(roomID, true)
+	}
+	for _, roomID := range removedRooms {
+		s.notifyManagedRoom(roomID, false)
+	}
+	return nil
+}
 
-func (s *Service) Room(roomID string) (Room, error) { return s.catalog.Room(roomID) }
+func (s *Service) List() ([]Room, error) {
+	persisted, err := s.store.CatalogRooms()
+	if err != nil {
+		return nil, catalogLookupError(err, ErrRoomNotFound)
+	}
+	byID := make(map[string]Room, len(persisted))
+	for _, room := range persisted {
+		byID[room.ID] = room
+	}
+	if s.localDiscovery {
+		local, localErr := s.catalog.List()
+		if localErr != nil {
+			return nil, localErr
+		}
+		for _, room := range local {
+			room.TargetIDs, room.AvailableTargetIDs = []string{"local"}, []string{"local"}
+			if stored, exists := byID[room.ID]; exists {
+				room = mergeRoomValues(room, stored)
+			}
+			byID[room.ID] = room
+		}
+	}
+	items := make([]Room, 0, len(byID))
+	for _, room := range byID {
+		items = append(items, decorateRoomControl(room))
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if !strings.EqualFold(items[i].Name, items[j].Name) {
+			return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+		}
+		return items[i].ID < items[j].ID
+	})
+	return items, nil
+}
 
-func (s *Service) Worlds(roomID string) ([]World, error) { return s.catalog.Worlds(roomID) }
+func (s *Service) Room(roomID string) (Room, error) {
+	if _, err := DecodeID(roomID); err != nil {
+		return Room{}, err
+	}
+	var local Room
+	localFound := false
+	if s.localDiscovery {
+		value, err := s.catalog.Room(roomID)
+		if err == nil {
+			local, localFound = value, true
+			local.TargetIDs, local.AvailableTargetIDs = []string{"local"}, []string{"local"}
+		} else if !errors.Is(err, ErrRoomNotFound) {
+			return Room{}, err
+		}
+	}
+	persisted, persistedErr := s.store.CatalogRoom(roomID)
+	persistedFound := persistedErr == nil
+	if persistedErr != nil && !errors.Is(persistedErr, ErrRoomNotFound) {
+		return Room{}, catalogLookupError(persistedErr, ErrRoomNotFound)
+	}
+	switch {
+	case localFound && persistedFound:
+		return decorateRoomControl(mergeRoomValues(local, persisted)), nil
+	case localFound:
+		return decorateRoomControl(local), nil
+	case persistedFound:
+		return decorateRoomControl(persisted), nil
+	default:
+		return Room{}, ErrRoomNotFound
+	}
+}
+
+func decorateRoomControl(room Room) Room {
+	room.Managed = true
+	targets := mergeIDs(room.TargetIDs)
+	available := mergeIDs(room.AvailableTargetIDs)
+	room.TargetIDs, room.AvailableTargetIDs = targets, available
+	switch {
+	case len(targets) == 0:
+		room.ControlState = "unavailable"
+	case len(available) == 0:
+		room.ControlState = "offline"
+	case len(available) < len(targets):
+		room.ControlState = "degraded"
+	default:
+		room.ControlState = "ready"
+	}
+	room.ControlAvailable = room.ControlState == "ready"
+	return room
+}
+
+func (s *Service) Worlds(roomID string) ([]World, error) {
+	if _, err := DecodeID(roomID); err != nil {
+		return nil, err
+	}
+	if _, err := s.Room(roomID); err != nil {
+		return nil, err
+	}
+	persisted, err := s.store.CatalogWorlds(roomID)
+	if err != nil {
+		return nil, catalogLookupError(err, ErrWorldNotFound)
+	}
+	byID := make(map[string]World, len(persisted))
+	for _, world := range persisted {
+		byID[world.ID] = world
+	}
+	if s.localDiscovery {
+		local, localErr := s.catalog.Worlds(roomID)
+		if localErr == nil {
+			for _, world := range local {
+				world.TargetIDs, world.AvailableTargetIDs = []string{"local"}, []string{"local"}
+				if stored, exists := byID[world.ID]; exists {
+					world = mergeWorldValues(world, stored)
+				}
+				byID[world.ID] = world
+			}
+		} else if !errors.Is(localErr, ErrRoomNotFound) {
+			return nil, localErr
+		}
+	}
+	items := make([]World, 0, len(byID))
+	for _, world := range byID {
+		items = append(items, world)
+	}
+	sortWorlds(items)
+	return items, nil
+}
 
 func (s *Service) World(roomID, worldID string) (World, error) {
-	return s.catalog.World(roomID, worldID)
+	if _, err := DecodeID(worldID); err != nil {
+		return World{}, err
+	}
+	worlds, err := s.Worlds(roomID)
+	if err != nil {
+		return World{}, err
+	}
+	for _, world := range worlds {
+		if world.ID == worldID {
+			return world, nil
+		}
+	}
+	return World{}, ErrWorldNotFound
 }
 
 func (s *Service) Adopt(roomID string) (Room, error) {
-	room, err := s.catalog.Room(roomID)
+	return s.Register(roomID)
+}
+
+// Register persists a discovered room in the controller catalog. Discovery
+// calls this automatically; the public Adopt method remains as a compatibility
+// alias for older clients.
+func (s *Service) Register(roomID string) (Room, error) {
+	room, err := s.Room(roomID)
+	if err != nil {
+		return Room{}, err
+	}
+	registered, err := s.store.IsManaged(room.ID)
 	if err != nil {
 		return Room{}, err
 	}
 	if err := s.store.Adopt(room); err != nil {
 		return Room{}, err
 	}
-	room.Managed = true
-	s.notifyManagedRoom(room.ID, true)
+	room = decorateRoomControl(room)
+	if !registered {
+		s.notifyManagedRoom(room.ID, true)
+	}
 	return room, nil
 }
 
 func (s *Service) Unadopt(roomID string) error {
+	return s.Unregister(roomID)
+}
+
+func (s *Service) Unregister(roomID string) error {
 	if err := s.store.Unadopt(roomID); err != nil {
 		return err
 	}
@@ -157,6 +398,8 @@ func (s *Service) Create(request CreateRequest) (Room, error) {
 		return Room{}, err
 	}
 	defer release()
+	s.worldMu.Lock()
+	defer s.worldMu.Unlock()
 	if err := os.MkdirAll(s.catalog.root, 0750); err != nil {
 		return Room{}, fmt.Errorf("create save root: %w", err)
 	}
@@ -168,6 +411,10 @@ func (s *Service) Create(request CreateRequest) (Room, error) {
 		return Room{}, ErrRoomExists
 	} else if !os.IsNotExist(err) {
 		return Room{}, fmt.Errorf("inspect room target: %w", err)
+	}
+	allocation, err := s.nextRoomAllocation(request.IncludeCaves)
+	if err != nil {
+		return Room{}, err
 	}
 	temporary, err := os.MkdirTemp(s.catalog.root, ".dst-admin-create-")
 	if err != nil {
@@ -182,7 +429,7 @@ func (s *Service) Create(request CreateRequest) (Room, error) {
 			_ = os.RemoveAll(target)
 		}
 	}()
-	if err := writeRoomFiles(temporary, request); err != nil {
+	if err := writeRoomFiles(temporary, request, allocation); err != nil {
 		return Room{}, err
 	}
 	if err := os.Rename(temporary, target); err != nil {
@@ -196,7 +443,12 @@ func (s *Service) Create(request CreateRequest) (Room, error) {
 	if err := s.store.Adopt(room); err != nil {
 		return Room{}, err
 	}
+	if err := s.persistLocalCatalogRoom(room.ID); err != nil {
+		_ = s.store.Unadopt(room.ID)
+		return Room{}, err
+	}
 	room.Managed = true
+	room = s.localRoomValue(room)
 	completed = true
 	s.notifyManagedRoom(room.ID, true)
 	return room, nil
@@ -264,10 +516,21 @@ func (s *Service) CreateWorld(roomID string, request CreateWorldRequest) (World,
 	if err := os.Rename(filepath.Join(temporary, request.DirectoryName), target); err != nil {
 		return World{}, fmt.Errorf("publish world directory: %w", err)
 	}
+	published := true
+	defer func() {
+		if published {
+			_ = os.RemoveAll(target)
+		}
+	}()
 	world, err := s.catalog.World(roomID, EncodeID(request.DirectoryName))
 	if err != nil {
 		return World{}, err
 	}
+	if err := s.persistLocalCatalogRoom(room.ID); err != nil {
+		return World{}, err
+	}
+	published = false
+	world = s.localWorldValue(world)
 	s.notifyWorldCreated(room.ID, world.ID)
 	return world, nil
 }
@@ -310,11 +573,52 @@ func (s *Service) DeleteRoom(roomID string, request DeleteRoomRequest) (DeleteRo
 		}
 		return DeleteRoomResult{}, err
 	}
+	if err := s.store.RemoveRuntimeCatalogRoom(room.ID); err != nil {
+		if rollbackErr := os.Rename(target, source); rollbackErr != nil {
+			return DeleteRoomResult{}, fmt.Errorf("%w; restore room directory: %v", err, rollbackErr)
+		}
+		_ = s.store.Adopt(room)
+		return DeleteRoomResult{}, err
+	}
 	s.notifyManagedRoom(room.ID, false)
+	room = s.localRoomValue(room)
 	return DeleteRoomResult{
 		Room:         room,
 		RecoveryName: filepath.Join(".dst-admin-trash", trashName),
 	}, nil
+}
+
+func (s *Service) HasLocalRoom(roomID string) (bool, error) {
+	if _, err := s.catalog.Room(roomID); err != nil {
+		if errors.Is(err, ErrRoomNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// FinalizeRemoteRoomRecovery removes control-plane registration only after a
+// Runtime has confirmed that its room directory was moved to recovery.
+func (s *Service) FinalizeRemoteRoomRecovery(roomID string) (Room, error) {
+	s.worldMu.Lock()
+	defer s.worldMu.Unlock()
+	room, err := s.Room(roomID)
+	if err != nil {
+		return Room{}, err
+	}
+	if !room.Managed {
+		return Room{}, ErrRoomNotManaged
+	}
+	if err := s.store.Unadopt(room.ID); err != nil {
+		return Room{}, err
+	}
+	if err := s.store.RemoveRuntimeCatalogRoom(room.ID); err != nil {
+		_ = s.store.Adopt(room)
+		return Room{}, err
+	}
+	s.notifyManagedRoom(room.ID, false)
+	return room, nil
 }
 
 func (s *Service) notifyManagedRoom(roomID string, managed bool) {
@@ -368,6 +672,7 @@ func (s *Service) DeleteWorld(roomID, worldID string, request DeleteWorldRequest
 	if err != nil {
 		return DeleteWorldResult{}, err
 	}
+	world = s.localWorldValue(world)
 	roomPath := filepath.Join(s.catalog.root, room.DirectoryName)
 	source := filepath.Join(roomPath, world.DirectoryName)
 	trashRoot := filepath.Join(roomPath, ".dst-admin-trash")
@@ -381,6 +686,12 @@ func (s *Service) DeleteWorld(roomID, worldID string, request DeleteWorldRequest
 	target := filepath.Join(trashRoot, trashName)
 	if err := os.Rename(source, target); err != nil {
 		return DeleteWorldResult{}, fmt.Errorf("move world to recovery directory: %w", err)
+	}
+	if err := s.persistLocalCatalogRoom(room.ID); err != nil {
+		if rollbackErr := os.Rename(target, source); rollbackErr != nil {
+			return DeleteWorldResult{}, fmt.Errorf("%w; restore world directory: %v", err, rollbackErr)
+		}
+		return DeleteWorldResult{}, err
 	}
 	return DeleteWorldResult{World: world, RecoveryName: filepath.Join(".dst-admin-trash", trashName)}, nil
 }
@@ -431,7 +742,13 @@ func (s *Service) RestoreRoom(recoveryName string) (Room, error) {
 		}
 		return Room{}, err
 	}
+	if err := s.persistLocalCatalogRoom(room.ID); err != nil {
+		_ = s.store.Unadopt(room.ID)
+		_ = os.Rename(target, source)
+		return Room{}, err
+	}
 	room.Managed = true
+	room = s.localRoomValue(room)
 	s.notifyManagedRoom(room.ID, true)
 	return room, nil
 }
@@ -512,6 +829,11 @@ func (s *Service) RestoreWorld(roomID, recoveryName string) (World, error) {
 		_ = os.Rename(target, source)
 		return World{}, err
 	}
+	if err := s.persistLocalCatalogRoom(room.ID); err != nil {
+		_ = os.Rename(target, source)
+		return World{}, err
+	}
+	world = s.localWorldValue(world)
 	s.notifyWorldCreated(room.ID, world.ID)
 	return world, nil
 }
@@ -626,13 +948,82 @@ type worldAllocation struct {
 	master             bool
 }
 
+type roomAllocation struct {
+	masterPort        int
+	masterWorld       worldAllocation
+	cavesWorld        worldAllocation
+	includeCavesWorld bool
+}
+
+func (s *Service) nextRoomAllocation(includeCaves bool) (roomAllocation, error) {
+	usedPorts, err := s.configuredPorts()
+	if err != nil {
+		return roomAllocation{}, err
+	}
+	reserve := func(preferred int) (int, error) {
+		port := nextFreePort(preferred, usedPorts)
+		if port < 1 || port > 65535 {
+			return 0, errors.New("没有可用于新房间的 UDP 端口")
+		}
+		usedPorts[port] = true
+		return port, nil
+	}
+	masterPort, err := reserve(10889)
+	if err != nil {
+		return roomAllocation{}, err
+	}
+	masterServer, err := reserve(10999)
+	if err != nil {
+		return roomAllocation{}, err
+	}
+	masterAuth, err := reserve(8767)
+	if err != nil {
+		return roomAllocation{}, err
+	}
+	masterSteam, err := reserve(27017)
+	if err != nil {
+		return roomAllocation{}, err
+	}
+	result := roomAllocation{
+		masterPort: masterPort,
+		masterWorld: worldAllocation{
+			shardID: 1, serverPort: masterServer, authenticationPort: masterAuth,
+			masterServerPort: masterSteam, master: true,
+		},
+		includeCavesWorld: includeCaves,
+	}
+	if !includeCaves {
+		return result, nil
+	}
+	cavesServer, err := reserve(11000)
+	if err != nil {
+		return roomAllocation{}, err
+	}
+	cavesAuth, err := reserve(8768)
+	if err != nil {
+		return roomAllocation{}, err
+	}
+	cavesSteam, err := reserve(27018)
+	if err != nil {
+		return roomAllocation{}, err
+	}
+	result.cavesWorld = worldAllocation{
+		shardID: 2, serverPort: cavesServer, authenticationPort: cavesAuth,
+		masterServerPort: cavesSteam, master: false,
+	}
+	return result, nil
+}
+
 func (s *Service) nextWorldAllocation(roomID, roomPath, worldType string) (worldAllocation, error) {
 	worlds, err := s.catalog.Worlds(roomID)
 	if err != nil {
 		return worldAllocation{}, err
 	}
 	usedShardIDs := make(map[int]bool)
-	usedPorts := make(map[int]bool)
+	usedPorts, err := s.configuredPorts()
+	if err != nil {
+		return worldAllocation{}, err
+	}
 	hasMaster := false
 	for _, world := range worlds {
 		config, loadErr := ini.Load(filepath.Join(roomPath, world.DirectoryName, "server.ini"))
@@ -643,18 +1034,9 @@ func (s *Service) nextWorldAllocation(roomID, roomPath, worldType string) (world
 		if shardID > 0 {
 			usedShardIDs[shardID] = true
 		}
-		for _, port := range []int{
-			config.Section("NETWORK").Key("server_port").MustInt(0),
-			config.Section("STEAM").Key("authentication_port").MustInt(0),
-			config.Section("STEAM").Key("master_server_port").MustInt(0),
-		} {
-			if port > 0 {
-				usedPorts[port] = true
-			}
-		}
 		hasMaster = hasMaster || world.IsMaster
 	}
-	master := worldType == "forest" && !hasMaster
+	master := !hasMaster
 	shardID := 2
 	if master {
 		shardID = 1
@@ -662,15 +1044,68 @@ func (s *Service) nextWorldAllocation(roomID, roomPath, worldType string) (world
 	for usedShardIDs[shardID] {
 		shardID++
 	}
-	serverPort := nextFreePort(10998+shardID, usedPorts)
-	usedPorts[serverPort] = true
-	authenticationPort := nextFreePort(8766+shardID, usedPorts)
-	usedPorts[authenticationPort] = true
-	masterServerPort := nextFreePort(27016+shardID, usedPorts)
+	reserve := func(preferred int) (int, error) {
+		port := nextFreePort(preferred, usedPorts)
+		if port < 1 || port > 65535 {
+			return 0, errors.New("没有可用于新世界的 UDP 端口")
+		}
+		usedPorts[port] = true
+		return port, nil
+	}
+	serverPort, err := reserve(10998 + shardID)
+	if err != nil {
+		return worldAllocation{}, err
+	}
+	authenticationPort, err := reserve(8766 + shardID)
+	if err != nil {
+		return worldAllocation{}, err
+	}
+	masterServerPort, err := reserve(27016 + shardID)
+	if err != nil {
+		return worldAllocation{}, err
+	}
 	return worldAllocation{
 		shardID: shardID, serverPort: serverPort, authenticationPort: authenticationPort,
 		masterServerPort: masterServerPort, master: master,
 	}, nil
+}
+
+func (s *Service) configuredPorts() (map[int]bool, error) {
+	result := make(map[int]bool)
+	rooms, err := s.catalog.List()
+	if err != nil {
+		return nil, err
+	}
+	for _, room := range rooms {
+		roomPath := filepath.Join(s.catalog.root, room.DirectoryName)
+		cluster, loadErr := ini.Load(filepath.Join(roomPath, "cluster.ini"))
+		if loadErr != nil {
+			return nil, fmt.Errorf("parse existing room cluster.ini: %w", loadErr)
+		}
+		if port := cluster.Section("SHARD").Key("master_port").MustInt(0); port > 0 {
+			result[port] = true
+		}
+		worlds, worldsErr := s.catalog.Worlds(room.ID)
+		if worldsErr != nil {
+			return nil, worldsErr
+		}
+		for _, world := range worlds {
+			config, configErr := ini.Load(filepath.Join(roomPath, world.DirectoryName, "server.ini"))
+			if configErr != nil {
+				return nil, fmt.Errorf("parse existing world server.ini: %w", configErr)
+			}
+			for _, port := range []int{
+				config.Section("NETWORK").Key("server_port").MustInt(0),
+				config.Section("STEAM").Key("authentication_port").MustInt(0),
+				config.Section("STEAM").Key("master_server_port").MustInt(0),
+			} {
+				if port > 0 {
+					result[port] = true
+				}
+			}
+		}
+	}
+	return result, nil
 }
 
 func nextFreePort(candidate int, used map[int]bool) int {
@@ -716,7 +1151,7 @@ type ValidationError struct {
 
 func (e *ValidationError) Error() string { return "room input is invalid" }
 
-func writeRoomFiles(root string, request CreateRequest) error {
+func writeRoomFiles(root string, request CreateRequest, allocation roomAllocation) error {
 	clusterKey, err := randomClusterKey()
 	if err != nil {
 		return err
@@ -730,13 +1165,14 @@ func writeRoomFiles(root string, request CreateRequest) error {
 	_, _ = network.NewKey("cluster_name", request.Name)
 	_, _ = network.NewKey("cluster_description", request.Description)
 	_, _ = network.NewKey("cluster_password", request.Password)
+	_, _ = network.NewKey("cluster_language", "zh")
 	misc, _ := cluster.NewSection("MISC")
 	_, _ = misc.NewKey("console_enabled", "true")
 	shard, _ := cluster.NewSection("SHARD")
 	_, _ = shard.NewKey("shard_enabled", "true")
 	_, _ = shard.NewKey("bind_ip", "127.0.0.1")
 	_, _ = shard.NewKey("master_ip", "127.0.0.1")
-	_, _ = shard.NewKey("master_port", "10889")
+	_, _ = shard.NewKey("master_port", strconv.Itoa(allocation.masterPort))
 	_, _ = shard.NewKey("cluster_key", clusterKey)
 	if err := writeINI(filepath.Join(root, "cluster.ini"), cluster, 0640); err != nil {
 		return err
@@ -746,11 +1182,17 @@ func writeRoomFiles(root string, request CreateRequest) error {
 			return fmt.Errorf("write cluster token: %w", err)
 		}
 	}
-	if err := writeWorld(root, "Master", 1, 10999, 8767, 27017, true, "forest"); err != nil {
+	if err := writeWorld(
+		root, "Master", allocation.masterWorld.shardID, allocation.masterWorld.serverPort,
+		allocation.masterWorld.authenticationPort, allocation.masterWorld.masterServerPort, true, "forest",
+	); err != nil {
 		return err
 	}
-	if request.IncludeCaves {
-		if err := writeWorld(root, "Caves", 2, 11000, 8768, 27018, false, "cave"); err != nil {
+	if allocation.includeCavesWorld {
+		if err := writeWorld(
+			root, "Caves", allocation.cavesWorld.shardID, allocation.cavesWorld.serverPort,
+			allocation.cavesWorld.authenticationPort, allocation.cavesWorld.masterServerPort, false, "cave",
+		); err != nil {
 			return err
 		}
 	}

@@ -63,6 +63,13 @@ func (c *Coordinator) Restore(ctx context.Context, setID, confirmation, sourceJo
 	if err := c.verifySet(backupSet, currentParts, revision); err != nil {
 		return RestoreResult{}, err
 	}
+	defer func() {
+		targetIDs := make([]string, 0, len(currentParts))
+		for _, part := range currentParts {
+			targetIDs = append(targetIDs, part.target.TargetID)
+		}
+		runtimedriver.NotifyRuntimeTargetsChanged(c.mutations, targetIDs...)
+	}()
 	now := c.now().UTC()
 	operation := Operation{
 		ID: operationID, SetID: setID, RoomID: room.ID, Kind: "restore", Phase: "planned", Status: OperationRunning,
@@ -161,7 +168,8 @@ func (c *Coordinator) verifySet(value Set, current []runtimePart, revision strin
 		}
 		return errors.Join(ErrNotRestorable, errors.New(value.ValidationError))
 	}
-	if value.Status != StatusVerified || value.VerifiedAt == nil || value.ManifestVersion != manifestVersion || len(value.Parts) != len(current) ||
+	if value.Status != StatusVerified || value.VerifiedAt == nil ||
+		value.ManifestVersion != legacyManifestVersion && value.ManifestVersion != manifestVersion || len(value.Parts) != len(current) ||
 		value.TopologyRevision != revision || len(value.ManifestSHA256) != 64 || len(value.SharedSHA256) != 64 {
 		return ErrIncomplete
 	}
@@ -195,7 +203,7 @@ func (c *Coordinator) verifySet(value Set, current []runtimePart, revision strin
 		target, exists := byWorld[part.WorldID]
 		if !exists || part.Status != PartVerified || part.TopologyRevision != revision || part.TargetID != target.target.TargetID ||
 			part.InstallationID != target.target.InstallationID || part.Cluster != target.target.Cluster || part.Shard != target.target.Shard ||
-			!strings.EqualFold(part.SharedSHA256, value.SharedSHA256) {
+			value.ManifestVersion == legacyManifestVersion && !strings.EqualFold(part.SharedSHA256, value.SharedSHA256) {
 			return ErrTopologyChanged
 		}
 		path, err := c.partPath(part)
@@ -208,6 +216,9 @@ func (c *Coordinator) verifySet(value Set, current []runtimePart, revision strin
 		inspection, inspectErr := shardtransfer.InspectBackupArchive(path)
 		if inspectErr != nil || !inspection.Restorable {
 			return errors.Join(ErrNotRestorable, inspectErr, errors.New(inspection.ValidationError))
+		}
+		if value.ManifestVersion == manifestVersion && !strings.EqualFold(inspection.SharedCompatibilitySHA256, value.SharedSHA256) {
+			return ErrIntegrity
 		}
 	}
 	return nil

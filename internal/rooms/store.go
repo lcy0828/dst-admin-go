@@ -3,6 +3,7 @@ package rooms
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jinzhu/gorm"
@@ -15,18 +16,31 @@ type managedRoomRecord struct {
 }
 
 type Store struct {
-	db    *gorm.DB
-	table string
-	now   func() time.Time
+	db                 *gorm.DB
+	table              string
+	catalogRoomsTable  string
+	catalogWorldsTable string
+	catalogMu          sync.Mutex
+	now                func() time.Time
 }
 
 func NewStore(db *gorm.DB, tablePrefix string) *Store {
-	return &Store{db: db, table: strings.TrimSpace(tablePrefix) + "managed_room", now: time.Now}
+	prefix := strings.TrimSpace(tablePrefix)
+	return &Store{
+		db: db, table: prefix + "managed_room", catalogRoomsTable: prefix + "room_catalog",
+		catalogWorldsTable: prefix + "world_catalog", now: time.Now,
+	}
 }
 
 func (s *Store) Migrate() error {
 	if err := s.db.Table(s.table).AutoMigrate(&managedRoomRecord{}).Error; err != nil {
 		return fmt.Errorf("migrate managed rooms: %w", err)
+	}
+	if err := s.db.Table(s.catalogRoomsTable).AutoMigrate(&catalogRoomRecord{}).Error; err != nil {
+		return fmt.Errorf("migrate room catalog: %w", err)
+	}
+	if err := s.db.Table(s.catalogWorldsTable).AutoMigrate(&catalogWorldRecord{}).Error; err != nil {
+		return fmt.Errorf("migrate world catalog: %w", err)
 	}
 	return nil
 }

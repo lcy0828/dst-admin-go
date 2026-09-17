@@ -35,6 +35,7 @@ type Scope string
 const (
 	ScopeShared Scope = "shared"
 	ScopeWorld  Scope = "world"
+	ScopeMod    Scope = "mod"
 )
 
 type Descriptor struct {
@@ -191,6 +192,10 @@ func (m *Manager) Prepare(ctx context.Context, publicationID string) error {
 }
 
 func (m *Manager) Publish(publicationID string) error {
+	return m.publish(publicationID, nil)
+}
+
+func (m *Manager) publish(publicationID string, expected map[string]string) error {
 	descriptor, err := m.descriptor(publicationID)
 	if err != nil {
 		return err
@@ -209,6 +214,9 @@ func (m *Manager) Publish(publicationID string) error {
 	if err != nil || len(entries) == 0 {
 		return errors.Join(err, ErrIntegrity)
 	}
+	if expected != nil && len(entries) != len(expected) {
+		return ErrInvalidRequest
+	}
 	recovery := m.recoveryPath(publicationID)
 	if err := os.Mkdir(recovery, 0o700); err != nil {
 		return err
@@ -220,6 +228,15 @@ func (m *Manager) Publish(publicationID string) error {
 			return ErrIntegrity
 		}
 		targetPath := filepath.Join(target, name)
+		if expected != nil {
+			digest, exists := expected[name]
+			if !exists {
+				return ErrInvalidRequest
+			}
+			if err := verifyExpectedFile(targetPath, digest); err != nil {
+				return err
+			}
+		}
 		info, statErr := os.Lstat(targetPath)
 		item := fileReceipt{Name: name, Mode: 0o640}
 		if statErr == nil {
@@ -318,7 +335,7 @@ func (m *Manager) restore(value receipt) error {
 
 func (m *Manager) targetRoot(descriptor Descriptor) (string, error) {
 	root := filepath.Join(m.saveRoot, descriptor.Cluster)
-	if descriptor.Scope == ScopeWorld {
+	if descriptor.Scope == ScopeWorld || descriptor.Scope == ScopeMod {
 		root = filepath.Join(root, descriptor.Shard)
 	}
 	if !contained(m.saveRoot, root) {
@@ -359,7 +376,7 @@ func (m *Manager) recoveryPath(id string) string {
 
 func validateDescriptor(value Descriptor) error {
 	if !operationPattern.MatchString(value.PublicationID) || !identityPattern.MatchString(value.Cluster) ||
-		!identityPattern.MatchString(value.Shard) || value.Scope != ScopeShared && value.Scope != ScopeWorld ||
+		!identityPattern.MatchString(value.Shard) || value.Scope != ScopeShared && value.Scope != ScopeWorld && value.Scope != ScopeMod ||
 		value.Size < 1 || value.Size > maxTotalBytes || len(value.SHA256) != 64 {
 		return ErrInvalidRequest
 	}
@@ -385,7 +402,10 @@ func allowedName(scope Scope, name string) bool {
 		}
 		return false
 	}
-	return name == "server.ini" || name == "leveldataoverride.lua"
+	if scope == ScopeWorld {
+		return name == "server.ini" || name == "leveldataoverride.lua"
+	}
+	return scope == ScopeMod && name == "modoverrides.lua"
 }
 
 func extractArchive(ctx context.Context, archivePath, stage string, scope Scope) error {

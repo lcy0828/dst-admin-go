@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,10 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"dont/internal/agents"
 	"dont/internal/backups"
 	"dont/internal/configuration"
 	"dont/internal/jobs"
 	"dont/internal/rooms"
+	"dont/internal/runtimedriver"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/gorm"
@@ -166,11 +169,11 @@ func TestConfigurationHTTPRevisionFieldsAndApplyJob(t *testing.T) {
 	assertStatus(t, response, http.StatusAccepted)
 	jobID, _ := responseData(t, response)["id"].(string)
 	job := waitForConfigurationJob(t, app.jobs, jobID)
-	if len(job.Targets) != 1 || !strings.Contains(job.Targets[0].Message, "已同步到 2 个远程运行目标") {
+	if len(job.Targets) != 1 || !strings.Contains(job.Targets[0].Message, "已应用到 2 个 Runtime 目标") {
 		t.Fatalf("configuration job did not report remote publication: %#v", job.Targets)
 	}
-	if app.backups.Count() != 1 {
-		t.Fatalf("protection backups = %d, want 1", app.backups.Count())
+	if app.backups.Count() != 0 {
+		t.Fatalf("ordinary configuration save created %d world backups", app.backups.Count())
 	}
 	written, err := os.ReadFile(filepath.Join(app.roomPath, "cluster.ini"))
 	if err != nil || !strings.Contains(string(written), "cluster_description = After") {
@@ -235,6 +238,29 @@ func TestConfigurationHTTPAccessConfirmationAndTokenNoStore(t *testing.T) {
 	encoded, _ := json.Marshal(job)
 	if strings.Contains(string(encoded), "replacement-token") || strings.Contains(string(encoded), "existing-cluster-token") {
 		t.Fatalf("configuration job leaked a token: %s", encoded)
+	}
+}
+
+func TestConfigurationHTTPReportsAgentUpgradeRequired(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "unsupported Agent action", err: agents.ErrUnsupportedAction},
+		{name: "missing Runtime capability", err: runtimedriver.ErrCapabilityMissing},
+		{name: "wrapped missing capability", err: errors.Join(errors.New("configuration read failed"), runtimedriver.ErrCapabilityMissing)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(response)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/api/v2/rooms/room/configuration", nil)
+			configurationFailure(ctx, test.err)
+			assertAPIError(t, response, http.StatusConflict, "AGENT_UPGRADE_REQUIRED")
+			if jobError := configurationJobError(test.err); jobError.Code != "AGENT_UPGRADE_REQUIRED" {
+				t.Fatalf("job error code = %q, want AGENT_UPGRADE_REQUIRED", jobError.Code)
+			}
+		})
 	}
 }
 

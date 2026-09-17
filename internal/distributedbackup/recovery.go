@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"dont/internal/roomops"
 
@@ -12,8 +11,7 @@ import (
 )
 
 // Recover resumes or rolls back operations left active by a controller crash.
-// It is safe to call at startup and periodically; Runtime steps and receipts
-// are idempotent and fenced by a newly acquired room lease.
+// The application calls it once after startup; further recovery is explicit.
 func (c *Coordinator) Recover(ctx context.Context) error {
 	operations, err := c.store.ActiveOperations()
 	if err != nil {
@@ -135,21 +133,4 @@ func runtimePartsByWorld(values []runtimePart) map[string]runtimePart {
 		result[value.part.WorldID] = value
 	}
 	return result
-}
-
-func (c *Coordinator) RunRecovery(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		interval = time.Minute
-	}
-	_ = c.Recover(ctx)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			_ = c.Recover(ctx)
-		}
-	}
 }

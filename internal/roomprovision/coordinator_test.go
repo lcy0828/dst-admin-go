@@ -31,6 +31,42 @@ func (provisionStoppedControl) Start(context.Context, string, string) error     
 func (provisionStoppedControl) Stop(context.Context, string, string) error         { return nil }
 func (provisionStoppedControl) Send(context.Context, string, string, string) error { return nil }
 
+type provisionTrackingControl struct {
+	running  map[string]bool
+	starts   map[string]int
+	stops    map[string]int
+	startErr error
+}
+
+func newProvisionTrackingControl(running ...string) *provisionTrackingControl {
+	control := &provisionTrackingControl{running: map[string]bool{}, starts: map[string]int{}, stops: map[string]int{}}
+	for _, shard := range running {
+		control.running[shard] = true
+	}
+	return control
+}
+
+func (c *provisionTrackingControl) Status(_ context.Context, _, shard string) (shards.RuntimeStatus, error) {
+	if c.running[shard] {
+		return shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}, nil
+	}
+	return shards.RuntimeStatus{State: shards.RuntimeStopped}, nil
+}
+func (c *provisionTrackingControl) Start(_ context.Context, _, shard string) error {
+	c.starts[shard]++
+	if c.startErr != nil {
+		return c.startErr
+	}
+	c.running[shard] = true
+	return nil
+}
+func (c *provisionTrackingControl) Stop(_ context.Context, _, shard string) error {
+	c.stops[shard]++
+	c.running[shard] = false
+	return nil
+}
+func (*provisionTrackingControl) Send(context.Context, string, string, string) error { return nil }
+
 type provisionTestRooms struct {
 	bundle    rooms.ProvisionBundle
 	staged    bool
@@ -60,9 +96,19 @@ func (f *provisionTestRooms) CompleteProvisionCluster(_, _ string) error {
 
 type provisionTestTopology struct {
 	placements []topology.ExecutionPlacement
+	links      []topology.ShardLink
 	resources  topology.InfrastructureSnapshot
 	applyErr   error
+	verifyErr  error
 	applied    bool
+}
+
+func (f *provisionTestTopology) VerifyDesiredShardLinks(context.Context, string) error {
+	return f.verifyErr
+}
+
+func (f *provisionTestTopology) ResolveDesiredShardLinks(context.Context, string) ([]topology.ShardLink, error) {
+	return append([]topology.ShardLink(nil), f.links...), nil
 }
 
 func (f *provisionTestTopology) ResolveDesiredRoomExecutions(context.Context, string) ([]topology.ExecutionPlacement, error) {
@@ -121,6 +167,9 @@ func (f provisionTestRouter) ProvisionTarget(placement topology.ExecutionPlaceme
 }
 
 func (f provisionTestRouter) TrustedTarget(target runtimedriver.Target) (runtimedriver.Driver, error) {
+	if target.TargetID == "local" {
+		return f.source, nil
+	}
 	driver, ok := f.targets[target.TargetID]
 	if !ok {
 		return nil, runtimedriver.ErrInvalidTarget
@@ -206,7 +255,7 @@ func newProvisionFixture(t *testing.T, masterTarget, cavesTarget string) provisi
 	catalog := &provisionTestRooms{bundle: rooms.ProvisionBundle{
 		Room: room,
 		Shared: []rooms.ProvisionFile{
-			{Name: "cluster.ini", Data: []byte("[NETWORK]\ncluster_name = Test\n[SHARD]\nshard_enabled = true\nbind_ip = 127.0.0.1\nmaster_ip = 127.0.0.1\n"), Mode: 0o600},
+			{Name: "cluster.ini", Data: []byte("[NETWORK]\ncluster_name = Test\n[SHARD]\nshard_enabled = true\nbind_ip = 127.0.0.1\nmaster_ip = 127.0.0.1\nmaster_port = 10889\n"), Mode: 0o600},
 			{Name: "cluster_token.txt", Data: []byte("token\n"), Mode: 0o600},
 		},
 		Worlds: []rooms.ProvisionWorld{
@@ -312,9 +361,103 @@ func TestCoordinatorProvisionsRoomAcrossRemoteTargets(t *testing.T) {
 		}
 		cluster, readErr := os.ReadFile(filepath.Join(root, "Cluster_1", "cluster.ini"))
 		config, parseErr := ini.Load(cluster)
-		if readErr != nil || parseErr != nil || config.Section("SHARD").Key("master_ip").String() != "192.0.2.10" || config.Section("SHARD").Key("bind_ip").String() != "0.0.0.0" {
+		expectedMasterIP := "192.0.2.10"
+		if targetID == "agent:node-a" {
+			expectedMasterIP = "127.0.0.1"
+		}
+		if readErr != nil || parseErr != nil || config.Section("SHARD").Key("master_ip").String() != expectedMasterIP || config.Section("SHARD").Key("bind_ip").String() != "0.0.0.0" {
 			t.Fatalf("target=%s cluster=%q readErr=%v parseErr=%v", targetID, cluster, readErr, parseErr)
 		}
+	}
+}
+
+func TestCoordinatorRendersSelectedShardLinkOnlyForSecondary(t *testing.T) {
+	fixture := newProvisionFixture(t, "agent:node-a", "agent:node-b")
+	fixture.topology.links = []topology.ShardLink{{
+		SourceTargetID: "agent:node-b", MasterTargetID: "agent:node-a",
+		Address: "100.64.0.10", Port: 11889, Mode: topology.ShardLinkOverlay,
+	}}
+	operation, err := fixture.coordinator.Provision(context.Background(), "room-1", "revision-1", "job-link")
+	if err != nil || operation.Status != StatusSucceeded {
+		t.Fatalf("operation=%#v err=%v", operation, err)
+	}
+	secondary, err := ini.Load(filepath.Join(fixture.roots["agent:node-b"], "Cluster_1", "cluster.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	section := secondary.Section("SHARD")
+	if section.Key("master_ip").String() != "100.64.0.10" || section.Key("master_port").MustInt(0) != 11889 {
+		t.Fatalf("secondary shard config=%#v", section.KeysHash())
+	}
+	master, err := ini.Load(filepath.Join(fixture.roots["agent:node-a"], "Cluster_1", "cluster.ini"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if master.Section("SHARD").Key("master_port").MustInt(0) != 10889 {
+		t.Fatalf("master listener port changed: %#v", master.Section("SHARD").KeysHash())
+	}
+}
+
+func TestCoordinatorRestoresOnlyWorldsThatWereRunning(t *testing.T) {
+	fixture := newProvisionFixture(t, "agent:node-a", "agent:node-a")
+	sourceControl := newProvisionTrackingControl("Master")
+	sourceDriver, err := runtimedriver.NewNative(t.TempDir(), sourceControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetControl := newProvisionTrackingControl()
+	targetDriver, err := runtimedriver.NewNative(fixture.roots["agent:node-a"], targetControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.router.source = sourceDriver
+	fixture.router.targets["agent:node-a"] = targetDriver
+	fixture.coordinator.runtimes = fixture.router
+
+	operation, err := fixture.coordinator.Provision(context.Background(), "room-1", "revision-1", "job-running")
+	if err != nil || operation.Status != StatusSucceeded || sourceControl.stops["Master"] != 1 || targetControl.starts["Master"] != 1 || targetControl.starts["Caves"] != 0 {
+		t.Fatalf("operation=%#v source=%#v target=%#v err=%v", operation, sourceControl, targetControl, err)
+	}
+	for _, step := range operation.Steps {
+		if step.WorldID == "master" && (!step.WasRunning || !step.RuntimeRestored) {
+			t.Fatalf("master runtime state was not persisted: %#v", step)
+		}
+		if step.WorldID == "caves" && (step.WasRunning || step.RuntimeRestored) {
+			t.Fatalf("stopped caves should remain stopped: %#v", step)
+		}
+	}
+}
+
+func TestCoordinatorRecoversRuntimeRestoreAfterTopologyCommit(t *testing.T) {
+	fixture := newProvisionFixture(t, "agent:node-a", "agent:node-a")
+	sourceControl := newProvisionTrackingControl("Master")
+	sourceDriver, err := runtimedriver.NewNative(t.TempDir(), sourceControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetControl := newProvisionTrackingControl()
+	targetControl.startErr = errors.New("forced start failure")
+	targetDriver, err := runtimedriver.NewNative(fixture.roots["agent:node-a"], targetControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.router.source = sourceDriver
+	fixture.router.targets["agent:node-a"] = targetDriver
+	fixture.coordinator.runtimes = fixture.router
+
+	operation, err := fixture.coordinator.Provision(context.Background(), "room-1", "revision-1", "job-runtime-recovery")
+	if err == nil || operation.Status != StatusRecoveryRequired || operation.Phase != "runtime_restore_target" || !fixture.topology.applied {
+		t.Fatalf("operation=%#v applied=%v err=%v", operation, fixture.topology.applied, err)
+	}
+
+	targetControl.startErr = nil
+	restarted, err := NewCoordinator(fixture.rooms, fixture.topology, fixture.router, &provisionTestLeases{}, fixture.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := restarted.RecoverOperation(context.Background(), operation.ID)
+	if err != nil || recovered.Status != StatusSucceeded || !targetControl.running["Master"] || targetControl.starts["Master"] != 2 {
+		t.Fatalf("recovered=%#v target=%#v err=%v", recovered, targetControl, err)
 	}
 }
 
