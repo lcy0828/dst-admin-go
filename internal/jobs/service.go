@@ -119,6 +119,22 @@ func (s *Service) Cancel(jobID string) (Job, error) {
 
 func (s *Service) Get(jobID string) (Job, error) { return s.store.Get(jobID) }
 
+func (s *Service) UpdateProgress(jobID string, progress int, message string) (Job, error) {
+	job, event, err := s.store.UpdateProgress(jobID, progress, message)
+	if err == nil && event.ID != 0 {
+		s.broker.Publish()
+	}
+	return job, err
+}
+
+func (s *Service) UpdateProgressDetail(jobID string, update ProgressUpdate) (Job, error) {
+	job, event, err := s.store.UpdateProgressDetail(jobID, update)
+	if err == nil && event.ID != 0 {
+		s.broker.Publish()
+	}
+	return job, err
+}
+
 func (s *Service) List(filter ListFilter) ([]Job, int, error) { return s.store.List(filter) }
 
 func (s *Service) EventsAfter(afterID int64, limit int) ([]Event, error) {

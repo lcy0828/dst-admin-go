@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"dont/internal/authn"
 	"dont/internal/systemsettings"
@@ -25,6 +27,7 @@ var publicAPIRoutes = map[publicRoute]struct{}{
 
 func RequestContext() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		started := time.Now()
 		requestID := strings.TrimSpace(c.GetHeader("X-Request-ID"))
 		if requestID == "" || len(requestID) > 128 {
 			requestID = uuid.NewString()
@@ -38,7 +41,20 @@ func RequestContext() gin.HandlerFunc {
 			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
 		c.Next()
+		duration := time.Since(started)
+		contentType, _, _ := strings.Cut(c.Writer.Header().Get("Content-Type"), ";")
+		eventStream := strings.EqualFold(strings.TrimSpace(contentType), "text/event-stream")
+		// A subscription's lifetime is not request latency. Failed subscriptions
+		// and ordinary failures must still be visible, even when they fail fast.
+		if strings.HasPrefix(c.Request.URL.Path, "/api/v2/") &&
+			(c.Writer.Status() >= http.StatusBadRequest || duration >= time.Second && !eventStream || isModMutationRequest(c.Request.Method, c.Request.URL.Path)) {
+			log.Printf("[API] request_id=%s method=%s path=%s status=%d duration_ms=%d", requestID, c.Request.Method, c.Request.URL.Path, c.Writer.Status(), duration.Milliseconds())
+		}
 	}
+}
+
+func isModMutationRequest(method, path string) bool {
+	return method != http.MethodGet && method != http.MethodHead && strings.Contains(path, "/mods")
 }
 
 func Recovery() gin.HandlerFunc {

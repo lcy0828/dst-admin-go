@@ -2,8 +2,11 @@ package jobs
 
 import (
 	"context"
+	"dont/shared"
 	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,6 +98,137 @@ func TestAllFailedJobExposesTargetError(t *testing.T) {
 	completed := waitForJob(t, service, job.ID, StatusFailed)
 	if completed.Error == nil || completed.Error.Code != "WORKSHOP_DOWNLOAD_MISSING" || completed.Error.Message != "未找到下载后的模组文件" {
 		t.Fatalf("target failure was not promoted to the job: %#v", completed)
+	}
+}
+
+func TestSucceededJobPersistsTargetWarning(t *testing.T) {
+	service, _ := newTestJobService(t)
+	job, err := service.Submit("room.start", "room-1", "", []TargetSpec{{ID: "master", Name: "Master"}}, func(_ context.Context, report func(TargetResult)) error {
+		report(TargetResult{
+			TargetID: "master", Status: StatusSucceeded, Message: "分片已启动",
+			Warning: &Error{Code: "MOD_LOAD_CONFIRMATION_FAILED", Message: "模组 3687959533 未确认加载"},
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := waitForJob(t, service, job.ID, StatusSucceeded)
+	if completed.Outcome != OutcomeFull || completed.Targets[0].Warning == nil ||
+		completed.Targets[0].Warning.Code != "MOD_LOAD_CONFIRMATION_FAILED" ||
+		!strings.Contains(completed.Message, "1 个目标存在警告") {
+		t.Fatalf("warning was not persisted: %#v", completed)
+	}
+	events, err := service.EventsAfter(0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := events[len(events)-1]
+	if last.Type != "job.completed" || last.Data.Targets[0].Warning == nil {
+		t.Fatalf("warning missing from completion event: %#v", last)
+	}
+}
+
+func TestProgressUpdatesAreVisibleAndDoNotRegressOnTargetCompletion(t *testing.T) {
+	service, store := newTestJobService(t)
+	job, _, err := store.Create("room.start", "room-1", "", []TargetSpec{{ID: "master", Name: "Master"}, {ID: "caves", Name: "Caves"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.MarkRunning(job.ID); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := service.UpdateProgress(job.ID, 70, "正在启动世界")
+	if err != nil || updated.Progress != 70 || updated.Message != "正在启动世界" {
+		t.Fatalf("updated=%#v err=%v", updated, err)
+	}
+	if _, _, err := store.RecordTarget(job.ID, TargetResult{TargetID: "master", Status: StatusSucceeded}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := service.Get(job.ID)
+	if err != nil || current.Progress != 70 {
+		t.Fatalf("target completion regressed progress: %#v err=%v", current, err)
+	}
+	stale, err := service.UpdateProgress(job.ID, 60, "过期阶段")
+	if err != nil || stale.Progress != 70 || stale.Message != "正在启动世界" {
+		t.Fatalf("stale=%#v err=%v", stale, err)
+	}
+}
+
+func TestProgressTransferSnapshotIsPersistedAndCleared(t *testing.T) {
+	service, store := newTestJobService(t)
+	job, _, err := store.Create("mod.download", "", "", []TargetSpec{{ID: "1392778117", Name: "Workshop 1392778117"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.MarkRunning(job.ID); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := service.UpdateProgressDetail(job.ID, ProgressUpdate{
+		Progress: 37, Message: "正在下载模组", CurrentBytes: 32 << 20, TotalBytes: 92 << 20, BytesPerSecond: 4_500_375,
+		Detail: &ProgressDetail{Stage: "mod.cache", WorkshopID: "1392778117", CurrentItem: 2, TotalItems: 3, TargetID: "agent:test", InstallationID: "native"},
+	})
+	if err != nil || updated.Transfer == nil || updated.Transfer.CurrentBytes != 32<<20 ||
+		updated.Transfer.TotalBytes != 92<<20 || updated.Transfer.BytesPerSecond != 4_500_375 {
+		t.Fatalf("updated=%#v err=%v", updated, err)
+	}
+	persisted, err := store.Get(job.ID)
+	if err != nil || persisted.ProgressDetail == nil || !reflect.DeepEqual(persisted.ProgressDetail, updated.ProgressDetail) {
+		t.Fatalf("item progress missing after read: %+v err=%v", persisted.ProgressDetail, err)
+	}
+	events, err := service.EventsAfter(0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Type == "job.progress" && event.Data.ID == job.ID && event.Data.Transfer != nil && event.Data.Transfer.BytesPerSecond == 4_500_375 {
+			if event.Data.ProgressDetail == nil || event.Data.ProgressDetail.CurrentItem != 2 || event.Data.ProgressDetail.TotalItems != 3 {
+				t.Fatalf("missing batch item in event: %+v", event.Data)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("transfer snapshot missing from job.progress event: %#v", events)
+	}
+	cleared, err := service.UpdateProgress(job.ID, 38, "正在校验模组")
+	if err != nil || cleared.Transfer != nil || cleared.ProgressDetail != nil {
+		t.Fatalf("cleared=%#v err=%v", cleared, err)
+	}
+}
+
+func TestModDownloadResultsSurvivePhaseChangesAndJobFailure(t *testing.T) {
+	service, store := newTestJobService(t)
+	job, _, _ := store.Create("mod.update.activate", "room", "", []TargetSpec{{ID: "room", Name: "room"}})
+	if _, _, err := store.MarkRunning(job.ID); err != nil {
+		t.Fatal(err)
+	}
+	items := []shared.ModDownloadProgress{{WorkshopID: "111", TargetID: "local", Status: "succeeded"}, {WorkshopID: "222", TargetID: "local", Status: "failed", Message: "I/O Operation Failed"}}
+	if _, err := service.UpdateProgressDetail(job.ID, ProgressUpdate{Progress: 50, Message: "下载结束", Detail: &ProgressDetail{Items: items}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.UpdateProgress(job.ID, 65, "准备重启"); err != nil {
+		t.Fatal(err)
+	}
+	worlds := []shared.WorldOperationProgress{{WorldID: "master", Name: "Master", Stage: "ready", Percent: 100}, {WorldID: "caves", Name: "Caves", Stage: "loading_world", Percent: 80}}
+	if _, err := service.UpdateProgressDetail(job.ID, ProgressUpdate{Progress: 90, Message: "正在重启", Detail: &ProgressDetail{Worlds: worlds}}); err != nil {
+		t.Fatal(err)
+	}
+	worlds[1].Stage, worlds[1].Message = "failed", "port in use"
+	// A world may report after another progress source advanced the workflow.
+	if _, err := service.UpdateProgressDetail(job.ID, ProgressUpdate{Progress: 89, Message: "部分失败", Detail: &ProgressDetail{Worlds: worlds}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.UpdateProgress(job.ID, 95, "正在结束任务"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Complete(job.ID, errors.New("restart failed"), false); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Get(job.ID)
+	if err != nil || loaded.ProgressDetail == nil || !reflect.DeepEqual(loaded.ProgressDetail.Items, items) || !reflect.DeepEqual(loaded.ProgressDetail.Worlds, worlds) {
+		t.Fatalf("lost item results: %+v %v", loaded, err)
 	}
 }
 

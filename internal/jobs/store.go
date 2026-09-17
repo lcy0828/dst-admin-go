@@ -28,6 +28,10 @@ type jobRecord struct {
 	WorldID         string    `gorm:"type:varchar(255)"`
 	Progress        int       `gorm:"not null"`
 	Message         string    `gorm:"type:text"`
+	ProgressDetail  string    `gorm:"type:text"`
+	CurrentBytes    int64     `gorm:"not null;default:0"`
+	TotalBytes      int64     `gorm:"not null;default:0"`
+	BytesPerSecond  int64     `gorm:"not null;default:0"`
 	ErrorCode       string    `gorm:"type:varchar(64)"`
 	ErrorMessage    string    `gorm:"type:text"`
 	CancelRequested bool      `gorm:"not null"`
@@ -37,16 +41,18 @@ type jobRecord struct {
 }
 
 type targetRecord struct {
-	ID           int64  `gorm:"primary_key;AUTO_INCREMENT"`
-	JobID        string `gorm:"type:char(36);index;not null"`
-	TargetID     string `gorm:"type:varchar(255);not null"`
-	Name         string `gorm:"type:varchar(255);not null"`
-	Status       string `gorm:"type:varchar(24);not null"`
-	Message      string `gorm:"type:text"`
-	ErrorCode    string `gorm:"type:varchar(64)"`
-	ErrorMessage string `gorm:"type:text"`
-	StartedAt    *time.Time
-	FinishedAt   *time.Time
+	ID             int64  `gorm:"primary_key;AUTO_INCREMENT"`
+	JobID          string `gorm:"type:char(36);index;not null"`
+	TargetID       string `gorm:"type:varchar(255);not null"`
+	Name           string `gorm:"type:varchar(255);not null"`
+	Status         string `gorm:"type:varchar(24);not null"`
+	Message        string `gorm:"type:text"`
+	WarningCode    string `gorm:"type:varchar(64)"`
+	WarningMessage string `gorm:"type:text"`
+	ErrorCode      string `gorm:"type:varchar(64)"`
+	ErrorMessage   string `gorm:"type:text"`
+	StartedAt      *time.Time
+	FinishedAt     *time.Time
 }
 
 type eventRecord struct {
@@ -166,6 +172,73 @@ func (s *Store) MarkRunning(jobID string) (Job, Event, error) {
 	return s.commitEvent(tx, "job.running", jobID)
 }
 
+func (s *Store) UpdateProgress(jobID string, progress int, message string) (Job, Event, error) {
+	return s.UpdateProgressDetail(jobID, ProgressUpdate{Progress: progress, Message: message})
+}
+
+func (s *Store) UpdateProgressDetail(jobID string, update ProgressUpdate) (Job, Event, error) {
+	update.Message = strings.TrimSpace(update.Message)
+	if update.Progress < 0 || update.Progress >= 100 || update.Message == "" || len(update.Message) > 1000 ||
+		update.CurrentBytes < 0 || update.TotalBytes < 0 || update.BytesPerSecond < 0 ||
+		update.TotalBytes > 0 && update.CurrentBytes > update.TotalBytes {
+		return Job{}, Event{}, ErrInvalidStatus
+	}
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return Job{}, Event{}, tx.Error
+	}
+	var current jobRecord
+	if err := tx.Table(s.jobsTable).Where("id = ?", jobID).First(&current).Error; err != nil {
+		tx.Rollback()
+		if gorm.IsRecordNotFoundError(err) {
+			return Job{}, Event{}, ErrNotFound
+		}
+		return Job{}, Event{}, err
+	}
+	if Status(current.Status) != StatusRunning {
+		tx.Rollback()
+		return Job{}, Event{}, ErrInvalidStatus
+	}
+	if update.Progress < current.Progress {
+		if update.Detail == nil || len(update.Detail.Items) == 0 && len(update.Detail.Worlds) == 0 {
+			tx.Rollback()
+			job, err := s.Get(jobID)
+			return job, Event{}, err
+		}
+		update.Progress = current.Progress
+	}
+	var previous ProgressDetail
+	_ = json.Unmarshal([]byte(current.ProgressDetail), &previous)
+	detail := ""
+	var next ProgressDetail
+	if update.Detail != nil {
+		next = *update.Detail
+	}
+	if len(next.Items) == 0 {
+		next.Items = previous.Items
+	}
+	if len(next.Worlds) == 0 {
+		next.Worlds = previous.Worlds
+	}
+	if update.Detail != nil || len(next.Items) > 0 || len(next.Worlds) > 0 {
+		encoded, err := json.Marshal(next)
+		if err != nil {
+			tx.Rollback()
+			return Job{}, Event{}, err
+		}
+		detail = string(encoded)
+	}
+	if err := tx.Table(s.jobsTable).Where("id = ? AND status = ?", jobID, StatusRunning).Updates(map[string]interface{}{
+		"progress": update.Progress, "message": update.Message,
+		"progress_detail": detail,
+		"current_bytes":   update.CurrentBytes, "total_bytes": update.TotalBytes, "bytes_per_second": update.BytesPerSecond,
+	}).Error; err != nil {
+		tx.Rollback()
+		return Job{}, Event{}, err
+	}
+	return s.commitEvent(tx, "job.progress", jobID)
+}
+
 func (s *Store) RecordTarget(jobID string, result TargetResult) (Job, Event, error) {
 	if result.Status != StatusSucceeded && result.Status != StatusFailed && result.Status != StatusCanceled {
 		return Job{}, Event{}, ErrInvalidStatus
@@ -173,7 +246,12 @@ func (s *Store) RecordTarget(jobID string, result TargetResult) (Job, Event, err
 	now := s.now().UTC()
 	updates := map[string]interface{}{
 		"status": result.Status, "message": result.Message, "finished_at": now,
+		"warning_code": "", "warning_message": "",
 		"error_code": "", "error_message": "",
+	}
+	if result.Warning != nil {
+		updates["warning_code"] = result.Warning.Code
+		updates["warning_message"] = result.Warning.Message
 	}
 	if result.Error != nil {
 		updates["error_code"] = result.Error.Code
@@ -202,7 +280,9 @@ func (s *Store) RecordTarget(jobID string, result TargetResult) (Job, Event, err
 	if total > 0 {
 		progress = finished * 100 / total
 	}
-	if err := tx.Table(s.jobsTable).Where("id = ?", jobID).UpdateColumn("progress", progress).Error; err != nil {
+	if err := tx.Table(s.jobsTable).Where("id = ?", jobID).UpdateColumn(
+		"progress", gorm.Expr("CASE WHEN progress < ? THEN ? ELSE progress END", progress, progress),
+	).Error; err != nil {
 		tx.Rollback()
 		return Job{}, Event{}, err
 	}
@@ -221,6 +301,7 @@ func (s *Store) Complete(jobID string, runnerErr error, canceled bool) (Job, Eve
 		return Job{}, Event{}, ErrInvalidStatus
 	}
 	succeeded, failed, canceledTargets := targetCounts(job.Targets)
+	warnings := targetWarningCount(job.Targets)
 	status := StatusSucceeded
 	outcome := OutcomeFull
 	errorCode, errorMessage := "", ""
@@ -250,11 +331,14 @@ func (s *Store) Complete(jobID string, runnerErr error, canceled bool) (Job, Eve
 				}
 			}
 		}
+	} else if warnings > 0 {
+		message = fmt.Sprintf("任务执行成功，%d 个目标存在警告", warnings)
 	}
 	now := s.now().UTC()
 	updates := map[string]interface{}{
 		"status": status, "outcome": outcome, "progress": 100, "message": message,
 		"error_code": errorCode, "error_message": errorMessage, "finished_at": now,
+		"current_bytes": 0, "total_bytes": 0, "bytes_per_second": 0,
 	}
 	if err := tx.Table(s.jobsTable).Where("id = ? AND status = ?", jobID, StatusRunning).Updates(updates).Error; err != nil {
 		tx.Rollback()
@@ -310,6 +394,7 @@ func (s *Store) RecoverInterrupted() ([]Event, error) {
 		if err := tx.Table(s.jobsTable).Where("id = ?", record.ID).Updates(map[string]interface{}{
 			"status": StatusFailed, "outcome": outcome, "progress": 100, "message": "任务被服务重启中断",
 			"error_code": "SERVER_RESTARTED", "error_message": "服务重启中断了任务", "finished_at": now,
+			"current_bytes": 0, "total_bytes": 0, "bytes_per_second": 0,
 		}).Error; err != nil {
 			tx.Rollback()
 			return nil, err
@@ -519,6 +604,9 @@ func (s *Store) jobFromRecord(tx *gorm.DB, record jobRecord) (Job, error) {
 			ID: target.ID, TargetID: target.TargetID, Name: target.Name, Status: Status(target.Status), Message: target.Message,
 			StartedAt: target.StartedAt, FinishedAt: target.FinishedAt,
 		}
+		if target.WarningCode != "" || target.WarningMessage != "" {
+			item.Warning = &Error{Code: target.WarningCode, Message: target.WarningMessage}
+		}
 		if target.ErrorCode != "" || target.ErrorMessage != "" {
 			item.Error = &Error{Code: target.ErrorCode, Message: target.ErrorMessage}
 		}
@@ -528,6 +616,17 @@ func (s *Store) jobFromRecord(tx *gorm.DB, record jobRecord) (Job, error) {
 		ID: record.ID, Kind: record.Kind, Status: Status(record.Status), Outcome: Outcome(record.Outcome), RoomID: record.RoomID,
 		WorldID: record.WorldID, Progress: record.Progress, Message: record.Message, CancelRequested: record.CancelRequested,
 		CreatedAt: record.CreatedAt, StartedAt: record.StartedAt, FinishedAt: record.FinishedAt, Targets: targets,
+	}
+	if record.CurrentBytes > 0 || record.TotalBytes > 0 || record.BytesPerSecond > 0 {
+		job.Transfer = &TransferProgress{
+			CurrentBytes: record.CurrentBytes, TotalBytes: record.TotalBytes, BytesPerSecond: record.BytesPerSecond,
+		}
+	}
+	if record.ProgressDetail != "" {
+		var detail ProgressDetail
+		if json.Unmarshal([]byte(record.ProgressDetail), &detail) == nil {
+			job.ProgressDetail = &detail
+		}
 	}
 	if record.ErrorCode != "" || record.ErrorMessage != "" {
 		job.Error = &Error{Code: record.ErrorCode, Message: record.ErrorMessage}
@@ -547,6 +646,16 @@ func targetCounts(targets []Target) (succeeded, failed, canceled int) {
 		}
 	}
 	return
+}
+
+func targetWarningCount(targets []Target) int {
+	count := 0
+	for _, target := range targets {
+		if target.Warning != nil {
+			count++
+		}
+	}
+	return count
 }
 
 func completionOutcome(succeeded, unsuccessful int) Outcome {
