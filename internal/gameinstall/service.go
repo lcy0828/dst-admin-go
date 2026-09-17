@@ -213,7 +213,12 @@ func (s *Service) Submit(targetID, installationID string, adopt bool, p shared.G
 			ctx, cancel := context.WithTimeout(ctx, 29*time.Minute)
 			defer cancel()
 			ctx = operationprogress.WithReporter(ctx, func(p operationprogress.Update) {
-				_, _ = s.jobs.UpdateProgressDetail(job.ID, jobs.ProgressUpdate{Progress: p.Percent, Message: p.Message})
+				observedAt := time.Now().UTC()
+				_, _ = s.jobs.UpdateProgressDetail(job.ID, jobs.ProgressUpdate{
+					Progress: min(99, p.Percent), Message: p.Message,
+					CurrentBytes: p.CurrentBytes, TotalBytes: p.TotalBytes, BytesPerSecond: p.BytesPerSecond,
+					Detail: &jobs.ProgressDetail{Stage: p.Stage, TargetID: t.ID, InstallationID: i.ID, ObservedAt: &observedAt},
+				})
 			})
 			e := s.execute(ctx, t.ID, i.ID, action, p, job.ID)
 			r := jobs.TargetResult{TargetID: key, Status: jobs.StatusSucceeded, Message: "游戏服务端已就绪"}
