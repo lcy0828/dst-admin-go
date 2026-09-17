@@ -64,14 +64,3 @@ Leases, Agent operation journals, and installation directory locks coordinate in
 
 Installation status is read only when opening the page, changing scope, or refreshing manually.
 The service does not scan disks for games, check Steam's latest release, or poll while idle. Only unfinished jobs have progress polled every two seconds.
-
-## Verification on 2026-09-16
-
-- Local Go tests cover nodes without rooms, multiple installation locations, offline status, exact routing, and asynchronous installation jobs.
-- Node and Agent tests on native Linux at `192.168.2.23` cover first-install dispatch, duplicate requests, restart after adoption, rejection during gameplay, existing files, and save protection.
-- An isolated copy of DST 747465 was adopted successfully. Executable paths and installation status after restart were correct, and the test save checksum file stayed unchanged. The production Agent and original game directory were not replaced.
-- A recent management service on the same host completed inspection, adoption jobs, and installation-list refresh through real HTTP. The page was accessible during 180.05 seconds of continuous operation; installation status checks every 30 seconds passed, and the service exited with code 0. The original save backup SHA-256 stayed unchanged, and the production Agent kept running.
-- Browser checks cover multiple machines, disabled offline actions, accurate install/adopt requests, invalidation after changing a path, discarding old responses after switching machines, failure messages, and a 390 px mobile layout.
-- All 669 frontend tests, the production build, and relevant ESLint checks passed.
-
-First-download automation used a controlled SteamCMD executor to verify commands and result handling. This test did not download the full game from Steam again; real directory adoption used an existing independent game copy.

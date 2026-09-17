@@ -6,3 +6,14 @@
 .DS_Store
 .tmp-*
 /deploy/docker/.env
+/.local-docs/
+/.codex-build/
+/dist/
+/internal/webui/dist/
+/docs/research/
+/docs/dst-lobby-address-research.md
+/.idea/
+/Klei/
+/conf/app.conf
+/conf/app.conf.bak
+/agent/conf/app.conf

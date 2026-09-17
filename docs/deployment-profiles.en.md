@@ -62,7 +62,7 @@ a remote-capable operation.
 ## Install native local
 
 Follow the [Linux/macOS startup guide](startup-guide.en.md) for dependencies,
-service users, empty data directories, matching frontend/backend builds, and
+service users, empty data directories, a native package with embedded UI, and
 configuration. The Linux installer starts from `local.conf.example`, but an
 upgrade must use a separate copy of the current installed configuration.
 

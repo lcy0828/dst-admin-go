@@ -53,7 +53,7 @@ Controller 进程、Go runtime 和数据库诊断仅属于控制端，通过 `/s
 
 ## 安装本机原生服务
 
-按 [Linux/macOS 启动指南](startup-guide.md)准备依赖、运行用户、空数据目录、匹配的前后端构建和配置。
+按 [Linux/macOS 启动指南](startup-guide.md)准备依赖、运行用户、空数据目录、内置页面的原生包和配置。
 Linux 首次安装从 `local.conf.example` 开始，升级则必须使用当前生效配置的独立副本。
 
 Linux 使用 `dst-admin-local.service`，监听 `0.0.0.0:8000`，显式加载 `/var/lib/dst-admin/app.conf`。

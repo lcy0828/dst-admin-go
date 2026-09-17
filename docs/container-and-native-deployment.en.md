@@ -259,21 +259,3 @@ Mod cache, Workshop content, and DST binaries can generally be rebuilt, but reta
 Kubernetes PVC/CSI snapshots replace only single-volume copying, not cross-shard save barriers, manifests, or centralized verification.
 The current implementation offers disabled-by-default Provider status, read-only REST observation, typed preflight API/UI, namespace RBAC, and an experimental safety core.
 However, `applyAllowed=false` is fixed, with no Apply route, lease-aware supervisor, Console, mod distribution, backup, or restore workflow. It is not a production installation option.
-
-## Historical Debian 12 host evidence
-
-On 2026-08-15, the following remote Agent flows ran on a fresh Debian 12 / Docker environment with a test workspace isolated from existing DST installations.
-This evidence covers the remote protocol and cross-node data flows; it does not replace acceptance of the current management-container-to-local-shard model:
-
-- Non-root control-plane first startup, migration of old `control-data` permissions, control-plane health checks, and reconnection of two Agents.
-- Simultaneous native/container Agent registration, correct Runtime inventory, physical-core capacity, and managed-container label identification.
-- Successful cross-node/cross-volume shard apply: target Placement became `aligned`, and the source retained a recoverable migration directory.
-- SteamCMD downloaded Workshop `1392778117`: about 110 MB and 1433 files, with tree SHA verification.
-- A distributed protection backup preceded publication. The mod-cache bundle uploaded in 256 KiB chunks; cross-node tree checks and local manifest checks on both ends preceded atomic publication and target `modoverrides.lua` readback.
-- On 2026-08-16, further tests covered a migrated shard whose directory no longer existed on the Controller. Room mod lists, configuration files, and `modinfo.lua` schemas aggregated from current Placement without falling back to local Controller files.
-- Workshop `1392778117` was disabled, enabled, configured with `AutoStackedLoot=true`, then removed. All four jobs and Publications were `succeeded/full`, with target-file readback after each step. After removal, `modoverrides.lua` was `return {}`, the managed setup section contained no `ServerModSetup`, and immutable node cache remained available for reuse and rollback.
-
-Final job IDs: `c23bcdb2-09fc-43ba-bbb8-04e6eba38f9d`, `a908e856-8df7-4ed9-90cb-87d5e926b87d`, `f8233414-f253-4e6c-9bb5-bba4a2a4aca8`, `0bce17e5-0801-4755-a7cb-6f3fc1a094c0`.
-Publication IDs: `3e7dd0ad-a2b4-4948-b738-0dd311057050`, `321d6b7b-3e2e-42ba-bfc3-ddc85c138245`, `7ddc78bc-1299-44cf-9da5-0d63bd6ffc84`, `2dfe6b50-3baf-42e0-80e1-7d72d41703a2`.
-
-This evidence covers a Debian 12 Docker/native combination. It does not establish production compatibility with Podman, macOS containers, or Kubernetes.

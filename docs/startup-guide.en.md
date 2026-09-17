@@ -3,7 +3,7 @@
 [简体中文（默认）](startup-guide.md) | **English**
 
 This guide follows the current source: prepare the environment, start the management service, install the game, then start your worlds.
-In production, Go serves both the UI and API. Build the frontend once; Vite does not need to run.
+Release binaries embed the web UI and serve it alongside the API. No frontend build or Vite process is needed on the deployment host.
 First installation and upgrades use different steps. For an existing deployment, read [upgrades and data protection](#upgrades-and-data-protection) first.
 
 ## Choose a deployment
@@ -23,8 +23,7 @@ For advanced options such as independent world containers, see [deployment model
 
 ## Linux native deployment
 
-These commands target **Debian 12 amd64** and run from the `dst-admin-go` repository root.
-See the [README](../README.en.md#1-get-matching-backend-and-frontend-sources) for source checkout instructions.
+These commands target **Debian 12 amd64**. Download the complete package from this repository and run installation commands from its extracted directory.
 For an existing DST installation, keep its service user and data directories. Skip user creation, directory creation, and SteamCMD download steps that are already complete.
 Do not recursively change permissions or move directories containing active saves.
 
@@ -61,25 +60,20 @@ sudo -u dst /opt/dst/steamcmd/steamcmd.sh +quit
 The second command should finish self-updating and exit. Fix missing dynamic loaders or 32-bit libraries before continuing.
 This step does not download DST. Install the game through the UI later. Set the SteamCMD configuration path to `/opt/dst/steamcmd/steamcmd.sh`, replacing the example default of `/usr/games/steamcmd`.
 
-### 3. Build the management service and UI
+### 3. Obtain the native package
 
-Install [Go](https://go.dev/doc/install) on the build machine (`go.mod` specifies toolchain `go1.25.13`) and [Node.js 24 LTS](https://nodejs.org/en/download).
-Automatic Go toolchain downloads need access to their download source. Older Go/Node packages from Debian may not meet the requirements.
-Prefer building on the same OS and architecture as the runtime host. Do not copy macOS binaries to Linux.
+Download `dst-admin-VERSION-linux-amd64.tar.gz` and its `.sha256` file from the main repository's Releases or Package workflow artifacts. Verify and extract on the target host:
 
 ```bash
-go version
-node --version
-npm --version
-mkdir -p dist
-CGO_ENABLED=1 go build -trimpath -o dist/dst-admin ./cmd/admin-api
-CGO_ENABLED=0 go build -trimpath -o dist/dst-map-renderer ./cmd/dst-map-renderer
-npm --prefix ../dst-admin-vue-v3 ci
-npm --prefix ../dst-admin-vue-v3 run build
+sha256sum -c dst-admin-VERSION-linux-amd64.tar.gz.sha256
+tar -xzf dst-admin-VERSION-linux-amd64.tar.gz
+cd dst-admin-VERSION-linux-amd64
+./dst-admin -version
 ```
 
-The management service uses SQLite and requires CGO and a C compiler. The Agent and map renderer support `CGO_ENABLED=0`.
-The build should produce two binaries and `../dst-admin-vue-v3/dist/index.html`.
+Replace `VERSION` with the actual filename. The output must contain `embeddedWebUI: true` and `frontendCommit`. The package includes the UI, Agent, map renderer, helpers, and installation templates; the runtime host needs no Go or Node.js. Execute the remaining commands from the extracted directory.
+
+To build instead, use this repository's [packaging guide](deployment-and-rollback.en.md). Only the build machine needs Go, a C compiler, Git, and Node.js.
 
 ### 4. Configure and install
 
@@ -115,10 +109,9 @@ The room's Cluster Token and the Agent connection key serve different purposes.
 
 ```bash
 sudo deploy/scripts/install-native-local.sh \
-  --binary "$PWD/dist/dst-admin" \
-  --renderer "$PWD/dist/dst-map-renderer" \
+  --binary "$PWD/dst-admin" \
+  --renderer "$PWD/dst-map-renderer" \
   --config "$PWD/../dst-admin-local/app.conf" \
-  --web-root "$PWD/../dst-admin-vue-v3/dist" \
   --user dst
 sudo systemctl enable --now dst-admin-local
 sudo systemctl status dst-admin-local --no-pager
@@ -126,7 +119,7 @@ curl -fsS http://127.0.0.1:8000/api/v2/auth/session
 ```
 
 The service should be `active`, and the endpoint should return JSON. The default listener is `0.0.0.0:8000`.
-systemd explicitly sets `DST_ADMIN_CONFIG=/var/lib/dst-admin/app.conf` and the frontend path. Future configuration changes belong in this installed location.
+systemd explicitly sets `DST_ADMIN_CONFIG=/var/lib/dst-admin/app.conf` and serves the embedded UI. Future configuration changes belong in this installed location.
 `HTTP_PORT` does not override a startup `-addr` argument. To change the listener, use a systemd override and retain the other service settings.
 
 ```bash
@@ -134,7 +127,7 @@ journalctl -u dst-admin-local -n 100 --no-pager
 sudo systemctl restart dst-admin-local
 ```
 
-Open the UI and follow [first game startup](#first-game-startup-and-existing-saves). For a reverse proxy example, see [deployment and rollback](deployment-and-rollback.en.md#6-nginx-same-origin-reverse-proxy).
+Open the UI and follow [first game startup](#first-game-startup-and-existing-saves). For a reverse proxy example, see [deployment and rollback](deployment-and-rollback.en.md#nginx-same-origin-proxy).
 
 ## Connect a remote Agent
 
@@ -150,7 +143,7 @@ Game UDP ports must still be open on the machine running each world.
 4. Check connectivity from the remote host: on a LAN, use `ws://CONTROLLER_IP:8080/agent` (native deployments default to `8000`); behind an HTTPS proxy, use `wss://DOMAIN/agent`.
 
 For existing Agents, reuse the securely saved connection key. Do not rotate it just to add a node.
-The UI only shows a masked existing key. If the key is lost, follow [key rotation](deployment-and-rollback.en.md#9-key-rotation) for all affected nodes.
+The UI only shows a masked existing key. If the key is lost, follow [key rotation](deployment-and-rollback.en.md#key-rotation) for all affected nodes.
 Write keys to a configuration file with mode `0600`; do not include them in WebSocket URLs or command lines.
 
 ### 2. Prepare the remote environment
@@ -158,16 +151,7 @@ Write keys to a configuration file with mode `0600`; do not include them in WebS
 The remote host needs the same tmux, game libraries, SteamCMD, service user, and data directories described in [Linux native deployment, steps 1 and 2](#linux-native-deployment).
 An Agent-only host does not need Node.js, frontend files, or a management database. You can build the Agent elsewhere for the target OS/architecture and copy it over.
 
-Build a Linux amd64 Agent from the source repository:
-
-```bash
-mkdir -p dist
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-  -o dist/dst-admin-agent ./cmd/agent
-```
-
-The remote host also needs the repository's `deploy/scripts/` and `deploy/systemd/` directories with their relative structure intact.
-Run the following from the remote source root:
+The native package includes `dst-admin-agent` and `deploy/`. Copy a package matching the remote system and architecture, extract it there, and run:
 
 ```bash
 mkdir -p ../dst-agent-local
@@ -202,7 +186,7 @@ Use different `[runtime.NAME]` sections for multiple installations. Save roots m
 
 ```bash
 sudo deploy/scripts/install-native-agent.sh \
-  --binary "$PWD/dist/dst-admin-agent" \
+  --binary "$PWD/dst-admin-agent" \
   --config "$PWD/../dst-agent-local/agent.conf" \
   --user dst
 sudo systemctl enable --now dst-admin-agent
@@ -238,12 +222,12 @@ Embedded Members and standalone Agents use different variable names; see the [ro
 
 macOS uses the signed-in user's Steam game files. Linux one-click downloads and LuaJIT installation are not available on macOS.
 
-1. Install Xcode Command Line Tools, the Go toolchain, and Node.js 24; install tmux with `brew install tmux`.
+1. Install tmux with `brew install tmux`.
 2. Install DST through Steam. Apple Silicon needs Rosetta 2 for the x86_64 game.
-3. Build the management service, renderer, and frontend on macOS using Linux step 3.
+3. Download the macOS package (`darwin-arm64` for Apple Silicon), verify it with `shasum -a 256 -c FILE.tar.gz.sha256`, and extract it. Run the following commands there. Intel Macs can build `darwin-amd64` locally using the packaging guide.
 4. Copy `local.conf.example` outside the repository and edit it. Use actual absolute paths writable by the current user; do not use `~` or `$HOME` inside INI values.
 
-For first installation, prepare configuration from the backend repository root:
+For first installation, prepare configuration from the extracted package directory:
 
 ```bash
 mkdir -p ../dst-admin-local
@@ -268,10 +252,9 @@ Create configured directories that do not exist, then install **without sudo**:
 
 ```bash
 deploy/scripts/install-macos-local.sh \
-  --binary "$PWD/dist/dst-admin" \
-  --renderer "$PWD/dist/dst-map-renderer" \
-  --config "$PWD/../dst-admin-local/app.conf" \
-  --web-root "$PWD/../dst-admin-vue-v3/dist"
+  --binary "$PWD/dst-admin" \
+  --renderer "$PWD/dst-map-renderer" \
+  --config "$PWD/../dst-admin-local/app.conf"
 launchctl print "gui/$(id -u)/top.luocaiyi.dst-admin-local"
 curl -fsS http://127.0.0.1:8000/api/v2/auth/session
 ```

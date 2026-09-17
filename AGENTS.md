@@ -13,3 +13,12 @@ Keep the local Runtime in process. Product behavior, errors, operation results,
 and resource presentation should match remote Agents, while local calls and
 remote WebSocket transport remain separate adapters. Background work must be
 demand-driven, coalesced, bounded, and inactive when its target is unused.
+
+## Public documentation and local data
+
+Keep published docs focused on installation, supported behavior, operation, and
+compatibility. Put development diaries, discussions, machine-specific service
+notes, and private research in ignored `.local-docs/`. Never commit real configs,
+credentials, player records, saves, or build artifacts. Preserve existing local
+data when removing it from Git tracking. Deployment documentation belongs in the
+backend repository; its packages include the official frontend.

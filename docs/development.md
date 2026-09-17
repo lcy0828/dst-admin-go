@@ -21,7 +21,6 @@ workspace/
 ```
 
 已有正式服务占用端口时使用其他端口和独立数据目录；不要启动第二个管理进程控制同一存档。
-本项目登记的本机服务重启规则见前端仓库 `docs/local-runtime.md`。
 
 ## 1. 准备独立配置
 
@@ -113,7 +112,7 @@ DST_ADMIN_MAP_RENDERER_PATH="$PWD/dist/dst-map-renderer" \
 后端在相应仓库执行，按改动选择包；正式发布要求见[部署与回滚](deployment-and-rollback.md)：
 
 ```bash
-go test ./...
+DST_ADMIN_CONFIG="$PWD/deploy/systemd/local.conf.example" go test ./...
 go vet ./...
 ```
 
@@ -127,3 +126,7 @@ npm run build
 
 Agent 从后端 `./cmd/agent` 构建，配置和 `-state` 使用独立路径，不能复用正式 Agent 的身份文件。
 开发启动不会自动添加远程节点；如需联调，按[远程 Agent 指南](startup-guide.md#接入远程-agent)配置。
+
+## 完整产品打包
+
+镜像和原生包会自动获取正式前端并嵌入管理二进制，见[打包说明](deployment-and-rollback.md)。开发时直接 `go run` 不内嵌页面，可以继续用 Vite 代理或显式设置 `DST_ADMIN_WEB_ROOT`。私有前端仓库需要 Git 访问权限；`--frontend PATH` 仅使用该目录已提交的 HEAD。

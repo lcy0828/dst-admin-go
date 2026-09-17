@@ -71,7 +71,7 @@ Agent 的节点间精确制品服务默认关闭。只有希望同一可信网�
 ```ini
 [agent]
 MOD_PEER_LISTEN_ADDR = :18081
-MOD_PEER_ADVERTISE_URL = http://192.168.2.23:18081
+MOD_PEER_ADVERTISE_URL = http://agent.example.com:18081
 ```
 
 `MOD_PEER_ADVERTISE_URL` 必须是其他运行节点可访问的无路径 HTTP(S) 地址，不能写容器内部地址。也可使用 `DST_ADMIN_AGENT_MOD_PEER_LISTEN_ADDR` 和 `DST_ADMIN_AGENT_MOD_PEER_ADVERTISE_URL` 覆盖。Docker 部署必须显式发布对应 TCP 端口；防火墙应只允许可信 Controller/Agent 网络访问，不能直接开放到公网。监听地址和公布地址缺少任意一个都会拒绝启动，避免上报一个实际不可用的 Peer 能力。
@@ -84,47 +84,6 @@ MOD_PEER_ADVERTISE_URL = http://192.168.2.23:18081
 - 依赖按图递归展开，去重并限制为最多 100 个节点，循环引用不会无限递归。
 - HTTP 客户端有 12 秒超时、16 MiB 响应上限，并拒绝尾随 JSON。
 - SteamCMD 仅通过参数数组调用，不拼接 shell 命令。每次成功返回后仍校验目录与安全的 `modinfo.lua`。
-
-## 4. Lua 兼容策略
-
-默认使用嵌入式 gopher-lua：
-
-- 不开放 `os`、`io`、网络、`dofile` 和 `loadfile`。
-- `require`/`modimport` 只能读取当前 Mod 目录内的安全普通 Lua 文件。
-- 单次执行 3 秒超时，限制调用栈、注册表、Lua 深度和文件大小。
-- 提供 `locale`、`folder_name`、`ChooseTranslationTable` 等常见 `modinfo.lua` 全局量。
-- 空结果、循环表、无法无损映射的表键和重复 JSON 键都视为主解析失败并进入 fallback，不能静默丢字段。
-- `package.loaded`、循环 `require` 和符号链接逃逸均有明确处理；模块路径越出当前 Mod 目录会被拒绝。
-
-Go 解析失败时才进入兼容 fallback，顺序固定为外部 Lua、Python/Lupa：
-
-- fallback helper 通过 `go:embed` 随 Go 二进制发布，并从标准输入交给配置的 Lua 解释器执行；部署不再依赖外置 helper 脚本。
-- `DST_ADMIN_LUA_BINARY` 显式路径优先；否则自动发现 `lua`、`lua5.5` 至 `lua5.1`、`luajit`，并检查 macOS Homebrew 等标准安装目录，不硬编码用户主目录。
-- 外部 Lua 不存在或执行失败时，可使用 `DST_ADMIN_PYTHON_BINARY` 指向已安装 `lupa` 的独立 Python 环境；Python 适配器同样内嵌，不复用参考项目中包含 Steam 网络访问的脚本。
-- 使用参数数组启动 Lua 二进制；Mod 路径和 ID 通过固定环境变量传入，不拼接 shell。
-- 固定最小环境变量和受控 `LUA_PATH`/`LUA_CPATH`。
-- 可选 `DST_ADMIN_LUA_PATH` 只扩展 Lua/C 模块搜索目录，不决定 helper 来源。
-- helper 提供 `locale`、`folder_name`、`ChooseTranslationTable` 和 `modimport`，使用纯 Lua 生成 JSON。
-- Python/Lupa 适配器遇到循环表、超过 100 层、不可表示的键或键转换冲突时会明确失败，不会静默丢字段后宣称兼容。
-- 8 秒超时；stdout 上限 8 MiB，stderr 独立限制为 16 KiB；只接受唯一、非空 JSON 对象。
-- 返回前会脱敏本地 Mod 路径及疑似 key、token、password、secret 内容。
-- API 返回 `parser`、`fallbackUsed`、`fallbackReason` 和 `warnings`，前端明确显示兼容路径。
-
-外部 Lua 提供最高兼容性，但仍会执行第三方 Mod 代码。生产部署应使用低权限专用系统用户，并限制该用户对存档、服务端和网络的权限。gopher-lua 是安全优先的主路径，外部 Lua 是兼容性 fallback，不应调换顺序。
-
-部署检查会返回实际选中的 fallback 类型、绝对路径、发现来源、版本和缺失原因。macOS 未发现运行时时会明确提示 `brew install lua`；系统不会自动安装 Lua、Python 包或修改全局环境。`DST_ADMIN_LUA_PATH` 只是可选模块搜索目录，缺失时会单独告警，但内嵌 helper 不依赖它。
-
-### 4.1 真实服务器兼容矩阵
-
-2026-08-08 在 `192.168.2.12` 已安装的 46 个 Workshop Mod 上执行同一批样本：
-
-| 路径 | 通过 | 结论 |
-| --- | ---: | --- |
-| gopher-lua 主解析 | 46/46 | 当前样本全部通过 |
-| 旧外置 `modgetinfo.lua` 强制 fallback | 37/46 | 旧 helper 不能作为兼容基线 |
-| 新内嵌 helper 强制 fallback | 46/46 | 当前样本全部通过 |
-
-该矩阵证明当前真实样本在两条现行解析路径均通过，但不能数学保证未来所有未知 Mod。发布门禁是：保留双路径、未知字段语义无损、失败明确可见，并持续把新增失败样本加入回归集；不得用“100% 兼容”掩盖未测试的未来 Lua 行为。
 
 ## 5. 配置与数据保护
 
@@ -205,5 +164,3 @@ npm run build
 ```
 
 当前仓库尚未提供浏览器 E2E 脚本。发布前人工浏览器验收需覆盖普通 Go parser Mod、递归依赖、配置预览/应用/回读、Lua fallback 原因，以及 390/768/1024/1440 四档无横向溢出。生命周期自动测试覆盖下载失败恢复、半成品清理、更新并发隔离、人工 setup 保留和无变化卸载。
-
-Debian 12 实机验收已覆盖一个迁移到容器 Agent、控制器本机不再保留 Shard 目录的房间。Workshop `1392778117` 的 110 MB/1433 文件内容完成跨节点发布后，房间列表能返回真实作者、版本、评分与 Placement 状态，配置接口能解析完整中文 schema。随后禁用、启用、配置 `AutoStackedLoot=true` 和移除均取得 `succeeded/full` Job 与 Publication，并以目标 `modoverrides.lua`、setup 托管段和不可变 cache 回读作为完成证据。

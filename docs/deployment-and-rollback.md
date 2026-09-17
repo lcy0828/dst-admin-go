@@ -1,267 +1,108 @@
-# DST Admin 生产部署、迁移与回滚
+# 发布与回滚
 
 **简体中文（默认）** | [English](deployment-and-rollback.en.md)
 
-## 1. 适用范围
+安装入口是[主 README](../README.md)。镜像和原生包都内置页面，升级时替换完整产物。配置、数据库、Agent 身份和游戏存档独立保留。
 
-本文适用于 Vue 3 静态前端和 Go 管理 API 的同源生产部署。示例目录使用 `/opt/dst-admin`，服务用户使用 `dstadmin`；实际路径必须与系统设置和 DST 专用用户一致。控制面默认管理本机；远程 Agent 是显式启用的可选运行目标，部署方式见 `docs/container-and-native-deployment.md`。
+## 下载与版本
 
-首次安装请先读[安装与启动指南](startup-guide.md)。本文采用自定义 release 目录和
-`dst-admin.service`，与官方首次安装脚本的 `/var/lib/dst-admin`、`dst-admin-local.service`
-是两种布局。现有部署应沿用自己的布局，不要直接混用路径或创建第二个管理服务。
+- [Package 工作流](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) 构建 Linux amd64 和 macOS arm64 原生包，并推送 GHCR 镜像。
+- 分支发布使用 `ghcr.io/lcy0828/dst-admin-go/all-in-one:preview`、`control-plane:preview`、`agent:preview` 和 `dst-runtime:preview`；同次构建另有 `sha-后端完整提交号` 标签。前端或手动重建仍可能改变同一后端提交的产物，精确复现请固定镜像 digest 与前端提交。
+- `v*` 标签触发版本镜像和本仓库 GitHub Release，附件包含 `.tar.gz` 与 SHA-256。正式发布前先完成目标环境验收。
+- `dst-admin -version` 输出后端版本、提交、前端提交和 `embeddedWebUI`；原生 `manifest.json` 另记录工具链、锁文件哈希。镜像可通过 `docker image inspect` 查看 `io.dst-admin.frontend.commit`。
+- 仓库和镜像是否公开取决于 GitHub 设置。私有包需认证，不把凭据写进配置示例或镜像层。
 
-生产切换必须满足：后端全量测试、竞态测试和 `go vet`，前端 lint/unit/build，真实后端核心流程人工验收、数据库备份校验、配置备份和上一版本产物均已完成。当前仓库没有浏览器 E2E 或 OpenAPI 代码生成脚本，不能把不存在的命令伪装成发布门禁。不要在没有可恢复数据库副本时直接启动新版本迁移。
+## 从一个仓库打包
 
-## 2. 发布目录
-
-```text
-/opt/dst-admin/
-  releases/
-    20260808-120000/
-      dst-admin
-      dst-map-renderer
-      public/
-      VERSION
-  shared/
-    app.conf
-    go-dont.db
-    backups/
-  current -> releases/20260808-120000
-  previous -> releases/<last-version>
-```
-
-- 二进制和前端产物按版本只读保存，运行数据放在 `shared/`。
-- 切换使用同一文件系统内的符号链接原子替换，不在生产机临时重新构建。
-- `app.conf` 和数据库权限为 `0600`，运行服务的 `UMask` 为 `0077`。
-- `VERSION` 至少记录后端 Git SHA、前端 Git SHA、构建时间和最低兼容版本。
-
-## 3. 上线前备份
-
-先停止写入，再备份 SQLite。若不能停机，必须使用 SQLite `.backup`，不能只复制正在写入的主数据库文件。
+构建机需要 Git、Node.js 22+。原生构建另外需要 Go 工具链（见 `go.mod`）和 C 编译器；镜像构建需要 Docker Buildx，Go/Node 编译在镜像构建阶段进行。
 
 ```bash
-sudo systemctl stop dst-admin
-sudo install -d -o dstadmin -g dstadmin -m 0700 /opt/dst-admin/shared/backups
-sudo -u dstadmin sqlite3 /opt/dst-admin/shared/go-dont.db ".backup '/opt/dst-admin/shared/backups/go-dont.db.pre-20260808-120000'"
-sudo -u dstadmin sqlite3 /opt/dst-admin/shared/backups/go-dont.db.pre-20260808-120000 "PRAGMA integrity_check;"
-sudo -u dstadmin cp -p /opt/dst-admin/shared/app.conf /opt/dst-admin/shared/backups/app.conf.pre-20260808-120000
-sudo chmod 0600 /opt/dst-admin/shared/backups/go-dont.db.pre-20260808-120000 /opt/dst-admin/shared/backups/app.conf.pre-20260808-120000
+# 包含最新正式前端的原生包，自动使用当前系统/架构
+node deploy/scripts/build-native-release.mjs --version preview-local --output ./dist
+
+# 包含页面的镜像
+node deploy/scripts/build-image.mjs --kind all-in-one --tag dst-admin/all-in-one:preview
+node deploy/scripts/build-image.mjs --kind control-plane --tag dst-admin/control-plane:preview
+
+# 远程执行端与独立世界运行镜像
+node deploy/scripts/build-image.mjs --kind agent --tag dst-admin/agent:preview
+node deploy/scripts/build-image.mjs --kind dst-runtime --tag dst-admin/dst-runtime:preview
 ```
 
-`PRAGMA integrity_check` 必须返回 `ok`。同时确认：
+默认从 GitHub 正式前端 `master` 获取最新已提交源码，并在本次构建中固定 SHA。前端下载、`npm ci` 或构建失败会让打包失败，不使用工作区旧 `dist/` 顶替。原生管理二进制使用 `webui` 构建标签内嵌页面，生成文件不会提交到 Git。
 
-- 存档和备份目录磁盘空间充足。
-- `app.conf.bak` 可读且权限为 `0600`；它是系统设置最近一次保存产生的快速回滚副本，不能替代本次发布备份。
-- 上一版本二进制、静态资源和对应配置仍在 `previous` 指向的目录中。
-- 若仓库或历史日志曾出现 Agent 密钥，上线后必须轮换，不能认为删除当前文件中的值已使旧密钥失效。
+可选参数：
 
-## 4. 构建与安装
+| 参数 | 用途 |
+| --- | --- |
+| `--frontend-ref SHA` | 固定已知兼容的前端版本 |
+| `--frontend PATH` | 使用指定前端检出的已提交 HEAD，忽略未提交修改 |
+| `--frontend-repository URL` | 指定可认证的源码地址，例如 GitHub SSH URL |
+| `--version VERSION` | 写入发布版本 |
+| `--platform linux/amd64` | 镜像目标平台；All-in-One 和游戏 Runtime 使用 amd64 |
+| `--push` | 将镜像推送到 `--tag` 指定仓库；默认只加载到本机 Docker |
 
-建议在独立构建机生成产物：
+私有前端需要 Git 读取权限。HTTPS 可使用已配置的 Git credential helper；SSH 示例：
 
 ```bash
-cd dst-admin-go
-go version # 必须为 go1.25.13 或更新的兼容补丁版本
-go test -race ./...
-go vet ./...
-go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-release_version="$(git describe --tags --always --dirty)"
-release_commit="$(git rev-parse HEAD)"
-release_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-CGO_ENABLED=1 go build -trimpath \
-  -ldflags "-X dont/internal/buildinfo.Version=${release_version} -X dont/internal/buildinfo.Commit=${release_commit} -X dont/internal/buildinfo.BuildTime=${release_time}" \
-  -o dist/dst-admin ./cmd/admin-api
-CGO_ENABLED=0 go build -trimpath -o dist/dst-map-renderer ./cmd/dst-map-renderer
-
-cd ../dst-admin-vue-v3
-npm ci
-npm audit --registry=https://registry.npmjs.org --audit-level=moderate
-npm run lint -- --no-fix
-npm test
-npm run build
+node deploy/scripts/build-native-release.mjs --version preview-local \
+  --frontend-repository git@github.com:lcy0828/dst-admin-vue.git
 ```
 
-把 `dist/dst-admin`、`dist/dst-map-renderer` 和前端 `dist/` 放入新的 release 目录，前端目录命名为 `public/`，校验 SHA-256 后再切换。部署探针还要确认 `/api/v2/system/status` 返回的 `application.version` 和 `application.commit` 与本次 release 一致。不要把 `.env`、数据库、`app.conf`、Agent 密钥或 Steam API Key 打进前端产物。
+原生管理服务依赖 CGO/SQLite，应在目标系统和架构构建；不要直接把 macOS 产物复制到 Linux。发布包包含 `dst-admin`、`dst-admin-agent`、`dst-map-renderer`、`mod-local-setup` 和 `deploy/`。
 
-前端 API 方法和分布式类型目前由手写 client/声明维护。后端 `docs/openapi-v2.yaml`、前端 `src/api/v2.js` 与 `src/api/distributedManagement.d.ts` 必须在评审和测试中保持一致，并按前端 `docs/DST_ADMIN_FUNCTION_TRUTH.md` 的发布清单完成真实后端验收。
+`DST_ADMIN_WEB_ROOT` 仅作为显式外部页面覆盖入口保留。使用内嵌发布包时清除旧覆盖变量，以免继续加载旧页面。裸 `go build ./cmd/admin-api` 供开发使用，不会自动下载或嵌入前端。
 
-## 5. 服务启动
+## GitHub Actions
 
-最小 systemd 单元示例：
+后端 CI 运行 Go 测试、race、vet、漏洞扫描及编译。Package 工作流在当前发布分支推送、`v*` 标签或手动运行时构建完整产物。它先解析前端提交，再让所有任务使用同一 SHA；原生包启动检查通过后上传附件，镜像启动检查通过后推送。
 
-先创建能运行 shell/tmux 的 `dstadmin` 用户，准备所有配置目录，并将审核后的现有配置放在
-`/opt/dst-admin/shared/app.conf`，数据库路径指向同目录的 `go-dont.db`。
-新部署可从 `deploy/systemd/local.conf.example` 修改；升级必须保留现有配置。
-文件归属 `dstadmin`、模式 `0600`，运行账号需能读取发布产物并写入配置中的数据目录。
+前端私有仓库通过后端 Actions secret `FRONTEND_READ_KEY` 中的只读 deploy key 检出；公有仓库不需要该密钥。密钥只用于获取源码，不进入构建上下文。镜像推送使用当前仓库 `GITHUB_TOKEN` 的 `packages:write` 权限。更换前端仓库时同时调整工作流地址和授权。
 
-```ini
-[Unit]
-Description=DST Admin
-After=network-online.target
-Wants=network-online.target
+前端提交不会直接修改已安装服务，也不会自动发布后端。需要新页面时运行主仓库 Package 工作流；也可用 `frontend_ref` 输入指定回滚版本。手动构建可选择是否发布镜像，默认发布；标签发布附件只有对应标签流水线成功后可下载。
 
-[Service]
-Type=simple
-User=dstadmin
-Group=dstadmin
-WorkingDirectory=/opt/dst-admin/shared
-ExecStart=/opt/dst-admin/current/dst-admin -addr 127.0.0.1:8000
-Environment=DST_ADMIN_CONFIG=/opt/dst-admin/shared/app.conf
-Environment=DST_ADMIN_WEB_ROOT=/opt/dst-admin/current/public
-Environment=DST_ADMIN_MAP_RENDERER_PATH=/opt/dst-admin/current/dst-map-renderer
-Environment=DST_ADMIN_SAVE_PATH=/opt/dst/saves
-Environment=DST_ADMIN_BACKUP_PATH=/opt/dst/backups
-Environment=DST_ADMIN_SERVER_PATH=/opt/dst/server
-Restart=on-failure
-RestartSec=5
-KillMode=process
-UMask=0077
-NoNewPrivileges=true
-PrivateTmp=true
+## 升级与回滚
 
-[Install]
-WantedBy=multi-user.target
-```
+1. 在页面正常保存并停止受影响房间，确认进程退出。停止 native 管理服务或 Agent 本身不等于停止游戏。
+2. 备份当前生效配置、数据库、Agent 身份/操作状态和所有目标节点的存档。SQLite 停写后复制完整状态，或使用一致性 `.backup`；不要仅复制正在写入的主数据库文件。
+3. 保留旧镜像 digest 或原生包，验证新包 SHA-256。预览版本升级先在独立目录检查启动和页面。
+4. Docker 保留原 `.env` 和数据挂载，替换镜像后 `up -d`。原生安装脚本使用当前生效配置的独立副本，不能重新套初始模板；Linux 安装后显式重启，macOS 安装脚本会重启 LaunchAgent。
+5. 检查页面、登录、房间列表、Agent 在线状态，再按需启动原房间并检查真实游戏日志。
 
-保存为 `/etc/systemd/system/dst-admin.service` 后执行：
+若使用自定义服务托管，也可将原生包放在 `ROOT/releases/版本目录`，用 `deploy/scripts/activate-native-release.sh --root ROOT --release 版本目录` 原子切换 `current`，用 `--rollback` 切回 `previous`。服务应事先配置为运行 `ROOT/current/dst-admin`；该工具只切换链接，不改配置、存档或重启进程。普通安装脚本复制到固定路径，不会自动使用此链接。
 
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now dst-admin
-sudo systemctl status dst-admin --no-pager
-curl -fsS http://127.0.0.1:8000/api/v2/auth/session
-```
+回滚二进制前检查数据库兼容性。需要恢复旧数据库时使用匹配的备份，并单独核对游戏存档的恢复时间点；只切换程序不会恢复数据。不要删除存档、Agent 状态或锁文件来解决版本冲突。
 
-首次启动会执行向后兼容的数据库表迁移。启动失败时不要反复重启覆盖现场；保留日志并执行第 10 节回滚。
+## Nginx 同源反向代理
 
-裸机 native Runtime 的 tmux socket 身份绑定规范化后的 DST 存档根目录，不绑定 release 目录、Agent 状态文件或 Installation ID。发布和回滚不得修改运行用户或 `DST_ADMIN_SAVE_PATH` 后直接恢复原有世界；确需迁移路径时先正常停止房间，完成配置切换后再启动。Controller/Agent 的 systemd 单元必须保留 `KillMode=process`，使管理进程重启不会把独立 tmux/DST 当作子进程一并终止。
-
-native 配置中的 `STEAMCMD_PATH`/`STEAM_CMD_PATH` 必须指向绝对、可执行的稳定入口。官方安装脚本会在切换服务前发现真实 SteamCMD、补建缺失的稳定符号链接并在无法发现时中止安装；手工发布也必须执行同等检查，不能等到游戏更新或模组下载时才暴露路径错误。
-
-## 6. Nginx 同源反向代理
-
-以下示例假设域名证书已配置，按实际域名、证书路径修改。管理服务仅监听本机 `8000`。
-All-in-One 的本机反向代理可将 `.env` 中 `DST_ADMIN_HTTP_BIND` 设为 `127.0.0.1:8080`，
-并把示例的后端端口改为 `8080`；若 Nginx 本身在另一个容器中，使用双方可达的容器网络地址。
-独立 Nginx 服务静态页面时还需把同版本 `public/` 放到示例目录。
+Web、`/api` 与 `/agent` 必须路由到同一个管理服务。配置有效 TLS 证书，并在 Nginx `http` 块定义：
 
 ```nginx
-server {
-    listen 443 ssl http2;
-    server_name dst.example.com;
-    ssl_certificate /etc/letsencrypt/live/dst.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/dst.example.com/privkey.pem;
-    root /opt/dst-admin/current/public;
-
-    location = /agent {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-        proxy_buffering off;
-    }
-
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 3600s;
-        add_header X-Accel-Buffering no always;
-    }
-
-    location /assets/ {
-        try_files $uri =404;
-        expires 1y;
-        add_header Cache-Control "public, max-age=31536000, immutable";
-    }
-
-    location = /index.html {
-        add_header Cache-Control "no-cache, no-store, must-revalidate";
-    }
-
-    location / {
-        try_files $uri $uri/ /index.html;
-        add_header Cache-Control "no-cache";
-    }
+map $http_upgrade $dst_connection_upgrade {
+    default upgrade;
+    '' close;
 }
 ```
 
-Job 和日志 SSE 都位于 `/api/v2` 下，必须关闭代理缓冲并放宽读取超时。
-Agent 使用独立的 `/agent` WebSocket 路径；只转发 `/api/` 会使页面可用但远端无法接入。
-保存后先运行 `sudo nginx -t`，通过后再 reload Nginx。连接地址为 `wss://dst.example.com/agent`。
+在对应 HTTPS `server` 中：
 
-新 release 只注册 `/api/v2`。旧 `/api/*`、`/gamelog`、`/static`、tmux raw-command 和旧 cron raw-command 必须返回 `404`；上线前把这些负向探针纳入检查。兼容旧前端只能通过保留的 `previous` release，禁止在新二进制增加环境开关重新暴露旧路由。
-
-## 7. 切换顺序
-
-1. 完成第 3 节备份并记录旧版本健康状态。
-2. 安装新 release，校验二进制和静态资源摘要。
-3. 令 `previous` 指向当前 release，再原子切换 `current`。
-4. 启动 `dst-admin`，确认没有迁移和配置错误。
-5. 执行未登录会话探针：`curl -fsS https://dst.example.com/api/v2/auth/session`。
-6. 登录后检查 `/api/v2/system/capabilities`、`/api/v2/system/status`、房间列表和最近 Job；数据库状态必须为可用、`WAL`、外键已启用且迁移版本与本次发布一致。
-7. 验证一个无副作用刷新 Job，并观察 `/api/v2/jobs/events` 的 `queued -> running -> terminal`。
-8. 确认 native Runtime 已重新取得 `.dst-admin/runtime/owner.lock`；`RUNTIME_OWNER_CONFLICT` 表示另一套本机 Controller/Agent 仍在写同一 `SAVE_PATH`，不得通过删除锁文件绕过。
-9. 对每个原本运行的 native 世界确认 Runtime 状态仍为 `running`，且没有 `LEGACY_TMUX_SOCKET_CONFLICT`、`UNMANAGED_DST_PROCESS_CONFLICT` 或 `DUPLICATE_DST_PROCESS_CONFLICT`。
-10. 对每个 native Installation 确认登记的 `STEAMCMD_PATH` 可执行；安装脚本创建的稳定入口必须仍指向存在的 SteamCMD。
-11. 断开 SSE 后携带 `Last-Event-ID` 重连，确认事件可回放且没有重复业务动作。
-12. 验证前端 `index.html` 不缓存、带 Hash 的 assets 长缓存，最后开放流量。
-
-## 8. 健康与运行检查
-
-- 进程健康：systemd 状态为 active，8000 仅对本机代理监听。
-- API 健康：`GET /api/v2/auth/session` 返回 JSON；登录后能力与系统状态接口成功。
-- 数据健康：数据库 `PRAGMA quick_check` 返回 `ok`，最新 Job 可持久化并在刷新后读取。
-- 实时健康：Job SSE 和世界日志 SSE 保持连接；Nginx 日志中没有周期性 499/504。
-- Mod 健康：能力页同时显示内嵌解析器与外部 Lua fallback；至少各验证一个主路径和强制 fallback 样本。
-- Runtime 归属：同一 `SAVE_PATH` 只有一个 owner lock 持有者；升级前后的 tmux socket 路径一致，实际 DST PID 没有因控制服务重启而变化。
-
-## 9. 密钥轮换
-
-本节适用于启用了远程 Agent 的部署。本地单节点部署不要求安装 Agent；一旦启用远程节点，密钥轮换、Agent 重连和 capability 回读都属于发布门禁。
-
-- 常规读取 `GET /api/v2/agents/security` 只返回掩码和 SHA-256 指纹。
-- 轮换必须在前端输入 `ROTATE AGENT KEY`，调用 `/api/v2/agents/security/actions/rotate`。
-- 新密钥只在轮换响应和对应前端结果中显示一次；立即更新离线 Agent 的 `0600` 配置。
-- 旧 `/api/agent/security/key/generate`、`/update` 及其余 legacy API 不再注册并返回 `404 Not Found`，不得用于部署脚本。
-- 轮换完成后检查所有 Agent 重新上线，并确认 Runtime inventory、Placement、Console、备份、Mod 和游戏更新所需 capability 没有降级，再销毁临时记录，不把密钥写进命令历史、工单或 URL。
-
-## 10. 回滚
-
-触发条件包括：数据库迁移失败、登录不可用、核心房间控制回归、持续 5xx、SSE 无法恢复、Agent 大面积离线或发现高危泄漏。
-
-```bash
-sudo systemctl stop dst-admin
-rollback_release="$(readlink -f /opt/dst-admin/previous)"
-case "$rollback_release" in
-  /opt/dst-admin/releases/*) ;;
-  *) echo "invalid rollback release: $rollback_release" >&2; exit 1 ;;
-esac
-sudo ln -sfn "$rollback_release" /opt/dst-admin/current.next
-sudo mv -Tf /opt/dst-admin/current.next /opt/dst-admin/current
-sudo -u dstadmin cp -p /opt/dst-admin/shared/backups/app.conf.pre-20260808-120000 /opt/dst-admin/shared/app.conf
-sudo chmod 0600 /opt/dst-admin/shared/app.conf
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $dst_connection_upgrade;
+    proxy_read_timeout 3600s;
+    proxy_buffering off;
+}
 ```
 
-数据库迁移仅包含经验证的向后兼容新增时，可先使用原数据库启动旧版。若旧版不能读取、迁移中断或新版本已写入旧版不认识的语义，则恢复发布前数据库：
+All-in-One 默认上游端口为 `8080`。按实际存档上传限制设置 `client_max_body_size`，不要向公网同时暴露未加密的管理入口。
 
-```bash
-sudo -u dstadmin cp -p /opt/dst-admin/shared/backups/go-dont.db.pre-20260808-120000 /opt/dst-admin/shared/go-dont.db
-sudo chmod 0600 /opt/dst-admin/shared/go-dont.db
-sudo systemctl start dst-admin
-```
+## 密钥轮换
 
-回滚后重新执行会话探针、登录、房间读取和一个无副作用刷新。若新版本期间已经轮换 Agent 密钥，不能恢复旧密钥文件后直接结束：必须让服务端和全部 Agent 使用同一有效密钥，必要时再次轮换。
-
-## 11. 发布完成记录
-
-每次发布记录以下证据：版本 SHA、备份路径与完整性结果、迁移日志、健康检查时间、SSE 重连结果、Agent 在线数、Mod 双路径样本结果、回滚演练结果和批准人。只有证据齐全，才把 release 标记为可长期保留；上一版本至少保留一个完整发布周期。
+在 Agent 安全设置生成新密钥前，准备所有连接节点的更新计划。保存新密钥到各节点受保护配置，重启对应连接并确认恢复在线。丢失旧密钥或轮换后未更新节点会导致 Agent 离线；密钥不能写进 URL、普通日志或公开 issue。

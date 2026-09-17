@@ -18,6 +18,7 @@ jobs:
     env:
       CGO_ENABLED: 1
       GOTOOLCHAIN: go1.25.13+auto
+      DST_ADMIN_CONFIG: ${{ github.workspace }}/deploy/systemd/local.conf.example
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

@@ -5,7 +5,7 @@ SECURITY_KEY =
 ; 可选：仅在节点间需要精确模组直传时同时启用。默认关闭。
 ; 监听端口必须由防火墙限制为可信 Controller/Agent 网络。
 ; MOD_PEER_LISTEN_ADDR = :18081
-; MOD_PEER_ADVERTISE_URL = http://192.168.2.23:18081
+; MOD_PEER_ADVERTISE_URL = http://agent.example.com:18081
 
 [runtime.native]
 DRIVER = native

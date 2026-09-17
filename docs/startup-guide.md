@@ -3,7 +3,7 @@
 **简体中文（默认）** | [English](startup-guide.en.md)
 
 本指南对应当前源码，按“准备环境 → 启动管理服务 → 安装游戏 → 开服”执行。
-生产环境由 Go 服务同时提供页面和 API，前端只需构建，不需要运行 Vite。
+发布二进制内嵌页面，由 Go 服务同时提供页面和 API；部署机器无需构建前端或运行 Vite。
 首次安装和升级使用不同步骤；已有部署请先看下方的[升级与数据保护](#升级与数据保护)。
 
 ## 选择部署方式
@@ -23,8 +23,7 @@
 
 ## Linux 原生部署
 
-以下命令以 **Debian 12 amd64** 为例，在 `dst-admin-go` 仓库根目录执行。
-前后端源码获取方法见 [README](../README.md#1-下载匹配的前后端)。
+以下命令以 **Debian 12 amd64** 为例，从本仓库下载完整原生包，后续安装命令在解压目录执行。
 如果已有 DST，沿用它的运行用户和数据目录，跳过新用户、新目录及 SteamCMD 下载步骤中已经完成的部分。
 不要对运行中的存档递归修改权限或移动目录。
 
@@ -63,26 +62,20 @@ sudo -u dst /opt/dst/steamcmd/steamcmd.sh +quit
 这一步没有下载 DST。稍后通过页面安装游戏；配置中的 SteamCMD 路径使用
 `/opt/dst/steamcmd/steamcmd.sh`，而不是示例默认的 `/usr/games/steamcmd`。
 
-### 3. 构建管理服务和页面
+### 3. 获取原生安装包
 
-构建机安装 [Go](https://go.dev/doc/install)（项目 `go.mod` 指定 `go1.25.13` 工具链）
-和 [Node.js 24 LTS](https://nodejs.org/en/download)。Go 自动获取工具链时需要能访问下载源。
-Debian 自带的旧版 Go/Node 不一定满足要求。建议在与运行机器相同的系统和架构上构建，
-不要把 macOS 二进制复制到 Linux。
+从主仓库 Releases 或 Package 工作流的 Artifacts 下载 `dst-admin-VERSION-linux-amd64.tar.gz` 和 `.sha256`，在目标机器校验并解压：
 
 ```bash
-go version
-node --version
-npm --version
-mkdir -p dist
-CGO_ENABLED=1 go build -trimpath -o dist/dst-admin ./cmd/admin-api
-CGO_ENABLED=0 go build -trimpath -o dist/dst-map-renderer ./cmd/dst-map-renderer
-npm --prefix ../dst-admin-vue-v3 ci
-npm --prefix ../dst-admin-vue-v3 run build
+sha256sum -c dst-admin-VERSION-linux-amd64.tar.gz.sha256
+tar -xzf dst-admin-VERSION-linux-amd64.tar.gz
+cd dst-admin-VERSION-linux-amd64
+./dst-admin -version
 ```
 
-管理服务使用 SQLite，必须启用 CGO，并具备 C 编译器。Agent 和地图渲染器可使用
-`CGO_ENABLED=0`。构建结束应有两个二进制和 `../dst-admin-vue-v3/dist/index.html`。
+将 `VERSION` 换成实际文件名。版本输出应包含 `embeddedWebUI: true` 和 `frontendCommit`。包内包含页面、Agent、地图渲染器、辅助程序和安装模板，运行机器不需要 Go 或 Node.js。后续命令在解压目录执行。
+
+如需自行构建，请按[打包说明](deployment-and-rollback.md)操作；只有构建机需要 Go、C 编译器、Git 和 Node.js。
 
 ### 4. 配置并安装
 
@@ -117,10 +110,9 @@ chmod 600 ../dst-admin-local/app.conf
 
 ```bash
 sudo deploy/scripts/install-native-local.sh \
-  --binary "$PWD/dist/dst-admin" \
-  --renderer "$PWD/dist/dst-map-renderer" \
+  --binary "$PWD/dst-admin" \
+  --renderer "$PWD/dst-map-renderer" \
   --config "$PWD/../dst-admin-local/app.conf" \
-  --web-root "$PWD/../dst-admin-vue-v3/dist" \
   --user dst
 sudo systemctl enable --now dst-admin-local
 sudo systemctl status dst-admin-local --no-pager
@@ -128,7 +120,7 @@ curl -fsS http://127.0.0.1:8000/api/v2/auth/session
 ```
 
 服务应为 `active`，接口返回 JSON。默认监听 `0.0.0.0:8000`。systemd 已明确指定
-`DST_ADMIN_CONFIG=/var/lib/dst-admin/app.conf` 和前端路径；生效配置以后位于这个安装位置。
+`DST_ADMIN_CONFIG=/var/lib/dst-admin/app.conf` ；页面由二进制内嵌提供，生效配置以后位于这个安装位置。
 `HTTP_PORT` 不覆盖启动命令中的 `-addr`。修改监听地址时使用 systemd override，并保留其他服务配置。
 
 ```bash
@@ -137,7 +129,7 @@ sudo systemctl restart dst-admin-local
 ```
 
 打开页面后按[首次开服](#首次开服与已有存档)完成游戏安装。反向代理示例见
-[部署与回滚](deployment-and-rollback.md#6-nginx-同源反向代理)。
+[部署与回滚](deployment-and-rollback.md#nginx-同源反向代理)。
 
 ## 接入远程 Agent
 
@@ -158,7 +150,7 @@ Agent 主动连接控制端的 `/agent`，不需要为普通命令额外开放 A
    原生默认端口为 `8000`；通过 HTTPS 反向代理时使用 `wss://域名/agent`。
 
 已有 Agent 时复用妥善保存的连接密钥，不要为新增节点随意轮换。页面只显示旧密钥的掩码；
-丢失密钥时需按[密钥轮换流程](deployment-and-rollback.md#9-密钥轮换)处理全部相关节点。
+丢失密钥时需按[密钥轮换流程](deployment-and-rollback.md#密钥轮换)处理全部相关节点。
 密钥写入权限为 `0600` 的配置文件，不拼进 WebSocket URL 或命令行。
 
 ### 2. 在远程机器准备环境
@@ -167,16 +159,7 @@ Agent 主动连接控制端的 `/agent`，不需要为普通命令额外开放 A
 [Linux 原生部署第 1、2 步](#linux-原生部署)准备。只运行 Agent 的机器不需要 Node.js、
 前端文件或管理服务数据库。可以在另一台构建机上生成匹配目标系统/架构的 Agent 后复制过去。
 
-在源码仓库构建 Linux amd64 Agent：
-
-```bash
-mkdir -p dist
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-  -o dist/dst-admin-agent ./cmd/agent
-```
-
-安装时远端还需有仓库中的 `deploy/scripts/` 和 `deploy/systemd/`，保持相对目录结构。
-下面命令在远端源码根目录执行：
+原生包已包含 `dst-admin-agent` 和 `deploy/`。将匹配远端系统架构的完整包传到远端，解压后执行：
 
 ```bash
 mkdir -p ../dst-agent-local
@@ -211,7 +194,7 @@ SERVER_MODE = 64
 
 ```bash
 sudo deploy/scripts/install-native-agent.sh \
-  --binary "$PWD/dist/dst-admin-agent" \
+  --binary "$PWD/dst-admin-agent" \
   --config "$PWD/../dst-agent-local/agent.conf" \
   --user dst
 sudo systemctl enable --now dst-admin-agent
@@ -248,13 +231,13 @@ journalctl -u dst-admin-agent -n 100 --no-pager
 
 macOS 使用当前登录用户的 Steam 游戏文件。Linux 一键下载和 LuaJIT 安装不适用于 macOS。
 
-1. 安装 Xcode Command Line Tools、Go 工具链、Node.js 24；用 `brew install tmux` 安装 tmux。
+1. 用 `brew install tmux` 安装 tmux。
 2. 通过 Steam 安装 DST；Apple Silicon 运行 x86_64 游戏需准备 Rosetta 2。
-3. 按 Linux 第 3 步在 macOS 本机构建管理程序、渲染器和前端。
+3. 下载匹配架构的 macOS 原生包（Apple Silicon 使用 `darwin-arm64`），用 `shasum -a 256 -c 文件名.tar.gz.sha256` 校验并解压；后续命令在解压目录执行。Intel Mac 可按打包指南在本机构建 `darwin-amd64`。
 4. 将 `local.conf.example` 复制到仓库外编辑。配置路径必须是当前用户可写的绝对路径，
    INI 中不要使用 `~` 或 `$HOME` 代替真实路径。
 
-首次部署在后端仓库根目录准备配置：
+首次部署在解压目录准备配置：
 
 ```bash
 mkdir -p ../dst-admin-local
@@ -279,10 +262,9 @@ chmod 600 ../dst-admin-local/app.conf
 
 ```bash
 deploy/scripts/install-macos-local.sh \
-  --binary "$PWD/dist/dst-admin" \
-  --renderer "$PWD/dist/dst-map-renderer" \
-  --config "$PWD/../dst-admin-local/app.conf" \
-  --web-root "$PWD/../dst-admin-vue-v3/dist"
+  --binary "$PWD/dst-admin" \
+  --renderer "$PWD/dst-map-renderer" \
+  --config "$PWD/../dst-admin-local/app.conf"
 launchctl print "gui/$(id -u)/top.luocaiyi.dst-admin-local"
 curl -fsS http://127.0.0.1:8000/api/v2/auth/session
 ```
@@ -331,7 +313,7 @@ Web 端口通过不代表游戏端口通过。防火墙放行实际世界配置�
 | Linux Agent | `systemctl restart dst-admin-agent`；`journalctl -u dst-admin-agent` | `/var/lib/dst-admin-agent`、可选 `agent.env`、游戏及存档目录 |
 | macOS 本机 | `launchctl kickstart -k "gui/$(id -u)/top.luocaiyi.dst-admin-local"` | Application Support 中的配置/状态以及外部游戏、存档目录 |
 
-更新前创建可恢复的存档、数据库和配置备份，并保留旧二进制/前端或镜像。
+更新前创建可恢复的存档、数据库和配置备份，并保留旧安装包或镜像。
 复制存档前先正常停止相关世界；停止 native 管理服务或 Agent 不等于停服。
 SQLite 使用停写后的复制或 `.backup`，不能只复制正在写入的数据库主文件。
 

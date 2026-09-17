@@ -84,7 +84,7 @@ dst-map-renderer \
 
 内置解析器支持普通 Lua Session、`KLEI     1` 文本以及 `KLEI0001 + Base64 + 16-byte header + raw Deflate`。Lua 运行在受限 `gopher-lua` 环境中，带执行超时、输入/解压/JSON 上限以及属性深度和数量限制。
 
-Renderer 从当前游戏的 `scripts/tiledefs.lua` 读取官方 Tile 顺序，并使用 Session 的 `world_tile_map` 解释实际 ID；地形由官方 KTEX 纹理、`map_edge` 遮罩和道路纹理生成。未知 MOD prefab 不会被丢弃，原始 prefab、坐标、分类和受限属性会写入 `features.json`；能匹配官方图标的实体还会携带 `icons.png` 精灵坐标。未知 MOD Tile 使用由 ID 稳定派生的备用色并写入 warning。Renderer 不依赖图鉴数据库，因此 `/Users/lcy/dst` 或未来 Catalog 服务不可用时仍能生成地图，但缺少当前 DST 官方资源时会明确失败。
+Renderer 从当前游戏的 `scripts/tiledefs.lua` 读取官方 Tile 顺序，并使用 Session 的 `world_tile_map` 解释实际 ID；地形由官方 KTEX 纹理、`map_edge` 遮罩和道路纹理生成。未知 MOD prefab 不会被丢弃，原始 prefab、坐标、分类和受限属性会写入 `features.json`；能匹配官方图标的实体还会携带 `icons.png` 精灵坐标。未知 MOD Tile 使用由 ID 稳定派生的备用色并写入 warning。Renderer 不依赖图鉴数据库，因此 `独立图鉴目录` 或未来 Catalog 服务不可用时仍能生成地图，但缺少当前 DST 官方资源时会明确失败。
 
 ## 任务状态与故障处理
 

@@ -54,46 +54,10 @@ API：`GET /runtime-targets/luajit` 返回 `installations` 和可选 `transfers`
 `targetId + installationId + releaseId`，`source` 默认 `runtime`，显式
 `controller` 才传包。
 
-## 上游与兼容构建
+## 上游与兼容性
 
-上游：<https://github.com/fesily/DontStarveLuaJIT2>。
-2026-09-16 节点实查最新稳定版为 v3.0.0，上游提交
-`2d40d7bb1a00a0bf7ed8cc5bd8b4433d58b1ee89`。原包 `linux_Mod.zip`
-为 45,159,683 字节，SHA-256：
-`58374ccd18e6e13225e1a3c980a92fb06bfa26a17e7338fe4c78fc7a5ec9b1f3`。
+节点查询 [DontStarveLuaJIT2 上游发布](https://github.com/fesily/DontStarveLuaJIT2/releases)，在用户执行安装或更新时下载选定版本。下载、缓存、校验和应用在目标机器完成，也可选择由控制端提供包。
 
-本地合并提交 `a621a55`，Linux 启动兼容修复 `bfcc646`，取消自定义 JIT 参数与
-私有契约的提交 `fcdff97`。兼容构建保留 Linux 自动签名修复、原子签名写入、
-Debian 12 运行依赖及必要的插件资源。仅在 Frida 对 libc `chdir` 的快速替换
-返回 `GUM_REPLACE_WRONG_SIGNATURE` 时回退到普通替换；此条件在测试机原生
-Linux 上已复现，普通替换成功，因此保留该修复。
+是否能直接使用取决于目标 Linux 的架构、动态加载器、GLIBC/GLIBCXX/CXXABI 和包内文件。版本更新不等于自动兼容：先在目标节点完成依赖检查，失败时保留现有安装并显示原因。较旧发行版可使用系统提供的兼容构建。
 
-嵌入的兼容 ZIP 位于 `internal/luajit/packages/`，版本 3.0.0，源码 `fcdff97`，
-12,534,607 字节，SHA-256：
-`49a6278e35db7caaf535f239a7154398e4c6a16aab955a7d8848fdd121a7a6e0`。
-使用源码仓库的 `tools/linux/build-debian12.sh` 构建，Frida `COPYING` 放入
-`Mod/licenses/frida/`，再用 `tools/linux/package-admin.py` 打包；同步更新
-`packages/manifest.json`。ZIP 包含来源和第三方许可，不包含测试 shim 或令牌。
-
-## 2026-09-16 验证
-
-- CMake 53 项测试通过；前端 669 项测试与生产构建通过，相关 Go 包测试通过。
-- 浏览器验证节点选择、检查上游、节点下载、默认安装、可选控制端传包、移动端布局，
-  以及移除 JIT 开关后的启动选择。
-- `192.168.2.23`（原生 Debian 12 amd64）实测官方原包安装在依赖检查处失败，
-  原游戏程序摘要不变；新兼容包成功安装到独立游戏副本。
-- 同机独立离线测试世界（DST 747465）使用 `-lua_vm_type=jit` 启动，就绪后
-  连续运行 **180.8 秒**，定期查询世界状态均正常，退出码 0。另一次短启动调用
-  上游 `GameInjector.DS_LUAJIT_get_vm_type_name(0)` 确认当前 VM 为 `jit`。
-- 新版管理服务在本地隔离环境启动并观察 180.3 秒，会话接口和 LuaJIT 版本列表正常，退出码 0。
-- 同机 Agent 测试覆盖节点下载、SHA 失败、缓存安装、幂等重试和可选控制端传包。
-  测试夹具可通过 `DST_ADMIN_TEST_STEAM_API` 指向游戏 Steam 库，或使用 C 编译器
-  构造不执行的测试库；真实游戏启动验证使用实际游戏依赖。
-- 测试根目录 `/opt/dst-admin-luajit-review-20260916`；原线上 Agent、原房间及
-  `/opt/dst/saves` 未替换、未清理。原存档备份为其下的
-  `preserved/original-saves.tar`，157,962,240 字节，SHA-256：
-  `902702567956fb28e5eb430cb27955a72c812937230d9b3e0b4d7109459fc1c1`。
-
-静态检测的 `ready` 表示文件布局和版本等安装检查通过，实际 VM 启动以进程、
-控制台查询和运行日志为证。本次测试范围是独立世界的启动与三分钟运行，未声明
-验证用户原存档的全部 MOD、长期运行或性能收益。
+系统不要求上游包包含额外的启动模式声明，也不依赖私有启动开关。更新后仍需校验实际游戏启动；游戏本体更新可能覆盖已安装的 LuaJIT 文件，按页面状态重新安装即可。离线兼容包的来源和许可见[内置包说明](../internal/luajit/packages/README.md)。

@@ -203,19 +203,3 @@ docker logs "$runtime_container"
 `/opt/dst/control` 属于平台灾备，应与房间备份分开保护。远程 Agent 的 runtime state 决定 fencing 与幂等语义，恢复远程节点时必须保留；本机容器通过数据库、受管标签和固定 installation ID 重新发现。Mod cache、Workshop 内容和 DST 二进制原则上可重建，但保留 cache 能保证精确版本回滚和 Steam 不可用时恢复。
 
 Kubernetes 的 PVC/CSI snapshot 只能替代单卷复制，不能替代跨 Shard 保存屏障、manifest 和集中校验。当前已提供默认关闭的 Provider 状态、只读 REST observation、类型化 preflight API/UI、namespace RBAC 与实验安全内核，但固定 `applyAllowed=false`，没有 Apply 路由、lease-aware supervisor、Console、Mod 分发、备份或恢复链路，不能作为生产安装步骤。
-
-## 历史 Debian 12 实机证据
-
-2026-08-15 在全新 Debian 12 / Docker 环境完成以下远程 Agent 链路，测试工作区与既有 DST 环境隔离。它证明远程协议与跨节点数据链路，不替代当前“管理容器直控本机 Shard”的重新验收：
-
-- 非 root 控制面首次启动与旧 `control-data` 权限迁移，控制面健康检查和两个 Agent 重连。
-- 裸机 Agent 与容器 Agent 同时注册，Runtime inventory、物理核心容量和受管容器 label 识别正常。
-- 分片跨节点/跨 volume apply 成功，目标 Placement 变为 `aligned`，源端保留可恢复迁移目录。
-- SteamCMD 下载 Workshop `1392778117` 成功，约 110 MB、1433 个文件，并验证 tree SHA。
-- 发布前创建分布式保护备份；Mod cache bundle 以 256 KiB 分块上传，完成跨节点 tree 校验与两端本地 manifest 校验后原子发布，再回读目标 `modoverrides.lua`。
-- 2026-08-16 继续验证迁移后控制器本机已不存在 Shard 目录的场景：房间 Mod 列表、配置文件和 `modinfo.lua` schema 均从当前 Placement 正常聚合，没有回落到控制器本机。
-- 对 Workshop `1392778117` 依次完成禁用、启用、配置 `AutoStackedLoot=true` 和移除。四个 Job 与 Publication 均为 `succeeded/full`；每步都回读目标文件。移除后 `modoverrides.lua` 为 `return {}`，托管 setup 段无 `ServerModSetup`，节点不可变 cache 仍保留用于重用和回滚。
-
-对应最终 Job ID 为 `c23bcdb2-09fc-43ba-bbb8-04e6eba38f9d`、`a908e856-8df7-4ed9-90cb-87d5e926b87d`、`f8233414-f253-4e6c-9bb5-bba4a2a4aca8`、`0bce17e5-0801-4755-a7cb-6f3fc1a094c0`；Publication ID 为 `3e7dd0ad-a2b4-4948-b738-0dd311057050`、`321d6b7b-3e2e-42ba-bfc3-ddc85c138245`、`7ddc78bc-1299-44cf-9da5-0d63bd6ffc84`、`2dfe6b50-3baf-42e0-80e1-7d72d41703a2`。
-
-这些证据验证的是 Debian 12 Docker/native 组合，不扩展为 Podman、macOS 容器或 Kubernetes 生产兼容声明。

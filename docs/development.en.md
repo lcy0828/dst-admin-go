@@ -19,7 +19,7 @@ workspace/
   dst-admin-dev/       Development configuration and data; not tracked by Git
 ```
 
-If a production service already uses the ports, choose other ports and independent data directories. Do not run two management processes against the same saves. This project's registered local restart rules are in the frontend repository's `docs/local-runtime.md` (Chinese).
+If a production service already uses the ports, choose other ports and independent data directories. Do not run two management processes against the same saves.
 
 ## 1. Prepare isolated configuration
 
@@ -109,7 +109,7 @@ Game processes inside independent tmux sessions may continue after the managemen
 Run backend checks from its repository and select packages appropriate to your changes. Formal release requirements are in [deployment and rollback](deployment-and-rollback.en.md):
 
 ```bash
-go test ./...
+DST_ADMIN_CONFIG="$PWD/deploy/systemd/local.conf.example" go test ./...
 go vet ./...
 ```
 
@@ -122,3 +122,7 @@ npm run build
 ```
 
 Build the Agent from backend `./cmd/agent`. Use separate configuration and `-state` paths; do not reuse production Agent identity files. Development startup does not automatically add remote nodes. For integration tests, follow the [remote Agent guide](startup-guide.en.md#connect-a-remote-agent).
+
+## Package the complete product
+
+Image and native builds fetch the official frontend and embed it in the management binary; see [packaging](deployment-and-rollback.en.md). Plain `go run` builds have no embedded UI; use Vite or an explicit `DST_ADMIN_WEB_ROOT` during development. Private frontend source requires Git access. `--frontend PATH` uses only its committed HEAD.
