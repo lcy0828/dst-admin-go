@@ -138,7 +138,7 @@ Game UDP ports must still be open on the machine running each world.
 ### 1. Enable the Controller
 
 1. Open **Machine Management** (`/agents/list`), then **Deployment role**. Choose the local + Controller role, or Controller-only if it will not run local worlds. Before switching roles, stop worlds on any local Runtime target that will be disabled.
-2. Save and restart the management service. For systemd, use `systemctl restart dst-admin-local`. For All-in-One, use the README's Compose command with the same environment file, replacing `up -d` with `restart dst-admin`. Restarting All-in-One stops worlds inside the container; check rooms and start them as needed after recovery.
+2. Stop local worlds and wait for background tasks, then save. The role applies within the current process without restarting the management service.
 3. Open **Agent security settings** (`/agents/security`). For first enrollment with no existing Agents, generate a new key and save the plaintext shown this time for the remote `[agent] SECURITY_KEY`.
 4. Check connectivity from the remote host: on a LAN, use `ws://CONTROLLER_IP:8080/agent` (native deployments default to `8000`); behind an HTTPS proxy, use `wss://DOMAIN/agent`.
 
@@ -211,7 +211,7 @@ Stopping an Agent usually leaves native worlds running. Stop worlds through room
 
 ## Join an existing management instance to a Controller
 
-If the remote host already runs All-in-One or a full native management service, switch its deployment role to join a management center, enter the upstream `ws(s)://…/agent` URL and connection key, then save and restart that instance.
+If the remote host already runs All-in-One or a full native management service, switch its deployment role to join a management center, enter the upstream `ws(s)://…/agent` URL and connection key, then stop local worlds, wait for background tasks, and save to apply.
 Its embedded Member connects upstream and continues managing its existing files. Do not install a second standalone Agent to control the same saves.
 After joining, perform writes through the Controller; the remote UI remains available for reading.
 
@@ -269,7 +269,7 @@ An instance without an administrator automatically opens `/setup`: **Administrat
 Account creation asks for a username, password, and password confirmation, using the server's configured password policy. Chinese is the default, with an English switch.
 
 Progress is stored in the database and survives page refreshes, login, and service restarts.
-When role or path changes require a restart, installation and room creation in the wizard wait until the service restarts; then click **Check again**.
+Role, directory, and runtime tool settings saved in the UI apply without restarting the management service. Stop local worlds and wait for background tasks first; failed application rolls back the configuration. Changing paths does not move, import, or delete saves. Environment-controlled settings still require a deployment update and restart.
 The game step supports installation or adoption of an existing directory, with optional LuaJIT. Save imports create new rooms; replacement of existing rooms is unavailable in the wizard.
 For remote rooms, use **Configure runtime nodes** to place and provision worlds, then return from the page header to recheck. A catalog entry alone does not count as a ready room.
 Save uploads in the wizard are for local hosting. A Controller-only instance discovers existing saves from the Agent’s configured save directory; provisioning a new room does not transfer local Session saves.
@@ -322,7 +322,7 @@ See [deployment and rollback](deployment-and-rollback.en.md) for a complete rele
 | Missing data directory or Permission denied | Check absolute paths, service user, and parent-directory access; create configured empty directories before first local startup |
 | SteamCMD unavailable | Run its registered absolute path as the service user; check 32-bit libraries, write permissions, and download connectivity |
 | Management API works but the page returns 404 | Check for a built `index.html` under `DST_ADMIN_WEB_ROOT` |
-| Agent offline | Check that the Controller role took effect after restart, the `/agent` URL, keys on both ends, environment overrides, and proxy WebSocket support |
+| Agent offline | Check that the Controller role has been applied, the `/agent` URL, keys on both ends, environment overrides, and proxy WebSocket support |
 | Agent online but installation unavailable | Check `[runtime.NAME]`, SteamCMD, Agent capabilities, and the installation selected in the UI |
 | `RUNTIME_OWNER_CONFLICT` | Check whether a local management service and another Agent both control the saves; stop the extra manager normally |
 | Installation/validation rejected while games run | Stop every world using that game installation through room management, confirm it stopped, then retry |

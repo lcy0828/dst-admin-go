@@ -57,7 +57,7 @@ func (h *SystemSettingsHandler) apply(c *gin.Context) {
 		Failure(c, http.StatusUnprocessableEntity, "IP_WHITELIST_LOCKOUT", "IP 白名单必须包含当前访问地址", map[string]string{"security.ipWhitelist": c.ClientIP()})
 		return
 	}
-	value, err := h.service.Apply(input)
+	value, err := h.service.ApplyContext(c.Request.Context(), input)
 	if err != nil {
 		systemSettingsFailure(c, err)
 		return
@@ -82,6 +82,8 @@ func (h *SystemSettingsHandler) testEmail(c *gin.Context) {
 
 func systemSettingsFailure(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, systemsettings.ErrRuntimeBusy):
+		Failure(c, http.StatusConflict, "SYSTEM_SETTINGS_RUNTIME_BUSY", err.Error(), nil)
 	case errors.Is(err, systemsettings.ErrConflict):
 		Failure(c, http.StatusConflict, "SYSTEM_SETTINGS_CONFLICT", "系统设置已被其他操作修改，请刷新后重试", nil)
 	case errors.Is(err, systemsettings.ErrConfirmationRequired):

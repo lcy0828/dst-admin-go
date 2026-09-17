@@ -88,13 +88,22 @@ type Repository interface {
 	Save(expectedRevision string, values map[string]string) (Snapshot, error)
 }
 
-type FileRepository struct{ path string }
+type FileRepository struct {
+	path string
+	mu   sync.Mutex
+}
 
 func NewFileRepository(path string) *FileRepository {
 	return &FileRepository{path: filepath.Clean(path)}
 }
 
 func (r *FileRepository) Snapshot() (Snapshot, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.snapshot()
+}
+
+func (r *FileRepository) snapshot() (Snapshot, error) {
 	raw, err := os.ReadFile(r.path)
 	if err != nil {
 		return Snapshot{}, err
@@ -103,6 +112,8 @@ func (r *FileRepository) Snapshot() (Snapshot, error) {
 }
 
 func (r *FileRepository) Save(expectedRevision string, values map[string]string) (Snapshot, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	raw, err := os.ReadFile(r.path)
 	if err != nil {
 		return Snapshot{}, err
@@ -135,7 +146,7 @@ func (r *FileRepository) Save(expectedRevision string, values map[string]string)
 	if err := atomicWrite(r.path, encoded.Bytes(), 0600); err != nil {
 		return Snapshot{}, fmt.Errorf("write settings: %w", err)
 	}
-	return r.Snapshot()
+	return snapshotFromBytes(r.path, encoded.Bytes())
 }
 
 func snapshotFromBytes(path string, raw []byte) (Snapshot, error) {

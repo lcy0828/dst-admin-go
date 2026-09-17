@@ -118,6 +118,10 @@ func InitApplication() (*Application, error) {
 }
 
 func initApplication(manageBackground bool) (*Application, error) {
+	return initApplicationConfig(manageBackground, manageBackground, setting.CurrentSnapshot())
+}
+
+func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.Snapshot) (*Application, error) {
 	if err := setting.Validate(); err != nil {
 		return nil, err
 	}
@@ -132,7 +136,12 @@ func initApplication(manageBackground bool) (*Application, error) {
 	}
 	completed := false
 	defer func() {
-		if !completed && databaseOpened && manageBackground {
+		if !completed {
+			for i := len(hooks.stop) - 1; i >= 0; i-- {
+				_ = hooks.stop[i](context.Background())
+			}
+		}
+		if !completed && databaseOpened && ownsDatabase {
 			_ = models.CloseDB()
 		}
 	}()
@@ -149,18 +158,18 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err := roomStore.Migrate(); err != nil {
 		return nil, err
 	}
-	savePath := setting.Path("paths", "DST_SAVE_PATH", "DST_ADMIN_SAVE_PATH")
-	backupPath := setting.Path("paths", "DST_BACKUP_PATH", "DST_ADMIN_BACKUP_PATH")
-	serverPath := setting.Path("paths", "DST_SERVER_PATH", "DST_ADMIN_SERVER_PATH")
-	ugcPath := setting.Path("paths", "DST_UGC_PATH", "DST_ADMIN_UGC_PATH")
-	steamCMDPath := setting.Path("mod", "STEAM_CMD_PATH", "DST_ADMIN_STEAMCMD_PATH")
-	luaFallbackPath := setting.Path("mod", "LUA_SH_PATH", "DST_ADMIN_LUA_PATH")
-	workshopContentPath := setting.Path("mod", "WORKSHOP_CONTENT", "DST_ADMIN_WORKSHOP_CONTENT")
-	workshopDownloadPath := setting.Path("mod", "WORKSHOP_MOD_PATH", "DST_ADMIN_WORKSHOP_DOWNLOAD")
-	steamAPIKey := setting.String("mod", "STEAM_WEB_API_KEY", "DST_ADMIN_STEAM_API_KEY")
-	steamAppID := setting.String("mod", "APP_ID", "DST_ADMIN_STEAM_APP_ID")
-	luaBinary := setting.String("mod", "LUA_BINARY", "DST_ADMIN_LUA_BINARY")
-	pythonBinary := setting.String("mod", "PYTHON_BINARY", "DST_ADMIN_PYTHON_BINARY")
+	savePath := config.Path("paths", "DST_SAVE_PATH", "DST_ADMIN_SAVE_PATH")
+	backupPath := config.Path("paths", "DST_BACKUP_PATH", "DST_ADMIN_BACKUP_PATH")
+	serverPath := config.Path("paths", "DST_SERVER_PATH", "DST_ADMIN_SERVER_PATH")
+	ugcPath := config.Path("paths", "DST_UGC_PATH", "DST_ADMIN_UGC_PATH")
+	steamCMDPath := config.Path("mod", "STEAM_CMD_PATH", "DST_ADMIN_STEAMCMD_PATH")
+	luaFallbackPath := config.Path("mod", "LUA_SH_PATH", "DST_ADMIN_LUA_PATH")
+	workshopContentPath := config.Path("mod", "WORKSHOP_CONTENT", "DST_ADMIN_WORKSHOP_CONTENT")
+	workshopDownloadPath := config.Path("mod", "WORKSHOP_MOD_PATH", "DST_ADMIN_WORKSHOP_DOWNLOAD")
+	steamAPIKey := config.String("mod", "STEAM_WEB_API_KEY", "DST_ADMIN_STEAM_API_KEY")
+	steamAppID := config.String("mod", "APP_ID", "DST_ADMIN_STEAM_APP_ID")
+	luaBinary := config.String("mod", "LUA_BINARY", "DST_ADMIN_LUA_BINARY")
+	pythonBinary := config.String("mod", "PYTHON_BINARY", "DST_ADMIN_PYTHON_BINARY")
 	if steamAppID == "" {
 		steamAppID = "322330"
 	}
@@ -168,45 +177,45 @@ func initApplication(manageBackground bool) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
-	mapRendererPath := setting.Path("map", "RENDERER_PATH", "DST_ADMIN_MAP_RENDERER_PATH")
-	mapPath := setting.Path("paths", "DST_MAP_PATH", "DST_ADMIN_MAP_PATH")
+	mapRendererPath := config.Path("map", "RENDERER_PATH", "DST_ADMIN_MAP_RENDERER_PATH")
+	mapPath := config.Path("paths", "DST_MAP_PATH", "DST_ADMIN_MAP_PATH")
 	if mapPath == "" {
 		mapPath = backupPath + string(os.PathSeparator) + "maps"
 	}
-	serverMode := setting.String("paths", "DST_SERVER_MODE", "DST_ADMIN_SERVER_MODE")
-	localRuntimeDriver := strings.ToLower(strings.TrimSpace(setting.String("runtime", "DRIVER", "DST_ADMIN_LOCAL_RUNTIME_DRIVER")))
+	serverMode := config.String("paths", "DST_SERVER_MODE", "DST_ADMIN_SERVER_MODE")
+	localRuntimeDriver := strings.ToLower(strings.TrimSpace(config.String("runtime", "DRIVER", "DST_ADMIN_LOCAL_RUNTIME_DRIVER")))
 	if localRuntimeDriver == "" {
 		localRuntimeDriver = "native"
 	}
-	localInstallationID := strings.TrimSpace(setting.String("runtime", "INSTALLATION_ID", "DST_ADMIN_LOCAL_INSTALLATION_ID"))
+	localInstallationID := strings.TrimSpace(config.String("runtime", "INSTALLATION_ID", "DST_ADMIN_LOCAL_INSTALLATION_ID"))
 	if localInstallationID == "" {
 		localInstallationID = "default"
 	}
-	localContainerEngine := strings.TrimSpace(setting.String("runtime", "CONTAINER_ENGINE", "DST_ADMIN_LOCAL_CONTAINER_ENGINE"))
+	localContainerEngine := strings.TrimSpace(config.String("runtime", "CONTAINER_ENGINE", "DST_ADMIN_LOCAL_CONTAINER_ENGINE"))
 	if localContainerEngine == "" {
 		localContainerEngine = "docker"
 	}
-	localContainerImage := strings.TrimSpace(setting.String("runtime", "CONTAINER_IMAGE", "DST_ADMIN_LOCAL_CONTAINER_IMAGE"))
+	localContainerImage := strings.TrimSpace(config.String("runtime", "CONTAINER_IMAGE", "DST_ADMIN_LOCAL_CONTAINER_IMAGE"))
 	if localContainerImage == "" {
 		localContainerImage = "dst-admin/dst-runtime:dev"
 	}
-	localContainerHostSavePath := strings.TrimSpace(setting.String("runtime", "CONTAINER_HOST_SAVE_PATH", "DST_ADMIN_LOCAL_CONTAINER_SAVE_SOURCE"))
+	localContainerHostSavePath := strings.TrimSpace(config.String("runtime", "CONTAINER_HOST_SAVE_PATH", "DST_ADMIN_LOCAL_CONTAINER_SAVE_SOURCE"))
 	if localContainerHostSavePath == "" {
 		localContainerHostSavePath = savePath
 	}
-	localContainerHostServerPath := strings.TrimSpace(setting.String("runtime", "CONTAINER_HOST_SERVER_PATH", "DST_ADMIN_LOCAL_CONTAINER_SERVER_SOURCE"))
+	localContainerHostServerPath := strings.TrimSpace(config.String("runtime", "CONTAINER_HOST_SERVER_PATH", "DST_ADMIN_LOCAL_CONTAINER_SERVER_SOURCE"))
 	if localContainerHostServerPath == "" {
 		localContainerHostServerPath = serverPath
 	}
-	localContainerHostUGCPath := strings.TrimSpace(setting.String("runtime", "CONTAINER_HOST_UGC_PATH", "DST_ADMIN_LOCAL_CONTAINER_UGC_SOURCE"))
+	localContainerHostUGCPath := strings.TrimSpace(config.String("runtime", "CONTAINER_HOST_UGC_PATH", "DST_ADMIN_LOCAL_CONTAINER_UGC_SOURCE"))
 	if localContainerHostUGCPath == "" {
 		localContainerHostUGCPath = ugcPath
 	}
-	localConsoleSocket := strings.TrimSpace(setting.String("runtime", "CONSOLE_SOCKET", "DST_ADMIN_LOCAL_CONSOLE_SOCKET"))
+	localConsoleSocket := strings.TrimSpace(config.String("runtime", "CONSOLE_SOCKET", "DST_ADMIN_LOCAL_CONSOLE_SOCKET"))
 	if localConsoleSocket == "" {
 		localConsoleSocket = "/run/dst-admin/tmux/tmux.sock"
 	}
-	localConsoleSession := strings.TrimSpace(setting.String("runtime", "CONSOLE_SESSION", "DST_ADMIN_LOCAL_CONSOLE_SESSION"))
+	localConsoleSession := strings.TrimSpace(config.String("runtime", "CONSOLE_SESSION", "DST_ADMIN_LOCAL_CONSOLE_SESSION"))
 	if localConsoleSession == "" {
 		localConsoleSession = "dst"
 	}
@@ -219,7 +228,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		serverContentRoot = layout.ContentRoot
 	}
 	runtimeWorkshopContentPath := workshopContentPath
-	deploymentProfile, err := configuredDeploymentProfile(backupPath)
+	deploymentProfile, err := deploymentProfileFromSnapshot(config, backupPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve deployment profile: %w", err)
 	}
@@ -256,7 +265,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 	var agentGateway *legacyserver.Server
 	if backgroundEnabled && deploymentProfile.ControllerEnabled {
 		agentGateway, err = legacyserver.NewServer(&legacyserver.Config{
-			KeyFile: setting.ConfigPath, SecurityKey: setting.String("server", "SECURITY_KEY", "DST_ADMIN_AGENT_SECURITY_KEY"),
+			KeyFile: config.ConfigPath, SecurityKey: config.String("server", "SECURITY_KEY", "DST_ADMIN_AGENT_SECURITY_KEY"),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("initialize embedded Agent gateway: %w", err)
@@ -402,7 +411,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		return nil, err
 	}
 	systemStatusHandler := httpapi.NewSystemStatusHandler(systemStatusService, nodeResourceService)
-	var systemSettingsRepository systemsettings.Repository = systemsettings.NewFileRepository(setting.ConfigPath)
+	var systemSettingsRepository systemsettings.Repository = systemsettings.NewFileRepository(config.ConfigPath)
 	if driver := os.Getenv("DST_ADMIN_TEST_SYSTEM_SETTINGS"); driver != "" {
 		if os.Getenv("DST_ADMIN_ENV") != "test" || driver != "memory" {
 			return nil, fmt.Errorf("DST_ADMIN_TEST_SYSTEM_SETTINGS is only available as memory in the test environment")
@@ -414,7 +423,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 		return nil, err
 	}
 	systemSettingsHandler := httpapi.NewSystemSettingsHandler(systemSettingsService)
-	beaconURL := strings.TrimSpace(setting.String("catalog", "BEACON_URL", "DST_ADMIN_BEACON_URL"))
+	beaconURL := strings.TrimSpace(config.String("catalog", "BEACON_URL", "DST_ADMIN_BEACON_URL"))
 	if beaconURL == "" {
 		beaconURL = "http://127.0.0.1:3000"
 	}
@@ -479,6 +488,7 @@ func initApplication(manageBackground bool) (*Application, error) {
 			return nil, controlErr
 		}
 		shardControl = tmuxControl
+		hooks.stop = append(hooks.stop, func(context.Context) error { return tmuxControl.Close() })
 	case "container":
 		stateRoot := filepath.Join(backupPath, ".dst-admin-container-runtime")
 		containerHost, controlErr := runtimeagent.NewContainerRuntimeHost(runtimeagent.ContainerRuntimeHostConfig{
@@ -1276,11 +1286,50 @@ func initApplication(manageBackground bool) (*Application, error) {
 		worldMapHandler.Register(v2)
 	}
 
-	if manageBackground {
+	if ownsDatabase {
 		hooks.final = append(hooks.final, models.CloseDB)
 	}
 	completed = true
-	return newApplication(router, hooks), nil
+	application := newApplication(router, hooks)
+	application.settings, application.config = systemSettingsService, config
+	application.prepareReload = func(ctx context.Context) (func(), error) {
+		resume, err := jobService.PauseIfIdle()
+		if err != nil {
+			return nil, systemsettings.ErrRuntimeBusy
+		}
+		if embeddedFleetMember != nil {
+			resumeMember, memberErr := embeddedFleetMember.PauseIfIdle()
+			if memberErr != nil {
+				resume()
+				return nil, systemsettings.ErrRuntimeBusy
+			}
+			resumeJobs := resume
+			resume = func() { resumeMember(); resumeJobs() }
+		}
+		if deploymentProfile.LocalExecutorEnabled {
+			localRooms, inspectErr := roomCatalog.List()
+			if inspectErr != nil {
+				resume()
+				return nil, inspectErr
+			}
+			for _, room := range localRooms {
+				worlds, inspectErr := roomCatalog.Worlds(room.ID)
+				if inspectErr != nil {
+					resume()
+					return nil, inspectErr
+				}
+				for _, world := range worlds {
+					status, inspectErr := shardControl.Status(ctx, room.DirectoryName, world.DirectoryName)
+					if inspectErr != nil || status.SessionExists || status.State != shards.RuntimeStopped && status.State != shards.RuntimeFailed {
+						resume()
+						return nil, systemsettings.ErrRuntimeBusy
+					}
+				}
+			}
+		}
+		return resume, nil
+	}
+	return application, nil
 }
 
 func openLocalModManager(config moddistribution.Config) (*moddistribution.Manager, error) {

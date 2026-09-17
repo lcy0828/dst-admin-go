@@ -6,6 +6,7 @@ import (
 )
 
 var (
+	ErrRuntimeBusy          = errors.New("请先停止本机世界并等待任务完成，再应用管理方式或目录设置")
 	ErrConflict             = errors.New("system settings revision conflict")
 	ErrInvalidInput         = errors.New("system settings input is invalid")
 	ErrConfirmationRequired = errors.New("system settings confirmation is required")
@@ -39,12 +40,13 @@ type Field struct {
 }
 
 type Settings struct {
-	Revision          string    `json:"revision"`
-	ConfigurationPath string    `json:"configurationPath"`
-	BackupPath        string    `json:"backupPath"`
-	RestartRequired   bool      `json:"restartRequired"`
-	Fields            []Field   `json:"fields"`
-	ReadAt            time.Time `json:"readAt"`
+	RuntimeApplySupported bool      `json:"runtimeApplySupported"`
+	Revision              string    `json:"revision"`
+	ConfigurationPath     string    `json:"configurationPath"`
+	BackupPath            string    `json:"backupPath"`
+	RestartRequired       bool      `json:"restartRequired"`
+	Fields                []Field   `json:"fields"`
+	ReadAt                time.Time `json:"readAt"`
 }
 
 type Input struct {

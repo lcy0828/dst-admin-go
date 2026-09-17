@@ -2,6 +2,8 @@ package routers
 
 import (
 	"context"
+	"dont/internal/systemsettings"
+	"dont/pkg/setting"
 	"errors"
 	"net/http"
 	"sync"
@@ -20,12 +22,16 @@ type applicationHooks struct {
 
 // Application owns the HTTP handler and every process-scoped background task.
 type Application struct {
-	router *gin.Engine
-	hooks  applicationHooks
+	router        *gin.Engine
+	hooks         applicationHooks
+	settings      *systemsettings.Service
+	config        setting.Snapshot
+	prepareReload func(context.Context) (func(), error)
 
 	mu      sync.Mutex
 	started bool
 	closed  bool
+	cleaned bool
 	ctx     context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -65,16 +71,15 @@ func (a *Application) Start(parent context.Context) error {
 		cancel()
 		return err
 	}
-	started := 0
 	for _, start := range a.hooks.start {
 		if err := start(ctx); err != nil {
 			cancel()
-			for index := min(started, len(a.hooks.stop)) - 1; index >= 0; index-- {
+			for index := len(a.hooks.stop) - 1; index >= 0; index-- {
 				_ = a.hooks.stop[index](context.Background())
 			}
+			a.cleaned = true
 			return err
 		}
-		started++
 	}
 	a.ctx, a.cancel, a.started = ctx, cancel, true
 	for _, worker := range a.hooks.workers {
@@ -98,14 +103,16 @@ func (a *Application) Close(ctx context.Context) error {
 		return nil
 	}
 	a.closed = true
-	cancel, started := a.cancel, a.started
+	cancel := a.cancel
+	cleaned := a.cleaned
+	a.cleaned = true
 	a.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
 	}
 	var result error
-	if started {
+	if !cleaned {
 		for index := len(a.hooks.stop) - 1; index >= 0; index-- {
 			result = errors.Join(result, a.hooks.stop[index](ctx))
 		}
