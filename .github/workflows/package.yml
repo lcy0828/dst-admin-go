@@ -2,7 +2,7 @@ name: Package
 
 on:
   push:
-    branches: [feature/v2-rebuild]
+    branches: [master]
     tags: ['v*']
   workflow_dispatch:
     inputs:
