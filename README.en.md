@@ -108,7 +108,7 @@ cp all-in-one.env.example .env
 **2. Edit `.env` to set the image and data directory**
 
 ```ini
-DST_ADMIN_IMAGE=ghcr.io/lcy0828/dst-admin-go/all-in-one:preview
+DST_ADMIN_IMAGE=ghcr.io/lcy0828/dst-admin-go/all-in-one:latest
 DST_ADMIN_DATA_ROOT=/opt/dst
 ```
 
@@ -149,14 +149,16 @@ Allow the ports you use through the host firewall and cloud security group. Defa
 <details>
 <summary><strong>Available Docker images, including Agent</strong></summary>
 
-Image prefix: `ghcr.io/lcy0828/dst-admin-go/`. Current tag: `preview`.
+Use `latest` for stable releases or pin a `vX.Y.Z` version. When Docker Hub synchronization is enabled, all four services share [`lcy0828/dst-admin-go`](https://hub.docker.com/r/lcy0828/dst-admin-go).
 
-| Image | Purpose |
-| --- | --- |
-| `all-in-one` | Web UI, Controller, and local games |
-| `control-plane` | Web UI and Controller |
-| `agent` | Remote container Runtime management |
-| `dst-runtime` | Separate world runtime |
+| Purpose | GHCR image suffix | Docker Hub tag |
+| --- | --- | --- |
+| Web UI, Controller, and local games | `all-in-one:latest` | `latest` |
+| Web UI and Controller | `control-plane:latest` | `controller-latest` |
+| Remote container Runtime management | `agent:latest` | `agent-latest` |
+| Separate world runtime | `dst-runtime:latest` | `runtime-latest` |
+
+The GHCR prefix is `ghcr.io/lcy0828/dst-admin-go/`. For Docker Hub, set `DST_ADMIN_IMAGE=lcy0828/dst-admin-go:latest` above. To pin a version, use tags such as `lcy0828/dst-admin-go:agent-v1.0.0`. `preview` is for testing; stable tags become available after the first successful release. See [publishing](docs/deployment-and-rollback.en.md#github-actions).
 
 For remote machines running native game processes, use the native Agent package. See the [Agent setup guide](docs/startup-guide.en.md#connect-a-remote-agent).
 

@@ -11,12 +11,15 @@ on:
         default: master
         type: string
       publish_images:
-        description: 'Push tested images to GHCR'
+        description: 'Publish tested images to GHCR and configured Docker Hub'
         default: true
         type: boolean
 
 permissions:
   contents: read
+
+env:
+  DOCKERHUB_NAMESPACE: lcy0828
 
 concurrency:
   group: package-${{ github.ref }}
@@ -29,6 +32,8 @@ jobs:
     outputs:
       frontend: ${{ steps.source.outputs.frontend }}
       version: ${{ steps.source.outputs.version }}
+      stable: ${{ steps.source.outputs.stable }}
+      dockerhub: ${{ steps.registries.outputs.dockerhub }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -55,11 +60,33 @@ jobs:
         run: |
           frontend=$(git -C .codex-build/frontend rev-parse HEAD)
           version="preview-${GITHUB_SHA:0:12}"
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then version="$GITHUB_REF_NAME"; fi
-          [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,79}$ ]]
+          stable=false
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version="$GITHUB_REF_NAME"
+            if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+              echo '::error::Release tags must use vX.Y.Z or vX.Y.Z-rc.N.'
+              exit 1
+            fi
+            if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then stable=true; fi
+          fi
+          [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]]
           echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "stable=$stable" >> "$GITHUB_OUTPUT"
           echo "Backend: $GITHUB_SHA; frontend: $frontend; version: $version" >> "$GITHUB_STEP_SUMMARY"
+      - name: Check Docker Hub publishing configuration
+        id: registries
+        if: github.event_name != 'workflow_dispatch' || inputs.publish_images
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        shell: bash
+        run: |
+          if [[ -n "$DOCKERHUB_TOKEN" ]]; then
+            echo 'dockerhub=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'dockerhub=false' >> "$GITHUB_OUTPUT"
+            echo 'Docker Hub skipped: configure the DOCKERHUB_TOKEN Actions secret to enable publication.' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   native:
     needs: sources
@@ -177,7 +204,7 @@ jobs:
           -e DST_ADMIN_VALIDATE_ONLY=1 -e DST_CLUSTER=Smoke -e DST_SHARD=Master
           -e DST_CONF_DIR=. -e DST_UGC_DIRECTORY=/opt/dst/workshop/steamapps/workshop
           dst-admin-test:dst-runtime
-      - name: Push tested images
+      - name: Push tested images to GHCR
         if: github.event_name != 'workflow_dispatch' || inputs.publish_images
         env:
           IMAGE_KIND: ${{ matrix.kind }}
@@ -194,19 +221,90 @@ jobs:
             docker push "$target:preview"
           fi
           echo "Published $target:$RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+      - name: Log in to Docker Hub
+        if: needs.sources.outputs.dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME || env.DOCKERHUB_NAMESPACE }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Push the same tested images to Docker Hub
+        if: needs.sources.outputs.dockerhub == 'true'
+        env:
+          IMAGE_KIND: ${{ matrix.kind }}
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+        shell: bash
+        run: |
+          case "$IMAGE_KIND" in
+            all-in-one) prefix='' ;;
+            control-plane) prefix='controller-' ;;
+            agent) prefix='agent-' ;;
+            dst-runtime) prefix='runtime-' ;;
+            *) echo "::error::Unknown image kind: $IMAGE_KIND"; exit 1 ;;
+          esac
+          target="docker.io/$DOCKERHUB_NAMESPACE/dst-admin-go"
+          tags=("$RELEASE_VERSION" "sha-$GITHUB_SHA")
+          if [[ "$GITHUB_REF_TYPE" != tag ]]; then tags+=(preview); fi
+          for tag in "${tags[@]}"; do
+            docker tag "dst-admin-test:$IMAGE_KIND" "$target:$prefix$tag"
+            docker push "$target:$prefix$tag"
+          done
+          echo "Published $target:$prefix$RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.publish_images)
     needs: [sources, native, images]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+      packages: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           pattern: dst-admin-*
           merge-multiple: true
           path: release
+      - uses: docker/setup-buildx-action@v3
+        if: needs.sources.outputs.stable == 'true'
+      - name: Log in to GHCR for stable aliases
+        if: needs.sources.outputs.stable == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to Docker Hub for stable aliases
+        if: needs.sources.outputs.stable == 'true' && needs.sources.outputs.dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME || env.DOCKERHUB_NAMESPACE }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Promote stable images after all package checks pass
+        if: needs.sources.outputs.stable == 'true'
+        env:
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+          PUBLISH_DOCKERHUB: ${{ needs.sources.outputs.dockerhub }}
+        shell: bash
+        run: |
+          for kind in all-in-one control-plane agent dst-runtime; do
+            target="ghcr.io/${GITHUB_REPOSITORY,,}/$kind"
+            docker buildx imagetools create --prefer-index=false \
+              --tag "$target:latest" "$target:$RELEASE_VERSION"
+            echo "Published $target:latest from $RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "$PUBLISH_DOCKERHUB" == true ]]; then
+              case "$kind" in
+                all-in-one) prefix='' ;;
+                control-plane) prefix='controller-' ;;
+                agent) prefix='agent-' ;;
+                dst-runtime) prefix='runtime-' ;;
+              esac
+              target="docker.io/$DOCKERHUB_NAMESPACE/dst-admin-go"
+              docker buildx imagetools create --prefer-index=false \
+                --tag "$target:${prefix}latest" "$target:$prefix$RELEASE_VERSION"
+              echo "Published $target:${prefix}latest from $prefix$RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
       - name: Publish versioned downloads in the main repository
         env:
           GH_TOKEN: ${{ github.token }}

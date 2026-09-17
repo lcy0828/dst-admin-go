@@ -108,7 +108,7 @@ cp all-in-one.env.example .env
 **2. 编辑 `.env`，设置镜像与数据目录**
 
 ```ini
-DST_ADMIN_IMAGE=ghcr.io/lcy0828/dst-admin-go/all-in-one:preview
+DST_ADMIN_IMAGE=ghcr.io/lcy0828/dst-admin-go/all-in-one:latest
 DST_ADMIN_DATA_ROOT=/opt/dst
 ```
 
@@ -149,14 +149,16 @@ docker compose --env-file .env -f compose.all-in-one.yaml up -d
 <details>
 <summary><strong>可用的 Docker 镜像（包含 Agent）</strong></summary>
 
-镜像前缀：`ghcr.io/lcy0828/dst-admin-go/`，当前标签：`preview`。
+正式版使用 `latest`，也可指定 `vX.Y.Z` 固定版本。Docker Hub 同步启用后，四种服务统一发布到 [`lcy0828/dst-admin-go`](https://hub.docker.com/r/lcy0828/dst-admin-go)。
 
-| 镜像 | 用途 |
-| --- | --- |
-| `all-in-one` | 管理页面、控制端和本机游戏 |
-| `control-plane` | 管理页面和控制端 |
-| `agent` | 远程容器 Runtime 管理 |
-| `dst-runtime` | 独立世界运行环境 |
+| 用途 | GHCR 镜像后缀 | Docker Hub 标签 |
+| --- | --- | --- |
+| 管理页面、控制端和本机游戏 | `all-in-one:latest` | `latest` |
+| 管理页面和控制端 | `control-plane:latest` | `controller-latest` |
+| 远程容器 Runtime 管理 | `agent:latest` | `agent-latest` |
+| 独立世界运行环境 | `dst-runtime:latest` | `runtime-latest` |
+
+GHCR 前缀为 `ghcr.io/lcy0828/dst-admin-go/`。使用 Docker Hub 时，将上面的 `DST_ADMIN_IMAGE` 改为 `lcy0828/dst-admin-go:latest`。固定版本时，例如 Agent 使用 `lcy0828/dst-admin-go:agent-v1.0.0`。`preview` 仅供测试；正式标签在首个版本成功发布后可用，见[发布说明](docs/deployment-and-rollback.md#github-actions)。
 
 远程机器直接运行原生游戏进程时，使用原生 Agent 安装包。具体配置见[部署指南](docs/startup-guide.md#接入远程-agent)。
 
