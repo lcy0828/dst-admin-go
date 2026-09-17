@@ -107,10 +107,14 @@ cp all-in-one.env.example .env
 
 **2. Edit `.env` to set the image and data directory**
 
+**Use Alibaba Cloud in mainland China and Docker Hub elsewhere.** Both registries contain the same images. The example below uses Docker Hub:
+
 ```ini
-DST_ADMIN_IMAGE=ghcr.io/lcy0828/dst-admin-go/all-in-one:latest
+DST_ADMIN_IMAGE=lcy0828/dst-admin-go:latest
 DST_ADMIN_DATA_ROOT=/opt/dst
 ```
+
+For mainland China, set `DST_ADMIN_IMAGE=registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go:latest` instead.
 
 **3. Start the panel**
 
@@ -158,7 +162,7 @@ Use `latest` for stable releases or pin a `vX.Y.Z` version. All four services sh
 | Remote container Runtime management | `agent:latest` | `agent-latest` |
 | Separate world runtime | `dst-runtime:latest` | `runtime-latest` |
 
-The GHCR prefix is `ghcr.io/lcy0828/dst-admin-go/`. Set `DST_ADMIN_IMAGE=lcy0828/dst-admin-go:latest` for Docker Hub, or `registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go:latest` for Alibaba Cloud in China. Pin an Agent release with a tag such as `agent-v1.0.0`. `preview` is for testing. See [mirror configuration](docs/deployment-and-rollback.en.md#github-actions).
+Alibaba Cloud is recommended in mainland China and Docker Hub elsewhere. GHCR also remains available under `ghcr.io/lcy0828/dst-admin-go/`. Pin an Agent release with a tag such as `agent-v1.0.0`. `preview` is for testing. See [mirror configuration](docs/deployment-and-rollback.en.md#github-actions).
 
 For remote machines running native game processes, use the native Agent package. See the [Agent setup guide](docs/startup-guide.en.md#connect-a-remote-agent).
 
