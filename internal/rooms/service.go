@@ -73,18 +73,36 @@ type PurgeRecoveryRequest struct {
 }
 
 type Service struct {
-	catalog        *Catalog
-	store          *Store
-	localDiscovery bool
-	worldMu        sync.Mutex
-	lifecycleMu    sync.RWMutex
-	onManaged      []func(string)
-	onUnmanaged    []func(string)
-	onWorld        []func(string, string)
+	catalog         *Catalog
+	store           *Store
+	localDiscovery  bool
+	worldMu         sync.Mutex
+	lifecycleMu     sync.RWMutex
+	onManaged       []func(string)
+	onUnmanaged     []func(string)
+	onWorld         []func(string, string)
+	initializeWorld func(string, string) error
 }
 
 func NewService(catalog *Catalog, store *Store) *Service {
 	return &Service{catalog: catalog, store: store, localDiscovery: true}
+}
+
+// ConfigureWorldInitializer prepares managed assets in newly created staging
+// directories, before the room/world is published. It never runs on discovery,
+// adoption, restoration, or ordinary starts.
+func (s *Service) ConfigureWorldInitializer(initialize func(root, world string) error) {
+	s.initializeWorld = initialize
+}
+
+func (s *Service) initializeNewWorld(root, name string) error {
+	if s.initializeWorld == nil {
+		return nil
+	}
+	if err := s.initializeWorld(root, name); err != nil {
+		return fmt.Errorf("initialize %s world runtime: %w", name, err)
+	}
+	return nil
 }
 
 // ConfigureLocalDiscovery controls whether the controller's save path is a
@@ -432,6 +450,14 @@ func (s *Service) Create(request CreateRequest) (Room, error) {
 	if err := writeRoomFiles(temporary, request, allocation); err != nil {
 		return Room{}, err
 	}
+	if err := s.initializeNewWorld(temporary, "Master"); err != nil {
+		return Room{}, err
+	}
+	if request.IncludeCaves {
+		if err := s.initializeNewWorld(temporary, "Caves"); err != nil {
+			return Room{}, err
+		}
+	}
 	if err := os.Rename(temporary, target); err != nil {
 		return Room{}, fmt.Errorf("publish room directory: %w", err)
 	}
@@ -511,6 +537,9 @@ func (s *Service) CreateWorld(roomID string, request CreateWorldRequest) (World,
 		allocation.master,
 		request.Type,
 	); err != nil {
+		return World{}, err
+	}
+	if err := s.initializeNewWorld(temporary, request.DirectoryName); err != nil {
 		return World{}, err
 	}
 	if err := os.Rename(filepath.Join(temporary, request.DirectoryName), target); err != nil {

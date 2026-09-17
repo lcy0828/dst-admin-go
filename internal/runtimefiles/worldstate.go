@@ -28,6 +28,15 @@ func ReadWorldState(ctx context.Context, saveRoot, cluster, shard string, status
 	}
 	value.Artifacts, err = ReadArtifacts(ctx, saveRoot, cluster, shard, shared.ArtifactRuntimeWorldState)
 	if errors.Is(err, os.ErrNotExist) {
+		if status.State == "running" {
+			for _, name := range []string{"customcommands.lua", "dst-admin/bootstrap.lua", "dst-admin/manifest.json"} {
+				info, statErr := os.Lstat(filepath.Join(root, filepath.FromSlash(name)))
+				if statErr != nil || !info.Mode().IsRegular() {
+					value.ReadError = "状态采集脚本尚未安装或不完整，请在运行时管理中安装并激活采集脚本"
+					break
+				}
+			}
+		}
 		// A world that has never produced JSON has no state to decode. Avoid
 		// reading session/configuration/log identity when there is no sample.
 		return value, nil

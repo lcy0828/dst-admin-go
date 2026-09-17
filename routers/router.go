@@ -242,6 +242,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err != nil {
 		return nil, err
 	}
+	roomService.ConfigureWorldInitializer(runtimeManager.InitializeWorld)
 	jobStore := jobs.NewStore(models.DB(), tablePrefix)
 	if err := jobStore.Migrate(); err != nil {
 		return nil, err
