@@ -107,10 +107,14 @@ cp all-in-one.env.example .env
 
 **2. 编辑 `.env`，设置镜像与数据目录**
 
+**国内用户推荐阿里云镜像，其他地区推荐 Docker Hub。** 两处镜像内容一致，以下默认使用阿里云：
+
 ```ini
-DST_ADMIN_IMAGE=ghcr.io/lcy0828/dst-admin-go/all-in-one:latest
+DST_ADMIN_IMAGE=registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go:latest
 DST_ADMIN_DATA_ROOT=/opt/dst
 ```
+
+使用 Docker Hub 时，将 `DST_ADMIN_IMAGE` 改为 `lcy0828/dst-admin-go:latest`。
 
 **3. 启动面板**
 
@@ -158,7 +162,7 @@ docker compose --env-file .env -f compose.all-in-one.yaml up -d
 | 远程容器 Runtime 管理 | `agent:latest` | `agent-latest` |
 | 独立世界运行环境 | `dst-runtime:latest` | `runtime-latest` |
 
-GHCR 前缀为 `ghcr.io/lcy0828/dst-admin-go/`。使用 Docker Hub 时，将 `DST_ADMIN_IMAGE` 改为 `lcy0828/dst-admin-go:latest`；国内服务器可使用 `registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go:latest`。例如 Agent 的固定版本标签为 `agent-v1.0.0`。`preview` 仅供测试，镜像同步配置见[发布说明](docs/deployment-and-rollback.md#github-actions)。
+国内用户推荐阿里云，其他地区推荐 Docker Hub；GHCR 也保留同步，前缀为 `ghcr.io/lcy0828/dst-admin-go/`。例如 Agent 的固定版本标签为 `agent-v1.0.0`。`preview` 仅供测试，镜像同步配置见[发布说明](docs/deployment-and-rollback.md#github-actions)。
 
 远程机器直接运行原生游戏进程时，使用原生 Agent 安装包。具体配置见[部署指南](docs/startup-guide.md#接入远程-agent)。
 
