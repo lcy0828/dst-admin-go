@@ -142,23 +142,23 @@ Allow the ports you use through the host firewall and cloud security group. Defa
 | Your setup | Deployment |
 | --- | --- |
 | One machine for everything | **All-in-One**, using the steps above |
-| Run binaries directly | [Native installation](docs/startup-guide.en.md) · [Download packages](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) |
+| Run binaries directly | [Native installation](docs/startup-guide.en.md) · [Download packages](https://github.com/lcy0828/dst-admin-go/releases/latest) |
 | Manage more machines | [Connect a remote Agent](docs/startup-guide.en.md#connect-a-remote-agent) |
 | Separate the panel and games | [Deployment profiles](docs/deployment-profiles.en.md) |
 
 <details>
 <summary><strong>Available Docker images, including Agent</strong></summary>
 
-Use `latest` for stable releases or pin a `vX.Y.Z` version. When Docker Hub synchronization is enabled, all four services share [`lcy0828/dst-admin-go`](https://hub.docker.com/r/lcy0828/dst-admin-go).
+Use `latest` for stable releases or pin a `vX.Y.Z` version. All four services share [`lcy0828/dst-admin-go`](https://hub.docker.com/r/lcy0828/dst-admin-go) on Docker Hub and `registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go` on Alibaba Cloud.
 
-| Purpose | GHCR image suffix | Docker Hub tag |
+| Purpose | GHCR image suffix | Docker Hub / Alibaba Cloud tag |
 | --- | --- | --- |
 | Web UI, Controller, and local games | `all-in-one:latest` | `latest` |
 | Web UI and Controller | `control-plane:latest` | `controller-latest` |
 | Remote container Runtime management | `agent:latest` | `agent-latest` |
 | Separate world runtime | `dst-runtime:latest` | `runtime-latest` |
 
-The GHCR prefix is `ghcr.io/lcy0828/dst-admin-go/`. For Docker Hub, set `DST_ADMIN_IMAGE=lcy0828/dst-admin-go:latest` above. To pin a version, use tags such as `lcy0828/dst-admin-go:agent-v1.0.0`. `preview` is for testing; stable tags become available after the first successful release. See [publishing](docs/deployment-and-rollback.en.md#github-actions).
+The GHCR prefix is `ghcr.io/lcy0828/dst-admin-go/`. Set `DST_ADMIN_IMAGE=lcy0828/dst-admin-go:latest` for Docker Hub, or `registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go:latest` for Alibaba Cloud in China. Pin an Agent release with a tag such as `agent-v1.0.0`. `preview` is for testing. See [mirror configuration](docs/deployment-and-rollback.en.md#github-actions).
 
 For remote machines running native game processes, use the native Agent package. See the [Agent setup guide](docs/startup-guide.en.md#connect-a-remote-agent).
 

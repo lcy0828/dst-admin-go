@@ -6,10 +6,10 @@ Start from the [main README](../README.en.md). Images and native packages embed 
 
 ## Downloads and versions
 
-- The [Package workflow](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) builds Linux amd64 and macOS arm64 native packages and pushes tested images to GHCR. With Docker Hub credentials configured, it publishes the same images to `lcy0828/dst-admin-go` without rebuilding.
+- The [Package workflow](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) builds Linux amd64 and macOS arm64 native packages and pushes tested images to GHCR. With mirror credentials configured, it publishes the same images to Docker Hub and Alibaba Cloud without rebuilding.
 - Stable deployments use `ghcr.io/lcy0828/dst-admin-go/all-in-one:latest` or Docker Hub's `lcy0828/dst-admin-go:latest`. Replace `latest` with `vX.Y.Z` to pin a release. Docker Hub prefixes Controller, Agent, and Runtime tags with `controller-`, `agent-`, and `runtime-`, for example `agent-latest` or `agent-v1.0.0`.
 - Branch images are `ghcr.io/lcy0828/dst-admin-go/all-in-one:preview`, `control-plane:preview`, `agent:preview`, and `dst-runtime:preview`. Builds also receive `sha-FULL_BACKEND_COMMIT` tags. Rebuilding the same backend with a different frontend can change these tags; pin the image digest and frontend SHA for exact provenance.
-- `vX.Y.Z` tags publish stable versions: versioned images are pushed first, then all four `latest` aliases are updated after every native package and image check passes. A GitHub Release contains `.tar.gz` and SHA-256 files. Candidate tags such as `vX.Y.Z-rc.N` publish versioned images and a prerelease without updating `latest`. Stable tags cannot be pulled until the first successful release.
+- `vX.Y.Z` tags publish stable versions: versioned images are pushed first, then all four `latest` aliases are updated after every native package and image check passes. A GitHub Release contains `.tar.gz` and SHA-256 files. Candidate tags such as `vX.Y.Z-rc.N` publish versioned images and a prerelease without updating `latest`.
 - `dst-admin -version` reports backend version/commit, frontend commit, and `embeddedWebUI`. Native `manifest.json` also records tools and lockfile hashes. Images carry `io.dst-admin.frontend.commit`.
 
 ## Build from one repository
@@ -58,7 +58,15 @@ To enable Docker Hub synchronization:
 2. Add `DOCKERHUB_TOKEN` under the GitHub repository's **Settings → Secrets and variables → Actions**. The login username defaults to `lcy0828`; set the optional `DOCKERHUB_USERNAME` secret for a different login account. The workflow's `DOCKERHUB_NAMESPACE` sets the destination namespace.
 3. Push a stable version tag, for example `git tag v1.0.0 && git push origin v1.0.0`, where `origin` points to the GitHub repository.
 
-Without a token, only GHCR is published and the Actions summary notes that Docker Hub was skipped. Invalid credentials or failed pushes fail the job. Turning off `publish_images` on a manual run disables both registries and GitHub Release publication. All-in-One, Controller, and Agent startup checks still run for 180 seconds; Runtime validates its startup wrapper.
+To enable Alibaba Cloud ACR synchronization:
+
+1. In the Hangzhou region, create namespace `dstadmin` and repository `dst-admin-go`. Set a fixed registry login password under ACR **Access Credentials**.
+2. Add GitHub Actions **Secrets** `ALIYUN_USERNAME` (ACR login username) and `ALIYUN_PASSWORD` (registry password), plus the **Variable** `ALIYUN_NAMESPACE=dstadmin`.
+3. Future Package runs also publish to `registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go`, using the same service tags as Docker Hub: `latest`, `agent-latest`, `agent-v1.0.0`, and so on.
+
+To copy an existing release, run **Sync Alibaba Cloud images** in Actions with `version=v1.0.0`. It copies the four published GHCR images without rebuilding. Stable version inputs also copy GHCR's current `latest`; prereleases copy only their version. Use `latest` to copy only the current stable aliases. Run `docker login registry.cn-hangzhou.aliyuncs.com` on deployment hosts before pulling from a private ACR repository.
+
+Unconfigured mirrors are skipped with a note in the Actions summary. Invalid credentials or failed pushes fail the job. Turning off `publish_images` on a manual run disables all registries and GitHub Release publication. All-in-One, Controller, and Agent startup checks still run for 180 seconds; Runtime validates its startup wrapper.
 
 Frontend commits do not update installed services or automatically publish the backend. Run Package to include new pages, or set the manual `frontend_ref` input to pin a revision. Manual runs may disable image publication; it is enabled by default. Tagged release assets exist only after the tag pipeline succeeds.
 
