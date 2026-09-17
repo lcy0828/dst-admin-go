@@ -16,14 +16,17 @@ func worldStateFilesFixture(t *testing.T) (string, string) {
 	t.Helper()
 	root := t.TempDir()
 	world := filepath.Join(root, "all", "Master")
-	for _, directory := range []string{"save/session/SESSION", "save/mod_config_data/dst-admin"} {
+	for _, directory := range []string{"save/session/SESSION", "save/mod_config_data/dst-admin", "dst-admin"} {
 		if err := os.MkdirAll(filepath.Join(world, directory), 0750); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for name, content := range map[string]string{
-		"server.ini":     "[SHARD]\nid = 1\n",
-		"server_log.txt": "[00:00:00]: Starting Up\n[00:00:00]: Current time: Sun Sep 6 12:00:00 2026\n",
+		"customcommands.lua":      "-- managed loader\n",
+		"dst-admin/bootstrap.lua": "-- managed bootstrap\n",
+		"dst-admin/manifest.json": "{}",
+		"server.ini":              "[SHARD]\nid = 1\n",
+		"server_log.txt":          "[00:00:00]: Starting Up\n[00:00:00]: Current time: Sun Sep 6 12:00:00 2026\n",
 		"save/mod_config_data/dst-admin/worldstate-a.json": "KLEI     1 {\"sequence\":1}",
 		"save/mod_config_data/dst-admin/worldstate-b.json": "KLEI     1 {\"sequence\":2}",
 	} {
@@ -95,6 +98,17 @@ func TestStoppedWorldWithoutSamplesDoesNotRequireGameGeneratedFiles(t *testing.T
 	value, err := ReadWorldState(context.Background(), root, "testtest", "Master", shared.ShardRuntimeStatus{State: "stopped"})
 	if err != nil || value.ReadError != "" || value.Artifacts.Kind != shared.ArtifactRuntimeWorldState || len(value.Artifacts.Artifacts) != 0 || !value.StartedAt.IsZero() {
 		t.Fatalf("unused world treated as failure: %+v %v", value, err)
+	}
+}
+
+func TestRunningWorldWithoutCollectorReportsActionableError(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "room", "Master"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	value, err := ReadWorldState(context.Background(), root, "room", "Master", shared.ShardRuntimeStatus{State: "running"})
+	if err != nil || !strings.Contains(value.ReadError, "采集脚本") {
+		t.Fatalf("missing collector=%+v err=%v", value, err)
 	}
 }
 

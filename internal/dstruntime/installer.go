@@ -104,6 +104,15 @@ func NewManager(saveRoot string, roomCatalog Catalog) (*Manager, error) {
 	return &Manager{root: filepath.Clean(root), rooms: roomCatalog, now: time.Now, locks: make(map[string]*sync.Mutex)}, nil
 }
 
+// InitializeWorld installs into a caller-owned staging directory. Room creation
+// publishes these assets atomically with the new world's configuration, and
+// ProvisionBundle carries the same assets to remote placements.
+func (m *Manager) InitializeWorld(stagingRoot, worldName string) error {
+	staging := &Manager{root: stagingRoot, now: m.now, locks: make(map[string]*sync.Mutex)}
+	_, err := staging.install(rooms.Room{Managed: true}, rooms.World{DirectoryName: worldName, Name: worldName})
+	return err
+}
+
 func (m *Manager) InstallRoom(ctx context.Context, roomID string) ([]WorldStatus, error) {
 	room, err := m.rooms.Room(roomID)
 	if err != nil {
