@@ -460,8 +460,8 @@ func (s *DSTServer) ConsoleTransportHealth() (string, bool, error) {
 		return "pane_dead", false, nil
 	}
 	command := strings.ToLower(strings.TrimSpace(fields[1]))
-	pid, parseErr := strconv.ParseInt(strings.TrimSpace(fields[2]), 10, 64)
-	if parseErr != nil || pid <= 0 || !strings.Contains(command, "dontstarve") {
+	pid, parseErr := strconv.ParseInt(strings.TrimSpace(fields[2]), 10, 32)
+	if parseErr != nil || pid <= 0 || !strings.Contains(command, "dontstarve") && !s.consoleGameDescendant(int32(pid)) {
 		return "process_mismatch", false, nil
 	}
 	clients, err := s.tmux.ListClients()
