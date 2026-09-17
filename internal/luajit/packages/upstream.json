@@ -1,0 +1,14 @@
+[
+  {
+    "release": {
+      "id": "58374ccd18e6e13225e1a3c980a92fb06bfa26a17e7338fe4c78fc7a5ec9b1f3",
+      "version": "3.0.0",
+      "os": "linux",
+      "arch": "amd64",
+      "sha256": "58374ccd18e6e13225e1a3c980a92fb06bfa26a17e7338fe4c78fc7a5ec9b1f3",
+      "size": 45159683,
+      "channel": "upstream",
+      "sourceUrl": "https://github.com/fesily/DontStarveLuaJIT2/releases/download/v3.0.0/linux_Mod.zip"
+    }
+  }
+]
