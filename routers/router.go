@@ -1008,7 +1008,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err := automationStore.Migrate(); err != nil {
 		return nil, err
 	}
-	automationExecutor, err := automation.NewDomainExecutor(shardOperations, backupService, commandService, playerService, structuredLogService, worldStateService, runtimeAuditService)
+	automationExecutor, err := automation.NewDomainExecutor(shardOperations, automation.BackupRouter{BackupExecutor: backupService, Distributed: distributedBackupService}, commandService, playerService, structuredLogService, worldStateService, runtimeAuditService)
 	if err != nil {
 		return nil, err
 	}

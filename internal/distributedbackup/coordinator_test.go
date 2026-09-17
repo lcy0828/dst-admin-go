@@ -741,3 +741,53 @@ func assertTextFile(t *testing.T, path, expected string) {
 		t.Fatalf("%s=%q err=%v", path, data, err)
 	}
 }
+
+func TestAutomaticBackupUsesHotSnapshotForRunningSplitRoom(t *testing.T) {
+	fixture := newDistributedBackupFixture(t)
+	drivers := installHotBarrierDrivers(t, fixture, []int64{41, 41})
+	created, err := fixture.coordinator.CreateWithMode(context.Background(), "room", "在线一致备份", "manual", "job-auto", ModeAutomatic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != StatusVerified || created.Mode != ModeHot || created.BarrierID == "" || created.Snapshot != 41 || len(created.Parts) != 2 {
+		t.Fatalf("created=%#v", created)
+	}
+	for _, part := range created.Parts {
+		if part.SnapshotAfter != 41 || part.SnapshotBefore != 40 || part.BarrierSessionID == "" || part.BarrierInstance == "" || part.BarrierCompleted == nil {
+			t.Fatalf("part lacks barrier proof: %#v", part)
+		}
+	}
+	for _, driver := range drivers {
+		if !driver.released {
+			t.Fatal("snapshot hold was not released after immutable staging")
+		}
+	}
+	fixture.master.mu.Lock()
+	masterStops := fixture.master.stops["Cluster_1\x00Master"]
+	fixture.master.mu.Unlock()
+	fixture.caves.mu.Lock()
+	cavesStops := fixture.caves.stops["Cluster_1\x00Caves"]
+	fixture.caves.mu.Unlock()
+	if masterStops != 0 || cavesStops != 0 {
+		t.Fatalf("hot backup stopped shards: master=%d caves=%d", masterStops, cavesStops)
+	}
+}
+
+func TestAutomaticBackupPreservesStoppedAndPartiallyRunningSplitRooms(t *testing.T) {
+	for _, masterRunning := range []bool{false, true} {
+		fixture := newDistributedBackupFixture(t)
+		fixture.caves.states["Cluster_1\x00Caves"] = shards.RuntimeStatus{State: shards.RuntimeStopped}
+		if !masterRunning {
+			fixture.master.states["Cluster_1\x00Master"] = shards.RuntimeStatus{State: shards.RuntimeStopped}
+		}
+		created, err := fixture.coordinator.CreateWithMode(context.Background(), "room", "scheduled", "snapshot", "job-auto", ModeAutomatic)
+		if err != nil || created.Status != StatusVerified || created.Mode != ModeCold {
+			t.Fatalf("backup=%#v err=%v", created, err)
+		}
+		master, _ := fixture.master.Status(context.Background(), "Cluster_1", "Master")
+		caves, _ := fixture.caves.Status(context.Background(), "Cluster_1", "Caves")
+		if (master.State == shards.RuntimeRunning) != masterRunning || caves.State != shards.RuntimeStopped {
+			t.Fatalf("running set changed: %v %v", master, caves)
+		}
+	}
+}

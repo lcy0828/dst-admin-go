@@ -328,3 +328,5 @@ See [deployment and rollback](deployment-and-rollback.en.md) for a complete rele
 | Installation/validation rejected while games run | Stop every world using that game installation through room management, confirm it stopped, then retry |
 | LuaJIT system-library incompatibility | Choose a compatible build for the node's OS; see the LuaJIT guide. Ordinary startup does not repair it |
 | Worlds run but players cannot connect | Check the Master's player UDP port, public address, firewall, and router forwarding |
+
+[Scheduled tasks and room backups](automation.en.md)
