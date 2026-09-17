@@ -191,7 +191,7 @@ func (s *DSTServer) StartWithRuntimeOptions(runtimeMode shared.RuntimePerformanc
 	log.Printf("[TMUX] 正在创建tmux会话 会话名: %s", s.SessionName)
 
 	log.Printf("[TMUX] 使用服务端工作目录: %s", layout.WorkingDirectory)
-	output, err := s.tmux.Command("new-session", "-s", s.SessionName, "-c", layout.WorkingDirectory, "-d", startCmd)
+	output, err := s.createSession(layout.WorkingDirectory, startCmd)
 
 	if err != nil {
 		log.Printf("[TMUX][错误] 创建tmux会话失败: %v, 输出: %s", err, output)
@@ -207,6 +207,15 @@ func (s *DSTServer) StartWithRuntimeOptions(runtimeMode shared.RuntimePerformanc
 	SaveServerInfo(s)
 
 	return nil
+}
+
+func (s *DSTServer) createSession(directory, command string) ([]byte, error) {
+	// Multiple command arguments bypass the account's login shell (nologin in
+	// our images) without changing the account or global tmux configuration.
+	return exec.Command("tmux", s.tmuxArguments(
+		"new-session", "-s", s.SessionName, "-c", directory,
+		"-d", "/bin/sh", "-c", command,
+	)...).CombinedOutput()
 }
 
 func runtimeLaunchArguments(_ shared.RuntimeLaunchOptions) []string {
