@@ -18,6 +18,7 @@ import (
 	"dont/internal/mods"
 	"dont/internal/rooms"
 	"dont/internal/runtimeguard"
+	"dont/internal/tempfiles"
 	"dont/internal/topology"
 
 	"github.com/google/uuid"
@@ -124,6 +125,9 @@ func newService(config Config, store *Store, roomManager RoomManager, runtime Ru
 	config.ImportRoot, err = absoluteDirectory(config.ImportRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve save import root: %w", err)
+	}
+	if err := tempfiles.Cleanup(config.ImportRoot, tempfiles.Uploads); err != nil {
+		return nil, fmt.Errorf("recover temporary save uploads: %w", err)
 	}
 	if config.MaxUploadSize <= 0 {
 		config.MaxUploadSize = MaxUploadBytes
@@ -589,3 +593,5 @@ func safeSourceName(value string) string {
 	}
 	return value
 }
+
+func (s *Service) UploadDirectory() string { return s.config.ImportRoot }

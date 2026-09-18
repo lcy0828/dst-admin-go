@@ -40,6 +40,7 @@ const (
 	ActionPlayerRefresh        Action = "player.refresh"
 	ActionStructuredLogRefresh Action = "log.structured.refresh"
 	ActionWorldStateRefresh    Action = "world.state.refresh"
+	ActionGameUpdateEmpty      Action = "game.update-empty"
 )
 
 type Group struct {
@@ -200,6 +201,7 @@ type ActionDefinition struct {
 
 type ExecutionResult struct {
 	Message string
+	Skipped bool
 }
 
 type Document struct {

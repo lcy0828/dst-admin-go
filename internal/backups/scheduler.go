@@ -9,7 +9,13 @@ import (
 	"dont/internal/jobs"
 )
 
+type SnapshotExecutor interface {
+	Create(context.Context, string, string, Kind, string) (Backup, error)
+	PruneSnapshots(context.Context, string, int) (int64, int, error)
+}
+
 type Scheduler struct {
+	executor SnapshotExecutor
 	backups  *Service
 	jobs     *jobs.Service
 	interval time.Duration
@@ -17,8 +23,12 @@ type Scheduler struct {
 	inFlight map[string]bool
 }
 
-func NewScheduler(backupService *Service, jobService *jobs.Service) *Scheduler {
-	return &Scheduler{backups: backupService, jobs: jobService, interval: time.Minute, inFlight: make(map[string]bool)}
+func NewScheduler(backupService *Service, jobService *jobs.Service, executors ...SnapshotExecutor) *Scheduler {
+	var executor SnapshotExecutor = backupService
+	if len(executors) > 0 {
+		executor = executors[0]
+	}
+	return &Scheduler{executor: executor, backups: backupService, jobs: jobService, interval: time.Minute, inFlight: make(map[string]bool)}
 }
 
 func (s *Scheduler) Start(ctx context.Context) {
@@ -53,9 +63,9 @@ func (s *Scheduler) RunDue() error {
 		job, submitErr := s.jobs.SubmitFactory("backup.snapshot", policy.RoomID, "", targets, func(job jobs.Job) jobs.Runner {
 			return func(ctx context.Context, report func(jobs.TargetResult)) error {
 				defer s.end(policy.RoomID)
-				value, createErr := s.backups.Create(ctx, policy.RoomID, "", KindSnapshot, job.ID)
+				value, createErr := s.executor.Create(ctx, policy.RoomID, "", KindSnapshot, job.ID)
 				if createErr == nil {
-					_, _, createErr = s.backups.PruneSnapshots(policy.RoomID, policy.MaxSnapshots)
+					_, _, createErr = s.executor.PruneSnapshots(ctx, policy.RoomID, policy.MaxSnapshots)
 				}
 				_ = s.backups.MarkPolicyRun(policy.RoomID, job.ID, createErr)
 				if createErr != nil {

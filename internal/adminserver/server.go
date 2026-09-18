@@ -31,7 +31,7 @@ func Run(ctx context.Context, address string) error {
 	}
 	server := &http.Server{
 		Addr:              address,
-		Handler:           handler,
+		Handler:           uploadReadTimeout(handler, 2*time.Hour),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      0,
@@ -55,4 +55,21 @@ func Run(ctx context.Context, address string) error {
 	shutdownErr := server.Shutdown(shutdownContext)
 	closeErr := application.Close(shutdownContext)
 	return errors.Join(serveErr, shutdownErr, closeErr)
+}
+
+// Extend only file-upload body reads; ordinary requests retain ReadTimeout and
+// every connection still has the short ReadHeaderTimeout.
+func uploadReadTimeout(next http.Handler, timeout time.Duration) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		roomUpload := strings.HasPrefix(path, "/api/v2/rooms/") && strings.HasSuffix(path, "/backups/upload")
+		if r.Method == http.MethodPost && (roomUpload || path == "/api/v2/save-imports/upload" ||
+			path == "/api/v2/runtime-targets/luajit/packages" || path == "/api/v2/agent-releases") {
+			if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(timeout)); err != nil {
+				http.Error(w, "upload read deadline unavailable", http.StatusInternalServerError)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }

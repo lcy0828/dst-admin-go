@@ -40,7 +40,7 @@ func TestHybridBackupCreatorUsesDistributedBackupOnlyForRemotePlacement(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.ID != "distributed-backup" || distributed.calls != 1 || distributed.mode != distributedbackup.ModeCold {
+	if created.ID != "distributed-backup" || distributed.calls != 1 || distributed.mode != distributedbackup.ModeAutomatic {
 		t.Fatalf("backup=%#v calls=%d mode=%s", created, distributed.calls, distributed.mode)
 	}
 
@@ -52,5 +52,19 @@ func TestHybridBackupCreatorUsesDistributedBackupOnlyForRemotePlacement(t *testi
 	created, err = creator.Create(context.Background(), "room", "protection", backups.KindProtection, "job")
 	if err != nil || created.ID != "local-backup" || distributed.calls != 0 {
 		t.Fatalf("local backup=%#v distributed calls=%d error=%v", created, distributed.calls, err)
+	}
+}
+
+func TestHybridBackupCreatorRoutesRunningLocalRoomToCoordinator(t *testing.T) {
+	distributed := &hybridDistributedBackup{}
+	creator, err := NewHybridBackupCreator(hybridLocalBackup{err: backups.ErrConsistentBackupRequired}, distributed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := creator.Create(context.Background(), "room", "protection", backups.KindProtection, "job"); err != nil {
+		t.Fatal(err)
+	}
+	if distributed.calls != 1 || distributed.mode != distributedbackup.ModeAutomatic {
+		t.Fatalf("running room did not use coordinated backup: %#v", distributed)
 	}
 }

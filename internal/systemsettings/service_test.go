@@ -215,3 +215,23 @@ func fieldByID(t *testing.T, settings Settings, id string) Field {
 	t.Fatalf("field %s not found", id)
 	return Field{}
 }
+
+func TestUnsupportedGlobalSwitchesCannotBeEnabledThroughSettingsAPI(t *testing.T) {
+	service, err := NewService(NewMemoryRepository())
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := service.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"backup.auto", "backup.frequency", "backup.time", "backup.retention", "notification.emailEnabled", "notification.serverStatus", "notification.loginFailures", "notification.backupResults", "notification.systemUpdates"} {
+		field := fieldByID(t, settings, id)
+		if field.Editable {
+			t.Fatalf("unsupported field editable: %s", id)
+		}
+		if _, err := service.Apply(Input{Revision: settings.Revision, Values: map[string]string{id: field.Value}, Confirmation: ApplyConfirmation}); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("%s accepted write: %v", id, err)
+		}
+	}
+}

@@ -126,8 +126,9 @@ func (l *coordinatorLeases) Renew(_ context.Context, lease operationlease.Lease,
 func (*coordinatorLeases) Release(operationlease.Lease) error { return nil }
 
 type coordinatorBackups struct {
-	mu  sync.Mutex
-	ids []string
+	mu        sync.Mutex
+	ids       []string
+	verifyErr error
 }
 
 type releaseMutationObserver struct {
@@ -147,6 +148,10 @@ func (b *coordinatorBackups) CreateProtection(_ context.Context, roomID, _, _ st
 	id := "backup-" + roomID
 	b.ids = append(b.ids, id)
 	return id, nil
+}
+
+func (b *coordinatorBackups) VerifyProtection(context.Context, string, string, string) error {
+	return b.verifyErr
 }
 
 type releaseCoordinatorFixture struct {

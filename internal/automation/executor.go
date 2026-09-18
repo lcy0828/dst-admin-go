@@ -13,7 +13,9 @@ import (
 	"dont/internal/agents"
 	"dont/internal/backups"
 	"dont/internal/console"
+	"dont/internal/gameupdate"
 	"dont/internal/jobs"
+	"dont/internal/maintenance"
 	"dont/internal/players"
 	"dont/internal/rooms"
 	"dont/internal/runtimeaudit"
@@ -35,7 +37,7 @@ type RoomActionPlanner interface {
 
 type BackupExecutor interface {
 	Create(context.Context, string, string, backups.Kind, string) (backups.Backup, error)
-	PruneSnapshots(string, int) (int64, int, error)
+	PruneSnapshots(context.Context, string, int) (int64, int, error)
 }
 
 type CommandExecutor interface {
@@ -75,6 +77,9 @@ type NotificationSender interface {
 }
 
 type DomainExecutor struct {
+	gameUpdates interface {
+		UpdateRoomWhenEmpty(context.Context, string, string) (bool, error)
+	}
 	roomActions    RoomActionPlanner
 	backups        BackupExecutor
 	commands       CommandExecutor
@@ -85,6 +90,12 @@ type DomainExecutor struct {
 	audit          interface {
 		RecordAction(runtimeaudit.ActionRequest) error
 	}
+}
+
+func (e *DomainExecutor) ConfigureGameUpdates(updater interface {
+	UpdateRoomWhenEmpty(context.Context, string, string) (bool, error)
+}) {
+	e.gameUpdates = updater
 }
 
 func (e *DomainExecutor) ConfigureNotifications(sender NotificationSender) error {
@@ -110,11 +121,20 @@ func NewDomainExecutor(roomActions RoomActionPlanner, backupService BackupExecut
 
 func (e *DomainExecutor) Validate(task Task) error {
 	switch task.Action {
+	case ActionGameUpdateEmpty:
+		if len(task.Parameters) != 0 || len(task.WorldIDs) != 0 || task.RetryTimes != 0 {
+			return &FieldError{Fields: map[string]string{"parameters": "无人更新作用于整个房间，不接受世界筛选、额外参数或立即重试"}}
+		}
 	case ActionRoomStart, ActionRoomStop, ActionRoomRestart, ActionPlayerRefresh, ActionStructuredLogRefresh, ActionWorldStateRefresh:
 		if len(task.Parameters) > 0 {
 			return &FieldError{Fields: map[string]string{"parameters": "此动作不接受额外参数"}}
 		}
 	case ActionBackupCreate:
+		if _, exists := task.Parameters["keep"]; exists {
+			if _, err := integerParameter(task.Parameters, "keep", 1, 100); err != nil {
+				return &FieldError{Fields: map[string]string{"parameters.keep": "保留数量必须在 1-100 之间"}}
+			}
+		}
 		if name, exists := task.Parameters["name"]; exists {
 			value, ok := name.(string)
 			if !ok || len([]rune(strings.TrimSpace(value))) > 80 {
@@ -214,6 +234,27 @@ func (e *DomainExecutor) execute(ctx context.Context, task Task, jobID string, s
 		return ExecutionResult{}, err
 	}
 	switch task.Action {
+	case ActionGameUpdateEmpty:
+		if e.gameUpdates == nil {
+			return ExecutionResult{}, ErrDependencies
+		}
+		updated, err := e.gameUpdates.UpdateRoomWhenEmpty(ctx, task.RoomID, jobID)
+		if ctx.Err() != nil {
+			return ExecutionResult{}, ctx.Err()
+		}
+		if errors.Is(err, gameupdate.ErrReleaseRecoveryNeeded) {
+			return ExecutionResult{}, err
+		}
+		if errors.Is(err, maintenance.ErrPlayersOnline) || errors.Is(err, maintenance.ErrPresenceUnavailable) || errors.Is(err, gameupdate.ErrReleasePreviewBlocked) {
+			return ExecutionResult{Message: err.Error(), Skipped: true}, nil
+		}
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		if !updated {
+			return ExecutionResult{Message: "游戏服务端已是最新版本，无需重启", Skipped: true}, nil
+		}
+		return ExecutionResult{Message: "游戏服务端已更新，原本运行的世界已恢复"}, nil
 	case ActionRoomStart, ActionRoomStop, ActionRoomRestart:
 		return e.executeRoomAction(ctx, task, jobID)
 	case ActionBackupCreate:
@@ -226,10 +267,16 @@ func (e *DomainExecutor) execute(ctx context.Context, task Task, jobID string, s
 		if err != nil {
 			return ExecutionResult{}, err
 		}
+		if _, exists := task.Parameters["keep"]; exists {
+			keep, _ := integerParameter(task.Parameters, "keep", 1, 100)
+			if _, _, err := e.backups.PruneSnapshots(ctx, task.RoomID, keep); err != nil {
+				return ExecutionResult{}, fmt.Errorf("快照 %s 已创建，但清理旧快照失败: %w", backup.Name, err)
+			}
+		}
 		return ExecutionResult{Message: "已创建快照 " + backup.Name}, nil
 	case ActionBackupPrune:
 		keep, _ := integerParameter(task.Parameters, "keep", 1, 100)
-		_, removed, err := e.backups.PruneSnapshots(task.RoomID, keep)
+		_, removed, err := e.backups.PruneSnapshots(ctx, task.RoomID, keep)
 		if err != nil {
 			return ExecutionResult{}, err
 		}
@@ -443,10 +490,11 @@ func integerParameter(parameters map[string]interface{}, name string, minimum, m
 
 func ActionDefinitions() []ActionDefinition {
 	return []ActionDefinition{
+		{ID: ActionGameUpdateEmpty, Name: "无人时更新游戏并重启", Description: "检查游戏更新；所有共用安装的房间均无人时更新并恢复原运行世界", Parameters: []string{}},
 		{ID: ActionRoomStart, Name: "启动分片", Description: "启动选中的分片；未选择时启动全部分片", Parameters: []string{}},
 		{ID: ActionRoomStop, Name: "停止分片", Description: "停止选中的分片；未选择时停止全部分片", Parameters: []string{}},
 		{ID: ActionRoomRestart, Name: "重启分片", Description: "重启选中的分片；未选择时重启全部分片", Parameters: []string{}},
-		{ID: ActionBackupCreate, Name: "创建快照", Description: "创建一致性房间快照", Parameters: []string{"name"}},
+		{ID: ActionBackupCreate, Name: "创建快照", Description: "创建一致性房间快照", Parameters: []string{"name", "keep"}},
 		{ID: ActionBackupPrune, Name: "清理快照", Description: "按保留数量清理旧快照", Parameters: []string{"keep"}},
 		{ID: ActionCommandExecute, Name: "执行游戏命令", Description: "执行管理员选择的命令模板或自定义 Lua 脚本", NeedsWorld: true, Parameters: []string{"commandId", "arguments", "rawCommand"}},
 		{ID: ActionNotificationSend, Name: "发送游戏通知", Description: "向房间内当前运行中的所有分片发送游戏内消息", Parameters: []string{"message"}},

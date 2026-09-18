@@ -67,18 +67,12 @@ func (h *LuaJITHandler) inspect(c *gin.Context) {
 	Success(c, http.StatusOK, value)
 }
 func (h *LuaJITHandler) upload(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, luajit.MaxPackageBytes+(1<<20))
-	if err := c.Request.ParseMultipartForm(8 << 20); err != nil {
-		Failure(c, http.StatusBadRequest, "INVALID_LUAJIT_UPLOAD", "请选择不超过 256 MiB 的 ZIP 安装包", nil)
-		return
-	}
-	defer c.Request.MultipartForm.RemoveAll()
-	f, _, err := c.Request.FormFile("file")
+	f, err := readUpload(c, h.store.UploadDirectory(), luajit.MaxPackageBytes)
 	if err != nil {
-		Failure(c, http.StatusBadRequest, "INVALID_LUAJIT_UPLOAD", "请选择 ZIP 安装包", nil)
+		uploadFailure(c, err)
 		return
 	}
-	defer f.Close()
+	defer f.cleanup()
 	value, err := h.store.Save(c.Request.Context(), f, "")
 	if err != nil {
 		luaJITFailure(c, err)

@@ -80,7 +80,8 @@ func NormalizeReleasePolicy(value ReleasePolicyInput) (ReleasePolicy, error) {
 		return ReleasePolicy{}, ErrReleaseInvalid
 	}
 	return ReleasePolicy{
-		CleanCache: value.CleanCache, RestartRunning: restart, LoadConfirmation: value.LoadConfirmation,
+		RequireEmpty: value.RequireEmpty,
+		CleanCache:   value.CleanCache, RestartRunning: restart, LoadConfirmation: value.LoadConfirmation,
 		TimeoutSeconds: value.TimeoutSeconds,
 	}, nil
 }
@@ -102,6 +103,23 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 	if err != nil {
 		return ReleasePlan{}, err
 	}
+	selectedInstallations := request.installationKeys
+	if request.roomID != "" {
+		selectedInstallations = make(map[string]bool)
+		for _, observed := range snapshot.Shards {
+			if observed.Room.ID == request.roomID {
+				selectedInstallations[releaseSnapshotInstallationKey(observed)] = true
+			}
+		}
+		if len(selectedInstallations) == 0 {
+			return ReleasePlan{}, ErrReleaseInvalid
+		}
+	}
+	if selectedInstallations != nil {
+		// A shared installation can connect several split rooms. Include their
+		// other installations as well so a room never receives mixed builds.
+		selectedInstallations = connectedReleaseInstallations(snapshot, selectedInstallations)
+	}
 	plan := ReleasePlan{
 		Version: ReleasePlanVersion, DesiredVersion: requested, TopologyRevision: snapshot.TopologyRevision,
 		Policy: policy, Blockers: []ReleaseBlocker{}, Ready: true, CreatedAt: p.now().UTC(),
@@ -109,6 +127,9 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 	targets := make(map[string]*ReleaseInstallationPlan)
 	roomIDs := make(map[string]bool)
 	for _, observed := range snapshot.Shards {
+		if selectedInstallations != nil && !selectedInstallations[releaseSnapshotInstallationKey(observed)] {
+			continue
+		}
 		targetID := strings.TrimSpace(observed.Target.ID)
 		if len(selectedTargets) > 0 && !selectedTargets[targetID] {
 			continue
@@ -563,6 +584,48 @@ func validateStoredReleasePolicy(value ReleasePolicy) error {
 
 func releaseInstallationKey(targetID, installationID string) string {
 	return targetID + "\x00" + installationID
+}
+
+func releaseSnapshotInstallationKey(value ReleaseShardSnapshot) string {
+	targetID, installationID := strings.TrimSpace(value.Target.ID), strings.TrimSpace(value.Target.Config.InstallationID)
+	if installationID == "" {
+		installationID = "unknown"
+		if targetID == "local" {
+			installationID = "default"
+		}
+	}
+	return releaseInstallationKey(targetID, installationID)
+}
+
+func connectedReleaseInstallations(snapshot ReleasePlacementSnapshot, seeds map[string]bool) map[string]bool {
+	roomInstallations := make(map[string][]string)
+	installationRooms := make(map[string][]string)
+	for _, shard := range snapshot.Shards {
+		key := releaseSnapshotInstallationKey(shard)
+		roomInstallations[shard.Room.ID] = append(roomInstallations[shard.Room.ID], key)
+		installationRooms[key] = append(installationRooms[key], shard.Room.ID)
+	}
+	selected, rooms := make(map[string]bool), make(map[string]bool)
+	queue := make([]string, 0, len(seeds))
+	for key := range seeds {
+		selected[key] = true
+		queue = append(queue, key)
+	}
+	for index := 0; index < len(queue); index++ {
+		for _, roomID := range installationRooms[queue[index]] {
+			if rooms[roomID] {
+				continue
+			}
+			rooms[roomID] = true
+			for _, key := range roomInstallations[roomID] {
+				if !selected[key] {
+					selected[key] = true
+					queue = append(queue, key)
+				}
+			}
+		}
+	}
+	return selected
 }
 
 func releaseShardKey(value ReleaseShardPlan) string { return value.RoomID + "\x00" + value.WorldID }

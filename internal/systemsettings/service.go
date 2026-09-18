@@ -348,14 +348,6 @@ func validateValues(values map[string]string) []Issue {
 	if nestedPaths(values["paths.save"], values["paths.backup"]) {
 		issues = append(issues, Issue{FieldID: "paths.backup", Severity: "error", Message: "存档目录与备份目录不能相同或互相嵌套"})
 	}
-	if parseBool(values["notification.emailEnabled"]) {
-		for _, id := range []string{"notification.smtpServer", "notification.smtpPort", "notification.smtpUsername", "notification.smtpPassword", "notification.senderEmail", "ui.adminEmail"} {
-			if strings.TrimSpace(values[id]) == "" {
-				definition, _ := definitionByID(id)
-				issues = append(issues, Issue{FieldID: id, Severity: "error", Message: definition.Label + "不能为空"})
-			}
-		}
-	}
 	if _, err := deploymentprofile.Resolve(deploymentprofile.Values{
 		Packaging: values["deployment.packaging"], LocalExecutorEnabled: values["fleet.localExecutorEnabled"],
 		ControllerEnabled: values["fleet.controllerEnabled"], MemberEnabled: values["fleet.memberEnabled"],

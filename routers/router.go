@@ -708,6 +708,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err := distributedBackupService.ConfigureMutationObserver(runtimeObservationCoordinator); err != nil {
 		return nil, err
 	}
+	localProtectionBackups := distributedbackup.LegacyCreator{Coordinator: distributedBackupService, Guard: localMutationGuard}
 	distributedBackupHandler, err := httpapi.NewDistributedBackupHandler(distributedBackupService, jobService)
 	if err != nil {
 		return nil, err
@@ -779,7 +780,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	modService, err := modservice.NewService(modservice.Config{
 		SaveRoot: savePath, ServerRoot: serverContentRoot, WorkshopContentRoot: workshopContentPath,
 		UGCRoot: ugcPath, AppID: steamAppID,
-	}, roomService, shardControl, backupService, modMetadata, modParser, modRunner)
+	}, roomService, shardControl, localProtectionBackups, modMetadata, modParser, modRunner)
 	if err != nil {
 		return nil, err
 	}
@@ -948,9 +949,10 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err != nil {
 		return nil, err
 	}
-	gameNotificationService.ConfigureOnlineCounter(playerapi.NewRuntimeOnlineCounter(
+	maintenanceOnlineCounter := playerapi.NewRuntimeOnlineCounter(
 		roomService, runtimeDriverRouter, playerapi.NewRuntimeRosterProbe(runtimeDriverRouter),
-	))
+	)
+	gameNotificationService.ConfigureOnlineCounter(maintenanceOnlineCounter)
 	if backgroundEnabled {
 		hooks.workers = append(hooks.workers, func(ctx context.Context) {
 			playerService.RunBanExpiryScheduler(ctx, time.Minute)
@@ -966,6 +968,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, fmt.Errorf("initialize Mod update service: %w", err)
 	}
 	modHandler.ConfigureInstallationUpdateRefresher(modUpdateService)
+	modUpdateService.ConfigureOnlineCounter(maintenanceOnlineCounter)
 	modUpdateService.ConfigureAnnouncer(modupdates.AnnounceFunc(func(ctx context.Context, roomID, message, jobID string) error {
 		_, failures, _, notifyErr := gameNotificationService.SendAutomation(ctx, roomID, message, jobID)
 		if notifyErr != nil {
@@ -1008,7 +1011,8 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err := automationStore.Migrate(); err != nil {
 		return nil, err
 	}
-	automationExecutor, err := automation.NewDomainExecutor(shardOperations, automation.BackupRouter{BackupExecutor: backupService, Distributed: distributedBackupService}, commandService, playerService, structuredLogService, worldStateService, runtimeAuditService)
+	backupExecutor := automation.BackupRouter{BackupExecutor: backupService, Distributed: distributedBackupService}
+	automationExecutor, err := automation.NewDomainExecutor(shardOperations, backupExecutor, commandService, playerService, structuredLogService, worldStateService, runtimeAuditService)
 	if err != nil {
 		return nil, err
 	}
@@ -1080,7 +1084,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	saveImportHandler := httpapi.NewSaveImportHandler(saveImportService, jobService)
 	automationHandler := httpapi.NewAutomationHandler(automationService, automationScheduler)
 	if backgroundEnabled {
-		backupScheduler := backupapi.NewScheduler(backupService, jobService)
+		backupScheduler := backupapi.NewScheduler(backupService, jobService, backupExecutor)
 		hooks.workers = append(hooks.workers, backupScheduler.Run)
 	}
 	gameUpdateStore := gameupdate.NewStore(models.DB(), tablePrefix)
@@ -1108,7 +1112,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 			DisableUpdate:          strings.EqualFold(strings.TrimSpace(os.Getenv("DST_ADMIN_DISABLE_LOCAL_GAME_UPDATE")), "true"),
 			OfficialReleaseChecker: officialReleaseChecker,
 		},
-		roomService, shardControl, backupService, gameUpdateStore, updateRunner, latestChecker, runtimeAuditService,
+		roomService, shardControl, localProtectionBackups, gameUpdateStore, updateRunner, latestChecker, runtimeAuditService,
 	)
 	if err != nil {
 		return nil, err
@@ -1169,9 +1173,41 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	gameReleaseCoordinator.ConfigureNotifier(gameNotificationService)
+	gameReleaseCoordinator.ConfigureOnlineCounter(maintenanceOnlineCounter)
+	automationExecutor.ConfigureGameUpdates(gameReleaseCoordinator)
 	if err := gameUpdateHandler.ConfigureReleases(gameReleaseCoordinator); err != nil {
 		return nil, err
 	}
+	distributedBackupService.ConfigureDeletionGuard(func(value distributedbackup.Set) error {
+		if value.Kind != "protection" {
+			return nil
+		}
+		publications, err := modPublicationStore.Active()
+		if err != nil {
+			return err
+		}
+		for _, publication := range publications {
+			if publication.ID == value.SourceJobID {
+				return distributedbackup.ErrInUse
+			}
+			for _, id := range publication.ProtectionBackupIDs {
+				if id == value.ID {
+					return distributedbackup.ErrInUse
+				}
+			}
+		}
+		if value.SourceJobID == "" {
+			return nil
+		}
+		required, err := gameReleaseCoordinator.RequiresProtection(value.SourceJobID)
+		if err != nil {
+			return err
+		}
+		if required {
+			return distributedbackup.ErrInUse
+		}
+		return nil
+	})
 	worldMapStore := worldmap.NewStore(models.DB(), tablePrefix)
 	if err := worldMapStore.Migrate(); err != nil {
 		return nil, err
@@ -1205,7 +1241,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	}
 	idempotencyStore := httpapi.NewIdempotencyStore(15*time.Minute, 2048)
 	router := gin.New()
-	if err := router.SetTrustedProxies(nil); err != nil {
+	if err := httpapi.ConfigureTrustedProxies(router, os.Getenv("DST_ADMIN_TRUSTED_PROXIES")); err != nil {
 		return nil, err
 	}
 

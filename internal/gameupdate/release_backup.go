@@ -29,3 +29,7 @@ func (p *DistributedReleaseProtection) CreateProtection(ctx context.Context, roo
 	}
 	return value.ID, nil
 }
+
+func (p *DistributedReleaseProtection) VerifyProtection(ctx context.Context, id, roomID, sourceJobID string) error {
+	return p.backups.VerifyProtection(ctx, id, roomID, sourceJobID)
+}

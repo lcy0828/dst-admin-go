@@ -15,11 +15,13 @@ import (
 )
 
 type AuthHandler struct {
-	service  *authn.Service
-	mu       sync.Mutex
-	failures map[string]loginFailure
-	policy   func() LoginSecurityPolicy
-	ui       func() UIPreferences
+	service   *authn.Service
+	mu        sync.Mutex
+	failures  map[string]loginFailure
+	now       func() time.Time
+	nextSweep time.Time
+	policy    func() LoginSecurityPolicy
+	ui        func() UIPreferences
 }
 
 type LoginSecurityPolicy struct {
@@ -37,11 +39,12 @@ type UIPreferences struct {
 type loginFailure struct {
 	count        int
 	blockedUntil time.Time
+	expiresAt    time.Time
 }
 
 type credentialsRequest struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
+	Username string `json:"username" binding:"required,max=256"`
+	Password string `json:"password" binding:"required,max=1024"`
 }
 
 type changePasswordRequest struct {
@@ -50,7 +53,7 @@ type changePasswordRequest struct {
 }
 
 func NewAuthHandler(service *authn.Service) *AuthHandler {
-	return &AuthHandler{service: service, failures: make(map[string]loginFailure), policy: func() LoginSecurityPolicy {
+	return &AuthHandler{service: service, failures: make(map[string]loginFailure), now: time.Now, policy: func() LoginSecurityPolicy {
 		return LoginSecurityPolicy{MaxAttempts: 5, BlockFor: 15 * time.Minute}
 	}, ui: defaultUIPreferences}
 }
@@ -101,6 +104,7 @@ func (h *AuthHandler) Session(c *gin.Context) {
 }
 
 func (h *AuthHandler) Setup(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 8<<10)
 	var request credentialsRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
 		Failure(c, http.StatusBadRequest, "INVALID_REQUEST", "用户名和密码不能为空", nil)
@@ -142,6 +146,13 @@ func (h *AuthHandler) SaveOnboarding(c *gin.Context) {
 }
 
 func (h *AuthHandler) Login(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 8<<10)
+	ipKey := "ip\x00" + c.ClientIP()
+	if retryAfter, blocked := h.isBlocked(ipKey); blocked {
+		c.Header("Retry-After", retryAfter)
+		Failure(c, http.StatusTooManyRequests, "LOGIN_RATE_LIMITED", "登录尝试过于频繁，请稍后再试", nil)
+		return
+	}
 	var request credentialsRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
 		Failure(c, http.StatusBadRequest, "INVALID_REQUEST", "用户名和密码不能为空", nil)
@@ -157,6 +168,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, authn.ErrInvalidCredentials) {
 			h.recordFailure(key)
+			h.recordFailureLimit(ipKey, 25)
 		}
 		h.writeAuthError(c, err)
 		return
@@ -239,34 +251,71 @@ func (h *AuthHandler) writeAuthError(c *gin.Context, err error) {
 	}
 }
 
+const maxLoginFailureEntries = 4096
+
+func (h *AuthHandler) sweepFailures(now time.Time) {
+	if now.Before(h.nextSweep) && len(h.failures) < maxLoginFailureEntries {
+		return
+	}
+	for key, failure := range h.failures {
+		if !failure.expiresAt.After(now) {
+			delete(h.failures, key)
+		}
+	}
+	h.nextSweep = now.Add(time.Minute)
+}
+
 func (h *AuthHandler) isBlocked(key string) (string, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	now := h.now()
+	h.sweepFailures(now)
 	failure := h.failures[key]
-	if failure.blockedUntil.After(time.Now()) {
-		seconds := int(time.Until(failure.blockedUntil).Seconds()) + 1
-		return strconv.Itoa(seconds), true
+	if failure.blockedUntil.After(now) {
+		return strconv.Itoa(int(failure.blockedUntil.Sub(now).Seconds()) + 1), true
 	}
-	if !failure.blockedUntil.IsZero() {
+	if !failure.expiresAt.After(now) || !failure.blockedUntil.IsZero() {
 		delete(h.failures, key)
 	}
 	return "", false
 }
 
 func (h *AuthHandler) recordFailure(key string) {
+	limit := h.policy().MaxAttempts
+	if limit < 3 || limit > 10 {
+		limit = 5
+	}
+	h.recordFailureLimit(key, limit)
+}
+
+func (h *AuthHandler) recordFailureLimit(key string, limit int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	failure := h.failures[key]
+	now := h.now()
+	h.sweepFailures(now)
+	failure, exists := h.failures[key]
+	if !exists && len(h.failures) >= maxLoginFailureEntries {
+		// Keep memory bounded even when requests use a different source each time.
+		var oldestKey string
+		var oldest time.Time
+		for candidate, item := range h.failures {
+			if oldest.IsZero() || item.expiresAt.Before(oldest) {
+				oldestKey, oldest = candidate, item.expiresAt
+			}
+		}
+		delete(h.failures, oldestKey)
+	}
+	if !failure.expiresAt.After(now) {
+		failure = loginFailure{}
+	}
+	blockFor := h.policy().BlockFor
+	if blockFor <= 0 {
+		blockFor = 15 * time.Minute
+	}
 	failure.count++
-	policy := h.policy()
-	if policy.MaxAttempts < 3 || policy.MaxAttempts > 10 {
-		policy.MaxAttempts = 5
-	}
-	if policy.BlockFor <= 0 {
-		policy.BlockFor = 15 * time.Minute
-	}
-	if failure.count >= policy.MaxAttempts {
-		failure.blockedUntil = time.Now().Add(policy.BlockFor)
+	failure.expiresAt = now.Add(blockFor)
+	if failure.count >= limit {
+		failure.blockedUntil = failure.expiresAt
 	}
 	h.failures[key] = failure
 }

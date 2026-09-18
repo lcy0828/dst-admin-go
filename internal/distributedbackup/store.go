@@ -414,3 +414,31 @@ func operationFromRecord(record operationRecord) (Operation, error) {
 		Failure: record.Failure, CreatedAt: record.CreatedAt.UTC(), UpdatedAt: record.UpdatedAt.UTC(),
 	}, nil
 }
+
+// DeleteSet retains completed operation history, but removes the set and parts
+// atomically. Active recovery references must have been checked under the lease.
+func (s *Store) DeleteSet(id string) error {
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	defer tx.Rollback()
+	var active int
+	if err := tx.Table(s.operationTable).Where("(set_id = ? OR protection_set_id = ?) AND status IN (?)", id, id, []string{string(OperationRunning), string(OperationRecoveryRequired)}).Count(&active).Error; err != nil {
+		return err
+	}
+	if active != 0 {
+		return ErrInUse
+	}
+	if err := tx.Table(s.partTable).Where("set_id = ?", id).Delete(&partRecord{}).Error; err != nil {
+		return err
+	}
+	result := tx.Table(s.setTable).Where("id = ?", id).Delete(&setRecord{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrNotFound
+	}
+	return tx.Commit().Error
+}

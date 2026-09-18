@@ -3,10 +3,12 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"mime"
 	"net/http"
 
 	"dont/internal/distributedbackup"
 	"dont/internal/jobs"
+	"dont/internal/tempfiles"
 
 	"github.com/gin-gonic/gin"
 )
@@ -23,6 +25,11 @@ type DistributedBackupService interface {
 
 type DistributedHotBackupService interface {
 	CreateWithMode(context.Context, string, string, string, string, string) (distributedbackup.Set, error)
+}
+
+type DistributedBackupFiles interface {
+	Delete(context.Context, string, string) (distributedbackup.Set, error)
+	Export(context.Context, string) (*tempfiles.File, distributedbackup.Set, error)
 }
 
 type DistributedBackupHandler struct {
@@ -42,8 +49,54 @@ func (h *DistributedBackupHandler) Register(v2 *gin.RouterGroup) {
 	v2.POST("/rooms/:roomId/backup-sets", h.create)
 	v2.GET("/rooms/:roomId/backup-operations", h.listOperations)
 	v2.GET("/backup-sets/:backupSetId", h.get)
+	v2.DELETE("/backup-sets/:backupSetId", h.delete)
+	v2.GET("/backup-sets/:backupSetId/download", h.download)
 	v2.POST("/backup-sets/:backupSetId/actions/restore", h.restore)
 	v2.POST("/backup-operations/:backupOperationId/actions/recover", h.recoverOperation)
+}
+
+func (h *DistributedBackupHandler) delete(c *gin.Context) {
+	var input struct {
+		Confirmation string `json:"confirmation"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请确认要删除的备份名称", nil)
+		return
+	}
+	service, ok := h.backups.(DistributedBackupFiles)
+	if !ok {
+		Failure(c, http.StatusNotImplemented, "BACKUP_OPERATION_UNAVAILABLE", "备份删除不可用", nil)
+		return
+	}
+	value, err := service.Delete(c.Request.Context(), c.Param("backupSetId"), input.Confirmation)
+	if err != nil {
+		distributedBackupFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, gin.H{"deleted": true, "id": value.ID})
+}
+
+func (h *DistributedBackupHandler) download(c *gin.Context) {
+	service, ok := h.backups.(DistributedBackupFiles)
+	if !ok {
+		Failure(c, http.StatusNotImplemented, "BACKUP_OPERATION_UNAVAILABLE", "备份导出不可用", nil)
+		return
+	}
+	file, value, err := service.Export(c.Request.Context(), c.Param("backupSetId"))
+	if err != nil {
+		distributedBackupFailure(c, err)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		distributedBackupFailure(c, err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": value.Name + ".zip"}))
+	http.ServeContent(c.Writer, c.Request, value.Name+".zip", info.ModTime(), file)
 }
 
 func (h *DistributedBackupHandler) listOperations(c *gin.Context) {
@@ -86,7 +139,7 @@ func (h *DistributedBackupHandler) create(c *gin.Context) {
 	if mode == "" {
 		mode = distributedbackup.ModeHot
 	}
-	if mode != distributedbackup.ModeCold && mode != distributedbackup.ModeHot {
+	if mode != distributedbackup.ModeCold && mode != distributedbackup.ModeHot && mode != distributedbackup.ModeAutomatic {
 		Failure(c, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "备份模式无效", nil)
 		return
 	}
@@ -94,7 +147,7 @@ func (h *DistributedBackupHandler) create(c *gin.Context) {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
 			var value distributedbackup.Set
 			var createErr error
-			if mode == distributedbackup.ModeHot {
+			if mode != distributedbackup.ModeCold {
 				service, ok := h.backups.(DistributedHotBackupService)
 				if !ok {
 					createErr = distributedbackup.ErrHotUnavailable
@@ -213,6 +266,10 @@ func distributedBackupJobError(err error) *jobs.Error {
 
 func distributedBackupFailure(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, distributedbackup.ErrInUse):
+		Failure(c, http.StatusConflict, "BACKUP_SET_IN_USE", err.Error(), nil)
+	case errors.Is(err, distributedbackup.ErrConfirmationRequired):
+		Failure(c, http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", err.Error(), nil)
 	case errors.Is(err, distributedbackup.ErrNotFound):
 		Failure(c, http.StatusNotFound, "BACKUP_SET_NOT_FOUND", "备份集不存在", nil)
 	case errors.Is(err, distributedbackup.ErrInvalidInput):

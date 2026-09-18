@@ -12,6 +12,7 @@ import (
 
 	"dont/internal/agents"
 	"dont/internal/jobs"
+	"dont/internal/maintenance"
 	"dont/internal/operationlease"
 	"dont/internal/operationprogress"
 	"dont/internal/roomops"
@@ -388,6 +389,11 @@ func (o *Operations) planWithOptions(action Action, roomID string, selectedWorld
 			return nil
 		}
 		orderWorlds(currentWorlds, action)
+		if action == ActionStop || action == ActionRestart {
+			if err := maintenance.Check(ctx); err != nil {
+				return err
+			}
+		}
 		if action == ActionStart || action == ActionRestart {
 			// Game Lua is supported by every DST installation. Only optional
 			// runtimes need an additional target capability check here.

@@ -661,12 +661,21 @@ func TestReleaseStoreRecoversInterruptedStages(t *testing.T) {
 	if _, err := store.Create(value); err != nil {
 		t.Fatal(err)
 	}
+	previewed := value
+	previewed.ID, previewed.Stage = "release-previewed", ReleaseStagePreviewed
+	previewed.SourceJobID = "job-previewed"
+	if _, err := store.Create(previewed); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Migrate(); err != nil {
 		t.Fatal(err)
 	}
 	recovered, err := store.Get(value.ID)
 	if err != nil || recovered.Stage != ReleaseStageRecoveryRequired || recovered.ErrorCode != "SERVICE_RESTARTED" {
 		t.Fatalf("recovered=%#v err=%v", recovered, err)
+	}
+	if recovered, err := store.Get(previewed.ID); err != nil || recovered.Stage != ReleaseStageRecoveryRequired {
+		t.Fatalf("interruption before protection has no recovery entry: %#v %v", recovered, err)
 	}
 }
 

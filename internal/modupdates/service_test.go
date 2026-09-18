@@ -322,7 +322,7 @@ func TestAutomaticUpdateBlocksOnStalePresence(t *testing.T) {
 	fixture.enableAutomatic(t)
 	fixture.presence.values = []players.PresenceSnapshot{{RoomID: "room", Fresh: false, StaleOnline: 1, Online: 1}}
 	state, err := fixture.service.check(context.Background(), "room", "job", true)
-	if err == nil || state.Status != StatusBlocked || state.ErrorCode != "PLAYER_PRESENCE_STALE" || fixture.restarter.calls != 0 || state.NextActionAt == nil {
+	if err == nil || state.Status != StatusBlocked || state.ErrorCode != "PLAYER_PRESENCE_STALE" || fixture.restarter.calls != 0 || state.NextCheckAt == nil || len(fixture.catalog.updateCalls) != 0 {
 		t.Fatalf("blocked state = %#v, error = %v", state, err)
 	}
 }

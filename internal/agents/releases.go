@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 
+	"dont/internal/tempfiles"
+
 	"github.com/google/uuid"
 )
 
@@ -83,6 +85,9 @@ func NewReleaseStore(root string) (*ReleaseStore, error) {
 	}
 	if err := os.Chmod(absolute, 0o700); err != nil {
 		return nil, fmt.Errorf("secure agent release directory: %w", err)
+	}
+	if err := tempfiles.Cleanup(absolute, tempfiles.Uploads); err != nil {
+		return nil, fmt.Errorf("recover agent uploads: %w", err)
 	}
 	return &ReleaseStore{root: absolute, now: time.Now, grants: make(map[string]releaseDownloadGrant)}, nil
 }
@@ -400,4 +405,11 @@ func splitAgentVersion(value string) ([]string, string) {
 		}
 	}
 	return parts, prerelease
+}
+
+func (s *Service) UploadDirectory() string {
+	if s.releases == nil {
+		return ""
+	}
+	return s.releases.root
 }

@@ -130,6 +130,14 @@ func TestDistributedBackupHandlerCreatesAndRestoresJobs(t *testing.T) {
 		t.Fatalf("cold create job=%#v mode=%q", coldCreateJob, fixture.createdMode)
 	}
 
+	automaticCreated := performDistributedBackupRequest(t, router, http.MethodPost, "/api/v2/rooms/room/backup-sets", map[string]string{"name": "自动选择模式", "mode": distributedbackup.ModeAutomatic})
+	if automaticCreated.Code != http.StatusAccepted {
+		t.Fatalf("automatic create status=%d body=%s", automaticCreated.Code, automaticCreated.Body.String())
+	}
+	automaticJob := waitDistributedBackupJob(t, jobService, distributedBackupJobID(t, automaticCreated.Body.Bytes()))
+	if automaticJob.Status != jobs.StatusSucceeded || fixture.createdMode != distributedbackup.ModeAutomatic {
+		t.Fatalf("automatic create job=%#v mode=%q", automaticJob, fixture.createdMode)
+	}
 	fixture.createdMode = ""
 	coldOnlyHandler, err := NewDistributedBackupHandler(coldOnlyDistributedBackupService{DistributedBackupService: fixture}, jobService)
 	if err != nil {

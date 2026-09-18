@@ -11,6 +11,24 @@ import (
 	"github.com/shirou/gopsutil/v3/disk"
 )
 
+func TestServiceRecoversAbandonedMultipartFilesOnInitialization(t *testing.T) {
+	app := newApplyTestApp(t)
+	dir := filepath.Join(app.importRoot, ".uploads")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "upload-interrupted")
+	if err := os.WriteFile(path, []byte("partial upload"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewService(Config{SaveRoot: app.saveRoot, ImportRoot: app.importRoot, WorkshopRoot: app.workshopRoot}, app.store, app.rooms, app.runtime, app.backups, app.downloader); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("abandoned multipart file remains: %v", err)
+	}
+}
+
 func TestServiceRecoversInterruptedAnalysisAsRetryable(t *testing.T) {
 	app := newApplyTestApp(t)
 	archive := createZIP(t, []archiveTestEntry{

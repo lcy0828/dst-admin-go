@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"dont/internal/tempfiles"
 	"dont/shared"
 )
 
@@ -43,6 +44,9 @@ func NewStore(root string) (*Store, error) {
 		return nil, err
 	}
 	if err = os.MkdirAll(root, 0700); err != nil {
+		return nil, err
+	}
+	if err := tempfiles.Cleanup(root, tempfiles.Uploads); err != nil {
 		return nil, err
 	}
 	return &Store{root: root, grants: map[string]grant{}}, nil
@@ -229,3 +233,5 @@ func (s *Store) Open(id, token string) (*os.File, error) {
 	}
 	return os.Open(p)
 }
+
+func (s *Store) UploadDirectory() string { return s.root }

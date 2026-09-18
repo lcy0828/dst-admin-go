@@ -21,6 +21,7 @@ import (
 	"dont/internal/roomops"
 	"dont/internal/rooms"
 	"dont/internal/runtimeguard"
+	"dont/internal/tempfiles"
 
 	"github.com/google/uuid"
 	"github.com/shirou/gopsutil/v3/disk"
@@ -36,18 +37,18 @@ const (
 const MaxUploadSize = maxUploadBytes
 
 var (
-	ErrRoomNotManaged        = errors.New("room must be managed before backups can be used")
-	ErrInvalidName           = errors.New("backup name is invalid")
-	ErrInvalidArchive        = errors.New("backup archive is invalid")
-	ErrUnsafeArchive         = errors.New("backup archive contains an unsafe entry")
-	ErrArchiveTooLarge       = errors.New("backup archive exceeds safety limits")
-	ErrInsufficientSpace     = errors.New("insufficient disk space")
-	ErrConfirmationNeeded    = errors.New("backup restore confirmation does not match")
-	ErrWorldRunning          = errors.New("all worlds must be stopped before restore")
-	ErrConsistentSaveMissing = errors.New("running room has no running master world for a consistent save")
-	ErrBackupRoomMismatch    = errors.New("backup does not belong to room")
-	ErrUnsafeBackupPath      = errors.New("backup path is unsafe")
-	ErrSnapshotPolicyInvalid = errors.New("backup snapshot policy is invalid")
+	ErrRoomNotManaged           = errors.New("room must be managed before backups can be used")
+	ErrInvalidName              = errors.New("backup name is invalid")
+	ErrInvalidArchive           = errors.New("backup archive is invalid")
+	ErrUnsafeArchive            = errors.New("backup archive contains an unsafe entry")
+	ErrArchiveTooLarge          = errors.New("backup archive exceeds safety limits")
+	ErrInsufficientSpace        = errors.New("insufficient disk space")
+	ErrConfirmationNeeded       = errors.New("backup restore confirmation does not match")
+	ErrWorldRunning             = errors.New("all worlds must be stopped before restore")
+	ErrConsistentBackupRequired = errors.New("运行中的房间请使用一致性备份；旧 ZIP 备份仅支持已停止的房间")
+	ErrBackupRoomMismatch       = errors.New("backup does not belong to room")
+	ErrUnsafeBackupPath         = errors.New("backup path is unsafe")
+	ErrSnapshotPolicyInvalid    = errors.New("backup snapshot policy is invalid")
 )
 
 type RoomCatalog interface {
@@ -74,7 +75,6 @@ type Service struct {
 	runtime    Runtime
 	store      *Store
 	now        func() time.Time
-	saveSettle time.Duration
 	locksMu    sync.Mutex
 	roomLocks  map[string]*sync.Mutex
 	guard      runtimeguard.MutationGuard
@@ -96,9 +96,12 @@ func NewService(saveRoot, backupRoot string, roomCatalog RoomCatalog, runtime Ru
 	if err != nil {
 		return nil, fmt.Errorf("resolve backup root: %w", err)
 	}
+	if err := tempfiles.Cleanup(resolvedBackup, tempfiles.Uploads); err != nil {
+		return nil, fmt.Errorf("recover backup uploads: %w", err)
+	}
 	return &Service{
 		saveRoot: resolvedSave, backupRoot: resolvedBackup, rooms: roomCatalog, runtime: runtime, store: store,
-		now: time.Now, saveSettle: 2 * time.Second, roomLocks: make(map[string]*sync.Mutex),
+		now: time.Now, roomLocks: make(map[string]*sync.Mutex),
 	}, nil
 }
 
@@ -447,9 +450,17 @@ func (s *Service) MarkPolicyRun(roomID, jobID string, runErr error) error {
 
 func (s *Service) DuePolicies() ([]Policy, error) { return s.store.DuePolicies(s.now().UTC()) }
 
-func (s *Service) PruneSnapshots(roomID string, keep int) (int64, int, error) {
+func (s *Service) PruneSnapshots(ctx context.Context, roomID string, keep int) (int64, int, error) {
 	if keep < 1 || keep > 100 {
 		return 0, 0, ErrSnapshotPolicyInvalid
+	}
+	ctx, release, err := roomops.Acquire(ctx, roomID)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer release()
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
 	}
 	room, err := s.resolveRoom(roomID)
 	if err != nil {
@@ -459,7 +470,13 @@ func (s *Service) PruneSnapshots(roomID string, keep int) (int64, int, error) {
 		return 0, 0, err
 	}
 	lock := s.roomLock(roomID)
-	lock.Lock()
+	for !lock.TryLock() {
+		select {
+		case <-ctx.Done():
+			return 0, 0, ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 	defer lock.Unlock()
 	items, err := s.store.List(roomID)
 	if err != nil {
@@ -475,9 +492,12 @@ func (s *Service) PruneSnapshots(roomID string, keep int) (int64, int, error) {
 	var bytes int64
 	removed := 0
 	if len(snapshots) <= keep {
-		return 0, 0, nil
+		return 0, 0, ctx.Err()
 	}
 	for _, item := range snapshots[keep:] {
+		if err := ctx.Err(); err != nil {
+			return bytes, removed, err
+		}
 		filePath, _, pathErr := s.backupPath(item)
 		if pathErr != nil {
 			return bytes, removed, pathErr
@@ -497,7 +517,7 @@ func (s *Service) PruneSnapshots(roomID string, keep int) (int64, int, error) {
 		removed++
 	}
 	_ = room
-	return bytes, removed, nil
+	return bytes, removed, ctx.Err()
 }
 
 func (s *Service) requireLocalRoom(roomID string) error {
@@ -629,41 +649,13 @@ func (s *Service) syncLegacyLocked(room rooms.Room) error {
 	return nil
 }
 
+// The legacy ZIP format cannot coordinate live shard snapshots. All running
+// room backups must go through the consistency coordinator.
 func (s *Service) prepareConsistentSave(ctx context.Context, room rooms.Room) error {
-	worlds, err := s.rooms.Worlds(room.ID)
-	if err != nil {
+	if err := s.requireStopped(ctx, room); errors.Is(err, ErrWorldRunning) {
+		return ErrConsistentBackupRequired
+	} else {
 		return err
-	}
-	anyRunning := false
-	masterRunning := false
-	masterName := ""
-	for _, world := range worlds {
-		running, statusErr := s.runtime.IsRunning(ctx, room.DirectoryName, world.DirectoryName)
-		if statusErr != nil {
-			return fmt.Errorf("inspect world before backup: %w", statusErr)
-		}
-		anyRunning = anyRunning || running
-		if world.IsMaster {
-			masterName = world.DirectoryName
-			masterRunning = running
-		}
-	}
-	if !anyRunning {
-		return nil
-	}
-	if !masterRunning || masterName == "" {
-		return ErrConsistentSaveMissing
-	}
-	if err := s.runtime.Send(ctx, room.DirectoryName, masterName, "c_save()"); err != nil {
-		return fmt.Errorf("request consistent save: %w", err)
-	}
-	timer := time.NewTimer(s.saveSettle)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
 	}
 }
 
@@ -1093,3 +1085,5 @@ func requireFreeSpace(target string, required uint64) error {
 	}
 	return nil
 }
+
+func (s *Service) UploadDirectory() string { return s.backupRoot }

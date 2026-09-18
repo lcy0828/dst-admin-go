@@ -60,7 +60,7 @@ func (c *Coordinator) Restore(ctx context.Context, setID, confirmation, sourceJo
 	if confirmation != room.Name {
 		return RestoreResult{}, ErrInvalidInput
 	}
-	if err := c.verifySet(backupSet, currentParts, revision); err != nil {
+	if err := c.verifySet(ctx, backupSet, currentParts, revision, true); err != nil {
 		return RestoreResult{}, err
 	}
 	defer func() {
@@ -160,16 +160,12 @@ func (c *Coordinator) Restore(ctx context.Context, setID, confirmation, sourceJo
 	return result, nil
 }
 
-func (c *Coordinator) verifySet(value Set, current []runtimePart, revision string) error {
-	value = c.classifySet(value)
-	if !value.Restorable {
-		if value.ContentKind == "unknown" {
-			return errors.Join(ErrIntegrity, errors.New(value.ValidationError))
-		}
-		return errors.Join(ErrNotRestorable, errors.New(value.ValidationError))
+func (c *Coordinator) verifySet(ctx context.Context, value Set, current []runtimePart, revision string, requireSave bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if value.Status != StatusVerified || value.VerifiedAt == nil ||
-		value.ManifestVersion != legacyManifestVersion && value.ManifestVersion != manifestVersion || len(value.Parts) != len(current) ||
+		value.ManifestVersion != legacyManifestVersion && value.ManifestVersion != manifestVersion || len(value.Parts) == 0 || len(value.Parts) != len(current) ||
 		value.TopologyRevision != revision || len(value.ManifestSHA256) != 64 || len(value.SharedSHA256) != 64 {
 		return ErrIncomplete
 	}
@@ -200,6 +196,9 @@ func (c *Coordinator) verifySet(value Set, current []runtimePart, revision strin
 		byWorld[item.part.WorldID] = item
 	}
 	for _, part := range value.Parts {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		target, exists := byWorld[part.WorldID]
 		if !exists || part.Status != PartVerified || part.TopologyRevision != revision || part.TargetID != target.target.TargetID ||
 			part.InstallationID != target.target.InstallationID || part.Cluster != target.target.Cluster || part.Shard != target.target.Shard ||
@@ -210,11 +209,11 @@ func (c *Coordinator) verifySet(value Set, current []runtimePart, revision strin
 		if err != nil {
 			return err
 		}
-		if err := verifyRegularFile(path, part.Size, part.SHA256); err != nil {
+		if err := verifyRegularFile(ctx, path, part.Size, part.SHA256); err != nil {
 			return err
 		}
 		inspection, inspectErr := shardtransfer.InspectBackupArchive(path)
-		if inspectErr != nil || !inspection.Restorable {
+		if inspectErr != nil || requireSave && !inspection.Restorable {
 			return errors.Join(ErrNotRestorable, inspectErr, errors.New(inspection.ValidationError))
 		}
 		if value.ManifestVersion == manifestVersion && !strings.EqualFold(inspection.SharedCompatibilitySHA256, value.SharedSHA256) {
@@ -340,7 +339,7 @@ func rekeyParts(values []runtimePart, setID string, now time.Time) []runtimePart
 	return result
 }
 
-func verifyRegularFile(path string, expectedSize int64, expectedSHA string) error {
+func verifyRegularFile(ctx context.Context, path string, expectedSize int64, expectedSHA string) error {
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() != expectedSize {
 		return errors.Join(ErrIntegrity, err)
@@ -351,7 +350,7 @@ func verifyRegularFile(path string, expectedSize int64, expectedSHA string) erro
 	}
 	defer file.Close()
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	if _, err := io.Copy(hash, exportReader{ctx, file}); err != nil {
 		return errors.Join(ErrIntegrity, err)
 	}
 	if !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), expectedSHA) {

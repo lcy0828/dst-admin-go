@@ -13,6 +13,9 @@ import (
 // Recover resumes or rolls back operations left active by a controller crash.
 // The application calls it once after startup; further recovery is explicit.
 func (c *Coordinator) Recover(ctx context.Context) error {
+	if err := c.recoverDeletions(ctx); err != nil {
+		return err
+	}
 	operations, err := c.store.ActiveOperations()
 	if err != nil {
 		return err

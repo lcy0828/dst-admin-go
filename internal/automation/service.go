@@ -324,6 +324,9 @@ func (s *Service) RunTask(roomID, taskID string, trigger Trigger) (jobs.Job, err
 			}
 			finished := s.now().UTC()
 			status := RunSucceeded
+			if result.Skipped {
+				status = RunSkipped
+			}
 			errorMessage := ""
 			if executeErr != nil {
 				status = RunFailed

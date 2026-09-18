@@ -95,7 +95,7 @@ func (s *ReleaseStore) Migrate() error {
 	}
 	now := s.now().UTC()
 	active := []string{
-		string(ReleaseStageProtecting), string(ReleaseStageStopping), string(ReleaseStageStaged), string(ReleaseStageUpdating),
+		string(ReleaseStagePreviewed), string(ReleaseStageProtecting), string(ReleaseStageStopping), string(ReleaseStageStaged), string(ReleaseStageUpdating),
 		string(ReleaseStageVerified), string(ReleaseStageRestarting), string(ReleaseStageConfirming),
 	}
 	if err := s.db.Table(s.releaseTable).Where("stage IN (?)", active).Updates(map[string]interface{}{
@@ -268,6 +268,28 @@ func (s *ReleaseStore) List(limit, offset int) ([]Release, int, error) {
 		values = append(values, value)
 	}
 	return values, total, nil
+}
+
+// An unattended attempt must not replace recovery evidence or forget which
+// worlds were running before an interrupted release stopped them.
+func (s *ReleaseStore) requireNoPendingRelease(plan ReleasePlan) error {
+	for _, installation := range plan.Installations {
+		pending := s.db.Table(s.releaseTable).Select("id").Where("stage NOT IN (?)", []string{
+			string(ReleaseStageSucceeded), string(ReleaseStageFailed),
+		}).SubQuery()
+		var record releaseInstallationRecord
+		err := s.db.Table(s.installationTable).
+			Where("target_id = ? AND installation_id = ? AND release_id IN (?)", installation.TargetID, installation.InstallationID, pending).
+			First(&record).Error
+		if gorm.IsRecordNotFoundError(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: %s", ErrReleaseRecoveryNeeded, record.ReleaseID)
+	}
+	return nil
 }
 
 func validateRelease(value Release) error {

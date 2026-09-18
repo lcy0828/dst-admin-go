@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"dont/internal/maintenance"
 	"dont/internal/operationlease"
 	"dont/internal/roomops"
 	"dont/internal/runtimeaudit"
@@ -29,6 +30,18 @@ type ReleaseCoordinator struct {
 	renewInterval time.Duration
 	notifier      LifecycleNotifier
 	mutations     runtimedriver.RuntimeMutationObserver
+	online        maintenance.OnlineCounter
+}
+
+func (c *ReleaseCoordinator) ConfigureOnlineCounter(counter maintenance.OnlineCounter) {
+	c.online = counter
+}
+
+func (c *ReleaseCoordinator) requireEmpty(ctx context.Context, plan ReleasePlan) error {
+	if !plan.Policy.RequireEmpty {
+		return nil
+	}
+	return maintenance.RequireEmpty(ctx, c.online, plan.AffectedRoomIDs)
 }
 
 func NewReleaseCoordinator(planner *ReleasePlanner, runtime ReleaseRuntime, leases ReleaseLeaseService, backups ReleaseProtectionService, store *ReleaseStore) (*ReleaseCoordinator, error) {
@@ -59,6 +72,15 @@ func (c *ReleaseCoordinator) Preview(ctx context.Context, request ReleasePreview
 
 func (c *ReleaseCoordinator) Get(id string) (Release, error) { return c.store.Get(id) }
 
+// Failed releases remain retryable and must keep their original protection.
+func (c *ReleaseCoordinator) RequiresProtection(id string) (bool, error) {
+	value, err := c.store.Get(id)
+	if errors.Is(err, ErrReleaseNotFound) {
+		return false, nil
+	}
+	return value.Stage != ReleaseStageSucceeded, err
+}
+
 func (c *ReleaseCoordinator) List(limit, offset int) ([]Release, int, error) {
 	return c.store.List(limit, offset)
 }
@@ -76,6 +98,11 @@ func (c *ReleaseCoordinator) Publish(ctx context.Context, request ReleasePublish
 		return Release{}, err
 	}
 	return c.withReleaseLocks(ctx, request.Plan, request.ID, func(runContext context.Context, fences *releaseFenceSet) (Release, error) {
+		if request.Plan.Policy.RequireEmpty {
+			if err := c.store.requireNoPendingRelease(request.Plan); err != nil {
+				return Release{}, err
+			}
+		}
 		fresh, err := c.previewStoredPlan(runContext, request.Plan)
 		if err != nil {
 			return Release{}, err
@@ -83,7 +110,13 @@ func (c *ReleaseCoordinator) Publish(ctx context.Context, request ReleasePublish
 		if fresh.PlanHash != request.Plan.PlanHash {
 			return Release{}, ErrReleasePlanChanged
 		}
+		if err := c.requireEmpty(runContext, request.Plan); err != nil {
+			return Release{}, err
+		}
 		if err := c.notifyBeforeRelease(runContext, request.Plan, request.SourceJobID); err != nil {
+			return Release{}, err
+		}
+		if err := c.requireEmpty(runContext, request.Plan); err != nil {
 			return Release{}, err
 		}
 		now := c.now().UTC()
@@ -142,6 +175,9 @@ func (c *ReleaseCoordinator) Retry(ctx context.Context, id string, sourceJobIDs 
 		if !fresh.Ready || !sameReleaseStructure(value.Plan, fresh) {
 			return c.failRelease(value, "TOPOLOGY_CHANGED", ErrReleaseTopologyChanged, ReleaseStageRecoveryRequired)
 		}
+		if err := c.requireEmpty(runContext, value.Plan); err != nil {
+			return value, err
+		}
 		if err := c.notifyBeforeRelease(runContext, value.Plan, notificationJobID); err != nil {
 			return value, err
 		}
@@ -180,6 +216,9 @@ func (c *ReleaseCoordinator) notifyBeforeRelease(ctx context.Context, plan Relea
 }
 
 func (c *ReleaseCoordinator) execute(ctx context.Context, value Release, fences *releaseFenceSet, recovery bool) (Release, error) {
+	if value.Plan.Policy.RequireEmpty {
+		ctx = maintenance.WithCheck(ctx, func(ctx context.Context) error { return c.requireEmpty(ctx, value.Plan) })
+	}
 	if !value.Plan.UpdateRequired {
 		now := c.now().UTC()
 		value.Stage, value.FinishedAt, value.UpdatedAt = ReleaseStageSucceeded, &now, now
@@ -256,6 +295,9 @@ func (c *ReleaseCoordinator) createProtectionBackups(ctx context.Context, value 
 	}
 	for index, roomID := range value.Plan.AffectedRoomIDs {
 		if index < len(value.ProtectionBackupIDs) && value.ProtectionBackupIDs[index] != "" {
+			if err := c.backups.VerifyProtection(ctx, value.ProtectionBackupIDs[index], roomID, value.ID); err != nil {
+				return value, fmt.Errorf("更新前保护备份不可用，已阻止继续更新房间 %s: %w", roomID, err)
+			}
 			continue
 		}
 		lease, found := fences.forRoom(roomID)
@@ -267,7 +309,10 @@ func (c *ReleaseCoordinator) createProtectionBackups(ctx context.Context, value 
 			return value, backupErr
 		}
 		fences.replace(lease)
-		value.ProtectionBackupIDs = append(value.ProtectionBackupIDs, backupID)
+		for len(value.ProtectionBackupIDs) <= index {
+			value.ProtectionBackupIDs = append(value.ProtectionBackupIDs, "")
+		}
+		value.ProtectionBackupIDs[index] = backupID
 		value.UpdatedAt = c.now().UTC()
 		value, err = c.store.Save(value)
 		if err != nil {
@@ -278,6 +323,9 @@ func (c *ReleaseCoordinator) createProtectionBackups(ctx context.Context, value 
 }
 
 func (c *ReleaseCoordinator) stopPlannedShards(ctx context.Context, value Release, fences *releaseFenceSet) (Release, []ReleaseShardPlan, error) {
+	if err := c.requireEmpty(ctx, value.Plan); err != nil {
+		return value, nil, err
+	}
 	value.Stage, value.UpdatedAt = ReleaseStageStopping, c.now().UTC()
 	value, err := c.store.Save(value)
 	if err != nil {
@@ -300,6 +348,9 @@ func (c *ReleaseCoordinator) stopPlannedShards(ctx context.Context, value Releas
 			return value, stopped, statusErr
 		}
 		if status.State != string(shards.RuntimeStopped) || status.SessionExists {
+			if err := c.requireEmpty(ctx, value.Plan); err != nil {
+				return value, stopped, err
+			}
 			operation, operationErr := fences.operation(shard.RoomID, value.ID, "stop", index)
 			if operationErr != nil {
 				return value, stopped, operationErr
@@ -566,10 +617,20 @@ func (c *ReleaseCoordinator) recoverStoppedShards(ctx context.Context, value *Re
 
 func (c *ReleaseCoordinator) previewStoredPlan(ctx context.Context, plan ReleasePlan) (ReleasePlan, error) {
 	restart := plan.Policy.RestartRunning
+	targetIDs := releasePlanTargetIDs(plan)
+	var installations map[string]bool
+	if plan.Policy.RequireEmpty {
+		targetIDs = nil
+		installations = make(map[string]bool)
+		for _, installation := range plan.Installations {
+			installations[releaseInstallationKey(installation.TargetID, installation.InstallationID)] = true
+		}
+	}
 	return c.planner.Preview(ctx, ReleasePreviewRequest{
-		DesiredVersion: plan.DesiredVersion,
-		TargetIDs:      releasePlanTargetIDs(plan),
-		Policy:         ReleasePolicyInput{CleanCache: plan.Policy.CleanCache, RestartRunning: &restart, LoadConfirmation: plan.Policy.LoadConfirmation, TimeoutSeconds: plan.Policy.TimeoutSeconds},
+		installationKeys: installations,
+		DesiredVersion:   plan.DesiredVersion,
+		TargetIDs:        targetIDs,
+		Policy:           ReleasePolicyInput{RequireEmpty: plan.Policy.RequireEmpty, CleanCache: plan.Policy.CleanCache, RestartRunning: &restart, LoadConfirmation: plan.Policy.LoadConfirmation, TimeoutSeconds: plan.Policy.TimeoutSeconds},
 	})
 }
 

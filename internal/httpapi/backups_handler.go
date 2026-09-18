@@ -95,28 +95,17 @@ func (h *BackupHandler) create(c *gin.Context) {
 }
 
 func (h *BackupHandler) upload(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, backupapi.MaxUploadSize+1024*1024)
-	fileHeader, err := c.FormFile("file")
+	file, err := readUpload(c, h.backups.UploadDirectory(), backupapi.MaxUploadSize)
 	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			backupFailure(c, backupapi.ErrArchiveTooLarge)
-			return
-		}
-		Failure(c, http.StatusBadRequest, "UPLOAD_REQUIRED", "请选择一个 ZIP 备份文件", nil)
+		uploadFailure(c, err)
 		return
 	}
-	if !strings.EqualFold(filepath.Ext(fileHeader.Filename), ".zip") {
+	defer file.cleanup()
+	if !strings.EqualFold(filepath.Ext(file.Filename), ".zip") {
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_ARCHIVE", "备份文件必须为 ZIP", nil)
 		return
 	}
-	file, err := fileHeader.Open()
-	if err != nil {
-		Failure(c, http.StatusBadRequest, "UPLOAD_READ_FAILED", "无法读取上传文件", nil)
-		return
-	}
-	defer file.Close()
-	value, err := h.backups.Import(c.Request.Context(), c.Param("roomId"), c.PostForm("name"), fileHeader.Filename, file)
+	value, err := h.backups.Import(c.Request.Context(), c.Param("roomId"), file.Fields["name"], file.Filename, file)
 	if err != nil {
 		backupFailure(c, err)
 		return
@@ -243,8 +232,8 @@ func (h *BackupHandler) prune(c *gin.Context) {
 		return
 	}
 	targets := []jobs.TargetSpec{{ID: roomID, Name: "自动快照"}}
-	job, err := h.jobs.Submit("backup.prune", roomID, "", targets, func(_ context.Context, report func(jobs.TargetResult)) error {
-		bytes, count, pruneErr := h.backups.PruneSnapshots(roomID, policy.MaxSnapshots)
+	job, err := h.jobs.Submit("backup.prune", roomID, "", targets, func(ctx context.Context, report func(jobs.TargetResult)) error {
+		bytes, count, pruneErr := h.backups.PruneSnapshots(ctx, roomID, policy.MaxSnapshots)
 		if pruneErr != nil {
 			report(jobs.TargetResult{TargetID: roomID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: backupErrorCode(pruneErr, "BACKUP_PRUNE_FAILED"), Message: pruneErr.Error()}})
 			return nil
@@ -275,12 +264,12 @@ func backupFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusUnprocessableEntity, "CONFIRMATION_REQUIRED", "请输入完整房间名确认恢复", nil)
 	case errors.Is(err, backupapi.ErrWorldRunning):
 		Failure(c, http.StatusConflict, "WORLD_RUNNING", "停止全部分片后才能恢复备份", nil)
-	case errors.Is(err, backupapi.ErrConsistentSaveMissing):
-		Failure(c, http.StatusConflict, "CONSISTENT_SAVE_UNAVAILABLE", "运行中的房间缺少 Master，无法创建一致性备份", nil)
+	case errors.Is(err, backupapi.ErrConsistentBackupRequired):
+		Failure(c, http.StatusConflict, "CONSISTENT_BACKUP_REQUIRED", backupapi.ErrConsistentBackupRequired.Error(), nil)
 	case errors.Is(err, backupapi.ErrRoomNotManaged):
 		Failure(c, http.StatusConflict, "ROOM_UNAVAILABLE", "房间当前不可用，请检查运行节点与拓扑状态", nil)
 	case errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable):
-		Failure(c, http.StatusConflict, runtimeguard.ErrorCode, "房间包含远程分片；分布式备份尚未开放，已阻止修改控制端本机存档", nil)
+		Failure(c, http.StatusConflict, runtimeguard.ErrorCode, "房间包含远程分片，请使用一致性备份管理", nil)
 	case errors.Is(err, backupapi.ErrBackupRoomMismatch), errors.Is(err, backupapi.ErrUnsafeBackupPath), errors.Is(err, rooms.ErrInvalidID), errors.Is(err, rooms.ErrUnsafePath):
 		Failure(c, http.StatusBadRequest, "INVALID_BACKUP_RESOURCE", "备份资源或路径无效", nil)
 	case errors.Is(err, rooms.ErrRoomNotFound):

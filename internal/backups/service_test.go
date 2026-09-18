@@ -85,19 +85,14 @@ func newBackupService(t *testing.T) (*Service, *testRuntime, string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service.saveSettle = time.Millisecond
 	return service, runtime, roomPath, backupRoot
 }
 
-func TestCreateRequestsConsistentSaveAndPersistsVerifiedArchive(t *testing.T) {
-	service, runtime, _, _ := newBackupService(t)
-	runtime.running["Master"] = true
+func TestStoppedRoomCreatesVerifiedLegacyArchive(t *testing.T) {
+	service, _, _, _ := newBackupService(t)
 	value, err := service.Create(context.Background(), rooms.EncodeID("room"), "第一次备份", KindManual, "job-id")
 	if err != nil {
 		t.Fatal(err)
-	}
-	if len(runtime.sent) != 1 || runtime.sent[0] != "c_save()" {
-		t.Fatalf("save commands = %#v", runtime.sent)
 	}
 	if value.VerifiedAt == nil || value.SHA256 == "" || value.FileCount < 3 || value.SourceJobID != "job-id" {
 		t.Fatalf("backup = %#v", value)
@@ -106,17 +101,23 @@ func TestCreateRequestsConsistentSaveAndPersistsVerifiedArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = file.Close()
+	file.Close()
 }
 
-func TestProtectionBackupAlsoRequestsConsistentSave(t *testing.T) {
-	service, runtime, _, _ := newBackupService(t)
-	runtime.running["Master"] = true
-	if _, err := service.Create(context.Background(), rooms.EncodeID("room"), "更新前", KindProtection, "job-id"); err != nil {
-		t.Fatal(err)
-	}
-	if len(runtime.sent) != 1 || runtime.sent[0] != "c_save()" {
-		t.Fatalf("save commands = %#v", runtime.sent)
+func TestLiveLegacyBackupRequiresCoordinatorWithoutSideEffects(t *testing.T) {
+	for _, kind := range []Kind{KindManual, KindSnapshot, KindProtection} {
+		service, runtime, _, root := newBackupService(t)
+		runtime.running["Master"] = true
+		if _, err := service.Create(context.Background(), rooms.EncodeID("room"), "live", kind, "job-id"); !errors.Is(err, ErrConsistentBackupRequired) {
+			t.Fatalf("kind=%s err=%v", kind, err)
+		}
+		if len(runtime.sent) != 0 {
+			t.Fatal("legacy backup sent an unacknowledged save")
+		}
+		files, err := filepath.Glob(filepath.Join(root, "room", "*.zip"))
+		if err != nil || len(files) != 0 {
+			t.Fatalf("live archive published: %v %v", files, err)
+		}
 	}
 }
 
@@ -201,7 +202,7 @@ func TestPolicyCanBeDisabledAndSnapshotsArePruned(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_, removed, err := service.PruneSnapshots(roomID, 1)
+	_, removed, err := service.PruneSnapshots(context.Background(), roomID, 1)
 	if err != nil || removed != 1 {
 		t.Fatalf("prune = %d, %v", removed, err)
 	}
@@ -356,7 +357,7 @@ func TestRemoteRoomGuardBlocksBackupMutationsWithoutSideEffects(t *testing.T) {
 	assertBlocked("restore", err)
 	_, err = service.Delete(manual.ID)
 	assertBlocked("delete", err)
-	_, _, err = service.PruneSnapshots(roomID, 1)
+	_, _, err = service.PruneSnapshots(context.Background(), roomID, 1)
 	assertBlocked("prune", err)
 
 	afterSource, err := os.ReadFile(filepath.Join(roomPath, "Master", "session-data"))
@@ -391,4 +392,75 @@ func TestRemoteRoomGuardBlocksBackupMutationsWithoutSideEffects(t *testing.T) {
 	if err != nil || uploaded.Kind != KindUpload {
 		t.Fatalf("upload result=%#v err=%v", uploaded, err)
 	}
+}
+
+type scheduledBackupProbe struct {
+	created chan Kind
+	pruned  chan int
+}
+
+func (p *scheduledBackupProbe) Create(_ context.Context, _ string, _ string, kind Kind, _ string) (Backup, error) {
+	p.created <- kind
+	return Backup{Name: "consistent snapshot"}, nil
+}
+func (p *scheduledBackupProbe) PruneSnapshots(_ context.Context, _ string, keep int) (int64, int, error) {
+	p.pruned <- keep
+	return 0, 0, nil
+}
+
+func TestExistingPoliciesUseConfiguredConsistencyExecutor(t *testing.T) {
+	service, runtime, _, _ := newBackupService(t)
+	runtime.running["Master"] = true
+	roomID := rooms.EncodeID("room")
+	if _, err := service.SavePolicy(roomID, PolicyRequest{Enabled: true, IntervalMinute: 15, MaxSnapshots: 2}); err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return time.Now().Add(16 * time.Minute) }
+	store := jobs.NewStore(service.store.db, "coordinated_scheduler_")
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	jobService, err := jobs.NewService(store, jobs.NewBroker())
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := &scheduledBackupProbe{created: make(chan Kind, 1), pruned: make(chan int, 1)}
+	if err := NewScheduler(service, jobService, probe).RunDue(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case kind := <-probe.created:
+		if kind != KindSnapshot {
+			t.Fatal(kind)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("consistency executor was not called")
+	}
+	select {
+	case keep := <-probe.pruned:
+		if keep != 2 {
+			t.Fatal(keep)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("retention was not routed")
+	}
+	// Join the persistent job before the fixture closes its database.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		policy, err := service.Policy(roomID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if policy.LastJobID != "" {
+			job, err := jobService.Get(policy.LastJobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.Status == jobs.StatusSucceeded {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("scheduled backup did not finish")
 }

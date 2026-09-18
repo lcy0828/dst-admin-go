@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -220,5 +221,33 @@ func assertStatus(t *testing.T, response *httptest.ResponseRecorder, expected in
 	t.Helper()
 	if response.Code != expected {
 		t.Fatalf("expected status %d, got %d: %s", expected, response.Code, response.Body.String())
+	}
+}
+
+func TestLoginRotationIsLimitedAndFailureCacheExpires(t *testing.T) {
+	app := newAuthTestApp(t)
+	response := performJSON(app.router, http.MethodPost, "/api/v2/auth/setup", map[string]string{"username": "admin", "password": "strong-password-one"}, nil, "")
+	assertStatus(t, response, http.StatusCreated)
+	for attempt := 0; attempt < 26; attempt++ {
+		username := "unknown-" + strconv.Itoa(attempt)
+		response = performJSON(app.router, http.MethodPost, "/api/v2/auth/login", map[string]string{"username": username, "password": "wrong-password"}, nil, "")
+		expected := http.StatusUnauthorized
+		if attempt == 25 {
+			expected = http.StatusTooManyRequests
+		}
+		assertStatus(t, response, expected)
+	}
+	now := time.Now()
+	app.handler.now = func() time.Time { return now }
+	for i := 0; i < maxLoginFailureEntries+100; i++ {
+		app.handler.recordFailure("different-ip-" + strconv.Itoa(i))
+	}
+	if len(app.handler.failures) > maxLoginFailureEntries {
+		t.Fatal("failure cache exceeded capacity")
+	}
+	now = now.Add(16 * time.Minute)
+	app.handler.isBlocked("unused")
+	if len(app.handler.failures) != 0 {
+		t.Fatalf("expired entries remain: %d", len(app.handler.failures))
 	}
 }

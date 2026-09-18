@@ -31,6 +31,7 @@ type backupTestPlacements struct {
 	room     rooms.Room
 	worlds   []rooms.World
 	revision string
+	local    bool
 }
 
 func (f backupTestPlacements) ResolveRoomExecutions(_ context.Context, roomID string) ([]topology.ExecutionPlacement, error) {
@@ -39,6 +40,9 @@ func (f backupTestPlacements) ResolveRoomExecutions(_ context.Context, roomID st
 		targetID := "agent:caves-node"
 		if world.Role == rooms.WorldRoleMaster {
 			targetID = "agent:master-node"
+		}
+		if f.local {
+			targetID = runtimedriver.LocalTargetID
 		}
 		result = append(result, topology.ExecutionPlacement{Room: f.room, World: world, Revision: f.revision, AppliedTargetID: targetID})
 	}
@@ -262,6 +266,10 @@ func (l *backupTestLeases) counts() (int, int, int) {
 }
 
 func newDistributedBackupFixture(t *testing.T) distributedBackupFixture {
+	return newBackupPlacementFixture(t, false)
+}
+
+func newBackupPlacementFixture(t *testing.T, local bool) distributedBackupFixture {
 	t.Helper()
 	db, err := gorm.Open("sqlite3", ":memory:")
 	if err != nil {
@@ -282,6 +290,11 @@ func newDistributedBackupFixture(t *testing.T) distributedBackupFixture {
 	leases := &backupTestLeases{service: leaseService}
 	masterRoot := filepath.Join(t.TempDir(), "master-node")
 	cavesRoot := filepath.Join(t.TempDir(), "caves-node")
+	masterTarget, cavesTarget := "agent:master-node", "agent:caves-node"
+	if local {
+		cavesRoot = masterRoot
+		masterTarget, cavesTarget = runtimedriver.LocalTargetID, runtimedriver.LocalTargetID
+	}
 	writeShardFixture(t, masterRoot, "Master", "master-v1")
 	writeShardFixture(t, cavesRoot, "Caves", "caves-v1")
 	masterControl := newBackupTestControl("Cluster_1", "Master")
@@ -306,10 +319,10 @@ func newDistributedBackupFixture(t *testing.T) distributedBackupFixture {
 		driver runtimedriver.Driver
 		target runtimedriver.Target
 	}{
-		masterID: {driver: masterDriver, target: runtimedriver.Target{TargetID: "agent:master-node", InstallationID: "default", RoomID: roomID, WorldID: masterID, Cluster: "Cluster_1", Shard: "Master", TopologyRevision: "revision-1"}},
-		cavesID:  {driver: cavesDriver, target: runtimedriver.Target{TargetID: "agent:caves-node", InstallationID: "default", RoomID: roomID, WorldID: cavesID, Cluster: "Cluster_1", Shard: "Caves", TopologyRevision: "revision-1"}},
+		masterID: {driver: masterDriver, target: runtimedriver.Target{TargetID: masterTarget, InstallationID: "default", RoomID: roomID, WorldID: masterID, Cluster: "Cluster_1", Shard: "Master", TopologyRevision: "revision-1"}},
+		cavesID:  {driver: cavesDriver, target: runtimedriver.Target{TargetID: cavesTarget, InstallationID: "default", RoomID: roomID, WorldID: cavesID, Cluster: "Cluster_1", Shard: "Caves", TopologyRevision: "revision-1"}},
 	}}
-	placements := backupTestPlacements{room: catalog.room, worlds: catalog.worlds, revision: "revision-1"}
+	placements := backupTestPlacements{room: catalog.room, worlds: catalog.worlds, revision: "revision-1", local: local}
 	coordinator, err := NewCoordinator(filepath.Join(t.TempDir(), "central-backups"), catalog, placements, router, leases, store)
 	if err != nil {
 		t.Fatal(err)

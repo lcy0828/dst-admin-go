@@ -55,6 +55,7 @@ const (
 )
 
 type ReleasePolicy struct {
+	RequireEmpty     bool                    `json:"requireEmpty,omitempty"`
 	CleanCache       bool                    `json:"cleanCache"`
 	RestartRunning   bool                    `json:"restartRunning"`
 	LoadConfirmation ReleaseLoadConfirmation `json:"loadConfirmation"`
@@ -62,6 +63,7 @@ type ReleasePolicy struct {
 }
 
 type ReleasePolicyInput struct {
+	RequireEmpty     bool                    `json:"requireEmpty,omitempty"`
 	CleanCache       bool                    `json:"cleanCache"`
 	RestartRunning   *bool                   `json:"restartRunning,omitempty"`
 	LoadConfirmation ReleaseLoadConfirmation `json:"loadConfirmation,omitempty"`
@@ -69,9 +71,11 @@ type ReleasePolicyInput struct {
 }
 
 type ReleasePreviewRequest struct {
-	DesiredVersion string             `json:"desiredVersion,omitempty"`
-	TargetIDs      []string           `json:"targetIds,omitempty"`
-	Policy         ReleasePolicyInput `json:"policy"`
+	roomID           string
+	installationKeys map[string]bool
+	DesiredVersion   string             `json:"desiredVersion,omitempty"`
+	TargetIDs        []string           `json:"targetIds,omitempty"`
+	Policy           ReleasePolicyInput `json:"policy"`
 }
 
 type ReleaseCreateRequest struct {
@@ -236,4 +240,5 @@ type ReleaseLeaseService interface {
 
 type ReleaseProtectionService interface {
 	CreateProtection(context.Context, string, string, string, *operationlease.Lease) (string, error)
+	VerifyProtection(context.Context, string, string, string) error
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"dont/internal/jobs"
+	"dont/internal/maintenance"
 	"dont/internal/modpublication"
 	"dont/internal/mods"
 	"dont/internal/operationprogress"
@@ -62,6 +63,7 @@ type Service struct {
 	presence  Presence
 	jobs      *jobs.Service
 	announcer Announcer
+	online    maintenance.OnlineCounter
 	now       func() time.Time
 	wake      chan struct{}
 	activeMu  sync.Mutex
@@ -272,8 +274,40 @@ func (s *Service) check(ctx context.Context, roomID, jobID string, automatic boo
 		return state, err
 	}
 	// Manual/notify-only checks never download content or restart worlds.
+	policy, err = s.store.Policy(roomID)
+	if err != nil {
+		return state, err
+	}
 	if !automatic || !policy.AutoCheck || !policy.AutoPrepare {
 		return state, nil
+	}
+	if len(checked.ModIDs) == 0 && state.PreparedAt == nil {
+		return state, nil
+	}
+	ctx, release, affected, err := s.lockAffectedRooms(ctx, roomID)
+	if err != nil {
+		return s.fail(state, "MAINTENANCE_SCOPE_FAILED", err, nil)
+	}
+	defer release()
+	// Unattended downloads and restarts must both wait for the shared rooms.
+	presence, presenceErr := s.refreshAffectedPresence(ctx, affected)
+	state.OnlinePlayers, state.StaleOnlinePlayers, state.PresenceFresh = presence.Online, presence.StaleOnline, presence.Fresh
+	if presenceErr != nil || !presence.Fresh || presence.Online > 0 {
+		state.EmptySince, state.NextActionAt = nil, nil
+		state.NextCheckAt = timePointer(s.now().Add(time.Minute))
+		if presenceErr != nil {
+			return s.fail(state, "PLAYER_PRESENCE_CHECK_FAILED", presenceErr, nil)
+		}
+		if !presence.Fresh {
+			return s.fail(state, "PLAYER_PRESENCE_STALE", maintenance.ErrPresenceUnavailable, nil)
+		}
+		state.Status = StatusWaitingForPlayers
+		if policy.GameAnnouncement && state.AnnouncementPlanHash == "" && s.announcer != nil {
+			if s.announcer.AnnounceModUpdate(ctx, roomID, "检测到模组更新，将在所有受影响房间无人时更新并重启。", jobID) == nil {
+				state.AnnouncementPlanHash = "waiting"
+			}
+		}
+		return s.saveState(state)
 	}
 	if len(checked.ModIDs) > 0 {
 		state, err = s.downloadUpdates(ctx, state, checked.ModIDs)
@@ -383,6 +417,11 @@ func (s *Service) applyWhenEmpty(ctx context.Context, roomID, jobID string) (Sta
 	if state.PreparedPlanHash != "" {
 		return s.check(ctx, roomID, jobID, true)
 	}
+	ctx, release, affected, err := s.lockAffectedRooms(ctx, roomID)
+	if err != nil {
+		return s.fail(state, "MAINTENANCE_SCOPE_FAILED", err, nil)
+	}
+	defer release()
 	now := s.now().UTC()
 	state.NextActionAt = timePointer(now.Add(time.Minute))
 	state, err = s.saveState(state)
@@ -390,7 +429,7 @@ func (s *Service) applyWhenEmpty(ctx context.Context, roomID, jobID string) (Sta
 		return state, err
 	}
 	operationprogress.Report(ctx, operationprogress.Update{Percent: 65, Message: "正在主动确认所有世界的在线玩家"})
-	presence, presenceErr := s.presence.RefreshPresence(ctx, roomID)
+	presence, presenceErr := s.refreshAffectedPresence(ctx, affected)
 	if presenceErr != nil {
 		state.EmptySince = nil
 		return s.fail(state, "PLAYER_PRESENCE_CHECK_FAILED", presenceErr, timePointer(now.Add(time.Minute)))
@@ -434,17 +473,9 @@ func (s *Service) applyWhenEmpty(ctx context.Context, roomID, jobID string) (Sta
 		return s.fail(state, "MOD_UPDATE_CHECK_FAILED", err, timePointer(s.now().Add(time.Minute)))
 	}
 	state = s.recordCheck(state, checked.ModIDs)
-	if len(checked.ModIDs) > 0 {
-		state, err = s.downloadUpdates(ctx, state, checked.ModIDs)
-		if err != nil {
-			return state, err
-		}
-		state.NextActionAt = timePointer(s.now())
-		return s.saveState(state)
-	}
 	// Re-read telemetry immediately before restarting. A joining player cancels
 	// the unattended activation even if the earlier grace observation was empty.
-	presence, presenceErr = s.presence.RefreshPresence(ctx, roomID)
+	presence, presenceErr = s.refreshAffectedPresence(ctx, affected)
 	if presenceErr != nil || !presence.Fresh || presence.Online > 0 {
 		state.EmptySince = nil
 		if presenceErr != nil {
@@ -458,10 +489,31 @@ func (s *Service) applyWhenEmpty(ctx context.Context, roomID, jobID string) (Sta
 		}
 		return s.saveState(state)
 	}
-	return s.restartPrepared(ctx, roomID, jobID, state)
+	ctx = maintenance.WithCheck(ctx, func(ctx context.Context) error {
+		latest, err := s.store.Policy(roomID)
+		if err != nil {
+			return err
+		}
+		if !latest.AutoCheck || !latest.AutoPrepare || !latest.ApplyWhenEmpty {
+			return errors.New("自动模组维护已暂停")
+		}
+		return s.requireEmpty(ctx, affected)
+	})
+	if err := maintenance.Check(ctx); err != nil {
+		return s.fail(state, "MAINTENANCE_RECHECK_FAILED", err, timePointer(s.now().Add(time.Minute)))
+	}
+	if len(checked.ModIDs) > 0 {
+		state, err = s.downloadUpdates(ctx, state, checked.ModIDs)
+		if err != nil {
+			return state, err
+		}
+		state.NextActionAt = timePointer(s.now())
+		return s.saveState(state)
+	}
+	return s.restartPrepared(ctx, roomID, jobID, state, affected...)
 }
 
-func (s *Service) restartPrepared(ctx context.Context, roomID, jobID string, state State) (State, error) {
+func (s *Service) restartPrepared(ctx context.Context, roomID, jobID string, state State, affected ...string) (State, error) {
 	state.Status, state.NextActionAt = StatusActivating, nil
 	state.ErrorCode, state.ErrorMessage = "", ""
 	var err error
@@ -469,7 +521,17 @@ func (s *Service) restartPrepared(ctx context.Context, roomID, jobID string, sta
 		return state, err
 	}
 	operationprogress.Report(ctx, operationprogress.Update{Percent: 80, Message: "模组下载完成，正在重启原本运行的世界"})
-	err = s.restarter.RestartRunningWorlds(ctx, roomID, jobID)
+	if len(affected) == 0 {
+		affected = []string{roomID}
+	}
+	for _, id := range affected {
+		if err = maintenance.Check(ctx); err != nil {
+			break
+		}
+		if err = s.restarter.RestartRunningWorlds(ctx, id, jobID); err != nil {
+			break
+		}
+	}
 	state.EmptySince = nil
 	if err != nil {
 		return s.fail(state, "MOD_WORLD_RESTART_FAILED", err, nil)

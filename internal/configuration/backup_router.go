@@ -13,8 +13,7 @@ type distributedBackupCreator interface {
 	CreateWithMode(context.Context, string, string, string, string, string) (distributedbackup.Set, error)
 }
 
-// HybridBackupCreator keeps the fast native backup path for local rooms and
-// selects the placement-aware backup path when any shard is remote.
+// HybridBackupCreator uses the legacy path only for stopped local rooms.
 type HybridBackupCreator struct {
 	local       BackupCreator
 	distributed distributedBackupCreator
@@ -29,10 +28,10 @@ func NewHybridBackupCreator(local BackupCreator, distributed distributedBackupCr
 
 func (c *HybridBackupCreator) Create(ctx context.Context, roomID, name string, kind backups.Kind, sourceJobID string) (backups.Backup, error) {
 	value, err := c.local.Create(ctx, roomID, name, kind, sourceJobID)
-	if err == nil || !errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable) {
+	if err == nil || !errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable) && !errors.Is(err, backups.ErrConsistentBackupRequired) {
 		return value, err
 	}
-	created, err := c.distributed.CreateWithMode(ctx, roomID, name, string(kind), sourceJobID, distributedbackup.ModeCold)
+	created, err := c.distributed.CreateWithMode(ctx, roomID, name, string(kind), sourceJobID, distributedbackup.ModeAutomatic)
 	if err != nil {
 		return backups.Backup{}, err
 	}

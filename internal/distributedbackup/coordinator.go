@@ -14,12 +14,14 @@ import (
 	"strings"
 	"time"
 
+	"dont/internal/maintenance"
 	"dont/internal/operationlease"
 	"dont/internal/roomops"
 	"dont/internal/rooms"
 	"dont/internal/runtimedriver"
 	"dont/internal/shards"
 	"dont/internal/shardtransfer"
+	"dont/internal/tempfiles"
 	"dont/internal/topology"
 	"dont/shared"
 
@@ -55,14 +57,15 @@ type LeaseService interface {
 }
 
 type Coordinator struct {
-	root       string
-	rooms      RoomCatalog
-	placements PlacementResolver
-	runtimes   RuntimeRouter
-	leases     LeaseService
-	store      *Store
-	now        func() time.Time
-	mutations  runtimedriver.RuntimeMutationObserver
+	root          string
+	rooms         RoomCatalog
+	placements    PlacementResolver
+	runtimes      RuntimeRouter
+	leases        LeaseService
+	store         *Store
+	now           func() time.Time
+	mutations     runtimedriver.RuntimeMutationObserver
+	deletionGuard func(Set) error
 }
 
 type runtimePart struct {
@@ -83,6 +86,9 @@ func NewCoordinator(root string, rooms RoomCatalog, placements PlacementResolver
 	}
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		return nil, err
+	}
+	if err := tempfiles.Cleanup(absolute, tempfiles.Exports); err != nil {
+		return nil, fmt.Errorf("recover temporary backup exports: %w", err)
 	}
 	return &Coordinator{root: filepath.Clean(absolute), rooms: rooms, placements: placements, runtimes: runtimes, leases: leases, store: store, now: time.Now}, nil
 }
@@ -554,6 +560,9 @@ func (c *Coordinator) stopAll(ctx context.Context, parts []runtimePart, operatio
 			return err
 		}
 		if status.SessionExists || status.State != string(shards.RuntimeStopped) {
+			if err := maintenance.Check(ctx); err != nil {
+				return err
+			}
 			if _, err := part.driver.ExecuteShard(ctx, part.target, c.runtimeOperation(*lease, operation.ID, "stop", index, 0), shared.ShardActionStop, stopTimeout); err != nil {
 				return err
 			}

@@ -59,21 +59,21 @@ var fieldDefinitions = []fieldDefinition{
 	{ID: "security.twoFactorAuth", Group: "security", Label: "双因素认证", Kind: "boolean", Section: "security", Key: "TWO_FACTOR_AUTH", Default: "false", ReadOnly: true},
 	{ID: "security.ipWhitelist", Group: "security", Label: "IP 白名单", Kind: "ip-list", Section: "security", Key: "IP_WHITELIST", Environment: "DST_ADMIN_IP_WHITELIST"},
 
-	{ID: "backup.auto", Group: "backup", Label: "自动备份", Kind: "boolean", Section: "backup", Key: "AUTO_BACKUP", Environment: "DST_ADMIN_AUTO_BACKUP", Default: "true", Required: true},
-	{ID: "backup.frequency", Group: "backup", Label: "备份频率", Kind: "select", Section: "backup", Key: "FREQUENCY", Environment: "DST_ADMIN_BACKUP_FREQUENCY", Default: "daily", Options: []string{"daily", "weekly", "monthly"}, Required: true},
-	{ID: "backup.time", Group: "backup", Label: "备份时间", Kind: "time", Section: "backup", Key: "TIME", Environment: "DST_ADMIN_BACKUP_TIME", Default: "03:00", Required: true},
-	{ID: "backup.retention", Group: "backup", Label: "保留备份数量", Kind: "number", Section: "backup", Key: "RETENTION", Environment: "DST_ADMIN_BACKUP_RETENTION", Default: "7", Required: true, Minimum: 1, Maximum: 100},
+	{ID: "backup.auto", Group: "backup", Label: "自动备份", Kind: "boolean", Section: "backup", Key: "AUTO_BACKUP", Environment: "DST_ADMIN_AUTO_BACKUP", Default: "false", Required: true, ReadOnly: true},
+	{ID: "backup.frequency", Group: "backup", Label: "备份频率", Kind: "select", Section: "backup", Key: "FREQUENCY", Environment: "DST_ADMIN_BACKUP_FREQUENCY", Default: "daily", Options: []string{"daily", "weekly", "monthly"}, Required: true, ReadOnly: true},
+	{ID: "backup.time", Group: "backup", Label: "备份时间", Kind: "time", Section: "backup", Key: "TIME", Environment: "DST_ADMIN_BACKUP_TIME", Default: "03:00", Required: true, ReadOnly: true},
+	{ID: "backup.retention", Group: "backup", Label: "保留备份数量", Kind: "number", Section: "backup", Key: "RETENTION", Environment: "DST_ADMIN_BACKUP_RETENTION", Default: "7", Required: true, Minimum: 1, Maximum: 100, ReadOnly: true},
 
-	{ID: "notification.emailEnabled", Group: "notification", Label: "邮件通知", Kind: "boolean", Section: "notification", Key: "EMAIL_ENABLED", Environment: "DST_ADMIN_EMAIL_ENABLED", Default: "false", Required: true},
+	{ID: "notification.emailEnabled", Group: "notification", Label: "邮件通知", Kind: "boolean", Section: "notification", Key: "EMAIL_ENABLED", Environment: "DST_ADMIN_EMAIL_ENABLED", Default: "false", Required: true, ReadOnly: true},
 	{ID: "notification.smtpServer", Group: "notification", Label: "SMTP 服务器", Kind: "text", Section: "notification", Key: "SMTP_SERVER", Environment: "DST_ADMIN_SMTP_SERVER"},
 	{ID: "notification.smtpPort", Group: "notification", Label: "SMTP 端口", Kind: "number", Section: "notification", Key: "SMTP_PORT", Environment: "DST_ADMIN_SMTP_PORT", Default: "587", Minimum: 1, Maximum: 65535},
 	{ID: "notification.smtpUsername", Group: "notification", Label: "SMTP 用户名", Kind: "text", Section: "notification", Key: "SMTP_USERNAME", Environment: "DST_ADMIN_SMTP_USERNAME"},
 	{ID: "notification.smtpPassword", Group: "notification", Label: "SMTP 密码", Kind: "secret", Section: "notification", Key: "SMTP_PASSWORD", Environment: "DST_ADMIN_SMTP_PASSWORD", Sensitive: true},
 	{ID: "notification.senderEmail", Group: "notification", Label: "发件人邮箱", Kind: "email", Section: "notification", Key: "SENDER_EMAIL", Environment: "DST_ADMIN_SENDER_EMAIL"},
-	{ID: "notification.serverStatus", Group: "notification", Label: "服务器状态通知", Kind: "boolean", Section: "notification", Key: "SERVER_STATUS", Environment: "DST_ADMIN_NOTIFY_SERVER_STATUS", Default: "true", Required: true},
-	{ID: "notification.loginFailures", Group: "notification", Label: "登录失败通知", Kind: "boolean", Section: "notification", Key: "LOGIN_FAILURES", Environment: "DST_ADMIN_NOTIFY_LOGIN_FAILURES", Default: "true", Required: true},
-	{ID: "notification.backupResults", Group: "notification", Label: "备份结果通知", Kind: "boolean", Section: "notification", Key: "BACKUP_RESULTS", Environment: "DST_ADMIN_NOTIFY_BACKUP_RESULTS", Default: "true", Required: true},
-	{ID: "notification.systemUpdates", Group: "notification", Label: "系统更新通知", Kind: "boolean", Section: "notification", Key: "SYSTEM_UPDATES", Environment: "DST_ADMIN_NOTIFY_SYSTEM_UPDATES", Default: "true", Required: true},
+	{ID: "notification.serverStatus", Group: "notification", Label: "服务器状态通知", Kind: "boolean", Section: "notification", Key: "SERVER_STATUS", Environment: "DST_ADMIN_NOTIFY_SERVER_STATUS", Default: "true", Required: true, ReadOnly: true},
+	{ID: "notification.loginFailures", Group: "notification", Label: "登录失败通知", Kind: "boolean", Section: "notification", Key: "LOGIN_FAILURES", Environment: "DST_ADMIN_NOTIFY_LOGIN_FAILURES", Default: "true", Required: true, ReadOnly: true},
+	{ID: "notification.backupResults", Group: "notification", Label: "备份结果通知", Kind: "boolean", Section: "notification", Key: "BACKUP_RESULTS", Environment: "DST_ADMIN_NOTIFY_BACKUP_RESULTS", Default: "true", Required: true, ReadOnly: true},
+	{ID: "notification.systemUpdates", Group: "notification", Label: "系统更新通知", Kind: "boolean", Section: "notification", Key: "SYSTEM_UPDATES", Environment: "DST_ADMIN_NOTIFY_SYSTEM_UPDATES", Default: "true", Required: true, ReadOnly: true},
 }
 
 type Snapshot struct {

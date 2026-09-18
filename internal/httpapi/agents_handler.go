@@ -183,28 +183,13 @@ func (h *AgentHandler) releases(c *gin.Context) {
 }
 
 func (h *AgentHandler) uploadRelease(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, agents.MaxAgentReleaseBytes+1024*1024)
-	fileHeader, err := c.FormFile("file")
+	file, err := readUpload(c, h.service.UploadDirectory(), agents.MaxAgentReleaseBytes)
 	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			Failure(c, http.StatusRequestEntityTooLarge, "AGENT_RELEASE_TOO_LARGE", "Agent 二进制文件超过 128 MiB 上传上限", nil)
-			return
-		}
-		Failure(c, http.StatusBadRequest, "AGENT_RELEASE_FILE_REQUIRED", "请选择 Agent 二进制文件", nil)
+		uploadFailure(c, err)
 		return
 	}
-	if fileHeader.Size > agents.MaxAgentReleaseBytes {
-		Failure(c, http.StatusRequestEntityTooLarge, "AGENT_RELEASE_TOO_LARGE", "Agent 二进制文件超过 128 MiB 上传上限", nil)
-		return
-	}
-	file, err := fileHeader.Open()
-	if err != nil {
-		Failure(c, http.StatusBadRequest, "AGENT_RELEASE_READ_FAILED", "无法读取 Agent 二进制文件", nil)
-		return
-	}
-	defer file.Close()
-	release, err := h.service.SaveRelease(c.PostForm("version"), fileHeader.Filename, file)
+	defer file.cleanup()
+	release, err := h.service.SaveRelease(file.Fields["version"], file.Filename, file)
 	if err != nil {
 		agentFailure(c, err)
 		return

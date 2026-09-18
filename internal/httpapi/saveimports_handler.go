@@ -51,28 +51,17 @@ func (h *SaveImportHandler) get(c *gin.Context) {
 }
 
 func (h *SaveImportHandler) upload(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, saveimport.MaxUploadBytes+1024*1024)
 	if err := h.imports.CheckUploadSpace(c.Request.ContentLength, true); err != nil {
 		saveImportFailure(c, err)
 		return
 	}
-	fileHeader, err := c.FormFile("file")
+	file, err := readUpload(c, h.imports.UploadDirectory(), saveimport.MaxUploadBytes)
 	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			saveImportFailure(c, saveimport.ErrArchiveTooLarge)
-			return
-		}
-		Failure(c, http.StatusBadRequest, "UPLOAD_REQUIRED", "请选择 ZIP、TAR 或 TAR.GZ 存档文件", nil)
+		uploadFailure(c, err)
 		return
 	}
-	file, err := fileHeader.Open()
-	if err != nil {
-		Failure(c, http.StatusBadRequest, "UPLOAD_READ_FAILED", "无法读取上传的存档文件", nil)
-		return
-	}
-	defer file.Close()
-	value, err := h.imports.UploadWithSize(c.Request.Context(), c.PostForm("name"), fileHeader.Filename, file, fileHeader.Size)
+	defer file.cleanup()
+	value, err := h.imports.UploadWithSize(c.Request.Context(), file.Fields["name"], file.Filename, file, file.Size)
 	if err != nil {
 		saveImportFailure(c, err)
 		return
