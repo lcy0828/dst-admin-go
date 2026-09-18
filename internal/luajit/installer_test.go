@@ -306,3 +306,65 @@ func TestBundledReleaseIsInstallable(t *testing.T) {
 		t.Fatalf("bundled package rejected: %+v, %v", report, err)
 	}
 }
+
+func TestInstalledLauncherRemainsReadyWithoutUpstreamMarker(t *testing.T) {
+	_, release, archive := fixtureStore(t)
+	o, game := fixtureInstallation(t, true)
+	if _, err := Install(context.Background(), o, release, archive); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(o.ServerPath, "data", "unsafedata", "ds_luajit_injector.path")
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	// Concurrent upstream bootstraps share a marker temporary file. Its loss
+	// must not invalidate the explicit injector path in our installed launcher.
+	for _, serverPath := range []string{o.ServerPath, filepath.Dir(game), game} {
+		selected := o
+		selected.ServerPath = serverPath
+		if report := selected.Inspect(); !report.CanEnable || report.PackageVersion != release.Version || len(report.Issues) != 0 {
+			t.Fatalf("inspect %s: %+v", serverPath, report)
+		}
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("inspection must not rewrite the marker: %v", err)
+	}
+	// A stale marker also cannot override the actual launcher's environment.
+	if err := os.WriteFile(marker, []byte("/stale/plugin/libInjector.so\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if report := o.Inspect(); !report.CanEnable {
+		t.Fatalf("stale marker overrides launcher: %+v", report)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(o.ServerPath, "mods", "DontStarveLuaJIT2", "deps", "liblua51DS.so")); err != nil {
+		t.Fatal(err)
+	}
+	if report := o.Inspect(); report.CanEnable || report.Status != shared.RuntimePerformanceIncompatible {
+		t.Fatalf("missing VM accepted: %+v", report)
+	}
+}
+
+func TestUnknownLauncherStillRequiresValidPluginMarker(t *testing.T) {
+	_, release, archive := fixtureStore(t)
+	o, game := fixtureInstallation(t, true)
+	if _, err := Install(context.Background(), o, release, archive); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(o.ServerPath, "data", "unsafedata", "ds_luajit_injector.path")); err != nil {
+		t.Fatal(err)
+	}
+	launcher, err := os.ReadFile(game)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher = bytes.ReplaceAll(launcher, []byte("export DS_LUAJIT_INJECTOR="), []byte("# export DS_LUAJIT_INJECTOR="))
+	if err := os.WriteFile(game, launcher, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if report := o.Inspect(); report.CanEnable {
+		t.Fatalf("unverified launcher accepted without marker: %+v", report)
+	}
+}

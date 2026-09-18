@@ -84,7 +84,7 @@ func Inspect(options Options) shared.RuntimePerformanceReport {
 	files := locateNativeFiles(options)
 	report.GameVersion = readGameVersion(options.ServerPath, files.binDirectory)
 	plugins := locatePluginFiles(options, files)
-	if regularFile(plugins.marker) {
+	if plugins.marker != "" || plugins.realInjector != "" {
 		return inspectPluginLayout(options, files, plugins)
 	}
 	if files.markers == 0 {
@@ -281,26 +281,41 @@ func locateNativeFiles(options Options) nativeFiles {
 
 func locatePluginFiles(options Options, files nativeFiles) pluginFiles {
 	result := pluginFiles{}
-	for _, root := range candidateGameRoots(options.ServerPath, files.binDirectory) {
-		marker := filepath.Join(root, "data", "unsafedata", "ds_luajit_injector.path")
-		if regularFile(marker) {
-			result.marker = marker
-			break
+	// The managed launcher sets DS_LUAJIT_INJECTOR explicitly. Upstream may
+	// replace its shared marker during concurrent shard startup, so inspect
+	// the launcher's actual destination before consulting that optional cache.
+	if options.Platform == "linux" {
+		if layout, ok := dstinstall.Resolve(files.executable, options.ServerMode); ok {
+			expected, buildErr := ManagedLinuxLauncher(layout)
+			actual, readErr := readLimited(files.executable, 64*1024)
+			if buildErr == nil && readErr == nil && string(actual) == expected {
+				result.realInjector = filepath.Join(layout.ContentRoot, "mods", "DontStarveLuaJIT2", "libInjector.so")
+				result.markerValid = true
+			}
 		}
 	}
-	if result.marker == "" {
-		return result
+	if result.realInjector == "" {
+		for _, root := range candidateGameRoots(options.ServerPath, files.binDirectory) {
+			marker := filepath.Join(root, "data", "unsafedata", "ds_luajit_injector.path")
+			if regularFile(marker) {
+				result.marker = marker
+				break
+			}
+		}
+		if result.marker == "" {
+			return result
+		}
+		data, err := readLimited(result.marker, 4096)
+		if err != nil {
+			return result
+		}
+		value := strings.TrimSpace(string(data))
+		if value == "" || strings.ContainsAny(value, "\x00\r\n") || !filepath.IsAbs(value) {
+			return result
+		}
+		result.markerValid = true
+		result.realInjector = filepath.Clean(value)
 	}
-	data, err := readLimited(result.marker, 4096)
-	if err != nil {
-		return result
-	}
-	value := strings.TrimSpace(string(data))
-	if value == "" || strings.ContainsAny(value, "\x00\r\n") || !filepath.IsAbs(value) {
-		return result
-	}
-	result.markerValid = true
-	result.realInjector = filepath.Clean(value)
 	result.modRoot = filepath.Dir(result.realInjector)
 	result.signature = filepath.Join(result.modRoot, "signatures_server.json")
 	switch options.Platform {
