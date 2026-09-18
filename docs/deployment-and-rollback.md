@@ -55,7 +55,7 @@ node deploy/scripts/build-native-release.mjs --version preview-local \
 
 ## GitHub Actions
 
-后端 CI 运行 Go 测试、race、vet、漏洞扫描及编译。Package 工作流在当前发布分支推送、`v*` 标签或手动运行时构建完整产物。它先解析前端提交，再让所有任务使用同一 SHA；原生包启动检查通过后上传附件，镜像启动检查通过后推送。
+后端 CI 运行 Go 测试、race、vet、漏洞扫描及编译。Package 工作流在当前发布分支推送、`v*` 标签或手动运行时构建完整产物。它复用 Backend CI 作为前置门禁，只有同一后端提交的质量检查成功才构建并发布镜像、附件或推进 `latest`。前端先固定提交，再让所有任务使用同一 SHA；原生包启动检查通过后上传附件，镜像启动检查通过后推送。
 
 前端私有仓库通过后端 Actions secret `FRONTEND_READ_KEY` 中的只读 deploy key 检出；公有仓库不需要该密钥。密钥只用于获取源码，不进入构建上下文。GHCR 推送使用当前仓库 `GITHUB_TOKEN` 的 `packages:write` 权限。更换前端仓库时同时调整工作流地址和授权。
 
@@ -112,10 +112,14 @@ location / {
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $dst_connection_upgrade;
-    proxy_read_timeout 3600s;
+    proxy_read_timeout 7200s;
+    proxy_send_timeout 7200s;
+    proxy_request_buffering off;
     proxy_buffering off;
 }
 ```
+
+管理服务需设置 `DST_ADMIN_TRUSTED_PROXIES` 为实际反向代理的 IP 或 CIDR，例如原生部署的 `127.0.0.1,::1`，然后重启管理服务。Docker 中请填写容器实际看到的代理地址；不要直接照抄回环地址或信任所有来源。未设置时会忽略转发 IP 头，IP 白名单和登录限流按直接连接的地址判断。
 
 All-in-One 默认上游端口为 `8080`。按实际存档上传限制设置 `client_max_body_size`，不要向公网同时暴露未加密的管理入口。
 

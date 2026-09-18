@@ -3,7 +3,7 @@
 [简体中文（默认）](luajit-installation.md) | **English**
 
 Choose a version under **Game server management → LuaJIT2 acceleration** and install it.
-The list distinguishes upstream releases, compatibility builds, and imported packages.
+The list distinguishes upstream releases, compatibility builds, and imported packages. A compatibility build is selected by default when available; you can choose an upstream release or imported package instead.
 By default, the selected Agent or local Runtime manages versions, downloads, caching, validation, and installation. The Controller dispatches jobs and displays progress.
 The local Runtime uses an in-process installer; it does not start or connect to an extra local Agent.
 

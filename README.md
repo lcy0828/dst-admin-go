@@ -41,7 +41,7 @@
 | **配置世界与模组**<br>调整房间和世界设置，管理模组的启用、配置与更新。 | **备份与恢复存档**<br>创建备份、导入已有存档，需要时恢复世界。 |
 | **接入远程机器**<br>通过 Agent 管理其他主机，查看各节点的安装与资源状态。 | **掌握游戏动态**<br>查看在线玩家、季节、日志与聊天记录，执行控制台命令。 |
 
-镜像和原生安装包均内置管理页面。默认中文，支持英文、多套配色与深色模式；动态天气可跟随游戏中的季节、昼夜和降水，也可手动预览。
+镜像和原生安装包均内置管理页面。默认中文，支持英文、多套配色与深色模式；动态天气默认开启，跟随游戏中的季节、昼夜和降水，也可关闭或手动预览。
 
 ## 支持环境
 
@@ -58,6 +58,8 @@
 [正式版下载](https://github.com/lcy0828/dst-admin-go/releases/latest)提供 Linux x86_64、macOS Apple Silicon 的完整原生包和独立 Agent 包。四种 Docker 镜像均为 `linux/amd64`；Apple Silicon 推荐[原生 macOS 部署](docs/startup-guide.md#macos-本机部署)。Windows 可在 Linux x86_64 虚拟机内按 Linux 方式部署；WSL2 / Docker Desktop 尚未纳入发布验证。
 
 **LuaJIT2 页面安装**目前支持 Linux x86_64 的 64 位 DST，适用于原生运行和常规 All-in-One；macOS、Windows、Linux ARM 和独立分片容器暂不支持。详见 [LuaJIT2 安装说明](docs/luajit-installation.md)。
+
+LuaJIT2 来源于 [fesily/DontStarveLuaJIT2](https://github.com/fesily/DontStarveLuaJIT2)，感谢原作者 [fesily](https://github.com/fesily)。本项目提供安装与版本管理，内置兼容构建也基于该上游项目；原项目说明与许可请见其仓库。
 
 ## 界面预览
 

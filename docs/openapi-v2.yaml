@@ -691,6 +691,46 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DistributedBackupSetEnvelope" }
         "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Backups]
+      operationId: deleteDistributedBackupSet
+      summary: Delete backup artifacts after confirming the backup name and checking recovery references
+      parameters:
+        - $ref: "#/components/parameters/CSRFToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirmation]
+              properties:
+                confirmation: { type: string, description: Exact backup name }
+      responses:
+        "200":
+          description: Backup set deleted; live game saves are unchanged
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /backup-sets/{backupSetId}/download:
+    parameters:
+      - name: backupSetId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [Backups]
+      operationId: downloadDistributedBackupSet
+      summary: Export a verified backup as a portable room ZIP with every world
+      responses:
+        "200":
+          description: Room ZIP; temporary export is removed when the response finishes
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /backup-sets/{backupSetId}/actions/restore:
     parameters:
       - name: backupSetId
@@ -6519,6 +6559,7 @@ components:
       type: object
       additionalProperties: false
       properties:
+        requireEmpty: { type: boolean, default: false, description: "Require live confirmation that every affected room has no players before stopping worlds." }
         cleanCache: { type: boolean, default: false }
         restartRunning: { type: boolean, default: true }
         loadConfirmation: { $ref: "#/components/schemas/GameReleaseLoadConfirmation" }
@@ -6528,6 +6569,7 @@ components:
       additionalProperties: false
       required: [cleanCache, restartRunning, loadConfirmation, timeoutSeconds]
       properties:
+        requireEmpty: { type: boolean }
         cleanCache: { type: boolean }
         restartRunning: { type: boolean }
         loadConfirmation: { $ref: "#/components/schemas/GameReleaseLoadConfirmation" }
@@ -8406,7 +8448,7 @@ components:
         meta: { $ref: "#/components/schemas/Meta" }
     AutomationAction:
       type: string
-      enum: [room.start, room.stop, room.restart, backup.create, backup.prune, command.execute, notification.send, player.refresh, log.structured.refresh, world.state.refresh]
+      enum: [room.start, room.stop, room.restart, backup.create, backup.prune, command.execute, notification.send, player.refresh, log.structured.refresh, world.state.refresh, game.update-empty]
     AutomationActionDefinition:
       type: object
       additionalProperties: false
@@ -10158,8 +10200,9 @@ components:
         name: { type: string, maxLength: 128 }
         mode:
           type: string
-          enum: [cold-consistent, hot-consistent]
-          default: cold-consistent
+          enum: [cold-consistent, hot-consistent, automatic]
+          default: hot-consistent
+          description: Automatic uses a hot snapshot when all shards run; otherwise it stops and restores only the previously running shards.
     DistributedBackupSetRestoreInput:
       type: object
       additionalProperties: false

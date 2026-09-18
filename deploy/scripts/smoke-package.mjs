@@ -26,7 +26,7 @@ try {
     const binary = path.resolve(options.binary)
     metadata = JSON.parse(execFileSync(binary, ['-version'], { cwd: stage, env: environment, encoding: 'utf8', timeout: 30000 }))
     const template = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../systemd/local.conf.example')
-    const config = (await readFile(template, 'utf8')).replaceAll('/var/lib/dst-admin', path.join(stage, 'control')).replaceAll('/opt/dst', path.join(stage, 'data')).replace('AUTO_BACKUP = true', 'AUTO_BACKUP = false')
+    const config = (await readFile(template, 'utf8')).replaceAll('/var/lib/dst-admin', path.join(stage, 'control')).replaceAll('/opt/dst', path.join(stage, 'data'))
     for (const name of ['control', 'data/server', 'data/saves', 'data/backups', 'data/maps', 'data/workshop/steamapps/workshop/content/322330']) await mkdir(path.join(stage, name), { recursive: true })
     await writeFile(path.join(stage, 'app.conf'), config, { mode: 0o600 })
     const socket = net.createServer()

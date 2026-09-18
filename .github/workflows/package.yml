@@ -28,6 +28,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  quality:
+    uses: ./.github/workflows/ci.yml
+
   sources:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
@@ -100,7 +103,7 @@ jobs:
           fi
 
   native:
-    needs: sources
+    needs: [sources, quality]
     strategy:
       fail-fast: false
       matrix:
@@ -171,7 +174,7 @@ jobs:
           retention-days: 30
 
   images:
-    needs: sources
+    needs: [sources, quality]
     permissions:
       contents: read
       packages: write
@@ -308,7 +311,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.publish_images)
-    needs: [sources, native, images]
+    needs: [quality, sources, native, images]
     runs-on: ubuntu-22.04
     permissions:
       contents: write

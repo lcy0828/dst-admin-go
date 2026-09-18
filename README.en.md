@@ -41,7 +41,7 @@
 | **Configure worlds and mods**<br>Edit room and world settings. Enable, configure, and update mods. | **Back up and restore saves**<br>Create backups, import existing saves, and restore your worlds when needed. |
 | **Connect remote machines**<br>Manage other hosts through Agents and check each node's installations and resources. | **See what's happening**<br>Check players, seasons, logs, and chat. Run commands from the console. |
 
-Images and native packages include the web UI. Chinese is the default, with English, color presets, and dark mode available. Animated weather can follow in-game seasons, time of day, and precipitation, or be previewed manually.
+Images and native packages include the web UI. Chinese is the default, with English, color presets, and dark mode available. Animated weather is enabled by default and follows in-game seasons, time of day, and precipitation. You can turn it off or preview it manually.
 
 ## Supported platforms
 
@@ -58,6 +58,8 @@ Access the web UI from a modern browser on Windows, macOS, or Linux. The table b
 [Releases](https://github.com/lcy0828/dst-admin-go/releases/latest) provide full native packages and standalone Agent packages for Linux x86_64 and macOS Apple Silicon. All four Docker images target `linux/amd64`; on Apple Silicon, prefer [native macOS deployment](docs/startup-guide.en.md#macos-local-deployment). Windows users can deploy in a Linux x86_64 virtual machine; WSL2 / Docker Desktop are not covered by release validation.
 
 **LuaJIT2 installation from the panel** currently supports 64-bit DST on Linux x86_64, running natively or in the standard All-in-One container. It is not available for macOS, Windows, Linux ARM, or separate shard containers. See the [LuaJIT2 guide](docs/luajit-installation.en.md).
+
+LuaJIT2 comes from [fesily/DontStarveLuaJIT2](https://github.com/fesily/DontStarveLuaJIT2), created by [fesily](https://github.com/fesily). This project provides installation and version management; its bundled compatibility build is also based on that upstream project. See the original repository for documentation and licensing.
 
 ## Screenshots
 

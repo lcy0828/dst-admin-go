@@ -48,7 +48,7 @@ Native management uses CGO/SQLite: build on the target OS/architecture, or suppl
 
 ## GitHub Actions
 
-Backend CI runs tests, race detection, vet, vulnerability scanning, and compilation. Package runs on release-branch pushes, `v*` tags, or manual dispatch. It resolves the frontend once and shares its SHA across jobs. Native packages are uploaded after startup smoke tests; images are pushed after startup checks.
+Backend CI runs tests, race detection, vet, vulnerability scanning, and compilation. Package runs on release-branch pushes, `v*` tags, or manual dispatch. It requires Backend CI to pass for the same backend commit before building and publishing packages or images, or advancing `latest`. It resolves the frontend once and shares its SHA across jobs. Native packages are uploaded after startup smoke tests; images are pushed after startup checks.
 
 For private frontend source, store a read-only deploy key in backend secret `FRONTEND_READ_KEY`; public source needs no key. The key is used only for checkout and never enters build contexts. GHCR uses this repository's `GITHUB_TOKEN` with `packages:write`. Update both repository settings and authorization when changing the frontend source.
 
@@ -105,10 +105,14 @@ location / {
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $dst_connection_upgrade;
-    proxy_read_timeout 3600s;
+    proxy_read_timeout 7200s;
+    proxy_send_timeout 7200s;
+    proxy_request_buffering off;
     proxy_buffering off;
 }
 ```
+
+Set `DST_ADMIN_TRUSTED_PROXIES` on the management service to the actual proxy IP addresses or CIDRs, then restart it. For a native deployment this might be `127.0.0.1,::1`; in Docker use the addresses visible to the container. Do not blindly trust loopback addresses or all sources. When unset, forwarded IP headers are ignored and IP allowlists and login limits use the directly connected address.
 
 All-in-One defaults to upstream port `8080`. Set `client_max_body_size` for save uploads. Do not expose an additional unencrypted public management endpoint.
 

@@ -29,6 +29,8 @@ The independent-shard container driver is not supported yet.
 Use the existing game update workflow when you need automatic backup, shutdown, and resumption of running rooms.
 SteamCMD validation can overwrite the LuaJIT launcher. Reinstall/repair LuaJIT below if needed; ordinary game startup does not repair it automatically.
 
+If a game update fails and remains retryable, its pre-update protection backups cannot be deleted. A retry checks the original backup files and their integrity. Missing or damaged files block the update and require recovery; the system does not replace the original protection with data from after the update.
+
 ## Use an existing server on the machine
 
 If a registered installation location is empty or absent, click **Use an existing server** and enter an absolute path on the **selected machine**.
