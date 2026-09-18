@@ -3,10 +3,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/lcy0828/dst-admin-go/stargazers"><img src="docs/assets/readme/metrics/stars.svg" alt="GitHub Stars"></a>
-  <a href="https://github.com/lcy0828/dst-admin-go/forks"><img src="docs/assets/readme/metrics/forks.svg" alt="GitHub Forks"></a>
-  <a href="https://github.com/lcy0828/dst-admin-go/actions/workflows/ci.yml"><img src="docs/assets/readme/metrics/ci.svg" alt="CI"></a>
-  <a href="https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml"><img src="docs/assets/readme/metrics/package.svg" alt="Package"></a>
+  <a href="https://github.com/lcy0828/dst-admin-go/stargazers"><img src="https://img.shields.io/github/stars/lcy0828/dst-admin-go?style=flat&amp;label=Stars&amp;color=e7b76e&amp;labelColor=20362a" alt="GitHub Stars"></a>
+  <a href="https://github.com/lcy0828/dst-admin-go/forks"><img src="https://img.shields.io/github/forks/lcy0828/dst-admin-go?style=flat&amp;label=Forks&amp;color=8ac496&amp;labelColor=20362a" alt="GitHub Forks"></a>
+  <a href="https://github.com/lcy0828/dst-admin-go/actions/workflows/ci.yml"><img src="https://github.com/lcy0828/dst-admin-go/actions/workflows/ci.yml/badge.svg?branch=master&amp;event=push" alt="CI"></a>
+  <a href="https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml"><img src="https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml/badge.svg?branch=master&amp;event=push" alt="Package"></a>
 </p>
 
 <p align="center"><strong>从第一次开服，到每一天的冒险。</strong></p>
@@ -162,5 +162,10 @@ docker compose up -d
 ## Star 趋势
 
 <p align="center">
-  <a href="https://github.com/lcy0828/dst-admin-go/stargazers"><img src="docs/assets/readme/metrics/stars.zh.svg" alt="GitHub Star 数量随时间的变化" width="100%"></a>
+  <a href="https://www.star-history.com/?repos=lcy0828%2Fdst-admin-go&amp;type=date">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=lcy0828/dst-admin-go&amp;type=Date&amp;theme=dark">
+      <img src="https://api.star-history.com/svg?repos=lcy0828/dst-admin-go&amp;type=Date" alt="GitHub Star 数量随时间的变化" width="100%">
+    </picture>
+  </a>
 </p>
