@@ -293,6 +293,10 @@ func (a *Agent) Start() error {
 
 	// 连接到服务器
 	err := a.Connect()
+	// Snapshot log fields before reconnect can normalize the shared config again.
+	a.connMutex.Lock()
+	agentID, serverURL := a.Config.AgentID, displayAgentURL(a.Config.ServerURL)
+	a.connMutex.Unlock()
 	if err != nil {
 		log.Printf("连接服务器失败: %v, 将尝试重连", err)
 		go a.reconnect()
@@ -305,7 +309,7 @@ func (a *Agent) Start() error {
 		}
 	}
 
-	log.Printf("Agent已启动，ID: %s, 连接到服务器: %s", a.Config.AgentID, displayAgentURL(a.Config.ServerURL))
+	log.Printf("Agent已启动，ID: %s, 连接到服务器: %s", agentID, serverURL)
 	return nil
 }
 
