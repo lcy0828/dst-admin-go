@@ -116,17 +116,7 @@ func (s *Store) ImportURL(ctx context.Context, rawURL, expected string) (shared.
 		return shared.LuaJITRelease{}, err
 	}
 	emit(ctx, "download", 5, "运行节点正在下载 LuaJIT 安装包")
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return shared.LuaJITRelease{}, err
-	}
-	client := &http.Client{Timeout: 10 * time.Minute, CheckRedirect: func(next *http.Request, via []*http.Request) error {
-		if len(via) >= 5 || next.URL.Scheme != "https" || next.URL.User != nil {
-			return errors.New("安装包重定向无效")
-		}
-		return nil
-	}}
-	response, err := client.Do(request)
+	response, err := fetchPublicSource(ctx, rawURL, publicSourceClient(10*time.Minute))
 	if err != nil {
 		return shared.LuaJITRelease{}, err
 	}
