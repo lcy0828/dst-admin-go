@@ -100,9 +100,11 @@
 ```bash
 mkdir -p /opt/dst
 cd /opt/dst
-curl -fL https://raw.githubusercontent.com/lcy0828/dst-admin-go/master/deploy/docker/compose.all-in-one.yaml -o compose.yaml
+curl -fL https://ghfast.top/https://raw.githubusercontent.com/lcy0828/dst-admin-go/master/deploy/docker/compose.all-in-one.yaml -o compose.yaml
 docker compose up -d
 ```
+
+部署文件默认通过 [GHFast](https://ghfast.top/) 代理下载，也可使用 [GitHub 直连地址](https://raw.githubusercontent.com/lcy0828/dst-admin-go/master/deploy/docker/compose.all-in-one.yaml)。
 
 默认使用**阿里云镜像**，无需克隆仓库或配置 `.env`。其他地区可将 `compose.yaml` 中的 `image` 改为 `lcy0828/dst-admin-go:latest`，使用 Docker Hub。端口和数据目录也直接在此文件中调整。
 
