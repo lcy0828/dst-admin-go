@@ -64,16 +64,19 @@ sudo -u dst /opt/dst/steamcmd/steamcmd.sh +quit
 
 ### 3. 获取原生安装包
 
-从主仓库 Releases 或 Package 工作流的 Artifacts 下载 `dst-admin-VERSION-linux-amd64.tar.gz` 和 `.sha256`，在目标机器校验并解压：
+从[正式版下载页](https://github.com/lcy0828/dst-admin-go/releases/latest)选择版本。国内下载命令如下；其他地区可删除 `https://ghfast.top/` 前缀：
 
 ```bash
-sha256sum -c dst-admin-VERSION-linux-amd64.tar.gz.sha256
-tar -xzf dst-admin-VERSION-linux-amd64.tar.gz
-cd dst-admin-VERSION-linux-amd64
-./dst-admin -version
+DST_ADMIN_VERSION=v1.0.1
+DST_ADMIN_DOWNLOAD=https://ghfast.top/https://github.com/lcy0828/dst-admin-go/releases/download
+curl -fL "$DST_ADMIN_DOWNLOAD/$DST_ADMIN_VERSION/dst-admin-$DST_ADMIN_VERSION-linux-amd64.tar.gz" -o "dst-admin-$DST_ADMIN_VERSION-linux-amd64.tar.gz"
+curl -fL "$DST_ADMIN_DOWNLOAD/$DST_ADMIN_VERSION/dst-admin-$DST_ADMIN_VERSION-linux-amd64.tar.gz.sha256" -o "dst-admin-$DST_ADMIN_VERSION-linux-amd64.tar.gz.sha256"
+sha256sum -c "dst-admin-$DST_ADMIN_VERSION-linux-amd64.tar.gz.sha256" && \
+  tar -xzf "dst-admin-$DST_ADMIN_VERSION-linux-amd64.tar.gz" && \
+  cd "dst-admin-$DST_ADMIN_VERSION-linux-amd64" && ./dst-admin -version
 ```
 
-将 `VERSION` 换成实际文件名。版本输出应包含 `embeddedWebUI: true` 和 `frontendCommit`。包内包含页面、Agent、地图渲染器、辅助程序和安装模板，运行机器不需要 Go 或 Node.js。后续命令在解压目录执行。
+将 `DST_ADMIN_VERSION` 换成要安装的正式版本。版本输出应包含 `embeddedWebUI: true` 和 `frontendCommit`。包内包含页面、Agent、地图渲染器、辅助程序和安装模板，运行机器不需要 Go 或 Node.js。后续命令在解压目录执行。
 
 如需自行构建，请按[打包说明](deployment-and-rollback.md)操作；只有构建机需要 Go、C 编译器、Git 和 Node.js。
 
@@ -132,6 +135,10 @@ sudo systemctl restart dst-admin-local
 [部署与回滚](deployment-and-rollback.md#nginx-同源反向代理)。
 
 ## 接入远程 Agent
+
+在 **机器与连接 → Agent 安全设置 → Linux** 可直接复制安装命令：下载最新正式 Agent 小包、校验 SHA-256，并保留已有配置和身份。可选 GHFast 或 GitHub 直连，无需 Go。Docker 安装使用 `agent-latest`；新游戏节点推荐 All-in-One 后加入管理中心。
+
+正式版还提供 `dst-admin-agent-linux-amd64.tar.gz` 和 `dst-admin-agent-darwin-arm64.tar.gz`，仅包含 Agent 与配置示例；需要系统服务安装脚本时使用下面的完整原生包。
 
 控制端提供页面；Agent 在远程机器执行下载、安装和房间操作。Agent 本身没有独立管理页面。
 Agent 主动连接控制端的 `/agent`，不需要为普通命令额外开放 Agent 入站 TCP 端口。

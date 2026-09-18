@@ -7,9 +7,9 @@ Start from the [main README](../README.en.md). Images and native packages embed 
 ## Downloads and versions
 
 - The [Package workflow](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) builds Linux amd64 and macOS arm64 native packages and pushes tested images to GHCR. With mirror credentials configured, it publishes the same images to Docker Hub and Alibaba Cloud without rebuilding.
-- Stable deployments use `ghcr.io/lcy0828/dst-admin-go/all-in-one:latest` or Docker Hub's `lcy0828/dst-admin-go:latest`. Replace `latest` with `vX.Y.Z` to pin a release. Docker Hub prefixes Controller, Agent, and Runtime tags with `controller-`, `agent-`, and `runtime-`, for example `agent-latest` or `agent-v1.0.0`.
+- In mainland China, stable deployments use `registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go:latest`; elsewhere use Docker Hub's `lcy0828/dst-admin-go:latest`. Replace `latest` with `vX.Y.Z` to pin a release. Docker Hub prefixes Controller, Agent, and Runtime tags with `controller-`, `agent-`, and `runtime-`, for example `agent-latest` or `agent-v1.0.0`.
 - Branch images are `ghcr.io/lcy0828/dst-admin-go/all-in-one:preview`, `control-plane:preview`, `agent:preview`, and `dst-runtime:preview`. Builds also receive `sha-FULL_BACKEND_COMMIT` tags. Rebuilding the same backend with a different frontend can change these tags; pin the image digest and frontend SHA for exact provenance.
-- `vX.Y.Z` tags publish stable versions: versioned images are pushed first, then all four `latest` aliases are updated after every native package and image check passes. A GitHub Release contains `.tar.gz` and SHA-256 files. Candidate tags such as `vX.Y.Z-rc.N` publish versioned images and a prerelease without updating `latest`.
+- `vX.Y.Z` tags publish stable versions: versioned images are pushed first, then all four `latest` aliases are updated after every native package and image check passes. A GitHub Release contains full native packages, standalone Agent packages and SHA-256 files. Agent packages have stable filenames such as `releases/latest/download/dst-admin-agent-linux-amd64.tar.gz`. Candidate tags such as `vX.Y.Z-rc.N` publish versioned images and a prerelease without updating `latest`.
 - `dst-admin -version` reports backend version/commit, frontend commit, and `embeddedWebUI`. Native `manifest.json` also records tools and lockfile hashes. Images carry `io.dst-admin.frontend.commit`.
 
 ## Build from one repository
@@ -68,7 +68,7 @@ To copy an existing release, run **Sync Alibaba Cloud images** in Actions with `
 
 Unconfigured mirrors are skipped with a note in the Actions summary. Invalid credentials or failed pushes fail the job. Turning off `publish_images` on a manual run disables all registries and GitHub Release publication. All-in-One, Controller, and Agent startup checks still run for 180 seconds; Runtime validates its startup wrapper.
 
-Frontend commits do not update installed services or automatically publish the backend. Run Package to include new pages, or set the manual `frontend_ref` input to pin a revision. Manual runs may disable image publication; it is enabled by default. Tagged release assets exist only after the tag pipeline succeeds.
+Frontend commits do not update installed services or automatically publish the backend. Branch builds update `preview` only. Publish a new `vX.Y.Z` tag to deliver fixes through `latest`; do not rewrite released tags. Run Package to include new pages, or set the manual `frontend_ref` input to pin a revision. Manual runs may disable image publication; it is enabled by default. Tagged release assets exist only after the tag pipeline succeeds.
 
 ## Upgrade and rollback
 

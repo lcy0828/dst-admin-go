@@ -146,6 +146,21 @@ jobs:
           node deploy/scripts/smoke-package.mjs
           --binary "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin"
           --frontend-commit "$FRONTEND_REF" --duration 180
+      - name: Verify standalone Agent download
+        env:
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        shell: bash
+        run: |
+          cd dist
+          if command -v sha256sum >/dev/null; then
+            sha256sum -c "dst-admin-agent-$RELEASE_PLATFORM.tar.gz.sha256"
+          else
+            shasum -a 256 -c "dst-admin-agent-$RELEASE_PLATFORM.tar.gz.sha256"
+          fi
+          agent_check=$(mktemp -d)
+          tar -xzf "dst-admin-agent-$RELEASE_PLATFORM.tar.gz" -C "$agent_check"
+          test -s "$agent_check/agent.conf.example"
+          "$agent_check/dst-admin-agent" -version
       - uses: actions/upload-artifact@v4
         with:
           name: dst-admin-${{ matrix.platform }}

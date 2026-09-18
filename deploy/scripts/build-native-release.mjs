@@ -86,6 +86,18 @@ try {
     execFileSync('tar', ['-czf', archive, '-C', stage, name], { stdio: 'inherit' })
     await writeFile(path.join(output, name + '.tar.gz'), await readFile(archive), { flag: 'wx' })
     await writeFile(path.join(output, name + '.tar.gz.sha256'), `${digest(await readFile(archive))}  ${name}.tar.gz\n`, { flag: 'wx' })
+    // Stable asset names let the installation page use releases/latest/download
+    // without querying GitHub's API or hard-coding a release version.
+    const agentName = `dst-admin-agent-${platform}.tar.gz`
+    const agentStage = path.join(stage, 'agent')
+    await mkdir(agentStage)
+    await cp(path.join(release, 'dst-admin-agent'), path.join(agentStage, 'dst-admin-agent'))
+    await cp(path.join(backend, 'deploy/systemd/agent.conf.example'), path.join(agentStage, 'agent.conf.example'))
+    const agentArchive = path.join(stage, agentName)
+    execFileSync('tar', ['-czf', agentArchive, '-C', agentStage, 'dst-admin-agent', 'agent.conf.example'], { stdio: 'inherit' })
+    const agentData = await readFile(agentArchive)
+    await writeFile(path.join(output, agentName), agentData, { flag: 'wx' })
+    await writeFile(path.join(output, agentName + '.sha256'), `${digest(agentData)}  ${agentName}\n`, { flag: 'wx' })
     await rename(release, path.join(output, name))
     console.log(path.join(output, name + '.tar.gz'))
   })

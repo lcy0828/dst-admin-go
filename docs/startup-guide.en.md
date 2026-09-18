@@ -62,16 +62,19 @@ This step does not download DST. Install the game through the UI later. Set the 
 
 ### 3. Obtain the native package
 
-Download `dst-admin-VERSION-linux-amd64.tar.gz` and its `.sha256` file from the main repository's Releases or Package workflow artifacts. Verify and extract on the target host:
+Choose a version from the [stable release page](https://github.com/lcy0828/dst-admin-go/releases/latest). Download, verify and extract it below. In mainland China, prefix `https://github.com/` with `https://ghfast.top/`.
 
 ```bash
-sha256sum -c dst-admin-VERSION-linux-amd64.tar.gz.sha256
-tar -xzf dst-admin-VERSION-linux-amd64.tar.gz
-cd dst-admin-VERSION-linux-amd64
-./dst-admin -version
+DST_ADMIN_VERSION=v1.0.1
+DST_ADMIN_DOWNLOAD=https://github.com/lcy0828/dst-admin-go/releases/download
+curl -fL "$DST_ADMIN_DOWNLOAD/$DST_ADMIN_VERSION/dst-admin-$DST_ADMIN_VERSION-linux-amd64.tar.gz" -o "dst-admin-$DST_ADMIN_VERSION-linux-amd64.tar.gz"
+curl -fL "$DST_ADMIN_DOWNLOAD/$DST_ADMIN_VERSION/dst-admin-$DST_ADMIN_VERSION-linux-amd64.tar.gz.sha256" -o "dst-admin-$DST_ADMIN_VERSION-linux-amd64.tar.gz.sha256"
+sha256sum -c "dst-admin-$DST_ADMIN_VERSION-linux-amd64.tar.gz.sha256" && \
+  tar -xzf "dst-admin-$DST_ADMIN_VERSION-linux-amd64.tar.gz" && \
+  cd "dst-admin-$DST_ADMIN_VERSION-linux-amd64" && ./dst-admin -version
 ```
 
-Replace `VERSION` with the actual filename. The output must contain `embeddedWebUI: true` and `frontendCommit`. The package includes the UI, Agent, map renderer, helpers, and installation templates; the runtime host needs no Go or Node.js. Execute the remaining commands from the extracted directory.
+Set `DST_ADMIN_VERSION` to the stable release you want to install. The output must contain `embeddedWebUI: true` and `frontendCommit`. The package includes the UI, Agent, map renderer, helpers, and installation templates; the runtime host needs no Go or Node.js. Execute the remaining commands from the extracted directory.
 
 To build instead, use this repository's [packaging guide](deployment-and-rollback.en.md). Only the build machine needs Go, a C compiler, Git, and Node.js.
 
@@ -130,6 +133,10 @@ sudo systemctl restart dst-admin-local
 Open the UI and follow [first game startup](#first-game-startup-and-existing-saves). For a reverse proxy example, see [deployment and rollback](deployment-and-rollback.en.md#nginx-same-origin-proxy).
 
 ## Connect a remote Agent
+
+In **Machines & connections → Agent security → Linux**, copy the installer to download and verify the latest stable Agent while preserving existing configuration and identity. Choose GHFast or GitHub direct; Go is not required. Docker uses `agent-latest`. For a new game node, deploy All-in-One and join the management center.
+
+Releases also provide `dst-admin-agent-linux-amd64.tar.gz` and `dst-admin-agent-darwin-arm64.tar.gz`, containing the Agent and a configuration example. Use the full native package below for system service installers.
 
 The Controller provides the UI. The Agent downloads, installs, and operates rooms on the remote machine; it has no separate management page.
 The Agent connects outbound to the Controller's `/agent`. Ordinary commands do not require an additional inbound TCP port on the Agent.
