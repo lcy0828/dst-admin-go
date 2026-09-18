@@ -8,21 +8,21 @@ x-default-logging: &default-logging
 
 services:
   dst-admin:
-    image: ${DST_ADMIN_IMAGE:-ghcr.io/lcy0828/dst-admin-go/all-in-one:latest}
+    image: registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go:latest
     platform: linux/amd64
     restart: unless-stopped
     logging: *default-logging
     stop_grace_period: 90s
     environment:
-      DST_ADMIN_BOOTSTRAP_DST: ${DST_ADMIN_BOOTSTRAP_DST:-false}
-      TZ: ${TZ:-Asia/Shanghai}
+      DST_ADMIN_BOOTSTRAP_DST: "false"
+      TZ: Asia/Shanghai
     volumes:
-      - ${DST_ADMIN_DATA_ROOT:-/opt/dst}:/opt/dst
+      - /opt/dst:/opt/dst
     ports:
-      - "${DST_ADMIN_HTTP_BIND:-0.0.0.0:8080}:8080/tcp"
-      - "${DST_SERVER_PORT_RANGE:-10999-11020}:10999-11020/udp"
-      - "${DST_AUTH_PORT_RANGE:-8766-8790}:8766-8790/udp"
-      - "${DST_STEAM_PORT_RANGE:-27016-27040}:27016-27040/udp"
+      - "8080:8080/tcp"
+      - "10999-11020:10999-11020/udp"
+      - "8766-8790:8766-8790/udp"
+      - "27016-27040:27016-27040/udp"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/v2/auth/session"]
       interval: 15s

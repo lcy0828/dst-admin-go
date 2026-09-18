@@ -35,7 +35,7 @@ If a registered installation location is empty or absent, click **Use an existin
 The UI checks the executable and version before asking you to confirm. Changing the path requires another inspection.
 The job also rejects confirmation if the inspected executable or version has changed.
 
-For container deployments, the path must be visible inside the container. All-in-One mounts host `DST_ADMIN_DATA_ROOT` at container `/opt/dst` by default; enter `/opt/dst/...` in the UI.
+For container deployments, the path must be visible inside the container. All-in-One mounts host `/opt/dst` at container `/opt/dst` by default; enter `/opt/dst/...` in the UI.
 Explicitly mount other host directories first. Keep a separately mounted source directory mounted after container recreation so the connection remains valid.
 
 Adoption creates a directory link at the registered game location pointing to the existing game directory.

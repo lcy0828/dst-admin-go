@@ -295,7 +295,7 @@ For worlds on different machines, secondary shards must also reach the Master's 
 
 | Deployment | Normal restart and logs | Retain during upgrades |
 | --- | --- | --- |
-| All-in-One | README Compose commands with the same `--env-file` | Host data root, environment file, and old image |
+| All-in-One | `docker compose restart` from the deployment directory | Host data directory, Compose file, and old image |
 | Linux local | `systemctl restart dst-admin-local`; `journalctl -u dst-admin-local` | `/var/lib/dst-admin` and every configured data directory |
 | Linux Agent | `systemctl restart dst-admin-agent`; `journalctl -u dst-admin-agent` | `/var/lib/dst-admin-agent`, optional `agent.env`, game and save directories |
 | macOS local | `launchctl kickstart -k "gui/$(id -u)/top.luocaiyi.dst-admin-local"` | Configuration/state in Application Support and external game/save directories |

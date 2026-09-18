@@ -131,7 +131,7 @@ The current Klei Linux dedicated server distribution is packaged as
 emulation rather than producing an unusable ARM image.
 
 All persistent state lives below `/opt/dst`, bind-mounted from
-`${DST_ADMIN_DATA_ROOT:-/opt/dst}` on the host. Container replacement must not lose
+`/opt/dst` on the host. Container replacement must not lose
 the database, saves, Workshop content, Mod releases, backups, or server files.
 The container has no Docker socket and does not need privileged mode. On
 container shutdown, the entrypoint sends a save-and-shutdown command to every
@@ -149,10 +149,11 @@ are:
 - Its local executor is one failure and storage domain. Fleet roles can attach
   other nodes, but they do not make the local `/opt/dst` volume distributed.
 
-Use the [README Docker instructions](../README.en.md#docker-quick-start) to build
-and start the image. They keep the image tag, host data root, and exposed ports
-in `deploy/docker/.env`; use the same explicit `--env-file` on every Compose
-operation, including upgrades and restarts.
+Download and start the Compose file using the [README Docker instructions](../README.en.md#docker-quick-start).
+It defaults to the Alibaba Cloud image and needs no `.env`. Configure the image,
+host data mount, and ports directly in `compose.yaml`. When migrating an existing
+deployment, copy custom values from its old `.env` into the Compose file and keep
+the same data directory.
 
 In regions where the official Debian mirror is slow, the build script accepts
 `--debian-mirror` and `--debian-security-mirror`, or the equivalent
