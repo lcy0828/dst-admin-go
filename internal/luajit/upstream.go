@@ -24,13 +24,7 @@ func (s *Store) RefreshUpstream(ctx context.Context) error {
 	defer s.catalogMu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, upstreamReleasesURL, nil)
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Accept", "application/vnd.github+json")
-	request.Header.Set("User-Agent", "DST-Admin-LuaJIT")
-	response, err := http.DefaultClient.Do(request)
+	response, err := fetchPublicSource(ctx, upstreamReleasesURL, publicSourceClient(6*time.Second))
 	if err != nil {
 		return fmt.Errorf("运行节点无法检查 LuaJIT 上游版本: %w", err)
 	}

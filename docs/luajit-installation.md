@@ -61,3 +61,9 @@ API：`GET /runtime-targets/luajit` 返回 `installations` 和可选 `transfers`
 是否能直接使用取决于目标 Linux 的架构、动态加载器、GLIBC/GLIBCXX/CXXABI 和包内文件。版本更新不等于自动兼容：先在目标节点完成依赖检查，失败时保留现有安装并显示原因。较旧发行版可使用系统提供的兼容构建。
 
 系统不要求上游包包含额外的启动模式声明，也不依赖私有启动开关。更新后仍需校验实际游戏启动；游戏本体更新可能覆盖已安装的 LuaJIT 文件，按页面状态重新安装即可。离线兼容包的来源和许可见[内置包说明](../internal/luajit/packages/README.md)。
+
+## 国内网络与代理
+
+默认在所选运行节点直连 GitHub；连接失败时，版本元数据改用 `gh-proxy.com`，安装包改用 `ghfast.top`。GHFast 不支持 GitHub API，因此两者分别处理。代理仅用于公开的 LuaJIT 上游地址，不接收 Agent 密钥、控制端传包凭据或自定义下载地址；下载后仍校验原有 SHA-256、包结构和系统依赖。
+
+无需额外配置。需要固定网络方式时，可在实际运行节点设置可选环境变量 `DST_ADMIN_GITHUB_ACCESS=direct`（只直连）或 `proxy`（只代理），默认 `auto`。它不替代 SteamCMD 的下载网络。离线时仍可使用内置兼容包或主动上传经过校验的 ZIP。

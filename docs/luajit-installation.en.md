@@ -55,3 +55,9 @@ The target node queries [DontStarveLuaJIT2 releases](https://github.com/fesily/D
 Compatibility depends on architecture, the dynamic loader, GLIBC/GLIBCXX/CXXABI, and package contents. A new release is not automatically compatible: dependency checks run on the target, preserve the existing installation on failure, and explain the reason. Older distributions can use the supplied compatibility build.
 
 Upstream packages need no extra launch-mode declaration or private launch switch. Verify game startup after updates. A game update may replace LuaJIT files; reinstall when the page reports this. See [bundled package provenance and licenses](../internal/luajit/packages/README.md).
+
+## Downloads and proxies
+
+The selected runtime node connects to GitHub directly first. If the request fails, release metadata uses `gh-proxy.com` and package downloads use `ghfast.top`; GHFast does not support the GitHub API. Only public LuaJIT upstream URLs use these fallbacks. Agent keys, controller transfer credentials and custom download URLs are never forwarded to them. SHA-256, archive and system dependency checks still apply.
+
+No configuration is required. To select a fixed route, optionally set `DST_ADMIN_GITHUB_ACCESS=direct` or `proxy` on the actual runtime node; the default is `auto`. This does not proxy SteamCMD downloads. Bundled compatibility packages and explicit ZIP uploads remain available offline.
