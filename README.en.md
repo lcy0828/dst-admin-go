@@ -20,6 +20,7 @@
 </p>
 <p align="center">
   <a href="#docker-quick-start">Quick start</a> ·
+  <a href="#supported-platforms">Platforms</a> ·
   <a href="#screenshots">Screenshots</a> ·
   <a href="#animated-demos">Animated demos</a> ·
   <a href="docs/startup-guide.en.md">Deployment guide</a> ·
@@ -41,6 +42,22 @@
 | **Connect remote machines**<br>Manage other hosts through Agents and check each node's installations and resources. | **See what's happening**<br>Check players, seasons, logs, and chat. Run commands from the console. |
 
 Images and native packages include the web UI. Chinese is the default, with English, color presets, and dark mode available. Animated weather can follow in-game seasons, time of day, and precipitation, or be previewed manually.
+
+## Supported platforms
+
+Access the web UI from a modern browser on Windows, macOS, or Linux. The table below describes the **machines hosting the Controller / Agent and running the game**.
+
+| OS / architecture | Controller / Agent installation | Run DST locally |
+| --- | --- | --- |
+| **Linux x86_64 (amd64)** | **Recommended**: Docker or the `linux-amd64` native package | Supported, with game installation and updates from the panel |
+| **macOS Apple Silicon (arm64)** | `darwin-arm64` native package | Supported; requires Steam game files, tmux, and Rosetta 2. Update the game through Steam |
+| macOS Intel (x86_64) | Build `darwin-amd64` from source; no prebuilt package or release CI coverage | Uses Steam game files and tmux |
+| Windows | Native deployment is not supported; no Windows package | Managing native Windows game processes is not supported |
+| Linux ARM64 | Build the Controller from source; no prebuilt package or release CI coverage | DST has no native Linux ARM server build |
+
+[Releases](https://github.com/lcy0828/dst-admin-go/releases/latest) provide full native packages and standalone Agent packages for Linux x86_64 and macOS Apple Silicon. All four Docker images target `linux/amd64`; on Apple Silicon, prefer [native macOS deployment](docs/startup-guide.en.md#macos-local-deployment). Windows users can deploy in a Linux x86_64 virtual machine; WSL2 / Docker Desktop are not covered by release validation.
+
+**LuaJIT2 installation from the panel** currently supports 64-bit DST on Linux x86_64, running natively or in the standard All-in-One container. It is not available for macOS, Windows, Linux ARM, or separate shard containers. See the [LuaJIT2 guide](docs/luajit-installation.en.md).
 
 ## Screenshots
 

@@ -20,6 +20,7 @@
 </p>
 <p align="center">
   <a href="#docker-快速安装">快速安装</a> ·
+  <a href="#支持环境">支持环境</a> ·
   <a href="#界面预览">界面预览</a> ·
   <a href="#动态演示">动态演示</a> ·
   <a href="docs/startup-guide.md">部署指南</a> ·
@@ -41,6 +42,22 @@
 | **接入远程机器**<br>通过 Agent 管理其他主机，查看各节点的安装与资源状态。 | **掌握游戏动态**<br>查看在线玩家、季节、日志与聊天记录，执行控制台命令。 |
 
 镜像和原生安装包均内置管理页面。默认中文，支持英文、多套配色与深色模式；动态天气可跟随游戏中的季节、昼夜和降水，也可手动预览。
+
+## 支持环境
+
+管理页面可通过 Windows、macOS、Linux 的现代浏览器访问。下表说明**部署管理端 / Agent、运行游戏的机器**需要什么环境。
+
+| 系统 / 架构 | 管理端 / Agent 安装方式 | 本机运行 DST |
+| --- | --- | --- |
+| **Linux x86_64（amd64）** | **推荐**：Docker 或 `linux-amd64` 原生包 | 支持，可在页面安装、更新游戏 |
+| **macOS Apple Silicon（arm64）** | `darwin-arm64` 原生包 | 支持，需 Steam 游戏、tmux 和 Rosetta 2；通过 Steam 更新游戏 |
+| macOS Intel（x86_64） | 自行构建 `darwin-amd64`，无预编译包，未纳入发布 CI 验证 | 使用 Steam 游戏与 tmux |
+| Windows | 暂不支持原生部署，无 Windows 安装包 | 暂不支持管理 Windows 原生游戏进程 |
+| Linux ARM64 | 可自行构建控制端，未提供预编译包，未纳入发布 CI 验证 | DST Linux 服务端不提供原生 ARM 版本 |
+
+[正式版下载](https://github.com/lcy0828/dst-admin-go/releases/latest)提供 Linux x86_64、macOS Apple Silicon 的完整原生包和独立 Agent 包。四种 Docker 镜像均为 `linux/amd64`；Apple Silicon 推荐[原生 macOS 部署](docs/startup-guide.md#macos-本机部署)。Windows 可在 Linux x86_64 虚拟机内按 Linux 方式部署；WSL2 / Docker Desktop 尚未纳入发布验证。
+
+**LuaJIT2 页面安装**目前支持 Linux x86_64 的 64 位 DST，适用于原生运行和常规 All-in-One；macOS、Windows、Linux ARM 和独立分片容器暂不支持。详见 [LuaJIT2 安装说明](docs/luajit-installation.md)。
 
 ## 界面预览
 
