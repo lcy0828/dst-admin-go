@@ -104,6 +104,8 @@ curl -fL https://raw.githubusercontent.com/lcy0828/dst-admin-go/master/deploy/do
 docker compose up -d
 ```
 
+If GitHub downloads are unavailable, prefix the download URL with `https://ghfast.top/` ([GHFast proxy download](https://ghfast.top/https://raw.githubusercontent.com/lcy0828/dst-admin-go/master/deploy/docker/compose.all-in-one.yaml)).
+
 The default is the **Alibaba Cloud registry**. No repository clone or `.env` is required. Outside mainland China, change `image` in `compose.yaml` to `lcy0828/dst-admin-go:latest` to use Docker Hub. Edit ports and the data mount directly in the same file.
 
 Open **`http://SERVER_IP:8080`** and follow the setup wizard:
