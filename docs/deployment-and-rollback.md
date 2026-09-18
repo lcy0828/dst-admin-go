@@ -7,9 +7,9 @@
 ## 下载与版本
 
 - [Package 工作流](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) 构建 Linux amd64 和 macOS arm64 原生包，并将测试通过的镜像推送到 GHCR；配置镜像仓库凭据后同步发布到 Docker Hub 和阿里云，不重复构建。
-- 正式部署使用 `ghcr.io/lcy0828/dst-admin-go/all-in-one:latest` 或 Docker Hub 的 `lcy0828/dst-admin-go:latest`，需要固定版本时将 `latest` 替换为 `vX.Y.Z`。Docker Hub 的控制端、Agent、Runtime 标签分别加 `controller-`、`agent-`、`runtime-` 前缀，例如 `agent-latest`、`agent-v1.0.0`。
+- 国内正式部署使用 `registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go:latest`，其他地区使用 Docker Hub 的 `lcy0828/dst-admin-go:latest`，需要固定版本时将 `latest` 替换为 `vX.Y.Z`。Docker Hub 的控制端、Agent、Runtime 标签分别加 `controller-`、`agent-`、`runtime-` 前缀，例如 `agent-latest`、`agent-v1.0.0`。
 - 分支发布使用 `ghcr.io/lcy0828/dst-admin-go/all-in-one:preview`、`control-plane:preview`、`agent:preview` 和 `dst-runtime:preview`；同次构建另有 `sha-后端完整提交号` 标签。前端或手动重建仍可能改变同一后端提交的产物，精确复现请固定镜像 digest 与前端提交。
-- `vX.Y.Z` 标签触发正式发布：生成版本镜像，所有原生包与镜像检查通过后更新四类镜像的 `latest` 标签，并创建包含 `.tar.gz` 与 SHA-256 的 GitHub Release。`vX.Y.Z-rc.N` 等候选版只发布对应版本和预发布 Release，不覆盖 `latest`。
+- `vX.Y.Z` 标签触发正式发布：生成版本镜像，所有原生包与镜像检查通过后更新四类镜像的 `latest` 标签，并创建包含完整原生包、独立 Agent 包与 SHA-256 的 GitHub Release。独立 Agent 包使用固定文件名，可通过 `releases/latest/download/dst-admin-agent-linux-amd64.tar.gz` 下载最新正式版。`vX.Y.Z-rc.N` 等候选版只发布对应版本和预发布 Release，不覆盖 `latest`。
 - `dst-admin -version` 输出后端版本、提交、前端提交和 `embeddedWebUI`；原生 `manifest.json` 另记录工具链、锁文件哈希。镜像可通过 `docker image inspect` 查看 `io.dst-admin.frontend.commit`。
 
 ## 从一个仓库打包
@@ -75,7 +75,7 @@ node deploy/scripts/build-native-release.mjs --version preview-local \
 
 未配置某个镜像站的凭据时会跳过该镜像站，并在 Actions 摘要中注明；凭据失效或推送失败会使任务失败。手动运行关闭 `publish_images` 时，所有镜像仓库和 GitHub Release 均不发布。All-in-One、控制端和 Agent 的启动检查保持 180 秒，Runtime 检查启动包装器。
 
-前端提交不会直接修改已安装服务，也不会自动发布后端。需要新页面时运行主仓库 Package 工作流；也可用 `frontend_ref` 输入指定回滚版本。手动构建可选择是否发布镜像，默认发布；标签发布附件只有对应标签流水线成功后可下载。
+前端提交不会直接修改已安装服务，也不会自动发布后端。主分支构建只更新 `preview`；要让正式用户通过 `latest` 获得修复，需要发布新的 `vX.Y.Z` 标签，不覆盖已发布标签。需要新页面时运行主仓库 Package 工作流；也可用 `frontend_ref` 输入指定回滚版本。手动构建可选择是否发布镜像，默认发布；标签发布附件只有对应标签流水线成功后可下载。
 
 ## 升级与回滚
 
