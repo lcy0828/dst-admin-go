@@ -246,18 +246,10 @@ func Install(ctx context.Context, o Options, release shared.LuaJITRelease, archi
 	if err = writeFile(marker, []byte(filepath.Join(mod, "libInjector.so")+"\n"), 0644); err != nil {
 		return report, err
 	}
-	modRelative, err := filepath.Rel(layout.WorkingDirectory, mod)
+	wrapper, err := runtimeperformance.ManagedLinuxLauncher(layout)
 	if err != nil {
 		return report, err
 	}
-	rootRelative, err := filepath.Rel(layout.WorkingDirectory, layout.InstallRoot)
-	if err != nil {
-		return report, err
-	}
-	wrapper := "#!/bin/sh\n# DST Admin LuaJIT launcher v1\nset -eu\nbin_dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n" +
-		"mod_root=\"$bin_dir\"/" + shellLiteral(modRelative) + "\ninstall_root=\"$bin_dir\"/" + shellLiteral(rootRelative) + "\n" +
-		"exec 9>\"$install_root/.dst-admin-luajit.lock\"\nflock -s -n 9 || exit 75\n[ ! -d \"$install_root/.dst-admin-luajit-transaction\" ] || exit 75\n" +
-		"export LD_LIBRARY_PATH=\"$bin_dir/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\"\nexport DS_LUAJIT_INJECTOR=\"$mod_root/libInjector.so\"\nexport DS_LUAJIT_INJECTOR_DIR=\"$mod_root\"\nexport DS_LUAJIT_PLUGIN_DIR=\"$mod_root/plugins\"\nexport LD_PRELOAD=\"$bin_dir/lib64/libInjector.so\"\ncd \"$bin_dir\"\nexec \"$bin_dir/" + filepath.Base(original) + "\" \"$@\"\n"
 
 	if err = writeFile(binary, []byte(wrapper), 0755); err != nil {
 		return report, err
@@ -303,5 +295,3 @@ func writeFile(name string, data []byte, mode os.FileMode) error {
 	}
 	return os.Rename(f.Name(), name)
 }
-
-func shellLiteral(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
