@@ -97,36 +97,20 @@
 
 适合一台机器同时运行面板和游戏。推荐 **Linux x86_64 · 2 核 / 4 GB 内存起 · 20 GB 空闲磁盘**，先安装 [Docker 和 Compose](https://docs.docker.com/engine/install/)。
 
-**1. 获取部署文件**
-
 ```bash
-git clone https://github.com/lcy0828/dst-admin-go.git
-cd dst-admin-go/deploy/docker
-cp all-in-one.env.example .env
+mkdir -p /opt/dst
+cd /opt/dst
+curl -fL https://raw.githubusercontent.com/lcy0828/dst-admin-go/master/deploy/docker/compose.all-in-one.yaml -o compose.yaml
+docker compose up -d
 ```
 
-**2. 编辑 `.env`，设置镜像与数据目录**
-
-**国内用户推荐阿里云镜像，其他地区推荐 Docker Hub。** 两处镜像内容一致，以下默认使用阿里云：
-
-```ini
-DST_ADMIN_IMAGE=registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go:latest
-DST_ADMIN_DATA_ROOT=/opt/dst
-```
-
-使用 Docker Hub 时，将 `DST_ADMIN_IMAGE` 改为 `lcy0828/dst-admin-go:latest`。
-
-**3. 启动面板**
-
-```bash
-docker compose --env-file .env -f compose.all-in-one.yaml up -d
-```
+默认使用**阿里云镜像**，无需克隆仓库或配置 `.env`。其他地区可将 `compose.yaml` 中的 `image` 改为 `lcy0828/dst-admin-go:latest`，使用 Docker Hub。端口和数据目录也直接在此文件中调整。
 
 打开 **`http://服务器IP:8080`**，跟随初始化向导完成：
 
 **创建管理员 → 安装或接入游戏 → 填写 [Klei Token](https://accounts.klei.com/account/game/servers?game=DontStarveTogether) → 创建房间或导入存档 → 启动世界**
 
-> 数据默认保存在 `/opt/dst`：`saves/` 是存档，`control/` 是配置和数据库。升级时保留此目录与原 `.env`。
+> 数据默认保存在 `/opt/dst`：`saves/` 是存档，`control/` 是配置和数据库。升级时保留数据目录和 `compose.yaml` 的挂载配置，在部署目录执行 `docker compose pull && docker compose up -d`。
 
 <details>
 <summary><strong>需要开放哪些端口？</strong></summary>

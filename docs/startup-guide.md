@@ -306,7 +306,7 @@ Web 端口通过不代表游戏端口通过。防火墙放行实际世界配置�
 
 | 部署 | 正常启停与日志 | 升级时必须保留 |
 | --- | --- | --- |
-| All-in-One | README 中同一 `--env-file` 的 Compose 命令 | 宿主数据根目录、环境文件和旧镜像 |
+| All-in-One | 在部署目录执行 `docker compose restart` | 宿主数据目录、Compose 文件和旧镜像 |
 | Linux 本机 | `systemctl restart dst-admin-local`；`journalctl -u dst-admin-local` | `/var/lib/dst-admin` 及配置指向的全部数据目录 |
 | Linux Agent | `systemctl restart dst-admin-agent`；`journalctl -u dst-admin-agent` | `/var/lib/dst-admin-agent`、可选 `agent.env`、游戏及存档目录 |
 | macOS 本机 | `launchctl kickstart -k "gui/$(id -u)/top.luocaiyi.dst-admin-local"` | Application Support 中的配置/状态以及外部游戏、存档目录 |

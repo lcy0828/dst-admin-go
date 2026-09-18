@@ -97,36 +97,20 @@ Switch to dark mode and preview seasonal lighting, time of day, rain, and snow. 
 
 Run the panel and game together on one machine. Recommended: **Linux x86_64 · 2 CPU cores / 4 GB RAM or more · 20 GB free disk space**. Install [Docker with Compose](https://docs.docker.com/engine/install/) first.
 
-**1. Get the deployment files**
-
 ```bash
-git clone https://github.com/lcy0828/dst-admin-go.git
-cd dst-admin-go/deploy/docker
-cp all-in-one.env.example .env
+mkdir -p /opt/dst
+cd /opt/dst
+curl -fL https://raw.githubusercontent.com/lcy0828/dst-admin-go/master/deploy/docker/compose.all-in-one.yaml -o compose.yaml
+docker compose up -d
 ```
 
-**2. Edit `.env` to set the image and data directory**
-
-**Use Alibaba Cloud in mainland China and Docker Hub elsewhere.** Both registries contain the same images. The example below uses Docker Hub:
-
-```ini
-DST_ADMIN_IMAGE=lcy0828/dst-admin-go:latest
-DST_ADMIN_DATA_ROOT=/opt/dst
-```
-
-For mainland China, set `DST_ADMIN_IMAGE=registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go:latest` instead.
-
-**3. Start the panel**
-
-```bash
-docker compose --env-file .env -f compose.all-in-one.yaml up -d
-```
+The default is the **Alibaba Cloud registry**. No repository clone or `.env` is required. Outside mainland China, change `image` in `compose.yaml` to `lcy0828/dst-admin-go:latest` to use Docker Hub. Edit ports and the data mount directly in the same file.
 
 Open **`http://SERVER_IP:8080`** and follow the setup wizard:
 
 **Create an administrator → Install or connect the game → Add a [Klei Token](https://accounts.klei.com/account/game/servers?game=DontStarveTogether) → Create a room or import saves → Start your worlds**
 
-> Data lives in `/opt/dst` by default: `saves/` holds game saves; `control/` holds configuration and the database. Keep this directory and the existing `.env` when upgrading.
+> Data lives in `/opt/dst` by default: `saves/` holds game saves; `control/` holds configuration and the database. Keep the data directory and the mounts in `compose.yaml` when upgrading. Run `docker compose pull && docker compose up -d` from the deployment directory.
 
 <details>
 <summary><strong>Which ports should I open?</strong></summary>

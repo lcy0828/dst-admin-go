@@ -82,7 +82,7 @@ node deploy/scripts/build-native-release.mjs --version preview-local \
 1. 在页面正常保存并停止受影响房间，确认进程退出。停止 native 管理服务或 Agent 本身不等于停止游戏。
 2. 备份当前生效配置、数据库、Agent 身份/操作状态和所有目标节点的存档。SQLite 停写后复制完整状态，或使用一致性 `.backup`；不要仅复制正在写入的主数据库文件。
 3. 保留旧镜像 digest 或原生包，验证新包 SHA-256。预览版本升级先在独立目录检查启动和页面。
-4. Docker 保留原 `.env` 和数据挂载，替换镜像后 `up -d`。原生安装脚本使用当前生效配置的独立副本，不能重新套初始模板；Linux 安装后显式重启，macOS 安装脚本会重启 LaunchAgent。
+4. Docker 保留 Compose 中的原端口和数据挂载，替换镜像后 `up -d`。原生安装脚本使用当前生效配置的独立副本，不能重新套初始模板；Linux 安装后显式重启，macOS 安装脚本会重启 LaunchAgent。
 5. 检查页面、登录、房间列表、Agent 在线状态，再按需启动原房间并检查真实游戏日志。
 
 若使用自定义服务托管，也可将原生包放在 `ROOT/releases/版本目录`，用 `deploy/scripts/activate-native-release.sh --root ROOT --release 版本目录` 原子切换 `current`，用 `--rollback` 切回 `previous`。服务应事先配置为运行 `ROOT/current/dst-admin`；该工具只切换链接，不改配置、存档或重启进程。普通安装脚本复制到固定路径，不会自动使用此链接。

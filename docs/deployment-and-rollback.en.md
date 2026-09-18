@@ -75,7 +75,7 @@ Frontend commits do not update installed services or automatically publish the b
 1. Save and stop affected rooms through the panel, then verify process exit. Stopping a native management service or Agent alone does not stop game worlds.
 2. Back up active configuration, databases, Agent identities/operation state, and saves on every target. Copy SQLite state after stopping writes or use consistent `.backup`; do not copy only a live main database file.
 3. Retain the old image digest or package. Verify the new SHA-256 and smoke-test previews in an isolated directory.
-4. Docker: preserve `.env` and mounts, replace the image, then `up -d`. Native installers: pass an independent copy of active configuration, never a fresh template. Explicitly restart Linux services; macOS installers restart LaunchAgents.
+4. Docker: preserve the ports and data mounts in the Compose file, replace the image, then `up -d`. Native installers: pass an independent copy of active configuration, never a fresh template. Explicitly restart Linux services; macOS installers restart LaunchAgents.
 5. Check pages, login, room inventory, and Agents. Start the rooms you need and inspect actual game logs.
 
 For custom service layouts, extract packages under `ROOT/releases/VERSION` and run `deploy/scripts/activate-native-release.sh --root ROOT --release VERSION` to switch `current`; `--rollback` restores `previous`. Configure the service to run `ROOT/current/dst-admin` beforehand. This helper only switches links, never configuration, saves, or processes. Standard installers copy to fixed paths and do not use this link automatically.

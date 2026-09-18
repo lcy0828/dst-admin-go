@@ -113,7 +113,7 @@ Master、Caves 及其他 Shard 是同一容器中的独立进程，可以分别�
 Klei 当前的 Linux 专服面向 `linux/amd64`，因此 Apple Silicon 宿主通过 Docker 的 amd64 模拟运行此模式，
 不构建无法使用的 ARM 镜像。
 
-所有持久化状态放在容器 `/opt/dst` 下，从宿主 `${DST_ADMIN_DATA_ROOT:-/opt/dst}` 绑定挂载。
+所有持久化状态放在容器 `/opt/dst` 下，默认从宿主 `/opt/dst` 绑定挂载。
 替换容器不能丢失数据库、存档、Workshop 内容、Mod 发布版本、备份或服务端文件。
 容器没有 Docker socket，也不需要特权模式。
 容器关闭时，入口脚本先向每个受管 DST pane 发送保存并关闭命令，再停止 API。
@@ -124,9 +124,9 @@ Klei 当前的 Linux 专服面向 `linux/amd64`，因此 Apple Silicon 宿主通
 - 容器级 CPU 限制作用于整个安装。首版 All-in-One 不宣称支持逐 Shard CPU 强制限制，因为当前 Linux 执行器需要委派可写的 cgroup v2 控制器。未来针对容器的 taskset/cpuset 驱动必须验证后才能开放。
 - 本机执行器属于同一个故障和存储范围。Fleet 角色可以连接其他节点，但不会让本机 `/opt/dst` 卷变成分布式存储。
 
-按 [README Docker 说明](../README.md#docker-快速安装)构建并启动镜像。
-镜像标签、宿主数据根目录和开放端口保存在 `deploy/docker/.env`；
-所有 Compose 操作，包括升级和重启，都使用相同的显式 `--env-file`。
+按 [README Docker 说明](../README.md#docker-快速安装)下载 Compose 文件并启动。
+默认使用阿里云镜像，无需 `.env`；镜像、宿主数据目录和端口直接在 `compose.yaml` 中配置。
+已有部署迁移时，先将原 `.env` 中自定义的镜像、端口和挂载路径写入 Compose 文件，保持数据目录不变。
 
 官方 Debian 镜像源较慢时，构建脚本接受 `--debian-mirror`、`--debian-security-mirror`，
 或对应的 `DST_ADMIN_DEBIAN_MIRROR`、`DST_ADMIN_DEBIAN_SECURITY_MIRROR` 环境变量。
