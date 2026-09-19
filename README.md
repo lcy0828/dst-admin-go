@@ -114,7 +114,23 @@ LuaJIT2 来源于 [fesily/DontStarveLuaJIT2](https://github.com/fesily/DontStarv
 
 ## Docker 快速安装
 
-适合一台机器同时运行面板和游戏。推荐 **Linux x86_64 · 2 核 / 4 GB 内存起 · 20 GB 空闲磁盘**，先安装 [Docker 和 Compose](https://docs.docker.com/engine/install/)。
+适合一台机器同时运行面板和游戏。推荐 **Linux x86_64 · 2 核 / 4 GB 内存起 · 20 GB 空闲磁盘**。
+
+尚未安装 Docker 时，以 root 用户在 Bash 中执行对应命令，安装 Docker 和 Compose；已有环境可跳过。也可按 [Docker 官方文档](https://docs.docker.com/engine/install/)安装。
+
+**国内服务器（阿里云软件源）：**
+
+```bash
+bash <(curl -Ls https://get.docker.com) --mirror Aliyun
+```
+
+**海外服务器（官方软件源）：**
+
+```bash
+bash <(curl -Ls https://get.docker.com)
+```
+
+然后启动面板：
 
 ```bash
 mkdir -p /opt/dst

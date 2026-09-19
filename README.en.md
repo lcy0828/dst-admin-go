@@ -114,7 +114,23 @@ Switch to dark mode and preview seasonal lighting, time of day, rain, and snow. 
 
 ## Docker quick start
 
-Run the panel and game together on one machine. Recommended: **Linux x86_64 · 2 CPU cores / 4 GB RAM or more · 20 GB free disk space**. Install [Docker with Compose](https://docs.docker.com/engine/install/) first.
+Run the panel and game together on one machine. Recommended: **Linux x86_64 · 2 CPU cores / 4 GB RAM or more · 20 GB free disk space**.
+
+If Docker is not installed, run the appropriate command below as root in Bash to install Docker and Compose. Skip this step for an existing installation, or follow the [Docker installation guide](https://docs.docker.com/engine/install/).
+
+**Mainland China (Alibaba Cloud package mirror):**
+
+```bash
+bash <(curl -Ls https://get.docker.com) --mirror Aliyun
+```
+
+**Other regions (official package repository):**
+
+```bash
+bash <(curl -Ls https://get.docker.com)
+```
+
+Then start the panel:
 
 ```bash
 mkdir -p /opt/dst
