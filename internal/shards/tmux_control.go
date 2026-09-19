@@ -586,6 +586,14 @@ func (c *TmuxControl) inspectRuntimeOwnership(ctx context.Context, server *dsttm
 			Message: fmt.Sprintf("同一世界的 DST 进程不属于当前 Runtime（PID %s）；已阻止重复启动，请先停止该进程后重试", processIDList(matches)),
 		}, nil
 	}
+	if managed.SessionExists {
+		// Reuse the ownership probe: this survives Controller/Agent restarts and
+		// adds no extra process scan or background work.
+		managed.RuntimeMode = "unknown"
+		if len(matches) == 1 {
+			managed.RuntimeMode = matches[0].RuntimeMode
+		}
+	}
 	return managed, nil
 }
 

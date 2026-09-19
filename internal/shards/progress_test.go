@@ -76,7 +76,7 @@ func TestRestartReportsReadyWorldBeforeOtherWorldFinishes(t *testing.T) {
 	ctx = operationprogress.WithReporter(ctx, func(update operationprogress.Update) { progress <- update })
 	done := make(chan struct{})
 	go func() {
-		o.executeRestartPlan(ctx, rooms.Room{DirectoryName: "room"}, worlds, nil, nil, "", func(result jobs.TargetResult) { results <- result })
+		o.executeRestartPlan(ctx, rooms.Room{DirectoryName: "room"}, worlds, nil, nil, "", false, func(result jobs.TargetResult) { results <- result })
 		close(done)
 	}()
 	select {

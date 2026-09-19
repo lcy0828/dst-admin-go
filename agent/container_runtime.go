@@ -117,7 +117,9 @@ func newContainerShardRuntime(installation RuntimeInstallation, cli containerCLI
 	}, nil
 }
 
-func (c *containerShardRuntime) Status(ctx context.Context, cluster, shard string) (shards.RuntimeStatus, error) {
+func (c *containerShardRuntime) Status(ctx context.Context, cluster, shard string) (status shards.RuntimeStatus, statusErr error) {
+	// This provider currently supports only the original Game Lua engine.
+	defer func() { status.RuntimeMode = shared.RuntimePerformanceModeGame }()
 	instance, err := c.find(ctx, cluster, shard)
 	if err != nil {
 		return shards.RuntimeStatus{State: shards.RuntimeUnknown}, err

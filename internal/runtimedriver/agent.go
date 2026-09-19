@@ -327,6 +327,11 @@ func checkedGameVersionResult(result shared.RuntimeOperationResult, err error) (
 
 func (d *Agent) Status(ctx context.Context, target Target) (shared.ShardRuntimeStatus, error) {
 	result, err := d.ExecuteShard(ctx, target, Operation{ID: newOperationID()}, shared.ShardActionStatus, 30*time.Second)
+	if result.Status.RuntimeMode == "" && (result.Status.SessionExists || result.Status.State == "running" || result.Status.State == "starting") {
+		// Older Agents cannot distinguish an active Game Lua process from LuaJIT.
+		// Maintenance must request an upgrade instead of silently selecting Game.
+		result.Status.RuntimeMode = "unknown"
+	}
 	return result.Status, err
 }
 

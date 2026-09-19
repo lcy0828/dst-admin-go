@@ -24,7 +24,7 @@ func NewActivationRuntime(router *runtimedriver.Router) (*ActivationRuntime, err
 
 func (r *ActivationRuntime) Status(ctx context.Context, world modpublication.WorldPlan) (modpublication.ShardRuntimeObservation, error) {
 	status, err := r.router.Status(ctx, world.RoomID, world.WorldID)
-	return modpublication.ShardRuntimeObservation{State: status.State, SessionExists: status.SessionExists}, err
+	return modpublication.ShardRuntimeObservation{State: status.State, SessionExists: status.SessionExists, RuntimeMode: status.RuntimeMode}, err
 }
 
 func (r *ActivationRuntime) CaptureLogCursor(ctx context.Context, world modpublication.WorldPlan) (modpublication.LogCursor, error) {
@@ -72,6 +72,7 @@ func (r *ActivationRuntime) execute(ctx context.Context, world modpublication.Wo
 		FencingToken: fence.FencingToken, LeaseExpiresAt: &expires,
 	}
 	if action == shared.ShardActionStart {
+		request.RuntimeMode = operation.RuntimeMode
 		request.LaunchOptions.SkipUpdateServerMods = true
 	}
 	_, err = driver.ExecuteShard(ctx, target, request, action, 60*time.Second)

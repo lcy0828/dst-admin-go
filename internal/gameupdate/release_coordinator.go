@@ -484,6 +484,7 @@ func (c *ReleaseCoordinator) restartAndConfirm(ctx context.Context, value Releas
 		}
 		operation, operationErr := fences.operation(shard.RoomID, value.ID, "start", index)
 		if operationErr == nil {
+			operation.RuntimeMode = shard.RuntimeMode
 			operationErr = c.runtime.Start(ctx, shard, operation)
 		}
 		if operationErr != nil {
@@ -601,6 +602,7 @@ func (c *ReleaseCoordinator) recoverStoppedShards(ctx context.Context, value *Re
 	for index, shard := range orderReleaseShardValues(stopped, true) {
 		operation, err := fences.operation(shard.RoomID, value.ID, "recover", index)
 		if err == nil {
+			operation.RuntimeMode = shard.RuntimeMode
 			err = c.runtime.Start(ctx, shard, operation)
 		}
 		result := releaseShardResult(value, shard.RoomID, shard.WorldID)

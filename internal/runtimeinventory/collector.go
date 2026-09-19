@@ -334,8 +334,18 @@ func IsDSTExecutable(value string) bool {
 }
 
 func ShardProcessFromArguments(pid int32, name string, arguments []string) shared.ShardProcessReport {
+	mode := shared.RuntimePerformanceModeGame
+	switch value := commandFlag(arguments, "-lua_vm_type"); value {
+	case "", "game":
+	case "jit":
+		mode = shared.RuntimePerformanceModeLuaJIT
+	case "jit_gen":
+		mode = shared.RuntimePerformanceModeArenaGC
+	default:
+		mode = "unknown"
+	}
 	return shared.ShardProcessReport{
-		PID: pid, Executable: name,
+		PID: pid, Executable: name, RuntimeMode: mode,
 		Cluster:         commandFlag(arguments, "-cluster"),
 		Shard:           commandFlag(arguments, "-shard"),
 		StorageRoot:     commandFlag(arguments, "-persistent_storage_root"),

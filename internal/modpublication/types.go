@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"dont/shared"
 )
 
 const (
@@ -87,6 +89,7 @@ type LogCursor struct {
 }
 
 type ShardRuntimeObservation struct {
+	RuntimeMode   shared.RuntimePerformanceMode
 	State         string
 	SessionExists bool
 }
@@ -97,19 +100,20 @@ type ShardLogObservation struct {
 }
 
 type ShardActivationResult struct {
-	RoomID          string           `json:"roomId"`
-	WorldID         string           `json:"worldId"`
-	TargetID        string           `json:"targetId"`
-	InstallationID  string           `json:"installationId"`
-	Status          ActivationStatus `json:"status"`
-	WasRunning      bool             `json:"wasRunning"`
-	RuntimeState    string           `json:"runtimeState,omitempty"`
-	LoadMarker      string           `json:"loadMarker,omitempty"`
-	ErrorCode       string           `json:"errorCode,omitempty"`
-	ErrorMessage    string           `json:"errorMessage,omitempty"`
-	RestartedAt     *time.Time       `json:"restartedAt,omitempty"`
-	LoadConfirmedAt *time.Time       `json:"loadConfirmedAt,omitempty"`
-	UpdatedAt       time.Time        `json:"updatedAt"`
+	RuntimeMode     shared.RuntimePerformanceMode `json:"runtimeMode,omitempty"`
+	RoomID          string                        `json:"roomId"`
+	WorldID         string                        `json:"worldId"`
+	TargetID        string                        `json:"targetId"`
+	InstallationID  string                        `json:"installationId"`
+	Status          ActivationStatus              `json:"status"`
+	WasRunning      bool                          `json:"wasRunning"`
+	RuntimeState    string                        `json:"runtimeState,omitempty"`
+	LoadMarker      string                        `json:"loadMarker,omitempty"`
+	ErrorCode       string                        `json:"errorCode,omitempty"`
+	ErrorMessage    string                        `json:"errorMessage,omitempty"`
+	RestartedAt     *time.Time                    `json:"restartedAt,omitempty"`
+	LoadConfirmedAt *time.Time                    `json:"loadConfirmedAt,omitempty"`
+	UpdatedAt       time.Time                     `json:"updatedAt"`
 }
 
 type Activation struct {
@@ -294,6 +298,7 @@ type Fence struct {
 }
 
 type RuntimeOperation struct {
+	RuntimeMode      shared.RuntimePerformanceMode                   `json:"runtimeMode,omitempty"`
 	PublicationID    string                                          `json:"publicationId"`
 	TopologyRevision string                                          `json:"topologyRevision"`
 	PlanHash         string                                          `json:"planHash"`

@@ -67,12 +67,12 @@ func (r *coordinatorRuntime) Stop(_ context.Context, shard ReleaseShardPlan, _ r
 	return nil
 }
 
-func (r *coordinatorRuntime) Start(_ context.Context, shard ReleaseShardPlan, _ runtimedriver.Operation) error {
+func (r *coordinatorRuntime) Start(_ context.Context, shard ReleaseShardPlan, operation runtimedriver.Operation) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	key := releaseShardKey(shard)
 	r.events = append(r.events, "start:"+key)
-	r.states[key] = shared.ShardRuntimeStatus{State: "running", SessionExists: true}
+	r.states[key] = shared.ShardRuntimeStatus{State: "running", SessionExists: true, RuntimeMode: operation.RuntimeMode}
 	return nil
 }
 
@@ -337,5 +337,35 @@ func assertEventBefore(t *testing.T, events []string, first, second string) {
 	}
 	if firstIndex < 0 || secondIndex < 0 || firstIndex >= secondIndex {
 		t.Fatalf("expected %q before %q in %v", first, second, events)
+	}
+}
+
+func TestGameReleaseRetainsPerWorldRuntimeModes(t *testing.T) {
+	f := newReleaseCoordinatorFixture(t, ReleaseLoadConfirmationNone)
+	want := map[string]shared.RuntimePerformanceMode{"room-a\x00Master": shared.RuntimePerformanceModeLuaJIT, "room-a\x00Caves": shared.RuntimePerformanceModeArenaGC, "room-b\x00Master": shared.RuntimePerformanceModeGame}
+	for key, mode := range want {
+		status := f.runtime.states[key]
+		status.RuntimeMode = mode
+		f.runtime.states[key] = status
+	}
+	restart := true
+	plan, err := f.coordinator.planner.Preview(context.Background(), ReleasePreviewRequest{Policy: ReleasePolicyInput{RestartRunning: &restart, LoadConfirmation: ReleaseLoadConfirmationNone, TimeoutSeconds: 30}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedKey := releaseInstallationKey("agent:node-b", "primary")
+	f.runtime.updateErrors[failedKey] = errors.New("temporary download failure")
+	if _, err = f.coordinator.Publish(context.Background(), ReleasePublishRequest{ID: "release-modes", Plan: plan}); !errors.Is(err, ErrReleaseRecoveryNeeded) {
+		t.Fatalf("expected update failure: %v", err)
+	}
+	delete(f.runtime.updateErrors, failedKey)
+	release, err := f.coordinator.Retry(context.Background(), "release-modes")
+	if err != nil || release.Stage != ReleaseStageSucceeded {
+		t.Fatalf("release=%#v err=%v", release, err)
+	}
+	for key, mode := range want {
+		if f.runtime.states[key].RuntimeMode != mode {
+			t.Errorf("%s switched to %s", key, f.runtime.states[key].RuntimeMode)
+		}
 	}
 }

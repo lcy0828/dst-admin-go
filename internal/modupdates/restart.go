@@ -16,7 +16,7 @@ type worldCatalog interface {
 }
 type worldOperations interface {
 	StatusFor(context.Context, string, string) (shards.RuntimeStatus, error)
-	Plan(shards.Action, string, []string) ([]jobs.TargetSpec, jobs.Runner, error)
+	PlanWithOptions(shards.Action, string, []string, shards.PlanOptions) ([]jobs.TargetSpec, jobs.Runner, error)
 }
 
 type WorldRestarter struct {
@@ -51,7 +51,7 @@ func (r *WorldRestarter) RestartRunningWorlds(ctx context.Context, roomID, jobID
 	if len(ids) == 0 {
 		return nil
 	}
-	targets, run, err := r.operations.Plan(shards.ActionRestart, roomID, ids)
+	targets, run, err := r.operations.PlanWithOptions(shards.ActionRestart, roomID, ids, shards.PlanOptions{PreserveRuntimeMode: true})
 	if err != nil {
 		return err
 	}

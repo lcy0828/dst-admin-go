@@ -32,7 +32,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var AgentVersion = "2.16.13"
+var AgentVersion = "2.16.14"
 
 // 常量
 const (

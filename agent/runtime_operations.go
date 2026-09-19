@@ -1122,7 +1122,7 @@ func runtimeResult(request shared.RuntimeOperationRequest, outcome shared.Runtim
 }
 
 func sharedRuntimeStatus(status shards.RuntimeStatus) shared.ShardRuntimeStatus {
-	return shared.ShardRuntimeStatus{State: string(status.State), Code: status.Code, Message: status.Message, SessionExists: status.SessionExists, Paused: status.Paused}
+	return shared.ShardRuntimeStatus{State: string(status.State), Code: status.Code, Message: status.Message, SessionExists: status.SessionExists, Paused: status.Paused, RuntimeMode: status.RuntimeMode}
 }
 
 func (state *shardOperationState) beginRuntime(request shared.RuntimeOperationRequest, now time.Time) (*shared.RuntimeOperationResult, error) {

@@ -541,5 +541,5 @@ func validateTarget(target Target) error {
 }
 
 func nativeStatus(status shards.RuntimeStatus) shared.ShardRuntimeStatus {
-	return shared.ShardRuntimeStatus{State: string(status.State), StartupStage: status.StartupStage, Code: status.Code, Message: status.Message, SessionExists: status.SessionExists, Paused: status.Paused}
+	return shared.ShardRuntimeStatus{State: string(status.State), StartupStage: status.StartupStage, Code: status.Code, Message: status.Message, SessionExists: status.SessionExists, Paused: status.Paused, RuntimeMode: status.RuntimeMode}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"dont/internal/operationlease"
+	"dont/shared"
 )
 
 var workshopLogIDPattern = regexp.MustCompile(`(?i)workshop[-_](\d+)`)
@@ -126,9 +127,20 @@ func (c *Coordinator) activateCommittedWithRunningSnapshot(ctx context.Context, 
 		return publication, ErrInvalidInput
 	}
 	requestedAt := c.now().UTC()
+	originalModes := make(map[string]shared.RuntimePerformanceMode)
+	for _, shard := range publication.Activation.Shards {
+		originalModes[worldKey(shard.RoomID, shard.WorldID)] = shard.RuntimeMode
+	}
 	publication.Activation = Activation{
 		Policy: policy, Status: ActivationStatusRestarting, RequestedAt: &requestedAt,
 		Shards: activationShards(publication.Plan, requestedAt),
+	}
+	if originalRunning != nil {
+		for index := range publication.Activation.Shards {
+			shard := &publication.Activation.Shards[index]
+			key := worldKey(shard.RoomID, shard.WorldID)
+			shard.WasRunning, shard.RuntimeMode = originalRunning[key], originalModes[key]
+		}
 	}
 	publication.RestartRequired = true
 	publication.UpdatedAt = requestedAt
@@ -149,13 +161,18 @@ func (c *Coordinator) activateCommittedWithRunningSnapshot(ctx context.Context, 
 		}
 		result := &publication.Activation.Shards[index]
 		result.RuntimeState = observation.State
+		result.RuntimeMode = observation.RuntimeMode
 		result.WasRunning = observation.SessionExists || observation.State == "running" || observation.State == "starting"
 		if originalRunning != nil {
 			result.WasRunning = originalRunning[key]
+			result.RuntimeMode = originalModes[key]
 		}
 		if !result.WasRunning {
 			result.Status, result.UpdatedAt = ActivationStatusSkipped, c.now().UTC()
 			continue
+		}
+		if _, valid := shared.NormalizeRuntimePerformanceMode(result.RuntimeMode); !valid {
+			return c.failActivation(publication, result, "RUNTIME_MODE_UNKNOWN", errors.New("无法确认世界的 Lua 运行模式，请等待启动完成或升级 Agent 后重试"))
 		}
 		running[key] = true
 	}

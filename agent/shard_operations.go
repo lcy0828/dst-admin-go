@@ -656,7 +656,7 @@ func shardResult(request shared.ShardOperationRequest, status shards.RuntimeStat
 		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: request.OperationID,
 		OperationKey: request.OperationKey, InstallationID: request.InstallationID, Action: request.Action,
 		Cluster: request.Cluster, Shard: request.Shard, RuntimeMode: request.RuntimeMode, LaunchOptions: request.LaunchOptions, FencingToken: request.FencingToken,
-		Status:  shared.ShardRuntimeStatus{State: string(status.State), StartupStage: status.StartupStage, Code: status.Code, Message: status.Message, SessionExists: status.SessionExists, Paused: status.Paused},
+		Status:  shared.ShardRuntimeStatus{State: string(status.State), StartupStage: status.StartupStage, Code: status.Code, Message: status.Message, SessionExists: status.SessionExists, Paused: status.Paused, RuntimeMode: status.RuntimeMode},
 		Message: message, ObservedAt: observedAt.UTC(),
 	}
 }

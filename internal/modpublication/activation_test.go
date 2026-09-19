@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"dont/internal/operationlease"
+	"dont/shared"
 )
 
 type activationCall struct {
@@ -89,14 +90,14 @@ func (f *fakeActivationRuntime) Stop(_ context.Context, world WorldPlan, _ Runti
 	return nil
 }
 
-func (f *fakeActivationRuntime) Start(_ context.Context, world WorldPlan, _ RuntimeOperation) error {
+func (f *fakeActivationRuntime) Start(_ context.Context, world WorldPlan, operation RuntimeOperation) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, activationCall{action: "start", worldID: world.WorldID})
 	if err := f.fail["start:"+world.WorldID]; err != nil {
 		return err
 	}
-	f.states[world.WorldID] = ShardRuntimeObservation{State: "running", SessionExists: true}
+	f.states[world.WorldID] = ShardRuntimeObservation{State: "running", SessionExists: true, RuntimeMode: operation.RuntimeMode}
 	return nil
 }
 
@@ -484,5 +485,49 @@ func TestManualActivationPolicyPreservesExistingPublicationFlow(t *testing.T) {
 	if err != nil || publication.Status != StatusSucceeded || publication.Activation.Status != ActivationStatusSkipped ||
 		publication.Activation.Policy.Mode != ActivationModeManual || !publication.RestartRequired {
 		t.Fatalf("manual compatibility flow changed: %#v err=%v", publication, err)
+	}
+}
+
+func TestModActivationRetainsRuntimeModesDuringRecovery(t *testing.T) {
+	worlds, placements := twoTargetWorlds()
+	worlds[0].IsMaster = true
+	activation := activationRuntimeFor(worlds)
+	modes := map[string]shared.RuntimePerformanceMode{"master": shared.RuntimePerformanceModeLuaJIT, "caves": shared.RuntimePerformanceModeArenaGC}
+	for key, mode := range modes {
+		status := activation.states[key]
+		status.RuntimeMode = mode
+		activation.states[key] = status
+	}
+	app := newTestApplication(t, worlds, placements)
+	coordinator := coordinatorWithActivation(t, app, activation)
+	plan, err := coordinator.Preview(context.Background(), "room-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication, err := coordinator.Publish(context.Background(), PublishRequest{ID: "publication-modes", Plan: plan, Activation: restartActivationPolicy()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, shard := range publication.Activation.Shards {
+		if shard.RuntimeMode != modes[shard.WorldID] || activation.states[shard.WorldID].RuntimeMode != modes[shard.WorldID] {
+			t.Fatalf("mode lost: %#v", shard)
+		}
+	}
+	publication.RestartRequired = true
+	publication.Activation.Status = ActivationStatusRestarting
+	if _, err = app.store.Save(publication); err != nil {
+		t.Fatal(err)
+	}
+	for key := range activation.states {
+		activation.states[key] = ShardRuntimeObservation{State: "stopped"}
+	}
+	recovered, err := coordinator.RecoverOne(context.Background(), publication.ID)
+	if err != nil || recovered.Activation.Status != ActivationStatusSucceeded {
+		t.Fatalf("recovery=%#v err=%v", recovered, err)
+	}
+	for key, mode := range modes {
+		if activation.states[key].RuntimeMode != mode {
+			t.Fatalf("recovery mode %s=%s", key, activation.states[key].RuntimeMode)
+		}
 	}
 }

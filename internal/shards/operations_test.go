@@ -1266,3 +1266,42 @@ func TestStartUsesCurrentDiskStateWithoutManagedModLaunchOptions(t *testing.T) {
 		t.Fatalf("ordinary start overrode DST's on-disk Mod behavior: %#v", runtime.request)
 	}
 }
+
+type modeRecordingControl struct {
+	*fakeControl
+	modes map[string]shared.RuntimePerformanceMode
+}
+
+func (c *modeRecordingControl) StartWithRuntimeMode(ctx context.Context, room, world string, mode shared.RuntimePerformanceMode) error {
+	if err := c.fakeControl.Start(ctx, room, world); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.modes[world] = mode
+	return nil
+}
+func TestMaintenanceRestartPreservesDifferentWorldRuntimeModes(t *testing.T) {
+	control := &modeRecordingControl{fakeControl: &fakeControl{
+		running: map[string]bool{"summer_2026/Master": true, "summer_2026/Caves": true},
+		status: map[string]RuntimeStatus{
+			"summer_2026/Master": {State: RuntimeRunning, SessionExists: true, RuntimeMode: shared.RuntimePerformanceModeLuaJIT},
+			"summer_2026/Caves":  {State: RuntimeRunning, SessionExists: true, RuntimeMode: shared.RuntimePerformanceModeArenaGC},
+		}, fail: map[string]error{},
+	}, modes: map[string]shared.RuntimePerformanceMode{}}
+	operations := testOperations(control)
+	_, run, err := operations.PlanWithOptions(ActionRestart, rooms.EncodeID("summer_2026"), nil, PlanOptions{PreserveRuntimeMode: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = run(context.Background(), func(result jobs.TargetResult) {
+		if result.Status != jobs.StatusSucceeded {
+			t.Errorf("result=%#v", result)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if control.modes["Master"] != shared.RuntimePerformanceModeLuaJIT || control.modes["Caves"] != shared.RuntimePerformanceModeArenaGC {
+		t.Fatalf("modes=%v", control.modes)
+	}
+}

@@ -96,18 +96,19 @@ type ReleaseBlocker struct {
 }
 
 type ReleaseShardPlan struct {
-	RoomID           string `json:"roomId"`
-	RoomName         string `json:"roomName"`
-	RoomDirectory    string `json:"roomDirectory"`
-	WorldID          string `json:"worldId"`
-	WorldName        string `json:"worldName"`
-	WorldDirectory   string `json:"worldDirectory"`
-	IsMaster         bool   `json:"isMaster"`
-	TargetID         string `json:"targetId"`
-	InstallationID   string `json:"installationId"`
-	TopologyRevision string `json:"topologyRevision"`
-	RuntimeState     string `json:"runtimeState,omitempty"`
-	WasRunning       bool   `json:"wasRunning"`
+	RuntimeMode      shared.RuntimePerformanceMode `json:"runtimeMode,omitempty"`
+	RoomID           string                        `json:"roomId"`
+	RoomName         string                        `json:"roomName"`
+	RoomDirectory    string                        `json:"roomDirectory"`
+	WorldID          string                        `json:"worldId"`
+	WorldName        string                        `json:"worldName"`
+	WorldDirectory   string                        `json:"worldDirectory"`
+	IsMaster         bool                          `json:"isMaster"`
+	TargetID         string                        `json:"targetId"`
+	InstallationID   string                        `json:"installationId"`
+	TopologyRevision string                        `json:"topologyRevision"`
+	RuntimeState     string                        `json:"runtimeState,omitempty"`
+	WasRunning       bool                          `json:"wasRunning"`
 }
 
 type ReleaseInstallationPlan struct {

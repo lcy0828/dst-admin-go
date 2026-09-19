@@ -417,3 +417,23 @@ func TestTmuxControlInvalidationRejectsInFlightCache(t *testing.T) {
 		t.Fatalf("invalidated in-flight result remained cached: status=%#v calls=%d error=%v", status, calls.Load(), err)
 	}
 }
+
+func TestTmuxOwnershipStatusIncludesObservedRuntimeMode(t *testing.T) {
+	root := shortSaveRootForTest(t)
+	control, err := NewTmuxControl(TmuxConfig{SaveRoot: root, ServerMode: "64", ProcessProbe: func(context.Context) ([]shared.ShardProcessReport, error) {
+		return []shared.ShardProcessReport{{PID: 42, Cluster: "room", Shard: "Master", StorageRoot: root, RuntimeMode: shared.RuntimePerformanceModeLuaJIT}}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	control.legacySessionProbe = func(*dsttmux.DSTServer) (bool, error) { return false, nil }
+	server, err := control.server("room", "Master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := control.inspectRuntimeOwnership(context.Background(), server, "room", "Master", RuntimeStatus{State: RuntimeRunning, SessionExists: true})
+	if err != nil || status.RuntimeMode != shared.RuntimePerformanceModeLuaJIT {
+		t.Fatalf("status=%#v err=%v", status, err)
+	}
+}

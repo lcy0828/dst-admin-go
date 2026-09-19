@@ -194,12 +194,13 @@ type ShardOperationRequest struct {
 }
 
 type ShardRuntimeStatus struct {
-	State         string `json:"state"`
-	StartupStage  string `json:"startup_stage,omitempty"`
-	Code          string `json:"code,omitempty"`
-	Message       string `json:"message,omitempty"`
-	SessionExists bool   `json:"session_exists"`
-	Paused        *bool  `json:"paused,omitempty"`
+	RuntimeMode   RuntimePerformanceMode `json:"runtime_mode,omitempty"`
+	State         string                 `json:"state"`
+	StartupStage  string                 `json:"startup_stage,omitempty"`
+	Code          string                 `json:"code,omitempty"`
+	Message       string                 `json:"message,omitempty"`
+	SessionExists bool                   `json:"session_exists"`
+	Paused        *bool                  `json:"paused,omitempty"`
 }
 
 type ShardOperationResult struct {
@@ -354,17 +355,18 @@ type ShardInventoryReport struct {
 }
 
 type ShardProcessReport struct {
-	PID             int32      `json:"pid"`
-	RuntimeKind     string     `json:"runtime_kind,omitempty"`
-	InstanceID      string     `json:"instance_id,omitempty"`
-	Executable      string     `json:"executable"`
-	Cluster         string     `json:"cluster"`
-	Shard           string     `json:"shard"`
-	StorageRoot     string     `json:"storage_root,omitempty"`
-	ConfigDirectory string     `json:"config_directory,omitempty"`
-	StartedAt       *time.Time `json:"started_at,omitempty"`
-	CPUPercent      float64    `json:"cpu_percent,omitempty"`
-	RSSBytes        uint64     `json:"rss_bytes,omitempty"`
+	RuntimeMode     RuntimePerformanceMode `json:"runtime_mode,omitempty"`
+	PID             int32                  `json:"pid"`
+	RuntimeKind     string                 `json:"runtime_kind,omitempty"`
+	InstanceID      string                 `json:"instance_id,omitempty"`
+	Executable      string                 `json:"executable"`
+	Cluster         string                 `json:"cluster"`
+	Shard           string                 `json:"shard"`
+	StorageRoot     string                 `json:"storage_root,omitempty"`
+	ConfigDirectory string                 `json:"config_directory,omitempty"`
+	StartedAt       *time.Time             `json:"started_at,omitempty"`
+	CPUPercent      float64                `json:"cpu_percent,omitempty"`
+	RSSBytes        uint64                 `json:"rss_bytes,omitempty"`
 }
 
 type RuntimeInventoryReport struct {

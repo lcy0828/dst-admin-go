@@ -410,8 +410,12 @@ func (p *ReleasePlanner) finishReleaseTarget(ctx context.Context, target *Releas
 			continue
 		}
 		shard.RuntimeState = status.State
+		shard.RuntimeMode = status.RuntimeMode
 		shard.WasRunning = status.State == string(shards.RuntimeRunning) || status.State == string(shards.RuntimeStarting)
 		if shard.WasRunning {
+			if _, valid := shared.NormalizeRuntimePerformanceMode(status.RuntimeMode); !valid {
+				target.Blockers = append(target.Blockers, releaseShardBlocker("RUNTIME_MODE_UNKNOWN", "无法确认世界的 Lua 运行模式，请等待启动完成或升级 Agent 后重试", target.TargetID, target.InstallationID, shard.RoomID, shard.WorldID))
+			}
 			target.RunningShards++
 		}
 	}
@@ -488,6 +492,7 @@ func preferredReleaseVersion(values []ReleaseInstallationPlan) string {
 
 func calculateReleasePlanHash(plan ReleasePlan) (string, error) {
 	type canonicalShard struct {
+		RuntimeMode                                    shared.RuntimePerformanceMode `json:",omitempty"`
 		RoomID, RoomDirectory, WorldID, WorldDirectory string
 		IsMaster                                       bool
 		TargetID, InstallationID, TopologyRevision     string
@@ -516,7 +521,8 @@ func calculateReleasePlanHash(plan ReleasePlan) (string, error) {
 		}
 		for _, shard := range target.Shards {
 			canonical.Shards = append(canonical.Shards, canonicalShard{
-				RoomID: shard.RoomID, RoomDirectory: shard.RoomDirectory, WorldID: shard.WorldID,
+				RuntimeMode: shard.RuntimeMode,
+				RoomID:      shard.RoomID, RoomDirectory: shard.RoomDirectory, WorldID: shard.WorldID,
 				WorldDirectory: shard.WorldDirectory, IsMaster: shard.IsMaster, TargetID: shard.TargetID,
 				InstallationID: shard.InstallationID, TopologyRevision: shard.TopologyRevision,
 				WasRunning: shard.WasRunning,

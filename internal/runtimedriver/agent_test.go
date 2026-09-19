@@ -304,3 +304,32 @@ func TestAgentGrantModArtifactUsesOptionalPeerContract(t *testing.T) {
 		t.Fatalf("peer grant request=%#v target=%q", executor.request, executor.targetID)
 	}
 }
+
+type statusReportingExecutor struct {
+	emptyMigrationExecutor
+	status shared.ShardRuntimeStatus
+}
+
+func (e statusReportingExecutor) ExecuteShard(context.Context, string, shared.ShardOperationRequest, int) (agents.ShardExecutionResult, error) {
+	return agents.ShardExecutionResult{Result: shared.ShardOperationResult{Status: e.status}}, nil
+}
+func TestAgentStatusDoesNotAssumeGameLuaForOlderRunningAgents(t *testing.T) {
+	for _, tc := range []struct {
+		status shared.ShardRuntimeStatus
+		want   shared.RuntimePerformanceMode
+	}{
+		{shared.ShardRuntimeStatus{State: "running", SessionExists: true}, "unknown"},
+		{shared.ShardRuntimeStatus{State: "starting", SessionExists: true}, "unknown"},
+		{shared.ShardRuntimeStatus{State: "running", SessionExists: true, RuntimeMode: shared.RuntimePerformanceModeLuaJIT}, shared.RuntimePerformanceModeLuaJIT},
+		{shared.ShardRuntimeStatus{State: "stopped"}, ""},
+	} {
+		driver, err := NewAgent(statusReportingExecutor{status: tc.status})
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, err := driver.Status(context.Background(), Target{TargetID: "agent:node", InstallationID: "default", Cluster: "room", Shard: "Master"})
+		if err != nil || status.RuntimeMode != tc.want {
+			t.Fatalf("status=%#v want=%s err=%v", status, tc.want, err)
+		}
+	}
+}

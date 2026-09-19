@@ -23,6 +23,7 @@ import (
 	"dont/internal/rooms"
 	"dont/internal/runtimeaudit"
 	"dont/internal/shards"
+	"dont/shared"
 )
 
 var (
@@ -76,11 +77,12 @@ type Config struct {
 }
 
 type plannedWorld struct {
-	roomID    string
-	roomName  string
-	worldID   string
-	worldName string
-	isMaster  bool
+	runtimeMode shared.RuntimePerformanceMode
+	roomID      string
+	roomName    string
+	worldID     string
+	worldName   string
+	isMaster    bool
 }
 
 type Service struct {
@@ -422,7 +424,11 @@ func sameUpdatePlan(plannedRooms []rooms.Room, plannedWorlds []plannedWorld, cur
 	worldKeys := func(items []plannedWorld) []string {
 		keys := make([]string, 0, len(items))
 		for _, world := range items {
-			keys = append(keys, world.roomID+"\x00"+world.worldID+"\x00"+world.roomName+"\x00"+world.worldName)
+			mode, valid := shared.NormalizeRuntimePerformanceMode(world.runtimeMode)
+			if !valid {
+				mode = world.runtimeMode
+			}
+			keys = append(keys, world.roomID+"\x00"+world.worldID+"\x00"+world.roomName+"\x00"+world.worldName+"\x00"+string(mode))
 		}
 		sort.Strings(keys)
 		return keys
@@ -508,7 +514,21 @@ func (s *Service) captureState(ctx context.Context) ([]rooms.Room, []plannedWorl
 				return nil, nil, statusErr
 			}
 			if active {
-				running = append(running, plannedWorld{roomID: room.ID, roomName: room.DirectoryName, worldID: world.ID, worldName: world.DirectoryName, isMaster: world.IsMaster})
+				mode := shared.RuntimePerformanceModeGame
+				if control, ok := s.control.(interface {
+					Status(context.Context, string, string) (shards.RuntimeStatus, error)
+				}); ok {
+					status, err := control.Status(ctx, room.DirectoryName, world.DirectoryName)
+					if err != nil {
+						return nil, nil, err
+					}
+					var valid bool
+					mode, valid = shared.NormalizeRuntimePerformanceMode(status.RuntimeMode)
+					if !valid {
+						return nil, nil, shards.ErrInvalidRuntimeMode
+					}
+				}
+				running = append(running, plannedWorld{roomID: room.ID, roomName: room.DirectoryName, worldID: world.ID, worldName: world.DirectoryName, isMaster: world.IsMaster, runtimeMode: mode})
 			}
 		}
 	}
@@ -524,7 +544,15 @@ func (s *Service) setRunning(ctx context.Context, world plannedWorld, expected b
 		return nil
 	}
 	if expected {
-		err = s.control.Start(ctx, world.roomName, world.worldName)
+		if control, ok := s.control.(interface {
+			StartWithRuntimeMode(context.Context, string, string, shared.RuntimePerformanceMode) error
+		}); ok {
+			err = control.StartWithRuntimeMode(ctx, world.roomName, world.worldName, world.runtimeMode)
+		} else if mode, valid := shared.NormalizeRuntimePerformanceMode(world.runtimeMode); !valid || mode != shared.RuntimePerformanceModeGame {
+			return shards.ErrRuntimeModeUnavailable
+		} else {
+			err = s.control.Start(ctx, world.roomName, world.worldName)
+		}
 	} else {
 		err = s.control.Stop(ctx, world.roomName, world.worldName)
 	}

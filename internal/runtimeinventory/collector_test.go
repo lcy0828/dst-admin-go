@@ -106,3 +106,21 @@ func TestDSTProcessMatchRejectsSupervisorWithEmbeddedLaunchCommand(t *testing.T)
 		t.Fatal("actual DST process was not recognized")
 	}
 }
+
+func TestShardProcessReadsRuntimeModeFromActualArguments(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want shared.RuntimePerformanceMode
+	}{
+		{nil, shared.RuntimePerformanceModeGame},
+		{[]string{"-lua_vm_type=game"}, shared.RuntimePerformanceModeGame},
+		{[]string{"-lua_vm_type=jit"}, shared.RuntimePerformanceModeLuaJIT},
+		{[]string{"-lua_vm_type", "jit_gen"}, shared.RuntimePerformanceModeArenaGC},
+		{[]string{"-lua_vm_type=future"}, "unknown"},
+	} {
+		value := ShardProcessFromArguments(42, "dontstarve_dedicated_server_nullrenderer_x64", tc.args)
+		if value.RuntimeMode != tc.want {
+			t.Fatalf("args=%v got=%s want=%s", tc.args, value.RuntimeMode, tc.want)
+		}
+	}
+}

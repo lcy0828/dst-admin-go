@@ -29,7 +29,10 @@ type restartWorldOperations struct {
 func (o *restartWorldOperations) StatusFor(_ context.Context, _, id string) (shards.RuntimeStatus, error) {
 	return o.states[id], o.statusErr
 }
-func (o *restartWorldOperations) Plan(action shards.Action, _ string, ids []string) ([]jobs.TargetSpec, jobs.Runner, error) {
+func (o *restartWorldOperations) PlanWithOptions(action shards.Action, _ string, ids []string, options shards.PlanOptions) ([]jobs.TargetSpec, jobs.Runner, error) {
+	if !options.PreserveRuntimeMode {
+		return nil, nil, errors.New("maintenance must preserve runtime modes")
+	}
 	if action != shards.ActionRestart || len(ids) == 0 {
 		return nil, nil, errors.New("invalid restart selection")
 	}

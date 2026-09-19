@@ -602,12 +602,18 @@ func (c *Coordinator) activationOperation(publication Publication, world WorldPl
 			break
 		}
 	}
-	return RuntimeOperation{
+	operation := RuntimeOperation{
 		PublicationID: publication.ID, TopologyRevision: publication.Plan.TopologyRevision,
 		PlanHash: publication.Plan.PlanHash, Fences: append([]Fence(nil), fences...), Action: "activate-" + action,
 		IdempotencyKey: "mod-activation:" + hashBytes([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s", publication.ID, world.RoomID, world.WorldID, action, attempt))),
 		RenewFences:    c.renewFences,
 	}
+	if action != "stop" {
+		if index := activationShardIndex(publication, world.RoomID, world.WorldID); index >= 0 {
+			operation.RuntimeMode = publication.Activation.Shards[index].RuntimeMode
+		}
+	}
+	return operation
 }
 
 func publicationOperationKey(publicationID string) string {

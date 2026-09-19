@@ -17,6 +17,8 @@ import (
 	"dont/internal/jobs"
 	"dont/internal/roomops"
 	"dont/internal/rooms"
+	"dont/internal/shards"
+	"dont/shared"
 
 	"github.com/jinzhu/gorm"
 	_ "github.com/mattn/go-sqlite3"
@@ -474,5 +476,42 @@ func TestCleanSteamCacheOnlyRemovesApp343050(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(base, "downloading", "999999")); err != nil {
 			t.Fatalf("unrelated cache removed: %v", err)
 		}
+	}
+}
+
+type updateModeControl struct {
+	*updateControl
+	modes map[string]shared.RuntimePerformanceMode
+}
+
+func (c *updateModeControl) Status(ctx context.Context, room, world string) (shards.RuntimeStatus, error) {
+	running, err := c.IsRunning(ctx, room, world)
+	state := shards.RuntimeStopped
+	if running {
+		state = shards.RuntimeRunning
+	}
+	return shards.RuntimeStatus{State: state, SessionExists: running, RuntimeMode: c.modes[world]}, err
+}
+func (c *updateModeControl) StartWithRuntimeMode(ctx context.Context, room, world string, mode shared.RuntimePerformanceMode) error {
+	c.modes[world] = mode
+	return c.Start(ctx, room, world)
+}
+func TestLocalUpdatePreservesObservedRuntimeModes(t *testing.T) {
+	service, _, _, control, _, _ := newUpdateService(t, nil)
+	modes := &updateModeControl{updateControl: control, modes: map[string]shared.RuntimePerformanceMode{"Master": shared.RuntimePerformanceModeLuaJIT, "Caves": shared.RuntimePerformanceModeArenaGC}}
+	service.control = modes
+	managed, running, err := service.captureState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.execute(context.Background(), "local-mode-update", UpdateRequest{RestartRunning: true}, "/tmp/steamcmd", managed, running, func(result jobs.TargetResult) {
+		if result.Status != jobs.StatusSucceeded {
+			t.Errorf("result=%#v", result)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if modes.modes["Master"] != shared.RuntimePerformanceModeLuaJIT || modes.modes["Caves"] != shared.RuntimePerformanceModeArenaGC {
+		t.Fatalf("modes=%v", modes.modes)
 	}
 }
