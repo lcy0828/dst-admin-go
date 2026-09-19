@@ -29,7 +29,9 @@ func TestProductionCodeDoesNotBypassRuntimeDriverForTmux(t *testing.T) {
 		}
 		if entry.IsDir() {
 			name := entry.Name()
-			if name == ".git" || name == "vendor" || strings.HasPrefix(name, ".tmp") {
+			// Match go tooling's treatment of hidden/private source copies and
+			// avoid walking frontend dependencies or generated build outputs.
+			if path != root && (strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || name == "vendor" || name == "node_modules" || name == "dist") {
 				return filepath.SkipDir
 			}
 			return nil
