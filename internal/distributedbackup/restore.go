@@ -60,6 +60,9 @@ func (c *Coordinator) Restore(ctx context.Context, setID, confirmation, sourceJo
 	if confirmation != room.Name {
 		return RestoreResult{}, ErrInvalidInput
 	}
+	if err := validateRunningModes(currentParts, running); err != nil {
+		return RestoreResult{}, err
+	}
 	if err := c.verifySet(ctx, backupSet, currentParts, revision, true); err != nil {
 		return RestoreResult{}, err
 	}
@@ -72,7 +75,8 @@ func (c *Coordinator) Restore(ctx context.Context, setID, confirmation, sourceJo
 	}()
 	now := c.now().UTC()
 	operation := Operation{
-		ID: operationID, SetID: setID, RoomID: room.ID, Kind: "restore", Phase: "planned", Status: OperationRunning,
+		OriginalRuntimeModes: runtimeModesByWorld(currentParts),
+		ID:                   operationID, SetID: setID, RoomID: room.ID, Kind: "restore", Phase: "planned", Status: OperationRunning,
 		TopologyRevision: revision, LeaseID: lease.LeaseID, FencingToken: lease.FencingToken,
 		OriginalRunningWorlds: append([]string(nil), running...), CreatedAt: now, UpdatedAt: now,
 	}
@@ -81,9 +85,10 @@ func (c *Coordinator) Restore(ctx context.Context, setID, confirmation, sourceJo
 		return RestoreResult{}, err
 	}
 	result = RestoreResult{SetID: setID, OperationID: operationID, Warnings: []string{}}
+	restartSafe := true
 	defer func() {
-		if restartErr := c.restartWorlds(context.Background(), currentParts, running, operation, &lease); restartErr != nil {
-			returnErr = errors.Join(returnErr, fmt.Errorf("restore pre-restore running shards: %w", restartErr))
+		if restartSafe || operation.Phase == "rollback_completed" {
+			returnErr = errors.Join(returnErr, c.resumeOperationWorlds(context.Background(), currentParts, &operation, &lease))
 		}
 	}()
 	if err := c.saveOperationPhase(&operation, "stopping", OperationRunning, ""); err != nil {
@@ -117,6 +122,7 @@ func (c *Coordinator) Restore(ctx context.Context, setID, confirmation, sourceJo
 		return result, c.failRestore(&operation, nil, &lease, err)
 	}
 	prepared := make([]restorePart, 0, len(plans))
+	restartSafe = false
 	for index, plan := range plans {
 		if err := c.renewLease(ctx, &lease); err != nil {
 			return result, c.failRestore(&operation, prepared, &lease, err)
@@ -145,16 +151,17 @@ func (c *Coordinator) Restore(ctx context.Context, setID, confirmation, sourceJo
 		_ = c.saveOperationPhase(&operation, "published", OperationRecoveryRequired, err.Error())
 		return result, err
 	}
+	restartSafe = true
 	for index, plan := range plans {
 		if _, err := plan.driver.CompleteRestore(ctx, plan.target, c.runtimeOperation(lease, operation.ID, "complete", index, 0), plan.restoreID); err != nil {
 			result.Warnings = append(result.Warnings, plan.source.WorldName+" 恢复清理待重试: "+err.Error())
 		}
 	}
-	status, failure := OperationSucceeded, ""
+	status, failure := OperationRunning, ""
 	if len(result.Warnings) > 0 {
 		status, failure = OperationRecoveryRequired, strings.Join(result.Warnings, "; ")
 	}
-	if err := c.saveOperationPhase(&operation, "completed", status, failure); err != nil {
+	if err := c.saveOperationPhase(&operation, "resuming", status, failure); err != nil {
 		return result, err
 	}
 	return result, nil
@@ -298,16 +305,16 @@ func (c *Coordinator) transferRestore(ctx context.Context, plan restorePart, ope
 
 func (c *Coordinator) failRestore(operation *Operation, plans []restorePart, lease *operationlease.Lease, cause error) error {
 	rollbackErr := c.rollbackRestore(context.Background(), plans, *operation, lease)
-	status := OperationRolledBack
+	phase, status := "rollback_completed", OperationRunning
 	if rollbackErr != nil {
-		status = OperationRecoveryRequired
+		phase, status = "rolling_back", OperationRecoveryRequired
 	}
 	failure := cause.Error()
 	if rollbackErr != nil {
 		failure += "; rollback: " + rollbackErr.Error()
 	}
-	_ = c.saveOperationPhase(operation, "rolled_back", status, failure)
-	return errors.Join(cause, rollbackErr)
+	saveErr := c.saveOperationPhase(operation, phase, status, failure)
+	return errors.Join(cause, rollbackErr, saveErr)
 }
 
 func (c *Coordinator) rollbackRestore(ctx context.Context, plans []restorePart, operation Operation, lease *operationlease.Lease) error {

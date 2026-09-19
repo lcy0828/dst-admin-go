@@ -3,6 +3,8 @@ package distributedbackup
 import (
 	"errors"
 	"time"
+
+	"dont/shared"
 )
 
 var (
@@ -118,20 +120,21 @@ const (
 )
 
 type Operation struct {
-	ID                    string          `json:"id"`
-	SetID                 string          `json:"setId"`
-	ProtectionSetID       string          `json:"protectionSetId,omitempty"`
-	RoomID                string          `json:"roomId"`
-	Kind                  string          `json:"kind"`
-	Phase                 string          `json:"phase"`
-	Status                OperationStatus `json:"status"`
-	TopologyRevision      string          `json:"topologyRevision"`
-	LeaseID               string          `json:"leaseId,omitempty"`
-	FencingToken          uint64          `json:"fencingToken"`
-	OriginalRunningWorlds []string        `json:"originalRunningWorlds"`
-	Failure               string          `json:"failure,omitempty"`
-	CreatedAt             time.Time       `json:"createdAt"`
-	UpdatedAt             time.Time       `json:"updatedAt"`
+	OriginalRuntimeModes  map[string]shared.RuntimePerformanceMode `json:"originalRuntimeModes,omitempty"`
+	ID                    string                                   `json:"id"`
+	SetID                 string                                   `json:"setId"`
+	ProtectionSetID       string                                   `json:"protectionSetId,omitempty"`
+	RoomID                string                                   `json:"roomId"`
+	Kind                  string                                   `json:"kind"`
+	Phase                 string                                   `json:"phase"`
+	Status                OperationStatus                          `json:"status"`
+	TopologyRevision      string                                   `json:"topologyRevision"`
+	LeaseID               string                                   `json:"leaseId,omitempty"`
+	FencingToken          uint64                                   `json:"fencingToken"`
+	OriginalRunningWorlds []string                                 `json:"originalRunningWorlds"`
+	Failure               string                                   `json:"failure,omitempty"`
+	CreatedAt             time.Time                                `json:"createdAt"`
+	UpdatedAt             time.Time                                `json:"updatedAt"`
 }
 
 type CreateRequest struct {

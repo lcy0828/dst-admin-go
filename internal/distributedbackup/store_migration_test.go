@@ -47,8 +47,19 @@ func TestStoreMigrateAddsSnapshotColumnsToLegacySQLiteSchema(t *testing.T) {
 		}
 	}
 
+	if err := db.Exec(`INSERT INTO legacy_backup_operation
+  (id,room_id,kind,phase,status,topology_revision,fencing_token,original_running_worlds,created_at,updated_at)
+  VALUES ('before-upgrade','room','restore','published','running','revision',1,'["master"]',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`).Error; err != nil {
+		t.Fatal(err)
+	}
+
 	if err := NewStore(db, "legacy_").Migrate(); err != nil {
 		t.Fatalf("legacy migration failed: %v", err)
+	}
+
+	original, err := NewStore(db, "legacy_").Operation("before-upgrade")
+	if err != nil || original.Status != OperationRunning || original.Phase != "published" || len(original.OriginalRunningWorlds) != 1 || original.OriginalRunningWorlds[0] != "master" || len(original.OriginalRuntimeModes) != 0 {
+		t.Fatalf("existing recovery operation changed during migration: %#v err=%v", original, err)
 	}
 
 	for _, table := range []string{"legacy_backup_set", "legacy_backup_part"} {

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"dont/shared"
+
 	"github.com/jinzhu/gorm"
 )
 
@@ -79,6 +81,7 @@ type partRecord struct {
 }
 
 type operationRecord struct {
+	OriginalRuntimeModes  string    `gorm:"type:text"`
 	ID                    string    `gorm:"primary_key;type:char(36)"`
 	SetID                 string    `gorm:"type:char(36);index"`
 	ProtectionSetID       string    `gorm:"type:char(36);index"`
@@ -265,6 +268,7 @@ func (s *Store) SaveOperation(value Operation) (Operation, error) {
 		"set_id": record.SetID, "protection_set_id": record.ProtectionSetID, "phase": record.Phase, "status": record.Status,
 		"topology_revision": record.TopologyRevision, "lease_id": record.LeaseID, "fencing_token": record.FencingToken,
 		"original_running_worlds": record.OriginalRunningWorlds, "failure": record.Failure, "updated_at": record.UpdatedAt,
+		"original_runtime_modes": record.OriginalRuntimeModes,
 	}
 	result := s.db.Table(s.operationTable).Where("id = ?", value.ID).Updates(updates)
 	if result.Error != nil {
@@ -387,12 +391,17 @@ func partFromRecord(record partRecord) Part {
 }
 
 func operationRecordFrom(value Operation) (operationRecord, error) {
+	modes, err := json.Marshal(value.OriginalRuntimeModes)
+	if err != nil {
+		return operationRecord{}, err
+	}
 	running, err := json.Marshal(value.OriginalRunningWorlds)
 	if err != nil {
 		return operationRecord{}, err
 	}
 	return operationRecord{
-		ID: value.ID, SetID: value.SetID, ProtectionSetID: value.ProtectionSetID, RoomID: value.RoomID, Kind: value.Kind,
+		OriginalRuntimeModes: string(modes),
+		ID:                   value.ID, SetID: value.SetID, ProtectionSetID: value.ProtectionSetID, RoomID: value.RoomID, Kind: value.Kind,
 		Phase: value.Phase, Status: string(value.Status), TopologyRevision: value.TopologyRevision, LeaseID: value.LeaseID,
 		FencingToken: value.FencingToken, OriginalRunningWorlds: string(running), Failure: value.Failure,
 		CreatedAt: value.CreatedAt.UTC(), UpdatedAt: value.UpdatedAt.UTC(),
@@ -400,6 +409,12 @@ func operationRecordFrom(value Operation) (operationRecord, error) {
 }
 
 func operationFromRecord(record operationRecord) (Operation, error) {
+	var modes map[string]shared.RuntimePerformanceMode
+	if record.OriginalRuntimeModes != "" {
+		if err := json.Unmarshal([]byte(record.OriginalRuntimeModes), &modes); err != nil {
+			return Operation{}, err
+		}
+	}
 	var running []string
 	if err := json.Unmarshal([]byte(record.OriginalRunningWorlds), &running); err != nil {
 		return Operation{}, err
@@ -408,7 +423,8 @@ func operationFromRecord(record operationRecord) (Operation, error) {
 		running = []string{}
 	}
 	return Operation{
-		ID: record.ID, SetID: record.SetID, ProtectionSetID: record.ProtectionSetID, RoomID: record.RoomID,
+		OriginalRuntimeModes: modes,
+		ID:                   record.ID, SetID: record.SetID, ProtectionSetID: record.ProtectionSetID, RoomID: record.RoomID,
 		Kind: record.Kind, Phase: record.Phase, Status: OperationStatus(record.Status), TopologyRevision: record.TopologyRevision,
 		LeaseID: record.LeaseID, FencingToken: record.FencingToken, OriginalRunningWorlds: running,
 		Failure: record.Failure, CreatedAt: record.CreatedAt.UTC(), UpdatedAt: record.UpdatedAt.UTC(),

@@ -69,10 +69,11 @@ type Coordinator struct {
 }
 
 type runtimePart struct {
-	part   Part
-	driver runtimedriver.Driver
-	target runtimedriver.Target
-	state  string
+	runtimeMode shared.RuntimePerformanceMode
+	part        Part
+	driver      runtimedriver.Driver
+	target      runtimedriver.Target
+	state       string
 }
 
 func NewCoordinator(root string, rooms RoomCatalog, placements PlacementResolver, runtimes RuntimeRouter, leases LeaseService, store *Store) (*Coordinator, error) {
@@ -183,6 +184,11 @@ func (c *Coordinator) createUsingLease(ctx context.Context, roomID, name, kind, 
 			mode = ModeHot
 		}
 	}
+	if mode == ModeCold {
+		if err := validateRunningModes(runtimeParts, running); err != nil {
+			return Set{}, err
+		}
+	}
 	set, operation, err := c.initializeSet(room, runtimeParts, revision, running, name, kind, sourceJobID, operationID, *lease, mode)
 	if err != nil {
 		return Set{}, err
@@ -195,12 +201,9 @@ func (c *Coordinator) createUsingLease(ctx context.Context, roomID, name, kind, 
 
 func (c *Coordinator) createWithPlan(ctx context.Context, set Set, operation Operation, runtimeParts []runtimePart, lease *operationlease.Lease, restart bool) (result Set, returnErr error) {
 	result = set
-	originalRunning := append([]string(nil), operation.OriginalRunningWorlds...)
 	defer func() {
 		if restart {
-			if restartErr := c.restartWorlds(context.Background(), runtimeParts, originalRunning, operation, lease); restartErr != nil {
-				returnErr = errors.Join(returnErr, fmt.Errorf("restore original running shards: %w", restartErr))
-			}
+			returnErr = errors.Join(returnErr, c.resumeOperationWorlds(context.Background(), runtimeParts, &operation, lease))
 		}
 	}()
 	if err := c.saveOperationPhase(&operation, "stopping", OperationRunning, ""); err != nil {
@@ -242,7 +245,11 @@ func (c *Coordinator) createWithPlan(ctx context.Context, set Set, operation Ope
 		return c.failCreate(result, operation, err)
 	}
 	operation.SetID = result.ID
-	if err := c.saveOperationPhase(&operation, "completed", OperationSucceeded, ""); err != nil {
+	phase, status := "completed", OperationSucceeded
+	if restart {
+		phase, status = "resuming", OperationRunning
+	}
+	if err := c.saveOperationPhase(&operation, phase, status, ""); err != nil {
 		return result, err
 	}
 	return result, nil
@@ -291,7 +298,7 @@ func (c *Coordinator) plan(ctx context.Context, roomID string) (rooms.Room, []ru
 		}
 		partID := fmt.Sprintf("backup-%s-%02d", setID, index)
 		parts = append(parts, runtimePart{
-			driver: driver, target: target, state: status.State,
+			driver: driver, target: target, state: status.State, runtimeMode: status.RuntimeMode,
 			part: Part{
 				ID: partID, SetID: setID, RoomID: roomID, WorldID: world.ID, WorldName: world.Name, WorldRole: string(world.Role),
 				TargetID: target.TargetID, InstallationID: target.InstallationID, Cluster: target.Cluster, Shard: target.Shard,
@@ -330,7 +337,8 @@ func (c *Coordinator) initializeSet(room rooms.Room, parts []runtimePart, revisi
 		return Set{}, Operation{}, err
 	}
 	operation := Operation{
-		ID: operationID, SetID: setID, RoomID: room.ID, Kind: "create", Phase: "planned", Status: OperationRunning,
+		OriginalRuntimeModes: runtimeModesByWorld(parts),
+		ID:                   operationID, SetID: setID, RoomID: room.ID, Kind: "create", Phase: "planned", Status: OperationRunning,
 		TopologyRevision: revision, LeaseID: lease.LeaseID, FencingToken: lease.FencingToken,
 		OriginalRunningWorlds: append([]string(nil), running...), CreatedAt: now, UpdatedAt: now,
 	}
@@ -610,10 +618,50 @@ func (c *Coordinator) restartWorlds(ctx context.Context, parts []runtimePart, wo
 			failures = errors.Join(failures, err)
 			continue
 		}
-		_, err := part.driver.ExecuteShard(ctx, part.target, c.runtimeOperation(*lease, operation.ID, "restart", index, 0), shared.ShardActionStart, stopTimeout)
+		request := c.runtimeOperation(*lease, operation.ID, "restart", index, 0)
+		request.RuntimeMode = operation.OriginalRuntimeModes[part.part.WorldID]
+		_, err := part.driver.ExecuteShard(ctx, part.target, request, shared.ShardActionStart, stopTimeout)
 		failures = errors.Join(failures, err)
 	}
 	return failures
+}
+
+func runtimeModesByWorld(parts []runtimePart) map[string]shared.RuntimePerformanceMode {
+	values := make(map[string]shared.RuntimePerformanceMode, len(parts))
+	for _, part := range parts {
+		values[part.part.WorldID] = part.runtimeMode
+	}
+	return values
+}
+
+func validateRunningModes(parts []runtimePart, running []string) error {
+	for _, part := range parts {
+		for _, id := range running {
+			if part.part.WorldID == id {
+				if _, valid := shared.NormalizeRuntimePerformanceMode(part.runtimeMode); !valid {
+					return fmt.Errorf("无法确认世界 %s 的 Lua 运行模式，请等待启动完成或升级 Agent 后重试", part.part.WorldName)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// Keep completed data work recoverable until every previously running world
+// has resumed. Recovery can then retry startup without publishing saves again.
+func (c *Coordinator) resumeOperationWorlds(ctx context.Context, parts []runtimePart, operation *Operation, lease *operationlease.Lease) error {
+	if err := c.restartWorlds(ctx, parts, operation.OriginalRunningWorlds, *operation, lease); err != nil {
+		return c.markRecoveryRequired(operation, errors.Join(errors.New("恢复原运行世界失败"), err))
+	}
+	if operation.Status == OperationRunning {
+		switch operation.Phase {
+		case "completed", "resuming":
+			return c.saveOperationPhase(operation, "completed", OperationSucceeded, "")
+		case "rollback_completed":
+			return c.saveOperationPhase(operation, "recovered", OperationRolledBack, operation.Failure)
+		}
+	}
+	return nil
 }
 
 func orderedRuntimeParts(parts []runtimePart, masterFirst bool) []runtimePart {

@@ -67,6 +67,12 @@ func (c *Coordinator) recoverOperation(ctx context.Context, operation Operation)
 		if loadErr != nil {
 			return c.markRecoveryRequired(&operation, loadErr)
 		}
+		if (operation.Phase == "completed" || operation.Phase == "resuming") && value.Status == StatusVerified {
+			if err := c.restartWorlds(ctx, current, operation.OriginalRunningWorlds, operation, &lease); err != nil {
+				return c.markRecoveryRequired(&operation, err)
+			}
+			return c.saveOperationPhase(&operation, "completed", OperationSucceeded, "")
+		}
 		byWorld := runtimePartsByWorld(current)
 		var cleanup error
 		for index, part := range value.Parts {
@@ -97,6 +103,12 @@ func (c *Coordinator) recoverOperation(ctx context.Context, operation Operation)
 	if operation.Kind != "restore" {
 		return c.markRecoveryRequired(&operation, errors.New("unknown backup operation kind"))
 	}
+	if operation.Phase == "rollback_completed" {
+		if err := c.restartWorlds(ctx, current, operation.OriginalRunningWorlds, operation, &lease); err != nil {
+			return c.markRecoveryRequired(&operation, err)
+		}
+		return c.saveOperationPhase(&operation, "recovered", OperationRolledBack, operation.Failure)
+	}
 	value, err := c.store.GetSet(operation.SetID)
 	if err != nil {
 		return c.markRecoveryRequired(&operation, err)
@@ -105,7 +117,7 @@ func (c *Coordinator) recoverOperation(ctx context.Context, operation Operation)
 	if err != nil {
 		return c.markRecoveryRequired(&operation, err)
 	}
-	if operation.Phase == "published" || operation.Phase == "completed" {
+	if operation.Phase == "published" || operation.Phase == "completed" || operation.Phase == "resuming" {
 		var cleanup error
 		for index, plan := range plans {
 			_, stepErr := plan.driver.CompleteRestore(ctx, plan.target, c.runtimeOperation(lease, operation.ID, "recover-complete", index, 0), plan.restoreID)
@@ -117,17 +129,23 @@ func (c *Coordinator) recoverOperation(ctx context.Context, operation Operation)
 		}
 		return c.saveOperationPhase(&operation, "completed", OperationSucceeded, "")
 	}
-	rollbackErr := c.rollbackRestore(ctx, plans, operation, &lease)
-	restartErr := c.restartWorlds(ctx, current, operation.OriginalRunningWorlds, operation, &lease)
-	if err := errors.Join(rollbackErr, restartErr); err != nil {
+	// Older controllers may have restarted partially restored worlds. Always
+	// stop writers before attempting rollback, and never resume a failed rollback.
+	if err := c.stopAll(ctx, current, operation, &lease); err != nil {
 		return c.markRecoveryRequired(&operation, err)
 	}
-	return c.saveOperationPhase(&operation, "recovered", OperationRolledBack, "控制器重启后已回滚未完成的恢复")
+	if err := c.rollbackRestore(ctx, plans, operation, &lease); err != nil {
+		return c.markRecoveryRequired(&operation, err)
+	}
+	if err := c.saveOperationPhase(&operation, "rollback_completed", OperationRunning, "控制器重启后已回滚未完成的恢复"); err != nil {
+		return err
+	}
+	return c.resumeOperationWorlds(ctx, current, &operation, &lease)
 }
 
 func (c *Coordinator) markRecoveryRequired(operation *Operation, cause error) error {
-	_ = c.saveOperationPhase(operation, operation.Phase, OperationRecoveryRequired, cause.Error())
-	return errors.Join(ErrRecoveryIncomplete, cause)
+	saveErr := c.saveOperationPhase(operation, operation.Phase, OperationRecoveryRequired, cause.Error())
+	return errors.Join(ErrRecoveryIncomplete, cause, saveErr)
 }
 
 func runtimePartsByWorld(values []runtimePart) map[string]runtimePart {

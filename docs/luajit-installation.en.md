@@ -20,6 +20,10 @@ Stop all worlds sharing the DST installation before installing. Afterward, the s
 Startup uses only upstream `-lua_vm_type=game|jit|jit_gen`. JIT compilation follows upstream configuration without a separate override switch.
 Ordinary startup does not download, repair, or replace resources. If a SteamCMD update overwrites the launcher, reinstall/repair LuaJIT.
 
+Automatic restarts after cold backups, save restores, game updates, and mod updates preserve each world's previous Lua runtime mode.
+Remote nodes require Agent 2.16.14 or later. If the mode cannot be determined, maintenance asks you to wait or upgrade before stopping worlds.
+If a game update makes the previous mode unavailable, startup reports a failure instead of silently switching to Game Lua.
+
 Currently supported: Linux x64, 64-bit DST, and Native Runtime (including regular All-in-One).
 Installation is not currently offered for Windows, macOS, Linux ARM, or independent-shard containers.
 Remote Agents and Controllers must use the updated versions supporting `runtime.luajit.v2` and the simplified `luajit` startup mode.

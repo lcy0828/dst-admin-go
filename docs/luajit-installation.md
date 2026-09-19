@@ -22,6 +22,10 @@ LuaJIT，或高级设置中的实验性分代 GC。启动参数仅使用上游�
 `-lua_vm_type=game|jit|jit_gen`，JIT 编译行为遵循上游配置，不额外提供覆盖开关。
 普通启动不下载、修复或替换资源。SteamCMD 更新若覆盖启动入口，可重新安装 / 修复。
 
+冷备份、存档恢复、游戏更新和模组更新后的自动重启会保留各世界原先的 Lua 运行模式。
+远程节点需升级到 Agent 2.16.14 或更新版本；无法确认运行模式时，会在停服前提示等待或升级。
+若游戏更新使原模式不可用，启动会明确失败，不会静默切回 Game Lua。
+
 当前支持 Linux x64、64 位 DST、Native Runtime（包含常规 All-in-One）。
 Windows、macOS、Linux ARM 和独立分片容器暂不提供安装；远程 Agent 和控制端
 需使用本次更新后的版本，支持 `runtime.luajit.v2` 和简化后的 `luajit` 启动模式。
