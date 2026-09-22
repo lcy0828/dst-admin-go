@@ -40,11 +40,13 @@ type nativeConsoleHealth interface {
 }
 
 type Native struct {
-	saveRoot string
-	control  NativeControl
-	transfer *shardtransfer.Manager
-	configs  *configpublication.Manager
-	cpu      NativeCPUBackend
+	artworkServer   string
+	artworkWorkshop string
+	saveRoot        string
+	control         NativeControl
+	transfer        *shardtransfer.Manager
+	configs         *configpublication.Manager
+	cpu             NativeCPUBackend
 
 	evidence *nativeEvidenceStore
 }
@@ -275,7 +277,7 @@ func (d *Native) Kind() Kind { return KindNative }
 func (d *Native) Capabilities() []Capability {
 	result := []Capability{
 		CapabilityLifecycle, CapabilityConsoleInput, CapabilityConsoleHealth, CapabilityRawConsole,
-		CapabilityOperationProof, CapabilityLogContinuation, CapabilityChatHistory, CapabilityArtifacts, CapabilityWorldStateRead,
+		CapabilityOperationProof, CapabilityLogContinuation, CapabilityChatHistory, CapabilityArtifacts, CapabilityWorldStateRead, CapabilityEntityArtwork,
 		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore, CapabilityConfigRead, CapabilityConfigSecrets, CapabilityConfigPublish, CapabilityConfigApply,
 		CapabilityShardRouting,
 	}

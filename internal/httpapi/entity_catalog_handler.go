@@ -18,6 +18,7 @@ type EntityCatalogSearch interface {
 }
 
 type EntityCatalogHandler struct {
+	artwork   EntityArtworkReader
 	catalog   EntityCatalogSearch
 	runtime   entitycatalog.RuntimeCommander
 	snapshots *entitycatalog.SnapshotCache
@@ -36,6 +37,7 @@ func (h *EntityCatalogHandler) Register(v2 *gin.RouterGroup) {
 	v2.GET("/entity-catalog/entities", h.search)
 	v2.GET("/entity-catalog/directory", func(c *gin.Context) { Success(c, http.StatusOK, entitycatalog.Directory()) })
 	v2.GET("/rooms/:roomId/worlds/:worldId/entity-catalog/snapshot", h.snapshot)
+	v2.GET("/rooms/:roomId/worlds/:worldId/entity-catalog/artwork/:prefab", h.readArtwork)
 	v2.POST("/rooms/:roomId/worlds/:worldId/entity-catalog/search", h.searchRuntime)
 }
 

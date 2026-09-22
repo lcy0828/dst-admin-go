@@ -78,6 +78,8 @@ func runtimeCapability(action shared.RuntimeAction) string {
 		return "runtime.chat-history.v1"
 	case shared.RuntimeActionReadArtifacts:
 		return "runtime.artifacts.v1"
+	case shared.RuntimeActionEntityArtwork:
+		return "runtime.entity-artwork.v1"
 	case shared.RuntimeActionWorldStateRead:
 		return "runtime.worldstate.read.v1"
 	case shared.RuntimeActionObserveOperation:

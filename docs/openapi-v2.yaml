@@ -2902,6 +2902,24 @@ paths:
         "200": { description: Entity search results, content: { application/json: { schema: { $ref: "#/components/schemas/EntityCatalogEnvelope" } } } }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
         "502": { $ref: "#/components/responses/BadGateway" }
+  /rooms/{roomId}/worlds/{worldId}/entity-catalog/artwork/{prefab}:
+    parameters:
+      - { $ref: "#/components/parameters/RoomID" }
+      - { $ref: "#/components/parameters/WorldID" }
+      - { name: prefab, in: path, required: true, schema: { type: string, maxLength: 80 } }
+      - { name: modId, in: query, schema: { type: string, maxLength: 80 } }
+    get:
+      tags: [Entity Catalog]
+      operationId: getWorldEntityArtwork
+      summary: Read an installed game or mod thumbnail from the world's applied Runtime
+      description: Lazy, bounded XML/KTEX extraction, without game console calls or local fallback. Matches exact Prefab atlas element names. Private browser cache for five minutes. Remote Agent requires runtime.entity-artwork.v1.
+      responses:
+        "200": { description: PNG thumbnail, content: { image/png: { schema: { type: string, format: binary } } } }
+        "204": { description: No matching artwork }
+        "304": { description: Cached PNG is current }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "503": { description: Target unavailable, capability missing, unreadable asset or resource limit reached }
   /rooms/{roomId}/worlds/{worldId}/entity-catalog/search:
     parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }]
     post:

@@ -522,6 +522,11 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err != nil {
 		return nil, err
 	}
+	artworkWorkshopPath := ""
+	if strings.TrimSpace(ugcPath) != "" {
+		artworkWorkshopPath = runtimeWorkshopContentPath
+	}
+	nativeRuntimeDriver.ConfigureEntityArtwork(serverContentRoot, artworkWorkshopPath)
 	trustedServerRoot, err := filepath.Abs(serverInstallRoot)
 	if err != nil {
 		return nil, err
@@ -599,6 +604,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	entityCatalogHandler.ConfigureRuntime(distributedRuntimeBridge)
+	entityCatalogHandler.ConfigureArtwork(runtimeDriverRouter)
 	runtimeEventService, err := runtimeevents.New(distributedRuntimeBridge)
 	if err != nil {
 		return nil, err

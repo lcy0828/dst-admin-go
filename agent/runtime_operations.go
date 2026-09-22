@@ -17,6 +17,7 @@ import (
 
 	"dont/internal/configpublication"
 	"dont/internal/consoledispatch"
+	"dont/internal/entityart"
 	"dont/internal/networkprobe"
 	"dont/internal/roomops"
 	"dont/internal/runtimefiles"
@@ -73,6 +74,12 @@ func (a *Agent) executeRuntimeOperationContext(parent context.Context, commandTy
 	defer cancel()
 
 	if !shared.RuntimeOperationRequiresLease(*request) {
+		if request.Action == shared.RuntimeActionEntityArtwork {
+			data, err := entityart.Default.Read(operationContext, runtimeModServerPath(installation), runtimeWorkshopContentPath(installation), request.EntityArtwork.Prefab, request.EntityArtwork.ModID)
+			result := runtimeResult(*request, shared.RuntimeOutcomeObserved, "Entity artwork read")
+			result.EntityArtwork = &shared.RuntimeEntityArtworkResult{Prefab: request.EntityArtwork.Prefab, ModID: request.EntityArtwork.ModID, Data: data}
+			return result, err
+		}
 		if request.Action == shared.RuntimeActionConsoleSend {
 			control, err := a.runtimeControl(installation)
 			if err != nil {
@@ -190,6 +197,16 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 			request.LeaseExpiresAt.After(now.Add(10*time.Minute)) {
 			return errors.New("Runtime 操作租约无效或已过期")
 		}
+	}
+	if request.Action == shared.RuntimeActionEntityArtwork {
+		if request.EntityArtwork == nil || !entityart.Valid(request.EntityArtwork.Prefab, request.EntityArtwork.ModID) ||
+			request.GameInstallation != nil || request.LuaJIT != nil || request.Console != nil || request.Logs != nil || request.ChatLogs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil || request.Network != nil || request.CPU != nil || request.Configuration != nil || request.Map != nil {
+			return entityart.ErrInvalid
+		}
+		return nil
+	}
+	if request.EntityArtwork != nil {
+		return entityart.ErrInvalid
 	}
 	if shared.IsGameInstallationAction(request.Action) {
 		return validateGameInstallationPayload(request)

@@ -23,6 +23,7 @@ const (
 	RuntimeActionChatLogsRead            RuntimeAction = "runtime.chat-logs.read"
 	RuntimeActionReadArtifacts           RuntimeAction = "runtime.artifacts.read"
 	RuntimeActionWorldStateRead          RuntimeAction = "runtime.worldstate.read"
+	RuntimeActionEntityArtwork           RuntimeAction = "runtime.entity-artwork.read"
 	RuntimeActionMigrationExportPrepare  RuntimeAction = "runtime.migration.export.prepare"
 	RuntimeActionMigrationExportRead     RuntimeAction = "runtime.migration.export.read"
 	RuntimeActionMigrationExportRelease  RuntimeAction = "runtime.migration.export.release"
@@ -156,6 +157,16 @@ type RuntimeChatLogRequest struct {
 
 func IsRuntimeLogSource(value RuntimeLogSource) bool {
 	return value == "" || value == RuntimeLogSourceServer || value == RuntimeLogSourceChat
+}
+
+type RuntimeEntityArtworkRequest struct {
+	Prefab string `json:"prefab"`
+	ModID  string `json:"mod_id,omitempty"`
+}
+type RuntimeEntityArtworkResult struct {
+	Prefab string `json:"prefab"`
+	ModID  string `json:"mod_id,omitempty"`
+	Data   []byte `json:"data,omitempty"`
 }
 
 type RuntimeArtifactRequest struct {
@@ -374,6 +385,7 @@ type RuntimeMapRequest struct {
 // path; execution destinations still come from the installation registry. It
 // never accepts an executable, container specification or shell command.
 type RuntimeOperationRequest struct {
+	EntityArtwork    *RuntimeEntityArtworkRequest `json:"entity_artwork,omitempty"`
 	GameInstallation *GameInstallationRequest     `json:"game_installation,omitempty"`
 	LuaJIT           *RuntimeLuaJITRequest        `json:"luajit,omitempty"`
 	ProtocolVersion  int                          `json:"protocol_version"`
@@ -762,6 +774,7 @@ type RuntimeRoomRecoveryResult struct {
 }
 
 type RuntimeOperationResult struct {
+	EntityArtwork    *RuntimeEntityArtworkResult `json:"entity_artwork,omitempty"`
 	GameInstallation *GameInstallationReport     `json:"game_installation,omitempty"`
 	LuaJITReleases   []LuaJITRelease             `json:"luajit_releases,omitempty"`
 	LuaJITRelease    *LuaJITRelease              `json:"luajit_release,omitempty"`
@@ -805,7 +818,7 @@ func IsRuntimeAction(value RuntimeAction) bool {
 	}
 	switch value {
 	case RuntimeActionConsoleHealth, RuntimeActionConsoleSend, RuntimeActionObserveOperation, RuntimeActionReadLogs,
-		RuntimeActionChatLogsList, RuntimeActionChatLogsRead, RuntimeActionReadArtifacts, RuntimeActionWorldStateRead,
+		RuntimeActionChatLogsList, RuntimeActionChatLogsRead, RuntimeActionReadArtifacts, RuntimeActionWorldStateRead, RuntimeActionEntityArtwork,
 		RuntimeActionMigrationExportPrepare, RuntimeActionMigrationExportRead, RuntimeActionMigrationExportRelease,
 		RuntimeActionMigrationPeerGrant, RuntimeActionMigrationFetch,
 		RuntimeActionMigrationImportBegin, RuntimeActionMigrationImportWrite, RuntimeActionMigrationImportCommit,
