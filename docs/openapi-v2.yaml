@@ -4005,6 +4005,26 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/RuntimeTargetListEnvelope" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /runtime-targets/{targetId}/display-address:
+    parameters:
+      - { name: targetId, in: path, required: true, schema: { type: string } }
+    put:
+      tags: [Runtime Targets]
+      operationId: setRuntimeTargetDisplayAddress
+      summary: Set a display-only machine IP or hostname without changing game networking
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayAddress]
+              properties:
+                displayAddress: { type: string, maxLength: 253, description: Empty restores the discovered address }
+      responses:
+        "200": { description: Updated runtime target, content: { application/json: { schema: { $ref: "#/components/schemas/RuntimeTargetEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /runtime-targets/{targetId}:
     parameters:
       - name: targetId
@@ -9678,6 +9698,9 @@ components:
         kind: { $ref: "#/components/schemas/RuntimeKind" }
         agentId: { type: string }
         name: { type: string, description: Effective user-facing machine name. This is separate from hostname and RuntimeConfig.displayName. }
+        displayAddress: { type: string, description: Display-only address override }
+        displayNameCustom: { type: boolean }
+        containerized: { type: boolean }
         hostname: { type: string }
         os: { type: string }
         arch: { type: string }

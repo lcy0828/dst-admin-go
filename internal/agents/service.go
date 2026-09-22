@@ -156,17 +156,17 @@ func (s *Service) RuntimeTargets() ([]RuntimeTarget, error) {
 	if err != nil {
 		return nil, err
 	}
-	displayNames, err := s.store.NodeDisplayNames()
+	presentations, err := s.store.nodePresentations()
 	if err != nil {
 		return nil, err
 	}
 	items := make([]RuntimeTarget, 0, len(agentItems)+1)
 	if s.localEnabled {
-		items = append(items, applyRuntimeTargetDisplayName(s.localRuntimeTarget(), displayNames))
+		items = append(items, applyRuntimeTargetPresentation(s.localRuntimeTarget(), presentations))
 	}
 	for _, agent := range agentItems {
 		config, configured := configs[agent.ID]
-		items = append(items, applyRuntimeTargetDisplayName(runtimeTargetFromAgent(agent, config, configured), displayNames))
+		items = append(items, applyRuntimeTargetPresentation(runtimeTargetFromAgent(agent, config, configured), presentations))
 	}
 	return items, nil
 }
@@ -190,12 +190,12 @@ func (s *Service) RuntimeTarget(agentID string) (RuntimeTarget, error) {
 	}
 	config, err := s.store.RuntimeConfig(agentID)
 	if errors.Is(err, ErrRuntimeNotConfigured) {
-		return s.applyStoredRuntimeTargetDisplayName(runtimeTargetFromAgent(agent, RuntimeConfig{}, false))
+		return s.applyStoredRuntimeTargetPresentation(runtimeTargetFromAgent(agent, RuntimeConfig{}, false))
 	}
 	if err != nil {
 		return RuntimeTarget{}, err
 	}
-	return s.applyStoredRuntimeTargetDisplayName(runtimeTargetFromAgent(agent, config, true))
+	return s.applyStoredRuntimeTargetPresentation(runtimeTargetFromAgent(agent, config, true))
 }
 
 func (s *Service) SaveRuntimeConfig(agentID string, input RuntimeConfig) (RuntimeTarget, error) {
@@ -233,23 +233,33 @@ func (s *Service) saveRuntimeConfig(agentID string, input RuntimeConfig, source 
 	}
 	s.emitRuntimeTopologyChanged()
 	s.wakeInventoryRefresh()
-	return s.applyStoredRuntimeTargetDisplayName(runtimeTargetFromAgent(agent, config, true))
+	return s.applyStoredRuntimeTargetPresentation(runtimeTargetFromAgent(agent, config, true))
 }
 
 func (s *Service) RenameRuntimeTarget(targetID, displayName string) (RuntimeTarget, error) {
-	targetID = strings.TrimSpace(targetID)
-	displayName = strings.TrimSpace(displayName)
+	targetID, displayName = strings.TrimSpace(targetID), strings.TrimSpace(displayName)
 	if !validNodeDisplayName(displayName) {
 		return RuntimeTarget{}, ErrInvalidInput
 	}
+	target, err := s.resolvePresentationTarget(targetID)
+	if err != nil {
+		return RuntimeTarget{}, err
+	}
+	if err := s.store.SaveNodeDisplayName(targetID, displayName); err != nil {
+		return RuntimeTarget{}, err
+	}
+	target.Name, target.DisplayNameCustom = displayName, true
+	return target, nil
+}
 
+func (s *Service) resolvePresentationTarget(targetID string) (RuntimeTarget, error) {
 	var target RuntimeTarget
 	switch {
 	case targetID == "local":
 		if !s.localEnabled {
 			return RuntimeTarget{}, ErrRuntimeTargetNotFound
 		}
-		target = s.localRuntimeTarget()
+		return s.applyStoredRuntimeTargetPresentation(s.localRuntimeTarget())
 	case strings.HasPrefix(targetID, "agent:"):
 		agentID := strings.TrimPrefix(targetID, "agent:")
 		if !agentIDPattern.MatchString(agentID) {
@@ -267,10 +277,6 @@ func (s *Service) RenameRuntimeTarget(targetID, displayName string) (RuntimeTarg
 		return RuntimeTarget{}, ErrRuntimeTargetNotFound
 	}
 
-	if err := s.store.SaveNodeDisplayName(targetID, displayName); err != nil {
-		return RuntimeTarget{}, err
-	}
-	target.Name = displayName
 	return target, nil
 }
 
@@ -322,7 +328,7 @@ func (s *Service) localRuntimeTarget() RuntimeTarget {
 	return RuntimeTarget{
 		ID: "local", Kind: RuntimeKindLocal, Name: "本机", Hostname: hostname, OS: runtime.GOOS, Arch: runtime.GOARCH, Status: status,
 		Default: true, DefaultInstallationID: defaultID, Configured: configured, Online: true,
-		IPAddresses: localRuntimeIPAddresses(), Capabilities: localRuntimeCapabilities(), Config: config, Installations: installations, Performance: &performance,
+		Containerized: localRuntimeContainerized(), IPAddresses: localRuntimeIPAddresses(), Capabilities: localRuntimeCapabilities(), Config: config, Installations: installations, Performance: &performance,
 	}
 }
 
@@ -385,18 +391,20 @@ func localRuntimeCapabilities() []string {
 	)
 }
 
-func (s *Service) applyStoredRuntimeTargetDisplayName(target RuntimeTarget) (RuntimeTarget, error) {
-	displayNames, err := s.store.NodeDisplayNames()
+func (s *Service) applyStoredRuntimeTargetPresentation(target RuntimeTarget) (RuntimeTarget, error) {
+	presentations, err := s.store.nodePresentations()
 	if err != nil {
 		return RuntimeTarget{}, err
 	}
-	return applyRuntimeTargetDisplayName(target, displayNames), nil
+	return applyRuntimeTargetPresentation(target, presentations), nil
 }
 
-func applyRuntimeTargetDisplayName(target RuntimeTarget, displayNames map[string]string) RuntimeTarget {
-	if displayName := strings.TrimSpace(displayNames[target.ID]); displayName != "" {
-		target.Name = displayName
+func applyRuntimeTargetPresentation(target RuntimeTarget, presentations map[string]nodeDisplayNameRecord) RuntimeTarget {
+	presentation := presentations[target.ID]
+	if name := strings.TrimSpace(presentation.DisplayName); name != "" {
+		target.Name, target.DisplayNameCustom = name, true
 	}
+	target.DisplayAddress = presentation.DisplayAddress
 	return target
 }
 
@@ -1031,7 +1039,7 @@ func runtimeTargetFromAgent(agent Agent, config RuntimeConfig, configured bool) 
 	heartbeat := agent.LastHeartbeat.UTC()
 	return RuntimeTarget{
 		ID: "agent:" + agent.ID, Kind: RuntimeKindAgent, AgentID: agent.ID, Name: name,
-		Hostname: agent.Hostname, OS: agent.OS, Arch: agent.Arch, IPAddresses: append([]string{}, agent.IPAddresses...), Status: status,
+		Containerized: agent.Details["deployment_profile"] == "container", Hostname: agent.Hostname, OS: agent.OS, Arch: agent.Arch, IPAddresses: append([]string{}, agent.IPAddresses...), Status: status,
 		DefaultInstallationID: config.InstallationID, Configured: configured, Online: agent.Status == StatusOnline,
 		Capabilities: append([]string(nil), agent.Capabilities...), LastHeartbeat: &heartbeat, Config: config,
 		Installations: cloneRuntimeInstallations(agent.Installations), Performance: performance,

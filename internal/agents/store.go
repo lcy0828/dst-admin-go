@@ -82,10 +82,11 @@ type inventoryRecord struct {
 }
 
 type nodeDisplayNameRecord struct {
-	TargetID    string `gorm:"type:varchar(160);primary_key"`
-	DisplayName string `gorm:"type:varchar(100);not null"`
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	TargetID       string `gorm:"type:varchar(160);primary_key"`
+	DisplayName    string `gorm:"type:varchar(100);not null"`
+	DisplayAddress string `gorm:"type:varchar(253);not null;default:''"`
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 type Store struct {
@@ -98,6 +99,7 @@ type Store struct {
 	nodeNamesTable string
 	now            func() time.Time
 	inventoryMu    sync.Mutex
+	nodeMetadataMu sync.Mutex
 }
 
 const inventoryBundleVersion = 2
@@ -263,19 +265,33 @@ func (s *Store) DeleteAgent(id string) error {
 	return tx.Commit().Error
 }
 
-func (s *Store) NodeDisplayNames() (map[string]string, error) {
+func (s *Store) nodePresentations() (map[string]nodeDisplayNameRecord, error) {
 	var records []nodeDisplayNameRecord
 	if err := s.db.Table(s.nodeNamesTable).Find(&records).Error; err != nil {
 		return nil, err
 	}
-	result := make(map[string]string, len(records))
+	result := make(map[string]nodeDisplayNameRecord, len(records))
 	for _, record := range records {
-		result[record.TargetID] = record.DisplayName
+		result[record.TargetID] = record
+	}
+	return result, nil
+}
+
+func (s *Store) NodeDisplayNames() (map[string]string, error) {
+	records, err := s.nodePresentations()
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]string, len(records))
+	for id, record := range records {
+		result[id] = record.DisplayName
 	}
 	return result, nil
 }
 
 func (s *Store) SaveNodeDisplayName(targetID, displayName string) error {
+	s.nodeMetadataMu.Lock()
+	defer s.nodeMetadataMu.Unlock()
 	now := s.now().UTC()
 	var count int
 	if err := s.db.Table(s.nodeNamesTable).Where("target_id = ?", targetID).Count(&count).Error; err != nil {

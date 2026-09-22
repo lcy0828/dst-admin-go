@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"dont/internal/agents"
 	"dont/shared"
 )
 
@@ -194,6 +195,7 @@ type ResourcePreflight struct {
 }
 
 type InfrastructureSnapshot struct {
+	Machines         []MachineObservation   `json:"machines"`
 	Providers        []RuntimeProvider      `json:"providers"`
 	Environments     []ExecutionEnvironment `json:"environments"`
 	NetworkProfiles  []NetworkProfile       `json:"networkProfiles"`
@@ -202,6 +204,31 @@ type InfrastructureSnapshot struct {
 	Preflight        ResourcePreflight      `json:"preflight"`
 	CapacityPolicy   CapacityPolicy         `json:"capacityPolicy"`
 	ObservedAt       time.Time              `json:"observedAt"`
+}
+
+// MachineObservation reuses infrastructure observations and applied placements;
+// listing machines does not introduce another runtime collection or poller.
+type MachineObservation struct {
+	TargetID       string                 `json:"targetId"`
+	InstallationID string                 `json:"installationId"`
+	Available      bool                   `json:"available"`
+	Stale          bool                   `json:"stale"`
+	StaleReason    string                 `json:"staleReason,omitempty"`
+	ObservedAt     *time.Time             `json:"observedAt,omitempty"`
+	Capacity       agents.Capacity        `json:"capacity"`
+	Memory         shared.MemoryInventory `json:"memory"`
+	Worlds         []MachineWorld         `json:"worlds"`
+}
+
+type MachineWorld struct {
+	RoomID     string `json:"roomId"`
+	RoomName   string `json:"roomName"`
+	WorldID    string `json:"worldId"`
+	WorldName  string `json:"worldName"`
+	Role       string `json:"role"`
+	Known      bool   `json:"known"`
+	Running    bool   `json:"running"`
+	ServerPort int    `json:"serverPort,omitempty"`
 }
 
 type NetworkProfileUpdate struct {

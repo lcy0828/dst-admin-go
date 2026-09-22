@@ -26,6 +26,7 @@ func (h *AgentHandler) Register(v2 *gin.RouterGroup) {
 	runtimes := v2.Group("/runtime-targets")
 	runtimes.GET("", h.runtimeTargets)
 	runtimes.PATCH("/:targetId", h.renameRuntimeTarget)
+	runtimes.PUT("/:targetId/display-address", h.setRuntimeTargetDisplayAddress)
 	runtimes.GET("/agents/:agentId", h.runtimeTarget)
 	runtimes.PUT("/agents/:agentId", h.saveRuntimeConfig)
 	runtimes.DELETE("/agents/:agentId", h.deleteRuntimeConfig)

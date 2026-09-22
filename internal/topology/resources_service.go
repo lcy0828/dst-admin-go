@@ -53,6 +53,7 @@ func (s *Service) Infrastructure(ctx context.Context) (InfrastructureSnapshot, e
 	}
 	providers = enrichProviderIPAddresses(providers, inventories)
 	return InfrastructureSnapshot{
+		Machines:  machineObservations(plans, inventories),
 		Providers: providers, Environments: environments, NetworkProfiles: profiles,
 		PortReservations: reservations, CPUAllocations: allocations, Preflight: build.preflight,
 		CapacityPolicy: defaultCapacityPolicy(), ObservedAt: time.Now().UTC(),

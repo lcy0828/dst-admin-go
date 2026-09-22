@@ -222,6 +222,9 @@ type RuntimeTarget struct {
 	OS                    string                           `json:"os"`
 	Arch                  string                           `json:"arch"`
 	IPAddresses           []string                         `json:"ipAddresses"`
+	DisplayAddress        string                           `json:"displayAddress"`
+	DisplayNameCustom     bool                             `json:"displayNameCustom"`
+	Containerized         bool                             `json:"containerized"`
 	Status                RuntimeStatus                    `json:"status"`
 	Default               bool                             `json:"default"`
 	DefaultInstallationID string                           `json:"defaultInstallationId,omitempty"`

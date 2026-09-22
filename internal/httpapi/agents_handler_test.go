@@ -71,6 +71,17 @@ func TestAgentHTTPListCommandFailureAndKeyRotation(t *testing.T) {
 	if data := responseData(t, response); data["name"] != "本地游戏机" || data["hostname"] == "" {
 		t.Fatalf("unexpected renamed local machine: %s", response.Body.String())
 	}
+	response = performJSON(router, http.MethodPut, "/api/v2/runtime-targets/local/display-address", map[string]interface{}{
+		"displayAddress": "games.example.com",
+	}, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if data := responseData(t, response); data["displayAddress"] != "games.example.com" || data["name"] != "本地游戏机" || data["id"] != "local" {
+		t.Fatalf("unexpected display metadata: %s", response.Body.String())
+	}
+	response = performJSON(router, http.MethodPut, "/api/v2/runtime-targets/local/display-address", map[string]interface{}{}, nil, "")
+	assertStatus(t, response, http.StatusBadRequest)
+	response = performJSON(router, http.MethodPut, "/api/v2/runtime-targets/local/display-address", map[string]interface{}{"displayAddress": "0.0.0.0"}, nil, "")
+	assertStatus(t, response, http.StatusUnprocessableEntity)
 	response = performJSON(router, http.MethodPatch, "/api/v2/runtime-targets/agent%3Aagent-primary", map[string]interface{}{
 		"displayName": "远程游戏机",
 	}, nil, "")
