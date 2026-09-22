@@ -44,6 +44,7 @@ type runRecord struct {
 }
 
 type definitionRecord struct {
+	ScriptMode  string    `gorm:"type:varchar(16);not null;default:'template'"`
 	ID          string    `gorm:"primary_key;type:char(36)"`
 	Name        string    `gorm:"type:varchar(80);not null"`
 	Description string    `gorm:"type:varchar(300);not null"`
@@ -230,7 +231,7 @@ func (s *Store) CreateDefinition(definition Definition) (Definition, error) {
 	definition.ID = uuid.NewString()
 	record := definitionRecord{
 		ID: definition.ID, Name: definition.Name, Description: definition.Description,
-		Category: definition.Category, Script: definition.Script, Parameters: string(parameters),
+		Category: definition.Category, Script: definition.Script, ScriptMode: definition.ScriptMode, Parameters: string(parameters),
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.db.Table(s.definitionsTable).Create(&record).Error; err != nil {
@@ -246,7 +247,7 @@ func (s *Store) UpdateDefinition(definition Definition) (Definition, error) {
 	}
 	updates := map[string]interface{}{
 		"name": definition.Name, "description": definition.Description, "category": definition.Category,
-		"script": definition.Script, "parameters": string(parameters), "updated_at": s.now().UTC(),
+		"script": definition.Script, "script_mode": definition.ScriptMode, "parameters": string(parameters), "updated_at": s.now().UTC(),
 	}
 	result := s.db.Table(s.definitionsTable).Where("id = ?", definition.ID).Updates(updates)
 	if result.Error != nil {
@@ -306,7 +307,7 @@ func definitionFromRecord(record definitionRecord) (Definition, error) {
 	}
 	return Definition{
 		ID: record.ID, Name: record.Name, Description: record.Description, Category: record.Category,
-		Risk: RiskCritical, Parameters: parameters, Script: record.Script, IsBuiltin: false,
+		Risk: RiskCritical, Parameters: parameters, Script: record.Script, ScriptMode: record.ScriptMode, IsBuiltin: false,
 	}, nil
 }
 

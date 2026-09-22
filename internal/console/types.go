@@ -24,6 +24,7 @@ type Parameter struct {
 }
 
 type Definition struct {
+	ScriptMode  string      `json:"scriptMode,omitempty"`
 	ID          string      `json:"id"`
 	Name        string      `json:"name"`
 	Description string      `json:"description"`

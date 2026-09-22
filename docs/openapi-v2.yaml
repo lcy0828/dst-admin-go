@@ -6270,6 +6270,11 @@ components:
       additionalProperties: false
       required: [id, name, description, category, risk, parameters, script, isBuiltin]
       properties:
+        scriptMode:
+          type: string
+          enum: [template, literal]
+          default: template
+          description: Literal Lua preserves braces and requires an empty parameter list; template mode expands declared parameters.
         id:
           type: string
         name:
@@ -6293,6 +6298,11 @@ components:
       additionalProperties: false
       required: [name, category, script, parameters]
       properties:
+        scriptMode:
+          type: string
+          enum: [template, literal]
+          default: template
+          description: Literal Lua preserves braces and requires an empty parameter list; template mode expands declared parameters.
         name:
           type: string
           minLength: 1

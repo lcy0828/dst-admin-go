@@ -444,7 +444,7 @@ func builtinTemplates() map[string]template {
 			if err != nil {
 				return "", err
 			}
-			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.components and p.components.inventory then local mode=%s;local n=0;for i=1,%d do local item=SpawnPrefab(%s);if item then local granted=1;local stack=item.components and item.components.stackable;if mode=="stacks"and stack then stack:SetStackSize(stack.maxsize or 1);granted=stack:StackSize()end;p.components.inventory:GiveItem(item);n=n+granted end end;print("[DST-ADMIN-GIVE]",%s,%s,mode,n)else print("[DST-ADMIN-GIVE]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), quoteLua(quantityMode), count, quoteLua(prefab), quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
+			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.components and p.components.inventory then local mode=%s;local n=0;for i=1,%d do local item=SpawnPrefab(%s);if not item then error("PREFAB_NOT_FOUND")end;if not(item.components and item.components.inventoryitem)then item:Remove();error("PREFAB_NOT_INVENTORY_ITEM")end;if item then local granted=1;local stack=item.components and item.components.stackable;if mode=="stacks"and stack then stack:SetStackSize(stack.maxsize or 1);granted=stack:StackSize()end;p.components.inventory:GiveItem(item);n=n+granted end end;print("[DST-ADMIN-GIVE]",%s,%s,mode,n)else print("[DST-ADMIN-GIVE]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), quoteLua(quantityMode), count, quoteLua(prefab), quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
 		},
 	}
 	templates["give_recipe_materials"] = template{
@@ -628,6 +628,13 @@ func simpleTemplate(id, name, description, category string, risk Risk, script st
 }
 
 func normalizeDefinition(definition Definition) (Definition, error) {
+	if definition.ScriptMode == "" {
+		definition.ScriptMode = "template"
+	}
+	if definition.ScriptMode != "template" && definition.ScriptMode != "literal" || definition.ScriptMode == "literal" && len(definition.Parameters) > 0 {
+		return Definition{}, ErrInvalidDefinition
+	}
+
 	definition.Name = strings.TrimSpace(definition.Name)
 	definition.Description = strings.TrimSpace(definition.Description)
 	definition.Category = strings.TrimSpace(definition.Category)
@@ -659,6 +666,9 @@ func normalizeDefinition(definition Definition) (Definition, error) {
 			return Definition{}, ErrInvalidDefinition
 		}
 	}
+	if definition.ScriptMode == "literal" {
+		return definition, nil
+	}
 	for _, match := range placeholderPattern.FindAllStringSubmatch(definition.Script, -1) {
 		if _, exists := seen[match[1]]; !exists {
 			return Definition{}, ErrInvalidDefinition
@@ -668,6 +678,12 @@ func normalizeDefinition(definition Definition) (Definition, error) {
 }
 
 func renderCustomDefinition(definition Definition, arguments map[string]interface{}) (string, error) {
+	if definition.ScriptMode == "literal" {
+		if len(arguments) > 0 {
+			return "", ErrInvalidArguments
+		}
+		return definition.Script, nil
+	}
 	values := make(map[string]string, len(definition.Parameters))
 	for _, parameter := range definition.Parameters {
 		value, exists := arguments[parameter.Name]
@@ -687,9 +703,11 @@ func renderCustomDefinition(definition Definition, arguments map[string]interfac
 		}
 		values[parameter.Name] = rendered
 	}
-	script := definition.Script
-	for name, value := range values {
-		script = strings.ReplaceAll(script, "{"+name+"}", value)
+	script := placeholderPattern.ReplaceAllStringFunc(definition.Script, func(placeholder string) string {
+		return values[placeholder[1:len(placeholder)-1]]
+	})
+	if len(script) > 4096 {
+		return "", ErrInvalidArguments
 	}
 	return script, nil
 }
