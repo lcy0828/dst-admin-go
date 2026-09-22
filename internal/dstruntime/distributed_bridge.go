@@ -15,6 +15,7 @@ import (
 
 	"dont/internal/operationlease"
 	"dont/internal/requesttiming"
+	"dont/internal/runtimefiles"
 	"dont/shared"
 )
 
@@ -309,13 +310,26 @@ func (b *DistributedBridge) RefreshSnapshots(ctx context.Context, roomID, worldI
 	}
 }
 
+var ErrRuntimeCommandBusy = errors.New("world is processing another runtime operation")
+
 func (b *DistributedBridge) ExecuteCommand(ctx context.Context, roomID, worldID string, request CommandRequest) (CommandReceipt, error) {
 	if err := validateCommandRequest(request); err != nil {
 		return CommandReceipt{}, err
 	}
 	lock := b.worldLock(roomID, worldID)
-	lock.Lock()
+	// Optional catalogue browsing must not queue behind gameplay operations or
+	// other browsers. The caller can explicitly try again when the world is free.
+	if request.Action == "catalog.entities" {
+		if !lock.TryLock() {
+			return CommandReceipt{}, ErrRuntimeCommandBusy
+		}
+	} else {
+		lock.Lock()
+	}
 	defer lock.Unlock()
+	if err := ctx.Err(); err != nil {
+		return CommandReceipt{}, err
+	}
 	health, err := b.requireModule(ctx, roomID, worldID, "commands")
 	if err != nil {
 		return CommandReceipt{}, err
@@ -329,6 +343,11 @@ func (b *DistributedBridge) ExecuteCommand(ctx context.Context, roomID, worldID 
 	if _, err := b.runtime.SendID(ctx, roomID, worldID, shared.RuntimeConsoleRequest{
 		Mode: shared.ConsoleModeManaged, Command: command, CommandDocument: document,
 	}); err != nil {
+		// Different worlds in one room can briefly contend on the room's
+		// delivery lease. Only catalog reads may retry this pre-send rejection.
+		if request.Action == "catalog.entities" && errors.Is(err, operationlease.ErrBusy) {
+			return CommandReceipt{}, fmt.Errorf("%w: %w", ErrRuntimeCommandBusy, err)
+		}
 		return CommandReceipt{}, fmt.Errorf("send runtime command: %w", err)
 	}
 	return b.waitForCommandReceipt(ctx, roomID, worldID, health, request, sentAt)
@@ -432,8 +451,11 @@ func (b *DistributedBridge) requireModule(ctx context.Context, roomID, worldID, 
 		return Health{}, fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 	}
 	module, exists := health.Modules[moduleName]
-	if !health.Running || !health.Ready || !exists || !module.Running || !module.Ready || module.Busy || b.now().UTC().Sub(health.ReadAt) > defaultFreshFor {
+	if !health.Running || !health.Ready || !exists || !module.Running || !module.Ready || b.now().UTC().Sub(health.ReadAt) > defaultFreshFor {
 		return Health{}, fmt.Errorf("%w: %s module is not ready", ErrRuntimeUnavailable, moduleName)
+	}
+	if module.Busy {
+		return Health{}, fmt.Errorf("%w: %w: %s", ErrRuntimeUnavailable, ErrRuntimeCommandBusy, moduleName)
 	}
 	return health, nil
 }
@@ -479,10 +501,17 @@ func (b *DistributedBridge) lifecycleHealthReady(health Health, startedAt time.T
 }
 
 func (b *DistributedBridge) waitForCommandReceipt(ctx context.Context, roomID, worldID string, health Health, request CommandRequest, sentAt time.Time) (CommandReceipt, error) {
-	deadline := time.NewTimer(b.timeout)
+	timeout := b.timeout
+	if request.Action == "catalog.entities" && timeout == defaultCommandTimeout {
+		// Catalogue collection yields between game frames and has a 10s Runtime
+		// deadline. Allow time for its final receipt without extending Lua commands.
+		timeout = 15 * time.Second
+	}
+	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(b.pollInterval)
 	defer ticker.Stop()
+	var lastReadErr error
 	for {
 		bundle, err := b.runtime.ReadArtifacts(ctx, roomID, worldID, shared.ArtifactRuntimeCommand)
 		if err == nil {
@@ -504,9 +533,12 @@ func (b *DistributedBridge) waitForCommandReceipt(ctx context.Context, roomID, w
 				sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Sequence > candidates[j].Sequence })
 				return candidates[0], nil
 			}
-			if failures != nil {
-				return CommandReceipt{}, failures
-			}
+			// Klei replaces receipt files asynchronously. A partially written JSON
+			// slot is not evidence that the command failed. Keep validating reads
+			// until this request's receipt arrives; never resend the command.
+			lastReadErr = failures
+		} else if errors.Is(err, runtimefiles.ErrArtifactChanging) {
+			lastReadErr = err
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return CommandReceipt{}, err
 		}
@@ -514,7 +546,7 @@ func (b *DistributedBridge) waitForCommandReceipt(ctx context.Context, roomID, w
 		case <-ctx.Done():
 			return CommandReceipt{}, ctx.Err()
 		case <-deadline.C:
-			return CommandReceipt{}, fmt.Errorf("%w: command %s may have executed; it will not be retried automatically", ErrRuntimeResultAbsent, request.RequestID)
+			return CommandReceipt{}, fmt.Errorf("%w: command %s may have executed; it will not be retried automatically (last receipt read: %v)", ErrRuntimeResultAbsent, request.RequestID, lastReadErr)
 		case <-ticker.C:
 		}
 	}

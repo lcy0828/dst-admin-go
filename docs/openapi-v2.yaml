@@ -2842,6 +2842,53 @@ paths:
                 type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /entity-catalog/directory:
+    get:
+      tags: [Entity Catalog]
+      operationId: getEntityDirectory
+      summary: Complete embedded vanilla display directory, independent of artwork installation
+      responses:
+        "200":
+          description: Text metadata only; does not assert the target world has registered an entity
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      gameVersion: { type: string }
+                      items: { type: array, items: { $ref: "#/components/schemas/CatalogEntity" } }
+  /rooms/{roomId}/worlds/{worldId}/entity-catalog/snapshot:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }]
+    get:
+      tags: [Entity Catalog]
+      operationId: readWorldEntitySnapshot
+      summary: Read one complete, bounded world directory for client-side filtering and ranking
+      description: Coalesces concurrent requests to the same world. At most two collections and two snapshots, cached for five minutes. Uses bounded Runtime 2.4.8 batches over the existing Agent transport, with up to 2048 entries and 128 KiB of encoded item JSON per batch, with legacy 120-entry pages only after explicit batch rejection. One batch in flight per world, at most 50000 entries and an 8 MiB metadata budget, within 30 seconds. Inconsistent or partial reads fail. No game mutations or fallback to local placement. No idle polling. A forced refresh replaces the previous snapshot. Canceled collectors finish unwinding before replacement. A collection retries busy/stale pages at most three times within its original deadline. Errors include details.retryable and a reason code; incomplete snapshots are never cached.
+      parameters:
+        - { name: refresh, in: query, schema: { type: boolean, default: false } }
+      responses:
+        "200":
+          description: Complete directory with the original observation time; hasMore is false
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items: { type: array, items: { $ref: "#/components/schemas/CatalogEntity" } }
+                      mods: { type: array, items: { type: object } }
+                      total: { type: integer }
+                      observedAt: { type: string, format: date-time }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409":
+          description: Directory unavailable; error codes include RUNTIME_BUSY, RUNTIME_CATALOG_CHANGED, RUNTIME_CATALOG_TIMEOUT, RUNTIME_CATALOG_LIMIT, RUNTIME_NOT_INSTALLED and RUNTIME_CATALOG_UNAVAILABLE. error.details.retryable indicates whether bounded read retries are appropriate.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "499": { description: Client canceled the directory read }
   /entity-catalog/entities:
     get:
       tags: [Entity Catalog]
@@ -2855,6 +2902,46 @@ paths:
         "200": { description: Entity search results, content: { application/json: { schema: { $ref: "#/components/schemas/EntityCatalogEnvelope" } } } }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
         "502": { $ref: "#/components/responses/BadGateway" }
+  /rooms/{roomId}/worlds/{worldId}/entity-catalog/search:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }]
+    post:
+      tags: [Entity Catalog]
+      operationId: searchWorldEntityCatalog
+      summary: Read registered vanilla and mod Prefabs from the selected running world
+      description: On-demand read through the applied local or Agent placement. Never spawns entities. Collection and searches yield between static game frames, including while auto-paused, and have a ten-second collection deadline. Uses a shard-local snapshot for up to five minutes; refresh explicitly rebuilds it. Requires DST Admin Runtime 2.4.8 or newer; unavailable worlds return an error without local fallback. Busy worlds reject catalog reads instead of queuing them.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [limit]
+              properties:
+                refresh: { type: boolean, default: false, description: Rebuild the shard-local catalog snapshot }
+                query: { type: string, maxLength: 100 }
+                source: { type: string, maxLength: 128, description: 'all, vanilla, mods, or a loaded mod ID' }
+                offset: { type: integer, minimum: 0, maximum: 50000 }
+                limit: { type: integer, minimum: 1, maximum: 120 }
+      responses:
+        "200":
+          description: Paginated registered entities and their mod sources; component capabilities are not inferred by instantiating entities
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items: { type: array, items: { $ref: "#/components/schemas/CatalogEntity" } }
+                      mods: { type: array, items: { type: object, properties: { id: { type: string }, name: { type: string }, count: { type: integer } } } }
+                      total: { type: integer }
+                      offset: { type: integer }
+                      hasMore: { type: boolean }
+                      observedAt: { type: string, format: date-time }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /mods/search:
     get:
       tags: [Mods]
@@ -4598,17 +4685,20 @@ components:
       required: [key, namespace, id, nameZhCN, nameEn, type, capabilities, common, source]
       properties:
         key: { type: string }
+        modId: { type: string }
+        modName: { type: string }
         namespace: { type: string }
         id: { type: string, pattern: '^[A-Za-z0-9_]+$' }
         nameZhCN: { type: string }
         nameEn: { type: string }
         type: { type: string }
+        category: { type: string, enum: [item, food, equipment, structure, creature, boss, nature, other] }
         artworkUrl: { type: string, format: uri }
         capabilities:
           type: array
           items: { $ref: "#/components/schemas/EntityCapability" }
         common: { type: boolean }
-        source: { type: string, enum: [builtin, beacon] }
+        source: { type: string, enum: [builtin, beacon, runtime] }
     EntityCatalogSearchResult:
       type: object
       additionalProperties: false

@@ -25,6 +25,9 @@ const (
 	MaximumLogBytes      = 512 * 1024
 )
 
+// ErrArtifactChanging means a publisher has not finished replacing its output.
+var ErrArtifactChanging = errors.New("Runtime artifact is being written")
+
 var artifactNames = map[shared.ArtifactKind][]string{
 	shared.ArtifactRuntimeHealth:        {"health.json"},
 	shared.ArtifactRuntimePlayers:       {"players-a.json", "players-b.json"},
@@ -71,6 +74,9 @@ func ReadArtifacts(ctx context.Context, saveRoot, cluster, shard string, kind sh
 		}
 		if !exists {
 			continue
+		}
+		if len(data) == 0 || int64(len(data)) != info.Size() {
+			return bundle, fmt.Errorf("%w: %s", ErrArtifactChanging, name)
 		}
 		total += int64(len(data))
 		if total > MaximumBundleBytes {

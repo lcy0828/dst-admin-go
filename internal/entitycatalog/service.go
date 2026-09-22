@@ -28,6 +28,9 @@ const (
 )
 
 type Entity struct {
+	Category     string       `json:"category,omitempty"`
+	ModID        string       `json:"modId,omitempty"`
+	ModName      string       `json:"modName,omitempty"`
 	Key          string       `json:"key"`
 	Namespace    string       `json:"namespace"`
 	ID           string       `json:"id"`

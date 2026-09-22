@@ -1,4 +1,4 @@
-local VERSION = "2.4.6"
+local VERSION = "2.4.8"
 local PROTOCOL_VERSION = 2
 local MODULE_ROOT = "../dst-admin/"
 local READY_RETRY_SECONDS = 0.5
@@ -174,6 +174,13 @@ local function new_candidate()
             local ok, stopped = xpcall(candidate.Telemetry.Stop, debug.traceback)
             if not ok or stopped == false then
                 emit_error("STOP_FAILED", stopped)
+                return false
+            end
+        end
+        if candidate.Commands ~= nil and type(candidate.Commands.ClearCatalog) == "function" then
+            local ok, failure = pcall(candidate.Commands.ClearCatalog)
+            if not ok then
+                emit_error("STOP_FAILED", failure)
                 return false
             end
         end

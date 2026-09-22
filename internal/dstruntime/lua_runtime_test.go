@@ -25,6 +25,9 @@ func TestTelemetryLuaStartAndStopAreIdempotent(t *testing.T) {
 	theSim := state.NewTable()
 	state.SetField(theSim, "SetPersistentString", state.NewFunction(func(L *lua.LState) int {
 		writes++
+		if callback, ok := L.Get(5).(*lua.LFunction); ok {
+			callLuaFunction(t, state, callback, lua.LTrue)
+		}
 		return 0
 	}))
 	state.SetGlobal("TheSim", theSim)

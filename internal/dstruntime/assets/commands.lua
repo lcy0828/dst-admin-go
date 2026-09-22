@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.6"
+local PRODUCER_VERSION = "2.4.8"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local INPUT_ROOT = "../dst-admin/command-requests/"
 local RECENT_REQUEST_LIMIT = 256
@@ -89,6 +89,163 @@ handlers["console.execute"] = function(arguments)
         return result(false, "COMMAND_EXECUTION_FAILED", safe_text(execution_error, 512))
     end
     return result(true, "COMMAND_EXECUTED", "")
+end
+
+-- One bounded snapshot per shard, built only on request. Search/page changes
+-- reuse registration metadata; never call prefab factories to infer components.
+local CATALOG_TTL = 300
+local CATALOG_PREFAB_LIMIT = 50000
+local CATALOG_MOD_LIMIT = 500
+local catalog_cache, catalog_expiry_task, catalog_cancel
+local catalog_slice_deadline
+local CATALOG_SLICE_SECONDS = .003
+local CATALOG_BATCH_LIMIT = 2048
+local CATALOG_BATCH_BYTES = 128 * 1024
+
+local function catalog_checkpoint(index)
+    if catalog_slice_deadline ~= nil and index % 64 == 0 and os.clock() >= catalog_slice_deadline then
+        coroutine.yield()
+    end
+end
+
+-- Lua 5.1 cannot yield from table.sort's C comparator. An iterative merge sort
+-- allows both registration walks and sorting to share the same per-frame budget.
+local function sort_catalog(entries)
+    local scratch, width, count = {}, 1, #entries
+    while width < count do
+        for first = 1, count, width * 2 do
+            local middle, last = math.min(first + width, count + 1), math.min(first + width * 2 - 1, count)
+            local left, right = first, middle
+            for index = first, last do
+                if left < middle and (right > last or entries[left].id <= entries[right].id) then
+                    scratch[index] = entries[left]
+                    left = left + 1
+                else
+                    scratch[index] = entries[right]
+                    right = right + 1
+                end
+                catalog_checkpoint(index)
+            end
+        end
+        entries, scratch, width = scratch, entries, width * 2
+    end
+    return entries
+end
+
+local function clear_catalog()
+    catalog_cache = nil
+    if catalog_expiry_task ~= nil then
+        catalog_expiry_task:Cancel()
+        catalog_expiry_task = nil
+    end
+end
+
+local function build_catalog()
+    local registry = Prefabs or {}
+    local owners, mods, entries, search_text = {}, {}, {}, {}
+    local mod_count, mod_prefab_count = 0, 0
+    for _, mod_id in ipairs(ModManager ~= nil and ModManager.enabledmods or {}) do
+        mod_count = mod_count + 1
+        catalog_checkpoint(mod_count)
+        if mod_count > CATALOG_MOD_LIMIT then
+            return nil, result(false, "CATALOG_TOO_LARGE", "too many loaded mods")
+        end
+        local mod = ModManager:GetMod(mod_id)
+        if mod ~= nil then
+            local owner = { id = safe_text(mod_id, 128), name = safe_text(mod.modinfo ~= nil and mod.modinfo.name or mod_id, 160), count = 0 }
+            for id, prefab in pairs(mod.Prefabs or {}) do
+                mod_prefab_count = mod_prefab_count + 1
+                catalog_checkpoint(mod_prefab_count)
+                if mod_prefab_count > CATALOG_PREFAB_LIMIT then
+                    return nil, result(false, "CATALOG_TOO_LARGE", "too many mod prefab registrations")
+                end
+                if registry[id] == prefab then
+                    owners[id] = owner
+                    owner.count = owner.count + 1
+                end
+            end
+            mods[#mods + 1] = owner
+        end
+    end
+    local visited = 0
+    for id, prefab in pairs(registry) do
+        visited = visited + 1
+        catalog_checkpoint(visited)
+        if visited > CATALOG_PREFAB_LIMIT then return nil, result(false, "CATALOG_TOO_LARGE", "too many registered prefabs") end
+        if type(prefab) == "table" and type(id) == "string" and #id <= 80 and string.match(id, "^[a-z0-9_]+$") ~= nil and type(prefab.fn) == "function" then
+            local owner = owners[id]
+            local name = STRINGS ~= nil and STRINGS.NAMES ~= nil and STRINGS.NAMES[string.upper(id)] or id
+            name = type(name) == "string" and safe_text(name, 160) or id
+            entries[#entries + 1] = { id = id, nameZhCN = name, nameEn = name, modId = owner ~= nil and owner.id or nil, modName = owner ~= nil and owner.name or nil }
+            search_text[id] = string.lower(id .. " " .. name .. " " .. (owner ~= nil and owner.name or ""))
+        end
+    end
+    entries = sort_catalog(entries)
+    return { registry = registry, manager = ModManager, entries = entries, searchText = search_text, mods = mods, observedAt = os.time() }
+end
+
+handlers["catalog.entities"] = function(arguments)
+    local query = type(arguments.query) == "string" and string.lower(arguments.query) or ""
+    local source = type(arguments.source) == "string" and arguments.source or ""
+    local offset, limit = tonumber(arguments.offset) or 0, tonumber(arguments.limit) or 120
+    local maximum = arguments.snapshot == true and CATALOG_BATCH_LIMIT or 120
+    if #query > 400 or #source > 128 or offset < 0 or offset > 50000 or offset % 1 ~= 0 or limit < 1 or limit > maximum or limit % 1 ~= 0 then
+        return result(false, "INVALID_SEARCH", "catalog query is invalid")
+    end
+    if source == "" then source = "all" end
+    if arguments.refresh == true or (catalog_cache ~= nil and
+        (catalog_cache.registry ~= Prefabs or catalog_cache.manager ~= ModManager or os.time() - catalog_cache.observedAt >= CATALOG_TTL)) then
+        clear_catalog()
+    end
+    if catalog_cache == nil then
+        local snapshot, failure = build_catalog()
+        if snapshot == nil then return failure end
+        catalog_cache = snapshot
+        -- A single expiry callback releases unused indexes without a poller.
+        if TheWorld ~= nil and TheWorld.DoStaticTaskInTime ~= nil then
+            catalog_expiry_task = TheWorld:DoStaticTaskInTime(CATALOG_TTL, function()
+                if catalog_cache == snapshot then
+                    catalog_expiry_task = nil
+                    catalog_cache = nil
+                end
+            end)
+        end
+    end
+    local snapshot = catalog_cache
+    local matches = snapshot.entries
+    if query ~= "" or source ~= "all" then
+        -- Keep only the latest filter, not a cache entry for every keystroke.
+        if snapshot.query ~= query or snapshot.source ~= source then
+            matches = {}
+            for index, entry in ipairs(snapshot.entries) do
+                catalog_checkpoint(index)
+                local matches_source = source == "all" or (source == "vanilla" and entry.modId == nil)
+                    or (source == "mods" and entry.modId ~= nil) or source == entry.modId
+                if matches_source and (query == "" or string.find(snapshot.searchText[entry.id], query, 1, true) ~= nil) then
+                    matches[#matches + 1] = entry
+                end
+            end
+            snapshot.query, snapshot.source, snapshot.matches = query, source, matches
+        else
+            matches = snapshot.matches
+        end
+    else
+        snapshot.query, snapshot.source, snapshot.matches = nil, nil, nil
+    end
+    local items, page_bytes = {}, 2
+    for index = offset + 1, math.min(offset + limit, #matches) do
+        local item = matches[index]
+        if arguments.snapshot == true then
+            -- Bound the actual escaped JSON, including long Mod/localized names.
+            -- Ordinary UI search keeps its existing 120-item contract.
+            local item_bytes = #json.encode_compliant(item) + 1
+            if page_bytes + item_bytes > CATALOG_BATCH_BYTES then break end
+            page_bytes = page_bytes + item_bytes
+        end
+        items[#items + 1] = item
+        catalog_checkpoint(index)
+    end
+    return result(true, "CATALOG_READY", "", { items = items, mods = snapshot.mods, total = #matches, offset = offset, hasMore = offset + #items < #matches, observedAt = os.date("!%Y-%m-%dT%H:%M:%SZ", snapshot.observedAt) })
 end
 
 local function apply_god_waterwalk(player)
@@ -298,6 +455,13 @@ local function finish_signal(request_id)
     state.loading = false
     state.dispatching = false
     remember_completed(request_id)
+    -- Periodic health can capture this dispatcher mid-command. Publish the
+    -- idle transition only when needed, without resampling players/worlds.
+    local runtime = rawget(_G, "DSTAdmin")
+    if #state.signals == 0 and runtime ~= nil and runtime.Telemetry ~= nil
+        and type(runtime.Telemetry.CommandFinished) == "function" then
+        pcall(runtime.Telemetry.CommandFinished)
+    end
     if dispatch_next ~= nil then dispatch_next() end
 end
 
@@ -351,6 +515,45 @@ local function execute_request(signal, request)
         local denied = result(false, "ACTION_NOT_ALLOWED", "action is not allowed")
         signal.result = denied
         persist(request, denied)
+        return
+    end
+    if request.action == "catalog.entities" and TheWorld ~= nil and TheWorld.DoStaticTaskInTime ~= nil then
+        local started_at, task, finished = os.time(), nil, false
+        local thread = coroutine.create(function()
+            return handler(type(request.arguments) == "table" and request.arguments or {})
+        end)
+        local function finish_catalog(action_result)
+            if finished then return end
+            finished = true
+            catalog_cancel = nil
+            signal.result = action_result
+            persist(request, action_result)
+        end
+        local resume_catalog
+        resume_catalog = function()
+            if finished then return end
+            task = nil
+            if os.time() - started_at >= 10 then
+                finish_catalog(result(false, "CATALOG_TIMEOUT", "catalog collection exceeded its time budget"))
+                return
+            end
+            catalog_slice_deadline = os.clock() + CATALOG_SLICE_SECONDS
+            local ok, action_result = coroutine.resume(thread)
+            catalog_slice_deadline = nil
+            if not ok then
+                finish_catalog(result(false, "ACTION_FAILED", safe_text(action_result, 512)))
+            elseif coroutine.status(thread) == "dead" then
+                finish_catalog(action_result)
+            else
+                -- Static tasks continue while the empty world is auto-paused.
+                task = TheWorld:DoStaticTaskInTime(1 / 30, resume_catalog)
+            end
+        end
+        catalog_cancel = function()
+            if task ~= nil then task:Cancel(); task = nil end
+            finish_catalog(result(false, "CATALOG_CANCELLED", "runtime stopped during catalog collection"))
+        end
+        resume_catalog()
         return
     end
     local executed, action_result = xpcall(function()
@@ -476,6 +679,11 @@ function M.ExecuteFile(request_id, action)
         return result(true, "COMMAND_DOCUMENT_ALREADY_ACCEPTED", "")
     end
     return result(true, "COMMAND_DOCUMENT_ACCEPTED", "")
+end
+
+function M.ClearCatalog()
+    if catalog_cancel ~= nil then catalog_cancel() end
+    clear_catalog()
 end
 
 function M.Status()

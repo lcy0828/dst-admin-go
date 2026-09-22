@@ -319,3 +319,93 @@ func TestDistributedRefreshCancelsBothPendingOutputReads(t *testing.T) {
 		t.Fatal("refresh did not cancel both reads")
 	}
 }
+
+func TestDistributedCatalogReadsDoNotQueueBehindWorldOperations(t *testing.T) {
+	bridge, fixture, room, world, _ := newDistributedBridgeFixture(t)
+	request := CommandRequest{RequestID: "catalog-busy-123456", Action: "catalog.entities"}
+	lock := bridge.worldLock(room, world)
+	lock.Lock()
+	done := make(chan error, 1)
+	go func() { _, err := bridge.ExecuteCommand(context.Background(), room, world, request); done <- err }()
+	select {
+	case err := <-done:
+		lock.Unlock()
+		if !errors.Is(err, ErrRuntimeCommandBusy) {
+			t.Fatalf("busy catalog error: %v", err)
+		}
+	case <-time.After(time.Second):
+		lock.Unlock()
+		<-done
+		t.Fatal("catalog read queued behind a world operation")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := bridge.ExecuteCommand(ctx, room, world, request); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled catalog: %v", err)
+	}
+	if len(fixture.sent) != 0 {
+		t.Fatal("busy or cancelled reads reached the game")
+	}
+}
+
+func TestDistributedCommandWaitsForCompleteReceiptWithoutResending(t *testing.T) {
+	bridge, fixture, room, world, now := newDistributedBridgeFixture(t)
+	request := CommandRequest{RequestID: "catalog-write-race-1234", Action: "catalog.entities"}
+	complete := make(chan struct{})
+	fixture.onSend = func(shared.RuntimeConsoleRequest) {
+		partial := []byte("KLEI     1 {\"requestId\":")
+		hash := sha256.Sum256(partial)
+		fixture.mu.Lock()
+		fixture.bundles[shared.ArtifactRuntimeCommand] = shared.RuntimeArtifactBundle{Kind: shared.ArtifactRuntimeCommand, Artifacts: []shared.RuntimeArtifact{{Name: "command-receipt-a.json", Size: int64(len(partial)), Data: partial, SHA256: hex.EncodeToString(hash[:]), UpdatedAt: now}}}
+		fixture.mu.Unlock()
+		go func() {
+			defer close(complete)
+			time.Sleep(10 * time.Millisecond)
+			receipt := CommandReceipt{SchemaVersion: 1, ProducerVersion: RuntimeVersion, ProducerInstanceID: "remote-instance", SessionID: "REMOTE_SESSION", ShardID: "2", Sequence: 1, RequestID: request.RequestID, Action: request.Action, OK: true, Code: "CATALOG_READY", CompletedAtUnix: now.Unix()}
+			fixture.mu.Lock()
+			fixture.bundles[shared.ArtifactRuntimeCommand] = artifactBundle(shared.ArtifactRuntimeCommand, now, "command-receipt-a.json", receipt)
+			fixture.mu.Unlock()
+		}()
+	}
+	receipt, err := bridge.ExecuteCommand(context.Background(), room, world, request)
+	<-complete
+	if err != nil || !receipt.OK || receipt.RequestID != request.RequestID {
+		t.Fatalf("receipt=%#v err=%v", receipt, err)
+	}
+	if len(fixture.sent) != 1 {
+		t.Fatalf("command was replayed %d times", len(fixture.sent))
+	}
+}
+
+func TestDistributedCatalogDistinguishesBusyHealthFromUnavailableModule(t *testing.T) {
+	bridge, fixture, room, world, now := newDistributedBridgeFixture(t)
+	health := Health{SchemaVersion: 1, ProducerVersion: RuntimeVersion, ProducerInstanceID: "remote-instance", SessionID: "REMOTE_SESSION", ShardID: "2", Running: true, Ready: true,
+		Modules: map[string]ModuleHealth{"commands": {Running: true, Ready: true, Busy: true}}}
+	fixture.bundles[shared.ArtifactRuntimeHealth] = artifactBundle(shared.ArtifactRuntimeHealth, now, "health.json", health)
+	request := CommandRequest{RequestID: "catalog-health-busy-01", Action: "catalog.entities"}
+	if _, err := bridge.ExecuteCommand(context.Background(), room, world, request); !errors.Is(err, ErrRuntimeCommandBusy) {
+		t.Fatalf("busy health must be retryable: %v", err)
+	}
+	health.Modules["commands"] = ModuleHealth{Running: true, Ready: false}
+	fixture.bundles[shared.ArtifactRuntimeHealth] = artifactBundle(shared.ArtifactRuntimeHealth, now, "health.json", health)
+	if _, err := bridge.ExecuteCommand(context.Background(), room, world, request); !errors.Is(err, ErrRuntimeUnavailable) || errors.Is(err, ErrRuntimeCommandBusy) {
+		t.Fatalf("unready health must not be treated as transient busy: %v", err)
+	}
+	if len(fixture.sent) != 0 {
+		t.Fatal("rejected read reached the world")
+	}
+}
+
+func TestCatalogDeliveryLeaseContentionIsRetryableWithoutReplayingGameCommands(t *testing.T) {
+	bridge, fixture, room, world, _ := newDistributedBridgeFixture(t)
+	fixture.sendErr = operationlease.ErrBusy
+	for _, action := range []string{"catalog.entities", "console.execute"} {
+		_, err := bridge.ExecuteCommand(context.Background(), room, world, CommandRequest{RequestID: "lease-contention-1234", Action: action})
+		if !errors.Is(err, operationlease.ErrBusy) || errors.Is(err, ErrRuntimeCommandBusy) != (action == "catalog.entities") {
+			t.Fatalf("%s error=%v", action, err)
+		}
+	}
+	if len(fixture.sent) != 2 {
+		t.Fatal("bridge replayed a command", len(fixture.sent))
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,5 +193,19 @@ func TestReadLogsRejectsIntermediateShardSymlink(t *testing.T) {
 	}
 	if _, err := ReadLogs(context.Background(), root, "Cluster_1", "Master", shared.RuntimeLogRequest{Cursor: -1, MaxBytes: 1024, MaxLines: 10}); err == nil {
 		t.Fatal("expected intermediate symlink escape error")
+	}
+}
+
+func TestEmptyCommandReceiptIsPendingPublication(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "Room", "Master", "save", "mod_config_data", "dst-admin")
+	if err := os.MkdirAll(directory, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "command-receipt-a.json"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadArtifacts(context.Background(), root, "Room", "Master", shared.ArtifactRuntimeCommand); !errors.Is(err, ErrArtifactChanging) {
+		t.Fatalf("empty in-progress receipt: %v", err)
 	}
 }

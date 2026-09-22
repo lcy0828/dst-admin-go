@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 2
-local PRODUCER_VERSION = "2.4.6"
+local PRODUCER_VERSION = "2.4.8"
 local SNAPSHOT_INTERVAL = 5
 local READY_RETRY_SECONDS = 1
 local READY_RETRY_LIMIT = 60
@@ -180,11 +180,28 @@ local function health_payload()
     }
 end
 
-local function write_health()
-    local ok, encoded = pcall(json.encode_compliant, health_payload())
-    if ok then
-        TheSim:SetPersistentString(OUTPUT_ROOT .. "health.json", encoded, false)
-    end
+local health_writing, health_pending, health_commands_busy = false, false, false
+local write_health
+write_health = function()
+    -- Serialize writes so an older busy snapshot cannot overwrite a newer idle
+    -- notification. Coalesce overlap into one latest snapshot, with no poller.
+    if health_writing then health_pending = true; return end
+    local payload = health_payload()
+    local ok, encoded = pcall(json.encode_compliant, payload)
+    if not ok then return end
+    health_commands_busy = payload.modules.commands ~= nil and payload.modules.commands.busy == true
+    health_writing = true
+    local started = pcall(function()
+        TheSim:SetPersistentString(OUTPUT_ROOT .. "health.json", encoded, false, function()
+            health_writing = false
+            if health_pending then health_pending = false; write_health() end
+        end)
+    end)
+    if not started then health_writing = false end
+end
+
+function M.CommandFinished()
+    if state.running and state.ready and health_commands_busy then write_health() end
 end
 
 local function complete(callback, written)

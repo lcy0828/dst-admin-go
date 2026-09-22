@@ -38,6 +38,7 @@ var (
 var allowedRuntimeCommands = map[string]bool{
 	"system.ping":             true,
 	"console.execute":         true,
+	"catalog.entities":        true,
 	"telemetry.emit":          true,
 	"player.kick":             true,
 	"player.announce":         true,
@@ -456,11 +457,14 @@ func (b *Bridge) moduleReady(ctx context.Context, room rooms.Room, world rooms.W
 		return fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 	}
 	module, exists := health.Modules[moduleName]
-	if !health.Running || !health.Ready || !exists || !module.Running || !module.Ready || module.Busy {
+	if !health.Running || !health.Ready || !exists || !module.Running || !module.Ready {
 		return fmt.Errorf("%w: %s module is not ready", ErrRuntimeUnavailable, moduleName)
 	}
 	if b.now().UTC().Sub(health.ReadAt) > defaultFreshFor {
 		return fmt.Errorf("%w: runtime health is stale", ErrRuntimeUnavailable)
+	}
+	if module.Busy {
+		return fmt.Errorf("%w: %w: %s", ErrRuntimeUnavailable, ErrRuntimeCommandBusy, moduleName)
 	}
 	return nil
 }

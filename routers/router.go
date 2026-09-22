@@ -598,6 +598,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err != nil {
 		return nil, err
 	}
+	entityCatalogHandler.ConfigureRuntime(distributedRuntimeBridge)
 	runtimeEventService, err := runtimeevents.New(distributedRuntimeBridge)
 	if err != nil {
 		return nil, err
