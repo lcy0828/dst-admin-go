@@ -6,9 +6,9 @@ Start from the [main README](../README.en.md). Images and native packages embed 
 
 ## Downloads and versions
 
-- The [Package workflow](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) builds Linux amd64 and macOS arm64 native packages and pushes tested images to GHCR. With mirror credentials configured, it publishes the same images to Docker Hub and Alibaba Cloud without rebuilding.
+- The [Package workflow](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) builds Linux amd64 and macOS arm64 native packages. Version tags or explicit manual publication push tested images to GHCR. With mirror credentials configured, it publishes the same images to Docker Hub and Alibaba Cloud without rebuilding.
 - In mainland China, stable deployments use `registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go:latest`; elsewhere use Docker Hub's `lcy0828/dst-admin-go:latest`. Replace `latest` with `vX.Y.Z` to pin a release. Docker Hub prefixes Controller, Agent, and Runtime tags with `controller-`, `agent-`, and `runtime-`, for example `agent-latest` or `agent-v1.0.0`.
-- Branch images are `ghcr.io/lcy0828/dst-admin-go/all-in-one:preview`, `control-plane:preview`, `agent:preview`, and `dst-runtime:preview`. Builds also receive `sha-FULL_BACKEND_COMMIT` tags. Rebuilding the same backend with a different frontend can change these tags; pin the image digest and frontend SHA for exact provenance.
+- Explicit manual image publication uses `ghcr.io/lcy0828/dst-admin-go/all-in-one:preview`, `control-plane:preview`, `agent:preview`, and `dst-runtime:preview`. Builds also receive `sha-FULL_BACKEND_COMMIT` tags. Rebuilding the same backend with a different frontend can change these tags; pin the image digest and frontend SHA for exact provenance.
 - `vX.Y.Z` tags publish stable versions: versioned images are pushed first, then all four `latest` aliases are updated after every native package and image check passes. A GitHub Release contains full native packages, standalone Agent packages and SHA-256 files. Agent packages have stable filenames such as `releases/latest/download/dst-admin-agent-linux-amd64.tar.gz`. Candidate tags such as `vX.Y.Z-rc.N` publish versioned images and a prerelease without updating `latest`.
 - `dst-admin -version` reports backend version/commit, frontend commit, and `embeddedWebUI`. Native `manifest.json` also records tools and lockfile hashes. Images carry `io.dst-admin.frontend.commit`.
 
@@ -48,7 +48,15 @@ Native management uses CGO/SQLite: build on the target OS/architecture, or suppl
 
 ## GitHub Actions
 
-Backend CI runs tests, race detection, vet, vulnerability scanning, and compilation. Package runs on release-branch pushes, `v*` tags, or manual dispatch. It requires Backend CI to pass for the same backend commit before building and publishing packages or images, or advancing `latest`. It resolves the frontend once and shares its SHA across jobs. Native packages are uploaded after startup smoke tests; images are pushed after startup checks.
+A local `git commit` does not trigger GitHub Actions; pushing does. Backend CI runs tests, race detection, vet, vulnerability scanning, and compilation. Frontend CI runs checks, tests, and builds. Package requires Backend CI and pins one frontend SHA for all build jobs.
+
+| Action | Checks and builds | Publication |
+| --- | --- | --- |
+| Push a branch or open/update a PR | Repository CI | None |
+| Push backend `master` | CI, full packaging and startup checks; native packages retained as Actions artifacts | No images, Release, `latest`, or `preview` updates |
+| Push `vX.Y.Z` | Checks, packaging, publication | Stable Release and versioned images; `latest` advances after all checks pass |
+| Push `vX.Y.Z-rc.N` | Checks, packaging, publication | Prerelease and versioned images; no `latest` update |
+| Run Package manually | Checks and packaging by default | Only an explicit `publish_images` selection publishes preview images; no Release |
 
 For private frontend source, store a read-only deploy key in backend secret `FRONTEND_READ_KEY`; public source needs no key. The key is used only for checkout and never enters build contexts. GHCR uses this repository's `GITHUB_TOKEN` with `packages:write`. Update both repository settings and authorization when changing the frontend source.
 
@@ -66,9 +74,9 @@ To enable Alibaba Cloud ACR synchronization:
 
 To copy an existing release, run **Sync Alibaba Cloud images** in Actions with `version=v1.0.0`. It copies the four published GHCR images without rebuilding. Stable version inputs also copy GHCR's current `latest`; prereleases copy only their version. Use `latest` to copy only the current stable aliases. Run `docker login registry.cn-hangzhou.aliyuncs.com` on deployment hosts before pulling from a private ACR repository.
 
-Unconfigured mirrors are skipped with a note in the Actions summary. Invalid credentials or failed pushes fail the job. Turning off `publish_images` on a manual run disables all registries and GitHub Release publication. All-in-One, Controller, and Agent startup checks still run for 180 seconds; Runtime validates its startup wrapper.
+Unconfigured mirrors are skipped with a note in the Actions summary. Invalid credentials or failed pushes fail the job. Manual runs default to `publish_images: false` and publish to no registry. Manual runs never create a GitHub Release. All-in-One, Controller, and Agent startup checks still run for 180 seconds; Runtime validates its startup wrapper.
 
-Frontend commits do not update installed services or automatically publish the backend. Branch builds update `preview` only. Publish a new `vX.Y.Z` tag to deliver fixes through `latest`; do not rewrite released tags. Run Package to include new pages, or set the manual `frontend_ref` input to pin a revision. Manual runs may disable image publication; it is enabled by default. Tagged release assets exist only after the tag pipeline succeeds.
+Frontend commits do not update installed services or automatically publish the backend. Branch builds do not publish images. Publish a new `vX.Y.Z` tag to deliver fixes through `latest`; do not rewrite released tags. Run Package to include new pages, or set the manual `frontend_ref` input to pin a revision. Manual image publication is disabled by default; explicitly enabling it publishes preview images only. Tagged release assets exist only after the tag pipeline succeeds.
 
 ## Upgrade and rollback
 

@@ -6,9 +6,9 @@
 
 ## 下载与版本
 
-- [Package 工作流](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) 构建 Linux amd64 和 macOS arm64 原生包，并将测试通过的镜像推送到 GHCR；配置镜像仓库凭据后同步发布到 Docker Hub 和阿里云，不重复构建。
+- [Package 工作流](https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml) 构建 Linux amd64 和 macOS arm64 原生包；版本标签或明确启用的手动发布会将测试通过的镜像推送到 GHCR，配置镜像仓库凭据后同步发布到 Docker Hub 和阿里云，不重复构建。
 - 国内正式部署使用 `registry.cn-hangzhou.aliyuncs.com/dstadmin/dst-admin-go:latest`，其他地区使用 Docker Hub 的 `lcy0828/dst-admin-go:latest`，需要固定版本时将 `latest` 替换为 `vX.Y.Z`。Docker Hub 的控制端、Agent、Runtime 标签分别加 `controller-`、`agent-`、`runtime-` 前缀，例如 `agent-latest`、`agent-v1.0.0`。
-- 分支发布使用 `ghcr.io/lcy0828/dst-admin-go/all-in-one:preview`、`control-plane:preview`、`agent:preview` 和 `dst-runtime:preview`；同次构建另有 `sha-后端完整提交号` 标签。前端或手动重建仍可能改变同一后端提交的产物，精确复现请固定镜像 digest 与前端提交。
+- 手动明确启用镜像发布时使用 `ghcr.io/lcy0828/dst-admin-go/all-in-one:preview`、`control-plane:preview`、`agent:preview` 和 `dst-runtime:preview`；同次构建另有 `sha-后端完整提交号` 标签。前端或手动重建仍可能改变同一后端提交的产物，精确复现请固定镜像 digest 与前端提交。
 - `vX.Y.Z` 标签触发正式发布：生成版本镜像，所有原生包与镜像检查通过后更新四类镜像的 `latest` 标签，并创建包含完整原生包、独立 Agent 包与 SHA-256 的 GitHub Release。独立 Agent 包使用固定文件名，可通过 `releases/latest/download/dst-admin-agent-linux-amd64.tar.gz` 下载最新正式版。`vX.Y.Z-rc.N` 等候选版只发布对应版本和预发布 Release，不覆盖 `latest`。
 - `dst-admin -version` 输出后端版本、提交、前端提交和 `embeddedWebUI`；原生 `manifest.json` 另记录工具链、锁文件哈希。镜像可通过 `docker image inspect` 查看 `io.dst-admin.frontend.commit`。
 
@@ -55,7 +55,15 @@ node deploy/scripts/build-native-release.mjs --version preview-local \
 
 ## GitHub Actions
 
-后端 CI 运行 Go 测试、race、vet、漏洞扫描及编译。Package 工作流在当前发布分支推送、`v*` 标签或手动运行时构建完整产物。它复用 Backend CI 作为前置门禁，只有同一后端提交的质量检查成功才构建并发布镜像、附件或推进 `latest`。前端先固定提交，再让所有任务使用同一 SHA；原生包启动检查通过后上传附件，镜像启动检查通过后推送。
+本地 `git commit` 不触发 GitHub Actions；推送代码后才触发。后端 CI 运行 Go 测试、race、vet、漏洞扫描及编译，前端 CI 运行检查、测试及构建。Package 复用 Backend CI 作为前置检查，并固定同一次构建使用的前端 SHA。
+
+| 操作 | 自动执行 | 发布行为 |
+| --- | --- | --- |
+| 推送普通分支或提交 PR | 对应仓库的 CI | 不发布 |
+| 推送后端 `master` | CI、完整打包及启动检查；原生包保存在 Actions artifacts | 不推送镜像，不创建 Release，不更新 `latest` 或 `preview` |
+| 推送 `vX.Y.Z` 标签 | 检查、打包、发布 | 正式 Release、版本镜像，全部检查通过后更新 `latest` |
+| 推送 `vX.Y.Z-rc.N` 标签 | 检查、打包、发布 | 预发布 Release 和版本镜像，不更新 `latest` |
+| 手动运行 Package | 默认仅检查和打包 | 仅明确勾选 `publish_images` 才发布 `preview` 镜像；不创建 Release |
 
 前端私有仓库通过后端 Actions secret `FRONTEND_READ_KEY` 中的只读 deploy key 检出；公有仓库不需要该密钥。密钥只用于获取源码，不进入构建上下文。GHCR 推送使用当前仓库 `GITHUB_TOKEN` 的 `packages:write` 权限。更换前端仓库时同时调整工作流地址和授权。
 
@@ -73,9 +81,9 @@ node deploy/scripts/build-native-release.mjs --version preview-local \
 
 补传已有正式版时，在 Actions 运行 **Sync Alibaba Cloud images**，填写 `version=v1.0.0`。它直接复制 GHCR 中已发布的四种镜像，保留构建内容；正式版本号同时同步 GHCR 当前的 `latest`，候选版只同步对应版本。只填写 `latest` 时仅同步最新正式标签。拉取私有 ACR 仓库前，在部署机器运行 `docker login registry.cn-hangzhou.aliyuncs.com`。
 
-未配置某个镜像站的凭据时会跳过该镜像站，并在 Actions 摘要中注明；凭据失效或推送失败会使任务失败。手动运行关闭 `publish_images` 时，所有镜像仓库和 GitHub Release 均不发布。All-in-One、控制端和 Agent 的启动检查保持 180 秒，Runtime 检查启动包装器。
+未配置某个镜像站的凭据时会跳过该镜像站，并在 Actions 摘要中注明；凭据失效或推送失败会使任务失败。手动运行默认关闭 `publish_images`，所有镜像仓库均不发布；手动运行始终不创建 GitHub Release。All-in-One、控制端和 Agent 的启动检查保持 180 秒，Runtime 检查启动包装器。
 
-前端提交不会直接修改已安装服务，也不会自动发布后端。主分支构建只更新 `preview`；要让正式用户通过 `latest` 获得修复，需要发布新的 `vX.Y.Z` 标签，不覆盖已发布标签。需要新页面时运行主仓库 Package 工作流；也可用 `frontend_ref` 输入指定回滚版本。手动构建可选择是否发布镜像，默认发布；标签发布附件只有对应标签流水线成功后可下载。
+前端提交不会直接修改已安装服务，也不会自动发布后端。主分支构建不发布镜像；要让正式用户通过 `latest` 获得修复，需要发布新的 `vX.Y.Z` 标签，不覆盖已发布标签。需要新页面时运行主仓库 Package 工作流；也可用 `frontend_ref` 输入指定回滚版本。手动构建默认不发布镜像，明确勾选后只发布预览镜像；标签发布附件只有对应标签流水线成功后可下载。
 
 ## 升级与回滚
 
