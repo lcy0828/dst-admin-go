@@ -46,7 +46,15 @@ const (
 	RunUnresponsive RunStatus = "unresponsive"
 )
 
+// Output contains only synchronous print calls from this exact command receipt.
+// A nil Output means the Runtime did not return captured output (legacy/unknown).
+type Output struct {
+	Text      string `json:"text"`
+	Truncated bool   `json:"truncated"`
+}
+
 type Run struct {
+	Output           *Output                `json:"output,omitempty"`
 	ID               string                 `json:"id"`
 	RoomID           string                 `json:"roomId"`
 	WorldID          string                 `json:"worldId"`
@@ -56,6 +64,7 @@ type Run struct {
 	Risk             Risk                   `json:"risk"`
 	Arguments        map[string]interface{} `json:"arguments,omitempty"`
 	RawCommand       string                 `json:"rawCommand,omitempty"`
+	Script           string                 `json:"script,omitempty"`
 	Status           RunStatus              `json:"status"`
 	Message          string                 `json:"message,omitempty"`
 	ErrorCode        string                 `json:"errorCode,omitempty"`
@@ -88,6 +97,7 @@ type Delivery struct {
 }
 
 type ExecutionCompletion struct {
+	Output           *Output
 	Status           RunStatus
 	TransportOutcome string
 	ExecutionOutcome string

@@ -188,6 +188,7 @@ func (s *Service) Execute(ctx context.Context, roomID, worldID string, request E
 	run, err := s.store.Create(Run{
 		RoomID: room.ID, WorldID: world.ID, Mode: map[bool]string{true: "builtin", false: "custom"}[builtin], CommandID: definition.ID,
 		Name: definition.Name, Risk: definition.Risk, Arguments: request.Arguments,
+		Script: script,
 	})
 	if err != nil {
 		return Run{}, err
@@ -238,11 +239,15 @@ func (s *Service) executeVerified(ctx context.Context, room rooms.Room, world ro
 		Action:    "console.execute",
 		Arguments: map[string]interface{}{"script": script},
 	})
+	if err == nil && (receipt.RequestID != run.ID || receipt.Action != "console.execute") {
+		err = dstruntime.ErrRuntimeResultAbsent
+	}
 	if err == nil {
 		observedAt := receipt.CompletedAt.UTC()
 		completion := ExecutionCompletion{
 			Status: RunSucceeded, TransportOutcome: "sent", ExecutionOutcome: "confirmed",
 			Message: "命令已由 DST 执行并返回确认", ObservedAt: &observedAt,
+			Output: commandOutput(receipt.Details),
 		}
 		if !receipt.OK {
 			completion.Status = RunFailed

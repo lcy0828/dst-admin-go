@@ -6395,6 +6395,17 @@ components:
     CommandRunStatus:
       type: string
       enum: [sending, sent, succeeded, failed, uncertain, unresponsive]
+    CommandOutput:
+      type: object
+      additionalProperties: false
+      required: [text, truncated]
+      description: Synchronous print output from this command only, limited to 16 KiB of UTF-8 text. Delayed callbacks remain in world logs.
+      properties:
+        text:
+          type: string
+          maxLength: 16384
+        truncated:
+          type: boolean
     CommandRun:
       type: object
       additionalProperties: false
@@ -6421,6 +6432,11 @@ components:
           additionalProperties: true
         rawCommand:
           type: string
+        script:
+          type: string
+          description: Rendered code captured when a built-in or saved command was executed.
+        output:
+          $ref: "#/components/schemas/CommandOutput"
         status:
           $ref: "#/components/schemas/CommandRunStatus"
         transportOutcome:

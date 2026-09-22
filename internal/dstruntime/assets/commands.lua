@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.8"
+local PRODUCER_VERSION = "2.4.10"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local INPUT_ROOT = "../dst-admin/command-requests/"
 local RECENT_REQUEST_LIMIT = 256
@@ -74,21 +74,80 @@ handlers["system.ping"] = function()
     return result(true, "CONSOLE_RESPONSIVE", "")
 end
 
+local CONSOLE_OUTPUT_BYTES = 16 * 1024
+
+-- Keep synchronous print output inside this request's receipt. DST runs this
+-- chunk without yielding; timers/coroutines that run later are outside its scope.
+-- The saved wrapper becomes a plain forwarder after execution, even if user Lua
+-- retained a reference to it. Never leave a global log hook installed at idle.
+local function execute_console(chunk)
+    local original_print = print
+    local parts, size, truncated, active = {}, 0, false, true
+    local function append(text)
+        local remaining = CONSOLE_OUTPUT_BYTES - size
+        if #text > remaining then
+            truncated = true
+            local end_at = remaining
+            -- Avoid splitting a UTF-8 character at the output boundary.
+            while end_at > 0 and string.byte(text, end_at + 1) ~= nil
+                and string.byte(text, end_at + 1) >= 128 and string.byte(text, end_at + 1) < 192 do
+                end_at = end_at - 1
+            end
+            text = string.sub(text, 1, end_at)
+        end
+        if #text > 0 then
+            -- Bound fragment overhead as well as payload bytes, including
+            -- commands that print many tiny or empty arguments.
+            if #parts >= 128 then parts = { table.concat(parts) } end
+            parts[#parts + 1] = text
+            size = size + #text
+        end
+    end
+    local function collect(...)
+        for index = 1, select("#", ...) do
+            if truncated then return end
+            if index > 1 then append("\t") end
+            if truncated then return end
+            append(tostring(select(index, ...)))
+        end
+        if not truncated then append("\n") end
+    end
+    _G.print = function(...)
+        original_print(...)
+        if active and not truncated then
+            -- A hostile tostring must not prevent restoration or turn a logging
+            -- failure into a second execution of the user's command.
+            local ok = pcall(collect, ...)
+            if not ok then truncated = true end
+        end
+    end
+    -- DST's native debug.traceback also enters the fatal script-error path.
+    -- Console errors are ordinary command results: use pcall, as the game's
+    -- own ExecuteConsoleCommand does, without invoking that global handler.
+    local executed, failure = pcall(chunk)
+    active = false
+    _G.print = original_print
+    local output = { text = table.concat(parts), truncated = truncated }
+    parts = nil
+    return executed, failure, { output = output }
+end
+
 handlers["console.execute"] = function(arguments)
     local script = type(arguments) == "table" and arguments.script or nil
     if type(script) ~= "string" or #script < 1 or #script > 4096
         or string.find(script, "\0", 1, true) ~= nil then
         return result(false, "INVALID_SCRIPT", "console script is invalid")
     end
-    local chunk, compile_error = loadstring(script)
+    local chunk, compile_error = loadstring(script, "=DST Admin command")
     if chunk == nil then
-        return result(false, "COMMAND_COMPILE_FAILED", safe_text(compile_error, 512))
+        return result(false, "COMMAND_COMPILE_FAILED", safe_text(compile_error, 512), { output = { text = "", truncated = false } })
     end
-    local executed, execution_error = xpcall(chunk, debug.traceback)
+    local executed, execution_error, details = execute_console(chunk)
     if not executed then
-        return result(false, "COMMAND_EXECUTION_FAILED", safe_text(execution_error, 512))
+        local described, message = pcall(safe_text, execution_error, 512)
+        return result(false, "COMMAND_EXECUTION_FAILED", described and message or "Lua command failed", details)
     end
-    return result(true, "COMMAND_EXECUTED", "")
+    return result(true, "COMMAND_EXECUTED", "", details)
 end
 
 -- One bounded snapshot per shard, built only on request. Search/page changes
@@ -489,6 +548,11 @@ local function persist(request, action_result)
         finish_signal(request.requestId)
         return false
     end
+    -- Klei's compliant encoder still leaves some C0 control bytes unescaped.
+    -- Arbitrary console output must remain valid JSON (including NUL/ANSI).
+    encoded = string.gsub(encoded, "[%z\1-\8\11\12\14-\31]", function(char)
+        return string.format("\\u%04x", string.byte(char))
+    end)
     local slot = state.nextSlot
     state.writing = true
     local started = pcall(function()

@@ -16,6 +16,9 @@ var ErrRunNotFound = errors.New("command run not found")
 var ErrDefinitionNotFound = errors.New("command definition not found")
 
 type runRecord struct {
+	OutputText       string `gorm:"type:text"`
+	OutputCaptured   bool
+	OutputTruncated  bool
 	ID               string    `gorm:"primary_key;type:char(36)"`
 	RoomID           string    `gorm:"type:varchar(255);index;not null"`
 	WorldID          string    `gorm:"type:varchar(255);index;not null"`
@@ -25,6 +28,7 @@ type runRecord struct {
 	Risk             string    `gorm:"type:varchar(16);not null"`
 	Arguments        string    `gorm:"type:text"`
 	RawCommand       string    `gorm:"type:text"`
+	Script           string    `gorm:"type:text"`
 	Status           string    `gorm:"type:varchar(16);index;not null"`
 	Message          string    `gorm:"type:text"`
 	ErrorCode        string    `gorm:"type:varchar(64)"`
@@ -152,6 +156,11 @@ func (s *Store) CompleteExecution(runID string, completion ExecutionCompletion) 
 		"may_have_executed": completion.MayHaveExecuted,
 		"recovery_outcome":  strings.TrimSpace(completion.RecoveryOutcome),
 		"observed_at":       completion.ObservedAt,
+	}
+	if completion.Output != nil {
+		updates["output_captured"] = true
+		updates["output_text"] = completion.Output.Text
+		updates["output_truncated"] = completion.Output.Truncated
 	}
 	result := s.db.Table(s.runsTable).Where("id = ? AND status = ?", runID, RunSending).Updates(updates)
 	if result.Error != nil {
@@ -315,6 +324,7 @@ func recordFromRun(run Run, arguments string) runRecord {
 	return runRecord{
 		ID: run.ID, RoomID: run.RoomID, WorldID: run.WorldID, Mode: run.Mode, CommandID: run.CommandID,
 		Name: run.Name, Risk: string(run.Risk), Arguments: arguments, RawCommand: run.RawCommand,
+		Script: run.Script,
 		Status: string(run.Status), Message: run.Message, ErrorCode: run.ErrorCode, ErrorMessage: run.ErrorMessage,
 		CreatedAt: run.CreatedAt, FinishedAt: run.FinishedAt, TransportOutcome: run.TransportOutcome,
 		ExecutionOutcome: run.ExecutionOutcome, MayHaveExecuted: run.MayHaveExecuted, RecoveryOutcome: run.RecoveryOutcome,
@@ -324,6 +334,10 @@ func recordFromRun(run Run, arguments string) runRecord {
 }
 
 func runFromRecord(record runRecord) (Run, error) {
+	var output *Output
+	if record.OutputCaptured {
+		output = &Output{Text: record.OutputText, Truncated: record.OutputTruncated}
+	}
 	arguments := make(map[string]interface{})
 	if record.Arguments != "" && record.Arguments != "null" {
 		if err := json.Unmarshal([]byte(record.Arguments), &arguments); err != nil {
@@ -331,8 +345,10 @@ func runFromRecord(record runRecord) (Run, error) {
 		}
 	}
 	return Run{
-		ID: record.ID, RoomID: record.RoomID, WorldID: record.WorldID, Mode: record.Mode, CommandID: record.CommandID,
+		Output: output,
+		ID:     record.ID, RoomID: record.RoomID, WorldID: record.WorldID, Mode: record.Mode, CommandID: record.CommandID,
 		Name: record.Name, Risk: Risk(record.Risk), Arguments: arguments, RawCommand: record.RawCommand,
+		Script: record.Script,
 		Status: RunStatus(record.Status), Message: record.Message, ErrorCode: record.ErrorCode, ErrorMessage: record.ErrorMessage,
 		LogQuery: record.ID, CreatedAt: record.CreatedAt, FinishedAt: record.FinishedAt,
 		TransportOutcome: record.TransportOutcome, ExecutionOutcome: record.ExecutionOutcome,

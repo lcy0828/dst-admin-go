@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.8"
+local PRODUCER_VERSION = "2.4.10"
 local OUTPUT_PATH = "mod_config_data/dst-admin/snapshot-barrier.json"
 local ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]+$"
 local BARRIER_TIMEOUT = 180
