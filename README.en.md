@@ -191,7 +191,7 @@ For remote machines running native game processes, use the native Agent package.
 
 ## Explore further
 
-- **Run and maintain**: [Game server installation](docs/game-installation-management.en.md) · [LuaJIT2 installation](docs/luajit-installation.en.md) · [Upgrades and rollback](docs/deployment-and-rollback.en.md)
+- **Run and maintain**: [Game server installation](docs/game-installation-management.en.md) · [LuaJIT2 installation](docs/luajit-installation.en.md) · [Upgrades and rollback](docs/deployment-and-rollback.en.md) · [Game workbench](docs/game-workbench.en.md)
 - **Contribute**: [Development guide](docs/development.en.md) · [Frontend source](https://github.com/lcy0828/dst-admin-vue) · [Issue tracker](https://github.com/lcy0828/dst-admin-go/issues)
 
 ## Star history
