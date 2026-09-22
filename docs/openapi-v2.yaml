@@ -2842,6 +2842,126 @@ paths:
                 type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /entity-catalog/artwork-pack:
+    get:
+      tags: [Entity Catalog]
+      operationId: getArtworkPackStatus
+      summary: Inspect the optional shared panel artwork pack without network downloads
+      responses:
+        "200": { description: Installed and available versions, progress and error, content: { application/json: { schema: { $ref: "#/components/schemas/ArtworkPackEnvelope" } } } }
+    delete:
+      tags: [Entity Catalog]
+      operationId: uninstallArtworkPack
+      summary: Uninstall only the optional panel resources, taking effect immediately
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Uninstalled, content: { application/json: { schema: { $ref: "#/components/schemas/ArtworkPackEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /entity-catalog/artwork-pack/install:
+    post:
+      tags: [Entity Catalog]
+      operationId: installArtworkPack
+      summary: Download and atomically activate the pinned official artwork pack
+      description: Runs on the panel host for all local and Agent rooms. One operation at a time. No download occurs until explicitly requested. Previous installation is retained on failure. Poll status only while the resource dialog is open and an operation is active.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                source: { type: string, enum: [domestic, github], default: domestic }
+      responses:
+        "202": { description: Download accepted, content: { application/json: { schema: { $ref: "#/components/schemas/ArtworkPackEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /entity-catalog/artwork-pack/upload:
+    post:
+      tags: [Entity Catalog]
+      operationId: importArtworkPack
+      summary: Import the pinned official tar.gz without external network access
+      description: Streams one file up to 20 MiB. The same SHA-256, bounded extraction and catalog checks apply to online and offline installation. Arbitrary packages, paths, scripts and links are rejected.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        "200": { description: Installed, content: { application/json: { schema: { $ref: "#/components/schemas/ArtworkPackEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /entity-catalog/artwork-pack/cancel:
+    post:
+      tags: [Entity Catalog]
+      operationId: cancelArtworkPackDownload
+      summary: Cancel an active transfer while retaining the installed pack
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "202": { description: Cancellation requested, content: { application/json: { schema: { $ref: "#/components/schemas/ArtworkPackEnvelope" } } } }
+  /entity-catalog/artwork-pack/index:
+    get:
+      tags: [Entity Catalog]
+      operationId: getArtworkPackIndex
+      summary: Get the installed revision and Prefabs with artwork
+      responses:
+        "200":
+          description: Read once when the installed revision changes; empty Prefabs when uninstalled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      revision: { type: string }
+                      prefabs: { type: array, items: { type: string } }
+  /entity-catalog/artwork-pack/artwork/{prefab}:
+    get:
+      tags: [Entity Catalog]
+      operationId: getArtworkPackImage
+      summary: Read one installed vanilla WebP image without contacting a Runtime
+      parameters:
+        - { name: prefab, in: path, required: true, schema: { type: string, maxLength: 80 } }
+        - { name: v, in: query, schema: { type: string }, description: Installed revision for browser cache invalidation }
+      responses:
+        "200": { description: Private cacheable WebP, content: { image/webp: { schema: { type: string, format: binary } } } }
+        "304": { description: Current image already cached }
+        "404": { description: Pack or image missing, or requested revision is no longer installed }
+  /entity-catalog/artwork-pack/entities:
+    get:
+      tags: [Entity Catalog]
+      operationId: searchArtworkPackEntities
+      summary: Search the installed offline vanilla catalog, including when worlds are stopped
+      parameters:
+        - { name: q, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, maximum: 50000, default: 0 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 120, default: 60 } }
+      responses:
+        "200":
+          description: Static catalog snapshot; actual game actions still validate target components
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items: { type: array, items: { $ref: "#/components/schemas/CatalogEntity" } }
+                      mods: { type: array, maxItems: 0, items: { type: object } }
+                      total: { type: integer }
+                      offset: { type: integer }
+                      hasMore: { type: boolean }
+                      observedAt: { type: string, format: date-time, description: Pack installation time }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /entity-catalog/directory:
     get:
       tags: [Entity Catalog]
@@ -4716,7 +4836,44 @@ components:
           type: array
           items: { $ref: "#/components/schemas/EntityCapability" }
         common: { type: boolean }
-        source: { type: string, enum: [builtin, beacon, runtime] }
+        source: { type: string, enum: [builtin, beacon, runtime, artwork-pack] }
+    ArtworkPackEnvelope:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            available:
+              type: object
+              properties:
+                version: { type: string }
+                gameVersion: { type: string }
+                sha256: { type: string }
+                archiveBytes: { type: integer, format: int64 }
+                installedBytes: { type: integer, format: int64 }
+                entities: { type: integer }
+                illustrated: { type: integer }
+                images: { type: integer }
+                sources: { type: object, additionalProperties: { type: string, format: uri } }
+            installed:
+              type: [object, 'null']
+              properties:
+                version: { type: string }
+                gameVersion: { type: string }
+                revision: { type: string }
+                bytes: { type: integer, format: int64 }
+                entities: { type: integer }
+                illustrated: { type: integer }
+                images: { type: integer }
+                installedAt: { type: string, format: date-time }
+            phase: { type: string, enum: [idle, downloading, uploading, verifying, installing, failed] }
+            busy: { type: boolean }
+            receivedBytes: { type: integer, format: int64 }
+            totalBytes: { type: integer, format: int64 }
+            bytesPerSecond: { type: integer, format: int64 }
+            error: { type: string, enum: [invalid_package, cancelled, timeout, transfer_or_storage_failed, invalid_installed_pack] }
+        error: { type: 'null' }
+        meta: { $ref: "#/components/schemas/Meta" }
     EntityCatalogSearchResult:
       type: object
       additionalProperties: false

@@ -12,6 +12,7 @@ import (
 	runtimeagent "dont/agent"
 	"dont/controller"
 	agentservice "dont/internal/agents"
+	"dont/internal/artworkpack"
 	"dont/internal/authn"
 	"dont/internal/automation"
 	backupapi "dont/internal/backups"
@@ -433,6 +434,12 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, fmt.Errorf("initialize entity catalog: %w", err)
 	}
 	entityCatalogHandler := httpapi.NewEntityCatalogHandler(entityCatalogService)
+	artworkPackService, err := artworkpack.New(filepath.Join(filepath.Dir(config.ConfigPath), "resource-packs", "entity-artwork"), artworkpack.OfficialRelease(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("initialize workbench artwork package: %w", err)
+	}
+	hooks.stop = append(hooks.stop, artworkPackService.Close)
+	artworkPackHandler := httpapi.NewArtworkPackHandler(artworkPackService)
 	authService.SetPolicyProvider(func() authn.PasswordPolicy {
 		preferences, runtimeErr := systemSettingsService.Runtime()
 		if runtimeErr != nil {
@@ -1316,6 +1323,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		systemStatusHandler.Register(v2)
 		systemSettingsHandler.Register(v2)
 		entityCatalogHandler.Register(v2)
+		artworkPackHandler.Register(v2)
 		containerHandler.Register(v2)
 		backupHandler.Register(v2)
 		distributedBackupHandler.Register(v2)
