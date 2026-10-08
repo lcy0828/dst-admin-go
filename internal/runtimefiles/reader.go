@@ -429,7 +429,7 @@ func trustedShardPath(saveRoot, cluster, shard string) (string, error) {
 		return "", errors.New("DST 分片目录不可用")
 	}
 	relative, err := filepath.Rel(resolvedRoot, candidate)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || filepath.IsAbs(relative) {
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || filepath.IsAbs(relative) {
 		return "", errors.New("分片目录越出 DST 存档根目录")
 	}
 	return candidate, nil

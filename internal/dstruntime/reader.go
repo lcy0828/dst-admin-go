@@ -14,8 +14,6 @@ import (
 
 	"dont/internal/rooms"
 	"dont/internal/runtimefiles"
-
-	"github.com/go-ini/ini"
 )
 
 const (
@@ -335,38 +333,11 @@ func decodeStrictJSON(data []byte, destination interface{}) error {
 }
 
 func configuredShardID(worldPath string) (string, error) {
-	clusterData, _, clusterExists, err := readRegular(filepath.Join(filepath.Dir(worldPath), "cluster.ini"), 256*1024)
-	if err != nil {
-		return "", err
-	}
-	if clusterExists {
-		cluster, loadErr := ini.Load(clusterData)
-		if loadErr != nil {
-			return "", fmt.Errorf("parse cluster.ini shard identity: %w", loadErr)
-		}
-		shardEnabled := cluster.Section("SHARD").Key("shard_enabled")
-		if shardEnabled.String() != "" {
-			enabled, boolErr := shardEnabled.Bool()
-			if boolErr != nil {
-				return "", fmt.Errorf("parse cluster.ini shard_enabled: %w", boolErr)
-			}
-			if !enabled {
-				return "0", nil
-			}
-		}
-	}
-	data, _, exists, err := readRegular(filepath.Join(worldPath, "server.ini"), 256*1024)
-	if err != nil {
-		return "", err
-	}
-	if !exists {
+	id, err := runtimefiles.ReadConfiguredShardID(worldPath)
+	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
-	config, err := ini.Load(data)
-	if err != nil {
-		return "", fmt.Errorf("parse server.ini shard identity: %w", err)
-	}
-	return strings.TrimSpace(config.Section("SHARD").Key("id").String()), nil
+	return id, err
 }
 
 func validMetric(value *float64) bool {

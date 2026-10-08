@@ -3,9 +3,12 @@ package dstruntime
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"dont/internal/runtimefiles"
 	"dont/shared"
 )
 
@@ -106,6 +109,72 @@ func TestCurrentWorldStateRejectsPreviousBootAndWrongIdentity(t *testing.T) {
 	fixture.err = context.DeadlineExceeded
 	if _, err := bridge.ReadCurrentWorldState(context.Background(), roomID, worldID); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("timeout error=%v", err)
+	}
+}
+
+func TestCurrentWorldStateUsesEffectiveShardIdentityFromRuntimeFiles(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		cluster    string
+		configured string
+		sampled    string
+		wantErr    error
+	}{
+		{name: "unsharded master configured as one", cluster: "[SHARD]\nshard_enabled = false\n", configured: "1", sampled: "0"},
+		{name: "unsharded master configured as zero", cluster: "[SHARD]\nshard_enabled = false\n", configured: "0", sampled: "0"},
+		{name: "unsharded rejects foreign shard", cluster: "[SHARD]\nshard_enabled = false\n", configured: "1", sampled: "1", wantErr: ErrSnapshotStale},
+		{name: "sharded preserves custom master ID", cluster: "[SHARD]\nshard_enabled = true\n", configured: "7", sampled: "7"},
+		{name: "sharded rejects zero sample", cluster: "[SHARD]\nshard_enabled = true\n", configured: "1", sampled: "0", wantErr: ErrSnapshotStale},
+		{name: "legacy config retains explicit ID", configured: "1", sampled: "1"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			bridge, _, roomID, worldID, now := newDistributedBridgeFixture(t)
+			root := t.TempDir()
+			world := filepath.Join(root, "Cluster", "Master")
+			for _, name := range []string{"save/session/SESSION", "save/mod_config_data/dst-admin"} {
+				if err := os.MkdirAll(filepath.Join(world, name), 0750); err != nil {
+					t.Fatal(err)
+				}
+			}
+			server := "[SHARD]\nis_master = true\nid = " + testCase.configured + "\n"
+			for path, data := range map[string]string{
+				filepath.Join(root, "Cluster", "cluster.ini"): testCase.cluster,
+				filepath.Join(world, "server.ini"):            server,
+				filepath.Join(world, "server_log.txt"):        "[00:00:00]: Current time: " + now.Add(-time.Minute).In(time.Local).Format(time.ANSIC) + "\n",
+			} {
+				if err := os.WriteFile(path, []byte(data), 0640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			snapshot := WorldStateSnapshot{
+				SchemaVersion: ProtocolVersion, ProducerVersion: RuntimeVersion, ProducerInstanceID: "current", SessionID: "SESSION", ShardID: testCase.sampled,
+				Sequence: 1, CapturedAtUnix: now.Add(-10 * time.Second).Unix(), Complete: true, Season: "autumn",
+			}
+			for _, slot := range []string{"worldstate-a.json", "worldstate-b.json"} {
+				writeSnapshot(t, filepath.Join(world, "save/mod_config_data/dst-admin", slot), snapshot)
+				snapshot.Sequence++
+			}
+			files, err := runtimefiles.ReadWorldState(context.Background(), root, "Cluster", "Master", shared.ShardRuntimeStatus{State: "running"})
+			if err != nil || files.ReadError != "" {
+				t.Fatalf("runtime file read=%#v, %v", files, err)
+			}
+			fixture := &currentWorldFilesFixture{value: files}
+			bridge.runtime = fixture
+			value, err := bridge.ReadCurrentWorldState(context.Background(), roomID, worldID)
+			if !errors.Is(err, testCase.wantErr) {
+				t.Fatalf("state read error=%v, want %v", err, testCase.wantErr)
+			}
+			if err == nil && (value.Snapshot.ShardID != testCase.sampled || value.Snapshot.Sequence != 2) {
+				t.Fatalf("wrong snapshot=%#v", value)
+			}
+			if fixture.calls != 1 || fixture.otherCalls != 0 {
+				t.Fatalf("state read sent extra requests: %d/%d", fixture.calls, fixture.otherCalls)
+			}
+			written, err := os.ReadFile(filepath.Join(world, "server.ini"))
+			if err != nil || string(written) != server {
+				t.Fatalf("state read rewrote server.ini: %v", err)
+			}
+		})
 	}
 }
 

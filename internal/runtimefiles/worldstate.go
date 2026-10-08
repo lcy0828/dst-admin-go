@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"dont/shared"
-
-	"github.com/go-ini/ini"
 )
 
 // ReadWorldState returns the on-disk outputs and their runtime identity without
@@ -50,7 +48,7 @@ func ReadWorldState(ctx context.Context, saveRoot, cluster, shard string, status
 	}
 	value.SessionID, err = worldSessionID(root)
 	if err == nil {
-		value.ShardID, err = worldShardID(root)
+		value.ShardID, err = ReadConfiguredShardID(root)
 	}
 	if err == nil {
 		value.StartedAt, err = worldStartedAt(root)
@@ -62,21 +60,6 @@ func ReadWorldState(ctx context.Context, saveRoot, cluster, shard string, status
 		value.ReadError = fmt.Sprintf("read world state files: %v", err)
 	}
 	return value, nil
-}
-
-func worldShardID(root string) (string, error) {
-	data, _, exists, err := readTrustedRegular(filepath.Join(root, "server.ini"), 1024*1024)
-	if err != nil {
-		return "", err
-	}
-	if !exists {
-		return "", errors.New("server.ini is unavailable")
-	}
-	config, err := ini.Load(data)
-	if err != nil {
-		return "", fmt.Errorf("parse server.ini: %w", err)
-	}
-	return strings.TrimSpace(config.Section("SHARD").Key("id").String()), nil
 }
 
 func worldSessionID(root string) (string, error) {
