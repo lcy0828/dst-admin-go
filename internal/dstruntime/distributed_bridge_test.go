@@ -189,7 +189,11 @@ func (r *refreshReadRuntime) ReadArtifacts(ctx context.Context, roomID, worldID 
 	r.reads[kind]++
 	r.readMu.Unlock()
 	if r.started != nil && (kind == shared.ArtifactRuntimePlayers || kind == shared.ArtifactRuntimeWorldState) {
-		r.started <- kind
+		select {
+		case r.started <- kind:
+		case <-ctx.Done():
+			return shared.RuntimeArtifactBundle{}, ctx.Err()
+		}
 		select {
 		case <-ctx.Done():
 			return shared.RuntimeArtifactBundle{}, ctx.Err()
@@ -304,10 +308,19 @@ func TestDistributedRefreshCancelsBothPendingOutputReads(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { _, err := bridge.RefreshSnapshots(ctx, roomID, worldID); done <- err }()
-	select {
-	case <-runtime.started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("output read did not start")
+	started := make(map[shared.ArtifactKind]bool)
+	startTimeout := time.NewTimer(2 * time.Second)
+	defer startTimeout.Stop()
+	for range 2 {
+		select {
+		case kind := <-runtime.started:
+			started[kind] = true
+		case <-startTimeout.C:
+			t.Fatal("both output reads did not start")
+		}
+	}
+	if !started[shared.ArtifactRuntimePlayers] || !started[shared.ArtifactRuntimeWorldState] {
+		t.Fatalf("pending output reads = %v", started)
 	}
 	cancel()
 	select {
