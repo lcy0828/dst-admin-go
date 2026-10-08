@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"dont/shared"
@@ -98,13 +99,17 @@ func probeEndpoint(ctx context.Context, endpoint shared.RuntimeNetworkEndpointRe
 	request := []byte(endpointProbePrefix + endpoint.Token)
 	expected := []byte(endpointAckPrefix + endpoint.Token)
 	buffer := make([]byte, maximumProbePacket)
+	deadline, _ := probeContext.Deadline()
 	for probeContext.Err() == nil {
 		sentAt := time.Now()
-		if err := connection.SetDeadline(minimumDeadline(sentAt.Add(350*time.Millisecond), sentAt.Add(timeout))); err != nil {
+		if err := connection.SetDeadline(minimumDeadline(sentAt.Add(350*time.Millisecond), deadline)); err != nil {
 			result.Error = err.Error()
 			return result
 		}
 		if _, err := connection.Write(request); err != nil {
+			if errors.Is(err, syscall.ECONNREFUSED) && waitForEndpointRetry(probeContext) {
+				continue
+			}
 			result.Error = err.Error()
 			return result
 		}
@@ -117,6 +122,11 @@ func probeEndpoint(ctx context.Context, endpoint shared.RuntimeNetworkEndpointRe
 		if readErr != nil {
 			var networkErr net.Error
 			if !errors.As(readErr, &networkErr) || !networkErr.Timeout() {
+				// A remote listener may still be binding its port. Linux reports
+				// the first ICMP rejection immediately; retry within the same budget.
+				if errors.Is(readErr, syscall.ECONNREFUSED) && waitForEndpointRetry(probeContext) {
+					continue
+				}
 				result.Error = readErr.Error()
 				return result
 			}
@@ -124,6 +134,17 @@ func probeEndpoint(ctx context.Context, endpoint shared.RuntimeNetworkEndpointRe
 	}
 	result.Error = "endpoint probe timed out"
 	return result
+}
+
+func waitForEndpointRetry(ctx context.Context) bool {
+	timer := time.NewTimer(50 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func sortedTokenSet(values map[string]bool) []string {
