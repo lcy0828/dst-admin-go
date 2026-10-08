@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,6 +19,8 @@ import (
 	"dont/internal/rooms"
 	"dont/internal/runtimedriver"
 	"dont/shared"
+
+	"github.com/go-ini/ini"
 )
 
 type configurationCatalog struct {
@@ -625,6 +628,152 @@ func TestWorldConfigurationPreservesComplexUnknownLuaValues(t *testing.T) {
 	complex, ok = complex.stringEntry("complex_unknown")
 	if !ok || len(complex.entries) != 2 {
 		t.Fatalf("complex override was not preserved: %#v", complex)
+	}
+}
+
+func TestWorldConfigurationPreservesExplicitMasterShardID(t *testing.T) {
+	for _, shardID := range []int{0, 7} {
+		for _, routed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("shard=%d/routed=%t", shardID, routed), func(t *testing.T) {
+				service, roomPath, _ := newConfigurationService(t)
+				serverPath := filepath.Join(roomPath, "Master", "server.ini")
+				original, err := os.ReadFile(serverPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if shardID == 0 {
+					if err := os.WriteFile(filepath.Join(roomPath, "cluster.ini"), []byte("[SHARD]\nshard_enabled = false\n"), 0640); err != nil {
+						t.Fatal(err)
+					}
+				}
+				publisher := &configurationPublisher{}
+				if routed {
+					override, err := os.ReadFile(filepath.Join(roomPath, "Master", "leveldataoverride.lua"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					reader := configurationSnapshotReader{files: []shared.RuntimeConfigurationFile{
+						routedConfigurationFile("server.ini", string(original), 0640, time.Now()),
+						routedConfigurationFile("leveldataoverride.lua", string(override), 0640, time.Now()),
+					}}
+					if err := service.ConfigureReader(reader); err != nil {
+						t.Fatal(err)
+					}
+					if err := service.ConfigurePublisher(publisher); err != nil {
+						t.Fatal(err)
+					}
+				}
+				current, err := service.WorldConfig("room", "world")
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, field := range current.ServerSchema {
+					if field.Key == "shardId" && (field.Minimum == nil || *field.Minimum != 0) {
+						t.Fatalf("master shard schema rejects zero: %#v", field)
+					}
+				}
+				request := WorldUpdateRequest{ExpectedRevision: current.Revision, Server: current.Server}
+				request.Server.ShardID = shardID
+				if _, err := service.ApplyWorld(context.Background(), "job-master-id", "room", "world", request); err != nil {
+					t.Fatal(err)
+				}
+				var written []byte
+				if routed {
+					if len(publisher.requests) != 1 || !publisher.requests[0].IncludeLocal {
+						t.Fatalf("publication=%#v", publisher.requests)
+					}
+					for _, file := range publisher.requests[0].Payload {
+						if file.Name == "server.ini" {
+							written = file.Data
+						}
+					}
+					local, err := os.ReadFile(serverPath)
+					if err != nil || string(local) != string(original) {
+						t.Fatalf("remote save changed controller files: %v", err)
+					}
+				} else {
+					written, err = os.ReadFile(serverPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				config, err := ini.Load(written)
+				if err != nil || config.Section("SHARD").Key("id").MustInt(-1) != shardID || !config.Section("SHARD").Key("is_master").MustBool(false) || config.Section("CUSTOM").Key("keep").String() != "yes" {
+					t.Fatalf("master ID or unknown keys lost: %s, %v", written, err)
+				}
+				if !routed {
+					updated, err := service.WorldConfig("room", "world")
+					if err != nil || updated.Server.ShardID != shardID {
+						t.Fatalf("saved master ID did not roundtrip: %#v, %v", updated, err)
+					}
+					updated.Server.ServerPort++
+					if _, err := service.ApplyWorld(context.Background(), "job-master-id-again", "room", "world", WorldUpdateRequest{ExpectedRevision: updated.Revision, Server: updated.Server}); err != nil {
+						t.Fatalf("saving another field rejected master ID: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestWorldConfigurationRejectsInvalidShardIDs(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		isMaster bool
+		shardID  int
+	}{
+		{name: "negative master", isMaster: true, shardID: -1},
+		{name: "master above limit", isMaster: true, shardID: 1000},
+		{name: "zero secondary", shardID: 0},
+		{name: "negative secondary", shardID: -1},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			service, roomPath, _ := newConfigurationService(t)
+			current, err := service.WorldConfig("room", "world")
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := WorldUpdateRequest{ExpectedRevision: current.Revision, Server: current.Server}
+			request.Server.IsMaster, request.Server.ShardID = testCase.isMaster, testCase.shardID
+			_, err = service.ApplyWorld(context.Background(), "job-invalid-shard", "room", "world", request)
+			var fieldErr *FieldError
+			if !errors.As(err, &fieldErr) || fieldErr.Fields["server.shardId"] == "" {
+				t.Fatalf("invalid ID error=%v", err)
+			}
+			updated, err := service.WorldConfig("room", "world")
+			if err != nil || updated.Revision != current.Revision {
+				t.Fatalf("invalid ID changed configuration in %s: %#v, %v", roomPath, updated, err)
+			}
+		})
+	}
+}
+
+func TestWorldConfigurationDoesNotTreatMissingOrMalformedShardIDAsZero(t *testing.T) {
+	for _, replacement := range []string{"", "id = invalid\n"} {
+		t.Run(replacement, func(t *testing.T) {
+			service, roomPath, _ := newConfigurationService(t)
+			path := filepath.Join(roomPath, "Master", "server.ini")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(strings.Replace(string(data), "id = 1\n", replacement, 1)), 0640); err != nil {
+				t.Fatal(err)
+			}
+			current, err := service.WorldConfig("room", "world")
+			if err != nil || current.Server.ShardID != -1 {
+				t.Fatalf("invalid ID was converted to zero: %#v, %v", current, err)
+			}
+			request := WorldUpdateRequest{ExpectedRevision: current.Revision, Server: current.Server}
+			request.Server.ServerPort++
+			if _, err := service.ApplyWorld(context.Background(), "job-missing-id", "room", "world", request); !errors.Is(err, ErrInvalidConfiguration) {
+				t.Fatalf("invalid ID accepted on save: %v", err)
+			}
+			request.Server.ShardID = 0
+			if _, err := service.ApplyWorld(context.Background(), "job-repair-id", "room", "world", request); err != nil {
+				t.Fatalf("explicit ID could not repair configuration: %v", err)
+			}
+		})
 	}
 }
 

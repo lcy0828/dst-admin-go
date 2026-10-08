@@ -290,7 +290,7 @@ func parseWorldDocument(server fileSnapshot, serverModified time.Time, override 
 			ServerPort:         serverConfig.Section("NETWORK").Key("server_port").MustInt(0),
 			IsMaster:           serverConfig.Section("SHARD").Key("is_master").MustBool(false),
 			ShardName:          serverConfig.Section("SHARD").Key("name").String(),
-			ShardID:            serverConfig.Section("SHARD").Key("id").MustInt(0),
+			ShardID:            serverConfig.Section("SHARD").Key("id").MustInt(-1),
 			AuthenticationPort: serverConfig.Section("STEAM").Key("authentication_port").MustInt(0),
 			MasterServerPort:   serverConfig.Section("STEAM").Key("master_server_port").MustInt(0),
 			EncodeUserPath:     serverConfig.Section("ACCOUNT").Key("encode_user_path").MustBool(true),
@@ -313,8 +313,16 @@ func worldConfigFromDocument(document worldDocument) (WorldConfig, error) {
 		}
 		overrides[entry.key.text] = value
 	}
+	schema := append([]FieldSchema(nil), serverSchema...)
+	if document.serverValues.IsMaster {
+		for index := range schema {
+			if schema[index].Key == "shardId" {
+				schema[index].Minimum = intPointer(0)
+			}
+		}
+	}
 	return WorldConfig{
-		Revision: document.revision, Server: document.serverValues, ServerSchema: append([]FieldSchema(nil), serverSchema...),
+		Revision: document.revision, Server: document.serverValues, ServerSchema: schema,
 		Overrides: overrides, OverrideSchema: append([]OverrideSchema(nil), overrideSchema...), UnknownFieldCount: document.unknownFields, ModifiedAt: document.modified, Sync: document.sync,
 	}, nil
 }
@@ -433,8 +441,12 @@ func validateWorldServer(values WorldServerValues) error {
 	if len([]rune(values.ShardName)) > 64 || strings.ContainsAny(values.ShardName, "\x00\r\n") {
 		fields["server.shardName"] = "世界名称不能超过 64 个字符且不能包含换行"
 	}
-	if values.ShardID < 1 || values.ShardID > 999 {
-		fields["server.shardId"] = "世界 ID 必须在 1-999 之间"
+	minimumShardID := 1
+	if values.IsMaster {
+		minimumShardID = 0
+	}
+	if values.ShardID < minimumShardID || values.ShardID > 999 {
+		fields["server.shardId"] = fmt.Sprintf("世界 ID 必须在 %d-999 之间", minimumShardID)
 	}
 	for key, value := range map[string]int{"server.authenticationPort": values.AuthenticationPort, "server.masterServerPort": values.MasterServerPort} {
 		if value < 0 || value > 65535 {
