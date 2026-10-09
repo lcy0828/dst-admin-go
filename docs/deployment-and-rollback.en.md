@@ -2,7 +2,7 @@
 
 [简体中文（默认）](deployment-and-rollback.md) | **English**
 
-Start from the [main README](../README.en.md). Images and native packages embed the UI; upgrade the complete artifact while preserving configuration, databases, Agent identities, and saves.
+Start from the [main README](../README.en.md). Images and native packages embed the UI. Update the management program from the panel or replace the full release artifact while preserving configuration, databases, Agent identities and saves.
 
 ## Downloads and versions
 
@@ -78,7 +78,31 @@ Unconfigured mirrors are skipped with a note in the Actions summary. Invalid cre
 
 Frontend commits do not update installed services or automatically publish the backend. Branch builds do not publish images. Publish a new `vX.Y.Z` tag to deliver fixes through `latest`; do not rewrite released tags. Run Package to include new pages, or set the manual `frontend_ref` input to pin a revision. Manual image publication is disabled by default; explicitly enabling it publishes preview images only. Tagged release assets exist only after the tag pipeline succeeds.
 
-## Upgrade and rollback
+## Online updates
+
+Official Linux amd64 and macOS arm64 releases with online update support display the management version in the header and flag newer releases. Under **System settings → Software updates**, check the latest stable GitHub release and confirm installation. The panel downloads and verifies SHA-256, platform and embedded UI, switches the program, and reconnects after restart. Download progress and speed are shown. Automatic source selection tries GitHub first and falls back to GHFast on connection failure; either source can be selected manually. Development builds and releases without an update bundle display version information and a release link.
+
+Only the management program, embedded frontend and bundled helpers change. Running game rooms continue; wait for backups, game downloads and other background work to finish before updating. The panel offers release checks, forward updates and retries. A new program must start within 60 seconds and remain healthy for 10 seconds before activation. Failed startup automatically restores the committed program and preserves that choice across restarts. Settings, databases and saves are preserved; releases that require incompatible database or base dependency changes need the full upgrade procedure.
+
+Programs are persisted under `software-updates/` next to the configuration file: `/opt/dst/control/software-updates` for All-in-One and `/var/lib/dst-admin/software-updates` for the control plane. Preserve the data mounts to retain updates across container restarts and recreation. A newly installed newer base image is verified once; if it fails, the last verified program is restored. Restarting that same image preserves recovery instead of repeatedly selecting the failed version. `DST_ADMIN_UPDATE_DIR` selects a separate writable directory; the runtime user needs write and execute permission, and the mount must allow execution.
+
+Compose allows a writable container root filesystem by default. Set `DST_ADMIN_READ_ONLY=true` or change `read_only` to `true` for a read-only deployment. Online updates still work with writable data mounts and temporary directories. No `.env` is required. Online updates do not modify the original image; image tags identify the base version, while the panel shows the active program version.
+
+Install a version with the update launcher before using this feature; an older release cannot add the launcher from its existing UI. Routine updates do not require pulling an image. System libraries, SteamCMD and deployment script changes still require an image update. Standalone Agents are upgraded separately under Machines. Clear `DST_ADMIN_WEB_ROOT` when using the embedded frontend to avoid loading an external older UI.
+
+Stable releases contain `dst-admin-update-linux-amd64.tar.gz` or `dst-admin-update-darwin-arm64.tar.gz` and its `.sha256` file, plus `dst-admin-release.json` for release checks through the China download proxy. Bundles contain only `dst-admin`, `dst-map-renderer`, `mod-local-setup` and a verification manifest. CI checks the bundle, embedded frontend and update/recovery lifecycle. Protocol changes require a new full base release; incompatible data migrations must not be shipped as routine updates with automatic program recovery.
+
+### Standalone Agent online updates
+
+Open **Machines → Select a machine → Diagnostics → Agent software updates** to view that node's current release, check for updates, install, or retry. Official Linux amd64/arm64, macOS amd64/arm64 and Windows amd64 Agents, including Docker Agents, use persisted version directories and a stable launcher. Routine updates require neither a new image nor a manual system-service restart. Windows support here refers to updating the Agent program; its game-running capabilities do not change.
+
+Agents check and download official bundles directly by default, with GitHub and the China proxy available. Choose **Controller relay** when a node cannot reach download sources: the Controller streams one trusted official archive, and the Agent verifies and installs it locally. Updating the Controller does not automatically update all Agents. Background release downloads are disabled; checks and updates run only on demand.
+
+Releases provide `dst-admin-agent-update-<platform>.tar.gz` and its `.sha256`, containing the Agent and packaged helpers. The new Agent must start and reconnect over its authenticated control channel within 60 seconds, then remain healthy for 10 seconds before activation. Startup or reconnection failure automatically restores the previous program. Wait for other Agent commands to finish before switching. Running game processes, Agent identity, settings, operation state and saves are preserved. Short connection failures keep observing the update; after a timeout, Reconnect resumes the same job without reinstalling. Management roles and directories cannot be reapplied while an update bundle is downloading; wait for it to finish.
+
+Updates live beside the Agent configuration in `software-updates/`, or `/var/lib/dst-admin-agent/software-updates` in Docker. Override this with `DST_ADMIN_AGENT_UPDATE_DIR` if needed. Preserve its writable, executable data mount. An older Agent requires one package or image upgrade to obtain the launcher before page updates become available. `-version` retains the Agent protocol version used for compatibility; `-build-info` reports the official release build shown in the panel.
+
+## Full upgrade and rollback
 
 1. Save and stop affected rooms through the panel, then verify process exit. Stopping a native management service or Agent alone does not stop game worlds.
 2. Back up active configuration, databases, Agent identities/operation state, and saves on every target. Copy SQLite state after stopping writes or use consistent `.backup`; do not copy only a live main database file.

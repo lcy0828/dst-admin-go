@@ -138,7 +138,7 @@ sudo systemctl restart dst-admin-local
 
 在 **机器与连接 → Agent 安全设置 → Linux** 可直接复制安装命令：下载最新正式 Agent 小包、校验 SHA-256，并保留已有配置和身份。可选 GHFast 或 GitHub 直连，无需 Go。Docker 安装使用 `agent-latest`；新游戏节点推荐 All-in-One 后加入管理中心。
 
-正式版还提供 `dst-admin-agent-linux-amd64.tar.gz` 和 `dst-admin-agent-darwin-arm64.tar.gz`，仅包含 Agent 与配置示例；需要系统服务安装脚本时使用下面的完整原生包。
+正式版提供 `dst-admin-agent-<平台>.tar.gz` 及 `.sha256`，平台包括 `linux-amd64`、`linux-arm64`、`darwin-amd64`、`darwin-arm64`、`windows-amd64`，仅包含 Agent 与配置示例；需要 Linux 或 macOS 系统服务安装脚本时使用对应完整原生包。Windows 包内程序为 `dst-admin-agent.exe`；Windows Agent 支持连接和程序更新，暂不支持运行 Windows 原生 DST。
 
 控制端提供页面；Agent 在远程机器执行下载、安装和房间操作。Agent 本身没有独立管理页面。
 Agent 主动连接控制端的 `/agent`，不需要为普通命令额外开放 Agent 入站 TCP 端口。

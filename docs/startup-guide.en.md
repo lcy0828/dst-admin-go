@@ -136,7 +136,7 @@ Open the UI and follow [first game startup](#first-game-startup-and-existing-sav
 
 In **Machines & connections → Agent security → Linux**, copy the installer to download and verify the latest stable Agent while preserving existing configuration and identity. Choose GHFast or GitHub direct; Go is not required. Docker uses `agent-latest`. For a new game node, deploy All-in-One and join the management center.
 
-Releases also provide `dst-admin-agent-linux-amd64.tar.gz` and `dst-admin-agent-darwin-arm64.tar.gz`, containing the Agent and a configuration example. Use the full native package below for system service installers.
+Releases provide `dst-admin-agent-<platform>.tar.gz` and `.sha256` for `linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`, and `windows-amd64`, containing the Agent and a configuration example. Use the matching full native package for Linux or macOS service installers. The Windows binary is `dst-admin-agent.exe`; it supports control connections and program updates, while running native Windows DST remains unsupported.
 
 The Controller provides the UI. The Agent downloads, installs, and operates rooms on the remote machine; it has no separate management page.
 The Agent connects outbound to the Controller's `/agent`. Ordinary commands do not require an additional inbound TCP port on the Agent.

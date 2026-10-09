@@ -51,11 +51,11 @@
 | --- | --- | --- |
 | **Linux x86_64（amd64）** | **推荐**：Docker 或 `linux-amd64` 原生包 | 支持，可在页面安装、更新游戏 |
 | **macOS Apple Silicon（arm64）** | `darwin-arm64` 原生包 | 支持，需 Steam 游戏、tmux 和 Rosetta 2；通过 Steam 更新游戏 |
-| macOS Intel（x86_64） | 自行构建 `darwin-amd64`，无预编译包，未纳入发布 CI 验证 | 使用 Steam 游戏与 tmux |
-| Windows | 暂不支持原生部署，无 Windows 安装包 | 暂不支持管理 Windows 原生游戏进程 |
-| Linux ARM64 | 可自行构建控制端，未提供预编译包，未纳入发布 CI 验证 | DST Linux 服务端不提供原生 ARM 版本 |
+| macOS Intel（x86_64） | Agent 提供 `darwin-amd64` 包；管理端需自行构建 | 使用 Steam 游戏与 tmux |
+| Windows x86_64 | Agent 提供 `windows-amd64` 包；管理端暂不支持原生部署 | 暂不支持管理 Windows 原生游戏进程 |
+| Linux ARM64 | Agent 提供 `linux-arm64` 包；管理端需自行构建 | DST Linux 服务端不提供原生 ARM 版本 |
 
-[正式版下载](https://github.com/lcy0828/dst-admin-go/releases/latest)提供 Linux x86_64、macOS Apple Silicon 的完整原生包和独立 Agent 包。四种 Docker 镜像均为 `linux/amd64`；Apple Silicon 推荐[原生 macOS 部署](docs/startup-guide.md#macos-本机部署)。Windows 可在 Linux x86_64 虚拟机内按 Linux 方式部署；WSL2 / Docker Desktop 尚未纳入发布验证。
+[正式版下载](https://github.com/lcy0828/dst-admin-go/releases/latest)提供 Linux x86_64、macOS Apple Silicon 的完整原生包；独立 Agent 包覆盖上表五种平台，支持[页面在线更新](docs/deployment-and-rollback.md#独立-agent-在线更新)。四种 Docker 镜像均为 `linux/amd64`；Apple Silicon 推荐[原生 macOS 部署](docs/startup-guide.md#macos-本机部署)。Windows 游戏节点可在 Linux x86_64 虚拟机内按 Linux 方式部署；WSL2 / Docker Desktop 尚未纳入发布验证。
 
 **LuaJIT2 页面安装**目前支持 Linux x86_64 的 64 位 DST，适用于原生运行和常规 All-in-One；macOS、Windows、Linux ARM 和独立分片容器暂不支持。详见 [LuaJIT2 安装说明](docs/luajit-installation.md)。
 
@@ -147,7 +147,7 @@ docker compose up -d
 
 **创建管理员 → 安装或接入游戏 → 填写 [Klei Token](https://accounts.klei.com/account/game/servers?game=DontStarveTogether) → 创建房间或导入存档 → 启动世界**
 
-> 数据默认保存在 `/opt/dst`：`saves/` 是存档，`control/` 是配置和数据库。升级时保留数据目录和 `compose.yaml` 的挂载配置，在部署目录执行 `docker compose pull && docker compose up -d`。
+> 数据默认保存在 `/opt/dst`：`saves/` 是存档，`control/` 是配置和数据库。支持在线更新的正式版可在 **系统设置 → 软件更新** 更新控制端和内置前端，在 **机器详情 → 诊断** 单独更新 Agent；普通更新无需拉取镜像，运行中的房间继续运行。首次接入此功能或更新系统依赖时，保留数据挂载，执行 `docker compose pull && docker compose up -d`。详见[更新与回退](docs/deployment-and-rollback.md#页面在线更新)。
 
 <details>
 <summary><strong>需要开放哪些端口？</strong></summary>

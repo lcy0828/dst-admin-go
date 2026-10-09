@@ -51,11 +51,11 @@ Access the web UI from a modern browser on Windows, macOS, or Linux. The table b
 | --- | --- | --- |
 | **Linux x86_64 (amd64)** | **Recommended**: Docker or the `linux-amd64` native package | Supported, with game installation and updates from the panel |
 | **macOS Apple Silicon (arm64)** | `darwin-arm64` native package | Supported; requires Steam game files, tmux, and Rosetta 2. Update the game through Steam |
-| macOS Intel (x86_64) | Build `darwin-amd64` from source; no prebuilt package or release CI coverage | Uses Steam game files and tmux |
-| Windows | Native deployment is not supported; no Windows package | Managing native Windows game processes is not supported |
-| Linux ARM64 | Build the Controller from source; no prebuilt package or release CI coverage | DST has no native Linux ARM server build |
+| macOS Intel (x86_64) | Prebuilt `darwin-amd64` Agent; build the Controller from source | Uses Steam game files and tmux |
+| Windows x86_64 | Prebuilt `windows-amd64` Agent; native Controller deployment is not supported | Managing native Windows game processes is not supported |
+| Linux ARM64 | Prebuilt `linux-arm64` Agent; build the Controller from source | DST has no native Linux ARM server build |
 
-[Releases](https://github.com/lcy0828/dst-admin-go/releases/latest) provide full native packages and standalone Agent packages for Linux x86_64 and macOS Apple Silicon. All four Docker images target `linux/amd64`; on Apple Silicon, prefer [native macOS deployment](docs/startup-guide.en.md#macos-local-deployment). Windows users can deploy in a Linux x86_64 virtual machine; WSL2 / Docker Desktop are not covered by release validation.
+[Releases](https://github.com/lcy0828/dst-admin-go/releases/latest) provide full native packages for Linux x86_64 and macOS Apple Silicon, plus standalone Agent packages for all five platforms above with [online updates](docs/deployment-and-rollback.en.md#standalone-agent-online-updates). All four Docker images target `linux/amd64`; on Apple Silicon, prefer [native macOS deployment](docs/startup-guide.en.md#macos-local-deployment). Windows game nodes can deploy in a Linux x86_64 virtual machine; WSL2 / Docker Desktop are not covered by release validation.
 
 **LuaJIT2 installation from the panel** currently supports 64-bit DST on Linux x86_64, running natively or in the standard All-in-One container. It is not available for macOS, Windows, Linux ARM, or separate shard containers. See the [LuaJIT2 guide](docs/luajit-installation.en.md).
 
@@ -147,7 +147,7 @@ Open **`http://SERVER_IP:8080`** and follow the setup wizard:
 
 **Create an administrator → Install or connect the game → Add a [Klei Token](https://accounts.klei.com/account/game/servers?game=DontStarveTogether) → Create a room or import saves → Start your worlds**
 
-> Data lives in `/opt/dst` by default: `saves/` holds game saves; `control/` holds configuration and the database. Keep the data directory and the mounts in `compose.yaml` when upgrading. Run `docker compose pull && docker compose up -d` from the deployment directory.
+> Data lives in `/opt/dst`: `saves/` holds game saves; `control/` holds configuration and the database. Official releases with online update support update the Controller and embedded UI under **System settings → Software updates**, and each Agent under **Machine details → Diagnostics**. Routine updates need no new image; running rooms continue. To first install this feature or update system dependencies, preserve the data mounts and run `docker compose pull && docker compose up -d`. See [online updates and rollback](docs/deployment-and-rollback.en.md#online-updates).
 
 <details>
 <summary><strong>Which ports should I open?</strong></summary>
