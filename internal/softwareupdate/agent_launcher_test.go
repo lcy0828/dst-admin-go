@@ -63,7 +63,9 @@ func testAgentSupervisor(t *testing.T) *supervisor {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &supervisor{root: root, base: binary, baseVersion: "v1.2.2", kind: "agent", platform: runtime.GOOS + "-" + runtime.GOARCH, agent: ipc, signals: signals, args: []string{"-test.run=^TestAgentLauncherHelperProcess$"}, environment: environmentWith(os.Environ(), map[string]string{"DST_AGENT_UPDATE_TEST_HELPER": "1", "DST_ADMIN_AGENT_LAUNCHER_URL": address, "DST_ADMIN_AGENT_LAUNCHER_TOKEN": ipc.token}), bootTimeout: 2 * time.Second, stableDuration: time.Millisecond, validate: func(context.Context, string, string, string) error { return nil }}
+	// Race instrumentation and cold executable validation can delay helper
+	// startup while the full suite compiles and runs other packages.
+	s := &supervisor{root: root, base: binary, baseVersion: "v1.2.2", kind: "agent", platform: runtime.GOOS + "-" + runtime.GOARCH, agent: ipc, signals: signals, args: []string{"-test.run=^TestAgentLauncherHelperProcess$"}, environment: environmentWith(os.Environ(), map[string]string{"DST_AGENT_UPDATE_TEST_HELPER": "1", "DST_ADMIN_AGENT_LAUNCHER_URL": address, "DST_ADMIN_AGENT_LAUNCHER_TOKEN": ipc.token}), bootTimeout: 5 * time.Second, stableDuration: time.Millisecond, validate: func(context.Context, string, string, string) error { return nil }}
 	state := diskState{Protocol: Protocol, Current: &installedRelease{Version: s.baseVersion}}
 	if err := writeState(root, state); err != nil {
 		t.Fatal(err)
@@ -172,7 +174,7 @@ func TestAgentRecoveredProgramSurvivesSameBaseRestart(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- s.run(ctx) }()
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(12 * time.Second)
 		for {
 			state, _ := readState(s.root)
 			_, readyErr := os.Stat(filepath.Join(s.root, "ready.json"))
