@@ -2,6 +2,7 @@ package routers
 
 import (
 	"context"
+	"dont/internal/softwareupdate"
 	"dont/internal/systemsettings"
 	"dont/pkg/setting"
 	"errors"
@@ -22,11 +23,13 @@ type applicationHooks struct {
 
 // Application owns the HTTP handler and every process-scoped background task.
 type Application struct {
-	router        *gin.Engine
-	hooks         applicationHooks
-	settings      *systemsettings.Service
-	config        setting.Snapshot
-	prepareReload func(context.Context) (func(), error)
+	router                 *gin.Engine
+	hooks                  applicationHooks
+	settings               *systemsettings.Service
+	config                 setting.Snapshot
+	prepareReload          func(context.Context) (func(), error)
+	software               *softwareupdate.Service
+	prepareSoftwareRestart func(context.Context) (func(), error)
 
 	mu      sync.Mutex
 	started bool

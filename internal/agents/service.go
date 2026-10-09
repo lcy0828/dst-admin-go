@@ -20,6 +20,7 @@ import (
 
 	"dont/internal/jobs"
 	"dont/internal/runtimeperformance"
+	"dont/internal/softwareupdate"
 	"dont/shared"
 
 	"github.com/google/uuid"
@@ -56,6 +57,11 @@ type Service struct {
 	onRuntimeTopologyChanged []func()
 	upgradeMu                sync.Mutex
 	activeUpgrades           map[string]struct{}
+	softwareClient           softwareupdate.ReleaseClient
+	softwareRelays           map[string]*agentSoftwareRelay
+	softwareCheckMu          sync.Mutex
+	softwareCacheMu          sync.RWMutex
+	softwareReleaseChecks    map[string]softwareupdate.Check
 	systemReportMu           sync.Mutex
 	systemReports            map[string]*systemReportRequest
 }

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"dont/internal/authn"
 	"dont/internal/automation"
 	backupapi "dont/internal/backups"
+	"dont/internal/buildinfo"
 	"dont/internal/capabilities"
 	"dont/internal/chatlogs"
 	"dont/internal/configuration"
@@ -55,6 +57,7 @@ import (
 	"dont/internal/runtimeoverview"
 	"dont/internal/saveimport"
 	"dont/internal/shards"
+	"dont/internal/softwareupdate"
 	"dont/internal/structuredlogs"
 	"dont/internal/systemsettings"
 	"dont/internal/systemstatus"
@@ -178,7 +181,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err != nil {
 		return nil, err
 	}
-	mapRendererPath := config.Path("map", "RENDERER_PATH", "DST_ADMIN_MAP_RENDERER_PATH")
+	mapRendererPath := softwareupdate.BundledHelper(config.Path("map", "RENDERER_PATH", "DST_ADMIN_MAP_RENDERER_PATH"), "dst-map-renderer")
 	mapPath := config.Path("paths", "DST_MAP_PATH", "DST_ADMIN_MAP_PATH")
 	if mapPath == "" {
 		mapPath = backupPath + string(os.PathSeparator) + "maps"
@@ -425,6 +428,16 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	systemSettingsHandler := httpapi.NewSystemSettingsHandler(systemSettingsService)
+	softwareRoot, err := softwareupdate.DefaultRoot(config.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	softwareService := softwareupdate.New(softwareupdate.Config{
+		Root: softwareRoot, Current: buildinfo.Current(), BaseVersion: os.Getenv("DST_ADMIN_UPDATE_BASE_VERSION"),
+		Platform: runtime.GOOS + "-" + runtime.GOARCH, Managed: softwareupdate.ManagedChild(),
+	})
+	softwareHandler := httpapi.NewSystemSoftwareHandler(softwareService)
+	hooks.stop = append(hooks.stop, softwareService.Close)
 	beaconURL := strings.TrimSpace(config.String("catalog", "BEACON_URL", "DST_ADMIN_BEACON_URL"))
 	if beaconURL == "" {
 		beaconURL = "http://127.0.0.1:3000"
@@ -1322,6 +1335,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		roomProvisionHandler.Register(v2)
 		systemStatusHandler.Register(v2)
 		systemSettingsHandler.Register(v2)
+		softwareHandler.Register(v2)
 		entityCatalogHandler.Register(v2)
 		artworkPackHandler.Register(v2)
 		containerHandler.Register(v2)
@@ -1344,6 +1358,26 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	completed = true
 	application := newApplication(router, hooks)
 	application.settings, application.config = systemSettingsService, config
+	application.software = softwareService
+	application.prepareSoftwareRestart = func(context.Context) (func(), error) {
+		if artworkPackService.Status().Busy {
+			return nil, systemsettings.ErrRuntimeBusy
+		}
+		resume, err := jobService.PauseIfIdle()
+		if err != nil {
+			return nil, systemsettings.ErrRuntimeBusy
+		}
+		if embeddedFleetMember != nil {
+			resumeMember, err := embeddedFleetMember.PauseIfIdle()
+			if err != nil {
+				resume()
+				return nil, systemsettings.ErrRuntimeBusy
+			}
+			resumeJobs := resume
+			resume = func() { resumeMember(); resumeJobs() }
+		}
+		return resume, nil
+	}
 	application.prepareReload = func(ctx context.Context) (func(), error) {
 		resume, err := jobService.PauseIfIdle()
 		if err != nil {

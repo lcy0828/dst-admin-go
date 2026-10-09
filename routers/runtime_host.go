@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"dont/internal/softwareupdate"
 	"dont/internal/systemsettings"
 	"dont/models"
 	"dont/pkg/setting"
@@ -43,6 +44,9 @@ func InitRuntimeHost() (*RuntimeHost, error) {
 	}
 	host := &RuntimeHost{app: app, active: make(map[*requestTicket]struct{}), changed: make(chan struct{}, 1), build: build}
 	app.settings.SetRuntimeApplier(host.apply)
+	if app.software != nil {
+		app.software.SetRestartGuard(host.prepareSoftwareRestart)
+	}
 	return host, nil
 }
 
@@ -131,6 +135,16 @@ func (h *RuntimeHost) apply(ctx context.Context, persist, rollback func() error)
 	}
 	defer release()
 	old := h.app
+	if old.software != nil {
+		resumeSoftware, err := old.software.PauseIfIdle()
+		if err != nil {
+			if errors.Is(err, softwareupdate.ErrBusy) {
+				return systemsettings.ErrRuntimeBusy
+			}
+			return err
+		}
+		defer resumeSoftware()
+	}
 	resume, err := old.prepareReload(ctx)
 	if err != nil {
 		return err
@@ -154,6 +168,9 @@ func (h *RuntimeHost) apply(ctx context.Context, persist, rollback func() error)
 	next, err := h.build(config)
 	if err == nil {
 		next.settings.SetRuntimeApplier(h.apply)
+		if next.software != nil {
+			next.software.SetRestartGuard(h.prepareSoftwareRestart)
+		}
 		err = next.Start(h.ctx)
 		if err != nil {
 			_ = next.Close(context.Background())
@@ -173,6 +190,9 @@ func (h *RuntimeHost) restore(config setting.Snapshot) error {
 	app, err := h.build(config)
 	if err == nil {
 		app.settings.SetRuntimeApplier(h.apply)
+		if app.software != nil {
+			app.software.SetRestartGuard(h.prepareSoftwareRestart)
+		}
 		err = app.Start(h.ctx)
 		if err != nil {
 			_ = app.Close(context.Background())
@@ -189,6 +209,27 @@ func (h *RuntimeHost) restore(config setting.Snapshot) error {
 	h.app = app
 	h.mu.Unlock()
 	return nil
+}
+
+func (h *RuntimeHost) prepareSoftwareRestart(ctx context.Context) (func(), error) {
+	if !h.transitionMu.TryLock() {
+		return nil, systemsettings.ErrRuntimeBusy
+	}
+	defer h.transitionMu.Unlock()
+	releaseBarrier, err := h.barrier(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if h.app.prepareSoftwareRestart == nil {
+		releaseBarrier()
+		return nil, systemsettings.ErrRuntimeBusy
+	}
+	resume, err := h.app.prepareSoftwareRestart(ctx)
+	if err != nil {
+		releaseBarrier()
+		return nil, err
+	}
+	return func() { resume(); releaseBarrier() }, nil
 }
 
 func (h *RuntimeHost) Close(ctx context.Context) error {

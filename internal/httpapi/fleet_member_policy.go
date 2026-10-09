@@ -18,7 +18,8 @@ func FleetMemberPolicy(memberEnabled bool) gin.HandlerFunc {
 		}
 		path := c.Request.URL.Path
 		if path == "/api/v2/auth" || strings.HasPrefix(path, "/api/v2/auth/") ||
-			path == "/api/v2/system/settings/preview" || path == "/api/v2/system/settings/actions/apply" {
+			path == "/api/v2/system/settings/preview" || path == "/api/v2/system/settings/actions/apply" ||
+			path == "/api/v2/system/software/actions/update" || path == "/api/v2/system/software/actions/apply" {
 			c.Next()
 			return
 		}

@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"dont/internal/jobs"
 	"dont/internal/runtimeinventory"
+	"dont/internal/softwareupdate"
 	"dont/shared"
 )
 
@@ -510,12 +512,31 @@ func (s *Service) agentUpdateStatus(agent Agent, latest *AgentRelease) AgentUpda
 	status := AgentUpdateStatus{CurrentVersion: agent.Version, Mode: AgentUpdateModeMigration, Reason: "manual_migration_required"}
 	deployment := strings.ToLower(strings.TrimSpace(stringValue(agent.Details["deployment_profile"])))
 	switch {
+	case containsString(agent.Capabilities, shared.AgentSoftwareUpdateCapability):
+		status.Mode, status.Supported, status.Reason = AgentUpdateModeSelf, true, ""
 	case strings.EqualFold(agent.OS, "windows"):
 		status.Mode, status.Reason = AgentUpdateModeUnsupported, "windows_service_helper_required"
 	case deployment == "container":
 		status.Mode, status.Reason = AgentUpdateModeContainer, "container_image_required"
 	case containsString(agent.Capabilities, shared.AgentUpgradeCommand):
 		status.Mode, status.Supported, status.Reason = AgentUpdateModeSelf, true, ""
+	}
+	if containsString(agent.Capabilities, shared.AgentSoftwareUpdateCapability) {
+		var value struct {
+			Software *softwareupdate.Snapshot `json:"software"`
+		}
+		data, _ := json.Marshal(agent.Details["agent_update"])
+		if json.Unmarshal(data, &value) == nil && value.Software != nil {
+			merged := s.withControllerCheck(*value.Software)
+			value.Software = &merged
+			status.Software = value.Software
+			status.CurrentVersion = value.Software.Current.Version
+			if value.Software.Check.Latest != nil {
+				status.LatestVersion = value.Software.Check.Latest.Version
+				status.UpdateAvailable = value.Software.Check.HasUpdate
+			}
+		}
+		return status
 	}
 	if latest == nil {
 		return status

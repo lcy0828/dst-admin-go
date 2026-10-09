@@ -12,6 +12,7 @@ import (
 
 	"dont/internal/authn"
 	"dont/models"
+	"github.com/google/uuid"
 )
 
 func TestRouterPublishesOnlyV2AndMigratesAdmin(t *testing.T) {
@@ -102,6 +103,95 @@ func TestMemoryAdaptersAreRejectedOutsideTestEnvironment(t *testing.T) {
 				t.Fatalf("validate %s error = %v, want adapter-specific rejection", adapterName, err)
 			}
 		})
+	}
+}
+
+func TestSoftwareUpdateRoutesRequireSessionCSRFAndConfirmation(t *testing.T) {
+	configureRouterTestEnvironment(t)
+	router, err := InitRouter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := models.DB().Exec("DELETE FROM dont_admin_session").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := models.DB().Exec("DELETE FROM dont_auth").Error; err != nil {
+		t.Fatal(err)
+	}
+	if response := request(router, "GET", "/api/v2/system/software", nil, nil, ""); response.Code != 401 {
+		t.Fatal("exposed software status", response.Code)
+	}
+	input := map[string]string{"version": "v9.9.9", "confirmation": "v9.9.9"}
+	agentPath := "/api/v2/agents/agent-primary/software"
+	for _, path := range []string{agentPath, agentPath + "/check"} {
+		if response := request(router, "GET", path, nil, nil, ""); response.Code != 401 {
+			t.Fatal("exposed Agent software status", path, response.Code)
+		}
+	}
+	if response := request(router, "POST", agentPath+"/actions/update", input, nil, ""); response.Code != 401 {
+		t.Fatal("unauthenticated Agent update admitted", response.Code)
+	}
+	if response := request(router, "POST", "/api/v2/system/software/actions/update", input, nil, ""); response.Code != 401 {
+		t.Fatal("unauthenticated update admitted", response.Code)
+	}
+	response := request(router, "POST", "/api/v2/auth/setup", map[string]string{"username": "update-security", "password": "Update123!"}, nil, "")
+	if response.Code != 201 {
+		t.Fatal(response.Code, response.Body)
+	}
+	cookie := response.Result().Cookies()[0]
+	var session struct {
+		Data struct {
+			CSRF string `json:"csrfToken"`
+		}
+	}
+	_ = json.Unmarshal(response.Body.Bytes(), &session)
+	if response = request(router, "POST", "/api/v2/system/software/actions/update", input, cookie, ""); response.Code != 403 {
+		t.Fatal("CSRF not enforced", response.Code)
+	}
+	if response = request(router, "POST", agentPath+"/actions/update", input, cookie, ""); response.Code != 403 {
+		t.Fatal("Agent update CSRF not enforced", response.Code)
+	}
+	post := func(confirmation string) *httptest.ResponseRecorder {
+		data, _ := json.Marshal(map[string]string{"version": "v9.9.9", "confirmation": confirmation})
+		req := httptest.NewRequest("POST", "/api/v2/system/software/actions/update", bytes.NewReader(data))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-CSRF-Token", session.Data.CSRF)
+		req.Header.Set("Idempotency-Key", uuid.NewString())
+		req.AddCookie(cookie)
+		out := httptest.NewRecorder()
+		router.ServeHTTP(out, req)
+		return out
+	}
+	if response = post("wrong"); response.Code != 400 || !strings.Contains(response.Body.String(), "INVALID_SOFTWARE_UPDATE") {
+		t.Fatal("confirmation not enforced", response.Code, response.Body)
+	}
+	if response = post("v9.9.9"); response.Code != 422 || !strings.Contains(response.Body.String(), "SOFTWARE_UPDATE_UNSUPPORTED") {
+		t.Fatal("development build update admitted", response.Code, response.Body)
+	}
+	for _, path := range []string{"/api/v2/system/software/actions/rollback", agentPath + "/actions/update"} {
+		body, _ := json.Marshal(map[string]any{"version": "v1.2.2", "confirmation": "v1.2.2", "rollback": true})
+		req := httptest.NewRequest("POST", path, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-CSRF-Token", session.Data.CSRF)
+		req.Header.Set("Idempotency-Key", uuid.NewString())
+		req.AddCookie(cookie)
+		out := httptest.NewRecorder()
+		router.ServeHTTP(out, req)
+		want := 422
+		if strings.HasSuffix(path, "/rollback") {
+			want = 404
+		}
+		if out.Code != want {
+			t.Fatalf("manual downgrade accepted: %s HTTP %d %s", path, out.Code, out.Body)
+		}
+	}
+	req := httptest.NewRequest("GET", "/api/v2/system/software", nil)
+	req.AddCookie(cookie)
+	req.Header.Set("X-DST-Runtime-Target", "agent:fixture")
+	out := httptest.NewRecorder()
+	router.ServeHTTP(out, req)
+	if out.Code != 200 {
+		t.Fatal("controller update was routed to selected Agent", out.Code, out.Body)
 	}
 }
 

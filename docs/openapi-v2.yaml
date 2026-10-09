@@ -272,6 +272,66 @@ paths:
         "200": { description: Normalized node resource snapshots, content: { application/json: { schema: { $ref: "#/components/schemas/NodeResourceSnapshotEnvelope" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /system/software:
+    get:
+      tags: [System]
+      operationId: getSoftwareStatus
+      summary: Read this management service's version, update progress and rollback availability
+      responses:
+        "200": { description: Management software status, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareStatusEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /system/software/check:
+    get:
+      tags: [System]
+      operationId: checkSoftwareRelease
+      summary: Check the latest official stable release with a 20-minute cache
+      parameters:
+        - { name: force, in: query, schema: { type: boolean, default: false } }
+        - { name: source, in: query, schema: { type: string, enum: [auto, direct, proxy], default: auto } }
+      responses:
+        "200": { description: Release check, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareStatusEnvelope" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /system/software/actions/update:
+    post:
+      tags: [System]
+      operationId: downloadSoftwareRelease
+      summary: Download and verify an official executable bundle without changing user data
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, confirmation]
+              properties:
+                version: { type: string, example: v1.2.2 }
+                confirmation: { type: string, description: Must equal version }
+                source: { type: string, enum: [auto, direct, proxy], default: auto }
+      responses:
+        "202": { description: Asynchronous download, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareOperationEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /system/software/actions/apply:
+    post:
+      tags: [System]
+      operationId: applySoftwareRelease
+      summary: Apply a verified release and restart only the management process after background writes finish
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operationId, confirmation]
+              properties:
+                operationId: { type: string }
+                confirmation: { type: string, enum: [APPLY SOFTWARE UPDATE] }
+      responses:
+        "202": { description: Management restart accepted, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareOperationEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /system/settings:
     get:
       tags: [System]
@@ -4439,6 +4499,49 @@ paths:
       responses:
         "200": { description: Agent runtime inventory snapshot, content: { application/json: { schema: { $ref: "#/components/schemas/AgentInventorySnapshotEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
+  /agents/{agentId}/software:
+    parameters: [{ $ref: "#/components/parameters/AgentID" }]
+    get:
+      tags: [Agents]
+      operationId: getAgentSoftware
+      summary: Read the selected Agent's release, progress and retained rollback version
+      responses:
+        "200": { description: Agent software snapshot, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareStatusEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /agents/{agentId}/software/check:
+    parameters: [{ $ref: "#/components/parameters/AgentID" }]
+    get:
+      tags: [Agents]
+      operationId: checkAgentSoftware
+      summary: Check the official release on this Agent, or use the optional Controller relay
+      parameters:
+        - { name: force, in: query, schema: { type: boolean, default: false } }
+        - { name: source, in: query, schema: { type: string, enum: [auto, direct, proxy, controller], default: auto } }
+      responses:
+        "200": { description: Agent release check, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareStatusEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /agents/{agentId}/software/actions/update:
+    parameters: [{ $ref: "#/components/parameters/AgentID" }]
+    post:
+      tags: [Agents, Jobs]
+      operationId: updateAgentSoftware
+      summary: Download and verify an Agent release, switch programs and wait for reconnection, or roll back
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentSoftwareInput" }
+      responses:
+        "202": { description: Agent update job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /agents/{agentId}/actions/upgrade:
     parameters: [{ $ref: "#/components/parameters/AgentID" }]
     post:
@@ -9400,6 +9503,63 @@ components:
         foreignKeys: { type: boolean }
         maxOpenConnections: { type: integer, minimum: 0 }
         migrationVersion: { type: string }
+    SoftwareOperation:
+      type: object
+      required: [id, version, phase, progress]
+      properties:
+        id: { type: string }
+        version: { type: string }
+        phase: { type: string, enum: [downloading, verifying, prepared, restarting, succeeded, failed, rolled_back] }
+        progress: { type: integer, minimum: 0, maximum: 100 }
+        downloadedBytes: { type: integer, format: int64 }
+        totalBytes: { type: integer, format: int64 }
+        bytesPerSecond: { type: integer, format: int64 }
+        startedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        error: { type: string }
+        releaseId: { type: string }
+    SoftwareStatus:
+      type: object
+      properties:
+        current:
+          type: object
+          properties:
+            version: { type: string }
+            commit: { type: string }
+            frontendCommit: { type: string }
+            buildTime: { type: string }
+            dirty: { type: boolean }
+        platform: { type: string }
+        supported: { type: boolean }
+        ready: { type: boolean, description: Startup verification is complete and program switches are admitted }
+        unsupportedReason: { type: string }
+        operation: { $ref: "#/components/schemas/SoftwareOperation" }
+        check:
+          type: object
+          properties:
+            hasUpdate: { type: boolean }
+            checkedAt: { type: string, format: date-time }
+            cached: { type: boolean }
+            warning: { type: string }
+            latest:
+              type: object
+              properties:
+                version: { type: string }
+                name: { type: string }
+                notes: { type: string }
+                url: { type: string, format: uri }
+                publishedAt: { type: string, format: date-time }
+                onlineUpdate: { type: boolean }
+    SoftwareStatusEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/SoftwareStatus" }
+        error: { $ref: "#/components/schemas/APIError" }
+    SoftwareOperationEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/SoftwareOperation" }
+        error: { $ref: "#/components/schemas/APIError" }
     SystemStatus:
       type: object
       additionalProperties: false
@@ -10233,6 +10393,16 @@ components:
         updateAvailable: { type: boolean }
         reason: { type: string }
         release: { $ref: "#/components/schemas/AgentRelease" }
+        software: { $ref: "#/components/schemas/SoftwareStatus" }
+    AgentSoftwareInput:
+      type: object
+      additionalProperties: false
+      required: [version, confirmation]
+      properties:
+        version: { type: string, pattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+$" }
+        confirmation: { type: string, description: Must exactly match version. }
+        source: { type: string, enum: [auto, direct, proxy, controller], default: auto }
+        operationId: { type: string, description: Apply this already verified Agent operation without downloading again. }
     AgentUpgradeInput:
       type: object
       additionalProperties: false

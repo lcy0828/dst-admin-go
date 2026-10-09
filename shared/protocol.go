@@ -137,10 +137,15 @@ type ReportDataPayload struct {
 const AgentUpgradeProtocolVersion = 1
 
 const AgentUpgradeCommand = "agent.upgrade.v1"
+const AgentSoftwareUpdateCapability = "agent.software-update.v1"
 
 // AgentUpgradeRequest contains an authenticated, short-lived controller
 // download path and immutable package metadata. It never carries shell input.
 type AgentUpgradeRequest struct {
+	Action          string `json:"action,omitempty"`
+	Source          string `json:"source,omitempty"`
+	Force           bool   `json:"force,omitempty"`
+	OperationID     string `json:"operation_id,omitempty"`
 	ProtocolVersion int    `json:"protocol_version"`
 	ReleaseID       string `json:"release_id"`
 	Version         string `json:"version"`
@@ -153,12 +158,13 @@ type AgentUpgradeRequest struct {
 }
 
 type AgentUpgradeResult struct {
-	ProtocolVersion int       `json:"protocol_version"`
-	ReleaseID       string    `json:"release_id"`
-	PreviousVersion string    `json:"previous_version"`
-	Version         string    `json:"version"`
-	RestartRequired bool      `json:"restart_required"`
-	ObservedAt      time.Time `json:"observed_at"`
+	Software        json.RawMessage `json:"software,omitempty"`
+	ProtocolVersion int             `json:"protocol_version"`
+	ReleaseID       string          `json:"release_id"`
+	PreviousVersion string          `json:"previous_version"`
+	Version         string          `json:"version"`
+	RestartRequired bool            `json:"restart_required"`
+	ObservedAt      time.Time       `json:"observed_at"`
 }
 
 const RuntimeInventoryProtocolVersion = 1

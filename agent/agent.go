@@ -27,12 +27,15 @@ import (
 	"dont/internal/moddistribution"
 	"dont/internal/operationprogress"
 	"dont/internal/shardtransfer"
+	"dont/internal/softwareupdate"
 	"dont/shared"
 	"github.com/go-ini/ini"
 	"github.com/gorilla/websocket"
 )
 
-var AgentVersion = "2.16.14"
+// Agent protocol version remains independent of the official product release.
+// Existing capability/compatibility checks use this version.
+var AgentVersion = "2.17.0"
 
 // 常量
 const (
@@ -70,6 +73,7 @@ var startTime = time.Now()
 
 // Agent 表示一个代理实例
 type Agent struct {
+	software             *softwareupdate.Service
 	commandAdmissionMu   sync.Mutex
 	commandsPaused       bool
 	commandsPending      int
@@ -316,6 +320,11 @@ func (a *Agent) Start() error {
 // Stop 停止代理
 func (a *Agent) Stop() {
 	log.Println("Agent正在停止...")
+	if a.software != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = a.software.Close(ctx)
+		cancel()
+	}
 	close(a.stopChan)
 	a.stopModPeerServer()
 	a.attachMutex.Lock()
@@ -1204,8 +1213,16 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 		"runtime.inventory.read", "runtime.processes.read", "runtime.capacity.read",
 	}
 	updateProfile := currentAgentUpdateProfile()
+	if a.software != nil {
+		if snapshot, err := a.software.Snapshot(); err == nil {
+			updateProfile.Software = &snapshot
+		}
+	}
 	if updateProfile.Mode == "self" {
 		capabilities = append(capabilities, shared.AgentUpgradeCommand)
+		if a.software != nil {
+			capabilities = append(capabilities, shared.AgentSoftwareUpdateCapability)
+		}
 	}
 	deploymentCapabilities, runtimeProfiles, capabilityIssues := runtimeDeploymentCapabilities(a.Config.RuntimeInstallations)
 	capabilities = append(capabilities, deploymentCapabilities...)

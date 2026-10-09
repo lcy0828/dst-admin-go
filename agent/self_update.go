@@ -16,17 +16,22 @@ import (
 	"strings"
 	"time"
 
+	"dont/internal/softwareupdate"
 	"dont/shared"
 )
 
 const maxAgentUpgradeBytes int64 = 128 * 1024 * 1024
 
 type agentUpdateProfile struct {
-	Mode   string `json:"mode"`
-	Reason string `json:"reason,omitempty"`
+	Mode     string                   `json:"mode"`
+	Reason   string                   `json:"reason,omitempty"`
+	Software *softwareupdate.Snapshot `json:"software,omitempty"`
 }
 
 func currentAgentUpdateProfile() agentUpdateProfile {
+	if softwareupdate.ManagedChild() && os.Getenv("DST_ADMIN_AGENT_LAUNCHER_URL") != "" {
+		return agentUpdateProfile{Mode: "self"}
+	}
 	if runtime.GOOS == "windows" {
 		return agentUpdateProfile{Mode: "unsupported", Reason: "windows_service_helper_required"}
 	}
@@ -57,6 +62,12 @@ func (a *Agent) executeAgentUpgrade(request *shared.AgentUpgradeRequest, timeout
 		return result, errors.New("Agent 升级请求缺失")
 	}
 	result.ReleaseID, result.Version = request.ReleaseID, request.Version
+	if request.Action != "" {
+		return a.executeSoftwareUpdate(request)
+	}
+	if a.software != nil {
+		return result, fmt.Errorf("此 Agent 使用版本目录更新，请在机器详情的软件更新中操作；可选择控制端传包")
+	}
 	if currentAgentUpdateProfile().Mode != "self" {
 		return result, errors.New("当前 Agent 安装方式不支持页面内升级")
 	}

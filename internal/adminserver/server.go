@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"dont/internal/buildinfo"
 	"dont/internal/webui"
 	"dont/routers"
 )
@@ -28,6 +29,14 @@ func Run(ctx context.Context, address string) error {
 	if err != nil {
 		closeErr := application.Close(context.Background())
 		return errors.Join(fmt.Errorf("initialize web UI: %w", err), closeErr)
+	}
+	if bootID := os.Getenv("DST_ADMIN_BOOT_ID"); bootID != "" {
+		next := handler
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-DST-Admin-Boot-ID", bootID)
+			w.Header().Set("X-DST-Admin-Version", buildinfo.Current().Version)
+			next.ServeHTTP(w, r)
+		})
 	}
 	server := &http.Server{
 		Addr:              address,

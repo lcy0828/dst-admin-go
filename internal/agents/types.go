@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"dont/internal/softwareupdate"
 	"dont/shared"
 )
 
@@ -148,13 +149,14 @@ const (
 )
 
 type AgentUpdateStatus struct {
-	Mode            AgentUpdateMode `json:"mode"`
-	Supported       bool            `json:"supported"`
-	CurrentVersion  string          `json:"currentVersion"`
-	LatestVersion   string          `json:"latestVersion,omitempty"`
-	UpdateAvailable bool            `json:"updateAvailable"`
-	Reason          string          `json:"reason,omitempty"`
-	Release         *AgentRelease   `json:"release,omitempty"`
+	Software        *softwareupdate.Snapshot `json:"software,omitempty"`
+	Mode            AgentUpdateMode          `json:"mode"`
+	Supported       bool                     `json:"supported"`
+	CurrentVersion  string                   `json:"currentVersion"`
+	LatestVersion   string                   `json:"latestVersion,omitempty"`
+	UpdateAvailable bool                     `json:"updateAvailable"`
+	Reason          string                   `json:"reason,omitempty"`
+	Release         *AgentRelease            `json:"release,omitempty"`
 }
 
 type AgentUpgradeInput struct {

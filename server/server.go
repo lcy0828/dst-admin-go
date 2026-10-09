@@ -1003,6 +1003,17 @@ func runtimeOperationTimeoutLimit(action shared.RuntimeAction) int {
 }
 
 func (s *Server) SendAgentUpgrade(agentID string, request shared.AgentUpgradeRequest, timeout int) (string, error) {
+	if request.Action != "" {
+		if timeout < 30 || timeout > 300 {
+			return "", fmt.Errorf("Agent 软件更新超时参数无效")
+		}
+		if err := shared.ValidateAgentSoftwareRequest(request); err != nil {
+			return "", err
+		}
+		copy := request
+		audit, _ := json.Marshal(map[string]interface{}{"action": request.Action, "version": request.Version, "source": request.Source, "operation_id": request.OperationID})
+		return s.sendCommandPayload(agentID, shared.CommandPayload{Type: shared.AgentUpgradeCommand, AgentUpgrade: &copy, Timeout: timeout}, string(audit))
+	}
 	if request.ProtocolVersion != shared.AgentUpgradeProtocolVersion || timeout < 30 || timeout > 300 ||
 		!agentReleaseIDPattern.MatchString(request.ReleaseID) || !agentReleaseVersionPattern.MatchString(request.Version) ||
 		(request.OS != "linux" && request.OS != "darwin" && request.OS != "windows") ||

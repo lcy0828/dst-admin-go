@@ -11,7 +11,9 @@ import (
 
 	"dont/internal/adminserver"
 	"dont/internal/buildinfo"
+	"dont/internal/softwareupdate"
 	"dont/internal/webui"
+	"dont/pkg/configpath"
 )
 
 func main() {
@@ -27,6 +29,20 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if _, releaseBuild := softwareupdate.NormalizeVersion(buildinfo.Current().Version); releaseBuild && webui.Embedded() && softwareupdate.SupervisorAvailable() && !softwareupdate.ManagedChild() {
+		config, err := configpath.Find()
+		if err != nil {
+			log.Fatalf("locate configuration: %v", err)
+		}
+		root, err := softwareupdate.DefaultRoot(config)
+		if err != nil {
+			log.Fatalf("locate software update storage: %v", err)
+		}
+		if err := softwareupdate.RunSupervisor(ctx, root, config, *address, buildinfo.Current().Version, os.Args[1:]); err != nil {
+			log.Fatalf("software launcher: %v", err)
+		}
+		return
+	}
 	log.Printf("DST Admin API listening on http://%s", *address)
 	if err := adminserver.Run(ctx, *address); err != nil {
 		log.Fatalf("serve DST Admin API: %v", err)

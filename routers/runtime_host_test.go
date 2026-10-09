@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"dont/internal/buildinfo"
+	"dont/internal/softwareupdate"
 	"dont/internal/systemsettings"
 	"dont/models"
 	"dont/pkg/setting"
@@ -19,6 +22,55 @@ import (
 	"github.com/go-ini/ini"
 	"github.com/google/uuid"
 )
+
+type blockedRuntimeSoftwareDownload struct{}
+
+func (blockedRuntimeSoftwareDownload) Latest(ctx context.Context, _, _ string) (*softwareupdate.Release, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (blockedRuntimeSoftwareDownload) Checksum(context.Context, softwareupdate.Asset, string) ([]byte, error) {
+	return nil, nil
+}
+func (blockedRuntimeSoftwareDownload) Download(context.Context, softwareupdate.Asset, string, io.Writer) error {
+	return nil
+}
+
+func TestRuntimeConfigurationApplyDoesNotCancelSoftwareDownload(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "releases"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	software := softwareupdate.New(softwareupdate.Config{Root: root, Current: buildinfo.Info{Version: "v1.0.0"}, Platform: "linux-amd64", Managed: true, Ready: func() bool { return true }, Client: blockedRuntimeSoftwareDownload{}})
+	t.Cleanup(func() { _ = software.Close(context.Background()) })
+	if _, err := software.Start("v1.1.0", "auto"); err != nil {
+		t.Fatal(err)
+	}
+	engine := gin.New()
+	app := newApplication(engine, applicationHooks{})
+	app.software = software
+	app.prepareReload = func(context.Context) (func(), error) {
+		t.Error("configuration reload proceeded during software download")
+		return func() {}, nil
+	}
+	host := &RuntimeHost{app: app, active: make(map[*requestTicket]struct{}), changed: make(chan struct{}, 1)}
+	persisted := false
+	engine.POST("/apply", func(c *gin.Context) {
+		err := host.apply(c.Request.Context(), func() error { persisted = true; return nil }, func() error { return nil })
+		if err == systemsettings.ErrRuntimeBusy {
+			c.Status(409)
+		} else {
+			t.Errorf("unexpected apply result: %v", err)
+			c.Status(500)
+		}
+	})
+	response := httptest.NewRecorder()
+	host.ServeHTTP(response, httptest.NewRequest("POST", "/apply", nil))
+	status, err := software.Snapshot()
+	if response.Code != 409 || persisted || host.app != app || err != nil || status.Operation.Phase != "downloading" {
+		t.Fatalf("reload canceled or replaced updater: HTTP %d persisted=%v status=%+v err=%v", response.Code, persisted, status, err)
+	}
+}
 
 func TestRuntimeHostAppliesPathsAndRolesAndRestoresFailedConfiguration(t *testing.T) {
 	configureRouterTestEnvironment(t)
@@ -213,4 +265,47 @@ func TestRuntimeBarrierDrainsReadStreamsAndPreservesInflightWrites(t *testing.T)
 	}
 	<-writeDone
 	<-streamDone
+}
+
+func TestSoftwareRestartUsesIdleJobGuardWithoutRequiringWorldsStopped(t *testing.T) {
+	engine := gin.New()
+	app := newApplication(engine, applicationHooks{})
+	// Settings reload's guard represents a live room: software restart must
+	// never call it. Running rooms outlive the management process.
+	app.prepareReload = func(context.Context) (func(), error) {
+		t.Error("software restart attempted to stop/reload world runtime")
+		return nil, systemsettings.ErrRuntimeBusy
+	}
+	busy, resumed := true, false
+	app.prepareSoftwareRestart = func(context.Context) (func(), error) {
+		if busy {
+			return nil, systemsettings.ErrRuntimeBusy
+		}
+		return func() { resumed = true }, nil
+	}
+	host := &RuntimeHost{app: app, active: make(map[*requestTicket]struct{}), changed: make(chan struct{}, 1)}
+	engine.GET("/ready", func(c *gin.Context) { c.Status(200) })
+	engine.POST("/apply", func(c *gin.Context) {
+		resume, err := host.prepareSoftwareRestart(c.Request.Context())
+		if err != nil {
+			c.Status(409)
+			return
+		}
+		resume()
+		c.Status(202)
+	})
+	response := request(host, "POST", "/apply", nil, nil, "")
+	if response.Code != 409 {
+		t.Fatal(response.Code)
+	}
+	if response = request(host, "GET", "/ready", nil, nil, ""); response.Code != 200 {
+		t.Fatal("busy job left admission closed")
+	}
+	busy = false
+	if response = request(host, "POST", "/apply", nil, nil, ""); response.Code != 202 || !resumed {
+		t.Fatal("idle software restart denied", response.Code)
+	}
+	if response = request(host, "GET", "/ready", nil, nil, ""); response.Code != 200 {
+		t.Fatal("resume left admission closed")
+	}
 }
