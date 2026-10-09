@@ -217,7 +217,18 @@ func TestMemoryAdaptersAreAcceptedOnlyInExplicitTestEnvironment(t *testing.T) {
 
 func configureRouterTestEnvironment(t *testing.T) {
 	t.Helper()
-	root, err := filepath.EvalSymlinks(t.TempDir())
+	// Test names may exceed the portable Unix socket limit when included in
+	// t.TempDir's path. Keep this isolated Runtime root short on Linux as well.
+	temporaryRoot, err := os.MkdirTemp("", "dst-router-")
+	if err != nil {
+		t.Fatalf("create router test root: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(temporaryRoot); err != nil {
+			t.Errorf("remove router test root: %v", err)
+		}
+	})
+	root, err := filepath.EvalSymlinks(temporaryRoot)
 	if err != nil {
 		t.Fatalf("resolve router test root: %v", err)
 	}
