@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -59,19 +60,21 @@ func agentFixture(t *testing.T, directory, platform, version string, executable 
 }
 
 func TestAgentDownloadsVerifyRoleAndChecksumBeforePreparing(t *testing.T) {
+	platform := runtime.GOOS + "-" + runtime.GOARCH
 	for _, scenario := range []string{"direct", "controller", "bad_checksum", "manager_package"} {
 		t.Run(scenario, func(t *testing.T) {
-			archive := agentFixture(t, t.TempDir(), "linux-amd64", "v1.1.0", []byte("new Agent"))
+			archive := agentFixture(t, t.TempDir(), platform, "v1.1.0", []byte("new Agent"))
 			data, err := os.ReadFile(archive)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if scenario == "manager_package" {
-				data = testBundle(t, "v1.1.0", "linux-amd64", nil)
+				data = testBundle(t, "v1.1.0", platform, nil)
 			}
 			service, client := testService(t, data)
 			service.config.Kind = "agent"
-			client.release.Archive.Name = "dst-admin-agent-update-linux-amd64.tar.gz"
+			service.config.Platform = platform
+			client.release.Archive.Name = "dst-admin-agent-update-" + platform + ".tar.gz"
 			if scenario == "bad_checksum" {
 				client.checksum = strings.Repeat("0", 64)
 			}
@@ -117,6 +120,9 @@ func TestAgentDownloadsVerifyRoleAndChecksumBeforePreparing(t *testing.T) {
 func TestAgentBundlesEnforceRolePlatformAndIntegrity(t *testing.T) {
 	for _, platform := range []string{"linux-amd64", "linux-arm64", "darwin-arm64", "darwin-amd64", "windows-amd64"} {
 		t.Run(platform, func(t *testing.T) {
+			if runtime.GOOS == "windows" && !strings.HasPrefix(platform, "windows-") {
+				t.Skip("Windows filesystems do not preserve Unix executable permission bits; verified on Unix runners")
+			}
 			root := t.TempDir()
 			archive := agentFixture(t, root, platform, "v1.2.3", []byte("Agent program"))
 			stage := filepath.Join(root, "stage")
