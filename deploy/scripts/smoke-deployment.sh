@@ -12,7 +12,7 @@ else
     --mount "type=bind,src=$repo,dst=/src,readonly" \
     --workdir /src \
     --env DST_ADMIN_CONFIG=/src/deploy/systemd/local.conf.example \
-    golang:1.25-bookworm \
+    golang:1.26.9-bookworm \
     go test ./agent ./server ./routers ./internal/agents ./internal/shards ./internal/worldstate ./internal/runtimedriver ./internal/deploymentprofile ./internal/topology ./internal/roomprovision ./internal/distributedbackup ./internal/gameupdate -count=1
 fi
 

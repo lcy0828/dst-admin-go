@@ -7,7 +7,7 @@ Development runs the Go API and Vite separately. The paths below keep configurat
 
 ## Tools and repositories
 
-- Use the Go toolchain specified in `go.mod` (currently `go1.25.13`). The management service needs CGO and a C compiler.
+- Use the Go toolchain specified in `go.mod` (currently `go1.26.9`). The management service needs CGO and a C compiler.
 - Use Node.js 24 LTS and npm; run `npm ci` with the repository's `package-lock.json`.
 - The local Runtime needs tmux and separate writable data directories. Linux game/mod downloads need SteamCMD. See [Linux prerequisites](startup-guide.en.md#linux-native-deployment).
 - Place the repositories side by side: [backend](https://github.com/lcy0828/dst-admin-go) on `master`, [frontend](https://github.com/lcy0828/dst-admin-vue) on `master`.

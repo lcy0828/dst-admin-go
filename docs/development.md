@@ -7,7 +7,7 @@
 
 ## 环境与仓库
 
-- Go 工具链按 `go.mod`（当前为 `go1.25.13`）；管理服务依赖 CGO 和 C 编译器。
+- Go 工具链按 `go.mod`（当前为 `go1.26.9`）；管理服务依赖 CGO 和 C 编译器。
 - Node.js 24 LTS、npm；使用仓库的 `package-lock.json` 执行 `npm ci`。
 - 本机 Runtime 需要 tmux、可读写的独立数据目录；Linux 下载游戏/模组需要 SteamCMD。
   依赖准备见[启动指南](startup-guide.md#linux-原生部署)。
