@@ -98,6 +98,43 @@ try {
     const agentData = await readFile(agentArchive)
     await writeFile(path.join(output, agentName), agentData, { flag: 'wx' })
     await writeFile(path.join(output, agentName + '.sha256'), `${digest(agentData)}  ${agentName}\n`, { flag: 'wx' })
+
+    // A small, stable-name update asset contains only executable code. Runtime
+    // configuration, deployment files and game/save data never enter this bundle.
+    const updateName = `dst-admin-update-${platform}.tar.gz`
+    const updateStage = path.join(stage, 'update')
+    await mkdir(updateStage)
+    const files = {}
+    for (const binary of ['dst-admin', 'dst-map-renderer', 'mod-local-setup']) {
+      const data = await readFile(path.join(release, binary))
+      await cp(path.join(release, binary), path.join(updateStage, binary))
+      files[binary] = { size: data.length, sha256: digest(data) }
+    }
+    await writeFile(path.join(updateStage, 'manifest.json'), JSON.stringify({
+      protocol: 1, version: options.version, platform, embeddedWebUI: true,
+      frontendCommit: frontendSource.commit, files
+    }, null, 2) + '\n')
+    const updateArchive = path.join(stage, updateName)
+    execFileSync('tar', ['-czf', updateArchive, '-C', updateStage, ...Object.keys(files), 'manifest.json'], { stdio: 'inherit' })
+    const updateData = await readFile(updateArchive)
+    await writeFile(path.join(output, updateName), updateData, { flag: 'wx' })
+    await writeFile(path.join(output, updateName + '.sha256'), `${digest(updateData)}  ${updateName}\n`, { flag: 'wx' })
+
+    const agentUpdateName = `dst-admin-agent-update-${platform}.tar.gz`
+    const agentUpdateStage = path.join(stage, 'agent-update')
+    await mkdir(agentUpdateStage)
+    const agentFiles = {}
+    for (const binary of ['dst-admin-agent', 'dst-map-renderer', 'mod-local-setup']) {
+      const data = await readFile(path.join(release, binary))
+      await cp(path.join(release, binary), path.join(agentUpdateStage, binary))
+      agentFiles[binary] = { size: data.length, sha256: digest(data) }
+    }
+    await writeFile(path.join(agentUpdateStage, 'manifest.json'), JSON.stringify({ protocol: 1, kind: 'agent', version: options.version, platform, files: agentFiles }, null, 2) + '\n')
+    const agentUpdateArchive = path.join(stage, agentUpdateName)
+    execFileSync('tar', ['-czf', agentUpdateArchive, '-C', agentUpdateStage, ...Object.keys(agentFiles), 'manifest.json'], { stdio: 'inherit' })
+    const agentUpdateData = await readFile(agentUpdateArchive)
+    await writeFile(path.join(output, agentUpdateName), agentUpdateData, { flag: 'wx' })
+    await writeFile(path.join(output, agentUpdateName + '.sha256'), `${digest(agentUpdateData)}  ${agentUpdateName}\n`, { flag: 'wx' })
     await rename(release, path.join(output, name))
     console.log(path.join(output, name + '.tar.gz'))
   })

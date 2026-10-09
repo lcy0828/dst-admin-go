@@ -18,8 +18,8 @@ if [ "$(id -u)" = "0" ]; then
     case "$socket_gid" in
       ""|*[!0-9]*) echo "invalid Docker socket group" >&2; exit 65 ;;
     esac
-    # The root filesystem is read-only, so use the socket group as the
-    # process primary group instead of editing /etc/group at startup.
+    # Use the socket group as the process primary group without changing
+    # /etc/group; this also supports an optional read-only root filesystem.
     runtime_identity="10000:$socket_gid"
   fi
   exec gosu "$runtime_identity" "$0" "$@"

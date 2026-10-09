@@ -155,6 +155,21 @@ jobs:
           node deploy/scripts/smoke-package.mjs
           --binary "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin"
           --frontend-commit "$FRONTEND_REF" --duration 180
+      - name: Verify online management update bundle
+        env:
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+        run: >-
+          node deploy/scripts/verify-update-package.mjs
+          "dist/dst-admin-update-$RELEASE_PLATFORM.tar.gz" "$RELEASE_VERSION" "$RELEASE_PLATFORM"
+      - name: Verify management updates and automatic recovery without touching user data
+        env:
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+        run: >-
+          node deploy/scripts/smoke-software-update.mjs
+          --binary "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin"
+          --bundle "dist/dst-admin-update-$RELEASE_PLATFORM.tar.gz"
       - name: Verify standalone Agent download
         env:
           RELEASE_PLATFORM: ${{ matrix.platform }}
@@ -170,6 +185,22 @@ jobs:
           tar -xzf "dst-admin-agent-$RELEASE_PLATFORM.tar.gz" -C "$agent_check"
           test -s "$agent_check/agent.conf.example"
           "$agent_check/dst-admin-agent" -version
+      - name: Verify Agent online update bundle
+        env:
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+        run: >-
+          node deploy/scripts/verify-update-package.mjs
+          "dist/dst-admin-agent-update-$RELEASE_PLATFORM.tar.gz" "$RELEASE_VERSION" "$RELEASE_PLATFORM" agent
+      - name: Verify Agent update through the management API
+        env:
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+        run: >-
+          node deploy/scripts/smoke-agent-software-update.mjs
+          --controller "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin"
+          --binary "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin-agent"
+          --bundle "dist/dst-admin-agent-update-$RELEASE_PLATFORM.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
           name: dst-admin-${{ matrix.platform }}
@@ -179,8 +210,53 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  images:
+  agents:
     needs: [sources, quality]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux-arm64
+          - runner: macos-14
+            platform: darwin-amd64
+          - runner: windows-latest
+            platform: windows-amd64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.25.13
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build Agent and online update tools
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: node deploy/scripts/build-agent-release.mjs dist "$RELEASE_VERSION" "$RELEASE_PLATFORM"
+      - name: Verify Agent update package
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: node deploy/scripts/verify-update-package.mjs "dist/dst-admin-agent-update-$RELEASE_PLATFORM.tar.gz" "$RELEASE_VERSION" "$RELEASE_PLATFORM" agent
+      - name: Verify portable Agent launcher lifecycle
+        run: go test ./internal/softwareupdate -run Agent -count=1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dst-admin-agent-${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  images:
+    needs: [sources, quality, native]
     permissions:
       contents: read
       packages: write
@@ -204,6 +280,10 @@ jobs:
         with:
           node-version: 22
       - uses: docker/setup-buildx-action@v3
+      - uses: actions/setup-go@v5
+        if: matrix.kind == 'agent'
+        with:
+          go-version: 1.25.13
       - uses: docker/login-action@v3
         if: needs.sources.outputs.publish == 'true'
         with:
@@ -229,9 +309,50 @@ jobs:
         run: >-
           node deploy/scripts/smoke-package.mjs --image "dst-admin-test:$IMAGE_KIND"
           --kind "$IMAGE_KIND" --frontend-commit "$FRONTEND_REF" --duration 180
+      - uses: actions/download-artifact@v4
+        if: matrix.kind == 'all-in-one' || matrix.kind == 'control-plane'
+        with:
+          name: dst-admin-linux-amd64
+          path: .codex-build/online-update
+      - name: Check persisted online update with writable root filesystem
+        if: matrix.kind == 'all-in-one' || matrix.kind == 'control-plane'
+        env:
+          IMAGE_KIND: ${{ matrix.kind }}
+        run: >-
+          node deploy/scripts/smoke-software-update.mjs
+          --image "dst-admin-test:$IMAGE_KIND" --kind "$IMAGE_KIND"
+          --bundle .codex-build/online-update/dst-admin-update-linux-amd64.tar.gz --read-only false
+      - name: Check persisted online update with read-only root filesystem
+        if: matrix.kind == 'all-in-one' || matrix.kind == 'control-plane'
+        env:
+          IMAGE_KIND: ${{ matrix.kind }}
+        run: >-
+          node deploy/scripts/smoke-software-update.mjs
+          --image "dst-admin-test:$IMAGE_KIND" --kind "$IMAGE_KIND"
+          --bundle .codex-build/online-update/dst-admin-update-linux-amd64.tar.gz --read-only true
       - name: Check Agent startup and graceful shutdown
         if: matrix.kind == 'agent'
         run: node deploy/scripts/smoke-agent-image.mjs dst-admin-test:agent 180
+      - uses: actions/download-artifact@v4
+        if: matrix.kind == 'agent'
+        with:
+          name: dst-admin-linux-amd64
+          path: .codex-build/online-update
+      - name: Build isolated management API for Agent lifecycle tests
+        if: matrix.kind == 'agent'
+        run: go build -trimpath -o .codex-build/agent-test-controller ./cmd/admin-api
+      - name: Check Docker Agent online updates and persistence
+        if: matrix.kind == 'agent'
+        run: >-
+          node deploy/scripts/smoke-agent-software-update.mjs
+          --controller .codex-build/agent-test-controller --image dst-admin-test:agent
+          --bundle .codex-build/online-update/dst-admin-agent-update-linux-amd64.tar.gz --read-only false
+      - name: Check Docker Agent updates with a read-only root
+        if: matrix.kind == 'agent'
+        run: >-
+          node deploy/scripts/smoke-agent-software-update.mjs
+          --controller .codex-build/agent-test-controller --image dst-admin-test:agent
+          --bundle .codex-build/online-update/dst-admin-agent-update-linux-amd64.tar.gz --read-only true
       - name: Check Runtime wrapper
         if: matrix.kind == 'dst-runtime'
         run: >-
@@ -317,12 +438,16 @@ jobs:
 
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [quality, sources, native, images]
+    needs: [quality, sources, native, agents, images]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
       packages: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: actions/download-artifact@v4
         with:
           pattern: dst-admin-*
@@ -394,9 +519,16 @@ jobs:
           FRONTEND_REF: ${{ needs.sources.outputs.frontend }}
         shell: bash
         run: |
-          printf 'Backend: %s\nFrontend: %s\n\nWeb UI is embedded in the management binary.\n' "$GITHUB_SHA" "$FRONTEND_REF" > release-notes.md
+          notes="docs/releases/$GITHUB_REF_NAME.md"
+          if [[ -f "$notes" ]]; then
+            cat "$notes" > release-notes.md
+          else
+            printf 'Web UI is embedded in the management binary.\n' > release-notes.md
+          fi
+          printf '\n\nBackend: %s\nFrontend: %s\n' "$GITHUB_SHA" "$FRONTEND_REF" >> release-notes.md
+          node deploy/scripts/write-release-index.mjs release "$GITHUB_REF_NAME" release-notes.md
           args=()
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then args+=(--prerelease); fi
-          gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.sha256 \
+          gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.sha256 release/dst-admin-release.json \
             --repo "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" \
             --notes-file release-notes.md "${args[@]}"

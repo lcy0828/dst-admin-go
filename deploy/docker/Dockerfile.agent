@@ -4,7 +4,10 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/dst-admin-agent ./agent/cmd/agent \
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X dont/internal/buildinfo.Version=${VERSION} -X dont/internal/buildinfo.Commit=${COMMIT} -X dont/internal/buildinfo.BuildTime=${BUILD_TIME}" -o /out/dst-admin-agent ./agent/cmd/agent \
     && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/dst-map-renderer ./cmd/dst-map-renderer \
     && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/mod-local-setup ./cmd/mod-local-setup
 
