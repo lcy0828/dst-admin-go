@@ -19,8 +19,11 @@ const run = (command, args, extra = {}) => execFileSync(command, args, { encodin
 const stage = await realpath(await mkdtemp(path.join(os.tmpdir(), 'dst-agent-update-')))
 const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('DST_ADMIN_')))
 const key = randomBytes(32).toString('base64')
-let controller, agent, room, container, cookie = '', csrf = '', log = '', agentID, roomPID, agentArgs, baseURL, agentConfig
+let controller, agent, room, container, cookie = '', csrf = '', log = '', agentID, roomPID, agentArgs, baseURL, agentConfig, dataRoot
 const children = []
+const readFixture = (hostPath, containerPath) => container
+  ? execFileSync('docker', ['exec', '--user', '10000:10000', container, 'cat', containerPath], { timeout: 60000 })
+  : readFile(hostPath)
 function start(binary, args, env) {
   const child = spawn(binary, args, { cwd: stage, env: { ...cleanEnv, GIN_MODE: 'release', ...env }, stdio: ['ignore', 'pipe', 'pipe'] })
   children.push(child)
@@ -43,8 +46,8 @@ async function waitFor(load, timeout = 90000) {
 try {
   const listener = net.createServer(); await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve))
   const port = listener.address().port; await new Promise(resolve => listener.close(resolve)); baseURL = `http://127.0.0.1:${port}`
-  const controlRoot = path.join(stage, 'control'), dataRoot = path.join(stage, 'agent')
-  await mkdir(controlRoot); await mkdir(dataRoot, { mode: 0o777 })
+  const controlRoot = path.join(stage, 'control'); dataRoot = path.join(stage, 'agent')
+  await mkdir(controlRoot); await mkdir(dataRoot, { mode: 0o700 })
   for (const directory of ['server', 'saves', 'backups', 'maps', 'workshop/steamapps/workshop/content/322330']) await mkdir(path.join(stage, 'game', directory), { recursive: true })
   const template = (await readFile('deploy/systemd/local.conf.example', 'utf8')).replaceAll('/var/lib/dst-admin', controlRoot).replaceAll('/opt/dst', path.join(stage, 'game'))
   const controllerConfig = path.join(controlRoot, 'app.conf'); await writeFile(controllerConfig, template, { mode: 0o600 })
@@ -65,7 +68,7 @@ try {
     assert.equal(manifest.kind, 'agent')
     agentConfig = path.join(dataRoot, 'agent.conf')
     const config = `[agent]\nSERVER_URL = ws://${options.image ? 'host.docker.internal' : '127.0.0.1'}:${port}/agent\nSECURITY_KEY = ${key}\n`
-    await writeFile(agentConfig, config, { mode: options.image ? 0o644 : 0o600 })
+    await writeFile(agentConfig, config, { mode: 0o600 })
     const save = path.join(dataRoot, 'save-sentinel'); await writeFile(save, 'preserve saved worlds')
     const agentRoot = path.join(dataRoot, 'software-updates')
     if (options.binary) {
@@ -75,7 +78,9 @@ try {
       options.startAgent()
       room = spawn('sleep', ['600']); roomPID = room.pid
     } else {
-      run('chmod', ['777', dataRoot])
+      // Match the official runtime UID so its private-file checks can chmod
+      // the generated configuration on Linux hosts with real UID boundaries.
+      run('docker', ['run', '--rm', '--user', '0', '--entrypoint', '/bin/chown', '--mount', `type=bind,src=${dataRoot},dst=/fixture`, options.image, '-R', '10000:10000', '/fixture'])
       container = `dst-agent-update-${process.pid}-${Date.now()}`
       agentArgs = ['run', '--detach', '--platform', 'linux/amd64', '--name', container, '--add-host', 'host.docker.internal:host-gateway', '--mount', `type=bind,src=${dataRoot},dst=/var/lib/dst-admin-agent`, '--tmpfs', '/tmp:mode=1777,size=64m', '--tmpfs', '/run:mode=0755,size=16m']
       if (options['read-only'] === 'true') agentArgs.push('--read-only')
@@ -106,7 +111,9 @@ try {
       await cp(extracted, path.join(agentRoot, 'releases', releaseID), { recursive: true })
       await writeFile(statePath + '.fixture', JSON.stringify(state), { mode: 0o600 }); run('mv', [statePath + '.fixture', statePath])
     }
-    const before = await readFile(agentConfig)
+    const readConfig = () => readFixture(agentConfig, '/var/lib/dst-admin-agent/agent.conf')
+    const readSave = async () => (await readFixture(save, '/var/lib/dst-admin-agent/save-sentinel')).toString('utf8')
+    const before = await readConfig()
     async function waitJob(job) {
       const value = await waitFor(async () => { const value = await api(`/jobs/${job.id}`); return ['succeeded', 'failed', 'canceled'].includes(value.status) ? value : null }, 120000)
       assert.equal(value.status, 'succeeded', JSON.stringify(value))
@@ -116,7 +123,7 @@ try {
     const applied = await api(`/agents/${agentID}/software`)
     assert.equal(applied.current.version, manifest.version); assert.equal(applied.ready, true)
     assert.equal((await readStore()).current.id, releaseID)
-    assert.deepEqual(await readFile(agentConfig), before); assert.equal(await readFile(save, 'utf8'), 'preserve saved worlds')
+    assert.deepEqual(await readConfig(), before); assert.equal(await readSave(), 'preserve saved worlds')
     if (agent) assert.equal(agent.pid, launcherPID, 'stable Agent launcher PID changed')
     if (room) assert.equal(room.exitCode, null, 'simulated game process stopped')
     if (container) assert.equal(run('docker', ['exec', container, 'tmux', 'display-message', '-p', '-t', 'update-smoke-room', '#{pane_pid}']), roomPID)
@@ -125,7 +132,7 @@ try {
     await waitFor(connectedAgent)
     await waitFor(async () => { const value = await api(`/agents/${agentID}/software`); return value.ready && value.current.version === manifest.version ? value : null })
     assert.equal((await readStore()).current.id, releaseID, 'program did not survive recreation')
-    assert.deepEqual(await readFile(agentConfig), before); assert.equal(await readFile(save, 'utf8'), 'preserve saved worlds')
+    assert.deepEqual(await readConfig(), before); assert.equal(await readSave(), 'preserve saved worlds')
     console.log('Agent update smoke passed: authenticated Controller/Agent channel, program apply, reconnection, stable launcher and simulated room, persisted version after recreation, preserved configuration and save bytes.')
   }
 } catch (error) {
@@ -135,5 +142,6 @@ try {
   if (room?.exitCode === null) room.kill('SIGTERM')
   if (container) { try { run('docker', ['rm', '--force', container]) } catch { /* Already removed. */ } }
   await stop(agent); await stop(controller)
+  if (options.image && dataRoot) run('docker', ['run', '--rm', '--user', '0', '--entrypoint', '/bin/chown', '--mount', `type=bind,src=${dataRoot},dst=/fixture`, options.image, '-R', `${process.getuid()}:${process.getgid()}`, '/fixture'])
   await rm(stage, { recursive: true, force: true })
 }

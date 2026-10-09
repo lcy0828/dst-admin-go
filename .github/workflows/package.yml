@@ -14,6 +14,10 @@ on:
         description: 'Publish preview images to GHCR and configured mirrors (no Release)'
         default: false
         type: boolean
+      verification_version:
+        description: 'Optional vX.Y.Z to verify online updates without publishing; publish_images must be false'
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -69,6 +73,9 @@ jobs:
       - id: source
         name: Pin source revisions
         shell: bash
+        env:
+          BUILD_VERIFICATION_VERSION: ${{ inputs.verification_version }}
+          BUILD_PUBLICATION_REQUESTED: ${{ steps.publication.outputs.publish }}
         run: |
           frontend=$(git -C .codex-build/frontend rev-parse HEAD)
           version="preview-${GITHUB_SHA:0:12}"
@@ -80,6 +87,12 @@ jobs:
               exit 1
             fi
             if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then stable=true; fi
+          elif [[ -n "$BUILD_VERIFICATION_VERSION" ]]; then
+            if [[ "$GITHUB_EVENT_NAME" != workflow_dispatch || "$BUILD_PUBLICATION_REQUESTED" == true || ! "$BUILD_VERIFICATION_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo '::error::verification_version requires a manual non-publishing run and vX.Y.Z.'
+              exit 1
+            fi
+            version="$BUILD_VERIFICATION_VERSION"
           fi
           [[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]]
           echo "frontend=$frontend" >> "$GITHUB_OUTPUT"

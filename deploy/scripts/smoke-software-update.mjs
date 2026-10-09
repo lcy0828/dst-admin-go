@@ -22,9 +22,12 @@ const run = (cmd, args, extra = {}) => execFileSync(cmd, args, { encoding: 'utf8
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 const stage = await realpath(await mkdtemp(path.join(os.tmpdir(), 'dst-online-update-')))
 const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('DST_ADMIN_')))
-let child, container, root, baseURL, metadata, log = '', cookie, csrf, room, roomPID
+let child, container, root, baseURL, metadata, log = '', cookie, csrf, room, roomPID, readStore
 let exited = false
 const deadline = () => Date.now() + 90000
+const readFixture = (hostPath, containerPath, uid) => container
+  ? execFileSync('docker', ['exec', '--user', uid, container, 'cat', containerPath], { timeout: 60000 })
+  : readFile(hostPath)
 
 try {
   if (options.binary) {
@@ -100,13 +103,18 @@ try {
     const bootID = initial.response.headers.get('x-dst-admin-boot-id')
     const launcherPID = child?.pid
     const configPath = options.binary ? path.join(stage, 'app.conf') : path.join(stage, 'data', options.kind === 'all-in-one' ? 'control/app.conf' : 'app.conf')
-    const config = await readFile(configPath)
+    const mount = options.kind === 'all-in-one' ? '/opt/dst' : '/var/lib/dst-admin'
+    const uid = options.kind === 'all-in-one' ? '10000:10000' : '10001:10001'
+    const containerConfig = mount + (options.kind === 'all-in-one' ? '/control/app.conf' : '/app.conf')
+    const config = await readFixture(configPath, containerConfig, uid)
     const save = path.join(stage, options.binary ? 'data/saves/existing-save' : 'data/existing-save')
-    await writeFile(save, 'preserve save bytes')
+    const containerSave = mount + '/existing-save'
+    if (container) run('docker', ['exec', '--interactive', '--user', uid, container, 'sh', '-c', 'cat > "$1"', 'fixture', containerSave], { input: 'preserve save bytes' })
+    else await writeFile(save, 'preserve save bytes')
+    const readSave = async () => (await readFixture(save, containerSave, uid)).toString('utf8')
     const statePath = path.join(root, 'state.json')
     const store = options.kind === 'all-in-one' ? '/opt/dst/control/software-updates' : '/var/lib/dst-admin/software-updates'
-    const uid = options.kind === 'all-in-one' ? '10000:10000' : '10001:10001'
-    const readStore = async () => JSON.parse(container ? run('docker',['exec','--user',uid,container,'cat',store+'/state.json']) : await readFile(statePath,'utf8'))
+    readStore = async () => JSON.parse(container ? run('docker',['exec','--user',uid,container,'cat',store+'/state.json']) : await readFile(statePath,'utf8'))
     const state = await readStore()
     const id = randomBytes(16).toString('hex'), release = randomBytes(16).toString('hex')
     state.operation = { id, releaseId: release, version: manifest.version, phase: 'prepared', progress: 100, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
@@ -136,8 +144,8 @@ try {
     assert.notEqual(applied.response.headers.get('x-dst-admin-boot-id'), bootID)
     assert.equal(applied.value.current.frontendCommit, metadata.frontendCommit)
     assert.equal((await readStore()).current.id, release)
-    assert.equal(await readFile(save, 'utf8'), 'preserve save bytes')
-    assert.deepEqual(await readFile(configPath), config)
+    assert.equal(await readSave(), 'preserve save bytes')
+    assert.deepEqual(await readFixture(configPath, containerConfig, uid), config)
     if (child) assert.equal(child.pid, launcherPID, 'launcher PID changed during management restart')
     if (room) { assert.equal(room.pid, roomPID); assert.equal(room.exitCode, null) }
     if (options.image && roomPID) assert.equal(run('docker', ['exec', '--user', '10000:10000', container, 'tmux', 'display-message', '-p', '-t', 'update-test-room', '#{pane_pid}']), roomPID, 'room process changed')
@@ -153,7 +161,7 @@ try {
     const restored = await waitFor(async () => { const result = await fetchJSON('/system/software'); return result.value.ready && result.value.operation?.phase === 'succeeded' ? result.value : null })
     assert.equal(restored.current.version, metadata.version)
     assert.equal((await readStore()).current.id, release)
-    assert.equal(await readFile(save, 'utf8'), 'preserve save bytes')
+    assert.equal(await readSave(), 'preserve save bytes')
     // Reject a corrupted trial after admission, then restore the exact committed
     // program. Pausing only the isolated launcher makes preflight deterministic.
     if (container) options.startRoom?.()
@@ -168,7 +176,12 @@ try {
       await writeFile(statePath + '.fixture', JSON.stringify(failedState), { mode: 0o600 }); run('mv', [statePath + '.fixture', statePath])
     }
     const marker = JSON.parse(container ? run('docker', ['exec', '--user', uid, container, 'cat', store + '/ready.json']) : await readFile(path.join(root, 'ready.json'), 'utf8'))
-    const signalLauncher = signal => container ? run('docker', ['exec', '--user', uid, container, 'sh', '-c', 'kill -"$1" "$2"', 'signal', signal, String(marker.parentPid)]) : child.kill('SIG' + signal)
+    const signalLauncher = signal => {
+      // PID 1 ignores SIGSTOP from its own namespace. The daemon can signal
+      // the control-plane launcher from the parent namespace instead.
+      if (container && marker.parentPid === 1) return run('docker', ['kill', '--signal', signal, container])
+      return container ? run('docker', ['exec', '--user', uid, container, 'sh', '-c', 'kill -"$1" "$2"', 'signal', signal, String(marker.parentPid)]) : child.kill('SIG' + signal)
+    }
     signalLauncher('STOP')
     try {
       await fetchJSON('/system/software/actions/apply', { operationId: failedID, confirmation: 'APPLY SOFTWARE UPDATE' })
@@ -177,14 +190,14 @@ try {
     } finally { signalLauncher('CONT') }
     await waitFor(async () => { const result = await fetchJSON('/system/software'); return result.value.ready && result.value.operation?.phase === 'rolled_back' ? result.value : null })
     assert.equal((await readStore()).current.id, release, 'failed update did not restore the committed program')
-    assert.equal(await readFile(save, 'utf8'), 'preserve save bytes')
-    assert.deepEqual(await readFile(configPath), config)
+    assert.equal(await readSave(), 'preserve save bytes')
+    assert.deepEqual(await readFixture(configPath, containerConfig, uid), config)
     console.log('Online update smoke passed: authenticated apply, embedded UI, stable launcher/room PID, persisted program after recreation, automatic recovery, preserved settings and save sentinel.')
   }
 } catch (error) {
   if (root) {
     try {
-      const state = JSON.parse(await readFile(path.join(root,'state.json')))
+      const state = readStore ? await readStore() : JSON.parse(await readFile(path.join(root,'state.json')))
       console.error('Isolated update state:',JSON.stringify(state))
       if (state.operation?.releaseId) {
         const directory = path.join(root,'releases',state.operation.releaseId)
@@ -209,6 +222,10 @@ try {
     if (!exited) child.kill('SIGKILL')
   }
   if (room) room.kill('SIGTERM')
-  if (container) { try { run('docker', ['rm', '--force', container]) } catch {} }
+  if (container) {
+    try { run('docker', ['rm', '--force', container]) } catch {}
+    // Restore ownership only in the generated test volume before host cleanup.
+    run('docker', ['run', '--rm', '--user', '0', '--entrypoint', '/bin/chown', '--mount', `type=bind,src=${path.join(stage, 'data')},dst=/fixture`, options.image, '-R', `${process.getuid()}:${process.getgid()}`, '/fixture'])
+  }
   await rm(stage, { recursive: true, force: true })
 }

@@ -78,6 +78,8 @@ Unconfigured mirrors are skipped with a note in the Actions summary. Invalid cre
 
 Frontend commits do not update installed services or automatically publish the backend. Branch builds do not publish images. Publish a new `vX.Y.Z` tag to deliver fixes through `latest`; do not rewrite released tags. Run Package to include new pages, or set the manual `frontend_ref` input to pin a revision. Manual image publication is disabled by default; explicitly enabling it publishes preview images only. Tagged release assets exist only after the tag pipeline succeeds.
 
+Before tagging a release, run Package manually with `verification_version` (for example `v1.2.6`) and leave `publish_images` disabled. This verifies native packages, online updates and images without creating a Release, publishing images or changing `latest`. Push the stable tag after all checks pass.
+
 ## Online updates
 
 Official Linux amd64 and macOS arm64 releases with online update support display the management version in the header and flag newer releases. Under **System settings → Software updates**, check the latest stable GitHub release and confirm installation. The panel downloads and verifies SHA-256, platform and embedded UI, switches the program, and reconnects after restart. Download progress and speed are shown. Automatic source selection tries GitHub first and falls back to GHFast on connection failure; either source can be selected manually. Development builds and releases without an update bundle display version information and a release link.
