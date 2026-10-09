@@ -23,7 +23,8 @@ try {
   await writeFile(path.join(stage, 'manifest.json'), JSON.stringify({ protocol: 1, kind: 'agent', version, platform, files }, null, 2) + '\n')
   async function archive(name, entries) {
     const destination = path.join(output, name)
-    execFileSync('tar', ['-czf', destination, '-C', stage, ...entries], { stdio: 'inherit' })
+    // GNU tar treats the colon in a Windows drive path as a remote archive.
+    execFileSync('tar', ['-czf', name, '-C', stage, ...entries], { cwd: output, stdio: 'inherit' })
     await writeFile(destination + '.sha256', `${hash(await readFile(destination))}  ${name}\n`)
   }
   await archive(`dst-admin-agent-update-${platform}.tar.gz`, [...Object.keys(files), 'manifest.json'])

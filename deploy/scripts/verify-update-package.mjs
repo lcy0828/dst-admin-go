@@ -9,18 +9,19 @@ import path from 'node:path'
 const [archiveArg, version, platform, kind = 'management'] = process.argv.slice(2)
 assert(archiveArg && version && platform, 'usage: verify-update-package.mjs ARCHIVE VERSION PLATFORM')
 const archive = path.resolve(archiveArg)
+const archiveName = path.basename(archive), archiveDirectory = path.dirname(archive)
 const sha256 = data => createHash('sha256').update(data).digest('hex')
 const suffix = platform.startsWith('windows-') ? '.exe' : ''
 const binaries = kind === 'agent' ? ['dst-admin-agent', 'dst-map-renderer', 'mod-local-setup'].map(name => name + suffix) : ['dst-admin', 'dst-map-renderer', 'mod-local-setup']
 const names = [...binaries, 'manifest.json'].sort()
-const entries = execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' }).trim().split('\n').sort()
+const entries = execFileSync('tar', ['-tzf', archiveName], { cwd: archiveDirectory, encoding: 'utf8' }).trim().split(/\r?\n/).sort()
 assert.deepEqual(entries, names)
 const checksum = (await readFile(archive + '.sha256', 'utf8')).trim().split(/\s+/)
 assert.equal(checksum[0], sha256(await readFile(archive)))
 assert.equal(checksum[1], path.basename(archive))
 const directory = await mkdtemp(path.join(os.tmpdir(), 'dst-update-package-'))
 try {
-  execFileSync('tar', ['-xzf', archive, '-C', directory])
+  execFileSync('tar', ['-xzf', archiveName, '-C', directory], { cwd: archiveDirectory })
   const manifest = JSON.parse(await readFile(path.join(directory, 'manifest.json'), 'utf8'))
   assert.equal(manifest.protocol, 1)
   assert.equal(manifest.version, version)
