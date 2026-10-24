@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -340,7 +339,7 @@ func (b *DistributedBridge) ExecuteCommand(ctx context.Context, roomID, worldID 
 	if err != nil {
 		return CommandReceipt{}, err
 	}
-	payload, err := json.Marshal(request)
+	payload, err := marshalRuntimeRequest(request)
 	if err != nil || len(payload) > maxRuntimeRequestBytes {
 		return CommandReceipt{}, fmt.Errorf("%w: invalid command payload", ErrRuntimeRequestInvalid)
 	}
@@ -405,7 +404,7 @@ func (b *DistributedBridge) CaptureDiagnostic(ctx context.Context, roomID, world
 	if err != nil {
 		return DiagnosticReport{}, err
 	}
-	payload, err := json.Marshal(request)
+	payload, err := marshalRuntimeRequest(request)
 	if err != nil || len(payload) > maxRuntimeRequestBytes {
 		return DiagnosticReport{}, ErrRuntimeRequestInvalid
 	}

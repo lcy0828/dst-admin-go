@@ -331,7 +331,7 @@ func (b *Bridge) ExecuteCommand(ctx context.Context, roomID, worldID string, req
 	if err := b.commandReady(ctx, room, world); err != nil {
 		return CommandReceipt{}, err
 	}
-	payload, err := json.Marshal(request)
+	payload, err := marshalRuntimeRequest(request)
 	if err != nil {
 		return CommandReceipt{}, fmt.Errorf("%w: encode command payload: %v", ErrRuntimeRequestInvalid, err)
 	}
@@ -386,7 +386,7 @@ func (b *Bridge) CaptureDiagnostic(ctx context.Context, roomID, worldID string, 
 	if err := b.moduleReady(ctx, room, world, "diagnostics"); err != nil {
 		return DiagnosticReport{}, err
 	}
-	payload, err := json.Marshal(request)
+	payload, err := marshalRuntimeRequest(request)
 	if err != nil || len(payload) > maxRuntimeRequestBytes {
 		return DiagnosticReport{}, errors.New("runtime diagnostic request is invalid")
 	}
