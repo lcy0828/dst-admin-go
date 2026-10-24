@@ -194,7 +194,7 @@ For remote machines running native game processes, use the native Agent package.
 
 - **AI control and troubleshooting**: [Browser assistant and MCP](docs/ai-assistant.en.md)
 
-- **Run and maintain**: [Game server installation](docs/game-installation-management.en.md) · [LuaJIT2 installation](docs/luajit-installation.en.md) · [Upgrades and rollback](docs/deployment-and-rollback.en.md) · [Game workbench](docs/game-workbench.en.md) · [Email and Webhook notifications](docs/notifications.en.md)
+- **Run and maintain**: [Game server installation](docs/game-installation-management.en.md) · [LuaJIT2 installation](docs/luajit-installation.en.md) · [Workshop networking](docs/workshop-network.en.md) · [Upgrades and rollback](docs/deployment-and-rollback.en.md) · [Game workbench](docs/game-workbench.en.md) · [Email and Webhook notifications](docs/notifications.en.md)
 - **Contribute**: [Development guide](docs/development.en.md) · [Frontend source](https://github.com/lcy0828/dst-admin-vue) · [Issue tracker](https://github.com/lcy0828/dst-admin-go/issues)
 
 ## Star history

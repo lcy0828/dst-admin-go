@@ -194,7 +194,7 @@ docker compose up -d
 
 - **AI 控制与排查**：[页面助手与 MCP 接入](docs/ai-assistant.md)
 
-- **开服与维护**：[游戏服务端安装](docs/game-installation-management.md) · [LuaJIT2 安装](docs/luajit-installation.md) · [升级与回滚](docs/deployment-and-rollback.md) · [游戏工作台](docs/game-workbench.md) · [邮箱与 Webhook 通知](docs/notifications.md)
+- **开服与维护**：[游戏服务端安装](docs/game-installation-management.md) · [LuaJIT2 安装](docs/luajit-installation.md) · [工坊网络设置](docs/workshop-network.md) · [升级与回滚](docs/deployment-and-rollback.md) · [游戏工作台](docs/game-workbench.md) · [邮箱与 Webhook 通知](docs/notifications.md)
 - **参与开发**：[开发指南](docs/development.md) · [前端源码](https://github.com/lcy0828/dst-admin-vue) · [问题反馈](https://github.com/lcy0828/dst-admin-go/issues)
 
 ## Star 趋势
