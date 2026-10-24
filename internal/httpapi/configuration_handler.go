@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 
 	"dont/internal/agents"
@@ -116,7 +117,7 @@ func (h *ConfigurationHandler) applyWorldConfiguration(c *gin.Context) {
 }
 
 func (h *ConfigurationHandler) access(c *gin.Context) {
-	value, err := h.configuration.AccessLists(c.Param("roomId"))
+	value, err := h.configuration.AccessListsContext(c.Request.Context(), c.Param("roomId"))
 	if err != nil {
 		configurationFailure(c, err)
 		return
@@ -129,7 +130,7 @@ func (h *ConfigurationHandler) previewAccess(c *gin.Context) {
 	if !bindConfigurationJSON(c, &request) {
 		return
 	}
-	value, err := h.configuration.PreviewAccess(c.Param("roomId"), request)
+	value, err := h.configuration.PreviewAccessContext(c.Request.Context(), c.Param("roomId"), request)
 	if err != nil {
 		configurationFailure(c, err)
 		return
@@ -143,7 +144,7 @@ func (h *ConfigurationHandler) applyAccess(c *gin.Context) {
 		return
 	}
 	roomID := c.Param("roomId")
-	if _, err := h.configuration.ValidateAccessApply(roomID, request); err != nil {
+	if _, err := h.configuration.ValidateAccessApplyContext(c.Request.Context(), roomID, request); err != nil {
 		configurationFailure(c, err)
 		return
 	}
@@ -260,6 +261,7 @@ func bindConfigurationJSON(c *gin.Context, target interface{}) bool {
 func configurationFailure(c *gin.Context, err error) {
 	var fieldError *configuration.FieldError
 	var conflict *configuration.RevisionConflictError
+	var accessError *configuration.AccessReadError
 	switch {
 	case errors.As(err, &fieldError):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_CONFIGURATION", "配置字段无效", gin.H{"fields": fieldError.Fields})
@@ -279,6 +281,13 @@ func configurationFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusBadRequest, "INVALID_CONFIGURATION_PATH", "配置路径无效", nil)
 	case errors.Is(err, rooms.ErrRoomNotFound), errors.Is(err, rooms.ErrWorldNotFound):
 		Failure(c, http.StatusNotFound, "RESOURCE_NOT_FOUND", "房间或世界不存在", nil)
+	case errors.As(err, &accessError):
+		log.Printf("[CONFIGURATION] request_id=%q room=%q access read failed: %v", RequestID(c), c.Param("roomId"), err)
+		status, code, message := http.StatusUnprocessableEntity, "ACCESS_LIST_INVALID", "访问名单格式无效，请检查对应文件和行号"
+		if accessError.Reason == "read_failed" || accessError.Reason == "incomplete_snapshot" || accessError.Reason == "runtime_read_failed" {
+			status, code, message = http.StatusInternalServerError, "ACCESS_LIST_READ_FAILED", "访问名单读取失败，请检查对应文件和运行节点"
+		}
+		Failure(c, status, code, message, gin.H{"file": accessError.File, "line": accessError.Line, "reason": accessError.Reason})
 	default:
 		Failure(c, http.StatusInternalServerError, "CONFIGURATION_OPERATION_FAILED", "配置操作失败", nil)
 	}

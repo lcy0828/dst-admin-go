@@ -2750,6 +2750,7 @@ paths:
       tags: [Configuration]
       operationId: getRoomAccessLists
       summary: Read admin, block, and whitelist files as one revisioned resource
+      description: Reads the applied Runtime files without modifying them. Accepts UTF-8 (with or without BOM) and BOM-marked UTF-16 editor files. Revisions cover the original bytes. A malformed list identifies the file, line and reason without exposing player IDs or absolute node paths. Unknown entries are never silently removed.
       responses:
         "200":
           description: Current access lists
@@ -2757,6 +2758,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AccessListsEnvelope"
+        "422":
+          description: ACCESS_LIST_INVALID; error.details contains file, line (zero if not applicable), and reason (invalid_id, invalid_encoding or too_many_entries).
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+        "500":
+          description: ACCESS_LIST_READ_FAILED; error.details identifies the file when known and the failed read stage. The request ID correlates with server-side diagnostics.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
   /rooms/{roomId}/access/preview:
     parameters:
       - $ref: "#/components/parameters/RoomID"

@@ -12,11 +12,13 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"dont/internal/roomops"
 	"dont/internal/rooms"
 	"dont/internal/runtimefiles"
 	"dont/shared"
+	"golang.org/x/text/encoding/unicode"
 )
 
 var accessIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
@@ -33,6 +35,21 @@ type fileSnapshot struct {
 	exists bool
 }
 
+// AccessReadError identifies a failed list without exposing player IDs or the
+// node's absolute paths in the API response.
+type AccessReadError struct {
+	File   string
+	Line   int
+	Reason string
+	Err    error
+}
+
+func (e *AccessReadError) Error() string {
+	return fmt.Sprintf("access list %s, line %d (%s): %v", e.File, e.Line, e.Reason, e.Err)
+}
+
+func (e *AccessReadError) Unwrap() error { return e.Err }
+
 func (s *Service) AccessLists(roomID string) (AccessLists, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -48,7 +65,11 @@ func (s *Service) AccessListsContext(ctx context.Context, roomID string) (Access
 }
 
 func (s *Service) PreviewAccess(roomID string, request AccessUpdateRequest) (Preview, error) {
-	room, _, document, _, err := s.accessDocument(context.Background(), roomID)
+	return s.PreviewAccessContext(context.Background(), roomID, request)
+}
+
+func (s *Service) PreviewAccessContext(ctx context.Context, roomID string, request AccessUpdateRequest) (Preview, error) {
+	room, _, document, _, err := s.accessDocument(ctx, roomID)
 	if err != nil {
 		return Preview{}, err
 	}
@@ -59,7 +80,11 @@ func (s *Service) PreviewAccess(roomID string, request AccessUpdateRequest) (Pre
 }
 
 func (s *Service) ValidateAccessApply(roomID string, request AccessUpdateRequest) (Preview, error) {
-	room, _, document, _, err := s.accessDocument(context.Background(), roomID)
+	return s.ValidateAccessApplyContext(context.Background(), roomID, request)
+}
+
+func (s *Service) ValidateAccessApplyContext(ctx context.Context, roomID string, request AccessUpdateRequest) (Preview, error) {
+	room, _, document, _, err := s.accessDocument(ctx, roomID)
 	if err != nil {
 		return Preview{}, err
 	}
@@ -171,7 +196,15 @@ func (s *Service) accessDocument(ctx context.Context, roomID string) (rooms.Room
 	}
 	snapshot, err := s.readRuntimeConfiguration(ctx, roomID, "", string(PublicationShared))
 	if err != nil {
-		return rooms.Room{}, "", accessDocument{}, true, err
+		name := ""
+		var pathError *os.PathError
+		if errors.As(err, &pathError) {
+			switch base := filepath.Base(pathError.Path); base {
+			case "adminlist.txt", "blocklist.txt", "whitelist.txt", "cluster.ini":
+				name = base
+			}
+		}
+		return rooms.Room{}, "", accessDocument{}, true, &AccessReadError{File: name, Reason: "runtime_read_failed", Err: err}
 	}
 	document, err := loadAccessSnapshot(snapshot.Result.Files)
 	return room, "", document, true, err
@@ -190,12 +223,12 @@ func loadAccessSnapshot(values []shared.RuntimeConfigurationFile) (accessDocumen
 	for _, name := range []string{"adminlist.txt", "blocklist.txt", "whitelist.txt"} {
 		file, exists := files[name]
 		if !exists {
-			return accessDocument{}, errors.New("Runtime 访问名单快照不完整")
+			return accessDocument{}, &AccessReadError{File: name, Reason: "incomplete_snapshot", Err: errors.New("Runtime 访问名单快照不完整")}
 		}
 		parts = append(parts, revisionPart{name: name, data: file.data, exists: file.exists})
 		list, err := decodeAccessList(file.data)
 		if err != nil {
-			return accessDocument{}, fmt.Errorf("parse %s: %w", name, err)
+			return accessDocument{}, accessFileError(name, err)
 		}
 		switch name {
 		case "adminlist.txt":
@@ -217,13 +250,13 @@ func loadAccessDocument(roomPath string) (accessDocument, error) {
 	for _, name := range []string{"adminlist.txt", "blocklist.txt", "whitelist.txt"} {
 		data, mode, _, exists, err := readConfiguration(filepath.Join(roomPath, name), true)
 		if err != nil {
-			return accessDocument{}, err
+			return accessDocument{}, &AccessReadError{File: name, Reason: "read_failed", Err: err}
 		}
 		files[name] = fileSnapshot{data: data, mode: mode, exists: exists}
 		parts = append(parts, revisionPart{name: name, data: data, exists: exists})
 		list, err := decodeAccessList(data)
 		if err != nil {
-			return accessDocument{}, fmt.Errorf("parse %s: %w", name, err)
+			return accessDocument{}, accessFileError(name, err)
 		}
 		switch name {
 		case "adminlist.txt":
@@ -298,11 +331,42 @@ func normalizeAccessList(input []string) ([]string, error) {
 }
 
 func decodeAccessList(data []byte) ([]string, error) {
-	values := strings.Fields(string(data))
-	if len(values) == 0 {
-		return []string{}, nil
+	// Windows editors commonly prefix UTF-8/UTF-16 files with a BOM. Read these
+	// without changing the source file or its revision; explicit saves use UTF-8.
+	if len(data) >= 2 && (data[0] == 0xff && data[1] == 0xfe || data[0] == 0xfe && data[1] == 0xff) {
+		var err error
+		data, err = unicode.UTF16(unicode.LittleEndian, unicode.ExpectBOM).NewDecoder().Bytes(data)
+		if err != nil {
+			return nil, &AccessReadError{Reason: "invalid_encoding", Err: errors.New("名单文本编码无效")}
+		}
+	}
+	text := strings.TrimPrefix(string(data), "\ufeff")
+	if !utf8.ValidString(text) {
+		return nil, &AccessReadError{Reason: "invalid_encoding", Err: errors.New("名单文本编码无效")}
+	}
+	values := []string{}
+	lineNumber := 0
+	for line := range strings.Lines(text) {
+		lineNumber++
+		for value := range strings.FieldsSeq(line) {
+			if !accessIDPattern.MatchString(value) {
+				return nil, &AccessReadError{Line: lineNumber, Reason: "invalid_id", Err: errors.New("ID 只能包含字母、数字、下划线和短横线，长度为 1-128")}
+			}
+			values = append(values, value)
+			if len(values) > 10000 {
+				return nil, &AccessReadError{Line: lineNumber, Reason: "too_many_entries", Err: errors.New("名单不能超过 10000 项")}
+			}
+		}
 	}
 	return normalizeAccessList(values)
+}
+
+func accessFileError(name string, err error) error {
+	var detail *AccessReadError
+	if errors.As(err, &detail) {
+		return &AccessReadError{File: name, Line: detail.Line, Reason: detail.Reason, Err: detail.Err}
+	}
+	return &AccessReadError{File: name, Reason: "invalid_format", Err: err}
 }
 
 func encodeAccessList(values []string) []byte {
