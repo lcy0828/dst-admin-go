@@ -15,6 +15,10 @@ var vanillaDirectory []byte
 type DirectoryResult struct {
 	GameVersion string   `json:"gameVersion"`
 	Items       []Entity `json:"items"`
+	Total       int      `json:"total"`
+	Offset      int      `json:"offset"`
+	Limit       int      `json:"limit"`
+	HasMore     bool     `json:"hasMore"`
 }
 
 var directoryOnce sync.Once

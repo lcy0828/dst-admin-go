@@ -66,7 +66,7 @@ func TestWorldCatalogBusyIsRetryableWithoutRuntimeRepair(t *testing.T) {
 func TestUnifiedDirectoryRemainsAvailableWithoutAWorldOrArtworkPack(t *testing.T) {
 	router := gin.New()
 	NewEntityCatalogHandler(entityCatalogFixture{}).Register(router.Group("/api/v2"))
-	response := performJSON(router, http.MethodGet, "/api/v2/entity-catalog/directory", nil, nil, "")
+	response := performJSON(router, http.MethodGet, "/api/v2/entity-catalog/directory?complete=true", nil, nil, "")
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"id":"goldnugget"`) || !strings.Contains(response.Body.String(), `"category":"equipment"`) {
 		t.Fatalf("directory unavailable: %d", response.Code)
 	}

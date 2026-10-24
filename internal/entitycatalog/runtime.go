@@ -42,6 +42,7 @@ type RuntimeSearchResult struct {
 	Mods       []RuntimeMod `json:"mods"`
 	Total      int          `json:"total"`
 	Offset     int          `json:"offset"`
+	Limit      int          `json:"limit,omitempty"`
 	HasMore    bool         `json:"hasMore"`
 	ObservedAt time.Time    `json:"observedAt"`
 }

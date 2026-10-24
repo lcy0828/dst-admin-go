@@ -3468,7 +3468,13 @@ paths:
     get:
       tags: [Entity Catalog]
       operationId: getEntityDirectory
-      summary: Complete embedded vanilla display directory, independent of artwork installation
+      summary: Browse or search embedded vanilla metadata with bounded pagination
+      description: Defaults to 60 entries. Use q to filter by Prefab or localized name, then offset and limit to page the same embedded directory. The web workbench explicitly requests complete=true for client-side ranking; AI and MCP clients should keep the default paged mode. This is registered Prefab metadata, not instances spawned in a world.
+      parameters:
+        - { name: q, in: query, schema: { type: string, maxLength: 100, default: "" } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, maximum: 50000, default: 0 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 120, default: 60 } }
+        - { name: complete, in: query, description: Explicit full-directory mode for the web workbench; keep false for AI and MCP calls, schema: { type: boolean, default: false } }
       responses:
         "200":
           description: Text metadata only; does not assert the target world has registered an entity
@@ -3482,18 +3488,28 @@ paths:
                     properties:
                       gameVersion: { type: string }
                       items: { type: array, items: { $ref: "#/components/schemas/CatalogEntity" } }
+                      total: { type: integer, description: Entries matching q before pagination }
+                      offset: { type: integer }
+                      limit: { type: integer }
+                      hasMore: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
   /rooms/{roomId}/worlds/{worldId}/entity-catalog/snapshot:
     parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }]
     get:
       tags: [Entity Catalog]
       operationId: readWorldEntitySnapshot
-      summary: Read one complete, bounded world directory for client-side filtering and ranking
+      summary: Browse or search a cached world Prefab snapshot with bounded pagination
       description: Coalesces concurrent requests to the same world. At most two collections and two snapshots, cached for five minutes. Uses bounded Runtime 2.4.8 batches over the existing Agent transport, with up to 2048 entries and 128 KiB of encoded item JSON per batch, with legacy 120-entry pages only after explicit batch rejection. One batch in flight per world, at most 50000 entries and an 8 MiB metadata budget, within 30 seconds. Inconsistent or partial reads fail. No game mutations or fallback to local placement. No idle polling. A forced refresh replaces the previous snapshot. Canceled collectors finish unwinding before replacement. A collection retries busy/stale pages at most three times within its original deadline. Errors include details.retryable and a reason code; incomplete snapshots are never cached.
       parameters:
-        - { name: refresh, in: query, schema: { type: boolean, default: false } }
+        - { name: refresh, in: query, description: Refresh only on the first page; later pages must reuse the same snapshot, schema: { type: boolean, default: false } }
+        - { name: observedAt, in: query, description: Pass the prior page's observedAt to reject mixed snapshots with RUNTIME_CATALOG_CHANGED if the cache expired or another caller refreshed it, schema: { type: string, format: date-time } }
+        - { name: q, in: query, schema: { type: string, maxLength: 100, default: "" } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, maximum: 50000, default: 0 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 120, default: 60 } }
+        - { name: complete, in: query, description: Explicit full-directory mode for the web workbench; keep false for AI and MCP calls, schema: { type: boolean, default: false } }
       responses:
         "200":
-          description: Complete directory with the original observation time; hasMore is false
+          description: Defaults to 60 matching entries and the original snapshot observation time. Page changes reuse the bounded snapshot without further game commands. complete=true returns the full matching directory for client-side ranking.
           content:
             application/json:
               schema:
@@ -3505,6 +3521,9 @@ paths:
                       items: { type: array, items: { $ref: "#/components/schemas/CatalogEntity" } }
                       mods: { type: array, items: { type: object } }
                       total: { type: integer }
+                      offset: { type: integer }
+                      limit: { type: integer }
+                      hasMore: { type: boolean }
                       observedAt: { type: string, format: date-time }
         "400": { $ref: "#/components/responses/BadRequest" }
         "409":

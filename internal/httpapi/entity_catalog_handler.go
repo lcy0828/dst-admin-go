@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"dont/internal/dstruntime"
 	"dont/internal/entitycatalog"
@@ -35,18 +36,58 @@ func (h *EntityCatalogHandler) ConfigureRuntime(runtime entitycatalog.RuntimeCom
 
 func (h *EntityCatalogHandler) Register(v2 *gin.RouterGroup) {
 	v2.GET("/entity-catalog/entities", h.search)
-	v2.GET("/entity-catalog/directory", func(c *gin.Context) { Success(c, http.StatusOK, entitycatalog.Directory()) })
+	v2.GET("/entity-catalog/directory", h.directory)
 	v2.GET("/rooms/:roomId/worlds/:worldId/entity-catalog/snapshot", h.snapshot)
 	v2.GET("/rooms/:roomId/worlds/:worldId/entity-catalog/artwork/:prefab", h.readArtwork)
 	v2.POST("/rooms/:roomId/worlds/:worldId/entity-catalog/search", h.searchRuntime)
 }
 
+func catalogPageOptions(c *gin.Context) (entitycatalog.PageOptions, bool) {
+	limit, limitErr := strconv.Atoi(c.DefaultQuery("limit", "60"))
+	offset, offsetErr := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	complete, completeErr := strconv.ParseBool(c.DefaultQuery("complete", "false"))
+	options := entitycatalog.PageOptions{Query: c.Query("q"), Limit: limit, Offset: offset, Complete: complete}
+	_, _, validationErr := entitycatalog.PageEntities(nil, options)
+	if limitErr != nil || offsetErr != nil || completeErr != nil || validationErr != nil {
+		Failure(c, http.StatusBadRequest, "INVALID_ENTITY_SEARCH", "实体搜索参数无效", nil)
+		return entitycatalog.PageOptions{}, false
+	}
+	return options, true
+}
+
+func (h *EntityCatalogHandler) directory(c *gin.Context) {
+	options, ok := catalogPageOptions(c)
+	if !ok {
+		return
+	}
+	result := entitycatalog.Directory()
+	result.Items, result.Total, _ = entitycatalog.PageEntities(result.Items, options)
+	result.Offset, result.Limit = options.Offset, options.Limit
+	if options.Complete {
+		result.Limit = len(result.Items)
+	}
+	result.HasMore = result.Offset+len(result.Items) < result.Total
+	Success(c, http.StatusOK, result)
+}
+
 func (h *EntityCatalogHandler) snapshot(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
+	options, ok := catalogPageOptions(c)
+	if !ok {
+		return
+	}
 	refresh, err := strconv.ParseBool(c.DefaultQuery("refresh", "false"))
-	if err != nil {
+	if err != nil || refresh && options.Offset != 0 {
 		Failure(c, http.StatusBadRequest, "INVALID_ENTITY_SEARCH", "实体搜索参数无效", nil)
 		return
+	}
+	var expectedObservation time.Time
+	if value := c.Query("observedAt"); value != "" {
+		expectedObservation, err = time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			Failure(c, http.StatusBadRequest, "INVALID_ENTITY_SEARCH", "实体搜索参数无效", nil)
+			return
+		}
 	}
 	if h.snapshots == nil {
 		Failure(c, http.StatusConflict, "RUNTIME_CATALOG_UNAVAILABLE", "当前世界目录不可用", gin.H{"retryable": false})
@@ -75,6 +116,16 @@ func (h *EntityCatalogHandler) snapshot(c *gin.Context) {
 		Failure(c, http.StatusConflict, code, message, gin.H{"retryable": retryable})
 		return
 	}
+	if !expectedObservation.IsZero() && !expectedObservation.Equal(result.ObservedAt) {
+		Failure(c, http.StatusConflict, "RUNTIME_CATALOG_CHANGED", "世界目录已更新，请从第一页重新读取", gin.H{"retryable": true, "observedAt": result.ObservedAt})
+		return
+	}
+	result.Items, result.Total, _ = entitycatalog.PageEntities(result.Items, options)
+	result.Offset, result.Limit = options.Offset, options.Limit
+	if options.Complete {
+		result.Limit = len(result.Items)
+	}
+	result.HasMore = result.Offset+len(result.Items) < result.Total
 	Success(c, http.StatusOK, result)
 }
 

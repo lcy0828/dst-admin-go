@@ -56,3 +56,36 @@ func TestSchemaRejectsUnknownFieldsAndEscapingPaths(t *testing.T) {
 		t.Fatal("path traversal accepted")
 	}
 }
+
+func TestEntityDirectoryToolsExposeWorkingPagination(t *testing.T) {
+	catalog, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"getEntityDirectory", "readWorldEntitySnapshot"} {
+		op, ok := catalog.Operation(id)
+		if !ok {
+			t.Fatal("missing directory operation", id)
+		}
+		schema, err := op.ToolSchema()
+		encoded, _ := json.Marshal(schema)
+		if err != nil || !strings.Contains(string(encoded), `"limit"`) || !strings.Contains(string(encoded), `"offset"`) || !strings.Contains(string(encoded), `"q"`) {
+			t.Fatal("tool still advertises no pagination", id, err)
+		}
+		input := `{"query":{"q":"gold","offset":60,"limit":60}}`
+		if id == "readWorldEntitySnapshot" {
+			input = `{"path":{"roomId":"room","worldId":"Master"},"query":{"q":"gold","offset":60,"limit":60}}`
+		}
+		parsed, err := op.Validate(json.RawMessage(input))
+		if err != nil {
+			t.Fatal(id, err)
+		}
+		uri, err := op.URL(parsed)
+		if err != nil || !strings.Contains(uri, "limit=60") || !strings.Contains(uri, "offset=60") || !strings.Contains(uri, "q=gold") {
+			t.Fatal(id, uri, err)
+		}
+		if _, err := op.Validate(json.RawMessage(strings.Replace(input, `"limit":60`, `"limit":121`, 1))); err == nil {
+			t.Fatal("tool accepted an invalid page size", id)
+		}
+	}
+}
