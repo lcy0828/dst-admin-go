@@ -11,8 +11,8 @@ require (
 	github.com/gin-gonic/gin v1.9.1
 	github.com/go-ini/ini v1.67.0
 	github.com/gocolly/colly v1.2.0
-	github.com/google/uuid v1.6.0
 	github.com/google/jsonschema-go v0.4.3
+	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/hpcloud/tail v1.0.0
 	github.com/jinzhu/gorm v1.9.16
@@ -24,6 +24,7 @@ require (
 	github.com/woozymasta/bcn v0.7.0
 	github.com/yuin/gopher-lua v1.1.1
 	golang.org/x/crypto v0.57.0
+	golang.org/x/image v0.46.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/text v0.42.0
 	gopkg.in/yaml.v3 v3.0.1

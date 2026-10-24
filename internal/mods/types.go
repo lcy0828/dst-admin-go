@@ -71,20 +71,29 @@ const (
 )
 
 type SearchOptions struct {
-	Query    string
-	Sort     SearchSort
-	Days     int
-	Tags     []string
-	Page     int
-	PageSize int
+	Language      string
+	Source        string
+	ConfigVersion string
+	Query         string
+	Sort          SearchSort
+	Days          int
+	Tags          []string
+	Page          int
+	PageSize      int
 }
 
 type SearchResult struct {
-	Warning  string     `json:"warning,omitempty"`
-	Items    []SteamMod `json:"items"`
-	Total    int        `json:"total"`
-	Page     int        `json:"page"`
-	PageSize int        `json:"pageSize"`
+	Source        string     `json:"source,omitempty"`
+	ConfigVersion string     `json:"configVersion,omitempty"`
+	TotalKind     string     `json:"totalKind,omitempty"`
+	HasMore       bool       `json:"hasMore"`
+	Stale         bool       `json:"stale"`
+	ObservedAt    time.Time  `json:"observedAt"`
+	Warning       string     `json:"warning,omitempty"`
+	Items         []SteamMod `json:"items"`
+	Total         int        `json:"total"`
+	Page          int        `json:"page"`
+	PageSize      int        `json:"pageSize"`
 }
 
 type HealthState string

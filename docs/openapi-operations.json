@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "1162d1e33eda442c5cb13b9991788bc900038857b6063706e78135a82dcdd253",
+  "operationsSHA256": "916be5fcc813f14ffba0b71d3453c05c8fed195600af11892c1d21b456568f73",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -466,6 +466,13 @@
       "transport": "download"
     },
     {
+      "operationId": "enrichModDisplayMetadata",
+      "method": "POST",
+      "path": "/mods/metadata/enrichment",
+      "contentType": "application/json",
+      "transport": "json"
+    },
+    {
       "operationId": "executeRawRoomCommand",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/{worldId}/raw-commands",
@@ -727,6 +734,12 @@
       "transport": "json"
     },
     {
+      "operationId": "getModThumbnail",
+      "method": "GET",
+      "path": "/mods/{modId}/thumbnail",
+      "transport": "download"
+    },
+    {
       "operationId": "getNodeResources",
       "method": "GET",
       "path": "/system/resources",
@@ -850,6 +863,12 @@
       "operationId": "getSystemStatus",
       "method": "GET",
       "path": "/system/status",
+      "transport": "json"
+    },
+    {
+      "operationId": "getWorkshopNetworkSettings",
+      "method": "GET",
+      "path": "/system/workshop",
       "transport": "json"
     },
     {
@@ -1756,6 +1775,13 @@
       "transport": "json"
     },
     {
+      "operationId": "testWorkshopNetworkConnection",
+      "method": "POST",
+      "path": "/system/workshop/actions/test",
+      "contentType": "application/json",
+      "transport": "json"
+    },
+    {
       "operationId": "unbanRoomPlayer",
       "method": "POST",
       "path": "/rooms/{roomId}/players/{playerId}/actions/unban",
@@ -1900,6 +1926,13 @@
       "operationId": "updateStructuredLogRule",
       "method": "PUT",
       "path": "/rooms/{roomId}/log-rules/{ruleId}",
+      "contentType": "application/json",
+      "transport": "json"
+    },
+    {
+      "operationId": "updateWorkshopNetworkSettings",
+      "method": "PUT",
+      "path": "/system/workshop",
       "contentType": "application/json",
       "transport": "json"
     },

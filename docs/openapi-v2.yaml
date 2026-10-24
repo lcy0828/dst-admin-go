@@ -521,6 +521,80 @@ paths:
         "202": { description: Management restart accepted, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareOperationEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /system/workshop:
+    get:
+      tags: [System, Mods]
+      operationId: getWorkshopNetworkSettings
+      summary: Read effective Controller Workshop network settings with masked secrets
+      responses:
+        "200": { description: Current revision, fields and active configVersion, content: { application/json: { schema: { $ref: "#/components/schemas/WorkshopSettingsEnvelope" } } } }
+    put:
+      tags: [System, Mods]
+      operationId: updateWorkshopNetworkSettings
+      summary: Save Workshop proxy, API/community URLs or Steam key and apply immediately while worlds run
+      description: Submit only Workshop fields. Empty secrets retain saved values; clearSecrets explicitly clears them. Does not alter Agent or SteamCMD download networking.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/WorkshopSettingsInput" } } } }
+      responses:
+        "200": { description: Saved and applied settings, content: { application/json: { schema: { $ref: "#/components/schemas/WorkshopSettingsEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /system/workshop/actions/test:
+    post:
+      tags: [System, Mods]
+      operationId: testWorkshopNetworkConnection
+      summary: Test name search, ID lookup and image access using unsaved Workshop settings
+      description: Read-only network requests, no configuration writes. Omitted or empty secrets retain current values. An optional sampleId allows ID lookup to be tested even when name search fails. Stage failures remain HTTP 200 with individual availability; not_tested is distinct from failure.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/WorkshopTestInput" } } } }
+      responses:
+        "200": { description: Individual stage results, content: { application/json: { schema: { $ref: "#/components/schemas/WorkshopTestEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /mods/metadata/enrichment:
+    post:
+      tags: [Mods]
+      operationId: enrichModDisplayMetadata
+      summary: Fetch optional authors and, on request, community descriptions without blocking core metadata
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids: { type: array, minItems: 1, maxItems: 100, items: { type: string, pattern: '^[0-9]{1,20}$' } }
+                configVersion: { type: string, description: Reject enrichment if active settings have changed }
+                community: { type: boolean, default: false, description: Fetch community descriptions only when details are expanded }
+      responses:
+        "200": { description: Available display data and optional warning, content: { application/json: { schema: { $ref: "#/components/schemas/ModMetadataEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /mods/{modId}/thumbnail:
+    parameters: [{ $ref: "#/components/parameters/ModID" }]
+    get:
+      tags: [Mods]
+      operationId: getModThumbnail
+      summary: Read an authenticated cached Steam thumbnail by Mod ID without an arbitrary upstream URL
+      parameters:
+        - { name: size, in: query, schema: { type: integer, enum: [80, 184, 384], default: 184 } }
+        - { name: If-None-Match, in: header, schema: { type: string } }
+      responses:
+        "200":
+          description: Validated thumbnail with private caching and ETag
+          content:
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+            image/gif: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+        "304": { description: Thumbnail has not changed }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /system/settings:
     get:
       tags: [System]
@@ -3506,6 +3580,9 @@ paths:
       tags: [Mods]
       operationId: searchMods
       parameters:
+        - { name: language, in: query, schema: { type: string, enum: [schinese, english] } }
+        - { name: source, in: query, description: Keep the returned source for subsequent pages. Explicit source changes start from page one., schema: { type: string, enum: [api, community] } }
+        - { name: configVersion, in: query, description: Active configuration version returned with the first page, schema: { type: string } }
         - { name: query, in: query, schema: { type: string, maxLength: 100, default: "" } }
         - { name: sort, in: query, schema: { type: string, enum: [relevance, trend, most_recent, last_updated, most_subscribed, top_rated], default: relevance } }
         - { name: days, in: query, schema: { type: integer, enum: [-1, 1, 7, 30, 90, 180, 365], default: 7 } }
@@ -3521,7 +3598,7 @@ paths:
       tags: [Mods]
       operationId: getModMetadata
       summary: Read Workshop metadata independently from Runtime file observations
-      description: Includes localized names and authors from the same source as Mod details. Load separately from Runtime facts; versions in this response are Workshop versions, not installed disk versions.
+      description: Returns basic JSON metadata and stored localized display fields without waiting for community pages. Fetch optional authors and descriptions separately using enrichModDisplayMetadata. Versions are Workshop versions, not installed disk versions.
       parameters:
         - name: ids
           in: query
@@ -8730,6 +8807,7 @@ components:
           properties:
             items: { type: object, additionalProperties: { $ref: "#/components/schemas/SteamMod" } }
             warning: { type: string }
+            configVersion: { type: string, description: Active Workshop configuration version on enrichment responses }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     SteamModEnvelope:
@@ -8795,6 +8873,12 @@ components:
       type: object
       required: [items, total, page, pageSize]
       properties:
+        source: { type: string, enum: [api, community] }
+        configVersion: { type: string }
+        totalKind: { type: string, enum: [exact, lower_bound, unknown] }
+        hasMore: { type: boolean }
+        stale: { type: boolean }
+        observedAt: { type: string, format: date-time }
         warning: { type: string }
         items: { type: array, items: { $ref: "#/components/schemas/SteamMod" } }
         total: { type: integer }
@@ -10475,6 +10559,61 @@ components:
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/SystemSettings" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    WorkshopSettingsInput:
+      type: object
+      required: [revision, values]
+      properties:
+        revision: { type: string }
+        values:
+          type: object
+          additionalProperties: false
+          properties:
+            mod.steamAPIBase: { type: string, description: HTTP(S) base URL; supports a path prefix }
+            mod.steamCommunityBase: { type: string, description: HTTP(S) base URL; supports a path prefix }
+            mod.proxyMode: { type: string, enum: [system, direct, custom] }
+            mod.proxyURL: { type: string, writeOnly: true, description: HTTP(S) or socks5h proxy URL. Empty retains the configured secret. }
+            mod.steamAPIKey: { type: string, writeOnly: true, description: Empty retains the configured key. }
+        clearSecrets: { type: array, items: { type: string, enum: [mod.steamAPIKey, mod.proxyURL] } }
+    WorkshopSettingsEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          type: object
+          required: [revision, fields, configVersion]
+          properties:
+            revision: { type: string }
+            configVersion: { type: string }
+            fields: { type: array, items: { $ref: "#/components/schemas/SystemSettingField" } }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    WorkshopTestInput:
+      allOf:
+        - $ref: "#/components/schemas/WorkshopSettingsInput"
+        - type: object
+          properties:
+            sampleId: { type: string, pattern: '^[0-9]{1,20}$' }
+    WorkshopTestEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          type: object
+          required: [stages, checkedAt]
+          properties:
+            checkedAt: { type: string, format: date-time }
+            stages:
+              type: array
+              items:
+                type: object
+                required: [name, status, durationMs]
+                properties:
+                  name: { type: string, enum: [search, details, image] }
+                  status: { type: string, enum: [available, unavailable, not_tested] }
+                  code: { type: string }
+                  durationMs: { type: integer, minimum: 0 }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     SystemSettingsInput:

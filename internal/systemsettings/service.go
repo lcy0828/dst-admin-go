@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"dont/internal/deploymentprofile"
+	"dont/internal/mods"
 )
 
 var digitsPattern = regexp.MustCompile(`^[0-9]{1,20}$`)
@@ -24,13 +25,14 @@ var colorPattern = regexp.MustCompile(`^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$`)
 var rgbaPattern = regexp.MustCompile(`^rgba\(\s*(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\s*,\s*(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\s*,\s*(25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\s*,\s*(0|1|0?\.[0-9]+)\s*\)$`)
 
 type Service struct {
-	applyMu       sync.Mutex
-	baselineMu    sync.RWMutex
-	applier       RuntimeApplier
-	repository    Repository
-	startupValues map[string]string
-	lookupEnv     func(string) (string, bool)
-	now           func() time.Time
+	applyMu         sync.Mutex
+	baselineMu      sync.RWMutex
+	applier         RuntimeApplier
+	workshopApplier WorkshopApplier
+	repository      Repository
+	startupValues   map[string]string
+	lookupEnv       func(string) (string, bool)
+	now             func() time.Time
 }
 
 // RuntimeApplier runs persistence and runtime replacement within one admission
@@ -120,6 +122,15 @@ func (s *Service) ApplyContext(ctx context.Context, input Input) (ApplyResult, e
 	for id, value := range updates {
 		combined[id] = value
 	}
+	var commit func()
+	discard := func() {}
+	if s.workshopApplier != nil && s.workshopConfig(combined) != s.workshopConfig(previous.Values) {
+		commit, discard, err = s.workshopApplier(s.workshopConfig(combined))
+		if err != nil {
+			return ApplyResult{}, ErrInvalidInput
+		}
+	}
+	defer discard()
 	if s.applier != nil && s.runtimeChanged(combined) {
 		if err = s.applier(ctx, persist, rollback); err == nil {
 			s.baselineMu.Lock()
@@ -131,6 +142,9 @@ func (s *Service) ApplyContext(ctx context.Context, input Input) (ApplyResult, e
 	}
 	if err != nil {
 		return ApplyResult{}, err
+	}
+	if commit != nil {
+		commit()
 	}
 	// Runtime initialization may persist generated node identity or gateway
 	// credentials in this file. Return the current revision for the next edit.
@@ -338,12 +352,15 @@ func validateValues(values map[string]string) []Issue {
 		if definition.ID == "mod.steamAppID" && !digitsPattern.MatchString(value) {
 			issues = append(issues, Issue{FieldID: definition.ID, Severity: "error", Message: "Steam App ID 必须为数字"})
 		}
-		if definition.Sensitive && definition.ID != "notification.smtpPassword" && !secretPattern.MatchString(value) {
+		if definition.Sensitive && definition.ID != "notification.smtpPassword" && definition.ID != "mod.proxyURL" && !secretPattern.MatchString(value) {
 			issues = append(issues, Issue{FieldID: definition.ID, Severity: "error", Message: definition.Label + "格式无效"})
 		}
 		if strings.ContainsRune(value, 0) {
 			issues = append(issues, Issue{FieldID: definition.ID, Severity: "error", Message: definition.Label + "包含无效字符"})
 		}
+	}
+	if _, err := mods.NetworkConfigFromValues(values).Normalize(); err != nil {
+		issues = append(issues, Issue{FieldID: "mod.steamAPIBase", Severity: "error", Message: err.Error()})
 	}
 	if nestedPaths(values["paths.save"], values["paths.backup"]) {
 		issues = append(issues, Issue{FieldID: "paths.backup", Severity: "error", Message: "存档目录与备份目录不能相同或互相嵌套"})
