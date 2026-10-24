@@ -33,6 +33,8 @@ var fieldDefinitions = []fieldDefinition{
 	{ID: "mod.workshopContent", Group: "mod", Label: "Workshop 内容目录", Kind: "path", Section: "mod", Key: "WORKSHOP_CONTENT", Environment: "DST_ADMIN_WORKSHOP_CONTENT", RestartRequired: true},
 	{ID: "mod.steamAppID", Group: "mod", Label: "Steam App ID", Kind: "text", Section: "mod", Key: "APP_ID", Environment: "DST_ADMIN_STEAM_APP_ID", Default: "322330", Required: true, RestartRequired: true},
 	{ID: "mod.steamAPIKey", Group: "mod", Label: "Steam Web API Key", Kind: "secret", Section: "mod", Key: "STEAM_WEB_API_KEY", Environment: "DST_ADMIN_STEAM_API_KEY", Sensitive: true, RestartRequired: true},
+	{ID: "mod.steamAPIBase", Group: "mod", Label: "Steam Web API 基地址", Kind: "text", Section: "mod", Key: "STEAM_API_BASE", Environment: "DST_ADMIN_STEAM_API_BASE", Default: "https://api.steampowered.com", RestartRequired: true},
+	{ID: "mod.steamCommunityBase", Group: "mod", Label: "Steam 社区基地址", Kind: "text", Section: "mod", Key: "STEAM_COMMUNITY_BASE", Environment: "DST_ADMIN_STEAM_COMMUNITY_BASE", Default: "https://steamcommunity.com", RestartRequired: true},
 	{ID: "lua.binary", Group: "lua", Label: "外部 Lua 解释器", Kind: "text", Section: "mod", Key: "LUA_BINARY", Environment: "DST_ADMIN_LUA_BINARY", Default: "lua", Required: true, RestartRequired: true},
 	{ID: "lua.pythonBinary", Group: "lua", Label: "Python/Lupa 解释器（可选）", Kind: "text", Section: "mod", Key: "PYTHON_BINARY", Environment: "DST_ADMIN_PYTHON_BINARY", Default: "python3", RestartRequired: true},
 	{ID: "lua.fallback", Group: "lua", Label: "Lua 兼容模块目录（可选）", Kind: "path", Section: "mod", Key: "LUA_SH_PATH", Environment: "DST_ADMIN_LUA_PATH", RestartRequired: true},

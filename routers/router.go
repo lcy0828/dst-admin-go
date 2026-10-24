@@ -177,6 +177,8 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	workshopDownloadPath := config.Path("mod", "WORKSHOP_MOD_PATH", "DST_ADMIN_WORKSHOP_DOWNLOAD")
 	steamAPIKey := config.String("mod", "STEAM_WEB_API_KEY", "DST_ADMIN_STEAM_API_KEY")
 	steamAppID := config.String("mod", "APP_ID", "DST_ADMIN_STEAM_APP_ID")
+	steamAPIBase := config.String("mod", "STEAM_API_BASE", "DST_ADMIN_STEAM_API_BASE")
+	steamCommunityBase := config.String("mod", "STEAM_COMMUNITY_BASE", "DST_ADMIN_STEAM_COMMUNITY_BASE")
 	luaBinary := config.String("mod", "LUA_BINARY", "DST_ADMIN_LUA_BINARY")
 	pythonBinary := config.String("mod", "PYTHON_BINARY", "DST_ADMIN_PYTHON_BINARY")
 	if steamAppID == "" {
@@ -841,7 +843,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err := metadataStore.Migrate(); err != nil {
 		return nil, fmt.Errorf("initialize Workshop metadata: %w", err)
 	}
-	steamMetadata := modservice.NewSteamProvider(steamAPIKey, steamAppID)
+	steamMetadata := modservice.NewSteamProviderWithBases(steamAPIKey, steamAppID, steamAPIBase, steamCommunityBase)
 	steamMetadata.ConfigureMetadataStore(metadataStore)
 	var modMetadata modservice.MetadataProvider = steamMetadata
 	steamModRunner := modservice.NewSteamCMDRunner(steamCMDPath, workshopDownloadPath, steamAppID)

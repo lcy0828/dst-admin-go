@@ -28,6 +28,9 @@ const (
 	steamCommunityUserAgent = "dst-admin-go/1.0 (+https://github.com/lcy0828/dst-admin-go)"
 	steamCommunityCacheTTL  = 7 * 24 * time.Hour
 	steamCommunityWorkers   = 2
+
+	defaultSteamAPIBase       = "https://api.steampowered.com"
+	defaultSteamCommunityBase = "https://steamcommunity.com"
 )
 
 var steamRatingImagePattern = regexp.MustCompile(`(?:^|/)([1-5])-star_large(?:[.?]|$)`)
@@ -85,16 +88,32 @@ func (value *steamInt64) UnmarshalJSON(data []byte) error {
 }
 
 func NewSteamProvider(apiKey, appID string) *SteamProvider {
+	return NewSteamProviderWithBases(apiKey, appID, "", "")
+}
+
+// NewSteamProviderWithBases 允许把 Steam 接口地址指向其他入口（例如受限网络下的
+// 自建反代）。apiBase / communityBase 为空时沿用官方地址。
+func NewSteamProviderWithBases(apiKey, appID, apiBase, communityBase string) *SteamProvider {
 	if strings.TrimSpace(appID) == "" {
 		appID = "322330"
 	}
 	return &SteamProvider{
 		APIKey: strings.TrimSpace(apiKey), AppID: appID,
-		HTTPClient: &http.Client{Timeout: 12 * time.Second}, APIBase: "https://api.steampowered.com",
-		CommunityBase: "https://steamcommunity.com", communityCache: make(map[string]communityMetadataCache),
+		HTTPClient:    &http.Client{Timeout: 12 * time.Second},
+		APIBase:       normalizeSteamBase(apiBase, defaultSteamAPIBase),
+		CommunityBase: normalizeSteamBase(communityBase, defaultSteamCommunityBase),
+		communityCache: make(map[string]communityMetadataCache),
 		communityCalls: make(map[string]*communityMetadataCall), communitySlots: make(chan struct{}, steamCommunityWorkers),
 		summarySlot: make(chan struct{}, 1),
 	}
+}
+
+func normalizeSteamBase(value, fallback string) string {
+	value = strings.TrimRight(strings.TrimSpace(value), "/")
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func (p *SteamProvider) Search(ctx context.Context, options SearchOptions) (SearchResult, error) {
