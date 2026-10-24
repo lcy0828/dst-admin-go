@@ -48,6 +48,7 @@ type SteamProvider struct {
 	CommunityBase     string
 	cacheMu           sync.Mutex
 	communityCache    map[string]communityMetadataCache
+	communityBytes    int
 	communityCalls    map[string]*communityMetadataCall
 	communitySlots    chan struct{}
 	communityCooldown time.Time
@@ -99,9 +100,9 @@ func NewSteamProviderWithBases(apiKey, appID, apiBase, communityBase string) *St
 	}
 	return &SteamProvider{
 		APIKey: strings.TrimSpace(apiKey), AppID: appID,
-		HTTPClient:    &http.Client{Timeout: 12 * time.Second},
-		APIBase:       normalizeSteamBase(apiBase, defaultSteamAPIBase),
-		CommunityBase: normalizeSteamBase(communityBase, defaultSteamCommunityBase),
+		HTTPClient:     &http.Client{Timeout: 12 * time.Second},
+		APIBase:        normalizeSteamBase(apiBase, defaultSteamAPIBase),
+		CommunityBase:  normalizeSteamBase(communityBase, defaultSteamCommunityBase),
 		communityCache: make(map[string]communityMetadataCache),
 		communityCalls: make(map[string]*communityMetadataCall), communitySlots: make(chan struct{}, steamCommunityWorkers),
 		summarySlot: make(chan struct{}, 1),
@@ -144,7 +145,7 @@ func (p *SteamProvider) Search(ctx context.Context, options SearchOptions) (Sear
 	}
 	parameters := url.Values{
 		"key": {p.APIKey}, "appid": {p.AppID}, "search_text": {query}, "page": {strconv.Itoa(page)},
-		"numperpage": {strconv.Itoa(pageSize)}, "language": {"6"}, "return_tags": {"true"},
+		"numperpage": {strconv.Itoa(pageSize)}, "language": {steamAPILanguage(options.Language)}, "return_tags": {"true"},
 		"return_vote_data": {"true"}, "return_children": {"true"},
 		"query_type": {steamQueryType(options.Sort)}, "days": {strconv.Itoa(options.Days)},
 	}
@@ -157,13 +158,16 @@ func (p *SteamProvider) Search(ctx context.Context, options SearchOptions) (Sear
 		return SearchResult{}, err
 	}
 	var payload struct {
-		Response struct {
-			Total int               `json:"total"`
+		Response *struct {
+			Total *int              `json:"total"`
 			Items []steamDetailWire `json:"publishedfiledetails"`
 		} `json:"response"`
 	}
 	if err := p.doJSON(request, &payload); err != nil {
 		return SearchResult{}, fmt.Errorf("search Steam Workshop: %w", err)
+	}
+	if payload.Response == nil || payload.Response.Total == nil || *payload.Response.Total < 0 || (payload.Response.Items == nil && *payload.Response.Total > 0) {
+		return SearchResult{}, &NetworkError{Code: "WORKSHOP_INVALID_RESPONSE"}
 	}
 	items := make([]SteamMod, 0, len(payload.Response.Items))
 	for _, item := range payload.Response.Items {
@@ -171,9 +175,8 @@ func (p *SteamProvider) Search(ctx context.Context, options SearchOptions) (Sear
 			items = append(items, converted)
 		}
 	}
-	p.populateAuthors(ctx, items)
-	p.rememberSearch(items, displayLanguage)
-	return SearchResult{Items: items, Total: payload.Response.Total, Page: page, PageSize: pageSize}, nil
+	p.rememberSearch(items, searchLanguage(options))
+	return SearchResult{Items: items, Total: *payload.Response.Total, Page: page, PageSize: pageSize}, nil
 }
 
 func (p *SteamProvider) searchCommunity(ctx context.Context, options SearchOptions) (SearchResult, error) {
@@ -185,10 +188,15 @@ func (p *SteamProvider) searchCommunity(ctx context.Context, options SearchOptio
 	items := make([]SteamMod, 0, pageCount*steamCommunityPageSize)
 	seen := make(map[string]bool, cap(items))
 	total := -1
+	partial := ""
 	for index := 0; index < pageCount; index++ {
 		batch, batchTotal, err := p.searchCommunityPage(ctx, options, communityPage+index)
 		if err != nil {
-			return SearchResult{}, err
+			if len(items) == 0 {
+				return SearchResult{}, err
+			}
+			partial = "WORKSHOP_PARTIAL_RESULT"
+			break
 		}
 		if batchTotal >= 0 {
 			total = batchTotal
@@ -203,47 +211,25 @@ func (p *SteamProvider) searchCommunity(ctx context.Context, options SearchOptio
 			break
 		}
 	}
+	totalKind := "exact"
 	if total < 0 {
+		totalKind = "lower_bound"
 		total = (communityPage-1)*steamCommunityPageSize + len(items)
 		if len(items) == pageCount*steamCommunityPageSize {
 			total++
 		}
 	}
 	if offset >= len(items) {
-		return SearchResult{Items: []SteamMod{}, Total: total, Page: page, PageSize: pageSize}, nil
+		return SearchResult{Items: []SteamMod{}, Total: total, TotalKind: totalKind, Warning: partial, Page: page, PageSize: pageSize}, nil
 	}
 	end := min(offset+pageSize, len(items))
 	items = items[offset:end]
-	ids := make([]string, 0, len(items))
-	for _, item := range items {
-		ids = append(ids, item.ID)
-	}
-	details, err := p.Summaries(ctx, ids)
-	if err != nil {
-		return SearchResult{}, fmt.Errorf("load public Steam Workshop search details: %w", err)
-	}
-	for index, item := range items {
-		if detail, ok := details[item.ID]; ok {
-			if item.Name != "" {
-				detail.Name = item.Name
-			}
-			if item.PreviewURL != "" {
-				detail.PreviewURL = item.PreviewURL
-			}
-			if item.Author != "" {
-				detail.Author = item.Author
-			}
-			if item.AuthorID != "" {
-				detail.AuthorID = item.AuthorID
-			}
-			items[index] = detail
-		}
-	}
-	p.rememberSearch(items, steamCommunityLanguage(options.Query))
-	return SearchResult{Items: items, Total: total, Page: page, PageSize: pageSize}, nil
+	p.rememberSearch(items, searchLanguage(options))
+	return SearchResult{Items: items, Total: total, TotalKind: totalKind, Warning: partial, Page: page, PageSize: pageSize}, nil
 }
 
 func (p *SteamProvider) searchCommunityPage(ctx context.Context, options SearchOptions, page int) ([]SteamMod, int, error) {
+	ctx = context.WithValue(ctx, networkKindKey{}, 1)
 	select {
 	case p.communitySlots <- struct{}{}:
 		defer func() { <-p.communitySlots }()
@@ -257,7 +243,7 @@ func (p *SteamProvider) searchCommunityPage(ctx context.Context, options SearchO
 		"appid": {p.AppID}, "searchtext": {options.Query}, "browsesort": {steamCommunitySort(options.Sort)},
 		"section": {"readytouseitems"}, "p": {strconv.Itoa(page)},
 		"num_per_page": {strconv.Itoa(steamCommunityPageSize)}, "days": {strconv.Itoa(options.Days)},
-		"l": {steamCommunityLanguage(options.Query)},
+		"l": {searchLanguage(options)},
 	}
 	for _, tag := range options.Tags {
 		parameters.Add("requiredtags[]", tag)
@@ -272,7 +258,7 @@ func (p *SteamProvider) searchCommunityPage(ctx context.Context, options SearchO
 	request.Header.Set("Accept", "text/html")
 	response, err := p.HTTPClient.Do(request)
 	if err != nil {
-		return nil, -1, fmt.Errorf("search public Steam Workshop: %w", err)
+		return nil, -1, safeNetworkError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -281,18 +267,18 @@ func (p *SteamProvider) searchCommunityPage(ctx context.Context, options SearchO
 			p.limitCommunity(response.Header.Get("Retry-After"))
 			return nil, -1, p.communityLimit()
 		}
-		return nil, -1, fmt.Errorf("public Steam Workshop returned HTTP %d", response.StatusCode)
+		return nil, -1, &NetworkError{Code: "WORKSHOP_UPSTREAM_REJECTED", Status: response.StatusCode}
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, steamResponseLimit+1))
 	if err != nil {
-		return nil, -1, err
+		return nil, -1, safeNetworkError(err)
 	}
 	if int64(len(data)) > steamResponseLimit {
-		return nil, -1, fmt.Errorf("public Steam Workshop response exceeds %d bytes", steamResponseLimit)
+		return nil, -1, &NetworkError{Code: "WORKSHOP_INVALID_RESPONSE"}
 	}
 	document, err := goquery.NewDocumentFromReader(bytes.NewReader(data))
 	if err != nil {
-		return nil, -1, fmt.Errorf("parse public Steam Workshop response: %w", err)
+		return nil, -1, &NetworkError{Code: "WORKSHOP_INVALID_RESPONSE"}
 	}
 	if body := strings.ToLower(document.Find("body").Text()); strings.Contains(body, "too many requests") || strings.Contains(body, "请求太多") {
 		p.limitCommunity(response.Header.Get("Retry-After"))
@@ -342,12 +328,15 @@ func (p *SteamProvider) searchCommunityPage(ctx context.Context, options SearchO
 			return true
 		}
 		value, _, _ := strings.Cut(text, " ")
-		if parsed, parseErr := strconv.Atoi(value); parseErr == nil && parsed >= 0 {
+		if parsed, parseErr := strconv.Atoi(strings.ReplaceAll(value, ",", "")); parseErr == nil && parsed >= 0 {
 			total = parsed
 			return false
 		}
 		return true
 	})
+	if len(items) == 0 && (total < 0 || total > 0 && (page-1)*steamCommunityPageSize < total) {
+		return nil, -1, &NetworkError{Code: "WORKSHOP_INVALID_RESPONSE"}
+	}
 	return items, total, nil
 }
 
@@ -362,7 +351,7 @@ func steamCommunityLanguage(query string) string {
 
 func (p *SteamProvider) Details(ctx context.Context, ids []string) (map[string]SteamMod, error) {
 	if p.store != nil {
-		return p.storedDetails(ctx, ids, true)
+		return p.storedDetails(ctx, ids, true, true)
 	}
 	return p.details(ctx, ids, true)
 }
@@ -403,12 +392,15 @@ func (p *SteamProvider) details(ctx context.Context, ids []string, enrichCommuni
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	var payload struct {
-		Response struct {
+		Response *struct {
 			Items []steamDetailWire `json:"publishedfiledetails"`
 		} `json:"response"`
 	}
 	if err := p.doJSON(request, &payload); err != nil {
 		return nil, fmt.Errorf("load Steam Workshop details: %w", err)
+	}
+	if payload.Response == nil || payload.Response.Items == nil {
+		return nil, &NetworkError{Code: "WORKSHOP_INVALID_RESPONSE"}
 	}
 	result := make(map[string]SteamMod, len(payload.Response.Items))
 	items := make([]SteamMod, 0, len(payload.Response.Items))
@@ -441,7 +433,7 @@ func (p *SteamProvider) details(ctx context.Context, ids []string, enrichCommuni
 		}
 	}
 	if len(missing) > 0 {
-		enrichmentErr = errors.Join(enrichmentErr, fmt.Errorf("Steam 未返回 Workshop 信息：%s", strings.Join(missing, ", ")))
+		enrichmentErr = errors.Join(enrichmentErr, &NetworkError{Code: "WORKSHOP_ITEM_UNAVAILABLE", Status: 404})
 	}
 	return result, enrichmentErr
 }
@@ -548,7 +540,7 @@ func (p *SteamProvider) populateAuthors(ctx context.Context, items []SteamMod) {
 		return
 	}
 	var payload struct {
-		Response struct {
+		Response *struct {
 			Players []struct {
 				ID   string `json:"steamid"`
 				Name string `json:"personaname"`
@@ -556,6 +548,9 @@ func (p *SteamProvider) populateAuthors(ctx context.Context, items []SteamMod) {
 		} `json:"response"`
 	}
 	if p.doJSON(request, &payload) != nil {
+		return
+	}
+	if payload.Response == nil {
 		return
 	}
 	names := make(map[string]string, len(payload.Response.Players))
@@ -572,24 +567,39 @@ func (p *SteamProvider) populateCommunityMetadata(ctx context.Context, items []S
 	var mu sync.Mutex
 	var failures []error
 	seenErrors := make(map[string]bool)
-	for index := range items {
-		index := index
+	next := 0
+	// Fixed workers instead of creating one waiting goroutine per installed Mod.
+	for worker := 0; worker < min(steamCommunityWorkers, len(items)); worker++ {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			metadata, ok := p.communityMetadata(ctx, items[index].ID)
-			if metadata.Err != nil {
+			for {
 				mu.Lock()
-				if message := metadata.Err.Error(); !seenErrors[message] {
-					seenErrors[message] = true
-					failures = append(failures, metadata.Err)
-				}
+				index := next
+				next++
 				mu.Unlock()
+				if index >= len(items) {
+					return
+				}
+				if ctx.Err() != nil {
+					mu.Lock()
+					failures = append(failures, safeNetworkError(ctx.Err()))
+					mu.Unlock()
+					return
+				}
+				metadata, ok := p.communityMetadata(ctx, items[index].ID)
+				if metadata.Err != nil {
+					mu.Lock()
+					if message := metadata.Err.Error(); !seenErrors[message] {
+						seenErrors[message] = true
+						failures = append(failures, metadata.Err)
+					}
+					mu.Unlock()
+				}
+				if ok {
+					mergeCommunityMetadata(&items[index], metadata)
+				}
 			}
-			if !ok {
-				return
-			}
-			mergeCommunityMetadata(&items[index], metadata)
 		}()
 	}
 	wait.Wait()
@@ -601,6 +611,7 @@ func (p *SteamProvider) loadCommunityMetadata(ctx context.Context, id string) (c
 }
 
 func (p *SteamProvider) fetchCommunityMetadata(ctx context.Context, id string) (communityMetadataCache, bool) {
+	ctx = context.WithValue(ctx, networkKindKey{}, 1)
 	if err := p.communityLimit(); err != nil {
 		return communityMetadataCache{Err: err}, false
 	}
@@ -614,7 +625,7 @@ func (p *SteamProvider) fetchCommunityMetadata(ctx context.Context, id string) (
 	request.Header.Set("Accept", "text/html")
 	response, err := p.HTTPClient.Do(request)
 	if err != nil {
-		return communityMetadataCache{Err: fmt.Errorf("获取 Workshop %s 工坊页面：%w", id, err)}, false
+		return communityMetadataCache{Err: safeNetworkError(err)}, false
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -623,18 +634,18 @@ func (p *SteamProvider) fetchCommunityMetadata(ctx context.Context, id string) (
 			p.limitCommunity(response.Header.Get("Retry-After"))
 			return communityMetadataCache{Err: p.communityLimit()}, false
 		}
-		return communityMetadataCache{Err: fmt.Errorf("Workshop %s 工坊页面返回 HTTP %d", id, response.StatusCode)}, false
+		return communityMetadataCache{Err: &NetworkError{Code: "WORKSHOP_UPSTREAM_REJECTED", Status: response.StatusCode}}, false
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, steamResponseLimit+1))
 	if err != nil {
-		return communityMetadataCache{Err: err}, false
+		return communityMetadataCache{Err: safeNetworkError(err)}, false
 	}
 	if int64(len(data)) > steamResponseLimit {
-		return communityMetadataCache{Err: fmt.Errorf("Workshop %s 工坊页面超过大小限制", id)}, false
+		return communityMetadataCache{Err: &NetworkError{Code: "WORKSHOP_INVALID_RESPONSE"}}, false
 	}
 	document, err := goquery.NewDocumentFromReader(bytes.NewReader(data))
 	if err != nil {
-		return communityMetadataCache{Err: err}, false
+		return communityMetadataCache{Err: &NetworkError{Code: "WORKSHOP_INVALID_RESPONSE"}}, false
 	}
 	metadata := communityMetadataCache{ExpiresAt: time.Now().Add(steamCommunityCacheTTL)}
 	metadata.Name = strings.TrimSpace(document.Find(".workshopItemTitle").First().Text())
@@ -644,7 +655,7 @@ func (p *SteamProvider) fetchCommunityMetadata(ctx context.Context, id string) (
 			p.limitCommunity(response.Header.Get("Retry-After"))
 			return communityMetadataCache{Err: p.communityLimit()}, false
 		}
-		return communityMetadataCache{Err: fmt.Errorf("Workshop %s 未返回有效的工坊详情页面", id)}, false
+		return communityMetadataCache{Err: &NetworkError{Code: "WORKSHOP_INVALID_RESPONSE"}}, false
 	}
 	metadata.Author = cleanCommunityAuthor(document.Find(`a[href*="/myworkshopfiles/"]`).First().Text())
 	description := document.Find("#highlightContent").First()
@@ -732,14 +743,46 @@ func (p *SteamProvider) communityMetadata(ctx context.Context, id string) (commu
 		// Avoid repeated failed page loads as the user changes panels. This
 		// short backoff is display-only; version API calls never consult it.
 		call.metadata.ExpiresAt = time.Now().Add(time.Minute)
-		p.communityCache[id] = call.metadata
+		p.cacheCommunityLocked(id, call.metadata)
 	} else if call.ok {
-		p.communityCache[id] = call.metadata
+		p.cacheCommunityLocked(id, call.metadata)
 	}
 	delete(p.communityCalls, id)
 	close(call.done)
 	p.cacheMu.Unlock()
 	return call.metadata, call.ok
+}
+
+func communityMetadataBytes(value communityMetadataCache) int {
+	return len(value.Name) + len(value.Author) + len(value.Description) + 256
+}
+
+// cacheMu must be held. SQLite retains the longer history; keep only a small
+// working set in memory even if many different detail dialogs are opened.
+func (p *SteamProvider) cacheCommunityLocked(id string, value communityMetadataCache) {
+	size := communityMetadataBytes(value)
+	if size > 128<<10 {
+		return
+	}
+	if p.communityCache == nil {
+		p.communityCache = make(map[string]communityMetadataCache)
+	}
+	if old, exists := p.communityCache[id]; exists {
+		p.communityBytes -= communityMetadataBytes(old)
+	}
+	p.communityCache[id] = value
+	p.communityBytes += size
+	for len(p.communityCache) > 512 || p.communityBytes > 8<<20 {
+		oldest := ""
+		var when time.Time
+		for key, entry := range p.communityCache {
+			if oldest == "" || entry.ExpiresAt.Before(when) {
+				oldest, when = key, entry.ExpiresAt
+			}
+		}
+		p.communityBytes -= communityMetadataBytes(p.communityCache[oldest])
+		delete(p.communityCache, oldest)
+	}
 }
 
 func (p *SteamProvider) limitCommunity(retryAfter string) {
@@ -760,7 +803,7 @@ func (p *SteamProvider) communityLimit() error {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
 	if remaining := time.Until(p.communityCooldown); remaining > 0 {
-		return fmt.Errorf("Steam 暂时限制工坊资料查询，约 %d 秒后可重试；版本检查不受此限制", int(remaining.Seconds())+1)
+		return &NetworkError{Code: "WORKSHOP_RATE_LIMITED", Status: http.StatusTooManyRequests, RetryAfter: int(remaining.Seconds()) + 1}
 	}
 	return nil
 }
@@ -798,33 +841,33 @@ func (p *SteamProvider) doJSON(request *http.Request, target interface{}) error 
 	response, err := p.HTTPClient.Do(request)
 	finishHTTP()
 	if err != nil {
-		return err
+		return safeNetworkError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("Steam API returned HTTP %d", response.StatusCode)
+		return &NetworkError{Code: "WORKSHOP_UPSTREAM_REJECTED", Status: response.StatusCode}
 	}
 	finishBody := requesttiming.Start(request.Context(), "steam.response_body")
 	data, err := io.ReadAll(io.LimitReader(response.Body, steamResponseLimit+1))
 	finishBody()
 	if err != nil {
-		return err
+		return safeNetworkError(err)
 	}
 	if int64(len(data)) > steamResponseLimit {
-		return fmt.Errorf("Steam API response exceeds %d bytes", steamResponseLimit)
+		return &NetworkError{Code: "WORKSHOP_INVALID_RESPONSE"}
 	}
 	defer requesttiming.Start(request.Context(), "steam.decode_json")()
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if err := decoder.Decode(target); err != nil {
-		return err
+		return &NetworkError{Code: "WORKSHOP_INVALID_RESPONSE"}
 	}
 	var trailing interface{}
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		if err == nil {
-			return errors.New("Steam API response contains trailing JSON")
+			return &NetworkError{Code: "WORKSHOP_INVALID_RESPONSE"}
 		}
-		return fmt.Errorf("Steam API response contains invalid trailing data: %w", err)
+		return &NetworkError{Code: "WORKSHOP_INVALID_RESPONSE"}
 	}
 	return nil
 }
@@ -855,6 +898,9 @@ func normalizeSearchOptions(options SearchOptions) SearchOptions {
 
 func validateSearch(options SearchOptions) error {
 	fields := make(map[string]string)
+	if options.Language != "" && options.Language != "schinese" && options.Language != "english" {
+		fields["language"] = "不支持的语言"
+	}
 	if len([]rune(options.Query)) > 100 {
 		fields["query"] = "搜索内容不能超过 100 个字符"
 	}
@@ -1018,3 +1064,16 @@ func uniqueModIDs(values []string) []string {
 }
 
 var _ MetadataProvider = (*SteamProvider)(nil)
+
+func searchLanguage(options SearchOptions) string {
+	if options.Language != "" {
+		return options.Language
+	}
+	return steamCommunityLanguage(options.Query)
+}
+func steamAPILanguage(language string) string {
+	if language == "english" {
+		return "0"
+	}
+	return "6"
+}

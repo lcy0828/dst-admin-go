@@ -284,9 +284,10 @@ func (s *Service) Describe(ctx context.Context, modIDs []string) (map[string]Ste
 func (s *Service) Metadata(ctx context.Context, modIDs []string) (map[string]SteamMod, error) {
 	items, err := s.describe(ctx, modIDs, true)
 	var incomplete []string
+	_, deferredEnrichment := s.metadata.(*Workshop)
 	for _, id := range uniqueModIDs(modIDs) {
 		item := items[id]
-		if strings.TrimSpace(item.Name) == "" || strings.TrimSpace(item.Author) == "" {
+		if strings.TrimSpace(item.Name) == "" || !deferredEnrichment && strings.TrimSpace(item.Author) == "" {
 			incomplete = append(incomplete, id)
 		}
 	}
@@ -328,7 +329,7 @@ func (s *Service) describe(ctx context.Context, modIDs []string, displayMetadata
 	var failures []error
 	timeout := 5 * time.Second
 	if displayMetadata {
-		timeout = 12 * time.Second
+		timeout = 8 * time.Second
 	}
 	metadataCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

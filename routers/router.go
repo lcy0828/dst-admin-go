@@ -177,8 +177,6 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	workshopDownloadPath := config.Path("mod", "WORKSHOP_MOD_PATH", "DST_ADMIN_WORKSHOP_DOWNLOAD")
 	steamAPIKey := config.String("mod", "STEAM_WEB_API_KEY", "DST_ADMIN_STEAM_API_KEY")
 	steamAppID := config.String("mod", "APP_ID", "DST_ADMIN_STEAM_APP_ID")
-	steamAPIBase := config.String("mod", "STEAM_API_BASE", "DST_ADMIN_STEAM_API_BASE")
-	steamCommunityBase := config.String("mod", "STEAM_COMMUNITY_BASE", "DST_ADMIN_STEAM_COMMUNITY_BASE")
 	luaBinary := config.String("mod", "LUA_BINARY", "DST_ADMIN_LUA_BINARY")
 	pythonBinary := config.String("mod", "PYTHON_BINARY", "DST_ADMIN_PYTHON_BINARY")
 	if steamAppID == "" {
@@ -843,9 +841,20 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err := metadataStore.Migrate(); err != nil {
 		return nil, fmt.Errorf("initialize Workshop metadata: %w", err)
 	}
-	steamMetadata := modservice.NewSteamProviderWithBases(steamAPIKey, steamAppID, steamAPIBase, steamCommunityBase)
-	steamMetadata.ConfigureMetadataStore(metadataStore)
-	var modMetadata modservice.MetadataProvider = steamMetadata
+	workshopConfig, err := systemSettingsService.WorkshopConfig()
+	if err != nil {
+		return nil, fmt.Errorf("initialize Workshop network configuration: %w", err)
+	}
+	workshopConfig.AppID = steamAppID
+	workshopConfig.APIKey = steamAPIKey
+	workshopService, err := modservice.NewWorkshop(workshopConfig, metadataStore, filepath.Join(filepath.Dir(config.ConfigPath), "cache", "workshop-thumbnails"))
+	if err != nil {
+		return nil, fmt.Errorf("initialize Workshop network: %w", err)
+	}
+	hooks.stop = append(hooks.stop, func(context.Context) error { return workshopService.Close() })
+	systemSettingsService.SetWorkshopApplier(workshopService.Prepare)
+	workshopHandler := httpapi.NewWorkshopHandler(workshopService, systemSettingsService)
+	var modMetadata modservice.MetadataProvider = workshopService
 	steamModRunner := modservice.NewSteamCMDRunner(steamCMDPath, workshopDownloadPath, steamAppID)
 	steamModRunner.SteamLogin = steamLoginManager
 	var modRunner modservice.DownloadRunner = steamModRunner
@@ -1449,6 +1458,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		saveImportHandler.Register(v2)
 		configurationHandler.Register(v2)
 		modHandler.Register(v2)
+		workshopHandler.Register(v2)
 		modPublicationHandler.Register(v2)
 		modUpdateHandler.Register(v2)
 		gameUpdateHandler.Register(v2)

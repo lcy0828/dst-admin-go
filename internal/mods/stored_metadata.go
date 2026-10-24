@@ -41,10 +41,10 @@ func (p *SteamProvider) DisplayMetadata(ctx context.Context, ids []string) (map[
 	if p.store == nil {
 		return p.Details(ctx, ids)
 	}
-	return p.storedDetails(ctx, ids, false)
+	return p.storedDetails(ctx, ids, false, true)
 }
 
-func (p *SteamProvider) storedDetails(ctx context.Context, ids []string, refreshOld bool) (map[string]SteamMod, error) {
+func (p *SteamProvider) storedDetails(ctx context.Context, ids []string, refreshOld, enrich bool) (map[string]SteamMod, error) {
 	ids = uniqueModIDs(ids)
 	if len(ids) > 100 {
 		return nil, ErrInvalidRequest
@@ -99,7 +99,7 @@ func (p *SteamProvider) storedDetails(ctx context.Context, ids []string, refresh
 			mergeCommunityMetadata(&item, record.Community)
 			p.cacheMu.Lock()
 			if _, exists := p.communityCache[id]; !exists {
-				p.communityCache[id] = record.Community
+				p.cacheCommunityLocked(id, record.Community)
 			}
 			p.cacheMu.Unlock()
 		}
@@ -109,7 +109,7 @@ func (p *SteamProvider) storedDetails(ctx context.Context, ids []string, refresh
 		}
 		result[id] = item
 	}
-	if len(items) > 0 {
+	if enrich && len(items) > 0 {
 		failures = append(failures, p.populateCommunityMetadata(ctx, items))
 		for _, item := range items {
 			result[item.ID] = item
@@ -156,8 +156,19 @@ func (p *SteamProvider) rememberSearch(items []SteamMod, language string) {
 		if strings.TrimSpace(item.Author) != "" {
 			value.Author = item.Author
 		}
+		if value.Name == record.Community.Name && value.Author == record.Community.Author {
+			continue
+		}
 		if err := p.store.save(item.ID, language, nil, &value, record.CommunityCheckedAt); err != nil {
 			log.Printf("[WorkshopMetadata] save search id=%s: %v", item.ID, err)
 		}
 	}
+}
+
+// BasicDetails deliberately excludes all per-item community requests.
+func (p *SteamProvider) BasicDetails(ctx context.Context, ids []string) (map[string]SteamMod, error) {
+	if p.store != nil {
+		return p.storedDetails(ctx, ids, false, false)
+	}
+	return p.details(ctx, ids, false)
 }

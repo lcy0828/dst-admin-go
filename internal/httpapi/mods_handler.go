@@ -797,7 +797,7 @@ func modSearchOptions(c *gin.Context) (mods.SearchOptions, bool) {
 	}
 	return mods.SearchOptions{
 		Query: c.Query("query"), Sort: mods.SearchSort(c.Query("sort")), Days: days,
-		Tags: tags, Page: page, PageSize: pageSize,
+		Tags: tags, Page: page, PageSize: pageSize, Source: c.Query("source"), ConfigVersion: c.Query("configVersion"), Language: c.Query("language"),
 	}, true
 }
 
@@ -812,7 +812,26 @@ func bindModJSON(c *gin.Context, target interface{}) bool {
 func modFailure(c *gin.Context, err error) {
 	var fieldError *mods.FieldError
 	var conflict *mods.RevisionConflictError
+	var network *mods.NetworkError
 	switch {
+	case errors.As(err, &network):
+		status := http.StatusBadGateway
+		if network.Code == "WORKSHOP_ITEM_UNAVAILABLE" {
+			status = http.StatusNotFound
+		}
+		if network.Code == "WORKSHOP_TIMEOUT" {
+			status = http.StatusGatewayTimeout
+		}
+		if network.Code == "WORKSHOP_BUSY" || network.Status == 429 {
+			status = http.StatusServiceUnavailable
+		}
+		if network.Code == "WORKSHOP_CONFIG_CHANGED" {
+			status = http.StatusConflict
+		}
+		if network.RetryAfter > 0 {
+			c.Header("Retry-After", strconv.Itoa(network.RetryAfter))
+		}
+		Failure(c, status, network.Code, "创意工坊资料暂不可用", network)
 	case errors.As(err, &fieldError):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_MOD_CONFIGURATION", "Mod 字段无效", gin.H{"fields": fieldError.Fields})
 	case errors.As(err, &conflict):
