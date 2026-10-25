@@ -61,6 +61,8 @@ type hotBarrierDriver struct {
 	receipt        runtimedriver.SnapshotBarrierReceipt
 	released       bool
 	stageErr       error
+	stageHook      func()
+	releaseHook    func()
 	backupReleases int
 }
 
@@ -68,7 +70,11 @@ func (d *hotBarrierDriver) StageBackup(ctx context.Context, target runtimedriver
 	if d.stageErr != nil {
 		return runtimedriver.BackupDescriptor{}, d.stageErr
 	}
-	return d.Driver.StageBackup(ctx, target, operation, backupID)
+	descriptor, err := d.Driver.StageBackup(ctx, target, operation, backupID)
+	if d.stageHook != nil {
+		d.stageHook()
+	}
+	return descriptor, err
 }
 
 func (d *hotBarrierDriver) ReleaseBackup(ctx context.Context, target runtimedriver.Target, operation runtimedriver.Operation, backupID string) error {
@@ -125,6 +131,9 @@ func (d *hotBarrierDriver) ReleaseSnapshotBarrier(_ context.Context, _ runtimedr
 	}
 	d.released = true
 	d.receipt.State = "released"
+	if d.releaseHook != nil {
+		d.releaseHook()
+	}
 	return nil
 }
 
@@ -802,5 +811,33 @@ func TestAutomaticBackupPreservesStoppedAndPartiallyRunningSplitRooms(t *testing
 		if (master.State == shards.RuntimeRunning) != masterRunning || caves.State != shards.RuntimeStopped {
 			t.Fatalf("running set changed: %v %v", master, caves)
 		}
+	}
+}
+
+func TestHotBackupRejectsProtectionLostDuringStagingOrRelease(t *testing.T) {
+	for _, phase := range []string{"staging", "release", "elapsed without Lua updates"} {
+		t.Run(phase, func(t *testing.T) {
+			fixture := newDistributedBackupFixture(t)
+			drivers := installHotBarrierDrivers(t, fixture, []int64{41, 41})
+			expire := func() { drivers[0].receipt.State = "failed"; drivers[0].receipt.Message = "snapshot barrier expired" }
+			if phase == "staging" {
+				drivers[1].stageHook = func() { drivers[0].harness.mu.Lock(); defer drivers[0].harness.mu.Unlock(); expire() }
+			} else if phase == "release" {
+				drivers[0].releaseHook = expire
+			} else {
+				now := time.Now()
+				fixture.coordinator.now = func() time.Time { return now }
+				drivers[1].stageHook = func() { now = now.Add(barrierProtectionTimeout + time.Second) }
+			}
+			created, err := fixture.coordinator.CreateWithMode(context.Background(), "room", "超时保护测试", "manual", "", ModeHot)
+			if !errors.Is(err, ErrBarrierFailed) || created.Status == StatusVerified {
+				t.Fatalf("expired protection published: set=%+v err=%v", created, err)
+			}
+			for _, driver := range drivers {
+				if driver.backupReleases == 0 || !driver.released {
+					t.Fatal("staged files or barriers were not released")
+				}
+			}
+		})
 	}
 }

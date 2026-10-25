@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	barrierPrepareTimeout  = 30 * time.Second
-	barrierCompleteTimeout = 2 * time.Minute
+	barrierPrepareTimeout    = 30 * time.Second
+	barrierCompleteTimeout   = 2 * time.Minute
+	barrierProtectionTimeout = 180 * time.Second
 )
 
 type stagedHotPart struct {
@@ -59,6 +60,9 @@ func (c *Coordinator) createHotWithPlan(ctx context.Context, set Set, operation 
 		return result, err
 	}
 	master := -1
+	// Start the protection budget on the controller before any prepare call.
+	// Remote wall-clock skew cannot extend a frozen Lua barrier's lifetime.
+	protectionDeadline := c.now().Add(barrierProtectionTimeout)
 	for index, current := range runtimeParts {
 		if current.part.WorldRole == string(rooms.WorldRoleMaster) {
 			if master >= 0 {
@@ -116,7 +120,7 @@ func (c *Coordinator) createHotWithPlan(ctx context.Context, set Set, operation 
 	} else {
 		result = saved
 	}
-	if err := c.revalidateHotPlan(ctx, result.TopologyRevision, runtimeParts, receipts, barrierID); err != nil {
+	if err := c.revalidateHotPlan(ctx, result.TopologyRevision, runtimeParts, receipts, barrierID, protectionDeadline); err != nil {
 		return c.failCreate(result, operation, err)
 	}
 	if err := c.saveOperationPhase(&operation, "staging", OperationRunning, ""); err != nil {
@@ -137,6 +141,11 @@ func (c *Coordinator) createHotWithPlan(ctx context.Context, set Set, operation 
 			return c.failCreate(result, operation, stageErr)
 		}
 		staged = append(staged, stagedHotPart{index: index, runtime: runtimeParts[index], part: part, descriptor: descriptor})
+	}
+	// Copies are only consistent if every save barrier survived staging. Once
+	// these immutable parts are sealed, transfer can continue without the hold.
+	if err := c.revalidateHotPlan(ctx, result.TopologyRevision, runtimeParts, receipts, barrierID, protectionDeadline); err != nil {
+		return c.failCreate(result, operation, err)
 	}
 	if err := c.releaseHotBarriers(ctx, runtimeParts, operation, lease, barrierID); err != nil {
 		return c.failCreate(result, operation, err)
@@ -220,7 +229,7 @@ func (c *Coordinator) waitHotBarrier(ctx context.Context, parts []runtimePart, p
 	return completed, snapshots[0], nil
 }
 
-func (c *Coordinator) revalidateHotPlan(ctx context.Context, revision string, parts []runtimePart, receipts []runtimedriver.SnapshotBarrierReceipt, barrierID string) error {
+func (c *Coordinator) revalidateHotPlan(ctx context.Context, revision string, parts []runtimePart, receipts []runtimedriver.SnapshotBarrierReceipt, barrierID string, protectionDeadline time.Time) error {
 	executions, err := c.placements.ResolveRoomExecutions(ctx, parts[0].part.RoomID)
 	if err != nil || len(executions) != len(parts) {
 		return errors.Join(ErrTopologyChanged, err)
@@ -243,9 +252,17 @@ func (c *Coordinator) revalidateHotPlan(ctx context.Context, revision string, pa
 	}
 	for index, current := range parts {
 		receipt, observeErr := current.driver.(runtimedriver.SnapshotBarrierDriver).SnapshotBarrier(ctx, current.target, barrierID)
-		if observeErr != nil || receipt.State != "completed" || receipt.ProducerInstanceID != receipts[index].ProducerInstanceID || receipt.SnapshotAfter != receipts[index].SnapshotAfter {
+		if observeErr != nil || receipt.State != "completed" || receipt.BarrierID != barrierID ||
+			receipt.PreparedAtUnix < 1 || receipt.PreparedAtUnix != receipts[index].PreparedAtUnix ||
+			receipt.Proof != "save_current_callback" || receipt.ProducerInstanceID != receipts[index].ProducerInstanceID ||
+			receipt.SessionID != receipts[index].SessionID || receipt.ShardID != receipts[index].ShardID ||
+			receipt.SnapshotBefore != receipts[index].SnapshotBefore || receipt.SnapshotAfter != receipts[index].SnapshotAfter ||
+			receipt.CompletedAtUnix != receipts[index].CompletedAtUnix {
 			return errors.Join(ErrBarrierFailed, observeErr)
 		}
+	}
+	if !c.now().Before(protectionDeadline) {
+		return fmt.Errorf("%w: snapshot protection exceeded its controller deadline", ErrBarrierFailed)
 	}
 	return nil
 }
@@ -258,8 +275,40 @@ func (c *Coordinator) releaseHotBarriers(ctx context.Context, parts []runtimePar
 		if err := current.driver.(runtimedriver.SnapshotBarrierDriver).ReleaseSnapshotBarrier(ctx, current.target, c.runtimeOperation(*lease, operation.ID, "barrier-release", index, 0), barrierID); err != nil {
 			return fmt.Errorf("release snapshot barrier for %s: %w", current.part.WorldName, err)
 		}
+		// Console delivery only confirms input was sent. Require the persisted
+		// release acknowledgement so expiry racing with the last validation cannot
+		// publish a verified backup.
+		waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err := waitHotBarrierReleased(waitCtx, current, barrierID)
+		cancel()
+		if err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func waitHotBarrierReleased(ctx context.Context, current runtimePart, barrierID string) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		receipt, err := current.driver.(runtimedriver.SnapshotBarrierDriver).SnapshotBarrier(ctx, current.target, barrierID)
+		if err == nil {
+			if receipt.State == "released" && receipt.Message == "" && receipt.Proof == "save_current_callback" &&
+				receipt.ProducerInstanceID == current.part.BarrierInstance && receipt.SessionID == current.part.BarrierSessionID &&
+				receipt.ShardID == current.part.BarrierShardID && receipt.SnapshotAfter == current.part.SnapshotAfter {
+				return nil
+			}
+			if receipt.State != "completed" {
+				return ErrBarrierFailed
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(ErrBarrierFailed, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func (c *Coordinator) cancelHotBarriers(parts []runtimePart, operation Operation, lease *operationlease.Lease, barrierID string) {
