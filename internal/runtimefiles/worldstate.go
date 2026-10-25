@@ -53,6 +53,25 @@ func ReadWorldState(ctx context.Context, saveRoot, cluster, shard string, status
 		value.ReadError = fmt.Sprintf("read world state files: %v", err)
 		return value, nil
 	}
+	identity, err := ReadWorldIdentity(ctx, saveRoot, cluster, shard, status)
+	value.SessionID, value.ShardID, value.StartedAt = identity.SessionID, identity.ShardID, identity.StartedAt
+	if err != nil {
+		value.ReadError = fmt.Sprintf("read world state files: %v", err)
+	}
+	return value, nil
+}
+
+// ReadWorldIdentity reads only the current save/config/log identity, even when
+// no world-state artifact exists yet. It never sends a console command.
+func ReadWorldIdentity(ctx context.Context, saveRoot, cluster, shard string, status shared.ShardRuntimeStatus) (shared.RuntimeWorldStateRead, error) {
+	value := shared.RuntimeWorldStateRead{Runtime: status}
+	if err := ctx.Err(); err != nil {
+		return value, err
+	}
+	root, err := trustedShardPath(saveRoot, cluster, shard)
+	if err != nil {
+		return value, err
+	}
 	value.SessionID, err = worldSessionID(root)
 	if err == nil {
 		value.ShardID, err = ReadConfiguredShardID(root)
@@ -60,13 +79,7 @@ func ReadWorldState(ctx context.Context, saveRoot, cluster, shard string, status
 	if err == nil {
 		value.StartedAt, err = worldStartedAt(root)
 	}
-	if err != nil {
-		if ctx.Err() != nil {
-			return value, ctx.Err()
-		}
-		value.ReadError = fmt.Sprintf("read world state files: %v", err)
-	}
-	return value, nil
+	return value, err
 }
 
 func worldSessionID(root string) (string, error) {
@@ -97,4 +110,34 @@ func worldStartedAt(root string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, nil
+}
+
+// ReadWorldPause observes only engine log records; Lua pause getters do not
+// include dedicated-server sleep while empty on every DST build.
+func ReadWorldPause(ctx context.Context, saveRoot, cluster, shard string) *bool {
+	root, err := trustedShardPath(saveRoot, cluster, shard)
+	if err != nil || ctx.Err() != nil {
+		return nil
+	}
+	for _, name := range []string{"server_log.txt", "forest_server_log.txt"} {
+		path := filepath.Join(root, name)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
+		start := max(int64(0), info.Size()-simulationScanBytes)
+		data := make([]byte, info.Size()-start)
+		_, err = file.ReadAt(data, start)
+		_ = file.Close()
+		if err != nil {
+			return nil
+		}
+		paused, _ := latestSimulationPause(data, start == 0)
+		return paused
+	}
+	return nil
 }

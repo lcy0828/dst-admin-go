@@ -276,6 +276,10 @@ func (b *DistributedBridge) RefreshSnapshots(ctx context.Context, roomID, worldI
 	lock.Lock()
 	finishLock()
 	defer lock.Unlock()
+	return b.refreshSnapshotsLocked(ctx, roomID, worldID)
+}
+
+func (b *DistributedBridge) refreshSnapshotsLocked(ctx context.Context, roomID, worldID string) (SnapshotRefreshResult, error) {
 	finishStatus := requesttiming.Start(ctx, "refresh.status")
 	statusErr := b.requireRunning(ctx, roomID, worldID)
 	finishStatus()
@@ -368,7 +372,14 @@ func (b *DistributedBridge) ExecuteCommand(ctx context.Context, roomID, worldID 
 	if err != nil {
 		return CommandReceipt{}, err
 	}
-	payload, err := marshalRuntimeRequest(request)
+	if request.Action == "catalog.entities" {
+		status, err := b.runtime.Status(ctx, roomID, worldID)
+		if err != nil {
+			return CommandReceipt{}, err
+		}
+		request.SimulationPaused = status.Paused
+	}
+	payload, err := marshalCommandRequest(request)
 	if err != nil || len(payload) > maxRuntimeRequestBytes {
 		return CommandReceipt{}, fmt.Errorf("%w: invalid command payload", ErrRuntimeRequestInvalid)
 	}
@@ -433,7 +444,12 @@ func (b *DistributedBridge) CaptureDiagnostic(ctx context.Context, roomID, world
 	if err != nil {
 		return DiagnosticReport{}, err
 	}
-	payload, err := marshalRuntimeRequest(request)
+	status, err := b.runtime.Status(ctx, roomID, worldID)
+	if err != nil {
+		return DiagnosticReport{}, err
+	}
+	request.SimulationPaused = status.Paused
+	payload, err := marshalDiagnosticRequest(request)
 	if err != nil || len(payload) > maxRuntimeRequestBytes {
 		return DiagnosticReport{}, ErrRuntimeRequestInvalid
 	}
@@ -443,6 +459,11 @@ func (b *DistributedBridge) CaptureDiagnostic(ctx context.Context, roomID, world
 	}
 	deadline := time.NewTimer(defaultDiagnosticTimeout)
 	defer deadline.Stop()
+	watchdog := time.NewTimer(time.Duration(request.DurationSeconds+1) * time.Second)
+	defer watchdog.Stop()
+	if request.Profile != "performance" {
+		watchdog.Stop()
+	}
 	ticker := time.NewTicker(b.pollInterval)
 	defer ticker.Stop()
 	for {
@@ -456,6 +477,8 @@ func (b *DistributedBridge) CaptureDiagnostic(ctx context.Context, roomID, world
 			return DiagnosticReport{}, readErr
 		}
 		select {
+		case <-watchdog.C:
+			_, _ = b.send(ctx, roomID, worldID, `local r=rawget(_G,"DSTAdmin"); if r and r.Poll then r.Poll() end`, shared.ConsoleModeProbe, "runtime.diagnostic.deadline:"+request.RequestID)
 		case <-ctx.Done():
 			return DiagnosticReport{}, ctx.Err()
 		case <-deadline.C:
@@ -484,14 +507,40 @@ func (b *DistributedBridge) requireModule(ctx context.Context, roomID, worldID, 
 	if err != nil {
 		return Health{}, fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 	}
+	current, err := b.currentProcessHealth(ctx, roomID, worldID, health)
+	if err != nil || !current {
+		return Health{}, fmt.Errorf("%w: runtime health does not belong to the current process", ErrRuntimeUnavailable)
+	}
+	if !health.FreshAt(b.now().UTC()) {
+		refreshed, err := b.refreshSnapshotsLocked(ctx, roomID, worldID)
+		if err != nil {
+			return Health{}, fmt.Errorf("%w: confirm stale runtime: %w", ErrRuntimeUnavailable, err)
+		}
+		health = refreshed.Health
+		current, err = b.currentProcessHealth(ctx, roomID, worldID, health)
+		if err != nil || !current {
+			return Health{}, fmt.Errorf("%w: runtime process changed during refresh", ErrRuntimeUnavailable)
+		}
+	}
 	module, exists := health.Modules[moduleName]
-	if !health.Running || !health.Ready || !exists || !module.Running || !module.Ready || b.now().UTC().Sub(health.ReadAt) > defaultFreshFor {
+	if !health.Running || !health.Ready || !exists || !module.Running || !module.Ready || !health.FreshAt(b.now().UTC()) {
 		return Health{}, fmt.Errorf("%w: %s module is not ready", ErrRuntimeUnavailable, moduleName)
 	}
 	if module.Busy {
 		return Health{}, fmt.Errorf("%w: %w: %s", ErrRuntimeUnavailable, ErrRuntimeCommandBusy, moduleName)
 	}
 	return health, nil
+}
+
+func (b *DistributedBridge) currentProcessHealth(ctx context.Context, roomID, worldID string, health Health) (bool, error) {
+	reader, ok := b.runtime.(interface {
+		ReadWorldState(context.Context, string, string) (shared.RuntimeWorldStateRead, error)
+	})
+	if !ok {
+		return false, ErrWorldStateReadUnsupported
+	}
+	value, err := reader.ReadWorldState(ctx, roomID, worldID)
+	return err == nil && value.ReadError == "" && healthMatchesCurrentProcess(b.now().UTC(), health, value), err
 }
 
 func (b *DistributedBridge) send(ctx context.Context, roomID, worldID, command string, mode shared.ConsoleMode, coalesceKey string) (shared.RuntimeOperationResult, error) {
@@ -522,7 +571,7 @@ func (b *DistributedBridge) lifecycleHealthReady(health Health, startedAt time.T
 	if health.ProducerVersion != RuntimeVersion || !health.Running || !health.Ready || health.Writing || health.LastError != nil || health.ConsecutiveFailures != 0 {
 		return false
 	}
-	if !startedAt.IsZero() && health.ReadAt.Before(startedAt) || b.now().UTC().Sub(health.ReadAt) > defaultFreshFor {
+	if !startedAt.IsZero() && health.ReadAt.Before(startedAt) || !health.FreshAt(b.now().UTC()) {
 		return false
 	}
 	for _, name := range []string{"worldstate", "commands", "events", "diagnostics", "barriers"} {

@@ -2,12 +2,10 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.12"
+local PRODUCER_VERSION = "2.4.13"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local FLUSH_DELAY = 1
 local MAX_BATCH = 128
-local READY_RETRY_SECONDS = 1
-local READY_RETRY_LIMIT = 60
 
 local state = {
     running = false,
@@ -51,10 +49,10 @@ local flush
 
 local function schedule_flush()
     if not state.running or state.writing or state.flushTask ~= nil or #state.pending == 0 then return end
-    state.flushTask = TheWorld:DoTaskInTime(FLUSH_DELAY, function()
+    state.flushTask = clock.After(FLUSH_DELAY, function()
         state.flushTask = nil
         flush()
-    end)
+    end, "dst-admin-events-flush")
 end
 
 local function emit(kind, fields)
@@ -156,12 +154,15 @@ local function await_world()
         return
     end
     state.readyAttempts = state.readyAttempts + 1
-    if state.readyAttempts >= READY_RETRY_LIMIT then
-        state.readyTask = nil
-        state.lastError = "world readiness timed out"
-        return
+    state.readyTask = clock.After(clock.ReadyDelay(state.readyAttempts), await_world, "dst-admin-events-ready")
+end
+
+function M.Poll()
+    clock.Poll()
+    if state.running and not state.ready then
+        if state.readyTask ~= nil then state.readyTask:Cancel(); state.readyTask = nil end
+        await_world()
     end
-    state.readyTask = scheduler:ExecuteInTime(READY_RETRY_SECONDS, await_world, "dst-admin-events-ready")
 end
 
 function M.Start()

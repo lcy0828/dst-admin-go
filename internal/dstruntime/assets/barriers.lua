@@ -2,12 +2,10 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.12"
+local PRODUCER_VERSION = "2.4.13"
 local OUTPUT_PATH = "mod_config_data/dst-admin/snapshot-barrier.json"
 local ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]+$"
 local BARRIER_TIMEOUT = 180
-local READY_RETRY_SECONDS = 1
-local READY_RETRY_LIMIT = 60
 
 local state = {
     running = false,
@@ -119,14 +117,16 @@ end
 
 local function schedule_timeout(barrier_id)
     cancel_timeout()
-    state.timeoutTask = TheWorld:DoTaskInTime(BARRIER_TIMEOUT, function()
+    state.timeoutTask = clock.After(BARRIER_TIMEOUT, function()
         state.timeoutTask = nil
         if state.holding and state.receipt ~= nil and state.receipt.barrierId == barrier_id then
+            state.receipt.state = "failed"
+            state.receipt.message = "snapshot barrier expired"
             M.Release(barrier_id)
         elseif state.pending ~= nil and state.pending.barrierId == barrier_id then
             M.Cancel(barrier_id)
         end
-    end)
+    end, "dst-admin-barrier-timeout")
 end
 
 local function wrap_save_current()
@@ -136,6 +136,9 @@ local function wrap_save_current()
     end
     state.originalSaveCurrent = ShardGameIndex.SaveCurrent
     state.wrappedSaveCurrent = function(index, onsavedcb, isshutdown)
+        -- A fully sleeping server may not tick either scheduler. Expire the
+        -- protection before the first resumed save can inspect the hold.
+        clock.Poll()
         if state.holding then
             state.delayedSave = true
             state.delayedShutdown = state.delayedShutdown or isshutdown == true
@@ -195,12 +198,15 @@ local function await_world()
         return
     end
     state.readyAttempts = state.readyAttempts + 1
-    if state.readyAttempts >= READY_RETRY_LIMIT then
-        state.readyTask = nil
-        state.lastError = "world readiness timed out"
-        return
+    state.readyTask = clock.After(clock.ReadyDelay(state.readyAttempts), await_world, "dst-admin-barriers-ready")
+end
+
+function M.Poll()
+    clock.Poll()
+    if state.running and not state.ready then
+        if state.readyTask ~= nil then state.readyTask:Cancel(); state.readyTask = nil end
+        await_world()
     end
-    state.readyTask = scheduler:ExecuteInTime(READY_RETRY_SECONDS, await_world, "dst-admin-barriers-ready")
 end
 
 function M.Start()
@@ -233,6 +239,7 @@ function M.Stop()
 end
 
 function M.Prepare(barrier_id)
+    clock.Poll()
     if not state.running or not state.ready or not valid_barrier_id(barrier_id) then return false end
     if state.holding then
         return state.receipt ~= nil and state.receipt.barrierId == barrier_id and state.receipt.state == "completed"
@@ -252,6 +259,7 @@ function M.Prepare(barrier_id)
 end
 
 function M.Commit(barrier_id)
+    clock.Poll()
     if not state.running or state.pending == nil or state.pending.barrierId ~= barrier_id then return false end
     if TheWorld == nil or TheWorld.ismastershard ~= true then return false end
     TheWorld:PushEvent("ms_save")
@@ -259,6 +267,7 @@ function M.Commit(barrier_id)
 end
 
 function M.Release(barrier_id)
+    clock.Poll()
     if not valid_barrier_id(barrier_id) or state.receipt == nil or state.receipt.barrierId ~= barrier_id then return false end
     state.holding = false
     state.pending = nil
@@ -271,6 +280,7 @@ function M.Release(barrier_id)
 end
 
 function M.Cancel(barrier_id)
+    clock.Poll()
     if not valid_barrier_id(barrier_id) then return false end
     if state.pending ~= nil and state.pending.barrierId == barrier_id then
         state.pending.state = "cancelled"

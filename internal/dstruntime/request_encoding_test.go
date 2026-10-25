@@ -27,6 +27,7 @@ func TestRuntimeRequestPreservesLuaStringsWithGameDecoder(t *testing.T) {
 				}
 				trigger, document := commandDelivery(request, payload)
 				state := lua.NewState()
+				installStaticSchedulerStub(state)
 				defer state.Close()
 				var delivered []byte
 				commands := state.NewTable()

@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.12"
+local PRODUCER_VERSION = "2.4.13"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local INPUT_ROOT = "mod_config_data/dst-admin/command-requests/"
 local RECENT_REQUEST_LIMIT = 256
@@ -582,7 +582,11 @@ local function execute_request(signal, request)
         return
     end
     if request.action == "catalog.entities" and TheWorld ~= nil and TheWorld.DoStaticTaskInTime ~= nil then
+        -- An unknown pause observation cannot establish that static timers
+        -- will advance. Keep that case within the same bounded request too.
+        local synchronous = request.simulationPaused ~= false
         local started_at, task, finished = os.time(), nil, false
+        local idle_deadline = os.clock() + 1
         local thread = coroutine.create(function()
             return handler(type(request.arguments) == "table" and request.arguments or {})
         end)
@@ -597,7 +601,7 @@ local function execute_request(signal, request)
         resume_catalog = function()
             if finished then return end
             task = nil
-            if os.time() - started_at >= 10 then
+            if os.time() - started_at >= 10 or synchronous and os.clock() >= idle_deadline then
                 finish_catalog(result(false, "CATALOG_TIMEOUT", "catalog collection exceeded its time budget"))
                 return
             end
@@ -608,8 +612,9 @@ local function execute_request(signal, request)
                 finish_catalog(result(false, "ACTION_FAILED", safe_text(action_result, 512)))
             elseif coroutine.status(thread) == "dead" then
                 finish_catalog(action_result)
-            else
-                -- Static tasks continue while the empty world is auto-paused.
+            elseif not synchronous then
+                -- Ordinary pause permits static work; native empty-server
+                -- sleep requires bounded synchronous slices in this request.
                 task = TheWorld:DoStaticTaskInTime(1 / 30, resume_catalog)
             end
         end
@@ -618,6 +623,9 @@ local function execute_request(signal, request)
             finish_catalog(result(false, "CATALOG_CANCELLED", "runtime stopped during catalog collection"))
         end
         resume_catalog()
+        if synchronous then
+            while not finished do resume_catalog() end
+        end
         return
     end
     local executed, action_result = xpcall(function()

@@ -16,6 +16,7 @@ func TestReloadRestoresPreviousWhenInitialRefreshFails(t *testing.T) {
 	for _, failure := range []string{"return false", `error("snapshot write failed")`} {
 		t.Run(failure, func(t *testing.T) {
 			state := lua.NewState()
+			installStaticSchedulerStub(state)
 			defer state.Close()
 			lifecycle := `local running=false; return {Start=function() running=true; return true end, Stop=function() running=false; return true end, Status=function() return {running=running} end}`
 			worldState := `local running=false; return {Start=function() running=true; return true end, Stop=function() running=false; return true end, Status=function() return {running=running} end, EmitOnce=function(callback) if callback then callback(true) end; return true end}`
@@ -73,6 +74,7 @@ func TestMissingExecutionScriptsMustNotBeReportedAsWaiting(t *testing.T) {
 
 func TestLateActivationFailureCannotReplaceNewerRuntime(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 	if err := state.DoString(`oldRuntime={Start=function() return true end,Stop=function() return true end};DSTAdmin=oldRuntime`); err != nil {
 		t.Fatal(err)

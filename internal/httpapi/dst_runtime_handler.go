@@ -211,6 +211,7 @@ func (h *DSTRuntimeHandler) status(c *gin.Context) {
 		if worldErr == nil {
 			processStatus, worldErr = h.processStatus(c.Request.Context(), room, world)
 			report.ProcessRunning = processStatus.State == shards.RuntimeRunning
+			report.Paused, report.StartupStage = processStatus.Paused, processStatus.StartupStage
 		}
 		if worldErr != nil {
 			report.HealthMessage = "无法确认分片进程状态：" + worldErr.Error()
@@ -263,6 +264,9 @@ func (h *DSTRuntimeHandler) status(c *gin.Context) {
 					status.Message = "目标 Agent 未提供可用的 Runtime 制品"
 					report.WorldStatus = status
 					report.HealthMessage = healthErr.Error()
+					if installationObserved && processStatus.State == shards.RuntimeStarting {
+						report.HealthState, report.HealthMessage = dstruntime.HealthStateStarting, "游戏仍在启动，等待首次采集"
+					}
 					appendReport(report)
 					continue
 				}
@@ -281,6 +285,11 @@ func (h *DSTRuntimeHandler) status(c *gin.Context) {
 		}
 		if status.State != dstruntime.InstallStateInstalled {
 			report.HealthMessage = "运行时尚未安装或需要修复"
+			appendReport(report)
+			continue
+		}
+		if processStatus.State == shards.RuntimeStarting {
+			report.HealthState, report.HealthMessage = dstruntime.HealthStateStarting, "游戏仍在启动，等待首次采集"
 			appendReport(report)
 			continue
 		}
@@ -555,7 +564,7 @@ func runtimeHealthState(health dstruntime.Health, processRunning bool, processPa
 }
 
 func runtimeHealthIsStale(health dstruntime.Health) bool {
-	return !health.ReadAt.IsZero() && time.Since(health.ReadAt) > 20*time.Second
+	return !health.FreshAt(time.Now().UTC())
 }
 
 func dstRuntimeFailure(c *gin.Context, err error) {

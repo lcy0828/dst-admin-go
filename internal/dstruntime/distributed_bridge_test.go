@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -49,7 +51,7 @@ func (f *distributedRuntimeFixture) ReadArtifacts(_ context.Context, _, _ string
 	defer f.mu.Unlock()
 	bundle, exists := f.bundles[kind]
 	if !exists {
-		return shared.RuntimeArtifactBundle{}, errors.New("artifact unavailable")
+		return shared.RuntimeArtifactBundle{}, os.ErrNotExist
 	}
 	return bundle, nil
 }
@@ -166,9 +168,10 @@ func newDistributedBridgeFixture(t *testing.T) (*DistributedBridge, *distributed
 		t.Fatal(err)
 	}
 	now := time.Unix(1_786_500_100, 0).UTC()
+	captured := now.Unix()
 	health := Health{
 		SchemaVersion: 1, ProducerVersion: RuntimeVersion, ProducerInstanceID: "remote-instance", SessionID: "REMOTE_SESSION", ShardID: "2",
-		Running: true, Ready: true, Sequence: 3, Modules: map[string]ModuleHealth{
+		Running: true, Ready: true, Sequence: 3, LastCapturedAtUnix: &captured, LastWrittenAtUnix: &captured, Modules: map[string]ModuleHealth{
 			"worldstate": {Running: true, Ready: true, Sequence: 4}, "commands": {Running: true, Ready: true},
 			"events": {Running: true, Ready: true}, "diagnostics": {Running: true, Ready: true},
 		},
@@ -424,7 +427,9 @@ func TestDistributedCommandWaitsForCompleteReceiptWithoutResending(t *testing.T)
 
 func TestDistributedCatalogDistinguishesBusyHealthFromUnavailableModule(t *testing.T) {
 	bridge, fixture, room, world, now := newDistributedBridgeFixture(t)
+	stamp := now.Unix()
 	health := Health{SchemaVersion: 1, ProducerVersion: RuntimeVersion, ProducerInstanceID: "remote-instance", SessionID: "REMOTE_SESSION", ShardID: "2", Running: true, Ready: true,
+		LastCapturedAtUnix: &stamp, LastWrittenAtUnix: &stamp,
 		Modules: map[string]ModuleHealth{"commands": {Running: true, Ready: true, Busy: true}}}
 	fixture.bundles[shared.ArtifactRuntimeHealth] = artifactBundle(shared.ArtifactRuntimeHealth, now, "health.json", health)
 	request := CommandRequest{RequestID: "catalog-health-busy-01", Action: "catalog.entities"}
@@ -452,5 +457,99 @@ func TestCatalogDeliveryLeaseContentionIsRetryableWithoutReplayingGameCommands(t
 	}
 	if len(fixture.sent) != 2 {
 		t.Fatal("bridge replayed a command", len(fixture.sent))
+	}
+}
+
+func TestDistributedCommandConfirmsStaleHeartbeatWithoutReplayingMutation(t *testing.T) {
+	for _, recover := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recover=%t", recover), func(t *testing.T) {
+			bridge, fixture, room, world, now := newDistributedBridgeFixture(t)
+			health, err := bridge.Health(context.Background(), room, world)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stamp := now.Add(-time.Minute).Unix()
+			health.HeartbeatAtUnix = &stamp
+			health.HeartbeatSequence = 1
+			fixture.bundles[shared.ArtifactRuntimeHealth] = artifactBundle(shared.ArtifactRuntimeHealth, now.Add(-time.Minute), "health.json", health)
+			request := CommandRequest{RequestID: "paused-preflight-once-001", Action: "console.execute", Arguments: map[string]interface{}{"script": "print(42)"}}
+			fixture.onSend = func(command shared.RuntimeConsoleRequest) {
+				if command.Command == managedRefreshScript {
+					if !recover {
+						return
+					}
+					advanceRefreshFixture(t, fixture, now)
+					fixture.mu.Lock()
+					defer fixture.mu.Unlock()
+					var updated Health
+					artifact := fixture.bundles[shared.ArtifactRuntimeHealth].Artifacts[0]
+					if err := json.Unmarshal(artifact.Data, &updated); err != nil {
+						t.Fatal(err)
+					}
+					at := now.Unix()
+					updated.HeartbeatAtUnix = &at
+					updated.HeartbeatSequence = 2
+					fixture.bundles[shared.ArtifactRuntimeHealth] = artifactBundle(shared.ArtifactRuntimeHealth, now, "health.json", updated)
+					return
+				}
+				receipt := CommandReceipt{SchemaVersion: 1, ProducerVersion: RuntimeVersion, ProducerInstanceID: health.ProducerInstanceID, SessionID: health.SessionID, ShardID: health.ShardID, Sequence: 1, RequestID: request.RequestID, Action: request.Action, OK: true, Code: "COMMAND_COMPLETE", CompletedAtUnix: now.Unix()}
+				fixture.mu.Lock()
+				defer fixture.mu.Unlock()
+				fixture.bundles[shared.ArtifactRuntimeCommand] = artifactBundle(shared.ArtifactRuntimeCommand, now, "command-receipt-a.json", receipt)
+			}
+			_, err = bridge.ExecuteCommand(context.Background(), room, world, request)
+			expected := 1
+			if recover {
+				expected = 2
+			}
+			if len(fixture.sent) != expected || (recover && err != nil) || (!recover && !errors.Is(err, ErrRuntimeRefresh)) {
+				t.Fatalf("sent=%d err=%v", len(fixture.sent), err)
+			}
+		})
+	}
+}
+
+func TestDistributedCommandRejectsPreviousBootEvenWithFreshFile(t *testing.T) {
+	bridge, fixture, room, world, now := newDistributedBridgeFixture(t)
+	fixture.current.StartedAt = now.Add(-time.Second)
+	health, _ := bridge.Health(context.Background(), room, world)
+	old := now.Add(-time.Minute).Unix()
+	health.LastCapturedAtUnix = &old
+	health.LastWrittenAtUnix = &old
+	fixture.bundles[shared.ArtifactRuntimeHealth] = artifactBundle(shared.ArtifactRuntimeHealth, now, "health.json", health)
+	_, err := bridge.ExecuteCommand(context.Background(), room, world, CommandRequest{RequestID: "reject-previous-boot", Action: "system.ping"})
+	if !errors.Is(err, ErrRuntimeUnavailable) || len(fixture.sent) != 0 {
+		t.Fatalf("old process trusted: err=%v sent=%d", err, len(fixture.sent))
+	}
+}
+
+func TestDistributedDiagnosticServicesFrozenDeadlineWithoutResubmittingSample(t *testing.T) {
+	bridge, fixture, room, world, now := newDistributedBridgeFixture(t)
+	request := DiagnosticRequest{RequestID: "diagnostic-sleeps-midway", Profile: "performance", DurationSeconds: 1}
+	previous := DiagnosticReport{
+		SchemaVersion: 1, ProducerVersion: RuntimeVersion, ProducerInstanceID: "remote-instance", SessionID: "REMOTE_SESSION", ShardID: "2",
+		Sequence: 1, RequestID: "diagnostic-previous", Profile: request.Profile, Code: "DIAGNOSTIC_TIMEOUT", CompletedAtUnix: now.Unix(),
+		Result: map[string]interface{}{"sampleCount": 0, "durationMilliseconds": 0},
+	}
+	fixture.onSend = func(command shared.RuntimeConsoleRequest) {
+		if !strings.Contains(command.Command, "r.Poll()") {
+			return // Sampling accepted, then both game schedulers stop.
+		}
+		report := previous
+		report.Sequence++
+		report.RequestID = request.RequestID
+		fixture.mu.Lock()
+		defer fixture.mu.Unlock()
+		fixture.bundles[shared.ArtifactRuntimeDiagnostics] = artifactBundle(shared.ArtifactRuntimeDiagnostics, now, "diagnostic-a.json", report)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	report, err := bridge.CaptureDiagnostic(ctx, room, world, request)
+	if err != nil || report.OK || report.Code != "DIAGNOSTIC_TIMEOUT" {
+		t.Fatalf("frozen diagnostic=%+v err=%v", report, err)
+	}
+	if len(fixture.sent) != 2 || !strings.Contains(fixture.sent[0].Command, "CaptureJSON(") ||
+		fixture.sent[1].Mode != shared.ConsoleModeProbe || !strings.Contains(fixture.sent[1].Command, "r.Poll()") {
+		t.Fatalf("diagnostic must be submitted once, followed by one read-only deadline pulse: %+v", fixture.sent)
 	}
 }

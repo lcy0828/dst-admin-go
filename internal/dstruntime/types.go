@@ -8,7 +8,7 @@ import (
 
 const (
 	ProtocolVersion = 2
-	RuntimeVersion  = "2.4.12"
+	RuntimeVersion  = "2.4.13"
 )
 
 var (
@@ -72,6 +72,8 @@ type WorldReport struct {
 	AutoUpdate *UpdateReport `json:"autoUpdate,omitempty"`
 	WorldStatus
 	ProcessRunning bool        `json:"processRunning"`
+	Paused         *bool       `json:"paused,omitempty"`
+	StartupStage   string      `json:"startupStage,omitempty"`
 	HealthState    HealthState `json:"healthState"`
 	Health         *Health     `json:"health,omitempty"`
 	HealthMessage  string      `json:"healthMessage,omitempty"`
@@ -178,6 +180,9 @@ type Health struct {
 	Ready                    bool                    `json:"ready"`
 	Writing                  bool                    `json:"writing"`
 	Sequence                 int64                   `json:"sequence"`
+	HeartbeatSequence        int64                   `json:"heartbeatSequence,omitempty"`
+	HeartbeatAtUnix          *int64                  `json:"heartbeatAtUnix,omitempty"`
+	Paused                   *bool                   `json:"paused,omitempty"`
 	LastCapturedAtUnix       *int64                  `json:"lastCapturedAtUnix"`
 	LastWrittenAtUnix        *int64                  `json:"lastWrittenAtUnix"`
 	LastDurationMilliseconds *float64                `json:"lastDurationMilliseconds"`
@@ -234,9 +239,10 @@ type SnapshotBarrierReceipt struct {
 }
 
 type CommandRequest struct {
-	RequestID string                 `json:"requestId"`
-	Action    string                 `json:"action"`
-	Arguments map[string]interface{} `json:"arguments"`
+	RequestID        string                 `json:"requestId"`
+	Action           string                 `json:"action"`
+	Arguments        map[string]interface{} `json:"arguments"`
+	SimulationPaused *bool                  `json:"-"`
 }
 
 type CommandReceipt struct {
@@ -277,11 +283,12 @@ type EventBatch struct {
 }
 
 type DiagnosticRequest struct {
-	RequestID       string `json:"requestId"`
-	Profile         string `json:"profile"`
-	Prefab          string `json:"prefab,omitempty"`
-	DurationSeconds int    `json:"durationSeconds,omitempty"`
-	SampleLimit     int    `json:"sampleLimit,omitempty"`
+	RequestID        string `json:"requestId"`
+	Profile          string `json:"profile"`
+	Prefab           string `json:"prefab,omitempty"`
+	DurationSeconds  int    `json:"durationSeconds,omitempty"`
+	SampleLimit      int    `json:"sampleLimit,omitempty"`
+	SimulationPaused *bool  `json:"-"`
 }
 
 type DiagnosticReport struct {

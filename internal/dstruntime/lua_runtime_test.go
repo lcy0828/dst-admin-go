@@ -10,6 +10,7 @@ import (
 
 func TestTelemetryLuaStartAndStopAreIdempotent(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 
 	scheduled, canceled, writes := 0, 0, 0
@@ -43,6 +44,7 @@ func TestTelemetryLuaStartAndStopAreIdempotent(t *testing.T) {
 		return 1
 	}))
 	state.SetGlobal("scheduler", scheduler)
+	state.SetGlobal("staticScheduler", scheduler)
 
 	module := loadLuaModule(t, state, "telemetry.lua")
 	callLuaMethod(t, state, module, "Start", true)
@@ -62,6 +64,7 @@ func TestTelemetryLuaStartAndStopAreIdempotent(t *testing.T) {
 
 func TestWorldStateLuaWritesAllMetricsAndRotatesSlots(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 
 	writtenPaths := make([]string, 0, 2)
@@ -110,6 +113,7 @@ func TestWorldStateLuaWritesAllMetricsAndRotatesSlots(t *testing.T) {
 		return 1
 	}))
 	state.SetGlobal("scheduler", scheduler)
+	state.SetGlobal("staticScheduler", scheduler)
 	periodicCanceled := 0
 	var periodicCallback *lua.LFunction
 	theWorld := state.NewTable()
@@ -139,10 +143,10 @@ func TestWorldStateLuaWritesAllMetricsAndRotatesSlots(t *testing.T) {
 	if len(scheduled) != 0 {
 		t.Fatalf("ready world scheduled %d readiness tasks, want 0", len(scheduled))
 	}
-	if len(writtenPaths) != 0 || periodicCallback == nil {
+	if len(writtenPaths) != 0 || periodicCallback != nil {
 		t.Fatalf("module start writes = %#v, periodic callback = %v", writtenPaths, periodicCallback != nil)
 	}
-	callLuaFunction(t, state, periodicCallback)
+	callLuaMethod(t, state, module, "EmitOnce", true)
 	if len(writtenPaths) != 1 || writtenPaths[0] != "mod_config_data/dst-admin/worldstate-a.json" {
 		t.Fatalf("first periodic world state writes = %#v", writtenPaths)
 	}
@@ -173,19 +177,20 @@ func TestWorldStateLuaWritesAllMetricsAndRotatesSlots(t *testing.T) {
 	if luaIntField(state, status, "sequence") != 1 || !lua.LVAsBool(state.GetField(status, "ready")) {
 		t.Fatalf("world state status = %v", status)
 	}
-	callLuaFunction(t, state, periodicCallback)
+	callLuaMethod(t, state, module, "EmitOnce", true)
 	if len(writtenPaths) != 2 || writtenPaths[1] != "mod_config_data/dst-admin/worldstate-b.json" {
 		t.Fatalf("rotated world state writes = %#v", writtenPaths)
 	}
 	callLuaMethod(t, state, module, "Stop", true)
 	callLuaMethod(t, state, module, "Stop", true)
-	if periodicCanceled != 1 {
-		t.Fatalf("Stop canceled periodic tasks %d times, want 1", periodicCanceled)
+	if periodicCanceled != 0 {
+		t.Fatalf("Stop canceled periodic tasks %d times, want 0", periodicCanceled)
 	}
 }
 
 func TestCommandsLuaUsesAllowlistAndWritesStructuredReceipt(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 	writtenPath, writtenJSON, kicked := "", "", ""
 	preloadJSONHarness(state)
@@ -233,6 +238,7 @@ func TestCommandsLuaUsesAllowlistAndWritesStructuredReceipt(t *testing.T) {
 
 func TestCommandsLuaExecutesManagedScriptAndKeepsSuccessOutOfServerLog(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 	preloadJSONHarness(state)
 	printed := 0
@@ -277,6 +283,7 @@ func TestCommandsLuaExecutesManagedScriptAndKeepsSuccessOutOfServerLog(t *testin
 
 func TestCommandsLuaLoadsCommandDocumentAndKeepsReceiptIdentity(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 	preloadJSONHarness(state)
 	writtenPath, writtenJSON, loadedPath, erasedPath := "", "", "", ""
@@ -330,6 +337,7 @@ func TestCommandsLuaLoadsCommandDocumentAndKeepsReceiptIdentity(t *testing.T) {
 
 func TestCommandsLuaSerializesFileSignalsAndPersistsMismatch(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 	preloadJSONHarness(state)
 	readCallbacks := map[string]*lua.LFunction{}
@@ -412,6 +420,7 @@ func TestCommandsLuaSerializesFileSignalsAndPersistsMismatch(t *testing.T) {
 
 func TestCommandsLuaDoesNotExecuteWhenDocumentCleanupFails(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 	preloadJSONHarness(state)
 	writtenJSON := ""
@@ -466,6 +475,7 @@ func TestCommandsLuaDoesNotExecuteWhenDocumentCleanupFails(t *testing.T) {
 
 func TestEventsLuaLifecycleDoesNotLeakTasksOrListeners(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 
 	preloadStaticJSONHarness(state)
@@ -483,6 +493,7 @@ func TestEventsLuaLifecycleDoesNotLeakTasksOrListeners(t *testing.T) {
 		return 1
 	}))
 	state.SetGlobal("scheduler", scheduler)
+	state.SetGlobal("staticScheduler", scheduler)
 
 	theSim := state.NewTable()
 	state.SetField(theSim, "SetPersistentString", state.NewFunction(func(L *lua.LState) int { return 0 }))
@@ -507,7 +518,7 @@ func TestEventsLuaLifecycleDoesNotLeakTasksOrListeners(t *testing.T) {
 		watchesRemoved++
 		return 0
 	}))
-	state.SetField(theWorld, "DoTaskInTime", state.NewFunction(func(L *lua.LState) int {
+	state.SetField(theWorld, "DoStaticTaskInTime", state.NewFunction(func(L *lua.LState) int {
 		L.Push(luaTask(state, &flushCanceled))
 		return 1
 	}))
@@ -546,6 +557,7 @@ func TestEventsLuaLifecycleDoesNotLeakTasksOrListeners(t *testing.T) {
 
 func TestDiagnosticsLuaCancelsReadinessAndAutomaticallyStopsPerformanceSampling(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 
 	preloadStaticJSONHarness(state)
@@ -559,6 +571,7 @@ func TestDiagnosticsLuaCancelsReadinessAndAutomaticallyStopsPerformanceSampling(
 		return 1
 	}))
 	state.SetGlobal("scheduler", scheduler)
+	state.SetGlobal("staticScheduler", scheduler)
 
 	theSim := state.NewTable()
 	state.SetField(theSim, "SetPersistentString", state.NewFunction(func(L *lua.LState) int {
@@ -643,6 +656,7 @@ func TestDiagnosticsLuaCancelsReadinessAndAutomaticallyStopsPerformanceSampling(
 
 func TestBarriersLuaProvesSaveCallbackAndPreservesDelayedShutdown(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 
 	var receipt *lua.LTable
@@ -682,7 +696,7 @@ func TestBarriersLuaProvesSaveCallbackAndPreservesDelayedShutdown(t *testing.T) 
 	theWorld := state.NewTable()
 	state.SetField(theWorld, "ismastersim", lua.LTrue)
 	state.SetField(theWorld, "ismastershard", lua.LTrue)
-	state.SetField(theWorld, "DoTaskInTime", state.NewFunction(func(L *lua.LState) int {
+	state.SetField(theWorld, "DoStaticTaskInTime", state.NewFunction(func(L *lua.LState) int {
 		timeoutCallback = L.CheckFunction(3)
 		L.Push(luaTask(state, &timeoutCanceled))
 		return 1
@@ -759,6 +773,7 @@ func TestBarriersLuaProvesSaveCallbackAndPreservesDelayedShutdown(t *testing.T) 
 
 func TestBarriersLuaWaitsForWorldBeforeWrappingSave(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 
 	preloadStaticJSONHarness(state)
@@ -775,6 +790,7 @@ func TestBarriersLuaWaitsForWorldBeforeWrappingSave(t *testing.T) {
 		return 1
 	}))
 	state.SetGlobal("scheduler", scheduler)
+	state.SetGlobal("staticScheduler", scheduler)
 
 	module := loadLuaModule(t, state, "barriers.lua")
 	callLuaMethod(t, state, module, "Start", true)
@@ -877,6 +893,7 @@ func requireLuaFunction(t *testing.T, value lua.LValue, label string) *lua.LFunc
 
 func TestBootstrapLuaReloadSwapsOnlyAStartedCandidate(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 
 	telemetrySource := runtimeTelemetryHarnessSource(false)
@@ -1073,4 +1090,17 @@ func luaInt(state *lua.LState, name string) int {
 
 func luaIntField(state *lua.LState, table *lua.LTable, name string) int {
 	return int(lua.LVAsNumber(state.GetField(table, name)))
+}
+
+// Most module tests do not advance time. Integration tests replace this stub
+// with independent simulation/static queues and exercise actual deadlines.
+func installStaticSchedulerStub(state *lua.LState) {
+	scheduler := state.NewTable()
+	state.SetField(scheduler, "ExecuteInTime", state.NewFunction(func(L *lua.LState) int {
+		task := L.NewTable()
+		state.SetField(task, "Cancel", state.NewFunction(func(L *lua.LState) int { return 0 }))
+		L.Push(task)
+		return 1
+	}))
+	state.SetGlobal("staticScheduler", scheduler)
 }

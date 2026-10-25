@@ -139,7 +139,7 @@ func TestClassifyRuntimeLogKeepsRunningStateWhileSaveIsUnhealthy(t *testing.T) {
 	if status.State != RuntimeRunning || status.Code != "SAVE_WRITE_FAILED" || !strings.Contains(status.Message, "可能回档") {
 		t.Fatalf("status=%#v", status)
 	}
-	status = ClassifyRuntimeLog("[CRITICAL] Failed to save file /save/session\nSerializing world: 56\n")
+	status = ClassifyRuntimeLog("Server registered via geo DNS\n[CRITICAL] Failed to save file /save/session\nSerializing world: 56\n")
 	if status.State != RuntimeRunning || status.Code != "" {
 		t.Fatalf("recovered status=%#v", status)
 	}
@@ -311,5 +311,41 @@ func TestMacOSApplicationPolicyCommandIsReady(t *testing.T) {
 	}
 	if err := prepareStartPolicy(runtime.GOOS, macOSApplicationPolicyCommand); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFirstWorldgenSerializationIsProgressUntilServiceReady(t *testing.T) {
+	for _, readFile := range []bool{false, true} {
+		t.Run(map[bool]string{false: "memory", true: "stream"}[readFile], func(t *testing.T) {
+			classify := func(content string) RuntimeStatus {
+				t.Helper()
+				fallback := RuntimeStatus{State: RuntimeStarting, SessionExists: true}
+				if !readFile {
+					return classifyRuntimeStartupLog(content, fallback)
+				}
+				path := filepath.Join(t.TempDir(), "server_log.txt")
+				if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+				value, err := classifyRuntimeLogFile(path, fallback)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return value
+			}
+			generated := "Generating world with these parameters:\nSerializing world: session/NEW/0000000002\nSyncWorldSettings\n"
+			if value := classify(generated); value.State != RuntimeStarting {
+				t.Fatalf("first save marked ready: %+v", value)
+			}
+			if value := classify(generated + "Sim paused\n"); value.State != RuntimeRunning {
+				t.Fatalf("paused ready not accepted: %+v", value)
+			}
+			if value := classify("Loading world: session/EXISTING\nShard server ready\nSerializing world: session/EXISTING/0000000042\n"); value.State != RuntimeRunning {
+				t.Fatalf("existing save regressed: %+v", value)
+			}
+			if value := classify("Failed to bind server port\nSerializing world: session/NEW/0000000002\n"); value.State != RuntimeFailed {
+				t.Fatalf("serialization hid startup failure: %+v", value)
+			}
+		})
 	}
 }

@@ -8,6 +8,7 @@ import (
 
 func TestRuntimeCatalogReadsRegisteredModPrefabsWithoutSpawning(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 	preloadJSONHarness(state)
 	err := state.DoString(`
@@ -78,6 +79,7 @@ func TestRuntimeCatalogReadsRegisteredModPrefabsWithoutSpawning(t *testing.T) {
 
 func TestRuntimeCatalogCacheLifecycleAndBoundedModWork(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 	preloadJSONHarness(state)
 	if err := state.DoString(`
@@ -156,6 +158,7 @@ func TestRuntimeCatalogCacheLifecycleAndBoundedModWork(t *testing.T) {
 
 func TestRuntimeCatalogYieldsAcrossStaticFramesAndCancelsOnStop(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 	preloadJSONHarness(state)
 	if err := state.DoString(`
@@ -179,7 +182,7 @@ func TestRuntimeCatalogYieldsAcrossStaticFramesAndCancelsOnStop(t *testing.T) {
 	module := loadLuaModule(t, state, "commands.lua")
 	state.SetGlobal("commands", module)
 	if err := state.DoString(`
- local initial=commands.Execute({requestId="catalog-yield-00001",action="catalog.entities",arguments={limit=120}})
+ local initial=commands.Execute({requestId="catalog-yield-00001",action="catalog.entities",simulationPaused=false,arguments={limit=120}})
  assert(initial.code=="COMMAND_ACCEPTED" and #receipts==0, "cold collection must yield before completing")
  local frames=0
  while #tasks>0 do
@@ -189,13 +192,13 @@ func TestRuntimeCatalogYieldsAcrossStaticFramesAndCancelsOnStop(t *testing.T) {
  local data=receipts[1].details
  assert(data.total==2000 and #data.items==120 and #expiry==1)
  for index,item in ipairs(data.items) do assert(item.id==string.format("prefab_%05d",index),"cross-frame sorting lost order") end
- commands.Execute({requestId="catalog-yield-00002",action="catalog.entities",arguments={query="prefab_",offset=120,limit=120}})
+ commands.Execute({requestId="catalog-yield-00002",action="catalog.entities",simulationPaused=false,arguments={query="prefab_",offset=120,limit=120}})
  assert(#receipts==1, "search must also yield")
  while #tasks>0 do local task=table.remove(tasks,1);if not task.cancelled then task.fn() end end
  assert(#receipts==2 and receipts[2].details.total==2000 and receipts[2].details.items[1].id=="prefab_00121")
- local page=commands.Execute({requestId="catalog-page-00001",action="catalog.entities",arguments={query="prefab_",offset=240,limit=120}})
+ local page=commands.Execute({requestId="catalog-page-00001",action="catalog.entities",simulationPaused=false,arguments={query="prefab_",offset=240,limit=120}})
  assert(page.code=="CATALOG_READY" and #tasks==0, "cached pagination must not repeat filtering")
- commands.Execute({requestId="catalog-yield-00003",action="catalog.entities",arguments={refresh=true}})
+ commands.Execute({requestId="catalog-yield-00003",action="catalog.entities",simulationPaused=false,arguments={refresh=true}})
  assert(#tasks==1)
  commands.ClearCatalog()
  assert(tasks[1].cancelled and expiry[1].cancelled and receipts[#receipts].code=="CATALOG_CANCELLED")
@@ -204,7 +207,7 @@ func TestRuntimeCatalogYieldsAcrossStaticFramesAndCancelsOnStop(t *testing.T) {
  tasks[1].fn()
  assert(#receipts==receipt_count and #tasks==1, "cancelled callbacks must not resume collection")
  tasks={}
- commands.Execute({requestId="catalog-yield-00004",action="catalog.entities",arguments={}})
+ commands.Execute({requestId="catalog-yield-00004",action="catalog.entities",simulationPaused=false,arguments={}})
  assert(#tasks==1)
  advance(10);table.remove(tasks,1).fn()
  assert(receipts[#receipts].code=="CATALOG_TIMEOUT" and not commands.Status().busy and #tasks==0)
@@ -216,6 +219,7 @@ func TestRuntimeCatalogYieldsAcrossStaticFramesAndCancelsOnStop(t *testing.T) {
 
 func TestRuntimeCatalogBatchesBoundEscapedBytesAndRetainEveryEntry(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 	preloadGameJSONHarness(state)
 	if err := state.DoString(`
@@ -259,6 +263,7 @@ func TestRuntimeCatalogBatchesBoundEscapedBytesAndRetainEveryEntry(t *testing.T)
 
 func TestCommandCompletionCoalescesFreshHealthWithoutResamplingPlayers(t *testing.T) {
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	defer state.Close()
 	preloadGameJSONHarness(state)
 	if err := state.DoString(`
@@ -295,6 +300,31 @@ func TestCommandCompletionCoalescesFreshHealthWithoutResamplingPlayers(t *testin
  command_callback(true)
  assert(#health_writes==2 and player_writes==1,"idle completion caused redundant sampling/writes")
  `); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeCatalogCompletesDuringNativeSleepWithoutSchedulingContinuation(t *testing.T) {
+	state := lua.NewState()
+	defer state.Close()
+	installStaticSchedulerStub(state)
+	preloadJSONHarness(state)
+	if err := state.DoString(`
+local cpu=0;os.clock=function()cpu=cpu+0.0005;return cpu end
+TheSim={SetPersistentString=function(self,path,value,encoded,callback) callback(true) end}
+TheWorld={DoStaticTaskInTime=function(self,delay) assert(delay==300,"native sleep must not wait for another tick");return{Cancel=function()end}end}
+Prefabs={};for i=1,4000 do Prefabs["prefab_"..i]={fn=function()error("must not spawn")end} end
+`); err != nil {
+		t.Fatal(err)
+	}
+	state.SetGlobal("commands", loadLuaModule(t, state, "commands.lua"))
+	if err := state.DoString(`
+for _,hint in ipairs({true,"unknown"}) do
+local result=commands.Execute({requestId="native-sleep-catalog-"..tostring(hint),action="catalog.entities",simulationPaused=hint==true and true or nil,arguments={limit=120,refresh=true}})
+assert(result.ok and result.details.total==4000,result.code)
+assert(not commands.Status().busy)
+end
+`); err != nil {
 		t.Fatal(err)
 	}
 }

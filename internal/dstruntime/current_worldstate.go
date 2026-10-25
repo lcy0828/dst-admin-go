@@ -51,10 +51,20 @@ func healthMatchesCurrentProcess(now time.Time, health Health, value shared.Runt
 		value.StartedAt.IsZero() || value.StartedAt.After(now) ||
 		value.SessionID == "" || value.SessionID != health.SessionID ||
 		value.ShardID == "" || value.ShardID != health.ShardID ||
-		health.ProducerInstanceID == "" || health.LastCapturedAtUnix == nil || health.LastWrittenAtUnix == nil {
+		health.ProducerInstanceID == "" {
 		return false
 	}
 	startedAt := value.StartedAt.Truncate(time.Second)
+	if health.ReadAt.Before(startedAt) {
+		return false
+	}
+	if health.HeartbeatAtUnix != nil {
+		at := time.Unix(*health.HeartbeatAtUnix, 0)
+		return health.HeartbeatSequence > 0 && !at.Before(startedAt) && !at.After(now.Add(maxFutureSkew))
+	}
+	if health.LastCapturedAtUnix == nil || health.LastWrittenAtUnix == nil {
+		return false
+	}
 	capturedAt := time.Unix(*health.LastCapturedAtUnix, 0)
 	writtenAt := time.Unix(*health.LastWrittenAtUnix, 0)
 	return !capturedAt.Before(startedAt) && !writtenAt.Before(capturedAt) &&

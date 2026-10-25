@@ -2,10 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 2
-local PRODUCER_VERSION = "2.4.12"
-local SNAPSHOT_INTERVAL = 5
-local READY_RETRY_SECONDS = 1
-local READY_RETRY_LIMIT = 60
+local PRODUCER_VERSION = "2.4.13"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 
 local state = {
@@ -16,12 +13,12 @@ local state = {
     nextSlot = "a",
     readyAttempts = 0,
     readyTask = nil,
-    periodicTask = nil,
     lastCapturedAtUnix = nil,
     lastWrittenAtUnix = nil,
     lastDurationMilliseconds = nil,
     lastError = nil,
     consecutiveFailures = 0,
+    generation = 0,
 }
 
 local instance_id = string.format("%d-%06d", os.time(), math.random(0, 999999))
@@ -152,7 +149,8 @@ function M.EmitOnce(callback)
         return false
     end
     state.writing = true
-    local started = GetTime ~= nil and GetTime() or 0
+    local started = clock.Now()
+    local generation = state.generation
     local captured_at = os.time()
     local ok, payload = xpcall(function()
         local session_id, shard_id = runtime_identity()
@@ -184,10 +182,11 @@ function M.EmitOnce(callback)
         return false
     end
     local slot = state.nextSlot
-    TheSim:SetPersistentString(OUTPUT_ROOT .. "worldstate-" .. slot .. ".json", encoded, false, function(written)
+    local persisted = pcall(function() TheSim:SetPersistentString(OUTPUT_ROOT .. "worldstate-" .. slot .. ".json", encoded, false, function(written)
+        if generation ~= state.generation then complete(callback, false); return end
         state.writing = false
         state.lastCapturedAtUnix = captured_at
-        state.lastDurationMilliseconds = math.max(0, ((GetTime ~= nil and GetTime() or started) - started) * 1000)
+        state.lastDurationMilliseconds = math.max(0, (clock.Now() - started) * 1000)
         if written then
             state.lastWrittenAtUnix = os.time()
             state.lastError = nil
@@ -198,7 +197,14 @@ function M.EmitOnce(callback)
             state.consecutiveFailures = state.consecutiveFailures + 1
         end
         complete(callback, written == true)
-    end)
+    end) end)
+    if not persisted then
+        state.writing = false
+        state.lastError = "world state persistence could not start"
+        state.consecutiveFailures = state.consecutiveFailures + 1
+        complete(callback, false)
+        return false
+    end
     return true
 end
 
@@ -217,22 +223,26 @@ local function await_world()
     if ready_for_capture() then
         state.ready = true
         state.readyTask = nil
-        state.periodicTask = TheWorld:DoPeriodicTask(SNAPSHOT_INTERVAL, M.EmitOnce)
+        -- Periodic capture is coordinated by bootstrap, including paused worlds.
         return
     end
     state.readyAttempts = state.readyAttempts + 1
-    if state.readyAttempts >= READY_RETRY_LIMIT then
-        state.lastError = "world readiness timed out"
-        state.consecutiveFailures = state.consecutiveFailures + 1
-        state.readyTask = nil
-        return
+    state.readyTask = clock.After(clock.ReadyDelay(state.readyAttempts), await_world, "dst-admin-worldstate-ready")
+end
+
+function M.Poll()
+    clock.Poll()
+    if state.running and not state.ready then
+        if state.readyTask ~= nil then state.readyTask:Cancel(); state.readyTask = nil end
+        await_world()
     end
-    state.readyTask = scheduler:ExecuteInTime(READY_RETRY_SECONDS, await_world, "dst-admin-worldstate-ready")
 end
 
 function M.Start()
     if state.running then return true end
     state.running = true
+    state.generation = state.generation + 1
+    state.writing = false
     state.ready = false
     state.readyAttempts = 0
     state.lastError = nil
@@ -242,14 +252,11 @@ end
 
 function M.Stop()
     state.running = false
+    state.generation = state.generation + 1
     state.ready = false
     if state.readyTask ~= nil then
         state.readyTask:Cancel()
         state.readyTask = nil
-    end
-    if state.periodicTask ~= nil then
-        state.periodicTask:Cancel()
-        state.periodicTask = nil
     end
     return true
 end

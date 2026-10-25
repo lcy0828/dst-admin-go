@@ -2,19 +2,19 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.12"
+local PRODUCER_VERSION = "2.4.13"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local MAX_SAMPLES = 50
-local READY_RETRY_SECONDS = 1
-local READY_RETRY_LIMIT = 60
 
 local state = {
+    generation = 0,
     running = false,
     ready = false,
     busy = false,
     sequence = 0,
     nextSlot = "a",
     activeTask = nil,
+    timeoutTask = nil,
     readyTask = nil,
     readyAttempts = 0,
     lastError = nil,
@@ -44,7 +44,9 @@ local function runtime_identity()
 end
 
 local function response(ok, code, message, result)
-    return { ok = ok == true, code = safe_text(code, 64), message = safe_text(message, 512), result = result or {} }
+    -- DST's encoder serializes an empty Lua table as [], not an object. Omit
+    -- absent results so errors remain compatible with the typed Go reader.
+    return { ok = ok == true, code = safe_text(code, 64), message = safe_text(message, 512), result = result }
 end
 
 local function persist(request, report)
@@ -72,7 +74,9 @@ local function persist(request, report)
         return false
     end
     local slot = state.nextSlot
-    TheSim:SetPersistentString(OUTPUT_ROOT .. "diagnostic-" .. slot .. ".json", encoded, false, function(written)
+    local generation = state.generation
+    local started = pcall(function() TheSim:SetPersistentString(OUTPUT_ROOT .. "diagnostic-" .. slot .. ".json", encoded, false, function(written)
+        if generation ~= state.generation then return end
         state.busy = false
         if written then
             state.nextSlot = slot == "a" and "b" or "a"
@@ -80,7 +84,8 @@ local function persist(request, report)
         else
             state.lastError = "diagnostic persistence failed"
         end
-    end)
+    end) end)
+    if not started then state.busy = false; state.lastError = "diagnostic persistence could not start"; return false end
     print(string.format("[DST-ADMIN-DIAGNOSTIC RECEIPT] request=%s profile=%s code=%s", request.requestId, request.profile, report.code))
     return true
 end
@@ -135,29 +140,47 @@ local function performance_report(request)
         persist(request, response(false, "INVALID_DURATION", "durationSeconds must be between 1 and 5"))
         return
     end
+    if request.simulationPaused == true or clock.Paused() == true then
+        persist(request, response(false, "SIMULATION_PAUSED", "simulation is paused; performance sampling requires simulation ticks"))
+        return
+    end
+    local generation = state.generation
     local intervals = {}
     local started = GetTime ~= nil and GetTime() or 0
     local previous = started
+    local finished = false
+    local function finish(ok, code, message)
+        if finished or not state.running or generation ~= state.generation then return end
+        finished = true
+        if state.activeTask ~= nil then state.activeTask:Cancel(); state.activeTask = nil end
+        if state.timeoutTask ~= nil then state.timeoutTask:Cancel(); state.timeoutTask = nil end
+        local total, maximum = 0, 0
+        for _, value in ipairs(intervals) do total = total + value; if value > maximum then maximum = value end end
+        persist(request, response(ok, code, message, {
+            durationMilliseconds = math.max(0, (previous - started) * 1000),
+            sampleCount = #intervals,
+            averageIntervalMilliseconds = #intervals > 0 and total / #intervals or nil,
+            maximumIntervalMilliseconds = #intervals > 0 and maximum or nil,
+        }))
+    end
+    -- This deadline is independent of the simulation being measured.
+    state.timeoutTask = clock.After(duration + 1, function()
+        finish(false, clock.Paused() == true and "SIMULATION_PAUSED" or "DIAGNOSTIC_TIMEOUT",
+            "simulation sampling did not complete within its real-time deadline")
+    end, "dst-admin-diagnostic-timeout")
     state.activeTask = TheWorld:DoPeriodicTask(0.1, function()
+        if finished or not state.running or generation ~= state.generation then return end
         local current = GetTime ~= nil and GetTime() or previous
         intervals[#intervals + 1] = math.max(0, (current - previous) * 1000)
         previous = current
         if current - started >= duration or #intervals >= MAX_SAMPLES then
-            state.activeTask:Cancel()
-            state.activeTask = nil
-            local total, maximum = 0, 0
-            for _, value in ipairs(intervals) do total = total + value; if value > maximum then maximum = value end end
-            persist(request, response(true, "DIAGNOSTIC_COMPLETE", "", {
-                durationMilliseconds = math.max(0, (current - started) * 1000),
-                sampleCount = #intervals,
-                averageIntervalMilliseconds = #intervals > 0 and total / #intervals or 0,
-                maximumIntervalMilliseconds = maximum,
-            }))
+            finish(true, "DIAGNOSTIC_COMPLETE", "")
         end
     end)
 end
 
 function M.Capture(request)
+    clock.Poll()
     if not state.running or not state.ready then return response(false, "DIAGNOSTIC_UNAVAILABLE", "diagnostics are not ready") end
     if state.busy then return response(false, "DIAGNOSTIC_BUSY", "another diagnostic is running") end
     if type(request) ~= "table" or type(request.requestId) ~= "string"
@@ -186,13 +209,23 @@ function M.CaptureJSON(source)
     return M.Capture(request)
 end
 
+local await_world
+
+function M.Poll()
+    clock.Poll()
+    if state.running and not state.ready and await_world ~= nil then
+        if state.readyTask ~= nil then state.readyTask:Cancel(); state.readyTask = nil end
+        await_world()
+    end
+end
+
 function M.Start()
     if state.running then return true end
     state.running = true
+    state.generation = state.generation + 1
     state.ready = false
     state.readyAttempts = 0
     state.lastError = nil
-    local await_world
     await_world = function()
         if not state.running then return end
         if TheWorld ~= nil and TheWorld.ismastersim == true and TheSim ~= nil and TheSim.SetPersistentString ~= nil then
@@ -201,12 +234,7 @@ function M.Start()
             return
         end
         state.readyAttempts = state.readyAttempts + 1
-        if state.readyAttempts >= READY_RETRY_LIMIT then
-            state.readyTask = nil
-            state.lastError = "world readiness timed out"
-            return
-        end
-        state.readyTask = scheduler:ExecuteInTime(READY_RETRY_SECONDS, await_world, "dst-admin-diagnostics-ready")
+        state.readyTask = clock.After(clock.ReadyDelay(state.readyAttempts), await_world, "dst-admin-diagnostics-ready")
     end
     await_world()
     return true
@@ -214,9 +242,11 @@ end
 
 function M.Stop()
     state.running = false
+    state.generation = state.generation + 1
     state.ready = false
     if state.readyTask ~= nil then state.readyTask:Cancel(); state.readyTask = nil end
     if state.activeTask ~= nil then state.activeTask:Cancel(); state.activeTask = nil end
+    if state.timeoutTask ~= nil then state.timeoutTask:Cancel(); state.timeoutTask = nil end
     state.busy = false
     return true
 end

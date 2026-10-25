@@ -227,8 +227,8 @@ func (b *Bridge) waitForMaintenanceHealth(ctx context.Context, roomID, worldID, 
 	}
 }
 
-// Paused worlds do not run periodic collection. Their existing health is still
-// current when its timestamps belong to the process identified by this log.
+// Whole-server idle sleep can stop both schedulers. Current-boot evidence is
+// required before treating retained paused health as expected inactivity.
 func maintenanceHealthCurrent(ctx context.Context, root, cluster, shard string, health Health, bridge *Bridge, control MaintenanceControl) bool {
 	worldPath := filepath.Join(root, cluster, shard)
 	if !maintenanceHealthMatchesProcess(ctx, root, cluster, shard, health, control) {
@@ -247,6 +247,7 @@ func maintenanceHealthCurrent(ctx context.Context, root, cluster, shard string, 
 	}
 	// All readiness, module and version checks still apply; only age is waived.
 	health.ReadAt = bridge.now().UTC()
+	health.HeartbeatAtUnix = nil
 	return bridge.validLifecycleHealth(worldPath, health, time.Time{})
 }
 

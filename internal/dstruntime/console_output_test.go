@@ -38,6 +38,7 @@ func TestDistributedConsoleOutputKeepsReceiptCorrespondence(t *testing.T) {
 func consoleOutputHarness(t *testing.T) (*lua.LState, func(string, string) CommandReceipt) {
 	t.Helper()
 	state := lua.NewState()
+	installStaticSchedulerStub(state)
 	t.Cleanup(state.Close)
 	preloadGameJSONHarness(state)
 	state.SetGlobal("print", state.NewFunction(func(L *lua.LState) int { return 0 }))

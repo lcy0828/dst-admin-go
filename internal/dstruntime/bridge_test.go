@@ -501,11 +501,19 @@ func TestEventReaderPrefersTheInstanceWithTheNewestEventOverFileModificationTime
 func writeRuntimeSessionAndHealth(t *testing.T, root string, now time.Time) {
 	t.Helper()
 	worldPath := filepath.Join(root, "Cluster_1", "Master")
+	if err := os.WriteFile(filepath.Join(worldPath, "server.ini"), []byte("[SHARD]\nid=1\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(worldPath, "save", "session", "SESSION"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	captured := now.Unix()
+	if err := os.WriteFile(filepath.Join(worldPath, "server_log.txt"), []byte("[00:00:00]: Current time: "+now.Add(-time.Hour).Format("Mon Jan 2 15:04:05 2006")+"\n"), 0640); err != nil {
 		t.Fatal(err)
 	}
 	health := Health{
 		SchemaVersion: 1, ProducerVersion: RuntimeVersion, ProducerInstanceID: "instance", SessionID: "SESSION", ShardID: "1", Running: true, Ready: true,
+		LastCapturedAtUnix: &captured, LastWrittenAtUnix: &captured,
 		Modules: map[string]ModuleHealth{"commands": {Running: true, Ready: true}, "diagnostics": {Running: true, Ready: true}},
 	}
 	output := filepath.Join(worldPath, "save", "mod_config_data", "dst-admin")

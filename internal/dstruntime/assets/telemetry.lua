@@ -2,10 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 2
-local PRODUCER_VERSION = "2.4.12"
-local SNAPSHOT_INTERVAL = 5
-local READY_RETRY_SECONDS = 1
-local READY_RETRY_LIMIT = 60
+local PRODUCER_VERSION = "2.4.13"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 
 local state = {
@@ -16,12 +13,13 @@ local state = {
     nextSlot = "a",
     readyAttempts = 0,
     readyTask = nil,
-    periodicTask = nil,
     lastCapturedAtUnix = nil,
     lastWrittenAtUnix = nil,
     lastDurationMilliseconds = nil,
     lastError = nil,
     consecutiveFailures = 0,
+    generation = 0,
+    heartbeatSequence = 0,
 }
 
 local instance_id = string.format("%d-%06d", os.time(), math.random(0, 999999))
@@ -172,6 +170,9 @@ local function health_payload()
         ready = state.ready,
         writing = state.writing,
         sequence = state.sequence,
+        heartbeatSequence = state.heartbeatSequence,
+        heartbeatAtUnix = os.time(),
+        paused = clock.Paused(),
         lastCapturedAtUnix = state.lastCapturedAtUnix,
         lastWrittenAtUnix = state.lastWrittenAtUnix,
         lastDurationMilliseconds = state.lastDurationMilliseconds,
@@ -182,32 +183,48 @@ local function health_payload()
 end
 
 local health_writing, health_pending, health_commands_busy = false, false, false
+local health_callbacks = {}
 local write_health
-write_health = function()
+write_health = function(callback)
     -- Retired collectors may still receive persistence callbacks. They must
     -- never publish health for a replacement Runtime.
     local runtime = rawget(_G, "DSTAdmin")
     if runtime ~= nil and runtime.Telemetry ~= nil and runtime.Telemetry ~= M then
         health_pending = false
+        if type(callback) == "function" then callback(false) end
         return
     end
     -- Serialize writes so an older busy snapshot cannot overwrite a newer idle
     -- notification. Coalesce overlap into one latest snapshot, with no poller.
+    if type(callback) == "function" then health_callbacks[#health_callbacks + 1] = callback end
     if health_writing then health_pending = true; return end
+    local callbacks = health_callbacks
+    health_callbacks = {}
+    local generation = state.generation
+    local completed = false
+    local function finish(written)
+        if completed then return end
+        completed = true
+        health_writing = false
+        for _, pending in ipairs(callbacks) do pcall(pending, written == true and state.generation == generation) end
+        if health_pending then health_pending = false; write_health() end
+    end
+    state.heartbeatSequence = state.heartbeatSequence + 1
     local payload = health_payload()
     local ok, encoded = pcall(json.encode_compliant, payload)
-    if not ok then return end
+    if not ok then finish(false); return end
     health_commands_busy = payload.modules.commands ~= nil and payload.modules.commands.busy == true
     health_writing = true
     local started = pcall(function()
         -- Released collectors can finish callbacks after handover. Keep their
         -- fixed health.json separate from this version's health publication.
-        TheSim:SetPersistentString(OUTPUT_ROOT .. "health-" .. PRODUCER_VERSION .. ".json", encoded, false, function()
-            health_writing = false
-            if health_pending then health_pending = false; write_health() end
-        end)
+        TheSim:SetPersistentString(OUTPUT_ROOT .. "health-" .. PRODUCER_VERSION .. ".json", encoded, false, finish)
     end)
-    if not started then health_writing = false end
+    if not started then finish(false) end
+end
+
+function M.Heartbeat()
+    if state.running then write_health() end
 end
 
 function M.CommandFinished()
@@ -229,7 +246,8 @@ function M.EmitOnce(callback)
         return false
     end
     state.writing = true
-    local started = GetTime ~= nil and GetTime() or 0
+    local generation = state.generation
+    local started = clock.Now()
     local captured_at = os.time()
     local ok, payload = xpcall(function()
         local players = {}
@@ -275,10 +293,11 @@ function M.EmitOnce(callback)
         return false
     end
     local slot = state.nextSlot
-    TheSim:SetPersistentString(OUTPUT_ROOT .. "players-" .. slot .. ".json", encoded, false, function(written)
+    local persisted = pcall(function() TheSim:SetPersistentString(OUTPUT_ROOT .. "players-" .. slot .. ".json", encoded, false, function(written)
+        if generation ~= state.generation then complete(callback, false); return end
         state.writing = false
         state.lastCapturedAtUnix = captured_at
-        state.lastDurationMilliseconds = math.max(0, ((GetTime ~= nil and GetTime() or started) - started) * 1000)
+        state.lastDurationMilliseconds = math.max(0, (clock.Now() - started) * 1000)
         if written then
             state.lastWrittenAtUnix = os.time()
             state.lastError = nil
@@ -288,9 +307,16 @@ function M.EmitOnce(callback)
             state.lastError = "snapshot persistence failed"
             state.consecutiveFailures = state.consecutiveFailures + 1
         end
+        write_health(function(healthy) complete(callback, written == true and healthy) end)
+    end) end)
+    if not persisted then
+        state.writing = false
+        state.lastError = "snapshot persistence could not start"
+        state.consecutiveFailures = state.consecutiveFailures + 1
         write_health()
-        complete(callback, written == true)
-    end)
+        complete(callback, false)
+        return false
+    end
     return true
 end
 
@@ -307,23 +333,26 @@ local function await_world()
     if ready_for_capture() then
         state.ready = true
         state.readyTask = nil
-        state.periodicTask = TheWorld:DoPeriodicTask(SNAPSHOT_INTERVAL, M.EmitOnce)
+        -- Periodic capture is coordinated by bootstrap, including paused worlds.
         return
     end
     state.readyAttempts = state.readyAttempts + 1
-    if state.readyAttempts >= READY_RETRY_LIMIT then
-        state.lastError = "world readiness timed out"
-        state.consecutiveFailures = state.consecutiveFailures + 1
-        state.readyTask = nil
-        write_health()
-        return
+    state.readyTask = clock.After(clock.ReadyDelay(state.readyAttempts), await_world, "dst-admin-telemetry-ready")
+end
+
+function M.Poll()
+    clock.Poll()
+    if state.running and not state.ready then
+        if state.readyTask ~= nil then state.readyTask:Cancel(); state.readyTask = nil end
+        await_world()
     end
-    state.readyTask = scheduler:ExecuteInTime(READY_RETRY_SECONDS, await_world, "dst-admin-telemetry-ready")
 end
 
 function M.Start()
     if state.running then return true end
     state.running = true
+    state.generation = state.generation + 1
+    state.writing = false
     state.ready = false
     state.readyAttempts = 0
     state.lastError = nil
@@ -333,14 +362,11 @@ end
 
 function M.Stop(handover)
     state.running = false
+    state.generation = state.generation + 1
     state.ready = false
     if state.readyTask ~= nil then
         state.readyTask:Cancel()
         state.readyTask = nil
-    end
-    if state.periodicTask ~= nil then
-        state.periodicTask:Cancel()
-        state.periodicTask = nil
     end
     if handover == true then
         health_pending = false

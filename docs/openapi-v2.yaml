@@ -6836,6 +6836,9 @@ components:
         ready: { type: boolean }
         writing: { type: boolean }
         sequence: { type: integer, format: int64, minimum: 0 }
+        heartbeatSequence: { type: integer, format: int64, minimum: 0, description: Independent heartbeat counter; does not imply a successful sample }
+        heartbeatAtUnix: { type: integer, format: int64, minimum: 1, description: Last persisted collector heartbeat; native empty-server sleep may suspend updates }
+        paused: { type: boolean, description: Actual simulation pause state; absent when unknown or from a legacy collector }
         lastCapturedAtUnix: { type: integer, format: int64 }
         lastWrittenAtUnix: { type: integer, format: int64 }
         lastDurationMilliseconds: { type: number, minimum: 0 }
@@ -7068,6 +7071,8 @@ components:
         backupPath: { type: string }
         message: { type: string }
         processRunning: { type: boolean }
+        paused: { type: boolean, description: Simulation pause observed from the current process; absent when unknown }
+        startupStage: { type: string, description: Current game startup milestone when available }
         healthState: { $ref: "#/components/schemas/DSTRuntimeHealthState" }
         health:
           allOf: [{ $ref: "#/components/schemas/DSTRuntimeHealth" }]

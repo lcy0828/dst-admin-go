@@ -74,7 +74,6 @@ var runtimeReadySignals = []string{
 	"[Shard] secondary shard is now ready!",
 	"[Shard] secondary shard LUA is now ready!",
 	"Sim paused",
-	"Serializing world:",
 }
 
 // ClassifyRuntimeLog exposes the same readiness and startup-failure semantics
@@ -250,6 +249,9 @@ var runtimeStartupSignals = []struct{ needle, stage string }{
 	{"Load BE", "loading_world"},
 	{"Generating world", "generating_world"},
 	{"WORLD GEN", "generating_world"},
+	// The first save is part of world generation. Serialization alone never
+	// proves that shard initialization and service registration have completed.
+	{"Serializing world:", "loading_world"},
 	{"[Workshop]", "loading_mods"},
 	{"ModIndex:", "loading_mods"},
 	{"Mod: workshop-", "loading_mods"},

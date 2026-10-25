@@ -53,6 +53,7 @@ func newMaintenanceLuaControl(t *testing.T, worldPath string) *maintenanceLuaCon
 	t.Helper()
 	c := &maintenanceLuaControl{state: lua.NewState(), status: shards.RuntimeStatus{State: shards.RuntimeRunning}}
 	t.Cleanup(c.state.Close)
+	installStaticSchedulerStub(c.state)
 	preloadGameJSONHarness(c.state)
 	if err := c.state.DoString(`
 TheNet={GetSessionIdentifier=function() return "SESSION" end, GetClientTable=function() return {{userid="KU_TEST",name="Player",prefab="wilson"}} end}
@@ -204,6 +205,9 @@ func TestNodeMaintenanceKeepsPausedRuntimeButRejectsPreviousBootHealth(t *testin
 	old := time.Now().Add(-time.Hour)
 	stamp := old.Unix()
 	health.LastCapturedAtUnix, health.LastWrittenAtUnix = &stamp, &stamp
+	// Published collectors without an independent heartbeat retain the legacy
+	// paused/current-boot exception during upgrade.
+	health.HeartbeatAtUnix, health.HeartbeatSequence = nil, 0
 	data, err := json.Marshal(health)
 	if err != nil {
 		t.Fatal(err)

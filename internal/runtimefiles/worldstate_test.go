@@ -225,3 +225,44 @@ func TestWorldStateReadKeepsOtherSlotWhenOneFileCannotBeRead(t *testing.T) {
 		t.Fatalf("all unreadable files were hidden: %#v, %v", value, err)
 	}
 }
+
+func TestWorldPauseHintRequiresRecentCompleteEngineEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name, content string
+		known, paused bool
+	}{
+		{"sleep", "[00:00:03]: Sim paused\n", true, true},
+		{"resumed", "[00:00:03]: Sim paused\n[00:00:04]: Sim unpaused\n", true, false},
+		{"new process", "[00:00:03]: Sim paused\n[00:00:00]: Starting Up\n", false, false},
+		{"console echo", "[00:00:03]: RemoteCommandInput: \"print('Sim paused')\"\n", false, false},
+		{"incomplete", "[00:00:03]: Sim paused", false, false},
+		{"outside bounded tail", "[00:00:03]: Sim paused\n" + strings.Repeat("ordinary log line\n", simulationScanBytes), false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, world := worldStateFilesFixture(t)
+			if err := os.WriteFile(filepath.Join(world, "server_log.txt"), []byte(test.content), 0640); err != nil {
+				t.Fatal(err)
+			}
+			got := ReadWorldPause(context.Background(), root, "all", "Master")
+			if (got != nil) != test.known || got != nil && *got != test.paused {
+				t.Fatalf("pause evidence=%v; want known=%t paused=%t", got, test.known, test.paused)
+			}
+		})
+	}
+}
+
+func TestWorldIdentityDoesNotDependOnCollectorArtifacts(t *testing.T) {
+	root, world := worldStateFilesFixture(t)
+	if err := os.RemoveAll(filepath.Join(world, "save/mod_config_data/dst-admin")); err != nil {
+		t.Fatal(err)
+	}
+	value, err := ReadWorldIdentity(context.Background(), root, "all", "Master", shared.ShardRuntimeStatus{State: "running"})
+	if err != nil || value.SessionID != "SESSION" || value.ShardID != "1" || value.StartedAt.IsZero() {
+		t.Fatalf("missing artifacts lost process identity: %+v %v", value, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := ReadWorldIdentity(ctx, root, "all", "Master", shared.ShardRuntimeStatus{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("identity ignored cancellation: %v", err)
+	}
+}

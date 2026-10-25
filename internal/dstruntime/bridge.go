@@ -16,6 +16,7 @@ import (
 
 	"dont/internal/rooms"
 	"dont/internal/runtimefiles"
+	"dont/shared"
 )
 
 const (
@@ -171,6 +172,10 @@ func (b *Bridge) RefreshSnapshots(ctx context.Context, roomID, worldID string) (
 	lock.Lock()
 	defer lock.Unlock()
 
+	return b.refreshSnapshotsLocked(ctx, room, world, worldPath)
+}
+
+func (b *Bridge) refreshSnapshotsLocked(ctx context.Context, room rooms.Room, world rooms.World, worldPath string) (SnapshotRefreshResult, error) {
 	if err := b.lifecycleReady(ctx, room, world, worldPath); err != nil {
 		return SnapshotRefreshResult{}, err
 	}
@@ -304,7 +309,7 @@ func (b *Bridge) validLifecycleHealth(worldPath string, health Health, startedAt
 	if !startedAt.IsZero() && health.ReadAt.Before(startedAt) {
 		return false
 	}
-	if b.now().UTC().Sub(health.ReadAt) > defaultFreshFor {
+	if !health.FreshAt(b.now().UTC()) {
 		return false
 	}
 	if shardID, err := configuredShardID(worldPath); err != nil || shardID != "" && health.ShardID != shardID {
@@ -334,7 +339,10 @@ func (b *Bridge) ExecuteCommand(ctx context.Context, roomID, worldID string, req
 	if err := b.commandReady(ctx, room, world); err != nil {
 		return CommandReceipt{}, err
 	}
-	payload, err := marshalRuntimeRequest(request)
+	if request.Action == "catalog.entities" {
+		request.SimulationPaused = runtimefiles.ReadWorldPause(ctx, b.manager.root, room.DirectoryName, world.DirectoryName)
+	}
+	payload, err := marshalCommandRequest(request)
 	if err != nil {
 		return CommandReceipt{}, fmt.Errorf("%w: encode command payload: %v", ErrRuntimeRequestInvalid, err)
 	}
@@ -392,7 +400,8 @@ func (b *Bridge) CaptureDiagnostic(ctx context.Context, roomID, worldID string, 
 	if err := b.moduleReady(ctx, room, world, "diagnostics"); err != nil {
 		return DiagnosticReport{}, err
 	}
-	payload, err := marshalRuntimeRequest(request)
+	request.SimulationPaused = runtimefiles.ReadWorldPause(ctx, b.manager.root, room.DirectoryName, world.DirectoryName)
+	payload, err := marshalDiagnosticRequest(request)
 	if err != nil || len(payload) > maxRuntimeRequestBytes {
 		return DiagnosticReport{}, errors.New("runtime diagnostic request is invalid")
 	}
@@ -406,6 +415,11 @@ func (b *Bridge) CaptureDiagnostic(ctx context.Context, roomID, worldID string, 
 	}
 	deadline := time.NewTimer(defaultDiagnosticTimeout)
 	defer deadline.Stop()
+	watchdog := time.NewTimer(time.Duration(request.DurationSeconds+1) * time.Second)
+	defer watchdog.Stop()
+	if request.Profile != "performance" {
+		watchdog.Stop()
+	}
 	ticker := time.NewTicker(b.pollInterval)
 	defer ticker.Stop()
 	for {
@@ -417,6 +431,9 @@ func (b *Bridge) CaptureDiagnostic(ctx context.Context, roomID, worldID string, 
 			return DiagnosticReport{}, readErr
 		}
 		select {
+		case <-watchdog.C:
+			// Read-only deadline service, never a replay of the diagnostic.
+			_ = b.sender.Send(ctx, room.DirectoryName, world.DirectoryName, `local r=rawget(_G,"DSTAdmin"); if r and r.Poll then r.Poll() end`)
 		case <-ctx.Done():
 			return DiagnosticReport{}, ctx.Err()
 		case <-deadline.C:
@@ -476,11 +493,29 @@ func (b *Bridge) moduleReady(ctx context.Context, room rooms.Room, world rooms.W
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrRuntimeUnavailable, err)
 	}
+	worldPath, err := b.manager.worldPath(room, world)
+	if err != nil {
+		return err
+	}
+	current, err := runtimefiles.ReadWorldIdentity(ctx, b.manager.root, room.DirectoryName, world.DirectoryName, shared.ShardRuntimeStatus{State: "running"})
+	if err != nil || !healthMatchesCurrentProcess(b.now().UTC(), health, current) {
+		return fmt.Errorf("%w: runtime health does not belong to the current process", ErrRuntimeUnavailable)
+	}
+	if !health.FreshAt(b.now().UTC()) {
+		refreshed, err := b.refreshSnapshotsLocked(ctx, room, world, worldPath)
+		if err != nil {
+			return fmt.Errorf("%w: confirm stale runtime: %w", ErrRuntimeUnavailable, err)
+		}
+		health = refreshed.Health
+		if !healthMatchesCurrentProcess(b.now().UTC(), health, current) {
+			return fmt.Errorf("%w: runtime process changed during refresh", ErrRuntimeUnavailable)
+		}
+	}
 	module, exists := health.Modules[moduleName]
 	if !health.Running || !health.Ready || !exists || !module.Running || !module.Ready {
 		return fmt.Errorf("%w: %s module is not ready", ErrRuntimeUnavailable, moduleName)
 	}
-	if b.now().UTC().Sub(health.ReadAt) > defaultFreshFor {
+	if !health.FreshAt(b.now().UTC()) {
 		return fmt.Errorf("%w: runtime health is stale", ErrRuntimeUnavailable)
 	}
 	if module.Busy {
@@ -783,7 +818,7 @@ func decodeDiagnosticReportData(data []byte, expectedSession, expectedShard stri
 		return DiagnosticReport{}, fmt.Errorf("%w: decode diagnostic report: %v", ErrRuntimeResultInvalid, err)
 	}
 	if value.SchemaVersion != 1 || value.ProducerVersion == "" || value.ProducerInstanceID == "" || value.SessionID == "" || value.ShardID == "" ||
-		value.Sequence < 1 || !runtimeRequestIDPattern.MatchString(value.RequestID) || !runtimeCodePattern.MatchString(value.Code) || len([]rune(value.Message)) > 512 || value.CompletedAtUnix < 1 || value.Result == nil {
+		value.Sequence < 1 || !runtimeRequestIDPattern.MatchString(value.RequestID) || !runtimeCodePattern.MatchString(value.Code) || len([]rune(value.Message)) > 512 || value.CompletedAtUnix < 1 || value.OK && value.Result == nil {
 		return DiagnosticReport{}, ErrRuntimeResultInvalid
 	}
 	if value.Profile != "summary" && value.Profile != "prefab" && value.Profile != "performance" {
@@ -821,4 +856,21 @@ func quoteRuntimeLua(value string) string {
 	}
 	builder.WriteByte('"')
 	return builder.String()
+}
+
+// The pause observation is trusted process evidence, not an API parameter.
+func marshalDiagnosticRequest(request DiagnosticRequest) ([]byte, error) {
+	type wire struct {
+		DiagnosticRequest
+		SimulationPaused *bool `json:"simulationPaused,omitempty"`
+	}
+	return marshalRuntimeRequest(wire{DiagnosticRequest: request, SimulationPaused: request.SimulationPaused})
+}
+
+func marshalCommandRequest(request CommandRequest) ([]byte, error) {
+	type wire struct {
+		CommandRequest
+		SimulationPaused *bool `json:"simulationPaused,omitempty"`
+	}
+	return marshalRuntimeRequest(wire{CommandRequest: request, SimulationPaused: request.SimulationPaused})
 }

@@ -64,6 +64,7 @@ func TestTelemetryJSONRoundTripsPlayerNamesAndErrors(t *testing.T) {
 	for _, name := range []string{"Don't you cry", `中文玩家 "quoted" \\ path`, "名字\n换行\t制表\r回车 🎮"} {
 		t.Run(name, func(t *testing.T) {
 			state := lua.NewState()
+			installStaticSchedulerStub(state)
 			defer state.Close()
 			preloadGameJSONHarness(state)
 			state.SetGlobal("player_name", lua.LString(name))

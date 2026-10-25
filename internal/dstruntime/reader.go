@@ -332,6 +332,9 @@ func decodeHealthData(data []byte, expectedSession, expectedShard string, readAt
 	if health.UpdateID != "" && !runtimeRequestIDPattern.MatchString(health.UpdateID) || health.SchemaVersion != 1 || health.ProducerVersion == "" || health.ProducerInstanceID == "" || health.SessionID == "" || health.ShardID == "" || health.Sequence < 0 || health.ConsecutiveFailures < 0 {
 		return Health{}, ErrSnapshotInvalid
 	}
+	if health.HeartbeatSequence < 0 || health.HeartbeatAtUnix != nil && (*health.HeartbeatAtUnix < 1 || health.HeartbeatSequence < 1) {
+		return Health{}, ErrSnapshotInvalid
+	}
 	for _, module := range health.Modules {
 		if module.Sequence < 0 || module.Pending < 0 || module.ConsecutiveFailures < 0 || !validMetric(module.LastDurationMilliseconds) || module.LastCapturedAtUnix != nil && *module.LastCapturedAtUnix < 1 || module.LastWrittenAtUnix != nil && *module.LastWrittenAtUnix < 1 {
 			return Health{}, ErrSnapshotInvalid
@@ -345,6 +348,20 @@ func decodeHealthData(data []byte, expectedSession, expectedShard string, readAt
 	}
 	health.ReadAt = readAt.UTC()
 	return health, nil
+}
+
+// FreshAt checks the persisted heartbeat as well as its transport timestamp.
+// Copying an old health file cannot turn it into a live Runtime acknowledgement.
+// Older collectors without an independent heartbeat retain their mtime contract.
+func (health Health) FreshAt(now time.Time) bool {
+	if health.ReadAt.IsZero() || health.ReadAt.After(now.Add(maxFutureSkew)) || now.Sub(health.ReadAt) > defaultFreshFor {
+		return false
+	}
+	if health.HeartbeatAtUnix != nil {
+		at := time.Unix(*health.HeartbeatAtUnix, 0)
+		return !at.After(now.Add(maxFutureSkew)) && now.Sub(at) <= defaultFreshFor
+	}
+	return true
 }
 
 func decodeStrictJSON(data []byte, destination interface{}) error {

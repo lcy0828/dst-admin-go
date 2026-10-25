@@ -193,6 +193,10 @@ func TestRuntimeHealthStateAccountsForPausedSimulation(t *testing.T) {
 	lastError := "runtime failed"
 	stale := dstruntime.Health{Running: true, Ready: true, ReadAt: time.Now().Add(-time.Minute)}
 	fresh := dstruntime.Health{Running: true, Ready: true, ReadAt: time.Now()}
+	oldBeat := time.Now().Add(-time.Minute).Unix()
+	newCollector := fresh
+	newCollector.HeartbeatAtUnix = &oldBeat
+	newCollector.HeartbeatSequence = 1
 
 	tests := []struct {
 		name        string
@@ -208,6 +212,7 @@ func TestRuntimeHealthStateAccountsForPausedSimulation(t *testing.T) {
 		{name: "runtime error while paused", health: dstruntime.Health{Running: true, Ready: true, ReadAt: stale.ReadAt, LastError: &lastError}, paused: &paused, want: dstruntime.HealthStateDegraded},
 		{name: "runtime failures while paused", health: dstruntime.Health{Running: true, Ready: true, ReadAt: stale.ReadAt, ConsecutiveFailures: 1}, paused: &paused, want: dstruntime.HealthStateDegraded},
 		{name: "fresh and ready", health: fresh, want: dstruntime.HealthStateReady},
+		{name: "new collector dormant in verified current process", health: newCollector, paused: &paused, currentBoot: true, want: dstruntime.HealthStateReady},
 	}
 
 	for _, test := range tests {

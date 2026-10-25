@@ -26,6 +26,7 @@ func TestInstalledRuntimeLoadsThroughRestrictedPersistentStorage(t *testing.T) {
 			}
 			worldPath := filepath.Join(root, "Cluster_1", "Master")
 			state := lua.NewState()
+			installStaticSchedulerStub(state)
 			defer state.Close()
 			preloadGameJSONHarness(state)
 			if err := state.DoString(`

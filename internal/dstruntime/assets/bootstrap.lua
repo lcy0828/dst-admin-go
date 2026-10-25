@@ -1,7 +1,7 @@
-local VERSION = "2.4.12"
+local VERSION = "2.4.13"
 local PROTOCOL_VERSION = 2
 local MODULE_ROOT = "mod_config_data/dst-admin/runtime/"
-local READY_RETRY_SECONDS = 0.5
+local SNAPSHOT_INTERVAL = 5
 local pending_update = rawget(_G, "DSTAdminPendingUpdate")
 local UPDATE_ID = pending_update ~= nil and pending_update.id or nil
 local previous_runtime = rawget(_G, "DSTAdmin")
@@ -93,6 +93,11 @@ local function new_candidate()
         readinessTask = nil,
         readyAnnounced = false,
         activationCallback = nil,
+        refreshCallbacks = {},
+        refreshInProgress = false,
+        refreshEpoch = 0,
+        periodicTask = nil,
+        readinessAttempts = 0,
     }
 
     function candidate.Status()
@@ -114,6 +119,21 @@ local function new_candidate()
             diagnostics = diagnostics,
             barriers = barriers,
         }
+    end
+
+    local function periodic_capture()
+        candidate.periodicTask = nil
+        if rawget(_G, "DSTAdmin") ~= candidate or candidate.state == "stopped" or candidate.state == "failed" then return end
+        -- A slow snapshot never creates a queue. Health can still describe the
+        -- pending operation, without advancing either snapshot's capture time.
+        if candidate.refreshInProgress then
+            if type(candidate.Telemetry.Heartbeat) == "function" then candidate.Telemetry.Heartbeat() end
+        else
+            candidate.Refresh()
+        end
+        if rawget(_G, "DSTAdmin") == candidate and candidate.state ~= "stopped" and candidate.state ~= "failed" then
+            candidate.periodicTask = clock.After(SNAPSHOT_INTERVAL, periodic_capture, "dst-admin-capture")
+        end
     end
 
     function candidate.Start()
@@ -167,6 +187,9 @@ local function new_candidate()
             return false
         end
         candidate.state = candidate_ready(candidate) and "running" or "waiting_for_world"
+        if candidate.periodicTask == nil then
+            candidate.periodicTask = clock.After(SNAPSHOT_INTERVAL, periodic_capture, "dst-admin-capture")
+        end
         return true
     end
 
@@ -174,55 +197,48 @@ local function new_candidate()
         if candidate.state == "stopped" then
             return true
         end
+        -- Invalidate activation before notifying outstanding refresh callers.
+        -- Otherwise their failure callback can roll back an explicitly stopped
+        -- candidate and revive an instance during handover.
+        candidate.state = "stopped"
+        candidate.activationCallback = nil
+        if candidate.postInitOwner ~= nil and candidate.postInitOwner.SimPostInit == candidate.postInitHook then
+            candidate.postInitOwner.SimPostInit = candidate.originalPostInit
+        end
         if candidate.readinessTask ~= nil then
             candidate.readinessTask:Cancel()
             candidate.readinessTask = nil
         end
-        if candidate.Diagnostics ~= nil then
-            local ok, stopped = xpcall(candidate.Diagnostics.Stop, debug.traceback)
-            if not ok or stopped == false then
-                emit_error("STOP_FAILED", stopped)
-                return false
-            end
+        if candidate.periodicTask ~= nil then
+            candidate.periodicTask:Cancel()
+            candidate.periodicTask = nil
         end
-        if candidate.Barriers ~= nil then
-            local ok, stopped = xpcall(candidate.Barriers.Stop, debug.traceback)
-            if not ok or stopped == false then
-                emit_error("STOP_FAILED", stopped)
-                return false
-            end
-        end
-        if candidate.Events ~= nil then
-            local ok, stopped = xpcall(candidate.Events.Stop, debug.traceback)
-            if not ok or stopped == false then
-                emit_error("STOP_FAILED", stopped)
-                return false
-            end
-        end
-        if candidate.WorldState ~= nil then
-            local ok, stopped = xpcall(candidate.WorldState.Stop, debug.traceback)
-            if not ok or stopped == false then
-                emit_error("STOP_FAILED", stopped)
-                return false
-            end
-        end
-        if candidate.Telemetry ~= nil then
-            local ok, stopped = xpcall(function() return candidate.Telemetry.Stop(handover) end, debug.traceback)
-            if not ok or stopped == false then
-                emit_error("STOP_FAILED", stopped)
-                return false
+        candidate.refreshEpoch = candidate.refreshEpoch + 1
+        candidate.refreshInProgress = false
+        local callbacks = candidate.refreshCallbacks
+        candidate.refreshCallbacks = {}
+        for _, callback in ipairs(callbacks) do pcall(callback, false) end
+        local all_stopped = true
+        for _, name in ipairs({"Diagnostics", "Barriers", "Events", "WorldState", "Telemetry"}) do
+            local module = candidate[name]
+            if module ~= nil then
+                local ok, stopped = xpcall(function() return module.Stop(name == "Telemetry" and handover or nil) end, debug.traceback)
+                if not ok or stopped == false then
+                    all_stopped = false
+                    emit_error("STOP_FAILED", name .. ": " .. tostring(stopped))
+                end
             end
         end
         if candidate.Commands ~= nil and type(candidate.Commands.ClearCatalog) == "function" then
             local ok, failure = pcall(candidate.Commands.ClearCatalog)
             if not ok then
+                all_stopped = false
                 emit_error("STOP_FAILED", failure)
-                return false
             end
         end
         candidate.activationCallback = nil
-        candidate.state = "stopped"
-        return true
+        candidate.state = all_stopped and "stopped" or "failed"
+        return all_stopped
     end
 
     function candidate.Reload()
@@ -247,38 +263,62 @@ local function new_candidate()
         return true
     end
 
+    function candidate.Poll()
+        if candidate.state == "stopped" or candidate.state == "failed" then return end
+        -- Whole-server idle sleep can stop both game schedulers. Explicit
+        -- management input services due deadlines without advancing game time.
+        for _, name in ipairs({"Telemetry", "WorldState", "Events", "Diagnostics", "Barriers"}) do
+            local module = candidate[name]
+            if module ~= nil and type(module.Poll) == "function" then module.Poll() end
+        end
+        clock.Poll()
+        if candidate.activationCallback ~= nil and candidate_ready(candidate) then
+            candidate.Activate(candidate.activationCallback)
+        end
+    end
+
     function candidate.Refresh(callback)
+        candidate.Poll()
+        if candidate.refreshInProgress then
+            if type(callback) == "function" then
+                if #candidate.refreshCallbacks >= 32 then callback(false); return false end
+                candidate.refreshCallbacks[#candidate.refreshCallbacks + 1] = callback
+            end
+            return true
+        end
         local completed = false
+        local epoch = candidate.refreshEpoch
         local function finish(written)
             if completed then return end
             completed = true
-            if type(callback) == "function" then callback(written == true) end
+            if candidate.refreshEpoch ~= epoch then return end
+            candidate.refreshInProgress = false
+            local callbacks = candidate.refreshCallbacks
+            candidate.refreshCallbacks = {}
+            for _, pending in ipairs(callbacks) do pcall(pending, written == true) end
         end
         if candidate.state == "waiting_for_world" and candidate_ready(candidate) then
             candidate.state = "running"
         end
         if candidate.state ~= "running" or candidate.WorldState == nil or candidate.Telemetry == nil then
-            finish(false)
+            if type(callback) == "function" then callback(false) end
             return false
         end
+        candidate.refreshInProgress = true
+        if type(callback) == "function" then candidate.refreshCallbacks[#candidate.refreshCallbacks + 1] = callback end
         local ok, accepted = xpcall(function()
             return candidate.WorldState.EmitOnce(function(written)
-                if written ~= true then
-                    emit_error("REFRESH_WORLDSTATE_FAILED", "world state snapshot was not written")
-                    finish(false)
-                    return
-                end
+                if candidate.refreshEpoch ~= epoch or rawget(_G, "DSTAdmin") ~= candidate or candidate.state == "stopped" then return end
                 local emitted, result = xpcall(function()
-                    return candidate.Telemetry.EmitOnce(function(persisted) finish(persisted) end)
+                    return candidate.Telemetry.EmitOnce(function(persisted) finish(written == true and persisted == true) end)
                 end, debug.traceback)
                 if not emitted or result ~= true then
-                    emit_error("REFRESH_TELEMETRY_FAILED", result)
                     finish(false)
                 end
             end)
         end, debug.traceback)
         if not ok or accepted ~= true then
-            emit_error("REFRESH_WORLDSTATE_FAILED", accepted)
+            if type(candidate.Telemetry.Heartbeat) == "function" then candidate.Telemetry.Heartbeat() end
             finish(false)
             return false
         end
@@ -292,6 +332,10 @@ local function new_candidate()
     end
 
     local function complete_activation()
+        if candidate.readinessTask ~= nil then
+            candidate.readinessTask:Cancel()
+            candidate.readinessTask = nil
+        end
         local callback = candidate.activationCallback
         candidate.activationCallback = nil
         candidate.state = "running"
@@ -317,13 +361,23 @@ local function new_candidate()
             return
         end
         candidate.state = "waiting_for_world"
-        if scheduler ~= nil and type(scheduler.ExecuteInTime) == "function" then
-            candidate.readinessTask = scheduler:ExecuteInTime(READY_RETRY_SECONDS, await_world, "dst-admin-bootstrap-ready")
-        end
+        candidate.readinessAttempts = candidate.readinessAttempts + 1
+        candidate.readinessTask = clock.After(clock.ReadyDelay(candidate.readinessAttempts), await_world, "dst-admin-bootstrap-ready")
     end
 
     function candidate.Activate(callback)
         candidate.activationCallback = callback
+        local owner = rawget(_G, "ModManager")
+        if owner ~= nil and type(owner.SimPostInit) == "function" and candidate.postInitHook == nil then
+            candidate.postInitOwner, candidate.originalPostInit = owner, owner.SimPostInit
+            candidate.postInitHook = function(...)
+                candidate.originalPostInit(...)
+                if rawget(_G, "DSTAdmin") == candidate and candidate.state ~= "stopped" then
+                    candidate.Poll()
+                end
+            end
+            owner.SimPostInit = candidate.postInitHook
+        end
         if candidate_ready(candidate) then
             return complete_activation()
         end
