@@ -128,6 +128,17 @@ func (m *Manager) BuildPlan(ctx context.Context, input PlanInput) (Plan, error) 
 			return Plan{}, ErrInvalidInput
 		}
 		if len(raw.ModOverrides) == 0 {
+			// Compatibility permits generation for a new destination only. A
+			// Workshop subset cannot reconstruct an existing mixed document.
+			path := filepath.Join(installation.SavePath, raw.RoomDirectory, raw.WorldDirectory, "modoverrides.lua")
+			if err := rejectSymlinkComponents(path); err != nil {
+				return Plan{}, err
+			}
+			if _, err := os.Lstat(path); err == nil {
+				return Plan{}, fmt.Errorf("%w: complete modoverrides.lua is required for an existing world", ErrInvalidInput)
+			} else if !os.IsNotExist(err) {
+				return Plan{}, err
+			}
 			raw.ModOverrides = RenderDefaultOverrides(raw.Mods)
 		}
 		if len(raw.ModOverrides) > maxOverridesBytes || strings.IndexByte(string(raw.ModOverrides), 0) >= 0 {

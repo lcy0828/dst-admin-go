@@ -400,7 +400,7 @@ func localRuntimeCapabilities() []string {
 		return capabilities
 	}
 	return append(capabilities,
-		"runtime.mods.local-link.v1",
+		"runtime.mods.local-link.v1", shared.LocalModCapability,
 		"shard.control.v1", "shard.control.v2", "shard.runtime-mode.v1", "shard.skip-mod-update.v1", "runtime.driver.v2", "runtime.console.v2",
 		"runtime.logs.v1", "runtime.chat-history.v1", "runtime.artifacts.v1", "runtime.worldstate.read.v1", "runtime.entity-artwork.v1", "runtime.migration.v1", "runtime.migration.peer.v1",
 		"runtime.backup.v1", "runtime.restore.collector.v1", "runtime.mods.v1", "runtime.mods.state.v1", "runtime.mods.files.v1", "runtime.mods.inventory.v1", "runtime.mods.fetch.v2", "runtime.mods.download.v1", "runtime.mods.content-publish.v1", "runtime.game-update.v1", "runtime.game-install.v1", "runtime.luajit.v2", "runtime.cpu.v1",

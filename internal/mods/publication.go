@@ -75,12 +75,23 @@ func MutateModOverride(content []byte, mutation OverrideMutation) (OverrideMutat
 	changes := make([]ConfigChange, 0)
 	switch mutation.Action {
 	case OverrideActionAdd:
-		ids := uniqueModIDs(mutation.ModIDs)
+		ids := make([]string, 0, len(mutation.ModIDs))
+		seen := make(map[string]bool)
+		for _, id := range mutation.ModIDs {
+			ref, valid := ParseReference(id)
+			if !valid {
+				return OverrideMutationResult{}, ErrInvalidModID
+			}
+			if !seen[ref.ID] {
+				ids = append(ids, ref.ID)
+				seen[ref.ID] = true
+			}
+		}
 		if len(ids) == 0 {
 			return OverrideMutationResult{}, ErrInvalidRequest
 		}
 		for _, modID := range ids {
-			if !validModID(modID) {
+			if !ValidReference(modID) {
 				return OverrideMutationResult{}, ErrInvalidModID
 			}
 			entry, exists := document.mod(modID)
@@ -91,7 +102,7 @@ func MutateModOverride(content []byte, mutation OverrideMutation) (OverrideMutat
 				}
 			}
 			ensureModEntry(&document, modID, mutation.Enabled)
-			changes = append(changes, ConfigChange{Path: "workshop-" + modID, Label: modID, Before: exists, After: true, Operation: "add"})
+			changes = append(changes, ConfigChange{Path: overrideKey(modID), Label: modID, Before: exists, After: true, Operation: "add"})
 		}
 	case OverrideActionEnable:
 		entry, validationErr := requireOverrideEntry(document, mutation.ModID)
@@ -104,12 +115,12 @@ func MutateModOverride(content []byte, mutation OverrideMutation) (OverrideMutat
 			changes = append(changes, ConfigChange{Path: "enabled", Label: "启用状态", Before: before, After: mutation.Enabled, Operation: "replace"})
 		}
 	case OverrideActionRemove:
-		if !validModID(mutation.ModID) {
+		if !ValidReference(mutation.ModID) {
 			return OverrideMutationResult{}, ErrInvalidModID
 		}
 		if _, ok := document.mod(mutation.ModID); ok {
-			document.root.setStringEntry("workshop-"+mutation.ModID, nil)
-			changes = append(changes, ConfigChange{Path: "workshop-" + mutation.ModID, Label: mutation.ModID, Before: true, Operation: "remove"})
+			document.root.setStringEntry(overrideKey(mutation.ModID), nil)
+			changes = append(changes, ConfigChange{Path: overrideKey(mutation.ModID), Label: mutation.ModID, Before: true, Operation: "remove"})
 		}
 	case OverrideActionConfigure:
 		entry, validationErr := requireOverrideEntry(document, mutation.ModID)
@@ -161,7 +172,7 @@ func MutateModOverride(content []byte, mutation OverrideMutation) (OverrideMutat
 }
 
 func requireOverrideEntry(document modOverrideDocument, modID string) (*luaNode, error) {
-	if !validModID(modID) {
+	if !ValidReference(modID) {
 		return nil, ErrInvalidModID
 	}
 	entry, ok := document.mod(modID)
@@ -248,11 +259,12 @@ func overrideSnapshot(document modOverrideDocument) OverrideSnapshot {
 	entryRevisions := make(map[string]string)
 	configurationRevisions := make(map[string]string)
 	for _, entry := range document.root.entries {
-		if entry.key.kind.String() != "string" || !strings.HasPrefix(entry.key.text, "workshop-") {
+		ref, valid := configuredReference(entry)
+		if !valid {
 			continue
 		}
-		modID := strings.TrimPrefix(entry.key.text, "workshop-")
-		if validModID(modID) {
+		modID := ref.ID
+		{
 			mods = append(mods, OverrideModState{ModID: modID, Enabled: modEnabled(entry.value)})
 			entryRevisions[modID] = modEntryRevision(entry.value)
 			options, ok := modConfiguration(entry.value)

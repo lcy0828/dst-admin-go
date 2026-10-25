@@ -14,7 +14,7 @@ globals_table = lua.globals()
 original_globals = {str(key) for key in globals_table}
 
 globals_table.locale = selected_locale
-globals_table.folder_name = "workshop-" + mod_id
+globals_table.folder_name = os.environ.get("DST_MODINFO_DIRECTORY", "workshop-" + mod_id)
 lua.execute(
     "ChooseTranslationTable = function(translations) "
     "return translations[locale] or translations.zhr or translations[1] end"

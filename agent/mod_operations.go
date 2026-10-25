@@ -196,12 +196,23 @@ func (a *Agent) observeModAction(ctx context.Context, installation RuntimeInstal
 	response := &shared.RuntimeModResult{}
 	result.Mod = response
 	if request.Action == shared.RuntimeActionModSchemaRead {
-		parsed, err := mods.ParseInstalledModInfo(ctx, mods.NewDualParser("", ""), installation.WorkshopContentPath, runtimeModServerPath(installation), request.Mod.WorkshopID)
+		modID := request.Mod.WorkshopID
+		if request.Mod.ModID != "" {
+			modID = request.Mod.ModID
+		}
+		parsed, err := mods.ParseInstalledModInfo(ctx, mods.NewDualParser("", ""), installation.WorkshopContentPath, runtimeModServerPath(installation), modID)
 		if err == nil {
 			response.Schema = &shared.RuntimeModSchema{
 				WorkshopID: request.Mod.WorkshopID, Options: parsed.Values["configuration_options"],
 				Parser: parsed.Parser, FallbackUsed: parsed.FallbackUsed, FallbackReason: parsed.FallbackReason, Warnings: parsed.Warnings,
 			}
+			if request.Mod.ModID != "" {
+				response.Schema.ModID = modID
+			}
+			response.Schema.Name, _ = parsed.Values["name"].(string)
+			response.Schema.Author, _ = parsed.Values["author"].(string)
+			response.Schema.Version, _ = parsed.Values["version"].(string)
+			response.Schema.Description, _ = parsed.Values["description"].(string)
 			if encoded, encodeErr := json.Marshal(response.Schema); encodeErr != nil || len(encoded) > int(shared.MaximumSecureMessageBytes/2) {
 				err = errors.New("Mod 配置声明超过读取大小限制或无法编码")
 				response.Schema = nil
@@ -228,9 +239,17 @@ func (a *Agent) observeModAction(ctx context.Context, installation RuntimeInstal
 		var observation moddistribution.FilesObservation
 		var err error
 		if request.Action == shared.RuntimeActionModFilesInventory {
-			observation, err = moddistribution.InventoryInstallationFiles(ctx, trusted)
+			if request.Mod.IncludeLocal {
+				observation, err = moddistribution.InventoryInstallationMods(ctx, trusted)
+			} else {
+				observation, err = moddistribution.InventoryInstallationFiles(ctx, trusted)
+			}
 		} else {
-			observation, err = moddistribution.ObserveInstallationFiles(ctx, trusted, request.Mod.WorkshopIDs, worlds)
+			if len(request.Mod.ModIDs) > 0 {
+				observation, err = moddistribution.ObserveInstallationMods(ctx, trusted, request.Mod.ModIDs, worlds)
+			} else {
+				observation, err = moddistribution.ObserveInstallationFiles(ctx, trusted, request.Mod.WorkshopIDs, worlds)
+			}
 		}
 		if err == nil {
 			response.Files = runtimeModFilesObservation(observation)
@@ -310,6 +329,9 @@ func validateModOperationPayload(request shared.RuntimeOperationRequest) error {
 	emptyTransferCore := mod.Kind == "" && mod.UploadID == "" && mod.Size == 0 && mod.SHA256 == "" && len(mod.Data) == 0
 	emptyTransfer := emptyTransferCore && mod.PeerSubject == ""
 	emptyFetch := len(mod.FetchSources) == 0 && len(mod.FetchLocations) == 0 && !mod.Validate
+	if mod.ModID != "" && request.Action != shared.RuntimeActionModSchemaRead || len(mod.ModIDs) != 0 && request.Action != shared.RuntimeActionModFilesObserve || mod.IncludeLocal && request.Action != shared.RuntimeActionModFilesInventory {
+		return errors.New("本地 Mod 参数不能用于当前动作")
+	}
 	if request.Action != shared.RuntimeActionModFilesObserve && request.Action != shared.RuntimeActionModDownload && request.Action != shared.RuntimeActionModLink && (len(mod.WorkshopIDs) != 0 || len(mod.Worlds) != 0) {
 		return errors.New("Mod 文件观察参数不能用于当前动作")
 	}
@@ -340,7 +362,9 @@ func validateModOperationPayload(request shared.RuntimeOperationRequest) error {
 			return errors.New("Mod 缓存检查请求无效")
 		}
 	case shared.RuntimeActionModSchemaRead:
-		if !emptyTransfer || mod.OperationID != "" || !modWorkshopID.MatchString(mod.WorkshopID) || mod.ExpectedTreeSHA256 != "" ||
+		ref, local := shared.ParseModReference(mod.ModID)
+		validID := mod.ModID == "" && modWorkshopID.MatchString(mod.WorkshopID) || local && ref.Source == "local" && ref.ID == mod.ModID && mod.WorkshopID == ""
+		if !emptyTransfer || mod.OperationID != "" || !validID || mod.ExpectedTreeSHA256 != "" ||
 			mod.Offset != 0 || !emptyMetadata || !emptyFetch || mod.RoomDirectory != "" || mod.WorldDirectory != "" {
 			return errors.New("Mod 配置声明读取请求无效")
 		}
@@ -410,12 +434,20 @@ func validModDownloadIDs(values []string) bool {
 }
 
 func validModFilesObservation(mod shared.RuntimeModRequest) bool {
-	if len(mod.WorkshopIDs) < 1 || len(mod.WorkshopIDs) > 4096 || len(mod.Worlds) > 256 {
+	values := mod.WorkshopIDs
+	if len(mod.ModIDs) > 0 {
+		if len(mod.WorkshopIDs) > 0 {
+			return false
+		}
+		values = mod.ModIDs
+	}
+	if len(values) < 1 || len(values) > 4096 || len(mod.Worlds) > 256 {
 		return false
 	}
 	ids := make(map[string]bool, len(mod.WorkshopIDs))
-	for _, workshopID := range mod.WorkshopIDs {
-		if !modWorkshopID.MatchString(workshopID) || ids[workshopID] {
+	for _, workshopID := range values {
+		ref, valid := shared.ParseModReference(workshopID)
+		if !valid || ref.ID != workshopID || len(mod.ModIDs) == 0 && !modWorkshopID.MatchString(workshopID) || ids[workshopID] {
 			return false
 		}
 		ids[workshopID] = true
@@ -1386,40 +1418,11 @@ func runtimeModContentPlanInput(value shared.RuntimeModPlanInput, installation R
 }
 
 func readModOverrides(ctx context.Context, installation RuntimeInstallation, request shared.RuntimeModRequest) (*shared.RuntimeModOverridesChunk, error) {
-	path := filepath.Join(installation.SavePath, request.RoomDirectory, request.WorldDirectory, "modoverrides.lua")
-	if !pathWithinRoot(path, installation.SavePath) {
-		return nil, errors.New("modoverrides.lua 位于受信存档目录之外")
-	}
-	if err := rejectModSymlinkComponents(path); err != nil {
-		return nil, err
-	}
-	info, err := os.Lstat(path)
+	data, err := moddistribution.ReadOverrides(ctx, installation.SavePath, request.RoomDirectory, request.WorldDirectory)
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 0 || info.Size() > modMaximumOverrides {
-		return nil, errors.New("modoverrides.lua 不是安全的普通文件")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	openedInfo, err := file.Stat()
-	if err != nil || !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() {
-		return nil, errors.Join(errors.New("modoverrides.lua 在读取期间发生变化"), err)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	data, err := io.ReadAll(io.LimitReader(file, modMaximumOverrides+1))
-	if err != nil || int64(len(data)) != info.Size() {
-		return nil, errors.Join(errors.New("modoverrides.lua 读取不完整"), err)
-	}
-	if !utf8.Valid(data) || strings.IndexByte(string(data), 0) >= 0 {
-		return nil, errors.New("modoverrides.lua 不是有效 UTF-8 文本")
-	}
-	if request.Offset > int64(len(data)) {
+	if request.Offset < 0 || request.Offset > int64(len(data)) {
 		return nil, fmt.Errorf("modoverrides.lua offset 超出文件大小: %d", len(data))
 	}
 	digest := sha256.Sum256(data)
@@ -1428,6 +1431,7 @@ func readModOverrides(ctx context.Context, installation RuntimeInstallation, req
 		end = int64(len(data))
 	}
 	return &shared.RuntimeModOverridesChunk{
+		Missing:       data == nil,
 		RoomDirectory: request.RoomDirectory, WorldDirectory: request.WorldDirectory,
 		Offset: request.Offset, NextOffset: end, Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:]),
 		Data: append([]byte(nil), data[request.Offset:end]...), Complete: end == int64(len(data)),
@@ -1654,7 +1658,7 @@ func runtimeModFilesObservation(value moddistribution.FilesObservation) *shared.
 	for key, world := range value.Worlds {
 		result.Worlds[key] = shared.RuntimeModWorldFileState{
 			RoomID: world.RoomID, WorldID: world.WorldID,
-			LoadedModIDs: append([]string(nil), world.LoadedModIDs...), LogObserved: world.LogObserved,
+			LoadedModIDs: append([]string(nil), world.LoadedModIDs...), LogObserved: world.LogObserved, LogStartedAt: world.LogStartedAt,
 		}
 	}
 	return result

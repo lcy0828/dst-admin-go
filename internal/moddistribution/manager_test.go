@@ -1011,7 +1011,7 @@ func TestPublishRefusesExternalChangeAfterPrepare(t *testing.T) {
 	manifest := environment.importMod(t, "904", map[string]string{"modinfo.lua": "version='1'"})
 	writeWorldConfig(t, environment.saves, "Master", []byte("return {before=true}\n"))
 	writeWorldConfig(t, environment.saves, "Caves", []byte("return {before=true}\n"))
-	plan, err := environment.manager.BuildPlan(context.Background(), release("release-external-01", manifest, nil, nil))
+	plan, err := environment.manager.BuildPlan(context.Background(), release("release-external-01", manifest, []byte("return {after=true}\n"), []byte("return {after=true}\n")))
 	if err != nil {
 		t.Fatal(err)
 	}

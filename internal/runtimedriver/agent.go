@@ -459,15 +459,26 @@ func (d *Agent) InspectModCache(ctx context.Context, target Target, workshopID, 
 }
 
 func (d *Agent) ReadModSchema(ctx context.Context, target Target, workshopID string) (shared.RuntimeModSchema, error) {
+	ref, valid := shared.ParseModReference(workshopID)
+	if !valid {
+		return shared.RuntimeModSchema{}, ErrInvalidTarget
+	}
+	workshopID = ref.ID
 	request := modRuntimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionModSchemaRead)
 	request.Mod = &shared.RuntimeModRequest{WorkshopID: workshopID}
+	if ref.Source == "local" {
+		request.Mod.WorkshopID, request.Mod.ModID = "", ref.ID
+	}
 	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 30)
 	value, err := checkedModResult(result.Result, err)
 	if err != nil {
 		return shared.RuntimeModSchema{}, err
 	}
-	if !value.Complete || value.Schema == nil || value.Schema.WorkshopID != workshopID || value.Schema.Parser == "" {
+	if !value.Complete || value.Schema == nil || value.Schema.Parser == "" {
 		return shared.RuntimeModSchema{}, errors.New("Agent 未返回匹配的 Mod 配置声明")
+	}
+	if ref.Source == "local" && (value.Schema.ModID != ref.ID || value.Schema.WorkshopID != "") || ref.Source == "workshop" && value.Schema.WorkshopID != ref.ID {
+		return shared.RuntimeModSchema{}, errors.New("Agent 返回的 Mod 配置身份不匹配")
 	}
 	return *value.Schema, nil
 }
@@ -652,6 +663,16 @@ func (d *Agent) ObserveModFiles(ctx context.Context, target Target, workshopIDs 
 		WorkshopIDs: append([]string(nil), workshopIDs...),
 		Worlds:      append([]shared.RuntimeModObserveWorld(nil), worlds...),
 	}
+	for _, id := range workshopIDs {
+		ref, valid := shared.ParseModReference(id)
+		if !valid || ref.ID != id {
+			return nil, ErrInvalidTarget
+		}
+		if ref.Source == "local" {
+			request.Mod.ModIDs = append([]string(nil), workshopIDs...)
+			request.Mod.WorkshopIDs = nil
+		}
+	}
 	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 30)
 	value, err := checkedModResult(result.Result, err)
 	if err != nil {
@@ -691,8 +712,16 @@ func (d *Agent) ObserveModFiles(ctx context.Context, target Target, workshopIDs 
 }
 
 func (d *Agent) InventoryModFiles(ctx context.Context, target Target) (*shared.RuntimeModFilesObservation, error) {
+	return d.inventoryModFiles(ctx, target, false)
+}
+
+func (d *Agent) InventoryLocalModFiles(ctx context.Context, target Target) (*shared.RuntimeModFilesObservation, error) {
+	return d.inventoryModFiles(ctx, target, true)
+}
+
+func (d *Agent) inventoryModFiles(ctx context.Context, target Target, includeLocal bool) (*shared.RuntimeModFilesObservation, error) {
 	request := modRuntimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionModFilesInventory)
-	request.Mod = &shared.RuntimeModRequest{}
+	request.Mod = &shared.RuntimeModRequest{IncludeLocal: includeLocal}
 	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 30)
 	value, err := checkedModResult(result.Result, err)
 	if err != nil {
@@ -702,7 +731,8 @@ func (d *Agent) InventoryModFiles(ctx context.Context, target Target) (*shared.R
 		return nil, errors.New("Agent 返回的 Mod 安装目录清单无效")
 	}
 	for workshopID, state := range value.Files.Mods {
-		if !validRuntimeWorkshopID(workshopID) || state.Status != shared.RuntimeModFileReady && state.Status != shared.RuntimeModFileInvalid {
+		ref, valid := shared.ParseModReference(workshopID)
+		if !valid || ref.ID != workshopID || !includeLocal && !validRuntimeWorkshopID(workshopID) || state.Status != shared.RuntimeModFileReady && state.Status != shared.RuntimeModFileInvalid {
 			return nil, errors.New("Agent 返回的 Mod 安装目录项目无效")
 		}
 	}

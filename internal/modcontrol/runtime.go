@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"dont/internal/agents"
 	"dont/internal/moddistribution"
 	"dont/internal/modpublication"
 	"dont/internal/mods"
@@ -330,7 +331,7 @@ func (r *Runtime) ObserveRuntimeModFiles(ctx context.Context, request RuntimeFil
 		})
 	}
 	if request.TargetID == "local" {
-		observed, err := r.manager.ObserveFiles(ctx, request.InstallationID, request.WorkshopIDs, worlds)
+		observed, err := r.manager.ObserveMods(ctx, request.InstallationID, request.WorkshopIDs, worlds)
 		if err != nil {
 			return nil, err
 		}
@@ -348,6 +349,18 @@ func (r *Runtime) ObserveRuntimeModFiles(ctx context.Context, request RuntimeFil
 	}
 	if !containsRuntimeCapability(execution.Target.Capabilities, "runtime.mods.files.v1") {
 		return nil, errors.New("运行节点版本不支持实际 Mod 文件读取")
+	}
+	if !containsRuntimeCapability(execution.Target.Capabilities, shared.LocalModCapability) {
+		ids := make([]string, 0, len(request.WorkshopIDs))
+		for _, id := range request.WorkshopIDs {
+			if mods.ValidID(id) {
+				ids = append(ids, id)
+			}
+		}
+		if len(ids) == 0 {
+			return nil, fmt.Errorf("本地 Mod 观察需要升级运行节点: %w", runtimedriver.ErrCapabilityMissing)
+		}
+		request.WorkshopIDs = ids
 	}
 	target := runtimedriver.Target{
 		TargetID: request.TargetID, InstallationID: request.InstallationID,
@@ -367,16 +380,58 @@ func (r *Runtime) ObserveRuntimeModInventory(ctx context.Context, targetID, inst
 		return nil, ErrInvalidRequest
 	}
 	if targetID == "local" {
-		observed, err := r.manager.InventoryFiles(ctx, installationID)
+		observed, err := r.manager.InventoryMods(ctx, installationID)
 		if err != nil {
 			return nil, err
 		}
 		return runtimeFilesObservation(observed), nil
 	}
-	return r.remote.InventoryModFiles(ctx, runtimedriver.Target{
+	target := runtimedriver.Target{
 		TargetID: targetID, InstallationID: installationID,
 		TopologyRevision: "runtime-mod-inventory-v1",
-	})
+	}
+	if reader, ok := r.remote.(interface {
+		InventoryLocalModFiles(context.Context, runtimedriver.Target) (*shared.RuntimeModFilesObservation, error)
+	}); ok {
+		value, err := reader.InventoryLocalModFiles(ctx, target)
+		if err == nil || !errors.Is(err, agents.ErrUnsupportedAction) {
+			return value, err
+		}
+	}
+	return r.remote.InventoryModFiles(ctx, target)
+}
+
+func (r *Runtime) LocalModDetails(ctx context.Context, targetID, installationID, id string) (mods.SteamMod, error) {
+	ref, valid := mods.ParseReference(id)
+	if !valid || ref.Source != "local" || targetID == "" || installationID == "" {
+		return mods.SteamMod{}, mods.ErrInvalidRequest
+	}
+	item := mods.SteamMod{ID: ref.ID, Source: ref.Source, DirectoryName: ref.DirectoryName, Dependencies: []string{}, Tags: []string{}}
+	if targetID == "local" {
+		installation, ok := r.manager.Installation(installationID)
+		if !ok {
+			return item, runtimedriver.ErrInvalidTarget
+		}
+		parsed, err := mods.ParseInstalledModInfo(ctx, mods.NewDualParser("", ""), installation.WorkshopContentPath, installation.ServerPath, ref.ID)
+		if err != nil {
+			return item, err
+		}
+		item.Name, _ = parsed.Values["name"].(string)
+		item.Author, _ = parsed.Values["author"].(string)
+		item.Version, _ = parsed.Values["version"].(string)
+		item.Description, _ = parsed.Values["description"].(string)
+		return item, nil
+	}
+	reader, ok := r.remote.(runtimedriver.ModSchemaReader)
+	if !ok {
+		return item, runtimedriver.ErrCapabilityMissing
+	}
+	schema, err := reader.ReadModSchema(ctx, runtimedriver.Target{TargetID: targetID, InstallationID: installationID, TopologyRevision: "local-mod-details-v1"}, ref.ID)
+	if err != nil {
+		return item, err
+	}
+	item.Name, item.Author, item.Version, item.Description = schema.Name, schema.Author, schema.Version, schema.Description
+	return item, nil
 }
 
 func runtimeFilesObservation(value moddistribution.FilesObservation) *shared.RuntimeModFilesObservation {
@@ -396,7 +451,7 @@ func runtimeFilesObservation(value moddistribution.FilesObservation) *shared.Run
 	for key, world := range value.Worlds {
 		result.Worlds[key] = shared.RuntimeModWorldFileState{
 			RoomID: world.RoomID, WorldID: world.WorldID,
-			LoadedModIDs: append([]string(nil), world.LoadedModIDs...), LogObserved: world.LogObserved,
+			LoadedModIDs: append([]string(nil), world.LoadedModIDs...), LogObserved: world.LogObserved, LogStartedAt: world.LogStartedAt,
 		}
 	}
 	return result

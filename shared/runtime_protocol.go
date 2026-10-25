@@ -319,6 +319,9 @@ type RuntimeModPlanInput struct {
 }
 
 type RuntimeModRequest struct {
+	ModID              string                    `json:"mod_id,omitempty"`
+	ModIDs             []string                  `json:"mod_ids,omitempty"`
+	IncludeLocal       bool                      `json:"include_local,omitempty"`
 	Kind               RuntimeModUploadKind      `json:"kind,omitempty"`
 	UploadID           string                    `json:"upload_id,omitempty"`
 	OperationID        string                    `json:"release_operation_id,omitempty"`
@@ -621,10 +624,11 @@ type RuntimeModFileState struct {
 }
 
 type RuntimeModWorldFileState struct {
-	RoomID       string   `json:"room_id"`
-	WorldID      string   `json:"world_id"`
-	LoadedModIDs []string `json:"loaded_mod_ids"`
-	LogObserved  bool     `json:"log_observed"`
+	LogStartedAt time.Time `json:"log_started_at,omitempty"`
+	RoomID       string    `json:"room_id"`
+	WorldID      string    `json:"world_id"`
+	LoadedModIDs []string  `json:"loaded_mod_ids"`
+	LogObserved  bool      `json:"log_observed"`
 }
 
 type RuntimeModFilesObservation struct {
@@ -642,6 +646,7 @@ type RuntimeModReleaseState struct {
 }
 
 type RuntimeModOverridesChunk struct {
+	Missing        bool   `json:"missing,omitempty"`
 	RoomDirectory  string `json:"room_directory"`
 	WorldDirectory string `json:"world_directory"`
 	Offset         int64  `json:"offset"`
@@ -653,6 +658,11 @@ type RuntimeModOverridesChunk struct {
 }
 
 type RuntimeModSchema struct {
+	ModID          string      `json:"mod_id,omitempty"`
+	Name           string      `json:"name,omitempty"`
+	Author         string      `json:"author,omitempty"`
+	Version        string      `json:"version,omitempty"`
+	Description    string      `json:"description,omitempty"`
 	WorkshopID     string      `json:"workshop_id"`
 	Options        interface{} `json:"options"`
 	Parser         string      `json:"parser"`

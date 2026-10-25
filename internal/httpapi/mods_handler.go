@@ -318,7 +318,7 @@ func (h *ModHandler) addToRoom(c *gin.Context) {
 		return
 	}
 	roomID, modID := c.Param("roomId"), c.Param("modId")
-	if !mods.ValidID(modID) {
+	if !mods.ValidReference(modID) {
 		modFailure(c, mods.ErrInvalidModID)
 		return
 	}
@@ -346,6 +346,35 @@ func (h *ModHandler) search(c *gin.Context) {
 }
 
 func (h *ModHandler) details(c *gin.Context) {
+	ref, valid := mods.ParseReference(c.Param("modId"))
+	if !valid {
+		modFailure(c, mods.ErrInvalidModID)
+		return
+	}
+	if ref.Source == "local" {
+		targetID, installationID := c.Query("targetId"), c.Query("installationId")
+		if targetID == "" || installationID == "" {
+			modFailure(c, &mods.FieldError{Fields: map[string]string{"targetId": "本地模组必须指定运行节点", "installationId": "本地模组必须指定安装实例"}})
+			return
+		}
+		reader, ok := h.placement.(interface {
+			LocalModDetails(context.Context, string, string, string) (mods.SteamMod, error)
+		})
+		if !ok {
+			modFailure(c, runtimedriver.ErrCapabilityMissing)
+			return
+		}
+		item, err := reader.LocalModDetails(c.Request.Context(), targetID, installationID, ref.ID)
+		if err != nil {
+			modFailure(c, err)
+			return
+		}
+		if item.Name == "" {
+			item.Name = ref.DirectoryName
+		}
+		Success(c, http.StatusOK, item)
+		return
+	}
 	value, err := h.mods.Search(c.Request.Context(), mods.SearchOptions{
 		Query: c.Param("modId"), Sort: mods.SearchSortRelevance, Days: 7, Page: 1, PageSize: 1,
 	})
@@ -358,6 +387,7 @@ func (h *ModHandler) details(c *gin.Context) {
 		return
 	}
 	item := value.Items[0]
+	item.Source, item.DirectoryName = "workshop", ref.DirectoryName
 	item.MetadataWarning = value.Warning
 	Success(c, http.StatusOK, item)
 }
@@ -441,12 +471,14 @@ func (h *ModHandler) install(c *gin.Context) {
 	if !bindModJSON(c, &request) {
 		return
 	}
-	if !mods.ValidID(request.ModID) {
+	ref, valid := mods.ParseReference(request.ModID)
+	if !valid || ref.Source == "local" && (h.roomInstaller == nil || request.IncludeDependencies) {
 		modFailure(c, mods.ErrInvalidModID)
 		return
 	}
+	request.ModID = ref.ID
 	roomID := c.Param("roomId")
-	h.submit(c, "mod.install", roomID, "", request.ModID, "Workshop "+request.ModID, func(ctx context.Context, jobID string) (mods.ActionResult, error) {
+	h.submit(c, "mod.install", roomID, "", request.ModID, ref.DirectoryName, func(ctx context.Context, jobID string) (mods.ActionResult, error) {
 		if h.roomInstaller != nil {
 			return h.roomInstaller.Install(ctx, jobID, roomID, request, log.Writer())
 		}
@@ -474,7 +506,7 @@ func (h *ModHandler) enable(c *gin.Context) {
 		return
 	}
 	roomID, modID := c.Param("roomId"), c.Param("modId")
-	if !mods.ValidID(modID) {
+	if !mods.ValidReference(modID) {
 		modFailure(c, mods.ErrInvalidModID)
 		return
 	}

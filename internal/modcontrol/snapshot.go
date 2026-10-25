@@ -7,12 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 
+	"dont/internal/moddistribution"
 	"dont/internal/modpublication"
 	"dont/internal/mods"
 	"dont/internal/rooms"
@@ -270,6 +270,10 @@ func (s *SnapshotSource) build(ctx context.Context) (runtimeSnapshot, error) {
 			if request.roomOnly && request.action != "reconcile" && len(request.worldIDs) > 0 && !request.worldIDs[world.ID] {
 				continue
 			}
+
+			if request.worldIDs[world.ID] && request.modID != "" && !mods.ValidID(request.modID) && execution.AppliedTargetID != "local" && !containsRuntimeCapability(execution.Target.Capabilities, shared.LocalModCapability) {
+				return runtimeSnapshot{}, fmt.Errorf("节点 %s 需要升级后才能管理本地模组: %w", execution.AppliedTargetID, runtimedriver.ErrCapabilityMissing)
+			}
 			sourcePlacement := publicationPlacement(execution, room.ID, world.ID)
 			placement := effectivePublicationPlacement(request, execution, room.ID, world.ID)
 			installationKey := placement.TargetID + "\x00" + placement.InstallationID
@@ -304,6 +308,20 @@ func (s *SnapshotSource) build(ctx context.Context) (runtimeSnapshot, error) {
 					ExpectedSHA256: originalSHA256, Content: content,
 				})
 			}
+
+			// A Workshop publication carries the whole configuration but cannot
+			// move arbitrary local content. Refuse before staging any target.
+			if sourcePlacement.TargetID != placement.TargetID || sourcePlacement.InstallationID != placement.InstallationID {
+				original, inspectErr := mods.InspectModOverride(content)
+				if inspectErr != nil {
+					return runtimeSnapshot{}, inspectErr
+				}
+				for _, item := range original.Mods {
+					if !mods.ValidID(item.ModID) {
+						return runtimeSnapshot{}, fmt.Errorf("本地模组 %s 尚不支持跨安装迁移；请先处理目标安装的本地依赖: %w", item.ModID, ErrInvalidRequest)
+					}
+				}
+			}
 			snapshot, err := mods.InspectModOverride(content)
 			if err != nil {
 				return runtimeSnapshot{}, err
@@ -312,7 +330,17 @@ func (s *SnapshotSource) build(ctx context.Context) (runtimeSnapshot, error) {
 				RoomID: room.ID, RoomDirectory: room.DirectoryName, WorldID: world.ID,
 				WorldDirectory: world.DirectoryName, IsMaster: world.IsMaster, ModOverrides: append([]byte(nil), content...),
 			}
+			if content == nil {
+				// Publication requires a complete document; preserve raw absence
+				// separately for the editor and compare-and-swap digest.
+				managed.ModOverrides = []byte("return {}\n")
+			}
 			for _, item := range snapshot.Mods {
+				// Local configuration travels in the complete Lua document. It must
+				// never enter a Workshop-only content plan or Steam download.
+				if !mods.ValidID(item.ModID) {
+					continue
+				}
 				requirement := modpublication.ModRequirement{WorkshopID: item.ModID}
 				if artifact, exists := request.artifacts[proposalArtifactKey(placement.TargetID, placement.InstallationID, item.ModID)]; exists {
 					requirement.TreeSHA256 = artifact.TreeSHA256
@@ -457,18 +485,11 @@ func (s *SnapshotSource) applyProposal(ctx context.Context, request proposal, ex
 
 func (s *SnapshotSource) readOverrides(ctx context.Context, execution topology.ExecutionPlacement, placement modpublication.AppliedPlacement) ([]byte, error) {
 	if placement.TargetID == "local" {
-		path := filepath.Join(s.saveRoot, execution.Room.DirectoryName, execution.World.DirectoryName, "modoverrides.lua")
-		info, err := os.Lstat(path)
-		if os.IsNotExist(err) {
-			return nil, nil
+		installation, err := s.localInstallation(execution, placement.InstallationID)
+		if err != nil {
+			return nil, err
 		}
-		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return nil, errors.Join(err, errors.New("modoverrides.lua is not a trusted regular file"))
-		}
-		if info.Size() < 0 || info.Size() > 8<<20 {
-			return nil, errors.New("modoverrides.lua exceeded its safe read limit")
-		}
-		return os.ReadFile(path)
+		return moddistribution.ReadOverrides(ctx, installation.SavePath, execution.Room.DirectoryName, execution.World.DirectoryName)
 	}
 	target := runtimedriver.Target{
 		TargetID: placement.TargetID, InstallationID: placement.InstallationID,
@@ -483,7 +504,13 @@ func (s *SnapshotSource) readOverrides(ctx context.Context, execution topology.E
 		if err != nil {
 			return nil, err
 		}
-		if chunk.Size < 0 || chunk.Size > 8<<20 || len(chunk.Data) > shared.MaxChunkBytes ||
+		if chunk.Missing {
+			if offset != 0 || chunk.Offset != 0 || chunk.NextOffset != 0 || chunk.Size != 0 || len(chunk.Data) != 0 || !chunk.Complete || chunk.SHA256 != shaHex(nil) || chunk.RoomDirectory != execution.Room.DirectoryName || chunk.WorldDirectory != execution.World.DirectoryName {
+				return nil, errors.New("remote missing modoverrides.lua response is inconsistent")
+			}
+			return nil, nil
+		}
+		if chunk.Size <= 0 || chunk.Size > 8<<20 || len(chunk.Data) > shared.MaxChunkBytes ||
 			chunk.Offset != offset || chunk.NextOffset != offset+int64(len(chunk.Data)) || chunk.NextOffset > chunk.Size ||
 			chunk.RoomDirectory != execution.Room.DirectoryName || chunk.WorldDirectory != execution.World.DirectoryName {
 			return nil, errors.New("remote modoverrides.lua chunk is inconsistent")

@@ -39,6 +39,8 @@ func (e *RevisionConflictError) Unwrap() error { return ErrRevisionConflict }
 
 type SteamMod struct {
 	ID              string    `json:"id"`
+	Source          string    `json:"source,omitempty"`
+	DirectoryName   string    `json:"directoryName,omitempty"`
 	Name            string    `json:"name"`
 	AuthorID        string    `json:"authorId,omitempty"`
 	Author          string    `json:"author,omitempty"`

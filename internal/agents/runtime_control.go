@@ -25,6 +25,9 @@ func (s *Service) ExecuteRuntime(ctx context.Context, targetID string, request s
 	if agent.Status != StatusOnline {
 		return RuntimeExecutionResult{}, ErrAgentOffline
 	}
+	if request.Mod != nil && (request.Mod.ModID != "" || len(request.Mod.ModIDs) > 0 || request.Mod.IncludeLocal) && !containsString(agent.Capabilities, shared.LocalModCapability) {
+		return RuntimeExecutionResult{}, fmt.Errorf("Agent 不支持本地模组读取，请先升级 Agent: %w", ErrUnsupportedAction)
+	}
 	if !containsString(agent.Capabilities, "runtime.driver.v2") || !containsString(agent.Capabilities, runtimeCapability(request.Action)) {
 		if request.Action == shared.RuntimeActionLuaEnsure {
 			return RuntimeExecutionResult{}, fmt.Errorf("Agent 尚不支持 Runtime 自动维护，请先升级 Agent: %w", ErrUnsupportedAction)
@@ -34,7 +37,8 @@ func (s *Service) ExecuteRuntime(ctx context.Context, targetID string, request s
 	if request.Action == shared.RuntimeActionConsoleSend && request.Console != nil && request.Console.CommandDocument != nil && !containsString(agent.Capabilities, shared.RuntimeCommandDocumentCapability) {
 		return RuntimeExecutionResult{}, errors.New("Agent 不支持当前 Runtime 命令文件格式，请先升级 Agent")
 	}
-	if (request.Action == shared.RuntimeActionLuaEnsure && agent.InstallationRegistrySupported) || shared.IsGameInstallationAction(request.Action) || request.Action == shared.RuntimeActionLuaJITObserve || (request.Action == shared.RuntimeActionLuaJITInstall || request.Action == shared.RuntimeActionLuaJITDownload) {
+	registeredScope := agent.InstallationRegistrySupported && (request.Action == shared.RuntimeActionLuaEnsure || strings.HasPrefix(string(request.Action), "runtime.mods.") || request.Action == shared.RuntimeActionModConfigurationWrite)
+	if registeredScope || shared.IsGameInstallationAction(request.Action) || request.Action == shared.RuntimeActionLuaJITObserve || (request.Action == shared.RuntimeActionLuaJITInstall || request.Action == shared.RuntimeActionLuaJITDownload) {
 		registered := false
 		for _, installation := range agent.Installations {
 			if installation.ID == request.InstallationID {

@@ -10,6 +10,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"dont/internal/dsttime"
+	"dont/shared"
 )
 
 const maxObservedWorkshopIDs = 4096
@@ -85,6 +88,17 @@ func InventoryInstallationFiles(ctx context.Context, installation TrustedInstall
 // ObserveInstallationFiles is the side-effect-free entry point used by an
 // Agent before any publication manager has been initialized.
 func ObserveInstallationFiles(ctx context.Context, installation TrustedInstallation, workshopIDs []string, worlds []ObserveWorld) (FilesObservation, error) {
+	for _, id := range workshopIDs {
+		if !validWorkshopID(id) {
+			return FilesObservation{}, ErrInvalidInput
+		}
+	}
+	return ObserveInstallationMods(ctx, installation, workshopIDs, worlds)
+}
+
+// ObserveInstallationMods reads both sources without treating local IDs as
+// Workshop download or publication identities.
+func ObserveInstallationMods(ctx context.Context, installation TrustedInstallation, workshopIDs []string, worlds []ObserveWorld) (FilesObservation, error) {
 	installation.ServerPath = filepath.Clean(installation.ServerPath)
 	installation.SavePath = filepath.Clean(installation.SavePath)
 	installation.WorkshopContentPath = filepath.Clean(installation.WorkshopContentPath)
@@ -124,8 +138,13 @@ func observeInstallationFiles(ctx context.Context, installation TrustedInstallat
 		if err := ctx.Err(); err != nil {
 			return FilesObservation{}, err
 		}
-		if !validWorkshopID(workshopID) {
+		ref, valid := shared.ParseModReference(workshopID)
+		if !valid || ref.ID != workshopID {
 			return FilesObservation{}, ErrInvalidInput
+		}
+		if ref.Source == "local" {
+			result.Mods[ref.ID] = observeInstallationMod(filepath.Join(installation.ServerPath, "mods", ref.DirectoryName))
+			continue
 		}
 		state := observeInstallationMod(installationModTarget(installation, workshopID))
 		manual := false
@@ -166,8 +185,8 @@ func observeInstallationFiles(ctx context.Context, installation TrustedInstallat
 		if _, duplicate := result.Worlds[key]; duplicate {
 			return FilesObservation{}, ErrInvalidInput
 		}
-		loaded, observed := observeLoadedMods(filepath.Join(installation.SavePath, world.RoomDirectory, world.WorldDirectory, "server_log.txt"), ids)
-		result.Worlds[key] = WorldFileState{RoomID: world.RoomID, WorldID: world.WorldID, LoadedModIDs: loaded, LogObserved: observed}
+		loaded, observed, started := observeLoadedModsGeneration(filepath.Join(installation.SavePath, world.RoomDirectory, world.WorldDirectory, "server_log.txt"), ids)
+		result.Worlds[key] = WorldFileState{RoomID: world.RoomID, WorldID: world.WorldID, LoadedModIDs: loaded, LogObserved: observed, LogStartedAt: started}
 	}
 	return result, nil
 }
@@ -209,42 +228,63 @@ func observeInstallationMod(root string) FileState {
 }
 
 func observeLoadedMods(path string, workshopIDs []string) ([]string, bool) {
+	ids, observed, _ := observeLoadedModsGeneration(path, workshopIDs)
+	return ids, observed
+}
+
+func observeLoadedModsGeneration(path string, workshopIDs []string) ([]string, bool, time.Time) {
 	if err := rejectSymlinkComponents(filepath.Dir(path)); err != nil {
-		return []string{}, false
+		return []string{}, false, time.Time{}
 	}
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 0 {
-		return []string{}, false
+		return []string{}, false, time.Time{}
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return []string{}, false
+		return []string{}, false, time.Time{}
 	}
 	defer file.Close()
+	prefix, err := io.ReadAll(io.LimitReader(file, 64<<10))
+	if err != nil {
+		return []string{}, false, time.Time{}
+	}
+	started, _ := dsttime.FindStartTime(string(prefix))
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return []string{}, false, time.Time{}
+	}
 	const tailBytes int64 = 2 << 20
 	if info.Size() > tailBytes {
 		if _, err := file.Seek(info.Size()-tailBytes, io.SeekStart); err != nil {
-			return []string{}, false
+			return []string{}, false, time.Time{}
 		}
 	}
 	data, err := io.ReadAll(io.LimitReader(file, tailBytes))
 	if err != nil {
-		return []string{}, false
+		return []string{}, false, time.Time{}
 	}
 	data = bytes.ToLower(data)
 	lines := bytes.Split(data, []byte{'\n'})
 	loaded := make([]string, 0, len(workshopIDs))
 	for _, workshopID := range workshopIDs {
-		needle := "workshop-" + workshopID
+		ref, valid := shared.ParseModReference(workshopID)
+		if !valid {
+			continue
+		}
+		needle := strings.ToLower(ref.DirectoryName)
 		for _, line := range lines {
-			if !bytes.Contains(line, []byte("loading mod:")) && !bytes.Contains(line, []byte("loading modmain.lua")) {
+			if !bytes.Contains(line, []byte("loading mod:")) && !bytes.Contains(line, []byte("loading modmain.lua")) && !bytes.Contains(line, []byte("registering shard mod namespace")) && !bytes.Contains(line, []byte("registering prefabs")) {
 				continue
 			}
-			if slices.Contains(strings.Fields(string(line)), needle) {
+			fields := strings.Fields(string(line))
+			for i := range fields {
+				fields[i] = strings.Trim(fields[i], "\"':")
+			}
+			if slices.Contains(fields, needle) {
 				loaded = append(loaded, workshopID)
 				break
 			}
 		}
 	}
-	return loaded, true
+	return loaded, true, started
 }

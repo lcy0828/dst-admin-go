@@ -12,7 +12,7 @@ import (
 // This stores only the editor mode, never a second copy of game configuration.
 type configurationModeRecord struct {
 	RoomID string `gorm:"primary_key;type:varchar(255)"`
-	ModID  string `gorm:"primary_key;type:varchar(32)"`
+	ModID  string `gorm:"primary_key;type:varchar(261)"`
 	Mode   string `gorm:"type:varchar(16);not null"`
 }
 
@@ -34,12 +34,14 @@ func (s *Service) ConfigureConfigurationModes(store *ConfigurationModeStore) {
 }
 
 func (s *Service) SetConfigurationMode(_ context.Context, roomID, modID, mode string) error {
-	if s.configurationModes == nil || !mods.ValidID(modID) || (mode != "shared" && mode != "separate") {
+	if s.configurationModes == nil || !mods.ValidReference(modID) || (mode != "shared" && mode != "separate") {
 		return mods.ErrInvalidRequest
 	}
 	if _, err := s.source.rooms.Room(roomID); err != nil {
 		return err
 	}
+	ref, _ := mods.ParseReference(modID)
+	modID = ref.ID
 	record := configurationModeRecord{RoomID: roomID, ModID: modID, Mode: mode}
 	return s.configurationModes.db.Table(s.configurationModes.table).Save(&record).Error
 }

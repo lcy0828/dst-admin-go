@@ -158,13 +158,11 @@ func (s *Service) List(ctx context.Context, roomID string) (ModList, error) {
 			return ModList{}, fmt.Errorf("read %s modoverrides.lua: %w", world.Name, loadErr)
 		}
 		for _, entry := range document.root.entries {
-			if entry.key.kind.String() != "string" || !strings.HasPrefix(entry.key.text, "workshop-") {
+			ref, valid := configuredReference(entry)
+			if !valid {
 				continue
 			}
-			id := strings.TrimPrefix(entry.key.text, "workshop-")
-			if !validModID(id) {
-				continue
-			}
+			id := ref.ID
 			item := ensure(id)
 			item.configured = append(item.configured, world.ID)
 			if modEnabled(entry.value) {
@@ -214,13 +212,11 @@ func (s *Service) ListFromOverrides(ctx context.Context, roomID string, contents
 			return ModList{}, fmt.Errorf("read world %s modoverrides.lua: %w", worldID, parseErr)
 		}
 		for _, entry := range document.root.entries {
-			if entry.key.kind.String() != "string" || !strings.HasPrefix(entry.key.text, "workshop-") {
+			ref, valid := configuredReference(entry)
+			if !valid {
 				continue
 			}
-			id := strings.TrimPrefix(entry.key.text, "workshop-")
-			if !validModID(id) {
-				continue
-			}
+			id := ref.ID
 			item := aggregates[id]
 			if item == nil {
 				item = &modAggregate{}
@@ -236,7 +232,7 @@ func (s *Service) ListFromOverrides(ctx context.Context, roomID string, contents
 	items := make([]ModState, 0, len(aggregates))
 	for id, aggregate := range aggregates {
 		item := ModState{
-			SteamMod: SteamMod{ID: id}, Configured: len(aggregate.configured) > 0, Enabled: len(aggregate.enabled) > 0,
+			SteamMod: steamIdentity(id), Configured: len(aggregate.configured) > 0, Enabled: len(aggregate.enabled) > 0,
 			ConfiguredWorlds: uniqueStrings(aggregate.configured), EnabledWorlds: uniqueStrings(aggregate.enabled),
 			InstalledWorlds: []string{}, LoadedWorlds: []string{}, Warnings: []string{},
 		}
@@ -374,7 +370,13 @@ func (s *Service) buildModList(ctx context.Context, aggregates map[string]*modAg
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	metadata, metadataErr := s.Describe(ctx, ids)
+	workshopIDs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if validModID(id) {
+			workshopIDs = append(workshopIDs, id)
+		}
+	}
+	metadata, metadataErr := s.Describe(ctx, workshopIDs)
 	defer requesttiming.Start(ctx, "mods.local_files_and_merge")()
 	items := make([]ModState, 0, len(ids))
 	for _, id := range ids {
@@ -386,6 +388,8 @@ func (s *Service) buildModList(ctx context.Context, aggregates map[string]*modAg
 			InstalledWorlds: uniqueStrings(aggregate.installed), LoadedWorlds: uniqueStrings(aggregate.loaded), Warnings: []string{},
 		}
 		state.ID = id
+		ref, _ := ParseReference(id)
+		state.Source, state.DirectoryName = ref.Source, ref.DirectoryName
 		normalizeSteamModCollections(&state.SteamMod)
 		state.LatestVersion = state.Version
 		if manifestItem, ok := manifest[id]; ok {
@@ -396,6 +400,13 @@ func (s *Service) buildModList(ctx context.Context, aggregates map[string]*modAg
 			}
 		}
 		downloadPath := s.downloadedPath(id)
+		if ref.Source == "local" {
+			downloadPath = filepath.Join(s.config.ServerRoot, "mods", ref.DirectoryName)
+			if info, err := os.Lstat(downloadPath); err == nil && info.IsDir() {
+				state.Installed = true
+				state.InstalledWorlds = append([]string(nil), state.ConfiguredWorlds...)
+			}
+		}
 		state.Downloaded = directoryExists(downloadPath)
 		modified := latestModTime(downloadPath)
 		if state.ManifestUpdatedAt != nil && state.ManifestUpdatedAt.After(modified) {
@@ -412,6 +423,9 @@ func (s *Service) buildModList(ctx context.Context, aggregates map[string]*modAg
 		if state.Downloaded {
 			if _, statErr := safeRegularFile(modInfoPath); statErr != nil {
 				state.Warnings = append(state.Warnings, "已下载目录缺少安全可读的 modinfo.lua")
+				if ref.Source == "local" {
+					state.Installed, state.InstalledWorlds = false, []string{}
+				}
 			} else {
 				mergeLocalModInfo(&state.SteamMod, literalModMetadata(modInfoPath))
 			}
@@ -441,6 +455,15 @@ func (s *Service) buildModList(ctx context.Context, aggregates map[string]*modAg
 
 func (state *ModState) applyHealth() {
 	state.Health, state.HealthMessage, state.RepairAction = HealthHealthy, "Mod 文件与配置状态正常", ""
+	if state.Source == "local" {
+		switch {
+		case state.Configured && !state.Enabled:
+			state.Health, state.HealthMessage = HealthDisabled, "所有已配置分片均已禁用"
+		case !state.Installed:
+			state.Health, state.HealthMessage = HealthNotInstalled, "运行节点缺少完整的本地模组目录，请检查 modinfo.lua"
+		}
+		return
+	}
 	if state.Downloaded && len(state.Warnings) > 0 && strings.Contains(state.Warnings[0], "缺少") {
 		state.Health, state.HealthMessage, state.RepairAction = HealthCorrupt, "下载目录不完整", "repair"
 		return

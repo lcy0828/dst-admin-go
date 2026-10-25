@@ -219,6 +219,13 @@ func (s *Service) Install(ctx context.Context, _ string, roomID string, request 
 	if err != nil {
 		return mods.ActionResult{}, err
 	}
+	if ref, ok := mods.ParseReference(prepared.modID); ok && ref.Source == "local" {
+		prepared.roomOnly = true
+		if _, err := s.applyPreparedOverrides(ctx, prepared, ""); err != nil {
+			return mods.ActionResult{}, err
+		}
+		return mods.ActionResult{ModIDs: []string{ref.ID}, Message: "已将本机模组添加到所选世界；运行中的世界将在下次重启后生效"}, nil
+	}
 	downloadedTargets, readyTargets, err := s.downloadRoomInstallations(ctx, targets, prepared.modIDs, output)
 	if err != nil {
 		return mods.ActionResult{}, err
@@ -575,7 +582,9 @@ func (s *Service) roomList(ctx context.Context, roomID string, includeMetadata b
 	if includeMetadata {
 		ids := make([]string, 0, len(result.Items))
 		for _, item := range result.Items {
-			ids = append(ids, item.ID)
+			if mods.ValidID(item.ID) {
+				ids = append(ids, item.ID)
+			}
 		}
 		metadata, metadataErr := s.mods.Describe(ctx, ids)
 		if metadataErr != nil {
@@ -583,8 +592,11 @@ func (s *Service) roomList(ctx context.Context, roomID string, includeMetadata b
 		}
 		for index := range result.Items {
 			item := &result.Items[index]
-			item.SteamMod = metadata[item.ID]
-			item.ID = ids[index]
+			ref, _ := mods.ParseReference(item.ID)
+			if ref.Source == "workshop" {
+				item.SteamMod = metadata[item.ID]
+			}
+			item.ID, item.Source, item.DirectoryName = ref.ID, ref.Source, ref.DirectoryName
 			item.LatestVersion = item.Version
 		}
 	}
@@ -625,7 +637,7 @@ func (s *Service) CheckUpdates(ctx context.Context, roomID string) (mods.ActionR
 	}
 	ids := make([]string, 0, len(list.Items))
 	for _, item := range list.Items {
-		if item.Enabled {
+		if item.Enabled && mods.ValidID(item.ID) {
 			ids = append(ids, item.ID)
 		}
 	}
@@ -638,7 +650,7 @@ func (s *Service) CheckUpdates(ctx context.Context, roomID string) (mods.ActionR
 	failures := []error{metadataErr}
 	updates := make([]string, 0)
 	for _, item := range list.Items {
-		if !item.Enabled {
+		if !item.Enabled || !mods.ValidID(item.ID) {
 			continue
 		}
 		latest := metadata[item.ID]
@@ -704,7 +716,9 @@ func (s *Service) installationModInventory(ctx context.Context, targetID, instal
 	result.ObservedAt = observed.ObservedAt.UTC()
 	ids := make([]string, 0, len(observed.Mods))
 	for workshopID := range observed.Mods {
-		ids = append(ids, workshopID)
+		if mods.ValidID(workshopID) {
+			ids = append(ids, workshopID)
+		}
 	}
 	sort.Strings(ids)
 	var metadata map[string]mods.SteamMod
@@ -720,7 +734,12 @@ func (s *Service) installationModInventory(ctx context.Context, targetID, instal
 			result.ReferencesWarning = referencesErr.Error()
 		}
 	}
-	for _, workshopID := range ids {
+	allIDs := make([]string, 0, len(observed.Mods))
+	for id := range observed.Mods {
+		allIDs = append(allIDs, id)
+	}
+	sort.Strings(allIDs)
+	for _, workshopID := range allIDs {
 		state := observed.Mods[workshopID]
 		item := mods.RuntimeInstallationMod{
 			SteamMod: metadata[workshopID], CurrentVersion: strings.TrimSpace(state.Version),
@@ -731,15 +750,28 @@ func (s *Service) installationModInventory(ctx context.Context, targetID, instal
 			MetadataReason: state.MetadataReason, RoomReferences: references[workshopID],
 		}
 		item.ID = workshopID
+		ref, valid := mods.ParseReference(workshopID)
+		if !valid {
+			return result, mods.ErrInvalidModID
+		}
+		item.Source, item.DirectoryName = ref.Source, ref.DirectoryName
 		if strings.TrimSpace(state.Name) != "" {
 			item.Name = strings.TrimSpace(state.Name)
 		}
 		if strings.TrimSpace(item.Name) == "" {
 			item.Name = "Workshop " + workshopID
+			if ref.Source == "local" {
+				item.Name = ref.DirectoryName
+			}
 		}
 		if state.Status == shared.RuntimeModFileReady {
 			item.VersionStatus = runtimeModVersionStatus(state, item.LatestSteamManifestID, item.LatestVersion, item.UpdatedAt)
+			if ref.Source == "local" {
+				item.VersionStatus = "local"
+			}
 			switch item.VersionStatus {
+			case "local":
+				// Local files have no Workshop update status.
 			case "current":
 				result.Current++
 			case "outdated":
@@ -867,7 +899,7 @@ func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worl
 	}
 	modsByWorld := make(map[string][]string, len(worlds))
 	for _, item := range result.Items {
-		for _, worldID := range item.EnabledWorlds {
+		for _, worldID := range append(append([]string(nil), item.ConfiguredWorlds...), item.EnabledWorlds...) {
 			modsByWorld[worldID] = append(modsByWorld[worldID], item.ID)
 		}
 	}
@@ -947,10 +979,14 @@ func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worl
 		for _, worldID := range item.EnabledWorlds {
 			enabledWorlds[worldID] = true
 		}
+		configuredWorlds := make(map[string]bool, len(item.ConfiguredWorlds)+len(item.EnabledWorlds))
+		for _, worldID := range append(append([]string(nil), item.ConfiguredWorlds...), item.EnabledWorlds...) {
+			configuredWorlds[worldID] = true
+		}
 		targets := make(map[string]*runtimeFileGroup)
 		for key, group := range groups {
 			for worldID := range group.worldIDs {
-				if enabledWorlds[worldID] {
+				if configuredWorlds[worldID] {
 					targets[key] = group
 					break
 				}
@@ -989,13 +1025,18 @@ func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worl
 			if state.Status == shared.RuntimeModFileReady && state.Reason == "" {
 				item.RuntimeReadyTargets++
 				fact.Status = runtimeModVersionStatus(state, item.SteamManifestID, item.LatestVersion, item.UpdatedAt)
+				if item.Source == "local" {
+					fact.Status = "local"
+				}
 				switch fact.Status {
 				case "current":
 					item.RuntimeCurrentTargets++
 				case "outdated":
 					item.RuntimeOutdatedTargets++
 				default:
-					item.RuntimeUnknownTargets++
+					if item.Source != "local" {
+						item.RuntimeUnknownTargets++
+					}
 				}
 				if runtimeName == "" && strings.TrimSpace(state.Name) != "" {
 					runtimeName = strings.TrimSpace(state.Name)
@@ -1004,7 +1045,7 @@ func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worl
 					versions[fact.Version] = true
 				}
 				for worldID := range group.worldIDs {
-					if enabledWorlds[worldID] {
+					if configuredWorlds[worldID] {
 						item.InstalledWorlds = append(item.InstalledWorlds, worldID)
 					}
 				}
@@ -1018,7 +1059,7 @@ func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worl
 			item.RuntimeVersions = append(item.RuntimeVersions, fact)
 			for key, worldState := range group.observation.Worlds {
 				_ = key
-				if !enabledWorlds[worldState.WorldID] || !containsStringValue(worldState.LoadedModIDs, item.ID) {
+				if !enabledWorlds[worldState.WorldID] || !containsStringValue(worldState.LoadedModIDs, item.ID) || !s.currentModLog(ctx, room, group.request, worldState) {
 					continue
 				}
 				item.LoadedWorlds = append(item.LoadedWorlds, worldState.WorldID)
@@ -1040,6 +1081,8 @@ func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worl
 			}
 		}
 		switch {
+		case item.Source == "local" && item.RuntimeReadyTargets > 0 && len(versions) <= 1:
+			item.RuntimeVersionStatus = "local"
 		case len(versions) > 1:
 			item.RuntimeVersionStatus = "mixed"
 		case item.RuntimeOutdatedTargets > 0:
@@ -1112,6 +1155,10 @@ func applyRuntimeModHealth(item *mods.ModState) {
 		item.Health, item.HealthMessage, item.RepairAction = mods.HealthDisabled, "所有已配置分片均已禁用", ""
 	case "pending":
 		item.Health, item.HealthMessage, item.RepairAction = mods.HealthNotDownloaded, "运行机器缺少模组文件", "repair"
+		if item.Source == "local" {
+			item.RepairAction = ""
+			item.HealthMessage = "运行机器缺少本地模组文件，请在对应安装目录补齐"
+		}
 		for _, target := range item.RuntimeVersions {
 			if target.MetadataReason == "local_mod_entry_missing" || target.MetadataReason == "local_mod_entry_invalid" {
 				item.Health, item.HealthMessage = mods.HealthNotInstalled, "模组文件已下载，但本地加载入口未就绪"
@@ -1266,11 +1313,16 @@ func (s *Service) prepare(ctx context.Context, roomID string, request Request) (
 		action = "reconcile"
 	}
 	prepared := proposal{
-		roomID: roomID, action: mods.OverrideAction(action), modID: strings.TrimSpace(request.ModID),
+		roomID: roomID, action: mods.OverrideAction(action), modID: request.ModID,
 		configurationSourceWorldID: strings.TrimSpace(request.SourceWorldID),
 		enabled:                    request.Enabled, preserveEnabled: request.PreserveEnabled, revision: strings.TrimSpace(request.ExpectedConfigurationRevision),
 		revisions: cloneStringMap(request.ExpectedConfigurationRevisions),
 		patch:     clonePatch(request.Patch), worldIDs: make(map[string]bool),
+	}
+	if prepared.modID != "" {
+		if ref, ok := mods.ParseReference(prepared.modID); ok {
+			prepared.modID = ref.ID
+		}
 	}
 	for _, worldID := range request.WorldIDs {
 		worldID = strings.TrimSpace(worldID)
@@ -1296,8 +1348,15 @@ func (s *Service) prepare(ctx context.Context, roomID string, request Request) (
 		sort.Strings(prepared.modIDs)
 		return prepared, nil
 	case mods.OverrideActionAdd:
-		if !mods.ValidID(prepared.modID) || len(prepared.worldIDs) == 0 {
+		if !mods.ValidReference(prepared.modID) || len(prepared.worldIDs) == 0 {
 			return proposal{}, ErrInvalidRequest
+		}
+		if !mods.ValidID(prepared.modID) {
+			if request.IncludeDependencies {
+				return proposal{}, ErrInvalidRequest
+			}
+			prepared.modIDs = []string{prepared.modID}
+			break
 		}
 		ids, err := s.mods.ResolveDependencies(ctx, prepared.modID, request.IncludeDependencies)
 		if err != nil {
@@ -1305,11 +1364,11 @@ func (s *Service) prepare(ctx context.Context, roomID string, request Request) (
 		}
 		prepared.modIDs = ids
 	case mods.OverrideActionEnable, mods.OverrideActionRemove:
-		if !mods.ValidID(prepared.modID) || len(prepared.worldIDs) == 0 {
+		if !mods.ValidReference(prepared.modID) || len(prepared.worldIDs) == 0 {
 			return proposal{}, ErrInvalidRequest
 		}
 	case mods.OverrideActionConfigure:
-		if !mods.ValidID(prepared.modID) || len(prepared.worldIDs) == 0 {
+		if !mods.ValidReference(prepared.modID) || len(prepared.worldIDs) == 0 {
 			return proposal{}, ErrInvalidRequest
 		}
 		if len(prepared.worldIDs) == 1 && len(prepared.revisions) == 0 {
@@ -1328,6 +1387,11 @@ func (s *Service) prepare(ctx context.Context, roomID string, request Request) (
 		}
 	default:
 		return proposal{}, ErrInvalidRequest
+	}
+	if prepared.action == mods.OverrideActionAdd && !mods.ValidID(prepared.modID) {
+		if err := s.validateLocalAddition(ctx, prepared); err != nil {
+			return proposal{}, err
+		}
 	}
 	return prepared, nil
 }

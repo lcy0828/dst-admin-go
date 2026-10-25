@@ -63,7 +63,13 @@ func loadModOverride(path string) (modOverrideDocument, error) {
 
 func parseModOverrideContent(data []byte, mode os.FileMode, exists bool, name string) (modOverrideDocument, error) {
 	if len(data) == 0 {
+		if exists {
+			return modOverrideDocument{}, fmt.Errorf("%s is empty; refusing to reconstruct an existing configuration", name)
+		}
 		data = []byte("return {}\n")
+	}
+	if err := validateLiteralOverrides(data, name); err != nil {
+		return modOverrideDocument{}, err
 	}
 	root, err := parseLuaTable(data, name)
 	if err != nil {
@@ -206,7 +212,7 @@ func (n *luaNode) setStringEntry(name string, value *luaNode) {
 }
 
 func (d modOverrideDocument) mod(modID string) (*luaNode, bool) {
-	return d.root.stringEntry("workshop-" + modID)
+	return d.root.stringEntry(overrideKey(modID))
 }
 
 func modEnabled(entry *luaNode) bool {
@@ -223,7 +229,7 @@ func ensureModEntry(document *modOverrideDocument, modID string, enabled bool) *
 	entry, ok := document.mod(modID)
 	if !ok || entry.kind != lua.LTTable {
 		entry = tableNode()
-		document.root.setStringEntry("workshop-"+modID, entry)
+		document.root.setStringEntry(overrideKey(modID), entry)
 	}
 	entry.setStringEntry("enabled", boolNode(enabled))
 	if _, ok := modConfiguration(entry); !ok {

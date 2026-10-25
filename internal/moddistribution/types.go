@@ -105,6 +105,7 @@ type ObserveWorld struct {
 }
 
 type WorldFileState struct {
+	LogStartedAt time.Time
 	RoomID       string
 	WorldID      string
 	LoadedModIDs []string

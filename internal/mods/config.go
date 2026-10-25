@@ -47,7 +47,7 @@ func (s *Service) ConfigurationFile(roomID, worldID string) (ConfigurationFile, 
 }
 
 func (s *Service) Configuration(ctx context.Context, roomID, worldID, modID string) (ModConfiguration, error) {
-	if !validModID(modID) {
+	if !ValidReference(modID) {
 		return ModConfiguration{}, ErrInvalidModID
 	}
 	ctx, release, err := s.acquireRoom(ctx, roomID)
@@ -62,7 +62,7 @@ func (s *Service) Configuration(ctx context.Context, roomID, worldID, modID stri
 // ConfigurationFromContent combines local Mod files with supplied overrides.
 // Remote placements must supply their own parsed schema instead.
 func (s *Service) ConfigurationFromContent(ctx context.Context, roomID, worldID, modID string, content []byte) (ModConfiguration, error) {
-	if !validModID(modID) {
+	if !ValidReference(modID) {
 		return ModConfiguration{}, ErrInvalidModID
 	}
 	room, err := s.rooms.Room(roomID)
@@ -80,7 +80,7 @@ func (s *Service) ConfigurationFromContent(ctx context.Context, roomID, worldID,
 }
 
 func (s *Service) PreviewConfiguration(ctx context.Context, roomID, worldID, modID string, request ConfigUpdateRequest) (ConfigPreview, error) {
-	if !validModID(modID) {
+	if !ValidReference(modID) {
 		return ConfigPreview{}, ErrInvalidModID
 	}
 	ctx, release, err := s.acquireRoom(ctx, roomID)
@@ -93,7 +93,7 @@ func (s *Service) PreviewConfiguration(ctx context.Context, roomID, worldID, mod
 }
 
 func (s *Service) ApplyConfiguration(ctx context.Context, _ string, roomID, worldID, modID string, request ConfigUpdateRequest) (ConfigApplyResult, error) {
-	if !validModID(modID) {
+	if !ValidReference(modID) {
 		return ConfigApplyResult{}, ErrInvalidModID
 	}
 	if err := s.requireLocalWorld(roomID, worldID); err != nil {
@@ -258,7 +258,7 @@ func (s *Service) configurationFromDocument(ctx context.Context, roomID, worldID
 // ConfigurationFromParsed combines a runtime's schema and world overrides
 // without accessing the Controller filesystem or downloading any content.
 func ConfigurationFromParsed(roomID, worldID, modID string, content []byte, parsed ParserResult) (ModConfiguration, error) {
-	if !validModID(modID) {
+	if !ValidReference(modID) {
 		return ModConfiguration{}, ErrInvalidModID
 	}
 	document, err := parseModOverrideContent(content, 0o640, len(content) > 0, "modoverrides.lua")
@@ -303,7 +303,7 @@ func configurationFromParsed(roomID, worldID, modID string, document modOverride
 		}
 	}
 	return ModConfiguration{
-		Revision: document.revision, RoomID: roomID, WorldID: worldID, ModID: modID,
+		Revision: document.revision, RoomID: roomID, WorldID: worldID, ModID: referenceID(modID),
 		Enabled: modEnabled(entry), Parser: parsed.Parser, FallbackUsed: parsed.FallbackUsed,
 		FallbackReason: parsed.FallbackReason, Warnings: nonNilStrings(parsed.Warnings),
 		RawPreserved: true, SchemaVersion: "1", Fields: fields, Values: values, Overrides: overrides, UnknownValues: unknown,

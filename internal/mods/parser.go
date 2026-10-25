@@ -60,12 +60,30 @@ func NewDualParserWithPython(luaBinary, pythonBinary, helperDir string) *DualPar
 	}
 }
 
+// Bound on-demand parsing across concurrent page and AI requests. Lists use
+// literal metadata observations and never acquire these slots.
+var modInfoParseSlots = make(chan struct{}, 2)
+var modInfoFallbackSlots = make(chan struct{}, 1)
+
 func (p *DualParser) Parse(ctx context.Context, modID, modInfoPath string) (ParserResult, error) {
+	select {
+	case modInfoParseSlots <- struct{}{}:
+		defer func() { <-modInfoParseSlots }()
+	case <-ctx.Done():
+		return ParserResult{}, ctx.Err()
+	}
+
 	embeddedCtx, cancel := context.WithTimeout(ctx, embeddedParserTimeout)
 	values, embeddedErr := parseModInfoEmbedded(embeddedCtx, modID, modInfoPath)
 	cancel()
 	if embeddedErr == nil {
 		return ParserResult{Values: values, Parser: "go", Warnings: []string{}}, nil
+	}
+	select {
+	case modInfoFallbackSlots <- struct{}{}:
+		defer func() { <-modInfoFallbackSlots }()
+	case <-ctx.Done():
+		return ParserResult{}, ctx.Err()
 	}
 	values, fallbackRuntime, fallbackErr := p.parseFallback(ctx, modID, modInfoPath)
 	if fallbackErr != nil {
@@ -192,7 +210,7 @@ func installSafeRequire(state *lua.LState, root string) {
 
 func installModInfoGlobals(state *lua.LState, modID string) {
 	state.SetGlobal("locale", lua.LString("zh"))
-	state.SetGlobal("folder_name", lua.LString("workshop-"+modID))
+	state.SetGlobal("folder_name", lua.LString(overrideKey(modID)))
 	state.SetGlobal("ChooseTranslationTable", state.NewFunction(func(L *lua.LState) int {
 		table := L.CheckTable(1)
 		value := table.RawGetString("zh")
@@ -411,6 +429,7 @@ func (p *DualParser) fallbackEnvironment(binary, modID, modInfoAbs string) []str
 		"PATH=" + strings.Join(uniquePathDirectories(pathDirectories), string(os.PathListSeparator)),
 		"DST_MODINFO_PATH=" + modInfoAbs,
 		"DST_MODINFO_ID=" + modID,
+		"DST_MODINFO_DIRECTORY=" + overrideKey(modID),
 		"DST_MODINFO_LOCALE=zh",
 		"LUA_PATH=" + strings.Join(modulePaths, ";") + ";;",
 		"LUA_CPATH=" + strings.Join(cModulePaths, ";") + ";;",

@@ -3661,14 +3661,29 @@ paths:
     post:
       tags: [Mods]
       operationId: updateNodeMod
+      summary: Update one Workshop Mod in the Controller content library
+      description: >-
+        This is the Controller library operation, not a placement-aware room update. For a known Runtime target and installation prefer updateRuntimeInstallationMod. Does not imply configuration publication or that running worlds loaded the new version.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "202": { description: Node update job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
   /mods/{modId}:
-    parameters: [{ $ref: "#/components/parameters/ModID" }]
+    parameters: [{ $ref: "#/components/parameters/ModReference" }]
     get:
       tags: [Mods]
       operationId: getModDetails
+      parameters:
+        - name: targetId
+          in: query
+          description: Required for local Mods; the owning Runtime target. No fallback to Controller files.
+          schema: {type: string, minLength: 1, maxLength: 134}
+        - name: installationId
+          in: query
+          description: Required for local Mods; an installation registered on targetId.
+          schema: {type: string, minLength: 1, maxLength: 128}
+      summary: Read Workshop details or installation-scoped local Mod metadata
+      description: >-
+        Workshop identifiers use Steam metadata. Local Mod identifiers require targetId and installationId and read metadata on that Runtime only. Never substitute Controller files for an unavailable remote installation.
       responses:
         "200": { description: Workshop item, content: { application/json: { schema: { $ref: "#/components/schemas/SteamModEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -3765,6 +3780,9 @@ paths:
     get:
       tags: [Mods]
       operationId: listRoomMods
+      summary: Read all configured room Mods and their per-world runtime observations
+      description: >-
+        Includes Workshop and local Mods. Configuration, enabled state, installed files and actual loading are separate facts. Stopped worlds do not imply a collection failure; unavailable nodes must remain unknown. This does not download or update Mods.
       parameters:
         - { name: view, in: query, description: The facts view reads Runtime state and configuration without waiting for Steam. Missing official metadata never implies the installed version is current., schema: { type: string, enum: [full, facts], default: full } }
       responses:
@@ -3785,7 +3803,7 @@ paths:
       tags: [Mods]
       operationId: installMod
       summary: Download a Mod on the selected worlds' runtime installations and add it to their room configuration
-      description: Reads each target installation in real time. A current ready copy skips SteamCMD; missing, invalid, outdated, or unconfirmed content is downloaded on that target. The selected worlds' modoverrides.lua files are then updated directly without a full room Mod publication.
+      description: Reads each selected target installation. Workshop content is downloaded only when needed. A local Mod must already exist on every selected installation and includeDependencies must be false; no Steam download or cross-node local file copy occurs. Only selected worlds' modoverrides.lua files are changed, preserving other entries. Changes take effect on the next world start.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModInstallInput" } } } }
       responses:
@@ -3793,7 +3811,7 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/mods/{modId}/configuration-mode:
-    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModReference" }]
     put:
       tags: [Mods]
       operationId: setRoomModConfigurationMode
@@ -3814,7 +3832,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/mods/{modId}/actions/add:
-    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModReference" }]
     post:
       tags: [Mods]
       operationId: addModToRoom
@@ -3845,7 +3863,7 @@ paths:
         "202": { description: Update job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
   /rooms/{roomId}/mods/{modId}/actions/enable:
-    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModID" }]
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/ModReference" }]
     post:
       tags: [Mods]
       operationId: setModEnabled
@@ -3890,19 +3908,25 @@ paths:
         "200": { description: Exact modoverrides.lua content, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationFileEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
   /rooms/{roomId}/worlds/{worldId}/mods/{modId}/configuration:
-    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }, { $ref: "#/components/parameters/ModID" }]
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }, { $ref: "#/components/parameters/ModReference" }]
     get:
       tags: [Mods]
       operationId: getModConfiguration
+      summary: Read one world Mod configuration and editable option schema
+      description: >-
+        Uses the world applied Runtime placement. Returns actual overrides and their revision; retain this revision for preview and apply. Missing files or an unavailable Agent are not empty configuration.
       responses:
         "200": { description: Parsed Mod configuration, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
   /rooms/{roomId}/worlds/{worldId}/mods/{modId}/configuration/preview:
-    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }, { $ref: "#/components/parameters/ModID" }]
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }, { $ref: "#/components/parameters/ModReference" }]
     post:
       tags: [Mods]
       operationId: previewModConfiguration
+      summary: Validate and preview a world Mod configuration patch
+      description: >-
+        Requires the current configuration revision. Returns proposed changes without writing or restarting the world. Apply through applyModConfiguration only if the preview and target scope match the request.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationInput" } } } }
       responses:
@@ -3910,7 +3934,7 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/worlds/{worldId}/mods/{modId}/configuration/actions/apply:
-    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }, { $ref: "#/components/parameters/ModID" }]
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }, { $ref: "#/components/parameters/ModReference" }]
     post:
       tags: [Mods]
       operationId: applyModConfiguration
@@ -5321,6 +5345,13 @@ components:
       schema:
         type: string
         format: uuid
+    ModReference:
+      name: modId
+      in: path
+      required: true
+      description: "Numeric Workshop ID or local:<exact directory name>. Non-numeric local names are accepted as aliases. Local numeric directories require the local: prefix. Configuration keys and directory names are preserved."
+      schema:
+        $ref: "#/components/schemas/ModReferenceID"
     ModID:
       name: modId
       in: path
@@ -5426,6 +5457,12 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
   schemas:
+    ModReferenceID:
+      type: string
+      minLength: 1
+      maxLength: 261
+      pattern: '^(?:[0-9]{1,20}|local:[^/\\:\x00-\x1F\x7F]{1,255}|[0-9]*[^0-9/\\:\x00-\x1F\x7F][^/\\:\x00-\x1F\x7F]*)$'
+      description: Workshop numeric identity or a single local directory component. Runtime validation also rejects dot paths, reserved Workshop keys, invalid UTF-8 and names over the filesystem byte limit.
     DeletedEnvelope:
       type: object
       required: [data]
@@ -8805,7 +8842,9 @@ components:
       type: object
       required: [id, name, subscriptions, score, ratingCount, favorites, views, fileSize, dependencies, tags]
       properties:
-        id: { type: string, pattern: '^[0-9]{1,20}$' }
+        id: { $ref: "#/components/schemas/ModReferenceID" }
+        source: { type: string, enum: [workshop, local] }
+        directoryName: { type: string }
         name: { type: string }
         authorId: { type: string }
         author: { type: string }
@@ -8979,10 +9018,10 @@ components:
       additionalProperties: false
       required: [modId, worldIds, enabled, includeDependencies]
       properties:
-        modId: { type: string, pattern: '^[0-9]{1,20}$' }
+        modId: { $ref: "#/components/schemas/ModReferenceID" }
         worldIds: { type: array, items: { type: string } }
         enabled: { type: boolean }
-        includeDependencies: { type: boolean }
+        includeDependencies: { type: boolean, description: Must be false for an already installed local Mod; local files are never downloaded from Steam. }
     ModDownloadInput:
       type: object
       additionalProperties: false
@@ -9247,7 +9286,7 @@ components:
       required: [action]
       properties:
         action: { type: string, enum: [reconcile, add, enable, remove, configure] }
-        modId: { type: string, pattern: '^[0-9]{1,20}$' }
+        modId: { $ref: "#/components/schemas/ModReferenceID" }
         modIds: { type: array, items: { type: string, pattern: '^[0-9]{1,20}$' } }
         worldIds: { type: array, uniqueItems: true, items: { type: string } }
         enabled: { type: boolean }
@@ -9310,7 +9349,7 @@ components:
       required: [action, planHash, confirmation]
       properties:
         action: { type: string, enum: [reconcile, add, enable, remove, configure] }
-        modId: { type: string, pattern: '^[0-9]{1,20}$' }
+        modId: { $ref: "#/components/schemas/ModReferenceID" }
         modIds: { type: array, items: { type: string, pattern: '^[0-9]{1,20}$' } }
         worldIds: { type: array, uniqueItems: true, items: { type: string } }
         enabled: { type: boolean }

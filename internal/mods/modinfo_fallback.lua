@@ -8,7 +8,7 @@ for key in pairs(_G) do
 end
 
 locale = selected_locale
-folder_name = "workshop-" .. mod_id
+folder_name = os.getenv("DST_MODINFO_DIRECTORY") or ("workshop-" .. mod_id)
 ChooseTranslationTable = function(translations)
     return translations[selected_locale] or translations.zhr or translations[1]
 end
