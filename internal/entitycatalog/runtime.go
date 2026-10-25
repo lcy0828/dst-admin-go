@@ -108,6 +108,8 @@ func searchRuntimePage(ctx context.Context, commander RuntimeCommander, roomID, 
 		item.Key = "runtime:" + item.ID
 		item.Namespace = "runtime"
 		item.Source = "runtime"
+		item.Translated = localizedChinese(item.NameZhCN)
+		item.TranslationSource = "runtime"
 		// Registration alone cannot prove component support. Execution checks the
 		// actual entity; catalog collection never instantiates it to guess its type.
 		item.Type = "unknown"

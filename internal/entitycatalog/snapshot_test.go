@@ -139,7 +139,7 @@ func TestSnapshotCoalescesWaitersAndCancelsWhenUnused(t *testing.T) {
 }
 func TestEmbeddedDirectoryHasRealCategoriesAndNoDuplicates(t *testing.T) {
 	d := Directory()
-	if len(d.Items) != 6121 || d.GameVersion != "747465" {
+	if len(d.Items) != 8025 || d.GameVersion != "759671" {
 		t.Fatal(len(d.Items), d.GameVersion)
 	}
 	found := map[string]Entity{}
@@ -238,5 +238,31 @@ func TestSnapshotBatchesLargeDirectoriesAndNegotiatesLegacyPages(t *testing.T) {
 	result, err = NewSnapshotCache(wrapped).Read(context.Background(), "remote", "world", false)
 	if err != nil || len(result.Items) != 241 || probes != 1 || legacy.calls != 3 {
 		t.Fatalf("legacy result=%d probes=%d calls=%d err=%v", len(result.Items), probes, legacy.calls, err)
+	}
+}
+
+func TestDirectoryBuildAndTranslationProvenance(t *testing.T) {
+	d := Directory()
+	if d.GameVersion != "759671" || d.BuiltAt == "" || len(d.RegisteredSHA256) != 64 || len(d.LocalizationSHA256) != 64 || len(d.Items) < 7500 {
+		t.Fatalf("invalid build metadata: version=%s built=%s count=%d", d.GameVersion, d.BuiltAt, len(d.Items))
+	}
+	expected := map[string]string{"queen_torch": "女王火炬", "king_cane": "国王魔杖", "atrium_ritual_organ_bat": "枯萎喉头", "atrium_ritual_organ_rocky": "枯萎钳爪", "deer_antler1": "鹿角", "winter_ornament_boss_antlion": "华丽的装饰"}
+	fallback := 0
+	for _, v := range d.Items {
+		if name, ok := expected[v.ID]; ok {
+			if v.NameZhCN != name || !v.Translated {
+				t.Errorf("%s=%+v", v.ID, v)
+			}
+			delete(expected, v.ID)
+		}
+		if v.TranslationSource == "fallback" {
+			fallback++
+			if v.Translated {
+				t.Fatalf("fallback is marked translated: %+v", v)
+			}
+		}
+	}
+	if len(expected) != 0 || fallback == 0 {
+		t.Fatalf("missing=%v fallback=%d", expected, fallback)
 	}
 }

@@ -3522,7 +3522,11 @@ paths:
                   data:
                     type: object
                     properties:
-                      gameVersion: { type: string }
+                      gameVersion: { type: string, description: Game build used to generate the embedded directory, independent of the selected installation }
+                      builtAt: { type: string, format: date-time }
+                      source: { type: string }
+                      registeredSHA256: { type: string }
+                      localizationSHA256: { type: string }
                       items: { type: array, items: { $ref: "#/components/schemas/CatalogEntity" } }
                       total: { type: integer, description: Entries matching q before pagination }
                       offset: { type: integer }
@@ -5904,7 +5908,9 @@ components:
         modName: { type: string }
         namespace: { type: string }
         id: { type: string, pattern: '^[A-Za-z0-9_]+$' }
-        nameZhCN: { type: string }
+        nameZhCN: { type: string, description: Chinese display name or backward-compatible English/Prefab fallback; check translated }
+        translated: { type: boolean, description: Whether nameZhCN contains a known Chinese translation rather than a fallback }
+        translationSource: { type: string, enum: [official, official-alias, official-shared-name, curated, fallback, runtime, beacon, artwork-pack] }
         nameEn: { type: string }
         type: { type: string }
         category: { type: string, enum: [item, food, equipment, structure, creature, boss, nature, other] }

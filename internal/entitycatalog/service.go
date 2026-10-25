@@ -28,19 +28,21 @@ const (
 )
 
 type Entity struct {
-	Category     string       `json:"category,omitempty"`
-	ModID        string       `json:"modId,omitempty"`
-	ModName      string       `json:"modName,omitempty"`
-	Key          string       `json:"key"`
-	Namespace    string       `json:"namespace"`
-	ID           string       `json:"id"`
-	NameZhCN     string       `json:"nameZhCN"`
-	NameEn       string       `json:"nameEn"`
-	Type         string       `json:"type"`
-	ArtworkURL   string       `json:"artworkUrl,omitempty"`
-	Capabilities []Capability `json:"capabilities"`
-	Common       bool         `json:"common"`
-	Source       string       `json:"source"`
+	Category          string       `json:"category,omitempty"`
+	ModID             string       `json:"modId,omitempty"`
+	ModName           string       `json:"modName,omitempty"`
+	Key               string       `json:"key"`
+	Namespace         string       `json:"namespace"`
+	ID                string       `json:"id"`
+	Translated        bool         `json:"translated"`
+	TranslationSource string       `json:"translationSource,omitempty"`
+	NameZhCN          string       `json:"nameZhCN"`
+	NameEn            string       `json:"nameEn"`
+	Type              string       `json:"type"`
+	ArtworkURL        string       `json:"artworkUrl,omitempty"`
+	Capabilities      []Capability `json:"capabilities"`
+	Common            bool         `json:"common"`
+	Source            string       `json:"source"`
 }
 
 type SearchOptions struct {
@@ -175,7 +177,7 @@ func (s *Service) searchBeacon(ctx context.Context, query string, options Search
 		}
 		items = append(items, Entity{
 			Key: item.Key, Namespace: item.Namespace, ID: item.ID,
-			NameZhCN: item.Names.ZhCN, NameEn: item.Names.En, Type: item.Type,
+			Translated: localizedChinese(item.Names.ZhCN), TranslationSource: "beacon", NameZhCN: item.Names.ZhCN, NameEn: item.Names.En, Type: item.Type,
 			ArtworkURL: artworkURL, Capabilities: capabilities, Source: "beacon",
 		})
 	}
@@ -253,7 +255,7 @@ func common(id, zhCN, en, entityType string, capabilities ...Capability) Entity 
 		capabilities = append(capabilities, CapabilityRemove)
 	}
 	return Entity{
-		Key: "dst:" + id, Namespace: "dst", ID: id, NameZhCN: zhCN, NameEn: en,
+		Key: "dst:" + id, Namespace: "dst", ID: id, Translated: localizedChinese(zhCN), TranslationSource: "curated", NameZhCN: zhCN, NameEn: en,
 		Type: entityType, Capabilities: capabilities, Common: true, Source: "builtin",
 	}
 }
@@ -379,4 +381,15 @@ var commonEntities = []Entity{
 	common("lightning_rod", "避雷针", "Lightning Rod", "structure", CapabilitySpawn),
 	common("pighouse", "猪屋", "Pig House", "structure", CapabilitySpawn),
 	common("rabbithouse", "兔屋", "Rabbit Hutch", "structure", CapabilitySpawn),
+}
+
+// Runtime/third-party strings may be an ID or English fallback. Do not mark
+// those as Chinese translations merely because the display field is nonempty.
+func localizedChinese(value string) bool {
+	for _, ch := range value {
+		if ch >= 0x3400 && ch <= 0x9fff {
+			return true
+		}
+	}
+	return false
 }

@@ -407,7 +407,7 @@ func (s *Service) Search(options entitycatalog.RuntimeSearchOptions) (entitycata
 		if result.Total <= options.Offset || len(result.Items) >= options.Limit {
 			continue
 		}
-		result.Items = append(result.Items, entitycatalog.Entity{ID: item.ID, Key: "vanilla:" + item.ID, Namespace: "vanilla", NameZhCN: item.NameZhCN, NameEn: item.NameEn, Type: item.Type, Source: "artwork-pack", Capabilities: []entitycatalog.Capability{entitycatalog.CapabilityGive, entitycatalog.CapabilitySpawn, entitycatalog.CapabilityRemove}})
+		result.Items = append(result.Items, entitycatalog.Entity{ID: item.ID, Key: "vanilla:" + item.ID, Namespace: "vanilla", Translated: strings.ContainsFunc(item.NameZhCN, func(r rune) bool { return r >= 0x3400 && r <= 0x9fff }), TranslationSource: "artwork-pack", NameZhCN: item.NameZhCN, NameEn: item.NameEn, Type: item.Type, Source: "artwork-pack", Capabilities: []entitycatalog.Capability{entitycatalog.CapabilityGive, entitycatalog.CapabilitySpawn, entitycatalog.CapabilityRemove}})
 	}
 	result.HasMore = options.Offset+len(result.Items) < result.Total
 	return result, nil
