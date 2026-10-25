@@ -123,3 +123,54 @@ func TestMCPGeneratedToolsUseSameBackend(t *testing.T) {
 		t.Fatal(out.Code, out.Body, executed.Load())
 	}
 }
+
+func TestFinalModelAndMCPToolsCarryDescriptionsAndLocalReferences(t *testing.T) {
+	s, store := fixture(t, apiBackendFunc(func(_ context.Context, _ Principal, op *apicontract.Operation, input apicontract.Input) (json.RawMessage, error) {
+		if op.ID != "setModEnabled" || input.Path["modId"] != "local:fishdried_custom" {
+			t.Errorf("wrong local operation %s %+v", op.ID, input)
+		}
+		return json.RawMessage(`{"data":{"publishedTargets":1,"worldIds":["Master"]}}`), nil
+	}))
+	catalog, err := apicontract.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ConfigureAPI(catalog)
+	tools, err := s.AvailableTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded := map[string]Tool{}
+	for _, tool := range tools {
+		if tool.Name == "api_listRoomCommands" {
+			if !strings.Contains(tool.Description, "deprecated") || !strings.Contains(tool.Description, "api_listCommands") {
+				t.Fatal("model lost replacement", tool.Description)
+			}
+		}
+		if tool.Name == "api_getModConfiguration" {
+			loaded[tool.Name] = tool
+		}
+	}
+	definitions, _ := json.Marshal(s.modelTools(loaded))
+	if !strings.Contains(string(definitions), "Local numeric directories") || !strings.Contains(string(definitions), "local:") {
+		t.Fatal("parameter description lost in model tools")
+	}
+	_, secret, err := store.CreateToken(TokenInput{Name: "mcp metadata", Days: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest("POST", "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	request.Header.Set("Authorization", "Bearer "+secret)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	request.Header.Set("MCP-Protocol-Version", "2025-06-18")
+	response := httptest.NewRecorder()
+	s.MCP(response, request)
+	if response.Code != 200 || !strings.Contains(response.Body.String(), "Local numeric directories") || !strings.Contains(response.Body.String(), "api_listCommands for the same behavior") {
+		t.Fatalf("MCP metadata missing: status %d", response.Code)
+	}
+	raw := json.RawMessage(`{"path":{"roomId":"room-a","modId":"local:fishdried_custom"},"body":{"worldIds":["Master"],"enabled":false,"expectedRevision":"current"},"requestId":"local-mcp-toggle-001"}`)
+	if _, err := s.Invoke(context.Background(), principal(), "api_setModEnabled", raw); err != nil {
+		t.Fatal("local typed action rejected", err)
+	}
+}

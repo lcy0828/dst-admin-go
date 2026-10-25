@@ -33,6 +33,12 @@ func apiTool(op *apicontract.Operation) (Tool, error) {
 	if op.Description != "" {
 		description += ". " + op.Description
 	}
+	if op.Deprecated {
+		description += ". Compatibility operation (deprecated)."
+		if op.ReplacedBy != "" {
+			description += " Prefer api_" + op.ReplacedBy + " for the same behavior."
+		}
+	}
 	if op.Mutation() {
 		description += ". Executes the administrator's requested operation directly. Preserve unspecified fields and revisions. Submitted tasks require checking their actual result."
 	}
@@ -125,7 +131,7 @@ func (s *Service) discover(raw json.RawMessage) (json.RawMessage, error) {
 	}
 	items := []map[string]any{}
 	for _, op := range s.catalog.Search(query, in.Limit) {
-		items = append(items, map[string]any{"operationId": op.ID, "tool": op.ToolName(), "summary": op.Summary, "tags": op.Tags, "transport": op.Transport})
+		items = append(items, map[string]any{"operationId": op.ID, "tool": op.ToolName(), "summary": op.Summary, "tags": op.Tags, "transport": op.Transport, "deprecated": op.Deprecated, "replacedBy": op.ReplacedBy})
 	}
 	return json.Marshal(map[string]any{"items": items, "count": len(items), "instruction": "Matching typed tools are now loaded. Call the appropriate api_ tool with path/query/body parameters. Discover more specific keywords if needed. An empty search is not proof a capability is absent."})
 }

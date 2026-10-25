@@ -44,6 +44,8 @@ type Operation struct {
 	ID          string              `yaml:"operationId" json:"operationId"`
 	Summary     string              `yaml:"summary" json:"summary"`
 	Description string              `yaml:"description" json:"description,omitempty"`
+	Deprecated  bool                `yaml:"deprecated" json:"deprecated,omitempty"`
+	ReplacedBy  string              `yaml:"x-dst-replaced-by" json:"replacedBy,omitempty"`
 	Tags        []string            `yaml:"tags" json:"tags"`
 	Parameters  []Parameter         `yaml:"parameters" json:"-"`
 	RequestBody Body                `yaml:"requestBody" json:"-"`
@@ -147,6 +149,14 @@ func Parse(data []byte) (*Catalog, error) {
 		}
 	}
 	sort.Slice(c.ordered, func(i, j int) bool { return c.ordered[i].ID < c.ordered[j].ID })
+	for _, op := range c.ordered {
+		if op.ReplacedBy != "" {
+			replacement, ok := c.operations[op.ReplacedBy]
+			if !ok || replacement == op || !replacement.Callable() || replacement.Deprecated {
+				return nil, fmt.Errorf("invalid replacement for %s: %s", op.ID, op.ReplacedBy)
+			}
+		}
+	}
 	return c, nil
 }
 
@@ -220,6 +230,14 @@ func (op *Operation) compile() {
 			definition := param.Schema
 			if definition == nil {
 				definition = map[string]any{"type": "string"}
+			}
+			if param.Description != "" {
+				copy := make(map[string]any, len(definition)+1)
+				for key, value := range definition {
+					copy[key] = value
+				}
+				copy["description"] = param.Description
+				definition = copy
 			}
 			p[param.Name] = definition
 			if param.Required {
@@ -462,6 +480,9 @@ func (c *Catalog) Search(query string, limit int) []*Operation {
 				if strings.Contains(hay, word) {
 					score++
 				}
+				if strings.Contains(strings.ToLower(op.Summary), word) {
+					score += 4
+				}
 				if strings.Contains(identity, word) {
 					score += 3
 				}
@@ -473,10 +494,37 @@ func (c *Catalog) Search(query string, limit int) []*Operation {
 			}
 		}
 		if score > 0 {
+			if op.Deprecated && score < 1000 {
+				score = max(1, score-3)
+			}
 			matches = append(matches, match{op, score})
 		}
 	}
-	sort.SliceStable(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
+	// Equivalent compatibility aliases may mention more search terms in their
+	// migration notes. Their recommended operation must still precede them.
+	byID := make(map[string]int, len(matches))
+	for i, item := range matches {
+		byID[item.op.ID] = i
+	}
+	for _, item := range matches {
+		if !item.op.Deprecated || item.score >= 1000 || item.op.ReplacedBy == "" {
+			continue
+		}
+		if index, ok := byID[item.op.ReplacedBy]; ok && matches[index].score < 1000 && matches[index].score <= item.score {
+			matches[index].score = item.score + 1
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		a, b := matches[i], matches[j]
+		// Exact IDs remain discoverable, including compatibility operations.
+		if a.score >= 1000 || b.score >= 1000 {
+			return a.score > b.score
+		}
+		if a.score == b.score && a.op.Deprecated != b.op.Deprecated {
+			return !a.op.Deprecated
+		}
+		return a.score > b.score
+	})
 	if limit < 1 || limit > 30 {
 		limit = 8
 	}

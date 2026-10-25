@@ -609,6 +609,9 @@ paths:
     post:
       tags: [System]
       operationId: previewSystemSettings
+      summary: Validate and preview a system settings change
+      description: >-
+        Does not apply settings. Inspect validation, proposed changes and effective/restart requirements before applySystemSettings; retain any required revision or preview identifiers.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SystemSettingsInput" } } } }
       responses:
@@ -622,6 +625,9 @@ paths:
     post:
       tags: [System]
       operationId: applySystemSettings
+      summary: Apply a validated system settings change
+      description: >-
+        Use previewSystemSettings before applying. Preserve the current revision and unspecified settings. Inspect the returned effective state and any restart requirement; this does not restart game worlds.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SystemSettingsInput" } } } }
       responses:
@@ -664,6 +670,9 @@ paths:
     post:
       tags: [System]
       operationId: createNotificationChannel
+      summary: Create an email or webhook notification channel
+      description: >-
+        Use the channel type-specific configuration in the request schema. Credentials are sensitive and existing secret values are masked on reads. Creating a channel does not prove delivery; use its test action and delivery records.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/NotificationChannelInput" } } } }
       responses:
@@ -690,6 +699,9 @@ paths:
     delete:
       tags: [System]
       operationId: deleteNotificationChannel
+      summary: Delete one notification delivery channel
+      description: >-
+        Removes the configured channel. Does not retract messages already delivered; references or active deliveries may be reported by the operation.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -729,6 +741,9 @@ paths:
     get:
       tags: [System]
       operationId: listNotificationDeliveries
+      summary: List notification delivery attempts and their outcomes
+      description: >-
+        Use delivery status and errors to inspect email or webhook failures. A configured channel or submitted notification does not prove delivery.
       parameters:
         - name: limit
           in: query
@@ -2006,7 +2021,9 @@ paths:
     get:
       tags: [Console]
       operationId: listCommands
-      summary: List built-in and persistent custom command definitions
+      summary: List the shared built-in and persistent custom command definitions
+      description: >-
+        This is the global command-definition catalog, not execution history. The compatibility listRoomCommands endpoint returns this same catalog and does not filter definitions by room.
       responses:
         "200":
           description: Commands ordered for display
@@ -2102,7 +2119,11 @@ paths:
     get:
       tags: [Console]
       operationId: listRoomCommands
-      summary: List built-in and persistent custom command definitions
+      deprecated: true
+      x-dst-replaced-by: listCommands
+      summary: Read the shared command catalog through a legacy room URL
+      description: >-
+        Compatibility alias for listCommands. The roomId in this URL does not filter the returned command definitions. Use listCommandRuns for room-specific execution history.
       responses:
         "200":
           description: Built-in commands ordered for display
@@ -2354,7 +2375,14 @@ paths:
     post:
       tags: [Save Imports, Jobs]
       operationId: applySaveImport
-      summary: Deploy one analyzed candidate to a local room through an atomic job
+      summary: Deploy an analyzed save through a recoverable job
+      description: >-
+        New and clone imports create a local room. Replacement with preserved
+        networking uses each world's applied local or Agent Placement and reads
+        target settings there. Existing session data requires a readable selected
+        save index and world snapshot; configuration-only templates create new
+        worlds. Collector preparation occurs in staging and preserves the target
+        world's opt-out. Ordinary startup never repairs or overwrites these files.
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -2365,7 +2393,7 @@ paths:
             schema: { $ref: "#/components/schemas/SaveImportApplyInput" }
       responses:
         "202":
-          description: Local deployment job accepted
+          description: Save deployment job accepted
           content:
             application/json:
               schema: { $ref: "#/components/schemas/JobEnvelope" }
@@ -2472,7 +2500,9 @@ paths:
     get:
       tags: [Backups]
       operationId: getRoomBackupPolicy
-      summary: Read the persisted automatic snapshot policy
+      summary: Read the legacy interval-based automatic snapshot policy
+      description: >-
+        This is the interval policy only; Cron backup tasks are a separate source. Use listRoomBackupSchedules for the effective room backup schedule overview. Historical backups alone do not prove scheduling is active.
       responses:
         "200":
           description: Snapshot policy
@@ -2483,7 +2513,9 @@ paths:
     put:
       tags: [Backups]
       operationId: updateRoomBackupPolicy
-      summary: Enable, disable, or reschedule automatic snapshots
+      summary: Configure the legacy interval-based automatic snapshot policy
+      description: >-
+        Use only when changing this interval policy. For ordinary enable, pause or Cron backup requests prefer configureRoomBackupSchedule, which reuses existing plans and avoids duplicate scheduling. Do not enable both sources unintentionally.
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -2901,6 +2933,9 @@ paths:
     get:
       tags: [Game]
       operationId: getGameVersion
+      summary: Inspect update availability using Steam and official Klei version evidence
+      description: >-
+        May perform network queries. For only the versions already installed on selected managed targets use getInstalledGameVersions. Setting steam=false avoids the Steam query but does not imply that all official version queries are disabled.
       parameters:
         - name: steam
           in: query
@@ -2910,7 +2945,6 @@ paths:
           in: query
           description: With steam=false, bypass the official release cache for an explicit refresh.
           schema: { type: boolean, default: false }
-      summary: Inspect the local Steam build, Steam update state, official Klei PC release, and update capability
       responses:
         "200":
           description: Version report; Steam and Klei failures are reported independently
@@ -2924,7 +2958,9 @@ paths:
     get:
       tags: [Game]
       operationId: getInstalledGameVersions
-      summary: Read each managed installation once from its applied Runtime target without Steam queries or update preflight
+      summary: Read installed game versions from selected managed Runtime installations
+      description: >-
+        Lightweight installed-version observation without Steam queries or updates. Uses applied Runtime targets; stale or offline nodes remain unavailable. To compare with official releases use getGameVersion.
       parameters:
         - name: targetIds
           in: query
@@ -3605,6 +3641,9 @@ paths:
     get:
       tags: [Mods]
       operationId: searchMods
+      summary: Search Steam Workshop Mods with filters and pagination
+      description: >-
+        Searches Workshop, not local installation directories. Use room or installation inventory to find local Mods. Availability and metadata depend on the configured Workshop access method; use the returned pagination and warning fields.
       parameters:
         - { name: language, in: query, schema: { type: string, enum: [schinese, english] } }
         - { name: source, in: query, description: Keep the returned source for subsequent pages. Explicit source changes start from page one., schema: { type: string, enum: [api, community] } }
@@ -3650,7 +3689,9 @@ paths:
     post:
       tags: [Mods]
       operationId: downloadModToNode
-      summary: Download Workshop files without changing any room configuration
+      summary: Download a Workshop Mod into the Controller content library
+      description: >-
+        Uses the Controller library download service. For an explicit local or remote Runtime installation use downloadRuntimeInstallationMod with targetId and installationId. Does not enable the Mod in any room or restart worlds.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModDownloadInput" } } } }
       responses:
@@ -3724,7 +3765,9 @@ paths:
     post:
       tags: [Mods, Agents, Jobs]
       operationId: downloadRuntimeInstallationMod
-      summary: Download one Mod directly on a runtime installation without changing any room configuration
+      summary: Download a Workshop Mod on one explicit Runtime installation
+      description: >-
+        Requires targetId and installationId. Downloads content only; does not add the Mod to room configuration or restart worlds. Local Mods are not Steam-downloadable.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "202": { description: Runtime installation Mod download Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
@@ -3746,7 +3789,9 @@ paths:
     post:
       tags: [Mods, Agents, Jobs]
       operationId: updateRuntimeInstallationMod
-      summary: Update one Mod in a runtime installation without changing room configuration or world processes
+      summary: Update one Workshop Mod content on an explicit Runtime installation
+      description: >-
+        Requires targetId and installationId. Does not modify room configuration or restart running worlds. For applying a room update and restart use the room update workflow. Local files are not updated through Steam.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "202": { description: Runtime installation Mod update Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
@@ -3767,7 +3812,9 @@ paths:
     post:
       tags: [Mods, Agents, Jobs]
       operationId: updateOutdatedRuntimeInstallationMods
-      summary: Update every outdated Mod in one runtime installation without changing room configuration or world processes
+      summary: Update outdated Workshop content in one Runtime installation
+      description: >-
+        Batch counterpart of updateRuntimeInstallationMod. Only confirmed outdated Workshop Mods are selected; unknown versions and local Mods are not treated as up to date or sent to Steam. Does not restart worlds.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "202": { description: Runtime installation Mod batch update Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
@@ -3848,6 +3895,9 @@ paths:
     post:
       tags: [Mods]
       operationId: checkModUpdates
+      summary: Compare enabled Workshop versions across the room runtime installations
+      description: >-
+        Read version evidence from the applied room placements and compare with Workshop. Returns a job; query its result. Does not download content, change configuration or restart worlds. For the durable room update workflow use checkRoomModUpdate.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "202": { description: Update check job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
@@ -4017,7 +4067,9 @@ paths:
     post:
       tags: [Mods, Jobs]
       operationId: checkRoomModUpdate
-      summary: Check Workshop now; automatic policies may also prepare exact node caches
+      summary: Check Workshop versions and persist the room update workflow state
+      description: >-
+        Manual checks do not download content, change room configuration or restart worlds. Inspect getRoomModUpdate and the returned job for the result. Separately enabled automatic policies may prepare content and apply it when empty; use the explicit apply action for an immediate update and restart.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "202": { description: Mod update check Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
@@ -4282,7 +4334,11 @@ paths:
     post:
       tags: [WorldState]
       operationId: refreshWorldStates
-      summary: Read each shard's current world-state files without creating a job
+      deprecated: true
+      x-dst-replaced-by: listWorldStates
+      summary: Read current world-state files through a compatibility POST endpoint
+      description: >-
+        Reads existing Runtime files; does not force collection, send console input or create a job. Prefer listWorldStates for a room-wide read. The refresh name does not mean new telemetry was collected.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "200": { description: Current world-state file results, content: { application/json: { schema: { $ref: "#/components/schemas/WorldStateListEnvelope" } } } }
@@ -4293,7 +4349,9 @@ paths:
     post:
       tags: [WorldState]
       operationId: refreshWorldState
-      summary: Read one shard's latest world-state files without console input or history writes
+      summary: Read one world current state files from its applied Runtime
+      description: >-
+        Single-world read of already collected files, without forcing collection or sending console input. For all worlds in a room use listWorldStates. Missing or stale observations remain explicit.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "200": { description: Latest world-state file result or first-sample pending state, content: { application/json: { schema: { $ref: "#/components/schemas/WorldStateRefreshResultEnvelope" } } } }
@@ -4305,6 +4363,9 @@ paths:
     get:
       tags: [Automation]
       operationId: listAutomationActions
+      summary: List supported automation actions and their parameter schemas
+      description: >-
+        Use before creating or editing generic automation tasks. Returns action-specific required fields, supported values and units; do not invent action names or parameter fields.
       responses:
         "200": { description: Allowed automation actions, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationActionListEnvelope" } } } }
   /rooms/{roomId}/automation/groups:
@@ -4312,11 +4373,17 @@ paths:
     get:
       tags: [Automation]
       operationId: listAutomationGroups
+      summary: List automation groups and their enabled state
+      description: >-
+        A disabled group suppresses scheduled execution of its tasks even if an individual task is enabled. This is configuration, not execution history.
       responses:
         "200": { description: Automation groups, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationGroupListEnvelope" } } } }
     post:
       tags: [Automation]
       operationId: createAutomationGroup
+      summary: Create a group for automation tasks
+      description: >-
+        A task runs on schedule only when both its task and group are enabled. Creating a group does not run its tasks.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationGroupInput" } } } }
       responses:
@@ -4329,6 +4396,9 @@ paths:
     put:
       tags: [Automation]
       operationId: updateAutomationGroup
+      summary: Update an automation group and its enabled state
+      description: >-
+        Changing group enabled state affects scheduling of every task in the group. Preserve unspecified values according to the request schema. Do not enable unrelated tasks when the request concerns one room backup; prefer configureRoomBackupSchedule.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationGroupInput" } } } }
       responses:
@@ -4339,6 +4409,9 @@ paths:
     delete:
       tags: [Automation]
       operationId: deleteAutomationGroup
+      summary: Delete an automation task group
+      description: >-
+        Inspect the group and its tasks before deletion. Follow the conflict response when tasks or references prevent deletion. This does not undo actions already executed.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "200": { description: Group deleted, content: { application/json: { schema: { $ref: "#/components/schemas/DeletedEnvelope" } } } }
@@ -4349,11 +4422,17 @@ paths:
     get:
       tags: [Automation]
       operationId: listAutomationTasks
+      summary: List scheduled automation task definitions
+      description: >-
+        Inspect action, room, schedule, timezone and group state to identify the intended task. A task enabled flag alone does not prove an effective schedule. For automatic room backup status prefer listRoomBackupSchedules.
       responses:
         "200": { description: Automation tasks, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationTaskListEnvelope" } } } }
     post:
       tags: [Automation]
       operationId: createAutomationTask
+      summary: Create a scheduled automation task with an action and parameters
+      description: >-
+        Use listAutomationActions for supported actions and parameter definitions. Specify the Cron schedule and timezone explicitly when timing matters; duration fields use their declared units. Group state, retry policy, timeout and dependencies affect execution. This saves a schedule; use runAutomationTask for an immediate execution. For ordinary automatic room backups prefer configureRoomBackupSchedule.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationTaskInput" } } } }
       responses:
@@ -4366,12 +4445,18 @@ paths:
     get:
       tags: [Automation]
       operationId: getAutomationTask
+      summary: Read one scheduled automation task definition
+      description: >-
+        Includes its action, parameters, schedule, timezone, enabled state and revision. Effective scheduling also depends on the parent group. This does not run the task.
       responses:
         "200": { description: Automation task, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationTaskEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
     put:
       tags: [Automation]
       operationId: updateAutomationTask
+      summary: Update an existing scheduled automation task
+      description: >-
+        Read getAutomationTask first and retain its revision. Follow action-specific parameters, Cron timezone, duration units, retry, timeout and dependency fields. Saving a task does not execute it immediately.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationTaskInput" } } } }
       responses:
@@ -4382,6 +4467,9 @@ paths:
     delete:
       tags: [Automation]
       operationId: deleteAutomationTask
+      summary: Delete one scheduled automation task
+      description: >-
+        Stops future scheduling of this task. Does not delete room saves or undo previous executions; inspect running jobs separately.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "200": { description: Task deleted, content: { application/json: { schema: { $ref: "#/components/schemas/DeletedEnvelope" } } } }
@@ -4394,6 +4482,9 @@ paths:
     post:
       tags: [Automation, Jobs]
       operationId: runAutomationTask
+      summary: Run an existing automation task once immediately
+      description: >-
+        Requires taskId. Returns a persistent job; use getJob and the execution record to confirm its actual outcome. Does not enable the task or change its saved schedule. Avoid resubmitting when the result is unknown.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "202": { description: Automation job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
@@ -4404,6 +4495,9 @@ paths:
     get:
       tags: [Automation]
       operationId: listAutomationRuns
+      summary: List automation execution history with supported filters and pagination
+      description: >-
+        Use individual run or job results to verify completion. Successful historical executions do not prove that the current task and group are enabled.
       parameters:
         - { name: taskId, in: query, schema: { type: string } }
         - { name: groupId, in: query, schema: { type: string } }
@@ -4422,6 +4516,9 @@ paths:
     get:
       tags: [Automation]
       operationId: getAutomationRun
+      summary: Read one automation execution and its result
+      description: >-
+        Use this after running a task to inspect actual status and errors. A submitted or running execution has not completed successfully.
       responses:
         "200": { description: Automation run record, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationRunEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -4430,6 +4527,9 @@ paths:
     post:
       tags: [Automation]
       operationId: clearAutomationRuns
+      summary: Delete retained automation execution history
+      description: >-
+        Clears execution records only. Does not delete task definitions, change their enabled state or undo previously executed actions.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationClearRunsInput" } } } }
       responses:
@@ -4441,6 +4541,9 @@ paths:
     get:
       tags: [Automation]
       operationId: getAutomationStats
+      summary: Read aggregate automation task and execution statistics
+      description: >-
+        Aggregates are for the automation subsystem. Use task definitions to inspect schedules and individual runs or jobs to verify an operation.
       parameters:
         - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 90, default: 7 } }
       responses:
@@ -4450,6 +4553,9 @@ paths:
     get:
       tags: [Automation]
       operationId: exportAutomation
+      summary: Export automation group and task definitions
+      description: >-
+        Returns configuration for export, not a backup of game saves or proof of task execution. Use previewAutomationImport before importing into another deployment.
       responses:
         "200": { description: Portable automation document, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationDocumentEnvelope" } } } }
   /rooms/{roomId}/automation/imports/preview:
@@ -4457,6 +4563,9 @@ paths:
     post:
       tags: [Automation]
       operationId: previewAutomationImport
+      summary: Validate an automation configuration import without applying it
+      description: >-
+        Inspect errors, conflicts and proposed changes before importAutomation. Does not create tasks, enable groups or execute actions.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationDocument" } } } }
       responses:
@@ -4466,6 +4575,9 @@ paths:
     post:
       tags: [Automation]
       operationId: importAutomation
+      summary: Import validated automation groups and task definitions
+      description: >-
+        First use previewAutomationImport and inspect validation or conflict results. Imports definitions, not historical executions or game saves. Follow the request schema for enabled state and import mode.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AutomationImportInput" } } } }
       responses:
@@ -4953,7 +5065,9 @@ paths:
     get:
       tags: [Agents]
       operationId: listAgentCommands
-      summary: List persisted Agent command history
+      summary: List persisted command history across Agents
+      description: >-
+        Use the supported filters and pagination. For one known Agent prefer listAgentCommandsForAgent. These records do not represent live world console output.
       parameters:
         - { name: agentId, in: query, schema: { type: string, maxLength: 128 } }
         - { name: status, in: query, schema: { $ref: "#/components/schemas/AgentCommandStatus" } }
@@ -5099,6 +5213,9 @@ paths:
     get:
       tags: [Agents]
       operationId: getAgent
+      summary: Read one Agent connection and reported runtime information
+      description: >-
+        Requires agentId. Distinguish disconnected or stale observations from a healthy online Agent. The random Agent identifier is not a player connection address.
       responses:
         "200": { description: Agent node, content: { application/json: { schema: { $ref: "#/components/schemas/AgentEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -5116,6 +5233,9 @@ paths:
     get:
       tags: [Agents]
       operationId: listAgentCommandsForAgent
+      summary: List persisted command history for one specific Agent
+      description: >-
+        Requires agentId and uses the declared pagination parameters. Prefer this over global listAgentCommands when investigating a known Agent. Records are command history, not live game console output.
       parameters:
         - { name: status, in: query, schema: { $ref: "#/components/schemas/AgentCommandStatus" } }
         - { name: query, in: query, schema: { type: string, maxLength: 100 } }
@@ -6926,10 +7046,12 @@ components:
       additionalProperties: false
       required: [state, message, updatedAt]
       properties:
-        state: { type: string, enum: [updating, current, updated, failed, disabled] }
+        state: { type: string, enum: [updating, current, updated, failed, disabled], description: "updating also covers temporary deferral while a room or Runtime operation is busy" }
         message: { type: string }
         version: { type: string }
-        installationState: { $ref: "#/components/schemas/DSTRuntimeInstallState" }
+        installationState:
+          allOf: [{ $ref: "#/components/schemas/DSTRuntimeInstallState" }]
+          description: "Last confirmed installation state for the current applied placement, installation path and Agent instance; progress, contention and transport errors retain evidence only within that location. Superseded requests cannot replace a newer report."
         updatedAt: { type: string, format: date-time }
     DSTRuntimeReport:
       type: object
@@ -6940,14 +7062,16 @@ components:
         worldId: { type: string }
         worldName: { type: string }
         state: { $ref: "#/components/schemas/DSTRuntimeInstallState" }
-        version: { type: string }
+        version: { type: string, description: "Installed Runtime version on the selected node; health.producerVersion identifies the running collector" }
         protocolVersion: { type: integer, minimum: 1 }
         changed: { type: boolean }
         backupPath: { type: string }
         message: { type: string }
         processRunning: { type: boolean }
         healthState: { $ref: "#/components/schemas/DSTRuntimeHealthState" }
-        health: { $ref: "#/components/schemas/DSTRuntimeHealth" }
+        health:
+          allOf: [{ $ref: "#/components/schemas/DSTRuntimeHealth" }]
+          description: "Observed collector health, including an older running version while installed files have already changed. Status observation does not relax version checks for Runtime commands."
         autoUpdate: { $ref: "#/components/schemas/DSTRuntimeUpdate" }
         healthMessage: { type: string }
     DSTRuntimeStatusEnvelope:
