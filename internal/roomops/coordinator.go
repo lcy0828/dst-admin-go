@@ -2,6 +2,7 @@ package roomops
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"sync"
@@ -22,6 +23,8 @@ type coordinator struct {
 }
 
 var shared = coordinator{locks: make(map[string]*lockEntry)}
+
+var ErrBusy = errors.New("room operation is busy")
 
 type operationLocker struct {
 	roomID  string
@@ -53,8 +56,21 @@ func (l *operationLocker) Unlock() {
 // The returned context makes acquisition reentrant for nested operations such
 // as an import creating its protection backup while holding the room lease.
 func Acquire(ctx context.Context, roomID string) (context.Context, func(), error) {
+	return acquire(ctx, roomID, true)
+}
+
+// TryAcquire has the same reentrant lease contract as Acquire, but returns
+// ErrBusy immediately so background maintenance cannot delay unrelated rooms.
+func TryAcquire(ctx context.Context, roomID string) (context.Context, func(), error) {
+	return acquire(ctx, roomID, false)
+}
+
+func acquire(ctx context.Context, roomID string, wait bool) (context.Context, func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return ctx, nil, err
 	}
 	roomID = strings.TrimSpace(roomID)
 	marker, _ := ctx.Value(leaseContextKey{}).(leaseMarker)
@@ -72,11 +88,28 @@ func Acquire(ctx context.Context, roomID string) (context.Context, func(), error
 	entry.refs++
 	shared.mu.Unlock()
 
-	select {
-	case <-ctx.Done():
+	if wait {
+		select {
+		case <-ctx.Done():
+			shared.releaseReference(roomID, entry)
+			return ctx, nil, ctx.Err()
+		case <-entry.token:
+		}
+	} else {
+		select {
+		case <-entry.token:
+		default:
+			shared.releaseReference(roomID, entry)
+			if err := ctx.Err(); err != nil {
+				return ctx, nil, err
+			}
+			return ctx, nil, ErrBusy
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		entry.token <- struct{}{}
 		shared.releaseReference(roomID, entry)
-		return ctx, nil, ctx.Err()
-	case <-entry.token:
+		return ctx, nil, err
 	}
 
 	var once sync.Once

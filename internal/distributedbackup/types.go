@@ -154,6 +154,9 @@ type RestoreResult struct {
 }
 
 type DirectoryImportWorld struct {
+	// SourceRoot optionally selects a per-Placement subtree inside SourceRoot.
+	// It carries node-specific cluster network settings without duplicating saves.
+	SourceRoot    string
 	WorldID       string
 	DirectoryName string
 }

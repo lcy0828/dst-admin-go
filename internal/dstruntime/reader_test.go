@@ -84,6 +84,67 @@ func TestReadPlayersRejectsStaleWrongSessionAndInvalidEmptySnapshot(t *testing.T
 	}
 }
 
+func TestSnapshotSelectionDoesNotCompareSequencesAcrossInstances(t *testing.T) {
+	for _, sameInstance := range []bool{false, true} {
+		t.Run(map[bool]string{false: "new instance resets sequence", true: "same instance preserves sequence order"}[sameInstance], func(t *testing.T) {
+			manager, catalog, root := newRuntimeTestManager(t)
+			now := time.Now().UTC().Truncate(time.Second)
+			manager.now = func() time.Time { return now }
+			if _, err := manager.InstallWorld(context.Background(), catalog.room.ID, catalog.worlds[0].ID); err != nil {
+				t.Fatal(err)
+			}
+			worldPath := filepath.Join(root, "Cluster_1", "Master")
+			if err := os.MkdirAll(filepath.Join(worldPath, "save/session/SESSION"), 0750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(worldPath, "server.ini"), []byte("[SHARD]\nid = 1\n"), 0640); err != nil {
+				t.Fatal(err)
+			}
+			output := filepath.Join(worldPath, "save/mod_config_data/dst-admin")
+			oldID, newID := "old-instance", "new-instance"
+			if sameInstance {
+				newID = oldID
+			}
+			for _, item := range []struct {
+				slot, instance string
+				sequence       int64
+				modified       time.Time
+			}{
+				{"a", oldID, 100, now.Add(-100 * time.Millisecond)},
+				{"b", newID, 1, now.Add(100 * time.Millisecond)},
+			} {
+				players := Snapshot{SchemaVersion: ProtocolVersion, ProducerVersion: RuntimeVersion, ProducerInstanceID: item.instance, SessionID: "SESSION", ShardID: "1", Sequence: item.sequence, CapturedAtUnix: now.Unix(), Complete: true, Players: []SnapshotPlayer{}}
+				world := WorldStateSnapshot{SchemaVersion: ProtocolVersion, ProducerVersion: RuntimeVersion, ProducerInstanceID: item.instance, SessionID: "SESSION", ShardID: "1", Sequence: item.sequence, CapturedAtUnix: now.Unix(), Complete: true, Precipitation: "none"}
+				for name, value := range map[string]interface{}{"players-" + item.slot + ".json": players, "worldstate-" + item.slot + ".json": world} {
+					data, err := json.Marshal(value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					path := filepath.Join(output, name)
+					if err := os.WriteFile(path, data, 0640); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chtimes(path, item.modified, item.modified); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			wantSequence := int64(1)
+			if sameInstance {
+				wantSequence = 100
+			}
+			players, err := manager.ReadPlayers(context.Background(), catalog.room.ID, catalog.worlds[0].ID)
+			if err != nil || players.Sequence != wantSequence {
+				t.Fatalf("wrong player snapshot after handover: %+v %v", players, err)
+			}
+			world, err := manager.ReadWorldState(context.Background(), catalog.room.ID, catalog.worlds[0].ID)
+			if err != nil || world.Sequence != wantSequence {
+				t.Fatalf("wrong world snapshot after handover: %+v %v", world, err)
+			}
+		})
+	}
+}
+
 func TestReadWorldStateChoosesNewestValidSlotAndPreservesEveryMetric(t *testing.T) {
 	manager, catalog, root := newRuntimeTestManager(t)
 	manager.now = func() time.Time { return time.Unix(1_786_500_010, 0).UTC() }

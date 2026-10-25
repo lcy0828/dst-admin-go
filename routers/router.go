@@ -1179,6 +1179,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err != nil {
 		return nil, err
 	}
+	saveImportService.ConfigureRuntimeReader(runtimeDriverRouter)
 	if err := saveImportService.ConfigurePortAllocator(topologyService); err != nil {
 		return nil, err
 	}

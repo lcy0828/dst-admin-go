@@ -77,8 +77,15 @@ type verifiedImport struct {
 }
 
 type Manager struct {
-	saveRoot  string
-	stateRoot string
+	saveRoot            string
+	stateRoot           string
+	prepareRestoreWorld func(context.Context, string, string) error
+}
+
+// ConfigureRestoreWorld sets node-local staging preparation before any save is
+// replaced. Configure once during construction, before serving operations.
+func (m *Manager) ConfigureRestoreWorld(prepare func(context.Context, string, string) error) {
+	m.prepareRestoreWorld = prepare
 }
 
 func New(saveRoot, stateRoot string) (*Manager, error) {

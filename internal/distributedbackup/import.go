@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"dont/internal/roomops"
+	"dont/internal/runtimedriver"
 	"dont/internal/shardtransfer"
 )
 
@@ -30,7 +31,10 @@ func (c *Coordinator) ImportDirectory(ctx context.Context, request DirectoryImpo
 	if err != nil {
 		return Set{}, err
 	}
-	sourceRoot, sourceWorlds, err := validateDirectoryImport(request.SourceRoot, request.Worlds, runtimeParts)
+	if err := requireRestoreCollector(runtimeParts); err != nil {
+		return Set{}, err
+	}
+	_, sourceWorlds, err := validateDirectoryImport(request.SourceRoot, request.Worlds, runtimeParts)
 	if err != nil {
 		return Set{}, err
 	}
@@ -69,9 +73,10 @@ func (c *Coordinator) ImportDirectory(ctx context.Context, request DirectoryImpo
 		if pathErr != nil {
 			return c.failDirectoryImport(set, pathErr)
 		}
+		source := sourceWorlds[current.part.WorldID]
 		descriptor, createErr := shardtransfer.CreateBackupArchive(
 			ctx, current.part.ID, current.target.Cluster, current.target.Shard,
-			sourceRoot, filepath.Join(sourceRoot, sourceWorlds[current.part.WorldID]), partPath,
+			source.SourceRoot, filepath.Join(source.SourceRoot, source.DirectoryName), partPath,
 		)
 		if createErr != nil {
 			return c.failDirectoryImport(set, createErr)
@@ -107,7 +112,7 @@ func (c *Coordinator) ImportDirectory(ctx context.Context, request DirectoryImpo
 	return result, nil
 }
 
-func validateDirectoryImport(sourceRoot string, worlds []DirectoryImportWorld, runtimeParts []runtimePart) (string, map[string]string, error) {
+func validateDirectoryImport(sourceRoot string, worlds []DirectoryImportWorld, runtimeParts []runtimePart) (string, map[string]DirectoryImportWorld, error) {
 	sourceRoot = strings.TrimSpace(sourceRoot)
 	if sourceRoot == "" || len(worlds) != len(runtimeParts) || len(runtimeParts) == 0 {
 		return "", nil, ErrImportWorldMismatch
@@ -124,16 +129,30 @@ func validateDirectoryImport(sourceRoot string, worlds []DirectoryImportWorld, r
 	for _, part := range runtimeParts {
 		worldIDs[part.part.WorldID] = true
 	}
-	result := make(map[string]string, len(worlds))
+	result := make(map[string]DirectoryImportWorld, len(worlds))
 	usedDirectories := make(map[string]bool, len(worlds))
 	for _, world := range worlds {
 		world.WorldID = strings.TrimSpace(world.WorldID)
 		world.DirectoryName = strings.TrimSpace(world.DirectoryName)
-		if !worldIDs[world.WorldID] || result[world.WorldID] != "" || world.DirectoryName == "" ||
+		if !worldIDs[world.WorldID] || result[world.WorldID].DirectoryName != "" || world.DirectoryName == "" ||
 			filepath.Base(world.DirectoryName) != world.DirectoryName || strings.ContainsAny(world.DirectoryName, "\x00/\\\r\n") || usedDirectories[world.DirectoryName] {
 			return "", nil, ErrImportWorldMismatch
 		}
-		path := filepath.Join(absolute, world.DirectoryName)
+		if world.SourceRoot == "" {
+			world.SourceRoot = absolute
+		}
+		world.SourceRoot, err = filepath.Abs(world.SourceRoot)
+		if err != nil || !containedPath(absolute, world.SourceRoot) {
+			return "", nil, ErrImportWorldMismatch
+		}
+		// Resolve symlinks before opening a subtree supplied by an import caller.
+		resolved, err := filepath.EvalSymlinks(world.SourceRoot)
+		canonicalRoot, rootErr := filepath.EvalSymlinks(absolute)
+		relative, relativeErr := filepath.Rel(absolute, world.SourceRoot)
+		if err != nil || rootErr != nil || relativeErr != nil || resolved != filepath.Join(canonicalRoot, relative) {
+			return "", nil, ErrImportWorldMismatch
+		}
+		path := filepath.Join(world.SourceRoot, world.DirectoryName)
 		if !containedPath(absolute, path) {
 			return "", nil, ErrImportWorldMismatch
 		}
@@ -141,10 +160,10 @@ func validateDirectoryImport(sourceRoot string, worlds []DirectoryImportWorld, r
 		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return "", nil, errors.Join(statErr, ErrImportWorldMismatch)
 		}
-		result[world.WorldID], usedDirectories[world.DirectoryName] = world.DirectoryName, true
+		result[world.WorldID], usedDirectories[world.DirectoryName] = world, true
 	}
 	for worldID := range worldIDs {
-		if result[worldID] == "" {
+		if result[worldID].DirectoryName == "" {
 			return "", nil, ErrImportWorldMismatch
 		}
 	}
@@ -169,4 +188,13 @@ func (c *Coordinator) failDirectoryImport(value Set, cause error) (Set, error) {
 	current.Failure, current.UpdatedAt = cause.Error(), c.now().UTC()
 	saved, saveErr := c.store.SaveSet(current)
 	return saved, errors.Join(fmt.Errorf("import save directory: %w", cause), saveErr)
+}
+
+func requireRestoreCollector(parts []runtimePart) error {
+	for _, part := range parts {
+		if !runtimedriver.HasTargetCapability(part.driver, part.target, runtimedriver.CapabilityRestoreCollector) {
+			return fmt.Errorf("%w: 节点 %s 尚不支持恢复时保留采集配置，请先升级该节点的 Agent", ErrTargetUnavailable, part.target.TargetID)
+		}
+	}
+	return nil
 }

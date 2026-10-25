@@ -75,6 +75,24 @@ func (b *DistributedBridge) readPlayersForHealth(ctx context.Context, roomID, wo
 	if err != nil {
 		return Snapshot{}, err
 	}
+	reader, ok := b.runtime.(interface {
+		ReadWorldState(context.Context, string, string) (shared.RuntimeWorldStateRead, error)
+	})
+	if !ok {
+		return Snapshot{}, ErrWorldStateReadUnsupported
+	}
+	current, err := reader.ReadWorldState(ctx, roomID, worldID)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if current.ReadError != "" {
+		return Snapshot{}, fmt.Errorf("%w: %s", ErrSnapshotUnavailable, current.ReadError)
+	}
+	if current.Runtime.State != "running" || current.StartedAt.IsZero() ||
+		current.StartedAt.After(b.now().UTC()) || current.SessionID == "" || current.ShardID == "" ||
+		current.SessionID != health.SessionID || current.ShardID != health.ShardID || health.ReadAt.Before(current.StartedAt) {
+		return Snapshot{}, ErrWorldStatePending
+	}
 	candidates := make([]Snapshot, 0, len(artifacts))
 	var failures error
 	for _, artifact := range artifacts {
@@ -85,6 +103,10 @@ func (b *DistributedBridge) readPlayersForHealth(ctx context.Context, roomID, wo
 		}
 		if value.ProducerVersion != RuntimeVersion || value.ProducerInstanceID != health.ProducerInstanceID || value.Sequence != health.Sequence {
 			failures = errors.Join(failures, fmt.Errorf("%s: %w", artifact.Name, ErrSnapshotStale))
+			continue
+		}
+		if value.CapturedAt.Before(current.StartedAt) || artifact.UpdatedAt.Before(current.StartedAt) {
+			failures = errors.Join(failures, ErrWorldStatePending)
 			continue
 		}
 		candidates = append(candidates, value)
@@ -157,6 +179,13 @@ func (b *DistributedBridge) readWorldStateForHealth(ctx context.Context, roomID,
 
 func (b *DistributedBridge) Health(ctx context.Context, roomID, worldID string) (Health, error) {
 	return b.readHealth(ctx, roomID, worldID, true)
+}
+
+// ObserveHealth is for status presentation, including a collector that has not
+// switched to the installed version yet. Commands and live protocol operations
+// keep using Health and its strict embedded-version requirement.
+func (b *DistributedBridge) ObserveHealth(ctx context.Context, roomID, worldID string) (Health, error) {
+	return b.readHealth(ctx, roomID, worldID, false)
 }
 
 func (b *DistributedBridge) readHealth(ctx context.Context, roomID, worldID string, requireCurrentVersion bool) (Health, error) {

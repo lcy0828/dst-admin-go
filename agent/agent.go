@@ -1242,7 +1242,7 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 			shared.SteamLoginCapability,
 			"runtime.mods.local-link.v1",
 			"shard.control.v1", "shard.control.v2", "shard.runtime-mode.v1", "shard.skip-mod-update.v1", "runtime.driver.v2", "runtime.console.v2", shared.RuntimeLuaCapability, shared.RuntimeCommandDocumentCapability, "runtime.logs.v1", "runtime.chat-history.v1", "runtime.artifacts.v1", "runtime.worldstate.read.v1", "runtime.entity-artwork.v1", "runtime.migration.v1",
-			"runtime.backup.v1", "runtime.mods.v1", "runtime.mods.state.v1", "runtime.mods.files.v1", "runtime.mods.inventory.v1", "runtime.mods.schema.v1", "runtime.mods.fetch.v2", "runtime.mods.download.v1", "runtime.mods.content-publish.v1", "runtime.progress.v1", "runtime.game-update.v1", "runtime.game-install.v1", "runtime.luajit.v2", "runtime.cpu.v1", "runtime.configuration.v1", "runtime.configuration.read.v1", "runtime.configuration.mod-write.v1", "runtime.configuration.secrets.v1", "runtime.configuration.apply.v1", "runtime.maps.v1",
+			"runtime.backup.v1", "runtime.restore.collector.v1", "runtime.mods.v1", "runtime.mods.state.v1", "runtime.mods.files.v1", "runtime.mods.inventory.v1", "runtime.mods.schema.v1", "runtime.mods.fetch.v2", "runtime.mods.download.v1", "runtime.mods.content-publish.v1", "runtime.progress.v1", "runtime.game-update.v1", "runtime.game-install.v1", "runtime.luajit.v2", "runtime.cpu.v1", "runtime.configuration.v1", "runtime.configuration.read.v1", "runtime.configuration.mod-write.v1", "runtime.configuration.secrets.v1", "runtime.configuration.apply.v1", "runtime.maps.v1",
 			"runtime.network.v1", "runtime.network.endpoints.v1", "runtime.migration.shard-routing.v1", "runtime.room-recovery.v1",
 		)
 		if a.modPeerEnabled() {

@@ -10,6 +10,7 @@ import (
 
 	"dont/internal/configpublication"
 	"dont/internal/consoledispatch"
+	"dont/internal/dstruntime"
 	"dont/internal/runtimefiles"
 	"dont/internal/shards"
 	"dont/internal/shardtransfer"
@@ -71,6 +72,7 @@ func NewNative(saveRoot string, control NativeControl) (*Native, error) {
 	if err != nil {
 		return nil, err
 	}
+	transfer.ConfigureRestoreWorld(dstruntime.PrepareImportedWorld)
 	configs, err := configpublication.New(saveRoot, filepath.Join(saveRoot, ".dst-admin-config-publications"))
 	if err != nil {
 		return nil, err
@@ -278,7 +280,7 @@ func (d *Native) Capabilities() []Capability {
 	result := []Capability{
 		CapabilityLifecycle, CapabilityConsoleInput, CapabilityConsoleHealth, CapabilityRawConsole,
 		CapabilityOperationProof, CapabilityLogContinuation, CapabilityChatHistory, CapabilityArtifacts, CapabilityWorldStateRead, CapabilityEntityArtwork,
-		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore, CapabilityConfigRead, CapabilityConfigSecrets, CapabilityConfigPublish, CapabilityConfigApply,
+		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore, CapabilityRestoreCollector, CapabilityConfigRead, CapabilityConfigSecrets, CapabilityConfigPublish, CapabilityConfigApply,
 		CapabilityShardRouting,
 	}
 	if d.cpu != nil {

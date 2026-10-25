@@ -53,7 +53,7 @@ func (d *Agent) Capabilities() []Capability {
 	return []Capability{
 		CapabilityLifecycle, CapabilityConsoleInput, CapabilityConsoleHealth, CapabilityRawConsole,
 		CapabilityOperationProof, CapabilityLogContinuation, CapabilityChatHistory, CapabilityArtifacts, CapabilityWorldStateRead, CapabilityEntityArtwork,
-		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore,
+		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore, CapabilityRestoreCollector,
 		CapabilityModPrepare, CapabilityModPublish, CapabilityGameUpdate,
 		CapabilityExclusiveCPU,
 		CapabilityConfigRead, CapabilityConfigSecrets, CapabilityConfigPublish, CapabilityConfigApply,

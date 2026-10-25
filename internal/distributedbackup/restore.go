@@ -57,6 +57,9 @@ func (c *Coordinator) Restore(ctx context.Context, setID, confirmation, sourceJo
 	if err != nil {
 		return RestoreResult{}, err
 	}
+	if err := requireRestoreCollector(currentParts); err != nil {
+		return RestoreResult{}, err
+	}
 	if confirmation != room.Name {
 		return RestoreResult{}, ErrInvalidInput
 	}

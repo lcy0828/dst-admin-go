@@ -21,8 +21,11 @@ type maintenanceLuaControl struct {
 	status     shards.RuntimeStatus
 	sent       []string
 	failWrites bool
+	abortErr   error
 	delayLoads bool
 	loads      []func()
+	beforeSend func(string)
+	afterSend  func(string)
 }
 
 func (c *maintenanceLuaControl) Status(context.Context, string, string) (shards.RuntimeStatus, error) {
@@ -33,7 +36,17 @@ func (c *maintenanceLuaControl) Send(_ context.Context, _, _ string, script stri
 		return errors.New("oversized console command")
 	}
 	c.sent = append(c.sent, script)
-	return c.state.DoString(script)
+	if c.abortErr != nil && strings.Contains(script, "u.aborted=true") {
+		return c.abortErr
+	}
+	if c.beforeSend != nil {
+		c.beforeSend(script)
+	}
+	err := c.state.DoString(script)
+	if err == nil && c.afterSend != nil {
+		c.afterSend(script)
+	}
+	return err
 }
 
 func newMaintenanceLuaControl(t *testing.T, worldPath string) *maintenanceLuaControl {
@@ -126,7 +139,7 @@ func TestNodeMaintenanceRejectsRecentHealthFromPreviousProcess(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			healthPath := filepath.Join(path, "save/mod_config_data/dst-admin/health.json")
+			healthPath := filepath.Join(path, "save/mod_config_data/dst-admin/health-"+RuntimeVersion+".json")
 			if err := os.WriteFile(healthPath, data, 0640); err != nil {
 				t.Fatal(err)
 			}
@@ -195,7 +208,7 @@ func TestNodeMaintenanceKeepsPausedRuntimeButRejectsPreviousBootHealth(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	healthPath := filepath.Join(path, "save/mod_config_data/dst-admin/health.json")
+	healthPath := filepath.Join(path, "save/mod_config_data/dst-admin/health-"+RuntimeVersion+".json")
 	if err := os.WriteFile(healthPath, data, 0640); err != nil {
 		t.Fatal(err)
 	}
@@ -241,12 +254,132 @@ func TestNodeMaintenanceDefersDuringBarrierWithoutReplacingRuntime(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(path, "save/mod_config_data/dst-admin/health.json"), data, 0640); err != nil {
+	if err := os.WriteFile(filepath.Join(path, "save/mod_config_data/dst-admin/health-"+RuntimeVersion+".json"), data, 0640); err != nil {
 		t.Fatal(err)
 	}
 	value, err := EnsureNodeWorld(context.Background(), root, "Cluster_1", "Master", request, control)
 	if !errors.Is(err, ErrRuntimeRefreshDeferred) || !value.Deferred || len(control.sent) != count {
 		t.Fatalf("busy Runtime replaced: %+v err=%v", value, err)
+	}
+}
+
+func TestNodeMaintenanceChecksLiveOperationsAfterPersistedHealth(t *testing.T) {
+	for _, module := range []string{"Commands", "Barriers", "Diagnostics", "Telemetry", "WorldState", "Events"} {
+		t.Run(module, func(t *testing.T) {
+			_, _, root := newRuntimeTestManager(t)
+			path := filepath.Join(root, "Cluster_1", "Master")
+			control := newMaintenanceLuaControl(t, path)
+			request := shared.RuntimeLuaRequest{Version: RuntimeVersion, InstallIfMissing: true}
+			if _, err := EnsureNodeWorld(context.Background(), root, "Cluster_1", "Master", request, control); err != nil {
+				t.Fatal(err)
+			}
+			previous := control.state.GetGlobal("DSTAdmin")
+			before := []byte("-- DST-ADMIN MANAGED BLOCK BEGIN protocol=2 version=2.4.10\n-- original loader\n-- DST-ADMIN MANAGED BLOCK END\n-- preserve user code\n")
+			if err := os.WriteFile(filepath.Join(path, customCommandsName), before, 0600); err != nil {
+				t.Fatal(err)
+			}
+			// Begin work after the node has already inspected the healthy on-disk
+			// snapshot. The switch must inspect the live module before stopping it.
+			control.beforeSend = func(script string) {
+				if !strings.Contains(script, "local __update=") {
+					return
+				}
+				control.beforeSend = nil
+				if err := control.state.DoString(`busyModule=DSTAdmin.` + module + `; originalStatus=busyModule.Status; busyModule.Status=function() return {running=true,ready=true,busy=true,writing=true,holding=true,pending=1} end`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			value, err := EnsureNodeWorld(ctx, root, "Cluster_1", "Master", request, control)
+			cancel()
+			if !errors.Is(err, ErrRuntimeRefreshDeferred) || !value.Deferred || control.state.GetGlobal("DSTAdmin") != previous || control.state.GetField(previous, "state") != lua.LString("running") {
+				t.Fatalf("live %s operation was interrupted: %+v err=%v", module, value, err)
+			}
+			if data, err := os.ReadFile(filepath.Join(path, customCommandsName)); err != nil || string(data) != string(before) {
+				t.Fatalf("deferred update changed the original scripts: %q %v", data, err)
+			}
+			if control.state.GetGlobal("DSTAdminPendingUpdate") != lua.LNil {
+				t.Fatal("deferred update retained a pending activation")
+			}
+			if err := control.state.DoString(`busyModule.Status=originalStatus`); err != nil {
+				t.Fatal(err)
+			}
+			value, err = EnsureNodeWorld(context.Background(), root, "Cluster_1", "Master", request, control)
+			if err != nil || !value.Active || control.state.GetGlobal("DSTAdmin") == previous {
+				t.Fatalf("update did not resume after the operation completed: %+v err=%v", value, err)
+			}
+		})
+	}
+}
+
+func TestNodeMaintenanceDoesNotDeferWhenAbortFails(t *testing.T) {
+	_, _, root := newRuntimeTestManager(t)
+	path := filepath.Join(root, "Cluster_1", "Master")
+	control := newMaintenanceLuaControl(t, path)
+	request := shared.RuntimeLuaRequest{Version: RuntimeVersion, InstallIfMissing: true}
+	if _, err := EnsureNodeWorld(context.Background(), root, "Cluster_1", "Master", request, control); err != nil {
+		t.Fatal(err)
+	}
+	previous := control.state.GetGlobal("DSTAdmin")
+	before := []byte("-- DST-ADMIN MANAGED BLOCK BEGIN protocol=2 version=2.4.10\n-- original loader\n-- DST-ADMIN MANAGED BLOCK END\n-- preserve user code\n")
+	if err := os.WriteFile(filepath.Join(path, customCommandsName), before, 0600); err != nil {
+		t.Fatal(err)
+	}
+	control.beforeSend = func(script string) {
+		if strings.Contains(script, "local __update=") {
+			if err := control.state.DoString(`DSTAdmin.Barriers.Status=function() return {holding=true} end`); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	abortErr := errors.New("console disconnected during abort")
+	control.abortErr = abortErr
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	value, err := EnsureNodeWorld(ctx, root, "Cluster_1", "Master", request, control)
+	if value.Deferred || !errors.Is(err, ErrRuntimeActivation) || errors.Is(err, ErrRuntimeRefreshDeferred) || !errors.Is(err, abortErr) {
+		t.Fatalf("recovery failure was classified as a normal deferral: %+v err=%v", value, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(path, customCommandsName)); err != nil || string(data) != string(before) {
+		t.Fatalf("failed abort prevented restoring the original scripts: %q %v", data, err)
+	}
+	if control.state.GetGlobal("DSTAdmin") != previous || control.state.GetField(previous, "state") != lua.LString("running") {
+		t.Fatal("deferred update stopped the busy instance")
+	}
+}
+
+func TestNodeMaintenanceWaitsForCoherentSnapshots(t *testing.T) {
+	_, _, root := newRuntimeTestManager(t)
+	worldPath := filepath.Join(root, "Cluster_1", "Master")
+	control := newMaintenanceLuaControl(t, worldPath)
+	var restoreDone chan error
+	control.afterSend = func(script string) {
+		if !strings.Contains(script, "local __update=") {
+			return
+		}
+		control.afterSend = nil
+		path := filepath.Join(worldPath, "save/mod_config_data/dst-admin/worldstate-a.json")
+		coherent, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}"), 0640); err != nil {
+			t.Fatal(err)
+		}
+		restoreDone = make(chan error, 1)
+		time.AfterFunc(50*time.Millisecond, func() { restoreDone <- os.WriteFile(path, coherent, 0640) })
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	value, err := EnsureNodeWorld(ctx, root, "Cluster_1", "Master", shared.RuntimeLuaRequest{Version: RuntimeVersion, InstallIfMissing: true}, control)
+	if restoreDone == nil {
+		t.Fatal("activation was not sent")
+	}
+	if restoreErr := <-restoreDone; restoreErr != nil {
+		t.Fatal(restoreErr)
+	}
+	if err != nil || !value.Active {
+		t.Fatalf("transient snapshot rotation caused a failed activation: %+v err=%v", value, err)
 	}
 }
 

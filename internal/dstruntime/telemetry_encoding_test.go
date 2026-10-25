@@ -109,7 +109,7 @@ GetTime = function() return 1 end
 				t.Fatal(err)
 			}
 			callLuaMethod(t, state, module, "EmitOnce", false)
-			health, err := decodeHealthData(writes["mod_config_data/dst-admin/health.json"], "SESSION", "1", time.Now())
+			health, err := decodeHealthData(writes["mod_config_data/dst-admin/health-"+RuntimeVersion+".json"], "SESSION", "1", time.Now())
 			if err != nil || health.LastError == nil || !strings.Contains(*health.LastError, "can't sample player's state") || health.ConsecutiveFailures != 1 {
 				t.Fatalf("health error lost: %#v, %v", health, err)
 			}

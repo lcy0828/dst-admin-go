@@ -29,32 +29,33 @@ const (
 type Capability string
 
 const (
-	CapabilityLifecycle       Capability = "lifecycle"
-	CapabilityConsoleInput    Capability = "consoleInput"
-	CapabilityConsoleHealth   Capability = "consoleHealth"
-	CapabilityRawConsole      Capability = "rawConsole"
-	CapabilityOperationProof  Capability = "operationProof"
-	CapabilityLogContinuation Capability = "logContinuation"
-	CapabilityChatHistory     Capability = "chatHistory"
-	CapabilityArtifacts       Capability = "artifacts"
-	CapabilityWorldStateRead  Capability = "worldStateRead"
-	CapabilityEntityArtwork   Capability = "entityArtwork"
-	CapabilitySnapshotBarrier Capability = "snapshotBarrier"
-	CapabilityBackupStage     Capability = "backupStage"
-	CapabilityBackupRestore   Capability = "backupRestore"
-	CapabilityModPrepare      Capability = "modPrepare"
-	CapabilityModPublish      Capability = "modPublish"
-	CapabilityGameUpdate      Capability = "gameUpdate"
-	CapabilityExclusiveCPU    Capability = "exclusiveCpu"
-	CapabilityPublishedUDP    Capability = "publishedUdpEndpoint"
-	CapabilityConfigRead      Capability = "configRead"
-	CapabilityConfigSecrets   Capability = "configSecrets"
-	CapabilityConfigPublish   Capability = "configPublish"
-	CapabilityConfigApply     Capability = "configApply"
-	CapabilityMapRender       Capability = "mapRender"
-	CapabilityShardRouting    Capability = "shardRouting"
-	CapabilityMigrationPeer   Capability = "migrationPeer"
-	CapabilityRoomRecovery    Capability = "roomRecovery"
+	CapabilityLifecycle        Capability = "lifecycle"
+	CapabilityConsoleInput     Capability = "consoleInput"
+	CapabilityConsoleHealth    Capability = "consoleHealth"
+	CapabilityRawConsole       Capability = "rawConsole"
+	CapabilityOperationProof   Capability = "operationProof"
+	CapabilityLogContinuation  Capability = "logContinuation"
+	CapabilityChatHistory      Capability = "chatHistory"
+	CapabilityArtifacts        Capability = "artifacts"
+	CapabilityWorldStateRead   Capability = "worldStateRead"
+	CapabilityEntityArtwork    Capability = "entityArtwork"
+	CapabilitySnapshotBarrier  Capability = "snapshotBarrier"
+	CapabilityBackupStage      Capability = "backupStage"
+	CapabilityBackupRestore    Capability = "backupRestore"
+	CapabilityRestoreCollector Capability = "restoreCollector"
+	CapabilityModPrepare       Capability = "modPrepare"
+	CapabilityModPublish       Capability = "modPublish"
+	CapabilityGameUpdate       Capability = "gameUpdate"
+	CapabilityExclusiveCPU     Capability = "exclusiveCpu"
+	CapabilityPublishedUDP     Capability = "publishedUdpEndpoint"
+	CapabilityConfigRead       Capability = "configRead"
+	CapabilityConfigSecrets    Capability = "configSecrets"
+	CapabilityConfigPublish    Capability = "configPublish"
+	CapabilityConfigApply      Capability = "configApply"
+	CapabilityMapRender        Capability = "mapRender"
+	CapabilityShardRouting     Capability = "shardRouting"
+	CapabilityMigrationPeer    Capability = "migrationPeer"
+	CapabilityRoomRecovery     Capability = "roomRecovery"
 )
 
 type Target struct {
@@ -424,6 +425,8 @@ func runtimeCapabilities(values []string) []Capability {
 			appendCapability(CapabilitySnapshotBarrier)
 			appendCapability(CapabilityBackupStage)
 			appendCapability(CapabilityBackupRestore)
+		case "runtime.restore.collector.v1":
+			appendCapability(CapabilityRestoreCollector)
 		case "runtime.mods.v1":
 			appendCapability(CapabilityModPrepare)
 			appendCapability(CapabilityModPublish)

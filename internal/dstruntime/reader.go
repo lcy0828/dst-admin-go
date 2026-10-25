@@ -14,11 +14,11 @@ import (
 
 	"dont/internal/rooms"
 	"dont/internal/runtimefiles"
+	"dont/internal/saveidentity"
 )
 
 const (
 	maxSnapshotBytes = int64(1024 * 1024)
-	maxHealthBytes   = int64(64 * 1024)
 	defaultFreshFor  = 20 * time.Second
 	maxFutureSkew    = 30 * time.Second
 )
@@ -51,7 +51,10 @@ func (m *Manager) ReadPlayers(ctx context.Context, roomID, worldID string) (Snap
 	if status.State != InstallStateInstalled {
 		return Snapshot{}, fmt.Errorf("%w: %s", ErrRuntimeNotInstalled, status.Message)
 	}
-	expectedSession := currentSessionID(worldPath)
+	expectedSession, err := currentSessionID(worldPath)
+	if err != nil {
+		return Snapshot{}, err
+	}
 	candidates := make([]Snapshot, 0, 2)
 	var failures error
 	for _, name := range []string{"players-a.json", "players-b.json"} {
@@ -78,7 +81,9 @@ func (m *Manager) ReadPlayers(ctx context.Context, roomID, worldID string) (Snap
 		if !left.CapturedAt.Equal(right.CapturedAt) {
 			return left.CapturedAt.After(right.CapturedAt)
 		}
-		return left.Sequence > right.Sequence
+		// Sequences restart with each producer. Within one capture second,
+		// prefer the last persisted instance instead of an older high sequence.
+		return left.persistedAt.After(right.persistedAt)
 	})
 	return candidates[0], nil
 }
@@ -121,7 +126,10 @@ func (m *Manager) readWorldState(ctx context.Context, roomID, worldID string, re
 	if err != nil {
 		return WorldStateSnapshot{}, err
 	}
-	expectedSession := currentSessionID(worldPath)
+	expectedSession, err := currentSessionID(worldPath)
+	if err != nil {
+		return WorldStateSnapshot{}, err
+	}
 	candidates := make([]WorldStateSnapshot, 0, 2)
 	var failures error
 	for _, name := range []string{"worldstate-a.json", "worldstate-b.json"} {
@@ -154,7 +162,7 @@ func (m *Manager) readWorldState(ctx context.Context, roomID, worldID string, re
 		if !left.CapturedAt.Equal(right.CapturedAt) {
 			return left.CapturedAt.After(right.CapturedAt)
 		}
-		return left.Sequence > right.Sequence
+		return left.persistedAt.After(right.persistedAt)
 	})
 	return candidates[0], nil
 }
@@ -172,19 +180,18 @@ func (m *Manager) Health(roomID, worldID string) (Health, error) {
 	if err != nil {
 		return Health{}, err
 	}
-	healthPath := filepath.Join(worldPath, "save", "mod_config_data", "dst-admin", "health.json")
-	data, _, exists, err := readRegular(healthPath, maxHealthBytes)
+	data, info, exists, err := runtimefiles.ReadRuntimeHealth(worldPath)
 	if err != nil {
 		return Health{}, err
 	}
 	if !exists {
 		return Health{}, ErrSnapshotUnavailable
 	}
-	readAt := time.Now().UTC()
-	if info, statErr := os.Stat(healthPath); statErr == nil {
-		readAt = info.ModTime().UTC()
+	session, err := currentSessionID(worldPath)
+	if err != nil {
+		return Health{}, err
 	}
-	return decodeHealthData(data, currentSessionID(worldPath), "", readAt)
+	return decodeHealthData(data, session, "", info.ModTime().UTC())
 }
 
 func readSnapshot(path, expectedSession string, now time.Time) (Snapshot, error) {
@@ -195,7 +202,13 @@ func readSnapshot(path, expectedSession string, now time.Time) (Snapshot, error)
 	if !exists {
 		return Snapshot{}, os.ErrNotExist
 	}
-	return decodeSnapshotData(data, expectedSession, "", now)
+	value, err := decodeSnapshotData(data, expectedSession, "", now)
+	if err == nil {
+		if info, statErr := os.Stat(path); statErr == nil {
+			value.persistedAt = info.ModTime()
+		}
+	}
+	return value, err
 }
 
 func decodeSnapshotData(data []byte, expectedSession, expectedShard string, now time.Time) (Snapshot, error) {
@@ -251,7 +264,13 @@ func readWorldStateSnapshot(path, expectedSession, expectedShard string, now tim
 	if !exists {
 		return WorldStateSnapshot{}, os.ErrNotExist
 	}
-	return decodeWorldStateData(data, expectedSession, expectedShard, now, requireFresh)
+	value, err := decodeWorldStateData(data, expectedSession, expectedShard, now, requireFresh)
+	if err == nil {
+		if info, statErr := os.Stat(path); statErr == nil {
+			value.persistedAt = info.ModTime()
+		}
+	}
+	return value, err
 }
 
 func decodeWorldStateData(data []byte, expectedSession, expectedShard string, now time.Time, requireFresh bool) (WorldStateSnapshot, error) {
@@ -352,30 +371,6 @@ func validPositiveMetric(value *float64) bool {
 	return validMetric(value) && (value == nil || *value > 0)
 }
 
-func currentSessionID(worldPath string) string {
-	root := filepath.Join(worldPath, "save", "session")
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return ""
-	}
-	type session struct {
-		name    string
-		updated time.Time
-	}
-	values := make([]session, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || len(entry.Name()) > 128 {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil || info.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
-		values = append(values, session{name: entry.Name(), updated: info.ModTime()})
-	}
-	if len(values) == 0 {
-		return ""
-	}
-	sort.SliceStable(values, func(i, j int) bool { return values[i].updated.After(values[j].updated) })
-	return values[0].name
+func currentSessionID(worldPath string) (string, error) {
+	return saveidentity.CurrentSession(worldPath)
 }

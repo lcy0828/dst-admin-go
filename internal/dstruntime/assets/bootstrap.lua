@@ -1,12 +1,40 @@
-local VERSION = "2.4.11"
+local VERSION = "2.4.12"
 local PROTOCOL_VERSION = 2
 local MODULE_ROOT = "mod_config_data/dst-admin/runtime/"
 local READY_RETRY_SECONDS = 0.5
 local pending_update = rawget(_G, "DSTAdminPendingUpdate")
 local UPDATE_ID = pending_update ~= nil and pending_update.id or nil
+local previous_runtime = rawget(_G, "DSTAdmin")
 
 local function emit_error(code, message)
     print(string.format("[DST-ADMIN-RUNTIME ERROR] code=%s message=%s", tostring(code), tostring(message)))
+end
+
+local function update_result(state, message)
+    if pending_update == nil or pending_update.aborted
+        or rawget(_G, "DSTAdminPendingUpdate") ~= pending_update then return end
+    -- Only the active maintenance attempt publishes this bounded acknowledgement.
+    -- It does not replace health or trigger another periodic collector.
+    pcall(function()
+        local json = require("json")
+        local payload = json.encode_compliant({schemaVersion=1, updateId=UPDATE_ID,
+            state=state, message=string.sub(tostring(message or ""), 1, 512)})
+        TheSim:SetPersistentString("mod_config_data/dst-admin/update-result.json", payload, false)
+    end)
+end
+
+local function replacement_blocker(previous)
+    if previous == nil then return nil end
+    if previous.reloadInProgress then return "Reload" end
+    for _, name in ipairs({"Commands", "Barriers", "Diagnostics", "Telemetry", "WorldState", "Events"}) do
+        local module = previous[name]
+        if module ~= nil and type(module.Status) == "function" then
+            local ok, status = pcall(module.Status)
+            if not ok or type(status) ~= "table" then return name .. " status unavailable" end
+            if status.busy or status.writing or status.holding or (tonumber(status.pending) or 0) > 0 then return name end
+        end
+    end
+    return nil
 end
 
 local function load_module(name, callback)
@@ -142,7 +170,7 @@ local function new_candidate()
         return true
     end
 
-    function candidate.Stop()
+    function candidate.Stop(handover)
         if candidate.state == "stopped" then
             return true
         end
@@ -179,7 +207,7 @@ local function new_candidate()
             end
         end
         if candidate.Telemetry ~= nil then
-            local ok, stopped = xpcall(candidate.Telemetry.Stop, debug.traceback)
+            local ok, stopped = xpcall(function() return candidate.Telemetry.Stop(handover) end, debug.traceback)
             if not ok or stopped == false then
                 emit_error("STOP_FAILED", stopped)
                 return false
@@ -198,12 +226,18 @@ local function new_candidate()
     end
 
     function candidate.Reload()
-        if candidate.reloadInProgress or rawget(_G, "DSTAdmin") ~= candidate then
+        if candidate.reloadInProgress or rawget(_G, "DSTAdmin") ~= candidate
+            or rawget(_G, "DSTAdminPendingUpdate") ~= nil
+            or candidate.state == "stopped" or candidate.state == "failed" then
             return false
         end
         candidate.reloadInProgress = true
         build_candidate(function(next_candidate, load_error)
             candidate.reloadInProgress = false
+            -- Module reads are asynchronous. Another activation or an explicit
+            -- Stop may have retired this instance while those reads completed.
+            if rawget(_G, "DSTAdmin") ~= candidate or candidate.state == "stopped"
+                or candidate.state == "failed" or rawget(_G, "DSTAdminPendingUpdate") ~= nil then return end
             if next_candidate == nil then
                 emit_error("RELOAD_LOAD_FAILED", load_error)
                 return
@@ -350,9 +384,21 @@ build_candidate = function(callback)
 end
 
 activate_candidate = function(previous, candidate, operation)
+    if rawget(_G, "DSTAdmin") ~= previous then
+        update_result("deferred", "runtime instance changed while loading modules")
+        return false
+    end
+    -- A persisted health snapshot can predate a backup barrier, diagnostic or
+    -- console command. Check the live modules in the same Lua turn as Stop.
+    local blocker = replacement_blocker(previous)
+    if blocker ~= nil then
+        update_result("deferred", blocker)
+        return false
+    end
     if previous ~= nil and type(previous.Stop) == "function" then
-        local stopped, stop_result = xpcall(previous.Stop, debug.traceback)
+        local stopped, stop_result = xpcall(function() return previous.Stop(true) end, debug.traceback)
         if not stopped or stop_result == false then
+            update_result("failed", "previous runtime did not stop")
             emit_error(operation .. "_PREVIOUS_STOP_FAILED", stop_result)
             return false
         end
@@ -364,7 +410,8 @@ activate_candidate = function(previous, candidate, operation)
         restored = true
         local current = rawget(_G, "DSTAdmin")
         if current ~= candidate and current ~= previous then return end
-        pcall(candidate.Stop)
+        update_result("failed", "candidate activation failed; restoring previous runtime")
+        pcall(candidate.Stop, true)
         rawset(_G, "DSTAdmin", previous)
         if previous ~= nil and type(previous.Start) == "function" then
             local ok, result = xpcall(previous.Start, debug.traceback)
@@ -394,12 +441,13 @@ end
 
 build_candidate(function(candidate, load_error)
     if candidate == nil then
+        update_result("failed", load_error)
         emit_error("RUNTIME_LOAD_FAILED", load_error)
         return
     end
     if pending_update ~= nil and (pending_update.aborted or rawget(_G, "DSTAdminPendingUpdate") ~= pending_update) then return end
     if pending_update ~= nil then pending_update.candidate = candidate end
-    activate_candidate(rawget(_G, "DSTAdmin"), candidate, "LOAD")
+    activate_candidate(previous_runtime, candidate, "LOAD")
 end)
 
 return true

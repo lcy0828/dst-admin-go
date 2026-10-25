@@ -436,11 +436,10 @@ func inspectWorld(candidateRoot, worldRoot, serverPath string) (WorldManifest, [
 	} else if strings.Contains(strings.ToLower(worldName), "cave") {
 		world.Role = "caves"
 	}
-	sessionRoot := filepath.Join(worldRoot, "save", "session")
-	if sessions, err := os.ReadDir(sessionRoot); err == nil {
-		world.SessionCount = len(sessions)
-	}
-	if world.SessionCount == 0 {
+	world.SessionCount, err = inspectSavedWorld(worldRoot)
+	if err != nil {
+		diagnostics = append(diagnostics, Diagnostic{Code: "INVALID_SAVE_INDEX", Severity: SeverityError, Message: err.Error(), Path: worldName})
+	} else if world.SessionCount == 0 {
 		diagnostics = append(diagnostics, Diagnostic{Code: "WORLD_SESSION_MISSING", Severity: SeverityInfo, Message: "分片没有现有 session，将按新世界配置启动", Path: worldName})
 	}
 	return world, diagnostics

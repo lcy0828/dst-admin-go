@@ -17,9 +17,11 @@ import (
 	"dont/internal/distributedbackup"
 	"dont/internal/mods"
 	"dont/internal/rooms"
+	"dont/internal/runtimedriver"
 	"dont/internal/runtimeguard"
 	"dont/internal/tempfiles"
 	"dont/internal/topology"
+	"dont/shared"
 
 	"github.com/google/uuid"
 	"github.com/shirou/gopsutil/v3/disk"
@@ -45,6 +47,7 @@ type Service struct {
 	guard         runtimeguard.MutationGuard
 	ports         PortAllocator
 	coordinated   CoordinatedRestorer
+	runtimeReader ImportRuntimeReader
 	locksMu       sync.Mutex
 	locks         map[string]*sync.Mutex
 	activeMu      sync.Mutex
@@ -86,6 +89,14 @@ type CoordinatedRestorer interface {
 	Operations(string) ([]distributedbackup.Operation, error)
 	RecoverOperation(context.Context, string) (distributedbackup.Operation, error)
 }
+
+// ImportRuntimeReader resolves configuration on each world's applied Placement.
+type ImportRuntimeReader interface {
+	ReadConfiguration(context.Context, string, string, string) (runtimedriver.ConfigurationSnapshot, error)
+	RevealClusterToken(context.Context, string, string) (shared.RuntimeClusterTokenReveal, error)
+}
+
+func (s *Service) ConfigureRuntimeReader(reader ImportRuntimeReader) { s.runtimeReader = reader }
 
 func (s *Service) ConfigurePortAllocator(allocator PortAllocator) error {
 	if allocator == nil {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"dont/internal/backups"
+	"dont/internal/dstruntime"
 	"dont/internal/mods"
 	"dont/internal/roomops"
 	"dont/internal/rooms"
@@ -157,6 +158,10 @@ func (s *Service) Apply(ctx context.Context, id, jobID string, request ApplyRequ
 		return ApplyResult{}, err
 	}
 	if err := verifyStagedRoom(staging, request.AllowPartial); err != nil {
+		return ApplyResult{}, err
+	}
+
+	if err := prepareImportedRuntime(ctx, staging, target, request.Mode == ApplyModeReplace); err != nil {
 		return ApplyResult{}, err
 	}
 
@@ -827,12 +832,7 @@ func preserveNetworkConfiguration(sourceRoot, destinationRoot string) error {
 	if err != nil {
 		return err
 	}
-	for _, key := range []string{"bind_ip", "master_ip", "master_port", "cluster_key"} {
-		value := sourceCluster.Section("SHARD").Key(key).String()
-		if value != "" {
-			destinationCluster.Section("SHARD").Key(key).SetValue(value)
-		}
-	}
+	preserveClusterNetwork(sourceCluster, destinationCluster)
 	if err := destinationCluster.SaveTo(filepath.Join(destinationRoot, "cluster.ini")); err != nil {
 		return err
 	}
@@ -851,6 +851,8 @@ func preserveNetworkConfiguration(sourceRoot, destinationRoot string) error {
 			continue
 		}
 		usedSource[sourceWorld.directory] = true
+		copyINIKey(sourceWorld.config, destinationWorld.config, "SHARD", "id")
+		copyINIKey(sourceWorld.config, destinationWorld.config, "SHARD", "is_master")
 		copyINIKey(sourceWorld.config, destinationWorld.config, "NETWORK", "server_port")
 		copyINIKey(sourceWorld.config, destinationWorld.config, "STEAM", "authentication_port")
 		copyINIKey(sourceWorld.config, destinationWorld.config, "STEAM", "master_server_port")
@@ -1104,6 +1106,9 @@ func verifyStagedRoom(root string, allowPartial bool) error {
 		if err != nil {
 			return ErrInvalidArchive
 		}
+		if _, err := inspectSavedWorld(filepath.Join(root, entry.Name())); err != nil {
+			return fmt.Errorf("%w: %s: %v", ErrInvalidArchive, entry.Name(), err)
+		}
 		worlds++
 		if config.Section("SHARD").Key("is_master").MustBool(false) {
 			masters++
@@ -1167,5 +1172,40 @@ func ErrorCode(err error) string {
 		return runtimeguard.ErrorCode
 	default:
 		return "SAVE_IMPORT_APPLY_FAILED"
+	}
+}
+
+func prepareImportedRuntime(ctx context.Context, incomingRoot, targetRoot string, replacing bool) error {
+	incoming, err := readNetworkWorlds(incomingRoot)
+	if err != nil {
+		return err
+	}
+	var targets []networkWorld
+	if replacing {
+		targets, err = readNetworkWorlds(targetRoot)
+		if err != nil {
+			return err
+		}
+	}
+	used := make(map[string]bool)
+	for _, world := range incoming {
+		current := ""
+		if target := matchNetworkWorld(targets, world, used); target != nil {
+			current = filepath.Join(targetRoot, target.directory)
+			used[target.directory] = true
+		}
+		if err := dstruntime.PrepareImportedWorld(ctx, filepath.Join(incomingRoot, world.directory), current); err != nil {
+			return fmt.Errorf("prepare imported runtime %s: %w", world.directory, err)
+		}
+	}
+	return nil
+}
+
+func preserveClusterNetwork(source, destination *ini.File) {
+	for _, key := range []string{"bind_ip", "master_ip", "master_port", "cluster_key"} {
+		destination.Section("SHARD").DeleteKey(key)
+		if source.Section("SHARD").HasKey(key) {
+			destination.Section("SHARD").Key(key).SetValue(source.Section("SHARD").Key(key).String())
+		}
 	}
 }

@@ -2,16 +2,54 @@ package runtimedriver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"time"
 
 	"dont/internal/dstruntime"
 	"dont/internal/operationlease"
+	"dont/internal/roomops"
 	"dont/shared"
 )
 
 type LuaRuntimeDriver interface {
 	EnsureLuaRuntime(context.Context, Target, Operation, shared.RuntimeLuaRequest) (shared.RuntimeLuaResult, error)
+}
+
+// LuaRuntimeScope uses only applied placement and registered node metadata.
+// Report reads must never refresh fleet inventory or contact an Agent.
+func (r *Router) LuaRuntimeScope(roomID, worldID string) (string, error) {
+	placement, err := r.placements.AppliedPlacement(roomID, worldID)
+	if err != nil {
+		return "", err
+	}
+	target := targetFromPlacement(placement, roomID, worldID)
+	endpoint, err := r.endpoints.ResolveEndpoint(target.TargetID, target.InstallationID)
+	if err != nil {
+		return "", err
+	}
+	var nodeScope string
+	switch driver := endpoint.Driver.(type) {
+	case *Native:
+		nodeScope = driver.saveRoot
+	case *Agent:
+		if source, ok := driver.executor.(interface {
+			RuntimeNodeScope(string, string) (string, error)
+		}); ok {
+			nodeScope, err = source.RuntimeNodeScope(target.TargetID, target.InstallationID)
+			if err != nil {
+				return "", err
+			}
+		}
+	}
+	data, err := json.Marshal([]string{target.TargetID, target.InstallationID, target.TopologyRevision, target.Cluster, target.Shard, nodeScope})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func (d *Native) EnsureLuaRuntime(ctx context.Context, target Target, op Operation, request shared.RuntimeLuaRequest) (shared.RuntimeLuaResult, error) {
@@ -47,6 +85,14 @@ func (d *Agent) EnsureLuaRuntime(ctx context.Context, target Target, op Operatio
 }
 
 func (r *Router) EnsureLuaRuntime(ctx context.Context, roomID, worldID string, request shared.RuntimeLuaRequest) (shared.RuntimeLuaResult, error) {
+	ctx, release, err := roomops.TryAcquire(ctx, roomID)
+	if err != nil {
+		if errors.Is(err, roomops.ErrBusy) {
+			return shared.RuntimeLuaResult{Deferred: true, Message: "房间正在执行其他操作，稍后自动重试 Runtime 更新"}, errors.Join(dstruntime.ErrRuntimeRefreshDeferred, err)
+		}
+		return shared.RuntimeLuaResult{}, err
+	}
+	defer release()
 	driver, target, err := r.DriverTarget(ctx, roomID, worldID)
 	if err != nil {
 		return shared.RuntimeLuaResult{}, err

@@ -110,3 +110,83 @@ func TestLateActivationFailureCannotReplaceNewerRuntime(t *testing.T) {
 		t.Fatal("late failed activation replaced the newer runtime")
 	}
 }
+
+func TestLateReloadCannotReplaceNewerRuntime(t *testing.T) {
+	for _, test := range []struct {
+		name, action string
+	}{
+		{"newer activation", `DSTAdmin.Stop(); DSTAdmin={state="running"}`},
+		{"explicit stop", `DSTAdmin.Stop()`},
+		{"automatic update started", `DSTAdminPendingUpdate={id="new-update"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, root := newRuntimeTestManager(t)
+			worldPath := filepath.Join(root, "Cluster_1", "Master")
+			control := newMaintenanceLuaControl(t, worldPath)
+			assets, _, err := desiredAssets()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writeExecutionAssets(worldPath, assets); err != nil {
+				t.Fatal(err)
+			}
+			if err := control.state.DoString(string(assets["bootstrap.lua"])); err != nil {
+				t.Fatal(err)
+			}
+			previous := requireLuaTable(t, control.state.GetGlobal("DSTAdmin"), "previous runtime")
+			control.delayLoads = true
+			callLuaMethod(t, control.state, previous, "Reload", true)
+			if len(control.loads) == 0 {
+				t.Fatal("reload did not start an asynchronous module read")
+			}
+			// Another lifecycle action wins while the previous instance's module
+			// reads are pending. Their late success must not publish a Runtime.
+			if err := control.state.DoString(test.action); err != nil {
+				t.Fatal(err)
+			}
+			current := control.state.GetGlobal("DSTAdmin")
+			currentState := control.state.GetField(current, "state")
+			control.delayLoads = false
+			for _, load := range control.loads {
+				load()
+			}
+			if control.state.GetGlobal("DSTAdmin") != current || control.state.GetField(current, "state") != currentState {
+				t.Fatal("late successful reload overrode the newer lifecycle action")
+			}
+			if control.state.GetField(previous, "reloadInProgress") != lua.LFalse {
+				t.Fatal("abandoned reload kept the previous instance busy")
+			}
+		})
+	}
+}
+
+func TestLateStartupBootstrapCannotReplaceNewerActivation(t *testing.T) {
+	_, _, root := newRuntimeTestManager(t)
+	worldPath := filepath.Join(root, "Cluster_1", "Master")
+	control := newMaintenanceLuaControl(t, worldPath)
+	assets, _, err := desiredAssets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeExecutionAssets(worldPath, assets); err != nil {
+		t.Fatal(err)
+	}
+	control.delayLoads = true
+	if err := control.state.DoString(string(assets["bootstrap.lua"])); err != nil {
+		t.Fatal(err)
+	}
+	if len(control.loads) == 0 {
+		t.Fatal("startup bootstrap did not start asynchronous module reads")
+	}
+	control.delayLoads = false
+	if err := control.state.DoString(string(assets["bootstrap.lua"])); err != nil {
+		t.Fatal(err)
+	}
+	current := requireLuaTable(t, control.state.GetGlobal("DSTAdmin"), "new activation")
+	for _, load := range control.loads {
+		load()
+	}
+	if control.state.GetGlobal("DSTAdmin") != current || control.state.GetField(current, "state") != lua.LString("running") {
+		t.Fatal("late startup bootstrap replaced the newer runtime")
+	}
+}

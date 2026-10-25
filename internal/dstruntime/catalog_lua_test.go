@@ -264,7 +264,7 @@ func TestCommandCompletionCoalescesFreshHealthWithoutResamplingPlayers(t *testin
 	if err := state.DoString(`
  health_writes={};health_callbacks={};command_callback=nil;player_writes=0
  TheSim={SetPersistentString=function(self,path,value,encoded,callback)
-   if string.find(path,"health.json",1,true) then
+   if string.match(path,"/health%-.+%.json$") then
      health_writes[#health_writes+1]=value;health_callbacks[#health_callbacks+1]=callback
    elseif string.find(path,"command-receipt-",1,true) then command_callback=callback
    else player_writes=player_writes+1;callback(true) end

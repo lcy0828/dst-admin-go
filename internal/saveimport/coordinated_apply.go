@@ -9,10 +9,16 @@ import (
 	"strings"
 
 	"dont/internal/distributedbackup"
+	"dont/internal/roomops"
 	"dont/internal/rooms"
 )
 
 func (s *Service) applyCoordinatedReplacement(ctx context.Context, id, jobID string, value Session, candidate Candidate, request ApplyRequest) (result ApplyResult, resultErr error) {
+	ctx, releaseRoom, err := roomops.Acquire(ctx, request.TargetRoomID)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	defer releaseRoom()
 	room, err := s.rooms.Room(request.TargetRoomID)
 	if err != nil {
 		return ApplyResult{}, err
@@ -22,10 +28,6 @@ func (s *Service) applyCoordinatedReplacement(ctx context.Context, id, jobID str
 	}
 	if request.Confirmation != room.Name {
 		return ApplyResult{}, ErrConfirmation
-	}
-	targetRoot := filepath.Join(s.config.SaveRoot, room.DirectoryName)
-	if !contained(s.config.SaveRoot, targetRoot) || !regularDirectory(targetRoot) {
-		return ApplyResult{}, ErrTargetNotManaged
 	}
 	contentRoot := filepath.Join(s.config.ImportRoot, id, "content")
 	sourceRoot := filepath.Join(contentRoot, filepath.FromSlash(candidate.Root))
@@ -54,6 +56,11 @@ func (s *Service) applyCoordinatedReplacement(ctx context.Context, id, jobID str
 			return ApplyResult{}, err
 		}
 	}
+	targetRoot, targetShared, cleanup, err := s.snapshotImportTarget(ctx, id, room, request.TokenPolicy == TokenPreserve)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	defer cleanup()
 	if err := s.applyTokenPolicy(staging, targetRoot, request); err != nil {
 		return ApplyResult{}, err
 	}
@@ -70,6 +77,11 @@ func (s *Service) applyCoordinatedReplacement(ctx context.Context, id, jobID str
 	worlds, err := s.coordinatedWorldMapping(room.ID, targetRoot, staging)
 	if err != nil {
 		return ApplyResult{}, err
+	}
+	if targetShared != nil {
+		if err := preparePlacementSharedFiles(staging, worlds, targetShared); err != nil {
+			return ApplyResult{}, err
+		}
 	}
 	backupSet, err := s.coordinated.ImportDirectory(ctx, distributedbackup.DirectoryImportRequest{
 		RoomID: room.ID, SourceRoot: staging, Name: value.Name, Kind: "import", SourceJobID: jobID, Worlds: worlds,
@@ -195,7 +207,7 @@ func (s *Service) coordinatedWorldMapping(roomID, targetRoot, importedRoot strin
 			return nil, ErrWorldMismatch
 		}
 		imported := matchNetworkWorld(importedWorlds, target, usedImported)
-		if imported == nil {
+		if imported == nil || imported.master != target.master {
 			return nil, ErrWorldMismatch
 		}
 		usedImported[imported.directory] = true

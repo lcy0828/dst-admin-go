@@ -65,9 +65,10 @@ func TestSaveImportHTTPUploadsAndAnalyzesWrappedArchive(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	app := newSaveImportHandlerApp(t)
 	archive := saveImportHTTPZip(t, map[string]string{
-		"Cluster_1/cluster.ini":         "[NETWORK]\ncluster_name = HTTP Import\n[GAMEPLAY]\ngame_mode = survival\n",
-		"Cluster_1/Master/server.ini":   "[NETWORK]\nserver_port = 10999\n[SHARD]\nis_master = true\nid = 1\n",
-		"Cluster_1/Master/save/session": "save",
+		"Cluster_1/cluster.ini":                            "[NETWORK]\ncluster_name = HTTP Import\n[GAMEPLAY]\ngame_mode = survival\n",
+		"Cluster_1/Master/server.ini":                      "[NETWORK]\nserver_port = 10999\n[SHARD]\nis_master = true\nid = 1\n",
+		"Cluster_1/Master/save/session/SESSION/0000000001": "save",
+		"Cluster_1/Master/save/shardindex":                 `return {session_id="SESSION"}`,
 	})
 	response := performSaveImportUpload(t, app.router, "import.zip", "HTTP Import", archive)
 	assertStatus(t, response, http.StatusAccepted)

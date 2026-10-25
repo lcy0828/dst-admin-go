@@ -123,7 +123,7 @@ scheduler={ExecuteInTime=function() error("ready world should not wait") end}
 					t.Errorf("module not read: %s", name)
 				}
 			}
-			health, err := decodeHealthData(outputs["mod_config_data/dst-admin/health.json"], "SESSION", "1", time.Now())
+			health, err := decodeHealthData(outputs["mod_config_data/dst-admin/health-"+RuntimeVersion+".json"], "SESSION", "1", time.Now())
 			if err != nil || !health.Running || !health.Ready {
 				t.Fatalf("health=%+v error=%v", health, err)
 			}

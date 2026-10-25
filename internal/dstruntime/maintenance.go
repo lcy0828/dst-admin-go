@@ -2,6 +2,7 @@ package dstruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"dont/internal/roomops"
 	"dont/internal/rooms"
 	"dont/internal/runtimefiles"
 	"dont/internal/shards"
@@ -46,6 +48,9 @@ func (p maintenanceProcess) IsRunning(ctx context.Context, room, world string) (
 	case shards.RuntimeRunning:
 		return true, nil
 	case shards.RuntimeStopped, shards.RuntimeFailed:
+		if status.SessionExists || strings.HasSuffix(status.Code, "_CONFLICT") {
+			return false, fmt.Errorf("%w: %s %s", ErrRuntimeProcessConflict, status.Code, status.Message)
+		}
 		return false, nil
 	default:
 		return false, fmt.Errorf("%w: Runtime 正在切换状态（%s），稍后重试更新", ErrRuntimeRefreshDeferred, status.State)
@@ -79,6 +84,15 @@ func EnsureNodeWorld(ctx context.Context, root, cluster, shard string, request s
 		return result, err
 	}
 	roomID, worldID := catalog.room.ID, catalog.world.ID
+	ctx, release, err := roomops.TryAcquire(ctx, roomID)
+	if err != nil {
+		if errors.Is(err, roomops.ErrBusy) {
+			result.Deferred, result.Message = true, "房间正在执行其他操作，稍后自动重试 Runtime 更新"
+			return result, errors.Join(ErrRuntimeRefreshDeferred, err)
+		}
+		return result, err
+	}
+	defer release()
 	status := manager.inspect(catalog.room, catalog.world)
 	result.State, result.Version = string(status.State), status.Version
 	if status.State == InstallStateMissing && !request.InstallIfMissing {
@@ -103,7 +117,8 @@ func EnsureNodeWorld(ctx context.Context, root, cluster, shard string, request s
 			}
 		}
 	}
-	installed, err := manager.InstallWorld(ctx, roomID, worldID)
+	publication := make(runtimePublication)
+	installed, err := manager.installWorld(ctx, roomID, worldID, publication)
 	if err != nil {
 		return result, err
 	}
@@ -128,16 +143,7 @@ func EnsureNodeWorld(ctx context.Context, root, cluster, shard string, request s
 	script := `local __update={id=` + strconv.Quote(token) + `,previous=rawget(_G,"DSTAdmin")};rawset(_G,"DSTAdminPendingUpdate",__update);` + strings.Replace(managedActivationScript, `function(ok,source) `, `function(ok,source) if rawget(_G,"DSTAdminPendingUpdate")~=__update or __update.aborted then return end `, 1)
 	err = control.Send(ctx, cluster, shard, script)
 	if err == nil {
-		var health Health
-		health, err = bridge.waitForLifecycleHealth(ctx, roomID, worldID, worldPath, start, "", token)
-		if err == nil {
-			players, playersErr := manager.ReadPlayers(ctx, roomID, worldID)
-			world, worldErr := manager.ReadWorldState(ctx, roomID, worldID)
-			err = errors.Join(playersErr, worldErr)
-			if err == nil && !refreshOutputsMatch(health, players, world, health.SessionID, health.ShardID) {
-				err = ErrRuntimeActivation
-			}
-		}
+		err = bridge.waitForMaintenanceHealth(ctx, roomID, worldID, worldPath, start, token)
 	}
 	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
@@ -149,16 +155,76 @@ func EnsureNodeWorld(ctx context.Context, root, cluster, shard string, request s
 		}
 	}
 	// Abort the matching attempt only; never stop an unrelated/newer instance.
-	abort := `local u=rawget(_G,"DSTAdminPendingUpdate"); if u and u.id==` + strconv.Quote(token) + ` then u.aborted=true; if u.candidate and rawget(_G,"DSTAdmin")==u.candidate then pcall(u.candidate.Stop); rawset(_G,"DSTAdmin",u.previous); if u.previous then pcall(u.previous.Start); if u.previous.Refresh then pcall(u.previous.Refresh) end end end; rawset(_G,"DSTAdminPendingUpdate",nil) end`
+	abort := `local u=rawget(_G,"DSTAdminPendingUpdate"); if u and u.id==` + strconv.Quote(token) + ` then u.aborted=true; if u.candidate and rawget(_G,"DSTAdmin")==u.candidate then pcall(u.candidate.Stop,true); rawset(_G,"DSTAdmin",u.previous); if u.previous then pcall(u.previous.Start); if u.previous.Refresh then pcall(u.previous.Refresh) end end end; rawset(_G,"DSTAdminPendingUpdate",nil) end`
 	abortErr := control.Send(cleanup, cluster, shard, abort)
 	var restoreErr error
 	if installed.Changed {
-		restoreErr = manager.restoreStateBackup(worldPath, filepath.Base(installed.BackupPath))
+		if _, restoreErr = manager.worldPath(catalog.room, catalog.world); restoreErr == nil {
+			restoreErr = manager.restoreMaintenanceBackup(worldPath, filepath.Base(installed.BackupPath), publication)
+		}
 	}
 	restored := manager.inspect(catalog.room, catalog.world)
 	result.State, result.Version = string(restored.State), restored.Version
+	result.Deferred = errors.Is(err, ErrRuntimeRefreshDeferred)
 	result.Active, result.Message = false, "Runtime 更新未确认成功，已尝试恢复更新前状态"
+	if abortErr != nil || restoreErr != nil {
+		if result.Deferred {
+			// A failed recovery is an activation failure. Retain the deferral
+			// reason as text so callers cannot treat it as an ordinary busy retry.
+			err = fmt.Errorf("%w: deferred update recovery failed (%v)", ErrRuntimeActivation, err)
+			result.Deferred = false
+		}
+		result.Message = "Runtime 更新失败，恢复更新前状态未完成，请检查 Runtime 状态后重试"
+	} else if result.Deferred {
+		result.Message = "Runtime 正在执行操作，保留当前实例并稍后重试更新"
+	}
 	return result, errors.Join(err, abortErr, restoreErr)
+}
+
+// Keep waiting when one output rotates between reads. Health alone is not the
+// acknowledgement: the two snapshots must agree with this activation as well.
+func (b *Bridge) waitForMaintenanceHealth(ctx context.Context, roomID, worldID, worldPath string, startedAt time.Time, token string) error {
+	deadline := time.NewTimer(defaultLifecycleTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(b.pollInterval)
+	defer ticker.Stop()
+	for {
+		data, _, exists, err := readRegular(filepath.Join(worldPath, "save", "mod_config_data", managedDirectory, "update-result.json"), 4096)
+		if err != nil {
+			return fmt.Errorf("read runtime maintenance acknowledgement: %w", err)
+		}
+		if exists {
+			var receipt struct {
+				SchemaVersion int    `json:"schemaVersion"`
+				UpdateID      string `json:"updateId"`
+				State         string `json:"state"`
+				Message       string `json:"message"`
+			}
+			if json.Unmarshal(data, &receipt) == nil && receipt.SchemaVersion == 1 && receipt.UpdateID == token {
+				switch receipt.State {
+				case "deferred":
+					return fmt.Errorf("%w: %s", ErrRuntimeRefreshDeferred, receipt.Message)
+				case "failed":
+					return fmt.Errorf("%w: %s", ErrRuntimeActivation, receipt.Message)
+				}
+			}
+		}
+		health, err := b.manager.Health(roomID, worldID)
+		if err == nil && health.UpdateID == token && b.validLifecycleHealth(worldPath, health, startedAt) {
+			players, playersErr := b.manager.ReadPlayers(ctx, roomID, worldID)
+			world, worldErr := b.manager.ReadWorldState(ctx, roomID, worldID)
+			if playersErr == nil && worldErr == nil && refreshOutputsMatch(health, players, world, health.SessionID, health.ShardID) {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("%w: managed runtime did not publish coherent fresh state", ErrRuntimeActivation)
+		case <-ticker.C:
+		}
+	}
 }
 
 // Paused worlds do not run periodic collection. Their existing health is still

@@ -30,6 +30,7 @@ type coordinatedRestorerStub struct {
 	recoveredIDs   []string
 	token          string
 	ports          map[string]int
+	clusters       map[string][]byte
 }
 
 func (stub *coordinatedRestorerStub) ImportDirectory(_ context.Context, request distributedbackup.DirectoryImportRequest) (distributedbackup.Set, error) {
@@ -44,8 +45,14 @@ func (stub *coordinatedRestorerStub) ImportDirectory(_ context.Context, request 
 	}
 	stub.token = strings.TrimSpace(string(token))
 	stub.ports = make(map[string]int, len(request.Worlds))
+	stub.clusters = make(map[string][]byte)
 	for _, world := range request.Worlds {
-		config, err := ini.Load(filepath.Join(request.SourceRoot, world.DirectoryName, "server.ini"))
+		root := world.SourceRoot
+		if root == "" {
+			root = request.SourceRoot
+		}
+		stub.clusters[world.DirectoryName], _ = os.ReadFile(filepath.Join(root, "cluster.ini"))
+		config, err := ini.Load(filepath.Join(root, world.DirectoryName, "server.ini"))
 		if err != nil {
 			return distributedbackup.Set{}, err
 		}
@@ -86,6 +93,12 @@ func TestCoordinatedReplaceSupportsRunningRemoteAndMixedRooms(t *testing.T) {
 		}},
 	}
 	service := coordinatedApplyService(t, app, coordinator, deniedSaveImportMutationGuard{})
+	for _, name := range []string{"Master", "Caves"} {
+		if err := os.WriteFile(filepath.Join(app.saveRoot, "Target", name, "leveldataoverride.lua"), []byte("return {}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service.ConfigureRuntimeReader(importTargetReader{roots: map[string]string{"Master": app.saveRoot, "Caves": app.saveRoot}, cluster: "Target"})
 	app.runtime.running["Master"] = true
 	app.runtime.running["Caves"] = true
 
@@ -317,8 +330,10 @@ func uploadTwoWorldImport(t *testing.T, app applyTestApp, first string, firstID 
 		{name: "cluster_token.txt", content: "source-token-1234567890\n"},
 		{name: first + "/server.ini", content: serverINI(firstMaster, firstID, 10999)},
 		{name: first + "/save/session/source/0000000001", content: "imported-first"},
+		{name: first + "/save/shardindex", content: `return {session_id="source"}`},
 		{name: second + "/server.ini", content: serverINI(secondMaster, secondID, 11000)},
 		{name: second + "/save/session/source/0000000001", content: "imported-second"},
+		{name: second + "/save/shardindex", content: `return {session_id="source"}`},
 	})
 	value, err := app.service.Upload(context.Background(), "two-world-import", "two-world.zip", bytes.NewReader(archive))
 	if err != nil {

@@ -110,6 +110,7 @@ func (b *DistributedBridge) ReadCurrentWorldState(ctx context.Context, roomID, w
 			failures = errors.Join(failures, ErrWorldStatePending)
 			continue
 		}
+		snapshot.persistedAt = artifact.UpdatedAt
 		candidates = append(candidates, snapshot)
 	}
 	if len(candidates) == 0 {
@@ -120,7 +121,10 @@ func (b *DistributedBridge) ReadCurrentWorldState(ctx context.Context, roomID, w
 		if left.ProducerInstanceID == right.ProducerInstanceID && left.Sequence != right.Sequence {
 			return left.Sequence > right.Sequence
 		}
-		return left.CapturedAt.After(right.CapturedAt)
+		if !left.CapturedAt.Equal(right.CapturedAt) {
+			return left.CapturedAt.After(right.CapturedAt)
+		}
+		return left.persistedAt.After(right.persistedAt)
 	})
 	result.Snapshot = candidates[0]
 	return result, nil

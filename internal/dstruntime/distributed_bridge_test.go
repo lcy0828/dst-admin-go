@@ -18,6 +18,7 @@ import (
 type distributedRuntimeFixture struct {
 	mu      sync.Mutex
 	status  shared.ShardRuntimeStatus
+	current shared.RuntimeWorldStateRead
 	bundles map[shared.ArtifactKind]shared.RuntimeArtifactBundle
 	sent    []shared.RuntimeConsoleRequest
 	onSend  func(shared.RuntimeConsoleRequest)
@@ -26,6 +27,10 @@ type distributedRuntimeFixture struct {
 
 func (f *distributedRuntimeFixture) Status(context.Context, string, string) (shared.ShardRuntimeStatus, error) {
 	return f.status, nil
+}
+
+func (f *distributedRuntimeFixture) ReadWorldState(context.Context, string, string) (shared.RuntimeWorldStateRead, error) {
+	return f.current, nil
 }
 
 func (f *distributedRuntimeFixture) SendID(_ context.Context, _, _ string, request shared.RuntimeConsoleRequest) (shared.RuntimeOperationResult, error) {
@@ -47,6 +52,32 @@ func (f *distributedRuntimeFixture) ReadArtifacts(_ context.Context, _, _ string
 		return shared.RuntimeArtifactBundle{}, errors.New("artifact unavailable")
 	}
 	return bundle, nil
+}
+
+func TestDistributedHealthObservationAllowsOldProducerButCommandsRemainStrict(t *testing.T) {
+	bridge, fixture, roomID, worldID, now := newDistributedBridgeFixture(t)
+	health := Health{SchemaVersion: 1, ProducerVersion: "2.4.11", ProducerInstanceID: "previous", SessionID: "REMOTE_SESSION", ShardID: "2", Sequence: 1, Running: true, Ready: true}
+	fixture.bundles[shared.ArtifactRuntimeHealth] = artifactBundle(shared.ArtifactRuntimeHealth, now, "health.json", health)
+	observed, err := bridge.ObserveHealth(context.Background(), roomID, worldID)
+	if err != nil || observed.ProducerVersion != "2.4.11" || !observed.Ready {
+		t.Fatalf("old producer not observable: %+v %v", observed, err)
+	}
+	if _, err := bridge.Health(context.Background(), roomID, worldID); !errors.Is(err, ErrRuntimeUnavailable) {
+		t.Fatalf("strict health accepted old producer: %v", err)
+	}
+	_, err = bridge.ExecuteCommand(context.Background(), roomID, worldID, CommandRequest{RequestID: "strict-old-runtime", Action: "player.kick", Arguments: map[string]interface{}{"userId": "KU_REMOTE"}})
+	if !errors.Is(err, ErrRuntimeUnavailable) || len(fixture.sent) != 0 {
+		t.Fatalf("old producer received managed command: err=%v sent=%d", err, len(fixture.sent))
+	}
+	health.SchemaVersion = 999
+	fixture.bundles[shared.ArtifactRuntimeHealth] = artifactBundle(shared.ArtifactRuntimeHealth, now, "health.json", health)
+	if _, err := bridge.ObserveHealth(context.Background(), roomID, worldID); !errors.Is(err, ErrSnapshotInvalid) {
+		t.Fatalf("status observation accepted invalid schema: %v", err)
+	}
+	fixture.bundles[shared.ArtifactRuntimeHealth].Artifacts[0].SHA256 = "00"
+	if _, err := bridge.ObserveHealth(context.Background(), roomID, worldID); !errors.Is(err, ErrRuntimeResultInvalid) {
+		t.Fatalf("status observation accepted invalid artifact: %v", err)
+	}
 }
 
 func TestDistributedBridgeReadsPlacementArtifactsWithCoherentIdentity(t *testing.T) {
@@ -151,7 +182,8 @@ func newDistributedBridgeFixture(t *testing.T) (*DistributedBridge, *distributed
 		Sequence: 4, CapturedAtUnix: now.Unix(), Complete: true, Season: "autumn", Phase: "day", Precipitation: "none",
 	}
 	fixture := &distributedRuntimeFixture{
-		status: shared.ShardRuntimeStatus{State: "running", SessionExists: true},
+		status:  shared.ShardRuntimeStatus{State: "running", SessionExists: true},
+		current: shared.RuntimeWorldStateRead{Runtime: shared.ShardRuntimeStatus{State: "running"}, StartedAt: now.Add(-time.Hour), SessionID: "REMOTE_SESSION", ShardID: "2"},
 		bundles: map[shared.ArtifactKind]shared.RuntimeArtifactBundle{
 			shared.ArtifactRuntimeHealth:     artifactBundle(shared.ArtifactRuntimeHealth, now, "health.json", health),
 			shared.ArtifactRuntimePlayers:    artifactBundle(shared.ArtifactRuntimePlayers, now, "players-a.json", players),

@@ -8,7 +8,7 @@ import (
 
 const (
 	ProtocolVersion = 2
-	RuntimeVersion  = "2.4.11"
+	RuntimeVersion  = "2.4.12"
 )
 
 var (
@@ -20,6 +20,7 @@ var (
 	ErrSnapshotStale          = errors.New("DST Admin telemetry snapshot is stale")
 	ErrSnapshotInvalid        = errors.New("DST Admin telemetry snapshot is invalid")
 	ErrRuntimeUnavailable     = errors.New("DST Admin runtime is unavailable")
+	ErrRuntimeProcessConflict = errors.New("DST Admin runtime process ownership is unresolved")
 	ErrRuntimeResultAbsent    = errors.New("DST Admin runtime result is unavailable")
 	ErrRuntimeResultStale     = errors.New("DST Admin runtime result is stale")
 	ErrRuntimeResultInvalid   = errors.New("DST Admin runtime result is invalid")
@@ -104,6 +105,7 @@ type Snapshot struct {
 	Complete           bool             `json:"complete"`
 	Players            []SnapshotPlayer `json:"players"`
 	CapturedAt         time.Time        `json:"-"`
+	persistedAt        time.Time
 }
 
 type SnapshotPlayer struct {
@@ -162,6 +164,7 @@ type WorldStateSnapshot struct {
 	NightmareProgress     *float64  `json:"nightmareProgress,omitempty"`
 	HostPerformance       *int      `json:"hostPerformance,omitempty"`
 	CapturedAt            time.Time `json:"-"`
+	persistedAt           time.Time
 }
 
 type Health struct {

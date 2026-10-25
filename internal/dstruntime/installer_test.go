@@ -150,6 +150,40 @@ func TestInstallRejectsSymlinkedRuntimeOutputDirectory(t *testing.T) {
 	}
 }
 
+func TestRuntimeRejectsSymlinkedManagedDirectory(t *testing.T) {
+	manager, catalog, root := newRuntimeTestManager(t)
+	world := catalog.worlds[0]
+	worldPath := filepath.Join(root, catalog.room.DirectoryName, world.DirectoryName)
+	escaped := t.TempDir()
+	protected := filepath.Join(escaped, "telemetry.lua")
+	if err := os.WriteFile(protected, []byte("-- preserve outside file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(escaped, filepath.Join(worldPath, managedDirectory)); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := manager.InstallWorld(context.Background(), catalog.room.ID, world.ID); !errors.Is(err, ErrUnsafeRuntimePath) {
+		t.Errorf("install followed managed directory symlink: %v", err)
+	}
+	statuses, err := manager.StatusRoom(catalog.room.ID)
+	if err != nil || statuses[0].State != InstallStateInvalid {
+		t.Errorf("symlinked managed directory was not reported invalid: %+v %v", statuses, err)
+	}
+	if _, err := manager.UninstallWorld(context.Background(), catalog.room.ID, world.ID); !errors.Is(err, ErrUnsafeRuntimePath) {
+		t.Errorf("uninstall followed managed directory symlink: %v", err)
+	}
+	entries, err := os.ReadDir(escaped)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("managed directory symlink target was modified: %v %v", entries, err)
+	}
+	if data, err := os.ReadFile(protected); err != nil || string(data) != "-- preserve outside file" {
+		t.Fatalf("file outside the managed world was modified: %q %v", data, err)
+	}
+	if _, err := os.Lstat(filepath.Join(worldPath, customCommandsName)); !os.IsNotExist(err) {
+		t.Fatalf("rejected install changed customcommands: %v", err)
+	}
+}
+
 func TestInstallRejectsBrokenMarkersAndModifiedManagedAsset(t *testing.T) {
 	manager, catalog, root := newRuntimeTestManager(t)
 	custom := filepath.Join(root, "Cluster_1", "Master", customCommandsName)

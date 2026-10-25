@@ -162,6 +162,7 @@ func TestApplyCreatesManagedRoomAndAllocatesConflictFreePorts(t *testing.T) {
 		{name: "Cluster_1/cluster_token.txt", content: "source-token-1234567890\n"},
 		{name: "Cluster_1/Master/server.ini", content: serverINI(true, 1, 10999)},
 		{name: "Cluster_1/Master/save/session/source/0000000001", content: "new-save"},
+		{name: "Cluster_1/Master/save/shardindex", content: `return {session_id="source"}`},
 		{name: "Cluster_1/Master/modoverrides.lua", content: `return {["workshop-1392778117"] = { enabled = true }}`},
 	})
 	value, err := app.service.Upload(context.Background(), "外部存档", "Cluster_1.zip", bytes.NewReader(archive))
@@ -209,6 +210,7 @@ func TestApplyUsesDurablePortLeaseAndActivatesAfterPublication(t *testing.T) {
 		{name: "Cluster_1/cluster_token.txt", content: "source-token-1234567890\n"},
 		{name: "Cluster_1/Master/server.ini", content: serverINI(true, 1, 10999)},
 		{name: "Cluster_1/Master/save/session/source/0000000001", content: "save"},
+		{name: "Cluster_1/Master/save/shardindex", content: `return {session_id="source"}`},
 	})
 	value, err := app.service.Upload(context.Background(), "带端口租约", "Cluster_1.zip", bytes.NewReader(archive))
 	if err != nil {
@@ -395,6 +397,7 @@ func TestApplyReplacePreservesTargetTokenAndPortsAndCreatesProtectionBackup(t *t
 		{name: "cluster_token.txt", content: "source-token-1234567890\n"},
 		{name: "Master/server.ini", content: serverINI(true, 1, 10999)},
 		{name: "Master/save/session/source/0000000001", content: "new-save"},
+		{name: "Master/save/shardindex", content: `return {session_id="source"}`},
 	})
 	value, err := app.service.Upload(context.Background(), "替换包", "source.zip", bytes.NewReader(archive))
 	if err != nil {
@@ -474,6 +477,7 @@ func TestRemoteRoomGuardBlocksReplaceButAllowsNewAndClone(t *testing.T) {
 		{name: "cluster_token.txt", content: "source-token-1234567890\n"},
 		{name: "Master/server.ini", content: serverINI(true, 1, 10999)},
 		{name: "Master/save/session/source/0000000001", content: "new-save"},
+		{name: "Master/save/shardindex", content: `return {session_id="source"}`},
 		{name: "Master/modoverrides.lua", content: `return {["workshop-1392778117"] = { enabled = true }}`},
 	})
 	value, err := app.service.Upload(context.Background(), "远端替换门禁", "source.zip", bytes.NewReader(archive))
@@ -906,6 +910,7 @@ func uploadAnalyzedImportWithMod(t *testing.T, app applyTestApp, name string) Se
 		{name: "cluster_token.txt", content: "source-token-1234567890\n"},
 		{name: "Master/server.ini", content: serverINI(true, 1, 10999)},
 		{name: "Master/save/session/source/0000000001", content: "save"},
+		{name: "Master/save/shardindex", content: `return {session_id="source"}`},
 		{name: "Master/modoverrides.lua", content: `return {["workshop-1392778117"] = { enabled = true }}`},
 	})
 	value, err := app.service.Upload(context.Background(), name, name+".zip", bytes.NewReader(archive))

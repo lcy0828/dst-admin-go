@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 2
-local PRODUCER_VERSION = "2.4.11"
+local PRODUCER_VERSION = "2.4.12"
 local SNAPSHOT_INTERVAL = 5
 local READY_RETRY_SECONDS = 1
 local READY_RETRY_LIMIT = 60
@@ -184,6 +184,13 @@ end
 local health_writing, health_pending, health_commands_busy = false, false, false
 local write_health
 write_health = function()
+    -- Retired collectors may still receive persistence callbacks. They must
+    -- never publish health for a replacement Runtime.
+    local runtime = rawget(_G, "DSTAdmin")
+    if runtime ~= nil and runtime.Telemetry ~= nil and runtime.Telemetry ~= M then
+        health_pending = false
+        return
+    end
     -- Serialize writes so an older busy snapshot cannot overwrite a newer idle
     -- notification. Coalesce overlap into one latest snapshot, with no poller.
     if health_writing then health_pending = true; return end
@@ -193,7 +200,9 @@ write_health = function()
     health_commands_busy = payload.modules.commands ~= nil and payload.modules.commands.busy == true
     health_writing = true
     local started = pcall(function()
-        TheSim:SetPersistentString(OUTPUT_ROOT .. "health.json", encoded, false, function()
+        -- Released collectors can finish callbacks after handover. Keep their
+        -- fixed health.json separate from this version's health publication.
+        TheSim:SetPersistentString(OUTPUT_ROOT .. "health-" .. PRODUCER_VERSION .. ".json", encoded, false, function()
             health_writing = false
             if health_pending then health_pending = false; write_health() end
         end)
@@ -322,7 +331,7 @@ function M.Start()
     return true
 end
 
-function M.Stop()
+function M.Stop(handover)
     state.running = false
     state.ready = false
     if state.readyTask ~= nil then
@@ -333,12 +342,20 @@ function M.Stop()
         state.periodicTask:Cancel()
         state.periodicTask = nil
     end
-    write_health()
+    if handover == true then
+        health_pending = false
+    else
+        write_health()
+    end
     return true
 end
 
 function M.Status()
-    return health_payload()
+    local status = health_payload()
+    -- Keep the persisted snapshot's writing flag unchanged: that snapshot is
+    -- itself written asynchronously. Live replacement must also drain health.
+    status.writing = state.writing or health_writing
+    return status
 end
 
 M.version = PRODUCER_VERSION

@@ -263,6 +263,18 @@ func (m *Manager) PrepareRestore(ctx context.Context, id string) (BackupDescript
 		_ = os.RemoveAll(stage)
 		return BackupDescriptor{}, err
 	}
+	if m.prepareRestoreWorld != nil {
+		current := filepath.Join(m.saveRoot, descriptor.Cluster, descriptor.Shard)
+		if _, err := os.Lstat(current); os.IsNotExist(err) {
+			current = ""
+		} else if err != nil {
+			return BackupDescriptor{}, err
+		}
+		if err := m.prepareRestoreWorld(ctx, filepath.Join(stage, "shard"), current); err != nil {
+			_ = os.RemoveAll(stage)
+			return BackupDescriptor{}, fmt.Errorf("prepare restored runtime: %w", err)
+		}
+	}
 	marker := filepath.Join(stage, "shard", ".dst-admin-restore-id")
 	if err := os.WriteFile(marker, []byte(id+"\n"), 0o600); err != nil {
 		_ = os.RemoveAll(stage)
@@ -592,8 +604,13 @@ func InspectBackupArchive(path string) (BackupInspection, error) {
 		}
 		contentSize += int64(entry.UncompressedSize64)
 		name := filepath.ToSlash(filepath.Clean(filepath.FromSlash(entry.Name)))
-		if name == "shard/save/shardindex" && entry.Mode().IsRegular() && entry.UncompressedSize64 > 0 {
-			evidence.HasShardIndex = true
+		if entry.Mode().IsRegular() && entry.UncompressedSize64 > 0 {
+			if name == "shard/save/shardindex" {
+				evidence.HasShardIndex = true
+			}
+			if name == "shard/save/saveindex" {
+				evidence.HasLegacySaveIndex = true
+			}
 		}
 		if sessionID, snapshot, ok := archiveSnapshotEvidence(name, entry); ok {
 			evidence.addSnapshot(sessionID, snapshot)
@@ -654,13 +671,14 @@ func hashCompatibleSharedData(values map[string][]byte) (string, error) {
 }
 
 type saveEvidence struct {
-	HasShardIndex  bool
-	SessionID      string
-	LatestSnapshot string
+	HasShardIndex      bool
+	HasLegacySaveIndex bool
+	SessionID          string
+	LatestSnapshot     string
 }
 
 func (e saveEvidence) restorable() bool {
-	return e.HasShardIndex && e.LatestSnapshot != ""
+	return (e.HasShardIndex || e.HasLegacySaveIndex) && e.LatestSnapshot != ""
 }
 
 func (e *saveEvidence) addSnapshot(sessionID, snapshot string) {
@@ -676,10 +694,10 @@ func (e saveEvidence) inspection(contentSize int64, fileCount int, sharedSHA str
 		LatestSnapshot: e.LatestSnapshot, HasShardIndex: e.HasShardIndex,
 	}
 	switch {
-	case !e.HasShardIndex && e.LatestSnapshot == "":
-		value.ValidationError = "备份不包含 save/shardindex 和 Session 快照"
-	case !e.HasShardIndex:
-		value.ValidationError = "备份不包含 save/shardindex"
+	case !e.HasShardIndex && !e.HasLegacySaveIndex && e.LatestSnapshot == "":
+		value.ValidationError = "备份不包含 save/shardindex（或旧版 saveindex）和 Session 快照"
+	case !e.HasShardIndex && !e.HasLegacySaveIndex:
+		value.ValidationError = "备份不包含 save/shardindex（或旧版 saveindex）"
 	case e.LatestSnapshot == "":
 		value.ValidationError = "备份不包含有效的 Session 快照"
 	default:
@@ -699,8 +717,14 @@ func archiveSnapshotEvidence(name string, entry *zip.File) (string, string, bool
 
 func inspectSaveDirectory(saveRoot string) saveEvidence {
 	value := saveEvidence{}
-	if info, err := os.Lstat(filepath.Join(saveRoot, "shardindex")); err == nil && info.Mode().IsRegular() && info.Size() > 0 {
-		value.HasShardIndex = true
+	for _, name := range []string{"shardindex", "saveindex"} {
+		if info, err := os.Lstat(filepath.Join(saveRoot, name)); err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+			if name == "shardindex" {
+				value.HasShardIndex = true
+			} else {
+				value.HasLegacySaveIndex = true
+			}
+		}
 	}
 	sessions, err := os.ReadDir(filepath.Join(saveRoot, "session"))
 	if err != nil {

@@ -55,6 +55,7 @@ func ReadArtifacts(ctx context.Context, saveRoot, cluster, shard string, kind sh
 	if kind == shared.ArtifactRuntimePlayerHistory {
 		return readPlayerHistoryArtifact(ctx, root, shard)
 	}
+	worldRoot := root
 	root = filepath.Join(root, "save", "mod_config_data", "dst-admin")
 	bundle := shared.RuntimeArtifactBundle{Kind: kind, Artifacts: []shared.RuntimeArtifact{}}
 	var total int64
@@ -63,8 +64,15 @@ func ReadArtifacts(ctx context.Context, saveRoot, cluster, shard string, kind sh
 		if err := ctx.Err(); err != nil {
 			return bundle, err
 		}
-		path := filepath.Join(root, name)
-		data, info, exists, err := readTrustedRegular(path, MaximumArtifactBytes)
+		var data []byte
+		var info os.FileInfo
+		var exists bool
+		var err error
+		if kind == shared.ArtifactRuntimeHealth {
+			data, info, exists, err = ReadRuntimeHealth(worldRoot)
+		} else {
+			data, info, exists, err = readTrustedRegular(filepath.Join(root, name), MaximumArtifactBytes)
+		}
 		if err != nil {
 			if kind == shared.ArtifactRuntimeWorldState {
 				readFailures = errors.Join(readFailures, fmt.Errorf("%s: %w", name, err))
@@ -532,9 +540,17 @@ func readTrustedRegular(path string, limit int64) ([]byte, os.FileInfo, bool, er
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > limit {
 		return nil, nil, false, errors.New("Runtime 制品文件不安全或超过大小限制")
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, nil, false, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if int64(len(data)) > limit {
+		return nil, nil, false, errors.New("Runtime 制品超过大小限制")
 	}
 	return data, info, true, nil
 }

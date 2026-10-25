@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"dont/internal/saveidentity"
 	"dont/shared"
 )
 
@@ -70,28 +70,7 @@ func ReadWorldState(ctx context.Context, saveRoot, cluster, shard string, status
 }
 
 func worldSessionID(root string) (string, error) {
-	entries, err := os.ReadDir(filepath.Join(root, "save", "session"))
-	if os.IsNotExist(err) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	var session string
-	var newest time.Time
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || len(entry.Name()) > 128 {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return "", err
-		}
-		if info.ModTime().After(newest) {
-			session, newest = entry.Name(), info.ModTime()
-		}
-	}
-	return session, nil
+	return saveidentity.CurrentSession(root)
 }
 
 func worldStartedAt(root string) (time.Time, error) {

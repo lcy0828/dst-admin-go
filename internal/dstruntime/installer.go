@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"dont/internal/roomops"
 	"dont/internal/rooms"
 
 	"github.com/yuin/gopher-lua/parse"
@@ -30,7 +31,7 @@ const (
 	maxManagedBytes    = int64(2 * 1024 * 1024)
 )
 
-const managedLoader = `-- DST-ADMIN MANAGED BLOCK BEGIN protocol=2 version=2.4.11
+const managedLoader = `-- DST-ADMIN MANAGED BLOCK BEGIN protocol=2 version=2.4.12
 do
     TheSim:GetPersistentString("mod_config_data/dst-admin/runtime/bootstrap.lua", function(success, source)
         if not success or type(source) ~= "string" then
@@ -121,6 +122,11 @@ func (m *Manager) InstallRoom(ctx context.Context, roomID string) ([]WorldStatus
 	if !room.Managed {
 		return nil, rooms.ErrRoomNotManaged
 	}
+	ctx, release, err := roomops.Acquire(ctx, room.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	worlds, err := m.rooms.Worlds(room.ID)
 	if err != nil {
 		return nil, err
@@ -140,6 +146,14 @@ func (m *Manager) InstallRoom(ctx context.Context, roomID string) ([]WorldStatus
 }
 
 func (m *Manager) InstallWorld(ctx context.Context, roomID, worldID string) (WorldStatus, error) {
+	return m.installWorld(ctx, roomID, worldID, nil)
+}
+
+// A maintenance publication records the exact bytes written by this attempt,
+// so recovery can detect edits made while waiting for the live activation.
+type runtimePublication map[string][sha256.Size]byte
+
+func (m *Manager) installWorld(ctx context.Context, roomID, worldID string, publication runtimePublication) (WorldStatus, error) {
 	if err := ctx.Err(); err != nil {
 		return WorldStatus{}, err
 	}
@@ -150,11 +164,19 @@ func (m *Manager) InstallWorld(ctx context.Context, roomID, worldID string) (Wor
 	if !room.Managed {
 		return WorldStatus{}, rooms.ErrRoomNotManaged
 	}
+	ctx, release, err := roomops.Acquire(ctx, room.ID)
+	if err != nil {
+		return WorldStatus{}, err
+	}
+	defer release()
+	if err := ctx.Err(); err != nil {
+		return WorldStatus{}, err
+	}
 	world, err := m.rooms.World(room.ID, worldID)
 	if err != nil {
 		return WorldStatus{}, err
 	}
-	return m.install(room, world)
+	return m.installTracked(room, world, publication)
 }
 
 func (m *Manager) StatusRoom(roomID string) ([]WorldStatus, error) {
@@ -219,6 +241,14 @@ func (m *Manager) RollbackWorld(ctx context.Context, roomID, worldID, backupID s
 	if !room.Managed {
 		return WorldStatus{}, rooms.ErrRoomNotManaged
 	}
+	ctx, release, err := roomops.Acquire(ctx, room.ID)
+	if err != nil {
+		return WorldStatus{}, err
+	}
+	defer release()
+	if err := ctx.Err(); err != nil {
+		return WorldStatus{}, err
+	}
 	world, err := m.rooms.World(room.ID, worldID)
 	if err != nil {
 		return WorldStatus{}, err
@@ -250,6 +280,14 @@ func (m *Manager) UninstallWorld(ctx context.Context, roomID, worldID string) (W
 	}
 	room, err := m.rooms.Room(roomID)
 	if err != nil {
+		return WorldStatus{}, err
+	}
+	ctx, release, err := roomops.Acquire(ctx, room.ID)
+	if err != nil {
+		return WorldStatus{}, err
+	}
+	defer release()
+	if err := ctx.Err(); err != nil {
 		return WorldStatus{}, err
 	}
 	world, err := m.rooms.World(room.ID, worldID)
@@ -308,6 +346,10 @@ func (m *Manager) UninstallWorld(ctx context.Context, roomID, worldID string) (W
 }
 
 func (m *Manager) install(room rooms.Room, world rooms.World) (WorldStatus, error) {
+	return m.installTracked(room, world, nil)
+}
+
+func (m *Manager) installTracked(room rooms.Room, world rooms.World, publication runtimePublication) (WorldStatus, error) {
 	worldPath, err := m.worldPath(room, world)
 	if err != nil {
 		return WorldStatus{}, err
@@ -395,6 +437,15 @@ func (m *Manager) install(room rooms.Room, world rooms.World) (WorldStatus, erro
 	if err := atomicWrite(customPath, updated, mode); err != nil {
 		return status, rollback(err)
 	}
+	if publication != nil {
+		publication[customCommandsName] = sha256.Sum256(updated)
+		publication[filepath.Join(managedDirectory, manifestName)] = sha256.Sum256(encoded)
+		for _, name := range managedAssetNames {
+			sum := sha256.Sum256(assets[name])
+			publication[filepath.Join(managedDirectory, name)] = sum
+			publication[filepath.Join(executionDirectory, name)] = sum
+		}
+	}
 	return WorldStatus{RoomID: room.ID, WorldID: world.ID, WorldName: world.Name, State: InstallStateInstalled, Version: RuntimeVersion, Protocol: ProtocolVersion, Changed: true, BackupPath: filepath.Join(backupDirectory, backup), Message: "DST Admin 运行时已安装；运行中的分片将在下次重启后加载"}, nil
 }
 
@@ -469,6 +520,15 @@ func (m *Manager) worldPath(room rooms.Room, world rooms.World) (string, error) 
 		return "", err
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", ErrUnsafeRuntimePath
+	}
+	// The canonical Lua sources are managed files too. Checking only each file
+	// would still follow a symlink on their parent during install or uninstall.
+	managedInfo, err := os.Lstat(filepath.Join(path, managedDirectory))
+	if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	if err == nil && (!managedInfo.IsDir() || managedInfo.Mode()&os.ModeSymlink != 0) {
 		return "", ErrUnsafeRuntimePath
 	}
 	return path, nil

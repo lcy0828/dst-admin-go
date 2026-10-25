@@ -30,6 +30,7 @@ func TestScannerRecognizesWrappedFinderArchiveAndMods(t *testing.T) {
 		{name: "Cluster_1/cluster_token.txt", content: "token\n"},
 		{name: "Cluster_1/Master/server.ini", content: serverINI(true, 1, 10999)},
 		{name: "Cluster_1/Master/save/session/session-id/0000000001", content: "save"},
+		{name: "Cluster_1/Master/save/shardindex", content: `return {session_id="session-id"}`},
 		{name: "Cluster_1/Master/modoverrides.lua", content: `return {["workshop-1392778117"] = { enabled = true }, ["workshop-3781609737"] = { enabled = true }}`},
 		{name: "__MACOSX/Cluster_1/._cluster.ini", content: "metadata"},
 		{name: "Cluster_1/.DS_Store", content: "metadata"},

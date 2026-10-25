@@ -138,7 +138,19 @@ func (a *Agent) executeRuntimeOperationContext(parent context.Context, commandTy
 	} else if shared.IsGameInstallationAction(request.Action) || request.Action == shared.RuntimeActionGameVersionUpdate {
 		lockKey = request.InstallationID + "\x00game-version"
 	}
-	operationContext, release, err := roomops.Acquire(operationContext, lockKey)
+	var release func()
+	var err error
+	if request.Action == shared.RuntimeActionLuaEnsure {
+		operationContext, release, err = roomops.TryAcquire(operationContext, lockKey)
+		if errors.Is(err, roomops.ErrBusy) {
+			message := "房间正在执行其他操作，Runtime 更新已暂缓"
+			result := runtimeResult(*request, shared.RuntimeOutcomeFailed, message)
+			result.LuaRuntime = &shared.RuntimeLuaResult{Deferred: true, Message: message}
+			return result, errors.Join(dstruntime.ErrRuntimeRefreshDeferred, err)
+		}
+	} else {
+		operationContext, release, err = roomops.Acquire(operationContext, lockKey)
+	}
 	if err != nil {
 		return shared.RuntimeOperationResult{}, err
 	}
@@ -953,6 +965,7 @@ func (a *Agent) transferManager(installation RuntimeInstallation) (*shardtransfe
 	if err != nil {
 		return nil, err
 	}
+	created.ConfigureRestoreWorld(dstruntime.PrepareImportedWorld)
 	a.shardTransfers[installation.ID] = created
 	return created, nil
 }

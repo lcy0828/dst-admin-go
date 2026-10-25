@@ -174,7 +174,10 @@ func (b *Bridge) RefreshSnapshots(ctx context.Context, roomID, worldID string) (
 	if err := b.lifecycleReady(ctx, room, world, worldPath); err != nil {
 		return SnapshotRefreshResult{}, err
 	}
-	expectedSession := currentSessionID(worldPath)
+	expectedSession, err := currentSessionID(worldPath)
+	if err != nil {
+		return SnapshotRefreshResult{}, err
+	}
 	if expectedSession == "" {
 		return SnapshotRefreshResult{}, fmt.Errorf("%w: current DST session is unavailable", ErrRuntimeRefresh)
 	}
@@ -338,6 +341,10 @@ func (b *Bridge) ExecuteCommand(ctx context.Context, roomID, worldID string, req
 	if len(payload) > maxRuntimeRequestBytes {
 		return CommandReceipt{}, fmt.Errorf("%w: command payload exceeds %d bytes", ErrRuntimeRequestInvalid, maxRuntimeRequestBytes)
 	}
+	expectedSession, err := currentSessionID(worldPath)
+	if err != nil {
+		return CommandReceipt{}, err
+	}
 	script, document := commandDelivery(request, payload)
 	if document != nil {
 		if err := runtimefiles.PublishCommandDocument(ctx, b.manager.root, room.DirectoryName, world.DirectoryName, *document); err != nil {
@@ -349,7 +356,6 @@ func (b *Bridge) ExecuteCommand(ctx context.Context, roomID, worldID string, req
 		return CommandReceipt{}, fmt.Errorf("send runtime command: %w", err)
 	}
 
-	expectedSession := currentSessionID(worldPath)
 	deadline := time.NewTimer(b.timeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(b.pollInterval)
@@ -390,11 +396,14 @@ func (b *Bridge) CaptureDiagnostic(ctx context.Context, roomID, worldID string, 
 	if err != nil || len(payload) > maxRuntimeRequestBytes {
 		return DiagnosticReport{}, errors.New("runtime diagnostic request is invalid")
 	}
+	expectedSession, err := currentSessionID(worldPath)
+	if err != nil {
+		return DiagnosticReport{}, err
+	}
 	sentAt := b.now().UTC()
 	if err := b.sender.Send(ctx, room.DirectoryName, world.DirectoryName, `DSTAdmin.Diagnostics.CaptureJSON(`+quoteRuntimeLua(string(payload))+`)`); err != nil {
 		return DiagnosticReport{}, fmt.Errorf("send runtime diagnostic: %w", err)
 	}
-	expectedSession := currentSessionID(worldPath)
 	deadline := time.NewTimer(defaultDiagnosticTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(b.pollInterval)
@@ -425,7 +434,11 @@ func (b *Bridge) ReadEvents(ctx context.Context, roomID, worldID string) (EventB
 	if err != nil {
 		return EventBatch{}, err
 	}
-	return readEventBatch(worldPath, currentSessionID(worldPath), b.now().UTC())
+	session, err := currentSessionID(worldPath)
+	if err != nil {
+		return EventBatch{}, err
+	}
+	return readEventBatch(worldPath, session, b.now().UTC())
 }
 
 func (b *Bridge) LatestDiagnostic(ctx context.Context, roomID, worldID string) (DiagnosticReport, error) {
@@ -436,7 +449,11 @@ func (b *Bridge) LatestDiagnostic(ctx context.Context, roomID, worldID string) (
 	if err != nil {
 		return DiagnosticReport{}, err
 	}
-	return readLatestDiagnosticReport(worldPath, currentSessionID(worldPath), b.now().UTC())
+	session, err := currentSessionID(worldPath)
+	if err != nil {
+		return DiagnosticReport{}, err
+	}
+	return readLatestDiagnosticReport(worldPath, session, b.now().UTC())
 }
 
 func (b *Bridge) commandReady(ctx context.Context, room rooms.Room, world rooms.World) error {
