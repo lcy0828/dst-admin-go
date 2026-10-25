@@ -1,0 +1,487 @@
+diff --git a/Mod/modmain.lua b/Mod/modmain.lua
+index 968c630..5007647 100644
+--- a/Mod/modmain.lua
++++ b/Mod/modmain.lua
+@@ -243,6 +243,10 @@ local function main()
+ 
+ 	local function HookGetModConfigData()
+ 		local old_GetModConfigData = GetModConfigData
++		local process_vm
++		if GameInjector and type(GameInjector.DS_LUAJIT_get_process_vm_type_name) == "function" then
++			process_vm = GameInjector.DS_LUAJIT_get_process_vm_type_name()
++		end
+ 		local dynamic_disable_rules = BuildConfigDisableRulesFromModInfo()
+ 		if dynamic_disable_rules then
+ 			print("DisableBy rules loaded from configuration_options: " .. tostring(#dynamic_disable_rules))
+@@ -250,6 +254,10 @@ local function main()
+ 			print("DisableBy rules not available, skip runtime disable action")
+ 		end
+ 		local function get_raw_config(key, get_local_config)
++			if type(process_vm) == "string" then
++				if key == "LuaVmType" then return process_vm end
++				if key == "EnabledGenGC" then return process_vm == "jit_gen" end
++			end
+ 			return old_GetModConfigData(key, get_local_config)
+ 		end
+ 
+@@ -416,7 +424,7 @@ local function main()
+ 
+ 	function _M:SwitchVm(noreset)
+ 		---@type string
+-		luavmType = GetModConfigData("LuaVmType")
++		local luavmType = GetModConfigData("LuaVmType")
+ 		if type(luavmType) ~= "string" then
+ 			return false
+ 		end
+diff --git a/cmake/custom-triplets/x64-linux-custom.cmake b/cmake/custom-triplets/x64-linux-custom.cmake
+index 99d7064..86c3bb6 100644
+--- a/cmake/custom-triplets/x64-linux-custom.cmake
++++ b/cmake/custom-triplets/x64-linux-custom.cmake
+@@ -10,3 +10,9 @@ if ((DEFINED ENV{GITHUB_ACTIONS} AND NOT "$ENV{GITHUB_ACTIONS}" STREQUAL "")
+ 	OR (DEFINED ENV{CI} AND NOT "$ENV{CI}" STREQUAL ""))
+ 	set(VCPKG_BUILD_TYPE release)
+ endif ()
++
++# Generic virtual CPUs may not expose invariant TSC. Keep Tracy's on-demand
++# profiler loadable there without asking users to bypass its clock check.
++if(PORT STREQUAL "tracy")
++    list(APPEND VCPKG_CMAKE_CONFIGURE_OPTIONS "-DTRACY_TIMER_FALLBACK=ON")
++endif()
+diff --git a/src/DontStarveInjector/CMakeLists.txt b/src/DontStarveInjector/CMakeLists.txt
+index 8664d9c..2d3ba36 100644
+--- a/src/DontStarveInjector/CMakeLists.txt
++++ b/src/DontStarveInjector/CMakeLists.txt
+@@ -332,21 +332,22 @@ if (_ds_gum_stage_ok)
+     # Cross-platform gum plugins (Linux/macOS often stub until signatures land).
+     add_subdirectory(plugins/plugin_network_rpc)
+     add_subdirectory(plugins/plugin_network_stats)
+-    add_subdirectory(plugins/plugin_network_sim)
+-    add_subdirectory(plugins/plugin_sim_lagcomp)
+     add_subdirectory(plugins/plugin_debug_profiler)
+     add_subdirectory(plugins/plugin_fps_render)
+     add_subdirectory(plugins/plugin_network_tick)
+     set(_ds_gum_plugins
+             plugin_network_rpc
+             plugin_network_stats
+-            plugin_network_sim
+-            plugin_sim_lagcomp
+             plugin_debug_profiler
+             plugin_fps_render
+             plugin_network_tick)
+     # render.vbpool / render.angle / render.shadow need ANGLE stage (3rd/angle/win64) + GLES headers.
+     if (WIN32)
++        # These native APIs have no POSIX implementation; do not ship modules
++        # that cannot resolve their own imports during Linux discovery.
++        add_subdirectory(plugins/plugin_network_sim)
++        add_subdirectory(plugins/plugin_sim_lagcomp)
++        list(APPEND _ds_gum_plugins plugin_network_sim plugin_sim_lagcomp)
+         add_subdirectory(plugins/plugin_render_vbpool)
+         add_subdirectory(plugins/plugin_render_angle)
+         add_subdirectory(plugins/plugin_render_shadow)
+diff --git a/src/DontStarveInjector/DontStarveInjector.cpp b/src/DontStarveInjector/DontStarveInjector.cpp
+index 93320bc..d604c59 100644
+--- a/src/DontStarveInjector/DontStarveInjector.cpp
++++ b/src/DontStarveInjector/DontStarveInjector.cpp
+@@ -1,3 +1,4 @@
++#include <fmt/format.h>
+ // DontStarveInjector.cpp : Defines the exported functions for the DLL application.
+ //
+ 
+@@ -155,13 +156,13 @@ DONTSTARVEINJECTOR_API void Inject(bool isClient) {
+ 
+     ictx->DontStarveInjectorIsClient = isClient;
+ #ifdef _WIN32
+-    const auto log_path = std::format("DontStarveInjector_{}.log", isClient ? "client"s : "server"s);
++    const auto log_path = fmt::format("DontStarveInjector_{}.log", isClient ? "client"s : "server"s);
+     auto logger = std::make_shared<spdlog::logger>("", std::make_shared<spdlog::sinks::msvc_sink_st>());
+     logger->sinks().push_back(std::make_shared<spdlog::sinks::basic_file_sink_st>(log_path, true));
+     spdlog::set_default_logger(std::move(logger));
+ #endif
+ #ifdef __linux__
+-    const auto log_path = std::format("DontStarveInjector_{}.log", isClient ? "client"s : std::format("server_{}", server_is_master() ? "master" : "caves"));
++    const auto log_path = fmt::format("DontStarveInjector_{}.log", isClient ? "client"s : fmt::format("server_{}", server_is_master() ? "master" : "caves"));
+     spdlog::default_logger()->sinks().push_back(std::make_shared<spdlog::sinks::basic_file_sink_st>(log_path));
+ #endif
+ #if USE_LISTENER
+diff --git a/src/DontStarveInjector/GameRuntimeApis.cpp b/src/DontStarveInjector/GameRuntimeApis.cpp
+index 69b4a57..0dc2d3a 100644
+--- a/src/DontStarveInjector/GameRuntimeApis.cpp
++++ b/src/DontStarveInjector/GameRuntimeApis.cpp
+@@ -1,3 +1,4 @@
++#include <fmt/format.h>
+ // L0 residual GAME_API: installer update + mod version + process hygiene.
+ // fps.render → plugin_fps_render; network.tick → plugin_network_tick.
+ #include "config/InjectorHostConfig.hpp"
+@@ -26,7 +27,7 @@ DONTSTARVEINJECTOR_GAME_API int DS_LUAJIT_update(const char *mod_directory, int
+     if (!std::filesystem::exists(installer)) {
+         return 0;
+     }
+-    std::string cmd = std::format("cmd /C \"{}\" {}", installer.string(), tt == 1 ? "uninstall" : "");
++    std::string cmd = fmt::format("cmd /C \"{}\" {}", installer.string(), tt == 1 ? "uninstall" : "");
+     STARTUPINFO si;
+     ZeroMemory(&si, sizeof(si));
+     si.cb = sizeof(si);
+diff --git a/src/DontStarveInjector/config/sources/EnvOrCmdSource.cpp b/src/DontStarveInjector/config/sources/EnvOrCmdSource.cpp
+index afa6355..934a5d4 100644
+--- a/src/DontStarveInjector/config/sources/EnvOrCmdSource.cpp
++++ b/src/DontStarveInjector/config/sources/EnvOrCmdSource.cpp
+@@ -39,6 +39,9 @@ ConfigPartial EnvOrCmdSource::read(CascadeContext &) const {
+         } else {
+             partial.values[std::string{kLuaVmType}] =
+                 ds::plugin::ConfigValue::string(std::string{raw});
++            // Explicit game/jit selection also overrides an inherited arena GC.
++            partial.values[std::string{kEnabledGenGC}] =
++                ds::plugin::ConfigValue::boolean(false);
+         }
+     }
+ 
+diff --git a/src/DontStarveInjector/plugins/plugin_core_vm/game/GameLuaContext.cpp b/src/DontStarveInjector/plugins/plugin_core_vm/game/GameLuaContext.cpp
+index 8dcf5cd..de5f900 100644
+--- a/src/DontStarveInjector/plugins/plugin_core_vm/game/GameLuaContext.cpp
++++ b/src/DontStarveInjector/plugins/plugin_core_vm/game/GameLuaContext.cpp
+@@ -332,11 +332,11 @@ std::string wrapper_game_main_buffer(lua_State *L, std::string_view buffer) {
+             switch (key.front()) {
+                 case 'e':
+                     if (key == "e"sv)
+-                        (default_before_code ? before_code : before_injector_code) += std::format("{};", value);
++                        (default_before_code ? before_code : before_injector_code) += fmt::format("{};", value);
+                     break;
+                 case 'E':
+                     if (key == "E"sv)
+-                        before_injector_code += std::format("{};", value);
++                        before_injector_code += fmt::format("{};", value);
+                 case 'R':
+                 case 'r':
+                     if (key == "r"sv || key == "R"sv || key == "relocation"sv || key == "Relocation"sv) {
+@@ -474,7 +474,7 @@ std::string wrapper_game_main_buffer(lua_State *L, std::string_view buffer) {
+ 
+     ctx->_luaL_dostring(L, GameLuaInjectorName ".push_event('before_main')");
+ 
+-    auto new_buffer = std::format("{};" GameLuaInjectorName ".push_event('game_initialized');{}", buffer_prefix, buffer_after);
++    auto new_buffer = fmt::format("{};" GameLuaInjectorName ".push_event('game_initialized');{}", buffer_prefix, buffer_after);
+     if (ictx->config.enable_lua_debugger) {
+         // replace buffer
+         if (!ictx->config.disable_lua_debugger_code_patch) {
+diff --git a/src/DontStarveInjector/plugins/plugin_core_vm/injector/GameLuaModule.cpp b/src/DontStarveInjector/plugins/plugin_core_vm/injector/GameLuaModule.cpp
+index d7400e2..07285c2 100644
+--- a/src/DontStarveInjector/plugins/plugin_core_vm/injector/GameLuaModule.cpp
++++ b/src/DontStarveInjector/plugins/plugin_core_vm/injector/GameLuaModule.cpp
+@@ -1,4 +1,6 @@
+ #include "config/InjectorHostConfig.hpp"
++#include "config/path/ConfigPaths.hpp"
++#include "../GameLuaType.hpp"
+ #include "sdk/steam/Workshop.hpp"
+ #include <cstdint>
+ #include <string.h>
+@@ -1236,8 +1238,20 @@ char luajit_ds_check_slowtailcall(lua_State *L, const char *chunkname) {
+ // listed on Linux aborted the whole chunk on a missing modinfo.lua). This export
+ // answers "which package dirs under <plugins>/ carry modinfo.lua" from the same
+ // filesystem the native loader scans, so Lua never references an absent package.
+-static std::vector<std::string> game_injector_list_plugin_packages(const std::string &plugins_dir) {
+-    return ds::plugin::list_plugin_packages(plugins_dir);
++static auto game_injector_list_plugin_packages(const std::string &plugins_dir) {
++    // sol binds a bare std::vector as userdata, but the Lua registry needs an
++    // ordinary table for type checks and ipairs (including the DST sandbox).
++    return sol::as_table(ds::plugin::list_plugin_packages(plugins_dir));
++}
++
++// Expose the same highest-priority process selector used by the native cascade.
++// Lua mod defaults must not switch a CLI-selected VM back to the default VM.
++static const char *game_injector_process_vm_type() {
++    const auto raw = static_cast<const char *>(InjectorConfig::instance()->lua_vm_type);
++    if (!raw || !ds::config::path::is_supported_lua_vm_type(raw)) {
++        return nullptr;
++    }
++    return GameLuaTypeToString(GameLuaTypeFromString(raw)).data();
+ }
+ 
+ int luaopen_GameInjector(lua_State* L) {
+@@ -1249,6 +1263,7 @@ int luaopen_GameInjector(lua_State* L) {
+     module.set_function("DS_LUAJIT_Fengxun_Decrypt", &DS_LUAJIT_Fengxun_Decrypt);
+     module.set_function("DS_LUAJIT_set_vm_type", &DS_LUAJIT_set_vm_type);
+     module.set_function("DS_LUAJIT_get_vm_type_name", &DS_LUAJIT_get_vm_type_name);
++    module.set_function("DS_LUAJIT_get_process_vm_type_name", &game_injector_process_vm_type);
+     module.set_function("DS_LUAJIT_update", &DS_LUAJIT_update);
+     module.set_function("DS_LUAJIT_get_mod_version", &DS_LUAJIT_get_mod_version);
+     module.set_function("DS_LUAJIT_list_plugin_packages", &game_injector_list_plugin_packages);
+diff --git a/src/DontStarveInjector/plugins/plugin_core_vm/signature_load/Progress.cpp b/src/DontStarveInjector/plugins/plugin_core_vm/signature_load/Progress.cpp
+index 1beed9b..454f2ad 100644
+--- a/src/DontStarveInjector/plugins/plugin_core_vm/signature_load/Progress.cpp
++++ b/src/DontStarveInjector/plugins/plugin_core_vm/signature_load/Progress.cpp
+@@ -1,7 +1,7 @@
+ 
+ #include "Progress.hpp"
+ #include <thread>
+-#include <format>
++#include <fmt/format.h>
+ #include <atomic>
+ #include <string>
+ #include <utility>
+@@ -136,7 +136,7 @@ void set_progress(int step, const std::string_view& msg) {
+         }
+     }
+     if (!msg.empty()) {
+-        std::string statusText = std::format("{:.1f} % [{}]", progress_ctx.cur / (float)progress_ctx.max_step * 100, msg);
++        std::string statusText = fmt::format("{:.1f} % [{}]", progress_ctx.cur / (float)progress_ctx.max_step * 100, msg);
+         SetWindowText(progress_ctx.hStatusText, statusText.c_str());
+     }
+ }
+\ No newline at end of file
+diff --git a/src/DontStarveInjector/profiler.cpp b/src/DontStarveInjector/profiler.cpp
+index a4ed57c..1038547 100644
+--- a/src/DontStarveInjector/profiler.cpp
++++ b/src/DontStarveInjector/profiler.cpp
+@@ -13,7 +13,7 @@
+ #include <chrono>
+ #include <cstdint>
+ #include <cstring>
+-#include <format>
++#include <fmt/format.h>
+ #include <map>
+ #include <string>
+ #include <string_view>
+@@ -521,12 +521,12 @@ namespace luajit {
+             GumDebugSymbolDetails details;
+             if (gum_symbol_details_from_address(cfunc, &details)) {
+                 if (details.line_number != 0) {
+-                    std::format_to(std::back_inserter(buf), "C:{}!{}:{}", details.module_name, details.symbol_name, details.line_number);
++                    fmt::format_to(std::back_inserter(buf), "C:{}!{}:{}", details.module_name, details.symbol_name, details.line_number);
+                 } else {
+-                    std::format_to(std::back_inserter(buf), "C:{}!{}", details.module_name, details.symbol_name);
++                    fmt::format_to(std::back_inserter(buf), "C:{}!{}", details.module_name, details.symbol_name);
+                 }
+             } else {
+-                std::format_to(std::back_inserter(buf), "C:{}", reinterpret_cast<uintptr_t>(cfunc));
++                fmt::format_to(std::back_inserter(buf), "C:{}", reinterpret_cast<uintptr_t>(cfunc));
+             }
+             sym = buf;
+             luajit_cfunc_cache.emplace(cfunc, std::move(buf));
+@@ -581,11 +581,11 @@ static void trace(gum_luajit_profiler *prof) noexcept {
+                             auto source = proto_chunkname(pt);
+                             spaceNeeded += source->len;
+                             if (simple_prof) {
+-                                spaceNeeded += std::formatted_size("{}", pt->firstline);
++                                spaceNeeded += fmt::formatted_size("{}", pt->firstline);
+                             } else {
+                                 auto line = luajit::luajit_debug_frameline(curL, trace, pt, framedata.nextframe);
+                                 line = line > 0? line : pt->firstline;
+-                                spaceNeeded += std::formatted_size("{}", pt->firstline);
++                                spaceNeeded += fmt::formatted_size("{}", pt->firstline);
+                             }
+                             spaceNeeded += 1;//:
+                             break;
+@@ -594,12 +594,12 @@ static void trace(gum_luajit_profiler *prof) noexcept {
+                             auto fn = framedata.val.fn;
+                             if (isffunc(fn)) {
+                                 spaceNeeded += buildin_prefix.size();
+-                                spaceNeeded += std::formatted_size("{}", fn->c.ffid);
++                                spaceNeeded += fmt::formatted_size("{}", fn->c.ffid);
+                             } else {
+                                 if (use_cfunc_info)
+                                     spaceNeeded += luajit::get_cfunction_cache(fn->c.f).size();
+                                 else 
+-                                    spaceNeeded += std::formatted_size("{}", (void*)fn->c.f);
++                                    spaceNeeded += fmt::formatted_size("{}", (void*)fn->c.f);
+                             }
+                             break;
+                         }
+@@ -620,32 +620,32 @@ static void trace(gum_luajit_profiler *prof) noexcept {
+                     {
+                         auto pt = framedata.val.pt;
+                         auto source = proto_chunkname(pt);
+-                        left -= std::format_to_n(dst, left, "T:{}:{}",  std::string_view{strdata(source), source->len}, pt->firstline).size;
++                        left -= fmt::format_to_n(dst, left, "T:{}:{}",  std::string_view{strdata(source), source->len}, pt->firstline).size;
+                         break;
+                     }
+                     case LJ_TPROTO: {
+                         auto pt = framedata.val.pt;
+                         auto source = proto_chunkname(pt);
+                         if (simple_prof) {
+-                            left -= std::format_to_n(dst, left, "{}:{}", std::string_view{strdata(source), source->len}, pt->firstline).size;
++                            left -= fmt::format_to_n(dst, left, "{}:{}", std::string_view{strdata(source), source->len}, pt->firstline).size;
+                         } else {
+                             auto line = luajit::luajit_debug_frameline(curL, trace, pt, framedata.nextframe);
+                             line = line > 0? line : pt->firstline;
+-                            left -= std::format_to_n(dst, left, "{}:{}", std::string_view{strdata(source), source->len}, line).size;
++                            left -= fmt::format_to_n(dst, left, "{}:{}", std::string_view{strdata(source), source->len}, line).size;
+                         }
+                         break;
+                     }
+                     case LJ_TFUNC: {
+                         auto fn = framedata.val.fn;
+                         if (isffunc(fn)) {
+-                            left -= std::format_to_n(dst, left, "{}{}", buildin_prefix, fn->c.ffid).size;
++                            left -= fmt::format_to_n(dst, left, "{}{}", buildin_prefix, fn->c.ffid).size;
+                         } else {
+                             if (use_cfunc_info) {
+                                 auto cache = luajit::get_cfunction_cache(fn->c.f);
+-                                left -= std::format_to_n(dst, left, "{}", cache).size;
++                                left -= fmt::format_to_n(dst, left, "{}", cache).size;
+                             }
+                             else 
+-                                left -= std::format_to_n(dst, left, "{}", (void*)fn->c.f).size;
++                                left -= fmt::format_to_n(dst, left, "{}", (void*)fn->c.f).size;
+                         }
+                         break;
+                     }
+diff --git a/src/DontStarveInjector/util/inlinehook.cpp b/src/DontStarveInjector/util/inlinehook.cpp
+index 90f85b5..569306b 100644
+--- a/src/DontStarveInjector/util/inlinehook.cpp
++++ b/src/DontStarveInjector/util/inlinehook.cpp
+@@ -9,7 +9,7 @@
+ 
+ #include <cassert>
+ #include <cstring>
+-#include <format>
++#include <fmt/format.h>
+ #include <memory>
+ #include <memory_resource>
+ #include <unordered_map>
+diff --git a/src/DontStarveInjector/util/updater.cpp b/src/DontStarveInjector/util/updater.cpp
+index 70d8d43..36d8545 100644
+--- a/src/DontStarveInjector/util/updater.cpp
++++ b/src/DontStarveInjector/util/updater.cpp
+@@ -1,7 +1,7 @@
+ #include <filesystem>
+ #include <string>
+ #include <string_view>
+-#include <format>
++#include <fmt/format.h>
+ #include <charconv>
+ #include <Windows.h>
+ #include <spdlog/spdlog.h>
+@@ -141,7 +141,7 @@ static void installer(bool setup, bool restart) {
+     }
+     //powershell -NoExit -Command Wait-Process 13860; rm winmm.dll;start dontstarve_steam_x64.exe
+ #define DEBUG_SHELL !NDEBUG
+-    auto cmd = std::format("powershell"
++    auto cmd = fmt::format("powershell"
+                            #if !NDEBUG
+                            " -NoExit"
+                            #endif
+@@ -152,7 +152,7 @@ static void installer(bool setup, bool restart) {
+             ,
+                            GetCurrentProcessId(), update_cmd);
+ #ifndef ENABLE_STEAM_SUPPORT
+-    cmd += std::format("start {}", getExePath().filename().string());
++    cmd += fmt::format("start {}", getExePath().filename().string());
+ #endif
+     spdlog::info("run shell:{}", cmd);
+     if (CreateProcessA(NULL, cmd.data(), NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) {
+diff --git a/src/DontStarveInjector/util/zipfile.cpp b/src/DontStarveInjector/util/zipfile.cpp
+index c0650af..53a1f96 100644
+--- a/src/DontStarveInjector/util/zipfile.cpp
++++ b/src/DontStarveInjector/util/zipfile.cpp
+@@ -3,7 +3,7 @@
+ #include <string>
+ #include <string_view>
+ #include <filesystem>
+-#include <format>
++#include <fmt/format.h>
+ #include <unordered_map>
+ #include "zipfile.hpp"
+ #include <sstream>
+diff --git a/src/FunctionRelocation/MemorySignature.hpp b/src/FunctionRelocation/MemorySignature.hpp
+index ca42fe7..7dd8bff 100644
+--- a/src/FunctionRelocation/MemorySignature.hpp
++++ b/src/FunctionRelocation/MemorySignature.hpp
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include <cstdint>
++#include <cstddef>
+ #include <vector>
+ #include "export.hpp"
+ 
+diff --git a/src/FunctionRelocation/ModuleSections.hpp b/src/FunctionRelocation/ModuleSections.hpp
+index b2c8b06..d5ec670 100644
+--- a/src/FunctionRelocation/ModuleSections.hpp
++++ b/src/FunctionRelocation/ModuleSections.hpp
+@@ -73,20 +73,20 @@ namespace function_relocation {
+ 
+     struct ModuleDetials {
+         std::string name;
+-        GumMemoryRange range;
++        GumMemoryRange range{};
+         std::string path;
+     };
+     
+     struct ModuleSections {
+         ModuleDetials details;
+-        GumMemoryRange text;
+-        GumMemoryRange pdata;
+-        GumMemoryRange rodata;
+-        GumMemoryRange plt;
+-        GumMemoryRange got_plt;
+-        GumMemoryRange bss;
++        GumMemoryRange text{};
++        GumMemoryRange pdata{};
++        GumMemoryRange rodata{};
++        GumMemoryRange plt{};
++        GumMemoryRange got_plt{};
++        GumMemoryRange bss{};
+ #ifndef _WIN32
+-        GumMemoryRange ehframe;
++        GumMemoryRange ehframe{};
+ #endif  
+         std::unordered_map<std::string, GumMemoryRange> sections;
+ #define MODULESECTION_IN_RANGE(name) \
+diff --git a/src/FunctionRelocation/ScanCtx.hpp b/src/FunctionRelocation/ScanCtx.hpp
+index 5eb59ee..dee9df8 100644
+--- a/src/FunctionRelocation/ScanCtx.hpp
++++ b/src/FunctionRelocation/ScanCtx.hpp
+@@ -8,7 +8,7 @@
+ #include <range/v3/all.hpp>
+ #include <algorithm>
+ #include <cassert>
+-#include <format>
++#include <fmt/format.h>
+ #include <list>
+ #include <set>
+ 
+diff --git a/tests/function_relocation/legacy_memory_signature.hpp b/tests/function_relocation/legacy_memory_signature.hpp
+index cf75dee..6a85706 100644
+--- a/tests/function_relocation/legacy_memory_signature.hpp
++++ b/tests/function_relocation/legacy_memory_signature.hpp
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <cstdint>
++#include <cstddef>
+ #include <vector>
+ #include "export.hpp"
+ 
+diff --git a/tests/plugin/plugin_host_lua_spec.lua b/tests/plugin/plugin_host_lua_spec.lua
+index c241ebe..f7e64b1 100644
+--- a/tests/plugin/plugin_host_lua_spec.lua
++++ b/tests/plugin/plugin_host_lua_spec.lua
+@@ -41,6 +41,20 @@ if rawget(_G, "GameInjector") == nil then
+     })
+ end
+ 
++-- These cross-platform host specs also simulate Windows-only plugin faces.
++-- Read those fixtures from source; Linux distributions correctly omit them.
++package.preload["plugins.package_load"] = function()
++    local loader = dofile(ROOT .. "/Mod/plugins/package_load.lua")
++    local load_from_root = loader.load_package_from_root
++    loader.load_package_from_root = function(package_root, stem, api)
++        if stem == "plugin_network_sim" or stem == "plugin_sim_lagcomp" then
++            package_root = ROOT .. "/src/DontStarveInjector/plugins/" .. stem .. "/"
++        end
++        return load_from_root(package_root, stem, api)
++    end
++    return loader
++end
++
+ local PluginHost = require("plugins.host")
+ 
+ local function assert_eq(actual, expected, message)
+diff --git a/tools/Creater/main.cpp b/tools/Creater/main.cpp
+index 563bf30..bf04d8e 100644
+--- a/tools/Creater/main.cpp
++++ b/tools/Creater/main.cpp
+@@ -1,4 +1,4 @@
+-#include <format>
++#include <fmt/format.h>
+ #include <frida-gum.h>
+ #include <spdlog/spdlog.h>
+ #include <filesystem>

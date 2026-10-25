@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/fesily/DontStarveLuaJIT2.git",
+  "commit": "201ea9bb16ea23e6ead77f733cd1d92c386b2bb8",
+  "upstreamTag": "preview-40091876144-201ea9b",
+  "version": "3.3.2",
+  "revision": "201ea9b-debian12",
+  "luajitCommit": "9dd5e0d9da9b5e611dad0a9fe9c88167d0f94aab",
+  "vcpkgCommit": "9e593bb18ea69cc5095e012465dcd675a822ed0d",
+  "fridaCommit": "ddc10c5559cbb41a3dd72866bfba6ff3945ffa5c",
+  "sourceDateEpoch": 1792829614
+}

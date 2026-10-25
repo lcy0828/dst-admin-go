@@ -7,6 +7,15 @@ The list distinguishes upstream releases, compatibility builds, and imported pac
 By default, the selected Agent or local Runtime manages versions, downloads, caching, validation, and installation. The Controller dispatches jobs and displays progress.
 The local Runtime uses an in-process installer; it does not start or connect to an extra local Agent.
 
+The bundled compatibility build is **3.3.2 (`201ea9b-debian12`)**, based on a pinned
+upstream preview commit and built for the default Debian 12 images. It includes
+newer Linux signature, plugin discovery, world generation and sandbox-path fixes.
+The official stable upstream release remains **v3.2.0**. See [package provenance,
+patches and licenses](../internal/luajit/packages/README.md).
+To upgrade, update the management service or the corresponding Agent, stop every
+world sharing that game installation, and install the new compatibility build
+from this page. Existing installations are not replaced in the background.
+
 **Check upstream updates** asks the current node to read GitHub metadata and SHA-256 for the latest stable Linux package.
 It does not download, install, or start background polling. Installation then downloads and verifies the selected version on that node.
 Future upstream releases can be followed directly while the package layout and VM interface remain compatible, without adding a private capability file.
@@ -34,7 +43,7 @@ Old JIT-on / JIT-off requests are rejected so their meaning cannot change silent
 - Require an explicit `targetId + installationId`. Missing remote targets do not fall back to the local host.
 - ZIP limit: 256 MiB; extracted limit: 1 GiB. Reject path traversal, symbolic links, duplicate files, non-Linux-x64 ELF binaries, and missing runtime files. No private mode contract file is required.
 - Downloads require an HTTPS source, HTTPS redirects, and a specified SHA-256. Failed validation does not publish to cache.
-- Before replacing runtime files, the target node checks ELF dynamic dependencies and required system-library versions. For example, official v3.0.0 needs newer GLIBC / GLIBCXX than Debian 12 provides, so use a compatibility build there.
+- Before replacing runtime files, the target node checks ELF dynamic dependencies and required system-library versions. Official v3.2.0 and the current 3.3.2 preview Linux archives need GLIBC 2.38 / GLIBCXX 3.4.32, above the Debian 12 baseline; use the compatibility build there.
 - Optional Controller transfers use relative paths and short-lived credentials for one package. Credentials are not sent to third-party download sources.
 - The original game executable is retained as `_1`. The Mod, bootstrap library, locator file, and launcher are backed up together and rolled back on failure. After an interrupted installation transaction, the next installation restores it first; unrestored backups are retained.
 - Shared/exclusive installation directory file locks coordinate game processes, updates, and installation. Master and Caves can run concurrently.
@@ -59,6 +68,14 @@ The target node queries [DontStarveLuaJIT2 releases](https://github.com/fesily/D
 Compatibility depends on architecture, the dynamic loader, GLIBC/GLIBCXX/CXXABI, and package contents. A new release is not automatically compatible: dependency checks run on the target, preserve the existing installation on failure, and explain the reason. Older distributions can use the supplied compatibility build.
 
 Upstream packages need no extra launch-mode declaration or private launch switch. Verify game startup after updates. A game update may replace LuaJIT files; reinstall when the page reports this. See [bundled package provenance and licenses](../internal/luajit/packages/README.md).
+
+The compatibility baseline is Debian 12 / Linux x64 with DST **759671**, covering
+Master + Caves, new worlds and save reloads, sustained operation in all three VM
+modes, telemetry and console receipts. Generational GC remains experimental;
+third-party mods are not exhaustively tested. Upstream's optional `network.stats`
+client RTT probe disables itself when its signature does not match this game
+version, so it cannot supply player RTT then. Existing world and player telemetry
+remain available.
 
 ## Downloads and proxies
 

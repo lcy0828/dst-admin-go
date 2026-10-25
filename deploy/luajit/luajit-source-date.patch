@@ -1,0 +1,41 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index dc0c00c..cf65f48 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -311,10 +311,32 @@ ENDIF()
+ 
+ CHECK_LIBRARY_EXISTS(m sin "" MINILUA_USE_LIBM)
+ 
+-add_custom_command(OUTPUT ${LUAJIT_DIR}/src/luajit_relver.txt
+-  COMMAND git show -s --format=%ct > ${LUAJIT_DIR}/src/luajit_relver.txt
+-  WORKING_DIRECTORY ${LUAJIT_DIR}/src/
+-)
++set(LUAJIT_RELVER "")
++if(DEFINED ENV{SOURCE_DATE_EPOCH} AND "$ENV{SOURCE_DATE_EPOCH}" MATCHES "^[0-9]+$")
++  set(LUAJIT_RELVER "$ENV{SOURCE_DATE_EPOCH}")
++elseif(EXISTS "${LUAJIT_DIR}/.git")
++  find_package(Git QUIET)
++  if(GIT_FOUND)
++    execute_process(
++      COMMAND "${GIT_EXECUTABLE}" show -s --format=%ct
++      WORKING_DIRECTORY "${LUAJIT_DIR}"
++      OUTPUT_VARIABLE LUAJIT_RELVER
++      OUTPUT_STRIP_TRAILING_WHITESPACE
++      RESULT_VARIABLE LUAJIT_RELVER_RESULT
++    )
++    if(NOT LUAJIT_RELVER_RESULT EQUAL 0)
++      set(LUAJIT_RELVER "")
++    endif()
++  endif()
++endif()
++if(NOT LUAJIT_RELVER MATCHES "^[0-9]+$" AND EXISTS "${LUAJIT_DIR}/.relver")
++  file(STRINGS "${LUAJIT_DIR}/.relver" LUAJIT_RELVER LIMIT_COUNT 1)
++endif()
++if(NOT LUAJIT_RELVER MATCHES "^[0-9]+$")
++  message(FATAL_ERROR
++    "Unable to determine LuaJIT release version. Set SOURCE_DATE_EPOCH or provide .relver.")
++endif()
++file(WRITE "${LUAJIT_DIR}/src/luajit_relver.txt" "${LUAJIT_RELVER}\n")
+ 
+ ## Source Lists
+ SET(SRC_LJLIB

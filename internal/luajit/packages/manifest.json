@@ -1,12 +1,12 @@
 [
   {
-    "file": "dst-admin-luajit2-3.0.0-linux-amd64.zip",
+    "file": "dst-admin-luajit2-3.3.2-linux-amd64.zip",
     "release": {
-      "version": "3.0.0",
-      "revision": "fcdff97",
-      "sha256": "49a6278e35db7caaf535f239a7154398e4c6a16aab955a7d8848fdd121a7a6e0",
-      "size": 12534607,
-      "id": "49a6278e35db7caaf535f239a7154398e4c6a16aab955a7d8848fdd121a7a6e0",
+      "version": "3.3.2",
+      "revision": "201ea9b-debian12",
+      "sha256": "86d0d29d7652b7df3f89c74d5b5c0ec3269619f3bf3b0ebf7eec7e67177178b9",
+      "size": 45206477,
+      "id": "86d0d29d7652b7df3f89c74d5b5c0ec3269619f3bf3b0ebf7eec7e67177178b9",
       "os": "linux",
       "arch": "amd64",
       "channel": "compatibility"

@@ -1,14 +1,14 @@
 [
   {
     "release": {
-      "id": "58374ccd18e6e13225e1a3c980a92fb06bfa26a17e7338fe4c78fc7a5ec9b1f3",
-      "version": "3.0.0",
+      "id": "95aaf931af377b1e5cf2f531ed644a33b2a45eeb236e8abc936d786bea67d120",
+      "version": "3.2.0",
       "os": "linux",
       "arch": "amd64",
-      "sha256": "58374ccd18e6e13225e1a3c980a92fb06bfa26a17e7338fe4c78fc7a5ec9b1f3",
-      "size": 45159683,
+      "sha256": "95aaf931af377b1e5cf2f531ed644a33b2a45eeb236e8abc936d786bea67d120",
+      "size": 45402404,
       "channel": "upstream",
-      "sourceUrl": "https://github.com/fesily/DontStarveLuaJIT2/releases/download/v3.0.0/linux_Mod.zip"
+      "sourceUrl": "https://github.com/fesily/DontStarveLuaJIT2/releases/download/v3.2.0/linux_Mod.zip"
     }
   }
 ]
