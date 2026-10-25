@@ -159,7 +159,7 @@ func TestFinalModelAndMCPToolsCarryDescriptionsAndLocalReferences(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest("POST", "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	request := httptest.NewRequest("POST", "/mcp?view=legacy&tags=mod,console", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
 	request.Header.Set("Authorization", "Bearer "+secret)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json, text/event-stream")

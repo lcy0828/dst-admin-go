@@ -65,10 +65,11 @@ type Arguments struct {
 	IncludeStartupPlan bool   `json:"includeStartupPlan,omitempty"`
 }
 type Tool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
-	Mutation    bool           `json:"mutation"`
+	Metadata    *apicontract.ToolMetadata `json:"metadata,omitempty"`
+	Name        string                    `json:"name"`
+	Description string                    `json:"description"`
+	InputSchema map[string]any            `json:"inputSchema"`
+	Mutation    bool                      `json:"mutation"`
 }
 type Call struct {
 	ID              string    `gorm:"primary_key;type:varchar(64)" json:"id"`

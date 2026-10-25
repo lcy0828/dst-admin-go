@@ -104,7 +104,7 @@ func TestAIRoutesKeepSessionCSRFAndBearerBoundaries(t *testing.T) {
 	if out := mcp("", ""); out.Code != 401 {
 		t.Fatal("MCP accepted browser session without Bearer", out.Code, out.Body)
 	}
-	if out := mcp(token.Data.Secret, ""); out.Code != 200 || !strings.Contains(out.Body.String(), `"name":"room_control"`) || !strings.Contains(out.Body.String(), `"name":"world_console"`) {
+	if out := mcp(token.Data.Secret, ""); out.Code != 200 || !strings.Contains(out.Body.String(), `"name":"call_api"`) || !strings.Contains(out.Body.String(), `"name":"find_api"`) {
 		t.Fatal("MCP administrator tool catalog", out.Code, out.Body)
 	}
 	if out := mcp(token.Data.Secret, "https://untrusted.example"); out.Code != 403 {

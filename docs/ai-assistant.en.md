@@ -82,3 +82,26 @@ Connections → Browser chat limits controls tool rounds, tool calls and the tot
 AI starts no idle collectors, model polling or background jobs. At most two AI requests and two actual tool executions run concurrently. Context, logs and results have size limits; large results preserve excerpts and receipt identifiers. Full records remain on their management pages.
 
 Necessary state, logs and tool results are sent to the configured model. Common credentials are redacted, but arbitrary free text cannot be fully recognized; do not paste passwords or keys into ordinary chat. The model credential and temporary private results use `ai/provider.key` under the configuration directory; retain this key when backing up management data. External credentials are stored only as digests.
+
+### MCP catalog views
+
+The default `/mcp` connection exposes a compact set of common tools plus complete
+API discovery and execution. Use `find_api` with keywords or `tags`, `access`,
+`risk`, `runtime`; pass `includeSchema: true` for the input schema. Then call
+`call_api` with `operationId` and matching `arguments` (including `requestId` for
+writes). The original validation, credential scope, idempotency and Runtime guards
+still apply.
+
+For typed tools, connect to `/mcp?tags=backup&access=read`,
+`/mcp?tags=mod,player`, or `/mcp?view=all`. `view=legacy` includes compatibility
+helpers and deprecated aliases. Lists use standard MCP `nextCursor` pagination,
+up to 64 tools per page; keep the same endpoint query for subsequent pages.
+Tags match by OR; other dimensions match by AND. Listing filters do not restrict
+execution authority, and existing tool names remain callable.
+
+Standard annotations include titles and read-only, idempotent, destructive and
+open-world hints. Namespaced `_meta["io.github.lcy0828.dst-admin/tool"]` contains
+multi-domain tags, access, risk and runtime requirements. These describe behavior
+and do not add approvals. Runtime `any` does not override operation-specific
+requirements such as stopping a world. The generated `docs/openapi-operations.json`
+shares this metadata; new operations inherit their declared domains.

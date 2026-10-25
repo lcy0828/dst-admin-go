@@ -105,6 +105,7 @@ paths:
     delete:
       tags: [AI]
       operationId: deleteAIAttachment
+      x-dst-tool: {"risk": "high"}
       x-dst-transport: assistant
       summary: Delete an assistant attachment owned by the caller
       parameters:
@@ -147,6 +148,7 @@ paths:
     post:
       tags: [AI]
       operationId: testAIProvider
+      x-dst-tool: {"openWorld": true}
       summary: Test the saved model connection; sends a minimal prompt
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
@@ -178,6 +180,7 @@ paths:
     delete:
       tags: [AI]
       operationId: revokeAIToken
+      x-dst-tool: {"risk": "high"}
       summary: Revoke MCP credential and block further calls
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
@@ -473,6 +476,7 @@ paths:
     get:
       tags: [System]
       operationId: checkSoftwareRelease
+      x-dst-tool: {"openWorld": true}
       summary: Check the latest official stable release with a 20-minute cache
       parameters:
         - { name: force, in: query, schema: { type: boolean, default: false } }
@@ -484,6 +488,7 @@ paths:
     post:
       tags: [System]
       operationId: downloadSoftwareRelease
+      x-dst-tool: {"openWorld": true}
       summary: Download and verify an official executable bundle without changing user data
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
@@ -505,6 +510,7 @@ paths:
     post:
       tags: [System]
       operationId: applySoftwareRelease
+      x-dst-tool: {"risk": "high"}
       summary: Apply a verified release and restart only the management process after background writes finish
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
@@ -543,6 +549,7 @@ paths:
     post:
       tags: [System, Mods]
       operationId: testWorkshopNetworkConnection
+      x-dst-tool: {"openWorld": true, "readOnly": true}
       summary: Test name search, ID lookup and image access using unsaved Workshop settings
       description: Read-only network requests, no configuration writes. Omitted or empty secrets retain current values. An optional sampleId allows ID lookup to be tested even when name search fails. Stage failures remain HTTP 200 with individual availability; not_tested is distinct from failure.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
@@ -555,6 +562,7 @@ paths:
     post:
       tags: [Mods]
       operationId: enrichModDisplayMetadata
+      x-dst-tool: {"openWorld": true}
       summary: Fetch optional authors and, on request, community descriptions without blocking core metadata
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
@@ -579,6 +587,7 @@ paths:
     get:
       tags: [Mods]
       operationId: getModThumbnail
+      x-dst-tool: {"openWorld": true}
       summary: Read an authenticated cached Steam thumbnail by Mod ID without an arbitrary upstream URL
       parameters:
         - { name: size, in: query, schema: { type: integer, enum: [80, 184, 384], default: 184 } }
@@ -609,6 +618,7 @@ paths:
     post:
       tags: [System]
       operationId: previewSystemSettings
+      x-dst-tool: {"readOnly": true}
       summary: Validate and preview a system settings change
       description: >-
         Does not apply settings. Inspect validation, proposed changes and effective/restart requirements before applySystemSettings; retain any required revision or preview identifiers.
@@ -641,6 +651,7 @@ paths:
     post:
       tags: [System]
       operationId: testSystemSMTPConnection
+      x-dst-tool: {"openWorld": true}
       summary: Establish a real SMTP connection, negotiate TLS, and authenticate when configured
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
@@ -670,6 +681,7 @@ paths:
     post:
       tags: [System]
       operationId: createNotificationChannel
+      x-dst-tool: {"destructive": false}
       summary: Create an email or webhook notification channel
       description: >-
         Use the channel type-specific configuration in the request schema. Credentials are sensitive and existing secret values are masked on reads. Creating a channel does not prove delivery; use its test action and delivery records.
@@ -699,6 +711,7 @@ paths:
     delete:
       tags: [System]
       operationId: deleteNotificationChannel
+      x-dst-tool: {"risk": "high"}
       summary: Delete one notification delivery channel
       description: >-
         Removes the configured channel. Does not retract messages already delivered; references or active deliveries may be reported by the operation.
@@ -729,6 +742,7 @@ paths:
     post:
       tags: [System]
       operationId: testNotificationChannel
+      x-dst-tool: {"openWorld": true}
       summary: Queue a real test send, including for a disabled channel
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
@@ -761,6 +775,7 @@ paths:
     post:
       tags: [System]
       operationId: retryNotificationDelivery
+      x-dst-tool: {"openWorld": true}
       summary: Requeue a failed delivery; an interrupted send may already have reached its recipient
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
@@ -778,6 +793,7 @@ paths:
     post:
       tags: [System]
       operationId: sendCustomNotification
+      x-dst-tool: {"openWorld": true}
       summary: Send a custom message to enabled channels subscribed to custom events
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
@@ -815,6 +831,7 @@ paths:
     post:
       tags: [Rooms]
       operationId: createRoom
+      x-dst-tool: {"destructive": false}
       summary: Atomically create and adopt a DST room
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -847,6 +864,7 @@ paths:
     post:
       tags: [Rooms, Jobs]
       operationId: runBatchRoomAction
+      x-dst-tool: {"risk": "high"}
       summary: Start, stop, or restart selected worlds across multiple rooms through one persistent job
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -891,6 +909,7 @@ paths:
     delete:
       tags: [Rooms]
       operationId: deleteRoom
+      x-dst-tool: {"risk": "high"}
       summary: Move a stopped room into the save-root recovery directory
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -956,6 +975,7 @@ paths:
     post:
       tags: [Topology]
       operationId: previewRoomTopology
+      x-dst-tool: {"readOnly": true}
       summary: Preview cross-room target capacity, stale inventory, missing Shards, and duplicate runtimes
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -1163,6 +1183,7 @@ paths:
     post:
       tags: [Backups, Jobs]
       operationId: createDistributedBackupSet
+      x-dst-tool: {"destructive": false}
       summary: Create a verified cold-consistent or hot-consistent backup set for every Shard
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -1201,6 +1222,7 @@ paths:
     delete:
       tags: [Backups]
       operationId: deleteDistributedBackupSet
+      x-dst-tool: {"risk": "high"}
       summary: Delete backup artifacts after confirming the backup name and checking recovery references
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -1248,6 +1270,7 @@ paths:
     post:
       tags: [Backups, Jobs]
       operationId: restoreDistributedBackupSet
+      x-dst-tool: {"risk": "high"}
       summary: Create a protection set, then restore and publish every Shard atomically
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -1416,6 +1439,7 @@ paths:
     post:
       tags: [Topology, Runtime]
       operationId: detectRuntimeNetworkProfileEgress
+      x-dst-tool: {"openWorld": true}
       summary: Detect the public egress IP on the Runtime target associated with a network profile
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -1475,6 +1499,7 @@ paths:
     delete:
       tags: [Rooms]
       operationId: purgeRoomRecovery
+      x-dst-tool: {"risk": "high"}
       summary: Permanently remove a deleted room
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -1507,6 +1532,7 @@ paths:
     post:
       tags: [Rooms]
       operationId: createRoomWorld
+      x-dst-tool: {"destructive": false}
       summary: Atomically create a stopped world with collision-free shard ports
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -1535,6 +1561,7 @@ paths:
     delete:
       tags: [Rooms]
       operationId: deleteRoomWorld
+      x-dst-tool: {"risk": "high"}
       summary: Move a stopped world into the room recovery directory
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -1590,6 +1617,7 @@ paths:
     delete:
       tags: [Rooms]
       operationId: purgeWorldRecovery
+      x-dst-tool: {"risk": "high"}
       summary: Permanently remove a deleted world
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -1670,6 +1698,7 @@ paths:
     post:
       tags: [Runtime]
       operationId: activateWorldRuntime
+      x-dst-tool: {"runtime": "server-running"}
       summary: Activate the installed managed runtime without restarting the shard
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
@@ -1682,6 +1711,7 @@ paths:
     post:
       tags: [Runtime]
       operationId: reloadWorldRuntime
+      x-dst-tool: {"runtime": "server-running"}
       summary: Reload only the managed runtime modules without restarting the shard
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
@@ -1759,6 +1789,7 @@ paths:
     post:
       tags: [Rooms]
       operationId: captureWorldRuntimeDiagnostic
+      x-dst-tool: {"runtime": "shard-ready"}
       summary: Run one bounded runtime diagnostic and wait for its structured report
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -1793,6 +1824,7 @@ paths:
     delete:
       tags: [Runtime]
       operationId: uninstallWorldRuntime
+      x-dst-tool: {"risk": "high"}
       summary: Remove only DST Admin managed runtime content while the shard is stopped
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/DSTRuntimeConfirmationInput" } } } }
@@ -1812,6 +1844,7 @@ paths:
     post:
       tags: [Rooms, Jobs]
       operationId: runRoomAction
+      x-dst-tool: {"risk": "high"}
       summary: Start, stop, restart, save or clean up stopped runtime processes through a persistent job
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -2034,6 +2067,7 @@ paths:
     post:
       tags: [Console]
       operationId: createCommand
+      x-dst-tool: {"destructive": false}
       summary: Persist a custom Lua command definition
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -2098,6 +2132,7 @@ paths:
     delete:
       tags: [Console]
       operationId: deleteCommand
+      x-dst-tool: {"risk": "high"}
       summary: Delete a persistent custom command definition
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -2166,6 +2201,7 @@ paths:
     delete:
       tags: [Console]
       operationId: clearCommandRuns
+      x-dst-tool: {"risk": "high"}
       summary: Delete persistent command audit records for a room or world
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -2205,6 +2241,7 @@ paths:
     post:
       tags: [Console]
       operationId: executeRoomCommand
+      x-dst-tool: {"risk": "high", "runtime": "shard-ready"}
       summary: Render and send a typed built-in command
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -2235,6 +2272,7 @@ paths:
     post:
       tags: [Console]
       operationId: executeRawRoomCommand
+      x-dst-tool: {"risk": "high", "runtime": "shard-ready"}
       summary: Send a bounded raw Lua command after exact room-name confirmation
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -2324,6 +2362,7 @@ paths:
     delete:
       tags: [Save Imports]
       operationId: deleteSaveImport
+      x-dst-tool: {"risk": "high"}
       summary: Delete an imported artifact after exact-name confirmation
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -2375,6 +2414,7 @@ paths:
     post:
       tags: [Save Imports, Jobs]
       operationId: applySaveImport
+      x-dst-tool: {"risk": "high"}
       summary: Deploy an analyzed save through a recoverable job
       description: >-
         New and clone imports create a local room. Replacement with preserved
@@ -2417,6 +2457,7 @@ paths:
     post:
       tags: [Backups, Jobs]
       operationId: createRoomBackup
+      x-dst-tool: {"destructive": false}
       summary: Request a consistent manual backup through a persistent job
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -2577,6 +2618,7 @@ paths:
     delete:
       tags: [Backups]
       operationId: deleteBackup
+      x-dst-tool: {"risk": "high"}
       summary: Delete a backup after exact backup-name confirmation
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -2621,6 +2663,7 @@ paths:
     post:
       tags: [Backups, Jobs]
       operationId: restoreBackup
+      x-dst-tool: {"risk": "high"}
       summary: Atomically restore a stopped room after creating a protection backup
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -2664,6 +2707,7 @@ paths:
     post:
       tags: [Configuration]
       operationId: previewRoomConfiguration
+      x-dst-tool: {"readOnly": true}
       summary: Validate a room configuration and calculate its server-side diff without writing
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -2730,6 +2774,7 @@ paths:
     post:
       tags: [Configuration]
       operationId: previewWorldConfiguration
+      x-dst-tool: {"readOnly": true}
       summary: Validate ports and Lua override patches and calculate a server-side diff
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -2802,6 +2847,7 @@ paths:
     post:
       tags: [Configuration]
       operationId: previewRoomAccessLists
+      x-dst-tool: {"readOnly": true}
       summary: Validate and diff access lists; removals require the exact room name
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -2864,6 +2910,7 @@ paths:
     post:
       tags: [Configuration]
       operationId: revealClusterToken
+      x-dst-tool: {"readOnly": true, "risk": "high"}
       summary: Reveal the Cluster Token after exact room-name confirmation; response is never cached
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -2889,6 +2936,7 @@ paths:
     post:
       tags: [Configuration]
       operationId: previewClusterToken
+      x-dst-tool: {"readOnly": true}
       summary: Validate a token change without returning either secret in the diff
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -3244,6 +3292,7 @@ paths:
     post:
       tags: [Game, Jobs]
       operationId: updateGameServer
+      x-dst-tool: {"risk": "high", "openWorld": true}
       summary: Protect managed rooms, stop running shards, update a SteamCMD-managed server, and optionally restart shards
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
@@ -3390,6 +3439,7 @@ paths:
     delete:
       tags: [Entity Catalog]
       operationId: uninstallArtworkPack
+      x-dst-tool: {"risk": "high"}
       summary: Uninstall only the optional panel resources, taking effect immediately
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
@@ -3538,6 +3588,7 @@ paths:
     get:
       tags: [Entity Catalog]
       operationId: readWorldEntitySnapshot
+      x-dst-tool: {"runtime": "shard-ready"}
       summary: Browse or search a cached world Prefab snapshot with bounded pagination
       description: Coalesces concurrent requests to the same world. At most two collections and two snapshots, cached for five minutes. Uses bounded Runtime 2.4.8 batches over the existing Agent transport, with up to 2048 entries and 128 KiB of encoded item JSON per batch, with legacy 120-entry pages only after explicit batch rejection. One batch in flight per world, at most 50000 entries and an 8 MiB metadata budget, within 30 seconds. Inconsistent or partial reads fail. No game mutations or fallback to local placement. No idle polling. A forced refresh replaces the previous snapshot. Canceled collectors finish unwinding before replacement. A collection retries busy/stale pages at most three times within its original deadline. Errors include details.retryable and a reason code; incomplete snapshots are never cached.
       parameters:
@@ -3606,6 +3657,7 @@ paths:
     post:
       tags: [Entity Catalog]
       operationId: searchWorldEntityCatalog
+      x-dst-tool: {"runtime": "shard-ready", "readOnly": true}
       summary: Read registered vanilla and mod Prefabs from the selected running world
       description: On-demand read through the applied local or Agent placement. Never spawns entities. Collection and searches yield between static game frames, including while auto-paused, and have a ten-second collection deadline. Uses a shard-local snapshot for up to five minutes; refresh explicitly rebuilds it. Requires DST Admin Runtime 2.4.8 or newer; unavailable worlds return an error without local fallback. Busy worlds reject catalog reads instead of queuing them.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
@@ -3645,6 +3697,7 @@ paths:
     get:
       tags: [Mods]
       operationId: searchMods
+      x-dst-tool: {"openWorld": true}
       summary: Search Steam Workshop Mods with filters and pagination
       description: >-
         Searches Workshop, not local installation directories. Use room or installation inventory to find local Mods. Availability and metadata depend on the configured Workshop access method; use the returned pagination and warning fields.
@@ -3693,6 +3746,7 @@ paths:
     post:
       tags: [Mods]
       operationId: downloadModToNode
+      x-dst-tool: {"openWorld": true}
       summary: Download a Workshop Mod into the Controller content library
       description: >-
         Uses the Controller library download service. For an explicit local or remote Runtime installation use downloadRuntimeInstallationMod with targetId and installationId. Does not enable the Mod in any room or restart worlds.
@@ -3706,6 +3760,7 @@ paths:
     post:
       tags: [Mods]
       operationId: updateNodeMod
+      x-dst-tool: {"openWorld": true}
       summary: Update one Workshop Mod in the Controller content library
       description: >-
         This is the Controller library operation, not a placement-aware room update. For a known Runtime target and installation prefer updateRuntimeInstallationMod. Does not imply configuration publication or that running worlds loaded the new version.
@@ -3717,6 +3772,7 @@ paths:
     get:
       tags: [Mods]
       operationId: getModDetails
+      x-dst-tool: {"openWorld": true}
       parameters:
         - name: targetId
           in: query
@@ -3769,6 +3825,7 @@ paths:
     post:
       tags: [Mods, Agents, Jobs]
       operationId: downloadRuntimeInstallationMod
+      x-dst-tool: {"openWorld": true}
       summary: Download a Workshop Mod on one explicit Runtime installation
       description: >-
         Requires targetId and installationId. Downloads content only; does not add the Mod to room configuration or restart worlds. Local Mods are not Steam-downloadable.
@@ -3793,6 +3850,7 @@ paths:
     post:
       tags: [Mods, Agents, Jobs]
       operationId: updateRuntimeInstallationMod
+      x-dst-tool: {"openWorld": true}
       summary: Update one Workshop Mod content on an explicit Runtime installation
       description: >-
         Requires targetId and installationId. Does not modify room configuration or restart running worlds. For applying a room update and restart use the room update workflow. Local files are not updated through Steam.
@@ -3816,6 +3874,7 @@ paths:
     post:
       tags: [Mods, Agents, Jobs]
       operationId: updateOutdatedRuntimeInstallationMods
+      x-dst-tool: {"openWorld": true}
       summary: Update outdated Workshop content in one Runtime installation
       description: >-
         Batch counterpart of updateRuntimeInstallationMod. Only confirmed outdated Workshop Mods are selected; unknown versions and local Mods are not treated as up to date or sent to Steam. Does not restart worlds.
@@ -3853,6 +3912,7 @@ paths:
     post:
       tags: [Mods]
       operationId: installMod
+      x-dst-tool: {"openWorld": true}
       summary: Download a Mod on the selected worlds' runtime installations and add it to their room configuration
       description: Reads each selected target installation. Workshop content is downloaded only when needed. A local Mod must already exist on every selected installation and includeDependencies must be false; no Steam download or cross-node local file copy occurs. Only selected worlds' modoverrides.lua files are changed, preserving other entries. Changes take effect on the next world start.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
@@ -3910,6 +3970,7 @@ paths:
     post:
       tags: [Mods]
       operationId: updateMod
+      x-dst-tool: {"openWorld": true}
       deprecated: true
       summary: Legacy local room mutation; update controller content and publish a reconcile plan instead
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
@@ -3933,6 +3994,7 @@ paths:
     post:
       tags: [Mods]
       operationId: repairMod
+      x-dst-tool: {"openWorld": true}
       deprecated: true
       summary: Legacy local room mutation; production deployments require a Mod publication
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
@@ -3978,6 +4040,7 @@ paths:
     post:
       tags: [Mods]
       operationId: previewModConfiguration
+      x-dst-tool: {"readOnly": true}
       summary: Validate and preview a world Mod configuration patch
       description: >-
         Requires the current configuration revision. Returns proposed changes without writing or restarting the world. Apply through applyModConfiguration only if the preview and target scope match the request.
@@ -4004,6 +4067,7 @@ paths:
     post:
       tags: [Mods]
       operationId: previewRoomModPublication
+      x-dst-tool: {"readOnly": true}
       summary: Build an immutable Placement-aware Mod publication plan without changing any node
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModPublicationRequest" } } } }
@@ -4027,6 +4091,7 @@ paths:
     post:
       tags: [Mods, Jobs]
       operationId: publishRoomMods
+      x-dst-tool: {"openWorld": true}
       summary: Revalidate a confirmed plan and atomically publish it to every affected installation
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModPublicationConfirmedRequest" } } } }
@@ -4116,6 +4181,7 @@ paths:
     post:
       tags: [Mods, Jobs]
       operationId: retryFailedModPublication
+      x-dst-tool: {"openWorld": true}
       summary: Resume post-commit recovery or create a new publication from a failed pre-commit desired state
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
@@ -4170,6 +4236,7 @@ paths:
     post:
       tags: [Players, Jobs]
       operationId: refreshRoomPlayers
+      x-dst-tool: {"runtime": "shard-ready"}
       summary: Probe each world and persist its current player snapshot
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerRefreshInput" } } } }
@@ -4182,6 +4249,7 @@ paths:
     post:
       tags: [Players, Jobs]
       operationId: kickRoomPlayer
+      x-dst-tool: {"risk": "high", "runtime": "shard-ready"}
       summary: Kick an online player from the world where they were observed
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
@@ -4195,6 +4263,7 @@ paths:
     post:
       tags: [Players, Jobs]
       operationId: banRoomPlayer
+      x-dst-tool: {"risk": "high", "runtime": "shard-ready"}
       summary: Add a player to the room blocklist and notify a running shard
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
@@ -4221,6 +4290,7 @@ paths:
     post:
       tags: [Players, Jobs]
       operationId: announceToRoomPlayer
+      x-dst-tool: {"tags": ["notification"], "runtime": "shard-ready"}
       summary: Broadcast a marked reminder on the online player's current shard
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
@@ -4234,6 +4304,7 @@ paths:
     post:
       tags: [Players, Jobs]
       operationId: killRoomPlayer
+      x-dst-tool: {"risk": "high", "runtime": "shard-ready"}
       summary: Kill an online player in the world where they were observed
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
@@ -4247,6 +4318,7 @@ paths:
     post:
       tags: [Players, Jobs]
       operationId: setRoomPlayerGodMode
+      x-dst-tool: {"runtime": "shard-ready"}
       summary: Enable or disable invincibility for an online player
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
@@ -4260,6 +4332,7 @@ paths:
     post:
       tags: [Players, Jobs]
       operationId: setRoomPlayerCreativeMode
+      x-dst-tool: {"runtime": "shard-ready"}
       summary: Enable or disable free-build mode for an online player
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
@@ -4273,6 +4346,7 @@ paths:
     post:
       tags: [Players, Jobs]
       operationId: resurrectRoomPlayer
+      x-dst-tool: {"runtime": "shard-ready"}
       summary: Resurrect an online ghost player
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
@@ -4286,6 +4360,7 @@ paths:
     post:
       tags: [Players, Jobs]
       operationId: resetRoomPlayerCharacter
+      x-dst-tool: {"risk": "high", "runtime": "shard-ready"}
       summary: Despawn an online player so they can choose another character
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerActionInput" } } } }
@@ -4338,6 +4413,7 @@ paths:
     post:
       tags: [WorldState]
       operationId: refreshWorldStates
+      x-dst-tool: {"runtime": "shard-ready"}
       deprecated: true
       x-dst-replaced-by: listWorldStates
       summary: Read current world-state files through a compatibility POST endpoint
@@ -4353,6 +4429,7 @@ paths:
     post:
       tags: [WorldState]
       operationId: refreshWorldState
+      x-dst-tool: {"runtime": "shard-ready"}
       summary: Read one world current state files from its applied Runtime
       description: >-
         Single-world read of already collected files, without forcing collection or sending console input. For all worlds in a room use listWorldStates. Missing or stale observations remain explicit.
@@ -4385,6 +4462,7 @@ paths:
     post:
       tags: [Automation]
       operationId: createAutomationGroup
+      x-dst-tool: {"destructive": false}
       summary: Create a group for automation tasks
       description: >-
         A task runs on schedule only when both its task and group are enabled. Creating a group does not run its tasks.
@@ -4413,6 +4491,7 @@ paths:
     delete:
       tags: [Automation]
       operationId: deleteAutomationGroup
+      x-dst-tool: {"risk": "high"}
       summary: Delete an automation task group
       description: >-
         Inspect the group and its tasks before deletion. Follow the conflict response when tasks or references prevent deletion. This does not undo actions already executed.
@@ -4434,6 +4513,7 @@ paths:
     post:
       tags: [Automation]
       operationId: createAutomationTask
+      x-dst-tool: {"destructive": false}
       summary: Create a scheduled automation task with an action and parameters
       description: >-
         Use listAutomationActions for supported actions and parameter definitions. Specify the Cron schedule and timezone explicitly when timing matters; duration fields use their declared units. Group state, retry policy, timeout and dependencies affect execution. This saves a schedule; use runAutomationTask for an immediate execution. For ordinary automatic room backups prefer configureRoomBackupSchedule.
@@ -4471,6 +4551,7 @@ paths:
     delete:
       tags: [Automation]
       operationId: deleteAutomationTask
+      x-dst-tool: {"risk": "high"}
       summary: Delete one scheduled automation task
       description: >-
         Stops future scheduling of this task. Does not delete room saves or undo previous executions; inspect running jobs separately.
@@ -4567,6 +4648,7 @@ paths:
     post:
       tags: [Automation]
       operationId: previewAutomationImport
+      x-dst-tool: {"readOnly": true}
       summary: Validate an automation configuration import without applying it
       description: >-
         Inspect errors, conflicts and proposed changes before importAutomation. Does not create tasks, enable groups or execute actions.
@@ -4623,6 +4705,7 @@ paths:
     post:
       tags: [Logs]
       operationId: createStructuredLogRule
+      x-dst-tool: {"destructive": false}
       summary: Create a room-scoped extraction rule
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleInput" } } } }
@@ -4645,6 +4728,7 @@ paths:
     delete:
       tags: [Logs]
       operationId: deleteStructuredLogRule
+      x-dst-tool: {"risk": "high"}
       summary: Delete a custom extraction rule
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
@@ -4656,6 +4740,7 @@ paths:
     post:
       tags: [Logs]
       operationId: testStructuredLogRule
+      x-dst-tool: {"readOnly": true}
       summary: Compile and test an extraction rule against a bounded text sample
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleTestInput" } } } }
@@ -4696,6 +4781,7 @@ paths:
     post:
       tags: [Kubernetes]
       operationId: observeExperimentalKubernetesShard
+      x-dst-tool: {"readOnly": true}
       summary: Observe the fixed managed resources for one Kubernetes Shard
       description: Performs namespace-scoped Kubernetes GET requests only. It cannot exec a Pod, read Secrets, or mutate cluster state.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
@@ -4714,6 +4800,7 @@ paths:
     post:
       tags: [Kubernetes]
       operationId: preflightExperimentalKubernetesShard
+      x-dst-tool: {"readOnly": true}
       summary: Observe one Shard and preview its fixed typed resource plan
       description: Returns a generated plan only when all safety gates pass. applyAllowed is always false and no Apply operation is exposed.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
@@ -4751,6 +4838,7 @@ paths:
     post:
       tags: [Runtime]
       operationId: manageNodeSteamLogin
+      x-dst-tool: {"openWorld": true}
       summary: Configure account login or interact with a bounded Steam Guard session on the selected node
       description: Anonymous is the default. Credentials are encrypted on the runtime node. Installations using the same SteamCMD executable share settings. Requires runtime.steam-login.v1 on remote Agents. Verification lasts at most four minutes. Scheduled downloads needing Guard fail clearly and can be retried after verification. An explicit reset clears only the selected SteamCMD profile and switches it to anonymous, without changing other accounts or game files. Reset accepts no mode, username, password, code or sessionId and is rejected during downloads or login verification.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
@@ -4777,6 +4865,7 @@ paths:
     post:
       tags: [Runtime]
       operationId: probeExistingGameInstallation
+      x-dst-tool: {"readOnly": true}
       summary: Inspect an existing directory on the selected node without installing or moving files
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
@@ -4797,6 +4886,7 @@ paths:
     post:
       tags: [Runtime]
       operationId: installGameOnRuntime
+      x-dst-tool: {"openWorld": true}
       summary: Install or validate DST with SteamCMD at a registered node location; all worlds must be stopped
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
@@ -4878,6 +4968,7 @@ paths:
     post:
       tags: [Runtime]
       operationId: downloadLuaJITPackage
+      x-dst-tool: {"openWorld": true}
       summary: Have the selected Runtime download an HTTPS package directly and cache it after SHA-256 verification
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
@@ -4997,6 +5088,7 @@ paths:
     delete:
       tags: [Agents]
       operationId: unconfigureAgentRuntimeTarget
+      x-dst-tool: {"risk": "high"}
       summary: Remove only the Agent runtime paths without forgetting the Agent
       description: Also suppresses automatic adoption for this Agent so the same discovered installation is not recreated immediately. A later manual PUT clears the suppression.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
@@ -5047,6 +5139,7 @@ paths:
     delete:
       tags: [Agents]
       operationId: deleteAgentRelease
+      x-dst-tool: {"risk": "high"}
       summary: Delete an Agent binary that is not being downloaded
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
@@ -5157,6 +5250,7 @@ paths:
     get:
       tags: [Agents]
       operationId: checkAgentSoftware
+      x-dst-tool: {"openWorld": true}
       summary: Check the official release on this Agent, or use the optional Controller relay
       parameters:
         - { name: force, in: query, schema: { type: boolean, default: false } }
@@ -5171,6 +5265,7 @@ paths:
     post:
       tags: [Agents, Jobs]
       operationId: updateAgentSoftware
+      x-dst-tool: {"risk": "high"}
       summary: Download and verify an Agent release, switch programs and wait for reconnection, or roll back
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
@@ -5189,6 +5284,7 @@ paths:
     post:
       tags: [Agents, Jobs]
       operationId: upgradeAgent
+      x-dst-tool: {"risk": "high"}
       summary: Upgrade a compatible native Agent and wait for the expected version to reconnect
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
@@ -5226,6 +5322,7 @@ paths:
     delete:
       tags: [Agents]
       operationId: forgetAgent
+      x-dst-tool: {"risk": "high"}
       summary: Remove an offline Agent snapshot
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
@@ -5253,6 +5350,7 @@ paths:
     post:
       tags: [Agents, Jobs]
       operationId: runAgentCommand
+      x-dst-tool: {"risk": "high"}
       summary: Run one fixed domain action on an online Agent
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
@@ -5285,6 +5383,7 @@ paths:
     post:
       tags: [GameNotifications, Jobs]
       operationId: sendGameNotification
+      x-dst-tool: {"openWorld": true}
       summary: Broadcast once through a running Shard, preferring the Master; DST forwards to connected Shards
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
@@ -5369,6 +5468,7 @@ paths:
     post:
       tags: [Containers, Jobs]
       operationId: runContainerAction
+      x-dst-tool: {"risk": "high"}
       summary: Run a fixed lifecycle action on a managed DST container
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ContainerActionInput" } } } }

@@ -19,7 +19,7 @@ const discoverAPI = "find_api"
 func (s *Service) InitialTools() []Tool {
 	list := Tools()
 	if s.catalog != nil {
-		list = append(list, Tool{Name: discoverAPI, Description: "Discover all management APIs by domain or operationId, then load their typed tools. Search English keywords such as backup, automation, mod, player, game, agent, notification, configuration, software, topology. Use this whenever a requested action is not in the initial legacy tools; do not conclude it is unavailable. All administrator UI management APIs are included. Prefer configureRoomBackupSchedule to enable/change/pause automatic backups.", InputSchema: schema([]string{"query"}, map[string]any{"query": map[string]any{"type": "string", "maxLength": 256}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 12}})})
+		list = append(list, Tool{Name: discoverAPI, Description: "Discover all management APIs by domain or operationId, then load their typed tools. Search English keywords such as backup, automation, mod, player, game, agent, notification, configuration, software, topology. Use this whenever a requested action is not in the initial legacy tools; do not conclude it is unavailable. All administrator UI management APIs are included. Prefer configureRoomBackupSchedule to enable/change/pause automatic backups.", InputSchema: schema([]string{}, map[string]any{"includeSchema": map[string]any{"type": "boolean", "description": "Return inputSchema for call_api; defaults to false."}, "tags": map[string]any{"type": "array", "maxItems": 16, "items": map[string]any{"type": "string"}}, "access": map[string]any{"type": "string", "enum": []string{"read", "write"}}, "risk": map[string]any{"type": "string", "enum": []string{"low", "normal", "high"}}, "runtime": map[string]any{"type": "string", "enum": []string{"any", "server-running", "shard-ready"}}, "query": map[string]any{"type": "string", "maxLength": 256}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 12}})})
 	}
 	return list
 }
@@ -45,7 +45,8 @@ func apiTool(op *apicontract.Operation) (Tool, error) {
 	if op.Transport == "multipart" {
 		description += ". File fields use attachmentId references from uploaded files."
 	}
-	return Tool{Name: op.ToolName(), Description: description, InputSchema: input, Mutation: op.Mutation()}, nil
+	metadata := op.ToolMetadata()
+	return Tool{Name: op.ToolName(), Description: description, InputSchema: input, Mutation: op.Mutation(), Metadata: &metadata}, nil
 }
 
 func (s *Service) AvailableTools() ([]Tool, error) {
@@ -114,10 +115,12 @@ func (s *Service) loadDiscovered(data json.RawMessage, loaded map[string]Tool) {
 
 func (s *Service) discover(raw json.RawMessage) (json.RawMessage, error) {
 	var in struct {
-		Query string `json:"query"`
-		Limit int    `json:"limit"`
+		Query         string `json:"query"`
+		Limit         int    `json:"limit"`
+		IncludeSchema bool   `json:"includeSchema"`
+		apicontract.MetadataFilter
 	}
-	if json.Unmarshal(raw, &in) != nil || len(in.Query) > 256 || in.Limit < 0 || in.Limit > 12 {
+	if json.Unmarshal(raw, &in) != nil || in.MetadataFilter.Validate() != nil || len(in.Query) > 256 || in.Limit < 0 || in.Limit > 12 {
 		return nil, ErrInvalid
 	}
 	if in.Limit == 0 {
@@ -130,10 +133,19 @@ func (s *Service) discover(raw json.RawMessage) (json.RawMessage, error) {
 		}
 	}
 	items := []map[string]any{}
-	for _, op := range s.catalog.Search(query, in.Limit) {
-		items = append(items, map[string]any{"operationId": op.ID, "tool": op.ToolName(), "summary": op.Summary, "tags": op.Tags, "transport": op.Transport, "deprecated": op.Deprecated, "replacedBy": op.ReplacedBy})
+	for _, op := range s.catalog.SearchFiltered(query, in.Limit, in.MetadataFilter) {
+		metadata := op.ToolMetadata()
+		item := map[string]any{"operationId": op.ID, "tool": op.ToolName(), "summary": op.Summary, "tags": metadata.Tags, "access": metadata.Access, "risk": metadata.Risk, "runtime": metadata.Runtime, "transport": op.Transport, "deprecated": op.Deprecated, "replacedBy": op.ReplacedBy}
+		if in.IncludeSchema {
+			input, err := op.AIInputSchema()
+			if err != nil {
+				return nil, err
+			}
+			item["inputSchema"] = input
+		}
+		items = append(items, item)
 	}
-	return json.Marshal(map[string]any{"items": items, "count": len(items), "instruction": "Matching typed tools are now loaded. Call the appropriate api_ tool with path/query/body parameters. Discover more specific keywords if needed. An empty search is not proof a capability is absent."})
+	return json.Marshal(map[string]any{"items": items, "count": len(items), "instruction": "Matching typed tools are now loaded in the page assistant. External MCP clients can use call_api with operationId and arguments, or the listed api_ tool. Use includeSchema=true to inspect its argument schema. Discover more specific keywords if needed. An empty search is not proof a capability is absent."})
 }
 
 func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw json.RawMessage) (Invocation, error) {

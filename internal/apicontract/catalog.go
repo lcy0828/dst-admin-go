@@ -41,6 +41,7 @@ type Response struct {
 	Ref         string           `yaml:"$ref"`
 }
 type Operation struct {
+	Policy      ToolPolicy          `yaml:"x-dst-tool" json:"-"`
 	ID          string              `yaml:"operationId" json:"operationId"`
 	Summary     string              `yaml:"summary" json:"summary"`
 	Description string              `yaml:"description" json:"description,omitempty"`
@@ -456,6 +457,9 @@ func (op *Operation) URL(in Input) (string, error) {
 // Search uses the complete catalog; matching is deterministic and has no model
 // request, vector index or idle worker. Empty query lists all domains.
 func (c *Catalog) Search(query string, limit int) []*Operation {
+	return c.SearchFiltered(query, limit, MetadataFilter{})
+}
+func (c *Catalog) SearchFiltered(query string, limit int, filter MetadataFilter) []*Operation {
 	query = strings.ToLower(strings.TrimSpace(query))
 	words := strings.Fields(query)
 	type match struct {
@@ -464,7 +468,7 @@ func (c *Catalog) Search(query string, limit int) []*Operation {
 	}
 	matches := make([]match, 0, len(c.ordered))
 	for _, op := range c.ordered {
-		if !op.Callable() {
+		if !op.Callable() || !filter.Matches(op.ToolMetadata()) {
 			continue
 		}
 		score := 0

@@ -1,1982 +1,4441 @@
 {
-  "operationsSHA256": "916be5fcc813f14ffba0b71d3453c05c8fed195600af11892c1d21b456568f73",
+  "operationsSHA256": "89f26d8174a0679c9e2e8e44e1e88b47398815bbaa5a78ee709d04e70248c24d",
   "operations": [
     {
       "operationId": "activateModPublication",
       "method": "POST",
       "path": "/mod-publications/{publicationId}/actions/activate",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "mod"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Restart the shards that were running before a committed Mod publication and confirm they load"
     },
     {
       "operationId": "activateWorldRuntime",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/{worldId}/runtime/actions/activate",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "runtime",
+        "world"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "server-running",
+      "title": "Activate the installed managed runtime without restarting the shard"
     },
     {
       "operationId": "addModToRoom",
       "method": "POST",
       "path": "/rooms/{roomId}/mods/{modId}/actions/add",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Add an already downloaded Mod to selected worlds in a room",
+      "deprecated": true
     },
     {
       "operationId": "adoptExistingGameInstallation",
       "method": "POST",
       "path": "/runtime-targets/game-installations/actions/adopt",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game",
+        "runtime"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Connect an inspected game directory to an empty registered installation location, preserving saves"
     },
     {
       "operationId": "analyzeSaveImport",
       "method": "POST",
       "path": "/save-imports/{importId}/actions/analyze",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "save"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Re-run deep analysis for an uploaded local archive"
     },
     {
       "operationId": "announceToRoomPlayer",
       "method": "POST",
       "path": "/rooms/{roomId}/players/{playerId}/actions/announce",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "notification",
+        "player",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "shard-ready",
+      "title": "Broadcast a marked reminder on the online player's current shard"
     },
     {
       "operationId": "applyClusterToken",
       "method": "POST",
       "path": "/rooms/{roomId}/cluster-token/actions/apply",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "access",
+        "configuration",
+        "job",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Protect the room and atomically replace or clear the token through a persistent job"
     },
     {
       "operationId": "applyModConfiguration",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/{worldId}/mods/{modId}/configuration/actions/apply",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "mod",
+        "room",
+        "world"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Merge owned Mod fields into the latest Runtime modoverrides.lua and atomically write the selected worlds"
     },
     {
       "operationId": "applyRoomAccessLists",
       "method": "POST",
       "path": "/rooms/{roomId}/access/actions/apply",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "access",
+        "configuration",
+        "job",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Protect the room and atomically apply changed access list files through a job"
     },
     {
       "operationId": "applyRoomConfiguration",
       "method": "POST",
       "path": "/rooms/{roomId}/configuration/actions/apply",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "job",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Create a protection backup and atomically apply cluster.ini through a persistent job"
     },
     {
       "operationId": "applyRoomModUpdateNow",
       "method": "POST",
       "path": "/rooms/{roomId}/mod-update/actions/apply",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "mod",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Recheck, download, atomically publish, and restart worlds that were running after an explicit operator confirmation"
     },
     {
       "operationId": "applyRoomModUpdateWhenEmpty",
       "method": "POST",
       "path": "/rooms/{roomId}/mod-update/actions/apply-when-empty",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "mod",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Resume a prepared update after fresh telemetry confirms the room is empty"
     },
     {
       "operationId": "applyRoomShardLinks",
       "method": "POST",
       "path": "/rooms/{roomId}/topology/shard-links/actions/apply",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "topology"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Transactionally apply a route-only Shard topology change without restarting worlds"
     },
     {
       "operationId": "applyRoomTopologyPlacement",
       "method": "POST",
       "path": "/rooms/{roomId}/topology/actions/apply",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "room",
+        "topology"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Move one stopped Shard to its desired target and atomically activate the placement"
     },
     {
       "operationId": "applySaveImport",
       "method": "POST",
       "path": "/save-imports/{importId}/actions/apply",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "save"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Deploy an analyzed save through a recoverable job"
     },
     {
       "operationId": "applySoftwareRelease",
       "method": "POST",
       "path": "/system/software/actions/apply",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "software",
+        "system"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Apply a verified release and restart only the management process after background writes finish"
     },
     {
       "operationId": "applySystemSettings",
       "method": "POST",
       "path": "/system/settings/actions/apply",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Apply a validated system settings change"
     },
     {
       "operationId": "applyWorldConfiguration",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/{worldId}/configuration/actions/apply",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "job",
+        "room",
+        "world"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Protect the room and apply revisioned INI and Lua changes through a persistent job"
     },
     {
       "operationId": "banRoomPlayer",
       "method": "POST",
       "path": "/rooms/{roomId}/players/{playerId}/actions/ban",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "player",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "shard-ready",
+      "title": "Add a player to the room blocklist and notify a running shard"
     },
     {
       "operationId": "cancelArtworkPackDownload",
       "method": "POST",
       "path": "/entity-catalog/artwork-pack/cancel",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "entity"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Cancel an active transfer while retaining the installed pack"
     },
     {
       "operationId": "cancelJob",
       "method": "POST",
       "path": "/jobs/{jobId}/cancel",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Request cooperative cancellation"
     },
     {
       "operationId": "captureWorldRuntimeDiagnostic",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/{worldId}/runtime/diagnostics",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "world"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "shard-ready",
+      "title": "Run one bounded runtime diagnostic and wait for its structured report"
     },
     {
       "operationId": "changePassword",
       "method": "PUT",
       "path": "/auth/password",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "access"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Change the administrator password and revoke every session"
     },
     {
       "operationId": "chatWithAI",
       "method": "POST",
       "path": "/system/ai/chat",
       "contentType": "application/json",
-      "transport": "assistant"
+      "transport": "assistant",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Run a bounded model tool loop and stream progress and actual receipts"
     },
     {
       "operationId": "checkAgentSoftware",
       "method": "GET",
       "path": "/agents/{agentId}/software/check",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "software"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Check the official release on this Agent, or use the optional Controller relay"
     },
     {
       "operationId": "checkModUpdates",
       "method": "POST",
       "path": "/rooms/{roomId}/mods/actions/check-updates",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Compare enabled Workshop versions across the room runtime installations"
     },
     {
       "operationId": "checkRoomModUpdate",
       "method": "POST",
       "path": "/rooms/{roomId}/mod-update/actions/check",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "mod",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Check Workshop versions and persist the room update workflow state"
     },
     {
       "operationId": "checkSoftwareRelease",
       "method": "GET",
       "path": "/system/software/check",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "software",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Check the latest official stable release with a 20-minute cache"
     },
     {
       "operationId": "clearAutomationRuns",
       "method": "POST",
       "path": "/rooms/{roomId}/automation/runs/actions/clear",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Delete retained automation execution history"
     },
     {
       "operationId": "clearCommandRuns",
       "method": "DELETE",
       "path": "/rooms/{roomId}/command-runs",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "console",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Delete persistent command audit records for a room or world"
     },
     {
       "operationId": "clearStructuredLogs",
       "method": "POST",
       "path": "/rooms/{roomId}/structured-logs/actions/clear",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "log",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Delete one world's derived structured-log snapshot and refresh cursor"
     },
     {
       "operationId": "configureAI",
       "method": "PUT",
       "path": "/system/ai",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Save AI configuration with revision checking"
     },
     {
       "operationId": "configureAgentRuntimeTarget",
       "method": "PUT",
       "path": "/runtime-targets/agents/{agentId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Save paths interpreted only on the selected Agent machine"
     },
     {
       "operationId": "configureRoomBackupSchedule",
       "method": "POST",
       "path": "/rooms/{roomId}/backup-schedules/actions/configure",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup",
+        "room",
+        "schedule"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Enable, edit or pause automatic room backups without duplicate schedules"
     },
     {
       "operationId": "createAIToken",
       "method": "POST",
       "path": "/system/ai/tokens",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Create a scoped MCP credential; plaintext returned once"
     },
     {
       "operationId": "createAutomationGroup",
       "method": "POST",
       "path": "/rooms/{roomId}/automation/groups",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Create a group for automation tasks"
     },
     {
       "operationId": "createAutomationTask",
       "method": "POST",
       "path": "/rooms/{roomId}/automation/tasks",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Create a scheduled automation task with an action and parameters"
     },
     {
       "operationId": "createCommand",
       "method": "POST",
       "path": "/commands",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "console"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Persist a custom Lua command definition"
     },
     {
       "operationId": "createDistributedBackupSet",
       "method": "POST",
       "path": "/rooms/{roomId}/backup-sets",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup",
+        "job",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Create a verified cold-consistent or hot-consistent backup set for every Shard"
     },
     {
       "operationId": "createNotificationChannel",
       "method": "POST",
       "path": "/system/notifications/channels",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "notification",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Create an email or webhook notification channel"
     },
     {
       "operationId": "createPrivateAIInput",
       "method": "POST",
       "path": "/system/ai/private-inputs",
       "contentType": "application/json",
-      "transport": "assistant"
+      "transport": "assistant",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Store a private input for a management operation without disclosing its value to the model"
     },
     {
       "operationId": "createRoom",
       "method": "POST",
       "path": "/rooms",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Atomically create and adopt a DST room"
     },
     {
       "operationId": "createRoomBackup",
       "method": "POST",
       "path": "/rooms/{roomId}/backups",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup",
+        "job",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Request a consistent manual backup through a persistent job"
     },
     {
       "operationId": "createRoomWorld",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "world"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Atomically create a stopped world with collision-free shard ports"
     },
     {
       "operationId": "createStructuredLogRule",
       "method": "POST",
       "path": "/rooms/{roomId}/log-rules",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "log",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Create a room-scoped extraction rule"
     },
     {
       "operationId": "deleteAIAttachment",
       "method": "DELETE",
       "path": "/system/ai/attachments/{attachmentId}",
-      "transport": "assistant"
+      "transport": "assistant",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Delete an assistant attachment owned by the caller"
     },
     {
       "operationId": "deleteAgentRelease",
       "method": "DELETE",
       "path": "/agent-releases/{releaseId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Delete an Agent binary that is not being downloaded"
     },
     {
       "operationId": "deleteAutomationGroup",
       "method": "DELETE",
       "path": "/rooms/{roomId}/automation/groups/{groupId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Delete an automation task group"
     },
     {
       "operationId": "deleteAutomationTask",
       "method": "DELETE",
       "path": "/rooms/{roomId}/automation/tasks/{taskId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Delete one scheduled automation task"
     },
     {
       "operationId": "deleteBackup",
       "method": "DELETE",
       "path": "/backups/{backupId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Delete a backup after exact backup-name confirmation"
     },
     {
       "operationId": "deleteCommand",
       "method": "DELETE",
       "path": "/commands/{commandId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "console"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Delete a persistent custom command definition"
     },
     {
       "operationId": "deleteDistributedBackupSet",
       "method": "DELETE",
       "path": "/backup-sets/{backupSetId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Delete backup artifacts after confirming the backup name and checking recovery references"
     },
     {
       "operationId": "deleteNotificationChannel",
       "method": "DELETE",
       "path": "/system/notifications/channels/{channelId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "notification",
+        "system"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Delete one notification delivery channel"
     },
     {
       "operationId": "deleteRoom",
       "method": "DELETE",
       "path": "/rooms/{roomId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Move a stopped room into the save-root recovery directory"
     },
     {
       "operationId": "deleteRoomWorld",
       "method": "DELETE",
       "path": "/rooms/{roomId}/worlds/{worldId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "world"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Move a stopped world into the room recovery directory"
     },
     {
       "operationId": "deleteSaveImport",
       "method": "DELETE",
       "path": "/save-imports/{importId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "save"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Delete an imported artifact after exact-name confirmation"
     },
     {
       "operationId": "deleteStructuredLogRule",
       "method": "DELETE",
       "path": "/rooms/{roomId}/log-rules/{ruleId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "log",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Delete a custom extraction rule"
     },
     {
       "operationId": "detectRuntimeNetworkProfileEgress",
       "method": "POST",
       "path": "/runtime-infrastructure/network-profiles/{profileId}/actions/detect-egress",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "runtime",
+        "topology"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Detect the public egress IP on the Runtime target associated with a network profile"
     },
     {
       "operationId": "discoverRoomShardLinks",
       "method": "POST",
       "path": "/rooms/{roomId}/topology/shard-links/actions/discover",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "topology"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Probe every candidate Master UDP endpoint from each planned Secondary runtime machine"
     },
     {
       "operationId": "downloadAIResource",
       "method": "GET",
       "path": "/system/ai/resources/{resourceId}",
-      "transport": "assistant"
+      "transport": "assistant",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Download or stream a management result prepared by the assistant"
     },
     {
       "operationId": "downloadBackup",
       "method": "GET",
       "path": "/backups/{backupId}/download",
-      "transport": "download"
+      "transport": "download",
+      "tags": [
+        "backup"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Download an authenticated verified ZIP backup"
     },
     {
       "operationId": "downloadDistributedBackupSet",
       "method": "GET",
       "path": "/backup-sets/{backupSetId}/download",
-      "transport": "download"
+      "transport": "download",
+      "tags": [
+        "backup"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Export a verified backup as a portable room ZIP with every world"
     },
     {
       "operationId": "downloadLuaJITPackage",
       "method": "POST",
       "path": "/runtime-targets/luajit/actions/download",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game",
+        "runtime"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Have the selected Runtime download an HTTPS package directly and cache it after SHA-256 verification"
     },
     {
       "operationId": "downloadManagementContract",
       "method": "GET",
       "path": "/system/openapi",
-      "transport": "assistant"
+      "transport": "assistant",
+      "tags": [
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Download the exact OpenAPI contract used by management tools"
     },
     {
       "operationId": "downloadModToNode",
       "method": "POST",
       "path": "/mods/library/actions/download",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Download a Workshop Mod into the Controller content library"
     },
     {
       "operationId": "downloadPrivateAIResult",
       "method": "GET",
       "path": "/system/ai/private-results/{resourceId}",
-      "transport": "assistant"
+      "transport": "assistant",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Download a caller-owned private API result"
     },
     {
       "operationId": "downloadRuntimeInstallationMod",
       "method": "POST",
       "path": "/runtime-targets/{targetId}/installations/{installationId}/mods/{modId}/actions/download",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "job",
+        "mod"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Download a Workshop Mod on one explicit Runtime installation"
     },
     {
       "operationId": "downloadSessionSnapshot",
       "method": "GET",
       "path": "/sessions/{sessionId}/download",
-      "transport": "download"
+      "transport": "download",
+      "tags": [
+        "map"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Download an authenticated world Session snapshot for diagnosis"
     },
     {
       "operationId": "downloadSoftwareRelease",
       "method": "POST",
       "path": "/system/software/actions/update",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "software",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Download and verify an official executable bundle without changing user data"
     },
     {
       "operationId": "downloadWorldLog",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/logs/download",
-      "transport": "download"
+      "transport": "download",
+      "tags": [
+        "log",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Download the current world log without creating a missing file"
     },
     {
       "operationId": "enrichModDisplayMetadata",
       "method": "POST",
       "path": "/mods/metadata/enrichment",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Fetch optional authors and, on request, community descriptions without blocking core metadata"
     },
     {
       "operationId": "executeRawRoomCommand",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/{worldId}/raw-commands",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "console",
+        "room",
+        "world"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "shard-ready",
+      "title": "Send a bounded raw Lua command after exact room-name confirmation"
     },
     {
       "operationId": "executeRoomCommand",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/{worldId}/commands",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "console",
+        "room",
+        "world"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "shard-ready",
+      "title": "Render and send a typed built-in command"
     },
     {
       "operationId": "exportAutomation",
       "method": "GET",
       "path": "/rooms/{roomId}/automation/export",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Export automation group and task definitions"
     },
     {
       "operationId": "forgetAgent",
       "method": "DELETE",
       "path": "/agents/{agentId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Remove an offline Agent snapshot"
     },
     {
       "operationId": "generateRoomMap",
       "method": "POST",
       "path": "/rooms/{roomId}/maps/actions/generate",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "map",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Generate validated map layers through a persistent job and atomically publish them"
     },
     {
       "operationId": "getAICall",
       "method": "GET",
       "path": "/system/ai/calls/{callId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read a full tool receipt on demand"
     },
     {
       "operationId": "getAIStatus",
       "method": "GET",
       "path": "/system/ai",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read Controller AI configuration and tool catalog without secrets"
     },
     {
       "operationId": "getAgent",
       "method": "GET",
       "path": "/agents/{agentId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one Agent connection and reported runtime information"
     },
     {
       "operationId": "getAgentCommand",
       "method": "GET",
       "path": "/agents/commands/{commandId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "console"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one persisted Agent command result"
     },
     {
       "operationId": "getAgentRuntimeInventory",
       "method": "GET",
       "path": "/agents/{agentId}/inventory",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the last typed DST installation, room, Shard, process, and capacity observation"
     },
     {
       "operationId": "getAgentRuntimeTarget",
       "method": "GET",
       "path": "/runtime-targets/agents/{agentId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one Agent and its isolated remote runtime configuration"
     },
     {
       "operationId": "getAgentSecurity",
       "method": "GET",
       "path": "/agents/security",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read masked Agent key metadata without exposing the secret"
     },
     {
       "operationId": "getAgentSoftware",
       "method": "GET",
       "path": "/agents/{agentId}/software",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "software"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the selected Agent's release, progress and retained rollback version"
     },
     {
       "operationId": "getArtworkPackImage",
       "method": "GET",
       "path": "/entity-catalog/artwork-pack/artwork/{prefab}",
-      "transport": "download"
+      "transport": "download",
+      "tags": [
+        "entity"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one installed vanilla WebP image without contacting a Runtime"
     },
     {
       "operationId": "getArtworkPackIndex",
       "method": "GET",
       "path": "/entity-catalog/artwork-pack/index",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "entity"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Get the installed revision and Prefabs with artwork"
     },
     {
       "operationId": "getArtworkPackStatus",
       "method": "GET",
       "path": "/entity-catalog/artwork-pack",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "entity"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Inspect the optional shared panel artwork pack without network downloads"
     },
     {
       "operationId": "getAuthSession",
       "method": "GET",
       "path": "/auth/session",
-      "transport": "identity"
+      "transport": "identity",
+      "tags": [
+        "access"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Inspect setup and session state"
     },
     {
       "operationId": "getAutomationRun",
       "method": "GET",
       "path": "/rooms/{roomId}/automation/runs/{runId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one automation execution and its result"
     },
     {
       "operationId": "getAutomationStats",
       "method": "GET",
       "path": "/rooms/{roomId}/automation/stats",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read aggregate automation task and execution statistics"
     },
     {
       "operationId": "getAutomationTask",
       "method": "GET",
       "path": "/rooms/{roomId}/automation/tasks/{taskId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one scheduled automation task definition"
     },
     {
       "operationId": "getBackup",
       "method": "GET",
       "path": "/backups/{backupId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one backup record"
     },
     {
       "operationId": "getClusterTokenStatus",
       "method": "GET",
       "path": "/rooms/{roomId}/cluster-token",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "access",
+        "configuration",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read only masked Cluster Token status and revision"
     },
     {
       "operationId": "getCommand",
       "method": "GET",
       "path": "/commands/{commandId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "console"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one built-in or custom command definition"
     },
     {
       "operationId": "getCommandRun",
       "method": "GET",
       "path": "/rooms/{roomId}/command-runs/{runId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "console",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one persistent command record"
     },
     {
       "operationId": "getDistributedBackupSet",
       "method": "GET",
       "path": "/backup-sets/{backupSetId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Inspect a coordinated backup set and every verified Shard part"
     },
     {
       "operationId": "getEntityDirectory",
       "method": "GET",
       "path": "/entity-catalog/directory",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "entity"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Browse or search embedded vanilla metadata with bounded pagination"
     },
     {
       "operationId": "getExperimentalKubernetesRuntimeProvider",
       "method": "GET",
       "path": "/runtime-providers/kubernetes",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "kubernetes",
+        "runtime"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Inspect the default-off experimental Kubernetes Provider and its read-only capabilities"
     },
     {
       "operationId": "getFleetRuntimeOverview",
       "method": "GET",
       "path": "/runtime-overview",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "runtime",
+        "topology"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read current managed rooms and their applied Runtime placements from the fleet or one target"
     },
     {
       "operationId": "getGameNotificationPolicy",
       "method": "GET",
       "path": "/rooms/{roomId}/game-notification-policy",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "notification",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Get maintenance countdown notification policy"
     },
     {
       "operationId": "getGameRelease",
       "method": "GET",
       "path": "/game/releases/{releaseId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one durable release including backups, installation results, shard state, and recovery diagnostics"
     },
     {
       "operationId": "getGameUpdateRun",
       "method": "GET",
       "path": "/game/update-runs/{jobId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the bounded persistent SteamCMD log and version transition for an update job"
     },
     {
       "operationId": "getGameVersion",
       "method": "GET",
       "path": "/game/version",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Inspect update availability using Steam and official Klei version evidence"
     },
     {
       "operationId": "getInstalledGameVersions",
       "method": "GET",
       "path": "/game/installed-versions",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read installed game versions from selected managed Runtime installations"
     },
     {
       "operationId": "getJob",
       "method": "GET",
       "path": "/jobs/{jobId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one job and all target results"
     },
     {
       "operationId": "getLatestWorldRuntimeDiagnostic",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/runtime/diagnostics/latest",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the latest bounded customcommands runtime diagnostic report"
     },
     {
       "operationId": "getMapFeatures",
       "method": "GET",
       "path": "/maps/{mapId}/features",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "map"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read immutable map POIs while preserving unknown MOD prefabs and properties"
     },
     {
       "operationId": "getMapLayerImage",
       "method": "GET",
       "path": "/maps/{mapId}/images/{layer}",
-      "transport": "download"
+      "transport": "download",
+      "tags": [
+        "map"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one immutable authenticated PNG layer"
     },
     {
       "operationId": "getMapManifest",
       "method": "GET",
       "path": "/maps/{mapId}/manifest",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "map"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the immutable renderer manifest, world state, dimensions, and generation warnings"
     },
     {
       "operationId": "getModConfiguration",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/mods/{modId}/configuration",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "mod",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one world Mod configuration and editable option schema"
     },
     {
       "operationId": "getModConfigurationFile",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/mods/configuration-file",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the selected world's actual modoverrides.lua without modifying it"
     },
     {
       "operationId": "getModDetails",
       "method": "GET",
       "path": "/mods/{modId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read Workshop details or installation-scoped local Mod metadata"
     },
     {
       "operationId": "getModMetadata",
       "method": "GET",
       "path": "/mods/metadata",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read Workshop metadata independently from Runtime file observations"
     },
     {
       "operationId": "getModPublication",
       "method": "GET",
       "path": "/mod-publications/{publicationId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one durable Mod publication, including node results and recovery state"
     },
     {
       "operationId": "getModThumbnail",
       "method": "GET",
       "path": "/mods/{modId}/thumbnail",
-      "transport": "download"
+      "transport": "download",
+      "tags": [
+        "mod"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read an authenticated cached Steam thumbnail by Mod ID without an arbitrary upstream URL"
     },
     {
       "operationId": "getNodeResources",
       "method": "GET",
       "path": "/system/resources",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read normalized resource metrics for the controller and remote Agents"
     },
     {
       "operationId": "getRoom",
       "method": "GET",
       "path": "/rooms/{roomId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read a discovered room"
     },
     {
       "operationId": "getRoomAccessLists",
       "method": "GET",
       "path": "/rooms/{roomId}/access",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "access",
+        "configuration",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read admin, block, and whitelist files as one revisioned resource"
     },
     {
       "operationId": "getRoomBackupPolicy",
       "method": "GET",
       "path": "/rooms/{roomId}/backup-policy",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the legacy interval-based automatic snapshot policy"
     },
     {
       "operationId": "getRoomConfiguration",
       "method": "GET",
       "path": "/rooms/{roomId}/configuration",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read schema-backed cluster.ini values with a content revision"
     },
     {
       "operationId": "getRoomLogs",
       "method": "GET",
       "path": "/rooms/{roomId}/logs",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "log",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read bounded log tails from every world in the room"
     },
     {
       "operationId": "getRoomModProfile",
       "method": "GET",
       "path": "/rooms/{roomId}/mod-profile",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Derive room-default and per-world Mod configuration exceptions from the current Runtime files"
     },
     {
       "operationId": "getRoomModReplicas",
       "method": "GET",
       "path": "/rooms/{roomId}/mod-replicas",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the persisted desired and observed Mod state for every installation and world in the applied Placement"
     },
     {
       "operationId": "getRoomModUpdate",
       "method": "GET",
       "path": "/rooms/{roomId}/mod-update",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the unattended update policy and its durable convergence state"
     },
     {
       "operationId": "getRoomPlayer",
       "method": "GET",
       "path": "/rooms/{roomId}/players/{playerId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "player",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one persisted player observation"
     },
     {
       "operationId": "getRoomRuntime",
       "method": "GET",
       "path": "/rooms/{roomId}/runtime",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "runtime"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Inspect managed customcommands.lua installation and health for every shard"
     },
     {
       "operationId": "getRoomRuntimeModes",
       "method": "GET",
       "path": "/rooms/{roomId}/runtime-modes",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List Lua runtime modes supported by every selected world target"
     },
     {
       "operationId": "getRoomRuntimeOverview",
       "method": "GET",
       "path": "/rooms/{roomId}/runtime/overview",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "runtime",
+        "topology"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Inspect placement-aware Runtime, Agent, health, and diagnostic state for every shard"
     },
     {
       "operationId": "getRoomTopology",
       "method": "GET",
       "path": "/rooms/{roomId}/topology",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "topology"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read desired and applied Shard placement with whole-node capacity projections"
     },
     {
       "operationId": "getRuntimeInfrastructure",
       "method": "GET",
       "path": "/runtime-infrastructure",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "runtime",
+        "topology"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Inspect Runtime providers, execution environments, network scopes, port reservations, and CPU allocations"
     },
     {
       "operationId": "getSaveImport",
       "method": "GET",
       "path": "/save-imports/{importId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "save"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read one save import and its normalized manifest"
     },
     {
       "operationId": "getSetupChecks",
       "method": "GET",
       "path": "/system/setup-checks",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Re-run deployment and room discovery checks"
     },
     {
       "operationId": "getSoftwareStatus",
       "method": "GET",
       "path": "/system/software",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "software",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read this management service's version, update progress and rollback availability"
     },
     {
       "operationId": "getSystemCapabilities",
       "method": "GET",
       "path": "/system/capabilities",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Detect platform, tools, paths, and available management features"
     },
     {
       "operationId": "getSystemSettings",
       "method": "GET",
       "path": "/system/settings",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read effective editable settings and their source without revealing secrets"
     },
     {
       "operationId": "getSystemStatus",
       "method": "GET",
       "path": "/system/status",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read host, CPU, memory, disk, process, and Go runtime metrics"
     },
     {
       "operationId": "getWorkshopNetworkSettings",
       "method": "GET",
       "path": "/system/workshop",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read effective Controller Workshop network settings with masked secrets"
     },
     {
       "operationId": "getWorldConfiguration",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/configuration",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read server.ini and leveldataoverride.lua as one revisioned configuration"
     },
     {
       "operationId": "getWorldEntityArtwork",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/entity-catalog/artwork/{prefab}",
-      "transport": "download"
+      "transport": "download",
+      "tags": [
+        "entity",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read an installed game or mod thumbnail from the world's applied Runtime"
     },
     {
       "operationId": "getWorldLog",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/logs",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "log",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read a bounded tail of the current world log"
     },
     {
       "operationId": "getWorldRuntimeEvents",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/runtime/events",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the bounded recent customcommands runtime event batches"
     },
     {
       "operationId": "getWorldStateHistory",
       "method": "GET",
       "path": "/rooms/{roomId}/world-states/history",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read a bounded time series for one world shard"
     },
     {
       "operationId": "importArtworkPack",
       "method": "POST",
       "path": "/entity-catalog/artwork-pack/upload",
       "contentType": "multipart/form-data",
-      "transport": "multipart"
+      "transport": "multipart",
+      "tags": [
+        "entity"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Import the pinned official tar.gz without external network access"
     },
     {
       "operationId": "importAutomation",
       "method": "POST",
       "path": "/rooms/{roomId}/automation/imports",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Import validated automation groups and task definitions"
     },
     {
       "operationId": "inspectLuaJITInstallation",
       "method": "GET",
       "path": "/runtime-targets/luajit/status",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game",
+        "runtime"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read fresh LuaJIT readiness from the selected local or Agent installation"
     },
     {
       "operationId": "installArtworkPack",
       "method": "POST",
       "path": "/entity-catalog/artwork-pack/install",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "entity"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Download and atomically activate the pinned official artwork pack"
     },
     {
       "operationId": "installGameOnRuntime",
       "method": "POST",
       "path": "/runtime-targets/game-installations/actions/install",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game",
+        "runtime"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Install or validate DST with SteamCMD at a registered node location; all worlds must be stopped"
     },
     {
       "operationId": "installLuaJITPackage",
       "method": "POST",
       "path": "/runtime-targets/luajit/actions/install",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game",
+        "runtime"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Install or repair LuaJIT on one stopped DST installation with backup and rollback"
     },
     {
       "operationId": "installMod",
       "method": "POST",
       "path": "/rooms/{roomId}/mods/actions/install",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Download a Mod on the selected worlds' runtime installations and add it to their room configuration"
     },
     {
       "operationId": "installRoomRuntime",
       "method": "POST",
       "path": "/rooms/{roomId}/runtime/actions/install",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "runtime"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Idempotently install or upgrade the managed runtime in every shard"
     },
     {
       "operationId": "installWorldRuntime",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/{worldId}/runtime/actions/install",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "runtime",
+        "world"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Idempotently install or upgrade the managed runtime in one shard"
     },
     {
       "operationId": "kickRoomPlayer",
       "method": "POST",
       "path": "/rooms/{roomId}/players/{playerId}/actions/kick",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "player",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "shard-ready",
+      "title": "Kick an online player from the world where they were observed"
     },
     {
       "operationId": "killRoomPlayer",
       "method": "POST",
       "path": "/rooms/{roomId}/players/{playerId}/actions/kill",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "player",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "shard-ready",
+      "title": "Kill an online player in the world where they were observed"
     },
     {
       "operationId": "listAICalls",
       "method": "GET",
       "path": "/system/ai/calls",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the latest 100 tool calls"
     },
     {
       "operationId": "listAITokens",
       "method": "GET",
       "path": "/system/ai/tokens",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List MCP credential metadata; no plaintext keys"
     },
     {
       "operationId": "listAgentActions",
       "method": "GET",
       "path": "/agents/actions",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List the fixed domain action allowlist"
     },
     {
       "operationId": "listAgentCommands",
       "method": "GET",
       "path": "/agents/commands",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "console"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List persisted command history across Agents"
     },
     {
       "operationId": "listAgentCommandsForAgent",
       "method": "GET",
       "path": "/agents/{agentId}/commands",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "console"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List persisted command history for one specific Agent"
     },
     {
       "operationId": "listAgentReleases",
       "method": "GET",
       "path": "/agent-releases",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List uploaded Agent binaries and detected target platforms"
     },
     {
       "operationId": "listAgents",
       "method": "GET",
       "path": "/agents",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List persisted Agent snapshots and current connectivity"
     },
     {
       "operationId": "listAutomationActions",
       "method": "GET",
       "path": "/rooms/{roomId}/automation/actions",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List supported automation actions and their parameter schemas"
     },
     {
       "operationId": "listAutomationGroups",
       "method": "GET",
       "path": "/rooms/{roomId}/automation/groups",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List automation groups and their enabled state"
     },
     {
       "operationId": "listAutomationRuns",
       "method": "GET",
       "path": "/rooms/{roomId}/automation/runs",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List automation execution history with supported filters and pagination"
     },
     {
       "operationId": "listAutomationTasks",
       "method": "GET",
       "path": "/rooms/{roomId}/automation/tasks",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List scheduled automation task definitions"
     },
     {
       "operationId": "listCommandRuns",
       "method": "GET",
       "path": "/rooms/{roomId}/command-runs",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "console",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List persistent command audit records"
     },
     {
       "operationId": "listCommands",
       "method": "GET",
       "path": "/commands",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "console"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List the shared built-in and persistent custom command definitions"
     },
     {
       "operationId": "listContainers",
       "method": "GET",
       "path": "/containers",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "container"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List managed or clearly DST-owned Docker containers"
     },
     {
       "operationId": "listDistributedBackupOperations",
       "method": "GET",
       "path": "/rooms/{roomId}/backup-operations",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List durable create and restore operations, including recovery-required state"
     },
     {
       "operationId": "listDistributedBackupSets",
       "method": "GET",
       "path": "/rooms/{roomId}/backup-sets",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List coordinated backup sets for every Shard in a room"
     },
     {
       "operationId": "listGameInstallations",
       "method": "GET",
       "path": "/runtime-targets/game-installations",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game",
+        "runtime"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Inspect all registered game installations, including nodes with no rooms"
     },
     {
       "operationId": "listGameNotifications",
       "method": "GET",
       "path": "/game-notifications",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "notification"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List immutable game notification delivery history"
     },
     {
       "operationId": "listGameReleases",
       "method": "GET",
       "path": "/game/releases",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List durable distributed game release and recovery records"
     },
     {
       "operationId": "listJobs",
       "method": "GET",
       "path": "/jobs",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List persisted operation jobs"
     },
     {
       "operationId": "listLuaJITPackagesAndInstallations",
       "method": "GET",
       "path": "/runtime-targets/luajit",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game",
+        "runtime"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List compatible LuaJIT packages and exact runtime installations"
     },
     {
       "operationId": "listNodeModLibrary",
       "method": "GET",
       "path": "/mods/library",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List Workshop files stored on the active runtime target"
     },
     {
       "operationId": "listNotificationChannels",
       "method": "GET",
       "path": "/system/notifications/channels",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "notification",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List Controller notification channels without endpoint credentials"
     },
     {
       "operationId": "listNotificationDeliveries",
       "method": "GET",
       "path": "/system/notifications/deliveries",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "notification",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List notification delivery attempts and their outcomes"
     },
     {
       "operationId": "listRoomBackupSchedules",
       "method": "GET",
       "path": "/rooms/{roomId}/backup-schedules",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup",
+        "room",
+        "schedule"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read automatic backup tasks, their group state, legacy policy and shared creation defaults"
     },
     {
       "operationId": "listRoomBackups",
       "method": "GET",
       "path": "/rooms/{roomId}/backups",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List verified backups for a managed room"
     },
     {
       "operationId": "listRoomChatLogs",
       "method": "GET",
       "path": "/rooms/{roomId}/chat-logs",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "log",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read persisted room chat history and synchronize available world logs"
     },
     {
       "operationId": "listRoomCommands",
       "method": "GET",
       "path": "/rooms/{roomId}/commands",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "console",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the shared command catalog through a legacy room URL",
+      "deprecated": true,
+      "replacedBy": "listCommands"
     },
     {
       "operationId": "listRoomMaps",
       "method": "GET",
       "path": "/rooms/{roomId}/maps",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "map",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List successful, running, and failed map generations without hiding the last usable map"
     },
     {
       "operationId": "listRoomModPublications",
       "method": "GET",
       "path": "/rooms/{roomId}/mod-publications",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List durable Mod publication and recovery records for a room"
     },
     {
       "operationId": "listRoomMods",
       "method": "GET",
       "path": "/rooms/{roomId}/mods",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read all configured room Mods and their per-world runtime observations"
     },
     {
       "operationId": "listRoomPlayers",
       "method": "GET",
       "path": "/rooms/{roomId}/players",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "player",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List persisted player observations and current access state"
     },
     {
       "operationId": "listRoomProvisionOperations",
       "method": "GET",
       "path": "/rooms/{roomId}/provision-operations",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "topology"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List durable room configuration publication operations and per-Shard phases"
     },
     {
       "operationId": "listRoomRecoveries",
       "method": "GET",
       "path": "/rooms/recovery",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List recoverable room directories"
     },
     {
       "operationId": "listRoomRuntimeEvents",
       "method": "GET",
       "path": "/rooms/{roomId}/runtime-events",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "log",
+        "room",
+        "runtime"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read persisted shard lifecycle and unexpected-exit audit events"
     },
     {
       "operationId": "listRoomWorlds",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List shard configuration and current tmux state"
     },
     {
       "operationId": "listRooms",
       "method": "GET",
       "path": "/rooms",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Discover DST rooms from the configured save root"
     },
     {
       "operationId": "listRuntimeInstallationMods",
       "method": "GET",
       "path": "/runtime-targets/{targetId}/installations/{installationId}/mods",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "mod"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the Mod files currently present in one runtime installation"
     },
     {
       "operationId": "listRuntimeTargets",
       "method": "GET",
       "path": "/runtime-targets",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List the controller-local runtime first, followed by Agent-backed remote runtimes"
     },
     {
       "operationId": "listSaveImports",
       "method": "GET",
       "path": "/save-imports",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "save"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List local save import sessions and compatibility reports"
     },
     {
       "operationId": "listStructuredLogRules",
       "method": "GET",
       "path": "/rooms/{roomId}/log-rules",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "log",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List room-scoped structured log extraction rules"
     },
     {
       "operationId": "listStructuredLogs",
       "method": "GET",
       "path": "/rooms/{roomId}/structured-logs",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "log",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Query the latest persisted structured snapshot from every room shard"
     },
     {
       "operationId": "listWorldRecoveries",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/recovery",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List recoverable world directories for a room"
     },
     {
       "operationId": "listWorldRuntimeBackups",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/runtime/backups",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup",
+        "room",
+        "runtime",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List verified managed-runtime state backups for one shard"
     },
     {
       "operationId": "listWorldSessions",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/sessions",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "map",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Discover bounded regular world snapshots while excluding metadata and unsafe links"
     },
     {
       "operationId": "listWorldStates",
       "method": "GET",
       "path": "/rooms/{roomId}/world-states",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the latest world-state files from each shard runtime without triggering collection"
     },
     {
       "operationId": "login",
       "method": "POST",
       "path": "/auth/login",
       "contentType": "application/json",
-      "transport": "identity"
+      "transport": "identity",
+      "tags": [
+        "access"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Create an administrator session"
     },
     {
       "operationId": "logout",
       "method": "POST",
       "path": "/auth/logout",
       "contentType": "application/json",
-      "transport": "identity"
+      "transport": "identity",
+      "tags": [
+        "access"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Revoke the current session"
     },
     {
       "operationId": "manageNodeSteamLogin",
       "method": "POST",
       "path": "/runtime-targets/game-installations/steam-login",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game",
+        "runtime"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Configure account login or interact with a bounded Steam Guard session on the selected node"
     },
     {
       "operationId": "migrateLegacyStructuredLogRules",
       "method": "POST",
       "path": "/rooms/{roomId}/log-rules/actions/migrate-legacy",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "log",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Import migration-ready legacy global log rules into one managed room"
     },
     {
       "operationId": "observeExperimentalKubernetesShard",
       "method": "POST",
       "path": "/runtime-providers/kubernetes/{providerId}/shards/observe",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "kubernetes",
+        "runtime"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Observe the fixed managed resources for one Kubernetes Shard"
     },
     {
       "operationId": "observeNodeSteamLogin",
       "method": "GET",
       "path": "/runtime-targets/game-installations/steam-login",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game",
+        "runtime"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read node-local Steam login settings without returning credentials or contacting Steam"
     },
     {
       "operationId": "preflightExperimentalKubernetesShard",
       "method": "POST",
       "path": "/runtime-providers/kubernetes/{providerId}/shards/preflight",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "kubernetes",
+        "runtime"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Observe one Shard and preview its fixed typed resource plan"
     },
     {
       "operationId": "previewAutomationImport",
       "method": "POST",
       "path": "/rooms/{roomId}/automation/imports/preview",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Validate an automation configuration import without applying it"
     },
     {
       "operationId": "previewClusterToken",
       "method": "POST",
       "path": "/rooms/{roomId}/cluster-token/preview",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "access",
+        "configuration",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Validate a token change without returning either secret in the diff"
     },
     {
       "operationId": "previewGameRelease",
       "method": "POST",
       "path": "/game/releases/preview",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Preflight every affected installation and shard without changing runtime state"
     },
     {
       "operationId": "previewLegacyStructuredLogRuleMigration",
       "method": "GET",
       "path": "/rooms/{roomId}/log-rules/migration-preview",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "log",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Preview an idempotent migration from legacy global log rules into one managed room"
     },
     {
       "operationId": "previewModConfiguration",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/{worldId}/mods/{modId}/configuration/preview",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "mod",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Validate and preview a world Mod configuration patch"
     },
     {
       "operationId": "previewRoomAccessLists",
       "method": "POST",
       "path": "/rooms/{roomId}/access/preview",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "access",
+        "configuration",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Validate and diff access lists; removals require the exact room name"
     },
     {
       "operationId": "previewRoomConfiguration",
       "method": "POST",
       "path": "/rooms/{roomId}/configuration/preview",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Validate a room configuration and calculate its server-side diff without writing"
     },
     {
       "operationId": "previewRoomMaintenance",
       "method": "GET",
       "path": "/rooms/{roomId}/maintenance-preview",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "notification",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the current game roster and notification policy on demand"
     },
     {
       "operationId": "previewRoomModPublication",
       "method": "POST",
       "path": "/rooms/{roomId}/mod-publications/preview",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Build an immutable Placement-aware Mod publication plan without changing any node"
     },
     {
       "operationId": "previewRoomTopology",
       "method": "POST",
       "path": "/rooms/{roomId}/topology/preview",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "topology"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Preview cross-room target capacity, stale inventory, missing Shards, and duplicate runtimes"
     },
     {
       "operationId": "previewSystemSettings",
       "method": "POST",
       "path": "/system/settings/preview",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Validate and preview a system settings change"
     },
     {
       "operationId": "previewWorldConfiguration",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/{worldId}/configuration/preview",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Validate ports and Lua override patches and calculate a server-side diff"
     },
     {
       "operationId": "probeExistingGameInstallation",
       "method": "POST",
       "path": "/runtime-targets/game-installations/probe",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game",
+        "runtime"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Inspect an existing directory on the selected node without installing or moving files"
     },
     {
       "operationId": "provisionRoomTopology",
       "method": "POST",
       "path": "/rooms/{roomId}/topology/actions/provision",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "room",
+        "topology"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Publish a stopped locally managed room configuration to every planned runtime target"
     },
     {
       "operationId": "pruneRoomBackups",
       "method": "POST",
       "path": "/rooms/{roomId}/backups/actions/prune",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup",
+        "job",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Apply the current snapshot retention limit through a persistent job"
     },
     {
       "operationId": "publishGameRelease",
       "method": "POST",
       "path": "/game/releases",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game",
+        "job"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Revalidate a confirmed plan, protect all rooms, update every installation, and restore prior shard state"
     },
     {
       "operationId": "publishRoomMods",
       "method": "POST",
       "path": "/rooms/{roomId}/mod-publications",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "mod",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Revalidate a confirmed plan and atomically publish it to every affected installation"
     },
     {
       "operationId": "purgeRoomRecovery",
       "method": "DELETE",
       "path": "/rooms/recovery/{recoveryName}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Permanently remove a deleted room"
     },
     {
       "operationId": "purgeWorldRecovery",
       "method": "DELETE",
       "path": "/rooms/{roomId}/worlds/recovery/{recoveryName}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "world"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Permanently remove a deleted world"
     },
     {
       "operationId": "readWorldEntitySnapshot",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/entity-catalog/snapshot",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "entity",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "shard-ready",
+      "title": "Browse or search a cached world Prefab snapshot with bounded pagination"
     },
     {
       "operationId": "recoverDistributedBackupOperation",
       "method": "POST",
       "path": "/backup-operations/{backupOperationId}/actions/recover",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup",
+        "job"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Idempotently resume or roll back a recovery-required backup operation"
     },
     {
       "operationId": "recoverRoomProvisionOperation",
       "method": "POST",
       "path": "/provision-operations/{provisionOperationId}/actions/recover",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "topology"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Resume a committed publication or roll back an operation interrupted before its durable commit decision"
     },
     {
       "operationId": "refreshAgentRuntimeInventory",
       "method": "POST",
       "path": "/agents/{agentId}/inventory/actions/refresh",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "job"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Request one read-only typed runtime inventory observation from a configured online Agent"
     },
     {
       "operationId": "refreshRoomPlayers",
       "method": "POST",
       "path": "/rooms/{roomId}/players/actions/refresh",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "player",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "shard-ready",
+      "title": "Probe each world and persist its current player snapshot"
     },
     {
       "operationId": "refreshRuntimeObservations",
       "method": "POST",
       "path": "/runtime-observations/actions/refresh",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "runtime",
+        "topology"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Actively refresh the selected Runtime targets without creating a persistent Job"
     },
     {
       "operationId": "refreshStructuredLogs",
       "method": "POST",
       "path": "/rooms/{roomId}/structured-logs/actions/refresh",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "log",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Parse bounded current log snapshots for every room shard"
     },
     {
       "operationId": "refreshWorldState",
       "method": "POST",
       "path": "/rooms/{roomId}/world-states/{worldId}/actions/refresh",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "world"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "shard-ready",
+      "title": "Read one world current state files from its applied Runtime"
     },
     {
       "operationId": "refreshWorldStates",
       "method": "POST",
       "path": "/rooms/{roomId}/world-states/actions/refresh",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "world"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "shard-ready",
+      "title": "Read current world-state files through a compatibility POST endpoint",
+      "deprecated": true,
+      "replacedBy": "listWorldStates"
     },
     {
       "operationId": "reloadWorldRuntime",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/{worldId}/runtime/actions/reload",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "runtime",
+        "world"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "server-running",
+      "title": "Reload only the managed runtime modules without restarting the shard"
     },
     {
       "operationId": "renameBackup",
       "method": "PATCH",
       "path": "/backups/{backupId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Rename backup metadata without moving the verified archive"
     },
     {
       "operationId": "renameRuntimeTarget",
       "method": "PATCH",
       "path": "/runtime-targets/{targetId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Set the user-facing machine name without changing its hostname or runtime installation name"
     },
     {
       "operationId": "repairMod",
       "method": "POST",
       "path": "/rooms/{roomId}/mods/{modId}/actions/repair",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Legacy local room mutation; production deployments require a Mod publication",
+      "deprecated": true
     },
     {
       "operationId": "repairRoomChatHistory",
       "method": "POST",
       "path": "/rooms/{roomId}/chat-logs/actions/repair",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "log",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Restore archived announcements and verify message dates in a cancellable job"
     },
     {
       "operationId": "resetRoomPlayerCharacter",
       "method": "POST",
       "path": "/rooms/{roomId}/players/{playerId}/actions/change-character",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "player",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "shard-ready",
+      "title": "Despawn an online player so they can choose another character"
     },
     {
       "operationId": "restoreBackup",
       "method": "POST",
       "path": "/backups/{backupId}/actions/restore",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup",
+        "job"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Atomically restore a stopped room after creating a protection backup"
     },
     {
       "operationId": "restoreDistributedBackupSet",
       "method": "POST",
       "path": "/backup-sets/{backupSetId}/actions/restore",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup",
+        "job"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Create a protection set, then restore and publish every Shard atomically"
     },
     {
       "operationId": "restoreRoomRecovery",
       "method": "POST",
       "path": "/rooms/recovery/{recoveryName}/actions/restore",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Restore and adopt a deleted room"
     },
     {
       "operationId": "restoreWorldRecovery",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/recovery/{recoveryName}/actions/restore",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "world"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Restore a deleted world while the room is stopped"
     },
     {
       "operationId": "resurrectRoomPlayer",
       "method": "POST",
       "path": "/rooms/{roomId}/players/{playerId}/actions/resurrect",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "player",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "shard-ready",
+      "title": "Resurrect an online ghost player"
     },
     {
       "operationId": "retryFailedModPublication",
       "method": "POST",
       "path": "/mod-publications/{publicationId}/actions/retry-failed",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "mod"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Resume post-commit recovery or create a new publication from a failed pre-commit desired state"
     },
     {
       "operationId": "retryGameRelease",
       "method": "POST",
       "path": "/game/releases/{releaseId}/actions/retry",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game",
+        "job"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Resume a failed or recovery-required release while skipping installations already at the exact target version"
     },
     {
       "operationId": "retryNotificationDelivery",
       "method": "POST",
       "path": "/system/notifications/deliveries/{deliveryId}/actions/retry",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "notification",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Requeue a failed delivery; an interrupted send may already have reached its recipient"
     },
     {
       "operationId": "revealClusterToken",
       "method": "POST",
       "path": "/rooms/{roomId}/cluster-token/reveal",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "access",
+        "configuration",
+        "room"
+      ],
+      "access": "read",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Reveal the Cluster Token after exact room-name confirmation; response is never cached"
     },
     {
       "operationId": "revokeAIToken",
       "method": "DELETE",
       "path": "/system/ai/tokens/{tokenId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Revoke MCP credential and block further calls"
     },
     {
       "operationId": "rollbackWorldRuntime",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/{worldId}/runtime/actions/rollback",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "runtime",
+        "world"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Restore a verified runtime backup while the shard is stopped"
     },
     {
       "operationId": "rotateAgentKey",
       "method": "POST",
       "path": "/agents/security/actions/rotate",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Rotate the Agent key and reveal the replacement exactly once"
     },
     {
       "operationId": "runAgentCommand",
       "method": "POST",
       "path": "/agents/{agentId}/commands",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "console",
+        "job"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Run one fixed domain action on an online Agent"
     },
     {
       "operationId": "runAutomationTask",
       "method": "POST",
       "path": "/rooms/{roomId}/automation/tasks/{taskId}/actions/run",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "room",
+        "schedule"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Run an existing automation task once immediately"
     },
     {
       "operationId": "runBatchRoomAction",
       "method": "POST",
       "path": "/rooms/actions/{action}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Start, stop, or restart selected worlds across multiple rooms through one persistent job"
     },
     {
       "operationId": "runContainerAction",
       "method": "POST",
       "path": "/containers/{containerId}/actions/{action}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "container",
+        "job"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Run a fixed lifecycle action on a managed DST container"
     },
     {
       "operationId": "runRoomAction",
       "method": "POST",
       "path": "/rooms/{roomId}/actions/{action}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Start, stop, restart, save or clean up stopped runtime processes through a persistent job"
     },
     {
       "operationId": "saveInitialSetupProgress",
       "method": "PUT",
       "path": "/auth/onboarding",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "access"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Save administrator setup progress without changing game or save data"
     },
     {
       "operationId": "searchArtworkPackEntities",
       "method": "GET",
       "path": "/entity-catalog/artwork-pack/entities",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "entity"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Search the installed offline vanilla catalog, including when worlds are stopped"
     },
     {
       "operationId": "searchEntityCatalog",
       "method": "GET",
       "path": "/entity-catalog/entities",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "entity"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Search built-in common entities and the optional Beacon catalog"
     },
     {
       "operationId": "searchMods",
       "method": "GET",
       "path": "/mods/search",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Search Steam Workshop Mods with filters and pagination"
     },
     {
       "operationId": "searchWorldEntityCatalog",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/{worldId}/entity-catalog/search",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "entity",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "shard-ready",
+      "title": "Read registered vanilla and mod Prefabs from the selected running world"
     },
     {
       "operationId": "sendCustomNotification",
       "method": "POST",
       "path": "/system/notifications/actions/send",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "notification",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Send a custom message to enabled channels subscribed to custom events"
     },
     {
       "operationId": "sendGameNotification",
       "method": "POST",
       "path": "/game-notifications",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "notification"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Broadcast once through a running Shard, preferring the Master; DST forwards to connected Shards"
     },
     {
       "operationId": "setModEnabled",
       "method": "POST",
       "path": "/rooms/{roomId}/mods/{modId}/actions/enable",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Directly enable or disable a Mod in the selected Runtime world configuration files"
     },
     {
       "operationId": "setRoomModConfigurationMode",
       "method": "PUT",
       "path": "/rooms/{roomId}/mods/{modId}/configuration-mode",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Persist the shared or separate editor preference without changing game files"
     },
     {
       "operationId": "setRoomPlayerCreativeMode",
       "method": "POST",
       "path": "/rooms/{roomId}/players/{playerId}/actions/creative-mode",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "player",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "shard-ready",
+      "title": "Enable or disable free-build mode for an online player"
     },
     {
       "operationId": "setRoomPlayerGodMode",
       "method": "POST",
       "path": "/rooms/{roomId}/players/{playerId}/actions/god-mode",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "player",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "shard-ready",
+      "title": "Enable or disable invincibility for an online player"
     },
     {
       "operationId": "setRuntimeTargetDisplayAddress",
       "method": "PUT",
       "path": "/runtime-targets/{targetId}/display-address",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "runtime"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Set a display-only machine IP or hostname without changing game networking"
     },
     {
       "operationId": "setupAdmin",
       "method": "POST",
       "path": "/auth/setup",
       "contentType": "application/json",
-      "transport": "identity"
+      "transport": "identity",
+      "tags": [
+        "access"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Create the single administrator on first run"
     },
     {
       "operationId": "streamJobEvents",
       "method": "GET",
       "path": "/jobs/events",
-      "transport": "stream"
+      "transport": "stream",
+      "tags": [
+        "job"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Stream authenticated job events from the current watermark or resume cursor"
     },
     {
       "operationId": "streamRuntimeObservations",
       "method": "GET",
       "path": "/runtime-observations/stream",
-      "transport": "stream"
+      "transport": "stream",
+      "tags": [
+        "runtime",
+        "topology"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Keep the selected Runtime targets actively observed while the page is visible"
     },
     {
       "operationId": "streamWorldLog",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/logs/events",
-      "transport": "stream"
+      "transport": "stream",
+      "tags": [
+        "log",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Stream log snapshots, appended lines, resets, and heartbeats"
     },
     {
       "operationId": "streamWorldRuntimeEvents",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/runtime/events/stream",
-      "transport": "stream"
+      "transport": "stream",
+      "tags": [
+        "room",
+        "runtime",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Stream bounded Runtime events and resume after the last delivered producer cursor"
     },
     {
       "operationId": "testAIProvider",
       "method": "POST",
       "path": "/system/ai/actions/test",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Test the saved model connection; sends a minimal prompt"
     },
     {
       "operationId": "testNotificationChannel",
       "method": "POST",
       "path": "/system/notifications/channels/{channelId}/actions/test",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "notification",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Queue a real test send, including for a disabled channel"
     },
     {
       "operationId": "testStructuredLogRule",
       "method": "POST",
       "path": "/rooms/{roomId}/log-rules/actions/test",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "log",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Compile and test an extraction rule against a bounded text sample"
     },
     {
       "operationId": "testSystemSMTPConnection",
       "method": "POST",
       "path": "/system/settings/actions/test-email",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Establish a real SMTP connection, negotiate TLS, and authenticate when configured"
     },
     {
       "operationId": "testWorkshopNetworkConnection",
       "method": "POST",
       "path": "/system/workshop/actions/test",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Test name search, ID lookup and image access using unsaved Workshop settings"
     },
     {
       "operationId": "unbanRoomPlayer",
       "method": "POST",
       "path": "/rooms/{roomId}/players/{playerId}/actions/unban",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "job",
+        "player",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Remove a player from the room blocklist and notify a running shard"
     },
     {
       "operationId": "unconfigureAgentRuntimeTarget",
       "method": "DELETE",
       "path": "/runtime-targets/agents/{agentId}",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Remove only the Agent runtime paths without forgetting the Agent"
     },
     {
       "operationId": "uninstallArtworkPack",
       "method": "DELETE",
       "path": "/entity-catalog/artwork-pack",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "entity"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Uninstall only the optional panel resources, taking effect immediately"
     },
     {
       "operationId": "uninstallMod",
       "method": "POST",
       "path": "/rooms/{roomId}/mods/{modId}/actions/uninstall",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Legacy local room mutation; use a remove publication to retain controller content safely",
+      "deprecated": true
     },
     {
       "operationId": "uninstallWorldRuntime",
       "method": "DELETE",
       "path": "/rooms/{roomId}/worlds/{worldId}/runtime",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "runtime",
+        "world"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Remove only DST Admin managed runtime content while the shard is stopped"
     },
     {
       "operationId": "updateAgentSoftware",
       "method": "POST",
       "path": "/agents/{agentId}/software/actions/update",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "job",
+        "software"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Download and verify an Agent release, switch programs and wait for reconnection, or roll back"
     },
     {
       "operationId": "updateAutomationGroup",
       "method": "PUT",
       "path": "/rooms/{roomId}/automation/groups/{groupId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Update an automation group and its enabled state"
     },
     {
       "operationId": "updateAutomationTask",
       "method": "PUT",
       "path": "/rooms/{roomId}/automation/tasks/{taskId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "schedule"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Update an existing scheduled automation task"
     },
     {
       "operationId": "updateCommand",
       "method": "PUT",
       "path": "/commands/{commandId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "console"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Update a persistent custom command definition"
     },
     {
       "operationId": "updateGameNotificationPolicy",
       "method": "PUT",
       "path": "/rooms/{roomId}/game-notification-policy",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "notification",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Update maintenance countdown notification policy"
     },
     {
       "operationId": "updateGameServer",
       "method": "POST",
       "path": "/game/actions/update",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "game",
+        "job"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Protect managed rooms, stop running shards, update a SteamCMD-managed server, and optionally restart shards"
     },
     {
       "operationId": "updateMod",
       "method": "POST",
       "path": "/rooms/{roomId}/mods/{modId}/actions/update",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Legacy local room mutation; update controller content and publish a reconcile plan instead",
+      "deprecated": true
     },
     {
       "operationId": "updateNodeMod",
       "method": "POST",
       "path": "/mods/library/{modId}/actions/update",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Update one Workshop Mod in the Controller content library"
     },
     {
       "operationId": "updateNotificationChannel",
       "method": "PUT",
       "path": "/system/notifications/channels/{channelId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "notification",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Update a channel using its current revision"
     },
     {
       "operationId": "updateOutdatedRuntimeInstallationMods",
       "method": "POST",
       "path": "/runtime-targets/{targetId}/installations/{installationId}/mods/actions/update-outdated",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "job",
+        "mod"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Update outdated Workshop content in one Runtime installation"
     },
     {
       "operationId": "updateRoomBackupPolicy",
       "method": "PUT",
       "path": "/rooms/{roomId}/backup-policy",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "backup",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Configure the legacy interval-based automatic snapshot policy"
     },
     {
       "operationId": "updateRoomModUpdatePolicy",
       "method": "PUT",
       "path": "/rooms/{roomId}/mod-update/policy",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Configure event-driven update checks, prefetch, and empty-room activation"
     },
     {
       "operationId": "updateRoomTopology",
       "method": "PUT",
       "path": "/rooms/{roomId}/topology",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "room",
+        "topology"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Save desired placement without activating remote execution"
     },
     {
       "operationId": "updateRuntimeCPUAllocation",
       "method": "PUT",
       "path": "/runtime-infrastructure/cpu-allocations",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "runtime",
+        "topology"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Configure optional shared or exclusive logical CPU affinity for one Shard"
     },
     {
       "operationId": "updateRuntimeInstallationMod",
       "method": "POST",
       "path": "/runtime-targets/{targetId}/installations/{installationId}/mods/{modId}/actions/update",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "job",
+        "mod"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Update one Workshop Mod content on an explicit Runtime installation"
     },
     {
       "operationId": "updateRuntimeNetworkProfile",
       "method": "PUT",
       "path": "/runtime-infrastructure/network-profiles/{profileId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "runtime",
+        "topology"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Update one execution environment network identity"
     },
     {
       "operationId": "updateStructuredLogRule",
       "method": "PUT",
       "path": "/rooms/{roomId}/log-rules/{ruleId}",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "log",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Replace a room-scoped extraction rule"
     },
     {
       "operationId": "updateWorkshopNetworkSettings",
       "method": "PUT",
       "path": "/system/workshop",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "mod",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Save Workshop proxy, API/community URLs or Steam key and apply immediately while worlds run"
     },
     {
       "operationId": "upgradeAgent",
       "method": "POST",
       "path": "/agents/{agentId}/actions/upgrade",
       "contentType": "application/json",
-      "transport": "json"
+      "transport": "json",
+      "tags": [
+        "agent",
+        "job"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Upgrade a compatible native Agent and wait for the expected version to reconnect"
     },
     {
       "operationId": "uploadAIAttachment",
       "method": "POST",
       "path": "/system/ai/attachments",
       "contentType": "multipart/form-data",
-      "transport": "assistant"
+      "transport": "assistant",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Stream a file into private temporary assistant storage"
     },
     {
       "operationId": "uploadAgentRelease",
       "method": "POST",
       "path": "/agent-releases",
       "contentType": "multipart/form-data",
-      "transport": "multipart"
+      "transport": "multipart",
+      "tags": [
+        "agent"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Upload a versioned Go Agent binary for page-controlled upgrades"
     },
     {
       "operationId": "uploadLuaJITPackage",
       "method": "POST",
       "path": "/runtime-targets/luajit/packages",
       "contentType": "multipart/form-data",
-      "transport": "multipart"
+      "transport": "multipart",
+      "tags": [
+        "game",
+        "runtime"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Upload a compatible ZIP to the optional controller transfer store, maximum 256 MiB"
     },
     {
       "operationId": "uploadRoomBackup",
       "method": "POST",
       "path": "/rooms/{roomId}/backups/upload",
       "contentType": "multipart/form-data",
-      "transport": "multipart"
+      "transport": "multipart",
+      "tags": [
+        "backup",
+        "room"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Upload and verify a ZIP backup without publishing invalid content"
     },
     {
       "operationId": "uploadSaveImport",
       "method": "POST",
       "path": "/save-imports/upload",
       "contentType": "multipart/form-data",
-      "transport": "multipart"
+      "transport": "multipart",
+      "tags": [
+        "job",
+        "save"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Upload a local DST archive and start a deep analysis job"
     }
   ]
 }
