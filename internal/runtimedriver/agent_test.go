@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,39 @@ import (
 )
 
 type emptyMigrationExecutor struct{}
+
+func TestAgentArtifactAbsenceSurvivesJSONWithoutMaskingReadFailures(t *testing.T) {
+	remoteFailure := errors.New("remote read failed")
+	for _, test := range []struct {
+		name   string
+		bundle shared.RuntimeArtifactBundle
+		absent bool
+	}{
+		{"confirmed absent", shared.RuntimeArtifactBundle{Kind: shared.ArtifactRuntimeDiagnostics, Absent: true}, true},
+		{"permission or read failure", shared.RuntimeArtifactBundle{Kind: shared.ArtifactRuntimeDiagnostics}, false},
+		{"wrong artifact kind", shared.RuntimeArtifactBundle{Kind: shared.ArtifactRuntimeHealth, Absent: true}, false},
+		{"contradictory payload", shared.RuntimeArtifactBundle{Kind: shared.ArtifactRuntimeDiagnostics, Absent: true, Artifacts: []shared.RuntimeArtifact{{Name: "diagnostic-a.json"}}}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data, err := json.Marshal(shared.RuntimeOperationResult{Artifacts: &test.bundle})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var result shared.RuntimeOperationResult
+			if err := json.Unmarshal(data, &result); err != nil {
+				t.Fatal(err)
+			}
+			driver, err := NewAgent(failedMigrationExecutor{result: agents.RuntimeExecutionResult{Result: result}, err: remoteFailure})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = driver.ReadArtifacts(context.Background(), Target{TargetID: "agent:node", InstallationID: "native"}, shared.ArtifactRuntimeDiagnostics)
+			if errors.Is(err, os.ErrNotExist) != test.absent || !test.absent && !errors.Is(err, remoteFailure) {
+				t.Fatalf("artifact absence=%t err=%v", test.absent, err)
+			}
+		})
+	}
+}
 
 func TestAgentModWriteRequiresConfirmedDigestAndPreservesConflict(t *testing.T) {
 	content := []byte("return {}\n")

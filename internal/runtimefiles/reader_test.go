@@ -42,6 +42,25 @@ func TestValidateRemoteRuntimePayloads(t *testing.T) {
 	}
 }
 
+func TestArtifactAbsenceDoesNotMaskUnreadableResult(t *testing.T) {
+	root := t.TempDir()
+	output := filepath.Join(root, "Room", "Master", "save", "mod_config_data", "dst-admin")
+	if err := os.MkdirAll(output, 0750); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := ReadArtifacts(context.Background(), root, "Room", "Master", shared.ArtifactRuntimeDiagnostics)
+	if !errors.Is(err, os.ErrNotExist) || !bundle.Absent || len(bundle.Artifacts) != 0 {
+		t.Fatalf("missing diagnostic=%+v err=%v", bundle, err)
+	}
+	if err := os.Mkdir(filepath.Join(output, "diagnostic-a.json"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err = ReadArtifacts(context.Background(), root, "Room", "Master", shared.ArtifactRuntimeDiagnostics)
+	if err == nil || errors.Is(err, os.ErrNotExist) || bundle.Absent {
+		t.Fatalf("invalid diagnostic was marked absent: %+v %v", bundle, err)
+	}
+}
+
 func TestReadLogsContinuesByFileIdentityAndResetsAfterRotation(t *testing.T) {
 	root := t.TempDir()
 	world := filepath.Join(root, "Cluster_1", "Master")

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -414,6 +415,9 @@ func (d *Agent) ReadArtifacts(ctx context.Context, target Target, kind shared.Ar
 	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 30)
 	if result.Result.Artifacts == nil {
 		return shared.RuntimeArtifactBundle{}, err
+	}
+	if bundle := result.Result.Artifacts; bundle.Absent && bundle.Kind == kind && len(bundle.Artifacts) == 0 {
+		return *bundle, os.ErrNotExist
 	}
 	return *result.Result.Artifacts, err
 }

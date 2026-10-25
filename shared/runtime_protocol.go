@@ -527,6 +527,7 @@ type RuntimeArtifact struct {
 type RuntimeArtifactBundle struct {
 	Kind      ArtifactKind      `json:"kind"`
 	Artifacts []RuntimeArtifact `json:"artifacts"`
+	Absent    bool              `json:"absent,omitempty"`
 }
 
 type RuntimeWorldStateRead struct {

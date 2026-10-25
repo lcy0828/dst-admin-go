@@ -99,6 +99,8 @@ func ReadArtifacts(ctx context.Context, saveRoot, cluster, shard string, kind sh
 		if readFailures != nil {
 			return bundle, readFailures
 		}
+		// Keep absence distinguishable after Agent errors cross JSON transport.
+		bundle.Absent = true
 		return bundle, os.ErrNotExist
 	}
 	return bundle, nil
