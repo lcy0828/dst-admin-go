@@ -357,18 +357,26 @@ func (b *DistributedBridge) ExecuteCommand(ctx context.Context, roomID, worldID 
 	lock := b.worldLock(roomID, worldID)
 	// Optional catalogue browsing must not queue behind gameplay operations or
 	// other browsers. The caller can explicitly try again when the world is free.
+	finishQueue := requesttiming.Start(ctx, "command.queue")
 	if request.Action == "catalog.entities" {
 		if !lock.TryLock() {
+			finishQueue()
 			return CommandReceipt{}, ErrRuntimeCommandBusy
 		}
 	} else {
-		lock.Lock()
+		if err := lockRuntimeCommand(ctx, lock); err != nil {
+			finishQueue()
+			return CommandReceipt{}, err
+		}
 	}
+	finishQueue()
 	defer lock.Unlock()
 	if err := ctx.Err(); err != nil {
 		return CommandReceipt{}, err
 	}
+	finishPreflight := requesttiming.Start(ctx, "command.preflight")
 	health, err := b.requireModule(ctx, roomID, worldID, "commands")
+	finishPreflight()
 	if err != nil {
 		return CommandReceipt{}, err
 	}
@@ -385,13 +393,22 @@ func (b *DistributedBridge) ExecuteCommand(ctx context.Context, roomID, worldID 
 	}
 	command, document := commandDelivery(request, payload)
 	sentAt := b.now().UTC()
-	if _, err := b.runtime.SendID(ctx, roomID, worldID, shared.RuntimeConsoleRequest{
+	finishSend := requesttiming.Start(ctx, "command.send")
+	delivery, sendErr := b.runtime.SendID(ctx, roomID, worldID, shared.RuntimeConsoleRequest{
 		Mode: shared.ConsoleModeManaged, Command: command, CommandDocument: document,
-	}); err != nil {
-		// Different worlds in one room can briefly contend on the room's
-		// delivery lease. Only catalog reads may retry this pre-send rejection.
-		if request.Action == "catalog.entities" && errors.Is(err, operationlease.ErrBusy) {
-			return CommandReceipt{}, fmt.Errorf("%w: %w", ErrRuntimeCommandBusy, err)
+	})
+	finishSend()
+	if err := sendErr; err != nil {
+		// A rejected lease proves dispatch did not begin. This is distinct
+		// from a transport cancellation after delivery may have started.
+		if errors.Is(err, operationlease.ErrBusy) {
+			if request.Action == "catalog.entities" {
+				return CommandReceipt{}, fmt.Errorf("%w: %w", ErrRuntimeCommandBusy, err)
+			}
+			return CommandReceipt{}, fmt.Errorf("send runtime command: %w", err)
+		}
+		if delivery.Outcome == shared.RuntimeOutcomeSent || delivery.Outcome == shared.RuntimeOutcomeUnknown || delivery.Outcome == shared.RuntimeOutcomeConfirmed || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return CommandReceipt{}, unconfirmedCommand(request, err, nil)
 		}
 		return CommandReceipt{}, fmt.Errorf("send runtime command: %w", err)
 	}
@@ -584,29 +601,31 @@ func (b *DistributedBridge) lifecycleHealthReady(health Health, startedAt time.T
 }
 
 func (b *DistributedBridge) waitForCommandReceipt(ctx context.Context, roomID, worldID string, health Health, request CommandRequest, sentAt time.Time) (CommandReceipt, error) {
-	timeout := b.timeout
-	if request.Action == "catalog.entities" && timeout == defaultCommandTimeout {
-		// Catalogue collection yields between game frames and has a 10s Runtime
-		// deadline. Allow time for its final receipt without extending Lua commands.
-		timeout = 15 * time.Second
-	}
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
+	ctx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+	finishWait := requesttiming.Start(ctx, "command.receipt")
+	defer finishWait()
 	ticker := time.NewTicker(b.pollInterval)
 	defer ticker.Stop()
 	var lastReadErr error
 	for {
+		if err := ctx.Err(); err != nil {
+			return CommandReceipt{}, unconfirmedCommand(request, err, lastReadErr)
+		}
 		bundle, err := b.runtime.ReadArtifacts(ctx, roomID, worldID, shared.ArtifactRuntimeCommand)
+		if err := ctx.Err(); err != nil {
+			return CommandReceipt{}, unconfirmedCommand(request, err, lastReadErr)
+		}
 		if err == nil {
 			artifacts, bundleErr := validatedArtifacts(bundle, shared.ArtifactRuntimeCommand, "command-receipt-a.json", "command-receipt-b.json")
 			if bundleErr != nil {
-				return CommandReceipt{}, bundleErr
+				return CommandReceipt{}, unconfirmedCommand(request, bundleErr, nil)
 			}
 			candidates := make([]CommandReceipt, 0, len(artifacts))
 			var failures error
 			for _, artifact := range artifacts {
 				value, decodeErr := decodeCommandReceiptData(artifact.Data, health.SessionID, health.ShardID, request, b.now().UTC(), sentAt)
-				if decodeErr == nil {
+				if decodeErr == nil && commandInstanceMatches(health, value) {
 					candidates = append(candidates, value)
 				} else if !errors.Is(decodeErr, ErrRuntimeResultAbsent) {
 					failures = errors.Join(failures, decodeErr)
@@ -623,13 +642,11 @@ func (b *DistributedBridge) waitForCommandReceipt(ctx context.Context, roomID, w
 		} else if errors.Is(err, runtimefiles.ErrArtifactChanging) {
 			lastReadErr = err
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return CommandReceipt{}, err
+			return CommandReceipt{}, unconfirmedCommand(request, err, nil)
 		}
 		select {
 		case <-ctx.Done():
-			return CommandReceipt{}, ctx.Err()
-		case <-deadline.C:
-			return CommandReceipt{}, fmt.Errorf("%w: command %s may have executed; it will not be retried automatically (last receipt read: %v)", ErrRuntimeResultAbsent, request.RequestID, lastReadErr)
+			return CommandReceipt{}, unconfirmedCommand(request, ctx.Err(), lastReadErr)
 		case <-ticker.C:
 		}
 	}

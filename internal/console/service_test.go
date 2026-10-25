@@ -786,3 +786,13 @@ func TestScheduledAdminCommandsRetainAuditAndInteractiveConfirmation(t *testing.
 		}
 	}
 }
+
+func TestDispatchedUnconfirmedCommandDoesNotProbeOrReplay(t *testing.T) {
+	service := newConsoleService(t, &captureSender{})
+	commander := &captureCommander{errors: []error{errors.Join(dstruntime.ErrRuntimeCommandUnconfirmed, dstruntime.ErrRuntimeResultAbsent, context.DeadlineExceeded)}}
+	service.commander = commander
+	run, err := service.Execute(context.Background(), "room-id", "world-id", ExecuteRequest{CommandID: "announce", Arguments: map[string]interface{}{"message": "hello"}})
+	if err != nil || run.Status != RunUncertain || !run.MayHaveExecuted || run.ExecutionOutcome != "unknown" || len(commander.requests) != 1 {
+		t.Fatalf("run=%+v err=%v calls=%d", run, err, len(commander.requests))
+	}
+}

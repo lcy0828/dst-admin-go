@@ -265,6 +265,13 @@ func (s *Service) executeVerified(ctx context.Context, room rooms.Room, world ro
 		}
 		return completed, nil
 	}
+	if errors.Is(err, dstruntime.ErrRuntimeCommandUnconfirmed) {
+		return s.store.CompleteExecution(run.ID, ExecutionCompletion{
+			Status: RunUncertain, TransportOutcome: "sent", ExecutionOutcome: "unknown",
+			Message: "命令已发送，但尚未确认执行结果；不会自动重放", ErrorCode: "COMMAND_OUTCOME_UNKNOWN",
+			ErrorMessage: err.Error(), MayHaveExecuted: true,
+		})
+	}
 	if errors.Is(err, dstruntime.ErrRuntimeResultAbsent) {
 		return s.completeMissingReceipt(ctx, room, world, run, err)
 	}

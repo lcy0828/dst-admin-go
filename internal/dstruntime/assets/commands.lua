@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.13"
+local PRODUCER_VERSION = "2.4.14"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local INPUT_ROOT = "mod_config_data/dst-admin/command-requests/"
 local RECENT_REQUEST_LIMIT = 256
@@ -760,6 +760,7 @@ end
 
 function M.Status()
     return {
+        producerInstanceId = instance_id,
         running = true,
         ready = TheWorld ~= nil and TheNet ~= nil,
         busy = state.dispatching or state.writing or state.loading or #state.signals > 0,

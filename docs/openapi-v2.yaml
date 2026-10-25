@@ -6877,6 +6877,7 @@ components:
       additionalProperties: false
       required: [running, ready]
       properties:
+        producerInstanceId: { type: string, maxLength: 128, description: Module producer identity; commands use this identity for receipts, not the telemetry producer identity }
         running: { type: boolean }
         ready: { type: boolean }
         busy: { type: boolean }

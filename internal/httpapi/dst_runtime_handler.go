@@ -585,6 +585,8 @@ func dstRuntimeFailure(c *gin.Context, err error) {
 		Failure(c, http.StatusConflict, "RUNTIME_AGENT_UPGRADE_REQUIRED", "请先升级目标 Agent，再重试 Runtime 维护", gin.H{"reason": err.Error()})
 	case errors.Is(err, dstruntime.ErrRuntimeRequestInvalid):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_RUNTIME_REQUEST", "运行诊断参数无效", nil)
+	case errors.Is(err, dstruntime.ErrRuntimeCommandUnconfirmed):
+		Failure(c, http.StatusGatewayTimeout, "COMMAND_OUTCOME_UNKNOWN", "命令已发送，但未在限定时间内收到确认；可能已执行，不会自动重放", gin.H{"mayHaveExecuted": true, "reason": err.Error()})
 	case errors.Is(err, dstruntime.ErrRuntimeResultAbsent):
 		Failure(c, http.StatusNotFound, "RUNTIME_RESULT_NOT_FOUND", "运行时尚未产生对应结果", nil)
 	case errors.Is(err, dstruntime.ErrRuntimeUnavailable), errors.Is(err, dstruntime.ErrRuntimeNotInstalled):

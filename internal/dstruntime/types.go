@@ -8,26 +8,27 @@ import (
 
 const (
 	ProtocolVersion = 2
-	RuntimeVersion  = "2.4.13"
+	RuntimeVersion  = "2.4.14"
 )
 
 var (
-	ErrRuntimeNotInstalled    = errors.New("DST Admin runtime is not installed")
-	ErrManagedBlockInvalid    = errors.New("customcommands.lua managed block is invalid")
-	ErrManagedFileChanged     = errors.New("DST Admin managed runtime file was modified")
-	ErrUnsafeRuntimePath      = errors.New("DST Admin runtime path is unsafe")
-	ErrSnapshotUnavailable    = errors.New("DST Admin telemetry snapshot is unavailable")
-	ErrSnapshotStale          = errors.New("DST Admin telemetry snapshot is stale")
-	ErrSnapshotInvalid        = errors.New("DST Admin telemetry snapshot is invalid")
-	ErrRuntimeUnavailable     = errors.New("DST Admin runtime is unavailable")
-	ErrRuntimeProcessConflict = errors.New("DST Admin runtime process ownership is unresolved")
-	ErrRuntimeResultAbsent    = errors.New("DST Admin runtime result is unavailable")
-	ErrRuntimeResultStale     = errors.New("DST Admin runtime result is stale")
-	ErrRuntimeResultInvalid   = errors.New("DST Admin runtime result is invalid")
-	ErrRuntimeRequestInvalid  = errors.New("DST Admin runtime request is invalid")
-	ErrRuntimeActivation      = errors.New("DST Admin runtime activation failed")
-	ErrRuntimeRefresh         = errors.New("DST Admin runtime snapshot refresh failed")
-	ErrRuntimeRefreshDeferred = errors.New("DST Admin runtime snapshot refresh is deferred")
+	ErrRuntimeNotInstalled       = errors.New("DST Admin runtime is not installed")
+	ErrManagedBlockInvalid       = errors.New("customcommands.lua managed block is invalid")
+	ErrManagedFileChanged        = errors.New("DST Admin managed runtime file was modified")
+	ErrUnsafeRuntimePath         = errors.New("DST Admin runtime path is unsafe")
+	ErrSnapshotUnavailable       = errors.New("DST Admin telemetry snapshot is unavailable")
+	ErrSnapshotStale             = errors.New("DST Admin telemetry snapshot is stale")
+	ErrSnapshotInvalid           = errors.New("DST Admin telemetry snapshot is invalid")
+	ErrRuntimeUnavailable        = errors.New("DST Admin runtime is unavailable")
+	ErrRuntimeProcessConflict    = errors.New("DST Admin runtime process ownership is unresolved")
+	ErrRuntimeCommandUnconfirmed = errors.New("DST Admin command outcome is unconfirmed")
+	ErrRuntimeResultAbsent       = errors.New("DST Admin runtime result is unavailable")
+	ErrRuntimeResultStale        = errors.New("DST Admin runtime result is stale")
+	ErrRuntimeResultInvalid      = errors.New("DST Admin runtime result is invalid")
+	ErrRuntimeRequestInvalid     = errors.New("DST Admin runtime request is invalid")
+	ErrRuntimeActivation         = errors.New("DST Admin runtime activation failed")
+	ErrRuntimeRefresh            = errors.New("DST Admin runtime snapshot refresh failed")
+	ErrRuntimeRefreshDeferred    = errors.New("DST Admin runtime snapshot refresh is deferred")
 )
 
 type InstallState string
@@ -193,6 +194,7 @@ type Health struct {
 }
 
 type ModuleHealth struct {
+	ProducerInstanceID       string   `json:"producerInstanceId,omitempty"`
 	Running                  bool     `json:"running"`
 	Ready                    bool     `json:"ready"`
 	Busy                     bool     `json:"busy,omitempty"`

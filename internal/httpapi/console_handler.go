@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"dont/internal/requesttiming"
 	"errors"
 	"net/http"
 	"strconv"
@@ -132,7 +133,9 @@ func (h *ConsoleHandler) execute(c *gin.Context) {
 		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的命令", nil)
 		return
 	}
-	result, err := h.console.Execute(c.Request.Context(), c.Param("roomId"), c.Param("worldId"), request)
+	ctx, timing := requesttiming.New(c.Request.Context())
+	result, err := h.console.Execute(ctx, c.Param("roomId"), c.Param("worldId"), request)
+	finishReadTiming(c, timing, err)
 	if err != nil {
 		consoleFailure(c, err)
 		return
@@ -146,7 +149,9 @@ func (h *ConsoleHandler) executeRaw(c *gin.Context) {
 		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的原始命令", nil)
 		return
 	}
-	result, err := h.console.ExecuteRaw(c.Request.Context(), c.Param("roomId"), c.Param("worldId"), request)
+	ctx, timing := requesttiming.New(c.Request.Context())
+	result, err := h.console.ExecuteRaw(ctx, c.Param("roomId"), c.Param("worldId"), request)
+	finishReadTiming(c, timing, err)
 	if err != nil {
 		consoleFailure(c, err)
 		return

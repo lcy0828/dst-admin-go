@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"dont/internal/requesttiming"
 	"dont/internal/rooms"
 	"dont/internal/runtimefiles"
 	"dont/shared"
@@ -22,7 +23,7 @@ import (
 const (
 	maxRuntimeRequestBytes   = 16 * 1024
 	maxRuntimeResultBytes    = int64(256 * 1024)
-	defaultCommandTimeout    = 5 * time.Second
+	defaultCommandTimeout    = 15 * time.Second
 	defaultDiagnosticTimeout = 8 * time.Second
 	defaultLifecycleTimeout  = 10 * time.Second
 	defaultPollInterval      = 100 * time.Millisecond
@@ -333,10 +334,18 @@ func (b *Bridge) ExecuteCommand(ctx context.Context, roomID, worldID string, req
 		return CommandReceipt{}, err
 	}
 	lock := b.worldLock(worldPath)
-	lock.Lock()
+	finishQueue := requesttiming.Start(ctx, "command.queue")
+	err = lockRuntimeCommand(ctx, lock)
+	finishQueue()
+	if err != nil {
+		return CommandReceipt{}, err
+	}
 	defer lock.Unlock()
 
-	if err := b.commandReady(ctx, room, world); err != nil {
+	finishPreflight := requesttiming.Start(ctx, "command.preflight")
+	err = b.commandReady(ctx, room, world)
+	finishPreflight()
+	if err != nil {
 		return CommandReceipt{}, err
 	}
 	if request.Action == "catalog.entities" {
@@ -359,28 +368,42 @@ func (b *Bridge) ExecuteCommand(ctx context.Context, roomID, worldID string, req
 			return CommandReceipt{}, fmt.Errorf("publish runtime command document: %w", err)
 		}
 	}
+	health, err := b.manager.Health(room.ID, world.ID)
+	if err != nil {
+		return CommandReceipt{}, err
+	}
 	sentAt := b.now().UTC()
-	if err := b.sender.Send(ctx, room.DirectoryName, world.DirectoryName, script); err != nil {
+	finishSend := requesttiming.Start(ctx, "command.send")
+	err = b.sender.Send(ctx, room.DirectoryName, world.DirectoryName, script)
+	finishSend()
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return CommandReceipt{}, unconfirmedCommand(request, err, nil)
+		}
 		return CommandReceipt{}, fmt.Errorf("send runtime command: %w", err)
 	}
-
-	deadline := time.NewTimer(b.timeout)
-	defer deadline.Stop()
+	waitCtx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+	finishWait := requesttiming.Start(ctx, "command.receipt")
+	defer finishWait()
 	ticker := time.NewTicker(b.pollInterval)
 	defer ticker.Stop()
+	var lastReadErr error
 	for {
-		receipt, readErr := readCommandReceipt(worldPath, expectedSession, request, b.now().UTC(), sentAt)
-		if readErr == nil {
+		if err := waitCtx.Err(); err != nil {
+			return CommandReceipt{}, unconfirmedCommand(request, err, lastReadErr)
+		}
+		receipt, readErr := readCommandReceipt(worldPath, expectedSession, health, request, b.now().UTC(), sentAt)
+		if err := waitCtx.Err(); err != nil {
+			return CommandReceipt{}, unconfirmedCommand(request, err, lastReadErr)
+		}
+		if readErr == nil && commandInstanceMatches(health, receipt) && receipt.ShardID == health.ShardID {
 			return receipt, nil
 		}
-		if !errors.Is(readErr, ErrRuntimeResultAbsent) {
-			return CommandReceipt{}, readErr
-		}
+		lastReadErr = readErr
 		select {
-		case <-ctx.Done():
-			return CommandReceipt{}, ctx.Err()
-		case <-deadline.C:
-			return CommandReceipt{}, fmt.Errorf("%w: command %s may have executed; it will not be retried automatically", ErrRuntimeResultAbsent, request.RequestID)
+		case <-waitCtx.Done():
+			return CommandReceipt{}, unconfirmedCommand(request, waitCtx.Err(), lastReadErr)
 		case <-ticker.C:
 		}
 	}
@@ -586,7 +609,7 @@ func validateCommandRequest(request CommandRequest) error {
 	return nil
 }
 
-func readCommandReceipt(worldPath, expectedSession string, request CommandRequest, now, notBefore time.Time) (CommandReceipt, error) {
+func readCommandReceipt(worldPath, expectedSession string, health Health, request CommandRequest, now, notBefore time.Time) (CommandReceipt, error) {
 	candidates := make([]CommandReceipt, 0, 2)
 	var invalid error
 	root := filepath.Join(worldPath, "save", "mod_config_data", "dst-admin")
@@ -598,7 +621,9 @@ func readCommandReceipt(worldPath, expectedSession string, request CommandReques
 			}
 			continue
 		}
-		candidates = append(candidates, value)
+		if commandInstanceMatches(health, value) && value.ShardID == health.ShardID {
+			candidates = append(candidates, value)
+		}
 	}
 	if len(candidates) == 0 {
 		if invalid != nil {
