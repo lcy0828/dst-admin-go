@@ -11,6 +11,7 @@ import (
 const defaultRetention = 2016
 
 type snapshotRecord struct {
+	SessionID             string `gorm:"type:varchar(128)"`
 	ID                    uint   `gorm:"primary_key"`
 	RoomID                string `gorm:"type:varchar(255);not null;index:idx_world_state_room_world_observed"`
 	WorldID               string `gorm:"type:varchar(255);not null;index:idx_world_state_room_world_observed"`
@@ -129,7 +130,7 @@ func (s *Store) History(roomID, worldID string, limit int) ([]Snapshot, int, err
 func recordFromSnapshot(snapshot Snapshot) snapshotRecord {
 	return snapshotRecord{
 		RoomID: snapshot.RoomID, WorldID: snapshot.WorldID, WorldName: snapshot.WorldName, WorldRole: snapshot.WorldRole,
-		Season: snapshot.Season, Phase: snapshot.Phase, Cycles: snapshot.Cycles,
+		SessionID: snapshot.SessionID, Season: snapshot.Season, Phase: snapshot.Phase, Cycles: snapshot.Cycles,
 		ElapsedDaysInSeason: snapshot.ElapsedDaysInSeason, RemainingDaysInSeason: snapshot.RemainingDaysInSeason,
 		SeasonProgress: snapshot.SeasonProgress, DayProgress: snapshot.DayProgress, PhaseProgress: snapshot.PhaseProgress,
 		Precipitation: snapshot.Precipitation, MoonPhase: snapshot.MoonPhase, Temperature: snapshot.Temperature,
@@ -143,7 +144,7 @@ func recordFromSnapshot(snapshot Snapshot) snapshotRecord {
 func snapshotFromRecord(record snapshotRecord) Snapshot {
 	return Snapshot{
 		ID: record.ID, RoomID: record.RoomID, WorldID: record.WorldID, WorldName: record.WorldName, WorldRole: record.WorldRole,
-		Season: record.Season, Phase: record.Phase, Cycles: record.Cycles,
+		SessionID: record.SessionID, Season: record.Season, Phase: record.Phase, Cycles: record.Cycles,
 		ElapsedDaysInSeason: record.ElapsedDaysInSeason, RemainingDaysInSeason: record.RemainingDaysInSeason,
 		SeasonProgress: record.SeasonProgress, DayProgress: record.DayProgress, PhaseProgress: record.PhaseProgress,
 		Precipitation: record.Precipitation, MoonPhase: record.MoonPhase, Temperature: record.Temperature,

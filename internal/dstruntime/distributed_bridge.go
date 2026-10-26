@@ -57,6 +57,26 @@ func (b *DistributedBridge) IsLocalPlacement(roomID, worldID string) (bool, erro
 	return locality.IsLocalPlacement(roomID, worldID)
 }
 
+// Typed inventory requests share the command mailbox with console operations.
+// Keep the lock until the node has consumed its receipt, including remote nodes.
+func (b *DistributedBridge) ReadPlayerInventory(ctx context.Context, roomID, worldID string, q shared.PlayerInventoryRequest) (shared.PlayerInventory, error) {
+	reader, ok := b.runtime.(interface {
+		ReadPlayerInventory(context.Context, string, string, shared.PlayerInventoryRequest) (shared.PlayerInventory, error)
+	})
+	if !ok {
+		return shared.PlayerInventory{}, &shared.InventoryError{Code: "INVENTORY_CAPABILITY_UNAVAILABLE"}
+	}
+	if q.Source != "live" {
+		return reader.ReadPlayerInventory(ctx, roomID, worldID, q)
+	}
+	lock := b.worldLock(roomID, worldID)
+	if !lock.TryLock() {
+		return shared.PlayerInventory{}, &shared.InventoryError{Code: "INVENTORY_BUSY"}
+	}
+	defer lock.Unlock()
+	return reader.ReadPlayerInventory(ctx, roomID, worldID, q)
+}
+
 func (b *DistributedBridge) ReadPlayers(ctx context.Context, roomID, worldID string) (Snapshot, error) {
 	health, err := b.Health(ctx, roomID, worldID)
 	if err != nil {

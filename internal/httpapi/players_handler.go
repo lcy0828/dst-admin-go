@@ -48,6 +48,7 @@ func (h *PlayerHandler) Register(v2 *gin.RouterGroup) {
 	group := v2.Group("/rooms/:roomId/players")
 	group.GET("", h.list)
 	group.GET("/:playerId", h.player)
+	group.GET("/:playerId/inventory", h.inventory)
 	group.POST("/actions/refresh", h.refresh)
 	group.POST("/:playerId/actions/kick", h.action(players.ActionKick))
 	group.POST("/:playerId/actions/ban", h.action(players.ActionBan))
@@ -73,7 +74,7 @@ func (h *PlayerHandler) list(c *gin.Context) {
 		includeAccessLists = parsed
 	}
 	value, err := h.players.List(c.Param("roomId"), players.ListFilter{
-		Query: c.Query("query"), Status: c.Query("status"), WorldID: c.Query("worldId"),
+		Scope: c.Query("scope"), Query: c.Query("query"), Status: c.Query("status"), WorldID: c.Query("worldId"),
 		Prefab: c.Query("prefab"), Limit: limit, Offset: offset, SkipAccessLists: !includeAccessLists,
 	})
 	if err != nil {

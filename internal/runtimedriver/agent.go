@@ -53,7 +53,7 @@ func (d *Agent) Kind() Kind { return KindNative }
 func (d *Agent) Capabilities() []Capability {
 	return []Capability{
 		CapabilityLifecycle, CapabilityConsoleInput, CapabilityConsoleHealth, CapabilityRawConsole,
-		CapabilityOperationProof, CapabilityLogContinuation, CapabilityChatHistory, CapabilityArtifacts, CapabilityWorldStateRead, CapabilityEntityArtwork,
+		CapabilityOperationProof, CapabilityLogContinuation, CapabilityChatHistory, CapabilityArtifacts, CapabilityWorldStateRead, CapabilityEntityArtwork, CapabilityPlayerInventory,
 		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore, CapabilityRestoreCollector,
 		CapabilityModPrepare, CapabilityModPublish, CapabilityGameUpdate,
 		CapabilityExclusiveCPU,

@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.14"
+local PRODUCER_VERSION = "2.4.15"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local INPUT_ROOT = "mod_config_data/dst-admin/command-requests/"
 local RECENT_REQUEST_LIMIT = 256
@@ -72,6 +72,185 @@ local handlers = {}
 
 handlers["system.ping"] = function()
     return result(true, "CONSOLE_RESPONSIVE", "")
+end
+
+-- Read only known data fields, including Class property storage. Accessing a
+-- property through obj[key] could enter a Mod's __index; invoking getters or
+-- OnSave would allow arbitrary work and could change the inventory.
+local function inventory_field(object, key)
+    if type(object) ~= "table" then return nil end
+    local value = rawget(object, key)
+    if value ~= nil then return value end
+    local properties = rawget(object, "_")
+    local property = type(properties) == "table" and rawget(properties, key) or nil
+    return type(property) == "table" and rawget(property, 1) or nil
+end
+
+local inventory_metrics = {
+            { "perishable", "perishable", "perishremainingtime", "perishtime", "time", "seconds" },
+            { "fuel", "fueled", "currentfuel", "maxfuel", "fuel", "fuel" },
+            { "armor", "armor", "condition", "maxcondition", "condition", "condition" },
+            { "uses", "finiteuses", "current", "total", "uses", "uses" },
+}
+
+handlers["player.inventory"] = function(arguments)
+    local user_id = type(arguments) == "table" and arguments.userId or nil
+    if not valid_user_id(user_id) then return result(false, "INVALID_USER_ID", "") end
+    local player
+    local players = rawget(_G, "AllPlayers")
+    if type(players) == "table" then
+        for index = 1, 256 do
+            local candidate = rawget(players, index)
+            if candidate == nil then break end
+            if inventory_field(candidate, "userid") == user_id then player = candidate; break end
+        end
+    end
+    if player == nil then return result(false, "PLAYER_NOT_FOUND", "") end
+    if inventory_field(player, "migration") ~= nil then return result(false, "PLAYER_LOCATION_UNCERTAIN", "") end
+    local inventory = inventory_field(inventory_field(player, "components"), "inventory")
+    if type(inventory) ~= "table" then return result(false, "PLAYER_NOT_READY", "") end
+    local output = {
+        schemaVersion = 1, playerId = user_id, source = "live", status = "complete",
+        character = type(inventory_field(player, "prefab")) == "string" and string.sub(inventory_field(player, "prefab"), 1, 128) or "", coverage = "standard_components",
+        equipment = {}, inventory = {}, activeItem = json.null, slotCount = json.null,
+        warnings = {}, limitsReached = {}, empty = false,
+    }
+    local seen, reasons, nodes, checks, bytes = {}, {}, 0, 0, 0
+    local pending = {}
+    local deadline = os.clock() + 0.005
+    local function partial(reason)
+        output.status = "partial"
+        if not reasons[reason] then reasons[reason] = true; output.limitsReached[#output.limitsReached + 1] = reason end
+    end
+    local function budget(force_clock)
+        checks = checks + 1
+        if checks > 4096 then partial("WORK_LIMIT"); return false end
+        if (force_clock or checks % 32 == 0) and os.clock() >= deadline then partial("TIME_LIMIT"); return false end
+        return true
+    end
+    local function numeric(value)
+        return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+    end
+    local function string_value(value, length)
+        if type(value) ~= "string" then return "" end
+        if #value <= length then return value end
+        while length > 0 do
+            local byte = string.byte(value, length + 1)
+            if byte == nil or byte < 128 or byte >= 192 then break end
+            length = length - 1
+        end
+        return string.sub(value, 1, length)
+    end
+    local item, slots
+    slots = function(values, path, depth, serialized)
+        local list, keys = {}, {}
+        if type(values) ~= "table" then return list end
+        for key in next, values do
+            if not budget() then break end
+            if #keys >= 512 then partial("SLOT_LIMIT"); break end
+            if type(key) == "number" and numeric(key) or type(key) == "string" and #key <= 64 then keys[#keys + 1] = key
+            else partial("INVALID_SLOT") end
+        end
+        table.sort(keys, function(a, b) if type(a) == "number" and type(b) == "number" then return a < b end return tostring(a) < tostring(b) end)
+        for _, key in ipairs(keys) do
+            if not budget() then break end
+            local value = rawget(values, key)
+            local slot = tostring(key)
+            local node = item(value, path .. "/" .. slot, depth, serialized)
+            if node ~= nil then node.slot = slot; list[#list + 1] = node end
+        end
+        return list
+    end
+    item = function(value, path, depth, serialized)
+        if not budget(true) then return nil end
+        if depth > 6 then partial("DEPTH_LIMIT"); return nil end
+        if nodes >= 512 then partial("ITEM_LIMIT"); return nil end
+        if type(value) ~= "table" then partial("INVALID_ITEM"); return nil end
+        if seen[value] then partial("REPEATED_REFERENCE"); return nil end
+        seen[value] = true
+        local prefab = string_value(inventory_field(value, "prefab"), 128)
+        if prefab == "" then partial("INVALID_ITEM"); return nil end
+        local data = inventory_field(value, serialized and "data" or "components")
+        local named = inventory_field(inventory_field(data, "named"), "name")
+        local name, name_source = string_value(named, 256), serialized and "saved_name" or "custom_name"
+        if name == "" then
+            local strings = rawget(_G, "STRINGS")
+            name = string_value(inventory_field(inventory_field(strings, "NAMES"), string.upper(prefab)), 256)
+            name_source = "strings"
+        end
+        if name == "" then name = prefab; name_source = "prefab" end
+        local cost = 768 + 6 * (#prefab + #name + #path + 64)
+        if bytes + cost > 160 * 1024 then partial("BYTE_LIMIT"); return nil end
+        bytes, nodes = bytes + cost, nodes + 1
+        local node = { nodeId = path, slot = path, prefab = prefab, name = name, nameSource = name_source,
+            count = 1, recordSource = serialized and "serialized" or "live", contents = {}, slotCount = json.null }
+        local stack = inventory_field(data, "stackable")
+        local count = inventory_field(stack, serialized and "stack" or "stacksize")
+        if count ~= nil then if numeric(count) and count >= 1 then node.count = count else node.count = json.null; node.warnings = { "INVALID_COUNT" } end end
+        local metrics
+        for _, spec in ipairs(inventory_metrics) do
+            local component = inventory_field(data, spec[2])
+            if type(component) == "table" then
+                local current = inventory_field(component, serialized and spec[5] or spec[3])
+                local maximum = not serialized and inventory_field(component, spec[4]) or nil
+                local metric = { value = numeric(current) and current or json.null, maximum = numeric(maximum) and maximum or json.null,
+                    ratio = json.null, unit = spec[6], availability = numeric(current) and "value_only" or "unknown" }
+                if numeric(current) and numeric(maximum) and maximum > 0 then
+                    local ratio = current / maximum
+                    if ratio >= 0 and ratio <= 1 then metric.ratio = ratio; metric.availability = "known"
+                    else metric.reason = "OUT_OF_RANGE" end
+                elseif serialized then metric.reason = "MAXIMUM_NOT_SAVED" end
+                metrics = metrics or {}
+                metrics[spec[1]] = metric
+            end
+        end
+        if metrics ~= nil then node.metrics = metrics end
+        if inventory_field(data, "container") ~= nil or inventory_field(data, "unwrappable") ~= nil or inventory_field(data, "inventoryitemholder") ~= nil then
+            pending[#pending + 1] = { node = node, data = data, path = path, depth = depth, serialized = serialized }
+        end
+        return node
+    end
+    -- Build root records before traversing nested containers.
+    output.equipment = slots(inventory_field(inventory, "equipslots"), "equipment", 0, false)
+    output.inventory = slots(inventory_field(inventory, "itemslots"), "inventory", 0, false)
+    local active = inventory_field(inventory, "activeitem")
+    if active ~= nil and not seen[active] then output.activeItem = item(active, "active", 0, false) or json.null end
+    local slot_count = inventory_field(inventory, "maxslots")
+    if numeric(slot_count) and slot_count >= 0 and slot_count <= 4096 then output.slotCount = slot_count end
+    local cursor = 1
+    while cursor <= #pending do
+        if not budget() then break end
+        local entry = pending[cursor]
+        local node, data, path, depth, serialized = entry.node, entry.data, entry.path, entry.depth, entry.serialized
+        local container = inventory_field(data, "container")
+        if type(container) == "table" then
+            node.containerKind = "container"
+            local count_slots = not serialized and inventory_field(container, "numslots") or nil
+            if numeric(count_slots) and count_slots >= 0 and count_slots <= 4096 then node.slotCount = count_slots end
+            node.contents = slots(inventory_field(container, serialized and "items" or "slots"), path .. "/container", depth + 1, serialized)
+        end
+        local bundle = inventory_field(data, "unwrappable")
+        if type(bundle) == "table" then
+            node.containerKind = "bundle"
+            for _, child in ipairs(slots(inventory_field(bundle, serialized and "items" or "itemdata"), path .. "/bundle", depth + 1, true)) do node.contents[#node.contents + 1] = child end
+        end
+        local holder = inventory_field(data, "inventoryitemholder")
+        if type(holder) == "table" then
+            node.containerKind = "holder"
+            local held = inventory_field(holder, "item")
+            if held ~= nil then local child = item(held, path .. "/holder", depth + 1, serialized); if child ~= nil then node.contents[#node.contents + 1] = child end end
+        end
+        cursor = cursor + 1
+    end
+    if cursor <= #pending then
+        for index = cursor, #pending do
+            local entry = pending[index]
+            if inventory_field(entry.data, "container") ~= nil or inventory_field(entry.data, "unwrappable") ~= nil or inventory_field(entry.data, "inventoryitemholder") ~= nil then entry.node.warnings = { "CONTENTS_UNREAD" } end
+        end
+    end
+    if type(inventory_field(inventory, "equipslots")) ~= "table" or type(inventory_field(inventory, "itemslots")) ~= "table" then partial("ROOT_SECTION_UNAVAILABLE") end
+    output.empty = output.status == "complete" and #output.equipment == 0 and #output.inventory == 0 and (active == nil)
+    return result(true, "PLAYER_INVENTORY_READ", "", output)
 end
 
 local CONSOLE_OUTPUT_BYTES = 16 * 1024

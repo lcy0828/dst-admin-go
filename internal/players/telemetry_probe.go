@@ -19,6 +19,7 @@ const (
 )
 
 type SnapshotResult struct {
+	SessionID    string
 	Observations []Observation
 	Source       DataSource
 	ObservedAt   time.Time
@@ -127,8 +128,16 @@ func (p *TelemetryProbe) SnapshotDetailed(ctx context.Context, roomID, worldID s
 	}
 	if runtimeErr == nil {
 		observations := observationsFromRuntime(snapshot)
+		if snapshot.SessionID != "" {
+			// Log identity can predate a world reset. Keep account identity,
+			// but never fill a new save's missing character from old log data.
+			for i, identity := range native {
+				native[i] = Observation{ID: identity.ID, Name: identity.Name, NetID: identity.NetID,
+					Fields: FieldStates{"name": identity.Fields["name"], "netId": identity.Fields["netId"]}}
+			}
+		}
 		return SnapshotResult{
-			Observations: mergeSnapshotIdentities(native, observations), Source: SourceRuntime, ObservedAt: snapshot.CapturedAt,
+			Observations: mergeSnapshotIdentities(native, observations), Source: SourceRuntime, ObservedAt: snapshot.CapturedAt, SessionID: snapshot.SessionID,
 			Degraded: nativeErr != nil, Warning: errorMessage(nativeErr),
 		}, nil
 	}
@@ -369,3 +378,19 @@ func errorMessage(err error) string {
 var _ Probe = (*TelemetryProbe)(nil)
 var _ DetailedProbe = (*TelemetryProbe)(nil)
 var _ HistoryProbe = (*TelemetryProbe)(nil)
+
+// CurrentSession reads validated passive world state, including while DST is
+// paused. It never refreshes telemetry or sends console commands.
+func (p *TelemetryProbe) CurrentSession(ctx context.Context, roomID, worldID string) (string, time.Time, error) {
+	reader, ok := p.runtime.(interface {
+		ReadCurrentWorldState(context.Context, string, string) (dstruntime.CurrentWorldState, error)
+	})
+	if !ok {
+		return "", time.Time{}, nil
+	}
+	value, err := reader.ReadCurrentWorldState(ctx, roomID, worldID)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return value.Snapshot.SessionID, value.Snapshot.CapturedAt, nil
+}

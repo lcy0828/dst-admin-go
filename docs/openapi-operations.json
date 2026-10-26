@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "89f26d8174a0679c9e2e8e44e1e88b47398815bbaa5a78ee709d04e70248c24d",
+  "operationsSHA256": "8e46580b9bc33c7519feccc2683ba806786c55c740baef220c2e7cc211db2097",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -1785,6 +1785,23 @@
       "risk": "low",
       "runtime": "any",
       "title": "Read one persisted player observation"
+    },
+    {
+      "operationId": "getRoomPlayerInventory",
+      "method": "GET",
+      "path": "/rooms/{roomId}/players/{playerId}/inventory",
+      "transport": "json",
+      "tags": [
+        "entity",
+        "inventory",
+        "player",
+        "room",
+        "save"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read a player's carried items from live memory or their current Session save without saving the game"
     },
     {
       "operationId": "getRoomRuntime",

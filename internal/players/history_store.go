@@ -92,7 +92,7 @@ func (s *Store) enrichHistoryPlayer(tx *gorm.DB, existing playerRecord, worldID,
 		updates["status_changed_at"] = observation.LastDisconnectedAt
 		updates["last_refreshed_at"] = observation.LastDisconnectedAt
 		fields["online"] = historicalField(observation.LastDisconnectedAt)
-		markFieldStale(fields, "gameplayState")
+		markDynamicFieldsStale(fields)
 	}
 	if len(updates) == 0 && len(fields) == 0 {
 		return nil
@@ -117,4 +117,29 @@ func historyFieldWithFallback(state FieldState, at time.Time) FieldState {
 
 func newerHistoryField(state FieldState, at time.Time) bool {
 	return state.ObservedAt == nil || at.After(*state.ObservedAt)
+}
+
+// A newer disconnect can settle a known current player after auto-pause. Other
+// fields in the aggregate log cache may belong to an earlier save and cannot
+// enrich a session-bound record.
+func (s *Store) mergeSessionDisconnects(tx *gorm.DB, roomID, worldID, sessionID string, observations []Observation, observedAt time.Time) error {
+	var records []playerRecord
+	if err := tx.Table(s.table).Where("room_id = ? AND world_id = ? AND session_id = ?", roomID, worldID, sessionID).Find(&records).Error; err != nil {
+		return err
+	}
+	byID := make(map[string]playerRecord, len(records))
+	for _, record := range records {
+		byID[record.UserID] = record
+	}
+	for _, observation := range observations {
+		record, ok := byID[observation.ID]
+		at := observation.LastDisconnectedAt
+		if !ok || at.IsZero() || !at.After(record.LastRefreshedAt) || at.Before(observation.LastSeenAt) || at.Before(observation.LastConnectedAt) || observation.HistoryWorldID != "" && observation.HistoryWorldID != worldID {
+			continue
+		}
+		if err := s.enrichHistoryPlayer(tx, record, worldID, record.WorldName, Observation{ID: record.UserID, LastSeenAt: at, LastDisconnectedAt: at}, observedAt); err != nil {
+			return err
+		}
+	}
+	return nil
 }

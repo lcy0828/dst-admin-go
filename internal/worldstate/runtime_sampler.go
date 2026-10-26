@@ -69,7 +69,7 @@ func (s *RuntimeSampler) StoppedSnapshot(ctx context.Context, roomID, worldID st
 
 func observationFromRuntime(snapshot dstruntime.WorldStateSnapshot) Observation {
 	return Observation{
-		Season: snapshot.Season, Phase: snapshot.Phase, Cycles: snapshot.Cycles,
+		SessionID: snapshot.SessionID, Season: snapshot.Season, Phase: snapshot.Phase, Cycles: snapshot.Cycles,
 		ElapsedDaysInSeason: snapshot.ElapsedDaysInSeason, RemainingDaysInSeason: snapshot.RemainingDaysInSeason,
 		SeasonProgress: snapshot.SeasonProgress, DayProgress: snapshot.DayProgress, PhaseProgress: snapshot.PhaseProgress,
 		Precipitation: snapshot.Precipitation, MoonPhase: snapshot.MoonPhase, Temperature: snapshot.Temperature,

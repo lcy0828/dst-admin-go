@@ -13,6 +13,7 @@ import (
 
 	"dont/internal/configuration"
 	"dont/internal/dstruntime"
+	"dont/internal/playerinventory"
 	"dont/internal/rooms"
 	"dont/internal/shards"
 
@@ -49,16 +50,17 @@ type AccessManager interface {
 }
 
 type Service struct {
-	rooms     RoomCatalog
-	runtime   Runtime
-	sender    Sender
-	access    AccessManager
-	store     *Store
-	probe     Probe
-	commander RuntimeCommander
-	now       func() time.Time
-	locksMu   sync.Mutex
-	locks     map[string]*sync.Mutex
+	rooms          RoomCatalog
+	runtime        Runtime
+	sender         Sender
+	access         AccessManager
+	store          *Store
+	probe          Probe
+	commander      RuntimeCommander
+	inventoryReads *playerinventory.Reader
+	now            func() time.Time
+	locksMu        sync.Mutex
+	locks          map[string]*sync.Mutex
 }
 
 func NewService(roomCatalog RoomCatalog, runtime Runtime, sender Sender, access AccessManager, store *Store, probe Probe, commanders ...RuntimeCommander) (*Service, error) {
@@ -68,6 +70,7 @@ func NewService(roomCatalog RoomCatalog, runtime Runtime, sender Sender, access 
 	service := &Service{
 		rooms: roomCatalog, runtime: runtime, sender: sender, access: access, store: store, probe: probe,
 		now: time.Now, locks: make(map[string]*sync.Mutex),
+		inventoryReads: playerinventory.NewCoalescer(4, 0),
 	}
 	if len(commanders) > 0 {
 		service.commander = commanders[0]
@@ -134,7 +137,15 @@ func (s *Service) List(roomID string, filter ListFilter) (List, error) {
 	if err != nil {
 		return List{}, err
 	}
+	stale, err := s.store.StaleCount(room.ID)
+	if err != nil {
+		return List{}, err
+	}
+	if filter.Scope == "history" {
+		online, staleOnline, totalPlayers, stale = 0, 0, total, total
+	}
 	result := List{
+		Stale: stale,
 		Items: items, Total: total, Online: online, Offline: totalPlayers - online - staleOnline,
 		StaleOnline: staleOnline, Banned: len(blocked), Limit: filter.Limit, Offset: filter.Offset, LastRefreshedAt: refreshed,
 		AccessListsAvailable: accessAvailable,
@@ -300,6 +311,9 @@ func (s *Service) PrepareScheduledRefresh(ctx context.Context, roomID string, wo
 		switch status.State {
 		case shards.RuntimeRunning:
 			if status.Paused != nil && *status.Paused {
+				if err := s.observePassiveWorldSession(ctx, room.ID, world.ID); err != nil {
+					return false, err
+				}
 				// The last disconnect commonly triggers auto-pause. Merge its
 				// log evidence even though game telemetry no longer advances.
 				if _, err := s.mergeWorldHistory(ctx, room, world, s.now().UTC()); err != nil && statusErr == nil {
@@ -398,6 +412,10 @@ func (s *Service) collectWorldSnapshot(ctx context.Context, room rooms.Room, wor
 	}
 	running := runtimeStatus.State == shards.RuntimeRunning
 	if skipPaused && running && runtimeStatus.Paused != nil && *runtimeStatus.Paused {
+		if err := s.observePassiveWorldSession(ctx, room.ID, world.ID); err != nil {
+			outcome.Err = err
+			return outcome, worldSnapshot{}
+		}
 		outcome.Deferred = true
 		outcome.Err = s.store.MarkWorldStale(room.ID, world.ID)
 		outcome.Result = RefreshResult{
@@ -426,7 +444,7 @@ func (s *Service) collectWorldSnapshot(ctx context.Context, room rooms.Room, wor
 		outcome.Result = RefreshResult{WorldID: world.ID, Running: false, Source: SourceNativeLog, Status: FreshnessStale, Warning: warning, Message: message}
 		return outcome, snapshot
 	}
-	observations, source, status, warning, snapshotAt, err := s.readSnapshot(ctx, room.ID, world.ID, observedAt)
+	observations, source, status, warning, snapshotAt, sessionID, err := s.readSnapshot(ctx, room.ID, world.ID, observedAt)
 	if err != nil {
 		if ctx.Err() == nil && (errors.Is(err, dstruntime.ErrRuntimeRefreshDeferred) || errors.Is(err, ErrTelemetryRecoveryDeferred)) {
 			outcome.Deferred = true
@@ -454,6 +472,7 @@ func (s *Service) collectWorldSnapshot(ctx context.Context, room rooms.Room, wor
 		outcome.Err = err
 		return outcome, worldSnapshot{}
 	}
+	snapshot.SessionID = sessionID
 	snapshot.Observations = observations
 	snapshot.ObservedAt = observedAt
 	snapshot.Source = source
@@ -471,11 +490,11 @@ func (s *Service) collectWorldSnapshot(ctx context.Context, room rooms.Room, wor
 	return outcome, snapshot
 }
 
-func (s *Service) readSnapshot(ctx context.Context, roomID, worldID string, observedAt time.Time) ([]Observation, DataSource, FreshnessStatus, string, time.Time, error) {
+func (s *Service) readSnapshot(ctx context.Context, roomID, worldID string, observedAt time.Time) ([]Observation, DataSource, FreshnessStatus, string, time.Time, string, error) {
 	if detailed, ok := s.probe.(DetailedProbe); ok {
 		result, err := detailed.SnapshotDetailed(ctx, roomID, worldID)
 		if err != nil {
-			return nil, "", FreshnessUnavailable, "", time.Time{}, err
+			return nil, "", FreshnessUnavailable, "", time.Time{}, "", err
 		}
 		status := FreshnessLive
 		if result.Degraded {
@@ -484,14 +503,14 @@ func (s *Service) readSnapshot(ctx context.Context, roomID, worldID string, obse
 		if result.ObservedAt.IsZero() {
 			result.ObservedAt = observedAt
 		}
-		return result.Observations, result.Source, status, result.Warning, result.ObservedAt.UTC(), nil
+		return result.Observations, result.Source, status, result.Warning, result.ObservedAt.UTC(), result.SessionID, nil
 	}
 	observations, err := s.probe.Snapshot(ctx, roomID, worldID)
 	if err != nil {
-		return nil, "", FreshnessUnavailable, "", time.Time{}, err
+		return nil, "", FreshnessUnavailable, "", time.Time{}, "", err
 	}
 	observations = stampNativeObservations(observations, observedAt)
-	return observations, SourceNativeLog, FreshnessLive, "", observedAt, nil
+	return observations, SourceNativeLog, FreshnessLive, "", observedAt, "", nil
 }
 
 func playerSourceLabel(source DataSource) string {
@@ -788,7 +807,7 @@ func (s *Service) normalizeFilter(roomID string, filter ListFilter) (ListFilter,
 	filter.Query = strings.TrimSpace(filter.Query)
 	filter.Prefab = strings.TrimSpace(filter.Prefab)
 	filter.WorldID = strings.TrimSpace(filter.WorldID)
-	if len([]rune(filter.Query)) > 128 || len(filter.Prefab) > 128 || (filter.Status != "" && filter.Status != "online" && filter.Status != "offline") {
+	if len([]rune(filter.Query)) > 128 || len(filter.Prefab) > 128 || (filter.Status != "" && filter.Status != "online" && filter.Status != "offline") || (filter.Scope != "" && filter.Scope != "current" && filter.Scope != "history") {
 		return ListFilter{}, ErrInvalidFilter
 	}
 	if filter.WorldID != "" {
@@ -1065,4 +1084,27 @@ func contains(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// ObserveWorldSession is called with already validated runtime evidence.
+func (s *Service) ObserveWorldSession(roomID, worldID, sessionID string, at time.Time) error {
+	lock := s.roomLock(roomID)
+	lock.Lock()
+	defer lock.Unlock()
+	return s.store.ObserveWorldSession(roomID, worldID, sessionID, at)
+}
+
+func (s *Service) observePassiveWorldSession(ctx context.Context, roomID, worldID string) error {
+	reader, ok := s.probe.(interface {
+		CurrentSession(context.Context, string, string) (string, time.Time, error)
+	})
+	if !ok {
+		return nil
+	}
+	session, at, err := reader.CurrentSession(ctx, roomID, worldID)
+	// Missing/stale identity is not evidence of a new save.
+	if err != nil || session == "" {
+		return nil
+	}
+	return s.store.ObserveWorldSession(roomID, worldID, session, at)
 }

@@ -407,6 +407,7 @@ type RuntimeMapRequest struct {
 // path; execution destinations still come from the installation registry. It
 // never accepts an executable, container specification or shell command.
 type RuntimeOperationRequest struct {
+	PlayerInventory  *PlayerInventoryRequest      `json:"player_inventory,omitempty"`
 	LuaRuntime       *RuntimeLuaRequest           `json:"lua_runtime,omitempty"`
 	EntityArtwork    *RuntimeEntityArtworkRequest `json:"entity_artwork,omitempty"`
 	GameInstallation *GameInstallationRequest     `json:"game_installation,omitempty"`
@@ -805,6 +806,7 @@ type RuntimeRoomRecoveryResult struct {
 }
 
 type RuntimeOperationResult struct {
+	PlayerInventory  *PlayerInventory            `json:"player_inventory,omitempty"`
 	LuaRuntime       *RuntimeLuaResult           `json:"lua_runtime,omitempty"`
 	EntityArtwork    *RuntimeEntityArtworkResult `json:"entity_artwork,omitempty"`
 	GameInstallation *GameInstallationReport     `json:"game_installation,omitempty"`
@@ -849,7 +851,7 @@ func IsRuntimeAction(value RuntimeAction) bool {
 		return true
 	}
 	switch value {
-	case RuntimeActionLuaEnsure, RuntimeActionConsoleHealth, RuntimeActionConsoleSend, RuntimeActionObserveOperation, RuntimeActionReadLogs,
+	case RuntimeActionPlayerInventory, RuntimeActionLuaEnsure, RuntimeActionConsoleHealth, RuntimeActionConsoleSend, RuntimeActionObserveOperation, RuntimeActionReadLogs,
 		RuntimeActionChatLogsList, RuntimeActionChatLogsRead, RuntimeActionReadArtifacts, RuntimeActionWorldStateRead, RuntimeActionEntityArtwork,
 		RuntimeActionMigrationExportPrepare, RuntimeActionMigrationExportRead, RuntimeActionMigrationExportRelease,
 		RuntimeActionMigrationPeerGrant, RuntimeActionMigrationFetch,

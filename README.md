@@ -81,7 +81,7 @@ LuaJIT2 来源于 [fesily/DontStarveLuaJIT2](https://github.com/fesily/DontStarv
   </tr>
   <tr>
     <td width="50%" valign="top"><strong>存档备份与恢复</strong><br><a href="docs/assets/readme/backups.zh.webp"><img src="docs/assets/readme/backups.zh.webp" alt="存档备份与恢复" width="100%"></a><br><sub>查看完整房间备份，按需恢复或导入存档。</sub></td>
-    <td width="50%" valign="top"><strong>玩家管理</strong><br><a href="docs/assets/readme/players.zh.webp"><img src="docs/assets/readme/players.zh.webp" alt="玩家管理" width="100%"></a><br><sub>查看角色、在线状态与游玩记录。</sub></td>
+    <td width="50%" valign="top"><strong>玩家管理</strong><br><a href="docs/assets/readme/players.zh.webp"><img src="docs/assets/readme/players.zh.webp" alt="玩家管理" width="100%"></a><br><sub>查看角色、在线状态、游玩记录与<a href="docs/player-inventory.md">玩家背包</a>。</sub></td>
   </tr>
 </table>
 

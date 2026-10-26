@@ -37,7 +37,7 @@ func (s *Service) ExecuteRuntime(ctx context.Context, targetID string, request s
 	if request.Action == shared.RuntimeActionConsoleSend && request.Console != nil && request.Console.CommandDocument != nil && !containsString(agent.Capabilities, shared.RuntimeCommandDocumentCapability) {
 		return RuntimeExecutionResult{}, errors.New("Agent 不支持当前 Runtime 命令文件格式，请先升级 Agent")
 	}
-	registeredScope := agent.InstallationRegistrySupported && (request.Action == shared.RuntimeActionLuaEnsure || strings.HasPrefix(string(request.Action), "runtime.mods.") || request.Action == shared.RuntimeActionModConfigurationWrite)
+	registeredScope := agent.InstallationRegistrySupported && (request.Action == shared.RuntimeActionLuaEnsure || request.Action == shared.RuntimeActionPlayerInventory || strings.HasPrefix(string(request.Action), "runtime.mods.") || request.Action == shared.RuntimeActionModConfigurationWrite)
 	if registeredScope || shared.IsGameInstallationAction(request.Action) || request.Action == shared.RuntimeActionLuaJITObserve || (request.Action == shared.RuntimeActionLuaJITInstall || request.Action == shared.RuntimeActionLuaJITDownload) {
 		registered := false
 		for _, installation := range agent.Installations {
@@ -84,6 +84,8 @@ func runtimeCapability(action shared.RuntimeAction) string {
 		return "runtime.game-install.v1"
 	}
 	switch action {
+	case shared.RuntimeActionPlayerInventory:
+		return shared.PlayerInventoryCapability
 	case shared.RuntimeActionLuaEnsure:
 		return shared.RuntimeLuaCapability
 	case shared.RuntimeActionConsoleHealth, shared.RuntimeActionConsoleSend:

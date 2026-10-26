@@ -49,11 +49,12 @@ type StoppedSampler interface {
 }
 
 type Service struct {
-	rooms   RoomCatalog
-	runtime Runtime
-	store   *Store
-	sampler Sampler
-	now     func() time.Time
+	sessionObserver func(string, string, string, time.Time) error
+	rooms           RoomCatalog
+	runtime         Runtime
+	store           *Store
+	sampler         Sampler
+	now             func() time.Time
 }
 
 type listWorldRead struct {
@@ -219,6 +220,11 @@ func (s *Service) snapshotFromRead(roomID string, world rooms.World, read listWo
 	item = decorateSnapshot(item, read.runtimeStatus.State, s.now())
 	item.RuntimeCode, item.RuntimeMessage = read.runtimeStatus.Code, read.runtimeStatus.Message
 	item.ObservationState, item.ObservationCode, item.ObservationError = read.observationState, read.observationCode, read.observationError
+	if read.hasSnapshot && item.SessionID != "" && s.sessionObserver != nil && (item.Freshness == FreshnessLive || item.Freshness == FreshnessPaused) {
+		if err := s.sessionObserver(roomID, world.ID, item.SessionID, item.ObservedAt); err != nil {
+			item.ObservationState, item.ObservationCode, item.ObservationError = ObservationStateFailed, "PLAYER_SESSION_SYNC_FAILED", err.Error()
+		}
+	}
 	return item
 }
 
@@ -389,7 +395,7 @@ func snapshotFromObservation(roomID string, world rooms.World, observation Obser
 	}
 	return Snapshot{
 		RoomID: roomID, WorldID: world.ID, WorldName: world.Name, WorldRole: string(world.Role),
-		Season: observation.Season, Phase: observation.Phase, Cycles: observation.Cycles,
+		SessionID: observation.SessionID, Season: observation.Season, Phase: observation.Phase, Cycles: observation.Cycles,
 		ElapsedDaysInSeason: observation.ElapsedDaysInSeason, RemainingDaysInSeason: observation.RemainingDaysInSeason,
 		SeasonProgress: observation.SeasonProgress, DayProgress: observation.DayProgress, PhaseProgress: observation.PhaseProgress,
 		Precipitation: observation.Precipitation, MoonPhase: observation.MoonPhase, Temperature: observation.Temperature,
@@ -423,4 +429,10 @@ func validateObservation(observation Observation) error {
 		}
 	}
 	return nil
+}
+
+// ConfigureSessionObserver reuses validated observations; no additional runtime
+// polling is needed to invalidate players when a paused world has been reset.
+func (s *Service) ConfigureSessionObserver(observer func(string, string, string, time.Time) error) {
+	s.sessionObserver = observer
 }

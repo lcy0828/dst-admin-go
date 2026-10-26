@@ -1096,6 +1096,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err != nil {
 		return nil, err
 	}
+	worldStateService.ConfigureSessionObserver(playerService.ObserveWorldSession)
 	worldStateHandler := httpapi.NewWorldStateHandler(worldStateService)
 	automationStore := automation.NewStore(models.DB(), tablePrefix)
 	if err := automationStore.Migrate(); err != nil {

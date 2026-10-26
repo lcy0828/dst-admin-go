@@ -41,6 +41,7 @@ var allowedRuntimeCommands = map[string]bool{
 	"system.ping":             true,
 	"console.execute":         true,
 	"catalog.entities":        true,
+	"player.inventory":        true,
 	"telemetry.emit":          true,
 	"player.kick":             true,
 	"player.announce":         true,

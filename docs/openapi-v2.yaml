@@ -4208,6 +4208,7 @@ paths:
       operationId: listRoomPlayers
       summary: List persisted player observations and current access state
       parameters:
+        - { name: scope, in: query, description: Current save records by default; history reads archived previous or unverified save records without game actions, schema: { type: string, enum: [current, history], default: current } }
         - { name: query, in: query, schema: { type: string, maxLength: 128 } }
         - { name: status, in: query, schema: { type: string, enum: [online, offline] } }
         - { name: worldId, in: query, schema: { type: string } }
@@ -4231,6 +4232,34 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/players/{playerId}/inventory:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }]
+    get:
+      tags: [Players, Entity Catalog]
+      operationId: getRoomPlayerInventory
+      x-dst-tool: { readOnly: true, tags: [inventory, save], runtime: any }
+      summary: Read a player's carried items from live memory or their current Session save without saving the game
+      description: >-
+        Includes equipment, inventory, held items, standard containers and serialized bundles. Works on the applied local or Agent node.
+        auto chooses live only with confirmed presence; stopped or confirmed offline players use saved data. Ambiguous worlds or directories return candidates.
+        A live read failure never silently falls back to save. Explicit save does not require the game or Lua Runtime to run.
+        Saved file time is not a logout time. Missing saved attribute denominators are unknown, not zero or full.
+        Complete covers supported standard components, not arbitrary Mod-private storage. Partial results are not empty inventories.
+        Imported saves can be inspected by a known player ID without a historical player database record.
+      parameters:
+        - { name: source, in: query, schema: { type: string, enum: [auto, live, save], default: auto } }
+        - { name: worldId, in: query, schema: { type: string }, description: Select a specific world's source; do not guess during migration }
+        - { name: sourceId, in: query, schema: { type: string, pattern: '^[a-f0-9]{64}$' }, description: Opaque source identifier returned in candidates; select its worldId together with it }
+        - { name: refresh, in: query, schema: { type: boolean, default: false }, description: Bypass completed parsing cache; still coalesces in-flight reads }
+      responses:
+        "200": { description: Complete or explicitly partial inventory, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerInventoryEnvelope" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: SOURCE_AMBIGUOUS, PLAYER_LOCATION_UNCERTAIN, PLAYER_NOT_READY, PLAYER_NOT_ONLINE or SAVE_CHANGED; error.details.candidates lists selectable sources, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "429": { description: INVENTORY_BUSY; retry manually after Retry-After, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "503": { description: TARGET_OFFLINE or INVENTORY_CAPABILITY_UNAVAILABLE, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "504": { description: INVENTORY_TIMEOUT; the command is not replayed, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
   /rooms/{roomId}/players/actions/refresh:
     parameters: [{ $ref: "#/components/parameters/RoomID" }]
     post:
@@ -9835,11 +9864,87 @@ components:
         data: { $ref: "#/components/schemas/ModPublicationList" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
+    InventoryMetric:
+      type: object
+      additionalProperties: false
+      required: [value, maximum, ratio, unit, availability]
+      properties:
+        value: { type: [number, "null"] }
+        maximum: { type: [number, "null"] }
+        ratio: { type: [number, "null"], minimum: 0, maximum: 1 }
+        unit: { type: string }
+        availability: { type: string, enum: [known, value_only, not_saved, unknown] }
+        reason: { type: string }
+    InventoryItem:
+      type: object
+      additionalProperties: false
+      required: [nodeId, slot, prefab, name, nameSource, count, recordSource, contents, slotCount]
+      properties:
+        nodeId: { type: string, description: Identity within this response only }
+        slot: { type: string }
+        prefab: { type: string }
+        name: { type: string }
+        nameSource: { type: string }
+        count: { type: [number, "null"] }
+        recordSource: { type: string, enum: [live, serialized] }
+        metrics: { type: object, additionalProperties: { $ref: "#/components/schemas/InventoryMetric" } }
+        contents: { type: array, items: { $ref: "#/components/schemas/InventoryItem" } }
+        containerKind: { type: string }
+        slotCount: { type: [integer, "null"] }
+        warnings: { type: array, items: { type: string } }
+    InventoryCandidate:
+      type: object
+      additionalProperties: false
+      required: [sourceId, worldId, worldName, sessionId, fileModifiedAt]
+      properties:
+        sourceId: { type: string }
+        worldId: { type: string }
+        worldName: { type: string }
+        sessionId: { type: string }
+        fileModifiedAt: { type: [string, "null"], format: date-time }
+    PlayerInventory:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, playerId, roomId, worldId, worldName, source, sessionId, character, capturedAt, savedAt, fileModifiedAt, timeSource, cacheAgeMs, status, coverage, empty, slotCount, equipment, inventory, activeItem, warnings, limitsReached]
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        playerId: { type: string }
+        roomId: { type: string }
+        worldId: { type: string }
+        worldName: { type: string }
+        source: { type: string, enum: [live, save] }
+        sourceId: { type: string }
+        sessionId: { type: string }
+        character: { type: string }
+        capturedAt: { type: string, format: date-time }
+        savedAt: { type: [string, "null"], format: date-time }
+        fileModifiedAt: { type: [string, "null"], format: date-time }
+        timeSource: { type: string, enum: [captured, file_modified] }
+        cacheAgeMs: { type: integer, minimum: 0 }
+        status: { type: string, enum: [complete, partial] }
+        coverage: { type: string, const: standard_components }
+        empty: { type: boolean }
+        slotCount: { type: [integer, "null"] }
+        equipment: { type: array, items: { $ref: "#/components/schemas/InventoryItem" } }
+        inventory: { type: array, items: { $ref: "#/components/schemas/InventoryItem" } }
+        activeItem: { anyOf: [{ $ref: "#/components/schemas/InventoryItem" }, { type: "null" }] }
+        warnings: { type: array, items: { type: string } }
+        limitsReached: { type: array, items: { type: string } }
+    PlayerInventoryEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/PlayerInventory" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     Player:
       type: object
       additionalProperties: false
       required: [id, roomId, worldId, worldName, name, online, banned, admin, age, firstSeenAt, lastSeenAt, statusChangedAt, lastRefreshedAt, presenceStatus, fields, presenceConflict, observedWorldIds]
       properties:
+        sessionId: { type: string, description: Validated per-world save session; absent for legacy observations }
+        historical: { type: boolean, description: True for a read-only archived record }
+        historyId: { type: integer, minimum: 1, description: Stable archived record identifier }
         id: { type: string, pattern: '^[A-Za-z0-9_-]{1,128}$' }
         roomId: { type: string }
         worldId: { type: string }
@@ -9902,6 +10007,7 @@ components:
       additionalProperties: false
       required: [items, total, online, staleOnline, offline, banned, limit, offset]
       properties:
+        stale: { type: integer, minimum: 0, description: All records with stale presence including offline records; staleOnline retains its safety-oriented meaning }
         items: { type: array, items: { $ref: "#/components/schemas/Player" } }
         total: { type: integer, minimum: 0 }
         online:
@@ -9947,6 +10053,7 @@ components:
       additionalProperties: false
       required: [id, roomId, worldId, worldName, worldRole, observedAt, runtimeState, freshness, stale]
       properties:
+        sessionId: { type: string, description: Save session belonging to this world shard }
         id: { type: integer, format: int64 }
         roomId: { type: string }
         worldId: { type: string }

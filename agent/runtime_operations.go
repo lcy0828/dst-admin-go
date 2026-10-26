@@ -20,6 +20,7 @@ import (
 	"dont/internal/dstruntime"
 	"dont/internal/entityart"
 	"dont/internal/networkprobe"
+	"dont/internal/playerinventory"
 	"dont/internal/roomops"
 	"dont/internal/runtimefiles"
 	"dont/internal/shards"
@@ -75,6 +76,9 @@ func (a *Agent) executeRuntimeOperationContext(parent context.Context, commandTy
 	defer cancel()
 
 	if !shared.RuntimeOperationRequiresLease(*request) {
+		if request.Action == shared.RuntimeActionPlayerInventory {
+			return a.readPlayerInventory(operationContext, installation, *request)
+		}
 		if request.Action == shared.RuntimeActionEntityArtwork {
 			data, err := entityart.Default.Read(operationContext, runtimeModServerPath(installation), runtimeWorkshopContentPath(installation), request.EntityArtwork.Prefab, request.EntityArtwork.ModID)
 			result := runtimeResult(*request, shared.RuntimeOutcomeObserved, "Entity artwork read")
@@ -223,6 +227,16 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 			request.LeaseExpiresAt.After(now.Add(10*time.Minute)) {
 			return errors.New("Runtime 操作租约无效或已过期")
 		}
+	}
+	if request.PlayerInventory != nil && request.Action != shared.RuntimeActionPlayerInventory {
+		return errors.New("Runtime 操作包含无关玩家背包负载")
+	}
+	if request.Action == shared.RuntimeActionPlayerInventory {
+		if request.PlayerInventory == nil || !playerinventory.ValidRequest(*request.PlayerInventory) || request.PlayerInventory.Source == "auto" ||
+			request.LuaRuntime != nil || request.EntityArtwork != nil || request.GameInstallation != nil || request.LuaJIT != nil || request.Console != nil || request.Logs != nil || request.ChatLogs != nil || request.Artifacts != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil || request.Network != nil || request.CPU != nil || request.Configuration != nil || request.Map != nil {
+			return errors.New("玩家背包查询负载无效")
+		}
+		return nil
 	}
 	if request.Action == shared.RuntimeActionLuaEnsure {
 		if request.LuaRuntime == nil || request.LuaRuntime.Version == "" || len(request.LuaRuntime.Version) > 32 ||

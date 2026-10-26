@@ -39,6 +39,7 @@ const (
 	CapabilityArtifacts        Capability = "artifacts"
 	CapabilityWorldStateRead   Capability = "worldStateRead"
 	CapabilityEntityArtwork    Capability = "entityArtwork"
+	CapabilityPlayerInventory  Capability = "playerInventory"
 	CapabilitySnapshotBarrier  Capability = "snapshotBarrier"
 	CapabilityBackupStage      Capability = "backupStage"
 	CapabilityBackupRestore    Capability = "backupRestore"
@@ -419,6 +420,8 @@ func runtimeCapabilities(values []string) []Capability {
 			appendCapability(CapabilityArtifacts)
 		case "runtime.entity-artwork.v1":
 			appendCapability(CapabilityEntityArtwork)
+		case shared.PlayerInventoryCapability:
+			appendCapability(CapabilityPlayerInventory)
 		case "runtime.worldstate.read.v1":
 			appendCapability(CapabilityWorldStateRead)
 		case "runtime.backup.v1":

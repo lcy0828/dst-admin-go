@@ -279,7 +279,7 @@ func (d *Native) Kind() Kind { return KindNative }
 func (d *Native) Capabilities() []Capability {
 	result := []Capability{
 		CapabilityLifecycle, CapabilityConsoleInput, CapabilityConsoleHealth, CapabilityRawConsole,
-		CapabilityOperationProof, CapabilityLogContinuation, CapabilityChatHistory, CapabilityArtifacts, CapabilityWorldStateRead, CapabilityEntityArtwork,
+		CapabilityOperationProof, CapabilityLogContinuation, CapabilityChatHistory, CapabilityArtifacts, CapabilityWorldStateRead, CapabilityEntityArtwork, CapabilityPlayerInventory,
 		CapabilitySnapshotBarrier, CapabilityBackupStage, CapabilityBackupRestore, CapabilityRestoreCollector, CapabilityConfigRead, CapabilityConfigSecrets, CapabilityConfigPublish, CapabilityConfigApply,
 		CapabilityShardRouting,
 	}

@@ -11,6 +11,7 @@ import (
 )
 
 type playerRecord struct {
+	SessionID        string `gorm:"type:varchar(128)"`
 	RoomID           string `gorm:"type:varchar(255);not null;unique_index:idx_player_room_user;index"`
 	UserID           string `gorm:"type:varchar(128);not null;unique_index:idx_player_room_user"`
 	WorldID          string `gorm:"type:varchar(255);not null;index"`
@@ -73,7 +74,7 @@ func (s *Store) Migrate() error {
 	if err := s.db.Table(s.bansTable).AutoMigrate(&banRecord{}).Error; err != nil {
 		return fmt.Errorf("migrate player bans: %w", err)
 	}
-	return nil
+	return s.migrateSessions()
 }
 
 func (s *Store) ReplaceWorldSnapshot(roomID, worldID, worldName string, observations []Observation, observedAt time.Time) error {
@@ -83,6 +84,7 @@ func (s *Store) ReplaceWorldSnapshot(roomID, worldID, worldName string, observat
 }
 
 type worldSnapshot struct {
+	SessionID    string
 	WorldID      string
 	WorldName    string
 	Observations []Observation
@@ -110,6 +112,18 @@ func (s *Store) ReplaceRoomSnapshots(roomID string, snapshots []worldSnapshot) e
 		tx.Rollback()
 		return err
 	}
+
+	accepted := make([]worldSnapshot, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		ok, err := s.observeWorldSessionTx(tx, roomID, snapshot.WorldID, snapshot.SessionID, snapshot.ObservedAt)
+		if err != nil {
+			return rollback(err)
+		}
+		if ok {
+			accepted = append(accepted, snapshot)
+		}
+	}
+	snapshots = accepted
 	var current []playerRecord
 	if err := tx.Table(s.table).Where("room_id = ?", roomID).Find(&current).Error; err != nil {
 		return rollback(err)
@@ -181,10 +195,13 @@ func (s *Store) markStoppedWorldPlayersOffline(tx *gorm.DB, roomID string, snaps
 		return err
 	}
 	for _, record := range online {
+		if snapshot.ObservedAt.Before(record.LastRefreshedAt) {
+			continue
+		}
 		fieldStates := decodeFieldStates(record.FieldStates)
 		observedAt := snapshot.ObservedAt.UTC()
 		fieldStates["online"] = FieldState{Source: SourceNativeLog, ObservedAt: &observedAt, Status: FreshnessStale}
-		markFieldStale(fieldStates, "gameplayState")
+		markDynamicFieldsStale(fieldStates)
 		encoded, err := encodeFieldStates(fieldStates)
 		if err != nil {
 			return err
@@ -247,7 +264,7 @@ func (s *Store) upsertSnapshotPlayer(tx *gorm.DB, roomID string, candidate snaps
 			return err
 		}
 		record := playerRecord{
-			RoomID: roomID, UserID: observation.ID, WorldID: candidate.WorldID, WorldName: candidate.WorldName,
+			SessionID: candidate.SessionID, RoomID: roomID, UserID: observation.ID, WorldID: candidate.WorldID, WorldName: candidate.WorldName,
 			Name: observation.Name, Prefab: observation.Prefab, GameplayState: observation.GameplayState, Online: true, Admin: observation.Admin,
 			Age: observation.Age, NetID: observation.NetID, NetScore: observation.NetScore,
 			HealthPercent: observation.HealthPercent, HungerPercent: observation.HungerPercent,
@@ -291,6 +308,9 @@ func (s *Store) upsertSnapshotPlayer(tx *gorm.DB, roomID string, candidate snaps
 		"presence_conflict": presenceConflict, "observed_world_ids": encodedWorldIDs,
 		"last_seen_at": lastSeen, "last_refreshed_at": candidate.ObservedAt, "status_changed_at": statusChanged,
 	}
+	if candidate.SessionID != "" && worldID == candidate.WorldID {
+		updates["session_id"] = candidate.SessionID
+	}
 	setObservedMetric(updates, "net_score", observation.NetScore)
 	setObservedMetric(updates, "health_percent", observation.HealthPercent)
 	setObservedMetric(updates, "hunger_percent", observation.HungerPercent)
@@ -309,7 +329,7 @@ func (s *Store) upsertSnapshotPlayer(tx *gorm.DB, roomID string, candidate snaps
 	if observation.GameplayState != "" {
 		updates["gameplay_state"] = observation.GameplayState
 	}
-	if observation.Age == 0 && existing.Age > 0 {
+	if observation.Age == 0 && existing.Age > 0 && observation.Fields["age"].Status != FreshnessLive {
 		delete(updates, "age")
 	}
 	if observation.NetID == "" && existing.NetID != "" {
@@ -327,6 +347,9 @@ func (s *Store) markMissingSnapshotPlayersOffline(tx *gorm.DB, roomID string, sn
 		return err
 	}
 	for _, record := range online {
+		if snapshot.ObservedAt.Before(record.LastRefreshedAt) {
+			continue
+		}
 		if _, observed := winners[record.UserID]; observed {
 			continue
 		}
@@ -336,7 +359,7 @@ func (s *Store) markMissingSnapshotPlayersOffline(tx *gorm.DB, roomID string, sn
 			source = SourceNativeLog
 		}
 		fieldStates["online"] = liveField(source, snapshot.ObservedAt)
-		markFieldStale(fieldStates, "gameplayState")
+		markDynamicFieldsStale(fieldStates)
 		encodedFieldStates, err := encodeFieldStates(fieldStates)
 		if err != nil {
 			return err
@@ -372,6 +395,17 @@ func (s *Store) MergeWorldHistory(roomID, worldID, worldName string, observation
 }
 
 func (s *Store) mergeWorldHistoryTx(tx *gorm.DB, roomID, worldID, worldName string, observations []Observation, observedAt time.Time) (int, error) {
+	// Unscoped log archives can contain players from any previous save. Once
+	// the runtime has identified this world, only session-bound telemetry may
+	// populate current records. Archived rows remain available via scope=history.
+	var session playerWorldSession
+	found := tx.Table(s.table+"_session").Where("room_id = ? AND world_id = ?", roomID, worldID).First(&session)
+	if found.Error == nil {
+		return 0, s.mergeSessionDisconnects(tx, roomID, worldID, session.SessionID, observations, observedAt)
+	}
+	if !gorm.IsRecordNotFoundError(found.Error) {
+		return 0, found.Error
+	}
 	inserted := 0
 	for _, observation := range observations {
 		historyWorldID, historyWorldName := worldID, worldName
@@ -502,7 +536,7 @@ func (s *Store) markRecordsOffline(roomID, fieldClause string, fieldValue interf
 	for _, record := range records {
 		states := decodeFieldStates(record.FieldStates)
 		states["online"] = liveField(SourceNativeLog, observedAt)
-		markFieldStale(states, "gameplayState")
+		markDynamicFieldsStale(states)
 		encoded, err := encodeFieldStates(states)
 		if err != nil {
 			return rollback(err)
@@ -530,6 +564,9 @@ func (s *Store) Get(roomID, userID string) (Player, error) {
 }
 
 func (s *Store) List(roomID string, filter ListFilter) ([]Player, int, error) {
+	if filter.Scope == "history" {
+		return s.listHistory(roomID, filter)
+	}
 	query := s.db.Table(s.table).Where("room_id = ?", roomID)
 	if filter.Status == "online" {
 		query = query.Where("online = ?", true)
@@ -656,11 +693,14 @@ func utcPointer(value *time.Time) *time.Time {
 func playerFromRecord(record playerRecord) Player {
 	fields := decodeFieldStates(record.FieldStates)
 	presence := fields["online"]
+	if !record.Online || presence.Status != FreshnessLive {
+		markDynamicFieldsStale(fields)
+	}
 	if presence.Status == "" {
 		presence.Status = FreshnessUnavailable
 	}
 	return Player{
-		ID: record.UserID, RoomID: record.RoomID, WorldID: record.WorldID, WorldName: record.WorldName,
+		SessionID: record.SessionID, ID: record.UserID, RoomID: record.RoomID, WorldID: record.WorldID, WorldName: record.WorldName,
 		WorldConfirmed: storedWorldConfirmed(record),
 		Name:           record.Name, Prefab: record.Prefab, GameplayState: record.GameplayState, Online: record.Online, Admin: record.Admin, Age: record.Age,
 		NetID: record.NetID, NetScore: record.NetScore, Performance: record.Performance, HealthPercent: record.HealthPercent,

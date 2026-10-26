@@ -14,6 +14,7 @@ var (
 )
 
 type Snapshot struct {
+	SessionID             string           `json:"sessionId,omitempty"`
 	ID                    uint             `json:"id"`
 	RoomID                string           `json:"roomId"`
 	WorldID               string           `json:"worldId"`
@@ -71,6 +72,7 @@ const (
 )
 
 type Observation struct {
+	SessionID             string
 	Season                string
 	Phase                 string
 	Cycles                *int

@@ -24,6 +24,9 @@ func (e *FieldError) Error() string { return ErrInvalidAction.Error() }
 func (e *FieldError) Unwrap() error { return ErrInvalidAction }
 
 type Player struct {
+	HistoryID            uint            `json:"historyId,omitempty"`
+	SessionID            string          `json:"sessionId,omitempty"`
+	Historical           bool            `json:"historical"`
 	ID                   string          `json:"id"`
 	RoomID               string          `json:"roomId"`
 	WorldID              string          `json:"worldId"`
@@ -125,6 +128,7 @@ type Observation struct {
 }
 
 type ListFilter struct {
+	Scope           string
 	Query           string
 	Status          string
 	WorldID         string
@@ -135,6 +139,7 @@ type ListFilter struct {
 }
 
 type List struct {
+	Stale                int        `json:"stale"`
 	Items                []Player   `json:"items"`
 	Total                int        `json:"total"`
 	Online               int        `json:"online"`

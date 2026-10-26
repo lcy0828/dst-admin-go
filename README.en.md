@@ -81,7 +81,7 @@ Actual application screens with demo data. Click an image to enlarge.
   </tr>
   <tr>
     <td width="50%" valign="top"><strong>Save backups and restore</strong><br><a href="docs/assets/readme/backups.en.webp"><img src="docs/assets/readme/backups.en.webp" alt="Save backups and restore" width="100%"></a><br><sub>Browse room backups, restore a world, or import saves.</sub></td>
-    <td width="50%" valign="top"><strong>Player management</strong><br><a href="docs/assets/readme/players.en.webp"><img src="docs/assets/readme/players.en.webp" alt="Player management" width="100%"></a><br><sub>View characters, player presence, and play history.</sub></td>
+    <td width="50%" valign="top"><strong>Player management</strong><br><a href="docs/assets/readme/players.en.webp"><img src="docs/assets/readme/players.en.webp" alt="Player management" width="100%"></a><br><sub>View characters, player presence, play history, and <a href="docs/player-inventory.md#english">inventories</a>.</sub></td>
   </tr>
 </table>
 
