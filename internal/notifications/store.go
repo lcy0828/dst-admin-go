@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"dont/internal/softwareupdate"
 	"github.com/google/uuid"
 	"github.com/jinzhu/gorm"
 )
@@ -41,6 +42,11 @@ type deliveryRecord struct {
 	CompletedAt   *time.Time
 }
 
+type releaseNoticeRecord struct {
+	ID      string `gorm:"primary_key;type:varchar(64)"`
+	Version string `gorm:"type:varchar(64);not null"`
+}
+
 type Store struct {
 	db                                   *gorm.DB
 	channelsTable, deliveriesTable, root string
@@ -61,7 +67,7 @@ func (s *Store) Migrate() error {
 	if err := s.db.Table(s.deliveriesTable).AutoMigrate(&deliveryRecord{}).Error; err != nil {
 		return err
 	}
-	return nil
+	return s.db.Table(s.channelsTable + "_release").AutoMigrate(&releaseNoticeRecord{}).Error
 }
 
 func (s *Store) Channels() ([]Channel, error) {
@@ -263,6 +269,26 @@ func (s *Store) Enqueue(event Event, channels []Channel) ([]Delivery, error) {
 	items := make([]Delivery, 0, len(channels))
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		for _, channel := range channels {
+			if (event.Kind == "software.available" || event.Kind == "agent.software.available") && event.Version != "" {
+				if _, ok := softwareupdate.NormalizeVersion(event.Version); !ok {
+					return ErrInvalid
+				}
+				key := sha256.Sum256([]byte(channel.ID + "\x00" + event.Kind + "\x00" + event.TargetID))
+				id := hex.EncodeToString(key[:])
+				var notice releaseNoticeRecord
+				err := tx.Table(s.channelsTable+"_release").Where("id = ?", id).First(&notice).Error
+				if err != nil && !gorm.IsRecordNotFoundError(err) {
+					return err
+				}
+				if err == nil && softwareupdate.CompareVersions(notice.Version, event.Version) >= 0 {
+					continue
+				}
+				notice.ID = id
+				notice.Version = event.Version
+				if err := tx.Table(s.channelsTable + "_release").Save(&notice).Error; err != nil {
+					return err
+				}
+			}
 			hash := sha256.Sum256([]byte(channel.ID + "\x00" + event.ID))
 			row := deliveryRecord{ID: hex.EncodeToString(hash[:]), ChannelID: channel.ID, ChannelName: channel.Name, EventData: string(data), Status: "queued", CreatedAt: time.Now().UTC(), NextAttemptAt: time.Now().UTC()}
 			if err := tx.Table(s.deliveriesTable).Where("id = ?", row.ID).FirstOrCreate(&row).Error; err != nil {

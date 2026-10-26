@@ -472,12 +472,32 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	softwareService := softwareupdate.New(softwareupdate.Config{
+		Proxy: func() (string, string, error) {
+			value, err := systemSettingsService.WorkshopConfig()
+			return value.ProxyMode, value.ProxyURL, err
+		},
 		Root: softwareRoot, Current: buildinfo.Current(), BaseVersion: os.Getenv("DST_ADMIN_UPDATE_BASE_VERSION"),
 		Platform: runtime.GOOS + "-" + runtime.GOARCH, Managed: softwareupdate.ManagedChild(),
-		OnAvailable: func(version string) {
-			notificationService.Emit(notifications.Event{ID: "software:" + version, Kind: "software.available", Title: "DST Admin 发现新版 / Update available", Message: version + "\n在系统设置 → 软件更新查看 / Open System settings → Software updates.", Status: "available", Severity: "info"})
+		OnRelease: func(release softwareupdate.Release) {
+			version := release.Version
+			notificationService.Emit(notifications.Event{ID: "software:" + version, Version: version, Kind: "software.available", Title: "DST Admin 发现新版 / Update available", Message: buildinfo.Current().Version + " → " + version + "\nhttps://github.com/" + softwareupdate.Repository + "/releases/tag/" + version + "\n" + release.PublishedAt.Format(time.RFC3339) + "\n在系统设置 → 软件更新查看 / Open System settings → Software updates.", Status: "available", Severity: "info"})
 		},
 	})
+	agentService.ConfigureSoftwareUpdates(softwareService, filepath.Join(softwareRoot, "agent-relay"))
+	notificationService.SetChannelChangeListener(func() { observeNotificationAgents(); softwareService.WakeChecks() })
+	if backgroundEnabled {
+		hooks.workers = append(hooks.workers, func(ctx context.Context) {
+			softwareService.RunChecks(ctx, func() bool {
+				return notificationService.Active("software.available") || notificationService.Active("agent.software.available")
+			}, func(ctx context.Context) {
+				if notificationService.Active("agent.software.available") {
+					agentService.NotifySoftwareReleases(ctx, func(id, name, current string, release softwareupdate.Release) {
+						notificationService.Emit(notifications.Event{ID: "agent-software:" + id + ":" + release.Version, Version: release.Version, Kind: "agent.software.available", TargetID: id, Title: "Agent 发现新版 / Agent update available", Message: name + " · " + current + " → " + release.Version + "\n" + release.URL + "\n" + release.PublishedAt.Format(time.RFC3339), Status: "available", Severity: "info"})
+					})
+				}
+			})
+		})
+	}
 	softwareHandler := httpapi.NewSystemSoftwareHandler(softwareService)
 	hooks.stop = append(hooks.stop, softwareService.Close)
 	beaconURL := strings.TrimSpace(config.String("catalog", "BEACON_URL", "DST_ADMIN_BEACON_URL"))

@@ -46,6 +46,7 @@ func (h *AgentHandler) Register(v2 *gin.RouterGroup) {
 	group.POST("/:agentId/commands", h.runCommand)
 	group.POST("/:agentId/actions/upgrade", h.upgrade)
 	group.GET("/:agentId/software", h.softwareStatus)
+	group.PUT("/:agentId/software/settings", h.softwareSettings)
 	group.GET("/:agentId/software/check", h.softwareCheck)
 	group.POST("/:agentId/software/actions/update", h.softwareUpdate)
 

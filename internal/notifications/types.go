@@ -13,11 +13,12 @@ var (
 	ErrSecrets  = errors.New("notification credentials are unavailable")
 )
 
-var EventKinds = []string{"room.result", "backup.result", "game.result", "mod.result", "agent.status", "security.login", "software.available", "custom"}
+var EventKinds = []string{"room.result", "backup.result", "game.result", "mod.result", "agent.status", "security.login", "software.available", "agent.software.available", "custom"}
 
 const DefaultTemplate = `{"event_id":"{{id}}","event":"{{event}}","title":"{{title}}","message":"{{message}}","status":"{{status}}","room_id":"{{roomId}}","target_id":"{{targetId}}","job_id":"{{jobId}}","timestamp":"{{timestamp}}"}`
 
 type Event struct {
+	Version    string    `json:"version,omitempty"`
 	ID         string    `json:"id"`
 	Kind       string    `json:"kind"`
 	Title      string    `json:"title"`

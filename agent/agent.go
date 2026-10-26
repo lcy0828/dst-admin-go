@@ -1232,7 +1232,7 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 	if updateProfile.Mode == "self" {
 		capabilities = append(capabilities, shared.AgentUpgradeCommand)
 		if a.software != nil {
-			capabilities = append(capabilities, shared.AgentSoftwareUpdateCapability)
+			capabilities = append(capabilities, shared.AgentSoftwareUpdateCapability, shared.AgentSoftwareSettingsCapability)
 		}
 	}
 	deploymentCapabilities, runtimeProfiles, capabilityIssues := runtimeDeploymentCapabilities(a.Config.RuntimeInstallations)

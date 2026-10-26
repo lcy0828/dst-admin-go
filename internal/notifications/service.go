@@ -108,7 +108,7 @@ func (s *Service) emit(event Event, channelID string, test bool) ([]Delivery, er
 	s.mu.RLock()
 	var selected []Channel
 	for _, channel := range s.channels {
-		if test && channel.ID == channelID || !test && channel.Enabled && slices.Contains(channel.Events, event.Kind) && (!channel.FailuresOnly || event.Severity == "error" || event.Severity == "warning") {
+		if test && channel.ID == channelID || !test && channel.Enabled && slices.Contains(channel.Events, event.Kind) && (!channel.FailuresOnly || event.Kind == "software.available" || event.Kind == "agent.software.available" || event.Severity == "error" || event.Severity == "warning") {
 			selected = append(selected, channel)
 		}
 	}

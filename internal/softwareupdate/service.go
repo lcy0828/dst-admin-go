@@ -3,7 +3,6 @@ package softwareupdate
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -30,22 +29,29 @@ type Config struct {
 	FreeSpace          func(context.Context, string) (uint64, error)
 	ValidateExecutable func(context.Context, string, string, string) error
 	OnAvailable        func(string)
+	OnRelease          func(Release)
+	Proxy              func() (string, string, error)
 }
 
 type Service struct {
-	config    Config
-	mu        sync.Mutex
-	checkMu   sync.Mutex
-	check     Check
-	operation *Operation
-	cancel    context.CancelFunc
-	done      chan struct{}
-	guard     func(context.Context) (func(), error)
-	closed    bool
-	paused    bool
+	config        Config
+	mu            sync.Mutex
+	checkMu       sync.Mutex
+	settingsMu    sync.Mutex
+	checkKey      string
+	checkWake     chan struct{}
+	managedClient bool
+	check         Check
+	operation     *Operation
+	cancel        context.CancelFunc
+	done          chan struct{}
+	guard         func(context.Context) (func(), error)
+	closed        bool
+	paused        bool
 }
 
 func New(config Config) *Service {
+	managedClient := config.Client == nil
 	if config.Client == nil {
 		if config.Kind == "agent" {
 			config.Client = NewAgentGitHubClient(nil)
@@ -74,7 +80,7 @@ func New(config Config) *Service {
 			config.ValidateExecutable = validateAgentExecutable
 		}
 	}
-	return &Service{config: config}
+	return &Service{config: config, managedClient: managedClient, checkWake: make(chan struct{}, 1)}
 }
 
 func (s *Service) SetRestartGuard(guard func(context.Context) (func(), error)) {
@@ -101,7 +107,11 @@ func (s *Service) supported() (bool, string) {
 
 func (s *Service) Snapshot() (Snapshot, error) {
 	supported, reason := s.supported()
-	result := Snapshot{Current: s.config.Current, Platform: s.config.Platform, Supported: supported, Ready: supported && s.config.Ready(), UnsupportedReason: reason}
+	settings, err := s.Settings()
+	if err != nil {
+		return Snapshot{}, err
+	}
+	result := Snapshot{Settings: settings, Current: s.config.Current, Platform: s.config.Platform, Supported: supported, Ready: supported && s.config.Ready(), UnsupportedReason: reason}
 	state, err := readState(s.config.Root)
 	if err != nil {
 		return result, err
@@ -144,22 +154,38 @@ func (s *Service) PauseIfIdle() (func(), error) {
 }
 
 func (s *Service) Check(ctx context.Context, force bool, source string) (Snapshot, error) {
-	if !ValidSource(source) {
-		return Snapshot{}, ErrInvalid
+	client, source, _, key, err := s.ResolveNetwork(source, false)
+	if err != nil {
+		return Snapshot{}, err
 	}
+	defer closeReleaseClient(client)
 	s.checkMu.Lock()
 	defer s.checkMu.Unlock()
 	s.mu.Lock()
 	last := s.check.CheckedAt
-	if !last.IsZero() && (time.Since(last) < 5*time.Second || !force && time.Since(last) < 20*time.Minute) {
+	if s.checkKey == key && !last.IsZero() && (time.Since(last) < 5*time.Second || !force && time.Since(last) < 20*time.Minute) {
 		s.check.Cached = true
+		var available *Release
+		if s.check.HasUpdate && s.check.Latest != nil && s.check.Warning == "" {
+			copy := *s.check.Latest
+			available = &copy
+		}
 		s.mu.Unlock()
+		// A newly subscribed channel can use the cached release immediately.
+		// Notification delivery owns persistent per-channel deduplication.
+		if available != nil && s.config.OnRelease != nil {
+			s.config.OnRelease(*available)
+		}
 		return s.Snapshot()
 	}
+	if s.checkKey != key {
+		s.check = Check{}
+		s.checkKey = key
+	}
 	s.mu.Unlock()
-	checkCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	checkCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	release, err := s.config.Client.Latest(checkCtx, s.config.Platform, source)
+	release, err := client.Latest(checkCtx, s.config.Platform, source)
 	if err == nil && release == nil {
 		err = ErrInvalid
 	}
@@ -180,6 +206,9 @@ func (s *Service) Check(ctx context.Context, force bool, source string) (Snapsho
 	if available && s.config.OnAvailable != nil {
 		s.config.OnAvailable(release.Version)
 	}
+	if available && s.config.OnRelease != nil {
+		s.config.OnRelease(*release)
+	}
 	return s.Snapshot()
 }
 
@@ -192,12 +221,32 @@ func newID() string {
 }
 
 func (s *Service) Start(version, source string) (Operation, error) {
-	return s.StartWithClient(version, source, s.config.Client)
+	client, source, settings, _, err := s.ResolveNetwork(source, false)
+	if err != nil {
+		return Operation{}, err
+	}
+	op, err := s.startWithSettings(version, source, client, settings)
+	if err != nil {
+		closeReleaseClient(client)
+	}
+	return op, err
 }
 
 // StartWithClient permits authenticated controller transfer without changing
 // the client's source for concurrent version checks or later updates.
 func (s *Service) StartWithClient(version, source string, client ReleaseClient) (Operation, error) {
+	settings, err := s.settings()
+	if err != nil {
+		return Operation{}, err
+	}
+	return s.startWithSettings(version, source, client, settings)
+}
+func (s *Service) startWithSettings(version, source string, client ReleaseClient, settings Settings) (Operation, error) {
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+	if source == "" {
+		source = settings.Source
+	}
 	version, valid := NormalizeVersion(version)
 	if !valid || !ValidSource(source) {
 		return Operation{}, ErrInvalid
@@ -238,7 +287,7 @@ func (s *Service) StartWithClient(version, source string, client ReleaseClient) 
 	if err := writeState(s.config.Root, state); err != nil {
 		return Operation{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(settings.TimeoutMinutes)*time.Minute)
 	s.cancel = cancel
 	s.done = make(chan struct{})
 	s.operation = &operation
@@ -308,6 +357,7 @@ func (s *Service) phase(id, phase string, progress int, failure error, releaseID
 
 func (s *Service) download(ctx context.Context, operation Operation, source string, client ReleaseClient) {
 	var finalErr error
+	defer closeReleaseClient(client)
 	defer func() {
 		if finalErr != nil {
 			_ = s.phase(operation.ID, "failed", 0, finalErr, "")
@@ -332,7 +382,15 @@ func (s *Service) prepareWithClient(ctx context.Context, operation Operation, so
 	if client == nil {
 		return ErrInvalid
 	}
-	release, err := client.Latest(ctx, s.config.Platform, source)
+	var release *Release
+	var err error
+	if fixed, ok := client.(interface {
+		Release(context.Context, string, string, string) (*Release, error)
+	}); ok {
+		release, err = fixed.Release(ctx, s.config.Platform, source, operation.Version)
+	} else {
+		release, err = client.Latest(ctx, s.config.Platform, source)
+	}
 	if err != nil {
 		return err
 	}
@@ -361,27 +419,26 @@ func (s *Service) prepareWithClient(ctx context.Context, operation Operation, so
 	if release.Archive.Digest != "" && release.Archive.Digest != "sha256:"+fields[0] {
 		return fmt.Errorf("%w: GitHub asset digest mismatch", ErrInvalid)
 	}
-	archive, err := os.CreateTemp(s.config.Root, ".download-*")
+	archive, err := VerifiedArchive(ctx, s.config.Root, client, release.Archive, source, fields[0], func(p DownloadProgress) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if op := s.operation; op != nil && op.ID == operation.ID {
+			op.DownloadedBytes = p.Bytes
+			op.TotalBytes = p.Total
+			op.BytesPerSecond = p.Speed
+			op.Source = p.Source
+			op.Resumed = p.Resumed
+			op.Attempt = p.Attempt
+			op.UpdatedAt = time.Now().UTC()
+			if p.Total > 0 {
+				op.Progress = int(p.Bytes * 80 / p.Total)
+			}
+		}
+	})
 	if err != nil {
 		return err
 	}
-	defer os.Remove(archive.Name())
-	hash := sha256.New()
-	writer := &progressWriter{service: s, writer: io.MultiWriter(archive, hash), id: operation.ID, start: time.Now(), total: release.Archive.Size}
-	err = client.Download(ctx, release.Archive, source, writer)
-	if err == nil {
-		err = archive.Sync()
-	}
-	closeErr := archive.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	if writer.count != release.Archive.Size || hex.EncodeToString(hash.Sum(nil)) != fields[0] {
-		return fmt.Errorf("%w: downloaded archive checksum mismatch", ErrInvalid)
-	}
+	defer archive.Close()
 	if err := s.phase(operation.ID, "verifying", 85, nil, ""); err != nil {
 		return err
 	}

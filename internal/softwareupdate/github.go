@@ -19,6 +19,7 @@ type ReleaseClient interface {
 
 type GitHubClient struct {
 	client *http.Client
+	direct *http.Client
 	kind   string
 }
 
@@ -43,7 +44,7 @@ func NewGitHubClient(client *http.Client) *GitHubClient {
 }
 
 func ValidSource(source string) bool {
-	return source == "auto" || source == "direct" || source == "proxy"
+	return source == "auto" || source == "direct" || source == "proxy" || source == "mirror"
 }
 
 func trustedURL(raw string, redirect bool) error {
@@ -55,6 +56,12 @@ func trustedURL(raw string, redirect bool) error {
 	case "api.github.com":
 		if u.Path == "/repos/"+Repository+"/releases/latest" {
 			return nil
+		}
+		prefix := "/repos/" + Repository + "/releases/tags/"
+		if strings.HasPrefix(u.Path, prefix) {
+			if _, ok := NormalizeVersion(strings.TrimPrefix(u.Path, prefix)); ok {
+				return nil
+			}
 		}
 	case "github.com":
 		if u.Path == "/"+Repository+"/releases/latest/download/dst-admin-release.json" && u.RawQuery == "" {
@@ -92,7 +99,7 @@ func sourceURLs(raw, source string) ([]string, error) {
 	if source == "direct" {
 		return []string{raw}, nil
 	}
-	if source == "proxy" {
+	if source == "proxy" || source == "mirror" {
 		return []string{proxy}, nil
 	}
 	return []string{raw, proxy}, nil
@@ -110,7 +117,7 @@ func (g *GitHubClient) get(ctx context.Context, raw string) (*http.Response, err
 	req.Header.Set("User-Agent", "dst-admin-go/software-update")
 	response, err := g.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, transportError(err)
 	}
 	if response.StatusCode != http.StatusOK {
 		response.Body.Close()
@@ -125,9 +132,12 @@ func (g *GitHubClient) small(ctx context.Context, asset Asset, source string, li
 		return nil, err
 	}
 	var lastErr error
-	for _, raw := range urls {
-		attempt, cancel := context.WithTimeout(ctx, 10*time.Second)
-		response, err := g.get(attempt, raw)
+	for _, route := range g.routes(urls, source) {
+		raw := route.url
+		attempt, cancel := context.WithTimeout(ctx, 20*time.Second)
+		copy := *g
+		copy.client = route.client
+		response, err := copy.get(attempt, raw)
 		if err == nil {
 			var data []byte
 			data, err = io.ReadAll(io.LimitReader(response.Body, limit+1))
@@ -150,18 +160,37 @@ func (g *GitHubClient) small(ctx context.Context, asset Asset, source string, li
 }
 
 func (g *GitHubClient) Latest(ctx context.Context, platform, source string) (*Release, error) {
+	return g.release(ctx, platform, source, "")
+}
+func (g *GitHubClient) Release(ctx context.Context, platform, source, version string) (*Release, error) {
+	if normalized, ok := NormalizeVersion(version); !ok || version != normalized {
+		return nil, ErrInvalid
+	}
+	return g.release(ctx, platform, source, version)
+}
+func (g *GitHubClient) release(ctx context.Context, platform, source, version string) (*Release, error) {
 	if !ValidSource(source) {
 		return nil, ErrInvalid
 	}
+	apiURL := "https://api.github.com/repos/" + Repository + "/releases/latest"
+	indexURL := "https://github.com/" + Repository + "/releases/latest/download/dst-admin-release.json"
+	if version != "" {
+		apiURL = "https://api.github.com/repos/" + Repository + "/releases/tags/" + version
+		indexURL = "https://github.com/" + Repository + "/releases/download/" + version + "/dst-admin-release.json"
+	}
 	var data []byte
 	var err error
-	if source != "proxy" {
-		data, err = g.small(ctx, Asset{URL: "https://api.github.com/repos/" + Repository + "/releases/latest"}, "direct", 2<<20)
+	if source != "proxy" && source != "mirror" {
+		data, err = g.small(ctx, Asset{URL: apiURL}, source, 2<<20)
 	}
-	if source == "proxy" || err != nil && source == "auto" {
+	if (source == "proxy" || source == "mirror") || err != nil && source == "auto" {
 		// GHFast supports release assets, not api.github.com. The official
 		// release index provides bounded metadata without downloading a binary.
-		data, err = g.small(ctx, Asset{URL: "https://github.com/" + Repository + "/releases/latest/download/dst-admin-release.json"}, "proxy", 2<<20)
+		fallback := *g
+		if source == "auto" && g.direct != nil {
+			fallback.client = g.direct
+		}
+		data, err = fallback.small(ctx, Asset{URL: indexURL}, "proxy", 2<<20)
 	}
 	if err != nil {
 		return nil, err
@@ -179,7 +208,11 @@ func (g *GitHubClient) Latest(ctx context.Context, platform, source string) (*Re
 	if err := json.Unmarshal(data, &value); err != nil {
 		return nil, err
 	}
-	version, valid := NormalizeVersion(value.Version)
+	selected, valid := NormalizeVersion(value.Version)
+	if version != "" && selected != version {
+		return nil, ErrReleaseChanged
+	}
+	version = selected
 	if !valid || value.Draft || value.Prerelease || value.URL != "https://github.com/"+Repository+"/releases/tag/"+version {
 		return nil, ErrInvalid
 	}

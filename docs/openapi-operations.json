@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "8e46580b9bc33c7519feccc2683ba806786c55c740baef220c2e7cc211db2097",
+  "operationsSHA256": "803561c1b97878bc42dd7b415ce6346b483a790518d7ae2a1dc726d5b4bfde9f",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -1226,7 +1226,7 @@
       "access": "read",
       "risk": "low",
       "runtime": "any",
-      "title": "Read the selected Agent's release, progress and retained rollback version"
+      "title": "Read the selected Agent's release, progress and saved update settings"
     },
     {
       "operationId": "getArtworkPackImage",
@@ -1911,7 +1911,7 @@
       "access": "read",
       "risk": "low",
       "runtime": "any",
-      "title": "Read this management service's version, update progress and rollback availability"
+      "title": "Read this management service's version, update progress and saved settings"
     },
     {
       "operationId": "getSystemCapabilities",
@@ -3704,6 +3704,22 @@
       "title": "Start, stop, restart, save or clean up stopped runtime processes through a persistent job"
     },
     {
+      "operationId": "saveAgentSoftwareUpdateSettings",
+      "method": "PUT",
+      "path": "/agents/{agentId}/software/settings",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "agent",
+        "configuration",
+        "software"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Persist software download source and proxy settings on the selected machine"
+    },
+    {
       "operationId": "saveInitialSetupProgress",
       "method": "PUT",
       "path": "/auth/onboarding",
@@ -3716,6 +3732,22 @@
       "risk": "normal",
       "runtime": "any",
       "title": "Save administrator setup progress without changing game or save data"
+    },
+    {
+      "operationId": "saveSoftwareUpdateSettings",
+      "method": "PUT",
+      "path": "/system/software/settings",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "software",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Persist software download source and proxy settings on the selected machine"
     },
     {
       "operationId": "searchArtworkPackEntities",
@@ -4111,7 +4143,7 @@
       "access": "write",
       "risk": "high",
       "runtime": "any",
-      "title": "Download and verify an Agent release, switch programs and wait for reconnection, or roll back"
+      "title": "Download and verify an Agent release, switch programs and wait for reconnection"
     },
     {
       "operationId": "updateAutomationGroup",

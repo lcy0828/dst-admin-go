@@ -16,10 +16,17 @@ func ValidateAgentSoftwareRequest(request AgentUpgradeRequest) error {
 	if request.ProtocolVersion != AgentUpgradeProtocolVersion || !agentSoftwareID.MatchString(request.ReleaseID) || (request.OS != "linux" && request.OS != "darwin" && request.OS != "windows") || (request.Arch != "amd64" && request.Arch != "arm64") {
 		return invalid
 	}
-	if request.Source != "" && request.Source != "auto" && request.Source != "direct" && request.Source != "proxy" && request.Source != "controller" {
+	if request.Source != "" && request.Source != "auto" && request.Source != "direct" && request.Source != "proxy" && request.Source != "mirror" && request.Source != "controller" {
+		return invalid
+	}
+	if request.Action != "settings" && len(request.Settings) > 0 {
 		return invalid
 	}
 	switch request.Action {
+	case "settings":
+		if len(request.Settings) == 0 || len(request.Settings) > 8192 || request.Version != "" || request.OperationID != "" || request.Source != "" {
+			return invalid
+		}
 	case "status", "check":
 		if request.Version != "" || request.OperationID != "" || request.Source == "controller" {
 			return invalid

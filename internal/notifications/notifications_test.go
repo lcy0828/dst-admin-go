@@ -404,3 +404,44 @@ func TestQueueAndHistoryStayBoundedIncludingManualRetry(t *testing.T) {
 		t.Fatal("prune removed pending or kept too much history", pending, completed)
 	}
 }
+
+func TestReleaseAlertsSurviveHistoryCleanupAndFailuresOnly(t *testing.T) {
+	s, store, _ := fixture(t)
+	input := webhookInput("https://example.com/hook")
+	input.FailuresOnly = true
+	if _, err := s.Save("", input); err != nil {
+		t.Fatal(err)
+	}
+	event := Event{ID: "software:v1.3.4", Kind: "software.available", Version: "v1.3.4", Title: "New version", Message: "v1.3.4", Status: "available", Severity: "info"}
+	s.Emit(event)
+	_, count, err := s.History(25, 0)
+	if err != nil || count != 1 {
+		t.Fatal(count, err)
+	}
+	if err := store.db.Table(store.deliveriesTable).Where("1 = 1").Delete(&deliveryRecord{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	recreated, err := New(store, &testMail{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recreated.Emit(event)
+	_, count, err = recreated.History(25, 0)
+	if err != nil || count != 0 {
+		t.Fatal("repeated after history cleanup", count, err)
+	}
+	event.ID = "software:v1.3.5"
+	event.Version = "v1.3.5"
+	recreated.Emit(event)
+	event.Kind = "agent.software.available"
+	event.TargetID = "node-a"
+	event.ID = "agent-software:node-a:v1.3.5"
+	recreated.Emit(event)
+	event.TargetID = "node-b"
+	event.ID = "agent-software:node-b:v1.3.5"
+	recreated.Emit(event)
+	_, count, err = recreated.History(25, 0)
+	if err != nil || count != 3 {
+		t.Fatal("new releases/nodes suppressed", count, err)
+	}
+}

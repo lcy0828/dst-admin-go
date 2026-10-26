@@ -77,3 +77,11 @@ Webhook connection errors, HTTP `429` and `5xx` are retried up to 3 total attemp
 Limits: 32 channels, 1000 pending deliveries and 2000 recent completed deliveries. Deleting a channel retains history and cancels sends that have not started; an in-flight request may complete.
 
 Include the database and `notifications/webhook.key` in the configuration directory when backing up management data. If the key is lost, restore the matching key or reenter each endpoint URL and all headers (`{}` for none). SMTP credentials retain their existing system configuration storage.
+
+## Software release alerts
+
+Subscribe a channel to management service or Agent release alerts. These subscriptions bypass the failures-only filter.
+
+Background release checks default to every six hours and run only with an enabled release subscription. Disable them or choose an interval of 1–168 hours in notification settings. The browser may remain closed. Checks reuse the Controller's saved update source/proxy and registered Agent version information; they never start or query game worlds.
+
+Each channel queues a component, node and version once, independently of service restarts or delivery-history cleanup. Inspect and retry failed deliveries in notification history. An interrupted send may already have reached the recipient, so manual retries can duplicate it.

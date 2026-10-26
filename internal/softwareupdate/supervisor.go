@@ -365,7 +365,12 @@ func (s *supervisor) run(ctx context.Context) error {
 		return err
 	}
 	if state.Pending != nil || state.Operation != nil && state.Operation.Busy() {
-		if err := failState(s.root, "rolled_back", fmt.Errorf("previous update was interrupted; retaining the committed version")); err != nil {
+		phase, message := "rolled_back", "previous update was interrupted; retaining the committed version"
+		if state.Pending == nil && state.Operation != nil && (state.Operation.Phase == "downloading" || state.Operation.Phase == "verifying") {
+			phase = "interrupted"
+			message = "download interrupted; continue to reuse verified partial bytes"
+		}
+		if err := failState(s.root, phase, fmt.Errorf("%s", message)); err != nil {
 			return err
 		}
 		state, err = readState(s.root)

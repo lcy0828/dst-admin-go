@@ -138,23 +138,25 @@ const AgentUpgradeProtocolVersion = 1
 
 const AgentUpgradeCommand = "agent.upgrade.v1"
 const AgentSoftwareUpdateCapability = "agent.software-update.v1"
+const AgentSoftwareSettingsCapability = "agent.software-settings.v1"
 
 // AgentUpgradeRequest contains an authenticated, short-lived controller
 // download path and immutable package metadata. It never carries shell input.
 type AgentUpgradeRequest struct {
-	Action          string `json:"action,omitempty"`
-	Source          string `json:"source,omitempty"`
-	Force           bool   `json:"force,omitempty"`
-	OperationID     string `json:"operation_id,omitempty"`
-	ProtocolVersion int    `json:"protocol_version"`
-	ReleaseID       string `json:"release_id"`
-	Version         string `json:"version"`
-	OS              string `json:"os"`
-	Arch            string `json:"arch"`
-	DownloadPath    string `json:"download_path"`
-	DownloadToken   string `json:"download_token"`
-	SHA256          string `json:"sha256"`
-	Size            int64  `json:"size"`
+	Settings        json.RawMessage `json:"settings,omitempty"`
+	Action          string          `json:"action,omitempty"`
+	Source          string          `json:"source,omitempty"`
+	Force           bool            `json:"force,omitempty"`
+	OperationID     string          `json:"operation_id,omitempty"`
+	ProtocolVersion int             `json:"protocol_version"`
+	ReleaseID       string          `json:"release_id"`
+	Version         string          `json:"version"`
+	OS              string          `json:"os"`
+	Arch            string          `json:"arch"`
+	DownloadPath    string          `json:"download_path"`
+	DownloadToken   string          `json:"download_token"`
+	SHA256          string          `json:"sha256"`
+	Size            int64           `json:"size"`
 }
 
 type AgentUpgradeResult struct {

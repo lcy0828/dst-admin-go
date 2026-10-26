@@ -88,6 +88,9 @@ type Check struct {
 }
 
 type Operation struct {
+	Source          string    `json:"source,omitempty"`
+	Resumed         bool      `json:"resumed"`
+	Attempt         int       `json:"attempt,omitempty"`
 	ID              string    `json:"id"`
 	Version         string    `json:"version"`
 	Phase           string    `json:"phase"`
@@ -106,6 +109,7 @@ func (o Operation) Busy() bool {
 }
 
 type Snapshot struct {
+	Settings          Settings       `json:"settings"`
 	Current           buildinfo.Info `json:"current"`
 	Platform          string         `json:"platform"`
 	Supported         bool           `json:"supported"`

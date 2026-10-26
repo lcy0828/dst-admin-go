@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -31,6 +33,7 @@ type agentSoftwareRelay struct {
 	asset  softwareupdate.Asset
 	source string
 	used   bool
+	file   *os.File
 }
 
 func (s *Service) agentSoftwareClient() softwareupdate.ReleaseClient {
@@ -46,7 +49,13 @@ func (s *Service) checkAgentRelease(ctx context.Context, platform string, force 
 	s.softwareCheckMu.Lock()
 	defer s.softwareCheckMu.Unlock()
 	s.softwareCacheMu.RLock()
-	check := s.softwareReleaseChecks[platform]
+	client, source, key, networkErr := s.softwareNetwork()
+	defer softwareupdate.CloseClient(client)
+	if networkErr != nil {
+		s.softwareCacheMu.RUnlock()
+		return softwareupdate.Check{Warning: networkErr.Error()}
+	}
+	check := s.softwareReleaseChecks[platform+"/"+key]
 	s.softwareCacheMu.RUnlock()
 	if !check.CheckedAt.IsZero() && (time.Since(check.CheckedAt) < 5*time.Second || !force && time.Since(check.CheckedAt) < 20*time.Minute) {
 		check.Cached = true
@@ -54,9 +63,9 @@ func (s *Service) checkAgentRelease(ctx context.Context, platform string, force 
 	}
 	check.CheckedAt = time.Now().UTC()
 	check.Cached = false
-	checkCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	checkCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	release, err := s.agentSoftwareClient().Latest(checkCtx, platform, "auto")
+	release, err := client.Latest(checkCtx, platform, source)
 	if err != nil {
 		check.Warning = err.Error()
 		check.Cached = check.Latest != nil
@@ -68,6 +77,12 @@ func (s *Service) checkAgentRelease(ctx context.Context, platform string, force 
 	if s.softwareReleaseChecks == nil {
 		s.softwareReleaseChecks = map[string]softwareupdate.Check{}
 	}
+	for oldKey := range s.softwareReleaseChecks {
+		if strings.HasPrefix(oldKey, platform+"/") {
+			delete(s.softwareReleaseChecks, oldKey)
+		}
+	}
+	s.softwareReleaseChecks[platform+"/"+key] = check
 	s.softwareReleaseChecks[platform] = check
 	s.softwareCacheMu.Unlock()
 	return check
@@ -100,7 +115,17 @@ func (s *Service) softwareRequest(ctx context.Context, agentID string, request s
 		request.ReleaseID = strings.ReplaceAll(uuid.NewString(), "-", "")
 	}
 	request.OS, request.Arch = agent.OS, agent.Arch
-	result, err := s.transport.ExecuteUpgrade(ctx, agentID, request, 30)
+	if request.Source == "mirror" && !containsString(agent.Capabilities, shared.AgentSoftwareSettingsCapability) {
+		request.Source = "proxy"
+	}
+	if request.Action == "settings" && !containsString(agent.Capabilities, shared.AgentSoftwareSettingsCapability) {
+		return softwareupdate.Snapshot{}, ErrUpgradeUnsupported
+	}
+	timeout := 30
+	if request.Action == "check" {
+		timeout = 100
+	}
+	result, err := s.transport.ExecuteUpgrade(ctx, agentID, request, timeout)
 	if err != nil {
 		if result.Result.ProtocolVersion == request.ProtocolVersion && result.Result.ReleaseID == request.ReleaseID {
 			return softwareupdate.Snapshot{}, fmt.Errorf("%w: %w", errAgentSoftwareRejected, err)
@@ -115,6 +140,15 @@ func (s *Service) softwareRequest(ctx context.Context, agentID string, request s
 }
 
 func (s *Service) AgentSoftware(ctx context.Context, id string, check, force bool, source string) (softwareupdate.Snapshot, error) {
+	if source == "" && check {
+		baseline, err := s.softwareRequest(ctx, id, shared.AgentUpgradeRequest{Action: "status"})
+		if err != nil {
+			return baseline, err
+		}
+		if baseline.Settings.ControllerRelay {
+			source = "controller"
+		}
+	}
 	if source == "controller" && check {
 		snapshot, err := s.softwareRequest(ctx, id, shared.AgentUpgradeRequest{Action: "status"})
 		if err != nil {
@@ -124,10 +158,10 @@ func (s *Service) AgentSoftware(ctx context.Context, id string, check, force boo
 		snapshot.Check.HasUpdate = snapshot.Check.Latest != nil && softwareupdate.CompareVersions(snapshot.Check.Latest.Version, snapshot.Current.Version) > 0
 		return snapshot, nil
 	}
-	if source == "" || source == "controller" {
+	if source == "controller" {
 		source = "auto"
 	}
-	if !softwareupdate.ValidSource(source) {
+	if source != "" && !softwareupdate.ValidSource(source) {
 		return softwareupdate.Snapshot{}, ErrInvalidInput
 	}
 	action := "status"
@@ -143,10 +177,7 @@ func (s *Service) UpdateAgentSoftware(id string, input AgentSoftwareInput) (jobs
 	if !valid || input.Confirmation != input.Version {
 		return jobs.Job{}, ErrInvalidInput
 	}
-	if input.Source == "" {
-		input.Source = "auto"
-	}
-	if input.Source != "controller" && !softwareupdate.ValidSource(input.Source) {
+	if input.Source != "" && input.Source != "controller" && !softwareupdate.ValidSource(input.Source) {
 		return jobs.Job{}, ErrInvalidInput
 	}
 	agent, err := s.Agent(id)
@@ -165,7 +196,7 @@ func (s *Service) UpdateAgentSoftware(id string, input AgentSoftwareInput) (jobs
 	job, err := s.jobs.SubmitFactory("agent.software.update", "", "", []jobs.TargetSpec{{ID: id, Name: agent.DisplayName}}, func(job jobs.Job) jobs.Runner {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
 			defer s.finishAgentUpgrade(id)
-			ctx, cancel := context.WithTimeout(ctx, 18*time.Minute)
+			ctx, cancel := context.WithTimeout(ctx, 485*time.Minute)
 			defer cancel()
 			request := shared.AgentUpgradeRequest{Action: "update", Version: version, Source: input.Source, OperationID: input.OperationID}
 			if input.OperationID != "" {
@@ -178,8 +209,11 @@ func (s *Service) UpdateAgentSoftware(id string, input AgentSoftwareInput) (jobs
 			if softwareupdate.CompareVersions(version, baseline.Current.Version) < 0 || request.Action == "apply" && (baseline.Operation == nil || baseline.Operation.ID != input.OperationID || baseline.Operation.Version != version) {
 				return reportAgentUpgradeFailure(report, id, "AGENT_SOFTWARE_UPDATE_FAILED", ErrInvalidInput)
 			}
+			if request.Source == "" && baseline.Settings.ControllerRelay && request.Action == "update" {
+				request.Source = "controller"
+			}
 			var revoke func()
-			if input.Source == "controller" && request.Action == "update" {
+			if request.Source == "controller" && request.Action == "update" {
 				var relayErr error
 				request, revoke, relayErr = s.relaySoftwareRequest(ctx, agent, request)
 				if relayErr != nil {
@@ -229,7 +263,7 @@ func (s *Service) UpdateAgentSoftware(id string, input AgentSoftwareInput) (jobs
 						lastProgress = progressKey
 					}
 					switch op.Phase {
-					case "failed", "rolled_back":
+					case "failed", "interrupted", "rolled_back":
 						return reportAgentUpgradeFailure(report, id, "AGENT_SOFTWARE_UPDATE_FAILED", fmt.Errorf("%s: %s", op.Phase, op.Error))
 					case "succeeded":
 						if snapshot.Ready && snapshot.Current.Version == version {
@@ -276,15 +310,37 @@ func (s *Service) UpdateAgentSoftware(id string, input AgentSoftwareInput) (jobs
 }
 
 func (s *Service) relaySoftwareRequest(ctx context.Context, agent Agent, request shared.AgentUpgradeRequest) (shared.AgentUpgradeRequest, func(), error) {
-	client := s.agentSoftwareClient()
-	release, err := client.Latest(ctx, agent.OS+"-"+agent.Arch, "auto")
+	minutes := 60
+	if s.softwareSettings != nil {
+		settings, err := s.softwareSettings.Settings()
+		if err != nil {
+			return request, nil, err
+		}
+		minutes = settings.TimeoutMinutes
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(minutes)*time.Minute)
+	defer cancel()
+
+	client, source, _, err := s.softwareNetwork()
+	defer softwareupdate.CloseClient(client)
+	if err != nil {
+		return request, nil, err
+	}
+	var release *softwareupdate.Release
+	if fixed, ok := client.(interface {
+		Release(context.Context, string, string, string) (*softwareupdate.Release, error)
+	}); ok {
+		release, err = fixed.Release(ctx, agent.OS+"-"+agent.Arch, source, request.Version)
+	} else {
+		release, err = client.Latest(ctx, agent.OS+"-"+agent.Arch, source)
+	}
 	if err != nil {
 		return request, nil, err
 	}
 	if release == nil || release.Version != request.Version || !release.OnlineUpdate {
 		return request, nil, softwareupdate.ErrReleaseChanged
 	}
-	checksum, err := client.Checksum(ctx, release.Checksum, "auto")
+	checksum, err := client.Checksum(ctx, release.Checksum, source)
 	if err != nil {
 		return request, nil, err
 	}
@@ -292,16 +348,30 @@ func (s *Service) relaySoftwareRequest(ctx context.Context, agent Agent, request
 	if len(fields) != 2 || !runtimePerformanceSHA256Pattern.MatchString(fields[0]) || strings.TrimPrefix(fields[1], "*") != release.Archive.Name || release.Archive.Digest != "" && release.Archive.Digest != "sha256:"+fields[0] {
 		return request, nil, ErrInvalidInput
 	}
+	var file *os.File
+	if s.softwareRelayRoot != "" {
+		file, err = softwareupdate.VerifiedArchive(ctx, s.softwareRelayRoot, client, release.Archive, source, fields[0], nil)
+		if err != nil {
+			return request, nil, err
+		}
+	}
 	id := strings.ReplaceAll(uuid.NewString(), "-", "")
 	token := uuid.NewString() + uuid.NewString()
 	s.upgradeMu.Lock()
 	if s.softwareRelays == nil {
 		s.softwareRelays = map[string]*agentSoftwareRelay{}
 	}
-	s.softwareRelays[id] = &agentSoftwareRelay{token: token, until: time.Now().Add(16 * time.Minute), asset: release.Archive, source: "auto"}
+	s.softwareRelays[id] = &agentSoftwareRelay{token: token, until: time.Now().Add(245 * time.Minute), asset: release.Archive, source: source, file: file}
 	s.upgradeMu.Unlock()
 	request.ReleaseID, request.DownloadPath, request.DownloadToken, request.SHA256, request.Size = id, "/agent-software-updates/"+id, token, fields[0], release.Archive.Size
-	return request, func() { s.upgradeMu.Lock(); delete(s.softwareRelays, id); s.upgradeMu.Unlock() }, nil
+	return request, func() {
+		s.upgradeMu.Lock()
+		delete(s.softwareRelays, id)
+		s.upgradeMu.Unlock()
+		if file != nil {
+			file.Close()
+		}
+	}, nil
 }
 
 // The optional relay streams a single official archive with a short-lived
@@ -317,4 +387,67 @@ func (s *Service) AgentSoftwareTransfer(ctx context.Context, id, token string, w
 	copy := *grant
 	s.upgradeMu.Unlock()
 	return copy.asset.Size, s.agentSoftwareClient().Download(ctx, copy.asset, copy.source, writer(copy.asset.Size))
+}
+
+func (s *Service) ConfigureSoftwareUpdates(service *softwareupdate.Service, relayRoot string) {
+	s.softwareSettings = service
+	s.softwareRelayRoot = relayRoot
+}
+func (s *Service) softwareNetwork() (softwareupdate.ReleaseClient, string, string, error) {
+	if s.softwareSettings == nil {
+		return s.agentSoftwareClient(), "auto", "auto", nil
+	}
+	client, source, _, key, err := s.softwareSettings.ResolveNetwork("", true)
+	return client, source, key, err
+}
+func (s *Service) SaveAgentSoftwareSettings(ctx context.Context, id string, input softwareupdate.Settings) (softwareupdate.Snapshot, error) {
+	data, err := json.Marshal(input)
+	if err != nil {
+		return softwareupdate.Snapshot{}, err
+	}
+	return s.softwareRequest(ctx, id, shared.AgentUpgradeRequest{Action: "settings", Settings: data})
+}
+
+// Serve a verified seekable archive. The token may be used for multiple ranges
+// during this task; concurrent readers use independent offsets.
+func (s *Service) ServeAgentSoftware(w http.ResponseWriter, r *http.Request, id, token string) error {
+	s.upgradeMu.Lock()
+	grant := s.softwareRelays[id]
+	if grant == nil || grant.file == nil || time.Now().After(grant.until) || subtle.ConstantTimeCompare([]byte(token), []byte(grant.token)) != 1 {
+		s.upgradeMu.Unlock()
+		return ErrDownloadToken
+	}
+	file, err := os.Open(grant.file.Name())
+	size := grant.asset.Size
+	s.upgradeMu.Unlock()
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeContent(w, r, "agent-update.tar.gz", time.Time{}, io.NewSectionReader(file, 0, size))
+	return nil
+}
+
+// Cached inventory already contains versions and platforms; notification checks
+// do not query Agent runtimes and are coalesced once per release/platform.
+func (s *Service) NotifySoftwareReleases(ctx context.Context, emit func(string, string, string, softwareupdate.Release)) {
+	items, err := s.CachedAgents()
+	if err != nil {
+		return
+	}
+	for _, item := range items {
+		if ctx.Err() != nil {
+			return
+		}
+		if !containsString(item.Capabilities, shared.AgentSoftwareUpdateCapability) {
+			continue
+		}
+		check := s.checkAgentRelease(ctx, item.OS+"-"+item.Arch, false)
+		if check.Warning == "" && check.Latest != nil && softwareupdate.CompareVersions(check.Latest.Version, item.Version) > 0 {
+			emit(item.ID, item.DisplayName, item.Version, *check.Latest)
+		}
+	}
 }

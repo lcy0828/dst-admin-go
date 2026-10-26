@@ -7,7 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -329,5 +333,69 @@ func TestAgentReleaseCheckCoalescesWithoutBlockingMachineSnapshots(t *testing.T)
 	}
 	if client.calls.Load() != 1 || service.withControllerCheck(snapshot).Check.Latest.Version != "v1.2.4" {
 		t.Fatal("duplicate release requests or stale machine snapshot", client.calls.Load())
+	}
+}
+
+func TestVerifiedSoftwareRelaySupportsRepeatedRanges(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "agent.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	_, _ = file.WriteString("0123456789")
+	s := &Service{softwareRelays: map[string]*agentSoftwareRelay{"release": {token: "token", until: time.Now().Add(time.Minute), file: file, asset: softwareupdate.Asset{Size: 10}}}}
+	for _, offset := range []int{0, 5} {
+		req := httptest.NewRequest(http.MethodGet, "http://controller/agent-software-updates/release", nil)
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+		w := httptest.NewRecorder()
+		if err := s.ServeAgentSoftware(w, req, "release", "token"); err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != 206 || w.Body.String() != "0123456789"[offset:] {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	}
+	if err := s.ServeAgentSoftware(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil), "release", "wrong"); !errors.Is(err, ErrDownloadToken) {
+		t.Fatal("wrong token accepted", err)
+	}
+}
+
+type interruptedSoftwareTransport struct{ *softwareTestTransport }
+
+func (t *interruptedSoftwareTransport) ExecuteUpgrade(ctx context.Context, id string, request shared.AgentUpgradeRequest, timeout int) (AgentUpgradeExecutionResult, error) {
+	result, err := t.softwareTestTransport.ExecuteUpgrade(ctx, id, request, timeout)
+	if err == nil && request.Action == "update" {
+		t.stateMu.Lock()
+		defer t.stateMu.Unlock()
+		t.snapshot.Operation.Phase = "interrupted"
+		t.snapshot.Operation.Error = "download interrupted; resume available"
+		result.Result.Software, err = json.Marshal(t.snapshot)
+	}
+	return result, err
+}
+func TestAgentInterruptedDownloadEndsJobWithoutApplying(t *testing.T) {
+	service, _, jobService, memory := newAgentTestService(t)
+	memory.mu.Lock()
+	record := memory.snapshots["agent-primary"]
+	record.Capabilities = append(record.Capabilities, shared.AgentSoftwareUpdateCapability)
+	memory.snapshots[record.ID] = record
+	memory.mu.Unlock()
+	transport := &interruptedSoftwareTransport{&softwareTestTransport{MemoryTransport: memory, snapshot: softwareupdate.Snapshot{Supported: true, Ready: true, Platform: "linux-amd64"}}}
+	transport.snapshot.Current.Version = "v1.2.2"
+	service.transport = transport
+	job, err := service.UpdateAgentSoftware("agent-primary", AgentSoftwareInput{Version: "v1.2.3", Confirmation: "v1.2.3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := waitSoftwareAcknowledgementJob(t, jobService, job.ID)
+	if finished.Status != jobs.StatusFailed {
+		t.Fatal("interrupted transfer did not end", finished.Status)
+	}
+	transport.stateMu.Lock()
+	defer transport.stateMu.Unlock()
+	for _, request := range transport.requests {
+		if request.Action == "apply" {
+			t.Fatal("interrupted archive was applied")
+		}
 	}
 }

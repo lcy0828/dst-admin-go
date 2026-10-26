@@ -19,6 +19,7 @@ func NewSystemSoftwareHandler(service *softwareupdate.Service) *SystemSoftwareHa
 
 func (h *SystemSoftwareHandler) Register(v2 *gin.RouterGroup) {
 	v2.GET("/system/software", h.status)
+	v2.PUT("/system/software/settings", h.settings)
 	v2.GET("/system/software/check", h.check)
 	v2.POST("/system/software/actions/update", h.update)
 	v2.POST("/system/software/actions/apply", h.apply)
@@ -40,7 +41,7 @@ func (h *SystemSoftwareHandler) check(c *gin.Context) {
 		softwareFailure(c, softwareupdate.ErrInvalid)
 		return
 	}
-	value, err := h.service.Check(c.Request.Context(), force, c.DefaultQuery("source", "auto"))
+	value, err := h.service.Check(c.Request.Context(), force, c.Query("source"))
 	if err != nil {
 		softwareFailure(c, err)
 		return
@@ -58,9 +59,6 @@ func (h *SystemSoftwareHandler) update(c *gin.Context) {
 	if err := c.ShouldBindJSON(&input); err != nil || input.Confirmation != input.Version {
 		softwareFailure(c, softwareupdate.ErrInvalid)
 		return
-	}
-	if input.Source == "" {
-		input.Source = "auto"
 	}
 	value, err := h.service.Start(input.Version, input.Source)
 	if err != nil {
@@ -103,4 +101,18 @@ func softwareFailure(c *gin.Context, err error) {
 		status, code, message = http.StatusBadRequest, "INVALID_SOFTWARE_UPDATE", "版本、确认信息或更新包无效"
 	}
 	Failure(c, status, code, message, gin.H{"reason": err.Error()})
+}
+
+func (h *SystemSoftwareHandler) settings(c *gin.Context) {
+	var input softwareupdate.Settings
+	if c.ShouldBindJSON(&input) != nil {
+		softwareFailure(c, softwareupdate.ErrInvalid)
+		return
+	}
+	result, err := h.service.SaveSettings(input)
+	if err != nil {
+		softwareFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, result)
 }

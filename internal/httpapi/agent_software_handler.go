@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"dont/internal/softwareupdate"
 	"encoding/json"
 	"errors"
 	"io"
@@ -22,9 +23,9 @@ func (h *AgentHandler) softwareRead(c *gin.Context, check bool) {
 		agentFailure(c, agents.ErrInvalidInput)
 		return
 	}
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 100*time.Second)
 	defer cancel()
-	value, err := h.service.AgentSoftware(ctx, c.Param("agentId"), check, force, c.DefaultQuery("source", "auto"))
+	value, err := h.service.AgentSoftware(ctx, c.Param("agentId"), check, force, c.Query("source"))
 	if err != nil {
 		agentFailure(c, err)
 		return
@@ -53,16 +54,7 @@ func (h *AgentHandler) softwareTransfer(c *gin.Context) {
 		Failure(c, 401, "AGENT_RELEASE_TOKEN_REQUIRED", "Agent 更新凭据无效", nil)
 		return
 	}
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Minute)
-	defer cancel()
-	_, err := h.service.AgentSoftwareTransfer(ctx, c.Param("releaseId"), auth[1], func(size int64) io.Writer {
-		c.Header("Cache-Control", "no-store")
-		c.Header("X-Content-Type-Options", "nosniff")
-		c.Header("Content-Type", "application/octet-stream")
-		c.Header("Content-Length", strconv.FormatInt(size, 10))
-		c.Status(http.StatusOK)
-		return c.Writer
-	})
+	err := h.service.ServeAgentSoftware(c.Writer, c.Request, c.Param("releaseId"), auth[1])
 	if err != nil && !c.Writer.Written() {
 		c.Header("Content-Length", "")
 		status := http.StatusBadGateway
@@ -71,4 +63,18 @@ func (h *AgentHandler) softwareTransfer(c *gin.Context) {
 		}
 		Failure(c, status, "AGENT_RELEASE_TOKEN_INVALID", "Agent 更新传输失败", nil)
 	}
+}
+
+func (h *AgentHandler) softwareSettings(c *gin.Context) {
+	var input softwareupdate.Settings
+	if c.ShouldBindJSON(&input) != nil {
+		agentFailure(c, agents.ErrInvalidInput)
+		return
+	}
+	value, err := h.service.SaveAgentSoftwareSettings(c.Request.Context(), c.Param("agentId"), input)
+	if err != nil {
+		agentFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"runtime"
 	"time"
 
@@ -40,14 +41,19 @@ func (a *Agent) executeSoftwareUpdate(request *shared.AgentUpgradeRequest) (shar
 		return result, softwareupdate.ErrInvalid
 	}
 	source := request.Source
-	if source == "" {
-		source = "auto"
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 95*time.Second)
 	defer cancel()
 	var snapshot softwareupdate.Snapshot
 	var err error
 	switch request.Action {
+	case "settings":
+		var input softwareupdate.Settings
+		if err = json.Unmarshal(request.Settings, &input); err == nil {
+			_, err = a.software.SaveSettings(input)
+		}
+		if err == nil {
+			snapshot, err = a.software.Snapshot()
+		}
 	case "status":
 		snapshot, err = a.software.Snapshot()
 	case "check":
@@ -123,7 +129,7 @@ func (c *controllerUpdateClient) Download(ctx context.Context, _ softwareupdate.
 		return err
 	}
 	request.Header.Set("Authorization", "Bearer "+c.token)
-	client := &http.Client{Timeout: 15 * time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return softwareupdate.ErrInvalid }}
+	client := &http.Client{Timeout: 4 * time.Hour, CheckRedirect: func(*http.Request, []*http.Request) error { return softwareupdate.ErrInvalid }}
 	defer client.CloseIdleConnections()
 	response, err := client.Do(request)
 	if err != nil {
@@ -144,4 +150,10 @@ func (c *controllerUpdateClient) Download(ctx context.Context, _ softwareupdate.
 		return softwareupdate.ErrInvalid
 	}
 	return nil
+}
+
+func (c *controllerUpdateClient) DownloadFile(ctx context.Context, asset softwareupdate.Asset, _ string, file *os.File, progress func(softwareupdate.DownloadProgress)) error {
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return softwareupdate.ErrInvalid }}
+	defer client.CloseIdleConnections()
+	return softwareupdate.DownloadHTTPFile(ctx, asset, client, c.url, http.Header{"Authorization": []string{"Bearer " + c.token}}, file, progress)
 }

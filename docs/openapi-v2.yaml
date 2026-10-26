@@ -464,11 +464,42 @@ paths:
         "200": { description: Normalized node resource snapshots, content: { application/json: { schema: { $ref: "#/components/schemas/NodeResourceSnapshotEnvelope" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /system/software/settings:
+    put:
+      tags: [System]
+      operationId: saveSoftwareUpdateSettings
+      summary: Persist software download source and proxy settings on the selected machine
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SoftwareUpdateSettings" }
+      responses:
+        "200": { description: Saved settings with proxy credentials omitted, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareSettingsEnvelope" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /agents/{agentId}/software/settings:
+    parameters: [{ $ref: "#/components/parameters/AgentID" }]
+    put:
+      tags: [Agents]
+      operationId: saveAgentSoftwareUpdateSettings
+      summary: Persist software download source and proxy settings on the selected machine
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SoftwareUpdateSettings" }
+      responses:
+        "200": { description: Agent snapshot with saved settings, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareStatusEnvelope" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /system/software:
     get:
       tags: [System]
       operationId: getSoftwareStatus
-      summary: Read this management service's version, update progress and rollback availability
+      summary: Read this management service's version, update progress and saved settings
       responses:
         "200": { description: Management software status, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareStatusEnvelope" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -480,7 +511,7 @@ paths:
       summary: Check the latest official stable release with a 20-minute cache
       parameters:
         - { name: force, in: query, schema: { type: boolean, default: false } }
-        - { name: source, in: query, schema: { type: string, enum: [auto, direct, proxy], default: auto } }
+        - { name: source, in: query, schema: { type: string, enum: [auto, direct, mirror, proxy], description: Omit to use saved settings; proxy is a legacy alias for mirror } }
       responses:
         "200": { description: Release check, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareStatusEnvelope" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -501,7 +532,7 @@ paths:
               properties:
                 version: { type: string, example: v1.2.2 }
                 confirmation: { type: string, description: Must equal version }
-                source: { type: string, enum: [auto, direct, proxy], default: auto }
+                source: { type: string, enum: [auto, direct, mirror, proxy], description: Omit to use saved settings; proxy is a legacy alias for mirror }
       responses:
         "202": { description: Asynchronous download, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareOperationEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -5272,7 +5303,7 @@ paths:
     get:
       tags: [Agents]
       operationId: getAgentSoftware
-      summary: Read the selected Agent's release, progress and retained rollback version
+      summary: Read the selected Agent's release, progress and saved update settings
       responses:
         "200": { description: Agent software snapshot, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareStatusEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -5287,7 +5318,7 @@ paths:
       summary: Check the official release on this Agent, or use the optional Controller relay
       parameters:
         - { name: force, in: query, schema: { type: boolean, default: false } }
-        - { name: source, in: query, schema: { type: string, enum: [auto, direct, proxy, controller], default: auto } }
+        - { name: source, in: query, schema: { type: string, enum: [auto, direct, mirror, proxy, controller], description: Omit to use saved settings; proxy is a legacy alias for mirror } }
       responses:
         "200": { description: Agent release check, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareStatusEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -5299,7 +5330,7 @@ paths:
       tags: [Agents, Jobs]
       operationId: updateAgentSoftware
       x-dst-tool: {"risk": "high"}
-      summary: Download and verify an Agent release, switch programs and wait for reconnection, or roll back
+      summary: Download and verify an Agent release, switch programs and wait for reconnection
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -5920,7 +5951,7 @@ components:
             createdAt: { type: string, format: date-time }
     NotificationEventKind:
       type: string
-      enum: [room.result, backup.result, game.result, mod.result, agent.status, security.login, software.available, custom]
+      enum: [room.result, backup.result, game.result, mod.result, agent.status, security.login, software.available, agent.software.available, custom]
     NotificationChannelInput:
       type: object
       required: [name, type, enabled, events]
@@ -5929,8 +5960,8 @@ components:
         name: { type: string, minLength: 1, maxLength: 100 }
         type: { type: string, enum: [email, webhook] }
         enabled: { type: boolean }
-        events: { type: array, maxItems: 8, items: { $ref: "#/components/schemas/NotificationEventKind" } }
-        failuresOnly: { type: boolean, description: Skips success and informational events; explicit test sends bypass this filter }
+        events: { type: array, maxItems: 9, items: { $ref: "#/components/schemas/NotificationEventKind" } }
+        failuresOnly: { type: boolean, description: Skips success and informational events except subscribed software release alerts; explicit test sends bypass this filter }
         recipients: { type: array, minItems: 1, maxItems: 20, items: { type: string, format: email }, description: Required for email channels }
         url: { type: string, maxLength: 4096, writeOnly: true, description: HTTP/HTTPS endpoint. Required for new Webhooks; blank preserves the stored endpoint. }
         headers:
@@ -10823,13 +10854,33 @@ components:
         foreignKeys: { type: boolean }
         maxOpenConnections: { type: integer, minimum: 0 }
         migrationVersion: { type: string }
+    SoftwareSettingsEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/SoftwareUpdateSettings" }
+        error: { $ref: "#/components/schemas/APIError" }
+    SoftwareUpdateSettings:
+      type: object
+      required: [source, proxyMode, timeoutMinutes, backgroundCheck, checkIntervalHours]
+      properties:
+        source: { type: string, enum: [auto, direct, mirror, proxy] }
+        proxyMode: { type: string, enum: [inherit, system, direct, custom] }
+        proxyURL: { type: string, maxLength: 2048, writeOnly: true, description: Leave empty to retain an existing custom proxy; localhost means the downloading machine }
+        proxyConfigured: { type: boolean, readOnly: true }
+        controllerRelay: { type: boolean, description: Agent preference for downloading via this Controller }
+        timeoutMinutes: { type: integer, minimum: 10, maximum: 240, default: 60 }
+        backgroundCheck: { type: boolean, default: true, description: Controller checks only while a release notification channel is enabled }
+        checkIntervalHours: { type: integer, minimum: 1, maximum: 168, default: 6 }
     SoftwareOperation:
       type: object
       required: [id, version, phase, progress]
       properties:
+        source: { type: string }
+        resumed: { type: boolean }
+        attempt: { type: integer }
         id: { type: string }
         version: { type: string }
-        phase: { type: string, enum: [downloading, verifying, prepared, restarting, succeeded, failed, rolled_back] }
+        phase: { type: string, enum: [downloading, verifying, prepared, restarting, succeeded, failed, interrupted, rolled_back] }
         progress: { type: integer, minimum: 0, maximum: 100 }
         downloadedBytes: { type: integer, format: int64 }
         totalBytes: { type: integer, format: int64 }
@@ -10841,6 +10892,7 @@ components:
     SoftwareStatus:
       type: object
       properties:
+        settings: { $ref: "#/components/schemas/SoftwareUpdateSettings" }
         current:
           type: object
           properties:
@@ -11776,7 +11828,7 @@ components:
       properties:
         version: { type: string, pattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+$" }
         confirmation: { type: string, description: Must exactly match version. }
-        source: { type: string, enum: [auto, direct, proxy, controller], default: auto }
+        source: { type: string, enum: [auto, direct, mirror, proxy, controller], description: Omit to use saved settings; proxy is a legacy alias for mirror }
         operationId: { type: string, description: Apply this already verified Agent operation without downloading again. }
     AgentUpgradeInput:
       type: object

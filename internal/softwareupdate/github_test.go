@@ -77,3 +77,32 @@ func TestPartialDownloadIsNeverConcatenatedWithFallback(t *testing.T) {
 		t.Fatal("partial archive retried", calls, err)
 	}
 }
+
+func TestAutoMirrorBypassesFailedConfiguredProxy(t *testing.T) {
+	proxyCalls, directCalls := 0, 0
+	name := "dst-admin-update-linux-amd64.tar.gz"
+	data, _ := json.Marshal(map[string]any{"tag_name": "v1.10.0", "html_url": "https://github.com/" + Repository + "/releases/tag/v1.10.0", "assets": []Asset{{Name: name, URL: "https://github.com/" + Repository + "/releases/download/v1.10.0/" + name, Size: 100}, {Name: name + ".sha256", URL: "https://github.com/" + Repository + "/releases/download/v1.10.0/" + name + ".sha256", Size: 120}}})
+	client := NewGitHubClient(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		proxyCalls++
+		return nil, errors.New("configured proxy unavailable")
+	})})
+	client.direct = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		directCalls++
+		if r.URL.Hostname() != "ghfast.top" {
+			return nil, errors.New("official route unavailable")
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(string(data))), Header: make(http.Header)}, nil
+	})}
+	release, err := client.Latest(context.Background(), "linux-amd64", "auto")
+	if err != nil || release == nil || !release.OnlineUpdate || proxyCalls != 1 || directCalls != 2 {
+		t.Fatalf("auto fallback: %+v %v proxy=%d direct=%d", release, err, proxyCalls, directCalls)
+	}
+	routes := client.routes([]string{release.Archive.URL, "https://ghfast.top/" + release.Archive.URL}, "auto")
+	if len(routes) != 3 || routes[2].client != client.direct {
+		t.Fatal("asset mirror reused broken proxy")
+	}
+	fixed := client.routes([]string{"https://ghfast.top/" + release.Archive.URL}, "mirror")
+	if len(fixed) != 1 || fixed[0].client != client.client {
+		t.Fatal("explicit mirror settings were ignored")
+	}
+}

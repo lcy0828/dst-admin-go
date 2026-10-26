@@ -59,6 +59,8 @@ type Service struct {
 	upgradeMu                sync.Mutex
 	activeUpgrades           map[string]struct{}
 	softwareClient           softwareupdate.ReleaseClient
+	softwareSettings         *softwareupdate.Service
+	softwareRelayRoot        string
 	softwareRelays           map[string]*agentSoftwareRelay
 	softwareCheckMu          sync.Mutex
 	softwareCacheMu          sync.RWMutex
