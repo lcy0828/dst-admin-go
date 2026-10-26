@@ -25,7 +25,9 @@ import (
 // Exercise the production Agent, encrypted WebSocket transport, capability
 // discovery, trusted installation selection and actual read-only save parser.
 // No fake command handler or running game is needed for a saved inventory.
-func TestPlayerInventoryProductionGatewayMultiNodeAndInstallation(t *testing.T) {
+// Keep the name short: t.TempDir includes it in native tmux socket paths, which
+// must fit within Linux's Unix-domain socket address limit.
+func TestInventoryGatewayPlacements(t *testing.T) {
 	root := t.TempDir()
 	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
 	gateway, err := legacyserver.NewServer(&legacyserver.Config{KeyFile: filepath.Join(root, "gateway.conf"), SecurityKey: key})
