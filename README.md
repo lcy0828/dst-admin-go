@@ -7,6 +7,7 @@
   <a href="https://github.com/lcy0828/dst-admin-go/forks"><img src="https://img.shields.io/github/forks/lcy0828/dst-admin-go?style=flat&amp;label=Forks&amp;color=8ac496&amp;labelColor=20362a" alt="GitHub Forks"></a>
   <a href="https://github.com/lcy0828/dst-admin-go/actions/workflows/ci.yml"><img src="https://github.com/lcy0828/dst-admin-go/actions/workflows/ci.yml/badge.svg?branch=master&amp;event=push" alt="CI"></a>
   <a href="https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml"><img src="https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml/badge.svg?branch=master&amp;event=push" alt="Package"></a>
+  <a href="#交流与反馈"><img src="https://img.shields.io/badge/QQ-1132317728-8ac496?style=flat&amp;labelColor=20362a" alt="QQ 交流群：1132317728"></a>
 </p>
 
 <p align="center"><strong>从第一次开服，到每一天的冒险。</strong></p>
@@ -196,6 +197,12 @@ docker compose up -d
 
 - **开服与维护**：[游戏服务端安装](docs/game-installation-management.md) · [LuaJIT2 安装](docs/luajit-installation.md) · [工坊网络设置](docs/workshop-network.md) · [升级与回滚](docs/deployment-and-rollback.md) · [游戏工作台](docs/game-workbench.md) · [邮箱与 Webhook 通知](docs/notifications.md)
 - **参与开发**：[开发指南](docs/development.md) · [前端源码](https://github.com/lcy0828/dst-admin-vue) · [问题反馈](https://github.com/lcy0828/dst-admin-go/issues)
+
+## 交流与反馈
+
+**QQ 交流群：1132317728**。欢迎交流部署、开服经验和使用建议，在 QQ 中搜索群号即可申请加入。
+
+Bug 反馈与功能建议也欢迎提交 [GitHub Issue](https://github.com/lcy0828/dst-admin-go/issues)，方便跟进处理进度。
 
 ## Star 趋势
 

@@ -7,6 +7,7 @@
   <a href="https://github.com/lcy0828/dst-admin-go/forks"><img src="https://img.shields.io/github/forks/lcy0828/dst-admin-go?style=flat&amp;label=Forks&amp;color=8ac496&amp;labelColor=20362a" alt="GitHub Forks"></a>
   <a href="https://github.com/lcy0828/dst-admin-go/actions/workflows/ci.yml"><img src="https://github.com/lcy0828/dst-admin-go/actions/workflows/ci.yml/badge.svg?branch=master&amp;event=push" alt="CI"></a>
   <a href="https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml"><img src="https://github.com/lcy0828/dst-admin-go/actions/workflows/package.yml/badge.svg?branch=master&amp;event=push" alt="Package"></a>
+  <a href="#community"><img src="https://img.shields.io/badge/QQ-1132317728-8ac496?style=flat&amp;labelColor=20362a" alt="QQ community group: 1132317728"></a>
 </p>
 
 <p align="center"><strong>From your first server to your next adventure.</strong></p>
@@ -196,6 +197,12 @@ For remote machines running native game processes, use the native Agent package.
 
 - **Run and maintain**: [Game server installation](docs/game-installation-management.en.md) · [LuaJIT2 installation](docs/luajit-installation.en.md) · [Workshop networking](docs/workshop-network.en.md) · [Upgrades and rollback](docs/deployment-and-rollback.en.md) · [Game workbench](docs/game-workbench.en.md) · [Email and Webhook notifications](docs/notifications.en.md)
 - **Contribute**: [Development guide](docs/development.en.md) · [Frontend source](https://github.com/lcy0828/dst-admin-vue) · [Issue tracker](https://github.com/lcy0828/dst-admin-go/issues)
+
+## Community
+
+**QQ group: 1132317728**. Discuss deployment, share server management tips, and offer feedback. Search for the group number in QQ to request to join.
+
+You can also submit bug reports and feature requests through [GitHub Issues](https://github.com/lcy0828/dst-admin-go/issues) to track their progress.
 
 ## Star history
 
