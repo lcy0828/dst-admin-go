@@ -105,3 +105,18 @@ multi-domain tags, access, risk and runtime requirements. These describe behavio
 and do not add approvals. Runtime `any` does not override operation-specific
 requirements such as stopping a world. The generated `docs/openapi-operations.json`
 shares this metadata; new operations inherit their declared domains.
+
+## Current evidence and operation scope
+
+Room identities and conversational context may be reused between turns. Current
+world state, logs, players, performance and configuration require the matching
+query in the current turn. Within the configured tool budget, the page assistant
+requests one corrective lookup when this evidence is missing. If it remains
+unavailable, the answer says it cannot confirm the result. Explanations and target
+clarifications do not require tools. This check does not validate every model
+claim; the returned timestamps, scope and partial-data markers remain authoritative.
+
+Read-only queries run directly. Single-world lifecycle operations use
+`runRoomAction` with an explicit `body.worldIds` selection. MCP clients receive
+the same tool guidance, but their final answers are generated externally and are
+not subject to the page assistant's response checks.

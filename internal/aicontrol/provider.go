@@ -187,6 +187,7 @@ func (s *Service) Chat(ctx context.Context, input ChatInput, emit func(ChatEvent
 		return ChatOutput{}, ErrInvalid
 	}
 	out := ChatOutput{Calls: []Invocation{}}
+	evidence := newTurnEvidence(input)
 	used := 0
 	turn := fmt.Sprint(time.Now().UnixNano())
 	// A multi-room check often needs a catalog, room overviews, and one state
@@ -202,7 +203,16 @@ func (s *Service) Chat(ctx context.Context, input ChatInput, emit func(ChatEvent
 			return out, err
 		}
 		if len(m.ToolCalls) == 0 {
-			out.Content = m.Content
+			if len(evidence.missing()) > 0 && !evidence.permitsClarification(input, m.Content) {
+				if !evidence.repair && (limits.MaxToolCalls == 0 || used < limits.MaxToolCalls) {
+					evidence.repair = true
+					messages = append(messages, Message{Role: "system", Content: evidence.repairPrompt()})
+					continue
+				}
+				out.Content = evidence.unavailable(input.Locale)
+			} else {
+				out.Content = m.Content
+			}
 			return out, nil
 		}
 		if limits.MaxToolCalls > 0 && len(m.ToolCalls) > limits.MaxToolCalls-used {
@@ -223,7 +233,12 @@ func (s *Service) Chat(ctx context.Context, input ChatInput, emit func(ChatEvent
 				fields["requestId"] = "page-" + digest(turn+call.Function.Name+string(canonical))
 				raw, _ = json.Marshal(fields)
 			}
-			result, err := s.Invoke(ctx, principal, call.Function.Name, raw)
+			var result Invocation
+			err := checkChatWorldScope(evidence.question, call.Function.Name, raw)
+			if err == nil {
+				result, err = s.Invoke(ctx, principal, call.Function.Name, raw)
+			}
+			evidence.record(call.Function.Name, result, err)
 			var data []byte
 			if err != nil {
 				data, _ = json.Marshal(map[string]string{"error": err.Error()})
@@ -261,6 +276,9 @@ func (s *Service) Chat(ctx context.Context, input ChatInput, emit func(ChatEvent
 	final, summaryErr := complete(ctx, config, key, messages, nil)
 	if summaryErr == nil && strings.TrimSpace(final.Content) != "" {
 		out.Content = final.Content
+		if len(evidence.missing()) > 0 && !evidence.permitsClarification(input, final.Content) {
+			out.Content = evidence.unavailable(input.Locale)
+		}
 		return out, nil
 	}
 	return s.providerFallback(ctx, principal, out, summaryErr, input.Locale, emit), nil
