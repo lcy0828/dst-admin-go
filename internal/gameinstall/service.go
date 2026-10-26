@@ -89,7 +89,8 @@ func (s *Service) resolve(targetID, installationID string) (agents.RuntimeTarget
 func request(i agents.RuntimeInstallation, action shared.RuntimeAction, p shared.GameInstallationRequest) shared.RuntimeOperationRequest {
 	return shared.RuntimeOperationRequest{ProtocolVersion: shared.RuntimeOperationProtocolVersion, OperationID: uuid.NewString(), InstallationID: i.ID, Action: action, Cluster: "GameInstallation", Shard: "Runtime", TopologyRevision: "installation-v1", GameInstallation: &p}
 }
-func (s *Service) observe(ctx context.Context, t agents.RuntimeTarget, i agents.RuntimeInstallation, path string) (shared.GameInstallationReport, error) {
+func (s *Service) observe(ctx context.Context, t agents.RuntimeTarget, i agents.RuntimeInstallation, path string, checkUsage ...bool) (shared.GameInstallationReport, error) {
+	check := len(checkUsage) > 0 && checkUsage[0]
 	if !t.Online {
 		return shared.GameInstallationReport{}, agents.ErrAgentOffline
 	}
@@ -101,9 +102,12 @@ func (s *Service) observe(ctx context.Context, t agents.RuntimeTarget, i agents.
 		if path != "" {
 			return o.Probe(path)
 		}
+		if check {
+			return o.Check(ctx), nil
+		}
 		return o.Inspect(), nil
 	}
-	r, err := s.targets.ExecuteRuntime(ctx, t.ID, request(i, shared.RuntimeActionGameInstallationObserve, shared.GameInstallationRequest{Path: path}), 30)
+	r, err := s.targets.ExecuteRuntime(ctx, t.ID, request(i, shared.RuntimeActionGameInstallationObserve, shared.GameInstallationRequest{Path: path, CheckUsage: check}), 30)
 	if err != nil {
 		return shared.GameInstallationReport{}, err
 	}
@@ -176,6 +180,15 @@ func (s *Service) Probe(ctx context.Context, targetID, installationID, path stri
 		return shared.GameInstallationReport{}, err
 	}
 	return s.observe(ctx, t, i, path)
+}
+
+func (s *Service) Check(ctx context.Context, targetID, installationID string) (Installation, error) {
+	t, i, err := s.resolve(targetID, installationID)
+	if err != nil {
+		return Installation{}, err
+	}
+	report, err := s.observe(ctx, t, i, "", true)
+	return Installation{TargetID: t.ID, TargetName: t.Name, InstallationID: i.ID, Online: t.Online, OS: t.OS, Supported: supported(t), GameInstallationReport: report}, err
 }
 func (s *Service) Submit(targetID, installationID string, adopt bool, p shared.GameInstallationRequest) (jobs.Job, error) {
 	t, i, err := s.resolve(targetID, installationID)

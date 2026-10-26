@@ -9,8 +9,8 @@ Offline nodes and failed inspections are not reported as an uninstalled game.
 ## Install and update
 
 1. Configure SteamCMD on the target machine (executable, installation directory or command in PATH) and register its game and save directories.
-2. Confirm that every world using that installation has stopped.
-3. Click **Install game server** or **Update / validate** for the intended machine and installation, then wait for the job to finish.
+2. Click **Install game server** or **Update / validate** for the intended installation and wait for read-only preflight.
+3. Review affected worlds, choose whether to resume them afterwards, and confirm. Running worlds are labeled **Will stop**.
 4. After first installation, create a room, import saves, or continue with LuaJIT2 installation below.
 
 For native local deployments, create the configured directories before starting the management service. Empty directories are sufficient; downloading the game first is unnecessary.
@@ -25,9 +25,11 @@ It does not install OS dependencies or SteamCMD. Remote hosts need a recent Agen
 Agents without registered installation paths show configuration guidance. Register them in Agent configuration first; the UI does not create arbitrary trusted directories.
 The independent-shard container driver is not supported yet.
 
-**Update / validate** here requires manually stopping worlds and is intended for first installation or explicit repair.
-Use the existing game update workflow when you need automatic backup, shutdown, and resumption of running rooms.
-SteamCMD validation can overwrite the LuaJIT launcher. Reinstall/repair LuaJIT below if needed; ordinary game startup does not repair it automatically.
+**Update / validate** uses the game release workflow: create and verify protection backups → stop affected worlds → run SteamCMD update and validation → optionally resume previously running worlds. Originally stopped worlds stay stopped. Shared installations and connected rooms across nodes are included in the preview; unrelated installations on the same host are excluded. A current build is still validated. Validation may download Steam's current build; it is not read-only.
+
+Confirmation stays disabled while checking, when nodes are offline or state is unknown, or when unmanaged game processes use the installation. Review the reason and use **Check again**. The plan is rechecked before execution; scope or running-state changes require confirmation again. New installations and idle installations without managed worlds use the direct installer. Follow task progress or **View update history** after confirmation. Failed updates do not blindly restart worlds.
+
+Explicit updates preserve recognized existing Linux x64 LuaJIT2 launchers, restore them against the new game executable, and verify availability. They do not download or upgrade the LuaJIT package. Failed maintenance can be retried; ordinary startup never repairs files.
 
 If a game update fails and remains retryable, its pre-update protection backups cannot be deleted. A retry checks the original backup files and their integrity. Missing or damaged files block the update and require recovery; the system does not replace the original protection with data from after the update.
 
@@ -79,7 +81,7 @@ Only POSIX directory links are supported. Steam client installations on macOS re
 
 Selecting a game directory **does not import saves**. The system continues using the existing save directory shown in the UI.
 Import existing saves separately through room management. Adoption does not overwrite a populated game location and rejects source directories overlapping saves or the registered location.
-The installer does not delete saves or automatically stop/start worlds.
+The low-level installer does not delete saves or stop/start worlds. Managed updates in the UI use the game release coordinator for lifecycle operations.
 
 ## API and workload
 
@@ -88,6 +90,8 @@ All endpoints are under `/api/v2`. Installation and adoption return background j
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /runtime-targets/game-installations?targetId=…` | List registered installations within the selected scope |
+| `POST /runtime-targets/game-installations/preview` | Read-only usage and impact preflight; return a plan or blockers |
+| `POST /game/releases` | Submit confirmed installation selection, policy and plan hash for coordinated maintenance |
 | `POST /runtime-targets/game-installations/probe` | Inspect an existing directory |
 | `POST /runtime-targets/game-installations/actions/install` | Install or validate the registered location |
 | `POST /runtime-targets/game-installations/actions/adopt` | Confirm adoption of an existing directory |
@@ -100,3 +104,5 @@ Leases, Agent operation journals, and installation directory locks coordinate in
 
 Installation status is read only when opening the page, changing scope, or refreshing manually.
 The service does not scan disks for games, check Steam's latest release, or poll while idle. Only unfinished jobs have progress polled every two seconds.
+
+Preflight scans installation processes and checks related nodes only on explicit action or recheck; there is no new idle polling. For `release` mode, submit the plan's `selectedInstallations` as `installations`, `policy`, and `planHash` (also as `confirmation`) to the release endpoint. For `install` mode, call the low-level installer only when `ready=true`.

@@ -19,16 +19,17 @@ const (
 )
 
 var (
-	ErrReleaseInvalid         = errors.New("game release input is invalid")
-	ErrReleaseNotFound        = errors.New("game release not found")
-	ErrReleaseConflict        = errors.New("game release conflicts with active state")
-	ErrReleasePlanChanged     = errors.New("game release plan changed")
-	ErrReleasePreviewBlocked  = errors.New("game release preview contains blockers")
-	ErrDesiredVersionChanged  = errors.New("desired Steam build changed")
-	ErrReleaseRecoveryNeeded  = errors.New("game release requires recovery")
-	ErrReleaseTopologyChanged = errors.New("game release topology changed")
-	ErrReleaseConfirmation    = errors.New("game release confirmation is invalid")
-	ErrLatestBuildUnavailable = errors.New("latest Steam build is unavailable")
+	ErrReleaseInvalid            = errors.New("game release input is invalid")
+	ErrReleaseNotFound           = errors.New("game release not found")
+	ErrReleaseConflict           = errors.New("game release conflicts with active state")
+	ErrReleasePlanChanged        = errors.New("game release plan changed")
+	ErrReleasePreviewBlocked     = errors.New("game release preview contains blockers")
+	ErrDesiredVersionChanged     = errors.New("desired Steam build changed")
+	ErrReleaseRecoveryNeeded     = errors.New("game release requires recovery")
+	ErrReleaseTopologyChanged    = errors.New("game release topology changed")
+	ErrReleaseConfirmation       = errors.New("game release confirmation is invalid")
+	ErrLatestBuildUnavailable    = errors.New("latest Steam build is unavailable")
+	ErrReleaseInstallationUnused = errors.New("selected installation has no managed worlds")
 )
 
 type ReleaseStage string
@@ -55,6 +56,7 @@ const (
 )
 
 type ReleasePolicy struct {
+	Validate         bool                    `json:"validate,omitempty"`
 	RequireEmpty     bool                    `json:"requireEmpty,omitempty"`
 	CleanCache       bool                    `json:"cleanCache"`
 	RestartRunning   bool                    `json:"restartRunning"`
@@ -63,6 +65,7 @@ type ReleasePolicy struct {
 }
 
 type ReleasePolicyInput struct {
+	Validate         bool                    `json:"validate,omitempty"`
 	RequireEmpty     bool                    `json:"requireEmpty,omitempty"`
 	CleanCache       bool                    `json:"cleanCache"`
 	RestartRunning   *bool                   `json:"restartRunning,omitempty"`
@@ -70,7 +73,13 @@ type ReleasePolicyInput struct {
 	TimeoutSeconds   int                     `json:"timeoutSeconds,omitempty"`
 }
 
+type ReleaseInstallationSelection struct {
+	TargetID       string `json:"targetId"`
+	InstallationID string `json:"installationId"`
+}
+
 type ReleasePreviewRequest struct {
+	Installations    []ReleaseInstallationSelection `json:"installations,omitempty"`
 	roomID           string
 	installationKeys map[string]bool
 	DesiredVersion   string             `json:"desiredVersion,omitempty"`
@@ -79,11 +88,12 @@ type ReleasePreviewRequest struct {
 }
 
 type ReleaseCreateRequest struct {
-	DesiredVersion string             `json:"desiredVersion,omitempty"`
-	TargetIDs      []string           `json:"targetIds,omitempty"`
-	Policy         ReleasePolicyInput `json:"policy"`
-	PlanHash       string             `json:"planHash"`
-	Confirmation   string             `json:"confirmation"`
+	Installations  []ReleaseInstallationSelection `json:"installations,omitempty"`
+	DesiredVersion string                         `json:"desiredVersion,omitempty"`
+	TargetIDs      []string                       `json:"targetIds,omitempty"`
+	Policy         ReleasePolicyInput             `json:"policy"`
+	PlanHash       string                         `json:"planHash"`
+	Confirmation   string                         `json:"confirmation"`
 }
 
 type ReleaseBlocker struct {
@@ -138,17 +148,18 @@ type ReleaseInstallationPlan struct {
 }
 
 type ReleasePlan struct {
-	Version          int                       `json:"version"`
-	DesiredVersion   string                    `json:"desiredVersion"`
-	TopologyRevision string                    `json:"topologyRevision"`
-	PlanHash         string                    `json:"planHash"`
-	Policy           ReleasePolicy             `json:"policy"`
-	AffectedRoomIDs  []string                  `json:"affectedRoomIds"`
-	Installations    []ReleaseInstallationPlan `json:"installations"`
-	Blockers         []ReleaseBlocker          `json:"blockers"`
-	Ready            bool                      `json:"ready"`
-	UpdateRequired   bool                      `json:"updateRequired"`
-	CreatedAt        time.Time                 `json:"createdAt"`
+	SelectedInstallations []ReleaseInstallationSelection `json:"selectedInstallations,omitempty"`
+	Version               int                            `json:"version"`
+	DesiredVersion        string                         `json:"desiredVersion"`
+	TopologyRevision      string                         `json:"topologyRevision"`
+	PlanHash              string                         `json:"planHash"`
+	Policy                ReleasePolicy                  `json:"policy"`
+	AffectedRoomIDs       []string                       `json:"affectedRoomIds"`
+	Installations         []ReleaseInstallationPlan      `json:"installations"`
+	Blockers              []ReleaseBlocker               `json:"blockers"`
+	Ready                 bool                           `json:"ready"`
+	UpdateRequired        bool                           `json:"updateRequired"`
+	CreatedAt             time.Time                      `json:"createdAt"`
 }
 
 type ReleaseInstallationResult struct {

@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "803561c1b97878bc42dd7b415ce6346b483a790518d7ae2a1dc726d5b4bfde9f",
+  "operationsSHA256": "99258c325fa2c2db47361b36c9b4203febb503a2ecf92053fb7bd5000b110ac3",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -2972,6 +2972,21 @@
       "risk": "low",
       "runtime": "any",
       "title": "Validate a token change without returning either secret in the diff"
+    },
+    {
+      "operationId": "previewGameInstallationMaintenance",
+      "method": "POST",
+      "path": "/runtime-targets/game-installations/preview",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "game",
+        "runtime"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Check installation usage and preview automatic stop, update or validation, and resumption"
     },
     {
       "operationId": "previewGameRelease",

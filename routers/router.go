@@ -1302,6 +1302,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	gameReleaseCoordinator.ConfigureNotifier(gameNotificationService)
+	gameInstallationHandler.ConfigureReleases(gameReleaseCoordinator)
 	gameReleaseCoordinator.ConfigureOnlineCounter(maintenanceOnlineCounter)
 	automationExecutor.ConfigureGameUpdates(gameReleaseCoordinator)
 	if err := gameUpdateHandler.ConfigureReleases(gameReleaseCoordinator); err != nil {

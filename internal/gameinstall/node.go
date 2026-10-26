@@ -17,6 +17,7 @@ import (
 
 	"dont/internal/dstserver"
 	"dont/internal/installationlock"
+	"dont/internal/luajit"
 	"dont/internal/operationprogress"
 	"dont/internal/steamlogin"
 	"dont/shared"
@@ -235,19 +236,85 @@ func validateGameBinary(path string, allowLauncher bool) error {
 	}
 	return errors.New("服务端程序格式不受支持或已损坏")
 }
-func stopped(ctx context.Context, root string) error {
+func runningProcesses(ctx context.Context, root string) (int, error) {
 	root = canonical(root)
 	ps, err := process.ProcessesWithContext(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	count := 0
 	for _, p := range ps {
 		executable, e := p.ExeWithContext(ctx)
-		if e == nil && strings.HasPrefix(filepath.Base(executable), "dontstarve_") && within(root, canonical(executable)) {
-			return ErrRunning
+		if e != nil || !strings.HasPrefix(filepath.Base(executable), "dontstarve_") {
+			name, _ := p.NameWithContext(ctx)
+			if !strings.HasPrefix(name, "dontstarve_") && !strings.Contains(filepath.Base(executable), "rosetta") && !strings.HasPrefix(filepath.Base(executable), "qemu-") {
+				continue
+			}
+			args, err := p.CmdlineSliceWithContext(ctx)
+			if err != nil {
+				return 0, fmt.Errorf("无法确认游戏进程 %d: %w", p.Pid, err)
+			}
+			executable = ""
+			for _, arg := range args {
+				if strings.HasPrefix(filepath.Base(arg), "dontstarve_") {
+					executable = arg
+					break
+				}
+			}
+			if executable == "" {
+				if strings.HasPrefix(name, "dontstarve_") {
+					return 0, errors.New("无法确认游戏进程的安装路径")
+				}
+				continue
+			}
+			if !filepath.IsAbs(executable) {
+				cwd, err := p.CwdWithContext(ctx)
+				if err != nil {
+					return 0, err
+				}
+				executable = filepath.Join(cwd, executable)
+			}
+		}
+		if within(root, canonical(strings.TrimSuffix(executable, " (deleted)"))) {
+			count++
 		}
 	}
-	return ctx.Err()
+	return count, ctx.Err()
+}
+
+// EnsureStopped is the final node-local guard before SteamCMD can change an
+// installation, including worlds started outside this Controller.
+func EnsureStopped(ctx context.Context, root string) error {
+	count, err := runningProcesses(ctx, root)
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return ErrRunning
+	}
+	return nil
+}
+
+func stopped(ctx context.Context, root string) error { return EnsureStopped(ctx, root) }
+
+// Check is an explicit, read-only preflight. Catalog reads do not scan processes.
+func (o Options) Check(ctx context.Context) shared.GameInstallationReport {
+	value := o.Inspect()
+	value.UsageState = "unknown"
+	if err := o.validate(); err != nil {
+		value.UsageError = err.Error()
+		return value
+	}
+	count, err := runningProcesses(ctx, o.root())
+	if err != nil {
+		value.UsageError = err.Error()
+		return value
+	}
+	value.UsageState, value.RunningProcesses = "idle", count
+	if count > 0 {
+		value.UsageState = "running"
+	}
+	return value
 }
 func (o Options) guard() (func(), error) {
 	key := sha256.Sum256([]byte(filepath.Clean(o.root())))
@@ -358,7 +425,9 @@ func (o Options) Install(ctx context.Context) (shared.GameInstallationReport, er
 	if runner == nil {
 		runner = steamlogin.ExecRunner{}
 	}
-	err = steamlogin.Wrap(o.SteamLogin, runner).Run(ctx, o.steamCMD(), args, out)
+	err = luajit.PreserveSteamLauncher(luajit.Options{ServerPath: root, ServerMode: "64", Platform: o.Platform, Architecture: o.Architecture}, func() error {
+		return steamlogin.Wrap(o.SteamLogin, runner).Run(ctx, o.steamCMD(), args, out)
+	})
 	logText := out.finish()
 	if err != nil {
 		return o.Inspect(), fmt.Errorf("SteamCMD 安装失败: %w\n%s", err, logText)

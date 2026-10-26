@@ -4925,6 +4925,29 @@ paths:
       responses:
         "200": { description: "Sanitized login status. Verification runs asynchronously; read only while a login is active.", content: { application/json: { schema: { $ref: "#/components/schemas/SteamLoginStatusEnvelope" } } } }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /runtime-targets/game-installations/preview:
+    post:
+      tags: [Runtime, Game]
+      operationId: previewGameInstallationMaintenance
+      x-dst-tool: {"readOnly": true}
+      summary: Check installation usage and preview automatic stop, update or validation, and resumption
+      description: Read-only. Does not stop worlds or create a job. A ready release-mode response includes a confirmed-scope plan for POST /game/releases with selectedInstallations as installations, policy, planHash and confirmation. Install mode uses actions/install only after idle usage is confirmed. Unknown usage, offline nodes and unmanaged game processes block submission. Shared installations and connected rooms are included in the release plan.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [targetId, installationId]
+              properties:
+                targetId: { type: string }
+                installationId: { type: string }
+                restartRunning: { type: boolean, default: true }
+      responses:
+        "200": { description: Read-only maintenance preflight, content: { application/json: { schema: { $ref: "#/components/schemas/GameInstallationMaintenanceEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /runtime-targets/game-installations/probe:
     post:
       tags: [Runtime]
@@ -4952,6 +4975,7 @@ paths:
       operationId: installGameOnRuntime
       x-dst-tool: {"openWorld": true}
       summary: Install or validate DST with SteamCMD at a registered node location; all worlds must be stopped
+      description: Use previewGameInstallationMaintenance first. For managed worlds, submit its release plan to POST /game/releases to coordinate backups, shutdown and resumption. This low-level installer never stops worlds.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -5801,6 +5825,9 @@ components:
       type: object
       required: [installed, serverPath, savePath, steamcmdAvailable, canInstall, canAdopt]
       properties:
+        usageState: { type: string, enum: [idle, running, unknown], description: Only populated by explicit maintenance preflight; absent on older Agents }
+        usageError: { type: string }
+        runningProcesses: { type: integer, minimum: 0 }
         installed: { type: boolean }
         serverPath: { type: string }
         resolvedPath: { type: string }
@@ -5836,6 +5863,31 @@ components:
                   os: { type: string }
                   supported: { type: boolean }
                   error: { type: string }
+    GameInstallationMaintenanceEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [mode, ready, installation, blockers]
+          properties:
+            mode: { type: string, enum: [install, release] }
+            ready: { type: boolean }
+            installation:
+              allOf:
+                - { $ref: "#/components/schemas/GameInstallationReport" }
+                - type: object
+                  required: [targetId, installationId, online]
+                  properties:
+                    targetId: { type: string }
+                    installationId: { type: string }
+                    targetName: { type: string }
+                    online: { type: boolean }
+                    os: { type: string }
+                    supported: { type: boolean }
+                    error: { type: string }
+            plan: { $ref: "#/components/schemas/GameReleasePlan" }
+            blockers: { type: array, items: { $ref: "#/components/schemas/GameReleaseBlocker" } }
     LuaJITRelease:
       type: object
       required: [id, version, os, arch, sha256, size]
@@ -8197,10 +8249,18 @@ components:
     GameReleaseLoadConfirmation:
       type: string
       enum: [logs, none]
+    GameReleaseInstallationSelection:
+      type: object
+      additionalProperties: false
+      required: [targetId, installationId]
+      properties:
+        targetId: { type: string }
+        installationId: { type: string }
     GameReleasePolicyInput:
       type: object
       additionalProperties: false
       properties:
+        validate: { type: boolean, default: false, description: Run SteamCMD validation even when already at the target build. Validation can download the current Steam build. }
         requireEmpty: { type: boolean, default: false, description: "Require live confirmation that every affected room has no players before stopping worlds." }
         cleanCache: { type: boolean, default: false }
         restartRunning: { type: boolean, default: true }
@@ -8211,6 +8271,7 @@ components:
       additionalProperties: false
       required: [cleanCache, restartRunning, loadConfirmation, timeoutSeconds]
       properties:
+        validate: { type: boolean, default: false, description: Run SteamCMD validation even when already at the target build. Validation can download the current Steam build. }
         requireEmpty: { type: boolean }
         cleanCache: { type: boolean }
         restartRunning: { type: boolean }
@@ -8220,6 +8281,8 @@ components:
       type: object
       additionalProperties: false
       properties:
+        targetIds: { type: array, maxItems: 100, items: { type: string }, description: Select all installations on these targets; mutually exclusive with installations }
+        installations: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/GameReleaseInstallationSelection" }, description: Exact seed installations; shared installations and connected rooms are included transitively. Mutually exclusive with targetIds. }
         desiredVersion: { type: string, pattern: '^[0-9]{1,64}$' }
         policy: { $ref: "#/components/schemas/GameReleasePolicyInput" }
     GameReleaseCreateInput:
@@ -8227,6 +8290,8 @@ components:
       additionalProperties: false
       required: [planHash, confirmation]
       properties:
+        targetIds: { type: array, maxItems: 100, items: { type: string }, description: Select all installations on these targets; mutually exclusive with installations }
+        installations: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/GameReleaseInstallationSelection" }, description: Exact seed installations; shared installations and connected rooms are included transitively. Mutually exclusive with targetIds. }
         desiredVersion: { type: string, pattern: '^[0-9]{1,64}$' }
         policy: { $ref: "#/components/schemas/GameReleasePolicyInput" }
         planHash: { type: string, pattern: '^[a-f0-9]{64}$' }
@@ -8297,11 +8362,12 @@ components:
         topologyRevision: { type: string, pattern: '^[a-f0-9]{64}$' }
         planHash: { type: string, pattern: '^[a-f0-9]{64}$' }
         policy: { $ref: "#/components/schemas/GameReleasePolicy" }
+        selectedInstallations: { type: array, items: { $ref: "#/components/schemas/GameReleaseInstallationSelection" }, description: Original exact selection to reuse when submitting this plan }
         affectedRoomIds: { type: array, items: { type: string } }
         installations: { type: array, items: { $ref: "#/components/schemas/GameReleaseInstallationPlan" } }
         blockers: { type: array, items: { $ref: "#/components/schemas/GameReleaseBlocker" } }
         ready: { type: boolean }
-        updateRequired: { type: boolean }
+        updateRequired: { type: boolean, description: Update or explicitly requested validation must run }
         createdAt: { type: string, format: date-time }
     GameReleasePlanEnvelope:
       type: object

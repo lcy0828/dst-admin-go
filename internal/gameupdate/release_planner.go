@@ -80,6 +80,7 @@ func NormalizeReleasePolicy(value ReleasePolicyInput) (ReleasePolicy, error) {
 		return ReleasePolicy{}, ErrReleaseInvalid
 	}
 	return ReleasePolicy{
+		Validate:     value.Validate,
 		RequireEmpty: value.RequireEmpty,
 		CleanCache:   value.CleanCache, RestartRunning: restart, LoadConfirmation: value.LoadConfirmation,
 		TimeoutSeconds: value.TimeoutSeconds,
@@ -104,6 +105,24 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 		return ReleasePlan{}, err
 	}
 	selectedInstallations := request.installationKeys
+	selection, err := normalizeReleaseInstallations(request.Installations)
+	if err != nil || (len(selection) > 0 && (len(selectedTargets) > 0 || request.roomID != "" || selectedInstallations != nil)) {
+		return ReleasePlan{}, ErrReleaseInvalid
+	}
+	if len(selection) > 0 {
+		selectedInstallations = make(map[string]bool, len(selection))
+		available := make(map[string]bool)
+		for _, shard := range snapshot.Shards {
+			available[releaseSnapshotInstallationKey(shard)] = true
+		}
+		for _, item := range selection {
+			key := releaseInstallationKey(item.TargetID, item.InstallationID)
+			if !available[key] {
+				return ReleasePlan{}, ErrReleaseInstallationUnused
+			}
+			selectedInstallations[key] = true
+		}
+	}
 	if request.roomID != "" {
 		selectedInstallations = make(map[string]bool)
 		for _, observed := range snapshot.Shards {
@@ -121,7 +140,8 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 		selectedInstallations = connectedReleaseInstallations(snapshot, selectedInstallations)
 	}
 	plan := ReleasePlan{
-		Version: ReleasePlanVersion, DesiredVersion: requested, TopologyRevision: snapshot.TopologyRevision,
+		SelectedInstallations: selection,
+		Version:               ReleasePlanVersion, DesiredVersion: requested, TopologyRevision: snapshot.TopologyRevision,
 		Policy: policy, Blockers: []ReleaseBlocker{}, Ready: true, CreatedAt: p.now().UTC(),
 	}
 	targets := make(map[string]*ReleaseInstallationPlan)
@@ -175,9 +195,28 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 		return ReleasePlan{}, err
 	}
 	for _, target := range installations {
+		// A requested validation still writes game files even when the build is current.
+		if policy.Validate && target.UpToDate {
+			add := func(code, message string) {
+				target.Blockers = append(target.Blockers, ReleaseBlocker{Code: code, Message: message, TargetID: target.TargetID, InstallationID: target.InstallationID})
+			}
+			if target.UpdateMethod == dstinstall.UpdateMethodSteamClient {
+				add("STEAM_CLIENT_UPDATE_REQUIRED", "该安装由 Steam 客户端管理，请在 Steam 中校验游戏文件")
+			} else {
+				if !target.SteamCMDAvailable {
+					add("STEAMCMD_UNAVAILABLE", "运行目标未配置可执行的 SteamCMD")
+				}
+				if !target.UpdateSupported {
+					add("UPDATE_UNSUPPORTED", "该运行目标不支持自动更新或校验 DST")
+				}
+				if target.AvailableBytes < target.RequiredBytes {
+					add("DISK_INSUFFICIENT", "DST 安装所在磁盘可用空间不足")
+				}
+			}
+		}
 		plan.Installations = append(plan.Installations, target)
 		plan.Blockers = append(plan.Blockers, target.Blockers...)
-		if target.Installed && releaseVersionPattern.MatchString(target.DesiredVersion) && !target.UpToDate {
+		if target.Installed && releaseVersionPattern.MatchString(target.DesiredVersion) && (!target.UpToDate || policy.Validate) {
 			plan.UpdateRequired = true
 		}
 	}
@@ -410,6 +449,9 @@ func (p *ReleasePlanner) finishReleaseTarget(ctx context.Context, target *Releas
 			continue
 		}
 		shard.RuntimeState = status.State
+		if status.State != string(shards.RuntimeRunning) && status.State != string(shards.RuntimeStarting) && status.State != string(shards.RuntimeStopped) || status.State == string(shards.RuntimeStopped) && status.SessionExists {
+			target.Blockers = append(target.Blockers, releaseShardBlocker("SHARD_STATE_UNCERTAIN", "世界正在切换状态或状态无法确认，请重新检查后再更新", target.TargetID, target.InstallationID, shard.RoomID, shard.WorldID))
+		}
 		shard.RuntimeMode = status.RuntimeMode
 		shard.WasRunning = status.State == string(shards.RuntimeRunning) || status.State == string(shards.RuntimeStarting)
 		if shard.WasRunning {
@@ -505,13 +547,15 @@ func calculateReleasePlanHash(plan ReleasePlan) (string, error) {
 		Shards                                                   []canonicalShard
 	}
 	payload := struct {
+		SelectedInstallations            []ReleaseInstallationSelection `json:",omitempty"`
 		Version                          int
 		DesiredVersion, TopologyRevision string
 		Policy                           ReleasePolicy
 		AffectedRoomIDs                  []string
 		Targets                          []canonicalTarget
 	}{
-		Version: plan.Version, DesiredVersion: plan.DesiredVersion, TopologyRevision: plan.TopologyRevision,
+		SelectedInstallations: plan.SelectedInstallations,
+		Version:               plan.Version, DesiredVersion: plan.DesiredVersion, TopologyRevision: plan.TopologyRevision,
 		Policy: plan.Policy, AffectedRoomIDs: append([]string(nil), plan.AffectedRoomIDs...),
 	}
 	for _, target := range plan.Installations {
@@ -553,7 +597,7 @@ func validateReleasePlan(plan ReleasePlan) error {
 		key := releaseInstallationKey(target.TargetID, target.InstallationID)
 		metadataPresent := target.AppID != "" || target.UpdateMethod != ""
 		metadataInvalid := metadataPresent && (!releaseAppIDPattern.MatchString(target.AppID) || target.UpdateMethod != dstinstall.UpdateMethodSteamCMD && target.UpdateMethod != dstinstall.UpdateMethodSteamClient)
-		updateBlocked := !target.UpToDate && (!target.SteamCMDAvailable || !target.UpdateSupported || target.AvailableBytes < target.RequiredBytes)
+		updateBlocked := (!target.UpToDate || plan.Policy.Validate) && (!target.SteamCMDAvailable || !target.UpdateSupported || target.AvailableBytes < target.RequiredBytes)
 		if seenInstallations[key] || len(target.Shards) == 0 || !releaseVersionPattern.MatchString(target.DesiredVersion) || metadataInvalid || len(target.Blockers) != 0 || !target.Online || !target.InventoryFresh || !target.Installed || updateBlocked {
 			return ErrReleaseInvalid
 		}

@@ -214,3 +214,51 @@ func TestInstallRefusesRunningNativeGame(t *testing.T) {
 		t.Fatalf("expected running refusal, got %v", err)
 	}
 }
+
+func TestMaintenanceCheckIsReadOnly(t *testing.T) {
+	o := nodeOptions(t)
+	report := o.Check(context.Background())
+	if report.UsageState != "idle" || report.Installed {
+		t.Fatalf("unexpected preflight: %+v", report)
+	}
+	if _, err := os.Stat(o.ServerPath); !os.IsNotExist(err) {
+		t.Fatal("preflight created game directory", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if report = o.Check(ctx); report.UsageState != "unknown" {
+		t.Fatalf("canceled process scan reported idle: %+v", report)
+	}
+}
+
+func TestMaintenanceDetectsUnmanagedProcess(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux /proc process identity")
+	}
+	o := nodeOptions(t)
+	writeGame(t, o.ServerPath)
+	executable := filepath.Join(o.ServerPath, "bin64", dstserver.BinaryX64)
+	data, err := os.ReadFile("/bin/sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(executable, data, 0755); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(executable, "30")
+	if err = command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = command.Process.Kill(); _ = command.Wait() }()
+	report := o.Check(context.Background())
+	if report.UsageState != "running" || report.RunningProcesses != 1 {
+		t.Fatalf("unmanaged process missed: %+v", report)
+	}
+	if err = EnsureStopped(context.Background(), o.ServerPath); !errors.Is(err, ErrRunning) {
+		t.Fatal("write guard missed running game", err)
+	}
+	other := nodeOptions(t)
+	if report = other.Check(context.Background()); report.UsageState != "idle" {
+		t.Fatal("unrelated installation blocked", report)
+	}
+}

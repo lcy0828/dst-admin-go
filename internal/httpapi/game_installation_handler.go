@@ -7,12 +7,22 @@ import (
 	"net/http"
 )
 
-type GameInstallationHandler struct{ service *gameinstall.Service }
+type GameInstallationHandler struct {
+	service  *gameinstall.Service
+	releases GameReleaseService
+}
+
+func (h *GameInstallationHandler) ConfigureReleases(releases GameReleaseService) {
+	h.releases = releases
+}
 
 func NewGameInstallationHandler(service *gameinstall.Service) *GameInstallationHandler {
 	return &GameInstallationHandler{service: service}
 }
 func (h *GameInstallationHandler) Register(v2 *gin.RouterGroup) {
+	if h.releases != nil {
+		v2.POST("/runtime-targets/game-installations/preview", h.preview)
+	}
 	v2.GET("/runtime-targets/game-installations", func(c *gin.Context) {
 		items, err := h.service.Catalog(c.Request.Context(), c.Query("targetId"))
 		if err != nil {

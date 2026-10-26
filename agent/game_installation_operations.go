@@ -15,6 +15,9 @@ func validateGameInstallationPayload(r shared.RuntimeOperationRequest) error {
 		return errors.New("游戏安装请求负载无效")
 	}
 	p := r.GameInstallation
+	if p.CheckUsage && (r.Action != shared.RuntimeActionGameInstallationObserve || p.Path != "" || p.Fingerprint != "") {
+		return errors.New("使用状态检查只能读取已登记的安装位置")
+	}
 	if shared.IsSteamLoginAction(r.Action) {
 		if p.Path != "" || p.Fingerprint != "" || p.SteamLogin == nil {
 			return steamlogin.ErrInvalid
@@ -72,6 +75,8 @@ func (a *Agent) executeGameInstallation(ctx context.Context, i RuntimeInstallati
 	case shared.RuntimeActionGameInstallationObserve:
 		if r.GameInstallation.Path != "" {
 			report, err = o.Probe(r.GameInstallation.Path)
+		} else if r.GameInstallation.CheckUsage {
+			report = o.Check(ctx)
 		} else {
 			report = o.Inspect()
 		}

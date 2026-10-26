@@ -392,7 +392,8 @@ func (c *ReleaseCoordinator) updateInstallations(ctx context.Context, value Rele
 			continue
 		}
 		observation, observeErr := c.runtime.ObserveInstallation(ctx, target)
-		if observeErr == nil && observation.Installed && observation.CurrentVersion == desiredVersion {
+		alreadyValidated := result.Stage == ReleaseStageVerified || result.Stage == ReleaseStageSucceeded
+		if (!value.Plan.Policy.Validate || alreadyValidated) && observeErr == nil && observation.Installed && observation.CurrentVersion == desiredVersion {
 			now := c.now().UTC()
 			result.Stage, result.AfterVersion, result.ErrorCode, result.ErrorMessage = ReleaseStageVerified, observation.CurrentVersion, "", ""
 			result.FinishedAt, result.UpdatedAt = &now, now
@@ -628,11 +629,15 @@ func (c *ReleaseCoordinator) previewStoredPlan(ctx context.Context, plan Release
 			installations[releaseInstallationKey(installation.TargetID, installation.InstallationID)] = true
 		}
 	}
+	if len(plan.SelectedInstallations) > 0 {
+		targetIDs, installations = nil, nil
+	}
 	return c.planner.Preview(ctx, ReleasePreviewRequest{
+		Installations:    plan.SelectedInstallations,
 		installationKeys: installations,
 		DesiredVersion:   plan.DesiredVersion,
 		TargetIDs:        targetIDs,
-		Policy:           ReleasePolicyInput{RequireEmpty: plan.Policy.RequireEmpty, CleanCache: plan.Policy.CleanCache, RestartRunning: &restart, LoadConfirmation: plan.Policy.LoadConfirmation, TimeoutSeconds: plan.Policy.TimeoutSeconds},
+		Policy:           ReleasePolicyInput{Validate: plan.Policy.Validate, RequireEmpty: plan.Policy.RequireEmpty, CleanCache: plan.Policy.CleanCache, RestartRunning: &restart, LoadConfirmation: plan.Policy.LoadConfirmation, TimeoutSeconds: plan.Policy.TimeoutSeconds},
 	})
 }
 

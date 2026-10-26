@@ -2,7 +2,9 @@ package gameupdate
 
 import (
 	"context"
+	"dont/internal/gameinstall"
 	"dont/internal/installationlock"
+	"dont/internal/luajit"
 	"errors"
 	"strings"
 
@@ -66,6 +68,9 @@ func (s *Service) UpdateReleaseInstallation(ctx context.Context, expectedVersion
 		return s.releaseVersionResult(""), lockErr
 	}
 	defer unlock()
+	if err := gameinstall.EnsureStopped(ctx, installRoot(s.config.ServerPath)); err != nil {
+		return s.releaseVersionResult(""), err
+	}
 	if cleanCache {
 		if err := cleanSteamCache(executable, installRoot(s.config.ServerPath), dstinstall.AppIDDedicatedServer); err != nil {
 			return s.releaseVersionResult(""), err
@@ -73,7 +78,9 @@ func (s *Service) UpdateReleaseInstallation(ctx context.Context, expectedVersion
 	}
 	output := &boundedBuffer{limit: 2 * 1024 * 1024}
 	arguments := []string{"+force_install_dir", installRoot(s.config.ServerPath), "+login", "anonymous", "+app_update", dstinstall.AppIDDedicatedServer, "validate", "+quit"}
-	runErr := s.runner.Run(ctx, executable, arguments, output)
+	runErr := luajit.PreserveSteamLauncher(luajit.Options{ServerPath: installRoot(s.config.ServerPath), ServerMode: "64"}, func() error {
+		return s.runner.Run(ctx, executable, arguments, output)
+	})
 	result := s.releaseVersionResult(output.String())
 	if runErr == nil && result.CurrentVersion != expectedVersion {
 		runErr = errors.New("SteamCMD 已结束，但安装版本与目标版本不一致")

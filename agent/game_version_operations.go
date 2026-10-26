@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"dont/internal/gameinstall"
 	"dont/internal/installationlock"
+	"dont/internal/luajit"
 	"dont/internal/steamlogin"
 	"errors"
 	"fmt"
@@ -109,6 +111,10 @@ func (a *Agent) updateGameVersion(ctx context.Context, installation RuntimeInsta
 		return result, lockErr
 	}
 	defer unlock()
+	if err := gameinstall.EnsureStopped(ctx, root); err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+		return result, err
+	}
 
 	if request.GameVersion.CleanCache {
 		if err := cleanAgentSteamCache(steamcmd, root); err != nil {
@@ -119,7 +125,9 @@ func (a *Agent) updateGameVersion(ctx context.Context, installation RuntimeInsta
 	}
 	output := &limitedGameVersionBuffer{limit: maxGameUpdateLogBytes}
 	arguments := []string{"+force_install_dir", root, "+login", "anonymous", "+app_update", dstDedicatedServerAppID, "validate", "+quit"}
-	runErr := steamlogin.Wrap(a.Config.SteamLogin, a.gameVersionRunner).Run(ctx, steamcmd, arguments, output)
+	runErr := luajit.PreserveSteamLauncher(luajit.Options{ServerPath: root, ServerMode: "64"}, func() error {
+		return steamlogin.Wrap(a.Config.SteamLogin, a.gameVersionRunner).Run(ctx, steamcmd, arguments, output)
+	})
 	current, installed := readInstalledGameVersion(installation)
 	value := gameVersionResult(a.now, installation, steamcmd, output.String())
 	value.CurrentVersion, value.SteamBuild, value.Installed = current, current, installed

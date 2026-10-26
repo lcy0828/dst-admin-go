@@ -88,6 +88,7 @@ func (h *GameUpdateHandler) releasePublish(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), gameReleasePreviewTimeout)
 	defer cancel()
 	plan, err := h.releases.Preview(ctx, gameupdate.ReleasePreviewRequest{
+		Installations:  request.Installations,
 		DesiredVersion: request.DesiredVersion,
 		TargetIDs:      request.TargetIDs,
 		Policy:         request.Policy,
@@ -274,6 +275,8 @@ func gameReleaseJobError(releaseErr error, code, message string) *jobs.Error {
 func gameReleaseFailure(c *gin.Context, err error) {
 	status, code, message := http.StatusInternalServerError, "GAME_RELEASE_FAILED", "游戏更新操作失败"
 	switch {
+	case errors.Is(err, gameupdate.ErrReleaseInstallationUnused):
+		status, code, message = http.StatusUnprocessableEntity, "INSTALLATION_UNUSED", "该安装没有受管世界，请使用游戏安装管理执行更新或校验"
 	case errors.Is(err, context.DeadlineExceeded):
 		status, code, message = http.StatusGatewayTimeout, "GAME_RELEASE_PREVIEW_TIMEOUT", "版本检查超时，Steam 或运行节点响应过慢，请稍后重试"
 	case errors.Is(err, gameupdate.ErrReleaseNotFound):
