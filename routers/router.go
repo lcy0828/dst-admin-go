@@ -879,6 +879,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	})
 	modService.ConfigureMutationGuard(localMutationGuard)
 	modHandler := httpapi.NewModHandler(modService, jobService)
+	modHandler.ConfigureRuntimeTargets(agentService.RuntimeTargets)
 	modPublicationRoot := filepath.Join(backupPath, ".mod-publication")
 	modReplicaStore := modpublication.NewReplicaStore(models.DB(), tablePrefix)
 	if err := modReplicaStore.Migrate(); err != nil {

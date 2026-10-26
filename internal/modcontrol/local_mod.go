@@ -90,3 +90,20 @@ func (s *Service) currentModLog(ctx context.Context, room rooms.Room, request Ru
 	}
 	return false
 }
+
+func (s *Service) LocalModTargets(ctx context.Context, roomID string) ([]mods.InstallationScope, error) {
+	executions, err := s.source.topology.ResolveCachedRoomExecutions(ctx, roomID)
+	if err != nil {
+		return nil, err
+	}
+	result := []mods.InstallationScope{}
+	seen := map[string]bool{}
+	for _, execution := range executions {
+		key := execution.AppliedTargetID + "/" + execution.AppliedInstallationID
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, mods.InstallationScope{TargetID: execution.AppliedTargetID, InstallationID: execution.AppliedInstallationID})
+		}
+	}
+	return result, nil
+}

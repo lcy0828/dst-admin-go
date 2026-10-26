@@ -36,6 +36,8 @@ func InventoryInstallationMods(ctx context.Context, installation TrustedInstalla
 	if err != nil {
 		return result, err
 	}
+	metadataCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
 	root := filepath.Join(installation.ServerPath, "mods")
 	if err := rejectSymlinkComponents(root); err != nil {
 		return result, err
@@ -60,7 +62,7 @@ func InventoryInstallationMods(ctx context.Context, installation TrustedInstalla
 		if _, err := os.Lstat(filepath.Join(root, entry.Name(), "modinfo.lua")); os.IsNotExist(err) {
 			continue
 		}
-		result.Mods[ref.ID] = observeInstallationMod(filepath.Join(root, entry.Name()))
+		result.Mods[ref.ID] = observeInstallationModContext(metadataCtx, filepath.Join(root, entry.Name()), ref.ID)
 		if len(result.Mods) > maxObservedWorkshopIDs {
 			return FilesObservation{}, ErrInvalidInput
 		}

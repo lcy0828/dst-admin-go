@@ -25,6 +25,7 @@ import (
 
 	"dont/internal/dstserver"
 	"dont/internal/moddistribution"
+	"dont/internal/modmetadata"
 	"dont/internal/mods"
 	"dont/internal/operationprogress"
 	"dont/internal/roomops"
@@ -192,6 +193,7 @@ func (a *Agent) executeModAction(ctx context.Context, installation RuntimeInstal
 }
 
 func (a *Agent) observeModAction(ctx context.Context, installation RuntimeInstallation, request shared.RuntimeOperationRequest) (shared.RuntimeOperationResult, error) {
+	ctx = modmetadata.WithLanguage(ctx, request.Mod.Language)
 	result := runtimeResult(request, shared.RuntimeOutcomeObserved, "Mod Runtime 状态已读取")
 	response := &shared.RuntimeModResult{}
 	result.Mod = response
@@ -1651,7 +1653,7 @@ func runtimeModFilesObservation(value moddistribution.FilesObservation) *shared.
 	for workshopID, state := range value.Mods {
 		result.Mods[workshopID] = shared.RuntimeModFileState{
 			Status: shared.RuntimeModFileStatus(state.Status), Reason: state.Reason,
-			Name: state.Name, Version: state.Version, InstalledSize: state.InstalledSize, SteamManifestID: state.SteamManifestID,
+			Name: state.Name, Author: state.Author, Description: state.Description, Version: state.Version, InstalledSize: state.InstalledSize, SteamManifestID: state.SteamManifestID,
 			SteamUpdatedAt: cloneObservedTime(state.SteamUpdatedAt), MetadataReason: state.MetadataReason,
 		}
 	}

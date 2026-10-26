@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"dont/internal/agents"
 	"dont/internal/jobs"
+	"dont/internal/modmetadata"
 	"dont/internal/mods"
 	"dont/internal/operationprogress"
 	"dont/internal/requesttiming"
@@ -23,6 +25,7 @@ import (
 )
 
 type ModHandler struct {
+	runtimeTargets        func() ([]agents.RuntimeTarget, error)
 	mods                  modService
 	placement             modPlacementReader
 	installationUpdater   modInstallationUpdater
@@ -158,6 +161,7 @@ func (h *ModHandler) setConfigurationMode(c *gin.Context) {
 }
 
 func (h *ModHandler) installationInventory(c *gin.Context) {
+	c.Request = c.Request.WithContext(modmetadata.WithLanguage(c.Request.Context(), c.Query("language")))
 	reader, ok := h.placement.(modInstallationInventoryReader)
 	if !ok {
 		Failure(c, http.StatusServiceUnavailable, "MOD_RUNTIME_INVENTORY_UNAVAILABLE", "机器模组内容读取尚不可用", nil)
@@ -346,15 +350,15 @@ func (h *ModHandler) search(c *gin.Context) {
 }
 
 func (h *ModHandler) details(c *gin.Context) {
+	c.Request = c.Request.WithContext(modmetadata.WithLanguage(c.Request.Context(), c.Query("language")))
 	ref, valid := mods.ParseReference(c.Param("modId"))
 	if !valid {
 		modFailure(c, mods.ErrInvalidModID)
 		return
 	}
 	if ref.Source == "local" {
-		targetID, installationID := c.Query("targetId"), c.Query("installationId")
-		if targetID == "" || installationID == "" {
-			modFailure(c, &mods.FieldError{Fields: map[string]string{"targetId": "本地模组必须指定运行节点", "installationId": "本地模组必须指定安装实例"}})
+		targetID, installationID, resolved := h.modDetailScope(c)
+		if !resolved {
 			return
 		}
 		reader, ok := h.placement.(interface {
@@ -369,6 +373,7 @@ func (h *ModHandler) details(c *gin.Context) {
 			modFailure(c, err)
 			return
 		}
+		item.TargetID, item.InstallationID = targetID, installationID
 		if item.Name == "" {
 			item.Name = ref.DirectoryName
 		}
@@ -438,6 +443,7 @@ func (h *ModHandler) metadata(c *gin.Context) {
 }
 
 func (h *ModHandler) list(c *gin.Context) {
+	c.Request = c.Request.WithContext(modmetadata.WithLanguage(c.Request.Context(), c.Query("language")))
 	ctx, timing := requesttiming.New(c.Request.Context())
 	var value mods.ModList
 	var err error

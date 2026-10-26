@@ -319,6 +319,7 @@ type RuntimeModPlanInput struct {
 }
 
 type RuntimeModRequest struct {
+	Language           string                    `json:"language,omitempty"`
 	ModID              string                    `json:"mod_id,omitempty"`
 	ModIDs             []string                  `json:"mod_ids,omitempty"`
 	IncludeLocal       bool                      `json:"include_local,omitempty"`
@@ -615,6 +616,8 @@ const (
 )
 
 type RuntimeModFileState struct {
+	Author          string               `json:"author,omitempty"`
+	Description     string               `json:"description,omitempty"`
 	Status          RuntimeModFileStatus `json:"status"`
 	Reason          string               `json:"reason,omitempty"`
 	Name            string               `json:"name,omitempty"`

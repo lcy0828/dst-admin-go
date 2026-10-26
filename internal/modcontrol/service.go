@@ -755,8 +755,16 @@ func (s *Service) installationModInventory(ctx context.Context, targetID, instal
 			return result, mods.ErrInvalidModID
 		}
 		item.Source, item.DirectoryName = ref.Source, ref.DirectoryName
+		if ref.Source == "local" {
+			item.Author = state.Author
+			item.Version = state.Version
+			item.Description = state.Description
+		}
 		if strings.TrimSpace(state.Name) != "" {
-			item.Name = strings.TrimSpace(state.Name)
+			item.LocalName = strings.TrimSpace(state.Name)
+			if ref.Source == "local" || item.Name == "" {
+				item.Name = item.LocalName
+			}
 		}
 		if strings.TrimSpace(item.Name) == "" {
 			item.Name = "Workshop " + workshopID
@@ -1001,7 +1009,7 @@ func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worl
 		}
 		sort.Strings(targetKeys)
 		versions := make(map[string]bool)
-		runtimeName := ""
+		names, authors := map[string]bool{}, map[string]bool{}
 		for _, targetKey := range targetKeys {
 			group := targets[targetKey]
 			fact := mods.RuntimeModVersionTarget{
@@ -1018,6 +1026,7 @@ func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worl
 				item.RuntimeVersions = append(item.RuntimeVersions, fact)
 				continue
 			}
+			fact.Name, fact.Author = strings.TrimSpace(state.Name), strings.TrimSpace(state.Author)
 			fact.Version = strings.TrimSpace(state.Version)
 			fact.SteamManifestID = state.SteamManifestID
 			fact.SteamUpdatedAt = cloneRuntimeVersionTime(state.SteamUpdatedAt)
@@ -1038,8 +1047,11 @@ func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worl
 						item.RuntimeUnknownTargets++
 					}
 				}
-				if runtimeName == "" && strings.TrimSpace(state.Name) != "" {
-					runtimeName = strings.TrimSpace(state.Name)
+				if fact.Name != "" {
+					names[fact.Name] = true
+				}
+				if fact.Author != "" {
+					authors[fact.Author] = true
 				}
 				if fact.Version != "" {
 					versions[fact.Version] = true
@@ -1065,9 +1077,31 @@ func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worl
 				item.LoadedWorlds = append(item.LoadedWorlds, worldState.WorldID)
 			}
 		}
-		if runtimeName != "" {
-			item.Name = runtimeName
+		item.MetadataMixed = len(names) > 1 || len(authors) > 1 || len(versions) > 1
+		if len(names) == 1 {
+			for name := range names {
+				item.LocalName = name
+				if item.Source == "local" || item.Name == "" {
+					item.Name = name
+				}
+			}
 		}
+		if item.Source == "local" {
+			if len(authors) == 1 {
+				for author := range authors {
+					item.Author = author
+				}
+			}
+			if len(versions) == 1 {
+				for version := range versions {
+					item.Version = version
+				}
+			}
+			if item.Name == "" {
+				item.Name = item.DirectoryName
+			}
+		}
+
 		sort.Strings(item.InstalledWorlds)
 		item.InstalledWorlds = uniqueSortedStrings(item.InstalledWorlds)
 		sort.Strings(item.LoadedWorlds)

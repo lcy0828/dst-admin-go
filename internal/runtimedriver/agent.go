@@ -12,6 +12,7 @@ import (
 
 	"dont/internal/agents"
 	"dont/internal/configpublication"
+	"dont/internal/modmetadata"
 	"dont/internal/runtimefiles"
 	"dont/shared"
 )
@@ -469,7 +470,7 @@ func (d *Agent) ReadModSchema(ctx context.Context, target Target, workshopID str
 	}
 	workshopID = ref.ID
 	request := modRuntimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionModSchemaRead)
-	request.Mod = &shared.RuntimeModRequest{WorkshopID: workshopID}
+	request.Mod = &shared.RuntimeModRequest{WorkshopID: workshopID, Language: modmetadata.Language(ctx)}
 	if ref.Source == "local" {
 		request.Mod.WorkshopID, request.Mod.ModID = "", ref.ID
 	}
@@ -545,6 +546,7 @@ func (d *Agent) FetchModCache(ctx context.Context, target Target, operation Oper
 
 func (d *Agent) DownloadMods(ctx context.Context, target Target, operation Operation, workshopIDs []string) error {
 	result, err := d.executeMod(ctx, target, operation, shared.RuntimeActionModDownload, shared.RuntimeModRequest{
+		Language:    modmetadata.Language(ctx),
 		WorkshopIDs: append([]string(nil), workshopIDs...),
 	}, 30*time.Minute)
 	value, err := checkedModResult(result, err)
@@ -725,7 +727,7 @@ func (d *Agent) InventoryLocalModFiles(ctx context.Context, target Target) (*sha
 
 func (d *Agent) inventoryModFiles(ctx context.Context, target Target, includeLocal bool) (*shared.RuntimeModFilesObservation, error) {
 	request := modRuntimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionModFilesInventory)
-	request.Mod = &shared.RuntimeModRequest{IncludeLocal: includeLocal}
+	request.Mod = &shared.RuntimeModRequest{IncludeLocal: includeLocal, Language: modmetadata.Language(ctx)}
 	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 30)
 	value, err := checkedModResult(result.Result, err)
 	if err != nil {

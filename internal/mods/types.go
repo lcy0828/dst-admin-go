@@ -38,6 +38,10 @@ func (e *RevisionConflictError) Error() string { return ErrRevisionConflict.Erro
 func (e *RevisionConflictError) Unwrap() error { return ErrRevisionConflict }
 
 type SteamMod struct {
+	LocalName       string    `json:"localName,omitempty"`
+	MetadataMixed   bool      `json:"metadataMixed,omitempty"`
+	TargetID        string    `json:"targetId,omitempty"`
+	InstallationID  string    `json:"installationId,omitempty"`
 	ID              string    `json:"id"`
 	Source          string    `json:"source,omitempty"`
 	DirectoryName   string    `json:"directoryName,omitempty"`
@@ -148,6 +152,8 @@ type ModState struct {
 }
 
 type RuntimeModVersionTarget struct {
+	Name            string     `json:"name,omitempty"`
+	Author          string     `json:"author,omitempty"`
 	TargetID        string     `json:"targetId"`
 	InstallationID  string     `json:"installationId"`
 	Version         string     `json:"version,omitempty"`
@@ -328,4 +334,9 @@ type ConfigApplyResult struct {
 	ProtectionBackupID string            `json:"protectionBackupId"`
 	WorldIDs           []string          `json:"worldIds,omitempty"`
 	PublishedTargets   int               `json:"publishedTargets,omitempty"`
+}
+
+type InstallationScope struct {
+	TargetID       string `json:"targetId"`
+	InstallationID string `json:"installationId"`
 }

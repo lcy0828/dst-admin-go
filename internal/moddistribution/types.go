@@ -87,6 +87,8 @@ const (
 )
 
 type FileState struct {
+	Author          string
+	Description     string
 	Status          FileStatus
 	Reason          string
 	Name            string

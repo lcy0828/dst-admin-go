@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode"
 
+	"dont/internal/modmetadata"
 	"dont/internal/modruntime"
 
 	lua "github.com/yuin/gopher-lua"
@@ -77,6 +78,9 @@ func (p *DualParser) Parse(ctx context.Context, modID, modInfoPath string) (Pars
 	values, embeddedErr := parseModInfoEmbedded(embeddedCtx, modID, modInfoPath)
 	cancel()
 	if embeddedErr == nil {
+		for key, value := range modmetadata.Values(ctx, modInfoPath, modID) {
+			values[key] = value
+		}
 		return ParserResult{Values: values, Parser: "go", Warnings: []string{}}, nil
 	}
 	select {

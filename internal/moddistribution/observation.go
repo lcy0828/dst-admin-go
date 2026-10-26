@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"dont/internal/dsttime"
+	"dont/internal/modmetadata"
 	"dont/shared"
 )
 
@@ -127,6 +128,8 @@ func ObserveInstallationMods(ctx context.Context, installation TrustedInstallati
 }
 
 func observeInstallationFiles(ctx context.Context, installation TrustedInstallation, ids []string, worlds []ObserveWorld) (FilesObservation, error) {
+	metadataCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
 	result := FilesObservation{
 		InstallationID: installation.ID,
 		Mods:           make(map[string]FileState, len(ids)),
@@ -143,15 +146,15 @@ func observeInstallationFiles(ctx context.Context, installation TrustedInstallat
 			return FilesObservation{}, ErrInvalidInput
 		}
 		if ref.Source == "local" {
-			result.Mods[ref.ID] = observeInstallationMod(filepath.Join(installation.ServerPath, "mods", ref.DirectoryName))
+			result.Mods[ref.ID] = observeInstallationModContext(metadataCtx, filepath.Join(installation.ServerPath, "mods", ref.DirectoryName), ref.ID)
 			continue
 		}
-		state := observeInstallationMod(installationModTarget(installation, workshopID))
+		state := observeInstallationModContext(metadataCtx, installationModTarget(installation, workshopID), workshopID)
 		manual := false
 		if installation.WorkshopContentPath != "" {
 			entry := filepath.Join(installation.ServerPath, "mods", "workshop-"+workshopID)
 			if info, err := os.Lstat(entry); err == nil && info.IsDir() {
-				state = observeInstallationMod(entry)
+				state = observeInstallationModContext(metadataCtx, entry, workshopID)
 				manual = true
 			} else if state.Status == FileReady {
 				linked, linkErr := localModEntry(entry, installationModTarget(installation, workshopID))
@@ -202,6 +205,10 @@ func compactObservedStrings(values []string) []string {
 }
 
 func observeInstallationMod(root string) FileState {
+	ref, _ := shared.ModReferenceFromKey(filepath.Base(root))
+	return observeInstallationModContext(context.Background(), root, ref.ID)
+}
+func observeInstallationModContext(ctx context.Context, root, id string) FileState {
 	if err := rejectSymlinkComponents(filepath.Dir(root)); err != nil {
 		return FileState{Status: FileInvalid, Reason: "unsafe_path"}
 	}
@@ -223,8 +230,8 @@ func observeInstallationMod(root string) FileState {
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > maxOverridesBytes {
 		return FileState{Status: FileInvalid, Reason: "invalid_modinfo"}
 	}
-	name, version, reason := observeModIdentity(modInfoPath, info.Size())
-	return FileState{Status: FileReady, Name: name, Version: version, MetadataReason: reason}
+	value := modmetadata.Read(ctx, modInfoPath, id, modmetadata.Language(ctx))
+	return FileState{Status: FileReady, Name: value.Name, Author: value.Author, Description: value.Description, Version: value.Version, MetadataReason: value.Reason}
 }
 
 func observeLoadedMods(path string, workshopIDs []string) ([]string, bool) {

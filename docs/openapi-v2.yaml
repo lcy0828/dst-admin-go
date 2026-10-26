@@ -3774,17 +3774,19 @@ paths:
       operationId: getModDetails
       x-dst-tool: {"openWorld": true}
       parameters:
+        - { name: language, in: query, schema: { type: string, enum: [zh, en], default: zh }, description: Installed metadata translation language }
+        - { name: roomId, in: query, schema: { type: string }, description: Optional applied Room scope for unambiguous target selection }
         - name: targetId
           in: query
-          description: Required for local Mods; the owning Runtime target. No fallback to Controller files.
+          description: The owning Runtime target. Missing scope is inferred only when the registered candidates or roomId determine exactly one installation.
           schema: {type: string, minLength: 1, maxLength: 134}
         - name: installationId
           in: query
-          description: Required for local Mods; an installation registered on targetId.
+          description: An installation registered on targetId. Ambiguous scope returns MOD_TARGET_REQUIRED with candidates.
           schema: {type: string, minLength: 1, maxLength: 128}
       summary: Read Workshop details or installation-scoped local Mod metadata
       description: >-
-        Workshop identifiers use Steam metadata. Local Mod identifiers require targetId and installationId and read metadata on that Runtime only. Never substitute Controller files for an unavailable remote installation.
+        Workshop identifiers use Steam metadata. Local Mods use the explicit targetId and installationId or a unique registered candidate; optional roomId restricts inference to applied Room placement. Ambiguity returns 422 MOD_TARGET_REQUIRED with candidates; offline nodes are not omitted. Never substitute Controller files for an unavailable remote installation.
       responses:
         "200": { description: Workshop item, content: { application/json: { schema: { $ref: "#/components/schemas/SteamModEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -3804,6 +3806,7 @@ paths:
       summary: Read the Mod files currently present in one runtime installation
       description: Performs one demand-driven, side-effect-free filesystem inventory. Offline Agent data is not served from a stale snapshot.
       parameters:
+        - { name: language, in: query, schema: { type: string, enum: [zh, en], default: zh }, description: Installed metadata translation language }
         - { name: view, in: query, description: The facts view omits Steam metadata and cross-room references; version comparison remains unknown until enriched., schema: { type: string, enum: [full, facts], default: full } }
       responses:
         "200": { description: Actual Mod content on the selected installation, content: { application/json: { schema: { $ref: "#/components/schemas/RuntimeInstallationModInventoryEnvelope" } } } }
@@ -3894,6 +3897,7 @@ paths:
       description: >-
         Includes Workshop and local Mods. Configuration, enabled state, installed files and actual loading are separate facts. Stopped worlds do not imply a collection failure; unavailable nodes must remain unknown. This does not download or update Mods.
       parameters:
+        - { name: language, in: query, schema: { type: string, enum: [zh, en], default: zh }, description: Installed metadata translation language }
         - { name: view, in: query, description: The facts view reads Runtime state and configuration without waiting for Steam. Missing official metadata never implies the installed version is current., schema: { type: string, enum: [full, facts], default: full } }
       responses:
         "200": { description: Room Mod health inventory, content: { application/json: { schema: { $ref: "#/components/schemas/ModListEnvelope" } } } }
@@ -9107,6 +9111,10 @@ components:
       type: object
       required: [id, name, subscriptions, score, ratingCount, favorites, views, fileSize, dependencies, tags]
       properties:
+        localName: { type: string, description: Name read from the installed package; Steam name remains unchanged }
+        metadataMixed: { type: boolean, description: Installed names, authors or versions differ between nodes }
+        targetId: { type: string }
+        installationId: { type: string }
         id: { $ref: "#/components/schemas/ModReferenceID" }
         source: { type: string, enum: [workshop, local] }
         directoryName: { type: string }
