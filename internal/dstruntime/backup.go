@@ -129,6 +129,22 @@ func readStateBackup(worldPath, backupID string) (backupManifest, []capturedFile
 	if manifest.SchemaVersion == 1 {
 		paths = legacyRuntimeStatePaths()
 	}
+
+	// Published collectors before 2.4.17 had seven modules. Accept that exact
+	// historical layout and explicitly remove the newly added module on restore.
+	olderLayout := false
+	if len(manifest.Files) != len(paths) {
+		historical := make([]string, 0, len(paths))
+		for _, name := range paths {
+			if filepath.Base(name) != "activity.lua" {
+				historical = append(historical, name)
+			}
+		}
+		if len(manifest.Files) == len(historical) {
+			paths = historical
+			olderLayout = true
+		}
+	}
 	if (manifest.SchemaVersion != 1 && manifest.SchemaVersion != backupSchemaVersion) || manifest.ID != backupID || manifest.CreatedAt.IsZero() || len(manifest.Files) != len(paths) {
 		return backupManifest{}, nil, errors.New("runtime backup manifest is invalid")
 	}
@@ -161,6 +177,12 @@ func readStateBackup(worldPath, backupID string) (backupManifest, []capturedFile
 			return backupManifest{}, nil, errors.New("runtime backup manifest has an invalid missing file")
 		}
 		files = append(files, file)
+	}
+	if olderLayout {
+		files = append(files, capturedFile{path: filepath.Join(managedDirectory, "activity.lua")})
+		if manifest.SchemaVersion != 1 {
+			files = append(files, capturedFile{path: filepath.Join(executionDirectory, "activity.lua")})
+		}
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
 	return manifest, files, nil

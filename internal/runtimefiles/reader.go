@@ -34,6 +34,7 @@ var artifactNames = map[shared.ArtifactKind][]string{
 	shared.ArtifactRuntimePlayerHistory: {"player-history.json"},
 	shared.ArtifactRuntimeWorldState:    {"worldstate-a.json", "worldstate-b.json"},
 	shared.ArtifactRuntimeEvents:        {"events-a.json", "events-b.json"},
+	shared.ArtifactPlayerActivity:       activityArtifactNames(),
 	shared.ArtifactRuntimeCommand:       {"command-receipt-a.json", "command-receipt-b.json"},
 	shared.ArtifactRuntimeDiagnostics:   {"diagnostic-a.json", "diagnostic-b.json"},
 	shared.ArtifactRuntimeBarrier:       {"snapshot-barrier.json"},
@@ -44,9 +45,13 @@ func IsArtifactKind(kind shared.ArtifactKind) bool {
 	return exists
 }
 
-func ReadArtifacts(ctx context.Context, saveRoot, cluster, shard string, kind shared.ArtifactKind) (shared.RuntimeArtifactBundle, error) {
+func ReadArtifacts(ctx context.Context, saveRoot, cluster, shard string, kind shared.ArtifactKind, requestedNames ...string) (shared.RuntimeArtifactBundle, error) {
 	if !IsArtifactKind(kind) {
 		return shared.RuntimeArtifactBundle{}, errors.New("Runtime 制品类型不受支持")
+	}
+	names, err := RequestedArtifactNames(kind, requestedNames)
+	if err != nil {
+		return shared.RuntimeArtifactBundle{}, err
 	}
 	root, err := trustedShardPath(saveRoot, cluster, shard)
 	if err != nil {
@@ -60,7 +65,7 @@ func ReadArtifacts(ctx context.Context, saveRoot, cluster, shard string, kind sh
 	bundle := shared.RuntimeArtifactBundle{Kind: kind, Artifacts: []shared.RuntimeArtifact{}}
 	var total int64
 	var readFailures error
-	for _, name := range artifactNames[kind] {
+	for _, name := range names {
 		if err := ctx.Err(); err != nil {
 			return bundle, err
 		}

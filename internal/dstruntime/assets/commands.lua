@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.16"
+local PRODUCER_VERSION = "2.4.17"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local INPUT_ROOT = "mod_config_data/dst-admin/command-requests/"
 local RECENT_REQUEST_LIMIT = 256
@@ -309,6 +309,13 @@ local function execute_console(chunk)
     local output = { text = table.concat(parts), truncated = truncated }
     parts = nil
     return executed, failure, { output = output }
+end
+
+handlers["activity.configure"] = function(arguments)
+    local runtime=rawget(_G,"DSTAdmin")
+    if runtime==nil or runtime.Activity==nil then return result(false,"ACTIVITY_UNAVAILABLE","activity collector is unavailable") end
+    local ok,code=runtime.Activity.Configure(arguments)
+    return result(ok,code,"",{revision=arguments.revision})
 end
 
 handlers["console.execute"] = function(arguments)

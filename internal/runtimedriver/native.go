@@ -554,6 +554,13 @@ func (d *Native) ReadArtifacts(ctx context.Context, target Target, kind shared.A
 	return runtimefiles.ReadArtifacts(ctx, d.saveRoot, target.Cluster, target.Shard, kind)
 }
 
+func (d *Native) ReadActivityArtifacts(ctx context.Context, target Target, names []string) (shared.RuntimeArtifactBundle, error) {
+	if err := validateTarget(target); err != nil {
+		return shared.RuntimeArtifactBundle{}, err
+	}
+	return runtimefiles.ReadArtifacts(ctx, d.saveRoot, target.Cluster, target.Shard, shared.ArtifactPlayerActivity, names...)
+}
+
 func (d *Native) ReadWorldState(ctx context.Context, target Target) (shared.RuntimeWorldStateRead, error) {
 	status, err := d.Status(ctx, target)
 	if err != nil {

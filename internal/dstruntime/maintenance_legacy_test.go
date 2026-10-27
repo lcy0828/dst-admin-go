@@ -20,8 +20,13 @@ func installPublishedRuntimeFixture(t *testing.T, manager *Manager, catalog runt
 	if _, err := manager.InstallWorld(context.Background(), catalog.room.ID, catalog.worlds[0].ID); err != nil {
 		t.Fatal(err)
 	}
+	for _, directory := range []string{managedDirectory, "save/mod_config_data/dst-admin/runtime"} {
+		if err := os.Remove(filepath.Join(worldPath, directory, "activity.lua")); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
 	installed := manifest{Version: "2.4.11", ProtocolVersion: ProtocolVersion, Assets: make(map[string]string), InstalledAt: time.Now().UTC()}
-	for _, name := range managedAssetNames {
+	for _, name := range []string{"bootstrap.lua", "telemetry.lua", "worldstate.lua", "commands.lua", "events.lua", "diagnostics.lua", "barriers.lua"} {
 		value, err := os.ReadFile(filepath.Join("testdata/runtime-2.4.11", name))
 		if err != nil {
 			t.Fatal(err)

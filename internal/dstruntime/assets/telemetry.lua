@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 2
-local PRODUCER_VERSION = "2.4.16"
+local PRODUCER_VERSION = "2.4.17"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 
 local state = {
@@ -154,7 +154,7 @@ local function health_payload()
     local modules = {}
     local runtime = rawget(_G, "DSTAdmin")
     if runtime ~= nil then
-        for _, name in ipairs({ "WorldState", "Commands", "Events", "Diagnostics", "Barriers" }) do
+        for _, name in ipairs({ "WorldState", "Commands", "Events", "Diagnostics", "Barriers", "Activity" }) do
             local module = runtime[name]
             if module ~= nil and type(module.Status) == "function" then
                 local ok, status = pcall(module.Status)

@@ -432,6 +432,22 @@ func (d *Agent) ReadArtifacts(ctx context.Context, target Target, kind shared.Ar
 	return *result.Result.Artifacts, err
 }
 
+func (d *Agent) ReadActivityArtifacts(ctx context.Context, target Target, names []string) (shared.RuntimeArtifactBundle, error) {
+	request := runtimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionReadArtifacts)
+	request.Artifacts = &shared.RuntimeArtifactRequest{Kind: shared.ArtifactPlayerActivity, Names: names}
+	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 15)
+	if result.Result.Artifacts == nil {
+		if err == nil {
+			err = errors.New("Agent did not return activity artifacts")
+		}
+		return shared.RuntimeArtifactBundle{}, err
+	}
+	if result.Result.Artifacts.Absent {
+		return *result.Result.Artifacts, os.ErrNotExist
+	}
+	return *result.Result.Artifacts, err
+}
+
 func (d *Agent) ReadWorldState(ctx context.Context, target Target) (shared.RuntimeWorldStateRead, error) {
 	request := runtimeRequest(target, Operation{ID: newOperationID()}, shared.RuntimeActionWorldStateRead)
 	result, err := d.executor.ExecuteRuntime(ctx, target.TargetID, request, 10)

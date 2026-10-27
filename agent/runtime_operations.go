@@ -352,6 +352,9 @@ func validateRuntimeOperationRequest(commandType string, request shared.RuntimeO
 		if request.Artifacts == nil || request.Console != nil || request.Logs != nil || request.Observation != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil || !runtimefiles.IsArtifactKind(request.Artifacts.Kind) {
 			return errors.New("Runtime 制品读取请求无效")
 		}
+		if _, err := runtimefiles.RequestedArtifactNames(request.Artifacts.Kind, request.Artifacts.Names); err != nil {
+			return err
+		}
 	case shared.RuntimeActionObserveOperation:
 		if request.Observation == nil || request.Console != nil || request.Logs != nil || request.Artifacts != nil || request.Migration != nil || request.Backup != nil || request.Mod != nil || request.GameVersion != nil ||
 			!operationIdentity.MatchString(request.Observation.ObservedOperationID) ||
@@ -589,7 +592,7 @@ func (a *Agent) observeRuntimeAction(ctx context.Context, control shardRuntimeCo
 		result.ChatLogs = &chatLogs
 		return result, err
 	case shared.RuntimeActionReadArtifacts:
-		bundle, err := runtimefiles.ReadArtifacts(ctx, installation.SavePath, request.Cluster, request.Shard, request.Artifacts.Kind)
+		bundle, err := runtimefiles.ReadArtifacts(ctx, installation.SavePath, request.Cluster, request.Shard, request.Artifacts.Kind, request.Artifacts.Names...)
 		result.Artifacts = &bundle
 		return result, err
 	case shared.RuntimeActionWorldStateRead:

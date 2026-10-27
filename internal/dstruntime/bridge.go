@@ -39,6 +39,7 @@ var (
 
 var allowedRuntimeCommands = map[string]bool{
 	"system.ping":             true,
+	"activity.configure":      true,
 	"console.execute":         true,
 	"catalog.entities":        true,
 	"player.inventory":        true,

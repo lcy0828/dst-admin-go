@@ -5,7 +5,7 @@ import "embed"
 //go:embed assets/*.lua
 var embeddedAssets embed.FS
 
-var managedAssetNames = []string{"bootstrap.lua", "telemetry.lua", "worldstate.lua", "commands.lua", "events.lua", "diagnostics.lua", "barriers.lua"}
+var managedAssetNames = []string{"bootstrap.lua", "telemetry.lua", "worldstate.lua", "commands.lua", "events.lua", "diagnostics.lua", "barriers.lua", "activity.lua"}
 
 func assetData(name string) ([]byte, error) {
 	data, err := embeddedAssets.ReadFile("assets/" + name)

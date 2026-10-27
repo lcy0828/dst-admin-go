@@ -1,4 +1,4 @@
-local VERSION = "2.4.16"
+local VERSION = "2.4.17"
 local PROTOCOL_VERSION = 2
 local MODULE_ROOT = "mod_config_data/dst-admin/runtime/"
 local SNAPSHOT_INTERVAL = 5
@@ -23,15 +23,16 @@ local function update_result(state, message)
     end)
 end
 
-local function replacement_blocker(previous)
+local function replacement_blocker(previous,drain_activity)
     if previous == nil then return nil end
     if previous.reloadInProgress then return "Reload" end
-    for _, name in ipairs({"Commands", "Barriers", "Diagnostics", "Telemetry", "WorldState", "Events"}) do
+    for _, name in ipairs({"Commands", "Barriers", "Diagnostics", "Telemetry", "WorldState", "Events", "Activity"}) do
         local module = previous[name]
         if module ~= nil and type(module.Status) == "function" then
             local ok, status = pcall(module.Status)
             if not ok or type(status) ~= "table" then return name .. " status unavailable" end
-            if status.busy or status.writing or status.holding or (tonumber(status.pending) or 0) > 0 then return name end
+            local can_drain=name=="Activity" and drain_activity and type(module.Drain)=="function"
+            if status.busy or status.writing or status.holding or (tonumber(status.pending) or 0) > 0 and not can_drain then return name end
         end
     end
     return nil
@@ -186,6 +187,10 @@ local function new_candidate()
             emit_error("START_FAILED", started)
             return false
         end
+        if candidate.Activity ~= nil then
+            local ok,started=pcall(candidate.Activity.Start)
+            if not ok or started==false then pcall(candidate.Activity.Stop);candidate.activityStartError="ACTIVITY_START_FAILED" end
+        end
         candidate.state = candidate_ready(candidate) and "running" or "waiting_for_world"
         if candidate.periodicTask == nil then
             candidate.periodicTask = clock.After(SNAPSHOT_INTERVAL, periodic_capture, "dst-admin-capture")
@@ -219,7 +224,7 @@ local function new_candidate()
         candidate.refreshCallbacks = {}
         for _, callback in ipairs(callbacks) do pcall(callback, false) end
         local all_stopped = true
-        for _, name in ipairs({"Diagnostics", "Barriers", "Events", "WorldState", "Telemetry"}) do
+        for _, name in ipairs({"Activity", "Diagnostics", "Barriers", "Events", "WorldState", "Telemetry"}) do
             local module = candidate[name]
             if module ~= nil then
                 local ok, stopped = xpcall(function() return module.Stop(name == "Telemetry" and handover or nil) end, debug.traceback)
@@ -267,7 +272,7 @@ local function new_candidate()
         if candidate.state == "stopped" or candidate.state == "failed" then return end
         -- Whole-server idle sleep can stop both game schedulers. Explicit
         -- management input services due deadlines without advancing game time.
-        for _, name in ipairs({"Telemetry", "WorldState", "Events", "Diagnostics", "Barriers"}) do
+        for _, name in ipairs({"Telemetry", "WorldState", "Events", "Diagnostics", "Barriers", "Activity"}) do
             local module = candidate[name]
             if module ~= nil and type(module.Poll) == "function" then module.Poll() end
         end
@@ -428,7 +433,11 @@ build_candidate = function(callback)
                                 return
                             end
                             candidate.Barriers = barriers
-                            callback(candidate, nil)
+                            load_module("activity", function(activity, activity_error)
+                                if activity == nil then callback(nil, activity_error);return end
+                                candidate.Activity = activity
+                                callback(candidate, nil)
+                            end)
                         end)
                     end)
                 end)
@@ -437,17 +446,30 @@ build_candidate = function(callback)
     end)
 end
 
-activate_candidate = function(previous, candidate, operation)
+activate_candidate = function(previous, candidate, operation, activity_drained)
+    local expected_update=operation=="LOAD" and pending_update or nil
+    if rawget(_G,"DSTAdminPendingUpdate")~=expected_update or expected_update~=nil and expected_update.aborted then return false end
     if rawget(_G, "DSTAdmin") ~= previous then
         update_result("deferred", "runtime instance changed while loading modules")
         return false
     end
     -- A persisted health snapshot can predate a backup barrier, diagnostic or
     -- console command. Check the live modules in the same Lua turn as Stop.
-    local blocker = replacement_blocker(previous)
+    local blocker = replacement_blocker(previous,not activity_drained)
     if blocker ~= nil then
         update_result("deferred", blocker)
         return false
+    end
+    if not activity_drained and previous ~= nil and previous.Activity ~= nil and type(previous.Activity.Drain)=="function" then
+        local ok,accepted=pcall(previous.Activity.Drain,function(drained)
+            if drained then activate_candidate(previous,candidate,operation,true)
+            else update_result("deferred","Activity drain did not complete") end
+        end,function()
+            return rawget(_G,"DSTAdmin")==previous and previous.state~="stopped" and previous.state~="failed"
+                and rawget(_G,"DSTAdminPendingUpdate")==expected_update and (expected_update==nil or not expected_update.aborted)
+        end)
+        if not ok or accepted~=true then update_result("deferred","Activity drain unavailable");return false end
+        return true
     end
     if previous ~= nil and type(previous.Stop) == "function" then
         local stopped, stop_result = xpcall(function() return previous.Stop(true) end, debug.traceback)

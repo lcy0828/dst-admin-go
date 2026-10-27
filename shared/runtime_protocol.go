@@ -120,6 +120,7 @@ const (
 	ArtifactRuntimePlayerHistory ArtifactKind = "runtime.player_history"
 	ArtifactRuntimeWorldState    ArtifactKind = "runtime.worldstate"
 	ArtifactRuntimeEvents        ArtifactKind = "runtime.events"
+	ArtifactPlayerActivity       ArtifactKind = "runtime.player_activity"
 	ArtifactRuntimeCommand       ArtifactKind = "runtime.command_receipt"
 	ArtifactRuntimeDiagnostics   ArtifactKind = "runtime.diagnostics"
 	ArtifactRuntimeBarrier       ArtifactKind = "runtime.snapshot_barrier"
@@ -189,7 +190,8 @@ type RuntimeEntityArtworkResult struct {
 }
 
 type RuntimeArtifactRequest struct {
-	Kind ArtifactKind `json:"kind"`
+	Kind  ArtifactKind `json:"kind"`
+	Names []string     `json:"names,omitempty"`
 }
 
 type RuntimeObservationRequest struct {
@@ -616,6 +618,8 @@ const (
 )
 
 type RuntimeModFileState struct {
+	DSTCompatible   *bool                `json:"dst_compatible,omitempty"`
+	APIVersion      string               `json:"api_version,omitempty"`
 	Author          string               `json:"author,omitempty"`
 	Description     string               `json:"description,omitempty"`
 	Status          RuntimeModFileStatus `json:"status"`

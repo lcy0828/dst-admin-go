@@ -702,6 +702,42 @@ func (r *Router) ReadArtifacts(ctx context.Context, roomID, worldID string, kind
 	return bundle, nil
 }
 
+func (r *Router) ReadActivityArtifacts(ctx context.Context, roomID, worldID string, names []string) (shared.RuntimeArtifactBundle, error) {
+	if _, err := runtimefiles.RequestedArtifactNames(shared.ArtifactPlayerActivity, names); err != nil {
+		return shared.RuntimeArtifactBundle{}, err
+	}
+	driver, target, err := r.DriverTarget(ctx, roomID, worldID)
+	if err != nil {
+		return shared.RuntimeArtifactBundle{}, err
+	}
+	reader, ok := driver.(interface {
+		ReadActivityArtifacts(context.Context, Target, []string) (shared.RuntimeArtifactBundle, error)
+	})
+	if !ok {
+		return shared.RuntimeArtifactBundle{}, ErrCapabilityMissing
+	}
+	bundle, err := reader.ReadActivityArtifacts(ctx, target, names)
+	if err != nil {
+		return bundle, err
+	}
+	if err = runtimefiles.ValidateArtifactBundle(shared.ArtifactPlayerActivity, bundle); err != nil {
+		return shared.RuntimeArtifactBundle{}, err
+	}
+	allowed, _ := runtimefiles.RequestedArtifactNames(shared.ArtifactPlayerActivity, names)
+	for _, artifact := range bundle.Artifacts {
+		found := false
+		for _, name := range allowed {
+			if artifact.Name == name {
+				found = true
+			}
+		}
+		if !found {
+			return shared.RuntimeArtifactBundle{}, errors.New("unexpected activity artifact")
+		}
+	}
+	return bundle, nil
+}
+
 func (r *Router) ReadWorldState(ctx context.Context, roomID, worldID string) (shared.RuntimeWorldStateRead, error) {
 	driver, target, err := r.DriverTarget(ctx, roomID, worldID)
 	if err != nil {
