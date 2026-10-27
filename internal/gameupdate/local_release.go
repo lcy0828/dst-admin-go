@@ -4,11 +4,13 @@ import (
 	"context"
 	"dont/internal/gameinstall"
 	"dont/internal/installationlock"
+	"dont/internal/installationmaintenance"
 	"dont/internal/luajit"
 	"errors"
 	"strings"
 
 	dstinstall "dont/internal/dstserver"
+	"dont/internal/runtimedriver"
 	"dont/shared"
 
 	"github.com/shirou/gopsutil/v3/disk"
@@ -37,6 +39,11 @@ func (s *Service) ObserveReleaseInstallation(ctx context.Context) (shared.Runtim
 }
 
 func (s *Service) UpdateReleaseInstallation(ctx context.Context, expectedVersion string, cleanCache bool) (shared.RuntimeGameVersionResult, error) {
+	ctx, releaseMaintenance, err := s.maintenance.Acquire(ctx, []installationmaintenance.Resource{{TargetID: "local", InstallationID: "default", Directory: installRoot(s.config.ServerPath)}}, "")
+	if err != nil {
+		return shared.RuntimeGameVersionResult{}, errors.Join(runtimedriver.ErrOperationNotDispatched, err)
+	}
+	defer releaseMaintenance()
 	expectedVersion = strings.TrimSpace(expectedVersion)
 	if !releaseVersionPattern.MatchString(expectedVersion) {
 		return shared.RuntimeGameVersionResult{}, ErrReleaseInvalid
@@ -44,7 +51,7 @@ func (s *Service) UpdateReleaseInstallation(ctx context.Context, expectedVersion
 	s.mu.Lock()
 	if s.active {
 		s.mu.Unlock()
-		return shared.RuntimeGameVersionResult{}, ErrUpdateInProgress
+		return shared.RuntimeGameVersionResult{}, errors.Join(runtimedriver.ErrOperationNotDispatched, ErrUpdateInProgress)
 	}
 	s.active = true
 	s.mu.Unlock()
@@ -54,22 +61,25 @@ func (s *Service) UpdateReleaseInstallation(ctx context.Context, expectedVersion
 		s.mu.Unlock()
 	}()
 	if s.config.DisableUpdate {
-		return s.releaseVersionResult(""), ErrUpdateDisabled
+		return s.releaseVersionResult(""), errors.Join(runtimedriver.ErrOperationNotDispatched, ErrUpdateDisabled)
 	}
 	if s.config.UpdateMethod != dstinstall.UpdateMethodSteamCMD {
-		return s.releaseVersionResult(""), ErrSteamClientManaged
+		return s.releaseVersionResult(""), errors.Join(runtimedriver.ErrOperationNotDispatched, ErrSteamClientManaged)
 	}
 	executable := findSteamCMD(s.config.SteamCMDPath)
 	if executable == "" {
-		return s.releaseVersionResult(""), ErrSteamCMDUnavailable
+		return s.releaseVersionResult(""), errors.Join(runtimedriver.ErrOperationNotDispatched, ErrSteamCMDUnavailable)
 	}
 	unlock, lockErr := installationlock.Acquire(installRoot(s.config.ServerPath))
 	if lockErr != nil {
-		return s.releaseVersionResult(""), lockErr
+		return s.releaseVersionResult(""), errors.Join(runtimedriver.ErrOperationNotDispatched, lockErr)
 	}
 	defer unlock()
 	if err := gameinstall.EnsureStopped(ctx, installRoot(s.config.ServerPath)); err != nil {
-		return s.releaseVersionResult(""), err
+		return s.releaseVersionResult(""), errors.Join(runtimedriver.ErrOperationNotDispatched, err)
+	}
+	if err := gameinstall.EnsureNoSteamUpdate(ctx, installRoot(s.config.ServerPath)); err != nil {
+		return s.releaseVersionResult(""), errors.Join(runtimedriver.ErrOperationNotDispatched, err)
 	}
 	if cleanCache {
 		if err := cleanSteamCache(executable, installRoot(s.config.ServerPath), dstinstall.AppIDDedicatedServer); err != nil {

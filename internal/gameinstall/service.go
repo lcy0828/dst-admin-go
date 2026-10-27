@@ -2,6 +2,7 @@ package gameinstall
 
 import (
 	"context"
+	"dont/internal/installationmaintenance"
 	"errors"
 	"fmt"
 	"sync"
@@ -31,12 +32,13 @@ type Installation struct {
 	shared.GameInstallationReport
 }
 type Service struct {
-	steamLogin *steamlogin.Manager
-	targets    Targets
-	jobs       *jobs.Service
-	leases     *operationlease.Service
-	mu         sync.Mutex
-	busy       map[string]bool
+	maintenance *installationmaintenance.Gate
+	steamLogin  *steamlogin.Manager
+	targets     Targets
+	jobs        *jobs.Service
+	leases      *operationlease.Service
+	mu          sync.Mutex
+	busy        map[string]bool
 }
 
 func NewService(t Targets, j *jobs.Service, l *operationlease.Service) *Service {
@@ -260,6 +262,15 @@ func (s *Service) execute(ctx context.Context, targetID, installationID string, 
 	if !t.Online {
 		return agents.ErrAgentOffline
 	}
+	resources := []installationmaintenance.Resource{{TargetID: t.ID, InstallationID: i.ID, Directory: i.ServerPath}}
+	if action == shared.RuntimeActionGameInstallationAdopt {
+		resources = append(resources, installationmaintenance.Resource{TargetID: t.ID, InstallationID: i.ID, Directory: p.Path})
+	}
+	ctx, releaseMaintenance, err := s.maintenance.Acquire(ctx, resources, "")
+	if err != nil {
+		return err
+	}
+	defer releaseMaintenance()
 	lease, err := s.leases.Acquire(ctx, "game-install:"+targetID+":"+installationID, jobID, 10*time.Minute)
 	if err != nil {
 		return err
@@ -315,3 +326,5 @@ func (s *Service) execute(ctx context.Context, targetID, installationID string, 
 	}
 	return nil
 }
+
+func (s *Service) ConfigureMaintenance(gate *installationmaintenance.Gate) { s.maintenance = gate }

@@ -106,3 +106,26 @@ Installation status is read only when opening the page, changing scope, or refre
 The service does not scan disks for games, check Steam's latest release, or poll while idle. Only unfinished jobs have progress polled every two seconds.
 
 Preflight scans installation processes and checks related nodes only on explicit action or recheck; there is no new idle polling. For `release` mode, submit the plan's `selectedInstallations` as `installations`, `policy`, and `planHash` (also as `confirmation`) to the release endpoint. For `install` mode, call the low-level installer only when `ready=true`.
+
+## Update recovery
+
+Updates refresh only the affected installations on demand, including when called
+from MCP without an open browser. Normal execution stops each originally running
+world once, creates verified cold protection backups, validates game files, and
+restores the original world set and Lua modes. Originally stopped worlds stay stopped.
+
+A failed connected installation keeps its related worlds stopped. Independent,
+verified room groups can resume. Pre-write failures restore worlds stopped by the
+attempt when ownership and safety can be confirmed. Interrupted writes remain
+pending until their operation receipt is available; retry queries that receipt
+before resending. A restore-only retry does not download or stop worlds again.
+
+If Steam publishes another build, the record shows expected and actual versions.
+Select **Recheck and continue** to review the new build and resume the original
+release with its original backups and restore settings. Standard SteamCMD updates
+install the current latest build; they cannot pin or roll back to an arbitrary old build.
+Task progress describes processed steps, not download percentage or rollback.
+
+If an interrupted write receipt cannot be recovered, choose **Validate, repair and continue**. Re-preview the original installation scope with `policy.validate=true`, then send its `planHash` and matching `confirmation` with `validateUnknown=true` to the original release retry endpoint. Node-local directory locks and SteamCMD process checks must pass before a new fenced validation attempt; related worlds stay stopped until verified.
+
+Lost-receipt repair requires an Agent advertising `runtime.game-update-repair.v1`; older Agents prompt for an upgrade. Ordinary updates and historical records remain compatible. Node inventories report the physical installation root so directory aliases share a maintenance scope.

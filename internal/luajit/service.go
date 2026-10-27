@@ -2,6 +2,7 @@ package luajit
 
 import (
 	"context"
+	"dont/internal/installationmaintenance"
 	"errors"
 	"fmt"
 	"os"
@@ -38,6 +39,7 @@ type Catalog struct {
 	Installations []Installation         `json:"installations"`
 }
 type Service struct {
+	maintenance  *installationmaintenance.Gate
 	runtimeStore *Store
 	transfers    *Store
 	targets      Targets
@@ -262,6 +264,11 @@ func (s *Service) submit(targetID, installationID string, action shared.RuntimeA
 	return job, err
 }
 func (s *Service) execute(ctx context.Context, t agents.RuntimeTarget, i agents.RuntimeInstallation, action shared.RuntimeAction, payload shared.RuntimeLuaJITRequest, jobID string) error {
+	ctx, releaseMaintenance, err := s.maintenance.Acquire(ctx, []installationmaintenance.Resource{{TargetID: t.ID, InstallationID: i.ID, Directory: i.ServerPath}}, "")
+	if err != nil {
+		return err
+	}
+	defer releaseMaintenance()
 	lease, err := s.leases.Acquire(ctx, "luajit:"+t.ID+":"+i.ID, jobID, 10*time.Minute)
 	if err != nil {
 		return err
@@ -343,3 +350,5 @@ func (s *Service) executeLocal(ctx context.Context, t agents.RuntimeTarget, i ag
 	_, err = Install(ctx, OptionsFor(i, t), release, archive)
 	return err
 }
+
+func (s *Service) ConfigureMaintenance(gate *installationmaintenance.Gate) { s.maintenance = gate }

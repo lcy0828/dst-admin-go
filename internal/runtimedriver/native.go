@@ -41,6 +41,7 @@ type nativeConsoleHealth interface {
 }
 
 type Native struct {
+	maintenance     maintenanceBinding
 	artworkServer   string
 	artworkWorkshop string
 	saveRoot        string
@@ -169,6 +170,13 @@ func (d *Native) ObserveCPU(ctx context.Context, target Target, request shared.R
 }
 
 func (d *Native) PrepareMigrationExport(ctx context.Context, target Target, _ Operation, migrationID string) (MigrationDescriptor, error) {
+	next, release, err := d.maintenance.acquire(ctx, target)
+	if err != nil {
+		return MigrationDescriptor{}, err
+	}
+	defer release()
+	ctx = next
+
 	value, err := d.transfer.PrepareExport(ctx, migrationID, target.Cluster, target.Shard)
 	return MigrationDescriptor{MigrationID: value.MigrationID, Size: value.Size, SHA256: value.SHA256}, err
 }
@@ -182,8 +190,15 @@ func (d *Native) ReleaseMigrationExport(_ context.Context, _ Target, _ Operation
 	return d.transfer.ReleaseExport(migrationID)
 }
 
-func (d *Native) BeginMigrationImport(_ context.Context, _ Target, _ Operation, descriptor MigrationDescriptor) error {
-	_, err := d.transfer.BeginImportWithShardEndpoint(
+func (d *Native) BeginMigrationImport(ctx context.Context, target Target, _ Operation, descriptor MigrationDescriptor) error {
+	next, release, err := d.maintenance.acquire(ctx, target)
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx = next
+
+	_, err = d.transfer.BeginImportWithShardEndpoint(
 		descriptor.MigrationID, descriptor.Size, descriptor.SHA256,
 		descriptor.ShardBindAll, descriptor.ShardMasterAddress, descriptor.ShardMasterPort,
 	)
@@ -195,7 +210,14 @@ func (d *Native) WriteMigrationImport(_ context.Context, _ Target, _ Operation, 
 }
 
 func (d *Native) CommitMigrationImport(ctx context.Context, target Target, _ Operation, migrationID string) error {
-	_, err := d.transfer.CommitImport(ctx, migrationID, target.Cluster, target.Shard)
+	next, release, err := d.maintenance.acquire(ctx, target)
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx = next
+
+	_, err = d.transfer.CommitImport(ctx, migrationID, target.Cluster, target.Shard)
 	return err
 }
 
@@ -298,6 +320,14 @@ func (d *Native) Status(ctx context.Context, target Target) (shared.ShardRuntime
 }
 
 func (d *Native) ExecuteShard(ctx context.Context, target Target, operation Operation, action shared.ShardAction, timeout time.Duration) (shared.ShardOperationResult, error) {
+	if action == shared.ShardActionStart || action == shared.ShardActionRestart {
+		next, release, err := d.maintenance.acquire(ctx, target)
+		if err != nil {
+			return shared.ShardOperationResult{}, err
+		}
+		defer release()
+		ctx = next
+	}
 	if err := validateTarget(target); err != nil || !shared.IsShardAction(action) {
 		return shared.ShardOperationResult{}, ErrInvalidTarget
 	}

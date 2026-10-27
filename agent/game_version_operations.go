@@ -116,6 +116,11 @@ func (a *Agent) updateGameVersion(ctx context.Context, installation RuntimeInsta
 		return result, err
 	}
 
+	if err := gameinstall.EnsureNoSteamUpdate(ctx, root); err != nil {
+		result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()
+		return result, err
+	}
+
 	if request.GameVersion.CleanCache {
 		if err := cleanAgentSteamCache(steamcmd, root); err != nil {
 			result.Outcome, result.Message = shared.RuntimeOutcomeFailed, err.Error()

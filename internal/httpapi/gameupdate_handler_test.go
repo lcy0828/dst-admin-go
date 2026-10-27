@@ -43,6 +43,9 @@ func TestInstalledVersionsHTTPReturnsScopedReadErrorsWithoutPreflight(t *testing
 }
 
 type gameReleaseHTTPFixture struct {
+	block            <-chan struct{}
+	previewCalls     int
+	retryRequest     gameupdate.ReleaseRetryRequest
 	mu               sync.Mutex
 	plan             gameupdate.ReleasePlan
 	previewErr       error
@@ -53,12 +56,20 @@ type gameReleaseHTTPFixture struct {
 
 func (f *gameReleaseHTTPFixture) Preview(_ context.Context, request gameupdate.ReleasePreviewRequest) (gameupdate.ReleasePlan, error) {
 	f.mu.Lock()
+	f.previewCalls++
 	f.previewRequest = request
 	f.mu.Unlock()
 	return f.plan, f.previewErr
 }
 
-func (f *gameReleaseHTTPFixture) Publish(_ context.Context, request gameupdate.ReleasePublishRequest) (gameupdate.Release, error) {
+func (f *gameReleaseHTTPFixture) Publish(ctx context.Context, request gameupdate.ReleasePublishRequest) (gameupdate.Release, error) {
+	if f.block != nil {
+		select {
+		case <-f.block:
+		case <-ctx.Done():
+			return gameupdate.Release{}, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	value := successfulHTTPGameRelease(request.ID, request.SourceJobID, request.Plan)
@@ -66,7 +77,14 @@ func (f *gameReleaseHTTPFixture) Publish(_ context.Context, request gameupdate.R
 	return value, nil
 }
 
-func (f *gameReleaseHTTPFixture) Retry(_ context.Context, id string, sourceJobIDs ...string) (gameupdate.Release, error) {
+func (f *gameReleaseHTTPFixture) Retry(ctx context.Context, id string, sourceJobIDs ...string) (gameupdate.Release, error) {
+	if f.block != nil {
+		select {
+		case <-f.block:
+		case <-ctx.Done():
+			return gameupdate.Release{}, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	value, found := f.releases[id]
@@ -274,5 +292,80 @@ func TestGameUpdateRunFallsBackToJobBeforeSteamCMDRunExists(t *testing.T) {
 	}
 	if _, ok := gameUpdateRunFromJob(jobs.Job{ID: "other", Kind: "room.start"}); ok {
 		t.Fatal("non-update job must not be exposed as an update run")
+	}
+}
+
+func (f *gameReleaseHTTPFixture) RetryConfirmed(ctx context.Context, id string, request gameupdate.ReleaseRetryRequest, jobID string) (gameupdate.Release, error) {
+	f.mu.Lock()
+	f.retryRequest = request
+	f.mu.Unlock()
+	return f.Retry(ctx, id, jobID)
+}
+
+func TestGameReleaseHTTPActiveDuplicateReusesJobWithoutRepreview(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	block := make(chan struct{})
+	fixture := &gameReleaseHTTPFixture{plan: gameReleaseHTTPPlan(), releases: make(map[string]gameupdate.Release), block: block}
+	router, jobsService := newGameReleaseHandlerApp(t, fixture)
+	request := map[string]interface{}{"planHash": releaseHTTPPlanHash, "confirmation": releaseHTTPPlanHash}
+	first := performJSON(router, http.MethodPost, "/api/v2/game/releases", request, nil, "")
+	assertStatus(t, first, http.StatusAccepted)
+	id := responseData(t, first)["id"].(string)
+	defer func() { close(block); waitForJobStatus(t, jobsService, id, jobs.StatusSucceeded) }()
+	second := performJSON(router, http.MethodPost, "/api/v2/game/releases", request, nil, "")
+	assertStatus(t, second, http.StatusAccepted)
+	if responseData(t, second)["id"] != id {
+		t.Fatal("duplicate update enqueued a second job")
+	}
+	fixture.mu.Lock()
+	calls := fixture.previewCalls
+	fixture.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("duplicate repreviewed after execution began: %d", calls)
+	}
+	invalid := performJSON(router, http.MethodPost, "/api/v2/game/releases", map[string]interface{}{"planHash": releaseHTTPPlanHash, "confirmation": "wrong"}, nil, "")
+	assertStatus(t, invalid, http.StatusUnprocessableEntity)
+}
+
+func TestGameReleaseHTTPDuplicateConfirmedRetryReusesJob(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	block := make(chan struct{})
+	failed := successfulHTTPGameRelease("recover-one", "old-job", gameReleaseHTTPPlan())
+	failed.Stage = gameupdate.ReleaseStageRecoveryRequired
+	fixture := &gameReleaseHTTPFixture{plan: failed.Plan, releases: map[string]gameupdate.Release{failed.ID: failed}, block: block}
+	router, jobsService := newGameReleaseHandlerApp(t, fixture)
+	path := "/api/v2/game/releases/recover-one/actions/retry"
+	request := map[string]interface{}{"planHash": releaseHTTPPlanHash, "confirmation": releaseHTTPPlanHash, "validateUnknown": true}
+	first := performJSON(router, http.MethodPost, path, request, nil, "")
+	assertStatus(t, first, http.StatusAccepted)
+	id := responseData(t, first)["id"].(string)
+	defer func() {
+		close(block)
+		waitForJobStatus(t, jobsService, id, jobs.StatusSucceeded)
+		fixture.mu.Lock()
+		defer fixture.mu.Unlock()
+		if !fixture.retryRequest.ValidateUnknown || fixture.retryRequest.PlanHash != releaseHTTPPlanHash {
+			t.Fatalf("confirmation not forwarded: %+v", fixture.retryRequest)
+		}
+	}()
+	second := performJSON(router, http.MethodPost, path, request, nil, "")
+	assertStatus(t, second, http.StatusAccepted)
+	if responseData(t, second)["id"] != id {
+		t.Fatal("duplicate retry enqueued a second job")
+	}
+	different := performJSON(router, http.MethodPost, path, map[string]interface{}{}, nil, "")
+	assertStatus(t, different, http.StatusConflict)
+	invalid := performJSON(router, http.MethodPost, path, map[string]interface{}{"validateUnknown": true}, nil, "")
+	assertStatus(t, invalid, http.StatusUnprocessableEntity)
+}
+
+func TestGameReleaseReportUsesActualValidatedBuildAfterRepreview(t *testing.T) {
+	plan := gameReleaseHTTPPlan()
+	value := successfulHTTPGameRelease("release", "job", plan)
+	value.Installations[0].ExpectedVersion, value.Installations[0].AfterVersion = "702", "702"
+	var results []jobs.TargetResult
+	gameReleaseReport(func(result jobs.TargetResult) { results = append(results, result) }, plan, value, nil)
+	if !strings.Contains(results[0].Message, "702") || strings.Contains(results[0].Message, "701") {
+		t.Fatalf("reported old preview build: %+v", results[0])
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"dont/internal/installationlock"
+	"dont/internal/installationmaintenance"
 	"errors"
 	"fmt"
 	"io"
@@ -86,6 +87,7 @@ type plannedWorld struct {
 }
 
 type Service struct {
+	maintenance          *installationmaintenance.Gate
 	config               Config
 	rooms                RoomCatalog
 	control              shards.Control
@@ -330,6 +332,12 @@ func (s *Service) execute(ctx context.Context, jobID string, request UpdateReque
 		return err
 	}
 	defer releaseRooms()
+	ctx, releaseMaintenance, err := s.maintenance.Acquire(ctx, []installationmaintenance.Resource{{TargetID: "local", InstallationID: "default", Directory: installRoot(s.config.ServerPath)}}, "")
+	if err != nil {
+		return err
+	}
+	defer releaseMaintenance()
+
 	if s.notifier != nil && len(running) > 0 {
 		action := string(shards.ActionStop)
 		if request.RestartRunning {
@@ -680,3 +688,5 @@ func (b *boundedBuffer) String() string {
 	}
 	return b.buffer.String()
 }
+
+func (s *Service) ConfigureMaintenance(gate *installationmaintenance.Gate) { s.maintenance = gate }

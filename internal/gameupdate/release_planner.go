@@ -14,6 +14,7 @@ import (
 	"time"
 
 	dstinstall "dont/internal/dstserver"
+	"dont/internal/installationmaintenance"
 	"dont/internal/shards"
 	"dont/shared"
 )
@@ -134,15 +135,79 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 			return ReleasePlan{}, ErrReleaseInvalid
 		}
 	}
+	if len(selectedTargets) > 0 {
+		selectedInstallations = make(map[string]bool)
+		for _, shard := range snapshot.Shards {
+			if selectedTargets[shard.Target.ID] {
+				selectedInstallations[releaseSnapshotInstallationKey(shard)] = true
+			}
+		}
+		selectedTargets = nil
+	}
 	if selectedInstallations != nil {
 		// A shared installation can connect several split rooms. Include their
 		// other installations as well so a room never receives mixed builds.
 		selectedInstallations = connectedReleaseInstallations(snapshot, selectedInstallations)
 	}
+	var refreshBlockers []ReleaseBlocker
+	if source, ok := p.snapshots.(interface {
+		RefreshInstallations(context.Context, []ReleaseInstallationSelection, time.Time) []ReleaseBlocker
+	}); ok {
+		selectedNodes := make(map[string]bool)
+		for _, shard := range snapshot.Shards {
+			if selectedInstallations == nil || selectedInstallations[releaseSnapshotInstallationKey(shard)] {
+				selectedNodes[shard.Target.ID] = true
+			}
+		}
+		endpoints := make(map[string]ReleaseInstallationSelection)
+		for _, shard := range snapshot.Shards {
+			key := releaseSnapshotInstallationKey(shard)
+			if selectedInstallations != nil && !selectedInstallations[key] && !(shard.Target.ID != "local" && selectedNodes[shard.Target.ID] && shard.ServerRoot == "") {
+				continue
+			}
+			if len(selectedTargets) > 0 && !selectedTargets[shard.Target.ID] {
+				continue
+			}
+			endpoints[key] = ReleaseInstallationSelection{TargetID: shard.Target.ID, InstallationID: shard.Target.Config.InstallationID}
+		}
+		selections := make([]ReleaseInstallationSelection, 0, len(endpoints))
+		for _, endpoint := range endpoints {
+			if endpoint.InstallationID == "" {
+				endpoint.InstallationID = "default"
+			}
+			selections = append(selections, endpoint)
+		}
+		refreshBlockers = source.RefreshInstallations(ctx, selections, request.observeAfter)
+		snapshot, err = p.snapshots.Snapshot(ctx)
+		if err != nil {
+			return ReleasePlan{}, err
+		}
+		if selectedInstallations != nil {
+			selectedInstallations = connectedReleaseInstallations(snapshot, selectedInstallations)
+			var missing []ReleaseInstallationSelection
+			for _, shard := range snapshot.Shards {
+				key := releaseSnapshotInstallationKey(shard)
+				if selectedInstallations[key] {
+					if _, found := endpoints[key]; !found {
+						missing = append(missing, ReleaseInstallationSelection{TargetID: shard.Target.ID, InstallationID: shard.Target.Config.InstallationID})
+						endpoints[key] = ReleaseInstallationSelection{}
+					}
+				}
+			}
+			if len(missing) > 0 {
+				refreshBlockers = append(refreshBlockers, source.RefreshInstallations(ctx, missing, request.observeAfter)...)
+				snapshot, err = p.snapshots.Snapshot(ctx)
+				if err != nil {
+					return ReleasePlan{}, err
+				}
+				selectedInstallations = connectedReleaseInstallations(snapshot, selectedInstallations)
+			}
+		}
+	}
 	plan := ReleasePlan{
 		SelectedInstallations: selection,
 		Version:               ReleasePlanVersion, DesiredVersion: requested, TopologyRevision: snapshot.TopologyRevision,
-		Policy: policy, Blockers: []ReleaseBlocker{}, Ready: true, CreatedAt: p.now().UTC(),
+		Policy: policy, Blockers: refreshBlockers, Ready: true, CreatedAt: p.now().UTC(),
 	}
 	targets := make(map[string]*ReleaseInstallationPlan)
 	roomIDs := make(map[string]bool)
@@ -167,8 +232,8 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 			target = &ReleaseInstallationPlan{
 				TargetID: targetID, TargetName: observed.Target.Name,
 				OS: strings.ToLower(strings.TrimSpace(observed.Target.OS)), Arch: strings.ToLower(strings.TrimSpace(observed.Target.Arch)),
-				InstallationID: installationID,
-				Online:         observed.Target.Online || targetID == "local", InventoryFresh: observed.InventoryAvailable && !observed.InventoryStale,
+				InstallationID: installationID, ServerPath: releaseSnapshotDirectory(observed),
+				Online: observed.Target.Online || targetID == "local", InventoryFresh: observed.InventoryAvailable && !observed.InventoryStale,
 				Capabilities: normalizedReleaseStrings(observed.Target.Capabilities), RequiredBytes: p.minimumFree,
 				Blockers: []ReleaseBlocker{},
 			}
@@ -233,6 +298,7 @@ func (p *ReleasePlanner) Preview(ctx context.Context, request ReleasePreviewRequ
 	}
 	sortReleaseBlockers(plan.Blockers)
 	plan.Ready = len(plan.Blockers) == 0 && releaseVersionPattern.MatchString(plan.DesiredVersion)
+	plan.TopologyRevision = releaseScopeRevision(plan)
 	plan.PlanHash, err = calculateReleasePlanHash(plan)
 	if err != nil {
 		return ReleasePlan{}, err
@@ -379,6 +445,7 @@ func (p *ReleasePlanner) finishReleaseTarget(ctx context.Context, target *Releas
 		target.GameVersion = p.observeReleaseGameVersion(ctx, target.Shards)
 	}
 	target.AppID, target.UpdateMethod = normalizeReleaseInstallationMetadata(observation)
+	target.Branch = observation.Branch
 	target.AvailableBytes, target.SteamCMDAvailable, target.UpdateSupported = observation.AvailableBytes, observation.SteamCMDAvailable, observation.UpdateSupported
 	if observation.Branch != "" && observation.Branch != "public" {
 		add("BRANCH_UNSUPPORTED", "当前安装使用 "+observation.Branch+" 分支，不能按正式分支自动更新")
@@ -543,6 +610,7 @@ func calculateReleasePlanHash(plan ReleasePlan) (string, error) {
 	type canonicalTarget struct {
 		TargetID, InstallationID, CurrentVersion, DesiredVersion string
 		AppID                                                    string `json:",omitempty"`
+		ServerPath, Branch                                       string `json:",omitempty"`
 		UpdateMethod                                             string `json:",omitempty"`
 		Shards                                                   []canonicalShard
 	}
@@ -563,7 +631,13 @@ func calculateReleasePlanHash(plan ReleasePlan) (string, error) {
 			TargetID: target.TargetID, InstallationID: target.InstallationID, CurrentVersion: target.CurrentVersion,
 			DesiredVersion: target.DesiredVersion, AppID: target.AppID, UpdateMethod: target.UpdateMethod,
 		}
+		if plan.Version >= 2 {
+			canonical.ServerPath, canonical.Branch = target.ServerPath, target.Branch
+		}
 		for _, shard := range target.Shards {
+			if plan.Version >= 2 {
+				shard.RuntimeMode, _ = shared.NormalizeRuntimePerformanceMode(shard.RuntimeMode)
+			}
 			canonical.Shards = append(canonical.Shards, canonicalShard{
 				RuntimeMode: shard.RuntimeMode,
 				RoomID:      shard.RoomID, RoomDirectory: shard.RoomDirectory, WorldID: shard.WorldID,
@@ -583,7 +657,7 @@ func calculateReleasePlanHash(plan ReleasePlan) (string, error) {
 }
 
 func validateReleasePlan(plan ReleasePlan) error {
-	if plan.Version != ReleasePlanVersion || !releaseVersionPattern.MatchString(plan.DesiredVersion) || len(plan.TopologyRevision) != 64 || len(plan.PlanHash) != 64 ||
+	if (plan.Version != 1 && plan.Version != ReleasePlanVersion) || !releaseVersionPattern.MatchString(plan.DesiredVersion) || len(plan.TopologyRevision) != 64 || len(plan.PlanHash) != 64 ||
 		len(plan.AffectedRoomIDs) == 0 || len(plan.Installations) == 0 || plan.CreatedAt.IsZero() || !plan.Ready || len(plan.Blockers) != 0 {
 		return ErrReleaseInvalid
 	}
@@ -655,6 +729,21 @@ func connectedReleaseInstallations(snapshot ReleasePlacementSnapshot, seeds map[
 		roomInstallations[shard.Room.ID] = append(roomInstallations[shard.Room.ID], key)
 		installationRooms[key] = append(installationRooms[key], shard.Room.ID)
 	}
+	aliases := make(map[string][]string)
+	for _, shard := range snapshot.Shards {
+		directory := releaseSnapshotDirectory(shard)
+		if directory != "" {
+			aliases[shard.Target.ID+"\x00"+directory] = append(aliases[shard.Target.ID+"\x00"+directory], releaseSnapshotInstallationKey(shard))
+		}
+	}
+	for _, keys := range aliases {
+		for _, key := range keys {
+			for _, alias := range keys {
+				installationRooms[key] = append(installationRooms[key], "alias:"+alias)
+				roomInstallations["alias:"+alias] = append(roomInstallations["alias:"+alias], alias)
+			}
+		}
+	}
 	selected, rooms := make(map[string]bool), make(map[string]bool)
 	queue := make([]string, 0, len(seeds))
 	for key := range seeds {
@@ -713,4 +802,28 @@ func sortReleaseBlockers(values []ReleaseBlocker) {
 		right := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s", values[j].TargetID, values[j].InstallationID, values[j].RoomID, values[j].WorldID, values[j].Code)
 		return left < right
 	})
+}
+
+func releaseScopeRevision(plan ReleasePlan) string {
+	revisions := make(map[string]string)
+	for _, target := range plan.Installations {
+		for _, shard := range target.Shards {
+			revisions[shard.RoomID] = shard.TopologyRevision
+		}
+	}
+	values := make([]string, 0, len(revisions))
+	for roomID, revision := range revisions {
+		values = append(values, roomID+"\x00"+revision)
+	}
+	sort.Strings(values)
+	digest := sha256.Sum256([]byte(strings.Join(values, "\x00")))
+	return hex.EncodeToString(digest[:])
+}
+
+func releaseSnapshotDirectory(shard ReleaseShardSnapshot) string {
+	directory := shard.ServerRoot
+	if directory == "" {
+		directory = shard.Target.Config.ServerPath
+	}
+	return installationmaintenance.Directory(shard.Target.ID, directory)
 }

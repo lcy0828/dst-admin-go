@@ -101,7 +101,7 @@ func TestMaintenanceRetryPreservesSuccessfulValidation(t *testing.T) {
 		t.Fatal("failed update reported success")
 	}
 	for _, event := range f.runtime.mutationEvents() {
-		if strings.HasPrefix(event, "start:") {
+		if strings.HasPrefix(event, "start:room-b") {
 			t.Fatal("started after failure", event)
 		}
 	}

@@ -2,6 +2,7 @@ package routers
 
 import (
 	"context"
+	"dont/internal/installationmaintenance"
 	"fmt"
 	"log"
 	"os"
@@ -1267,6 +1268,15 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err := gameReleaseStore.Migrate(); err != nil {
 		return nil, err
 	}
+	installationMaintenance := installationmaintenance.New(gameReleaseStore.CheckMaintenance)
+	resolveMaintenance := func(target runtimedriver.Target) (installationmaintenance.Resource, error) {
+		return agentService.InstallationMaintenanceResource(target.TargetID, target.InstallationID)
+	}
+	nativeRuntimeDriver.ConfigureMaintenance(installationMaintenance, resolveMaintenance)
+	agentRuntimeDriver.ConfigureMaintenance(installationMaintenance, resolveMaintenance)
+	luajitService.ConfigureMaintenance(installationMaintenance)
+	gameInstallationService.ConfigureMaintenance(installationMaintenance)
+	gameUpdateService.ConfigureMaintenance(installationMaintenance)
 	gameReleaseSnapshot, err := gameupdate.NewTopologyReleaseSnapshot(roomService, topologyService, runtimeObservationCoordinator)
 	if err != nil {
 		return nil, fmt.Errorf("initialize game release topology snapshot: %w", err)
@@ -1301,6 +1311,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err := gameReleaseCoordinator.ConfigureMutationObserver(runtimeObservationCoordinator); err != nil {
 		return nil, err
 	}
+	gameReleaseCoordinator.ConfigureMaintenance(installationMaintenance)
 	gameReleaseCoordinator.ConfigureNotifier(gameNotificationService)
 	gameInstallationHandler.ConfigureReleases(gameReleaseCoordinator)
 	gameReleaseCoordinator.ConfigureOnlineCounter(maintenanceOnlineCounter)

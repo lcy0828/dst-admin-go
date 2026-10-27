@@ -7,6 +7,8 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"dont/internal/agents"
 	"dont/internal/rooms"
@@ -92,7 +94,7 @@ func (s *TopologyReleaseSnapshot) Snapshot(ctx context.Context) (ReleasePlacemen
 				}
 			}
 			result.Shards = append(result.Shards, ReleaseShardSnapshot{
-				Room: room, World: world, Target: target, InventoryAvailable: available && inventory.Available,
+				Room: room, World: world, Target: target, ServerRoot: inventory.Inventory.Installation.ServerRoot, InventoryAvailable: available && inventory.Available,
 				InventoryStale: !available || inventory.Stale, InventoryHasShard: available && inventoryContainsReleaseShard(inventory, room.DirectoryName, world.DirectoryName),
 				TopologyRevision: placement.Revision,
 			})
@@ -172,4 +174,39 @@ func inventoryContainsReleaseShard(inventory agents.RuntimeTargetInventory, clus
 		}
 	}
 	return false
+}
+
+// RefreshInstallations is demand driven and bounded; it does not acquire an
+// observation subscription or keep a worker alive after the release finishes.
+func (s *TopologyReleaseSnapshot) RefreshInstallations(ctx context.Context, selections []ReleaseInstallationSelection, after time.Time) []ReleaseBlocker {
+	source, ok := s.targets.(interface {
+		EnsureRuntimeInstallationFresh(context.Context, string, string, time.Time) error
+	})
+	if !ok {
+		return nil
+	}
+	results := make([][]ReleaseBlocker, len(selections))
+	slots := make(chan struct{}, 2)
+	var wait sync.WaitGroup
+	for index, selection := range selections {
+		wait.Add(1)
+		go func(index int, selection ReleaseInstallationSelection) {
+			defer wait.Done()
+			select {
+			case slots <- struct{}{}:
+				defer func() { <-slots }()
+			case <-ctx.Done():
+				return
+			}
+			if err := source.EnsureRuntimeInstallationFresh(ctx, selection.TargetID, selection.InstallationID, after); err != nil {
+				results[index] = []ReleaseBlocker{{Code: "INVENTORY_REFRESH_FAILED", Message: "刷新运行清单失败: " + err.Error(), TargetID: selection.TargetID, InstallationID: selection.InstallationID}}
+			}
+		}(index, selection)
+	}
+	wait.Wait()
+	var blockers []ReleaseBlocker
+	for _, result := range results {
+		blockers = append(blockers, result...)
+	}
+	return blockers
 }

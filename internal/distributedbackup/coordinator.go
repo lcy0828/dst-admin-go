@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/shirou/gopsutil/v3/disk"
 	"io"
 	"os"
 	"path/filepath"
@@ -387,6 +388,13 @@ func (c *Coordinator) collectStagedPart(ctx context.Context, current runtimePart
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return c.failPart(part, err)
 	}
+	usage, usageErr := disk.Usage(filepath.Dir(path))
+	if usageErr != nil {
+		return c.failPart(part, fmt.Errorf("读取保护备份磁盘空间: %w", usageErr))
+	}
+	if descriptor.Size < 0 || usage.Free < uint64(descriptor.Size)+64*1024*1024 {
+		return c.failPart(part, errors.New("BACKUP_DISK_INSUFFICIENT: 备份所在磁盘可用空间不足"))
+	}
 	temporary, err := os.CreateTemp(filepath.Dir(path), ".part-*.tmp")
 	if err != nil {
 		return c.failPart(part, err)
@@ -761,4 +769,20 @@ func (c *Coordinator) writeManifest(value Set) (string, error) {
 func containedPath(root, target string) bool {
 	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(target))
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)) && !filepath.IsAbs(relative)
+}
+
+// CheckProtectionSpace checks the actual backup volume, independently from the
+// game installation. Each staged part is checked again using its exact size.
+func (c *Coordinator) CheckProtectionSpace(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	usage, err := disk.Usage(c.root)
+	if err != nil {
+		return fmt.Errorf("读取保护备份磁盘空间: %w", err)
+	}
+	if usage.Free < 64*1024*1024 {
+		return errors.New("BACKUP_DISK_INSUFFICIENT: 备份所在磁盘可用空间不足")
+	}
+	return nil
 }

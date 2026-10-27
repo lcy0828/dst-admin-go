@@ -167,12 +167,12 @@ paths:
     post:
       tags: [AI]
       operationId: createAIToken
-      summary: Create a scoped MCP credential; plaintext returned once
+      summary: Create a named administrator API/MCP credential; plaintext returned once
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AITokenInput" } } } }
       responses:
         "201":
-          description: Create a scoped MCP credential; plaintext returned once
+          description: Create a named administrator API/MCP credential; plaintext returned once
           content: { application/json: { schema: { $ref: "#/components/schemas/AIEnvelope" } } }
   /system/ai/tokens/{tokenId}:
     parameters:
@@ -3071,7 +3071,11 @@ paths:
     post:
       tags: [Game]
       operationId: previewGameRelease
-      summary: Preflight every affected installation and shard without changing runtime state
+      summary: Refresh affected installations and preflight every shard without stopping worlds
+      description: |
+        Demand-driven inventory refresh does not require an open browser. Shared installations and connected rooms are included; unavailable evidence remains a concrete blocker. Read-only: it does not stop worlds or create protection backups. Copy the returned exact scope and policy into publishGameRelease; do not manually refresh the fleet.
+        MCP arguments example (replace sample IDs, hash and requestId with actual values; reuse requestId only for the same request):
+        {"body":{"installations":[{"targetId":"local","installationId":"default"}],"policy":{"restartRunning":true,"loadConfirmation":"logs","timeoutSeconds":300}},"requestId":"issue24-preview-001"}
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -3113,6 +3117,10 @@ paths:
       tags: [Game, Jobs]
       operationId: publishGameRelease
       summary: Revalidate a confirmed plan, protect all rooms, update every installation, and restore prior shard state
+      description: |
+        Use a ready preview and copy its exact selection, policy and planHash. confirmation is the same hash string, never a boolean. The returned Job ID is also the initial release ID. Poll getJob and getGameRelease; getGameUpdateRun belongs to the legacy game.update flow.
+        MCP arguments example (replace sample IDs, hash and requestId with actual values; reuse requestId only for the same request):
+        {"body":{"installations":[{"targetId":"local","installationId":"default"}],"policy":{"restartRunning":true,"loadConfirmation":"logs","timeoutSeconds":300},"planHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","confirmation":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"requestId":"issue24-publish-001"}
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -3140,6 +3148,10 @@ paths:
       tags: [Game]
       operationId: getGameRelease
       summary: Read one durable release including backups, installation results, shard state, and recovery diagnostics
+      description: |
+        Use the original release ID. A retry creates a new Job ID but keeps the original release ID. Read stage and installation/shard results: protecting means maintenance backup is in progress; a temporarily stopped world during maintenance is not independent evidence of a crash. A final success requires verified installations and the requested restore result.
+        MCP arguments example (replace sample IDs, hash and requestId with actual values; reuse requestId only for the same request):
+        {"path":{"releaseId":"24a00000-0000-4000-8000-000000000001"}}
       responses:
         "200":
           description: Distributed game release record
@@ -3155,10 +3167,25 @@ paths:
     post:
       tags: [Game, Jobs]
       operationId: retryGameRelease
-      summary: Resume a failed or recovery-required release while skipping installations already at the exact target version
+      summary: Resume a release using persisted write receipts and original world restore intentions
+      description: |
+        Read getGameRelease first. Unknown dispatched writes are observed before any resend. For irrecoverable receipts, explicitly re-preview with policy.validate true and confirm validateUnknown to perform a guarded repair. Verified installations are not downloaded again. If nextAction is preview_and_retry, preview the original exact installation scope and policy, then send that planHash as both planHash and confirmation to accept the new latest Steam build. The path is an object with releaseId, not a bare string or an id field. Poll the returned new Job ID with getJob and keep reading the original release ID with getGameRelease. Do not pass the retry Job ID to getGameRelease.
+        MCP arguments example (replace sample IDs, hash and requestId with actual values; reuse requestId only for the same request):
+        {"path":{"releaseId":"24a00000-0000-4000-8000-000000000001"},"requestId":"issue24-retry-001"}
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
         - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                planHash: { type: string, pattern: '^[a-f0-9]{64}$', description: Fresh re-preview hash when explicitly accepting a changed upstream build }
+                confirmation: { type: string, pattern: '^[a-f0-9]{64}$', description: Must equal planHash }
+                validateUnknown: { type: boolean, default: false, description: Explicit repair of a lost write receipt. Requires a fresh original-scope preview with policy.validate true and matching planHash/confirmation. Starts a new fenced validation attempt only after node-local directory and SteamCMD process guards pass. }
       responses:
         "202":
           description: Release recovery Job accepted
@@ -3352,6 +3379,10 @@ paths:
       tags: [Game]
       operationId: getGameUpdateRun
       summary: Read the bounded persistent SteamCMD log and version transition for an update job
+      description: |
+        For legacy game.update jobs only. For game.release or game.release.retry, use getJob and getGameRelease with the original release ID. A release Job need not have a legacy SteamCMD run record; its absence is not evidence of update failure.
+        MCP arguments example (replace sample IDs, hash and requestId with actual values; reuse requestId only for the same request):
+        {"path":{"jobId":"24a00000-0000-4000-8000-000000000002"}}
       responses:
         "200":
           description: Persisted update run
@@ -3402,6 +3433,10 @@ paths:
       tags: [Jobs]
       operationId: getJob
       summary: Read one job and all target results
+      description: |
+        The path is an object with jobId. Read status and target results; progress 100 or outcome none alone does not prove success or rollback. For game.release and game.release.retry also read the original getGameRelease record.
+        MCP arguments example (replace sample IDs, hash and requestId with actual values; reuse requestId only for the same request):
+        {"path":{"jobId":"24a00000-0000-4000-8000-000000000002"}}
       responses:
         "200":
           description: Job details
@@ -8312,6 +8347,7 @@ components:
       additionalProperties: false
       required: [roomId, roomName, roomDirectory, worldId, worldName, worldDirectory, isMaster, targetId, installationId, topologyRevision, wasRunning]
       properties:
+        runtimeMode: { type: string, description: Original per-world Lua runtime mode; empty and game are equivalent }
         roomId: { type: string }
         roomName: { type: string }
         roomDirectory: { type: string }
@@ -8329,6 +8365,8 @@ components:
       additionalProperties: false
       required: [targetId, targetName, os, arch, installationId, online, inventoryFresh, capabilities, installed, desiredVersion, upToDate, availableBytes, requiredBytes, steamcmdAvailable, updateSupported, runningShards, shards, blockers]
       properties:
+        serverPath: { type: string, description: Registered installation directory used for maintenance scope }
+        branch: { type: string }
         targetId: { type: string }
         targetName: { type: string }
         os: { type: string, description: Operating system reported by the runtime target }
@@ -8357,7 +8395,7 @@ components:
       additionalProperties: false
       required: [version, desiredVersion, topologyRevision, planHash, policy, affectedRoomIds, installations, blockers, ready, updateRequired, createdAt]
       properties:
-        version: { type: integer, enum: [1] }
+        version: { type: integer, enum: [1, 2], description: Hash rules version; stored v1 releases remain readable }
         desiredVersion: { type: string, pattern: '^[0-9]{1,64}$' }
         topologyRevision: { type: string, pattern: '^[a-f0-9]{64}$' }
         planHash: { type: string, pattern: '^[a-f0-9]{64}$' }
@@ -8384,6 +8422,9 @@ components:
       additionalProperties: false
       required: [targetId, installationId, stage, updatedAt]
       properties:
+        writeState: { type: string, enum: [not_started, dispatched, unknown, failed, version_changed, verified], description: Write and integrity evidence; a changed version is not an automatic rollback }
+        operationId: { type: string, description: Persisted write identity; uncertain requests are queried using this identity }
+        expectedVersion: { type: string }
         targetId: { type: string }
         installationId: { type: string }
         stage: { $ref: "#/components/schemas/GameReleaseStage" }
@@ -8400,6 +8441,9 @@ components:
       additionalProperties: false
       required: [roomId, worldId, targetId, installationId, isMaster, wasRunning, stage, updatedAt]
       properties:
+        stopRequestedAt: { type: string, format: date-time, description: Persisted before dispatching stop }
+        logFileId: { type: string }
+        logOffset: { type: integer, minimum: 0, description: Persisted pre-start cursor for retrying this launch confirmation }
         roomId: { type: string }
         worldId: { type: string }
         targetId: { type: string }
@@ -8420,6 +8464,11 @@ components:
       additionalProperties: false
       required: [id, stage, plan, protectionBackupIds, installations, shards, createdAt, updatedAt]
       properties:
+        attempt: { type: integer, minimum: 0 }
+        writingStarted: { type: boolean, description: A game-file write may have been dispatched in this release }
+        planHistory: { type: array, items: { $ref: "#/components/schemas/GameReleasePlan" }, description: Previous plans retained after explicitly confirmed re-preview }
+        blockers: { type: array, items: { $ref: "#/components/schemas/GameReleaseBlocker" } }
+        nextAction: { type: string, enum: [retry_release, preview_and_retry, inspect_release], description: Resume the original release; inspect_release queries unknown writes without resending }
         id: { type: string, format: uuid }
         sourceJobId: { type: string, format: uuid }
         stage: { $ref: "#/components/schemas/GameReleaseStage" }
@@ -12095,6 +12144,7 @@ components:
         server_mode: { type: string }
         save_path_ok: { type: boolean }
         server_path_ok: { type: boolean }
+        server_root: { type: string, description: Optional node-resolved installation root for physical directory alias coordination }
     AgentShardInventory:
       type: object
       additionalProperties: false

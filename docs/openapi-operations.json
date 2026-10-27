@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "99258c325fa2c2db47361b36c9b4203febb503a2ecf92053fb7bd5000b110ac3",
+  "operationsSHA256": "921de6252bbe1b8c7890e0a5b5716d5f442bc0d2ac60a9c3c3d4e13f9677260e",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -528,7 +528,7 @@
       "access": "write",
       "risk": "normal",
       "runtime": "any",
-      "title": "Create a scoped MCP credential; plaintext returned once"
+      "title": "Create a named administrator API/MCP credential; plaintext returned once"
     },
     {
       "operationId": "createAutomationGroup",
@@ -3000,7 +3000,7 @@
       "access": "write",
       "risk": "normal",
       "runtime": "any",
-      "title": "Preflight every affected installation and shard without changing runtime state"
+      "title": "Refresh affected installations and preflight every shard without stopping worlds"
     },
     {
       "operationId": "previewLegacyStructuredLogRuleMigration",
@@ -3558,6 +3558,7 @@
       "operationId": "retryGameRelease",
       "method": "POST",
       "path": "/game/releases/{releaseId}/actions/retry",
+      "contentType": "application/json",
       "transport": "json",
       "tags": [
         "game",
@@ -3566,7 +3567,7 @@
       "access": "write",
       "risk": "normal",
       "runtime": "any",
-      "title": "Resume a failed or recovery-required release while skipping installations already at the exact target version"
+      "title": "Resume a release using persisted write receipts and original world restore intentions"
     },
     {
       "operationId": "retryNotificationDelivery",

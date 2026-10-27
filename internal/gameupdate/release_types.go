@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	ReleasePlanVersion       = 1
-	RequiredUpdateCapability = "runtime.game-update.v1"
-	DefaultUpdateHeadroom    = uint64(2 * 1024 * 1024 * 1024)
+	ReleasePlanVersion             = 2
+	RequiredUpdateCapability       = "runtime.game-update.v1"
+	RequiredUpdateRepairCapability = "runtime.game-update-repair.v1"
+	DefaultUpdateHeadroom          = uint64(2 * 1024 * 1024 * 1024)
 )
 
 var (
@@ -82,6 +83,7 @@ type ReleasePreviewRequest struct {
 	Installations    []ReleaseInstallationSelection `json:"installations,omitempty"`
 	roomID           string
 	installationKeys map[string]bool
+	observeAfter     time.Time
 	DesiredVersion   string             `json:"desiredVersion,omitempty"`
 	TargetIDs        []string           `json:"targetIds,omitempty"`
 	Policy           ReleasePolicyInput `json:"policy"`
@@ -122,6 +124,8 @@ type ReleaseShardPlan struct {
 }
 
 type ReleaseInstallationPlan struct {
+	ServerPath        string             `json:"serverPath,omitempty"`
+	Branch            string             `json:"branch,omitempty"`
 	TargetID          string             `json:"targetId"`
 	TargetName        string             `json:"targetName"`
 	OS                string             `json:"os"`
@@ -163,20 +167,26 @@ type ReleasePlan struct {
 }
 
 type ReleaseInstallationResult struct {
-	TargetID       string       `json:"targetId"`
-	InstallationID string       `json:"installationId"`
-	Stage          ReleaseStage `json:"stage"`
-	BeforeVersion  string       `json:"beforeVersion,omitempty"`
-	AfterVersion   string       `json:"afterVersion,omitempty"`
-	Log            string       `json:"log,omitempty"`
-	ErrorCode      string       `json:"errorCode,omitempty"`
-	ErrorMessage   string       `json:"errorMessage,omitempty"`
-	StartedAt      *time.Time   `json:"startedAt,omitempty"`
-	FinishedAt     *time.Time   `json:"finishedAt,omitempty"`
-	UpdatedAt      time.Time    `json:"updatedAt"`
+	WriteState      string       `json:"writeState,omitempty"`
+	OperationID     string       `json:"operationId,omitempty"`
+	ExpectedVersion string       `json:"expectedVersion,omitempty"`
+	TargetID        string       `json:"targetId"`
+	InstallationID  string       `json:"installationId"`
+	Stage           ReleaseStage `json:"stage"`
+	BeforeVersion   string       `json:"beforeVersion,omitempty"`
+	AfterVersion    string       `json:"afterVersion,omitempty"`
+	Log             string       `json:"log,omitempty"`
+	ErrorCode       string       `json:"errorCode,omitempty"`
+	ErrorMessage    string       `json:"errorMessage,omitempty"`
+	StartedAt       *time.Time   `json:"startedAt,omitempty"`
+	FinishedAt      *time.Time   `json:"finishedAt,omitempty"`
+	UpdatedAt       time.Time    `json:"updatedAt"`
 }
 
 type ReleaseShardResult struct {
+	StopRequestedAt *time.Time   `json:"stopRequestedAt,omitempty"`
+	LogFileID       string       `json:"logFileId,omitempty"`
+	LogOffset       int64        `json:"logOffset,omitempty"`
 	RoomID          string       `json:"roomId"`
 	WorldID         string       `json:"worldId"`
 	TargetID        string       `json:"targetId"`
@@ -195,6 +205,11 @@ type ReleaseShardResult struct {
 }
 
 type Release struct {
+	PlanHistory         []ReleasePlan               `json:"planHistory,omitempty"`
+	WritingStarted      bool                        `json:"writingStarted,omitempty"`
+	Attempt             int                         `json:"attempt,omitempty"`
+	Blockers            []ReleaseBlocker            `json:"blockers,omitempty"`
+	NextAction          string                      `json:"nextAction,omitempty"`
 	ID                  string                      `json:"id"`
 	SourceJobID         string                      `json:"sourceJobId,omitempty"`
 	Stage               ReleaseStage                `json:"stage"`
@@ -209,6 +224,12 @@ type Release struct {
 	FinishedAt          *time.Time                  `json:"finishedAt,omitempty"`
 }
 
+type ReleaseRetryRequest struct {
+	ValidateUnknown bool   `json:"validateUnknown,omitempty"`
+	PlanHash        string `json:"planHash,omitempty"`
+	Confirmation    string `json:"confirmation,omitempty"`
+}
+
 type ReleasePublishRequest struct {
 	ID          string      `json:"id"`
 	SourceJobID string      `json:"sourceJobId,omitempty"`
@@ -221,6 +242,7 @@ type ReleasePlacementSnapshot struct {
 }
 
 type ReleaseShardSnapshot struct {
+	ServerRoot         string
 	Room               rooms.Room
 	World              rooms.World
 	Target             agents.RuntimeTarget

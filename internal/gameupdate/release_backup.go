@@ -33,3 +33,7 @@ func (p *DistributedReleaseProtection) CreateProtection(ctx context.Context, roo
 func (p *DistributedReleaseProtection) VerifyProtection(ctx context.Context, id, roomID, sourceJobID string) error {
 	return p.backups.VerifyProtection(ctx, id, roomID, sourceJobID)
 }
+
+func (p *DistributedReleaseProtection) CheckProtectionSpace(ctx context.Context) error {
+	return p.backups.CheckProtectionSpace(ctx)
+}

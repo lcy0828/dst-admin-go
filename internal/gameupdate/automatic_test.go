@@ -111,7 +111,7 @@ func TestAutomaticGameUpdateSkipsCurrentAndOccupiedOrUnknownRooms(t *testing.T) 
 	}
 }
 
-func TestAutomaticGameUpdateRechecksAfterProtectionBackup(t *testing.T) {
+func TestAutomaticGameUpdateDoesNotRequirePresenceAfterStopping(t *testing.T) {
 	f := automaticFixture(t, false)
 	f.coordinator.ConfigureOnlineCounter(automaticOnlineFunc(func(context.Context, string) (int, error) {
 		if len(f.coordinator.backups.(*coordinatorBackups).ids) > 0 {
@@ -120,8 +120,8 @@ func TestAutomaticGameUpdateRechecksAfterProtectionBackup(t *testing.T) {
 		return 0, nil
 	}))
 	updated, err := f.coordinator.UpdateRoomWhenEmpty(context.Background(), "room-a", "job-joining")
-	if updated || !errors.Is(err, maintenance.ErrPlayersOnline) || len(f.runtime.mutationEvents()) != 0 {
-		t.Fatalf("joining player was ignored: updated=%v err=%v events=%v", updated, err, f.runtime.mutationEvents())
+	if !updated || err != nil {
+		t.Fatalf("stopped worlds incorrectly required live presence: updated=%v err=%v", updated, err)
 	}
 }
 
@@ -143,10 +143,12 @@ func TestAutomaticGameUpdateRequiresRecoveryBeforeAnotherAttempt(t *testing.T) {
 		t.Fatalf("lost recovery evidence: total=%d err=%v", total, err)
 	}
 	f.runtime.updateErrors = make(map[string]error)
+	f.runtime.states["room-a\x00Master"] = shared.ShardRuntimeStatus{State: "running", SessionExists: true}
 	f.coordinator.ConfigureOnlineCounter(automaticOnlineFunc(func(context.Context, string) (int, error) { return 1, nil }))
 	if _, err := f.coordinator.Retry(context.Background(), values[0].ID); !errors.Is(err, maintenance.ErrPlayersOnline) {
 		t.Fatalf("recovery lost empty guard: %v", err)
 	}
+	f.runtime.states["room-a\x00Master"] = shared.ShardRuntimeStatus{State: "stopped"}
 	f.coordinator.ConfigureOnlineCounter(automaticOnlineFunc(func(context.Context, string) (int, error) { return 0, nil }))
 	if value, err := f.coordinator.Retry(context.Background(), values[0].ID); err != nil || value.Stage != ReleaseStageSucceeded {
 		t.Fatalf("recovery failed: stage=%s err=%v", value.Stage, err)

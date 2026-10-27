@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -241,7 +242,7 @@ func TestReleaseCoordinatorOrdersStopUpdateAndRestart(t *testing.T) {
 	}
 }
 
-func TestReleaseCoordinatorKeepsAllShardsStoppedWhenAnyInstallationFails(t *testing.T) {
+func TestReleaseCoordinatorRestoresOnlyIndependentVerifiedScopes(t *testing.T) {
 	fixture := newReleaseCoordinatorFixture(t, ReleaseLoadConfirmationNone)
 	mutations := &releaseMutationObserver{}
 	if err := fixture.coordinator.ConfigureMutationObserver(mutations); err != nil {
@@ -254,13 +255,16 @@ func TestReleaseCoordinatorKeepsAllShardsStoppedWhenAnyInstallationFails(t *test
 		t.Fatalf("release=%#v error=%v", value, err)
 	}
 	for _, event := range fixture.runtime.mutationEvents() {
-		if len(event) >= 6 && event[:6] == "start:" {
-			t.Fatalf("shard restarted before every installation succeeded: %v", fixture.runtime.mutationEvents())
+		if event == "start:room-b\x00Master" || event == "start:room-b\x00Archive" {
+			t.Fatalf("failed scope restarted: %v", fixture.runtime.mutationEvents())
 		}
 	}
 	for key, status := range fixture.runtime.states {
-		if key != "room-b\x00Archive" && (status.State != "stopped" || status.SessionExists) {
-			t.Fatalf("shard %q was not kept stopped: %#v", key, status)
+		if strings.HasPrefix(key, "room-b\x00") && (status.State != "stopped" || status.SessionExists) {
+			t.Fatalf("failed scope %q restarted: %#v", key, status)
+		}
+		if strings.HasPrefix(key, "room-a\x00") && status.State != "running" {
+			t.Fatalf("independent verified scope %q not restored", key)
 		}
 	}
 	mutations.mu.Lock()

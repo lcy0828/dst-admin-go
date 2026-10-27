@@ -23,7 +23,8 @@ type AgentExecutor interface {
 }
 
 type Agent struct {
-	executor AgentExecutor
+	maintenance maintenanceBinding
+	executor    AgentExecutor
 }
 
 var (
@@ -338,6 +339,14 @@ func (d *Agent) Status(ctx context.Context, target Target) (shared.ShardRuntimeS
 }
 
 func (d *Agent) ExecuteShard(ctx context.Context, target Target, operation Operation, action shared.ShardAction, timeout time.Duration) (shared.ShardOperationResult, error) {
+	if action == shared.ShardActionStart || action == shared.ShardActionRestart {
+		next, release, err := d.maintenance.acquire(ctx, target)
+		if err != nil {
+			return shared.ShardOperationResult{}, err
+		}
+		defer release()
+		ctx = next
+	}
 	request := shared.ShardOperationRequest{
 		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: operation.ID, OperationKey: operation.Key,
 		InstallationID: target.InstallationID, Action: action, Cluster: target.Cluster, Shard: target.Shard,
@@ -844,6 +853,13 @@ func modRuntimeRequest(target Target, operation Operation, action shared.Runtime
 }
 
 func (d *Agent) PrepareMigrationExport(ctx context.Context, target Target, operation Operation, migrationID string) (MigrationDescriptor, error) {
+	next, release, err := d.maintenance.acquire(ctx, target)
+	if err != nil {
+		return MigrationDescriptor{}, err
+	}
+	defer release()
+	ctx = next
+
 	result, err := d.executeMigration(ctx, target, operation, shared.RuntimeActionMigrationExportPrepare, shared.RuntimeMigrationRequest{MigrationID: migrationID}, 5*time.Minute)
 	value, err := checkedMigrationResult(result, migrationID, err)
 	if err != nil {
@@ -885,6 +901,13 @@ func (d *Agent) ReleaseMigrationExport(ctx context.Context, target Target, opera
 }
 
 func (d *Agent) BeginMigrationImport(ctx context.Context, target Target, operation Operation, descriptor MigrationDescriptor) error {
+	next, release, err := d.maintenance.acquire(ctx, target)
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx = next
+
 	request := runtimeRequest(target, operation, shared.RuntimeActionMigrationImportBegin)
 	request.Migration = &shared.RuntimeMigrationRequest{
 		MigrationID: descriptor.MigrationID, Size: descriptor.Size, SHA256: descriptor.SHA256,
@@ -954,6 +977,13 @@ func (d *Agent) WriteMigrationImport(ctx context.Context, target Target, operati
 }
 
 func (d *Agent) CommitMigrationImport(ctx context.Context, target Target, operation Operation, migrationID string) error {
+	next, release, err := d.maintenance.acquire(ctx, target)
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx = next
+
 	result, err := d.executeMigration(ctx, target, operation, shared.RuntimeActionMigrationImportCommit, shared.RuntimeMigrationRequest{MigrationID: migrationID}, 5*time.Minute)
 	return checkedCompletedMigration(result, migrationID, err)
 }

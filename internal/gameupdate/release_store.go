@@ -12,6 +12,7 @@ import (
 )
 
 type releaseRecord struct {
+	ExecutionJSON        string `gorm:"type:text"`
 	ID                   string `gorm:"primary_key;type:varchar(128)"`
 	SourceJobID          string `gorm:"type:varchar(128);unique_index"`
 	Stage                string `gorm:"type:varchar(32);index;not null"`
@@ -141,24 +142,32 @@ func (s *ReleaseStore) Create(value Release) (Release, error) {
 	return s.Get(value.ID)
 }
 
-func (s *ReleaseStore) Save(value Release) (Release, error) {
+func (s *ReleaseStore) Save(value Release) (Release, error) { return s.save(value, "") }
+
+func (s *ReleaseStore) save(value Release, previousHash string) (Release, error) {
 	if err := validateRelease(value); err != nil {
-		return Release{}, err
+		return value, err
 	}
 	record, err := releaseRecordFrom(value)
 	if err != nil {
-		return Release{}, err
+		return value, err
 	}
 	tx := s.db.Begin()
 	if tx.Error != nil {
-		return Release{}, tx.Error
+		return value, tx.Error
 	}
-	rollback := func(err error) (Release, error) { tx.Rollback(); return Release{}, err }
+	rollback := func(err error) (Release, error) { tx.Rollback(); return value, err }
 	updates := map[string]interface{}{
-		"stage": record.Stage, "protection_backup_json": record.ProtectionBackupJSON, "error_code": record.ErrorCode,
+		"execution_json": record.ExecutionJSON, "stage": record.Stage, "protection_backup_json": record.ProtectionBackupJSON, "error_code": record.ErrorCode,
 		"error_message": record.ErrorMessage, "finished_at": record.FinishedAt, "updated_at": record.UpdatedAt,
 	}
-	result := tx.Table(s.releaseTable).Where("id = ? AND plan_hash = ?", record.ID, record.PlanHash).Updates(updates)
+	expectedHash := record.PlanHash
+	if previousHash != "" {
+		expectedHash = previousHash
+		updates["plan_json"], updates["plan_hash"] = record.PlanJSON, record.PlanHash
+		updates["desired_version"], updates["topology_revision"] = record.DesiredVersion, record.TopologyRevision
+	}
+	result := tx.Table(s.releaseTable).Where("id = ? AND plan_hash = ?", record.ID, expectedHash).Updates(updates)
 	if result.Error != nil {
 		return rollback(result.Error)
 	}
@@ -194,9 +203,13 @@ func (s *ReleaseStore) Save(value Release) (Release, error) {
 		}
 	}
 	if err := tx.Commit().Error; err != nil {
-		return Release{}, err
+		return value, err
 	}
-	return s.Get(value.ID)
+	saved, err := s.Get(value.ID)
+	if err != nil {
+		return value, err
+	}
+	return saved, nil
 }
 
 func (s *ReleaseStore) Get(id string) (Release, error) {
@@ -225,6 +238,24 @@ func (s *ReleaseStore) Get(id string) (Release, error) {
 	}
 	for _, item := range shardRecords {
 		value.Shards = append(value.Shards, releaseShardFromRecord(item))
+	}
+	if record.ExecutionJSON != "" {
+		var state releaseExecutionEvidence
+		if err := json.Unmarshal([]byte(record.ExecutionJSON), &state); err != nil {
+			return Release{}, err
+		}
+		value.Attempt, value.Blockers, value.NextAction = state.Attempt, state.Blockers, state.NextAction
+		value.WritingStarted, value.PlanHistory = state.WritingStarted, state.PlanHistory
+		for _, evidence := range state.Installations {
+			if item := releaseInstallationResult(&value, evidence.TargetID, evidence.InstallationID); item != nil {
+				item.WriteState, item.OperationID, item.ExpectedVersion = evidence.WriteState, evidence.OperationID, evidence.ExpectedVersion
+			}
+		}
+		for _, evidence := range state.Shards {
+			if item := releaseShardResult(&value, evidence.RoomID, evidence.WorldID); item != nil {
+				item.StopRequestedAt, item.LogFileID, item.LogOffset = evidence.StopRequestedAt, evidence.LogFileID, evidence.LogOffset
+			}
+		}
 	}
 	return value, nil
 }
@@ -321,8 +352,13 @@ func releaseRecordFrom(value Release) (releaseRecord, error) {
 	if err != nil {
 		return releaseRecord{}, err
 	}
+	evidence, err := json.Marshal(releaseExecutionEvidence{WritingStarted: value.WritingStarted, PlanHistory: value.PlanHistory, Attempt: value.Attempt, Blockers: value.Blockers, NextAction: value.NextAction, Installations: installationEvidence(value), Shards: shardEvidence(value)})
+	if err != nil {
+		return releaseRecord{}, err
+	}
 	return releaseRecord{
-		ID: value.ID, SourceJobID: value.SourceJobID, Stage: string(value.Stage), DesiredVersion: value.Plan.DesiredVersion,
+		ExecutionJSON: string(evidence),
+		ID:            value.ID, SourceJobID: value.SourceJobID, Stage: string(value.Stage), DesiredVersion: value.Plan.DesiredVersion,
 		TopologyRevision: value.Plan.TopologyRevision, PlanHash: value.Plan.PlanHash, PlanJSON: string(plan),
 		ProtectionBackupJSON: string(backups), ErrorCode: value.ErrorCode, ErrorMessage: value.ErrorMessage,
 		FinishedAt: value.FinishedAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
@@ -384,4 +420,53 @@ func releaseShardFromRecord(record releaseShardRecord) ReleaseShardResult {
 func childReleaseRecordID(releaseID, key string) string {
 	digest := sha256.Sum256([]byte(key))
 	return fmt.Sprintf("%s:%x", releaseID, digest[:12])
+}
+
+type releaseExecutionEvidence struct {
+	WritingStarted bool                          `json:"writingStarted,omitempty"`
+	PlanHistory    []ReleasePlan                 `json:"planHistory,omitempty"`
+	Attempt        int                           `json:"attempt"`
+	Blockers       []ReleaseBlocker              `json:"blockers,omitempty"`
+	NextAction     string                        `json:"nextAction,omitempty"`
+	Installations  []releaseInstallationEvidence `json:"installations"`
+	Shards         []releaseShardEvidence        `json:"shards"`
+}
+
+// Rebase changes only the confirmed plan after explicit re-preview. The
+// previous plan and original running intentions remain in execution evidence.
+func (s *ReleaseStore) Rebase(value Release, previousHash string) (Release, error) {
+	if previousHash == "" {
+		return value, ErrReleaseInvalid
+	}
+	return s.save(value, previousHash)
+}
+
+type releaseInstallationEvidence struct {
+	TargetID        string `json:"targetId"`
+	InstallationID  string `json:"installationId"`
+	WriteState      string `json:"writeState,omitempty"`
+	OperationID     string `json:"operationId,omitempty"`
+	ExpectedVersion string `json:"expectedVersion,omitempty"`
+}
+type releaseShardEvidence struct {
+	RoomID          string     `json:"roomId"`
+	WorldID         string     `json:"worldId"`
+	StopRequestedAt *time.Time `json:"stopRequestedAt,omitempty"`
+	LogFileID       string     `json:"logFileId,omitempty"`
+	LogOffset       int64      `json:"logOffset,omitempty"`
+}
+
+func installationEvidence(value Release) []releaseInstallationEvidence {
+	result := make([]releaseInstallationEvidence, 0, len(value.Installations))
+	for _, item := range value.Installations {
+		result = append(result, releaseInstallationEvidence{item.TargetID, item.InstallationID, item.WriteState, item.OperationID, item.ExpectedVersion})
+	}
+	return result
+}
+func shardEvidence(value Release) []releaseShardEvidence {
+	result := make([]releaseShardEvidence, 0, len(value.Shards))
+	for _, item := range value.Shards {
+		result = append(result, releaseShardEvidence{item.RoomID, item.WorldID, item.StopRequestedAt, item.LogFileID, item.LogOffset})
+	}
+	return result
 }

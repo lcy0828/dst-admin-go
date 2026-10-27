@@ -23,9 +23,9 @@ func (r *failFirstReleaseStop) Stop(ctx context.Context, shard ReleaseShardPlan,
 
 func TestFailedReleaseRetainsProtectionAndRetryVerifiesBeforeMutating(t *testing.T) {
 	f := newReleaseCoordinatorFixture(t, ReleaseLoadConfirmationNone)
-	f.coordinator.runtime = &failFirstReleaseStop{coordinatorRuntime: f.runtime}
+	f.runtime.updateErrors["agent:node-b\x00primary"] = errors.New("temporary update failure")
 	value, err := f.coordinator.Publish(context.Background(), ReleasePublishRequest{ID: "release-protection", Plan: f.plan})
-	if err == nil || value.Stage != ReleaseStageFailed || len(value.ProtectionBackupIDs) == 0 {
+	if err == nil || value.Stage != ReleaseStageRecoveryRequired || len(value.ProtectionBackupIDs) == 0 {
 		t.Fatalf("failed release: %#v %v", value, err)
 	}
 	if needed, err := f.coordinator.RequiresProtection(value.ID); err != nil || !needed {
@@ -43,6 +43,7 @@ func TestFailedReleaseRetainsProtectionAndRetryVerifiesBeforeMutating(t *testing
 		t.Fatal("retry mutated runtimes or replaced missing original protection")
 	}
 	backups.verifyErr = nil
+	delete(f.runtime.updateErrors, "agent:node-b\x00primary")
 	retried, err = f.coordinator.Retry(context.Background(), value.ID)
 	if err != nil || retried.Stage != ReleaseStageSucceeded {
 		t.Fatalf("valid protection did not permit retry: %#v %v", retried, err)

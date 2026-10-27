@@ -67,6 +67,7 @@ type cacheEntry struct {
 	state          State
 	err            string
 	refreshStarted *time.Time
+	sampleStarted  time.Time
 	lastCheckpoint time.Time
 	checkpointHash string
 }
@@ -75,6 +76,7 @@ type flight struct {
 	done    chan struct{}
 	result  RefreshResult
 	waiters int
+	started time.Time
 }
 
 type lease struct {
@@ -310,16 +312,63 @@ func (c *Coordinator) RefreshRuntimeTarget(ctx context.Context, targetID, target
 		if item.Target.ID != targetID || installationID(item) != targetInstallationID {
 			continue
 		}
-		result := c.refreshEndpoint(ctx, item)
-		if result.State != StateFresh {
-			return &UnavailableError{
-				TargetID: result.TargetID, InstallationID: result.InstallationID,
-				State: result.State, Message: result.Error,
-			}
-		}
-		return nil
+		return c.ensureEndpoint(ctx, item, c.now().UTC(), true)
 	}
 	return ErrRuntimeTargetNotFound
+}
+
+// EnsureRuntimeInstallationFresh observes only the requested installation. A
+// nonzero boundary requires a sample begun after the caller's mutation.
+func (c *Coordinator) EnsureRuntimeInstallationFresh(ctx context.Context, targetID, installationID string, after time.Time) error {
+	items, err := c.source.CachedRuntimeTargetInventories(ctx)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if item.Target.ID == targetID && strings.TrimSpace(item.Target.Config.InstallationID) == installationID {
+			return c.ensureEndpoint(ctx, item, after, false)
+		}
+	}
+	return ErrRuntimeTargetNotFound
+}
+
+func (c *Coordinator) ensureEndpoint(ctx context.Context, item agents.RuntimeTargetInventory, after time.Time, force bool) error {
+	key := endpointKey(item.Target.ID, installationID(item))
+	collections := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		c.mu.Lock()
+		entry := c.cache[key]
+		running := c.flights[key]
+		if !force && running == nil && entry.state == StateFresh && entry.inventory.Available && entry.inventory.ReceivedAt != nil && !entry.inventory.ReceivedAt.IsZero() && c.now().UTC().Sub(*entry.inventory.ReceivedAt) <= c.freshnessWindow && (after.IsZero() || !entry.sampleStarted.Before(after)) {
+			c.mu.Unlock()
+			return nil
+		}
+		if running != nil && !after.IsZero() && running.started.Before(after) {
+			c.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-running.done:
+			}
+			force = false
+			continue
+		}
+		c.mu.Unlock()
+		if collections >= 2 {
+			return &UnavailableError{TargetID: item.Target.ID, InstallationID: installationID(item), State: StateUnavailable, Message: "运行目标未返回可用于本次操作的新清单"}
+		}
+		collections++
+		result := c.refreshEndpoint(ctx, item)
+		if result.State != StateFresh {
+			return &UnavailableError{TargetID: result.TargetID, InstallationID: result.InstallationID, State: result.State, Message: result.Error}
+		}
+		// The sample can have raced with an older flight between the check
+		// and refreshEndpoint. Verify its actual start boundary before use.
+		force = false
+	}
 }
 
 func (c *Coordinator) refreshEndpoint(ctx context.Context, item agents.RuntimeTargetInventory) RefreshResult {
@@ -343,7 +392,7 @@ func (c *Coordinator) refreshEndpoint(ctx context.Context, item agents.RuntimeTa
 	started := c.now().UTC()
 	current.state, current.err, current.refreshStarted = StateRefreshing, "", &started
 	c.cache[key] = current
-	running := &flight{done: make(chan struct{})}
+	running := &flight{done: make(chan struct{}), started: started}
 	c.flights[key] = running
 	c.mu.Unlock()
 	c.publish("observation.refreshing", observationFromEntry(item, current))
@@ -384,10 +433,20 @@ func (c *Coordinator) collect(ctx context.Context, item agents.RuntimeTargetInve
 		}
 		return c.finishError(item, key, state, err.Error(), previous)
 	}
+	if !observed.Available || observed.ReceivedAt == nil || observed.ReceivedAt.IsZero() || c.now().UTC().Sub(*observed.ReceivedAt) > c.freshnessWindow {
+		return c.finishError(item, key, StateUnavailable, "运行目标返回的清单缺少有效接收时间或已经过期", previous)
+	}
+	if observed.Target.ID != item.Target.ID || installationID(observed) != installationID(item) {
+		return c.finishError(item, key, StateError, "运行目标返回的安装身份不匹配", previous)
+	}
 	observed.ObservationState = string(StateFresh)
 	c.mu.Lock()
 	entry := c.cache[key]
-	entry.inventory, entry.state, entry.err, entry.refreshStarted = observed, StateFresh, "", nil
+	entry.inventory, entry.state, entry.err = observed, StateFresh, ""
+	if entry.refreshStarted != nil {
+		entry.sampleStarted = *entry.refreshStarted
+	}
+	entry.refreshStarted = nil
 	digest := structuralDigest(observed.Inventory)
 	checkpoint := observed.Target.ID != "local" && (entry.lastCheckpoint.IsZero() || entry.checkpointHash != digest || c.now().UTC().Sub(entry.lastCheckpoint) >= c.checkpointEvery)
 	c.cache[key] = entry

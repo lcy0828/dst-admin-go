@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"dont/internal/hostresource"
+	"dont/internal/installationmaintenance"
 	"dont/internal/worldidentity"
 	"dont/shared"
 
@@ -47,6 +48,7 @@ func Collect(ctx context.Context, request shared.RuntimeInventoryRequest) (share
 		Installation: shared.RuntimeInstallationReport{
 			ID: request.InstallationID, DisplayName: request.DisplayName,
 			SavePath: request.SavePath, ServerPath: request.ServerPath, ServerMode: request.ServerMode,
+			ServerRoot: installationmaintenance.Directory("local", request.ServerPath),
 			SavePathOK: directoryExists(request.SavePath), ServerPathOK: directoryExists(request.ServerPath),
 		},
 		Rooms: []shared.RoomInventoryReport{}, Processes: []shared.ShardProcessReport{}, Warnings: []string{},

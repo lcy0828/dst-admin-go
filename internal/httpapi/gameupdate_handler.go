@@ -3,11 +3,14 @@ package httpapi
 import (
 	"context"
 	"crypto/sha256"
+	"dont/internal/installationmaintenance"
 	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"dont/internal/gameupdate"
@@ -17,6 +20,9 @@ import (
 )
 
 type GameUpdateHandler struct {
+	releaseMu      sync.Mutex
+	activeReleases map[string]releaseSubmission
+
 	updates  *gameupdate.Service
 	jobs     *jobs.Service
 	releases GameReleaseService
@@ -36,7 +42,7 @@ type GameReleaseService interface {
 }
 
 func NewGameUpdateHandler(updates *gameupdate.Service, jobService *jobs.Service) *GameUpdateHandler {
-	return &GameUpdateHandler{updates: updates, jobs: jobService}
+	return &GameUpdateHandler{updates: updates, jobs: jobService, activeReleases: make(map[string]releaseSubmission)}
 }
 
 func (h *GameUpdateHandler) ConfigureReleases(service GameReleaseService) error {
@@ -85,6 +91,19 @@ func (h *GameUpdateHandler) releasePublish(c *gin.Context) {
 		Failure(c, http.StatusBadRequest, "INVALID_JSON", "游戏更新确认信息无效", nil)
 		return
 	}
+	request.PlanHash = strings.ToLower(strings.TrimSpace(request.PlanHash))
+	request.Confirmation = strings.ToLower(strings.TrimSpace(request.Confirmation))
+	if request.PlanHash == "" || request.PlanHash != request.Confirmation {
+		gameReleaseFailure(c, gameupdate.ErrReleaseConfirmation)
+		return
+	}
+	h.releaseMu.Lock()
+	if job, ok := h.activeReleaseJob(request.PlanHash); ok {
+		h.releaseMu.Unlock()
+		Success(c, http.StatusAccepted, job)
+		return
+	}
+	h.releaseMu.Unlock()
 	ctx, cancel := context.WithTimeout(c.Request.Context(), gameReleasePreviewTimeout)
 	defer cancel()
 	plan, err := h.releases.Preview(ctx, gameupdate.ReleasePreviewRequest{
@@ -98,7 +117,7 @@ func (h *GameUpdateHandler) releasePublish(c *gin.Context) {
 		return
 	}
 	if !plan.Ready {
-		gameReleaseFailure(c, gameupdate.ErrReleasePreviewBlocked)
+		gameReleaseFailure(c, &gameupdate.ReleasePreflightError{Blockers: plan.Blockers})
 		return
 	}
 	if !strings.EqualFold(strings.TrimSpace(request.PlanHash), plan.PlanHash) {
@@ -108,6 +127,22 @@ func (h *GameUpdateHandler) releasePublish(c *gin.Context) {
 	if !strings.EqualFold(strings.TrimSpace(request.Confirmation), plan.PlanHash) {
 		gameReleaseFailure(c, gameupdate.ErrReleaseConfirmation)
 		return
+	}
+	h.releaseMu.Lock()
+	defer h.releaseMu.Unlock()
+	if job, ok := h.activeReleaseJob(plan.PlanHash); ok {
+		Success(c, http.StatusAccepted, job)
+		return
+	}
+	for _, pending := range h.activeReleases {
+		for _, a := range plan.Installations {
+			for _, b := range pending.Plan.Installations {
+				if installationmaintenance.Overlaps(installationmaintenance.Resource{TargetID: a.TargetID, InstallationID: a.InstallationID, Directory: a.ServerPath}, installationmaintenance.Resource{TargetID: b.TargetID, InstallationID: b.InstallationID, Directory: b.ServerPath}) {
+					gameReleaseFailure(c, &installationmaintenance.BusyError{Owner: pending.JobID})
+					return
+				}
+			}
+		}
 	}
 	targets := gameReleaseJobTargets(plan)
 	job, err := h.jobs.SubmitFactory("game.release", "", "", targets, func(job jobs.Job) jobs.Runner {
@@ -121,11 +156,34 @@ func (h *GameUpdateHandler) releasePublish(c *gin.Context) {
 		Failure(c, http.StatusInternalServerError, "JOB_CREATE_FAILED", "无法创建游戏更新任务", nil)
 		return
 	}
+	h.activeReleases[plan.PlanHash] = releaseSubmission{JobID: job.ID, Plan: plan}
 	Success(c, http.StatusAccepted, job)
 }
 
 func (h *GameUpdateHandler) releaseRetry(c *gin.Context) {
 	id := strings.TrimSpace(c.Param("releaseId"))
+	var request gameupdate.ReleaseRetryRequest
+	if err := c.ShouldBindJSON(&request); err != nil && !errors.Is(err, io.EOF) {
+		Failure(c, http.StatusBadRequest, "INVALID_JSON", "游戏恢复确认信息无效", nil)
+		return
+	}
+	if request.PlanHash != request.Confirmation || request.ValidateUnknown && request.PlanHash == "" {
+		gameReleaseFailure(c, gameupdate.ErrReleaseConfirmation)
+		return
+	}
+	h.releaseMu.Lock()
+	defer h.releaseMu.Unlock()
+	retryKey := "retry:" + id + ":" + request.PlanHash
+	if job, ok := h.activeReleaseJob(retryKey); ok {
+		Success(c, http.StatusAccepted, job)
+		return
+	}
+	for key, pending := range h.activeReleases {
+		if strings.HasPrefix(key, "retry:"+id+":") {
+			gameReleaseFailure(c, &installationmaintenance.BusyError{Owner: pending.JobID})
+			return
+		}
+	}
 	current, err := h.releases.Get(id)
 	if err != nil {
 		gameReleaseFailure(c, err)
@@ -137,7 +195,19 @@ func (h *GameUpdateHandler) releaseRetry(c *gin.Context) {
 	}
 	job, err := h.jobs.SubmitFactory("game.release.retry", "", "", gameReleaseJobTargets(current.Plan), func(job jobs.Job) jobs.Runner {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
-			value, retryErr := h.releases.Retry(ctx, id, job.ID)
+			var value gameupdate.Release
+			var retryErr error
+			if request.PlanHash != "" {
+				if service, ok := h.releases.(interface {
+					RetryConfirmed(context.Context, string, gameupdate.ReleaseRetryRequest, string) (gameupdate.Release, error)
+				}); ok {
+					value, retryErr = service.RetryConfirmed(ctx, id, request, job.ID)
+				} else {
+					retryErr = gameupdate.ErrReleaseInvalid
+				}
+			} else {
+				value, retryErr = h.releases.Retry(ctx, id, job.ID)
+			}
 			gameReleaseReport(report, current.Plan, value, retryErr)
 			return nil
 		}
@@ -146,6 +216,7 @@ func (h *GameUpdateHandler) releaseRetry(c *gin.Context) {
 		Failure(c, http.StatusInternalServerError, "JOB_CREATE_FAILED", "无法创建游戏版本恢复任务", nil)
 		return
 	}
+	h.activeReleases[retryKey] = releaseSubmission{JobID: job.ID, Plan: current.Plan}
 	Success(c, http.StatusAccepted, job)
 }
 
@@ -204,9 +275,15 @@ func gameReleaseReport(report func(jobs.TargetResult), plan gameupdate.ReleasePl
 			if desiredVersion == "" {
 				desiredVersion = plan.DesiredVersion
 			}
+			if result.AfterVersion != "" {
+				desiredVersion = result.AfterVersion
+			}
 			target.Status, target.Message = jobs.StatusSucceeded, "安装已验证为 "+desiredVersion
 		} else {
 			code, message := releaseError(result)
+			if code == "" {
+				code, message = value.ErrorCode, value.ErrorMessage
+			}
 			target.Status, target.Error = jobs.StatusFailed, gameReleaseJobError(releaseErr, code, message)
 		}
 		report(target)
@@ -216,10 +293,15 @@ func gameReleaseReport(report func(jobs.TargetResult), plan gameupdate.ReleasePl
 			switch {
 			case !shard.WasRunning && shardResult != nil && shardResult.Stage == gameupdate.ReleaseStageSucceeded:
 				target.Status, target.Message = jobs.StatusSucceeded, "更新前已停止，保持停止"
+			case shardResult != nil && shardResult.Stage == gameupdate.ReleaseStageSucceeded && shardResult.RuntimeState == "stopped":
+				target.Status, target.Message = jobs.StatusSucceeded, "按本次策略保持停止"
 			case shardResult != nil && shardResult.Stage == gameupdate.ReleaseStageSucceeded:
-				target.Status, target.Message = jobs.StatusSucceeded, "分片已恢复运行并完成加载确认"
+				target.Status, target.Message = jobs.StatusSucceeded, "分片已恢复运行并完成确认"
 			default:
 				code, message := shardError(shardResult)
+				if code == "" {
+					code, message = value.ErrorCode, value.ErrorMessage
+				}
 				target.Status, target.Error = jobs.StatusFailed, gameReleaseJobError(releaseErr, code, message)
 			}
 			report(target)
@@ -261,7 +343,23 @@ func shardError(value *gameupdate.ReleaseShardResult) (string, string) {
 
 func gameReleaseJobError(releaseErr error, code, message string) *jobs.Error {
 	if code == "" {
-		code = "GAME_RELEASE_INCOMPLETE"
+		var blocked *gameupdate.ReleasePreflightError
+		switch {
+		case errors.As(releaseErr, &blocked) && len(blocked.Blockers) > 0:
+			code = blocked.Blockers[0].Code
+		case errors.Is(releaseErr, gameupdate.ErrReleasePlanChanged):
+			code = "PLAN_CHANGED"
+		case errors.Is(releaseErr, gameupdate.ErrDesiredVersionChanged):
+			code = "DESIRED_VERSION_CHANGED"
+		case errors.Is(releaseErr, gameupdate.ErrReleaseTopologyChanged):
+			code = "TOPOLOGY_CHANGED"
+		case errors.Is(releaseErr, installationmaintenance.ErrBusy):
+			code = "INSTALLATION_MAINTENANCE_BUSY"
+		case errors.Is(releaseErr, context.Canceled):
+			code = "CANCELED"
+		default:
+			code = "GAME_RELEASE_INCOMPLETE"
+		}
 	}
 	if message == "" && releaseErr != nil {
 		message = releaseErr.Error()
@@ -274,6 +372,16 @@ func gameReleaseJobError(releaseErr error, code, message string) *jobs.Error {
 
 func gameReleaseFailure(c *gin.Context, err error) {
 	status, code, message := http.StatusInternalServerError, "GAME_RELEASE_FAILED", "游戏更新操作失败"
+	var blocked *gameupdate.ReleasePreflightError
+	if errors.As(err, &blocked) {
+		Failure(c, http.StatusConflict, "PREVIEW_BLOCKED", blocked.Error(), gin.H{"blockers": blocked.Blockers})
+		return
+	}
+	var busy *installationmaintenance.BusyError
+	if errors.As(err, &busy) {
+		Failure(c, http.StatusConflict, "INSTALLATION_MAINTENANCE_BUSY", "该游戏安装正在维护，请查看原任务", gin.H{"releaseId": busy.Owner})
+		return
+	}
 	switch {
 	case errors.Is(err, gameupdate.ErrReleaseInstallationUnused):
 		status, code, message = http.StatusUnprocessableEntity, "INSTALLATION_UNUSED", "该安装没有受管世界，请使用游戏安装管理执行更新或校验"
@@ -404,4 +512,27 @@ func gameUpdateFailure(c *gin.Context, err error) {
 	default:
 		Failure(c, http.StatusInternalServerError, "GAME_UPDATE_FAILED", "游戏更新操作失败", nil)
 	}
+}
+
+type releaseSubmission struct {
+	JobID string
+	Plan  gameupdate.ReleasePlan
+}
+
+// Called under releaseMu. Completed entries are pruned on demand; no polling
+// worker or unbounded history map is required for request coalescing.
+func (h *GameUpdateHandler) activeReleaseJob(hash string) (jobs.Job, bool) {
+	var match jobs.Job
+	found := false
+	for key, pending := range h.activeReleases {
+		job, err := h.jobs.Get(pending.JobID)
+		if err != nil || job.Status != jobs.StatusRunning && job.Status != jobs.StatusQueued {
+			delete(h.activeReleases, key)
+			continue
+		}
+		if key == hash {
+			match, found = job, true
+		}
+	}
+	return match, found
 }

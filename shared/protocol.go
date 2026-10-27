@@ -283,6 +283,7 @@ type MemoryInventory struct {
 }
 
 type RuntimeInstallationReport struct {
+	ServerRoot   string `json:"server_root,omitempty"`
 	ID           string `json:"id"`
 	DisplayName  string `json:"display_name"`
 	SavePath     string `json:"save_path"`

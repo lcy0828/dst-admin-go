@@ -775,6 +775,14 @@ func normalizeInventory(report shared.RuntimeInventoryReport, config RuntimeConf
 	report.Installation.SavePath = trimLimit(report.Installation.SavePath, 2048)
 	report.Installation.ServerPath = trimLimit(report.Installation.ServerPath, 2048)
 	report.Installation.ServerMode = trimLimit(report.Installation.ServerMode, 16)
+	root := strings.TrimSpace(report.Installation.ServerRoot)
+	if root != "" && (len(root) > 2048 || strings.ContainsAny(root, "\x00\r\n") || !filepath.IsAbs(root) && !windowsAbsolutePathPattern.MatchString(root)) {
+		return shared.RuntimeInventoryReport{}, errors.New("Agent 返回的实际安装根目录无效")
+	}
+	report.Installation.ServerRoot = trimLimit(cleanRuntimePath(strings.TrimSpace(report.Installation.ServerRoot)), 2048)
+	if strings.TrimSpace(report.Installation.ServerRoot) == "." {
+		report.Installation.ServerRoot = ""
+	}
 	report.CPU.PhysicalCoreSource = trimLimit(report.CPU.PhysicalCoreSource, 64)
 	report.Warnings = cleanStrings(report.Warnings, 64, 240)
 	seenProcesses := make(map[string]bool)

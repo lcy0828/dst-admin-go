@@ -43,7 +43,12 @@ func (d *LocalGameVersionDriver) ObserveGameVersion(ctx context.Context, _ runti
 	return d.local.ObserveReleaseInstallation(ctx)
 }
 
-func (d *LocalGameVersionDriver) UpdateGameVersion(ctx context.Context, _ runtimedriver.Target, _ runtimedriver.Operation, expected string, cleanCache bool) (shared.RuntimeGameVersionResult, error) {
+func (d *LocalGameVersionDriver) UpdateGameVersion(ctx context.Context, _ runtimedriver.Target, operation runtimedriver.Operation, expected string, cleanCache bool) (shared.RuntimeGameVersionResult, error) {
+	if local, ok := d.local.(interface {
+		UpdateReleaseInstallationOperation(context.Context, runtimedriver.Operation, string, bool) (shared.RuntimeGameVersionResult, error)
+	}); ok {
+		return local.UpdateReleaseInstallationOperation(ctx, operation, expected, cleanCache)
+	}
 	return d.local.UpdateReleaseInstallation(ctx, expected, cleanCache)
 }
 
@@ -63,10 +68,10 @@ func (r *DriverReleaseRuntime) UpdateInstallation(ctx context.Context, plan Rele
 	defer cancel()
 	endpoint, target, err := r.resolveInstallation(updateContext, plan)
 	if err != nil {
-		return shared.RuntimeGameVersionResult{}, err
+		return shared.RuntimeGameVersionResult{}, errors.Join(runtimedriver.ErrOperationNotDispatched, err)
 	}
 	if endpoint.GameVersion == nil || !runtimedriver.HasEndpointCapability(endpoint, target, runtimedriver.CapabilityGameUpdate) {
-		return shared.RuntimeGameVersionResult{}, runtimedriver.ErrCapabilityMissing
+		return shared.RuntimeGameVersionResult{}, errors.Join(runtimedriver.ErrOperationNotDispatched, runtimedriver.ErrCapabilityMissing)
 	}
 	return endpoint.GameVersion.UpdateGameVersion(updateContext, target, operation, expected, cleanCache)
 }
@@ -142,3 +147,19 @@ func (r *DriverReleaseRuntime) resolveShard(ctx context.Context, shard ReleaseSh
 }
 
 var _ ReleaseRuntime = (*DriverReleaseRuntime)(nil)
+
+func (r *DriverReleaseRuntime) ObserveUpdate(ctx context.Context, plan ReleaseInstallationPlan, operationID string) (shared.RuntimeOperationEvidence, error) {
+	endpoint, target, err := r.resolveInstallation(ctx, plan)
+	if err != nil {
+		return shared.RuntimeOperationEvidence{}, err
+	}
+	if local, ok := endpoint.GameVersion.(*LocalGameVersionDriver); ok {
+		if source, ok := local.local.(interface {
+			ObserveReleaseUpdate(context.Context, string) (shared.RuntimeOperationEvidence, error)
+		}); ok {
+			return source.ObserveReleaseUpdate(ctx, operationID)
+		}
+		return shared.RuntimeOperationEvidence{}, runtimedriver.ErrCapabilityMissing
+	}
+	return endpoint.Driver.ObserveOperation(ctx, target, operationID, operationID)
+}

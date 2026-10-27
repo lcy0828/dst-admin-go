@@ -1,6 +1,7 @@
 package runtimeinventory
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -122,5 +123,24 @@ func TestShardProcessReadsRuntimeModeFromActualArguments(t *testing.T) {
 		if value.RuntimeMode != tc.want {
 			t.Fatalf("args=%v got=%s want=%s", tc.args, value.RuntimeMode, tc.want)
 		}
+	}
+}
+
+func TestInventoryReportsPhysicalInstallationRootWithoutChangingConfiguredPath(t *testing.T) {
+	root := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "server-alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skip(err)
+	}
+	report, err := Collect(context.Background(), shared.RuntimeInventoryRequest{InstallationID: "one", SavePath: t.TempDir(), ServerPath: alias})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Installation.ServerPath != alias || report.Installation.ServerRoot != resolvedRoot {
+		t.Fatalf("configured path or canonical identity lost: %+v", report.Installation)
 	}
 }
