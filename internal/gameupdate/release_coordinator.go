@@ -494,6 +494,7 @@ func (c *ReleaseCoordinator) stopPlannedShards(ctx context.Context, value Releas
 			if operationErr != nil {
 				return value, stopped, operationErr
 			}
+			result.Stage, result.UpdatedAt = ReleaseStageStopping, c.now().UTC()
 			result.StopRequestedAt = timePointer(c.now().UTC())
 			value, err = c.store.Save(value)
 			if err != nil {
@@ -744,7 +745,7 @@ func (c *ReleaseCoordinator) restartAndConfirm(ctx context.Context, value Releas
 			cursors[releaseShardKey(shard)] = cursor{fileID: fileID, offset: offset}
 			result.LogFileID, result.LogOffset = fileID, offset
 		}
-		result.Stage, result.ErrorCode, result.ErrorMessage = ReleaseStageConfirming, "", ""
+		result.Stage, result.ErrorCode, result.ErrorMessage = ReleaseStageRestarting, "", ""
 		if !alreadyStarted {
 			result.StartedAt, result.UpdatedAt = timePointer(c.now().UTC()), c.now().UTC()
 			value, err = c.store.Save(value)
