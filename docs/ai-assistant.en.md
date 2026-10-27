@@ -21,6 +21,7 @@ The browser retains the latest 32 messages and draft per administrator account. 
 The browser assistant and external MCP clients share the published OpenAPI management operations: rooms and worlds, configuration, lifecycle, saves, mods, players, backups and automation, installation and updates, runtime nodes, notifications and system settings. New management operations enter the tool catalog through the same contract.
 
 - Compact tools cover common status, per-shard CPU/RSS, real players, configured mods, backups, automation, logs, jobs and command receipts.
+- Prefer built-in commands for spawning entities or giving items. Their receipts include confirmed [spawn positions and destinations](command-spawn-records.en.md); incomplete records do not establish zero spawns.
 - Use `find_api` with a domain or `operationId` to discover other operations, then call the typed `api_<operationId>` tool. Browser conversations load matching definitions as needed.
 - Tool descriptions explain scope, prerequisites and side effects; parameter descriptions come from the published OpenAPI. Compatibility operations carry `deprecated` and `x-dst-replaced-by`: prefer `listCommands` and `listWorldStates`. Existing `listRoomCommands` and `refreshWorldStates` calls remain supported, while intent searches favor their replacements.
 - Installed local mods support inspection, per-world enablement and configuration using `local:<directory name>`. Workshop operations retain numeric IDs. Local details require a target and installation; Steam cannot download local content. See [mod management](mod-management.md#本地模组) for directory and Agent requirements.
@@ -122,3 +123,7 @@ the same tool guidance, but their final answers are generated externally and are
 not subject to the page assistant's response checks.
 
 For Chinese search metadata, result schemas and client indexing, see [MCP tool discovery and results](mcp-tool-discovery.en.md).
+
+For reported update failures or mod conflicts, use [Game and mod analysis](mod-diagnostics.en.md). The page and MCP share read-only evidence, error context and pre-update summary comparisons.
+
+Use [Player activity records](player-activity.en.md) for persisted actions, positions, combat and collection settings. AI and the UI share this evidence; missing or expired history cannot be reconstructed.

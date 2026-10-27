@@ -43,6 +43,7 @@ import (
 	"dont/internal/luajit"
 	"dont/internal/modartifact"
 	"dont/internal/modcontrol"
+	"dont/internal/moddiagnostics"
 	"dont/internal/moddistribution"
 	"dont/internal/modpublication"
 	modservice "dont/internal/mods"
@@ -50,6 +51,7 @@ import (
 	"dont/internal/notifications"
 	"dont/internal/operationlease"
 	"dont/internal/placementmigration"
+	"dont/internal/playeractivity"
 	playerapi "dont/internal/players"
 	"dont/internal/roomprovision"
 	"dont/internal/rooms"
@@ -693,6 +695,19 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		roomService.AddWorldLifecycle(func(string, string) { runtimeUpdater.Wake() })
 		hooks.workers = append(hooks.workers, runtimeUpdater.Run)
 	}
+
+	activityStore := playeractivity.NewStore(models.DB(), tablePrefix)
+	if err := activityStore.Migrate(); err != nil {
+		return nil, err
+	}
+	activityService := playeractivity.New(activityStore, roomService, runtimeDriverRouter, distributedRuntimeBridge)
+	activityHandler := httpapi.NewPlayerActivityHandler(activityService)
+	if backgroundEnabled && !deploymentProfile.MemberEnabled {
+		agentService.AddRuntimeNodeListener(activityService.Wake)
+		roomService.AddManagedRoomLifecycle(func(string) { activityService.Wake() }, func(string) { activityService.Wake() })
+		roomService.AddWorldLifecycle(func(string, string) { activityService.Wake() })
+		hooks.workers = append(hooks.workers, activityService.Run)
+	}
 	entityCatalogHandler.ConfigureRuntime(distributedRuntimeBridge)
 	entityCatalogHandler.ConfigureArtwork(runtimeDriverRouter)
 	runtimeEventService, err := runtimeevents.New(distributedRuntimeBridge)
@@ -1312,6 +1327,15 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	gameReleaseCoordinator.ConfigureMaintenance(installationMaintenance)
+	modDiagnosticStore := moddiagnostics.NewStore(models.DB(), tablePrefix)
+	if err := modDiagnosticStore.Migrate(); err != nil {
+		return nil, err
+	}
+	modDiagnosticService := moddiagnostics.NewService(&moddiagnostics.RuntimeSource{
+		Catalog: roomService, Mods: modControlService, Logs: logService, Events: runtimeAuditService, Router: runtimeDriverRouter,
+	}, modDiagnosticStore)
+	gameReleaseCoordinator.ConfigureModDiagnostics(modDiagnosticService)
+	modDiagnosticHandler := httpapi.NewModDiagnosticsHandler(modDiagnosticService)
 	gameReleaseCoordinator.ConfigureNotifier(gameNotificationService)
 	gameInstallationHandler.ConfigureReleases(gameReleaseCoordinator)
 	gameReleaseCoordinator.ConfigureOnlineCounter(maintenanceOnlineCounter)
@@ -1497,6 +1521,8 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		modPublicationHandler.Register(v2)
 		modUpdateHandler.Register(v2)
 		gameUpdateHandler.Register(v2)
+		modDiagnosticHandler.Register(v2)
+		activityHandler.Register(v2)
 		luajitHandler.Register(v2)
 		gameInstallationHandler.Register(v2)
 		worldMapHandler.Register(v2)

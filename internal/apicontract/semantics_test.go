@@ -66,7 +66,13 @@ func TestChineseDiscoveryScenarios(t *testing.T) {
 		{"这次备份任务到底成功没有", "getJob"},
 		{"找一下现有的备份存档", "listRoomBackups|listDistributedBackupSets"},
 		{"查这个玩家背包和装备", "getRoomPlayerInventory"},
+		{"这个玩家最近做过哪些事情", "listRoomPlayerActivity"},
+		{"查看玩家去过的地方和移动轨迹", "getRoomPlayerTrajectory"},
+		{"这个人参与打过哪些Boss", "getRoomPlayerCombat"},
+		{"修改所有玩家的坐标采样频率", "updateRoomPlayerActivitySettings"},
 		{"离线玩家身上的东西还能查吗", "getRoomPlayerInventory"},
+		{"统计蜘蛛巢数量并返回数字", "executeRawRoomCommand"},
+		{"读取刚才Lua的print输出", "getCommandRun|listCommandRuns|executeRawRoomCommand"},
 		{"把在线玩家踢下线", "kickRoomPlayer"},
 		{"查询游戏里之前的聊天", "listRoomChatLogs"},
 		{"房间安装了哪些本地模组", "listRoomMods"},
@@ -171,5 +177,19 @@ func BenchmarkChineseDiscovery(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		c.Search("服务器刚崩溃，读一下日志末尾", 8)
+	}
+}
+
+func TestModCompatibilityAnalysisIsDiscoverableAndReadOnlyWithoutLiveLua(t *testing.T) {
+	c, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, ok := c.Operation("analyzeWorldModCompatibility")
+	if !ok || !op.Callable() || op.Mutation() || op.ToolMetadata().Runtime != "any" {
+		t.Fatal("diagnostics incorrectly needs a running game or write access", op)
+	}
+	if !strings.Contains(op.Semantics().Purpose, "不会禁用模组") {
+		t.Fatal("read-only diagnostic semantics missing")
 	}
 }

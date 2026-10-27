@@ -24,6 +24,7 @@ tags:
   - name: Maps
   - name: Configuration
   - name: Mods
+  - name: Diagnostics
   - name: Players
   - name: Runtime
   - name: Runtime Audit
@@ -2006,6 +2007,296 @@ paths:
           $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/player-activity/settings:
+    parameters:
+      - $ref: '#/components/parameters/RoomID'
+    get:
+      tags:
+        - Players
+      operationId: getRoomPlayerActivitySettings
+      summary: Read room-wide player activity recording settings
+      x-dst-tool:
+        readOnly: true
+        tags:
+          - player
+          - activity
+          - tracking
+        runtime: any
+      description: Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement.
+      responses:
+        "200":
+          description: Read room-wide player activity recording settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerActivitySettingsEnvelope'
+        "400":
+          description: Invalid settings or query
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+    put:
+      parameters:
+        - $ref: '#/components/parameters/CSRFToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      tags:
+        - Players
+      operationId: updateRoomPlayerActivitySettings
+      summary: Configure all-player recording, collection intervals, categories and retention dynamically
+      x-dst-tool:
+        readOnly: false
+        tags:
+          - player
+          - activity
+          - tracking
+        runtime: any
+      description: Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlayerActivitySettingsPatch'
+      responses:
+        "200":
+          description: Configure all-player recording, collection intervals, categories and retention dynamically
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerActivitySettingsEnvelope'
+        "400":
+          description: Invalid settings or query
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+        "409":
+          $ref: '#/components/responses/Conflict'
+  /rooms/{roomId}/player-activity/status:
+    parameters:
+      - $ref: '#/components/parameters/RoomID'
+    get:
+      tags:
+        - Players
+      operationId: getRoomPlayerActivityStatus
+      summary: Read desired and node-applied recording revisions, gaps and stored record budget
+      x-dst-tool:
+        readOnly: true
+        tags:
+          - player
+          - activity
+          - tracking
+        runtime: any
+      description: Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement.
+      responses:
+        "200":
+          description: Read desired and node-applied recording revisions, gaps and stored record budget
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerActivityStatusEnvelope'
+        "400":
+          description: Invalid settings or query
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+  /rooms/{roomId}/player-activity/events:
+    parameters:
+      - $ref: '#/components/parameters/RoomID'
+    get:
+      tags:
+        - Players
+      operationId: listRoomPlayerActivity
+      summary: Read persisted player activity timeline with bounded cursor pagination
+      x-dst-tool:
+        readOnly: true
+        tags:
+          - player
+          - activity
+          - tracking
+        runtime: any
+      description: Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement.
+      parameters:
+        - name: userId
+          in: query
+          schema:
+            type: string
+        - name: worldId
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: kind
+          in: query
+          schema:
+            type: string
+        - name: before
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: Read persisted player activity timeline with bounded cursor pagination
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerActivityPageEnvelope'
+        "400":
+          description: Invalid settings or query
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+  /rooms/{roomId}/player-activity/trajectory:
+    parameters:
+      - $ref: '#/components/parameters/RoomID'
+    get:
+      tags:
+        - Players
+      operationId: getRoomPlayerTrajectory
+      summary: Read sampled player coordinates and coverage boundaries; never an exact replay
+      x-dst-tool:
+        readOnly: true
+        tags:
+          - player
+          - activity
+          - tracking
+        runtime: any
+      description: Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement.
+      parameters:
+        - name: userId
+          in: query
+          schema:
+            type: string
+          required: true
+        - name: worldId
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: before
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        "200":
+          description: Read sampled player coordinates and coverage boundaries; never an exact replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerActivityPageEnvelope'
+        "400":
+          description: Invalid settings or query
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+  /rooms/{roomId}/player-activity/combat:
+    parameters:
+      - $ref: '#/components/parameters/RoomID'
+    get:
+      tags:
+        - Players
+      operationId: getRoomPlayerCombat
+      summary: Aggregate a bounded window of persisted incoming damage, outgoing combat and kills
+      x-dst-tool:
+        readOnly: true
+        tags:
+          - player
+          - activity
+          - tracking
+        runtime: any
+      description: Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement.
+      parameters:
+        - name: userId
+          in: query
+          schema:
+            type: string
+        - name: worldId
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Aggregate a bounded window of persisted incoming damage, outgoing combat and kills
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerActivityCombatEnvelope'
+        "400":
+          description: Invalid settings or query
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+  /rooms/{roomId}/worlds/{worldId}/mod-diagnostics:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+      - $ref: "#/components/parameters/WorldID"
+    get:
+      tags: [Mods, Diagnostics]
+      operationId: analyzeWorldModCompatibility
+      x-dst-tool:
+        tags: [diagnostic, mod, game, log]
+        readOnly: true
+        runtime: any
+      summary: Analyze game and mod observations and bounded first-error stack evidence without changing game files
+      description: Read-only deterministic analysis, available even when the Lua Runtime cannot start. Missing or previous-start logs are explicit unknowns. Stack references are suspected involvement, never proven mod causation. No isolation test, mod disabling, game command or restart is performed. The JSON report can be saved as diagnostic evidence; review excerpts for sensitive content before sharing.
+      responses:
+        "200":
+          description: Structured observations, update baseline comparison, findings and limitations
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModDiagnosticReportEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
   /rooms/{roomId}/worlds/{worldId}/logs:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -2255,7 +2546,15 @@ paths:
     get:
       tags: [Console]
       operationId: getCommandRun
-      summary: Read one persistent command record
+      summary: Read one command result or check its original late receipt
+      description: Default reads only the persisted record. With refresh=true, an unconfirmed managed run submitted within 2 minutes performs one bounded read of its original Runtime receipt and persists any confirmed result. Never executes Lua, sends a recovery probe, or replays the command. Missing/overwritten receipts remain unconfirmed. Lists never perform this read.
+      parameters:
+        - name: refresh
+          in: query
+          description: Read the original receipt once for an eligible unconfirmed run; defaults to false.
+          schema:
+            type: boolean
+            default: false
       responses:
         "200":
           description: Command record
@@ -5805,6 +6104,351 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
   schemas:
+    PlayerActivitySettings:
+      type: object
+      properties:
+        revision:
+          type: string
+        enabled:
+          type: boolean
+        positions:
+          type: boolean
+        actions:
+          type: boolean
+        combat:
+          type: boolean
+        positionIntervalSeconds:
+          type: integer
+          minimum: 5
+          maximum: 300
+          default: 15
+        minimumDistance:
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 10
+        combatIntervalSeconds:
+          type: integer
+          minimum: 5
+          maximum: 120
+          default: 10
+        flushIntervalSeconds:
+          type: integer
+          minimum: 2
+          maximum: 30
+          default: 5
+        syncIntervalSeconds:
+          type: integer
+          minimum: 5
+          maximum: 60
+          default: 10
+        retentionDays:
+          type: integer
+          minimum: 1
+          maximum: 90
+          default: 7
+        maximumMiB:
+          type: integer
+          minimum: 16
+          maximum: 2048
+          default: 512
+      required:
+        - revision
+        - enabled
+        - positions
+        - actions
+        - combat
+        - positionIntervalSeconds
+        - minimumDistance
+        - combatIntervalSeconds
+        - flushIntervalSeconds
+        - syncIntervalSeconds
+        - retentionDays
+        - maximumMiB
+    PlayerActivitySettingsPatch:
+      type: object
+      properties:
+        revision:
+          type: string
+        enabled:
+          type: boolean
+        positions:
+          type: boolean
+        actions:
+          type: boolean
+        combat:
+          type: boolean
+        positionIntervalSeconds:
+          type: integer
+          minimum: 5
+          maximum: 300
+          default: 15
+        minimumDistance:
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 10
+        combatIntervalSeconds:
+          type: integer
+          minimum: 5
+          maximum: 120
+          default: 10
+        flushIntervalSeconds:
+          type: integer
+          minimum: 2
+          maximum: 30
+          default: 5
+        syncIntervalSeconds:
+          type: integer
+          minimum: 5
+          maximum: 60
+          default: 10
+        retentionDays:
+          type: integer
+          minimum: 1
+          maximum: 90
+          default: 7
+        maximumMiB:
+          type: integer
+          minimum: 16
+          maximum: 2048
+          default: 512
+      required:
+        - revision
+    PlayerActivityPosition:
+      type: object
+      properties:
+        x:
+          type: number
+        y:
+          type: number
+        z:
+          type: number
+        tile:
+          type: integer
+      required:
+        - x
+        - y
+        - z
+    PlayerActivityEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        roomId:
+          type: string
+        worldId:
+          type: string
+        producerInstanceId:
+          type: string
+        sessionId:
+          type: string
+        kind:
+          type: string
+        userId:
+          type: string
+        name:
+          type: string
+        prefab:
+          type: string
+        sequence:
+          type: integer
+        occurredAtUnix:
+          type: integer
+        occurredAt:
+          type: string
+          format: date-time
+        receivedAt:
+          type: string
+          format: date-time
+        position:
+          $ref: '#/components/schemas/PlayerActivityPosition'
+        fields:
+          type: object
+          additionalProperties: true
+      required:
+        - id
+        - kind
+        - occurredAt
+        - worldId
+        - userId
+    PlayerActivityPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlayerActivityEvent'
+        nextCursor:
+          type: string
+        hasMore:
+          type: boolean
+        limit:
+          type: integer
+      required:
+        - items
+        - hasMore
+        - limit
+    PlayerActivityWorldStatus:
+      type: object
+      properties:
+        worldId:
+          type: string
+        worldName:
+          type: string
+        state:
+          type: string
+        desiredRevision:
+          type: string
+        appliedRevision:
+          type: string
+        error:
+          type: string
+        sourceUpdatedAt:
+          type: string
+          format: date-time
+        lastCollectedAt:
+          type: string
+          format: date-time
+        lastEventAt:
+          type: string
+          format: date-time
+        pending:
+          type: boolean
+        dropped:
+          type: integer
+        gapCount:
+          type: integer
+      required:
+        - worldId
+        - state
+        - pending
+    PlayerActivityStatus:
+      type: object
+      properties:
+        settings:
+          $ref: '#/components/schemas/PlayerActivitySettings'
+        worlds:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlayerActivityWorldStatus'
+        storedEvents:
+          type: integer
+        storedBytes:
+          type: integer
+      required:
+        - settings
+        - worlds
+        - storedEvents
+        - storedBytes
+    PlayerActivityCombatSummary:
+      type: object
+      properties:
+        userId:
+          type: string
+        direction:
+          type: string
+        worldId:
+          type: string
+        producerInstanceId:
+          type: string
+        targetGuid:
+          type: string
+        targetPrefab:
+          type: string
+        epic:
+          type: boolean
+        hits:
+          type: integer
+        damage:
+          type: number
+        unknownDamageHits:
+          type: integer
+        kills:
+          type: integer
+        firstAt:
+          type: string
+          format: date-time
+        lastAt:
+          type: string
+          format: date-time
+      required:
+        - userId
+        - direction
+        - worldId
+        - hits
+        - kills
+    PlayerActivityCombat:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlayerActivityCombatSummary'
+        truncated:
+          type: boolean
+        scannedEvents:
+          type: integer
+      required:
+        - items
+        - truncated
+        - scannedEvents
+    PlayerActivitySettingsEnvelope:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/PlayerActivitySettings'
+      required:
+        - data
+    PlayerActivityPositionEnvelope:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/PlayerActivityPosition'
+      required:
+        - data
+    PlayerActivityEventEnvelope:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/PlayerActivityEvent'
+      required:
+        - data
+    PlayerActivityPageEnvelope:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/PlayerActivityPage'
+      required:
+        - data
+    PlayerActivityWorldStatusEnvelope:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/PlayerActivityWorldStatus'
+      required:
+        - data
+    PlayerActivityStatusEnvelope:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/PlayerActivityStatus'
+      required:
+        - data
+    PlayerActivityCombatSummaryEnvelope:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/PlayerActivityCombatSummary'
+      required:
+        - data
+    PlayerActivityCombatEnvelope:
+      type: object
+      properties:
+        data:
+          $ref: '#/components/schemas/PlayerActivityCombat'
+      required:
+        - data
     ModReferenceID:
       type: string
       minLength: 1
@@ -7763,11 +8407,65 @@ components:
           maxLength: 16384
         truncated:
           type: boolean
+    CommandWorldPosition:
+      type: object
+      additionalProperties: false
+      required: [x, y, z]
+      description: Observed game coordinates at execution time, not a saved or current position. Zero is valid.
+      properties:
+        x: { type: number }
+        y: { type: number }
+        z: { type: number }
+    CommandSpawnRecord:
+      type: object
+      additionalProperties: false
+      required: [prefab, quantity, destination]
+      properties:
+        prefab: { type: string }
+        quantity: { type: integer, minimum: 1 }
+        destination: { type: string, enum: [world, inventory, unresolved] }
+        entityGuid: { type: string, description: Runtime entity identifier; not stable across world loads. }
+        position: { $ref: "#/components/schemas/CommandWorldPosition" }
+    CommandSpawnAudit:
+      type: object
+      additionalProperties: false
+      required: [status, playerId, records, omitted]
+      description: Evidence from this command's persisted receipt for instrumented built-in spawn/give commands. At most 40 primary objects; recipe overflow, missing receipt lines and failed commands remain explicit. No historical player position lookup, automatic replay or arbitrary Lua instrumentation. A complete capture does not establish later entity health. Generated saddles and bells are not separately inventoried.
+      properties:
+        status: { type: string, enum: [complete, partial, unavailable] }
+        playerId: { type: string }
+        origin: { $ref: "#/components/schemas/CommandWorldPosition" }
+        records:
+          type: array
+          maxItems: 40
+          items: { $ref: "#/components/schemas/CommandSpawnRecord" }
+        total: { type: integer, minimum: 0, description: Number of primary objects reaching the recording step. Absent when the command did not finish the recording sequence; not a guarantee that no additional side effects occurred. }
+        omitted: { type: integer, minimum: 0 }
     CommandRun:
       type: object
       additionalProperties: false
-      required: [id, roomId, worldId, mode, name, risk, status, mayHaveExecuted, logQuery, createdAt]
+      required: [id, roomId, worldId, mode, name, risk, status, resultState, mayHaveExecuted, logQuery, createdAt]
       properties:
+        resultState:
+          type: string
+          enum: [waiting, output, no_output, output_unavailable, failed, unconfirmed]
+          description: Evidence state. output includes printed 0; no_output means confirmed execution with empty synchronous capture, not zero matches. output_unavailable means confirmed execution without capture support. unconfirmed never implies zero or failure. Failed execution takes precedence over any partial output.
+        receiptRefreshUntil:
+          type: string
+          format: date-time
+          description: Eligible unconfirmed managed runs can request refresh=true until this time (2 minutes from submission). Receipts may be overwritten earlier. Absence means no late lookup is offered.
+        receiptCheck:
+          type: object
+          additionalProperties: false
+          required: [status, checkedAt]
+          description: Outcome of an explicit receipt lookup in this response; not persisted as command execution evidence.
+          properties:
+            status:
+              type: string
+              enum: [found, not_found, unavailable, expired, unsupported]
+            checkedAt:
+              type: string
+              format: date-time
         id:
           type: string
           format: uuid
@@ -7794,6 +8492,8 @@ components:
           description: Rendered code captured when a built-in or saved command was executed.
         output:
           $ref: "#/components/schemas/CommandOutput"
+        spawnAudit:
+          $ref: "#/components/schemas/CommandSpawnAudit"
         status:
           $ref: "#/components/schemas/CommandRunStatus"
         transportOutcome:
@@ -8391,6 +9091,97 @@ components:
         runningShards: { type: integer, minimum: 0 }
         shards: { type: array, items: { $ref: "#/components/schemas/GameReleaseShardPlan" } }
         blockers: { type: array, items: { $ref: "#/components/schemas/GameReleaseBlocker" } }
+    ModDiagnosticVersion:
+      type: object
+      properties:
+        appId: { type: string }
+        steamBuild: { type: string }
+        gameVersion: { type: string }
+    ModDiagnosticMod:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        version: { type: string }
+        manifest: { type: string }
+        fileStatus: { type: string }
+        dstCompatible: { type: boolean, description: Author declaration, not a game-version compatibility guarantee; absent means unknown }
+        apiVersion: { type: string }
+        dependencies: { type: array, items: { type: string }, description: Cached declared Workshop dependencies may be incomplete or optional }
+    ModDiagnosticObservation:
+      type: object
+      required: [roomId, worldId, version, mods, observedAt, limitations]
+      properties:
+        roomId: { type: string }
+        worldId: { type: string }
+        roomName: { type: string }
+        worldName: { type: string }
+        targetId: { type: string }
+        installationId: { type: string }
+        topologyRevision: { type: string }
+        runtimeState: { type: string }
+        runtimeMode: { type: string }
+        os: { type: string }
+        version: { $ref: "#/components/schemas/ModDiagnosticVersion" }
+        configurationRevision: { type: string, description: Configuration revision only; configuration content and credentials are excluded }
+        mods: { type: array, maxItems: 512, items: { $ref: "#/components/schemas/ModDiagnosticMod" } }
+        observedAt: { type: string, format: date-time }
+        limitations: { type: array, items: { type: string } }
+    ModDiagnosticBaseline:
+      type: object
+      required: [releaseId, capturedAt, observation]
+      properties:
+        releaseId: { type: string }
+        capturedAt: { type: string, format: date-time }
+        observation: { $ref: "#/components/schemas/ModDiagnosticObservation" }
+    ModDiagnosticEvidence:
+      type: object
+      required: [code, firstCursor, errorCursor, lines, modIds, truncated]
+      properties:
+        code: { type: string }
+        firstCursor: { type: integer }
+        errorCursor: { type: integer }
+        lines: { type: array, maxItems: 40, items: { type: string } }
+        modIds: { type: array, items: { type: string } }
+        truncated: { type: boolean }
+    ModDiagnosticFinding:
+      type: object
+      required: [code, kind]
+      properties:
+        code: { type: string }
+        kind: { type: string, enum: [observed, suspected] }
+        modIds: { type: array, items: { type: string } }
+    ModDiagnosticChange:
+      type: object
+      required: [field]
+      properties:
+        field: { type: string, enum: [steamBuild, gameVersion, configurationRevision, modVersion, modManifest, modEnabled] }
+        modId: { type: string }
+        before: { type: string }
+        after: { type: string }
+    ModDiagnosticReport:
+      type: object
+      required: [status, observation, changes, findings, evidence, logCorrelation, limitations, recommendations]
+      properties:
+        status: { type: string, enum: [observed_problem, suspected, no_known_issue, insufficient_evidence] }
+        observation: { $ref: "#/components/schemas/ModDiagnosticObservation" }
+        baseline: { $ref: "#/components/schemas/ModDiagnosticBaseline" }
+        changes: { type: array, items: { $ref: "#/components/schemas/ModDiagnosticChange" } }
+        findings: { type: array, items: { $ref: "#/components/schemas/ModDiagnosticFinding" } }
+        evidence: { type: array, maxItems: 4, items: { $ref: "#/components/schemas/ModDiagnosticEvidence" } }
+        logStartedAt: { type: string, format: date-time }
+        incidentAt: { type: string, format: date-time }
+        logCorrelation: { type: string, enum: [matched, historical, unknown, not_requested] }
+        limitations: { type: array, items: { type: string } }
+        recommendations: { type: array, items: { type: string } }
+    ModDiagnosticReportEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ModDiagnosticReport" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     GameReleasePlan:
       type: object
       additionalProperties: false
@@ -8401,6 +9192,7 @@ components:
         topologyRevision: { type: string, pattern: '^[a-f0-9]{64}$' }
         planHash: { type: string, pattern: '^[a-f0-9]{64}$' }
         policy: { $ref: "#/components/schemas/GameReleasePolicy" }
+        modDiagnostics: { type: array, items: { $ref: "#/components/schemas/ModDiagnosticReport" }, description: Read-only advisories excluded from readiness and plan hash }
         selectedInstallations: { type: array, items: { $ref: "#/components/schemas/GameReleaseInstallationSelection" }, description: Original exact selection to reuse when submitting this plan }
         affectedRoomIds: { type: array, items: { type: string } }
         installations: { type: array, items: { $ref: "#/components/schemas/GameReleaseInstallationPlan" } }
@@ -8465,6 +9257,7 @@ components:
       additionalProperties: false
       required: [id, stage, plan, protectionBackupIds, installations, shards, createdAt, updatedAt]
       properties:
+        modDiagnosticsWarning: { type: string, enum: [BASELINE_SAVE_FAILED], description: Advisory snapshot persistence failed; game update safety checks are unchanged }
         attempt: { type: integer, minimum: 0 }
         writingStarted: { type: boolean, description: A game-file write may have been dispatched in this release }
         planHistory: { type: array, items: { $ref: "#/components/schemas/GameReleasePlan" }, description: Previous plans retained after explicitly confirmed re-preview }

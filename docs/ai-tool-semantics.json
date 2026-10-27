@@ -1194,26 +1194,34 @@
       ]
     },
     "executeRawRoomCommand": {
-      "purpose": "确认房间名后向该房间下发原始 Lua 控制台指令，用于内置命令覆盖不到的高级操作，如批量刷物品、改世界参数、强制清场。",
+      "purpose": "在指定世界执行自定义服务端 Lua，并返回同一次命令的执行回执与同步 print 输出；适合查询内置接口未覆盖的实体数量等信息，也可执行管理员要求的修改。",
       "actions": [
         "执行原始 Lua 控制台指令",
         "按房间名精确投递自定义命令",
-        "批量刷物品、改世界参数"
+        "批量刷物品、改世界参数",
+        "读取自定义Lua打印结果",
+        "查询世界实体数量"
       ],
       "queries": [
         "内置命令改不了这个世界参数，帮我直接跑一段脚本改一下",
-        "想给全服玩家刷一组物资，用原始指令批量发一下"
+        "想给全服玩家刷一组物资，用原始指令批量发一下",
+        "统计地面和洞穴各有多少蜘蛛巢并返回数字",
+        "控制台只说已下发，查看这次Lua的打印结果"
       ],
       "terms": [
         "原始指令",
         "控制台命令",
         "Lua 脚本",
-        "房间名核对",
-        "管理员指令"
-      ]
+        "print",
+        "output.text",
+        "数字回传",
+        "蜘蛛巢数量",
+        "实体计数"
+      ],
+      "resultNotes": "业务结果位于 data.data：status/executionOutcome 是游戏执行状态，output.text 是本次同步 print(...) 输出（最多16KiB），output.truncated 表示截断。查询数字需用 print 打印；单独 return 的值和异步回调不在该输出内。output 缺失表示未返回捕获输出，需检查执行状态与Runtime，不能据此判定接口只能下发或实体为0；output.text 为空只说明本次未捕获同步打印。resultState 区分 waiting/output/no_output/output_unavailable/failed/unconfirmed；只有同步打印0才能作为数量0。可用 getCommandRun 按返回 id 查询；未确认且 receiptRefreshUntil 未过期时传 query.refresh=true 读取原Runtime回执，receiptCheck.status说明找到、暂未找到、无法读取或过期；只补收不重发，后续命令可能覆盖回执。sent/uncertain 不能当作已执行。"
     },
     "executeRoomCommand": {
-      "purpose": "渲染并下发面板内置的类型化房间指令，覆盖回档、重置世界、踢人封禁、发物品公告等常用操作，无需手写脚本。",
+      "purpose": "执行面板内置或已保存的类型化命令，返回该次命令的执行状态与可用的同步打印输出；常用操作无需手写Lua。",
       "actions": [
         "执行内置回档指令",
         "一键重置或新建世界",
@@ -1229,7 +1237,8 @@
         "踢人封禁",
         "内置指令",
         "全服公告"
-      ]
+      ],
+      "resultNotes": "业务结果位于 data.data：status/executionOutcome 是游戏执行状态，output.text 是本次同步 print(...) 输出（最多16KiB），output.truncated 表示截断。查询数字需用 print 打印；单独 return 的值和异步回调不在该输出内。output 缺失表示未返回捕获输出，需检查执行状态与Runtime，不能据此判定接口只能下发或实体为0；output.text 为空只说明本次未捕获同步打印。resultState 区分 waiting/output/no_output/output_unavailable/failed/unconfirmed；只有同步打印0才能作为数量0。可用 getCommandRun 按返回 id 查询；未确认且 receiptRefreshUntil 未过期时传 query.refresh=true 读取原Runtime回执，receiptCheck.status说明找到、暂未找到、无法读取或过期；只补收不重发，后续命令可能覆盖回执。sent/uncertain 不能当作已执行。 内置生成/发物品命令的 spawnAudit 来自同一次持久化回执，包含可确认的玩家执行位置、主要生成对象、实际落点或物品栏去向；最多40条明细，partial/unavailable/omitted不代表没有生成。origin不等于实体落点，entityGuid不能跨重启定位。原始或自定义Lua不自动采集坐标。"
     },
     "exportAutomation": {
       "purpose": "把面板中的定时任务与自动化分组定义导出为配置文本，用于迁移或备份任务规则，不包含存档与执行结果。",
@@ -1585,23 +1594,24 @@
       ]
     },
     "getCommandRun": {
-      "purpose": "读取一条持久化的指令执行记录，查看谁在什么时间执行了哪条指令、执行结果和返回日志，用于追溯管理员操作与刷物品行为。",
+      "purpose": "按命令运行id读取持久化执行回执，包括目标世界、游戏执行状态、错误和该次同步print输出；不会重新执行命令，也不抓取整段世界日志。",
       "actions": [
-        "查某条指令的执行记录",
-        "看是谁执行了这条指令",
-        "核对指令执行结果和返回"
+        "读取同一次命令的打印输出",
+        "核对游戏实际执行状态",
+        "读取实体计数结果"
       ],
       "queries": [
-        "谁刚才在服里用指令刷了一堆东西，翻下执行记录",
-        "我发的这条指令到底执行成功了没，看下返回"
+        "命令只说已下发，读取刚才那次的输出和执行结果",
+        "把刚才统计蜘蛛巢的数字结果读出来"
       ],
       "terms": [
-        "指令记录",
-        "管理员操作",
-        "执行日志",
-        "控制台",
-        "刷物品"
-      ]
+        "命令回执",
+        "print",
+        "output.text",
+        "数字回传",
+        "实体计数"
+      ],
+      "resultNotes": "业务结果位于 data.data：status/executionOutcome 是游戏执行状态，output.text 是本次同步 print(...) 输出（最多16KiB），output.truncated 表示截断。查询数字需用 print 打印；单独 return 的值和异步回调不在该输出内。output 缺失表示未返回捕获输出，需检查执行状态与Runtime，不能据此判定接口只能下发或实体为0；output.text 为空只说明本次未捕获同步打印。resultState 区分 waiting/output/no_output/output_unavailable/failed/unconfirmed；只有同步打印0才能作为数量0。可用 getCommandRun 按返回 id 查询；未确认且 receiptRefreshUntil 未过期时传 query.refresh=true 读取原Runtime回执，receiptCheck.status说明找到、暂未找到、无法读取或过期；只补收不重发，后续命令可能覆盖回执。sent/uncertain 不能当作已执行。"
     },
     "getDistributedBackupSet": {
       "purpose": "查看一套多分片备份集的组成与每个分片副本的校验结果，确认地面世界与洞穴存档是否都备份齐全、能否整套恢复。",
@@ -2438,7 +2448,9 @@
         "日志尾巴 tail",
         "报错堆栈",
         "模组加载",
-        "崩服"
+        "崩服",
+        "日志尾部",
+        "崩溃后的日志"
       ],
       "resultNotes": "日志仅包含请求范围内的尾部或过滤结果；没有匹配行不能证明没有错误。"
     },
@@ -2870,11 +2882,11 @@
       ]
     },
     "listCommandRuns": {
-      "purpose": "查询控制台指令的持久审计记录，能追溯谁在什么时候对哪个房间执行了什么指令以及结果，用来复盘误操作或异常操作。",
+      "purpose": "按房间及可选世界分页查询持久化命令记录，查找运行id、执行状态与可用的打印输出，再用getCommandRun读取指定记录；查询不会执行指令。",
       "actions": [
-        "查询控制台指令执行记录",
-        "按时间或执行人筛选审计记录",
-        "追溯某条指令的执行结果"
+        "查询房间命令历史",
+        "按世界筛选命令记录",
+        "查找命令运行id"
       ],
       "queries": [
         "谁半夜在控制台执行了指令，把指令记录翻出来",
@@ -2885,7 +2897,8 @@
         "审计日志",
         "回档指令",
         "执行记录"
-      ]
+      ],
+      "resultNotes": "data.data.items 是命令记录数组，每项的 id、status、executionOutcome、output.text 分别表示运行编号、执行状态与同步打印；total/limit/offset 用于分页。使用 getCommandRun 读取指定 id，不会重新执行命令；旧记录或未确认结果缺少 output 时，不能当作0或自动重发。"
     },
     "listCommands": {
       "purpose": "列出系统内置指令和自定义指令的完整清单，是全局指令目录而非执行历史，用来查有哪些指令可用、自定义指令有没有加上。",
@@ -5447,6 +5460,137 @@
         "压缩包",
         "兼容性",
         "Cluster"
+      ]
+    },
+    "analyzeWorldModCompatibility": {
+      "purpose": "只读分析指定世界的游戏与模组版本、文件状态、依赖声明和配置摘要，对比更新前快照，关联最近启动的首个错误及堆栈。不会禁用模组、执行隔离测试或重启世界；涉及模组不等于确认由它导致。",
+      "actions": [
+        "分析游戏与模组兼容性",
+        "定位模组相关报错",
+        "比较更新前后版本和配置"
+      ],
+      "queries": [
+        "游戏更新后启动失败是不是模组冲突",
+        "这个世界哪一个模组报错",
+        "不用AI能排查模组冲突吗"
+      ],
+      "terms": [
+        "mod conflict",
+        "兼容性",
+        "首个错误",
+        "堆栈",
+        "模组冲突",
+        "版本冲突",
+        "更新前快照",
+        "配置变更"
+      ]
+    },
+    "getRoomPlayerActivitySettings": {
+      "purpose": "读取全员活动记录开关、位置采样频率、动作与战斗记录及保留策略",
+      "actions": [
+        "读取全员活动记录开关、位置采样频率、动作与战斗记录及保留策略"
+      ],
+      "queries": [
+        "玩家行为采集频率是多少",
+        "是否给所有玩家记录活动"
+      ],
+      "terms": [
+        "采集频率",
+        "全员记录",
+        "活动设置"
+      ]
+    },
+    "updateRoomPlayerActivitySettings": {
+      "purpose": "动态设置房间全员活动采集频率、类别和保留期限；先读 revision，节点报告 appliedRevision 才算生效",
+      "actions": [
+        "动态设置房间全员活动采集频率、类别和保留期限；先读 revision",
+        "修改全员采集频率",
+        "调整位置采样间隔"
+      ],
+      "queries": [
+        "把玩家坐标改成每30秒采集一次",
+        "保留玩家行为记录14天"
+      ],
+      "terms": [
+        "采集频率",
+        "玩家跟踪",
+        "保留时间",
+        "采样",
+        "频率",
+        "采集",
+        "坐标"
+      ]
+    },
+    "getRoomPlayerActivityStatus": {
+      "purpose": "查询各分片活动采集是否应用配置及历史缺口",
+      "actions": [
+        "查询各分片活动采集是否应用配置及历史缺口"
+      ],
+      "queries": [
+        "玩家行为记录生效了吗",
+        "采集有丢失吗"
+      ],
+      "terms": [
+        "采集缺口",
+        "应用状态"
+      ]
+    },
+    "listRoomPlayerActivity": {
+      "purpose": "按玩家房间世界时间范围查询持久化行为时间线，包含采集缺口，不把缺失记录当作没做过",
+      "actions": [
+        "按玩家房间世界时间范围查询持久化行为时间线"
+      ],
+      "queries": [
+        "这个玩家最近做了什么",
+        "他捡了什么建造了什么"
+      ],
+      "terms": [
+        "玩家行为",
+        "活动记录",
+        "拾取",
+        "建造",
+        "死亡"
+      ]
+    },
+    "getRoomPlayerTrajectory": {
+      "purpose": "读取玩家采样坐标和采集边界，跨世界和实例不得连成路线，不是精确回放",
+      "actions": [
+        "读取玩家采样坐标和采集边界",
+        "查看玩家移动轨迹"
+      ],
+      "queries": [
+        "玩家最近去了哪里",
+        "查询这个人的移动轨迹坐标"
+      ],
+      "terms": [
+        "玩家轨迹",
+        "位置历史",
+        "坐标",
+        "轨迹",
+        "位置",
+        "移动",
+        "路线"
+      ]
+    },
+    "getRoomPlayerCombat": {
+      "purpose": "读取玩家战斗汇总，区分受到攻击和主动攻击，Boss参与和击杀；未知伤害不得视为0",
+      "actions": [
+        "读取玩家战斗汇总",
+        "查看Boss参与和击杀记录"
+      ],
+      "queries": [
+        "他打了哪些boss",
+        "这个玩家最近击杀了什么生物"
+      ],
+      "terms": [
+        "战斗记录",
+        "Boss",
+        "参与",
+        "攻击",
+        "战斗",
+        "生物",
+        "击杀",
+        "伤害"
       ]
     }
   }

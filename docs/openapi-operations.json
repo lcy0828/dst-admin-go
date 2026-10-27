@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "921de6252bbe1b8c7890e0a5b5716d5f442bc0d2ac60a9c3c3d4e13f9677260e",
+  "operationsSHA256": "10656736f76ba06341b1f9436e3261af525319ff7041263e9d49083f7d21fbab",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -75,6 +75,24 @@
       "risk": "normal",
       "runtime": "any",
       "title": "Re-run deep analysis for an uploaded local archive"
+    },
+    {
+      "operationId": "analyzeWorldModCompatibility",
+      "method": "GET",
+      "path": "/rooms/{roomId}/worlds/{worldId}/mod-diagnostics",
+      "transport": "json",
+      "tags": [
+        "diagnostic",
+        "game",
+        "log",
+        "mod",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Analyze game and mod observations and bounded first-error stack evidence without changing game files"
     },
     {
       "operationId": "announceToRoomPlayer",
@@ -1375,7 +1393,7 @@
       "access": "read",
       "risk": "low",
       "runtime": "any",
-      "title": "Read one persistent command record"
+      "title": "Read one command result or check its original late receipt"
     },
     {
       "operationId": "getDistributedBackupSet",
@@ -1787,6 +1805,55 @@
       "title": "Read one persisted player observation"
     },
     {
+      "operationId": "getRoomPlayerActivitySettings",
+      "method": "GET",
+      "path": "/rooms/{roomId}/player-activity/settings",
+      "transport": "json",
+      "tags": [
+        "activity",
+        "configuration",
+        "player",
+        "room",
+        "tracking"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read room-wide player activity recording settings"
+    },
+    {
+      "operationId": "getRoomPlayerActivityStatus",
+      "method": "GET",
+      "path": "/rooms/{roomId}/player-activity/status",
+      "transport": "json",
+      "tags": [
+        "activity",
+        "player",
+        "room",
+        "tracking"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read desired and node-applied recording revisions, gaps and stored record budget"
+    },
+    {
+      "operationId": "getRoomPlayerCombat",
+      "method": "GET",
+      "path": "/rooms/{roomId}/player-activity/combat",
+      "transport": "json",
+      "tags": [
+        "activity",
+        "player",
+        "room",
+        "tracking"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Aggregate a bounded window of persisted incoming damage, outgoing combat and kills"
+    },
+    {
       "operationId": "getRoomPlayerInventory",
       "method": "GET",
       "path": "/rooms/{roomId}/players/{playerId}/inventory",
@@ -1802,6 +1869,22 @@
       "risk": "low",
       "runtime": "any",
       "title": "Read a player's carried items from live memory or their current Session save without saving the game"
+    },
+    {
+      "operationId": "getRoomPlayerTrajectory",
+      "method": "GET",
+      "path": "/rooms/{roomId}/player-activity/trajectory",
+      "transport": "json",
+      "tags": [
+        "activity",
+        "player",
+        "room",
+        "tracking"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read sampled player coordinates and coverage boundaries; never an exact replay"
     },
     {
       "operationId": "getRoomRuntime",
@@ -2630,6 +2713,22 @@
       "risk": "low",
       "runtime": "any",
       "title": "Read all configured room Mods and their per-world runtime observations"
+    },
+    {
+      "operationId": "listRoomPlayerActivity",
+      "method": "GET",
+      "path": "/rooms/{roomId}/player-activity/events",
+      "transport": "json",
+      "tags": [
+        "activity",
+        "player",
+        "room",
+        "tracking"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read persisted player activity timeline with bounded cursor pagination"
     },
     {
       "operationId": "listRoomPlayers",
@@ -4322,6 +4421,24 @@
       "risk": "normal",
       "runtime": "any",
       "title": "Configure event-driven update checks, prefetch, and empty-room activation"
+    },
+    {
+      "operationId": "updateRoomPlayerActivitySettings",
+      "method": "PUT",
+      "path": "/rooms/{roomId}/player-activity/settings",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "activity",
+        "configuration",
+        "player",
+        "room",
+        "tracking"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Configure all-player recording, collection intervals, categories and retention dynamically"
     },
     {
       "operationId": "updateRoomTopology",

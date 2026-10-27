@@ -85,6 +85,50 @@ accepted backup task, not a completed backup:
 - Historical player observations are not current presence; file modification
   time is not logout time; saved Mod settings are not proof a process loaded them.
 
+## Custom Lua output and receipts
+
+For spawning entities or giving items, prefer built-ins through `executeRoomCommand`.
+Their `spawnAudit` contains [confirmed positions and destinations](command-spawn-records.en.md).
+Raw Lua is not automatically instrumented for spawn coordinates.
+
+For a numeric or text query, use `executeRawRoomCommand` and synchronously
+`print(...)` the answer. A complete `call_api` example follows; replace the room
+and world IDs and the exact room name:
+
+```json
+{"operationId":"executeRawRoomCommand","arguments":{"path":{"roomId":"actual-room-id","worldId":"actual-world-id"},"body":{"command":"print(\"World:\", TheWorld.prefab)","confirmation":"Actual full room name"},"requestId":"console-query-001"}}
+```
+
+Canonical API receipts place the run at `data.data`, with captured text in
+`output.text`. The compatibility tool `world_console` places its run directly
+at `data`. Inspect the run's `status` and `executionOutcome`; outer tool success
+or transport delivery alone does not prove game execution. Read the returned
+run `id` with `getCommandRun` or compatibility `command_receipt` to inspect the
+same persisted result without executing Lua again.
+
+Output is limited to 16 KiB, with `output.truncated` marking truncation. A Lua
+return value is not captured print output. Prints from delayed timers or
+coroutines remain in world logs. Missing `output` means capture evidence is
+unavailable; empty text means no synchronous print was captured. Neither means
+zero entities. Inspect the original receipt before retrying uncertain commands,
+and keep counts tied to the corresponding world and run.
+
+`resultState` distinguishes `waiting`, `output`, `no_output`, `output_unavailable`,
+`failed`, and `unconfirmed`. A failed run stays failed even with partial output.
+For unconfirmed records with `receiptRefreshUntil`, request `query.refresh=true`
+within 2 minutes of submission (compatibility tool: `refresh:true`):
+
+```json
+{"operationId":"getCommandRun","arguments":{"path":{"roomId":"actual-room-id","runId":"returned-run-id"},"query":{"refresh":true}}}
+```
+
+`receiptCheck.status` reports `found` (confirmed result saved), `not_found`,
+`unavailable`, `expired`, or `unsupported`. A missing receipt may not be written
+yet or may have been overwritten by later commands; it remains unconfirmed,
+never a zero count. Lookup is one read without command dispatch or recovery
+probes. Default record/history reads access the database only; no background
+receipt polling is added.
+
 ## Calling and tracking game updates
 
 Query an exact operation ID with `find_api` and `includeSchema: true` to receive

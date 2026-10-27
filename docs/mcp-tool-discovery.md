@@ -75,6 +75,44 @@ MCP `outputSchema` 描述实际调用回执，`structuredContent` 与文本结�
 - 玩家历史观测不是当前在线状态，存档文件时间不是离线时间，已保存的模组配置也不代表
   游戏进程已加载。按每个工具的结果说明和实际采样时间判断。
 
+## 自定义 Lua 的输出与回执
+
+生成实体和发放物品时，优先使用 `executeRoomCommand` 的内置命令；`spawnAudit` 包含本次回执确认的[落点与去向](command-spawn-records.md)。原始 Lua 不会自动采集生成坐标。
+
+需要查询数字或文本时，使用 `executeRawRoomCommand`，在代码中同步 `print(...)`。
+例如通过 `call_api` 查询所选世界的名称（替换真实房间、世界编号与房间名）：
+
+```json
+{"operationId":"executeRawRoomCommand","arguments":{"path":{"roomId":"实际房间编号","worldId":"实际世界编号"},"body":{"command":"print(\"World:\", TheWorld.prefab)","confirmation":"实际完整房间名"},"requestId":"console-query-001"}}
+```
+
+规范 API 工具的业务回执位于 `data.data`，同步打印内容在其 `output.text` 中；
+兼容工具 `world_console` 的业务回执直接位于 `data`。检查内层 `status` 与
+`executionOutcome`，不要把外层工具成功或“已下发”当成游戏执行成功。
+返回的 `id` 是命令运行编号，可用 `getCommandRun`（兼容工具为 `command_receipt`）
+读取同一条结果；查询回执不会再次运行 Lua。
+
+输出最多 16 KiB，`output.truncated` 表示截断。仅 `return` 数字不会变成打印输出；
+定时器、协程等延后执行的打印仍在世界日志中。缺少 `output` 表示没有取得捕获能力证据，
+空 `output.text` 表示没有捕获到同步打印，两者都不能解释为实体数量为零。
+结果不确定时先读原回执，不自动重发；不同世界的统计应分别保留世界与回执对应关系。
+
+`resultState` 统一表示结果证据：`waiting` 等待回执、`output` 已取得输出、
+`no_output` 确认完成但没有同步打印、`output_unavailable` 已完成但不提供捕获输出、
+`failed` 执行失败、`unconfirmed` 未确认。失败时即使有部分输出，也不能当成查询成功。
+
+对于提供 `receiptRefreshUntil` 的未确认记录，可在提交后 2 分钟内设置
+`query.refresh=true` 补读原始 Runtime 回执；兼容工具使用 `refresh:true`。例如：
+
+```json
+{"operationId":"getCommandRun","arguments":{"path":{"roomId":"实际房间编号","runId":"返回的运行编号"},"query":{"refresh":true}}}
+```
+
+`receiptCheck.status` 表示 `found` 已找到并保存、`not_found` 暂未找到、
+`unavailable` 目标暂时不可读、`expired` 超过补查时间、`unsupported` 不支持补查。
+暂未找到可能是尚未写入或已被后续命令覆盖，仍然属于未确认，不是数量零。
+补查只读一次，不发送命令或探针；默认查询和历史列表只读数据库，没有后台补查轮询。
+
 ## 游戏更新的调用与跟踪
 
 用 `find_api` 查询精确操作编号并加 `includeSchema: true`，可以拿到完整 arguments
