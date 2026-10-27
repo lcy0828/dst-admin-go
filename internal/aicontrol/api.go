@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"dont/internal/apicontract"
 	"github.com/google/uuid"
@@ -19,7 +20,7 @@ const discoverAPI = "find_api"
 func (s *Service) InitialTools() []Tool {
 	list := Tools()
 	if s.catalog != nil {
-		list = append(list, Tool{Name: discoverAPI, Description: "Discover all management APIs by domain or operationId, then load their typed tools. Search English keywords such as backup, automation, mod, player, game, agent, notification, configuration, software, topology. Use this whenever a requested action is not in the initial legacy tools; do not conclude it is unavailable. All administrator UI management APIs are included. Prefer configureRoomBackupSchedule to enable/change/pause automatic backups.", InputSchema: schema([]string{}, map[string]any{"includeSchema": map[string]any{"type": "boolean", "description": "Return inputSchema for call_api; defaults to false."}, "tags": map[string]any{"type": "array", "maxItems": 16, "items": map[string]any{"type": "string"}}, "access": map[string]any{"type": "string", "enum": []string{"read", "write"}}, "risk": map[string]any{"type": "string", "enum": []string{"low", "normal", "high"}}, "runtime": map[string]any{"type": "string", "enum": []string{"any", "server-running", "shard-ready"}}, "query": map[string]any{"type": "string", "maxLength": 256}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 12}})})
+		list = append(list, Tool{Name: discoverAPI, Description: "Discover all management APIs by domain or operationId, then load their typed tools. 支持中文需求、故障现象、英文关键词或精确 operationId。Search Chinese or English purposes and symptoms; refine ambiguous searches. Use this whenever a requested action is not in the initial legacy tools; do not conclude it is unavailable. All administrator UI management APIs are included. Prefer configureRoomBackupSchedule to enable/change/pause automatic backups.", InputSchema: schema([]string{}, map[string]any{"includeResultSchema": map[string]any{"type": "boolean", "description": "Get complete business result schemas for one exact operationId/api_ tool name. Also includes inputSchema and receipt outputSchema. Defaults to false."}, "includeSchema": map[string]any{"type": "boolean", "description": "Return inputSchema and receipt outputSchema; defaults to false. Detailed business fields use includeResultSchema with an exact operationId."}, "tags": map[string]any{"type": "array", "maxItems": 16, "items": map[string]any{"type": "string"}}, "access": map[string]any{"type": "string", "enum": []string{"read", "write"}}, "risk": map[string]any{"type": "string", "enum": []string{"low", "normal", "high"}}, "runtime": map[string]any{"type": "string", "enum": []string{"any", "server-running", "shard-ready"}}, "query": map[string]any{"type": "string", "maxLength": 256}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 12}})})
 	}
 	return list
 }
@@ -30,6 +31,9 @@ func apiTool(op *apicontract.Operation) (Tool, error) {
 		return Tool{}, err
 	}
 	description := op.Summary
+	if semantic := op.Semantics(); semantic != nil {
+		description = semantic.Purpose + "\n" + description
+	}
 	if op.Description != "" {
 		description += ". " + op.Description
 	}
@@ -46,6 +50,7 @@ func apiTool(op *apicontract.Operation) (Tool, error) {
 		description += ". File fields use attachmentId references from uploaded files."
 	}
 	metadata := op.ToolMetadata()
+	description += "\n" + op.ResultSummary()
 	return Tool{Name: op.ToolName(), Description: description, InputSchema: input, Mutation: op.Mutation(), Metadata: &metadata}, nil
 }
 
@@ -115,37 +120,58 @@ func (s *Service) loadDiscovered(data json.RawMessage, loaded map[string]Tool) {
 
 func (s *Service) discover(raw json.RawMessage) (json.RawMessage, error) {
 	var in struct {
-		Query         string `json:"query"`
-		Limit         int    `json:"limit"`
-		IncludeSchema bool   `json:"includeSchema"`
+		Query               string `json:"query"`
+		Limit               int    `json:"limit"`
+		IncludeSchema       bool   `json:"includeSchema"`
+		IncludeResultSchema bool   `json:"includeResultSchema"`
 		apicontract.MetadataFilter
 	}
-	if json.Unmarshal(raw, &in) != nil || in.MetadataFilter.Validate() != nil || len(in.Query) > 256 || in.Limit < 0 || in.Limit > 12 {
+	if json.Unmarshal(raw, &in) != nil || in.MetadataFilter.Validate() != nil || utf8.RuneCountInString(in.Query) > 256 || in.Limit < 0 || in.Limit > 12 {
 		return nil, ErrInvalid
 	}
 	if in.Limit == 0 {
 		in.Limit = 8
 	}
-	query := in.Query
-	for _, alias := range [][2]string{{"备份", "backup"}, {"存档", "save"}, {"定时", "automation"}, {"任务", "automation"}, {"模组", "mod"}, {"玩家", "player"}, {"房间", "room"}, {"世界", "world"}, {"通知", "notification"}, {"邮箱", "notification"}, {"机器", "agent"}, {"节点", "agent"}, {"安装", "install"}, {"配置", "configuration"}, {"更新", "update"}, {"日志", "log"}, {"地图", "map"}, {"版本", "software"}} {
-		if strings.Contains(query, alias[0]) {
-			query += " " + alias[1]
+	if in.IncludeResultSchema {
+		if op, ok := s.catalog.Operation(strings.TrimSpace(in.Query)); !ok || !op.Callable() {
+			return nil, fmt.Errorf("%w: includeResultSchema requires an exact operationId or api_ tool name", ErrInvalid)
 		}
+		in.Limit = 1
 	}
+	query := in.Query
 	items := []map[string]any{}
 	for _, op := range s.catalog.SearchFiltered(query, in.Limit, in.MetadataFilter) {
 		metadata := op.ToolMetadata()
 		item := map[string]any{"operationId": op.ID, "tool": op.ToolName(), "summary": op.Summary, "tags": metadata.Tags, "access": metadata.Access, "risk": metadata.Risk, "runtime": metadata.Runtime, "transport": op.Transport, "deprecated": op.Deprecated, "replacedBy": op.ReplacedBy}
-		if in.IncludeSchema {
+		if semantic := op.Semantics(); semantic != nil {
+			item["purpose"] = semantic.Purpose
+		}
+		item["resultSummary"] = op.ResultSummary()
+		if in.IncludeSchema || in.IncludeResultSchema {
+			if op.Description != "" {
+				item["description"] = op.Description
+			}
 			input, err := op.AIInputSchema()
 			if err != nil {
 				return nil, err
 			}
 			item["inputSchema"] = input
+			item["outputSchema"] = receiptOutputSchema()
+		}
+		if in.IncludeResultSchema {
+			contract, err := op.ResultSchema()
+			if err != nil {
+				return nil, err
+			}
+			item["resultContract"] = contract
 		}
 		items = append(items, item)
 	}
-	return json.Marshal(map[string]any{"items": items, "count": len(items), "instruction": "Matching typed tools are now loaded in the page assistant. External MCP clients can use call_api with operationId and arguments, or the listed api_ tool. Use includeSchema=true to inspect its argument schema. Discover more specific keywords if needed. An empty search is not proof a capability is absent."})
+	encoded, err := json.Marshal(map[string]any{"items": items, "count": len(items), "instruction": "Matching typed tools are now loaded in the page assistant. External MCP clients can use call_api with operationId and arguments, or the listed api_ tool. Use includeSchema=true for arguments; includeResultSchema=true with an exact operationId for business result fields. Discover more specific keywords if needed. An empty search is not proof a capability is absent."})
+	if len(encoded) > 60<<10 {
+		return nil, fmt.Errorf("%w: discovery schemas exceed the response limit; request fewer tools or use the published OpenAPI contract", ErrInvalid)
+	}
+	return encoded, err
 }
 
 func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw json.RawMessage) (Invocation, error) {
@@ -253,7 +279,13 @@ func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw j
 		}
 		data, _ = json.Marshal(map[string]string{"error": err.Error()})
 	}
-	data = boundResult(Sanitize(redactPrivateValues(data, privateValues)), 64<<10)
+	if name != discoverAPI || err != nil {
+		// Discovery contains only bundled contract text, never settings or
+		// caller input. Redacting schema property names corrupts that contract.
+		// All actual management results still use the usual redaction path.
+		data = Sanitize(redactPrivateValues(data, privateValues))
+	}
+	data = boundResult(data, 64<<10)
 	call.Result = string(data)
 	if err := s.Store.db.Table(s.Store.callTable).Where("id = ? AND status = ?", call.ID, "executing").Updates(map[string]any{"status": call.Status, "result": call.Result}).Error; err != nil {
 		return Invocation{CallID: call.ID, Status: "uncertain", Data: data}, fmt.Errorf("AI_RESULT_PERSISTENCE_FAILED: inspect task before retry")

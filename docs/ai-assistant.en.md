@@ -120,3 +120,5 @@ Read-only queries run directly. Single-world lifecycle operations use
 `runRoomAction` with an explicit `body.worldIds` selection. MCP clients receive
 the same tool guidance, but their final answers are generated externally and are
 not subject to the page assistant's response checks.
+
+For Chinese search metadata, result schemas and client indexing, see [MCP tool discovery and results](mcp-tool-discovery.en.md).

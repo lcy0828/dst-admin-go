@@ -251,7 +251,7 @@ func (s *Service) Chat(ctx context.Context, input ChatInput, emit func(ChatEvent
 				data, _ = json.Marshal(result)
 				emit(ChatEvent{Type: "result", Tool: call.Function.Name, Call: &result})
 			}
-			data = boundResult(data, 8<<10)
+			data = modelToolResult(data, call.Function.Name, raw, result.Status)
 			messages = append(messages, Message{Role: "tool", ToolCallID: call.ID, Content: string(data)})
 			encoded, _ := json.Marshal(messages)
 			if len(encoded) > 96<<10 {

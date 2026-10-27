@@ -111,9 +111,19 @@ func (s *Service) mcpDefinition(tool Tool) *mcp.Tool {
 		if op, ok := s.catalog.Operation(tool.Name); ok {
 			extension["deprecated"] = op.Deprecated
 			extension["replacedBy"] = op.ReplacedBy
+			extension["catalogRevision"] = op.CatalogRevision()
+			extension["semanticVersion"] = 1
+			if semantic := op.Semantics(); semantic != nil {
+				extension["locale"] = "zh-CN"
+				extension["cn_purpose"] = semantic.Purpose
+				extension["actions"] = semantic.Actions
+				extension["symptoms"] = semantic.Queries
+				extension["slang"] = semantic.Terms
+			}
+			extension["resultSummary"] = op.ResultSummary()
 		}
 	}
-	return &mcp.Tool{Name: tool.Name, Title: metadata.Title, Description: tool.Description, InputSchema: tool.InputSchema, Meta: mcp.Meta{mcpMetadataKey: extension}, Annotations: &mcp.ToolAnnotations{Title: metadata.Title, ReadOnlyHint: metadata.Access == "read", IdempotentHint: metadata.Idempotent, DestructiveHint: &metadata.Destructive, OpenWorldHint: &metadata.OpenWorld}}
+	return &mcp.Tool{Name: tool.Name, Title: metadata.Title, Description: tool.Description, InputSchema: tool.InputSchema, OutputSchema: receiptOutputSchema(), Meta: mcp.Meta{mcpMetadataKey: extension}, Annotations: &mcp.ToolAnnotations{Title: metadata.Title, ReadOnlyHint: metadata.Access == "read", IdempotentHint: metadata.Idempotent, DestructiveHint: &metadata.Destructive, OpenWorldHint: &metadata.OpenWorld}}
 }
 
 var compactMCPNames = map[string]bool{discoverAPI: true, dispatchAPI: true, "api_listRooms": true, "api_getRoomRuntimeOverview": true, "api_listRoomPlayers": true, "api_listRoomMods": true, "api_listRoomBackupSchedules": true, "api_listJobs": true, "api_getJob": true}

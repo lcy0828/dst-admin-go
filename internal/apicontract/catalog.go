@@ -3,12 +3,14 @@
 package apicontract
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
 
 	apidocs "dont/docs"
 
@@ -65,6 +67,11 @@ type Operation struct {
 	aiOnce      sync.Once
 	aiSchema    map[string]any
 	aiErr       error
+	semantics   *ToolSemantics
+	searchTerms map[string]float64
+	resultOnce  sync.Once
+	result      *ResultContract
+	resultErr   error
 }
 type Catalog struct {
 	operations map[string]*Operation
@@ -73,9 +80,18 @@ type Catalog struct {
 	parameters map[string]Parameter
 	responses  map[string]Response
 	paths      map[string]map[string]any
+	termWeight map[string]float64
+	lexicon    map[string]bool
+	revision   string
 }
 
-var Default = sync.OnceValues(func() (*Catalog, error) { return Parse(apidocs.OpenAPI) })
+var Default = sync.OnceValues(func() (*Catalog, error) {
+	c, err := Parse(apidocs.OpenAPI)
+	if err == nil {
+		err = c.loadSemantics(apidocs.AIToolSemantics)
+	}
+	return c, err
+})
 
 func Parse(data []byte) (*Catalog, error) {
 	var doc struct {
@@ -94,6 +110,7 @@ func Parse(data []byte) (*Catalog, error) {
 		return nil, fmt.Errorf("OpenAPI 3.1 contract is required")
 	}
 	c := &Catalog{operations: map[string]*Operation{}, schemas: doc.Components.Schemas, parameters: doc.Components.Parameters, responses: doc.Components.Responses, paths: doc.Paths}
+	c.revision = fmt.Sprintf("%x", sha256.Sum256(data))
 	for path, item := range doc.Paths {
 		if !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "?#") {
 			return nil, fmt.Errorf("invalid API path %q", path)
@@ -271,64 +288,12 @@ func (op *Operation) compile() {
 		required = append(required, "requestId")
 	}
 	root["required"] = required
-	defs := map[string]any{}
-	var rewrite func(any) (any, error)
-	rewrite = func(value any) (any, error) {
-		switch v := value.(type) {
-		case map[string]any:
-			out := map[string]any{}
-			for k, item := range v {
-				if k == "$ref" {
-					ref, ok := item.(string)
-					if !ok || !strings.HasPrefix(ref, "#/components/schemas/") {
-						return nil, fmt.Errorf("unsupported schema reference %v", item)
-					}
-					name := strings.TrimPrefix(ref, "#/components/schemas/")
-					if _, seen := defs[name]; !seen {
-						definition, exists := op.catalog.schemas[name]
-						if !exists {
-							return nil, fmt.Errorf("unresolved schema %q", name)
-						}
-						defs[name] = map[string]any{}
-						resolved, err := rewrite(definition)
-						if err != nil {
-							return nil, err
-						}
-						defs[name] = resolved
-					}
-					out[k] = "#/$defs/" + name
-				} else {
-					resolved, err := rewrite(item)
-					if err != nil {
-						return nil, err
-					}
-					out[k] = resolved
-				}
-			}
-			return out, nil
-		case []any:
-			out := make([]any, len(v))
-			for i, item := range v {
-				r, err := rewrite(item)
-				if err != nil {
-					return nil, err
-				}
-				out[i] = r
-			}
-			return out, nil
-		default:
-			return value, nil
-		}
-	}
-	resolved, err := rewrite(root)
+	resolved, err := op.catalog.standaloneSchema(root)
 	if err != nil {
 		op.err = err
 		return
 	}
-	op.input = resolved.(map[string]any)
-	if len(defs) > 0 {
-		op.input["$defs"] = defs
-	}
+	op.input = resolved
 	encoded, err := json.Marshal(op.input)
 	if err != nil {
 		op.err = err
@@ -462,6 +427,15 @@ func (c *Catalog) Search(query string, limit int) []*Operation {
 func (c *Catalog) SearchFiltered(query string, limit int, filter MetadataFilter) []*Operation {
 	query = strings.ToLower(strings.TrimSpace(query))
 	words := strings.Fields(query)
+	var semanticTerms map[string]bool
+	if strings.ContainsFunc(query, func(r rune) bool { return unicode.Is(unicode.Han, r) }) {
+		semanticTerms = chineseTerms(query)
+		for term := range semanticTerms {
+			if !c.lexicon[term] {
+				delete(semanticTerms, term)
+			}
+		}
+	}
 	type match struct {
 		op    *Operation
 		score int
@@ -496,6 +470,22 @@ func (c *Catalog) SearchFiltered(query string, limit int, filter MetadataFilter)
 					}
 				}
 			}
+		}
+		if score < 1000 {
+			score = min(999, score+c.semanticScore(op, semanticTerms))
+			// A search hint only: every candidate remains callable through its
+			// original validation. Never infer authorization from query words.
+			if len(semanticTerms) > 0 && score > 0 {
+				if (strings.HasPrefix(query, "查看") || strings.HasPrefix(query, "查询") || strings.HasPrefix(query, "找") || strings.HasPrefix(query, "看看")) && op.ToolMetadata().Access == "read" {
+					score += 12
+				}
+				if (strings.Contains(query, "列出") || strings.Contains(query, "所有") || strings.Contains(query, "哪些")) && strings.HasPrefix(op.ID, "list") {
+					score += 12
+				}
+			}
+		}
+		if strings.TrimPrefix(query, ToolPrefix) != identity {
+			score = min(999, score)
 		}
 		if score > 0 {
 			if op.Deprecated && score < 1000 {

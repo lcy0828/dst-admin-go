@@ -7,6 +7,23 @@ import (
 	"unicode/utf8"
 )
 
+// Full schemas are explicitly requested for a single operation and already
+// bounded by discovery. Never cut a JSON Schema into an unusable excerpt.
+// Actual game/log/operation results retain the smaller normal context budget.
+func modelToolResult(data json.RawMessage, tool string, arguments json.RawMessage, status string) json.RawMessage {
+	budget := 8 << 10
+	if tool == discoverAPI && status == "succeeded" {
+		var options struct {
+			IncludeSchema       bool `json:"includeSchema"`
+			IncludeResultSchema bool `json:"includeResultSchema"`
+		}
+		if json.Unmarshal(arguments, &options) == nil && (options.IncludeSchema || options.IncludeResultSchema) {
+			budget = 64 << 10
+		}
+	}
+	return boundResult(data, budget)
+}
+
 // boundResult retains structured evidence and receipt identifiers. A large
 // output must never turn a successful operation into a failure or invite a retry.
 // It also supplies useful excerpts to the model within its smaller context budget.
