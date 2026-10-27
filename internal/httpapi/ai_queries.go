@@ -141,9 +141,9 @@ func (b *AIBackend) roomPlayers(ctx context.Context, a aicontrol.Arguments) (jso
 	}
 	rows := make([]any, 0, len(list.Items))
 	for _, player := range list.Items {
-		rows = append(rows, map[string]any{"id": player.ID, "name": player.Name, "prefab": player.Prefab, "worldId": player.WorldID, "worldName": player.WorldName, "online": player.Online, "presenceStatus": player.PresenceStatus, "presenceObservedAt": player.PresenceObservedAt, "lastSeenAt": player.LastSeenAt})
+		rows = append(rows, map[string]any{"id": player.ID, "name": player.Name, "prefab": player.Prefab, "worldId": player.WorldID, "worldName": player.WorldName, "worldConfirmed": player.WorldConfirmed, "localEntity": player.LocalEntity, "presenceConflict": player.PresenceConflict, "observedWorldIds": player.ObservedWorldIDs, "worldEvidence": player.Fields["world"], "online": player.Online, "presenceStatus": player.PresenceStatus, "presenceObservedAt": player.PresenceObservedAt, "lastSeenAt": player.LastSeenAt})
 	}
-	result := map[string]any{"roomId": a.RoomID, "items": rows, "total": list.Total, "online": list.Online, "staleOnline": list.StaleOnline, "offline": list.Offline, "limit": limit, "offset": a.Offset, "presence": presence, "countMeaning": "Unique actual players, excluding dedicated [Host]. Stale presence is not confirmed online; total includes player history. Partial/unavailable presence cannot prove an empty room."}
+	result := map[string]any{"roomId": a.RoomID, "items": rows, "total": list.Total, "online": list.Online, "staleOnline": list.StaleOnline, "offline": list.Offline, "limit": limit, "offset": a.Offset, "presence": presence, "countMeaning": "Room online is deduplicated cluster connections, including selecting/loading/migrating players, excluding dedicated [Host]. World counts are local entities only; countKnown=false is unknown, not an empty shard. unlocatedOnline counts online players without a confirmed current shard. worldId/worldName are last-known history when worldConfirmed=false, never a current location. Only simultaneous local entities create a presenceConflict. Stale presence is not confirmed online; total includes player history. Partial/unavailable presence cannot prove an empty room."}
 	if refreshErr != nil {
 		result["refreshError"] = refreshErr.Error()
 		result["currentPresenceAvailable"] = false

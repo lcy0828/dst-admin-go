@@ -19,12 +19,13 @@ const (
 )
 
 type SnapshotResult struct {
-	SessionID    string
-	Observations []Observation
-	Source       DataSource
-	ObservedAt   time.Time
-	Degraded     bool
-	Warning      string
+	LocalityKnown bool
+	SessionID     string
+	Observations  []Observation
+	Source        DataSource
+	ObservedAt    time.Time
+	Degraded      bool
+	Warning       string
 }
 
 type DetailedProbe interface {
@@ -137,7 +138,8 @@ func (p *TelemetryProbe) SnapshotDetailed(ctx context.Context, roomID, worldID s
 			}
 		}
 		return SnapshotResult{
-			Observations: mergeSnapshotIdentities(native, observations), Source: SourceRuntime, ObservedAt: snapshot.CapturedAt, SessionID: snapshot.SessionID,
+			LocalityKnown: snapshot.LocalityKnown,
+			Observations:  mergeSnapshotIdentities(native, observations), Source: SourceRuntime, ObservedAt: snapshot.CapturedAt, SessionID: snapshot.SessionID,
 			Degraded: nativeErr != nil, Warning: errorMessage(nativeErr),
 		}, nil
 	}
@@ -159,7 +161,8 @@ func (p *TelemetryProbe) SnapshotDetailed(ctx context.Context, roomID, worldID s
 	fallbackAt := p.now().UTC()
 	fallback = stampTelemetryObservations(fallback, SourceConsoleFallback, fallbackAt)
 	return SnapshotResult{
-		Observations: mergeSnapshotIdentities(native, fallback), Source: SourceConsoleFallback, ObservedAt: fallbackAt, Degraded: true, Warning: warning,
+		LocalityKnown: observationsHaveLocality(fallback),
+		Observations:  mergeSnapshotIdentities(native, fallback), Source: SourceConsoleFallback, ObservedAt: fallbackAt, Degraded: true, Warning: warning,
 	}, nil
 }
 
@@ -250,7 +253,8 @@ func observationsFromRuntime(snapshot dstruntime.Snapshot) []Observation {
 	result := make([]Observation, 0, len(snapshot.Players))
 	for _, player := range snapshot.Players {
 		observation := Observation{
-			ID: player.ID, Name: player.Name, Prefab: player.Prefab, Admin: player.Admin, Age: player.Age,
+			LocalEntity: player.LocalEntity,
+			ID:          player.ID, Name: player.Name, Prefab: player.Prefab, Admin: player.Admin, Age: player.Age,
 			GameplayState: normalizeGameplayState(player.GameplayState),
 			NetID:         player.NetID, NetScore: player.NetScore, HealthPercent: player.HealthPercent,
 			HungerPercent: player.HungerPercent, SanityPercent: player.SanityPercent,

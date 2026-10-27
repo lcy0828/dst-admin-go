@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 2
-local PRODUCER_VERSION = "2.4.15"
+local PRODUCER_VERSION = "2.4.16"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 
 local state = {
@@ -76,7 +76,7 @@ local function gameplay_state(client, player)
     return "loading"
 end
 
-local function capture_player(client)
+local function capture_player(client, player, locality_known)
     if client == nil or virtual_host(client) then
         return nil
     end
@@ -84,16 +84,19 @@ local function capture_player(client)
     if user_id == "" then
         return nil
     end
-    local player = UserToPlayer ~= nil and UserToPlayer(user_id) or nil
     local record = {
         id = user_id,
         name = safe_text(client.name, 256),
-        prefab = safe_text(client.prefab, 128),
+        prefab = safe_text(player ~= nil and player.prefab or client.prefab, 128),
         gameplayState = gameplay_state(client, player),
         admin = client.admin == true,
         age = math.max(0, tonumber(client.playerage) or 0),
         netId = safe_text(client.netid, 128),
     }
+    if locality_known then
+        record.localEntity = player ~= nil
+        if player == nil and record.gameplayState == "loading" then record.gameplayState = "unknown" end
+    end
     if record.name == "" then
         record.name = user_id
     end
@@ -250,15 +253,32 @@ function M.EmitOnce(callback)
     local started = clock.Now()
     local captured_at = os.time()
     local ok, payload = xpcall(function()
-        local players = {}
-        local clients = TheNet:GetClientTable() or {}
-        for _, client in ipairs(clients) do
-            local captured = capture_player(client)
-            if captured ~= nil then
+        local players, local_players, seen = {}, {}, {}
+        local entities = rawget(_G, "AllPlayers")
+        local locality_known = type(entities) == "table"
+        if locality_known then
+            for index, player in ipairs(entities) do
+                if index > 256 then error("local player scan exceeds 256 entries") end
+                if type(player.userid) == "string" and player.userid ~= "" then local_players[player.userid] = player end
+            end
+        end
+        local function append(client, player)
+            local captured = capture_player(client, player, locality_known)
+            if captured ~= nil and not seen[captured.id] then
+                seen[captured.id] = true
                 players[#players + 1] = captured
-                if #players > 64 then
-                    error("player snapshot exceeds 64 entries")
-                end
+                if #players > 64 then error("player snapshot exceeds 64 entries") end
+            end
+        end
+        for index, client in ipairs(TheNet:GetClientTable() or {}) do
+            if index > 256 then error("client scan exceeds 256 entries") end
+            append(client, local_players[client.userid])
+        end
+        -- A local entity can arrive just before cluster account metadata.
+        for user_id, player in pairs(local_players) do
+            if not seen[user_id] then
+                local name = type(player.GetDisplayName) == "function" and player:GetDisplayName() or player.name
+                append({ userid = user_id, name = name, prefab = player.prefab }, player)
             end
         end
         local session_id, shard_id = runtime_identity()
@@ -272,6 +292,7 @@ function M.EmitOnce(callback)
             sequence = state.sequence,
             capturedAtUnix = captured_at,
             complete = true,
+            localityKnown = locality_known,
             players = players,
         }
     end, debug.traceback)

@@ -2166,7 +2166,7 @@
         "容器",
         "打包袋"
       ],
-      "resultNotes": "检查 source、status、coverage 和 candidates；存档时间不是离线时间，不完整数据不能解释为空背包。"
+      "resultNotes": "自动模式会按需确认玩家所在分片，无需先刷新玩家名单。集群客户端名单重复不代表分片冲突；迁移最多重新定位一次。worldId 严格限定查询范围，refresh=true 会重新确认位置且不绕过限流。位置未知、采集失败或节点离线不能自动改读存档。检查 source、status、coverage 和 candidates；存档时间不是离线时间，不完整数据不能解释为空背包。"
     },
     "getRoomRuntime": {
       "purpose": "检查房间各分片的 DST Admin 托管 Lua 模块安装情况与采集健康状态。",
@@ -3226,7 +3226,8 @@
         "黑名单",
         "Klei ID",
         "玩家记录"
-      ]
+      ],
+      "resultNotes": "房间在线人数按真实连接 ID 去重，包括选角、加载与迁移。localEntity 是采样时的本地实体证据，缺失表示旧采集端未声明。worldConfirmed=false 时 worldId/worldName 仅为最后确认的位置，不可当作当前位置。只有多个新鲜本地实体才构成 presenceConflict；集群名单重复不构成分片冲突。"
     },
     "listRoomProvisionOperations": {
       "purpose": "查询房间配置发布任务的流水与每个分片的推进阶段，确认改完的 cluster.ini、世界设置有没有真正落到地面和洞穴分片。",
@@ -4048,7 +4049,8 @@
         "玩家名单",
         "在线人数",
         "探测"
-      ]
+      ],
+      "resultNotes": "房间在线人数按真实连接 ID 去重，包括选角、加载与迁移。localEntity 是采样时的本地实体证据，缺失表示旧采集端未声明。worldConfirmed=false 时 worldId/worldName 仅为最后确认的位置，不可当作当前位置。只有多个新鲜本地实体才构成 presenceConflict；集群名单重复不构成分片冲突。"
     },
     "refreshRuntimeObservations": {
       "purpose": "对选定的运行时目标做一次即时观测刷新，不落地成常驻任务，用于临时瞄一眼面板监控数据。",

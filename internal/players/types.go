@@ -32,6 +32,7 @@ type Player struct {
 	WorldID              string          `json:"worldId"`
 	WorldName            string          `json:"worldName"`
 	WorldConfirmed       bool            `json:"worldConfirmed"`
+	LocalEntity          *bool           `json:"localEntity,omitempty"`
 	Name                 string          `json:"name"`
 	Prefab               string          `json:"prefab,omitempty"`
 	GameplayState        string          `json:"gameplayState,omitempty"`
@@ -99,6 +100,8 @@ const (
 )
 
 type Observation struct {
+	// nil denotes an older producer without explicit shard-local evidence.
+	LocalEntity        *bool
 	HistoryWorldID     string
 	HistoryWorldName   string
 	FirstSeenAt        time.Time
@@ -159,6 +162,7 @@ type WorldTarget struct {
 }
 
 type RefreshResult struct {
+	CountKnown bool            `json:"countKnown"`
 	WorldID    string          `json:"worldId"`
 	Count      int             `json:"count"`
 	Running    bool            `json:"running"`
@@ -179,16 +183,18 @@ type RefreshOutcome struct {
 // PresenceSnapshot is a safety-oriented room observation. Fresh is true only
 // when every running world produced live telemetry during this collection.
 type PresenceSnapshot struct {
-	RoomID      string          `json:"roomId"`
-	Online      int             `json:"online"`
-	StaleOnline int             `json:"staleOnline"`
-	Fresh       bool            `json:"fresh"`
-	CheckedAt   time.Time       `json:"checkedAt"`
-	Worlds      []PresenceWorld `json:"worlds"`
-	Warnings    []string        `json:"warnings,omitempty"`
+	UnlocatedOnline int             `json:"unlocatedOnline"`
+	RoomID          string          `json:"roomId"`
+	Online          int             `json:"online"`
+	StaleOnline     int             `json:"staleOnline"`
+	Fresh           bool            `json:"fresh"`
+	CheckedAt       time.Time       `json:"checkedAt"`
+	Worlds          []PresenceWorld `json:"worlds"`
+	Warnings        []string        `json:"warnings,omitempty"`
 }
 
 type PresenceWorld struct {
+	CountKnown bool            `json:"countKnown"`
 	WorldID    string          `json:"worldId"`
 	Running    bool            `json:"running"`
 	Count      int             `json:"count"`

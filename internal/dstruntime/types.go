@@ -8,7 +8,7 @@ import (
 
 const (
 	ProtocolVersion = 2
-	RuntimeVersion  = "2.4.15"
+	RuntimeVersion  = "2.4.16"
 )
 
 var (
@@ -106,12 +106,14 @@ type Snapshot struct {
 	Sequence           int64            `json:"sequence"`
 	CapturedAtUnix     int64            `json:"capturedAtUnix"`
 	Complete           bool             `json:"complete"`
+	LocalityKnown      bool             `json:"localityKnown,omitempty"`
 	Players            []SnapshotPlayer `json:"players"`
 	CapturedAt         time.Time        `json:"-"`
 	persistedAt        time.Time
 }
 
 type SnapshotPlayer struct {
+	LocalEntity   *bool    `json:"localEntity,omitempty"`
 	ID            string   `json:"id"`
 	Name          string   `json:"name"`
 	Prefab        string   `json:"prefab,omitempty"`

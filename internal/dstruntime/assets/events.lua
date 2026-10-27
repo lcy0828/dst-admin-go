@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.15"
+local PRODUCER_VERSION = "2.4.16"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local FLUSH_DELAY = 1
 local MAX_BATCH = 128

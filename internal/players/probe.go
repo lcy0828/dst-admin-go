@@ -327,7 +327,7 @@ func applyHistoricalProbeLine(state *nativeLogState, line string, complete func(
 			block.invalid = true
 			return
 		}
-		if ignored || block.seen[observation.ID] {
+		if ignored || block.seen[observation.ID] || observation.LocalEntity != nil && !*observation.LocalEntity {
 			return
 		}
 		block.seen[observation.ID] = true
@@ -427,6 +427,9 @@ func parseDisconnectedClient(line string) (string, bool) {
 }
 
 func mergeObservation(existing, update Observation) Observation {
+	if update.LocalEntity != nil {
+		existing.LocalEntity = update.LocalEntity
+	}
 	if existing.ID == "" {
 		existing.ID = update.ID
 	}
@@ -495,7 +498,7 @@ func mergeObservation(existing, update Observation) Observation {
 
 func parseProbeObservation(payload string, captureNetScore bool) (Observation, bool, error) {
 	fields := strings.Split(strings.TrimSpace(payload), "\t")
-	if len(fields) != 12 && len(fields) != 13 && len(fields) != 19 {
+	if len(fields) != 12 && len(fields) != 13 && len(fields) != 14 && len(fields) != 19 && len(fields) != 20 {
 		return Observation{}, false, errors.New("player probe returned malformed fields")
 	}
 	decoded := make([]string, 6)
@@ -548,7 +551,15 @@ func parseProbeObservation(payload string, captureNetScore bool) (Observation, b
 			*destination = &metric
 		}
 	}
-	if len(fields) == 19 {
+	if len(fields) == 14 || len(fields) == 20 {
+		flag := fields[len(fields)-1]
+		if flag != "0" && flag != "1" {
+			return Observation{}, false, errors.New("player probe returned invalid local entity evidence")
+		}
+		local := flag == "1"
+		observation.LocalEntity = &local
+	}
+	if len(fields) == 19 || len(fields) == 20 {
 		vitals := []*(*float64){&observation.Health, &observation.HealthMax, &observation.Hunger, &observation.HungerMax, &observation.Sanity, &observation.SanityMax}
 		for metricIndex, destination := range vitals {
 			value, err := strconv.ParseFloat(fields[13+metricIndex], 64)

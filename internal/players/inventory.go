@@ -3,6 +3,7 @@ package players
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 
 	"dont/internal/playerinventory"
@@ -10,6 +11,12 @@ import (
 	"dont/internal/shards"
 	"dont/shared"
 )
+
+var errInventoryLocationChanged = errors.New("player location requires confirmation")
+
+func uncertainInventoryLocation() error {
+	return errors.Join(&shared.InventoryError{Code: "PLAYER_LOCATION_UNCERTAIN"}, errInventoryLocationChanged)
+}
 
 type inventoryRuntime interface {
 	ReadPlayerInventory(context.Context, string, string, shared.PlayerInventoryRequest) (shared.PlayerInventory, error)
@@ -25,7 +32,7 @@ func (s *Service) Inventory(ctx context.Context, roomID, worldID string, q share
 		return shared.PlayerInventory{}, &shared.InventoryError{Code: "INVALID_PLAYER_ID"}
 	}
 	key := roomID + "\x00" + worldID + "\x00" + q.PlayerID + "\x00" + q.Source + "\x00" + q.SourceID
-	return s.inventoryReads.Do(ctx, key, key, func(ctx context.Context) (shared.PlayerInventory, error) {
+	return s.inventoryReads.Do(ctx, key+"\x00"+strconv.FormatBool(q.Refresh), key, func(ctx context.Context) (shared.PlayerInventory, error) {
 		return s.readInventory(ctx, roomID, worldID, q)
 	})
 }
@@ -59,18 +66,39 @@ func (s *Service) readInventory(ctx context.Context, roomID, worldID string, q s
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if q.Source == "auto" || q.Source == "live" {
-		world, locateErr := s.inventoryLiveWorld(ctx, room, worlds, q.PlayerID)
+		world, locateErr := s.inventoryLiveWorld(ctx, room, worlds, q.PlayerID, q.Refresh, worldID != "")
+		retried := false
+		if worldID == "" && !q.Refresh && errors.Is(locateErr, errInventoryLocationChanged) {
+			retried = true
+			world, locateErr = s.inventoryLiveWorld(ctx, room, worlds, q.PlayerID, true, false)
+		}
 		if locateErr != nil {
 			return shared.PlayerInventory{}, locateErr
 		}
 		if world != nil {
-			q.Source = "live"
-			return readInventoryWorld(ctx, reader, room.ID, *world, q)
+			live := q
+			live.Source = "live"
+			value, readErr := readInventoryWorld(ctx, reader, room.ID, *world, live)
+			code := playerinventory.Code(readErr)
+			// The entity may have migrated after routing. Re-locate at most
+			// once, within the same deadline and the original room scope.
+			if worldID == "" && !retried && (code == "PLAYER_NOT_ONLINE" || code == "PLAYER_LOCATION_UNCERTAIN") {
+				world, locateErr = s.inventoryLiveWorld(ctx, room, worlds, q.PlayerID, true, false)
+				if locateErr != nil {
+					return shared.PlayerInventory{}, locateErr
+				}
+				if world == nil {
+					return shared.PlayerInventory{}, &shared.InventoryError{Code: "PLAYER_NOT_ONLINE"}
+				}
+				return readInventoryWorld(ctx, reader, room.ID, *world, live)
+			}
+			return value, readErr
 		}
 		if q.Source == "live" {
 			return shared.PlayerInventory{}, &shared.InventoryError{Code: "PLAYER_NOT_ONLINE"}
 		}
 	}
+
 	q.Source = "save"
 	var results []shared.PlayerInventory
 	var candidates []shared.InventoryCandidate
@@ -114,29 +142,31 @@ func readInventoryWorld(ctx context.Context, reader inventoryRuntime, roomID str
 	return value, err
 }
 
-func (s *Service) inventoryLiveWorld(ctx context.Context, room rooms.Room, worlds []rooms.World, player string) (*rooms.World, error) {
+type inventoryLocationProbe interface {
+	InventorySnapshot(context.Context, string, string, bool) (SnapshotResult, error)
+}
+
+func (s *Service) inventoryLiveWorld(ctx context.Context, room rooms.Room, worlds []rooms.World, player string, force, scoped bool) (*rooms.World, error) {
 	known, err := s.store.Get(room.ID, player)
-	if err == nil && known.Online && known.PresenceConflict {
-		return nil, &shared.InventoryError{Code: "PLAYER_LOCATION_UNCERTAIN"}
-	}
-	if err == nil && known.Online && known.WorldConfirmed && known.PresenceStatus == FreshnessLive && known.PresenceObservedAt != nil && s.now().Sub(*known.PresenceObservedAt) >= -2*time.Second && s.now().Sub(*known.PresenceObservedAt) <= 15*time.Second {
+	if !force && err == nil && known.Online && !known.PresenceConflict && known.WorldConfirmed &&
+		known.LocalEntity != nil && *known.LocalEntity && known.PresenceStatus == FreshnessLive && known.PresenceObservedAt != nil &&
+		s.now().Sub(*known.PresenceObservedAt) >= -2*time.Second && s.now().Sub(*known.PresenceObservedAt) <= 15*time.Second {
 		for _, world := range worlds {
-			if world.ID == known.WorldID {
-				if known.GameplayState == GameplayStateMigrating {
-					return nil, &shared.InventoryError{Code: "PLAYER_LOCATION_UNCERTAIN"}
+			if world.ID == known.WorldID && known.GameplayState != GameplayStateMigrating {
+				status, statusErr := s.worldStatus(ctx, room, world)
+				if statusErr == nil && status.State == shards.RuntimeRunning {
+					return &world, nil
 				}
-				if known.GameplayState == GameplayStateLoading || known.GameplayState == GameplayStateSelectingCharacter {
-					return nil, &shared.InventoryError{Code: "PLAYER_NOT_READY"}
-				}
-				return &world, nil
+				break
 			}
 		}
 	}
 	var selected *rooms.World
+	connected, selecting, migrating := false, false, false
 	for _, world := range worlds {
-		status, err := s.worldStatus(ctx, room, world)
-		if err != nil {
-			return nil, err
+		status, statusErr := s.worldStatus(ctx, room, world)
+		if statusErr != nil {
+			return nil, statusErr
 		}
 		if status.State == shards.RuntimeStopped || status.State == shards.RuntimeFailed {
 			continue
@@ -144,27 +174,56 @@ func (s *Service) inventoryLiveWorld(ctx context.Context, room rooms.Room, world
 		if status.State != shards.RuntimeRunning {
 			return nil, &shared.InventoryError{Code: "PLAYER_LOCATION_UNCERTAIN"}
 		}
-		observations, _, freshness, _, observedAt, _, err := s.readSnapshot(ctx, room.ID, world.ID, s.now().UTC())
-		age := s.now().Sub(observedAt)
-		if err != nil || freshness != FreshnessLive || age < -2*time.Second || age > 15*time.Second {
-			if errors.Is(err, context.DeadlineExceeded) {
+		var result SnapshotResult
+		var snapshotErr error
+		if probe, ok := s.probe.(inventoryLocationProbe); ok {
+			result, snapshotErr = probe.InventorySnapshot(ctx, room.ID, world.ID, force)
+		} else {
+			result, snapshotErr = s.readSnapshot(ctx, room.ID, world.ID, s.now().UTC())
+		}
+		if snapshotErr != nil || !inventorySnapshotFresh(result, s.now()) {
+			if errors.Is(snapshotErr, context.DeadlineExceeded) || errors.Is(snapshotErr, ErrProbeTimedOut) {
 				return nil, &shared.InventoryError{Code: "INVENTORY_TIMEOUT"}
 			}
-			return nil, &shared.InventoryError{Code: "PLAYER_LOCATION_UNCERTAIN"}
+			if errors.Is(snapshotErr, context.Canceled) {
+				return nil, snapshotErr
+			}
+			if errors.Is(snapshotErr, ErrTelemetryRecoveryDeferred) {
+				return nil, &shared.InventoryError{Code: "INVENTORY_BUSY"}
+			}
+			return nil, errors.Join(&shared.InventoryError{Code: "PLAYER_LOCATION_UNCERTAIN"}, snapshotErr)
 		}
-		for _, observation := range observations {
+		for _, observation := range result.Observations {
 			if observation.ID != player {
 				continue
 			}
-			if selected != nil || observation.GameplayState == GameplayStateMigrating {
-				return nil, &shared.InventoryError{Code: "PLAYER_LOCATION_UNCERTAIN"}
+			connected = true
+			selecting = selecting || observation.GameplayState == GameplayStateSelectingCharacter || observation.GameplayState == GameplayStateLoading
+			if observation.LocalEntity == nil || !*observation.LocalEntity {
+				continue
 			}
-			if observation.GameplayState == GameplayStateLoading || observation.GameplayState == GameplayStateSelectingCharacter {
-				return nil, &shared.InventoryError{Code: "PLAYER_NOT_READY"}
+			migrating = migrating || observation.GameplayState == GameplayStateMigrating
+			if selected != nil {
+				return nil, uncertainInventoryLocation()
 			}
 			copy := world
 			selected = &copy
 		}
 	}
-	return selected, nil
+	if migrating {
+		return nil, uncertainInventoryLocation()
+	}
+	if selected != nil {
+		return selected, nil
+	}
+	if connected {
+		if selecting {
+			return nil, &shared.InventoryError{Code: "PLAYER_NOT_READY"}
+		}
+		if scoped {
+			return nil, &shared.InventoryError{Code: "PLAYER_NOT_ONLINE"}
+		}
+		return nil, uncertainInventoryLocation()
+	}
+	return nil, nil
 }

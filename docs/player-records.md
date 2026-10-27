@@ -9,6 +9,8 @@
 - 已离线或状态过期的玩家，其之前采集的游戏属性不会继续标为实时。首页“状态已过期”包含离线且状态过期的记录；后台无人维护使用的在线人数口径保持保守。
 - 未确定 Session 的旧日志不能补入已经确定的新存档。此行为不修改游戏存档、封禁名单或白名单。
 
+房间在线人数按真实连接的 KU ID 去重，包含选角、加载和跨分片迁移中的玩家。世界人数只计算当前分片的本地玩家实体，所以房间在线数可能大于各世界人数之和。没有实体归属时显示“位置确认中”；悬停可查看最后确认的位置，这不表示当前仍在该世界。虚拟 `[Host]` 不计入玩家。
+
 API：`GET /api/v2/rooms/{roomId}/players?scope=current|history`，默认 `current`。
 `sessionId` 表示记录对应的分片存档；`historical` 和 `historyId` 标识历史记录。
 汇总 `stale` 包含全部状态过期记录；`staleOnline` 只包含最后已知在线且观测过期的记录。
@@ -30,3 +32,5 @@ Offline or stale gameplay attributes are not marked live. The `scope=current|his
 query selects current or archived records; `sessionId`, `historical` and `historyId`
 identify their source. The `stale` total includes offline records with stale presence,
 while `staleOnline` retains its conservative online-maintenance meaning.
+
+Room online counts unique real connections, including character selection, loading and shard migration. Per-world counts include only shard-local entities, so their sum can be below room online. Players without a confirmed current shard show a pending location; the tooltip can show the last confirmed world as history. Dedicated `[Host]` entries are excluded.

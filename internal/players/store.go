@@ -11,6 +11,8 @@ import (
 )
 
 type playerRecord struct {
+	// PresenceWorldID identifies the observer, not the player's current location.
+	PresenceWorldID  string `gorm:"type:varchar(255);not null;default:''"`
 	SessionID        string `gorm:"type:varchar(128)"`
 	RoomID           string `gorm:"type:varchar(255);not null;unique_index:idx_player_room_user;index"`
 	UserID           string `gorm:"type:varchar(128);not null;unique_index:idx_player_room_user"`
@@ -19,8 +21,9 @@ type playerRecord struct {
 	Name             string `gorm:"type:varchar(256);not null;index"`
 	Prefab           string `gorm:"type:varchar(128);index"`
 	GameplayState    string `gorm:"type:varchar(32);index"`
-	Online           bool   `gorm:"not null;index"`
-	Admin            bool   `gorm:"not null"`
+	LocalEntity      *bool
+	Online           bool `gorm:"not null;index"`
+	Admin            bool `gorm:"not null"`
 	Age              int
 	NetID            string `gorm:"type:varchar(128)"`
 	NetScore         *int
@@ -43,6 +46,16 @@ type playerRecord struct {
 	LastSeenAt       time.Time `gorm:"not null;index"`
 	StatusChangedAt  time.Time `gorm:"not null"`
 	LastRefreshedAt  time.Time `gorm:"not null;index"`
+}
+
+// Empty observer IDs are records written before explicit presence provenance.
+const presenceWorldColumn = "COALESCE(NULLIF(presence_world_id, ''), world_id)"
+
+func presenceObserverWorld(record playerRecord) string {
+	if record.PresenceWorldID != "" {
+		return record.PresenceWorldID
+	}
+	return record.WorldID
 }
 
 type banRecord struct {
@@ -154,6 +167,7 @@ func (s *Store) ReplaceRoomSnapshots(roomID string, snapshots []worldSnapshot) e
 		// connection list. Its remote "loading" entry cannot replace another
 		// shard's confirmed entity state when that shard was not sampled.
 		if existing.Online && storedWorldConfirmed(existing) && existing.WorldID != candidate.WorldID &&
+			candidate.observation.LocalEntity == nil &&
 			!observedWorlds[existing.WorldID] && !candidateHasLocalPlayer(candidate) &&
 			(candidate.observation.GameplayState == GameplayStateLoading || candidate.observation.GameplayState == GameplayStateSelectingCharacter) {
 			continue
@@ -191,7 +205,7 @@ func (s *Store) ReplaceRoomSnapshots(roomID string, snapshots []worldSnapshot) e
 
 func (s *Store) markStoppedWorldPlayersOffline(tx *gorm.DB, roomID string, snapshot worldSnapshot) error {
 	var online []playerRecord
-	if err := tx.Table(s.table).Where("room_id = ? AND world_id = ? AND online = ?", roomID, snapshot.WorldID, true).Find(&online).Error; err != nil {
+	if err := tx.Table(s.table).Where("room_id = ? AND "+presenceWorldColumn+" = ? AND online = ?", roomID, snapshot.WorldID, true).Find(&online).Error; err != nil {
 		return err
 	}
 	for _, record := range online {
@@ -217,6 +231,9 @@ func (s *Store) markStoppedWorldPlayersOffline(tx *gorm.DB, roomID string, snaps
 }
 
 func snapshotCandidateWins(candidate, current snapshotCandidate, existing playerRecord) bool {
+	if candidate.ObservedAt.Sub(current.ObservedAt) > 15*time.Second || current.ObservedAt.Sub(candidate.ObservedAt) > 15*time.Second {
+		return candidate.ObservedAt.After(current.ObservedAt)
+	}
 	candidateLocal := candidateHasLocalPlayer(candidate)
 	currentLocal := candidateHasLocalPlayer(current)
 	if candidateLocal != currentLocal {
@@ -248,7 +265,7 @@ func (s *Store) upsertSnapshotPlayer(tx *gorm.DB, roomID string, candidate snaps
 	}
 	observation.Fields["lastSeenAt"] = liveField(source, candidate.ObservedAt)
 	observation.Fields["world"] = FieldState{Source: source, Status: FreshnessUnavailable}
-	if candidateHasLocalPlayer(candidate) || source == SourceNativeLog {
+	if candidateHasLocalPlayer(candidate) || source == SourceNativeLog && observation.LocalEntity == nil {
 		observation.Fields["world"] = liveField(source, candidate.ObservedAt)
 	}
 	encodedWorldIDs := encodeWorldIDs(observedWorldIDs)
@@ -264,8 +281,8 @@ func (s *Store) upsertSnapshotPlayer(tx *gorm.DB, roomID string, candidate snaps
 			return err
 		}
 		record := playerRecord{
-			SessionID: candidate.SessionID, RoomID: roomID, UserID: observation.ID, WorldID: candidate.WorldID, WorldName: candidate.WorldName,
-			Name: observation.Name, Prefab: observation.Prefab, GameplayState: observation.GameplayState, Online: true, Admin: observation.Admin,
+			PresenceWorldID: candidate.WorldID, SessionID: candidate.SessionID, RoomID: roomID, UserID: observation.ID, WorldID: candidate.WorldID, WorldName: candidate.WorldName,
+			Name: observation.Name, Prefab: observation.Prefab, GameplayState: observation.GameplayState, LocalEntity: observation.LocalEntity, Online: true, Admin: observation.Admin,
 			Age: observation.Age, NetID: observation.NetID, NetScore: observation.NetScore,
 			HealthPercent: observation.HealthPercent, HungerPercent: observation.HungerPercent,
 			SanityPercent: observation.SanityPercent, Temperature: observation.Temperature, Moisture: observation.Moisture,
@@ -302,7 +319,9 @@ func (s *Store) upsertSnapshotPlayer(tx *gorm.DB, roomID string, candidate snaps
 		return err
 	}
 	updates := map[string]interface{}{
-		"world_id": worldID, "world_name": worldName, "name": observation.Name,
+		"local_entity":      observation.LocalEntity,
+		"presence_world_id": candidate.WorldID,
+		"world_id":          worldID, "world_name": worldName, "name": observation.Name,
 		"online": true, "admin": observation.Admin, "age": observation.Age, "net_id": observation.NetID,
 		"performance": nil, "field_states": encodedFieldStates,
 		"presence_conflict": presenceConflict, "observed_world_ids": encodedWorldIDs,
@@ -343,7 +362,7 @@ func (s *Store) upsertSnapshotPlayer(tx *gorm.DB, roomID string, candidate snaps
 
 func (s *Store) markMissingSnapshotPlayersOffline(tx *gorm.DB, roomID string, snapshot worldSnapshot, winners map[string]snapshotCandidate) error {
 	var online []playerRecord
-	if err := tx.Table(s.table).Where("room_id = ? AND world_id = ? AND online = ?", roomID, snapshot.WorldID, true).Find(&online).Error; err != nil {
+	if err := tx.Table(s.table).Where("room_id = ? AND "+presenceWorldColumn+" = ? AND online = ?", roomID, snapshot.WorldID, true).Find(&online).Error; err != nil {
 		return err
 	}
 	for _, record := range online {
@@ -452,7 +471,7 @@ func (s *Store) mergeWorldHistoryTx(tx *gorm.DB, roomID, worldID, worldName stri
 }
 
 func (s *Store) MarkWorldOffline(roomID, worldID string, observedAt time.Time) error {
-	return s.markRecordsOffline(roomID, "world_id = ?", worldID, observedAt)
+	return s.markRecordsOffline(roomID, presenceWorldColumn+" = ?", worldID, observedAt)
 }
 
 // ObserveRuntimePresence updates only presence that has become invalid. It does
@@ -472,7 +491,7 @@ func (s *Store) ObserveRuntimePresence(roomID string, stopped, unconfirmed []str
 	}
 	defer tx.Rollback()
 	var records []playerRecord
-	if err := tx.Table(s.table).Where("room_id = ? AND world_id IN (?) AND online = ?", roomID, worldIDs, true).Find(&records).Error; err != nil {
+	if err := tx.Table(s.table).Where("room_id = ? AND "+presenceWorldColumn+" IN (?) AND online = ?", roomID, worldIDs, true).Find(&records).Error; err != nil {
 		return err
 	}
 	for _, record := range records {
@@ -487,7 +506,7 @@ func (s *Store) ObserveRuntimePresence(roomID string, stopped, unconfirmed []str
 			instant := record.LastRefreshedAt.UTC()
 			states["online"] = FieldState{Source: SourceNativeLog, ObservedAt: &instant, Status: FreshnessStale}
 		}
-		if confirmedStopped[record.WorldID] {
+		if confirmedStopped[presenceObserverWorld(record)] {
 			instant := observedAt.UTC()
 			states["online"] = FieldState{Source: SourceNativeLog, ObservedAt: &instant, Status: FreshnessStale}
 		}
@@ -495,11 +514,11 @@ func (s *Store) ObserveRuntimePresence(roomID string, stopped, unconfirmed []str
 		if err != nil {
 			return err
 		}
-		if !confirmedStopped[record.WorldID] && encoded == record.FieldStates {
+		if !confirmedStopped[presenceObserverWorld(record)] && encoded == record.FieldStates {
 			continue
 		}
 		updates := map[string]interface{}{"field_states": encoded}
-		if confirmedStopped[record.WorldID] {
+		if confirmedStopped[presenceObserverWorld(record)] {
 			updates["online"], updates["status_changed_at"] = false, observedAt.UTC()
 			updates["presence_conflict"] = false
 			updates["observed_world_ids"] = encodeWorldIDs([]string{record.WorldID})
@@ -598,33 +617,48 @@ func (s *Store) List(roomID string, filter ListFilter) ([]Player, int, error) {
 	return items, total, nil
 }
 
+type playerCounts struct {
+	total, online, staleOnline, unlocatedOnline int
+	refreshedAt                                 *time.Time
+}
+
 func (s *Store) Counts(roomID string) (int, int, int, *time.Time, error) {
-	var total int
+	counts, err := s.presenceCounts(roomID)
+	return counts.total, counts.online, counts.staleOnline, counts.refreshedAt, err
+}
+
+func (s *Store) presenceCounts(roomID string) (playerCounts, error) {
+	counts := playerCounts{}
 	base := s.db.Table(s.table).Where("room_id = ?", roomID)
-	if err := base.Count(&total).Error; err != nil {
-		return 0, 0, 0, nil, err
+	if err := base.Count(&counts.total).Error; err != nil {
+		return counts, err
 	}
-	var onlineRecords []playerRecord
-	if err := s.db.Table(s.table).Select("field_states").Where("room_id = ? AND online = ?", roomID, true).Find(&onlineRecords).Error; err != nil {
-		return 0, 0, 0, nil, err
+	var records []playerRecord
+	if err := s.db.Table(s.table).Select("field_states, presence_conflict, gameplay_state").Where("room_id = ? AND online = ?", roomID, true).Find(&records).Error; err != nil {
+		return counts, err
 	}
-	staleOnline := 0
-	for _, record := range onlineRecords {
-		if decodeFieldStates(record.FieldStates)["online"].Status != FreshnessLive {
-			staleOnline++
+	for _, record := range records {
+		fields := decodeFieldStates(record.FieldStates)
+		if fields["online"].Status != FreshnessLive {
+			counts.staleOnline++
+			continue
+		}
+		counts.online++
+		if fields["world"].Status != FreshnessLive || record.PresenceConflict || record.GameplayState == GameplayStateMigrating {
+			counts.unlocatedOnline++
 		}
 	}
-	online := len(onlineRecords) - staleOnline
-	var record playerRecord
-	result := s.db.Table(s.table).Where("room_id = ?", roomID).Order("last_refreshed_at DESC").First(&record)
+	var latest playerRecord
+	result := s.db.Table(s.table).Where("room_id = ?", roomID).Order("last_refreshed_at DESC").First(&latest)
 	if gorm.IsRecordNotFoundError(result.Error) {
-		return total, online, staleOnline, nil, nil
+		return counts, nil
 	}
 	if result.Error != nil {
-		return 0, 0, 0, nil, result.Error
+		return counts, result.Error
 	}
-	refreshed := record.LastRefreshedAt.UTC()
-	return total, online, staleOnline, &refreshed, nil
+	refreshed := latest.LastRefreshedAt.UTC()
+	counts.refreshedAt = &refreshed
+	return counts, nil
 }
 
 func (s *Store) SaveBan(value Ban) error {
@@ -701,7 +735,8 @@ func playerFromRecord(record playerRecord) Player {
 	}
 	return Player{
 		SessionID: record.SessionID, ID: record.UserID, RoomID: record.RoomID, WorldID: record.WorldID, WorldName: record.WorldName,
-		WorldConfirmed: storedWorldConfirmed(record),
+		WorldConfirmed: storedWorldConfirmed(record) && (!record.Online || fields["world"].Status == FreshnessLive && !record.PresenceConflict && record.GameplayState != GameplayStateMigrating),
+		LocalEntity:    record.LocalEntity,
 		Name:           record.Name, Prefab: record.Prefab, GameplayState: record.GameplayState, Online: record.Online, Admin: record.Admin, Age: record.Age,
 		NetID: record.NetID, NetScore: record.NetScore, Performance: record.Performance, HealthPercent: record.HealthPercent,
 		HungerPercent: record.HungerPercent, SanityPercent: record.SanityPercent,
@@ -726,27 +761,12 @@ func presenceWorldIDs(winner snapshotCandidate, candidates []snapshotCandidate) 
 		}
 	}
 	cutoff := latest.Add(-15 * time.Second)
-	hasLocalPlayer := false
-	for _, candidate := range candidates {
-		if !candidate.ObservedAt.Before(cutoff) && candidateHasLocalPlayer(candidate) {
-			hasLocalPlayer = true
-			break
-		}
-	}
 	seen := map[string]bool{}
 	for _, candidate := range candidates {
-		if candidate.ObservedAt.Before(cutoff) || strings.TrimSpace(candidate.WorldID) == "" || hasLocalPlayer && !candidateHasLocalPlayer(candidate) {
+		if candidate.ObservedAt.Before(cutoff) || strings.TrimSpace(candidate.WorldID) == "" || !candidateHasLocalPlayer(candidate) {
 			continue
 		}
 		seen[candidate.WorldID] = true
-	}
-	// TheNet:GetClientTable is cluster-wide. When no shard has a local player
-	// entity yet, every shard may report the same selecting/loading client.
-	if !hasLocalPlayer {
-		seen = map[string]bool{winner.WorldID: true}
-	}
-	if len(seen) == 0 {
-		seen[winner.WorldID] = true
 	}
 	values := make([]string, 0, len(seen))
 	for worldID := range seen {
@@ -757,6 +777,9 @@ func presenceWorldIDs(winner snapshotCandidate, candidates []snapshotCandidate) 
 }
 
 func candidateHasLocalPlayer(candidate snapshotCandidate) bool {
+	if candidate.observation.LocalEntity != nil {
+		return *candidate.observation.LocalEntity
+	}
 	switch candidate.observation.GameplayState {
 	case GameplayStateAlive, GameplayStateDead, GameplayStateGhost, GameplayStateMigrating:
 		return true
@@ -776,7 +799,7 @@ func decodeWorldIDs(encoded, fallback string) []string {
 	if strings.TrimSpace(encoded) != "" {
 		_ = json.Unmarshal([]byte(encoded), &values)
 	}
-	if len(values) == 0 && strings.TrimSpace(fallback) != "" {
+	if strings.TrimSpace(encoded) == "" && strings.TrimSpace(fallback) != "" {
 		values = []string{fallback}
 	}
 	return values

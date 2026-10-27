@@ -238,6 +238,9 @@ func decodeSnapshotData(data []byte, expectedSession, expectedShard string, now 
 	seen := make(map[string]bool, len(value.Players))
 	for index := range value.Players {
 		player := &value.Players[index]
+		if value.LocalityKnown && player.LocalEntity == nil {
+			return Snapshot{}, fmt.Errorf("%w: missing local entity evidence", ErrSnapshotInvalid)
+		}
 		if !snapshotPlayerID.MatchString(player.ID) || seen[player.ID] || strings.TrimSpace(player.Name) == "" || len([]rune(player.Name)) > 256 || len([]rune(player.Prefab)) > 128 || len([]rune(player.GameplayState)) > 32 || len([]rune(player.NetID)) > 128 || player.Age < 0 {
 			return Snapshot{}, fmt.Errorf("%w: invalid player identity", ErrSnapshotInvalid)
 		}

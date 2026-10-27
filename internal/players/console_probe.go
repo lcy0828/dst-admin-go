@@ -78,19 +78,17 @@ func (p *ConsoleProbe) Snapshot(ctx context.Context, roomID, worldID string) ([]
 	}
 }
 
+// Keep the fallback small enough for both local and Agent console transports.
+// Account metadata is cluster-wide; only AllPlayers proves shard locality.
+// Detailed vitals remain unavailable until managed telemetry is healthy.
 func playerProbeScript(nonce string) string {
-	return `local __p="[DST-".."ADMIN-PLAYERS ` + nonce + `"; ` +
-		`local function __e(v) return (tostring(v or ""):gsub("([^%w%-%._])",function(c) return string.format("%%%02X",string.byte(c)) end)) end; ` +
-		`for _,v in ipairs(TheNet:GetClientTable() or {}) do local p=UserToPlayer(v.userid); ` +
-		`local g=p and (p.migration and "migrating" or (p.HasTag and p:HasTag("playerghost") and "ghost") or (p.components and p.components.health and p.components.health:IsDead() and "dead") or "alive") or ((v.prefab==nil or v.prefab=="") and "selecting_character" or "loading"); ` +
-		`local h=-1 local u=-1 local s=-1 local t=-999 local m=-1; ` +
-		`if p then if p.components.health then h=p.components.health:GetPercent()*100 end; ` +
-		`if p.components.hunger then u=p.components.hunger:GetPercent()*100 end; ` +
-		`if p.components.sanity then s=p.components.sanity:GetPercent()*100 end; ` +
-		`if p.components.temperature then t=p.components.temperature.current end; ` +
-		`if p.components.moisture then m=p.components.moisture:GetMoisture() end end; ` +
-		`print(__p.." ITEM] "..table.concat({__e(v.userid),__e(v.name),__e(v.prefab),tostring(v.playerage or 0),v.admin and "1" or "0",__e(v.netid),tostring(v.netscore or -1),tostring(h),tostring(u),tostring(s),tostring(t),tostring(m),__e(g)},"\t")) end; ` +
-		`print(__p.." DONE]")`
+    return `local q="[DST-".."ADMIN-PLAYERS ` + nonce + `";` +
+        `local function e(v)return(tostring(v or""):gsub("([^%w%-%._])",function(c)return string.format("%%%02X",c:byte())end))end;` +
+        `local a,b={},{};for i,p in ipairs(AllPlayers)do assert(i<257);a[p.userid]=p end;` +
+        `for i,v in ipairs(TheNet:GetClientTable()or{})do assert(i<257);if v.userid and(v.name~="[Host]"or(v.prefab or"")~=""or(v.netid or"")~="")then b[v.userid]=v end end;` +
+        `for u,p in pairs(a)do b[u]=b[u]or{userid=u,name=p.name,prefab=p.prefab}end;` +
+        `for u,v in pairs(b)do local p=a[u];local g=p and(p.migration and"migrating"or p:HasTag("playerghost")and"ghost"or p.components.health and p.components.health:IsDead()and"dead"or"alive")or(v.prefab and v.prefab~=""and"unknown"or"selecting_character");` +
+        `print(q.." ITEM] "..table.concat({e(u),e(v.name or u),e(p and p.prefab or v.prefab),v.playerage or 0,v.admin and 1 or 0,e(v.netid),v.netscore or -1,-1,-1,-1,-999,-1,g,p and 1 or 0},"\t"))end;print(q.." DONE]")`
 }
 
 func consoleProbeLogSize(path string) (int64, error) {

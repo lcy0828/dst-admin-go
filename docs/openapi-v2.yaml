@@ -4311,16 +4311,17 @@ paths:
       summary: Read a player's carried items from live memory or their current Session save without saving the game
       description: >-
         Includes equipment, inventory, held items, standard containers and serialized bundles. Works on the applied local or Agent node.
-        auto chooses live only with confirmed presence; stopped or confirmed offline players use saved data. Ambiguous worlds or directories return candidates.
+        auto chooses live only with confirmed shard-local entity evidence, refreshing stale or legacy location data on demand. Cluster client lists alone do not establish location.
+        Only stopped worlds or complete fresh observations confirming the player offline allow automatic saved data. Directory ambiguity returns candidates; uncertain location never falls back to saved data.
         A live read failure never silently falls back to save. Explicit save does not require the game or Lua Runtime to run.
         Saved file time is not a logout time. Missing saved attribute denominators are unknown, not zero or full.
         Complete covers supported standard components, not arbitrary Mod-private storage. Partial results are not empty inventories.
         Imported saves can be inspected by a known player ID without a historical player database record.
       parameters:
         - { name: source, in: query, schema: { type: string, enum: [auto, live, save], default: auto } }
-        - { name: worldId, in: query, schema: { type: string }, description: Select a specific world's source; do not guess during migration }
+        - { name: worldId, in: query, schema: { type: string }, description: Strictly restrict lookup to this world; never cross to another world even during migration }
         - { name: sourceId, in: query, schema: { type: string, pattern: '^[a-f0-9]{64}$' }, description: Opaque source identifier returned in candidates; select its worldId together with it }
-        - { name: refresh, in: query, schema: { type: boolean, default: false }, description: Bypass completed parsing cache; still coalesces in-flight reads }
+        - { name: refresh, in: query, schema: { type: boolean, default: false }, description: Reconfirm live shard location and bypass saved parsing cache; still coalesces equivalent in-flight reads and respects rate limits }
       responses:
         "200": { description: Complete or explicitly partial inventory, content: { application/json: { schema: { $ref: "#/components/schemas/PlayerInventoryEnvelope" } } } }
         "400": { $ref: "#/components/responses/BadRequest" }
@@ -10103,7 +10104,8 @@ components:
         roomId: { type: string }
         worldId: { type: string }
         worldName: { type: string }
-        worldConfirmed: { type: boolean, description: True only when local entity or native connection events establish the world; a cluster-wide client list alone is insufficient }
+        localEntity: { type: boolean, description: Explicit local entity evidence from the selected observation; absent for older producers and history. Does not by itself guarantee fresh presence }
+        worldConfirmed: { type: boolean, description: For online players, true only for current local entity evidence without conflict. When false, worldId and worldName can be last-known history and must not be shown as current location. A cluster-wide client list alone is insufficient }
         name: { type: string }
         prefab: { type: string }
         online: { type: boolean }
@@ -10133,7 +10135,7 @@ components:
         fields:
           type: object
           additionalProperties: { $ref: "#/components/schemas/PlayerFieldState" }
-        presenceConflict: { type: boolean }
+        presenceConflict: { type: boolean, description: Simultaneous shard-local entity evidence in multiple worlds; duplicated cluster client entries alone do not create a conflict }
         observedWorldIds: { type: array, items: { type: string } }
     PlayerDataSource:
       type: string
@@ -10167,7 +10169,7 @@ components:
         online:
           type: integer
           minimum: 0
-          description: Players confirmed online by the latest successful observation.
+          description: Unique real cluster connections in the latest successful observation, including selecting, loading and migrating players. A player can be online without a confirmed current world.
         staleOnline:
           type: integer
           minimum: 0

@@ -70,7 +70,7 @@ func NewService(roomCatalog RoomCatalog, runtime Runtime, sender Sender, access 
 	service := &Service{
 		rooms: roomCatalog, runtime: runtime, sender: sender, access: access, store: store, probe: probe,
 		now: time.Now, locks: make(map[string]*sync.Mutex),
-		inventoryReads: playerinventory.NewCoalescer(4, 0),
+		inventoryReads: playerinventory.NewCoalescer(2, 2*time.Second),
 	}
 	if len(commanders) > 0 {
 		service.commander = commanders[0]
@@ -187,7 +187,7 @@ func (s *Service) RefreshPresence(ctx context.Context, roomID string) (PresenceS
 	}
 	for _, outcome := range outcomes {
 		world := PresenceWorld{
-			WorldID: outcome.WorldID, Running: outcome.Result.Running, Count: outcome.Result.Count,
+			WorldID: outcome.WorldID, Running: outcome.Result.Running, Count: outcome.Result.Count, CountKnown: outcome.Result.CountKnown,
 			Status: outcome.Result.Status, ObservedAt: outcome.Result.ObservedAt, Warning: outcome.Result.Warning,
 		}
 		if outcome.Err != nil {
@@ -205,12 +205,13 @@ func (s *Service) RefreshPresence(ctx context.Context, roomID string) (PresenceS
 		}
 		result.Worlds = append(result.Worlds, world)
 	}
-	_, online, staleOnline, _, err := s.store.Counts(roomID)
+	counts, err := s.store.presenceCounts(roomID)
 	if err != nil {
 		return result, err
 	}
-	result.Online, result.StaleOnline = online+staleOnline, staleOnline
-	if staleOnline > 0 {
+	result.Online, result.StaleOnline = counts.online+counts.staleOnline, counts.staleOnline
+	result.UnlocatedOnline = counts.unlocatedOnline
+	if counts.staleOnline > 0 {
 		result.Fresh = false
 		result.Warnings = append(result.Warnings, "存在未确认离线的玩家记录")
 	}
@@ -441,10 +442,18 @@ func (s *Service) collectWorldSnapshot(ctx context.Context, room rooms.Room, wor
 		if historyErr != nil {
 			warning = historyWarning(historyErr)
 		}
-		outcome.Result = RefreshResult{WorldID: world.ID, Running: false, Source: SourceNativeLog, Status: FreshnessStale, Warning: warning, Message: message}
+		outcome.Result = RefreshResult{WorldID: world.ID, Running: false, CountKnown: true, Source: SourceNativeLog, Status: FreshnessStale, Warning: warning, Message: message}
 		return outcome, snapshot
 	}
-	observations, source, status, warning, snapshotAt, sessionID, err := s.readSnapshot(ctx, room.ID, world.ID, observedAt)
+	result, err := s.readSnapshot(ctx, room.ID, world.ID, observedAt)
+	observations, source, warning, snapshotAt, sessionID := result.Observations, result.Source, result.Warning, result.ObservedAt, result.SessionID
+	status := FreshnessLive
+	if result.Degraded {
+		status = FreshnessStale
+	}
+	if snapshotAt.IsZero() {
+		snapshotAt = observedAt
+	}
 	if err != nil {
 		if ctx.Err() == nil && (errors.Is(err, dstruntime.ErrRuntimeRefreshDeferred) || errors.Is(err, ErrTelemetryRecoveryDeferred)) {
 			outcome.Deferred = true
@@ -482,35 +491,33 @@ func (s *Service) collectWorldSnapshot(ctx context.Context, room rooms.Room, wor
 		}
 		warning += historyWarning(historyErr)
 	}
-	message := fmt.Sprintf("已通过 %s 读取 %d 个在线玩家", playerSourceLabel(source), len(observations))
+	localCount := 0
+	for _, observation := range observations {
+		if candidateHasLocalPlayer(snapshotCandidate{observation: observation}) {
+			localCount++
+		}
+	}
+	message := fmt.Sprintf("已通过 %s 读取 %d 个本地玩家实体", playerSourceLabel(source), localCount)
+	if !result.LocalityKnown {
+		message = fmt.Sprintf("已通过 %s 读取 %d 个连接记录；当前分片人数尚未确认", playerSourceLabel(source), len(observations))
+	}
 	outcome.Result = RefreshResult{
-		WorldID: world.ID, Count: len(observations), Running: true, Source: source, Status: status,
+		WorldID: world.ID, Count: localCount, CountKnown: result.LocalityKnown, Running: true, Source: source, Status: status,
 		ObservedAt: &observedAt, Warning: warning, Message: message,
 	}
 	return outcome, snapshot
 }
 
-func (s *Service) readSnapshot(ctx context.Context, roomID, worldID string, observedAt time.Time) ([]Observation, DataSource, FreshnessStatus, string, time.Time, string, error) {
+func (s *Service) readSnapshot(ctx context.Context, roomID, worldID string, observedAt time.Time) (SnapshotResult, error) {
 	if detailed, ok := s.probe.(DetailedProbe); ok {
-		result, err := detailed.SnapshotDetailed(ctx, roomID, worldID)
-		if err != nil {
-			return nil, "", FreshnessUnavailable, "", time.Time{}, "", err
-		}
-		status := FreshnessLive
-		if result.Degraded {
-			status = FreshnessStale
-		}
-		if result.ObservedAt.IsZero() {
-			result.ObservedAt = observedAt
-		}
-		return result.Observations, result.Source, status, result.Warning, result.ObservedAt.UTC(), result.SessionID, nil
+		return detailed.SnapshotDetailed(ctx, roomID, worldID)
 	}
 	observations, err := s.probe.Snapshot(ctx, roomID, worldID)
 	if err != nil {
-		return nil, "", FreshnessUnavailable, "", time.Time{}, "", err
+		return SnapshotResult{}, err
 	}
-	observations = stampNativeObservations(observations, observedAt)
-	return observations, SourceNativeLog, FreshnessLive, "", observedAt, "", nil
+	return SnapshotResult{Observations: stampNativeObservations(observations, observedAt), Source: SourceNativeLog,
+		ObservedAt: observedAt, LocalityKnown: observationsHaveLocality(observations)}, nil
 }
 
 func playerSourceLabel(source DataSource) string {

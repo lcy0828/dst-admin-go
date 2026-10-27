@@ -57,7 +57,7 @@ func TestParseProbeOutputDecodesCurrentVitalsAndCharacterMaximums(t *testing.T) 
 
 func TestPlayerProbeScriptStaysWithinDSTConsoleInputBudget(t *testing.T) {
 	script := playerProbeScript("00000000-0000-0000-0000-000000000000")
-	if length := len(script); length > 1800 {
+	if length := len(script); length > 1023 {
 		t.Fatalf("fallback player probe is too long for the DST console: %d bytes", length)
 	}
 	if !strings.Contains(script, "v.netscore or -1") || strings.Contains(script, "v.performance or -1") {

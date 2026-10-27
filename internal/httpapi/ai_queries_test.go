@@ -130,7 +130,7 @@ func TestAIQueriesUseDomainPlayerAndModFacts(t *testing.T) {
 	f := &aiQueryFixture{refreshErr: errors.New("one Agent offline")}
 	b := &AIBackend{queries: AIPlatformQueries{Players: f, Mods: f, ModMetadata: f, Automation: f}}
 	raw, err := b.Invoke(context.Background(), "room_players", aicontrol.Arguments{RoomID: "r"}, "r")
-	if err != nil || f.refreshes != 1 || !strings.Contains(string(raw), `"currentPresenceAvailable":false`) || !strings.Contains(string(raw), `"staleOnline":1`) || !strings.Contains(string(raw), "one Agent offline") {
+	if err != nil || f.refreshes != 1 || !strings.Contains(string(raw), `"currentPresenceAvailable":false`) || !strings.Contains(string(raw), `"staleOnline":1`) || !strings.Contains(string(raw), "one Agent offline") || !strings.Contains(string(raw), `"worldConfirmed":false`) || !strings.Contains(string(raw), "World counts are local entities only") {
 		t.Fatal(string(raw), err)
 	}
 	raw, err = b.Invoke(context.Background(), "room_mods", aicontrol.Arguments{RoomID: "r", Limit: 1}, "r")

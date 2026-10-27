@@ -18,7 +18,7 @@ API 与 AI/MCP 使用同一接口：
 GET /api/v2/rooms/{roomId}/players/{playerId}/inventory?source=auto
 ```
 
-`source` 可选 `auto`、`live`、`save`；可用 `worldId` 和返回的 `sourceId` 选择来源。`refresh=true` 跳过存档解析缓存，仍受并发与刷新频率限制。完整参数和错误见 [OpenAPI](openapi-v2.yaml) 的 `getRoomPlayerInventory`。
+`source` 可选 `auto`、`live`、`save`；可用 `worldId` 和返回的 `sourceId` 选择来源。`refresh=true` 重新确认在线玩家的位置并跳过存档解析缓存，仍受并发与刷新频率限制。在线定位基于分片本地玩家实体，位置数据过期时在本次请求内按需刷新，无需先打开或刷新玩家列表。指定 `worldId` 会严格限制该世界，不会自动跨世界；位置不确定、采集失败或节点离线不会自动改读历史存档。完整参数和错误见 [OpenAPI](openapi-v2.yaml) 的 `getRoomPlayerInventory`。
 
 ## English
 
@@ -30,4 +30,4 @@ Queries do not save the game, create items or modify saves. There is no addition
 
 Search preserves container ancestry. Existing artwork is reused; missing images do not block results. Mods using standard components are supported. Ground chests, followers, shared storage and private Mod storage are excluded. A complete result covers supported components only. Limits produce an explicit partial result. Missing saved attribute maximums remain unknown rather than becoming zero or full percentages.
 
-The page, AI and MCP share the authenticated `getRoomPlayerInventory` OpenAPI operation shown above. Use `source=auto|live|save`, optionally `worldId` and a returned `sourceId`. `refresh=true` bypasses the save parsing cache while preserving concurrency and rate limits.
+The page, AI and MCP share the authenticated `getRoomPlayerInventory` OpenAPI operation shown above. Use `source=auto|live|save`, optionally `worldId` and a returned `sourceId`. `refresh=true` reconfirms live player location and bypasses the save parsing cache while preserving concurrency and rate limits. Location uses shard-local entities; stale evidence is refreshed on demand without requiring a player-list refresh. An explicit `worldId` strictly restricts the lookup. Unknown locations, collection failures and offline nodes never silently fall back to saved items.

@@ -81,8 +81,8 @@ func TestSelectingClientDoesNotAcquireFictitiousCavesLocation(t *testing.T) {
 	}
 	store.MergeWorldHistory("room", "master", "Master", []Observation{{ID: "KU_ONE", Name: "Selecting", FirstSeenAt: at, LastSeenAt: at, LastConnectedAt: at}}, at.Add(time.Second))
 	p, _ = store.Get("room", "KU_ONE")
-	if !p.WorldConfirmed || p.WorldID != "master" {
-		t.Fatalf("authentication did not establish location=%#v", p)
+	if p.WorldConfirmed || p.WorldID != "master" || p.Fields["world"].Status != FreshnessStale {
+		t.Fatalf("authentication history was presented as current location=%#v", p)
 	}
 	// The next cluster-wide sample must preserve the last confirmed world.
 	store.ReplaceRoomSnapshots("room", []worldSnapshot{{WorldID: "caves", WorldName: "Caves", Source: SourceRuntime, ObservedAt: at.Add(2 * time.Second), Observations: []Observation{obs}}})
