@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,15 +109,22 @@ func TestFailedPublishedRuntimeUpgradeRestoresLegacyHealthSelection(t *testing.T
 	// manifest must select old health again, despite the candidate's file.
 	control.afterSend = func(script string) {
 		if strings.Contains(script, "local __update=") {
-			if err := control.state.DoString(`DSTAdmin.WorldState.Stop()`); err != nil {
+			// Publish the injected failure. Stopping the module alone leaves the
+			// candidate's initial healthy snapshot on disk, so the check could
+			// legitimately accept it before the next heartbeat.
+			if err := control.state.DoString(`DSTAdmin.WorldState.Stop(); DSTAdmin.Telemetry.Heartbeat()`); err != nil {
 				t.Fatal(err)
+			}
+			health, err := manager.Health(catalog.room.ID, catalog.worlds[0].ID)
+			if err != nil || health.ProducerVersion != RuntimeVersion || health.Modules["worldstate"].Running {
+				t.Fatalf("candidate failure was not published: %+v %v", health, err)
 			}
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	result, err := EnsureNodeWorld(ctx, root, "Cluster_1", "Master", shared.RuntimeLuaRequest{Version: RuntimeVersion}, control)
-	if err == nil || result.Active || result.Version != "2.4.11" || control.state.GetGlobal("DSTAdmin") != previous {
+	if !errors.Is(err, context.DeadlineExceeded) || result.Active || result.Version != "2.4.11" || control.state.GetGlobal("DSTAdmin") != previous {
 		t.Fatalf("failed update did not recover published Runtime: %+v %v", result, err)
 	}
 	if _, err := os.Stat(filepath.Join(path, "save/mod_config_data/dst-admin/health-"+RuntimeVersion+".json")); err != nil {
