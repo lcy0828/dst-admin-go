@@ -21,7 +21,11 @@ import (
 	"github.com/yuin/gopher-lua/parse"
 )
 
-type Metadata struct{ Name, Author, Version, Description, Reason string }
+type Metadata struct {
+	Name, Author, Version, Description, Reason string
+	DSTCompatible                              *bool
+	APIVersion                                 string
+}
 type fingerprint struct {
 	Size     int64
 	Modified time.Time
@@ -151,10 +155,15 @@ func text(value string, limit int) string {
 	return value
 }
 func fields(values map[string]string) Metadata {
-	return Metadata{Name: text(values["name"], 2048), Author: text(values["author"], 2048), Version: text(values["version"], 256), Description: text(values["description"], 8192)}
+	result := Metadata{Name: text(values["name"], 2048), Author: text(values["author"], 2048), Version: text(values["version"], 256), Description: text(values["description"], 8192), APIVersion: text(values["api_version"], 32)}
+	if values["dst_compatible"] == "true" || values["dst_compatible"] == "false" {
+		value := values["dst_compatible"] == "true"
+		result.DSTCompatible = &value
+	}
+	return result
 }
 func wanted(key string) bool {
-	return key == "name" || key == "author" || key == "version" || key == "description"
+	return key == "name" || key == "author" || key == "version" || key == "description" || key == "dst_compatible" || key == "api_version"
 }
 
 func read(ctx context.Context, path, id, language string) (Metadata, map[string]fingerprint) {
@@ -190,12 +199,34 @@ func read(ctx context.Context, path, id, language string) (Metadata, map[string]
 				break
 			}
 			if wanted(name.Value) {
-				v, ok := assign.Rhs[i].(*ast.StringExpr)
-				if !ok {
+				switch v := assign.Rhs[i].(type) {
+				case *ast.StringExpr:
+					if name.Value != "dst_compatible" {
+						values[name.Value] = v.Value
+					} else {
+						delete(values, name.Value)
+					}
+				case *ast.NumberExpr:
+					if name.Value != "dst_compatible" {
+						values[name.Value] = v.Value
+					} else {
+						delete(values, name.Value)
+					}
+				case *ast.TrueExpr:
+					if name.Value == "dst_compatible" {
+						values[name.Value] = "true"
+					} else {
+						delete(values, name.Value)
+					}
+				case *ast.FalseExpr:
+					if name.Value == "dst_compatible" {
+						values[name.Value] = "false"
+					} else {
+						delete(values, name.Value)
+					}
+				default:
 					static = false
-					break
 				}
-				values[name.Value] = v.Value
 			} else if !literal(assign.Rhs[i]) {
 				static = false
 				break
@@ -326,9 +357,13 @@ func read(ctx context.Context, path, id, language string) (Metadata, map[string]
 		return Metadata{Reason: reason}, files
 	}
 	values = map[string]string{}
-	for _, name := range []string{"name", "author", "version", "description"} {
+	for _, name := range []string{"name", "author", "version", "description", "dst_compatible", "api_version"} {
 		v := state.GetGlobal(name)
-		if v.Type() == lua.LTString || v.Type() == lua.LTNumber {
+		if name == "dst_compatible" {
+			if v.Type() == lua.LTBool {
+				values[name] = v.String()
+			}
+		} else if v.Type() == lua.LTString || v.Type() == lua.LTNumber {
 			values[name] = v.String()
 		}
 	}

@@ -104,3 +104,49 @@ func TestModFactsUseRuntimeWithoutWorkshopMetadata(t *testing.T) {
 		t.Fatalf("remote failure replaced by local files: %#v, %v", list, err)
 	}
 }
+
+func TestCompatibilityFactsOmitLoadedLogScanningAndSteamQueries(t *testing.T) {
+	f := newSnapshotFixture(t)
+	f.mods.localList = mods.ModList{Items: []mods.ModState{{SteamMod: mods.SteamMod{ID: "100"}, Configured: true, Enabled: true, EnabledWorlds: []string{f.master.ID, f.caves.ID}}}}
+	catalog := &unavailableMetadataCatalog{testModCatalog: f.mods}
+	service, err := NewService(f.source, catalog, &snapshotCoordinator{source: f.source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer := &testRuntimeFileObserver{observation: &shared.RuntimeModFilesObservation{InstallationID: "install-2", Mods: map[string]shared.RuntimeModFileState{"100": {Status: shared.RuntimeModFileReady, Version: "1"}}}}
+	if err := service.ConfigureRuntimeFileObserver(observer); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.RoomCompatibilityFacts(context.Background(), f.room.ID)
+	if err != nil || len(result.Items) != 1 || catalog.calls != 0 || len(observer.requests) == 0 {
+		t.Fatal(result, err, catalog.calls)
+	}
+	for _, request := range observer.requests {
+		if !request.SkipLoadedLogs || len(request.Worlds) == 0 {
+			t.Fatal("compatibility read must skip logs but retain routing identities", request)
+		}
+	}
+}
+
+type compatibilityCachedCatalog struct {
+	*testModCatalog
+	cachedCalls int
+}
+
+func (c *compatibilityCachedCatalog) CachedMetadata(context.Context, []string) (map[string]mods.SteamMod, error) {
+	c.cachedCalls++
+	return map[string]mods.SteamMod{"100": {ID: "100", Dependencies: []string{"200"}}}, nil
+}
+func TestCompatibilityFactsUseCachedDependencyDeclarations(t *testing.T) {
+	f := newSnapshotFixture(t)
+	f.mods.localList = mods.ModList{Items: []mods.ModState{{SteamMod: mods.SteamMod{ID: "100"}, Enabled: true, EnabledWorlds: []string{f.master.ID}}}}
+	catalog := &compatibilityCachedCatalog{testModCatalog: f.mods}
+	service, err := NewService(f.source, catalog, &snapshotCoordinator{source: f.source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := service.RoomCompatibilityFacts(context.Background(), f.room.ID)
+	if err != nil || len(facts.Items) != 1 || !facts.Items[0].CachedDependenciesAvailable || len(facts.Items[0].Dependencies) != 1 || facts.Items[0].Dependencies[0] != "200" || catalog.cachedCalls != 1 {
+		t.Fatal(facts, err)
+	}
+}

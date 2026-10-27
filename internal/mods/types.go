@@ -116,6 +116,7 @@ const (
 )
 
 type ModState struct {
+	CachedDependenciesAvailable bool `json:"-"`
 	SteamMod
 	LatestVersion             string                    `json:"latestVersion,omitempty"`
 	RuntimeVersion            string                    `json:"runtimeVersion,omitempty"`
@@ -152,6 +153,9 @@ type ModState struct {
 }
 
 type RuntimeModVersionTarget struct {
+	DSTCompatible   *bool      `json:"dstCompatible,omitempty"`
+	APIVersion      string     `json:"apiVersion,omitempty"`
+	FileStatus      string     `json:"fileStatus,omitempty"`
 	Name            string     `json:"name,omitempty"`
 	Author          string     `json:"author,omitempty"`
 	TargetID        string     `json:"targetId"`

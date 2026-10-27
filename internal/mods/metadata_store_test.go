@@ -34,13 +34,13 @@ func TestCachedMetadataUsesOldDisplayFieldsWithoutVersionEvidenceOrNetwork(t *te
 	db, store := openMetadataTestStore(t, ":memory:")
 	t.Cleanup(func() { _ = db.Close() })
 	old := time.Now().Add(-30 * 24 * time.Hour)
-	if err := store.save("100", displayLanguage, &SteamMod{ID: "100", Name: "Internal title", PreviewURL: "https://example.test/image", Version: "1", SteamManifestID: "old", UpdatedAt: old}, &communityMetadataCache{Name: "工坊名称", Author: "作者"}, old); err != nil {
+	if err := store.save("100", displayLanguage, &SteamMod{ID: "100", Name: "Internal title", PreviewURL: "https://example.test/image", Version: "1", SteamManifestID: "old", UpdatedAt: old, Dependencies: []string{"200"}}, &communityMetadataCache{Name: "工坊名称", Author: "作者"}, old); err != nil {
 		t.Fatal(err)
 	}
 	provider := &SteamProvider{store: store}
 	items, err := provider.CachedMetadata(context.Background(), []string{"100", "200"})
 	item := items["100"]
-	if err != nil || len(items) != 1 || item.Name != "工坊名称" || item.PreviewURL == "" || item.Version != "" || item.SteamManifestID != "" || !item.UpdatedAt.IsZero() {
+	if err != nil || len(items) != 1 || item.Name != "工坊名称" || item.PreviewURL == "" || item.Version != "" || item.SteamManifestID != "" || !item.UpdatedAt.IsZero() || len(item.Dependencies) != 1 || item.Dependencies[0] != "200" {
 		t.Fatalf("display read: %+v %v", items, err)
 	}
 }

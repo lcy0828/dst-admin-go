@@ -321,6 +321,9 @@ func (r *Runtime) ObserveRuntimeModFiles(ctx context.Context, request RuntimeFil
 	worlds := make([]moddistribution.ObserveWorld, 0, len(request.Worlds))
 	remoteWorlds := make([]shared.RuntimeModObserveWorld, 0, len(request.Worlds))
 	for _, world := range request.Worlds {
+		if request.SkipLoadedLogs {
+			break
+		}
 		worlds = append(worlds, moddistribution.ObserveWorld{
 			RoomID: world.RoomID, RoomDirectory: world.RoomDirectory,
 			WorldID: world.WorldID, WorldDirectory: world.WorldDirectory,
@@ -443,6 +446,7 @@ func runtimeFilesObservation(value moddistribution.FilesObservation) *shared.Run
 	}
 	for workshopID, state := range value.Mods {
 		result.Mods[workshopID] = shared.RuntimeModFileState{
+			DSTCompatible: state.DSTCompatible, APIVersion: state.APIVersion,
 			Status: shared.RuntimeModFileStatus(state.Status), Reason: state.Reason,
 			Name: state.Name, Author: state.Author, Description: state.Description, Version: state.Version, InstalledSize: state.InstalledSize, SteamManifestID: state.SteamManifestID,
 			SteamUpdatedAt: cloneRuntimeFileTime(state.SteamUpdatedAt), MetadataReason: state.MetadataReason,

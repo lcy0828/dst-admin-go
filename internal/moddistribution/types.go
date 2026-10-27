@@ -87,6 +87,8 @@ const (
 )
 
 type FileState struct {
+	DSTCompatible   *bool  `json:"dst_compatible,omitempty"`
+	APIVersion      string `json:"api_version,omitempty"`
 	Author          string
 	Description     string
 	Status          FileStatus

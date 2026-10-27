@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"dont/internal/agents"
+	"dont/internal/moddiagnostics"
 	"dont/internal/operationlease"
 	"dont/internal/rooms"
 	"dont/internal/runtimedriver"
@@ -152,6 +153,7 @@ type ReleaseInstallationPlan struct {
 }
 
 type ReleasePlan struct {
+	ModDiagnostics        []moddiagnostics.Report        `json:"modDiagnostics,omitempty"`
 	SelectedInstallations []ReleaseInstallationSelection `json:"selectedInstallations,omitempty"`
 	Version               int                            `json:"version"`
 	DesiredVersion        string                         `json:"desiredVersion"`
@@ -205,23 +207,24 @@ type ReleaseShardResult struct {
 }
 
 type Release struct {
-	PlanHistory         []ReleasePlan               `json:"planHistory,omitempty"`
-	WritingStarted      bool                        `json:"writingStarted,omitempty"`
-	Attempt             int                         `json:"attempt,omitempty"`
-	Blockers            []ReleaseBlocker            `json:"blockers,omitempty"`
-	NextAction          string                      `json:"nextAction,omitempty"`
-	ID                  string                      `json:"id"`
-	SourceJobID         string                      `json:"sourceJobId,omitempty"`
-	Stage               ReleaseStage                `json:"stage"`
-	Plan                ReleasePlan                 `json:"plan"`
-	ProtectionBackupIDs []string                    `json:"protectionBackupIds"`
-	ErrorCode           string                      `json:"errorCode,omitempty"`
-	ErrorMessage        string                      `json:"errorMessage,omitempty"`
-	Installations       []ReleaseInstallationResult `json:"installations"`
-	Shards              []ReleaseShardResult        `json:"shards"`
-	CreatedAt           time.Time                   `json:"createdAt"`
-	UpdatedAt           time.Time                   `json:"updatedAt"`
-	FinishedAt          *time.Time                  `json:"finishedAt,omitempty"`
+	ModDiagnosticsWarning string                      `json:"modDiagnosticsWarning,omitempty"`
+	PlanHistory           []ReleasePlan               `json:"planHistory,omitempty"`
+	WritingStarted        bool                        `json:"writingStarted,omitempty"`
+	Attempt               int                         `json:"attempt,omitempty"`
+	Blockers              []ReleaseBlocker            `json:"blockers,omitempty"`
+	NextAction            string                      `json:"nextAction,omitempty"`
+	ID                    string                      `json:"id"`
+	SourceJobID           string                      `json:"sourceJobId,omitempty"`
+	Stage                 ReleaseStage                `json:"stage"`
+	Plan                  ReleasePlan                 `json:"plan"`
+	ProtectionBackupIDs   []string                    `json:"protectionBackupIds"`
+	ErrorCode             string                      `json:"errorCode,omitempty"`
+	ErrorMessage          string                      `json:"errorMessage,omitempty"`
+	Installations         []ReleaseInstallationResult `json:"installations"`
+	Shards                []ReleaseShardResult        `json:"shards"`
+	CreatedAt             time.Time                   `json:"createdAt"`
+	UpdatedAt             time.Time                   `json:"updatedAt"`
+	FinishedAt            *time.Time                  `json:"finishedAt,omitempty"`
 }
 
 type ReleaseRetryRequest struct {

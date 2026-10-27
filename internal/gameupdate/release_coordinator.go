@@ -11,6 +11,7 @@ import (
 
 	"dont/internal/installationmaintenance"
 	"dont/internal/maintenance"
+	"dont/internal/moddiagnostics"
 	"dont/internal/operationlease"
 	"dont/internal/roomops"
 	"dont/internal/runtimeaudit"
@@ -22,18 +23,40 @@ import (
 const releaseLeaseTTL = 5 * time.Minute
 
 type ReleaseCoordinator struct {
-	planner       *ReleasePlanner
-	runtime       ReleaseRuntime
-	leases        ReleaseLeaseService
-	backups       ReleaseProtectionService
-	store         *ReleaseStore
-	now           func() time.Time
-	pollInterval  time.Duration
-	renewInterval time.Duration
-	notifier      LifecycleNotifier
-	mutations     runtimedriver.RuntimeMutationObserver
-	online        maintenance.OnlineCounter
-	maintenance   *installationmaintenance.Gate
+	planner        *ReleasePlanner
+	runtime        ReleaseRuntime
+	leases         ReleaseLeaseService
+	backups        ReleaseProtectionService
+	store          *ReleaseStore
+	now            func() time.Time
+	pollInterval   time.Duration
+	renewInterval  time.Duration
+	notifier       LifecycleNotifier
+	mutations      runtimedriver.RuntimeMutationObserver
+	online         maintenance.OnlineCounter
+	maintenance    *installationmaintenance.Gate
+	modDiagnostics ReleaseModDiagnostics
+}
+
+type ReleaseModDiagnostics interface {
+	Preflight(context.Context, []moddiagnostics.Scope) []moddiagnostics.Report
+	Capture(context.Context, string, []moddiagnostics.Scope) error
+}
+
+func (c *ReleaseCoordinator) ConfigureModDiagnostics(service ReleaseModDiagnostics) {
+	c.modDiagnostics = service
+}
+
+func releaseModScopes(plan ReleasePlan) []moddiagnostics.Scope {
+	var scopes []moddiagnostics.Scope
+	for _, installation := range plan.Installations {
+		for _, shard := range installation.Shards {
+			scopes = append(scopes, moddiagnostics.Scope{RoomID: shard.RoomID, WorldID: shard.WorldID,
+				TargetID: installation.TargetID, InstallationID: installation.InstallationID, TopologyRevision: shard.TopologyRevision, RuntimeMode: string(shard.RuntimeMode), OS: installation.OS,
+				Version: moddiagnostics.Version{AppID: installation.AppID, SteamBuild: installation.SteamBuild, GameVersion: installation.GameVersion}})
+		}
+	}
+	return scopes
 }
 
 func (c *ReleaseCoordinator) ConfigureOnlineCounter(counter maintenance.OnlineCounter) {
@@ -70,7 +93,11 @@ func (c *ReleaseCoordinator) ConfigureMutationObserver(observer runtimedriver.Ru
 }
 
 func (c *ReleaseCoordinator) Preview(ctx context.Context, request ReleasePreviewRequest) (ReleasePlan, error) {
-	return c.planner.Preview(ctx, request)
+	plan, err := c.planner.Preview(ctx, request)
+	if err == nil && c.modDiagnostics != nil {
+		plan.ModDiagnostics = c.modDiagnostics.Preflight(ctx, releaseModScopes(plan))
+	}
+	return plan, err
 }
 
 func (c *ReleaseCoordinator) Get(id string) (Release, error) { return c.store.Get(id) }
@@ -150,6 +177,13 @@ func (c *ReleaseCoordinator) Publish(ctx context.Context, request ReleasePublish
 				return existing, nil
 			}
 			return Release{}, err
+		}
+		// Preserve the first pre-write observation. Retries/idempotent requests
+		// return the stored release and never recapture a post-write baseline.
+		if c.modDiagnostics != nil {
+			if err := c.modDiagnostics.Capture(runContext, value.ID, releaseModScopes(value.Plan)); err != nil {
+				value.ModDiagnosticsWarning = "BASELINE_SAVE_FAILED"
+			}
 		}
 		return c.execute(runContext, value, fences, false, false)
 	})

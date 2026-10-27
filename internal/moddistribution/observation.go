@@ -231,7 +231,7 @@ func observeInstallationModContext(ctx context.Context, root, id string) FileSta
 		return FileState{Status: FileInvalid, Reason: "invalid_modinfo"}
 	}
 	value := modmetadata.Read(ctx, modInfoPath, id, modmetadata.Language(ctx))
-	return FileState{Status: FileReady, Name: value.Name, Author: value.Author, Description: value.Description, Version: value.Version, MetadataReason: value.Reason}
+	return FileState{DSTCompatible: value.DSTCompatible, APIVersion: value.APIVersion, Status: FileReady, Name: value.Name, Author: value.Author, Description: value.Description, Version: value.Version, MetadataReason: value.Reason}
 }
 
 func observeLoadedMods(path string, workshopIDs []string) ([]string, bool) {

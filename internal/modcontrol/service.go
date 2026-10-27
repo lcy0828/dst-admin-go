@@ -541,14 +541,51 @@ func (s *Service) Recover(ctx context.Context) ([]modpublication.Publication, er
 }
 
 func (s *Service) RoomList(ctx context.Context, roomID string) (mods.ModList, error) {
-	return s.roomList(ctx, roomID, true)
+	return s.roomList(ctx, roomID, true, true)
 }
 
 func (s *Service) RoomFacts(ctx context.Context, roomID string) (mods.ModList, error) {
-	return s.roomList(ctx, roomID, false)
+	return s.roomList(ctx, roomID, false, true)
 }
 
-func (s *Service) roomList(ctx context.Context, roomID string, includeMetadata bool) (mods.ModList, error) {
+// RoomCompatibilityFacts excludes loaded-mod log scans. Compatibility checks
+// need configuration and installed files, not repeated 2 MiB per-world tails.
+func (s *Service) RoomCompatibilityFacts(ctx context.Context, roomID string) (mods.ModList, error) {
+	result, err := s.roomList(ctx, roomID, false, false)
+	if err != nil {
+		return result, err
+	}
+	// CachedMetadata is deliberately optional and never invokes Describe/Steam.
+	// An absent cache entry is unknown, not a declaration of no dependencies.
+	reader, ok := s.mods.(interface {
+		CachedMetadata(context.Context, []string) (map[string]mods.SteamMod, error)
+	})
+	if !ok {
+		return result, nil
+	}
+	var ids []string
+	for _, item := range result.Items {
+		if item.Enabled && mods.ValidID(item.ID) && len(ids) < 512 {
+			ids = append(ids, item.ID)
+		}
+	}
+	cached := map[string]mods.SteamMod{}
+	for start := 0; start < len(ids); start += 100 {
+		batch, _ := reader.CachedMetadata(ctx, ids[start:min(start+100, len(ids))])
+		for id, item := range batch {
+			cached[id] = item
+		}
+	}
+	for index := range result.Items {
+		if item, exists := cached[result.Items[index].ID]; exists && item.Dependencies != nil {
+			result.Items[index].Dependencies = append([]string(nil), item.Dependencies...)
+			result.Items[index].CachedDependenciesAvailable = true
+		}
+	}
+	return result, nil
+}
+
+func (s *Service) roomList(ctx context.Context, roomID string, includeMetadata, includeLoaded bool) (mods.ModList, error) {
 	finishCatalog := requesttiming.Start(ctx, "mods.catalog")
 	room, err := s.source.rooms.Room(roomID)
 	if err != nil {
@@ -615,7 +652,7 @@ func (s *Service) roomList(ctx context.Context, roomID string, includeMetadata b
 		finishProfile()
 	}
 	finishFiles := requesttiming.Start(ctx, "mods.runtime_files")
-	s.observeRoomModFiles(snapshotCtx, room, worlds, placements, &result)
+	s.observeRoomModFiles(snapshotCtx, room, worlds, placements, &result, includeLoaded)
 	finishFiles()
 	result.Healthy, result.Attention = 0, 0
 	for _, item := range result.Items {
@@ -897,7 +934,7 @@ type runtimeFileGroup struct {
 	err         error
 }
 
-func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worlds []rooms.World, placements modpublication.PlacementSnapshot, result *mods.ModList) {
+func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worlds []rooms.World, placements modpublication.PlacementSnapshot, result *mods.ModList, includeLoaded bool) {
 	if len(result.Items) == 0 {
 		return
 	}
@@ -924,7 +961,7 @@ func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worl
 		group := groups[key]
 		if group == nil {
 			group = &runtimeFileGroup{
-				request:  RuntimeFileRequest{TargetID: placement.TargetID, InstallationID: placement.InstallationID, TopologyRevision: placements.TopologyRevision},
+				request:  RuntimeFileRequest{TargetID: placement.TargetID, InstallationID: placement.InstallationID, TopologyRevision: placements.TopologyRevision, SkipLoadedLogs: !includeLoaded},
 				worldIDs: make(map[string]bool), workshopIDs: make(map[string]bool),
 			}
 			groups[key] = group
@@ -1026,6 +1063,7 @@ func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worl
 				item.RuntimeVersions = append(item.RuntimeVersions, fact)
 				continue
 			}
+			fact.DSTCompatible, fact.APIVersion, fact.FileStatus = state.DSTCompatible, state.APIVersion, string(state.Status)
 			fact.Name, fact.Author = strings.TrimSpace(state.Name), strings.TrimSpace(state.Author)
 			fact.Version = strings.TrimSpace(state.Version)
 			fact.SteamManifestID = state.SteamManifestID
@@ -1071,7 +1109,7 @@ func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worl
 			item.RuntimeVersions = append(item.RuntimeVersions, fact)
 			for key, worldState := range group.observation.Worlds {
 				_ = key
-				if !enabledWorlds[worldState.WorldID] || !containsStringValue(worldState.LoadedModIDs, item.ID) || !s.currentModLog(ctx, room, group.request, worldState) {
+				if !includeLoaded || !enabledWorlds[worldState.WorldID] || !containsStringValue(worldState.LoadedModIDs, item.ID) || !s.currentModLog(ctx, room, group.request, worldState) {
 					continue
 				}
 				item.LoadedWorlds = append(item.LoadedWorlds, worldState.WorldID)

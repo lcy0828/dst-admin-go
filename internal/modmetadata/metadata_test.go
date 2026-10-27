@@ -52,6 +52,25 @@ func TestStaticMetadataIgnoresCommentsAndPreservesLongStrings(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestCompatibilityDeclarationsKeepUnknownDistinctFromFalse(t *testing.T) {
+	for _, code := range []string{`name="mod";dst_compatible=false;api_version=10`, `local b=false;name="mod";dst_compatible=b;api_version=10`} {
+		path := filepath.Join(t.TempDir(), "modinfo.lua")
+		_ = os.WriteFile(path, []byte(code), 0600)
+		got := Read(context.Background(), path, "123", "zh")
+		if got.DSTCompatible == nil || *got.DSTCompatible || got.APIVersion != "10" {
+			t.Fatal(got)
+		}
+	}
+	for _, code := range []string{`name="mod"`, `name="mod";dst_compatible="false"`, `local x="false";name="mod";dst_compatible=x`} {
+		path := filepath.Join(t.TempDir(), "modinfo.lua")
+		_ = os.WriteFile(path, []byte(code), 0600)
+		got := Read(context.Background(), path, "123", "zh")
+		if got.DSTCompatible != nil {
+			t.Fatal("a missing or non-boolean declaration became false", got)
+		}
+	}
+}
 func BenchmarkMetadataWarm200(b *testing.B) {
 	root := b.TempDir()
 	paths := make([]string, 200)

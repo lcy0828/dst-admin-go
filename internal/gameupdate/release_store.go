@@ -246,6 +246,7 @@ func (s *ReleaseStore) Get(id string) (Release, error) {
 		}
 		value.Attempt, value.Blockers, value.NextAction = state.Attempt, state.Blockers, state.NextAction
 		value.WritingStarted, value.PlanHistory = state.WritingStarted, state.PlanHistory
+		value.ModDiagnosticsWarning = state.ModDiagnosticsWarning
 		for _, evidence := range state.Installations {
 			if item := releaseInstallationResult(&value, evidence.TargetID, evidence.InstallationID); item != nil {
 				item.WriteState, item.OperationID, item.ExpectedVersion = evidence.WriteState, evidence.OperationID, evidence.ExpectedVersion
@@ -352,7 +353,7 @@ func releaseRecordFrom(value Release) (releaseRecord, error) {
 	if err != nil {
 		return releaseRecord{}, err
 	}
-	evidence, err := json.Marshal(releaseExecutionEvidence{WritingStarted: value.WritingStarted, PlanHistory: value.PlanHistory, Attempt: value.Attempt, Blockers: value.Blockers, NextAction: value.NextAction, Installations: installationEvidence(value), Shards: shardEvidence(value)})
+	evidence, err := json.Marshal(releaseExecutionEvidence{ModDiagnosticsWarning: value.ModDiagnosticsWarning, WritingStarted: value.WritingStarted, PlanHistory: value.PlanHistory, Attempt: value.Attempt, Blockers: value.Blockers, NextAction: value.NextAction, Installations: installationEvidence(value), Shards: shardEvidence(value)})
 	if err != nil {
 		return releaseRecord{}, err
 	}
@@ -423,13 +424,14 @@ func childReleaseRecordID(releaseID, key string) string {
 }
 
 type releaseExecutionEvidence struct {
-	WritingStarted bool                          `json:"writingStarted,omitempty"`
-	PlanHistory    []ReleasePlan                 `json:"planHistory,omitempty"`
-	Attempt        int                           `json:"attempt"`
-	Blockers       []ReleaseBlocker              `json:"blockers,omitempty"`
-	NextAction     string                        `json:"nextAction,omitempty"`
-	Installations  []releaseInstallationEvidence `json:"installations"`
-	Shards         []releaseShardEvidence        `json:"shards"`
+	ModDiagnosticsWarning string                        `json:"modDiagnosticsWarning,omitempty"`
+	WritingStarted        bool                          `json:"writingStarted,omitempty"`
+	PlanHistory           []ReleasePlan                 `json:"planHistory,omitempty"`
+	Attempt               int                           `json:"attempt"`
+	Blockers              []ReleaseBlocker              `json:"blockers,omitempty"`
+	NextAction            string                        `json:"nextAction,omitempty"`
+	Installations         []releaseInstallationEvidence `json:"installations"`
+	Shards                []releaseShardEvidence        `json:"shards"`
 }
 
 // Rebase changes only the confirmed plan after explicit re-preview. The

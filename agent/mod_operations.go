@@ -1652,6 +1652,7 @@ func runtimeModFilesObservation(value moddistribution.FilesObservation) *shared.
 	}
 	for workshopID, state := range value.Mods {
 		result.Mods[workshopID] = shared.RuntimeModFileState{
+			DSTCompatible: state.DSTCompatible, APIVersion: state.APIVersion,
 			Status: shared.RuntimeModFileStatus(state.Status), Reason: state.Reason,
 			Name: state.Name, Author: state.Author, Description: state.Description, Version: state.Version, InstalledSize: state.InstalledSize, SteamManifestID: state.SteamManifestID,
 			SteamUpdatedAt: cloneObservedTime(state.SteamUpdatedAt), MetadataReason: state.MetadataReason,

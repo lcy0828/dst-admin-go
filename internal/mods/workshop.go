@@ -251,7 +251,9 @@ func (w *Workshop) Search(ctx context.Context, options SearchOptions) (SearchRes
 
 func cloneMod(item SteamMod) SteamMod {
 	item.Tags = append([]string(nil), item.Tags...)
-	item.Dependencies = append([]string(nil), item.Dependencies...)
+	if item.Dependencies != nil {
+		item.Dependencies = append([]string{}, item.Dependencies...)
+	}
 	return item
 }
 func cloneSearch(value SearchResult) SearchResult {

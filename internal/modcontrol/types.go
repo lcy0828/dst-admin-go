@@ -94,6 +94,7 @@ type RuntimeFileWorld struct {
 }
 
 type RuntimeFileRequest struct {
+	SkipLoadedLogs   bool
 	TargetID         string
 	InstallationID   string
 	TopologyRevision string

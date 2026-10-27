@@ -13,7 +13,8 @@ const displayVersionTTL = 5 * time.Minute
 
 func (p *SteamProvider) ConfigureMetadataStore(store *MetadataStore) { p.store = store }
 
-// CachedMetadata is display-only: no network, version check, or TTL refresh.
+// CachedMetadata returns display fields and cached declarations only: no
+// network, version check, or TTL refresh. Dependencies may be old or incomplete.
 func (p *SteamProvider) CachedMetadata(ctx context.Context, ids []string) (map[string]SteamMod, error) {
 	result := make(map[string]SteamMod)
 	if err := ctx.Err(); err != nil {
@@ -30,7 +31,11 @@ func (p *SteamProvider) CachedMetadata(ctx context.Context, ids []string) (map[s
 		item := record.Summary
 		mergeCommunityMetadata(&item, record.Community)
 		// Cached version evidence must not be used as an update check.
-		result[id] = SteamMod{ID: id, Name: item.Name, Author: item.Author, PreviewURL: item.PreviewURL}
+		var dependencies []string
+		if item.Dependencies != nil {
+			dependencies = append([]string{}, item.Dependencies...)
+		}
+		result[id] = SteamMod{ID: id, Name: item.Name, Author: item.Author, PreviewURL: item.PreviewURL, Dependencies: dependencies}
 	}
 	return result, nil
 }
