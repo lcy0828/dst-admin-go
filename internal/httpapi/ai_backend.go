@@ -190,6 +190,9 @@ func (b *AIBackend) Invoke(ctx context.Context, name string, a aicontrol.Argumen
 			NotFound(c)
 		}
 	case "command_receipt":
+		if a.Refresh {
+			query.Set("refresh", "true")
+		}
 		handler = b.console.run
 	case "room_control":
 		if b.member {

@@ -96,7 +96,7 @@ func (s *Store) Create(run Run) (Run, error) {
 	if err := s.db.Table(s.runsTable).Create(&record).Error; err != nil {
 		return Run{}, err
 	}
-	return run, nil
+	return describeResult(run), nil
 }
 
 func (s *Store) Complete(runID string, sendErr error) (Run, error) {
@@ -134,6 +134,19 @@ func (s *Store) CompleteDelivery(runID string, delivery Delivery, sendErr error)
 }
 
 func (s *Store) CompleteExecution(runID string, completion ExecutionCompletion) (Run, error) {
+	return s.completeExecution(runID, completion, false)
+}
+
+// confirmLateExecution only advances an unconfirmed managed run. A concurrent
+// reader must never overwrite an already confirmed result.
+func (s *Store) confirmLateExecution(runID string, completion ExecutionCompletion) (Run, error) {
+	if completion.Status != RunSucceeded && completion.Status != RunFailed {
+		return Run{}, errors.New("late receipt must confirm execution")
+	}
+	return s.completeExecution(runID, completion, true)
+}
+
+func (s *Store) completeExecution(runID string, completion ExecutionCompletion, late bool) (Run, error) {
 	status := completion.Status
 	if status != RunSucceeded && status != RunFailed && status != RunUncertain && status != RunUnresponsive {
 		return Run{}, errors.New("command execution completion status is invalid")
@@ -162,11 +175,17 @@ func (s *Store) CompleteExecution(runID string, completion ExecutionCompletion) 
 		updates["output_text"] = completion.Output.Text
 		updates["output_truncated"] = completion.Output.Truncated
 	}
-	result := s.db.Table(s.runsTable).Where("id = ? AND status = ?", runID, RunSending).Updates(updates)
+	query := s.db.Table(s.runsTable).Where("id = ?", runID)
+	if late {
+		query = query.Where("status IN (?) AND may_have_executed = ?", []RunStatus{RunUncertain, RunUnresponsive}, true)
+	} else {
+		query = query.Where("status = ?", RunSending)
+	}
+	result := query.Updates(updates)
 	if result.Error != nil {
 		return Run{}, result.Error
 	}
-	if result.RowsAffected != 1 {
+	if result.RowsAffected != 1 && !late {
 		return Run{}, ErrRunNotFound
 	}
 	return s.Get(runID)
@@ -344,7 +363,7 @@ func runFromRecord(record runRecord) (Run, error) {
 			return Run{}, fmt.Errorf("decode command arguments: %w", err)
 		}
 	}
-	return Run{
+	return describeResult(Run{
 		Output: output,
 		ID:     record.ID, RoomID: record.RoomID, WorldID: record.WorldID, Mode: record.Mode, CommandID: record.CommandID,
 		Name: record.Name, Risk: Risk(record.Risk), Arguments: arguments, RawCommand: record.RawCommand,
@@ -355,5 +374,5 @@ func runFromRecord(record runRecord) (Run, error) {
 		MayHaveExecuted: record.MayHaveExecuted, RecoveryOutcome: record.RecoveryOutcome,
 		OperationID: record.OperationID, OperationKey: record.OperationKey, TargetID: record.TargetID,
 		AgentID: record.AgentID, TopologyRevision: record.TopologyRevision, ObservedAt: record.ObservedAt,
-	}, nil
+	}), nil
 }

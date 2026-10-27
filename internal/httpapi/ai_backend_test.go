@@ -128,3 +128,42 @@ func TestAIConsolePreservesSuccessfulLargeReceipt(t *testing.T) {
 		t.Error("AI lost a real successful console receipt", commander.calls, runs[0].Status, result.Status)
 	}
 }
+
+func TestAILateReceiptLookupUsesSameConsoleResult(t *testing.T) {
+	db, err := gorm.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.DB().SetMaxOpenConns(1)
+	commandStore := consoleapi.NewStore(db, "late_ai_")
+	if err = commandStore.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	commander := &handlerLateCommander{}
+	service, err := consoleapi.NewService(consoleHandlerRooms{}, consoleHandlerSender{}, commandStore, commander)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := service.ExecuteRaw(context.Background(), "room", "Master", consoleapi.RawRequest{Command: "print(0)", Confirmation: "周末服"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &AIBackend{console: NewConsoleHandler(service)}
+	aiStore := aicontrol.NewStore(db, "late_ai_", t.TempDir())
+	if err = aiStore.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = aiStore.SaveConfig(aicontrol.ConfigInput{Config: aicontrol.Config{Revision: "initial", Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	ai := aicontrol.New(aiStore, backend)
+	result, err := ai.Invoke(context.Background(), aicontrol.Principal{ID: "mcp", RoomID: "room"}, "command_receipt", json.RawMessage(fmt.Sprintf(`{"roomId":"room","runId":%q,"refresh":true}`, run.ID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got consoleapi.Run
+	if err = json.Unmarshal(result.Data, &got); err != nil || got.Status != consoleapi.RunSucceeded || got.Output.Text != "0\n" || got.ReceiptCheck.Status != "found" || commander.reads != 1 {
+		t.Fatalf("result=%s err=%v reads=%d", result.Data, err, commander.reads)
+	}
+}

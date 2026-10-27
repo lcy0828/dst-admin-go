@@ -50,6 +50,7 @@ type Principal struct {
 	RoomID  string // Optional actual credential scope; page selection is only context.
 }
 type Arguments struct {
+	Refresh            bool   `json:"refresh,omitempty"`
 	RoomID             string `json:"roomId,omitempty"`
 	WorldID            string `json:"worldId,omitempty"`
 	JobID              string `json:"jobId,omitempty"`

@@ -121,7 +121,9 @@ func receiptField(key string) bool {
 	switch key {
 	case "id", "callId", "jobId", "runId", "roomId", "worldId", "status", "state",
 		"error", "errorCode", "errorMessage", "code", "message", "data", "result",
-		"mayHaveExecuted", "executionOutcome", "transportOutcome", "createdAt", "finishedAt":
+		"mayHaveExecuted", "executionOutcome", "transportOutcome", "createdAt", "finishedAt",
+		"resultState", "receiptRefreshUntil", "receiptCheck", "output", "spawnAudit",
+		"findings", "evidence", "limitations", "logCorrelation", "recommendations":
 		return true
 	case "resource", "privateResult", "url", "httpStatus", "operationId":
 		return true

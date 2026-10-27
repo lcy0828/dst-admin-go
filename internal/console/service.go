@@ -13,6 +13,8 @@ import (
 	"dont/internal/dstruntime"
 	"dont/internal/rooms"
 	"dont/shared"
+
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -53,11 +55,12 @@ type template struct {
 }
 
 type Service struct {
-	rooms     RoomCatalog
-	sender    Sender
-	store     *Store
-	commander RuntimeCommander
-	templates map[string]template
+	rooms        RoomCatalog
+	sender       Sender
+	store        *Store
+	commander    RuntimeCommander
+	templates    map[string]template
+	receiptReads singleflight.Group
 }
 
 func NewService(roomCatalog RoomCatalog, sender Sender, store *Store, commanders ...RuntimeCommander) (*Service, error) {
@@ -243,22 +246,7 @@ func (s *Service) executeVerified(ctx context.Context, room rooms.Room, world ro
 		err = dstruntime.ErrRuntimeResultAbsent
 	}
 	if err == nil {
-		observedAt := receipt.CompletedAt.UTC()
-		completion := ExecutionCompletion{
-			Status: RunSucceeded, TransportOutcome: "sent", ExecutionOutcome: "confirmed",
-			Message: "命令已由 DST 执行并返回确认", ObservedAt: &observedAt,
-			Output: commandOutput(receipt.Details),
-		}
-		if !receipt.OK {
-			completion.Status = RunFailed
-			completion.ExecutionOutcome = "rejected"
-			completion.Message = "DST 未能执行命令"
-			completion.ErrorCode = receipt.Code
-			completion.ErrorMessage = strings.TrimSpace(receipt.Message)
-			if completion.ErrorMessage == "" {
-				completion.ErrorMessage = receipt.Code
-			}
-		}
+		completion := receiptCompletion(receipt)
 		completed, completeErr := s.store.CompleteExecution(run.ID, completion)
 		if completeErr != nil {
 			return Run{}, completeErr
@@ -456,7 +444,7 @@ func builtinTemplates() map[string]template {
 			if err != nil {
 				return "", err
 			}
-			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.components and p.components.inventory then local mode=%s;local n=0;for i=1,%d do local item=SpawnPrefab(%s);if not item then error("PREFAB_NOT_FOUND")end;if not(item.components and item.components.inventoryitem)then item:Remove();error("PREFAB_NOT_INVENTORY_ITEM")end;if item then local granted=1;local stack=item.components and item.components.stackable;if mode=="stacks"and stack then stack:SetStackSize(stack.maxsize or 1);granted=stack:StackSize()end;p.components.inventory:GiveItem(item);n=n+granted end end;print("[DST-ADMIN-GIVE]",%s,%s,mode,n)else print("[DST-ADMIN-GIVE]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), quoteLua(quantityMode), count, quoteLua(prefab), quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
+			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.components and p.components.inventory then local mode=%s;local n=0;for i=1,%d do local item=SpawnPrefab(%s);if not item then error("PREFAB_NOT_FOUND")end;if not(item.components and item.components.inventoryitem)then item:Remove();error("PREFAB_NOT_INVENTORY_ITEM")end;if item then local granted=1;local stack=item.components and item.components.stackable;if mode=="stacks"and stack then stack:SetStackSize(stack.maxsize or 1);granted=stack:StackSize()end;p.components.inventory:GiveItem(item);__dst_record(item,p,"inventory",granted);n=n+granted end end;print("[DST-ADMIN-GIVE]",%s,%s,mode,n)else print("[DST-ADMIN-GIVE]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), quoteLua(quantityMode), count, quoteLua(prefab), quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
 		},
 	}
 	templates["give_recipe_materials"] = template{
@@ -482,7 +470,7 @@ func builtinTemplates() map[string]template {
 			if err != nil {
 				return "", err
 			}
-			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;local recipe=(AllRecipes or {})[%s];if p and recipe then local n=0;local function give(item)if not item then return end;if item.components and item.components.inventoryitem and p.components and p.components.inventory then p.components.inventory:GiveItem(item)else local x,y,z=p.Transform:GetWorldPosition();item.Transform:SetPosition(x,y,z)end;n=n+1 end;for i=1,%d do for _,ingredient in pairs(recipe.ingredients or {})do for k=1,ingredient.amount or 0 do give(SpawnPrefab(ingredient.type))end end end;print("[DST-ADMIN-GIVE-MATERIALS]",%s,%s,n)else print("[DST-ADMIN-GIVE-MATERIALS]","PLAYER_OR_RECIPE_NOT_FOUND",%s,%s)end`, quoteLua(playerID), quoteLua(prefab), count, quoteLua(playerID), quoteLua(prefab), quoteLua(playerID), quoteLua(prefab)), nil
+			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;local recipe=(AllRecipes or {})[%s];if p and recipe then local n=0;local function give(item)if not item then return end;if item.components and item.components.inventoryitem and p.components and p.components.inventory then p.components.inventory:GiveItem(item);__dst_record(item,p,"inventory",1)else local x,y,z=p.Transform:GetWorldPosition();item.Transform:SetPosition(x,y,z);__dst_record(item,p,"world",1)end;n=n+1 end;for i=1,%d do for _,ingredient in pairs(recipe.ingredients or {})do for k=1,ingredient.amount or 0 do give(SpawnPrefab(ingredient.type))end end end;print("[DST-ADMIN-GIVE-MATERIALS]",%s,%s,n)else print("[DST-ADMIN-GIVE-MATERIALS]","PLAYER_OR_RECIPE_NOT_FOUND",%s,%s)end`, quoteLua(playerID), quoteLua(prefab), count, quoteLua(playerID), quoteLua(prefab), quoteLua(playerID), quoteLua(prefab)), nil
 		},
 	}
 	templates["give_blueprint"] = template{
@@ -509,7 +497,7 @@ func builtinTemplates() map[string]template {
 				return "", err
 			}
 			blueprint := prefab + "_blueprint"
-			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.components and p.components.inventory then local n=0;for i=1,%d do local item=SpawnPrefab(%s);if item then p.components.inventory:GiveItem(item);n=n+1 end end;print("[DST-ADMIN-GIVE-BLUEPRINT]",%s,%s,n)else print("[DST-ADMIN-GIVE-BLUEPRINT]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), count, quoteLua(blueprint), quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
+			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.components and p.components.inventory then local n=0;for i=1,%d do local item=SpawnPrefab(%s);if item then p.components.inventory:GiveItem(item);__dst_record(item,p,"inventory",1);n=n+1 end end;print("[DST-ADMIN-GIVE-BLUEPRINT]",%s,%s,n)else print("[DST-ADMIN-GIVE-BLUEPRINT]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), count, quoteLua(blueprint), quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
 		},
 	}
 	templates["set_clock_segments"] = template{
@@ -561,7 +549,7 @@ func builtinTemplates() map[string]template {
 			if err != nil {
 				return "", err
 			}
-			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.Transform then local x,y,z=p.Transform:GetWorldPosition();local n=0;for i=1,%d do local e=SpawnPrefab(%s);if e and e.Transform then local a=(i-1)*6.28318530718/%d;e.Transform:SetPosition(x+math.cos(a)*2,y,z+math.sin(a)*2);n=n+1 end end;print("[DST-ADMIN-SPAWN]",%s,%s,n)else print("[DST-ADMIN-SPAWN]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), count, quoteLua(prefab), count, quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
+			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.Transform then local x,y,z=p.Transform:GetWorldPosition();local n=0;for i=1,%d do local e=SpawnPrefab(%s);if e and e.Transform then local a=(i-1)*6.28318530718/%d;e.Transform:SetPosition(x+math.cos(a)*2,y,z+math.sin(a)*2);__dst_record(e,p,"world",1);n=n+1 end end;print("[DST-ADMIN-SPAWN]",%s,%s,n)else print("[DST-ADMIN-SPAWN]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), count, quoteLua(prefab), count, quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
 		},
 	}
 	templates["teleport_to_nearest_entity"] = template{
@@ -627,6 +615,18 @@ func builtinTemplates() map[string]template {
 		},
 	}
 	addGameToolTemplates(templates)
+	for _, id := range []string{"spawn_entity", "spawn_domesticated_beefalo", "give_item", "give_blueprint", "give_recipe_materials"} {
+		tmpl := templates[id]
+		render := tmpl.render
+		tmpl.render = func(arguments map[string]interface{}) (string, error) {
+			script, err := render(arguments)
+			if err != nil {
+				return "", err
+			}
+			return withSpawnAudit(script), nil
+		}
+		templates[id] = tmpl
+	}
 	return templates
 }
 

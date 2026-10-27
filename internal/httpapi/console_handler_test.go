@@ -7,7 +7,10 @@ import (
 	"testing"
 
 	consoleapi "dont/internal/console"
+	"dont/internal/dstruntime"
 	"dont/internal/rooms"
+	"errors"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/gorm"
@@ -28,7 +31,7 @@ type consoleHandlerSender struct{}
 
 func (consoleHandlerSender) Send(context.Context, string, string, string) error { return nil }
 
-func newConsoleHandlerRouter(t *testing.T) *gin.Engine {
+func newConsoleHandlerRouter(t *testing.T, commanders ...consoleapi.RuntimeCommander) *gin.Engine {
 	t.Helper()
 	db, err := gorm.Open("sqlite3", ":memory:")
 	if err != nil {
@@ -40,7 +43,7 @@ func newConsoleHandlerRouter(t *testing.T) *gin.Engine {
 	if err := store.Migrate(); err != nil {
 		t.Fatal(err)
 	}
-	service, err := consoleapi.NewService(consoleHandlerRooms{}, consoleHandlerSender{}, store)
+	service, err := consoleapi.NewService(consoleHandlerRooms{}, consoleHandlerSender{}, store, commanders...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,5 +87,50 @@ func TestConsoleCommandDefinitionAndHistoryRoutes(t *testing.T) {
 	response = performJSON(router, http.MethodDelete, "/api/v2/rooms/room/command-runs", nil, nil, "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("clear history: %d %s", response.Code, response.Body.String())
+	}
+}
+
+type handlerLateCommander struct{ reads int }
+
+func (c *handlerLateCommander) ExecuteCommand(context.Context, string, string, dstruntime.CommandRequest) (dstruntime.CommandReceipt, error) {
+	return dstruntime.CommandReceipt{}, errors.Join(dstruntime.ErrRuntimeCommandUnconfirmed, dstruntime.ErrRuntimeResultAbsent)
+}
+func (c *handlerLateCommander) ReadCommandReceipt(_ context.Context, room, world string, r dstruntime.CommandRequest, since time.Time) (dstruntime.CommandReceipt, error) {
+	c.reads++
+	return dstruntime.CommandReceipt{RequestID: r.RequestID, Action: r.Action, OK: true, Code: "COMMAND_EXECUTED", CompletedAt: time.Now(), Details: map[string]interface{}{"output": map[string]interface{}{"text": "0\n", "truncated": false}}}, nil
+}
+func TestConsoleLateReceiptHTTPIsOptInAndRoomScoped(t *testing.T) {
+	commander := &handlerLateCommander{}
+	router := newConsoleHandlerRouter(t, commander)
+	response := performJSON(router, http.MethodPost, "/api/v2/rooms/room/worlds/Master/raw-commands", map[string]interface{}{"command": "print(0)", "confirmation": "周末服"}, nil, "")
+	var envelope struct {
+		Data consoleapi.Run `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil || envelope.Data.Status != consoleapi.RunUncertain {
+		t.Fatalf("%d %s %v", response.Code, response.Body.String(), err)
+	}
+	id := envelope.Data.ID
+	for _, tc := range []struct {
+		path   string
+		status int
+	}{
+		{"/api/v2/rooms/room/command-runs/" + id, 200},
+		{"/api/v2/rooms/other/command-runs/" + id + "?refresh=true", 404},
+		{"/api/v2/rooms/room/command-runs/" + id + "?refresh=invalid", 400},
+	} {
+		response = performJSON(router, http.MethodGet, tc.path, nil, nil, "")
+		if response.Code != tc.status {
+			t.Fatalf("%s: %d %s", tc.path, response.Code, response.Body.String())
+		}
+	}
+	if commander.reads != 0 {
+		t.Fatal("lookup ran before explicit scoped request")
+	}
+	response = performJSON(router, http.MethodGet, "/api/v2/rooms/room/command-runs/"+id+"?refresh=true", nil, nil, "")
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil || envelope.Data.Status != consoleapi.RunSucceeded || envelope.Data.ResultState != "output" || envelope.Data.Output.Text != "0\n" || envelope.Data.ReceiptCheck.Status != "found" {
+		t.Fatalf("%d %s %v", response.Code, response.Body.String(), err)
+	}
+	if response.Header().Get("Cache-Control") != "no-store" || commander.reads != 1 {
+		t.Fatal("lookup cached or duplicated")
 	}
 }

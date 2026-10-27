@@ -106,6 +106,15 @@ func (h *ConsoleHandler) runs(c *gin.Context) {
 }
 
 func (h *ConsoleHandler) run(c *gin.Context) {
+	refresh := false
+	if value, exists := c.GetQuery("refresh"); exists {
+		var err error
+		refresh, err = strconv.ParseBool(value)
+		if err != nil {
+			Failure(c, http.StatusBadRequest, "INVALID_QUERY", "refresh 必须为布尔值", nil)
+			return
+		}
+	}
 	result, err := h.console.Run(c.Param("runId"))
 	if err != nil {
 		consoleFailure(c, err)
@@ -115,6 +124,14 @@ func (h *ConsoleHandler) run(c *gin.Context) {
 		Failure(c, http.StatusNotFound, "RESOURCE_NOT_FOUND", "命令记录不存在", nil)
 		return
 	}
+	if refresh {
+		result, err = h.console.RefreshRun(c.Request.Context(), c.Param("roomId"), result.ID)
+		if err != nil {
+			consoleFailure(c, err)
+			return
+		}
+	}
+	c.Header("Cache-Control", "no-store")
 	Success(c, http.StatusOK, result)
 }
 

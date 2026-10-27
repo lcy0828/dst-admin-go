@@ -177,3 +177,35 @@ func TestSelectedRoomContextAppliesToReceiptsAndTaskQueries(t *testing.T) {
 		t.Fatal("cached task ignored selected room")
 	}
 }
+
+func TestModelExcerptKeepsConsoleEvidenceAndLookupState(t *testing.T) {
+	value := map[string]any{"id": "run-123", "status": "uncertain", "resultState": "unconfirmed", "receiptRefreshUntil": "2026-10-27T10:00:00Z", "receiptCheck": map[string]any{"status": "not_found", "checkedAt": "2026-10-27T09:59:00Z"}, "output": map[string]any{"text": "0\n", "truncated": false}}
+	for i := 0; i < 100; i++ {
+		value[fmt.Sprintf("extra_%03d", i)] = strings.Repeat("noise", 500)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	bounded := boundResult(raw, 2048)
+	if err = json.Unmarshal(bounded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["resultState"] != "unconfirmed" || got["receiptRefreshUntil"] != value["receiptRefreshUntil"] || got["receiptCheck"].(map[string]any)["status"] != "not_found" || got["output"].(map[string]any)["text"] != "0\n" {
+		t.Fatalf("lost evidence: %s", bounded)
+	}
+}
+
+func TestModelExcerptRetainsDiagnosticLimitationsAndCausalUncertainty(t *testing.T) {
+	value := map[string]any{"status": "suspected", "logCorrelation": "unknown", "limitations": []string{"STACK_REFERENCE_IS_NOT_CAUSATION", "START_CORRELATION_UNKNOWN"}, "findings": []map[string]any{{"code": "MOD_IN_ERROR_STACK", "kind": "suspected"}}, "evidence": []map[string]any{{"errorCursor": 12, "lines": []string{"LUA ERROR"}}}}
+	for i := 0; i < 100; i++ {
+		value[fmt.Sprintf("long-extra-%d", i)] = strings.Repeat("x", 1000)
+	}
+	raw, _ := json.Marshal(value)
+	bounded := boundResult(raw, 8192)
+	var result map[string]any
+	if err := json.Unmarshal(bounded, &result); err != nil || result["logCorrelation"] != "unknown" || result["limitations"] == nil || result["findings"] == nil {
+		t.Fatalf("diagnostic uncertainty lost: %s %v", bounded, err)
+	}
+}
