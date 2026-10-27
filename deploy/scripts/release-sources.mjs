@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 export const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 export const frontendRepository = 'https://github.com/lcy0828/dst-admin-vue.git'
-const sourcePaths = ['go.mod', 'go.sum', 'main.go', 'agent', 'cmd', 'controller', 'cron', 'internal', 'models', 'pkg', 'routers', 'server', 'service', 'shared', 'template', 'tmux', 'deploy', 'docs/openapi.go', 'docs/openapi-v2.yaml', 'docs/openapi-operations.json']
+const sourcePaths = ['go.mod', 'go.sum', 'main.go', 'agent', 'cmd', 'controller', 'cron', 'internal', 'models', 'pkg', 'routers', 'server', 'service', 'shared', 'template', 'tmux', 'deploy', 'docs/openapi.go', 'docs/openapi-v2.yaml', 'docs/openapi-operations.json', 'docs/ai-tool-semantics.json']
 
 export const run = (command, args, cwd = backendRoot) => execFileSync(command, args, { cwd, encoding: 'utf8' }).trim()
 export const revision = root => ({
