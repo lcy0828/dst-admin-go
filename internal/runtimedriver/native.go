@@ -321,7 +321,7 @@ func (d *Native) Status(ctx context.Context, target Target) (shared.ShardRuntime
 
 func (d *Native) ExecuteShard(ctx context.Context, target Target, operation Operation, action shared.ShardAction, timeout time.Duration) (shared.ShardOperationResult, error) {
 	if action == shared.ShardActionStart || action == shared.ShardActionRestart {
-		next, release, err := d.maintenance.acquire(ctx, target)
+		next, release, err := d.maintenance.acquireLifecycle(ctx, target)
 		if err != nil {
 			return shared.ShardOperationResult{}, err
 		}

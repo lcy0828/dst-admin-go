@@ -68,14 +68,27 @@ type ownershipKey struct{}
 type Gate struct {
 	mu      sync.Mutex
 	owners  map[string]entry
+	readers map[string]map[string]int
 	pending func(context.Context, []Resource, string) error
 }
 
 func New(pending func(context.Context, []Resource, string) error) *Gate {
-	return &Gate{owners: make(map[string]entry), pending: pending}
+	return &Gate{owners: make(map[string]entry), readers: make(map[string]map[string]int), pending: pending}
 }
 func Owner(ctx context.Context) string { value, _ := ctx.Value(ownershipKey{}).(string); return value }
 func (g *Gate) Acquire(ctx context.Context, resources []Resource, owner string) (context.Context, func(), error) {
+	return g.acquire(ctx, resources, owner, false)
+}
+
+// AcquireShared lets independent Shards start from the same installation while
+// excluding maintenance that can replace its files. Persistent interrupted
+// maintenance still blocks entry, and an owning maintenance context may reenter
+// to restore its worlds without releasing its exclusive reservation.
+func (g *Gate) AcquireShared(ctx context.Context, resources []Resource, owner string) (context.Context, func(), error) {
+	return g.acquire(ctx, resources, owner, true)
+}
+
+func (g *Gate) acquire(ctx context.Context, resources []Resource, owner string, shared bool) (context.Context, func(), error) {
 	if g == nil {
 		return ctx, func() {}, nil
 	}
@@ -104,6 +117,13 @@ func (g *Gate) Acquire(ctx context.Context, resources []Resource, owner string) 
 		if current := g.owners[key]; current.refs > 0 && current.owner != owner {
 			return ctx, nil, &BusyError{Owner: current.owner}
 		}
+		if !shared {
+			for reader := range g.readers[key] {
+				if reader != owner {
+					return ctx, nil, &BusyError{Owner: reader}
+				}
+			}
+		}
 	}
 	if g.pending != nil {
 		if err := g.pending(ctx, resources, owner); err != nil {
@@ -111,6 +131,13 @@ func (g *Gate) Acquire(ctx context.Context, resources []Resource, owner string) 
 		}
 	}
 	for key := range keys {
+		if shared {
+			if g.readers[key] == nil {
+				g.readers[key] = make(map[string]int)
+			}
+			g.readers[key][owner]++
+			continue
+		}
 		current := g.owners[key]
 		current.owner, current.refs = owner, current.refs+1
 		g.owners[key] = current
@@ -121,6 +148,16 @@ func (g *Gate) Acquire(ctx context.Context, resources []Resource, owner string) 
 			g.mu.Lock()
 			defer g.mu.Unlock()
 			for key := range keys {
+				if shared {
+					g.readers[key][owner]--
+					if g.readers[key][owner] == 0 {
+						delete(g.readers[key], owner)
+					}
+					if len(g.readers[key]) == 0 {
+						delete(g.readers, key)
+					}
+					continue
+				}
 				current := g.owners[key]
 				current.refs--
 				if current.refs == 0 {
