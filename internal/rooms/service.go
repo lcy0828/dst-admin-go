@@ -458,6 +458,11 @@ func (s *Service) Create(request CreateRequest) (Room, error) {
 			return Room{}, err
 		}
 	}
+	// A newly created directory is a new room, even when an operator removed
+	// an older directory manually and reused its name.
+	if err := s.store.forgetRoomRuntimeModes(EncodeID(request.DirectoryName)); err != nil {
+		return Room{}, err
+	}
 	if err := os.Rename(temporary, target); err != nil {
 		return Room{}, fmt.Errorf("publish room directory: %w", err)
 	}
@@ -540,6 +545,9 @@ func (s *Service) CreateWorld(roomID string, request CreateWorldRequest) (World,
 		return World{}, err
 	}
 	if err := s.initializeNewWorld(temporary, request.DirectoryName); err != nil {
+		return World{}, err
+	}
+	if err := s.store.ForgetWorldRuntimeMode(room.ID, EncodeID(request.DirectoryName)); err != nil {
 		return World{}, err
 	}
 	if err := os.Rename(filepath.Join(temporary, request.DirectoryName), target); err != nil {
@@ -719,6 +727,15 @@ func (s *Service) DeleteWorld(roomID, worldID string, request DeleteWorldRequest
 	if err := s.persistLocalCatalogRoom(room.ID); err != nil {
 		if rollbackErr := os.Rename(target, source); rollbackErr != nil {
 			return DeleteWorldResult{}, fmt.Errorf("%w; restore world directory: %v", err, rollbackErr)
+		}
+		return DeleteWorldResult{}, err
+	}
+	if err := s.store.ForgetWorldRuntimeMode(room.ID, world.ID); err != nil {
+		if rollbackErr := os.Rename(target, source); rollbackErr != nil {
+			return DeleteWorldResult{}, fmt.Errorf("%w; restore world directory: %v", err, rollbackErr)
+		}
+		if catalogErr := s.persistLocalCatalogRoom(room.ID); catalogErr != nil {
+			return DeleteWorldResult{}, fmt.Errorf("%w; restore world catalog: %v", err, catalogErr)
 		}
 		return DeleteWorldResult{}, err
 	}

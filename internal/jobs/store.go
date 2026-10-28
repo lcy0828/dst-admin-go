@@ -29,6 +29,7 @@ type jobRecord struct {
 	Progress        int       `gorm:"not null"`
 	Message         string    `gorm:"type:text"`
 	ProgressDetail  string    `gorm:"type:text"`
+	RuntimeModes    string    `gorm:"type:text"`
 	CurrentBytes    int64     `gorm:"not null;default:0"`
 	TotalBytes      int64     `gorm:"not null;default:0"`
 	BytesPerSecond  int64     `gorm:"not null;default:0"`
@@ -628,6 +629,11 @@ func (s *Store) jobFromRecord(tx *gorm.DB, record jobRecord) (Job, error) {
 		ID: record.ID, Kind: record.Kind, Status: Status(record.Status), Outcome: Outcome(record.Outcome), RoomID: record.RoomID,
 		WorldID: record.WorldID, Progress: record.Progress, Message: record.Message, CancelRequested: record.CancelRequested,
 		CreatedAt: record.CreatedAt, StartedAt: record.StartedAt, FinishedAt: record.FinishedAt, Targets: targets,
+	}
+	if record.RuntimeModes != "" {
+		if err := json.Unmarshal([]byte(record.RuntimeModes), &job.RuntimeModes); err != nil {
+			return Job{}, fmt.Errorf("read job runtime mode plan: %w", err)
+		}
 	}
 	if record.CurrentBytes > 0 || record.TotalBytes > 0 || record.BytesPerSecond > 0 {
 		job.Transfer = &TransferProgress{

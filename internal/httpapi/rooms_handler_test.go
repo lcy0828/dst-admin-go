@@ -54,7 +54,7 @@ func (c *roomHandlerControl) Status(_ context.Context, room, world string) (shar
 		return status, nil
 	}
 	if c.running[key] {
-		return shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true}, nil
+		return shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true, RuntimeMode: shared.RuntimePerformanceModeGame}, nil
 	}
 	return shards.RuntimeStatus{State: shards.RuntimeStopped}, nil
 }
@@ -65,6 +65,19 @@ func (c *roomHandlerControl) Start(_ context.Context, room, world string) error 
 	c.running[room+"/"+world] = true
 	if status, ok := c.startStatuses[room+"/"+world]; ok {
 		c.statuses[room+"/"+world] = status
+	}
+	return nil
+}
+
+func (c *roomHandlerControl) StartWithRuntimeMode(ctx context.Context, room, world string, mode shared.RuntimePerformanceMode) error {
+	if err := c.Start(ctx, room, world); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := room + "/" + world
+	if _, exists := c.statuses[key]; !exists {
+		c.statuses[key] = shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true, RuntimeMode: mode}
 	}
 	return nil
 }
@@ -106,11 +119,63 @@ func newRoomHandlerApp(t *testing.T) (*gin.Engine, *jobs.Service, *roomHandlerCo
 	}
 	control := &roomHandlerControl{running: make(map[string]bool), statuses: make(map[string]shards.RuntimeStatus)}
 	operations := shards.NewOperations(roomService, control)
+	if err := operations.ConfigureRuntimeModePersistence(roomStore, jobStore); err != nil {
+		t.Fatal(err)
+	}
 	router := gin.New()
 	v2 := router.Group("/api/v2")
 	NewRoomHandler(roomService, operations, jobService).Register(v2)
 	NewJobHandler(jobService).Register(v2)
 	return router, jobService, control, roomService
+}
+
+func TestRoomAPIRestartStopAndStartRetainPerWorldRuntimeModes(t *testing.T) {
+	router, service, control, roomService := newRoomHandlerApp(t)
+	room, err := roomService.Create(rooms.CreateRequest{DirectoryName: "mode_api", Name: "逐世界运行方式", GameMode: "survival", MaxPlayers: 6, IncludeCaves: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	control.running["mode_api/Master"], control.running["mode_api/Caves"] = true, true
+	control.statuses["mode_api/Master"] = shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true, RuntimeMode: shared.RuntimePerformanceModeLuaJIT}
+	control.statuses["mode_api/Caves"] = shards.RuntimeStatus{State: shards.RuntimeRunning, SessionExists: true, RuntimeMode: shared.RuntimePerformanceModeArenaGC}
+	for _, action := range []string{"restart", "stop", "start"} {
+		response := performJSON(router, http.MethodPost, "/api/v2/rooms/"+room.ID+"/actions/"+action, map[string]interface{}{}, nil, "")
+		assertStatus(t, response, http.StatusAccepted)
+		jobID, _ := responseData(t, response)["id"].(string)
+		var job jobs.Job
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			job, err = service.Get(jobID)
+			if err == nil && (job.Status == jobs.StatusSucceeded || job.Status == jobs.StatusFailed) {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err != nil || job.Status != jobs.StatusSucceeded || job.Outcome != jobs.OutcomeFull {
+			t.Fatalf("%s job=%+v err=%v", action, job, err)
+		}
+		if action != "stop" && len(job.RuntimeModes) != 2 {
+			t.Fatalf("plan not persisted: %+v", job)
+		}
+		preferences, err := roomService.RuntimeModePreferences(room.ID)
+		if err != nil || preferences[rooms.EncodeID("Master")].Mode != shared.RuntimePerformanceModeLuaJIT || preferences[rooms.EncodeID("Caves")].Mode != shared.RuntimePerformanceModeArenaGC {
+			t.Fatalf("%s preferences=%+v err=%v", action, preferences, err)
+		}
+	}
+	response := performJSON(router, http.MethodGet, "/api/v2/rooms/"+room.ID+"/worlds", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	for _, raw := range responseData(t, response)["items"].([]interface{}) {
+		world := raw.(map[string]interface{})
+		if world["runtimeMode"] != world["preferredRuntimeMode"] || world["status"] != "running" {
+			t.Fatalf("actual/saved mode missing: %+v", world)
+		}
+	}
+	response = performJSON(router, http.MethodGet, "/api/v2/rooms/"+room.ID+"/runtime-modes", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	data := responseData(t, response)
+	if data["selectionState"] != "mixed" || data["defaultMode"] != nil {
+		t.Fatalf("mixed modes became Game Lua: %+v", data)
+	}
 }
 
 func TestRoomHandlerPropagatesManagedRoomLifecycle(t *testing.T) {

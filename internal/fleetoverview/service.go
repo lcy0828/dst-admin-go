@@ -56,13 +56,15 @@ type Problem struct {
 
 type World struct {
 	rooms.World
-	Status           string                  `json:"status"`
-	StatusCode       string                  `json:"statusCode,omitempty"`
-	Paused           *bool                   `json:"paused,omitempty"`
-	ControlAvailable bool                    `json:"controlAvailable"`
-	StatusMessage    string                  `json:"statusMessage,omitempty"`
-	Placement        topology.Placement      `json:"placement"`
-	Target           *topology.TargetSummary `json:"target,omitempty"`
+	RuntimeMode          shared.RuntimePerformanceMode `json:"runtimeMode,omitempty"`
+	PreferredRuntimeMode shared.RuntimePerformanceMode `json:"preferredRuntimeMode,omitempty"`
+	Status               string                        `json:"status"`
+	StatusCode           string                        `json:"statusCode,omitempty"`
+	Paused               *bool                         `json:"paused,omitempty"`
+	ControlAvailable     bool                          `json:"controlAvailable"`
+	StatusMessage        string                        `json:"statusMessage,omitempty"`
+	Placement            topology.Placement            `json:"placement"`
+	Target               *topology.TargetSummary       `json:"target,omitempty"`
 }
 
 type Room struct {
@@ -258,6 +260,24 @@ func (s *Service) snapshot(ctx context.Context, targetID string, observeRuntime 
 			TargetID: targetID, RoomID: roomID, Severity: "info",
 		})
 	}
+	if source, ok := s.rooms.(interface {
+		RuntimeModePreferences(string) (map[string]rooms.RuntimeModePreference, error)
+	}); ok {
+		for i := range result.Rooms {
+			preferences, err := source.RuntimeModePreferences(result.Rooms[i].ID)
+			if err != nil {
+				appendProblem(Problem{Code: "RUNTIME_MODE_PREFERENCE_UNAVAILABLE", Message: err.Error(), RoomID: result.Rooms[i].ID, Severity: "warning"})
+				continue
+			}
+			for j := range result.Rooms[i].Worlds {
+				world := &result.Rooms[i].Worlds[j]
+				world.PreferredRuntimeMode = preferences[world.ID].Mode
+				if world.PreferredRuntimeMode == "" {
+					world.PreferredRuntimeMode = shared.RuntimePerformanceModeGame
+				}
+			}
+		}
+	}
 	sort.SliceStable(result.Rooms, func(i, j int) bool {
 		if !strings.EqualFold(result.Rooms[i].Name, result.Rooms[j].Name) {
 			return strings.ToLower(result.Rooms[i].Name) < strings.ToLower(result.Rooms[j].Name)
@@ -310,6 +330,7 @@ func (s *Service) observeRuntime(ctx context.Context, roomItems []Room) error {
 				current.Status = state
 				current.StatusCode = strings.ToUpper(strings.TrimSpace(status.Code))
 				current.Paused = status.Paused
+				current.RuntimeMode = status.RuntimeMode
 				if message := strings.TrimSpace(status.Message); message != "" {
 					current.StatusMessage = message
 				}

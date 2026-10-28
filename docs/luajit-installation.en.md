@@ -25,9 +25,14 @@ You can also supply an HTTPS URL and SHA-256, then choose to download on the run
 The Controller transfers a package only when you explicitly upload a ZIP and choose **Transfer from Controller / Transfer and install**. The receiving node stores it in its cache.
 Offline nodes and download failures produce explicit errors; they do not automatically use the Controller or another node instead.
 
-Stop all worlds sharing the DST installation before installing. Afterward, the startup dialog offers original Game Lua, LuaJIT, or experimental generational GC in advanced settings.
+Stop all worlds sharing the DST installation before installing. The room/world action menu then offers Game Lua, LuaJIT, or experimental generational GC in advanced settings.
 Startup uses only upstream `-lua_vm_type=game|jit|jit_gen`. JIT compilation follows upstream configuration without a separate override switch.
 Ordinary startup does not download, repair, or replace resources. If a SteamCMD update overwrites the launcher, reinstall/repair LuaJIT.
+
+Ordinary **Start** uses each world's last successful mode; a new world without history uses Game Lua.
+**Restart** preserves each running world's actual mode, including mixed selections. Use **Choose runtime and start** or **Change runtime and restart** to switch explicitly. Successful choices survive management-service restarts. The world status shows the actual mode; an installed LuaJIT package only means the option is available.
+
+For MCP/OpenAPI start and restart, omit `runtimeMode` to inherit, or explicitly use `game`, `luajit`, or `arena-gc`. Scheduled start/restart actions accept the same optional `parameters.runtimeMode`; existing tasks inherit when it is absent. Remembering a mode does not pin the package version. Unknown modes, offline nodes, and incompatible packages produce clear errors; ordinary Stop remains available.
 
 Automatic restarts after cold backups, save restores, game updates, and mod updates preserve each world's previous Lua runtime mode.
 Remote nodes require Agent 2.16.14 or later. If the mode cannot be determined, maintenance asks you to wait or upgrade before stopping worlds.

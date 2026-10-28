@@ -72,22 +72,23 @@ type Target struct {
 }
 
 type Job struct {
-	ID              string            `json:"id"`
-	Kind            string            `json:"kind"`
-	Status          Status            `json:"status"`
-	Outcome         Outcome           `json:"outcome"`
-	RoomID          string            `json:"roomId,omitempty"`
-	WorldID         string            `json:"worldId,omitempty"`
-	Progress        int               `json:"progress"`
-	Message         string            `json:"message,omitempty"`
-	Transfer        *TransferProgress `json:"transfer,omitempty"`
-	ProgressDetail  *ProgressDetail   `json:"progressDetail,omitempty"`
-	Error           *Error            `json:"error,omitempty"`
-	CancelRequested bool              `json:"cancelRequested"`
-	CreatedAt       time.Time         `json:"createdAt"`
-	StartedAt       *time.Time        `json:"startedAt,omitempty"`
-	FinishedAt      *time.Time        `json:"finishedAt,omitempty"`
-	Targets         []Target          `json:"targets"`
+	RuntimeModes    []RuntimeModeSelection `json:"runtimeModes,omitempty"`
+	ID              string                 `json:"id"`
+	Kind            string                 `json:"kind"`
+	Status          Status                 `json:"status"`
+	Outcome         Outcome                `json:"outcome"`
+	RoomID          string                 `json:"roomId,omitempty"`
+	WorldID         string                 `json:"worldId,omitempty"`
+	Progress        int                    `json:"progress"`
+	Message         string                 `json:"message,omitempty"`
+	Transfer        *TransferProgress      `json:"transfer,omitempty"`
+	ProgressDetail  *ProgressDetail        `json:"progressDetail,omitempty"`
+	Error           *Error                 `json:"error,omitempty"`
+	CancelRequested bool                   `json:"cancelRequested"`
+	CreatedAt       time.Time              `json:"createdAt"`
+	StartedAt       *time.Time             `json:"startedAt,omitempty"`
+	FinishedAt      *time.Time             `json:"finishedAt,omitempty"`
+	Targets         []Target               `json:"targets"`
 }
 
 type TargetSpec struct {

@@ -293,12 +293,14 @@ func (h *RoomHandler) get(c *gin.Context) {
 
 type worldState struct {
 	rooms.World
-	Status           string              `json:"status"`
-	StatusCode       string              `json:"statusCode,omitempty"`
-	ControlAvailable bool                `json:"controlAvailable"`
-	StatusMessage    string              `json:"statusMessage,omitempty"`
-	Paused           *bool               `json:"paused,omitempty"`
-	LatestExit       *runtimeaudit.Event `json:"latestExit,omitempty"`
+	RuntimeMode          shared.RuntimePerformanceMode `json:"runtimeMode,omitempty"`
+	PreferredRuntimeMode shared.RuntimePerformanceMode `json:"preferredRuntimeMode,omitempty"`
+	Status               string                        `json:"status"`
+	StatusCode           string                        `json:"statusCode,omitempty"`
+	ControlAvailable     bool                          `json:"controlAvailable"`
+	StatusMessage        string                        `json:"statusMessage,omitempty"`
+	Paused               *bool                         `json:"paused,omitempty"`
+	LatestExit           *runtimeaudit.Event           `json:"latestExit,omitempty"`
 }
 
 func (h *RoomHandler) worldsList(c *gin.Context) {
@@ -313,8 +315,15 @@ func (h *RoomHandler) worldsList(c *gin.Context) {
 		return
 	}
 	result := make([]worldState, 0, len(worlds))
+	modePreferences, modePreferenceErr := h.rooms.RuntimeModePreferences(room.ID)
 	for _, world := range worlds {
 		state := worldState{World: world, Status: "unknown", ControlAvailable: true}
+		if modePreferenceErr == nil {
+			state.PreferredRuntimeMode = modePreferences[world.ID].Mode
+			if state.PreferredRuntimeMode == "" {
+				state.PreferredRuntimeMode = shared.RuntimePerformanceModeGame
+			}
+		}
 		status, statusErr := h.operations.StatusFor(c.Request.Context(), room.ID, world.ID)
 		if statusErr != nil {
 			state.ControlAvailable = false
@@ -326,6 +335,7 @@ func (h *RoomHandler) worldsList(c *gin.Context) {
 		state.StatusCode = status.Code
 		state.StatusMessage = status.Message
 		state.Paused = status.Paused
+		state.RuntimeMode = status.RuntimeMode
 		if h.audit != nil {
 			state.LatestExit, _ = h.audit.LatestExit(room.ID, world.ID)
 		}
@@ -393,7 +403,7 @@ func (h *RoomHandler) action(c *gin.Context) {
 		return
 	}
 	targets, runner, err := h.operations.PlanWithOptions(action, roomID, request.WorldIDs, shards.PlanOptions{
-		RuntimeMode: request.RuntimeMode, Immediate: request.Immediate,
+		RuntimeMode: request.RuntimeMode, RuntimeVersion: request.RuntimeVersion, Immediate: request.Immediate,
 	})
 	if err != nil {
 		roomFailure(c, err)
@@ -508,7 +518,7 @@ func (h *RoomHandler) batchAction(c *gin.Context) {
 			}
 		}
 		selections = append(selections, shards.BatchRoomSelection{
-			RoomID: room.RoomID, WorldIDs: room.WorldIDs, RuntimeMode: room.RuntimeMode,
+			RoomID: room.RoomID, WorldIDs: room.WorldIDs, RuntimeMode: room.RuntimeMode, RuntimeVersion: room.RuntimeVersion,
 		})
 	}
 	targets, runner, err := h.operations.PlanBatch(action, selections)

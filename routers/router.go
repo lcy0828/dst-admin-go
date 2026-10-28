@@ -727,6 +727,9 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	shardOperations := shards.NewOperations(roomService, shardControl)
+	if err := shardOperations.ConfigureRuntimeModePersistence(roomStore, jobStore); err != nil {
+		return nil, err
+	}
 	if err := shardOperations.ConfigureRuntime(topologyService, runtimeDriverRouter, operationLeaseService); err != nil {
 		return nil, err
 	}

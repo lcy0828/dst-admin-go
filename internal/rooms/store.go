@@ -33,6 +33,9 @@ func NewStore(db *gorm.DB, tablePrefix string) *Store {
 }
 
 func (s *Store) Migrate() error {
+	if err := s.db.Table(s.runtimeModesTable()).AutoMigrate(&RuntimeModePreference{}).Error; err != nil {
+		return fmt.Errorf("migrate world runtime preferences: %w", err)
+	}
 	if err := s.db.Table(s.table).AutoMigrate(&managedRoomRecord{}).Error; err != nil {
 		return fmt.Errorf("migrate managed rooms: %w", err)
 	}
@@ -70,8 +73,17 @@ func (s *Store) Adopt(room Room) error {
 }
 
 func (s *Store) Unadopt(roomID string) error {
-	if err := s.db.Table(s.table).Where("room_id = ?", roomID).Delete(&managedRoomRecord{}).Error; err != nil {
+	tx := s.db.Begin()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	if err := tx.Table(s.table).Where("room_id = ?", roomID).Delete(&managedRoomRecord{}).Error; err != nil {
+		tx.Rollback()
 		return fmt.Errorf("unadopt room: %w", err)
 	}
-	return nil
+	if err := forgetRoomRuntimeModes(tx, s.runtimeModesTable(), roomID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit().Error
 }

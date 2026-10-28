@@ -262,8 +262,8 @@ func TestCancelledOperationIsUncertainAndBounded(t *testing.T) {
 	if _, err := s.Invoke(ctx, principal(), "room_control", mutation("cancel-operation")); !errors.Is(err, context.Canceled) {
 		t.Fatal("cancelled operation accepted")
 	}
-	if _, err := s.Invoke(context.Background(), principal(), "room_control", json.RawMessage(`{"roomId":"room-a","action":"restart","requestId":"mode-required"}`)); !errors.Is(err, ErrInvalid) {
-		t.Fatal("startup mode silently defaulted")
+	if _, err := s.Invoke(context.Background(), principal(), "room_control", json.RawMessage(`{"roomId":"room-a","action":"restart","requestId":"mode-inherited"}`)); err != nil {
+		t.Fatalf("omitted mode must use backend inheritance: %v", err)
 	}
 }
 

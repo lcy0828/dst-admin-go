@@ -21,3 +21,8 @@ New backup sets support download and deletion. Downloads are portable room ZIPs 
 Manual backups in the UI use the consistency coordinator. Existing ZIP backups remain available to view, download, restore, and delete. The legacy ZIP creation endpoint requires a stopped room.
 
 Upload staging uses the corresponding feature's data directory; reserve disk space for the upload and processing. HTTP upload reads allow up to two hours. Configure any reverse proxy with matching size and time limits. Temporary upload and export files left after a crash are reclaimed at startup or on the next operation of the same type. Files used by active uploads or downloads are protected.
+
+## Startup runtime
+
+Start/restart tasks offer **Keep world settings** (default), Game Lua, LuaJIT, or Arena GC.
+Restart preserves each running world's actual mode and start uses its remembered choice; new worlds use Game Lua. API actions `room.start` and `room.restart` accept optional `parameters.runtimeMode`: `game`, `luajit`, or `arena-gc`. Modes are revalidated at execution and do not pin a LuaJIT package version.

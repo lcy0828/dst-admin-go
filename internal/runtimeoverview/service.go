@@ -32,11 +32,12 @@ type Problem struct {
 }
 
 type RuntimeStatus struct {
-	State         string `json:"state"`
-	Code          string `json:"code,omitempty"`
-	Message       string `json:"message,omitempty"`
-	SessionExists bool   `json:"sessionExists"`
-	Paused        *bool  `json:"paused,omitempty"`
+	RuntimeMode   shared.RuntimePerformanceMode `json:"runtimeMode,omitempty"`
+	State         string                        `json:"state"`
+	Code          string                        `json:"code,omitempty"`
+	Message       string                        `json:"message,omitempty"`
+	SessionExists bool                          `json:"sessionExists"`
+	Paused        *bool                         `json:"paused,omitempty"`
 }
 
 type ArtifactStatus struct {
@@ -177,7 +178,7 @@ func (s *Service) inspectShard(ctx context.Context, roomID string, placement top
 		shard.Runtime.State = "unknown"
 		shard.RuntimeProblem = problem(statusErr, "RUNTIME_STATUS_UNAVAILABLE")
 	} else {
-		shard.Runtime = RuntimeStatus{State: status.State, Code: status.Code, Message: status.Message, SessionExists: status.SessionExists, Paused: status.Paused}
+		shard.Runtime = RuntimeStatus{State: status.State, Code: status.Code, Message: status.Message, SessionExists: status.SessionExists, Paused: status.Paused, RuntimeMode: status.RuntimeMode}
 	}
 	health, healthErr := s.artifacts.Health(ctx, roomID, placement.WorldID)
 	if healthErr != nil {

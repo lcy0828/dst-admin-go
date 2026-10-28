@@ -95,16 +95,18 @@ func (e *CapacityRiskError) Error() string { return ErrCapacityRisk.Error() }
 func (e *CapacityRiskError) Unwrap() error { return ErrCapacityRisk }
 
 type PlanOptions struct {
-	RuntimeMode shared.RuntimePerformanceMode
-	Immediate   bool
+	RuntimeMode    shared.RuntimePerformanceMode
+	RuntimeVersion string
+	Immediate      bool
 	// Maintenance restarts retain the observed mode of each world.
 	PreserveRuntimeMode bool
 }
 
 type BatchRoomSelection struct {
-	RoomID      string
-	WorldIDs    []string
-	RuntimeMode shared.RuntimePerformanceMode
+	RuntimeVersion string
+	RoomID         string
+	WorldIDs       []string
+	RuntimeMode    shared.RuntimePerformanceMode
 }
 
 type RuntimeModeTarget struct {
@@ -132,12 +134,14 @@ type RuntimePackageOption struct {
 }
 
 type RuntimeModeAvailability struct {
-	RoomID      string                          `json:"roomId"`
-	WorldIDs    []string                        `json:"worldIds"`
-	DefaultMode shared.RuntimePerformanceMode   `json:"defaultMode"`
-	Modes       []shared.RuntimePerformanceMode `json:"modes"`
-	Targets     []RuntimeModeTarget             `json:"targets"`
-	Packages    []RuntimePackageOption          `json:"packages"`
+	Worlds         []WorldRuntimeMode              `json:"worlds"`
+	SelectionState string                          `json:"selectionState"`
+	RoomID         string                          `json:"roomId"`
+	WorldIDs       []string                        `json:"worldIds"`
+	DefaultMode    shared.RuntimePerformanceMode   `json:"defaultMode,omitempty"`
+	Modes          []shared.RuntimePerformanceMode `json:"modes"`
+	Targets        []RuntimeModeTarget             `json:"targets"`
+	Packages       []RuntimePackageOption          `json:"packages"`
 }
 
 type RuntimeModeError struct {
@@ -226,21 +230,23 @@ func WithOperationAudit(ctx context.Context, metadata OperationAuditMetadata) co
 }
 
 type Operations struct {
-	rooms        RoomCatalog
-	control      Control
-	pollInterval time.Duration
-	startTimeout time.Duration
-	stopTimeout  time.Duration
-	placements   executionPlacementResolver
-	remote       remoteShardExecutor
-	runtime      placedRuntimeExecutor
-	leases       operationLeaseService
-	leaseTTL     time.Duration
-	observer     OperationObserver
-	notifier     OperationNotifier
-	activeMu     sync.Mutex
-	activeSeq    uint64
-	activeStarts map[string]map[uint64]context.CancelFunc
+	modePreferences RuntimeModePreferences
+	modePlans       RuntimeModePlans
+	rooms           RoomCatalog
+	control         Control
+	pollInterval    time.Duration
+	startTimeout    time.Duration
+	stopTimeout     time.Duration
+	placements      executionPlacementResolver
+	remote          remoteShardExecutor
+	runtime         placedRuntimeExecutor
+	leases          operationLeaseService
+	leaseTTL        time.Duration
+	observer        OperationObserver
+	notifier        OperationNotifier
+	activeMu        sync.Mutex
+	activeSeq       uint64
+	activeStarts    map[string]map[uint64]context.CancelFunc
 	// stopEpoch invalidates start plans submitted before a stop runner begins.
 	stopEpoch map[string]uint64
 }
@@ -290,20 +296,26 @@ func (o *Operations) PlanWithOptions(action Action, roomID string, selectedWorld
 }
 
 func (o *Operations) planWithOptions(action Action, roomID string, selectedWorldIDs []string, options PlanOptions) ([]jobs.TargetSpec, jobs.Runner, error) {
-	if options.PreserveRuntimeMode && action != ActionRestart {
+	if options.PreserveRuntimeMode && (action != ActionRestart || options.RuntimeMode != "") {
 		return nil, nil, ErrInvalidRuntimeMode
 	}
 	if action != ActionStart && action != ActionStop && action != ActionRestart && action != ActionSave && action != ActionCleanup {
 		return nil, nil, ErrUnknownAction
 	}
-	runtimeMode, runtimeModeValid := shared.NormalizeRuntimePerformanceMode(options.RuntimeMode)
-	if !runtimeModeValid {
-		return nil, nil, ErrInvalidRuntimeMode
+	if options.RuntimeMode != "" {
+		if _, valid := shared.NormalizeRuntimePerformanceMode(options.RuntimeMode); !valid {
+			return nil, nil, ErrInvalidRuntimeMode
+		}
+		if action != ActionStart && action != ActionRestart {
+			return nil, nil, ErrInvalidRuntimeMode
+		}
 	}
-	if action == ActionStart || action == ActionRestart {
-		options.RuntimeMode = runtimeMode
-	} else if options.RuntimeMode != "" {
-		return nil, nil, ErrInvalidRuntimeMode
+	if options.RuntimeVersion != "" {
+		version, valid := normalizeRuntimePackageVersion(options.RuntimeVersion)
+		if !valid || options.RuntimeMode == "" || (options.RuntimeMode == shared.RuntimePerformanceModeGame) != (version == "game") {
+			return nil, nil, ErrInvalidRuntimeVersion
+		}
+		options.RuntimeVersion = version
 	}
 	room, worlds, err := o.resolvePlan(roomID, selectedWorldIDs)
 	if err != nil {
@@ -400,16 +412,19 @@ func (o *Operations) planWithOptions(action Action, roomID string, selectedWorld
 				return err
 			}
 		}
+		var modePlan []jobs.RuntimeModeSelection
+		modes := make(map[string]shared.RuntimePerformanceMode, len(currentWorlds))
 		if action == ActionStart || action == ActionRestart {
-			// Game Lua is supported by every DST installation. Only optional
-			// runtimes need an additional target capability check here.
-			if options.RuntimeMode != shared.RuntimePerformanceModeGame {
-				if _, modeErr := o.RequireRuntimeMode(ctx, currentRoom.ID, plannedWorldIDs, options.RuntimeMode); modeErr != nil {
-					for _, world := range currentWorlds {
-						report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "RUNTIME_MODE_UNAVAILABLE", Message: modeErr.Error()}})
-					}
-					return nil
+			var modeErr error
+			modePlan, modeErr = o.resolveRuntimeModePlan(ctx, action, currentRoom, currentWorlds, options)
+			if modeErr != nil {
+				for _, world := range currentWorlds {
+					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: operationErrorCode(action, modeErr), Message: modeErr.Error()}})
 				}
+				return nil
+			}
+			for _, selection := range modePlan {
+				modes[selection.WorldID] = selection.Mode
 			}
 		}
 		if activeLease != nil {
@@ -422,16 +437,39 @@ func (o *Operations) planWithOptions(action Action, roomID string, selectedWorld
 			}
 			*activeLease = renewed
 		}
+		var stopWarnings map[string]*jobs.Error
+		if action == ActionStop {
+			stopWarnings = o.rememberModesBeforeStop(ctx, currentRoom, currentWorlds)
+		}
 		emit := func(result worldExecutionResult) {
+			if action == ActionStop {
+				result.warning = stopWarnings[result.world.ID]
+			}
+			if !options.PreserveRuntimeMode {
+				for _, selection := range modePlan {
+					if selection.WorldID == result.world.ID {
+						o.rememberSuccessfulMode(ctx, currentRoom.ID, selection, &result)
+						break
+					}
+				}
+			}
 			report(targetResult(action, result))
 		}
 		switch action {
 		case ActionStart:
-			o.executeStartPhase(ctx, currentRoom, currentWorlds, activeLease, operationIDs, options.RuntimeMode, emit)
+			startable := make([]rooms.World, 0, len(currentWorlds))
+			for i, world := range currentWorlds {
+				if modePlan[i].Error != nil {
+					report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: modePlan[i].Error})
+					continue
+				}
+				startable = append(startable, world)
+			}
+			o.executeConcurrentModes(ctx, ActionStart, currentRoom, startable, activeLease, operationIDs, "", modes, emit)
 		case ActionStop:
 			o.executeStopPhase(ctx, currentRoom, currentWorlds, activeLease, operationIDs, emit)
 		case ActionRestart:
-			o.executeRestartPlan(ctx, currentRoom, currentWorlds, activeLease, operationIDs, options.RuntimeMode, options.PreserveRuntimeMode, report)
+			o.executeRestartPlan(ctx, currentRoom, currentWorlds, activeLease, operationIDs, modes, emit)
 		default:
 			for _, world := range currentWorlds {
 				result := o.executeWorld(ctx, action, currentRoom, world, activeLease, operationIDs[world.ID], "")
@@ -444,6 +482,7 @@ func (o *Operations) planWithOptions(action Action, roomID string, selectedWorld
 }
 
 type worldExecutionResult struct {
+	warning *jobs.Error
 	world   rooms.World
 	message string
 	err     error
@@ -513,27 +552,11 @@ func (o *Operations) executeStopPhase(ctx context.Context, room rooms.Room, worl
 	return results
 }
 
-func (o *Operations) executeRestartPlan(ctx context.Context, room rooms.Room, worlds []rooms.World, lease *operationlease.Lease, startOperationIDs map[string]string, runtimeMode shared.RuntimePerformanceMode, preserveMode bool, report func(jobs.TargetResult)) {
-	var modes map[string]shared.RuntimePerformanceMode
-	if preserveMode {
-		modes = make(map[string]shared.RuntimePerformanceMode, len(worlds))
-		for _, world := range worlds {
-			status, err := o.StatusFor(ctx, room.ID, world.ID)
-			mode, valid := shared.NormalizeRuntimePerformanceMode(status.RuntimeMode)
-			if err != nil || !valid || status.State == RuntimeUnknown {
-				for _, selected := range worlds {
-					cause := fmt.Errorf("无法确认世界 %s 的 Lua 运行模式，请等待启动完成或升级 Agent 后重试: %w", world.Name, errors.Join(ErrInvalidRuntimeMode, err))
-					report(targetResult(ActionRestart, worldExecutionResult{world: selected, err: cause}))
-				}
-				return
-			}
-			modes[world.ID] = mode
-		}
-	}
+func (o *Operations) executeRestartPlan(ctx context.Context, room rooms.Room, worlds []rooms.World, lease *operationlease.Lease, startOperationIDs map[string]string, modes map[string]shared.RuntimePerformanceMode, emit func(worldExecutionResult)) {
 	stopOperationIDs := operationIDsFor(worlds)
 	stopped := o.executeStopPhase(ctx, room, worlds, lease, stopOperationIDs, func(result worldExecutionResult) {
 		if result.err != nil {
-			report(targetResult(ActionRestart, result))
+			emit(result)
 		}
 	})
 	restartable := make([]rooms.World, 0, len(worlds))
@@ -542,11 +565,11 @@ func (o *Operations) executeRestartPlan(ctx context.Context, room rooms.Room, wo
 			restartable = append(restartable, world)
 		}
 	}
-	o.executeConcurrentModes(ctx, ActionStart, room, restartable, lease, startOperationIDs, runtimeMode, modes, func(result worldExecutionResult) {
+	o.executeConcurrentModes(ctx, ActionStart, room, restartable, lease, startOperationIDs, "", modes, func(result worldExecutionResult) {
 		if result.err == nil {
 			result.message = "分片已重启"
 		}
-		report(targetResult(ActionRestart, result))
+		emit(result)
 	})
 }
 
@@ -697,7 +720,7 @@ func operationIDsFor(worlds []rooms.World) map[string]string {
 
 func targetResult(action Action, result worldExecutionResult) jobs.TargetResult {
 	if result.err == nil {
-		return jobs.TargetResult{TargetID: result.world.ID, Status: jobs.StatusSucceeded, Message: result.message}
+		return jobs.TargetResult{TargetID: result.world.ID, Status: jobs.StatusSucceeded, Message: result.message, Warning: result.warning}
 	}
 	if errors.Is(result.err, context.Canceled) {
 		return jobs.TargetResult{TargetID: result.world.ID, Status: jobs.StatusCanceled, Error: &jobs.Error{Code: "JOB_CANCELED", Message: "任务已取消"}}
@@ -735,7 +758,7 @@ func (o *Operations) PlanBatch(action Action, selections []BatchRoomSelection) (
 		for _, world := range worlds {
 			worldIDs = append(worldIDs, world.ID)
 		}
-		targets, runner, err := o.planWithOptions(action, roomID, worldIDs, PlanOptions{RuntimeMode: selection.RuntimeMode})
+		targets, runner, err := o.planWithOptions(action, roomID, worldIDs, PlanOptions{RuntimeMode: selection.RuntimeMode, RuntimeVersion: selection.RuntimeVersion})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -803,6 +826,17 @@ func (o *Operations) RuntimeModes(ctx context.Context, roomID string, worldIDs [
 	if err != nil {
 		return RuntimeModeAvailability{}, err
 	}
+	availability, err := o.runtimeModeAvailability(ctx, room, worlds)
+	if err != nil {
+		return RuntimeModeAvailability{}, err
+	}
+	if err := o.decorateRuntimeModeDefaults(ctx, room, worlds, &availability); err != nil {
+		return RuntimeModeAvailability{}, err
+	}
+	return availability, nil
+}
+
+func (o *Operations) runtimeModeAvailability(ctx context.Context, room rooms.Room, worlds []rooms.World) (RuntimeModeAvailability, error) {
 	availability := RuntimeModeAvailability{
 		RoomID: room.ID, DefaultMode: shared.RuntimePerformanceModeGame,
 		Modes: []shared.RuntimePerformanceMode{
@@ -911,7 +945,11 @@ func (o *Operations) RequireRuntimeMode(ctx context.Context, roomID string, worl
 			Modes:       []shared.RuntimePerformanceMode{shared.RuntimePerformanceModeGame},
 		}, nil
 	}
-	availability, err := o.RuntimeModes(ctx, roomID, worldIDs)
+	room, worlds, err := o.resolvePlan(roomID, worldIDs)
+	if err != nil {
+		return RuntimeModeAvailability{}, err
+	}
+	availability, err := o.runtimeModeAvailability(ctx, room, worlds)
 	if err != nil {
 		return RuntimeModeAvailability{}, err
 	}
@@ -924,6 +962,12 @@ func (o *Operations) RequireRuntimeMode(ctx context.Context, roomID string, worl
 }
 
 func (o *Operations) RequireRuntimeSelection(ctx context.Context, roomID string, worldIDs []string, requestedMode shared.RuntimePerformanceMode, requestedVersion string) (RuntimeModeAvailability, error) {
+	if requestedMode == "" {
+		if requestedVersion != "" {
+			return RuntimeModeAvailability{}, ErrInvalidRuntimeVersion
+		}
+		return RuntimeModeAvailability{}, nil
+	}
 	availability, err := o.RequireRuntimeMode(ctx, roomID, worldIDs, requestedMode)
 	if err != nil {
 		return availability, err
@@ -1320,6 +1364,14 @@ func operationErrorCode(action Action, err error) string {
 		return executionError.Code
 	}
 	switch {
+	case errors.Is(err, ErrRuntimeModeUnavailable):
+		return "RUNTIME_MODE_UNAVAILABLE"
+	case errors.Is(err, ErrInvalidRuntimeMode):
+		return "RUNTIME_MODE_UNCONFIRMED"
+	case errors.Is(err, ErrRuntimeVersionUnavailable):
+		return "RUNTIME_VERSION_UNAVAILABLE"
+	case errors.Is(err, rooms.ErrRuntimePreferenceConflict):
+		return "RUNTIME_MODE_PREFERENCE_CHANGED"
 	case errors.Is(err, topology.ErrResourceConflict):
 		return "RESOURCE_PREFLIGHT_FAILED"
 	case errors.Is(err, agents.ErrAgentOffline):

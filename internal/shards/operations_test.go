@@ -100,7 +100,7 @@ func (executor *fakeRemoteExecutor) ExecuteShard(_ context.Context, targetID str
 	return agents.ShardExecutionResult{Result: shared.ShardOperationResult{
 		ProtocolVersion: shared.ShardOperationProtocolVersion, OperationID: request.OperationID,
 		InstallationID: "default", Action: request.Action, Cluster: request.Cluster, Shard: request.Shard,
-		Status: shared.ShardRuntimeStatus{State: state, SessionExists: state == "running"}, Message: "远程完成",
+		Status: shared.ShardRuntimeStatus{State: state, SessionExists: state == "running", RuntimeMode: shared.RuntimePerformanceModeGame}, Message: "远程完成",
 	}}, nil
 }
 
@@ -295,7 +295,7 @@ func (f *fakeControl) Status(_ context.Context, room, world string) (RuntimeStat
 		return status, nil
 	}
 	if f.running[key] {
-		return RuntimeStatus{State: RuntimeRunning, SessionExists: true}, nil
+		return RuntimeStatus{State: RuntimeRunning, SessionExists: true, RuntimeMode: shared.RuntimePerformanceModeGame}, nil
 	}
 	return RuntimeStatus{State: RuntimeStopped}, nil
 }
@@ -851,7 +851,7 @@ func TestStartTimeoutCleansUpSession(t *testing.T) {
 	control := &fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}}
 	operations := testOperations(control)
 	operations.startTimeout = 5 * time.Millisecond
-	control.status["summer_2026/Master"] = RuntimeStatus{State: RuntimeStarting, SessionExists: true}
+	control.status["summer_2026/Master"] = RuntimeStatus{State: RuntimeStarting, SessionExists: true, RuntimeMode: shared.RuntimePerformanceModeGame}
 	_, runner, err := operations.Plan(ActionStart, rooms.EncodeID("summer_2026"), []string{rooms.EncodeID("Master")})
 	if err != nil {
 		t.Fatal(err)
@@ -1154,7 +1154,7 @@ func TestDistributedOperationUsesAppliedRemoteTargetWithLeaseAndNoLocalFallback(
 	if err := runner(runnerContext, func(result jobs.TargetResult) { results = append(results, result) }); err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Status != jobs.StatusSucceeded || remote.calls != 1 || remote.targetID != "agent:node-a" {
+	if len(results) != 1 || results[0].Status != jobs.StatusSucceeded || remote.calls != 2 || remote.targetID != "agent:node-a" {
 		t.Fatalf("results=%#v remote=%#v", results, remote)
 	}
 	if remote.request.Action != shared.ShardActionStart || remote.request.FencingToken != 7 || remote.request.LeaseID != "lease-1" || remote.request.OperationKey == "" {

@@ -24,6 +24,7 @@ import (
 	"dont/internal/structuredlogs"
 	"dont/internal/topology"
 	"dont/internal/worldstate"
+	"dont/shared"
 )
 
 type ActionExecutor interface {
@@ -125,7 +126,17 @@ func (e *DomainExecutor) Validate(task Task) error {
 		if len(task.Parameters) != 0 || len(task.WorldIDs) != 0 || task.RetryTimes != 0 {
 			return &FieldError{Fields: map[string]string{"parameters": "无人更新作用于整个房间，不接受世界筛选、额外参数或立即重试"}}
 		}
-	case ActionRoomStart, ActionRoomStop, ActionRoomRestart, ActionPlayerRefresh, ActionStructuredLogRefresh, ActionWorldStateRefresh:
+	case ActionRoomStart, ActionRoomRestart:
+		for key, value := range task.Parameters {
+			mode, ok := value.(string)
+			if key != "runtimeMode" {
+				return &FieldError{Fields: map[string]string{"parameters": "此动作仅接受 runtimeMode 参数"}}
+			}
+			if _, valid := shared.NormalizeRuntimePerformanceMode(shared.RuntimePerformanceMode(mode)); !ok || !valid || mode == "" {
+				return &FieldError{Fields: map[string]string{"parameters.runtimeMode": "启动方式必须是 game、luajit 或 arena-gc；省略时沿用设置"}}
+			}
+		}
+	case ActionRoomStop, ActionPlayerRefresh, ActionStructuredLogRefresh, ActionWorldStateRefresh:
 		if len(task.Parameters) > 0 {
 			return &FieldError{Fields: map[string]string{"parameters": "此动作不接受额外参数"}}
 		}
@@ -384,14 +395,30 @@ func (e *DomainExecutor) executeRoomAction(ctx context.Context, task Task, jobID
 	ctx = shards.WithOperationAudit(ctx, shards.OperationAuditMetadata{
 		JobID: jobID, Source: string(runtimeaudit.SourceAutomation),
 	})
-	targets, runner, err := e.roomActions.Plan(action, task.RoomID, task.WorldIDs)
+	var targets []jobs.TargetSpec
+	var runner jobs.Runner
+	var err error
+	if planner, ok := e.roomActions.(interface {
+		PlanWithOptions(shards.Action, string, []string, shards.PlanOptions) ([]jobs.TargetSpec, jobs.Runner, error)
+	}); ok {
+		mode, _ := task.Parameters["runtimeMode"].(string)
+		targets, runner, err = planner.PlanWithOptions(action, task.RoomID, task.WorldIDs, shards.PlanOptions{RuntimeMode: shared.RuntimePerformanceMode(mode)})
+	} else if len(task.Parameters) > 0 {
+		return ExecutionResult{}, errors.New("当前运行控制器不支持指定启动方式")
+	} else {
+		targets, runner, err = e.roomActions.Plan(action, task.RoomID, task.WorldIDs)
+	}
 	if err != nil {
 		return ExecutionResult{}, err
 	}
 	results := make([]jobs.TargetResult, 0, len(targets))
 	runnerErr := runner(ctx, func(result jobs.TargetResult) { results = append(results, result) })
 	var executionErr error
+	var warnings []string
 	for _, result := range results {
+		if result.Warning != nil {
+			warnings = append(warnings, result.Warning.Message)
+		}
 		if result.Status == jobs.StatusFailed || result.Status == jobs.StatusCanceled {
 			if result.Error != nil {
 				executionErr = errors.Join(executionErr, errors.New(result.Error.Message))
@@ -404,7 +431,11 @@ func (e *DomainExecutor) executeRoomAction(ctx context.Context, task Task, jobID
 	if executionErr != nil {
 		return ExecutionResult{}, executionErr
 	}
-	return ExecutionResult{Message: fmt.Sprintf("已完成 %d 个分片动作", len(results))}, nil
+	message := fmt.Sprintf("已完成 %d 个分片动作", len(results))
+	if len(warnings) > 0 {
+		message += "；提醒：" + strings.Join(warnings, "；")
+	}
+	return ExecutionResult{Message: message}, nil
 }
 
 func (e *DomainExecutor) commandDefinition(commandID string) (console.Definition, bool) {
@@ -491,9 +522,9 @@ func integerParameter(parameters map[string]interface{}, name string, minimum, m
 func ActionDefinitions() []ActionDefinition {
 	return []ActionDefinition{
 		{ID: ActionGameUpdateEmpty, Name: "无人时更新游戏并重启", Description: "检查游戏更新；所有共用安装的房间均无人时更新并恢复原运行世界", Parameters: []string{}},
-		{ID: ActionRoomStart, Name: "启动分片", Description: "启动选中的分片；未选择时启动全部分片", Parameters: []string{}},
+		{ID: ActionRoomStart, Name: "启动分片", Description: "启动选中的分片；省略 runtimeMode 时沿用各世界的启动方式", Parameters: []string{"runtimeMode"}},
 		{ID: ActionRoomStop, Name: "停止分片", Description: "停止选中的分片；未选择时停止全部分片", Parameters: []string{}},
-		{ID: ActionRoomRestart, Name: "重启分片", Description: "重启选中的分片；未选择时重启全部分片", Parameters: []string{}},
+		{ID: ActionRoomRestart, Name: "重启分片", Description: "重启选中的分片；省略 runtimeMode 时保留各世界的运行方式", Parameters: []string{"runtimeMode"}},
 		{ID: ActionBackupCreate, Name: "创建快照", Description: "创建一致性房间快照", Parameters: []string{"name", "keep"}},
 		{ID: ActionBackupPrune, Name: "清理快照", Description: "按保留数量清理旧快照", Parameters: []string{"keep"}},
 		{ID: ActionCommandExecute, Name: "执行游戏命令", Description: "执行管理员选择的命令模板或自定义 Lua 脚本", NeedsWorld: true, Parameters: []string{"commandId", "arguments", "rawCommand"}},
