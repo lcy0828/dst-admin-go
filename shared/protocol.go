@@ -364,6 +364,8 @@ type ShardInventoryReport struct {
 }
 
 type ShardProcessReport struct {
+	CPUSeconds      *float64               `json:"cpu_seconds,omitempty"`
+	SampledAt       time.Time              `json:"sampled_at,omitempty"`
 	RuntimeMode     RuntimePerformanceMode `json:"runtime_mode,omitempty"`
 	PID             int32                  `json:"pid"`
 	RuntimeKind     string                 `json:"runtime_kind,omitempty"`

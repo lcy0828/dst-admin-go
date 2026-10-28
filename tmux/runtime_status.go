@@ -42,6 +42,7 @@ type RuntimeStatus struct {
 
 const runtimeLogScanChunkBytes = 64 * 1024
 const runtimeLogTailBytes int64 = 256 * 1024
+const runtimeAuthFailureContextBytes = 16 * 1024
 const macOSApplicationPolicyCommand = "/usr/sbin/taskpolicy"
 
 var runtimeFailureSignals = []struct {
@@ -218,6 +219,9 @@ func classifyRuntimeStartupLog(content string, fallback RuntimeStatus) RuntimeSt
 			failure = RuntimeStatus{
 				State: RuntimeFailed, Code: signal.code, Message: signal.message, SessionExists: true,
 			}
+			if signal.code == "TOKEN_MISSING" {
+				failure.Code, failure.Message = runtimeTokenFailureDetails([]byte(content), index)
+			}
 		}
 	}
 	if latestFailure >= 0 {
@@ -239,6 +243,28 @@ func classifyRuntimeStartupLog(content string, fallback RuntimeStatus) RuntimeSt
 		}
 	}
 	return fallback
+}
+
+// DST can print "No auth token could be found" after reading a valid token if
+// its login request fails. Only correlate nearby authentication evidence, never
+// unrelated lobby errors from an otherwise running world.
+func runtimeTokenFailureDetails(content []byte, missingIndex int) (string, string) {
+	start := missingIndex - runtimeAuthFailureContextBytes
+	if start < 0 {
+		start = 0
+	}
+	context := content[start:missingIndex]
+	reset := bytes.LastIndex(context, []byte("Account Communication Success (6)"))
+	if startup := bytes.LastIndex(context, []byte("Starting Up")); startup > reset {
+		reset = startup
+	}
+	if bytes.LastIndex(context, []byte("E_EXPIRED_TOKEN")) > reset {
+		return "TOKEN_EXPIRED", "Klei 集群令牌已过期或无效"
+	}
+	if bytes.LastIndex(context, []byte("CURL ERROR: (login.kleientertainment.com)")) > reset {
+		return "KLEI_CONNECTION_FAILED", "无法连接 Klei 登录服务，请检查 DNS、网络或代理后重试"
+	}
+	return "TOKEN_MISSING", "未找到有效的 Klei 集群令牌"
 }
 
 var runtimeStartupSignals = []struct{ needle, stage string }{
@@ -279,6 +305,7 @@ func classifyRuntimeLogFile(path string, fallback RuntimeStatus) (RuntimeStatus,
 
 	latestReady := int64(-1)
 	failurePositions := make([]int64, len(runtimeFailureSignals))
+	failureDetails := make([]RuntimeStatus, len(runtimeFailureSignals))
 	for index := range failurePositions {
 		failurePositions[index] = -1
 	}
@@ -307,6 +334,10 @@ func classifyRuntimeLogFile(path string, fallback RuntimeStatus) (RuntimeStatus,
 					position := base + int64(found)
 					if position > failurePositions[index] {
 						failurePositions[index] = position
+						failureDetails[index] = RuntimeStatus{State: RuntimeFailed, Code: signal.code, Message: signal.message, SessionExists: true}
+						if signal.code == "TOKEN_MISSING" {
+							failureDetails[index].Code, failureDetails[index].Message = runtimeTokenFailureDetails(window, found)
+						}
 					}
 				}
 			}
@@ -336,7 +367,7 @@ func classifyRuntimeLogFile(path string, fallback RuntimeStatus) (RuntimeStatus,
 		if position > latestReady && (signal.priority > failurePriority || signal.priority == failurePriority && position > latestFailure) {
 			latestFailure = position
 			failurePriority = signal.priority
-			failure = RuntimeStatus{State: RuntimeFailed, Code: signal.code, Message: signal.message, SessionExists: true}
+			failure = failureDetails[index]
 		}
 	}
 	if latestFailure >= 0 {
@@ -353,7 +384,7 @@ func classifyRuntimeLogFile(path string, fallback RuntimeStatus) (RuntimeStatus,
 }
 
 func runtimeLogSignalOverlap() int {
-	longest := len("Steam Workshop functionality will be disabled")
+	longest := runtimeAuthFailureContextBytes + len("No auth token could be found")
 	for _, signal := range runtimeReadySignals {
 		if len(signal) > longest {
 			longest = len(signal)

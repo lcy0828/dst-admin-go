@@ -56,9 +56,10 @@ type Event struct {
 }
 
 type ListFilter struct {
-	WorldID string
-	Type    EventType
-	Limit   int
+	From, To time.Time
+	WorldID  string
+	Type     EventType
+	Limit    int
 }
 
 type List struct {

@@ -67,6 +67,12 @@ func (s *Store) List(roomID string, filter ListFilter) (List, error) {
 	if filter.Type != "" {
 		query = query.Where("type = ?", filter.Type)
 	}
+	if !filter.From.IsZero() {
+		query = query.Where("occurred_at >= ?", filter.From.UTC())
+	}
+	if !filter.To.IsZero() {
+		query = query.Where("occurred_at <= ?", filter.To.UTC())
+	}
 	var total int
 	if err := query.Count(&total).Error; err != nil {
 		return List{}, err

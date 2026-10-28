@@ -96,6 +96,46 @@ func TestClassifyRuntimeLogRejectsExpiredToken(t *testing.T) {
 	}
 }
 
+func TestRuntimeAuthenticationFailureClassification(t *testing.T) {
+	loginError := "[00:00:08]: CURL ERROR: (login.kleientertainment.com) [35]gnutls_handshake() failed: The TLS connection was non-properly terminated.\n"
+	missing := "[00:00:08]: No auth token could be found.\n"
+	for _, tc := range []struct {
+		name, log, code string
+		state           RuntimeState
+	}{
+		{"imported token read but TLS failed", "Token retrieved from: /saves/MyDediServer/cluster_token.txt\n" + loginError + "[0] Account Failed (6): \"\"\n" + missing, "KLEI_CONNECTION_FAILED", RuntimeFailed},
+		{"missing token", missing, "TOKEN_MISSING", RuntimeFailed},
+		{"expired token", loginError + "[200] Account Failed (6): \"E_EXPIRED_TOKEN\"\n" + missing, "TOKEN_EXPIRED", RuntimeFailed},
+		{"recovered login", loginError + missing + "[200] Account Communication Success (6)\nShard server ready\n", "", RuntimeRunning},
+		{"new missing token after successful login", loginError + "[200] Account Communication Success (6)\n" + missing, "TOKEN_MISSING", RuntimeFailed},
+		{"previous startup error", loginError + "Starting Up\n" + missing, "TOKEN_MISSING", RuntimeFailed},
+		{"unrelated lobby failure", "Shard server ready\nCURL ERROR: (lobby-v2.klei.com) [35]gnutls_handshake() failed\n", "", RuntimeRunning},
+		{"lobby does not imply login failure", "CURL ERROR: (lobby-v2.klei.com) [35]gnutls_handshake() failed\n" + missing, "TOKEN_MISSING", RuntimeFailed},
+		{"old login error outside bounded context", loginError + strings.Repeat("routine log\n", runtimeAuthFailureContextBytes) + missing, "TOKEN_MISSING", RuntimeFailed},
+		{"latest missing token wins", loginError + missing + "[200] Account Communication Success (6)\n" + missing, "TOKEN_MISSING", RuntimeFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Place the authentication sequence both across a scan boundary and
+			// inside one chunk. The short and streaming readers must agree.
+			for _, padding := range []int{0, runtimeLogScanChunkBytes - len(loginError)/2, runtimeLogScanChunkBytes - len(loginError) - len(missing)/2} {
+				content := strings.Repeat(" ", padding) + tc.log
+				status := ClassifyRuntimeLog(content)
+				if status.State != tc.state || status.Code != tc.code {
+					t.Fatalf("padding=%d: status=%+v want %s/%s", padding, status, tc.state, tc.code)
+				}
+				path := filepath.Join(t.TempDir(), "server_log.txt")
+				if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+				streamed, err := classifyRuntimeLogFile(path, RuntimeStatus{State: RuntimeStarting, SessionExists: true})
+				if err != nil || streamed != status {
+					t.Fatalf("padding=%d: streamed=%+v err=%v, short read=%+v", padding, streamed, err, status)
+				}
+			}
+		})
+	}
+}
+
 func TestClassifyRuntimeLogAcceptsLatestReadySignal(t *testing.T) {
 	status := classifyRuntimeLog("No auth token could be found\nServer registered via geo DNS in ap-east\n", RuntimeStatus{State: RuntimeStarting})
 	if status.State != RuntimeRunning {

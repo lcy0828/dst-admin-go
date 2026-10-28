@@ -50,6 +50,7 @@ import (
 	"dont/internal/modupdates"
 	"dont/internal/notifications"
 	"dont/internal/operationlease"
+	"dont/internal/performance"
 	"dont/internal/placementmigration"
 	"dont/internal/playeractivity"
 	playerapi "dont/internal/players"
@@ -60,6 +61,7 @@ import (
 	"dont/internal/runtimedriver"
 	"dont/internal/runtimeevents"
 	"dont/internal/runtimeguard"
+	"dont/internal/runtimeinventory"
 	"dont/internal/runtimeobservation"
 	"dont/internal/runtimeoverview"
 	"dont/internal/saveimport"
@@ -1139,6 +1141,16 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	worldStateService.ConfigureSessionObserver(playerService.ObserveWorldSession)
+	performanceStore := performance.NewStore(models.DB(), tablePrefix)
+	if err := performanceStore.Migrate(); err != nil {
+		return nil, err
+	}
+	performanceService := performance.New(performanceStore, roomService, performance.RuntimeSource{Placements: topologyService, Reader: distributedRuntimeBridge, LocalProcesses: runtimeinventory.ProbeDSTProcesses, LocalStatus: runtimeDriverRouter.Status, Remote: runtimeObservationCoordinator})
+	performanceService.ConfigureEvents(runtimeAuditService)
+	performanceHandler := httpapi.NewPerformanceHandler(performanceService)
+	if backgroundEnabled {
+		hooks.workers = append(hooks.workers, performanceService.Run)
+	}
 	worldStateHandler := httpapi.NewWorldStateHandler(worldStateService)
 	automationStore := automation.NewStore(models.DB(), tablePrefix)
 	if err := automationStore.Migrate(); err != nil {
@@ -1498,6 +1510,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		consoleHandler.Register(v2)
 		playerHandler.Register(v2)
 		worldStateHandler.Register(v2)
+		performanceHandler.Register(v2)
 		automationHandler.Register(v2)
 		backupScheduleHandler.Register(v2)
 		agentHandler.Register(v2)

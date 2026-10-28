@@ -75,6 +75,12 @@ func Collect(ctx context.Context, request shared.RuntimeInventoryRequest) (share
 	return report, nil
 }
 
+// ProcessesForInstallation filters observed processes by their trusted storage
+// or executable roots without collecting a filesystem or machine inventory.
+func ProcessesForInstallation(values []shared.ShardProcessReport, savePath, serverPath string) []shared.ShardProcessReport {
+	return installationProcesses(values, nil, savePath, serverPath)
+}
+
 func installationProcesses(values []shared.ShardProcessReport, rooms []shared.RoomInventoryReport, savePath, serverPath string) []shared.ShardProcessReport {
 	identities := make(map[string]bool)
 	for _, room := range rooms {
@@ -203,7 +209,7 @@ func scanRooms(saveRoot string) ([]shared.RoomInventoryReport, []string, error) 
 			warnings = append(warnings, fmt.Sprintf("房间数量超过 %d，清单已截断", maximumInventoryRooms))
 			break
 		}
-		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		roomPath := filepath.Join(saveRoot, entry.Name())
@@ -236,7 +242,7 @@ func scanRooms(saveRoot string) ([]shared.RoomInventoryReport, []string, error) 
 				warnings = append(warnings, fmt.Sprintf("房间 %s 的分片数量超过 %d，清单已截断", entry.Name(), maximumInventoryShards))
 				break
 			}
-			if !shardEntry.IsDir() || shardEntry.Type()&os.ModeSymlink != 0 {
+			if !shardEntry.IsDir() || shardEntry.Type()&os.ModeSymlink != 0 || strings.HasPrefix(shardEntry.Name(), ".") {
 				continue
 			}
 			serverPath := filepath.Join(roomPath, shardEntry.Name(), "server.ini")
@@ -296,6 +302,13 @@ func ProbeDSTProcesses(ctx context.Context) ([]shared.ShardProcessReport, error)
 			continue
 		}
 		item := ShardProcessFromArguments(value.Pid, name, arguments)
+		if times, timesErr := value.TimesWithContext(ctx); timesErr == nil && times != nil {
+			total := times.User + times.System
+			if total >= 0 {
+				item.CPUSeconds = &total
+				item.SampledAt = time.Now().UTC()
+			}
+		}
 		if executable, executableErr := value.ExeWithContext(ctx); executableErr == nil && executable != "" {
 			item.Executable = executable
 		}

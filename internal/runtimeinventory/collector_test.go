@@ -55,6 +55,32 @@ func TestScanRoomsReportsShardIDRoleAndWorldTypeIndependently(t *testing.T) {
 	}
 }
 
+func TestScanRoomsIgnoresStagingDirectoriesDuringImportAndPublication(t *testing.T) {
+	root := t.TempDir()
+	for _, directory := range []string{"MyDediServer", ".dst-admin-import-123", ".dst-admin-rollback-123", ".dst-admin-create-123", ".trash"} {
+		room := filepath.Join(root, directory)
+		for _, world := range []string{"Master", ".dst-admin-staging-123"} {
+			worldPath := filepath.Join(room, world)
+			if err := os.MkdirAll(worldPath, 0750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(worldPath, "server.ini"), []byte("[SHARD]\nis_master = true\nid = 10001\n"), 0640); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(room, "cluster.ini"), []byte("[NETWORK]\ncluster_name = Imported\n"), 0640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rooms, warnings, err := scanRooms(root)
+	if err != nil || len(warnings) != 0 || len(rooms) != 1 || rooms[0].Directory != "MyDediServer" || len(rooms[0].Shards) != 1 || rooms[0].Shards[0].Directory != "Master" {
+		t.Fatalf("import staging entered runtime inventory: rooms=%+v warnings=%v err=%v", rooms, warnings, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".dst-admin-import-123", "Master", "server.ini")); err != nil {
+		t.Fatalf("inventory scan changed staging files: %v", err)
+	}
+}
+
 func TestHostResourcesReportsConsistentCPUTopology(t *testing.T) {
 	cpu, memory := HostResources()
 	if cpu.LogicalProcessors < 1 || cpu.PhysicalCores < 0 || cpu.PhysicalCores > cpu.LogicalProcessors {
