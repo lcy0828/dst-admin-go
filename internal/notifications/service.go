@@ -2,9 +2,11 @@ package notifications
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -272,6 +274,54 @@ func (s *Service) OnJob(job jobs.Job) {
 	// task identity instead of forwarding arbitrary logs to external endpoints.
 	if job.Error != nil {
 		message += "\n错误代码 / Error code: " + job.Error.Code
+	}
+	// Only forward bounded, allowlisted domain states, never arbitrary details.
+	for _, target := range job.Targets {
+		if target.Error == nil || target.Error.Details == nil {
+			continue
+		}
+		details := target.Error.Details
+		if code, ok := details["failureCode"].(string); ok {
+			switch code {
+			case "SAVE_IN_PROGRESS", "TARGET_SNAPSHOT_PASSED", "SAVE_WRITE_FAILED", "BARRIER_EXPIRED", "BACKUP_TIMEOUT", "SNAPSHOT_ROUND_UNCONFIRMED", "RUNTIME_UPDATE_REQUIRED", "HOT_BACKUP_UNAVAILABLE", "TOPOLOGY_CHANGED", "ARCHIVE_INTEGRITY_FAILED", "CONTROLLER_RESTARTED", "BACKUP_FAILED":
+				message += "\n备份原因 / Backup cause: " + code
+			}
+		}
+		if state, ok := details["artifactState"].(string); ok {
+			switch state {
+			case "not_generated", "staging", "available", "partial", "missing", "corrupt":
+				message += "\n备份文件 / Backup artifacts: " + state
+			}
+		}
+		if phase, ok := details["failurePhase"].(string); ok {
+			switch phase {
+			case "planned", "barrier_preparing", "barrier_arming", "barrier_committing", "barrier_waiting", "barrier_retrying", "staging", "transferring":
+				message += "\n失败阶段 / Failed phase: " + phase
+			}
+		}
+		if state, ok := details["barrierReleaseState"].(string); ok {
+			switch state {
+			case "pending", "released", "unconfirmed":
+				message += "\n保存保护 / Save protection: " + state
+			}
+		}
+		count := func(key string) (int, bool) {
+			encoded, err := json.Marshal(details[key])
+			if err != nil {
+				return 0, false
+			}
+			value, err := strconv.Atoi(string(encoded))
+			return value, err == nil && value >= 0 && value <= 1000000
+		}
+		verified, verifiedOK := count("verifiedWorlds")
+		total, totalOK := count("totalWorlds")
+		if verifiedOK && totalOK && verified <= total {
+			message += "\n世界校验 / Verified worlds: " + strconv.Itoa(verified) + "/" + strconv.Itoa(total)
+		}
+		if encoded, err := json.Marshal(details["barrierAttempts"]); err == nil && len(encoded) == 1 && encoded[0] >= '0' && encoded[0] <= '3' {
+			message += "\n保存尝试 / Save attempts: " + string(encoded)
+		}
+		break
 	}
 	message += "\n任务 / Task: " + job.ID
 	s.Emit(Event{ID: "job:" + job.ID, Kind: kind, Title: title + " · " + status, Message: message, Status: string(job.Status), Severity: severity, RoomID: job.RoomID, JobID: job.ID})

@@ -1,6 +1,6 @@
 local json = require("json")
 local M = {}
-local VERSION = "2.4.17"
+local VERSION = "2.4.18"
 local ROOT = "mod_config_data/dst-admin/"
 local MAX_PENDING, MAX_BATCH, MAX_TARGETS = 512, 128, 32
 local defaults = {enabled=true, positions=true, actions=true, combat=true, positionIntervalSeconds=15,

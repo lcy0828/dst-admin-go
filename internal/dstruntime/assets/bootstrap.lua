@@ -1,4 +1,4 @@
-local VERSION = "2.4.17"
+local VERSION = "2.4.18"
 local PROTOCOL_VERSION = 2
 local MODULE_ROOT = "mod_config_data/dst-admin/runtime/"
 local SNAPSHOT_INTERVAL = 5

@@ -254,7 +254,7 @@ func TestAgentDriverMarksConfirmedMigrationPeerFailureAsFallbackSafe(t *testing.
 }
 
 func TestSnapshotBarrierAcceptsRealKLEIPersistentJSON(t *testing.T) {
-	data := []byte(fmt.Sprintf(`KLEI     1 {"schemaVersion":1,"producerVersion":%q,"producerInstanceId":"barrier-instance","barrierId":"hot-test-0001","state":"prepared","sessionId":"SESSION","shardId":"2","snapshotBefore":7,"preparedAtUnix":1787118371}`, dstruntime.RuntimeVersion))
+	data := []byte(fmt.Sprintf(`KLEI     1 {"schemaVersion":2,"producerVersion":%q,"producerInstanceId":"barrier-instance","barrierId":"hot-test-0001","state":"prepared","sessionId":"SESSION","shardId":"2","snapshotBefore":7,"preparedAtUnix":1787118371}`, dstruntime.RuntimeVersion))
 	driver, err := NewAgent(barrierArtifactExecutor{data: data})
 	if err != nil {
 		t.Fatal(err)

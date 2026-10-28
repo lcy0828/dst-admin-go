@@ -4,6 +4,7 @@ import (
 	"context"
 	"dont/internal/backups"
 	"dont/internal/distributedbackup"
+	"dont/internal/jobs"
 	"dont/internal/runtimeguard"
 	"errors"
 )
@@ -26,6 +27,9 @@ func (r BackupRouter) Create(ctx context.Context, roomID, name string, kind back
 	}
 	created, err := r.Distributed.CreateWithMode(ctx, roomID, name, string(kind), jobID, distributedbackup.ModeAutomatic)
 	if err != nil {
+		if created.ID != "" {
+			return backups.Backup{}, &jobs.ResultError{Result: jobs.Error{Code: created.FailureCode, Message: err.Error(), Details: created.FailureDetails()}, Cause: err}
+		}
 		return backups.Backup{}, err
 	}
 	return backups.Backup{ID: created.ID, RoomID: roomID, Name: created.Name, Kind: kind, Status: string(created.Status), CreatedAt: created.CreatedAt, UpdatedAt: created.UpdatedAt}, nil

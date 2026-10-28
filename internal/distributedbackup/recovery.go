@@ -67,9 +67,34 @@ func (c *Coordinator) recoverOperation(ctx context.Context, operation Operation)
 		if loadErr != nil {
 			return c.markRecoveryRequired(&operation, loadErr)
 		}
+		if value.Mode == ModeHot && value.BarrierID != "" && value.BarrierReleaseState != "released" {
+			cleanupErr := c.cancelHotBarriers(current, operation, &lease, value.BarrierID, value.BarrierAttempts)
+			value.BarrierReleaseState = "released"
+			if cleanupErr != nil {
+				value.BarrierReleaseState = "unconfirmed"
+			}
+			if _, saveErr := c.store.SaveSet(value); cleanupErr != nil || saveErr != nil {
+				return c.markRecoveryRequired(&operation, errors.Join(cleanupErr, saveErr))
+			}
+		}
+		if value.Mode == ModeHot && value.Status == StatusVerified {
+			byWorld := runtimePartsByWorld(current)
+			for index, part := range value.Parts {
+				runtime, exists := byWorld[part.WorldID]
+				if !exists {
+					return c.markRecoveryRequired(&operation, ErrTopologyChanged)
+				}
+				if err := runtime.driver.ReleaseBackup(ctx, runtime.target, c.runtimeOperation(lease, operation.ID, "recover-release", index, 0), part.ID); err != nil {
+					return c.markRecoveryRequired(&operation, err)
+				}
+			}
+			return c.saveOperationPhase(&operation, "completed", OperationSucceeded, "")
+		}
 		if (operation.Phase == "completed" || operation.Phase == "resuming") && value.Status == StatusVerified {
-			if err := c.restartWorlds(ctx, current, operation.OriginalRunningWorlds, operation, &lease); err != nil {
-				return c.markRecoveryRequired(&operation, err)
+			if value.Mode != ModeHot {
+				if err := c.restartWorlds(ctx, current, operation.OriginalRunningWorlds, operation, &lease); err != nil {
+					return c.markRecoveryRequired(&operation, err)
+				}
 			}
 			return c.saveOperationPhase(&operation, "completed", OperationSucceeded, "")
 		}
@@ -83,7 +108,10 @@ func (c *Coordinator) recoverOperation(ctx context.Context, operation Operation)
 			}
 			cleanup = errors.Join(cleanup, runtime.driver.ReleaseBackup(ctx, runtime.target, c.runtimeOperation(lease, operation.ID, "recover-release", index, 0), part.ID))
 		}
-		cleanup = errors.Join(cleanup, c.restartWorlds(ctx, current, operation.OriginalRunningWorlds, operation, &lease))
+		if value.Mode != ModeHot {
+			cleanup = errors.Join(cleanup, c.restartWorlds(ctx, current, operation.OriginalRunningWorlds, operation, &lease))
+		}
+		value.FailurePhase, value.FailureCode = operation.Phase, "CONTROLLER_RESTARTED"
 		value.Status, value.Failure, value.UpdatedAt = StatusFailed, "控制器重启中断了备份创建", c.now().UTC()
 		verified := 0
 		for _, part := range value.Parts {

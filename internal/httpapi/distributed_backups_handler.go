@@ -158,7 +158,12 @@ func (h *DistributedBackupHandler) create(c *gin.Context) {
 				value, createErr = h.backups.Create(ctx, roomID, request.Name, "manual", job.ID)
 			}
 			if createErr != nil {
-				report(jobs.TargetResult{TargetID: roomID, Status: jobs.StatusFailed, Error: distributedBackupJobError(createErr)})
+				jobError := distributedBackupJobError(createErr)
+				if value.FailureCode != "" {
+					jobError.Code = value.FailureCode
+				}
+				jobError.Details = value.FailureDetails()
+				report(jobs.TargetResult{TargetID: roomID, Status: jobs.StatusFailed, Error: jobError})
 				return nil
 			}
 			report(jobs.TargetResult{TargetID: roomID, Status: jobs.StatusSucceeded, Message: "一致性备份集已创建：" + value.Name})

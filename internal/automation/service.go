@@ -352,7 +352,12 @@ func (s *Service) RunTask(roomID, taskID string, trigger Trigger) (jobs.Job, err
 				if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
 					code, errorMessage = "AUTOMATION_TIMEOUT", "自动化任务执行超时"
 				}
-				report(jobs.TargetResult{TargetID: task.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: code, Message: errorMessage}})
+				jobError := &jobs.Error{Code: code, Message: errorMessage}
+				var structured interface{ JobError() *jobs.Error }
+				if errors.As(executeErr, &structured) {
+					jobError = structured.JobError()
+				}
+				report(jobs.TargetResult{TargetID: task.ID, Status: jobs.StatusFailed, Error: jobError})
 				return executeErr
 			}
 			report(jobs.TargetResult{TargetID: task.ID, Status: jobs.StatusSucceeded, Message: result.Message})

@@ -26,8 +26,9 @@ const (
 )
 
 type Error struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Details map[string]interface{} `json:"details,omitempty"`
+	Code    string                 `json:"code"`
+	Message string                 `json:"message"`
 }
 
 type TransferProgress struct {
@@ -137,3 +138,13 @@ type RetentionResult struct {
 	JobsDeleted    int64
 	TargetsDeleted int64
 }
+
+// ResultError retains domain result details through an automation runner.
+type ResultError struct {
+	Result Error
+	Cause  error
+}
+
+func (e *ResultError) Error() string    { return e.Result.Message }
+func (e *ResultError) Unwrap() error    { return e.Cause }
+func (e *ResultError) JobError() *Error { return &e.Result }

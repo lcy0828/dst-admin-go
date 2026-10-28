@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"time"
 
 	"dont/internal/operationlease"
@@ -37,32 +36,40 @@ func (c *Coordinator) createHotWithPlan(ctx context.Context, set Set, operation 
 		if current.state != string(shards.RuntimeRunning) || !runtimedriver.HasTargetCapability(current.driver, current.target, runtimedriver.CapabilitySnapshotBarrier) {
 			return c.failCreate(result, operation, ErrHotUnavailable)
 		}
-		if _, ok := current.driver.(runtimedriver.SnapshotBarrierDriver); !ok {
+		if _, ok := current.driver.(runtimedriver.SnapshotRoundDriver); !ok {
 			return c.failCreate(result, operation, ErrHotUnavailable)
 		}
 	}
-	barrierID := "hot-" + uuid.NewString()
-	result.BarrierID = barrierID
-	if saved, err := c.store.SaveSet(result); err != nil {
-		return result, err
-	} else {
-		result = saved
-	}
-
-	prepared := make([]runtimedriver.SnapshotBarrierReceipt, len(runtimeParts))
-	barrierActive := true
+	// The context also bounds node-side staging. No retry extends protection.
+	protectionCtx, cancelProtection := context.WithTimeout(ctx, barrierProtectionTimeout)
+	defer cancelProtection()
+	ctx = protectionCtx
+	protectionDeadline := c.now().Add(barrierProtectionTimeout)
+	barrierID := ""
+	barrierActive := false
 	defer func() {
-		if barrierActive {
-			c.cancelHotBarriers(runtimeParts, operation, lease, barrierID)
+		if !barrierActive {
+			return
+		}
+		cleanupErr := c.cancelHotBarriers(runtimeParts, operation, lease, barrierID, result.BarrierAttempts)
+		current, loadErr := c.store.GetSet(result.ID)
+		if loadErr == nil {
+			current.BarrierReleaseState = "released"
+			if cleanupErr != nil {
+				current.BarrierReleaseState = "unconfirmed"
+			}
+			saved, saveErr := c.store.SaveSet(current)
+			if saveErr == nil {
+				result = saved
+			}
+			returnErr = errors.Join(returnErr, saveErr)
+		}
+		returnErr = errors.Join(returnErr, cleanupErr, loadErr)
+		if cleanupErr != nil {
+			_ = c.markRecoveryRequired(&operation, returnErr)
 		}
 	}()
-	if err := c.saveOperationPhase(&operation, "barrier_preparing", OperationRunning, ""); err != nil {
-		return result, err
-	}
 	master := -1
-	// Start the protection budget on the controller before any prepare call.
-	// Remote wall-clock skew cannot extend a frozen Lua barrier's lifetime.
-	protectionDeadline := c.now().Add(barrierProtectionTimeout)
 	for index, current := range runtimeParts {
 		if current.part.WorldRole == string(rooms.WorldRoleMaster) {
 			if master >= 0 {
@@ -70,34 +77,60 @@ func (c *Coordinator) createHotWithPlan(ctx context.Context, set Set, operation 
 			}
 			master = index
 		}
-		if err := c.renewLease(ctx, lease); err != nil {
-			return c.failCreate(result, operation, err)
-		}
-		barrier := current.driver.(runtimedriver.SnapshotBarrierDriver)
-		prepareCtx, cancel := context.WithTimeout(ctx, barrierPrepareTimeout)
-		receipt, err := barrier.PrepareSnapshotBarrier(prepareCtx, current.target, c.runtimeOperation(*lease, operation.ID, "barrier-prepare", index, 0), barrierID)
-		cancel()
-		if err != nil || receipt.State != "prepared" {
-			return c.failCreate(result, operation, errors.Join(ErrBarrierFailed, err))
-		}
-		prepared[index] = receipt
 	}
 	if master < 0 {
 		return c.failCreate(result, operation, ErrBarrierFailed)
 	}
-	if err := c.saveOperationPhase(&operation, "barrier_committing", OperationRunning, ""); err != nil {
-		return result, err
-	}
-	masterBarrier := runtimeParts[master].driver.(runtimedriver.SnapshotBarrierDriver)
-	if err := masterBarrier.CommitSnapshotBarrier(ctx, runtimeParts[master].target, c.runtimeOperation(*lease, operation.ID, "barrier-commit", master, 0), barrierID); err != nil {
-		return c.failCreate(result, operation, errors.Join(ErrBarrierFailed, err))
-	}
-	if err := c.saveOperationPhase(&operation, "barrier_waiting", OperationRunning, ""); err != nil {
-		return result, err
-	}
-	receipts, snapshot, err := c.waitHotBarrier(ctx, runtimeParts, prepared, barrierID)
-	if err != nil {
-		return c.failCreate(result, operation, err)
+	preparationDeadline := time.Now().Add(barrierPrepareTimeout)
+	var receipts []runtimedriver.SnapshotBarrierReceipt
+	var snapshot int64
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		barrierID = "hot-" + uuid.NewString()
+		result.BarrierID, result.BarrierAttempts, result.BarrierReleaseState = barrierID, attempt, "pending"
+		saved, saveErr := c.store.SaveSet(result)
+		if saveErr != nil {
+			return result, saveErr
+		}
+		result = saved
+		barrierActive = true
+		receipts, snapshot, err = c.establishHotRound(ctx, runtimeParts, &operation, lease, master, barrierID, attempt, preparationDeadline)
+		if err == nil {
+			break
+		}
+		if !runtimedriver.RetryableSnapshotBarrier(err) || attempt == 3 || !time.Now().Before(preparationDeadline) {
+			return c.failCreate(result, operation, errors.Join(ErrBarrierFailed, err))
+		}
+		if cleanupErr := c.cancelHotBarriers(runtimeParts, operation, lease, barrierID, attempt); cleanupErr != nil {
+			return c.failCreate(result, operation, errors.Join(ErrBarrierFailed, err, cleanupErr))
+		}
+		barrierActive = false
+		result.BarrierReleaseState = "released"
+		saved, saveErr = c.store.SaveSet(result)
+		if saveErr != nil {
+			return result, saveErr
+		}
+		result = saved
+		if err = c.saveOperationPhase(&operation, "barrier_retrying", OperationRunning, ""); err != nil {
+			return result, err
+		}
+		delay := time.Second
+		if attempt == 2 {
+			delay = 3 * time.Second
+		}
+		retryCtx, cancel := context.WithDeadline(ctx, preparationDeadline)
+		err = nil
+		timer := time.NewTimer(delay)
+		select {
+		case <-retryCtx.Done():
+			err = retryCtx.Err()
+		case <-timer.C:
+		}
+		timer.Stop()
+		cancel()
+		if err != nil {
+			return c.failCreate(result, operation, errors.Join(ErrBarrierFailed, err))
+		}
 	}
 	result.Snapshot = snapshot
 	for index := range runtimeParts {
@@ -151,7 +184,15 @@ func (c *Coordinator) createHotWithPlan(ctx context.Context, set Set, operation 
 		return c.failCreate(result, operation, err)
 	}
 	barrierActive = false
-
+	result.BarrierReleaseState = "released"
+	if saved, saveErr := c.store.SaveSet(result); saveErr != nil {
+		return c.failCreate(result, operation, saveErr)
+	} else {
+		result = saved
+	}
+	if err := c.saveOperationPhase(&operation, "transferring", OperationRunning, ""); err != nil {
+		return result, err
+	}
 	verified := 0
 	sharedSHA := ""
 	for _, stagedPart := range staged {
@@ -183,7 +224,71 @@ func (c *Coordinator) createHotWithPlan(ctx context.Context, set Set, operation 
 	return result, nil
 }
 
-func (c *Coordinator) waitHotBarrier(ctx context.Context, parts []runtimePart, prepared []runtimedriver.SnapshotBarrierReceipt, barrierID string) ([]runtimedriver.SnapshotBarrierReceipt, int64, error) {
+func (c *Coordinator) establishHotRound(ctx context.Context, parts []runtimePart, operation *Operation, lease *operationlease.Lease, master int, id string, attempt int, deadline time.Time) ([]runtimedriver.SnapshotBarrierReceipt, int64, error) {
+	if err := c.saveOperationPhase(operation, "barrier_preparing", OperationRunning, ""); err != nil {
+		return nil, 0, err
+	}
+	prepCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	prepared := make([]runtimedriver.SnapshotBarrierReceipt, len(parts))
+	for index, current := range parts {
+		if err := c.renewLease(prepCtx, lease); err != nil {
+			return nil, 0, err
+		}
+		receipt, err := current.driver.(runtimedriver.SnapshotRoundDriver).PrepareSnapshotBarrier(prepCtx, current.target, c.runtimeOperation(*lease, operation.ID, "barrier-prepare", index, int64(attempt)), id)
+		if err != nil {
+			return nil, 0, err
+		}
+		if receipt.SchemaVersion != 2 || receipt.State != "prepared" || receipt.BarrierID != id || receipt.ProducerInstanceID == "" || receipt.SessionID == "" || receipt.ShardID == "" {
+			return nil, 0, ErrBarrierFailed
+		}
+		prepared[index] = receipt
+	}
+	if err := c.saveOperationPhase(operation, "barrier_arming", OperationRunning, ""); err != nil {
+		return nil, 0, err
+	}
+	order := []int{master}
+	for i := range parts {
+		if i != master {
+			order = append(order, i)
+		}
+	}
+	target := int64(0)
+	for _, index := range order {
+		current := parts[index]
+		if err := c.renewLease(prepCtx, lease); err != nil {
+			return nil, 0, err
+		}
+		receipt, err := current.driver.(runtimedriver.SnapshotRoundDriver).ArmSnapshotBarrier(prepCtx, current.target, c.runtimeOperation(*lease, operation.ID, "barrier-arm", index, int64(attempt)), id, target)
+		if err != nil {
+			return nil, 0, err
+		}
+		if !sameBarrierIdentity(receipt, prepared[index], id) || (receipt.State != "armed" && receipt.State != "completed") || receipt.TargetSnapshotAfter < 1 || target != 0 && receipt.TargetSnapshotAfter != target {
+			return nil, 0, ErrBarrierFailed
+		}
+		target = receipt.TargetSnapshotAfter
+	}
+	if err := c.saveOperationPhase(operation, "barrier_committing", OperationRunning, ""); err != nil {
+		return nil, 0, err
+	}
+	current := parts[master]
+	if err := c.renewLease(ctx, lease); err != nil {
+		return nil, 0, err
+	}
+	if err := current.driver.(runtimedriver.SnapshotRoundDriver).CommitSnapshotBarrier(ctx, current.target, c.runtimeOperation(*lease, operation.ID, "barrier-commit", master, int64(attempt)), id); err != nil {
+		return nil, 0, err
+	}
+	if err := c.saveOperationPhase(operation, "barrier_waiting", OperationRunning, ""); err != nil {
+		return nil, 0, err
+	}
+	return c.waitHotBarrier(ctx, parts, prepared, id, target)
+}
+
+func sameBarrierIdentity(r, prepared runtimedriver.SnapshotBarrierReceipt, id string) bool {
+	return r.BarrierID == id && r.ProducerInstanceID == prepared.ProducerInstanceID && r.SessionID == prepared.SessionID && r.ShardID == prepared.ShardID && r.PreparedAtUnix == prepared.PreparedAtUnix
+}
+
+func (c *Coordinator) waitHotBarrier(ctx context.Context, parts []runtimePart, prepared []runtimedriver.SnapshotBarrierReceipt, barrierID string, target int64) ([]runtimedriver.SnapshotBarrierReceipt, int64, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, barrierCompleteTimeout)
 	defer cancel()
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -191,26 +296,35 @@ func (c *Coordinator) waitHotBarrier(ctx context.Context, parts []runtimePart, p
 	completed := make([]runtimedriver.SnapshotBarrierReceipt, len(parts))
 	done := make([]bool, len(parts))
 	for {
-		all := true
 		for index, current := range parts {
 			if done[index] {
 				continue
 			}
-			all = false
 			receipt, err := current.driver.(runtimedriver.SnapshotBarrierDriver).SnapshotBarrier(waitCtx, current.target, barrierID)
 			if err != nil {
-				continue
+				return nil, 0, err
 			}
-			if receipt.State == "failed" || receipt.State == "cancelled" || receipt.ProducerInstanceID != prepared[index].ProducerInstanceID ||
-				receipt.SessionID != prepared[index].SessionID || receipt.ShardID != prepared[index].ShardID || receipt.SnapshotBefore < prepared[index].SnapshotBefore {
+			if !sameBarrierIdentity(receipt, prepared[index], barrierID) {
 				return nil, 0, ErrBarrierFailed
 			}
-			if receipt.State == "completed" && receipt.Proof == "save_current_callback" && receipt.CompletedAtUnix >= receipt.PreparedAtUnix && receipt.SnapshotAfter > receipt.SnapshotBefore {
+			if receipt.State == "conflict" {
+				return nil, 0, &runtimedriver.SnapshotBarrierError{Code: receipt.Code, Message: receipt.Message}
+			}
+			if receipt.State == "failed" || receipt.State == "cancelled" || receipt.State == "released" {
+				return nil, 0, errors.Join(ErrBarrierFailed, &runtimedriver.SnapshotBarrierError{Code: receipt.Code, Message: receipt.Message})
+			}
+			if receipt.TargetSnapshotAfter != target {
+				return nil, 0, ErrBarrierFailed
+			}
+			if receipt.State == "completed" {
+				if receipt.Proof != "save_current_callback" || receipt.CompletedAtUnix < receipt.PreparedAtUnix || receipt.SnapshotAfter != target || receipt.SnapshotBefore != target-1 || !receipt.Holding || receipt.InFlight {
+					return nil, 0, ErrBarrierFailed
+				}
 				completed[index], done[index] = receipt, true
 			}
 		}
-		if all || allTrue(done) {
-			break
+		if allTrue(done) {
+			return completed, target, nil
 		}
 		select {
 		case <-waitCtx.Done():
@@ -218,15 +332,6 @@ func (c *Coordinator) waitHotBarrier(ctx context.Context, parts []runtimePart, p
 		case <-ticker.C:
 		}
 	}
-	snapshots := make([]int64, 0, len(completed))
-	for _, receipt := range completed {
-		snapshots = append(snapshots, receipt.SnapshotAfter)
-	}
-	sort.Slice(snapshots, func(i, j int) bool { return snapshots[i] < snapshots[j] })
-	if len(snapshots) == 0 || snapshots[0] != snapshots[len(snapshots)-1] {
-		return nil, 0, ErrBarrierFailed
-	}
-	return completed, snapshots[0], nil
 }
 
 func (c *Coordinator) revalidateHotPlan(ctx context.Context, revision string, parts []runtimePart, receipts []runtimedriver.SnapshotBarrierReceipt, barrierID string, protectionDeadline time.Time) error {
@@ -257,7 +362,7 @@ func (c *Coordinator) revalidateHotPlan(ctx context.Context, revision string, pa
 			receipt.Proof != "save_current_callback" || receipt.ProducerInstanceID != receipts[index].ProducerInstanceID ||
 			receipt.SessionID != receipts[index].SessionID || receipt.ShardID != receipts[index].ShardID ||
 			receipt.SnapshotBefore != receipts[index].SnapshotBefore || receipt.SnapshotAfter != receipts[index].SnapshotAfter ||
-			receipt.CompletedAtUnix != receipts[index].CompletedAtUnix {
+			receipt.CompletedAtUnix != receipts[index].CompletedAtUnix || receipt.TargetSnapshotAfter != receipts[index].TargetSnapshotAfter || !receipt.Holding || receipt.InFlight {
 			return errors.Join(ErrBarrierFailed, observeErr)
 		}
 	}
@@ -268,24 +373,23 @@ func (c *Coordinator) revalidateHotPlan(ctx context.Context, revision string, pa
 }
 
 func (c *Coordinator) releaseHotBarriers(ctx context.Context, parts []runtimePart, operation Operation, lease *operationlease.Lease, barrierID string) error {
+	releaseCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := c.renewLease(releaseCtx, lease); err != nil {
+		return err
+	}
+	// Release every world before waiting for delayed writes on any one world.
+	var failure error
 	for index, current := range parts {
-		if err := c.renewLease(ctx, lease); err != nil {
-			return err
-		}
-		if err := current.driver.(runtimedriver.SnapshotBarrierDriver).ReleaseSnapshotBarrier(ctx, current.target, c.runtimeOperation(*lease, operation.ID, "barrier-release", index, 0), barrierID); err != nil {
-			return fmt.Errorf("release snapshot barrier for %s: %w", current.part.WorldName, err)
-		}
-		// Console delivery only confirms input was sent. Require the persisted
-		// release acknowledgement so expiry racing with the last validation cannot
-		// publish a verified backup.
-		waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err := waitHotBarrierReleased(waitCtx, current, barrierID)
-		cancel()
+		err := current.driver.(runtimedriver.SnapshotBarrierDriver).ReleaseSnapshotBarrier(releaseCtx, current.target, c.runtimeOperation(*lease, operation.ID, "barrier-release", index, 0), barrierID)
 		if err != nil {
-			return err
+			failure = errors.Join(failure, fmt.Errorf("release snapshot barrier for %s: %w", current.part.WorldName, err))
 		}
 	}
-	return nil
+	for _, current := range parts {
+		failure = errors.Join(failure, waitHotBarrierReleased(releaseCtx, current, barrierID))
+	}
+	return failure
 }
 
 func waitHotBarrierReleased(ctx context.Context, current runtimePart, barrierID string) error {
@@ -296,10 +400,10 @@ func waitHotBarrierReleased(ctx context.Context, current runtimePart, barrierID 
 		if err == nil {
 			if receipt.State == "released" && receipt.Message == "" && receipt.Proof == "save_current_callback" &&
 				receipt.ProducerInstanceID == current.part.BarrierInstance && receipt.SessionID == current.part.BarrierSessionID &&
-				receipt.ShardID == current.part.BarrierShardID && receipt.SnapshotAfter == current.part.SnapshotAfter {
+				receipt.ShardID == current.part.BarrierShardID && receipt.SnapshotAfter == current.part.SnapshotAfter && !receipt.Busy && !receipt.Holding && !receipt.InFlight {
 				return nil
 			}
-			if receipt.State != "completed" {
+			if receipt.State != "completed" && receipt.State != "released" {
 				return ErrBarrierFailed
 			}
 		}
@@ -311,15 +415,56 @@ func waitHotBarrierReleased(ctx context.Context, current runtimePart, barrierID 
 	}
 }
 
-func (c *Coordinator) cancelHotBarriers(parts []runtimePart, operation Operation, lease *operationlease.Lease, barrierID string) {
+// Cancellation is acknowledged by every node, including any delayed normal
+// or shutdown write. A delivered console command alone is not a release proof.
+func (c *Coordinator) cancelHotBarriers(parts []runtimePart, operation Operation, lease *operationlease.Lease, barrierID string, attempt int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := c.renewLease(ctx, lease); err != nil {
+		return err
+	}
+	// A disconnected target must not delay cancellation on healthy targets.
+	failures := make(chan error, len(parts))
 	for index, current := range parts {
-		barrier, ok := current.driver.(runtimedriver.SnapshotBarrierDriver)
-		if !ok {
-			continue
+		step := c.runtimeOperation(*lease, operation.ID, "barrier-cancel", index, int64(attempt))
+		go func(current runtimePart, step runtimedriver.Operation) {
+			barrier, ok := current.driver.(runtimedriver.SnapshotBarrierDriver)
+			if !ok {
+				failures <- ErrHotUnavailable
+				return
+			}
+			failures <- barrier.CancelSnapshotBarrier(ctx, current.target, step, barrierID)
+		}(current, step)
+	}
+	var failure error
+	for range parts {
+		failure = errors.Join(failure, <-failures)
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		all := true
+		for _, current := range parts {
+			barrier, ok := current.driver.(runtimedriver.SnapshotBarrierDriver)
+			if !ok {
+				return errors.Join(failure, ErrHotUnavailable)
+			}
+			r, err := barrier.SnapshotBarrier(ctx, current.target, barrierID)
+			if err != nil {
+				return errors.Join(failure, err)
+			}
+			if r.BarrierID != barrierID || r.Busy || r.Holding || r.InFlight || (r.State != "released" && r.State != "cancelled" && r.State != "failed" && r.State != "conflict") {
+				all = false
+			}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = barrier.CancelSnapshotBarrier(ctx, current.target, c.runtimeOperation(*lease, operation.ID, "barrier-cancel", index, 0), barrierID)
-		cancel()
+		if all {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(failure, ErrBarrierFailed, ctx.Err())
+		case <-ticker.C:
+		}
 	}
 }
 

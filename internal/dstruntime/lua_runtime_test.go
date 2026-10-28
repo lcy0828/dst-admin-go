@@ -736,6 +736,10 @@ func TestBarriersLuaProvesSaveCallbackAndPreservesDelayedShutdown(t *testing.T) 
 	if receipt == nil || state.GetField(receipt, "state").String() != "prepared" || timeoutCallback == nil {
 		t.Fatalf("prepared receipt=%v timeout=%v", receipt, timeoutCallback != nil)
 	}
+	state.SetGlobal("barrierUnderTest", module)
+	if err := state.DoString(`assert(barrierUnderTest.Arm("hot-barrier-123", 0))`); err != nil {
+		t.Fatal(err)
+	}
 	callLuaMethodWithString(t, state, module, "Commit", "hot-barrier-123", true)
 	if saveCalls != 1 || state.GetField(receipt, "state").String() != "completed" || state.GetField(receipt, "proof").String() != "save_current_callback" || luaIntField(state, receipt, "snapshotAfter") != 41 {
 		t.Fatalf("saveCalls=%d receipt=%v", saveCalls, receipt)
@@ -762,7 +766,7 @@ func TestBarriersLuaProvesSaveCallbackAndPreservesDelayedShutdown(t *testing.T) 
 	callLuaMethodWithString(t, state, module, "Prepare", "hot-timeout-456", true)
 	callLuaFunction(t, state, timeoutCallback)
 	status = callLuaTableMethod(t, state, module, "Status")
-	if lua.LVAsBool(state.GetField(status, "busy")) || state.GetField(receipt, "state").String() != "cancelled" {
+	if lua.LVAsBool(state.GetField(status, "busy")) || state.GetField(receipt, "state").String() != "failed" {
 		t.Fatalf("timeout status=%v receipt=%v", status, receipt)
 	}
 	callLuaMethod(t, state, module, "Stop", true)

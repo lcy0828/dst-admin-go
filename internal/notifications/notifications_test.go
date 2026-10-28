@@ -445,3 +445,26 @@ func TestReleaseAlertsSurviveHistoryCleanupAndFailuresOnly(t *testing.T) {
 		t.Fatal("new releases/nodes suppressed", count, err)
 	}
 }
+
+func TestBackupNotificationUsesSafePersistedArtifactAndReleaseStates(t *testing.T) {
+	s, _, _ := fixture(t)
+	in := webhookInput("https://example.com/hook")
+	in.Events = []string{"backup.result"}
+	if _, err := s.Save("", in); err != nil {
+		t.Fatal(err)
+	}
+	s.OnJob(jobs.Job{ID: "backup-failed", Kind: "backup-set.create", Status: jobs.StatusFailed, Error: &jobs.Error{Code: "SAVE_IN_PROGRESS"}, Targets: []jobs.Target{{Error: &jobs.Error{Code: "SAVE_IN_PROGRESS", Message: "secret-password", Details: map[string]interface{}{"artifactState": "not_generated", "barrierReleaseState": "unconfirmed", "barrierAttempts": 3, "verifiedWorlds": 0, "totalWorlds": 2, "untrusted": "secret-password"}}}}})
+	items, count, err := s.History(10, 0)
+	if err != nil || count != 1 {
+		t.Fatalf("items=%+v count=%d err=%v", items, count, err)
+	}
+	message := items[0].Event.Message
+	for _, value := range []string{"not_generated", "unconfirmed", "3", "0/2"} {
+		if !strings.Contains(message, value) {
+			t.Fatalf("missing %q: %s", value, message)
+		}
+	}
+	if strings.Contains(message, "secret-password") {
+		t.Fatal("raw error/details leaked in notification")
+	}
+}

@@ -63,6 +63,12 @@ type hotBarrierDriver struct {
 	stageErr       error
 	stageHook      func()
 	releaseHook    func()
+	armFailures    int
+	armCode        string
+	armCalls       int
+	prepareIDs     []string
+	cancelErr      error
+	observeErr     error
 	backupReleases int
 }
 
@@ -87,11 +93,32 @@ func (d *hotBarrierDriver) ReleaseBackup(ctx context.Context, target runtimedriv
 func (d *hotBarrierDriver) PrepareSnapshotBarrier(_ context.Context, target runtimedriver.Target, _ runtimedriver.Operation, barrierID string) (runtimedriver.SnapshotBarrierReceipt, error) {
 	d.harness.mu.Lock()
 	defer d.harness.mu.Unlock()
+	d.prepareIDs = append(d.prepareIDs, barrierID)
 	d.receipt = runtimedriver.SnapshotBarrierReceipt{
-		SchemaVersion: 1, ProducerVersion: "2.4.0", ProducerInstanceID: "instance-" + target.Shard,
-		BarrierID: barrierID, State: "prepared", SessionID: "session-" + target.Shard, ShardID: target.Shard,
-		SnapshotBefore: 40, PreparedAtUnix: time.Now().Unix(),
+		SchemaVersion: 2, ProducerVersion: "2.4.18", ProducerInstanceID: "instance-" + target.Shard,
+		BarrierID: barrierID, State: "prepared", SessionID: "SESSION", ShardID: target.Shard,
+		SnapshotBefore: 40, PreparedAtUnix: time.Now().Unix(), Busy: true,
 	}
+	return d.receipt, nil
+}
+
+func (d *hotBarrierDriver) ArmSnapshotBarrier(_ context.Context, _ runtimedriver.Target, _ runtimedriver.Operation, barrierID string, target int64) (runtimedriver.SnapshotBarrierReceipt, error) {
+	d.harness.mu.Lock()
+	defer d.harness.mu.Unlock()
+	d.armCalls++
+	if d.armFailures > 0 {
+		d.armFailures--
+		code := d.armCode
+		if code == "" {
+			code = "SAVE_IN_PROGRESS"
+		}
+		d.receipt.State, d.receipt.Code = "conflict", code
+		return d.receipt, &runtimedriver.SnapshotBarrierError{Code: code, Message: "simulated save collision"}
+	}
+	if target == 0 {
+		target = 41
+	}
+	d.receipt.State, d.receipt.TargetSnapshotAfter = "armed", target
 	return d.receipt, nil
 }
 
@@ -107,6 +134,7 @@ func (d *hotBarrierDriver) CommitSnapshotBarrier(_ context.Context, _ runtimedri
 			snapshot = d.harness.snapshots[index]
 		}
 		current.receipt.State = "completed"
+		current.receipt.Holding = true
 		current.receipt.SnapshotAfter = snapshot
 		current.receipt.CompletedAtUnix = current.receipt.PreparedAtUnix + 1
 		current.receipt.Proof = "save_current_callback"
@@ -117,6 +145,9 @@ func (d *hotBarrierDriver) CommitSnapshotBarrier(_ context.Context, _ runtimedri
 func (d *hotBarrierDriver) SnapshotBarrier(_ context.Context, _ runtimedriver.Target, barrierID string) (runtimedriver.SnapshotBarrierReceipt, error) {
 	d.harness.mu.Lock()
 	defer d.harness.mu.Unlock()
+	if d.observeErr != nil {
+		return runtimedriver.SnapshotBarrierReceipt{}, d.observeErr
+	}
 	if d.receipt.BarrierID != barrierID {
 		return runtimedriver.SnapshotBarrierReceipt{}, errors.New("barrier receipt missing")
 	}
@@ -131,6 +162,7 @@ func (d *hotBarrierDriver) ReleaseSnapshotBarrier(_ context.Context, _ runtimedr
 	}
 	d.released = true
 	d.receipt.State = "released"
+	d.receipt.Busy, d.receipt.Holding, d.receipt.InFlight = false, false, false
 	if d.releaseHook != nil {
 		d.releaseHook()
 	}
@@ -140,8 +172,14 @@ func (d *hotBarrierDriver) ReleaseSnapshotBarrier(_ context.Context, _ runtimedr
 func (d *hotBarrierDriver) CancelSnapshotBarrier(_ context.Context, _ runtimedriver.Target, _ runtimedriver.Operation, barrierID string) error {
 	d.harness.mu.Lock()
 	defer d.harness.mu.Unlock()
+	if d.cancelErr != nil {
+		d.observeErr = d.cancelErr
+		return d.cancelErr
+	}
 	if d.receipt.BarrierID == barrierID {
 		d.released = true
+		d.receipt.State = "cancelled"
+		d.receipt.Busy, d.receipt.Holding, d.receipt.InFlight = false, false, false
 	}
 	return nil
 }
@@ -159,6 +197,11 @@ func installHotBarrierDrivers(t *testing.T, fixture distributedBackupFixture, sn
 		drivers = append(drivers, driver)
 	}
 	harness.drivers = drivers
+	for _, world := range []struct{ root, shard string }{{fixture.masterRoot, "Master"}, {fixture.cavesRoot, "Caves"}} {
+		if err := os.WriteFile(filepath.Join(world.root, "Cluster_1", world.shard, "save", "session", "SESSION", "0000000040"), []byte("saved-round-40"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return drivers
 }
 

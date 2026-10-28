@@ -302,22 +302,41 @@ type ChatLogDriver interface {
 	ReadChatLogGeneration(context.Context, Target, shared.RuntimeChatLogRequest) (shared.RuntimeChatLogResult, error)
 }
 
+// SnapshotBarrierError reports a Runtime rejection without hiding its cause.
+type SnapshotBarrierError struct {
+	Code    string
+	Message string
+}
+
+func (e *SnapshotBarrierError) Error() string { return "snapshot barrier " + e.Code + ": " + e.Message }
+func RetryableSnapshotBarrier(err error) bool {
+	var rejection *SnapshotBarrierError
+	return errors.As(err, &rejection) && (rejection.Code == "SAVE_IN_PROGRESS" || rejection.Code == "TARGET_SNAPSHOT_PASSED")
+}
+
 type SnapshotBarrierReceipt struct {
-	SchemaVersion      int       `json:"schemaVersion"`
-	ProducerVersion    string    `json:"producerVersion"`
-	ProducerInstanceID string    `json:"producerInstanceId"`
-	BarrierID          string    `json:"barrierId"`
-	State              string    `json:"state"`
-	SessionID          string    `json:"sessionId"`
-	ShardID            string    `json:"shardId"`
-	SnapshotBefore     int64     `json:"snapshotBefore"`
-	SnapshotAfter      int64     `json:"snapshotAfter,omitempty"`
-	PreparedAtUnix     int64     `json:"preparedAtUnix"`
-	CompletedAtUnix    int64     `json:"completedAtUnix,omitempty"`
-	ReleasedAtUnix     int64     `json:"releasedAtUnix,omitempty"`
-	Proof              string    `json:"proof,omitempty"`
-	Message            string    `json:"message,omitempty"`
-	ReadAt             time.Time `json:"-"`
+	SchemaVersion       int       `json:"schemaVersion"`
+	ProducerVersion     string    `json:"producerVersion"`
+	ProducerInstanceID  string    `json:"producerInstanceId"`
+	BarrierID           string    `json:"barrierId"`
+	State               string    `json:"state"`
+	SessionID           string    `json:"sessionId"`
+	ShardID             string    `json:"shardId"`
+	SnapshotBefore      int64     `json:"snapshotBefore"`
+	SnapshotAfter       int64     `json:"snapshotAfter,omitempty"`
+	PreparedAtUnix      int64     `json:"preparedAtUnix"`
+	CompletedAtUnix     int64     `json:"completedAtUnix,omitempty"`
+	ReleasedAtUnix      int64     `json:"releasedAtUnix,omitempty"`
+	Proof               string    `json:"proof,omitempty"`
+	Message             string    `json:"message,omitempty"`
+	TargetSnapshotAfter int64     `json:"targetSnapshotAfter,omitempty"`
+	CurrentSnapshot     int64     `json:"currentSnapshot"`
+	ArmedAtUnix         int64     `json:"armedAtUnix,omitempty"`
+	Code                string    `json:"code,omitempty"`
+	Busy                bool      `json:"busy"`
+	Holding             bool      `json:"holding"`
+	InFlight            bool      `json:"inFlight"`
+	ReadAt              time.Time `json:"-"`
 }
 
 // SnapshotBarrierDriver is optional because a provider may support cold
@@ -328,6 +347,12 @@ type SnapshotBarrierDriver interface {
 	SnapshotBarrier(context.Context, Target, string) (SnapshotBarrierReceipt, error)
 	ReleaseSnapshotBarrier(context.Context, Target, Operation, string) error
 	CancelSnapshotBarrier(context.Context, Target, Operation, string) error
+}
+
+// SnapshotRoundDriver binds every shard to the master's selected native save round.
+type SnapshotRoundDriver interface {
+	SnapshotBarrierDriver
+	ArmSnapshotBarrier(context.Context, Target, Operation, string, int64) (SnapshotBarrierReceipt, error)
 }
 
 type Driver interface {

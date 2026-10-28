@@ -53,6 +53,11 @@ type Set struct {
 	ManifestVersion       int        `json:"manifestVersion"`
 	TopologyRevision      string     `json:"topologyRevision"`
 	BarrierID             string     `json:"barrierId,omitempty"`
+	BarrierAttempts       int        `json:"barrierAttempts,omitempty"`
+	BarrierReleaseState   string     `json:"barrierReleaseState,omitempty"`
+	FailureCode           string     `json:"failureCode,omitempty"`
+	FailurePhase          string     `json:"failurePhase,omitempty"`
+	ArtifactState         string     `json:"artifactState,omitempty"`
 	Snapshot              int64      `json:"snapshot,omitempty"`
 	SharedSHA256          string     `json:"sharedSha256,omitempty"`
 	Status                Status     `json:"status"`
@@ -73,6 +78,7 @@ type Set struct {
 }
 
 type Part struct {
+	ArtifactState    string     `json:"artifactState,omitempty"`
 	ID               string     `json:"id"`
 	SetID            string     `json:"setId"`
 	RoomID           string     `json:"roomId"`
@@ -168,4 +174,32 @@ type DirectoryImportRequest struct {
 	Kind        string
 	SourceJobID string
 	Worlds      []DirectoryImportWorld
+}
+
+// FailureDetails is shared by page/MCP jobs and notification summaries. It
+// deliberately excludes raw logs, file paths, credentials and player data.
+func (s Set) FailureDetails() map[string]interface{} {
+	if s.ID == "" {
+		return nil
+	}
+	state := s.ArtifactState
+	verified := 0
+	for _, part := range s.Parts {
+		if part.Status == PartVerified && (part.ArtifactState == "" || part.ArtifactState == "available") {
+			verified++
+		}
+	}
+	if state == "" {
+		state = "not_generated"
+		if verified > 0 {
+			state = "available"
+			if verified < len(s.Parts) {
+				state = "partial"
+			}
+		}
+		if s.FailureCode == "ARCHIVE_INTEGRITY_FAILED" {
+			state = "corrupt"
+		}
+	}
+	return map[string]interface{}{"backupSetId": s.ID, "failureCode": s.FailureCode, "failurePhase": s.FailurePhase, "barrierAttempts": s.BarrierAttempts, "barrierReleaseState": s.BarrierReleaseState, "artifactState": state, "verifiedWorlds": verified, "totalWorlds": len(s.Parts)}
 }

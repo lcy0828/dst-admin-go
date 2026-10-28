@@ -266,6 +266,7 @@ ShardGameIndex.SaveCurrent=function(self,callback) saves=saves+1;snapshot=snapsh
 	}
 	if err := c.state.DoString(`
 assert(DSTAdmin.Barriers.Prepare("held-paused-barrier"))
+assert(DSTAdmin.Barriers.Arm("held-paused-barrier",5))
 ShardGameIndex:SaveCurrent()
 assert(DSTAdmin.Barriers.Status().holding)
 ShardGameIndex:SaveCurrent(function() onsave=true end)
@@ -341,6 +342,7 @@ func TestNativeSleepExpiresProtectionBeforeResumedSave(t *testing.T) {
 	}
 	if err := c.state.DoString(`
 assert(DSTAdmin.Barriers.Prepare("native-sleep-barrier"))
+assert(DSTAdmin.Barriers.Arm("native-sleep-barrier",5))
 ShardGameIndex:SaveCurrent()
 assert(DSTAdmin.Barriers.Status().holding)
 wallOffset=181

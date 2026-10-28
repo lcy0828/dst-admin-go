@@ -51,6 +51,7 @@ type targetRecord struct {
 	WarningMessage string `gorm:"type:text"`
 	ErrorCode      string `gorm:"type:varchar(64)"`
 	ErrorMessage   string `gorm:"type:text"`
+	ErrorDetails   string `gorm:"type:text"`
 	StartedAt      *time.Time
 	FinishedAt     *time.Time
 }
@@ -247,7 +248,7 @@ func (s *Store) RecordTarget(jobID string, result TargetResult) (Job, Event, err
 	updates := map[string]interface{}{
 		"status": result.Status, "message": result.Message, "finished_at": now,
 		"warning_code": "", "warning_message": "",
-		"error_code": "", "error_message": "",
+		"error_code": "", "error_message": "", "error_details": "",
 	}
 	if result.Warning != nil {
 		updates["warning_code"] = result.Warning.Code
@@ -256,6 +257,11 @@ func (s *Store) RecordTarget(jobID string, result TargetResult) (Job, Event, err
 	if result.Error != nil {
 		updates["error_code"] = result.Error.Code
 		updates["error_message"] = result.Error.Message
+		details, err := json.Marshal(result.Error.Details)
+		if err != nil {
+			return Job{}, Event{}, err
+		}
+		updates["error_details"] = string(details)
 	}
 	tx := s.db.Begin()
 	changed := tx.Table(s.targetsTable).Where("job_id = ? AND target_id = ? AND status = ?", jobID, result.TargetID, StatusRunning).Updates(updates)
@@ -612,6 +618,9 @@ func (s *Store) jobFromRecord(tx *gorm.DB, record jobRecord) (Job, error) {
 		}
 		if target.ErrorCode != "" || target.ErrorMessage != "" {
 			item.Error = &Error{Code: target.ErrorCode, Message: target.ErrorMessage}
+			if target.ErrorDetails != "" {
+				_ = json.Unmarshal([]byte(target.ErrorDetails), &item.Error.Details)
+			}
 		}
 		targets = append(targets, item)
 	}
@@ -633,6 +642,10 @@ func (s *Store) jobFromRecord(tx *gorm.DB, record jobRecord) (Job, error) {
 	}
 	if record.ErrorCode != "" || record.ErrorMessage != "" {
 		job.Error = &Error{Code: record.ErrorCode, Message: record.ErrorMessage}
+		// A single-result job exposes the same persisted details at both levels.
+		if len(targets) == 1 && targets[0].Error != nil {
+			job.Error.Details = targets[0].Error.Details
+		}
 	}
 	return job, nil
 }

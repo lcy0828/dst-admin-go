@@ -60,17 +60,44 @@ func prepareSnapshotBarrier(ctx context.Context, driver Driver, target Target, o
 	if err := sendSnapshotBarrier(ctx, driver, target, operation, "Prepare", barrierID); err != nil {
 		return SnapshotBarrierReceipt{}, err
 	}
+	return waitSnapshotBarrier(ctx, driver, target, barrierID, func(receipt SnapshotBarrierReceipt) bool { return receipt.State == "prepared" })
+}
+
+func (d *Native) ArmSnapshotBarrier(ctx context.Context, target Target, operation Operation, barrierID string, snapshot int64) (SnapshotBarrierReceipt, error) {
+	return armSnapshotBarrier(ctx, d, target, operation, barrierID, snapshot)
+}
+func (d *Agent) ArmSnapshotBarrier(ctx context.Context, target Target, operation Operation, barrierID string, snapshot int64) (SnapshotBarrierReceipt, error) {
+	return armSnapshotBarrier(ctx, d, target, operation, barrierID, snapshot)
+}
+func armSnapshotBarrier(ctx context.Context, driver Driver, target Target, operation Operation, barrierID string, snapshot int64) (SnapshotBarrierReceipt, error) {
+	if snapshot < 0 || snapshot > 9007199254740991 {
+		return SnapshotBarrierReceipt{}, ErrInvalidTarget
+	}
+	if err := sendSnapshotBarrier(ctx, driver, target, operation, "Arm", barrierID, snapshot); err != nil {
+		return SnapshotBarrierReceipt{}, err
+	}
+	return waitSnapshotBarrier(ctx, driver, target, barrierID, func(r SnapshotBarrierReceipt) bool {
+		return (r.State == "armed" || r.State == "completed") && r.TargetSnapshotAfter > 0 && (snapshot == 0 || r.TargetSnapshotAfter == snapshot)
+	})
+}
+func waitSnapshotBarrier(ctx context.Context, driver Driver, target Target, barrierID string, accepted func(SnapshotBarrierReceipt) bool) (SnapshotBarrierReceipt, error) {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	var observationErr error
 	for {
 		receipt, err := observeSnapshotBarrier(ctx, driver, target, barrierID)
 		observationErr = err
-		if err == nil && (receipt.State == "prepared" || receipt.State == "completed") {
-			return receipt, nil
+		var protocolErr *SnapshotBarrierError
+		if errors.As(err, &protocolErr) {
+			return SnapshotBarrierReceipt{}, err
 		}
-		if err == nil && (receipt.State == "failed" || receipt.State == "cancelled") {
-			return SnapshotBarrierReceipt{}, fmt.Errorf("snapshot barrier prepare failed: %s", receipt.Message)
+		if err == nil {
+			if accepted(receipt) {
+				return receipt, nil
+			}
+			if receipt.State == "failed" || receipt.State == "conflict" || receipt.State == "cancelled" {
+				return SnapshotBarrierReceipt{}, &SnapshotBarrierError{Code: receipt.Code, Message: receipt.Message}
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -80,11 +107,15 @@ func prepareSnapshotBarrier(ctx context.Context, driver Driver, target Target, o
 	}
 }
 
-func sendSnapshotBarrier(ctx context.Context, driver Driver, target Target, operation Operation, method, barrierID string) error {
+func sendSnapshotBarrier(ctx context.Context, driver Driver, target Target, operation Operation, method, barrierID string, targetSnapshot ...int64) error {
 	if !snapshotBarrierID.MatchString(barrierID) {
 		return ErrInvalidTarget
 	}
-	command := fmt.Sprintf(`local r=rawget(_G,"DSTAdmin"); local b=r~=nil and r.Barriers or nil; if b==nil or b.%s==nil or b.%s("%s")~=true then print("[DST-ADMIN-RUNTIME ERROR] code=SNAPSHOT_BARRIER_%s_FAILED") end`, method, method, barrierID, method)
+	argument := fmt.Sprintf("%q", barrierID)
+	if len(targetSnapshot) > 0 {
+		argument += fmt.Sprintf(",%d", targetSnapshot[0])
+	}
+	command := fmt.Sprintf(`local r=rawget(_G,"DSTAdmin"); local b=r~=nil and r.Barriers or nil; if b==nil or b.%s==nil or b.%s(%s)~=true then print("[DST-ADMIN-RUNTIME ERROR] code=SNAPSHOT_BARRIER_%s_FAILED") end`, method, method, argument, method)
 	result, err := driver.SendConsole(ctx, target, operation, shared.RuntimeConsoleRequest{Mode: shared.ConsoleModeManaged, Command: command}, 30*time.Second)
 	if err != nil {
 		return err
@@ -115,9 +146,12 @@ func observeSnapshotBarrier(ctx context.Context, driver Driver, target Target, b
 	}
 	receipt.ReadAt = bundle.Artifacts[0].UpdatedAt
 	if receipt.ProducerVersion != snapshotBarrierRuntimeVersion {
-		return SnapshotBarrierReceipt{}, fmt.Errorf("snapshot barrier runtime version %q does not match %q", receipt.ProducerVersion, snapshotBarrierRuntimeVersion)
+		return SnapshotBarrierReceipt{}, &SnapshotBarrierError{Code: "RUNTIME_UPDATE_REQUIRED", Message: fmt.Sprintf("snapshot barrier runtime version %q does not match %q; update the managed Runtime", receipt.ProducerVersion, snapshotBarrierRuntimeVersion)}
 	}
-	if receipt.SchemaVersion != 1 || receipt.BarrierID != barrierID ||
+	if receipt.SchemaVersion != 2 {
+		return SnapshotBarrierReceipt{}, &SnapshotBarrierError{Code: "RUNTIME_UPDATE_REQUIRED", Message: "snapshot round protocol is unavailable; update the managed Runtime"}
+	}
+	if receipt.BarrierID != barrierID ||
 		receipt.ProducerInstanceID == "" || receipt.SessionID == "" || receipt.ShardID == "" || receipt.PreparedAtUnix < 1 || receipt.SnapshotBefore < 0 {
 		return SnapshotBarrierReceipt{}, errors.New("snapshot barrier receipt is invalid or stale")
 	}

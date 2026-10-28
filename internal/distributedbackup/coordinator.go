@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -445,6 +446,14 @@ func (c *Coordinator) collectStagedPart(ctx context.Context, current runtimePart
 	if err != nil {
 		return c.failPart(part, errors.Join(ErrIntegrity, err))
 	}
+	// DST advances GetCurrentSnapshot to the next slot when SaveCurrent
+	// completes. The immutable archive must contain the slot that just finished.
+	if part.SnapshotAfter > 0 {
+		snapshot, parseErr := strconv.ParseInt(inspection.LatestSnapshot, 10, 64)
+		if parseErr != nil || !inspection.Restorable || !strings.EqualFold(inspection.SessionID, part.BarrierSessionID) || snapshot != part.SnapshotAfter-1 {
+			return c.failPart(part, errors.Join(ErrIntegrity, errors.New("SNAPSHOT_ARCHIVE_MISMATCH: archive does not match the completed save round")))
+		}
+	}
 	now := c.now().UTC()
 	part.Status, part.Size, part.ContentSize, part.FileCount = PartVerified, descriptor.Size, descriptor.ContentSize, descriptor.FileCount
 	part.SHA256, part.SharedSHA256, part.VerifiedAt, part.Failure = strings.ToLower(descriptor.SHA256), strings.ToLower(descriptor.SharedSHA256), &now, ""
@@ -507,31 +516,87 @@ func (c *Coordinator) classifySet(value Set) Set {
 	value.ValidationError = ""
 	value.Restorable = len(value.Parts) > 0
 	value.ContentKind = shardtransfer.BackupContentGameSave
-	unknown := false
+	value.ArtifactState = "available"
 	for index := range value.Parts {
 		part := &value.Parts[index]
+		part.ArtifactState = "available"
+		// Pending/staging rows have not published a controller archive. Looking
+		// for a ZIP here invents integrity failures on otherwise healthy storage.
+		published := part.Status == PartVerified || part.VerifiedAt != nil || part.Size > 0 || part.SHA256 != ""
 		path, err := c.partPath(*part)
-		if err != nil {
+		if !published {
+			part.ArtifactState = "not_generated"
+			if value.Status == StatusCreating && part.Status == PartStaging {
+				part.ArtifactState = "staging"
+			}
+			// A failed validation can leave a real, unpublished file. Preserve this
+			// evidence as corrupt rather than calling an invalid archive absent.
+			if err == nil {
+				if _, statErr := os.Stat(path); statErr == nil {
+					part.ArtifactState = "corrupt"
+				}
+			}
+			part.ContentKind, part.Restorable, part.ValidationError = "unknown", false, ""
+			if part.ArtifactState == "corrupt" {
+				part.ValidationError = part.Failure
+			}
+		} else if err != nil {
+			part.ArtifactState = "corrupt"
 			part.ContentKind, part.Restorable, part.ValidationError = "unknown", false, err.Error()
+		} else if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+			part.ArtifactState = "missing"
+			part.ContentKind, part.Restorable, part.ValidationError = "unknown", false, "BACKUP_FILE_MISSING"
+		} else if verifyErr := verifyRegularFile(context.Background(), path, part.Size, part.SHA256); verifyErr != nil {
+			part.ArtifactState = "corrupt"
+			part.ContentKind, part.Restorable, part.ValidationError = "unknown", false, verifyErr.Error()
 		} else if inspection, inspectErr := shardtransfer.InspectBackupArchive(path); inspectErr != nil {
+			part.ArtifactState = "corrupt"
 			part.ContentKind, part.Restorable, part.ValidationError = "unknown", false, inspectErr.Error()
 		} else {
 			part.ContentKind, part.Restorable = inspection.ContentKind, inspection.Restorable
 			part.SessionID, part.LatestSnapshot, part.HasShardIndex = inspection.SessionID, inspection.LatestSnapshot, inspection.HasShardIndex
 			part.ValidationError = inspection.ValidationError
 		}
+		if artifactPriority(part.ArtifactState) > artifactPriority(value.ArtifactState) {
+			value.ArtifactState = part.ArtifactState
+		}
 		if !part.Restorable {
 			value.Restorable = false
-			unknown = unknown || part.ContentKind == "unknown"
-			value.ValidationError = appendValidation(value.ValidationError, part.WorldName+": "+part.ValidationError)
+			if part.ValidationError != "" {
+				value.ValidationError = appendValidation(value.ValidationError, part.WorldName+": "+part.ValidationError)
+			}
 		}
 	}
-	if unknown {
+	if len(value.Parts) == 0 {
+		value.ArtifactState = "not_generated"
+	}
+	if value.ArtifactState == "not_generated" {
+		for _, part := range value.Parts {
+			if part.ArtifactState == "available" {
+				value.ArtifactState = "partial"
+				break
+			}
+		}
+	}
+	if value.ArtifactState != "available" {
 		value.ContentKind = "unknown"
 	} else if !value.Restorable {
 		value.ContentKind = shardtransfer.BackupContentConfigurationOnly
 	}
 	return value
+}
+func artifactPriority(state string) int {
+	switch state {
+	case "corrupt":
+		return 4
+	case "missing":
+		return 3
+	case "staging":
+		return 2
+	case "not_generated":
+		return 1
+	}
+	return 0
 }
 
 func appendValidation(current, message string) string {
@@ -564,9 +629,31 @@ func (c *Coordinator) failCreate(value Set, operation Operation, cause error) (S
 		current.Status = StatusPartial
 	}
 	current.Failure, current.UpdatedAt = cause.Error(), c.now().UTC()
+	current.FailurePhase = operation.Phase
+	current.FailureCode = backupFailureCode(cause)
 	saved, saveErr := c.store.SaveSet(current)
 	_ = c.saveOperationPhase(&operation, "failed", OperationFailed, cause.Error())
 	return saved, errors.Join(cause, saveErr)
+}
+
+func backupFailureCode(cause error) string {
+	var rejection *runtimedriver.SnapshotBarrierError
+	if errors.As(cause, &rejection) && rejection.Code != "" {
+		return rejection.Code
+	}
+	switch {
+	case errors.Is(cause, context.DeadlineExceeded):
+		return "BACKUP_TIMEOUT"
+	case errors.Is(cause, ErrBarrierFailed):
+		return "SNAPSHOT_ROUND_UNCONFIRMED"
+	case errors.Is(cause, ErrHotUnavailable):
+		return "HOT_BACKUP_UNAVAILABLE"
+	case errors.Is(cause, ErrTopologyChanged):
+		return "TOPOLOGY_CHANGED"
+	case errors.Is(cause, ErrIntegrity):
+		return "ARCHIVE_INTEGRITY_FAILED"
+	}
+	return "BACKUP_FAILED"
 }
 
 func (c *Coordinator) stopAll(ctx context.Context, parts []runtimePart, operation Operation, lease *operationlease.Lease) error {

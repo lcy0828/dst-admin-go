@@ -25,6 +25,10 @@ type setRecord struct {
 	// Snapshot was added after the initial backup-set schema. The default keeps
 	// SQLite migrations compatible with existing rows; zero means unavailable
 	// for a legacy backup.
+	BarrierAttempts       int    `gorm:"not null;default:0"`
+	BarrierReleaseState   string `gorm:"type:varchar(24)"`
+	FailureCode           string `gorm:"type:varchar(64)"`
+	FailurePhase          string `gorm:"type:varchar(32)"`
 	Snapshot              int64  `gorm:"not null;default:0"`
 	SharedSHA256          string `gorm:"type:char(64)"`
 	Status                string `gorm:"type:varchar(24);index;not null"`
@@ -208,6 +212,8 @@ func (s *Store) SaveSet(value Set) (Set, error) {
 		"content_size": record.ContentSize, "file_count": record.FileCount, "manifest_sha256": record.ManifestSHA256,
 		"content_kind": record.ContentKind, "restorable": record.Restorable, "validation_error": record.ValidationError,
 		"barrier_id": record.BarrierID, "snapshot": record.Snapshot,
+		"barrier_attempts": record.BarrierAttempts, "barrier_release_state": record.BarrierReleaseState,
+		"failure_code": record.FailureCode, "failure_phase": record.FailurePhase,
 		"failure": record.Failure, "verified_at": record.VerifiedAt, "updated_at": record.UpdatedAt,
 	}
 	result := s.db.Table(s.setTable).Where("id = ?", value.ID).Updates(updates)
@@ -337,6 +343,7 @@ func setRecordFrom(value Set) (setRecord, error) {
 		ID: value.ID, RoomID: value.RoomID, RoomName: value.RoomName, Name: value.Name, Kind: value.Kind, Mode: value.Mode,
 		ManifestVersion: value.ManifestVersion, TopologyRevision: value.TopologyRevision, SharedSHA256: value.SharedSHA256,
 		BarrierID: value.BarrierID, Snapshot: value.Snapshot,
+		BarrierAttempts: value.BarrierAttempts, BarrierReleaseState: value.BarrierReleaseState, FailureCode: value.FailureCode, FailurePhase: value.FailurePhase,
 		Status: string(value.Status), Size: value.Size, ContentSize: value.ContentSize, FileCount: value.FileCount,
 		ContentKind: value.ContentKind, Restorable: value.Restorable, ValidationError: value.ValidationError,
 		OriginalRunningWorlds: string(running), ManifestSHA256: value.ManifestSHA256, Failure: value.Failure,
@@ -353,6 +360,7 @@ func setFromRecord(record setRecord) (Set, error) {
 		ID: record.ID, RoomID: record.RoomID, RoomName: record.RoomName, Name: record.Name, Kind: record.Kind, Mode: record.Mode,
 		ManifestVersion: record.ManifestVersion, TopologyRevision: record.TopologyRevision, SharedSHA256: record.SharedSHA256,
 		BarrierID: record.BarrierID, Snapshot: record.Snapshot,
+		BarrierAttempts: record.BarrierAttempts, BarrierReleaseState: record.BarrierReleaseState, FailureCode: record.FailureCode, FailurePhase: record.FailurePhase,
 		Status: Status(record.Status), Size: record.Size, ContentSize: record.ContentSize, FileCount: record.FileCount,
 		ContentKind: record.ContentKind, Restorable: record.Restorable, ValidationError: record.ValidationError,
 		OriginalRunningWorlds: running, ManifestSHA256: record.ManifestSHA256, Failure: record.Failure, SourceJobID: record.SourceJobID,
