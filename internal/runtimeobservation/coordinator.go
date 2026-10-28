@@ -179,7 +179,8 @@ func (c *Coordinator) RuntimeTargetInventories(ctx context.Context) ([]agents.Ru
 		current.ObservationState = string(state)
 		current.ObservationError = message
 		current.RefreshStartedAt = started
-		current.Stale = state != StateFresh && state != StateRefreshing
+		current.Stale = state != StateFresh && (state != StateRefreshing || !current.Available ||
+			current.ReceivedAt == nil || current.ReceivedAt.IsZero() || now.Sub(*current.ReceivedAt) > c.freshnessWindow)
 		switch state {
 		case StateOffline:
 			current.StaleReason = "agent_offline"
@@ -342,7 +343,7 @@ func (c *Coordinator) ensureEndpoint(ctx context.Context, item agents.RuntimeTar
 		c.mu.Lock()
 		entry := c.cache[key]
 		running := c.flights[key]
-		if !force && running == nil && entry.state == StateFresh && entry.inventory.Available && entry.inventory.ReceivedAt != nil && !entry.inventory.ReceivedAt.IsZero() && c.now().UTC().Sub(*entry.inventory.ReceivedAt) <= c.freshnessWindow && (after.IsZero() || !entry.sampleStarted.Before(after)) {
+		if !force && item.Target.Online && item.Target.Configured && running == nil && entry.state == StateFresh && entry.inventory.Available && entry.inventory.ReceivedAt != nil && !entry.inventory.ReceivedAt.IsZero() && c.now().UTC().Sub(*entry.inventory.ReceivedAt) <= c.freshnessWindow && (after.IsZero() || !entry.sampleStarted.Before(after)) {
 			c.mu.Unlock()
 			return nil
 		}
@@ -555,6 +556,13 @@ func (c *Coordinator) Subscribe() (<-chan Event, func()) { return c.broker.Subsc
 // an existing endpoint flight or actively refreshes stale targets, then fails
 // closed when any selected endpoint still cannot be trusted.
 func (c *Coordinator) EnsureRuntimeTargetsFresh(ctx context.Context, targetIDs []string) error {
+	if len(targetIDs) == 0 {
+		return nil
+	}
+	items, err := c.RuntimeTargetInventories(ctx)
+	if err != nil {
+		return err
+	}
 	seen := make(map[string]bool, len(targetIDs))
 	for _, targetID := range targetIDs {
 		targetID = strings.TrimSpace(targetID)
@@ -562,28 +570,23 @@ func (c *Coordinator) EnsureRuntimeTargetsFresh(ctx context.Context, targetIDs [
 			continue
 		}
 		seen[targetID] = true
-		observations, err := c.Snapshot(ctx, Scope{TargetID: targetID})
-		if err != nil {
-			return err
-		}
-		fresh := len(observations) > 0
-		for _, observation := range observations {
-			fresh = fresh && observation.State == StateFresh
-		}
-		if fresh {
-			continue
-		}
-		results, err := c.Refresh(ctx, Scope{TargetID: targetID})
-		if err != nil {
-			return err
-		}
-		for _, result := range results {
-			if result.State != StateFresh {
-				return &UnavailableError{
-					TargetID: result.TargetID, InstallationID: result.InstallationID,
-					State: result.State, Message: result.Error,
-				}
+		found := false
+		for _, item := range items {
+			if item.Target.ID != targetID {
+				continue
 			}
+			found = true
+			if item.ObservationState == string(StateFresh) {
+				continue
+			}
+			// Refresh only the stale installation, and recheck its cache after
+			// joining an existing flight instead of forcing a duplicate sample.
+			if err := c.ensureEndpoint(ctx, item, time.Time{}, false); err != nil {
+				return err
+			}
+		}
+		if !found {
+			return ErrRuntimeTargetNotFound
 		}
 	}
 	return nil

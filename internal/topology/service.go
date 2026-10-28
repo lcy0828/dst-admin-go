@@ -896,6 +896,55 @@ func (s *Service) PreviewBatchStartCapacity(ctx context.Context, selections []St
 	if err != nil {
 		return BatchStartCapacityPreview{}, err
 	}
+	preview, err := s.previewBatchStartCapacity(result, selections)
+	if err != nil {
+		return BatchStartCapacityPreview{}, err
+	}
+	freshener, ok := s.targets.(runtimeTargetFreshener)
+	if !ok {
+		return preview, nil
+	}
+	selectedTargets := make(map[string]bool, len(preview.Targets))
+	for _, target := range preview.Targets {
+		selectedTargets[target.TargetID] = true
+	}
+	refreshTargets := make(map[string]bool)
+	for _, inventory := range result.inventories {
+		if selectedTargets[inventory.Target.ID] && inventory.Target.Online && inventory.Target.Configured &&
+			(!inventory.Available || inventory.Stale) {
+			refreshTargets[inventory.Target.ID] = true
+		}
+	}
+	if len(refreshTargets) == 0 {
+		return preview, nil
+	}
+	ids := make([]string, 0, len(refreshTargets))
+	for id := range refreshTargets {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	// A capacity check must work without a page subscription. Reuse the
+	// coordinator's endpoint cache and in-flight collection, with one shared
+	// deadline for this request. Failed samples remain unknown in the preview.
+	refreshCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	for _, id := range ids {
+		if refreshCtx.Err() != nil {
+			break
+		}
+		_ = freshener.EnsureRuntimeTargetsFresh(refreshCtx, []string{id})
+	}
+	if err := ctx.Err(); err != nil {
+		return BatchStartCapacityPreview{}, err
+	}
+	result, err = s.plan(ctx, firstRoomID, nil)
+	if err != nil {
+		return BatchStartCapacityPreview{}, err
+	}
+	return s.previewBatchStartCapacity(result, selections)
+}
+
+func (s *Service) previewBatchStartCapacity(result planResult, selections []StartCapacitySelection) (BatchStartCapacityPreview, error) {
 	endpointInventory := endpointInventories(result.inventories)
 	inventories := machineInventories(result.inventories)
 	starting := make(map[string]int)

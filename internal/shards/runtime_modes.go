@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"dont/internal/jobs"
@@ -92,6 +93,22 @@ func (o *Operations) resolveRuntimeModePlan(ctx context.Context, action Action, 
 		}
 		if o.placements != nil {
 			placement, placementErr := o.placements.AppliedPlacement(room.ID, world.ID)
+			if placementErr == nil && strings.TrimSpace(placement.AppliedInstallationID) == "" {
+				// Legacy placements omit the installation ID. Resolve the configured
+				// default exactly as the Runtime router does; never assume "default"
+				// or compare an unresolved ID with an inspected installation.
+				resolved, resolveErr := o.placements.ResolveExecution(ctx, room.ID, world.ID)
+				placementErr = resolveErr
+				if placementErr == nil {
+					if resolved.AppliedTargetID != placement.AppliedTargetID || resolved.Revision != placement.Revision {
+						placementErr = fmt.Errorf("世界 %s 的运行位置已变化，请重新提交: %w", world.Name, ErrInvalidRuntimeMode)
+					} else if strings.TrimSpace(resolved.AppliedInstallationID) == "" {
+						placementErr = ErrRuntimeModeUnavailable
+					} else {
+						placement = resolved
+					}
+				}
+			}
 			if placementErr != nil {
 				if action == ActionStart {
 					if original != nil {

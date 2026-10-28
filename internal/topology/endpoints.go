@@ -116,13 +116,19 @@ func machineInventories(values []agents.RuntimeTargetInventory) map[string]agent
 		}
 		processes := make(map[string]shared.ShardProcessReport)
 		rooms := make([]shared.RoomInventoryReport, 0)
-		available, stale := false, true
+		available, stale := false, false
 		for _, value := range group {
 			if value.Available {
 				available = true
 			}
-			if value.Available && !value.Stale {
-				stale = false
+			// Machine capacity needs every registered installation's process
+			// inventory. A fresh default cannot hide a missing sibling instance.
+			if !value.Available || value.Stale || !value.Target.Online {
+				if !stale {
+					selected.StaleReason = value.StaleReason
+					selected.ObservationState, selected.ObservationError = value.ObservationState, value.ObservationError
+				}
+				stale = true
 			}
 			rooms = append(rooms, value.Inventory.Rooms...)
 			for _, process := range value.Inventory.Processes {

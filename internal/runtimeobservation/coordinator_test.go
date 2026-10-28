@@ -212,3 +212,95 @@ func TestEnsureRuntimeTargetsFreshReturnsRecognizableUnavailableError(t *testing
 		t.Fatalf("unavailable error=%#v", unavailable)
 	}
 }
+
+func TestRefreshingExpiredInventoryStaysStaleUntilCollectionFinishes(t *testing.T) {
+	now := time.Now().UTC()
+	item := observationInventory(now)
+	item.Target.ID, item.Target.Kind = "local", agents.RuntimeKindLocal
+	source := &observationSource{items: []agents.RuntimeTargetInventory{item}}
+	coordinator, err := New(source, Options{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coordinator.Close()
+	if _, err := coordinator.Refresh(context.Background(), Scope{TargetID: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(91 * time.Second)
+	started, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	source.collect = func(ctx context.Context, selected agents.RuntimeTargetInventory) (agents.RuntimeTargetInventory, error) {
+		close(started)
+		select {
+		case <-ctx.Done():
+			return agents.RuntimeTargetInventory{}, ctx.Err()
+		case <-release:
+		}
+		selected.ObservedAt, selected.ReceivedAt = &now, &now
+		return selected, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	refreshed := make(chan error, 1)
+	go func() {
+		_, err := coordinator.Refresh(ctx, Scope{TargetID: "local"})
+		refreshed <- err
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	items, err := coordinator.RuntimeTargetInventories(ctx)
+	if err != nil || len(items) != 1 || items[0].ObservationState != string(StateRefreshing) || !items[0].Stale {
+		t.Fatalf("expired inventory became fresh before collection completed: %+v %v", items, err)
+	}
+	ensured := make(chan error, 1)
+	go func() { ensured <- coordinator.EnsureRuntimeTargetsFresh(ctx, []string{"local", "local"}) }()
+	unblock()
+	if err := <-refreshed; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-ensured; err != nil {
+		t.Fatal(err)
+	}
+	items, err = coordinator.RuntimeTargetInventories(ctx)
+	if err != nil || items[0].Stale || items[0].ObservationState != string(StateFresh) {
+		t.Fatalf("fresh inventory was not published: %+v %v", items, err)
+	}
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	if source.collects != 2 {
+		t.Fatalf("preflight did not reuse the flight: %d samples", source.collects)
+	}
+}
+
+func TestEnsureFreshDoesNotTrustCachedInventoryAfterTargetBecomesUnavailable(t *testing.T) {
+	for _, configured := range []bool{true, false} {
+		t.Run(map[bool]string{true: "offline", false: "unconfigured"}[configured], func(t *testing.T) {
+			source := &observationSource{items: []agents.RuntimeTargetInventory{observationInventory(time.Now().UTC())}}
+			coordinator, err := New(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer coordinator.Close()
+			if _, err := coordinator.Refresh(context.Background(), Scope{TargetID: "agent:node"}); err != nil {
+				t.Fatal(err)
+			}
+			source.mu.Lock()
+			source.items[0].Target.Configured = configured
+			source.items[0].Target.Online = !configured
+			source.mu.Unlock()
+			if err := coordinator.EnsureRuntimeTargetsFresh(context.Background(), []string{"agent:node"}); !errors.Is(err, ErrObservationUnavailable) {
+				t.Fatalf("fresh cache hid unavailable target: %v", err)
+			}
+			source.mu.Lock()
+			defer source.mu.Unlock()
+			if source.collects != 1 {
+				t.Fatalf("unavailable target was sampled: %d calls", source.collects)
+			}
+		})
+	}
+}

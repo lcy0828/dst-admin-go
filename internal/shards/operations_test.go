@@ -1030,7 +1030,7 @@ func TestStartAttemptsEachWorldAndReportsUnavailableRemoteTarget(t *testing.T) {
 	operations := testOperations(control)
 	resolver := &fakePlacementResolver{
 		appliedByWorld: map[string]topology.ExecutionPlacement{
-			masterID: {AppliedTargetID: "local"},
+			masterID: {AppliedTargetID: "local", AppliedInstallationID: "default"},
 			cavesID:  {AppliedTargetID: "agent:node-a"},
 		},
 		resolvedByWorld: map[string]topology.ExecutionPlacement{
@@ -1087,7 +1087,7 @@ func TestBatchPlanUsesRoomScopedTargetsAndMergedCapacityConfirmation(t *testing.
 	operations.pollInterval = time.Millisecond
 	operations.startTimeout = 100 * time.Millisecond
 	resolver := &fakePlacementResolver{
-		applied: topology.ExecutionPlacement{AppliedTargetID: "local"},
+		applied: topology.ExecutionPlacement{AppliedTargetID: "local", AppliedInstallationID: "default"},
 		batchPreview: topology.BatchStartCapacityPreview{
 			RequiresRiskConfirmation: true,
 			Targets:                  []topology.StartCapacityTarget{{TargetID: "local", RequiresRiskConfirmation: true}},
@@ -1131,7 +1131,7 @@ func TestDistributedOperationUsesAppliedRemoteTargetWithLeaseAndNoLocalFallback(
 	control := &fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}}
 	operations := testOperations(control)
 	resolver := &fakePlacementResolver{
-		applied:  topology.ExecutionPlacement{AppliedTargetID: "agent:node-a"},
+		applied:  topology.ExecutionPlacement{AppliedTargetID: "agent:node-a", AppliedInstallationID: "default"},
 		resolved: topology.ExecutionPlacement{Revision: "revision-1", AppliedTargetID: "agent:node-a", Target: agents.RuntimeTarget{AgentID: "node-a"}},
 	}
 	remote := &fakeRemoteExecutor{}
@@ -1242,7 +1242,7 @@ func TestStartUsesCurrentDiskStateWithoutManagedModLaunchOptions(t *testing.T) {
 	control := &fakeControl{running: map[string]bool{}, status: map[string]RuntimeStatus{}, fail: map[string]error{}}
 	operations := testOperations(control)
 	roomID, worldID := rooms.EncodeID("summer_2026"), rooms.EncodeID("Master")
-	resolver := &fakePlacementResolver{applied: topology.ExecutionPlacement{Revision: "revision-local", AppliedTargetID: "local"}}
+	resolver := &fakePlacementResolver{applied: topology.ExecutionPlacement{Revision: "revision-local", AppliedTargetID: "local", AppliedInstallationID: "default"}}
 	runtime := &fakePlacedRuntime{status: shared.ShardRuntimeStatus{State: string(RuntimeStopped)}}
 	leaseService := &fakeLeaseService{lease: operationlease.Lease{
 		RoomID: roomID, LeaseID: "lease-mod-start", OperationKey: "room-start", FencingToken: 11,
