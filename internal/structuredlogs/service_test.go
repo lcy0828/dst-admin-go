@@ -107,14 +107,14 @@ func TestServiceRuleValidationTestingAndCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CreateRule("room", RuleInput{Name: "broken", LogType: TypeEntity, Pattern: "[", Regex: true, Enabled: true}); !errors.Is(err, ErrInvalidRule) {
+	if _, err := service.CreateRule(RuleInput{Name: "broken", LogType: TypeEntity, Pattern: "[", Regex: true, Enabled: true}); !errors.Is(err, ErrInvalidRule) {
 		t.Fatalf("invalid regexp error = %v", err)
 	}
-	rule, err := service.CreateRule("room", RuleInput{Name: "Boss", LogType: TypeEntity, Pattern: "deerclops", Enabled: true, Priority: 1000})
+	rule, err := service.CreateRule(RuleInput{Name: "Boss", LogType: TypeEntity, Pattern: "deerclops", Enabled: true, Priority: 1000})
 	if err != nil || rule.BuiltIn {
 		t.Fatalf("custom rule = %#v, %v", rule, err)
 	}
-	tested, err := service.TestRule("room", RuleTestInput{RuleInput: RuleInput{Name: "Boss", LogType: TypeEntity, Pattern: "deerclops", Priority: 1000}, Sample: "spawned deerclops"})
+	tested, err := service.TestRule(RuleTestInput{RuleInput: RuleInput{Name: "Boss", LogType: TypeEntity, Pattern: "deerclops", Priority: 1000}, Sample: "spawned deerclops"})
 	if err != nil || !tested.Matched {
 		t.Fatalf("rule test = %#v, %v", tested, err)
 	}
@@ -158,10 +158,10 @@ func TestServicePreservesMultiLineHeadTailCustomTypesAndClear(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CreateRule("room", RuleInput{Name: "连续错误", LogType: TypeError, Pattern: "Error:", Enabled: true, Priority: 1000, MatchMode: MatchModeMultiLine}); err != nil {
+	if _, err := service.CreateRule(RuleInput{Name: "连续错误", LogType: TypeError, Pattern: "Error:", Enabled: true, Priority: 1000, MatchMode: MatchModeMultiLine}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CreateRule("room", RuleInput{Name: "堆栈", LogType: LogType("连接事件"), Pattern: "BEGIN", Enabled: true, Priority: 200, MatchMode: MatchModeHeadTail, TailPattern: "END$"}); err != nil {
+	if _, err := service.CreateRule(RuleInput{Name: "堆栈", LogType: LogType("连接事件"), Pattern: "BEGIN", Enabled: true, Priority: 200, MatchMode: MatchModeHeadTail, TailPattern: "END$"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.RefreshWorld(context.Background(), "room", "master"); err != nil {
@@ -175,7 +175,7 @@ func TestServicePreservesMultiLineHeadTailCustomTypesAndClear(t *testing.T) {
 	if err != nil || stack.Total != 1 || stack.Items[0].RawContent != "[00:00:04]: BEGIN stack\n[00:00:05]: detail\n[00:00:06]: END" {
 		t.Fatalf("head-tail entries = %#v, %v", stack, err)
 	}
-	tested, err := service.TestRule("room", RuleTestInput{RuleInput: RuleInput{Name: "堆栈", LogType: LogType("连接事件"), Pattern: "BEGIN", MatchMode: MatchModeHeadTail, TailPattern: "END$"}, Sample: "BEGIN stack\ndetail\nEND"})
+	tested, err := service.TestRule(RuleTestInput{RuleInput: RuleInput{Name: "堆栈", LogType: LogType("连接事件"), Pattern: "BEGIN", MatchMode: MatchModeHeadTail, TailPattern: "END$"}, Sample: "BEGIN stack\ndetail\nEND"})
 	if err != nil || !tested.Matched {
 		t.Fatalf("head-tail test = %#v, %v", tested, err)
 	}
@@ -217,26 +217,26 @@ func TestServicePreviewsAndMigratesLegacyRulesIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	preview, err := service.PreviewRuleMigration("room")
+	preview, err := service.PreviewRuleMigration()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !preview.SourceAvailable || preview.Total != 5 || preview.Ready != 1 || preview.Skipped != 2 || preview.Incompatible != 2 || preview.Conflicts != 0 {
 		t.Fatalf("unexpected migration preview: %#v", preview)
 	}
-	result, err := service.MigrateLegacyRules("room")
+	result, err := service.MigrateLegacyRules()
 	if err != nil || result.Imported != 1 {
 		t.Fatalf("migration result = %#v, err=%v", result, err)
 	}
-	migrated, err := store.Rule("room", "legacy-1")
+	migrated, err := store.Rule("", "legacy-1")
 	if err != nil || migrated.Name != "服务器启动" || migrated.Priority != 900 || migrated.BuiltIn {
 		t.Fatalf("migrated rule = %#v, err=%v", migrated, err)
 	}
-	second, err := service.MigrateLegacyRules("room")
+	second, err := service.MigrateLegacyRules()
 	if err != nil || second.Imported != 0 || second.Preview.Ready != 0 || second.Preview.Skipped != 3 {
 		t.Fatalf("second migration = %#v, err=%v", second, err)
 	}
-	rules, err := service.Rules("room")
+	rules, err := service.Rules()
 	if err != nil || len(rules) != len(defaultRules("room"))+1 {
 		t.Fatalf("rules after migration = %d, err=%v", len(rules), err)
 	}
@@ -255,10 +255,10 @@ func TestServiceMigrationReportsMatcherConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CreateRule("room", RuleInput{Name: "现有规则", LogType: TypeSystem, Pattern: "server", Enabled: true, Priority: 800}); err != nil {
+	if _, err := service.CreateRule(RuleInput{Name: "现有规则", LogType: TypeSystem, Pattern: "server", Enabled: true, Priority: 800}); err != nil {
 		t.Fatal(err)
 	}
-	preview, err := service.PreviewRuleMigration("room")
+	preview, err := service.PreviewRuleMigration()
 	if err != nil || preview.Conflicts != 1 || preview.Ready != 0 || preview.Items[0].ExistingRuleID == "" {
 		t.Fatalf("conflict preview = %#v, err=%v", preview, err)
 	}
@@ -266,7 +266,7 @@ func TestServiceMigrationReportsMatcherConflicts(t *testing.T) {
 
 func TestServiceReconcilesNewBuiltInsWithoutOverwritingExistingRules(t *testing.T) {
 	store := newStructuredLogStore(t)
-	existing := defaultRules("room")[0]
+	existing := defaultRules("")[0]
 	existing.Name = "用户调整后的错误规则"
 	existing.Priority = 999
 	if _, err := store.CreateRule(existing); err != nil {
@@ -276,15 +276,15 @@ func TestServiceReconcilesNewBuiltInsWithoutOverwritingExistingRules(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	rules, err := service.Rules("room")
+	rules, err := service.Rules()
 	if err != nil || len(rules) != len(defaultRules("room")) {
 		t.Fatalf("reconciled rules = %d, err=%v", len(rules), err)
 	}
-	preserved, err := store.Rule("room", existing.ID)
+	preserved, err := store.Rule("", existing.ID)
 	if err != nil || preserved.Name != existing.Name || preserved.Priority != existing.Priority {
 		t.Fatalf("existing built-in was overwritten: %#v, err=%v", preserved, err)
 	}
-	if _, err := store.Rule("room", "builtin-worldgen"); err != nil {
+	if _, err := store.Rule("", "builtin-worldgen"); err != nil {
 		t.Fatalf("new built-in was not added: %v", err)
 	}
 }

@@ -71,19 +71,20 @@ type snapshotMetadata struct {
 }
 
 type Store struct {
-	db               *gorm.DB
-	entriesTable     string
-	rulesTable       string
-	refreshTable     string
-	legacyRulesTable string
-	now              func() time.Time
+	db                  *gorm.DB
+	entriesTable        string
+	rulesTable          string
+	refreshTable        string
+	legacyRulesTable    string
+	ruleMigrationsTable string
+	now                 func() time.Time
 }
 
 func NewStore(db *gorm.DB, prefix string) *Store {
 	prefix = strings.TrimSpace(prefix)
 	return &Store{
 		db: db, entriesTable: prefix + "structured_log", rulesTable: prefix + "structured_log_rule",
-		refreshTable: prefix + "structured_log_refresh", legacyRulesTable: prefix + "log_extract_rule", now: time.Now,
+		refreshTable: prefix + "structured_log_refresh", legacyRulesTable: prefix + "log_extract_rule", ruleMigrationsTable: prefix + "structured_log_rule_migration", now: time.Now,
 	}
 }
 
@@ -115,7 +116,7 @@ func (s *Store) Migrate() error {
 			}
 		}
 	}
-	return nil
+	return s.migrateGlobalRules()
 }
 
 func (s *Store) ReplaceWorldSnapshot(roomID, worldID, worldName string, entries []Entry, observedAt time.Time) error {
@@ -256,7 +257,7 @@ func (s *Store) Counts(roomID, worldID string) (map[LogType]int, snapshotMetadat
 
 func (s *Store) Rules(roomID string) ([]Rule, error) {
 	var records []ruleRecord
-	if err := s.db.Table(s.rulesTable).Where("room_id = ?", roomID).Order("priority DESC, name ASC").Find(&records).Error; err != nil {
+	if err := s.db.Table(s.rulesTable).Where("room_id = ?", roomID).Order("priority DESC, name ASC, id ASC").Find(&records).Error; err != nil {
 		return nil, err
 	}
 	rules := make([]Rule, 0, len(records))

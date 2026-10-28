@@ -109,7 +109,7 @@ func (s *Service) RefreshWorld(ctx context.Context, roomID, worldID string) (Ref
 	if err != nil {
 		return RefreshResult{}, err
 	}
-	rules, err := s.rules(room.ID)
+	rules, err := s.rules()
 	if err != nil {
 		return RefreshResult{}, err
 	}
@@ -148,23 +148,13 @@ func (s *Service) ClearWorld(roomID, worldID string) (ClearResult, error) {
 	return ClearResult{RoomID: room.ID, WorldID: world.ID, Deleted: deleted, ClearedAt: clearedAt}, nil
 }
 
-func (s *Service) Rules(roomID string) ([]Rule, error) {
-	room, err := s.managedRoom(roomID)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := s.rules(room.ID); err != nil {
-		return nil, err
-	}
-	return s.store.Rules(room.ID)
+// Rules are shared by every managed room and can be configured before creating one.
+func (s *Service) Rules() ([]Rule, error) {
+	return s.ensureRulesInitialized()
 }
 
-func (s *Service) CreateRule(roomID string, input RuleInput) (Rule, error) {
-	room, err := s.managedRoom(roomID)
-	if err != nil {
-		return Rule{}, err
-	}
-	input, err = normalizeRule(input)
+func (s *Service) CreateRule(input RuleInput) (Rule, error) {
+	input, err := normalizeRule(input)
 	if err != nil {
 		return Rule{}, err
 	}
@@ -172,19 +162,15 @@ func (s *Service) CreateRule(roomID string, input RuleInput) (Rule, error) {
 	if err != nil {
 		return Rule{}, err
 	}
-	return s.store.CreateRule(Rule{ID: id, RoomID: room.ID, Name: input.Name, Description: input.Description, LogType: input.LogType, Pattern: input.Pattern, Regex: input.Regex, Enabled: input.Enabled, Priority: input.Priority, MatchMode: input.MatchMode, TailPattern: input.TailPattern})
+	return s.store.CreateRule(Rule{ID: id, Name: input.Name, Description: input.Description, LogType: input.LogType, Pattern: input.Pattern, Regex: input.Regex, Enabled: input.Enabled, Priority: input.Priority, MatchMode: input.MatchMode, TailPattern: input.TailPattern})
 }
 
-func (s *Service) UpdateRule(roomID, ruleID string, input RuleInput) (Rule, error) {
-	room, err := s.managedRoom(roomID)
+func (s *Service) UpdateRule(ruleID string, input RuleInput) (Rule, error) {
+	input, err := normalizeRule(input)
 	if err != nil {
 		return Rule{}, err
 	}
-	input, err = normalizeRule(input)
-	if err != nil {
-		return Rule{}, err
-	}
-	current, err := s.store.Rule(room.ID, strings.TrimSpace(ruleID))
+	current, err := s.store.Rule("", strings.TrimSpace(ruleID))
 	if err != nil {
 		return Rule{}, err
 	}
@@ -194,18 +180,11 @@ func (s *Service) UpdateRule(roomID, ruleID string, input RuleInput) (Rule, erro
 	return s.store.UpdateRule(current)
 }
 
-func (s *Service) DeleteRule(roomID, ruleID string) error {
-	room, err := s.managedRoom(roomID)
-	if err != nil {
-		return err
-	}
-	return s.store.DeleteRule(room.ID, strings.TrimSpace(ruleID))
+func (s *Service) DeleteRule(ruleID string) error {
+	return s.store.DeleteRule("", strings.TrimSpace(ruleID))
 }
 
-func (s *Service) TestRule(roomID string, input RuleTestInput) (RuleTestResult, error) {
-	if _, err := s.managedRoom(roomID); err != nil {
-		return RuleTestResult{}, err
-	}
+func (s *Service) TestRule(input RuleTestInput) (RuleTestResult, error) {
 	if len(input.Sample) > maxRuleSampleBytes || !utf8.ValidString(input.Sample) || strings.ContainsRune(input.Sample, '\x00') {
 		return RuleTestResult{}, &FieldError{Fields: map[string]string{"sample": "样本必须是不超过 64 KiB 的有效文本"}}
 	}
@@ -266,8 +245,8 @@ func (s *Service) normalizeFilter(roomID string, filter ListFilter) (ListFilter,
 	return filter, nil
 }
 
-func (s *Service) rules(roomID string) ([]compiledRule, error) {
-	rules, err := s.ensureRulesInitialized(roomID)
+func (s *Service) rules() ([]compiledRule, error) {
+	rules, err := s.ensureRulesInitialized()
 	if err != nil {
 		return nil, err
 	}
@@ -286,11 +265,11 @@ func (s *Service) rules(roomID string) ([]compiledRule, error) {
 	return compiled, nil
 }
 
-func (s *Service) ensureRulesInitialized(roomID string) ([]Rule, error) {
-	lock := s.lock(roomID + "\x00built-in-rules")
+func (s *Service) ensureRulesInitialized() ([]Rule, error) {
+	lock := s.lock("global-built-in-rules")
 	lock.Lock()
 	defer lock.Unlock()
-	rules, err := s.store.Rules(roomID)
+	rules, err := s.store.Rules("")
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +278,7 @@ func (s *Service) ensureRulesInitialized(roomID string) ([]Rule, error) {
 		existingIDs[rule.ID] = struct{}{}
 	}
 	missing := make([]Rule, 0)
-	for _, rule := range defaultRules(roomID) {
+	for _, rule := range defaultRules("") {
 		if _, exists := existingIDs[rule.ID]; !exists {
 			missing = append(missing, rule)
 		}
@@ -310,7 +289,7 @@ func (s *Service) ensureRulesInitialized(roomID string) ([]Rule, error) {
 	if _, err := s.store.CreateRules(missing); err != nil {
 		return nil, err
 	}
-	return s.store.Rules(roomID)
+	return s.store.Rules("")
 }
 
 func (s *Service) lock(key string) *sync.Mutex {

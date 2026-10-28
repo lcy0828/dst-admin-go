@@ -58,6 +58,8 @@ func TestRuntimeTargetBoundaryAllowsPlacementAwareRuntimeDomains(t *testing.T) {
 		"/api/v2/rooms/room-one/worlds/master/logs/events",
 		"/api/v2/rooms/room-one/worlds/master/commands",
 		"/api/v2/rooms/room-one/structured-logs",
+		"/api/v2/log-rules",
+		"/api/v2/log-rules/migration-preview",
 	} {
 		router.GET(path, func(c *gin.Context) { c.Status(http.StatusNoContent) })
 		request := httptest.NewRequest(http.MethodGet, path, nil)

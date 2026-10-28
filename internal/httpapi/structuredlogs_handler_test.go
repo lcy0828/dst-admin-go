@@ -29,31 +29,31 @@ func (structuredLogHandlerService) RefreshWorld(context.Context, string, string)
 func (structuredLogHandlerService) ClearWorld(_, worldID string) (structuredlogs.ClearResult, error) {
 	return structuredlogs.ClearResult{RoomID: "room", WorldID: worldID, Deleted: 2}, nil
 }
-func (structuredLogHandlerService) Rules(string) ([]structuredlogs.Rule, error) {
+func (structuredLogHandlerService) Rules() ([]structuredlogs.Rule, error) {
 	return []structuredlogs.Rule{{ID: "rule", Name: "规则", LogType: structuredlogs.TypeSystem}}, nil
 }
-func (structuredLogHandlerService) CreateRule(_ string, input structuredlogs.RuleInput) (structuredlogs.Rule, error) {
+func (structuredLogHandlerService) CreateRule(input structuredlogs.RuleInput) (structuredlogs.Rule, error) {
 	if input.Pattern == "" {
 		return structuredlogs.Rule{}, &structuredlogs.FieldError{Fields: map[string]string{"pattern": "必填"}}
 	}
 	return structuredlogs.Rule{ID: "created", Name: input.Name, Pattern: input.Pattern}, nil
 }
-func (structuredLogHandlerService) UpdateRule(_ string, id string, input structuredlogs.RuleInput) (structuredlogs.Rule, error) {
+func (structuredLogHandlerService) UpdateRule(id string, input structuredlogs.RuleInput) (structuredlogs.Rule, error) {
 	return structuredlogs.Rule{ID: id, Name: input.Name, Pattern: input.Pattern}, nil
 }
-func (structuredLogHandlerService) DeleteRule(_, id string) error {
+func (structuredLogHandlerService) DeleteRule(id string) error {
 	if id == "builtin" {
 		return structuredlogs.ErrBuiltInRule
 	}
 	return nil
 }
-func (structuredLogHandlerService) TestRule(string, structuredlogs.RuleTestInput) (structuredlogs.RuleTestResult, error) {
+func (structuredLogHandlerService) TestRule(structuredlogs.RuleTestInput) (structuredlogs.RuleTestResult, error) {
 	return structuredlogs.RuleTestResult{Matched: true}, nil
 }
-func (structuredLogHandlerService) PreviewRuleMigration(string) (structuredlogs.RuleMigrationPreview, error) {
+func (structuredLogHandlerService) PreviewRuleMigration() (structuredlogs.RuleMigrationPreview, error) {
 	return structuredlogs.RuleMigrationPreview{SourceAvailable: true, Total: 2, Ready: 1, Skipped: 1}, nil
 }
-func (structuredLogHandlerService) MigrateLegacyRules(string) (structuredlogs.RuleMigrationResult, error) {
+func (structuredLogHandlerService) MigrateLegacyRules() (structuredlogs.RuleMigrationResult, error) {
 	return structuredlogs.RuleMigrationResult{Imported: 1}, nil
 }
 
@@ -113,6 +113,29 @@ func TestStructuredLogHTTPReadRulesAndRefreshJob(t *testing.T) {
 	assertStatus(t, response, http.StatusOK)
 	if responseData(t, response)["deleted"].(float64) != 2 {
 		t.Fatalf("unexpected clear response: %s", response.Body.String())
+	}
+}
+
+func TestGlobalStructuredLogRuleEndpoints(t *testing.T) {
+	router, _ := newStructuredLogHandlerApp(t)
+	for _, test := range []struct {
+		method, path string
+		body         map[string]interface{}
+		status       int
+	}{
+		{http.MethodGet, "/log-rules", nil, http.StatusOK},
+		{http.MethodPost, "/log-rules", map[string]interface{}{"name": "Global", "pattern": "hello"}, http.StatusCreated},
+		{http.MethodPut, "/log-rules/custom", map[string]interface{}{"name": "Edited", "pattern": "bye"}, http.StatusOK},
+		{http.MethodPost, "/log-rules/actions/test", map[string]interface{}{"pattern": "hello", "sample": "hello"}, http.StatusOK},
+		{http.MethodGet, "/log-rules/migration-preview", nil, http.StatusOK},
+		{http.MethodPost, "/log-rules/actions/migrate-legacy", map[string]interface{}{}, http.StatusOK},
+		{http.MethodDelete, "/log-rules/custom", nil, http.StatusOK},
+		{http.MethodDelete, "/log-rules/builtin", nil, http.StatusConflict},
+	} {
+		t.Run(test.method+test.path, func(t *testing.T) {
+			response := performJSON(router, test.method, "/api/v2"+test.path, test.body, nil, "")
+			assertStatus(t, response, test.status)
+		})
 	}
 }
 

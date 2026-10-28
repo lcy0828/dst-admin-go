@@ -13,27 +13,19 @@ type preparedRuleMigration struct {
 	rules   []Rule
 }
 
-func (s *Service) PreviewRuleMigration(roomID string) (RuleMigrationPreview, error) {
-	room, err := s.managedRoom(roomID)
-	if err != nil {
-		return RuleMigrationPreview{}, err
-	}
-	prepared, err := s.prepareRuleMigration(room.ID)
+func (s *Service) PreviewRuleMigration() (RuleMigrationPreview, error) {
+	prepared, err := s.prepareRuleMigration()
 	if err != nil {
 		return RuleMigrationPreview{}, err
 	}
 	return prepared.preview, nil
 }
 
-func (s *Service) MigrateLegacyRules(roomID string) (RuleMigrationResult, error) {
-	room, err := s.managedRoom(roomID)
-	if err != nil {
-		return RuleMigrationResult{}, err
-	}
-	lock := s.lock(room.ID + "\x00rule-migration")
+func (s *Service) MigrateLegacyRules() (RuleMigrationResult, error) {
+	lock := s.lock("global-rule-migration")
 	lock.Lock()
 	defer lock.Unlock()
-	prepared, err := s.prepareRuleMigration(room.ID)
+	prepared, err := s.prepareRuleMigration()
 	if err != nil {
 		return RuleMigrationResult{}, err
 	}
@@ -44,12 +36,12 @@ func (s *Service) MigrateLegacyRules(roomID string) (RuleMigrationResult, error)
 	return RuleMigrationResult{Imported: len(created), Preview: prepared.preview}, nil
 }
 
-func (s *Service) prepareRuleMigration(roomID string) (preparedRuleMigration, error) {
+func (s *Service) prepareRuleMigration() (preparedRuleMigration, error) {
 	legacyRules, sourceAvailable, err := s.store.LegacyRules()
 	if err != nil {
 		return preparedRuleMigration{}, err
 	}
-	existing, err := s.ensureRulesInitialized(roomID)
+	existing, err := s.ensureRulesInitialized()
 	if err != nil {
 		return preparedRuleMigration{}, err
 	}
@@ -66,7 +58,7 @@ func (s *Service) prepareRuleMigration(roomID string) (preparedRuleMigration, er
 		rules:   make([]Rule, 0, len(legacyRules)),
 	}
 	for _, legacy := range legacyRules {
-		item, rule := prepareLegacyRule(roomID, legacy)
+		item, rule := prepareLegacyRule("", legacy)
 		if item.Status == RuleMigrationReady {
 			if current, ok := byID[rule.ID]; ok {
 				item.ExistingRuleID = current.ID

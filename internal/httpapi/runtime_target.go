@@ -10,6 +10,7 @@ import (
 const RuntimeTargetHeader = "X-DST-Runtime-Target"
 
 var remoteRuntimeControlPrefixes = []string{
+	"/api/v2/log-rules",
 	"/api/v2/entity-catalog/artwork-pack",
 	"/api/v2/agents",
 	"/api/v2/auth",

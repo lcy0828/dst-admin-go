@@ -19,13 +19,13 @@ type StructuredLogService interface {
 	WorldTargets(string) ([]rooms.World, error)
 	RefreshWorld(context.Context, string, string) (structuredlogs.RefreshResult, error)
 	ClearWorld(string, string) (structuredlogs.ClearResult, error)
-	Rules(string) ([]structuredlogs.Rule, error)
-	CreateRule(string, structuredlogs.RuleInput) (structuredlogs.Rule, error)
-	UpdateRule(string, string, structuredlogs.RuleInput) (structuredlogs.Rule, error)
-	DeleteRule(string, string) error
-	TestRule(string, structuredlogs.RuleTestInput) (structuredlogs.RuleTestResult, error)
-	PreviewRuleMigration(string) (structuredlogs.RuleMigrationPreview, error)
-	MigrateLegacyRules(string) (structuredlogs.RuleMigrationResult, error)
+	Rules() ([]structuredlogs.Rule, error)
+	CreateRule(structuredlogs.RuleInput) (structuredlogs.Rule, error)
+	UpdateRule(string, structuredlogs.RuleInput) (structuredlogs.Rule, error)
+	DeleteRule(string) error
+	TestRule(structuredlogs.RuleTestInput) (structuredlogs.RuleTestResult, error)
+	PreviewRuleMigration() (structuredlogs.RuleMigrationPreview, error)
+	MigrateLegacyRules() (structuredlogs.RuleMigrationResult, error)
 }
 
 type StructuredLogHandler struct {
@@ -42,14 +42,17 @@ func (h *StructuredLogHandler) Register(v2 *gin.RouterGroup) {
 	logs.GET("", h.list)
 	logs.POST("/actions/refresh", h.refresh)
 	logs.POST("/actions/clear", h.clear)
-	rules := v2.Group("/rooms/:roomId/log-rules")
-	rules.GET("", h.rules)
-	rules.POST("", h.createRule)
-	rules.PUT("/:ruleId", h.updateRule)
-	rules.DELETE("/:ruleId", h.deleteRule)
-	rules.POST("/actions/test", h.testRule)
-	rules.GET("/migration-preview", h.previewRuleMigration)
-	rules.POST("/actions/migrate-legacy", h.migrateLegacyRules)
+	// Keep the former room URLs as aliases while all clients move to global rules.
+	for _, path := range []string{"/log-rules", "/rooms/:roomId/log-rules"} {
+		rules := v2.Group(path)
+		rules.GET("", h.rules)
+		rules.POST("", h.createRule)
+		rules.PUT("/:ruleId", h.updateRule)
+		rules.DELETE("/:ruleId", h.deleteRule)
+		rules.POST("/actions/test", h.testRule)
+		rules.GET("/migration-preview", h.previewRuleMigration)
+		rules.POST("/actions/migrate-legacy", h.migrateLegacyRules)
+	}
 }
 
 func (h *StructuredLogHandler) clear(c *gin.Context) {
@@ -113,7 +116,7 @@ func (h *StructuredLogHandler) refresh(c *gin.Context) {
 }
 
 func (h *StructuredLogHandler) rules(c *gin.Context) {
-	items, err := h.logs.Rules(c.Param("roomId"))
+	items, err := h.logs.Rules()
 	if err != nil {
 		structuredLogFailure(c, err)
 		return
@@ -127,7 +130,7 @@ func (h *StructuredLogHandler) createRule(c *gin.Context) {
 		Failure(c, http.StatusBadRequest, "INVALID_JSON", "规则内容不是有效 JSON", nil)
 		return
 	}
-	value, err := h.logs.CreateRule(c.Param("roomId"), input)
+	value, err := h.logs.CreateRule(input)
 	if err != nil {
 		structuredLogFailure(c, err)
 		return
@@ -141,7 +144,7 @@ func (h *StructuredLogHandler) updateRule(c *gin.Context) {
 		Failure(c, http.StatusBadRequest, "INVALID_JSON", "规则内容不是有效 JSON", nil)
 		return
 	}
-	value, err := h.logs.UpdateRule(c.Param("roomId"), c.Param("ruleId"), input)
+	value, err := h.logs.UpdateRule(c.Param("ruleId"), input)
 	if err != nil {
 		structuredLogFailure(c, err)
 		return
@@ -150,7 +153,7 @@ func (h *StructuredLogHandler) updateRule(c *gin.Context) {
 }
 
 func (h *StructuredLogHandler) deleteRule(c *gin.Context) {
-	if err := h.logs.DeleteRule(c.Param("roomId"), c.Param("ruleId")); err != nil {
+	if err := h.logs.DeleteRule(c.Param("ruleId")); err != nil {
 		structuredLogFailure(c, err)
 		return
 	}
@@ -163,7 +166,7 @@ func (h *StructuredLogHandler) testRule(c *gin.Context) {
 		Failure(c, http.StatusBadRequest, "INVALID_JSON", "规则测试内容不是有效 JSON", nil)
 		return
 	}
-	value, err := h.logs.TestRule(c.Param("roomId"), input)
+	value, err := h.logs.TestRule(input)
 	if err != nil {
 		structuredLogFailure(c, err)
 		return
@@ -172,7 +175,7 @@ func (h *StructuredLogHandler) testRule(c *gin.Context) {
 }
 
 func (h *StructuredLogHandler) previewRuleMigration(c *gin.Context) {
-	value, err := h.logs.PreviewRuleMigration(c.Param("roomId"))
+	value, err := h.logs.PreviewRuleMigration()
 	if err != nil {
 		structuredLogFailure(c, err)
 		return
@@ -181,7 +184,7 @@ func (h *StructuredLogHandler) previewRuleMigration(c *gin.Context) {
 }
 
 func (h *StructuredLogHandler) migrateLegacyRules(c *gin.Context) {
-	value, err := h.logs.MigrateLegacyRules(c.Param("roomId"))
+	value, err := h.logs.MigrateLegacyRules()
 	if err != nil {
 		structuredLogFailure(c, err)
 		return

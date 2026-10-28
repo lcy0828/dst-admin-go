@@ -82,7 +82,7 @@ type List struct {
 
 type Rule struct {
 	ID          string    `json:"id"`
-	RoomID      string    `json:"roomId"`
+	RoomID      string    `json:"roomId,omitempty"`
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
 	LogType     LogType   `json:"logType"`
