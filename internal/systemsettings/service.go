@@ -249,12 +249,16 @@ func (s *Service) settingsFromSnapshot(snapshot Snapshot) Settings {
 			value, source = definition.Default, SourceDefault
 		}
 		configured := strings.TrimSpace(value) != ""
+		displayValue := ""
+		if definition.ID == "mod.proxyURL" {
+			displayValue = proxyDisplayAddress(value)
+		}
 		if definition.Sensitive {
 			value = ""
 		}
 		options := make([]string, len(definition.Options))
 		copy(options, definition.Options)
-		fields = append(fields, Field{ID: definition.ID, Group: definition.Group, Label: definition.Label, Kind: definition.Kind, Value: value, Options: options, Source: source, Environment: environment, Editable: source != SourceEnvironment && !definition.ReadOnly, Sensitive: definition.Sensitive, Configured: configured, RestartRequired: definition.RestartRequired && s.applier == nil, Minimum: definition.Minimum, Maximum: definition.Maximum})
+		fields = append(fields, Field{ID: definition.ID, Group: definition.Group, Label: definition.Label, Kind: definition.Kind, Value: value, DisplayValue: displayValue, Options: options, Source: source, Environment: environment, Editable: source != SourceEnvironment && !definition.ReadOnly, Sensitive: definition.Sensitive, Configured: configured, RestartRequired: definition.RestartRequired && s.applier == nil, Minimum: definition.Minimum, Maximum: definition.Maximum})
 	}
 	restartRequired := s.runtimeChanged(snapshot.Values)
 	return Settings{RuntimeApplySupported: s.applier != nil, Revision: snapshot.Revision, ConfigurationPath: snapshot.ConfigurationPath, BackupPath: snapshot.BackupPath, RestartRequired: restartRequired, Fields: fields, ReadAt: s.now().UTC()}

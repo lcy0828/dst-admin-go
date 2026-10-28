@@ -2,11 +2,44 @@ package systemsettings
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"dont/internal/mods"
 )
+
+func TestWorkshopProxyAddressRemainsVisibleWithoutExposingCredentials(t *testing.T) {
+	for _, raw := range []string{"http://10.1.2.3:7890", "http://private-user:private-password@10.1.2.3:7890"} {
+		s, _ := NewService(NewMemoryRepository())
+		s.lookupEnv = func(string) (string, bool) { return "", false }
+		before, _ := s.Settings()
+		result, err := s.ApplyWorkshop(context.Background(), Input{Revision: before.Revision, Values: map[string]string{"mod.proxyMode": "custom", "mod.proxyURL": raw}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range result.Settings.Fields {
+			if field.ID == "mod.proxyURL" && (field.Value != "" || field.DisplayValue != "http://10.1.2.3:7890") {
+				t.Fatalf("unreadable or unsafe endpoint: %+v", field)
+			}
+		}
+		encoded, _ := json.Marshal(result.Settings)
+		if strings.Contains(string(encoded), "private-user") || strings.Contains(string(encoded), "private-password") {
+			t.Fatal("credential leaked in settings response")
+		}
+		// Saving another field while the proxy display is unchanged retains
+		// the original authenticated URL, rather than its display-only value.
+		result, err = s.ApplyWorkshop(context.Background(), Input{Revision: result.Settings.Revision, Values: map[string]string{"mod.steamAPIKey": "changed-valid-key"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		config, err := s.WorkshopConfig()
+		if err != nil || config.ProxyURL != raw {
+			t.Fatalf("unrelated save lost proxy authentication: %v", err)
+		}
+	}
+}
 
 func TestWorkshopLiveSettingsBypassWorldStopBarrierAndMaskProxy(t *testing.T) {
 	s, err := NewService(NewMemoryRepository())
@@ -26,7 +59,7 @@ func TestWorkshopLiveSettingsBypassWorldStopBarrierAndMaskProxy(t *testing.T) {
 		t.Fatalf("err=%v barrier=%d commits=%d config=%+v", err, barrierCalls, commits, effective)
 	}
 	for _, field := range result.Settings.Fields {
-		if field.ID == "mod.proxyURL" && (field.Value != "" || !field.Configured || field.RestartRequired) {
+		if field.ID == "mod.proxyURL" && (field.Value != "" || field.DisplayValue != "http://127.0.0.1:7890" || !field.Configured || field.RestartRequired) {
 			t.Fatalf("exposed proxy: %+v", field)
 		}
 	}

@@ -2,8 +2,22 @@ package systemsettings
 
 import (
 	"context"
+	"net/url"
+	"strings"
+
 	"dont/internal/mods"
 )
+
+// Return a readable endpoint without exposing embedded proxy credentials. An
+// unchanged display value is never submitted as a replacement for the secret.
+func proxyDisplayAddress(value string) string {
+	u, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5h") || u.RawQuery != "" || u.Fragment != "" {
+		return ""
+	}
+	u.User = nil
+	return u.String()
+}
 
 // WorkshopApplier prepares a local-only change. Commit cannot fail after Save.
 type WorkshopApplier func(mods.NetworkConfig) (commit func(), discard func(), err error)

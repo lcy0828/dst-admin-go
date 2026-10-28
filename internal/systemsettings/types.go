@@ -28,6 +28,7 @@ type Field struct {
 	Label           string      `json:"label"`
 	Kind            string      `json:"kind"`
 	Value           string      `json:"value"`
+	DisplayValue    string      `json:"displayValue,omitempty"`
 	Options         []string    `json:"options"`
 	Source          FieldSource `json:"source"`
 	Environment     string      `json:"environment,omitempty"`
