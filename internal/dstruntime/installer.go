@@ -31,7 +31,7 @@ const (
 	maxManagedBytes    = int64(2 * 1024 * 1024)
 )
 
-const managedLoader = `-- DST-ADMIN MANAGED BLOCK BEGIN protocol=2 version=2.4.18
+const managedLoader = `-- DST-ADMIN MANAGED BLOCK BEGIN protocol=2 version=2.4.19
 do
     TheSim:GetPersistentString("mod_config_data/dst-admin/runtime/bootstrap.lua", function(success, source)
         if not success or type(source) ~= "string" then

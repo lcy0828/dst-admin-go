@@ -8,7 +8,7 @@ import (
 
 const (
 	ProtocolVersion = 2
-	RuntimeVersion  = "2.4.18"
+	RuntimeVersion  = "2.4.19"
 )
 
 var (
@@ -196,6 +196,9 @@ type Health struct {
 }
 
 type ModuleHealth struct {
+	PublicationPhase         string   `json:"publicationPhase,omitempty"`
+	WriteUnconfirmed         bool     `json:"writeUnconfirmed,omitempty"`
+	Generation               int64    `json:"generation,omitempty"`
 	ProducerInstanceID       string   `json:"producerInstanceId,omitempty"`
 	Running                  bool     `json:"running"`
 	Ready                    bool     `json:"ready"`

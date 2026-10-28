@@ -530,3 +530,95 @@ tick(10)
 		t.Fatal("outlier blocked valid batch")
 	}
 }
+
+func TestActivityLuaDelayedDiskWriteKeepsFenceUntilCompletion(t *testing.T) {
+	for _, path := range []string{"segment", "manifest", "config"} {
+		t.Run(path, func(t *testing.T) {
+			L := activityHarness(t)
+			defer L.Close()
+			L.SetGlobal("delayPath", lua.LString(path))
+			if err := L.DoString(`
+p=entity("KU_MAIN","wilson",1);AllPlayers={p};activity.Start()
+local write=TheSim.SetPersistentString
+local waiting,held,writesWhileHeld=nil,false,0
+TheSim.SetPersistentString=function(self,name,value,encode,callback)
+ if waiting then writesWhileHeld=writesWhileHeld+1 end
+ local selected=delayPath=="segment" and name:match("activity%-%d+%.json$") or delayPath=="manifest" and name:match("activity%-manifest%.json$") or delayPath=="config" and name:match("activity%-config%.json$")
+ if selected and not held then
+  held=true
+  -- Actual disk mutation and callback both occur later.
+  waiting=function()waiting=nil;write(self,name,value,encode,callback)end
+  return
+ end
+ return write(self,name,value,encode,callback)
+end
+local cfg={revision="delayed",enabled=true,positions=true,actions=true,combat=true,positionIntervalSeconds=15,minimumDistance=10,combatIntervalSeconds=10,flushIntervalSeconds=5}
+if delayPath=="config" then assert(activity.Configure(cfg)) else p:Push("death",{});tick(5) end
+assert(waiting~=nil and activity.Status().busy)
+for i=1,20 do tick(5);p:Push("death",{}) end
+assert(activity.Status().writeUnconfirmed)
+assert(not activity.Configure(cfg) and not activity.Drain(function()error("drain overlapped pending I/O")end))
+assert(not activity.Stop(),"stopped while persistent write still unresolved")
+assert(writesWhileHeld==0,"new writes overlapped uncertain old disk I/O")
+waiting()
+assert(not activity.Status().busy and not activity.Status().writeUnconfirmed)
+TheSim.SetPersistentString=write
+assert(activity.Drain(function(ok)assert(ok)end))
+local m=require("json").decode(files["mod_config_data/dst-admin/activity-manifest.json"])
+for _,slot in ipairs(m.slots) do
+ local seg=require("json").decode(files["mod_config_data/dst-admin/"..string.format("activity-%02d.json",slot.slot)])
+ assert(seg.generation==slot.generation and seg.firstSequence==slot.firstSequence,"late write overwrote committed files")
+end
+assert(activity.Status().pending==0 and activity.Stop())
+`); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestActivityLuaManifestFailureRetriesSameBatchBeforeNewEvents(t *testing.T) {
+	L := activityHarness(t)
+	defer L.Close()
+	if err := L.DoString(`
+p=entity("KU_MAIN","wilson",1);AllPlayers={p};activity.Start()
+local write=TheSim.SetPersistentString;local failed=false;local segmentWrites=0;local firstManifest
+TheSim.SetPersistentString=function(self,name,value,encode,cb)
+ if name:match("activity%-%d+%.json$") then segmentWrites=segmentWrites+1 end
+ if name:match("activity%-manifest%.json$") and not failed then failed=true;firstManifest=value;cb(false);return end
+ if name:match("activity%-manifest%.json$") and firstManifest then assert(value==firstManifest,"pending manifest bytes changed");firstManifest=nil end
+ return write(self,name,value,encode,cb)
+end
+p:Push("death",{});tick(5)
+assert(activity.Status().generation==0 and activity.Status().pending==1)
+p:Push("death",{});tick(5)
+assert(activity.Status().generation==1 and activity.Status().pending==1 and segmentWrites==1)
+tick(5)
+assert(activity.Status().generation==2 and activity.Status().pending==0 and segmentWrites==2)
+`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestActivityLuaThrowingQueuedWriteCannotUnlockFence(t *testing.T) {
+	L := activityHarness(t)
+	defer L.Close()
+	if err := L.DoString(`
+p=entity("KU_MAIN","wilson",1);AllPlayers={p};activity.Start()
+local write=TheSim.SetPersistentString;local waiting
+TheSim.SetPersistentString=function(self,name,data,encode,callback)
+ waiting=function()write(self,name,data,encode,callback)end
+ error("native API threw after enqueue")
+end
+p:Push("death",{});tick(5);tick(15)
+assert(activity.Status().writeUnconfirmed and activity.Status().busy)
+local first=waiting
+tick(60)
+assert(waiting==first,"throwing call released the unresolved I/O fence")
+TheSim.SetPersistentString=write
+first()
+assert(not activity.Status().busy and activity.Status().generation==1)
+`); err != nil {
+		t.Fatal(err)
+	}
+}

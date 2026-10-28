@@ -1,6 +1,6 @@
 local json = require("json")
 local M = {}
-local VERSION = "2.4.18"
+local VERSION = "2.4.19"
 local ROOT = "mod_config_data/dst-admin/"
 local MAX_PENDING, MAX_BATCH, MAX_TARGETS = 512, 128, 32
 local defaults = {enabled=true, positions=true, actions=true, combat=true, positionIntervalSeconds=15,
@@ -75,24 +75,47 @@ local function object_fields(e)
     end
     return fields
 end
-publish_manifest=function(callback)
-    local epoch=state.epoch
+-- Exactly one unresolved persistent write is allowed. A timeout reports
+-- uncertainty but does not cancel the engine I/O or release this fence.
+local function write_persistent(path,data,callback)
+    if state.io then return false end
+    local entry={path=path,startedAt=os.time(),epoch=state.epoch}
+    state.io=entry
+    local started=pcall(TheSim.SetPersistentString,TheSim,path,data,false,function(written)
+        if state.io~=entry then return end
+        state.io=nil
+        if not state.running or state.epoch~=entry.epoch then return end
+        callback(written==true)
+    end)
+    -- A throwing native call may have queued I/O before throwing. Without a
+    -- terminal callback, retain the fence instead of guessing cancellation.
+    if not started and state.io==entry then state.lastError="activity write completion unconfirmed" end
+    return true
+end
+local function manifest_data(commit)
     local session,shard=identity()
     local count=0;for _ in pairs(state.players) do count=count+1 end
     local ordered={}
-    for _,v in pairs(state.slots) do ordered[#ordered+1]=v end
+    for key,v in pairs(state.slots) do
+        if not commit or key~=commit.slot then ordered[#ordered+1]=v end
+    end
+    if commit then ordered[#ordered+1]=commit.descriptor end
     table.sort(ordered,function(a,b) return a.generation<b.generation end)
     local manifest={schemaVersion=1,producerVersion=VERSION,producerInstanceId=instance,sessionId=session,shardId=shard,
-        generation=state.generation,slots=ordered,dropped=state.dropped,config=config,playerCount=count,
-        pending=#state.pending,updatedAtUnix=os.time(),lastError=state.lastError}
+        generation=commit and commit.generation or state.generation,slots=ordered,dropped=state.dropped,config=config,playerCount=count,
+        pending=math.max(0,#state.pending-(commit and commit.count or 0)),updatedAtUnix=os.time(),lastError=state.lastError,
+        publicationPhase="committed",writeUnconfirmed=false}
     local ok,data=pcall(json.encode_compliant,manifest)
-    if not ok then state.lastError="activity manifest encode failed";if callback then callback(false) end;return end
-    local started=pcall(TheSim.SetPersistentString,TheSim,ROOT.."activity-manifest.json",data,false,function(written)
-        if not state.running or state.epoch~=epoch then return end
+    if ok then return data end
+    state.lastError="activity manifest encode failed"
+end
+publish_manifest=function(callback,commit)
+    local data=commit and commit.manifestData or manifest_data()
+    if not data then if callback then callback(false) end;return end
+    write_persistent(ROOT.."activity-manifest.json",data,function(written)
         if not written then state.lastError="activity manifest write failed" end
-        if callback then callback(written==true) end
+        if callback then callback(written) end
     end)
-    if not started and callback then callback(false) end
 end
 flush_actions=function(item,retain)
     for key,action in pairs(item.actions) do
@@ -123,60 +146,64 @@ flush=function(completed)
         if completed then completed(false) end
         return
     end
-    flush_combat(completed~=nil,completed~=nil)
-    for _,item in pairs(state.players) do flush_actions(item,completed~=nil) end
-    if #state.pending==0 then if completed then completed(true) end;return end
-    local batch={}
-    for i=1,math.min(MAX_BATCH,#state.pending) do batch[#batch+1]=state.pending[i] end
-    local session,shard=identity()
-    local generation=state.generation+1
-    local slot=(generation-1)%64+1
-    local payload={schemaVersion=1,producerVersion=VERSION,producerInstanceId=instance,sessionId=session,shardId=shard,
-        generation=generation,firstSequence=batch[1].sequence,lastSequence=batch[#batch].sequence,events=batch}
-    local ok,data=pcall(json.encode_compliant,payload)
-    while ok and #data>65536 and #batch>1 do
-        local count=math.max(1,math.floor(#batch/2))
-        while #batch>count do table.remove(batch) end
-        payload.lastSequence=batch[#batch].sequence
-        ok,data=pcall(json.encode_compliant,payload)
-    end
-    if not ok or #data>65536 then
-        state.lastError="activity batch exceeded encoding limit"
-        if completed then completed(false);return end
-        state.dropped=state.dropped+#batch
-        for i=1,#batch do table.remove(state.pending,1) end
-        schedule_flush();return
+    -- Retry the original transaction before collecting any new batch. Neither
+    -- bytes nor generation are rebuilt after a manifest publication failure.
+    local commit=state.commit
+    if not commit then
+        flush_combat(completed~=nil,completed~=nil)
+        for _,item in pairs(state.players) do flush_actions(item,completed~=nil) end
+        if #state.pending==0 then if completed then completed(true) end;return end
+        local batch={}
+        for i=1,math.min(MAX_BATCH,#state.pending) do batch[#batch+1]=state.pending[i] end
+        local session,shard=identity()
+        local generation=state.generation+1
+        local slot=(generation-1)%64+1
+        local payload={schemaVersion=1,producerVersion=VERSION,producerInstanceId=instance,sessionId=session,shardId=shard,
+            generation=generation,firstSequence=batch[1].sequence,lastSequence=batch[#batch].sequence,events=batch}
+        local ok,data=pcall(json.encode_compliant,payload)
+        while ok and #data>65536 and #batch>1 do
+            local count=math.max(1,math.floor(#batch/2))
+            while #batch>count do table.remove(batch) end
+            payload.lastSequence=batch[#batch].sequence
+            ok,data=pcall(json.encode_compliant,payload)
+        end
+        if not ok or #data>65536 then
+            state.lastError="activity batch exceeded encoding limit"
+            if completed then completed(false);return end
+            state.dropped=state.dropped+#batch
+            for i=1,#batch do table.remove(state.pending,1) end
+            schedule_flush();return
+        end
+        commit={slot=slot,generation=generation,count=#batch,data=data,phase="segment_pending",
+            descriptor={slot=slot,generation=generation,producerInstanceId=instance,sessionId=session,shardId=shard,
+                firstSequence=payload.firstSequence,lastSequence=payload.lastSequence}}
+        state.commit=commit
     end
     state.writing=true
-    local epoch=state.epoch
-    local started=pcall(TheSim.SetPersistentString,TheSim,ROOT..string.format("activity-%02d.json",slot),data,false,function(written)
-        if not state.running or state.epoch~=epoch then return end
-        if not written then
-            state.writing=false;state.lastError="activity segment write failed";schedule_flush()
-            if completed then completed(false) end
-            return
-        end
-        local previous=state.slots[slot]
-        state.slots[slot]={slot=slot,generation=generation,producerInstanceId=instance,sessionId=session,shardId=shard,
-            firstSequence=payload.firstSequence,lastSequence=payload.lastSequence}
-        state.generation=generation
-        publish_manifest(function(published)
-            state.writing=false
-            if published then
-                for i=1,#batch do table.remove(state.pending,1) end
-                state.lastError=nil
-            else
-                state.slots[slot]=previous
-                state.generation=generation-1
-            end
-            schedule_flush()
-            if completed then completed(published) end
-        end)
-    end)
-    if not started then
-        state.writing=false;state.lastError="activity write unavailable";schedule_flush()
-        if completed then completed(false) end
+    local function finish(ok)
+        state.writing=false
+        schedule_flush()
+        if completed then completed(ok) end
     end
+    local function publish()
+        commit.phase="manifest_pending"
+        if not commit.manifestData then commit.manifestData=manifest_data(commit) end
+        if not commit.manifestData then finish(false);return end
+        publish_manifest(function(published)
+            if published then
+                state.slots[commit.slot]=commit.descriptor
+                state.generation=commit.generation
+                for i=1,commit.count do table.remove(state.pending,1) end
+                state.commit=nil;state.lastError=nil
+            end
+            finish(published)
+        end,commit)
+    end
+    if commit.phase=="manifest_pending" then publish();return end
+    write_persistent(ROOT..string.format("activity-%02d.json",commit.slot),commit.data,function(written)
+        if not written then state.lastError="activity segment write failed";finish(false);return end
+        publish()
+    end)
 end
 local function has_battles()
     for _,item in pairs(state.players) do if next(item.battles) or next(item.actions) then return true end end
@@ -311,19 +338,16 @@ local function apply(nextconfig)
     schedule_positions(interval~=config.positionIntervalSeconds);schedule_flush();schedule_heartbeat()
 end
 function M.Configure(input)
-    if not state.running or not state.ready or state.writing or state.draining then return false,"ACTIVITY_BUSY" end
+    if not state.running or not state.ready or state.writing or state.commit or state.draining then return false,"ACTIVITY_BUSY" end
     local nextconfig=valid_config(input)
     if not nextconfig then return false,"INVALID_ACTIVITY_CONFIG" end
     local ok,data=pcall(json.encode_compliant,nextconfig)
     if not ok then return false,"INVALID_ACTIVITY_CONFIG" end
     state.writing=true
-    local epoch=state.epoch
-    local started=pcall(TheSim.SetPersistentString,TheSim,ROOT.."activity-config.json",data,false,function(written)
-        if not state.running or state.epoch~=epoch then return end
+    write_persistent(ROOT.."activity-config.json",data,function(written)
         if written then apply(nextconfig) else state.lastError="activity config persistence failed" end
         publish_manifest(function() state.writing=false;schedule_flush() end)
     end)
-    if not started then state.writing=false;return false,"ACTIVITY_CONFIG_WRITE_FAILED" end
     return true,"ACTIVITY_CONFIG_ACCEPTED"
 end
 schedule_heartbeat=function()
@@ -335,7 +359,7 @@ schedule_heartbeat=function()
     state.heartbeatTask=clock.After(60,function()
         state.heartbeatTask=nil
         if not state.running then return end
-        if next(state.players) and not state.writing and not state.draining then
+        if next(state.players) and not state.writing and not state.commit and not state.draining then
             state.writing=true;publish_manifest(function() state.writing=false;schedule_flush() end)
         end
         schedule_heartbeat()
@@ -431,6 +455,7 @@ function M.Poll()
 end
 function M.Stop()
     if not state.running then return true end
+    if state.io or state.writing or state.commit then return false end
     state.dropped=state.dropped+#state.pending
     for _,item in pairs(state.players) do
         for _ in pairs(item.actions) do state.dropped=state.dropped+1 end
@@ -447,8 +472,10 @@ function M.Stop()
     return true
 end
 function M.Status()
-    return {running=state.running,ready=state.ready,busy=state.writing or state.loading or state.draining~=nil,pending=#state.pending+(has_battles() and 1 or 0),
-        dropped=state.dropped,generation=state.generation,lastError=state.lastError}
+    return {producerInstanceId=instance,running=state.running,ready=state.ready,busy=state.writing or state.loading or state.draining~=nil,pending=#state.pending+(has_battles() and 1 or 0),
+        dropped=state.dropped,generation=state.generation,lastError=state.lastError,
+        publicationPhase=state.commit and state.commit.phase or state.io and "publishing" or "committed",
+        writeUnconfirmed=state.io~=nil and os.time()-state.io.startedAt>=12}
 end
 M.version=VERSION
 return M
