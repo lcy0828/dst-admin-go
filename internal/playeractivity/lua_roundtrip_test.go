@@ -20,7 +20,9 @@ func TestLuaProducerToStrictReaderAndSQLite(t *testing.T) {
 	jsonValue = func(v lua.LValue) any {
 		switch x := v.(type) {
 		case *lua.LTable:
-			if x.Len() > 0 {
+			// Klei's json.encode_compliant encodes an empty Lua table as [].
+			first, _ := x.Next(lua.LNil)
+			if x.Len() > 0 || first == lua.LNil {
 				a := []any{}
 				for i := 1; i <= x.Len(); i++ {
 					a = append(a, jsonValue(x.RawGetInt(i)))

@@ -92,7 +92,7 @@ func runtimeSourceRooms(source RuntimeCatalogSource) []sourceRoomValue {
 	values := make([]sourceRoomValue, 0, len(source.Inventory.Rooms))
 	for _, reportedRoom := range source.Inventory.Rooms {
 		directory := strings.TrimSpace(reportedRoom.Directory)
-		if validateComponent(directory) != nil || len(directory) > 255 {
+		if validateComponent(directory) != nil || len(directory) > 255 || strings.HasPrefix(directory, ".") {
 			continue
 		}
 		roomID := EncodeID(directory)
@@ -110,7 +110,7 @@ func runtimeSourceRooms(source RuntimeCatalogSource) []sourceRoomValue {
 		worlds := make([]World, 0, len(reportedRoom.Shards))
 		for _, reportedWorld := range reportedRoom.Shards {
 			worldDirectory := strings.TrimSpace(reportedWorld.Directory)
-			if validateComponent(worldDirectory) != nil || len(worldDirectory) > 255 {
+			if validateComponent(worldDirectory) != nil || len(worldDirectory) > 255 || strings.HasPrefix(worldDirectory, ".") {
 				continue
 			}
 			role, worldType, master := runtimeWorldIdentity(reportedWorld, worldDirectory)

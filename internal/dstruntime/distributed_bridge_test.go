@@ -64,7 +64,7 @@ func TestDistributedHealthObservationAllowsOldProducerButCommandsRemainStrict(t 
 	if err != nil || observed.ProducerVersion != "2.4.11" || !observed.Ready {
 		t.Fatalf("old producer not observable: %+v %v", observed, err)
 	}
-	if _, err := bridge.Health(context.Background(), roomID, worldID); !errors.Is(err, ErrRuntimeUnavailable) {
+	if _, err := bridge.Health(context.Background(), roomID, worldID); !errors.Is(err, ErrRuntimeUnavailable) || !errors.Is(err, ErrRuntimeVersionMismatch) {
 		t.Fatalf("strict health accepted old producer: %v", err)
 	}
 	_, err = bridge.ExecuteCommand(context.Background(), roomID, worldID, CommandRequest{RequestID: "strict-old-runtime", Action: "player.kick", Arguments: map[string]interface{}{"userId": "KU_REMOTE"}})

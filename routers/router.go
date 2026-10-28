@@ -691,6 +691,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	runtimeUpdater := dstruntime.NewAutoUpdater(roomService, runtimeDriverRouter)
 	if backgroundEnabled && !deploymentProfile.MemberEnabled {
 		agentService.AddRuntimeNodeListener(runtimeUpdater.Wake)
+		jobService.AddCompletionListener(runtimeUpdater.OnJob)
 		roomService.AddManagedRoomLifecycle(func(string) { runtimeUpdater.Wake() }, nil)
 		roomService.AddWorldLifecycle(func(string, string) { runtimeUpdater.Wake() })
 		hooks.workers = append(hooks.workers, runtimeUpdater.Run)
@@ -1072,6 +1073,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 			return nil, probeErr
 		}
 		telemetryProbe.ConfigureRemoteFallback(playerapi.NewRuntimeConsoleProbe(runtimeDriverRouter))
+		telemetryProbe.ConfigureRuntimeMaintenance(runtimeUpdater)
 		telemetryProbe.ConfigureHistory(playerapi.NewRuntimeHistoryProbe(runtimeDriverRouter))
 		playerProbe = telemetryProbe
 	}

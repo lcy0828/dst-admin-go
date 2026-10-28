@@ -57,23 +57,49 @@ type Position struct {
 	Z    float64 `json:"z"`
 	Tile *int    `json:"tile,omitempty"`
 }
+
+// EventFields accepts Klei's representation of an empty Lua table. Nonempty
+// arrays are not field dictionaries and must still fail event validation.
+type EventFields map[string]any
+
+func (f *EventFields) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) > 0 && data[0] == '[' {
+		var items []json.RawMessage
+		if err := json.Unmarshal(data, &items); err != nil {
+			return err
+		}
+		if len(items) != 0 {
+			return errors.New("activity fields must be an object or an empty Lua table")
+		}
+		*f = EventFields{}
+		return nil
+	}
+	var value map[string]any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*f = value
+	return nil
+}
+
 type Event struct {
-	ID                 string         `json:"id"`
-	RoomID             string         `json:"roomId"`
-	WorldID            string         `json:"worldId"`
-	ProducerInstanceID string         `json:"producerInstanceId"`
-	SessionID          string         `json:"sessionId"`
-	Sequence           int64          `json:"sequence"`
-	OccurredAtUnix     int64          `json:"occurredAtUnix"`
-	OccurredAt         time.Time      `json:"occurredAt"`
-	ReceivedAt         time.Time      `json:"receivedAt"`
-	Kind               string         `json:"kind"`
-	UserID             string         `json:"userId"`
-	Name               string         `json:"name"`
-	Prefab             string         `json:"prefab"`
-	Position           *Position      `json:"position,omitempty"`
-	ContinuousRangeID  string         `json:"continuousRangeId,omitempty"`
-	Fields             map[string]any `json:"fields"`
+	ID                 string      `json:"id"`
+	RoomID             string      `json:"roomId"`
+	WorldID            string      `json:"worldId"`
+	ProducerInstanceID string      `json:"producerInstanceId"`
+	SessionID          string      `json:"sessionId"`
+	Sequence           int64       `json:"sequence"`
+	OccurredAtUnix     int64       `json:"occurredAtUnix"`
+	OccurredAt         time.Time   `json:"occurredAt"`
+	ReceivedAt         time.Time   `json:"receivedAt"`
+	Kind               string      `json:"kind"`
+	UserID             string      `json:"userId"`
+	Name               string      `json:"name"`
+	Prefab             string      `json:"prefab"`
+	Position           *Position   `json:"position,omitempty"`
+	ContinuousRangeID  string      `json:"continuousRangeId,omitempty"`
+	Fields             EventFields `json:"fields"`
 }
 type Slot struct {
 	Slot               int    `json:"slot"`

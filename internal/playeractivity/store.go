@@ -263,6 +263,35 @@ func (s *Store) ingestBatch(row cursorRecord, events []Event, recovery []recover
 		if err := tx.Table(s.recoveries).Save(&r).Error; err != nil {
 			return err
 		}
+		if r.State == "resolved" {
+			// Retain the boundary for conservative trajectory continuity, but
+			// identify successful recovery instead of presenting a permanent gap.
+			id := identity(r.RoomID, r.WorldID, r.StreamID, "collection.gap", "SEGMENT_PENDING", r.ID)
+			var marker eventRecord
+			err := tx.Table(s.events).Where("id = ?", id).First(&marker).Error
+			if gorm.IsRecordNotFoundError(err) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			var e Event
+			if err = json.Unmarshal([]byte(marker.Value), &e); err != nil {
+				return err
+			}
+			if e.Fields == nil {
+				e.Fields = EventFields{}
+			}
+			e.Fields["recovered"] = true
+			e.Fields["recoveredAt"] = r.LastSeenAt
+			value, err := json.Marshal(e)
+			if err != nil {
+				return err
+			}
+			if err = tx.Table(s.events).Where("id = ?", id).Updates(map[string]any{"value": string(value), "size_bytes": len(value) + 256}).Error; err != nil {
+				return err
+			}
+		}
 	}
 	if err := s.saveCursor(tx, row); err != nil {
 		return err

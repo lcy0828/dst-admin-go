@@ -306,6 +306,7 @@ func decodeWorldStateData(data []byte, expectedSession, expectedShard string, no
 	for _, metric := range []*float64{
 		value.SeasonProgress, value.DayProgress, value.PhaseProgress, value.Temperature, value.Wetness,
 		value.Moisture, value.MoistureCeil, value.PrecipitationRate, value.NightmareProgress,
+		value.SimulationSeconds, value.RealSeconds, value.TimeScale,
 	} {
 		if !validMetric(metric) {
 			return WorldStateSnapshot{}, fmt.Errorf("%w: invalid world metric", ErrSnapshotInvalid)

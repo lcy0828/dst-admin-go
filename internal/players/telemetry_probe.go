@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"dont/internal/dstruntime"
+	"dont/shared"
 )
 
 type DataSource string
@@ -40,6 +41,10 @@ type runtimeSnapshotRefresher interface {
 	RefreshSnapshots(context.Context, string, string) (dstruntime.SnapshotRefreshResult, error)
 }
 
+type runtimeMaintainer interface {
+	EnsureWorld(context.Context, string, string, bool) (shared.RuntimeLuaResult, error)
+}
+
 type placementLocality interface {
 	IsLocalPlacement(string, string) (bool, error)
 }
@@ -58,6 +63,7 @@ type telemetryRecovery struct {
 type TelemetryProbe struct {
 	native         Probe
 	runtime        RuntimeSnapshotReader
+	maintenance    runtimeMaintainer
 	fallback       Probe
 	remoteFallback Probe
 	history        HistoryProbe
@@ -91,6 +97,10 @@ func (p *TelemetryProbe) ConfigureHistory(probe HistoryProbe) {
 	p.history = probe
 }
 
+func (p *TelemetryProbe) ConfigureRuntimeMaintenance(maintenance runtimeMaintainer) {
+	p.maintenance = maintenance
+}
+
 func (p *TelemetryProbe) SnapshotDetailed(ctx context.Context, roomID, worldID string) (SnapshotResult, error) {
 	local, err := p.isLocal(roomID, worldID)
 	if err != nil {
@@ -115,6 +125,16 @@ func (p *TelemetryProbe) SnapshotDetailed(ctx context.Context, roomID, worldID s
 		// Even a successful console fallback leaves the managed runtime broken.
 		// Back off active probes, while continuing passive reads on every request.
 		defer func() { finish(runtimeErr == nil || ctx.Err() != nil) }()
+	}
+	if errors.Is(runtimeErr, dstruntime.ErrRuntimeVersionMismatch) && p.maintenance != nil {
+		// Maintain only an existing installation. Never send current-protocol
+		// commands to an old collector or silently enable a disabled collector.
+		_, maintenanceErr := p.maintenance.EnsureWorld(ctx, roomID, worldID, false)
+		if maintenanceErr == nil {
+			snapshot, runtimeErr = p.runtime.ReadPlayers(ctx, roomID, worldID)
+		} else {
+			runtimeErr = errors.Join(runtimeErr, fmt.Errorf("runtime update: %w", maintenanceErr))
+		}
 	}
 	if runtimeErr != nil && refreshableSnapshotError(runtimeErr) {
 		if refresher, ok := p.runtime.(runtimeSnapshotRefresher); ok {

@@ -118,12 +118,16 @@ func TestCurrentWorldStateUsesEffectiveShardIdentityFromRuntimeFiles(t *testing.
 		cluster    string
 		configured string
 		sampled    string
+		secondary  bool
 		wantErr    error
 	}{
 		{name: "unsharded master configured as one", cluster: "[SHARD]\nshard_enabled = false\n", configured: "1", sampled: "0"},
 		{name: "unsharded master configured as zero", cluster: "[SHARD]\nshard_enabled = false\n", configured: "0", sampled: "0"},
 		{name: "unsharded rejects foreign shard", cluster: "[SHARD]\nshard_enabled = false\n", configured: "1", sampled: "1", wantErr: ErrSnapshotStale},
-		{name: "sharded preserves custom master ID", cluster: "[SHARD]\nshard_enabled = true\n", configured: "7", sampled: "7"},
+		{name: "imported master uses engine ID", cluster: "[SHARD]\nshard_enabled = true\n", configured: "10001", sampled: "1"},
+		{name: "imported master rejects configured ID as engine ID", cluster: "[SHARD]\nshard_enabled = true\n", configured: "10001", sampled: "10001", wantErr: ErrSnapshotStale},
+		{name: "imported secondary preserves custom ID", cluster: "[SHARD]\nshard_enabled = true\n", configured: "3152324993", sampled: "3152324993", secondary: true},
+		{name: "imported secondary rejects master ID", cluster: "[SHARD]\nshard_enabled = true\n", configured: "3152324993", sampled: "1", secondary: true, wantErr: ErrSnapshotStale},
 		{name: "sharded rejects zero sample", cluster: "[SHARD]\nshard_enabled = true\n", configured: "1", sampled: "0", wantErr: ErrSnapshotStale},
 		{name: "legacy config retains explicit ID", configured: "1", sampled: "1"},
 	} {
@@ -137,6 +141,9 @@ func TestCurrentWorldStateUsesEffectiveShardIdentityFromRuntimeFiles(t *testing.
 				}
 			}
 			server := "[SHARD]\nis_master = true\nid = " + testCase.configured + "\n"
+			if testCase.secondary {
+				server = "[SHARD]\nis_master = false\nid = " + testCase.configured + "\n"
+			}
 			for path, data := range map[string]string{
 				filepath.Join(root, "Cluster", "cluster.ini"): testCase.cluster,
 				filepath.Join(world, "server.ini"):            server,

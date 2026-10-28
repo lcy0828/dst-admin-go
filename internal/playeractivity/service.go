@@ -243,7 +243,7 @@ func (s *Service) Status(room string) (Status, error) {
 		if state == "" {
 			state = "pending"
 		}
-		if row.SourceUpdatedAt != nil && s.store.now().Sub(*row.SourceUpdatedAt) > 2*time.Minute && (state == "recording" || state == "idle") {
+		if row.SourceUpdatedAt != nil && s.store.now().Sub(*row.SourceUpdatedAt) > 2*time.Minute && state == "recording" {
 			state = "inactive"
 		}
 		coverage, err := s.store.coverage(room, w.ID)

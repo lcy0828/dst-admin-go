@@ -3,12 +3,13 @@ package dstruntime
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
 const (
 	ProtocolVersion = 2
-	RuntimeVersion  = "2.4.19"
+	RuntimeVersion  = "2.4.20"
 )
 
 var (
@@ -20,6 +21,7 @@ var (
 	ErrSnapshotStale             = errors.New("DST Admin telemetry snapshot is stale")
 	ErrSnapshotInvalid           = errors.New("DST Admin telemetry snapshot is invalid")
 	ErrRuntimeUnavailable        = errors.New("DST Admin runtime is unavailable")
+	ErrRuntimeVersionMismatch    = fmt.Errorf("%w: runtime version mismatch", ErrRuntimeUnavailable)
 	ErrRuntimeProcessConflict    = errors.New("DST Admin runtime process ownership is unresolved")
 	ErrRuntimeCommandUnconfirmed = errors.New("DST Admin command outcome is unconfirmed")
 	ErrRuntimeResultAbsent       = errors.New("DST Admin runtime result is unavailable")
@@ -142,6 +144,10 @@ type SnapshotRefreshResult struct {
 }
 
 type WorldStateSnapshot struct {
+	SimulationSeconds     *float64  `json:"simulationSeconds,omitempty"`
+	RealSeconds           *float64  `json:"realSeconds,omitempty"`
+	TimeScale             *float64  `json:"timeScale,omitempty"`
+	SimulationPaused      *bool     `json:"simulationPaused,omitempty"`
 	SchemaVersion         int       `json:"schemaVersion"`
 	ProducerVersion       string    `json:"producerVersion"`
 	ProducerInstanceID    string    `json:"producerInstanceId"`

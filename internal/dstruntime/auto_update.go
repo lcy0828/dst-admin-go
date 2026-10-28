@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
+	"dont/internal/jobs"
 	"dont/internal/operationlease"
 	"dont/internal/rooms"
 	"dont/shared"
@@ -37,11 +39,19 @@ type UpdateReport struct {
 // AutoUpdater has no polling loop. Startup, node generation/capability changes,
 // and explicit room adoption wake a single bounded maintenance worker.
 type AutoUpdater struct {
-	catalog MaintenanceCatalog
-	runtime MaintenanceRuntime
-	wake    chan struct{}
-	mu      sync.RWMutex
-	reports map[string]*maintenanceUpdate
+	catalog      MaintenanceCatalog
+	runtime      MaintenanceRuntime
+	wake         chan struct{}
+	mu           sync.RWMutex
+	reports      map[string]*maintenanceUpdate
+	requested    map[string]maintenanceTarget
+	allRequested bool
+}
+
+type maintenanceTarget struct {
+	roomID, worldID string
+	attempts        int
+	next            time.Time
 }
 
 type maintenanceUpdate struct {
@@ -55,10 +65,74 @@ func NewAutoUpdater(catalog MaintenanceCatalog, runtime MaintenanceRuntime) *Aut
 }
 
 func (u *AutoUpdater) Wake() {
+	u.mu.Lock()
+	u.allRequested = true
+	u.mu.Unlock()
+	u.signal()
+}
+
+func (u *AutoUpdater) signal() {
 	select {
 	case u.wake <- struct{}{}:
 	default:
 	}
+}
+
+// WakeWorld queues only the affected world, without touching the fleet catalog
+// or doing work inside a lifecycle completion callback.
+func (u *AutoUpdater) WakeWorld(roomID, worldID string) {
+	if roomID == "" || worldID == "" {
+		return
+	}
+	u.mu.Lock()
+	if u.requested == nil {
+		u.requested = make(map[string]maintenanceTarget)
+	}
+	key := roomID + "\x00" + worldID
+	if len(u.requested) < 1024 {
+		u.requested[key] = maintenanceTarget{roomID: roomID, worldID: worldID, next: time.Now()}
+	}
+	u.mu.Unlock()
+	u.signal()
+}
+
+// A previous startup failure can prevent maintenance. Once a lifecycle job
+// finishes, retry only the worlds that were actually started successfully.
+func (u *AutoUpdater) OnJob(job jobs.Job) {
+	switch job.Kind {
+	case "room.start", "room.restart", "rooms.start", "rooms.restart":
+	default:
+		return
+	}
+	if job.Status != jobs.StatusSucceeded && job.Status != jobs.StatusFailed && job.Status != jobs.StatusCanceled {
+		return
+	}
+	if job.RoomID != "" {
+		for _, target := range job.Targets {
+			if target.Status == jobs.StatusSucceeded {
+				u.WakeWorld(job.RoomID, target.TargetID)
+			}
+		}
+		return
+	}
+	for _, target := range job.Targets {
+		if target.Status != jobs.StatusSucceeded {
+			continue
+		}
+		// PlanBatch persists one target per world as roomID:worldID. Decode
+		// that identity even when no optional runtime mode plan was recorded.
+		if roomID, worldID, ok := strings.Cut(target.TargetID, ":"); ok {
+			u.WakeWorld(roomID, worldID)
+		}
+	}
+}
+
+func (u *AutoUpdater) takeRequests() (bool, map[string]maintenanceTarget) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	all, requested := u.allRequested, u.requested
+	u.allRequested, u.requested = false, nil
+	return all, requested
 }
 func (u *AutoUpdater) Report(roomID, worldID string) (UpdateReport, bool) {
 	u.mu.RLock()
@@ -182,15 +256,10 @@ func (u *AutoUpdater) ensureWorld(ctx context.Context, roomID, worldID string, i
 }
 
 func (u *AutoUpdater) Run(ctx context.Context) {
-	type target struct {
-		roomID, worldID string
-		attempts        int
-		next            time.Time
-	}
-	pending := make(map[string]target)
+	pending := make(map[string]maintenanceTarget)
 	u.Wake()
 	for {
-		var selected target
+		var selected maintenanceTarget
 		var selectedKey string
 		for key, value := range pending {
 			if selectedKey == "" || value.next.Before(selected.next) {
@@ -213,6 +282,15 @@ func (u *AutoUpdater) Run(ctx context.Context) {
 			if timer != nil {
 				timer.Stop()
 			}
+			all, requested := u.takeRequests()
+			for key, value := range requested {
+				if _, exists := pending[key]; !exists {
+					pending[key] = value
+				}
+			}
+			if !all {
+				continue
+			}
 			items, err := u.catalog.List()
 			if err != nil {
 				log.Printf("[RuntimeUpdate] list rooms: %v", err)
@@ -230,7 +308,7 @@ func (u *AutoUpdater) Run(ctx context.Context) {
 				for _, world := range worlds {
 					key := room.ID + "\x00" + world.ID
 					if _, exists := pending[key]; !exists {
-						pending[key] = target{roomID: room.ID, worldID: world.ID, next: time.Now()}
+						pending[key] = maintenanceTarget{roomID: room.ID, worldID: world.ID, next: time.Now()}
 					}
 				}
 			}

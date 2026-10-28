@@ -20,6 +20,38 @@ func runtimeCatalogSource(targetID string, online, stale bool, roomDirectory str
 	}
 }
 
+func TestRuntimeCatalogDoesNotAdoptImportStagingFromOlderAgents(t *testing.T) {
+	service, _ := newTestService(t)
+	service.ConfigureLocalDiscovery(false)
+	var managed []string
+	service.AddManagedRoomLifecycle(func(id string) { managed = append(managed, id) }, nil)
+	source := runtimeCatalogSource("agent:old", true, false, "MyDediServer",
+		shared.ShardInventoryReport{Directory: "Master", Role: "master", ID: 10001},
+		shared.ShardInventoryReport{Directory: ".dst-admin-staging-123", Role: "master", ID: 10001},
+	)
+	for _, directory := range []string{".dst-admin-import-123", ".dst-admin-rollback-123", ".dst-admin-create-123", ".trash"} {
+		report := source.Inventory.Rooms[0]
+		report.Directory = directory
+		source.Inventory.Rooms = append(source.Inventory.Rooms, report)
+	}
+	for iteration := 0; iteration < 2; iteration++ {
+		if err := service.SyncRuntimeCatalog([]RuntimeCatalogSource{source}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := service.List()
+	if err != nil || len(items) != 1 || items[0].DirectoryName != "MyDediServer" {
+		t.Fatalf("staging directories became rooms: %+v err=%v", items, err)
+	}
+	worlds, err := service.Worlds(items[0].ID)
+	if err != nil || len(worlds) != 1 || worlds[0].DirectoryName != "Master" {
+		t.Fatalf("staging directories became worlds: %+v err=%v", worlds, err)
+	}
+	if !reflect.DeepEqual(managed, []string{EncodeID("MyDediServer")}) {
+		t.Fatalf("staging directories triggered managed lifecycle/automation: %v", managed)
+	}
+}
+
 func TestRuntimeCatalogAutomaticallyRegistersRemoteOnlyRoom(t *testing.T) {
 	service, _ := newTestService(t)
 	service.ConfigureLocalDiscovery(false)

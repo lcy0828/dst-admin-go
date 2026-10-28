@@ -453,7 +453,7 @@ func (s *Service) collect(parent context.Context, room, world string, c Settings
 			row.Error = "NODE_ACTIVITY_ERROR"
 		}
 	}
-	if now.Sub(sourceAt) > 2*time.Minute && (row.State == "idle" || row.State == "recording") {
+	if now.Sub(sourceAt) > 2*time.Minute && row.State == "recording" {
 		row.State = "inactive"
 	}
 	delay := time.Duration(c.SyncIntervalSeconds) * time.Second

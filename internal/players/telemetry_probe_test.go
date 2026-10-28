@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"dont/internal/dstruntime"
+	"dont/shared"
 )
 
 func TestStampNativeObservationsMarksMissingIdentityFieldsUnavailable(t *testing.T) {
@@ -94,6 +95,63 @@ type refreshableTelemetryTestReader struct {
 	refresh      dstruntime.SnapshotRefreshResult
 	refreshErr   error
 	refreshCalls int
+}
+
+type telemetryMaintenanceFunc func(context.Context, string, string, bool) (shared.RuntimeLuaResult, error)
+
+func (f telemetryMaintenanceFunc) EnsureWorld(ctx context.Context, roomID, worldID string, install bool) (shared.RuntimeLuaResult, error) {
+	return f(ctx, roomID, worldID, install)
+}
+
+func TestPlayerRefreshRepairsOldRuntimeAndReadsConfirmedSnapshot(t *testing.T) {
+	reader := &telemetryTestReader{err: dstruntime.ErrRuntimeVersionMismatch}
+	fallback := &telemetryTestProbe{}
+	probe, err := NewTelemetryProbe(&telemetryTestProbe{}, reader, fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maintenanceCalls := 0
+	probe.ConfigureRuntimeMaintenance(telemetryMaintenanceFunc(func(_ context.Context, room, world string, install bool) (shared.RuntimeLuaResult, error) {
+		maintenanceCalls++
+		if room != "room" || world != "caves" || install {
+			t.Fatalf("maintenance escaped selected existing installation: %s/%s install=%v", room, world, install)
+		}
+		reader.err = nil
+		reader.snapshot = dstruntime.Snapshot{CapturedAt: time.Now(), ProducerVersion: dstruntime.RuntimeVersion, Players: []dstruntime.SnapshotPlayer{{ID: "KU_CURRENT", Name: "Current"}}}
+		return shared.RuntimeLuaResult{Active: true, Version: dstruntime.RuntimeVersion}, nil
+	}))
+	result, err := probe.SnapshotDetailed(context.Background(), "room", "caves")
+	if err != nil || result.Source != SourceRuntime || len(result.Observations) != 1 || maintenanceCalls != 1 || reader.calls != 2 || fallback.calls != 0 {
+		t.Fatalf("repair=%+v err=%v maintenance=%d reads=%d fallback=%d", result, err, maintenanceCalls, reader.calls, fallback.calls)
+	}
+	if _, err := probe.SnapshotDetailed(context.Background(), "room", "caves"); err != nil || maintenanceCalls != 1 {
+		t.Fatalf("healthy read repeated maintenance: %v calls=%d", err, maintenanceCalls)
+	}
+}
+
+func TestPlayerRuntimeRepairFailureKeepsCooldownAndRechecksRealHealth(t *testing.T) {
+	for _, maintenanceError := range []error{nil, dstruntime.ErrRuntimeRefreshDeferred} {
+		reader := &telemetryTestReader{err: dstruntime.ErrRuntimeVersionMismatch}
+		probe, _ := NewTelemetryProbe(&telemetryTestProbe{}, reader, &telemetryTestProbe{err: errors.New("console unavailable")})
+		calls := 0
+		probe.ConfigureRuntimeMaintenance(telemetryMaintenanceFunc(func(context.Context, string, string, bool) (shared.RuntimeLuaResult, error) {
+			calls++
+			// A successful return alone is not evidence that the live collector
+			// switched versions. The next strict read remains authoritative.
+			return shared.RuntimeLuaResult{}, maintenanceError
+		}))
+		if _, err := probe.SnapshotDetailed(context.Background(), "room", "caves"); !errors.Is(err, dstruntime.ErrRuntimeVersionMismatch) {
+			t.Fatalf("unconfirmed repair reported success: %v", err)
+		}
+		if _, err := probe.SnapshotDetailed(context.Background(), "room", "caves"); !errors.Is(err, ErrTelemetryRecoveryDeferred) || calls != 1 {
+			t.Fatalf("unbounded repeated repair: err=%v calls=%d", err, calls)
+		}
+		reader.err = nil
+		reader.snapshot = dstruntime.Snapshot{CapturedAt: time.Now()}
+		if result, err := probe.SnapshotDetailed(context.Background(), "room", "caves"); err != nil || result.Source != SourceRuntime {
+			t.Fatalf("cooldown hid completed repair: %+v %v", result, err)
+		}
+	}
 }
 
 func (r *refreshableTelemetryTestReader) RefreshSnapshots(context.Context, string, string) (dstruntime.SnapshotRefreshResult, error) {

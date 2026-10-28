@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 2
-local PRODUCER_VERSION = "2.4.19"
+local PRODUCER_VERSION = "2.4.20"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 
 local state = {
@@ -131,6 +131,12 @@ local function capture_world_state()
         nightmarePhase = nightmare_phase,
         nightmareProgress = nightmare_progress,
         hostPerformance = host_performance(),
+        -- Native monotonic wall clock and simulation ticks; no entity scan or
+        -- separate timer. Consumers discard pause, reload and clock boundaries.
+        simulationSeconds = type(GetTime) == "function" and read_number(GetTime) or nil,
+        realSeconds = type(GetTimeRealSeconds) == "function" and read_number(GetTimeRealSeconds) or nil,
+        timeScale = call_number(TheSim, "GetTimeScale"),
+        simulationPaused = clock.Paused(),
     }
 end
 

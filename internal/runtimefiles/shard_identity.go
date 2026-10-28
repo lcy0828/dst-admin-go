@@ -10,11 +10,13 @@ import (
 )
 
 // ReadConfiguredShardID reads the identity DST uses for telemetry. Disabling
-// sharding makes the runtime ID zero regardless of server.ini's configured ID.
+// sharding makes the runtime ID zero; with sharding enabled the master uses one,
+// regardless of server.ini's configured ID. Secondary shards use their own ID.
 // A missing shard_enabled setting retains the explicit server.ini identity for
 // compatibility with existing configurations. Callers must resolve worldPath
 // within their trusted save root before calling this function.
 func ReadConfiguredShardID(worldPath string) (string, error) {
+	shardingEnabled := false
 	data, _, exists, err := readTrustedRegular(filepath.Join(filepath.Dir(worldPath), "cluster.ini"), 256*1024)
 	if err != nil {
 		return "", fmt.Errorf("read cluster.ini shard identity: %w", err)
@@ -33,6 +35,7 @@ func ReadConfiguredShardID(worldPath string) (string, error) {
 			if !enabled {
 				return "0", nil
 			}
+			shardingEnabled = true
 		}
 	}
 	data, _, exists, err = readTrustedRegular(filepath.Join(worldPath, "server.ini"), 1024*1024)
@@ -45,6 +48,18 @@ func ReadConfiguredShardID(worldPath string) (string, error) {
 	server, err := ini.Load(data)
 	if err != nil {
 		return "", fmt.Errorf("parse server.ini shard identity: %w", err)
+	}
+	if shardingEnabled {
+		isMaster := server.Section("SHARD").Key("is_master")
+		if isMaster.String() != "" {
+			master, err := isMaster.Bool()
+			if err != nil {
+				return "", fmt.Errorf("parse server.ini is_master: %w", err)
+			}
+			if master {
+				return "1", nil
+			}
+		}
 	}
 	return strings.TrimSpace(server.Section("SHARD").Key("id").String()), nil
 }

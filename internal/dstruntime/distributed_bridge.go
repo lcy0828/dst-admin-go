@@ -225,7 +225,7 @@ func (b *DistributedBridge) readHealth(ctx context.Context, roomID, worldID stri
 		return Health{}, err
 	}
 	if requireCurrentVersion && health.ProducerVersion != RuntimeVersion {
-		return Health{}, fmt.Errorf("%w: runtime version %q does not match %q", ErrRuntimeUnavailable, health.ProducerVersion, RuntimeVersion)
+		return Health{}, fmt.Errorf("%w: loaded %q, expected %q", ErrRuntimeVersionMismatch, health.ProducerVersion, RuntimeVersion)
 	}
 	return health, nil
 }
