@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "1a20969999916e6a9a0084dd36143b7ae6bdf2081d898c345f43462c74676a4b",
+  "operationsSHA256": "aae6a5f716d5d8ad93d6e1731218debda28dfb264c663936f12f5b1719bcc3db",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -3714,6 +3714,22 @@
       "risk": "normal",
       "runtime": "shard-ready",
       "title": "Resurrect an online ghost player"
+    },
+    {
+      "operationId": "resyncRoomPlayerActivity",
+      "method": "POST",
+      "path": "/rooms/{roomId}/player-activity/resync",
+      "transport": "json",
+      "tags": [
+        "activity",
+        "player",
+        "room",
+        "tracking"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Wake the existing activity synchronizer without resetting history or restarting worlds"
     },
     {
       "operationId": "retryFailedModPublication",

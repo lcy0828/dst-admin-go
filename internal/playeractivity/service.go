@@ -2,14 +2,9 @@ package playeractivity
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
 	"math"
-	"os"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +36,7 @@ type Service struct {
 	mu          sync.Mutex
 	due         map[string]time.Time
 	active      map[string]bool
+	retryNow    map[string]bool
 	wake        chan struct{}
 	pruneAt     map[string]time.Time
 	pruneEvents map[string]int
@@ -50,7 +46,7 @@ type Service struct {
 }
 
 func New(store *Store, catalog Catalog, source Source, commander Commander) *Service {
-	return &Service{store: store, rooms: catalog, source: source, commander: commander, due: map[string]time.Time{}, active: map[string]bool{}, wake: make(chan struct{}, 1), pruneAt: map[string]time.Time{}, pruneEvents: map[string]int{}}
+	return &Service{store: store, rooms: catalog, source: source, commander: commander, due: map[string]time.Time{}, active: map[string]bool{}, retryNow: map[string]bool{}, wake: make(chan struct{}, 1), pruneAt: map[string]time.Time{}, pruneEvents: map[string]int{}}
 }
 func (s *Service) room(room string) error {
 	r, err := s.rooms.Room(room)
@@ -96,6 +92,10 @@ func (s *Service) Run(ctx context.Context) {
 	}
 }
 func (s *Service) collectDue(ctx context.Context) {
+	// Fast nodes can drain up to eight due targets; slow batches share one
+	// deadline so queued targets cannot hold the scheduler for N times 12s.
+	ctx, cancelRound := context.WithTimeout(ctx, 12*time.Second)
+	defer cancelRound()
 
 	type work struct {
 		room, world string
@@ -162,188 +162,6 @@ var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
 var kinds = map[string]bool{"position": true, "player.joined": true, "player.left": true, "player.death": true, "player.respawned": true, "action.pickup": true, "action.drop": true, "action.harvest": true, "action.eat": true, "action.build_item": true, "action.build_structure": true, "action.work": true, "combat.attack": true, "combat.received": true, "combat.kill": true}
 
 func decode(data []byte, value any) error { return runtimefiles.DecodeJSONArtifact(data, value) }
-func (s *Service) collect(ctx context.Context, room, world string, c Settings) time.Duration {
-	key := room + "/" + world
-	s.mu.Lock()
-	if s.active[key] {
-		s.mu.Unlock()
-		return time.Second * 5
-	}
-	s.active[key] = true
-	s.mu.Unlock()
-	defer func() { s.mu.Lock(); delete(s.active, key); s.mu.Unlock() }()
-	row, err := s.store.cursor(room, world)
-	if err != nil {
-		return time.Minute
-	}
-	persisted := row
-	fail := func(state, code string) time.Duration {
-		failure := persisted
-		failure.State = state
-		failure.Error = code
-		_ = s.store.saveCursor(s.store.db, failure)
-		return time.Minute
-	}
-	scope, err := s.source.ActivityScope(ctx, room, world)
-	if err != nil {
-		return fail("unavailable", "NODE_UNAVAILABLE")
-	}
-	bundle, err := s.source.ReadActivityArtifacts(ctx, room, world, nil)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fail("unavailable", "ACTIVITY_RUNTIME_UNAVAILABLE")
-		}
-		return fail("unavailable", "ACTIVITY_READ_FAILED")
-	}
-	if err = runtimefiles.ValidateArtifactBundle(shared.ArtifactPlayerActivity, bundle); err != nil {
-		return fail("unavailable", "ACTIVITY_INVALID_BUNDLE")
-	}
-	var manifest Manifest
-	found := false
-	for _, a := range bundle.Artifacts {
-		if a.Name == "activity-manifest.json" {
-			found = true
-			err = decode(a.Data, &manifest)
-			break
-		}
-	}
-	if !found || err != nil || !validManifest(manifest) {
-		return fail("unavailable", "ACTIVITY_INVALID_MANIFEST")
-	}
-	boundaryChanged := row.Scope != scope || row.Generation > manifest.Generation
-	if boundaryChanged {
-		row.Generation = 0
-		row.Scope = scope
-		row.Dropped = 0
-	}
-	now := s.store.now().UTC()
-	events := []Event{}
-	systemEvent := func(kind, code string, fields map[string]any) {
-		if fields == nil {
-			fields = map[string]any{}
-		}
-		fields["code"] = code
-		event := Event{ID: identity(room, world, scope, manifest.ProducerInstanceID, kind, code, strconv.FormatInt(manifest.Generation, 10), strconv.FormatInt(manifest.Dropped, 10)), RoomID: room, WorldID: world, Kind: kind, ProducerInstanceID: manifest.ProducerInstanceID, SessionID: manifest.SessionID, OccurredAt: now, OccurredAtUnix: now.Unix(), ReceivedAt: now, Fields: fields}
-		events = append(events, event)
-	}
-	if row.Producer != manifest.ProducerInstanceID || boundaryChanged {
-		systemEvent("collection.instance", "RUNTIME_INSTANCE_CHANGED", nil)
-		row.Producer = manifest.ProducerInstanceID
-		row.Dropped = 0
-	}
-	if manifest.Dropped > row.Dropped {
-		systemEvent("collection.gap", "NODE_EVENTS_DROPPED", map[string]any{"dropped": manifest.Dropped - row.Dropped})
-		row.GapCount++
-		row.Dropped = manifest.Dropped
-	}
-	slots := []Slot{}
-	for _, slot := range manifest.Slots {
-		if slot.Generation > row.Generation {
-			slots = append(slots, slot)
-		}
-	}
-	sort.Slice(slots, func(i, j int) bool { return slots[i].Generation < slots[j].Generation })
-	if len(slots) > 0 && slots[0].Generation > row.Generation+1 {
-		systemEvent("collection.gap", "SPOOL_WINDOW_EXCEEDED", map[string]any{"missingSegments": slots[0].Generation - row.Generation - 1})
-		row.GapCount++
-		row.Generation = slots[0].Generation - 1
-	}
-	if len(slots) > 8 {
-		slots = slots[:8]
-	}
-	if len(slots) > 0 {
-		names := []string{}
-		for _, slot := range slots {
-			names = append(names, fmt.Sprintf("activity-%02d.json", slot.Slot))
-		}
-		segments, err := s.source.ReadActivityArtifacts(ctx, room, world, names)
-		if err != nil {
-			return fail("unavailable", "ACTIVITY_SEGMENT_READ_FAILED")
-		}
-		if runtimefiles.ValidateArtifactBundle(shared.ArtifactPlayerActivity, segments) != nil {
-			return fail("unavailable", "ACTIVITY_INVALID_SEGMENT_BUNDLE")
-		}
-		byName := map[string][]byte{}
-		for _, a := range segments.Artifacts {
-			byName[a.Name] = a.Data
-		}
-		for _, slot := range slots {
-			var segment Segment
-			data := byName[fmt.Sprintf("activity-%02d.json", slot.Slot)]
-			// DST may prepend its PersistentStorage header to the bounded JSON payload.
-			if len(data) > 65536+256 || decode(data, &segment) != nil || !validSegment(segment, slot, now) {
-				return fail("unavailable", "ACTIVITY_SEGMENT_CHANGED")
-			}
-			if slot.Generation > row.Generation+1 {
-				systemEvent("collection.gap", "SEGMENT_SEQUENCE_GAP", map[string]any{"missingSegments": slot.Generation - row.Generation - 1})
-				row.GapCount++
-			}
-			for _, event := range segment.Events {
-				event.RoomID = room
-				event.WorldID = world
-				event.ProducerInstanceID = segment.ProducerInstanceID
-				event.SessionID = segment.SessionID
-				event.ID = identity(room, world, scope, segment.ProducerInstanceID, strconv.FormatInt(event.Sequence, 10))
-				event.OccurredAt = time.Unix(event.OccurredAtUnix, 0).UTC()
-				event.ReceivedAt = now
-				events = append(events, event)
-				if row.LastEventAt == nil || event.OccurredAt.After(*row.LastEventAt) {
-					at := event.OccurredAt
-					row.LastEventAt = &at
-				}
-			}
-			row.Generation = slot.Generation
-		}
-	}
-	after, err := s.source.ActivityScope(ctx, room, world)
-	if err != nil || after != scope {
-		return time.Second * 5
-	}
-	sourceAt := time.Unix(manifest.UpdatedAtUnix, 0).UTC()
-	row.SourceUpdatedAt = &sourceAt
-	row.AppliedRevision = manifest.Config.Revision
-	row.LastCollectedAt = &now
-	row.Error = ""
-	row.State = "recording"
-	if !manifest.Config.Enabled {
-		row.State = "disabled"
-	} else if manifest.PlayerCount == 0 {
-		row.State = "idle"
-	}
-	if manifest.LastError != "" {
-		row.State = "degraded"
-		row.Error = "NODE_ACTIVITY_ERROR"
-	}
-	if now.Sub(sourceAt) > 2*time.Minute && (row.State == "recording" || row.State == "idle") {
-		row.State = "inactive"
-	}
-	if err = s.store.ingest(row, events); err != nil {
-		return time.Minute
-	}
-	s.maybePrune(room, c, len(events))
-	if manifest.Config.Revision != c.Revision && s.commander != nil {
-		raw, _ := json.Marshal(c)
-		arguments := map[string]any{}
-		_ = json.Unmarshal(raw, &arguments)
-		id := "activity-" + identity(room, world, scope, manifest.ProducerInstanceID, c.Revision, strconv.FormatInt(now.Unix()/30, 10))[:48]
-		receipt, err := s.commander.ExecuteCommand(ctx, room, world, dstruntime.CommandRequest{RequestID: id, Action: "activity.configure", Arguments: arguments})
-		if err != nil || !receipt.OK {
-			if receipt.Code != "ACTIVITY_BUSY" {
-				row.Error = "ACTIVITY_CONFIG_APPLY_FAILED"
-				row.State = "degraded"
-				_ = s.store.saveCursor(s.store.db, row)
-			}
-			return time.Second * 30
-		}
-	}
-	if !c.Enabled && row.AppliedRevision == c.Revision {
-		return time.Minute
-	}
-	if manifest.PlayerCount == 0 && manifest.Config.Revision == c.Revision {
-		return time.Second * 30
-	}
-	return time.Duration(c.SyncIntervalSeconds) * time.Second
-}
 func validManifest(m Manifest) bool {
 	expected := m.Generation
 	if expected > 64 {
@@ -428,7 +246,23 @@ func (s *Service) Status(room string) (Status, error) {
 		if row.SourceUpdatedAt != nil && s.store.now().Sub(*row.SourceUpdatedAt) > 2*time.Minute && (state == "recording" || state == "idle") {
 			state = "inactive"
 		}
-		result.Worlds = append(result.Worlds, WorldStatus{WorldID: w.ID, WorldName: w.Name, State: state, DesiredRevision: c.Revision, AppliedRevision: row.AppliedRevision, SourceUpdatedAt: row.SourceUpdatedAt, Pending: row.AppliedRevision != c.Revision, LastCollectedAt: row.LastCollectedAt, LastEventAt: row.LastEventAt, Dropped: row.Dropped, GapCount: row.GapCount, Error: row.Error})
+		coverage, err := s.store.coverage(room, w.ID)
+		if err != nil {
+			return result, err
+		}
+		diagnostics, err := s.store.diagnostics(room, w.ID)
+		if err != nil {
+			return result, err
+		}
+		syncState := row.SyncState
+		if syncState == "" {
+			syncState = "pending"
+		}
+		backlog := row.SourceGeneration - row.Generation
+		if backlog < 0 {
+			backlog = 0
+		}
+		result.Worlds = append(result.Worlds, WorldStatus{WorldID: w.ID, WorldName: w.Name, State: state, DesiredRevision: c.Revision, AppliedRevision: row.AppliedRevision, SourceUpdatedAt: row.SourceUpdatedAt, Pending: row.AppliedRevision != c.Revision, LastCollectedAt: row.LastCollectedAt, LastEventAt: row.LastEventAt, Dropped: row.Dropped, GapCount: row.GapCount, Error: row.Error, SyncState: syncState, Backlog: backlog, ScannedGeneration: row.Generation, SourceGeneration: row.SourceGeneration, ProducerInstanceID: row.Producer, SessionID: row.SourceSession, NodePending: row.NodePending, PublicationPhase: row.PublicationPhase, WriteUnconfirmed: row.WriteUnconfirmed, LastAttemptAt: row.LastAttemptAt, NextRetryAt: row.NextRetryAt, ConfigError: row.ConfigError, Coverage: coverage, Diagnostics: diagnostics})
 	}
 	var counts struct {
 		Count int64
@@ -455,6 +289,7 @@ func (s *Service) maybePrune(room string, c Settings, added int) {
 	s.mu.Unlock()
 	if due {
 		_ = s.store.prune(room, c)
+		_ = s.store.pruneRecovery(room, c)
 	}
 }
 

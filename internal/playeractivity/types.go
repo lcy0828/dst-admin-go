@@ -72,6 +72,7 @@ type Event struct {
 	Name               string         `json:"name"`
 	Prefab             string         `json:"prefab"`
 	Position           *Position      `json:"position,omitempty"`
+	ContinuousRangeID  string         `json:"continuousRangeId,omitempty"`
 	Fields             map[string]any `json:"fields"`
 }
 type Slot struct {
@@ -97,6 +98,8 @@ type Manifest struct {
 	PlayerCount        int      `json:"playerCount"`
 	UpdatedAtUnix      int64    `json:"updatedAtUnix"`
 	LastError          string   `json:"lastError"`
+	PublicationPhase   string   `json:"publicationPhase,omitempty"`
+	WriteUnconfirmed   bool     `json:"writeUnconfirmed,omitempty"`
 }
 type Segment struct {
 	SchemaVersion      int     `json:"schemaVersion"`
@@ -110,33 +113,49 @@ type Segment struct {
 	Events             []Event `json:"events"`
 }
 type Query struct {
-	UserID  string    `json:"userId,omitempty"`
-	WorldID string    `json:"worldId,omitempty"`
-	Kind    string    `json:"kind,omitempty"`
-	From    time.Time `json:"from,omitempty"`
-	To      time.Time `json:"to,omitempty"`
-	Before  string    `json:"before,omitempty"`
-	Limit   int       `json:"limit,omitempty"`
+	UserID     string    `json:"userId,omitempty"`
+	WorldID    string    `json:"worldId,omitempty"`
+	Kind       string    `json:"kind,omitempty"`
+	From       time.Time `json:"from,omitempty"`
+	To         time.Time `json:"to,omitempty"`
+	Before     string    `json:"before,omitempty"`
+	Limit      int       `json:"limit,omitempty"`
+	Projection string    `json:"projection,omitempty"`
 }
 type Page struct {
-	Items      []Event `json:"items"`
-	NextCursor string  `json:"nextCursor"`
-	HasMore    bool    `json:"hasMore"`
-	Limit      int     `json:"limit"`
+	Items      []Event    `json:"items"`
+	NextCursor string     `json:"nextCursor"`
+	HasMore    bool       `json:"hasMore"`
+	Limit      int        `json:"limit"`
+	Coverage   []Coverage `json:"coverage"`
 }
 type WorldStatus struct {
-	WorldID         string     `json:"worldId"`
-	WorldName       string     `json:"worldName"`
-	State           string     `json:"state"`
-	DesiredRevision string     `json:"desiredRevision"`
-	AppliedRevision string     `json:"appliedRevision"`
-	SourceUpdatedAt *time.Time `json:"sourceUpdatedAt,omitempty"`
-	Pending         bool       `json:"pending"`
-	LastCollectedAt *time.Time `json:"lastCollectedAt,omitempty"`
-	LastEventAt     *time.Time `json:"lastEventAt,omitempty"`
-	Dropped         int64      `json:"dropped"`
-	GapCount        int64      `json:"gapCount"`
-	Error           string     `json:"error,omitempty"`
+	WorldID            string       `json:"worldId"`
+	WorldName          string       `json:"worldName"`
+	State              string       `json:"state"`
+	DesiredRevision    string       `json:"desiredRevision"`
+	AppliedRevision    string       `json:"appliedRevision"`
+	SourceUpdatedAt    *time.Time   `json:"sourceUpdatedAt,omitempty"`
+	Pending            bool         `json:"pending"`
+	LastCollectedAt    *time.Time   `json:"lastCollectedAt,omitempty"`
+	LastEventAt        *time.Time   `json:"lastEventAt,omitempty"`
+	Dropped            int64        `json:"dropped"`
+	GapCount           int64        `json:"gapCount"`
+	Error              string       `json:"error,omitempty"`
+	SyncState          string       `json:"syncState"`
+	Backlog            int64        `json:"backlog"`
+	ScannedGeneration  int64        `json:"scannedGeneration"`
+	SourceGeneration   int64        `json:"sourceGeneration"`
+	ProducerInstanceID string       `json:"producerInstanceId"`
+	SessionID          string       `json:"sessionId"`
+	NodePending        int          `json:"nodePending"`
+	PublicationPhase   string       `json:"publicationPhase,omitempty"`
+	WriteUnconfirmed   bool         `json:"writeUnconfirmed"`
+	LastAttemptAt      *time.Time   `json:"lastAttemptAt,omitempty"`
+	NextRetryAt        *time.Time   `json:"nextRetryAt,omitempty"`
+	ConfigError        string       `json:"configError,omitempty"`
+	Coverage           Coverage     `json:"coverage"`
+	Diagnostics        []Diagnostic `json:"diagnostics"`
 }
 type Status struct {
 	Settings     Settings      `json:"settings"`
@@ -163,6 +182,7 @@ type CombatResult struct {
 	Items         []CombatSummary `json:"items"`
 	Truncated     bool            `json:"truncated"`
 	ScannedEvents int             `json:"scannedEvents"`
+	Coverage      []Coverage      `json:"coverage"`
 }
 
 // DST encodes an empty Lua table as {}. Only accept that exact empty object as an empty array.
@@ -180,4 +200,45 @@ func (s *Slots) UnmarshalJSON(data []byte) error {
 	}
 	*s = Slots(v)
 	return nil
+}
+
+// Coverage describes retained history; it never infers missing action times or counts.
+type Coverage struct {
+	WorldID           string `json:"worldId"`
+	PendingSegments   int64  `json:"pendingSegments"`
+	IsolatedSegments  int64  `json:"isolatedSegments"`
+	UnavailableRanges int64  `json:"unavailableRanges"`
+	RecoveredSegments int64  `json:"recoveredSegments"`
+	Complete          bool   `json:"complete"`
+	LegacyUnknown     bool   `json:"legacyUnknown"`
+}
+type Diagnostic struct {
+	Code        string    `json:"code"`
+	Field       string    `json:"field,omitempty"`
+	Generation  int64     `json:"generation"`
+	Fingerprint string    `json:"fingerprint,omitempty"`
+	FirstSeenAt time.Time `json:"firstSeenAt"`
+	State       string    `json:"state"`
+}
+type TrajectoryPoint struct {
+	ID                 string    `json:"id"`
+	UserID             string    `json:"userId"`
+	WorldID            string    `json:"worldId"`
+	ProducerInstanceID string    `json:"producerInstanceId"`
+	SessionID          string    `json:"sessionId"`
+	OccurredAt         time.Time `json:"occurredAt"`
+	Position           *Position `json:"position"`
+	Source             string    `json:"source"`
+	ContinuousRangeID  string    `json:"continuousRangeId,omitempty"`
+}
+type TrajectoryPage struct {
+	Items      []TrajectoryPoint `json:"items"`
+	NextCursor string            `json:"nextCursor"`
+	HasMore    bool              `json:"hasMore"`
+	Limit      int               `json:"limit"`
+	Coverage   []Coverage        `json:"coverage"`
+}
+type SyncRequest struct {
+	Accepted bool   `json:"accepted"`
+	Status   string `json:"status"`
 }

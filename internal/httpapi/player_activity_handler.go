@@ -23,6 +23,7 @@ func (h *PlayerActivityHandler) Register(v2 *gin.RouterGroup) {
 	v2.GET(base+"/events", h.events)
 	v2.GET(base+"/trajectory", h.trajectory)
 	v2.GET(base+"/combat", h.combat)
+	v2.POST(base+"/resync", h.resync)
 }
 func activityResult(c *gin.Context, value any, err error) {
 	c.Header("Cache-Control", "no-store")
@@ -57,7 +58,7 @@ func (h *PlayerActivityHandler) status(c *gin.Context) {
 	activityResult(c, v, e)
 }
 func activityQuery(c *gin.Context) (playeractivity.Query, error) {
-	q := playeractivity.Query{UserID: c.Query("userId"), WorldID: c.Query("worldId"), Kind: c.Query("kind"), Before: c.Query("before")}
+	q := playeractivity.Query{UserID: c.Query("userId"), WorldID: c.Query("worldId"), Kind: c.Query("kind"), Before: c.Query("before"), Projection: c.Query("projection")}
 	var err error
 	if v := c.Query("limit"); v != "" {
 		q.Limit, err = strconv.Atoi(v)
@@ -93,6 +94,11 @@ func (h *PlayerActivityHandler) trajectory(c *gin.Context) {
 		activityResult(c, nil, e)
 		return
 	}
+	if q.Projection == "compact" {
+		v, e := h.service.CompactTrajectory(c.Param("roomId"), q)
+		activityResult(c, v, e)
+		return
+	}
 	v, e := h.service.Trajectory(c.Param("roomId"), q)
 	activityResult(c, v, e)
 }
@@ -104,4 +110,14 @@ func (h *PlayerActivityHandler) combat(c *gin.Context) {
 	}
 	v, e := h.service.Combat(c.Param("roomId"), q)
 	activityResult(c, v, e)
+}
+
+func (h *PlayerActivityHandler) resync(c *gin.Context) {
+	v, e := h.service.Resynchronize(c.Param("roomId"))
+	if e != nil {
+		activityResult(c, nil, e)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	Success(c, http.StatusAccepted, v)
 }

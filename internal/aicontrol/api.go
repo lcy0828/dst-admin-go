@@ -49,6 +49,9 @@ func apiTool(op *apicontract.Operation) (Tool, error) {
 	if op.Transport == "multipart" {
 		description += ". File fields use attachmentId references from uploaded files."
 	}
+	if hint := activityArgumentHint(op.ID); hint != "" {
+		description += "\nArguments: " + hint
+	}
 	metadata := op.ToolMetadata()
 	description += "\n" + op.ResultSummary()
 	return Tool{Name: op.ToolName(), Description: description, InputSchema: input, Mutation: op.Mutation(), Metadata: &metadata}, nil
@@ -147,6 +150,9 @@ func (s *Service) discover(raw json.RawMessage) (json.RawMessage, error) {
 			item["purpose"] = semantic.Purpose
 		}
 		item["resultSummary"] = op.ResultSummary()
+		if hint := activityArgumentHint(op.ID); hint != "" {
+			item["argumentHint"] = hint
+		}
 		if in.IncludeSchema || in.IncludeResultSchema {
 			if op.Description != "" {
 				item["description"] = op.Description
@@ -201,6 +207,9 @@ func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw j
 		if err != nil {
 			if len(values) > 0 {
 				return Invocation{}, fmt.Errorf("%w: private input does not match the requested API field", ErrInvalid)
+			}
+			if hint := activityArgumentHint(op.ID); hint != "" {
+				return Invocation{}, fmt.Errorf("%w: %s: %s. %s", ErrInvalid, op.ID, activityArgumentProblem(resolved, op.ID), hint)
 			}
 			return Invocation{}, fmt.Errorf("%w: %v", ErrInvalid, err)
 		}

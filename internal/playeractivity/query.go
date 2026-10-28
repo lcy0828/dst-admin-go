@@ -20,7 +20,7 @@ func (s *Service) validateQuery(room string, q Query) error {
 	if err := s.room(room); err != nil {
 		return err
 	}
-	if q.Limit < 0 || q.Limit > 500 || !safeKind(q.Kind) || q.UserID != "" && !actorPattern.MatchString(q.UserID) || len(q.Before) > 1024 {
+	if q.Limit < 0 || q.Limit > 500 || !safeKind(q.Kind) || q.UserID != "" && !actorPattern.MatchString(q.UserID) || len(q.Before) > 1024 || q.Projection != "" && q.Projection != "compact" {
 		return ErrInvalid
 	}
 	if !q.From.IsZero() && !q.To.IsZero() && !q.From.Before(q.To) {
@@ -80,7 +80,15 @@ func (s *Service) Events(room string, q Query) (Page, error) {
 		return result, err
 	}
 	fingerprint := identity(room, q.UserID, q.WorldID, q.Kind, q.From.UTC().Format(time.RFC3339Nano), q.To.UTC().Format(time.RFC3339Nano))
+	if q.Projection != "" {
+		fingerprint = identity(fingerprint, q.Projection)
+	}
 	db := s.store.filtered(room, q, c)
+	if q.Projection == "compact" {
+		// NULL denotes old rows. Preserve their points without manufacturing
+		// continuity metadata or scanning/migrating all history on upgrade.
+		db = db.Where("(has_position = ? OR (has_position IS NULL AND value LIKE ?))", true, `%"position":{%`)
+	}
 	if q.Before != "" {
 		raw, err := base64.RawURLEncoding.DecodeString(q.Before)
 		if err != nil {
@@ -112,7 +120,8 @@ func (s *Service) Events(room string, q Query) (Page, error) {
 		raw, _ := json.Marshal(pageCursor{last.OccurredAt, last.ID, fingerprint})
 		result.NextCursor = base64.RawURLEncoding.EncodeToString(raw)
 	}
-	return result, nil
+	result.Coverage, err = s.coverage(room, q)
+	return result, err
 }
 
 // Trajectory returns sampled positions and collection boundaries. Missing samples
@@ -196,6 +205,33 @@ func (s *Service) Combat(room string, q Query) (CombatResult, error) {
 				*item.Damage += number("damage")
 			}
 		}
+	}
+	result.Coverage, err = s.coverage(room, q)
+	return result, err
+}
+
+// CompactTrajectory is an explicit projection; the legacy trajectory response
+// remains unchanged unless requested. Non-coordinate events never consume its page.
+func (s *Service) CompactTrajectory(room string, q Query) (TrajectoryPage, error) {
+	result := TrajectoryPage{Items: []TrajectoryPoint{}}
+	q.Projection = "compact"
+	page, err := s.Trajectory(room, q)
+	if err != nil {
+		return result, err
+	}
+	result.NextCursor = page.NextCursor
+	result.HasMore = page.HasMore
+	result.Limit = page.Limit
+	result.Coverage = page.Coverage
+	for _, e := range page.Items {
+		if e.Position == nil {
+			continue
+		}
+		source := "action"
+		if e.Kind == "position" {
+			source = "sample"
+		}
+		result.Items = append(result.Items, TrajectoryPoint{ID: e.ID, UserID: e.UserID, WorldID: e.WorldID, ProducerInstanceID: e.ProducerInstanceID, SessionID: e.SessionID, OccurredAt: e.OccurredAt, Position: e.Position, Source: source, ContinuousRangeID: e.ContinuousRangeID})
 	}
 	return result, nil
 }

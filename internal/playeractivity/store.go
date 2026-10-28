@@ -18,45 +18,65 @@ type configRecord struct {
 	Value    string `gorm:"type:text"`
 }
 type eventRecord struct {
-	ID         string    `gorm:"primary_key;type:char(64)"`
-	RoomID     string    `gorm:"type:varchar(255);index:idx_activity_room_time;index:idx_activity_user_time"`
-	UserID     string    `gorm:"type:varchar(128);index:idx_activity_user_time"`
-	WorldID    string    `gorm:"type:varchar(255);index"`
-	Kind       string    `gorm:"type:varchar(64);index"`
-	OccurredAt time.Time `gorm:"index:idx_activity_room_time;index:idx_activity_user_time"`
-	SizeBytes  int64
-	Value      string `gorm:"type:text"`
+	ID          string    `gorm:"primary_key;type:char(64)"`
+	RoomID      string    `gorm:"type:varchar(255);index:idx_activity_room_time;index:idx_activity_user_time"`
+	UserID      string    `gorm:"type:varchar(128);index:idx_activity_user_time"`
+	WorldID     string    `gorm:"type:varchar(255);index"`
+	Kind        string    `gorm:"type:varchar(64);index"`
+	OccurredAt  time.Time `gorm:"index:idx_activity_room_time;index:idx_activity_user_time"`
+	SizeBytes   int64
+	Value       string `gorm:"type:text"`
+	HasPosition *bool  `gorm:"index"`
 }
 type cursorRecord struct {
-	ID              string `gorm:"primary_key;type:char(64)"`
-	RoomID          string `gorm:"type:varchar(255);index"`
-	WorldID         string `gorm:"type:varchar(255)"`
-	Scope           string `gorm:"type:varchar(512)"`
-	Generation      int64
-	Producer        string `gorm:"type:varchar(128)"`
-	AppliedRevision string `gorm:"type:varchar(80)"`
-	Dropped         int64
-	GapCount        int64
-	SourceUpdatedAt *time.Time
-	LastCollectedAt *time.Time
-	LastEventAt     *time.Time
-	State           string `gorm:"type:varchar(32)"`
-	Error           string `gorm:"type:varchar(256)"`
+	ID                   string `gorm:"primary_key;type:char(64)"`
+	RoomID               string `gorm:"type:varchar(255);index"`
+	WorldID              string `gorm:"type:varchar(255)"`
+	Scope                string `gorm:"type:varchar(512)"`
+	Generation           int64
+	LegacyCoverageBefore *time.Time
+	StreamID             string `gorm:"type:char(64)"`
+	RangeID              string `gorm:"type:char(64)"`
+	LastSession          string `gorm:"type:varchar(128)"`
+	LastProducer         string `gorm:"type:varchar(128)"`
+	LastSequence         int64
+	SourceGeneration     int64
+	SourceSession        string `gorm:"type:varchar(128)"`
+	VerifiedGeneration   int64
+	NodePending          int
+	PublicationPhase     string `gorm:"type:varchar(32)"`
+	WriteUnconfirmed     bool
+	LastAttemptAt        *time.Time
+	NextRetryAt          *time.Time
+	ConfigRetryAt        *time.Time
+	ConfigError          string `gorm:"type:varchar(64)"`
+	SyncState            string `gorm:"type:varchar(32)"`
+	DiscardBefore        *time.Time
+	Producer             string `gorm:"type:varchar(128)"`
+	AppliedRevision      string `gorm:"type:varchar(80)"`
+	Dropped              int64
+	GapCount             int64
+	SourceUpdatedAt      *time.Time
+	LastCollectedAt      *time.Time
+	LastEventAt          *time.Time
+	State                string `gorm:"type:varchar(32)"`
+	Error                string `gorm:"type:varchar(256)"`
 }
 type Store struct {
 	db                       *gorm.DB
 	configs, events, cursors string
+	recoveries               string
 	now                      func() time.Time
 }
 
 func NewStore(db *gorm.DB, prefix string) *Store {
-	return &Store{db: db, configs: prefix + "player_activity_config", events: prefix + "player_activity_event", cursors: prefix + "player_activity_cursor", now: time.Now}
+	return &Store{db: db, configs: prefix + "player_activity_config", events: prefix + "player_activity_event", cursors: prefix + "player_activity_cursor", recoveries: prefix + "player_activity_recovery", now: time.Now}
 }
 func (s *Store) Migrate() error {
 	for _, v := range []struct {
 		name  string
 		model any
-	}{{s.configs, &configRecord{}}, {s.events, &eventRecord{}}, {s.cursors, &cursorRecord{}}} {
+	}{{s.configs, &configRecord{}}, {s.events, &eventRecord{}}, {s.cursors, &cursorRecord{}}, {s.recoveries, &recoveryRecord{}}} {
 		if err := s.db.Table(v.name).AutoMigrate(v.model).Error; err != nil {
 			return err
 		}
@@ -142,11 +162,66 @@ func (s *Store) saveCursor(tx *gorm.DB, row cursorRecord) error {
 	return tx.Table(s.cursors).Save(&row).Error
 }
 func (s *Store) ingest(row cursorRecord, events []Event) error {
+	return s.ingestBatch(row, events, nil, false)
+}
+func (s *Store) ingestRecovery(row cursorRecord, events []Event, recovery []recoveryRecord) error {
+	return s.ingestBatch(row, events, recovery, true)
+}
+func (s *Store) ingestBatch(row cursorRecord, events []Event, recovery []recoveryRecord, enforcePolicy bool) error {
 	tx := s.db.Begin()
 	if tx.Error != nil {
 		return tx.Error
 	}
 	defer tx.Rollback()
+	// Merge the admission floor under the same transaction as the insert. A
+	// concurrent capacity prune must not be undone by a late segment read.
+	var latest cursorRecord
+	if err := tx.Table(s.cursors).Where("id = ?", row.ID).First(&latest).Error; err != nil && !gorm.IsRecordNotFoundError(err) {
+		return err
+	}
+	if latest.DiscardBefore != nil && (row.DiscardBefore == nil || latest.DiscardBefore.After(*row.DiscardBefore)) {
+		row.DiscardBefore = latest.DiscardBefore
+	}
+	cutoff := time.Time{}
+	if row.DiscardBefore != nil {
+		cutoff = *row.DiscardBefore
+	}
+	if enforcePolicy {
+		config := Defaults()
+		var record configRecord
+		err := tx.Table(s.configs).Where("room_id = ?", row.RoomID).First(&record).Error
+		if err != nil && !gorm.IsRecordNotFoundError(err) {
+			return err
+		}
+		if err == nil {
+			if json.Unmarshal([]byte(record.Value), &config) != nil || !config.valid() {
+				return fmt.Errorf("invalid persisted activity settings")
+			}
+		}
+		policyCutoff := s.now().UTC().Add(-time.Duration(config.RetentionDays) * 24 * time.Hour)
+		if policyCutoff.After(cutoff) {
+			cutoff = policyCutoff
+		}
+	}
+	if !cutoff.IsZero() {
+		kept := events[:0]
+		for _, e := range events {
+			if e.OccurredAt.After(cutoff) {
+				kept = append(kept, e)
+				continue
+			}
+			// The policy may have changed during I/O. Never claim that filtered
+			// missing events were restored by this transaction.
+			for i := range recovery {
+				r := &recovery[i]
+				if r.State == "resolved" && r.Producer == e.ProducerInstanceID && r.Session == e.SessionID && e.Sequence >= r.FirstSequence && e.Sequence <= r.LastSequence {
+					r.State = "expired"
+					r.Code = "ACTIVITY_RETENTION_EXCEEDED"
+				}
+			}
+		}
+		events = kept
+	}
 	ids := make([]string, 0, len(events))
 	for _, event := range events {
 		ids = append(ids, event.ID)
@@ -177,11 +252,17 @@ func (s *Store) ingest(row cursorRecord, events []Event) error {
 		if err != nil {
 			return err
 		}
-		record := eventRecord{ID: e.ID, RoomID: e.RoomID, UserID: e.UserID, WorldID: e.WorldID, Kind: e.Kind, OccurredAt: e.OccurredAt, Value: string(value), SizeBytes: int64(len(value) + 256)}
+		hasPosition := e.Position != nil
+		record := eventRecord{HasPosition: &hasPosition, ID: e.ID, RoomID: e.RoomID, UserID: e.UserID, WorldID: e.WorldID, Kind: e.Kind, OccurredAt: e.OccurredAt, Value: string(value), SizeBytes: int64(len(value) + 256)}
 		if err = tx.Table(s.events).Create(&record).Error; err != nil {
 			return err
 		}
 		seen[e.ID] = true
+	}
+	for _, r := range recovery {
+		if err := tx.Table(s.recoveries).Save(&r).Error; err != nil {
+			return err
+		}
 	}
 	if err := s.saveCursor(tx, row); err != nil {
 		return err
@@ -221,6 +302,10 @@ func (s *Store) prune(room string, c Settings) error {
 	}
 	if len(ids) == 0 {
 		return nil
+	}
+	floor := rows[len(rows)-1].OccurredAt
+	if err := s.db.Table(s.cursors).Where("room_id = ? AND (discard_before IS NULL OR discard_before < ?)", room, floor).Update("discard_before", floor).Error; err != nil {
+		return err
 	}
 	for start := 0; start < len(ids); start += 400 {
 		end := start + 400

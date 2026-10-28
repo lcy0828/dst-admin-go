@@ -2022,7 +2022,7 @@ paths:
           - activity
           - tracking
         runtime: any
-      description: Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement.
+      description: "Pass path as an object: {path: {roomId: id returned by listRooms}}. Filters belong in query, not path. worldId comes from listRoomWorlds. Settings changes use body with the latest revision. For MCP, request find_api includeSchema=true for the full input schema. Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement."
       responses:
         "200":
           description: Read room-wide player activity recording settings
@@ -2051,7 +2051,7 @@ paths:
           - activity
           - tracking
         runtime: any
-      description: Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement.
+      description: "Pass path as an object: {path: {roomId: id returned by listRooms}}. Filters belong in query, not path. worldId comes from listRoomWorlds. Settings changes use body with the latest revision. For MCP, request find_api includeSchema=true for the full input schema. Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement."
       requestBody:
         required: true
         content:
@@ -2088,7 +2088,7 @@ paths:
           - activity
           - tracking
         runtime: any
-      description: Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement.
+      description: "Pass path as an object: {path: {roomId: id returned by listRooms}}. Filters belong in query, not path. worldId comes from listRoomWorlds. Settings changes use body with the latest revision. For MCP, request find_api includeSchema=true for the full input schema. Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement."
       responses:
         "200":
           description: Read desired and node-applied recording revisions, gaps and stored record budget
@@ -2098,6 +2098,41 @@ paths:
                 $ref: '#/components/schemas/PlayerActivityStatusEnvelope'
         "400":
           description: Invalid settings or query
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "503":
+          $ref: '#/components/responses/ServiceUnavailable'
+  /rooms/{roomId}/player-activity/resync:
+    parameters:
+      - $ref: '#/components/parameters/RoomID'
+    post:
+      parameters:
+        - $ref: '#/components/parameters/CSRFToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      tags: [Players]
+      operationId: resyncRoomPlayerActivity
+      summary: Wake the existing activity synchronizer without resetting history or restarting worlds
+      description: 'Arguments example: {path: {roomId: id returned by listRooms}, requestId: activity-resync-unique-key}. Coalesces a background synchronization request. Does not clear cursors, replay player commands, force pending I/O to unlock or restart games. Accepted is not recovered; read getRoomPlayerActivityStatus for sync state and coverage. Missing segments are retried only within source and retention limits.'
+      x-dst-tool:
+        readOnly: false
+        tags: [player, activity, tracking]
+        runtime: any
+      responses:
+        "202":
+          description: Synchronization request accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      accepted:
+                        type: boolean
+                      status:
+                        type: string
+                        enum: [pending]
         "404":
           $ref: '#/components/responses/NotFound'
         "503":
@@ -2117,36 +2152,43 @@ paths:
           - activity
           - tracking
         runtime: any
-      description: Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement.
+      description: "Pass path as an object: {path: {roomId: id returned by listRooms}}. Filters belong in query, not path. worldId comes from listRoomWorlds. Settings changes use body with the latest revision. For MCP, request find_api includeSchema=true for the full input schema. Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement."
       parameters:
         - name: userId
           in: query
+          description: Player KU ID. Required for trajectory; read the actual userId from room players.
           schema:
             type: string
         - name: worldId
           in: query
+          description: World ID returned by listRoomWorlds; not a world directory or display name.
           schema:
             type: string
         - name: from
           in: query
+          description: Inclusive UTC/RFC3339 start time, for example 2026-10-28T04:00:00Z.
           schema:
             type: string
             format: date-time
         - name: to
           in: query
+          description: Inclusive UTC/RFC3339 end time.
           schema:
             type: string
             format: date-time
         - name: kind
           in: query
+          description: Optional event kind or category prefix, for example action. or combat.
           schema:
             type: string
         - name: before
           in: query
+          description: Opaque nextCursor from the previous page with the identical filters.
           schema:
             type: string
         - name: limit
           in: query
+          description: Use 10 for AI queries to avoid response truncation; follow hasMore/nextCursor.
           schema:
             type: integer
             minimum: 1
@@ -2180,33 +2222,45 @@ paths:
           - activity
           - tracking
         runtime: any
-      description: Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement.
+      description: "Pass path as an object: {path: {roomId: id returned by listRooms}}. Filters belong in query, not path. worldId comes from listRoomWorlds. Settings changes use body with the latest revision. For MCP, request find_api includeSchema=true for the full input schema. Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement."
       parameters:
+        - name: projection
+          in: query
+          description: Use compact for coordinate points only, with durable continuousRangeId and coverage; omitted preserves the legacy event response. Never connect points across missing/unknown range IDs, worlds, producers or sessions.
+          schema:
+            type: string
+            enum: [compact]
         - name: userId
           in: query
+          description: Player KU ID. Required for trajectory; read the actual userId from room players.
           schema:
             type: string
           required: true
         - name: worldId
           in: query
+          description: World ID returned by listRoomWorlds; not a world directory or display name.
           schema:
             type: string
         - name: from
           in: query
+          description: Inclusive UTC/RFC3339 start time, for example 2026-10-28T04:00:00Z.
           schema:
             type: string
             format: date-time
         - name: to
           in: query
+          description: Inclusive UTC/RFC3339 end time.
           schema:
             type: string
             format: date-time
         - name: before
           in: query
+          description: Opaque nextCursor from the previous page with the identical filters.
           schema:
             type: string
         - name: limit
           in: query
+          description: Use 10 for AI queries to avoid response truncation; follow hasMore/nextCursor.
           schema:
             type: integer
             minimum: 1
@@ -2218,7 +2272,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PlayerActivityPageEnvelope'
+                $ref: '#/components/schemas/PlayerActivityTrajectoryEnvelope'
         "400":
           description: Invalid settings or query
         "404":
@@ -2240,23 +2294,27 @@ paths:
           - activity
           - tracking
         runtime: any
-      description: Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement.
+      description: "Pass path as an object: {path: {roomId: id returned by listRooms}}. Filters belong in query, not path. worldId comes from listRoomWorlds. Settings changes use body with the latest revision. For MCP, request find_api includeSchema=true for the full input schema. Uses persisted activity records. No live Lua query, historical backfill or AI inference. Missing records do not prove an action did not occur. Position samples are approximate. Epic attacks show participation; kills record the emitted final-hit attribution. Damage is omitted when unresolved. Settings are effective only after each node reports appliedRevision. Retention removes only activity records; maximumMiB is a logical record budget, not the total database file size. Remote worlds always use their applied Agent placement."
       parameters:
         - name: userId
           in: query
+          description: Player KU ID. Required for trajectory; read the actual userId from room players.
           schema:
             type: string
         - name: worldId
           in: query
+          description: World ID returned by listRoomWorlds; not a world directory or display name.
           schema:
             type: string
         - name: from
           in: query
+          description: Inclusive UTC/RFC3339 start time, for example 2026-10-28T04:00:00Z.
           schema:
             type: string
             format: date-time
         - name: to
           in: query
+          description: Inclusive UTC/RFC3339 end time.
           schema:
             type: string
             format: date-time
@@ -6317,6 +6375,9 @@ components:
     PlayerActivityEvent:
       type: object
       properties:
+        continuousRangeId:
+          type: string
+          description: Durable continuity evidence. Missing for legacy/unknown records; show isolated points.
         id:
           type: string
         roomId:
@@ -6359,6 +6420,11 @@ components:
     PlayerActivityPage:
       type: object
       properties:
+        coverage:
+          type: array
+          description: Room/world retained-history coverage, independent of this page. Missing times and counts are not inferred.
+          items:
+            $ref: '#/components/schemas/PlayerActivityCoverage'
         items:
           type: array
           items:
@@ -6373,9 +6439,124 @@ components:
         - items
         - hasMore
         - limit
+    PlayerActivityCoverage:
+      type: object
+      description: Retained history coverage. complete means no known unresolved coverage descriptors, not proof every player action was recorded. Historical gaps do not mean recording is currently stopped.
+      properties:
+        worldId:
+          type: string
+        pendingSegments:
+          type: integer
+        isolatedSegments:
+          type: integer
+        unavailableRanges:
+          type: integer
+        recoveredSegments:
+          type: integer
+        legacyUnknown:
+          type: boolean
+          description: Prior retained gaps lack durable descriptors. Existing points remain available with unknown continuity.
+        complete:
+          type: boolean
+    PlayerActivityTrajectoryPoint:
+      type: object
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        worldId:
+          type: string
+        producerInstanceId:
+          type: string
+        sessionId:
+          type: string
+        occurredAt:
+          type: string
+          format: date-time
+        source:
+          type: string
+          enum: [sample, action]
+        position:
+          $ref: '#/components/schemas/PlayerActivityPosition'
+        continuousRangeId:
+          type: string
+          description: Connect only matching nonempty ranges within the same world/producer/session; unknown legacy points must remain isolated.
+      required: [id, userId, worldId, occurredAt, position, source]
+    PlayerActivityCompactTrajectoryPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlayerActivityTrajectoryPoint'
+        nextCursor:
+          type: string
+        hasMore:
+          type: boolean
+        limit:
+          type: integer
+        coverage:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlayerActivityCoverage'
+      required: [items, hasMore, limit, coverage]
+    PlayerActivityTrajectoryEnvelope:
+      type: object
+      properties:
+        data:
+          oneOf:
+            - $ref: '#/components/schemas/PlayerActivityPage'
+            - $ref: '#/components/schemas/PlayerActivityCompactTrajectoryPage'
     PlayerActivityWorldStatus:
       type: object
       properties:
+        producerInstanceId:
+          type: string
+        sessionId:
+          type: string
+        syncState:
+          type: string
+        backlog:
+          type: integer
+        scannedGeneration:
+          type: integer
+        sourceGeneration:
+          type: integer
+        nodePending:
+          type: integer
+        publicationPhase:
+          type: string
+        writeUnconfirmed:
+          type: boolean
+        lastAttemptAt:
+          type: string
+          format: date-time
+        nextRetryAt:
+          type: string
+          format: date-time
+        configError:
+          type: string
+        coverage:
+          $ref: '#/components/schemas/PlayerActivityCoverage'
+        diagnostics:
+          type: array
+          items:
+            type: object
+            properties:
+              code:
+                type: string
+              field:
+                type: string
+              generation:
+                type: integer
+              fingerprint:
+                type: string
+              firstSeenAt:
+                type: string
+                format: date-time
+              state:
+                type: string
         worldId:
           type: string
         worldName:
@@ -6465,6 +6646,10 @@ components:
     PlayerActivityCombat:
       type: object
       properties:
+        coverage:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlayerActivityCoverage'
         items:
           type: array
           items:

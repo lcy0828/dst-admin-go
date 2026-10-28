@@ -24,7 +24,7 @@ Settings apply to all players in the room without restarting running worlds. Pos
 | Retention | 7 days | 1–90 days |
 | Logical record budget per room | 512 MiB | 16–2048 MiB |
 
-Position records require both sufficient elapsed time and movement. Combat publication may take an additional flush interval. Shorter intervals increase record volume. Paths are schematic and only cover the current page, separated by world, Runtime instance and gaps; they are not an exact replay or map. Gap timestamps describe discovery, not the exact missing interval; affected worlds on the displayed page show points without connecting lines.
+Position records require both sufficient elapsed time and movement. Combat publication may take an additional flush interval. Shorter intervals increase record volume. Paths are schematic and only cover the current page, separated by world, Runtime instance and gaps; they are not an exact replay or map. Gap timestamps describe discovery, not the exact missing interval; durable range identifiers preserve breaks even across pages. Legacy records with unknown continuity remain isolated points.
 
 ## Resource bounds
 
@@ -43,3 +43,29 @@ Retention and logical size cleanup only delete activity records, never game save
 Authenticated `/api/v2/rooms/{roomId}/player-activity/` endpoints expose `settings`, `status`, `events`, `trajectory` and `combat`. GETs query persisted evidence only. Settings updates require the latest `revision`; conflicts return 409. Check node-applied revisions before claiming recording is active.
 
 MCP and the built-in assistant use the same OpenAPI operations. UI JSON exports contain only the displayed page or bounded combat summary, not the entire history.
+
+## Synchronization and recovery
+
+Configuration acknowledgement, node output, synchronization and retained-history coverage are separate observations. A healthy Runtime does not prove complete history; an old coverage gap does not mean current recording has stopped. Inspect `syncState`, `coverage` and bounded metadata diagnostics. Segment counts never imply exact missing times or action counts.
+
+A problematic segment retains a descriptor for deferred recovery while independently validated records continue to import. Configuration application runs before historical reads. Recovery shares the existing bounded scheduler, the 64-slot source window and retention policy. It cannot restore records intentionally removed by retention or capacity cleanup. Unknown write completion stays unconfirmed; a repeated hash does not prove a publisher committed the file.
+
+**Re-sync** wakes the same coordinator without resetting cursors, replaying gameplay commands or restarting worlds. Acceptance is not completion: check subsequent status. Offline nodes, unsupported protocols, unavailable disks and writes without a terminal callback remain explicitly blocked until their underlying cause is resolved.
+
+### MCP arguments
+
+Read actual IDs from `listRooms` and `listRoomWorlds`. `path` is an object of API identifiers, never a filesystem directory. Put filters in `query`. `find_api` supports `includeSchema: true`; refresh stale client tool catalogs when this option is missing.
+
+```json
+{
+  "operationId": "listRoomPlayerActivity",
+  "arguments": {
+    "path": { "roomId": "ID returned by listRooms" },
+    "query": { "userId": "KU_EXAMPLE", "limit": 10 }
+  }
+}
+```
+
+Use `getRoomPlayerTrajectory` with required `query.userId`, `projection: "compact"` and a small `limit` to retrieve coordinate points without full combat fields. Omit `projection` to retain the legacy event response. Only connect matching nonempty `continuousRangeId` values within the same world, producer and session. Legacy records with unknown continuity remain isolated points; upgrades do not manufacture historical paths.
+
+Use `resyncRoomPlayerActivity` with `path.roomId` and a unique `requestId`, then `getRoomPlayerActivityStatus` to check results. `accepted: true` only confirms scheduling. Follow `hasMore` and `nextCursor` using identical filters/time bounds. Coverage is independent of the current page; `_aiTruncated` means the AI excerpt is incomplete.
