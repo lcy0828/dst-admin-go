@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "10656736f76ba06341b1f9436e3261af525319ff7041263e9d49083f7d21fbab",
+  "operationsSHA256": "1a20969999916e6a9a0084dd36143b7ae6bdf2081d898c345f43462c74676a4b",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -686,6 +686,20 @@
     {
       "operationId": "createStructuredLogRule",
       "method": "POST",
+      "path": "/log-rules",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "log"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Create a global extraction rule"
+    },
+    {
+      "operationId": "createStructuredLogRuleForRoom",
+      "method": "POST",
       "path": "/rooms/{roomId}/log-rules",
       "contentType": "application/json",
       "transport": "json",
@@ -696,7 +710,9 @@
       "access": "write",
       "risk": "normal",
       "runtime": "any",
-      "title": "Create a room-scoped extraction rule"
+      "title": "Compatibility alias for global log rules; roomId does not limit rule scope",
+      "deprecated": true,
+      "replacedBy": "createStructuredLogRule"
     },
     {
       "operationId": "deleteAIAttachment",
@@ -855,6 +871,19 @@
     {
       "operationId": "deleteStructuredLogRule",
       "method": "DELETE",
+      "path": "/log-rules/{ruleId}",
+      "transport": "json",
+      "tags": [
+        "log"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Delete a custom extraction rule"
+    },
+    {
+      "operationId": "deleteStructuredLogRuleForRoom",
+      "method": "DELETE",
       "path": "/rooms/{roomId}/log-rules/{ruleId}",
       "transport": "json",
       "tags": [
@@ -864,7 +893,9 @@
       "access": "write",
       "risk": "high",
       "runtime": "any",
-      "title": "Delete a custom extraction rule"
+      "title": "Compatibility alias for global log rules; roomId does not limit rule scope",
+      "deprecated": true,
+      "replacedBy": "deleteStructuredLogRule"
     },
     {
       "operationId": "detectRuntimeNetworkProfileEgress",
@@ -2856,6 +2887,19 @@
     {
       "operationId": "listStructuredLogRules",
       "method": "GET",
+      "path": "/log-rules",
+      "transport": "json",
+      "tags": [
+        "log"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List global structured log extraction rules"
+    },
+    {
+      "operationId": "listStructuredLogRulesForRoom",
+      "method": "GET",
       "path": "/rooms/{roomId}/log-rules",
       "transport": "json",
       "tags": [
@@ -2865,7 +2909,9 @@
       "access": "read",
       "risk": "low",
       "runtime": "any",
-      "title": "List room-scoped structured log extraction rules"
+      "title": "Compatibility alias for global log rules; roomId does not limit rule scope",
+      "deprecated": true,
+      "replacedBy": "listStructuredLogRules"
     },
     {
       "operationId": "listStructuredLogs",
@@ -2986,6 +3032,19 @@
     {
       "operationId": "migrateLegacyStructuredLogRules",
       "method": "POST",
+      "path": "/log-rules/actions/migrate-legacy",
+      "transport": "json",
+      "tags": [
+        "log"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Import migration-ready legacy global log rules into the shared global rules"
+    },
+    {
+      "operationId": "migrateLegacyStructuredLogRulesForRoom",
+      "method": "POST",
       "path": "/rooms/{roomId}/log-rules/actions/migrate-legacy",
       "transport": "json",
       "tags": [
@@ -2995,7 +3054,9 @@
       "access": "write",
       "risk": "normal",
       "runtime": "any",
-      "title": "Import migration-ready legacy global log rules into one managed room"
+      "title": "Compatibility alias for global log rules; roomId does not limit rule scope",
+      "deprecated": true,
+      "replacedBy": "migrateLegacyStructuredLogRules"
     },
     {
       "operationId": "observeExperimentalKubernetesShard",
@@ -3104,6 +3165,19 @@
     {
       "operationId": "previewLegacyStructuredLogRuleMigration",
       "method": "GET",
+      "path": "/log-rules/migration-preview",
+      "transport": "json",
+      "tags": [
+        "log"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Preview an idempotent migration from legacy global log rules into the shared global rules"
+    },
+    {
+      "operationId": "previewLegacyStructuredLogRuleMigrationForRoom",
+      "method": "GET",
       "path": "/rooms/{roomId}/log-rules/migration-preview",
       "transport": "json",
       "tags": [
@@ -3113,7 +3187,9 @@
       "access": "read",
       "risk": "low",
       "runtime": "any",
-      "title": "Preview an idempotent migration from legacy global log rules into one managed room"
+      "title": "Compatibility alias for global log rules; roomId does not limit rule scope",
+      "deprecated": true,
+      "replacedBy": "previewLegacyStructuredLogRuleMigration"
     },
     {
       "operationId": "previewModConfiguration",
@@ -4128,6 +4204,20 @@
     {
       "operationId": "testStructuredLogRule",
       "method": "POST",
+      "path": "/log-rules/actions/test",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "log"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Compile and test an extraction rule against a bounded text sample"
+    },
+    {
+      "operationId": "testStructuredLogRuleForRoom",
+      "method": "POST",
       "path": "/rooms/{roomId}/log-rules/actions/test",
       "contentType": "application/json",
       "transport": "json",
@@ -4138,7 +4228,9 @@
       "access": "read",
       "risk": "low",
       "runtime": "any",
-      "title": "Compile and test an extraction rule against a bounded text sample"
+      "title": "Compatibility alias for global log rules; roomId does not limit rule scope",
+      "deprecated": true,
+      "replacedBy": "testStructuredLogRule"
     },
     {
       "operationId": "testSystemSMTPConnection",
@@ -4503,6 +4595,20 @@
     {
       "operationId": "updateStructuredLogRule",
       "method": "PUT",
+      "path": "/log-rules/{ruleId}",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "log"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Replace a global extraction rule"
+    },
+    {
+      "operationId": "updateStructuredLogRuleForRoom",
+      "method": "PUT",
       "path": "/rooms/{roomId}/log-rules/{ruleId}",
       "contentType": "application/json",
       "transport": "json",
@@ -4513,7 +4619,9 @@
       "access": "write",
       "risk": "normal",
       "runtime": "any",
-      "title": "Replace a room-scoped extraction rule"
+      "title": "Compatibility alias for global log rules; roomId does not limit rule scope",
+      "deprecated": true,
+      "replacedBy": "updateStructuredLogRule"
     },
     {
       "operationId": "updateWorkshopNetworkSettings",

@@ -5092,12 +5092,11 @@ paths:
         "200": { description: Derived snapshot cleared, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogClearResultEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
-  /rooms/{roomId}/log-rules:
-    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+  /log-rules:
     get:
       tags: [Logs]
       operationId: listStructuredLogRules
-      summary: List room-scoped structured log extraction rules
+      summary: List global structured log extraction rules
       responses:
         "200": { description: Extraction rules ordered by priority, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleListEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -5105,19 +5104,19 @@ paths:
       tags: [Logs]
       operationId: createStructuredLogRule
       x-dst-tool: {"destructive": false}
-      summary: Create a room-scoped extraction rule
+      summary: Create a global extraction rule
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleInput" } } } }
       responses:
         "201": { description: Created extraction rule, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
-  /rooms/{roomId}/log-rules/{ruleId}:
-    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/StructuredLogRuleID" }]
+  /log-rules/{ruleId}:
+    parameters: [{ $ref: "#/components/parameters/StructuredLogRuleID" }]
     put:
       tags: [Logs]
       operationId: updateStructuredLogRule
-      summary: Replace a room-scoped extraction rule
+      summary: Replace a global extraction rule
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleInput" } } } }
       responses:
@@ -5134,8 +5133,7 @@ paths:
         "200": { description: Custom extraction rule deleted, content: { application/json: { schema: { $ref: "#/components/schemas/DeletedEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
-  /rooms/{roomId}/log-rules/actions/test:
-    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+  /log-rules/actions/test:
     post:
       tags: [Logs]
       operationId: testStructuredLogRule
@@ -5147,12 +5145,96 @@ paths:
         "200": { description: Rule test result, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleTestEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /log-rules/migration-preview:
+    get:
+      tags: [Logs]
+      operationId: previewLegacyStructuredLogRuleMigration
+      summary: Preview an idempotent migration from legacy global log rules into the shared global rules
+      responses:
+        "200": { description: Legacy rule migration classification and counts, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleMigrationPreviewEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /log-rules/actions/migrate-legacy:
+    post:
+      tags: [Logs]
+      operationId: migrateLegacyStructuredLogRules
+      summary: Import migration-ready legacy global log rules into the shared global rules
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Imported rule count and the applied preview, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleMigrationResultEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/log-rules:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    get:
+      tags: [Logs]
+      operationId: listStructuredLogRulesForRoom
+      deprecated: true
+      x-dst-replaced-by: listStructuredLogRules
+      summary: Compatibility alias for global log rules; roomId does not limit rule scope
+      responses:
+        "200": { description: Extraction rules ordered by priority, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleListEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+    post:
+      tags: [Logs]
+      operationId: createStructuredLogRuleForRoom
+      deprecated: true
+      x-dst-replaced-by: createStructuredLogRule
+      x-dst-tool: {"destructive": false}
+      summary: Compatibility alias for global log rules; roomId does not limit rule scope
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleInput" } } } }
+      responses:
+        "201": { description: Created extraction rule, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/log-rules/{ruleId}:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/StructuredLogRuleID" }]
+    put:
+      tags: [Logs]
+      operationId: updateStructuredLogRuleForRoom
+      deprecated: true
+      x-dst-replaced-by: updateStructuredLogRule
+      summary: Compatibility alias for global log rules; roomId does not limit rule scope
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleInput" } } } }
+      responses:
+        "200": { description: Updated extraction rule, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+    delete:
+      tags: [Logs]
+      operationId: deleteStructuredLogRuleForRoom
+      deprecated: true
+      x-dst-replaced-by: deleteStructuredLogRule
+      x-dst-tool: {"risk": "high"}
+      summary: Compatibility alias for global log rules; roomId does not limit rule scope
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Custom extraction rule deleted, content: { application/json: { schema: { $ref: "#/components/schemas/DeletedEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/log-rules/actions/test:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }]
+    post:
+      tags: [Logs]
+      operationId: testStructuredLogRuleForRoom
+      deprecated: true
+      x-dst-replaced-by: testStructuredLogRule
+      x-dst-tool: {"readOnly": true}
+      summary: Compatibility alias for global log rules; roomId does not limit rule scope
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleTestInput" } } } }
+      responses:
+        "200": { description: Rule test result, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleTestEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/log-rules/migration-preview:
     parameters: [{ $ref: "#/components/parameters/RoomID" }]
     get:
       tags: [Logs]
-      operationId: previewLegacyStructuredLogRuleMigration
-      summary: Preview an idempotent migration from legacy global log rules into one managed room
+      operationId: previewLegacyStructuredLogRuleMigrationForRoom
+      deprecated: true
+      x-dst-replaced-by: previewLegacyStructuredLogRuleMigration
+      summary: Compatibility alias for global log rules; roomId does not limit rule scope
       responses:
         "200": { description: Legacy rule migration classification and counts, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleMigrationPreviewEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -5160,8 +5242,10 @@ paths:
     parameters: [{ $ref: "#/components/parameters/RoomID" }]
     post:
       tags: [Logs]
-      operationId: migrateLegacyStructuredLogRules
-      summary: Import migration-ready legacy global log rules into one managed room
+      operationId: migrateLegacyStructuredLogRulesForRoom
+      deprecated: true
+      x-dst-replaced-by: migrateLegacyStructuredLogRules
+      summary: Compatibility alias for global log rules; roomId does not limit rule scope
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "200": { description: Imported rule count and the applied preview, content: { application/json: { schema: { $ref: "#/components/schemas/StructuredLogRuleMigrationResultEnvelope" } } } }
@@ -7214,7 +7298,7 @@ components:
           default: false
         runtimeMode:
           $ref: "#/components/schemas/RuntimePerformanceMode"
-          description: Process-scoped Lua runtime for start and restart actions. Defaults to game.
+          description: Explicit Lua runtime for start/restart. Omit to retain each running world's actual mode, or its remembered mode when stopped. A new world without history uses game. Optional runtimes are validated before a restart stops any world.
         runtimeVersion:
           type: string
           pattern: '^(game|[0-9]+\.[0-9]+\.[0-9]+)$'
@@ -7236,7 +7320,7 @@ components:
           default: false
         runtimeMode:
           $ref: "#/components/schemas/RuntimePerformanceMode"
-          description: Process-scoped Lua runtime for this room selection. Defaults to game.
+          description: Explicit Lua runtime for this selection. Omit to preserve each world's own running or remembered mode, including mixed modes.
         runtimeVersion:
           type: string
           pattern: '^(game|[0-9]+\.[0-9]+\.[0-9]+)$'
@@ -7369,6 +7453,8 @@ components:
         updatedAt:
           type: string
           format: date-time
+        runtimeMode: { type: string, description: Actual runtime of the inspected process; unknown is never treated as game. }
+        preferredRuntimeMode: { $ref: "#/components/schemas/RuntimePerformanceMode" }
         status:
           type: string
           enum: [running, stopped, unknown]
@@ -7837,6 +7923,7 @@ components:
       additionalProperties: false
       required: [state, sessionExists]
       properties:
+        runtimeMode: { type: string, description: Actual runtime of the inspected process; unknown is never treated as game. }
         state: { type: string, enum: [running, stopped, starting, failed, unknown] }
         code: { type: string }
         message: { type: string }
@@ -11191,6 +11278,8 @@ components:
       type: object
       additionalProperties: false
       allOf:
+        - if: { properties: { action: { enum: [room.start, room.restart] } }, required: [action] }
+          then: { properties: { parameters: { $ref: "#/components/schemas/AutomationRuntimeModeParameters" } } }
         - if: { properties: { action: { const: backup.create } }, required: [action] }
           then: { properties: { parameters: { $ref: "#/components/schemas/AutomaticBackupParameters" } } }
         - if: { properties: { action: { const: backup.prune } }, required: [action] }
@@ -11218,6 +11307,12 @@ components:
         retryIntervalSeconds: { type: integer, minimum: 1, maximum: 3600 }
         dependencies: { type: array, maxItems: 64, items: { type: string, format: uuid } }
         expectedRevision: { type: string }
+    AutomationRuntimeModeParameters:
+      type: object
+      additionalProperties: false
+      description: Omit runtimeMode to preserve each world's running or remembered mode. Explicit modes are revalidated at execution. Package versions are not pinned by scheduled actions.
+      properties:
+        runtimeMode: { $ref: "#/components/schemas/RuntimePerformanceMode" }
     AutomaticBackupParameters:
       type: object
       description: Backup settings. Omit keep to disable automatic cleanup; name is an optional archive label. Only successful automatic snapshots are pruned.
@@ -11508,10 +11603,10 @@ components:
     StructuredLogRule:
       type: object
       additionalProperties: false
-      required: [id, roomId, name, description, logType, pattern, regex, enabled, priority, matchMode, tailPattern, builtIn, createdAt, updatedAt]
+      required: [id, name, description, logType, pattern, regex, enabled, priority, matchMode, tailPattern, builtIn, createdAt, updatedAt]
       properties:
         id: { type: string }
-        roomId: { type: string }
+        roomId: { type: string, deprecated: true, description: "Legacy scope field. Global rules omit it." }
         name: { type: string }
         description: { type: string }
         logType: { $ref: "#/components/schemas/StructuredLogType" }
@@ -11780,7 +11875,7 @@ components:
         controllerRelay: { type: boolean, description: Agent preference for downloading via this Controller }
         timeoutMinutes: { type: integer, minimum: 10, maximum: 240, default: 60 }
         backgroundCheck: { type: boolean, default: true, description: Controller checks only while a release notification channel is enabled }
-        checkIntervalHours: { type: integer, minimum: 1, maximum: 168, default: 6 }
+        checkIntervalHours: { type: number, minimum: 0.5, maximum: 168, default: 0.5, description: 'Background check interval in hours; fractional values are accepted. The default 0.5 is 30 minutes. Existing saved intervals are preserved.' }
     SoftwareOperation:
       type: object
       required: [id, version, phase, progress]
@@ -12652,15 +12747,32 @@ components:
           type: array
           items: { type: string, enum: [darwin, linux, windows] }
         processScopedModes: { type: boolean }
+    WorldRuntimeMode:
+      type: object
+      additionalProperties: false
+      required: [worldId, worldName, source, state]
+      properties:
+        worldId: { type: string }
+        worldName: { type: string }
+        preferredMode: { $ref: "#/components/schemas/RuntimePerformanceMode" }
+        actualMode: { $ref: "#/components/schemas/RuntimePerformanceMode" }
+        effectiveMode: { $ref: "#/components/schemas/RuntimePerformanceMode" }
+        source: { type: string, enum: [running, saved, default, unknown] }
+        state: { type: string, enum: [running, stopped, starting, failed, unknown] }
+        reason: { type: string }
     RuntimeModeAvailability:
       type: object
       additionalProperties: false
-      required: [roomId, worldIds, defaultMode, modes, targets, packages]
+      required: [roomId, worldIds, selectionState, worlds, modes, targets, packages]
       properties:
         roomId: { type: string }
         worldIds:
           type: array
           items: { type: string }
+        selectionState: { type: string, enum: [uniform, mixed, unknown] }
+        worlds:
+          type: array
+          items: { $ref: "#/components/schemas/WorldRuntimeMode" }
         defaultMode: { $ref: "#/components/schemas/RuntimePerformanceMode" }
         modes:
           type: array
@@ -13041,6 +13153,10 @@ components:
       additionalProperties: false
       required: [id, setId, roomId, worldId, worldName, worldRole, targetId, installationId, cluster, shard, topologyRevision, fileName, status, size, contentSize, fileCount, contentKind, restorable, hasShardIndex, createdAt, updatedAt]
       properties:
+        artifactState:
+          type: string
+          enum: [not_generated, staging, available, missing, corrupt]
+          description: Archive publication state. An ungenerated part is not a corrupt archive.
         id: { type: string }
         setId: { type: string, format: uuid }
         roomId: { type: string }
@@ -13083,6 +13199,14 @@ components:
       additionalProperties: false
       required: [id, roomId, roomName, name, kind, mode, manifestVersion, topologyRevision, status, size, contentSize, fileCount, contentKind, restorable, originalRunningWorlds, createdAt, updatedAt, parts]
       properties:
+        artifactState: { type: string, enum: [not_generated, staging, available, partial, missing, corrupt] }
+        barrierAttempts: { type: integer, minimum: 0, maximum: 3 }
+        barrierReleaseState:
+          type: string
+          enum: [pending, released, unconfirmed]
+          description: Released means every involved Runtime acknowledged release and drained delayed saves. Absence means a legacy backup without this evidence.
+        failureCode: { type: string, description: Machine-readable primary cause of backup failure. }
+        failurePhase: { type: string, description: Phase that failed, retained after the operation terminates. }
         id: { type: string, format: uuid }
         roomId: { type: string }
         roomName: { type: string }
@@ -13723,6 +13847,8 @@ components:
       additionalProperties: false
       required: [id, roomId, directoryName, name, role, type, isMaster, shardId, serverPort, targetIds, availableTargetIds, updatedAt, status, controlAvailable, placement]
       properties:
+        runtimeMode: { type: string, description: Actual runtime of the inspected process; unknown is never treated as game. }
+        preferredRuntimeMode: { $ref: "#/components/schemas/RuntimePerformanceMode" }
         id: { type: string }
         roomId: { type: string }
         directoryName: { type: string }
@@ -13877,6 +14003,10 @@ components:
       additionalProperties: false
       required: [code, message]
       properties:
+        details:
+          type: object
+          additionalProperties: true
+          description: Optional persisted domain result, including backup failure phase, attempts, artifact state and release acknowledgement.
         code:
           type: string
         message:
@@ -13905,6 +14035,25 @@ components:
         finishedAt:
           type: string
           format: date-time
+    JobRuntimeModeSelection:
+      type: object
+      additionalProperties: false
+      required: [roomId, worldId, worldName, action, mode, source, wasRunning]
+      properties:
+        roomId: { type: string }
+        worldId: { type: string }
+        worldName: { type: string }
+        action: { type: string, enum: [start, restart] }
+        requestedMode: { $ref: "#/components/schemas/RuntimePerformanceMode" }
+        requestedVersion: { type: string }
+        mode: { $ref: "#/components/schemas/RuntimePerformanceMode" }
+        source: { type: string, enum: [explicit, running, saved, default, unknown] }
+        targetId: { type: string }
+        installationId: { type: string }
+        topologyRevision: { type: string }
+        wasRunning: { type: boolean }
+        preferenceRevision: { type: string }
+        error: { $ref: "#/components/schemas/JobError" }
     Job:
       type: object
       additionalProperties: false
@@ -13918,6 +14067,9 @@ components:
         - createdAt
         - targets
       properties:
+        runtimeModes:
+          type: array
+          items: { $ref: "#/components/schemas/JobRuntimeModeSelection" }
         id:
           type: string
           format: uuid
