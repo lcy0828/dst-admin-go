@@ -452,9 +452,6 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	notificationHandler := httpapi.NewNotificationsHandler(notificationService)
 	jobService.AddCompletionListener(notificationService.OnJob)
 	observeNotificationAgents := func() {
-		if !notificationService.Active("agent.status") {
-			return
-		}
 		items, err := agentService.CachedAgents()
 		if err != nil {
 			return
@@ -485,21 +482,17 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		Platform: runtime.GOOS + "-" + runtime.GOARCH, Managed: softwareupdate.ManagedChild(),
 		OnRelease: func(release softwareupdate.Release) {
 			version := release.Version
-			notificationService.Emit(notifications.Event{ID: "software:" + version, Version: version, Kind: "software.available", Title: "DST Admin 发现新版 / Update available", Message: buildinfo.Current().Version + " → " + version + "\nhttps://github.com/" + softwareupdate.Repository + "/releases/tag/" + version + "\n" + release.PublishedAt.Format(time.RFC3339) + "\n在系统设置 → 软件更新查看 / Open System settings → Software updates.", Status: "available", Severity: "info"})
+			notificationService.Emit(notifications.Event{ID: "software:" + version, Version: version, Release: &notifications.ReleaseFacts{Component: "controller", CurrentVersion: buildinfo.Current().Version, LatestVersion: version, ReleaseURL: release.URL, PublishedAt: release.PublishedAt, DetectedAt: time.Now().UTC(), StatusPath: "/api/v2/system/software"}, Kind: "software.available", Title: "DST Admin 发现新版 / Update available", Message: buildinfo.Current().Version + " → " + version + "\nhttps://github.com/" + softwareupdate.Repository + "/releases/tag/" + version + "\n" + release.PublishedAt.Format(time.RFC3339) + "\n在系统设置 → 软件更新查看 / Open System settings → Software updates.", Status: "available", Severity: "info"})
 		},
 	})
 	agentService.ConfigureSoftwareUpdates(softwareService, filepath.Join(softwareRoot, "agent-relay"))
 	notificationService.SetChannelChangeListener(func() { observeNotificationAgents(); softwareService.WakeChecks() })
 	if backgroundEnabled {
 		hooks.workers = append(hooks.workers, func(ctx context.Context) {
-			softwareService.RunChecks(ctx, func() bool {
-				return notificationService.Active("software.available") || notificationService.Active("agent.software.available")
-			}, func(ctx context.Context) {
-				if notificationService.Active("agent.software.available") {
-					agentService.NotifySoftwareReleases(ctx, func(id, name, current string, release softwareupdate.Release) {
-						notificationService.Emit(notifications.Event{ID: "agent-software:" + id + ":" + release.Version, Version: release.Version, Kind: "agent.software.available", TargetID: id, Title: "Agent 发现新版 / Agent update available", Message: name + " · " + current + " → " + release.Version + "\n" + release.URL + "\n" + release.PublishedAt.Format(time.RFC3339), Status: "available", Severity: "info"})
-					})
-				}
+			softwareService.RunChecks(ctx, func(ctx context.Context) {
+				agentService.NotifySoftwareReleases(ctx, func(id, name, current string, release softwareupdate.Release) {
+					notificationService.Emit(notifications.Event{ID: "agent-software:" + id + ":" + release.Version, Version: release.Version, Release: &notifications.ReleaseFacts{Component: "agent", CurrentVersion: current, LatestVersion: release.Version, ReleaseURL: release.URL, PublishedAt: release.PublishedAt, DetectedAt: time.Now().UTC(), StatusPath: "/api/v2/agents/" + id + "/software"}, Kind: "agent.software.available", TargetID: id, Title: "Agent 发现新版 / Agent update available", Message: name + " · " + current + " → " + release.Version + "\n" + release.URL + "\n" + release.PublishedAt.Format(time.RFC3339), Status: "available", Severity: "info"})
+				})
 			})
 		})
 	}
@@ -1169,7 +1162,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	jobService.AddCompletionListener(func(job jobs.Job) {
-		if job.Kind != "automation.run" || !(notificationService.Active("room.result") || notificationService.Active("backup.result") || notificationService.Active("game.result")) {
+		if job.Kind != "automation.run" {
 			return
 		}
 		action, skipped, err := automationService.CompletedAction(job.ID)

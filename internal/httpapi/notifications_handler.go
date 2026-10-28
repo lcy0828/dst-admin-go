@@ -22,8 +22,24 @@ func (h *NotificationsHandler) Register(v2 *gin.RouterGroup) {
 	v2.DELETE("/system/notifications/channels/:channelId", h.delete)
 	v2.POST("/system/notifications/channels/:channelId/actions/test", h.test)
 	v2.GET("/system/notifications/deliveries", h.history)
+	v2.GET("/system/notifications/events", h.events)
 	v2.POST("/system/notifications/deliveries/:deliveryId/actions/retry", h.retry)
 	v2.POST("/system/notifications/actions/send", h.send)
+}
+
+func (h *NotificationsHandler) events(c *gin.Context) {
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	if err != nil {
+		notificationFailure(c, notifications.ErrInvalid)
+		return
+	}
+	value, err := h.service.Feed(c.Query("after"), c.Query("kinds"), limit)
+	if err != nil {
+		notificationFailure(c, err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	Success(c, http.StatusOK, value)
 }
 
 func (h *NotificationsHandler) list(c *gin.Context) {

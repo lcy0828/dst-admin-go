@@ -15,20 +15,32 @@ var (
 
 var EventKinds = []string{"room.result", "backup.result", "game.result", "mod.result", "agent.status", "security.login", "software.available", "agent.software.available", "custom"}
 
-const DefaultTemplate = `{"event_id":"{{id}}","event":"{{event}}","title":"{{title}}","message":"{{message}}","status":"{{status}}","room_id":"{{roomId}}","target_id":"{{targetId}}","job_id":"{{jobId}}","timestamp":"{{timestamp}}"}`
+const DefaultTemplate = `{"event_id":"{{id}}","event":"{{event}}","title":"{{title}}","message":"{{message}}","status":"{{status}}","room_id":"{{roomId}}","target_id":"{{targetId}}","job_id":"{{jobId}}","timestamp":"{{timestamp}}","release":{"component":"{{component}}","currentVersion":"{{currentVersion}}","latestVersion":"{{latestVersion}}","releaseURL":"{{releaseURL}}","publishedAt":"{{publishedAt}}","detectedAt":"{{detectedAt}}","statusPath":"{{statusPath}}"}}`
 
 type Event struct {
-	Version    string    `json:"version,omitempty"`
-	ID         string    `json:"id"`
-	Kind       string    `json:"kind"`
-	Title      string    `json:"title"`
-	Message    string    `json:"message"`
-	Status     string    `json:"status"`
-	Severity   string    `json:"severity"`
-	RoomID     string    `json:"roomId,omitempty"`
-	TargetID   string    `json:"targetId,omitempty"`
-	JobID      string    `json:"jobId,omitempty"`
-	OccurredAt time.Time `json:"occurredAt"`
+	Release    *ReleaseFacts `json:"release,omitempty"`
+	Version    string        `json:"version,omitempty"`
+	ID         string        `json:"id"`
+	Kind       string        `json:"kind"`
+	Title      string        `json:"title"`
+	Message    string        `json:"message"`
+	Status     string        `json:"status"`
+	Severity   string        `json:"severity"`
+	RoomID     string        `json:"roomId,omitempty"`
+	TargetID   string        `json:"targetId,omitempty"`
+	JobID      string        `json:"jobId,omitempty"`
+	OccurredAt time.Time     `json:"occurredAt"`
+}
+
+// ReleaseFacts are provider facts, independent of the human-readable template.
+type ReleaseFacts struct {
+	Component      string    `json:"component"`
+	CurrentVersion string    `json:"currentVersion"`
+	LatestVersion  string    `json:"latestVersion"`
+	ReleaseURL     string    `json:"releaseURL"`
+	PublishedAt    time.Time `json:"publishedAt"`
+	DetectedAt     time.Time `json:"detectedAt"`
+	StatusPath     string    `json:"statusPath"`
 }
 
 // Endpoint URLs and headers are write-only, including URL path/query tokens.

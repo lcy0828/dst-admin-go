@@ -119,11 +119,16 @@ func TestUpdateSettingsPersistMaskAndSeparateCacheSources(t *testing.T) {
 	}
 }
 
-func TestBackgroundChecksSleepWithoutSubscriptions(t *testing.T) {
+func TestDisabledBackgroundChecksSleep(t *testing.T) {
 	s, client := testService(t, []byte("fixture"))
+	settings := DefaultSettings()
+	settings.BackgroundCheck = false
+	if _, err := s.SaveSettings(settings); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { s.RunChecks(ctx, func() bool { return false }, nil); close(done) }()
+	go func() { s.RunChecks(ctx, nil); close(done) }()
 	s.WakeChecks()
 	cancel()
 	select {
@@ -132,7 +137,7 @@ func TestBackgroundChecksSleepWithoutSubscriptions(t *testing.T) {
 		t.Fatal("worker did not stop")
 	}
 	if client.calls.Load() != 0 {
-		t.Fatal("inactive subscription queried release")
+		t.Fatal("disabled checking queried release")
 	}
 }
 
@@ -143,7 +148,7 @@ func TestBackgroundChecksRunEveryThirtyMinutesWithoutBrowserRequests(t *testing.
 		defer cancel()
 		done := make(chan struct{})
 		go func() {
-			s.RunChecks(ctx, func() bool { return true }, nil)
+			s.RunChecks(ctx, nil)
 			close(done)
 		}()
 		synctest.Wait()
@@ -213,4 +218,28 @@ func TestCachedReleaseCanNotifyNewSubscriptionsWithoutNetwork(t *testing.T) {
 	if delivered != 2 || client.calls.Load() != 1 {
 		t.Fatalf("release signals=%d network=%d", delivered, client.calls.Load())
 	}
+}
+
+func TestChannelWakeDoesNotPostponeScheduledChecks(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, client := testService(t, []byte("fixture"))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() { s.RunChecks(ctx, nil); close(done) }()
+		synctest.Wait()
+		time.Sleep(19 * time.Minute)
+		s.WakeChecks()
+		synctest.Wait()
+		if client.calls.Load() != 1 {
+			t.Fatal("channel edit bypassed shared cache")
+		}
+		time.Sleep(11 * time.Minute)
+		synctest.Wait()
+		if client.calls.Load() != 2 {
+			t.Fatal("channel edit postponed the thirty-minute check")
+		}
+		cancel()
+		<-done
+	})
 }

@@ -67,6 +67,9 @@ func (s *Store) Migrate() error {
 	if err := s.db.Table(s.deliveriesTable).AutoMigrate(&deliveryRecord{}).Error; err != nil {
 		return err
 	}
+	if err := s.db.Table(s.channelsTable + "_event").AutoMigrate(&feedRecord{}).Error; err != nil {
+		return err
+	}
 	return s.db.Table(s.channelsTable + "_release").AutoMigrate(&releaseNoticeRecord{}).Error
 }
 

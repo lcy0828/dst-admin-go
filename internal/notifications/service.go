@@ -118,14 +118,19 @@ func (s *Service) emit(event Event, channelID string, test bool) ([]Delivery, er
 	if test && len(selected) == 0 {
 		return nil, ErrNotFound
 	}
-	if len(selected) == 0 {
-		return []Delivery{}, nil
-	}
 	if event.ID == "" {
 		event.ID = uuid.NewString()
 	}
 	if event.OccurredAt.IsZero() {
 		event.OccurredAt = time.Now().UTC()
+	}
+	if !test {
+		if err := s.store.appendEvent(event); err != nil {
+			return nil, err
+		}
+	}
+	if len(selected) == 0 {
+		return []Delivery{}, nil
 	}
 	items, err := s.store.Enqueue(event, selected)
 	if err == nil {
@@ -256,7 +261,7 @@ func (s *Service) OnJob(job jobs.Job) {
 	case strings.HasPrefix(job.Kind, "mod."):
 		kind, title = "mod.result", "模组操作 / Mod operation"
 	}
-	if kind == "" || !s.Active(kind) {
+	if kind == "" {
 		return
 	}
 	severity, status := "info", "成功 / Succeeded"
@@ -332,7 +337,7 @@ func (s *Service) ObserveAgent(id, name, status string) {
 	previous, known := s.agents[id]
 	s.agents[id] = status
 	s.mu.Unlock()
-	if !known || previous == status || !s.Active("agent.status") {
+	if !known || previous == status {
 		return
 	}
 	title, severity := "Agent 已连接 / Agent connected", "info"

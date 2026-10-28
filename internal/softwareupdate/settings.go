@@ -173,24 +173,29 @@ func closeReleaseClient(client ReleaseClient) {
 	}
 }
 
-// Background work sleeps when there is no active subscription. Channel edits
-// and settings edits wake it; all checks share the normal on-demand cache.
+// The background setting controls checks independently of delivery subscriptions.
+// Settings and channel edits wake the shared, coalesced on-demand cache.
 func (s *Service) WakeChecks() {
 	select {
 	case s.checkWake <- struct{}{}:
 	default:
 	}
 }
-func (s *Service) RunChecks(ctx context.Context, active func() bool, checkAgents func(context.Context)) {
+func (s *Service) RunChecks(ctx context.Context, checkAgents func(context.Context)) {
 	for ctx.Err() == nil {
 		v, err := s.settings()
 		delay := time.Duration(0)
-		if err == nil && v.BackgroundCheck && active() {
-			_, _ = s.Check(ctx, false, "")
+		if err == nil && v.BackgroundCheck {
+			snapshot, _ := s.Check(ctx, false, "")
 			if ctx.Err() == nil && checkAgents != nil {
 				checkAgents(ctx)
 			}
 			delay = time.Duration(v.CheckIntervalHours * float64(time.Hour))
+			// Channel edits may reuse the shared cache, but must not postpone
+			// the next scheduled check by another complete interval.
+			if !snapshot.Check.CheckedAt.IsZero() {
+				delay = max(time.Second, time.Until(snapshot.Check.CheckedAt.Add(delay)))
+			}
 		} else if err != nil {
 			delay = time.Hour
 		}

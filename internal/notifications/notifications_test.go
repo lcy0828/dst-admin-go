@@ -160,7 +160,7 @@ func TestWebhookTransportAndProviderResults(t *testing.T) {
 		t.Fatal(result)
 	}
 	var received Event
-	var payload map[string]string
+	var payload map[string]any
 	mu.Lock()
 	if err := json.Unmarshal(body, &payload); err != nil || payload["message"] != event.Message {
 		t.Fatal("bad body", received, string(body))

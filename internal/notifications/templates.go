@@ -13,7 +13,7 @@ import (
 
 var variablePattern = regexp.MustCompile(`\{\{([^{}]+)\}\}`)
 var headerPattern = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
-var variables = []string{"id", "event", "title", "message", "status", "roomId", "targetId", "jobId", "timestamp"}
+var variables = []string{"id", "event", "title", "message", "status", "roomId", "targetId", "jobId", "timestamp", "component", "currentVersion", "latestVersion", "releaseURL", "publishedAt", "detectedAt", "statusPath"}
 
 func validate(input *ChannelInput, secret credentials) error {
 	input.Name = strings.TrimSpace(input.Name)
@@ -99,6 +99,16 @@ func validate(input *ChannelInput, secret credentials) error {
 // event cannot change the shape of a custom webhook request.
 func render(channel Channel, event Event) ([]byte, error) {
 	values := map[string]string{"id": event.ID, "event": event.Kind, "title": event.Title, "message": event.Message, "status": event.Status, "roomId": event.RoomID, "targetId": event.TargetID, "jobId": event.JobID, "timestamp": event.OccurredAt.UTC().Format("2006-01-02T15:04:05Z")}
+	if event.Release != nil {
+		r := event.Release
+		values["component"] = r.Component
+		values["currentVersion"] = r.CurrentVersion
+		values["latestVersion"] = r.LatestVersion
+		values["releaseURL"] = r.ReleaseURL
+		values["statusPath"] = r.StatusPath
+		values["publishedAt"] = r.PublishedAt.UTC().Format("2006-01-02T15:04:05Z")
+		values["detectedAt"] = r.DetectedAt.UTC().Format("2006-01-02T15:04:05Z")
+	}
 	replace := func(value string) string {
 		return variablePattern.ReplaceAllStringFunc(value, func(match string) string { return values[match[2:len(match)-2]] })
 	}

@@ -68,6 +68,9 @@ Webhook 地址及请求头保存后不再返回明文。编辑时留空保留原
 | `status` | 任务或事件状态 |
 | `roomId` / `targetId` / `jobId` | 可用时的房间 / 节点 / 任务标识 |
 | `timestamp` | UTC 事件时间 |
+| `component` / `currentVersion` / `latestVersion` | 新版事件的组件、当前和目标版本 |
+| `releaseURL` / `publishedAt` / `detectedAt` | 发布说明、发布时间与检测时间 |
+| `statusPath` | 同一管理端上的版本状态 API 路径 |
 
 **发送自定义消息** 会发送到启用且订阅自定义消息的渠道。API 为 `POST /api/v2/system/notifications/actions/send`，遵循现有登录、CSRF 和幂等请求要求，详细接口见 [OpenAPI](openapi-v2.yaml)。
 
@@ -85,8 +88,25 @@ Webhook 连接失败、HTTP `429` 或 `5xx` 最多自动尝试 3 次；自动重
 
 在通知渠道中订阅“发现管理服务新版”或“发现 Agent 新版”。新版提醒不会被“仅发送失败或异常”过滤。
 
-通知设置中的“后台检查软件新版”默认开启，每 30 分钟检查一次，可以关闭或改为 30～10080 分钟（最多 7 天）。已有保存的检查间隔继续生效。只有存在已启用的新版订阅时才会定期访问发布源；无需保持浏览器打开，也不会启动或查询游戏世界。管理服务使用软件更新页保存的下载源和网络代理。Agent 新版检查使用控制端已登记的版本信息，不要求每个 Agent 单独访问 GitHub。
+通知设置中的“后台检查软件新版”默认开启，每 30 分钟检查一次，可以关闭或改为 30～10080 分钟（最多 7 天）。已有保存的检查间隔继续生效。后台检查与通知订阅独立：即使没有订阅也会按间隔访问发布源；关闭后台检查后只保留手动检查。无需保持浏览器打开，也不会启动或查询游戏世界。管理服务使用软件更新页保存的下载源和网络代理。Agent 新版检查使用控制端已登记的版本信息，不要求每个 Agent 单独访问 GitHub。
 
 同一渠道对同一组件、节点和版本只入队一次，重启和清理发送历史不会重置记录。投递失败可在发送记录中查看和重试；中断的投递可能已经到达收件方，手动重试可能重复发送。
 
-仅连接 MCP 不会创建通知订阅。若 AI 机器人支持接收 Webhook，可为它添加 Webhook 渠道并订阅新版事件；机器人收到通知后再通过 MCP 查询版本详情或执行用户要求的更新。当前 MCP 使用请求响应方式，没有主动推送新版事件的订阅接口。此通知目前覆盖管理服务与 Agent，游戏服务端和 LuaJIT2 新版尚未接入同一提醒机制。
+仅连接 MCP 不会创建通知订阅。若 AI 机器人支持接收 Webhook，可为它添加 Webhook 渠道并订阅新版事件；机器人收到通知后再通过 MCP 查询版本详情或执行用户要求的更新。MCP 宿主可定时调用 `readNotificationEvents`，保存游标并在下次继续补读。普通 MCP 连接本身不能唤醒模型；宿主需提供定时任务或 Webhook 接收能力。此通知目前覆盖管理服务与 Agent，游戏服务端和 LuaJIT2 新版尚未接入同一提醒机制。
+
+
+## 机器人补读通知
+
+**AI 助手 → 连接 → 机器人接收平台通知** 可直接展开同一套通知渠道，测试 Webhook 并查看投递记录。测试成功只表示接收接口接受了请求，不代表模型已处理。
+
+没有 Webhook 接收地址的宿主可每 5 分钟查询 `GET /api/v2/system/notifications/events`，或通过 `find_api(includeSchema=true)` 发现 `readNotificationEvents`。使用管理员认证；此接口不需要房间参数。
+
+首次调用可传 `query: { kinds: "software.available,agent.software.available", limit: 50 }`。处理完一页后保存 `nextCursor`，下次作为 `query.after`；`hasMore=true` 时继续读到追平。每一页必须沿用相同的 `kinds`，按事件 `id` 去重。后台在没有投递渠道时也记录事件。
+
+事件保留 30 天或最近 10000 条。`historyTruncated=true` 表示有历史已经过期，此时重新核对当前组件版本，不能把通知历史当作完整事实。事件中的 `release` 对象包含结构化版本事实；旧渠道的自定义模板保持原样，可按上表主动加入新变量。通知不触发安装，更新仍需明确提交更新操作并读取实际任务结果。
+
+### English
+
+Background release checks and delivery subscriptions are independent. Checks run on the saved schedule even with no channels and while the UI is closed. Disabling checks leaves manual checks available. Webhooks reuse the channel editor under **AI → Connections**. HTTP acceptance does not mean the model has processed a message.
+
+MCP-only hosts must schedule `readNotificationEvents` themselves, process each page before saving `nextCursor`, and resume using `query.after` with the same `kinds` filter. Follow `hasMore`, deduplicate by event `id`, and recheck current versions if `historyTruncated` is true. The feed retains 30 days or 10,000 events independently of delivery channels. A normal MCP connection cannot wake a model automatically. Release events contain structured `release` facts and never initiate installation.
