@@ -39,6 +39,79 @@ tags:
   - name: Save Imports
   - name: Entity Catalog
 paths:
+  /rooms/{roomId}/performance:
+    get:
+      tags: [WorldState, Runtime]
+      operationId: getRoomPerformanceReport
+      x-dst-tool: { tags: [performance, report] }
+      summary: Read world simulation scores, CPU and memory history with evidence-based findings
+      description: >-
+        Uses background-collected records, never game commands or inventory refresh. Score is simulated seconds divided by native monotonic real seconds and game time scale, capped at 100. It is not FPS. Paused, sleeping, stopped, missing clocks and discontinuous windows are not scored. CPU 100 percent means one logical core. Default range is 24 hours. For AI use maxPoints=60 and read worlds summaries first. Missing history is not zero performance. Aggregated memory and CPU peaks preserve extremes. Restart/session/placement boundaries remain separate. Findings describe correlations, not proof of a faulty mod. Path is an object containing the real roomId from listRooms; query contains optional worldId/from/to/maxPoints.
+      parameters:
+        - { $ref: "#/components/parameters/RoomID" }
+        - { name: worldId, in: query, schema: { type: string }, description: Optional exact world ID returned by the room }
+        - { name: from, in: query, schema: { type: string, format: date-time }, description: Inclusive RFC3339 range start, within configured aggregate retention }
+        - { name: to, in: query, schema: { type: string, format: date-time }, description: Inclusive RFC3339 range end; defaults to now }
+        - { name: maxPoints, in: query, schema: { type: integer, minimum: 30, maximum: 1200, default: 600 }, description: Total plotted rows across worlds; use 60 for concise AI results }
+      responses:
+        "200":
+          description: Bounded series with explicit missing scores and per-world summaries
+          content: { application/json: { schema: { type: object, properties: { data: { $ref: "#/components/schemas/PerformanceReport" } } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/performance/settings:
+    get:
+      tags: [WorldState, Runtime]
+      operationId: getRoomPerformanceSettings
+      summary: Read persistent background performance sampling and retention settings
+      parameters: [{ $ref: "#/components/parameters/RoomID" }]
+      responses:
+        "200":
+          description: Current settings and optimistic revision
+          content: { application/json: { schema: { type: object, properties: { data: { $ref: "#/components/schemas/PerformanceSettings" } } } } }
+    put:
+      tags: [WorldState, Runtime]
+      operationId: updateRoomPerformanceSettings
+      x-dst-tool: { destructive: false, tags: [performance] }
+      summary: Enable or adjust background performance sampling and bounded retention without restarting worlds
+      description: Supply all settings with the revision returned by getRoomPerformanceSettings. Changes apply to subsequent samples; history is not fabricated or erased when disabled. Reducing retention expires old data through bounded background cleanup.
+      parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PerformanceSettings" } } } }
+      responses:
+        "200":
+          description: Applied settings with a new revision
+          content: { application/json: { schema: { type: object, properties: { data: { $ref: "#/components/schemas/PerformanceSettings" } } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /system/notifications/events:
+    get:
+      tags: [System]
+      operationId: readNotificationEvents
+      x-dst-tool: { tags: [notification, software] }
+      summary: Consume durable platform notifications using a stable cursor, including new software releases
+      description: >-
+        For robots without a webhook receiver. Events are recorded without requiring a notification channel. The host must schedule this MCP/API call and wake the model; an ordinary MCP request-response connection cannot wake it automatically. First call with no after; save nextCursor only after processing the page. Follow hasMore until caught up. Reuse the same kinds filter on every page. Resume after reconnect using the saved cursor; deduplicate by stable event id. historyTruncated indicates history expired (30 days or 10000 events); recheck current software status rather than assuming completeness. Delivery retries are separate from this event feed. A discovered update never initiates installation. No room path is required.
+      parameters:
+        - { name: after, in: query, schema: { type: string, maxLength: 1024 }, description: Opaque nextCursor returned by the previous call; not an offset or server path }
+        - { name: kinds, in: query, schema: { type: string, maxLength: 512 }, description: Optional comma-separated event kinds; for software use software.available,agent.software.available }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+      responses:
+        "200":
+          description: Oldest unread events first; webhook credentials omitted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [items, nextCursor, hasMore, historyTruncated, retentionDays]
+                    properties:
+                      items: { type: array, items: { $ref: "#/components/schemas/NotificationEvent" } }
+                      nextCursor: { type: string }
+                      hasMore: { type: boolean }
+                      historyTruncated: { type: boolean }
+                      retentionDays: { type: integer }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /system/ai/private-inputs:
     post:
       tags: [AI]
@@ -6997,10 +7070,97 @@ components:
         urlConfigured: { type: boolean }
         headersConfigured: { type: boolean }
         updatedAt: { type: string, format: date-time }
+    PerformanceSettings:
+      type: object
+      additionalProperties: false
+      required: [revision, enabled, intervalSeconds, retentionDays, aggregateDays]
+      properties:
+        revision: { type: string }
+        enabled: { type: boolean, default: true }
+        intervalSeconds: { type: integer, minimum: 15, maximum: 300, default: 30 }
+        retentionDays: { type: integer, minimum: 1, maximum: 30, default: 7 }
+        aggregateDays: { type: integer, minimum: 1, maximum: 180, default: 90, description: Must be at least retentionDays }
+    PerformanceReport:
+      type: object
+      required: [from, to, items, worlds, events, eventsTruncated, resolutionSeconds, truncated, scoreVersion]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        resolutionSeconds: { type: integer }
+        truncated: { type: boolean }
+        scoreVersion: { type: string }
+        items:
+          type: array
+          maxItems: 1200
+          items:
+            type: object
+            properties:
+              roomId: { type: string }
+              worldId: { type: string }
+              worldName: { type: string }
+              targetId: { type: string }
+              installationId: { type: string }
+              instanceId: { type: string }
+              at: { type: string, format: date-time }
+              state: { type: string }
+              reason: { type: string }
+              score: { type: [number, 'null'], minimum: 0, maximum: 100 }
+              minimumScore: { type: [number, 'null'] }
+              cpuPercent: { type: [number, 'null'], description: Average process CPU within this bucket; 100 is one logical core }
+              rssBytes: { type: integer, minimum: 0, description: Peak process RSS within the bucket }
+              windowSeconds: { type: number }
+              validSeconds: { type: number }
+              lowSeconds: { type: number }
+              samples: { type: integer }
+              scoreVersion: { type: string }
+        eventsTruncated: { type: boolean }
+        eventsWarning: { type: string, enum: [EVENTS_UNAVAILABLE] }
+        events:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              worldId: { type: string }
+              worldName: { type: string }
+              at: { type: string, format: date-time }
+              type: { type: string }
+              source: { type: string }
+              reasonCode: { type: string }
+              jobId: { type: string }
+        worlds:
+          type: array
+          items:
+            type: object
+            properties:
+              worldId: { type: string }
+              worldName: { type: string }
+              scoreVersion: { type: string }
+              averageScore: { type: [number, 'null'] }
+              minimumScore: { type: [number, 'null'] }
+              validSeconds: { type: number }
+              lowSeconds: { type: number }
+              observedSeconds: { type: number }
+              coverage: { type: number, minimum: 0, maximum: 1 }
+              peakCPUPercent: { type: [number, 'null'] }
+              peakRSSBytes: { type: integer, minimum: 0 }
+              findings: { type: array, items: { type: object, properties: { code: { type: string }, severity: { type: string }, value: { type: number } } } }
     NotificationEvent:
       type: object
       required: [id, kind, title, message, status, severity, occurredAt]
       properties:
+        version: { type: string }
+        release:
+          type: object
+          properties:
+            component: { type: string, enum: [controller, agent] }
+            currentVersion: { type: string }
+            latestVersion: { type: string }
+            releaseURL: { type: string }
+            publishedAt: { type: string, format: date-time }
+            detectedAt: { type: string, format: date-time }
+            statusPath: { type: string }
         id: { type: string }
         kind: { $ref: "#/components/schemas/NotificationEventKind" }
         title: { type: string }
@@ -12191,6 +12351,7 @@ components:
         label: { type: string }
         kind: { type: string, enum: [path, text, select, secret, boolean, number, email, color, time, ip-list] }
         value: { type: string }
+        displayValue: { type: string, description: "Display-only value with credentials removed. Omit unchanged secret fields when saving; never send this value as their replacement." }
         options: { type: array, items: { type: string } }
         source: { $ref: "#/components/schemas/SystemSettingSource" }
         environment: { type: string }

@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "aae6a5f716d5d8ad93d6e1731218debda28dfb264c663936f12f5b1719bcc3db",
+  "operationsSHA256": "285890b688ad667a2a693b36c779aa7f6dcc77f5dcf66f077591169de781161d",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -1822,6 +1822,39 @@
       "title": "Read the unattended update policy and its durable convergence state"
     },
     {
+      "operationId": "getRoomPerformanceReport",
+      "method": "GET",
+      "path": "/rooms/{roomId}/performance",
+      "transport": "json",
+      "tags": [
+        "performance",
+        "report",
+        "room",
+        "runtime",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read world simulation scores, CPU and memory history with evidence-based findings"
+    },
+    {
+      "operationId": "getRoomPerformanceSettings",
+      "method": "GET",
+      "path": "/rooms/{roomId}/performance/settings",
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "room",
+        "runtime",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read persistent background performance sampling and retention settings"
+    },
+    {
       "operationId": "getRoomPlayer",
       "method": "GET",
       "path": "/rooms/{roomId}/players/{playerId}",
@@ -3421,6 +3454,21 @@
       "title": "Permanently remove a deleted world"
     },
     {
+      "operationId": "readNotificationEvents",
+      "method": "GET",
+      "path": "/system/notifications/events",
+      "transport": "json",
+      "tags": [
+        "notification",
+        "software",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Consume durable platform notifications using a stable cursor, including new software releases"
+    },
+    {
       "operationId": "readWorldEntitySnapshot",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/entity-catalog/snapshot",
@@ -4529,6 +4577,24 @@
       "risk": "normal",
       "runtime": "any",
       "title": "Configure event-driven update checks, prefetch, and empty-room activation"
+    },
+    {
+      "operationId": "updateRoomPerformanceSettings",
+      "method": "PUT",
+      "path": "/rooms/{roomId}/performance/settings",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "performance",
+        "room",
+        "runtime",
+        "world"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Enable or adjust background performance sampling and bounded retention without restarting worlds"
     },
     {
       "operationId": "updateRoomPlayerActivitySettings",
