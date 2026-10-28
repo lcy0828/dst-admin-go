@@ -17,24 +17,26 @@ import (
 // Settings belong to the machine doing the download. ProxyURL is write-only
 // over HTTP; on disk it is protected with the same 0600 permissions as state.
 type Settings struct {
-	ControllerRelay    bool   `json:"controllerRelay"`
-	Source             string `json:"source"`
-	ProxyMode          string `json:"proxyMode"`
-	ProxyURL           string `json:"proxyURL,omitempty"`
-	ProxyConfigured    bool   `json:"proxyConfigured"`
-	TimeoutMinutes     int    `json:"timeoutMinutes"`
-	BackgroundCheck    bool   `json:"backgroundCheck"`
-	CheckIntervalHours int    `json:"checkIntervalHours"`
+	ControllerRelay bool   `json:"controllerRelay"`
+	Source          string `json:"source"`
+	ProxyMode       string `json:"proxyMode"`
+	ProxyURL        string `json:"proxyURL,omitempty"`
+	ProxyConfigured bool   `json:"proxyConfigured"`
+	TimeoutMinutes  int    `json:"timeoutMinutes"`
+	BackgroundCheck bool   `json:"backgroundCheck"`
+	// Keep the existing field name and saved integer-hour values. Fractional
+	// hours allow the UI to configure minutes without rewriting old settings.
+	CheckIntervalHours float64 `json:"checkIntervalHours"`
 }
 
 func DefaultSettings() Settings {
-	return Settings{Source: "auto", ProxyMode: "inherit", TimeoutMinutes: 60, BackgroundCheck: true, CheckIntervalHours: 6}
+	return Settings{Source: "auto", ProxyMode: "inherit", TimeoutMinutes: 60, BackgroundCheck: true, CheckIntervalHours: 0.5}
 }
 
 func (v Settings) Public() Settings { v.ProxyConfigured = v.ProxyURL != ""; v.ProxyURL = ""; return v }
 
 func validateSettings(v Settings) error {
-	if !ValidSource(v.Source) || v.TimeoutMinutes < 10 || v.TimeoutMinutes > 240 || v.CheckIntervalHours < 1 || v.CheckIntervalHours > 168 {
+	if !ValidSource(v.Source) || v.TimeoutMinutes < 10 || v.TimeoutMinutes > 240 || !(v.CheckIntervalHours >= 0.5 && v.CheckIntervalHours <= 168) {
 		return ErrInvalid
 	}
 	switch v.ProxyMode {
@@ -142,7 +144,7 @@ func (s *Service) ResolveNetwork(source string, agent bool) (ReleaseClient, stri
 		transport.Proxy = http.ProxyFromEnvironment
 	case "custom":
 		proxyURL, parseErr := url.Parse(address)
-		if parseErr != nil || validateSettings(Settings{Source: "auto", ProxyMode: "custom", ProxyURL: address, TimeoutMinutes: 60, CheckIntervalHours: 6}) != nil {
+		if parseErr != nil || validateSettings(Settings{Source: "auto", ProxyMode: "custom", ProxyURL: address, TimeoutMinutes: 60, CheckIntervalHours: 0.5}) != nil {
 			return nil, "", v, "", ErrInvalid
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
@@ -188,7 +190,7 @@ func (s *Service) RunChecks(ctx context.Context, active func() bool, checkAgents
 			if ctx.Err() == nil && checkAgents != nil {
 				checkAgents(ctx)
 			}
-			delay = time.Duration(v.CheckIntervalHours) * time.Hour
+			delay = time.Duration(v.CheckIntervalHours * float64(time.Hour))
 		} else if err != nil {
 			delay = time.Hour
 		}

@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -131,6 +133,70 @@ func TestBackgroundChecksSleepWithoutSubscriptions(t *testing.T) {
 	}
 	if client.calls.Load() != 0 {
 		t.Fatal("inactive subscription queried release")
+	}
+}
+
+func TestBackgroundChecksRunEveryThirtyMinutesWithoutBrowserRequests(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, client := testService(t, []byte("fixture"))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			s.RunChecks(ctx, func() bool { return true }, nil)
+			close(done)
+		}()
+		synctest.Wait()
+		if client.calls.Load() != 1 {
+			t.Fatal("initial background release check did not run")
+		}
+		time.Sleep(29 * time.Minute)
+		synctest.Wait()
+		if client.calls.Load() != 1 {
+			t.Fatal("background release check ran before its interval")
+		}
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		if client.calls.Load() != 2 {
+			t.Fatal("background release check did not repeat after thirty minutes")
+		}
+		cancel()
+		<-done
+	})
+}
+
+func TestCheckIntervalDefaultsAndSavedHoursRemainCompatible(t *testing.T) {
+	s, _ := testService(t, []byte("fixture"))
+	defaults, err := s.Settings()
+	if err != nil || !defaults.BackgroundCheck || defaults.CheckIntervalHours != 0.5 {
+		t.Fatal("new installations must default to thirty-minute checks", defaults, err)
+	}
+	// A pre-upgrade settings file uses a JSON integer for the interval.
+	legacy := []byte(`{"source":"direct","proxyMode":"system","timeoutMinutes":60,"backgroundCheck":false,"checkIntervalHours":6}`)
+	if err := os.WriteFile(filepath.Join(s.config.Root, "settings.json"), legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := New(s.config).Settings()
+	if err != nil || actual.CheckIntervalHours != 6 || actual.BackgroundCheck {
+		t.Fatal("saved interval and disabled state changed on upgrade", actual, err)
+	}
+	for _, hours := range []float64{0.5, 1.25, 6, 168} {
+		settings := DefaultSettings()
+		settings.CheckIntervalHours = hours
+		if _, err := s.SaveSettings(settings); err != nil {
+			t.Fatal(hours, err)
+		}
+		actual, err := New(s.config).Settings()
+		if err != nil || actual.CheckIntervalHours != hours {
+			t.Fatal("saved interval did not survive reopening", hours, actual, err)
+		}
+	}
+	for _, hours := range []float64{0, 0.49, 168.01} {
+		settings := DefaultSettings()
+		settings.CheckIntervalHours = hours
+		if _, err := s.SaveSettings(settings); err == nil {
+			t.Fatal("out-of-range interval accepted", hours)
+		}
 	}
 }
 

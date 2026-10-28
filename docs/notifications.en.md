@@ -38,10 +38,11 @@ Saved endpoint URLs and headers are never returned in plaintext. Leave them blan
 | Mod operation results | Mod management jobs finish; successful routine update checks remain silent |
 | Agent disconnects and reconnects | Observed connection state changes; first observation and Controller restarts do not send a fleet-wide status report |
 | Sign-in attempts blocked | Repeated failed sign-ins reach the configured threshold |
-| New management service release | Existing update checks find a new release; deduplicated per channel/version while history is retained, without adding a release polling loop |
+| New management service release | Background or manual checks find a new release; deduplicated per channel, component, node and version |
+| New Agent release | Background checks find an available release for a registered Agent |
 | Custom messages | Manual sends from this page or the custom notification API |
 
-Channels have independent subscriptions and enable switches. **Failures and warnings only** skips successes, reconnects, new releases and custom messages. Explicit test sends bypass this filter. Empty-room updates that do no work do not send success notifications.
+Channels have independent subscriptions and enable switches. **Failures and warnings only** skips successes, reconnects and custom messages. Release alerts and explicit test sends bypass this filter. Empty-room updates that do no work do not send success notifications.
 
 Task notifications include operation kind, status, room/world identity, task ID and error code. Raw command output and arbitrary logs are excluded. Independent game crash detection and player join/leave events are not included.
 
@@ -82,6 +83,8 @@ Include the database and `notifications/webhook.key` in the configuration direct
 
 Subscribe a channel to management service or Agent release alerts. These subscriptions bypass the failures-only filter.
 
-Background release checks default to every six hours and run only with an enabled release subscription. Disable them or choose an interval of 1–168 hours in notification settings. The browser may remain closed. Checks reuse the Controller's saved update source/proxy and registered Agent version information; they never start or query game worlds.
+Background release checks are enabled by default, run every 30 minutes and require an enabled release subscription. Disable them or choose an interval of 30–10080 minutes (up to seven days) in notification settings. Previously saved intervals remain in effect. The browser may remain closed. Checks reuse the Controller's saved update source/proxy and registered Agent version information; they never start or query game worlds.
 
 Each channel queues a component, node and version once, independently of service restarts or delivery-history cleanup. Inspect and retry failed deliveries in notification history. An interrupted send may already have reached the recipient, so manual retries can duplicate it.
+
+Connecting an MCP client does not create a notification subscription. If an AI bot can receive Webhooks, add its endpoint as a channel and subscribe to release events. After receiving an event, the bot can query details or execute a user-requested update through MCP. The current MCP transport is request/response and has no release-event push subscription. These alerts cover the management service and Agents; DST server and LuaJIT2 releases are not yet included.
