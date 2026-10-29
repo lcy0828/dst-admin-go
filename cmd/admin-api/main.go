@@ -36,7 +36,7 @@ func main() {
 	if supervise {
 		component = "launcher"
 	}
-	closeLogs := servicelogs.Start(servicelogs.Config{Root: servicelogs.Root(configpath.Current()), Component: component, Version: buildinfo.Current().Version}, softwareupdate.ManagedChild())
+	closeLogs := servicelogs.Start(servicelogs.Config{Root: servicelogs.Root(configpath.Current()), Component: component, Version: buildinfo.Current().Version}, servicelogs.CapturedByLauncher())
 	defer closeLogs()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -290,4 +291,28 @@ func BenchmarkServiceLogQueries(b *testing.B) {
 			}
 		}
 	})
+}
+
+func TestOnlineUpdateFromOldLauncherKeepsServiceLogPersistence(t *testing.T) {
+	t.Setenv("DST_ADMIN_SUPERVISED", "1")
+	t.Setenv("DST_ADMIN_SERVICE_LOG_CAPTURE", "")
+	if CapturedByLauncher() {
+		t.Fatal("legacy launcher incorrectly claimed log ownership")
+	}
+	root := t.TempDir()
+	closeLogs := Start(Config{Root: root, Component: "controller", Console: io.Discard}, CapturedByLauncher())
+	Emit(shared.ServiceLogEntry{Message: "new program under legacy launcher", JobID: "update-check"})
+	closeLogs()
+	page, err := Query(context.Background(), root, shared.ServiceLogQuery{JobID: "update-check"})
+	if err != nil || len(page.Items) != 1 {
+		t.Fatal(page, err)
+	}
+	t.Setenv("DST_ADMIN_SERVICE_LOG_CAPTURE", "1")
+	if !CapturedByLauncher() {
+		t.Fatal("new launcher capture capability ignored")
+	}
+	t.Setenv("DST_ADMIN_SUPERVISED", "")
+	if CapturedByLauncher() {
+		t.Fatal("unsupervised process cannot delegate its writer")
+	}
 }

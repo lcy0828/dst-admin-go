@@ -121,7 +121,8 @@ func (s *supervisor) start(release *installedRelease) (*childProcess, string, er
 	command := exec.Command(binary, s.args...)
 	replacements := map[string]string{
 		"DST_ADMIN_SUPERVISED": "1", "DST_ADMIN_UPDATE_PARENT_PID": strconv.Itoa(os.Getpid()),
-		"DST_ADMIN_UPDATE_DIR": s.root, "DST_ADMIN_UPDATE_BASE_VERSION": s.baseVersion,
+		"DST_ADMIN_SERVICE_LOG_CAPTURE": "1",
+		"DST_ADMIN_UPDATE_DIR":          s.root, "DST_ADMIN_UPDATE_BASE_VERSION": s.baseVersion,
 		"DST_ADMIN_BOOT_ID": bootID, "PATH": path,
 	}
 	if s.configPath != "" {

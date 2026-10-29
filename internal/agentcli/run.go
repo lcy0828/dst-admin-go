@@ -76,7 +76,7 @@ func Run() {
 	if releaseBuild && softwareupdate.AgentPlatform(runtime.GOOS+"-"+runtime.GOARCH) && !softwareupdate.ManagedChild() {
 		component = "launcher"
 	}
-	closeLogs := servicelogs.Start(servicelogs.Config{Root: servicelogs.Root(*configPath), Component: component, Version: buildinfo.Current().Version}, softwareupdate.ManagedChild())
+	closeLogs := servicelogs.Start(servicelogs.Config{Root: servicelogs.Root(*configPath), Component: component, Version: buildinfo.Current().Version}, servicelogs.CapturedByLauncher())
 	defer closeLogs()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

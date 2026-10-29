@@ -26,6 +26,12 @@ var debugCheckAt, debugUntil time.Time
 var legacyTime = regexp.MustCompile(`^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)? `)
 var legacyIDs = regexp.MustCompile(`(?:^|\s)(request_id|job_id|operation_id|room_id|world_id)=([^\s]+)`)
 
+// Old launchers supervise updates but do not persist child output. A child
+// must retain its own writer unless the parent explicitly advertises capture.
+func CapturedByLauncher() bool {
+	return os.Getenv("DST_ADMIN_SUPERVISED") == "1" && os.Getenv("DST_ADMIN_SERVICE_LOG_CAPTURE") == "1"
+}
+
 // Start runs before configuration validation. Metadata-only CLI commands do
 // not call it. Supervised children emit structured lines; only the parent owns
 // persistence and rotation.
