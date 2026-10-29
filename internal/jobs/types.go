@@ -107,11 +107,12 @@ type TargetResult struct {
 type Runner func(context.Context, func(TargetResult)) error
 
 type Event struct {
-	ID        int64     `json:"id"`
-	JobID     string    `json:"jobId"`
-	Type      string    `json:"type"`
-	Data      Job       `json:"data"`
-	CreatedAt time.Time `json:"createdAt"`
+	stageChanged bool
+	ID           int64     `json:"id"`
+	JobID        string    `json:"jobId"`
+	Type         string    `json:"type"`
+	Data         Job       `json:"data"`
+	CreatedAt    time.Time `json:"createdAt"`
 }
 
 type ListFilter struct {

@@ -20,6 +20,7 @@ var remoteRuntimeControlPrefixes = []string{
 	"/api/v2/runtime-providers",
 	"/api/v2/runtime-targets",
 	"/api/v2/system/resources",
+	"/api/v2/system/service-logs",
 	"/api/v2/system/settings",
 	"/api/v2/system/software",
 	"/api/v2/system/ai",

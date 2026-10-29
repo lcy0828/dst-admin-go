@@ -66,6 +66,7 @@ import (
 	"dont/internal/runtimeobservation"
 	"dont/internal/runtimeoverview"
 	"dont/internal/saveimport"
+	"dont/internal/servicelogs"
 	"dont/internal/shards"
 	"dont/internal/softwareupdate"
 	"dont/internal/steamlogin"
@@ -1498,6 +1499,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		runtimeHandler.Register(v2)
 		runtimeObservabilityHandler.Register(v2)
 		jobHandler.Register(v2)
+		httpapi.NewServiceLogsHandler(servicelogs.Root(config.ConfigPath), agentService, jobService).Register(v2)
 		logHandler.Register(v2)
 		chatLogHandler.Register(v2)
 		structuredLogHandler.Register(v2)

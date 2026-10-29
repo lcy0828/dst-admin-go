@@ -15,6 +15,7 @@ import (
 
 	"dont/agent"
 	"dont/internal/buildinfo"
+	"dont/internal/servicelogs"
 	"dont/internal/softwareupdate"
 	"dont/shared"
 )
@@ -57,7 +58,7 @@ func Run() {
 	if *attach {
 		socketPath, err := agent.ConsoleAttachSocketPath(*statePath)
 		if err != nil {
-			log.Fatal(err)
+			servicelogs.Fatal(err)
 		}
 		owner := *attachOwner
 		if owner == "" {
@@ -67,23 +68,29 @@ func Run() {
 			SocketPath: socketPath, InstallationID: *installation, Cluster: *cluster, Shard: *shard,
 			Owner: owner, Writable: *writable, LeaseDuration: *attachLease,
 		}); err != nil {
-			log.Fatal(err)
+			servicelogs.Fatal(err)
 		}
 		return
 	}
+	component := "agent"
+	if releaseBuild && softwareupdate.AgentPlatform(runtime.GOOS+"-"+runtime.GOARCH) && !softwareupdate.ManagedChild() {
+		component = "launcher"
+	}
+	closeLogs := servicelogs.Start(servicelogs.Config{Root: servicelogs.Root(*configPath), Component: component, Version: buildinfo.Current().Version}, softwareupdate.ManagedChild())
+	defer closeLogs()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if releaseBuild && softwareupdate.AgentPlatform(runtime.GOOS+"-"+runtime.GOARCH) && !softwareupdate.ManagedChild() {
 		config, err := filepath.Abs(*configPath)
 		if err != nil {
-			log.Fatal(err)
+			servicelogs.Fatal(err)
 		}
 		root, err := softwareupdate.DefaultAgentRoot(config)
 		if err != nil {
-			log.Fatal(err)
+			servicelogs.Fatal(err)
 		}
 		if err := softwareupdate.RunAgentSupervisor(ctx, root, config, releaseVersion, os.Args[1:]); err != nil {
-			log.Fatalf("Agent launcher: %v", err)
+			servicelogs.Fatalf("Agent launcher: %v", err)
 		}
 		return
 	}
@@ -91,7 +98,7 @@ func Run() {
 	if *agentID == "" {
 		hostname, err := os.Hostname()
 		if err != nil {
-			log.Fatalf("无法获取主机名: %v", err)
+			servicelogs.Fatalf("无法获取主机名: %v", err)
 		}
 		*agentID = hostname
 	}
@@ -105,22 +112,22 @@ func Run() {
 		OperationStateFile: *statePath,
 	})
 	if err != nil {
-		log.Fatalf("创建Agent失败: %v", err)
+		servicelogs.Fatalf("创建Agent失败: %v", err)
 	}
 	if releaseBuild && softwareupdate.ManagedChild() {
 		root, err := softwareupdate.DefaultAgentRoot(*configPath)
 		if err != nil {
-			log.Fatal(err)
+			servicelogs.Fatal(err)
 		}
 		a.ConfigureSoftwareUpdate(softwareupdate.New(softwareupdate.Config{Kind: "agent", Root: root, Current: buildinfo.Current(), BaseVersion: os.Getenv("DST_ADMIN_UPDATE_BASE_VERSION"), Platform: runtime.GOOS + "-" + runtime.GOARCH, Managed: true}))
 		closeHealth, err := softwareupdate.ServeAgentHealth(releaseVersion, a.Connected, stop)
 		if err != nil {
-			log.Fatalf("Agent update health: %v", err)
+			servicelogs.Fatalf("Agent update health: %v", err)
 		}
 		defer closeHealth()
 	}
 	if err := a.Start(); err != nil {
-		log.Fatalf("启动Agent失败: %v", err)
+		servicelogs.Fatalf("启动Agent失败: %v", err)
 	}
 
 	<-ctx.Done()

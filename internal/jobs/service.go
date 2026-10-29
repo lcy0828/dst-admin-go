@@ -2,6 +2,8 @@ package jobs
 
 import (
 	"context"
+	"dont/internal/servicelogs"
+	"dont/shared"
 	"errors"
 	"fmt"
 	"log"
@@ -104,6 +106,7 @@ func (s *Service) SubmitFactory(kind, roomID, worldID string, targets []TargetSp
 		}
 	}
 	s.broker.Publish()
+	logJobEvent(job, "JOB_QUEUED", "info", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
 	s.cancels[job.ID] = cancel
@@ -155,6 +158,9 @@ func (s *Service) UpdateProgress(jobID string, progress int, message string) (Jo
 
 func (s *Service) UpdateProgressDetail(jobID string, update ProgressUpdate) (Job, error) {
 	job, event, err := s.store.UpdateProgressDetail(jobID, update)
+	if err == nil && event.stageChanged {
+		logJobEvent(job, "JOB_STAGE_CHANGED", "info", update.Message)
+	}
 	if err == nil && event.ID != 0 {
 		s.broker.Publish()
 	}
@@ -232,12 +238,17 @@ func (s *Service) run(ctx context.Context, jobID string, runner Runner) {
 			cancel()
 		}
 	}()
-	if _, _, err := s.store.MarkRunning(jobID); err != nil {
+	if running, _, err := s.store.MarkRunning(jobID); err != nil {
 		return
+	} else {
+		logJobEvent(running, "JOB_RUNNING", "info", "")
 	}
 	s.broker.Publish()
 	report := func(result TargetResult) {
-		if _, _, err := s.store.RecordTarget(jobID, result); err == nil {
+		if recorded, _, err := s.store.RecordTarget(jobID, result); err == nil {
+			if result.Error != nil {
+				logJobEvent(recorded, result.Error.Code, "error", result.Error.Message)
+			}
 			s.broker.Publish()
 		}
 	}
@@ -261,6 +272,21 @@ func (s *Service) run(ctx context.Context, jobID string, runner Runner) {
 	}
 	if completed, _, err := s.store.Complete(jobID, runnerErr, ctx.Err() != nil); err == nil {
 		s.broker.Publish()
+		level := "info"
+		if completed.Status == StatusFailed {
+			level = "error"
+		}
+		logJobEvent(completed, "JOB_COMPLETED", level, "")
 		s.notifyCompletion(completed)
 	}
+}
+
+func logJobEvent(job Job, code, level, message string) {
+	if message == "" {
+		message = job.Kind + ": " + string(job.Status)
+		if job.Error != nil {
+			message += " " + job.Error.Message
+		}
+	}
+	servicelogs.Emit(shared.ServiceLogEntry{Level: level, Code: code, Message: message, JobID: job.ID, RoomID: job.RoomID, WorldID: job.WorldID, OperationID: job.Kind})
 }

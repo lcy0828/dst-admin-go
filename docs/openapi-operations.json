@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "285890b688ad667a2a693b36c779aa7f6dcc77f5dcf66f077591169de781161d",
+  "operationsSHA256": "684a9fd96717fefb4d6c4ebd685a7060de8c374c64c76fce97a03a288009952b",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -1141,6 +1141,20 @@
       "title": "Export automation group and task definitions"
     },
     {
+      "operationId": "exportServiceLogs",
+      "method": "GET",
+      "path": "/system/service-logs/export",
+      "transport": "download",
+      "tags": [
+        "log",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Export a bounded redacted service log page"
+    },
+    {
       "operationId": "forgetAgent",
       "method": "DELETE",
       "path": "/agents/{agentId}",
@@ -2034,6 +2048,63 @@
       "title": "Read one save import and its normalized manifest"
     },
     {
+      "operationId": "getServiceLogContext",
+      "method": "GET",
+      "path": "/system/service-logs/context",
+      "transport": "json",
+      "tags": [
+        "log",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read surrounding service log entries"
+    },
+    {
+      "operationId": "getServiceLogDiagnostics",
+      "method": "GET",
+      "path": "/system/service-logs/diagnostics",
+      "transport": "json",
+      "tags": [
+        "log",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Correlate service logs with a failed task or request"
+    },
+    {
+      "operationId": "getServiceLogSettings",
+      "method": "GET",
+      "path": "/system/service-logs/settings",
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "log",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read service log retention and debug settings"
+    },
+    {
+      "operationId": "getServiceLogSource",
+      "method": "GET",
+      "path": "/system/service-logs/sources/{sourceId}",
+      "transport": "json",
+      "tags": [
+        "log",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read selected service log source health"
+    },
+    {
       "operationId": "getSetupChecks",
       "method": "GET",
       "path": "/system/setup-checks",
@@ -2918,6 +2989,20 @@
       "title": "List local save import sessions and compatibility reports"
     },
     {
+      "operationId": "listServiceLogSources",
+      "method": "GET",
+      "path": "/system/service-logs/sources",
+      "transport": "json",
+      "tags": [
+        "log",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "List panel and Agent log sources"
+    },
+    {
       "operationId": "listStructuredLogRules",
       "method": "GET",
       "path": "/log-rules",
@@ -3452,6 +3537,20 @@
       "risk": "high",
       "runtime": "any",
       "title": "Permanently remove a deleted world"
+    },
+    {
+      "operationId": "queryServiceLogs",
+      "method": "GET",
+      "path": "/system/service-logs",
+      "transport": "json",
+      "tags": [
+        "log",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Query persisted panel and Agent service logs"
     },
     {
       "operationId": "readNotificationEvents",
@@ -4673,6 +4772,22 @@
       "risk": "normal",
       "runtime": "any",
       "title": "Update one execution environment network identity"
+    },
+    {
+      "operationId": "updateServiceLogSettings",
+      "method": "PUT",
+      "path": "/system/service-logs/settings",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "log",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Update service log retention and temporary debug settings"
     },
     {
       "operationId": "updateStructuredLogRule",

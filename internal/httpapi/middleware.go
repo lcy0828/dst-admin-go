@@ -1,9 +1,13 @@
 package httpapi
 
 import (
-	"log"
+	"dont/internal/servicelogs"
+	"dont/shared"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -30,7 +34,7 @@ func RequestContext() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		started := time.Now()
 		requestID := strings.TrimSpace(c.GetHeader("X-Request-ID"))
-		if requestID == "" || len(requestID) > 128 {
+		if requestID == "" || len(requestID) > 128 || strings.ContainsAny(requestID, "\r\n\t\x00 ") {
 			requestID = uuid.NewString()
 		}
 		c.Set(requestIDKey, requestID)
@@ -50,9 +54,28 @@ func RequestContext() gin.HandlerFunc {
 		eventStream := strings.EqualFold(strings.TrimSpace(contentType), "text/event-stream")
 		// A subscription's lifetime is not request latency. Failed subscriptions
 		// and ordinary failures must still be visible, even when they fail fast.
-		if strings.HasPrefix(c.Request.URL.Path, "/api/v2/") &&
-			(c.Writer.Status() >= http.StatusBadRequest || duration >= time.Second && !eventStream || isModMutationRequest(c.Request.Method, c.Request.URL.Path)) {
-			log.Printf("[API] request_id=%s method=%s path=%s status=%d duration_ms=%d", requestID, c.Request.Method, c.Request.URL.Path, c.Writer.Status(), duration.Milliseconds())
+		important := c.Writer.Status() >= http.StatusBadRequest || duration >= time.Second && !eventStream || isModMutationRequest(c.Request.Method, c.Request.URL.Path)
+		debugRequest := !eventStream && !important && servicelogs.DebugEnabled()
+		if strings.HasPrefix(c.Request.URL.Path, "/api/v2/") && (important || debugRequest) {
+			code, _ := c.Get("dst_admin.error_code")
+			message, _ := c.Get("dst_admin.error_message")
+			stack, _ := c.Get("dst_admin.error_stack")
+			level := "info"
+			if debugRequest {
+				level = "debug"
+			} else if c.Writer.Status() >= 500 {
+				level = "error"
+			} else if c.Writer.Status() >= 400 {
+				level = "warn"
+			}
+			text := fmt.Sprintf("[API] request_id=%s method=%s path=%s status=%d duration_ms=%d", requestID, c.Request.Method, c.Request.URL.Path, c.Writer.Status(), duration.Milliseconds())
+			if value, ok := message.(string); ok && value != "" {
+				text += " " + value
+			}
+			entry := shared.ServiceLogEntry{Level: level, Message: text, RequestID: requestID, Method: c.Request.Method, Path: c.Request.URL.Path, Status: c.Writer.Status(), DurationMS: duration.Milliseconds()}
+			entry.Code, _ = code.(string)
+			entry.Stack, _ = stack.(string)
+			servicelogs.Emit(entry)
 		}
 	}
 }
@@ -62,7 +85,8 @@ func isModMutationRequest(method, path string) bool {
 }
 
 func Recovery() gin.HandlerFunc {
-	return gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
+	return gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, recovered interface{}) {
+		c.Set("dst_admin.error_stack", fmt.Sprintf("%v\n%s", recovered, debug.Stack()))
 		Failure(c, http.StatusInternalServerError, "INTERNAL_ERROR", "服务内部错误", nil)
 	})
 }

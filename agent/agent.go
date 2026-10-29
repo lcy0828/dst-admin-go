@@ -26,6 +26,7 @@ import (
 	"dont/internal/modartifact"
 	"dont/internal/moddistribution"
 	"dont/internal/operationprogress"
+	"dont/internal/servicelogs"
 	"dont/internal/shardtransfer"
 	"dont/internal/softwareupdate"
 	"dont/internal/steamlogin"
@@ -845,6 +846,39 @@ func (a *Agent) executeCommand(cmdPayload shared.CommandPayload, connection *sha
 	var restartRequired bool
 
 	switch cmdPayload.Type {
+	case shared.ServiceLogsCommand:
+		if cmdPayload.ServiceLogs == nil {
+			errMsg = "SERVICE_LOGS_INVALID"
+			exitCode = 1
+			break
+		}
+		root := servicelogs.CurrentRoot()
+		if root == "" {
+			root = servicelogs.Root(a.Config.KeyFile)
+		}
+		queryCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		result, readErr := servicelogs.Execute(queryCtx, root, *cmdPayload.ServiceLogs)
+		cancel()
+		if readErr != nil {
+			switch {
+			case errors.Is(readErr, servicelogs.ErrInvalid):
+				result.ErrorCode = "SERVICE_LOGS_INVALID"
+			case errors.Is(readErr, servicelogs.ErrCursorExpired):
+				result.ErrorCode = "SERVICE_LOGS_CURSOR_EXPIRED"
+			case errors.Is(readErr, servicelogs.ErrConflict):
+				result.ErrorCode = "SERVICE_LOGS_CONFLICT"
+			default:
+				result.ErrorCode = "SERVICE_LOGS_UNAVAILABLE"
+			}
+		}
+		encoded, encodeErr := json.Marshal(result)
+		if encodeErr != nil {
+			errMsg = encodeErr.Error()
+			exitCode = 1
+		} else {
+			output = string(encoded)
+			success = true
+		}
 	case "exec":
 		output, errMsg, exitCode = a.executeArgumentCommand(cmdPayload.Content, cmdPayload.Timeout)
 		success = exitCode == 0 && errMsg == ""
@@ -1236,6 +1270,7 @@ func (a *Agent) collectSystemInfo() map[string]interface{} {
 		}
 	}
 	deploymentCapabilities, runtimeProfiles, capabilityIssues := runtimeDeploymentCapabilities(a.Config.RuntimeInstallations)
+	capabilities = append(capabilities, shared.ServiceLogsCommand)
 	capabilities = append(capabilities, deploymentCapabilities...)
 	if len(runtimeProfiles) > 0 && runtime.GOOS != "windows" {
 		capabilities = append(capabilities,

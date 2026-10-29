@@ -238,7 +238,11 @@ func (s *Store) UpdateProgressDetail(jobID string, update ProgressUpdate) (Job, 
 		tx.Rollback()
 		return Job{}, Event{}, err
 	}
-	return s.commitEvent(tx, "job.progress", jobID)
+	job, event, err := s.commitEvent(tx, "job.progress", jobID)
+	// Reuse the transaction's existing observation; logging progress must not
+	// introduce an additional database read for every download update.
+	event.stageChanged = err == nil && next.Stage != "" && next.Stage != previous.Stage
+	return job, event, err
 }
 
 func (s *Store) RecordTarget(jobID string, result TargetResult) (Job, Event, error) {

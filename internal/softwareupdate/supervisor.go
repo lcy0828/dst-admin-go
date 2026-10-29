@@ -14,6 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"dont/internal/servicelogs"
+	"dont/shared"
 )
 
 type childProcess struct {
@@ -125,7 +128,13 @@ func (s *supervisor) start(release *installedRelease) (*childProcess, string, er
 		replacements["DST_ADMIN_CONFIG"] = s.configPath
 	}
 	command.Env = environmentWith(s.environment, replacements)
-	command.Stdout, command.Stderr, command.Stdin = os.Stdout, os.Stderr, os.Stdin
+	component := "controller"
+	if s.kind == "agent" {
+		component = "agent"
+	}
+	stdout := servicelogs.NewChildWriter(component, release.Version, bootID)
+	stderr := servicelogs.NewChildWriter(component, release.Version, bootID)
+	command.Stdout, command.Stderr, command.Stdin = stdout, stderr, os.Stdin
 	if err := command.Start(); err != nil {
 		return nil, "", err
 	}
@@ -133,7 +142,13 @@ func (s *supervisor) start(release *installedRelease) (*childProcess, string, er
 	if s.agent != nil {
 		child.terminate = func() error { return s.agent.stop(bootID) }
 	}
-	go func() { child.done <- command.Wait() }()
+	go func() {
+		err := command.Wait()
+		stdout.Flush()
+		stderr.Flush()
+		servicelogs.Emit(sharedLogExit(component, release.Version, bootID, err))
+		child.done <- err
+	}()
 	return child, bootID, nil
 }
 
@@ -461,4 +476,13 @@ func (s *supervisor) wait(ctx context.Context, child *childProcess) error {
 			}
 		}
 	}
+}
+
+func sharedLogExit(component, version, boot string, err error) shared.ServiceLogEntry {
+	level, message := "info", "Service child process exited"
+	if err != nil {
+		level = "error"
+		message += ": " + err.Error()
+	}
+	return shared.ServiceLogEntry{Level: level, Component: component, Version: version, BootID: boot, Code: "SERVICE_PROCESS_EXIT", Message: message}
 }

@@ -23,6 +23,8 @@ func Success(c *gin.Context, status int, data interface{}) {
 }
 
 func Failure(c *gin.Context, status int, code, message string, details interface{}) {
+	c.Set("dst_admin.error_code", code)
+	c.Set("dst_admin.error_message", message)
 	c.AbortWithStatusJSON(status, gin.H{
 		"data":  nil,
 		"error": errorBody{Code: code, Message: message, Details: details},

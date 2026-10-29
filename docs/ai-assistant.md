@@ -128,3 +128,7 @@ AI 未使用时不启动采集、模型轮询或后台任务。同时最多处�
 在 **连接 → 机器人接收平台通知** 中配置 Webhook；不需要另一套通知配置。没有接收接口的 MCP 宿主可以定时调用 `readNotificationEvents`，按返回游标补读通知并唤醒模型。平台不会因普通 MCP 连接而自动唤醒外部机器人。详见[通知接入与补读](notifications.md#机器人补读通知)。
 
 查询历史性能时，通过 `find_api` 查找 `getRoomPerformanceReport` 并获取参数结构。使用真实房间 ID 作为 `path.roomId`；`query` 可包含 `worldId`、RFC3339 `from` / `to` 和 `maxPoints`（AI 建议 60）。优先读 `worlds` 中的整段统计、覆盖率和规则分析，再按需查看曲线及运行事件。分数反映模拟推进比例，不能当作 FPS；缺测和暂停不记作零分，也不能从时间接近推断模组导致卡顿。采样与保留设置使用同一套 OpenAPI。见[性能与报表](performance-reports.md)。
+
+### 排查管理服务自身异常
+
+除游戏世界日志外，AI / MCP 现在可查询控制端和 Agent 的持久化服务日志，按任务 ID 或请求 ID 关联排查。入口、参数和保存边界见[服务日志](service-logs.md)。

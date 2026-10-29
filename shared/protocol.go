@@ -75,6 +75,7 @@ type CommandPayload struct {
 	Content          string                   `json:"content,omitempty"`
 	ShardOperation   *ShardOperationRequest   `json:"shard_operation,omitempty"`
 	RuntimeOperation *RuntimeOperationRequest `json:"runtime_operation,omitempty"`
+	ServiceLogs      *ServiceLogRequest       `json:"service_logs,omitempty"`
 	AgentUpgrade     *AgentUpgradeRequest     `json:"agent_upgrade,omitempty"`
 	Timeout          int                      `json:"timeout"` // 超时时间(秒)
 }
