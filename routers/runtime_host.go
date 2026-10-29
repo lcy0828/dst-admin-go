@@ -119,7 +119,7 @@ func (h *RuntimeHost) barrier(ctx context.Context) (func(), error) {
 	}
 }
 
-func (h *RuntimeHost) apply(ctx context.Context, persist, rollback func() error) (resultErr error) {
+func (h *RuntimeHost) apply(ctx context.Context, changedFields []string, persist, rollback func() error) (resultErr error) {
 	defer func() {
 		if resultErr != nil {
 			log.Printf("[Settings] runtime apply failed: %v", resultErr)
@@ -145,7 +145,7 @@ func (h *RuntimeHost) apply(ctx context.Context, persist, rollback func() error)
 		}
 		defer resumeSoftware()
 	}
-	resume, err := old.prepareReload(ctx)
+	resume, err := old.prepareReload(ctx, changedFields)
 	if err != nil {
 		return err
 	}

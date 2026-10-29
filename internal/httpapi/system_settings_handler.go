@@ -82,6 +82,10 @@ func (h *SystemSettingsHandler) testEmail(c *gin.Context) {
 
 func systemSettingsFailure(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, systemsettings.ErrLocalWorldsRunning):
+		Failure(c, http.StatusConflict, "SYSTEM_SETTINGS_WORLDS_RUNNING", err.Error(), nil)
+	case errors.Is(err, systemsettings.ErrControllerInUse):
+		Failure(c, http.StatusConflict, "SYSTEM_SETTINGS_CONTROLLER_IN_USE", err.Error(), nil)
 	case errors.Is(err, systemsettings.ErrRuntimeBusy):
 		Failure(c, http.StatusConflict, "SYSTEM_SETTINGS_RUNTIME_BUSY", err.Error(), nil)
 	case errors.Is(err, systemsettings.ErrConflict):

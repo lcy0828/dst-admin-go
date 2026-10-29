@@ -3,6 +3,7 @@ package systemsettings
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 )
 
@@ -13,7 +14,7 @@ func TestRuntimeApplyPersistsOnlyWhenIdleAndRollsBackFailure(t *testing.T) {
 			s, _ := NewService(repo)
 			before, _ := repo.Snapshot()
 			called := false
-			s.SetRuntimeApplier(func(_ context.Context, save, rollback func() error) error {
+			s.SetRuntimeApplier(func(_ context.Context, _ []string, save, rollback func() error) error {
 				called = true
 				if mode == "busy" {
 					return ErrRuntimeBusy
@@ -53,5 +54,37 @@ func TestSavingExplicitDefaultsDoesNotRequireRestart(t *testing.T) {
 	result, err := s.Apply(Input{Revision: before.Revision, Confirmation: ApplyConfirmation, Values: map[string]string{"fleet.localExecutorEnabled": "true", "fleet.controllerEnabled": "true", "fleet.memberEnabled": "false"}})
 	if err != nil || result.Settings.RestartRequired {
 		t.Fatalf("equivalent defaults require restart: %v", err)
+	}
+}
+
+func TestRuntimeApplyUsesActiveValuesAndIncludesPendingFileChanges(t *testing.T) {
+	repo := NewMemoryRepository()
+	s, err := NewService(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.lookupEnv = func(string) (string, bool) { return "", false }
+	var changed []string
+	s.SetRuntimeApplier(func(_ context.Context, fields []string, save, _ func() error) error {
+		changed = append([]string(nil), fields...)
+		return save()
+	})
+	before, _ := s.Settings()
+	result, err := s.Apply(Input{Revision: before.Revision, Confirmation: ApplyConfirmation, Values: map[string]string{
+		"fleet.localExecutorEnabled": "true", "fleet.controllerEnabled": "false", "fleet.memberEnabled": "false",
+		"ui.systemName": "Online role switch",
+	}})
+	if err != nil || !slices.Equal(changed, []string{"fleet.controllerEnabled"}) || result.Settings.RestartRequired {
+		t.Fatalf("role-only apply: changed=%v result=%+v err=%v", changed, result, err)
+	}
+	// An operator edited the file after this generation started. A subsequent
+	// role save must not bypass the stop requirement for that pending path.
+	snapshot, err := repo.Save(result.Settings.Revision, map[string]string{"paths.save": "/opt/dst/pending-saves"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Apply(Input{Revision: snapshot.Revision, Confirmation: ApplyConfirmation, Values: map[string]string{"fleet.controllerEnabled": "true"}})
+	if err != nil || !slices.Equal(changed, []string{"paths.save", "fleet.controllerEnabled"}) {
+		t.Fatalf("pending file changes were omitted: changed=%v err=%v", changed, err)
 	}
 }

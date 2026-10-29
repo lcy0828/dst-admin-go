@@ -6,7 +6,9 @@ import (
 )
 
 var (
-	ErrRuntimeBusy          = errors.New("请先停止本机世界并等待任务完成，再应用管理方式或目录设置")
+	ErrRuntimeBusy          = errors.New("后台任务或其他配置变更正在执行，请等待完成后重试")
+	ErrLocalWorldsRunning   = errors.New("本次变更涉及本机运行环境或控制权，请先停止本机世界后重试")
+	ErrControllerInUse      = errors.New("仍有房间依赖远程机器，请先迁回本机或调整部署后再关闭集中管理")
 	ErrConflict             = errors.New("system settings revision conflict")
 	ErrInvalidInput         = errors.New("system settings input is invalid")
 	ErrConfirmationRequired = errors.New("system settings confirmation is required")

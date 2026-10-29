@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -1565,7 +1566,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		}
 		return resume, nil
 	}
-	application.prepareReload = func(ctx context.Context) (func(), error) {
+	application.prepareReload = func(ctx context.Context, changedFields []string) (func(), error) {
 		if steamLoginManager.Busy() {
 			return nil, systemsettings.ErrRuntimeBusy
 		}
@@ -1582,25 +1583,21 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 			resumeJobs := resume
 			resume = func() { resumeMember(); resumeJobs() }
 		}
-		if deploymentProfile.LocalExecutorEnabled {
-			localRooms, inspectErr := roomCatalog.List()
+		if deploymentProfile.ControllerEnabled && slices.Contains(changedFields, "fleet.controllerEnabled") {
+			dependentRooms, inspectErr := topologyService.RemoteDeploymentRooms()
 			if inspectErr != nil {
 				resume()
 				return nil, inspectErr
 			}
-			for _, room := range localRooms {
-				worlds, inspectErr := roomCatalog.Worlds(room.ID)
-				if inspectErr != nil {
-					resume()
-					return nil, inspectErr
-				}
-				for _, world := range worlds {
-					status, inspectErr := shardControl.Status(ctx, room.DirectoryName, world.DirectoryName)
-					if inspectErr != nil || status.SessionExists || status.State != shards.RuntimeStopped && status.State != shards.RuntimeFailed {
-						resume()
-						return nil, systemsettings.ErrRuntimeBusy
-					}
-				}
+			if len(dependentRooms) != 0 {
+				resume()
+				return nil, fmt.Errorf("%w（房间：%s）", systemsettings.ErrControllerInUse, dependentRooms[0].Name)
+			}
+		}
+		if deploymentProfile.LocalExecutorEnabled && !preservesLocalWorlds(deploymentProfile, changedFields) {
+			if inspectErr := requireStoppedLocalWorlds(ctx, roomCatalog, shardControl); inspectErr != nil {
+				resume()
+				return nil, inspectErr
 			}
 		}
 		return resume, nil

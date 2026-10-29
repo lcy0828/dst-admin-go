@@ -48,7 +48,10 @@ func TestWorkshopLiveSettingsBypassWorldStopBarrierAndMaskProxy(t *testing.T) {
 	}
 	s.lookupEnv = func(string) (string, bool) { return "", false }
 	barrierCalls, commits, discards := 0, 0, 0
-	s.SetRuntimeApplier(func(context.Context, func() error, func() error) error { barrierCalls++; return ErrRuntimeBusy })
+	s.SetRuntimeApplier(func(context.Context, []string, func() error, func() error) error {
+		barrierCalls++
+		return ErrRuntimeBusy
+	})
 	var effective mods.NetworkConfig
 	s.SetWorkshopApplier(func(config mods.NetworkConfig) (func(), func(), error) {
 		return func() { commits++; effective = config }, func() { discards++ }, nil

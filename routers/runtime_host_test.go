@@ -8,16 +8,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"dont/internal/buildinfo"
+	"dont/internal/rooms"
+	"dont/internal/shards"
 	"dont/internal/softwareupdate"
 	"dont/internal/systemsettings"
 	"dont/models"
 	"dont/pkg/setting"
+	"dont/shared"
+	dsttmux "dont/tmux"
 	"github.com/gin-gonic/gin"
 	"github.com/go-ini/ini"
 	"github.com/google/uuid"
@@ -49,14 +54,14 @@ func TestRuntimeConfigurationApplyDoesNotCancelSoftwareDownload(t *testing.T) {
 	engine := gin.New()
 	app := newApplication(engine, applicationHooks{})
 	app.software = software
-	app.prepareReload = func(context.Context) (func(), error) {
+	app.prepareReload = func(context.Context, []string) (func(), error) {
 		t.Error("configuration reload proceeded during software download")
 		return func() {}, nil
 	}
 	host := &RuntimeHost{app: app, active: make(map[*requestTicket]struct{}), changed: make(chan struct{}, 1)}
 	persisted := false
 	engine.POST("/apply", func(c *gin.Context) {
-		err := host.apply(c.Request.Context(), func() error { persisted = true; return nil }, func() error { return nil })
+		err := host.apply(c.Request.Context(), []string{"paths.save"}, func() error { persisted = true; return nil }, func() error { return nil })
 		if err == systemsettings.ErrRuntimeBusy {
 			c.Status(409)
 		} else {
@@ -75,6 +80,7 @@ func TestRuntimeConfigurationApplyDoesNotCancelSoftwareDownload(t *testing.T) {
 func TestRuntimeHostAppliesPathsAndRolesAndRestoresFailedConfiguration(t *testing.T) {
 	configureRouterTestEnvironment(t)
 	t.Setenv("DST_ADMIN_TEST_SYSTEM_SETTINGS", "")
+	t.Setenv("DST_ADMIN_TEST_CONTROL", "")
 	// The Runtime uses a Unix socket under saves. t.TempDir includes the test
 	// name, which exceeds the socket path limit for this integration test.
 	root, err := os.MkdirTemp("/tmp", "dst-rt-")
@@ -195,6 +201,102 @@ func TestRuntimeHostAppliesPathsAndRolesAndRestoresFailedConfiguration(t *testin
 	if response.Code != 200 || !strings.Contains(response.Body.String(), nextSaves) {
 		t.Fatalf("rollback failed: %d %s", response.Code, response.Body)
 	}
+	t.Run("role switches preserve live tmux sessions", func(t *testing.T) {
+		if _, err := exec.LookPath("tmux"); err != nil {
+			t.Skip("tmux unavailable")
+		}
+		roomPath := filepath.Join(nextSaves, "live-room")
+		if err := os.MkdirAll(roomPath, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(roomPath, "cluster.ini"), []byte("[NETWORK]\ncluster_name = Online switch\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		socket, err := shards.NativeConsoleSocketPath(nextSaves)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = exec.Command("tmux", "-S", socket, "kill-server").Run() })
+		identities := map[string]string{}
+		identity := func(world string) string {
+			t.Helper()
+			output, err := exec.Command("tmux", "-S", socket, "display-message", "-p", "-t", "="+dsttmux.V2SessionName("live-room", world)+":0.0", "#{session_id}|#{session_created}|#{pane_pid}|#{pane_dead}").CombinedOutput()
+			if err != nil {
+				t.Fatalf("inspect %s: %s %v", world, output, err)
+			}
+			return string(output)
+		}
+		for _, world := range []string{"Master", "Caves"} {
+			worldPath := filepath.Join(roomPath, world)
+			if err := os.MkdirAll(worldPath, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(worldPath, "server.ini"), []byte("[NETWORK]\nserver_port = 11000\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if output, err := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", dsttmux.V2SessionName("live-room", world), "/bin/sleep", "180").CombinedOutput(); err != nil {
+				t.Fatalf("create %s: %s %v", world, output, err)
+			}
+			identities[world] = identity(world)
+		}
+		// Combining the gateway switch with a path change must still be refused.
+		blocked := apply(map[string]string{"fleet.controllerEnabled": "true", "paths.save": filepath.Join(root, "blocked-saves")})
+		if blocked.Code != 409 || !strings.Contains(blocked.Body.String(), "SYSTEM_SETTINGS_WORLDS_RUNNING") {
+			t.Fatalf("path change bypassed live-world guard: %d %s", blocked.Code, blocked.Body)
+		}
+		for _, enabled := range []string{"true", "false"} {
+			response := apply(map[string]string{"fleet.localExecutorEnabled": "true", "fleet.controllerEnabled": enabled, "fleet.memberEnabled": "false"})
+			if response.Code != 200 {
+				t.Fatalf("online role switch %s: %d %s", enabled, response.Code, response.Body)
+			}
+			for world, before := range identities {
+				if after := identity(world); before != after {
+					t.Fatalf("%s was replaced: before=%q after=%q", world, before, after)
+				}
+			}
+		}
+		// Offline remote rooms still depend on this Controller. Refusal must
+		// preserve the config and generation, then release job admission so a
+		// later switch can succeed once the dependency has been removed.
+		if response := apply(map[string]string{"fleet.controllerEnabled": "true"}); response.Code != 200 {
+			t.Fatalf("enable Controller: %d %s", response.Code, response.Body)
+		}
+		catalog, err := rooms.NewCatalog(nextSaves, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		store := rooms.NewStore(db, file.Section("database").Key("TABLE_PREFIX").String())
+		catalogService := rooms.NewService(catalog, store)
+		remoteSource := rooms.RuntimeCatalogSource{
+			TargetID: "agent:offline", Available: true, Stale: true,
+			Inventory: shared.RuntimeInventoryReport{Rooms: []shared.RoomInventoryReport{{
+				Directory: "remote-room", Name: "Offline room", Shards: []shared.ShardInventoryReport{{Directory: "Master"}},
+			}}},
+		}
+		if err := catalogService.SyncRuntimeCatalog([]rooms.RuntimeCatalogSource{remoteSource}); err != nil {
+			t.Fatal(err)
+		}
+		before, generation := getSettings(), host.app
+		blocked = apply(map[string]string{"fleet.controllerEnabled": "false"})
+		if blocked.Code != 409 || !strings.Contains(blocked.Body.String(), "SYSTEM_SETTINGS_CONTROLLER_IN_USE") || !strings.Contains(blocked.Body.String(), "Offline room") {
+			t.Fatalf("remote dependency was ignored: %d %s", blocked.Code, blocked.Body)
+		}
+		if getSettings().Revision != before.Revision || host.app != generation {
+			t.Fatal("refused switch changed configuration or replaced the runtime")
+		}
+		remoteSource.Online, remoteSource.Stale, remoteSource.Inventory.Rooms = true, false, nil
+		if err := catalogService.SyncRuntimeCatalog([]rooms.RuntimeCatalogSource{remoteSource}); err != nil {
+			t.Fatal(err)
+		}
+		if response := apply(map[string]string{"fleet.controllerEnabled": "false"}); response.Code != 200 {
+			t.Fatalf("switch after removing dependency: %d %s", response.Code, response.Body)
+		}
+		for world, before := range identities {
+			if identity(world) != before {
+				t.Fatalf("%s was replaced while checking remote dependencies", world)
+			}
+		}
+	})
 	response = apply(map[string]string{"paths.save": saves, "fleet.controllerEnabled": "true"})
 	if response.Code != 200 {
 		t.Fatalf("second reload: %d %s", response.Code, response.Body)
@@ -272,7 +374,7 @@ func TestSoftwareRestartUsesIdleJobGuardWithoutRequiringWorldsStopped(t *testing
 	app := newApplication(engine, applicationHooks{})
 	// Settings reload's guard represents a live room: software restart must
 	// never call it. Running rooms outlive the management process.
-	app.prepareReload = func(context.Context) (func(), error) {
+	app.prepareReload = func(context.Context, []string) (func(), error) {
 		t.Error("software restart attempted to stop/reload world runtime")
 		return nil, systemsettings.ErrRuntimeBusy
 	}

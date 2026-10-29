@@ -232,7 +232,13 @@ independent credentials remain a future hardening item and must not be claimed
 as implemented.
 
 Role changes are saved from the deployment role panel in Machine Management
-and apply without a process restart once local worlds and background tasks are stopped.
+and apply without restarting the management process. Switching between local-only
+and local plus centralized management preserves local worlds and player connections.
+Disabling centralized management checks both applied and desired remote placements,
+including offline nodes; migrate dependent rooms locally or adjust their placement first.
+Changing the local executor, transferring control, or changing runtime directories
+still requires stopping local worlds. Wait for active background tasks or software
+updates to finish before switching roles.
 The deployment packaging is read-only at runtime because changing it requires
 reinstalling or replacing the deployment artifact.
 

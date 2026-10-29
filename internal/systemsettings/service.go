@@ -36,8 +36,10 @@ type Service struct {
 }
 
 // RuntimeApplier runs persistence and runtime replacement within one admission
-// barrier. On failure it must restore the old runtime and call rollback if saved.
-type RuntimeApplier func(context.Context, func() error, func() error) error
+// barrier. changedFields compares effective values with the active generation,
+// including unapplied file changes. It contains field IDs, never secret values.
+// On failure it must restore the old runtime and call rollback if saved.
+type RuntimeApplier func(ctx context.Context, changedFields []string, persist, rollback func() error) error
 
 func (s *Service) SetRuntimeApplier(applier RuntimeApplier) { s.applier = applier }
 
@@ -131,8 +133,8 @@ func (s *Service) ApplyContext(ctx context.Context, input Input) (ApplyResult, e
 		}
 	}
 	defer discard()
-	if s.applier != nil && s.runtimeChanged(combined) {
-		if err = s.applier(ctx, persist, rollback); err == nil {
+	if changedFields := s.runtimeChanges(combined); s.applier != nil && len(changedFields) != 0 {
+		if err = s.applier(ctx, changedFields, persist, rollback); err == nil {
 			s.baselineMu.Lock()
 			s.startupValues = combined
 			s.baselineMu.Unlock()
@@ -155,15 +157,16 @@ func (s *Service) ApplyContext(ctx context.Context, input Input) (ApplyResult, e
 	return ApplyResult{Settings: s.settingsFromSnapshot(snapshot), Changes: preview.Changes}, nil
 }
 
-func (s *Service) runtimeChanged(values map[string]string) bool {
+func (s *Service) runtimeChanges(values map[string]string) []string {
 	s.baselineMu.RLock()
 	defer s.baselineMu.RUnlock()
+	var fields []string
 	for _, definition := range fieldDefinitions {
 		if definition.RestartRequired && s.effectiveValue(definition.ID, values[definition.ID]) != s.effectiveValue(definition.ID, s.startupValues[definition.ID]) {
-			return true
+			fields = append(fields, definition.ID)
 		}
 	}
-	return false
+	return fields
 }
 
 func (s *Service) preview(snapshot Snapshot, input Input) (Preview, error) {
@@ -260,7 +263,7 @@ func (s *Service) settingsFromSnapshot(snapshot Snapshot) Settings {
 		copy(options, definition.Options)
 		fields = append(fields, Field{ID: definition.ID, Group: definition.Group, Label: definition.Label, Kind: definition.Kind, Value: value, DisplayValue: displayValue, Options: options, Source: source, Environment: environment, Editable: source != SourceEnvironment && !definition.ReadOnly, Sensitive: definition.Sensitive, Configured: configured, RestartRequired: definition.RestartRequired && s.applier == nil, Minimum: definition.Minimum, Maximum: definition.Maximum})
 	}
-	restartRequired := s.runtimeChanged(snapshot.Values)
+	restartRequired := len(s.runtimeChanges(snapshot.Values)) != 0
 	return Settings{RuntimeApplySupported: s.applier != nil, Revision: snapshot.Revision, ConfigurationPath: snapshot.ConfigurationPath, BackupPath: snapshot.BackupPath, RestartRequired: restartRequired, Fields: fields, ReadAt: s.now().UTC()}
 }
 

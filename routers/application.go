@@ -27,7 +27,7 @@ type Application struct {
 	hooks                  applicationHooks
 	settings               *systemsettings.Service
 	config                 setting.Snapshot
-	prepareReload          func(context.Context) (func(), error)
+	prepareReload          func(context.Context, []string) (func(), error)
 	software               *softwareupdate.Service
 	prepareSoftwareRestart func(context.Context) (func(), error)
 
