@@ -64,7 +64,7 @@ func (c *Coordinator) createHotWithPlan(ctx context.Context, set Set, operation 
 			}
 			returnErr = errors.Join(returnErr, saveErr)
 		}
-		returnErr = errors.Join(returnErr, cleanupErr, loadErr)
+		returnErr = joinHotBackupErrors(returnErr, cleanupErr, loadErr)
 		if cleanupErr != nil {
 			_ = c.markRecoveryRequired(&operation, returnErr)
 		}
@@ -102,7 +102,7 @@ func (c *Coordinator) createHotWithPlan(ctx context.Context, set Set, operation 
 			return c.failCreate(result, operation, errors.Join(ErrBarrierFailed, err))
 		}
 		if cleanupErr := c.cancelHotBarriers(runtimeParts, operation, lease, barrierID, attempt); cleanupErr != nil {
-			return c.failCreate(result, operation, errors.Join(ErrBarrierFailed, err, cleanupErr))
+			return c.failCreate(result, operation, joinHotBackupErrors(ErrBarrierFailed, err, cleanupErr))
 		}
 		barrierActive = false
 		result.BarrierReleaseState = "released"
@@ -438,7 +438,7 @@ func (c *Coordinator) cancelHotBarriers(parts []runtimePart, operation Operation
 	}
 	var failure error
 	for range parts {
-		failure = errors.Join(failure, <-failures)
+		failure = joinHotBackupErrors(failure, <-failures)
 	}
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -451,7 +451,7 @@ func (c *Coordinator) cancelHotBarriers(parts []runtimePart, operation Operation
 			}
 			r, err := barrier.SnapshotBarrier(ctx, current.target, barrierID)
 			if err != nil {
-				return errors.Join(failure, err)
+				return joinHotBackupErrors(failure, err)
 			}
 			if r.BarrierID != barrierID || r.Busy || r.Holding || r.InFlight || (r.State != "released" && r.State != "cancelled" && r.State != "failed" && r.State != "conflict") {
 				all = false

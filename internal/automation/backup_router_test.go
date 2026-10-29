@@ -4,6 +4,8 @@ import (
 	"context"
 	"dont/internal/backups"
 	"dont/internal/distributedbackup"
+	"dont/internal/jobs"
+	"dont/internal/runtimedriver"
 	"errors"
 	"testing"
 )
@@ -20,11 +22,16 @@ func (scheduledLocalBackup) PruneSnapshots(context.Context, string, int) (int64,
 type scheduledRemoteBackup struct {
 	calls           int
 	room, mode, job string
+	failureSet      distributedbackup.Set
+	err             error
 }
 
 func (b *scheduledRemoteBackup) CreateWithMode(_ context.Context, room, name, kind, job, mode string) (distributedbackup.Set, error) {
 	b.calls++
 	b.room, b.mode, b.job = room, mode, job
+	if b.err != nil {
+		return b.failureSet, b.err
+	}
 	return distributedbackup.Set{Name: name}, nil
 }
 func TestScheduledBackupsRouteLocalAndSplitRooms(t *testing.T) {
@@ -39,6 +46,25 @@ func TestScheduledBackupsRouteLocalAndSplitRooms(t *testing.T) {
 }
 func (*scheduledRemoteBackup) PruneSnapshots(context.Context, string, int) (int64, int, error) {
 	return 0, 0, nil
+}
+
+func TestAutomatedBackupRetainsReceiptFailureAndCleanupStatus(t *testing.T) {
+	for _, release := range []string{"released", "unconfirmed"} {
+		remote := &scheduledRemoteBackup{
+			err: errors.Join(distributedbackup.ErrBarrierFailed, runtimedriver.ErrSnapshotReceiptInvalid),
+			failureSet: distributedbackup.Set{ID: "failed-backup", Status: distributedbackup.StatusFailed,
+				FailureCode: "SNAPSHOT_RECEIPT_INVALID", FailurePhase: "barrier_waiting", BarrierReleaseState: release},
+		}
+		executor := &DomainExecutor{backups: BackupRouter{Distributed: remote}}
+		_, err := executor.Execute(context.Background(), Task{RoomID: "room", Action: ActionBackupCreate, Parameters: map[string]interface{}{}}, "job")
+		var result *jobs.ResultError
+		if !errors.As(err, &result) || !errors.Is(err, runtimedriver.ErrSnapshotReceiptInvalid) {
+			t.Fatalf("lost backup failure: %v", err)
+		}
+		if result.Result.Code != "SNAPSHOT_RECEIPT_INVALID" || result.Result.Details["failurePhase"] != "barrier_waiting" || result.Result.Details["barrierReleaseState"] != release {
+			t.Fatalf("lost automation details: %+v", result.Result)
+		}
+	}
 }
 
 type retentionBackupExecutor struct {

@@ -111,8 +111,13 @@ func (c *Coordinator) recoverOperation(ctx context.Context, operation Operation)
 		if value.Mode != ModeHot {
 			cleanup = errors.Join(cleanup, c.restartWorlds(ctx, current, operation.OriginalRunningWorlds, operation, &lease))
 		}
-		value.FailurePhase, value.FailureCode = operation.Phase, "CONTROLLER_RESTARTED"
-		value.Status, value.Failure, value.UpdatedAt = StatusFailed, "控制器重启中断了备份创建", c.now().UTC()
+		// Recovery also runs after a known backup failure with an unconfirmed
+		// release. Finishing that cleanup must not erase the original diagnosis.
+		if value.FailureCode == "" {
+			value.FailurePhase, value.FailureCode = operation.Phase, "CONTROLLER_RESTARTED"
+			value.Failure = "控制器重启中断了备份创建"
+		}
+		value.Status, value.UpdatedAt = StatusFailed, c.now().UTC()
 		verified := 0
 		for _, part := range value.Parts {
 			if part.Status == PartVerified {

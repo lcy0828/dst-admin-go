@@ -142,7 +142,7 @@ func observeSnapshotBarrier(ctx context.Context, driver Driver, target Target, b
 	}
 	var receipt SnapshotBarrierReceipt
 	if err := runtimefiles.DecodeJSONArtifact(bundle.Artifacts[0].Data, &receipt); err != nil {
-		return SnapshotBarrierReceipt{}, err
+		return SnapshotBarrierReceipt{}, fmt.Errorf("%w: %w", ErrSnapshotReceiptInvalid, err)
 	}
 	receipt.ReadAt = bundle.Artifacts[0].UpdatedAt
 	if receipt.ProducerVersion != snapshotBarrierRuntimeVersion {

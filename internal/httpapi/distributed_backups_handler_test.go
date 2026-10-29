@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"dont/internal/distributedbackup"
 	"dont/internal/jobs"
+	"dont/internal/runtimedriver"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/gorm"
@@ -24,6 +26,14 @@ type distributedBackupHTTPFixture struct {
 }
 
 type coldOnlyDistributedBackupService struct{ DistributedBackupService }
+
+func TestDistributedBackupJobClassifiesReceiptDecodeFailure(t *testing.T) {
+	err := errors.Join(distributedbackup.ErrBarrierFailed, runtimedriver.ErrSnapshotReceiptInvalid)
+	result := distributedBackupJobError(err)
+	if result.Code != "SNAPSHOT_RECEIPT_INVALID" || result.Message != err.Error() {
+		t.Fatalf("lost receipt diagnosis: %+v", result)
+	}
+}
 
 func (f *distributedBackupHTTPFixture) List(string) ([]distributedbackup.Set, error) {
 	return []distributedbackup.Set{f.value}, nil

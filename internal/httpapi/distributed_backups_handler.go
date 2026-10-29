@@ -8,6 +8,7 @@ import (
 
 	"dont/internal/distributedbackup"
 	"dont/internal/jobs"
+	"dont/internal/runtimedriver"
 	"dont/internal/tempfiles"
 
 	"github.com/gin-gonic/gin"
@@ -247,6 +248,8 @@ func (h *DistributedBackupHandler) recoverOperation(c *gin.Context) {
 func distributedBackupJobError(err error) *jobs.Error {
 	code := "BACKUP_SET_OPERATION_FAILED"
 	switch {
+	case errors.Is(err, runtimedriver.ErrSnapshotReceiptInvalid):
+		code = "SNAPSHOT_RECEIPT_INVALID"
 	case errors.Is(err, distributedbackup.ErrTopologyChanged):
 		code = "BACKUP_TOPOLOGY_CHANGED"
 	case errors.Is(err, distributedbackup.ErrTargetUnavailable):

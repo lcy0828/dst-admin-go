@@ -642,6 +642,8 @@ func backupFailureCode(cause error) string {
 		return rejection.Code
 	}
 	switch {
+	case errors.Is(cause, runtimedriver.ErrSnapshotReceiptInvalid):
+		return "SNAPSHOT_RECEIPT_INVALID"
 	case errors.Is(cause, context.DeadlineExceeded):
 		return "BACKUP_TIMEOUT"
 	case errors.Is(cause, ErrBarrierFailed):

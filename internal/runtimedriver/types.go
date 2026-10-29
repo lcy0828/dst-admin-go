@@ -16,6 +16,7 @@ var (
 	ErrOperationNotDispatched  = errors.New("runtime operation was not dispatched")
 	ErrMigrationPeerFallback   = errors.New("migration peer transfer may safely fall back")
 	ErrRoomRecoveryMultiTarget = errors.New("room recovery requires every world to use one runtime installation")
+	ErrSnapshotReceiptInvalid  = errors.New("snapshot barrier receipt could not be decoded")
 )
 
 type Kind string
@@ -337,6 +338,10 @@ type SnapshotBarrierReceipt struct {
 	Holding             bool      `json:"holding"`
 	InFlight            bool      `json:"inFlight"`
 	ReadAt              time.Time `json:"-"`
+
+	// CommitRequested is the master's idempotency marker, not save completion proof.
+	// Secondaries and receipts written before Commit legitimately omit it.
+	CommitRequested bool `json:"commitRequested,omitempty"`
 }
 
 // SnapshotBarrierDriver is optional because a provider may support cold
