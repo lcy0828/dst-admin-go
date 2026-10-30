@@ -2,11 +2,18 @@ name: Backend CI
 
 on:
   push:
+    branches: ['**']
   pull_request:
   workflow_call:
+    inputs:
+      reuse_successful_push:
+        description: Reuse a recent trusted master CI run for the exact commit
+        default: false
+        type: boolean
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: backend-${{ github.workflow }}-${{ github.ref }}
@@ -21,17 +28,64 @@ jobs:
       GOTOOLCHAIN: go1.26.10+auto
       DST_ADMIN_CONFIG: ${{ github.workspace }}/deploy/systemd/local.conf.example
     steps:
+      - name: Reuse the same commit's master checks when available
+        id: reuse
+        if: github.event_name != 'schedule' && inputs.reuse_successful_push == true
+        uses: actions/github-script@v7
+        timeout-minutes: 10
+        with:
+          script: |
+            const deadline = Date.now() + 8 * 60 * 1000;
+            while (Date.now() < deadline) {
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                ...context.repo, workflow_id: 'ci.yml', branch: 'master',
+                head_sha: context.sha, event: 'push', per_page: 20
+              });
+              const run = data.workflow_runs.find(run =>
+                run.head_sha === context.sha &&
+                Date.parse(run.created_at) > Date.now() - 24 * 60 * 60 * 1000);
+              if (!run) break;
+              if (run.status === 'completed') {
+                if (run.conclusion === 'success') {
+                  core.setOutput('reused', 'true');
+                  await core.summary.addLink('Reused exact-commit backend checks', run.html_url).write();
+                  return;
+                }
+                if (run.conclusion === 'failure') {
+                  throw new Error(`Backend checks failed: ${run.html_url}`);
+                }
+                break;
+              }
+              await new Promise(resolve => setTimeout(resolve, 10000));
+            }
+            core.setOutput('reused', 'false');
+            core.info('No reusable successful check; running full backend validation.');
       - uses: actions/checkout@v4
+        if: steps.reuse.outputs.reused != 'true'
       - uses: actions/setup-go@v5
+        if: steps.reuse.outputs.reused != 'true'
         with:
           go-version: 1.26.10
           cache: true
       - uses: actions/setup-python@v5
+        if: steps.reuse.outputs.reused != 'true'
         with:
           python-version: "3.12"
       - run: python -m unittest discover -s integrations/astrbot/tests -v
+        if: steps.reuse.outputs.reused != 'true'
+      - uses: actions/setup-node@v4
+        if: steps.reuse.outputs.reused != 'true'
+        with:
+          node-version: 22
+      - run: node --test deploy/scripts/*.test.mjs
+        if: steps.reuse.outputs.reused != 'true'
       - run: go test -race ./...
+        if: steps.reuse.outputs.reused != 'true'
       - run: go run ./cmd/openapi-manifest -check
+        if: steps.reuse.outputs.reused != 'true'
       - run: go vet ./...
+        if: steps.reuse.outputs.reused != 'true'
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        if: steps.reuse.outputs.reused != 'true'
       - run: go build ./...
+        if: steps.reuse.outputs.reused != 'true'

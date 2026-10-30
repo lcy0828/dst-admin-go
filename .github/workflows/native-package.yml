@@ -1,0 +1,124 @@
+name: Native package
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        required: true
+        type: string
+      platform:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      frontend:
+        required: true
+        type: string
+      smoke_seconds:
+        default: 30
+        type: number
+    secrets:
+      FRONTEND_READ_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: lcy0828/dst-admin-vue
+          ref: ${{ inputs.frontend }}
+          path: .codex-build/frontend
+          ssh-key: ${{ secrets.FRONTEND_READ_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .codex-build/frontend/package-lock.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: webui
+          path: .codex-build/webui
+      - name: Build native package with embedded UI
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_PLATFORM: ${{ inputs.platform }}
+          FRONTEND_REF: ${{ inputs.frontend }}
+        run: >-
+          node deploy/scripts/build-native-release.mjs --version "$RELEASE_VERSION"
+          --platform "$RELEASE_PLATFORM" --frontend .codex-build/frontend
+          --frontend-ref "$FRONTEND_REF" --frontend-dist .codex-build/webui --output dist
+      - name: Start packaged binary without external UI
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_PLATFORM: ${{ inputs.platform }}
+          FRONTEND_REF: ${{ inputs.frontend }}
+        run: >-
+          node deploy/scripts/smoke-package.mjs
+          --binary "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin"
+          --frontend-commit "$FRONTEND_REF" --duration "${{ inputs.smoke_seconds }}"
+      - name: Verify online management update bundle
+        env:
+          RELEASE_PLATFORM: ${{ inputs.platform }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: >-
+          node deploy/scripts/verify-update-package.mjs
+          "dist/dst-admin-update-$RELEASE_PLATFORM.tar.gz" "$RELEASE_VERSION" "$RELEASE_PLATFORM"
+      - name: Verify management updates and automatic recovery without touching user data
+        env:
+          RELEASE_PLATFORM: ${{ inputs.platform }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: >-
+          node deploy/scripts/smoke-software-update.mjs
+          --binary "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin"
+          --bundle "dist/dst-admin-update-$RELEASE_PLATFORM.tar.gz"
+      - name: Verify standalone Agent download
+        env:
+          RELEASE_PLATFORM: ${{ inputs.platform }}
+        shell: bash
+        run: |
+          cd dist
+          if command -v sha256sum >/dev/null; then
+            sha256sum -c "dst-admin-agent-$RELEASE_PLATFORM.tar.gz.sha256"
+          else
+            shasum -a 256 -c "dst-admin-agent-$RELEASE_PLATFORM.tar.gz.sha256"
+          fi
+          agent_check=$(mktemp -d)
+          tar -xzf "dst-admin-agent-$RELEASE_PLATFORM.tar.gz" -C "$agent_check"
+          test -s "$agent_check/agent.conf.example"
+          "$agent_check/dst-admin-agent" -version
+      - name: Verify Agent online update bundle
+        env:
+          RELEASE_PLATFORM: ${{ inputs.platform }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: >-
+          node deploy/scripts/verify-update-package.mjs
+          "dist/dst-admin-agent-update-$RELEASE_PLATFORM.tar.gz" "$RELEASE_VERSION" "$RELEASE_PLATFORM" agent
+      - name: Verify Agent update through the management API
+        env:
+          RELEASE_PLATFORM: ${{ inputs.platform }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: >-
+          node deploy/scripts/smoke-agent-software-update.mjs
+          --controller "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin"
+          --binary "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin-agent"
+          --bundle "dist/dst-admin-agent-update-$RELEASE_PLATFORM.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dst-admin-${{ inputs.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30

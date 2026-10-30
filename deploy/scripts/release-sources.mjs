@@ -3,6 +3,7 @@ import { cp, lstat, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { copyFrontendArtifact } from './frontend-artifact.mjs'
 
 export const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 export const frontendRepository = 'https://github.com/lcy0828/dst-admin-vue.git'
@@ -62,17 +63,20 @@ export async function withSources(options, action) {
       // Git metadata, checkout credentials and excluded docs cannot be sent.
       if (!options.frontend) await rm(checkout, { recursive: true, force: true })
       await readFile(path.join(frontend, 'package-lock.json'))
+      if (options['frontend-dist']) await copyFrontendArtifact(path.resolve(options['frontend-dist']), path.join(frontend, 'dist'), frontendSource.commit)
       console.log(`Frontend: ${frontendSource.commit} (${ref})`)
     }
-    return await action({ stage, backend, frontend, backendSource, frontendSource })
+    return await action({ stage, backend, frontend, backendSource, frontendSource, frontendPrebuilt: options.web !== false && Boolean(options['frontend-dist']) })
   } finally {
     await rm(stage, { recursive: true, force: true })
   }
 }
 
-export async function buildFrontend({ backend, frontend }) {
-  execFileSync('npm', ['ci'], { cwd: frontend, stdio: 'inherit' })
-  execFileSync('npm', ['run', 'build'], { cwd: frontend, stdio: 'inherit' })
+export async function buildFrontend({ backend, frontend, frontendPrebuilt }) {
+  if (!frontendPrebuilt) {
+    execFileSync('npm', ['ci'], { cwd: frontend, stdio: 'inherit' })
+    execFileSync('npm', ['run', 'build'], { cwd: frontend, stdio: 'inherit' })
+  }
   await readFile(path.join(frontend, 'dist', 'index.html'))
   await cp(path.join(frontend, 'dist'), path.join(backend, 'internal/webui/dist'), { recursive: true })
 }

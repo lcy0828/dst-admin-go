@@ -2,8 +2,9 @@ name: Package
 
 on:
   push:
-    branches: [master]
     tags: ['v*']
+  schedule:
+    - cron: '17 3 * * 1'
   workflow_dispatch:
     inputs:
       frontend_ref:
@@ -12,6 +13,10 @@ on:
         type: string
       publish_images:
         description: 'Publish preview images to GHCR and configured mirrors (no Release)'
+        default: false
+        type: boolean
+      extended_checks:
+        description: 'Observe startup for 180 seconds instead of 30; functional update checks always run'
         default: false
         type: boolean
       verification_version:
@@ -34,6 +39,11 @@ concurrency:
 jobs:
   quality:
     uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      reuse_successful_push: true
 
   sources:
     runs-on: ubuntu-22.04
@@ -70,6 +80,7 @@ jobs:
           npm ci
           npm run lint -- --no-fix
           npm test
+          npm run build
       - uses: actions/setup-go@v5
         with:
           go-version: 1.26.10
@@ -105,6 +116,16 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "stable=$stable" >> "$GITHUB_OUTPUT"
           echo "Backend: $GITHUB_SHA; frontend: $frontend; version: $version" >> "$GITHUB_STEP_SUMMARY"
+      - name: Package the single verified frontend build
+        env:
+          FRONTEND_REF: ${{ steps.source.outputs.frontend }}
+        run: node deploy/scripts/frontend-artifact.mjs .codex-build/frontend/dist .codex-build/webui "$FRONTEND_REF"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webui
+          path: .codex-build/webui
+          if-no-files-found: error
+          retention-days: 7
       - name: Check mirror publishing configuration
         id: registries
         if: steps.publication.outputs.publish == 'true'
@@ -127,110 +148,32 @@ jobs:
             echo 'Alibaba Cloud skipped: configure ALIYUN_USERNAME and ALIYUN_PASSWORD secrets and the ALIYUN_NAMESPACE variable.' >> "$GITHUB_STEP_SUMMARY"
           fi
 
-  native:
-    needs: [sources, quality]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-22.04
-            platform: linux-amd64
-          - runner: macos-14
-            platform: darwin-arm64
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: lcy0828/dst-admin-vue
-          ref: ${{ needs.sources.outputs.frontend }}
-          path: .codex-build/frontend
-          ssh-key: ${{ secrets.FRONTEND_READ_KEY }}
-          persist-credentials: false
-      - uses: actions/setup-go@v5
-        with:
-          go-version: 1.26.10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: .codex-build/frontend/package-lock.json
-      - name: Build native package with embedded UI
-        env:
-          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
-          RELEASE_PLATFORM: ${{ matrix.platform }}
-          FRONTEND_REF: ${{ needs.sources.outputs.frontend }}
-        run: >-
-          node deploy/scripts/build-native-release.mjs --version "$RELEASE_VERSION"
-          --platform "$RELEASE_PLATFORM" --frontend .codex-build/frontend
-          --frontend-ref "$FRONTEND_REF" --output dist
-      - name: Start packaged binary without external UI
-        env:
-          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
-          RELEASE_PLATFORM: ${{ matrix.platform }}
-          FRONTEND_REF: ${{ needs.sources.outputs.frontend }}
-        run: >-
-          node deploy/scripts/smoke-package.mjs
-          --binary "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin"
-          --frontend-commit "$FRONTEND_REF" --duration 180
-      - name: Verify online management update bundle
-        env:
-          RELEASE_PLATFORM: ${{ matrix.platform }}
-          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
-        run: >-
-          node deploy/scripts/verify-update-package.mjs
-          "dist/dst-admin-update-$RELEASE_PLATFORM.tar.gz" "$RELEASE_VERSION" "$RELEASE_PLATFORM"
-      - name: Verify management updates and automatic recovery without touching user data
-        env:
-          RELEASE_PLATFORM: ${{ matrix.platform }}
-          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
-        run: >-
-          node deploy/scripts/smoke-software-update.mjs
-          --binary "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin"
-          --bundle "dist/dst-admin-update-$RELEASE_PLATFORM.tar.gz"
-      - name: Verify standalone Agent download
-        env:
-          RELEASE_PLATFORM: ${{ matrix.platform }}
-        shell: bash
-        run: |
-          cd dist
-          if command -v sha256sum >/dev/null; then
-            sha256sum -c "dst-admin-agent-$RELEASE_PLATFORM.tar.gz.sha256"
-          else
-            shasum -a 256 -c "dst-admin-agent-$RELEASE_PLATFORM.tar.gz.sha256"
-          fi
-          agent_check=$(mktemp -d)
-          tar -xzf "dst-admin-agent-$RELEASE_PLATFORM.tar.gz" -C "$agent_check"
-          test -s "$agent_check/agent.conf.example"
-          "$agent_check/dst-admin-agent" -version
-      - name: Verify Agent online update bundle
-        env:
-          RELEASE_PLATFORM: ${{ matrix.platform }}
-          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
-        run: >-
-          node deploy/scripts/verify-update-package.mjs
-          "dist/dst-admin-agent-update-$RELEASE_PLATFORM.tar.gz" "$RELEASE_VERSION" "$RELEASE_PLATFORM" agent
-      - name: Verify Agent update through the management API
-        env:
-          RELEASE_PLATFORM: ${{ matrix.platform }}
-          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
-        run: >-
-          node deploy/scripts/smoke-agent-software-update.mjs
-          --controller "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin"
-          --binary "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin-agent"
-          --bundle "dist/dst-admin-agent-update-$RELEASE_PLATFORM.tar.gz"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dst-admin-${{ matrix.platform }}
-          path: |
-            dist/*.tar.gz
-            dist/*.tar.gz.sha256
-          if-no-files-found: error
-          retention-days: 30
+  native_linux:
+    needs: [sources]
+    uses: ./.github/workflows/native-package.yml
+    with:
+      runner: ubuntu-22.04
+      platform: linux-amd64
+      version: ${{ needs.sources.outputs.version }}
+      frontend: ${{ needs.sources.outputs.frontend }}
+      smoke_seconds: ${{ (github.event_name == 'schedule' || inputs.extended_checks) && 180 || 30 }}
+    secrets:
+      FRONTEND_READ_KEY: ${{ secrets.FRONTEND_READ_KEY }}
+
+  native_macos:
+    needs: [sources]
+    uses: ./.github/workflows/native-package.yml
+    with:
+      runner: macos-14
+      platform: darwin-arm64
+      version: ${{ needs.sources.outputs.version }}
+      frontend: ${{ needs.sources.outputs.frontend }}
+      smoke_seconds: ${{ (github.event_name == 'schedule' || inputs.extended_checks) && 180 || 30 }}
+    secrets:
+      FRONTEND_READ_KEY: ${{ secrets.FRONTEND_READ_KEY }}
 
   agents:
-    needs: [sources, quality]
+    needs: [sources]
     strategy:
       fail-fast: false
       matrix:
@@ -275,7 +218,7 @@ jobs:
           retention-days: 30
 
   images:
-    needs: [sources, quality, native]
+    needs: [sources, quality, native_linux]
     permissions:
       contents: read
       packages: write
@@ -299,16 +242,17 @@ jobs:
         with:
           node-version: 22
       - uses: docker/setup-buildx-action@v3
-      - uses: actions/setup-go@v5
-        if: matrix.kind == 'agent'
-        with:
-          go-version: 1.26.10
       - uses: docker/login-action@v3
         if: needs.sources.outputs.publish == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        if: matrix.kind == 'all-in-one' || matrix.kind == 'control-plane'
+        with:
+          name: webui
+          path: .codex-build/webui
       - name: Build complete image
         env:
           IMAGE_KIND: ${{ matrix.kind }}
@@ -317,8 +261,8 @@ jobs:
         run: >-
           node deploy/scripts/build-image.mjs --kind "$IMAGE_KIND"
           --tag "dst-admin-test:$IMAGE_KIND" --version "$RELEASE_VERSION"
-          --frontend .codex-build/frontend --frontend-ref "$FRONTEND_REF"
-          --cache-from "type=registry,ref=ghcr.io/${GITHUB_REPOSITORY,,}/$IMAGE_KIND:preview"
+          --frontend .codex-build/frontend --frontend-ref "$FRONTEND_REF" --frontend-dist .codex-build/webui
+          --cache-from "type=registry,ref=ghcr.io/${GITHUB_REPOSITORY,,}/$IMAGE_KIND:latest"
           --cache-to type=inline --load
       - name: Check embedded UI and startup
         if: matrix.kind == 'all-in-one' || matrix.kind == 'control-plane'
@@ -327,7 +271,7 @@ jobs:
           FRONTEND_REF: ${{ needs.sources.outputs.frontend }}
         run: >-
           node deploy/scripts/smoke-package.mjs --image "dst-admin-test:$IMAGE_KIND"
-          --kind "$IMAGE_KIND" --frontend-commit "$FRONTEND_REF" --duration 180
+          --kind "$IMAGE_KIND" --frontend-commit "$FRONTEND_REF" --duration "${{ (github.event_name == 'schedule' || inputs.extended_checks) && 180 || 30 }}"
       - uses: actions/download-artifact@v4
         if: matrix.kind == 'all-in-one' || matrix.kind == 'control-plane'
         with:
@@ -351,26 +295,32 @@ jobs:
           --bundle .codex-build/online-update/dst-admin-update-linux-amd64.tar.gz --read-only true
       - name: Check Agent startup and graceful shutdown
         if: matrix.kind == 'agent'
-        run: node deploy/scripts/smoke-agent-image.mjs dst-admin-test:agent 180
+        run: node deploy/scripts/smoke-agent-image.mjs dst-admin-test:agent "${{ (github.event_name == 'schedule' || inputs.extended_checks) && 180 || 30 }}"
       - uses: actions/download-artifact@v4
         if: matrix.kind == 'agent'
         with:
           name: dst-admin-linux-amd64
           path: .codex-build/online-update
-      - name: Build isolated management API for Agent lifecycle tests
+      - name: Reuse the verified Linux management API for Agent lifecycle tests
         if: matrix.kind == 'agent'
-        run: go build -trimpath -o .codex-build/agent-test-controller ./cmd/admin-api
+        env:
+          RELEASE_VERSION: ${{ needs.sources.outputs.version }}
+        run: |
+          mkdir -p .codex-build/agent-controller
+          tar -xzf ".codex-build/online-update/dst-admin-$RELEASE_VERSION-linux-amd64.tar.gz" \
+            -C .codex-build/agent-controller --strip-components=1 \
+            "dst-admin-$RELEASE_VERSION-linux-amd64/dst-admin"
       - name: Check Docker Agent online updates and persistence
         if: matrix.kind == 'agent'
         run: >-
           node deploy/scripts/smoke-agent-software-update.mjs
-          --controller .codex-build/agent-test-controller --image dst-admin-test:agent
+          --controller .codex-build/agent-controller/dst-admin --image dst-admin-test:agent
           --bundle .codex-build/online-update/dst-admin-agent-update-linux-amd64.tar.gz --read-only false
       - name: Check Docker Agent updates with a read-only root
         if: matrix.kind == 'agent'
         run: >-
           node deploy/scripts/smoke-agent-software-update.mjs
-          --controller .codex-build/agent-test-controller --image dst-admin-test:agent
+          --controller .codex-build/agent-controller/dst-admin --image dst-admin-test:agent
           --bundle .codex-build/online-update/dst-admin-agent-update-linux-amd64.tar.gz --read-only true
       - name: Check Runtime wrapper
         if: matrix.kind == 'dst-runtime'
@@ -457,7 +407,7 @@ jobs:
 
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [quality, sources, native, agents, images]
+    needs: [quality, sources, native_linux, native_macos, agents, images]
     runs-on: ubuntu-22.04
     permissions:
       contents: write

@@ -8,7 +8,7 @@ import { backendRoot, buildFrontend, run, withSources } from './release-sources.
 const options = {}
 for (let index = 2; index < process.argv.length; index += 2) {
   const name = process.argv[index]
-  if (!['--version', '--frontend', '--frontend-ref', '--frontend-repository', '--output', '--binaries', '--platform'].includes(name) || !process.argv[index + 1]) {
+  if (!['--version', '--frontend', '--frontend-ref', '--frontend-repository', '--frontend-dist', '--output', '--binaries', '--platform'].includes(name) || !process.argv[index + 1]) {
     throw new Error('usage: build-native-release.mjs --version VERSION [--output dist] [--frontend-ref master | --frontend PATH] [--frontend-repository URL] [--binaries PATH --platform linux-amd64]')
   }
   options[name.slice(2)] = process.argv[index + 1]

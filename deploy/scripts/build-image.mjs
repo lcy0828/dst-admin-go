@@ -7,7 +7,7 @@ const options = {}
 for (let index = 2; index < process.argv.length; index++) {
   const name = process.argv[index]
   if (['--push', '--load'].includes(name)) { options[name.slice(2)] = true; continue }
-  if (!['--kind', '--tag', '--frontend', '--frontend-ref', '--frontend-repository', '--version', '--platform', '--debian-mirror', '--debian-security-mirror', '--cache-from', '--cache-to'].includes(name) || !process.argv[index + 1]) throw new Error(`unknown or missing build argument: ${name}`)
+  if (!['--kind', '--tag', '--frontend', '--frontend-ref', '--frontend-repository', '--frontend-dist', '--version', '--platform', '--debian-mirror', '--debian-security-mirror', '--cache-from', '--cache-to'].includes(name) || !process.argv[index + 1]) throw new Error(`unknown or missing build argument: ${name}`)
   options[name.slice(2)] = process.argv[++index]
 }
 const kind = options.kind || 'all-in-one'
@@ -26,6 +26,7 @@ await withSources(options, async ({ stage, backend, backendSource, frontendSourc
     '--label', `org.opencontainers.image.revision=${backendSource.commit}`,
     '--label', `org.opencontainers.image.version=${version}`]
   if (frontendSource) args.push('--build-arg', `FRONTEND_COMMIT=${frontendSource.commit}`, '--label', `io.dst-admin.frontend.commit=${frontendSource.commit}`)
+  if (frontendSource && options['frontend-dist']) args.push('--build-arg', 'WEB_BUILD_STAGE=web-prebuilt')
   for (const [option, arg] of [['debian-mirror', 'DEBIAN_MIRROR'], ['debian-security-mirror', 'DEBIAN_SECURITY_MIRROR']]) {
     const value = options[option] || process.env[`DST_ADMIN_${arg}`]
     if (value) args.push('--build-arg', `${arg}=${value}`)
