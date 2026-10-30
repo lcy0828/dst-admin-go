@@ -12,6 +12,8 @@
 
 搜索会保留容器路径；容器可展开查看。物品图标复用已有资源，缺图不影响读取。模组使用标准物品、容器或包裹组件时可读取；地面箱子、跟随者、共享仓库及模组私有存储不在支持范围内。「完整」仅表示支持的组件已读取，不保证涵盖模组自定义数据。
 
+页面使用现有资源词库补全标准物品的中英文名称，支持中文搜索嵌套容器中的物品，并保留存档中的自定义名称。未知模组物品保留原名或 Prefab。词库按需读取并共享缓存，不逐件查询游戏。存档结果不代表玩家当前离线；多来源需重新选择时会清除旧结果，其他刷新失败保留的结果会明确标为「上次读取结果」。
+
 读取达到大小、深度、节点数或采样时间边界时，会明确标为部分结果，缺失内容不能视为空。存档常不保存耐久等属性的最大值；页面只显示可确定的剩余值，不推测百分比。
 
 API 与 AI/MCP 使用同一接口：
@@ -33,5 +35,7 @@ Queries do not save the game, create items or modify saves. There is no addition
 Offline reads support native version 3 player snapshots, including binary classified/minimap data after the inventory payload. Only the declared Lua data string is parsed; the suffix is never executed as code. Unsupported, truncated or oversized data produces an explicit error rather than an empty inventory.
 
 Search preserves container ancestry. Existing artwork is reused; missing images do not block results. Mods using standard components are supported. Ground chests, followers, shared storage and private Mod storage are excluded. A complete result covers supported components only. Limits produce an explicit partial result. Missing saved attribute maximums remain unknown rather than becoming zero or full percentages.
+
+The page fills standard item names from the shared catalog, supports Chinese searches inside containers, and preserves custom saved names. Unknown Mod items retain their original name or Prefab. Catalog reads are cached and do not query the game per item. A saved inventory does not establish current offline status. An ambiguous source clears the old display; retained data after other refresh failures is labeled as the previous result.
 
 The page, AI and MCP share the authenticated `getRoomPlayerInventory` OpenAPI operation shown above. Use `source=auto|live|save`, optionally `worldId` and a returned `sourceId`. `refresh=true` reconfirms live player location and bypasses the save parsing cache while preserving concurrency and rate limits. Location uses shard-local entities; stale evidence is refreshed on demand without requiring a player-list refresh. An explicit `worldId` strictly restricts the lookup. Unknown locations, collection failures and offline nodes never silently fall back to saved items.

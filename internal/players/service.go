@@ -58,6 +58,7 @@ type Service struct {
 	probe          Probe
 	commander      RuntimeCommander
 	inventoryReads *playerinventory.Reader
+	passiveReads   passivePlayerReads
 	now            func() time.Time
 	locksMu        sync.Mutex
 	locks          map[string]*sync.Mutex

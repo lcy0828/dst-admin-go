@@ -24,6 +24,70 @@ type playerHandlerService struct {
 	filterSink *players.ListFilter
 }
 
+type passivePlayerHandlerService struct {
+	playerHandlerService
+	calls   int
+	err     error
+	offline bool
+}
+
+func (s *passivePlayerHandlerService) SyncPassivePlayers(context.Context, string) error {
+	s.calls++
+	return s.err
+}
+
+func (s *passivePlayerHandlerService) List(room string, filter players.ListFilter) (players.List, error) {
+	value, err := s.playerHandlerService.List(room, filter)
+	value.Items[0].Online = s.calls > 0 && !s.offline
+	return value, err
+}
+
+func (s *passivePlayerHandlerService) Player(room, player string) (players.Player, error) {
+	value, err := s.playerHandlerService.Player(room, player)
+	value.Online = !s.offline
+	return value, err
+}
+
+func TestPlayerHTTPReadsConsumePassiveSnapshotsAndExposeFailures(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := &passivePlayerHandlerService{}
+	router := gin.New()
+	NewPlayerHandler(service, nil).Register(router.Group("/api/v2"))
+	response := performJSON(router, http.MethodGet, "/api/v2/rooms/room/players", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	items := responseData(t, response)["items"].([]interface{})
+	if service.calls != 1 || items[0].(map[string]interface{})["online"] != true {
+		t.Fatal("the list was read before passive synchronization")
+	}
+	response = performJSON(router, http.MethodGet, "/api/v2/rooms/room/players?scope=history", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if service.calls != 1 {
+		t.Fatal("history reads contacted the running game")
+	}
+	response = performJSON(router, http.MethodGet, "/api/v2/rooms/room/players/KU_ONE", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if service.calls != 2 {
+		t.Fatal("detail read did not synchronize")
+	}
+	service.err = errors.New("snapshot unavailable")
+	service.offline = true
+	response = performJSON(router, http.MethodGet, "/api/v2/rooms/room/players", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	data := responseData(t, response)
+	if len(data["warnings"].([]interface{})) == 0 || len(data["items"].([]interface{})) != 1 {
+		t.Fatalf("read failure hid the retained player data or its warning: %s", response.Body.String())
+	}
+	item := data["items"].([]interface{})[0].(map[string]interface{})
+	if item["presenceStatus"] != "stale" || item["online"] != false {
+		t.Fatal("cached offline presence was presented as currently confirmed")
+	}
+	response = performJSON(router, http.MethodGet, "/api/v2/rooms/room/players/KU_ONE", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	if responseData(t, response)["presenceStatus"] != "stale" {
+		t.Fatal("player detail hid unconfirmed offline presence")
+	}
+}
+
 func (s playerHandlerService) List(_ string, filter players.ListFilter) (players.List, error) {
 	if s.listErr != nil {
 		return players.List{}, s.listErr

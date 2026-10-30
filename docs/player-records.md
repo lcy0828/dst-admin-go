@@ -15,6 +15,8 @@ API：`GET /api/v2/rooms/{roomId}/players?scope=current|history`，默认 `curre
 `sessionId` 表示记录对应的分片存档；`historical` 和 `historyId` 标识历史记录。
 汇总 `stale` 包含全部状态过期记录；`staleOnline` 只包含最后已知在线且观测过期的记录。
 
+页面与 MCP 查询当前玩家列表或详情时，会按需合并 Runtime 已生成的有效快照，不必等待定时刷新任务。相同房间的并发查询共享结果，五秒内复用；全局最多同时同步两个房间，每次运行节点读取预算为两秒。此过程不发送 Lua、不安装或修复 Runtime，也不启动后台轮询。历史存档查询不触发同步。采集过期、节点离线或同步忙时保留已有记录；列表通过 `warnings` 明确说明本轮未确认的状态，原先离线的记录也会在本次响应中标为状态过期，保留原时间，不能将读取失败当作无人在线。原有主动刷新入口继续用于主动采集与恢复。
+
 ## English
 
 Player management shows current-save records by default. Select **Previous saves**
@@ -34,3 +36,5 @@ identify their source. The `stale` total includes offline records with stale pre
 while `staleOnline` retains its conservative online-maintenance meaning.
 
 Room online counts unique real connections, including character selection, loading and shard migration. Per-world counts include only shard-local entities, so their sum can be below room online. Players without a confirmed current shard show a pending location; the tooltip can show the last confirmed world as history. Dedicated `[Host]` entries are excluded.
+
+Current player list and detail reads, including MCP, merge already-published valid Runtime snapshots on demand. Concurrent reads share each room's result for five seconds; at most two rooms synchronize at once, with a two-second runtime-read budget. This never sends Lua, installs or repairs Runtime, or starts idle polling. History reads skip synchronization. Stale snapshots, offline nodes and busy synchronization preserve existing records; list `warnings` explain that current presence could not be confirmed. A failed read is not evidence that nobody is online. Explicit refresh remains available for active collection and recovery.

@@ -31,6 +31,10 @@ type playerBatchRefresher interface {
 	RefreshWorlds(context.Context, string, []string) ([]players.RefreshOutcome, error)
 }
 
+type passivePlayerSynchronizer interface {
+	SyncPassivePlayers(context.Context, string) error
+}
+
 type PlayerHandler struct {
 	players PlayerService
 	jobs    *jobs.Service
@@ -73,6 +77,10 @@ func (h *PlayerHandler) list(c *gin.Context) {
 		}
 		includeAccessLists = parsed
 	}
+	var syncErr error
+	if syncer, ok := h.players.(passivePlayerSynchronizer); ok && c.Query("scope") != "history" {
+		syncErr = syncer.SyncPassivePlayers(c.Request.Context(), c.Param("roomId"))
+	}
 	value, err := h.players.List(c.Param("roomId"), players.ListFilter{
 		Scope: c.Query("scope"), Query: c.Query("query"), Status: c.Query("status"), WorldID: c.Query("worldId"),
 		Prefab: c.Query("prefab"), Limit: limit, Offset: offset, SkipAccessLists: !includeAccessLists,
@@ -81,16 +89,45 @@ func (h *PlayerHandler) list(c *gin.Context) {
 		playerFailure(c, err)
 		return
 	}
+	if syncErr != nil {
+		value.Warnings = append(value.Warnings, "最新玩家状态尚未确认，以下保留上次记录："+syncErr.Error())
+		for index := range value.Items {
+			unconfirmOfflinePlayer(&value.Items[index])
+		}
+	}
 	Success(c, http.StatusOK, value)
 }
 
 func (h *PlayerHandler) player(c *gin.Context) {
+	var syncErr error
+	if syncer, ok := h.players.(passivePlayerSynchronizer); ok && players.ValidID(c.Param("playerId")) {
+		syncErr = syncer.SyncPassivePlayers(c.Request.Context(), c.Param("roomId"))
+	}
 	value, err := h.players.Player(c.Param("roomId"), c.Param("playerId"))
 	if err != nil {
 		playerFailure(c, err)
 		return
 	}
+	if syncErr != nil {
+		unconfirmOfflinePlayer(&value)
+	}
 	Success(c, http.StatusOK, value)
+}
+
+// A cached absence is not current evidence if any shard could not be read:
+// the player may have reconnected there. Preserve the old value and timestamp,
+// but expose its uncertainty without rewriting every historical offline row.
+func unconfirmOfflinePlayer(value *players.Player) {
+	if value.Online || value.Historical {
+		return
+	}
+	value.PresenceStatus = players.FreshnessStale
+	if value.Fields == nil {
+		value.Fields = players.FieldStates{}
+	}
+	presence := value.Fields["online"]
+	presence.Status = players.FreshnessStale
+	value.Fields["online"] = presence
 }
 
 func (h *PlayerHandler) refresh(c *gin.Context) {
