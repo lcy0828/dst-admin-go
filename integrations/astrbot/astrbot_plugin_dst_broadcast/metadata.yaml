@@ -1,0 +1,8 @@
+name: astrbot_plugin_dst_broadcast
+display_name: 饥荒 MCP 事件播报
+desc: 使用面板 MCP 事件和只读查询，播报玩家进出、分片状态和公开聊天。
+version: v0.1.2
+author: lcy
+astrbot_version: '>=4.29.3'
+support_platforms:
+  - aiocqhttp

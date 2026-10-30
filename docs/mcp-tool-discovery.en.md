@@ -7,6 +7,10 @@ clients use `find_api` with Chinese requests, symptoms, English keywords or an
 exact operation ID, then invoke `api_<operationId>` or `call_api`. Discovery
 does not execute a management operation.
 
+Token capability presets and room scopes are enforced by the server, including
+typed tools, dispatch, legacy aliases and REST. Discovery only returns capabilities
+allowed by the preset. The [AstrBot companion](astrbot-companion.md) exposes 3 / 5 / 7
+model tools by role and handles common queries without a model request.
 
 ```json
 {"query":"automatic room backups","limit":5}
@@ -205,3 +209,5 @@ compatibility. Deprecated aliases with explicit replacements inherit their
 replacement's vocabulary and retain deprecation notices.
 
 For ordinary-user game queries, use `api_queryRoomWorld` and `api_getRoomWorldQueryRun`. See [controlled read-only queries](controlled-world-queries.md) for the fixed allowlist, AstrBot tool permissions, limits and receipt semantics.
+
+The official AstrBot companion can use `?view=bot`, a bounded view of 14 dependencies including the four stable bot capability operations. Credential scope still filters this view. New capability schemas come from `api_listBotCapabilities`; the model does not load the full API catalog. Existing pagination=on/off behavior is preserved.

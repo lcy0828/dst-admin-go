@@ -1,0 +1,6 @@
+name: astrbot_plugin_dst_companion
+display_name: DST Admin 伴随助手
+desc: 常用查询不调用模型，支持昵称消歧、可信引用与受控管理
+version: v0.2.0
+author: lcy
+repo: https://github.com/lcy0828/dst-admin-go

@@ -17,3 +17,7 @@
 /conf/app.conf
 /conf/app.conf.bak
 /agent/conf/app.conf
+
+# AstrBot source checks and local packaging
+integrations/astrbot/**/__pycache__/
+integrations/astrbot/.ruff_cache/

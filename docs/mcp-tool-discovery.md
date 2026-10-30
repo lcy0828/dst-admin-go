@@ -6,6 +6,10 @@
 按中文需求、故障现象、英文关键词或精确操作编号查找工具，再调用对应的
 `api_<operationId>` 或 `call_api`。工具发现不会执行管理操作。
 
+接入密钥的用途和房间范围由服务端执行；目录和检索只返回该用途允许的能力，
+更换为 `call_api`、兼容别名或 REST 也不能扩权。向群员开放游戏查询可使用
+[AstrBot 伴随助手](astrbot-companion.md)，按角色将模型工具缩减为 3 / 5 / 7 个，
+常用问题直接调用面板，不请求模型。
 
 ```json
 {"query":"给房间设置定时备份","limit":5}
@@ -179,3 +183,5 @@ MCP `outputSchema` 描述实际调用回执，`structuredContent` 与文本结�
 检索场景以及 MCP 新旧回执兼容性。弃用别名有明确替代入口时继承其中文词汇，保留弃用提示。
 
 普通用户游戏查询可使用独立的 `api_queryRoomWorld` 与 `api_getRoomWorldQueryRun`。固定查询白名单、AstrBot 工具权限与回执说明见 [受控只读查询](controlled-world-queries.md)。
+
+AstrBot 伴随插件可使用 `?view=bot`：提供四个稳定 bot 能力入口、房间列表和高频读取依赖，共 14 项（仍按密钥范围过滤）。动态能力参数从 `api_listBotCapabilities` 获取，不将全部 API 加载给模型。保留现有 pagination=on/off 行为；接入示例见 [AstrBot 伴随助手](astrbot-companion.md)。

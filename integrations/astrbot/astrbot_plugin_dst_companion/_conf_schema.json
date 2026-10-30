@@ -1,0 +1,343 @@
+{
+  "enabled": {
+    "description": "启用快捷查询；不会启动游戏或重启房间",
+    "type": "bool",
+    "default": false
+  },
+  "mcp_server": {
+    "description": "AstrBot 已配置的游戏只读 MCP 连接名",
+    "type": "string",
+    "default": "dst-admin"
+  },
+  "management_mcp_server": {
+    "description": "独立管理 MCP 连接名；留空关闭管理",
+    "type": "string",
+    "default": ""
+  },
+  "allowed_sessions": {
+    "description": "允许会话的 unified_msg_origin；必须明确登记，默认不开放",
+    "type": "list",
+    "default": []
+  },
+  "room_ids": {
+    "description": "本插件开放的真实房间 ID；须同时在面板密钥范围内",
+    "type": "list",
+    "default": []
+  },
+  "room_aliases": {
+    "description": "房间别名 JSON，例如 {\"1服\":\"example-room\"}",
+    "type": "text",
+    "default": "{}"
+  },
+  "default_room_id": {
+    "description": "默认房间；留空时多房间询问选择",
+    "type": "string",
+    "default": ""
+  },
+  "public_queries": {
+    "description": "群内可见内容；背包与位置按实际群需求开放",
+    "type": "list",
+    "default": [
+      "status",
+      "players",
+      "profile",
+      "inventory",
+      "network",
+      "help",
+      "mods"
+    ]
+  },
+  "player_bindings": {
+    "description": "管理员已验证的 QQ→KU 映射 JSON；同名不作为验证",
+    "type": "text",
+    "default": "{}"
+  },
+  "game_admins": {
+    "description": "游戏管理者 QQ；还须具备 AstrBot 原生管理员身份",
+    "type": "list",
+    "default": []
+  },
+  "panel_admins": {
+    "description": "面板管理员 QQ；详细接口仅授权私聊开放",
+    "type": "list",
+    "default": []
+  },
+  "allow_private": {
+    "description": "已登记私聊会话不需要额外 @",
+    "type": "bool",
+    "default": false
+  },
+  "command_prefix": {
+    "description": "确定性查询前缀；也支持真实 @机器人",
+    "type": "string",
+    "default": "/dst"
+  },
+  "configuration_version": {
+    "description": "配置模式：1 保留旧字段与混合聊天；2 使用下方全局默认和会话覆盖",
+    "type": "int",
+    "default": 1,
+    "options": [
+      1,
+      2
+    ]
+  },
+  "defaults": {
+    "description": "v2 全局默认设置；会话只能缩小全局授权",
+    "type": "object",
+    "items": {
+      "mode": {
+        "description": "交互模式（shortcut 快捷指令，mixed 保留普通聊天）",
+        "type": "string",
+        "default": "shortcut",
+        "options": [
+          "shortcut",
+          "mixed"
+        ]
+      },
+      "rooms": {
+        "description": "允许房间真实 ID",
+        "type": "list",
+        "default": []
+      },
+      "defaultRoom": {
+        "description": "默认房间 ID",
+        "type": "string",
+        "default": ""
+      },
+      "roomAliases": {
+        "description": "房间别名",
+        "type": "dict",
+        "default": {}
+      },
+      "commandAliases": {
+        "description": "自定义完整指令 → 固定命令 kind 或 cap:能力ID",
+        "type": "dict",
+        "default": {}
+      },
+      "categories": {
+        "description": "允许读取的信息类别",
+        "type": "list",
+        "default": [
+          "status",
+          "players",
+          "profile",
+          "inventory",
+          "network",
+          "mods",
+          "help"
+        ]
+      },
+      "writeAllowlist": {
+        "description": "明确开放的写能力 ID（还须原生管理员和独立管理连接）",
+        "type": "list",
+        "default": []
+      },
+      "bindings": {
+        "description": "管理员已验证的 QQ → KU 绑定",
+        "type": "dict",
+        "default": {}
+      },
+      "pageSize": {
+        "description": "每页条数（1～10）",
+        "type": "int",
+        "default": 5
+      },
+      "style": {
+        "description": "展示样式",
+        "type": "string",
+        "default": "concise",
+        "options": [
+          "concise",
+          "detailed"
+        ]
+      },
+      "templates": {
+        "description": "按命令 kind 或能力 ID 自定义模板；只支持 {title} {body} {room} {player}",
+        "type": "dict",
+        "default": {}
+      },
+      "taskNotifications": {
+        "description": "管理任务结果通知",
+        "type": "bool",
+        "default": true
+      },
+      "queryTimeout": {
+        "description": "普通查询总超时秒数（2～20）",
+        "type": "int",
+        "default": 8
+      },
+      "inventoryTimeout": {
+        "description": "背包查询总超时秒数（5～40）",
+        "type": "int",
+        "default": 30
+      },
+      "directoryTTL": {
+        "description": "有请求时检查能力目录的间隔秒数（10～300）",
+        "type": "int",
+        "default": 60
+      },
+      "menuItems": {
+        "description": "菜单显示和顺序，固定命令 kind 或能力 ID；* 表示其余项，空列表隐藏菜单项（不改变授权）",
+        "type": "list",
+        "default": [
+          "*"
+        ]
+      },
+      "disabledCapabilities": {
+        "description": "实际停用的能力 ID；会话只能增加停用，不能移除全局停用",
+        "type": "list",
+        "default": []
+      }
+    }
+  },
+  "session_overrides": {
+    "description": "会话覆盖：只有 overrideFields 中列出的字段覆盖；未选字段忽略表单自动填入的默认值",
+    "type": "template_list",
+    "default": [],
+    "templates": {
+      "session": {
+        "name": "会话设置",
+        "items": {
+          "session": {
+            "description": "unified_msg_origin",
+            "type": "string",
+            "default": ""
+          },
+          "overrideFields": {
+            "description": "需要覆盖的字段；空列表表示全部继承",
+            "type": "list",
+            "default": [],
+            "options": [
+              "mode",
+              "rooms",
+              "defaultRoom",
+              "roomAliases",
+              "commandAliases",
+              "categories",
+              "writeAllowlist",
+              "bindings",
+              "pageSize",
+              "style",
+              "templates",
+              "taskNotifications",
+              "queryTimeout",
+              "inventoryTimeout",
+              "directoryTTL",
+              "menuItems",
+              "disabledCapabilities"
+            ]
+          },
+          "values": {
+            "description": "覆盖值",
+            "type": "object",
+            "items": {
+              "mode": {
+                "description": "交互模式（shortcut 快捷指令，mixed 保留普通聊天）",
+                "type": "string",
+                "default": "shortcut",
+                "options": [
+                  "shortcut",
+                  "mixed"
+                ]
+              },
+              "rooms": {
+                "description": "允许房间真实 ID",
+                "type": "list",
+                "default": []
+              },
+              "defaultRoom": {
+                "description": "默认房间 ID",
+                "type": "string",
+                "default": ""
+              },
+              "roomAliases": {
+                "description": "房间别名",
+                "type": "dict",
+                "default": {}
+              },
+              "commandAliases": {
+                "description": "自定义完整指令 → 固定命令 kind 或 cap:能力ID",
+                "type": "dict",
+                "default": {}
+              },
+              "categories": {
+                "description": "允许读取的信息类别",
+                "type": "list",
+                "default": [
+                  "status",
+                  "players",
+                  "profile",
+                  "inventory",
+                  "network",
+                  "mods",
+                  "help"
+                ]
+              },
+              "writeAllowlist": {
+                "description": "明确开放的写能力 ID（还须原生管理员和独立管理连接）",
+                "type": "list",
+                "default": []
+              },
+              "bindings": {
+                "description": "管理员已验证的 QQ → KU 绑定",
+                "type": "dict",
+                "default": {}
+              },
+              "pageSize": {
+                "description": "每页条数（1～10）",
+                "type": "int",
+                "default": 5
+              },
+              "style": {
+                "description": "展示样式",
+                "type": "string",
+                "default": "concise",
+                "options": [
+                  "concise",
+                  "detailed"
+                ]
+              },
+              "templates": {
+                "description": "按命令 kind 或能力 ID 自定义模板；只支持 {title} {body} {room} {player}",
+                "type": "dict",
+                "default": {}
+              },
+              "taskNotifications": {
+                "description": "管理任务结果通知",
+                "type": "bool",
+                "default": true
+              },
+              "queryTimeout": {
+                "description": "普通查询总超时秒数（2～20）",
+                "type": "int",
+                "default": 8
+              },
+              "inventoryTimeout": {
+                "description": "背包查询总超时秒数（5～40）",
+                "type": "int",
+                "default": 30
+              },
+              "directoryTTL": {
+                "description": "有请求时检查能力目录的间隔秒数（10～300）",
+                "type": "int",
+                "default": 60
+              },
+              "menuItems": {
+                "description": "菜单显示和顺序，固定命令 kind 或能力 ID；* 表示其余项，空列表隐藏菜单项（不改变授权）",
+                "type": "list",
+                "default": [
+                  "*"
+                ]
+              },
+              "disabledCapabilities": {
+                "description": "实际停用的能力 ID；会话只能增加停用，不能移除全局停用",
+                "type": "list",
+                "default": []
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

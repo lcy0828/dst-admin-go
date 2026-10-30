@@ -1,0 +1,72 @@
+{
+  "enabled": {
+    "description": "启用群播报",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后会自动向下方指定的 QQ 群发送所选事件。"
+  },
+  "mcp_server": {
+    "description": "AstrBot 已配置的 MCP 服务名称",
+    "type": "string",
+    "default": "dst-admin"
+  },
+  "platform_id": {
+    "description": "QQ 平台 ID",
+    "type": "string",
+    "default": "",
+    "hint": "填写 AstrBot 机器人页面中的平台 ID。"
+  },
+  "target_group_id": {
+    "description": "接收通知的 QQ 群号",
+    "type": "string",
+    "default": ""
+  },
+  "room_id": {
+    "description": "房间 roomId",
+    "type": "string",
+    "default": ""
+  },
+  "room_label": {
+    "description": "房间展示名称",
+    "type": "string",
+    "default": "1服"
+  },
+  "room_id_2": {
+    "description": "第二个房间 roomId（可选）",
+    "type": "string",
+    "default": ""
+  },
+  "room_label_2": {
+    "description": "第二个房间展示名称",
+    "type": "string",
+    "default": "2服"
+  },
+  "presence": {
+    "description": "播报玩家进服和退服",
+    "type": "bool",
+    "default": true
+  },
+  "server": {
+    "description": "播报分片启动、停止和异常退出",
+    "type": "bool",
+    "default": true
+  },
+  "chat": {
+    "description": "转发游戏公开聊天",
+    "type": "bool",
+    "default": false,
+    "hint": "只转发 say，不转发 whisper。首次启用不会补发历史聊天。"
+  },
+  "leave_grace_seconds": {
+    "description": "退服确认等待秒数",
+    "type": "int",
+    "default": 10,
+    "hint": "用于合并上下洞穴和快速重连，范围 5～60 秒。"
+  },
+  "poll_interval_seconds": {
+    "description": "状态及公开聊天检查间隔",
+    "type": "int",
+    "default": 15,
+    "hint": "玩家进出使用事件流；此间隔只用于确认分片运行记录和可选的公开聊天，范围 15～60 秒。"
+  }
+}
