@@ -5892,6 +5892,74 @@
         "查人"
       ],
       "examples": []
+    },
+    "listBotCapabilities": {
+      "purpose": "读取机器人能力目录，返回完整参数 Schema、权限分类与稳定修订",
+      "actions": [
+        "读取机器人能力目录，返回完整参数 Schema、权限分类与稳定修订"
+      ],
+      "queries": [
+        "读取机器人能力目录，返回完整参数 Schema、权限分类与稳定修订"
+      ],
+      "terms": [
+        "AstrBot",
+        "机器人",
+        "能力目录",
+        "菜单",
+        "快捷指令"
+      ],
+      "resultNotes": "检查业务 status、complete 和 executionOutcome；已下发不等于完成，缺少输出不等于零；不确定时使用原 requestId 补读，禁止自动重发。"
+    },
+    "queryBotCapability": {
+      "purpose": "按服务端固定白名单执行只读机器人查询",
+      "actions": [
+        "按服务端固定白名单执行只读机器人查询"
+      ],
+      "queries": [
+        "按服务端固定白名单执行只读机器人查询"
+      ],
+      "terms": [
+        "AstrBot",
+        "机器人",
+        "能力目录",
+        "菜单",
+        "快捷指令"
+      ],
+      "resultNotes": "检查业务 status、complete 和 executionOutcome；已下发不等于完成，缺少输出不等于零；不确定时使用原 requestId 补读，禁止自动重发。"
+    },
+    "runBotCapability": {
+      "purpose": "提交固定的机器人管理操作，丢失回包后只读原请求",
+      "actions": [
+        "提交固定的机器人管理操作，丢失回包后只读原请求"
+      ],
+      "queries": [
+        "提交固定的机器人管理操作，丢失回包后只读原请求"
+      ],
+      "terms": [
+        "AstrBot",
+        "机器人",
+        "能力目录",
+        "菜单",
+        "快捷指令"
+      ],
+      "resultNotes": "检查业务 status、complete 和 executionOutcome；已下发不等于完成，缺少输出不等于零；不确定时使用原 requestId 补读，禁止自动重发。"
+    },
+    "getBotCapabilityResult": {
+      "purpose": "凭原 requestId 找回同一身份和房间的任务或查询结果，不重新提交",
+      "actions": [
+        "凭原 requestId 找回同一身份和房间的任务或查询结果，不重新提交"
+      ],
+      "queries": [
+        "凭原 requestId 找回同一身份和房间的任务或查询结果，不重新提交"
+      ],
+      "terms": [
+        "AstrBot",
+        "机器人",
+        "能力目录",
+        "菜单",
+        "快捷指令"
+      ],
+      "resultNotes": "检查业务 status、complete 和 executionOutcome；已下发不等于完成，缺少输出不等于零；不确定时使用原 requestId 补读，禁止自动重发。"
     }
   }
 }

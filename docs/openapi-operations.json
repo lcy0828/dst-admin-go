@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "e1c2c5103f7ee03a9bd08b073af648b44eaed8e2486bbcf4fdc206769109eb68",
+  "operationsSHA256": "935e18fe6345afa960faf82bcf185e53d00fada110cb6ce46ad57852b35af0c4",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -1399,6 +1399,23 @@
       "title": "Read one backup record"
     },
     {
+      "operationId": "getBotCapabilityResult",
+      "method": "GET",
+      "path": "/rooms/{roomId}/bot/requests/{requestId}",
+      "transport": "json",
+      "tags": [
+        "ai",
+        "bot",
+        "result",
+        "room",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Recover the original caller-owned bot request without resubmitting it"
+    },
+    {
       "operationId": "getClusterTokenStatus",
       "method": "GET",
       "path": "/rooms/{roomId}/cluster-token",
@@ -2588,6 +2605,23 @@
       "title": "List scheduled automation task definitions"
     },
     {
+      "operationId": "listBotCapabilities",
+      "method": "GET",
+      "path": "/bot/capabilities",
+      "transport": "json",
+      "tags": [
+        "ai",
+        "bot",
+        "capability",
+        "menu",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Discover the permission-filtered bot capability directory without loading hundreds of tools"
+    },
+    {
       "operationId": "listCommandRuns",
       "method": "GET",
       "path": "/rooms/{roomId}/command-runs",
@@ -3554,6 +3588,23 @@
       "title": "Permanently remove a deleted world"
     },
     {
+      "operationId": "queryBotCapability",
+      "method": "GET",
+      "path": "/rooms/{roomId}/bot/queries/{capabilityId}",
+      "transport": "json",
+      "tags": [
+        "ai",
+        "bot",
+        "query",
+        "room",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Execute one fixed read-only bot capability with validated parameters"
+    },
+    {
       "operationId": "queryRoomWorld",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/queries/{queryId}",
@@ -4072,6 +4123,24 @@
       "risk": "high",
       "runtime": "any",
       "title": "Start, stop, or restart selected worlds across multiple rooms through one persistent job"
+    },
+    {
+      "operationId": "runBotCapability",
+      "method": "POST",
+      "path": "/rooms/{roomId}/bot/actions/{capabilityId}",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "action",
+        "ai",
+        "bot",
+        "room",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Submit one fixed administrator bot action once, with durable request recovery"
     },
     {
       "operationId": "runContainerAction",

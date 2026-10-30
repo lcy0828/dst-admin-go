@@ -69,6 +69,11 @@ func NewIdempotencyStore(ttl time.Duration, maxEntries int) *IdempotencyStore {
 
 func (s *IdempotencyStore) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Bot actions persist their request identity and reauthorize every replay.
+		if c.Request.Method == http.MethodPost && c.FullPath() == "/api/v2/rooms/:roomId/bot/actions/:capabilityId" {
+			c.Next()
+			return
+		}
 		if !isUnsafeMethod(c.Request.Method) {
 			c.Next()
 			return

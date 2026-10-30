@@ -265,7 +265,7 @@ func (s *Store) call(id string) (Call, error) {
 }
 func (s *Store) prune() error {
 	var count int
-	if err := s.db.Table(s.callTable).Where("status <> ?", "executing").Count(&count).Error; err != nil {
+	if err := s.db.Table(s.callTable).Where("status <> ? AND tool NOT IN (?)", "executing", []string{"bot.read", "bot.write"}).Count(&count).Error; err != nil {
 		return err
 	}
 	if count <= 2000 {
@@ -274,7 +274,7 @@ func (s *Store) prune() error {
 	var rows []struct{ ID string }
 	// Trim a batch so normal requests use an indexed count rather than sorting
 	// the entire retained history on every tool call.
-	if err := s.db.Table(s.callTable).Select("id").Where("status <> ?", "executing").Order("created_at ASC").Limit(100).Scan(&rows).Error; err != nil {
+	if err := s.db.Table(s.callTable).Select("id").Where("status <> ? AND tool NOT IN (?)", "executing", []string{"bot.read", "bot.write"}).Order("created_at ASC").Limit(100).Scan(&rows).Error; err != nil {
 		return err
 	}
 	ids := make([]string, 0, len(rows))
@@ -285,4 +285,30 @@ func (s *Store) prune() error {
 		return nil
 	}
 	return s.db.Table(s.callTable).Where("id IN (?)", ids).Delete(&Call{}).Error
+}
+
+// Demand-driven compaction preserves stable identity/fingerprint and any active
+// or uncertain receipt. Capacity exhaustion refuses new work; it never makes an
+// old write executable again. No background database sweep is introduced.
+func (s *Store) compactBotRecords() error {
+	var calls []Call
+	if e := s.db.Table(s.callTable).Where("tool IN (?) AND status = ? AND created_at < ?", []string{"bot.read", "bot.write"}, "succeeded", time.Now().UTC().Add(-7*24*time.Hour)).Order("created_at ASC").Limit(32).Find(&calls).Error; e != nil {
+		return e
+	}
+	for _, call := range calls {
+		var result BotResult
+		if json.Unmarshal([]byte(call.Result), &result) != nil || result.NextAction != "none" || (result.Status != "succeeded" && result.Status != "partial" && result.Status != "failed" && result.Status != "rejected") {
+			continue
+		}
+		result.Data = nil
+		result.Complete = false
+		result.Status = "unavailable"
+		result.NextAction = "none"
+		result.Error = map[string]string{"code": "BOT_RESULT_EXPIRED", "message": "结果正文已超过保留期；请求身份仍保留，不会重新执行"}
+		raw, _ := json.Marshal(result)
+		if e := s.db.Table(s.callTable).Where("id = ?", call.ID).Updates(map[string]any{"result": string(raw), "status": "archived"}).Error; e != nil {
+			return e
+		}
+	}
+	return nil
 }

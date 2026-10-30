@@ -207,6 +207,11 @@ func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw j
 		if !ok || !op.Callable() {
 			return Invocation{}, ErrDenied
 		}
+		if botOperation(op.ID) {
+			if _, e := strictBotJSONLimit(raw, 16<<10, 8); e != nil {
+				return Invocation{}, e
+			}
+		}
 		resolved, values, resolveErr := s.Store.resolvePrivateInputs(p, raw)
 		if resolveErr != nil {
 			return Invocation{}, resolveErr
@@ -233,6 +238,9 @@ func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw j
 				return Invocation{}, ErrDenied
 			}
 		}
+	}
+	if op != nil && botOperation(op.ID) {
+		return s.invokeBotAPI(ctx, p, op, in)
 	}
 	var value any
 	if json.Unmarshal(raw, &value) != nil {

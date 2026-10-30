@@ -6759,6 +6759,72 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /bot/capabilities:
+    get:
+      tags: [AI]
+      operationId: listBotCapabilities
+      summary: Discover the permission-filtered bot capability directory without loading hundreds of tools
+      x-dst-tool: {readOnly: true, destructive: false, risk: low, tags: [bot, capability, menu]}
+      parameters:
+        - {name: protocolVersion, in: query, required: true, schema: {type: integer, enum: [1]}}
+        - {name: knownRevision, in: query, schema: {type: string, maxLength: 128}}
+        - {name: cursor, in: query, schema: {type: string, maxLength: 512}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 64, default: 32}}
+      responses:
+        '200': {description: Atomic paginated directory; parameters are server-owned schemas, never URLs or scripts, content: {application/json: {schema: {$ref: '#/components/schemas/BotDirectoryEnvelope'}}}}
+  /rooms/{roomId}/bot/queries/{capabilityId}:
+    get:
+      tags: [AI]
+      operationId: queryBotCapability
+      summary: Execute one fixed read-only bot capability with validated parameters
+      description: parameters is one JSON object encoded as a query string value. Read status and complete; absent output is never zero. Re-read the original request rather than replaying an uncertain query.
+      x-dst-tool: {readOnly: true, destructive: false, risk: low, tags: [bot, query]}
+      parameters:
+        - {$ref: '#/components/parameters/RoomID'}
+        - {name: capabilityId, in: path, required: true, schema: {type: string, pattern: '^[a-z][a-z0-9_.-]{0,63}$'}}
+        - {name: contractVersion, in: query, required: true, schema: {type: integer, enum: [1]}}
+        - {name: schemaRevision, in: query, required: true, schema: {type: string, minLength: 1, maxLength: 128}}
+        - {name: requestId, in: query, required: true, schema: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$'}}
+        - {name: parameters, in: query, schema: {type: string, maxLength: 8192, default: '{}'}}
+      responses:
+        '200': {description: Business result with explicit status, complete, source and original request identity, content: {application/json: {schema: {$ref: '#/components/schemas/BotResultEnvelope'}}}}
+  /rooms/{roomId}/bot/actions/{capabilityId}:
+    post:
+      tags: [AI]
+      operationId: runBotCapability
+      summary: Submit one fixed administrator bot action once, with durable request recovery
+      description: Requires actual underlying operation permissions and Idempotency-Key. Unknown or custom capabilities cannot register scripts. On response loss read getBotCapabilityResult using the original requestId; never submit another request automatically.
+      x-dst-tool: {readOnly: false, destructive: true, tags: [bot, action]}
+      parameters:
+        - {$ref: '#/components/parameters/RoomID'}
+        - {name: capabilityId, in: path, required: true, schema: {type: string, pattern: '^[a-z][a-z0-9_.-]{0,63}$'}}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [contractVersion, schemaRevision, parameters]
+              properties:
+                contractVersion: {type: integer, enum: [1]}
+                schemaRevision: {type: string, minLength: 1, maxLength: 128}
+                parameters: {type: object}
+      responses:
+        '200': {description: Submitted is pending or running; only verified full completion is succeeded, content: {application/json: {schema: {$ref: '#/components/schemas/BotResultEnvelope'}}}}
+  /rooms/{roomId}/bot/requests/{requestId}:
+    get:
+      tags: [AI]
+      operationId: getBotCapabilityResult
+      summary: Recover the original caller-owned bot request without resubmitting it
+      x-dst-tool: {readOnly: true, destructive: false, risk: low, tags: [bot, result]}
+      parameters:
+        - {$ref: '#/components/parameters/RoomID'}
+        - {name: requestId, in: path, required: true, schema: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$'}}
+      responses:
+        '200': {description: Original request or bounded refresh of its existing Job or query receipt, content: {application/json: {schema: {$ref: '#/components/schemas/BotResultEnvelope'}}}}
 components:
   securitySchemes:
     apiBearer:
@@ -6962,6 +7028,65 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
   schemas:
+    BotDirectoryEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [protocolVersion, revision]
+          properties:
+            protocolVersion: {type: integer, enum: [1]}
+            revision: {type: string}
+            notModified: {type: boolean}
+            nextCursor: {type: string}
+            total: {type: integer, minimum: 0}
+            items:
+              type: array
+              maxItems: 64
+              items:
+                type: object
+                required: [id, title, category, access, contractVersion, schemaRevision, parameters, nativeTools, resultKind]
+                properties:
+                  id: {type: string}
+                  title: {type: string}
+                  category: {type: string}
+                  access: {type: string, enum: [read, write]}
+                  contractVersion: {type: integer}
+                  schemaRevision: {type: string}
+                  parameters: {type: object, additionalProperties: true}
+                  parameterHints: {type: object, additionalProperties: {type: string}}
+                  nativeTools: {type: array, items: {type: string}}
+                  resultKind: {type: string}
+    BotResultEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [requestId, capabilityId, contractVersion, roomId, status, complete, source, cached, executionOutcome, mayHaveExecuted, resultKind, data, nextAction]
+          properties:
+            requestId: {type: string}
+            capabilityId: {type: string}
+            contractVersion: {type: integer}
+            roomId: {type: string}
+            status: {type: string, enum: [pending, running, succeeded, partial, failed, uncertain, unavailable, rejected]}
+            complete: {type: boolean}
+            source: {type: string}
+            cached: {type: boolean}
+            observedAt: {type: [string, 'null'], format: date-time}
+            executionOutcome: {type: string}
+            mayHaveExecuted: {type: boolean}
+            resultKind: {type: string}
+            data: {}
+            jobId: {type: string}
+            queryRunId: {type: string}
+            error:
+              type: object
+              properties:
+                code: {type: string}
+                message: {type: string}
+            nextAction: {type: string, enum: [none, read_original, reselect_target, refresh_contract, fix_config]}
     ServiceLogEntry:
       type: object
       properties:

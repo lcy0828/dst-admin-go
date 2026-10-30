@@ -69,6 +69,30 @@ func TestMCPViewsPaginationMetadataAndDispatcher(t *testing.T) {
 	if !slices.Contains(names, dispatchAPI) || !slices.Contains(names, discoverAPI) || slices.Contains(names, "room_control") {
 		t.Fatal(names)
 	}
+
+	var botView mcp.ListToolsResult
+	if e := json.Unmarshal(request("?view=bot", "tools/list", map[string]any{}), &botView); e != nil {
+		t.Fatal(e)
+	}
+	botNames := map[string]bool{}
+	for _, tool := range botView.Tools {
+		botNames[tool.Name] = true
+		if !botMCPNames[tool.Name] {
+			t.Fatal("unexpected bot tool", tool.Name)
+		}
+		if strings.Contains(tool.Name, "Bot") {
+			read := tool.Name != "api_runBotCapability"
+			if tool.Annotations.ReadOnlyHint != read || *tool.Annotations.DestructiveHint == read {
+				t.Fatal("incorrect bot annotation", tool.Name)
+			}
+		}
+	}
+	for _, name := range []string{"api_listBotCapabilities", "api_queryBotCapability", "api_runBotCapability", "api_getBotCapabilityResult"} {
+		if !botNames[name] {
+			t.Fatal("missing bot tool", name)
+		}
+	}
+
 	seen := map[string]bool{}
 	cursor := ""
 	for page := 0; page < 20; page++ {
@@ -112,7 +136,7 @@ func TestMCPViewsPaginationMetadataAndDispatcher(t *testing.T) {
 			t.Fatal(tool.Name)
 		}
 	}
-	for _, query := range []string{"?view=compact", "?view=all", "?view=legacy", "?tags=backup&access=read", "?tags=no-such-domain"} {
+	for _, query := range []string{"?view=bot", "?view=compact", "?view=all", "?view=legacy", "?tags=backup&access=read", "?tags=no-such-domain"} {
 		var first mcp.ListToolsResult
 		if err := json.Unmarshal(request(query, "tools/list", map[string]any{}), &first); err != nil {
 			t.Fatal(err)

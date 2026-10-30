@@ -20,6 +20,7 @@ type AIHandler struct {
 
 func NewAIHandler(service *aicontrol.Service) *AIHandler { return &AIHandler{service: service} }
 func (h *AIHandler) Register(v2 *gin.RouterGroup) {
+	h.registerBot(v2)
 	g := v2.Group("/system/ai")
 	g.GET("", h.status)
 	g.PUT("", h.configure)

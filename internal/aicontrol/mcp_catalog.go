@@ -34,7 +34,7 @@ func parseMCPView(query url.Values) (mcpView, error) {
 	if view.View == "" {
 		view.View = "compact"
 	}
-	if !slices.Contains([]string{"compact", "all", "legacy"}, view.View) {
+	if !slices.Contains([]string{"compact", "all", "legacy", "bot"}, view.View) {
 		return view, ErrInvalid
 	}
 	switch query.Get("pagination") {
@@ -134,6 +134,7 @@ func (s *Service) mcpDefinition(tool Tool) *mcp.Tool {
 	return &mcp.Tool{Name: tool.Name, Title: metadata.Title, Description: tool.Description, InputSchema: tool.InputSchema, OutputSchema: receiptOutputSchema(), Meta: mcp.Meta{mcpMetadataKey: extension}, Annotations: &mcp.ToolAnnotations{Title: metadata.Title, ReadOnlyHint: metadata.Access == "read", IdempotentHint: metadata.Idempotent, DestructiveHint: &metadata.Destructive, OpenWorldHint: &metadata.OpenWorld}}
 }
 
+var botMCPNames = map[string]bool{"api_listBotCapabilities": true, "api_queryBotCapability": true, "api_runBotCapability": true, "api_getBotCapabilityResult": true, "api_listRooms": true, "api_listRoomWorlds": true, "api_listWorldStates": true, "api_resolveRoomPlayer": true, "api_getRoomPlayerInventory": true, "api_listRoomPlayers": true, "api_listRoomMods": true, "api_listRoomBackupSchedules": true, "api_getJob": true, "api_getRoomPerformanceReport": true}
 var compactMCPNames = map[string]bool{discoverAPI: true, dispatchAPI: true, "api_listRooms": true, "api_getRoomRuntimeOverview": true, "api_listRoomPlayers": true, "api_listRoomMods": true, "api_listRoomBackupSchedules": true, "api_listJobs": true, "api_getJob": true, "api_queryRoomWorld": true, "api_getRoomWorldQueryRun": true}
 
 // Listing views are immutable projections of one shared server. No per-token
@@ -155,6 +156,9 @@ func (s *Service) catalogMiddleware(definitions []*mcp.Tool) mcp.Middleware {
 			selected := make([]*mcp.Tool, 0, len(definitions))
 			for _, definition := range definitions {
 				p, _ := ctx.Value(mcpPrincipalKey{}).(Principal)
+				if view.View == "bot" && !botMCPNames[definition.Name] {
+					continue
+				}
 				if !p.AllowsTool(definition.Name) {
 					continue
 				}

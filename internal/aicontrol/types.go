@@ -83,7 +83,7 @@ type Call struct {
 	CallKey         string    `gorm:"unique_index;type:varchar(64)" json:"-"`
 	Fingerprint     string    `gorm:"type:varchar(64)" json:"-"`
 	Source          string    `gorm:"type:varchar(64);index" json:"source"`
-	Tool            string    `gorm:"type:varchar(64)" json:"tool"`
+	Tool            string    `gorm:"type:varchar(64);index" json:"tool"`
 	RoomID          string    `gorm:"type:varchar(255)" json:"roomId,omitempty"`
 	Arguments       string    `gorm:"type:text" json:"arguments"`
 	Status          string    `gorm:"type:varchar(24);index" json:"status"`
