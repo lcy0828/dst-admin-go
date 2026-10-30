@@ -133,6 +133,7 @@ jobs:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
           ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
           ALIYUN_PASSWORD: ${{ secrets.ALIYUN_PASSWORD }}
+          ALIYUN_PUBLISH_MODE: ${{ vars.ALIYUN_PUBLISH_MODE || 'github' }}
         shell: bash
         run: |
           if [[ -n "$DOCKERHUB_TOKEN" ]]; then
@@ -141,7 +142,13 @@ jobs:
             echo 'dockerhub=false' >> "$GITHUB_OUTPUT"
             echo 'Docker Hub skipped: configure the DOCKERHUB_TOKEN Actions secret to enable publication.' >> "$GITHUB_STEP_SUMMARY"
           fi
-          if [[ -n "$ALIYUN_USERNAME" && -n "$ALIYUN_PASSWORD" && -n "$ALIYUN_NAMESPACE" ]]; then
+          if [[ "$ALIYUN_PUBLISH_MODE" == local ]]; then
+            echo 'aliyun=false' >> "$GITHUB_OUTPUT"
+            echo 'Alibaba Cloud synchronization is delegated to the maintainer machine. After publication run: node deploy/scripts/sync-aliyun.mjs --version VERSION --promote-latest' >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$ALIYUN_PUBLISH_MODE" != github ]]; then
+            echo '::error::ALIYUN_PUBLISH_MODE must be github or local.'
+            exit 1
+          elif [[ -n "$ALIYUN_USERNAME" && -n "$ALIYUN_PASSWORD" && -n "$ALIYUN_NAMESPACE" ]]; then
             echo 'aliyun=true' >> "$GITHUB_OUTPUT"
           else
             echo 'aliyun=false' >> "$GITHUB_OUTPUT"
