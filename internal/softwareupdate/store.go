@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var releaseIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
@@ -17,6 +18,28 @@ var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var regexpFrontendCommit = regexp.MustCompile(`^[a-f0-9]{40}$`)
 
 var bundleFiles = map[string]bool{"dst-admin": true, "dst-map-renderer": true, "mod-local-setup": true}
+
+// External upgrades can cover an old staged or interrupted update. Only the
+// actual healthy program may settle it; pending switches and recovery results
+// retain their own lifecycle. This never claims that the old task succeeded.
+func supersedeCoveredOperation(state *diskState, current string) bool {
+	op := state.Operation
+	if state.Pending != nil || op == nil {
+		return false
+	}
+	if op.Phase != "prepared" && op.Phase != "failed" && op.Phase != "interrupted" {
+		return false
+	}
+	if _, ok := NormalizeVersion(current); !ok {
+		return false
+	}
+	if _, ok := NormalizeVersion(op.Version); !ok || CompareVersions(op.Version, current) > 0 {
+		return false
+	}
+	op.Phase, op.Error, op.BytesPerSecond = "superseded", "", 0
+	op.UpdatedAt = time.Now().UTC()
+	return true
+}
 
 func filesFor(kind, platform string) map[string]bool {
 	if kind != "agent" {

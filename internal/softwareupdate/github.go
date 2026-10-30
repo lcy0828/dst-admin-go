@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 )
@@ -18,9 +19,29 @@ type ReleaseClient interface {
 }
 
 type GitHubClient struct {
-	client *http.Client
-	direct *http.Client
-	kind   string
+	client       *http.Client
+	direct       *http.Client
+	kind         string
+	mirrorPrefix string
+}
+
+const defaultMirrorPrefix = "https://ghfast.top/"
+
+// A mirror prefixes an official release URL; it cannot supply release paths,
+// credentials or query parameters of its own.
+func normalizeMirrorPrefix(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultMirrorPrefix, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || len(raw) > 1024 || strings.ContainsAny(raw, "\\\r\n\t\x00 ") || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(raw, "#") || u.Opaque != "" || u.RawPath != "" {
+		return "", fmt.Errorf("%w: invalid GitHub mirror prefix", ErrInvalid)
+	}
+	if u.Path != "" && path.Clean(u.Path)+"/" != u.Path && path.Clean(u.Path) != u.Path {
+		return "", fmt.Errorf("%w: invalid GitHub mirror prefix path", ErrInvalid)
+	}
+	return strings.TrimRight(u.String(), "/") + "/", nil
 }
 
 func NewAgentGitHubClient(client *http.Client) *GitHubClient {
@@ -30,17 +51,22 @@ func NewAgentGitHubClient(client *http.Client) *GitHubClient {
 }
 
 func NewGitHubClient(client *http.Client) *GitHubClient {
+	return newGitHubClient(client, defaultMirrorPrefix)
+}
+
+func newGitHubClient(client *http.Client, prefix string) *GitHubClient {
 	if client == nil {
 		client = &http.Client{}
 	}
 	copy := *client
+	g := &GitHubClient{client: &copy, mirrorPrefix: prefix}
 	copy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return fmt.Errorf("too many release download redirects")
 		}
-		return trustedURL(req.URL.String(), true)
+		return g.trustedURL(req.URL.String(), true)
 	}
-	return &GitHubClient{client: &copy}
+	return g
 }
 
 func ValidSource(source string) bool {
@@ -76,10 +102,6 @@ func trustedURL(raw string, redirect bool) error {
 				}
 			}
 		}
-	case "ghfast.top":
-		if strings.HasPrefix(u.Path, "/https://") {
-			return trustedURL(strings.TrimPrefix(u.Path, "/"), false)
-		}
 	case "objects.githubusercontent.com", "release-assets.githubusercontent.com":
 		if redirect {
 			return nil
@@ -88,14 +110,21 @@ func trustedURL(raw string, redirect bool) error {
 	return fmt.Errorf("%w: untrusted release URL", ErrInvalid)
 }
 
-func sourceURLs(raw, source string) ([]string, error) {
+func (g *GitHubClient) trustedURL(raw string, redirect bool) error {
+	if strings.HasPrefix(raw, g.mirrorPrefix) {
+		return trustedURL(strings.TrimPrefix(raw, g.mirrorPrefix), false)
+	}
+	return trustedURL(raw, redirect)
+}
+
+func (g *GitHubClient) sourceURLs(raw, source string) ([]string, error) {
 	if !ValidSource(source) {
 		return nil, ErrInvalid
 	}
 	if err := trustedURL(raw, false); err != nil {
 		return nil, err
 	}
-	proxy := "https://ghfast.top/" + raw
+	proxy := g.mirrorPrefix + raw
 	if source == "direct" {
 		return []string{raw}, nil
 	}
@@ -106,7 +135,7 @@ func sourceURLs(raw, source string) ([]string, error) {
 }
 
 func (g *GitHubClient) get(ctx context.Context, raw string) (*http.Response, error) {
-	if err := trustedURL(raw, false); err != nil {
+	if err := g.trustedURL(raw, false); err != nil {
 		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
@@ -127,7 +156,7 @@ func (g *GitHubClient) get(ctx context.Context, raw string) (*http.Response, err
 }
 
 func (g *GitHubClient) small(ctx context.Context, asset Asset, source string, limit int64) ([]byte, error) {
-	urls, err := sourceURLs(asset.URL, source)
+	urls, err := g.sourceURLs(asset.URL, source)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +213,7 @@ func (g *GitHubClient) release(ctx context.Context, platform, source, version st
 		data, err = g.small(ctx, Asset{URL: apiURL}, source, 2<<20)
 	}
 	if (source == "proxy" || source == "mirror") || err != nil && source == "auto" {
-		// GHFast supports release assets, not api.github.com. The official
+		// Prefix mirrors support release assets, not api.github.com. The official
 		// release index provides bounded metadata without downloading a binary.
 		fallback := *g
 		if source == "auto" && g.direct != nil {
@@ -251,15 +280,17 @@ func (g *GitHubClient) Checksum(ctx context.Context, asset Asset, source string)
 // Downloads can be retried only before any bytes have been delivered. A partial
 // download fails safely; it is never concatenated with bytes from another mirror.
 func (g *GitHubClient) Download(ctx context.Context, asset Asset, source string, destination io.Writer) error {
-	urls, err := sourceURLs(asset.URL, source)
+	urls, err := g.sourceURLs(asset.URL, source)
 	if err != nil {
 		return err
 	}
 	var lastErr error
-	for _, raw := range urls {
+	for _, route := range g.routes(urls, source) {
 		headCtx, headCancel := context.WithCancel(ctx)
 		timer := time.AfterFunc(12*time.Second, headCancel)
-		response, err := g.get(headCtx, raw)
+		copy := *g
+		copy.client = route.client
+		response, err := copy.get(headCtx, route.url)
 		timer.Stop()
 		if err != nil {
 			headCancel()

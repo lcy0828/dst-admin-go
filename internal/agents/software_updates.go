@@ -206,7 +206,7 @@ func (s *Service) UpdateAgentSoftware(id string, input AgentSoftwareInput) (jobs
 			if err != nil {
 				return reportAgentUpgradeFailure(report, id, "AGENT_SOFTWARE_UPDATE_FAILED", err)
 			}
-			if softwareupdate.CompareVersions(version, baseline.Current.Version) < 0 || request.Action == "apply" && (baseline.Operation == nil || baseline.Operation.ID != input.OperationID || baseline.Operation.Version != version) {
+			if softwareupdate.CompareVersions(version, baseline.Current.Version) <= 0 || request.Action == "apply" && (baseline.Operation == nil || baseline.Operation.ID != input.OperationID || baseline.Operation.Version != version) {
 				return reportAgentUpgradeFailure(report, id, "AGENT_SOFTWARE_UPDATE_FAILED", ErrInvalidInput)
 			}
 			if request.Source == "" && baseline.Settings.ControllerRelay && request.Action == "update" {
@@ -263,6 +263,8 @@ func (s *Service) UpdateAgentSoftware(id string, input AgentSoftwareInput) (jobs
 						lastProgress = progressKey
 					}
 					switch op.Phase {
+					case "superseded":
+						return reportAgentUpgradeFailure(report, id, "AGENT_SOFTWARE_UPDATE_SUPERSEDED", fmt.Errorf("Agent 更新任务已失效：当前版本已覆盖目标版本，请重新检查"))
 					case "failed", "interrupted", "rolled_back":
 						return reportAgentUpgradeFailure(report, id, "AGENT_SOFTWARE_UPDATE_FAILED", fmt.Errorf("%s: %s", op.Phase, op.Error))
 					case "succeeded":

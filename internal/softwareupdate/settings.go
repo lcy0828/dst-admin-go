@@ -19,6 +19,7 @@ import (
 type Settings struct {
 	ControllerRelay bool   `json:"controllerRelay"`
 	Source          string `json:"source"`
+	MirrorPrefix    string `json:"mirrorPrefix"`
 	ProxyMode       string `json:"proxyMode"`
 	ProxyURL        string `json:"proxyURL,omitempty"`
 	ProxyConfigured bool   `json:"proxyConfigured"`
@@ -30,12 +31,15 @@ type Settings struct {
 }
 
 func DefaultSettings() Settings {
-	return Settings{Source: "auto", ProxyMode: "inherit", TimeoutMinutes: 60, BackgroundCheck: true, CheckIntervalHours: 0.5}
+	return Settings{Source: "auto", MirrorPrefix: defaultMirrorPrefix, ProxyMode: "inherit", TimeoutMinutes: 60, BackgroundCheck: true, CheckIntervalHours: 0.5}
 }
 
 func (v Settings) Public() Settings { v.ProxyConfigured = v.ProxyURL != ""; v.ProxyURL = ""; return v }
 
 func validateSettings(v Settings) error {
+	if _, err := normalizeMirrorPrefix(v.MirrorPrefix); err != nil {
+		return err
+	}
 	if !ValidSource(v.Source) || v.TimeoutMinutes < 10 || v.TimeoutMinutes > 240 || !(v.CheckIntervalHours >= 0.5 && v.CheckIntervalHours <= 168) {
 		return ErrInvalid
 	}
@@ -91,6 +95,10 @@ func (s *Service) SaveSettings(v Settings) (Settings, error) {
 	if v.Source == "proxy" {
 		v.Source = "mirror"
 	}
+	v.MirrorPrefix, err = normalizeMirrorPrefix(v.MirrorPrefix)
+	if err != nil {
+		return Settings{}, err
+	}
 	if err := validateSettings(v); err != nil {
 		return Settings{}, err
 	}
@@ -127,7 +135,11 @@ func (s *Service) ResolveNetwork(source string, agent bool) (ReleaseClient, stri
 			}
 		}
 	}
-	key := fmt.Sprintf("%x", sha256.Sum256([]byte(source+"\x00"+mode+"\x00"+address)))
+	prefix, err := normalizeMirrorPrefix(v.MirrorPrefix)
+	if err != nil {
+		return nil, "", v, "", err
+	}
+	key := fmt.Sprintf("%x", sha256.Sum256([]byte(source+"\x00"+mode+"\x00"+address+"\x00"+prefix)))
 	client := s.config.Client
 	if !s.managedClient && !agent {
 		return client, source, v, key, nil
@@ -151,7 +163,7 @@ func (s *Service) ResolveNetwork(source string, agent bool) (ReleaseClient, stri
 	default:
 		return nil, "", v, "", ErrInvalid
 	}
-	g := NewGitHubClient(&http.Client{Transport: transport})
+	g := newGitHubClient(&http.Client{Transport: transport}, prefix)
 	if agent || s.config.Kind == "agent" {
 		g.kind = "agent"
 	}

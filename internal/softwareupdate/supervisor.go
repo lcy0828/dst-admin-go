@@ -452,6 +452,11 @@ func (s *supervisor) run(ctx context.Context) error {
 		s.markReady(bootID)
 		return s.wait(ctx, child)
 	}
+	if supersedeCoveredOperation(&state, state.Current.Version) {
+		if err := writeState(s.root, state); err != nil {
+			log.Printf("[SoftwareUpdate] could not settle obsolete update: %v", err)
+		}
+	}
 	s.markReady(bootID)
 	return s.wait(ctx, child)
 }

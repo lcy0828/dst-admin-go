@@ -39,7 +39,7 @@ type route struct {
 func (g *GitHubClient) routes(urls []string, source string) []route {
 	var result []route
 	for _, raw := range urls {
-		mirror := strings.HasPrefix(raw, "https://ghfast.top/")
+		mirror := strings.HasPrefix(raw, g.mirrorPrefix)
 		if mirror && strings.Contains(raw, "https://api.github.com/") {
 			continue
 		}
@@ -69,7 +69,7 @@ func transportError(err error) error {
 }
 
 func (g *GitHubClient) DownloadFile(ctx context.Context, asset Asset, source string, file *os.File, progress func(DownloadProgress)) error {
-	urls, err := sourceURLs(asset.URL, source)
+	urls, err := g.sourceURLs(asset.URL, source)
 	if err != nil {
 		return err
 	}

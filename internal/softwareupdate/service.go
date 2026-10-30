@@ -112,12 +112,17 @@ func (s *Service) Snapshot() (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	result := Snapshot{Settings: settings, Current: s.config.Current, Platform: s.config.Platform, Supported: supported, Ready: supported && s.config.Ready(), UnsupportedReason: reason}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	state, err := readState(s.config.Root)
 	if err != nil {
 		return result, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if result.Ready && s.cancel == nil && supersedeCoveredOperation(&state, s.config.Current.Version) {
+		if err := writeState(s.config.Root, state); err != nil {
+			return result, err
+		}
+	}
 	result.Check = s.check
 	if s.check.Latest != nil {
 		copy := *s.check.Latest
@@ -226,7 +231,7 @@ func (s *Service) Start(version, source string) (Operation, error) {
 		return Operation{}, err
 	}
 	op, err := s.startWithSettings(version, source, client, settings)
-	if err != nil {
+	if err != nil || op.Phase == "prepared" {
 		closeReleaseClient(client)
 	}
 	return op, err
@@ -276,7 +281,13 @@ func (s *Service) startWithSettings(version, source string, client ReleaseClient
 		return Operation{}, ErrBusy
 	}
 	if state.Operation != nil && state.Operation.Phase == "prepared" && state.Operation.Version == version {
-		return *state.Operation, nil
+		// Do not keep returning an unusable package after an external cleanup
+		// or an interrupted filesystem replacement. Re-download on this explicit
+		// request, retaining the usual full archive and executable validation.
+		if err := s.validatePrepared(*state.Operation); err == nil {
+			return *state.Operation, nil
+		}
+		state.Operation = nil
 	}
 	// No download or parent switch is active. Retain committed, previous and
 	// prepared code, and clean temporary files left by interrupted downloads.
@@ -502,6 +513,11 @@ func (s *Service) PrepareApply(ctx context.Context, id string) (Operation, func(
 			resume()
 		}
 	}()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancel != nil || s.paused || s.closed || !s.config.Ready() {
+		return Operation{}, nil, ErrBusy
+	}
 	state, err := readState(s.config.Root)
 	if err != nil {
 		return Operation{}, nil, err
@@ -509,22 +525,27 @@ func (s *Service) PrepareApply(ctx context.Context, id string) (Operation, func(
 	if state.Pending != nil {
 		return Operation{}, nil, ErrBusy
 	}
-	if state.Operation == nil || state.Operation.ID != id || state.Operation.Phase != "prepared" || CompareVersions(state.Operation.Version, s.config.Current.Version) < 0 {
+	if supersedeCoveredOperation(&state, s.config.Current.Version) {
+		if err := writeState(s.config.Root, state); err != nil {
+			return Operation{}, nil, err
+		}
+	}
+	if state.Operation == nil || state.Operation.ID != id || state.Operation.Phase != "prepared" || CompareVersions(state.Operation.Version, s.config.Current.Version) <= 0 {
 		return Operation{}, nil, ErrNotPrepared
 	}
 	operation := *state.Operation
+	if err := s.validatePrepared(operation); err != nil {
+		state.Operation.Phase = "failed"
+		state.Operation.Error = "verified update package is unavailable or invalid; download it again"
+		state.Operation.UpdatedAt = time.Now().UTC()
+		if saveErr := writeState(s.config.Root, state); saveErr != nil {
+			return Operation{}, nil, saveErr
+		}
+		return Operation{}, nil, fmt.Errorf("%w: %s", ErrNotPrepared, state.Operation.Error)
+	}
 	target := &installedRelease{ID: operation.ReleaseID, Version: operation.Version}
 	operation.Phase = "restarting"
 	operation.UpdatedAt = time.Now().UTC()
-	if target.ID != "" {
-		directory, err := releaseDirectory(s.config.Root, target.ID)
-		if err != nil {
-			return Operation{}, nil, err
-		}
-		if _, err := validateBundleFor(directory, target.Version, s.config.Platform, s.config.Kind); err != nil {
-			return Operation{}, nil, err
-		}
-	}
 	state.Pending = target
 	state.Operation = &operation
 	if err := writeState(s.config.Root, state); err != nil {
@@ -532,6 +553,15 @@ func (s *Service) PrepareApply(ctx context.Context, id string) (Operation, func(
 	}
 	succeeded = true
 	return operation, resume, nil
+}
+
+func (s *Service) validatePrepared(operation Operation) error {
+	directory, err := releaseDirectory(s.config.Root, operation.ReleaseID)
+	if err != nil {
+		return err
+	}
+	_, err = validateBundleFor(directory, operation.Version, s.config.Platform, s.config.Kind)
+	return err
 }
 
 func (s *Service) NotifyApply(resume func()) {

@@ -13356,12 +13356,13 @@ components:
       required: [source, proxyMode, timeoutMinutes, backgroundCheck, checkIntervalHours]
       properties:
         source: { type: string, enum: [auto, direct, mirror, proxy] }
+        mirrorPrefix: { type: string, maxLength: 1024, default: 'https://ghfast.top/', description: 'HTTPS prefix prepended to official GitHub release URLs for mirror or automatic fallback. Empty restores the default. Credentials, query strings and fragments are rejected. Applies to metadata, checksums and archives on the downloading machine.' }
         proxyMode: { type: string, enum: [inherit, system, direct, custom] }
         proxyURL: { type: string, maxLength: 2048, writeOnly: true, description: Leave empty to retain an existing custom proxy; localhost means the downloading machine }
         proxyConfigured: { type: boolean, readOnly: true }
         controllerRelay: { type: boolean, description: Agent preference for downloading via this Controller }
         timeoutMinutes: { type: integer, minimum: 10, maximum: 240, default: 60 }
-        backgroundCheck: { type: boolean, default: true, description: Controller checks only while a release notification channel is enabled }
+        backgroundCheck: { type: boolean, default: true, description: Background checks run independently of browser activity and notification subscriptions }
         checkIntervalHours: { type: number, minimum: 0.5, maximum: 168, default: 0.5, description: 'Background check interval in hours; fractional values are accepted. The default 0.5 is 30 minutes. Existing saved intervals are preserved.' }
     SoftwareOperation:
       type: object
@@ -13372,7 +13373,7 @@ components:
         attempt: { type: integer }
         id: { type: string }
         version: { type: string }
-        phase: { type: string, enum: [downloading, verifying, prepared, restarting, succeeded, failed, interrupted, rolled_back] }
+        phase: { type: string, enum: [downloading, verifying, prepared, restarting, succeeded, failed, interrupted, rolled_back, superseded], description: 'superseded means the healthy running version already covers an old prepared or interrupted target; it does not claim that the old online-update operation succeeded.' }
         progress: { type: integer, minimum: 0, maximum: 100 }
         downloadedBytes: { type: integer, format: int64 }
         totalBytes: { type: integer, format: int64 }

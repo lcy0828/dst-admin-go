@@ -36,6 +36,58 @@ type lostSoftwareAcknowledgement struct {
 	rejected bool
 }
 
+type externallyUpdatedSoftwareTransport struct{ *softwareTestTransport }
+
+func (transport *externallyUpdatedSoftwareTransport) ExecuteUpgrade(ctx context.Context, id string, request shared.AgentUpgradeRequest, timeout int) (AgentUpgradeExecutionResult, error) {
+	result, err := transport.softwareTestTransport.ExecuteUpgrade(ctx, id, request, timeout)
+	if err == nil && request.Action == "update" {
+		transport.stateMu.Lock()
+		defer transport.stateMu.Unlock()
+		transport.snapshot.Current.Version = "v1.2.4"
+		transport.snapshot.Operation.Phase = "superseded"
+		result.Result.Software, err = json.Marshal(transport.snapshot)
+	}
+	return result, err
+}
+
+func TestAgentSoftwareCoveredTargetsNeverInstallOrWaitIndefinitely(t *testing.T) {
+	for _, externalDuringJob := range []bool{false, true} {
+		t.Run(fmt.Sprint(externalDuringJob), func(t *testing.T) {
+			service, _, jobService, memory := newAgentTestService(t)
+			memory.mu.Lock()
+			record := memory.snapshots["agent-primary"]
+			record.Capabilities = append(record.Capabilities, shared.AgentSoftwareUpdateCapability)
+			memory.snapshots[record.ID] = record
+			memory.mu.Unlock()
+			transport := &softwareTestTransport{MemoryTransport: memory, snapshot: softwareupdate.Snapshot{Supported: true, Ready: true, Platform: "linux-amd64"}}
+			transport.snapshot.Current.Version = "v1.2.3"
+			service.transport = transport
+			if externalDuringJob {
+				transport.snapshot.Current.Version = "v1.2.2"
+				service.transport = &externallyUpdatedSoftwareTransport{transport}
+			}
+			job, err := service.UpdateAgentSoftware("agent-primary", AgentSoftwareInput{Version: "v1.2.3", Confirmation: "v1.2.3"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			finished := waitSoftwareAcknowledgementJob(t, jobService, job.ID)
+			if finished.Status != jobs.StatusFailed {
+				t.Fatal("obsolete task was reported as an installation success", finished)
+			}
+			if externalDuringJob && (finished.Targets[0].Error == nil || finished.Targets[0].Error.Code != "AGENT_SOFTWARE_UPDATE_SUPERSEDED") {
+				t.Fatal("superseded task did not terminate truthfully", finished)
+			}
+			transport.stateMu.Lock()
+			defer transport.stateMu.Unlock()
+			for _, request := range transport.requests {
+				if request.Action == "apply" || !externalDuringJob && request.Action == "update" {
+					t.Fatal("covered target was mutated", request.Action)
+				}
+			}
+		})
+	}
+}
+
 func (transport *lostSoftwareAcknowledgement) ExecuteUpgrade(ctx context.Context, id string, request shared.AgentUpgradeRequest, timeout int) (AgentUpgradeExecutionResult, error) {
 	if request.Action == transport.action && transport.rejected {
 		return AgentUpgradeExecutionResult{Result: shared.AgentUpgradeResult{ProtocolVersion: request.ProtocolVersion, ReleaseID: request.ReleaseID}}, errors.New("other Agent work is running")

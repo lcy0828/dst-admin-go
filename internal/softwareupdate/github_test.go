@@ -38,7 +38,7 @@ func TestOfficialReleaseSelectionAndSourceFallback(t *testing.T) {
 
 func TestUntrustedReleaseURLsAreRejected(t *testing.T) {
 	for _, raw := range []string{"http://github.com/" + Repository + "/releases/latest", "https://example.com/update", "https://github.com/other/repo/releases/download/v1.0.0/dst-admin-update-linux-amd64.tar.gz", "https://github.com:443/" + Repository + "/releases/download/v1.0.0/dst-admin-update-x", "https://ghfast.top/https://127.0.0.1/update", "https://api.github.com/repos/evil/repo/releases/latest"} {
-		if _, err := sourceURLs(raw, "auto"); err == nil {
+		if _, err := NewGitHubClient(nil).sourceURLs(raw, "auto"); err == nil {
 			t.Fatal(raw)
 		}
 	}
