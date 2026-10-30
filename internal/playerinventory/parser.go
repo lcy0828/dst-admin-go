@@ -107,8 +107,12 @@ func decode(data []byte) ([]byte, error) {
 
 // Native player snapshots use version 3 and a bit-packed string length. A
 // leading bit selects 15 or 31 length bits; the last seven bits are aligned
-// within the last byte. A final boolean belongs to the session envelope, not
-// the Lua data. Validate the whole frame instead of searching for "return".
+// within the last byte. The byte immediately after the string is an envelope
+// boolean. Real player sessions can also contain opaque classified/minimap
+// data after it; that suffix is not part of the inventory Lua string. Validate
+// the declared string boundary instead of searching for "return" or assuming
+// that the boolean is the last byte in the file. Input/decoded size limits are
+// enforced by decode; no suffix data is interpreted, decompressed or executed.
 func decodeUserSession(data []byte) ([]byte, error) {
 	if len(data) < 4 || data[0] != 3 {
 		return nil, failure("SAVE_FORMAT_UNSUPPORTED")
@@ -130,10 +134,11 @@ func decodeUserSession(data []byte) ([]byte, error) {
 		return nil, failure("SAVE_LIMIT_EXCEEDED")
 	}
 	start := width + 1
-	if uint64(start)+uint64(length)+1 != uint64(len(data)) || data[len(data)-1] > 1 {
+	end := uint64(start) + uint64(length)
+	if end >= uint64(len(data)) || data[end] > 1 {
 		return nil, failure("SAVE_INVALID")
 	}
-	return data[start : start+int(length)], nil
+	return data[start:int(end)], nil
 }
 
 func parse(ctx context.Context, data []byte) (*table, error) {

@@ -86,6 +86,45 @@ func TestSaveInventoryReferencesRawValuesAndNoWrites(t *testing.T) {
 	}
 }
 
+func TestReadSaveNativePlayerSessionWithClassifiedData(t *testing.T) {
+	root, path := saveFixture(t, "A7G0221H0KC7")
+	body := []byte(`return {prefab="wilson",data={inventory={items={{prefab="twigs",data={stackable={stack=40}}}},equip={BODY={prefab="backpack",data={container={items={{prefab="carrot"}}}}}},activeitem={prefab="goldnugget"}}}}`)
+	frame := append([]byte{3, byte(len(body)) >> 1, byte(len(body)>>8) | byte(len(body)&1)<<7}, body...)
+	frame = append(frame, 1)
+	// A synthetic classified/minimap suffix has binary bytes, its own session
+	// identifier and a non-boolean last byte, as ordinary player saves do.
+	frame = append(frame, []byte("\x00\x10FEDCBA9876543210\x00\xffreturn os.execute(\"must-not-run\")\x00\xb8")...)
+	file := filepath.Join(path, "0000000003")
+	if err := os.WriteFile(file, frame, 0440); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := querySave(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Status != "complete" || value.Empty || value.Source != "save" || value.Character != "wilson" || value.SessionID != testSession || len(value.SourceID) != 64 || value.FileModifiedAt == nil || !value.FileModifiedAt.Equal(before.ModTime()) {
+		t.Fatalf("invalid source metadata: %+v", value)
+	}
+	if len(value.Inventory) != 1 || value.Inventory[0].Prefab != "twigs" || value.Inventory[0].Count == nil || *value.Inventory[0].Count != 40 {
+		t.Fatalf("invalid inventory: %+v", value.Inventory)
+	}
+	if len(value.Equipment) != 1 || value.Equipment[0].Prefab != "backpack" || len(value.Equipment[0].Contents) != 1 || value.Equipment[0].Contents[0].Prefab != "carrot" || value.ActiveItem == nil || value.ActiveItem.Prefab != "goldnugget" {
+		t.Fatalf("invalid equipped/held inventory: %+v", value)
+	}
+	after, err := os.ReadFile(file)
+	if err != nil || !bytes.Equal(after, frame) {
+		t.Fatalf("query changed save: %v", err)
+	}
+	afterInfo, err := os.Stat(file)
+	if err != nil || !sameFile(before, afterInfo) {
+		t.Fatalf("query changed save metadata: %v", err)
+	}
+}
+
 func TestSaveSelectionRollbackAndSameMetadataRewrite(t *testing.T) {
 	root, path := saveFixture(t, "A7G0221H0KC7")
 	old := filepath.Join(path, "0000000003")
@@ -192,6 +231,9 @@ func FuzzPlayerSaveData(f *testing.F) {
 	f.Add([]byte(`return {prefab="wilson",data={inventory={items={},equip={}}}}`))
 	f.Add([]byte(`local t={};t.self=t;return t`))
 	f.Add([]byte("\x03\x22\x00" + `return {prefab="wilson",data={inventory={items={},equip={}}},pad=""}` + "\x01"))
+	body := []byte(`return {data={inventory={items={},equip={}}}}`)
+	native := append([]byte{3, byte(len(body)) >> 1, byte(len(body)&1) << 7}, body...)
+	f.Add(append(native, []byte("\x01\x00\x10FEDCBA9876543210\xffreturn {}\xb8")...))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if len(data) > MaxInput {
 			return

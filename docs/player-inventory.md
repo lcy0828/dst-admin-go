@@ -8,6 +8,8 @@
 
 查询只读，不会触发存盘、生成物品或修改存档。关闭弹窗后没有新增后台轮询。本机与 Agent 使用相同的数据格式；远程节点需更新到支持该功能的版本，在线读取还需要配套的游戏 Runtime。查询本身不会安装或更新 Runtime。
 
+离线读取支持原生版本 3 玩家快照，包括末尾带有小地图等二进制附加数据的存档。仅解析长度声明内的玩家 Lua 数据，附加数据不会作为代码执行；不支持的格式、截断或超限会明确报错，不会当成空背包。
+
 搜索会保留容器路径；容器可展开查看。物品图标复用已有资源，缺图不影响读取。模组使用标准物品、容器或包裹组件时可读取；地面箱子、跟随者、共享仓库及模组私有存储不在支持范围内。「完整」仅表示支持的组件已读取，不保证涵盖模组自定义数据。
 
 读取达到大小、深度、节点数或采样时间边界时，会明确标为部分结果，缺失内容不能视为空。存档常不保存耐久等属性的最大值；页面只显示可确定的剩余值，不推测百分比。
@@ -27,6 +29,8 @@ Open a player's action menu on the dashboard or player management page and choos
 **Automatic** reads live data only after confirming the player's location; offline players and stopped worlds use the current Session save. **Live inventory** includes equipment, inventory, held items, backpacks, bundles and nested standard containers. **Saved snapshot** works without starting the game. Choose a source when multiple worlds or directories have records; file modification time is not logout time.
 
 Queries do not save the game, create items or modify saves. There is no additional idle polling. Local execution and Agents share the same format. Remote nodes need a compatible Agent, and live queries require the matching game Runtime. A query never installs or updates Runtime.
+
+Offline reads support native version 3 player snapshots, including binary classified/minimap data after the inventory payload. Only the declared Lua data string is parsed; the suffix is never executed as code. Unsupported, truncated or oversized data produces an explicit error rather than an empty inventory.
 
 Search preserves container ancestry. Existing artwork is reused; missing images do not block results. Mods using standard components are supported. Ground chests, followers, shared storage and private Mod storage are excluded. A complete result covers supported components only. Limits produce an explicit partial result. Missing saved attribute maximums remain unknown rather than becoming zero or full percentages.
 

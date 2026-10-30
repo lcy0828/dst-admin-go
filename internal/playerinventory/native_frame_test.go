@@ -40,8 +40,16 @@ func TestNativePlayerSessionFrames(t *testing.T) {
 				if _, err := decode(frame[:len(frame)-1]); err == nil {
 					t.Fatal("accepted truncated frame")
 				}
-				if _, err := decode(append(frame, 1)); err == nil {
-					t.Fatal("accepted trailing bytes")
+				// Actual player_classified records add binary minimap data here.
+				// Its bytes (including a later Lua marker or invalid boolean byte)
+				// must never extend or replace the length-delimited inventory body.
+				extended := append(append([]byte{}, frame...), []byte("\x00\x10FEDCBA9876543210\xff\x02return os.execute(\"must-not-run\")\x00\xb8")...)
+				decoded, err = decode(extended)
+				if err != nil || !bytes.Equal(decoded, body) {
+					t.Fatalf("classified suffix changed Lua payload: %v", err)
+				}
+				if _, err := parse(context.Background(), extended); err != nil {
+					t.Fatalf("valid inventory with opaque suffix rejected: %v", err)
 				}
 				frame[len(frame)-1] = 2
 				if _, err := decode(frame); err == nil {
@@ -49,5 +57,34 @@ func TestNativePlayerSessionFrames(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNativePlayerSessionDeclaredBoundaryIsAuthoritative(t *testing.T) {
+	body := []byte(`return {data={inventory={items={},equip={}}}}`)
+	// 15-bit string length encoding used by the native serializer.
+	prefix := []byte{3, byte(len(body)&255) >> 1, byte(len(body)>>8) | byte(len(body)&1)<<7}
+	frame := append(append(prefix, body...), 1)
+	for _, data := range [][]byte{
+		frame[:len(frame)-2], // truncated Lua body
+		frame[:len(frame)-1], // missing envelope boolean
+		append(append([]byte{}, frame[:len(frame)-1]...), 2, 0, 1), // invalid boundary boolean
+	} {
+		if _, err := parse(context.Background(), data); Code(err) != "SAVE_INVALID" {
+			t.Fatalf("invalid declared boundary accepted: %v", err)
+		}
+	}
+	// An unsupported expression inside the declared body remains forbidden,
+	// regardless of whether a valid-looking table occurs later in the file.
+	malicious := []byte(`return os.execute("must-not-run")`)
+	bad := append([]byte{3, byte(len(malicious)) >> 1, byte(len(malicious)&1) << 7}, malicious...)
+	bad = append(bad, 1)
+	bad = append(bad, body...)
+	if _, err := parse(context.Background(), bad); Code(err) != "SAVE_FORMAT_UNSUPPORTED" {
+		t.Fatalf("suffix supplied a replacement root: %v", err)
+	}
+	oversize := append(append([]byte{}, frame...), make([]byte, MaxInput)...)
+	if _, err := parse(context.Background(), oversize); Code(err) != "SAVE_LIMIT_EXCEEDED" {
+		t.Fatalf("classified suffix bypassed input size limit: %v", err)
 	}
 }
