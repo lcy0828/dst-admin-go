@@ -9,6 +9,7 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { nextFixtureVersion } from './forward-update-fixture.mjs'
 
 const options = {}
 for (let index = 2; index < process.argv.length; index += 2) {
@@ -44,7 +45,7 @@ try {
     const extracted = path.join(stage, 'bundle'); await mkdir(extracted)
     run('tar', ['-xzf', bundle, '-C', extracted])
     const manifest = JSON.parse(await readFile(path.join(extracted, 'manifest.json')))
-    assert.equal(manifest.version, metadata.version)
+    assert.equal(manifest.version, nextFixtureVersion(metadata.version), 'lifecycle fixture must be a real forward upgrade')
     if (options.binary) {
       const template = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../systemd/local.conf.example')
       const config = (await readFile(template, 'utf8')).replaceAll('/var/lib/dst-admin', path.join(stage, 'control')).replaceAll('/opt/dst', path.join(stage, 'data'))
@@ -159,7 +160,7 @@ try {
     }
     else options.recreate()
     const restored = await waitFor(async () => { const result = await fetchJSON('/system/software'); return result.value.ready && result.value.operation?.phase === 'succeeded' ? result.value : null })
-    assert.equal(restored.current.version, metadata.version)
+    assert.equal(restored.current.version, manifest.version)
     assert.equal((await readStore()).current.id, release)
     assert.equal(await readSave(), 'preserve save bytes')
     // Reject a corrupted trial after admission, then restore the exact committed
@@ -167,12 +168,15 @@ try {
     if (container) options.startRoom?.()
     const failedID = randomBytes(16).toString('hex'), failedRelease = randomBytes(16).toString('hex')
     const failedState = await readStore()
-    failedState.operation = { id: failedID, releaseId: failedRelease, version: manifest.version, phase: 'prepared', progress: 100, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
+    const failedManifest = { ...manifest, version: nextFixtureVersion(manifest.version) }
+    failedState.operation = { id: failedID, releaseId: failedRelease, version: failedManifest.version, phase: 'prepared', progress: 100, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
     if (container) {
       run('docker', ['exec', '--user', uid, container, 'cp', '-a', store + '/releases/' + release, store + '/releases/' + failedRelease])
+      run('docker', ['exec', '--interactive', '--user', uid, container, 'sh', '-c', 'cat > "$1"', 'fixture', store + '/releases/' + failedRelease + '/manifest.json'], { input: JSON.stringify(failedManifest) })
       run('docker', ['exec', '--interactive', '--user', uid, container, 'sh', '-c', 'cat > "$1.fixture" && mv "$1.fixture" "$1"', 'fixture', store + '/state.json'], { input: JSON.stringify(failedState) })
     } else {
       await cp(extracted, path.join(root, 'releases', failedRelease), { recursive: true })
+      await writeFile(path.join(root, 'releases', failedRelease, 'manifest.json'), JSON.stringify(failedManifest))
       await writeFile(statePath + '.fixture', JSON.stringify(failedState), { mode: 0o600 }); run('mv', [statePath + '.fixture', statePath])
     }
     const marker = JSON.parse(container ? run('docker', ['exec', '--user', uid, container, 'cat', store + '/ready.json']) : await readFile(path.join(root, 'ready.json'), 'utf8'))

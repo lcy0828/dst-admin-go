@@ -284,6 +284,11 @@ jobs:
         with:
           name: dst-admin-linux-amd64
           path: .codex-build/online-update
+      - uses: actions/download-artifact@v4
+        if: matrix.kind != 'dst-runtime'
+        with:
+          name: online-update-fixtures-linux-amd64
+          path: .codex-build/online-update-fixtures
       - name: Check persisted online update with writable root filesystem
         if: matrix.kind == 'all-in-one' || matrix.kind == 'control-plane'
         env:
@@ -291,7 +296,7 @@ jobs:
         run: >-
           node deploy/scripts/smoke-software-update.mjs
           --image "dst-admin-test:$IMAGE_KIND" --kind "$IMAGE_KIND"
-          --bundle .codex-build/online-update/dst-admin-update-linux-amd64.tar.gz --read-only false
+          --bundle .codex-build/online-update-fixtures/dst-admin-update-linux-amd64.tar.gz --read-only false
       - name: Check persisted online update with read-only root filesystem
         if: matrix.kind == 'all-in-one' || matrix.kind == 'control-plane'
         env:
@@ -299,7 +304,7 @@ jobs:
         run: >-
           node deploy/scripts/smoke-software-update.mjs
           --image "dst-admin-test:$IMAGE_KIND" --kind "$IMAGE_KIND"
-          --bundle .codex-build/online-update/dst-admin-update-linux-amd64.tar.gz --read-only true
+          --bundle .codex-build/online-update-fixtures/dst-admin-update-linux-amd64.tar.gz --read-only true
       - name: Check Agent startup and graceful shutdown
         if: matrix.kind == 'agent'
         run: node deploy/scripts/smoke-agent-image.mjs dst-admin-test:agent "${{ (github.event_name == 'schedule' || inputs.extended_checks) && 180 || 30 }}"
@@ -322,13 +327,13 @@ jobs:
         run: >-
           node deploy/scripts/smoke-agent-software-update.mjs
           --controller .codex-build/agent-controller/dst-admin --image dst-admin-test:agent
-          --bundle .codex-build/online-update/dst-admin-agent-update-linux-amd64.tar.gz --read-only false
+          --bundle .codex-build/online-update-fixtures/dst-admin-agent-update-linux-amd64.tar.gz --read-only false
       - name: Check Docker Agent updates with a read-only root
         if: matrix.kind == 'agent'
         run: >-
           node deploy/scripts/smoke-agent-software-update.mjs
           --controller .codex-build/agent-controller/dst-admin --image dst-admin-test:agent
-          --bundle .codex-build/online-update/dst-admin-agent-update-linux-amd64.tar.gz --read-only true
+          --bundle .codex-build/online-update-fixtures/dst-admin-agent-update-linux-amd64.tar.gz --read-only true
       - name: Check Runtime wrapper
         if: matrix.kind == 'dst-runtime'
         run: >-

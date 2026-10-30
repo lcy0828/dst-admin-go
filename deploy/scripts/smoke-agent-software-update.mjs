@@ -8,6 +8,7 @@ import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/p
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
+import { nextFixtureVersion } from './forward-update-fixture.mjs'
 
 const options = {}
 for (let index = 2; index < process.argv.length; index += 2) {
@@ -96,6 +97,7 @@ try {
     await waitFor(connectedAgent)
     console.log('Agent connected over its authenticated control channel.')
     const initial = await waitFor(async () => { const value = await api(`/agents/${agentID}/software`); return value.ready ? value : null })
+    assert.equal(manifest.version, nextFixtureVersion(initial.current.version), 'Agent lifecycle fixture must be a real forward upgrade')
     const launcherPID = agent?.pid
     const statePath = path.join(agentRoot, 'state.json'), store = '/var/lib/dst-admin-agent/software-updates'
     const readStore = async () => JSON.parse(container ? run('docker', ['exec', container, 'cat', store + '/state.json']) : await readFile(statePath, 'utf8'))

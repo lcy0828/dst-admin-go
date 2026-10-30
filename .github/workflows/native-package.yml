@@ -75,6 +75,12 @@ jobs:
         run: >-
           node deploy/scripts/verify-update-package.mjs
           "dist/dst-admin-update-$RELEASE_PLATFORM.tar.gz" "$RELEASE_VERSION" "$RELEASE_PLATFORM"
+      - name: Build isolated forward update fixtures
+        env:
+          RELEASE_PLATFORM: ${{ inputs.platform }}
+        run: |
+          node deploy/scripts/forward-update-fixture.mjs --bundle "dist/dst-admin-update-$RELEASE_PLATFORM.tar.gz" --output ".codex-build/update-fixtures/dst-admin-update-$RELEASE_PLATFORM.tar.gz" --frontend .codex-build/frontend --webui .codex-build/webui
+          node deploy/scripts/forward-update-fixture.mjs --bundle "dist/dst-admin-agent-update-$RELEASE_PLATFORM.tar.gz" --output ".codex-build/update-fixtures/dst-admin-agent-update-$RELEASE_PLATFORM.tar.gz"
       - name: Verify management updates and automatic recovery without touching user data
         env:
           RELEASE_PLATFORM: ${{ inputs.platform }}
@@ -82,7 +88,7 @@ jobs:
         run: >-
           node deploy/scripts/smoke-software-update.mjs
           --binary "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin"
-          --bundle "dist/dst-admin-update-$RELEASE_PLATFORM.tar.gz"
+          --bundle ".codex-build/update-fixtures/dst-admin-update-$RELEASE_PLATFORM.tar.gz"
       - name: Verify standalone Agent download
         env:
           RELEASE_PLATFORM: ${{ inputs.platform }}
@@ -113,7 +119,13 @@ jobs:
           node deploy/scripts/smoke-agent-software-update.mjs
           --controller "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin"
           --binary "dist/dst-admin-$RELEASE_VERSION-$RELEASE_PLATFORM/dst-admin-agent"
-          --bundle "dist/dst-admin-agent-update-$RELEASE_PLATFORM.tar.gz"
+          --bundle ".codex-build/update-fixtures/dst-admin-agent-update-$RELEASE_PLATFORM.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: online-update-fixtures-${{ inputs.platform }}
+          path: .codex-build/update-fixtures/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
       - uses: actions/upload-artifact@v4
         with:
           name: dst-admin-${{ inputs.platform }}
