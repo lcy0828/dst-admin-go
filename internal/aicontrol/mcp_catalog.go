@@ -154,6 +154,10 @@ func (s *Service) catalogMiddleware(definitions []*mcp.Tool) mcp.Middleware {
 			explicitFilter := len(view.Filter.Tags) > 0 || view.Filter.Access != "" || view.Filter.Risk != "" || view.Filter.Runtime != ""
 			selected := make([]*mcp.Tool, 0, len(definitions))
 			for _, definition := range definitions {
+				p, _ := ctx.Value(mcpPrincipalKey{}).(Principal)
+				if !p.AllowsTool(definition.Name) {
+					continue
+				}
 				if s.catalog != nil {
 					op, isAPI := s.catalog.Operation(definition.Name)
 					if view.View == "all" || explicitFilter && view.View != "legacy" {
@@ -170,7 +174,10 @@ func (s *Service) catalogMiddleware(definitions []*mcp.Tool) mcp.Middleware {
 					selected = append(selected, definition)
 				}
 			}
-			scope, _ := json.Marshal(view)
+			scope, _ := json.Marshal(struct {
+				View      mcpView
+				Principal Principal
+			}{view, func() Principal { p, _ := ctx.Value(mcpPrincipalKey{}).(Principal); return p }()})
 			hash := sha256.Sum256(append(catalogHash[:], scope...))
 			fingerprint := hex.EncodeToString(hash[:12])
 			offset := 0

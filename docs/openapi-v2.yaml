@@ -7920,6 +7920,8 @@ components:
       type: object
       required: [name, days]
       properties:
+        profile: { type: string, enum: [game-read, game-manage, panel-manage], default: panel-manage, description: Executable server capability preset. Existing tokens retain panel-manage compatibility. }
+        roomIds: { type: array, maxItems: 64, items: { type: string, minLength: 1, maxLength: 255 }, description: Required nonempty for game profiles. Empty grants all rooms only with panel-manage. }
         name: { type: string, minLength: 1, maxLength: 100 }
         days: { type: integer, minimum: 1, maximum: 365 }
     AIChatInput:

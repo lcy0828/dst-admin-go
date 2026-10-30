@@ -1476,6 +1476,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		}
 		return authService.AdministratorByID(principal.AdminID)
 	}))
+	api.Use(httpapi.AITokenScope(aiStore, apiContract, jobService))
 	{
 		// Reject local Member mutations before validating write-specific headers so
 		// every blocked request reports the same read-only contract.

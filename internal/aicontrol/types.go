@@ -34,17 +34,23 @@ type ConfigInput struct {
 	ClearKey bool   `json:"clearKey"`
 }
 type Token struct {
+	Profile   string    `json:"profile"`
+	RoomIDs   []string  `json:"roomIds,omitempty"`
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	ExpiresAt time.Time `json:"expiresAt"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 type TokenInput struct {
-	Name    string `json:"name"`
-	Days    int    `json:"days"`
-	AdminID int    `json:"-"`
+	Profile string   `json:"profile"`
+	RoomIDs []string `json:"roomIds,omitempty"`
+	Name    string   `json:"name"`
+	Days    int      `json:"days"`
+	AdminID int      `json:"-"`
 }
 type Principal struct {
+	Profile string
+	RoomIDs []string
 	ID      string
 	AdminID int
 	RoomID  string // Optional actual credential scope; page selection is only context.

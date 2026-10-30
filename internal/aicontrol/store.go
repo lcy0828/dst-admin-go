@@ -193,6 +193,9 @@ func (s *Store) Tokens() ([]Token, error) {
 	return values, nil
 }
 func (s *Store) CreateToken(input TokenInput) (Token, string, error) {
+	if err := normalizeTokenScope(&input); err != nil {
+		return Token{}, "", err
+	}
 	if strings.TrimSpace(input.Name) == "" || len(input.Name) > 100 || input.Days < 1 || input.Days > 365 {
 		return Token{}, "", ErrInvalid
 	}
@@ -211,7 +214,7 @@ func (s *Store) CreateToken(input TokenInput) (Token, string, error) {
 	}
 	secret := "dstai_" + base64.RawURLEncoding.EncodeToString(raw)
 	now := time.Now().UTC()
-	t := Token{ID: uuid.NewString(), Name: strings.TrimSpace(input.Name), CreatedAt: now, ExpiresAt: now.Add(time.Duration(input.Days) * 24 * time.Hour)}
+	t := Token{Profile: input.Profile, RoomIDs: input.RoomIDs, ID: uuid.NewString(), Name: strings.TrimSpace(input.Name), CreatedAt: now, ExpiresAt: now.Add(time.Duration(input.Days) * 24 * time.Hour)}
 	data, _ := json.Marshal(t)
 	err := s.db.Table(s.tokenTable).Create(&tokenRecord{ID: t.ID, Digest: digest(secret), Data: string(data), AdminID: input.AdminID}).Error
 	return t, secret, err
@@ -225,7 +228,11 @@ func (s *Store) token(where string, value any) (Principal, error) {
 	if json.Unmarshal([]byte(row.Data), &t) != nil || !t.ExpiresAt.After(time.Now()) {
 		return Principal{}, ErrDenied
 	}
-	return Principal{ID: t.ID, AdminID: row.AdminID}, nil
+	scope := TokenInput{Profile: t.Profile, RoomIDs: t.RoomIDs}
+	if normalizeTokenScope(&scope) != nil {
+		return Principal{}, ErrDenied
+	}
+	return Principal{ID: t.ID, AdminID: row.AdminID, Profile: scope.Profile, RoomIDs: scope.RoomIDs}, nil
 }
 func (s *Store) Authenticate(secret string) (Principal, error) {
 	if !strings.HasPrefix(secret, "dstai_") || len(secret) > 100 {

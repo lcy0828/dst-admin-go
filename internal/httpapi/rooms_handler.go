@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"dont/internal/aicontrol"
 	"dont/internal/jobs"
 	"dont/internal/operationprogress"
 	"dont/internal/rooms"
@@ -264,6 +265,16 @@ func (h *RoomHandler) list(c *gin.Context) {
 	if err != nil {
 		roomFailure(c, err)
 		return
+	}
+	if raw, ok := c.Get(aiScopeKey); ok {
+		p, _ := raw.(aicontrol.Principal)
+		visible := make([]rooms.Room, 0, len(result))
+		for _, item := range result {
+			if p.AllowsRoom(item.ID) {
+				visible = append(visible, item)
+			}
+		}
+		result = visible
 	}
 	Success(c, http.StatusOK, gin.H{"items": result, "total": len(result)})
 }

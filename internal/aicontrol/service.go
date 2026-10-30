@@ -46,7 +46,7 @@ func (s *Service) Acquire() (func(), error) {
 }
 func (s *Service) Enabled() bool { v, err := s.Store.Config(); return err == nil && v.Enabled }
 func allowed(p Principal, room string) bool {
-	return p.RoomID == "" || p.RoomID == room
+	return p.AllowsRoom(room)
 }
 func schema(required []string, properties map[string]any) map[string]any {
 	return map[string]any{"type": "object", "required": required, "properties": properties, "additionalProperties": false}
@@ -139,7 +139,7 @@ func (s *Service) Invoke(ctx context.Context, p Principal, name string, raw json
 	if err := ctx.Err(); err != nil {
 		return Invocation{}, err
 	}
-	if !s.Enabled() || p.ID == "" {
+	if !s.Enabled() || p.ID == "" || !p.AllowsTool(name) {
 		return Invocation{}, ErrDenied
 	}
 	if s.catalog != nil && (name == discoverAPI || strings.HasPrefix(name, apicontract.ToolPrefix)) {
@@ -226,6 +226,9 @@ func (s *Service) execute(ctx context.Context, p Principal, c Call) (Invocation,
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	data, err := s.backend.Invoke(ctx, c.Tool, a, p.RoomID)
+	if err == nil && c.Tool == "list_rooms" {
+		data, err = filterRoomList(p, data)
+	}
 	status := "succeeded"
 	if err != nil {
 		status = "failed"

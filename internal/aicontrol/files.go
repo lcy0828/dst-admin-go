@@ -228,7 +228,7 @@ func (s *Store) DeleteAttachment(p Principal, id string) error {
 	return os.Remove(s.filePath("attachments", id, ".json"))
 }
 func (s *Store) CreateResource(p Principal, op *apicontract.Operation, input apicontract.Input) (Resource, error) {
-	if p.ID == "" || op.Method != "GET" || !op.Callable() {
+	if p.ID == "" || op.Method != "GET" || !op.Callable() || !p.AllowsAPI(op, input) {
 		return Resource{}, ErrDenied
 	}
 	s.filesMu.Lock()

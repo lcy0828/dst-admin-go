@@ -122,6 +122,9 @@ func (s *Service) loadDiscovered(data json.RawMessage, loaded map[string]Tool) {
 }
 
 func (s *Service) discover(raw json.RawMessage) (json.RawMessage, error) {
+	return s.discoverFor(Principal{}, raw)
+}
+func (s *Service) discoverFor(p Principal, raw json.RawMessage) (json.RawMessage, error) {
 	var in struct {
 		Query               string `json:"query"`
 		Limit               int    `json:"limit"`
@@ -143,7 +146,10 @@ func (s *Service) discover(raw json.RawMessage) (json.RawMessage, error) {
 	}
 	query := in.Query
 	items := []map[string]any{}
-	for _, op := range s.catalog.SearchFiltered(query, in.Limit, in.MetadataFilter) {
+	for _, op := range s.catalog.SearchFiltered(query, len(s.catalog.Operations()), in.MetadataFilter) {
+		if !p.AllowsTool(op.ToolName()) {
+			continue
+		}
 		metadata := op.ToolMetadata()
 		item := map[string]any{"operationId": op.ID, "tool": op.ToolName(), "summary": op.Summary, "tags": metadata.Tags, "access": metadata.Access, "risk": metadata.Risk, "runtime": metadata.Runtime, "transport": op.Transport, "deprecated": op.Deprecated, "replacedBy": op.ReplacedBy}
 		if semantic := op.Semantics(); semantic != nil {
@@ -172,6 +178,9 @@ func (s *Service) discover(raw json.RawMessage) (json.RawMessage, error) {
 			item["resultContract"] = contract
 		}
 		items = append(items, item)
+		if len(items) >= in.Limit {
+			break
+		}
 	}
 	encoded, err := json.Marshal(map[string]any{"items": items, "count": len(items), "instruction": "Matching typed tools are now loaded in the page assistant. External MCP clients can use call_api with operationId and arguments, or the listed api_ tool. Use includeSchema=true for arguments; includeResultSchema=true with an exact operationId for business result fields. Discover more specific keywords if needed. An empty search is not proof a capability is absent."})
 	if len(encoded) > 60<<10 {
@@ -184,7 +193,7 @@ func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw j
 	if len(raw) > 64<<10 {
 		return Invocation{}, ErrInvalid
 	}
-	if !s.Enabled() || p.ID == "" {
+	if !s.Enabled() || p.ID == "" || !p.AllowsTool(name) {
 		return Invocation{}, ErrDenied
 	}
 	var op *apicontract.Operation
@@ -215,7 +224,10 @@ func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw j
 		}
 		privateValues = append(privateValues, op.SensitiveValues(resolved)...)
 		mutation = op.Mutation()
-		if p.RoomID != "" {
+		if !p.AllowsAPI(op, in) {
+			return Invocation{}, ErrDenied
+		}
+		if p.RoomID != "" && op.ID != "listBotCapabilities" && op.ID != "listRooms" {
 			room, ok := in.Path["roomId"].(string)
 			if !ok || !allowed(p, room) {
 				return Invocation{}, ErrDenied
@@ -274,9 +286,12 @@ func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw j
 	defer cancel()
 	var data json.RawMessage
 	if name == discoverAPI {
-		data, err = s.discover(raw)
+		data, err = s.discoverFor(p, raw)
 	} else if backend, ok := s.backend.(APIBackend); ok {
 		data, err = backend.InvokeAPI(ctx, p, op, in)
+		if err == nil && op.ID == "listRooms" {
+			data, err = filterAPIList(p, data)
+		}
 	} else {
 		err = ErrUnavailable
 	}
