@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "8e49693f15bbeafe07ceef9dd7dc0da4d3b2a8a29386c7d64318850cf0a4917c",
+  "operationsSHA256": "e1c2c5103f7ee03a9bd08b073af648b44eaed8e2486bbcf4fdc206769109eb68",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -3819,6 +3819,21 @@
       "risk": "high",
       "runtime": "shard-ready",
       "title": "Despawn an online player so they can choose another character"
+    },
+    {
+      "operationId": "resolveRoomPlayer",
+      "method": "GET",
+      "path": "/rooms/{roomId}/players/resolve",
+      "transport": "json",
+      "tags": [
+        "player",
+        "players",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Resolve a player name or exact KU ID without guessing ambiguous identities"
     },
     {
       "operationId": "restoreBackup",

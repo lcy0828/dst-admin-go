@@ -51,6 +51,7 @@ func NewPlayerHandler(service PlayerService, jobService *jobs.Service) *PlayerHa
 func (h *PlayerHandler) Register(v2 *gin.RouterGroup) {
 	group := v2.Group("/rooms/:roomId/players")
 	group.GET("", h.list)
+	group.GET("/resolve", h.resolve)
 	group.GET("/:playerId", h.player)
 	group.GET("/:playerId/inventory", h.inventory)
 	group.POST("/actions/refresh", h.refresh)
@@ -323,4 +324,25 @@ func playerJobError(err error) *jobs.Error {
 		code = "PLAYER_COMMAND_NOT_DISPATCHED"
 	}
 	return &jobs.Error{Code: code, Message: err.Error()}
+}
+
+func (h *PlayerHandler) resolve(c *gin.Context) {
+	resolver, ok := h.players.(interface {
+		Resolve(string, string, int) (players.Resolution, error)
+	})
+	if !ok {
+		Failure(c, 503, "PLAYER_RESOLVER_UNAVAILABLE", "玩家解析暂不可用", nil)
+		return
+	}
+	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if err != nil {
+		playerFailure(c, players.ErrInvalidFilter)
+		return
+	}
+	value, err := resolver.Resolve(c.Param("roomId"), c.Query("query"), offset)
+	if err != nil {
+		playerFailure(c, err)
+		return
+	}
+	Success(c, 200, value)
 }
