@@ -20,7 +20,7 @@ func releaseResources(plan ReleasePlan) []installationmaintenance.Resource {
 // an installation; recovery_required attempts retain ownership until retry.
 func (s *ReleaseStore) CheckMaintenance(ctx context.Context, resources []installationmaintenance.Resource, owner string) error {
 	var records []releaseRecord
-	if err := s.db.Table(s.releaseTable).Where("stage NOT IN (?)", []string{string(ReleaseStageSucceeded), string(ReleaseStageFailed)}).Find(&records).Error; err != nil {
+	if err := s.db.Table(s.releaseTable).Where("stage NOT IN (?)", []string{string(ReleaseStageSucceeded), string(ReleaseStageFailed), string(ReleaseStageAbandoned)}).Find(&records).Error; err != nil {
 		return err
 	}
 	for _, record := range records {

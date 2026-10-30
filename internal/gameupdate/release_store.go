@@ -2,6 +2,7 @@ package gameupdate
 
 import (
 	"crypto/sha256"
+	"dont/shared"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -250,11 +251,13 @@ func (s *ReleaseStore) Get(id string) (Release, error) {
 		for _, evidence := range state.Installations {
 			if item := releaseInstallationResult(&value, evidence.TargetID, evidence.InstallationID); item != nil {
 				item.WriteState, item.OperationID, item.ExpectedVersion = evidence.WriteState, evidence.OperationID, evidence.ExpectedVersion
+				item.WarningMessage = evidence.WarningMessage
 			}
 		}
 		for _, evidence := range state.Shards {
 			if item := releaseShardResult(&value, evidence.RoomID, evidence.WorldID); item != nil {
 				item.StopRequestedAt, item.LogFileID, item.LogOffset = evidence.StopRequestedAt, evidence.LogFileID, evidence.LogOffset
+				item.RuntimeMode, item.WarningCode = evidence.RuntimeMode, evidence.WarningCode
 			}
 		}
 	}
@@ -307,7 +310,7 @@ func (s *ReleaseStore) List(limit, offset int) ([]Release, int, error) {
 func (s *ReleaseStore) requireNoPendingRelease(plan ReleasePlan) error {
 	for _, installation := range plan.Installations {
 		pending := s.db.Table(s.releaseTable).Select("id").Where("stage NOT IN (?)", []string{
-			string(ReleaseStageSucceeded), string(ReleaseStageFailed),
+			string(ReleaseStageSucceeded), string(ReleaseStageFailed), string(ReleaseStageAbandoned),
 		}).SubQuery()
 		var record releaseInstallationRecord
 		err := s.db.Table(s.installationTable).
@@ -337,7 +340,7 @@ func validReleaseStage(value ReleaseStage) bool {
 	switch value {
 	case ReleaseStagePreviewed, ReleaseStageProtecting, ReleaseStageStopping, ReleaseStageStaged, ReleaseStageUpdating,
 		ReleaseStageVerified, ReleaseStageRestarting, ReleaseStageConfirming, ReleaseStageSucceeded,
-		ReleaseStageFailed, ReleaseStageRecoveryRequired:
+		ReleaseStageFailed, ReleaseStageRecoveryRequired, ReleaseStageAbandoned:
 		return true
 	default:
 		return false
@@ -444,6 +447,7 @@ func (s *ReleaseStore) Rebase(value Release, previousHash string) (Release, erro
 }
 
 type releaseInstallationEvidence struct {
+	WarningMessage  string `json:"warningMessage,omitempty"`
 	TargetID        string `json:"targetId"`
 	InstallationID  string `json:"installationId"`
 	WriteState      string `json:"writeState,omitempty"`
@@ -451,24 +455,26 @@ type releaseInstallationEvidence struct {
 	ExpectedVersion string `json:"expectedVersion,omitempty"`
 }
 type releaseShardEvidence struct {
-	RoomID          string     `json:"roomId"`
-	WorldID         string     `json:"worldId"`
-	StopRequestedAt *time.Time `json:"stopRequestedAt,omitempty"`
-	LogFileID       string     `json:"logFileId,omitempty"`
-	LogOffset       int64      `json:"logOffset,omitempty"`
+	RuntimeMode     shared.RuntimePerformanceMode `json:"runtimeMode,omitempty"`
+	WarningCode     string                        `json:"warningCode,omitempty"`
+	RoomID          string                        `json:"roomId"`
+	WorldID         string                        `json:"worldId"`
+	StopRequestedAt *time.Time                    `json:"stopRequestedAt,omitempty"`
+	LogFileID       string                        `json:"logFileId,omitempty"`
+	LogOffset       int64                         `json:"logOffset,omitempty"`
 }
 
 func installationEvidence(value Release) []releaseInstallationEvidence {
 	result := make([]releaseInstallationEvidence, 0, len(value.Installations))
 	for _, item := range value.Installations {
-		result = append(result, releaseInstallationEvidence{item.TargetID, item.InstallationID, item.WriteState, item.OperationID, item.ExpectedVersion})
+		result = append(result, releaseInstallationEvidence{TargetID: item.TargetID, InstallationID: item.InstallationID, WriteState: item.WriteState, OperationID: item.OperationID, ExpectedVersion: item.ExpectedVersion, WarningMessage: item.WarningMessage})
 	}
 	return result
 }
 func shardEvidence(value Release) []releaseShardEvidence {
 	result := make([]releaseShardEvidence, 0, len(value.Shards))
 	for _, item := range value.Shards {
-		result = append(result, releaseShardEvidence{item.RoomID, item.WorldID, item.StopRequestedAt, item.LogFileID, item.LogOffset})
+		result = append(result, releaseShardEvidence{RoomID: item.RoomID, WorldID: item.WorldID, StopRequestedAt: item.StopRequestedAt, LogFileID: item.LogFileID, LogOffset: item.LogOffset, RuntimeMode: item.RuntimeMode, WarningCode: item.WarningCode})
 	}
 	return result
 }

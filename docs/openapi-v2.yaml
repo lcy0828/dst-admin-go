@@ -4226,6 +4226,7 @@ paths:
       operationId: retryGameRelease
       summary: Resume a release using persisted write receipts and original world restore intentions
       description: |
+        To end maintenance without restarting, send finishWithoutRestart=true with the original stored planHash as both planHash and confirmation. This abandons only automatic restart: it requires every installation to have verified write evidence, the expected build and a healthy Steam manifest, plus stable current world states. It never unlocks a partial or unknown installation, repairs LuaJIT, or starts/stops worlds. The terminal release stage is abandoned, not succeeded.
         Read getGameRelease first. Unknown dispatched writes are observed before any resend. For irrecoverable receipts, explicitly re-preview with policy.validate true and confirm validateUnknown to perform a guarded repair. Verified installations are not downloaded again. If nextAction is preview_and_retry, preview the original exact installation scope and policy, then send that planHash as both planHash and confirmation to accept the new latest Steam build. The path is an object with releaseId, not a bare string or an id field. Poll the returned new Job ID with getJob and keep reading the original release ID with getGameRelease. Do not pass the retry Job ID to getGameRelease.
         MCP arguments example (replace sample IDs, hash and requestId with actual values; reuse requestId only for the same request):
         {"path":{"releaseId":"24a00000-0000-4000-8000-000000000001"},"requestId":"issue24-retry-001"}
@@ -4242,6 +4243,7 @@ paths:
               properties:
                 planHash: { type: string, pattern: '^[a-f0-9]{64}$', description: Fresh re-preview hash when explicitly accepting a changed upstream build }
                 confirmation: { type: string, pattern: '^[a-f0-9]{64}$', description: Must equal planHash }
+                finishWithoutRestart: { type: boolean, default: false, description: End verified maintenance while preserving current world states. Requires original planHash and matching confirmation. Cannot combine with validateUnknown. }
                 validateUnknown: { type: boolean, default: false, description: Explicit repair of a lost write receipt. Requires a fresh original-scope preview with policy.validate true and matching planHash/confirmation. Starts a new fenced validation attempt only after node-local directory and SteamCMD process guards pass. }
       responses:
         "202":
@@ -10621,12 +10623,13 @@ components:
         meta: { $ref: "#/components/schemas/Meta" }
     GameReleaseStage:
       type: string
-      enum: [previewed, protecting, stopping, staged, updating, verified, restarting, confirming, succeeded, failed, recovery_required]
+      enum: [previewed, protecting, stopping, staged, updating, verified, restarting, confirming, succeeded, failed, recovery_required, abandoned]
     GameReleaseInstallationResult:
       type: object
       additionalProperties: false
       required: [targetId, installationId, stage, updatedAt]
       properties:
+        warningMessage: { type: string, description: Optional accelerator repair warning; official game integrity is verified separately }
         writeState: { type: string, enum: [not_started, dispatched, unknown, failed, version_changed, verified], description: Write and integrity evidence; a changed version is not an automatic rollback }
         operationId: { type: string, description: Persisted write identity; uncertain requests are queried using this identity }
         expectedVersion: { type: string }
@@ -10646,6 +10649,8 @@ components:
       additionalProperties: false
       required: [roomId, worldId, targetId, installationId, isMaster, wasRunning, stage, updatedAt]
       properties:
+        runtimeMode: { type: string, enum: [game, luajit, arena-gc], description: Effective runtime selected during restore; original preference remains in plan }
+        warningCode: { type: string, enum: [RUNTIME_FALLBACK_GAME], description: Accelerator was unavailable before process creation; restored with the official runtime }
         stopRequestedAt: { type: string, format: date-time, description: Persisted before dispatching stop }
         logFileId: { type: string }
         logOffset: { type: integer, minimum: 0, description: Persisted pre-start cursor for retrying this launch confirmation }

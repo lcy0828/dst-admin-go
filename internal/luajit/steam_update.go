@@ -13,6 +13,32 @@ import (
 	"dont/internal/runtimeperformance"
 )
 
+// SteamLauncherError separates a successful official installation from optional
+// acceleration repair. GameAvailable is checked against the executable files,
+// not inferred from Steam's build ID.
+type SteamLauncherError struct {
+	UpdateError, RestoreError error
+	GameAvailable             bool
+}
+
+func (e *SteamLauncherError) Error() string {
+	return errors.Join(e.UpdateError, e.RestoreError).Error()
+}
+func (e *SteamLauncherError) Unwrap() []error {
+	if e.UpdateError == nil {
+		return []error{e.RestoreError}
+	}
+	return []error{e.UpdateError, e.RestoreError}
+}
+
+func SteamUpdateResult(err error) (error, string) {
+	var repair *SteamLauncherError
+	if errors.As(err, &repair) && repair.GameAvailable {
+		return repair.UpdateError, repair.RestoreError.Error()
+	}
+	return err, ""
+}
+
 // PreserveSteamLauncher belongs to explicit installation/update operations. The
 // caller must hold the installation lock and have confirmed the game is stopped.
 // A small intent file lets a retry finish maintenance after an interrupted
@@ -67,6 +93,13 @@ func PreserveSteamLauncher(o Options, update func() error) error {
 	}
 	legacy := "#!/bin/bash\nexport LD_LIBRARY_PATH=./lib64\nexport LD_PRELOAD=./lib64/libInjector.so\n./" + filepath.Base(layout.Executable) + "_1 \"$@\"\n"
 	known := string(current) == wrapper || string(current) == legacy
+	// A prior manual Steam update may already have overwritten our launcher
+	// without leaving an intent. Adopt only an otherwise intact plugin install;
+	// neither a vanilla installation nor an unknown script authorizes wrapping.
+	if !known && isGameELF(current) {
+		report := o.Inspect()
+		known = report.Provider == "dontstarve-luajit2" && len(report.Issues) == 1 && report.Issues[0] == "injector_wrapper_invalid"
+	}
 	if !known && len(pending) == 0 {
 		return update()
 	}
@@ -81,6 +114,16 @@ func PreserveSteamLauncher(o Options, update func() error) error {
 	if err := writeFile(intent, []byte("v1\n"), 0600); err != nil {
 		return err
 	}
+	// Let Steam validate/patch the official executable, rather than our shell
+	// wrapper. Keep the original and intent intact until post-update repair.
+	if string(current) == wrapper || string(current) == legacy {
+		original, readErr := readLauncher(layout.Executable + "_1")
+		if readErr == nil && isGameELF(original) {
+			if err := exposeSteamExecutable(layout.Executable); err != nil {
+				return err
+			}
+		}
+	}
 	runErr := update()
 	// Even a failed SteamCMD run may already have replaced the launcher. Restore
 	// its contract with the new ELF, never with the previous game's executable.
@@ -90,8 +133,39 @@ func PreserveSteamLauncher(o Options, update func() error) error {
 	}
 	if restoreErr != nil {
 		restoreErr = fmt.Errorf("恢复 LuaJIT 启动入口失败，请重试游戏更新或校验: %w", restoreErr)
+		entry, entryErr := readLauncher(layout.Executable)
+		original, originalErr := readLauncher(layout.Executable + "_1")
+		gameAvailable := entryErr == nil && (isGameELF(entry) || (string(entry) == wrapper || string(entry) == legacy) && originalErr == nil && isGameELF(original))
+		return &SteamLauncherError{UpdateError: runErr, RestoreError: restoreErr, GameAvailable: gameAvailable}
 	}
-	return errors.Join(runErr, restoreErr)
+	return runErr
+}
+
+func exposeSteamExecutable(path string) error {
+	source, err := os.Open(path + "_1")
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	target, err := os.CreateTemp(filepath.Dir(path), ".luajit-steam-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(target.Name())
+	if err = target.Chmod(0755); err == nil {
+		_, err = io.Copy(target, source)
+	}
+	if err == nil {
+		err = target.Sync()
+	}
+	closeErr := target.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(target.Name(), path)
 }
 
 func restoreSteamLauncher(o Options, layout dstserver.Layout, paths []string, wrapper string) (err error) {

@@ -455,7 +455,7 @@ func (p *ReleasePlanner) finishReleaseTarget(ctx context.Context, target *Releas
 		releaseVersionPattern.MatchString(officialVersion) && target.GameVersion == officialVersion
 	if officiallyCurrent {
 		target.DesiredVersion = target.CurrentVersion
-		target.UpToDate = true
+		target.UpToDate = observation.IntegrityError == ""
 	} else {
 		queryVersion := target.CurrentVersion
 		if queryVersion == "" {
@@ -483,7 +483,7 @@ func (p *ReleasePlanner) finishReleaseTarget(ctx context.Context, target *Releas
 			}
 			target.DesiredVersion = requested
 		}
-		target.UpToDate = target.Installed && (upToDate || target.CurrentVersion == target.DesiredVersion)
+		target.UpToDate = target.Installed && observation.IntegrityError == "" && (upToDate || target.CurrentVersion == target.DesiredVersion)
 	}
 	if !target.Installed {
 		add("INSTALLATION_MISSING", "未发现 DST 专用服务器安装版本")

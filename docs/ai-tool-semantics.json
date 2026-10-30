@@ -4376,12 +4376,13 @@
       ]
     },
     "retryGameRelease": {
-      "purpose": "继续原更新任务，先查询不确定写入的持久化回执，保留原运行世界和Lua模式，跳过已验证的下载。原回执无法恢复且用户要求校验修复时，按原范围以policy.validate=true重新预检，以planHash与confirmation确认并携带validateUnknown=true发起受节点锁及进程检查保护的新校验尝试。Steam版本变化时，重新预检原安装范围和策略，以planHash与confirmation确认新版本后继续原任务。",
-      "resultNotes": "返回新的重试 Job；用其 id 查询 getJob，继续用原 releaseId 查询 getGameRelease，不能互换。",
+      "purpose": "继续原游戏更新任务，保留备份和原恢复偏好；先读不确定写入回执，已验证安装不重复下载。修复未知写入时，以原范围 policy.validate=true 重新预检并确认 planHash、validateUnknown；接受 Steam 新版也需重新预检。安装全部验证后，可用原 planHash 确认 finishWithoutRestart，结束维护并保持世界当前状态。",
+      "resultNotes": "返回新的重试 Job；用其 id 查询 getJob，继续用原 releaseId 查询 getGameRelease，不能互换。安装全部已验证但自动恢复受阻时，可按用户要求携带 finishWithoutRestart=true 及原计划 planHash/confirmation 结束维护、保持世界当前状态；不完整或未知写入不能解锁。abandoned 表示主动结束维护，不表示自动恢复成功。分片 warningCode=RUNTIME_FALLBACK_GAME 表示加速组件不可用而使用原版恢复，不能说仍在使用 LuaJIT。",
       "actions": [
         "重试游戏版本发布任务",
         "断点续做版本升级",
-        "跳过已到达目标版本的安装"
+        "跳过已到达目标版本的安装",
+        "结束已验证安装的维护，保留世界当前状态"
       ],
       "queries": [
         "游戏版本那批发布失败了，再跑一遍",
@@ -4392,7 +4393,10 @@
         "目标版本",
         "灰度升级",
         "断点续做",
-        "发布批次"
+        "发布批次",
+        "维护锁",
+        "结束维护",
+        "不继续启动"
       ]
     },
     "retryNotificationDelivery": {

@@ -25,6 +25,10 @@ func TestSteamUpdatePreservesLauncherAndNewBinary(t *testing.T) {
 			newBinary := append(fixtureELF(), []byte("new Steam build")...)
 			downloadErr := errors.New("download interrupted")
 			err := PreserveSteamLauncher(o, func() error {
+				entry, err := os.ReadFile(game)
+				if err != nil || !isGameELF(entry) {
+					t.Fatal("Steam received the injected wrapper instead of the official executable", err)
+				}
 				if err := writeFile(game, newBinary, 0755); err != nil {
 					return err
 				}
@@ -86,5 +90,54 @@ func TestSteamUpdateDoesNotEnableLuaJITOnVanilla(t *testing.T) {
 	}
 	if _, err := os.Stat(game + "_1"); !os.IsNotExist(err) {
 		t.Fatal("unexpected LuaJIT wrapper")
+	}
+}
+
+func TestSteamUpdateRepairsPreviouslyOverwrittenManagedLauncher(t *testing.T) {
+	_, release, archive := fixtureStore(t)
+	o, game := fixtureInstallation(t, true)
+	if _, err := Install(context.Background(), o, release, archive); err != nil {
+		t.Fatal(err)
+	}
+	newBinary := append(fixtureELF(), []byte("manual Steam update")...)
+	if err := writeFile(game, newBinary, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := PreserveSteamLauncher(o, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !o.Inspect().CanEnable {
+		t.Fatal("previous overwrite not repaired")
+	}
+	actual, _ := os.ReadFile(game + "_1")
+	if !bytes.Equal(actual, newBinary) {
+		t.Fatal("restored stale game executable")
+	}
+}
+
+func TestSteamUpdateReportsOptionalRepairSeparatelyFromVanillaIntegrity(t *testing.T) {
+	_, release, archive := fixtureStore(t)
+	o, game := fixtureInstallation(t, true)
+	if _, err := Install(context.Background(), o, release, archive); err != nil {
+		t.Fatal(err)
+	}
+	err := PreserveSteamLauncher(o, func() error {
+		if err := os.RemoveAll(filepath.Join(o.ServerPath, "mods", "DontStarveLuaJIT2")); err != nil {
+			return err
+		}
+		return writeFile(game, fixtureELF(), 0755)
+	})
+	updateErr, warning := SteamUpdateResult(err)
+	if err == nil || updateErr != nil || warning == "" {
+		t.Fatalf("err=%v update=%v warning=%s", err, updateErr, warning)
+	}
+	entry, _ := os.ReadFile(game)
+	if !isGameELF(entry) {
+		t.Fatal("failed repair replaced valid vanilla entry")
+	}
+	// Missing/truncated game files must still prevent installation verification.
+	err = PreserveSteamLauncher(o, func() error { return writeFile(game, []byte("broken executable"), 0755) })
+	if result, _ := SteamUpdateResult(err); result == nil {
+		t.Fatal("broken game accepted")
 	}
 }

@@ -47,6 +47,7 @@ const (
 	ReleaseStageConfirming       ReleaseStage = "confirming"
 	ReleaseStageSucceeded        ReleaseStage = "succeeded"
 	ReleaseStageFailed           ReleaseStage = "failed"
+	ReleaseStageAbandoned        ReleaseStage = "abandoned"
 	ReleaseStageRecoveryRequired ReleaseStage = "recovery_required"
 )
 
@@ -169,6 +170,7 @@ type ReleasePlan struct {
 }
 
 type ReleaseInstallationResult struct {
+	WarningMessage  string       `json:"warningMessage,omitempty"`
 	WriteState      string       `json:"writeState,omitempty"`
 	OperationID     string       `json:"operationId,omitempty"`
 	ExpectedVersion string       `json:"expectedVersion,omitempty"`
@@ -186,24 +188,26 @@ type ReleaseInstallationResult struct {
 }
 
 type ReleaseShardResult struct {
-	StopRequestedAt *time.Time   `json:"stopRequestedAt,omitempty"`
-	LogFileID       string       `json:"logFileId,omitempty"`
-	LogOffset       int64        `json:"logOffset,omitempty"`
-	RoomID          string       `json:"roomId"`
-	WorldID         string       `json:"worldId"`
-	TargetID        string       `json:"targetId"`
-	InstallationID  string       `json:"installationId"`
-	IsMaster        bool         `json:"isMaster"`
-	WasRunning      bool         `json:"wasRunning"`
-	Stage           ReleaseStage `json:"stage"`
-	RuntimeState    string       `json:"runtimeState,omitempty"`
-	LoadMarker      string       `json:"loadMarker,omitempty"`
-	ErrorCode       string       `json:"errorCode,omitempty"`
-	ErrorMessage    string       `json:"errorMessage,omitempty"`
-	StoppedAt       *time.Time   `json:"stoppedAt,omitempty"`
-	StartedAt       *time.Time   `json:"startedAt,omitempty"`
-	LoadConfirmedAt *time.Time   `json:"loadConfirmedAt,omitempty"`
-	UpdatedAt       time.Time    `json:"updatedAt"`
+	RuntimeMode     shared.RuntimePerformanceMode `json:"runtimeMode,omitempty"`
+	WarningCode     string                        `json:"warningCode,omitempty"`
+	StopRequestedAt *time.Time                    `json:"stopRequestedAt,omitempty"`
+	LogFileID       string                        `json:"logFileId,omitempty"`
+	LogOffset       int64                         `json:"logOffset,omitempty"`
+	RoomID          string                        `json:"roomId"`
+	WorldID         string                        `json:"worldId"`
+	TargetID        string                        `json:"targetId"`
+	InstallationID  string                        `json:"installationId"`
+	IsMaster        bool                          `json:"isMaster"`
+	WasRunning      bool                          `json:"wasRunning"`
+	Stage           ReleaseStage                  `json:"stage"`
+	RuntimeState    string                        `json:"runtimeState,omitempty"`
+	LoadMarker      string                        `json:"loadMarker,omitempty"`
+	ErrorCode       string                        `json:"errorCode,omitempty"`
+	ErrorMessage    string                        `json:"errorMessage,omitempty"`
+	StoppedAt       *time.Time                    `json:"stoppedAt,omitempty"`
+	StartedAt       *time.Time                    `json:"startedAt,omitempty"`
+	LoadConfirmedAt *time.Time                    `json:"loadConfirmedAt,omitempty"`
+	UpdatedAt       time.Time                     `json:"updatedAt"`
 }
 
 type Release struct {
@@ -228,9 +232,10 @@ type Release struct {
 }
 
 type ReleaseRetryRequest struct {
-	ValidateUnknown bool   `json:"validateUnknown,omitempty"`
-	PlanHash        string `json:"planHash,omitempty"`
-	Confirmation    string `json:"confirmation,omitempty"`
+	FinishWithoutRestart bool   `json:"finishWithoutRestart,omitempty"`
+	ValidateUnknown      bool   `json:"validateUnknown,omitempty"`
+	PlanHash             string `json:"planHash,omitempty"`
+	Confirmation         string `json:"confirmation,omitempty"`
 }
 
 type ReleasePublishRequest struct {

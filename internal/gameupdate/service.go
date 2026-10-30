@@ -20,10 +20,12 @@ import (
 	backupapi "dont/internal/backups"
 	dstinstall "dont/internal/dstserver"
 	"dont/internal/jobs"
+	"dont/internal/luajit"
 	"dont/internal/roomops"
 	"dont/internal/rooms"
 	"dont/internal/runtimeaudit"
 	"dont/internal/shards"
+	"dont/internal/steamupdate"
 	"dont/shared"
 )
 
@@ -491,8 +493,9 @@ func (s *Service) runSteamCMD(ctx context.Context, jobID string, cleanCache bool
 			return err
 		}
 	}
-	arguments := []string{"+force_install_dir", installRoot(s.config.ServerPath), "+login", "anonymous", "+app_update", s.config.AppID, "validate", "+quit"}
-	runErr := s.runner.Run(ctx, executable, arguments, logBuffer)
+	runErr := luajit.PreserveSteamLauncher(luajit.Options{ServerPath: installRoot(s.config.ServerPath), ServerMode: "64"}, func() error {
+		return steamupdate.RunValidated(ctx, s.runner, executable, installRoot(s.config.ServerPath), s.config.AppID, steamManifestCandidates(installRoot(s.config.ServerPath), s.config.AppID), logBuffer)
+	})
 	after, _ := readLocalVersion(s.config.ServerPath, s.config.AppID)
 	if _, err := s.store.Complete(jobID, after, logBuffer.String(), runErr); err != nil {
 		return err

@@ -703,6 +703,8 @@ type RuntimeModResult struct {
 }
 
 type RuntimeGameVersionResult struct {
+	IntegrityError    string    `json:"integrity_error,omitempty"`
+	RuntimeWarning    string    `json:"runtime_warning,omitempty"`
 	Installed         bool      `json:"installed"`
 	AppID             string    `json:"app_id,omitempty"`
 	UpdateMethod      string    `json:"update_method,omitempty"`

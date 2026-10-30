@@ -64,7 +64,11 @@ func (c *ReleaseCoordinator) revalidate(ctx context.Context, value *Release, aft
 	if err != nil {
 		return err
 	}
-	if err := checkReleasePreflight(value.Plan, fresh, changedByTask); err != nil {
+	expected := value.Plan
+	if changedByTask {
+		expected = releaseEffectiveRuntimePlan(*value)
+	}
+	if err := checkReleasePreflight(expected, fresh, changedByTask); err != nil {
 		return err
 	}
 	// A world which was stopped by this task must still be stopped before a

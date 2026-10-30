@@ -167,13 +167,13 @@ func (h *GameUpdateHandler) releaseRetry(c *gin.Context) {
 		Failure(c, http.StatusBadRequest, "INVALID_JSON", "游戏恢复确认信息无效", nil)
 		return
 	}
-	if request.PlanHash != request.Confirmation || request.ValidateUnknown && request.PlanHash == "" {
+	if request.PlanHash != request.Confirmation || request.ValidateUnknown && request.PlanHash == "" || request.FinishWithoutRestart && (request.PlanHash == "" || request.ValidateUnknown) {
 		gameReleaseFailure(c, gameupdate.ErrReleaseConfirmation)
 		return
 	}
 	h.releaseMu.Lock()
 	defer h.releaseMu.Unlock()
-	retryKey := "retry:" + id + ":" + request.PlanHash
+	retryKey := "retry:" + id + ":" + request.PlanHash + ":" + strconv.FormatBool(request.FinishWithoutRestart)
 	if job, ok := h.activeReleaseJob(retryKey); ok {
 		Success(c, http.StatusAccepted, job)
 		return
@@ -197,7 +197,7 @@ func (h *GameUpdateHandler) releaseRetry(c *gin.Context) {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
 			var value gameupdate.Release
 			var retryErr error
-			if request.PlanHash != "" {
+			if request.PlanHash != "" || request.FinishWithoutRestart {
 				if service, ok := h.releases.(interface {
 					RetryConfirmed(context.Context, string, gameupdate.ReleaseRetryRequest, string) (gameupdate.Release, error)
 				}); ok {
@@ -291,6 +291,8 @@ func gameReleaseReport(report func(jobs.TargetResult), plan gameupdate.ReleasePl
 			shardResult := findGameReleaseShard(value, shard.RoomID, shard.WorldID)
 			target := jobs.TargetResult{TargetID: gameReleaseJobTarget("shard", shard.RoomID, shard.WorldID)}
 			switch {
+			case releaseErr == nil && value.Stage == gameupdate.ReleaseStageAbandoned:
+				target.Status, target.Message = jobs.StatusSucceeded, "已结束维护，世界保持当前状态"
 			case !shard.WasRunning && shardResult != nil && shardResult.Stage == gameupdate.ReleaseStageSucceeded:
 				target.Status, target.Message = jobs.StatusSucceeded, "更新前已停止，保持停止"
 			case shardResult != nil && shardResult.Stage == gameupdate.ReleaseStageSucceeded && shardResult.RuntimeState == "stopped":

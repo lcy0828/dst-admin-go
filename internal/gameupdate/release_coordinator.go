@@ -218,6 +218,12 @@ func (c *ReleaseCoordinator) retry(ctx context.Context, id string, request Relea
 		if value.Stage != ReleaseStageFailed && value.Stage != ReleaseStageRecoveryRequired {
 			return value, ErrReleaseConflict
 		}
+		if request.FinishWithoutRestart {
+			if request.ValidateUnknown || request.PlanHash != value.Plan.PlanHash || request.Confirmation != value.Plan.PlanHash {
+				return value, ErrReleaseConfirmation
+			}
+			return c.finishWithoutRestart(runContext, value)
+		}
 		// Legacy interrupted writes with no terminal evidence cannot be
 		// treated as if no write ever happened.
 		for index := range value.Installations {
@@ -291,13 +297,27 @@ func (c *ReleaseCoordinator) retry(ctx context.Context, id string, request Relea
 			if err != nil {
 				return value, err
 			}
-		} else if err := checkReleasePreflight(value.Plan, fresh, true); err != nil {
+		} else if err := checkReleasePreflight(releaseEffectiveRuntimePlan(value), fresh, true); err != nil {
 			return c.failRelease(value, "RECOVERY_PREFLIGHT_FAILED", err, ReleaseStageRecoveryRequired)
 		}
 		for _, target := range fresh.Installations {
 			result := releaseInstallationResult(&value, target.TargetID, target.InstallationID)
 			if result != nil && (result.Stage == ReleaseStageVerified || result.Stage == ReleaseStageSucceeded) && target.CurrentVersion != releaseTargetDesiredVersion(target, fresh.DesiredVersion) {
 				return c.failRelease(value, "VERIFIED_INSTALLATION_CHANGED", ErrReleasePlanChanged, ReleaseStageRecoveryRequired)
+			}
+			if request.ValidateUnknown && result != nil && (result.Stage == ReleaseStageVerified || result.Stage == ReleaseStageSucceeded) {
+				observed, observeErr := c.runtime.ObserveInstallation(runContext, target)
+				if observeErr != nil {
+					return value, observeErr
+				}
+				if observed.IntegrityError != "" {
+					result.Stage, result.WriteState = ReleaseStageStaged, "failed"
+				}
+			}
+		}
+		if releaseWritesVerified(value) {
+			if err := c.verifyCompletedInstallations(runContext, value); err != nil {
+				return c.failRelease(value, "VERIFIED_INSTALLATION_CHANGED", err, ReleaseStageRecoveryRequired)
 			}
 		}
 		if !releaseWritesVerified(value) {
@@ -564,7 +584,7 @@ func (c *ReleaseCoordinator) updateInstallations(ctx context.Context, value Rele
 		alreadyValidated := result.Stage == ReleaseStageVerified || result.Stage == ReleaseStageSucceeded
 		observation, observeErr := c.runtime.ObserveInstallation(ctx, target)
 		if alreadyValidated {
-			if observeErr != nil || !observation.Installed || observation.CurrentVersion != desired {
+			if observeErr != nil || !observation.Installed || observation.IntegrityError != "" || observation.CurrentVersion != desired {
 				err := errors.Join(errors.New("已验证的游戏安装发生变化，需要重新检查"), observeErr)
 				setReleaseInstallationFailure(result, "VERIFIED_INSTALLATION_CHANGED", err, c.now().UTC())
 				failures = errors.Join(failures, err)
@@ -583,7 +603,7 @@ func (c *ReleaseCoordinator) updateInstallations(ctx context.Context, value Rele
 				evidenceErr = errors.New("节点操作回执暂不可用")
 			}
 			matched := evidenceErr == nil && evidence.Completed && evidence.OperationID == result.OperationID && evidence.Action == string(shared.RuntimeActionGameVersionUpdate)
-			if matched && evidence.Outcome == shared.RuntimeOutcomeConfirmed && observeErr == nil && observation.Installed && observation.CurrentVersion == desired {
+			if matched && evidence.Outcome == shared.RuntimeOutcomeConfirmed && observeErr == nil && observation.Installed && observation.IntegrityError == "" && observation.CurrentVersion == desired {
 				result.Stage, result.WriteState, result.AfterVersion, result.ErrorCode, result.ErrorMessage = ReleaseStageVerified, "verified", observation.CurrentVersion, "", ""
 				result.FinishedAt, result.UpdatedAt = timePointer(c.now().UTC()), c.now().UTC()
 				value, err = c.store.Save(value)
@@ -606,7 +626,7 @@ func (c *ReleaseCoordinator) updateInstallations(ctx context.Context, value Rele
 			}
 			result.WriteState = "failed"
 		}
-		if !value.Plan.Policy.Validate && result.WriteState == "not_started" && observeErr == nil && observation.Installed && observation.CurrentVersion == desired {
+		if !value.Plan.Policy.Validate && result.WriteState == "not_started" && observeErr == nil && observation.Installed && observation.IntegrityError == "" && observation.CurrentVersion == desired {
 			result.Stage, result.WriteState, result.AfterVersion = ReleaseStageVerified, "verified", observation.CurrentVersion
 			result.FinishedAt, result.UpdatedAt = timePointer(c.now().UTC()), c.now().UTC()
 			value, err = c.store.Save(value)
@@ -645,7 +665,11 @@ func (c *ReleaseCoordinator) updateInstallations(ctx context.Context, value Rele
 		result = releaseInstallationResult(&value, target.TargetID, target.InstallationID)
 		updated, updateErr := c.runtime.UpdateInstallation(ctx, target, operation, desired, value.Plan.Policy.CleanCache)
 		result.AfterVersion, result.Log = updated.CurrentVersion, updated.Log
+		result.WarningMessage = updated.RuntimeWarning
 		code := "UPDATE_FAILED"
+		if updateErr == nil && updated.IntegrityError != "" {
+			updateErr = errors.New(updated.IntegrityError)
+		}
 		if updateErr == nil && (!updated.Installed || updated.CurrentVersion != desired) {
 			updateErr = ErrDesiredVersionChanged
 		}
@@ -756,7 +780,30 @@ func (c *ReleaseCoordinator) restartAndConfirm(ctx context.Context, value Releas
 			operation, operationErr := fences.operation(shard.RoomID, releaseAttemptID(value), "start", index)
 			if operationErr == nil {
 				operation.RuntimeMode = shard.RuntimeMode
+				if result.RuntimeMode != "" {
+					operation.RuntimeMode = result.RuntimeMode
+				}
 				operationErr = c.runtime.Start(ctx, shard, operation)
+				mode, valid := shared.NormalizeRuntimePerformanceMode(operation.RuntimeMode)
+				if valid && mode != shared.RuntimePerformanceModeGame && runtimeModeUnavailable(operationErr) {
+					// Only a pre-start runtime selection rejection can fall back.
+					// Reconfirm that no process/session was created before retrying.
+					status, statusErr := c.runtime.Status(ctx, shard)
+					if statusErr == nil && status.State == "stopped" && !status.SessionExists {
+						result.RuntimeMode, result.WarningCode = shared.RuntimePerformanceModeGame, "RUNTIME_FALLBACK_GAME"
+						value, err = c.store.Save(value)
+						if err != nil {
+							return value, err
+						}
+						result = releaseShardResult(&value, shard.RoomID, shard.WorldID)
+						fallback, fallbackErr := fences.operation(shard.RoomID, releaseAttemptID(value), "start-game", index)
+						if fallbackErr == nil {
+							fallback.RuntimeMode = shared.RuntimePerformanceModeGame
+							fallbackErr = c.runtime.Start(ctx, shard, fallback)
+						}
+						operationErr = fallbackErr
+					}
+				}
 			}
 			if operationErr != nil {
 				setReleaseShardFailure(result, "START_FAILED", operationErr, c.now().UTC())

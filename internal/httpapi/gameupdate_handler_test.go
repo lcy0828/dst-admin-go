@@ -369,3 +369,21 @@ func TestGameReleaseReportUsesActualValidatedBuildAfterRepreview(t *testing.T) {
 		t.Fatalf("reported old preview build: %+v", results[0])
 	}
 }
+
+func TestGameReleaseHTTPForwardsConfirmedFinishWithoutRestart(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	plan := gameReleaseHTTPPlan()
+	value := successfulHTTPGameRelease("finish-release", "original-job", plan)
+	value.Stage = gameupdate.ReleaseStageRecoveryRequired
+	fixture := &gameReleaseHTTPFixture{plan: plan, releases: map[string]gameupdate.Release{value.ID: value}}
+	router, jobService := newGameReleaseHandlerApp(t, fixture)
+	response := performJSON(router, http.MethodPost, "/api/v2/game/releases/finish-release/actions/retry", map[string]interface{}{"finishWithoutRestart": true, "planHash": releaseHTTPPlanHash, "confirmation": releaseHTTPPlanHash}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	id := responseData(t, response)["id"].(string)
+	waitForJobStatus(t, jobService, id, jobs.StatusSucceeded)
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if !fixture.retryRequest.FinishWithoutRestart || fixture.retryRequest.Confirmation != releaseHTTPPlanHash {
+		t.Fatalf("request=%+v", fixture.retryRequest)
+	}
+}

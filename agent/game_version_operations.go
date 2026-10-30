@@ -8,6 +8,7 @@ import (
 	"dont/internal/installationlock"
 	"dont/internal/luajit"
 	"dont/internal/steamlogin"
+	"dont/internal/steamupdate"
 	"errors"
 	"fmt"
 	"io"
@@ -71,7 +72,8 @@ func (a *Agent) observeGameVersion(ctx context.Context, installation RuntimeInst
 	appID, updateMethod := gameVersionInstallationMetadata(installation)
 	available, diskErr := availableGameBytes(gameInstallRoot(installation))
 	value := shared.RuntimeGameVersionResult{
-		Installed: installed, AppID: appID, UpdateMethod: updateMethod,
+		IntegrityError: gameIntegrityMessage(installation),
+		Installed:      installed, AppID: appID, UpdateMethod: updateMethod,
 		Branch:      dstinstall.SteamBranch(gameManifestCandidates(gameInstallRoot(installation), appID)...),
 		GameVersion: gameVersion, SteamBuild: version, CurrentVersion: version, AvailableBytes: available,
 		SteamCMDAvailable: steamcmd != "", UpdateSupported: updateMethod == dstinstall.UpdateMethodSteamCMD && steamcmd != "",
@@ -129,12 +131,12 @@ func (a *Agent) updateGameVersion(ctx context.Context, installation RuntimeInsta
 		}
 	}
 	output := &limitedGameVersionBuffer{limit: maxGameUpdateLogBytes}
-	arguments := []string{"+force_install_dir", root, "+login", "anonymous", "+app_update", dstDedicatedServerAppID, "validate", "+quit"}
 	runErr := luajit.PreserveSteamLauncher(luajit.Options{ServerPath: root, ServerMode: "64"}, func() error {
-		return steamlogin.Wrap(a.Config.SteamLogin, a.gameVersionRunner).Run(ctx, steamcmd, arguments, output)
+		return steamupdate.RunValidated(ctx, steamlogin.Wrap(a.Config.SteamLogin, a.gameVersionRunner), steamcmd, root, dstDedicatedServerAppID, gameManifestCandidates(root, dstDedicatedServerAppID), output)
 	})
 	current, installed := readInstalledGameVersion(installation)
 	value := gameVersionResult(a.now, installation, steamcmd, output.String())
+	runErr, value.RuntimeWarning = luajit.SteamUpdateResult(runErr)
 	value.CurrentVersion, value.SteamBuild, value.Installed = current, current, installed
 	result.GameVersion = value
 	if runErr == nil && current != strings.TrimSpace(request.GameVersion.ExpectedVersion) {
@@ -153,7 +155,8 @@ func gameVersionResult(now func() time.Time, installation RuntimeInstallation, s
 	appID, updateMethod := gameVersionInstallationMetadata(installation)
 	available, _ := availableGameBytes(gameInstallRoot(installation))
 	return &shared.RuntimeGameVersionResult{
-		Installed: installed, AppID: appID, UpdateMethod: updateMethod,
+		IntegrityError: gameIntegrityMessage(installation),
+		Installed:      installed, AppID: appID, UpdateMethod: updateMethod,
 		Branch:      dstinstall.SteamBranch(gameManifestCandidates(gameInstallRoot(installation), appID)...),
 		GameVersion: gameVersion, SteamBuild: version, CurrentVersion: version, AvailableBytes: available,
 		SteamCMDAvailable: steamcmd != "", UpdateSupported: updateMethod == dstinstall.UpdateMethodSteamCMD && steamcmd != "", Log: logText,
@@ -323,4 +326,12 @@ func (b *limitedGameVersionBuffer) String() string {
 		return b.buffer.String() + "\n[DST Admin] SteamCMD 输出超过 2 MiB，已截断\n"
 	}
 	return b.buffer.String()
+}
+
+func gameIntegrityMessage(installation RuntimeInstallation) string {
+	appID, _ := gameVersionInstallationMetadata(installation)
+	if err := steamupdate.IntegrityError(gameManifestCandidates(gameInstallRoot(installation), appID)...); err != nil {
+		return err.Error()
+	}
+	return ""
 }

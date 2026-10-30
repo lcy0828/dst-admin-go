@@ -6,6 +6,7 @@ import (
 	"dont/internal/installationlock"
 	"dont/internal/installationmaintenance"
 	"dont/internal/luajit"
+	"dont/internal/steamupdate"
 	"errors"
 	"strings"
 
@@ -30,7 +31,8 @@ func (s *Service) ObserveReleaseInstallation(ctx context.Context) (shared.Runtim
 	}
 	supported := !s.config.DisableUpdate && s.config.UpdateMethod == dstinstall.UpdateMethodSteamCMD && executable != ""
 	result := shared.RuntimeGameVersionResult{
-		Installed: installed, AppID: s.config.AppID, UpdateMethod: s.config.UpdateMethod,
+		IntegrityError: steamIntegrityMessage(steamManifestCandidates(installRoot(s.config.ServerPath), s.config.AppID)...),
+		Installed:      installed, AppID: s.config.AppID, UpdateMethod: s.config.UpdateMethod,
 		Branch:      dstinstall.SteamBranch(steamManifestCandidates(installRoot(s.config.ServerPath), s.config.AppID)...),
 		GameVersion: gameVersion, SteamBuild: current, CurrentVersion: current, AvailableBytes: available,
 		SteamCMDAvailable: executable != "", UpdateSupported: supported, ObservedAt: s.now().UTC(),
@@ -87,11 +89,11 @@ func (s *Service) UpdateReleaseInstallation(ctx context.Context, expectedVersion
 		}
 	}
 	output := &boundedBuffer{limit: 2 * 1024 * 1024}
-	arguments := []string{"+force_install_dir", installRoot(s.config.ServerPath), "+login", "anonymous", "+app_update", dstinstall.AppIDDedicatedServer, "validate", "+quit"}
 	runErr := luajit.PreserveSteamLauncher(luajit.Options{ServerPath: installRoot(s.config.ServerPath), ServerMode: "64"}, func() error {
-		return s.runner.Run(ctx, executable, arguments, output)
+		return steamupdate.RunValidated(ctx, s.runner, executable, installRoot(s.config.ServerPath), s.config.AppID, steamManifestCandidates(installRoot(s.config.ServerPath), s.config.AppID), output)
 	})
 	result := s.releaseVersionResult(output.String())
+	runErr, result.RuntimeWarning = luajit.SteamUpdateResult(runErr)
 	if runErr == nil && result.CurrentVersion != expectedVersion {
 		runErr = errors.New("SteamCMD 已结束，但安装版本与目标版本不一致")
 	}
@@ -107,10 +109,18 @@ func (s *Service) releaseVersionResult(logText string) shared.RuntimeGameVersion
 		available = usage.Free
 	}
 	return shared.RuntimeGameVersionResult{
-		Installed: installed, AppID: s.config.AppID, UpdateMethod: s.config.UpdateMethod,
+		IntegrityError: steamIntegrityMessage(steamManifestCandidates(installRoot(s.config.ServerPath), s.config.AppID)...),
+		Installed:      installed, AppID: s.config.AppID, UpdateMethod: s.config.UpdateMethod,
 		Branch:      dstinstall.SteamBranch(steamManifestCandidates(installRoot(s.config.ServerPath), s.config.AppID)...),
 		GameVersion: gameVersion, SteamBuild: current, CurrentVersion: current, AvailableBytes: available,
 		SteamCMDAvailable: executable != "", UpdateSupported: !s.config.DisableUpdate && s.config.UpdateMethod == dstinstall.UpdateMethodSteamCMD && executable != "",
 		Log: logText, ObservedAt: s.now().UTC(),
 	}
+}
+
+func steamIntegrityMessage(paths ...string) string {
+	if err := steamupdate.IntegrityError(paths...); err != nil {
+		return err.Error()
+	}
+	return ""
 }
