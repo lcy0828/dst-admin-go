@@ -489,6 +489,15 @@ jobs:
               --tag "$target:${prefix}latest" "$target:$prefix$RELEASE_VERSION"
             echo "Published $target:${prefix}latest from $prefix$RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
           done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Package the official AstrBot plugins
+        run: |
+          python integrations/astrbot/package.py --output release --plugin all
+          for file in release/astrbot_plugin_dst_*.zip; do
+            (cd release && sha256sum "${file#release/}") > "$file.sha256"
+          done
       - name: Publish versioned downloads in the main repository
         env:
           GH_TOKEN: ${{ github.token }}
@@ -505,6 +514,6 @@ jobs:
           node deploy/scripts/write-release-index.mjs release "$GITHUB_REF_NAME" release-notes.md
           args=()
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then args+=(--prerelease); fi
-          gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.sha256 release/dst-admin-release.json \
+          gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.zip release/*.sha256 release/dst-admin-release.json \
             --repo "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" \
             --notes-file release-notes.md "${args[@]}"

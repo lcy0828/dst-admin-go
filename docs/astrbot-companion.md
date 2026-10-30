@@ -4,7 +4,7 @@
 
 ## 安装与接入
 
-1. 从 `integrations/astrbot` 构建插件 ZIP，在 AstrBot 导入 `astrbot_plugin_dst_companion.zip`，或将该插件目录放进 AstrBot 的插件目录。保持原有分页兼容设置和其他插件。
+1. 从 [正式版下载](https://github.com/lcy0828/dst-admin-go/releases/latest)获取 `astrbot_plugin_dst_companion.zip` 及对应 `.sha256` 校验文件，在 AstrBot 导入 ZIP。也可以从 `integrations/astrbot` 构建插件 ZIP，或将该插件目录放进 AstrBot 的插件目录。保持原有分页兼容设置和其他插件。
 2. 在面板 **AI 助手 → 接入配置** 创建“游戏查询”密钥，并选择实际允许的房间。旧密钥保留面板管理权限，不会自动降权。
 3. 在 AstrBot 添加 Streamable HTTP MCP 连接，例如 `dst-read`，地址为 `https://panel.example/mcp?view=bot`，使用 `Authorization: Bearer <ACCESS_TOKEN>`。客户端应支持分页；不支持时可使用项目已有的 `pagination=off` 兼容开关。bot 视图包含 14 个插件依赖入口，仍按密钥用途过滤；不会把数百个接口加载给模型。旧面板不认识 bot 视图时可暂用 view=all，固定查询可兼容，但新动态能力和可恢复写入需要新面板。
 4. 在插件配置选择这个连接，填写明确允许的会话 `unified_msg_origin`、房间 ID 和可选别名。房间 ID 使用 `api_listRooms` 的真实返回值；别名示例 `{"1服":"example-room"}` 仅用于解释配置，不能照抄为真实房间 ID。多房间未配置默认值时会询问选择。
