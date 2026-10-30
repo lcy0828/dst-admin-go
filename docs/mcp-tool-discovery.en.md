@@ -7,6 +7,7 @@ clients use `find_api` with Chinese requests, symptoms, English keywords or an
 exact operation ID, then invoke `api_<operationId>` or `call_api`. Discovery
 does not execute a management operation.
 
+
 ```json
 {"query":"automatic room backups","limit":5}
 ```
@@ -49,6 +50,24 @@ and index this metadata. Cache by `catalogRevision`; rebuild when it changes.
 Do not send the whole catalog to a model on every turn. Default panel search is
 in memory and uses no embedding API, resident model, vector database or idle
 background polling.
+
+### Clients without pagination support
+
+Tool lists return at most 64 tools per page by default. Clients should follow
+`nextCursor` until the final page. As a compatibility option for clients that
+only read the first page, disable listing pagination in that client's URL:
+
+```text
+/mcp?view=all&pagination=off
+```
+
+The response includes every tool matching the selected view and filters, with
+no `nextCursor`. Set `pagination=on` or omit the parameter to restore pagination.
+This URL option does not change global settings, filtering, or call permissions.
+Cursors are rejected when pagination is off. The complete response can be large;
+the default compact listing's `find_api` and `call_api` already support discovering
+and calling all supported operations without sending the entire catalog to the
+model on every turn.
 
 ## Result interpretation
 
@@ -184,3 +203,5 @@ terms. Keep parameters and response schemas in OpenAPI. CI checks coverage,
 obsolete entries, schema references, Chinese discovery scenarios and MCP receipt
 compatibility. Deprecated aliases with explicit replacements inherit their
 replacement's vocabulary and retain deprecation notices.
+
+For ordinary-user game queries, use `api_queryRoomWorld` and `api_getRoomWorldQueryRun`. See [controlled read-only queries](controlled-world-queries.md) for the fixed allowlist, AstrBot tool permissions, limits and receipt semantics.

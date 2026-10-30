@@ -24,8 +24,9 @@ const mcpPageSize = 64
 
 type mcpViewKey struct{}
 type mcpView struct {
-	View   string
-	Filter apicontract.MetadataFilter
+	View        string
+	Filter      apicontract.MetadataFilter
+	Unpaginated bool `json:"unpaginated,omitempty"`
 }
 
 func parseMCPView(query url.Values) (mcpView, error) {
@@ -34,6 +35,13 @@ func parseMCPView(query url.Values) (mcpView, error) {
 		view.View = "compact"
 	}
 	if !slices.Contains([]string{"compact", "all", "legacy"}, view.View) {
+		return view, ErrInvalid
+	}
+	switch query.Get("pagination") {
+	case "", "on":
+	case "off":
+		view.Unpaginated = true
+	default:
 		return view, ErrInvalid
 	}
 	for _, tag := range query["tags"] {
@@ -126,7 +134,7 @@ func (s *Service) mcpDefinition(tool Tool) *mcp.Tool {
 	return &mcp.Tool{Name: tool.Name, Title: metadata.Title, Description: tool.Description, InputSchema: tool.InputSchema, OutputSchema: receiptOutputSchema(), Meta: mcp.Meta{mcpMetadataKey: extension}, Annotations: &mcp.ToolAnnotations{Title: metadata.Title, ReadOnlyHint: metadata.Access == "read", IdempotentHint: metadata.Idempotent, DestructiveHint: &metadata.Destructive, OpenWorldHint: &metadata.OpenWorld}}
 }
 
-var compactMCPNames = map[string]bool{discoverAPI: true, dispatchAPI: true, "api_listRooms": true, "api_getRoomRuntimeOverview": true, "api_listRoomPlayers": true, "api_listRoomMods": true, "api_listRoomBackupSchedules": true, "api_listJobs": true, "api_getJob": true}
+var compactMCPNames = map[string]bool{discoverAPI: true, dispatchAPI: true, "api_listRooms": true, "api_getRoomRuntimeOverview": true, "api_listRoomPlayers": true, "api_listRoomMods": true, "api_listRoomBackupSchedules": true, "api_listJobs": true, "api_getJob": true, "api_queryRoomWorld": true, "api_getRoomWorldQueryRun": true}
 
 // Listing views are immutable projections of one shared server. No per-token
 // server cache or tool registration is needed, and hidden tools remain callable.
@@ -167,6 +175,9 @@ func (s *Service) catalogMiddleware(definitions []*mcp.Tool) mcp.Middleware {
 			fingerprint := hex.EncodeToString(hash[:12])
 			offset := 0
 			if params, ok := req.GetParams().(*mcp.ListToolsParams); ok && params != nil && params.Cursor != "" {
+				if view.Unpaginated {
+					return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "tool cursors require pagination=on"}
+				}
 				raw, err := base64.RawURLEncoding.DecodeString(params.Cursor)
 				if err != nil {
 					return nil, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "invalid tool cursor"}
@@ -178,8 +189,12 @@ func (s *Service) catalogMiddleware(definitions []*mcp.Tool) mcp.Middleware {
 				}
 				offset = parsed
 			}
-			end := min(offset+mcpPageSize, len(selected))
-			result := &mcp.ListToolsResult{Tools: selected[offset:end], Meta: mcp.Meta{"io.github.lcy0828.dst-admin/catalog": map[string]any{"view": view.View, "total": len(selected), "pageSize": mcpPageSize, "catalog": fingerprint}}}
+			pageSize := mcpPageSize
+			if view.Unpaginated {
+				pageSize = len(selected)
+			}
+			end := min(offset+pageSize, len(selected))
+			result := &mcp.ListToolsResult{Tools: selected[offset:end], Meta: mcp.Meta{"io.github.lcy0828.dst-admin/catalog": map[string]any{"view": view.View, "total": len(selected), "pageSize": pageSize, "paginated": !view.Unpaginated, "catalog": fingerprint}}}
 			if end < len(selected) {
 				result.NextCursor = base64.RawURLEncoding.EncodeToString([]byte(fingerprint + ":" + strconv.Itoa(end)))
 			}

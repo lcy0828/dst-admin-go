@@ -1,6 +1,7 @@
 package aicontrol
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -111,9 +112,65 @@ func TestMCPViewsPaginationMetadataAndDispatcher(t *testing.T) {
 			t.Fatal(tool.Name)
 		}
 	}
+	for _, query := range []string{"?view=compact", "?view=all", "?view=legacy", "?tags=backup&access=read", "?tags=no-such-domain"} {
+		var first mcp.ListToolsResult
+		if err := json.Unmarshal(request(query, "tools/list", map[string]any{}), &first); err != nil {
+			t.Fatal(err)
+		}
+		var explicitOn mcp.ListToolsResult
+		if err := json.Unmarshal(request(query+"&pagination=on", "tools/list", map[string]any{}), &explicitOn); err != nil {
+			t.Fatal(err)
+		}
+		firstJSON, _ := json.Marshal(first)
+		onJSON, _ := json.Marshal(explicitOn)
+		if !bytes.Equal(firstJSON, onJSON) {
+			t.Fatalf("pagination=on changed the default listing for %s", query)
+		}
+		if (query == "?view=all" || query == "?view=legacy") && (len(first.Tools) != mcpPageSize || first.NextCursor == "") {
+			t.Fatalf("default listing is not paginated for %s", query)
+		}
+		combined := append([]*mcp.Tool{}, first.Tools...)
+		cursor := first.NextCursor
+		for page := 0; cursor != ""; page++ {
+			if page >= 20 {
+				t.Fatalf("pagination did not terminate for %s", query)
+			}
+			var result mcp.ListToolsResult
+			if err := json.Unmarshal(request(query, "tools/list", map[string]any{"cursor": cursor}), &result); err != nil {
+				t.Fatal(err)
+			}
+			combined = append(combined, result.Tools...)
+			cursor = result.NextCursor
+		}
+		var unpaginated mcp.ListToolsResult
+		if err := json.Unmarshal(request(query+"&pagination=off", "tools/list", map[string]any{}), &unpaginated); err != nil {
+			t.Fatal(err)
+		}
+		combinedJSON, _ := json.Marshal(combined)
+		unpaginatedJSON, _ := json.Marshal(unpaginated.Tools)
+		if unpaginated.NextCursor != "" || !bytes.Equal(combinedJSON, unpaginatedJSON) {
+			t.Fatalf("unpaginated listing differs from all pages for %s: %d/%d tools", query, len(unpaginated.Tools), len(combined))
+		}
+		meta, ok := unpaginated.Meta["io.github.lcy0828.dst-admin/catalog"].(map[string]any)
+		if !ok || meta["paginated"] != false || meta["total"] != float64(len(combined)) || meta["pageSize"] != float64(len(combined)) {
+			t.Fatalf("incorrect unpaginated metadata for %s: %+v", query, meta)
+		}
+		if first.NextCursor != "" {
+			var response struct {
+				Code int `json:"code"`
+			}
+			if err := json.Unmarshal(request(query+"&pagination=off", "tools/list", map[string]any{"cursor": first.NextCursor}), &response); err != nil || response.Code != -32602 {
+				t.Fatalf("unpaginated listing accepted a cursor for %s", query)
+			}
+		}
+	}
 	args := map[string]any{"operationId": "configureRoomBackupSchedule", "arguments": map[string]any{"path": map[string]any{"roomId": "room-a"}, "body": map[string]any{"enabled": true}, "requestId": "dispatch-backup-001"}}
 	for i := 0; i < 2; i++ {
-		if !strings.Contains(string(request("", "tools/call", map[string]any{"name": dispatchAPI, "arguments": args})), "enabled") {
+		query := ""
+		if i == 1 {
+			query = "?pagination=off"
+		}
+		if !strings.Contains(string(request(query, "tools/call", map[string]any{"name": dispatchAPI, "arguments": args})), "enabled") {
 			t.Fatal("dispatch failed")
 		}
 	}
@@ -121,7 +178,7 @@ func TestMCPViewsPaginationMetadataAndDispatcher(t *testing.T) {
 		t.Fatal("dispatcher bypassed idempotence", executed)
 	}
 	args["operationId"] = "setupAdmin"
-	if !strings.Contains(string(request("", "tools/call", map[string]any{"name": dispatchAPI, "arguments": args})), "AI_DENIED") {
+	if !strings.Contains(string(request("?pagination=off", "tools/call", map[string]any{"name": dispatchAPI, "arguments": args})), "AI_DENIED") {
 		t.Fatal("dispatcher exposed identity operation")
 	}
 	if executed != 1 {
@@ -130,7 +187,7 @@ func TestMCPViewsPaginationMetadataAndDispatcher(t *testing.T) {
 }
 
 func TestMCPFilterValidationAndScopedDispatch(t *testing.T) {
-	for _, query := range []string{"view=bad", "access=bad", "risk=bad", "runtime=bad", "tags=backup,,room"} {
+	for _, query := range []string{"view=bad", "access=bad", "risk=bad", "runtime=bad", "tags=backup,,room", "pagination=bad"} {
 		values, err := url.ParseQuery(query)
 		if err != nil {
 			t.Fatal(err)

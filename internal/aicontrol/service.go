@@ -22,6 +22,7 @@ type Service struct {
 	Store      *Store
 	backend    Backend
 	slots      chan struct{}
+	mcpSlots   chan struct{}
 	toolSlots  chan struct{}
 	catalog    *apicontract.Catalog
 	mcpOnce    sync.Once
@@ -30,7 +31,7 @@ type Service struct {
 }
 
 func New(store *Store, backend Backend) *Service {
-	return &Service{Store: store, backend: backend, slots: make(chan struct{}, 2), toolSlots: make(chan struct{}, 2)}
+	return &Service{Store: store, backend: backend, slots: make(chan struct{}, 2), mcpSlots: make(chan struct{}, 16), toolSlots: make(chan struct{}, 2)}
 }
 
 // ConfigureAPI is called once during application construction.

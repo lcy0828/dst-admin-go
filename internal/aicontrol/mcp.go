@@ -29,12 +29,13 @@ func (s *Service) MCP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "AI_AUTH_INVALID", 401)
 		return
 	}
-	release, err := s.Acquire()
-	if err != nil {
+	select {
+	case s.mcpSlots <- struct{}{}:
+	default:
 		http.Error(w, "AI_BUSY", 429)
 		return
 	}
-	defer release()
+	defer func() { <-s.mcpSlots }()
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
 	if Metadata(ctx) == nil {
