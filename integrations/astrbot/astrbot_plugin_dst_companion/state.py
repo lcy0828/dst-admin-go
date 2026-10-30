@@ -1,6 +1,7 @@
 """Bounded per-user state; message IDs are adapter receipts, never text hashes."""
 
 import json
+import re
 import time
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, is_dataclass
@@ -149,9 +150,7 @@ class State:
 
     def selection(self, key, text, quote, woken):
         value = self.choices.get(key)
-        if not value or value["until"] <= self.clock() or not text.isdigit():
-            return None
-        if not (woken or quote and quote == value["messageId"]):
+        if not self.choice_matches(key, quote) or not self.number(text):
             return None
         index = value.get("page", 0) * value.get("pageSize", 5) + int(text) - 1
         if not 1 <= int(text) <= value.get("pageSize", 5) or not 0 <= index < len(
@@ -195,15 +194,21 @@ class State:
         return None
 
     def handles(self, key, text, quote, woken):
-        value = self.choices.get(key)
-        if (
-            value
-            and value["until"] > self.clock()
-            and (woken or quote and quote == value["messageId"])
-            and (text.isdigit() or text in {"下一页", "上一页"})
+        if self.choice_matches(key, quote) and (
+            self.number(text) or text in {"下一页", "上一页", "取消", "返回", "取消选择"}
         ):
             return True
         return bool(woken and self.pending_form(key))
+
+    @staticmethod
+    def number(text):
+        return re.fullmatch(r"[0-9]{1,3}", text) is not None
+
+    def choice_matches(self, key, quote):
+        value = self.choices.get(key)
+        return bool(
+            value and value["until"] > self.clock() and (not quote or quote == value["messageId"])
+        )
 
     def page(self, key, direction):
         value = self.choices.get(key)

@@ -237,7 +237,9 @@ class V41FrameworkTests(unittest.IsolatedAsyncioTestCase):
         from astrbot_plugin_dst_companion.configuration import DEFAULTS
 
         bot = self.companion()
-        bot.config.update(configuration_version=2, defaults={**DEFAULTS, "rooms": ["r1"]})
+        bot.config.update(
+            configuration_version=2, defaults={**DEFAULTS, "rooms": ["r1"], "mode": "shortcut"}
+        )
         self.stopped = False
         event = self.event([C.At(qq="456"), C.Plain("这个问题需要复杂分析")])
         await bot.on_message(event)

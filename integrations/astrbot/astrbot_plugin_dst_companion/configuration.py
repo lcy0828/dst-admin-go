@@ -24,7 +24,7 @@ CATEGORIES = frozenset(
     }
 )
 DEFAULTS = {
-    "mode": "shortcut",
+    "mode": "mixed",
     "rooms": [],
     "defaultRoom": "",
     "roomAliases": {},

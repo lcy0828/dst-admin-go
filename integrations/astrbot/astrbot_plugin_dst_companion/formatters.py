@@ -1,4 +1,55 @@
+import math
 import re
+
+CHARACTERS = dict(
+    zip(
+        (
+            "wilson",
+            "willow",
+            "wolfgang",
+            "wendy",
+            "wx78",
+            "wickerbottom",
+            "woodie",
+            "wes",
+            "waxwell",
+            "wathgrithr",
+            "webber",
+            "winona",
+            "warly",
+            "wortox",
+            "wormwood",
+            "wurt",
+            "walter",
+            "wanda",
+        ),
+        (
+            "威尔逊",
+            "薇洛",
+            "沃尔夫冈",
+            "温蒂",
+            "WX-78",
+            "薇克巴顿",
+            "伍迪",
+            "韦斯",
+            "麦斯威尔",
+            "薇格弗德",
+            "韦伯",
+            "薇诺娜",
+            "沃利",
+            "沃拓克斯",
+            "沃姆伍德",
+            "沃特",
+            "沃尔特",
+            "旺达",
+        ),
+        strict=True,
+    )
+)
+
+
+def world_name(value):
+    return {"Master": "地面（Master）", "Caves": "洞穴（Caves）"}.get(value, safe(value))
 
 
 def safe(value):
@@ -13,11 +64,12 @@ def presence(player):
         return "离线"
     if not player.get("worldConfirmed"):
         return "在线 · 所在世界未确认"
-    return "在线 · " + safe(player.get("worldName"))
+    return "在线 · " + world_name(player.get("worldName"))
 
 
 def player_line(p):
-    return f"{safe(p.get('name'))} · {safe(p.get('prefab') or '角色未知')} · {presence(p)}"
+    prefab = str(p.get("prefab") or "").strip()
+    return f"{safe(p.get('name'))} · {CHARACTERS.get(prefab.lower(), safe(prefab or '角色未知'))} · {presence(p)}"
 
 
 def players(data):
@@ -60,37 +112,70 @@ def inventory(data):
     )
     lines = [f"背包 · {source} · {safe(data.get('status') or '覆盖情况未确认')}"]
 
-    # Keep the actual inventory structure; never imply unsupported Mod-private
-    # containers were inspected or that a partial result is an empty inventory.
-    def walk(value, depth=0):
-        if depth > 8 or len(lines) >= 16:
-            return
-        if isinstance(value, list):
-            for child in value:
-                walk(child, depth + 1)
-        elif isinstance(value, dict):
-            if value.get("prefab"):
-                amount = value.get("stackSize", value.get("count"))
-                lines.append(
-                    safe(value.get("name") or value["prefab"])
-                    + (f" ×{amount}" if type(amount) is int else "")
-                )
-            for key in (
-                "items",
-                "slots",
-                "equipment",
-                "inventory",
-                "containers",
-                "contents",
-                "heldItem",
-                "activeItem",
-                "overflow",
-                "item",
-            ):
-                if key in value:
-                    walk(value[key], depth + 1)
+    if data.get("worldName"):
+        lines.append(world_name(data["worldName"]))
+    truncated = False
+    count = 0
 
-    walk(data)
+    def number(value):
+        return type(value) in (int, float) and math.isfinite(value)
+
+    def walk(value, depth=0, equipment=False):
+        nonlocal count, truncated
+        if not isinstance(value, dict) or not value.get("prefab"):
+            return
+        if depth > 5 or count >= 50 or sum(map(len, lines)) > 2200:
+            truncated = True
+            return
+        count += 1
+        amount = value.get("count", value.get("stackSize"))
+        text = safe(value.get("name") or value["prefab"])
+        if number(amount):
+            text += f" ×{amount:g}"
+        if equipment:
+            slot = str(value.get("slot", "")).split("/")[-1]
+            text = (
+                {"hands": "手持", "body": "身体", "head": "头部"}.get(slot, safe(slot))
+                + "："
+                + text
+            )
+        metrics = value.get("metrics") or {}
+        details = []
+        for key, label in (
+            ("uses", "次数"),
+            ("armor", "护甲"),
+            ("fuel", "燃料"),
+            ("perishable", "新鲜"),
+        ):
+            metric = metrics.get(key) or {}
+            ratio, raw = metric.get("ratio"), metric.get("value")
+            if number(ratio) and 0 <= ratio <= 1:
+                details.append(f"{label} {ratio * 100:.0f}%")
+            elif number(raw):
+                details.append(
+                    f"{label} {raw:g}" + ("秒" if metric.get("unit") == "seconds" else "")
+                )
+        if details:
+            text += " [" + " · ".join(details) + "]"
+        lines.append("  " * depth + ("└ " if depth else "· ") + text)
+        for child in (value.get("contents") or [])[:256]:
+            walk(child, depth + 1)
+
+    for key, label in (("equipment", "装备"), ("inventory", "物品栏")):
+        values = data.get(key)
+        if isinstance(values, list):
+            lines.append("\n【" + label + "】")
+            for value in values[:256]:
+                walk(value, equipment=key == "equipment")
+            if len(values) > 256:
+                truncated = True
+    if isinstance(data.get("activeItem"), dict):
+        lines.append("\n【鼠标手持】")
+        walk(data["activeItem"])
+    if count == 0:
+        lines.append("未返回可展示物品；是否为空以面板返回的覆盖状态为准。")
+    if truncated or data.get("limitsReached"):
+        lines.append("（物品较多，仅展示部分；完整内容请在面板查看。）")
     saved = data.get("source") == "save"
     stamp = (
         data.get("savedAt") or data.get("fileModifiedAt")
@@ -114,7 +199,7 @@ def status(worlds, states):
         label = {"running": "运行中", "stopped": "已停止", "starting": "启动中"}.get(
             state, "状态未确认"
         )
-        line = f"{safe(world.get('name'))}：{label}"
+        line = f"{world_name(world.get('name'))}：{label}"
         fresh = snapshot.get("freshness") == "live" and not snapshot.get("stale")
         if fresh and state == "running":
             if type(snapshot.get("cycles")) is int:
@@ -126,12 +211,26 @@ def status(worlds, states):
                     "spring": "春",
                     "summer": "夏",
                 }.get(snapshot["season"], safe(snapshot["season"]))
+            if type(snapshot.get("remainingDaysInSeason")) is int:
+                line += f" · 剩余 {snapshot['remainingDaysInSeason']} 天"
         elif state == "running":
             line += " · 采集待同步"
         if snapshot.get("observedAt"):
             line += "\n  采样：" + safe(snapshot["observedAt"])
         lines.append(line)
     return "\n".join(lines or ["暂无世界记录。"])
+
+
+def mods(data):
+    rows = data.get("items")
+    if not isinstance(rows, list):
+        return "模组列表未返回，数量未知。"
+    total = data.get("total") if type(data.get("total")) is int else len(rows)
+    lines = [f"模组 {total} 个"]
+    lines.extend("· " + safe(m.get("name") or m.get("id")) for m in rows[:12])
+    if len(rows) > 12 or total > len(rows):
+        lines.append("仅展示部分模组，请到面板查看完整列表。")
+    return "\n".join(lines)
 
 
 def backups(data):

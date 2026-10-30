@@ -77,5 +77,5 @@ def options(pending, title="请选择"):
         lines.append(text)
     if pages > 1:
         lines.append("上一页 / 下一页")
-    lines.append("引用本条或 @机器人回复序号；取消退出。")
+    lines.append("可直接回复序号、上一页、下一页；也可引用本条或 @机器人选择。取消退出。")
     return "\n".join(lines)

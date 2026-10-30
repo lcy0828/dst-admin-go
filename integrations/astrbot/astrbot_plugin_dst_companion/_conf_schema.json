@@ -86,9 +86,9 @@
     "type": "object",
     "items": {
       "mode": {
-        "description": "交互模式（shortcut 快捷指令，mixed 保留普通聊天）",
+        "description": "交互模式（mixed：快捷指令直查，其他自然语言交给 AI；shortcut：仅快捷指令，AI 需写 AI:）",
         "type": "string",
-        "default": "shortcut",
+        "default": "mixed",
         "options": [
           "shortcut",
           "mixed"
@@ -232,9 +232,9 @@
             "type": "object",
             "items": {
               "mode": {
-                "description": "交互模式（shortcut 快捷指令，mixed 保留普通聊天）",
+                "description": "交互模式（mixed：快捷查询优先，其余交给 AI；shortcut：仅快捷指令）",
                 "type": "string",
-                "default": "shortcut",
+                "default": "mixed",
                 "options": [
                   "shortcut",
                   "mixed"

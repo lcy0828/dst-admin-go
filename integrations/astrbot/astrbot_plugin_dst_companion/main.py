@@ -23,7 +23,7 @@ from .policy import Actor, Policy
 from .state import State, Target
 
 
-@register("astrbot_plugin_dst_companion", "lcy", "DST Admin 常用查询与受控管理", "0.2.0")
+@register("astrbot_plugin_dst_companion", "lcy", "DST Admin 常用查询与受控管理", "0.2.1")
 class DSTCompanion(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context, config)
@@ -191,7 +191,11 @@ class DSTCompanion(Star):
     def input(self, event):
         text = []
         quote = ""
-        woken = False
+        # is_wake also becomes true for ALL-message listeners. Only the
+        # framework's explicit addressing flag may complement real At parts.
+        woken = getattr(event, "is_at_or_wake_command", False) is True and (
+            not event.is_private_chat() or self.config.get("allow_private", False)
+        )
         target_at = []
         media = False
         for part in event.get_messages():
@@ -229,6 +233,16 @@ class DSTCompanion(Star):
                 )
             value = value + " " + binding
         return None if media else (value, woken, quote, "")
+
+    def input_unscoped(self, event):
+        # An unconfigured group may use another bot workflow. Only an explicit
+        # request to our own prefix receives setup guidance; never hijack that
+        # group's generic menu or infer permission from its message contents.
+        value = "".join(p.text for p in event.get_messages() if isinstance(p, C.Plain)).strip()
+        prefix = str(self.config.get("command_prefix", "/dst"))
+        if prefix and (value == prefix or value.startswith(prefix + " ")):
+            return value[len(prefix) :].strip() or "帮助"
+        return ""
 
     async def send_reply(self, event, text, target=None, choice=False, sequence=0):
         if not self.alive:
@@ -281,6 +295,12 @@ class DSTCompanion(Star):
         actor = self.actor(event)
         if not actor:
             error = self.config_errors.get(str(event.unified_msg_origin))
+            if not error and self.alive:
+                from .routing import parse
+
+                parsed = self.input_unscoped(event)
+                if parsed and parse(parsed, {}) is not None:
+                    error = "此会话尚未启用 DST 伴随助手，请管理员在插件设置的允许会话中启用；本次未调用模型或查询房间。"
             if error:
                 event.stop_event()
                 await event.send(MessageChain().message(error))
@@ -347,13 +367,15 @@ class DSTCompanion(Star):
                 await self.send_reply(event, "机器人自检仅向 AstrBot 管理员开放。")
             else:
                 runtime = self.manager.mcp_server_runtime_view.get(self.server(False))
+                management = self.manager.mcp_server_runtime_view.get(self.server(True))
                 names = {t.name for t in runtime.client.tools} if runtime else set()
+                management_names = (
+                    {t.name for t in management.client.tools} if management else set()
+                )
                 required = {
                     "api_listRooms",
                     "api_listBotCapabilities",
                     "api_queryBotCapability",
-                    "api_runBotCapability",
-                    "api_getBotCapabilityResult",
                     "api_listRoomWorlds",
                     "api_listWorldStates",
                     "api_listRoomPlayers",
@@ -367,6 +389,16 @@ class DSTCompanion(Star):
                     + f" · 目录 {len(names)} 项\n权限：{actor.role} · 已配置 {len(actor.rooms)} 个房间\n"
                 )
                 text += "缺少能力：" + (", ".join(missing) if missing else "无")
+                if actor.role != "game-read":
+                    management_required = {
+                        "api_runBotCapability",
+                        "api_getBotCapabilityResult",
+                        "api_getJob",
+                    }
+                    text += "\n管理连接：" + ("已连接" if management else "未连接")
+                    text += " · 缺少能力：" + (
+                        ", ".join(sorted(management_required - management_names)) or "无"
+                    )
                 text += f"\n在途/排队 {len(self.gateway.pending)}/32 · 累计读取 {self.gateway.calls} · 合并 {self.gateway.merged}\n通知由事件播报插件投递，伴随助手不重复订阅。"
                 text += "\n有效配置：" + json.dumps(
                     self.settings.preview(str(event.unified_msg_origin)), ensure_ascii=False
@@ -380,6 +412,12 @@ class DSTCompanion(Star):
         if woken and explicit_ai(text):
             return
         selecting = self.state.handles(actor.key, text, quote, woken)
+        if woken and not selecting and (self.state.number(text) or text in {"上一页", "下一页"}):
+            event.stop_event()
+            await self.send_reply(
+                event, "没有匹配的有效菜单，或引用的菜单已被替换。请重新发送 菜单 后选择。"
+            )
+            return
         route = self.engine.parse(actor, text)
         if not selecting and (not woken or route is None):
             if (

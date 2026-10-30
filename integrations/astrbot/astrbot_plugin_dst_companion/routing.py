@@ -14,6 +14,7 @@ class Intent:
     room_name: str = ""
     capability: str = ""
     parameters: object = None
+    all_rooms: bool = False
 
 
 # Grammar ambiguity guard, NOT authorization or a Lua safety classifier.
@@ -40,18 +41,47 @@ def parse(text: str, aliases: dict[str, str]) -> Intent | None:
     if len(text) > 256 or DISCUSSION.search(text) or explicit_ai(text):
         return None
     text = normalize(text)
+    aliases = dict(aliases)
+    chinese = {
+        "一": "1",
+        "二": "2",
+        "三": "3",
+        "四": "4",
+        "五": "5",
+        "六": "6",
+        "七": "7",
+        "八": "8",
+        "九": "9",
+        "十": "10",
+    }
+    for word, number in chinese.items():
+        if number + "服" in aliases:
+            aliases.setdefault(word + "服", aliases[number + "服"])
     room = ""
+    room_name = ""
     for alias in sorted(aliases, key=len, reverse=True):
         if text.startswith(alias):
             room, text = aliases[alias], text[len(alias) :].strip()
             text = re.sub(r"^(?:现在|的)\s*", "", text)
             break
+    if not room:
+        match = re.match(r"^([一二三四五六七八九十]|[1-9][0-9]?)服\s*", text)
+        if match:
+            number = chinese.get(match[1], match[1])
+            room_name, text = number + "服", text[match.end() :].strip()
+            text = re.sub(r"^(?:现在|的)\s*", "", text)
+    if (room or room_name) and not text:
+        text = "信息"
     command = BY_PHRASE.get(text)
     if command:
         return Intent(
             command.kind,
             "我" if "我" in text and command.kind == "profile" else "他" if "他" in text else "",
             room,
+            room_name=room_name,
+            all_rooms=command.kind == "status"
+            and text in {"查房", "查服", "查群"}
+            and not (room or room_name),
         )
 
     # Display names are resolved exactly within the caller's current directory.
@@ -67,7 +97,7 @@ def parse(text: str, aliases: dict[str, str]) -> Intent | None:
 
     patterns = (
         ("network", r"(?:查网络|查询网络)\s+(.+)"),
-        ("inventory", r"(?:查背包|查询背包)\s+(.+)"),
+        ("inventory", r"(?:查背包|查询背包|查装备|查物资|查物品)\s+(.+)"),
         ("inventory", r"(?:查|查询)?\s*(.+?)(?:的)?背包(?:里有什么)?"),
         ("network", r"(?:查|查询)\s*(.+?)(?:的)?(?:网络|延迟|网络质量)"),
         ("profile", r"(?:查玩家|查询玩家|查人)\s*(.+)"),
@@ -80,7 +110,7 @@ def parse(text: str, aliases: dict[str, str]) -> Intent | None:
             target = match[1].strip().strip('“”"')
             if not target or COMPOUND.search(target):
                 return None
-            return Intent(kind, target, room)
+            return Intent(kind, target, room, room_name=room_name)
     # Writes require an exact configured alias, never a remembered fallback
     # after failing to resolve an explicit natural-language room description.
     for kind, verb in (("restart", "重启"), ("start", "启动"), ("stop", "停止")):

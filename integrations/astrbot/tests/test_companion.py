@@ -202,10 +202,12 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             (await self.engine.handle(actor("someone-else"), "1", quote="choice-123")).outcome,
             "pass",
         )
-        self.assertEqual((await self.engine.handle(actor(), "1")).outcome, "pass")
+        self.assertEqual(
+            (await self.engine.handle(actor(), "1", quote="older-menu")).outcome, "pass"
+        )
         # Resolve chosen KU, not the ambiguous nickname.
         self.gateway.candidates = [P]
-        result = await self.engine.handle(actor(), "1", quote="choice-123")
+        result = await self.engine.handle(actor(), "1")
         self.assertEqual(result.outcome, "matched")
         resolve = [args for name, args in self.gateway.calls if name == "api_resolveRoomPlayer"][-1]
         self.assertEqual(resolve["query"]["query"], "KU_example")
@@ -262,6 +264,25 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
 
 
 class StateTests(unittest.TestCase):
+    def test_plain_menu_choices_are_short_lived_user_scoped_and_reject_old_quotes(self):
+        from astrbot_plugin_dst_companion.routing import Intent
+
+        now = [100]
+        s = State(clock=lambda: now[0])
+        key = actor().key
+        seq = s.begin(key)
+        s.choose(key, Intent("help"), [P], "r1", seq)
+        s.choice_sent(key, "latest", seq)
+        self.assertTrue(s.handles(key, "1", "", False))
+        self.assertTrue(s.handles(key, "取消", "", False))
+        self.assertFalse(s.handles(actor("other").key, "1", "", False))
+        self.assertFalse(s.handles(key, "1", "old", True))
+        self.assertIsNone(s.selection(key, "1", "old", True))
+        self.assertFalse(s.handles(key, "²", "", True))
+        now[0] = 221
+        self.assertFalse(s.handles(key, "1", "", False))
+        self.assertIsNone(s.selection(key, "1", "latest", True))
+
     def test_old_candidate_and_late_receipt_cannot_replace_latest_selection(self):
         from astrbot_plugin_dst_companion.routing import Intent
 

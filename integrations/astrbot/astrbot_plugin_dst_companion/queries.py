@@ -40,7 +40,31 @@ class Queries:
             async with asyncio.TaskGroup() as tasks:
                 worlds = tasks.create_task(call("api_listRoomWorlds"))
                 states = tasks.create_task(call("api_listWorldStates"))
-            return fmt.status(worlds.result(), states.result()), target
+            parts = [fmt.status(worlds.result(), states.result())]
+            reads = []
+            if "players" in actor.visibility and "room.players" not in actor.disabled_capabilities:
+                reads.append(
+                    (
+                        "players",
+                        call(
+                            "api_listRoomPlayers",
+                            {"status": "online", "includeAccessLists": False, "limit": 100},
+                        ),
+                    )
+                )
+            if "mods" in actor.visibility and "room.mods" not in actor.disabled_capabilities:
+                reads.append(("mods", call("api_listRoomMods")))
+            values = await asyncio.gather(*(read for _, read in reads), return_exceptions=True)
+            for (section, _), data in zip(reads, values, strict=True):
+                if isinstance(data, Exception):
+                    parts.append(
+                        ("在线玩家" if section == "players" else "模组") + "：暂未读取成功"
+                    )
+                elif section == "players":
+                    parts.append(fmt.players(data))
+                else:
+                    parts.append(fmt.mods(data))
+            return "\n\n".join(parts), target
         if kind in {"players", "network"}:
             data = (
                 None
@@ -80,11 +104,7 @@ class Queries:
             return fmt.safe(target.name) + "\n" + fmt.inventory(data), target
         if kind == "mods":
             data = await call("api_listRoomMods")
-            rows = data.get("items", [])
-            text = "模组：\n" + "\n".join(fmt.safe(m.get("name") or m.get("id")) for m in rows[:12])
-            if len(rows) > 12:
-                text += "\n仅列前 12 个，请到面板查看完整列表。"
-            return text, target
+            return fmt.mods(data), target
         if kind == "backups":
             return fmt.backups(await call("api_listRoomBackupSchedules")), target
         raise QueryError("CAPABILITY_MISSING")

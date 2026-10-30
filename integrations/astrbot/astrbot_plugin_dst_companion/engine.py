@@ -96,6 +96,12 @@ class Engine:
                 "needs_selection", options(pending), choice=True, sequence=pending["sequence"]
             )
         selection = self.state.selection(actor.key, text.strip(), quote, woken)
+        if (
+            selection is None
+            and self.state.choice_matches(actor.key, quote)
+            and self.state.number(text)
+        ):
+            return Reply("handled_error", "序号不在当前页，请按最新菜单中的序号选择，或回复 取消。")
         context = self.state.quoted(actor.scope, quote) or self.state.target(actor.key)
         form = self.state.pending_form(actor.key)
         frozen = None
@@ -266,9 +272,12 @@ class Engine:
                     ordered.append(lookup[key])
             rows = ordered
         result = self.choose(actor, intent, rows, "", seq, "可用查询与管理", "menu")
-        result.text += (
-            note + "\n也可直接说：有哪些服、1服谁在线、查背包 昵称。复杂问题使用 AI: 问题。"
+        guidance = (
+            "其他问题可直接 @机器人询问，也可使用 AI: 问题。"
+            if not config or config["mode"] == "mixed"
+            else "复杂问题使用 AI: 问题。"
         )
+        result.text += note + "\n也可直接说：有哪些服、1服谁在线、查背包 昵称。" + guidance
         return result
 
     async def _perform(self, actor, intent, target, seq, deadline, frozen=None):
@@ -283,6 +292,36 @@ class Engine:
                 if rooms
                 else Reply("matched", "当前没有可访问的房间。")
             )
+        if intent.kind == "status" and intent.all_rooms:
+            if not rooms:
+                return Reply("matched", "当前没有可访问的房间。")
+            # Each room recipe already uses two reads, matching the per-user
+            # gateway limit. Do not turn a two-room overview into USER_BUSY.
+            semaphore = asyncio.Semaphore(1)
+
+            async def summary(room):
+                async with semaphore:
+                    try:
+                        text, _ = await self.queries.run(
+                            actor, "status", Target(room["id"]), None, deadline
+                        )
+                        text = fmt.safe(room.get("name")) + "\n" + text
+                        return (
+                            text
+                            if len(text) <= 480
+                            else text[:430] + "\n（概览已节选，请按房间名查询详情。）"
+                        )
+                    except (QueryError, TimeoutError):
+                        return (
+                            fmt.safe(room.get("name"))
+                            + "\n状态暂未读取成功，不能视为停服或无人在线。"
+                        )
+
+            parts = await asyncio.gather(*(summary(r) for r in rooms[:6]))
+            text = "\n\n────────────\n".join(parts)
+            if len(rooms) > 6:
+                text += "\n仅展示前 6 个房间，请按房间名查询其他房间。"
+            return Reply("matched", text)
         if intent.room_name:
             matches = [r for r in rooms if r.get("name") == intent.room_name]
             if len(matches) != 1:
