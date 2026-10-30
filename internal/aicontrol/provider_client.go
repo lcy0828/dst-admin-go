@@ -47,7 +47,7 @@ func providerStatusError(response *http.Response) error {
 		}
 	}
 	// Do not expose or log arbitrary provider response text; it may echo secrets.
-	log.Printf("[AI] provider_rejected status=%d error=%s", response.StatusCode, code)
+	log.Printf("[AI][ERROR] provider_rejected status=%d error=%s", response.StatusCode, code)
 	return &providerError{code: code}
 }
 
@@ -90,7 +90,7 @@ func requestProvider(ctx context.Context, request *http.Request) (*http.Response
 			if len(detail) > 256 {
 				detail = detail[:256]
 			}
-			log.Printf("[AI] provider_request attempt=%d bytes=%d duration_ms=%d error=%s cause=%q", attempt+1, request.ContentLength, time.Since(started).Milliseconds(), err, string(detail))
+			log.Printf("[AI][ERROR] provider_request attempt=%d bytes=%d duration_ms=%d error=%s cause=%q", attempt+1, request.ContentLength, time.Since(started).Milliseconds(), err, string(detail))
 			retry = ctx.Err() == nil
 		} else {
 			if response.StatusCode != http.StatusOK || time.Since(started) >= 10*time.Second {

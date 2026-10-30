@@ -95,7 +95,7 @@ func worldStateFailure(c *gin.Context, err error) {
 	case errors.Is(err, rooms.ErrRoomNotFound), errors.Is(err, rooms.ErrWorldNotFound):
 		NotFound(c)
 	default:
-		log.Printf("[WorldStateHTTP] request_id=%s method=%s path=%s error=%v", RequestID(c), c.Request.Method, c.Request.URL.Path, err)
+		log.Printf("[WorldStateHTTP][ERROR] request_id=%s method=%s path=%s error=%v", RequestID(c), c.Request.Method, c.Request.URL.Path, err)
 		Failure(c, http.StatusInternalServerError, "WORLD_STATE_FAILED", "世界状态操作失败", gin.H{"reason": err.Error()})
 	}
 }

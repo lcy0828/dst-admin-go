@@ -254,7 +254,7 @@ func playerFailure(c *gin.Context, err error) {
 	case errors.Is(err, rooms.ErrRoomNotFound), errors.Is(err, rooms.ErrWorldNotFound):
 		Failure(c, http.StatusNotFound, "RESOURCE_NOT_FOUND", "房间或世界不存在", nil)
 	default:
-		log.Printf("[PlayersHTTP] request_id=%s method=%s path=%s error=%v", RequestID(c), c.Request.Method, c.Request.URL.Path, err)
+		log.Printf("[PlayersHTTP][ERROR] request_id=%s method=%s path=%s error=%v", RequestID(c), c.Request.Method, c.Request.URL.Path, err)
 		Failure(c, http.StatusInternalServerError, "PLAYER_OPERATION_FAILED", "玩家操作失败", nil)
 	}
 }

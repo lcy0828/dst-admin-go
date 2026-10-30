@@ -301,7 +301,11 @@ func (p *RemotePublisher) PublishModOverrides(ctx context.Context, roomID string
 	for index, update := range updates {
 		started := time.Now()
 		err := writers[index].WriteModOverrides(ctx, update.Target, publicationOperation(lease, publicationID, "mod-write", index, 0), update.ExpectedSHA256, update.Content)
-		log.Printf("[ModConfigWrite] room_id=%s world_id=%s target_id=%s installation_id=%s bytes=%d duration_ms=%d error=%v", roomID, update.Target.WorldID, update.Target.TargetID, update.Target.InstallationID, len(update.Content), time.Since(started).Milliseconds(), err)
+		level := "INFO"
+		if err != nil {
+			level = "ERROR"
+		}
+		log.Printf("[ModConfigWrite][%s] room_id=%s world_id=%s target_id=%s installation_id=%s bytes=%d duration_ms=%d error=%v", level, roomID, update.Target.WorldID, update.Target.TargetID, update.Target.InstallationID, len(update.Content), time.Since(started).Milliseconds(), err)
 		if err != nil {
 			return published, fmt.Errorf("已保存 %d 个世界，写入 %s 的 modoverrides.lua 失败: %w", published, update.Target.Shard, err)
 		}

@@ -25,6 +25,7 @@ var debugRoot string
 var debugCheckAt, debugUntil time.Time
 var legacyTime = regexp.MustCompile(`^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)? `)
 var legacyIDs = regexp.MustCompile(`(?:^|\s)(request_id|job_id|operation_id|room_id|world_id)=([^\s]+)`)
+var legacyLevelPrefix = regexp.MustCompile(`(?i)^(DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|PANIC|调试|信息|警告|错误)(?:\s|:|：|$)`)
 
 // Old launchers supervise updates but do not persist child output. A child
 // must retain its own writer unless the parent explicitly advertises capture.
@@ -154,15 +155,7 @@ func (standardWriter) Write(p []byte) (int, error) {
 }
 func legacyEntry(raw string) shared.ServiceLogEntry {
 	raw = strings.TrimSpace(legacyTime.ReplaceAllString(raw, ""))
-	e := shared.ServiceLogEntry{Level: "info", Message: raw}
-	upper := strings.ToUpper(raw)
-	if strings.Contains(upper, "ERROR") || strings.HasPrefix(raw, "panic:") || strings.Contains(raw, "失败") {
-		e.Level = "error"
-	} else if strings.Contains(upper, "WARN") {
-		e.Level = "warn"
-	} else if strings.Contains(upper, "DEBUG") {
-		e.Level = "debug"
-	}
+	e := shared.ServiceLogEntry{Level: legacyLevel(raw), Message: raw}
 	for _, m := range legacyIDs.FindAllStringSubmatch(raw, -1) {
 		switch m[1] {
 		case "request_id":
@@ -178,6 +171,59 @@ func legacyEntry(raw string) shared.ServiceLogEntry {
 		}
 	}
 	return e
+}
+
+func legacyLevel(message string) string {
+	// Only leading labels describe severity. A command, path or quoted output
+	// may contain ERROR/WARN/DEBUG without reporting a failed operation.
+	head := message
+	level := ""
+	for strings.HasPrefix(head, "[") {
+		end := strings.IndexByte(head, ']')
+		if end < 0 {
+			break
+		}
+		label := strings.Fields(head[1:end])
+		if len(label) > 0 {
+			if explicit := legacyLevelLabel(label[len(label)-1]); explicit != "" {
+				level = explicit
+			}
+		}
+		head = strings.TrimSpace(head[end+1:])
+	}
+	if level != "" {
+		return level
+	}
+	if label := legacyLevelPrefix.FindStringSubmatch(head); label != nil {
+		return legacyLevelLabel(label[1])
+	}
+	// Older callers report an unlabelled failure before the first field
+	// separator. Values after it must never promote a successful log entry.
+	if end := strings.IndexAny(head, ":：,，\r\n"); end >= 0 {
+		head = head[:end]
+	}
+	head = strings.TrimSpace(head)
+	if strings.HasSuffix(head, "失败") || strings.HasSuffix(head, "错误") {
+		return "error"
+	}
+	return "info"
+}
+
+func legacyLevelLabel(label string) string {
+	switch strings.ToLower(label) {
+	case "debug", "调试":
+		return "debug"
+	case "info", "信息":
+		return "info"
+	case "warn", "warning", "警告":
+		return "warn"
+	case "error", "panic", "错误":
+		return "error"
+	case "fatal":
+		return "fatal"
+	default:
+		return ""
+	}
 }
 
 // ChildWriter accepts raw stdout/stderr and structured application events. Its

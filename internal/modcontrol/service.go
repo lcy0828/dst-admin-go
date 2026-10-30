@@ -372,7 +372,11 @@ func (s *Service) applyPreparedOverrides(ctx context.Context, prepared proposal,
 	result := mods.ConfigApplyResult{WorldIDs: append([]string(nil), worldIDs...), Revisions: make(map[string]string, len(worldIDs))}
 	preparedAt := time.Now()
 	result.PublishedTargets, err = s.configuration.PublishModOverrides(ctx, prepared.roomID, snapshot.overrides)
-	log.Printf("[ModConfig] room_id=%s mod_id=%s action=%s worlds=%d prepare_ms=%d publish_ms=%d total_ms=%d error=%v", prepared.roomID, prepared.modID, prepared.action, len(worldIDs), preparedAt.Sub(started).Milliseconds(), time.Since(preparedAt).Milliseconds(), time.Since(started).Milliseconds(), err)
+	level := "INFO"
+	if err != nil {
+		level = "ERROR"
+	}
+	log.Printf("[ModConfig][%s] room_id=%s mod_id=%s action=%s worlds=%d prepare_ms=%d publish_ms=%d total_ms=%d error=%v", level, prepared.roomID, prepared.modID, prepared.action, len(worldIDs), preparedAt.Sub(started).Milliseconds(), time.Since(preparedAt).Milliseconds(), time.Since(started).Milliseconds(), err)
 	if err != nil {
 		var conflict *runtimefiles.ConfigurationConflictError
 		if errors.As(err, &conflict) {

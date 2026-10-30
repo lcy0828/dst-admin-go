@@ -263,7 +263,7 @@ func (h *ModHandler) refreshInstallationUpdateState(ctx context.Context, targetI
 		}
 		result.Message = message
 		result.Warnings = append(result.Warnings, fmt.Sprintf("关联房间的更新检查未启动: %v", err))
-		log.Printf("[ModUpdates] target_id=%s installation_id=%s content_updated=true check_error=%v", targetID, installationID, err)
+		log.Printf("[ModUpdates][WARN] target_id=%s installation_id=%s content_updated=true check_error=%v", targetID, installationID, err)
 	}
 	return result, nil
 }
@@ -679,7 +679,7 @@ func (h *ModHandler) submit(c *gin.Context, kind, roomID, worldID, targetID, tar
 			ctx = attachModJobProgress(ctx, h.jobs, job.ID)
 			result, actionErr := action(ctx, job.ID)
 			if actionErr != nil {
-				log.Printf("[ModJob] request_id=%s job_id=%s kind=%s room_id=%s status=failed duration_ms=%d error=%v", requestID, job.ID, kind, roomID, time.Since(started).Milliseconds(), actionErr)
+				log.Printf("[ModJob][ERROR] request_id=%s job_id=%s kind=%s room_id=%s status=failed duration_ms=%d error=%v", requestID, job.ID, kind, roomID, time.Since(started).Milliseconds(), actionErr)
 				report(jobs.TargetResult{TargetID: targetID, Status: jobs.StatusFailed, Error: modJobError(actionErr)})
 				return nil
 			}
@@ -901,7 +901,7 @@ func modFailure(c *gin.Context, err error) {
 	case errors.Is(err, rooms.ErrInvalidID), errors.Is(err, rooms.ErrUnsafePath):
 		Failure(c, http.StatusBadRequest, "INVALID_MOD_RESOURCE", "Mod 资源路径无效", nil)
 	default:
-		log.Printf("[ModsHTTP] request_id=%s method=%s path=%s error=%v", RequestID(c), c.Request.Method, c.Request.URL.Path, err)
+		log.Printf("[ModsHTTP][ERROR] request_id=%s method=%s path=%s error=%v", RequestID(c), c.Request.Method, c.Request.URL.Path, err)
 		Failure(c, http.StatusInternalServerError, "MOD_OPERATION_FAILED", "Mod 操作失败", gin.H{"reason": err.Error()})
 	}
 }
