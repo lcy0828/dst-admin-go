@@ -328,6 +328,10 @@ func (b *Bridge) validLifecycleHealth(worldPath string, health Health, startedAt
 }
 
 func (b *Bridge) ExecuteCommand(ctx context.Context, roomID, worldID string, request CommandRequest) (CommandReceipt, error) {
+	return b.executeCommand(ctx, roomID, worldID, request, "")
+}
+
+func (b *Bridge) executeCommand(ctx context.Context, roomID, worldID string, request CommandRequest, queryInstance string) (CommandReceipt, error) {
 	if err := validateCommandRequest(request); err != nil {
 		return CommandReceipt{}, err
 	}
@@ -337,7 +341,14 @@ func (b *Bridge) ExecuteCommand(ctx context.Context, roomID, worldID string, req
 	}
 	lock := b.worldLock(worldPath)
 	finishQueue := requesttiming.Start(ctx, "command.queue")
-	err = lockRuntimeCommand(ctx, lock)
+	if queryInstance != "" {
+		if !lock.TryLock() {
+			finishQueue()
+			return CommandReceipt{}, ErrRuntimeCommandBusy
+		}
+	} else {
+		err = lockRuntimeCommand(ctx, lock)
+	}
 	finishQueue()
 	if err != nil {
 		return CommandReceipt{}, err
@@ -345,7 +356,11 @@ func (b *Bridge) ExecuteCommand(ctx context.Context, roomID, worldID string, req
 	defer lock.Unlock()
 
 	finishPreflight := requesttiming.Start(ctx, "command.preflight")
-	err = b.commandReady(ctx, room, world)
+	if queryInstance != "" {
+		err = b.queryReady(ctx, roomID, worldID, queryInstance)
+	} else {
+		err = b.commandReady(ctx, room, world)
+	}
 	finishPreflight()
 	if err != nil {
 		return CommandReceipt{}, err
@@ -374,11 +389,22 @@ func (b *Bridge) ExecuteCommand(ctx context.Context, roomID, worldID string, req
 	if err != nil {
 		return CommandReceipt{}, err
 	}
+	if queryInstance != "" {
+		if !queryHealthMatches(queryInstance, health) {
+			return CommandReceipt{}, ErrRuntimeUnavailable
+		}
+		if err := ctx.Err(); err != nil {
+			return CommandReceipt{}, err
+		}
+	}
 	sentAt := b.now().UTC()
 	finishSend := requesttiming.Start(ctx, "command.send")
 	err = b.sender.Send(ctx, room.DirectoryName, world.DirectoryName, script)
 	finishSend()
 	if err != nil {
+		if queryInstance != "" {
+			return CommandReceipt{}, unconfirmedCommand(request, err, nil)
+		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return CommandReceipt{}, unconfirmedCommand(request, err, nil)
 		}

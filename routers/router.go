@@ -75,6 +75,7 @@ import (
 	"dont/internal/systemstatus"
 	"dont/internal/topology"
 	"dont/internal/worldmap"
+	"dont/internal/worldquery"
 	"dont/internal/worldstate"
 	"dont/models"
 	"dont/pkg/setting"
@@ -801,6 +802,11 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	consoleHandler := httpapi.NewConsoleHandler(commandService)
+	worldQueryStore := worldquery.NewStore(models.DB(), tablePrefix)
+	if err := worldQueryStore.Migrate(); err != nil {
+		return nil, err
+	}
+	worldQueryService := worldquery.New(roomService, distributedRuntimeBridge, worldQueryStore)
 	backupStore := backupapi.NewStore(models.DB(), tablePrefix)
 	if err := backupStore.Migrate(); err != nil {
 		return nil, err
@@ -1504,6 +1510,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		chatLogHandler.Register(v2)
 		structuredLogHandler.Register(v2)
 		consoleHandler.Register(v2)
+		httpapi.NewWorldQueryHandler(worldQueryService, aiStore).Register(v2)
 		playerHandler.Register(v2)
 		worldStateHandler.Register(v2)
 		performanceHandler.Register(v2)

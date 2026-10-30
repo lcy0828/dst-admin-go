@@ -103,6 +103,15 @@ func (r *Router) DriverTarget(ctx context.Context, roomID, worldID string) (Driv
 	return endpoint.Driver, target, err
 }
 
+// QueryPlacementIdentity is an observation of the applied execution target.
+func (r *Router) QueryPlacementIdentity(ctx context.Context, roomID, worldID string) (string, error) {
+	_, target, err := r.EndpointTarget(ctx, roomID, worldID)
+	if err != nil {
+		return "", err
+	}
+	return target.TargetID + "/" + target.InstallationID, nil
+}
+
 func (r *Router) EndpointTarget(ctx context.Context, roomID, worldID string) (RuntimeEndpoint, Target, error) {
 	defer requesttiming.Start(ctx, "routing.total")()
 	finishApplied := requesttiming.Start(ctx, "routing.applied_placement")

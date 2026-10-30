@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "684a9fd96717fefb4d6c4ebd685a7060de8c374c64c76fce97a03a288009952b",
+  "operationsSHA256": "8e49693f15bbeafe07ceef9dd7dc0da4d3b2a8a29386c7d64318850cf0a4917c",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -2021,6 +2021,21 @@
       "title": "Read desired and applied Shard placement with whole-node capacity projections"
     },
     {
+      "operationId": "getRoomWorldQueryRun",
+      "method": "GET",
+      "path": "/rooms/{roomId}/worlds/{worldId}/query-runs/{runId}",
+      "transport": "json",
+      "tags": [
+        "query",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read this caller's query result or its original late receipt"
+    },
+    {
       "operationId": "getRuntimeInfrastructure",
       "method": "GET",
       "path": "/runtime-infrastructure",
@@ -3537,6 +3552,22 @@
       "risk": "high",
       "runtime": "any",
       "title": "Permanently remove a deleted world"
+    },
+    {
+      "operationId": "queryRoomWorld",
+      "method": "GET",
+      "path": "/rooms/{roomId}/worlds/{worldId}/queries/{queryId}",
+      "transport": "json",
+      "tags": [
+        "player",
+        "query",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "shard-ready",
+      "title": "Run a bounded server-whitelisted read-only game query"
     },
     {
       "operationId": "queryServiceLogs",

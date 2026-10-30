@@ -371,6 +371,10 @@ func (b *DistributedBridge) refreshSnapshotsLocked(ctx context.Context, roomID, 
 var ErrRuntimeCommandBusy = errors.New("world is processing another runtime operation")
 
 func (b *DistributedBridge) ExecuteCommand(ctx context.Context, roomID, worldID string, request CommandRequest) (CommandReceipt, error) {
+	return b.executeCommand(ctx, roomID, worldID, request, "")
+}
+
+func (b *DistributedBridge) executeCommand(ctx context.Context, roomID, worldID string, request CommandRequest, queryInstance string) (CommandReceipt, error) {
 	if err := validateCommandRequest(request); err != nil {
 		return CommandReceipt{}, err
 	}
@@ -378,7 +382,7 @@ func (b *DistributedBridge) ExecuteCommand(ctx context.Context, roomID, worldID 
 	// Optional catalogue browsing must not queue behind gameplay operations or
 	// other browsers. The caller can explicitly try again when the world is free.
 	finishQueue := requesttiming.Start(ctx, "command.queue")
-	if request.Action == "catalog.entities" {
+	if request.Action == "catalog.entities" || queryInstance != "" {
 		if !lock.TryLock() {
 			finishQueue()
 			return CommandReceipt{}, ErrRuntimeCommandBusy
@@ -395,7 +399,26 @@ func (b *DistributedBridge) ExecuteCommand(ctx context.Context, roomID, worldID 
 		return CommandReceipt{}, err
 	}
 	finishPreflight := requesttiming.Start(ctx, "command.preflight")
-	health, err := b.requireModule(ctx, roomID, worldID, "commands")
+	var health Health
+	var err error
+	if queryInstance != "" {
+		var identity string
+		identity, err = b.QueryIdentity(ctx, roomID, worldID)
+		if err == nil && identity != queryInstance {
+			err = ErrRuntimeUnavailable
+		}
+		if err == nil {
+			health, err = b.Health(ctx, roomID, worldID)
+		}
+		if err == nil && !queryHealthMatches(queryInstance, health) {
+			err = ErrRuntimeUnavailable
+		}
+		if err == nil {
+			err = readyQueryModule(health, b.now().UTC())
+		}
+	} else {
+		health, err = b.requireModule(ctx, roomID, worldID, "commands")
+	}
 	finishPreflight()
 	if err != nil {
 		return CommandReceipt{}, err
@@ -412,6 +435,11 @@ func (b *DistributedBridge) ExecuteCommand(ctx context.Context, roomID, worldID 
 		return CommandReceipt{}, fmt.Errorf("%w: invalid command payload", ErrRuntimeRequestInvalid)
 	}
 	command, document := commandDelivery(request, payload)
+	if queryInstance != "" {
+		if err := ctx.Err(); err != nil {
+			return CommandReceipt{}, err
+		}
+	}
 	sentAt := b.now().UTC()
 	finishSend := requesttiming.Start(ctx, "command.send")
 	delivery, sendErr := b.runtime.SendID(ctx, roomID, worldID, shared.RuntimeConsoleRequest{
@@ -422,12 +450,12 @@ func (b *DistributedBridge) ExecuteCommand(ctx context.Context, roomID, worldID 
 		// A rejected lease proves dispatch did not begin. This is distinct
 		// from a transport cancellation after delivery may have started.
 		if errors.Is(err, operationlease.ErrBusy) {
-			if request.Action == "catalog.entities" {
+			if request.Action == "catalog.entities" || queryInstance != "" {
 				return CommandReceipt{}, fmt.Errorf("%w: %w", ErrRuntimeCommandBusy, err)
 			}
 			return CommandReceipt{}, fmt.Errorf("send runtime command: %w", err)
 		}
-		if delivery.Outcome == shared.RuntimeOutcomeSent || delivery.Outcome == shared.RuntimeOutcomeUnknown || delivery.Outcome == shared.RuntimeOutcomeConfirmed || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if queryInstance != "" || delivery.Outcome == shared.RuntimeOutcomeSent || delivery.Outcome == shared.RuntimeOutcomeUnknown || delivery.Outcome == shared.RuntimeOutcomeConfirmed || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return CommandReceipt{}, unconfirmedCommand(request, err, nil)
 		}
 		return CommandReceipt{}, fmt.Errorf("send runtime command: %w", err)

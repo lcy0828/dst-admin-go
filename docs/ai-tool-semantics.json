@@ -9,6 +9,46 @@
     "note": "Adapted and corrected against the shipped API. Domain tiers are not used for ranking. New operations are maintained here."
   },
   "operations": {
+    "queryRoomWorld": {
+      "purpose": "为普通用户执行固定白名单只读游戏查询：世界信息、当前分片在线玩家、按 Prefab 统计实体。只接受结构化参数，不能执行自定义命令或 Lua。",
+      "actions": [
+        "查询世界信息",
+        "查询分片在线玩家",
+        "统计分片实体数量"
+      ],
+      "queries": [
+        "地面有多少个蜘蛛巢",
+        "普通用户查询当前季节和在线玩家",
+        "洞穴里的模组实体有多少个"
+      ],
+      "terms": [
+        "只读查询",
+        "实体计数",
+        "prefab",
+        "蜘蛛巢",
+        "AstrBot",
+        "普通用户"
+      ],
+      "resultNotes": "必须检查 status、complete 和 observedAt。partial 仅为下界；无输出不是零，sent 不是执行成功；uncertain 仅补读原回执，不自动重发。"
+    },
+    "getRoomWorldQueryRun": {
+      "purpose": "读取当前接入身份的只读查询结果，可补读两分钟内原请求的迟到回执，不重新执行查询，不读取管理员控制台命令。",
+      "actions": [
+        "读取只读查询结果",
+        "补读原查询回执"
+      ],
+      "queries": [
+        "刚才蜘蛛巢统计有结果了吗",
+        "查询超时后只检查原回执"
+      ],
+      "terms": [
+        "查询回执",
+        "迟到输出",
+        "只读查询结果",
+        "不重发"
+      ],
+      "resultNotes": "refresh=true 只读取原回执。缺失、过期或不匹配的结果仍不确定，不能解释成数量为零。"
+    },
     "activateModPublication": {
       "purpose": "启用已提交的模组发布方案：按发布前的分片运行状态重启地面与洞穴分片，并确认各分片成功加载新模组。",
       "actions": [

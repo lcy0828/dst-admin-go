@@ -72,7 +72,7 @@ func isPlacementAwareRuntimePath(value string) bool {
 	}
 	if len(parts) >= 4 && parts[1] == "worlds" {
 		switch parts[3] {
-		case "commands", "raw-commands", "logs":
+		case "commands", "raw-commands", "logs", "queries", "query-runs":
 			return true
 		}
 	}

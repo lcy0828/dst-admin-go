@@ -3248,6 +3248,80 @@ paths:
                 $ref: "#/components/schemas/CommandRunEnvelope"
         "404":
           $ref: "#/components/responses/NotFound"
+  /rooms/{roomId}/worlds/{worldId}/queries/{queryId}:
+    parameters:
+      - $ref: '#/components/parameters/RoomID'
+      - $ref: '#/components/parameters/WorldID'
+      - name: queryId
+        in: path
+        required: true
+        schema: {type: string, enum: [world_info, online_players, entity_count]}
+    get:
+      tags: [WorldState, Players]
+      operationId: queryRoomWorld
+      summary: Run a bounded server-whitelisted read-only game query
+      description: >-
+        Safe game-query tool for ordinary AstrBot users. Accepts only roomId/worldId/queryId
+        in path and prefab in query for entity_count. Never accepts Lua, command IDs,
+        functions, flags or custom command definitions. world_info and online_players
+        accept no extra parameters. Uses fresh current-instance observations or fixed,
+        bounded synchronous read-only templates. Does not start, repair or refresh Runtime.
+        entity_count counts registered entities in this shard, including sleeping entities;
+        it does not count uninstantiated save objects or other shards. Check business status
+        and complete: sent, missing output and uncertain are never success or zero. Partial
+        counts have count=null and lowerBound. Never replay uncertain queries; read their
+        original queryRunId. Credentials keep their existing scope; discovery access=read
+        is not a credential restriction. Do not grant ordinary users call_api or console tools.
+      x-dst-tool: {readOnly: true, destructive: false, risk: low, runtime: shard-ready, tags: [query]}
+      parameters:
+        - name: prefab
+          in: query
+          description: Required only for entity_count; exact case-sensitive Prefab identifier, including mod Prefabs. Forbidden for other queryId values.
+          schema: {type: string, minLength: 1, maxLength: 80, pattern: '^[A-Za-z0-9_]{1,80}$'}
+      responses:
+        '200':
+          description: Structured query evidence; HTTP success alone does not establish a complete result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WorldQueryEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '422': {description: Unknown query, invalid resource ID, missing or unexpected parameters}
+        '429': {description: Query rate or concurrency limit; no new query dispatched}
+        '503': {description: Query storage or service is unavailable}
+  /rooms/{roomId}/worlds/{worldId}/query-runs/{runId}:
+    parameters:
+      - $ref: '#/components/parameters/RoomID'
+      - $ref: '#/components/parameters/WorldID'
+      - name: runId
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    get:
+      tags: [WorldState]
+      operationId: getRoomWorldQueryRun
+      summary: Read this caller's query result or its original late receipt
+      description: >-
+        Reads only read-only query records belonging to this credential, room and world;
+        never exposes administrator console runs or scripts. refresh=true performs one
+        bounded read of the original Runtime receipt within 2 minutes. It never sends Lua,
+        repairs Runtime or replays the query. Expired, missing or invalid evidence remains
+        uncertain, never count=0. AstrBot users sharing one credential share that identity.
+      x-dst-tool: {readOnly: true, destructive: false, risk: low, tags: [query]}
+      parameters:
+        - name: refresh
+          in: query
+          description: Read the original late receipt once without executing anything again.
+          schema: {type: boolean, default: false}
+      responses:
+        '200':
+          description: Query record and receipt evidence
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WorldQueryEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '429': {description: Query read limit reached}
   /rooms/{roomId}/worlds/{worldId}/commands:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -9784,6 +9858,86 @@ components:
           type: string
           format: date-time
           description: DST Runtime 产生执行证据或恢复探针结果的时间。
+    WorldQueryEntityData:
+      type: object
+      additionalProperties: false
+      required: [prefab, count]
+      properties:
+        prefab: {type: string, maxLength: 80}
+        count: {type: [integer, 'null'], minimum: 0, maximum: 100000}
+        lowerBound: {type: integer, minimum: 0, maximum: 100000}
+    WorldQueryPlayersData:
+      type: object
+      additionalProperties: false
+      required: [players, count]
+      properties:
+        count: {type: integer, minimum: 0, maximum: 64}
+        players:
+          type: array
+          maxItems: 64
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, name, prefab]
+            properties:
+              id: {type: string, minLength: 1, maxLength: 80}
+              name: {type: string, maxLength: 192}
+              prefab: {type: string, maxLength: 80}
+    WorldQueryWorldData:
+      type: object
+      additionalProperties: false
+      required: [cycles, season, phase, temperature, israining, issnowing]
+      properties:
+        cycles: {type: [integer, 'null']}
+        season: {type: [string, 'null'], maxLength: 64}
+        phase: {type: [string, 'null'], maxLength: 64}
+        temperature: {type: [number, 'null']}
+        israining: {type: [boolean, 'null']}
+        issnowing: {type: [boolean, 'null']}
+    WorldQueryResult:
+      type: object
+      additionalProperties: false
+      required: [queryId, roomId, worldId, status, source, cached, complete, transportOutcome, executionOutcome, resultState, mayHaveExecuted, data, error]
+      properties:
+        queryRunId: {type: string, format: uuid}
+        queryId: {type: string, enum: [world_info, online_players, entity_count]}
+        roomId: {type: string}
+        worldId: {type: string}
+        status: {type: string, enum: [succeeded, partial, failed, timed_out, uncertain, unavailable]}
+        source: {type: string, enum: [snapshot, runtime]}
+        cached: {type: boolean}
+        complete: {type: boolean}
+        transportOutcome: {type: string, enum: [not_required, not_sent, sent, unknown]}
+        executionOutcome: {type: string, enum: [not_required, not_executed, confirmed, rejected, unknown]}
+        resultState: {type: string, enum: [unconfirmed, output, output_unavailable, no_output, failed]}
+        mayHaveExecuted: {type: boolean}
+        observedAt: {type: string, format: date-time}
+        scannedEntities: {type: integer, minimum: 0, maximum: 100000}
+        scanLimit: {type: integer, const: 100000}
+        receiptCheck: {type: string, enum: [pending, expired, unavailable, not_found, found]}
+        runtimeCode: {type: string, maxLength: 64, description: Original confirmed Runtime receipt code, when available}
+        data:
+          oneOf:
+            - {$ref: '#/components/schemas/WorldQueryEntityData'}
+            - {$ref: '#/components/schemas/WorldQueryPlayersData'}
+            - {$ref: '#/components/schemas/WorldQueryWorldData'}
+            - {type: 'null'}
+        error:
+          oneOf:
+            - type: 'null'
+            - type: object
+              additionalProperties: false
+              required: [code, message]
+              properties:
+                code: {type: string}
+                message: {type: string}
+    WorldQueryEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: {$ref: '#/components/schemas/WorldQueryResult'}
+        error: {type: 'null'}
+        meta: {$ref: '#/components/schemas/Meta'}
     CommandRunEnvelope:
       type: object
       required: [data, error, meta]
