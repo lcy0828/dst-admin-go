@@ -421,7 +421,7 @@ func (s *Service) validateSend(roomID, message string, source Source) (rooms.Roo
 
 func validSource(source Source) bool {
 	switch source {
-	case SourceManual, SourceRoomStop, SourceRoomRestart, SourceGameUpdate, SourceModSync, SourceAutomation:
+	case SourceManual, SourceRoomStop, SourceRoomRestart, SourceGameUpdate, SourceModSync, SourceAutomation, SourceBackup:
 		return true
 	default:
 		return false
@@ -429,6 +429,9 @@ func validSource(source Source) bool {
 }
 
 func lifecycleMessage(action, trigger string) (Source, string, bool) {
+	if action == "backup" {
+		return SourceBackup, "停服备份，完成后自动恢复", true
+	}
 	switch strings.TrimSpace(trigger) {
 	case string(SourceGameUpdate):
 		if action == "restart" {

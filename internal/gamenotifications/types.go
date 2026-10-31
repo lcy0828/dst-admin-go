@@ -27,6 +27,7 @@ const (
 	SourceGameUpdate  Source = "game_update"
 	SourceModSync     Source = "mod_sync"
 	SourceAutomation  Source = "automation"
+	SourceBackup      Source = "backup"
 )
 
 type Status string

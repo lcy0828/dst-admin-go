@@ -10,7 +10,15 @@ When an update is available, the system actively checks every affected room. Onl
 
 In **Backups**, select a room to add independent backup schedules, edit their time and time zone, or pause them. Use five-field Cron (minute, hour, day, month, weekday), or six fields with seconds first. For example, `0 4 * * *` runs daily at 04:00; `0 */6 * * *` runs every six hours. **Tasks and history** opens the execution records.
 
-Scheduled backups include every world in the room. Local, remote, and split rooms all use hot snapshots when all worlds are running. Partially running rooms briefly stop and resume their previously running worlds; stopped worlds remain stopped. A failed hot backup records an error without automatically switching to a stop-and-backup operation. Schedules can retain the newest 1–100 automatic snapshots; new schedules default to 7. Leave retention blank to disable cleanup. Cleanup runs only after a successful backup and preserves manual, protection, and recovery-referenced backups. Retention covers snapshots from all schedules in the room, so use the same count across schedules. Legacy ZIP snapshots and new backup sets are counted separately. Existing schedules without retention keep their previous behavior.
+Scheduled backups include every world in the room. Local, remote, and split rooms support the same three methods:
+
+- **Automatic:** back up online when every world runs; otherwise stop and resume the previously running worlds. Worlds already stopped remain stopped.
+- **Keep running:** every world must run and complete a coordinated save. Failure records an error and never falls back to stopping worlds.
+- **Stop and back up:** stop the running worlds, verify the backup, then resume those worlds. Use the room’s maintenance announcement policy before stopping: 30 seconds by default, skipped when the room is confirmed empty or announcements are disabled.
+
+Existing tasks without a method remain automatic; changing other settings preserves the current method. The API `configureRoomBackupSchedule` accepts optional `mode`; generic `backup.create` tasks use `parameters.mode`. Valid values are `automatic`, `hot-consistent`, and `cold-consistent`. Legacy interval policies cannot change method; pause an old policy separately when replacing it with a new schedule.
+
+ Schedules can retain the newest 1–100 automatic snapshots; new schedules default to 7. Leave retention blank to disable cleanup. Cleanup runs only after a successful backup and preserves manual, protection, and recovery-referenced backups. Retention covers snapshots from all schedules in the room, so use the same count across schedules. Legacy ZIP snapshots and new backup sets are counted separately. Existing schedules without retention keep their previous behavior.
 
 The management service runs schedules even when the browser is closed. Tasks do not run while that service is stopped. Cancellation or timeout stops cleanup before the next backup. A deletion already in progress finishes its commit; deleted backups are not automatically restored.
 

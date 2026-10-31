@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"dont/internal/backups"
+	"dont/internal/distributedbackup"
 	"dont/internal/rooms"
 	"github.com/google/uuid"
 )
@@ -19,10 +20,11 @@ type BackupScheduleDefaults struct {
 	Schedule string `json:"schedule"`
 	Timezone string `json:"timezone"`
 	Keep     int    `json:"keep"`
+	Mode     string `json:"mode"`
 }
 
 func DefaultBackupSchedule() BackupScheduleDefaults {
-	return BackupScheduleDefaults{Name: "房间定时备份", Schedule: "0 4 * * *", Timezone: "Asia/Shanghai", Keep: 7}
+	return BackupScheduleDefaults{Name: "房间定时备份", Schedule: "0 4 * * *", Timezone: "Asia/Shanghai", Keep: 7, Mode: distributedbackup.ModeAutomatic}
 }
 
 // Omitted fields preserve the selected plan. Defaults only apply to creation.
@@ -35,6 +37,7 @@ type BackupScheduleInput struct {
 	Schedule         *string `json:"schedule,omitempty"`
 	Timezone         *string `json:"timezone,omitempty"`
 	Keep             *int    `json:"keep,omitempty"`
+	Mode             *string `json:"mode,omitempty"`
 	ClearRetention   bool    `json:"clearRetention,omitempty"`
 }
 
@@ -67,6 +70,9 @@ func (s *Service) ConfigureBackupSchedule(roomID string, input BackupScheduleInp
 	if input.CreateNew && input.TaskID != "" || input.ClearRetention && input.Keep != nil || input.Keep != nil && (*input.Keep < 1 || *input.Keep > 100) {
 		return BackupScheduleResult{}, ErrInvalidInput
 	}
+	if input.Mode != nil && !validBackupMode(*input.Mode) {
+		return BackupScheduleResult{}, &FieldError{Fields: map[string]string{"mode": "请选择自动、不停服或停服后备份"}}
+	}
 	tasks, err := s.Tasks(roomID)
 	if err != nil {
 		return BackupScheduleResult{}, err
@@ -85,6 +91,9 @@ func (s *Service) ConfigureBackupSchedule(roomID string, input BackupScheduleInp
 		if policy.Enabled && input.TaskID == "" && !input.CreateNew {
 			if len(candidates) > 0 {
 				return BackupScheduleResult{}, &FieldError{Fields: map[string]string{"taskId": "存在旧快照策略和定时备份任务，请选择要修改的计划"}}
+			}
+			if input.Mode != nil {
+				return BackupScheduleResult{}, &FieldError{Fields: map[string]string{"mode": "旧计划不支持选择备份方式，请先暂停旧计划，再添加定时备份"}}
 			}
 			if input.Schedule != nil || input.Timezone != nil || input.Name != nil || input.ClearRetention {
 				return BackupScheduleResult{}, &FieldError{Fields: map[string]string{"schedule": "当前使用旧间隔快照策略；修改 Cron 前请先暂停旧策略，再创建定时计划"}}
@@ -153,7 +162,7 @@ func (s *Service) ConfigureBackupSchedule(roomID string, input BackupScheduleInp
 		}
 	}
 	defaults := DefaultBackupSchedule()
-	value := TaskInput{Name: defaults.Name, Enabled: true, Schedule: defaults.Schedule, Timezone: defaults.Timezone, Action: ActionBackupCreate, Parameters: map[string]any{"keep": defaults.Keep}, TimeoutSeconds: 600, RetryInterval: 60}
+	value := TaskInput{Name: defaults.Name, Enabled: true, Schedule: defaults.Schedule, Timezone: defaults.Timezone, Action: ActionBackupCreate, Parameters: map[string]any{"keep": defaults.Keep, "mode": defaults.Mode}, TimeoutSeconds: 600, RetryInterval: 60}
 	if selected != nil {
 		if input.ExpectedRevision != "" && input.ExpectedRevision != selected.Revision {
 			return BackupScheduleResult{}, ErrRevisionConflict
@@ -177,6 +186,12 @@ func (s *Service) ConfigureBackupSchedule(roomID string, input BackupScheduleInp
 			value.Parameters = map[string]any{}
 		}
 		value.Parameters["keep"] = *input.Keep
+	}
+	if input.Mode != nil {
+		if value.Parameters == nil {
+			value.Parameters = map[string]any{}
+		}
+		value.Parameters["mode"] = *input.Mode
 	}
 	if input.ClearRetention {
 		delete(value.Parameters, "keep")

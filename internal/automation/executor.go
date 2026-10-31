@@ -13,6 +13,7 @@ import (
 	"dont/internal/agents"
 	"dont/internal/backups"
 	"dont/internal/console"
+	"dont/internal/distributedbackup"
 	"dont/internal/gameupdate"
 	"dont/internal/jobs"
 	"dont/internal/maintenance"
@@ -39,6 +40,10 @@ type RoomActionPlanner interface {
 type BackupExecutor interface {
 	Create(context.Context, string, string, backups.Kind, string) (backups.Backup, error)
 	PruneSnapshots(context.Context, string, int) (int64, int, error)
+}
+
+type ModeBackupExecutor interface {
+	CreateWithMode(context.Context, string, string, backups.Kind, string, string) (backups.Backup, error)
 }
 
 type CommandExecutor interface {
@@ -141,6 +146,12 @@ func (e *DomainExecutor) Validate(task Task) error {
 			return &FieldError{Fields: map[string]string{"parameters": "此动作不接受额外参数"}}
 		}
 	case ActionBackupCreate:
+		if mode, exists := task.Parameters["mode"]; exists {
+			value, ok := mode.(string)
+			if !ok || !validBackupMode(value) {
+				return &FieldError{Fields: map[string]string{"parameters.mode": "请选择自动、不停服或停服后备份"}}
+			}
+		}
 		if _, exists := task.Parameters["keep"]; exists {
 			if _, err := integerParameter(task.Parameters, "keep", 1, 100); err != nil {
 				return &FieldError{Fields: map[string]string{"parameters.keep": "保留数量必须在 1-100 之间"}}
@@ -274,7 +285,19 @@ func (e *DomainExecutor) execute(ctx context.Context, task Task, jobID string, s
 		if name == "" {
 			name = "自动化快照 " + time.Now().Format("2006-01-02 15:04")
 		}
-		backup, err := e.backups.Create(ctx, task.RoomID, name, backups.KindSnapshot, jobID)
+		mode, _ := task.Parameters["mode"].(string)
+		var backup backups.Backup
+		var err error
+		if executor, ok := e.backups.(ModeBackupExecutor); ok {
+			if mode == "" {
+				mode = distributedbackup.ModeAutomatic
+			}
+			backup, err = executor.CreateWithMode(ctx, task.RoomID, name, backups.KindSnapshot, jobID, mode)
+		} else if mode == "" || mode == distributedbackup.ModeAutomatic {
+			backup, err = e.backups.Create(ctx, task.RoomID, name, backups.KindSnapshot, jobID)
+		} else {
+			return ExecutionResult{}, ErrDependencies
+		}
 		if err != nil {
 			return ExecutionResult{}, err
 		}
@@ -525,7 +548,7 @@ func ActionDefinitions() []ActionDefinition {
 		{ID: ActionRoomStart, Name: "启动分片", Description: "启动选中的分片；省略 runtimeMode 时沿用各世界的启动方式", Parameters: []string{"runtimeMode"}},
 		{ID: ActionRoomStop, Name: "停止分片", Description: "停止选中的分片；未选择时停止全部分片", Parameters: []string{}},
 		{ID: ActionRoomRestart, Name: "重启分片", Description: "重启选中的分片；省略 runtimeMode 时保留各世界的运行方式", Parameters: []string{"runtimeMode"}},
-		{ID: ActionBackupCreate, Name: "创建快照", Description: "创建一致性房间快照", Parameters: []string{"name", "keep"}},
+		{ID: ActionBackupCreate, Name: "创建快照", Description: "备份整个房间；mode 可选 automatic、hot-consistent 或 cold-consistent，省略时自动选择", Parameters: []string{"name", "keep", "mode"}},
 		{ID: ActionBackupPrune, Name: "清理快照", Description: "按保留数量清理旧快照", Parameters: []string{"keep"}},
 		{ID: ActionCommandExecute, Name: "执行游戏命令", Description: "执行管理员选择的命令模板或自定义 Lua 脚本", NeedsWorld: true, Parameters: []string{"commandId", "arguments", "rawCommand"}},
 		{ID: ActionNotificationSend, Name: "发送游戏通知", Description: "向房间内当前运行中的所有分片发送游戏内消息", Parameters: []string{"message"}},

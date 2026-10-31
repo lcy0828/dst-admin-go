@@ -67,6 +67,17 @@ func (c *Coordinator) recoverOperation(ctx context.Context, operation Operation)
 		if loadErr != nil {
 			return c.markRecoveryRequired(&operation, loadErr)
 		}
+		if operation.Phase == "notifying" {
+			// No world was stopped yet. A controller restart must not turn a
+			// canceled warning into an implicit start of the previously seen set.
+			value.Status, value.UpdatedAt = StatusFailed, c.now().UTC()
+			value.FailurePhase, value.FailureCode = "notifying", "CONTROLLER_RESTARTED"
+			value.Failure = "备份前通知已中断，请重新创建备份"
+			if _, err := c.store.SaveSet(value); err != nil {
+				return c.markRecoveryRequired(&operation, err)
+			}
+			return c.saveOperationPhase(&operation, "failed", OperationFailed, value.Failure)
+		}
 		if value.Mode == ModeHot && value.BarrierID != "" && value.BarrierReleaseState != "released" {
 			cleanupErr := c.cancelHotBarriers(current, operation, &lease, value.BarrierID, value.BarrierAttempts)
 			value.BarrierReleaseState = "released"

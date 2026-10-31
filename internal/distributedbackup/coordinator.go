@@ -68,6 +68,7 @@ type Coordinator struct {
 	now           func() time.Time
 	mutations     runtimedriver.RuntimeMutationObserver
 	deletionGuard func(Set) error
+	notifier      BackupNotifier
 }
 
 type runtimePart struct {
@@ -203,6 +204,21 @@ func (c *Coordinator) createUsingLease(ctx context.Context, roomID, name, kind, 
 
 func (c *Coordinator) createWithPlan(ctx context.Context, set Set, operation Operation, runtimeParts []runtimePart, lease *operationlease.Lease, restart bool) (result Set, returnErr error) {
 	result = set
+	// Protection workflows own their announcement. A standalone cold backup
+	// warns only when it will interrupt running worlds, before any lifecycle work.
+	if restart && set.Kind != "protection" && len(operation.OriginalRunningWorlds) > 0 && c.notifier != nil {
+		if err := c.saveOperationPhase(&operation, "notifying", OperationRunning, ""); err != nil {
+			return result, err
+		}
+		if err := c.runWithLeaseRenewal(ctx, lease, time.Minute, func(ctx context.Context) error {
+			return c.notifier.BeforeOperation(ctx, set.RoomID, "backup", "", set.SourceJobID)
+		}); err != nil {
+			return c.failCreate(result, operation, err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return c.failCreate(result, operation, err)
+	}
 	defer func() {
 		if restart {
 			returnErr = errors.Join(returnErr, c.resumeOperationWorlds(context.Background(), runtimeParts, &operation, lease))
