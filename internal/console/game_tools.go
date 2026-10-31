@@ -7,6 +7,10 @@ import (
 )
 
 func addGameToolTemplates(templates map[string]template) {
+	templates["resurrect_player"] = playerOnlyTemplate(
+		"resurrect_player", "复活玩家", "只复活在线幽灵；存活玩家保持原状，不切换生死", RiskHigh,
+		`if p:HasTag("playerghost")then p.rezsource="dst-admin-go";p:PushEvent("respawnfromghost");print("[DST-ADMIN-RESURRECT] REQUESTED; verify current player state")else print("[DST-ADMIN-RESURRECT] ALREADY_ALIVE")end`,
+	)
 	minStat, maxStat := -20, 100
 	minSpeed, maxSpeed := -2, 100
 	minTimeScale, maxTimeScale := 0, 20

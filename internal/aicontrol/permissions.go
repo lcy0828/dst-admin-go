@@ -24,7 +24,10 @@ var gameReads = map[string]bool{
 var gameWrites = map[string]bool{
 	"runBotCapability": true, "runRoomAction": true, "createRoomBackup": true,
 	"configureRoomBackupSchedule": true, "listRoomBackupSchedules": true,
-	"kickRoomPlayer": true,
+	"kickRoomPlayer":     true,
+	"giveRoomPlayerItem": true, "getRoomPlayerItemGrant": true,
+	"spawnRoomPlayerEntity": true, "getRoomPlayerEntitySpawn": true,
+	"executeBuiltinRoomCommand": true, "getBuiltinRoomCommandRun": true,
 }
 
 func (p Principal) Restricted() bool {

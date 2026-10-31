@@ -148,7 +148,18 @@ def permitted(actor, item):
     if item.get("category") not in KNOWN_CATEGORIES:
         return False
     if item.get("access") == "write":
-        return actor.role in {"game-manage", "panel-manage"} and item["id"] in actor.write_allowlist
+        workbench = (
+            item.get("resultKind") == "workbench-run"
+            and (
+                item.get("id", "").startswith("workbench.") or item.get("id") == "player.resurrect"
+            )
+            and item.get("risk") in {"low", "medium", "high", "critical"}
+            and actor.workbench_mode in {"standard", "all"}
+            and (item.get("risk") != "critical" or actor.workbench_mode == "all")
+        )
+        return actor.role in {"game-manage", "panel-manage"} and (
+            item["id"] in actor.write_allowlist or workbench
+        )
     return item.get("access") == "read" and item.get("category") in actor.visibility
 
 

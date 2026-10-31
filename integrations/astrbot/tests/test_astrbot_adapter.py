@@ -127,7 +127,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         ]
         request = NS(func_tool=ToolSet(tools), system_prompt="Existing persona")
         await bot.on_model_request(event, request)
-        self.assertEqual(request.system_prompt, "Existing persona")
+        self.assertTrue(request.system_prompt.startswith("Existing persona"))
+        self.assertIn("DST 当前权限", request.system_prompt)
         self.assertEqual(
             set(request.func_tool.names()),
             {"unrelated", "dst_rooms", "dst_room_query", "dst_player_query"},
@@ -164,7 +165,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         request = NS(func_tool=ToolSet(tools), system_prompt="Existing persona")
         await bot.on_model_request(event, request)
         self.assertEqual(request.func_tool.names(), ["unrelated"])
-        self.assertEqual(request.system_prompt, "Existing persona")
+        self.assertTrue(request.system_prompt.startswith("Existing persona"))
+        self.assertIn("DST 当前权限", request.system_prompt)
         self.assertIsNone(bot.actor(event))
         await bot.terminate()
 

@@ -104,13 +104,19 @@ class State:
     def evidence(self, key):
         return self.users.get(key, {}).get("evidence", []) if self.target(key) else []
 
-    def associate(self, scope, message_id, target):
+    def associate(self, scope, message_id, target, *, source=""):
         if message_id and not isinstance(message_id, bool):
-            self._put(self.messages, (*scope, str(message_id)), (self.clock() + 86400, target))
+            self._put(
+                self.messages, (*scope, str(message_id)), (self.clock() + 86400, target, source)
+            )
 
-    def quoted(self, scope, message_id):
+    def quoted(self, scope, message_id, *, source=None):
         value = self.messages.get((*scope, str(message_id)))
-        return value[1] if value and value[0] > self.clock() else None
+        return (
+            value[1]
+            if value and value[0] > self.clock() and (source is None or value[2] == source)
+            else None
+        )
 
     def choose(self, key, intent, candidates, room, sequence, mode="target", page_size=5):
         if self.users.get(key, {}).get("sequence") != sequence:

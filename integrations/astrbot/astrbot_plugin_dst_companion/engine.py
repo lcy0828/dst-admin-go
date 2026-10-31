@@ -7,6 +7,9 @@ from dataclasses import dataclass, replace
 from . import formatters as fmt
 from .capabilities import parse_parameter, permitted
 from .commands import allowed, menu_commands
+from .display import room_heading
+from .display import room_label as short_room_label
+from .display import text as display_text
 from .gateway import QueryError
 from .presentation import business, options, render
 from .queries import Queries
@@ -49,11 +52,31 @@ class Engine:
         actions=None,
         directory=None,
         settings=None,
+        message_renderer=None,
     ):
         self.gateway, self.state = gateway, state
         self.aliases, self.default_room, self.bindings = aliases or {}, default_room, bindings or {}
         self.actions, self.directory, self.settings = actions, directory, settings
         self.queries = Queries(gateway)
+        self.message_renderer = message_renderer
+
+    def decorate(self, actor, kind, title, body, room="", player="", full_room="", legacy=None):
+        values = {
+            "title": title,
+            "body": body,
+            "room": room,
+            "player": player,
+            "room_name": room,
+            "room_full_name": full_room or room,
+            "time": "时间请见各数据采样记录",
+        }
+        if self.message_renderer:
+            return self.message_renderer(actor.scope[-1], kind, values, legacy=legacy)
+        result = render(
+            legacy or "{title}\n{body}", title=title, body=body, room=room, player=player
+        )
+        # Both the legacy and new paths must preserve the entire business body.
+        return result if body in result else title + "\n" + body
 
     def config(self, actor):
         return self.settings(actor.scope[-1]) if self.settings else None
@@ -83,7 +106,7 @@ class Engine:
                 return None
         return parse(text, aliases)
 
-    async def handle(self, actor, text, *, woken=False, quote="", message_id=""):
+    async def handle(self, actor, text, *, woken=False, quote="", message_id="", reference=None):
         if not woken and not self.state.handles(actor.key, text.strip(), quote, woken):
             return Reply("pass")
         # Duplicate deliveries must not consume another person's/current choice.
@@ -102,7 +125,13 @@ class Engine:
             and self.state.number(text)
         ):
             return Reply("handled_error", "序号不在当前页，请按最新菜单中的序号选择，或回复 取消。")
-        context = self.state.quoted(actor.scope, quote) or self.state.target(actor.key)
+        # An unknown explicit reply must not silently select the last player.
+        context = self.state.quoted(actor.scope, quote) if quote else self.state.target(actor.key)
+        if reference is not None:
+            from .references import needs_reference
+
+            if needs_reference(intent):
+                context = reference
         form = self.state.pending_form(actor.key)
         frozen = None
         if selection:
@@ -127,7 +156,12 @@ class Engine:
             if form.get("configRevision") != actor.config_revision:
                 self.state.clear_form(actor.key)
                 return Reply("handled_error", ERRORS["CONFIG_CHANGED"])
-            if form["type"] == "player":
+            if form["type"] == "confirmation":
+                if text.strip() != "确认":
+                    return Reply("needs_selection", "请直接回复 确认 执行这项操作，或回复 取消。")
+                form["userConfirmed"] = True
+                intent, target, frozen = form["intent"], form["target"], form
+            elif form["type"] == "player":
                 intent, target = replace(form["intent"], player=text.strip()), form["target"]
             else:
                 try:
@@ -142,6 +176,31 @@ class Engine:
                 intent, target, frozen = form["intent"], form["target"], form
         else:
             target = context
+        if (
+            intent is None
+            and woken
+            and self.directory
+            and actor.role in {"game-manage", "panel-manage"}
+        ):
+            from .routing import COMPOUND, DISCUSSION, explicit_ai, normalize
+
+            value = normalize(text)
+            if len(value) <= 128 and not (
+                COMPOUND.search(value) or DISCUSSION.search(value) or explicit_ai(value)
+            ):
+                try:
+                    items = await self.directory.items(actor, time.monotonic() + 4)
+                    matches = [
+                        item
+                        for item in items
+                        if item.get("resultKind") == "workbench-run"
+                        and item.get("title") == value
+                        and permitted(actor, item)
+                    ]
+                    if len(matches) == 1:
+                        intent = Intent("capability", capability=matches[0]["id"])
+                except QueryError:
+                    pass
         if intent is None:
             return Reply("pass")
         if intent.kind == "cancel":
@@ -167,6 +226,20 @@ class Engine:
             if config
             else (30 if intent.kind == "inventory" else 8)
         )
+        if (
+            intent.kind == "capability"
+            and intent.capability
+            in {
+                "player.give_item",
+                "player.spawn_entity",
+                "player.resurrect",
+            }
+            or intent.kind == "capability"
+            and intent.capability.startswith("workbench.")
+        ):
+            # Shard confirmation and the original write receipt share one bounded
+            # deadline. A short read timeout must not cancel a valid item grant.
+            timeout = config["inventoryTimeout"] if config else 30
         try:
             async with asyncio.timeout(timeout):
                 return await self._perform(
@@ -303,9 +376,18 @@ class Engine:
                 async with semaphore:
                     try:
                         text, _ = await self.queries.run(
-                            actor, "status", Target(room["id"]), None, deadline
+                            actor,
+                            "status",
+                            Target(room["id"]),
+                            None,
+                            deadline,
+                            room=room,
+                            compact=True,
                         )
-                        text = fmt.safe(room.get("name")) + "\n" + text
+                        title, label = room_heading(room, rooms, "status")
+                        text = self.decorate(
+                            actor, "status", title, text, label, full_room=room.get("name", "")
+                        )
                         return (
                             text
                             if len(text) <= 480
@@ -313,7 +395,7 @@ class Engine:
                         )
                     except (QueryError, TimeoutError):
                         return (
-                            fmt.safe(room.get("name"))
+                            room_heading(room, rooms)[0]
                             + "\n状态暂未读取成功，不能视为停服或无人在线。"
                         )
 
@@ -323,7 +405,11 @@ class Engine:
                 text += "\n仅展示前 6 个房间，请按房间名查询其他房间。"
             return Reply("matched", text)
         if intent.room_name:
-            matches = [r for r in rooms if r.get("name") == intent.room_name]
+            matches = [
+                r for r in rooms if intent.room_name in {r.get("name"), display_text(r.get("name"))}
+            ]
+            if not matches:
+                matches = [r for r in rooms if short_room_label(r.get("name")) == intent.room_name]
             if len(matches) != 1:
                 return Reply("handled_error", "没有唯一匹配的房间，请使用房间列表选择。")
             target = Target(matches[0]["id"])
@@ -337,7 +423,7 @@ class Engine:
             else:
                 return Reply("matched", "当前没有可访问的房间。")
         room = next(r for r in rooms if r["id"] == target.room)
-        title = fmt.safe(room.get("name"))
+        title, room_label = room_heading(room, rooms, intent.kind)
         if intent.kind == "capability":
             return await self._dynamic(actor, intent, target, seq, deadline, title, frozen)
         player = None
@@ -381,7 +467,10 @@ class Engine:
                         "configRevision": actor.config_revision,
                     },
                 )
-                return Reply("needs_selection", "请 @机器人提供玩家昵称或 KU ID；取消退出。")
+                return Reply(
+                    "needs_selection",
+                    "👤 要查看哪位玩家？\n请 @机器人提供玩家昵称或 KU ID；也可引用玩家进退服通知后查询。取消退出。",
+                )
         if intent.kind == "job" and self.actions:
             text = await self.actions.latest(actor, target.room, deadline)
         elif intent.kind in {"backup", "restart", "start", "stop", "kick"} and self.actions:
@@ -392,20 +481,28 @@ class Engine:
                 raise QueryError("PERMISSION_DENIED")
             text = await self.actions.submit(actor, intent, target, deadline)
         else:
-            text, target = await self.queries.run(actor, intent.kind, target, player, deadline)
+            text, target = await self.queries.run(
+                actor, intent.kind, target, player, deadline, room=room
+            )
         config = self.config(actor)
         template = (
             config["templates"].get(intent.kind, "{title}\n{body}") if config else "{title}\n{body}"
         )
-        if intent.kind in {"backup", "restart", "start", "stop", "kick", "job"}:
-            result = title + "\n" + text
-        else:
-            result = render(template, title=title, body=text, room=title, player=target.name)
-            if text not in result:
-                result = result[:500] + "\n" + text
-        # Required evidence remains outside customizable templates.
-        if config and intent.kind not in {"backup", "restart", "start", "stop", "kick", "job"}:
-            result += "\n数据来源：面板；仅限本次可见记录，缺失不代表 0。"
+        kind = (
+            "action"
+            if intent.kind in {"backup", "restart", "start", "stop", "kick", "job"}
+            else intent.kind
+        )
+        result = self.decorate(
+            actor,
+            kind,
+            title,
+            text,
+            room_label,
+            target.name,
+            full_room=room.get("name", ""),
+            legacy=template if kind != "action" else None,
+        )
         if config and config["style"] == "detailed":
             result += "\n房间 ID：" + fmt.safe(target.room)
             if target.player:
@@ -424,6 +521,9 @@ class Engine:
             raise QueryError("DIRECTORY_CHANGED")
         parameters = dict(frozen["parameters"] if frozen else intent.parameters or {})
         schema = item["parameters"]
+        critical = item.get("risk") == "critical" and item["access"] == "write"
+        if critical:
+            parameters.pop("confirmed", None)
         for key, hint in item.get("parameterHints", {}).items():
             if (
                 hint == "player"
@@ -456,6 +556,8 @@ class Engine:
                     return Reply("handled_error", "没有确认的唯一玩家，请提供更完整昵称或 KU ID。")
                 parameters[key] = resolved["items"][0]["id"]
         for key, prop in schema.get("properties", {}).items():
+            if critical and key == "confirmed":
+                continue
             if key in parameters or key not in schema.get("required", []) and "default" not in prop:
                 continue
             form = {
@@ -486,6 +588,12 @@ class Engine:
                 parameters[key] = prop["default"]
                 continue
             self.state.form(actor.key, form)
+            if item.get("parameterHints", {}).get(key) == "player":
+                return Reply(
+                    "needs_selection",
+                    fmt.safe(item["title"]) + "：请 @机器人回复玩家昵称或 KU ID。\n"
+                    "也可直接说“" + fmt.safe(item["title"]) + " 玩家昵称”；回复 取消 退出。",
+                )
             hint = "；可选：" + json_values(prop["enum"]) if "enum" in prop else ""
             if "default" in prop:
                 hint += "；默认 " + fmt.safe(prop["default"]) + "，回复 默认 使用"
@@ -500,11 +608,35 @@ class Engine:
                 + hint
                 + "。取消退出。",
             )
+        if critical:
+            if not frozen or frozen.get("userConfirmed") is not True:
+                self.state.form(
+                    actor.key,
+                    {
+                        "type": "confirmation",
+                        "intent": intent,
+                        "target": target,
+                        "item": item,
+                        "parameters": parameters,
+                        "configRevision": actor.config_revision,
+                    },
+                )
+                return Reply(
+                    "needs_selection",
+                    "⚠️ "
+                    + fmt.safe(item["title"])
+                    + " · "
+                    + title
+                    + "\n参数："
+                    + json_values([str(k) + "=" + str(v) for k, v in parameters.items()])
+                    + "\n请直接回复 确认，或回复 取消。尚未执行。",
+                )
+            parameters["confirmed"] = True
         if item["access"] == "write":
             if not self.actions:
                 raise QueryError("CAPABILITY_MISSING")
             text = await self.actions.submit_capability(actor, item, target, parameters, deadline)
-            result = title + "\n" + text
+            result = self.decorate(actor, "action", title, text, room=title, player=target.name)
         else:
             data = await self.directory.execute(actor, item, target.room, parameters, deadline)
             body, footer = business(data)
@@ -515,8 +647,13 @@ class Engine:
                 else "{title}\n{body}"
             )
             result = (
-                render(
-                    template, title=title + " · " + fmt.safe(item["title"]), body=body, room=title
+                self.decorate(
+                    actor,
+                    "query",
+                    title + " · " + fmt.safe(item["title"]),
+                    body,
+                    room=title,
+                    legacy=template,
                 )
                 + "\n"
                 + footer

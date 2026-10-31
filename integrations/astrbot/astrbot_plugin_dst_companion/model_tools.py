@@ -10,11 +10,52 @@ from .routing import Intent
 from .state import Target
 
 
+def capability_page(items, actor, parameters, access):
+    from .capabilities import permitted
+
+    if len(parameters) > 8192:
+        raise ValueError("参数过大")
+    paging = json.loads(parameters)
+    if not isinstance(paging, dict) or set(paging) - {"search", "offset", "limit"}:
+        raise ValueError("目录只接受 search、offset、limit")
+    search, offset, limit = (
+        paging.get("search", ""),
+        paging.get("offset", 0),
+        paging.get("limit", 8),
+    )
+    if (
+        not isinstance(search, str)
+        or len(search) > 80
+        or type(offset) is not int
+        or not 0 <= offset <= 256
+        or type(limit) is not int
+        or not 1 <= limit <= 8
+    ):
+        raise ValueError("分页或搜索参数无效")
+    rows = [
+        c
+        for c in items
+        if c["access"] == access
+        and permitted(actor, c)
+        and (not search or search.casefold() in (c["id"] + " " + c.get("title", "")).casefold())
+    ]
+    end = offset + limit
+    return json.dumps(
+        {
+            "items": rows[offset:end],
+            "total": len(rows),
+            "nextOffset": end if end < len(rows) else None,
+        },
+        ensure_ascii=False,
+    )
+
+
 class ModelTools:
     def __init__(self, plugin):
         self.plugin = plugin
 
     async def query(self, event, kind, room, player=""):
+        await self.plugin.prepare(event)
         actor = self.plugin.actor(event)
         if not actor:
             return "此会话未开放 DST 查询。"
@@ -26,12 +67,16 @@ class ModelTools:
             result = await self.plugin.engine.execute(
                 actor, Intent(kind, player, room), Target(room)
             )
+            self.plugin.model_presentation.remember(
+                event, actor, self.plugin.connection_identity(), kind, result, room
+            )
             return result.text
         except QueryError as error:
             return "查询未完成：" + error.code
 
     async def dst_rooms(self, event: object) -> str:
         """列出当前调用者允许访问的 DST 房间。返回真实 roomId，不能猜测 ID。"""
+        await self.plugin.prepare(event)
         actor = self.plugin.actor(event)
         if not actor:
             return "此会话未开放 DST。"
@@ -58,22 +103,14 @@ class ModelTools:
             parameters(string): 动态读取的 JSON 对象；其他查询留空对象。
         """
         if query == "capabilities" or query.startswith("cap:"):
+            await self.plugin.prepare(event)
             actor = self.plugin.actor(event)
             if not actor or room_id not in actor.rooms:
                 return "未授权。"
             try:
-                from .capabilities import permitted
-
                 if query == "capabilities":
                     items = await self.plugin.directory.items(actor, time.monotonic() + 8)
-                    return json.dumps(
-                        {
-                            "items": [
-                                c for c in items if c["access"] == "read" and permitted(actor, c)
-                            ][:8]
-                        },
-                        ensure_ascii=False,
-                    )
+                    return capability_page(items, actor, parameters, "read")
                 if len(parameters) > 8192:
                     return "参数过大。"
                 values = json.loads(parameters)
@@ -115,28 +152,20 @@ class ModelTools:
 
         Args:
             room_id(string): 真实房间 ID。
-            action(string): backup、start、stop、restart、kick；capabilities 读取已开放写能力的参数；cap:能力ID 执行。
+            action(string): backup、start、stop、restart、kick；capabilities 按parameters的search、offset、limit分页读取已开放写能力与参数；复活用cap:player.resurrect；cap:能力ID 执行，例如 cap:player.give_item、cap:player.spawn_entity。
             player(string): kick 必须提供精确 KU ID，其他操作留空。
             parameters(string): 动态管理操作的结构化 JSON 对象，固定操作留空对象。
         """
+        await self.plugin.prepare(event)
         actor = self.plugin.actor(event)
         if not actor or actor.role not in ("game-manage", "panel-manage"):
             return "没有管理权限。"
         if action == "capabilities":
-            from .capabilities import permitted
-
             try:
                 items = await self.plugin.directory.items(actor, time.monotonic() + 8)
-                return json.dumps(
-                    {
-                        "items": [
-                            c for c in items if c["access"] == "write" and permitted(actor, c)
-                        ][:8]
-                    },
-                    ensure_ascii=False,
-                )
-            except QueryError:
-                return "管理能力目录暂不可用。"
+                return capability_page(items, actor, parameters, "write")
+            except (QueryError, ValueError):
+                return "管理能力目录暂不可用；parameters只接受search、offset、limit。"
         if action.startswith("cap:"):
             try:
                 if len(parameters) > 8192:
@@ -168,6 +197,7 @@ class ModelTools:
             room_id(string): 任务所属房间 ID。
             job_id(string): 原提交返回的 Job ID。
         """
+        await self.plugin.prepare(event)
         actor = self.plugin.actor(event)
         if not actor:
             return "未授权。"
@@ -181,6 +211,7 @@ class ModelTools:
         Args:
             query(string): 精确 operationId 或用途关键词。
         """
+        await self.plugin.prepare(event)
         actor = self.plugin.actor(event)
         if not actor or actor.role != "panel-manage" or not event.is_private_chat():
             return "只允许面板管理员在授权私聊读取详细管理接口。"
@@ -199,6 +230,7 @@ class ModelTools:
             operation_id(string): dst_find_api 返回的 operationId。
             arguments(string): JSON 对象，包含契约声明的 path/query/body/requestId。
         """
+        await self.plugin.prepare(event)
         actor = self.plugin.actor(event)
         if not actor or actor.role != "panel-manage" or not event.is_private_chat():
             return "未授权。"

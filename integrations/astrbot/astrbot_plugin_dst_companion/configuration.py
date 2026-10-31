@@ -33,6 +33,7 @@ DEFAULTS = {
     "disabledCapabilities": [],
     "categories": ["status", "players", "profile", "inventory", "network", "mods", "help"],
     "writeAllowlist": [],
+    "workbenchMode": "standard",
     "bindings": {},
     "pageSize": 5,
     "style": "concise",
@@ -74,6 +75,8 @@ def validate(values):
         "detailed",
     }:
         raise ValueError("未知交互或展示模式")
+    if values["workbenchMode"] not in {"off", "standard", "all"}:
+        raise ValueError("未知工作台授权模式")
     for field in ("rooms", "categories", "writeAllowlist", "menuItems", "disabledCapabilities"):
         value = values[field]
         if (
@@ -134,7 +137,7 @@ class Configuration:
         source = self.source
         if type(source.get("configuration_version", 1)) is not int or source.get(
             "configuration_version", 1
-        ) not in {1, 2}:
+        ) not in {1, 2, 3}:
             raise ValueError("未知配置版本")
         values = copy.deepcopy(DEFAULTS)
         if source.get("configuration_version", 1) == 1:
@@ -159,6 +162,31 @@ class Configuration:
             if not isinstance(supplied, dict) or set(supplied) - OVERRIDE_FIELDS:
                 raise ValueError("全局默认配置无效")
             values.update(copy.deepcopy(supplied))
+        if source.get("configuration_version", 1) == 3:
+            advanced = source.get("advanced", {})
+            if not isinstance(advanced, dict) or set(advanced) - (
+                OVERRIDE_FIELDS
+                | {"broadcastConnection", "leaveGrace", "pollInterval", "chatPollInterval"}
+            ):
+                raise ValueError("高级设置包含未知字段")
+            for key, low, high in (
+                ("leaveGrace", 5, 60),
+                ("pollInterval", 15, 60),
+                ("chatPollInterval", 2, 30),
+            ):
+                if key in advanced and (
+                    type(advanced[key]) is not int or not low <= advanced[key] <= high
+                ):
+                    raise ValueError("播报预算超限：" + key)
+            if (
+                not isinstance(advanced.get("broadcastConnection", ""), str)
+                or len(advanced.get("broadcastConnection", "")) > 255
+            ):
+                raise ValueError("播报连接名称无效")
+            values.update(
+                copy.deepcopy({k: v for k, v in advanced.items() if k in OVERRIDE_FIELDS})
+            )
+            values["mode"] = source.get("mode", "mixed")
         values = validate(values)
         global_values = copy.deepcopy(values)
         origins = {k: "global" for k in DEFAULTS}
@@ -197,6 +225,9 @@ class Configuration:
                 raise ValueError("会话配置超出全局授权：" + key)
         if not set(global_values["disabledCapabilities"]) <= set(values["disabledCapabilities"]):
             raise ValueError("会话不能移除全局禁用的能力")
+        levels = {"off": 0, "standard": 1, "all": 2}
+        if levels[values["workbenchMode"]] > levels[global_values["workbenchMode"]]:
+            raise ValueError("会话不能扩大工作台授权")
         return Effective(freeze(values), freeze(origins), fingerprint(values))
 
     def preview(self, session):
@@ -223,6 +254,12 @@ class ConfigEditor:
         async with self.lock:
             if fingerprint(dict(self.source)) != expected:
                 raise QueryError("CONFIG_CONFLICT")
+            from .message_templates import validate_templates
+
+            # Reject newly supplied invalid templates; old invalid rows do not
+            # make unrelated authorization edits impossible.
+            if candidate.get("message_templates", []) != self.source.get("message_templates", []):
+                validate_templates(candidate.get("message_templates", []))
             for session in sessions:
                 Configuration(candidate).effective(session)
             previous = copy.deepcopy(dict(self.source))
@@ -230,13 +267,18 @@ class ConfigEditor:
             self.source.update(copy.deepcopy(candidate))
             try:
                 committed = await self.save()
-            except Exception:
+            except BaseException:
                 # Never restore authority after another editor has changed it.
                 if fingerprint(dict(self.source)) == fingerprint(candidate):
                     self.source.clear()
                     self.source.update(previous)
                 raise
-            if committed is not True or fingerprint(dict(self.source)) != fingerprint(candidate):
+            if committed is not True:
+                if fingerprint(dict(self.source)) == fingerprint(candidate):
+                    self.source.clear()
+                    self.source.update(previous)
+                raise QueryError("CONFIG_SAVE_FAILED")
+            if fingerprint(dict(self.source)) != fingerprint(candidate):
                 raise QueryError("CONFIG_CONFLICT")
             return fingerprint(candidate)
 
@@ -265,6 +307,20 @@ def migrate_v2(source):
 
     candidate["defaults"] = thaw(effective.values)
     candidate["configuration_version"] = 2
+    for session in candidate.get("allowed_sessions", []):
+        Configuration(candidate).effective(str(session))
+    return candidate
+
+
+def migrate_v3(source):
+    """Preserve legacy effective settings while moving customization into v3."""
+    if source.get("configuration_version", 1) == 3:
+        return copy.deepcopy(dict(source))
+    candidate = migrate_v2(source)
+    candidate["configuration_version"] = 3
+    candidate["mode"] = Configuration({**source, "session_overrides": []}).effective(
+        "__migration_global__"
+    )["mode"]
     for session in candidate.get("allowed_sessions", []):
         Configuration(candidate).effective(str(session))
     return candidate

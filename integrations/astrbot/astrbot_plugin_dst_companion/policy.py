@@ -48,6 +48,7 @@ class Actor:
     directory_ttl: int = 60
     connection_id: str = ""
     disabled_capabilities: tuple = ()
+    workbench_mode: str = "off"
 
     @property
     def read_projection(self):
@@ -57,6 +58,7 @@ class Actor:
             self.rooms,
             tuple(sorted(self.visibility)),
             self.write_allowlist,
+            self.workbench_mode,
             self.config_revision,
         )
 
@@ -68,6 +70,7 @@ class Actor:
             self.rooms,
             tuple(sorted(self.visibility)),
             self.write_allowlist,
+            self.workbench_mode,
             self.config_revision,
         )
 

@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "935e18fe6345afa960faf82bcf185e53d00fada110cb6ce46ad57852b35af0c4",
+  "operationsSHA256": "9a01b208231c8dc98e2ec3b975fbab7553a6cb7845c03a05f1cd1547588fc728",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -342,6 +342,21 @@
       "risk": "normal",
       "runtime": "any",
       "title": "Request cooperative cancellation"
+    },
+    {
+      "operationId": "cancelSoftwareDownload",
+      "method": "POST",
+      "path": "/system/software/actions/cancel",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "software",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Cancel the named software download or preparation before process replacement"
     },
     {
       "operationId": "captureWorldRuntimeDiagnostic",
@@ -1095,6 +1110,24 @@
       "title": "Fetch optional authors and, on request, community descriptions without blocking core metadata"
     },
     {
+      "operationId": "executeBuiltinRoomCommand",
+      "method": "POST",
+      "path": "/rooms/{roomId}/workbench/actions/execute",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "console",
+        "player",
+        "resurrect",
+        "room",
+        "workbench"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "shard-ready",
+      "title": "Execute a server-owned built-in game workbench recipe once"
+    },
+    {
       "operationId": "executeRawRoomCommand",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds/{worldId}/raw-commands",
@@ -1414,6 +1447,20 @@
       "risk": "low",
       "runtime": "any",
       "title": "Recover the original caller-owned bot request without resubmitting it"
+    },
+    {
+      "operationId": "getBuiltinRoomCommandRun",
+      "method": "GET",
+      "path": "/rooms/{roomId}/workbench/runs/{runId}",
+      "transport": "json",
+      "tags": [
+        "console",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read only the original built-in workbench receipt without scripts"
     },
     {
       "operationId": "getClusterTokenStatus",
@@ -1949,6 +1996,23 @@
       "title": "Aggregate a bounded window of persisted incoming damage, outgoing combat and kills"
     },
     {
+      "operationId": "getRoomPlayerEntitySpawn",
+      "method": "GET",
+      "path": "/rooms/{roomId}/players/{playerId}/entity-spawns/{runId}",
+      "transport": "json",
+      "tags": [
+        "console",
+        "entity",
+        "player",
+        "receipt",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read only the original controlled entity spawn receipt"
+    },
+    {
       "operationId": "getRoomPlayerInventory",
       "method": "GET",
       "path": "/rooms/{roomId}/players/{playerId}/inventory",
@@ -1964,6 +2028,23 @@
       "risk": "low",
       "runtime": "any",
       "title": "Read a player's carried items from live memory or their current Session save without saving the game"
+    },
+    {
+      "operationId": "getRoomPlayerItemGrant",
+      "method": "GET",
+      "path": "/rooms/{roomId}/players/{playerId}/item-grants/{runId}",
+      "transport": "json",
+      "tags": [
+        "console",
+        "item",
+        "player",
+        "receipt",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read a fixed item grant receipt without exposing or executing console scripts"
     },
     {
       "operationId": "getRoomPlayerTrajectory",
@@ -2289,6 +2370,24 @@
       "risk": "low",
       "runtime": "any",
       "title": "Read a bounded time series for one world shard"
+    },
+    {
+      "operationId": "giveRoomPlayerItem",
+      "method": "POST",
+      "path": "/rooms/{roomId}/players/{playerId}/actions/give-item",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "console",
+        "grant",
+        "item",
+        "player",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "shard-ready",
+      "title": "Give 1–40 known vanilla items to a confirmed online player once"
     },
     {
       "operationId": "importArtworkPack",
@@ -4393,6 +4492,24 @@
       "risk": "normal",
       "runtime": "any",
       "title": "Create the single administrator on first run"
+    },
+    {
+      "operationId": "spawnRoomPlayerEntity",
+      "method": "POST",
+      "path": "/rooms/{roomId}/players/{playerId}/actions/spawn-entity",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "console",
+        "entity",
+        "player",
+        "room",
+        "spawn"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "shard-ready",
+      "title": "Spawn 1–5 allowlisted creatures near a confirmed online player once"
     },
     {
       "operationId": "streamJobEvents",

@@ -134,7 +134,20 @@ func (s *Service) mcpDefinition(tool Tool) *mcp.Tool {
 	return &mcp.Tool{Name: tool.Name, Title: metadata.Title, Description: tool.Description, InputSchema: tool.InputSchema, OutputSchema: receiptOutputSchema(), Meta: mcp.Meta{mcpMetadataKey: extension}, Annotations: &mcp.ToolAnnotations{Title: metadata.Title, ReadOnlyHint: metadata.Access == "read", IdempotentHint: metadata.Idempotent, DestructiveHint: &metadata.Destructive, OpenWorldHint: &metadata.OpenWorld}}
 }
 
-var botMCPNames = map[string]bool{"api_listBotCapabilities": true, "api_queryBotCapability": true, "api_runBotCapability": true, "api_getBotCapabilityResult": true, "api_listRooms": true, "api_listRoomWorlds": true, "api_listWorldStates": true, "api_resolveRoomPlayer": true, "api_getRoomPlayerInventory": true, "api_listRoomPlayers": true, "api_listRoomMods": true, "api_listRoomBackupSchedules": true, "api_getJob": true, "api_getRoomPerformanceReport": true}
+// The bot view includes the unified plugin's notification dependencies. Token
+// scope is still checked independently; a game-read token gains no log/stream
+// access simply because the dependencies appear in this view.
+var botMCPNames = map[string]bool{
+	"api_giveRoomPlayerItem": true, "api_getRoomPlayerItemGrant": true,
+	"api_spawnRoomPlayerEntity": true, "api_getRoomPlayerEntitySpawn": true,
+	"api_listBotCapabilities": true, "api_queryBotCapability": true, "api_runBotCapability": true,
+	"api_getBotCapabilityResult": true, "api_listRooms": true, "api_listRoomWorlds": true,
+	"api_listWorldStates": true, "api_resolveRoomPlayer": true, "api_getRoomPlayerInventory": true,
+	"api_listRoomPlayers": true, "api_listRoomMods": true, "api_listRoomBackupSchedules": true,
+	"api_getJob": true, "api_getRoomPerformanceReport": true,
+	"api_getRoom": true, "api_getRoomPlayer": true, "api_streamWorldRuntimeEvents": true,
+	"api_listRoomRuntimeEvents": true, "api_listRoomChatLogs": true,
+}
 var compactMCPNames = map[string]bool{discoverAPI: true, dispatchAPI: true, "api_listRooms": true, "api_getRoomRuntimeOverview": true, "api_listRoomPlayers": true, "api_listRoomMods": true, "api_listRoomBackupSchedules": true, "api_listJobs": true, "api_getJob": true, "api_queryRoomWorld": true, "api_getRoomWorldQueryRun": true}
 
 // Listing views are immutable projections of one shared server. No per-token

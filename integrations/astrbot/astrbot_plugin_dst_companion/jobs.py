@@ -228,7 +228,7 @@ class Actions:
     async def read(self, actor, record, deadline):
         if record.get("protocol") == 1:
             data = await self.get_job(actor, record, deadline)
-            body, footer = business(data)
+            body, footer = business(data, diagnostics=True)
             return body + "\n" + footer
         if not record.get("jobId"):
             return "原请求结果待确认；为避免重复执行，没有重新提交。"
@@ -295,7 +295,7 @@ class Actions:
             data = await self.get_job(actor, record, deadline)
             if data.get("status") in {"pending", "running", "uncertain"}:
                 self.watch(actor, key, record)
-            body, footer = business(data)
+            body, footer = business(data, diagnostics=True)
             return body + "\n" + footer
         if not record.get("jobId"):
             return await self.read(actor, record, deadline)

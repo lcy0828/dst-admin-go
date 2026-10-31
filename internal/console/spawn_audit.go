@@ -52,7 +52,7 @@ func spawnAudit(run Run) *SpawnAudit {
 		return nil
 	}
 	switch run.CommandID {
-	case "spawn_entity", "spawn_domesticated_beefalo", "give_item", "give_blueprint", "give_recipe_materials":
+	case "spawn_entity", "spawn_player_entity", "spawn_domesticated_beefalo", "give_item", "give_blueprint", "give_recipe_materials":
 	default:
 		return nil
 	}

@@ -82,12 +82,12 @@ func (s *Service) Definitions() []Definition {
 func (s *Service) DefinitionsWithError() ([]Definition, error) {
 	order := []string{
 		"world_info", "save_world", "announce", "list_players", "give_item", "give_recipe_materials", "give_blueprint",
-		"set_player_stat", "set_player_speed", "set_player_lock", "adjust_player_luck", "manage_player_skills", "set_monkey_curse",
+		"resurrect_player", "set_player_stat", "set_player_speed", "set_player_lock", "adjust_player_luck", "manage_player_skills", "set_monkey_curse",
 		"clear_player_debuffs", "clear_player_inventory", "clear_player_naughtiness", "teleport_player", "relocate_players", "set_player_ability", "toggle_player_ghost",
 		"set_player_attack_multiplier", "set_health_penalty", "set_character_power", "manage_followers", "spawn_domesticated_beefalo",
 		"set_season", "next_phase", "set_phase", "set_clock_segments",
 		"skip_days", "set_time_scale", "set_precipitation", "set_world_wetness", "set_world_temperature", "set_moon_phase",
-		"trigger_world_event", "trigger_incident", "set_special_event", "stop_vote", "spawn_entity", "teleport_to_nearest_entity", "remove_nearby_entities", "act_nearby_entities",
+		"trigger_world_event", "trigger_incident", "set_special_event", "stop_vote", "spawn_entity", "spawn_player_entity", "teleport_to_nearest_entity", "remove_nearby_entities", "act_nearby_entities",
 		"rollback", "shutdown", "regenerate",
 	}
 	result := make([]Definition, 0, len(order))
@@ -552,6 +552,7 @@ func builtinTemplates() map[string]template {
 			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.Transform then local x,y,z=p.Transform:GetWorldPosition();local n=0;for i=1,%d do local e=SpawnPrefab(%s);if e and e.Transform then local a=(i-1)*6.28318530718/%d;e.Transform:SetPosition(x+math.cos(a)*2,y,z+math.sin(a)*2);__dst_record(e,p,"world",1);n=n+1 end end;print("[DST-ADMIN-SPAWN]",%s,%s,n)else print("[DST-ADMIN-SPAWN]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), count, quoteLua(prefab), count, quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
 		},
 	}
+	templates["spawn_player_entity"] = spawnPlayerEntityTemplate()
 	templates["teleport_to_nearest_entity"] = template{
 		definition: Definition{
 			ID: "teleport_to_nearest_entity", Name: "传送到最近实体", Description: "将在线玩家传送到当前分片最近的指定 Prefab", Category: "玩家管理", Risk: RiskHigh,

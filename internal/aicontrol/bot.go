@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -31,6 +32,7 @@ type BotCapability struct {
 	ParameterHints  map[string]string `json:"parameterHints"`
 	NativeTools     []string          `json:"nativeTools"`
 	ResultKind      string            `json:"resultKind"`
+	Risk            string            `json:"risk,omitempty"`
 	Operation       string            `json:"-"`
 	build           func(string, map[string]any) apicontract.Input
 }
@@ -60,6 +62,9 @@ type BotResult struct {
 	Data             any               `json:"data"`
 	JobID            string            `json:"jobId,omitempty"`
 	QueryRunID       string            `json:"queryRunId,omitempty"`
+	GrantRunID       string            `json:"grantRunId,omitempty"`
+	SpawnRunID       string            `json:"spawnRunId,omitempty"`
+	WorkbenchRunID   string            `json:"workbenchRunId,omitempty"`
 	Error            map[string]string `json:"error,omitempty"`
 	NextAction       string            `json:"nextAction"`
 }
@@ -84,7 +89,23 @@ func BotCapabilities() []BotCapability {
 		return apicontract.Input{Path: map[string]any{"roomId": room, "playerId": p["playerId"]}}
 	}
 	pSchema := botSchema(map[string]any{"playerId": botString(128)}, "playerId")
+	spawnEntity := botString(100)
+	spawnEntity["description"] = "仅座狼/狗王(warg)、猎犬(hound)、蜘蛛(spider)、猪人(pigman)、兔子(rabbit)、蜜蜂(bee)；不接受其他实体或Lua"
 	list := []BotCapability{
+		{ID: "player.spawn_entity", Title: "生成玩家附近生物（固定白名单）", Category: "management", Access: "write", Operation: "spawnRoomPlayerEntity", Parameters: botSchema(map[string]any{
+			"playerId": botString(128), "entity": spawnEntity, "count": map[string]any{"type": "integer", "minimum": 1, "maximum": 5},
+		}, "playerId", "entity", "count"), ParameterHints: map[string]string{"playerId": "player"}, build: func(r string, p map[string]any) apicontract.Input {
+			v := player(r, p)
+			v.Body = map[string]any{"entity": p["entity"], "count": p["count"]}
+			return v
+		}},
+		{ID: "player.give_item", Title: "发放玩家物品", Category: "management", Access: "write", Operation: "giveRoomPlayerItem", Parameters: botSchema(map[string]any{
+			"playerId": botString(128), "item": botString(100), "count": map[string]any{"type": "integer", "minimum": 1, "maximum": 40},
+		}, "playerId", "item", "count"), ParameterHints: map[string]string{"playerId": "player"}, build: func(r string, p map[string]any) apicontract.Input {
+			v := player(r, p)
+			v.Body = map[string]any{"item": p["item"], "count": p["count"]}
+			return v
+		}},
 		{ID: "room.status", Title: "房间状态", Category: "status", Operation: "getRoomRuntimeOverview", build: empty},
 		{ID: "room.players", Title: "在线玩家", Category: "players", Operation: "listRoomPlayers", build: func(r string, _ map[string]any) apicontract.Input {
 			v := empty(r, nil)
@@ -113,7 +134,7 @@ func BotCapabilities() []BotCapability {
 			return v
 		}},
 		{ID: "room.backups.settings", Title: "自动备份设置", Category: "backups", Operation: "listRoomBackupSchedules", build: empty},
-		{ID: "room.backups.configure", Title: "设置自动备份", Category: "management", Access: "write", Operation: "configureRoomBackupSchedule", Parameters: botSchema(map[string]any{"enabled": map[string]any{"type": "boolean"}, "schedule": botString(100), "timezone": botString(64), "keep": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}, "taskId": botString(128)}, "enabled"), build: func(r string, p map[string]any) apicontract.Input { v := empty(r, nil); v.Body = p; return v }},
+		{ID: "room.backups.configure", Title: "设置自动备份", Category: "management", Access: "write", Operation: "configureRoomBackupSchedule", Parameters: botSchema(map[string]any{"enabled": map[string]any{"type": "boolean"}, "schedule": botString(100), "timezone": botString(64), "mode": map[string]any{"type": "string", "enum": []string{"automatic", "hot-consistent", "cold-consistent"}}, "keep": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}, "taskId": botString(128)}, "enabled"), build: func(r string, p map[string]any) apicontract.Input { v := empty(r, nil); v.Body = p; return v }},
 		{ID: "room.backup.create", Title: "立即备份", Category: "management", Access: "write", Operation: "createRoomBackup", build: func(r string, _ map[string]any) apicontract.Input {
 			v := empty(r, nil)
 			v.Body = map[string]any{}
@@ -155,6 +176,7 @@ func BotCapabilities() []BotCapability {
 			return v
 		}})
 	}
+	list = append(list, workbenchCapabilities()...)
 	for i := range list {
 		c := &list[i]
 		c.ContractVersion = 1
@@ -175,8 +197,20 @@ func BotCapabilities() []BotCapability {
 		if c.Access == "write" {
 			c.ResultKind = "job"
 		}
+		if c.Operation == "executeBuiltinRoomCommand" {
+			c.ResultKind = "workbench-run"
+			c.NativeTools = append(c.NativeTools, "api_getBuiltinRoomCommandRun")
+		}
 		if c.ID == "room.backups.configure" {
 			c.ResultKind = "facts"
+		}
+		if c.ID == "player.give_item" {
+			c.ResultKind = "item-grant"
+			c.NativeTools = append(c.NativeTools, "api_getRoomPlayerItemGrant")
+		}
+		if c.ID == "player.spawn_entity" {
+			c.ResultKind = "entity-spawn"
+			c.NativeTools = append(c.NativeTools, "api_getRoomPlayerEntitySpawn")
 		}
 		// Presentation changes do not invalidate a frozen parameter form.
 		c.SchemaRevision = botSchemaRevision(*c)
@@ -208,7 +242,7 @@ func (s *Service) BotDirectory(p Principal, version, limit int, known, cursor st
 	items := []BotCapability{}
 	for _, c := range BotCapabilities() {
 		for _, r := range append(append([]string{}, p.RoomIDs...), p.RoomID, "__unscoped__") {
-			if _, e := s.botCapability(p, c.ID, r); e == nil {
+			if _, exists := s.catalog.Operation(c.Operation); exists && p.AllowsRoom(r) && p.AllowsOperation(c.Operation, r) {
 				items = append(items, c)
 				break
 			}
@@ -451,6 +485,18 @@ func (s *Service) BotExecute(ctx context.Context, p Principal, in BotInput, writ
 	data, e := s.botBackend(ctx, p, c, target)
 	if e != nil {
 		result.Error = map[string]string{"code": "BOT_EXECUTION_UNCONFIRMED", "message": "请求结果尚未确认，请读取原请求记录"}
+		// Only explicit pre-dispatch rejections from this fixed endpoint establish
+		// no side effects. Transport failures and Lua errors remain uncertain.
+		var rejected *PlatformError
+		if (c.ID == "player.give_item" || c.ID == "player.spawn_entity") && errors.As(e, &rejected) &&
+			(rejected.Code == "INVALID_ITEM_GRANT" || rejected.Code == "INVALID_ENTITY_SPAWN" || rejected.Code == "PLAYER_NOT_ONLINE" || rejected.Code == "PLAYER_LOCATION_UNCERTAIN" || rejected.Code == "PLAYER_NOT_READY" || rejected.Code == "PLAYER_LOCATION_UNAVAILABLE") {
+			result.Status = "rejected"
+			result.Complete = true
+			result.NextAction = "none"
+			result.ExecutionOutcome = "rejected"
+			result.MayHaveExecuted = false
+			result.Error = map[string]string{"code": rejected.Code, "message": rejected.Message}
+		}
 		if !write {
 			result.Status = "unavailable"
 			result.NextAction = "none"
@@ -478,6 +524,45 @@ func (s *Service) BotExecute(ctx context.Context, p Principal, in BotInput, writ
 	return result, nil
 }
 func botProject(r BotResult, c BotCapability, d map[string]any) BotResult {
+	if c.ID == "player.give_item" || c.ID == "player.spawn_entity" || c.Operation == "executeBuiltinRoomCommand" {
+		r.Status = "uncertain"
+		r.Complete = false
+		r.NextAction = "read_original"
+		r.ExecutionOutcome = "unconfirmed"
+		r.MayHaveExecuted = true
+		runID, _ := d["runId"].(string)
+		if c.ID == "player.give_item" {
+			r.GrantRunID = runID
+		} else if c.ID == "player.spawn_entity" {
+			r.SpawnRunID = runID
+		} else {
+			r.WorkbenchRunID = runID
+		}
+		r.Data = botPick(d, "runId", "roomId", "worldId", "playerId", "prefab", "name", "requested", "granted", "spawned", "message", "spawnAudit", "commandId", "output")
+		r.ObservedAt = d["observedAt"]
+		if runID == "" || d["roomId"] != r.RoomID {
+			return r
+		}
+		if outcome, ok := d["executionOutcome"].(string); ok {
+			r.ExecutionOutcome = outcome
+		}
+		r.MayHaveExecuted = d["mayHaveExecuted"] == true
+		switch d["status"] {
+		case "running":
+			r.Status = "running"
+		case "failed":
+			r.Status = "failed"
+			r.Complete = true
+			r.NextAction = "none"
+		case "succeeded":
+			if d["complete"] == true && d["executionOutcome"] == "confirmed" {
+				r.Status = "succeeded"
+				r.Complete = true
+				r.NextAction = "none"
+			}
+		}
+		return r
+	}
 	r.Status = "succeeded"
 	r.Complete = true
 	r.NextAction = "none"
@@ -683,6 +768,39 @@ func (s *Service) botReadCall(ctx context.Context, p Principal, call Call, refre
 	}
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
+	receiptOperation, receiptRunID := "", ""
+	if c.ID == "player.give_item" {
+		receiptOperation, receiptRunID = "getRoomPlayerItemGrant", r.GrantRunID
+	}
+	if c.ID == "player.spawn_entity" {
+		receiptOperation, receiptRunID = "getRoomPlayerEntitySpawn", r.SpawnRunID
+	}
+	if c.Operation == "executeBuiltinRoomCommand" {
+		receiptOperation, receiptRunID = "getBuiltinRoomCommandRun", r.WorkbenchRunID
+	}
+	if refresh && !r.Complete && receiptRunID != "" && p.AllowsOperation(receiptOperation, in.RoomID) {
+		if op, ok := s.catalog.Operation(receiptOperation); ok {
+			if b, ok := s.backend.(APIBackend); ok {
+				input := apicontract.Input{Path: map[string]any{"roomId": in.RoomID, "playerId": in.Parameters["playerId"], "runId": receiptRunID}, Query: map[string]any{"refresh": true}}
+				if c.Operation == "executeBuiltinRoomCommand" {
+					delete(input.Path, "playerId")
+				}
+				raw, err := b.InvokeAPI(ctx, p, op, input)
+				if err == nil {
+					var env struct {
+						Data map[string]any `json:"data"`
+					}
+					if json.Unmarshal(raw, &env) == nil && env.Data["roomId"] == in.RoomID && (c.Operation == "executeBuiltinRoomCommand" && env.Data["commandId"] == strings.TrimPrefix(c.ID, "workbench.") || c.ID == "player.resurrect" && env.Data["commandId"] == "resurrect_player" || c.Operation != "executeBuiltinRoomCommand" && env.Data["playerId"] == in.Parameters["playerId"]) && env.Data["runId"] == receiptRunID {
+						r = botProject(r, c, env.Data)
+						v, _ := json.Marshal(r)
+						if err = s.Store.db.Table(s.Store.callTable).Where("id = ?", call.ID).Updates(map[string]any{"result": string(v), "status": botStoredStatus(r)}).Error; err != nil {
+							return r, err
+						}
+					}
+				}
+			}
+		}
+	}
 	if refresh && r.JobID != "" && p.AllowsOperation("getJob", in.RoomID) {
 		op, ok := s.catalog.Operation("getJob")
 		if !ok {
@@ -803,6 +921,6 @@ func botStoredStatus(result BotResult) string {
 }
 
 func botSchemaRevision(c BotCapability) string {
-	encoded, _ := json.Marshal([]any{c.ID, c.Access, c.Category, c.Parameters, c.ParameterHints, c.Operation, c.NativeTools, c.ResultKind, c.ContractVersion})
+	encoded, _ := json.Marshal([]any{c.ID, c.Access, c.Category, c.Risk, c.Parameters, c.ParameterHints, c.Operation, c.NativeTools, c.ResultKind, c.ContractVersion})
 	return digest(string(encoded))
 }

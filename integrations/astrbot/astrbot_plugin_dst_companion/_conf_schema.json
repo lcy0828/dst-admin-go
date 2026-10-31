@@ -1,38 +1,380 @@
 {
   "enabled": {
-    "description": "启用快捷查询；不会启动游戏或重启房间",
+    "description": "启用 DST 饥荒助手（群内仍需管理员启用）",
+    "type": "bool",
+    "default": true
+  },
+  "mcp_server": {
+    "description": "面板 MCP 连接名（留空自动识别）",
+    "type": "string",
+    "default": "",
+    "hint": "已添加唯一 DST MCP 时无需填写；多个连接可在群内用 /dst 使用连接 名称 选择。"
+  },
+  "mode": {
+    "description": "聊天模式：mixed 常用查询直查，其余交给 AI；shortcut 仅快捷指令",
+    "type": "string",
+    "default": "mixed",
+    "options": [
+      "mixed",
+      "shortcut"
+    ]
+  },
+  "allow_private": {
+    "description": "允许已明确授权的私聊直接查询",
     "type": "bool",
     "default": false
   },
-  "mcp_server": {
-    "description": "AstrBot 已配置的游戏只读 MCP 连接名",
-    "type": "string",
-    "default": "dst-admin"
-  },
   "management_mcp_server": {
-    "description": "独立管理 MCP 连接名；留空关闭管理",
+    "description": "可选管理连接（留空关闭写操作）",
     "type": "string",
     "default": ""
+  },
+  "game_admins": {
+    "description": "可选游戏管理员（还须是 AstrBot 管理员）",
+    "type": "list",
+    "default": []
+  },
+  "panel_admins": {
+    "description": "可选面板管理员（详细接口限授权私聊）",
+    "type": "list",
+    "default": []
+  },
+  "advanced": {
+    "description": "高级自定义（通常留空）：categories、commandAliases、templates、pageSize、writeAllowlist、chatPollInterval（聊天检查秒数，2～30，默认3）等；房间与群由指令自动管理；workbenchMode=standard（默认常用管理）/all（含危险操作，需二次确认）/off（仅writeAllowlist）。工作台仍需原生工具及面板授权。",
+    "type": "dict",
+    "default": {}
+  },
+  "message_templates": {
+    "description": "消息模板（全局）：选择类型后编辑多行正文；不添加则使用内置样式。本群覆盖可用 /dst 模板 管理。",
+    "type": "template_list",
+    "default": [],
+    "hint": "仅插件查询与播报使用；不控制 AI 自由回答。仅支持列出的平铺变量，不能写脚本；同类型只添加一次，正文最多 2000 字。保存后使用 /dst 模板 预览 类型 查看模拟效果。",
+    "templates": {
+      "chat_line": {
+        "name": "聊天条目",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "chat_line",
+            "options": [
+              "chat_line"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "聊天条目正文",
+            "type": "text",
+            "default": "{player_name}：{message}",
+            "hint": "可用变量：{message} {player_name} {room_full_name} {room_name} {time}；必须保留 {message}。"
+          }
+        }
+      },
+      "chat_batch": {
+        "name": "聊天播报",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "chat_batch",
+            "options": [
+              "chat_batch"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "聊天播报正文",
+            "type": "text",
+            "default": "💬 {room_name} · 游戏聊天\n{lines}",
+            "hint": "可用变量：{lines} {room_full_name} {room_name} {time}；必须保留 {lines}。"
+          }
+        }
+      },
+      "player_join": {
+        "name": "进服播报",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "player_join",
+            "options": [
+              "player_join"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "进服播报正文",
+            "type": "text",
+            "default": "🚪 玩家加入 · {room_name}\n━━━━━━━━━━━━\n👤 {player_name} · {character} · {world_name}\n{details}",
+            "hint": "可用变量：{character} {details} {max_players} {online} {player_age} {player_name} {room_full_name} {room_name} {season} {time} {world_day} {world_name}；必须保留 {details}。"
+          }
+        }
+      },
+      "player_leave": {
+        "name": "离服播报",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "player_leave",
+            "options": [
+              "player_leave"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "离服播报正文",
+            "type": "text",
+            "default": "👋 玩家离开 · {room_name}\n━━━━━━━━━━━━\n👤 {player_name} · {character} · {world_name}\n{details}",
+            "hint": "可用变量：{character} {details} {max_players} {online} {player_age} {player_name} {room_full_name} {room_name} {season} {time} {world_day} {world_name}；必须保留 {details}。"
+          }
+        }
+      },
+      "server_start": {
+        "name": "开服播报",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "server_start",
+            "options": [
+              "server_start"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "开服播报正文",
+            "type": "text",
+            "default": "🟢 世界已启动\n{room_name} · {world_name}",
+            "hint": "可用变量：{reason} {room_full_name} {room_name} {time} {world_name}"
+          }
+        }
+      },
+      "server_stop": {
+        "name": "停服播报",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "server_stop",
+            "options": [
+              "server_stop"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "停服播报正文",
+            "type": "text",
+            "default": "⚫ 世界已停止\n{room_name} · {world_name}",
+            "hint": "可用变量：{reason} {room_full_name} {room_name} {time} {world_name}"
+          }
+        }
+      },
+      "server_error": {
+        "name": "异常停服",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "server_error",
+            "options": [
+              "server_error"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "异常停服正文",
+            "type": "text",
+            "default": "⚠️ 世界异常退出\n{room_name} · {world_name}\n{reason}",
+            "hint": "可用变量：{reason} {room_full_name} {room_name} {time} {world_name}；必须保留 {reason}。"
+          }
+        }
+      },
+      "status": {
+        "name": "房间概况",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "status",
+            "options": [
+              "status"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "房间概况正文",
+            "type": "text",
+            "default": "{title}\n{body}",
+            "hint": "可用变量：{body} {player} {room} {room_full_name} {room_name} {time} {title}；必须保留 {body}。"
+          }
+        }
+      },
+      "players": {
+        "name": "在线玩家",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "players",
+            "options": [
+              "players"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "在线玩家正文",
+            "type": "text",
+            "default": "{title}\n{body}",
+            "hint": "可用变量：{body} {player} {room} {room_full_name} {room_name} {time} {title}；必须保留 {body}。"
+          }
+        }
+      },
+      "profile": {
+        "name": "玩家资料",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "profile",
+            "options": [
+              "profile"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "玩家资料正文",
+            "type": "text",
+            "default": "{title}\n{body}",
+            "hint": "可用变量：{body} {player} {room} {room_full_name} {room_name} {time} {title}；必须保留 {body}。"
+          }
+        }
+      },
+      "inventory": {
+        "name": "玩家背包",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "inventory",
+            "options": [
+              "inventory"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "玩家背包正文",
+            "type": "text",
+            "default": "{title}\n{body}",
+            "hint": "可用变量：{body} {player} {room} {room_full_name} {room_name} {time} {title}；必须保留 {body}。"
+          }
+        }
+      },
+      "mods": {
+        "name": "模组列表",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "mods",
+            "options": [
+              "mods"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "模组列表正文",
+            "type": "text",
+            "default": "{title}\n{body}",
+            "hint": "可用变量：{body} {player} {room} {room_full_name} {room_name} {time} {title}；必须保留 {body}。"
+          }
+        }
+      },
+      "network": {
+        "name": "连接质量",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "network",
+            "options": [
+              "network"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "连接质量正文",
+            "type": "text",
+            "default": "{title}\n{body}",
+            "hint": "可用变量：{body} {player} {room} {room_full_name} {room_name} {time} {title}；必须保留 {body}。"
+          }
+        }
+      },
+      "query": {
+        "name": "扩展查询",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "query",
+            "options": [
+              "query"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "扩展查询正文",
+            "type": "text",
+            "default": "{title}\n{body}",
+            "hint": "可用变量：{body} {player} {room} {room_full_name} {room_name} {time} {title}；必须保留 {body}。"
+          }
+        }
+      },
+      "action": {
+        "name": "管理回执",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "action",
+            "options": [
+              "action"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "管理回执正文",
+            "type": "text",
+            "default": "{title}\n{body}",
+            "hint": "可用变量：{body} {player} {room} {room_full_name} {room_name} {time} {title}；必须保留 {body}。"
+          }
+        }
+      }
+    }
   },
   "allowed_sessions": {
     "description": "允许会话的 unified_msg_origin；必须明确登记，默认不开放",
     "type": "list",
-    "default": []
+    "default": [],
+    "invisible": true
   },
   "room_ids": {
     "description": "本插件开放的真实房间 ID；须同时在面板密钥范围内",
     "type": "list",
-    "default": []
+    "default": [],
+    "invisible": true
   },
   "room_aliases": {
     "description": "房间别名 JSON，例如 {\"1服\":\"example-room\"}",
     "type": "text",
-    "default": "{}"
+    "default": "{}",
+    "invisible": true
   },
   "default_room_id": {
     "description": "默认房间；留空时多房间询问选择",
     "type": "string",
-    "default": ""
+    "default": "",
+    "invisible": true
   },
   "public_queries": {
     "description": "群内可见内容；背包与位置按实际群需求开放",
@@ -45,150 +387,37 @@
       "network",
       "help",
       "mods"
-    ]
+    ],
+    "invisible": true
   },
   "player_bindings": {
     "description": "管理员已验证的 QQ→KU 映射 JSON；同名不作为验证",
     "type": "text",
-    "default": "{}"
-  },
-  "game_admins": {
-    "description": "游戏管理者 QQ；还须具备 AstrBot 原生管理员身份",
-    "type": "list",
-    "default": []
-  },
-  "panel_admins": {
-    "description": "面板管理员 QQ；详细接口仅授权私聊开放",
-    "type": "list",
-    "default": []
-  },
-  "allow_private": {
-    "description": "已登记私聊会话不需要额外 @",
-    "type": "bool",
-    "default": false
+    "default": "{}",
+    "invisible": true
   },
   "command_prefix": {
     "description": "确定性查询前缀；也支持真实 @机器人",
     "type": "string",
-    "default": "/dst"
+    "default": "/dst",
+    "invisible": true
   },
   "configuration_version": {
     "description": "配置模式：1 保留旧字段与混合聊天；2 使用下方全局默认和会话覆盖",
     "type": "int",
-    "default": 1,
+    "default": 3,
     "options": [
       1,
-      2
-    ]
+      2,
+      3
+    ],
+    "invisible": true
   },
   "defaults": {
     "description": "v2 全局默认设置；会话只能缩小全局授权",
-    "type": "object",
-    "items": {
-      "mode": {
-        "description": "交互模式（mixed：快捷指令直查，其他自然语言交给 AI；shortcut：仅快捷指令，AI 需写 AI:）",
-        "type": "string",
-        "default": "mixed",
-        "options": [
-          "shortcut",
-          "mixed"
-        ]
-      },
-      "rooms": {
-        "description": "允许房间真实 ID",
-        "type": "list",
-        "default": []
-      },
-      "defaultRoom": {
-        "description": "默认房间 ID",
-        "type": "string",
-        "default": ""
-      },
-      "roomAliases": {
-        "description": "房间别名",
-        "type": "dict",
-        "default": {}
-      },
-      "commandAliases": {
-        "description": "自定义完整指令 → 固定命令 kind 或 cap:能力ID",
-        "type": "dict",
-        "default": {}
-      },
-      "categories": {
-        "description": "允许读取的信息类别",
-        "type": "list",
-        "default": [
-          "status",
-          "players",
-          "profile",
-          "inventory",
-          "network",
-          "mods",
-          "help"
-        ]
-      },
-      "writeAllowlist": {
-        "description": "明确开放的写能力 ID（还须原生管理员和独立管理连接）",
-        "type": "list",
-        "default": []
-      },
-      "bindings": {
-        "description": "管理员已验证的 QQ → KU 绑定",
-        "type": "dict",
-        "default": {}
-      },
-      "pageSize": {
-        "description": "每页条数（1～10）",
-        "type": "int",
-        "default": 5
-      },
-      "style": {
-        "description": "展示样式",
-        "type": "string",
-        "default": "concise",
-        "options": [
-          "concise",
-          "detailed"
-        ]
-      },
-      "templates": {
-        "description": "按命令 kind 或能力 ID 自定义模板；只支持 {title} {body} {room} {player}",
-        "type": "dict",
-        "default": {}
-      },
-      "taskNotifications": {
-        "description": "管理任务结果通知",
-        "type": "bool",
-        "default": true
-      },
-      "queryTimeout": {
-        "description": "普通查询总超时秒数（2～20）",
-        "type": "int",
-        "default": 8
-      },
-      "inventoryTimeout": {
-        "description": "背包查询总超时秒数（5～40）",
-        "type": "int",
-        "default": 30
-      },
-      "directoryTTL": {
-        "description": "有请求时检查能力目录的间隔秒数（10～300）",
-        "type": "int",
-        "default": 60
-      },
-      "menuItems": {
-        "description": "菜单显示和顺序，固定命令 kind 或能力 ID；* 表示其余项，空列表隐藏菜单项（不改变授权）",
-        "type": "list",
-        "default": [
-          "*"
-        ]
-      },
-      "disabledCapabilities": {
-        "description": "实际停用的能力 ID；会话只能增加停用，不能移除全局停用",
-        "type": "list",
-        "default": []
-      }
-    }
+    "type": "dict",
+    "invisible": true,
+    "default": {}
   },
   "session_overrides": {
     "description": "会话覆盖：只有 overrideFields 中列出的字段覆盖；未选字段忽略表单自动填入的默认值",
@@ -338,6 +567,7 @@
           }
         }
       }
-    }
+    },
+    "invisible": true
   }
 }

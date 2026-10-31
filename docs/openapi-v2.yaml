@@ -1164,6 +1164,28 @@ paths:
         "202": { description: Asynchronous download, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareOperationEnvelope" } } } }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /system/software/actions/cancel:
+    post:
+      tags: [System]
+      operationId: cancelSoftwareDownload
+      x-dst-tool: {"risk": "normal"}
+      summary: Cancel the named software download or preparation before process replacement
+      description: Stops download or verification and prevents automatic application. Committed code and game worlds remain unchanged. Cannot cancel once the supervisor switch has been committed. Update network settings and explicitly start a new download afterwards; verified partial bytes may be reused.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operationId]
+              properties:
+                operationId: { type: string, pattern: '^[a-f0-9]{32}$' }
+      responses:
+        "200": { description: Preparation canceled, content: { application/json: { schema: { $ref: "#/components/schemas/SoftwareOperationEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /system/software/actions/apply:
     post:
       tags: [System]
@@ -4159,6 +4181,7 @@ paths:
       operationId: listGameReleases
       summary: List durable distributed game release and recovery records
       parameters:
+        - { name: pending, in: query, schema: { type: boolean, default: false }, description: Return unresolved releases including old recovery-required records; excludes succeeded, failed and abandoned. }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 10 } }
         - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
       responses:
@@ -5417,6 +5440,120 @@ paths:
         "202": { description: Player refresh job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /rooms/{roomId}/players/{playerId}/actions/give-item:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }]
+    post:
+      tags: [Players, Console]
+      operationId: giveRoomPlayerItem
+      x-dst-tool: {readOnly: false, destructive: true, risk: high, runtime: shard-ready, tags: [player, item, grant]}
+      summary: Give 1–40 known vanilla items to a confirmed online player once
+      description: Requires game management permission. Accepts only exact vanilla inventory item name or Prefab and an integer count in units. No Lua, custom commands, animals, buildings or arbitrary Mod prefabs. Confirms the shard-local player entity before dispatch. Never retries on migration or uncertain receipt. Inspect status, complete and granted; sent or absent output is not success. Full inventory may drop items at the player. Read the original item-grant receipt rather than repeating the action.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [item, count]
+              properties:
+                item: {type: string, minLength: 1, maxLength: 100}
+                count: {type: integer, minimum: 1, maximum: 40}
+      responses:
+        "201": {description: Correlated item grant result; does not imply successful delivery, content: {application/json: {schema: {$ref: '#/components/schemas/ItemGrantEnvelope'}}}}
+        "409": {$ref: '#/components/responses/Conflict'}
+        "422": {$ref: '#/components/responses/UnprocessableEntity'}
+        "503": {$ref: '#/components/responses/ServiceUnavailable'}
+  /rooms/{roomId}/players/{playerId}/item-grants/{runId}:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }, { $ref: "#/components/parameters/CommandRunID" }]
+    get:
+      tags: [Players, Console]
+      operationId: getRoomPlayerItemGrant
+      x-dst-tool: {readOnly: true, destructive: false, risk: low, tags: [player, item, receipt]}
+      summary: Read a fixed item grant receipt without exposing or executing console scripts
+      description: Requires game management permission and matching room and player. refresh reads only the original Runtime receipt for up to two minutes; never resubmits. Missing output remains uncertain. Cannot read raw commands, custom definitions or unrelated player runs.
+      parameters:
+        - {name: refresh, in: query, schema: {type: boolean, default: false}}
+      responses:
+        "200": {description: Original item grant evidence, content: {application/json: {schema: {$ref: '#/components/schemas/ItemGrantEnvelope'}}}}
+        "404": {$ref: '#/components/responses/NotFound'}
+  /rooms/{roomId}/players/{playerId}/actions/spawn-entity:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }]
+    post:
+      tags: [Players, Console]
+      operationId: spawnRoomPlayerEntity
+      x-dst-tool: {readOnly: false, destructive: true, risk: high, runtime: shard-ready, tags: [player, entity, spawn]}
+      summary: Spawn 1–5 allowlisted creatures near a confirmed online player once
+      description: Game management only. Exact names or Prefabs for warg (座狼/狗王), hound, spider, pigman, rabbit and bee. Bosses, beefalo, structures and Mod constructors are not accepted. No caller Lua, coordinates, command ID or classification flags. Confirms the player's current shard and preflights up to 40 land points 6–13 units away before spawning. Does not guarantee safety from game Mod bugs. A sent command, absent output or truncated receipt is uncertain. Read the original receipt and never automatically repeat, including after migration or partial failure.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [entity, count]
+              properties:
+                entity: {type: string, minLength: 1, maxLength: 100}
+                count: {type: integer, minimum: 1, maximum: 5}
+      responses:
+        '201': {description: Original spawn outcome; inspect status and spawned, content: {application/json: {schema: {$ref: '#/components/schemas/EntitySpawnEnvelope'}}}}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/UnprocessableEntity'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /rooms/{roomId}/players/{playerId}/entity-spawns/{runId}:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }, { $ref: "#/components/parameters/CommandRunID" }]
+    get:
+      tags: [Players, Console]
+      operationId: getRoomPlayerEntitySpawn
+      x-dst-tool: {readOnly: true, destructive: false, risk: low, tags: [player, entity, receipt]}
+      summary: Read only the original controlled entity spawn receipt
+      description: Game management permission, same room and player required. refresh only rereads the original Runtime receipt within its recovery window; no redispatch, scripts or other commands.
+      parameters: [{name: refresh, in: query, schema: {type: boolean, default: false}}]
+      responses:
+        '200': {description: Original controlled spawn evidence, content: {application/json: {schema: {$ref: '#/components/schemas/EntitySpawnEnvelope'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /rooms/{roomId}/workbench/actions/execute:
+    parameters: [{ $ref: '#/components/parameters/RoomID' }]
+    post:
+      tags: [Console]
+      operationId: executeBuiltinRoomCommand
+      x-dst-tool: {readOnly: false, destructive: true, risk: high, runtime: shard-ready, tags: [workbench, player, resurrect]}
+      summary: Execute a server-owned built-in game workbench recipe once
+      description: Game management only. Discover typed parameters through listBotCapabilities. No Lua, custom commands or caller classification flags. Online player recipes resolve the actual shard. Critical recipes require confirmed=true after explicit user confirmation. A confirmed execution receipt proves the recipe ran, not every asynchronous game effect. Read the original run rather than repeating uncertain actions. Resurrection uses resurrect_player and never kills a living player.
+      parameters: [{ $ref: '#/components/parameters/CSRFToken' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [commandId, arguments]
+              properties:
+                commandId: {type: string, minLength: 1, maxLength: 64}
+                worldId: {type: string, maxLength: 255}
+                arguments: {type: object, maxProperties: 16, additionalProperties: {type: [string, number, boolean]}}
+                confirmed: {type: boolean, default: false}
+      responses:
+        '201': {description: Original execution evidence; not proof of all game effects, content: {application/json: {schema: {$ref: '#/components/schemas/WorkbenchEnvelope'}}}}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/UnprocessableEntity'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+  /rooms/{roomId}/workbench/runs/{runId}:
+    parameters: [{ $ref: '#/components/parameters/RoomID' }, { $ref: '#/components/parameters/CommandRunID' }]
+    get:
+      tags: [Console]
+      operationId: getBuiltinRoomCommandRun
+      x-dst-tool: {readOnly: true, destructive: false, risk: low}
+      summary: Read only the original built-in workbench receipt without scripts
+      description: Game management only. Matching room and built-in recipe required. refresh reads the existing Runtime receipt and never redispatches. Custom and raw commands are excluded.
+      parameters: [{name: refresh, in: query, schema: {type: boolean, default: false}}]
+      responses:
+        '200': {description: Original execution evidence, content: {application/json: {schema: {$ref: '#/components/schemas/WorkbenchEnvelope'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
   /rooms/{roomId}/players/{playerId}/actions/kick:
     parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/PlayerID" }]
     post:
@@ -7028,6 +7165,76 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
   schemas:
+    EntitySpawnEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: {$ref: '#/components/schemas/EntitySpawn'}
+        error: {type: 'null'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    EntitySpawn:
+      type: object
+      required: [runId, roomId, worldId, playerId, prefab, name, requested, status, complete, executionOutcome, mayHaveExecuted, message]
+      properties:
+        runId: {type: string}
+        roomId: {type: string}
+        worldId: {type: string}
+        playerId: {type: string}
+        prefab: {type: string}
+        name: {type: string}
+        requested: {type: integer, minimum: 1, maximum: 5}
+        spawned: {type: integer, minimum: 0, maximum: 5}
+        status: {type: string, enum: [running, succeeded, failed, uncertain]}
+        complete: {type: boolean}
+        executionOutcome: {type: string, enum: [unconfirmed, confirmed, rejected]}
+        mayHaveExecuted: {type: boolean}
+        message: {type: string}
+        observedAt: {type: string, format: date-time}
+        spawnAudit: {$ref: '#/components/schemas/CommandSpawnAudit'}
+    ItemGrantEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: {$ref: '#/components/schemas/ItemGrant'}
+        error: {type: 'null'}
+        meta: {$ref: '#/components/schemas/Meta'}
+    ItemGrant:
+      type: object
+      required: [runId, roomId, worldId, playerId, prefab, name, requested, status, complete, executionOutcome, mayHaveExecuted, message]
+      properties:
+        runId: {type: string}
+        roomId: {type: string}
+        worldId: {type: string}
+        playerId: {type: string}
+        prefab: {type: string}
+        name: {type: string}
+        requested: {type: integer, minimum: 1, maximum: 40}
+        granted: {type: integer, minimum: 0, maximum: 40}
+        status: {type: string, enum: [running, succeeded, failed, uncertain]}
+        complete: {type: boolean}
+        executionOutcome: {type: string, enum: [unconfirmed, confirmed, rejected]}
+        mayHaveExecuted: {type: boolean}
+        message: {type: string}
+        observedAt: {type: string, format: date-time}
+        spawnAudit: {$ref: '#/components/schemas/CommandSpawnAudit'}
+    WorkbenchEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [runId, roomId, worldId, commandId, status, complete, executionOutcome, mayHaveExecuted, message]
+          properties:
+            runId: {type: string}
+            roomId: {type: string}
+            worldId: {type: string}
+            commandId: {type: string}
+            status: {type: string}
+            complete: {type: boolean}
+            executionOutcome: {type: string}
+            mayHaveExecuted: {type: boolean}
+            message: {type: string}
+            output: {type: object, properties: {text: {type: string}, truncated: {type: boolean}}}
     BotDirectoryEnvelope:
       type: object
       required: [data]
@@ -7051,6 +7258,7 @@ components:
                   id: {type: string}
                   title: {type: string}
                   category: {type: string}
+                  risk: {type: string, enum: [low, medium, high, critical]}
                   access: {type: string, enum: [read, write]}
                   contractVersion: {type: integer}
                   schemaRevision: {type: string}
@@ -7081,6 +7289,9 @@ components:
             data: {}
             jobId: {type: string}
             queryRunId: {type: string}
+            grantRunId: {type: string}
+            spawnRunId: {type: string}
+            workbenchRunId: {type: string}
             error:
               type: object
               properties:
@@ -10281,12 +10492,13 @@ components:
     BackupScheduleDefaults:
       type: object
       additionalProperties: false
-      required: [name, schedule, timezone, keep]
+      required: [name, schedule, timezone, keep, mode]
       properties:
         name: { type: string, default: "房间定时备份" }
         schedule: { type: string, default: "0 4 * * *" }
         timezone: { type: string, default: "Asia/Shanghai" }
         keep: { type: integer, minimum: 1, maximum: 100, default: 7 }
+        mode: { type: string, enum: [automatic, hot-consistent, cold-consistent], default: automatic }
     BackupScheduleInput:
       type: object
       additionalProperties: false
@@ -10299,6 +10511,7 @@ components:
         schedule: { type: string, minLength: 1, maxLength: 128, description: Five-field or six-field Cron; new plans default to daily at 04:00. }
         timezone: { type: string, minLength: 1, maxLength: 64, description: IANA time zone; new plans default to Asia/Shanghai. }
         keep: { type: integer, minimum: 1, maximum: 100, description: Recent successful automatic snapshots to keep; defaults to 7 only when creating. Manual/protection backups and real saves are preserved. }
+        mode: { type: string, enum: [automatic, hot-consistent, cold-consistent], description: Preserve when omitted. New plans and old tasks without mode use automatic. Automatic uses an online backup only when every world runs; otherwise it stops and restores running worlds. Explicit hot-consistent never stops worlds or falls back to cold. Cold backups use the room maintenance announcement policy before stopping. Mode selection applies to automation tasks, not legacy interval policies. Pause an old interval policy separately when replacing it with a new plan. }
         clearRetention: { type: boolean, default: false, description: Disable automatic snapshot cleanup; mutually exclusive with keep. }
       not:
         anyOf:
@@ -10588,6 +10801,7 @@ components:
       type: object
       additionalProperties: false
       properties:
+        includeModDiagnostics: { type: boolean, default: true, description: Include optional mod advisory scans. False skips display diagnostics only; readiness, plan hash, safety checks and the pre-mutation baseline capture remain unchanged. }
         targetIds: { type: array, maxItems: 100, items: { type: string }, description: Select all installations on these targets; mutually exclusive with installations }
         installations: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/GameReleaseInstallationSelection" }, description: Exact seed installations; shared installations and connected rooms are included transitively. Mutually exclusive with targetIds. }
         desiredVersion: { type: string, pattern: '^[0-9]{1,64}$' }
@@ -10839,6 +11053,7 @@ components:
         nextAction: { type: string, enum: [retry_release, preview_and_retry, inspect_release], description: Resume the original release; inspect_release queries unknown writes without resending }
         id: { type: string, format: uuid }
         sourceJobId: { type: string, format: uuid }
+        currentJobId: {type: string, description: Current retry job; sourceJobId remains the original publication identity.}
         stage: { $ref: "#/components/schemas/GameReleaseStage" }
         plan: { $ref: "#/components/schemas/GameReleasePlan" }
         protectionBackupIds: { type: array, items: { type: string } }
@@ -13373,7 +13588,7 @@ components:
         attempt: { type: integer }
         id: { type: string }
         version: { type: string }
-        phase: { type: string, enum: [downloading, verifying, prepared, restarting, succeeded, failed, interrupted, rolled_back, superseded], description: 'superseded means the healthy running version already covers an old prepared or interrupted target; it does not claim that the old online-update operation succeeded.' }
+        phase: { type: string, enum: [downloading, verifying, prepared, restarting, succeeded, failed, interrupted, rolled_back, superseded, canceled], description: 'superseded means the healthy running version already covers an old prepared or interrupted target; it does not claim that the old online-update operation succeeded.' }
         progress: { type: integer, minimum: 0, maximum: 100 }
         downloadedBytes: { type: integer, format: int64 }
         totalBytes: { type: integer, format: int64 }
@@ -15432,7 +15647,7 @@ components:
         roomId: { type: string }
         roomName: { type: string }
         message: { type: string }
-        source: { type: string, enum: [manual, room_stop, room_restart, game_update, mod_sync, automation] }
+        source: { type: string, enum: [manual, room_stop, room_restart, game_update, mod_sync, automation, backup] }
         status: { type: string, enum: [queued, sending, succeeded, partial, failed, skipped, canceled] }
         jobId: { type: string, format: uuid }
         successCount: { type: integer, minimum: 0 }

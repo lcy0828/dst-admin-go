@@ -97,7 +97,7 @@ func (b *AIBackend) InvokeAPI(ctx context.Context, p aicontrol.Principal, op *ap
 	}
 	if result.Error != nil {
 		detail, _ := json.Marshal(result.Error)
-		return nil, fmt.Errorf("HTTP %d: %s", writer.status, detail)
+		return nil, &aicontrol.PlatformError{Status: writer.status, Code: result.Error.Code, Message: result.Error.Message, Payload: detail}
 	}
 	if writer.status >= 400 {
 		return nil, fmt.Errorf("AI_PLATFORM_HTTP_%d", writer.status)

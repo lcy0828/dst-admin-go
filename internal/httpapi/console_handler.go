@@ -1,10 +1,15 @@
 package httpapi
 
 import (
+	"context"
+	"dont/internal/aicontrol"
+	"dont/internal/playerinventory"
 	"dont/internal/requesttiming"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	consoleapi "dont/internal/console"
 	"dont/internal/rooms"
@@ -12,7 +17,15 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type ConsoleHandler struct{ console *consoleapi.Service }
+type OnlinePlayerLocator interface {
+	OnlineWorld(context.Context, string, string) (rooms.World, error)
+}
+type ConsoleHandler struct {
+	console *consoleapi.Service
+	locator OnlinePlayerLocator
+}
+
+func (h *ConsoleHandler) ConfigurePlayerLocator(locator OnlinePlayerLocator) { h.locator = locator }
 
 func NewConsoleHandler(service *consoleapi.Service) *ConsoleHandler {
 	return &ConsoleHandler{console: service}
@@ -29,9 +42,71 @@ func (h *ConsoleHandler) Register(v2 *gin.RouterGroup) {
 	roomsGroup.GET("/command-runs", h.runs)
 	roomsGroup.DELETE("/command-runs", h.deleteRuns)
 	roomsGroup.GET("/command-runs/:runId", h.run)
+	roomsGroup.POST("/workbench/actions/execute", h.workbench)
+	roomsGroup.GET("/workbench/runs/:runId", h.workbenchRun)
+	roomsGroup.POST("/players/:playerId/actions/give-item", h.giveItem)
+	roomsGroup.GET("/players/:playerId/item-grants/:runId", h.itemGrant)
+	roomsGroup.POST("/players/:playerId/actions/spawn-entity", h.spawnEntity)
+	roomsGroup.GET("/players/:playerId/entity-spawns/:runId", h.entitySpawn)
 	worldGroup := roomsGroup.Group("/worlds/:worldId")
 	worldGroup.POST("/commands", h.execute)
 	worldGroup.POST("/raw-commands", h.executeRaw)
+}
+
+func (h *ConsoleHandler) giveItem(c *gin.Context) {
+	raw, err := io.ReadAll(io.LimitReader(c.Request.Body, 1025))
+	if err != nil || len(raw) > 1024 {
+		Failure(c, 422, "INVALID_ITEM_GRANT", "发放参数无效；仅支持已知物品和 1–40 个数量", nil)
+		return
+	}
+	body, err := aicontrol.StrictBotJSON(raw)
+	item, _ := body["item"].(string)
+	count, numeric := body["count"].(float64)
+	if err != nil || len(body) != 2 || !numeric || count < 1 || count > 40 || count != float64(int(count)) {
+		Failure(c, 422, "INVALID_ITEM_GRANT", "仅接受 item 和整数 count（1–40）；不接受脚本或命令定义", nil)
+		return
+	}
+	if _, err = consoleapi.ResolveGrantItem(item, int(count)); err != nil {
+		Failure(c, 422, "INVALID_ITEM_GRANT", "物品名称不唯一或不在已知原版物品目录中；不能发放生物与建筑", nil)
+		return
+	}
+	if h.locator == nil {
+		Failure(c, 503, "PLAYER_LOCATION_UNAVAILABLE", "暂时无法确认玩家所在世界，未发放", nil)
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 25*time.Second)
+	defer cancel()
+	world, err := h.locator.OnlineWorld(ctx, c.Param("roomId"), c.Param("playerId"))
+	if err != nil {
+		code := playerinventory.Code(err)
+		if code == "SAVE_INVALID" || code == "" {
+			code = "PLAYER_LOCATION_UNAVAILABLE"
+		}
+		Failure(c, 409, code, "无法确认在线玩家所在世界，未发放", nil)
+		return
+	}
+	result, err := h.console.GiveItem(ctx, c.Param("roomId"), world.ID, c.Param("playerId"), item, int(count))
+	if err != nil {
+		consoleFailure(c, err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	Success(c, http.StatusCreated, result)
+}
+
+func (h *ConsoleHandler) itemGrant(c *gin.Context) {
+	refresh, err := strconv.ParseBool(c.DefaultQuery("refresh", "false"))
+	if err != nil {
+		Failure(c, 400, "INVALID_QUERY", "refresh 必须为布尔值", nil)
+		return
+	}
+	result, err := h.console.ItemGrant(c.Request.Context(), c.Param("roomId"), c.Param("playerId"), c.Param("runId"), refresh)
+	if err != nil {
+		consoleFailure(c, err)
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	Success(c, http.StatusOK, result)
 }
 
 func (h *ConsoleHandler) definitions(c *gin.Context) {

@@ -81,37 +81,94 @@ COMMANDS = (
             "详细",
             "怎么样",
             "运行正常吗",
+            "状态怎么样",
         ),
         "1服状态",
     ),
     Command(
         "players",
         "在线玩家",
-        ("谁在线", "有哪些人", "有哪些玩家", "在线玩家", "玩家列表", "玩家", "现在谁在线"),
+        (
+            "谁在线",
+            "有哪些人",
+            "有哪些玩家",
+            "在线玩家",
+            "玩家列表",
+            "玩家",
+            "现在谁在线",
+            "现在有谁在线",
+            "目前谁在线",
+            "目前在线玩家",
+            "有几个人",
+            "多少人在线",
+            "在线多少人",
+            "有多少人在玩",
+            "现在有多少人在玩",
+        ),
         "1服谁在线",
     ),
     Command(
         "profile",
         "玩家信息",
-        ("查玩家", "他在哪", "他在哪里", "查他", "查我", "我在哪"),
+        (
+            "查玩家",
+            "玩家资料",
+            "个人资料",
+            "个人信息",
+            "他在哪",
+            "他在哪里",
+            "查他",
+            "查我",
+            "我在哪",
+        ),
         "查玩家 昵称",
         player_required=True,
     ),
     Command(
         "inventory",
         "玩家背包",
-        ("查背包", "查装备", "查物资", "查物品", "背包", "查他的背包", "查他背包"),
+        (
+            "查背包",
+            "查询背包",
+            "查询玩家背包",
+            "查询 玩家背包",
+            "查看玩家背包",
+            "查看 玩家背包",
+            "玩家背包",
+            "玩家的背包",
+            "玩家装备",
+            "物品栏",
+            "装备",
+            "查装备",
+            "查物资",
+            "查物品",
+            "背包",
+            "查他的背包",
+            "查他背包",
+        ),
         "查背包 昵称",
         player_required=True,
     ),
     Command(
         "network",
         "网络档位",
-        ("延迟", "谁卡", "网络", "网络质量", "网络连接质量", "查网络", "查他网络"),
+        ("延迟", "谁卡", "网络", "网络延迟", "网络质量", "网络连接质量", "查网络", "查他网络"),
         "1服网络",
     ),
     Command(
-        "mods", "模组列表", ("模组", "模组列表", "安装了哪些模组", "装了哪些模组"), "1服模组列表"
+        "mods",
+        "模组列表",
+        (
+            "模组",
+            "模组列表",
+            "安装了哪些模组",
+            "装了哪些模组",
+            "模组有哪些",
+            "列出模组",
+            "mod",
+            "有哪些mod",
+        ),
+        "1服模组列表",
     ),
     Command(
         "backups",
@@ -139,7 +196,10 @@ COMMANDS = (
     Command("cancel", "取消选择", ("取消", "返回", "取消选择"), "取消", visibility="help"),
 )
 BY_KIND = {command.kind: command for command in COMMANDS}
-BY_PHRASE = {phrase: command for command in COMMANDS for phrase in command.phrases}
+# The displayed label is always executable; menus and shortcuts have one source.
+BY_PHRASE = {
+    phrase: command for command in COMMANDS for phrase in (*command.phrases, command.label)
+}
 
 
 def menu_commands(actor):

@@ -158,6 +158,33 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.state = State()
         self.engine = Engine(self.gateway, self.state, {"1服": "r1", "2服": "r2"})
 
+    async def test_inventory_query_verb_is_not_part_of_player_name(self):
+        for text in (
+            "查询 example-player 背包",
+            "查看 example-player 背包",
+            "查 example-player 背包",
+            "查询 example-player 的背包",
+        ):
+            with self.subTest(text=text):
+                intent = parse(text, {})
+                self.assertEqual(intent.kind, "inventory")
+                self.assertEqual(intent.player, "example-player")
+        intent = parse("查询 example-player 网络", {})
+        self.assertEqual(intent.player, "example-player")
+
+    async def test_inventory_without_name_requests_player_and_does_not_resolve_generic_word(self):
+        for text in ("查询 玩家背包", "查询玩家背包", "玩家背包", "查询背包"):
+            with self.subTest(text=text):
+                self.state = State()
+                self.engine.state = self.state
+                self.gateway.calls.clear()
+                result = await self.engine.handle(actor(), text, woken=True)
+                self.assertEqual(result.outcome, "needs_selection", result.text)
+                self.assertIn("玩家昵称", result.text)
+                self.assertFalse(
+                    any(name == "api_resolveRoomPlayer" for name, _ in self.gateway.calls)
+                )
+
     async def test_fast_paths_do_not_require_model(self):
         for text in (
             "1服查房",
@@ -237,9 +264,9 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
     async def test_inventory_source_and_network_do_not_invent_metrics(self):
         result = await self.engine.handle(actor(), "查背包 玩家 A 🦌", woken=True)
         self.assertIn("存档快照", result.text)
-        self.assertIn("partial", result.text)
-        self.assertIn("twigs ×12", result.text)
-        self.assertIn("存档时间：2026-01-01T00:00:00Z", result.text)
+        self.assertIn("部分内容", result.text)
+        self.assertIn("树枝 ×12", result.text)
+        self.assertIn("存档时间：2026-01-01 08:00:00（北京时间）", result.text)
         self.assertNotIn("01:00:00Z", result.text)
         result = await self.engine.handle(actor(), "查玩家 A 🦌网络", woken=True)
         self.assertIn("netScore 0", result.text)

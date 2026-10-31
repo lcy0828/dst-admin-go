@@ -93,6 +93,34 @@ func TestMCPViewsPaginationMetadataAndDispatcher(t *testing.T) {
 		}
 	}
 
+	// Notification dependencies are available to permitted keys in the small
+	// bot view, but adding them to the view must not grant new token scope.
+	for _, name := range []string{"api_getRoom", "api_getRoomPlayer", "api_streamWorldRuntimeEvents", "api_listRoomRuntimeEvents", "api_listRoomChatLogs"} {
+		if !botNames[name] {
+			t.Fatal("missing unified notification dependency", name)
+		}
+		for _, tool := range botView.Tools {
+			if tool.Name == name && (tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint) {
+				t.Fatal("notification dependency must be read-only", name)
+			}
+		}
+	}
+	originalKey := key
+	_, key, err = store.CreateToken(TokenInput{Name: "reader", Days: 1, Profile: ProfileGameRead, RoomIDs: []string{"room-a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var readerView mcp.ListToolsResult
+	if e := json.Unmarshal(request("?view=bot", "tools/list", map[string]any{}), &readerView); e != nil {
+		t.Fatal(e)
+	}
+	for _, tool := range readerView.Tools {
+		if slices.Contains([]string{"api_getRoom", "api_getRoomPlayer", "api_streamWorldRuntimeEvents", "api_listRoomRuntimeEvents", "api_listRoomChatLogs"}, tool.Name) {
+			t.Fatal("bot view expanded game-read scope", tool.Name)
+		}
+	}
+	key = originalKey
+
 	seen := map[string]bool{}
 	cursor := ""
 	for page := 0; page < 20; page++ {

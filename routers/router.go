@@ -825,6 +825,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err != nil {
 		return nil, err
 	}
+	distributedBackupService.ConfigureNotifier(gameNotificationService)
 	if err := distributedBackupService.ConfigureMutationObserver(runtimeObservationCoordinator); err != nil {
 		return nil, err
 	}
@@ -1094,6 +1095,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		})
 	}
 	playerHandler := httpapi.NewPlayerHandler(playerService, jobService)
+	consoleHandler.ConfigurePlayerLocator(playerService)
 	modUpdateStore := modupdates.NewStore(models.DB(), tablePrefix)
 	if err := modUpdateStore.Migrate(); err != nil {
 		return nil, err
