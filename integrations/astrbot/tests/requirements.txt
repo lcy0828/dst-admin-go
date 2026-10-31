@@ -1,0 +1,4 @@
+# Run the same real framework adapters in CI and local release verification.
+AstrBot==4.29.3
+httpx==0.28.1
+anyio==4.15.1

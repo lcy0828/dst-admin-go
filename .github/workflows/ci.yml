@@ -71,6 +71,11 @@ jobs:
         if: steps.reuse.outputs.reused != 'true'
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: integrations/astrbot/tests/requirements.txt
+      - name: Install AstrBot test dependencies
+        if: steps.reuse.outputs.reused != 'true'
+        run: python -m pip install -r integrations/astrbot/tests/requirements.txt
       - run: python -m unittest discover -s integrations/astrbot/tests -v
         if: steps.reuse.outputs.reused != 'true'
       - uses: actions/setup-node@v4

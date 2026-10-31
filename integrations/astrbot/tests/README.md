@@ -3,10 +3,12 @@
 使用 Python 3.12，在安装 AstrBot 4.29.3 的独立测试环境运行：
 
 ```bash
+python -m pip install -r integrations/astrbot/tests/requirements.txt
 python -m unittest discover -s integrations/astrbot/tests -v
 ```
 
 未安装 AstrBot 时，核心逻辑仍可测试，框架适配用例会跳过。完整验收必须确认框架测试实际运行，不能只看最终 `OK`。
+CI 安装上述固定版本依赖，实际运行框架适配用例。
 
 | 场景 | 验证内容 |
 | --- | --- |
