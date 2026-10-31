@@ -264,6 +264,11 @@ func (p *SteamProvider) searchCommunityPage(ctx context.Context, options SearchO
 	request.Header.Set("User-Agent", steamCommunityUserAgent)
 	request.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	request.Header.Set("Accept", "text/html")
+	// Some Steam Community edges return a persistent 429 for the gzip-only
+	// representation requested automatically by net/http, while the same page
+	// is available uncompressed. Choose one representation up front; never
+	// retry a real rate limit. The response size and concurrency limits remain.
+	request.Header.Set("Accept-Encoding", "identity")
 	response, err := p.HTTPClient.Do(request)
 	if err != nil {
 		return nil, -1, safeNetworkError(err)
@@ -648,6 +653,7 @@ func (p *SteamProvider) fetchCommunityMetadata(ctx context.Context, id string) (
 	}
 	request.Header.Set("User-Agent", steamCommunityUserAgent)
 	request.Header.Set("Accept", "text/html")
+	request.Header.Set("Accept-Encoding", "identity")
 	response, err := p.HTTPClient.Do(request)
 	if err != nil {
 		return communityMetadataCache{Err: safeNetworkError(err)}, false

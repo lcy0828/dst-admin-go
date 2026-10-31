@@ -17,8 +17,8 @@ immediately while worlds run, without restarting the service or disconnecting Ag
 
 Examples: `http://proxy.example.com:7890` or `socks5h://proxy.example.com:1080`.
 With `socks5h`, the proxy resolves destination names. Proxy URLs support credentials;
-URL-encode special characters. The saved proxy URL is treated as a secret and is never
-returned in plaintext. Leave it blank to retain it; select Direct or System proxy to stop using it.
+URL-encode special characters. The endpoint remains visible while saved credentials stay
+hidden and are retained when the address is unchanged. Select Direct or System proxy to stop using it.
 
 Inside Docker, `127.0.0.1` / `localhost` refers to the container. Use a host address
 reachable from the management container, and allow connections from that container.
@@ -61,7 +61,12 @@ after changing network settings.
 Authors and Community descriptions load separately from the main search. Images use
 authenticated same-origin thumbnail requests, with placeholders on failure. Network
 failures preserve known metadata. Historical display data never proves that an installed
-mod is current. Wait before retrying when the upstream service applies a rate limit.
+mod is current.
+
+When Steam limits access, the page shows the wait time and blocks resubmitting the same
+query during that period. Retry manually after the countdown; expiry does not send a request.
+A known ID can still use the independent API when name search is limited. If that item
+also needs the same Community page, it must wait too. ID failures are not labeled as name-search failures.
 
 ## Configuration file and environment
 

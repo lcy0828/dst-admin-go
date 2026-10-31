@@ -186,6 +186,15 @@ func (t *workshopTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 	}
 	release := func() { <-t.limits.slots[kind] }
+	// A request may have waited behind the response that established this
+	// cooldown. Do not send the already-queued work after that 429.
+	t.limits.mu.Lock()
+	until = t.limits.cooldown[key]
+	t.limits.mu.Unlock()
+	if until.After(time.Now()) {
+		release()
+		return nil, &NetworkError{Code: "WORKSHOP_RATE_LIMITED", Status: 429, RetryAfter: max(1, int(time.Until(until).Seconds()))}
+	}
 	if kind == 2 {
 		var proxy *url.URL
 		if t.base.Proxy != nil {
