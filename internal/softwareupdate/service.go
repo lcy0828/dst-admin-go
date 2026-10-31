@@ -323,7 +323,7 @@ func (w *progressWriter) Write(data []byte) (int, error) {
 	if now.Sub(w.last) >= 250*time.Millisecond || w.count == w.total {
 		w.last = now
 		w.service.mu.Lock()
-		if op := w.service.operation; op != nil && op.ID == w.id {
+		if op := w.service.operation; op != nil && op.ID == w.id && op.Phase == "downloading" {
 			op.DownloadedBytes = w.count
 			op.TotalBytes = w.total
 			op.UpdatedAt = now.UTC()
@@ -348,6 +348,9 @@ func (s *Service) phase(id, phase string, progress int, failure error, releaseID
 	}
 	if state.Operation == nil || state.Operation.ID != id || s.operation == nil || s.operation.ID != id {
 		return ErrInvalid
+	}
+	if state.Operation.Phase == "canceled" {
+		return context.Canceled
 	}
 	op := *s.operation
 	op.Phase = phase
@@ -383,6 +386,57 @@ func (s *Service) download(ctx context.Context, operation Operation, source stri
 		close(done)
 	}()
 	finalErr = s.prepareWithClient(ctx, operation, source, client)
+}
+
+// CancelDownload cancels only the named preparation operation. The committed
+// program and supervisor pending switch remain untouched. Persist cancellation
+// before stopping the worker so an overlapping prepared response cannot apply it.
+func (s *Service) CancelDownload(ctx context.Context, id string) (Operation, error) {
+	s.mu.Lock()
+	state, err := readState(s.config.Root)
+	if err != nil {
+		s.mu.Unlock()
+		return Operation{}, err
+	}
+	if state.Operation == nil || state.Operation.ID != id {
+		s.mu.Unlock()
+		return Operation{}, ErrNotPrepared
+	}
+	operation := *state.Operation
+	if s.operation != nil && s.operation.ID == id {
+		operation = *s.operation
+	}
+	if state.Pending != nil || s.paused || operation.Phase == "restarting" {
+		s.mu.Unlock()
+		return Operation{}, ErrBusy
+	}
+	switch operation.Phase {
+	case "downloading", "verifying", "prepared", "canceled":
+	default:
+		s.mu.Unlock()
+		return Operation{}, ErrNotPrepared
+	}
+	operation.Phase, operation.Error, operation.BytesPerSecond = "canceled", "", 0
+	operation.UpdatedAt = time.Now().UTC()
+	state.Operation = &operation
+	if err := writeState(s.config.Root, state); err != nil {
+		s.mu.Unlock()
+		return Operation{}, err
+	}
+	s.operation = &operation
+	cancel, done := s.cancel, s.done
+	if cancel != nil {
+		cancel()
+	}
+	s.mu.Unlock()
+	if cancel != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return operation, ctx.Err()
+		}
+	}
+	return operation, nil
 }
 
 func (s *Service) prepare(ctx context.Context, operation Operation, source string) error {
@@ -433,7 +487,7 @@ func (s *Service) prepareWithClient(ctx context.Context, operation Operation, so
 	archive, err := VerifiedArchive(ctx, s.config.Root, client, release.Archive, source, fields[0], func(p DownloadProgress) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if op := s.operation; op != nil && op.ID == operation.ID {
+		if op := s.operation; op != nil && op.ID == operation.ID && op.Phase == "downloading" {
 			op.DownloadedBytes = p.Bytes
 			op.TotalBytes = p.Total
 			op.BytesPerSecond = p.Speed

@@ -387,3 +387,38 @@ func TestGameReleaseHTTPForwardsConfirmedFinishWithoutRestart(t *testing.T) {
 		t.Fatalf("request=%+v", fixture.retryRequest)
 	}
 }
+
+type pendingReleaseHTTPFixture struct {
+	*gameReleaseHTTPFixture
+	pendingCalls int
+}
+
+func (f *pendingReleaseHTTPFixture) ListPending(limit, offset int) ([]gameupdate.Release, int, error) {
+	f.pendingCalls++
+	return []gameupdate.Release{{ID: "older-recovery", Stage: gameupdate.ReleaseStageRecoveryRequired}}, 1, nil
+}
+func TestGameReleaseHTTPPendingListAndOptionalModDiagnostics(t *testing.T) {
+	fixture := &gameReleaseHTTPFixture{plan: gameReleaseHTTPPlan(), releases: map[string]gameupdate.Release{}}
+	router, jobs := newGameReleaseHandlerApp(t, fixture)
+	response := performJSON(router, http.MethodPost, "/api/v2/game/releases/preview", map[string]any{"includeModDiagnostics": false}, nil, "")
+	assertStatus(t, response, 200)
+	if fixture.previewRequest.IncludeModDiagnostics == nil || *fixture.previewRequest.IncludeModDiagnostics {
+		t.Fatal(fixture.previewRequest)
+	}
+	response = performJSON(router, http.MethodGet, "/api/v2/game/releases?pending=true", nil, nil, "")
+	assertStatus(t, response, 503) // unsupported readers must fail closed
+	pending := &pendingReleaseHTTPFixture{gameReleaseHTTPFixture: fixture}
+	h := NewGameUpdateHandler(nil, jobs)
+	if err := h.ConfigureReleases(pending); err != nil {
+		t.Fatal(err)
+	}
+	app := gin.New()
+	h.Register(app.Group("/api/v2"))
+	response = performJSON(app, http.MethodGet, "/api/v2/game/releases?pending=true&limit=1", nil, nil, "")
+	assertStatus(t, response, 200)
+	if pending.pendingCalls != 1 || !strings.Contains(response.Body.String(), "older-recovery") {
+		t.Fatal(response.Body.String())
+	}
+	response = performJSON(app, http.MethodGet, "/api/v2/game/releases?pending=invalid", nil, nil, "")
+	assertStatus(t, response, 422)
+}

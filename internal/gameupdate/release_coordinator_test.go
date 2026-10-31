@@ -306,6 +306,10 @@ func TestReleaseCoordinatorRetrySkipsVerifiedInstallation(t *testing.T) {
 	if fixture.runtime.updateCounts[firstKey] != 1 || fixture.runtime.updateCounts[failedKey] != 2 {
 		t.Fatalf("update counts=%v", fixture.runtime.updateCounts)
 	}
+	stored, readErr := fixture.coordinator.Get(value.ID)
+	if readErr != nil || value.CurrentJobID != "retry-job" || stored.CurrentJobID != "retry-job" || stored.SourceJobID != value.SourceJobID {
+		t.Fatal(value, stored, readErr)
+	}
 	if len(notifier.calls) != 1 || notifier.calls[0].jobID != "retry-job" {
 		t.Fatalf("retry notifier calls=%#v", notifier.calls)
 	}

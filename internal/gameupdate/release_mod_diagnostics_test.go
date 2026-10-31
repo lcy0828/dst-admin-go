@@ -77,3 +77,24 @@ func TestAdvisoryPersistenceFailureDoesNotCancelProtectedGameUpdate(t *testing.T
 		t.Fatal(stored, err)
 	}
 }
+
+func TestPreviewCanSkipAdvisoriesWithoutSkippingBaselineOrSafety(t *testing.T) {
+	f := newReleaseCoordinatorFixture(t, ReleaseLoadConfirmationNone)
+	d := &diagnosticObserver{t: t, runtime: f.runtime}
+	f.coordinator.ConfigureModDiagnostics(d)
+	skip := false
+	request := ReleasePreviewRequest{IncludeModDiagnostics: &skip, Policy: ReleasePolicyInput{LoadConfirmation: ReleaseLoadConfirmationNone, TimeoutSeconds: 30}}
+	fast, err := f.coordinator.Preview(context.Background(), request)
+	if err != nil || !fast.Ready || len(fast.ModDiagnostics) != 0 || d.previews != 0 {
+		t.Fatal(fast, err, d.previews)
+	}
+	request.IncludeModDiagnostics = nil
+	full, err := f.coordinator.Preview(context.Background(), request)
+	if err != nil || fast.PlanHash != full.PlanHash || fast.Ready != full.Ready || d.previews != 1 {
+		t.Fatal(fast, full, err)
+	}
+	value, err := f.coordinator.Publish(context.Background(), ReleasePublishRequest{ID: "release-fast-preview", Plan: fast})
+	if err != nil || value.Stage != ReleaseStageSucceeded || d.captures != 1 {
+		t.Fatal(value.Stage, err, d.captures)
+	}
+}

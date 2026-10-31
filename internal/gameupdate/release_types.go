@@ -82,13 +82,14 @@ type ReleaseInstallationSelection struct {
 }
 
 type ReleasePreviewRequest struct {
-	Installations    []ReleaseInstallationSelection `json:"installations,omitempty"`
-	roomID           string
-	installationKeys map[string]bool
-	observeAfter     time.Time
-	DesiredVersion   string             `json:"desiredVersion,omitempty"`
-	TargetIDs        []string           `json:"targetIds,omitempty"`
-	Policy           ReleasePolicyInput `json:"policy"`
+	IncludeModDiagnostics *bool                          `json:"includeModDiagnostics,omitempty"`
+	Installations         []ReleaseInstallationSelection `json:"installations,omitempty"`
+	roomID                string
+	installationKeys      map[string]bool
+	observeAfter          time.Time
+	DesiredVersion        string             `json:"desiredVersion,omitempty"`
+	TargetIDs             []string           `json:"targetIds,omitempty"`
+	Policy                ReleasePolicyInput `json:"policy"`
 }
 
 type ReleaseCreateRequest struct {
@@ -211,6 +212,7 @@ type ReleaseShardResult struct {
 }
 
 type Release struct {
+	CurrentJobID          string                      `json:"currentJobId,omitempty"`
 	ModDiagnosticsWarning string                      `json:"modDiagnosticsWarning,omitempty"`
 	PlanHistory           []ReleasePlan               `json:"planHistory,omitempty"`
 	WritingStarted        bool                        `json:"writingStarted,omitempty"`

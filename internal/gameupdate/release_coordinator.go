@@ -94,7 +94,7 @@ func (c *ReleaseCoordinator) ConfigureMutationObserver(observer runtimedriver.Ru
 
 func (c *ReleaseCoordinator) Preview(ctx context.Context, request ReleasePreviewRequest) (ReleasePlan, error) {
 	plan, err := c.planner.Preview(ctx, request)
-	if err == nil && c.modDiagnostics != nil {
+	if err == nil && c.modDiagnostics != nil && (request.IncludeModDiagnostics == nil || *request.IncludeModDiagnostics) {
 		plan.ModDiagnostics = c.modDiagnostics.Preflight(ctx, releaseModScopes(plan))
 	}
 	return plan, err
@@ -113,6 +113,10 @@ func (c *ReleaseCoordinator) RequiresProtection(id string) (bool, error) {
 
 func (c *ReleaseCoordinator) List(limit, offset int) ([]Release, int, error) {
 	return c.store.List(limit, offset)
+}
+
+func (c *ReleaseCoordinator) ListPending(limit, offset int) ([]Release, int, error) {
+	return c.store.list(limit, offset, true)
 }
 
 func (c *ReleaseCoordinator) Publish(ctx context.Context, request ReleasePublishRequest) (Release, error) {
@@ -218,6 +222,7 @@ func (c *ReleaseCoordinator) retry(ctx context.Context, id string, request Relea
 		if value.Stage != ReleaseStageFailed && value.Stage != ReleaseStageRecoveryRequired {
 			return value, ErrReleaseConflict
 		}
+		value.CurrentJobID = notificationJobID
 		if request.FinishWithoutRestart {
 			if request.ValidateUnknown || request.PlanHash != value.Plan.PlanHash || request.Confirmation != value.Plan.PlanHash {
 				return value, ErrReleaseConfirmation

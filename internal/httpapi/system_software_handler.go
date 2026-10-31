@@ -1,9 +1,14 @@
 package httpapi
 
 import (
+	"context"
+	"dont/internal/aicontrol"
+	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"dont/internal/softwareupdate"
 	"dont/internal/systemsettings"
@@ -23,6 +28,30 @@ func (h *SystemSoftwareHandler) Register(v2 *gin.RouterGroup) {
 	v2.GET("/system/software/check", h.check)
 	v2.POST("/system/software/actions/update", h.update)
 	v2.POST("/system/software/actions/apply", h.apply)
+	v2.POST("/system/software/actions/cancel", h.cancel)
+}
+
+func (h *SystemSoftwareHandler) cancel(c *gin.Context) {
+	raw, err := io.ReadAll(io.LimitReader(c.Request.Body, 1025))
+	if err != nil || len(raw) > 1024 {
+		softwareFailure(c, softwareupdate.ErrInvalid)
+		return
+	}
+	input, err := aicontrol.StrictBotJSON(raw)
+	id, ok := input["operationId"].(string)
+	decoded, decodeErr := hex.DecodeString(id)
+	if err != nil || !ok || len(input) != 1 || len(id) != 32 || len(decoded) != 16 || decodeErr != nil {
+		softwareFailure(c, softwareupdate.ErrInvalid)
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+	value, err := h.service.CancelDownload(ctx, id)
+	if err != nil {
+		softwareFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
 }
 
 func (h *SystemSoftwareHandler) status(c *gin.Context) {

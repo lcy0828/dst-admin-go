@@ -106,11 +106,13 @@ func (h *GameUpdateHandler) releasePublish(c *gin.Context) {
 	h.releaseMu.Unlock()
 	ctx, cancel := context.WithTimeout(c.Request.Context(), gameReleasePreviewTimeout)
 	defer cancel()
+	includeModDiagnostics := false
 	plan, err := h.releases.Preview(ctx, gameupdate.ReleasePreviewRequest{
-		Installations:  request.Installations,
-		DesiredVersion: request.DesiredVersion,
-		TargetIDs:      request.TargetIDs,
-		Policy:         request.Policy,
+		IncludeModDiagnostics: &includeModDiagnostics,
+		Installations:         request.Installations,
+		DesiredVersion:        request.DesiredVersion,
+		TargetIDs:             request.TargetIDs,
+		Policy:                request.Policy,
 	})
 	if err != nil {
 		gameReleaseFailure(c, err)
@@ -236,7 +238,26 @@ func (h *GameUpdateHandler) releaseList(c *gin.Context) {
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_PAGINATION", "分页参数无效", nil)
 		return
 	}
-	values, total, err := h.releases.List(limit, offset)
+	pending, parseErr := strconv.ParseBool(c.DefaultQuery("pending", "false"))
+	if parseErr != nil {
+		Failure(c, http.StatusUnprocessableEntity, "INVALID_QUERY", "pending 必须为布尔值", nil)
+		return
+	}
+	var values []gameupdate.Release
+	var total int
+	var err error
+	if pending {
+		if reader, ok := h.releases.(interface {
+			ListPending(int, int) ([]gameupdate.Release, int, error)
+		}); ok {
+			values, total, err = reader.ListPending(limit, offset)
+		} else {
+			Failure(c, http.StatusServiceUnavailable, "GAME_RELEASE_READ_UNAVAILABLE", "更新状态读取暂不可用", nil)
+			return
+		}
+	} else {
+		values, total, err = h.releases.List(limit, offset)
+	}
 	if err != nil {
 		gameReleaseFailure(c, err)
 		return

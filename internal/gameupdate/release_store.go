@@ -247,6 +247,7 @@ func (s *ReleaseStore) Get(id string) (Release, error) {
 		}
 		value.Attempt, value.Blockers, value.NextAction = state.Attempt, state.Blockers, state.NextAction
 		value.WritingStarted, value.PlanHistory = state.WritingStarted, state.PlanHistory
+		value.CurrentJobID = state.CurrentJobID
 		value.ModDiagnosticsWarning = state.ModDiagnosticsWarning
 		for _, evidence := range state.Installations {
 			if item := releaseInstallationResult(&value, evidence.TargetID, evidence.InstallationID); item != nil {
@@ -283,15 +284,23 @@ func (s *ReleaseStore) FindIdempotent(id, sourceJobID string) (Release, error) {
 }
 
 func (s *ReleaseStore) List(limit, offset int) ([]Release, int, error) {
+	return s.list(limit, offset, false)
+}
+
+func (s *ReleaseStore) list(limit, offset int, pending bool) ([]Release, int, error) {
 	if limit < 1 || limit > 100 || offset < 0 {
 		return nil, 0, ErrReleaseInvalid
 	}
 	var total int
-	if err := s.db.Table(s.releaseTable).Count(&total).Error; err != nil {
+	query := s.db.Table(s.releaseTable)
+	if pending {
+		query = query.Where("stage NOT IN (?)", []string{string(ReleaseStageSucceeded), string(ReleaseStageFailed), string(ReleaseStageAbandoned)})
+	}
+	if err := query.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 	var records []releaseRecord
-	if err := s.db.Table(s.releaseTable).Order("created_at DESC, id DESC").Limit(limit).Offset(offset).Find(&records).Error; err != nil {
+	if err := query.Order("created_at DESC, id DESC").Limit(limit).Offset(offset).Find(&records).Error; err != nil {
 		return nil, 0, err
 	}
 	values := make([]Release, 0, len(records))
@@ -356,7 +365,7 @@ func releaseRecordFrom(value Release) (releaseRecord, error) {
 	if err != nil {
 		return releaseRecord{}, err
 	}
-	evidence, err := json.Marshal(releaseExecutionEvidence{ModDiagnosticsWarning: value.ModDiagnosticsWarning, WritingStarted: value.WritingStarted, PlanHistory: value.PlanHistory, Attempt: value.Attempt, Blockers: value.Blockers, NextAction: value.NextAction, Installations: installationEvidence(value), Shards: shardEvidence(value)})
+	evidence, err := json.Marshal(releaseExecutionEvidence{CurrentJobID: value.CurrentJobID, ModDiagnosticsWarning: value.ModDiagnosticsWarning, WritingStarted: value.WritingStarted, PlanHistory: value.PlanHistory, Attempt: value.Attempt, Blockers: value.Blockers, NextAction: value.NextAction, Installations: installationEvidence(value), Shards: shardEvidence(value)})
 	if err != nil {
 		return releaseRecord{}, err
 	}
@@ -427,6 +436,7 @@ func childReleaseRecordID(releaseID, key string) string {
 }
 
 type releaseExecutionEvidence struct {
+	CurrentJobID          string                        `json:"currentJobId,omitempty"`
 	ModDiagnosticsWarning string                        `json:"modDiagnosticsWarning,omitempty"`
 	WritingStarted        bool                          `json:"writingStarted,omitempty"`
 	PlanHistory           []ReleasePlan                 `json:"planHistory,omitempty"`
