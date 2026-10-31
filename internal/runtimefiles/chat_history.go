@@ -265,7 +265,23 @@ func chatLogCandidates(ctx context.Context, saveRoot, cluster, shard string) ([]
 	deduplicated := make(map[string]chatLogCandidate, len(candidates))
 	for _, candidate := range candidates {
 		current, exists := deduplicated[candidate.generation.ID]
-		if !exists || candidate.generation.Archived && !current.generation.Archived || candidate.generation.UpdatedAt.After(current.generation.UpdatedAt) {
+		if !exists {
+			deduplicated[candidate.generation.ID] = candidate
+			continue
+		}
+		left, err := os.Stat(current.path)
+		if err != nil {
+			return nil, err
+		}
+		right, err := os.Stat(candidate.path)
+		if err != nil {
+			return nil, err
+		}
+		if !os.SameFile(left, right) {
+			return nil, errors.New("聊天日志分段标识冲突，尚未确认同步完成")
+		}
+		// Hard links refer to the same stream. Keep its live path visible.
+		if !candidate.generation.Archived || current.generation.Archived && candidate.generation.UpdatedAt.After(current.generation.UpdatedAt) {
 			deduplicated[candidate.generation.ID] = candidate
 		}
 	}
@@ -305,11 +321,41 @@ func chatGeneration(cluster, shard, path string, info os.FileInfo, archived bool
 		}
 	}
 	sum := sha256.Sum256([]byte("chat-v1\x00" + cluster + "\x00" + shard + "\x00" + identity))
+	id := hex.EncodeToString(sum[:16])
+	if !startedAt.IsZero() && !estimated {
+		file, err := os.Open(path)
+		if err != nil {
+			return shared.RuntimeChatLogGeneration{}, err
+		}
+		marker, err := runtimeFileID(file, "server_chat_log")
+		_ = file.Close()
+		if err != nil {
+			return shared.RuntimeChatLogGeneration{}, err
+		}
+		// A process can rotate its chat independently of its startup marker.
+		// Physical identity distinguishes even identical first records. It stays
+		// stable across appends and renames; persisted sources reconcile copies.
+		// Keep the old ID embedded for that upgrade reconciliation.
+		id = "chat-v2:" + id + ":" + marker
+	}
 	return shared.RuntimeChatLogGeneration{
-		ID: hex.EncodeToString(sum[:16]), FileName: filepath.Base(path), Archived: archived, Size: info.Size(),
+		ID: id, FileName: filepath.Base(path), Archived: archived, Size: info.Size(),
 		StartedAt: startedAt.UTC(), StartedAtEstimated: estimated, UpdatedAt: info.ModTime().UTC(),
 		TimeVersion: shared.ChatTimeVersion,
 	}, nil
+}
+
+// LegacyChatGenerationID identifies records written before chat files within
+// one process were distinguished. It is metadata, never a trusted read cursor.
+func LegacyChatGenerationID(id string) string {
+	parts := strings.Split(id, ":")
+	if len(parts) != 3 || parts[0] != "chat-v2" || len(parts[1]) != 32 || len(parts[2]) != 32 {
+		return ""
+	}
+	if _, err := hex.DecodeString(parts[1] + parts[2]); err != nil {
+		return ""
+	}
+	return parts[1]
 }
 
 func currentChatStartTime(worldRoot string) time.Time {

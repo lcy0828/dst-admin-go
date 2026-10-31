@@ -2,6 +2,7 @@ package runtimefiles
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,117 @@ import (
 
 	"dont/shared"
 )
+
+func TestChatHistoryKeepsCurrentLogAfterRotationWithinSameBoot(t *testing.T) {
+	root := t.TempDir()
+	world := filepath.Join(root, "room", "Master")
+	for _, directory := range []string{"backup/server_log", "backup/server_chat_log"} {
+		if err := os.MkdirAll(filepath.Join(world, directory), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	boot := "Sun Aug 23 19:08:35 2026"
+	old := "[00:00:01]: [Announcement] archived\n"
+	current := "[00:00:02]: [Announcement] current\n"
+	writeChatFixture(t, world, boot, old)
+	before, err := ListChatLogGenerations(context.Background(), root, "room", "Master")
+	if err != nil || len(before) != 1 {
+		t.Fatalf("before=%#v err=%v", before, err)
+	}
+	suffix := "2026-08-24-20-00-00.txt"
+	// DST may copy a log into its archive while keeping the process and its
+	// server startup marker. Both physical chat files must remain readable.
+	for name, content := range map[string]string{
+		"backup/server_log/server_log_" + suffix:           "[00:00:00]: Current time: " + boot + "\n",
+		"backup/server_chat_log/server_chat_log_" + suffix: old,
+		"server_chat_log.txt":                              current,
+	} {
+		if err := os.WriteFile(filepath.Join(world, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := ListChatLogGenerations(context.Background(), root, "room", "Master")
+	if err != nil || len(after) != 2 {
+		t.Fatalf("current chat disappeared: generations=%#v err=%v", after, err)
+	}
+	var currentID string
+	for _, generation := range after {
+		if generation.Archived {
+			if generation.ID == before[0].ID {
+				t.Fatal("copying to a different physical file reused its identity")
+			}
+		} else {
+			currentID = generation.ID
+			if generation.ID == before[0].ID {
+				t.Fatal("current and archived logs share an identity")
+			}
+		}
+		chunk, err := ReadChatLogGeneration(context.Background(), root, "room", "Master", shared.RuntimeChatLogRequest{
+			GenerationID: generation.ID, MaxBytes: 1024, MaxLines: 10,
+		})
+		want := current
+		if generation.Archived {
+			want = old
+		}
+		if err != nil || len(chunk.Lines) != 1 || chunk.Lines[0].Text+"\n" != want {
+			t.Fatalf("wrong file selected: generation=%#v chunk=%#v err=%v", generation, chunk, err)
+		}
+	}
+	f, err := os.OpenFile(filepath.Join(world, "server_chat_log.txt"), os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = fmt.Fprintln(f, "[00:00:03]: [Announcement] appended")
+	if closeErr := f.Close(); err != nil || closeErr != nil {
+		t.Fatalf("append=%v close=%v", err, closeErr)
+	}
+	again, err := ListChatLogGenerations(context.Background(), root, "room", "Master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, generation := range again {
+		found = found || !generation.Archived && generation.ID == currentID
+	}
+	if !found {
+		t.Fatal("appending chat changed the current generation")
+	}
+}
+
+func TestChatHistoryKeepsDifferentFilesWithIdenticalFirstLines(t *testing.T) {
+	for _, divergent := range []bool{false, true} {
+		t.Run(fmt.Sprintf("divergent=%t", divergent), func(t *testing.T) {
+			root := t.TempDir()
+			world := filepath.Join(root, "room", "Master")
+			if err := os.MkdirAll(filepath.Join(world, "backup/server_chat_log"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(world, "backup/server_log"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			boot := "Sun Aug 23 19:08:35 2026"
+			first := "[00:00:01]: [Announcement] shared first line\n"
+			archive := first
+			if divergent {
+				archive += "[00:00:02]: [Announcement] archive only\n"
+			}
+			writeChatFixture(t, world, boot, first+"[00:00:03]: [Announcement] current only\n")
+			suffix := "2026-08-24-20-00-00.txt"
+			for name, content := range map[string]string{
+				"backup/server_log/server_log_" + suffix:           "[00:00:00]: Current time: " + boot + "\n",
+				"backup/server_chat_log/server_chat_log_" + suffix: archive,
+			} {
+				if err := os.WriteFile(filepath.Join(world, name), []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			generations, err := ListChatLogGenerations(context.Background(), root, "room", "Master")
+			if err != nil || len(generations) != 2 || generations[0].ID == generations[1].ID {
+				t.Fatalf("independent streams were silently combined: %#v err=%v", generations, err)
+			}
+		})
+	}
+}
 
 func TestChatHistoryPreservesGenerationAcrossDSTRotation(t *testing.T) {
 	root := t.TempDir()

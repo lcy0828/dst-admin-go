@@ -259,6 +259,22 @@ func TestRefreshingExpiredInventoryStaysStaleUntilCollectionFinishes(t *testing.
 	}
 	ensured := make(chan error, 1)
 	go func() { ensured <- coordinator.EnsureRuntimeTargetsFresh(ctx, []string{"local", "local"}) }()
+	// Keep the collection blocked until preflight has joined it. Merely
+	// starting the goroutine does not guarantee it runs before unblock.
+	for {
+		coordinator.mu.Lock()
+		running := coordinator.flights[endpointKey("local", "default")]
+		joined := running != nil && running.waiters > 0
+		coordinator.mu.Unlock()
+		if joined {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("preflight did not join the ongoing collection: ", ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
 	unblock()
 	if err := <-refreshed; err != nil {
 		t.Fatal(err)

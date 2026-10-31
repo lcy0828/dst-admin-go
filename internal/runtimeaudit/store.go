@@ -89,18 +89,84 @@ func (s *Store) List(roomID string, filter ListFilter) (List, error) {
 }
 
 func (s *Store) FirstSuccessfulStart() (*Event, error) {
-	var record eventRecord
-	err := s.db.Table(s.table).
-		Where("type = ? OR previous_state = ?", string(EventRunning), "running").
-		Order("occurred_at ASC, id ASC").First(&record).Error
-	if gorm.IsRecordNotFoundError(err) {
-		return nil, nil
-	}
-	if err != nil {
+	// Examine evidence in bounded batches. A failed first attempt must not hide
+	// a later successful start, and a single loaded world must not complete a
+	// grouped start. Historical evidence predating accepted requests retains its
+	// old meaning. This reads audit records only; it never changes the Runtime.
+	var firstRequest eventRecord
+	err := s.db.Table(s.table).Where("type IN (?)", []EventType{EventStartRequested, EventRestartRequested}).
+		Order("occurred_at ASC, id ASC").First(&firstRequest).Error
+	if err != nil && !gorm.IsRecordNotFoundError(err) {
 		return nil, err
 	}
-	event := eventFromRecord(record)
-	return &event, nil
+	var cursor eventRecord
+	for {
+		query := s.db.Table(s.table).Where("type = ? OR previous_state = ?", string(EventRunning), "running")
+		if cursor.ID != 0 {
+			query = query.Where("occurred_at > ? OR (occurred_at = ? AND id > ?)", cursor.OccurredAt, cursor.OccurredAt, cursor.ID)
+		}
+		var candidates []eventRecord
+		if err := query.Order("occurred_at ASC, id ASC").Limit(128).Find(&candidates).Error; err != nil {
+			return nil, err
+		}
+		for _, candidate := range candidates {
+			complete, err := s.startScopeComplete(candidate, firstRequest)
+			if err != nil {
+				return nil, err
+			}
+			if complete {
+				event := eventFromRecord(candidate)
+				return &event, nil
+			}
+		}
+		if len(candidates) < 128 {
+			return nil, nil
+		}
+		cursor = candidates[len(candidates)-1]
+	}
+}
+
+func (s *Store) startScopeComplete(candidate, firstRequest eventRecord) (bool, error) {
+	var requested eventRecord
+	err := s.db.Table(s.table).Where("room_id = ? AND world_id = ? AND type IN (?) AND (occurred_at < ? OR (occurred_at = ? AND id <= ?))",
+		candidate.RoomID, candidate.WorldID, []EventType{EventStartRequested, EventRestartRequested}, candidate.OccurredAt, candidate.OccurredAt, candidate.ID).
+		Order("occurred_at DESC, id DESC").First(&requested).Error
+	if gorm.IsRecordNotFoundError(err) {
+		// Do not use an unrelated world's observation to complete a newer start.
+		return firstRequest.ID == 0 || candidate.OccurredAt.Before(firstRequest.OccurredAt) ||
+			(candidate.OccurredAt.Equal(firstRequest.OccurredAt) && candidate.ID < firstRequest.ID), nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if requested.JobID == "" {
+		return true, nil // Legacy requests did not carry a grouped operation ID.
+	}
+	var scope []eventRecord
+	if err := s.db.Table(s.table).Where("room_id = ? AND job_id = ? AND type IN (?)", requested.RoomID, requested.JobID,
+		[]EventType{EventStartRequested, EventRestartRequested}).Find(&scope).Error; err != nil {
+		return false, err
+	}
+	for _, target := range scope {
+		var observed eventRecord
+		err := s.db.Table(s.table).Where("room_id = ? AND world_id = ? AND occurred_at >= ? AND (occurred_at < ? OR (occurred_at = ? AND id <= ?)) AND type IN (?)",
+			target.RoomID, target.WorldID, target.OccurredAt, candidate.OccurredAt, candidate.OccurredAt, candidate.ID,
+			[]EventType{EventSessionStarted, EventRunning, EventFailed, EventStopped, EventUnexpectedExit}).
+			Order("occurred_at DESC, id DESC").First(&observed).Error
+		if gorm.IsRecordNotFoundError(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		// A later stop/failure invalidates an earlier load. For legacy evidence
+		// the candidate itself may establish the state immediately before exit.
+		if observed.Type != string(EventRunning) && observed.RuntimeState != "running" &&
+			!(observed.ID == candidate.ID && observed.PreviousState == "running") {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (s *Store) LatestExit(roomID, worldID string) (*Event, error) {

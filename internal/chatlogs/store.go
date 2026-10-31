@@ -53,6 +53,7 @@ type generationRecord struct {
 	RoomID             string
 	WorldID            string
 	GenerationID       string
+	LegacyGenerationID string
 	FileName           string
 	Archived           bool
 	StartedAt          *time.Time
@@ -304,8 +305,36 @@ func (s *Store) importGeneration(roomID string, world rooms.World, generation sh
 			panic(recovered)
 		}
 	}()
+	query := tx.Table(s.generationsTable).Where("room_id = ? AND world_id = ? AND generation_id = ?", roomID, world.ID, generation.ID)
+	var existing generationRecord
+	found := true
+	if err := query.First(&existing).Error; gorm.IsRecordNotFoundError(err) {
+		found = false
+	} else if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	legacyID, err := s.bindLegacyGeneration(tx, roomID, world.ID, generation, existing, entries)
+	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
 	imported := 0
+	type adoptedSource struct {
+		source sourceRecord
+		entry  parsedEntry
+	}
+	var adoptedSources []adoptedSource
 	for _, entry := range entries {
+		adopted, err := s.adoptLegacySource(tx, roomID, world, generation.ID, legacyID, entry)
+		if err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		if adopted != nil {
+			adoptedSources = append(adoptedSources, adoptedSource{source: *adopted, entry: entry})
+			continue
+		}
 		created, err := s.importEntry(tx, roomID, world, generation.ID, entry, observedAt)
 		if err != nil {
 			tx.Rollback()
@@ -319,15 +348,6 @@ func (s *Store) importGeneration(roomID string, world rooms.World, generation sh
 	if !generation.StartedAt.IsZero() {
 		value := generation.StartedAt.UTC()
 		startedAt = &value
-	}
-	query := tx.Table(s.generationsTable).Where("room_id = ? AND world_id = ? AND generation_id = ?", roomID, world.ID, generation.ID)
-	var existing generationRecord
-	found := true
-	if err := query.First(&existing).Error; gorm.IsRecordNotFoundError(err) {
-		found = false
-	} else if err != nil {
-		tx.Rollback()
-		return 0, err
 	}
 	processedCursor := cursor
 	if found {
@@ -351,7 +371,8 @@ func (s *Store) importGeneration(roomID string, world rooms.World, generation sh
 	}
 	record := generationRecord{
 		RoomID: roomID, WorldID: world.ID, GenerationID: generation.ID, FileName: generation.FileName,
-		Archived: generation.Archived, StartedAt: startedAt, StartedAtEstimated: generation.StartedAtEstimated,
+		LegacyGenerationID: legacyID,
+		Archived:           generation.Archived, StartedAt: startedAt, StartedAtEstimated: generation.StartedAtEstimated,
 		UpdatedAt: generation.UpdatedAt.UTC(), Size: generation.Size, Cursor: cursor,
 		CaughtUp: cursor >= generation.Size, LastSyncedAt: observedAt.UTC(),
 		ParserVersion: existing.ParserVersion, RepairCursor: existing.RepairCursor, ParseErrors: existing.ParseErrors, LastParseProblem: existing.LastParseProblem,
@@ -383,6 +404,20 @@ func (s *Store) importGeneration(roomID string, world rooms.World, generation sh
 	if saveErr != nil {
 		tx.Rollback()
 		return 0, saveErr
+	}
+	for _, adopted := range adoptedSources {
+		if adopted.entry.timeVersion > 0 {
+			if err := s.correctSourceTime(tx, adopted.source, adopted.entry); err != nil {
+				tx.Rollback()
+				return 0, err
+			}
+		}
+	}
+	if legacyID != "" && processedCursor >= generation.Size {
+		if err := s.removeEmptyLegacyGeneration(tx, roomID, world.ID, legacyID); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
 	}
 	if err := tx.Commit().Error; err != nil {
 		return 0, err

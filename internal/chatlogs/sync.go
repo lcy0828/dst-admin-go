@@ -237,6 +237,12 @@ func (s *Service) syncWorld(ctx context.Context, roomID string, world rooms.Worl
 			repair = false
 		}
 		if !repair && state.Cursor == generation.Size && state.CaughtUp {
+			// A rename keeps its generation ID even though the location changed.
+			if err := s.store.db.Table(s.store.generationsTable).Where(
+				"room_id = ? AND world_id = ? AND generation_id = ?", roomID, world.ID, generation.ID,
+			).Updates(map[string]interface{}{"file_name": generation.FileName, "archived": generation.Archived}).Error; err != nil {
+				return imported, err
+			}
 			continue
 		}
 		if state == (GenerationState{}) {

@@ -242,3 +242,123 @@ func TestActionRequestsFastPollingWindow(t *testing.T) {
 		t.Fatalf("poll delay after action window = %s", got)
 	}
 }
+
+func TestFirstSuccessfulStartRequiresEveryRequestedWorld(t *testing.T) {
+	service, _, room, world := newAuditService(t)
+	now := time.Date(2026, 11, 1, 1, 0, 0, 0, time.UTC)
+	appendEvent := func(worldID string, kind EventType, jobID string) {
+		t.Helper()
+		now = now.Add(time.Second)
+		if _, err := service.store.Append(Event{RoomID: room.ID, WorldID: worldID, Type: kind, JobID: jobID, OccurredAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendEvent(world.ID, EventStartRequested, "start-both")
+	appendEvent("caves", EventStartRequested, "start-both")
+	appendEvent(world.ID, EventRunning, "")
+	appendEvent("unrelated", EventRunning, "")
+	if complete, err := service.FirstSuccessfulStart(); err != nil || complete != nil {
+		t.Fatalf("partial start completed: %#v, %v", complete, err)
+	}
+	appendEvent("caves", EventRunning, "")
+	complete, err := service.FirstSuccessfulStart()
+	if err != nil || complete == nil || complete.WorldID != "caves" {
+		t.Fatalf("completed scope = %#v, %v", complete, err)
+	}
+	appendEvent(world.ID, EventStopped, "stop")
+	appendEvent("caves", EventStopped, "stop")
+	if complete, err := service.FirstSuccessfulStart(); err != nil || complete == nil {
+		t.Fatalf("normal stop reopened guidance: %#v, %v", complete, err)
+	}
+}
+
+func TestFirstSuccessfulStartDoesNotRequireUnselectedWorlds(t *testing.T) {
+	service, _, room, world := newAuditService(t)
+	now := time.Now().UTC()
+	for _, event := range []Event{
+		{RoomID: room.ID, WorldID: world.ID, Type: EventStartRequested, JobID: "only-surface", OccurredAt: now},
+		{RoomID: room.ID, WorldID: world.ID, Type: EventRunning, OccurredAt: now.Add(time.Second)},
+	} {
+		if _, err := service.store.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if complete, err := service.FirstSuccessfulStart(); err != nil || complete == nil {
+		t.Fatalf("single selected world = %#v, %v", complete, err)
+	}
+}
+
+func TestFirstSuccessfulStartFindsLaterSuccessfulScope(t *testing.T) {
+	service, _, room, world := newAuditService(t)
+	now := time.Date(2026, 11, 1, 1, 0, 0, 0, time.UTC)
+	events := []Event{
+		{WorldID: world.ID, Type: EventStartRequested, JobID: "first-both"},
+		{WorldID: "caves", Type: EventStartRequested, JobID: "first-both"},
+		{WorldID: world.ID, Type: EventRunning},
+		{WorldID: "caves", Type: EventFailed},
+		{WorldID: world.ID, Type: EventStopped},
+		// The operator now explicitly chooses only the surface world.
+		{WorldID: world.ID, Type: EventStartRequested, JobID: "later-surface"},
+		{WorldID: world.ID, Type: EventRunning},
+	}
+	for i, event := range events {
+		event.RoomID, event.OccurredAt = room.ID, now.Add(time.Duration(i)*time.Second)
+		if _, err := service.store.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	complete, err := service.FirstSuccessfulStart()
+	if err != nil || complete == nil || !complete.OccurredAt.Equal(now.Add(6*time.Second)) {
+		t.Fatalf("later successful scope = %#v, %v", complete, err)
+	}
+}
+
+func TestFirstSuccessfulStartRequiresOverlappingRunningEvidence(t *testing.T) {
+	service, _, room, world := newAuditService(t)
+	now := time.Date(2026, 11, 1, 1, 0, 0, 0, time.UTC)
+	events := []Event{
+		{WorldID: world.ID, Type: EventStartRequested, JobID: "both"},
+		{WorldID: "caves", Type: EventStartRequested, JobID: "both"},
+		{WorldID: world.ID, Type: EventRunning},
+		{WorldID: world.ID, Type: EventUnexpectedExit, PreviousState: "running"},
+		{WorldID: "caves", Type: EventRunning},
+	}
+	// Equal timestamps still follow durable event order.
+	for _, event := range events {
+		event.RoomID, event.OccurredAt = room.ID, now
+		if _, err := service.store.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if complete, err := service.FirstSuccessfulStart(); err != nil || complete != nil {
+		t.Fatalf("non-overlapping loads completed: %#v, %v", complete, err)
+	}
+	if _, err := service.store.Append(Event{RoomID: room.ID, WorldID: world.ID, Type: EventRunning, OccurredAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if complete, err := service.FirstSuccessfulStart(); err != nil || complete == nil {
+		t.Fatalf("recovered scope = %#v, %v", complete, err)
+	}
+}
+
+func TestFirstSuccessfulStartPagesPastUnrelatedObservations(t *testing.T) {
+	service, _, room, world := newAuditService(t)
+	now := time.Date(2026, 11, 1, 1, 0, 0, 0, time.UTC)
+	if _, err := service.store.Append(Event{RoomID: room.ID, WorldID: world.ID, Type: EventStartRequested, JobID: "surface", OccurredAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 130; i++ {
+		if _, err := service.store.Append(Event{RoomID: room.ID, WorldID: "unrelated", Type: EventRunning, OccurredAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if complete, err := service.FirstSuccessfulStart(); err != nil || complete != nil {
+		t.Fatalf("unrelated evidence completed: %#v, %v", complete, err)
+	}
+	if _, err := service.store.Append(Event{RoomID: room.ID, WorldID: world.ID, Type: EventRunning, OccurredAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if complete, err := service.FirstSuccessfulStart(); err != nil || complete == nil || complete.WorldID != world.ID {
+		t.Fatalf("completion beyond first page = %#v, %v", complete, err)
+	}
+}

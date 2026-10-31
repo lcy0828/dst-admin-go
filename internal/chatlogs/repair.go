@@ -152,6 +152,16 @@ func (s *Store) observeGenerations(roomID, worldID string, ids []string) error {
 			return err
 		}
 	}
+	// Empty/unfinished live files can acquire a new identity when their first
+	// complete line arrives. Dropping metadata with no saved sources loses no
+	// messages and avoids inventing a permanent historical coverage gap.
+	if err := tx.Table(s.generationsTable).Where(
+		"room_id = ? AND world_id = ? AND unavailable = ? AND parse_errors = 0 AND (size = 0 OR file_name = ?) AND NOT EXISTS (SELECT 1 FROM "+s.sourcesTable+" AS source WHERE source.room_id = "+s.generationsTable+".room_id AND source.world_id = "+s.generationsTable+".world_id AND source.generation_id = "+s.generationsTable+".generation_id)",
+		roomID, worldID, true, "server_chat_log.txt",
+	).Delete(&generationRecord{}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
 	return tx.Commit().Error
 }
 
