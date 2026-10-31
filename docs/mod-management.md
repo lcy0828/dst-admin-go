@@ -104,6 +104,9 @@ MOD_PEER_ADVERTISE_URL = http://agent.example.com:18081
 
 - 名称搜索在未配置 Key 时使用公开 Workshop 搜索页，并通过 `ISteamRemoteStorage/GetPublishedFileDetails` 补全结果。
 - Workshop ID 搜索可直接使用公开 `ISteamRemoteStorage/GetPublishedFileDetails`。
+- 部分公开 Beta 条目可以订阅，但详情 API 返回条目不可用。直接输入工坊 ID 或链接时，面板会按需核对公开页面的主订阅按钮、条目 ID 和所属游戏，核实后展示名称、说明及页面声明的依赖，并提示资料来自公开页面。登录页、无效页、其他游戏、权限拒绝和 HTTP 故障不会据此放行。
+- 公开页面回退也用于显式下载的依赖解析及本机、Agent 的内容准备；依赖仍限制为最多 100 项。常规批量库存与后台版本检查不读取逐项网页，页面也不会被用来推断版本、更新时间或 Steam manifest；无法确认时保留“版本未知”，不会显示为最新版。
+- 资料可读取不代表 SteamCMD 一定能够下载。下载结果以目标机器上的任务回执及文件校验为准；若 Steam 拒绝匿名下载，仍需具备访问权限的 Steam 账号。回退不会登录账号或绕过工坊访问限制。
 - 配置 API Key 后，详情使用 `IPublishedFileService/GetDetails` 并显式请求 children、tags 和 votes；名称搜索使用 `QueryFiles`。
 - 依赖按图递归展开，去重并限制为最多 100 个节点，循环引用不会无限递归。
 - HTTP 客户端有 12 秒超时、16 MiB 响应上限，并拒绝尾随 JSON。

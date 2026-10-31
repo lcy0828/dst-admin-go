@@ -63,13 +63,18 @@ type communityMetadataCall struct {
 }
 
 type communityMetadataCache struct {
-	Name        string
-	Author      string
-	Description string
-	Score       float64
-	RatingCount int64
-	ExpiresAt   time.Time
-	Err         error `json:"-"`
+	Name          string
+	Author        string
+	Description   string
+	Score         float64
+	RatingCount   int64
+	ItemID        string
+	AppID         string
+	PreviewURL    string
+	Dependencies  []string
+	ItemCheckedAt time.Time
+	ExpiresAt     time.Time
+	Err           error `json:"-"`
 }
 
 type steamInt64 int64
@@ -135,6 +140,9 @@ func (p *SteamProvider) Search(ctx context.Context, options SearchOptions) (Sear
 		result := SearchResult{Items: items, Total: len(items), Page: 1, PageSize: pageSize}
 		if err != nil {
 			result.Warning = err.Error()
+		} else if len(items) > 0 && items[0].MetadataWarning != "" {
+			result.Warning = items[0].MetadataWarning
+			result.Source = "community"
 		} else if len(items) > 0 && strings.TrimSpace(items[0].Author) == "" {
 			result.Warning = "工坊暂未返回作者资料，已保留现有信息；60 秒后可重试"
 		}
@@ -350,10 +358,14 @@ func steamCommunityLanguage(query string) string {
 }
 
 func (p *SteamProvider) Details(ctx context.Context, ids []string) (map[string]SteamMod, error) {
+	var items map[string]SteamMod
+	var err error
 	if p.store != nil {
-		return p.storedDetails(ctx, ids, true, true)
+		items, err = p.storedDetails(ctx, ids, true, true)
+	} else {
+		items, err = p.details(ctx, ids, true)
 	}
-	return p.details(ctx, ids, true)
+	return p.withCommunityFallback(ctx, ids, items, err)
 }
 
 // Summaries resolves the batch Workshop fields needed by runtime inventory.
@@ -404,7 +416,20 @@ func (p *SteamProvider) details(ctx context.Context, ids []string, enrichCommuni
 	}
 	result := make(map[string]SteamMod, len(payload.Response.Items))
 	items := make([]SteamMod, 0, len(payload.Response.Items))
+	communityIDs := make(map[string]bool)
+	counts := make(map[string]int)
 	for _, item := range payload.Response.Items {
+		// EResult 9 means this API cannot find the item. A public, directly
+		// subscribable page can still exist (for example an unlisted beta).
+		// Other failures, including permission denials and wrong games, never
+		// authorize this fallback. Batch/update reads remain API-only.
+		counts[item.ID]++
+		if counts[item.ID] == 1 && item.Result == 9 &&
+			(item.ConsumerAppID == 0 || strconv.Itoa(item.ConsumerAppID) == p.AppID) {
+			communityIDs[item.ID] = true
+		} else {
+			delete(communityIDs, item.ID)
+		}
 		converted, ok := item.mod(p.AppID)
 		if !ok {
 			continue
@@ -433,7 +458,7 @@ func (p *SteamProvider) details(ctx context.Context, ids []string, enrichCommuni
 		}
 	}
 	if len(missing) > 0 {
-		enrichmentErr = errors.Join(enrichmentErr, &NetworkError{Code: "WORKSHOP_ITEM_UNAVAILABLE", Status: 404})
+		enrichmentErr = errors.Join(enrichmentErr, &workshopItemUnavailableError{missingIDs: missing, communityIDs: communityIDs})
 	}
 	return result, enrichmentErr
 }
@@ -658,6 +683,7 @@ func (p *SteamProvider) fetchCommunityMetadata(ctx context.Context, id string) (
 		return communityMetadataCache{Err: &NetworkError{Code: "WORKSHOP_INVALID_RESPONSE"}}, false
 	}
 	metadata.Author = cleanCommunityAuthor(document.Find(`a[href*="/myworkshopfiles/"]`).First().Text())
+	readCommunityItem(document, data, &metadata)
 	description := document.Find("#highlightContent").First()
 	description.Find("br").Each(func(_ int, selection *goquery.Selection) {
 		_ = selection.ReplaceWithHtml("\n")
@@ -754,7 +780,11 @@ func (p *SteamProvider) communityMetadata(ctx context.Context, id string) (commu
 }
 
 func communityMetadataBytes(value communityMetadataCache) int {
-	return len(value.Name) + len(value.Author) + len(value.Description) + 256
+	size := len(value.Name) + len(value.Author) + len(value.Description) + len(value.PreviewURL) + 320
+	for _, id := range value.Dependencies {
+		size += len(id) + 16
+	}
+	return size
 }
 
 // cacheMu must be held. SQLite retains the longer history; keep only a small

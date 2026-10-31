@@ -887,7 +887,7 @@ func (s *Service) resolveDependencies(ctx context.Context, root string, include 
 		if len(result) > 100 {
 			return nil, errors.New("Mod dependency graph exceeds 100 items")
 		}
-		details, err := s.Describe(ctx, []string{result[index]})
+		details, err := s.DescribeForDownload(ctx, []string{result[index]})
 		if err != nil {
 			return nil, err
 		}

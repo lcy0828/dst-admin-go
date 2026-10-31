@@ -161,7 +161,14 @@ func (u *InstallationUpdater) fetchLatestArtifacts(ctx context.Context, targetID
 			return updated, nil
 		},
 	}
-	metadata, err := u.catalog.Describe(ctx, modIDs)
+	var metadata map[string]mods.SteamMod
+	if explicit, ok := u.catalog.(interface {
+		DescribeForDownload(context.Context, []string) (map[string]mods.SteamMod, error)
+	}); ok {
+		metadata, err = explicit.DescribeForDownload(ctx, modIDs)
+	} else {
+		metadata, err = u.catalog.Describe(ctx, modIDs)
+	}
 	if err != nil {
 		return nil, modpublication.TargetPlan{}, modpublication.RuntimeOperation{}, fmt.Errorf("读取 Workshop 信息: %w", err)
 	}

@@ -46,7 +46,8 @@ func (p *SteamProvider) DisplayMetadata(ctx context.Context, ids []string) (map[
 	if p.store == nil {
 		return p.Details(ctx, ids)
 	}
-	return p.storedDetails(ctx, ids, false, true)
+	items, err := p.storedDetails(ctx, ids, false, true)
+	return p.withCommunityFallback(ctx, ids, items, err)
 }
 
 func (p *SteamProvider) storedDetails(ctx context.Context, ids []string, refreshOld, enrich bool) (map[string]SteamMod, error) {
@@ -170,10 +171,15 @@ func (p *SteamProvider) rememberSearch(items []SteamMod, language string) {
 	}
 }
 
-// BasicDetails deliberately excludes all per-item community requests.
+// BasicDetails excludes optional enrichment. A single explicitly unavailable
+// item may use a verified public page; batch and version reads never do.
 func (p *SteamProvider) BasicDetails(ctx context.Context, ids []string) (map[string]SteamMod, error) {
+	var items map[string]SteamMod
+	var err error
 	if p.store != nil {
-		return p.storedDetails(ctx, ids, false, false)
+		items, err = p.storedDetails(ctx, ids, false, false)
+	} else {
+		items, err = p.details(ctx, ids, false)
 	}
-	return p.details(ctx, ids, false)
+	return p.withCommunityFallback(ctx, ids, items, err)
 }

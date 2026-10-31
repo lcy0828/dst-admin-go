@@ -208,6 +208,7 @@ type testModDriver struct {
 	fetchTreeSHA            string
 	fetchTarget             runtimedriver.Target
 	fetchOperation          runtimedriver.Operation
+	fetchMetadata           shared.RuntimeModMetadata
 	fetchHook               func()
 	fetchProgressHook       func(context.Context, []shared.RuntimeModFetchLocation)
 	downloadErr             error
@@ -302,11 +303,12 @@ func (d *testModDriver) InspectModCache(_ context.Context, _ runtimedriver.Targe
 	return value, nil
 }
 
-func (d *testModDriver) FetchModCache(ctx context.Context, target runtimedriver.Target, operation runtimedriver.Operation, workshopID, treeSHA string, _ shared.RuntimeModMetadata, locations []shared.RuntimeModFetchLocation) (runtimedriver.ModFetchResult, error) {
+func (d *testModDriver) FetchModCache(ctx context.Context, target runtimedriver.Target, operation runtimedriver.Operation, workshopID, treeSHA string, metadata shared.RuntimeModMetadata, locations []shared.RuntimeModFetchLocation) (runtimedriver.ModFetchResult, error) {
 	d.mu.Lock()
 	d.fetchCalls++
 	d.fetchWorkshopID, d.fetchTreeSHA = workshopID, treeSHA
 	d.fetchTarget, d.fetchOperation = target, operation
+	d.fetchMetadata = metadata
 	d.fetchLocations = append(d.fetchLocations, append([]shared.RuntimeModFetchLocation(nil), locations...))
 	d.runtimeCalls = append(d.runtimeCalls, operation)
 	hook, progressHook, fetchErr, manifest, controllerManifest := d.fetchHook, d.fetchProgressHook, d.fetchErr, d.fetchManifest, d.controllerFetchManifest

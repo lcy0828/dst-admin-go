@@ -215,6 +215,7 @@ func (w *Workshop) Search(ctx context.Context, options SearchOptions) (SearchRes
 			if item, ok := items[options.Query]; ok {
 				result.Items = append(result.Items, item)
 				result.Total = 1
+				result.Warning = item.MetadataWarning
 				if err != nil {
 					result.Warning = err.Error()
 					err = nil
@@ -229,6 +230,9 @@ func (w *Workshop) Search(ctx context.Context, options SearchOptions) (SearchRes
 			return nil, err
 		}
 		result.Source, result.ConfigVersion, result.ObservedAt = source, s.version, time.Now().UTC()
+		if len(result.Items) == 1 && result.Items[0].MetadataWarning == workshopCommunityWarning {
+			result.Source = "community"
+		}
 		if result.TotalKind == "" {
 			result.TotalKind = "exact"
 		}
