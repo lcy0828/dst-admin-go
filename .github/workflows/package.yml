@@ -497,9 +497,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Package the official AstrBot plugins
+      - name: Package the unified AstrBot plugin
         run: |
-          python integrations/astrbot/package.py --output release --plugin all
+          python integrations/astrbot/package.py --output release --plugin companion
           for file in release/astrbot_plugin_dst_*.zip; do
             (cd release && sha256sum "${file#release/}") > "$file.sha256"
           done
