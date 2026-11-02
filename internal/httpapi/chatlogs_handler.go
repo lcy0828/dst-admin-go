@@ -40,6 +40,7 @@ func NewChatLogHandler(service ChatLogService, jobServices ...*jobs.Service) *Ch
 
 func (h *ChatLogHandler) Register(v2 *gin.RouterGroup) {
 	v2.GET("/rooms/:roomId/chat-logs", h.list)
+	v2.GET("/rooms/:roomId/chat-logs/stream", h.stream)
 	v2.POST("/rooms/:roomId/chat-logs/actions/repair", h.repair)
 }
 
@@ -59,6 +60,13 @@ func (h *ChatLogHandler) list(c *gin.Context) {
 
 func chatLogFailure(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, chatlogs.ErrInvalidStreamCursor):
+		Failure(c, http.StatusUnprocessableEntity, "INVALID_CHAT_STREAM_CURSOR", "聊天续读位置无效，或不属于当前房间和筛选条件", nil)
+	case errors.Is(err, chatlogs.ErrStreamUnavailable):
+		Failure(c, http.StatusServiceUnavailable, "CHAT_STREAM_UNAVAILABLE", "聊天推送暂不可用", nil)
+	case errors.Is(err, chatlogs.ErrStreamBusy):
+		c.Header("Retry-After", "5")
+		Failure(c, http.StatusTooManyRequests, "CHAT_STREAM_BUSY", "聊天订阅已达上限，请稍后重试", nil)
 	case errors.Is(err, chatlogs.ErrInvalidFilter):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_CHAT_LOG_FILTER", "聊天记录筛选条件无效", nil)
 	case errors.Is(err, chatlogs.ErrRoomNotManaged), errors.Is(err, rooms.ErrRoomNotManaged):

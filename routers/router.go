@@ -739,7 +739,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err := gameNotificationStore.RecoverInterrupted(); err != nil {
 		return nil, fmt.Errorf("recover interrupted game notifications: %w", err)
 	}
-	gameNotificationService, err := gamenotifications.NewService(roomService, runtimeDriverRouter, gameNotificationStore)
+	gameNotificationService, err := gamenotifications.NewService(roomService, runtimeDriverRouter, gameNotificationStore, distributedRuntimeBridge)
 	if err != nil {
 		return nil, err
 	}
@@ -784,6 +784,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	chatLogHandler := httpapi.NewChatLogHandler(chatLogService, jobService)
+	hooks.stop = append(hooks.stop, func(context.Context) error { chatLogService.Close(); return nil })
 	structuredLogStore := structuredlogs.NewStore(models.DB(), tablePrefix)
 	if err := structuredLogStore.Migrate(); err != nil {
 		return nil, err

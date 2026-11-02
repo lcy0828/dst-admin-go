@@ -84,6 +84,9 @@ type Store struct {
 	sourcesTable     string
 	generationsTable string
 	syncTable        string
+	changesTable     string
+	streamsTable     string
+	notify           func(string)
 }
 
 type GenerationState struct {
@@ -116,6 +119,7 @@ func NewStore(db *gorm.DB, prefix string) *Store {
 	return &Store{
 		db: db, eventsTable: prefix + "chat_event", sourcesTable: prefix + "chat_event_source",
 		generationsTable: prefix + "chat_log_generation", syncTable: prefix + "chat_log_sync",
+		changesTable: prefix + "chat_log_change", streamsTable: prefix + "chat_log_stream",
 	}
 }
 
@@ -129,6 +133,7 @@ func (s *Store) Migrate() error {
 	}{
 		{s.eventsTable, &eventRecord{}}, {s.sourcesTable, &sourceRecord{}},
 		{s.generationsTable, &generationRecord{}}, {s.syncTable, &syncRecord{}},
+		{s.changesTable, &changeRecord{}}, {s.streamsTable, &streamRecord{}},
 	} {
 		if err := s.db.Table(migration.table).AutoMigrate(migration.model).Error; err != nil {
 			return fmt.Errorf("migrate chat history table %s: %w", migration.table, err)
@@ -245,7 +250,11 @@ func (s *Store) ReconcileGeneration(roomID string, world rooms.World, generation
 			return err
 		}
 	}
-	return tx.Commit().Error
+	if err := tx.Commit().Error; err != nil {
+		return err
+	}
+	s.changed(roomID)
+	return nil
 }
 
 func (s *Store) reconcileEventSource(tx *gorm.DB, eventID string) error {
@@ -258,6 +267,9 @@ func (s *Store) reconcileEventSource(tx *gorm.DB, eventID string) error {
 		return err
 	}
 	if len(sources) == 0 {
+		if err := s.appendChange(tx, eventID, "deleted", true); err != nil {
+			return err
+		}
 		return tx.Table(s.eventsTable).Where("id = ?", eventID).Delete(&eventRecord{}).Error
 	}
 	sort.SliceStable(sources, func(i, j int) bool {
@@ -271,13 +283,16 @@ func (s *Store) reconcileEventSource(tx *gorm.DB, eventID string) error {
 		return sources[i].ObservedAt.Before(sources[j].ObservedAt)
 	})
 	primary := sources[0]
-	return tx.Table(s.eventsTable).Where("id = ?", eventID).Updates(map[string]interface{}{
+	if err := tx.Table(s.eventsTable).Where("id = ?", eventID).Updates(map[string]interface{}{
 		"source_timestamp":   primary.SourceTimestamp,
 		"occurred_at":        primary.OccurredAt,
 		"time_estimated":     primary.TimeEstimated || primary.TimeVersion == 0 && primary.StartedAtEstimated,
 		"primary_world_id":   primary.WorldID,
 		"primary_world_role": primary.WorldRole,
-	}).Error
+	}).Error; err != nil {
+		return err
+	}
+	return s.appendChange(tx, eventID, "updated", true)
 }
 
 func (s *Store) ImportGeneration(roomID string, world rooms.World, generation shared.RuntimeChatLogGeneration, entries []parsedEntry, cursor int64, observedAt time.Time) (int, error) {
@@ -335,7 +350,7 @@ func (s *Store) importGeneration(roomID string, world rooms.World, generation sh
 			adoptedSources = append(adoptedSources, adoptedSource{source: *adopted, entry: entry})
 			continue
 		}
-		created, err := s.importEntry(tx, roomID, world, generation.ID, entry, observedAt)
+		created, err := s.importEntry(tx, roomID, world, generation.ID, entry, observedAt, generation.Archived || progress.repair)
 		if err != nil {
 			tx.Rollback()
 			return 0, err
@@ -422,10 +437,11 @@ func (s *Store) importGeneration(roomID string, world rooms.World, generation sh
 	if err := tx.Commit().Error; err != nil {
 		return 0, err
 	}
+	s.changed(roomID)
 	return imported, nil
 }
 
-func (s *Store) importEntry(tx *gorm.DB, roomID string, world rooms.World, generationID string, entry parsedEntry, observedAt time.Time) (bool, error) {
+func (s *Store) importEntry(tx *gorm.DB, roomID string, world rooms.World, generationID string, entry parsedEntry, observedAt time.Time, historical bool) (bool, error) {
 	sourceID := chatSourceID(roomID, world.ID, generationID, entry.sourceCursor)
 	var existing sourceRecord
 	if err := tx.Table(s.sourcesTable).Where("id = ?", sourceID).First(&existing).Error; err == nil {
@@ -470,6 +486,13 @@ func (s *Store) importEntry(tx *gorm.DB, roomID string, world rooms.World, gener
 		TimeVersion: entry.timeVersion, TimeEstimated: entry.TimeEstimated,
 	}
 	if err := tx.Table(s.sourcesTable).Create(&source).Error; err != nil {
+		return false, err
+	}
+	operation := "created"
+	if matched {
+		operation = "updated"
+	}
+	if err := s.appendChange(tx, event.ID, operation, historical); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -612,6 +635,10 @@ func (s *Store) List(roomID string, filter Filter) (List, error) {
 }
 
 func (s *Store) entries(records []eventRecord) ([]Entry, error) {
+	return s.entriesFrom(s.db, records)
+}
+
+func (s *Store) entriesFrom(db *gorm.DB, records []eventRecord) ([]Entry, error) {
 	if len(records) == 0 {
 		return []Entry{}, nil
 	}
@@ -620,7 +647,7 @@ func (s *Store) entries(records []eventRecord) ([]Entry, error) {
 		ids = append(ids, record.ID)
 	}
 	var sources []sourceRecord
-	if err := s.db.Table(s.sourcesTable).Where("event_id IN (?)", ids).Order("observed_at ASC").Find(&sources).Error; err != nil {
+	if err := db.Table(s.sourcesTable).Where("event_id IN (?)", ids).Order("observed_at ASC").Find(&sources).Error; err != nil {
 		return nil, err
 	}
 	byEvent := make(map[string][]Source, len(records))

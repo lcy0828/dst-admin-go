@@ -47,9 +47,10 @@ func WithPersistence(store *Store, reader GenerationReader) ServiceOption {
 
 type SyncResult struct {
 	HistoryHealth
-	Imported int
-	Problems []Problem
-	Pending  bool
+	Imported        int
+	AvailableWorlds int
+	Problems        []Problem
+	Pending         bool
 }
 
 func (s *Service) SyncRoom(ctx context.Context, roomID string) (SyncResult, error) {
@@ -96,6 +97,9 @@ phases:
 			}
 			imported, syncErr := s.syncWorld(ctx, roomID, world, &budget, archives)
 			result.Imported += imported
+			if !archives && syncErr == nil {
+				result.AvailableWorlds++
+			}
 			if errors.Is(syncErr, ErrSyncPending) {
 				result.Pending = true
 				break phases

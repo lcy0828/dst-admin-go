@@ -37,14 +37,20 @@ type SnapshotReader interface {
 }
 
 type Service struct {
-	rooms       RoomCatalog
-	logs        SnapshotReader
-	store       *Store
-	generations GenerationReader
-	syncLocksMu sync.Mutex
-	syncLocks   map[string]chan struct{}
-	attemptsMu  sync.Mutex
-	attempts    map[string]time.Time
+	rooms         RoomCatalog
+	logs          SnapshotReader
+	store         *Store
+	generations   GenerationReader
+	syncLocksMu   sync.Mutex
+	syncLocks     map[string]chan struct{}
+	attemptsMu    sync.Mutex
+	attempts      map[string]time.Time
+	feedsMu       sync.Mutex
+	feeds         map[string]*chatFeed
+	feedListeners int
+	feedsClosed   bool
+	feedsWG       sync.WaitGroup
+	feedBudget    chan struct{}
 }
 
 type parsedEntry struct {
@@ -61,6 +67,7 @@ func NewService(roomCatalog RoomCatalog, logs SnapshotReader, options ...Service
 	}
 	service := &Service{
 		rooms: roomCatalog, logs: logs, syncLocks: make(map[string]chan struct{}), attempts: make(map[string]time.Time),
+		feeds: make(map[string]*chatFeed), feedBudget: make(chan struct{}, 2),
 	}
 	for _, option := range options {
 		if option == nil {
@@ -69,6 +76,9 @@ func NewService(roomCatalog RoomCatalog, logs SnapshotReader, options ...Service
 		if err := option(service); err != nil {
 			return nil, err
 		}
+	}
+	if service.store != nil {
+		service.store.notify = service.notifyChatFeed
 	}
 	return service, nil
 }
