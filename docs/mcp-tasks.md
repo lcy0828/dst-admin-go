@@ -14,7 +14,7 @@ OpenAPI 仍提供完整开发接口。任务工具复用服务端固定能力注
 | `dst_find` | 根据中文需求寻找最多 3 个已授权能力，返回参数结构 |
 | `dst_read` | 执行已发现的固定只读能力 |
 | `dst_result` | 回读原任务，绝不重新提交 |
-| `dst_player_action` | 准备复活、发物品、生成白名单生物或踢人 |
+| `dst_player_action` | 准备无敌/制作模式、复活、发物品、生成白名单生物、踢人、封禁/解封、提醒、死亡或重选角色 |
 | `dst_server_action` | 准备房间启停、保存、备份、定时备份设置 |
 | `dst_run` | 准备扩展管理能力，或提交原准备任务 |
 
@@ -49,6 +49,46 @@ OpenAPI 仍提供完整开发接口。任务工具复用服务端固定能力注
 提交时不能再附加或替换玩家、数量、房间。重复提交同一 `taskRef` 返回原任务。结果不确定时只用 `dst_result {"taskRef":"原任务编号"}`，不能重新准备并重发。准备有效期为 5 分钟；读取记录按容量和时间淘汰，写任务句柄保留最多 30 天。过期或删除的句柄不能重新执行；底层写入去重记录不会随读取记录一起删除。
 
 `state` 区分待补充、准备、处理中、成功、部分结果、失败和不确定；`result` 保留来源、观测时间、完整性及执行证据。`sent` 不等于成功，无输出不等于零。复活等工作台指令的执行回执不一定证明游戏效果，仍需读取当前状态。网络 `netScore` / `performance` 是原始档位，不换算成毫秒。
+
+### 玩家管理权限与模式开关（面板 v1.3.22 起）
+
+“无敌模式”和“上帝模式”是同一操作；“制作模式”“制造模式”“创造模式”和“自由建造”指同一制作开关。它们属于**游戏管理**，不需要授予面板管理权限。
+
+| 能力 | `dst_player_action.action` | 原生 MCP 工具 | 必填参数（除玩家外） |
+| --- | --- | --- | --- |
+| 无敌 / 上帝模式 | `god_mode` | `api_setRoomPlayerGodMode` | `enabled`，布尔值 |
+| 制作 / 创造模式 | `creative_mode` | `api_setRoomPlayerCreativeMode` | `enabled`，布尔值 |
+| 所在世界广播提醒 | `announce` | `api_announceToRoomPlayer` | `message`，1–300 字符；不是私聊 |
+| 封禁玩家 | `ban` | `api_banRoomPlayer` | `confirmation` 完整房间名称、`reason`、`duration` |
+| 解除封禁 | `unban` | `api_unbanRoomPlayer` | `confirmation` 完整房间名称 |
+| 使玩家死亡 | `kill` | `api_killRoomPlayer` | `confirmed: true`，仅在用户明确确认后填写 |
+| 重选角色 | `reset_character` | `api_resetRoomPlayerCharacter` | `confirmed: true`，会影响玩家角色和进度 |
+
+任务入口会解析昵称并在角色操作中生成目标玩家 ID 的原接口确认值；直接调用原生 API 时仍按该 API 的 schema 填写 `confirmation`。封禁时长支持 `1h/6h/12h/1d/3d/7d/30d/permanent`。无敌和制作模式必须明确开启或关闭，缺少 `enabled` 会要求补充，不会猜测。大多数角色操作要求玩家在线；未指定世界时由已有玩家执行器定位并检查当前分片，本机与 Agent 使用相同路径。
+
+例如向外部 MCP 的 `dst_player_action` 提交：
+
+```json
+{"room":"示例房间","player":"示例玩家","action":"god_mode","parameters":{"enabled":false}}
+```
+
+返回示意（任务编号以实际返回为准）：
+
+```json
+{"state":"prepared","taskRef":"00000000-0000-4000-8000-000000000001","capabilityId":"player.god_mode"}
+```
+
+此时尚未执行；按前述 `dst_run` 提交并用 `dst_result` 回读。排队或结果不确定时不能宣称游戏效果成功，也不能新建任务重发。
+
+本次一并补齐复活独立 API 的游戏管理权限；既有 `player.resurrect` 工作台能力的参数与回执不变。游戏管理员可以读取玩家详情、刷新玩家状态及查看房间备份列表。只读密钥继续使用公开玩家列表/固定查询，不能查看包含封禁原因的玩家管理详情，也不能调用这些修改操作。所有入口仍限制在密钥授权的房间。
+
+通用 Lua、自定义指令、修改管理员名单、读取集群令牌、删除房间、拓扑迁移及影响共享安装的更新仍属于面板管理；不能仅凭 API 的“玩家/房间”标签扩大权限。精简视图不逐一列出所有原生工具，可用 `find_api` + `call_api`；任务视图用 `dst_find`。修改连接权限或升级后，让 MCP 客户端重新加载工具目录。
+
+AstrBot v0.4.1 的玩家工具与群权限命令支持上述操作名称。**已有群授权不会自动扩大**：维护者先在全局 `group_permissions.owner.write`（群角色模式）或 `writeAllowlist`（旧模式）加入所需能力 ID，例如 `player.god_mode`、`player.creative_mode`，保留原有条目；群主随后可用 `/dst 权限 管理员 无敌模式 开`、`/dst 权限 管理员 制作模式 开` 在该上限内授权。普通成员与禁用项继续受限制，模型提出的修改仍等待用户确认。
+
+只更新面板、仍使用插件 v0.4.0 时，已明确授权的新能力可从目录被发现，通过通用 `dst_run` 按能力 ID 调用；新的专用 `action` 枚举和中文群设置别名需要插件 v0.4.1。无需开放通用 Lua 作为替代。
+
+回归覆盖真实 MCP `tools/list`、`find_api`、原生工具与分发器、REST 权限、模式开/关、遗漏参数、伪造字段、跨房间、任务去重、群授权与撤销。测试使用合成玩家和执行替身，不对实际世界修改模式。
 
 对应 HTTP 契约：
 
