@@ -405,15 +405,15 @@ func TestTemporaryBanExpiresAndPlayerCommandsAreFixedTemplates(t *testing.T) {
 		t.Fatal(err)
 	}
 	enabled := true
-	if _, err := service.Act(context.Background(), "job", "room", "KU_ONE", ActionGodMode, ActionRequest{WorldID: "master", Enabled: &enabled}); err != nil {
-		t.Fatal(err)
+	if _, err := service.Act(context.Background(), "job", "room", "KU_ONE", ActionGodMode, ActionRequest{WorldID: "master", Enabled: &enabled}); !errors.Is(err, dstruntime.ErrRuntimeUnavailable) {
+		t.Fatalf("mode without verified runtime must fail: %v", err)
 	}
-	if len(sender.scripts) != 1 {
-		t.Fatalf("god mode did not use the fixed server template: %q", sender.scripts)
+	if len(sender.scripts) != 0 {
+		t.Fatal("unverified mode fallback was sent")
 	}
-	for _, fragment := range []string{"_dst_admin_god_task", "SetInvincible(true)", "SetPercent(1)", "SetTemperature(35)", "WATERPROOFNESS_ABSOLUTE", "ClearCollidesWith(COLLISION.LIMITS)", `AddTag("dst_admin_god_mode")`} {
-		if !strings.Contains(sender.scripts[0], fragment) {
-			t.Fatalf("god mode template missing %q: %s", fragment, sender.scripts[0])
+	for _, fragment := range []string{`rawget(_G,"DSTAdmin")`, `WORKBENCH_UPDATE_REQUIRED`, `c.SetGodMode(p,true)`} {
+		if !strings.Contains(godModeStatement(true), fragment) {
+			t.Fatal("unprotected mode template", fragment)
 		}
 	}
 	if _, err := service.Act(context.Background(), "job", "room", "KU_ONE", ActionCreativeMode, ActionRequest{WorldID: "master"}); err == nil {
@@ -434,5 +434,38 @@ func TestTemporaryBanExpiresAndPlayerCommandsAreFixedTemplates(t *testing.T) {
 	bans, err := service.store.Bans("room")
 	if err != nil || len(bans) != 0 {
 		t.Fatalf("expired ban metadata remains: %#v err=%v", bans, err)
+	}
+}
+
+type modeTestCommander struct {
+	err   error
+	ok    bool
+	calls int
+}
+
+func (m *modeTestCommander) ExecuteCommand(context.Context, string, string, dstruntime.CommandRequest) (dstruntime.CommandReceipt, error) {
+	m.calls++
+	return dstruntime.CommandReceipt{OK: m.ok, Code: "MODE_OWNERSHIP_UNCERTAIN"}, m.err
+}
+func TestOwnedModesRequireActualReceiptAndNeverFallBack(t *testing.T) {
+	for _, action := range []Action{ActionGodMode, ActionCreativeMode} {
+		for _, failure := range []error{dstruntime.ErrRuntimeUnavailable, dstruntime.ErrRuntimeNotInstalled, errors.New("timeout"), nil} {
+			service, _, sender, _, _ := newPlayerTestService(t)
+			if _, e := service.RefreshWorld(context.Background(), "room", "master"); e != nil {
+				t.Fatal(e)
+			}
+			commander := &modeTestCommander{err: failure}
+			service.commander = commander
+			enabled := true
+			_, e := service.Act(context.Background(), "mode-example", "room", "KU_ONE", action, ActionRequest{WorldID: "master", Enabled: &enabled})
+			if e == nil || len(sender.scripts) != 0 || commander.calls != 1 {
+				t.Fatalf("%s: fallback/false success %v", action, e)
+			}
+			commander.ok = true
+			commander.err = nil
+			if _, e = service.Act(context.Background(), "mode-confirmed", "room", "KU_ONE", action, ActionRequest{WorldID: "master", Enabled: &enabled}); e != nil {
+				t.Fatal(e)
+			}
+		}
 	}
 }

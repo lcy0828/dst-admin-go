@@ -31,7 +31,7 @@ type WorldQueryRequest struct {
 
 func ValidateWorldQuery(queryID, prefab string) error {
 	switch queryID {
-	case "world_info", "online_players":
+	case "world_info", "online_players", "player_modes":
 		if prefab == "" {
 			return nil
 		}

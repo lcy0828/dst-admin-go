@@ -268,7 +268,7 @@ func TestGiveItemTargetsKUAndRejectsUnsafePrefab(t *testing.T) {
 	if _, err := service.Execute(context.Background(), "room", "world", request); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(sender.script, `local mode="stacks"`) || !strings.Contains(sender.script, `stack:SetStackSize(stack.maxsize or 1)`) || !strings.Contains(sender.script, `for i=1,2`) {
+	if !strings.Contains(sender.script, `local mode="stacks"`) || !strings.Contains(sender.script, `stack:SetStackSize(size)`) || !strings.Contains(sender.script, `for i=1,2`) {
 		t.Fatalf("stack quantity mode was not rendered: %s", sender.script)
 	}
 	request.Arguments["quantity_mode"] = "crates"
@@ -653,7 +653,7 @@ func TestNearbyEntityActionsUseAllowlistedComponents(t *testing.T) {
 	service := newConsoleService(t, sender)
 	expectedByAction := map[string]string{
 		"delete": `protected={FX=true`, "extinguish": `Extinguish(true)`, "ignite": `Ignite(nil,nil,p)`,
-		"restore": `SpawnPrefab(name,skin,nil,p.userid)`, "repair": `visitplayeritems(repair)`, "repair_boat": `repaired_treegrowth`,
+		"restore": `spawn(name,skin,nil,p.userid)`, "repair": `visitplayeritems(repair)`, "repair_boat": `repaired_treegrowth`,
 		"freshen": `visitplayeritems(fresh)`, "heat": `GetCurrent(),70`, "cool": `GetCurrent(),-20`,
 		"salvage": `winchtarget:Salvage()`, "haunt": `DoHaunt(p)`, "fertilize": `compostwrap`,
 		"grow": `DoMagicGrowth`, "harvest": `CanBeHarvested`, "pick": `CanAcceptCount`,
@@ -667,10 +667,16 @@ func TestNearbyEntityActionsUseAllowlistedComponents(t *testing.T) {
 			CommandID: "act_nearby_entities", Confirmation: "周末服",
 			Arguments: map[string]interface{}{"player_id": "KU_SAFE_PLAYER", "action": action, "radius": float64(30)},
 		}
-		if _, err := service.Execute(context.Background(), "room", "world", request); err != nil {
+		if _, err := service.Execute(WithWorkbenchCaller(context.Background(), "test-operator"), "room", "world", request); err != nil {
 			t.Fatalf("%s action error = %v", action, err)
 		}
 		assertLuaSyntax(t, sender.script)
+		if guardedNearby(action) {
+			if !strings.Contains(sender.script, `w.Nearby("KU_SAFE_PLAYER",`+quoteLua(action)+`,30,"","preview"`) {
+				t.Fatal(sender.script)
+			}
+			continue
+		}
 		for _, fragment := range []string{`local R=30`, `local filter=""`, `filter==""or e.prefab==filter`, expected} {
 			if !strings.Contains(sender.script, fragment) {
 				t.Fatalf("%s action missing %q: %s", action, fragment, sender.script)
@@ -681,11 +687,11 @@ func TestNearbyEntityActionsUseAllowlistedComponents(t *testing.T) {
 		CommandID: "act_nearby_entities", Confirmation: "周末服",
 		Arguments: map[string]interface{}{"player_id": "KU_SAFE_PLAYER", "prefab": `pigman");c_shutdown()`, "action": "kill", "radius": float64(10)},
 	}
-	if _, err := service.Execute(context.Background(), "room", "world", request); err != ErrInvalidArguments {
+	if _, err := service.Execute(WithWorkbenchCaller(context.Background(), "test-operator"), "room", "world", request); err != ErrInvalidArguments {
 		t.Fatalf("unsafe nearby prefab error = %v", err)
 	}
 	request.Arguments = map[string]interface{}{"player_id": "KU_SAFE_PLAYER", "prefab": "pigman", "action": "repair", "radius": float64(64)}
-	if _, err := service.Execute(context.Background(), "room", "world", request); err != nil || !strings.Contains(sender.script, `local filter="pigman"`) {
+	if _, err := service.Execute(WithWorkbenchCaller(context.Background(), "test-operator"), "room", "world", request); err != nil || !strings.Contains(sender.script, `local filter="pigman"`) {
 		t.Fatalf("optional prefab filter script = %s, %v", sender.script, err)
 	}
 }

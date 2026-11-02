@@ -19,6 +19,12 @@ type receiptReader interface {
 // ResultState describes evidence, not arbitrary Lua's business meaning. Only a
 // script's printed 0 can establish a zero count; missing output cannot.
 func describeResult(run Run) Run {
+	run.Batch = batchResult(run)
+	if run.Mode == "builtin" && run.CommandID == "act_nearby_entities" && strings.Contains(run.Script, "w.Nearby(") && run.Status == RunSucceeded && run.Batch == nil {
+		run.Status = RunUncertain
+		run.MayHaveExecuted = true
+		run.Message = "缺少有效的范围操作结果，请查看原回执，不要重复提交。"
+	}
 	run.SpawnAudit = spawnAudit(run)
 	run.ResultState = "unconfirmed"
 	switch run.Status {

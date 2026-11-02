@@ -3330,7 +3330,7 @@ paths:
       - name: queryId
         in: path
         required: true
-        schema: {type: string, enum: [world_info, online_players, entity_count]}
+        schema: {type: string, enum: [world_info, online_players, entity_count, player_modes]}
     get:
       tags: [WorldState, Players]
       operationId: queryRoomWorld
@@ -3341,6 +3341,7 @@ paths:
         functions, flags or custom command definitions. world_info and online_players
         accept no extra parameters. Uses fresh current-instance observations or fixed,
         bounded synchronous read-only templates. Does not start, repair or refresh Runtime.
+        player_modes reads current invincibility, creative mode and panel ownership in this shard; unknown is not disabled. It never modifies modes.
         entity_count counts registered entities in this shard, including sleeping entities;
         it does not count uninstantiated save objects or other shards. Check business status
         and complete: sent, missing output and uncertain are never success or zero. Partial
@@ -7389,6 +7390,34 @@ components:
         message: {type: string}
         observedAt: {type: string, format: date-time}
         spawnAudit: {$ref: '#/components/schemas/CommandSpawnAudit'}
+    WorkbenchAction:
+      type: object
+      additionalProperties: false
+      required: [id, title, searchTerms, parameters, risk]
+      properties:
+        id: {type: string, maxLength: 128}
+        title: {type: string, maxLength: 128}
+        searchTerms: {type: array, maxItems: 32, items: {type: string, maxLength: 128}}
+        parameters: {type: object, maxProperties: 1, additionalProperties: {type: string}}
+        risk: {$ref: '#/components/schemas/CommandRisk'}
+        description: {type: string, maxLength: 512}
+    WorkbenchBatchResult:
+      type: object
+      additionalProperties: false
+      required: [state, matched, attempted, verified, unconfirmed, skipped, failed]
+      properties:
+        state: {type: string, enum: [preview, cancelled, completed, partial]}
+        previewId: {type: string, format: uuid}
+        expiresIn: {type: integer, const: 30}
+        matched: {type: integer, minimum: 0, maximum: 40}
+        attempted: {type: integer, minimum: 0, maximum: 40}
+        verified: {type: integer, minimum: 0, maximum: 40}
+        unconfirmed: {type: integer, minimum: 0, maximum: 40}
+        skipped: {type: integer, minimum: 0, maximum: 40}
+        failed: {type: integer, minimum: 0, maximum: 40}
+        reason: {type: string}
+        x: {type: number}
+        z: {type: number}
     WorkbenchEnvelope:
       type: object
       required: [data]
@@ -7406,6 +7435,7 @@ components:
             executionOutcome: {type: string}
             mayHaveExecuted: {type: boolean}
             message: {type: string}
+            batch: {$ref: '#/components/schemas/WorkbenchBatchResult'}
             output: {type: object, properties: {text: {type: string}, truncated: {type: boolean}}}
     BotDirectoryEnvelope:
       type: object
@@ -7434,6 +7464,8 @@ components:
                   access: {type: string, enum: [read, write]}
                   contractVersion: {type: integer}
                   schemaRevision: {type: string}
+                  behaviorRevision: {type: string}
+                  actions: {type: array, maxItems: 128, items: {$ref: '#/components/schemas/WorkbenchAction'}}
                   parameters: {type: object, additionalProperties: true}
                   parameterHints: {type: object, additionalProperties: {type: string}}
                   searchTerms: {type: array, maxItems: 32, items: {type: string, maxLength: 128}}
@@ -10157,6 +10189,7 @@ components:
       additionalProperties: false
       required: [id, name, description, category, risk, parameters, script, isBuiltin]
       properties:
+        actions: {type: array, maxItems: 128, items: {$ref: '#/components/schemas/WorkbenchAction'}}
         scriptMode:
           type: string
           enum: [template, literal]
@@ -10332,6 +10365,7 @@ components:
       additionalProperties: false
       required: [id, roomId, worldId, mode, name, risk, status, resultState, mayHaveExecuted, logQuery, createdAt]
       properties:
+        batch: {$ref: '#/components/schemas/WorkbenchBatchResult'}
         resultState:
           type: string
           enum: [waiting, output, no_output, output_unavailable, failed, unconfirmed]
@@ -10437,6 +10471,26 @@ components:
               id: {type: string, minLength: 1, maxLength: 80}
               name: {type: string, maxLength: 192}
               prefab: {type: string, maxLength: 80}
+    WorldQueryModesData:
+      type: object
+      additionalProperties: false
+      required: [kind, players, count]
+      properties:
+        kind: {type: string, const: player_modes}
+        count: {type: integer, minimum: 0, maximum: 64}
+        players:
+          type: array
+          maxItems: 64
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, invincible, creative, panelGod, panelInvincible]
+            properties:
+              id: {type: string, minLength: 1, maxLength: 80}
+              invincible: {type: string, enum: [enabled, disabled, unknown]}
+              creative: {type: string, enum: [enabled, disabled, unknown]}
+              panelGod: {type: string, enum: [enabled, disabled, unknown]}
+              panelInvincible: {type: string, enum: [enabled, disabled, unknown]}
     WorldQueryWorldData:
       type: object
       additionalProperties: false
@@ -10454,7 +10508,7 @@ components:
       required: [queryId, roomId, worldId, status, source, cached, complete, transportOutcome, executionOutcome, resultState, mayHaveExecuted, data, error]
       properties:
         queryRunId: {type: string, format: uuid}
-        queryId: {type: string, enum: [world_info, online_players, entity_count]}
+        queryId: {type: string, enum: [world_info, online_players, entity_count, player_modes]}
         roomId: {type: string}
         worldId: {type: string}
         status: {type: string, enum: [succeeded, partial, failed, timed_out, uncertain, unavailable]}
@@ -10475,6 +10529,7 @@ components:
             - {$ref: '#/components/schemas/WorldQueryEntityData'}
             - {$ref: '#/components/schemas/WorldQueryPlayersData'}
             - {$ref: '#/components/schemas/WorldQueryWorldData'}
+            - {$ref: '#/components/schemas/WorldQueryModesData'}
             - {type: 'null'}
         error:
           oneOf:

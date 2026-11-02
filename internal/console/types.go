@@ -24,6 +24,7 @@ type Parameter struct {
 }
 
 type Definition struct {
+	Actions     []Action    `json:"actions,omitempty"`
 	ScriptMode  string      `json:"scriptMode,omitempty"`
 	ID          string      `json:"id"`
 	Name        string      `json:"name"`
@@ -60,6 +61,7 @@ type ReceiptCheck struct {
 }
 
 type Run struct {
+	Batch               *BatchResult           `json:"batch,omitempty"`
 	SpawnAudit          *SpawnAudit            `json:"spawnAudit,omitempty"`
 	ResultState         string                 `json:"resultState"`
 	ReceiptRefreshUntil *time.Time             `json:"receiptRefreshUntil,omitempty"`

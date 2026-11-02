@@ -76,6 +76,36 @@ func acceptReceipt(r Result, q Request, receipt dstruntime.CommandReceipt) Resul
 	}
 	var value any
 	switch q.QueryID {
+	case "player_modes":
+		var data struct {
+			Kind    string          `json:"kind"`
+			Players json.RawMessage `json:"players"`
+			Count   *int            `json:"count"`
+		}
+		if strictJSON(wire.Data, &data) != nil || data.Kind != "player_modes" || data.Count == nil || *data.Count < 0 || *data.Count > 64 {
+			return problem(r, "unavailable", "QUERY_OUTPUT_INVALID", "Invalid mode result")
+		}
+		items := []playerModes{}
+		if string(data.Players) != "{}" || *data.Count != 0 {
+			if strictJSON(data.Players, &items) != nil {
+				return problem(r, "unavailable", "QUERY_OUTPUT_INVALID", "Invalid mode list")
+			}
+		}
+		if items == nil || len(items) != *data.Count {
+			return problem(r, "unavailable", "QUERY_OUTPUT_INVALID", "Missing mode list")
+		}
+		seen := map[string]bool{}
+		for _, p := range items {
+			if p.ID == "" || len(p.ID) > 80 || seen[p.ID] || !validModeState(p.Invincible) || !validModeState(p.Creative) || !validModeState(p.PanelGod) || !validModeState(p.PanelInvincible) {
+				return problem(r, "unavailable", "QUERY_OUTPUT_INVALID", "Invalid mode evidence")
+			}
+			seen[p.ID] = true
+		}
+		value = struct {
+			Kind    string        `json:"kind"`
+			Players []playerModes `json:"players"`
+			Count   int           `json:"count"`
+		}{"player_modes", items, len(items)}
 	case "entity_count":
 		var data entityData
 		if strictJSON(wire.Data, &data) != nil || data.Prefab != q.Prefab || wire.Scanned == nil || *wire.Scanned < 0 || *wire.Scanned > 100000 {
@@ -139,3 +169,13 @@ func acceptReceipt(r Result, q Request, receipt dstruntime.CommandReceipt) Resul
 	}
 	return r
 }
+
+type playerModes struct {
+	ID              string `json:"id"`
+	Invincible      string `json:"invincible"`
+	Creative        string `json:"creative"`
+	PanelGod        string `json:"panelGod"`
+	PanelInvincible string `json:"panelInvincible"`
+}
+
+func validModeState(s string) bool { return s == "enabled" || s == "disabled" || s == "unknown" }

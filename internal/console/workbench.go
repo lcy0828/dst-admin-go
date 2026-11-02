@@ -27,7 +27,7 @@ func ValidateBuiltinWorkbench(id string, arguments map[string]interface{}, confi
 		return Definition{}, ErrCommandNotFound
 	}
 	d := tmpl.definition
-	if d.Risk == RiskCritical && !confirmed {
+	if EffectiveWorkbenchRisk(d, arguments) == RiskCritical && !confirmed {
 		return d, ErrConfirmationNeeded
 	}
 	props := map[string]Parameter{}
@@ -94,16 +94,17 @@ func numericArgument(value interface{}) (float64, bool) {
 }
 
 type WorkbenchResult struct {
-	RunID            string    `json:"runId"`
-	RoomID           string    `json:"roomId"`
-	WorldID          string    `json:"worldId"`
-	CommandID        string    `json:"commandId"`
-	Status           RunStatus `json:"status"`
-	Complete         bool      `json:"complete"`
-	ExecutionOutcome string    `json:"executionOutcome"`
-	MayHaveExecuted  bool      `json:"mayHaveExecuted"`
-	Message          string    `json:"message"`
-	Output           *Output   `json:"output,omitempty"`
+	Batch            *BatchResult `json:"batch,omitempty"`
+	RunID            string       `json:"runId"`
+	RoomID           string       `json:"roomId"`
+	WorldID          string       `json:"worldId"`
+	CommandID        string       `json:"commandId"`
+	Status           RunStatus    `json:"status"`
+	Complete         bool         `json:"complete"`
+	ExecutionOutcome string       `json:"executionOutcome"`
+	MayHaveExecuted  bool         `json:"mayHaveExecuted"`
+	Message          string       `json:"message"`
+	Output           *Output      `json:"output,omitempty"`
 }
 
 func workbenchResult(run Run) WorkbenchResult {
@@ -111,6 +112,24 @@ func workbenchResult(run Run) WorkbenchResult {
 	r.Complete = run.Status == RunFailed || run.Status == RunSucceeded && run.ExecutionOutcome == "confirmed"
 	if r.Complete && run.Status == RunSucceeded {
 		r.Message = "固定工作台指令已执行并收到回执；具体效果以输出和最新游戏状态为准"
+	}
+	r.Batch = batchResult(run)
+	if r.Batch != nil && r.Complete && run.Status == RunSucceeded {
+		switch r.Batch.State {
+		case "preview":
+			r.Message = "预览完成，尚未修改游戏。30 秒内携带预览编号确认或取消。"
+		case "cancelled":
+			r.Message = "已取消预览，没有执行批量操作。"
+		case "partial":
+			r.Status = "partial"
+			r.Message = "操作已结束，部分对象未完成或效果未确认；请查看逐项统计，不要重复提交。"
+		case "completed":
+			r.Message = "范围操作已完成，效果已确认。"
+		}
+	} else if r.Complete && run.Status == RunSucceeded && strings.Contains(run.Script, "w.Nearby(") {
+		r.Status = RunUncertain
+		r.Complete = false
+		r.Message = "缺少有效的范围操作结果，请读取原回执，不要重复提交。"
 	}
 	return r
 }

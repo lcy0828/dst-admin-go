@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"dont/internal/apicontract"
+	consoleapi "dont/internal/console"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
 	"github.com/jinzhu/gorm"
@@ -22,20 +23,22 @@ import (
 // Bot capabilities are code-owned recipes. Neither metadata nor callers can
 // supply a handler, operation, script or alternate execution URL.
 type BotCapability struct {
-	ID              string            `json:"id"`
-	SearchTerms     []string          `json:"searchTerms,omitempty"`
-	Title           string            `json:"title"`
-	Category        string            `json:"category"`
-	Access          string            `json:"access"`
-	ContractVersion int               `json:"contractVersion"`
-	SchemaRevision  string            `json:"schemaRevision"`
-	Parameters      map[string]any    `json:"parameters"`
-	ParameterHints  map[string]string `json:"parameterHints"`
-	NativeTools     []string          `json:"nativeTools"`
-	ResultKind      string            `json:"resultKind"`
-	Risk            string            `json:"risk,omitempty"`
-	Operation       string            `json:"-"`
-	build           func(string, map[string]any) apicontract.Input
+	Actions          []consoleapi.Action `json:"actions,omitempty"`
+	BehaviorRevision string              `json:"behaviorRevision,omitempty"`
+	ID               string              `json:"id"`
+	SearchTerms      []string            `json:"searchTerms,omitempty"`
+	Title            string              `json:"title"`
+	Category         string              `json:"category"`
+	Access           string              `json:"access"`
+	ContractVersion  int                 `json:"contractVersion"`
+	SchemaRevision   string              `json:"schemaRevision"`
+	Parameters       map[string]any      `json:"parameters"`
+	ParameterHints   map[string]string   `json:"parameterHints"`
+	NativeTools      []string            `json:"nativeTools"`
+	ResultKind       string              `json:"resultKind"`
+	Risk             string              `json:"risk,omitempty"`
+	Operation        string              `json:"-"`
+	build            func(string, map[string]any) apicontract.Input
 }
 type BotInput struct {
 	Operation       string         `json:"originalOperation,omitempty"`
@@ -157,7 +160,7 @@ func BotCapabilities() []BotCapability {
 			return v
 		}})
 	}
-	for _, q := range []string{"world_info", "online_players", "entity_count"} {
+	for _, q := range []string{"world_info", "online_players", "entity_count", "player_modes"} {
 		query := q
 		props := map[string]any{"worldId": botString(255)}
 		required := []string{"worldId"}
@@ -167,7 +170,7 @@ func BotCapabilities() []BotCapability {
 			required = append(required, "prefab")
 			hints["prefab"] = "resource"
 		}
-		list = append(list, BotCapability{ID: "world." + query, Title: map[string]string{"world_info": "世界信息", "online_players": "分片玩家", "entity_count": "实体计数"}[query], Category: "world", Operation: "queryRoomWorld", Parameters: botSchema(props, required...), ParameterHints: hints, build: func(r string, p map[string]any) apicontract.Input {
+		list = append(list, BotCapability{ID: "world." + query, Title: map[string]string{"world_info": "世界信息", "online_players": "分片玩家", "entity_count": "实体计数", "player_modes": "玩家模式状态"}[query], Category: "world", Operation: "queryRoomWorld", Parameters: botSchema(props, required...), ParameterHints: hints, build: func(r string, p map[string]any) apicontract.Input {
 			v := empty(r, nil)
 			v.Path["worldId"] = p["worldId"]
 			v.Path["queryId"] = query
@@ -215,7 +218,17 @@ func BotCapabilities() []BotCapability {
 			c.ResultKind = "entity-spawn"
 			c.NativeTools = append(c.NativeTools, "api_getRoomPlayerEntitySpawn")
 		}
+		if c.ID == "player.god_mode" || c.ID == "player.creative_mode" {
+			c.BehaviorRevision = consoleapi.WorkbenchBehaviorRevision
+		}
 		c.SearchTerms = strings.Fields(taskTerms[c.ID])
+		// Old clients search only 32 terms. Keep one useful alias per action
+		// first; the complete action catalog remains available to newer clients.
+		for _, action := range c.Actions {
+			if len(c.SearchTerms) < 32 {
+				c.SearchTerms = append(c.SearchTerms, action.Title)
+			}
+		}
 		// Presentation changes do not invalidate a frozen parameter form.
 		c.SchemaRevision = botSchemaRevision(*c)
 	}
@@ -542,7 +555,7 @@ func botProject(r BotResult, c BotCapability, d map[string]any) BotResult {
 		} else {
 			r.WorkbenchRunID = runID
 		}
-		r.Data = botPick(d, "runId", "roomId", "worldId", "playerId", "prefab", "name", "requested", "granted", "spawned", "message", "spawnAudit", "commandId", "output")
+		r.Data = botPick(d, "runId", "roomId", "worldId", "playerId", "prefab", "name", "requested", "granted", "spawned", "message", "spawnAudit", "batch", "commandId", "output")
 		r.ObservedAt = d["observedAt"]
 		if runID == "" || d["roomId"] != r.RoomID {
 			return r
@@ -552,6 +565,12 @@ func botProject(r BotResult, c BotCapability, d map[string]any) BotResult {
 		}
 		r.MayHaveExecuted = d["mayHaveExecuted"] == true
 		switch d["status"] {
+		case "partial":
+			if d["complete"] == true && d["executionOutcome"] == "confirmed" {
+				r.Status = "partial"
+				r.Complete = true
+				r.NextAction = "none"
+			}
 		case "running":
 			r.Status = "running"
 		case "failed":
@@ -925,6 +944,10 @@ func botStoredStatus(result BotResult) string {
 }
 
 func botSchemaRevision(c BotCapability) string {
-	encoded, _ := json.Marshal([]any{c.ID, c.Access, c.Category, c.Risk, c.Parameters, c.ParameterHints, c.Operation, c.NativeTools, c.ResultKind, c.ContractVersion})
+	parts := []any{c.ID, c.Access, c.Category, c.Risk, c.Parameters, c.ParameterHints, c.Operation, c.NativeTools, c.ResultKind, c.ContractVersion}
+	if c.BehaviorRevision != "" {
+		parts = append(parts, c.BehaviorRevision)
+	}
+	encoded, _ := json.Marshal(parts)
 	return digest(string(encoded))
 }

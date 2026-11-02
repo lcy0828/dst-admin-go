@@ -225,7 +225,7 @@ func (h *ConsoleHandler) execute(c *gin.Context) {
 		Failure(c, http.StatusBadRequest, "INVALID_JSON", "请求内容不是有效的命令", nil)
 		return
 	}
-	ctx, timing := requesttiming.New(c.Request.Context())
+	ctx, timing := requesttiming.New(workbenchCallerContext(c))
 	result, err := h.console.Execute(ctx, c.Param("roomId"), c.Param("worldId"), request)
 	finishReadTiming(c, timing, err)
 	if err != nil {

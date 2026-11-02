@@ -70,9 +70,11 @@ func (s *Service) loadTask(p Principal, id string) (taskRecord, BotInput, error)
 	if !p.AllowsRoom(r.RoomID) || json.Unmarshal([]byte(r.Input), &in) != nil {
 		return r, in, ErrDenied
 	}
-	if _, e := s.botCapability(p, in.CapabilityID, r.RoomID); e != nil {
-		return r, in, e
-	}
+	if r.State == "prepared" {
+		if _, e := s.botCapability(p, in.CapabilityID, r.RoomID); e != nil {
+			return r, in, e
+		}
+	} // Submitted receipts use BotResult's recorded-operation permission checks.
 	return r, inputWithTask(in, r.ID), nil
 }
 func (s *Service) executeTask(ctx context.Context, p Principal, id string) (TaskResponse, error) {

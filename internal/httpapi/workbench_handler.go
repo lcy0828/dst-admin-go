@@ -2,14 +2,33 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"io"
 	"strconv"
 	"time"
 
 	"dont/internal/aicontrol"
+	"dont/internal/authn"
 	consoleapi "dont/internal/console"
 	"github.com/gin-gonic/gin"
 )
+
+func workbenchCallerContext(c *gin.Context) context.Context {
+	ctx := c.Request.Context()
+	value, _ := c.Get(authn.ContextAdminKey)
+	admin, ok := value.(authn.Admin)
+	if !ok || admin.ID < 1 {
+		return ctx
+	}
+	// RequireSession has already verified these credentials. Hash rather than
+	// retaining a credential in a command, receipt or Runtime preview.
+	identity := fmt.Sprintf("admin:%d", admin.ID)
+	if header := c.GetHeader("Authorization"); header != "" {
+		identity += fmt.Sprintf(":token:%x", sha256.Sum256([]byte(header)))
+	}
+	return consoleapi.WithWorkbenchCaller(ctx, identity)
+}
 
 func (h *ConsoleHandler) workbench(c *gin.Context) {
 	raw, err := io.ReadAll(io.LimitReader(c.Request.Body, 8193))
@@ -56,7 +75,7 @@ func (h *ConsoleHandler) workbench(c *gin.Context) {
 		consoleFailure(c, consoleapi.ErrInvalidArguments)
 		return
 	}
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(workbenchCallerContext(c), 25*time.Second)
 	defer cancel()
 	if player, _ := args["player_id"].(string); player != "" {
 		if h.locator == nil {

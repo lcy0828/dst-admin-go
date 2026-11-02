@@ -689,7 +689,7 @@ func (s *Service) Act(ctx context.Context, jobID, roomID, playerID string, actio
 		result.Message = "玩家无敌模式已" + enabledText(enabled)
 	case ActionCreativeMode:
 		enabled := *request.Enabled
-		statement := `if p.components.builder then p.components.builder.freebuildmode=` + luaBoolean(enabled) + ` end; ` +
+		statement := `local r=rawget(_G,"DSTAdmin");local m=r and r.Commands and r.Commands.ModeOwnership;if not m or not m.Creative then error("WORKBENCH_UPDATE_REQUIRED")end;m.Creative(p,` + luaBoolean(enabled) + `); ` +
 			`if p.components.talker then p.components.talker:Say(` + quoteLua(toggleMessage("制作模式", enabled)) + `) end`
 		if err := s.sendPlayerAction(ctx, room, world, runtimeRequest, runtimeSupported, playerLookupScript(player.ID, statement)); err != nil {
 			return ActionResult{}, err
@@ -774,6 +774,10 @@ func (s *Service) worldStatus(ctx context.Context, room rooms.Room, world rooms.
 }
 
 func (s *Service) sendPlayerAction(ctx context.Context, room rooms.Room, world rooms.World, request dstruntime.CommandRequest, runtimeSupported bool, fallback string) error {
+	ownedMode := request.Action == "player.god_mode" || request.Action == "player.creative_mode"
+	if ownedMode && (s.commander == nil || !runtimeSupported) {
+		return fmt.Errorf("%w: WORKBENCH_UPDATE_REQUIRED: 请更新运行组件后再切换玩家模式", dstruntime.ErrRuntimeUnavailable)
+	}
 	if s.commander != nil && runtimeSupported {
 		receipt, err := s.commander.ExecuteCommand(ctx, room.ID, world.ID, request)
 		if err == nil {
@@ -782,7 +786,7 @@ func (s *Service) sendPlayerAction(ctx context.Context, room rooms.Room, world r
 			}
 			return fmt.Errorf("runtime action rejected: %s: %s", receipt.Code, receipt.Message)
 		}
-		if !errors.Is(err, dstruntime.ErrRuntimeUnavailable) && !errors.Is(err, dstruntime.ErrRuntimeNotInstalled) {
+		if ownedMode || !errors.Is(err, dstruntime.ErrRuntimeUnavailable) && !errors.Is(err, dstruntime.ErrRuntimeNotInstalled) {
 			return err
 		}
 	}
@@ -1011,14 +1015,7 @@ func playerLookupScript(playerID, statement string) string {
 }
 
 func godModeStatement(enabled bool) string {
-	if enabled {
-		return `p:AddTag("dst_admin_god_mode");if p:HasTag("playerghost")then p:PushEvent("respawnfromghost");p.rezsource="DST-ADMIN-GO控制台"end;` +
-			`local function waterwalk(inst)inst:AddTag("dst_admin_waterwalk");if inst.Physics then inst.Physics:ClearCollidesWith(COLLISION.LIMITS)end;local d=inst.components and inst.components.drownable;if d then if inst._dst_admin_shoulddrown==nil then inst._dst_admin_shoulddrown=d.ShouldDrown end;d.ShouldDrown=function()return false end end end;` +
-			`if p._dst_admin_god_task then p._dst_admin_god_task:Cancel()end;p._dst_admin_god_task=p:DoPeriodicTask(.1,function(inst)local c=inst.components or {};if c.health then c.health:SetInvincible(true);c.health:SetPercent(1)end;if c.hunger then c.hunger:SetPercent(1)end;if c.sanity then c.sanity:SetPercent(1)end;if c.temperature then c.temperature:SetTemperature(35)end;if c.moisture then if c.moisture.waterproofnessmodifiers then c.moisture.waterproofnessmodifiers:SetModifier("dst_admin_god",TUNING.WATERPROOFNESS_ABSOLUTE)end;c.moisture:SetPercent(0)end;if c.inventory and c.inventory.isexternallyinsulated then c.inventory.isexternallyinsulated:SetModifier("dst_admin_god",true)end;waterwalk(inst);if RemovePhysicsColliders then RemovePhysicsColliders(inst)end end);waterwalk(p)`
-	}
-	return `if p._dst_admin_god_task then p._dst_admin_god_task:Cancel();p._dst_admin_god_task=nil end;p:RemoveTag("dst_admin_god_mode");` +
-		`local c=p.components or {};if c.health and not p._dst_admin_stealth_task then c.health:SetInvincible(false)end;if c.moisture and c.moisture.waterproofnessmodifiers then c.moisture.waterproofnessmodifiers:RemoveModifier("dst_admin_god")end;if c.inventory and c.inventory.isexternallyinsulated then c.inventory.isexternallyinsulated:SetModifier("dst_admin_god",false)end;` +
-		`p:RemoveTag("dst_admin_god_waterwalk");if p.Physics then if ChangeToCharacterPhysics then ChangeToCharacterPhysics(p)else p.Physics:CollidesWith(COLLISION.LIMITS)end;if p:HasTag("dst_admin_waterwalk_mode")then p:AddTag("dst_admin_waterwalk");p.Physics:ClearCollidesWith(COLLISION.LIMITS)else p:RemoveTag("dst_admin_waterwalk")end end;local d=c.drownable;if d then if p:HasTag("dst_admin_waterwalk_mode")then d.ShouldDrown=function()return false end elseif p._dst_admin_shoulddrown then d.ShouldDrown=p._dst_admin_shoulddrown;p._dst_admin_shoulddrown=nil end end`
+	return `local r=rawget(_G,"DSTAdmin");local c=r and r.Commands;if not c or not c.SetGodMode then error("WORKBENCH_UPDATE_REQUIRED")end;c.SetGodMode(p,` + luaBoolean(enabled) + `)`
 }
 
 func luaBoolean(value bool) string {

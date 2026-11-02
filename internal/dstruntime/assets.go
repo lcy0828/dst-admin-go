@@ -12,6 +12,15 @@ func assetData(name string) ([]byte, error) {
 	if err != nil || name == "clock.lua" {
 		return data, err
 	}
+	if name == "commands.lua" {
+		for _, module := range []string{"mode_ownership.lua", "workbench.lua"} {
+			part, e := embeddedAssets.ReadFile("assets/" + module)
+			if e != nil {
+				return nil, e
+			}
+			data = append(append(part, '\n'), data...)
+		}
+	}
 	// Inline the shared clock: deployed file names and the restore layout stay
 	// compatible with published collectors, including older Runtime backups.
 	clock, err := embeddedAssets.ReadFile("assets/clock.lua")

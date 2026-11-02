@@ -83,7 +83,7 @@ func (s *Service) DefinitionsWithError() ([]Definition, error) {
 	order := []string{
 		"world_info", "save_world", "announce", "list_players", "give_item", "give_recipe_materials", "give_blueprint",
 		"resurrect_player", "set_player_stat", "set_player_speed", "set_player_lock", "adjust_player_luck", "manage_player_skills", "set_monkey_curse",
-		"clear_player_debuffs", "clear_player_inventory", "clear_player_naughtiness", "teleport_player", "relocate_players", "set_player_ability", "toggle_player_ghost",
+		"clear_player_debuffs", "clear_player_inventory", "clear_player_naughtiness", "teleport_player", "relocate_players", "set_player_ability", "set_player_invincibility", "toggle_player_ghost",
 		"set_player_attack_multiplier", "set_health_penalty", "set_character_power", "manage_followers", "spawn_domesticated_beefalo",
 		"set_season", "next_phase", "set_phase", "set_clock_segments",
 		"skip_days", "set_time_scale", "set_precipitation", "set_world_wetness", "set_world_temperature", "set_moon_phase",
@@ -187,6 +187,15 @@ func (s *Service) Execute(ctx context.Context, roomID, worldID string, request E
 	}
 	if err != nil {
 		return Run{}, err
+	}
+	if builtin && commandID == "act_nearby_entities" {
+		action, _ := request.Arguments["action"].(string)
+		if guardedNearby(action) {
+			script, err = bindNearbyCaller(ctx, room.ID, world.ID, script)
+			if err != nil {
+				return Run{}, err
+			}
+		}
 	}
 	run, err := s.store.Create(Run{
 		RoomID: room.ID, WorldID: world.ID, Mode: map[bool]string{true: "builtin", false: "custom"}[builtin], CommandID: definition.ID,
@@ -444,7 +453,7 @@ func builtinTemplates() map[string]template {
 			if err != nil {
 				return "", err
 			}
-			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.components and p.components.inventory then local mode=%s;local n=0;for i=1,%d do local item=SpawnPrefab(%s);if not item then error("PREFAB_NOT_FOUND")end;if not(item.components and item.components.inventoryitem)then item:Remove();error("PREFAB_NOT_INVENTORY_ITEM")end;if item then local granted=1;local stack=item.components and item.components.stackable;if mode=="stacks"and stack then stack:SetStackSize(stack.maxsize or 1);granted=stack:StackSize()end;p.components.inventory:GiveItem(item);__dst_record(item,p,"inventory",granted);n=n+granted end end;print("[DST-ADMIN-GIVE]",%s,%s,mode,n)else print("[DST-ADMIN-GIVE]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), quoteLua(quantityMode), count, quoteLua(prefab), quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
+			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.components and p.components.inventory then local mode=%s;local n=0;for i=1,%d do local item=SpawnPrefab(%s);if not item then error("PREFAB_NOT_FOUND")end;if not(item.components and item.components.inventoryitem)then item:Remove();error("PREFAB_NOT_INVENTORY_ITEM")end;if item then local granted=1;local stack=item.components and item.components.stackable;if mode=="stacks"and stack then local size=stack.maxsize or 1;if type(size)~="number"or size~=size or size<1 or size>400 or n+size>400 then item:Remove();error("ITEM_UNIT_BUDGET")end;stack:SetStackSize(size);granted=stack:StackSize()end;p.components.inventory:GiveItem(item);__dst_record(item,p,"inventory",granted);n=n+granted end end;print("[DST-ADMIN-GIVE]",%s,%s,mode,n)else print("[DST-ADMIN-GIVE]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), quoteLua(quantityMode), count, quoteLua(prefab), quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
 		},
 	}
 	templates["give_recipe_materials"] = template{
@@ -470,7 +479,7 @@ func builtinTemplates() map[string]template {
 			if err != nil {
 				return "", err
 			}
-			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;local recipe=(AllRecipes or {})[%s];if p and recipe then local n=0;local function give(item)if not item then return end;if item.components and item.components.inventoryitem and p.components and p.components.inventory then p.components.inventory:GiveItem(item);__dst_record(item,p,"inventory",1)else local x,y,z=p.Transform:GetWorldPosition();item.Transform:SetPosition(x,y,z);__dst_record(item,p,"world",1)end;n=n+1 end;for i=1,%d do for _,ingredient in pairs(recipe.ingredients or {})do for k=1,ingredient.amount or 0 do give(SpawnPrefab(ingredient.type))end end end;print("[DST-ADMIN-GIVE-MATERIALS]",%s,%s,n)else print("[DST-ADMIN-GIVE-MATERIALS]","PLAYER_OR_RECIPE_NOT_FOUND",%s,%s)end`, quoteLua(playerID), quoteLua(prefab), count, quoteLua(playerID), quoteLua(prefab), quoteLua(playerID), quoteLua(prefab)), nil
+			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;local recipe=(AllRecipes or {})[%s];if p and recipe then local total=0;local kinds=0;for _,ingredient in pairs(recipe.ingredients or {})do kinds=kinds+1;local amount=ingredient.amount;if kinds>40 or type(amount)~="number"or amount~=amount or amount<0 or amount~=math.floor(amount)or amount>40 then error("MATERIAL_BUDGET_EXCEEDED")end;total=total+amount end;if total*%d>40 then error("MATERIAL_BUDGET_EXCEEDED")end;local deadline=os.clock()+.004;local n=0;local function give(item)if not item then return end;if item.components and item.components.inventoryitem and p.components and p.components.inventory then p.components.inventory:GiveItem(item);__dst_record(item,p,"inventory",1)else local x,y,z=p.Transform:GetWorldPosition();item.Transform:SetPosition(x,y,z);__dst_record(item,p,"world",1)end;n=n+1 end;for i=1,%d do for _,ingredient in pairs(recipe.ingredients or {})do for k=1,ingredient.amount or 0 do if os.clock()>deadline then error("MATERIAL_CPU_BUDGET")end;give(SpawnPrefab(ingredient.type))end end end;print("[DST-ADMIN-GIVE-MATERIALS]",%s,%s,n)else print("[DST-ADMIN-GIVE-MATERIALS]","PLAYER_OR_RECIPE_NOT_FOUND",%s,%s)end`, quoteLua(playerID), quoteLua(prefab), count, count, quoteLua(playerID), quoteLua(prefab), quoteLua(playerID), quoteLua(prefab)), nil
 		},
 	}
 	templates["give_blueprint"] = template{
@@ -616,6 +625,10 @@ func builtinTemplates() map[string]template {
 		},
 	}
 	addGameToolTemplates(templates)
+	for id, tmpl := range templates {
+		tmpl.definition.Actions = commandActions(tmpl.definition)
+		templates[id] = tmpl
+	}
 	for _, id := range []string{"spawn_entity", "spawn_domesticated_beefalo", "give_item", "give_blueprint", "give_recipe_materials"} {
 		tmpl := templates[id]
 		render := tmpl.render

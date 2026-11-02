@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.20"
+local PRODUCER_VERSION = "2.4.21"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local INPUT_ROOT = "mod_config_data/dst-admin/command-requests/"
 local RECENT_REQUEST_LIMIT = 256
@@ -493,20 +493,12 @@ handlers["catalog.entities"] = function(arguments)
     return result(true, "CATALOG_READY", "", { items = items, mods = snapshot.mods, total = #matches, offset = offset, hasMore = offset + #items < #matches, observedAt = os.date("!%Y-%m-%dT%H:%M:%SZ", snapshot.observedAt) })
 end
 
-local function apply_god_waterwalk(player)
-    player:AddTag("dst_admin_waterwalk")
-    if player.Physics ~= nil then player.Physics:ClearCollidesWith(COLLISION.LIMITS) end
-    local drownable = player.components ~= nil and player.components.drownable or nil
-    if drownable ~= nil then
-        if player._dst_admin_shoulddrown == nil then
-            player._dst_admin_shoulddrown = drownable.ShouldDrown
-        end
-        drownable.ShouldDrown = function() return false end
-    end
-end
-
 local function set_god_mode(player, enabled)
     if enabled then
+        if player._dst_admin_god_task and not player._dst_admin_god_owner then error("MODE_OWNERSHIP_UNCERTAIN") end
+        if not ModeOwnership.Motion(player,"god",true) then error("MODE_OWNERSHIP_UNCERTAIN") end
+        ModeOwnership.Begin(player)
+        if not ModeOwnership.Apply(player) then error("MODE_OWNERSHIP_UNCERTAIN") end
 		player:AddTag("dst_admin_god_mode")
         if player:HasTag("playerghost") then
             player:PushEvent("respawnfromghost")
@@ -516,7 +508,7 @@ local function set_god_mode(player, enabled)
         player._dst_admin_god_task = player:DoPeriodicTask(.1, function(inst)
             local components = inst.components or {}
             if components.health ~= nil then
-                components.health:SetInvincible(true)
+                ModeOwnership.Apply(inst)
                 components.health:SetPercent(1)
             end
             if components.hunger ~= nil then components.hunger:SetPercent(1) end
@@ -531,10 +523,8 @@ local function set_god_mode(player, enabled)
             if components.inventory ~= nil and components.inventory.isexternallyinsulated ~= nil then
                 components.inventory.isexternallyinsulated:SetModifier("dst_admin_god", true)
             end
-            apply_god_waterwalk(inst)
-            if RemovePhysicsColliders ~= nil then RemovePhysicsColliders(inst) end
+            -- Do not overwrite later collision or drowning changes by Mods.
         end)
-        apply_god_waterwalk(player)
         return
     end
 
@@ -544,37 +534,15 @@ local function set_god_mode(player, enabled)
     end
 	player:RemoveTag("dst_admin_god_mode")
     local components = player.components or {}
-    if components.health ~= nil and player._dst_admin_stealth_task == nil then
-        components.health:SetInvincible(false)
-    end
+    local healthSafe = ModeOwnership.End(player)
     if components.moisture ~= nil and components.moisture.waterproofnessmodifiers ~= nil then
         components.moisture.waterproofnessmodifiers:RemoveModifier("dst_admin_god")
     end
     if components.inventory ~= nil and components.inventory.isexternallyinsulated ~= nil then
-        components.inventory.isexternallyinsulated:SetModifier("dst_admin_god", false)
+        components.inventory.isexternallyinsulated:RemoveModifier("dst_admin_god")
     end
-    player:RemoveTag("dst_admin_god_waterwalk")
-    if player.Physics ~= nil then
-        if ChangeToCharacterPhysics ~= nil then
-            ChangeToCharacterPhysics(player)
-        else
-            player.Physics:CollidesWith(COLLISION.LIMITS)
-        end
-		if player:HasTag("dst_admin_waterwalk_mode") then
-			player:AddTag("dst_admin_waterwalk")
-            player.Physics:ClearCollidesWith(COLLISION.LIMITS)
-		else
-			player:RemoveTag("dst_admin_waterwalk")
-        end
-    end
-	if components.drownable ~= nil then
-		if player:HasTag("dst_admin_waterwalk_mode") then
-			components.drownable.ShouldDrown = function() return false end
-		elseif player._dst_admin_shoulddrown ~= nil then
-			components.drownable.ShouldDrown = player._dst_admin_shoulddrown
-			player._dst_admin_shoulddrown = nil
-		end
-    end
+    local motionSafe = ModeOwnership.Motion(player,"god",false)
+    if not healthSafe or not motionSafe then error("MODE_OWNERSHIP_UNCERTAIN") end
 end
 
 handlers["telemetry.emit"] = function()
@@ -633,7 +601,7 @@ handlers["player.creative_mode"] = function(arguments)
     if player.components == nil or player.components.builder == nil then
         return result(false, "COMPONENT_UNAVAILABLE", "player builder component is unavailable")
     end
-    player.components.builder.freebuildmode = arguments.enabled
+    ModeOwnership.Creative(player, arguments.enabled)
     if player.components.talker ~= nil then
         player.components.talker:Say(arguments.enabled and "制作模式已开启" or "制作模式已关闭")
     end
@@ -955,5 +923,8 @@ function M.Status()
     }
 end
 
+M.Workbench = Workbench
+M.ModeOwnership = ModeOwnership
+M.SetGodMode = set_god_mode
 M.version = PRODUCER_VERSION
 return M
