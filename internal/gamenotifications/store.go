@@ -29,19 +29,23 @@ type notificationRecord struct {
 }
 
 type deliveryRecord struct {
-	ID               int64  `gorm:"primary_key;AUTO_INCREMENT"`
-	NotificationID   string `gorm:"type:char(36);unique_index:idx_game_notification_world;not null"`
-	WorldID          string `gorm:"type:varchar(255);unique_index:idx_game_notification_world;not null"`
-	WorldName        string `gorm:"type:varchar(255);not null"`
-	TargetID         string `gorm:"type:varchar(255);index"`
-	AgentID          string `gorm:"type:varchar(255);index"`
-	Status           string `gorm:"type:varchar(24);index;not null"`
-	Message          string `gorm:"type:text"`
-	ErrorCode        string `gorm:"type:varchar(64)"`
-	ErrorMessage     string `gorm:"type:text"`
-	TopologyRevision string `gorm:"type:varchar(80)"`
-	SentAt           *time.Time
-	ObservedAt       *time.Time
+	ID                 int64  `gorm:"primary_key;AUTO_INCREMENT"`
+	NotificationID     string `gorm:"type:char(36);unique_index:idx_game_notification_world;not null"`
+	WorldID            string `gorm:"type:varchar(255);unique_index:idx_game_notification_world;not null"`
+	WorldName          string `gorm:"type:varchar(255);not null"`
+	TargetID           string `gorm:"type:varchar(255);index"`
+	AgentID            string `gorm:"type:varchar(255);index"`
+	Status             string `gorm:"type:varchar(24);index;not null"`
+	Outcome            string `gorm:"type:varchar(24)"`
+	SkipReason         string `gorm:"type:varchar(32)"`
+	BroadcastWorldID   string `gorm:"type:varchar(255)"`
+	BroadcastWorldName string `gorm:"type:varchar(255)"`
+	Message            string `gorm:"type:text"`
+	ErrorCode          string `gorm:"type:varchar(64)"`
+	ErrorMessage       string `gorm:"type:text"`
+	TopologyRevision   string `gorm:"type:varchar(80)"`
+	SentAt             *time.Time
+	ObservedAt         *time.Time
 }
 
 type policyRecord struct {
@@ -107,10 +111,13 @@ func (s *Store) RecoverInterrupted() error {
 			if delivery.Status != DeliveryQueued {
 				continue
 			}
-			delivery.Status = DeliveryFailed
+			delivery.Status, delivery.Outcome = DeliveryFailed, OutcomeFailed
+			if notification.Status == StatusSending {
+				delivery.Outcome = OutcomeUnconfirmed
+			}
 			delivery.ErrorCode = "SERVICE_RESTARTED"
-			delivery.ErrorMessage = "服务重启导致通知发送中断"
-			delivery.SentAt = &now
+			delivery.ErrorMessage = "服务重启导致通知发送中断；不会自动重发"
+			delivery.ObservedAt = &now
 			if err := s.RecordDelivery(notification.ID, delivery); err != nil {
 				combined = errors.Join(combined, err)
 			}
@@ -185,6 +192,8 @@ func (s *Store) RecordDelivery(notificationID string, delivery Delivery) error {
 		"target_id": delivery.TargetID, "agent_id": delivery.AgentID, "status": delivery.Status,
 		"message": delivery.Message, "error_code": delivery.ErrorCode, "error_message": delivery.ErrorMessage,
 		"topology_revision": delivery.TopologyRevision, "sent_at": delivery.SentAt, "observed_at": delivery.ObservedAt,
+		"outcome": delivery.Outcome, "skip_reason": delivery.SkipReason,
+		"broadcast_world_id": delivery.BroadcastWorldID, "broadcast_world_name": delivery.BroadcastWorldName,
 	}
 	result := s.db.Table(s.deliveriesTable).
 		Where("notification_id = ? AND world_id = ? AND status = ?", notificationID, delivery.WorldID, DeliveryQueued).
@@ -227,7 +236,7 @@ func (s *Store) Fail(notificationID, message string) error {
 		current.Status = DeliveryFailed
 		current.ErrorCode = "JOB_CREATE_FAILED"
 		current.ErrorMessage = message
-		current.SentAt = &now
+		current.ObservedAt = &now
 		values = append(values, current)
 	}
 	for _, delivery := range values {
@@ -344,19 +353,22 @@ func (s *Store) SavePolicy(policy Policy) (Policy, error) {
 }
 
 func notificationFromRecord(record notificationRecord, deliveries []Delivery) Notification {
-	return Notification{
+	value := Notification{
 		ID: record.ID, RoomID: record.RoomID, RoomName: record.RoomName, Message: record.Message,
 		Source: Source(record.Source), Status: Status(record.Status), JobID: record.JobID,
 		SuccessCount: record.SuccessCount, FailureCount: record.FailureCount,
 		SkippedCount: record.SkippedCount, CanceledCount: record.CanceledCount,
 		CreatedAt: record.CreatedAt.UTC(), CompletedAt: utcTime(record.CompletedAt), Deliveries: deliveries,
 	}
+	return describeNotification(value)
 }
 
 func deliveryFromRecord(record deliveryRecord) Delivery {
 	return Delivery{
 		ID: record.ID, NotificationID: record.NotificationID, WorldID: record.WorldID, WorldName: record.WorldName,
 		TargetID: record.TargetID, AgentID: record.AgentID, Status: DeliveryStatus(record.Status), Message: record.Message,
+		Outcome: Outcome(record.Outcome), SkipReason: SkipReason(record.SkipReason),
+		BroadcastWorldID: record.BroadcastWorldID, BroadcastWorldName: record.BroadcastWorldName,
 		ErrorCode: record.ErrorCode, ErrorMessage: record.ErrorMessage, TopologyRevision: record.TopologyRevision,
 		SentAt: utcTime(record.SentAt), ObservedAt: utcTime(record.ObservedAt),
 	}

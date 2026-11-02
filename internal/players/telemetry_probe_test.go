@@ -346,3 +346,20 @@ func TestTelemetryRecoveryCoalescesAndBoundsDemandDrivenState(t *testing.T) {
 		t.Fatalf("unbounded state: %d", len(probe.recoveries))
 	}
 }
+
+func TestExplicitRefreshCanCollectAgainAfterValidatedPause(t *testing.T) {
+	now := time.Now().UTC()
+	reader := &refreshableTelemetryTestReader{
+		telemetryTestReader: &telemetryTestReader{err: dstruntime.ErrPlayerSamplingPaused},
+		refresh:             dstruntime.SnapshotRefreshResult{Players: dstruntime.Snapshot{CapturedAt: now, SessionID: "SESSION", LocalityKnown: true, Players: []dstruntime.SnapshotPlayer{}}},
+	}
+	fallback := &telemetryTestProbe{err: errors.New("must not use a console fallback")}
+	probe, err := NewTelemetryProbe(&telemetryTestProbe{}, reader, fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := probe.SnapshotDetailed(context.Background(), "room", "master")
+	if err != nil || reader.refreshCalls != 1 || fallback.calls != 0 || !result.ObservedAt.Equal(now) || result.Degraded {
+		t.Fatalf("explicit refresh lost after pause: %+v err=%v refresh=%d fallback=%d", result, err, reader.refreshCalls, fallback.calls)
+	}
+}

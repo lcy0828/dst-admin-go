@@ -19,6 +19,7 @@ type passivePlayerRead struct {
 	done    chan struct{}
 	expires time.Time
 	err     error
+	paused  []string
 }
 
 type passivePlayerReads struct {
@@ -97,9 +98,11 @@ func (s *Service) SyncPassivePlayers(ctx context.Context, roomID string) error {
 	entry := &passivePlayerRead{done: make(chan struct{})}
 	reads.rooms[room.ID] = entry
 	reads.mu.Unlock()
+	var paused []string
 	defer func() {
 		reads.mu.Lock()
 		entry.err, entry.expires = err, s.now().Add(passivePlayerInterval)
+		entry.paused = paused
 		close(entry.done)
 		<-reads.slots
 		reads.mu.Unlock()
@@ -142,6 +145,19 @@ func (s *Service) SyncPassivePlayers(ctx context.Context, roomID string) error {
 			if ctx.Err() != nil {
 				readErr = ctx.Err()
 			}
+			if errors.Is(readErr, dstruntime.ErrPlayerSamplingPaused) && status.Paused != nil && *status.Paused {
+				// The Runtime already checked the process, save, producer and
+				// snapshot integrity. Retain old samples without calling them live.
+				readErr = s.observePassiveWorldSession(ctx, room.ID, world.ID)
+				if readErr == nil {
+					_, readErr = s.mergeWorldHistory(ctx, room, world, s.now().UTC())
+				}
+				if readErr == nil {
+					paused = append(paused, world.ID)
+					stale = append(stale, world.ID)
+					continue
+				}
+			}
 			age := s.now().Sub(result.ObservedAt)
 			if readErr == nil && (result.Degraded || !result.LocalityKnown || !observationsHaveLocality(result.Observations) || result.SessionID == "" || age < -2*time.Second || age > 20*time.Second) {
 				readErr = dstruntime.ErrSnapshotStale
@@ -165,4 +181,14 @@ func (s *Service) SyncPassivePlayers(ctx context.Context, roomID string) error {
 	}
 	err = errors.Join(err, s.store.ObserveRuntimePresence(room.ID, nil, stale, s.now().UTC()))
 	return err
+}
+
+func (s *Service) pausedPlayerWorlds(roomID string) []string {
+	s.passiveReads.mu.Lock()
+	defer s.passiveReads.mu.Unlock()
+	entry := s.passiveReads.rooms[roomID]
+	if entry != nil && s.now().Before(entry.expires) {
+		return append([]string(nil), entry.paused...)
+	}
+	return nil
 }

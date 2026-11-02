@@ -242,7 +242,7 @@ func (p *TelemetryProbe) beginRecovery(key telemetryRecoveryKey) (func(bool), bo
 }
 
 func refreshableSnapshotError(err error) bool {
-	return errors.Is(err, dstruntime.ErrSnapshotUnavailable) || errors.Is(err, dstruntime.ErrSnapshotStale)
+	return errors.Is(err, dstruntime.ErrSnapshotUnavailable) || errors.Is(err, dstruntime.ErrSnapshotStale) || errors.Is(err, dstruntime.ErrPlayerSamplingPaused)
 }
 
 func (p *TelemetryProbe) HistorySnapshot(ctx context.Context, roomID, worldID string) ([]Observation, error) {

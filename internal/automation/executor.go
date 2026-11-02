@@ -318,12 +318,12 @@ func (e *DomainExecutor) execute(ctx context.Context, task Task, jobID string, s
 	case ActionNotificationSend:
 		message := strings.TrimSpace(task.Parameters["message"].(string))
 		success, failure, skipped, err := e.notifications.SendAutomation(ctx, task.RoomID, message, jobID)
-		result := ExecutionResult{Message: fmt.Sprintf("游戏通知：成功 %d，失败 %d，跳过 %d", success, failure, skipped)}
+		result := ExecutionResult{Message: fmt.Sprintf("游戏通知：已提交 %d，未完成 %d，未单独发送 %d；执行确认请查看通知记录", success, failure, skipped)}
 		if err != nil {
 			return result, err
 		}
 		if failure > 0 {
-			return result, fmt.Errorf("%d 个分片未能收到游戏通知", failure)
+			return result, fmt.Errorf("%d 次通知发送未完成，请查看通知记录", failure)
 		}
 		return result, nil
 	case ActionCommandExecute:

@@ -313,7 +313,10 @@ func (s *Service) RunTask(roomID, taskID string, trigger Trigger) (jobs.Job, err
 			retryCount := 0
 			for attempt := 0; attempt <= task.RetryTimes; attempt++ {
 				result, executeErr = s.execute(taskCtx, task, job.ID, trigger)
-				if executeErr == nil || taskCtx.Err() != nil || attempt == task.RetryTimes {
+				// An announcement can execute before its receipt or database write
+				// fails. Retrying the action would create a new notification and
+				// broadcast it again, even if the original result was uncertain.
+				if executeErr == nil || task.Action == ActionNotificationSend || taskCtx.Err() != nil || attempt == task.RetryTimes {
 					break
 				}
 				retryCount++

@@ -116,7 +116,7 @@ func (b *DistributedBridge) readPlayersForHealth(ctx context.Context, roomID, wo
 	candidates := make([]Snapshot, 0, len(artifacts))
 	var failures error
 	for _, artifact := range artifacts {
-		value, decodeErr := decodeSnapshotData(artifact.Data, health.SessionID, health.ShardID, b.now().UTC())
+		value, decodeErr := decodePlayerSnapshotData(artifact.Data, health.SessionID, health.ShardID, b.now().UTC(), false)
 		if decodeErr != nil {
 			failures = errors.Join(failures, fmt.Errorf("%s: %w", artifact.Name, decodeErr))
 			continue
@@ -140,6 +140,12 @@ func (b *DistributedBridge) readPlayersForHealth(ctx context.Context, roomID, wo
 		}
 		return candidates[i].CapturedAt.After(candidates[j].CapturedAt)
 	})
+	if b.now().Sub(candidates[0].CapturedAt) > defaultFreshFor {
+		if candidates[0].LocalityKnown && pausedHealthMatchesCurrentProcess(b.now().UTC(), health, current) {
+			return Snapshot{}, ErrPlayerSamplingPaused
+		}
+		return Snapshot{}, fmt.Errorf("%w: %w", ErrSnapshotUnavailable, ErrSnapshotStale)
+	}
 	return candidates[0], nil
 }
 
@@ -445,22 +451,25 @@ func (b *DistributedBridge) executeCommand(ctx context.Context, roomID, worldID 
 	delivery, sendErr := b.runtime.SendID(ctx, roomID, worldID, shared.RuntimeConsoleRequest{
 		Mode: shared.ConsoleModeManaged, Command: command, CommandDocument: document,
 	})
+	routing := CommandReceipt{TargetID: delivery.TargetID, AgentID: delivery.AgentID, TopologyRevision: delivery.TopologyRevision}
 	finishSend()
 	if err := sendErr; err != nil {
 		// A rejected lease proves dispatch did not begin. This is distinct
 		// from a transport cancellation after delivery may have started.
 		if errors.Is(err, operationlease.ErrBusy) {
 			if request.Action == "catalog.entities" || queryInstance != "" {
-				return CommandReceipt{}, fmt.Errorf("%w: %w", ErrRuntimeCommandBusy, err)
+				return routing, fmt.Errorf("%w: %w", ErrRuntimeCommandBusy, err)
 			}
-			return CommandReceipt{}, fmt.Errorf("send runtime command: %w", err)
+			return routing, fmt.Errorf("send runtime command: %w", err)
 		}
 		if queryInstance != "" || delivery.Outcome == shared.RuntimeOutcomeSent || delivery.Outcome == shared.RuntimeOutcomeUnknown || delivery.Outcome == shared.RuntimeOutcomeConfirmed || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return CommandReceipt{}, unconfirmedCommand(request, err, nil)
+			return routing, unconfirmedCommand(request, err, nil)
 		}
-		return CommandReceipt{}, fmt.Errorf("send runtime command: %w", err)
+		return routing, fmt.Errorf("send runtime command: %w", err)
 	}
-	return b.waitForCommandReceipt(ctx, roomID, worldID, health, request, sentAt)
+	receipt, err := b.waitForCommandReceipt(ctx, roomID, worldID, health, request, sentAt)
+	receipt.TargetID, receipt.AgentID, receipt.TopologyRevision = delivery.TargetID, delivery.AgentID, delivery.TopologyRevision
+	return receipt, err
 }
 
 func (b *DistributedBridge) ReadEvents(ctx context.Context, roomID, worldID string) (EventBatch, error) {

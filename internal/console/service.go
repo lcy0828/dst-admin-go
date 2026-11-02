@@ -378,7 +378,7 @@ func builtinTemplates() map[string]template {
 		"save_world":   simpleTemplate("save_world", "保存世界", "立即保存当前世界", "基础操作", RiskLow, "c_save()"),
 		"list_players": simpleTemplate("list_players", "列出玩家", "将当前玩家列表写入服务器日志", "查询", RiskLow, `for i,v in ipairs(TheNet:GetClientTable()) do print("[DST-ADMIN-PLAYER]",i,v.userid,v.name,v.prefab) end`),
 		"shutdown":     simpleTemplate("shutdown", "关闭分片", "保存并关闭当前分片", "危险操作", RiskHigh, "c_shutdown(true)"),
-		"regenerate":   simpleTemplate("regenerate", "重新生成世界", "删除当前进度并重新生成世界", "危险操作", RiskCritical, "c_regenerateworld()"),
+		"regenerate":   simpleTemplate("regenerate", "重置全部世界", "清除房间内全部世界的当前进度并重新生成地图，包括地面和洞穴；不会自动备份，全部世界需先运行并加载完成", "危险操作", RiskCritical, "c_regenerateworld()"),
 		"stop_vote":    simpleTemplate("stop_vote", "停止投票", "立即终止当前服务器投票", "世界控制", RiskHigh, "c_stopvote()"),
 	}
 

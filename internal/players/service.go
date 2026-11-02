@@ -154,6 +154,9 @@ func (s *Service) List(roomID string, filter ListFilter) (List, error) {
 	if accessWarning != "" {
 		result.Warnings = []string{accessWarning}
 	}
+	if filter.Scope != "history" {
+		result.PausedWorldIDs = s.pausedPlayerWorlds(room.ID)
+	}
 	return result, nil
 }
 

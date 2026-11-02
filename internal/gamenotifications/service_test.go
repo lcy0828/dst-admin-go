@@ -58,13 +58,15 @@ func (c notificationTestCatalog) Worlds(roomID string) ([]rooms.World, error) {
 }
 
 type notificationTestRuntime struct {
-	statuses   map[string]shared.ShardRuntimeStatus
-	statusErrs map[string]error
-	sendErrs   map[string]error
-	commands   map[string]string
+	statuses    map[string]shared.ShardRuntimeStatus
+	statusErrs  map[string]error
+	sendErrs    map[string]error
+	commands    map[string]string
+	statusCalls []string
 }
 
 func (r *notificationTestRuntime) Status(_ context.Context, _, worldID string) (shared.ShardRuntimeStatus, error) {
+	r.statusCalls = append(r.statusCalls, worldID)
 	return r.statuses[worldID], r.statusErrs[worldID]
 }
 
@@ -218,7 +220,7 @@ func TestStoreRecoversInterruptedNotificationHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	recovered, err := store.Get(plan.Notification.ID)
-	if err != nil || recovered.Status != StatusFailed || recovered.FailureCount != len(catalog.worlds) || recovered.CompletedAt == nil {
+	if err != nil || recovered.Status != StatusFailed || recovered.FailureCount != len(catalog.worlds) || recovered.CompletedAt == nil || recovered.Outcome != OutcomeUnconfirmed {
 		t.Fatalf("recovered=%#v err=%v", recovered, err)
 	}
 	for _, delivery := range recovered.Deliveries {

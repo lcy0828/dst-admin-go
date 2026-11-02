@@ -17,6 +17,8 @@ API：`GET /api/v2/rooms/{roomId}/players?scope=current|history`，默认 `curre
 
 页面与 MCP 查询当前玩家列表或详情时，会按需合并 Runtime 已生成的有效快照，不必等待定时刷新任务。相同房间的并发查询共享结果，五秒内复用；全局最多同时同步两个房间，每次运行节点读取预算为两秒。此过程不发送 Lua、不安装或修复 Runtime，也不启动后台轮询。历史存档查询不触发同步。采集过期、节点离线或同步忙时保留已有记录；列表通过 `warnings` 明确说明本轮未确认的状态，原先离线的记录也会在本次响应中标为状态过期，保留原时间，不能将读取失败当作无人在线。原有主动刷新入口继续用于主动采集与恢复。
 
+世界正常暂停时，玩家采样可能不再前进。面板校验采样确实属于当前进程、当前存档和当前世界后，会显示“玩家采样暂缓”，保留原始采样时间与上次记录；不会将旧记录算作已确认在线，也不会因暂停而主动唤醒世界。恢复运行并读到新采样后提示自动消失。节点离线、文件损坏、版本或存档不匹配仍会提示读取异常。列表中的 `pausedWorldIds` 标识本轮确认暂停采样的世界；旧客户端可以忽略此可选字段。
+
 ## English
 
 Player management shows current-save records by default. Select **Previous saves**
@@ -38,3 +40,5 @@ while `staleOnline` retains its conservative online-maintenance meaning.
 Room online counts unique real connections, including character selection, loading and shard migration. Per-world counts include only shard-local entities, so their sum can be below room online. Players without a confirmed current shard show a pending location; the tooltip can show the last confirmed world as history. Dedicated `[Host]` entries are excluded.
 
 Current player list and detail reads, including MCP, merge already-published valid Runtime snapshots on demand. Concurrent reads share each room's result for five seconds; at most two rooms synchronize at once, with a two-second runtime-read budget. This never sends Lua, installs or repairs Runtime, or starts idle polling. History reads skip synchronization. Stale snapshots, offline nodes and busy synchronization preserve existing records; list `warnings` explain that current presence could not be confirmed. A failed read is not evidence that nobody is online. Explicit refresh remains available for active collection and recovery.
+
+Paused worlds may stop advancing player samples. After validating the current process, save and shard identity, the panel reports paused sampling separately from failures and retains original observation times. This does not confirm current presence or wake the game. Fresh samples clear the notice after resuming. Offline nodes, corruption and identity/version mismatches remain errors. The optional list field `pausedWorldIds` identifies validated paused sampling.

@@ -259,6 +259,10 @@ type CommandRequest struct {
 }
 
 type CommandReceipt struct {
+	// Routing evidence comes from the actual dispatch, never from Lua payloads.
+	TargetID           string                 `json:"-"`
+	AgentID            string                 `json:"-"`
+	TopologyRevision   string                 `json:"-"`
 	SchemaVersion      int                    `json:"schemaVersion"`
 	ProducerVersion    string                 `json:"producerVersion"`
 	ProducerInstanceID string                 `json:"producerInstanceId"`

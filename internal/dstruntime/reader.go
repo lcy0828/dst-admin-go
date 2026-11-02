@@ -25,6 +25,10 @@ const (
 
 var snapshotPlayerID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
+// ErrPlayerSamplingPaused is returned only after validating a player's saved
+// snapshot against the current paused process. It is not a fresh observation.
+var ErrPlayerSamplingPaused = errors.New("player sampling is paused with the world")
+
 func (m *Manager) ReadPlayers(ctx context.Context, roomID, worldID string) (Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
@@ -212,6 +216,10 @@ func readSnapshot(path, expectedSession string, now time.Time) (Snapshot, error)
 }
 
 func decodeSnapshotData(data []byte, expectedSession, expectedShard string, now time.Time) (Snapshot, error) {
+	return decodePlayerSnapshotData(data, expectedSession, expectedShard, now, true)
+}
+
+func decodePlayerSnapshotData(data []byte, expectedSession, expectedShard string, now time.Time, requireFresh bool) (Snapshot, error) {
 	var value Snapshot
 	if err := decodeStrictJSON(data, &value); err != nil {
 		return Snapshot{}, fmt.Errorf("%w: decode JSON: %v", ErrSnapshotInvalid, err)
@@ -223,7 +231,7 @@ func decodeSnapshotData(data []byte, expectedSession, expectedShard string, now 
 	if value.CapturedAt.After(now.Add(maxFutureSkew)) {
 		return Snapshot{}, fmt.Errorf("%w: capture time is in the future", ErrSnapshotInvalid)
 	}
-	if now.Sub(value.CapturedAt) > defaultFreshFor {
+	if requireFresh && now.Sub(value.CapturedAt) > defaultFreshFor {
 		return Snapshot{}, fmt.Errorf("%w: captured at %s", ErrSnapshotStale, value.CapturedAt.Format(time.RFC3339))
 	}
 	if expectedSession != "" && value.SessionID != expectedSession {

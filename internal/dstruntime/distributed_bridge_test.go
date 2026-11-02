@@ -18,13 +18,14 @@ import (
 )
 
 type distributedRuntimeFixture struct {
-	mu      sync.Mutex
-	status  shared.ShardRuntimeStatus
-	current shared.RuntimeWorldStateRead
-	bundles map[shared.ArtifactKind]shared.RuntimeArtifactBundle
-	sent    []shared.RuntimeConsoleRequest
-	onSend  func(shared.RuntimeConsoleRequest)
-	sendErr error
+	mu         sync.Mutex
+	status     shared.ShardRuntimeStatus
+	current    shared.RuntimeWorldStateRead
+	bundles    map[shared.ArtifactKind]shared.RuntimeArtifactBundle
+	sent       []shared.RuntimeConsoleRequest
+	onSend     func(shared.RuntimeConsoleRequest)
+	sendErr    error
+	sendResult shared.RuntimeOperationResult
 }
 
 func (f *distributedRuntimeFixture) Status(context.Context, string, string) (shared.ShardRuntimeStatus, error) {
@@ -43,7 +44,11 @@ func (f *distributedRuntimeFixture) SendID(_ context.Context, _, _ string, reque
 	if onSend != nil {
 		onSend(request)
 	}
-	return shared.RuntimeOperationResult{Outcome: shared.RuntimeOutcomeSent}, f.sendErr
+	result := f.sendResult
+	if result.Outcome == "" {
+		result.Outcome = shared.RuntimeOutcomeSent
+	}
+	return result, f.sendErr
 }
 
 func (f *distributedRuntimeFixture) ReadArtifacts(_ context.Context, _, _ string, kind shared.ArtifactKind) (shared.RuntimeArtifactBundle, error) {
@@ -103,6 +108,7 @@ func TestDistributedBridgeReadsPlacementArtifactsWithCoherentIdentity(t *testing
 
 func TestDistributedBridgeExecutesManagedCommandAndWaitsForRemoteReceipt(t *testing.T) {
 	bridge, fixture, roomID, worldID, now := newDistributedBridgeFixture(t)
+	fixture.sendResult = shared.RuntimeOperationResult{TargetID: "agent:test-node", AgentID: "test-node", TopologyRevision: "test-revision"}
 	request := CommandRequest{RequestID: "remote-command-1234", Action: "player.kick", Arguments: map[string]interface{}{"userId": "KU_REMOTE"}}
 	fixture.onSend = func(console shared.RuntimeConsoleRequest) {
 		receipt := CommandReceipt{
@@ -114,7 +120,7 @@ func TestDistributedBridgeExecutesManagedCommandAndWaitsForRemoteReceipt(t *test
 		fixture.mu.Unlock()
 	}
 	receipt, err := bridge.ExecuteCommand(context.Background(), roomID, worldID, request)
-	if err != nil || !receipt.OK || receipt.RequestID != request.RequestID {
+	if err != nil || !receipt.OK || receipt.RequestID != request.RequestID || receipt.TargetID != "agent:test-node" || receipt.AgentID != "test-node" || receipt.TopologyRevision != "test-revision" {
 		t.Fatalf("receipt=%#v err=%v", receipt, err)
 	}
 	if len(fixture.sent) != 1 || fixture.sent[0].Mode != shared.ConsoleModeManaged {

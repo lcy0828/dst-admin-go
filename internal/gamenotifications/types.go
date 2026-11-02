@@ -13,9 +13,10 @@ const (
 )
 
 var (
-	ErrNotFound      = errors.New("game notification not found")
-	ErrInvalidInput  = errors.New("game notification input is invalid")
-	ErrRoomUnmanaged = errors.New("room must be managed before game notifications can be sent")
+	ErrNotFound           = errors.New("game notification not found")
+	ErrInvalidInput       = errors.New("game notification input is invalid")
+	ErrRoomUnmanaged      = errors.New("room must be managed before game notifications can be sent")
+	ErrOutcomeUnconfirmed = errors.New("公告执行结果未确认，可能已经发出；不会自动重发")
 )
 
 type Source string
@@ -44,6 +45,28 @@ const (
 
 type DeliveryStatus string
 
+// Outcome records execution evidence independently of legacy task status.
+// A completed submission is not proof that DST executed the announcement.
+type Outcome string
+
+const (
+	OutcomeWaiting     Outcome = "waiting"
+	OutcomeSubmitted   Outcome = "submitted"
+	OutcomeConfirmed   Outcome = "confirmed"
+	OutcomeUnconfirmed Outcome = "unconfirmed"
+	OutcomeFailed      Outcome = "failed"
+	OutcomeSkipped     Outcome = "skipped"
+	OutcomeCanceled    Outcome = "canceled"
+)
+
+type SkipReason string
+
+const (
+	SkipWorldStopped       SkipReason = "world_stopped"
+	SkipRoomBroadcast      SkipReason = "room_broadcast"
+	SkipBroadcastAttempted SkipReason = "broadcast_attempted"
+)
+
 const (
 	DeliveryQueued    DeliveryStatus = "queued"
 	DeliverySucceeded DeliveryStatus = "succeeded"
@@ -60,36 +83,44 @@ func (e *FieldError) Error() string { return ErrInvalidInput.Error() }
 func (e *FieldError) Unwrap() error { return ErrInvalidInput }
 
 type Delivery struct {
-	ID               int64          `json:"id"`
-	NotificationID   string         `json:"notificationId"`
-	WorldID          string         `json:"worldId"`
-	WorldName        string         `json:"worldName"`
-	TargetID         string         `json:"targetId,omitempty"`
-	AgentID          string         `json:"agentId,omitempty"`
-	Status           DeliveryStatus `json:"status"`
-	Message          string         `json:"message,omitempty"`
-	ErrorCode        string         `json:"errorCode,omitempty"`
-	ErrorMessage     string         `json:"errorMessage,omitempty"`
-	TopologyRevision string         `json:"topologyRevision,omitempty"`
-	SentAt           *time.Time     `json:"sentAt,omitempty"`
-	ObservedAt       *time.Time     `json:"observedAt,omitempty"`
+	ID                 int64          `json:"id"`
+	NotificationID     string         `json:"notificationId"`
+	WorldID            string         `json:"worldId"`
+	WorldName          string         `json:"worldName"`
+	TargetID           string         `json:"targetId,omitempty"`
+	AgentID            string         `json:"agentId,omitempty"`
+	Status             DeliveryStatus `json:"status"`
+	Outcome            Outcome        `json:"outcome"`
+	SkipReason         SkipReason     `json:"skipReason,omitempty"`
+	BroadcastWorldID   string         `json:"broadcastWorldId,omitempty"`
+	BroadcastWorldName string         `json:"broadcastWorldName,omitempty"`
+	Message            string         `json:"message,omitempty"`
+	ErrorCode          string         `json:"errorCode,omitempty"`
+	ErrorMessage       string         `json:"errorMessage,omitempty"`
+	TopologyRevision   string         `json:"topologyRevision,omitempty"`
+	SentAt             *time.Time     `json:"sentAt,omitempty"`
+	ObservedAt         *time.Time     `json:"observedAt,omitempty"`
 }
 
 type Notification struct {
-	ID            string     `json:"id"`
-	RoomID        string     `json:"roomId"`
-	RoomName      string     `json:"roomName"`
-	Message       string     `json:"message"`
-	Source        Source     `json:"source"`
-	Status        Status     `json:"status"`
-	JobID         string     `json:"jobId,omitempty"`
-	SuccessCount  int        `json:"successCount"`
-	FailureCount  int        `json:"failureCount"`
-	SkippedCount  int        `json:"skippedCount"`
-	CanceledCount int        `json:"canceledCount"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	CompletedAt   *time.Time `json:"completedAt,omitempty"`
-	Deliveries    []Delivery `json:"deliveries"`
+	ID               string     `json:"id"`
+	RoomID           string     `json:"roomId"`
+	RoomName         string     `json:"roomName"`
+	Message          string     `json:"message"`
+	Source           Source     `json:"source"`
+	Status           Status     `json:"status"`
+	Outcome          Outcome    `json:"outcome"`
+	SubmittedCount   int        `json:"submittedCount"`
+	ConfirmedCount   int        `json:"confirmedCount"`
+	UnconfirmedCount int        `json:"unconfirmedCount"`
+	JobID            string     `json:"jobId,omitempty"`
+	SuccessCount     int        `json:"successCount"`
+	FailureCount     int        `json:"failureCount"`
+	SkippedCount     int        `json:"skippedCount"`
+	CanceledCount    int        `json:"canceledCount"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	CompletedAt      *time.Time `json:"completedAt,omitempty"`
+	Deliveries       []Delivery `json:"deliveries"`
 }
 
 type Policy struct {

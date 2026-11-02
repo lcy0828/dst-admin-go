@@ -154,6 +154,7 @@ type List struct {
 	LastRefreshedAt      *time.Time `json:"lastRefreshedAt,omitempty"`
 	AccessListsAvailable bool       `json:"accessListsAvailable"`
 	Warnings             []string   `json:"warnings,omitempty"`
+	PausedWorldIDs       []string   `json:"pausedWorldIds,omitempty"`
 }
 
 type WorldTarget struct {

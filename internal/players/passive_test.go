@@ -249,3 +249,101 @@ func TestPassivePlayerReadsBoundGlobalWorkAndRemoteWaits(t *testing.T) {
 		t.Fatalf("unresponsive node did not honor the caller deadline: %v", err)
 	}
 }
+
+func TestPassivePlayersPausedAndActiveWorldsKeepDistinctStates(t *testing.T) {
+	s, _, sender, _, _ := newPlayerTestService(t)
+	paused := true
+	runtime := &samplingTestRuntime{playerTestRuntime: s.runtime.(*playerTestRuntime), statuses: map[string]shards.RuntimeStatus{
+		"master": {State: shards.RuntimeRunning, Paused: &paused},
+		"caves":  {State: shards.RuntimeRunning},
+	}}
+	s.runtime = runtime
+	before := s.now().Add(-time.Minute)
+	old := stampTelemetryObservation(Observation{ID: "KU_OLD", Name: "Old player", LocalEntity: entityEvidence(true)}, SourceRuntime, before)
+	if err := s.store.ReplaceRoomSnapshots("room", []worldSnapshot{{WorldID: "master", WorldName: "Master", SessionID: "session-master", ObservedAt: before, Observations: []Observation{old}}}); err != nil {
+		t.Fatal(err)
+	}
+	probe := &passiveTestProbe{read: func(_ context.Context, world string) (SnapshotResult, error) {
+		if world == "master" && paused {
+			return SnapshotResult{}, dstruntime.ErrPlayerSamplingPaused
+		}
+		return SnapshotResult{SessionID: "session-" + world, LocalityKnown: true, ObservedAt: s.now(), Source: SourceRuntime, Observations: []Observation{stampTelemetryObservation(Observation{ID: "KU_NEW", Name: "New player", LocalEntity: entityEvidence(true)}, SourceRuntime, s.now())}}, nil
+	}}
+	s.probe = probe
+	if err := s.SyncPassivePlayers(context.Background(), "room"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.List("room", ListFilter{SkipAccessLists: true})
+	if err != nil || len(list.PausedWorldIDs) != 1 || list.PausedWorldIDs[0] != "master" || len(list.Warnings) != 0 {
+		t.Fatalf("paused read not distinguished: %+v %v", list, err)
+	}
+	oldPlayer, _ := s.Player("room", "KU_OLD")
+	newPlayer, _ := s.Player("room", "KU_NEW")
+	if oldPlayer.PresenceStatus != FreshnessStale || !oldPlayer.LastRefreshedAt.Equal(before) || newPlayer.PresenceStatus != FreshnessLive {
+		t.Fatalf("pause faked observations: old=%+v new=%+v", oldPlayer, newPlayer)
+	}
+	if len(sender.scripts) != 0 {
+		t.Fatal("paused collection sent Lua")
+	}
+	paused = false
+	next := s.now().Add(passivePlayerInterval)
+	s.now = func() time.Time { return next }
+	if err := s.SyncPassivePlayers(context.Background(), "room"); err != nil {
+		t.Fatal(err)
+	}
+	list, _ = s.List("room", ListFilter{SkipAccessLists: true})
+	if len(list.PausedWorldIDs) != 0 {
+		t.Fatal("pause notice survived resumed sampling")
+	}
+}
+
+func TestPauseDoesNotHidePassivePlayerFailures(t *testing.T) {
+	for _, failure := range []error{agents.ErrAgentOffline, dstruntime.ErrSnapshotStale, dstruntime.ErrSnapshotInvalid, dstruntime.ErrRuntimeVersionMismatch} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			s, reader, _, _ := passiveFixture(t)
+			paused := true
+			s.runtime = &samplingTestRuntime{playerTestRuntime: s.runtime.(*playerTestRuntime), statuses: map[string]shards.RuntimeStatus{"master": {State: shards.RuntimeRunning, Paused: &paused}, "caves": {State: shards.RuntimeRunning, Paused: &paused}}}
+			reader.readErr = failure
+			if err := s.SyncPassivePlayers(context.Background(), "room"); !errors.Is(err, failure) {
+				t.Fatalf("failure hidden: %v", err)
+			}
+			if len(s.pausedPlayerWorlds("room")) != 0 {
+				t.Fatal("invalid snapshot presented as normal pause")
+			}
+		})
+	}
+}
+
+type pausedSessionProbe struct {
+	passiveTestProbe
+	session string
+	at      time.Time
+}
+
+func (p *pausedSessionProbe) CurrentSession(context.Context, string, string) (string, time.Time, error) {
+	return p.session, p.at, nil
+}
+func TestPassivePausedSaveResetDoesNotResurrectOldPlayerRecords(t *testing.T) {
+	s, runtime, _, _, _ := newPlayerTestService(t)
+	paused := true
+	s.runtime = &samplingTestRuntime{playerTestRuntime: runtime, statuses: map[string]shards.RuntimeStatus{"master": {State: shards.RuntimeRunning, Paused: &paused}, "caves": {State: shards.RuntimeStopped}}}
+	before := s.now().Add(-time.Hour)
+	old := stampTelemetryObservation(Observation{ID: "KU_OLD", Name: "Old save player", LocalEntity: entityEvidence(true)}, SourceRuntime, before)
+	if err := s.store.ReplaceRoomSnapshots("room", []worldSnapshot{{WorldID: "master", WorldName: "Master", SessionID: "OLD", ObservedAt: before, Observations: []Observation{old}}}); err != nil {
+		t.Fatal(err)
+	}
+	s.probe = &pausedSessionProbe{session: "NEW", at: s.now().Add(-time.Minute), passiveTestProbe: passiveTestProbe{read: func(context.Context, string) (SnapshotResult, error) {
+		return SnapshotResult{}, dstruntime.ErrPlayerSamplingPaused
+	}}}
+	if err := s.SyncPassivePlayers(context.Background(), "room"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.List("room", ListFilter{SkipAccessLists: true})
+	if err != nil || len(list.Items) != 0 || len(list.PausedWorldIDs) != 1 {
+		t.Fatalf("previous save presented as current: %+v %v", list, err)
+	}
+	history, err := s.List("room", ListFilter{Scope: "history", SkipAccessLists: true})
+	if err != nil || len(history.Items) != 1 || !history.Items[0].Historical || len(history.PausedWorldIDs) != 0 {
+		t.Fatalf("history invalid: %+v %v", history, err)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"dont/internal/dstruntime"
 	"dont/internal/jobs"
 	"dont/internal/rooms"
 	"dont/shared"
@@ -29,6 +30,10 @@ type OnlineCounter interface {
 	OnlinePlayers(context.Context, string) (int, error)
 }
 
+type RuntimeCommander interface {
+	ExecuteCommand(context.Context, string, string, dstruntime.CommandRequest) (dstruntime.CommandReceipt, error)
+}
+
 type OnlineCounterFunc func(context.Context, string) (int, error)
 
 func (f OnlineCounterFunc) OnlinePlayers(ctx context.Context, roomID string) (int, error) {
@@ -42,19 +47,24 @@ type SendPlan struct {
 }
 
 type Service struct {
-	rooms   RoomCatalog
-	runtime Runtime
-	store   *Store
-	online  OnlineCounter
-	now     func() time.Time
-	wait    func(context.Context, time.Duration) error
+	rooms     RoomCatalog
+	runtime   Runtime
+	commander RuntimeCommander
+	store     *Store
+	online    OnlineCounter
+	now       func() time.Time
+	wait      func(context.Context, time.Duration) error
 }
 
-func NewService(roomCatalog RoomCatalog, runtime Runtime, store *Store) (*Service, error) {
+func NewService(roomCatalog RoomCatalog, runtime Runtime, store *Store, commanders ...RuntimeCommander) (*Service, error) {
 	if roomCatalog == nil || runtime == nil || store == nil {
 		return nil, errors.New("rooms, runtime, and game notification store are required")
 	}
-	return &Service{rooms: roomCatalog, runtime: runtime, store: store, now: time.Now, wait: waitContext}, nil
+	service := &Service{rooms: roomCatalog, runtime: runtime, store: store, now: time.Now, wait: waitContext}
+	if len(commanders) > 0 {
+		service.commander = commanders[0]
+	}
+	return service, nil
 }
 
 func (s *Service) ConfigureOnlineCounter(counter OnlineCounter) {
@@ -287,6 +297,13 @@ func (s *Service) BeforeOperations(ctx context.Context, roomIDs []string, action
 
 func (s *Service) SendAutomation(ctx context.Context, roomID, message, jobID string) (int, int, int, error) {
 	value, err := s.sendDirect(ctx, roomID, message, SourceAutomation, jobID)
+	if err == nil && value.Outcome == OutcomeUnconfirmed {
+		err = ErrOutcomeUnconfirmed
+	}
+	if err == nil && (value.Outcome == OutcomeConfirmed || value.Outcome == OutcomeSubmitted) {
+		// Failure to inspect another world does not invalidate a room broadcast.
+		return value.SuccessCount, 0, value.SkippedCount, nil
+	}
 	return value.SuccessCount, value.FailureCount, value.SkippedCount, err
 }
 
@@ -319,12 +336,34 @@ func (s *Service) deliver(ctx context.Context, notificationID string, room rooms
 	// Submit once, preferring the Master, and record other shards as skipped.
 	worlds = append([]rooms.World(nil), worlds...)
 	sort.SliceStable(worlds, func(i, j int) bool { return worlds[i].IsMaster && !worlds[j].IsMaster })
-	broadcastWorld := ""
+	var broadcast *Delivery
 	success, failure, skipped, canceled := 0, 0, 0, 0
 	for index, world := range worlds {
+		// After any attempt, never send the same announcement on another world.
+		// No extra status RPC is necessary: this is a room broadcast, not a
+		// per-world delivery guarantee.
+		if broadcast != nil {
+			reason := SkipRoomBroadcast
+			message := "通过「" + broadcast.WorldName + "」广播，无需重复发送"
+			if broadcast.Outcome != OutcomeConfirmed && broadcast.Outcome != OutcomeSubmitted {
+				reason, message = SkipBroadcastAttempted, "已尝试通过「"+broadcast.WorldName+"」广播，为避免重复公告未再次发送"
+			}
+			now := s.now().UTC()
+			delivery := Delivery{WorldID: world.ID, Status: DeliverySkipped, Outcome: OutcomeSkipped,
+				SkipReason: reason, BroadcastWorldID: broadcast.WorldID, BroadcastWorldName: broadcast.WorldName,
+				Message: message, ObservedAt: &now}
+			if err := s.store.RecordDelivery(notificationID, delivery); err != nil {
+				return Notification{}, err
+			}
+			skipped++
+			if report != nil {
+				report(jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusSucceeded, Message: message})
+			}
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			for _, pending := range worlds[index:] {
-				delivery := Delivery{WorldID: pending.ID, Status: DeliveryCanceled, ErrorCode: "JOB_CANCELED", ErrorMessage: "任务已取消"}
+				delivery := Delivery{WorldID: pending.ID, Status: DeliveryCanceled, Outcome: OutcomeCanceled, ErrorCode: "JOB_CANCELED", ErrorMessage: "任务已取消"}
 				if recordErr := s.store.RecordDelivery(notificationID, delivery); recordErr != nil {
 					return Notification{}, recordErr
 				}
@@ -340,41 +379,27 @@ func (s *Service) deliver(ctx context.Context, notificationID string, room rooms
 			return completed, err
 		}
 		now := s.now().UTC()
-		delivery := Delivery{WorldID: world.ID, SentAt: &now}
+		delivery := Delivery{WorldID: world.ID, WorldName: world.Name, ObservedAt: &now}
 		var targetResult jobs.TargetResult
 		status, statusErr := s.runtime.Status(ctx, room.ID, world.ID)
 		if statusErr != nil {
+			delivery.Outcome = OutcomeFailed
 			delivery.Status, delivery.ErrorCode, delivery.ErrorMessage = DeliveryFailed, "RUNTIME_STATUS_FAILED", statusErr.Error()
 			failure++
 			targetResult = jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: delivery.ErrorCode, Message: delivery.ErrorMessage}}
 		} else if status.State != "running" || !status.SessionExists {
+			delivery.Outcome, delivery.SkipReason = OutcomeSkipped, SkipWorldStopped
 			delivery.Status, delivery.Message = DeliverySkipped, "分片未运行，未发送"
 			skipped++
 			targetResult = jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusSucceeded, Message: delivery.Message}
-		} else if broadcastWorld != "" {
-			delivery.Status, delivery.Message = DeliverySkipped, "已向「"+broadcastWorld+"」提交房间广播，此分片未重复发送"
-			skipped++
-			targetResult = jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusSucceeded, Message: delivery.Message}
 		} else {
-			broadcastWorld = world.Name
-			result, sendErr := s.runtime.SendID(ctx, room.ID, world.ID, shared.RuntimeConsoleRequest{
-				Mode: shared.ConsoleModeManaged, Command: "c_announce(" + quoteLua(notification.Message) + ")",
-			})
-			delivery.TargetID, delivery.AgentID = result.TargetID, result.AgentID
-			delivery.TopologyRevision = result.TopologyRevision
-			if !result.ObservedAt.IsZero() {
-				observed := result.ObservedAt.UTC()
-				delivery.ObservedAt = &observed
-			}
-			if sendErr != nil {
-				delivery.Status, delivery.ErrorCode, delivery.ErrorMessage = DeliveryFailed, "NOTIFICATION_SEND_FAILED", sendErr.Error()
+			delivery.SentAt = &now
+			delivery = s.sendBroadcast(ctx, notification, delivery)
+			broadcast = &delivery
+			if delivery.Status == DeliveryFailed {
 				failure++
 				targetResult = jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: delivery.ErrorCode, Message: delivery.ErrorMessage}}
 			} else {
-				delivery.Status, delivery.Message = DeliverySucceeded, strings.TrimSpace(result.Message)
-				if delivery.Message == "" {
-					delivery.Message = "游戏通知已发送到分片控制台"
-				}
 				success++
 				targetResult = jobs.TargetResult{TargetID: world.ID, Status: jobs.StatusSucceeded, Message: delivery.Message}
 			}
