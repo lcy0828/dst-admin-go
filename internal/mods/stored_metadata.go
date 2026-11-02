@@ -11,6 +11,19 @@ import (
 const displayLanguage = "schinese"
 const displayVersionTTL = 5 * time.Minute
 
+// Display caches may fill presentation gaps, but never assert a current version.
+func mergeCachedDisplay(item *SteamMod, cached SteamMod) {
+	if item.Name == "" {
+		item.Name = cached.Name
+	}
+	if item.Author == "" {
+		item.Author = cached.Author
+	}
+	if item.PreviewURL == "" {
+		item.PreviewURL = cached.PreviewURL
+	}
+}
+
 func (p *SteamProvider) ConfigureMetadataStore(store *MetadataStore) { p.store = store }
 
 // CachedMetadata returns display fields and cached declarations only: no
@@ -152,17 +165,17 @@ func (p *SteamProvider) rememberSearch(items []SteamMod, language string) {
 		// A search card is partial evidence. It must not replace a full description
 		// or postpone the next details refresh, nor count as a version check.
 		record := records[item.ID]
-		if record.Community.Name != "" && record.Community.Author != "" {
-			continue
-		}
 		value := record.Community
-		if strings.TrimSpace(item.Name) != "" {
+		if value.Name == "" && strings.TrimSpace(item.Name) != "" {
 			value.Name = item.Name
 		}
-		if strings.TrimSpace(item.Author) != "" {
+		if value.Author == "" && strings.TrimSpace(item.Author) != "" {
 			value.Author = item.Author
 		}
-		if value.Name == record.Community.Name && value.Author == record.Community.Author {
+		if value.PreviewURL == "" && strings.TrimSpace(item.PreviewURL) != "" {
+			value.PreviewURL = item.PreviewURL
+		}
+		if value.Name == record.Community.Name && value.Author == record.Community.Author && value.PreviewURL == record.Community.PreviewURL {
 			continue
 		}
 		if err := p.store.save(item.ID, language, nil, &value, record.CommunityCheckedAt); err != nil {

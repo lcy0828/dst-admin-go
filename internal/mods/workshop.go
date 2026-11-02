@@ -352,6 +352,23 @@ func (w *Workshop) read(ctx context.Context, ids []string, mode string) (map[str
 		switch mode {
 		case "cached":
 			result, err = s.provider.CachedMetadata(ctx, ids)
+			if result == nil {
+				result = make(map[string]SteamMod)
+			}
+			// Reuse cards already seen by search/details even without a persistent
+			// store. This path must never fetch upstream or supply version evidence.
+			w.mu.Lock()
+			for _, id := range ids {
+				item, exists := result[id]
+				card, remembered := w.cards[s.version+":"+id]
+				if !exists && !remembered {
+					continue
+				}
+				item.ID = id
+				mergeCachedDisplay(&item, card)
+				result[id] = item
+			}
+			w.mu.Unlock()
 		case "summaries":
 			result, err = s.provider.Summaries(ctx, ids)
 		case "enrich", "authors":

@@ -245,9 +245,6 @@ func (s *Service) loadConfiguration(ctx context.Context, roomID, worldID, modID 
 }
 
 func (s *Service) configurationFromDocument(ctx context.Context, roomID, worldID, modID string, document modOverrideDocument) (ModConfiguration, error) {
-	if _, ok := document.mod(modID); !ok {
-		return ModConfiguration{}, ErrModNotConfigured
-	}
 	parsed, err := ParseInstalledModInfo(ctx, s.parser, s.config.WorkshopContentRoot, s.config.ServerRoot, modID)
 	if err != nil {
 		return ModConfiguration{}, err
@@ -269,10 +266,9 @@ func ConfigurationFromParsed(roomID, worldID, modID string, content []byte, pars
 }
 
 func configurationFromParsed(roomID, worldID, modID string, document modOverrideDocument, parsed ParserResult) (ModConfiguration, error) {
-	entry, ok := document.mod(modID)
-	if !ok {
-		return ModConfiguration{}, ErrModNotConfigured
-	}
+	// Reading installed options does not require adding the mod to this world.
+	// Absent entries expose defaults only; mutation plans still reject them.
+	entry, configured := document.mod(modID)
 	fields := configurationFields(parsed.Values["configuration_options"])
 	known := make(map[string]ConfigField, len(fields))
 	for _, field := range fields {
@@ -304,7 +300,7 @@ func configurationFromParsed(roomID, worldID, modID string, document modOverride
 	}
 	return ModConfiguration{
 		Revision: document.revision, RoomID: roomID, WorldID: worldID, ModID: referenceID(modID),
-		Enabled: modEnabled(entry), Parser: parsed.Parser, FallbackUsed: parsed.FallbackUsed,
+		Enabled: modEnabled(entry), Configured: configured, Parser: parsed.Parser, FallbackUsed: parsed.FallbackUsed,
 		FallbackReason: parsed.FallbackReason, Warnings: nonNilStrings(parsed.Warnings),
 		RawPreserved: true, SchemaVersion: "1", Fields: fields, Values: values, Overrides: overrides, UnknownValues: unknown,
 	}, nil

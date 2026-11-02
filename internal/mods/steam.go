@@ -855,6 +855,9 @@ func (p *SteamProvider) cachedCommunityMetadata(id string) (communityMetadataCac
 }
 
 func mergeCommunityMetadata(item *SteamMod, metadata communityMetadataCache) {
+	if item.PreviewURL == "" {
+		item.PreviewURL = metadata.PreviewURL
+	}
 	if metadata.Name != "" {
 		item.Name = metadata.Name
 	}

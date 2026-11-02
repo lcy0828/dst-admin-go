@@ -42,6 +42,7 @@ API、MCP 和页面 AI 使用 `local:fishdried_custom` 标识该本地模组；�
 - `/mods/library` 是控制器共享的精确制品目录，不按节点或房间区分，也不继承手动 Runtime Target。
 - `/rooms/{roomId}/mods` 只列出该房间 `modoverrides.lua` 实际引用的 Mod。
 - `configuration_options` 属于单个房间的单个世界；不同房间以及同一房间的地面/洞穴都允许采用不同配置。
+- 模组已下载到房间所在机器时，即使尚未加入房间，也可以在房间模组中点击“查看配置”预览默认选项。查看不会添加或启用模组，不会写入配置或重启世界。已加入但停用的模组仍可编辑和保存配置，无需先启用。
 - `dedicated_server_mods_setup.lua` 是 DST 自带下载流程的登记文件，不决定房间是否启用。普通启动始终带 `-skip_update_server_mods`，不依靠该文件触发下载。本地加载入口在显式下载、添加或迁移时建立，已有人工模组目录不替换。
 
 世界迁移和精确版本收敛仍使用两阶段发布：

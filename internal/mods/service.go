@@ -351,8 +351,16 @@ func (s *Service) describe(ctx context.Context, modIDs []string, displayMetadata
 		if err != nil {
 			failures = append(failures, err)
 		}
+		// Machine inventories use API summaries for update evidence. Keep known
+		// thumbnails/names when that API omits an item, without fetching HTML or
+		// treating a display cache as proof that installed files are current.
+		var cached map[string]SteamMod
+		if !displayMetadata {
+			cached, _ = s.CachedMetadata(ctx, ids[start:end])
+		}
 		for _, id := range ids[start:end] {
 			item := items[id]
+			mergeCachedDisplay(&item, cached[id])
 			item.ID = id
 			normalizeSteamModCollections(&item)
 			result[id] = item

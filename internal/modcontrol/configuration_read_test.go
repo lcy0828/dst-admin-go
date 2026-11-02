@@ -72,3 +72,42 @@ func TestLocalConfigurationDoesNotReadAnotherWorldOnRemoteNode(t *testing.T) {
 		t.Fatal("local configuration contacted an unrelated remote world")
 	}
 }
+
+func TestUnconfiguredRemoteModPreviewUsesInstalledSchemaAndCannotWrite(t *testing.T) {
+	fixture := newSnapshotFixture(t)
+	key := fixture.room.DirectoryName + "\x00" + fixture.caves.DirectoryName
+	original := []byte(`return { operator_value = { untouched = true } }`)
+	fixture.driver.overrides[key] = original
+	fixture.driver.schemaHook = func(_ context.Context, target runtimedriver.Target, modID string) (shared.RuntimeModSchema, error) {
+		if target.TargetID != "target-2" || target.InstallationID != "install-2" || target.WorldID != fixture.caves.ID {
+			t.Fatalf("wrong preview target: %+v", target)
+		}
+		return shared.RuntimeModSchema{WorkshopID: modID, Parser: "go", Options: []interface{}{
+			map[string]interface{}{"name": "remote_only", "default": false},
+		}}, nil
+	}
+	service, err := NewService(fixture.source, fixture.mods, &snapshotCoordinator{source: fixture.source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := &modConfigurationPublisherFixture{}
+	if err := service.ConfigureConfigurationPublisher(publisher); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := service.Configuration(context.Background(), fixture.room.ID, fixture.caves.ID, "200")
+	if err != nil || configuration.Configured || configuration.Enabled || configuration.Values["remote_only"] != false {
+		t.Fatalf("preview=%+v, err=%v", configuration, err)
+	}
+	request := mods.ConfigUpdateRequest{ExpectedRevision: configuration.Revision, PreserveEnabled: true,
+		Patch: map[string]json.RawMessage{"remote_only": json.RawMessage(`true`)}}
+	if _, err := service.PreviewConfiguration(context.Background(), fixture.room.ID, fixture.caves.ID, "200", request); !errors.Is(err, mods.ErrModNotConfigured) {
+		t.Fatalf("patch preview accepted absent entry: %v", err)
+	}
+	if _, err := service.ApplyConfiguration(context.Background(), fixture.room.ID, fixture.caves.ID, "200", request); !errors.Is(err, mods.ErrModNotConfigured) {
+		t.Fatalf("save accepted absent entry: %v", err)
+	}
+	if len(publisher.writes) != 0 || fixture.driver.fetchCalls != 0 || fixture.driver.downloadCalls != 0 ||
+		len(fixture.mods.configurationContent) != 0 || string(fixture.driver.overrides[key]) != string(original) {
+		t.Fatal("preview changed files, downloaded content or used local schema")
+	}
+}

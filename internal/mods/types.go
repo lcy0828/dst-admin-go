@@ -281,6 +281,7 @@ type ModConfiguration struct {
 	WorldID        string                 `json:"worldId"`
 	ModID          string                 `json:"modId"`
 	Enabled        bool                   `json:"enabled"`
+	Configured     bool                   `json:"configured"`
 	Parser         string                 `json:"parser"`
 	FallbackUsed   bool                   `json:"fallbackUsed"`
 	FallbackReason string                 `json:"fallbackReason,omitempty"`
