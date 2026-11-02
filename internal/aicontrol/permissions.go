@@ -25,7 +25,13 @@ var gameReads = map[string]bool{
 var gameWrites = map[string]bool{
 	"runBotCapability": true, "runRoomAction": true, "createRoomBackup": true,
 	"configureRoomBackupSchedule": true, "listRoomBackupSchedules": true,
-	"kickRoomPlayer":     true,
+	"kickRoomPlayer": true,
+	// Fixed player actions belong to game management, independently of which
+	// API/MCP entry point the client discovers. Raw Lua remains panel-only.
+	"setRoomPlayerGodMode": true, "setRoomPlayerCreativeMode": true,
+	"resurrectRoomPlayer": true, "killRoomPlayer": true, "resetRoomPlayerCharacter": true,
+	"banRoomPlayer": true, "unbanRoomPlayer": true, "announceToRoomPlayer": true,
+	"getRoomPlayer": true, "refreshRoomPlayers": true, "listRoomBackups": true,
 	"giveRoomPlayerItem": true, "getRoomPlayerItemGrant": true,
 	"spawnRoomPlayerEntity": true, "getRoomPlayerEntitySpawn": true,
 	"executeBuiltinRoomCommand": true, "getBuiltinRoomCommandRun": true,

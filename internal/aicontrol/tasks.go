@@ -62,6 +62,13 @@ var taskTerms = map[string]string{
 	"player.inventory":       "背包 装备 物品栏 离线背包 inventory backpack",
 	"player.resolve":         "玩家信息 查人 昵称 profile player",
 	"player.resurrect":       "复活 救活 救人 resurrect revive",
+	"player.god_mode":        "无敌 无敌模式 上帝模式 不死 免伤 god godmode invincible",
+	"player.creative_mode":   "制作模式 制造模式 创造模式 自由建造 免费制作 creative freebuild freecrafting",
+	"player.announce":        "提醒玩家 通知玩家 玩家公告 announce",
+	"player.ban":             "封禁 封号 拉黑 ban",
+	"player.unban":           "解封 解除封禁 取消封禁 unban",
+	"player.kill":            "杀死玩家 杀死 击杀玩家 kill",
+	"player.reset_character": "重选角色 换人物 重置玩家 reset_character despawn",
 	"player.give_item":       "给 发 发放 给予 物品 肉丸 give item meatballs",
 	"player.kick":            "踢人 踢出 踢掉 kick",
 	"room.mods":              "模组 mod 配置 设置",
@@ -88,7 +95,7 @@ func TaskTools() []Tool {
 		makeTool("dst_find", "按中文需求寻找已授权能力，最多返回三个候选及完整的小段参数结构。优先调用推荐的常用工具。", []string{"query"}, map[string]any{"query": botString(128), "room": selector}),
 		makeTool("dst_read", "执行 dst_find 找到的固定只读能力。room/player/world 可填写名字；parameters 为 JSON 对象，不能提交 Lua。", []string{"capabilityId"}, map[string]any{"capabilityId": botString(64), "room": selector, "player": selector, "world": selector, "parameters": params}),
 		makeTool("dst_result", "查看原任务的进度和证据。绝不重新执行；结果不确定时继续查原任务。", []string{"taskRef"}, map[string]any{"taskRef": botString(64)}),
-		makeTool("dst_player_action", "准备复活、发物品、生成生物或踢人任务，返回固定 taskRef。准备不会修改游戏；随后用 dst_run execute 提交同一个任务。", []string{"action", "player"}, map[string]any{"room": selector, "player": selector, "action": map[string]any{"type": "string", "enum": []string{"resurrect", "give_item", "spawn_entity", "kick"}}, "parameters": params}),
+		makeTool("dst_player_action", "准备玩家管理任务：无敌/上帝模式 god_mode、制作/创造模式 creative_mode（均须 parameters.enabled 明确开关），以及复活、物品、生物、踢人、封禁/解封、提醒、死亡或重选角色。用 dst_find 获取参数；准备不会修改游戏，随后用 dst_run execute 提交同一 taskRef。", []string{"action", "player"}, map[string]any{"room": selector, "player": selector, "action": map[string]any{"type": "string", "enum": []string{"resurrect", "give_item", "spawn_entity", "kick", "god_mode", "creative_mode", "announce", "ban", "unban", "kill", "reset_character"}}, "parameters": params}),
 		makeTool("dst_server_action", "准备房间管理任务，返回固定 taskRef；准备不会停服或更新。后续用 dst_run execute 提交。", []string{"action"}, map[string]any{"room": selector, "action": map[string]any{"type": "string", "enum": []string{"start", "stop", "restart", "save", "backup", "configure_backup"}}, "parameters": params}),
 		makeTool("dst_run", "mode=prepare 准备扩展管理能力；mode=execute 只携带原 taskRef。重试相同 taskRef 返回原操作，不能修改目标或参数；不确定时不新建任务。", []string{"mode"}, map[string]any{"mode": map[string]any{"type": "string", "enum": []string{"prepare", "execute"}}, "taskRef": botString(64), "capabilityId": botString(64), "room": selector, "player": selector, "world": selector, "parameters": params}),
 	}
@@ -285,7 +292,7 @@ func (s *Service) InvokeTask(ctx context.Context, p Principal, name string, raw 
 	if required, ok := c.Parameters["required"].([]string); ok {
 		for _, key := range required {
 			if _, present := params[key]; !present {
-				label := map[string]string{"playerId": "玩家昵称或 KU ID", "player_id": "玩家昵称或 KU ID", "worldId": "世界", "prefab": "实体代码", "count": "数量", "item": "物品", "entity": "生物", "enabled": "是否启用"}[key]
+				label := map[string]string{"playerId": "玩家昵称或 KU ID", "player_id": "玩家昵称或 KU ID", "worldId": "世界", "prefab": "实体代码", "count": "数量", "item": "物品", "entity": "生物", "enabled": "是否启用", "confirmation": "完整房间名称", "reason": "封禁原因", "duration": "封禁时长", "message": "提醒内容", "confirmed": "用户明确确认"}[key]
 				if label == "" {
 					label = key
 				}
@@ -390,7 +397,7 @@ func recommendedTask(c BotCapability) string {
 	if strings.HasPrefix(c.ID, "world.") {
 		return "dst_world"
 	}
-	if slices.Contains([]string{"player.resurrect", "player.give_item", "player.spawn_entity", "player.kick"}, c.ID) {
+	if strings.HasPrefix(c.ID, "player.") && c.Access == "write" {
 		return "dst_player_action"
 	}
 	if slices.Contains([]string{"room.start", "room.stop", "room.restart", "room.save", "room.backup.create", "room.backups.configure"}, c.ID) {

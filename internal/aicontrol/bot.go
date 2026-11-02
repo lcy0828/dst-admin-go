@@ -178,6 +178,7 @@ func BotCapabilities() []BotCapability {
 		}})
 	}
 	list = append(list, workbenchCapabilities()...)
+	list = append(list, playerCapabilities()...)
 	list = append(list, activityCapabilities()...)
 	for i := range list {
 		c := &list[i]

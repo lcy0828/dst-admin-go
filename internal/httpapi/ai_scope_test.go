@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"dont/internal/aicontrol"
@@ -68,5 +69,52 @@ func TestScopedBearerCannotUseRESTOrLegacyBypass(t *testing.T) {
 	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/config", nil))
 	if w.Code != 200 {
 		t.Fatal("scope middleware changed cookie path")
+	}
+}
+
+func TestGameManagerFixedPlayerActionsRESTScope(t *testing.T) {
+	db, err := gorm.Open("sqlite3", filepath.Join(t.TempDir(), "players.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := aicontrol.NewStore(db, "scope_", t.TempDir())
+	if err = store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := apicontract.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := gin.New()
+	api := router.Group("/api/v2", AITokenScope(store, catalog, nil))
+	actions := []string{"god-mode", "creative-mode", "resurrect", "kill", "change-character", "ban", "unban", "announce", "kick"}
+	reached := 0
+	for _, action := range actions {
+		api.POST("/rooms/:roomId/players/:playerId/actions/"+action, func(c *gin.Context) { reached++; c.Status(202) })
+	}
+	for _, profile := range []string{aicontrol.ProfileGameManage, aicontrol.ProfileGameRead} {
+		_, secret, err := store.CreateToken(aicontrol.TokenInput{Name: "test", Days: 1, Profile: profile, RoomIDs: []string{"allowed"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, room := range []string{"allowed", "other"} {
+			for _, action := range actions {
+				req := httptest.NewRequest(http.MethodPost, "/api/v2/rooms/"+room+"/players/KU_EXAMPLE/actions/"+action, strings.NewReader(`{"enabled":false}`))
+				req.Header.Set("Authorization", "Bearer "+secret)
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, req)
+				want := 403
+				if profile == aicontrol.ProfileGameManage && room == "allowed" {
+					want = 202
+				}
+				if w.Code != want {
+					t.Errorf("%s %s %s: %d, want %d", profile, room, action, w.Code, want)
+				}
+			}
+		}
+	}
+	if reached != len(actions) {
+		t.Fatal("unauthorized action reached handler", reached)
 	}
 }
