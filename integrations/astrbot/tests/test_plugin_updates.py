@@ -25,6 +25,7 @@ from astrbot_plugin_dst_companion.update_security import (
     verify_manifest,
 )
 from astrbot_plugin_dst_companion.updates import Updates
+from astrbot_plugin_dst_companion.version import VERSION
 
 
 class ManifestTests(unittest.TestCase):
@@ -349,4 +350,4 @@ class FullHostLifecycleTests(unittest.TestCase):
                 astrbot="4.29.3",
             )
             extract_verified(archive, out / "verified", manifest)
-            self.assertEqual(manifest["version"], "0.4.0")
+            self.assertEqual(manifest["version"], VERSION)

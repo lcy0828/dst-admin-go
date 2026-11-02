@@ -1050,10 +1050,10 @@ class DSTCompanion(Star):
         """仅当用户明确要求修改玩家时使用；查询谁在线、玩家信息等不能调用此工具。结果不确定时不得重发。
 
         Args:
-            action(string): resurrect、give_item、spawn_entity 或 kick。
+            action(string): resurrect、give_item、spawn_entity、kick、god_mode（无敌/上帝模式）、creative_mode（制作/创造模式）、announce、ban、unban、kill 或 reset_character。先用 dst_find 查询所需参数。
             player(string): 玩家昵称或 KU ID；未指定时要求补充。
             room(string): 房间名称、别名或 ID。
-            parameters(object): 发物品提供 item、count；生成生物提供 entity、count；复活留空。
+            parameters(object): 无敌或制作模式必须提供 enabled=true/false；发物品提供 item、count；生成生物提供 entity、count；复活留空。其他操作按目录结构填写。
         """
         return await self.tasks.perform(event, "dst_player_action", action=action, room=room, player=player, parameters=parameters)
 

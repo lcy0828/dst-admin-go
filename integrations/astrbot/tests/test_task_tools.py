@@ -8,6 +8,54 @@ import test_astrbot_adapter as adapter
 
 @unittest.skipUnless(adapter.AVAILABLE, "requires real AstrBot")
 class TaskAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_player_modes_require_group_grants_and_preserve_false(self):
+        from astrbot_plugin_dst_companion.group_permissions import DEFAULT_RULES
+
+        for action in ("god_mode", "creative_mode"):
+            with self.subTest(action=action):
+                bot, event = self.companion(), self.event("admin")
+                item = {"id": "player." + action, "title": "玩家模式", "category": "management", "access": "write",
+                        "parameters": {"type": "object", "properties": {"playerId": {"type": "string"}, "enabled": {"type": "boolean"}},
+                                       "required": ["playerId", "enabled"], "additionalProperties": False},
+                        "parameterHints": {"playerId": "player"}}
+                bot.directory.items.return_value = [item]
+                values = dict(room="r1", player="示例玩家", action=action, parameters={"enabled": False})
+                denied = await bot.tasks.perform(event, "dst_player_action", **values)
+                self.assertIn("PERMISSION_DENIED", denied)
+                bot.engine.execute.assert_not_awaited()
+                bot.config["group_permissions"] = {
+                    "owner": {"write": DEFAULT_RULES["owner"]["write"] + [item["id"]]},
+                    "admin": {"write": DEFAULT_RULES["admin"]["write"] + [item["id"]]}}
+                result = await bot.tasks.perform(event, "dst_player_action", **values)
+                self.assertIn("查询卡片", result)
+                actor, intent, target = bot.engine.execute.call_args.args
+                self.assertEqual(intent.parameters, {"playerId": "示例玩家", "enabled": False})
+                self.assertEqual(intent.capability, item["id"])
+                self.assertTrue(intent.confirm_required)
+                self.assertEqual(target.room, "r1")
+                bot.engine.execute.reset_mock()
+                result = await bot.tasks.perform(event, "dst_player_action", **{**values, "parameters": {"enabled": "false"}})
+                self.assertIn("PARAMETER_INVALID", result)
+                bot.engine.execute.assert_not_awaited()
+                bot.config["group_permissions"]["admin"]["deny"] = [item["id"]]
+                result = await bot.tasks.perform(event, "dst_player_action", **values)
+                self.assertIn("PERMISSION_DENIED", result)
+                bot.engine.execute.assert_not_awaited()
+                await bot.terminate()
+
+    async def test_discovered_player_mode_works_through_generic_task_adapter(self):
+        from astrbot_plugin_dst_companion.group_permissions import DEFAULT_RULES
+
+        bot, event = self.companion(), self.event("owner")
+        bot.config["group_permissions"] = {"owner": {"write": DEFAULT_RULES["owner"]["write"] + ["player.god_mode"]}}
+        bot.directory.items.return_value = [{"id":"player.god_mode", "title":"无敌模式", "category":"management", "access":"write",
+            "parameters":{"type":"object", "properties":{"playerId":{"type":"string"}, "enabled":{"type":"boolean"}},
+                          "required":["playerId","enabled"], "additionalProperties":False}, "parameterHints":{"playerId":"player"}}]
+        result = await bot.tasks.perform(event,"dst_run", capability_id="player.god_mode", room="r1", player="示例玩家", parameters={"enabled":True})
+        self.assertIn("查询卡片",result)
+        self.assertTrue(bot.engine.execute.call_args.args[1].confirm_required)
+        await bot.terminate()
+
     def companion(self):
         bot = adapter.AdapterTests.companion(self)
         bot.config["permission_mode"] = "group"

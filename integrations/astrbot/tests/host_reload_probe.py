@@ -45,7 +45,7 @@ async def probe(root):
         loaded, error = await manager.load(specified_dir_name=plugin_name)
         assert loaded, error
         original = context.dst_companion_v1
-        assert original.plugin_version == "0.4.0"
+        assert original.plugin_version == "0.4.1"
         ledger["actions_v1"] = {"fixture": {"state": "uncertain"}}
         ledger["probe_cursor"] = 23
         updates = original.updates
@@ -55,12 +55,12 @@ async def probe(root):
         shutil.copytree(active, stage, ignore=shutil.ignore_patterns("__pycache__"))
         for filename in ("version.py", "metadata.yaml"):
             file = stage / filename
-            file.write_text(file.read_text().replace("0.4.0", "0.4.1"))
+            file.write_text(file.read_text().replace("0.4.1", "0.4.2"))
         host = updates.host
-        await host.start(original, stage, record, {"version": "0.4.1", "sequence": 5})
+        await host.start(original, stage, record, {"version": "0.4.2", "sequence": 5})
         assert host.state == "succeeded", (host.state, host.error)
         current = context.dst_companion_v1
-        assert current is not original and not original.alive and current.plugin_version == "0.4.1"
+        assert current is not original and not original.alive and current.plugin_version == "0.4.2"
         assert current.updates.host is host
         assert await current.get_kv_data("probe_cursor", 0) == 23
         ledger["probe_cursor"] = 24
@@ -68,13 +68,13 @@ async def probe(root):
         shutil.copytree(active, broken, ignore=shutil.ignore_patterns("__pycache__"))
         for filename in ("version.py", "metadata.yaml"):
             file = broken / filename
-            file.write_text(file.read_text().replace("0.4.1", "0.4.2"))
+            file.write_text(file.read_text().replace("0.4.2", "0.4.3"))
         file = broken / "main.py"
         file.write_text(file.read_text().replace("    async def initialize(self):", "    async def initialize(self):\n        raise RuntimeError('fixture initialize failure')"))
-        await host.start(current, broken, record, {"version": "0.4.2", "sequence": 6})
+        await host.start(current, broken, record, {"version": "0.4.3", "sequence": 6})
         assert host.state == "rolled_back", (host.state, host.error)
         recovered = context.dst_companion_v1
-        assert recovered.plugin_version == "0.4.1" and recovered.alive
+        assert recovered.plugin_version == "0.4.2" and recovered.alive
         assert await recovered.get_kv_data("probe_cursor", 0) == 24
         assert (await recovered.load_journal())["fixture"]["state"] == "uncertain"
         await recovered.terminate()

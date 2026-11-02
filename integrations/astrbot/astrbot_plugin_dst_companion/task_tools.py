@@ -25,7 +25,8 @@ READ_VIEWS = {
     "dst_world": {"world_info": "world", "online_players": "world", "entity_count": "world"},
 }
 ACTION_VALUES = {
-    "dst_player_action": ["resurrect", "give_item", "spawn_entity", "kick"],
+    "dst_player_action": ["resurrect", "give_item", "spawn_entity", "kick", "god_mode", "creative_mode",
+                          "announce", "ban", "unban", "kill", "reset_character"],
     "dst_server_action": ["start", "stop", "restart", "save", "backup", "configure_backup"],
 }
 
@@ -108,7 +109,7 @@ def recommended(item):
         }
     if capability in {"world.world_info", "world.online_players", "world.entity_count"}:
         return {"tool": "dst_world", "input": {"view": capability.split(".")[1]}}
-    if capability in {"player.resurrect", "player.give_item", "player.spawn_entity", "player.kick"}:
+    if capability in {"player." + action for action in ACTION_VALUES["dst_player_action"]}:
         return {"tool": "dst_player_action", "input": {"action": capability.split(".")[1]}}
     if capability in {
         "room.start",
@@ -298,7 +299,7 @@ class TaskTools:
                 capability = "world." + view
             elif name == "dst_player_action":
                 action = values.get("action")
-                if action not in {"resurrect", "give_item", "spawn_entity", "kick"}:
+                if action not in ACTION_VALUES["dst_player_action"]:
                     raise QueryError("PARAMETER_INVALID")
                 capability = "player." + action
             elif name == "dst_server_action":
