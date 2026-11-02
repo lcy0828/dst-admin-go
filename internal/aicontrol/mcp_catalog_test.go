@@ -70,6 +70,22 @@ func TestMCPViewsPaginationMetadataAndDispatcher(t *testing.T) {
 		t.Fatal(names)
 	}
 
+	var tasks mcp.ListToolsResult
+	if e := json.Unmarshal(request("?view=tasks", "tools/list", map[string]any{}), &tasks); e != nil {
+		t.Fatal(e)
+	}
+	if len(tasks.Tools) != 9 || tasks.NextCursor != "" {
+		t.Fatal("task view", len(tasks.Tools))
+	}
+	for _, tool := range tasks.Tools {
+		write, exists := taskNames[tool.Name]
+		if !exists || tool.Annotations.ReadOnlyHint == write {
+			t.Fatal("incorrect task annotation", tool.Name)
+		}
+		if tool.Name != "dst_run" && *tool.Annotations.DestructiveHint {
+			t.Fatal("prepare/read is not destructive", tool.Name)
+		}
+	}
 	var botView mcp.ListToolsResult
 	if e := json.Unmarshal(request("?view=bot", "tools/list", map[string]any{}), &botView); e != nil {
 		t.Fatal(e)
@@ -81,8 +97,9 @@ func TestMCPViewsPaginationMetadataAndDispatcher(t *testing.T) {
 			t.Fatal("unexpected bot tool", tool.Name)
 		}
 		if strings.Contains(tool.Name, "Bot") {
-			read := tool.Name != "api_runBotCapability"
-			if tool.Annotations.ReadOnlyHint != read || *tool.Annotations.DestructiveHint == read {
+			read := !slices.Contains([]string{"api_runBotCapability", "api_prepareBotTask", "api_executeBotTask"}, tool.Name)
+			destructive := slices.Contains([]string{"api_runBotCapability", "api_executeBotTask"}, tool.Name)
+			if tool.Annotations.ReadOnlyHint != read || *tool.Annotations.DestructiveHint != destructive {
 				t.Fatal("incorrect bot annotation", tool.Name)
 			}
 		}
@@ -95,7 +112,7 @@ func TestMCPViewsPaginationMetadataAndDispatcher(t *testing.T) {
 
 	// Notification dependencies are available to permitted keys in the small
 	// bot view, but adding them to the view must not grant new token scope.
-	for _, name := range []string{"api_getRoom", "api_getRoomPlayer", "api_streamWorldRuntimeEvents", "api_listRoomRuntimeEvents", "api_listRoomChatLogs"} {
+	for _, name := range []string{"api_getRoom", "api_getRoomPlayer", "api_streamWorldRuntimeEvents", "api_listRoomRuntimeEvents", "api_listRoomChatLogs", "api_streamRoomChatLogs"} {
 		if !botNames[name] {
 			t.Fatal("missing unified notification dependency", name)
 		}
@@ -107,6 +124,13 @@ func TestMCPViewsPaginationMetadataAndDispatcher(t *testing.T) {
 	}
 	originalKey := key
 	_, key, err = store.CreateToken(TokenInput{Name: "reader", Days: 1, Profile: ProfileGameRead, RoomIDs: []string{"room-a"}})
+	var readTasks mcp.ListToolsResult
+	if e := json.Unmarshal(request("?view=tasks&pagination=off", "tools/list", map[string]any{}), &readTasks); e != nil {
+		t.Fatal(e)
+	}
+	if len(readTasks.Tools) != 6 {
+		t.Fatal("read task count", len(readTasks.Tools))
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +139,7 @@ func TestMCPViewsPaginationMetadataAndDispatcher(t *testing.T) {
 		t.Fatal(e)
 	}
 	for _, tool := range readerView.Tools {
-		if slices.Contains([]string{"api_getRoom", "api_getRoomPlayer", "api_streamWorldRuntimeEvents", "api_listRoomRuntimeEvents", "api_listRoomChatLogs"}, tool.Name) {
+		if slices.Contains([]string{"api_getRoom", "api_getRoomPlayer", "api_streamWorldRuntimeEvents", "api_listRoomRuntimeEvents", "api_listRoomChatLogs", "api_streamRoomChatLogs"}, tool.Name) {
 			t.Fatal("bot view expanded game-read scope", tool.Name)
 		}
 	}

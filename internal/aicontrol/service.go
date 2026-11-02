@@ -24,6 +24,7 @@ type Service struct {
 	slots      chan struct{}
 	mcpSlots   chan struct{}
 	toolSlots  chan struct{}
+	taskSlots  chan struct{}
 	catalog    *apicontract.Catalog
 	mcpOnce    sync.Once
 	mcpHandler http.Handler
@@ -31,7 +32,7 @@ type Service struct {
 }
 
 func New(store *Store, backend Backend) *Service {
-	return &Service{Store: store, backend: backend, slots: make(chan struct{}, 2), mcpSlots: make(chan struct{}, 16), toolSlots: make(chan struct{}, 2)}
+	return &Service{Store: store, backend: backend, slots: make(chan struct{}, 2), mcpSlots: make(chan struct{}, 16), toolSlots: make(chan struct{}, 2), taskSlots: make(chan struct{}, 2)}
 }
 
 // ConfigureAPI is called once during application construction.
@@ -141,6 +142,14 @@ func (s *Service) Invoke(ctx context.Context, p Principal, name string, raw json
 	}
 	if !s.Enabled() || p.ID == "" || !p.AllowsTool(name) {
 		return Invocation{}, ErrDenied
+	}
+	if _, ok := taskNames[name]; ok {
+		result, err := s.InvokeTask(ctx, p, name, raw)
+		if err != nil {
+			return Invocation{}, err
+		}
+		data, err := json.Marshal(result)
+		return Invocation{CallID: result.TaskRef, Status: "succeeded", Data: data}, err
 	}
 	if s.catalog != nil && (name == discoverAPI || strings.HasPrefix(name, apicontract.ToolPrefix)) {
 		return s.invokeAPI(ctx, p, name, raw)

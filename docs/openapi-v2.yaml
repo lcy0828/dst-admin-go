@@ -2655,6 +2655,59 @@ paths:
           $ref: "#/components/responses/Conflict"
         "422":
           $ref: "#/components/responses/UnprocessableEntity"
+  /rooms/{roomId}/chat-logs/stream:
+    parameters:
+      - $ref: "#/components/parameters/RoomID"
+    get:
+      tags: [Logs]
+      operationId: streamRoomChatLogs
+      summary: Subscribe to persisted room chat changes, including player messages and mod announcements
+      x-dst-tool: {readOnly: true, destructive: false, risk: low, tags: [chat, stream], runtime: any}
+      description: >-
+        Room-scoped authenticated SSE; uses the same read permission as room chat history.
+        Without a cursor starts at the current journal tail, not historical messages.
+        Omit kind for say, whisper and announcement; use kind=say for public-chat forwarding.
+        chat.record data follows ChatLogChange; id is a resume cursor, not the chat record ID.
+        Operations are created, updated (including a second shard source), and deleted.
+        Persist all SSE ids, including chat.cursor. Cursor is bound to room and kind.
+        chat.gap means retention exceeded and is followed by retained replay;
+        chat.reset means journal replacement or restoration and starts at the current tail.
+        Both require explicit consumer handling, never infer uninterrupted coverage.
+        chat.status reports source synchronization; chat.error requires reconnect with the last committed cursor.
+        chat.reconnect requests periodic reauthorization. Heartbeat comments arrive every 15 seconds.
+        Created means newly persisted, not necessarily newly spoken; historical marks archive/repair ingestion.
+        The journal retains at most 2048 changes or 4 MiB per room, with 64 KiB maximum record payloads.
+        Consumers deduplicate deliveries by SSE id and update records by chat record ID; truncated records must not be treated as complete.
+        Concurrent subscribers share demand-driven collection (normally every 2 seconds, backoff on failure).
+        MCP returns an authenticated resource link, not an active model subscription. See docs/chat-stream.md.
+      parameters:
+        - name: kind
+          in: query
+          schema: { $ref: "#/components/schemas/ChatLogKind" }
+        - name: cursor
+          in: query
+          description: Opaque room-and-kind-bound cursor from a previously committed SSE id; takes precedence over Last-Event-ID
+          schema: { type: string, minLength: 1, maxLength: 160 }
+        - name: Last-Event-ID
+          in: header
+          schema: { type: string, maxLength: 160 }
+      responses:
+        "200":
+          description: SSE chat.cursor, chat.record, chat.status, chat.gap, chat.reset, chat.error, chat.reconnect and heartbeat comments
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+        "429":
+          description: Subscription budget exhausted; retry after Retry-After seconds (32 total, 8 rooms, 8 subscribers per room)
+          headers:
+            Retry-After:
+              schema: { type: integer, example: 5 }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /rooms/{roomId}/player-activity/settings:
     parameters:
       - $ref: '#/components/parameters/RoomID'
@@ -5182,7 +5235,7 @@ paths:
       operationId: getModConfiguration
       summary: Read one world Mod configuration and editable option schema
       description: >-
-        Uses the world applied Runtime placement. Returns actual overrides and their revision; retain this revision for preview and apply. Missing files or an unavailable Agent are not empty configuration.
+        Uses the world applied Runtime placement. Returns actual overrides and their revision; retain this revision for preview and apply. An installed Mod not yet added to this world returns its default options with configured=false and enabled=false, without changing files. Preview/apply still require a configured entry. Missing Mod files or an unavailable Agent are not empty configuration.
       responses:
         "200": { description: Parsed Mod configuration, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -6786,6 +6839,11 @@ paths:
       tags: [GameNotifications]
       operationId: listGameNotifications
       summary: List immutable game notification delivery history
+      description: >-
+        Use outcome for execution evidence: confirmed requires a matching game receipt;
+        submitted proves console submission only; unconfirmed may have executed and must not be resent automatically.
+        Legacy status and successCount describe submission workflow, not receipt by players.
+        Old successful records without receipts remain submitted. skipReason distinguishes stopped worlds from room broadcast deduplication.
       parameters:
         - { name: roomId, in: query, schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
@@ -6803,6 +6861,10 @@ paths:
       operationId: sendGameNotification
       x-dst-tool: {"openWorld": true}
       summary: Broadcast once through a running Shard, preferring the Master; DST forwards to connected Shards
+      description: >-
+        Sends once through the applied Runtime placement, waiting at most eight seconds for a matching execution receipt.
+        Never retries another Shard after a dispatch attempt. Job completion alone does not prove game execution:
+        read listGameNotifications and match jobId, then inspect outcome. confirmed does not prove receipt by every player.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -6896,6 +6958,63 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /bot/protocol:
+    get:
+      tags: [AI]
+      operationId: getBotProtocol
+      summary: Negotiate task and capability protocols and inspect this credential scope
+      x-dst-tool: {readOnly: true, destructive: false, risk: low, tags: [bot, capability]}
+      responses:
+        '200': {description: Supported protocols and credential profile without secrets, content: {application/json: {schema: {$ref: '#/components/schemas/BotProtocolEnvelope'}}}}
+  /bot/tasks/queries/{tool}:
+    post:
+      tags: [AI]
+      operationId: queryBotTask
+      summary: Query a game task using room names, player nicknames and typed parameters
+      description: Only six code-owned read tools are accepted. Namesakes return needs_input. Missing output is never zero. A taskRef identifies the original query; do not repeat uncertain queries.
+      x-dst-tool: {readOnly: true, destructive: false, risk: low, tags: [bot, query]}
+      parameters:
+        - {name: tool, in: path, required: true, schema: {type: string, enum: [dst_servers, dst_player, dst_world, dst_find, dst_read, dst_result]}}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/BotTaskInput'}}}}
+      responses:
+        '200': {description: Query result, original task or bounded target choices, content: {application/json: {schema: {$ref: '#/components/schemas/BotTaskEnvelope'}}}}
+  /bot/tasks/preparations/{tool}:
+    post:
+      tags: [AI]
+      operationId: prepareBotTask
+      summary: Prepare a fixed game management task without executing it
+      description: Resolves targets and validates the underlying code-owned capability. Returns a caller-owned taskRef valid for five minutes. Critical actions require confirmation in the panel or trusted plugin. dst_run accepts only mode=prepare at this endpoint.
+      x-dst-tool: {readOnly: false, destructive: false, risk: normal, tags: [bot, action]}
+      parameters:
+        - {name: tool, in: path, required: true, schema: {type: string, enum: [dst_player_action, dst_server_action, dst_run]}}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/BotTaskInput'}}}}
+      responses:
+        '200': {description: Prepared parameters or a concrete request for missing targets, content: {application/json: {schema: {$ref: '#/components/schemas/BotTaskEnvelope'}}}}
+  /bot/tasks/{taskRef}/execute:
+    post:
+      tags: [AI]
+      operationId: executeBotTask
+      summary: Submit the original prepared task once and recover the same operation on retries
+      description: Body must be empty or an empty object. Targets and parameters cannot be changed. Scope and capability revisions are checked again. Interrupted or uncertain dispatch is never replayed automatically.
+      x-dst-tool: {readOnly: false, destructive: true, risk: high, tags: [bot, action]}
+      parameters:
+        - {name: taskRef, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody: {required: false, content: {application/json: {schema: {type: object, additionalProperties: false}}}}
+      responses:
+        '200': {description: Actual original task status; submitted is not completed, content: {application/json: {schema: {$ref: '#/components/schemas/BotTaskEnvelope'}}}}
+  /bot/tasks/{taskRef}:
+    get:
+      tags: [AI]
+      operationId: getBotTask
+      summary: Read the caller-owned original task and its evidence without executing it again
+      x-dst-tool: {readOnly: true, destructive: false, risk: low, tags: [bot, result]}
+      parameters:
+        - {name: taskRef, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '200': {description: Original task, prepared parameters or uncertain result, content: {application/json: {schema: {$ref: '#/components/schemas/BotTaskEnvelope'}}}}
   /bot/capabilities:
     get:
       tags: [AI]
@@ -6903,7 +7022,7 @@ paths:
       summary: Discover the permission-filtered bot capability directory without loading hundreds of tools
       x-dst-tool: {readOnly: true, destructive: false, risk: low, tags: [bot, capability, menu]}
       parameters:
-        - {name: protocolVersion, in: query, required: true, schema: {type: integer, enum: [1]}}
+        - {name: protocolVersion, in: query, required: true, schema: {type: integer, enum: [1, 2]}}
         - {name: knownRevision, in: query, schema: {type: string, maxLength: 128}}
         - {name: cursor, in: query, schema: {type: string, maxLength: 512}}
         - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 64, default: 32}}
@@ -7165,6 +7284,58 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
   schemas:
+    BotTaskInput:
+      type: object
+      additionalProperties: false
+      description: Each selected task further validates allowed and required fields. Names can replace IDs; ambiguous targets return choices. Parameters are a typed object, not a JSON string. No Lua or caller-defined action mappings are accepted.
+      properties:
+        room: {type: string, minLength: 1, maxLength: 255}
+        player: {type: string, minLength: 1, maxLength: 255}
+        world: {type: string, minLength: 1, maxLength: 255}
+        view: {type: string, maxLength: 64}
+        action: {type: string, maxLength: 64}
+        query: {type: string, minLength: 1, maxLength: 128}
+        capabilityId: {type: string, minLength: 1, maxLength: 64}
+        parameters: {type: object, maxProperties: 32}
+        taskRef: {type: string, format: uuid}
+        mode: {type: string, enum: [prepare, execute]}
+    BotTaskResponse:
+      type: object
+      required: [state, summary]
+      properties:
+        state: {type: string, description: 'prepared, needs_input, needs_confirmation, expired, pending, running, succeeded, partial, failed, rejected, unavailable or uncertain. Read result.complete and evidence before reporting completion.'}
+        summary: {type: string}
+        taskRef: {type: string, format: uuid}
+        roomId: {type: string}
+        capabilityId: {type: string}
+        parameters: {type: object}
+        expiresAt: {type: string, format: date-time}
+        data: {type: object, description: Bounded choices or task-specific facts}
+        result: {type: object, description: Original BotResult with status, complete, source, observedAt and execution evidence}
+    BotTaskEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: {$ref: '#/components/schemas/BotTaskResponse'}
+        error: {type: [object, 'null']}
+        meta: {$ref: '#/components/schemas/Meta'}
+    BotProtocolEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data:
+          type: object
+          required: [protocolVersions, preferredVersion, capabilityContractVersions, profile, features]
+          properties:
+            protocolVersions: {type: array, items: {type: integer}}
+            preferredVersion: {type: integer}
+            capabilityContractVersions: {type: array, items: {type: integer}}
+            profile: {type: string, enum: [game-read, game-manage, panel-manage]}
+            roomIds: {type: array, nullable: true, items: {type: string}}
+            roomId: {type: string}
+            features: {type: array, items: {type: string}}
+        error: {type: [object, 'null']}
+        meta: {$ref: '#/components/schemas/Meta'}
     EntitySpawnEnvelope:
       type: object
       required: [data, error, meta]
@@ -7243,7 +7414,7 @@ components:
           type: object
           required: [protocolVersion, revision]
           properties:
-            protocolVersion: {type: integer, enum: [1]}
+            protocolVersion: {type: integer, enum: [1, 2]}
             revision: {type: string}
             notModified: {type: boolean}
             nextCursor: {type: string}
@@ -7264,6 +7435,7 @@ components:
                   schemaRevision: {type: string}
                   parameters: {type: object, additionalProperties: true}
                   parameterHints: {type: object, additionalProperties: {type: string}}
+                  searchTerms: {type: array, maxItems: 32, items: {type: string, maxLength: 128}}
                   nativeTools: {type: array, items: {type: string}}
                   resultKind: {type: string}
     BotResultEnvelope:
@@ -9830,6 +10002,17 @@ components:
           type: "null"
         meta:
           $ref: "#/components/schemas/Meta"
+    ChatLogChange:
+      type: object
+      required: [id, operation, kind, recordedAt, historical]
+      properties:
+        id: { type: string, description: Stable chat record ID, distinct from the SSE revision cursor }
+        operation: { type: string, enum: [created, updated, deleted] }
+        kind: { $ref: "#/components/schemas/ChatLogKind" }
+        recordedAt: { type: string, format: date-time, description: Journal commit preparation time, not speech time }
+        historical: { type: boolean, description: Archive or repair ingestion; false does not guarantee recent occurrence }
+        truncated: { type: boolean, description: Payload exceeded the SSE limit; do not treat as complete }
+        entry: { $ref: "#/components/schemas/ChatLogEntry" }
     ChatLogKind:
       type: string
       enum: [say, whisper, announcement]
@@ -12083,6 +12266,9 @@ components:
         worldId: { type: string }
         modId: { type: string }
         enabled: { type: boolean }
+        configured:
+          type: boolean
+          description: False when showing defaults for an installed Mod that has not been added to this world. Such a response is a read-only preview. Older servers may omit this field.
         parser: { type: string, enum: [go, lua] }
         fallbackUsed: { type: boolean }
         fallbackReason: { type: string }
@@ -12763,6 +12949,12 @@ components:
         banned: { type: integer, minimum: 0 }
         limit: { type: integer, minimum: 1, maximum: 100 }
         offset: { type: integer, minimum: 0 }
+        pausedWorldIds:
+          type: array
+          description: Worlds with validated current-process snapshots whose sampling is paused. Retained player records are last-known observations, not confirmed current presence. Real read failures remain warnings.
+          items: { type: string }
+        warnings: { type: array, items: { type: string } }
+        accessListsAvailable: { type: boolean }
         lastRefreshedAt: { type: string, format: date-time }
     PlayerListEnvelope:
       type: object
@@ -15620,6 +15812,10 @@ components:
       properties:
         roomId: { type: string }
         message: { type: string, minLength: 1, maxLength: 500 }
+    GameNotificationOutcome:
+      type: string
+      enum: [waiting, submitted, confirmed, unconfirmed, failed, skipped, canceled]
+      description: Game execution evidence. submitted is transport acknowledgement only; confirmed requires a matching game receipt; unconfirmed may have executed and must not be retried automatically.
     GameNotificationDelivery:
       type: object
       additionalProperties: false
@@ -15632,6 +15828,10 @@ components:
         targetId: { type: string }
         agentId: { type: string }
         status: { type: string, enum: [queued, succeeded, failed, skipped, canceled] }
+        outcome: { $ref: "#/components/schemas/GameNotificationOutcome" }
+        skipReason: { type: string, enum: [world_stopped, room_broadcast, broadcast_attempted] }
+        broadcastWorldId: { type: string }
+        broadcastWorldName: { type: string }
         message: { type: string }
         errorCode: { type: string }
         errorMessage: { type: string }
@@ -15649,8 +15849,12 @@ components:
         message: { type: string }
         source: { type: string, enum: [manual, room_stop, room_restart, game_update, mod_sync, automation, backup] }
         status: { type: string, enum: [queued, sending, succeeded, partial, failed, skipped, canceled] }
+        outcome: { $ref: "#/components/schemas/GameNotificationOutcome" }
+        submittedCount: { type: integer, minimum: 0 }
+        confirmedCount: { type: integer, minimum: 0 }
+        unconfirmedCount: { type: integer, minimum: 0 }
         jobId: { type: string, format: uuid }
-        successCount: { type: integer, minimum: 0 }
+        successCount: { type: integer, minimum: 0, description: Legacy count of completed submissions, including confirmed executions. This is not the number of worlds or players that received the announcement. }
         failureCount: { type: integer, minimum: 0 }
         skippedCount: { type: integer, minimum: 0 }
         canceledCount: { type: integer, minimum: 0 }

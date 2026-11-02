@@ -23,6 +23,7 @@ import (
 // supply a handler, operation, script or alternate execution URL.
 type BotCapability struct {
 	ID              string            `json:"id"`
+	SearchTerms     []string          `json:"searchTerms,omitempty"`
 	Title           string            `json:"title"`
 	Category        string            `json:"category"`
 	Access          string            `json:"access"`
@@ -177,6 +178,7 @@ func BotCapabilities() []BotCapability {
 		}})
 	}
 	list = append(list, workbenchCapabilities()...)
+	list = append(list, activityCapabilities()...)
 	for i := range list {
 		c := &list[i]
 		c.ContractVersion = 1
@@ -212,6 +214,7 @@ func BotCapabilities() []BotCapability {
 			c.ResultKind = "entity-spawn"
 			c.NativeTools = append(c.NativeTools, "api_getRoomPlayerEntitySpawn")
 		}
+		c.SearchTerms = strings.Fields(taskTerms[c.ID])
 		// Presentation changes do not invalidate a frozen parameter form.
 		c.SchemaRevision = botSchemaRevision(*c)
 	}
@@ -236,7 +239,7 @@ func (s *Service) botCapability(p Principal, id, room string) (BotCapability, er
 	return BotCapability{}, ErrInvalid
 }
 func (s *Service) BotDirectory(p Principal, version, limit int, known, cursor string) (map[string]any, error) {
-	if !s.Enabled() || p.ID == "" || version != 1 || limit < 1 || limit > 64 {
+	if !s.Enabled() || p.ID == "" || (version != 1 && version != 2) || limit < 1 || limit > 64 {
 		return nil, ErrInvalid
 	}
 	items := []BotCapability{}
@@ -248,7 +251,7 @@ func (s *Service) BotDirectory(p Principal, version, limit int, known, cursor st
 			}
 		}
 	}
-	encoded, _ := json.Marshal([]any{items, p.ID, p.Profile, p.RoomIDs, p.RoomID})
+	encoded, _ := json.Marshal([]any{items, p.ID, p.Profile, p.RoomIDs, p.RoomID, version})
 	revision := digest(string(encoded))
 	offset := 0
 	if len(cursor) > 512 {
@@ -269,13 +272,13 @@ func (s *Service) BotDirectory(p Principal, version, limit int, known, cursor st
 		offset = v.Offset
 	}
 	if known == revision && cursor == "" {
-		return map[string]any{"protocolVersion": 1, "revision": revision, "notModified": true}, nil
+		return map[string]any{"protocolVersion": version, "revision": revision, "notModified": true}, nil
 	}
 	end := offset + limit
 	if end > len(items) {
 		end = len(items)
 	}
-	out := map[string]any{"protocolVersion": 1, "revision": revision, "items": items[offset:end], "total": len(items), "nextCursor": ""}
+	out := map[string]any{"protocolVersion": version, "revision": revision, "items": items[offset:end], "total": len(items), "nextCursor": ""}
 	if end < len(items) {
 		b, _ := json.Marshal(map[string]any{"Revision": revision, "Offset": end})
 		out["nextCursor"] = base64.RawURLEncoding.EncodeToString(b)

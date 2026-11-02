@@ -34,7 +34,7 @@ func parseMCPView(query url.Values) (mcpView, error) {
 	if view.View == "" {
 		view.View = "compact"
 	}
-	if !slices.Contains([]string{"compact", "all", "legacy", "bot"}, view.View) {
+	if !slices.Contains([]string{"compact", "all", "legacy", "bot", "tasks"}, view.View) {
 		return view, ErrInvalid
 	}
 	switch query.Get("pagination") {
@@ -114,6 +114,12 @@ func (s *Service) mcpDefinition(tool Tool) *mcp.Tool {
 			metadata.Runtime = "shard-ready"
 		}
 	}
+	if _, task := taskNames[tool.Name]; task {
+		metadata.Tags = []string{"room", "task"}
+		if tool.Name == "dst_player_action" || tool.Name == "dst_server_action" {
+			metadata.Destructive = false // These only prepare, never dispatch a game mutation.
+		}
+	}
 	extension := map[string]any{"tags": metadata.Tags, "access": metadata.Access, "risk": metadata.Risk, "runtime": metadata.Runtime}
 	if s.catalog != nil {
 		if op, ok := s.catalog.Operation(tool.Name); ok {
@@ -138,6 +144,7 @@ func (s *Service) mcpDefinition(tool Tool) *mcp.Tool {
 // scope is still checked independently; a game-read token gains no log/stream
 // access simply because the dependencies appear in this view.
 var botMCPNames = map[string]bool{
+	"api_getBotProtocol": true, "api_queryBotTask": true, "api_prepareBotTask": true, "api_getBotTask": true, "api_executeBotTask": true,
 	"api_giveRoomPlayerItem": true, "api_getRoomPlayerItemGrant": true,
 	"api_spawnRoomPlayerEntity": true, "api_getRoomPlayerEntitySpawn": true,
 	"api_listBotCapabilities": true, "api_queryBotCapability": true, "api_runBotCapability": true,
@@ -146,7 +153,7 @@ var botMCPNames = map[string]bool{
 	"api_listRoomPlayers": true, "api_listRoomMods": true, "api_listRoomBackupSchedules": true,
 	"api_getJob": true, "api_getRoomPerformanceReport": true,
 	"api_getRoom": true, "api_getRoomPlayer": true, "api_streamWorldRuntimeEvents": true,
-	"api_listRoomRuntimeEvents": true, "api_listRoomChatLogs": true,
+	"api_listRoomRuntimeEvents": true, "api_listRoomChatLogs": true, "api_streamRoomChatLogs": true,
 }
 var compactMCPNames = map[string]bool{discoverAPI: true, dispatchAPI: true, "api_listRooms": true, "api_getRoomRuntimeOverview": true, "api_listRoomPlayers": true, "api_listRoomMods": true, "api_listRoomBackupSchedules": true, "api_listJobs": true, "api_getJob": true, "api_queryRoomWorld": true, "api_getRoomWorldQueryRun": true}
 
@@ -169,6 +176,10 @@ func (s *Service) catalogMiddleware(definitions []*mcp.Tool) mcp.Middleware {
 			selected := make([]*mcp.Tool, 0, len(definitions))
 			for _, definition := range definitions {
 				p, _ := ctx.Value(mcpPrincipalKey{}).(Principal)
+				_, isTask := taskNames[definition.Name]
+				if view.View == "tasks" && !isTask || view.View != "tasks" && view.View != "legacy" && isTask {
+					continue
+				}
 				if view.View == "bot" && !botMCPNames[definition.Name] {
 					continue
 				}
@@ -177,7 +188,7 @@ func (s *Service) catalogMiddleware(definitions []*mcp.Tool) mcp.Middleware {
 				}
 				if s.catalog != nil {
 					op, isAPI := s.catalog.Operation(definition.Name)
-					if view.View == "all" || explicitFilter && view.View != "legacy" {
+					if view.View == "all" || explicitFilter && view.View != "legacy" && view.View != "tasks" {
 						if !isAPI || op.Deprecated {
 							continue
 						}

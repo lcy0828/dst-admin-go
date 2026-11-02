@@ -4899,7 +4899,7 @@
       ]
     },
     "streamWorldRuntimeEvents": {
-      "purpose": "获取指定世界 Runtime 事件流的认证链接；可按生产者游标续读，生成链接不代表已读取事件。",
+      "purpose": "获取指定世界 Runtime 事件流的认证链接；可按生产者游标续读，生成链接不代表已读取事件。 进退服位于 runtime.event 的 event.kind（player.joined/player.left）；无游标连接从当前尾部开始，不补发历史。完整聊天与模组公告使用 streamRoomChatLogs。",
       "actions": [
         "订阅 Runtime 事件",
         "获取采集事件流"
@@ -6071,6 +6071,100 @@
         "代理"
       ],
       "resultNotes": "仅准备阶段可停止；提交程序切换后拒绝取消；不影响游戏世界。"
+    },
+    "getBotProtocol": {
+      "purpose": "检查面板与插件支持的协议和当前连接权限，不包含密钥。",
+      "actions": [
+        "检查插件兼容性"
+      ],
+      "queries": [
+        "插件更新后还能连接吗"
+      ],
+      "terms": [
+        "协议兼容",
+        "插件",
+        "MCP"
+      ],
+      "resultNotes": "检查 state 和原始 result 的完成状态；不确定结果只能查询原任务，不能自动重发。"
+    },
+    "queryBotTask": {
+      "purpose": "按房间名和玩家昵称执行固定只读任务，返回明确结果或候选目标。",
+      "actions": [
+        "按名字查询游戏"
+      ],
+      "queries": [
+        "查询示例玩家背包"
+      ],
+      "terms": [
+        "任务查询",
+        "插件",
+        "MCP"
+      ],
+      "resultNotes": "检查 state 和原始 result 的完成状态；不确定结果只能查询原任务，不能自动重发。"
+    },
+    "prepareBotTask": {
+      "purpose": "准备固定管理任务并锁定目标和参数，返回任务编号，尚不修改游戏。",
+      "actions": [
+        "准备管理任务"
+      ],
+      "queries": [
+        "准备给示例玩家发三个肉丸"
+      ],
+      "terms": [
+        "任务准备",
+        "插件",
+        "MCP"
+      ],
+      "resultNotes": "检查 state 和原始 result 的完成状态；不确定结果只能查询原任务，不能自动重发。"
+    },
+    "executeBotTask": {
+      "purpose": "按原任务编号提交已准备的操作，重复提交只查询原操作。",
+      "actions": [
+        "提交原任务"
+      ],
+      "queries": [
+        "执行刚才准备的任务"
+      ],
+      "terms": [
+        "任务提交",
+        "插件",
+        "MCP"
+      ],
+      "resultNotes": "检查 state 和原始 result 的完成状态；不确定结果只能查询原任务，不能自动重发。"
+    },
+    "getBotTask": {
+      "purpose": "读取当前连接拥有的原任务和执行证据，绝不重新执行。",
+      "actions": [
+        "查看任务结果"
+      ],
+      "queries": [
+        "刚才的任务完成了吗"
+      ],
+      "terms": [
+        "任务结果",
+        "插件",
+        "MCP"
+      ],
+      "resultNotes": "检查 state 和原始 result 的完成状态；不确定结果只能查询原任务，不能自动重发。"
+    },
+    "streamRoomChatLogs": {
+      "purpose": "获取房间游戏聊天推送流的认证链接，包含玩家发言和写入聊天日志的模组公告；支持断线续读。生成链接不代表已经订阅或收到了消息。",
+      "actions": [
+        "订阅游戏聊天",
+        "推送模组公告",
+        "聊天断线续读"
+      ],
+      "queries": [
+        "我需要游戏聊天记录的推送流",
+        "模组在游戏聊天里打印的消息能实时接收吗"
+      ],
+      "terms": [
+        "聊天记录",
+        "公屏",
+        "模组公告",
+        "SSE",
+        "续读"
+      ]
     }
   }
 }

@@ -69,6 +69,12 @@ func NewIdempotencyStore(ttl time.Duration, maxEntries int) *IdempotencyStore {
 
 func (s *IdempotencyStore) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Task execution is fenced by its persisted, caller-owned taskRef and
+		// must recheck current scope on every retry, including HTTP retries.
+		if c.FullPath() == "/api/v2/bot/tasks/queries/:tool" || c.FullPath() == "/api/v2/bot/tasks/preparations/:tool" || c.FullPath() == "/api/v2/bot/tasks/:taskRef/execute" {
+			c.Next()
+			return
+		}
 		// Bot actions persist their request identity and reauthorize every replay.
 		if c.Request.Method == http.MethodPost && c.FullPath() == "/api/v2/rooms/:roomId/bot/actions/:capabilityId" {
 			c.Next()

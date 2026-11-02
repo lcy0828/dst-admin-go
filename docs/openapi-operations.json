@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "9a01b208231c8dc98e2ec3b975fbab7553a6cb7845c03a05f1cd1547588fc728",
+  "operationsSHA256": "31b84d0687c406713bece178a3fc8a02e0c25b968f121c465dca253b197c7df9",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -1110,6 +1110,23 @@
       "title": "Fetch optional authors and, on request, community descriptions without blocking core metadata"
     },
     {
+      "operationId": "executeBotTask",
+      "method": "POST",
+      "path": "/bot/tasks/{taskRef}/execute",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "action",
+        "ai",
+        "bot",
+        "system"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "Submit the original prepared task once and recover the same operation on retries"
+    },
+    {
       "operationId": "executeBuiltinRoomCommand",
       "method": "POST",
       "path": "/rooms/{roomId}/workbench/actions/execute",
@@ -1447,6 +1464,38 @@
       "risk": "low",
       "runtime": "any",
       "title": "Recover the original caller-owned bot request without resubmitting it"
+    },
+    {
+      "operationId": "getBotProtocol",
+      "method": "GET",
+      "path": "/bot/protocol",
+      "transport": "json",
+      "tags": [
+        "ai",
+        "bot",
+        "capability",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Negotiate task and capability protocols and inspect this credential scope"
+    },
+    {
+      "operationId": "getBotTask",
+      "method": "GET",
+      "path": "/bot/tasks/{taskRef}",
+      "transport": "json",
+      "tags": [
+        "ai",
+        "bot",
+        "result",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the caller-owned original task and its evidence without executing it again"
     },
     {
       "operationId": "getBuiltinRoomCommandRun",
@@ -3369,6 +3418,23 @@
       "title": "Observe one Shard and preview its fixed typed resource plan"
     },
     {
+      "operationId": "prepareBotTask",
+      "method": "POST",
+      "path": "/bot/tasks/preparations/{tool}",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "action",
+        "ai",
+        "bot",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Prepare a fixed game management task without executing it"
+    },
+    {
       "operationId": "previewAutomationImport",
       "method": "POST",
       "path": "/rooms/{roomId}/automation/imports/preview",
@@ -3702,6 +3768,23 @@
       "risk": "low",
       "runtime": "any",
       "title": "Execute one fixed read-only bot capability with validated parameters"
+    },
+    {
+      "operationId": "queryBotTask",
+      "method": "POST",
+      "path": "/bot/tasks/queries/{tool}",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "ai",
+        "bot",
+        "query",
+        "system"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Query a game task using room names, player nicknames and typed parameters"
     },
     {
       "operationId": "queryRoomWorld",
@@ -4523,6 +4606,22 @@
       "risk": "low",
       "runtime": "any",
       "title": "Stream authenticated job events from the current watermark or resume cursor"
+    },
+    {
+      "operationId": "streamRoomChatLogs",
+      "method": "GET",
+      "path": "/rooms/{roomId}/chat-logs/stream",
+      "transport": "stream",
+      "tags": [
+        "chat",
+        "log",
+        "room",
+        "stream"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Subscribe to persisted room chat changes, including player messages and mod announcements"
     },
     {
       "operationId": "streamRuntimeObservations",

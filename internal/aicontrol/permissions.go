@@ -20,6 +20,7 @@ var gameReads = map[string]bool{
 	"getRoomPerformanceReport": true, "listRoomMods": true, "searchWorldEntityCatalog": true,
 	"getWorldEntityArtwork": true, "getWorldStateHistory": true,
 	"queryRoomWorld": true, "getRoomWorldQueryRun": true,
+	"listRoomPlayerActivity": true, "getRoomPlayerTrajectory": true, "getRoomPlayerCombat": true,
 }
 var gameWrites = map[string]bool{
 	"runBotCapability": true, "runRoomAction": true, "createRoomBackup": true,
@@ -43,6 +44,12 @@ func (p Principal) AllowsRoom(room string) bool {
 	return p.Profile == "" || p.Profile == ProfilePanelManage
 }
 func (p Principal) AllowsOperation(id, room string) bool {
+	if id == "getBotProtocol" || id == "queryBotTask" || id == "getBotTask" {
+		return true
+	}
+	if id == "prepareBotTask" || id == "executeBotTask" {
+		return p.Profile == "" || p.Profile == ProfilePanelManage || p.Profile == ProfileGameManage
+	}
 	if room != "" && !p.AllowsRoom(room) {
 		return false
 	}
@@ -61,6 +68,15 @@ func (p Principal) AllowsOperation(id, room string) bool {
 	return gameReads[id] || p.Profile == ProfileGameManage && gameWrites[id]
 }
 func (p Principal) AllowsTool(name string) bool {
+	if strings.HasPrefix(name, apicontract.ToolPrefix) {
+		id := strings.TrimPrefix(name, apicontract.ToolPrefix)
+		if id == "getBotProtocol" || id == "queryBotTask" || id == "getBotTask" || id == "prepareBotTask" || id == "executeBotTask" {
+			return p.AllowsOperation(id, "")
+		}
+	}
+	if write, ok := taskNames[name]; ok {
+		return !write || p.Profile == "" || p.Profile == ProfilePanelManage || p.Profile == ProfileGameManage
+	}
 	if p.Profile == "" || p.Profile == ProfilePanelManage {
 		return true
 	}

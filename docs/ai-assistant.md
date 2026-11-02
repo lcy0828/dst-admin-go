@@ -49,7 +49,7 @@ MCP 使用 **Streamable HTTP**：
   "mcpServers": {
     "dst-admin": {
       "type": "http",
-      "url": "https://panel.example.com/mcp",
+      "url": "https://panel.example.com/mcp?view=tasks",
       "headers": { "Authorization": "Bearer <ACCESS_TOKEN>" }
     }
   }
@@ -88,7 +88,9 @@ AI 未使用时不启动采集、模型轮询或后台任务。同时最多处�
 
 ### MCP 工具目录与分类
 
-默认连接 `/mcp` 提供精简的常用工具与两个完整能力入口，避免一次向模型传入数百个工具：
+新连接推荐 `/mcp?view=tasks`，按权限提供最多 9 个任务入口，支持直接用房间名称、玩家昵称查询或准备操作，详见[任务接入指南](mcp-tasks.md)。
+
+既有 `/mcp` 保留精简工具与以下完整能力入口：
 
 1. 调用 `find_api`，用关键词或 `tags`、`access`、`risk`、`runtime` 查找能力。需要了解参数时传 `includeSchema: true`。
 2. 调用 `call_api`，传返回的 `operationId`，把符合 `inputSchema` 的参数放在 `arguments` 内。写操作的 `requestId` 也放在 `arguments` 内。执行仍经过原接口校验、幂等和 Runtime 保护。
@@ -97,12 +99,13 @@ AI 未使用时不启动采集、模型轮询或后台任务。同时最多处�
 
 | URL | 工具列表 |
 | --- | --- |
+| `/mcp?view=tasks` | 推荐：最多 9 个任务入口 |
 | `/mcp?tags=backup&access=read` | 备份领域的只读规范工具 |
 | `/mcp?tags=mod,player` | 模组或玩家领域的规范工具 |
 | `/mcp?view=all` | 全部规范工具，不含弃用别名 |
 | `/mcp?view=legacy` | 包含旧便捷工具和弃用别名的兼容列表 |
 
-列表每页最多 64 项，通过 MCP 标准 `nextCursor` 继续获取；下一页应使用相同 URL。多个标签按“或”匹配，其他维度按“且”匹配。工具调用名称继续兼容，列表筛选不改变执行权限。旧客户端若依赖全量发现，可使用 `view=legacy`；工具数量受限的模型建议保留默认连接。
+列表每页最多 64 项，通过 MCP 标准 `nextCursor` 继续获取；下一页应使用相同 URL。多个标签按“或”匹配，其他维度按“且”匹配。工具调用名称继续兼容，列表筛选不改变执行权限。旧客户端若依赖全量发现，可使用 `view=legacy`；工具数量受限的模型建议使用 `view=tasks`。
 
 每个工具的 `annotations` 提供标题、只读、幂等、破坏性及外部交互提示；多标签、读写类型、风险和运行条件在 `_meta["io.github.lcy0828.dst-admin/tool"]`。这些是行为描述，不增加审批流程。`runtime` 的 `any` 表示没有统一的运行中要求，仍需遵守接口声明的停止状态等条件。`docs/openapi-operations.json` 也包含相同分类，新增同领域接口会自动继承标签。
 
@@ -134,3 +137,10 @@ AI 未使用时不启动采集、模型轮询或后台任务。同时最多处�
 ### 排查管理服务自身异常
 
 除游戏世界日志外，AI / MCP 现在可查询控制端和 Agent 的持久化服务日志，按任务 ID 或请求 ID 关联排查。入口、参数和保存边界见[服务日志](service-logs.md)。
+
+
+任务型 MCP、单连接群角色权限和插件更新说明见[任务接入指南](mcp-tasks.md)。已有插件保留旧权限模式；切换群角色模式需维护者明确设置。
+
+### 游戏聊天推送
+
+需要在外部程序接收公屏和模组公告，可使用 `api_streamRoomChatLogs` 获取认证 SSE 链接，支持断线续读和跨世界合并。接入方式、权限和事件格式见[游戏聊天推送接入](chat-stream.md)。取得链接不表示模型已持续订阅。

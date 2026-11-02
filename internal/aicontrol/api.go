@@ -60,6 +60,7 @@ func apiTool(op *apicontract.Operation) (Tool, error) {
 func (s *Service) AvailableTools() ([]Tool, error) {
 	list := s.InitialTools()
 	if s.catalog != nil {
+		list = append(list, TaskTools()...)
 		for _, op := range s.catalog.Operations() {
 			if !op.Callable() {
 				continue

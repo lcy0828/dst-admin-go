@@ -59,10 +59,15 @@ func TestOpenAPIMatchesPublishedV2Routes(t *testing.T) {
 			expected[method+" "+path] = struct{}{}
 			if isProtectedWrite(method, path) {
 				parameters := append(append([]openAPIParameter(nil), item.Parameters...), operation.Parameters...)
-				for _, required := range []string{
-					"#/components/parameters/CSRFToken",
-					"#/components/parameters/IdempotencyKey",
-				} {
+				requiredParameters := []string{"#/components/parameters/CSRFToken"}
+				// Task queries/preparation never dispatch game writes; execution
+				// uses its persisted taskRef and reauthorizes every replay.
+				// A generic HTTP response replay must not bypass that check.
+				taskIdentity := path == "/bot/tasks/queries/{tool}" || path == "/bot/tasks/preparations/{tool}" || path == "/bot/tasks/{taskRef}/execute"
+				if !taskIdentity {
+					requiredParameters = append(requiredParameters, "#/components/parameters/IdempotencyKey")
+				}
+				for _, required := range requiredParameters {
 					if !hasParameter(parameters, required) {
 						t.Errorf("%s %s does not declare %s", method, path, required)
 					}

@@ -33,19 +33,20 @@ type tokenRecord struct {
 type Store struct {
 	db                                       *gorm.DB
 	configTable, tokenTable, callTable, root string
+	taskTable                                string
 	mu                                       sync.Mutex
 	filesMu                                  sync.Mutex
 	uploadReserved                           int64
 }
 
 func NewStore(db *gorm.DB, prefix, root string) *Store {
-	return &Store{db: db, configTable: prefix + "ai_config", tokenTable: prefix + "ai_token", callTable: prefix + "ai_call", root: root}
+	return &Store{db: db, configTable: prefix + "ai_config", tokenTable: prefix + "ai_token", callTable: prefix + "ai_call", taskTable: prefix + "ai_task", root: root}
 }
 func (s *Store) Migrate() error {
 	for _, t := range []struct {
 		name  string
 		model any
-	}{{s.configTable, &configRecord{}}, {s.tokenTable, &tokenRecord{}}, {s.callTable, &Call{}}} {
+	}{{s.configTable, &configRecord{}}, {s.tokenTable, &tokenRecord{}}, {s.callTable, &Call{}}, {s.taskTable, &taskRecord{}}} {
 		if err := s.db.Table(t.name).AutoMigrate(t.model).Error; err != nil {
 			return err
 		}
@@ -291,6 +292,29 @@ func (s *Store) prune() error {
 // or uncertain receipt. Capacity exhaustion refuses new work; it never makes an
 // old write executable again. No background database sweep is introduced.
 func (s *Store) compactBotRecords() error {
+	// Read receipts may expire; replaying a missing fixed read cannot mutate the
+	// game. Keep write identities and uncertain receipts regardless of age.
+	if e := s.db.Table(s.callTable).Where("tool = ? AND status = ? AND created_at < ?", "bot.read", "succeeded", time.Now().UTC().Add(-24*time.Hour)).Delete(&Call{}).Error; e != nil {
+		return e
+	}
+	var reads int
+	if e := s.db.Table(s.callTable).Where("tool = ? AND status = ?", "bot.read", "succeeded").Count(&reads).Error; e != nil {
+		return e
+	}
+	if reads >= 2000 {
+		var rows []Call
+		if e := s.db.Table(s.callTable).Where("tool = ? AND status = ?", "bot.read", "succeeded").Order("created_at ASC").Limit(200).Find(&rows).Error; e != nil {
+			return e
+		}
+		ids := []string{}
+		for _, row := range rows {
+			ids = append(ids, row.ID)
+		}
+		if e := s.db.Table(s.callTable).Where("id IN (?) AND tool = ?", ids, "bot.read").Delete(&Call{}).Error; e != nil {
+			return e
+		}
+	}
+
 	var calls []Call
 	if e := s.db.Table(s.callTable).Where("tool IN (?) AND status = ? AND created_at < ?", []string{"bot.read", "bot.write"}, "succeeded", time.Now().UTC().Add(-7*24*time.Hour)).Order("created_at ASC").Limit(32).Find(&calls).Error; e != nil {
 		return e
