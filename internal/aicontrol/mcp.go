@@ -73,12 +73,17 @@ func (s *Service) initializeMCP() {
 		tool := t
 		definition := s.mcpDefinition(tool)
 		definitions = append(definitions, definition)
-		mcp.AddTool[map[string]any, any](server, definition, func(ctx context.Context, _ *mcp.CallToolRequest, input map[string]any) (*mcp.CallToolResult, any, error) {
+		mcp.AddTool[map[string]any, any](server, definition, func(ctx context.Context, req *mcp.CallToolRequest, input map[string]any) (*mcp.CallToolResult, any, error) {
 			p, ok := ctx.Value(mcpPrincipalKey{}).(Principal)
 			if !ok || p.ID == "" {
 				return nil, nil, ErrDenied
 			}
 			raw, _ := json.Marshal(input)
+			// Retain omission and duplicate fields for the player policy. The SDK's
+			// decoded map has already lost duplicate keys and may apply defaults.
+			if tool.Name == "api_listRoomPlayers" || tool.Name == dispatchAPI {
+				raw = req.Params.Arguments
+			}
 			var value Invocation
 			var err error
 			if tool.Name == dispatchAPI {

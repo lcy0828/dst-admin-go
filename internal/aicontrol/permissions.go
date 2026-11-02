@@ -93,23 +93,27 @@ func (p Principal) AllowsTool(name string) bool {
 	return name == discoverAPI || name == dispatchAPI || name == "list_rooms" || name == "call_result" || p.Profile == ProfileGameManage && (name == "get_job" || name == "room_control")
 }
 func (p Principal) AllowsAPI(op *apicontract.Operation, in apicontract.Input) bool {
+	return p.CheckAPI(op, in) == nil
+}
+
+func (p Principal) CheckAPI(op *apicontract.Operation, in apicontract.Input) error {
 	room, _ := in.Path["roomId"].(string)
 	if !p.AllowsOperation(op.ID, room) {
-		return false
+		return ErrDenied
+	}
+	if op.ID == "listRoomPlayers" {
+		_, err := p.playerListAccess(in)
+		return err
 	}
 	if p.Profile == ProfileGameRead || p.Profile == ProfileGameManage {
-		// The public projection excludes access lists; being a GET is insufficient.
-		if op.ID == "listRoomPlayers" && in.Query["includeAccessLists"] != false {
-			return false
-		}
 		if op.ID == "runRoomAction" {
 			action, _ := in.Path["action"].(string)
 			if !slices.Contains([]string{"start", "stop", "restart", "save"}, action) {
-				return false
+				return ErrDenied
 			}
 		}
 	}
-	return true
+	return nil
 }
 func normalizeTokenScope(input *TokenInput) error {
 	if input.Profile == "" {

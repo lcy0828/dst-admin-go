@@ -67,9 +67,10 @@ func AITokenScope(store *aicontrol.Store, catalog *apicontract.Catalog, jobServi
 			deny()
 			return
 		}
-		if (p.Profile == aicontrol.ProfileGameRead || p.Profile == aicontrol.ProfileGameManage) && op.ID == "listRoomPlayers" && c.Query("includeAccessLists") != "false" {
-			deny()
-			return
+		if op.ID == "listRoomPlayers" {
+			if _, ok := playerListAccess(c); !ok {
+				return
+			}
 		}
 		if op.ID == "runRoomAction" && p.Profile == aicontrol.ProfileGameManage {
 			switch c.Param("action") {

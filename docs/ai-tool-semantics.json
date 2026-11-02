@@ -3264,24 +3264,25 @@
       ]
     },
     "listRoomPlayers": {
-      "purpose": "列出房间内记录过的玩家以及当前访问权限状态，看谁来过、谁是管理员、谁在白名单或黑名单里，便于权限核查。",
+      "purpose": "查询房间在线玩家、历史玩家和角色状态，回答谁在线、谁来过、玩家在哪个世界。普通查询可省略 includeAccessLists；管理名单仅对具备面板管理权限的调用者开放。",
       "actions": [
+        "查在线玩家",
         "列房间玩家",
-        "查玩家权限状态",
-        "看谁在管理员名单"
+        "查历史玩家和角色状态"
       ],
       "queries": [
-        "群里那个 ID 是谁，查下玩家列表",
-        "想给某人加管理，先看看他现在什么权限"
+        "现在谁在线",
+        "这个房间有哪些玩家，分别在哪里",
+        "群里那个 ID 是谁，查下玩家列表"
       ],
       "terms": [
-        "白名单",
-        "管理员权限",
-        "黑名单",
+        "在线玩家",
+        "角色状态",
+        "历史玩家",
         "Klei ID",
         "玩家记录"
       ],
-      "resultNotes": "房间在线人数按真实连接 ID 去重，包括选角、加载与迁移。localEntity 是采样时的本地实体证据，缺失表示旧采集端未声明。worldConfirmed=false 时 worldId/worldName 仅为最后确认的位置，不可当作当前位置。只有多个新鲜本地实体才构成 presenceConflict；集群名单重复不构成分片冲突。"
+      "resultNotes": "accessListsAvailable=false 时管理名单未确认；accessListsState 区分未授权读取、未请求、已取得和来源不可用。未读取名单时 banned=false 或封禁数0不能解释为确认未封禁。普通玩家查询不需要管理名单。房间在线人数按真实连接 ID 去重，包括选角、加载与迁移。localEntity 是采样时的本地实体证据，缺失表示旧采集端未声明。worldConfirmed=false 时 worldId/worldName 仅为最后确认的位置，不可当作当前位置。只有多个新鲜本地实体才构成 presenceConflict；集群名单重复不构成分片冲突。"
     },
     "listRoomProvisionOperations": {
       "purpose": "查询房间配置发布任务的流水与每个分片的推进阶段，确认改完的 cluster.ini、世界设置有没有真正落到地面和洞穴分片。",

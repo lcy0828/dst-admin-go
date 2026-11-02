@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "31b84d0687c406713bece178a3fc8a02e0c25b968f121c465dca253b197c7df9",
+  "operationsSHA256": "5a6b76759aa91e53054a76b99f3f5c59bb968a1d6c0fc37e9d30f960f1e26a76",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -3074,7 +3074,7 @@
       "access": "read",
       "risk": "low",
       "runtime": "any",
-      "title": "List persisted player observations and current access state"
+      "title": "List online and recorded players with optional management-list information"
     },
     {
       "operationId": "listRoomProvisionOperations",

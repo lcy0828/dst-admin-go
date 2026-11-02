@@ -153,6 +153,7 @@ type List struct {
 	Offset               int        `json:"offset"`
 	LastRefreshedAt      *time.Time `json:"lastRefreshedAt,omitempty"`
 	AccessListsAvailable bool       `json:"accessListsAvailable"`
+	AccessListsState     string     `json:"accessListsState,omitempty"`
 	Warnings             []string   `json:"warnings,omitempty"`
 	PausedWorldIDs       []string   `json:"pausedWorldIds,omitempty"`
 }

@@ -73,6 +73,11 @@ func (s *Service) dispatchMCP(ctx context.Context, p Principal, raw json.RawMess
 	if !ok || !op.Callable() {
 		return Invocation{}, ErrDenied
 	}
+	if op.ID == "listRoomPlayers" {
+		if _, err := strictBotJSONLimit(raw, 64<<10, 8); err != nil {
+			return Invocation{}, err
+		}
+	}
 	return s.Invoke(ctx, p, op.ToolName(), in.Arguments)
 }
 
@@ -199,13 +204,20 @@ func (s *Service) catalogMiddleware(definitions []*mcp.Tool) mcp.Middleware {
 				info := definition.Meta[mcpMetadataKey].(map[string]any)
 				metadata := apicontract.ToolMetadata{Tags: info["tags"].([]string), Access: info["access"].(string), Risk: info["risk"].(string), Runtime: info["runtime"].(string)}
 				if view.Filter.Matches(metadata) {
+					if definition.Name == "api_listRoomPlayers" {
+						projected := *definition
+						projected.InputSchema = playerListInputSchema(p, definition.InputSchema.(map[string]any))
+						projected.Description += "\n" + playerListScopeHint(p)
+						definition = &projected
+					}
 					selected = append(selected, definition)
 				}
 			}
 			scope, _ := json.Marshal(struct {
-				View      mcpView
-				Principal Principal
-			}{view, func() Principal { p, _ := ctx.Value(mcpPrincipalKey{}).(Principal); return p }()})
+				View           mcpView
+				Principal      Principal
+				PolicyRevision string
+			}{view, func() Principal { p, _ := ctx.Value(mcpPrincipalKey{}).(Principal); return p }(), playerListPolicyRevision})
 			hash := sha256.Sum256(append(catalogHash[:], scope...))
 			fingerprint := hex.EncodeToString(hash[:12])
 			offset := 0

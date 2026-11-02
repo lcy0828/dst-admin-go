@@ -76,6 +76,49 @@ REST 写操作必须提供 `Idempotency-Key`；使用 Cookie 登录时还必须�
 
 外部客户端上传附件使用 `POST /api/v2/system/ai/attachments`，表单字段为 `file`，使用同一 Bearer 密钥。返回的 `id` 可作为管理上传工具的 `body.file.attachmentId`。下载结果也使用同一认证身份。
 
+### 查询玩家与管理名单
+
+查询“谁在线”“房间有哪些玩家”使用 `api_listRoomPlayers`，也可通过
+`call_api` 调用 `listRoomPlayers`。先从房间列表取得真实房间 ID，再传入 `path.roomId`：
+
+```json
+{
+  "path": { "roomId": "<ROOM_ID>" },
+  "query": { "status": "online", "limit": 25 }
+}
+```
+
+`includeAccessLists` 是可选的管理名单读取参数，不是查询玩家的必填条件：
+
+| 当前身份 | 省略参数 | `false` | `true` |
+| --- | --- | --- | --- |
+| 仅查询游戏、查询并管理游戏 | 基础玩家信息 | 基础玩家信息 | 拒绝读取管理名单 |
+| 面板管理、已登录管理员、旧版管理密钥 | 包含管理名单信息 | 基础玩家信息 | 包含管理名单信息 |
+
+两种游戏用途仍只能访问授权房间。基础查询跳过管理名单与封禁详情读取；
+玩家状态的新鲜度、分页及采集失败提示保持原有含义。
+
+结果中的 `accessListsState` 表示管理名单覆盖情况，普通游戏查询省略参数时返回：
+
+```json
+{
+  "accessListsAvailable": false,
+  "accessListsState": "not_permitted"
+}
+```
+
+这是玩家列表结果的字段节选，不表示玩家查询失败。明确传 `false` 时为
+`not_requested`，成功读取名单时为 `available`，有权限且已请求但来源暂不可用时为
+`unavailable`。未读取名单时，`banned=false` 或封禁数 `0` 不能用于判断是否确实无人被封禁。
+
+`tools/list` 与 `find_api(includeSchema=true)` 会按当前密钥说明参数默认值。
+若旧客户端仍自动填写缓存的 `true`，应刷新工具目录或明确传 `false`；游戏密钥明确请求
+`true` 仍会收到权限错误。需要兼容旧版面板的插件应继续显式传 `false`，无需更换密钥或升级插件。
+
+接入验证可用同一游戏密钥依次查询：省略参数、传 `false`、传 `true`。
+前两次应取得基础玩家列表，第三次应被拒绝；访问未授权房间始终被拒绝。
+新返回字段为可选扩展，旧面板可能不返回它。此项修复不需要重启游戏世界。
+
 前端接口映射来自 OpenAPI；修改契约后运行 `go run ./cmd/openapi-manifest`，前端副本通过 `-out <前端目录>/src/api/openapiOperations.json` 生成。CI 检查路由、操作编号、参数和响应 Schema 引用，以及生成文件是否同步。
 
 ## 对话与资源设置

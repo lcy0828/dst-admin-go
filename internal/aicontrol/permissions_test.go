@@ -60,7 +60,7 @@ func TestRestrictedTypedLegacyDispatcherAndDiscoverySharePolicy(t *testing.T) {
 	for _, tc := range []struct{ name, raw string }{
 		{"api_executeRawRoomCommand", `{"path":{"roomId":"a","worldId":"m"},"body":{"command":"print(1)","confirmation":"A"},"requestId":"test-reader-001"}`},
 		{"api_listRoomPlayers", `{"path":{"roomId":"b"},"query":{"includeAccessLists":false}}`},
-		{"api_listRoomPlayers", `{"path":{"roomId":"a"}}`},
+		{"api_listRoomPlayers", `{"path":{"roomId":"a"},"query":{"includeAccessLists":true}}`},
 		{"world_console", `{"roomId":"a","worldId":"m","command":"print(1)","requestId":"test-reader-002"}`},
 		{"api_createRoomBackup", `{"path":{"roomId":"a"},"body":{},"requestId":"test-reader-003"}`},
 	} {

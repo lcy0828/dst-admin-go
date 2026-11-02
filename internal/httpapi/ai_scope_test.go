@@ -47,7 +47,8 @@ func TestScopedBearerCannotUseRESTOrLegacyBypass(t *testing.T) {
 	}{
 		{"GET", "/api/v2/rooms/a/players?includeAccessLists=false", 200},
 		{"GET", "/api/v2/rooms/b/players?includeAccessLists=false", 403},
-		{"GET", "/api/v2/rooms/a/players", 403},
+		{"GET", "/api/v2/rooms/a/players", 200},
+		{"GET", "/api/v2/rooms/a/players?includeAccessLists=true", 403},
 		{"POST", "/api/v2/rooms/a/actions/save", 403},
 		{"GET", "/api/v2/jobs/other", 403}, {"GET", "/api/v1/config", 403},
 		{"GET", "/api/v2/system/ai/tokens", 403},
@@ -61,7 +62,7 @@ func TestScopedBearerCannotUseRESTOrLegacyBypass(t *testing.T) {
 			t.Errorf("%s: %d %s", tc.path, w.Code, w.Body.String())
 		}
 	}
-	if reached != 1 {
+	if reached != 2 {
 		t.Fatalf("denied route reached handler: %d", reached)
 	}
 	// Cookie sessions keep their existing admin behavior.

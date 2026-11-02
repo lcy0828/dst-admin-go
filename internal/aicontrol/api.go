@@ -160,11 +160,14 @@ func (s *Service) discoverFor(p Principal, raw json.RawMessage) (json.RawMessage
 		if hint := activityArgumentHint(op.ID); hint != "" {
 			item["argumentHint"] = hint
 		}
+		if op.ID == "listRoomPlayers" {
+			item["argumentHint"] = playerListScopeHint(p)
+		}
 		if in.IncludeSchema || in.IncludeResultSchema {
 			if op.Description != "" {
 				item["description"] = op.Description
 			}
-			input, err := op.AIInputSchema()
+			input, err := apiInputSchemaFor(p, op)
 			if err != nil {
 				return nil, err
 			}
@@ -213,6 +216,11 @@ func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw j
 				return Invocation{}, e
 			}
 		}
+		if op.ID == "listRoomPlayers" {
+			if _, e := strictBotJSONLimit(raw, 64<<10, 8); e != nil {
+				return Invocation{}, e
+			}
+		}
 		resolved, values, resolveErr := s.Store.resolvePrivateInputs(p, raw)
 		if resolveErr != nil {
 			return Invocation{}, resolveErr
@@ -230,8 +238,8 @@ func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw j
 		}
 		privateValues = append(privateValues, op.SensitiveValues(resolved)...)
 		mutation = op.Mutation()
-		if !p.AllowsAPI(op, in) {
-			return Invocation{}, ErrDenied
+		if err := p.CheckAPI(op, in); err != nil {
+			return Invocation{}, err
 		}
 		if p.RoomID != "" && op.ID != "listBotCapabilities" && op.ID != "listRooms" {
 			room, ok := in.Path["roomId"].(string)

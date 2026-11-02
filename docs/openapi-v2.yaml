@@ -5411,14 +5411,15 @@ paths:
     get:
       tags: [Players]
       operationId: listRoomPlayers
-      summary: List persisted player observations and current access state
+      summary: List online and recorded players with optional management-list information
+      description: Ordinary player queries may omit includeAccessLists. Game-read and game-manage callers then receive base player observations without management lists; an explicit true is denied. Panel administrators retain their existing default of including lists. Room authorization always applies.
       parameters:
         - { name: scope, in: query, description: Current save records by default; history reads archived previous or unverified save records without game actions, schema: { type: string, enum: [current, history], default: current } }
         - { name: query, in: query, schema: { type: string, maxLength: 128 } }
         - { name: status, in: query, schema: { type: string, enum: [online, offline] } }
         - { name: worldId, in: query, schema: { type: string } }
         - { name: prefab, in: query, schema: { type: string, maxLength: 128 } }
-        - { name: includeAccessLists, in: query, description: Include ban and access-list state; dashboards may disable this to avoid Runtime configuration reads, schema: { type: boolean, default: true } }
+        - { name: includeAccessLists, in: query, description: "Optional management-list read. Omission defaults to false for game-read/game-manage and true for panel administrators. Explicit true requires panel-management permission. False skips Runtime access-list and controller ban-detail reads. No identity-independent default applies.", schema: { type: boolean } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
         - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
       responses:
@@ -12955,6 +12956,10 @@ components:
           items: { type: string }
         warnings: { type: array, items: { type: string } }
         accessListsAvailable: { type: boolean }
+        accessListsState:
+          type: string
+          enum: [not_permitted, not_requested, available, unavailable]
+          description: "Management-list coverage: not_permitted means the caller's default excludes lists; not_requested means explicit false; available means retrieved; unavailable means requested and permitted but the source could not be read. When not read, banned=false and banned count 0 are compatibility placeholders, not verified absence of bans. Older servers may omit this field."
         lastRefreshedAt: { type: string, format: date-time }
     PlayerListEnvelope:
       type: object

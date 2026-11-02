@@ -74,6 +74,41 @@ REST writes require `Idempotency-Key`. Cookie-authenticated writes also require 
 
 External clients upload with `POST /api/v2/system/ai/attachments`, multipart field `file`, using the same Bearer credential. Pass the returned `id` as `body.file.attachmentId` in a management upload tool. Downloads use that same identity.
 
+### Player queries and management lists
+
+Use `api_listRoomPlayers`, or `call_api` with operation ID `listRoomPlayers`, to
+query online and recorded players. Get the actual room ID from the room list:
+
+```json
+{
+  "path": { "roomId": "<ROOM_ID>" },
+  "query": { "status": "online", "limit": 25 }
+}
+```
+
+The optional `query.includeAccessLists` defaults to `false` for `game-read` and
+`game-manage` credentials. Explicit `true` is denied for those profiles.
+Panel-management credentials, legacy management keys and signed-in administrators
+retain their previous default of including management lists. Explicit `false`
+skips Runtime access-list and controller ban-detail reads for every identity.
+Room authorization and player observation freshness rules still apply.
+
+The optional result field `accessListsState` distinguishes `not_permitted`
+(the caller's default excludes management lists), `not_requested` (explicit
+`false`), `available`, and `unavailable` (requested and authorized, but the source
+could not be read). Omitted management lists do not mean the player query failed.
+When lists were not read, `banned=false` and a ban count of `0` are compatibility
+placeholders, not evidence that no bans exist.
+
+Both `tools/list` and `find_api(includeSchema=true)` describe the caller's effective
+parameter defaults. Clients caching the old `true` default must refresh their
+tool catalog or explicitly send `false`. Plugins supporting older panels should
+keep sending `false`; no plugin upgrade or game-world restart is required.
+To verify an integration, query with the same game credential while omitting the
+parameter, setting it to `false`, and setting it to `true`: the first two should
+return base player data and the third should be denied. Unauthorized rooms remain
+inaccessible in every case.
+
 Client operation mappings are generated from OpenAPI: run `go run ./cmd/openapi-manifest`, and generate the frontend copy with `-out <frontend>/src/api/openapiOperations.json`. CI checks route parity, operation identifiers, request and response schema references, and generated-file freshness.
 
 ## Conversation and resource settings

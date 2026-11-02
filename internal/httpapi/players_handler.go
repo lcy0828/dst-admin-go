@@ -69,14 +69,9 @@ func (h *PlayerHandler) Register(v2 *gin.RouterGroup) {
 func (h *PlayerHandler) list(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "25"))
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
-	includeAccessLists := true
-	if raw, exists := c.GetQuery("includeAccessLists"); exists {
-		parsed, err := strconv.ParseBool(raw)
-		if err != nil {
-			playerFailure(c, players.ErrInvalidFilter)
-			return
-		}
-		includeAccessLists = parsed
+	access, ok := playerListAccess(c)
+	if !ok {
+		return
 	}
 	var syncErr error
 	if syncer, ok := h.players.(passivePlayerSynchronizer); ok && c.Query("scope") != "history" {
@@ -84,7 +79,7 @@ func (h *PlayerHandler) list(c *gin.Context) {
 	}
 	value, err := h.players.List(c.Param("roomId"), players.ListFilter{
 		Scope: c.Query("scope"), Query: c.Query("query"), Status: c.Query("status"), WorldID: c.Query("worldId"),
-		Prefab: c.Query("prefab"), Limit: limit, Offset: offset, SkipAccessLists: !includeAccessLists,
+		Prefab: c.Query("prefab"), Limit: limit, Offset: offset, SkipAccessLists: !access.Include,
 	})
 	if err != nil {
 		playerFailure(c, err)
@@ -96,6 +91,7 @@ func (h *PlayerHandler) list(c *gin.Context) {
 			unconfirmOfflinePlayer(&value.Items[index])
 		}
 	}
+	value.AccessListsState = access.State(value.AccessListsAvailable)
 	Success(c, http.StatusOK, value)
 }
 
