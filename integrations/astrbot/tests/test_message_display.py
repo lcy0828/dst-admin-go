@@ -125,7 +125,10 @@ class MessageDisplayTests(unittest.IsolatedAsyncioTestCase):
         gateway = Duplicates()
         a = actor(rooms=("r1", "r2"))
         result = await Engine(gateway, State()).handle(a, "测试服信息", woken=True)
-        self.assertIn("没有唯一匹配", result.text)
+        self.assertEqual(result.outcome, "needs_selection")
+        self.assertIn("对应多个房间", result.text)
+        self.assertIn("甲营地", result.text)
+        self.assertIn("乙营地", result.text)
         self.assertEqual(gateway.calls, [])
         result = await Engine(StatusGateway(), State()).handle(
             actor(rooms=("r2",)), "测试服信息", woken=True

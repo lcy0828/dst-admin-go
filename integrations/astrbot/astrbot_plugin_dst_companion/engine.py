@@ -13,7 +13,7 @@ from .display import text as display_text
 from .gateway import QueryError
 from .presentation import business, options, render
 from .queries import Queries
-from .routing import Intent, parse
+from .routing import READ_KINDS, Intent, form_reply, is_cancel_reply, parse
 from .state import Target
 
 
@@ -24,6 +24,7 @@ class Reply:
     target: Target | None = None
     choice: bool = False
     sequence: int = 0
+    data: dict | None = None
 
 
 ERRORS = {
@@ -38,6 +39,9 @@ ERRORS = {
     "PARAMETER_INVALID": "参数类型或范围不正确，请按提示重新输入，或取消。",
     "DIRECTORY_CHANGED": "能力目录已改变，请重新打开菜单。",
     "CONFIG_CHANGED": "会话配置已改变，请重新选择。",
+    "MCP_RESPONSE_INVALID": "面板返回的数据格式无法识别，本次读取失败，请检查连接或版本。",
+    "WORLD_NOT_RUNNING": "该世界未运行，无法读取当前游戏数据。",
+    "PANEL_DISCONNECTED": "面板连接已断开，本次没有取得查询结果。",
 }
 
 
@@ -112,7 +116,8 @@ class Engine:
         # Duplicate deliveries must not consume another person's/current choice.
         if self.state.duplicate(actor.scope, message_id):
             return Reply("matched")
-        intent = self.parse(actor, text)
+        pending = self.state.choice_matches(actor.key, quote) or self.state.pending_form(actor.key)
+        intent = Intent("cancel") if pending and is_cancel_reply(text) else self.parse(actor, text)
         if text in {"下一页", "上一页"} and self.state.handles(actor.key, text, quote, woken):
             pending = self.state.page(actor.key, 1 if text == "下一页" else -1)
             return Reply(
@@ -132,6 +137,10 @@ class Engine:
 
             if needs_reference(intent):
                 context = reference
+        if intent and intent.kind == "network" and not intent.player and (quote or reference):
+            # An explicit reply asks about that player. An unverified reply
+            # needs a name; it must not silently become a room-wide query.
+            intent = replace(intent, player=context.player if context and context.player else "他")
         form = self.state.pending_form(actor.key)
         frozen = None
         if selection:
@@ -156,19 +165,23 @@ class Engine:
             if form.get("configRevision") != actor.config_revision:
                 self.state.clear_form(actor.key)
                 return Reply("handled_error", ERRORS["CONFIG_CHANGED"])
+            answer = form_reply(text)
+            if answer is None:
+                self.state.begin(actor.key)
+                return Reply("pass")
             if form["type"] == "confirmation":
                 if text.strip() != "确认":
                     return Reply("needs_selection", "请直接回复 确认 执行这项操作，或回复 取消。")
                 form["userConfirmed"] = True
                 intent, target, frozen = form["intent"], form["target"], form
             elif form["type"] == "player":
-                intent, target = replace(form["intent"], player=text.strip()), form["target"]
+                intent, target = replace(form["intent"], player=answer), form["target"]
             else:
                 try:
                     value = (
                         form["schema"]["default"]
                         if text == "默认" and "default" in form["schema"]
-                        else parse_parameter(text, form["schema"])
+                        else parse_parameter(answer, form["schema"])
                     )
                 except QueryError:
                     return Reply("handled_error", ERRORS["PARAMETER_INVALID"])
@@ -260,6 +273,7 @@ class Engine:
                 ERRORS.get(
                     code, "请求未完成（" + fmt.safe(code) + "）。本次没有转交模型或重复执行。"
                 ),
+                data=getattr(error, "receipt", None),
             )
         except Exception:
             self.state.suspend(actor.key, seq)
@@ -346,11 +360,11 @@ class Engine:
             rows = ordered
         result = self.choose(actor, intent, rows, "", seq, "可用查询与管理", "menu")
         guidance = (
-            "其他问题可直接 @机器人询问，也可使用 AI: 问题。"
+            "其他问题直接 @机器人提问，会自动理解并选择可用功能。"
             if not config or config["mode"] == "mixed"
-            else "复杂问题使用 AI: 问题。"
+            else "当前只开启了快捷查询；需要自由提问时，请管理员开启混合模式。"
         )
-        result.text += note + "\n也可直接说：有哪些服、1服谁在线、查背包 昵称。" + guidance
+        result.text += note + "\n也可直接说：有哪些服、谁在线、查背包 昵称。" + guidance
         return result
 
     async def _perform(self, actor, intent, target, seq, deadline, frozen=None):
@@ -411,6 +425,19 @@ class Engine:
             if not matches:
                 matches = [r for r in rooms if short_room_label(r.get("name")) == intent.room_name]
             if len(matches) != 1:
+                if rooms and intent.kind in READ_KINDS:
+                    # A selection explicitly resolves the request, without
+                    # inventing ordinal aliases or querying a remembered room.
+                    explanation = "对应多个房间" if matches else "未匹配"
+                    return self.choose(
+                        actor,
+                        replace(intent, room="", room_name=""),
+                        matches or rooms,
+                        "",
+                        seq,
+                        "房间名称“" + fmt.safe(intent.room_name) + "”" + explanation
+                        + "，请选择要查询的房间",
+                    )
                 return Reply("handled_error", "没有唯一匹配的房间，请使用房间列表选择。")
             target = Target(matches[0]["id"])
         if target.room and not any(r["id"] == target.room for r in rooms):
@@ -426,15 +453,24 @@ class Engine:
         title, room_label = room_heading(room, rooms, intent.kind)
         if intent.kind == "capability":
             return await self._dynamic(actor, intent, target, seq, deadline, title, frozen)
+        if intent.kind == "network" and not intent.player:
+            # General connection questions describe the room's online players,
+            # even after an earlier profile/inventory query selected someone.
+            target = Target(target.room)
         player = None
         if intent.kind in {"inventory", "profile", "network", "kick"}:
+            missing_binding = False
             query = intent.player
             config = self.config(actor)
             bindings = config["bindings"] if config else self.bindings
             if query in {"我", "自己"}:
                 query = bindings.get(actor.user, "")
                 if not query:
-                    return Reply("needs_selection", "尚无已验证的 QQ→玩家绑定，请使用游戏昵称。")
+                    # Unknown self identity must ask again, even if a previous
+                    # query remembered another player. Reuse the normal form.
+                    target = Target(target.room)
+                    intent = replace(intent, player="他")
+                    missing_binding = True
             elif query in {"他", "他的"}:
                 query = ""
             if query or target.player:
@@ -457,7 +493,7 @@ class Engine:
                     raise QueryError("MCP_RESPONSE_INVALID")
                 player = items[0]
                 target = Target(target.room, player["id"], player.get("name", ""))
-            elif intent.kind != "network" or intent.player == "他":
+            elif intent.kind != "network" or intent.player in {"他", "他的"}:
                 self.state.form(
                     actor.key,
                     {
@@ -466,10 +502,14 @@ class Engine:
                         "target": target,
                         "configRevision": actor.config_revision,
                     },
+                    sequence=seq,
                 )
                 return Reply(
                     "needs_selection",
-                    "👤 要查看哪位玩家？\n请 @机器人提供玩家昵称或 KU ID；也可引用玩家进退服通知后查询。取消退出。",
+                    ("尚无已验证的 QQ→玩家绑定，请使用游戏昵称。\n" if missing_binding else "")
+                    + "👤 要查看哪位玩家？\n2 分钟内可直接回复玩家昵称或 KU ID；也可引用玩家进退服通知后查询。取消退出。"
+                    if intent.kind in {"profile", "inventory", "network"}
+                    else "请 @机器人提供玩家昵称或 KU ID；取消退出。",
                 )
         if intent.kind == "job" and self.actions:
             text = await self.actions.latest(actor, target.room, deadline)
@@ -511,6 +551,7 @@ class Engine:
         return Reply("matched", result, target)
 
     async def _dynamic(self, actor, intent, target, seq, deadline, title, frozen):
+        evidence = None
         if not self.directory:
             raise QueryError("CAPABILITY_MISSING")
         items = await self.directory.items(actor, deadline)
@@ -587,7 +628,7 @@ class Engine:
             if "default" in prop and item["access"] == "read":
                 parameters[key] = prop["default"]
                 continue
-            self.state.form(actor.key, form)
+            self.state.form(actor.key, form, sequence=seq)
             if item.get("parameterHints", {}).get(key) == "player":
                 return Reply(
                     "needs_selection",
@@ -608,7 +649,7 @@ class Engine:
                 + hint
                 + "。取消退出。",
             )
-        if critical:
+        if critical or intent.confirm_required:
             if not frozen or frozen.get("userConfirmed") is not True:
                 self.state.form(
                     actor.key,
@@ -620,6 +661,7 @@ class Engine:
                         "parameters": parameters,
                         "configRevision": actor.config_revision,
                     },
+                    sequence=seq,
                 )
                 return Reply(
                     "needs_selection",
@@ -631,7 +673,8 @@ class Engine:
                     + json_values([str(k) + "=" + str(v) for k, v in parameters.items()])
                     + "\n请直接回复 确认，或回复 取消。尚未执行。",
                 )
-            parameters["confirmed"] = True
+            if critical:
+                parameters["confirmed"] = True
         if item["access"] == "write":
             if not self.actions:
                 raise QueryError("CAPABILITY_MISSING")
@@ -639,6 +682,7 @@ class Engine:
             result = self.decorate(actor, "action", title, text, room=title, player=target.name)
         else:
             data = await self.directory.execute(actor, item, target.room, parameters, deadline)
+            evidence = data
             body, footer = business(data)
             config = self.config(actor)
             template = (
@@ -659,7 +703,7 @@ class Engine:
                 + footer
             )
         self.state.remember(actor.key, seq, target, result)
-        return Reply("matched", result, target)
+        return Reply("matched", result, target, data=evidence)
 
 
 def json_values(values):

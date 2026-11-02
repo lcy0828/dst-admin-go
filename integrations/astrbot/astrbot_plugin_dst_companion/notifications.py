@@ -8,6 +8,7 @@ import time
 import httpx
 
 from .broadcast import READ_TOOLS, BroadcastEngine
+from .chat_stream import CHAT_STREAM_TOOL, NOTICE_READ_TOOLS, chat_stream_session, supports_chat_stream
 from .gateway import QueryError, unpack
 from .sessions import group_origin
 from .streams import MCPReadError, closed_transport, resource_request, sse_frames, stateless_read
@@ -36,6 +37,7 @@ class Notifications:
         self.presence_tasks = {}
         self.wakeup = asyncio.Event()
         self.closed_sessions = set()
+        self.chat_resources = {}
 
     def warn(self, text):
         if time.monotonic() - self.warned.get(text, -1000) > 60:
@@ -87,16 +89,17 @@ class Notifications:
             candidate[session] = {"source": source, "state": state}
             if len(json.dumps(candidate, ensure_ascii=False).encode()) > 8 << 20:
                 raise QueryError("NOTICE_STATE_LIMIT")
-            await self.plugin.put_kv_data("broadcast_state_v2", candidate)
+            if await self.plugin.put_kv_data("broadcast_state_v2", candidate) is False:
+                raise QueryError("NOTICE_STATE_SAVE_FAILED")
             self.saved = candidate
 
     async def read(self, name, args):
-        if name not in READ_TOOLS:
+        if name not in NOTICE_READ_TOOLS:
             raise QueryError("PERMISSION_DENIED")
         key = (self.source, name, json.dumps(args, sort_keys=True))
         previous = self.cache.get(key)
         if (
-            name != "api_streamWorldRuntimeEvents"
+            name not in {"api_streamWorldRuntimeEvents", CHAT_STREAM_TOOL}
             and previous
             and time.monotonic() - previous[0] < 2
         ):
@@ -117,7 +120,7 @@ class Notifications:
             result = await asyncio.shield(task)
             if len(self.cache) >= 128:
                 self.cache.pop(next(iter(self.cache)))
-            if name != "api_streamWorldRuntimeEvents":
+            if name not in {"api_streamWorldRuntimeEvents", CHAT_STREAM_TOOL}:
                 self.cache[key] = (time.monotonic(), result)
             return copy.deepcopy(result)
         finally:
@@ -125,7 +128,7 @@ class Notifications:
                 self.read_tasks.pop(key, None)
 
     async def _read(self, name, args):
-        if name not in READ_TOOLS:
+        if name not in NOTICE_READ_TOOLS:
             raise QueryError("PERMISSION_DENIED")
         source = self.source
         p = self.plugin
@@ -149,7 +152,7 @@ class Notifications:
             identity = (server, id(runtime.client.session))
             if identity in self.closed_sessions:
                 result = await stateless_read(
-                    self.http, p.connections.configuration(server), name, args, READ_TOOLS
+                    self.http, p.connections.configuration(server), name, args, NOTICE_READ_TOOLS
                 )
             else:
                 try:
@@ -163,7 +166,7 @@ class Notifications:
                         self.closed_sessions.clear()
                     self.closed_sessions.add(identity)
                     result = await stateless_read(
-                        self.http, p.connections.configuration(server), name, args, READ_TOOLS
+                        self.http, p.connections.configuration(server), name, args, NOTICE_READ_TOOLS
                     )
             if source != self.source or source != p.connection_identity():
                 raise QueryError("ROOM_DENIED")
@@ -179,7 +182,6 @@ class Notifications:
         p = self.plugin
         self.session_errors = {}
         subscriptions = self.subscriptions()
-        identity = p.connection_identity() if subscriptions else ""
         if not subscriptions:
             await self.stop_feeds()
             self.engines.clear()
@@ -193,7 +195,9 @@ class Notifications:
             self.session_errors = dict.fromkeys(subscriptions, self.status)
             return
         try:
-            await p.catalog.refresh()
+            # The reconcile loop runs every 30s. Renew before expiry so a stream
+            # heartbeat cannot race the next tick and spuriously lose authority.
+            await p.catalog.refresh(min_valid_for=35)
             server = p.connections.broadcast(READ_TOOLS)
             if not server:
                 raise QueryError("NOTICE_CAPABILITY_MISSING")
@@ -202,6 +206,7 @@ class Notifications:
             self.engines.clear()
             self.status = "等待同源 MCP 播报权限或房间目录恢复"
             return
+        identity = p.connection_identity()
         if identity != self.source:
             await self.stop_feeds()
             self.engines.clear()
@@ -342,7 +347,7 @@ class Notifications:
             await asyncio.gather(chat_task, *children.values(), return_exceptions=True)
 
     async def chat_feed(self, room):
-        """One bounded fast poll per subscribed room; status/seed reads stay slow."""
+        """Prefer one durable room stream; retain bounded polling for older panels."""
         advanced = self.plugin.config.get("advanced", {})
         interval = max(2, min(30, int(advanced.get("chatPollInterval", 3))))
         failures = 0
@@ -350,6 +355,22 @@ class Notifications:
             engines = [e for e in self.receivers(room) if e.options.get("chat", False)]
             if not engines:
                 return
+            if supports_chat_stream(self):
+                try:
+                    await chat_stream_session(self, room, engines)
+                    failures = 0
+                    await asyncio.sleep(0.5)
+                    continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    failures = min(4, failures + 1)
+                    self.warn(f"聊天推送暂不可用（{type(error).__name__}），保留续读位置重连")
+                    if failures < 3:
+                        await asyncio.sleep(min(30, 2**failures))
+                        continue
+                    # Recover recent public messages during a sustained transport
+                    # outage. Keep the stream cursor and dedup IDs for reconnection.
             started = time.monotonic()
             failed = False
             for engine in engines:
@@ -471,6 +492,7 @@ class Notifications:
         self.tasks.clear()
         self.read_tasks.clear()
         self.presence_tasks.clear()
+        self.chat_resources.clear()
         if self.http is not None:
             await self.http.aclose()
             self.http = None

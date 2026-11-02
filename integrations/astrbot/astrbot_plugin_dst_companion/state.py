@@ -19,8 +19,9 @@ class State:
         self.clock, self.capacity = clock, capacity
         self.users, self.messages, self.choices, self.seen = (OrderedDict() for _ in range(4))
         self.forms = OrderedDict()
+        self.requests = OrderedDict()
         self.tables = {
-            id(t): t for t in (self.users, self.messages, self.choices, self.seen, self.forms)
+            id(t): t for t in (self.users, self.messages, self.choices, self.seen, self.forms, self.requests)
         }
         self.allocations = OrderedDict()
         self.bytes = 0
@@ -189,8 +190,24 @@ class State:
         self.forms.pop(key, None)
         self.bytes -= self.allocations.pop((id(self.forms), key), 0)
 
-    def form(self, key, value):
+    def claim_request(self, key, message_id):
+        if message_id and self.requests.get(key) != str(message_id):
+            current = self.users.get(key)
+            if current:
+                # Invalidate outstanding async results while retaining the
+                # prompt/choice that this new message may be answering.
+                self.next_sequence += 1
+                self._put(self.users, key, {**current, "sequence": self.next_sequence})
+            self._put(self.requests, key, str(message_id))
+
+    def current_request(self, key, message_id):
+        return not message_id or self.requests.get(key, str(message_id)) == str(message_id)
+
+    def form(self, key, value, sequence=None):
+        if sequence is not None and self.users.get(key, {}).get("sequence") != sequence:
+            return False
         self._put(self.forms, key, {**value, "until": self.clock() + 120})
+        return True
 
     def pending_form(self, key):
         value = self.forms.get(key)
@@ -200,11 +217,34 @@ class State:
         return None
 
     def handles(self, key, text, quote, woken):
+        from .routing import is_cancel_reply
+
         if self.choice_matches(key, quote) and (
-            self.number(text) or text in {"下一页", "上一页", "取消", "返回", "取消选择"}
+            self.number(text) or text in {"下一页", "上一页"} or is_cancel_reply(text)
         ):
             return True
-        return bool(woken and self.pending_form(key))
+        form = self.pending_form(key)
+        if not form:
+            return False
+        if woken:
+            from .routing import form_reply
+
+            return is_cancel_reply(text) or form_reply(text) is not None
+        if quote:
+            return False
+        if is_cancel_reply(text):
+            return True
+        # An own, short-lived read prompt may accept a plain nickname. Writes,
+        # confirmations, other users and unrelated conversation still need @.
+        from .routing import COMPOUND, DISCUSSION, explicit_ai, parse
+
+        return bool(
+            form.get("type") == "player"
+            and form["intent"].kind in {"profile", "inventory", "network"}
+            and 0 < len(text) <= 128
+            and not (DISCUSSION.search(text) or COMPOUND.search(text) or explicit_ai(text))
+            and parse(text, {}) is None
+        )
 
     @staticmethod
     def number(text):

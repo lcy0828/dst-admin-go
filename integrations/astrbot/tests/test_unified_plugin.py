@@ -66,6 +66,35 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         read.assert_awaited_once_with("api_listRooms", {})
         self.assertEqual(results[0], [{"id": "r", "name": "营地"}])
 
+    async def test_early_catalog_renewal_keeps_original_deadline_and_invalidates_failure(self):
+        now = [0]
+        read = AsyncMock(return_value={"items": [{"id": "r", "name": "营地"}]})
+        catalog = RoomCatalog(read, lambda: "source", clock=lambda: now[0])
+        await catalog.refresh()
+        now[0] = 30
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def renew(*args):
+            entered.set()
+            await release.wait()
+            return {"items": [{"id": "r", "name": "营地"}]}
+
+        read.side_effect = renew
+        task = asyncio.create_task(catalog.refresh(min_valid_for=35))
+        await entered.wait()
+        self.assertTrue(catalog.valid())
+        self.assertEqual(catalog.until, 60)
+        now[0] = 61
+        self.assertFalse(catalog.valid())
+        release.set()
+        await task
+        self.assertEqual(catalog.until, 121)
+        now[0] = 90
+        read.side_effect = TimeoutError()
+        with self.assertRaises(TimeoutError):
+            await catalog.refresh(min_valid_for=35)
+        self.assertFalse(catalog.valid())
+
     async def test_incomplete_duplicate_or_unbounded_catalog_is_rejected(self):
         for value in (
             {"items": [], "hasMore": True},

@@ -15,6 +15,7 @@ class Intent:
     capability: str = ""
     parameters: object = None
     all_rooms: bool = False
+    confirm_required: bool = False
 
 
 # Grammar ambiguity guard, NOT authorization or a Lua safety classifier.
@@ -23,13 +24,13 @@ DISCUSSION = re.compile(
 )
 COMPOUND = re.compile(
     r"然后|并且|以及|再帮|能否|是不是|功能|怎么|是否|和.*(?:背包|网络)|[，,]"
-    r"|(?:再|之后|同时)(?:查询|查看|查|重启|停止|启动|备份|给|生成|刷)"
+    r"|(?:再|之后|同时)(?:查询|查看|查|重启|停止|启动|备份|给|生成|刷)|比较|对比|分别|和.+谁"
 )
-QUANTITY = r"(?:[0-9]{1,4}|[一二两三四五六七八九]?十[一二三四五六七八九]?|[一二两三四五六七八九])"
+QUANTITY = r"(?:-?[0-9]{1,4}|[一二两三四五六七八九]?十[一二三四五六七八九]?|[一二两三四五六七八九])"
 
 
 def quantity(value):
-    if value.isascii() and value.isdecimal():
+    if re.fullmatch(r"-?[0-9]+", value):
         return int(value)
     digits = dict(zip("一二三四五六七八九", range(1, 10), strict=True))
     digits["两"] = 2
@@ -60,6 +61,30 @@ READ_PREFIX = re.compile(
 )
 
 
+def is_cancel_reply(text):
+    """Whole replies to an active prompt, not matches inside other requests."""
+    value = text.strip().rstrip("。！!～~")
+    return value in {
+        "取消", "返回", "取消选择", "算了", "不查了", "先不查了", "不用了", "先不用了",
+        "不选了", "不需要了", "算了不查了", "算了，不查了", "算了,不查了",
+    }
+
+
+def form_reply(text):
+    """A new conversational request must not be consumed as a nickname/value."""
+    value = re.sub(r"^(?:我说的是|我指的是|名字是|昵称是)\s*", "", text.strip())
+    if DISCUSSION.search(value) or COMPOUND.search(value) or re.search(r"先不|暂不|[？?]", value):
+        return None
+    return value
+
+
+def read_request_intent(text, aliases):
+    """Recognize fixed read requests independently of display-card eligibility."""
+    value = re.sub(r"^(?:AI(?:\s+|[：:])|问AI(?:\s+|[：:]))\s*", "", text.strip(), flags=re.I)
+    intent = parse(value, aliases)
+    return intent if intent and intent.kind in READ_KINDS else None
+
+
 def parse(text: str, aliases: dict[str, str]) -> Intent | None:
     if len(text) > 256 or DISCUSSION.search(text) or explicit_ai(text):
         return None
@@ -70,7 +95,17 @@ def parse(text: str, aliases: dict[str, str]) -> Intent | None:
         candidate = _parse(match[1], aliases)
         if candidate and candidate.kind in READ_KINDS:
             return candidate
-    return _parse(value, aliases)
+    intent = _parse(value, aliases)
+    if intent is not None:
+        return intent
+    # Recognise conversational endings only after an exact parse failed. Never
+    # trim a supplied player name or turn a fuzzy sentence into a write action.
+    plain = re.sub(r"[呀啊呢吗嘛哦呗啦]{1,3}$", "", value).rstrip()
+    if plain != value:
+        candidate = parse(plain, aliases)
+        if candidate and candidate.kind in READ_KINDS:
+            return candidate
+    return None
 
 
 def _parse(text: str, aliases: dict[str, str]) -> Intent | None:
@@ -230,18 +265,25 @@ def _parse_command(text, aliases, room, room_name):
         ("network", r"(?:查询|查看|查)\s*(.+?)(?:的)?(?:网络延迟|网络连接质量|网络质量|网络|延迟)"),
         ("profile", r"(?:查玩家|查询玩家|查人)\s*(.+)"),
         ("profile", r"(.+?)(?:现在)?(?:在(?:哪里|哪)(?:个世界)?|的位置|所在世界)"),
-        ("kick", r"踢出\s*(.+)"),
+        ("kick", r"(?:踢出|踢人)\s*(.+)"),
     )
     for kind, expression in patterns:
         match = re.fullmatch(expression, text)
         if match:
             target = match[1].strip().strip('“”"')
-            if not target or COMPOUND.search(target):
+            # CQ-looking text in a name stays literal data, never an At part.
+            grammar = re.sub(r"\[CQ:[^\]\r\n]+\]", "", target) if kind in READ_KINDS else target
+            if not target or COMPOUND.search(grammar):
                 return None
             return Intent(kind, target, room, room_name=room_name)
     # Writes require an exact configured alias, never a remembered fallback
     # after failing to resolve an explicit natural-language room description.
-    for kind, verb in (("restart", "重启"), ("start", "启动"), ("stop", "停止")):
-        if text.startswith(verb) and text[len(verb) :].strip() in aliases:
-            return Intent(kind, room=aliases[text[len(verb) :].strip()])
+    for kind, verb in (("restart", "重启"), ("start", "启动"), ("stop", "停止"), ("save", "保存")):
+        if text.startswith(verb):
+            name = text[len(verb):].strip()
+            if name in aliases or re.fullmatch(r"(?:[一二三四五六七八九十]|[1-9][0-9]?)服", name):
+                values = {"room": aliases.get(name, ""), "room_name": "" if name in aliases else name}
+                if kind == "save":
+                    return Intent("capability", capability="room.save", **values)
+                return Intent(kind, **values)
     return None

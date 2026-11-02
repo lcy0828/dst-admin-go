@@ -49,6 +49,7 @@ class Actor:
     connection_id: str = ""
     disabled_capabilities: tuple = ()
     workbench_mode: str = "off"
+    group_role: str = ""
 
     @property
     def read_projection(self):
@@ -60,6 +61,8 @@ class Actor:
             self.write_allowlist,
             self.workbench_mode,
             self.config_revision,
+            self.group_role,
+            tuple(sorted(self.disabled_capabilities)),
         )
 
     @property
@@ -72,6 +75,8 @@ class Actor:
             self.write_allowlist,
             self.workbench_mode,
             self.config_revision,
+            self.group_role,
+            tuple(sorted(self.disabled_capabilities)),
         )
 
 

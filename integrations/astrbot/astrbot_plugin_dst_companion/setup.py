@@ -16,8 +16,22 @@ class Setup:
     async def handle(self, event):
         p = self.plugin
         parts = p.input_unscoped(event)
+        from .group_setup import permission_request
+
+        if not parts and p.config.get("enabled", False) and p.allowed(str(event.unified_msg_origin)):
+            try:
+                addressed = p.input(event)
+            except (QueryError, ValueError, TypeError, KeyError):
+                addressed = None
+            if addressed and addressed[1] and not addressed[3]:
+                request = permission_request(addressed[0])
+                if request:
+                    parts = "权限 " + request
         if not parts:
             return False
+        request = permission_request(parts)
+        if request:
+            parts = "权限 " + request
         tokens = parts.split(maxsplit=1)
         command = tokens[0]
         argument = tokens[1].strip() if len(tokens) > 1 else ""
@@ -32,6 +46,9 @@ class Setup:
             "订阅房间",
             "播报",
             "聊天播报",
+            "权限",
+            "权限模式",
+            "检查插件更新", "安装插件更新", "取消插件下载", "插件更新状态", "恢复上一版插件",
         }:
             return False
         event.stop_event()  # Claim before any asynchronous read or persistence.
@@ -43,6 +60,9 @@ class Setup:
             except Exception:
                 p.logger.warning("设置回复投递未确认，未重发；可用 /dst 设置 核对保存结果。")
 
+        if command in {"检查插件更新", "安装插件更新", "取消插件下载", "插件更新状态", "恢复上一版插件"}:
+            await p.updates.handle(event, command, reply)
+            return True
         if command == "帮助":
             await reply(
                 "DST 助手设置（由插件直接处理，不调用模型）\n"
@@ -50,10 +70,39 @@ class Setup:
                 "/dst 启用本群 聊天播报 开（也支持“启动本群”）\n"
                 "/dst 设置 · /dst 模板 · /dst 聊天播报 开/关 · /dst 禁用本群\n"
                 "启用后可 @机器人 发送 菜单、有哪些服、1服信息、查背包 昵称。\n"
+                "其他问题直接 @机器人说即可，助手会自动理解并选择可用功能。\n"
                 "只有插件确认保存后才算启用；模型回复不能作为设置生效依据。"
             )
             return True
-        if not event.is_admin():
+        from .group_permissions import enabled as group_permissions_enabled
+        from .group_setup import handle as group_setup
+
+        if command in {"权限", "权限模式"}:
+            try:
+                return await group_setup(p, event, command, argument, reply)
+            except (QueryError, ValueError, OSError, TimeoutError):
+                await reply("权限设置未完成，请检查群身份、全局权限和配置保存状态。")
+                return True
+        group_mode = group_permissions_enabled(p.config)
+        if group_mode and not event.is_admin():
+            await p.ensure_enrollment()
+            session = group_origin(event.unified_msg_origin)
+            old = p.enrollment.records.get(session, {})
+            try:
+                role = await p.group_roles.refresh(event, force=True)
+            except QueryError:
+                await reply("暂时无法确认 QQ 群身份，请稍后重试。")
+                return True
+            if (old.get("source") != p.connections.source() or not old.get("rooms")
+                    or not p.session_native_allowed(session)):
+                await reply("请机器人维护者先为本群分配房间并启用；之后群主可自行管理本群。")
+                return True
+            if (role != "owner" and command != "设置"
+                    or command == "使用连接"
+                    or command == "模板" and argument.split()[:1] == ["全局"]):
+                await reply("此设置由群主或机器人维护者管理；面板连接和全局模板仅维护者可修改。")
+                return True
+        elif not event.is_admin():
             await reply("此设置仅允许 AstrBot 管理员操作。")
             return True
         if command == "模板":
@@ -140,10 +189,15 @@ class Setup:
                 return True
             ceiling = p.settings.effective(session)["rooms"]
             rooms = [r for r in p.catalog.rows if not ceiling or r["id"] in ceiling]
+            assigned = old.get("assignedRooms", old.get("rooms", []))
+            if group_mode and not event.is_admin() and assigned != "all":
+                rooms = [r for r in rooms if r["id"] in assigned]
             if not rooms:
                 await reply("面板未返回可开放房间，请检查密钥的房间权限。")
                 return True
             record = copy.deepcopy(old) if old.get("source") == source else {}
+            if group_mode and record and "assignedRooms" not in record:
+                record["assignedRooms"] = record.get("rooms", [])
             if command == "启用本群":
                 record = {
                     **record,
@@ -156,9 +210,12 @@ class Setup:
                     ),
                 }
                 record["notices"].update(enable_flags)
+                if group_mode and event.is_admin():
+                    record["assignedRooms"] = list(ceiling) or "all"
             elif command == "订阅房间":
                 if argument == "全部":
-                    record["rooms"] = list(ceiling) or "all"
+                    record["rooms"] = ([r["id"] for r in rooms] if group_mode and not event.is_admin()
+                                       else list(ceiling) or "all")
                 else:
                     matches = [r for r in rooms if r["name"] == argument]
                     if len(matches) != 1:
@@ -191,7 +248,8 @@ class Setup:
             management = (
                 "\n你的游戏管理：已授权 · 固定写能力 " + str(len(caller.write_allowlist)) + " 项"
                 if caller and caller.role in {"game-manage", "panel-manage"}
-                else "\n你的游戏管理：未授权（需管理连接、管理员映射与固定操作授权同时就绪）"
+                else ("\n你的游戏管理：按本群身份与操作权限开放，可用 /dst 权限 查看。" if group_mode
+                      else "\n你的游戏管理：未授权（需管理连接、管理员映射与固定操作授权同时就绪）")
             )
             names = [r["name"] for r in rooms if r["id"] in effective["rooms"]]
             notice = (

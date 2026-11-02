@@ -4,6 +4,35 @@
     "type": "bool",
     "default": true
   },
+  "panel_url": {
+    "description": "面板地址（推荐，填写后无需另外添加 MCP 连接）",
+    "type": "string",
+    "default": "",
+    "hint": "例如 https://panel.example；插件内部连接，不向模型暴露原始管理工具。"
+  },
+  "panel_token": {
+    "description": "面板完整管理密钥（仅插件后台使用）",
+    "type": "string",
+    "default": "",
+    "hint": "填写面板签发的完整管理密钥，查询、管理和播报共用。",
+    "obvious_hint": true
+  },
+  "permission_mode": {
+    "description": "群权限方式：group 按 QQ 群身份；legacy 保留旧授权",
+    "type": "string",
+    "default": "legacy",
+    "options": [
+      "group",
+      "legacy"
+    ],
+    "hint": "推荐 group：群主、管理员和成员自动识别；旧安装切换前保留原规则。"
+  },
+  "group_permissions": {
+    "description": "群角色默认权限（可选）：member/admin/owner，各支持 read、write、deny 列表和 workbench=off/standard/all",
+    "type": "dict",
+    "default": {},
+    "hint": "留空：成员查询；管理员可复活、发物品、踢人；群主可管理房间。群主可用 /dst 权限 管理员 重启房间 开 设置本群。"
+  },
   "mcp_server": {
     "description": "面板 MCP 连接名（留空自动识别）",
     "type": "string",
@@ -25,19 +54,22 @@
     "default": false
   },
   "management_mcp_server": {
-    "description": "可选管理连接（留空关闭写操作）",
+    "description": "旧版兼容：可选管理连接（留空关闭写操作）",
     "type": "string",
-    "default": ""
+    "default": "",
+    "invisible": true
   },
   "game_admins": {
-    "description": "可选游戏管理员（还须是 AstrBot 管理员）",
+    "description": "旧版兼容：可选游戏管理员（还须是 AstrBot 管理员）",
     "type": "list",
-    "default": []
+    "default": [],
+    "invisible": true
   },
   "panel_admins": {
-    "description": "可选面板管理员（详细接口限授权私聊）",
+    "description": "旧版兼容：可选面板管理员（详细接口限授权私聊）",
     "type": "list",
-    "default": []
+    "default": [],
+    "invisible": true
   },
   "advanced": {
     "description": "高级自定义（通常留空）：categories、commandAliases、templates、pageSize、writeAllowlist、chatPollInterval（聊天检查秒数，2～30，默认3）等；房间与群由指令自动管理；workbenchMode=standard（默认常用管理）/all（含危险操作，需二次确认）/off（仅writeAllowlist）。工作台仍需原生工具及面板授权。",
@@ -569,5 +601,33 @@
       }
     },
     "invisible": true
+  },
+  "plugin_updates": {
+    "description": "插件更新",
+    "type": "object",
+    "items": {
+      "mode": {
+        "description": "更新方式",
+        "type": "string",
+        "options": [
+          "manual",
+          "notify",
+          "auto"
+        ],
+        "default": "manual",
+        "hint": "manual 手动；notify 每约6小时检查；auto 自动安装兼容正式版。旧设置不会自动开启升级。"
+      },
+      "proxy": {
+        "description": "插件下载代理（可选）",
+        "type": "string",
+        "default": ""
+      },
+      "manifestUrl": {
+        "description": "签名版本清单（可选，默认官方源）",
+        "type": "string",
+        "default": "",
+        "hint": "更换地址仍需通过安装包内的公钥验证，不能更改信任密钥。"
+      }
+    }
   }
 }

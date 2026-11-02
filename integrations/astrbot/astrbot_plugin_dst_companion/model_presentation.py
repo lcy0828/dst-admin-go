@@ -1,14 +1,16 @@
 """Per-event display receipts for explicit single queries, never model-authored data."""
 
 import hashlib
-import re
 from dataclasses import dataclass, field
 
-from .routing import READ_KINDS, parse
+from .routing import READ_KINDS, parse, read_request_intent
 
 STYLE = (
     "\n[DST 回复排版；仅用于饥荒查询与操作，不改变其他话题的人格] "
     "插件工具返回的查询卡片已按群模板排版，保留标题、图标、换行、来源、采样与缺失说明；"
+    "如果工具返回含 result.data 的JSON，必须从其中提取问题所需的事实，不能只复述reply中的执行完成提示。"
+    "记录时间使用同一记录的timeEvidence北京时间；查询范围的起止时间不能代替事件发生时间。"
+    "战斗统计以combatEvidence为准，kills为0表示展示记录没有击杀，不能说有击杀记录；unknownDamageHits不换算为伤害。"
     "单项查询直接给出卡片，不要改写成散文、重复菜单或增加“来啦/我先查询”等开场。"
     "玩家信息需要明确昵称、KU ID或经过验证的引用；在线0人不代表没有历史玩家。"
     "需要分析时，先给简短结论，再用“📋 已核实”“💡 分析与建议”分开事实和推断，"
@@ -17,8 +19,8 @@ STYLE = (
     "只有本次读取过的事实才能写成当前结论；历史上下文不能冒充实时采样。"
     "操作能力与已授权内容以当前目录为准，不能从菜单举例推断已经开放了某项写操作。"
 )
-READ_TOOLS = frozenset({"dst_rooms", "dst_room_query", "dst_player_query"})
-DST_TOOLS = READ_TOOLS | {"dst_game_action", "dst_job", "dst_find_api", "dst_call_api"}
+READ_TOOLS = frozenset({"dst_rooms", "dst_room_query", "dst_player_query", "dst_servers", "dst_player", "dst_world", "dst_read", "dst_find", "dst_result"})
+DST_TOOLS = READ_TOOLS | {"dst_game_action", "dst_job", "dst_find_api", "dst_call_api", "dst_player_action", "dst_server_action", "dst_run"}
 
 
 @dataclass
@@ -38,8 +40,7 @@ class DisplayReceipt:
 def requested_intent(text, aliases):
     # Explicit AI prefix still allows analysis requests through; only a full,
     # known read intent may use the exact card at the final response boundary.
-    text = re.sub(r"^(?:AI(?:\s+|[：:])|问AI(?:\s+|[：:]))\s*", "", text.strip(), flags=re.I)
-    intent = parse(text, aliases)
+    intent = read_request_intent(text, aliases)
     return (
         intent
         if intent

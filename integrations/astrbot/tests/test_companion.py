@@ -105,6 +105,14 @@ class FakeGateway:
 
 
 class GrammarTests(unittest.TestCase):
+    def test_conversational_read_endings_preserve_names_and_do_not_expand_writes(self):
+        for text in ("现在谁在线呀", "现在有谁在线啊？", "玩家信息呢", "有哪些服呀", "1服房间状态呢"):
+            self.assertIsNotNone(parse(text, {"1服": "r1"}), text)
+        self.assertEqual(parse("查玩家 小呀", {}).player, "小呀")
+        self.assertEqual(parse("查背包 小啊", {}).player, "小啊")
+        for text in ("重启1服呀", "复活玩家呀", "不要查谁在线呀", "如果谁在线呢"):
+            self.assertIsNone(parse(text, {"1服": "r1"}), text)
+
     def test_eighty_common_expressions_and_negative_set(self):
         # 8 independent expressions x 10 polite variants. Every positive is a
         # whole intent; negatives preserve default conversation handling.
@@ -157,6 +165,31 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.gateway = FakeGateway()
         self.state = State()
         self.engine = Engine(self.gateway, self.state, {"1服": "r1", "2服": "r2"})
+
+    async def test_read_player_prompt_accepts_own_plain_followup_only(self):
+        person = actor()
+        prompt = await self.engine.handle(person, "玩家信息", woken=True)
+        self.assertIn("直接回复", prompt.text)
+        self.assertFalse(self.state.handles(actor("another").key, "小明", "", False))
+        self.assertFalse(self.state.handles(person.key, "为什么卡顿", "", False))
+        self.assertFalse(self.state.handles(person.key, "小明", "unrelated-quote", False))
+        result = await self.engine.handle(person, "玩家 A 🦌", message_id="followup")
+        self.assertEqual(result.outcome, "matched")
+        self.assertIn("玩家 A", result.text)
+        await self.engine.handle(person, "取消", woken=True)
+        await self.engine.handle(person, "玩家信息", woken=True)
+        self.state.forms[person.key]["until"] = 0
+        self.assertFalse(self.state.handles(person.key, "小明", "", False))
+
+    async def test_stale_form_and_old_model_request_cannot_replace_newer_request(self):
+        person = actor()
+        self.state.claim_request(person.key, "old")
+        older = self.state.begin(person.key)
+        self.state.claim_request(person.key, "new")
+        self.assertFalse(self.state.form(person.key, {"type": "player"}, sequence=older))
+        self.assertFalse(self.state.current_request(person.key, "old"))
+        self.assertTrue(self.state.current_request(person.key, "new"))
+        self.assertIsNone(self.state.pending_form(person.key))
 
     async def test_inventory_query_verb_is_not_part_of_player_name(self):
         for text in (

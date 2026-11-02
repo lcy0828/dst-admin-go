@@ -148,6 +148,16 @@ class ModelCardAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("单项查询直接给出卡片", request.system_prompt)
         self.assertIn("不代表没有历史玩家", request.system_prompt)
 
+    async def test_empty_model_answer_after_dst_tools_is_not_sent_as_silent_success(self):
+        self.bot.prepare = AsyncMock(return_value=True)
+        event = self.event([C.At(qq="456"), C.Plain("帮我分析服务器状态")])
+        await self.bot.on_model_request(event, NS(system_prompt="原人格", func_tool=None))
+        await self.bot.on_model_tool(event, NS(name="dst_servers"), {})
+        response = LLMResponse(role="assistant", completion_text="")
+        await self.bot.on_model_response(event, response)
+        self.assertIn("没能生成完整回复", response.completion_text)
+        self.assertIn("避免重复操作", response.completion_text)
+
     async def test_management_model_text_is_plain_without_rewriting_evidence(self):
         self.bot.prepare = AsyncMock(return_value=True)
         event = self.event([C.At(qq="456"), C.Plain("再次复活")])

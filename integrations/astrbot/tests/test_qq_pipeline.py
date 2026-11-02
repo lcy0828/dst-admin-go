@@ -238,6 +238,74 @@ class QQPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.models, [])
         self.assertEqual(self.other_handlers, [])
 
+    async def test_colloquial_double_at_and_plain_player_continuation_use_no_model(self):
+        output = await self.dispatch(self.event([C.At(qq="456"), C.At(qq="456"), C.Plain("现在谁在线呀")]))
+        self.assertEqual(len(output), 1)
+        self.assertIn("在线", output[0])
+        await self.dispatch(self.event([C.At(qq="456"), C.Plain("取消")]))
+        output = await self.dispatch(self.event([C.At(qq="456"), C.Plain("玩家信息")]))
+        self.assertIn("直接回复", output[0])
+        other = await self.dispatch(self.event([C.Plain("玩家 A 🦌")], user="999"))
+        self.assertEqual(other, [])
+        output = await self.dispatch(self.event([C.Plain("玩家 A 🦌")]))
+        self.assertEqual(len(output), 1)
+        self.assertIn("玩家 A", output[0])
+        self.assertEqual(self.models, [])
+
+    async def ask_model_identity(self):
+        import json
+        prompt = self.event([C.At(qq="456"), C.Plain("看看我的背包，QQ名不是我的游戏名")])
+        await self.bot.prepare(prompt)
+        self.bot.state.claim_request(self.bot.actor(prompt).key, str(prompt.message_obj.message_id))
+        shown = json.loads(await self.bot.tasks.perform(prompt, "dst_player", view="inventory", player="玩家 A"))
+        self.assertEqual(shown["state"], "needs_input")
+        self.assertIn("直接回复", shown["summary"])
+        return prompt
+
+    async def test_model_identity_prompt_accepts_bare_reply_once_and_isolates_users(self):
+        await self.ask_model_identity()
+        self.assertEqual(await self.dispatch(self.event([C.Plain("玩家 A")], user="999")), [])
+        self.assertEqual(await self.dispatch(self.event([C.Plain("玩家 A")], session="other")), [])
+        event = self.event([C.Plain("玩家 A")])
+        output = await self.dispatch(event)
+        self.assertEqual(len(output), 1)
+        self.assertIn("背包", output[0])
+        self.assertTrue(event.is_stopped())
+        self.assertTrue(any(name == "api_getRoomPlayerInventory" for name, _ in self.panel.calls))
+        self.assertEqual(self.models, [])
+        before = len(self.panel.calls)
+        self.assertEqual(await self.dispatch(self.event([C.Plain("玩家 A")])), [])
+        self.assertEqual(len(self.panel.calls), before)
+
+    async def test_model_identity_prompt_cancel_expiry_and_config_change_do_not_query(self):
+        for ending in ("cancel", "expired", "config"):
+            with self.subTest(ending=ending):
+                await self.ask_model_identity()
+                actor = self.bot.actor(self.event([]))
+                if ending == "cancel":
+                    output = await self.dispatch(self.event([C.Plain("取消")]))
+                    self.assertIn("已取消", output[0])
+                elif ending == "expired":
+                    self.bot.state.forms[actor.key]["until"] = 0
+                else:
+                    self.bot.state.forms[actor.key]["configRevision"] = "previous-config"
+                before = len(self.panel.calls)
+                output = await self.dispatch(self.event([C.Plain("玩家 A")]))
+                if ending == "config":
+                    self.assertTrue(output)
+                else:
+                    self.assertEqual(output, [])
+                self.assertEqual(len(self.panel.calls), before)
+        self.assertEqual(self.models, [])
+
+    async def test_new_natural_question_after_model_identity_prompt_reaches_model(self):
+        await self.ask_model_identity()
+        event = self.event([C.At(qq="456"), C.Plain("为什么下雨后服务器会卡，帮我分析一下")])
+        await self.dispatch(event)
+        self.assertFalse(event.is_stopped())
+        self.assertEqual(self.models, [event])
+        self.assertIsNone(self.bot.state.pending_form(self.bot.actor(event).key))
+
     async def test_reported_dst_commands_are_claimed_and_combined_setting_is_saved(self):
         self.automatic_setup()
         self.ctx.astrbot_config["plugin_set"] = [self.companion_module]
@@ -293,17 +361,93 @@ class QQPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.models, [])
         self.assertEqual(self.bot.enrollment.records, {})
 
-    async def test_enrolled_group_unknown_command_and_uncertain_reply_do_not_use_model(self):
+    async def test_enrolled_group_unknown_command_uses_model_without_ai_prefix(self):
         self.automatic_setup()
         await self.dispatch(self.event([C.Plain("/dst 启用本群")]))
-        output = await self.dispatch(self.event([C.Plain("/dst 修改神秘开关")]))
-        self.assertIn("未识别此 DST 指令", output[-1])
+        before = copy.deepcopy(self.bot.enrollment.records)
+        for parts in (
+            [C.Plain("/dst 修改神秘开关")],
+            [C.At(qq="456"), C.Plain("/dst 帮我分析管理员应该开放哪些权限")],
+        ):
+            event = self.event(parts)
+            output = await self.dispatch(event)
+            self.assertEqual(output, [])
+            self.assertFalse(event.is_stopped())
+            self.assertEqual(self.models[-1], event)
+            self.assertEqual(self.models.count(event), 1)
+        self.assertEqual(self.bot.enrollment.records, before)
+
+    async def test_uncertain_setup_reply_never_reaches_model(self):
+        self.automatic_setup()
+        await self.dispatch(self.event([C.Plain("/dst 启用本群")]))
         event = self.event([C.Plain("/dst")])
         event.bot.call_action.side_effect = TimeoutError()
         await self.dispatch(event)
         self.assertTrue(event.is_stopped())
         self.assertEqual(event.bot.call_action.await_count, 1)
         self.assertEqual(self.models, [])
+
+    async def test_unknown_custom_prefix_wakes_model_but_ordinary_chat_does_not(self):
+        self.bot.config["command_prefix"] = "!dst"
+        addressed = self.event([C.Plain("!dst 为什么更新失败了，帮我分析")])
+        await self.dispatch(addressed)
+        self.assertEqual(self.models, [addressed])
+        await self.dispatch(self.event([C.Plain("为什么更新失败了，帮我分析")]))
+        self.assertEqual(self.models, [addressed])
+
+    async def test_expired_catalog_refreshes_before_unknown_command_enters_model(self):
+        self.automatic_setup()
+        await self.dispatch(self.event([C.Plain("/dst 启用本群")]))
+        self.bot.catalog.until = 0
+        event = self.event([C.Plain("/dst 为什么最近比较卡")])
+        self.assertEqual(await self.dispatch(event), [])
+        self.assertEqual(self.models, [event])
+        self.assertTrue(self.bot.catalog.valid())
+
+    async def test_natural_bulk_group_permissions_are_direct_and_scope_checked(self):
+        self.automatic_setup()
+        await self.dispatch(self.event([C.Plain("/dst 启用本群")]))
+        self.bot.config["permission_mode"] = "group"
+        record = self.bot.enrollment.records["adapter:GroupMessage:789"]
+        self.bot.enrollment.records["adapter:GroupMessage:999"] = copy.deepcopy(record)
+        original_other = copy.deepcopy(self.bot.enrollment.records["adapter:GroupMessage:999"])
+        for parts in (
+            [C.Plain("/dst 给管理员添加所有权限")],
+            [C.At(qq="456"), C.Plain("请把管理员的全部权限打开")],
+        ):
+            output = await self.dispatch(self.event(parts))
+            self.assertIn("已向本群管理员开放", output[-1])
+            self.assertIn("重启房间", output[-1])
+        current = self.bot.enrollment.records["adapter:GroupMessage:789"]
+        self.assertEqual(current["rolePermissions"]["admin"]["workbench"], "standard")
+        self.assertIn("room.restart", current["rolePermissions"]["admin"]["write"])
+        self.assertEqual(self.bot.enrollment.records["adapter:GroupMessage:999"], original_other)
+        denied = self.event([C.At(qq="456"), C.Plain("给管理员添加所有权限")], user="999")
+        denied.bot.call_action = AsyncMock(side_effect=lambda action=None, **kw:
+            {"user_id": 999, "group_id": 789, "role": "admin"}
+            if action == "get_group_member_info" else {"message_id": "fixture"})
+        denied.bot.send_group_msg = denied.bot.call_action
+        denied.bot.send_private_msg = denied.bot.call_action
+        before = copy.deepcopy(self.bot.enrollment.records)
+        output = await self.dispatch(denied)
+        self.assertIn("群主或机器人维护者", output[-1])
+        self.assertEqual(self.bot.enrollment.records, before)
+        self.assertEqual(self.models, [])
+
+    async def test_permission_discussion_passes_to_model_without_changing_permissions(self):
+        self.automatic_setup()
+        await self.dispatch(self.event([C.Plain("/dst 启用本群")]))
+        self.bot.config["permission_mode"] = "group"
+        before = copy.deepcopy(self.bot.enrollment.records)
+        for text in (
+            "/dst 给管理员添加所有权限是否合适？",
+            "/dst 如果给管理员添加所有权限会怎样",
+            "/dst 不要给管理员添加所有权限",
+        ):
+            event = self.event([C.Plain(text)])
+            self.assertEqual(await self.dispatch(event), [])
+            self.assertEqual(self.models[-1], event)
+        self.assertEqual(self.bot.enrollment.records, before)
 
     async def test_real_session_filter_and_plugin_selection_are_respected(self):
         self.automatic_setup()

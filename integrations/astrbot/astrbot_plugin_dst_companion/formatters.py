@@ -197,14 +197,18 @@ def inventory(data):
     for key, label in (("equipment", "装备"), ("inventory", "物品栏")):
         values = data.get(key)
         if isinstance(values, list):
-            lines.append("\n" + ("🛡️" if key == "equipment" else "📦") + "【" + label + "】")
+            start, previous_count = len(lines), count
             for value in values[:256]:
                 walk(value, equipment=key == "equipment")
+            if count > previous_count:
+                lines.insert(start, "\n" + ("🛡️" if key == "equipment" else "📦") + "【" + label + "】")
             if len(values) > 256:
                 truncated = True
     if isinstance(data.get("activeItem"), dict):
-        lines.append("\n【鼠标手持】")
+        start, previous_count = len(lines), count
         walk(data["activeItem"])
+        if count > previous_count:
+            lines.insert(start, "\n【鼠标手持】")
     if count == 0:
         lines.append("未返回可展示物品；是否为空以面板返回的覆盖状态为准。")
     if truncated or data.get("limitsReached"):
@@ -262,6 +266,9 @@ def status(worlds, states, *, include_sample=True):
                 )
             if type(snapshot.get("remainingDaysInSeason")) is int:
                 details.append(f"剩余 {snapshot['remainingDaysInSeason']} 天")
+            phase = {"day": "白天", "dusk": "黄昏", "night": "夜晚"}.get(snapshot.get("phase"))
+            if phase:
+                details.append(phase)
         elif state == "running":
             line += " · 采集待同步"
             if snapshot.get("observedAt"):

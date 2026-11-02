@@ -18,33 +18,41 @@ class RoomCatalog:
     def valid(self):
         return self.identity_value == self.identity() and self.clock() < self.until
 
-    async def refresh(self, force=False):
+    async def refresh(self, force=False, min_valid_for=0):
         async with self.lock:
-            if not force and self.valid():
+            if not force and self.valid() and self.until - self.clock() > min_valid_for:
                 return self.rows
             identity = self.identity()
-            self.until = 0  # Failure never extends old authority.
-            result = await self.read("api_listRooms", {})
-            items = result.get("items")
-            if not isinstance(items, list) or result.get("_aiTruncated") or result.get("hasMore"):
+            try:
+                return await self._refresh(identity)
+            except BaseException:
+                self.until = 0  # Failure never extends old authority.
+                raise
+
+    async def _refresh(self, identity):
+        # Keep an unexpired grant usable while its early renewal is in flight.
+        # Its original deadline still applies, and any failure invalidates it.
+        result = await self.read("api_listRooms", {})
+        items = result.get("items")
+        if not isinstance(items, list) or result.get("_aiTruncated") or result.get("hasMore"):
+            raise QueryError("ROOM_CATALOG_INCOMPLETE")
+        if (
+            len(items) > 256
+            or type(result.get("total")) is int
+            and result["total"] > len(items)
+        ):
+            raise QueryError("ROOM_CATALOG_INCOMPLETE")
+        rows, ids = [], set()
+        for item in items:
+            room = item.get("id") if isinstance(item, dict) else None
+            if not isinstance(room, str) or not room or len(room) > 255 or room in ids:
                 raise QueryError("ROOM_CATALOG_INCOMPLETE")
-            if (
-                len(items) > 256
-                or type(result.get("total")) is int
-                and result["total"] > len(items)
-            ):
-                raise QueryError("ROOM_CATALOG_INCOMPLETE")
-            rows, ids = [], set()
-            for item in items:
-                room = item.get("id") if isinstance(item, dict) else None
-                if not isinstance(room, str) or not room or len(room) > 255 or room in ids:
-                    raise QueryError("ROOM_CATALOG_INCOMPLETE")
-                ids.add(room)
-                rows.append({"id": room, "name": str(item.get("name") or room)[:255]})
-            if identity != self.identity():
-                raise QueryError("CONFIG_CHANGED")
-            self.rows, self.identity_value, self.until = rows, identity, self.clock() + 60
-            return self.rows
+            ids.add(room)
+            rows.append({"id": room, "name": str(item.get("name") or room)[:255]})
+        if identity != self.identity():
+            raise QueryError("CONFIG_CHANGED")
+        self.rows, self.identity_value, self.until = rows, identity, self.clock() + 60
+        return self.rows
 
 
 class Enrollment:
@@ -68,14 +76,18 @@ class Enrollment:
         self.records = copy.deepcopy(value)
         self.loaded = True
 
-    async def update(self, session, value):
+    async def update(self, session, value, *, expected=None):
         async with self.lock:
+            if expected is not None and fingerprint(self.records.get(session, {})) != expected:
+                raise QueryError("CONFIG_CONFLICT")
             self.validate(session, value)
             candidate = copy.deepcopy(self.records)
             if len(candidate) >= 64 and session not in candidate:
                 raise QueryError("SESSION_LIMIT")
             candidate[session] = copy.deepcopy(value)
-            await self.save("sessions_v3", candidate)
+            committed = await self.save("sessions_v3", candidate)
+            if committed is False:
+                raise QueryError("CONFIG_SAVE_FAILED")
             self.records = candidate  # Do not grant anything before persistence succeeds.
 
     async def update_templates(self, session, rows, expected):
@@ -97,6 +109,10 @@ class Enrollment:
 
     @staticmethod
     def validate(session, record):
+        if isinstance(record, dict) and "rolePermissions" in record:
+            from .group_permissions import validate_rules
+
+            validate_rules(record["rolePermissions"])
         if (
             not isinstance(session, str)
             or len(session) > 255
@@ -107,6 +123,10 @@ class Enrollment:
             raise ValueError("invalid session")
         if not record["enabled"]:
             return
+        assigned = record.get("assignedRooms")
+        if assigned is not None and assigned != "all" and (not isinstance(assigned, list)
+                or len(assigned) > 256 or any(not isinstance(r, str) or not r or len(r) > 255 for r in assigned)):
+            raise ValueError("invalid assigned rooms")
         rooms = record.get("rooms")
         if rooms != "all" and (
             not isinstance(rooms, list)

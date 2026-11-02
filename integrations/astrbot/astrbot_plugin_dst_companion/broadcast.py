@@ -605,64 +605,96 @@ class BroadcastEngine:
             if first or any(str(x.get("id")) in known for x in items) or len(items) < 100:
                 break
         async with self.lock:
-            room = self.room(room_id)
-            seen = set(room["chat_seen"])
-            changed = first
-            batch = []
-            batch_size = 0
+            previous = copy.deepcopy(self.state)
+            try:
+                if self.record_chat(room_id, reversed(found), first=first):
+                    await self.persist()
+            except BaseException:
+                self.state = previous
+                raise
 
-            def flush():
-                if not batch:
+    def record_chat(self, room_id, items, *, first=False):
+        """Deduplicate and queue public chat using the existing templates."""
+        room = self.room(room_id)
+        seen = set(room["chat_seen"])
+        changed = first
+        batch = []
+        batch_size = 0
+
+        def flush():
+            if not batch:
+                return
+            lines = "\n".join(row[1] for row in batch)
+            count = len(batch)
+            # Separate SSE records can arrive in one burst. Merge only an
+            # adjacent, still-unsent chat notice, without delaying delivery.
+            last = self.state["outbox"][-1] if self.state["outbox"] else None
+            previous = last.get("_chat", {}) if last else {}
+            merge = (
+                previous.get("room") == room_id
+                and 0 <= self.clock() - last.get("created", 0) <= 2
+                and previous.get("count", 0) + count <= 5
+                and len(previous.get("lines", "")) + len(lines) + 1 <= 2600
+            )
+            if merge:
+                lines = previous["lines"] + "\n" + lines
+                count += previous["count"]
+            text = self.message(
+                room_id,
+                "chat_batch",
+                {
+                    "lines": lines,
+                    "time": batch[-1][2],
+                },
+            )
+            related = {"roomId": room_id, "kind": "chat", "chatCount": count}
+            if merge:
+                last.update(text=text, related=related)
+            else:
+                key = "chat/" + room_id + "/" + batch[0][0]
+                if any(item["key"] == key for item in self.state["outbox"]):
+                    batch.clear()
                     return
-                text = self.message(
-                    room_id,
-                    "chat_batch",
-                    {
-                        "lines": "\n".join(row[1] for row in batch),
-                        "time": batch[-1][2],
-                    },
-                )
-                self.queue(
-                    "chat/" + room_id + "/" + batch[0][0],
-                    text,
-                    {"roomId": room_id, "kind": "chat", "chatCount": len(batch)},
-                )
-                batch.clear()
+                self.queue(key, text, related)
+                last = self.state["outbox"][-1]
+            last["_chat"] = {"room": room_id, "lines": lines, "count": count}
+            batch.clear()
 
-            for item in reversed(found):
-                key = str(item.get("id") or "")
-                if not key or key in seen:
-                    continue
-                seen.add(key)
-                room["chat_seen"].append(key)
-                changed = True
-                stamp = timestamp(item.get("occurredAt"))
-                if (
-                    first
-                    or item.get("kind") != "say"
-                    or not stamp
-                    or not -30 <= self.clock() - stamp <= 120
-                ):
-                    continue
-                compact = self.message(
-                    room_id,
-                    "chat_line",
-                    {
-                        "player_name": clean(item.get("playerName")) or "未知玩家",
-                        "message": clean(item.get("content"), 1000),
-                        "time": time_text(item.get("occurredAt")),
-                    },
-                )
-                if batch and (len(batch) >= 5 or batch_size + len(compact) > 2600):
-                    flush()
-                    batch_size = 0
-                batch.append((key, compact, time_text(item.get("occurredAt"))))
-                batch_size += len(compact) + 2
-            flush()
-            room["chat_seeded"] = True
-            room["chat_seen"] = room["chat_seen"][-1000:]
-            if changed:
-                await self.persist()
+        for item in items:
+            key = str(item.get("id") or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            room["chat_seen"].append(key)
+            changed = True
+            stamp = timestamp(item.get("occurredAt"))
+            if (
+                first
+                or item.get("_historical") is True
+                or item.get("_truncated") is True
+                or item.get("kind") != "say"
+                or not stamp
+                or not -30 <= self.clock() - stamp <= 120
+            ):
+                continue
+            compact = self.message(
+                room_id,
+                "chat_line",
+                {
+                    "player_name": clean(item.get("playerName")) or "未知玩家",
+                    "message": clean(item.get("content"), 1000),
+                    "time": time_text(item.get("occurredAt")),
+                },
+            )
+            if batch and (len(batch) >= 5 or batch_size + len(compact) > 2600):
+                flush()
+                batch_size = 0
+            batch.append((key, compact, time_text(item.get("occurredAt"))))
+            batch_size += len(compact) + 2
+        flush()
+        room["chat_seeded"] = True
+        room["chat_seen"] = room["chat_seen"][-1000:]
+        return changed
 
     async def deliver_one(self):
         async with self.lock:

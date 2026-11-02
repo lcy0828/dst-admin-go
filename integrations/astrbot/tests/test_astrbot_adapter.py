@@ -116,13 +116,10 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 name=name, parameters={"type": "object"}, description="fixture", handler=None
             )
             for name in (
-                "dst_rooms",
-                "dst_room_query",
-                "dst_player_query",
-                "dst_game_action",
-                "dst_job",
-                "dst_find_api",
-                "dst_call_api",
+                "dst_rooms", "dst_room_query", "dst_player_query", "dst_game_action",
+                "dst_job", "dst_find_api", "dst_call_api",
+                "dst_servers", "dst_player", "dst_world", "dst_find", "dst_read", "dst_result",
+                "dst_player_action", "dst_server_action", "dst_run",
             )
         ]
         request = NS(func_tool=ToolSet(tools), system_prompt="Existing persona")
@@ -131,11 +128,11 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("DST 当前权限", request.system_prompt)
         self.assertEqual(
             set(request.func_tool.names()),
-            {"unrelated", "dst_rooms", "dst_room_query", "dst_player_query"},
+            {"unrelated", "dst_servers", "dst_player", "dst_find", "dst_read", "dst_result"},
         )
         # Actual AstrBot serializes the final provider tool payload.
         payload = request.func_tool.openai_schema()
-        self.assertEqual(len(payload), 4)
+        self.assertEqual(len(payload), 6)
         await bot.terminate()
 
     async def test_native_admin_guard_is_reused(self):

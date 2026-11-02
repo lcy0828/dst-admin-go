@@ -218,6 +218,23 @@ class DynamicTests(unittest.IsolatedAsyncioTestCase):
         policy.directory = directory
         return panel, gateway, directory
 
+    async def test_panel_upgrade_and_rollback_replace_cached_protocol_immediately(self):
+        current = [1]
+        gateway = NS(call=AsyncMock())
+        directory = Directory(gateway, version=lambda: current[0])
+        a = actor()
+        for version in (1, 2, 1):
+            current[0] = version
+            gateway.call.return_value = {
+                "protocolVersion": version, "revision": "v" + str(version),
+                "items": [capability("room.v" + str(version))], "nextCursor": "",
+            }
+            values = await directory.items(a, time.monotonic() + 8)
+            self.assertEqual(values[0]["id"], "room.v" + str(version))
+            self.assertEqual(gateway.call.call_args.args[2]["query"]["protocolVersion"], version)
+            self.assertNotIn("knownRevision", gateway.call.call_args.args[2]["query"])
+        self.assertEqual(gateway.call.await_count, 3)
+
     async def test_C01_same_plugin_gets_new_capability_through_menu_parameters(self):
         import importlib.util
         import tempfile
@@ -271,6 +288,8 @@ class DynamicTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("参数", bad.text)
         reply = await engine.handle(a, "7", woken=True)
         self.assertIn("42", reply.text)
+        self.assertEqual(reply.data["data"], {"answer": 42})
+        self.assertEqual(reply.data["capabilityId"], "room.added-later")
         call = next(args for name, args in panel.calls if name == "api_queryBotCapability")
         self.assertEqual(json.loads(call["query"]["parameters"]), {"period": 7})
         self.assertEqual(before, package_hash())

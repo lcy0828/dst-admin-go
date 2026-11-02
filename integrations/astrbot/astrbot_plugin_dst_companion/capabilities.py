@@ -164,8 +164,11 @@ def permitted(actor, item):
 
 
 class Directory:
-    def __init__(self, gateway, clock=time.monotonic):
+    def __init__(self, gateway, clock=time.monotonic, version=lambda: 1, receipts=None):
         self.gateway, self.clock = gateway, clock
+        self.version = version
+        self.receipts = receipts
+        self.unsupported = OrderedDict()
         self.cache = OrderedDict()
         self.locks = weakref.WeakValueDictionary()
 
@@ -173,6 +176,8 @@ class Directory:
         ttl = actor.directory_ttl if ttl is None else ttl
         key = actor.read_projection
         old = self.cache.get(key)
+        if old and old.get("protocolVersion", 1) != self.version():
+            old = None
         if old and not force and self.clock() - old["checked"] < ttl:
             return copy.deepcopy(old["items"])
         lock = self.locks.get(key)
@@ -183,15 +188,20 @@ class Directory:
             self.locks[key] = lock
         async with lock:
             old = self.cache.get(key)
+            if old and old.get("protocolVersion", 1) != self.version():
+                old = None
             if old and not force and self.clock() - old["checked"] < ttl:
                 return copy.deepcopy(old["items"])
-            args = {"query": {"protocolVersion": 1, "limit": 32}}
+            version = self.version()
+            args = {"query": {"protocolVersion": version, "limit": 32}}
             if old:
                 args["query"]["knownRevision"] = old["revision"]
             items, revision, cursors, budget = [], "", set(), 0
             for _ in range(8):
                 page = await self.gateway.call(actor, "api_listBotCapabilities", args, deadline)
-                if page.get("protocolVersion") != 1 or not isinstance(page.get("revision"), str):
+                if version != self.version():
+                    raise QueryError("DIRECTORY_CHANGED")
+                if page.get("protocolVersion") != version or not isinstance(page.get("revision"), str):
                     raise QueryError("CAPABILITY_INCOMPATIBLE")
                 if page.get("notModified") is True:
                     if not old or page["revision"] != old["revision"] or items:
@@ -214,10 +224,10 @@ class Directory:
                 if not isinstance(cursor, str) or len(cursor) > 512 or cursor in cursors:
                     raise QueryError("MCP_RESPONSE_INVALID")
                 cursors.add(cursor)
-                args = {"query": {"protocolVersion": 1, "limit": 32, "cursor": cursor}}
+                args = {"query": {"protocolVersion": version, "limit": 32, "cursor": cursor}}
             else:
                 raise QueryError("DIRECTORY_TOO_LARGE")
-            accepted, ids = [], set()
+            accepted, rejected, ids = [], [], set()
             for item in items:
                 if (
                     not isinstance(item, dict)
@@ -238,7 +248,17 @@ class Directory:
                     and item.get("category") in KNOWN_CATEGORIES
                 ):
                     accepted.append(copy.deepcopy(item))
-            self.cache[key] = {"revision": revision, "items": accepted, "checked": self.clock()}
+                else:
+                    rejected.append({"id": item["id"], "title": str(item.get("title", ""))[:128],
+                                     "access": item.get("access"), "category": item.get("category"),
+                                     "status": "client_update_required"})
+            self.unsupported[key] = rejected
+            self.unsupported.move_to_end(key)
+            while len(self.unsupported) > 64:
+                self.unsupported.popitem(last=False)
+            if version != self.version():
+                raise QueryError("DIRECTORY_CHANGED")
+            self.cache[key] = {"revision": revision, "items": accepted, "checked": self.clock(), "protocolVersion": version}
             self.cache.move_to_end(key)
             while len(self.cache) > 64:
                 self.cache.popitem(last=False)
@@ -266,7 +286,18 @@ class Directory:
                     "parameters": json.dumps(parameters, ensure_ascii=False, separators=(",", ":")),
                 },
             }
-            return await self.gateway.call(actor, "api_queryBotCapability", args, deadline)
+            if self.receipts:
+                await self.receipts.reserve(actor, item, room, request_id)
+            try:
+                return await self.gateway.call(actor, "api_queryBotCapability", args, deadline)
+            except QueryError as error:
+                if self.receipts:
+                    error.receipt = {
+                        "requestId": request_id, "roomId": room, "capabilityId": item["id"],
+                        "status": "uncertain", "complete": False,
+                        "error": {"code": error.code, "message": "查询结果尚未确认，请回读原查询，不要重新提交。"},
+                    }
+                raise
         args = {
             "path": path,
             "body": {

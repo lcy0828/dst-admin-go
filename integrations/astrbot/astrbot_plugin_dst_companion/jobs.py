@@ -7,6 +7,7 @@ import time
 import uuid
 
 from .formatters import safe
+from .capabilities import validate
 from .gateway import QueryError
 from .presentation import business
 
@@ -79,6 +80,9 @@ class Actions:
             return await self._submit_capability(actor, item, target, parameters, deadline)
 
     async def _submit_capability(self, actor, item, target, parameters, deadline):
+        # Invalid input has not crossed the send boundary. Do not reserve an
+        # uncertain task or tell users it may already have executed.
+        validate(parameters, item["parameters"])
         source = (
             *actor.key,
             str(getattr(getattr(actor.event, "message_obj", None), "message_id", "")),

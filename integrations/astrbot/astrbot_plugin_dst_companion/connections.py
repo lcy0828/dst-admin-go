@@ -45,6 +45,10 @@ class Connections:
         )
 
     def read(self):
+        if str(self.config.get("panel_url", "")).strip():
+            from .private_connection import PRIVATE_NAME
+
+            return PRIVATE_NAME
         explicit = str(self.config.get("mcp_server", "")).strip()
         if explicit:
             return explicit  # An unavailable explicit source must never fall back to another panel.
@@ -76,6 +80,10 @@ class Connections:
             return explicit if explicit in candidates else ""
         if source in candidates:
             return source
+        from .group_permissions import enabled
+
+        if enabled(self.config):
+            return ""  # Unified mode never borrows authority from another credential.
         management = str(self.config.get("management_mcp_server") or "")
         if management in candidates:
             return management  # Explicitly selected, same-panel, permitted connection.
