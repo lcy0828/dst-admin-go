@@ -498,8 +498,15 @@ jobs:
         with:
           python-version: "3.12"
       - name: Package the unified AstrBot plugin
+        env:
+          ASTRBOT_UPDATE_SIGNING_KEY: ${{ secrets.ASTRBOT_UPDATE_SIGNING_KEY }}
+          ASTRBOT_UPDATE_NEXT_PUBLIC_KEY: ${{ vars.ASTRBOT_UPDATE_NEXT_PUBLIC_KEY }}
         run: |
+          if [[ -n "$ASTRBOT_UPDATE_SIGNING_KEY" ]]; then python -m pip install 'cryptography>=43,<47'; fi
           python integrations/astrbot/package.py --output release --plugin companion
+          if [[ -n "$ASTRBOT_UPDATE_SIGNING_KEY" && "$GITHUB_REF_NAME" != *-* ]]; then
+            python integrations/astrbot/sign_release.py --output release --release "$GITHUB_REF_NAME" --sequence "$GITHUB_RUN_NUMBER"
+          fi
           for file in release/astrbot_plugin_dst_*.zip; do
             (cd release && sha256sum "${file#release/}") > "$file.sha256"
           done
@@ -519,6 +526,6 @@ jobs:
           node deploy/scripts/write-release-index.mjs release "$GITHUB_REF_NAME" release-notes.md
           args=()
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then args+=(--prerelease); fi
-          gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.zip release/*.sha256 release/dst-admin-release.json \
+          gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.zip release/*.sha256 release/*.json \
             --repo "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" \
             --notes-file release-notes.md "${args[@]}"

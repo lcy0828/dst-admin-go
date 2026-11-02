@@ -12,6 +12,12 @@ for (const name of (await readdir(root)).sort()) {
   assets.push({ name, size: (await stat(file)).size, digest: 'sha256:' + createHash('sha256').update(await readFile(file)).digest('hex'), browser_download_url: `https://github.com/${repository}/releases/download/${version}/${name}` })
 }
 assert.equal(assets.length, 14, 'Management and all five Agent platform bundles and checksums are required')
+// Plugin archives and signed metadata are independent of panel version numbers.
+for (const name of ['astrbot_plugin_dst_companion.zip', 'astrbot_plugin_dst_companion.zip.sha256', 'astrbot-plugin-release.json']) {
+  if (!(await readdir(root)).includes(name)) continue
+  const file = path.join(root, name)
+  assets.push({ name, size: (await stat(file)).size, digest: 'sha256:' + createHash('sha256').update(await readFile(file)).digest('hex'), browser_download_url: `https://github.com/${repository}/releases/download/${version}/${name}` })
+}
 await writeFile(path.join(root, 'dst-admin-release.json'), JSON.stringify({ tag_name: version, name: version,
   body: await readFile(notesFile, 'utf8'), html_url: `https://github.com/${repository}/releases/tag/${version}`,
   published_at: new Date().toISOString(), draft: false, prerelease: version.includes('-'), assets
