@@ -11,6 +11,7 @@ import re
 import time
 
 from .capabilities import permitted, validate
+from .discovery import actions as discover_actions, score as discovery_score
 from .gateway import QueryError
 from .presentation import business
 from .routing import Intent
@@ -22,7 +23,7 @@ WRITE_TOOLS = {"dst_player_action", "dst_server_action", "dst_run"}
 READ_VIEWS = {
     "dst_servers": {"overview": "status", "players": "players", "mods": "mods", "performance": "performance"},
     "dst_player": {"profile": "profile", "inventory": "inventory", "network": "network", "activity": "profile", "trajectory": "profile", "combat": "profile"},
-    "dst_world": {"world_info": "world", "online_players": "world", "entity_count": "world"},
+    "dst_world": {"world_info": "world", "online_players": "world", "entity_count": "world", "player_modes": "world"},
 }
 ACTION_VALUES = {
     "dst_player_action": ["resurrect", "give_item", "spawn_entity", "kick", "god_mode", "creative_mode",
@@ -107,7 +108,7 @@ def recommended(item):
                 "view": "profile" if capability == "player.resolve" else capability.split(".")[1]
             },
         }
-    if capability in {"world.world_info", "world.online_players", "world.entity_count"}:
+    if capability in {"world.world_info", "world.online_players", "world.entity_count", "world.player_modes"}:
         return {"tool": "dst_world", "input": {"view": capability.split(".")[1]}}
     if capability in {"player." + action for action in ACTION_VALUES["dst_player_action"]}:
         return {"tool": "dst_player_action", "input": {"action": capability.split(".")[1]}}
@@ -294,7 +295,7 @@ class TaskTools:
                 else:
                     raise QueryError("PARAMETER_INVALID")
             elif name == "dst_world":
-                if view not in {"world_info", "online_players", "entity_count"}:
+                if view not in {"world_info", "online_players", "entity_count", "player_modes"}:
                     raise QueryError("PARAMETER_INVALID")
                 capability = "world." + view
             elif name == "dst_player_action":
@@ -444,18 +445,25 @@ class TaskTools:
                     else []
                 ),
             ]
-            score = sum(
-                len(t) + 1
-                for t in terms
-                if isinstance(t, str) and t and (query in t.casefold() or t.casefold() in query)
-            )
-            if score:
-                ranked.append((score, item))
-        ranked.sort(key=lambda pair: (-pair[0], pair[1]["id"]))
+            matched = False
+            for action in discover_actions(item):
+                score = discovery_score(query, [action["id"], action["title"], *action["searchTerms"]])
+                if score:
+                    card = discover_item(item)
+                    card.update(title=action["title"], actionId=action["id"], description=action["description"])
+                    card["input"].setdefault("parameters", {}).update(action["parameters"])
+                    ranked.append((score + 100, card))
+                    matched = True
+            if not matched:
+                score = discovery_score(query, terms)
+                if score:
+                    ranked.append((score, discover_item(item)))
+        ranked.sort(key=lambda pair: (-pair[0], pair[1]["id"], pair[1].get("actionId", "")))
         return encode(
             {
-                "items": [] if unavailable else [discover_item(c) for _, c in ranked[:3]],
+                "items": [] if unavailable else [c for _, c in ranked[:3]],
                 "hasMore": len(ranked) > 3,
+                "note": "仅返回候选，尚未执行。查询、否定、条件或讨论不能当作操作请求；缺少目标或开关时请询问。权限与确认沿用原能力。",
                 "needsUpdate": [
                     {"id": c["id"], "title": c["title"], "status": c["status"]}
                     for c in unavailable

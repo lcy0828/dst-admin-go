@@ -212,6 +212,26 @@ class Engine:
                     ]
                     if len(matches) == 1:
                         intent = Intent("capability", capability=matches[0]["id"])
+                    elif not matches:
+                        from .discovery import actions as discover_actions
+                        candidates = []
+                        for item in items:
+                            if not permitted(actor, item):
+                                continue
+                            for action in discover_actions(item):
+                                for term in dict.fromkeys([action["title"], *action["searchTerms"]]):
+                                    if value == term or value.startswith(term + " "):
+                                        params = dict(action["parameters"])
+                                        nickname = value[len(term):].strip()
+                                        hints = [k for k,h in item.get("parameterHints", {}).items() if h == "player"]
+                                        if nickname:
+                                            if len(hints) != 1: continue
+                                            params[hints[0]] = nickname
+                                        candidates.append((item, action, params))
+                                        break
+                        if len(candidates) == 1:
+                            item, action, params = candidates[0]
+                            intent = Intent("capability", capability=item["id"], parameters=params)
                 except QueryError:
                     pass
         if intent is None:
@@ -558,11 +578,18 @@ class Engine:
         item = next((c for c in items if c["id"] == intent.capability), None)
         if not item or not permitted(actor, item):
             raise QueryError("PERMISSION_DENIED")
+        if frozen and frozen.get("previewUntil", float("inf")) <= self.state.clock():
+            self.state.clear_form(actor.key)
+            return Reply("handled_error", "预览已过期，请重新预览并确认范围。尚未执行。")
         if frozen and frozen["item"]["schemaRevision"] != item["schemaRevision"]:
             raise QueryError("DIRECTORY_CHANGED")
         parameters = dict(frozen["parameters"] if frozen else intent.parameters or {})
         schema = item["parameters"]
         critical = item.get("risk") == "critical" and item["access"] == "write"
+        nearby_preview = (item["id"] == "workbench.act_nearby_entities"
+                          and parameters.get("action") in {"extinguish", "freeze", "sleep", "pacify", "delete", "kill"}
+                          and parameters.get("phase", "preview") == "preview"
+                          and "phase" in schema.get("properties", {}))
         if critical:
             parameters.pop("confirmed", None)
         for key, hint in item.get("parameterHints", {}).items():
@@ -597,6 +624,8 @@ class Engine:
                     return Reply("handled_error", "没有确认的唯一玩家，请提供更完整昵称或 KU ID。")
                 parameters[key] = resolved["items"][0]["id"]
         for key, prop in schema.get("properties", {}).items():
+            if (item["id"] == "workbench.act_nearby_entities" and parameters.get("action") != "till" and key == "layout") or (nearby_preview and key in {"phase", "preview_id"}):
+                continue
             if critical and key == "confirmed":
                 continue
             if key in parameters or key not in schema.get("required", []) and "default" not in prop:
@@ -642,14 +671,11 @@ class Engine:
                 "needs_selection",
                 fmt.safe(item["title"])
                 + "：请提供 "
-                + key
-                + "（"
-                + prop["type"]
-                + "）"
+                + fmt.safe(prop.get("title") or key)
                 + hint
                 + "。取消退出。",
             )
-        if critical or intent.confirm_required:
+        if (critical or intent.confirm_required) and not nearby_preview:
             if not frozen or frozen.get("userConfirmed") is not True:
                 self.state.form(
                     actor.key,
@@ -678,7 +704,16 @@ class Engine:
         if item["access"] == "write":
             if not self.actions:
                 raise QueryError("CAPABILITY_MISSING")
+            preview_started = self.state.clock()
             text = await self.actions.submit_capability(actor, item, target, parameters, deadline)
+            evidence = await self.actions.submitted_result(actor) if nearby_preview else None
+            batch = evidence.get("data", {}).get("batch") if isinstance(evidence, dict) else None
+            if (nearby_preview and isinstance(batch, dict) and batch.get("state") == "preview"
+                    and isinstance(batch.get("previewId"), str) and evidence.get("complete") is True):
+                execution = {**parameters, "phase": "execute", "preview_id": batch["previewId"]}
+                self.state.form(actor.key, {"type": "confirmation", "intent": intent, "target": target,
+                    "item": item, "parameters": execution, "configRevision": actor.config_revision, "previewUntil": preview_started + 30}, sequence=seq)
+                return Reply("needs_selection", text + "\n请在 30 秒内直接回复 确认，或回复 取消。尚未修改游戏。", target, data=evidence)
             result = self.decorate(actor, "action", title, text, room=title, player=target.name)
         else:
             data = await self.directory.execute(actor, item, target.room, parameters, deadline)

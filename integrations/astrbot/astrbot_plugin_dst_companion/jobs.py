@@ -79,6 +79,12 @@ class Actions:
         async with self.lock:
             return await self._submit_capability(actor, item, target, parameters, deadline)
 
+    async def submitted_result(self, actor):
+        source = (*actor.key, str(getattr(getattr(actor.event, "message_obj", None), "message_id", "")))
+        key = hashlib.sha256(json.dumps(source).encode()).hexdigest()
+        record = (await self.load()).get(key, {})
+        return record.get("data") if record.get("connectionId") == actor.connection_id else None
+
     async def _submit_capability(self, actor, item, target, parameters, deadline):
         # Invalid input has not crossed the send boundary. Do not reserve an
         # uncertain task or tell users it may already have executed.

@@ -1,6 +1,6 @@
 name: astrbot_plugin_dst_companion
 display_name: DST Admin 饥荒助手
 desc: 查询、AI、事件播报合一；自动发现房间，群内一键启用
-version: v0.4.1
+version: v0.4.2
 author: lcy
 repo: https://github.com/lcy0828/dst-admin-go

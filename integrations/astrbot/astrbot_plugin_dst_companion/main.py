@@ -1008,7 +1008,7 @@ class DSTCompanion(Star):
 
         Args:
             world(string): 地面、洞穴或世界名称/ID。
-            view(string): world_info、online_players、entity_count。
+            view(string): world_info、online_players、entity_count、player_modes（只读模式状态，unknown 不等于关闭）。
             room(string): 房间名称、别名或 ID。
             parameters(object): entity_count 必须提供 prefab；其余留空。
         """

@@ -39,6 +39,12 @@ def query_body(result, data):
         return "自动备份：" + ("已开启" if data["effectiveEnabled"] else "已关闭") + (
             "\n下次备份：" + fmt.safe(data["nextRunLocal"]) if data.get("nextRunLocal") else ""
         )
+    if capability == "world.player_modes" and isinstance(data.get("players"), list):
+        labels = {"enabled": "已开启", "disabled": "已关闭", "unknown": "无法确认"}
+        return "玩家模式 · 当前读取\n" + "\n".join(
+            "· " + fmt.safe(row.get("id")) + "：免伤 " + labels.get(row.get("invincible"), "无法确认")
+            + " · 制作 " + labels.get(row.get("creative"), "无法确认")
+            for row in data["players"][:20] if isinstance(row, dict)) + "\n当前效果可能来自面板或其他模组。"
     if result.get("resultKind") == "query-run":
         if type(data.get("count")) is int and data.get("prefab"):
             return fmt.safe(data["prefab"]) + "：" + str(data["count"]) + " 个"
@@ -123,6 +129,17 @@ def business(result, *, diagnostics=False):
         if isinstance(output, dict) and output.get("truncated"):
             body += "\n（仅收到部分输出，无法确认完整效果）"
 
+        batch = data.get("batch")
+        if isinstance(batch, dict) and batch.get("state") in {"preview", "cancelled", "completed", "partial"}:
+            if batch["state"] == "preview":
+                body = "🔎 范围预览：" + fmt.safe(batch.get("matched")) + " 个符合条件的对象。\n尚未修改游戏；确认后只处理本次预览中的对象。"
+            elif batch["state"] == "cancelled":
+                body = "已取消范围操作，没有修改游戏。"
+            else:
+                body = ("范围操作已结束\n已确认生效：" + fmt.safe(batch.get("verified"))
+                        + " · 效果待确认：" + fmt.safe(batch.get("unconfirmed"))
+                        + "\n跳过：" + fmt.safe(batch.get("skipped")) + " · 失败：" + fmt.safe(batch.get("failed")))
+
     if len(body) > 1500:
         body = body[:1500] + "\n（仅展示部分内容）"
     error = result.get("error")
@@ -131,6 +148,8 @@ def business(result, *, diagnostics=False):
     footer = labels.get(status, "结果尚未确认")
     if result.get("resultKind") == "workbench-run" and status == "succeeded":
         footer = "指令执行完成 · 游戏内效果待确认"
+        if isinstance(data, dict) and isinstance(data.get("batch"), dict):
+            footer = {"preview": "预览有效期 30 秒", "cancelled": "已取消", "completed": "效果已确认"}.get(data["batch"].get("state"), "部分完成，请勿重复提交")
     if status in {"partial", "uncertain", "unavailable"} or result.get("complete") is not True:
         footer += " · 记录可能不完整"
     if result.get("observedAt"):
