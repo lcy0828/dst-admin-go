@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 )
 
 // Synthetic data: exercise large, translated configuration tables without
@@ -22,7 +23,13 @@ func TestLargeTranslatedConfigurationKeepsFinalMetadata(t *testing.T) {
 	if err := os.WriteFile(path, []byte(source.String()), 0600); err != nil {
 		t.Fatal(err)
 	}
-	got := Read(context.Background(), path, "123", "zh")
+	var got Metadata
+	// Verify large-table semantics independently of race instrumentation and
+	// shared CI CPU scheduling. Production keeps its real 100ms deadline;
+	// the VM instruction and allocation limits still apply inside this bubble.
+	synctest.Test(t, func(t *testing.T) {
+		got = Read(context.Background(), path, "123", "zh")
+	})
 	if got.Reason != "" || got.Version != "2.0" || got.Name != "测试模组" {
 		t.Fatalf("large valid config lost identity (%d bytes): %+v", source.Len(), got)
 	}
