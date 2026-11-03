@@ -521,7 +521,7 @@ func renderTeleportPlayer(arguments map[string]interface{}) (string, error) {
 	if err != nil || destinationID == playerID {
 		return "", ErrInvalidArguments
 	}
-	return fmt.Sprintf(`local p,d=nil,nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v elseif v.userid==%s then d=v end end;if p and d and p.Transform and d.Transform then local x,y,z=d.Transform:GetWorldPosition();p.Transform:SetPosition(x,y,z);print("[DST-ADMIN-TELEPORT]",%s,%s)else print("[DST-ADMIN-TELEPORT]","PLAYER_NOT_FOUND",%s,%s)end`, quoteLua(playerID), quoteLua(destinationID), quoteLua(playerID), quoteLua(destinationID), quoteLua(playerID), quoteLua(destinationID)), nil
+	return fmt.Sprintf(`local d=UserToPlayer(%s);if not d or not d.Transform then error("PLAYER_OFFLINE")end;local x,_,z=d.Transform:GetWorldPosition();local w=DSTAdmin and DSTAdmin.Commands and DSTAdmin.Commands.Workbench;if not w or not w.MovePlayers then error("WORKBENCH_UPDATE_REQUIRED")end;w.MovePlayers({{id=%s,x=x,z=z}})`, quoteLua(destinationID), quoteLua(playerID)), nil
 }
 
 func renderRelocatePlayers(arguments map[string]interface{}) (string, error) {
@@ -538,12 +538,12 @@ func renderRelocatePlayers(arguments map[string]interface{}) (string, error) {
 		return "", ErrInvalidArguments
 	}
 	actions := map[string]string{
-		"gather":  `if p then local x,y,z=position(p);if x then for _,v in ipairs(AllPlayers or {})do if v~=p and v:IsValid()then teleport(v,x,y,z);moved=moved+1 end end end end`,
-		"forward": `if p and other then local x,y,z=position(other);if x then teleport(p,x,y,z);moved=1 end end`,
-		"recall":  `if p and other then local x,y,z=position(p);if x then teleport(other,x,y,z);moved=1 end end`,
-		"swap":    `if p and other then local x1,y1,z1=position(p);local x2,y2,z2=position(other);if x1 and x2 then teleport(p,x2,y2,z2);teleport(other,x1,y1,z1);moved=2 end end`,
+		"gather":  `local x,_,z=p.Transform:GetWorldPosition();for _,v in ipairs(AllPlayers or {})do if v~=p and v:IsValid()then moves[#moves+1]={id=v.userid,x=x,z=z} end end`,
+		"forward": `local x,_,z=other.Transform:GetWorldPosition();moves={{id=p.userid,x=x,z=z}}`,
+		"recall":  `local x,_,z=p.Transform:GetWorldPosition();moves={{id=other.userid,x=x,z=z}}`,
+		"swap":    `local x,_,z=p.Transform:GetWorldPosition();local xx,_,zz=other.Transform:GetWorldPosition();moves={{id=p.userid,x=xx,z=zz},{id=other.userid,x=x,z=z}}`,
 	}
-	return fmt.Sprintf(`local p,other=nil,nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v elseif v.userid==%s then other=v end end;local function position(inst)if inst and inst.Transform then return inst.Transform:GetWorldPosition()end end;local function teleport(inst,x,y,z)if inst.Physics then inst.Physics:Teleport(x,y,z)elseif inst.Transform then inst.Transform:SetPosition(x,y,z)end end;local moved=0;%s;print("[DST-ADMIN-RELOCATE]",%s,%s,%s,moved)`, quoteLua(playerID), quoteLua(otherID), actions[action], quoteLua(playerID), quoteLua(otherID), quoteLua(action)), nil
+	return fmt.Sprintf(`local p=UserToPlayer(%s);local other=UserToPlayer(%s);if not p or (%s~="gather" and not other) then error("PLAYER_OFFLINE")end;local moves={};%s;local w=DSTAdmin and DSTAdmin.Commands and DSTAdmin.Commands.Workbench;if not w or not w.MovePlayers then error("WORKBENCH_UPDATE_REQUIRED")end;w.MovePlayers(moves)`, quoteLua(playerID), quoteLua(otherID), quoteLua(action), actions[action]), nil
 }
 
 func renderSetPlayerAbility(arguments map[string]interface{}) (string, error) {

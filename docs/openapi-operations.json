@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "dd4870348b3e9ea1f226155530177a11342929aa43bd171c2c9a43e3c152d69d",
+  "operationsSHA256": "fc83be44bf4c38a7b448698bc931fc82f6cad43ccdf177d400d65cbc49303296",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -345,6 +345,21 @@
       "title": "Request cooperative cancellation"
     },
     {
+      "operationId": "cancelRoomTeleport",
+      "method": "POST",
+      "path": "/rooms/{roomId}/teleport-previews/{previewId}/cancel",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "console",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "取消尚未提交的传送"
+    },
+    {
       "operationId": "cancelSoftwareDownload",
       "method": "POST",
       "path": "/system/software/actions/cancel",
@@ -685,6 +700,21 @@
       "title": "Request a consistent manual backup through a persistent job"
     },
     {
+      "operationId": "createRoomLocation",
+      "method": "POST",
+      "path": "/rooms/{roomId}/locations",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "console",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "保存地点"
+    },
+    {
       "operationId": "createRoomWorld",
       "method": "POST",
       "path": "/rooms/{roomId}/worlds",
@@ -854,6 +884,21 @@
       "risk": "high",
       "runtime": "any",
       "title": "Move a stopped room into the save-root recovery directory"
+    },
+    {
+      "operationId": "deleteRoomLocation",
+      "method": "DELETE",
+      "path": "/rooms/{roomId}/locations/{locationId}",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "console",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "删除地点"
     },
     {
       "operationId": "deleteRoomWorld",
@@ -1176,6 +1221,21 @@
       "risk": "high",
       "runtime": "shard-ready",
       "title": "Render and send a typed built-in command"
+    },
+    {
+      "operationId": "executeRoomTeleport",
+      "method": "POST",
+      "path": "/rooms/{roomId}/teleport-previews/{previewId}/execute",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "console",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "确认传送一次"
     },
     {
       "operationId": "exportAutomation",
@@ -1894,6 +1954,20 @@
       "title": "Read schema-backed cluster.ini values with a content revision"
     },
     {
+      "operationId": "getRoomLocation",
+      "method": "GET",
+      "path": "/rooms/{roomId}/locations/{locationId}",
+      "transport": "json",
+      "tags": [
+        "console",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "查看地点"
+    },
+    {
       "operationId": "getRoomLogs",
       "method": "GET",
       "path": "/rooms/{roomId}/logs",
@@ -2153,6 +2227,20 @@
       "risk": "low",
       "runtime": "any",
       "title": "Inspect placement-aware Runtime, Agent, health, and diagnostic state for every shard"
+    },
+    {
+      "operationId": "getRoomTeleportPreview",
+      "method": "GET",
+      "path": "/rooms/{roomId}/teleport-previews/{previewId}",
+      "transport": "json",
+      "tags": [
+        "console",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "查看原传送结果"
     },
     {
       "operationId": "getRoomTopology",
@@ -3006,6 +3094,20 @@
       "replacedBy": "listCommands"
     },
     {
+      "operationId": "listRoomLocations",
+      "method": "GET",
+      "path": "/rooms/{roomId}/locations",
+      "transport": "json",
+      "tags": [
+        "console",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "查询已保存地点"
+    },
+    {
       "operationId": "listRoomMaps",
       "method": "GET",
       "path": "/rooms/{roomId}/maps",
@@ -3434,6 +3536,21 @@
       "risk": "normal",
       "runtime": "any",
       "title": "Prepare a fixed game management task without executing it"
+    },
+    {
+      "operationId": "prepareRoomTeleport",
+      "method": "POST",
+      "path": "/rooms/{roomId}/teleport-previews",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "console",
+        "room"
+      ],
+      "access": "write",
+      "risk": "low",
+      "runtime": "any",
+      "title": "检查玩家传送目的地"
     },
     {
       "operationId": "previewAutomationImport",
@@ -4993,6 +5110,21 @@
       "risk": "normal",
       "runtime": "any",
       "title": "Configure the legacy interval-based automatic snapshot policy"
+    },
+    {
+      "operationId": "updateRoomLocation",
+      "method": "PATCH",
+      "path": "/rooms/{roomId}/locations/{locationId}",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "console",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "any",
+      "title": "修改地点"
     },
     {
       "operationId": "updateRoomModUpdatePolicy",

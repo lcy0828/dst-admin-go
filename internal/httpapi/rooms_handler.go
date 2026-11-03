@@ -20,11 +20,12 @@ import (
 )
 
 type RoomHandler struct {
-	rooms      *rooms.Service
-	operations *shards.Operations
-	jobs       *jobs.Service
-	audit      *runtimeaudit.Service
-	recovery   roomRecoveryMover
+	archiveLocations func(string, string) error
+	rooms            *rooms.Service
+	operations       *shards.Operations
+	jobs             *jobs.Service
+	audit            *runtimeaudit.Service
+	recovery         roomRecoveryMover
 }
 
 type roomRecoveryMover interface {
@@ -45,6 +46,15 @@ func (h *RoomHandler) ConfigureRoomRecovery(mover roomRecoveryMover) error {
 	}
 	h.recovery = mover
 	return nil
+}
+
+func (h *RoomHandler) ConfigureLocationArchive(f func(string, string) error) { h.archiveLocations = f }
+func (h *RoomHandler) archiveRoomLocations(room, world string) {
+	if h.archiveLocations != nil {
+		if err := h.archiveLocations(room, world); err != nil {
+			log.Printf("[Locations] archive deleted world: %v", err)
+		}
+	}
 }
 
 func (h *RoomHandler) Register(v2 *gin.RouterGroup) {
@@ -169,6 +179,7 @@ func (h *RoomHandler) deleteRoom(c *gin.Context) {
 			roomFailure(c, deleteErr)
 			return
 		}
+		h.archiveRoomLocations(roomID, "")
 		Success(c, http.StatusOK, result)
 		return
 	}
@@ -195,6 +206,7 @@ func (h *RoomHandler) deleteRoom(c *gin.Context) {
 		roomFailure(c, err)
 		return
 	}
+	h.archiveRoomLocations(roomID, "")
 	Success(c, http.StatusOK, rooms.DeleteRoomResult{
 		Room: forgotten, RecoveryName: location.TargetID + ":" + location.RecoveryRef,
 	})
@@ -233,6 +245,7 @@ func (h *RoomHandler) deleteWorld(c *gin.Context) {
 		roomFailure(c, err)
 		return
 	}
+	h.archiveRoomLocations(c.Param("roomId"), c.Param("worldId"))
 	Success(c, http.StatusOK, result)
 }
 

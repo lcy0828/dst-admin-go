@@ -15,6 +15,7 @@ const (
 // These are executable policy, not metadata or a listing filter. Unknown
 // operations fail closed. Existing unscoped tokens retain panel administration.
 var gameReads = map[string]bool{
+	"listRoomLocations": true, "getRoomLocation": true, "getRoomTeleportPreview": true,
 	"getRoomRuntimeOverview": true, "listBotCapabilities": true, "queryBotCapability": true, "getBotCapabilityResult": true, "listRooms": true, "listRoomWorlds": true, "listWorldStates": true,
 	"listRoomPlayers": true, "resolveRoomPlayer": true, "getRoomPlayerInventory": true,
 	"getRoomPerformanceReport": true, "listRoomMods": true, "searchWorldEntityCatalog": true,
@@ -23,6 +24,7 @@ var gameReads = map[string]bool{
 	"listRoomPlayerActivity": true, "getRoomPlayerTrajectory": true, "getRoomPlayerCombat": true,
 }
 var gameWrites = map[string]bool{
+	"createRoomLocation": true, "updateRoomLocation": true, "deleteRoomLocation": true, "prepareRoomTeleport": true, "executeRoomTeleport": true, "cancelRoomTeleport": true,
 	"runBotCapability": true, "runRoomAction": true, "createRoomBackup": true,
 	"configureRoomBackupSchedule": true, "listRoomBackupSchedules": true,
 	"kickRoomPlayer": true,

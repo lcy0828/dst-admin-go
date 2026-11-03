@@ -26,6 +26,19 @@ func (b *AIBackend) ConfigureAPI(handler http.Handler, files *aicontrol.Store) {
 }
 
 func (b *AIBackend) InvokeAPI(ctx context.Context, p aicontrol.Principal, op *apicontract.Operation, in apicontract.Input) (json.RawMessage, error) {
+	if aicontrol.IsModelChannel(ctx) {
+		// A model cannot turn a boolean or a legacy command ID into human approval.
+		switch op.ID {
+		case "executeRoomTeleport", "executeRawRoomCommand", "executeRoomCommand":
+			return nil, aicontrol.ErrDenied
+		case "executeBuiltinRoomCommand":
+			body, _ := in.Body.(map[string]any)
+			id, _ := body["commandId"].(string)
+			if id == "teleport_player" || id == "relocate_players" || id == "teleport_to_nearest_entity" {
+				return nil, aicontrol.ErrDenied
+			}
+		}
+	}
 	if b.apiRouter == nil {
 		return nil, aicontrol.ErrUnavailable
 	}

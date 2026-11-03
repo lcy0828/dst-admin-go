@@ -84,11 +84,15 @@ func (s *Store) Migrate() error {
 }
 
 func (s *Store) Create(run Run) (Run, error) {
+	return s.createWithID(run, uuid.NewString())
+}
+
+func (s *Store) createWithID(run Run, id string) (Run, error) {
 	arguments, err := json.Marshal(run.Arguments)
 	if err != nil {
 		return Run{}, fmt.Errorf("encode command arguments: %w", err)
 	}
-	run.ID = uuid.NewString()
+	run.ID = id
 	run.Status = RunSending
 	run.LogQuery = run.ID
 	run.CreatedAt = s.now().UTC()

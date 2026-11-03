@@ -7093,6 +7093,462 @@ paths:
         - {name: requestId, in: path, required: true, schema: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$'}}
       responses:
         '200': {description: Original request or bounded refresh of its existing Job or query receipt, content: {application/json: {schema: {$ref: '#/components/schemas/BotResultEnvelope'}}}}
+  /rooms/{roomId}/locations:
+    get:
+      tags:
+      - Console
+      operationId: listRoomLocations
+      summary: 查询已保存地点
+      description: Named destinations belong to one room, world and game session. Prepare checks a live
+        landing point; execute requires trusted human confirmation within 60 seconds. Only confirmed movement
+        evidence is success. Never replay uncertain results.
+      parameters:
+      - name: roomId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - name: worldId
+        in: query
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - name: search
+        in: query
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 48
+      - name: offset
+        in: query
+        schema:
+          type: integer
+          minimum: 0
+          maximum: 10000
+      responses:
+        '200':
+          description: 查询已保存地点
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/RoomLocation'
+                        maxItems: 50
+                      offset:
+                        type: integer
+                      limit:
+                        type: integer
+                      hasMore:
+                        type: boolean
+                    required: []
+                  error:
+                    type:
+                    - object
+                    - 'null'
+                  meta:
+                    type: object
+      x-dst-tool:
+        risk: low
+    post:
+      tags:
+      - Console
+      operationId: createRoomLocation
+      summary: 保存地点
+      description: Named destinations belong to one room, world and game session. Prepare checks a live
+        landing point; execute requires trusted human confirmation within 60 seconds. Only confirmed movement
+        evidence is success. Never replay uncertain results.
+      parameters:
+      - name: roomId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - $ref: '#/components/parameters/CSRFToken'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 保存地点
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RoomLocation'
+                  error:
+                    type:
+                    - object
+                    - 'null'
+                  meta:
+                    type: object
+      x-dst-tool:
+        risk: high
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoomLocationInput'
+  /rooms/{roomId}/locations/{locationId}:
+    get:
+      tags:
+      - Console
+      operationId: getRoomLocation
+      summary: 查看地点
+      description: Named destinations belong to one room, world and game session. Prepare checks a live
+        landing point; execute requires trusted human confirmation within 60 seconds. Only confirmed movement
+        evidence is success. Never replay uncertain results.
+      parameters:
+      - name: roomId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - name: locationId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      responses:
+        '200':
+          description: 查看地点
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RoomLocation'
+                  error:
+                    type:
+                    - object
+                    - 'null'
+                  meta:
+                    type: object
+      x-dst-tool:
+        risk: low
+    patch:
+      tags:
+      - Console
+      operationId: updateRoomLocation
+      summary: 修改地点
+      description: Named destinations belong to one room, world and game session. Prepare checks a live
+        landing point; execute requires trusted human confirmation within 60 seconds. Only confirmed movement
+        evidence is success. Never replay uncertain results.
+      parameters:
+      - name: roomId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - name: locationId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - $ref: '#/components/parameters/CSRFToken'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 修改地点
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RoomLocation'
+                  error:
+                    type:
+                    - object
+                    - 'null'
+                  meta:
+                    type: object
+      x-dst-tool:
+        risk: high
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoomLocationInput'
+    delete:
+      tags:
+      - Console
+      operationId: deleteRoomLocation
+      summary: 删除地点
+      description: Named destinations belong to one room, world and game session. Prepare checks a live
+        landing point; execute requires trusted human confirmation within 60 seconds. Only confirmed movement
+        evidence is success. Never replay uncertain results.
+      parameters:
+      - name: roomId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - name: locationId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - $ref: '#/components/parameters/CSRFToken'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 删除地点
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    properties:
+                      deleted:
+                        type: boolean
+                    required: []
+                  error:
+                    type:
+                    - object
+                    - 'null'
+                  meta:
+                    type: object
+      x-dst-tool:
+        risk: high
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                revision:
+                  type: integer
+                  minimum: 1
+              required:
+              - revision
+  /rooms/{roomId}/teleport-previews:
+    post:
+      tags:
+      - Console
+      operationId: prepareRoomTeleport
+      summary: 检查玩家传送目的地
+      description: Named destinations belong to one room, world and game session. Prepare checks a live
+        landing point; execute requires trusted human confirmation within 60 seconds. Only confirmed movement
+        evidence is success. Never replay uncertain results.
+      parameters:
+      - name: roomId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - $ref: '#/components/parameters/CSRFToken'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 检查玩家传送目的地
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RoomTeleportPreview'
+                  error:
+                    type:
+                    - object
+                    - 'null'
+                  meta:
+                    type: object
+      x-dst-tool:
+        risk: low
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoomTeleportInput'
+  /rooms/{roomId}/teleport-previews/{previewId}:
+    get:
+      tags:
+      - Console
+      operationId: getRoomTeleportPreview
+      summary: 查看原传送结果
+      description: Named destinations belong to one room, world and game session. Prepare checks a live
+        landing point; execute requires trusted human confirmation within 60 seconds. Only confirmed movement
+        evidence is success. Never replay uncertain results.
+      parameters:
+      - name: roomId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - name: previewId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - name: refresh
+        in: query
+        schema:
+          type: boolean
+      responses:
+        '200':
+          description: 查看原传送结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RoomTeleportPreview'
+                  error:
+                    type:
+                    - object
+                    - 'null'
+                  meta:
+                    type: object
+      x-dst-tool:
+        risk: low
+  /rooms/{roomId}/teleport-previews/{previewId}/execute:
+    post:
+      tags:
+      - Console
+      operationId: executeRoomTeleport
+      summary: 确认传送一次
+      description: Named destinations belong to one room, world and game session. Prepare checks a live
+        landing point; execute requires trusted human confirmation within 60 seconds. Only confirmed movement
+        evidence is success. Never replay uncertain results.
+      parameters:
+      - name: roomId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - name: previewId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - $ref: '#/components/parameters/CSRFToken'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 确认传送一次
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RoomTeleportPreview'
+                  error:
+                    type:
+                    - object
+                    - 'null'
+                  meta:
+                    type: object
+      x-dst-tool:
+        risk: high
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties: {}
+              required: []
+  /rooms/{roomId}/teleport-previews/{previewId}/cancel:
+    post:
+      tags:
+      - Console
+      operationId: cancelRoomTeleport
+      summary: 取消尚未提交的传送
+      description: Named destinations belong to one room, world and game session. Prepare checks a live
+        landing point; execute requires trusted human confirmation within 60 seconds. Only confirmed movement
+        evidence is success. Never replay uncertain results.
+      parameters:
+      - name: roomId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - name: previewId
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+      - $ref: '#/components/parameters/CSRFToken'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 取消尚未提交的传送
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RoomTeleportPreview'
+                  error:
+                    type:
+                    - object
+                    - 'null'
+                  meta:
+                    type: object
+      x-dst-tool:
+        risk: high
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties: {}
+              required: []
 components:
   securitySchemes:
     apiBearer:
@@ -7296,6 +7752,289 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
   schemas:
+    RoomLocation:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 255
+        roomId:
+          type: string
+          minLength: 1
+          maxLength: 255
+        worldId:
+          type: string
+          minLength: 1
+          maxLength: 255
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        source:
+          type: string
+          minLength: 1
+          maxLength: 255
+        sessionId:
+          type: string
+          minLength: 1
+          maxLength: 255
+        sourceTime: {type: string, format: date-time}
+        sourceRef:
+          type: string
+          minLength: 1
+          maxLength: 255
+        x:
+          type: number
+          minimum: -100000
+          maximum: 100000
+        z:
+          type: number
+          minimum: -100000
+          maximum: 100000
+        revision:
+          type: integer
+          minimum: 1
+        executionRevision:
+          type: integer
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+      - id
+      - roomId
+      - worldId
+      - name
+      - x
+      - z
+      - revision
+    RoomLocationInput:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 48
+        worldId:
+          type: string
+          minLength: 1
+          maxLength: 255
+        playerId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        x:
+          type: number
+          minimum: -100000
+          maximum: 100000
+        z:
+          type: number
+          minimum: -100000
+          maximum: 100000
+        mapId:
+          type: string
+          minLength: 1
+          maxLength: 36
+        revision:
+          type: integer
+          minimum: 1
+      required:
+      - name
+    RoomTeleportInput:
+      type: object
+      additionalProperties: false
+      properties:
+        playerId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        worldId:
+          type: string
+          minLength: 1
+          maxLength: 255
+        locationId:
+          type: string
+          minLength: 1
+          maxLength: 36
+        locationName:
+          type: string
+          minLength: 1
+          maxLength: 48
+        targetPlayerId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        x:
+          type: number
+          minimum: -100000
+          maximum: 100000
+        z:
+          type: number
+          minimum: -100000
+          maximum: 100000
+      required:
+      - playerId
+    RoomTeleportPreview:
+      type: object
+      additionalProperties: false
+      properties:
+        needsReview: {type: boolean}
+        id:
+          type: string
+          minLength: 1
+          maxLength: 255
+        roomId:
+          type: string
+          minLength: 1
+          maxLength: 255
+        worldId:
+          type: string
+          minLength: 1
+          maxLength: 255
+        playerId:
+          type: string
+          minLength: 1
+          maxLength: 255
+        playerName:
+          type: string
+          minLength: 0
+          maxLength: 255
+        locationId:
+          type: string
+          minLength: 1
+          maxLength: 255
+        locationName:
+          type: string
+          minLength: 1
+          maxLength: 255
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 255
+        runId:
+          type: string
+          minLength: 1
+          maxLength: 255
+        state:
+          type: string
+          enum:
+          - preparing
+          - prepared
+          - dispatching
+          - confirmed
+          - rejected
+          - uncertain
+          - cancelled
+          - expired
+        x:
+          type: number
+          minimum: -100000
+          maximum: 100000
+        z:
+          type: number
+          minimum: -100000
+          maximum: 100000
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        serverTime:
+          type: string
+          format: date-time
+        effect:
+          type: object
+          additionalProperties: false
+          properties:
+            state:
+              type: string
+              minLength: 1
+              maxLength: 255
+            operationId:
+              type: string
+              minLength: 1
+              maxLength: 255
+            playerId:
+              type: string
+              minLength: 1
+              maxLength: 255
+            playerName:
+              type: string
+              minLength: 1
+              maxLength: 255
+            sessionId:
+              type: string
+              minLength: 1
+              maxLength: 255
+            reason:
+              type: string
+              minLength: 1
+              maxLength: 255
+            point:
+              type: object
+              additionalProperties: false
+              properties:
+                x:
+                  type: number
+                  minimum: -100000
+                  maximum: 100000
+                z:
+                  type: number
+                  minimum: -100000
+                  maximum: 100000
+              required:
+              - x
+              - z
+            before:
+              type: object
+              additionalProperties: false
+              properties:
+                x:
+                  type: number
+                  minimum: -100000
+                  maximum: 100000
+                z:
+                  type: number
+                  minimum: -100000
+                  maximum: 100000
+              required:
+              - x
+              - z
+            after:
+              type: object
+              additionalProperties: false
+              properties:
+                x:
+                  type: number
+                  minimum: -100000
+                  maximum: 100000
+                z:
+                  type: number
+                  minimum: -100000
+                  maximum: 100000
+              required:
+              - x
+              - z
+            expiresAt:
+              type: integer
+            observedAt:
+              type: integer
+          required: []
+      required:
+      - id
+      - roomId
+      - worldId
+      - playerId
+      - state
+      - expiresAt
+      - serverTime
     BotTaskInput:
       type: object
       additionalProperties: false
@@ -7446,6 +8185,7 @@ components:
             mayHaveExecuted: {type: boolean}
             message: {type: string}
             batch: {$ref: '#/components/schemas/WorkbenchBatchResult'}
+            movement: {$ref: '#/components/schemas/WorkbenchMovementResult'}
             output: {type: object, properties: {text: {type: string}, truncated: {type: boolean}}}
     BotDirectoryEnvelope:
       type: object
@@ -10370,12 +11110,43 @@ components:
           items: { $ref: "#/components/schemas/CommandSpawnRecord" }
         total: { type: integer, minimum: 0, description: Number of primary objects reaching the recording step. Absent when the command did not finish the recording sequence; not a guarantee that no additional side effects occurred. }
         omitted: { type: integer, minimum: 0 }
+    WorkbenchMovementResult:
+      type: object
+      description: Bounded per-player effect evidence from the original fixed movement receipt. Partial results must not be replayed.
+      properties:
+        state: {type: string, enum: [confirmed, partial, preview, cancelled]}
+        previewId: {type: string, format: uuid}
+        expiresAt: {type: integer, description: Unix seconds; confirmation expires at this Runtime time}
+        attempted: {type: integer, minimum: 0, maximum: 40}
+        verified: {type: integer, minimum: 0, maximum: 40}
+        observedAt: {type: integer, description: Unix seconds from the Runtime}
+        items:
+          type: array
+          nullable: true
+          maxItems: 40
+          items:
+            type: object
+            properties:
+              playerName: {type: string}
+              playerId: {type: string}
+              state: {type: string, enum: [confirmed, rejected, uncertain, prepared]}
+              reason: {type: string}
+              point: {$ref: '#/components/schemas/MovementPoint'}
+              before: {$ref: '#/components/schemas/MovementPoint'}
+              after: {$ref: '#/components/schemas/MovementPoint'}
+    MovementPoint:
+      type: object
+      required: [x, z]
+      properties:
+        x: {type: number, minimum: -100000, maximum: 100000}
+        z: {type: number, minimum: -100000, maximum: 100000}
     CommandRun:
       type: object
       additionalProperties: false
       required: [id, roomId, worldId, mode, name, risk, status, resultState, mayHaveExecuted, logQuery, createdAt]
       properties:
         batch: {$ref: '#/components/schemas/WorkbenchBatchResult'}
+        movement: {$ref: '#/components/schemas/WorkbenchMovementResult'}
         resultState:
           type: string
           enum: [waiting, output, no_output, output_unavailable, failed, unconfirmed]
@@ -10405,7 +11176,7 @@ components:
           type: string
         mode:
           type: string
-          enum: [builtin, custom, raw]
+          enum: [builtin, custom, raw, location]
         commandId:
           type: string
         name:

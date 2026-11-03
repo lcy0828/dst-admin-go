@@ -61,6 +61,7 @@ type ReceiptCheck struct {
 }
 
 type Run struct {
+	Movement            *MovementResult        `json:"movement,omitempty"`
 	Batch               *BatchResult           `json:"batch,omitempty"`
 	SpawnAudit          *SpawnAudit            `json:"spawnAudit,omitempty"`
 	ResultState         string                 `json:"resultState"`

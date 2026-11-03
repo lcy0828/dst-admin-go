@@ -57,6 +57,9 @@ var taskNames = map[string]bool{
 	"dst_server_action": true, "dst_run": true,
 }
 var taskTerms = map[string]string{
+	"room.locations":                     "有哪些地点 已保存地点 地点列表 基地列表 保存的位置 locations",
+	"location.save":                      "保存位置 保存地点 记录地点 标记地点 记为基地 当前位置 mark location",
+	"player.teleport":                    "传送地点 传送到地点 传送到基地 传送到 回基地 前往位置 teleport destination",
 	"workbench.set_player_invincibility": "普通无敌 仅免伤 不补状态 invincibility",
 	"world.player_modes":                 "模式状态 是否无敌 是否开启无敌 是否开启制造模式 invincibility mode status",
 	"room.status":                        "查服 房间信息 服务器状态 一服信息 server status",
@@ -400,7 +403,7 @@ func recommendedTask(c BotCapability) string {
 	if strings.HasPrefix(c.ID, "world.") {
 		return "dst_world"
 	}
-	if strings.HasPrefix(c.ID, "player.") && c.Access == "write" {
+	if slices.Contains([]string{"player.resurrect", "player.give_item", "player.spawn_entity", "player.kick", "player.god_mode", "player.creative_mode", "player.announce", "player.ban", "player.unban", "player.kill", "player.reset_character"}, c.ID) && c.Access == "write" {
 		return "dst_player_action"
 	}
 	if slices.Contains([]string{"room.start", "room.stop", "room.restart", "room.save", "room.backup.create", "room.backups.configure"}, c.ID) {

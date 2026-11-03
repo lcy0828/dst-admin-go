@@ -94,17 +94,18 @@ func numericArgument(value interface{}) (float64, bool) {
 }
 
 type WorkbenchResult struct {
-	Batch            *BatchResult `json:"batch,omitempty"`
-	RunID            string       `json:"runId"`
-	RoomID           string       `json:"roomId"`
-	WorldID          string       `json:"worldId"`
-	CommandID        string       `json:"commandId"`
-	Status           RunStatus    `json:"status"`
-	Complete         bool         `json:"complete"`
-	ExecutionOutcome string       `json:"executionOutcome"`
-	MayHaveExecuted  bool         `json:"mayHaveExecuted"`
-	Message          string       `json:"message"`
-	Output           *Output      `json:"output,omitempty"`
+	Movement         *MovementResult `json:"movement,omitempty"`
+	Batch            *BatchResult    `json:"batch,omitempty"`
+	RunID            string          `json:"runId"`
+	RoomID           string          `json:"roomId"`
+	WorldID          string          `json:"worldId"`
+	CommandID        string          `json:"commandId"`
+	Status           RunStatus       `json:"status"`
+	Complete         bool            `json:"complete"`
+	ExecutionOutcome string          `json:"executionOutcome"`
+	MayHaveExecuted  bool            `json:"mayHaveExecuted"`
+	Message          string          `json:"message"`
+	Output           *Output         `json:"output,omitempty"`
 }
 
 func workbenchResult(run Run) WorkbenchResult {
@@ -114,6 +115,27 @@ func workbenchResult(run Run) WorkbenchResult {
 		r.Message = "固定工作台指令已执行并收到回执；具体效果以输出和最新游戏状态为准"
 	}
 	r.Batch = batchResult(run)
+	if movementCommand(run.CommandID) && (run.Status == RunSucceeded || run.Movement != nil) {
+		r.Movement = run.Movement
+		if r.Movement == nil {
+			r.Movement = movementResult(run)
+		}
+		if r.Movement == nil {
+			r.Status, r.Complete, r.ExecutionOutcome = RunUncertain, false, "unconfirmed"
+			r.Message = "缺少有效的传送位置回执，请查看原结果，不要重复提交。"
+		} else if r.Movement.State == "partial" {
+			r.Status = "partial"
+			r.Complete = true
+			r.Message = "操作已结束，部分玩家未完成或位置未确认，请查看逐人结果，不要重复提交。"
+		} else if r.Movement.State == "confirmed" {
+			r.Message = "传送已完成，玩家位置已确认。"
+		} else if r.Movement.State == "preview" {
+			r.Message = "已检查并固定本次玩家和落点，请在 60 秒内确认。尚未传送。"
+		} else {
+			r.Message = "已取消本次传送确认。"
+		}
+		return r
+	}
 	if r.Batch != nil && r.Complete && run.Status == RunSucceeded {
 		switch r.Batch.State {
 		case "preview":

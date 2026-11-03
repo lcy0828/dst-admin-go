@@ -236,7 +236,7 @@ func (s *Service) Chat(ctx context.Context, input ChatInput, emit func(ChatEvent
 			var result Invocation
 			err := checkChatWorldScope(evidence.question, call.Function.Name, raw)
 			if err == nil {
-				result, err = s.Invoke(ctx, principal, call.Function.Name, raw)
+				result, err = s.Invoke(WithModelChannel(ctx), principal, call.Function.Name, raw)
 			}
 			evidence.record(call.Function.Name, result, err)
 			var data []byte

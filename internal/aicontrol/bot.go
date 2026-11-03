@@ -183,6 +183,7 @@ func BotCapabilities() []BotCapability {
 	list = append(list, workbenchCapabilities()...)
 	list = append(list, playerCapabilities()...)
 	list = append(list, activityCapabilities()...)
+	list = append(list, locationCapabilities()...)
 	for i := range list {
 		c := &list[i]
 		c.ContractVersion = 1
@@ -220,6 +221,9 @@ func BotCapabilities() []BotCapability {
 		}
 		if c.ID == "player.god_mode" || c.ID == "player.creative_mode" {
 			c.BehaviorRevision = consoleapi.WorkbenchBehaviorRevision
+		}
+		if c.ID == "location.save" || c.ID == "player.teleport" {
+			c.ResultKind = "facts"
 		}
 		c.SearchTerms = strings.Fields(taskTerms[c.ID])
 		// Old clients search only 32 terms. Keep one useful alias per action
@@ -417,6 +421,11 @@ func (s *Service) BotExecute(ctx context.Context, p Principal, in BotInput, writ
 	if (c.Access == "write") != write {
 		return BotResult{}, ErrDenied
 	}
+	if IsModelChannel(ctx) && (c.ID == "workbench.teleport_player" || c.ID == "workbench.relocate_players" || c.ID == "workbench.teleport_to_nearest_entity") {
+		// Reject before reserving a write. This known denial must not produce an
+		// uncertain task suggesting that movement might already have happened.
+		return BotResult{}, ErrDenied
+	}
 	if in.ContractVersion != 1 || in.SchemaRevision != c.SchemaRevision {
 		return BotResult{}, ErrConflict
 	}
@@ -541,6 +550,28 @@ func (s *Service) BotExecute(ctx context.Context, p Principal, in BotInput, writ
 	return result, nil
 }
 func botProject(r BotResult, c BotCapability, d map[string]any) BotResult {
+	if c.ID == "location.save" {
+		r.Data = d
+		r.Status = "succeeded"
+		r.Complete = true
+		r.ExecutionOutcome = "confirmed"
+		r.NextAction = "none"
+		return r
+	}
+	if c.ID == "player.teleport" {
+		r.Data = d
+		r.Status = "failed"
+		r.Complete = true
+		r.ExecutionOutcome = "none"
+		r.NextAction = "none"
+		if d["state"] == "prepared" {
+			r.Status = "prepared"
+			r.ExecutionOutcome = "not_required"
+			r.NextAction = "confirm_in_trusted_client"
+		}
+		return r
+	}
+
 	if c.ID == "player.give_item" || c.ID == "player.spawn_entity" || c.Operation == "executeBuiltinRoomCommand" {
 		r.Status = "uncertain"
 		r.Complete = false
@@ -555,7 +586,7 @@ func botProject(r BotResult, c BotCapability, d map[string]any) BotResult {
 		} else {
 			r.WorkbenchRunID = runID
 		}
-		r.Data = botPick(d, "runId", "roomId", "worldId", "playerId", "prefab", "name", "requested", "granted", "spawned", "message", "spawnAudit", "batch", "commandId", "output")
+		r.Data = botPick(d, "runId", "roomId", "worldId", "playerId", "prefab", "name", "requested", "granted", "spawned", "message", "spawnAudit", "batch", "movement", "commandId", "output")
 		r.ObservedAt = d["observedAt"]
 		if runID == "" || d["roomId"] != r.RoomID {
 			return r

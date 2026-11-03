@@ -231,3 +231,61 @@ func TestTaskMissingParametersAndExpiredReadCleanupKeepWrites(t *testing.T) {
 		t.Fatal("write identity removed", e)
 	}
 }
+
+func TestLocationDiscoveryUsesCallableTaskRoutesAndReadScope(t *testing.T) {
+	s, _ := botFixture(t, apiBackendFunc(func(context.Context, Principal, *apicontract.Operation, apicontract.Input) (json.RawMessage, error) {
+		t.Fatal("discovery must not execute an API")
+		return nil, nil
+	}))
+	for _, tc := range []struct{ query, capability, tool, profile string }{
+		{"已保存地点", "room.locations", "dst_read", ProfileGameRead},
+		{"有哪些地点", "room.locations", "dst_read", ProfileGameRead},
+		{"保存地点", "location.save", "dst_run", ProfileGameManage},
+		{"传送到基地", "player.teleport", "dst_run", ProfileGameManage},
+		{"把玩家甲传送到营地", "player.teleport", "dst_run", ProfileGameManage},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			r := callTask(t, s, taskPrincipal(tc.profile), "dst_find", map[string]any{"query": tc.query})
+			items := r.Data.(map[string]any)["items"].([]map[string]any)
+			found := false
+			for _, item := range items {
+				if item["id"] != tc.capability {
+					continue
+				}
+				found = true
+				if item["tool"] != tc.tool {
+					t.Fatalf("uncallable route: %#v", item)
+				}
+				in := item["input"].(map[string]any)
+				if tc.tool == "dst_run" && (in["mode"] != "prepare" || in["capabilityId"] != tc.capability) {
+					t.Fatal(in)
+				}
+			}
+			if !found {
+				t.Fatalf("missing %s: %#v", tc.capability, items)
+			}
+		})
+	}
+	read := callTask(t, s, taskPrincipal(ProfileGameRead), "dst_find", map[string]any{"query": "传送到基地"})
+	for _, item := range read.Data.(map[string]any)["items"].([]map[string]any) {
+		if item["access"] != "read" {
+			t.Fatal("discovery widened permissions", item)
+		}
+	}
+	for _, c := range BotCapabilities() {
+		if c.ID == "room.locations" && (c.Category != "status" || c.Access != "read") {
+			t.Fatal(c)
+		}
+		// New player.* actions must not be routed to an unsupported enum merely
+		// because their ID happens to share the player prefix.
+		if recommendedTask(c) != "dst_player_action" {
+			continue
+		}
+		in := recommendedTaskInput(c)
+		in["player"] = "KU_EXAMPLE"
+		raw, _ := json.Marshal(in)
+		if _, err := parseTask("dst_player_action", raw); err != nil {
+			t.Fatalf("%s: %v", c.ID, err)
+		}
+	}
+}

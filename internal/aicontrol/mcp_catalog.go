@@ -149,6 +149,7 @@ func (s *Service) mcpDefinition(tool Tool) *mcp.Tool {
 // scope is still checked independently; a game-read token gains no log/stream
 // access simply because the dependencies appear in this view.
 var botMCPNames = map[string]bool{
+	"api_executeRoomTeleport": true, "api_cancelRoomTeleport": true, "api_getRoomTeleportPreview": true,
 	"api_getBotProtocol": true, "api_queryBotTask": true, "api_prepareBotTask": true, "api_getBotTask": true, "api_executeBotTask": true,
 	"api_giveRoomPlayerItem": true, "api_getRoomPlayerItemGrant": true,
 	"api_spawnRoomPlayerEntity": true, "api_getRoomPlayerEntitySpawn": true,

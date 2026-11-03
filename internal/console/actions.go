@@ -16,7 +16,7 @@ type Action struct {
 
 // WorkbenchBehaviorRevision invalidates unsubmitted tasks when fixed command
 // semantics change without changing their public parameter schema.
-const WorkbenchBehaviorRevision = "2"
+const WorkbenchBehaviorRevision = "3"
 
 func commandActions(d Definition) []Action {
 	field := map[string]string{"trigger_world_event": "event", "set_player_ability": "ability", "set_character_power": "action", "act_nearby_entities": "action", "set_player_lock": "resource"}[d.ID]

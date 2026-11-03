@@ -40,6 +40,7 @@ import (
 	"dont/internal/httpapi"
 	"dont/internal/jobs"
 	"dont/internal/kubernetesruntime"
+	"dont/internal/locations"
 	"dont/internal/logstream"
 	"dont/internal/luajit"
 	"dont/internal/modartifact"
@@ -803,6 +804,13 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	consoleHandler := httpapi.NewConsoleHandler(commandService)
+	locationStore := locations.NewStore(models.DB(), tablePrefix)
+	if err := locationStore.Migrate(); err != nil {
+		return nil, err
+	}
+	locationService := locations.New(locationStore, commandService, roomService)
+	roomHandler.ConfigureLocationArchive(locationStore.Archive)
+	locationService.ConfigureLeases(operationLeaseService)
 	worldQueryStore := worldquery.NewStore(models.DB(), tablePrefix)
 	if err := worldQueryStore.Migrate(); err != nil {
 		return nil, err
@@ -1097,6 +1105,17 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	}
 	playerHandler := httpapi.NewPlayerHandler(playerService, jobService)
 	consoleHandler.ConfigurePlayerLocator(playerService)
+	locationService.Configure(playerService, func(ctx context.Context, room, world string) (string, error) {
+		a, err := jobStore.LocationBinding(room, world)
+		if err != nil {
+			return "", err
+		}
+		b, err := commandStore.LocationBinding(room, world)
+		if err != nil {
+			return "", err
+		}
+		return a + "/" + b, nil
+	})
 	modUpdateStore := modupdates.NewStore(models.DB(), tablePrefix)
 	if err := modUpdateStore.Migrate(); err != nil {
 		return nil, err
@@ -1514,6 +1533,8 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		chatLogHandler.Register(v2)
 		structuredLogHandler.Register(v2)
 		consoleHandler.Register(v2)
+		locationService.ConfigureMapSource(worldMapService.LocationSource)
+		httpapi.NewLocationsHandler(locationService, aiStore).Register(v2)
 		httpapi.NewWorldQueryHandler(worldQueryService, aiStore).Register(v2)
 		playerHandler.Register(v2)
 		worldStateHandler.Register(v2)

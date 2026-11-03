@@ -580,7 +580,7 @@ func builtinTemplates() map[string]template {
 			if err != nil {
 				return "", err
 			}
-			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;local target=nil;local distance=nil;if p and p.Transform then local x,y,z=p.Transform:GetWorldPosition();for _,e in pairs(Ents or {})do if e~=p and e.prefab==%s and e:IsValid()and e.Transform and not e:HasTag("INLIMBO")then local ex,ey,ez=e.Transform:GetWorldPosition();local d=(ex-x)*(ex-x)+(ez-z)*(ez-z);if distance==nil or d<distance then target=e;distance=d end end end;if target then local tx,ty,tz=target.Transform:GetWorldPosition();if p.Physics then p.Physics:Teleport(tx,ty,tz)else p.Transform:SetPosition(tx,ty,tz)end end end;print("[DST-ADMIN-TELEPORT-PREFAB]",%s,%s,target~=nil)`, quoteLua(playerID), quoteLua(prefab), quoteLua(playerID), quoteLua(prefab)), nil
+			return fmt.Sprintf(`local p=UserToPlayer(%s);if not p or not p.Transform then error("PLAYER_OFFLINE")end;local x,_,z=p.Transform:GetWorldPosition();local target,distance=nil,nil;local count,deadline=0,os.clock()+.004;for _,e in pairs(Ents or {})do count=count+1;if count>4096 or os.clock()>deadline then error("NEAREST_SCAN_INCOMPLETE")end;if e~=p and e.prefab==%s and e:IsValid()and e.Transform and not e:HasTag("INLIMBO")then local ex,_,ez=e.Transform:GetWorldPosition();local d=(ex-x)^2+(ez-z)^2;if not distance or d<distance then target=e;distance=d end end end;if not target then error("ENTITY_NOT_FOUND")end;local tx,_,tz=target.Transform:GetWorldPosition();local w=DSTAdmin and DSTAdmin.Commands and DSTAdmin.Commands.Workbench;if not w or not w.MovePlayers then error("WORKBENCH_UPDATE_REQUIRED")end;w.MovePlayers({{id=p.userid,x=tx,z=tz}})`, quoteLua(playerID), quoteLua(prefab)), nil
 		},
 	}
 	templates["remove_nearby_entities"] = template{
@@ -641,6 +641,7 @@ func builtinTemplates() map[string]template {
 		}
 		templates[id] = tmpl
 	}
+	addMovementPreviews(templates)
 	return templates
 }
 

@@ -19,6 +19,20 @@ type receiptReader interface {
 // ResultState describes evidence, not arbitrary Lua's business meaning. Only a
 // script's printed 0 can establish a zero count; missing output cannot.
 func describeResult(run Run) Run {
+	run.Movement = movementResult(run)
+	if movementCommand(run.CommandID) && run.Mode == "builtin" && strings.Contains(run.Script, "w.MovePlayers(") && run.Status == RunSucceeded {
+		if run.Movement == nil || run.Movement.State == "partial" {
+			run.Status = RunUncertain
+			run.MayHaveExecuted = true
+			run.Message = "部分玩家的位置尚未确认，请查看逐人结果和原回执，不要重复提交。"
+		} else if run.Movement.State == "confirmed" {
+			run.Message = "传送已完成，玩家位置已确认。"
+		} else if run.Movement.State == "preview" {
+			run.Message = "已检查并固定本次玩家和落点，请在 60 秒内确认。尚未传送。"
+		} else {
+			run.Message = "已取消本次传送确认。"
+		}
+	}
 	run.Batch = batchResult(run)
 	if run.Mode == "builtin" && run.CommandID == "act_nearby_entities" && strings.Contains(run.Script, "w.Nearby(") && run.Status == RunSucceeded && run.Batch == nil {
 		run.Status = RunUncertain

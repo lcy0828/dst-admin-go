@@ -69,6 +69,25 @@ func TestBotDirectoryPermissionsAndAtomicPages(t *testing.T) {
 		t.Fatal(seen)
 	}
 }
+
+func TestModelBotRecipesCannotReserveLegacyMovement(t *testing.T) {
+	s, store := botFixture(t, apiBackendFunc(func(context.Context, Principal, *apicontract.Operation, apicontract.Input) (json.RawMessage, error) {
+		t.Fatal("model reached trusted movement backend")
+		return nil, nil
+	}))
+	p := Principal{ID: "example-manager", Profile: ProfilePanelManage, RoomIDs: []string{"room-a"}}
+	for _, id := range []string{"workbench.teleport_player", "workbench.relocate_players", "workbench.teleport_to_nearest_entity"} {
+		in := botInput(t, s, p, id, "model-forged-confirmation")
+		in.Parameters = map[string]any{"phase": "execute", "confirmed": true, "legacy": true}
+		if _, err := s.BotExecute(WithModelChannel(context.Background()), p, in, true); !errors.Is(err, ErrDenied) {
+			t.Fatalf("%s: %v", id, err)
+		}
+	}
+	var count int
+	if err := store.db.Table(store.callTable).Where("tool = ?", "bot.write").Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("rejected requests reserved writes: %d %v", count, err)
+	}
+}
 func pageCursor(t *testing.T, s *Service, p Principal) string {
 	t.Helper()
 	page, e := s.BotDirectory(p, 1, 2, "", "")

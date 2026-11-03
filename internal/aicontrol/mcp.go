@@ -46,7 +46,7 @@ func (s *Service) MCP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "AI_INVALID_TOOL_FILTER", http.StatusBadRequest)
 		return
 	}
-	ctx = context.WithValue(ctx, mcpViewKey{}, view)
+	ctx = context.WithValue(WithModelChannel(ctx), mcpViewKey{}, view)
 	r = r.WithContext(ctx)
 	s.mcpOnce.Do(s.initializeMCP)
 	if s.mcpError != nil {

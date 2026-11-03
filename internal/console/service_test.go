@@ -518,7 +518,7 @@ func TestPlayerMaintenanceAndTeleportCommands(t *testing.T) {
 	if _, err := service.Execute(context.Background(), "room", "world", request); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(sender.script, `v.userid=="KU_SOURCE"`) || !strings.Contains(sender.script, `v.userid=="KU_TARGET"`) || !strings.Contains(sender.script, `p.Transform:SetPosition(x,y,z)`) {
+	if !strings.Contains(sender.script, `id="KU_SOURCE"`) || !strings.Contains(sender.script, `UserToPlayer("KU_TARGET")`) || !strings.Contains(sender.script, `w.MovePlayers(`) || strings.Contains(sender.script, `Transform:SetPosition`) {
 		t.Fatalf("unexpected teleport script: %s", sender.script)
 	}
 	request.Arguments["destination_id"] = "KU_SOURCE"
