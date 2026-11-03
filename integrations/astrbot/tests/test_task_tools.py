@@ -8,6 +8,35 @@ import test_astrbot_adapter as adapter
 
 @unittest.skipUnless(adapter.AVAILABLE, "requires real AstrBot")
 class TaskAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_world_read_discovery_and_explicit_user_shard_survive_model_omission(self):
+        bot,event=self.companion(),self.event('admin')
+        bot.config['public_queries'].append('world')
+        await bot.prepare(event)
+        bot.input=lambda event: ('读取洞穴的季节和昼夜',)
+        item={'id':'world.world_info','title':'世界信息','category':'world','access':'read',
+              'parameters':{'type':'object','properties':{'worldId':{'type':'string'}},'required':['worldId']},
+              'parameterHints':{'worldId':'world'}}
+        bot.directory.items.return_value=[item]
+        found=json.loads(await bot.tasks.perform(event,'dst_find',query='读取洞穴世界的季节和昼夜信息'))
+        self.assertEqual(found['items'][0]['id'],'world.world_info')
+        bot.gateway.call=AsyncMock(return_value={'items':[{'id':'surface','name':'Master','role':'master'}, {'id':'underground','name':'Caves','role':'caves'}]})
+        await bot.tasks.perform(event,'dst_world',room='r1',view='world_info')
+        self.assertEqual(bot.engine.execute.call_args.args[1].parameters['worldId'],'underground')
+        await bot.terminate()
+
+    async def test_discovery_self_inventory_question_creates_actor_bound_continuation(self):
+        bot,event=self.companion(),self.event('member')
+        await bot.prepare(event)
+        bot.input=lambda event: ('看看我的背包，QQ名不是我的游戏名',)
+        reply=json.loads(await bot.tasks.perform(event,'dst_find',query='玩家背包'))
+        self.assertEqual(reply['state'],'needs_input')
+        actor=await bot.tasks.actor(event)
+        form=bot.state.pending_form(actor.key)
+        self.assertEqual(form['type'],'player')
+        self.assertEqual(form['intent'].kind,'inventory')
+        bot.engine.execute.assert_not_awaited()
+        await bot.terminate()
+
     async def test_player_modes_require_group_grants_and_preserve_false(self):
         from astrbot_plugin_dst_companion.group_permissions import DEFAULT_RULES
 

@@ -122,7 +122,7 @@ class Policy:
             )
             if (
                 not item
-                or not permitted(actor, item)
+                or not permitted(actor, item, args.get("body", {}).get("parameters") if name=="api_runBotCapability" else None)
                 or (name == "api_runBotCapability") != (item["access"] == "write")
             ):
                 raise QueryError("PERMISSION_DENIED")

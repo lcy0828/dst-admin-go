@@ -100,7 +100,7 @@ class NearbyConfirmationTests(unittest.IsolatedAsyncioTestCase):
         result=await engine.handle(manager,'冻结附近生物 KU_TEST123',woken=True)
         self.assertEqual(result.outcome,'needs_selection',result.text)
         form=engine.state.pending_form(manager.key)
-        self.assertEqual(form['parameters'],{'action':'freeze','player_id':'KU_TEST123'})
+        self.assertEqual(form['parameters'],{'action':'freeze','player_id':'KU_TEST123','phase':'preview'})
         self.assertEqual(form['field'],'radius')
         self.assertEqual(panel.executions,0)
         for i,text in enumerate(('别冻结附近生物','不要冻结附近生物','如果冻结附近生物','冻结附近生物会不会影响玩家','冻结附近生物，然后删除','“冻结附近生物”是什么意思')):

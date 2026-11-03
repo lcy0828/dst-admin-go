@@ -36,6 +36,7 @@ ERRORS = {
     "USER_BUSY": "你已有两项查询在处理，请稍等。",
     "RESULT_UNCERTAIN": "操作结果尚未确认，请查询原任务，不要重复提交。",
     "CAPABILITY_MISSING": "面板缺少该能力，请检查版本和 MCP 连接。",
+    "CLIENT_UPDATE_REQUIRED": "这项操作需要更新插件，其他查询可继续使用；也可先在面板操作。",
     "PARAMETER_INVALID": "参数类型或范围不正确，请按提示重新输入，或取消。",
     "DIRECTORY_CHANGED": "能力目录已改变，请重新打开菜单。",
     "CONFIG_CHANGED": "会话配置已改变，请重新选择。",
@@ -212,7 +213,11 @@ class Engine:
                         and item.get("title") == value
                         and permitted(actor, item)
                     ]
-                    if len(matches) == 1:
+                    from .interactions import direct_request
+                    direct=direct_request(value,items,actor)
+                    if direct:
+                        intent=Intent("capability",capability=direct[0],parameters=direct[1])
+                    elif len(matches) == 1:
                         intent = Intent("capability", capability=matches[0]["id"])
                     elif not matches:
                         from .discovery import actions as discover_actions
@@ -221,6 +226,8 @@ class Engine:
                             if not permitted(actor, item):
                                 continue
                             for action in discover_actions(item):
+                                if not permitted(actor,item,action["parameters"]):
+                                    continue
                                 for term in dict.fromkeys([action["title"], *action["searchTerms"]]):
                                     if value == term or value.startswith(term + " "):
                                         params = dict(action["parameters"])
@@ -609,8 +616,19 @@ class Engine:
             text = await self.actions.submit_teleport(actor, item, target, frozen["teleportPreview"], deadline)
             return Reply("matched", text, target)
         parameters = dict(frozen["parameters"] if frozen else intent.parameters or {})
-        schema = item["parameters"]
-        critical = item.get("risk") == "critical" and item["access"] == "write"
+        import copy
+        schema = copy.deepcopy(item["parameters"])
+        for row in item.get("actions",[]):
+            if not permitted(actor,item,row.get("parameters",{})):
+                for field,value in row.get("parameters",{}).items():
+                    prop=schema.get("properties",{}).get(field,{})
+                    if value in prop.get("enum",[]): prop["enum"].remove(value)
+        from .interactions import interaction, effective_risk, preview_seconds
+        selector_missing=any(row.get("parameters") and any(key not in parameters for key in row["parameters"]) for row in item.get("actions",[]) if isinstance(row,dict))
+        if not permitted(actor, item, parameters) and not selector_missing:
+            raise QueryError("PERMISSION_DENIED")
+        critical = effective_risk(item,parameters) == "critical" and item["access"] == "write"
+        flow = interaction(item, parameters)
         from .private_connection import LEGACY_MOVEMENT
         movement = item["id"] in LEGACY_MOVEMENT and "phase" in schema.get("properties", {})
         if movement and not (frozen and frozen.get("userConfirmed") is True):
@@ -619,11 +637,11 @@ class Engine:
             parameters.pop("preview_id", None)
             parameters["phase"] = "preview"
         movement_preview = movement and parameters.get("phase") == "preview"
-        nearby_preview = (item["id"] == "workbench.act_nearby_entities"
-                          and parameters.get("action") in {"extinguish", "freeze", "sleep", "pacify", "delete", "kill"}
-                          and parameters.get("phase", "preview") == "preview"
-                          and "phase" in schema.get("properties", {}))
-        if critical:
+        if flow and not (frozen and frozen.get("userConfirmed") is True):
+            parameters.pop("preview_id", None)
+            parameters["phase"] = "preview"
+        nearby_preview = bool(flow and parameters.get("phase") == "preview")
+        if critical or flow:
             parameters.pop("confirmed", None)
         for key, hint in item.get("parameterHints", {}).items():
             if (
@@ -657,11 +675,11 @@ class Engine:
                     return Reply("handled_error", "没有确认的唯一玩家，请提供更完整昵称或 KU ID。")
                 parameters[key] = resolved["items"][0]["id"]
         for key, prop in schema.get("properties", {}).items():
-            if movement and key in {"phase", "preview_id"}:
+            if (movement or flow) and key in {"phase", "preview_id"}:
                 continue
             if (item["id"] == "workbench.act_nearby_entities" and parameters.get("action") != "till" and key == "layout") or (nearby_preview and key in {"phase", "preview_id"}):
                 continue
-            if critical and key == "confirmed":
+            if (critical or flow) and key == "confirmed":
                 continue
             if key in parameters or key not in schema.get("required", []) and "default" not in prop:
                 continue
@@ -710,7 +728,7 @@ class Engine:
                 + hint
                 + "。取消退出。",
             )
-        if (critical or intent.confirm_required or item["id"] in LEGACY_MOVEMENT) and not nearby_preview and not movement_preview and item["id"] != "player.teleport":
+        if (critical or intent.confirm_required or flow or item["id"] in LEGACY_MOVEMENT) and not nearby_preview and not movement_preview and item["id"] != "player.teleport":
             if not frozen or frozen.get("userConfirmed") is not True:
                 self.state.form(
                     actor.key,
@@ -734,7 +752,7 @@ class Engine:
                     + json_values([str(k) + "=" + str(v) for k, v in parameters.items()])
                     + "\n请直接回复 确认，或回复 取消。尚未执行。",
                 )
-            if critical:
+            if critical or flow:
                 parameters["confirmed"] = True
         if item["access"] == "write":
             if not self.actions:
@@ -764,9 +782,16 @@ class Engine:
             batch = evidence.get("data", {}).get("batch") if isinstance(evidence, dict) else None
             if (nearby_preview and isinstance(batch, dict) and batch.get("state") == "preview"
                     and isinstance(batch.get("previewId"), str) and evidence.get("complete") is True):
+                if flow and batch.get("version",1)!=flow["resultVersion"]:
+                    raise QueryError("CLIENT_UPDATE_REQUIRED")
+                seconds=preview_seconds(batch,self.state.clock()-preview_started)
+                if seconds<=0:
+                    return Reply("handled_error","预览已过期，请重新检查。尚未执行。")
+                if batch.get("matched")==0:
+                    return Reply("matched",text,target,data=evidence)
                 execution = {**parameters, "phase": "execute", "preview_id": batch["previewId"]}
                 self.state.form(actor.key, {"type": "confirmation", "intent": intent, "target": target,
-                    "item": item, "parameters": execution, "configRevision": actor.config_revision, "previewUntil": preview_started + 30}, sequence=seq)
+                    "item": item, "parameters": execution, "configRevision": actor.config_revision, "previewUntil": preview_started + preview_seconds(batch, 0)}, sequence=seq)
                 return Reply("needs_selection", text + "\n请在 30 秒内直接回复 确认，或回复 取消。尚未修改游戏。", target, data=evidence)
             result = self.decorate(actor, "action", title, text, room=title, player=target.name)
         else:

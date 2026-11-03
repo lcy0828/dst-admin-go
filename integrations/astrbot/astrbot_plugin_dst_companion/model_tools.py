@@ -39,6 +39,11 @@ def capability_page(items, actor, parameters, access):
         and permitted(actor, c)
         and (not search or search.casefold() in (c["id"] + " " + c.get("title", "")).casefold())
     ]
+    import copy
+    rows=copy.deepcopy(rows)
+    for row in rows:
+        if "actions" in row:
+            row["actions"]=[action for action in row["actions"] if permitted(actor,row,action.get("parameters",{}))]
     end = offset + limit
     return json.dumps(
         {

@@ -142,7 +142,14 @@ def parse_parameter(text, schema):
         raise QueryError("PARAMETER_INVALID") from None
 
 
-def permitted(actor, item):
+def permitted(actor, item, parameters=None):
+    from .interactions import effective_risk
+    risk=effective_risk(item,parameters)
+    if parameters is None and risk=="critical" and actor.workbench_mode=="standard":
+        # Directory visibility is not execution authorization. Each submission
+        # below rechecks the selected code-owned action, including phase.
+        if any(isinstance(a,dict) and a.get("risk") in {"low","medium","high"} for a in item.get("actions",[])):
+            risk="high"
     if item.get("id") in actor.disabled_capabilities:
         return False
     if item.get("category") not in KNOWN_CATEGORIES:
@@ -155,7 +162,7 @@ def permitted(actor, item):
             )
             and item.get("risk") in {"low", "medium", "high", "critical"}
             and actor.workbench_mode in {"standard", "all"}
-            and (item.get("risk") != "critical" or actor.workbench_mode == "all")
+            and (risk != "critical" or actor.workbench_mode == "all")
         )
         return actor.role in {"game-manage", "panel-manage"} and (
             item["id"] in actor.write_allowlist or workbench
@@ -272,7 +279,7 @@ class Directory:
         )
 
     async def execute(self, actor, item, room, parameters, deadline, request_id=None):
-        if not permitted(actor, item) or room not in actor.rooms:
+        if not permitted(actor, item, parameters) or room not in actor.rooms:
             raise QueryError("PERMISSION_DENIED")
         validate(parameters, item["parameters"])
         request_id = request_id or "astrbot-" + uuid.uuid4().hex

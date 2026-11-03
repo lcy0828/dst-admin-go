@@ -165,7 +165,13 @@ class PrivatePanel:
         if not isinstance(room, str) or not room or len(room) > 255:
             raise QueryError("PARAMETER_INVALID")
         body = arguments.get("body", {})
-        if name == "api_runBotCapability" and path.get("capabilityId") in LEGACY_MOVEMENT:
+        if name == "api_runBotCapability" and (
+            path.get("capabilityId") in LEGACY_MOVEMENT or
+            isinstance(path.get("capabilityId"),str) and re.fullmatch(r"workbench\.[a-z][a-z0-9_]{0,63}",path["capabilityId"])
+            and body.get("parameters",{}).get("phase") in {"execute","cancel"}
+            and isinstance(body.get("parameters",{}).get("preview_id"),str)
+            and re.fullmatch(r"[a-f0-9-]{36}",body["parameters"]["preview_id"])
+        ):
             # Only the trusted engine reaches this adapter, after rechecking the
             # actual group member and consuming their confirmation message.
             suffix = "/bot/actions/" + path["capabilityId"]
@@ -205,7 +211,11 @@ class PrivatePanel:
 
         seconds = read_timeout_seconds.total_seconds() if read_timeout_seconds else 18
         if name in {"api_executeRoomTeleport", "api_cancelRoomTeleport"} or (
-            name == "api_runBotCapability" and arguments.get("path", {}).get("capabilityId") in LEGACY_MOVEMENT
+            name == "api_runBotCapability" and (
+                arguments.get("path", {}).get("capabilityId") in LEGACY_MOVEMENT or
+                str(arguments.get("path",{}).get("capabilityId","")).startswith("workbench.")
+                and arguments.get("body",{}).get("parameters",{}).get("phase") in {"execute","cancel"}
+            )
         ):
             return CallToolResult.model_validate(await self.confirmation_request(name, arguments, seconds))
         # No retry here, including transport loss after a management request.

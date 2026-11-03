@@ -73,6 +73,8 @@ TERMS = {
     "player.give_item": "发物品 发放 给予 物品 肉丸 give item meatballs",
     "player.spawn_entity": "生成 刷生物 座狼 狗王 spawn",
     "world.entity_count": "统计 数量 蜘蛛巢 多少 count entity",
+    "world.world_info": "世界信息 季节 昼夜 天气 月相 天数 season phase weather",
+    "world.online_players": "分片玩家 世界玩家 地面玩家 洞穴玩家",
     "player.activity": "活动 做了什么 干了什么 最近行为 activity",
     "player.trajectory": "去哪 去了哪里 位置 地点 轨迹 trajectory",
     "player.combat": "打了谁 打怪 打boss 战斗 combat",
@@ -211,9 +213,15 @@ class TaskTools:
             parsed = self.plugin.input(event)
             aliases = dict(self.plugin.effective(actor.scope[-1])["roomAliases"])
             original = parsed[0] if parsed else ""
-            if (name in {"dst_player", "dst_player_action"} or
+            if name=='dst_world' and not values.get('world'):
+                # Recover only an explicit, unique shard in the user's message;
+                # the model omitting a required selector must not erase it.
+                worlds=[label for label in ('地面','洞穴') if label in original]
+                if len(worlds)==1: values['world']=worlds[0]
+            own_query = re.search(r"(?:我|自己)(?:的)?(?:背包|信息|资料|网络|延迟|活动|轨迹|战斗|位置)|(?:给|复活|踢出|踢掉)我(?:[，。\s]|$)", original)
+            discovery_identity = name=='dst_find' and own_query and re.search(r"(?:看看|查|看下|读取).*(?:我|自己)(?:的)?(?:背包|信息|资料|网络|延迟)",original)
+            if (name in {"dst_player", "dst_player_action"} or discovery_identity or
                     name in {"dst_read", "dst_run"} and values.get("capability_id", "").startswith("player.")):
-                own_query = re.search(r"(?:我|自己)(?:的)?(?:背包|信息|资料|网络|延迟|活动|轨迹|战斗|位置)|(?:给|复活|踢出|踢掉)我(?:[，。\s]|$)", original)
                 supplied = values.get("player") or (values.get("parameters") or {}).get("playerId") or (values.get("parameters") or {}).get("player_id")
                 explicit_name = bool(isinstance(supplied, str) and supplied and (
                     re.fullmatch(r"KU_[A-Za-z0-9_-]{3,64}", supplied) and supplied in original

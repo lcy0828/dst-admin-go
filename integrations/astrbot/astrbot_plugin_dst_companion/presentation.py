@@ -145,13 +145,35 @@ def business(result, *, diagnostics=False):
             body = describe_movement(movement)
         if isinstance(batch, dict) and batch.get("state") in {"preview", "cancelled", "completed", "partial"}:
             if batch["state"] == "preview":
-                body = "🔎 范围预览：" + fmt.safe(batch.get("matched")) + " 个符合条件的对象。\n尚未修改游戏；确认后只处理本次预览中的对象。"
+                body = "🔎 操作预览：" + fmt.safe(batch.get("matched")) + " 个符合条件的对象。\n尚未修改游戏；确认后只处理本次预览中的对象。"
             elif batch["state"] == "cancelled":
-                body = "已取消范围操作，没有修改游戏。"
+                body = "已取消本次确认，没有修改游戏。"
             else:
-                body = ("范围操作已结束\n已确认生效：" + fmt.safe(batch.get("verified"))
+                body = ("操作已结束\n已确认生效：" + fmt.safe(batch.get("verified"))
                         + " · 效果待确认：" + fmt.safe(batch.get("unconfirmed"))
                         + "\n跳过：" + fmt.safe(batch.get("skipped")) + " · 失败：" + fmt.safe(batch.get("failed")))
+            if batch.get("version")==2:
+                if batch.get('action') in {'set_player_hunger_rate','set_wanda_age'}:
+                    label='面板附加饥饿倍率' if batch['action']=='set_player_hunger_rate' else '年龄'
+                    for row in batch.get('items',[])[:1]:
+                        body+='\n'+label+'：'+fmt.safe(row.get('before'))+' → '+fmt.safe(row.get('after'))
+                        if batch['state']=='preview':body+='（预计）'
+                        elif row.get('state')!='verified':body+='（结果待确认）'
+                if batch["state"]=="preview" and any(row.get("destination")=="inventory" for row in batch.get("items",[])):
+                    body+="\n物品交给所选玩家，不处理容器内物品。"
+                if any(row.get("destination")=="rebuild" for row in batch.get("items",[])):
+                    body+="\n在原位置重建科技站；不能找回烧毁前已丢失的数据。"
+                if batch.get("units") and batch["state"]!="preview":
+                    body+="\n已确认收到物品："+fmt.safe(batch["units"])+" 个"
+                reasons={"INVENTORY_FULL":"背包空间不足","TARGET_CHANGED":"对象状态已变化","TARGET_UNAVAILABLE":"暂时无法核对对象","CPU_BUDGET":"已达到本次处理时限","INVENTORY_UNAVAILABLE":"无法读取背包","MATERIAL_UNAVAILABLE":"无法准备肥料","TRANSITION_PENDING":"变身或年龄调整的结果待确认；暂停时需等待游戏继续","REBUILD_UNAVAILABLE":"暂时无法重建","REBUILD_UNCONFIRMED":"重建结果待确认","EFFECT_UNCONFIRMED":"效果待确认","OUTPUT_UNCONFIRMED":"收获物品去向待确认"}
+                counts={}
+                for row in batch.get("items",[]):
+                    if row.get("reason"):counts[row["reason"]]=counts.get(row["reason"],0)+1
+                for reason,count in list(counts.items())[:5]:
+                    body+="\n"+reasons.get(reason,"结果待核对")+"："+str(count)+" 项"
+                if batch.get("matched")==0:
+                    body="附近没有符合条件的对象，没有执行修改。"
+
 
     if len(body) > 1500:
         body = body[:1500] + "\n（仅展示部分内容）"
@@ -162,7 +184,7 @@ def business(result, *, diagnostics=False):
     if result.get("resultKind") == "workbench-run" and status == "succeeded":
         footer = "指令执行完成 · 游戏内效果待确认"
         if isinstance(data, dict) and isinstance(data.get("batch"), dict):
-            footer = {"preview": "预览有效期 30 秒", "cancelled": "已取消", "completed": "效果已确认"}.get(data["batch"].get("state"), "部分完成，请勿重复提交")
+            footer = {"preview": "预览有效期 30 秒", "cancelled": "已取消", "completed": "效果已确认" if data["batch"].get("matched") else "没有执行修改"}.get(data["batch"].get("state"), "部分完成，请勿重复提交")
         if isinstance(data, dict) and isinstance(data.get("movement"), dict):
             footer = {"preview":"检查有效期 60 秒", "cancelled":"已取消", "confirmed":"位置已确认"}.get(data["movement"].get("state"),"部分完成，请勿重复提交")
     if status in {"partial", "uncertain", "unavailable"} or result.get("complete") is not True:
