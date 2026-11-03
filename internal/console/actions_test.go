@@ -9,7 +9,7 @@ func TestActionCatalogUsesOnlyCodeOwnedEnumSuggestions(t *testing.T) {
 	for _, d := range BuiltinWorkbenchDefinitions() {
 		for _, a := range d.Actions {
 			t.Run(a.ID, func(t *testing.T) {
-				if seen[a.ID] || a.Risk != d.Risk || a.Title == "" || len(a.Parameters) != 1 {
+				if seen[a.ID] || a.Risk != actionRisk(d.ID, a.Parameters["action"], d.Risk) || a.Title == "" || len(a.Parameters) != 1 {
 					t.Fatal(a)
 				}
 				seen[a.ID] = true

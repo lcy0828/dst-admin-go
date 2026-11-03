@@ -15,7 +15,12 @@ func workbenchLua(t *testing.T) *lua.LState {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if e = L.DoString(string(source) + `;W=Workbench
+	var modules string
+	for _, name := range []string{"nearby_adapters.lua", "player_settings.lua", "workbench_v2.lua"} {
+		b, _ := embeddedAssets.ReadFile("assets/" + name)
+		modules += string(b) + "\n"
+	}
+	if e = L.DoString(modules + string(source) + `;W=Workbench
 now=100;os.time=function()return now end;os.clock=function()return 0 end
 TheWorld={};mutations=0;last=nil;print=function(text)last=text end
 p={Transform={GetWorldPosition=function()return 0,0,0 end}};UserToPlayer=function(id)if id=="KU_EXAMPLE"then return p end end

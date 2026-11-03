@@ -3,6 +3,7 @@ package aicontrol
 import (
 	"context"
 	"dont/internal/apicontract"
+	consoleapi "dont/internal/console"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -282,6 +283,35 @@ func TestBotSchemaRevisionSeparatesPresentationFromAuthorization(t *testing.T) {
 	capability.Category = "a-new-private-category"
 	if botSchemaRevision(capability) == original {
 		t.Fatal("privacy change retained old executable contract")
+	}
+}
+
+func TestBotActionSchemaRevisionTracksEffectAndAuthority(t *testing.T) {
+	makeCapability := func() BotCapability {
+		return BotCapability{ID: "workbench.act_nearby_entities", BehaviorRevision: "4", Actions: []consoleapi.Action{{
+			ID: "act_nearby_entities.pick", Title: "拾取地面物品", SearchTerms: []string{"拾取"}, Parameters: map[string]string{"action": "pick"}, Risk: consoleapi.RiskHigh,
+			Interaction: &consoleapi.Interaction{Kind: "preview-confirm-v1", ResultVersion: 2, EffectVersion: "1"},
+		}}}
+	}
+	original := botSchemaRevision(makeCapability())
+	textOnly := makeCapability()
+	textOnly.Actions[0].Title = "新的中文名称"
+	textOnly.Actions[0].Description = "更新说明"
+	textOnly.Actions[0].SearchTerms = []string{"新别名"}
+	if botSchemaRevision(textOnly) != original {
+		t.Fatal("presentation invalidated existing confirmation")
+	}
+	for _, change := range []func(*BotCapability){
+		func(c *BotCapability) { c.Actions[0].Risk = consoleapi.RiskCritical },
+		func(c *BotCapability) { c.Actions[0].Interaction.EffectVersion = "2" },
+		func(c *BotCapability) { c.Actions[0].Interaction.ResultVersion = 3 },
+		func(c *BotCapability) { c.Actions[0].Parameters["action"] = "delete" },
+	} {
+		c := makeCapability()
+		change(&c)
+		if botSchemaRevision(c) == original {
+			t.Fatal("effect/authority change preserved an obsolete confirmation")
+		}
 	}
 }
 func TestBotUnderlyingIdempotencySeparatesCredentials(t *testing.T) {

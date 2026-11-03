@@ -23,21 +23,22 @@ import (
 // Bot capabilities are code-owned recipes. Neither metadata nor callers can
 // supply a handler, operation, script or alternate execution URL.
 type BotCapability struct {
-	Actions          []consoleapi.Action `json:"actions,omitempty"`
-	BehaviorRevision string              `json:"behaviorRevision,omitempty"`
-	ID               string              `json:"id"`
-	SearchTerms      []string            `json:"searchTerms,omitempty"`
-	Title            string              `json:"title"`
-	Category         string              `json:"category"`
-	Access           string              `json:"access"`
-	ContractVersion  int                 `json:"contractVersion"`
-	SchemaRevision   string              `json:"schemaRevision"`
-	Parameters       map[string]any      `json:"parameters"`
-	ParameterHints   map[string]string   `json:"parameterHints"`
-	NativeTools      []string            `json:"nativeTools"`
-	ResultKind       string              `json:"resultKind"`
-	Risk             string              `json:"risk,omitempty"`
-	Operation        string              `json:"-"`
+	Interaction      *consoleapi.Interaction `json:"interaction,omitempty"`
+	Actions          []consoleapi.Action     `json:"actions,omitempty"`
+	BehaviorRevision string                  `json:"behaviorRevision,omitempty"`
+	ID               string                  `json:"id"`
+	SearchTerms      []string                `json:"searchTerms,omitempty"`
+	Title            string                  `json:"title"`
+	Category         string                  `json:"category"`
+	Access           string                  `json:"access"`
+	ContractVersion  int                     `json:"contractVersion"`
+	SchemaRevision   string                  `json:"schemaRevision"`
+	Parameters       map[string]any          `json:"parameters"`
+	ParameterHints   map[string]string       `json:"parameterHints"`
+	NativeTools      []string                `json:"nativeTools"`
+	ResultKind       string                  `json:"resultKind"`
+	Risk             string                  `json:"risk,omitempty"`
+	Operation        string                  `json:"-"`
 	build            func(string, map[string]any) apicontract.Input
 }
 type BotInput struct {
@@ -975,7 +976,10 @@ func botStoredStatus(result BotResult) string {
 }
 
 func botSchemaRevision(c BotCapability) string {
-	parts := []any{c.ID, c.Access, c.Category, c.Risk, c.Parameters, c.ParameterHints, c.Operation, c.NativeTools, c.ResultKind, c.ContractVersion}
+	parts := []any{c.ID, c.Access, c.Category, c.Risk, c.Parameters, c.ParameterHints, c.Operation, c.NativeTools, c.ResultKind, c.ContractVersion, c.Interaction}
+	for _, a := range c.Actions {
+		parts = append(parts, []any{a.ID, a.Parameters, a.Risk, a.Interaction})
+	}
 	if c.BehaviorRevision != "" {
 		parts = append(parts, c.BehaviorRevision)
 	}

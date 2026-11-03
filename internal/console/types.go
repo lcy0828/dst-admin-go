@@ -24,16 +24,17 @@ type Parameter struct {
 }
 
 type Definition struct {
-	Actions     []Action    `json:"actions,omitempty"`
-	ScriptMode  string      `json:"scriptMode,omitempty"`
-	ID          string      `json:"id"`
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	Category    string      `json:"category"`
-	Risk        Risk        `json:"risk"`
-	Parameters  []Parameter `json:"parameters"`
-	Script      string      `json:"script"`
-	IsBuiltin   bool        `json:"isBuiltin"`
+	Interaction *Interaction `json:"interaction,omitempty"`
+	Actions     []Action     `json:"actions,omitempty"`
+	ScriptMode  string       `json:"scriptMode,omitempty"`
+	ID          string       `json:"id"`
+	Name        string       `json:"name"`
+	Description string       `json:"description"`
+	Category    string       `json:"category"`
+	Risk        Risk         `json:"risk"`
+	Parameters  []Parameter  `json:"parameters"`
+	Script      string       `json:"script"`
+	IsBuiltin   bool         `json:"isBuiltin"`
 }
 
 type RunStatus string

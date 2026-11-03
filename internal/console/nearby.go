@@ -24,8 +24,19 @@ func bindNearbyCaller(ctx context.Context, room, world, script string) (string, 
 }
 
 func guardedNearby(action string) bool {
+	if nearbyV2(action) {
+		return true
+	}
 	switch action {
 	case "extinguish", "freeze", "sleep", "pacify", "delete", "kill":
+		return true
+	}
+	return false
+}
+
+func nearbyV2(action string) bool {
+	switch action {
+	case "pick", "repair", "fertilize", "grow", "ripen", "harvest", "repair_burnt":
 		return true
 	}
 	return false
@@ -43,10 +54,10 @@ func nearbyPhase(args map[string]interface{}) string {
 // our fixed nearby commands. The legacy generic API keeps its confirmation.
 func EffectiveWorkbenchRisk(d Definition, args map[string]interface{}) Risk {
 	action, _ := args["action"].(string)
-	if d.ID == "act_nearby_entities" && guardedNearby(action) && (nearbyPhase(args) == "preview" || nearbyPhase(args) == "cancel") {
+	if actionInteraction(d.ID, action) != nil && (nearbyPhase(args) == "preview" || nearbyPhase(args) == "cancel") {
 		return RiskLow
 	}
-	return d.Risk
+	return actionRisk(d.ID, action, d.Risk)
 }
 
 func renderGuardedNearby(args map[string]interface{}, playerID, action, prefab string, radius int) (string, error) {
@@ -59,6 +70,9 @@ func renderGuardedNearby(args map[string]interface{}, playerID, action, prefab s
 		if _, err := uuid.Parse(token); err != nil {
 			return "", ErrInvalidArguments
 		}
+	}
+	if nearbyV2(action) {
+		return fmt.Sprintf(`local r=rawget(_G,"DSTAdmin");local w=r and r.Commands and r.Commands.Workbench;if not w or not w.NearbyV2 or w.ResultVersion~=2 then error("WORKBENCH_UPDATE_REQUIRED")end;w.NearbyV2(%s,%s,%d,%s,%s,%s,%s,_dst_admin_batch_caller,_dst_admin_batch_request)`, quoteLua(playerID), quoteLua(action), radius, quoteLua(prefab), quoteLua(phase), quoteLua(token), quoteLua(uuid.NewString())), nil
 	}
 	return fmt.Sprintf(`local r=rawget(_G,"DSTAdmin");local w=r and r.Commands and r.Commands.Workbench;if not w or not w.Nearby then error("WORKBENCH_UPDATE_REQUIRED")end;w.Nearby(%s,%s,%d,%s,%s,%s,%s,_dst_admin_batch_caller)`, quoteLua(playerID), quoteLua(action), radius, quoteLua(prefab), quoteLua(phase), quoteLua(token), quoteLua(uuid.NewString())), nil
 }

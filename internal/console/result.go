@@ -33,11 +33,34 @@ func describeResult(run Run) Run {
 			run.Message = "已取消本次传送确认。"
 		}
 	}
+	if run.Mode == "builtin" && run.Status == RunFailed && nearbyPhase(run.Arguments) == "execute" &&
+		(strings.Contains(run.Script, "w.NearbyV2(") || strings.Contains(run.Script, "w.Setting(")) &&
+		(run.ErrorCode == "COMMAND_EXECUTION_FAILED" || run.ErrorCode == "ACTION_FAILED") {
+		run.Status = RunUncertain
+		run.MayHaveExecuted = true
+		run.Message = "本次操作异常结束，无法确认完整效果；请读取原结果，不要重复提交。"
+	}
 	run.Batch = batchResult(run)
-	if run.Mode == "builtin" && run.CommandID == "act_nearby_entities" && strings.Contains(run.Script, "w.Nearby(") && run.Status == RunSucceeded && run.Batch == nil {
+	if run.Mode == "builtin" && (strings.Contains(run.Script, "w.Nearby(") || strings.Contains(run.Script, "w.NearbyV2(") || strings.Contains(run.Script, "w.Setting(")) && run.Status == RunSucceeded && run.Batch == nil {
 		run.Status = RunUncertain
 		run.MayHaveExecuted = true
 		run.Message = "缺少有效的范围操作结果，请查看原回执，不要重复提交。"
+	}
+	if run.Batch != nil {
+		switch run.Batch.State {
+		case "preview":
+			run.Message = "已检查本次对象，尚未修改游戏。请在预览有效期内确认。"
+		case "cancelled":
+			run.Message = "已取消本次确认，没有执行修改。"
+		case "completed":
+			if run.Batch.Matched == 0 {
+				run.Message = "附近没有符合条件的对象，没有执行修改。"
+			} else {
+				run.Message = "操作已完成，效果已确认。"
+			}
+		case "partial":
+			run.Message = "操作已结束，部分对象未处理或效果未确认；请查看结果，不要重复提交。"
+		}
 	}
 	run.SpawnAudit = spawnAudit(run)
 	run.ResultState = "unconfirmed"
@@ -73,6 +96,29 @@ func receiptCompletion(receipt dstruntime.CommandReceipt) ExecutionCompletion {
 		completion.Status, completion.ExecutionOutcome = RunFailed, "rejected"
 		completion.Message, completion.ErrorCode = "DST 未能执行命令", receipt.Code
 		completion.ErrorMessage = strings.TrimSpace(receipt.Message)
+		for _, v := range []struct{ code, message string }{
+			{"WORKBENCH_UPDATE_REQUIRED", "这项操作需要更新运行机器上的游戏管理脚本，请在面板更新后重试。"},
+			{"BATCH_PREVIEW_EXPIRED", "本次预览已失效或对象已变化，请重新检查后确认。"},
+			{"BATCH_PREVIOUS_UNCONFIRMED", "对象的上一次操作结果仍待确认，请先查看原任务，避免重复修改。"},
+			{"BATCH_RATE_LIMIT", "操作过于频繁，请稍等几秒再检查。"},
+			{"BATCH_BUSY", "当前已有操作在准备或执行，请稍后重试。"},
+			{"BATCH_SCAN_LIMIT", "附近对象过多，请缩小范围或指定物品类型。"},
+			{"BATCH_TARGET_LIMIT", "本次操作超过处理数量限制，请缩小范围或指定类型。"},
+			{"BATCH_CPU_LIMIT", "本次检查达到处理时限，请缩小范围。"},
+			{"BATCH_REQUEST_EXPIRED", "请求等待时间过长，尚未开始执行，请重新检查后确认。"},
+			{"WOODIE_TRANSFORM_UNAVAILABLE", "伍迪当前不处于可恢复的兽形，或正在忙碌、骑乘、乘船，请稍后再试。"},
+			{"WANDA_AGE_UNAVAILABLE", "当前玩家不是可调整年龄的旺达，或正在受伤、变身，请稍后再试。"},
+			{"HUNGER_UNSUPPORTED", "当前角色不支持独立的饥饿消耗倍率，尚未修改。"},
+			{"PLAYER_NOT_ALIVE", "这项操作需要玩家存活，尚未修改。"},
+		} {
+			if strings.Contains(completion.ErrorMessage, v.code) {
+				completion.ErrorCode = v.code
+				completion.ErrorMessage = v.message
+				completion.Message = v.message
+				break
+			}
+		}
+
 		if completion.ErrorMessage == "" {
 			completion.ErrorMessage = receipt.Code
 		}

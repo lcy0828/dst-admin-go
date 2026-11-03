@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-type BatchResult struct {
+type batchV1 struct {
 	State       string   `json:"state"`
 	PreviewID   string   `json:"previewId,omitempty"`
 	ExpiresIn   int      `json:"expiresIn,omitempty"`
@@ -23,7 +23,33 @@ type BatchResult struct {
 	Z           *float64 `json:"z,omitempty"`
 }
 
+type BatchItem struct {
+	Prefab      string   `json:"prefab"`
+	State       string   `json:"state"`
+	Reason      string   `json:"reason,omitempty"`
+	Destination string   `json:"destination"`
+	Units       int      `json:"units"`
+	Before      *float64 `json:"before,omitempty"`
+	After       *float64 `json:"after,omitempty"`
+}
+
+type BatchResult struct {
+	batchV1
+	Version         int         `json:"version,omitempty"`
+	Action          string      `json:"action,omitempty"`
+	RequestID       string      `json:"requestId,omitempty"`
+	WorldID         string      `json:"worldId,omitempty"`
+	ObservedAt      int64       `json:"observedAt,omitempty"`
+	ExpiresAt       int64       `json:"expiresAt,omitempty"`
+	Units           int         `json:"units,omitempty"`
+	Items           []BatchItem `json:"items,omitempty"`
+	DetailsComplete bool        `json:"detailsComplete,omitempty"`
+}
+
 func batchResult(run Run) *BatchResult {
+	if run.Output != nil && strings.Contains(run.Output.Text, "[DST-ADMIN-BATCH-V2] ") {
+		return batchResultV2(run)
+	}
 	if run.Status != RunSucceeded || run.ExecutionOutcome != "confirmed" || run.Mode != "builtin" || run.CommandID != "act_nearby_entities" || run.Output == nil || run.Output.Truncated || !strings.Contains(run.Script, "w.Nearby(") {
 		return nil
 	}
@@ -46,7 +72,7 @@ func batchResult(run Run) *BatchResult {
 				return nil
 			}
 		}
-		var r BatchResult
+		var r batchV1
 		d := json.NewDecoder(bytes.NewReader(text))
 		d.DisallowUnknownFields()
 		if d.Decode(&r) != nil || d.Decode(new(any)) != io.EOF {
@@ -80,7 +106,7 @@ func batchResult(run Run) *BatchResult {
 		default:
 			return nil
 		}
-		result = &r
+		result = &BatchResult{batchV1: r}
 	}
 	return result
 }

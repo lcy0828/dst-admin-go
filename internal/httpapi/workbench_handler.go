@@ -57,6 +57,10 @@ func (h *ConsoleHandler) workbench(c *gin.Context) {
 		consoleFailure(c, consoleapi.ErrInvalidArguments)
 		return
 	}
+	if aicontrol.IsModelChannel(c.Request.Context()) && consoleapi.RequiresHumanConfirmation(id, args) {
+		Failure(c, 403, "HUMAN_CONFIRMATION_REQUIRED", "请在面板或插件中由原用户确认本次操作，尚未执行", nil)
+		return
+	}
 	confirmed := false
 	if value, exists := input["confirmed"]; exists {
 		var valid bool

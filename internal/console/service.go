@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"regexp"
 	"strconv"
 	"strings"
@@ -87,7 +88,7 @@ func (s *Service) DefinitionsWithError() ([]Definition, error) {
 		"set_player_attack_multiplier", "set_health_penalty", "set_character_power", "manage_followers", "spawn_domesticated_beefalo",
 		"set_season", "next_phase", "set_phase", "set_clock_segments",
 		"skip_days", "set_time_scale", "set_precipitation", "set_world_wetness", "set_world_temperature", "set_moon_phase",
-		"trigger_world_event", "trigger_incident", "set_special_event", "stop_vote", "spawn_entity", "spawn_player_entity", "teleport_to_nearest_entity", "remove_nearby_entities", "act_nearby_entities",
+		"set_player_hunger_rate", "set_wanda_age", "restore_woodie_human", "trigger_world_event", "trigger_incident", "set_special_event", "stop_vote", "spawn_entity", "spawn_player_entity", "teleport_to_nearest_entity", "remove_nearby_entities", "act_nearby_entities",
 		"rollback", "shutdown", "regenerate",
 	}
 	result := make([]Definition, 0, len(order))
@@ -176,7 +177,11 @@ func (s *Service) Execute(ctx context.Context, roomID, worldID string, request E
 	if err != nil {
 		return Run{}, err
 	}
-	if confirmationRequired(definition.Risk) && request.Confirmation != room.Name {
+	effectiveRisk := definition.Risk
+	if builtin {
+		effectiveRisk = EffectiveWorkbenchRisk(definition, request.Arguments)
+	}
+	if confirmationRequired(effectiveRisk) && request.Confirmation != room.Name {
 		return Run{}, ErrConfirmationNeeded
 	}
 	var script string
@@ -188,20 +193,24 @@ func (s *Service) Execute(ctx context.Context, roomID, worldID string, request E
 	if err != nil {
 		return Run{}, err
 	}
-	if builtin && commandID == "act_nearby_entities" {
+	if builtin {
 		action, _ := request.Arguments["action"].(string)
-		if guardedNearby(action) {
+		if actionInteraction(commandID, action) != nil {
 			script, err = bindNearbyCaller(ctx, room.ID, world.ID, script)
 			if err != nil {
 				return Run{}, err
 			}
 		}
 	}
-	run, err := s.store.Create(Run{
+	runID := uuid.NewString()
+	if strings.Contains(script, "_dst_admin_batch_request") {
+		script = fmt.Sprintf("if os.time()>%d then error(\"BATCH_REQUEST_EXPIRED\")end;local _dst_admin_batch_request=", s.store.now().Unix()+30) + quoteLua(runID) + ";" + script
+	}
+	run, err := s.store.createWithID(Run{
 		RoomID: room.ID, WorldID: world.ID, Mode: map[bool]string{true: "builtin", false: "custom"}[builtin], CommandID: definition.ID,
-		Name: definition.Name, Risk: definition.Risk, Arguments: request.Arguments,
+		Name: definition.Name, Risk: effectiveRisk, Arguments: request.Arguments,
 		Script: script,
-	})
+	}, runID)
 	if err != nil {
 		return Run{}, err
 	}
@@ -625,8 +634,10 @@ func builtinTemplates() map[string]template {
 		},
 	}
 	addGameToolTemplates(templates)
+	addStageBTemplates(templates)
 	for id, tmpl := range templates {
 		tmpl.definition.Actions = commandActions(tmpl.definition)
+		tmpl.definition.Interaction = actionInteraction(id, "")
 		templates[id] = tmpl
 	}
 	for _, id := range []string{"spawn_entity", "spawn_domesticated_beefalo", "give_item", "give_blueprint", "give_recipe_materials"} {

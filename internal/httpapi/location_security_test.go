@@ -54,3 +54,37 @@ func TestDirectApprovalHandlerAlsoRejectsModelContext(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
+
+func TestModelMayPrepareButCannotApproveAnyFixedInteraction(t *testing.T) {
+	catalog, _ := apicontract.Default()
+	op, _ := catalog.Operation("executeBuiltinRoomCommand")
+	backend := &AIBackend{}
+	ctx := aicontrol.WithModelChannel(context.Background())
+	for _, id := range []string{"act_nearby_entities", "set_player_hunger_rate", "set_wanda_age", "restore_woodie_human"} {
+		actions := []string{""}
+		if id == "act_nearby_entities" {
+			actions = []string{"freeze", "delete", "pick", "repair", "fertilize", "grow", "ripen", "harvest", "repair_burnt"}
+		}
+		for _, action := range actions {
+			for _, phase := range []string{"preview", "execute", "cancel"} {
+				_, err := backend.InvokeAPI(ctx, aicontrol.Principal{Profile: aicontrol.ProfilePanelManage}, op, apicontract.Input{Body: map[string]any{"commandId": id, "confirmed": true, "arguments": map[string]any{"action": action, "phase": phase, "preview_id": "00000000-0000-4000-8000-000000000001"}}})
+				if phase == "execute" && !errors.Is(err, aicontrol.ErrDenied) {
+					t.Fatalf("%s %s bypassed confirmation: %v", id, action, err)
+				}
+				if phase != "execute" && errors.Is(err, aicontrol.ErrDenied) {
+					t.Fatalf("%s preparation denied", id)
+				}
+			}
+		}
+	}
+}
+
+func TestDirectWorkbenchApprovalHandlerRejectsModelContext(t *testing.T) {
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("POST", "/", strings.NewReader(`{"commandId":"act_nearby_entities","arguments":{"action":"pick","phase":"execute"},"confirmed":true}`)).WithContext(aicontrol.WithModelChannel(context.Background()))
+	(&ConsoleHandler{}).workbench(ctx)
+	if w.Code != 403 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}

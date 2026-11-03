@@ -27,7 +27,7 @@ func ValidateBuiltinWorkbench(id string, arguments map[string]interface{}, confi
 		return Definition{}, ErrCommandNotFound
 	}
 	d := tmpl.definition
-	if EffectiveWorkbenchRisk(d, arguments) == RiskCritical && !confirmed {
+	if (EffectiveWorkbenchRisk(d, arguments) == RiskCritical || RequiresHumanConfirmation(id, arguments)) && !confirmed {
 		return d, ErrConfirmationNeeded
 	}
 	props := map[string]Parameter{}
@@ -146,9 +146,12 @@ func workbenchResult(run Run) WorkbenchResult {
 			r.Status = "partial"
 			r.Message = "操作已结束，部分对象未完成或效果未确认；请查看逐项统计，不要重复提交。"
 		case "completed":
-			r.Message = "范围操作已完成，效果已确认。"
+			r.Message = "操作已完成，效果已确认。"
+			if r.Batch.Matched == 0 {
+				r.Message = "附近没有符合条件的对象，没有执行修改。"
+			}
 		}
-	} else if r.Complete && run.Status == RunSucceeded && strings.Contains(run.Script, "w.Nearby(") {
+	} else if r.Complete && run.Status == RunSucceeded && (strings.Contains(run.Script, "w.Nearby(") || strings.Contains(run.Script, "w.NearbyV2(") || strings.Contains(run.Script, "w.Setting(")) {
 		r.Status = RunUncertain
 		r.Complete = false
 		r.Message = "缺少有效的范围操作结果，请读取原回执，不要重复提交。"

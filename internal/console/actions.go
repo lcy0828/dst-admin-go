@@ -12,11 +12,50 @@ type Action struct {
 	Parameters  map[string]string `json:"parameters"`
 	Risk        Risk              `json:"risk"`
 	Description string            `json:"description,omitempty"`
+	Interaction *Interaction      `json:"interaction,omitempty"`
+}
+
+// Interaction is a finite client protocol, not a recipe or an authorization.
+type Interaction struct {
+	Kind          string `json:"kind"`
+	ResultVersion int    `json:"resultVersion"`
+	EffectVersion string `json:"effectVersion"`
+}
+
+func actionInteraction(command, action string) *Interaction {
+	if command == "act_nearby_entities" && guardedNearby(action) {
+		version := 1
+		if nearbyV2(action) {
+			version = 2
+		}
+		return &Interaction{Kind: "preview-confirm-v1", ResultVersion: version, EffectVersion: "1"}
+	}
+	if command == "set_player_hunger_rate" || command == "set_wanda_age" || command == "restore_woodie_human" {
+		return &Interaction{Kind: "preview-confirm-v1", ResultVersion: 2, EffectVersion: "1"}
+	}
+	return nil
+}
+
+func actionRisk(command, action string, fallback Risk) Risk {
+	if command == "act_nearby_entities" && nearbyV2(action) {
+		if action == "repair_burnt" {
+			return RiskCritical
+		}
+		return RiskHigh
+	}
+	return fallback
+}
+
+// RequiresHumanConfirmation gates model transports as well as the fixed API.
+// Preparation/cancellation is allowed only for our code-owned interactions.
+func RequiresHumanConfirmation(id string, args map[string]interface{}) bool {
+	action, _ := args["action"].(string)
+	return actionInteraction(id, action) != nil && nearbyPhase(args) == "execute"
 }
 
 // WorkbenchBehaviorRevision invalidates unsubmitted tasks when fixed command
 // semantics change without changing their public parameter schema.
-const WorkbenchBehaviorRevision = "3"
+const WorkbenchBehaviorRevision = "4"
 
 func commandActions(d Definition) []Action {
 	field := map[string]string{"trigger_world_event": "event", "set_player_ability": "ability", "set_character_power": "action", "act_nearby_entities": "action", "set_player_lock": "resource"}[d.ID]
@@ -34,10 +73,32 @@ func commandActions(d Definition) []Action {
 				continue
 			}
 			terms := strings.Fields(words)
-			out = append(out, Action{ID: d.ID + "." + value, Title: terms[0], SearchTerms: terms, Parameters: map[string]string{field: value}, Risk: d.Risk, Description: actionDescriptions[d.ID]})
+			out = append(out, Action{ID: d.ID + "." + value, Title: terms[0], SearchTerms: terms, Parameters: map[string]string{field: value}, Risk: actionRisk(d.ID, value, d.Risk), Description: actionDescription(d.ID, value), Interaction: actionInteraction(d.ID, value)})
 		}
 	}
 	return out
+}
+
+func actionDescription(command, action string) string {
+	if command == "act_nearby_entities" {
+		switch action {
+		case "repair":
+			return "只修复地面装备的使用次数和护甲耐久；不补燃料、不充能、不处理背包或容器。"
+		case "repair_burnt":
+			return "只重建原版科学机器和炼金引擎，保留位置、朝向和可用皮肤；不能找回已丢失的数据。"
+		case "pick":
+			return "拾取地面无持有者的物品，交给中心玩家的主物品栏；不处理容器内部，空间不足时保留原物。"
+		case "fertilize":
+			return "为原生组件判断需要施肥的草、树苗、普通浆果丛等支持植物补充肥料；不扣玩家材料，不代表恢复农田营养。"
+		case "grow":
+			return "支持的原版农作物推进一个阶段，草、树苗、普通浆果丛和芦苇使用原生再生方法；不清零其他计时器。"
+		case "ripen":
+			return "有界推进支持的原版植物至可收获状态，并核对结果；不保证巨大化。"
+		case "harvest":
+			return "采摘支持的草、树苗、普通浆果丛和芦苇，产物交给中心玩家；随机农作物掉落、锅和晾肉架不在首批范围。"
+		}
+	}
+	return actionDescriptions[command]
 }
 
 var actionDescriptions = map[string]string{
@@ -62,10 +123,10 @@ var actionWords = map[string]map[string]string{
 	"set_player_lock": {"health": "锁血 生命下限 生命锁定", "moisture": "锁定潮湿 防潮 湿度锁定", "temperature": "锁定体温 恒温 温度锁定"},
 	"act_nearby_entities": {
 		"delete": "删除附近实体 清除附近实体", "extinguish": "附近灭火 扑灭 灭火", "ignite": "点燃附近实体 放火",
-		"restore": "恢复附近生物 回满附近生物状态", "repair": "修复烧毁建筑 修复建筑", "repair_boat": "修船 修复船只",
+		"restore": "恢复附近生物 回满附近生物状态", "repair": "修复耐久 维修地面装备", "repair_burnt": "重建烧毁建筑 修复烧毁建筑", "repair_boat": "修船 修复船只",
 		"freshen": "保鲜 恢复新鲜度", "heat": "加热附近物品 加热暖石", "cool": "冷却附近物品 冷却暖石",
-		"salvage": "打捞", "haunt": "作祟", "fertilize": "施肥", "grow": "催熟 催生 生长", "harvest": "收获 收割",
-		"pick": "采摘 拾取", "chop": "砍树 伐木", "mine": "挖矿 采矿", "hammer": "锤毁 拆建筑", "dig": "挖掘 铲除",
+		"salvage": "打捞", "haunt": "作祟", "fertilize": "施肥", "grow": "推进生长 生长一阶段", "ripen": "催熟 催生", "harvest": "采摘植物 收获 收割",
+		"pick": "拾取地面物品 拾取 掉落物", "chop": "砍树 伐木", "mine": "挖矿 采矿", "hammer": "锤毁 拆建筑", "dig": "挖掘 铲除",
 		"till": "耕地 犁地", "build_complete": "完成建造 完成施工", "chaos": "混战 生物互相攻击", "electrocute": "电击",
 		"kill": "击杀附近生物 杀死附近生物", "freeze": "冻结附近生物 冻住 冰冻 冻结", "sleep": "催眠 使生物睡觉",
 		"panic": "惊吓 恐慌", "pacify": "平息附近仇恨 安抚生物", "root": "定身 禁锢", "taunt": "嘲讽 吸引仇恨",

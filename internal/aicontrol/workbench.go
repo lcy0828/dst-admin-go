@@ -48,9 +48,9 @@ func workbenchCapabilities() []BotCapability {
 		if !hasPlayer {
 			required = append(required, "worldId")
 		}
-		if d.Risk == consoleapi.RiskCritical {
+		if d.Risk == consoleapi.RiskCritical || d.Interaction != nil {
 			props["confirmed"] = map[string]any{"type": "boolean", "enum": []bool{true}, "description": "危险操作需要用户明确二次确认"}
-			if d.ID != "act_nearby_entities" {
+			if d.ID != "act_nearby_entities" && d.Interaction == nil {
 				required = append(required, "confirmed")
 			}
 		}
@@ -58,7 +58,7 @@ func workbenchCapabilities() []BotCapability {
 		if d.ID == "resurrect_player" {
 			id = "player.resurrect"
 		}
-		out = append(out, BotCapability{ID: id, Title: d.Name, Actions: d.Actions, BehaviorRevision: consoleapi.WorkbenchBehaviorRevision, Category: "management", Access: "write", Risk: string(d.Risk), Operation: "executeBuiltinRoomCommand", Parameters: botSchema(props, required...), ParameterHints: hints, build: func(room string, p map[string]any) apicontract.Input {
+		out = append(out, BotCapability{ID: id, Title: d.Name, Actions: d.Actions, Interaction: d.Interaction, BehaviorRevision: consoleapi.WorkbenchBehaviorRevision, Category: "management", Access: "write", Risk: string(d.Risk), Operation: "executeBuiltinRoomCommand", Parameters: botSchema(props, required...), ParameterHints: hints, build: func(room string, p map[string]any) apicontract.Input {
 			args := map[string]any{}
 			for _, parameter := range d.Parameters {
 				if v, ok := p[parameter.Name]; ok {

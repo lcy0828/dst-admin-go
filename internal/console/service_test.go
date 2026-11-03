@@ -672,7 +672,11 @@ func TestNearbyEntityActionsUseAllowlistedComponents(t *testing.T) {
 		}
 		assertLuaSyntax(t, sender.script)
 		if guardedNearby(action) {
-			if !strings.Contains(sender.script, `w.Nearby("KU_SAFE_PLAYER",`+quoteLua(action)+`,30,"","preview"`) {
+			method := "Nearby"
+			if nearbyV2(action) {
+				method = "NearbyV2"
+			}
+			if !strings.Contains(sender.script, `w.`+method+`("KU_SAFE_PLAYER",`+quoteLua(action)+`,30,"","preview"`) {
 				t.Fatal(sender.script)
 			}
 			continue
@@ -691,7 +695,7 @@ func TestNearbyEntityActionsUseAllowlistedComponents(t *testing.T) {
 		t.Fatalf("unsafe nearby prefab error = %v", err)
 	}
 	request.Arguments = map[string]interface{}{"player_id": "KU_SAFE_PLAYER", "prefab": "pigman", "action": "repair", "radius": float64(64)}
-	if _, err := service.Execute(WithWorkbenchCaller(context.Background(), "test-operator"), "room", "world", request); err != nil || !strings.Contains(sender.script, `local filter="pigman"`) {
+	if _, err := service.Execute(WithWorkbenchCaller(context.Background(), "test-operator"), "room", "world", request); err != nil || !strings.Contains(sender.script, `w.NearbyV2("KU_SAFE_PLAYER","repair",64,"pigman","preview"`) {
 		t.Fatalf("optional prefab filter script = %s, %v", sender.script, err)
 	}
 }

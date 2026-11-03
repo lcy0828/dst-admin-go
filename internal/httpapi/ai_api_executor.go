@@ -15,6 +15,7 @@ import (
 
 	"dont/internal/aicontrol"
 	"dont/internal/apicontract"
+	consoleapi "dont/internal/console"
 	"github.com/google/uuid"
 )
 
@@ -34,6 +35,10 @@ func (b *AIBackend) InvokeAPI(ctx context.Context, p aicontrol.Principal, op *ap
 		case "executeBuiltinRoomCommand":
 			body, _ := in.Body.(map[string]any)
 			id, _ := body["commandId"].(string)
+			args, _ := body["arguments"].(map[string]any)
+			if consoleapi.RequiresHumanConfirmation(id, args) {
+				return nil, aicontrol.ErrDenied
+			}
 			if id == "teleport_player" || id == "relocate_players" || id == "teleport_to_nearest_entity" {
 				return nil, aicontrol.ErrDenied
 			}

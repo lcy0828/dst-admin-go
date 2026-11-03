@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.22"
+local PRODUCER_VERSION = "2.4.23"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local INPUT_ROOT = "mod_config_data/dst-admin/command-requests/"
 local RECENT_REQUEST_LIMIT = 256
@@ -333,6 +333,7 @@ handlers["console.execute"] = function(arguments)
         local described, message = pcall(safe_text, execution_error, 512)
         return result(false, "COMMAND_EXECUTION_FAILED", described and message or "Lua command failed", details)
     end
+    if Workbench and Workbench.TakeObservation then details._workbench_observation=Workbench.TakeObservation() end
     return result(true, "COMMAND_EXECUTED", "", details)
 end
 
@@ -342,6 +343,7 @@ local CATALOG_TTL = 300
 local CATALOG_PREFAB_LIMIT = 50000
 local CATALOG_MOD_LIMIT = 500
 local catalog_cache, catalog_expiry_task, catalog_cancel
+local workbench_cancel
 local catalog_slice_deadline
 local CATALOG_SLICE_SECONDS = .003
 local CATALOG_BATCH_LIMIT = 2048
@@ -790,6 +792,36 @@ local function execute_request(signal, request)
     elseif type(action_result) ~= "table" then
         action_result = result(false, "INVALID_ACTION_RESULT", "action returned an invalid result")
     end
+    local observe=action_result.details and action_result.details._workbench_observation
+    if observe then
+        action_result.details._workbench_observation=nil
+        local checks,task,finished=0,nil,false
+        local function finish_observation(out)
+            if finished then return end
+            finished=true;workbench_cancel=nil
+            if Workbench.FinishObservation then Workbench.FinishObservation() end
+            if task then task:Cancel();task=nil end
+            if out then
+                local encoded_ok,line=pcall(Workbench.Encode,out)
+                if encoded_ok then
+                    local original=action_result.details.output
+                    original.text=string.gsub(original.text,"%[DST%-ADMIN%-BATCH%-V2%] [^\n]*",function()return line end,1)
+                    if #original.text>CONSOLE_OUTPUT_BYTES then original.text="";original.truncated=true end
+                end
+            end
+            signal.result=action_result;persist(request,action_result)
+        end
+        local poll
+        poll=function()
+            task=nil;checks=checks+1
+            local ok,out=pcall(observe)
+            if not ok or out or checks>=20 then finish_observation(ok and out or nil)
+            else task=TheWorld:DoStaticTaskInTime(.25,poll) end
+        end
+        workbench_cancel=function()finish_observation(nil)end
+        if TheWorld and TheWorld.DoStaticTaskInTime then poll() else finish_observation(nil) end
+        return
+    end
     signal.result = action_result
     persist(request, action_result)
 end
@@ -908,6 +940,8 @@ function M.ExecuteFile(request_id, action)
 end
 
 function M.ClearCatalog()
+    if workbench_cancel then workbench_cancel() end
+    if Workbench and Workbench.Stop then Workbench.Stop() end
     if catalog_cancel ~= nil then catalog_cancel() end
     clear_catalog()
 end
