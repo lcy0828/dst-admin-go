@@ -30,6 +30,12 @@ Manual backups in the UI use the consistency coordinator. Existing ZIP backups r
 
 Upload staging uses the corresponding feature's data directory; reserve disk space for the upload and processing. HTTP upload reads allow up to two hours. Configure any reverse proxy with matching size and time limits. Temporary upload and export files left after a crash are reclaimed at startup or on the next operation of the same type. Files used by active uploads or downloads are protected.
 
+## Room selection and loading states
+
+Tasks, groups, history, and statistics belong to a selected room. A sole accessible room is selected automatically. With multiple rooms, the page restores an accessible selection from the browser session or asks you to choose; it does not show an empty task list before selection. Loading failures provide retry, and no rooms, no tasks, and no filter matches have separate states.
+
+Switching rooms or management scope clears previous page data and filters. Old edit dialogs and confirmations expire; already submitted jobs continue for their original room. Detail links resolve their owning room, and permission errors never trigger a fallback lookup in other rooms. Statistics appear only after a successful read.
+
 ## Startup runtime
 
 Start/restart tasks offer **Keep world settings** (default), Game Lua, LuaJIT, or Arena GC.
