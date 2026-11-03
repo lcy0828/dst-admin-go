@@ -186,6 +186,10 @@ class State:
             )
             self._put(self.choices, key, value)
 
+    def form_sent(self, key, message_id, form):
+        if form is not None and self.forms.get(key) is form and message_id:
+            self._put(self.forms, key, {**form, "messageId": str(message_id)})
+
     def clear_form(self, key):
         self.forms.pop(key, None)
         self.bytes -= self.allocations.pop((id(self.forms), key), 0)
@@ -226,7 +230,11 @@ class State:
         form = self.pending_form(key)
         if not form:
             return False
-        if woken:
+        if quote and quote != form.get("messageId"):
+            return False
+        if form.get("type") == "confirmation" and text.strip() == "确认":
+            return True
+        if woken or quote and quote == form.get("messageId"):
             from .routing import form_reply
 
             return is_cancel_reply(text) or form_reply(text) is not None
@@ -234,8 +242,7 @@ class State:
             return False
         if is_cancel_reply(text):
             return True
-        # An own, short-lived read prompt may accept a plain nickname. Writes,
-        # confirmations, other users and unrelated conversation still need @.
+        # A short-lived read prompt can also accept a plain nickname.
         from .routing import COMPOUND, DISCUSSION, explicit_ai, parse
 
         return bool(

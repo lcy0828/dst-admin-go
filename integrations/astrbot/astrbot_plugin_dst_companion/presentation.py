@@ -29,6 +29,15 @@ def query_body(result, data):
     if not isinstance(data, dict):
         return "查询已返回，请在面板查看详细结果。"
     capability = result.get("capabilityId", "")
+    if capability == "room.locations":
+        rows = data.get("items", [])
+        if not rows: return "当前世界还没有保存地点。"
+        return "📍 已保存地点\n" + "\n".join("· " + fmt.safe(row.get("name")) + " · X " + fmt.safe(row.get("x")) + " / Z " + fmt.safe(row.get("z")) for row in rows[:30] if isinstance(row, dict)) + ("\n还有其他地点，请缩小查询范围。" if data.get("hasMore") or len(rows)>30 else "")
+    if capability == "location.save":
+        return "📍 已保存地点：" + fmt.safe(data.get("name")) + "\nX " + fmt.safe(data.get("x")) + " / Z " + fmt.safe(data.get("z"))
+    if capability == "player.teleport":
+        from .teleport import describe
+        return describe(data)
     if capability == "player.inventory":
         return fmt.inventory(data)
     if capability in {"room.players", "player.resolve"}:
@@ -130,6 +139,10 @@ def business(result, *, diagnostics=False):
             body += "\n（仅收到部分输出，无法确认完整效果）"
 
         batch = data.get("batch")
+        movement = data.get("movement")
+        if isinstance(movement, dict):
+            from .teleport import describe_movement
+            body = describe_movement(movement)
         if isinstance(batch, dict) and batch.get("state") in {"preview", "cancelled", "completed", "partial"}:
             if batch["state"] == "preview":
                 body = "🔎 范围预览：" + fmt.safe(batch.get("matched")) + " 个符合条件的对象。\n尚未修改游戏；确认后只处理本次预览中的对象。"
@@ -150,6 +163,8 @@ def business(result, *, diagnostics=False):
         footer = "指令执行完成 · 游戏内效果待确认"
         if isinstance(data, dict) and isinstance(data.get("batch"), dict):
             footer = {"preview": "预览有效期 30 秒", "cancelled": "已取消", "completed": "效果已确认"}.get(data["batch"].get("state"), "部分完成，请勿重复提交")
+        if isinstance(data, dict) and isinstance(data.get("movement"), dict):
+            footer = {"preview":"检查有效期 60 秒", "cancelled":"已取消", "confirmed":"位置已确认"}.get(data["movement"].get("state"),"部分完成，请勿重复提交")
     if status in {"partial", "uncertain", "unavailable"} or result.get("complete") is not True:
         footer += " · 记录可能不完整"
     if result.get("observedAt"):

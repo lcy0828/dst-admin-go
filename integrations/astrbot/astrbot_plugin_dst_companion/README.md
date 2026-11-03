@@ -2,6 +2,8 @@
 
 一个插件提供常用直查、AI 工具和游戏事件播报。技术插件名仍为 `astrbot_plugin_dst_companion`，可直接升级旧伴随助手，适用 AstrBot 4.29.3 / Python 3.12。
 
+v0.4.3 配合面板 v1.3.25 支持保存地点和同世界传送。可直接说“有哪些地点”“把玩家甲当前位置记为基地”“把玩家甲传送到基地”，检查后由原用户回复“确认／取消”。完整交互需要面板地址与接入密钥的私有连接；模型不能代替用户确认，结果未确认时不会自动重发。详见[地点与传送](https://github.com/lcy0828/dst-admin-go/blob/master/docs/locations-and-teleport.md)。
+
 1. 导入 `astrbot_plugin_dst_companion.zip`，在插件设置填写面板地址 `panel_url` 和完整权限密钥 `panel_token`。这是插件内部连接，不向模型暴露底层管理工具。
 2. 新接入推荐选择 `permission_mode=group`，按真实 QQ 群身份授权。已有 MCP 连接和 `legacy` 权限继续兼容；升级不会自动扩权。
 3. AstrBot 管理员在自己的群里发送 **`/dst 启用本群`**，自动识别群与房间，不需要填写群号、平台 ID 或 roomId。

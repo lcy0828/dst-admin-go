@@ -79,6 +79,33 @@ class Actions:
         async with self.lock:
             return await self._submit_capability(actor, item, target, parameters, deadline)
 
+    async def submit_teleport(self, actor, item, target, preview, deadline):
+        from .teleport import describe, envelope
+        async with self.lock:
+            records = await self.load()
+            owner = hashlib.sha256(json.dumps(actor.key).encode()).hexdigest()
+            key = "teleport:" + preview["id"]
+            if key in records:
+                return await self.read(actor, records[key], deadline)
+            if len(records)>=256: raise QueryError("ACTION_JOURNAL_FULL")
+            record={"requestId":key, "roomId":target.room, "previewId":preview["id"], "owner":owner,
+                    "state":"prepared", "createdAt":time.time(), "capabilityId":item["id"], "protocol":1,
+                    "nativeTools":item["nativeTools"], "connectionId":actor.connection_id}
+            records[key]=record
+            await self.save(records)
+            try:
+                data=await self.gateway.call(actor,"api_executeRoomTeleport",{"path":{"roomId":target.room,"previewId":preview["id"]},"body":{}},deadline,write=True)
+                record.update(state="terminal" if envelope(data)["complete"] else "uncertain",data=envelope(data))
+            except BaseException as error:
+                record["state"]="uncertain"
+                records[key]=record
+                await self.save(records)
+                if isinstance(error, asyncio.CancelledError): raise
+                return "传送结果尚未确认，没有重新提交。请发送 任务进度 查询原结果。"
+            records[key]=record
+            await self.save(records)
+            return describe(data)
+
     async def submitted_result(self, actor):
         source = (*actor.key, str(getattr(getattr(actor.event, "message_obj", None), "message_id", "")))
         key = hashlib.sha256(json.dumps(source).encode()).hexdigest()
@@ -236,6 +263,10 @@ class Actions:
         )
 
     async def read(self, actor, record, deadline):
+        if record.get("previewId"):
+            from .teleport import describe
+            data = await self.get_job(actor, record, deadline)
+            return describe(data.get("data", {}))
         if record.get("protocol") == 1:
             data = await self.get_job(actor, record, deadline)
             body, footer = business(data, diagnostics=True)
@@ -277,6 +308,10 @@ class Actions:
                     await self.gateway.authorize(
                         actor, tool, {"path": {"roomId": record["roomId"]}}
                     )
+            if record.get("previewId"):
+                from .teleport import envelope
+                data=await self.gateway.call(actor,"api_getRoomTeleportPreview",{"path":{"roomId":record["roomId"],"previewId":record["previewId"]},"query":{"refresh":True}},deadline)
+                return envelope(data)
             return await self.gateway.call(
                 actor,
                 "api_getBotCapabilityResult",

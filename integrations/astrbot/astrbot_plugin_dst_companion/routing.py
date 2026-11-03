@@ -143,8 +143,19 @@ def _parse(text: str, aliases: dict[str, str]) -> Intent | None:
             text = re.sub(r"^(?:现在|的)\s*", "", text)
     if (room or room_name) and not text:
         text = "信息"
+
     elif room or room_name:
         text = normalize(text)
+
+    if text in {"有哪些地点", "地点列表", "查看地点", "已保存地点"}:
+        return Intent("capability", room=room, room_name=room_name, capability="room.locations", parameters={})
+    if not COMPOUND.search(text):
+        match = re.fullmatch(r"(?:把|将)?\s*(.{1,80}?)\s*(?:的)?当前位置(?:保存|记)为\s*(.{1,48})", text)
+        if match:
+            return Intent("capability", room=room, room_name=room_name, capability="location.save", parameters={"playerId": match[1].strip(), "name": match[2].strip()})
+        match = re.fullmatch(r"(?:把|将)\s*(.{1,80}?)\s*传送到\s*(.{1,48})", text)
+        if match:
+            return Intent("capability", room=room, room_name=room_name, capability="player.teleport", parameters={"playerId": match[1].strip(), "locationName": match[2].strip()})
     match = READ_PREFIX.fullmatch(text)
     if match:
         candidate = _parse_command(match[1], aliases, room, room_name)

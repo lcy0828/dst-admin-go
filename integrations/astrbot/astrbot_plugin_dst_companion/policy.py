@@ -15,10 +15,11 @@ READS = frozenset(
         "api_getRoomPlayerInventory",
         "api_getRoomPerformanceReport",
         "api_listRoomMods",
+        "api_getRoomTeleportPreview",
     }
 )
 WRITES = frozenset(
-    {"api_runBotCapability", "api_runRoomAction", "api_createRoomBackup", "api_kickRoomPlayer"}
+    {"api_runBotCapability", "api_runRoomAction", "api_createRoomBackup", "api_kickRoomPlayer", "api_executeRoomTeleport", "api_cancelRoomTeleport"}
 )
 
 
@@ -128,6 +129,11 @@ class Policy:
             for underlying in item["nativeTools"]:
                 if not await self.native(actor, underlying):
                     raise QueryError("NATIVE_PERMISSION_DENIED")
+        if name in {"api_executeRoomTeleport", "api_cancelRoomTeleport", "api_getRoomTeleportPreview"}:
+            from .capabilities import permitted
+            item = self.directory.lookup(actor, "player.teleport") if self.directory else None
+            if not item or not permitted(actor, item):
+                raise QueryError("PERMISSION_DENIED")
         # Native policy can be stricter than the companion policy.
         if not await self.native(actor, name):
             raise QueryError("NATIVE_PERMISSION_DENIED")

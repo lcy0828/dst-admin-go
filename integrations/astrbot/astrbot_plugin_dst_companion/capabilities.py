@@ -159,6 +159,7 @@ def permitted(actor, item):
         )
         return actor.role in {"game-manage", "panel-manage"} and (
             item["id"] in actor.write_allowlist or workbench
+            or item["id"] in {"player.teleport", "location.save"} and actor.workbench_mode in {"standard", "all"}
         )
     return item.get("access") == "read" and item.get("category") in actor.visibility
 

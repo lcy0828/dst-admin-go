@@ -162,6 +162,8 @@ class Engine:
             else:
                 target = Target(item["id"])
         elif form and intent is None:
+            if quote and quote != form.get("messageId"):
+                return Reply("pass")
             if form.get("configRevision") != actor.config_revision:
                 self.state.clear_form(actor.key)
                 return Reply("handled_error", ERRORS["CONFIG_CHANGED"])
@@ -237,7 +239,25 @@ class Engine:
         if intent is None:
             return Reply("pass")
         if intent.kind == "cancel":
+            if form and quote and quote != form.get("messageId"):
+                return Reply("pass")
             self.state.begin(actor.key)
+            if form and form.get("teleportPreview"):
+                preview = form["teleportPreview"]
+                try:
+                    await self.gateway.call(actor, "api_cancelRoomTeleport", {
+                        "path": {"roomId": form["target"].room, "previewId": preview["id"]}, "body": {}
+                    }, time.monotonic() + 6, write=True)
+                except QueryError:
+                    pass  # Local confirmation is revoked; the remote permit expires.
+                return Reply("matched", "已取消本次确认；已提交的操作仍需查看原结果。")
+            from .private_connection import LEGACY_MOVEMENT
+            if form and form.get("item", {}).get("id") in LEGACY_MOVEMENT and form.get("parameters", {}).get("preview_id"):
+                try:
+                    await self.directory.execute(actor, form["item"], form["target"].room,
+                        {**form["parameters"], "phase":"cancel"}, time.monotonic()+6)
+                except QueryError:
+                    pass
             return Reply("matched", "已取消选择；已经提交的任务不会因此停止。")
         config = self.config(actor)
         default = config["defaultRoom"] if config else self.default_room
@@ -266,6 +286,8 @@ class Engine:
                 "player.give_item",
                 "player.spawn_entity",
                 "player.resurrect",
+                "player.teleport",
+                "location.save",
             }
             or intent.kind == "capability"
             and intent.capability.startswith("workbench.")
@@ -583,9 +605,20 @@ class Engine:
             return Reply("handled_error", "预览已过期，请重新预览并确认范围。尚未执行。")
         if frozen and frozen["item"]["schemaRevision"] != item["schemaRevision"]:
             raise QueryError("DIRECTORY_CHANGED")
+        if frozen and frozen.get("teleportPreview") and frozen.get("userConfirmed") is True:
+            text = await self.actions.submit_teleport(actor, item, target, frozen["teleportPreview"], deadline)
+            return Reply("matched", text, target)
         parameters = dict(frozen["parameters"] if frozen else intent.parameters or {})
         schema = item["parameters"]
         critical = item.get("risk") == "critical" and item["access"] == "write"
+        from .private_connection import LEGACY_MOVEMENT
+        movement = item["id"] in LEGACY_MOVEMENT and "phase" in schema.get("properties", {})
+        if movement and not (frozen and frozen.get("userConfirmed") is True):
+            # Phase/preview handles supplied by a model do not authorize an
+            # existing plan. Always obtain this user's own frozen precheck.
+            parameters.pop("preview_id", None)
+            parameters["phase"] = "preview"
+        movement_preview = movement and parameters.get("phase") == "preview"
         nearby_preview = (item["id"] == "workbench.act_nearby_entities"
                           and parameters.get("action") in {"extinguish", "freeze", "sleep", "pacify", "delete", "kill"}
                           and parameters.get("phase", "preview") == "preview"
@@ -624,6 +657,8 @@ class Engine:
                     return Reply("handled_error", "没有确认的唯一玩家，请提供更完整昵称或 KU ID。")
                 parameters[key] = resolved["items"][0]["id"]
         for key, prop in schema.get("properties", {}).items():
+            if movement and key in {"phase", "preview_id"}:
+                continue
             if (item["id"] == "workbench.act_nearby_entities" and parameters.get("action") != "till" and key == "layout") or (nearby_preview and key in {"phase", "preview_id"}):
                 continue
             if critical and key == "confirmed":
@@ -675,7 +710,7 @@ class Engine:
                 + hint
                 + "。取消退出。",
             )
-        if (critical or intent.confirm_required) and not nearby_preview:
+        if (critical or intent.confirm_required or item["id"] in LEGACY_MOVEMENT) and not nearby_preview and not movement_preview and item["id"] != "player.teleport":
             if not frozen or frozen.get("userConfirmed") is not True:
                 self.state.form(
                     actor.key,
@@ -706,7 +741,26 @@ class Engine:
                 raise QueryError("CAPABILITY_MISSING")
             preview_started = self.state.clock()
             text = await self.actions.submit_capability(actor, item, target, parameters, deadline)
-            evidence = await self.actions.submitted_result(actor) if nearby_preview else None
+            evidence = await self.actions.submitted_result(actor) if nearby_preview or movement_preview or item["id"] == "player.teleport" else None
+            move_result = evidence.get("data", {}).get("movement") if isinstance(evidence, dict) else None
+            if movement_preview and isinstance(move_result, dict) and move_result.get("state") == "preview" and evidence.get("complete") is True:
+                remaining_seconds = max(0, min(60, move_result.get("expiresAt", 0) - move_result.get("observedAt", 0)) - (self.state.clock()-preview_started))
+                if remaining_seconds <= 0:
+                    return Reply("handled_error", "本次传送检查已过期，请重新发起。尚未传送。")
+                execution = {**parameters, "phase":"execute", "preview_id":move_result["previewId"]}
+                self.state.form(actor.key, {"type":"confirmation", "intent":intent, "target":target, "item":item,
+                    "parameters":execution, "configRevision":actor.config_revision, "previewUntil":self.state.clock()+remaining_seconds}, sequence=seq)
+                from .teleport import describe_movement
+                return Reply("needs_selection", describe_movement(move_result)+"\n请在 60 秒内回复 确认 或 取消。", target, data=evidence)
+            if item["id"] == "player.teleport" and isinstance(evidence, dict):
+                from .teleport import remaining, describe
+                preview = evidence.get("data", {})
+                if preview.get("state") == "prepared" and remaining(preview)>0:
+                    self.state.form(actor.key, {"type":"confirmation", "intent":intent, "target":target, "item":item,
+                        "parameters":parameters, "configRevision":actor.config_revision, "teleportPreview":preview,
+                        "previewUntil":self.state.clock()+remaining(preview)}, sequence=seq)
+                    return Reply("needs_selection", describe(preview)+"\n请在 60 秒内回复 确认 或 取消。附近仍可能有危险。", target, data=evidence)
+                return Reply("handled_error", describe(preview), target, data=evidence)
             batch = evidence.get("data", {}).get("batch") if isinstance(evidence, dict) else None
             if (nearby_preview and isinstance(batch, dict) and batch.get("state") == "preview"
                     and isinstance(batch.get("previewId"), str) and evidence.get("complete") is True):

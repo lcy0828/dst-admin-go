@@ -343,7 +343,7 @@ class DSTCompanion(Star):
             # Private service calls use the panel credential, not AstrBot's raw
             # api_* tool policy. Every plugin facade still enters this policy.
             if name in {"api_runBotCapability", "api_runRoomAction",
-                        "api_createRoomBackup", "api_kickRoomPlayer"}:
+                        "api_createRoomBackup", "api_kickRoomPlayer", "api_executeRoomTeleport"}:
                 try:
                     await self.group_roles.refresh(actor.event, force=True)
                 except QueryError:
@@ -512,6 +512,7 @@ class DSTCompanion(Star):
         if choice and self.state.choices.get(actor.key, {}).get("sequence") != sequence:
             return
         message_id = None
+        sent_form = self.state.pending_form(actor.key)
         async with asyncio.timeout(15), self.send_lock:
             current = self.actor(event)
             if not self.alive or current is None or not request_valid(current):
@@ -542,6 +543,7 @@ class DSTCompanion(Star):
                 event._has_send_oper = True
             else:
                 await event.send(MessageChain().message(text[:3500]))
+        self.state.form_sent(actor.key, message_id, sent_form)
         if target:
             self.state.associate(actor.scope, message_id, target, source=source)
         if choice and actor.key in self.state.choices:
