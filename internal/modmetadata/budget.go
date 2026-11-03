@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"regexp"
+	"strconv"
 	"strings"
 
 	lua "github.com/yuin/gopher-lua"
@@ -14,6 +14,8 @@ import (
 )
 
 const maxValueBytes = 64 << 10
+
+var errInstructionBudget = errors.New("metadata instruction budget exceeded")
 
 // The VM checks Done before each instruction. Bound instruction count as well
 // as wall time so a fast host cannot allocate an unbounded number of tables.
@@ -32,14 +34,16 @@ func (b *evaluationBudget) Done() <-chan struct{} {
 }
 func (b *evaluationBudget) Err() error {
 	if b.remaining == 0 {
-		return context.DeadlineExceeded
+		return errInstructionBudget
 	}
 	return b.Context.Err()
 }
-func withInstructionBudget(ctx context.Context) context.Context {
+func withInstructionBudget(ctx context.Context, sourceBytes int) context.Context {
 	exhausted := make(chan struct{})
 	close(exhausted)
-	return &evaluationBudget{Context: ctx, remaining: 20000, exhausted: exhausted}
+	// Large translated option tables need more VM work than a small identity
+	// file. This remains a fixed ceiling in addition to the wall/allocation caps.
+	return &evaluationBudget{Context: ctx, remaining: min(100000, max(20000, sourceBytes/2)), exhausted: exhausted}
 }
 
 // Replacing concatenation before compilation catches both local and global
@@ -49,6 +53,10 @@ func boundedLoad(L *lua.LState, data []byte, path string) (*lua.LFunction, error
 	if err != nil {
 		return nil, err
 	}
+	return boundedCompile(L, chunk, path)
+}
+
+func boundedCompile(L *lua.LState, chunk []ast.Stmt, path string) (*lua.LFunction, error) {
 	var invalid bool
 	var walk func(reflect.Value)
 	walk = func(v reflect.Value) {
@@ -63,7 +71,7 @@ func boundedLoad(L *lua.LState, data []byte, path string) (*lua.LFunction, error
 				// Visit the original key before injecting a reserved helper.
 				key := access.Key
 				walk(reflect.ValueOf(&key).Elem())
-				access.Key = &ast.FuncCallExpr{Func: &ast.IdentExpr{Value: "__dst_metadata_key"}, Args: []ast.Expr{key}}
+				access.Key = boundedKey(key)
 				walk(reflect.ValueOf(&access.Object).Elem())
 				return
 			}
@@ -72,7 +80,7 @@ func boundedLoad(L *lua.LState, data []byte, path string) (*lua.LFunction, error
 					walk(reflect.ValueOf(&field.Value).Elem())
 					if field.Key != nil {
 						walk(reflect.ValueOf(&field.Key).Elem())
-						field.Key = &ast.FuncCallExpr{Func: &ast.IdentExpr{Value: "__dst_metadata_key"}, Args: []ast.Expr{field.Key}}
+						field.Key = boundedKey(field.Key)
 					}
 				}
 				return
@@ -113,7 +121,79 @@ func boundedLoad(L *lua.LState, data []byte, path string) (*lua.LFunction, error
 	return L.NewFunctionFromProto(proto), nil
 }
 
-var formatNumber = regexp.MustCompile(`[0-9]{5,}`)
+// Literal string keys cannot cause a sparse numeric allocation. Instrumenting
+// every named field multiplies the VM work of ordinary large mod configurations.
+// Dynamic and numeric keys still use the existing allocation guard.
+func boundedKey(key ast.Expr) ast.Expr {
+	if _, ok := key.(*ast.StringExpr); ok {
+		return key
+	}
+	return &ast.FuncCallExpr{Func: &ast.IdentExpr{Value: "__dst_metadata_key"}, Args: []ast.Expr{key}}
+}
+
+// Bound the expansion before invoking the native formatter. A fixed cap on
+// percent signs rejected ordinary descriptions with nine short placeholders.
+func formatFitsBudget(L *lua.LState) bool {
+	format := L.CheckString(1)
+	if len(format) > 1024 {
+		return false
+	}
+	bound, argument := len(format), 2
+	for i := 0; i < len(format); i++ {
+		if format[i] != '%' {
+			continue
+		}
+		i++
+		if i >= len(format) {
+			return false
+		}
+		if format[i] == '%' {
+			continue
+		}
+		for i < len(format) && strings.ContainsRune("-+ #0", rune(format[i])) {
+			i++
+		}
+		readNumber := func() (int, bool) {
+			start := i
+			for i < len(format) && format[i] >= '0' && format[i] <= '9' {
+				i++
+			}
+			if start == i {
+				return 0, true
+			}
+			if i-start > 5 {
+				return 0, false
+			}
+			value, err := strconv.Atoi(format[start:i])
+			return value, err == nil && value <= maxValueBytes
+		}
+		width, ok := readNumber()
+		if !ok {
+			return false
+		}
+		precision := 0
+		if i < len(format) && format[i] == '.' {
+			i++
+			precision, ok = readNumber()
+			if !ok {
+				return false
+			}
+		}
+		if i >= len(format) || !strings.ContainsRune("cdiouxXeEfgGqs", rune(format[i])) {
+			return false
+		}
+		valueSize := 320 // includes the longest finite float64 integer part
+		if value, ok := L.Get(argument).(lua.LString); ok {
+			valueSize = len(value)*4 + 2
+		}
+		bound += width + precision + valueSize
+		if bound > maxValueBytes {
+			return false
+		}
+		argument++
+	}
+	return true
+}
 
 func boundLibraries(L *lua.LState) {
 	allocated, indices := 0, 0
@@ -173,12 +253,7 @@ func boundLibraries(L *lua.LState) {
 				L.RaiseError("metadata string input limit")
 				return 0
 			}
-			if name == "format" && (len(L.CheckString(1)) > 1024 || formatNumber.MatchString(L.CheckString(1))) {
-				L.RaiseError("metadata format limit")
-				return 0
-			}
-			// Each format specifier may expand to its width/precision or full argument.
-			if name == "format" && strings.Count(L.CheckString(1), "%") > 8 {
+			if name == "format" && !formatFitsBudget(L) {
 				L.RaiseError("metadata format limit")
 				return 0
 			}

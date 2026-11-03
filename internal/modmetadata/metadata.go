@@ -48,6 +48,8 @@ var moduleName = regexp.MustCompile(`^[A-Za-z0-9_./-]{1,200}$`)
 const maxFile = 256 << 10
 const maxTotal = 1 << 20
 
+var errMetadataTooLarge = errors.New("metadata file exceeds limit")
+
 func safeRead(root, path string) ([]byte, fingerprint, error) {
 	rel, err := filepath.Rel(root, path)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -72,8 +74,11 @@ func safeRead(root, path string) ([]byte, fingerprint, error) {
 	if err != nil {
 		return nil, fingerprint{}, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > maxFile {
-		return nil, fingerprint{}, errors.New("metadata file exceeds limit")
+	if !info.Mode().IsRegular() {
+		return nil, fingerprint{}, errors.New("metadata path is not a regular file")
+	}
+	if info.Size() > maxFile {
+		return nil, fingerprint{}, errMetadataTooLarge
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -81,7 +86,10 @@ func safeRead(root, path string) ([]byte, fingerprint, error) {
 	}
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, maxFile+1))
-	if err != nil || len(data) > maxFile {
+	if len(data) > maxFile {
+		return nil, fingerprint{}, errMetadataTooLarge
+	}
+	if err != nil {
 		return nil, fingerprint{}, errors.New("metadata file unreadable")
 	}
 	return data, fingerprint{info.Size(), info.ModTime(), sha256.Sum256(data)}, nil
@@ -155,6 +163,9 @@ func text(value string, limit int) string {
 	return value
 }
 func fields(values map[string]string) Metadata {
+	if value := text(values["api_version_dst"], 32); value != "" {
+		values["api_version"] = value
+	}
 	result := Metadata{Name: text(values["name"], 2048), Author: text(values["author"], 2048), Version: text(values["version"], 256), Description: text(values["description"], 8192), APIVersion: text(values["api_version"], 32)}
 	if values["dst_compatible"] == "true" || values["dst_compatible"] == "false" {
 		value := values["dst_compatible"] == "true"
@@ -163,7 +174,7 @@ func fields(values map[string]string) Metadata {
 	return result
 }
 func wanted(key string) bool {
-	return key == "name" || key == "author" || key == "version" || key == "description" || key == "dst_compatible" || key == "api_version"
+	return key == "name" || key == "author" || key == "version" || key == "description" || key == "dst_compatible" || key == "api_version" || key == "api_version_dst"
 }
 
 func read(ctx context.Context, path, id, language string) (Metadata, map[string]fingerprint) {
@@ -171,9 +182,18 @@ func read(ctx context.Context, path, id, language string) (Metadata, map[string]
 	files := map[string]fingerprint{}
 	data, fp, err := safeRead(root, path)
 	if err != nil {
+		if errors.Is(err, errMetadataTooLarge) {
+			return Metadata{Reason: "metadata_too_large"}, files
+		}
 		return Metadata{Reason: "metadata_unreadable"}, files
 	}
 	files[path] = fp
+	select {
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
+	case <-ctx.Done():
+		return Metadata{Reason: "metadata_timeout"}, files
+	}
 	// Static assignments never execute Lua. Any control flow or computed value
 	// uses the bounded interpreter, preserving assignment order and translations.
 	chunk, err := parse.Parse(bytes.NewReader(data), path)
@@ -239,17 +259,11 @@ func read(ctx context.Context, path, id, language string) (Metadata, map[string]
 	if static {
 		return fields(values), files
 	}
-	select {
-	case slots <- struct{}{}:
-		defer func() { <-slots }()
-	case <-ctx.Done():
-		return Metadata{Reason: "metadata_timeout"}, files
-	}
 	ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
 	state := lua.NewState(lua.Options{SkipOpenLibs: true, CallStackSize: 64, RegistrySize: 1024, RegistryMaxSize: 16384, MinimizeStackMemory: true})
 	defer state.Close()
-	state.SetContext(withInstructionBudget(ctx))
+	state.SetContext(withInstructionBudget(ctx, len(data)))
 	lua.OpenBase(state)
 	lua.OpenString(state)
 	lua.OpenTable(state)
@@ -344,20 +358,22 @@ func read(ctx context.Context, path, id, language string) (Metadata, map[string]
 	})
 	state.SetGlobal("require", require)
 	state.SetGlobal("modimport", require)
-	fn, err := boundedLoad(state, data, path)
+	fn, err := boundedCompile(state, chunk, path)
 	if err == nil {
 		state.Push(fn)
 		err = state.PCall(0, 0, nil)
 	}
 	if err != nil {
 		reason := "metadata_parse_failed"
-		if state.Context().Err() != nil {
+		if errors.Is(state.Context().Err(), errInstructionBudget) {
+			reason = "metadata_instruction_limit"
+		} else if state.Context().Err() != nil {
 			reason = "metadata_timeout"
 		}
 		return Metadata{Reason: reason}, files
 	}
 	values = map[string]string{}
-	for _, name := range []string{"name", "author", "version", "description", "dst_compatible", "api_version"} {
+	for _, name := range []string{"name", "author", "version", "description", "dst_compatible", "api_version", "api_version_dst"} {
 		v := state.GetGlobal(name)
 		if name == "dst_compatible" {
 			if v.Type() == lua.LTBool {
