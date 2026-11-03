@@ -246,10 +246,11 @@ type EnableRequest struct {
 }
 
 type ActionResult struct {
-	ModIDs             []string `json:"modIds"`
-	ProtectionBackupID string   `json:"protectionBackupId,omitempty"`
-	Message            string   `json:"message"`
-	Warnings           []string `json:"warnings,omitempty"`
+	CheckSummary       *ModUpdateCheck `json:"checkSummary,omitempty"`
+	ModIDs             []string        `json:"modIds"`
+	ProtectionBackupID string          `json:"protectionBackupId,omitempty"`
+	Message            string          `json:"message"`
+	Warnings           []string        `json:"warnings,omitempty"`
 }
 
 type ParserResult struct {

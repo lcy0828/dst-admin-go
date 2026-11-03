@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "5a6b76759aa91e53054a76b99f3f5c59bb968a1d6c0fc37e9d30f960f1e26a76",
+  "operationsSHA256": "dd4870348b3e9ea1f226155530177a11342929aa43bd171c2c9a43e3c152d69d",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -182,6 +182,7 @@
       "operationId": "applyRoomModUpdateNow",
       "method": "POST",
       "path": "/rooms/{roomId}/mod-update/actions/apply",
+      "contentType": "application/json",
       "transport": "json",
       "tags": [
         "job",
@@ -191,7 +192,7 @@
       "access": "write",
       "risk": "normal",
       "runtime": "any",
-      "title": "Recheck, download, atomically publish, and restart worlds that were running after an explicit operator confirmation"
+      "title": "Update confirmed Workshop mods and restart previously running worlds after operator confirmation"
     },
     {
       "operationId": "applyRoomModUpdateWhenEmpty",

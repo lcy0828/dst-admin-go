@@ -63,3 +63,29 @@ func TestModUpdateApplyNowHTTP(t *testing.T) {
 		t.Fatalf("unexpected manual apply response: %s", response.Body.String())
 	}
 }
+
+type checkedModUpdateHTTPStub struct {
+	modUpdateHTTPStub
+	request modupdates.ApplyRequest
+}
+
+func (s *checkedModUpdateHTTPStub) SubmitApplyNowChecked(id string, request modupdates.ApplyRequest) (jobs.Job, error) {
+	s.request = request
+	return s.SubmitApplyNow(id)
+}
+func TestModUpdateConfirmationBodyIsPreservedAndUnknownFieldsRejected(t *testing.T) {
+	service := &checkedModUpdateHTTPStub{}
+	handler, _ := NewModUpdateHandler(service)
+	router := gin.New()
+	handler.Register(router.Group("/api/v2"))
+	response := performJSON(router, http.MethodPost, "/api/v2/rooms/room-1/mod-update/actions/apply", map[string]any{"expectedScopeRevision": "scope-v1", "modIds": []string{"100"}}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	if service.request.ExpectedScopeRevision != "scope-v1" || len(service.request.ModIDs) != 1 || service.request.ModIDs[0] != "100" {
+		t.Fatal(service.request)
+	}
+	service.applyNowRoomID = ""
+	response = performJSON(router, http.MethodPost, "/api/v2/rooms/room-1/mod-update/actions/apply", map[string]any{"force": true}, nil, "")
+	if response.Code < 400 || service.applyNowRoomID != "" {
+		t.Fatal(response.Body.String())
+	}
+}

@@ -27,6 +27,8 @@ type policyRecord struct {
 }
 
 type stateRecord struct {
+	CheckSummaryJSON     string `gorm:"type:text"`
+	PendingUpdateJSON    string `gorm:"type:text"`
 	RoomID               string `gorm:"primary_key;type:varchar(128)"`
 	Status               string `gorm:"type:varchar(32);index;not null"`
 	AvailableModIDsJSON  string `gorm:"type:text;not null"`
@@ -144,6 +146,15 @@ func (s *Store) SaveState(value State) (State, error) {
 	}
 	value.UpdatedAt = s.now().UTC()
 	record := stateRecordFrom(value, string(encoded))
+	checkJSON, err := json.Marshal(value.CheckSummary)
+	if err != nil {
+		return State{}, err
+	}
+	pendingJSON, err := json.Marshal(value.PendingUpdate)
+	if err != nil {
+		return State{}, err
+	}
+	record.CheckSummaryJSON, record.PendingUpdateJSON = string(checkJSON), string(pendingJSON)
 	var count int
 	if err := s.db.Table(s.stateTable).Where("room_id = ?", value.RoomID).Count(&count).Error; err != nil {
 		return State{}, err
@@ -155,6 +166,7 @@ func (s *Store) SaveState(value State) (State, error) {
 	} else {
 		updates := map[string]interface{}{
 			"status": record.Status, "available_mod_ids_json": record.AvailableModIDsJSON,
+			"check_summary_json": record.CheckSummaryJSON, "pending_update_json": record.PendingUpdateJSON,
 			"prepared_plan_hash": record.PreparedPlanHash, "publication_id": record.PublicationID,
 			"online_players": record.OnlinePlayers, "stale_online_players": record.StaleOnlinePlayers,
 			"presence_fresh": record.PresenceFresh, "announcement_plan_hash": record.AnnouncementPlanHash,
@@ -223,7 +235,19 @@ func stateFromRecord(record stateRecord) (State, error) {
 	if err := json.Unmarshal([]byte(record.AvailableModIDsJSON), &ids); err != nil {
 		return State{}, fmt.Errorf("decode Mod update IDs: %w", err)
 	}
+	var extra State
+	if record.CheckSummaryJSON != "" {
+		if err := json.Unmarshal([]byte(record.CheckSummaryJSON), &extra.CheckSummary); err != nil {
+			return State{}, fmt.Errorf("decode Mod update check: %w", err)
+		}
+	}
+	if record.PendingUpdateJSON != "" {
+		if err := json.Unmarshal([]byte(record.PendingUpdateJSON), &extra.PendingUpdate); err != nil {
+			return State{}, fmt.Errorf("decode Mod update progress: %w", err)
+		}
+	}
 	return State{
+		CheckSummary: extra.CheckSummary, PendingUpdate: extra.PendingUpdate,
 		RoomID: record.RoomID, Status: Status(record.Status), AvailableModIDs: normalizedIDs(ids),
 		PreparedPlanHash: record.PreparedPlanHash, PublicationID: record.PublicationID,
 		OnlinePlayers: record.OnlinePlayers, StaleOnlinePlayers: record.StaleOnlinePlayers, PresenceFresh: record.PresenceFresh,

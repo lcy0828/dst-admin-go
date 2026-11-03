@@ -1152,14 +1152,14 @@ func TestRoomListDetectsVersionsAcrossRuntimePlacements(t *testing.T) {
 		t.Fatal("Steam failure must not become a successful zero-update check")
 	}
 	fixture.mods.describeErr = nil
-	if _, err := service.CheckUpdates(context.Background(), fixture.room.ID); err == nil {
-		t.Fatal("missing Steam version evidence must not become a successful check")
+	if result, err := service.CheckUpdates(context.Background(), fixture.room.ID); err != nil || result.CheckSummary == nil || result.CheckSummary.Complete || result.CheckSummary.Unknown != 1 || len(result.ModIDs) != 0 {
+		t.Fatalf("missing version evidence must remain explicitly unknown: %+v %v", result, err)
 	}
 	fixture.mods.described = map[string]mods.SteamMod{"100": {ID: "100", SteamManifestID: "new", Version: "1.9.8", UpdatedAt: latest}}
 	delete(observer.observations, "local\x00default")
 	updates, err = service.CheckUpdates(context.Background(), fixture.room.ID)
-	if err == nil || len(updates.ModIDs) != 1 || updates.ModIDs[0] != "100" {
-		t.Fatalf("unavailable node must preserve known remote update and return an error: %#v, %v", updates, err)
+	if err == nil || len(updates.ModIDs) != 0 || updates.CheckSummary == nil || updates.CheckSummary.Unknown != 1 {
+		t.Fatalf("unavailable node must block the affected mod and retain target evidence: %#v, %v", updates, err)
 	}
 }
 
@@ -1459,5 +1459,12 @@ func TestRetrySeparatesRecoveryAndExactTerminalRetry(t *testing.T) {
 	coordinator.previewPlan = &drifted
 	if _, err := service.Retry(context.Background(), "job-4", "publication-1"); !errors.Is(err, modpublication.ErrPlanChanged) {
 		t.Fatalf("plan drift was accepted: %v", err)
+	}
+}
+
+func TestConflictingInstalledVersionEvidenceRemainsUnknown(t *testing.T) {
+	state := shared.RuntimeModFileState{Status: shared.RuntimeModFileReady, SteamManifestID: "same", Version: "1"}
+	if got := runtimeModVersionStatus(state, "same", "2", time.Time{}); got != "unknown" {
+		t.Fatal(got)
 	}
 }

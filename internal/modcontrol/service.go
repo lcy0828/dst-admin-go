@@ -262,7 +262,7 @@ func (s *Service) Install(ctx context.Context, _ string, roomID string, request 
 	}, nil
 }
 
-func (s *Service) installationModsCurrent(ctx context.Context, targetID, installationID string, modIDs []string) (bool, error) {
+func (s *Service) installationModsCurrent(ctx context.Context, targetID, installationID string, modIDs []string, requireCommittedEvidence ...bool) (bool, error) {
 	if s.runtimeFiles == nil {
 		return false, nil
 	}
@@ -286,6 +286,13 @@ func (s *Service) installationModsCurrent(ctx context.Context, targetID, install
 	for _, modID := range modIDs {
 		state := observed.Mods[modID]
 		latest, exists := metadata[modID]
+		if len(requireCommittedEvidence) > 0 && requireCommittedEvidence[0] {
+			// A modinfo version can be written before Steam finishes the other files.
+			// Resolving a lost receipt requires committed Steam installation evidence.
+			if !(state.SteamManifestID != "" && latest.SteamManifestID != "" || state.SteamUpdatedAt != nil && !latest.UpdatedAt.IsZero()) {
+				return false, nil
+			}
+		}
 		if !exists || runtimeModVersionStatus(state, latest.SteamManifestID, latest.Version, latest.UpdatedAt) != "current" {
 			return false, nil
 		}
@@ -676,58 +683,104 @@ func (s *Service) CheckUpdates(ctx context.Context, roomID string) (mods.ActionR
 	if err != nil {
 		return mods.ActionResult{}, err
 	}
+	check := &mods.ModUpdateCheck{CheckedAt: time.Now().UTC(), Complete: true, Items: []mods.ModUpdateCheckItem{}}
 	ids := make([]string, 0, len(list.Items))
 	for _, item := range list.Items {
-		if item.Enabled && mods.ValidID(item.ID) {
+		if !item.Enabled {
+			continue
+		}
+		if mods.ValidID(item.ID) {
 			ids = append(ids, item.ID)
+		} else {
+			check.Local++
 		}
 	}
-	if len(ids) == 0 {
-		return mods.ActionResult{ModIDs: []string{}, Message: "房间没有已启用的模组"}, nil
+	scope, err := s.ModUpdateScope(ctx, roomID)
+	if err != nil {
+		return mods.ActionResult{}, err
 	}
-	// Always fetch version evidence. Display metadata may be old or unavailable
-	// without affecting this comparison, and missing evidence is never current.
-	metadata, metadataErr := s.mods.Describe(ctx, ids)
-	failures := []error{metadataErr}
-	updates := make([]string, 0)
+	check.Scope = scope
+	result := mods.ActionResult{ModIDs: []string{}, CheckSummary: check}
+	metadata := map[string]mods.SteamMod{}
+	var metadataErr error
+	if len(ids) > 0 {
+		metadata, metadataErr = s.mods.Describe(ctx, ids)
+	}
+	var failures []error
 	for _, item := range list.Items {
 		if !item.Enabled || !mods.ValidID(item.ID) {
 			continue
 		}
 		latest := metadata[item.ID]
-		if latest.SteamManifestID == "" && latest.Version == "" && latest.UpdatedAt.IsZero() {
-			// A failed batch request already explains why its missing items
-			// cannot be compared. Do not repeat it as a failure on every node.
-			if metadataErr == nil {
-				failures = append(failures, fmt.Errorf("Workshop %s 未返回可比较的版本信息", item.ID))
-			}
-			continue
+		entry := mods.ModUpdateCheckItem{ModID: item.ID, Name: item.Name, Status: "current", LatestVersion: latest.Version, Targets: []mods.RuntimeModVersionTarget{}}
+		latestKnown := latest.SteamManifestID != "" || latest.Version != "" || !latest.UpdatedAt.IsZero()
+		outdated, unknown := false, !latestKnown || len(item.RuntimeVersions) == 0
+		if !latestKnown {
+			entry.Reason = "latest_version_unavailable"
 		}
-		outdated := false
 		if len(item.RuntimeVersions) == 0 {
+			entry.Reason = "installed_version_unavailable"
 			failures = append(failures, fmt.Errorf("Workshop %s 未能读取运行机器上的版本", item.ID))
 		}
 		for _, target := range item.RuntimeVersions {
 			status := target.Status
 			if status == "unknown" || status == "current" || status == "outdated" {
-				status = runtimeModVersionStatus(shared.RuntimeModFileState{
+				evidence := shared.RuntimeModFileState{
 					Status: shared.RuntimeModFileReady, Version: target.Version,
 					SteamManifestID: target.SteamManifestID, SteamUpdatedAt: target.SteamUpdatedAt,
-				}, latest.SteamManifestID, latest.Version, latest.UpdatedAt)
+				}
+				status = runtimeModVersionStatus(evidence, latest.SteamManifestID, latest.Version, latest.UpdatedAt)
+				if runtimeModVersionConflict(evidence, latest.SteamManifestID, latest.Version, latest.UpdatedAt) {
+					target.MetadataReason = "version_evidence_conflict"
+				}
 			}
+			target.Status = status
+			entry.Targets = append(entry.Targets, target)
 			switch status {
 			case "outdated":
 				outdated = true
 			case "current":
+			case "unknown":
+				unknown = true
+				if entry.Reason == "" {
+					entry.Reason = target.MetadataReason
+				}
+				if entry.Reason == "" {
+					entry.Reason = "installed_version_unavailable"
+				}
 			default:
+				unknown = true
+				entry.Reason = status
+				// Missing/unsafe files and disconnected targets are execution
+				// blockers, unlike an unrelated mod's unreadable version.
 				failures = append(failures, fmt.Errorf("Workshop %s 在 %s/%s 的版本未确认：%s", item.ID, target.TargetID, target.InstallationID, status))
 			}
 		}
-		if outdated {
-			updates = append(updates, item.ID)
+		check.Total++
+		if unknown {
+			entry.Status = "unknown"
+			check.Unknown++
+			check.Complete = false
+		} else if outdated {
+			entry.Status = "outdated"
+			check.Outdated++
+			result.ModIDs = append(result.ModIDs, item.ID)
+		} else {
+			check.Current++
 		}
+		check.Items = append(check.Items, entry)
 	}
-	return mods.ActionResult{ModIDs: updates, Message: fmt.Sprintf("检测到 %d 个 Mod 可更新", len(updates))}, errors.Join(failures...)
+	// A failed upstream batch cannot silently become an all-current result.
+	// Preserve comparable items and expose missing ones; a complete outage fails.
+	if metadataErr != nil && check.Unknown == check.Total && check.Total > 0 {
+		failures = append(failures, metadataErr)
+	}
+	result.Message = check.Message()
+	if !check.Complete {
+		result.Warnings = []string{check.Message()}
+	}
+	return result, errors.Join(failures...)
+
 }
 
 func (s *Service) InstallationModInventory(ctx context.Context, targetID, installationID string) (mods.RuntimeInstallationModInventory, error) {
@@ -1188,9 +1241,23 @@ func (s *Service) observeRoomModFiles(ctx context.Context, room rooms.Room, worl
 	}
 }
 
+func runtimeModVersionConflict(state shared.RuntimeModFileState, manifest, version string, updated time.Time) bool {
+	currentVersion, version := strings.TrimSpace(state.Version), strings.TrimSpace(version)
+	if currentVersion == "" || version == "" || currentVersion == version {
+		return false
+	}
+	if state.SteamManifestID != "" && manifest != "" {
+		return state.SteamManifestID == manifest
+	}
+	return state.SteamUpdatedAt != nil && !updated.IsZero() && !updated.After(state.SteamUpdatedAt.Add(time.Second))
+}
+
 func runtimeModVersionStatus(state shared.RuntimeModFileState, latestManifestID, latestVersion string, latestUpdatedAt time.Time) string {
 	if state.Status != shared.RuntimeModFileReady {
 		return string(state.Status)
+	}
+	if runtimeModVersionConflict(state, latestManifestID, latestVersion, latestUpdatedAt) {
+		return "unknown"
 	}
 	currentManifestID := strings.TrimSpace(state.SteamManifestID)
 	latestManifestID = strings.TrimSpace(latestManifestID)

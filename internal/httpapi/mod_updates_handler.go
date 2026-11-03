@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"dont/internal/jobs"
@@ -77,7 +79,31 @@ func (h *ModUpdateHandler) applyWhenEmpty(c *gin.Context) {
 }
 
 func (h *ModUpdateHandler) applyNow(c *gin.Context) {
-	job, err := h.service.SubmitApplyNow(c.Param("roomId"))
+	var input modupdates.ApplyRequest
+	if c.Request.ContentLength != 0 {
+		decoder := json.NewDecoder(io.LimitReader(c.Request.Body, 64<<10))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			Failure(c, http.StatusBadRequest, "INVALID_JSON", "更新请求格式无效", nil)
+			return
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			Failure(c, http.StatusBadRequest, "INVALID_JSON", "更新请求格式无效", nil)
+			return
+		}
+	}
+	var job jobs.Job
+	var err error
+	if checked, ok := h.service.(interface {
+		SubmitApplyNowChecked(string, modupdates.ApplyRequest) (jobs.Job, error)
+	}); ok {
+		job, err = checked.SubmitApplyNowChecked(c.Param("roomId"), input)
+	} else if input.ExpectedScopeRevision != "" || input.ModIDs != nil {
+		err = modupdates.ErrInvalidInput
+	} else {
+		job, err = h.service.SubmitApplyNow(c.Param("roomId"))
+	}
 	if err != nil {
 		modUpdateFailure(c, err)
 		return

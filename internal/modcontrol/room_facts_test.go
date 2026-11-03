@@ -45,8 +45,11 @@ func TestCheckUpdatesReportsBatchFailureOnceAndKeepsPartialUpdates(t *testing.T)
 				t.Fatal(err)
 			}
 			result, err := service.CheckUpdates(context.Background(), f.room.ID)
-			if !errors.Is(err, context.DeadlineExceeded) || err.Error() != cause.Error() {
+			if !partial && (!errors.Is(err, context.DeadlineExceeded) || err.Error() != cause.Error()) {
 				t.Fatalf("batch error expanded into per-Mod failures: %v", err)
+			}
+			if partial && (err != nil || result.CheckSummary == nil || result.CheckSummary.Complete || result.CheckSummary.Unknown != 20) {
+				t.Fatalf("partial observations lost: %+v %v", result, err)
 			}
 			want := 0
 			if partial {

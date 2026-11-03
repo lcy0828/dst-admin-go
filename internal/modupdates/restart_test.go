@@ -131,7 +131,7 @@ func TestRestartRetainsLogStagesAndDoesNotTurnUnconfirmedStartupIntoReady(t *tes
 	}
 	var updates []operationprogress.Update
 	ctx := operationprogress.WithReporter(context.Background(), func(update operationprogress.Update) { updates = append(updates, update) })
-	if err := NewWorldRestarter(worlds, operations).RestartRunningWorlds(ctx, "room", "job"); err != nil {
+	if err := NewWorldRestarter(worlds, operations).RestartRunningWorlds(ctx, "room", "job"); !errors.Is(err, ErrRestartUncertain) {
 		t.Fatal(err)
 	}
 	if updates[2].Worlds[0].Stage != "loading_world" || updates[2].Worlds[1].Stage != "loading_mods" {
@@ -143,5 +143,29 @@ func TestRestartRetainsLogStagesAndDoesNotTurnUnconfirmedStartupIntoReady(t *tes
 	}
 	if updates[0].Worlds[0].Stage != "queued" {
 		t.Fatal("later progress mutated a previous event")
+	}
+}
+
+func TestRestartRetryOnlyResumesFailedWorldEvenIfItIsNowStopped(t *testing.T) {
+	worlds := restartWorldCatalog{{ID: "Master", Name: "Master"}, {ID: "Caves", Name: "Caves"}}
+	operations := &restartWorldOperations{states: map[string]shards.RuntimeStatus{"Master": {State: shards.RuntimeRunning}, "Caves": {State: shards.RuntimeRunning}}, failWorld: "Caves"}
+	restarter := NewWorldRestarter(worlds, operations)
+	var saved []RestartWorld
+	record := func(states []RestartWorld) error { saved = append([]RestartWorld{}, states...); return nil }
+	ctx := context.WithValue(context.Background(), restartTrackingKey{}, restartTracking{record: record})
+	if err := restarter.RestartRunningWorlds(ctx, "room", "first"); !errors.Is(err, ErrRestartIncomplete) {
+		t.Fatal(err)
+	}
+	if saved[0].Status != "ready" || saved[1].Status != "failed" {
+		t.Fatal(saved)
+	}
+	operations.states["Caves"] = shards.RuntimeStatus{State: shards.RuntimeStopped}
+	operations.failWorld = ""
+	ctx = context.WithValue(context.Background(), restartTrackingKey{}, restartTracking{previous: saved, record: record})
+	if err := restarter.RestartRunningWorlds(ctx, "room", "retry"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(operations.selected, []string{"Caves"}) || saved[1].Status != "ready" {
+		t.Fatal(operations.selected, saved)
 	}
 }

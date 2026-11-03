@@ -3,6 +3,8 @@ package modupdates
 import (
 	"errors"
 	"time"
+
+	"dont/internal/mods"
 )
 
 var (
@@ -54,23 +56,36 @@ type PolicyInput struct {
 }
 
 type State struct {
-	RoomID               string     `json:"roomId"`
-	Status               Status     `json:"status"`
-	AvailableModIDs      []string   `json:"availableModIds"`
-	PreparedPlanHash     string     `json:"preparedPlanHash,omitempty"`
-	PublicationID        string     `json:"publicationId,omitempty"`
-	OnlinePlayers        int        `json:"onlinePlayers"`
-	StaleOnlinePlayers   int        `json:"staleOnlinePlayers"`
-	PresenceFresh        bool       `json:"presenceFresh"`
-	AnnouncementPlanHash string     `json:"announcementPlanHash,omitempty"`
-	ErrorCode            string     `json:"errorCode,omitempty"`
-	ErrorMessage         string     `json:"errorMessage,omitempty"`
-	LastCheckedAt        *time.Time `json:"lastCheckedAt,omitempty"`
-	PreparedAt           *time.Time `json:"preparedAt,omitempty"`
-	EmptySince           *time.Time `json:"emptySince,omitempty"`
-	NextCheckAt          *time.Time `json:"nextCheckAt,omitempty"`
-	NextActionAt         *time.Time `json:"nextActionAt,omitempty"`
-	UpdatedAt            time.Time  `json:"updatedAt"`
+	CheckSummary         *mods.ModUpdateCheck `json:"checkSummary,omitempty"`
+	PendingUpdate        *PendingUpdate       `json:"pendingUpdate,omitempty"`
+	RoomID               string               `json:"roomId"`
+	Status               Status               `json:"status"`
+	AvailableModIDs      []string             `json:"availableModIds"`
+	PreparedPlanHash     string               `json:"preparedPlanHash,omitempty"`
+	PublicationID        string               `json:"publicationId,omitempty"`
+	OnlinePlayers        int                  `json:"onlinePlayers"`
+	StaleOnlinePlayers   int                  `json:"staleOnlinePlayers"`
+	PresenceFresh        bool                 `json:"presenceFresh"`
+	AnnouncementPlanHash string               `json:"announcementPlanHash,omitempty"`
+	ErrorCode            string               `json:"errorCode,omitempty"`
+	ErrorMessage         string               `json:"errorMessage,omitempty"`
+	LastCheckedAt        *time.Time           `json:"lastCheckedAt,omitempty"`
+	PreparedAt           *time.Time           `json:"preparedAt,omitempty"`
+	EmptySince           *time.Time           `json:"emptySince,omitempty"`
+	NextCheckAt          *time.Time           `json:"nextCheckAt,omitempty"`
+	NextActionAt         *time.Time           `json:"nextActionAt,omitempty"`
+	UpdatedAt            time.Time            `json:"updatedAt"`
+}
+
+type PendingUpdate struct {
+	RestartWorlds    map[string][]RestartWorld `json:"restartWorlds,omitempty"`
+	ScopeRevision    string                    `json:"scopeRevision,omitempty"`
+	RestartingRoomID string                    `json:"restartingRoomId,omitempty"`
+	RestartJobID     string                    `json:"restartJobId,omitempty"`
+	ModIDs           []string                  `json:"modIds"`
+	AffectedRoomIDs  []string                  `json:"affectedRoomIds"`
+	Targets          []mods.ModUpdateTarget    `json:"targets"`
+	RestartedRoomIDs []string                  `json:"restartedRoomIds"`
 }
 
 type Overview struct {

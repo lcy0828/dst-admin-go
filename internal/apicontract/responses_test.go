@@ -7,6 +7,8 @@ import (
 
 	"dont/internal/gameinstall"
 	"dont/internal/luajit"
+	"dont/internal/mods"
+	"dont/internal/modupdates"
 	"dont/shared"
 )
 
@@ -21,6 +23,7 @@ func TestInstallationAndSteamSchemasMatchSerializedPlatformTypes(t *testing.T) {
 		operation, status string
 		value             any
 	}{
+		{"getRoomModUpdate", "200", modupdates.Overview{Policy: modupdates.DefaultPolicy("example"), State: modupdates.State{RoomID: "example", Status: modupdates.StatusAvailable, AvailableModIDs: []string{"100"}, UpdatedAt: time.Now().UTC(), CheckSummary: &mods.ModUpdateCheck{CheckedAt: time.Now().UTC(), Scope: mods.ModUpdateScope{Revision: "revision", AffectedRoomIDs: []string{"example"}}, Total: 2, Outdated: 1, Unknown: 1, Items: []mods.ModUpdateCheckItem{{ModID: "100", Status: "outdated", Targets: []mods.RuntimeModVersionTarget{{TargetID: "local", InstallationID: "default", Status: "outdated", Version: "1"}}}}}, PendingUpdate: &modupdates.PendingUpdate{ModIDs: []string{"100"}, AffectedRoomIDs: []string{"example"}, Targets: []mods.ModUpdateTarget{{TargetID: "local", InstallationID: "default", ModIDs: []string{"100"}, Status: "verified"}}, RestartedRoomIDs: []string{}}}}},
 		{"listGameInstallations", "200", []gameinstall.Installation{{TargetID: "local", InstallationID: "default", GameInstallationReport: game}}},
 		{"probeExistingGameInstallation", "200", game},
 		{"observeNodeSteamLogin", "200", login},

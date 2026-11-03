@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -176,6 +177,9 @@ func (s *Service) SubmitApplyNow(roomID string) (jobs.Job, error) {
 }
 
 func (s *Service) submit(roomID string, action DueAction) (jobs.Job, error) {
+	return s.submitChecked(roomID, action, ApplyRequest{})
+}
+func (s *Service) submitChecked(roomID string, action DueAction, request ApplyRequest) (jobs.Job, error) {
 	if _, err := s.rooms.Room(roomID); err != nil {
 		return jobs.Job{}, err
 	}
@@ -204,6 +208,7 @@ func (s *Service) submit(roomID string, action DueAction) (jobs.Job, error) {
 		s.activeMu.Unlock()
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
 			defer s.clearActive(roomID, job.ID)
+			ctx = context.WithValue(ctx, applyRequestKey{}, request)
 			ctx = operationprogress.WithReporter(ctx, func(update operationprogress.Update) {
 				progress := update.Percent
 				if progress <= 0 {
@@ -233,7 +238,7 @@ func (s *Service) submit(roomID string, action DueAction) (jobs.Job, error) {
 				report(jobs.TargetResult{TargetID: target.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: code, Message: runErr.Error()}})
 				return nil
 			}
-			report(jobs.TargetResult{TargetID: target.ID, Status: jobs.StatusSucceeded, Message: "模组更新状态已刷新"})
+			report(jobs.TargetResult{TargetID: target.ID, Status: jobs.StatusSucceeded, Message: updateResultMessage(state)})
 			return nil
 		}
 	})
@@ -263,10 +268,14 @@ func (s *Service) check(ctx context.Context, roomID, jobID string, automatic boo
 	operationprogress.Report(ctx, operationprogress.Update{Percent: 5, Message: "正在检查 Workshop 更新"})
 	checked, err := s.catalog.CheckUpdates(ctx, roomID)
 	if err != nil {
+		state.CheckSummary = checked.CheckSummary
 		state.AvailableModIDs = normalizedIDs(append(state.AvailableModIDs, checked.ModIDs...))
 		return s.fail(state, "MOD_UPDATE_CHECK_FAILED", err, nil)
 	}
-	state = s.recordCheck(state, checked.ModIDs)
+	state = s.recordCheckResult(state, checked)
+	if err := s.validatePendingScope(ctx, state); err != nil {
+		return s.fail(state, "MOD_UPDATE_RECOVERY_REQUIRED", err, nil)
+	}
 	if state.PreparedAt != nil && policy.AutoCheck && policy.AutoPrepare && policy.ApplyWhenEmpty {
 		state.NextActionAt = timePointer(s.now())
 	}
@@ -281,7 +290,7 @@ func (s *Service) check(ctx context.Context, roomID, jobID string, automatic boo
 	if !automatic || !policy.AutoCheck || !policy.AutoPrepare {
 		return state, nil
 	}
-	if len(checked.ModIDs) == 0 && state.PreparedAt == nil {
+	if len(pendingDownloadIDs(state, checked.ModIDs)) == 0 && state.PreparedAt == nil {
 		return state, nil
 	}
 	ctx, release, affected, err := s.lockAffectedRooms(ctx, roomID)
@@ -309,8 +318,8 @@ func (s *Service) check(ctx context.Context, roomID, jobID string, automatic boo
 		}
 		return s.saveState(state)
 	}
-	if len(checked.ModIDs) > 0 {
-		state, err = s.downloadUpdates(ctx, state, checked.ModIDs)
+	if ids := pendingDownloadIDs(state, checked.ModIDs); len(ids) > 0 {
+		state, err = s.downloadUpdates(ctx, state, ids)
 		if err != nil {
 			return state, err
 		}
@@ -354,6 +363,10 @@ func (s *Service) downloadUpdates(ctx context.Context, state State, ids []string
 		update.Percent = 10 + min(100, max(0, update.Percent))/2
 		operationprogress.Report(ctx, update)
 	})
+	downloadCtx, err = s.trackDownloads(downloadCtx, &state, ids)
+	if err != nil {
+		return s.fail(state, "MOD_UPDATE_PLAN_CHANGED", err, nil)
+	}
 	result, err := s.content.UpdateRoomMods(downloadCtx, state.RoomID, ids, io.Discard)
 	if err != nil {
 		return s.fail(state, "MOD_RUNTIME_UPDATE_FAILED", err, nil)
@@ -361,6 +374,7 @@ func (s *Service) downloadUpdates(ctx context.Context, state State, ids []string
 	// The user may have disabled every requested Mod since the check.
 	if len(result.ModIDs) == 0 && state.PreparedAt == nil {
 		state.Status, state.AvailableModIDs = StatusIdle, []string{}
+		state.PendingUpdate = nil
 	} else {
 		state.Status, state.PreparedAt = StatusPrepared, timePointer(s.now())
 	}
@@ -374,6 +388,14 @@ func (s *Service) applyNow(ctx context.Context, roomID, jobID string) (State, er
 	if err != nil {
 		return State{}, err
 	}
+	ctx, release, affected, err := s.lockAffectedRooms(ctx, roomID)
+	if err != nil {
+		return s.fail(state, "MAINTENANCE_SCOPE_FAILED", err, nil)
+	}
+	defer release()
+	if err := s.validatePendingScope(ctx, state); err != nil {
+		return s.fail(state, "MOD_UPDATE_RECOVERY_REQUIRED", err, nil)
+	}
 	state.Status, state.ErrorCode, state.ErrorMessage = StatusChecking, "", ""
 	state.NextActionAt, state.EmptySince = nil, nil
 	if state, err = s.saveState(state); err != nil {
@@ -382,24 +404,28 @@ func (s *Service) applyNow(ctx context.Context, roomID, jobID string) (State, er
 	operationprogress.Report(ctx, operationprogress.Update{Percent: 5, Message: "正在重新检查 Workshop 更新"})
 	checked, err := s.catalog.CheckUpdates(ctx, roomID)
 	if err != nil {
+		state.CheckSummary = checked.CheckSummary
 		state.AvailableModIDs = normalizedIDs(append(state.AvailableModIDs, checked.ModIDs...))
 		return s.fail(state, "MOD_UPDATE_CHECK_FAILED", err, nil)
 	}
-	state = s.recordCheck(state, checked.ModIDs)
+	if err := checkApplyRequest(ctx, state, checked); err != nil {
+		return s.fail(state, "MOD_UPDATE_PLAN_CHANGED", err, nil)
+	}
+	state = s.recordCheckResult(state, checked)
 	if state, err = s.saveState(state); err != nil {
 		return state, err
 	}
-	if len(checked.ModIDs) > 0 {
-		state, err = s.downloadUpdates(ctx, state, checked.ModIDs)
+	if ids := pendingDownloadIDs(state, checked.ModIDs); len(ids) > 0 {
+		state, err = s.downloadUpdates(ctx, state, ids)
 		if err != nil {
 			return state, err
 		}
 	}
 	if state.PreparedAt == nil {
-		operationprogress.Report(ctx, operationprogress.Update{Percent: 100, Message: "没有需要应用的房间模组更新"})
+		operationprogress.Report(ctx, operationprogress.Update{Percent: 100, Message: updateResultMessage(state)})
 		return state, nil
 	}
-	return s.restartPrepared(ctx, roomID, jobID, state)
+	return s.restartPrepared(ctx, roomID, jobID, state, affected...)
 }
 
 func (s *Service) applyWhenEmpty(ctx context.Context, roomID, jobID string) (State, error) {
@@ -468,11 +494,12 @@ func (s *Service) applyWhenEmpty(ctx context.Context, roomID, jobID string) (Sta
 	operationprogress.Report(ctx, operationprogress.Update{Percent: 70, Message: "正在确认等待期间是否又有 Workshop 更新"})
 	checked, err := s.catalog.CheckUpdates(ctx, roomID)
 	if err != nil {
+		state.CheckSummary = checked.CheckSummary
 		state.AvailableModIDs = normalizedIDs(append(state.AvailableModIDs, checked.ModIDs...))
 		state.EmptySince = nil
 		return s.fail(state, "MOD_UPDATE_CHECK_FAILED", err, timePointer(s.now().Add(time.Minute)))
 	}
-	state = s.recordCheck(state, checked.ModIDs)
+	state = s.recordCheckResult(state, checked)
 	// Re-read telemetry immediately before restarting. A joining player cancels
 	// the unattended activation even if the earlier grace observation was empty.
 	presence, presenceErr = s.refreshAffectedPresence(ctx, affected)
@@ -502,8 +529,8 @@ func (s *Service) applyWhenEmpty(ctx context.Context, roomID, jobID string) (Sta
 	if err := maintenance.Check(ctx); err != nil {
 		return s.fail(state, "MAINTENANCE_RECHECK_FAILED", err, timePointer(s.now().Add(time.Minute)))
 	}
-	if len(checked.ModIDs) > 0 {
-		state, err = s.downloadUpdates(ctx, state, checked.ModIDs)
+	if ids := pendingDownloadIDs(state, checked.ModIDs); len(ids) > 0 {
+		state, err = s.downloadUpdates(ctx, state, ids)
 		if err != nil {
 			return state, err
 		}
@@ -514,6 +541,9 @@ func (s *Service) applyWhenEmpty(ctx context.Context, roomID, jobID string) (Sta
 }
 
 func (s *Service) restartPrepared(ctx context.Context, roomID, jobID string, state State, affected ...string) (State, error) {
+	if err := s.validatePendingScope(ctx, state); err != nil {
+		return s.fail(state, "MOD_UPDATE_RECOVERY_REQUIRED", err, nil)
+	}
 	state.Status, state.NextActionAt = StatusActivating, nil
 	state.ErrorCode, state.ErrorMessage = "", ""
 	var err error
@@ -524,12 +554,50 @@ func (s *Service) restartPrepared(ctx context.Context, roomID, jobID string, sta
 	if len(affected) == 0 {
 		affected = []string{roomID}
 	}
+	if state.PendingUpdate != nil && !slices.Equal(normalizedIDs(affected), state.PendingUpdate.AffectedRoomIDs) {
+		return s.fail(state, "MOD_UPDATE_PLAN_CHANGED", errors.New("待重启房间范围已变化，请核对原任务"), nil)
+	}
 	for _, id := range affected {
+		if state.PendingUpdate != nil && slices.Contains(state.PendingUpdate.RestartedRoomIDs, id) {
+			continue
+		}
 		if err = maintenance.Check(ctx); err != nil {
 			break
 		}
-		if err = s.restarter.RestartRunningWorlds(ctx, id, jobID); err != nil {
+		if state.PendingUpdate == nil {
+			state.PendingUpdate = &PendingUpdate{ModIDs: state.AvailableModIDs, AffectedRoomIDs: normalizedIDs(affected), Targets: []mods.ModUpdateTarget{}, RestartedRoomIDs: []string{}}
+		}
+		state.PendingUpdate.RestartingRoomID, state.PendingUpdate.RestartJobID = id, jobID
+		if state, err = s.saveState(state); err != nil {
 			break
+		}
+		restartCtx := context.WithValue(ctx, restartTrackingKey{}, restartTracking{
+			previous: state.PendingUpdate.RestartWorlds[id],
+			record: func(worlds []RestartWorld) error {
+				if state.PendingUpdate.RestartWorlds == nil {
+					state.PendingUpdate.RestartWorlds = make(map[string][]RestartWorld)
+				}
+				state.PendingUpdate.RestartWorlds[id] = append([]RestartWorld{}, worlds...)
+				saved, saveErr := s.saveState(state)
+				if saveErr == nil {
+					state = saved
+				}
+				return saveErr
+			},
+		})
+		if err = s.restarter.RestartRunningWorlds(restartCtx, id, jobID); err != nil {
+			if errors.Is(err, ErrRestartNotStarted) || errors.Is(err, ErrRestartIncomplete) {
+				state.PendingUpdate.RestartingRoomID = ""
+			}
+			break
+		}
+		if state.PendingUpdate != nil {
+			state.PendingUpdate.RestartingRoomID = ""
+			state.PendingUpdate.RestartedRoomIDs = normalizedIDs(append(state.PendingUpdate.RestartedRoomIDs, id))
+			state, err = s.saveState(state)
+			if err != nil {
+				break
+			}
 		}
 	}
 	state.EmptySince = nil
@@ -538,6 +606,7 @@ func (s *Service) restartPrepared(ctx context.Context, roomID, jobID string, sta
 	}
 	state.Status, state.PreparedPlanHash, state.PublicationID = StatusLoaded, "", ""
 	state.AvailableModIDs = []string{}
+	state.PendingUpdate = nil
 	state.PreparedAt, state.NextActionAt = nil, nil
 	state.ErrorCode, state.ErrorMessage, state.AnnouncementPlanHash = "", "", ""
 	operationprogress.Report(ctx, operationprogress.Update{Percent: 100, Message: "模组已更新，原本运行的世界已重启"})

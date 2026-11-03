@@ -5344,7 +5344,7 @@ paths:
       operationId: checkRoomModUpdate
       summary: Check Workshop versions and persist the room update workflow state
       description: >-
-        Manual checks do not download content, change room configuration or restart worlds. Inspect getRoomModUpdate and the returned job for the result. Separately enabled automatic policies may prepare content and apply it when empty; use the explicit apply action for an immediate update and restart.
+        Manual checks do not download content, change room configuration or restart worlds. A successful job may be a partial check: inspect checkSummary.complete and unknown; unknown never means current. Inspect getRoomModUpdate and the returned job for the result. Separately enabled automatic policies may prepare content and apply it when empty; use the explicit apply action for an immediate update and restart.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "202": { description: Mod update check Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
@@ -5367,7 +5367,17 @@ paths:
     post:
       tags: [Mods, Jobs]
       operationId: applyRoomModUpdateNow
-      summary: Recheck, download, atomically publish, and restart worlds that were running after an explicit operator confirmation
+      summary: Update confirmed Workshop mods and restart previously running worlds after operator confirmation
+      description: >
+        Rechecks installed versions and affected rooms before downloading only confirmed updates.
+        Unconfirmed versions are excluded and remain visible in checkSummary; unrelated unknown metadata does not block confirmed updates.
+        Does not publish or rewrite room configuration. Pass the observed scope revision and exact mod IDs to bind confirmation;
+        changed configuration, placement, or selection blocks execution. Inspect the job and pendingUpdate, not acceptance alone.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ModUpdateApplyRequest" }
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "202": { description: Manual Mod update and restart Job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
@@ -12479,20 +12489,115 @@ components:
         checkIntervalMinutes: { type: integer, minimum: 5, maximum: 1440, default: 5 }
         expectedRevision: { type: string }
     ModUpdatePolicy:
-      allOf:
-        - $ref: "#/components/schemas/ModUpdatePolicyInput"
-        - type: object
-          required: [roomId]
-          properties:
-            roomId: { type: string }
-            revision: { type: string }
-            createdAt: { type: string, format: date-time }
-            updatedAt: { type: string, format: date-time }
+      type: object
+      additionalProperties: false
+      required: [roomId, autoCheck, autoPrepare, applyWhenEmpty, restartWithPlayers, gameAnnouncement, emptyGraceSeconds, checkIntervalMinutes]
+      properties:
+        roomId: { type: string }
+        autoCheck: { type: boolean }
+        autoPrepare: { type: boolean }
+        applyWhenEmpty: { type: boolean }
+        restartWithPlayers: { type: boolean, enum: [false] }
+        gameAnnouncement: { type: boolean }
+        emptyGraceSeconds: { type: integer, minimum: 30, maximum: 1800 }
+        checkIntervalMinutes: { type: integer, minimum: 5, maximum: 1440 }
+        revision: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ModUpdateApplyRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        expectedScopeRevision: { type: string, maxLength: 128 }
+        modIds: { type: array, maxItems: 512, items: { type: string, pattern: "^[0-9]+$" } }
+    ModUpdateScope:
+      type: object
+      additionalProperties: false
+      required: [revision, affectedRoomIds]
+      properties:
+        revision: { type: string }
+        affectedRoomIds: { type: array, items: { type: string } }
+    RuntimeModVersionTarget:
+      type: object
+      additionalProperties: false
+      required: [targetId, installationId, status]
+      properties:
+        targetId: { type: string }
+        installationId: { type: string }
+        status: { type: string }
+        version: { type: string }
+        steamManifestId: { type: string }
+        steamUpdatedAt: { type: string, format: date-time }
+        metadataReason: { type: string }
+        dstCompatible: { type: boolean }
+        apiVersion: { type: string }
+        fileStatus: { type: string }
+        name: { type: string }
+        author: { type: string }
+    ModUpdateCheckItem:
+      type: object
+      additionalProperties: false
+      required: [modId, name, status, targets]
+      properties:
+        modId: { type: string }
+        name: { type: string }
+        status: { type: string, enum: [current, outdated, unknown] }
+        reason: { type: string }
+        latestVersion: { type: string }
+        targets: { type: array, items: { $ref: "#/components/schemas/RuntimeModVersionTarget" } }
+    ModUpdateCheck:
+      type: object
+      additionalProperties: false
+      required: [scope, checkedAt, complete, total, current, outdated, unknown, local, items]
+      properties:
+        scope: { $ref: "#/components/schemas/ModUpdateScope" }
+        checkedAt: { type: string, format: date-time }
+        complete: { type: boolean, description: False when any enabled Workshop mod remains unconfirmed. }
+        total: { type: integer, minimum: 0 }
+        current: { type: integer, minimum: 0 }
+        outdated: { type: integer, minimum: 0 }
+        unknown: { type: integer, minimum: 0 }
+        local: { type: integer, minimum: 0 }
+        items: { type: array, items: { $ref: "#/components/schemas/ModUpdateCheckItem" } }
+    ModUpdateTarget:
+      type: object
+      additionalProperties: false
+      required: [targetId, installationId, modIds, status]
+      properties:
+        targetId: { type: string }
+        installationId: { type: string }
+        modIds: { type: array, items: { type: string } }
+        status: { type: string, enum: [downloading, verified, failed, uncertain] }
+        message: { type: string }
+    ModRestartWorld:
+      type: object
+      additionalProperties: false
+      required: [worldId, status]
+      properties:
+        worldId: { type: string }
+        status: { type: string, enum: [pending, running, ready, failed, uncertain] }
+    ModPendingUpdate:
+      type: object
+      additionalProperties: false
+      required: [modIds, affectedRoomIds, targets, restartedRoomIds]
+      properties:
+        restartWorlds:
+          type: object
+          additionalProperties: { type: array, items: { $ref: "#/components/schemas/ModRestartWorld" } }
+        scopeRevision: { type: string }
+        modIds: { type: array, items: { type: string } }
+        affectedRoomIds: { type: array, items: { type: string } }
+        targets: { type: array, items: { $ref: "#/components/schemas/ModUpdateTarget" } }
+        restartedRoomIds: { type: array, items: { type: string } }
+        restartingRoomId: { type: string }
+        restartJobId: { type: string }
     ModUpdateState:
       type: object
       additionalProperties: false
       required: [roomId, status, availableModIds, onlinePlayers, staleOnlinePlayers, presenceFresh, updatedAt]
       properties:
+        checkSummary: { $ref: "#/components/schemas/ModUpdateCheck" }
+        pendingUpdate: { $ref: "#/components/schemas/ModPendingUpdate" }
         roomId: { type: string }
         status: { type: string, enum: [idle, checking, available, preparing, prepared, waiting_for_players, scheduled, activating, verifying, loaded, blocked, rolled_back] }
         availableModIds: { type: array, items: { type: string } }

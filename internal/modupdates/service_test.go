@@ -28,6 +28,7 @@ func (updateTestRooms) Room(id string) (rooms.Room, error) {
 }
 
 type updateTestCatalog struct {
+	checkSummary      *mods.ModUpdateCheck
 	checkErr          error
 	updates           []string
 	updateErr         error
@@ -43,7 +44,7 @@ func (c *updateTestCatalog) CheckUpdates(context.Context, string) (mods.ActionRe
 		close(c.checkStarted)
 		<-c.checkContinue
 	}
-	return mods.ActionResult{ModIDs: append([]string(nil), c.updates...)}, c.checkErr
+	return mods.ActionResult{ModIDs: append([]string(nil), c.updates...), CheckSummary: c.checkSummary}, c.checkErr
 }
 
 func (c *updateTestCatalog) UpdateRoomMods(_ context.Context, _ string, modIDs []string, _ io.Writer) (mods.ActionResult, error) {
@@ -413,7 +414,7 @@ func TestCheckRetainsDownloadedUpdateUntilRestartEvenAfterServiceRecreation(t *t
 
 func TestManualRetryAfterRestartFailureUsesPreparedNodeContent(t *testing.T) {
 	f := newUpdateTestFixture(t)
-	f.restarter.err = errors.New("Caves: startup failed")
+	f.restarter.err = errors.Join(ErrRestartIncomplete, errors.New("Caves: startup failed"))
 	state, err := f.service.applyNow(context.Background(), "room", "job")
 	if err == nil || state.ErrorCode != "MOD_WORLD_RESTART_FAILED" || state.PreparedAt == nil {
 		t.Fatalf("failure: %#v %v", state, err)

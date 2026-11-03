@@ -24,6 +24,15 @@ func (s *Service) UpdateRoomMods(ctx context.Context, roomID string, modIDs []st
 	if err != nil {
 		return mods.ActionResult{}, err
 	}
+	if expected := mods.ExpectedUpdateScope(ctx); expected != "" {
+		scope, err := s.ModUpdateScope(ctx, roomID)
+		if err != nil {
+			return mods.ActionResult{}, err
+		}
+		if scope.Revision != expected {
+			return mods.ActionResult{}, ErrTopologyChanged
+		}
+	}
 	requested := make(map[string]bool, len(modIDs))
 	for _, id := range modIDs {
 		requested[id] = true

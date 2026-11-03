@@ -569,17 +569,24 @@ func (d *Agent) FetchModCache(ctx context.Context, target Target, operation Oper
 	return fetchResult, nil
 }
 
+var ErrModDownloadUncertain = errors.New("模组下载结果尚未确认")
+
 func (d *Agent) DownloadMods(ctx context.Context, target Target, operation Operation, workshopIDs []string) error {
 	result, err := d.executeMod(ctx, target, operation, shared.RuntimeActionModDownload, shared.RuntimeModRequest{
 		Language:    modmetadata.Language(ctx),
 		WorkshopIDs: append([]string(nil), workshopIDs...),
 	}, 30*time.Minute)
-	value, err := checkedModResult(result, err)
-	if err != nil {
-		return err
+	request := modRuntimeRequest(target, operation, shared.RuntimeActionModDownload)
+	matched := result.OperationID == request.OperationID && result.InstallationID == request.InstallationID &&
+		result.Action == request.Action && result.ProtocolVersion == request.ProtocolVersion
+	if !matched {
+		return errors.Join(ErrModDownloadUncertain, err)
 	}
-	if !value.Complete {
-		return errors.New("Agent 未确认 Workshop 模组下载完成")
+	if result.Outcome == shared.RuntimeOutcomeFailed {
+		return errors.Join(errors.New("Agent 已确认模组下载失败"), err)
+	}
+	if err != nil || result.Outcome != shared.RuntimeOutcomeConfirmed || result.Mod == nil || !result.Mod.Complete {
+		return errors.Join(ErrModDownloadUncertain, err)
 	}
 	return nil
 }
