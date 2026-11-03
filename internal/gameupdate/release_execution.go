@@ -282,6 +282,9 @@ func releaseHasCapability(values []string, required string) bool {
 }
 
 func needsReleaseProtection(value Release) bool {
+	if value.Plan.Policy.SkipBackup || value.BackupSkipped {
+		return false
+	}
 	for i := range value.Plan.AffectedRoomIDs {
 		if i >= len(value.ProtectionBackupIDs) || value.ProtectionBackupIDs[i] == "" {
 			return true

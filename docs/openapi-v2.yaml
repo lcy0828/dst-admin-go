@@ -4250,11 +4250,11 @@ paths:
     post:
       tags: [Game, Jobs]
       operationId: publishGameRelease
-      summary: Revalidate a confirmed plan, protect all rooms, update every installation, and restore prior shard state
+      summary: Update the game with an optional backup and a configurable stop countdown
       description: |
-        Use a ready preview and copy its exact selection, policy and planHash. confirmation is the same hash string, never a boolean. The returned Job ID is also the initial release ID. Poll getJob and getGameRelease; getGameUpdateRun belongs to the legacy game.update flow.
-        MCP arguments example (replace sample IDs, hash and requestId with actual values; reuse requestId only for the same request):
-        {"body":{"installations":[{"targetId":"local","installationId":"default"}],"policy":{"restartRunning":true,"loadConfirmation":"logs","timeoutSeconds":300},"planHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","confirmation":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"requestId":"issue24-publish-001"}
+        After the user confirms the selected scope, send confirmed=true with the same targetIds or installations and policy. policy.stopDelaySeconds accepts 0–360 seconds (0 stops immediately); policy.skipBackup=true explicitly skips new backups. The server resolves affected shared installations, verifies stop results and validates installed versions. Legacy clients may still send matching planHash and confirmation strings from an unchanged preview instead of confirmed=true. The returned Job ID is also the initial release ID. Poll getJob and getGameRelease for countdown, backup, update and restoration progress; getGameUpdateRun belongs to the legacy game.update flow. If nextAction=backup_decision, game files have not been updated: retry backup, explicitly skip it, or cancel and restore worlds through retryGameRelease.
+        MCP arguments example (replace sample IDs and requestId with actual values; reuse requestId only for the same request):
+        {"body":{"confirmed":true,"targetIds":["local"],"policy":{"stopDelaySeconds":60,"skipBackup":false}},"requestId":"game-update-example-1"}
       parameters:
         - $ref: "#/components/parameters/CSRFToken"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -4304,6 +4304,7 @@ paths:
       summary: Resume a release using persisted write receipts and original world restore intentions
       description: |
         To end maintenance without restarting, send finishWithoutRestart=true with the original stored planHash as both planHash and confirmation. This abandons only automatic restart: it requires every installation to have verified write evidence, the expected build and a healthy Steam manifest, plus stable current world states. It never unlocks a partial or unknown installation, repairs LuaJIT, or starts/stops worlds. The terminal release stage is abandoned, not succeeded.
+        If nextAction is backup_decision, send an empty body to retry backups, {"confirmed":true,"skipBackup":true} to explicitly skip remaining backups, or {"confirmed":true,"cancelUpdate":true} to cancel and restore original running worlds. Skip/cancel cannot be combined with version-repair or plan-hash fields.
         Read getGameRelease first. Unknown dispatched writes are observed before any resend. For irrecoverable receipts, explicitly re-preview with policy.validate true and confirm validateUnknown to perform a guarded repair. Verified installations are not downloaded again. If nextAction is preview_and_retry, preview the original exact installation scope and policy, then send that planHash as both planHash and confirmation to accept the new latest Steam build. The path is an object with releaseId, not a bare string or an id field. Poll the returned new Job ID with getJob and keep reading the original release ID with getGameRelease. Do not pass the retry Job ID to getGameRelease.
         MCP arguments example (replace sample IDs, hash and requestId with actual values; reuse requestId only for the same request):
         {"path":{"releaseId":"24a00000-0000-4000-8000-000000000001"},"requestId":"issue24-retry-001"}
@@ -4320,6 +4321,9 @@ paths:
               properties:
                 planHash: { type: string, pattern: '^[a-f0-9]{64}$', description: Fresh re-preview hash when explicitly accepting a changed upstream build }
                 confirmation: { type: string, pattern: '^[a-f0-9]{64}$', description: Must equal planHash }
+                confirmed: { type: boolean, description: Explicit confirmation required for skipBackup or cancelUpdate }
+                skipBackup: { type: boolean, default: false, description: Skip remaining backups and resume this release. Requires confirmed=true and nextAction=backup_decision before any game write. }
+                cancelUpdate: { type: boolean, default: false, description: Cancel a backup-decision pause and restore originally running worlds. Requires confirmed=true. Mutually exclusive with skipBackup and version repair options. }
                 finishWithoutRestart: { type: boolean, default: false, description: End verified maintenance while preserving current world states. Requires original planHash and matching confirmation. Cannot combine with validateUnknown. }
                 validateUnknown: { type: boolean, default: false, description: Explicit repair of a lost write receipt. Requires a fresh original-scope preview with policy.validate true and matching planHash/confirmation. Starts a new fenced validation attempt only after node-local directory and SteamCMD process guards pass. }
       responses:
@@ -11800,6 +11804,9 @@ components:
       type: object
       additionalProperties: false
       properties:
+        pauseOnBackupFailure: { type: boolean, default: false, description: Wait for a backup decision instead of aborting and restoring worlds. Enabled automatically for confirmed=true submissions; unattended legacy callers retain abort-and-restore defaults. }
+        skipBackup: { type: boolean, default: false, description: Explicitly skip new pre-update backups. Existing backups are retained. }
+        stopDelaySeconds: { type: integer, minimum: 0, maximum: 360, description: Announce the update and wait this many seconds before stopping. Zero stops immediately. Omitted preserves legacy room notification preferences. }
         validate: { type: boolean, default: false, description: Run SteamCMD validation even when already at the target build. Validation can download the current Steam build. }
         requireEmpty: { type: boolean, default: false, description: "Require live confirmation that every affected room has no players before stopping worlds." }
         cleanCache: { type: boolean, default: false }
@@ -11811,6 +11818,9 @@ components:
       additionalProperties: false
       required: [cleanCache, restartRunning, loadConfirmation, timeoutSeconds]
       properties:
+        pauseOnBackupFailure: { type: boolean, default: false, description: Wait for a backup decision instead of aborting and restoring worlds. Enabled automatically for confirmed=true submissions; unattended legacy callers retain abort-and-restore defaults. }
+        skipBackup: { type: boolean, default: false, description: Explicitly skip new pre-update backups. Existing backups are retained. }
+        stopDelaySeconds: { type: integer, minimum: 0, maximum: 360, description: Announce the update and wait this many seconds before stopping. Zero stops immediately. Omitted preserves legacy room notification preferences. }
         validate: { type: boolean, default: false, description: Run SteamCMD validation even when already at the target build. Validation can download the current Steam build. }
         requireEmpty: { type: boolean }
         cleanCache: { type: boolean }
@@ -11829,8 +11839,13 @@ components:
     GameReleaseCreateInput:
       type: object
       additionalProperties: false
-      required: [planHash, confirmation]
+      anyOf:
+        - required: [confirmed]
+          properties:
+            confirmed: { const: true }
+        - required: [planHash, confirmation]
       properties:
+        confirmed: { type: boolean, description: User explicitly confirms updating every affected world in the selected scope. Allows submission without a plan hash. }
         targetIds: { type: array, maxItems: 100, items: { type: string }, description: Select all installations on these targets; mutually exclusive with installations }
         installations: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/GameReleaseInstallationSelection" }, description: Exact seed installations; shared installations and connected rooms are included transitively. Mutually exclusive with targetIds. }
         desiredVersion: { type: string, pattern: '^[0-9]{1,64}$' }
@@ -12014,7 +12029,7 @@ components:
         meta: { $ref: "#/components/schemas/Meta" }
     GameReleaseStage:
       type: string
-      enum: [previewed, protecting, stopping, staged, updating, verified, restarting, confirming, succeeded, failed, recovery_required, abandoned]
+      enum: [previewed, notifying, protecting, stopping, staged, updating, verified, restarting, confirming, succeeded, failed, recovery_required, abandoned]
     GameReleaseInstallationResult:
       type: object
       additionalProperties: false
@@ -12065,12 +12080,14 @@ components:
       additionalProperties: false
       required: [id, stage, plan, protectionBackupIds, installations, shards, createdAt, updatedAt]
       properties:
+        backupSkipped: { type: boolean, description: User explicitly skipped remaining backups after a backup failure. See also plan.policy.skipBackup. }
+        countdownEndsAt: { type: string, format: date-time, description: End of the user-selected stop countdown }
         modDiagnosticsWarning: { type: string, enum: [BASELINE_SAVE_FAILED], description: Advisory snapshot persistence failed; game update safety checks are unchanged }
         attempt: { type: integer, minimum: 0 }
         writingStarted: { type: boolean, description: A game-file write may have been dispatched in this release }
         planHistory: { type: array, items: { $ref: "#/components/schemas/GameReleasePlan" }, description: Previous plans retained after explicitly confirmed re-preview }
         blockers: { type: array, items: { $ref: "#/components/schemas/GameReleaseBlocker" } }
-        nextAction: { type: string, enum: [retry_release, preview_and_retry, inspect_release], description: Resume the original release; inspect_release queries unknown writes without resending }
+        nextAction: { type: string, enum: [retry_release, preview_and_retry, inspect_release, backup_decision], description: backup_decision waits for retry/skip/cancel before any game write; inspect_release queries unknown writes without resending }
         id: { type: string, format: uuid }
         sourceJobId: { type: string, format: uuid }
         currentJobId: {type: string, description: Current retry job; sourceJobId remains the original publication identity.}

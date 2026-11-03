@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "fc83be44bf4c38a7b448698bc931fc82f6cad43ccdf177d400d65cbc49303296",
+  "operationsSHA256": "d0d7ce9906b7f97f219e4424dd77eee96798b5119e85736abb673281856824ea",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -3823,7 +3823,7 @@
       "access": "write",
       "risk": "normal",
       "runtime": "any",
-      "title": "Revalidate a confirmed plan, protect all rooms, update every installation, and restore prior shard state"
+      "title": "Update the game with an optional backup and a configurable stop countdown"
     },
     {
       "operationId": "publishRoomMods",

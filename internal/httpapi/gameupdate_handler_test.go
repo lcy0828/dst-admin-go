@@ -158,7 +158,7 @@ func successfulHTTPGameRelease(id, sourceJobID string, plan gameupdate.ReleasePl
 	}
 }
 
-func newGameReleaseHandlerApp(t *testing.T, fixture *gameReleaseHTTPFixture) (*gin.Engine, *jobs.Service) {
+func newGameReleaseHandlerApp(t *testing.T, fixture GameReleaseService) (*gin.Engine, *jobs.Service) {
 	t.Helper()
 	db, err := gorm.Open("sqlite3", ":memory:")
 	if err != nil {
@@ -421,4 +421,56 @@ func TestGameReleaseHTTPPendingListAndOptionalModDiagnostics(t *testing.T) {
 	}
 	response = performJSON(app, http.MethodGet, "/api/v2/game/releases?pending=invalid", nil, nil, "")
 	assertStatus(t, response, 422)
+}
+
+func TestGameReleaseHTTPExplicitConfirmationPreservesScopeWithoutPlanHash(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := &gameReleaseHTTPFixture{plan: gameReleaseHTTPPlan(), releases: make(map[string]gameupdate.Release)}
+	router, jobService := newGameReleaseHandlerApp(t, fixture)
+	for _, input := range []map[string]interface{}{{}, {"confirmed": false}, {"confirmed": true, "planHash": "old", "confirmation": "old"}} {
+		response := performJSON(router, http.MethodPost, "/api/v2/game/releases", input, nil, "")
+		if response.Code == http.StatusAccepted {
+			t.Fatalf("accepted missing confirmation or mismatching legacy hash: %s", response.Body.String())
+		}
+	}
+	response := performJSON(router, http.MethodPost, "/api/v2/game/releases", map[string]interface{}{
+		"confirmed": true, "targetIds": []string{"agent:node-a"}, "desiredVersion": "701",
+		"policy": map[string]interface{}{"stopDelaySeconds": 0, "skipBackup": true},
+	}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	waitForJobStatus(t, jobService, responseData(t, response)["id"].(string), jobs.StatusSucceeded)
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	request := fixture.previewRequest
+	if len(request.TargetIDs) != 1 || request.TargetIDs[0] != "agent:node-a" || len(request.Installations) != 0 || !request.Policy.SkipBackup || request.Policy.StopDelaySeconds == nil || *request.Policy.StopDelaySeconds != 0 {
+		t.Fatalf("confirmation changed original scope/options: %+v", request)
+	}
+}
+
+func TestGameReleaseHTTPBackupDecisionRequiresConfirmationAndUnwrittenPause(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fixture := &gameReleaseHTTPFixture{plan: gameReleaseHTTPPlan(), releases: make(map[string]gameupdate.Release)}
+	paused := successfulHTTPGameRelease("paused-release", "original-job", fixture.plan)
+	paused.Stage, paused.NextAction, paused.WritingStarted = gameupdate.ReleaseStageRecoveryRequired, "backup_decision", false
+	fixture.releases[paused.ID] = paused
+	router, jobService := newGameReleaseHandlerApp(t, fixture)
+	for _, input := range []map[string]interface{}{
+		{"skipBackup": true}, {"cancelUpdate": true}, {"confirmed": true, "skipBackup": true, "cancelUpdate": true},
+		{"confirmed": true, "skipBackup": true, "validateUnknown": true},
+	} {
+		response := performJSON(router, http.MethodPost, "/api/v2/game/releases/paused-release/actions/retry", input, nil, "")
+		assertStatus(t, response, http.StatusUnprocessableEntity)
+	}
+	response := performJSON(router, http.MethodPost, "/api/v2/game/releases/paused-release/actions/retry", map[string]interface{}{"confirmed": true, "skipBackup": true}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	waitForJobStatus(t, jobService, responseData(t, response)["id"].(string), jobs.StatusSucceeded)
+	fixture.mu.Lock()
+	if !fixture.retryRequest.SkipBackup || !fixture.retryRequest.Confirmed {
+		t.Errorf("decision not passed to coordinator: %+v", fixture.retryRequest)
+	}
+	paused.WritingStarted = true
+	fixture.releases[paused.ID] = paused
+	fixture.mu.Unlock()
+	response = performJSON(router, http.MethodPost, "/api/v2/game/releases/paused-release/actions/retry", map[string]interface{}{"confirmed": true, "cancelUpdate": true}, nil, "")
+	assertStatus(t, response, http.StatusConflict)
 }

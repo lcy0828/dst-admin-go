@@ -64,6 +64,9 @@ func NewReleasePlanner(snapshots ReleaseSnapshotSource, runtime ReleaseRuntime, 
 }
 
 func NormalizeReleasePolicy(value ReleasePolicyInput) (ReleasePolicy, error) {
+	if value.StopDelaySeconds != nil && (*value.StopDelaySeconds < 0 || *value.StopDelaySeconds > 360) {
+		return ReleasePolicy{}, ErrReleaseInvalid
+	}
 	restart := true
 	if value.RestartRunning != nil {
 		restart = *value.RestartRunning
@@ -81,6 +84,7 @@ func NormalizeReleasePolicy(value ReleasePolicyInput) (ReleasePolicy, error) {
 		return ReleasePolicy{}, ErrReleaseInvalid
 	}
 	return ReleasePolicy{
+		SkipBackup: value.SkipBackup, PauseOnBackupFailure: value.PauseOnBackupFailure, StopDelaySeconds: value.StopDelaySeconds,
 		Validate:     value.Validate,
 		RequireEmpty: value.RequireEmpty,
 		CleanCache:   value.CleanCache, RestartRunning: restart, LoadConfirmation: value.LoadConfirmation,
@@ -700,6 +704,9 @@ func validateReleasePlan(plan ReleasePlan) error {
 }
 
 func validateStoredReleasePolicy(value ReleasePolicy) error {
+	if value.StopDelaySeconds != nil && (*value.StopDelaySeconds < 0 || *value.StopDelaySeconds > 360) {
+		return ErrReleaseInvalid
+	}
 	if value.LoadConfirmation != ReleaseLoadConfirmationLogs && value.LoadConfirmation != ReleaseLoadConfirmationNone || value.TimeoutSeconds < 30 || value.TimeoutSeconds > 900 {
 		return ErrReleaseInvalid
 	}

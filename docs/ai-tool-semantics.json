@@ -3935,8 +3935,8 @@
       ]
     },
     "publishGameRelease": {
-      "purpose": "按确认计划安全停服，创建并验证保护备份，再更新校验游戏和恢复原运行世界；安装与分片只是跟踪目标，不代表多次更新或回滚。",
-      "resultNotes": "首次提交返回的 Job ID 同时是原 releaseId。用 getJob 跟踪任务，并用 getGameRelease 读取具体维护阶段、版本和恢复结果。",
+      "purpose": "用户确认后更新游戏：可设停服等待 0～360 秒，可选择更新前备份或直接更新。新版用 confirmed=true 和所选范围提交；旧版计划哈希仍兼容。停止成功后才修改游戏文件，完成后恢复原先运行的世界。",
+      "resultNotes": "首次提交返回的 Job ID 同时是原 releaseId。用 getJob 和 getGameRelease 查看倒计时、备份、更新和恢复。nextAction=backup_decision 表示游戏尚未更新，需用户选择重试备份、跳过备份或取消并恢复；跳过需显式确认。",
       "actions": [
         "把服务端游戏版本更新到最新",
         "按计划逐台发布新版本",

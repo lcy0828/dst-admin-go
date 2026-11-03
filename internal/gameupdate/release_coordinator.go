@@ -29,6 +29,7 @@ type ReleaseCoordinator struct {
 	backups        ReleaseProtectionService
 	store          *ReleaseStore
 	now            func() time.Time
+	wait           func(context.Context, time.Duration) error
 	pollInterval   time.Duration
 	renewInterval  time.Duration
 	notifier       LifecycleNotifier
@@ -151,12 +152,6 @@ func (c *ReleaseCoordinator) Publish(ctx context.Context, request ReleasePublish
 		if err := c.requireEmpty(runContext, request.Plan); err != nil {
 			return Release{}, err
 		}
-		if err := c.notifyBeforeRelease(runContext, request.Plan, request.SourceJobID); err != nil {
-			return Release{}, err
-		}
-		if err := c.requireEmpty(runContext, request.Plan); err != nil {
-			return Release{}, err
-		}
 		now := c.now().UTC()
 		value := Release{
 			ID: request.ID, Attempt: 1, SourceJobID: request.SourceJobID, Stage: ReleaseStagePreviewed, Plan: request.Plan,
@@ -189,6 +184,10 @@ func (c *ReleaseCoordinator) Publish(ctx context.Context, request ReleasePublish
 				value.ModDiagnosticsWarning = "BASELINE_SAVE_FAILED"
 			}
 		}
+		value, err = c.waitBeforeRelease(runContext, value)
+		if err != nil {
+			return c.abortBeforeWrite(runContext, value, fences, "NOTIFICATION_FAILED", err)
+		}
 		return c.execute(runContext, value, fences, false, false)
 	})
 }
@@ -200,6 +199,9 @@ func (c *ReleaseCoordinator) RetryConfirmed(ctx context.Context, id string, requ
 	return c.retry(ctx, id, request, sourceJobID)
 }
 func (c *ReleaseCoordinator) retry(ctx context.Context, id string, request ReleaseRetryRequest, sourceJobIDs ...string) (Release, error) {
+	if (request.SkipBackup || request.CancelUpdate) && (!request.Confirmed || request.SkipBackup && request.CancelUpdate || request.ValidateUnknown || request.FinishWithoutRestart || request.PlanHash != "" || request.Confirmation != "") {
+		return Release{}, ErrReleaseConfirmation
+	}
 	if request.PlanHash != request.Confirmation || request.ValidateUnknown && request.PlanHash == "" {
 		return Release{}, ErrReleaseConfirmation
 	}
@@ -223,6 +225,21 @@ func (c *ReleaseCoordinator) retry(ctx context.Context, id string, request Relea
 			return value, ErrReleaseConflict
 		}
 		value.CurrentJobID = notificationJobID
+		backupDecision := value.NextAction == "backup_decision" && !value.WritingStarted
+		if request.SkipBackup || request.CancelUpdate {
+			if !backupDecision {
+				return value, ErrReleaseConflict
+			}
+			if request.CancelUpdate {
+				value, err = c.abortBeforeWrite(runContext, value, fences, "CANCELED", context.Canceled)
+				if value.Stage != ReleaseStageFailed {
+					return value, err
+				}
+				value.Stage, value.NextAction, value.ErrorCode, value.ErrorMessage = ReleaseStageAbandoned, "", "UPDATE_CANCELED", "已取消更新并恢复原先运行的世界"
+				return c.store.Save(value)
+			}
+			value.BackupSkipped = true
+		}
 		if request.FinishWithoutRestart {
 			if request.ValidateUnknown || request.PlanHash != value.Plan.PlanHash || request.Confirmation != value.Plan.PlanHash {
 				return value, ErrReleaseConfirmation
@@ -329,8 +346,10 @@ func (c *ReleaseCoordinator) retry(ctx context.Context, id string, request Relea
 			if err := c.requireRemainingEmpty(runContext, value); err != nil {
 				return value, err
 			}
-			if err := c.notifyBeforeRelease(runContext, value.Plan, notificationJobID); err != nil {
-				return value, err
+			if !backupDecision && value.Plan.Policy.StopDelaySeconds == nil {
+				if err := c.notifyBeforeRelease(runContext, value.Plan, notificationJobID); err != nil {
+					return value, err
+				}
 			}
 		}
 		value.Attempt++
@@ -339,6 +358,12 @@ func (c *ReleaseCoordinator) retry(ctx context.Context, id string, request Relea
 			value = saved
 		} else {
 			return value, saveErr
+		}
+		if !releaseWritesVerified(value) && value.Plan.Policy.StopDelaySeconds != nil {
+			value, err = c.waitBeforeRelease(runContext, value)
+			if err != nil {
+				return c.abortBeforeWrite(runContext, value, fences, "NOTIFICATION_FAILED", err)
+			}
 		}
 		return c.execute(runContext, value, fences, true, request.ValidateUnknown)
 	})
@@ -374,10 +399,13 @@ func (c *ReleaseCoordinator) execute(ctx context.Context, value Release, fences 
 	}
 	defer func() { runtimedriver.NotifyRuntimeTargetsChanged(c.mutations, releasePlanTargetIDs(value.Plan)...) }()
 	// Check existing archives before any retry can stop a previously restored world.
-	if recovery {
+	if recovery && !value.Plan.Policy.SkipBackup && !value.BackupSkipped {
 		for index, id := range value.ProtectionBackupIDs {
 			if id != "" {
 				if err := c.backups.VerifyProtection(ctx, id, value.Plan.AffectedRoomIDs[index], value.ID); err != nil {
+					if !value.WritingStarted {
+						return c.backupFailed(ctx, value, fences, err)
+					}
 					return c.failRelease(value, "PROTECTION_BACKUP_FAILED", err, ReleaseStageRecoveryRequired)
 				}
 			}
@@ -390,7 +418,7 @@ func (c *ReleaseCoordinator) execute(ctx context.Context, value Release, fences 
 	if !restoringOnly {
 		if checker, ok := c.backups.(interface{ CheckProtectionSpace(context.Context) error }); ok && needsReleaseProtection(value) {
 			if err := checker.CheckProtectionSpace(ctx); err != nil {
-				return c.abortBeforeWrite(ctx, value, fences, "BACKUP_PREFLIGHT_FAILED", err)
+				return c.backupFailed(ctx, value, fences, err)
 			}
 		}
 		value, _, err = c.stopPlannedShards(ctx, value, fences)
@@ -403,6 +431,10 @@ func (c *ReleaseCoordinator) execute(ctx context.Context, value Release, fences 
 		}
 		value, err = c.createProtectionBackups(ctx, value, fences)
 		if err != nil {
+			var backupErr *releaseBackupError
+			if errors.As(err, &backupErr) {
+				return c.backupFailed(ctx, value, fences, err)
+			}
 			return c.abortBeforeWrite(ctx, value, fences, "PROTECTION_BACKUP_FAILED", err)
 		}
 		if err := c.revalidate(ctx, &value, c.now().UTC(), true); err != nil {
@@ -448,6 +480,9 @@ func (c *ReleaseCoordinator) execute(ctx context.Context, value Release, fences 
 }
 
 func (c *ReleaseCoordinator) createProtectionBackups(ctx context.Context, value Release, fences *releaseFenceSet) (Release, error) {
+	if value.Plan.Policy.SkipBackup || value.BackupSkipped {
+		return value, nil
+	}
 	value.Stage, value.UpdatedAt = ReleaseStageProtecting, c.now().UTC()
 	value, err := c.store.Save(value)
 	if err != nil {
@@ -456,7 +491,7 @@ func (c *ReleaseCoordinator) createProtectionBackups(ctx context.Context, value 
 	for index, roomID := range value.Plan.AffectedRoomIDs {
 		if index < len(value.ProtectionBackupIDs) && value.ProtectionBackupIDs[index] != "" {
 			if err := c.backups.VerifyProtection(ctx, value.ProtectionBackupIDs[index], roomID, value.ID); err != nil {
-				return value, fmt.Errorf("更新前保护备份不可用，已阻止继续更新房间 %s: %w", roomID, err)
+				return value, &releaseBackupError{cause: fmt.Errorf("更新前备份不可用，房间 %s: %w", roomID, err)}
 			}
 			continue
 		}
@@ -466,7 +501,7 @@ func (c *ReleaseCoordinator) createProtectionBackups(ctx context.Context, value 
 		}
 		backupID, backupErr := c.backups.CreateProtection(ctx, roomID, "DST 更新前保护备份", value.ID, &lease)
 		if backupErr != nil {
-			return value, backupErr
+			return value, &releaseBackupError{cause: backupErr}
 		}
 		fences.replace(lease)
 		for len(value.ProtectionBackupIDs) <= index {
@@ -938,7 +973,17 @@ func (c *ReleaseCoordinator) recoverStoppedShards(ctx context.Context, value *Re
 			failures = errors.Join(failures, err)
 			continue
 		}
+		result := releaseShardResult(value, shard.RoomID, shard.WorldID)
 		if status.State == "running" || status.State == "starting" {
+			if status.State == "starting" {
+				if err := c.waitShardState(ctx, shard, true, 2*time.Minute); err != nil {
+					failures = errors.Join(failures, err)
+					continue
+				}
+			}
+			if result != nil {
+				result.RuntimeState, result.UpdatedAt = string(shards.RuntimeRunning), c.now().UTC()
+			}
 			continue
 		}
 		if status.State != "stopped" || status.SessionExists {
@@ -950,11 +995,12 @@ func (c *ReleaseCoordinator) recoverStoppedShards(ctx context.Context, value *Re
 			operation.RuntimeMode = shard.RuntimeMode
 			err = c.runtime.Start(ctx, shard, operation)
 		}
-		result := releaseShardResult(value, shard.RoomID, shard.WorldID)
 		if err != nil {
 			setReleaseShardFailure(result, "RECOVERY_START_FAILED", err, c.now().UTC())
 			failures = errors.Join(failures, err)
 		} else if result != nil {
+			now := c.now().UTC()
+			result.StartedAt = &now
 			if err := c.waitShardState(ctx, shard, true, 2*time.Minute); err != nil {
 				failures = errors.Join(failures, err)
 				continue
@@ -989,7 +1035,7 @@ func (c *ReleaseCoordinator) previewStoredPlanAfter(ctx context.Context, plan Re
 		installationKeys: installations,
 		DesiredVersion:   plan.DesiredVersion,
 		TargetIDs:        targetIDs,
-		Policy:           ReleasePolicyInput{Validate: plan.Policy.Validate, RequireEmpty: plan.Policy.RequireEmpty, CleanCache: plan.Policy.CleanCache, RestartRunning: &restart, LoadConfirmation: plan.Policy.LoadConfirmation, TimeoutSeconds: plan.Policy.TimeoutSeconds},
+		Policy:           ReleasePolicyInput{SkipBackup: plan.Policy.SkipBackup, PauseOnBackupFailure: plan.Policy.PauseOnBackupFailure, StopDelaySeconds: plan.Policy.StopDelaySeconds, Validate: plan.Policy.Validate, RequireEmpty: plan.Policy.RequireEmpty, CleanCache: plan.Policy.CleanCache, RestartRunning: &restart, LoadConfirmation: plan.Policy.LoadConfirmation, TimeoutSeconds: plan.Policy.TimeoutSeconds},
 	})
 }
 

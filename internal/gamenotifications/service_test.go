@@ -394,3 +394,30 @@ func TestServiceRejectsInvalidMessageAndUnmanagedRoom(t *testing.T) {
 		t.Fatalf("unmanaged error=%v", err)
 	}
 }
+
+func TestExplicitGameUpdateAnnouncementOverridesRoomPolicyWithoutAnotherCountdown(t *testing.T) {
+	service, _, _, catalog := newNotificationTestService(t)
+	if _, err := service.SavePolicy(catalog.room.ID, PolicyInput{Enabled: false, CountdownSeconds: 120}); err != nil {
+		t.Fatal(err)
+	}
+	service.wait = func(context.Context, time.Duration) error {
+		t.Fatal("announcement started a second countdown")
+		return nil
+	}
+	if err := service.AnnounceGameUpdate(context.Background(), []string{catalog.room.ID, catalog.room.ID}, 30, "update-test"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.List(ListFilter{})
+	if err != nil || result.Total != 1 {
+		t.Fatalf("history=%+v err=%v", result, err)
+	}
+	entry := result.Items[0]
+	if entry.Source != SourceGameUpdate || entry.JobID != "update-test" || !strings.Contains(entry.Message, "30") {
+		t.Fatalf("bad announcement: %+v", entry)
+	}
+	for _, delay := range []int{-1, 361} {
+		if err := service.AnnounceGameUpdate(context.Background(), []string{catalog.room.ID}, delay, "invalid"); err == nil {
+			t.Fatalf("accepted delay %d", delay)
+		}
+	}
+}

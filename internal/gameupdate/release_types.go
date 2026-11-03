@@ -38,6 +38,7 @@ type ReleaseStage string
 
 const (
 	ReleaseStagePreviewed        ReleaseStage = "previewed"
+	ReleaseStageNotifying        ReleaseStage = "notifying"
 	ReleaseStageProtecting       ReleaseStage = "protecting"
 	ReleaseStageStopping         ReleaseStage = "stopping"
 	ReleaseStageStaged           ReleaseStage = "staged"
@@ -59,21 +60,27 @@ const (
 )
 
 type ReleasePolicy struct {
-	Validate         bool                    `json:"validate,omitempty"`
-	RequireEmpty     bool                    `json:"requireEmpty,omitempty"`
-	CleanCache       bool                    `json:"cleanCache"`
-	RestartRunning   bool                    `json:"restartRunning"`
-	LoadConfirmation ReleaseLoadConfirmation `json:"loadConfirmation"`
-	TimeoutSeconds   int                     `json:"timeoutSeconds"`
+	SkipBackup           bool                    `json:"skipBackup,omitempty"`
+	PauseOnBackupFailure bool                    `json:"pauseOnBackupFailure,omitempty"`
+	StopDelaySeconds     *int                    `json:"stopDelaySeconds,omitempty"`
+	Validate             bool                    `json:"validate,omitempty"`
+	RequireEmpty         bool                    `json:"requireEmpty,omitempty"`
+	CleanCache           bool                    `json:"cleanCache"`
+	RestartRunning       bool                    `json:"restartRunning"`
+	LoadConfirmation     ReleaseLoadConfirmation `json:"loadConfirmation"`
+	TimeoutSeconds       int                     `json:"timeoutSeconds"`
 }
 
 type ReleasePolicyInput struct {
-	Validate         bool                    `json:"validate,omitempty"`
-	RequireEmpty     bool                    `json:"requireEmpty,omitempty"`
-	CleanCache       bool                    `json:"cleanCache"`
-	RestartRunning   *bool                   `json:"restartRunning,omitempty"`
-	LoadConfirmation ReleaseLoadConfirmation `json:"loadConfirmation,omitempty"`
-	TimeoutSeconds   int                     `json:"timeoutSeconds,omitempty"`
+	SkipBackup           bool                    `json:"skipBackup,omitempty"`
+	PauseOnBackupFailure bool                    `json:"pauseOnBackupFailure,omitempty"`
+	StopDelaySeconds     *int                    `json:"stopDelaySeconds,omitempty"`
+	Validate             bool                    `json:"validate,omitempty"`
+	RequireEmpty         bool                    `json:"requireEmpty,omitempty"`
+	CleanCache           bool                    `json:"cleanCache"`
+	RestartRunning       *bool                   `json:"restartRunning,omitempty"`
+	LoadConfirmation     ReleaseLoadConfirmation `json:"loadConfirmation,omitempty"`
+	TimeoutSeconds       int                     `json:"timeoutSeconds,omitempty"`
 }
 
 type ReleaseInstallationSelection struct {
@@ -93,6 +100,7 @@ type ReleasePreviewRequest struct {
 }
 
 type ReleaseCreateRequest struct {
+	Confirmed      bool                           `json:"confirmed,omitempty"`
 	Installations  []ReleaseInstallationSelection `json:"installations,omitempty"`
 	DesiredVersion string                         `json:"desiredVersion,omitempty"`
 	TargetIDs      []string                       `json:"targetIds,omitempty"`
@@ -212,6 +220,8 @@ type ReleaseShardResult struct {
 }
 
 type Release struct {
+	BackupSkipped         bool                        `json:"backupSkipped,omitempty"`
+	CountdownEndsAt       *time.Time                  `json:"countdownEndsAt,omitempty"`
 	CurrentJobID          string                      `json:"currentJobId,omitempty"`
 	ModDiagnosticsWarning string                      `json:"modDiagnosticsWarning,omitempty"`
 	PlanHistory           []ReleasePlan               `json:"planHistory,omitempty"`
@@ -234,6 +244,9 @@ type Release struct {
 }
 
 type ReleaseRetryRequest struct {
+	Confirmed            bool   `json:"confirmed,omitempty"`
+	SkipBackup           bool   `json:"skipBackup,omitempty"`
+	CancelUpdate         bool   `json:"cancelUpdate,omitempty"`
 	FinishWithoutRestart bool   `json:"finishWithoutRestart,omitempty"`
 	ValidateUnknown      bool   `json:"validateUnknown,omitempty"`
 	PlanHash             string `json:"planHash,omitempty"`

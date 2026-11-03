@@ -97,6 +97,7 @@ func (s *ReleaseStore) Migrate() error {
 	}
 	now := s.now().UTC()
 	active := []string{
+		string(ReleaseStageNotifying),
 		string(ReleaseStagePreviewed), string(ReleaseStageProtecting), string(ReleaseStageStopping), string(ReleaseStageStaged), string(ReleaseStageUpdating),
 		string(ReleaseStageVerified), string(ReleaseStageRestarting), string(ReleaseStageConfirming),
 	}
@@ -249,6 +250,7 @@ func (s *ReleaseStore) Get(id string) (Release, error) {
 		value.WritingStarted, value.PlanHistory = state.WritingStarted, state.PlanHistory
 		value.CurrentJobID = state.CurrentJobID
 		value.ModDiagnosticsWarning = state.ModDiagnosticsWarning
+		value.BackupSkipped, value.CountdownEndsAt = state.BackupSkipped, state.CountdownEndsAt
 		for _, evidence := range state.Installations {
 			if item := releaseInstallationResult(&value, evidence.TargetID, evidence.InstallationID); item != nil {
 				item.WriteState, item.OperationID, item.ExpectedVersion = evidence.WriteState, evidence.OperationID, evidence.ExpectedVersion
@@ -347,7 +349,7 @@ func validateRelease(value Release) error {
 
 func validReleaseStage(value ReleaseStage) bool {
 	switch value {
-	case ReleaseStagePreviewed, ReleaseStageProtecting, ReleaseStageStopping, ReleaseStageStaged, ReleaseStageUpdating,
+	case ReleaseStagePreviewed, ReleaseStageNotifying, ReleaseStageProtecting, ReleaseStageStopping, ReleaseStageStaged, ReleaseStageUpdating,
 		ReleaseStageVerified, ReleaseStageRestarting, ReleaseStageConfirming, ReleaseStageSucceeded,
 		ReleaseStageFailed, ReleaseStageRecoveryRequired, ReleaseStageAbandoned:
 		return true
@@ -365,7 +367,7 @@ func releaseRecordFrom(value Release) (releaseRecord, error) {
 	if err != nil {
 		return releaseRecord{}, err
 	}
-	evidence, err := json.Marshal(releaseExecutionEvidence{CurrentJobID: value.CurrentJobID, ModDiagnosticsWarning: value.ModDiagnosticsWarning, WritingStarted: value.WritingStarted, PlanHistory: value.PlanHistory, Attempt: value.Attempt, Blockers: value.Blockers, NextAction: value.NextAction, Installations: installationEvidence(value), Shards: shardEvidence(value)})
+	evidence, err := json.Marshal(releaseExecutionEvidence{BackupSkipped: value.BackupSkipped, CountdownEndsAt: value.CountdownEndsAt, CurrentJobID: value.CurrentJobID, ModDiagnosticsWarning: value.ModDiagnosticsWarning, WritingStarted: value.WritingStarted, PlanHistory: value.PlanHistory, Attempt: value.Attempt, Blockers: value.Blockers, NextAction: value.NextAction, Installations: installationEvidence(value), Shards: shardEvidence(value)})
 	if err != nil {
 		return releaseRecord{}, err
 	}
@@ -436,6 +438,8 @@ func childReleaseRecordID(releaseID, key string) string {
 }
 
 type releaseExecutionEvidence struct {
+	BackupSkipped         bool                          `json:"backupSkipped,omitempty"`
+	CountdownEndsAt       *time.Time                    `json:"countdownEndsAt,omitempty"`
 	CurrentJobID          string                        `json:"currentJobId,omitempty"`
 	ModDiagnosticsWarning string                        `json:"modDiagnosticsWarning,omitempty"`
 	WritingStarted        bool                          `json:"writingStarted,omitempty"`

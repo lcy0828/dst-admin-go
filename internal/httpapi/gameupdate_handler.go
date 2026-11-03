@@ -93,7 +93,8 @@ func (h *GameUpdateHandler) releasePublish(c *gin.Context) {
 	}
 	request.PlanHash = strings.ToLower(strings.TrimSpace(request.PlanHash))
 	request.Confirmation = strings.ToLower(strings.TrimSpace(request.Confirmation))
-	if request.PlanHash == "" || request.PlanHash != request.Confirmation {
+	legacyConfirmation := request.PlanHash != "" || request.Confirmation != ""
+	if legacyConfirmation && (request.PlanHash == "" || request.PlanHash != request.Confirmation) || !legacyConfirmation && !request.Confirmed {
 		gameReleaseFailure(c, gameupdate.ErrReleaseConfirmation)
 		return
 	}
@@ -104,6 +105,11 @@ func (h *GameUpdateHandler) releasePublish(c *gin.Context) {
 		return
 	}
 	h.releaseMu.Unlock()
+	if !legacyConfirmation {
+		// Interactive submissions can wait for a backup decision. Legacy and
+		// unattended callers keep abort-and-restore behavior by default.
+		request.Policy.PauseOnBackupFailure = true
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), gameReleasePreviewTimeout)
 	defer cancel()
 	includeModDiagnostics := false
@@ -122,11 +128,11 @@ func (h *GameUpdateHandler) releasePublish(c *gin.Context) {
 		gameReleaseFailure(c, &gameupdate.ReleasePreflightError{Blockers: plan.Blockers})
 		return
 	}
-	if !strings.EqualFold(strings.TrimSpace(request.PlanHash), plan.PlanHash) {
+	if legacyConfirmation && !strings.EqualFold(strings.TrimSpace(request.PlanHash), plan.PlanHash) {
 		gameReleaseFailure(c, gameupdate.ErrReleasePlanChanged)
 		return
 	}
-	if !strings.EqualFold(strings.TrimSpace(request.Confirmation), plan.PlanHash) {
+	if legacyConfirmation && !strings.EqualFold(strings.TrimSpace(request.Confirmation), plan.PlanHash) {
 		gameReleaseFailure(c, gameupdate.ErrReleaseConfirmation)
 		return
 	}
@@ -169,13 +175,14 @@ func (h *GameUpdateHandler) releaseRetry(c *gin.Context) {
 		Failure(c, http.StatusBadRequest, "INVALID_JSON", "游戏恢复确认信息无效", nil)
 		return
 	}
-	if request.PlanHash != request.Confirmation || request.ValidateUnknown && request.PlanHash == "" || request.FinishWithoutRestart && (request.PlanHash == "" || request.ValidateUnknown) {
+	if request.PlanHash != request.Confirmation || request.ValidateUnknown && request.PlanHash == "" || request.FinishWithoutRestart && (request.PlanHash == "" || request.ValidateUnknown) ||
+		(request.SkipBackup || request.CancelUpdate) && (!request.Confirmed || request.SkipBackup && request.CancelUpdate || request.ValidateUnknown || request.FinishWithoutRestart || request.PlanHash != "") {
 		gameReleaseFailure(c, gameupdate.ErrReleaseConfirmation)
 		return
 	}
 	h.releaseMu.Lock()
 	defer h.releaseMu.Unlock()
-	retryKey := "retry:" + id + ":" + request.PlanHash + ":" + strconv.FormatBool(request.FinishWithoutRestart)
+	retryKey := "retry:" + id + ":" + request.PlanHash + ":" + strconv.FormatBool(request.FinishWithoutRestart) + ":" + strconv.FormatBool(request.SkipBackup) + ":" + strconv.FormatBool(request.CancelUpdate)
 	if job, ok := h.activeReleaseJob(retryKey); ok {
 		Success(c, http.StatusAccepted, job)
 		return
@@ -195,11 +202,15 @@ func (h *GameUpdateHandler) releaseRetry(c *gin.Context) {
 		gameReleaseFailure(c, gameupdate.ErrReleaseConflict)
 		return
 	}
+	if (request.SkipBackup || request.CancelUpdate) && (current.NextAction != "backup_decision" || current.WritingStarted) {
+		gameReleaseFailure(c, gameupdate.ErrReleaseConflict)
+		return
+	}
 	job, err := h.jobs.SubmitFactory("game.release.retry", "", "", gameReleaseJobTargets(current.Plan), func(job jobs.Job) jobs.Runner {
 		return func(ctx context.Context, report func(jobs.TargetResult)) error {
 			var value gameupdate.Release
 			var retryErr error
-			if request.PlanHash != "" || request.FinishWithoutRestart {
+			if request.PlanHash != "" || request.FinishWithoutRestart || request.SkipBackup || request.CancelUpdate {
 				if service, ok := h.releases.(interface {
 					RetryConfirmed(context.Context, string, gameupdate.ReleaseRetryRequest, string) (gameupdate.Release, error)
 				}); ok {
@@ -291,7 +302,9 @@ func gameReleaseReport(report func(jobs.TargetResult), plan gameupdate.ReleasePl
 	for _, installation := range plan.Installations {
 		result := findGameReleaseInstallation(value, installation.TargetID, installation.InstallationID)
 		target := jobs.TargetResult{TargetID: gameReleaseJobTarget("installation", installation.TargetID, installation.InstallationID)}
-		if result != nil && (result.Stage == gameupdate.ReleaseStageVerified || result.Stage == gameupdate.ReleaseStageSucceeded) {
+		if releaseErr == nil && value.Stage == gameupdate.ReleaseStageAbandoned {
+			target.Status, target.Message = jobs.StatusSucceeded, value.ErrorMessage
+		} else if result != nil && (result.Stage == gameupdate.ReleaseStageVerified || result.Stage == gameupdate.ReleaseStageSucceeded) {
 			desiredVersion := installation.DesiredVersion
 			if desiredVersion == "" {
 				desiredVersion = plan.DesiredVersion
@@ -313,7 +326,7 @@ func gameReleaseReport(report func(jobs.TargetResult), plan gameupdate.ReleasePl
 			target := jobs.TargetResult{TargetID: gameReleaseJobTarget("shard", shard.RoomID, shard.WorldID)}
 			switch {
 			case releaseErr == nil && value.Stage == gameupdate.ReleaseStageAbandoned:
-				target.Status, target.Message = jobs.StatusSucceeded, "已结束维护，世界保持当前状态"
+				target.Status, target.Message = jobs.StatusSucceeded, value.ErrorMessage
 			case !shard.WasRunning && shardResult != nil && shardResult.Stage == gameupdate.ReleaseStageSucceeded:
 				target.Status, target.Message = jobs.StatusSucceeded, "更新前已停止，保持停止"
 			case shardResult != nil && shardResult.Stage == gameupdate.ReleaseStageSucceeded && shardResult.RuntimeState == "stopped":
