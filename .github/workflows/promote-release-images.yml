@@ -1,4 +1,4 @@
-name: Promote published release images
+name: Finalize release assets and images
 
 on:
   workflow_dispatch:
@@ -6,6 +6,10 @@ on:
       version:
         description: 'Published stable release to promote, for example v1.3.29'
         required: true
+        type: string
+      artifact_run_id:
+        description: 'Optional Package run ID: upload its verified cloud assets into an existing draft instead of promoting images'
+        default: ''
         type: string
 
 permissions:
@@ -17,7 +21,65 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  upload_assets:
+    if: inputs.artifact_run_id != ''
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+    steps:
+      - name: Require verified artifacts from the draft release commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$ARTIFACT_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_VERSION" --jq '.draft')" == true ]]
+          commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_VERSION" --jq '.sha')
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN_ID" --jq '.head_sha')" == "$commit" ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN_ID/jobs?per_page=100" > "$RUNNER_TEMP/release-jobs.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          jobs = {j['name']:j['conclusion'] for j in json.loads((Path(os.environ['RUNNER_TEMP'])/'release-jobs.json').read_text())['jobs']}
+          required = ['sources','quality / quality','native_linux / package',
+              'agents (ubuntu-22.04, linux-arm64)','agents (windows-latest, windows-amd64)',
+              'images (all-in-one)','images (control-plane)','images (agent)','images (dst-runtime)']
+          assert all(jobs.get(name)=='success' for name in required), 'Cloud package checks must pass'
+          PY
+      - name: Download and verify cloud packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download "$ARTIFACT_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            -n dst-admin-linux-amd64 -n dst-admin-agent-linux-arm64 \
+            -n dst-admin-agent-windows-amd64 -D "$RUNNER_TEMP/release-assets"
+          python3 - <<'PY'
+          import hashlib, os
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'release-assets'
+          checksums=list(root.rglob('*.sha256'))
+          assert len(checksums)==8
+          for path in checksums:
+              expected,name=path.read_text().split()
+              assert Path(name).name==name
+              assert hashlib.sha256((path.parent/name).read_bytes()).hexdigest()==expected
+          PY
+      - name: Upload verified files and keep the release as a draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' files < <(find "$RUNNER_TEMP/release-assets" -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sha256' \) -print0)
+          [[ "${#files[@]}" == 16 ]]
+          gh release upload "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}"
+          echo 'Uploaded 16 verified cloud assets. The release remains a draft for final checks.' >> "$GITHUB_STEP_SUMMARY"
   promote:
+    if: inputs.artifact_run_id == ''
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     env:
