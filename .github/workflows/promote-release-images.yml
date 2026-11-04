@@ -39,7 +39,7 @@ jobs:
           set -euo pipefail
           [[ "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$ARTIFACT_RUN_ID" =~ ^[0-9]+$ ]]
-          [[ "$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_VERSION" --jq '.draft')" == true ]]
+          [[ "$(gh release view "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')" == true ]]
           commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_VERSION" --jq '.sha')
           [[ "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN_ID" --jq '.head_sha')" == "$commit" ]]
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN_ID/jobs?per_page=100" > "$RUNNER_TEMP/release-jobs.json"
