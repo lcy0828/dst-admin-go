@@ -10,6 +10,9 @@ import httpx
 from .broadcast import READ_TOOLS, BroadcastEngine
 from .chat_stream import CHAT_STREAM_TOOL, NOTICE_READ_TOOLS, chat_stream_session, supports_chat_stream
 from .gateway import QueryError, unpack
+from .event_notices import BASE_TOOLS, EVENT_TOOLS, SYSTEM_TOOL, room_feed as facts_feed, platform_feed, supports as supports_events
+
+NOTICE_READ_TOOLS = NOTICE_READ_TOOLS | EVENT_TOOLS
 from .sessions import group_origin
 from .streams import MCPReadError, closed_transport, resource_request, sse_frames, stateless_read
 
@@ -38,6 +41,9 @@ class Notifications:
         self.wakeup = asyncio.Event()
         self.closed_sessions = set()
         self.chat_resources = {}
+        self.event_resources = {}
+        self.notice_capabilities = {}
+        self.platform_task = None
 
     def warn(self, text):
         if time.monotonic() - self.warned.get(text, -1000) > 60:
@@ -131,8 +137,10 @@ class Notifications:
         if name not in NOTICE_READ_TOOLS:
             raise QueryError("PERMISSION_DENIED")
         source = self.source
+        if name == SYSTEM_TOOL and not any(e.options.get("software", False) for e in self.engines.values()):
+            raise QueryError("PERMISSION_DENIED")
         p = self.plugin
-        server = p.connections.broadcast(READ_TOOLS)
+        server = p.connections.broadcast(BASE_TOOLS)
         runtime = p.manager.mcp_server_runtime_view.get(server)
         tool = next((t for t in runtime.client.tools if t.name == name), None) if runtime else None
         if (
@@ -143,7 +151,7 @@ class Notifications:
         ):
             raise QueryError("NOTICE_CAPABILITY_MISSING")
         async with asyncio.timeout(20), p.background, p.gateway.limit:
-            if self.source != p.connection_identity() or args.get("path", {}).get("roomId") not in {
+            if self.source != p.connection_identity() or name != SYSTEM_TOOL and args.get("path", {}).get("roomId") not in {
                 r for e in self.engines.values() for r in e.rooms
             }:
                 raise QueryError("ROOM_DENIED")
@@ -198,7 +206,7 @@ class Notifications:
             # The reconcile loop runs every 30s. Renew before expiry so a stream
             # heartbeat cannot race the next tick and spuriously lose authority.
             await p.catalog.refresh(min_valid_for=35)
-            server = p.connections.broadcast(READ_TOOLS)
+            server = p.connections.broadcast(BASE_TOOLS)
             if not server:
                 raise QueryError("NOTICE_CAPABILITY_MISSING")
         except Exception:
@@ -227,6 +235,19 @@ class Notifications:
                 **record.get("notices", {}),
                 "leave_grace_seconds": p.config.get("advanced", {}).get("leaveGrace", 10),
             }
+            sources = {
+                "presence": supports_events(self, "api_streamWorldRuntimeEvents"),
+                "server": supports_events(self, "api_listRoomRuntimeEvents"),
+                "chat": supports_chat_stream(self) or supports_events(self, "api_listRoomChatLogs"),
+                **{category: supports_events(self, "api_readRoomNotificationEvents") for category in ("maintenance", "season", "updates", "backup", "players", "boss", "mods", "alerts")},
+                "software": supports_events(self, SYSTEM_TOOL),
+            }
+            missing = [name for name, available in sources.items() if options.get(name, False) and not available]
+            known = hasattr(p, "manager")
+            if missing and known:
+                self.session_errors[session] = "部分播报暂不可用：当前连接未提供所需读取能力；查询继续使用。"
+            if known and not any(available and options.get(name, False) for name,available in sources.items()):
+                continue
             desired[session] = (rooms, options)
         if len({r for rooms, _ in desired.values() for r in rooms}) > self.MAX_ROOMS:
             await self.stop_feeds()
@@ -274,6 +295,13 @@ class Notifications:
                     session, kind, values
                 ),
             )
+        for session, engine in self.engines.items():
+            collection_missing = {category for room in engine.rooms
+                for category, state in engine.room(room).get("notice_collection", {}).items()
+                if engine.options.get(category, False) and state in {"disabled", "unavailable"}}
+            if collection_missing:
+                from .event_notices import LABELS
+                self.session_errors[session] = "部分播报没有可用采集：" + "、".join(LABELS[c] for c in sorted(collection_missing)) + "。请在面板查看采集设置；插件不会自动开启采集。"
         rooms = {r for e in self.engines.values() for r in e.rooms}
         for room in set(self.tasks) - rooms:
             task = self.tasks.pop(room)
@@ -287,6 +315,8 @@ class Notifications:
             )
         for room in rooms - set(self.tasks):
             self.tasks[room] = asyncio.create_task(self.room_feed(room), name="dst-room-events")
+        if self.engines and any(e.options.get("software", False) for e in self.engines.values()) and (self.platform_task is None or self.platform_task.done()):
+            self.platform_task = asyncio.create_task(platform_feed(self), name="dst-platform-notifications")
         if self.engines:
             self.status = f"已就绪 · {len(rooms)} 个房间 · {len(self.engines)} 个群"
 
@@ -296,12 +326,13 @@ class Notifications:
             for session, e in self.engines.items()
             if room in e.rooms
             and (not seeded or (session, room) in self.ready)
-            and (not presence or e.options.get("presence", True))
+            and (not presence or e.options.get("presence", True) or e.options.get("season", False) or e.options.get("mods", False))
         ]
 
     async def room_feed(self, room):
         children = {}
         chat_task = asyncio.create_task(self.chat_feed(room), name="dst-room-chat")
+        facts_task = asyncio.create_task(facts_feed(self, room), name="dst-room-notifications")
         advanced = self.plugin.config.get("advanced", {})
         interval = max(15, min(60, int(advanced.get("pollInterval", 30))))
         try:
@@ -323,7 +354,7 @@ class Notifications:
                             )
                         if len(worlds) > self.MAX_WORLDS:
                             raise QueryError("NOTICE_WORLD_LIMIT")
-                        desired = worlds if self.receivers(room, True) else set()
+                        desired = worlds if self.receivers(room, True) and supports_events(self, "api_streamWorldRuntimeEvents") else set()
                         for world in set(children) - desired:
                             task = children.pop(world)
                             task.cancel()
@@ -331,8 +362,13 @@ class Notifications:
                         for world in desired - set(children):
                             children[world] = asyncio.create_task(self.stream(room, world))
                         last_seed = time.monotonic()
+                    if facts_task.done():
+                        await asyncio.gather(facts_task, return_exceptions=True)
+                        facts_task = asyncio.create_task(facts_feed(self, room))
+                    if any(e.options.get("season", False) or e.options.get("maintenance", False) for e in engines):
+                        await self.read("api_listWorldStates", {"path": {"roomId": room}})
                     for engine in engines:
-                        if engine.options.get("server", True):
+                        if engine.options.get("server", True) and supports_events(self, "api_listRoomRuntimeEvents") and not (engine.options.get("maintenance", False) and supports_events(self, "api_readRoomNotificationEvents")):
                             await engine.poll_audit(room)
                             self.wakeup.set()
                 except asyncio.CancelledError:
@@ -342,9 +378,10 @@ class Notifications:
                 await asyncio.sleep(interval)
         finally:
             chat_task.cancel()
+            facts_task.cancel()
             for task in children.values():
                 task.cancel()
-            await asyncio.gather(chat_task, *children.values(), return_exceptions=True)
+            await asyncio.gather(chat_task, facts_task, *children.values(), return_exceptions=True)
 
     async def chat_feed(self, room):
         """Prefer one durable room stream; retain bounded polling for older panels."""
@@ -418,7 +455,7 @@ class Notifications:
                 if cursors and all(c == cursors[0] and c for c in cursors):
                     args["query"] = {"cursor": cursors[0]}
                 data = await self.read("api_streamWorldRuntimeEvents", args)
-                server = self.plugin.connections.broadcast(READ_TOOLS)
+                server = self.plugin.connections.broadcast(BASE_TOOLS)
                 url, headers = resource_request(
                     self.plugin.connections.configuration(server), data.get("resource", {})
                 )
@@ -485,6 +522,7 @@ class Notifications:
             list(self.tasks.values())
             + list(self.read_tasks.values())
             + list(self.presence_tasks.values())
+            + ([self.platform_task] if self.platform_task else [])
         )
         for task in tasks:
             task.cancel()
@@ -493,6 +531,9 @@ class Notifications:
         self.read_tasks.clear()
         self.presence_tasks.clear()
         self.chat_resources.clear()
+        self.event_resources.clear()
+        self.notice_capabilities.clear()
+        self.platform_task = None
         if self.http is not None:
             await self.http.aclose()
             self.http = None

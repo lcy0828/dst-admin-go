@@ -68,6 +68,9 @@ DEFINITIONS = {
         "reason",
     ),
 }
+for _category, _label in (("maintenance", "房间维护"), ("season", "季节变化"), ("updates", "更新提醒"), ("backup", "备份提醒"), ("software", "面板更新"), ("players", "死亡复活"), ("boss", "Boss击杀"), ("mods", "模组消息"), ("alerts", "运行告警")):
+    DEFINITIONS["event_" + _category] = Definition(_label, "📣 {room_name} · {title}\n━━━━━━━━━━━━\n{result}\n{body}\n🕒 {time}", COMMON | {"title", "body", "result"}, "body")
+
 for _key, _label in (
     ("status", "房间概况"),
     ("players", "在线玩家"),
@@ -113,6 +116,8 @@ def compile_template(kind, source):
     required = DEFINITIONS[kind].required
     if required and required not in fields:
         raise ValueError("必须保留 {" + required + "}，以免隐藏正文或执行证据")
+    if kind.startswith("event_") and "result" not in fields:
+        raise ValueError("必须保留 {result}，以免隐藏执行状态")
     return source
 
 
@@ -287,6 +292,7 @@ def sample_values(kind):
         "message": "准备去打龙蝇啦",
         "lines": "示例玩家：准备去打龙蝇啦\n示例队友：稍等我一下",
         "reason": "示例异常：进程意外退出，原因待排查",
+        "result": "结果待确认",
         "title": "🏕️ 示例服 · " + DEFINITIONS[kind].label,
         "body": "🌍 世界状态\n🟢 地面 · 运行中\n  第 386 天 · 🌱 春 · 剩余 20 天\n\n👥 在线 1 / 12 人\n· 示例玩家 · 温蒂 · 地面\n\n📦 模组 · 已配置 0 个",
     }

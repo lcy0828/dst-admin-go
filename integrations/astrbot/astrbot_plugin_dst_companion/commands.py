@@ -198,6 +198,7 @@ COMMANDS = (
         "停止跟踪",
         management=True,
     ),
+    Command("recent", "最近动态", ("最近动态", "最近发生了什么", "刚才发生了什么", "最近的维护记录", "最近更新记录"), "1服最近动态", visibility="status"),
     Command("help", "菜单", ("帮助", "菜单", "能做什么", "你能做什么", "有哪些功能"), "菜单"),
     Command("cancel", "取消选择", ("取消", "返回", "取消选择"), "取消", visibility="help"),
 )

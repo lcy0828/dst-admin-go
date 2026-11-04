@@ -143,7 +143,7 @@ class Enrollment:
         flags = record.get("notices", {})
         if (
             not isinstance(flags, dict)
-            or set(flags) - {"presence", "server", "chat"}
+            or set(flags) - {"presence", "server", "chat", "maintenance", "season", "updates", "backup", "software", "players", "boss", "mods", "alerts"}
             or any(type(v) is not bool for v in flags.values())
         ):
             raise ValueError("invalid notice settings")

@@ -1,6 +1,7 @@
 """Persistent submit-before-send journal. Recovery only reads original calls/jobs."""
 
 import asyncio
+import copy
 import hashlib
 import json
 import time
@@ -10,6 +11,11 @@ from .formatters import safe
 from .capabilities import validate
 from .gateway import QueryError
 from .presentation import business
+from .sessions import group_origin
+
+
+def notice_status(data):
+    return "partial" if data.get("outcome") in {"partial", "partial_success"} else data.get("status")
 
 
 def outcome(data):
@@ -57,6 +63,27 @@ class Actions:
     async def submit(self, *args):
         async with self.lock:
             return await self._submit(*args)
+
+    async def claim_notice(self, session, connection, related):
+        """Coordinate a task reply and its room broadcast before either sends.
+
+        An uncertain send retains its claim. This never retries a game action.
+        """
+        status = related.get("status")
+        if not related.get("jobId") or status not in {"succeeded", "failed", "partial", "canceled"}:
+            return False
+        async with self.lock:
+            records = copy.deepcopy(await self.load())
+            for record in records.values():
+                if (record.get("jobId") != related["jobId"] or record.get("roomId") != related.get("roomId")
+                        or record.get("sessionId") != group_origin(session) or record.get("connectionId") != connection):
+                    continue
+                if record.get("noticeStatus") == status or record.get("state") == "terminal" and notice_status(record.get("data", {})) == status:
+                    return True
+                record["noticeStatus"] = status
+                await self.save(records)
+                return False
+        return False
 
     async def _submit(self, actor, intent, target, deadline):
         if self.directory:
@@ -148,6 +175,7 @@ class Actions:
             "nativeTools": item["nativeTools"],
             "protocol": 1,
             "connectionId": actor.connection_id,
+            "sessionId": group_origin(getattr(actor.event, "unified_msg_origin", "")),
             "delivery": "not_attempted",
         }
         records[key] = record
@@ -208,7 +236,9 @@ class Actions:
             "fingerprint": fingerprint,
             "roomId": target.room,
             "createdAt": time.time(),
+            "sessionId": group_origin(getattr(actor.event, "unified_msg_origin", "")),
             "state": "prepared",
+            "connectionId": actor.connection_id,
             "owner": hashlib.sha256(json.dumps(actor.key).encode()).hexdigest(),
         }
         records[key] = record
@@ -374,15 +404,19 @@ class Actions:
     async def _finish_watch(self, key, watch, data=None):
         record = watch["record"]
         finished = data is not None and terminal(data)
+        broadcast_owns_result = False
         async with self.lock:
             records = await self.load()
             if key in records:
+                broadcast_owns_result = finished and records[key].get("noticeStatus") == notice_status(data)
                 records[key]["state"] = "terminal" if finished else "tracking_expired"
                 if data is not None:
                     records[key]["data"] = {k: data[k] for k in ("status", "outcome") if k in data}
-                records[key]["delivery"] = "delivery_unknown"
+                records[key]["delivery"] = "via_broadcast" if broadcast_owns_result else "delivery_unknown"
                 await self.save(records)
         self.watches.pop(key, None)
+        if broadcast_owns_result:
+            return
         # Persist and remove before attempting a send; never retry uncertain delivery.
         text = (
             outcome(data)

@@ -35,6 +35,18 @@ class Queries:
                 args["query"] = query
             return await self.gateway.call(actor, name, args, deadline)
 
+        if kind == "recent":
+            data = await call("api_listRoomRecentEvents", {"limit": 10})
+            lines = ["📋 最近动态"]
+            for item in data.get("items", []):
+                if not item.get("category"):
+                    continue
+                lines.append(fmt.time_text(item.get("occurredAt")) + " · " + fmt.safe(item.get("title", "动态")))
+                lines.append(fmt.safe(item.get("message", ""))[:500])
+            if len(lines) == 1:
+                lines.append("暂无可展示记录。")
+            lines.append("仅显示已采集记录，缺失不代表事件未发生。")
+            return "\n".join(lines), target
         if kind == "status":
             # Independent reads share Gateway's global limit and one deadline.
             worlds, states = await asyncio.gather(

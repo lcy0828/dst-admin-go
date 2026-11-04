@@ -4,6 +4,7 @@ from .gateway import QueryError
 
 READS = frozenset(
     {
+        "api_listRoomRecentEvents",
         "api_listBotCapabilities",
         "api_queryBotCapability",
         "api_getBotCapabilityResult",

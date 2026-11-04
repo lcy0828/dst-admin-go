@@ -15,10 +15,10 @@ NOTICE_READ_TOOLS = READ_TOOLS | {CHAT_STREAM_TOOL}
 def supports_chat_stream(hub):
     # This capability is optional: never add it to the required connection set.
     plugin = hub.plugin
-    if not hasattr(plugin, "connections"):
+    if not hasattr(plugin, "connections") or not hasattr(plugin,"manager"):
         return False
     try:
-        server = plugin.connections.broadcast(READ_TOOLS)
+        server = plugin.connections.broadcast(frozenset({"api_listRooms", "api_listRoomWorlds", "api_listWorldStates", "api_listRoomPlayers"}))
     except QueryError:
         return False
     runtime = plugin.manager.mcp_server_runtime_view.get(server)
@@ -90,7 +90,7 @@ async def chat_stream_session(hub, room_id, engines):
         expires = timestamp(resource.get("expiresAt")) or time.time() + 300
         hub.chat_resources[room_id] = (expires - 15, resource)
     plugin = hub.plugin
-    server = plugin.connections.broadcast(READ_TOOLS)
+    server = plugin.connections.broadcast(frozenset({"api_listRooms", "api_listRoomWorlds", "api_listWorldStates", "api_listRoomPlayers"}))
     url, headers = resource_request(plugin.connections.configuration(server), resource)
     # Reuse the authenticated resource; create no new link for every reconnect.
     # The resource has no fixed cursor, so each GET can resume independently.

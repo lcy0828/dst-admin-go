@@ -2,7 +2,7 @@
 
 import copy
 
-from .broadcast import READ_TOOLS
+from .event_notices import BASE_TOOLS
 from .configuration import fingerprint
 from .formatters import safe
 from .gateway import QueryError
@@ -46,6 +46,7 @@ class Setup:
             "订阅房间",
             "播报",
             "聊天播报",
+            "通知", "通知预设",
             "权限",
             "权限模式",
             "检查插件更新", "安装插件更新", "取消插件下载", "插件更新状态", "恢复上一版插件",
@@ -69,6 +70,7 @@ class Setup:
                 "管理员在本群发送：\n/dst 启用本群\n"
                 "/dst 启用本群 聊天播报 开（也支持“启动本群”）\n"
                 "/dst 设置 · /dst 模板 · /dst 聊天播报 开/关 · /dst 禁用本群\n"
+                "/dst 通知预设 玩家群/管理群 · /dst 通知 季节变化 开/关\n"
                 "启用后可 @机器人 发送 菜单、有哪些服、1服信息、查背包 昵称。\n"
                 "其他问题直接 @机器人说即可，助手会自动理解并选择可用功能。\n"
                 "只有插件确认保存后才算启用；模型回复不能作为设置生效依据。"
@@ -226,6 +228,20 @@ class Setup:
                         )
                         return True
                     record["rooms"] = [matches[0]["id"]]
+            elif command == "通知":
+                from .event_notices import LABELS
+                values = argument.split()
+                categories = {label: key for key, label in LABELS.items()}
+                if len(values) != 2 or values[0] not in categories or values[1] not in {"开", "关"}:
+                    await reply("使用 /dst 通知 类别 开/关；类别：" + "、".join(categories))
+                    return True
+                record.setdefault("notices", {})[categories[values[0]]] = values[1] == "开"
+            elif command == "通知预设":
+                if argument not in {"玩家群", "管理群"}:
+                    await reply("使用 /dst 通知预设 玩家群 或 管理群；已有设置只有选择后才更改。")
+                    return True
+                flags = record.setdefault("notices", {})
+                flags.update(presence=True, server=True, maintenance=True, season=True, updates=True, players=True, boss=True, mods=False, alerts=argument == "管理群", backup=argument == "管理群", software=argument == "管理群")
             elif command in {"播报", "聊天播报"}:
                 if argument not in {"开", "关"}:
                     await reply("使用 /dst " + command + " 开 或 关。")
@@ -238,12 +254,14 @@ class Setup:
                 else:
                     flags.update(presence=argument == "开", server=argument == "开")
                     if argument == "关":
-                        flags["chat"] = False
+                        flags.update({key: False for key in flags})
             if command != "设置":
                 await p.enrollment.update(session, record)
                 p.context.dst_companion_v1 = p
                 await p.notifications.reconcile()
             effective = p.effective(session)
+            from .event_notices import LABELS
+            enabled_notices = "、".join(label for key, label in LABELS.items() if record.get("notices", {}).get(key)) or "未开启扩展通知"
             caller = p.actor(event)
             management = (
                 "\n你的游戏管理：已授权 · 固定写能力 " + str(len(caller.write_allowlist)) + " 项"
@@ -256,7 +274,7 @@ class Setup:
                 p.notifications.delivery_errors.get(
                     session, p.notifications.session_errors.get(session, p.notifications.status)
                 )
-                if p.connections.broadcast(READ_TOOLS)
+                if p.connections.broadcast(BASE_TOOLS)
                 else "暂不可用：当前同源 MCP 未提供播报读取权限，查询可正常使用"
             )
             await reply(
@@ -268,6 +286,8 @@ class Setup:
                 + (notice if any(record.get("notices", {}).values()) else "关闭")
                 + "\n聊天播报开关："
                 + ("开" if record.get("notices", {}).get("chat") else "关")
+                + "\n扩展通知：" + enabled_notices
+                + "\n可用 /dst 通知预设 玩家群/管理群，或 /dst 通知 季节变化 开/关。"
                 + management
                 + (
                     f"\n聊天仅播报启用后的新公屏消息，约 {p.config.get('advanced', {}).get('chatPollInterval', 3)} 秒检查一次；连续消息会合并，不补发历史。"

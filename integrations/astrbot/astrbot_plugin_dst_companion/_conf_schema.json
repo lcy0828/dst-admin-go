@@ -381,6 +381,186 @@
             "hint": "可用变量：{body} {player} {room} {room_full_name} {room_name} {time} {title}；必须保留 {body}。"
           }
         }
+      },
+      "event_maintenance": {
+        "name": "房间维护",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "event_maintenance",
+            "options": [
+              "event_maintenance"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "房间维护正文",
+            "type": "text",
+            "default": "📣 {room_name} · {title}\n━━━━━━━━━━━━\n{result}\n{body}\n🕒 {time}",
+            "hint": "可用变量：{room_name} {room_full_name} {title} {result} {body} {time}；必须保留 {result} 和 {body}。"
+          }
+        }
+      },
+      "event_season": {
+        "name": "季节变化",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "event_season",
+            "options": [
+              "event_season"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "季节变化正文",
+            "type": "text",
+            "default": "📣 {room_name} · {title}\n━━━━━━━━━━━━\n{result}\n{body}\n🕒 {time}",
+            "hint": "可用变量：{room_name} {room_full_name} {title} {result} {body} {time}；必须保留 {result} 和 {body}。"
+          }
+        }
+      },
+      "event_updates": {
+        "name": "更新提醒",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "event_updates",
+            "options": [
+              "event_updates"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "更新提醒正文",
+            "type": "text",
+            "default": "📣 {room_name} · {title}\n━━━━━━━━━━━━\n{result}\n{body}\n🕒 {time}",
+            "hint": "可用变量：{room_name} {room_full_name} {title} {result} {body} {time}；必须保留 {result} 和 {body}。"
+          }
+        }
+      },
+      "event_backup": {
+        "name": "备份提醒",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "event_backup",
+            "options": [
+              "event_backup"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "备份提醒正文",
+            "type": "text",
+            "default": "📣 {room_name} · {title}\n━━━━━━━━━━━━\n{result}\n{body}\n🕒 {time}",
+            "hint": "可用变量：{room_name} {room_full_name} {title} {result} {body} {time}；必须保留 {result} 和 {body}。"
+          }
+        }
+      },
+      "event_software": {
+        "name": "面板更新",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "event_software",
+            "options": [
+              "event_software"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "面板更新正文",
+            "type": "text",
+            "default": "📣 {room_name} · {title}\n━━━━━━━━━━━━\n{result}\n{body}\n🕒 {time}",
+            "hint": "可用变量：{room_name} {room_full_name} {title} {result} {body} {time}；必须保留 {result} 和 {body}。"
+          }
+        }
+      },
+      "event_players": {
+        "name": "死亡复活",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "event_players",
+            "options": [
+              "event_players"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "死亡复活正文",
+            "type": "text",
+            "default": "📣 {room_name} · {title}\n━━━━━━━━━━━━\n{result}\n{body}\n🕒 {time}",
+            "hint": "可用变量：{room_name} {room_full_name} {title} {result} {body} {time}；必须保留 {result} 和 {body}。"
+          }
+        }
+      },
+      "event_boss": {
+        "name": "Boss击杀",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "event_boss",
+            "options": [
+              "event_boss"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "Boss击杀正文",
+            "type": "text",
+            "default": "📣 {room_name} · {title}\n━━━━━━━━━━━━\n{result}\n{body}\n🕒 {time}",
+            "hint": "可用变量：{room_name} {room_full_name} {title} {result} {body} {time}；必须保留 {result} 和 {body}。"
+          }
+        }
+      },
+      "event_mods": {
+        "name": "模组消息",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "event_mods",
+            "options": [
+              "event_mods"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "模组消息正文",
+            "type": "text",
+            "default": "📣 {room_name} · {title}\n━━━━━━━━━━━━\n{result}\n{body}\n🕒 {time}",
+            "hint": "可用变量：{room_name} {room_full_name} {title} {result} {body} {time}；必须保留 {result} 和 {body}。"
+          }
+        }
+      },
+      "event_alerts": {
+        "name": "运行告警",
+        "items": {
+          "type": {
+            "description": "模板类型",
+            "type": "string",
+            "default": "event_alerts",
+            "options": [
+              "event_alerts"
+            ],
+            "invisible": true
+          },
+          "body": {
+            "description": "运行告警正文",
+            "type": "text",
+            "default": "📣 {room_name} · {title}\n━━━━━━━━━━━━\n{result}\n{body}\n🕒 {time}",
+            "hint": "可用变量：{room_name} {room_full_name} {title} {result} {body} {time}；必须保留 {result} 和 {body}。"
+          }
+        }
       }
     }
   },

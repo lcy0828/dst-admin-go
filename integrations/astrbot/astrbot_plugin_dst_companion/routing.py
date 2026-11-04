@@ -54,7 +54,7 @@ def normalize(text):
 
 
 READ_KINDS = frozenset(
-    {"rooms", "status", "players", "profile", "inventory", "network", "mods", "help", "backups"}
+    {"rooms", "status", "players", "profile", "inventory", "network", "mods", "help", "backups", "recent"}
 )
 READ_PREFIX = re.compile(
     r"^(?:查询一下|查看一下|查一下|看一下|查询|查看|查下|看看|看下|查)\s*(.+)$"

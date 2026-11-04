@@ -192,7 +192,7 @@ class TemplateTests(unittest.IsolatedAsyncioTestCase):
         hub = Notifications(p)
         hub.subscriptions = lambda: {"group": record}
         hub.source, hub.http = "source", object()
-        engine = NS(rooms={"r": "示例服"}, options={**record["notices"], "leave_grace_seconds": 10})
+        engine = NS(rooms={"r": "示例服"}, options={**record["notices"], "leave_grace_seconds": 10}, room=lambda _: {})
         hub.engines = {"group": engine}
         feed = NS(cancel=lambda: self.fail("template edit must not cancel feed"))
         hub.tasks = {"r": feed}

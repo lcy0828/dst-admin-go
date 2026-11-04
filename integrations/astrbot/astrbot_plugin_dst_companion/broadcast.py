@@ -420,7 +420,10 @@ class BroadcastEngine:
             {"key": key, "text": text, "created": self.clock(), "related": related}
         )
         if len(self.state["outbox"]) > 200:
-            self.state["outbox"].pop(0)
+            discard = next((i for i,item in enumerate(self.state["outbox"]) if (item.get("related") or {}).get("kind") == "chat"), None)
+            if discard is None:
+                discard = next((i for i,item in enumerate(self.state["outbox"]) if (item.get("related") or {}).get("kind") == "mods"), 0)
+            self.state["outbox"].pop(discard)
             self.log("通知积压超过上限，已丢弃最旧通知")
 
     async def resolve_presence(self):
@@ -710,14 +713,14 @@ class BroadcastEngine:
                 self.state["deliveries"].remove(delivery)
                 raise
         outcome = "expired"
-        if self.clock() - notice["created"] <= 120:
+        if self.clock() <= notice.get("related", {}).get("expiresAt", float("inf")) and self.clock() - notice["created"] <= (86400 if notice.get("related", {}).get("kind") in {"maintenance", "season", "updates", "backup", "software"} else 600 if notice.get("related", {}).get("kind") in {"players", "boss", "mods", "alerts"} else 120):
             try:
                 sent = (
                     await self.emit_notice(notice["text"], notice.get("related"))
                     if self.emit_notice
                     else await self.emit(notice["text"])
                 )
-                outcome = "sent" if sent else "not_sent"
+                outcome = "suppressed" if isinstance(sent, dict) and sent.get("suppressed") else "sent" if sent else "not_sent"
                 related = notice.get("related", {})
                 if (
                     isinstance(sent, dict)

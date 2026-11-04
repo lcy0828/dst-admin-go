@@ -157,13 +157,7 @@ class DSTCompanion(Star):
                 role = "panel-manage"
             if not self.server(True) or not self.group_roles.verified(event):
                 role, writes, workbench = "game-read", (), "off"
-        connection_ids = []
-        for server in (self.server(False), self.server(True)):
-            runtime = self.manager.mcp_server_runtime_view.get(server)
-            # Hash the in-memory credential configuration; never persist/print it.
-            client_config = getattr(getattr(runtime, "client", None), "_mcp_server_config", None)
-            connection_ids.append([server, client_config])
-        connection_id = fingerprint(connection_ids)
+        connection_id = self.action_connection_identity()
         revision = fingerprint([effective.revision, connection_id, policy_revision,
                                 self.config.get("permission_mode", "legacy")])
         return Actor(
@@ -297,6 +291,14 @@ class DSTCompanion(Star):
             "writeAllowlist": list(effective["writeAllowlist"]),
             "pageSize": effective["pageSize"],
         }
+
+    def action_connection_identity(self):
+        values = []
+        for server in (self.server(False), self.server(True)):
+            runtime = self.manager.mcp_server_runtime_view.get(server)
+            # Only the hash is persisted; raw credentials remain in memory.
+            values.append([server, getattr(getattr(runtime, "client", None), "_mcp_server_config", None)])
+        return fingerprint(values)
 
     def connection_identity(self):
         values = []
@@ -1173,6 +1175,7 @@ class DSTCompanion(Star):
             "api_listRoomRuntimeEvents",
             "api_listRoomChatLogs",
             "api_streamRoomChatLogs",
+            "api_readRoomNotificationEvents", "api_streamRoomNotifications", "api_readNotificationEvents",
         }
         if name not in allowed or not self.alive:
             raise QueryError("PERMISSION_DENIED")
@@ -1199,8 +1202,8 @@ class DSTCompanion(Star):
                 ):
                     return False
                 flags = record.get("notices", {})
-                category = {"player": "presence", "server": "server", "chat": "chat"}.get(
-                    related.get("kind"), "presence"
+                category = {"player": "presence", "server": "server", "chat": "chat", "maintenance": "maintenance", "season": "season", "updates": "updates", "backup": "backup", "software": "software", "players": "players", "boss": "boss", "mods": "mods", "alerts": "alerts"}.get(
+                    related.get("kind"), "__unknown__"
                 )
                 if not flags.get(category, False):
                     return False
@@ -1271,6 +1274,9 @@ class DSTCompanion(Star):
                 or not self.notice_allowed(session, related)
             ):
                 return unavailable("发送前授权或播报开关已变化")
+            actions = getattr(getattr(self, "engine", None), "actions", None)
+            if actions and await actions.claim_notice(session, self.action_connection_identity(), related):
+                return {"suppressed": True}
             params = {
                 "message": [{"type": "text", "data": {"text": text[:3500]}}],
                 "self_id": self_id,
