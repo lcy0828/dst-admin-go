@@ -13,7 +13,7 @@ func assetData(name string) ([]byte, error) {
 		return data, err
 	}
 	if name == "commands.lua" {
-		for _, module := range []string{"mode_ownership.lua", "teleport.lua", "workbench.lua", "workbench_v2.lua", "player_settings.lua", "nearby_adapters.lua"} {
+		for _, module := range []string{"mode_ownership.lua", "managed_modes.lua", "teleport.lua", "workbench.lua", "workbench_expansion.lua", "workbench_v2.lua", "player_settings.lua", "nearby_adapters.lua"} {
 			part, e := embeddedAssets.ReadFile("assets/" + module)
 			if e != nil {
 				return nil, e

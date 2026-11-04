@@ -21,6 +21,11 @@ func batchResultV2(run Run) *BatchResult {
 		if !nearbyV2(action) || !strings.Contains(run.Script, "w.NearbyV2(") {
 			return nil
 		}
+	} else if guardedExpansion(run.CommandID) {
+		expected = run.CommandID
+		if !strings.Contains(run.Script, "w.Expansion(") {
+			return nil
+		}
 	} else {
 		expected = run.CommandID
 		if actionInteraction(run.CommandID, "") == nil || !strings.Contains(run.Script, "w.Setting(") {
@@ -58,7 +63,7 @@ func batchResultV2(run Run) *BatchResult {
 		if r.Version != 2 || r.Action != expected || r.RequestID != run.ID || len(r.WorldID) < 1 || len(r.WorldID) > 80 || r.Units < 0 || r.Units > 200 || !r.DetailsComplete || r.Reason != "" {
 			return nil
 		}
-		if run.CommandID != "act_nearby_entities" && r.Matched != 1 {
+		if run.CommandID != "act_nearby_entities" && !guardedExpansion(run.CommandID) && r.Matched != 1 {
 			return nil
 		}
 		if _, e := uuid.Parse(r.RequestID); e != nil {

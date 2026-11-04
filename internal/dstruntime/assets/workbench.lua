@@ -114,6 +114,10 @@ local Workbench = (function()
     M.TakeObservation=WorkbenchV2.TakeObservation
     M.FinishObservation=WorkbenchV2.FinishObservation
     M.Encode=WorkbenchV2.Encode
-    M.Stop=WorkbenchV2.Stop
+    M.IsBusy=WorkbenchV2.IsBusy
+    M.EncodeObservation=WorkbenchExpansion.EncodeObservation
+    M.ExpansionVersion=1
+    M.Expansion=WorkbenchExpansion.Run
+    M.Stop=function()WorkbenchExpansion.Stop();return WorkbenchV2.Stop()end
     return M
 end)()

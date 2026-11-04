@@ -9468,6 +9468,7 @@ components:
         nameEn: { type: string }
         type: { type: string }
         category: { type: string, enum: [item, food, equipment, structure, creature, boss, nature, other] }
+        hasRecipe: { type: boolean, description: Optional native recipe-registry evidence; absent means unknown on older Runtime versions }
         artworkUrl: { type: string, format: uri }
         capabilities:
           type: array
@@ -11276,6 +11277,21 @@ components:
               creative: {type: string, enum: [enabled, disabled, unknown]}
               panelGod: {type: string, enum: [enabled, disabled, unknown]}
               panelInvincible: {type: string, enum: [enabled, disabled, unknown]}
+              modeMemory: {type: string, enum: [enabled, disabled, unknown], description: Explicit panel mode memory for this player.}
+              panelModes:
+                type: object
+                maxProperties: 8
+                additionalProperties: false
+                properties:
+                  invincible: {type: string, enum: [enabled, disabled, unknown]}
+                  super_god: {type: string, enum: [enabled, disabled, unknown]}
+                  creative: {type: string, enum: [enabled, disabled, unknown]}
+                  health_lock: {type: string, enum: [enabled, disabled, unknown]}
+                  one_hit: {type: string, enum: [enabled, disabled, unknown]}
+                  invisible: {type: string, enum: [enabled, disabled, unknown]}
+                  water_walk: {type: string, enum: [enabled, disabled, unknown]}
+                  noclip: {type: string, enum: [enabled, disabled, unknown]}
+
     WorldQueryWorldData:
       type: object
       additionalProperties: false
@@ -12030,11 +12046,26 @@ components:
     GameReleaseStage:
       type: string
       enum: [previewed, notifying, protecting, stopping, staged, updating, verified, restarting, confirming, succeeded, failed, recovery_required, abandoned]
+    GameReleaseDownloadProgress:
+      type: object
+      additionalProperties: false
+      description: Latest SteamCMD phase evidence; percentages do not imply verified installation or world recovery. Older Agents omit this object.
+      required: [operationId, phase, attempt, currentBytes, totalBytes, phaseStartedAt, observedAt]
+      properties:
+        operationId: { type: string }
+        phase: { type: string, enum: [preparing, downloading, validating, finalizing] }
+        attempt: { type: integer, minimum: 1, maximum: 2 }
+        currentBytes: { type: integer, format: int64, minimum: 0 }
+        totalBytes: { type: integer, format: int64, minimum: 0, description: Zero means no measured total is available. }
+        bytesPerSecond: { type: integer, format: int64, minimum: 0, description: Download throughput only; omitted when unknown or validating. }
+        phaseStartedAt: { type: string, format: date-time }
+        observedAt: { type: string, format: date-time, description: Controller receipt time, not an Agent clock. }
     GameReleaseInstallationResult:
       type: object
       additionalProperties: false
       required: [targetId, installationId, stage, updatedAt]
       properties:
+        progress: { $ref: "#/components/schemas/GameReleaseDownloadProgress" }
         warningMessage: { type: string, description: Optional accelerator repair warning; official game integrity is verified separately }
         writeState: { type: string, enum: [not_started, dispatched, unknown, failed, version_changed, verified], description: Write and integrity evidence; a changed version is not an automatic rollback }
         operationId: { type: string, description: Persisted write identity; uncertain requests are queried using this identity }

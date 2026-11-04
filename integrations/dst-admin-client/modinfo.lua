@@ -1,0 +1,9 @@
+name = "DST Admin 客户端助手"
+description = "可选客户端工具。F8 检查并修复无技能树角色的错误技能提示；不执行远程脚本，不增加管理权限。"
+author = "dst-admin-go contributors"
+version = "1.0.0"
+api_version = 10
+dst_compatible = true
+client_only_mod = true
+all_clients_require_mod = false
+configuration_options = {}

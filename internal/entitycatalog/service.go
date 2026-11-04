@@ -28,6 +28,7 @@ const (
 )
 
 type Entity struct {
+	HasRecipe         bool         `json:"hasRecipe,omitempty"`
 	Category          string       `json:"category,omitempty"`
 	ModID             string       `json:"modId,omitempty"`
 	ModName           string       `json:"modName,omitempty"`

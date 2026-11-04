@@ -151,7 +151,7 @@ func workbenchResult(run Run) WorkbenchResult {
 				r.Message = "附近没有符合条件的对象，没有执行修改。"
 			}
 		}
-	} else if r.Complete && run.Status == RunSucceeded && (strings.Contains(run.Script, "w.Nearby(") || strings.Contains(run.Script, "w.NearbyV2(") || strings.Contains(run.Script, "w.Setting(")) {
+	} else if r.Complete && run.Status == RunSucceeded && (strings.Contains(run.Script, "w.Nearby(") || strings.Contains(run.Script, "w.NearbyV2(") || strings.Contains(run.Script, "w.Setting(") || guardedExpansion(run.CommandID) && strings.Contains(run.Script, "w.Expansion(")) {
 		r.Status = RunUncertain
 		r.Complete = false
 		r.Message = "缺少有效的范围操作结果，请读取原回执，不要重复提交。"

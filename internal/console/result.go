@@ -19,6 +19,7 @@ type receiptReader interface {
 // ResultState describes evidence, not arbitrary Lua's business meaning. Only a
 // script's printed 0 can establish a zero count; missing output cannot.
 func describeResult(run Run) Run {
+	run = describeWorldCount(run)
 	run.Movement = movementResult(run)
 	if movementCommand(run.CommandID) && run.Mode == "builtin" && strings.Contains(run.Script, "w.MovePlayers(") && run.Status == RunSucceeded {
 		if run.Movement == nil || run.Movement.State == "partial" {
@@ -34,14 +35,14 @@ func describeResult(run Run) Run {
 		}
 	}
 	if run.Mode == "builtin" && run.Status == RunFailed && nearbyPhase(run.Arguments) == "execute" &&
-		(strings.Contains(run.Script, "w.NearbyV2(") || strings.Contains(run.Script, "w.Setting(")) &&
+		(strings.Contains(run.Script, "w.NearbyV2(") || strings.Contains(run.Script, "w.Setting(") || guardedExpansion(run.CommandID) && strings.Contains(run.Script, "w.Expansion(")) &&
 		(run.ErrorCode == "COMMAND_EXECUTION_FAILED" || run.ErrorCode == "ACTION_FAILED") {
 		run.Status = RunUncertain
 		run.MayHaveExecuted = true
 		run.Message = "本次操作异常结束，无法确认完整效果；请读取原结果，不要重复提交。"
 	}
 	run.Batch = batchResult(run)
-	if run.Mode == "builtin" && (strings.Contains(run.Script, "w.Nearby(") || strings.Contains(run.Script, "w.NearbyV2(") || strings.Contains(run.Script, "w.Setting(")) && run.Status == RunSucceeded && run.Batch == nil {
+	if run.Mode == "builtin" && (strings.Contains(run.Script, "w.Nearby(") || strings.Contains(run.Script, "w.NearbyV2(") || strings.Contains(run.Script, "w.Setting(") || guardedExpansion(run.CommandID) && strings.Contains(run.Script, "w.Expansion(")) && run.Status == RunSucceeded && run.Batch == nil {
 		run.Status = RunUncertain
 		run.MayHaveExecuted = true
 		run.Message = "缺少有效的范围操作结果，请查看原回执，不要重复提交。"

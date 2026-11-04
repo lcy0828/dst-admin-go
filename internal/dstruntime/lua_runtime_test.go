@@ -901,7 +901,11 @@ func TestBootstrapLuaReloadSwapsOnlyAStartedCandidate(t *testing.T) {
 	defer state.Close()
 
 	telemetrySource := runtimeTelemetryHarnessSource(false)
-	commandsSource := "return { Execute = function() return { ok = true } end }"
+	commandsSource := `local fail=mode_start_failure;return {
+Execute=function()return {ok=true}end,
+Status=function()return {busy=command_busy}end,
+StartModes=function()mode_starts=(mode_starts or 0)+1;if fail then error("mode start failed")end end
+}`
 	lifecycleSource := `local running=false; return { Start=function() running=true; return true end, Stop=function() running=false; return true end, Status=function() return {running=running} end }`
 	worldStateSource := `local running=false; return {
 Start=function() running=true; return true end,
@@ -937,6 +941,9 @@ EmitOnce=function(callback) refresh_order=(refresh_order or "").."worldstate,"; 
 		t.Fatalf("load bootstrap: %v", err)
 	}
 	first := requireLuaTable(t, state.GetGlobal("DSTAdmin"), "initial DSTAdmin")
+	if luaInt(state, "mode_starts") != 1 {
+		t.Fatal("initial activation did not start modes")
+	}
 	if luaInt(state, "runtime_generation") != 1 || luaInt(state, "runtime_starts") != 1 {
 		t.Fatalf("initial counters: generation=%d starts=%d", luaInt(state, "runtime_generation"), luaInt(state, "runtime_starts"))
 	}
@@ -951,6 +958,9 @@ EmitOnce=function(callback) refresh_order=(refresh_order or "").."worldstate,"; 
 
 	callLuaMethod(t, state, first, "Reload", true)
 	second := requireLuaTable(t, state.GetGlobal("DSTAdmin"), "reloaded DSTAdmin")
+	if luaInt(state, "mode_starts") != 2 {
+		t.Fatal("reload did not start candidate modes exactly once")
+	}
 	if second == first || luaInt(state, "runtime_generation") != 2 || luaInt(state, "runtime_starts") != 2 || luaInt(state, "runtime_stops") != 1 {
 		t.Fatalf("successful reload did not swap cleanly: generation=%d starts=%d stops=%d", luaInt(state, "runtime_generation"), luaInt(state, "runtime_starts"), luaInt(state, "runtime_stops"))
 	}
@@ -982,6 +992,22 @@ EmitOnce=function(callback) refresh_order=(refresh_order or "").."worldstate,"; 
 	}
 	if luaInt(state, "runtime_generation") != 3 || luaInt(state, "runtime_starts") != 4 || luaInt(state, "runtime_stops") != 2 {
 		t.Fatalf("failed activation did not restore the previous runtime: generation=%d starts=%d stops=%d", luaInt(state, "runtime_generation"), luaInt(state, "runtime_starts"), luaInt(state, "runtime_stops"))
+	}
+	if luaInt(state, "mode_starts") != 3 {
+		t.Fatal("rollback did not restore previous mode listeners")
+	}
+
+	telemetrySource = runtimeTelemetryHarnessSource(false)
+	state.SetGlobal("command_busy", lua.LTrue)
+	callLuaMethod(t, state, second, "Reload", true)
+	if state.GetGlobal("DSTAdmin") != second || luaInt(state, "mode_starts") != 3 || luaInt(state, "runtime_stops") != 2 {
+		t.Fatal("reload interrupted an unfinished command or mode write")
+	}
+	state.SetGlobal("command_busy", lua.LFalse)
+	state.SetGlobal("mode_start_failure", lua.LTrue)
+	callLuaMethod(t, state, second, "Reload", true)
+	if state.GetGlobal("DSTAdmin") != second || luaInt(state, "mode_starts") != 5 {
+		t.Fatal("mode activation failure did not restore previous runtime modes")
 	}
 }
 

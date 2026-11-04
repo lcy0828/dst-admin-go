@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.23"
+local PRODUCER_VERSION = "2.4.24"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local INPUT_ROOT = "mod_config_data/dst-admin/command-requests/"
 local RECENT_REQUEST_LIMIT = 256
@@ -423,7 +423,7 @@ local function build_catalog()
             local owner = owners[id]
             local name = STRINGS ~= nil and STRINGS.NAMES ~= nil and STRINGS.NAMES[string.upper(id)] or id
             name = type(name) == "string" and safe_text(name, 160) or id
-            entries[#entries + 1] = { id = id, nameZhCN = name, nameEn = name, modId = owner ~= nil and owner.id or nil, modName = owner ~= nil and owner.name or nil }
+            entries[#entries + 1] = { hasRecipe = AllRecipes ~= nil and AllRecipes[id] ~= nil or nil, id = id, nameZhCN = name, nameEn = name, modId = owner ~= nil and owner.id or nil, modName = owner ~= nil and owner.name or nil }
             search_text[id] = string.lower(id .. " " .. name .. " " .. (owner ~= nil and owner.name or ""))
         end
     end
@@ -802,10 +802,12 @@ local function execute_request(signal, request)
             if Workbench.FinishObservation then Workbench.FinishObservation() end
             if task then task:Cancel();task=nil end
             if out then
-                local encoded_ok,line=pcall(Workbench.Encode,out)
+                local encoder=out._count and Workbench.EncodeObservation or Workbench.Encode
+                local encoded_ok,line,format=pcall(encoder,out)
                 if encoded_ok then
                     local original=action_result.details.output
-                    original.text=string.gsub(original.text,"%[DST%-ADMIN%-BATCH%-V2%] [^\n]*",function()return line end,1)
+                    local pattern=format=="count" and "%[DST%-ADMIN%-COUNT%-V1%] [^\n]*" or "%[DST%-ADMIN%-BATCH%-V2%] [^\n]*"
+                    original.text=string.gsub(original.text,pattern,function()return line end,1)
                     if #original.text>CONSOLE_OUTPUT_BYTES then original.text="";original.truncated=true end
                 end
             end
@@ -942,6 +944,7 @@ end
 function M.ClearCatalog()
     if workbench_cancel then workbench_cancel() end
     if Workbench and Workbench.Stop then Workbench.Stop() end
+    ManagedModes.Stop()
     if catalog_cancel ~= nil then catalog_cancel() end
     clear_catalog()
 end
@@ -951,7 +954,7 @@ function M.Status()
         producerInstanceId = instance_id,
         running = true,
         ready = TheWorld ~= nil and TheNet ~= nil,
-        busy = state.dispatching or state.writing or state.loading or #state.signals > 0,
+        busy = state.dispatching or state.writing or state.loading or #state.signals > 0 or workbench_cancel~=nil or Workbench.IsBusy() or ManagedModes.Busy(),
         pending = #state.signals,
         sequence = state.sequence,
     }
@@ -959,6 +962,8 @@ end
 
 M.Workbench = Workbench
 M.ModeOwnership = ModeOwnership
+M.ManagedModes = ManagedModes
+M.StartModes = ManagedModes.Start
 M.SetGodMode = set_god_mode
 M.version = PRODUCER_VERSION
 return M

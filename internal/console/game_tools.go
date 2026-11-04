@@ -210,7 +210,7 @@ func addGameToolTemplates(templates map[string]template) {
 			ID: "set_character_power", Name: "设置角色专属能力", Description: "设置当前角色及其伙伴的专属资源或形态", Category: "玩家管理", Risk: RiskHigh,
 			Parameters: []Parameter{
 				{Name: "player_id", Label: "玩家 KU ID", Type: "string", Required: true},
-				{Name: "action", Label: "角色能力", Type: "enum", Required: true, Options: []string{"beard_none", "beard_short", "beard_medium", "beard_long", "woby_empty", "woby_half", "woby_full", "abigail_bond_1", "abigail_bond_2", "abigail_bond_3", "abigail_health_5", "abigail_health_50", "abigail_health_100", "abigail_shadow", "abigail_lunar_toggle", "inspiration_0", "inspiration_50", "inspiration_100", "fitness_0", "fitness_50", "fitness_100", "woody_beaver", "woody_goose", "woody_moose", "wx_charge_add", "wx_charge_remove", "wormwood_bloom_0", "wormwood_bloom_1", "wormwood_bloom_2", "wormwood_bloom_3", "wormwood_bloom_progress_start", "wormwood_bloom_progress_half", "wormwood_bloom_progress_end", "wormwood_bloom_grow", "wormwood_bloom_decay", "merm_king_hunger_0", "merm_king_hunger_50", "merm_king_hunger_100", "merm_king_health_5", "merm_king_health_50", "merm_king_health_100", "merm_king_trident", "merm_king_crown", "merm_king_shoulder"}},
+				{Name: "action", Label: "角色能力", Type: "enum", Required: true, Options: []string{"beard_none", "beard_short", "beard_medium", "beard_long", "woby_empty", "woby_half", "woby_full", "abigail_bond_1", "abigail_bond_2", "abigail_bond_3", "abigail_health_0", "abigail_health_5", "abigail_health_50", "abigail_health_100", "abigail_shadow", "abigail_lunar_toggle", "inspiration_0", "inspiration_50", "inspiration_100", "fitness_0", "fitness_50", "fitness_100", "woody_beaver", "woody_goose", "woody_moose", "wx_charge_add", "wx_charge_remove", "wormwood_bloom_0", "wormwood_bloom_1", "wormwood_bloom_2", "wormwood_bloom_3", "wormwood_bloom_progress_start", "wormwood_bloom_progress_half", "wormwood_bloom_progress_end", "wormwood_bloom_grow", "wormwood_bloom_decay", "merm_king_hunger_0", "merm_king_hunger_50", "merm_king_hunger_100", "merm_king_health_5", "merm_king_health_50", "merm_king_health_100", "merm_king_trident", "merm_king_crown", "merm_king_shoulder"}},
 			},
 			Script: `按 KU ID 与白名单动作设置角色专属组件`, IsBuiltin: true,
 		},
@@ -611,21 +611,22 @@ func renderCharacterPower(arguments map[string]interface{}) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	action, err := enumArgument(arguments, "action", "beard_none", "beard_short", "beard_medium", "beard_long", "woby_empty", "woby_half", "woby_full", "abigail_bond_1", "abigail_bond_2", "abigail_bond_3", "abigail_health_5", "abigail_health_50", "abigail_health_100", "abigail_shadow", "abigail_lunar_toggle", "inspiration_0", "inspiration_50", "inspiration_100", "fitness_0", "fitness_50", "fitness_100", "woody_beaver", "woody_goose", "woody_moose", "wx_charge_add", "wx_charge_remove", "wormwood_bloom_0", "wormwood_bloom_1", "wormwood_bloom_2", "wormwood_bloom_3", "wormwood_bloom_progress_start", "wormwood_bloom_progress_half", "wormwood_bloom_progress_end", "wormwood_bloom_grow", "wormwood_bloom_decay", "merm_king_hunger_0", "merm_king_hunger_50", "merm_king_hunger_100", "merm_king_health_5", "merm_king_health_50", "merm_king_health_100", "merm_king_trident", "merm_king_crown", "merm_king_shoulder")
+	action, err := enumArgument(arguments, "action", "beard_none", "beard_short", "beard_medium", "beard_long", "woby_empty", "woby_half", "woby_full", "abigail_bond_1", "abigail_bond_2", "abigail_bond_3", "abigail_health_0", "abigail_health_5", "abigail_health_50", "abigail_health_100", "abigail_shadow", "abigail_lunar_toggle", "inspiration_0", "inspiration_50", "inspiration_100", "fitness_0", "fitness_50", "fitness_100", "woody_beaver", "woody_goose", "woody_moose", "wx_charge_add", "wx_charge_remove", "wormwood_bloom_0", "wormwood_bloom_1", "wormwood_bloom_2", "wormwood_bloom_3", "wormwood_bloom_progress_start", "wormwood_bloom_progress_half", "wormwood_bloom_progress_end", "wormwood_bloom_grow", "wormwood_bloom_decay", "merm_king_hunger_0", "merm_king_hunger_50", "merm_king_hunger_100", "merm_king_health_5", "merm_king_health_50", "merm_king_health_100", "merm_king_trident", "merm_king_crown", "merm_king_shoulder")
 	if err != nil {
 		return "", err
 	}
 	actions := map[string]string{
-		"beard_none":                    `local c=p.components and p.components.beard;if c and c.isgrowing then c.daysgrowth=0;c:Reset();applied=true end`,
-		"beard_short":                   `local c=p.components and p.components.beard;if c and c.isgrowing then c.daysgrowth=4;c:SetSkin(c.skinname);c:UpdateBeardInventory();applied=true end`,
-		"beard_medium":                  `local c=p.components and p.components.beard;if c and c.isgrowing then c.daysgrowth=8;c:SetSkin(c.skinname);c:UpdateBeardInventory();applied=true end`,
-		"beard_long":                    `local c=p.components and p.components.beard;if c and c.isgrowing then c.daysgrowth=16;c:SetSkin(c.skinname);c:UpdateBeardInventory();applied=true end`,
+		"beard_none":                    characterBeardScript(0),
+		"beard_short":                   characterBeardScript(1),
+		"beard_medium":                  characterBeardScript(2),
+		"beard_long":                    characterBeardScript(3),
 		"woby_empty":                    characterPercentScript(`p.woby and p.woby.components.hunger`, 0),
 		"woby_half":                     characterPercentScript(`p.woby and p.woby.components.hunger`, .5),
 		"woby_full":                     characterPercentScript(`p.woby and p.woby.components.hunger`, 1),
 		"abigail_bond_1":                `local c=p.components and p.components.ghostlybond;if c then c:SetBondLevel(1);applied=true end`,
 		"abigail_bond_2":                `local c=p.components and p.components.ghostlybond;if c then c:SetBondLevel(2);applied=true end`,
 		"abigail_bond_3":                `local c=p.components and p.components.ghostlybond;if c then c:SetBondLevel(3);applied=true end`,
+		"abigail_health_0":              characterPercentScript(`p.components and p.components.ghostlybond and p.components.ghostlybond.ghost and p.components.ghostlybond.ghost.components.health`, 0),
 		"abigail_health_5":              characterPercentScript(`p.components and p.components.ghostlybond and p.components.ghostlybond.ghost and p.components.ghostlybond.ghost.components.health`, .05),
 		"abigail_health_50":             characterPercentScript(`p.components and p.components.ghostlybond and p.components.ghostlybond.ghost and p.components.ghostlybond.ghost.components.health`, .5),
 		"abigail_health_100":            characterPercentScript(`p.components and p.components.ghostlybond and p.components.ghostlybond.ghost and p.components.ghostlybond.ghost.components.health`, 1),
@@ -674,7 +675,21 @@ func renderCharacterPower(arguments map[string]interface{}) (string, error) {
 			break
 		}
 	}
-	return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;local applied=false;if p and p.prefab==%s and not p:HasTag("playerghost")then %s end;print("[DST-ADMIN-CHARACTER-POWER]",%s,%s,applied)`, quoteLua(playerID), quoteLua(prefabByAction[action]), actions[action], quoteLua(playerID), quoteLua(action)), nil
+	characterCheck := "p.prefab==" + quoteLua(prefabByAction[action])
+	if strings.HasPrefix(action, "beard_") {
+		characterCheck = `(p.prefab=="wilson" or p.prefab=="webber")`
+	}
+	return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;local applied=false;if p and %s and not p:HasTag("playerghost")then %s end;print("[DST-ADMIN-CHARACTER-POWER]",%s,%s,applied)`, quoteLua(playerID), characterCheck, actions[action], quoteLua(playerID), quoteLua(action)), nil
+}
+
+// Native beard callbacks differ: Wilson grows at 4/8/16 days, Webber at
+// 3/6/9. Check the expected callback before changing anything and reset the
+// growth accumulator so a previous fractional bonus does not skip a stage.
+func characterBeardScript(level int) string {
+	if level == 0 {
+		return `local c=p.components and p.components.beard;if c and c.isgrowing and type(c.Reset)=="function"then c:Reset();applied=c.daysgrowth==0 end`
+	}
+	return fmt.Sprintf(`local c=p.components and p.components.beard;local days=(p.prefab=="webber"and {3,6,9}or {4,8,16})[%d];if c and c.isgrowing and type(c.SetSkin)=="function"and type(c.UpdateBeardInventory)=="function"and type(c.callbacks)=="table"and type(c.callbacks[days])=="function"then c.daysgrowth=days;c.daysgrowthaccumulator=0;c:SetSkin(c.skinname);c:UpdateBeardInventory();applied=c.daysgrowth==days end`, level)
 }
 
 func characterPercentScript(component string, percent float64) string {

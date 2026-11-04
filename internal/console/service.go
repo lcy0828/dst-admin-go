@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -91,6 +92,18 @@ func (s *Service) DefinitionsWithError() ([]Definition, error) {
 		"set_player_hunger_rate", "set_wanda_age", "restore_woodie_human", "trigger_world_event", "trigger_incident", "set_special_event", "stop_vote", "spawn_entity", "spawn_player_entity", "teleport_to_nearest_entity", "remove_nearby_entities", "act_nearby_entities",
 		"rollback", "shutdown", "regenerate",
 	}
+	seen := map[string]bool{}
+	for _, id := range order {
+		seen[id] = true
+	}
+	var extra []string
+	for id := range s.templates {
+		if !seen[id] {
+			extra = append(extra, id)
+		}
+	}
+	sort.Strings(extra)
+	order = append(order, extra...)
 	result := make([]Definition, 0, len(order))
 	for _, id := range order {
 		result = append(result, s.templates[id].definition)
@@ -195,7 +208,7 @@ func (s *Service) Execute(ctx context.Context, roomID, worldID string, request E
 	}
 	if builtin {
 		action, _ := request.Arguments["action"].(string)
-		if actionInteraction(commandID, action) != nil {
+		if _, expansion := expansionDefinition(commandID); actionInteraction(commandID, action) != nil || expansion {
 			script, err = bindNearbyCaller(ctx, room.ID, world.ID, script)
 			if err != nil {
 				return Run{}, err
@@ -635,6 +648,7 @@ func builtinTemplates() map[string]template {
 	}
 	addGameToolTemplates(templates)
 	addStageBTemplates(templates)
+	addExpansionTemplates(templates)
 	for id, tmpl := range templates {
 		tmpl.definition.Actions = commandActions(tmpl.definition)
 		tmpl.definition.Interaction = actionInteraction(id, "")

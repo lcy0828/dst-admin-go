@@ -96,6 +96,19 @@ func acceptReceipt(r Result, q Request, receipt dstruntime.CommandReceipt) Resul
 		}
 		seen := map[string]bool{}
 		for _, p := range items {
+			if len(p.PanelModes) > 8 || p.ModeMemory != "" && !validModeState(p.ModeMemory) {
+				return problem(r, "unavailable", "QUERY_OUTPUT_INVALID", "Invalid managed mode evidence")
+			}
+			for key, value := range p.PanelModes {
+				switch key {
+				case "invincible", "super_god", "creative", "health_lock", "one_hit", "invisible", "water_walk", "noclip":
+					if !validModeState(value) {
+						return problem(r, "unavailable", "QUERY_OUTPUT_INVALID", "Invalid managed mode evidence")
+					}
+				default:
+					return problem(r, "unavailable", "QUERY_OUTPUT_INVALID", "Invalid managed mode evidence")
+				}
+			}
 			if p.ID == "" || len(p.ID) > 80 || seen[p.ID] || !validModeState(p.Invincible) || !validModeState(p.Creative) || !validModeState(p.PanelGod) || !validModeState(p.PanelInvincible) {
 				return problem(r, "unavailable", "QUERY_OUTPUT_INVALID", "Invalid mode evidence")
 			}
@@ -171,11 +184,13 @@ func acceptReceipt(r Result, q Request, receipt dstruntime.CommandReceipt) Resul
 }
 
 type playerModes struct {
-	ID              string `json:"id"`
-	Invincible      string `json:"invincible"`
-	Creative        string `json:"creative"`
-	PanelGod        string `json:"panelGod"`
-	PanelInvincible string `json:"panelInvincible"`
+	ID              string            `json:"id"`
+	Invincible      string            `json:"invincible"`
+	Creative        string            `json:"creative"`
+	PanelGod        string            `json:"panelGod"`
+	PanelInvincible string            `json:"panelInvincible"`
+	PanelModes      map[string]string `json:"panelModes,omitempty"`
+	ModeMemory      string            `json:"modeMemory,omitempty"`
 }
 
 func validModeState(s string) bool { return s == "enabled" || s == "disabled" || s == "unknown" }

@@ -78,7 +78,8 @@ function ModeOwnership.Motion(player, source, enabled)
         if phys:GetCollisionMask()~=o.mask then safe=false
         else
             local mask=o.before
-            if o.sources.god then mask=phys:GetMass()>0 and COLLISION.GROUND or 0
+            if o.sources.noclip then mask=COLLISION.WORLD
+            elseif o.sources.god then mask=phys:GetMass()>0 and COLLISION.GROUND or 0
             elseif o.sources.water then mask=bit.band(mask,bit.bnot(COLLISION.LIMITS)) end
             phys:SetCollisionMask(mask);o.mask=mask
         end

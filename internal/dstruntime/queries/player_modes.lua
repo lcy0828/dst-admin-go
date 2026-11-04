@@ -24,7 +24,11 @@ for i=1,65 do
         local c=field(p,"components")
         local owned=field(p,"_dst_admin_god_owned")
         if field(p,"_dst_admin_god_task")~=nil then owned=true end
-        rows[#rows+1]={id=id,invincible=status(field(field(c,"health"),"invincible")),creative=status(field(field(c,"builder"),"freebuildmode")),panelGod=status(owned),panelInvincible=status(field(p,"_dst_admin_invincible_owned"))}
+        local modes=field(p,"_dst_admin_managed_modes");local panelModes=nil
+        if type(modes)=="table" then
+            panelModes={};for _,name in ipairs({"invincible","super_god","creative","health_lock","one_hit","invisible","water_walk","noclip"})do panelModes[name]=status(field(modes,name)==true) end
+        end
+        rows[#rows+1]={panelModes=panelModes,modeMemory=status(field(p,"_dst_admin_mode_memory")),id=id,invincible=status(field(field(c,"health"),"invincible")),creative=status(field(field(c,"builder"),"freebuildmode")),panelGod=status(owned),panelInvincible=status(field(p,"_dst_admin_invincible_owned"))}
         if #json.encode_compliant(rows)>7000 then rows[#rows]=nil;complete=false;reason="OUTPUT_LIMIT";break end
     end
 end

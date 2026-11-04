@@ -50,6 +50,13 @@ local WorkbenchV2 = (function()
         if plans[token] and plans[token].legacy then plans[token]=nil end
     end
     function M.IsBusy()return active or awaiting end
+    function M.BeginExternal()if M.IsBusy()then error("BATCH_BUSY")end;active=true end
+    function M.EndExternal()active=false end
+    function M.ContinueExternal(fn)
+        if active then error("BATCH_BUSY")end
+        active=true;local ok,result=pcall(fn);active=false;if not ok then error(result)end;return result
+    end
+    function M.ObserveExternal(fn)if awaiting then error("BATCH_BUSY")end;awaiting=true;observation=fn end
     local function valid(e)
         return e and e.IsValid and e:IsValid() and e.Transform and not e:HasTag("INLIMBO") and not e:HasTag("player") and not e:HasTag("playerghost") and not e:HasTag("FX")
     end

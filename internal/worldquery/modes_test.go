@@ -27,3 +27,18 @@ func TestModeEvidenceNeverTurnsUnknownOrMissingIntoDisabled(t *testing.T) {
 		}
 	}
 }
+
+func TestExtendedModesAcceptOldResponsesAndRejectForgedStates(t *testing.T) {
+	output := `{"protocolVersion":1,"runId":"modes-example","queryId":"player_modes","complete":true,"data":{"kind":"player_modes","count":1,"players":[{"id":"KU_EXAMPLE","invincible":"disabled","creative":"unknown","panelGod":"disabled","panelInvincible":"unknown","panelModes":{"noclip":"enabled","invisible":"disabled"},"modeMemory":"disabled"}]}}`
+	accept := func(s string) Result {
+		return acceptReceipt(Result{QueryRunID: "modes-example"}, Request{QueryID: "player_modes"}, dstruntime.CommandReceipt{OK: true, CompletedAt: time.Now(), Details: map[string]interface{}{"output": map[string]interface{}{"text": s, "truncated": false}}})
+	}
+	if r := accept(output); r.Status != "succeeded" {
+		t.Fatal(r)
+	}
+	for _, bad := range []string{strings.Replace(output, `"noclip":"enabled"`, `"god_from_custom_command":"enabled"`, 1), strings.Replace(output, `"noclip":"enabled"`, `"noclip":true`, 1), strings.Replace(output, `"modeMemory":"disabled"`, `"modeMemory":"persisted_probably"`, 1)} {
+		if r := accept(bad); r.Data != nil || r.Status != "unavailable" {
+			t.Fatal(r)
+		}
+	}
+}

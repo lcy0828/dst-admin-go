@@ -16,7 +16,7 @@ func workbenchLua(t *testing.T) *lua.LState {
 		t.Fatal(e)
 	}
 	var modules string
-	for _, name := range []string{"nearby_adapters.lua", "player_settings.lua", "workbench_v2.lua"} {
+	for _, name := range []string{"nearby_adapters.lua", "player_settings.lua", "workbench_v2.lua", "workbench_expansion.lua"} {
 		b, _ := embeddedAssets.ReadFile("assets/" + name)
 		modules += string(b) + "\n"
 	}

@@ -1,4 +1,4 @@
-local VERSION = "2.4.23"
+local VERSION = "2.4.24"
 local PROTOCOL_VERSION = 2
 local MODULE_ROOT = "mod_config_data/dst-admin/runtime/"
 local SNAPSHOT_INTERVAL = 5
@@ -490,7 +490,11 @@ activate_candidate = function(previous, candidate, operation, activity_drained)
         pcall(candidate.Stop, true)
         rawset(_G, "DSTAdmin", previous)
         if previous ~= nil and type(previous.Start) == "function" then
-            local ok, result = xpcall(previous.Start, debug.traceback)
+            local ok, result = xpcall(function()
+                local accepted=previous.Start()
+                if accepted and previous.Commands and previous.Commands.StartModes then previous.Commands.StartModes()end
+                return accepted
+            end, debug.traceback)
             if not ok or result == false then
                 emit_error(operation .. "_ROLLBACK_FAILED", result)
             elseif type(previous.Refresh) == "function" then
@@ -506,7 +510,11 @@ activate_candidate = function(previous, candidate, operation, activity_drained)
         rawset(_G, "DSTAdmin", candidate)
         local activated, accepted = xpcall(function()
             return candidate.Activate(function(written)
-                if not written then restore_previous() end
+                if not written then restore_previous()
+                elseif rawget(_G,"DSTAdmin")==candidate and candidate.Commands and candidate.Commands.StartModes then
+                    local ok,failure=pcall(candidate.Commands.StartModes)
+                    if not ok then emit_error(operation.."_MODE_START_FAILED",failure);restore_previous()end
+                end
             end)
         end, debug.traceback)
         if activated and accepted == true then return not restored end

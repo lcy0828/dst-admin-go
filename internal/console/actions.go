@@ -30,6 +30,9 @@ func actionInteraction(command, action string) *Interaction {
 		}
 		return &Interaction{Kind: "preview-confirm-v1", ResultVersion: version, EffectVersion: "1"}
 	}
+	if guardedExpansion(command) {
+		return &Interaction{Kind: "preview-confirm-v1", ResultVersion: 2, EffectVersion: "1"}
+	}
 	if command == "set_player_hunger_rate" || command == "set_wanda_age" || command == "restore_woodie_human" {
 		return &Interaction{Kind: "preview-confirm-v1", ResultVersion: 2, EffectVersion: "1"}
 	}
@@ -55,10 +58,10 @@ func RequiresHumanConfirmation(id string, args map[string]interface{}) bool {
 
 // WorkbenchBehaviorRevision invalidates unsubmitted tasks when fixed command
 // semantics change without changing their public parameter schema.
-const WorkbenchBehaviorRevision = "4"
+const WorkbenchBehaviorRevision = "6"
 
 func commandActions(d Definition) []Action {
-	field := map[string]string{"trigger_world_event": "event", "set_player_ability": "ability", "set_character_power": "action", "act_nearby_entities": "action", "set_player_lock": "resource"}[d.ID]
+	field := map[string]string{"trigger_world_event": "event", "set_player_ability": "ability", "set_character_power": "action", "act_nearby_entities": "action", "set_player_lock": "resource", "set_player_mode": "mode", "set_daylight_mode": "mode", "spawn_special_structure": "kind", "spawn_entity_array": "layout", "set_wurt_form": "form", "apply_all_players": "action"}[d.ID]
 	if field == "" {
 		return nil
 	}
@@ -110,6 +113,12 @@ var actionDescriptions = map[string]string{
 }
 
 var actionWords = map[string]map[string]string{
+	"set_player_mode":         {"invincible": "普通无敌 无敌模式", "super_god": "超级无敌 超级上帝", "creative": "统一制造模式 统一创造模式", "health_lock": "最低生命锁定 锁血一滴", "one_hit": "必杀模式 一击秒杀", "invisible": "隐身模式", "water_walk": "踏水模式", "noclip": "穿墙 穿墙模式", "clear_all": "解除全部模式 关闭全部面板模式"},
+	"set_daylight_mode":       {"day": "全天白昼 永昼", "night": "全天黑夜 永夜 日食", "restore": "恢复昼夜 解除永昼 解除永夜"},
+	"spawn_special_structure": {"training_dummy": "攻速人偶 伤害人偶 DPS人偶", "wormhole_pair": "链接虫洞 成对虫洞", "nightmare_werepig": "梦魇疯猪 束缚疯猪", "celestial_materials": "天体英雄召唤材料 天体祭坛", "scrap_daywalker": "刷新拾荒疯猪 拾荒疯猪"},
+	"spawn_entity_array":      {"rock_tree_1": "巨石树阵列一 岩石树阵列一", "rock_tree_2": "巨石树阵列二 岩石树阵列二", "beebox": "蜂箱阵列", "pond": "池塘阵列"},
+	"set_wurt_form":           {"normal": "沃特普通形态", "royal": "沃特皇家形态"},
+	"apply_all_players":       {"restore": "全员状态恢复", "kill": "全员死亡", "resurrect": "全员复活"},
 	"trigger_world_event": {
 		"lightning": "闪电 打雷 雷击", "earthquake": "地震 震动", "lunar_hail": "月雹 月亮冰雹", "meteor_shower": "流星雨 陨石 陨石雨",
 		"acid_rain": "酸雨", "moon_storm": "月球风暴 月亮风暴", "nightmare_calm": "远古平静 噩梦平静", "nightmare_warn": "远古警告 噩梦警告",
@@ -132,10 +141,10 @@ var actionWords = map[string]map[string]string{
 		"panic": "惊吓 恐慌", "pacify": "平息附近仇恨 安抚生物", "root": "定身 禁锢", "taunt": "嘲讽 吸引仇恨",
 	},
 	"set_character_power": {
-		"beard_none": "移除胡须 刮胡子", "beard_short": "短胡须 胡须一级", "beard_medium": "中胡须 胡须二级", "beard_long": "长胡须 胡须三级",
+		"beard_none": "移除胡须 刮胡子 韦伯剃胡须 威尔逊剃胡须", "beard_short": "短胡须 胡须一级 韦伯短胡须 威尔逊短胡须", "beard_medium": "中胡须 胡须二级 韦伯中胡须 威尔逊中胡须", "beard_long": "长胡须 胡须三级 韦伯长胡须 威尔逊长胡须",
 		"woby_empty": "沃比饥饿清空", "woby_half": "沃比饥饿一半", "woby_full": "沃比饥饿回满 喂饱沃比",
 		"abigail_bond_1": "阿比盖尔等级一 阿比盖尔一级 阿比盖尔等级", "abigail_bond_2": "阿比盖尔等级二 阿比盖尔二级 阿比盖尔等级",
-		"abigail_bond_3": "阿比盖尔等级三 阿比盖尔三级 阿比盖尔等级", "abigail_health_5": "阿比盖尔生命百分之五", "abigail_health_50": "阿比盖尔生命一半", "abigail_health_100": "阿比盖尔生命回满",
+		"abigail_bond_3": "阿比盖尔等级三 阿比盖尔三级 阿比盖尔等级", "abigail_health_0": "阿比盖尔生命清空 阿比盖尔死亡", "abigail_health_5": "阿比盖尔生命百分之五", "abigail_health_50": "阿比盖尔生命一半", "abigail_health_100": "阿比盖尔生命回满",
 		"abigail_shadow": "阿比盖尔暗影", "abigail_lunar_toggle": "阿比盖尔月亮", "inspiration_0": "灵感清空", "inspiration_50": "灵感一半", "inspiration_100": "灵感回满",
 		"fitness_0": "健身值清空", "fitness_50": "健身值一半", "fitness_100": "健身值回满",
 		"woody_beaver": "伍迪变河狸", "woody_goose": "伍迪变大鹅", "woody_moose": "伍迪变鹿", "wx_charge_add": "WX增加电能 机器人充电", "wx_charge_remove": "WX减少电能",

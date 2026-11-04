@@ -10,6 +10,12 @@ func TestTaskActionDiscoveryProvidesEnumArgumentsWithoutExecuting(t *testing.T) 
 	s, _ := taskFixture(t, nil)
 	manager := taskPrincipal(ProfileGameManage)
 	for _, tc := range []struct{ query, command, field, value string }{
+		{"穿墙", "set_player_mode", "mode", "noclip"},
+		{"超级无敌", "set_player_mode", "mode", "super_god"},
+		{"蜂箱阵列", "spawn_entity_array", "layout", "beebox"},
+		{"攻速人偶", "spawn_special_structure", "kind", "training_dummy"},
+		{"沃特皇家形态", "set_wurt_form", "form", "royal"},
+		{"全天黑夜", "set_daylight_mode", "mode", "night"},
 		{"闪电", "trigger_world_event", "event", "lightning"},
 		{"月雹", "trigger_world_event", "event", "lunar_hail"},
 		{"隐身", "set_player_ability", "ability", "stealth"},
@@ -17,6 +23,7 @@ func TestTaskActionDiscoveryProvidesEnumArgumentsWithoutExecuting(t *testing.T) 
 		{"冻结附近生物", "act_nearby_entities", "action", "freeze"},
 		{"附近灭火", "act_nearby_entities", "action", "extinguish"},
 		{"阿比盖尔三级", "set_character_power", "action", "abigail_bond_3"},
+		{"韦伯长胡须", "set_character_power", "action", "beard_long"},
 		{"别冻结蜘蛛", "act_nearby_entities", "action", "freeze"},
 		{"冻结会不会影响玩家", "act_nearby_entities", "action", "freeze"},
 	} {
