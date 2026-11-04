@@ -89,9 +89,11 @@ func (s *Service) UpdateReleaseInstallation(ctx context.Context, expectedVersion
 		}
 	}
 	output := &boundedBuffer{limit: 2 * 1024 * 1024}
+	progress := steamupdate.NewProgressWriter(ctx, output)
 	runErr := luajit.PreserveSteamLauncher(luajit.Options{ServerPath: installRoot(s.config.ServerPath), ServerMode: "64"}, func() error {
-		return steamupdate.RunValidated(ctx, s.runner, executable, installRoot(s.config.ServerPath), s.config.AppID, steamManifestCandidates(installRoot(s.config.ServerPath), s.config.AppID), output)
+		return steamupdate.RunValidated(ctx, s.runner, executable, installRoot(s.config.ServerPath), s.config.AppID, steamManifestCandidates(installRoot(s.config.ServerPath), s.config.AppID), progress)
 	})
+	progress.Flush()
 	result := s.releaseVersionResult(output.String())
 	runErr, result.RuntimeWarning = luajit.SteamUpdateResult(runErr)
 	if runErr == nil && result.CurrentVersion != expectedVersion {

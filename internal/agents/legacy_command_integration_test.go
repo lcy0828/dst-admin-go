@@ -96,11 +96,11 @@ func TestLegacyRuntimeCommandProgressAndConcurrentResults(t *testing.T) {
 	completed := startLegacyRead(progressCtx, transport, "runtime", "progress-read")
 	command := receiveLegacyCommand(t, ctx, commands)
 	sendLegacyCommandMessage(t, peer, shared.TypeCommandProgress, shared.CommandProgressPayload{
-		CommandID: command.CommandID, Sequence: 2, Percent: 40, Message: "downloading", CurrentBytes: 40, TotalBytes: 100, BytesPerSecond: 20,
+		CommandID: command.CommandID, Sequence: 2, Stage: "game.download", Attempt: 2, Percent: 40, Message: "downloading", CurrentBytes: 40, TotalBytes: 100, BytesPerSecond: 20,
 	})
 	select {
 	case update := <-updates:
-		if update.Percent != 40 || update.CurrentBytes != 40 || update.BytesPerSecond != 20 {
+		if update.Stage != "game.download" || update.Attempt != 2 || update.Percent != 40 || update.CurrentBytes != 40 || update.BytesPerSecond != 20 {
 			t.Fatalf("progress metadata changed: %#v", update)
 		}
 	case <-ctx.Done():

@@ -167,7 +167,7 @@ func (t *LegacyTransport) ExecuteShard(ctx context.Context, agentID string, requ
 
 func reportCommandProgress(ctx context.Context, progress shared.CommandProgressPayload) {
 	operationprogress.Report(ctx, operationprogress.Update{
-		Stage: progress.Stage, Percent: progress.Percent, Message: progress.Message,
+		Stage: progress.Stage, Attempt: progress.Attempt, Percent: progress.Percent, Message: progress.Message,
 		WorkshopID: progress.WorkshopID, CurrentItem: progress.CurrentItem, TotalItems: progress.TotalItems,
 		Items:        progress.Items,
 		CurrentBytes: progress.CurrentBytes, TotalBytes: progress.TotalBytes, BytesPerSecond: progress.BytesPerSecond,

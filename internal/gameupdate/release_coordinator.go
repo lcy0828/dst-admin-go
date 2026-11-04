@@ -695,6 +695,7 @@ func (c *ReleaseCoordinator) updateInstallations(ctx context.Context, value Rele
 		previousResult, writingStarted := *result, value.WritingStarted
 		value.WritingStarted = true
 		result.Stage, result.WriteState, result.OperationID, result.ExpectedVersion = ReleaseStageUpdating, "dispatched", operation.ID, desired
+		result.Progress = nil
 		result.StartedAt, result.UpdatedAt = timePointer(c.now().UTC()), c.now().UTC()
 		value, err = c.store.Save(value)
 		if err != nil {
@@ -703,7 +704,8 @@ func (c *ReleaseCoordinator) updateInstallations(ctx context.Context, value Rele
 			return value, err
 		}
 		result = releaseInstallationResult(&value, target.TargetID, target.InstallationID)
-		updated, updateErr := c.runtime.UpdateInstallation(ctx, target, operation, desired, value.Plan.Policy.CleanCache)
+		updated, download, updateErr := c.updateWithProgress(ctx, value, target, operation, desired)
+		result.Progress = download
 		result.AfterVersion, result.Log = updated.CurrentVersion, updated.Log
 		result.WarningMessage = updated.RuntimeWarning
 		code := "UPDATE_FAILED"

@@ -18,6 +18,7 @@ const (
 )
 
 type Update struct {
+	Attempt        int
 	Stage          string
 	Percent        int
 	Message        string

@@ -90,6 +90,7 @@ type CommandResponsePayload struct {
 }
 
 type CommandProgressPayload struct {
+	Attempt        int                   `json:"attempt,omitempty"`
 	CommandID      string                `json:"command_id"`
 	Sequence       uint64                `json:"sequence"`
 	Stage          string                `json:"stage,omitempty"`

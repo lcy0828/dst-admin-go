@@ -904,7 +904,7 @@ func (a *Agent) executeCommand(cmdPayload shared.CommandPayload, connection *sha
 			operationContext := operationprogress.WithReporter(context.Background(), func(update operationprogress.Update) {
 				a.sendCommandProgress(connection, shared.CommandProgressPayload{
 					CommandID: cmdPayload.CommandID, Sequence: progressSequence.Add(1),
-					Stage: update.Stage, Percent: update.Percent, Message: update.Message,
+					Stage: update.Stage, Attempt: update.Attempt, Percent: update.Percent, Message: update.Message,
 				})
 			})
 			result, operationErr := a.executeShardOperationContext(operationContext, cmdPayload.Type, cmdPayload.ShardOperation, cmdPayload.Timeout)
@@ -933,7 +933,7 @@ func (a *Agent) executeCommand(cmdPayload shared.CommandPayload, connection *sha
 				}
 				a.sendCommandProgress(connection, shared.CommandProgressPayload{
 					CommandID: cmdPayload.CommandID, Sequence: progressSequence.Add(1),
-					Stage: update.Stage, Percent: update.Percent, Message: update.Message,
+					Stage: update.Stage, Attempt: update.Attempt, Percent: update.Percent, Message: update.Message,
 					WorkshopID: update.WorkshopID, CurrentItem: update.CurrentItem, TotalItems: update.TotalItems,
 					Items:        progressItems,
 					CurrentBytes: update.CurrentBytes, TotalBytes: update.TotalBytes, BytesPerSecond: update.BytesPerSecond,

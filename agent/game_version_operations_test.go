@@ -10,8 +10,42 @@ import (
 	"testing"
 	"time"
 
+	"dont/internal/operationprogress"
 	"dont/shared"
 )
+
+type streamingGameVersionRunner struct {
+	base  *recordingGameVersionRunner
+	check func()
+}
+
+func (r streamingGameVersionRunner) Run(ctx context.Context, executable string, args []string, out io.Writer) error {
+	_, _ = io.WriteString(out, "Update state (0x81) validating, progress: 10 (10 / 100)\r")
+	r.check()
+	return r.base.Run(ctx, executable, args, out)
+}
+
+func TestAgentGameUpdateStreamsValidationBeforeReturningResult(t *testing.T) {
+	a, installation := newShardOperationAgent(t, &fakeShardRuntime{})
+	steamcmd := filepath.Join(t.TempDir(), "steamcmd")
+	if err := os.WriteFile(steamcmd, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	installation.SteamCMDPath = steamcmd
+	a.Config.RuntimeInstallations[0] = installation
+	var progress operationprogress.Update
+	ctx := operationprogress.WithReporter(context.Background(), func(p operationprogress.Update) { progress = p })
+	a.gameVersionRunner = streamingGameVersionRunner{base: &recordingGameVersionRunner{version: "747465"}, check: func() {
+		if progress.Stage != "game.validate" || progress.CurrentBytes != 10 || progress.BytesPerSecond != 0 || progress.Percent == 100 {
+			t.Fatal(progress)
+		}
+	}}
+	request := gameVersionRequest(shared.RuntimeActionGameVersionUpdate, "747465")
+	result, err := a.executeRuntimeOperationContext(ctx, string(request.Action), &request, 1800)
+	if err != nil || result.Outcome != shared.RuntimeOutcomeConfirmed {
+		t.Fatal(result, err)
+	}
+}
 
 type recordingGameVersionRunner struct {
 	version    string

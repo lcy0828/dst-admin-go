@@ -30,6 +30,7 @@ type releaseRecord struct {
 }
 
 type releaseInstallationRecord struct {
+	ProgressJSON   string `gorm:"type:text"`
 	ID             string `gorm:"primary_key;type:varchar(128)"`
 	ReleaseID      string `gorm:"type:varchar(128);index;not null"`
 	TargetID       string `gorm:"type:varchar(255);index;not null"`
@@ -396,7 +397,8 @@ func releaseFromRecord(record releaseRecord) (Release, error) {
 
 func releaseInstallationRecordFrom(releaseID string, value ReleaseInstallationResult, createdAt time.Time) releaseInstallationRecord {
 	return releaseInstallationRecord{
-		ID: childReleaseRecordID(releaseID, value.TargetID+"\x00"+value.InstallationID), ReleaseID: releaseID,
+		ProgressJSON: downloadProgressJSON(value.Progress),
+		ID:           childReleaseRecordID(releaseID, value.TargetID+"\x00"+value.InstallationID), ReleaseID: releaseID,
 		TargetID: value.TargetID, InstallationID: value.InstallationID, Stage: string(value.Stage), BeforeVersion: value.BeforeVersion,
 		AfterVersion: value.AfterVersion, Log: value.Log, ErrorCode: value.ErrorCode, ErrorMessage: value.ErrorMessage,
 		StartedAt: value.StartedAt, FinishedAt: value.FinishedAt, CreatedAt: createdAt, UpdatedAt: value.UpdatedAt,
@@ -415,7 +417,10 @@ func releaseShardRecordFrom(releaseID string, value ReleaseShardResult, createdA
 }
 
 func releaseInstallationFromRecord(record releaseInstallationRecord) ReleaseInstallationResult {
+	var progress *ReleaseDownloadProgress
+	_ = json.Unmarshal([]byte(record.ProgressJSON), &progress)
 	return ReleaseInstallationResult{
+		Progress: progress,
 		TargetID: record.TargetID, InstallationID: record.InstallationID, Stage: ReleaseStage(record.Stage),
 		BeforeVersion: record.BeforeVersion, AfterVersion: record.AfterVersion, Log: record.Log,
 		ErrorCode: record.ErrorCode, ErrorMessage: record.ErrorMessage, StartedAt: record.StartedAt,

@@ -179,21 +179,22 @@ type ReleasePlan struct {
 }
 
 type ReleaseInstallationResult struct {
-	WarningMessage  string       `json:"warningMessage,omitempty"`
-	WriteState      string       `json:"writeState,omitempty"`
-	OperationID     string       `json:"operationId,omitempty"`
-	ExpectedVersion string       `json:"expectedVersion,omitempty"`
-	TargetID        string       `json:"targetId"`
-	InstallationID  string       `json:"installationId"`
-	Stage           ReleaseStage `json:"stage"`
-	BeforeVersion   string       `json:"beforeVersion,omitempty"`
-	AfterVersion    string       `json:"afterVersion,omitempty"`
-	Log             string       `json:"log,omitempty"`
-	ErrorCode       string       `json:"errorCode,omitempty"`
-	ErrorMessage    string       `json:"errorMessage,omitempty"`
-	StartedAt       *time.Time   `json:"startedAt,omitempty"`
-	FinishedAt      *time.Time   `json:"finishedAt,omitempty"`
-	UpdatedAt       time.Time    `json:"updatedAt"`
+	Progress        *ReleaseDownloadProgress `json:"progress,omitempty"`
+	WarningMessage  string                   `json:"warningMessage,omitempty"`
+	WriteState      string                   `json:"writeState,omitempty"`
+	OperationID     string                   `json:"operationId,omitempty"`
+	ExpectedVersion string                   `json:"expectedVersion,omitempty"`
+	TargetID        string                   `json:"targetId"`
+	InstallationID  string                   `json:"installationId"`
+	Stage           ReleaseStage             `json:"stage"`
+	BeforeVersion   string                   `json:"beforeVersion,omitempty"`
+	AfterVersion    string                   `json:"afterVersion,omitempty"`
+	Log             string                   `json:"log,omitempty"`
+	ErrorCode       string                   `json:"errorCode,omitempty"`
+	ErrorMessage    string                   `json:"errorMessage,omitempty"`
+	StartedAt       *time.Time               `json:"startedAt,omitempty"`
+	FinishedAt      *time.Time               `json:"finishedAt,omitempty"`
+	UpdatedAt       time.Time                `json:"updatedAt"`
 }
 
 type ReleaseShardResult struct {

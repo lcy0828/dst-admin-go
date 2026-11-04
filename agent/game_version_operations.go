@@ -131,9 +131,11 @@ func (a *Agent) updateGameVersion(ctx context.Context, installation RuntimeInsta
 		}
 	}
 	output := &limitedGameVersionBuffer{limit: maxGameUpdateLogBytes}
+	progress := steamupdate.NewProgressWriter(ctx, output)
 	runErr := luajit.PreserveSteamLauncher(luajit.Options{ServerPath: root, ServerMode: "64"}, func() error {
-		return steamupdate.RunValidated(ctx, steamlogin.Wrap(a.Config.SteamLogin, a.gameVersionRunner), steamcmd, root, dstDedicatedServerAppID, gameManifestCandidates(root, dstDedicatedServerAppID), output)
+		return steamupdate.RunValidated(ctx, steamlogin.Wrap(a.Config.SteamLogin, a.gameVersionRunner), steamcmd, root, dstDedicatedServerAppID, gameManifestCandidates(root, dstDedicatedServerAppID), progress)
 	})
+	progress.Flush()
 	current, installed := readInstalledGameVersion(installation)
 	value := gameVersionResult(a.now, installation, steamcmd, output.String())
 	runErr, value.RuntimeWarning = luajit.SteamUpdateResult(runErr)

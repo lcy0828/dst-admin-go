@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-	"time"
 
 	"dont/internal/dstserver"
 	"dont/internal/installationlock"
@@ -420,7 +419,7 @@ func (o Options) Install(ctx context.Context) (shared.GameInstallationReport, er
 	}
 	operationprogress.Report(ctx, operationprogress.Update{Stage: "game.install", Percent: 0, Message: "正在连接 Steam 并准备安装"})
 	args := []string{"+force_install_dir", root, "+login", "anonymous", "+app_update", dstserver.AppIDDedicatedServer, "validate", "+quit"}
-	out := &installOutput{ctx: ctx, now: time.Now}
+	out := newInstallOutput(ctx)
 	var runner Runner = o.Runner
 	if runner == nil {
 		runner = steamlogin.ExecRunner{}
