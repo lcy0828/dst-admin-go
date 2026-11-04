@@ -77,6 +77,14 @@ def direct_request(value, items, actor):
             match=re.fullmatch(r"(?:让|把|将)?(.{1,64}?)恢复人形",value)
             if match: capability="workbench.restore_woodie_human";params={"player_id":match[1].strip()}
     if not capability:
+        modes={"无敌":"invincible","超级无敌":"super_god","制造":"creative","创造":"creative","锁血":"health_lock","一击必杀":"one_hit","隐身":"invisible","踏水":"water_walk","穿墙":"noclip"}
+        match=re.fullmatch(r"(?:给|让|将)?(.{1,64}?)(?:的)?(开启|打开|启用|关闭|关掉|停用)(超级无敌|无敌|制造|创造|锁血|一击必杀|隐身|踏水|穿墙)(?:模式)?",value)
+        if match:
+            capability="workbench.set_player_mode";params={"player_id":match[1].strip(),"mode":modes[match[3]],"enabled":match[2] in {"开启","打开","启用"}}
+        else:
+            match=re.fullmatch(r"(?:给|让|将)?(.{1,64}?)(?:解除|关闭)全部(?:面板)?模式",value)
+            if match:capability="workbench.set_player_mode";params={"player_id":match[1].strip(),"mode":"clear_all","enabled":False}
+    if not capability:
         return None
     item=next((item for item in items if item.get("id")==capability),None)
     if not item or not permitted(actor,item,params) or not interaction(item,params):

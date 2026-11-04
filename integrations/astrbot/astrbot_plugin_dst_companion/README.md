@@ -2,6 +2,8 @@
 
 一个插件提供常用直查、AI 工具和游戏事件播报。技术插件名仍为 `astrbot_plugin_dst_companion`，可直接升级旧伴随助手，适用 AstrBot 4.29.3 / Python 3.12。
 
+v0.4.5 配合面板 v1.3.28 和 Runtime 2.4.24，可直接处理明确的八种玩家模式开关，例如“给玩家甲开启穿墙模式”“给玩家甲关闭锁血模式”。沿用动态目录、群权限和原用户预览确认；条件、否定和多步骤请求继续交给 AI。更多操作见[工作台支持范围](https://github.com/lcy0828/dst-admin-go/blob/master/docs/workbench-support.md)。
+
 v0.4.3 配合面板 v1.3.25 支持保存地点和同世界传送。可直接说“有哪些地点”“把玩家甲当前位置记为基地”“把玩家甲传送到基地”，检查后由原用户回复“确认／取消”。完整交互需要面板地址与接入密钥的私有连接；模型不能代替用户确认，结果未确认时不会自动重发。详见[地点与传送](https://github.com/lcy0828/dst-admin-go/blob/master/docs/locations-and-teleport.md)。
 
 1. 导入 `astrbot_plugin_dst_companion.zip`，在插件设置填写面板地址 `panel_url` 和完整权限密钥 `panel_token`。这是插件内部连接，不向模型暴露底层管理工具。
