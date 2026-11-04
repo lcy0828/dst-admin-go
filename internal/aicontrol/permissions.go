@@ -15,6 +15,7 @@ const (
 // These are executable policy, not metadata or a listing filter. Unknown
 // operations fail closed. Existing unscoped tokens retain panel administration.
 var gameReads = map[string]bool{
+	"readRoomNotificationEvents": true, "streamRoomNotifications": true, "listRoomRecentEvents": true,
 	"listRoomLocations": true, "getRoomLocation": true, "getRoomTeleportPreview": true,
 	"getRoomRuntimeOverview": true, "listBotCapabilities": true, "queryBotCapability": true, "getBotCapabilityResult": true, "listRooms": true, "listRoomWorlds": true, "listWorldStates": true,
 	"listRoomPlayers": true, "resolveRoomPlayer": true, "getRoomPlayerInventory": true,

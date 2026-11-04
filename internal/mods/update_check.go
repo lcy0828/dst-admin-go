@@ -20,12 +20,13 @@ type ModUpdateCheck struct {
 }
 
 type ModUpdateCheckItem struct {
-	ModID         string                    `json:"modId"`
-	Name          string                    `json:"name"`
-	Status        string                    `json:"status"`
-	Reason        string                    `json:"reason,omitempty"`
-	LatestVersion string                    `json:"latestVersion,omitempty"`
-	Targets       []RuntimeModVersionTarget `json:"targets"`
+	ModID          string                    `json:"modId"`
+	Name           string                    `json:"name"`
+	Status         string                    `json:"status"`
+	Reason         string                    `json:"reason,omitempty"`
+	LatestRevision string                    `json:"latestRevision,omitempty"`
+	LatestVersion  string                    `json:"latestVersion,omitempty"`
+	Targets        []RuntimeModVersionTarget `json:"targets"`
 }
 
 func (c *ModUpdateCheck) Message() string {

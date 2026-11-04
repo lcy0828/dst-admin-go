@@ -13,23 +13,48 @@ var (
 	ErrSecrets  = errors.New("notification credentials are unavailable")
 )
 
-var EventKinds = []string{"room.result", "backup.result", "game.result", "mod.result", "agent.status", "security.login", "software.available", "agent.software.available", "custom"}
+var EventKinds = []string{"room.result", "backup.result", "game.result", "mod.result", "agent.status", "security.login", "software.available", "agent.software.available", "custom", "room.operation", "world.change", "world.season", "game.available", "mod.available", "mod.activation", "software.result", "player.death", "player.respawned", "boss.killed", "mod.notice", "runtime.alert"}
 
 const DefaultTemplate = `{"event_id":"{{id}}","event":"{{event}}","title":"{{title}}","message":"{{message}}","status":"{{status}}","room_id":"{{roomId}}","target_id":"{{targetId}}","job_id":"{{jobId}}","timestamp":"{{timestamp}}","release":{"component":"{{component}}","currentVersion":"{{currentVersion}}","latestVersion":"{{latestVersion}}","releaseURL":"{{releaseURL}}","publishedAt":"{{publishedAt}}","detectedAt":"{{detectedAt}}","statusPath":"{{statusPath}}"}}`
 
 type Event struct {
-	Release    *ReleaseFacts `json:"release,omitempty"`
-	Version    string        `json:"version,omitempty"`
-	ID         string        `json:"id"`
-	Kind       string        `json:"kind"`
-	Title      string        `json:"title"`
-	Message    string        `json:"message"`
-	Status     string        `json:"status"`
-	Severity   string        `json:"severity"`
-	RoomID     string        `json:"roomId,omitempty"`
-	TargetID   string        `json:"targetId,omitempty"`
-	JobID      string        `json:"jobId,omitempty"`
-	OccurredAt time.Time     `json:"occurredAt"`
+	SchemaVersion int           `json:"schemaVersion,omitempty"`
+	Category      string        `json:"category,omitempty"`
+	Facts         *Facts        `json:"facts,omitempty"`
+	Release       *ReleaseFacts `json:"release,omitempty"`
+	Version       string        `json:"version,omitempty"`
+	ID            string        `json:"id"`
+	Kind          string        `json:"kind"`
+	Title         string        `json:"title"`
+	Message       string        `json:"message"`
+	Status        string        `json:"status"`
+	Severity      string        `json:"severity"`
+	RoomID        string        `json:"roomId,omitempty"`
+	TargetID      string        `json:"targetId,omitempty"`
+	JobID         string        `json:"jobId,omitempty"`
+	OccurredAt    time.Time     `json:"occurredAt"`
+}
+
+// Facts contain only allowlisted domain observations, never arbitrary task logs.
+type Facts struct {
+	PlayerID        string   `json:"playerId,omitempty"`
+	PlayerName      string   `json:"playerName,omitempty"`
+	EntityPrefab    string   `json:"entityPrefab,omitempty"`
+	Source          string   `json:"source,omitempty"`
+	Code            string   `json:"code,omitempty"`
+	Score           *float64 `json:"score,omitempty"`
+	Action          string   `json:"action,omitempty"`
+	OperationID     string   `json:"operationId,omitempty"`
+	WorldID         string   `json:"worldId,omitempty"`
+	WorldName       string   `json:"worldName,omitempty"`
+	BeforeDay       *int     `json:"beforeDay,omitempty"`
+	Day             *int     `json:"day,omitempty"`
+	Season          string   `json:"season,omitempty"`
+	RemainingDays   *int     `json:"remainingDays,omitempty"`
+	VerifiedWorlds  int      `json:"verifiedWorlds,omitempty"`
+	TotalWorlds     int      `json:"totalWorlds,omitempty"`
+	RequiresRestart bool     `json:"requiresRestart,omitempty"`
+	ModIDs          []string `json:"modIds,omitempty"`
 }
 
 // ReleaseFacts are provider facts, independent of the human-readable template.

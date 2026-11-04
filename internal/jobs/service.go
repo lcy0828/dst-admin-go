@@ -62,6 +62,7 @@ type Service struct {
 	cancels             map[string]context.CancelFunc
 	completionMu        sync.RWMutex
 	completionListeners []func(Job)
+	lifecycleListeners  []func(Job)
 }
 
 func NewService(store *Store, broker *Broker) (*Service, error) {
@@ -242,6 +243,7 @@ func (s *Service) run(ctx context.Context, jobID string, runner Runner) {
 		return
 	} else {
 		logJobEvent(running, "JOB_RUNNING", "info", "")
+		s.notifyLifecycle(running)
 	}
 	s.broker.Publish()
 	report := func(result TargetResult) {
@@ -278,6 +280,7 @@ func (s *Service) run(ctx context.Context, jobID string, runner Runner) {
 		}
 		logJobEvent(completed, "JOB_COMPLETED", level, "")
 		s.notifyCompletion(completed)
+		s.notifyLifecycle(completed)
 	}
 }
 
@@ -289,4 +292,26 @@ func logJobEvent(job Job, code, level, message string) {
 		}
 	}
 	servicelogs.Emit(shared.ServiceLogEntry{Level: level, Code: code, Message: message, JobID: job.ID, RoomID: job.RoomID, WorldID: job.WorldID, OperationID: job.Kind})
+}
+
+// AddLifecycleListener observes persisted running and terminal states only.
+func (s *Service) AddLifecycleListener(listener func(Job)) {
+	s.completionMu.Lock()
+	defer s.completionMu.Unlock()
+	s.lifecycleListeners = append(s.lifecycleListeners, listener)
+}
+func (s *Service) notifyLifecycle(job Job) {
+	s.completionMu.RLock()
+	listeners := append([]func(Job){}, s.lifecycleListeners...)
+	s.completionMu.RUnlock()
+	for _, listener := range listeners {
+		func() {
+			defer func() {
+				if recover() != nil {
+					log.Print("[Jobs] lifecycle listener failed")
+				}
+			}()
+			listener(job)
+		}()
+	}
 }

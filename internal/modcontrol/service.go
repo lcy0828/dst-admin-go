@@ -714,6 +714,9 @@ func (s *Service) CheckUpdates(ctx context.Context, roomID string) (mods.ActionR
 		latest := metadata[item.ID]
 		entry := mods.ModUpdateCheckItem{ModID: item.ID, Name: item.Name, Status: "current", LatestVersion: latest.Version, Targets: []mods.RuntimeModVersionTarget{}}
 		latestKnown := latest.SteamManifestID != "" || latest.Version != "" || !latest.UpdatedAt.IsZero()
+		if latestKnown {
+			entry.LatestRevision = fmt.Sprintf("%s/%s/%d", latest.SteamManifestID, latest.Version, latest.UpdatedAt.Unix())
+		}
 		outdated, unknown := false, !latestKnown || len(item.RuntimeVersions) == 0
 		if !latestKnown {
 			entry.Reason = "latest_version_unavailable"

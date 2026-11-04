@@ -29,20 +29,22 @@ type Commander interface {
 }
 type activityTarget struct{ room, world string }
 type Service struct {
-	store       *Store
-	rooms       Catalog
-	source      Source
-	commander   Commander
-	mu          sync.Mutex
-	due         map[string]time.Time
-	active      map[string]bool
-	retryNow    map[string]bool
-	wake        chan struct{}
-	pruneAt     map[string]time.Time
-	pruneEvents map[string]int
-	targets     []activityTarget
-	refreshAt   time.Time
-	orphanAfter string
+	store          *Store
+	rooms          Catalog
+	source         Source
+	commander      Commander
+	mu             sync.Mutex
+	due            map[string]time.Time
+	active         map[string]bool
+	retryNow       map[string]bool
+	wake           chan struct{}
+	pruneAt        map[string]time.Time
+	pruneEvents    map[string]int
+	targets        []activityTarget
+	refreshAt      time.Time
+	orphanAfter    string
+	noticeObserver func([]Event) error
+	noticeDue      map[string]uint64
 }
 
 func New(store *Store, catalog Catalog, source Source, commander Commander) *Service {
@@ -149,6 +151,7 @@ func (s *Service) collectDue(ctx context.Context) {
 			readCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 			defer cancel()
 			delay := s.collect(readCtx, item.room, item.world, item.config)
+			s.publishNotices(item.room, item.world)
 			s.mu.Lock()
 			s.due[item.room+"/"+item.world] = s.store.now().Add(delay)
 			s.mu.Unlock()

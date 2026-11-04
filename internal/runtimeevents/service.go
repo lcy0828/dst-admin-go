@@ -32,7 +32,10 @@ type Window struct {
 	Events        []dstruntime.RuntimeEvent `json:"events"`
 }
 
-type Service struct{ source Source }
+type Service struct {
+	source   Source
+	observer func(string, string, string, []dstruntime.RuntimeEvent) error
+}
 
 func New(source Source) (*Service, error) {
 	if source == nil {
@@ -71,6 +74,11 @@ func (s *Service) Window(ctx context.Context, roomID, worldID string, cursor Cur
 			window.Events = append(window.Events, event)
 		}
 	}
+	if s.observer != nil {
+		if err := s.observer(roomID, worldID, batch.ProducerInstanceID, window.Events); err != nil {
+			return Window{}, err
+		}
+	}
 	return window, nil
 }
 
@@ -105,4 +113,8 @@ func EventCursor(producerInstanceID string, sequence int64) (string, error) {
 		return "", fmt.Errorf("%w: event identity is empty", ErrInvalidCursor)
 	}
 	return value, nil
+}
+
+func (s *Service) ConfigureObserver(observer func(string, string, string, []dstruntime.RuntimeEvent) error) {
+	s.observer = observer
 }

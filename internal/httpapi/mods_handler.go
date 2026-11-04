@@ -30,6 +30,7 @@ type ModHandler struct {
 	placement             modPlacementReader
 	installationUpdater   modInstallationUpdater
 	installationRefresher modInstallationUpdateRefresher
+	installationObserver  func(context.Context, string, string, string, []string, error)
 	roomInstaller         modRoomInstaller
 	jobs                  *jobs.Service
 }
@@ -102,6 +103,10 @@ func (h *ModHandler) ConfigureInstallationUpdater(updater modInstallationUpdater
 
 func (h *ModHandler) ConfigureInstallationUpdateRefresher(refresher modInstallationUpdateRefresher) {
 	h.installationRefresher = refresher
+}
+
+func (h *ModHandler) ConfigureInstallationContentObserver(observer func(context.Context, string, string, string, []string, error)) {
+	h.installationObserver = observer
 }
 
 func (h *ModHandler) ConfigureRoomInstaller(installer modRoomInstaller) {
@@ -207,8 +212,11 @@ func (h *ModHandler) submitInstallationMod(c *gin.Context, kind string, refreshU
 		return
 	}
 	targetID, installationID := c.Param("targetId"), c.Param("installationId")
-	h.submit(c, kind, "", "", modID, "Workshop "+modID, func(ctx context.Context, _ string) (mods.ActionResult, error) {
+	h.submit(c, kind, "", "", modID, "Workshop "+modID, func(ctx context.Context, jobID string) (mods.ActionResult, error) {
 		result, err := h.installationUpdater.UpdateInstallationMods(ctx, targetID, installationID, []string{modID}, log.Writer())
+		if h.installationObserver != nil {
+			h.installationObserver(ctx, jobID, targetID, installationID, []string{modID}, err)
+		}
 		if err != nil || !refreshUpdateState {
 			return result, err
 		}
@@ -235,12 +243,16 @@ func (h *ModHandler) updateOutdatedInstallationMods(c *gin.Context) {
 		}
 	}
 	targetName := fmt.Sprintf("%s / %s", targetID, installationID)
-	h.submit(c, "mod.installation.update-all", "", "", targetID+":"+installationID, targetName, func(ctx context.Context, _ string) (mods.ActionResult, error) {
+	h.submit(c, "mod.installation.update-all", "", "", targetID+":"+installationID, targetName, func(ctx context.Context, jobID string) (mods.ActionResult, error) {
 		result := mods.ActionResult{Message: "当前机器的模组已是最新版本"}
 		if len(modIDs) == 0 {
 			return h.refreshInstallationUpdateState(ctx, targetID, installationID, result)
 		}
-		return h.updateInstallationContent(ctx, targetID, installationID, modIDs)
+		result, err := h.updateInstallationContent(ctx, targetID, installationID, modIDs)
+		if h.installationObserver != nil {
+			h.installationObserver(ctx, jobID, targetID, installationID, modIDs, err)
+		}
+		return result, err
 	})
 }
 

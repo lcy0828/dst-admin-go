@@ -18,15 +18,16 @@ type configRecord struct {
 	Value    string `gorm:"type:text"`
 }
 type eventRecord struct {
-	ID          string    `gorm:"primary_key;type:char(64)"`
-	RoomID      string    `gorm:"type:varchar(255);index:idx_activity_room_time;index:idx_activity_user_time"`
-	UserID      string    `gorm:"type:varchar(128);index:idx_activity_user_time"`
-	WorldID     string    `gorm:"type:varchar(255);index"`
-	Kind        string    `gorm:"type:varchar(64);index"`
-	OccurredAt  time.Time `gorm:"index:idx_activity_room_time;index:idx_activity_user_time"`
-	SizeBytes   int64
-	Value       string `gorm:"type:text"`
-	HasPosition *bool  `gorm:"index"`
+	ID            string    `gorm:"primary_key;type:char(64)"`
+	RoomID        string    `gorm:"type:varchar(255);index:idx_activity_room_time;index:idx_activity_user_time"`
+	UserID        string    `gorm:"type:varchar(128);index:idx_activity_user_time"`
+	WorldID       string    `gorm:"type:varchar(255);index"`
+	Kind          string    `gorm:"type:varchar(64);index"`
+	OccurredAt    time.Time `gorm:"index:idx_activity_room_time;index:idx_activity_user_time"`
+	SizeBytes     int64
+	Value         string `gorm:"type:text"`
+	HasPosition   *bool  `gorm:"index"`
+	NoticePending bool   `gorm:"index"`
 }
 type cursorRecord struct {
 	ID                   string `gorm:"primary_key;type:char(64)"`
@@ -67,6 +68,8 @@ type Store struct {
 	configs, events, cursors string
 	recoveries               string
 	now                      func() time.Time
+	noticeEligible           func(Event) bool
+	noticeQueued             func(string, string)
 }
 
 func NewStore(db *gorm.DB, prefix string) *Store {
@@ -244,6 +247,7 @@ func (s *Store) ingestBatch(row cursorRecord, events []Event, recovery []recover
 	for _, e := range existing {
 		seen[e.ID] = true
 	}
+	noticeTargets := map[activityTarget]bool{}
 	for _, e := range events {
 		if seen[e.ID] {
 			continue
@@ -254,10 +258,14 @@ func (s *Store) ingestBatch(row cursorRecord, events []Event, recovery []recover
 		}
 		hasPosition := e.Position != nil
 		record := eventRecord{HasPosition: &hasPosition, ID: e.ID, RoomID: e.RoomID, UserID: e.UserID, WorldID: e.WorldID, Kind: e.Kind, OccurredAt: e.OccurredAt, Value: string(value), SizeBytes: int64(len(value) + 256)}
+		record.NoticePending = s.noticeEligible != nil && s.noticeEligible(e)
 		if err = tx.Table(s.events).Create(&record).Error; err != nil {
 			return err
 		}
 		seen[e.ID] = true
+		if record.NoticePending {
+			noticeTargets[activityTarget{e.RoomID, e.WorldID}] = true
+		}
 	}
 	for _, r := range recovery {
 		if err := tx.Table(s.recoveries).Save(&r).Error; err != nil {
@@ -296,7 +304,15 @@ func (s *Store) ingestBatch(row cursorRecord, events []Event, recovery []recover
 	if err := s.saveCursor(tx, row); err != nil {
 		return err
 	}
-	return tx.Commit().Error
+	if err := tx.Commit().Error; err != nil {
+		return err
+	}
+	if s.noticeQueued != nil {
+		for target := range noticeTargets {
+			s.noticeQueued(target.room, target.world)
+		}
+	}
+	return nil
 }
 func (s *Store) prune(room string, c Settings) error {
 	var rows []eventRecord

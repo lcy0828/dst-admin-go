@@ -64,6 +64,7 @@ type Store struct {
 	runsTable        string
 	definitionsTable string
 	now              func() time.Time
+	observer         func(Run)
 }
 
 func NewStore(db *gorm.DB, tablePrefix string) *Store {
@@ -100,6 +101,9 @@ func (s *Store) createWithID(run Run, id string) (Run, error) {
 	if err := s.db.Table(s.runsTable).Create(&record).Error; err != nil {
 		return Run{}, err
 	}
+	if s.observer != nil {
+		s.observer(describeResult(run))
+	}
 	return describeResult(run), nil
 }
 
@@ -134,7 +138,7 @@ func (s *Store) CompleteDelivery(runID string, delivery Delivery, sendErr error)
 	if result.RowsAffected != 1 {
 		return Run{}, ErrRunNotFound
 	}
-	return s.Get(runID)
+	return s.observeRun(runID)
 }
 
 func (s *Store) CompleteExecution(runID string, completion ExecutionCompletion) (Run, error) {
@@ -192,7 +196,7 @@ func (s *Store) completeExecution(runID string, completion ExecutionCompletion, 
 	if result.RowsAffected != 1 && !late {
 		return Run{}, ErrRunNotFound
 	}
-	return s.Get(runID)
+	return s.observeRun(runID)
 }
 
 func (s *Store) Get(runID string) (Run, error) {
@@ -379,4 +383,14 @@ func runFromRecord(record runRecord) (Run, error) {
 		OperationID: record.OperationID, OperationKey: record.OperationKey, TargetID: record.TargetID,
 		AgentID: record.AgentID, TopologyRevision: record.TopologyRevision, ObservedAt: record.ObservedAt,
 	}), nil
+}
+
+// ConfigureObserver is installed at construction; observers cannot alter execution.
+func (s *Store) ConfigureObserver(observer func(Run)) { s.observer = observer }
+func (s *Store) observeRun(id string) (Run, error) {
+	run, err := s.Get(id)
+	if err == nil && s.observer != nil {
+		s.observer(run)
+	}
+	return run, err
 }

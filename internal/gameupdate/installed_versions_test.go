@@ -85,3 +85,21 @@ func TestVersionSummaryNeverCallsSteamAndReflectsManualVersionChanges(t *testing
 		}
 	}
 }
+
+func TestInstalledRoomWatcherNeverProbesUnsubscribedRoom(t *testing.T) {
+	catalog := releaseSnapshotRooms{room: rooms.Room{ID: "example", Managed: true}, worlds: []rooms.World{{ID: "master", DirectoryName: "Master"}}}
+	calls := 0
+	driver := installedDriverFunc(func(context.Context, runtimedriver.Target) (shared.RuntimeGameVersionResult, error) {
+		calls++
+		return shared.RuntimeGameVersionResult{Installed: true, GameVersion: "100", Branch: "public"}, nil
+	})
+	service := NewInstalledVersionService(catalog, releaseSnapshotPlacements{"master": {AppliedTargetID: "local", AppliedInstallationID: "default"}}, installedTargets{{ID: "local", Online: true}}, driver, nil)
+	values, err := service.InstalledRooms(context.Background(), []string{"other"})
+	if err != nil || len(values) != 0 || calls != 0 {
+		t.Fatal("unsubscribed probe", values, err, calls)
+	}
+	values, err = service.InstalledRooms(context.Background(), []string{"example"})
+	if err != nil || len(values) != 1 || len(values[0].RoomIDs) != 1 || values[0].RoomIDs[0] != "example" || calls != 1 {
+		t.Fatal(values, err, calls)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -83,6 +84,7 @@ type NotificationSender interface {
 }
 
 type DomainExecutor struct {
+	observer    func(jobs.Job)
 	gameUpdates interface {
 		UpdateRoomWhenEmpty(context.Context, string, string) (bool, error)
 	}
@@ -97,6 +99,8 @@ type DomainExecutor struct {
 		RecordAction(runtimeaudit.ActionRequest) error
 	}
 }
+
+func (e *DomainExecutor) ConfigureObserver(observer func(jobs.Job)) { e.observer = observer }
 
 func (e *DomainExecutor) ConfigureGameUpdates(updater interface {
 	UpdateRoomWhenEmpty(context.Context, string, string) (bool, error)
@@ -251,9 +255,45 @@ func (e *DomainExecutor) ExecuteScheduled(ctx context.Context, task Task, jobID 
 	return e.execute(ctx, task, jobID, true)
 }
 
-func (e *DomainExecutor) execute(ctx context.Context, task Task, jobID string, scheduled bool) (ExecutionResult, error) {
+func (e *DomainExecutor) execute(ctx context.Context, task Task, jobID string, scheduled bool) (result ExecutionResult, resultErr error) {
 	if err := e.Validate(task); err != nil {
 		return ExecutionResult{}, err
+	}
+	if e.observer != nil && (task.Action == ActionRoomStart || task.Action == ActionRoomStop || task.Action == ActionRoomRestart || task.Action == ActionBackupCreate) {
+		job := jobs.Job{ID: jobID, Kind: string(task.Action), RoomID: task.RoomID, Status: jobs.StatusRunning, CreatedAt: time.Now().UTC()}
+		for _, world := range task.WorldIDs {
+			job.Targets = append(job.Targets, jobs.Target{TargetID: world, Status: jobs.StatusRunning})
+		}
+		e.observer(job)
+		defer func() {
+			if result.Skipped {
+				return
+			}
+			job.Status = jobs.StatusSucceeded
+			job.Outcome = jobs.OutcomeFull
+			if resultErr != nil {
+				job.Status = jobs.StatusFailed
+				job.Outcome = jobs.OutcomeNone
+			}
+			for i := range job.Targets {
+				job.Targets[i].Status = job.Status
+			}
+			if result.targets != nil {
+				job.Targets = result.targets
+				completed := 0
+				for _, target := range job.Targets {
+					if target.Status == jobs.StatusSucceeded {
+						completed++
+					}
+				}
+				if completed > 0 && completed < len(job.Targets) {
+					job.Outcome = jobs.OutcomePartial
+				}
+			}
+			finished := time.Now().UTC()
+			job.FinishedAt = &finished
+			e.observer(job)
+		}()
 	}
 	switch task.Action {
 	case ActionGameUpdateEmpty:
@@ -434,8 +474,23 @@ func (e *DomainExecutor) executeRoomAction(ctx context.Context, task Task, jobID
 	if err != nil {
 		return ExecutionResult{}, err
 	}
+	var resultsMu sync.Mutex
+	latest := make(map[string]jobs.TargetResult, len(targets))
+	runnerErr := runner(ctx, func(result jobs.TargetResult) {
+		resultsMu.Lock()
+		defer resultsMu.Unlock()
+		latest[result.TargetID] = result
+	})
 	results := make([]jobs.TargetResult, 0, len(targets))
-	runnerErr := runner(ctx, func(result jobs.TargetResult) { results = append(results, result) })
+	observed := make([]jobs.Target, 0, len(targets))
+	for _, target := range targets {
+		result, ok := latest[target.ID]
+		if !ok || (result.Status != jobs.StatusSucceeded && result.Status != jobs.StatusFailed && result.Status != jobs.StatusCanceled) {
+			result = jobs.TargetResult{TargetID: target.ID, Status: jobs.StatusFailed, Error: &jobs.Error{Code: "RESULT_UNCONFIRMED", Message: "尚未确认分片动作结果"}}
+		}
+		results = append(results, result)
+		observed = append(observed, jobs.Target{TargetID: target.ID, Name: target.Name, Status: result.Status, Error: result.Error, Warning: result.Warning})
+	}
 	var executionErr error
 	var warnings []string
 	for _, result := range results {
@@ -452,13 +507,13 @@ func (e *DomainExecutor) executeRoomAction(ctx context.Context, task Task, jobID
 	}
 	executionErr = errors.Join(executionErr, runnerErr)
 	if executionErr != nil {
-		return ExecutionResult{}, executionErr
+		return ExecutionResult{targets: observed}, executionErr
 	}
 	message := fmt.Sprintf("已完成 %d 个分片动作", len(results))
 	if len(warnings) > 0 {
 		message += "；提醒：" + strings.Join(warnings, "；")
 	}
-	return ExecutionResult{Message: message}, nil
+	return ExecutionResult{Message: message, targets: observed}, nil
 }
 
 func (e *DomainExecutor) commandDefinition(commandID string) (console.Definition, bool) {

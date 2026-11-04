@@ -38,12 +38,16 @@ type Service struct {
 	refreshAt     time.Time
 	globalPruneAt time.Time
 	now           func() time.Time
+	observer      func(Point)
 }
 
 func New(store *Store, rooms Catalog, source Source) *Service {
 	return &Service{store: store, rooms: rooms, source: source, previous: map[string]Input{}, due: map[string]time.Time{}, pruneAt: map[string]time.Time{}, wake: make(chan struct{}, 1), now: time.Now}
 }
 func (s *Service) ConfigureEvents(source EventSource) { s.events = source }
+
+// ConfigureObserver is called during startup. It reuses persisted samples.
+func (s *Service) ConfigureObserver(observer func(Point)) { s.observer = observer }
 func (s *Service) room(id string) error {
 	r, err := s.rooms.Room(id)
 	if err != nil {
@@ -275,6 +279,9 @@ func (s *Service) collectDue(ctx context.Context) {
 				s.previous[key] = in
 			}
 			s.mu.Unlock()
+			if s.observer != nil {
+				s.observer(point)
+			}
 		}
 	}
 }

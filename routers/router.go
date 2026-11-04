@@ -454,7 +454,31 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	notificationHandler := httpapi.NewNotificationsHandler(notificationService)
-	jobService.AddCompletionListener(notificationService.OnJob)
+	jobService.AddCompletionListener(func(job jobs.Job) {
+		// Scoped backup facts below include verification and serve existing
+		// backup.result channels too. Do not deliver the legacy result twice.
+		if job.RoomID != "" && (job.Kind == "backup.create" || job.Kind == "backup-set.create" || job.Kind == "backup.restore" || job.Kind == "backup-set.restore") {
+			return
+		}
+		notificationService.OnJob(job)
+	})
+	var verifiedBackupNotice func(jobs.Job) bool
+	observeDomainJob := func(job jobs.Job) {
+		if job.Status == jobs.StatusRunning && (job.Kind == "backup.restore" || job.Kind == "backup-set.restore") {
+			if worlds, err := roomService.Worlds(job.RoomID); err == nil {
+				ids := make([]string, 0, len(worlds))
+				for _, world := range worlds {
+					ids = append(ids, world.ID)
+				}
+				notificationService.TrackRestoreWorlds(job, ids)
+			}
+		}
+		if verifiedBackupNotice != nil && verifiedBackupNotice(job) {
+			return
+		}
+		notificationService.ObserveJob(job)
+	}
+	jobService.AddLifecycleListener(observeDomainJob)
 	observeNotificationAgents := func() {
 		items, err := agentService.CachedAgents()
 		if err != nil {
@@ -484,6 +508,9 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		},
 		Root: softwareRoot, Current: buildinfo.Current(), BaseVersion: os.Getenv("DST_ADMIN_UPDATE_BASE_VERSION"),
 		Platform: runtime.GOOS + "-" + runtime.GOARCH, Managed: softwareupdate.ManagedChild(),
+		OnOperation: func(current string, op softwareupdate.Operation, healthy bool) {
+			notificationService.ObserveSoftware("controller", "", current, op, healthy)
+		},
 		OnRelease: func(release softwareupdate.Release) {
 			version := release.Version
 			notificationService.Emit(notifications.Event{ID: "software:" + version, Version: version, Release: &notifications.ReleaseFacts{Component: "controller", CurrentVersion: buildinfo.Current().Version, LatestVersion: version, ReleaseURL: release.URL, PublishedAt: release.PublishedAt, DetectedAt: time.Now().UTC(), StatusPath: "/api/v2/system/software"}, Kind: "software.available", Title: "DST Admin 发现新版 / Update available", Message: buildinfo.Current().Version + " → " + version + "\nhttps://github.com/" + softwareupdate.Repository + "/releases/tag/" + version + "\n" + release.PublishedAt.Format(time.RFC3339) + "\n在系统设置 → 软件更新查看 / Open System settings → Software updates.", Status: "available", Severity: "info"})
@@ -701,6 +728,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	activityService := playeractivity.New(activityStore, roomService, runtimeDriverRouter, distributedRuntimeBridge)
+	activityService.ConfigureNotices(notifications.ActivityNoticeEligible, notificationService.ObserveActivity)
 	activityHandler := httpapi.NewPlayerActivityHandler(activityService)
 	if backgroundEnabled && !deploymentProfile.MemberEnabled {
 		agentService.AddRuntimeNodeListener(activityService.Wake)
@@ -714,6 +742,27 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err != nil {
 		return nil, err
 	}
+	runtimeEventService.ConfigureObserver(func(room, world, producer string, events []dstruntime.RuntimeEvent) error {
+		// Most stream reads are heartbeats or player presence. They must not
+		// add catalog reads or notification transactions to the idle path.
+		for _, event := range events {
+			switch event.Kind {
+			case "world.season":
+				w, err := roomService.World(room, world)
+				if err != nil {
+					return err
+				}
+				if w.IsMaster {
+					notificationService.ObserveSeason(room, world, producer, event)
+				}
+			case "mod.notice":
+				if err := notificationService.ObserveModNotice(room, world, producer, event); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 	runtimeOverviewService, err := runtimeoverview.New(topologyService, runtimeDriverRouter, distributedRuntimeBridge)
 	if err != nil {
 		return nil, err
@@ -757,6 +806,8 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err != nil {
 		return nil, err
 	}
+	runtimeAuditService.ConfigureObserver(notificationService.ObserveRuntime)
+	notificationHandler.ConfigureRooms(func(id string) error { _, err := roomService.Room(id); return err })
 	shardOperations.ConfigureObserver(runtimeAuditService)
 	if backgroundEnabled {
 		hooks.workers = append(hooks.workers, func(ctx context.Context) {
@@ -799,6 +850,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err := commandStore.Migrate(); err != nil {
 		return nil, err
 	}
+	commandStore.ConfigureObserver(notificationService.ObserveCommand)
 	commandService, err := consoleapi.NewService(roomService, runtimeDriverRouter, commandStore, distributedRuntimeBridge)
 	if err != nil {
 		return nil, err
@@ -834,6 +886,19 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err != nil {
 		return nil, err
 	}
+	verifiedBackupNotice = func(job jobs.Job) bool {
+		if job.Status != jobs.StatusSucceeded || (job.Kind != "backup.create" && job.Kind != "backup-set.create" && job.Kind != "automation.backup.create") {
+			return false
+		}
+		if value, err := distributedBackupStore.FindBySourceJob(job.RoomID, job.ID); err == nil {
+			notificationService.ObserveBackup(job, value.Status == distributedbackup.StatusVerified && value.VerifiedAt != nil, value.Restorable, len(value.Parts))
+			return true
+		}
+		value, err := backupStore.FindBySourceJob(job.RoomID, job.ID)
+		notificationService.ObserveBackup(job, err == nil && value.Status == "verified" && value.VerifiedAt != nil, false, 0)
+		return true
+	}
+
 	distributedBackupService.ConfigureNotifier(gameNotificationService)
 	if err := distributedBackupService.ConfigureMutationObserver(runtimeObservationCoordinator); err != nil {
 		return nil, err
@@ -1124,7 +1189,20 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	if err != nil {
 		return nil, fmt.Errorf("initialize Mod update service: %w", err)
 	}
+	modUpdateService.ConfigureObserver(notificationService.ObserveMods)
 	modHandler.ConfigureInstallationUpdateRefresher(modUpdateService)
+	modHandler.ConfigureInstallationContentObserver(func(ctx context.Context, jobID, targetID, installationID string, ids []string, updateErr error) {
+		read, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		affected, err := modControlService.InstallationEnabledModRooms(read, targetID, installationID, ids)
+		if err != nil {
+			log.Printf("[Notifications] resolve updated Mod rooms job=%s: %v", jobID, err)
+			return
+		}
+		for roomID, enabledIDs := range affected {
+			notificationService.ObserveModFiles(jobID, roomID, enabledIDs, updateErr == nil, time.Now().UTC())
+		}
+	})
 	modUpdateService.ConfigureOnlineCounter(maintenanceOnlineCounter)
 	modUpdateService.ConfigureAnnouncer(modupdates.AnnounceFunc(func(ctx context.Context, roomID, message, jobID string) error {
 		_, failures, _, notifyErr := gameNotificationService.SendAutomation(ctx, roomID, message, jobID)
@@ -1164,12 +1242,33 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	worldStateService.ConfigureSessionObserver(playerService.ObserveWorldSession)
+	worldStateService.ConfigureObserver(notificationService.ObserveWorld)
 	performanceStore := performance.NewStore(models.DB(), tablePrefix)
 	if err := performanceStore.Migrate(); err != nil {
 		return nil, err
 	}
 	performanceService := performance.New(performanceStore, roomService, performance.RuntimeSource{Placements: topologyService, Reader: distributedRuntimeBridge, LocalProcesses: runtimeinventory.ProbeDSTProcesses, LocalStatus: runtimeDriverRouter.Status, Remote: runtimeObservationCoordinator})
 	performanceService.ConfigureEvents(runtimeAuditService)
+	performanceService.ConfigureObserver(notificationService.ObservePerformance)
+	notificationService.ConfigureCollectionStatus(func(room string) map[string]string {
+		result := map[string]string{"players": "unavailable", "boss": "unavailable", "alerts": "unavailable"}
+		if c, err := activityService.Settings(room); err == nil {
+			result["players"], result["boss"] = "disabled", "disabled"
+			if c.Enabled {
+				result["players"] = "enabled"
+				if c.Combat {
+					result["boss"] = "enabled"
+				}
+			}
+		}
+		if c, err := performanceService.Settings(room); err == nil {
+			result["alerts"] = "disabled"
+			if c.Enabled {
+				result["alerts"] = "enabled"
+			}
+		}
+		return result
+	})
 	performanceHandler := httpapi.NewPerformanceHandler(performanceService)
 	if backgroundEnabled {
 		hooks.workers = append(hooks.workers, performanceService.Run)
@@ -1196,7 +1295,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 			return
 		}
 		action, skipped, err := automationService.CompletedAction(job.ID)
-		if err != nil || skipped {
+		if err != nil || skipped || action == automation.ActionBackupCreate {
 			return
 		}
 		job.Kind = string(action)
@@ -1320,6 +1419,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	gameInstallationService.ConfigureSteamLogin(steamLoginManager)
 	gameInstallationHandler := httpapi.NewGameInstallationHandler(gameInstallationService)
 	gameReleaseStore := gameupdate.NewReleaseStore(models.DB(), tablePrefix)
+	gameReleaseStore.ConfigureObserver(notificationService.ObserveRelease)
 	if err := gameReleaseStore.Migrate(); err != nil {
 		return nil, err
 	}
@@ -1341,7 +1441,22 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, fmt.Errorf("initialize local game version Runtime: %w", err)
 	}
 	localRuntimeEndpoint.GameVersion = localGameVersionDriver
-	gameUpdateHandler.ConfigureInstalledVersions(gameupdate.NewInstalledVersionService(roomService, topologyService, agentService, localGameVersionDriver, agentRuntimeDriver))
+	installedGameVersions := gameupdate.NewInstalledVersionService(roomService, topologyService, agentService, localGameVersionDriver, agentRuntimeDriver)
+	gameUpdateHandler.ConfigureInstalledVersions(installedGameVersions)
+	if backgroundEnabled {
+		hooks.workers = append(hooks.workers, func(ctx context.Context) {
+			notificationService.RunGameChecks(ctx, func(read context.Context, rooms []string) {
+				release, err := gameUpdateService.OfficialVersion(read, false)
+				if err != nil {
+					return
+				}
+				versions, err := installedGameVersions.InstalledRooms(read, rooms)
+				if err == nil {
+					notificationService.ObserveGameVersions(release, versions)
+				}
+			})
+		})
+	}
 	if err := runtimeDriverRouter.RegisterEndpoint(runtimedriver.LocalTargetID, localInstallationID, localRuntimeEndpoint); err != nil {
 		return nil, fmt.Errorf("register local game version Runtime: %w", err)
 	}
@@ -1379,6 +1494,47 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	gameReleaseCoordinator.ConfigureNotifier(gameNotificationService)
 	gameInstallationHandler.ConfigureReleases(gameReleaseCoordinator)
 	gameReleaseCoordinator.ConfigureOnlineCounter(maintenanceOnlineCounter)
+	notificationService.ConfigureRecovery(func() error {
+		// A bounded replay repairs the small gap between a source commit and its
+		// observer, without contacting Runtime nodes or re-running any operation.
+		history, _, err := jobService.List(jobs.ListFilter{Limit: 100})
+		if err != nil {
+			return err
+		}
+		for _, job := range history {
+			if time.Since(job.CreatedAt) > 24*time.Hour {
+				continue
+			}
+			if job.Kind == "automation.run" {
+				action, skipped, err := automationService.CompletedAction(job.ID)
+				if err != nil || skipped {
+					continue
+				}
+				job.Kind = string(action)
+			}
+			observeDomainJob(job)
+		}
+		releases, _, err := gameReleaseStore.List(50, 0)
+		if err != nil {
+			return err
+		}
+		for _, release := range releases {
+			if time.Since(release.UpdatedAt) <= 24*time.Hour {
+				notificationService.ObserveRelease(release)
+			}
+		}
+		runs, _, err := commandStore.List(consoleapi.ListFilter{Limit: 100})
+		if err != nil {
+			return err
+		}
+		for _, run := range runs {
+			if time.Since(run.CreatedAt) <= 10*time.Minute {
+				notificationService.ObserveCommand(run)
+			}
+		}
+		return nil
+	})
+	automationExecutor.ConfigureObserver(observeDomainJob)
 	automationExecutor.ConfigureGameUpdates(gameReleaseCoordinator)
 	if err := gameUpdateHandler.ConfigureReleases(gameReleaseCoordinator); err != nil {
 		return nil, err

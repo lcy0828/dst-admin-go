@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"dont/internal/jobs"
@@ -20,21 +21,38 @@ type MailSender interface {
 }
 
 type Service struct {
-	store           *Store
-	mail            MailSender
-	mu              sync.RWMutex
-	editMu          sync.Mutex
-	channels        []Channel
-	agents          map[string]string
-	channelsChanged func()
-	wake            chan struct{}
+	store              *Store
+	mail               MailSender
+	mu                 sync.RWMutex
+	editMu             sync.Mutex
+	channels           []Channel
+	agents             map[string]string
+	channelsChanged    func()
+	wake               chan struct{}
+	broker             *jobs.Broker
+	factsMu            sync.Mutex
+	projectionTx       bool
+	nextFactPrune      time.Time
+	nextExpiryCheck    time.Time
+	projected          []Event
+	projectionErr      error
+	projectionFailures atomic.Uint64
+	alertWatches       map[string]time.Time
+	gameWatches        map[string]time.Time
+	gameWake           chan struct{}
+	collectionMu       sync.Mutex
+	collectionStatus   func(string) map[string]string
+	collectionCache    map[string]cachedCollection
+	recoveryMu         sync.Mutex
+	recovery           func() error
+	recovered          bool
 }
 
 func New(store *Store, mail MailSender) (*Service, error) {
 	if store == nil || mail == nil {
 		return nil, errors.New("notification store and mail sender are required")
 	}
-	s := &Service{store: store, mail: mail, wake: make(chan struct{}, 1), agents: map[string]string{}}
+	s := &Service{store: store, mail: mail, wake: make(chan struct{}, 1), agents: map[string]string{}, broker: jobs.NewBroker(), gameWake: make(chan struct{}, 1)}
 	if err := s.reload(); err != nil {
 		return nil, err
 	}
@@ -107,6 +125,10 @@ func (s *Service) Active(kind string) bool {
 }
 
 func (s *Service) emit(event Event, channelID string, test bool) ([]Delivery, error) {
+	return s.emitRecorded(event, channelID, test, false)
+}
+
+func (s *Service) emitRecorded(event Event, channelID string, test, recorded bool) ([]Delivery, error) {
 	s.mu.RLock()
 	var selected []Channel
 	for _, channel := range s.channels {
@@ -124,10 +146,11 @@ func (s *Service) emit(event Event, channelID string, test bool) ([]Delivery, er
 	if event.OccurredAt.IsZero() {
 		event.OccurredAt = time.Now().UTC()
 	}
-	if !test {
+	if !test && !recorded {
 		if err := s.store.appendEvent(event); err != nil {
 			return nil, err
 		}
+		s.broker.Publish()
 	}
 	if len(selected) == 0 {
 		return []Delivery{}, nil
@@ -138,6 +161,8 @@ func (s *Service) emit(event Event, channelID string, test bool) ([]Delivery, er
 	}
 	return items, err
 }
+
+func (s *Service) Subscribe() (<-chan struct{}, func()) { return s.broker.Subscribe() }
 
 func (s *Service) Emit(event Event) {
 	if _, err := s.emit(event, "", false); err != nil {
@@ -345,4 +370,23 @@ func (s *Service) ObserveAgent(id, name, status string) {
 		title, severity = "Agent 已离线 / Agent offline", "error"
 	}
 	s.Emit(Event{Kind: "agent.status", Title: title, Message: name + "\n" + title, Status: status, Severity: severity, TargetID: "agent:" + id})
+}
+
+// Recover persisted source facts on the first reader, not on every boot or poll.
+func (s *Service) ConfigureRecovery(recover func() error) { s.recovery = recover }
+func (s *Service) recoverFacts() error {
+	s.recoveryMu.Lock()
+	defer s.recoveryMu.Unlock()
+	if s.recovered || s.recovery == nil {
+		return nil
+	}
+	before := s.projectionFailures.Load()
+	if err := s.recovery(); err != nil {
+		return err
+	}
+	if s.projectionFailures.Load() != before {
+		return errors.New("notification source recovery is incomplete")
+	}
+	s.recovered = true
+	return nil
 }

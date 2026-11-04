@@ -466,3 +466,12 @@ func (s *Store) DeleteSet(id string) error {
 	}
 	return tx.Commit().Error
 }
+
+// FindBySourceJob reads an existing result without scanning Runtime files.
+func (s *Store) FindBySourceJob(roomID, jobID string) (Set, error) {
+	var record setRecord
+	if err := s.db.Table(s.setTable).Where("room_id = ? AND source_job_id = ? AND kind <> ?", roomID, jobID, "protection").Order("created_at DESC").First(&record).Error; err != nil {
+		return Set{}, err
+	}
+	return s.GetSet(record.ID)
+}

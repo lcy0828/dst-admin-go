@@ -106,3 +106,34 @@ func TestMCPAdmissionIndependentOfLongConversations(t *testing.T) {
 		t.Fatalf("MCP blocked by chats: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestRoomNotificationCapabilitiesKeepRoomAndSystemPermissionsSeparate(t *testing.T) {
+	calls := 0
+	s, _ := fixture(t, apiBackendFunc(func(_ context.Context, _ Principal, _ *apicontract.Operation, _ apicontract.Input) (json.RawMessage, error) {
+		calls++
+		return json.RawMessage(`{"httpStatus":200,"data":{"items":[],"nextCursor":"example-cursor"}}`), nil
+	}))
+	catalog, err := apicontract.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ConfigureAPI(catalog)
+	p := Principal{ID: "example-reader", Profile: ProfileGameRead, RoomIDs: []string{"example"}}
+	for _, name := range []string{"readRoomNotificationEvents", "streamRoomNotifications", "listRoomRecentEvents"} {
+		if !p.AllowsOperation(name, "example") || p.AllowsOperation(name, "other") {
+			t.Fatalf("bad room scope for %s", name)
+		}
+		if _, err := s.Invoke(context.Background(), p, "api_"+name, json.RawMessage(`{"path":{"roomId":"example"}}`)); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, err := s.Invoke(context.Background(), p, "api_"+name, json.RawMessage(`{"path":{"roomId":"other"}}`)); !errors.Is(err, ErrDenied) {
+			t.Fatal("cross-room request reached backend", err)
+		}
+	}
+	if calls != 3 {
+		t.Fatal("unexpected backend calls", calls)
+	}
+	if _, err := s.Invoke(context.Background(), p, "api_readNotificationEvents", json.RawMessage(`{}`)); !errors.Is(err, ErrDenied) {
+		t.Fatal("room reader accessed system notices", err)
+	}
+}

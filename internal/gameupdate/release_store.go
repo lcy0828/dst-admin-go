@@ -69,6 +69,7 @@ type releaseShardRecord struct {
 }
 
 type ReleaseStore struct {
+	observer          func(Release)
 	db                *gorm.DB
 	releaseTable      string
 	installationTable string
@@ -142,7 +143,11 @@ func (s *ReleaseStore) Create(value Release) (Release, error) {
 	if err := tx.Commit().Error; err != nil {
 		return Release{}, err
 	}
-	return s.Get(value.ID)
+	saved, err := s.Get(value.ID)
+	if err == nil && s.observer != nil {
+		s.observer(saved)
+	}
+	return saved, err
 }
 
 func (s *ReleaseStore) Save(value Release) (Release, error) { return s.save(value, "") }
@@ -211,6 +216,9 @@ func (s *ReleaseStore) save(value Release, previousHash string) (Release, error)
 	saved, err := s.Get(value.ID)
 	if err != nil {
 		return value, err
+	}
+	if s.observer != nil {
+		s.observer(saved)
 	}
 	return saved, nil
 }
@@ -497,3 +505,5 @@ func shardEvidence(value Release) []releaseShardEvidence {
 	}
 	return result
 }
+
+func (s *ReleaseStore) ConfigureObserver(observer func(Release)) { s.observer = observer }

@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "d0d7ce9906b7f97f219e4424dd77eee96798b5119e85736abb673281856824ea",
+  "operationsSHA256": "ddd5b0fa56381efa614722b478b8b77328ee89702e7a5b4b0996b2f45d953ca6",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -3194,6 +3194,21 @@
       "title": "List durable room configuration publication operations and per-Shard phases"
     },
     {
+      "operationId": "listRoomRecentEvents",
+      "method": "GET",
+      "path": "/rooms/{roomId}/recent-events",
+      "transport": "json",
+      "tags": [
+        "history",
+        "notification",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "See what recently happened in a room, including restarts, rollback observations, seasons and updates"
+    },
+    {
       "operationId": "listRoomRecoveries",
       "method": "GET",
       "path": "/rooms/recovery",
@@ -3948,6 +3963,20 @@
       "risk": "low",
       "runtime": "any",
       "title": "Consume durable platform notifications using a stable cursor, including new software releases"
+    },
+    {
+      "operationId": "readRoomNotificationEvents",
+      "method": "GET",
+      "path": "/rooms/{roomId}/notifications/events",
+      "transport": "json",
+      "tags": [
+        "notification",
+        "room"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read room notifications for seasons, maintenance, backups and updates using a durable cursor"
     },
     {
       "operationId": "readWorldEntitySnapshot",
@@ -4740,6 +4769,21 @@
       "risk": "low",
       "runtime": "any",
       "title": "Subscribe to persisted room chat changes, including player messages and mod announcements"
+    },
+    {
+      "operationId": "streamRoomNotifications",
+      "method": "GET",
+      "path": "/rooms/{roomId}/notifications/stream",
+      "transport": "stream",
+      "tags": [
+        "notification",
+        "room",
+        "stream"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Subscribe to recorded room notifications without polling or invoking the model"
     },
     {
       "operationId": "streamRuntimeObservations",

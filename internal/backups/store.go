@@ -195,3 +195,9 @@ func policyRecordFrom(value Policy) policyRecord {
 func policyFromRecord(record policyRecord) Policy {
 	return Policy{RoomID: record.RoomID, Enabled: record.Enabled, IntervalMinute: record.IntervalMinute, MaxSnapshots: record.MaxSnapshots, NextRunAt: record.NextRunAt, LastRunAt: record.LastRunAt, LastJobID: record.LastJobID, LastError: record.LastError, UpdatedAt: record.UpdatedAt}
 }
+
+func (s *Store) FindBySourceJob(roomID, jobID string) (Backup, error) {
+	var record backupRecord
+	err := s.db.Table(s.backupTable).Where("room_id = ? AND source_job_id = ? AND kind <> ?", roomID, jobID, KindProtection).Order("created_at DESC").First(&record).Error
+	return backupFromRecord(record), err
+}

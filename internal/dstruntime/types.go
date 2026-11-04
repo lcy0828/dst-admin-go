@@ -9,7 +9,7 @@ import (
 
 const (
 	ProtocolVersion = 2
-	RuntimeVersion  = "2.4.24"
+	RuntimeVersion  = "2.4.25"
 )
 
 var (

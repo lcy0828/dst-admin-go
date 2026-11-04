@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.24"
+local PRODUCER_VERSION = "2.4.25"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local FLUSH_DELAY = 1
 local MAX_BATCH = 128
@@ -20,6 +20,9 @@ local state = {
     readyTask = nil,
     readyAttempts = 0,
     lastError = nil,
+    noticeWindow = 0,
+    noticeSources = {},
+    noticeTotal = 0,
 }
 
 local instance_id = string.format("%d-%06d", os.time(), math.random(0, 999999))
@@ -55,8 +58,44 @@ local function schedule_flush()
     end, "dst-admin-events-flush")
 end
 
+local function valid_notice(fields)
+    if type(fields) ~= "table" then return false end
+    local count = 0
+    for key in pairs(fields) do
+        if key ~= "source" and key ~= "code" and key ~= "message" then return false end
+        count = count + 1
+    end
+    if count ~= 3 then return false end
+    for _, key in ipairs({"source", "code"}) do
+        local v = fields[key]
+        if type(v) ~= "string" or #v < 1 or #v > 64 or not v:match("^[A-Za-z0-9_][A-Za-z0-9_.-]*$") then return false end
+    end
+    local text = fields.message
+    if type(text) ~= "string" or #text < 1 or #text > 1024 or text:match("%c") or not text:match("%S") then return false end
+    -- Validate complete UTF-8 sequences; never truncate inside a character.
+    local i = 1
+    while i <= #text do
+        local b = text:byte(i)
+        local n = b < 128 and 1 or b >= 194 and b <= 223 and 2 or b >= 224 and b <= 239 and 3 or b >= 240 and b <= 244 and 4 or 0
+        if n == 0 or i+n-1 > #text then return false end
+        for j = 1, n-1 do local c=text:byte(i+j); if c<128 or c>191 then return false end end
+        local c=text:byte(i+1)
+        if b==194 and c<=159 then return false end
+        if n==3 and (b==224 and c<160 or b==237 and c>159) or n==4 and (b==240 and c<144 or b==244 and c>143) then return false end
+        i=i+n
+    end
+    local window=math.floor(os.time()/60)
+    if state.noticeWindow~=window then state.noticeWindow=window;state.noticeSources={};state.noticeTotal=0 end
+    local existing=state.noticeSources[fields.source] or 0
+    local sources=0;for _ in pairs(state.noticeSources) do sources=sources+1 end
+    if state.noticeTotal>=20 or existing>=5 or existing==0 and sources>=8 or #state.pending>=MAX_BATCH-32 then return false end
+    state.noticeSources[fields.source]=existing+1;state.noticeTotal=state.noticeTotal+1
+    return true
+end
+
 local function emit(kind, fields)
-    if not state.running or not state.ready then return end
+    if not state.running or not state.ready then return false end
+    if kind=="mod.notice" and not valid_notice(fields) then return false end
     state.sequence = state.sequence + 1
     if #state.pending >= MAX_BATCH then table.remove(state.pending, 1) end
     state.pending[#state.pending + 1] = {
@@ -66,6 +105,7 @@ local function emit(kind, fields)
         fields = fields or {},
     }
     schedule_flush()
+    return true
 end
 
 flush = function()
@@ -197,7 +237,13 @@ function M.Stop()
     return true
 end
 
-function M.Emit(kind, fields) emit(kind, fields) end
+function M.Emit(kind, fields) return emit(kind, fields) end
+
+-- Stable, optional API for mod authors. No Lua, callbacks or game actions are
+-- accepted. Old runtimes do not expose Notify; callers should feature-detect it.
+function M.Notify(source, code, message)
+    return emit("mod.notice", {source=source, code=code, message=message})
+end
 
 function M.Status()
     return {

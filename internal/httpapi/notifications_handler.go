@@ -9,10 +9,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type NotificationsHandler struct{ service *notifications.Service }
+type NotificationsHandler struct {
+	service    *notifications.Service
+	roomExists func(string) error
+	streams    chan struct{}
+}
+
+func (h *NotificationsHandler) ConfigureRooms(check func(string) error) { h.roomExists = check }
 
 func NewNotificationsHandler(service *notifications.Service) *NotificationsHandler {
-	return &NotificationsHandler{service: service}
+	return &NotificationsHandler{service: service, streams: make(chan struct{}, 32)}
 }
 
 func (h *NotificationsHandler) Register(v2 *gin.RouterGroup) {
@@ -23,6 +29,9 @@ func (h *NotificationsHandler) Register(v2 *gin.RouterGroup) {
 	v2.POST("/system/notifications/channels/:channelId/actions/test", h.test)
 	v2.GET("/system/notifications/deliveries", h.history)
 	v2.GET("/system/notifications/events", h.events)
+	v2.GET("/rooms/:roomId/notifications/events", h.roomEvents)
+	v2.GET("/rooms/:roomId/notifications/stream", h.streamRoomEvents)
+	v2.GET("/rooms/:roomId/recent-events", h.recentRoomEvents)
 	v2.POST("/system/notifications/deliveries/:deliveryId/actions/retry", h.retry)
 	v2.POST("/system/notifications/actions/send", h.send)
 }

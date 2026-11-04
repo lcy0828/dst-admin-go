@@ -57,7 +57,7 @@ var allowedRuntimeCommands = map[string]bool{
 
 var allowedRuntimeEvents = map[string]bool{
 	"player.joined": true, "player.left": true, "world.save": true, "world.reset": true, "world.shutdown": true,
-	"world.cycles": true, "world.phase": true, "world.season": true, "world.rain": true,
+	"world.cycles": true, "world.phase": true, "world.season": true, "world.rain": true, "mod.notice": true,
 }
 
 type RuntimeProcess interface {
@@ -799,6 +799,9 @@ func decodeEventBatchData(data []byte, expectedSession, expectedShard string, no
 	for index := range value.Events {
 		event := &value.Events[index]
 		if event.Sequence != previous+1 || !allowedRuntimeEvents[event.Kind] || event.OccurredAtUnix < 1 || event.Fields == nil {
+			return EventBatch{}, ErrRuntimeResultInvalid
+		}
+		if event.Kind == "mod.notice" && !ValidModNotice(event.Fields) {
 			return EventBatch{}, ErrRuntimeResultInvalid
 		}
 		event.OccurredAt = time.Unix(event.OccurredAtUnix, 0).UTC()

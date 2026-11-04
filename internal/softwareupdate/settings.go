@@ -194,6 +194,7 @@ func (s *Service) WakeChecks() {
 	}
 }
 func (s *Service) RunChecks(ctx context.Context, checkAgents func(context.Context)) {
+	go s.observeBootOperation(ctx) // Observe the persisted switch independently of remote release checks.
 	for ctx.Err() == nil {
 		v, err := s.settings()
 		delay := time.Duration(0)

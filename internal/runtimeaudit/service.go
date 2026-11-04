@@ -35,6 +35,7 @@ type observedRuntime struct {
 }
 
 type Service struct {
+	observer  func(Event)
 	rooms     RoomCatalog
 	runtime   Runtime
 	store     *Store
@@ -71,7 +72,7 @@ func (s *Service) RecordAction(request ActionRequest) error {
 		if len(selected) > 0 && !selected[world.ID] {
 			continue
 		}
-		_, err = s.store.Append(Event{
+		_, err = s.appendEvent(Event{
 			RoomID: room.ID, WorldID: world.ID, RoomDirectory: room.DirectoryName, WorldDirectory: world.DirectoryName,
 			Type: eventType, Action: request.Action, Source: request.Source,
 			JobID: request.JobID, RequestID: request.RequestID, ExpectedExit: expectedExit, OccurredAt: s.now().UTC(),
@@ -277,14 +278,14 @@ func (s *Service) recordTransition(room rooms.Room, world rooms.World, before, c
 			base.Type, base.Source = EventUnexpectedExit, SourceExternal
 			base.ReasonCode, base.Message = "SESSION_DISAPPEARED", "未发现对应的停止、重启或清理请求，tmux 会话已消失"
 		}
-		if _, err := s.store.Append(base); err != nil {
+		if _, err := s.appendEvent(base); err != nil {
 			log.Printf("[RuntimeAudit] append exit room=%s world=%s: %v", room.ID, world.ID, err)
 		}
 		return
 	}
 	if !before.sessionExists && current.sessionExists {
 		base.Type, base.ReasonCode, base.Message = EventSessionStarted, "SESSION_CREATED", "检测到 tmux 会话已创建"
-		_, _ = s.store.Append(base)
+		_, _ = s.appendEvent(base)
 	}
 	if before.state == current.state {
 		return
@@ -297,7 +298,7 @@ func (s *Service) recordTransition(room rooms.Room, world rooms.World, before, c
 	default:
 		return
 	}
-	if _, err := s.store.Append(base); err != nil {
+	if _, err := s.appendEvent(base); err != nil {
 		log.Printf("[RuntimeAudit] append transition room=%s world=%s: %v", room.ID, world.ID, err)
 	}
 }
@@ -315,4 +316,13 @@ func actionEvent(action string) (EventType, bool) {
 	default:
 		return EventStartRequested, false
 	}
+}
+
+func (s *Service) ConfigureObserver(observer func(Event)) { s.observer = observer }
+func (s *Service) appendEvent(event Event) (Event, error) {
+	saved, err := s.store.Append(event)
+	if err == nil && s.observer != nil {
+		s.observer(saved)
+	}
+	return saved, err
 }

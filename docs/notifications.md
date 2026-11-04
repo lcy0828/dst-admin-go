@@ -110,3 +110,7 @@ Webhook 连接失败、HTTP `429` 或 `5xx` 最多自动尝试 3 次；自动重
 Background release checks and delivery subscriptions are independent. Checks run on the saved schedule even with no channels and while the UI is closed. Disabling checks leaves manual checks available. Webhooks reuse the channel editor under **AI → Connections**. HTTP acceptance does not mean the model has processed a message.
 
 MCP-only hosts must schedule `readNotificationEvents` themselves, process each page before saving `nextCursor`, and resume using `query.after` with the same `kinds` filter. Follow `hasMore`, deduplicate by event `id`, and recheck current versions if `historyTruncated` is true. The feed retains 30 days or 10,000 events independently of delivery channels. A normal MCP connection cannot wake a model automatically. Release events contain structured `release` facts and never initiate installation.
+
+## 群内房间动态
+
+统一 AstrBot 插件还可订阅按授权房间过滤的维护、季节、更新和备份记录，支持断线续读、类别开关和可编辑模板。使用方法见[机器人事件播报](robot-event-notifications.md)。邮箱/Webhook 原有渠道配置继续有效；增加的结构化事件类别可通过通知 API 选择。

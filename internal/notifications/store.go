@@ -70,6 +70,14 @@ func (s *Store) Migrate() error {
 	if err := s.db.Table(s.channelsTable + "_event").AutoMigrate(&feedRecord{}).Error; err != nil {
 		return err
 	}
+	for _, m := range []struct {
+		suffix string
+		model  interface{}
+	}{{"_world", &worldNoticeRecord{}}, {"_change", &changeNoticeRecord{}}, {"_operation", &operationNoticeRecord{}}, {"_performance", &performanceNoticeRecord{}}, {"_mod_notice", &modNoticeRecord{}}} {
+		if err := s.db.Table(s.channelsTable + m.suffix).AutoMigrate(m.model).Error; err != nil {
+			return err
+		}
+	}
 	return s.db.Table(s.channelsTable + "_release").AutoMigrate(&releaseNoticeRecord{}).Error
 }
 

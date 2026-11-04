@@ -1,6 +1,7 @@
 package automation
 
 import (
+	"dont/internal/jobs"
 	"errors"
 	"time"
 )
@@ -202,6 +203,7 @@ type ActionDefinition struct {
 type ExecutionResult struct {
 	Message string
 	Skipped bool
+	targets []jobs.Target
 }
 
 type Document struct {

@@ -56,6 +56,7 @@ func (f AnnounceFunc) AnnounceModUpdate(ctx context.Context, roomID, message, jo
 }
 
 type Service struct {
+	observer  func(State)
 	store     *Store
 	rooms     RoomCatalog
 	catalog   Catalog
@@ -658,6 +659,9 @@ func (s *Service) fail(state State, code string, cause error, nextAction *time.T
 func (s *Service) saveState(state State) (State, error) {
 	value, err := s.store.SaveState(state)
 	if err == nil {
+		if s.observer != nil {
+			s.observer(value)
+		}
 		s.jobs.Notify()
 		s.signal()
 	}
@@ -730,3 +734,5 @@ func waitForWake(ctx context.Context, wake <-chan struct{}, delay time.Duration)
 		return true
 	}
 }
+
+func (s *Service) ConfigureObserver(observer func(State)) { s.observer = observer }

@@ -30,6 +30,7 @@ type Config struct {
 	ValidateExecutable func(context.Context, string, string, string) error
 	OnAvailable        func(string)
 	OnRelease          func(Release)
+	OnOperation        func(string, Operation, bool)
 	Proxy              func() (string, string, error)
 }
 
@@ -113,7 +114,12 @@ func (s *Service) Snapshot() (Snapshot, error) {
 	}
 	result := Snapshot{Settings: settings, Current: s.config.Current, Platform: s.config.Platform, Supported: supported, Ready: supported && s.config.Ready(), UnsupportedReason: reason}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer func() {
+		s.mu.Unlock()
+		if result.Operation != nil && s.config.OnOperation != nil {
+			s.config.OnOperation(s.config.Current.Version, *result.Operation, result.Ready)
+		}
+	}()
 	state, err := readState(s.config.Root)
 	if err != nil {
 		return result, err
@@ -341,7 +347,13 @@ func (w *progressWriter) Write(data []byte) (int, error) {
 
 func (s *Service) phase(id, phase string, progress int, failure error, releaseID string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var observed *Operation
+	defer func() {
+		s.mu.Unlock()
+		if observed != nil && s.config.OnOperation != nil {
+			s.config.OnOperation(s.config.Current.Version, *observed, false)
+		}
+	}()
 	state, err := readState(s.config.Root)
 	if err != nil {
 		return err
@@ -366,6 +378,7 @@ func (s *Service) phase(id, phase string, progress int, failure error, releaseID
 		return err
 	}
 	s.operation = &op
+	observed = &op
 	return nil
 }
 
@@ -429,6 +442,9 @@ func (s *Service) CancelDownload(ctx context.Context, id string) (Operation, err
 		cancel()
 	}
 	s.mu.Unlock()
+	if s.config.OnOperation != nil {
+		s.config.OnOperation(s.config.Current.Version, operation, false)
+	}
 	if cancel != nil {
 		select {
 		case <-done:

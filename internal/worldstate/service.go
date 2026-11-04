@@ -50,6 +50,7 @@ type StoppedSampler interface {
 
 type Service struct {
 	sessionObserver func(string, string, string, time.Time) error
+	observer        func(Snapshot)
 	rooms           RoomCatalog
 	runtime         Runtime
 	store           *Store
@@ -224,6 +225,9 @@ func (s *Service) snapshotFromRead(roomID string, world rooms.World, read listWo
 		if err := s.sessionObserver(roomID, world.ID, item.SessionID, item.ObservedAt); err != nil {
 			item.ObservationState, item.ObservationCode, item.ObservationError = ObservationStateFailed, "PLAYER_SESSION_SYNC_FAILED", err.Error()
 		}
+	}
+	if s.observer != nil && read.hasSnapshot && (item.Freshness == FreshnessLive || item.Freshness == FreshnessPaused) {
+		s.observer(item)
 	}
 	return item
 }
@@ -436,3 +440,5 @@ func validateObservation(observation Observation) error {
 func (s *Service) ConfigureSessionObserver(observer func(string, string, string, time.Time) error) {
 	s.sessionObserver = observer
 }
+
+func (s *Service) ConfigureObserver(observer func(Snapshot)) { s.observer = observer }

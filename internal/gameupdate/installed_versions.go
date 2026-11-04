@@ -23,6 +23,7 @@ type installedVersionDriver interface {
 }
 
 type InstalledVersion struct {
+	RoomIDs        []string  `json:"-"`
 	TargetID       string    `json:"targetId"`
 	TargetName     string    `json:"targetName"`
 	InstallationID string    `json:"installationId"`
@@ -53,6 +54,19 @@ func NewInstalledVersionService(rooms releaseRoomCatalog, placements releasePlac
 // Installed reads each applied installation once without a topology inventory,
 // world status probe, Steam lookup, or update plan.
 func (s *InstalledVersionService) Installed(ctx context.Context, targetIDs []string) ([]InstalledVersion, error) {
+	return s.installed(ctx, targetIDs, nil)
+}
+func (s *InstalledVersionService) InstalledRooms(ctx context.Context, roomIDs []string) ([]InstalledVersion, error) {
+	selected := map[string]bool{}
+	for _, room := range roomIDs {
+		selected[room] = true
+	}
+	if len(selected) == 0 || len(selected) > 128 {
+		return nil, ErrReleaseInvalid
+	}
+	return s.installed(ctx, nil, selected)
+}
+func (s *InstalledVersionService) installed(ctx context.Context, targetIDs []string, selectedRooms map[string]bool) ([]InstalledVersion, error) {
 	selected, err := normalizeReleaseTargetIDs(targetIDs)
 	if err != nil {
 		return nil, err
@@ -72,8 +86,9 @@ func (s *InstalledVersionService) Installed(ctx context.Context, targetIDs []str
 	values := []InstalledVersion{}
 	routes := []runtimedriver.Target{}
 	seen := map[string]bool{}
+	indices := map[string]int{}
 	for _, room := range rooms {
-		if !room.Managed {
+		if !room.Managed || (selectedRooms != nil && !selectedRooms[room.ID]) {
 			continue
 		}
 		worlds, err := s.rooms.Worlds(room.ID)
@@ -113,14 +128,25 @@ func (s *InstalledVersionService) Installed(ctx context.Context, targetIDs []str
 			}
 			key := releaseInstallationKey(id, installation)
 			if seen[key] {
+				i := indices[key]
+				found := false
+				for _, id := range values[i].RoomIDs {
+					if id == room.ID {
+						found = true
+					}
+				}
+				if !found {
+					values[i].RoomIDs = append(values[i].RoomIDs, room.ID)
+				}
 				continue
 			}
 			seen[key] = true
+			indices[key] = len(values)
 			name := target.Name
 			if name == "" {
 				name = id
 			}
-			values = append(values, InstalledVersion{TargetID: id, TargetName: name, InstallationID: installation, OS: target.OS, Arch: target.Arch, Online: target.Online})
+			values = append(values, InstalledVersion{RoomIDs: []string{room.ID}, TargetID: id, TargetName: name, InstallationID: installation, OS: target.OS, Arch: target.Arch, Online: target.Online})
 			routes = append(routes, runtimedriver.Target{TargetID: id, InstallationID: installation, Cluster: room.DirectoryName, Shard: world.DirectoryName, RoomID: room.ID, WorldID: world.ID, TopologyRevision: placement.Revision})
 		}
 	}
