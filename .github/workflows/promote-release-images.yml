@@ -17,13 +17,13 @@ permissions:
   packages: write
 
 concurrency:
-  group: promote-release-images
+  group: finalize-release-${{ inputs.artifact_run_id != '' && 'assets' || 'images' }}
   cancel-in-progress: false
 
 jobs:
   upload_assets:
     if: inputs.artifact_run_id != ''
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
@@ -80,7 +80,7 @@ jobs:
           echo 'Uploaded 16 verified cloud assets. The release remains a draft for final checks.' >> "$GITHUB_STEP_SUMMARY"
   promote:
     if: inputs.artifact_run_id == ''
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       RELEASE_VERSION: ${{ inputs.version }}
