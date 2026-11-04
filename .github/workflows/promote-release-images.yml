@@ -1,0 +1,97 @@
+name: Promote published release images
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published stable release to promote, for example v1.3.29'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: promote-release-images
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      ALIYUN_NAMESPACE: ${{ vars.ALIYUN_NAMESPACE }}
+    steps:
+      - name: Require the current published stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          ALIYUN_USERNAME: ${{ secrets.ALIYUN_USERNAME }}
+          ALIYUN_PASSWORD: ${{ secrets.ALIYUN_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$ALIYUN_NAMESPACE" =~ ^[a-z0-9][a-z0-9_-]*$ ]]
+          [[ -n "$DOCKERHUB_TOKEN" && -n "$ALIYUN_USERNAME" && -n "$ALIYUN_PASSWORD" ]]
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
+          [[ "$latest" == "$RELEASE_VERSION" ]]
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME || 'lcy0828' }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/login-action@v3
+        with:
+          registry: registry.cn-hangzhou.aliyuncs.com
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+      - name: Verify every versioned image before changing aliases
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest() {
+            local value
+            value=$(docker buildx imagetools inspect "$1" | awk '$1 == "Digest:" {print $2; exit}')
+            [[ "$value" =~ ^sha256:[a-f0-9]{64}$ ]]
+            printf '%s' "$value"
+          }
+          : > "$RUNNER_TEMP/release-images.tsv"
+          for kind in all-in-one control-plane agent dst-runtime; do
+            case "$kind" in
+              all-in-one) prefix='' ;;
+              control-plane) prefix='controller-' ;;
+              agent) prefix='agent-' ;;
+              dst-runtime) prefix='runtime-' ;;
+            esac
+            source="ghcr.io/${GITHUB_REPOSITORY,,}/$kind"
+            expected=$(digest "$source:$RELEASE_VERSION")
+            printf '%s\t%s\t%s\n' "$source" "$expected" latest >> "$RUNNER_TEMP/release-images.tsv"
+            for target in docker.io/lcy0828/dst-admin-go "registry.cn-hangzhou.aliyuncs.com/$ALIYUN_NAMESPACE/dst-admin-go"; do
+              [[ "$(digest "$target:$prefix$RELEASE_VERSION")" == "$expected" ]]
+              printf '%s\t%s\t%s\n' "$target" "$expected" "${prefix}latest" >> "$RUNNER_TEMP/release-images.tsv"
+            done
+          done
+      - name: Promote immutable manifests and verify all aliases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS=$'\t' read -r repository expected alias; do
+            latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq '.tag_name')
+            [[ "$latest" == "$RELEASE_VERSION" ]]
+            docker buildx imagetools create --prefer-index=false \
+              --tag "$repository:$alias" "$repository@$expected"
+            actual=$(docker buildx imagetools inspect "$repository:$alias" | awk '$1 == "Digest:" {print $2; exit}')
+            [[ "$actual" == "$expected" ]]
+            echo "Verified $repository:$alias = $expected" >> "$GITHUB_STEP_SUMMARY"
+          done < "$RUNNER_TEMP/release-images.tsv"
