@@ -78,5 +78,12 @@ export async function buildFrontend({ backend, frontend, frontendPrebuilt }) {
     execFileSync('npm', ['run', 'build'], { cwd: frontend, stdio: 'inherit' })
   }
   await readFile(path.join(frontend, 'dist', 'index.html'))
-  await cp(path.join(frontend, 'dist'), path.join(backend, 'internal/webui/dist'), { recursive: true })
+  const embedded = path.join(backend, 'internal/webui/dist')
+  try {
+    await lstat(embedded)
+    throw new Error('embedded frontend assets already exist; refusing to mix builds')
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+  }
+  await cp(path.join(frontend, 'dist'), embedded, { recursive: true, errorOnExist: true, force: false })
 }
