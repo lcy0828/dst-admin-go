@@ -18,8 +18,10 @@ func TestTaskActionDiscoveryProvidesEnumArgumentsWithoutExecuting(t *testing.T) 
 		{"全天黑夜", "set_daylight_mode", "mode", "night"},
 		{"闪电", "trigger_world_event", "event", "lightning"},
 		{"月雹", "trigger_world_event", "event", "lunar_hail"},
-		{"隐身", "set_player_ability", "ability", "stealth"},
-		{"踏水", "set_player_ability", "ability", "water_walk"},
+		{"隐身", "set_player_mode", "mode", "invisible"},
+		{"潜行", "set_player_ability", "ability", "stealth"},
+		{"踏水", "set_player_mode", "mode", "water_walk"},
+		{"一击必杀", "set_player_mode", "mode", "one_hit"},
 		{"冻结附近生物", "act_nearby_entities", "action", "freeze"},
 		{"附近灭火", "act_nearby_entities", "action", "extinguish"},
 		{"阿比盖尔三级", "set_character_power", "action", "abigail_bond_3"},
@@ -64,5 +66,23 @@ func TestActionDescriptionsDoNotChangeFrozenExecutionButBehaviorDoes(t *testing.
 		if botSchemaRevision(c) == old {
 			t.Fatal("behavior change permits stale execution")
 		}
+	}
+}
+
+func TestPlayerModeDiscoveryKeepsImmunityAndGodEffectsSeparate(t *testing.T) {
+	s, _ := taskFixture(t, nil)
+	for query, want := range map[string]string{
+		"普通无敌": "workbench.set_player_invincibility",
+		"仅免伤":  "workbench.set_player_invincibility",
+		"无敌模式": "player.god_mode",
+		"上帝模式": "player.god_mode",
+	} {
+		t.Run(query, func(t *testing.T) {
+			r := callTask(t, s, taskPrincipal(ProfileGameManage), "dst_find", map[string]any{"query": query})
+			items := r.Data.(map[string]any)["items"].([]map[string]any)
+			if len(items) == 0 || items[0]["id"] != want {
+				t.Fatalf("mode discovery changed the effect: %+v", r)
+			}
+		})
 	}
 }

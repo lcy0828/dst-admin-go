@@ -157,9 +157,11 @@ var botMCPNames = map[string]bool{
 	"api_getBotCapabilityResult": true, "api_listRooms": true, "api_listRoomWorlds": true,
 	"api_listWorldStates": true, "api_resolveRoomPlayer": true, "api_getRoomPlayerInventory": true,
 	"api_listRoomPlayers": true, "api_listRoomMods": true, "api_listRoomBackupSchedules": true,
-	"api_getJob": true, "api_getRoomPerformanceReport": true,
+	"api_getJob": true, "api_getRoomPerformanceReport": true, "api_listRoomMaps": true,
 	"api_getRoom": true, "api_getRoomPlayer": true, "api_streamWorldRuntimeEvents": true,
 	"api_listRoomRuntimeEvents": true, "api_listRoomChatLogs": true, "api_streamRoomChatLogs": true,
+	"api_readRoomNotificationEvents": true, "api_streamRoomNotifications": true,
+	"api_listRoomRecentEvents": true, "api_readNotificationEvents": true,
 }
 var compactMCPNames = map[string]bool{discoverAPI: true, dispatchAPI: true, "api_listRooms": true, "api_getRoomRuntimeOverview": true, "api_listRoomPlayers": true, "api_listRoomMods": true, "api_listRoomBackupSchedules": true, "api_listJobs": true, "api_getJob": true, "api_queryRoomWorld": true, "api_getRoomWorldQueryRun": true}
 

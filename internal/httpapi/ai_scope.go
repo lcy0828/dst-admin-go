@@ -31,6 +31,11 @@ func AITokenScope(store *aicontrol.Store, catalog *apicontract.Catalog, jobServi
 			c.Abort()
 			return
 		}
+		if delegated, ok := aicontrol.DispatchedPrincipal(c.Request.Context()); ok {
+			// Internal API calls carry a previously reduced principal. Never read
+			// delegation claims from user-controlled headers here.
+			p = delegated
+		}
 		c.Set(aiScopeKey, p)
 		if !p.Restricted() {
 			c.Next()
@@ -58,7 +63,7 @@ func AITokenScope(store *aicontrol.Store, catalog *apicontract.Catalog, jobServi
 				return
 			}
 			job, e := jobService.Get(c.Param("jobId"))
-			if e != nil || job.RoomID == "" || !p.AllowsRoom(job.RoomID) {
+			if e != nil || job.RoomID == "" && !p.AllowsGlobalTasks() || job.RoomID != "" && !p.AllowsRoom(job.RoomID) {
 				deny()
 				return
 			}

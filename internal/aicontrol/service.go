@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"dont/internal/apicontract"
+	"dont/internal/intent"
 
 	"github.com/google/uuid"
 )
@@ -29,6 +30,8 @@ type Service struct {
 	mcpOnce    sync.Once
 	mcpHandler http.Handler
 	mcpError   error
+	searchOnce sync.Once
+	search     *intent.Service
 }
 
 func New(store *Store, backend Backend) *Service {
@@ -137,6 +140,7 @@ func parse(tool Tool, raw json.RawMessage) (Arguments, error) {
 	return a, nil
 }
 func (s *Service) Invoke(ctx context.Context, p Principal, name string, raw json.RawMessage) (Invocation, error) {
+	p.catalog = s.catalog
 	if err := ctx.Err(); err != nil {
 		return Invocation{}, err
 	}

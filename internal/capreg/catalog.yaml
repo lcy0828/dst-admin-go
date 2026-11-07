@@ -1,0 +1,1419 @@
+# Bot capability semantic + policy registry (code-owned).
+#
+# 这里只描述“语言”和“面向机器人的策略”：别名、例句、反例、风险等级、确认方式、
+# 槽位角色、回执模板。可执行的配方（BotCapabilities 的 build、控制台模板）仍然只在 Go
+# 代码里，注册表永远不能提供脚本、路由或处理函数。
+#
+# 约定：
+# - tier: R0 只读 | R1 单人可逆 | R2 影响全服/他人 | R3 破坏性/不可逆
+# - confirm: none | once | typed（R0 必须 none；R2 至少 once；R3 必须 typed）
+# - 带 actions 的能力：父级 tier/confirm 取所有子动作中的最高值；子动作未写 tier/confirm 时继承父级。
+#   已知子动作时，决策层必须使用子动作的策略。
+# - prefer: 指向同一意图的规范能力。发现时规范能力排在前面；被 prefer 的一方可以与规范能力共享别名。
+# - 回执占位符：{player}（目标玩家显示名）、{world}（世界显示名），以及本能力的参数名。
+# - 这里的 tier/confirm 只决定“是否需要确认”，不决定可见性或权限。
+
+slot_defaults:
+  worldId: {role: world, ask: never}
+  playerId: {role: target_player}
+  player_id: {role: target_player}
+  feedback: {role: presentation}
+  phase: {role: internal}
+  preview_id: {role: internal}
+  confirmed: {role: internal}
+  confirmation: {role: internal}
+  expected_session: {role: internal}
+
+capabilities:
+  # ───────────────────────────── 地点 ─────────────────────────────
+  - id: location.save
+    aliases: [保存位置, 保存地点, 记录地点, 标记地点, 记为基地, 当前位置, 存个点, mark location]
+    examples: ["把lcy现在的位置存成基地", "保存lcy当前位置叫猪王村", "记录一下我现在的位置", "标记地点 矿区", "把小明站的地方记为基地", "帮lcy存个点叫家"]
+    negatives: ["保存世界", "保存一下存档"]
+    tier: R1
+    confirm: none
+    slots:
+      name: {role: location}
+    receipt: {done: "已把 {player} 当前位置保存为「{name}」"}
+
+  - id: player.teleport
+    aliases: [传送地点, 传送到地点, 传送到基地, 传送到, 回基地, 前往位置, 送回家, teleport destination]
+    examples: ["把lcy传送到基地", "传送lcy到猪王村", "让小明回基地", "把玩家甲传送到营地", "送lcy回家", "lcy 传送到 矿区"]
+    negatives: ["传送到玩家身边", "传送到地图中心"]
+    # 传送到已保存地点由可信客户端二次确认（prepareRoomTeleport），对机器人而言是单人可逆。
+    tier: R1
+    confirm: none
+    slots:
+      locationName: {role: location}
+    receipt: {done: "已把 {player} 传送到「{locationName}」", pending: "已准备把 {player} 传送到「{locationName}」，等待确认"}
+
+  - id: room.locations
+    aliases: [有哪些地点, 已保存地点, 地点列表, 基地列表, 保存的位置, locations]
+    examples: ["有哪些保存的地点", "看看地点列表", "我们存过哪些基地", "已保存地点有哪些", "查一下保存的位置", "地点都有啥"]
+    negatives: ["保存当前位置", "传送到基地"]
+    tier: R0
+    confirm: none
+    slots:
+      search: {role: text, ask: never}
+      offset: {role: internal}
+
+  - id: room.map
+    aliases: [查看地图, 看地图, 看看地图, 世界地图, 地图, 小地图, 地图概览, map, world map]
+    examples: ["查看地图", "看看地图", "帮我看下世界地图", "地图生成了吗", "查一下地图状态", "现在有世界地图吗"]
+    negatives: ["重新生成地图", "全开地图", "给lcy开全图"]
+    tier: R0
+    confirm: none
+    receipt: {done: "已读取世界地图概览", pending: "正在读取世界地图"}
+
+  # ───────────────────────────── 玩家查询（R0） ─────────────────────────────
+  - id: player.activity
+    aliases: [活动, 做了什么, 干了什么, 最近行为, 玩家动态, activity]
+    examples: ["lcy最近做了什么", "看看小明在干嘛", "lcy今天干了什么", "查一下lcy的最近行为", "玩家lcy的活动记录", "阿呆刚才都做了啥"]
+    negatives: ["查看地图", "最近一天CPU内存"]
+    tier: R0
+    confirm: none
+    slots:
+      from: {role: time_range, ask: never}
+      to: {role: time_range, ask: never}
+      before: {role: internal}
+      limit: {role: quantity, ask: never}
+
+  - id: player.combat
+    aliases: [打了谁, 打怪, 打boss, 战斗, 战斗记录, combat]
+    examples: ["lcy打了哪些boss", "看看lcy的战斗记录", "小明今天打了谁", "lcy最近打怪了吗", "查一下阿呆的战斗", "lcy杀了什么怪"]
+    negatives: ["杀死玩家", "击杀附近生物"]
+    tier: R0
+    confirm: none
+    slots:
+      from: {role: time_range, ask: never}
+      to: {role: time_range, ask: never}
+
+  - id: player.inventory
+    aliases: [背包, 装备, 物品栏, 离线背包, 查背包, inventory, backpack]
+    examples: ["看看lcy的背包", "查背包 lcy", "lcy身上有什么", "小明带了哪些装备", "查看玩家背包", "lcy物品栏里有啥"]
+    negatives: ["清理背包", "清空lcy的背包", "给lcy发物品"]
+    tier: R0
+    confirm: none
+
+  - id: player.resolve
+    aliases: [玩家信息, 查人, 昵称, 玩家资料, 找玩家, profile, player]
+    examples: ["查一下lcy", "lcy是谁", "看看玩家lcy的信息", "找一下小明", "这个昵称对应哪个玩家", "玩家资料 阿呆"]
+    # “查看地图”曾被当成昵称（问题 #9），地图不是玩家资料。
+    negatives: ["查看地图", "看地图", "地图"]
+    tier: R0
+    confirm: none
+    slots:
+      query: {role: target_player}
+
+  - id: player.trajectory
+    aliases: [去哪, 去了哪里, 位置, 地点, 轨迹, 移动轨迹, trajectory]
+    examples: ["lcy去了哪里", "看看lcy的移动轨迹", "小明现在在哪", "lcy最近去哪了", "查一下阿呆的位置", "lcy今天走过哪些地方"]
+    negatives: ["已保存地点", "保存位置", "查看地图"]
+    tier: R0
+    confirm: none
+    slots:
+      from: {role: time_range, ask: never}
+      to: {role: time_range, ask: never}
+      before: {role: internal}
+      limit: {role: quantity, ask: never}
+
+  # ───────────────────────────── 玩家管理 ─────────────────────────────
+  - id: player.announce
+    aliases: [提醒玩家, 通知玩家, 玩家公告, 对玩家说, 私聊提醒, announce]
+    examples: ["提醒lcy该回家了", "通知小明快去打boss", "跟lcy说一声别乱跑", "对玩家lcy说注意安全", "提醒一下阿呆天要黑了", "给lcy发个提醒 准备过冬"]
+    negatives: ["发全服公告", "给lcy发物品"]
+    tier: R1
+    confirm: none
+    slots:
+      message: {role: text}
+    receipt: {done: "已提醒 {player}：{message}"}
+
+  - id: player.ban
+    aliases: [封禁, 封号, 拉黑, 封了, ban]
+    examples: ["封禁lcy", "把小明封号三天", "拉黑这个捣乱的", "封了阿呆 理由是炸家", "ban掉lcy一天", "永久封禁玩家lcy"]
+    negatives: ["解封lcy", "解除封禁"]
+    tier: R3
+    confirm: typed
+    slots:
+      reason: {role: text}
+      duration: {role: enum}
+    receipt: {done: "已封禁 {player}（{duration}）：{reason}"}
+
+  - id: player.unban
+    aliases: [解封, 解除封禁, 取消封禁, 移出黑名单, unban]
+    examples: ["解封lcy", "把小明解除封禁", "取消阿呆的封禁", "lcy可以解封了", "把lcy从黑名单移出去", "unban lcy"]
+    negatives: ["封禁lcy", "封号"]
+    # 解封可随时撤销，一次确认即可。
+    tier: R2
+    confirm: once
+    receipt: {done: "已解除 {player} 的封禁"}
+
+  - id: player.god_mode
+    aliases: [无敌, 无敌模式, 上帝模式, 不死, 免伤, 开无敌, 关无敌, god, godmode, invincible]
+    examples: ["开启无敌模式", "给lcy开启无敌模式", "给lcy开无敌", "关掉lcy的无敌", "lcy开上帝模式", "让小明不死", "取消lcy的无敌模式", "给我开个无敌"]
+    negatives: ["lcy开了无敌吗", "是否开启无敌", "超级无敌"]
+    # 完整上帝模式；普通免伤是独立效果，不得按权限自动互换。
+    tier: R1
+    confirm: none
+    slots:
+      enabled: {role: toggle}
+    receipt: {done: "已为 {player} {enabled}无敌模式", pending: "已提交：为 {player} {enabled}无敌模式，等待游戏确认"}
+
+  - id: player.creative_mode
+    aliases: [制作模式, 制造模式, 创造模式, 自由建造, 免费制作, 开创造, creative, freebuild, freecrafting]
+    examples: ["开启制作模式", "给lcy开启制作模式", "关掉lcy的创造模式", "给小明开自由建造", "lcy开创造", "取消lcy的制造模式", "让阿呆免费制作"]
+    negatives: ["lcy开了制作模式吗", "是否开启制造模式"]
+    # 规范能力：set_player_mode.creative prefer 本能力。
+    tier: R1
+    confirm: none
+    slots:
+      enabled: {role: toggle}
+    receipt: {done: "已为 {player} {enabled}制作模式", pending: "已提交：为 {player} {enabled}制作模式，等待游戏确认"}
+
+  - id: player.give_item
+    # “给”“发”是单字别名：当前发现算法需要它们覆盖“给X发五个草”这类无固定词组的说法。
+    aliases: [给, 发, 发放, 给予, 发物品, 给物品, 物品, 肉丸, give item, meatballs]
+    examples: ["给玩家lcy 发五个草", "给玩家lcy发五个草", "给lcy发5个草", "发五个草给lcy", "给小明10个木头", "给lcy来一组肉丸", "给他发五个草", "帮lcy刷20个金块"]
+    negatives: ["给lcy开启无敌模式", "给lcy发个提醒"]
+    tier: R1
+    confirm: none
+    slots:
+      item: {role: item}
+      count: {role: quantity}
+    receipt: {done: "已给 {player} 发放 {item} ×{count}", pending: "已提交：给 {player} 发放 {item} ×{count}，等待游戏确认"}
+
+  - id: player.kick
+    aliases: [踢人, 踢出, 踢掉, 请出去, kick]
+    examples: ["把lcy踢出去", "踢掉小明", "踢人 阿呆", "把这个捣乱的踢了", "kick lcy", "让lcy先下线"]
+    negatives: ["封禁lcy", "踢出黑名单"]
+    # 踢人影响他人在线状态，按 R2 一次确认。
+    tier: R2
+    confirm: once
+    receipt: {done: "已将 {player} 踢出房间"}
+
+  - id: player.kill
+    aliases: [杀死玩家, 杀死, 击杀玩家, 弄死, kill]
+    examples: ["杀死lcy", "把小明弄死", "击杀玩家阿呆", "让lcy死一次", "kill lcy", "把lcy杀了重来"]
+    negatives: ["lcy打了谁", "击杀附近生物", "全员死亡"]
+    tier: R3
+    confirm: typed
+    receipt: {done: "已让 {player} 死亡"}
+
+  - id: player.reset_character
+    aliases: [重选角色, 换人物, 重置玩家, 换角色, 重置角色, reset_character, despawn]
+    examples: ["让lcy重选角色", "小明想换人物", "重置玩家lcy", "帮阿呆换个角色", "lcy要重选", "把lcy的角色重置"]
+    # 问题 #7：“重置世界”必须去 regenerate，不能落到重置玩家。
+    negatives: ["重置世界", "重新生成世界", "重置远古"]
+    tier: R3
+    confirm: typed
+    receipt: {done: "已让 {player} 重选角色"}
+
+  - id: player.resurrect
+    aliases: [复活, 救活, 救人, 拉起来, 复活玩家, resurrect, revive]
+    examples: ["复活lcy", "复活 lcy", "复活玩家 lcy", "把小明救活", "再次复活", "lcy死了 拉一下", "救一下阿呆"]
+    negatives: ["全员复活", "lcy是怎么死的"]
+    # 复活是单人可逆操作：任何入口都不确认（问题 #1）。
+    tier: R1
+    confirm: none
+    receipt: {done: "已复活 {player}", pending: "已提交：复活 {player}，等待游戏确认"}
+
+  - id: player.spawn_entity
+    aliases: [生成, 刷, 生物, 座狼, 狗王, 刷怪, spawn]
+    examples: ["在lcy旁边刷两只猎犬", "给小明生成一只座狼", "在lcy附近刷3只蜘蛛", "刷个狗王给lcy打", "在阿呆身边生成兔子", "给lcy刷点蜜蜂"]
+    negatives: ["生成驯化皮弗娄牛", "生成特殊设施"]
+    # 固定白名单内的敌对生物也会影响附近其他玩家，按 R2。
+    tier: R2
+    confirm: once
+    slots:
+      entity: {role: entity}
+      count: {role: quantity}
+    receipt: {done: "已在 {player} 附近生成 {entity} ×{count}", pending: "已提交：在 {player} 附近生成 {entity} ×{count}"}
+
+  # ───────────────────────────── 房间（读） ─────────────────────────────
+  - id: room.backups.settings
+    aliases: [自动备份设置, 备份计划, 备份设置, 定时备份情况, backup schedule]
+    examples: ["自动备份开了吗", "看看备份计划", "备份设置是什么", "现在几点自动备份", "查一下定时备份情况", "自动备份保留几份"]
+    negatives: ["立即备份", "现在备份一下"]
+    tier: R0
+    confirm: none
+
+  - id: room.mods
+    aliases: [模组, mod, 模组列表, 装了哪些mod, mod配置, 模组配置]
+    examples: ["装了哪些模组", "看看mod列表", "服务器开了什么mod", "模组列表", "这个服有哪些mod", "查一下模组配置"]
+    negatives: ["设置季节", "设置自动备份"]
+    tier: R0
+    confirm: none
+
+  - id: room.network
+    aliases: [卡, 延迟, 网络, 客户端性能, 网卡不卡, netscore, ping]
+    examples: ["lcy卡不卡", "看看大家的延迟", "谁的网络不好", "玩家网络怎么样", "lcy的ping多少", "查一下客户端性能"]
+    negatives: ["最近一天CPU内存", "服务器卡不卡"]
+    tier: R0
+    confirm: none
+
+  - id: room.performance
+    aliases: [性能, performance, 负载, CPU, 内存, cpu内存, 性能报表, 卡顿, 服务器性能, 服务器卡不卡, 服务器负载, 内存占用, cpu占用]
+    examples: ["最近一天服务器CPU内存", "最近一天 CPU 内存怎么样", "过去24小时性能怎么样", "今天服务器卡不卡", "这周CPU负载", "最近一小时内存占用", "看看性能报表", "最近6小时服务器负载"]
+    negatives: ["lcy卡不卡", "玩家延迟"]
+    tier: R0
+    confirm: none
+    slots:
+      window: {role: time_range, ask: never}
+      from: {role: time_range, ask: never}
+      to: {role: time_range, ask: never}
+
+  - id: room.players
+    aliases: [谁在线, 在线人数, 名单, 在线玩家, 有谁, 几个人, online players]
+    examples: ["现在谁在线", "在线人数多少", "服里有几个人", "看看在线玩家", "有谁在玩", "在线名单"]
+    negatives: ["查一下lcy", "lcy在哪"]
+    tier: R0
+    confirm: none
+
+  - id: room.status
+    aliases: [查服, 房间信息, 服务器状态, 一服信息, 房间状态, 服务器开着吗, server status]
+    examples: ["查服", "服务器状态怎么样", "房间开着吗", "看看一服信息", "服务器现在正常吗", "房间状态"]
+    negatives: ["CPU", "内存", "重启房间"]
+    tier: R0
+    confirm: none
+
+  # ───────────────────────────── 房间（写） ─────────────────────────────
+  - id: room.backup.create
+    aliases: [备份, 快照, 立即备份, 现在备份, 备份存档, backup, snapshot]
+    examples: ["现在备份一下", "立即备份", "做个快照", "先备份再说", "帮我备份存档", "backup now"]
+    negatives: ["自动备份开了吗", "回档"]
+    # 备份不改变游戏状态，直接执行。
+    tier: R1
+    confirm: none
+    receipt: {done: "已完成备份", pending: "已提交备份任务"}
+
+  - id: room.reset
+    aliases: [重置世界, 重置全部世界, 重置存档, 重新生成世界, 重新生成地图, 删档重开, 重开世界, 新开一个档, 重置服务器, reset world]
+    examples: ["重置世界", "把服务器重置一下", "重置世界不用备份", "删档重开吧", "重新生成一个新世界", "先备份再重置世界", "这个档不要了，重开", "reset the world"]
+    negatives: ["重置角色", "重选角色", "重置玩家", "重置时间", "重置天数"]
+    # 清除全部世界进度，按 R3 输入式确认；默认先备份，用户可在确认时选择不备份。
+    tier: R3
+    confirm: typed
+    slots:
+      backup: {role: toggle, ask: never}
+    receipt: {done: "已重置全部世界", pending: "已提交重置任务"}
+
+  - id: room.backups.configure
+    aliases: [每天, 凌晨, 自动备份, 定时, 开启自动备份, 关闭自动备份, schedule backup]
+    examples: ["每天凌晨4点自动备份", "开启自动备份", "关闭自动备份", "设置每6小时备份一次", "自动备份保留10份", "定时备份改成每天中午"]
+    negatives: ["自动备份开了吗", "立即备份"]
+    tier: R2
+    confirm: once
+    slots:
+      enabled: {role: toggle}
+      schedule: {role: text, ask: never}
+      timezone: {role: text, ask: never}
+      mode: {role: enum, ask: never}
+      keep: {role: quantity, ask: never}
+      taskId: {role: internal}
+    receipt: {done: "已更新自动备份设置"}
+
+  - id: room.restart
+    aliases: [重启房间, 重启服务器, 重启, 重开服务器, restart]
+    examples: ["重启服务器", "重启一下房间", "把服重启", "服务器卡了重启下", "重开一下服务器", "restart"]
+    negatives: ["重置世界", "重启世界后回档"]
+    tier: R2
+    confirm: once
+    receipt: {done: "房间已重启", pending: "已提交重启房间"}
+
+  - id: room.save
+    aliases: [保存世界, 存档, 保存一下, 手动存档, save]
+    examples: ["保存一下世界", "存个档", "手动存档", "保存一下", "先存档", "save"]
+    negatives: ["保存地点", "保存位置"]
+    # 保存不改变游戏状态，直接执行。
+    tier: R1
+    confirm: none
+    receipt: {done: "世界已保存", pending: "已提交保存世界"}
+
+  - id: room.start
+    aliases: [启动房间, 开服, 启动服务器, 开一下服, start]
+    examples: ["开服", "启动服务器", "把房间启动", "开一下服", "服务器打开", "start"]
+    negatives: ["开启无敌模式", "开启自动备份"]
+    tier: R2
+    confirm: once
+    receipt: {done: "房间已启动", pending: "已提交启动房间"}
+
+  - id: room.stop
+    aliases: [停止房间, 关服, 停服, 关闭服务器, stop]
+    examples: ["关服", "停服", "把服务器关了", "停止房间", "今晚先关闭服务器", "stop"]
+    negatives: ["停止投票", "关闭分片"]
+    tier: R2
+    confirm: once
+    receipt: {done: "房间已停止", pending: "已提交停止房间"}
+
+  # ───────────────────────────── 工作台：附近与全员 ─────────────────────────────
+  - id: workbench.act_nearby_entities
+    aliases: [操作附近实体, 附近实体, 附近的东西, 周围的东西, 附近生物, 范围操作]
+    examples: ["把lcy附近的火灭了", "冻结lcy周围的生物", "lcy附近的树全砍了", "帮小明把附近的东西修一下", "lcy周围的作物催熟", "把lcy身边的掉落物捡起来", "对lcy附近的实体执行操作"]
+    negatives: ["清理玩家附近实体", "在玩家附近生成实体"]
+    # 父级取子动作最高风险（删除/击杀/砍挖等为 R3）。已知 action 时使用子动作策略。
+    tier: R3
+    confirm: typed
+    slots:
+      action: {role: enum}
+      prefab: {role: entity, ask: never}
+      radius: {role: quantity, ask: never}
+      layout: {role: enum, ask: never}
+    receipt: {done: "已对 {player} 附近执行：{action}", pending: "已提交：对 {player} 附近执行 {action}"}
+    actions:
+      delete: {aliases: [删除附近实体, 清除附近实体, 删掉附近的东西], examples: ["删除lcy附近的实体", "把lcy附近的东西都删了"], tier: R3, confirm: typed}
+      extinguish: {aliases: [附近灭火, 扑灭, 灭火, 着火了], examples: ["lcy附近着火了快灭火", "把小明周围的火扑灭"], tier: R2, confirm: once}
+      ignite: {aliases: [点燃附近实体, 放火, 点火], examples: ["把lcy附近的东西点燃", "在lcy周围放火"], tier: R3, confirm: typed}
+      restore: {aliases: [恢复附近生物, 回满附近生物状态, 治疗附近生物], examples: ["把lcy附近的生物回满血", "恢复lcy周围生物的状态"], tier: R2, confirm: once}
+      repair: {aliases: [修复耐久, 维修地面装备, 修装备], examples: ["修一下lcy附近地上的装备", "把lcy周围装备的耐久修满"], tier: R2, confirm: once}
+      repair_boat: {aliases: [修船, 修复船只, 船漏了], examples: ["lcy的船漏了帮忙修船", "修复小明附近的船只"], tier: R2, confirm: once}
+      freshen: {aliases: [保鲜, 恢复新鲜度, 食物保鲜], examples: ["把lcy附近的食物保鲜", "恢复lcy周围食物的新鲜度"], tier: R2, confirm: once}
+      heat: {aliases: [加热附近物品, 加热暖石, 暖石加热], examples: ["把lcy附近的暖石加热", "加热小明周围的物品"], tier: R2, confirm: once}
+      cool: {aliases: [冷却附近物品, 冷却暖石, 暖石降温], examples: ["把lcy附近的暖石冷却", "给小明周围的物品降温"], tier: R2, confirm: once}
+      salvage: {aliases: [打捞, 打捞沉物, 海底打捞], examples: ["打捞lcy附近的沉物", "帮lcy打捞海里的东西"], tier: R2, confirm: once}
+      # 作祟会让物品变质或变形，不删除实体，按 R2。
+      haunt: {aliases: [作祟, 鬼魂作祟, 附近作祟], examples: ["对lcy附近的东西作祟", "让lcy周围的物品被作祟"], tier: R2, confirm: once}
+      fertilize: {aliases: [施肥, 给植物施肥, 附近施肥], examples: ["给lcy附近的草和树苗施肥", "帮小明周围的浆果丛施肥"], tier: R2, confirm: once}
+      grow: {aliases: [推进生长, 生长一阶段, 长快点], examples: ["让lcy附近的作物长一阶段", "推进小明周围植物生长"], tier: R2, confirm: once}
+      ripen: {aliases: [催熟, 催生, 附近催熟], examples: ["把lcy附近的作物催熟", "催熟小明周围的植物"], tier: R2, confirm: once}
+      # 只重建原版科学机器/炼金引擎；面板标为 critical，但效果是修复，按 R2。
+      repair_burnt: {aliases: [重建烧毁建筑, 修复烧毁建筑, 烧掉的建筑], examples: ["重建lcy附近烧毁的科学机器", "把lcy周围烧掉的建筑修好"], tier: R2, confirm: once}
+      harvest: {aliases: [采摘植物, 收获, 收割, 采集附近], examples: ["帮lcy把附近的草和树枝收了", "收割小明周围的芦苇"], tier: R2, confirm: once}
+      pick: {aliases: [拾取地面物品, 拾取, 掉落物, 捡东西], examples: ["把lcy附近的掉落物捡起来", "帮小明拾取地上的东西"], tier: R2, confirm: once}
+      chop: {aliases: [砍树, 伐木, 砍光], examples: ["把lcy附近的树都砍了", "帮小明伐木"], tier: R3, confirm: typed}
+      mine: {aliases: [挖矿, 采矿, 敲石头], examples: ["帮lcy把附近的矿挖了", "在小明周围采矿"], tier: R3, confirm: typed}
+      hammer: {aliases: [锤毁, 拆建筑, 砸掉], examples: ["把lcy附近的建筑锤掉", "拆了小明周围的建筑"], tier: R3, confirm: typed}
+      dig: {aliases: [挖掘, 铲除, 铲掉], examples: ["把lcy附近的树桩铲掉", "挖掉小明周围的草"], tier: R3, confirm: typed}
+      till: {aliases: [耕地, 犁地, 开垦农田], examples: ["在lcy附近耕地", "帮小明犁一块3x3的地"], tier: R2, confirm: once}
+      build_complete: {aliases: [完成建造, 完成施工, 建完], examples: ["把lcy附近没建完的直接建好", "完成小明周围的施工"], tier: R2, confirm: once}
+      # 混战/电击会造成伤害甚至死亡，不可逆，按 R3。
+      chaos: {aliases: [混战, 生物互相攻击, 让怪打架], examples: ["让lcy附近的怪混战", "让小明周围的生物互相攻击"], tier: R3, confirm: typed}
+      electrocute: {aliases: [电击, 电一下, 附近电击], examples: ["电击lcy附近的生物", "把小明周围的怪电一下"], tier: R3, confirm: typed}
+      kill: {aliases: [击杀附近生物, 杀死附近生物, 清怪], examples: ["把lcy附近的怪都杀了", "清掉小明周围的生物"], tier: R3, confirm: typed}
+      freeze: {aliases: [冻结附近生物, 冻住, 冰冻, 冻结], examples: ["冻住lcy附近的猎犬", "把小明周围的生物冰冻"], tier: R2, confirm: once}
+      sleep: {aliases: [催眠, 使生物睡觉, 哄睡], examples: ["让lcy附近的生物睡觉", "催眠小明周围的怪"], tier: R2, confirm: once}
+      panic: {aliases: [惊吓, 恐慌, 吓跑], examples: ["吓跑lcy附近的生物", "让小明周围的怪恐慌"], tier: R2, confirm: once}
+      pacify: {aliases: [平息附近仇恨, 安抚生物, 别打了], examples: ["平息lcy附近的仇恨", "安抚小明周围的生物"], tier: R2, confirm: once}
+      root: {aliases: [定身, 禁锢, 定住], examples: ["把lcy附近的怪定住", "禁锢小明周围的生物"], tier: R2, confirm: once}
+      taunt: {aliases: [嘲讽, 吸引仇恨, 拉仇恨], examples: ["让lcy附近的怪嘲讽过来", "帮小明吸引周围的仇恨"], tier: R2, confirm: once}
+
+  - id: workbench.apply_all_players
+    aliases: [全部在线玩家, 所有玩家, 全员, 全服玩家, 所有人]
+    examples: ["给所有人回满状态", "全员复活", "把所有玩家都复活", "让全服玩家状态恢复", "所有人一起死一次", "本世界全部在线玩家恢复状态"]
+    negatives: ["发全服公告", "复活lcy"]
+    # 父级取子动作最高风险（全员死亡 R3）；恢复/复活为全服影响 R2。
+    tier: R3
+    confirm: typed
+    slots:
+      action: {role: enum}
+    receipt: {done: "已对本世界全部在线玩家执行：{action}"}
+    actions:
+      restore: {aliases: [全员状态恢复, 所有人回满, 全员回血], examples: ["全员回满血", "给所有人状态恢复"], tier: R2, confirm: once}
+      kill: {aliases: [全员死亡, 所有人去死, 全员击杀], examples: ["让所有人都死一次", "全员击杀"], tier: R3, confirm: typed}
+      resurrect: {aliases: [全员复活, 所有人复活, 复活所有人], examples: ["把所有人都复活", "复活全服的鬼魂"], tier: R2, confirm: once}
+
+  - id: workbench.remove_nearby_entities
+    aliases: [清理玩家附近实体, 清理附近, 删除附近指定实体, 清掉附近的]
+    examples: ["清理lcy附近的狗牙陷阱", "把lcy附近20个蜘蛛网删掉", "清掉小明附近的猎犬", "删除lcy周围的石头", "清理玩家附近的prefab", "把lcy身边的trap_teeth清掉"]
+    negatives: ["清理玩家物品", "删除世界内同类实体"]
+    tier: R3
+    confirm: typed
+    slots:
+      prefab: {role: entity}
+      radius: {role: quantity, ask: never}
+      maximum: {role: quantity, ask: never}
+    receipt: {done: "已清理 {player} 附近的 {prefab}"}
+
+  - id: workbench.move_nearby_creatures
+    aliases: [引导附近生物移动, 赶怪, 驱赶生物, 把生物引到]
+    examples: ["把lcy附近的牛赶到坐标100,200", "引导小明周围的生物移动", "把lcy附近的怪引走", "驱赶lcy附近的猪人到基地", "赶怪到别处", "让附近的生物走到指定位置"]
+    negatives: ["允许附近生物移动", "传送玩家"]
+    tier: R2
+    confirm: once
+    slots:
+      radius: {role: quantity, ask: never}
+      x: {role: location}
+      z: {role: location}
+    receipt: {done: "已引导 {player} 附近的生物移动"}
+
+  - id: workbench.set_nearby_movement
+    aliases: [允许或禁止附近生物移动, 禁止附近生物移动, 让怪别动, 冻结移动, 允许附近生物移动]
+    examples: ["让lcy附近的怪别动", "禁止小明周围的生物移动", "恢复lcy附近生物的移动", "附近的牛别乱跑", "允许附近生物移动", "让lcy周围的生物站着不动"]
+    negatives: ["冻结附近生物", "引导附近生物移动"]
+    tier: R2
+    confirm: once
+    slots:
+      enabled: {role: toggle}
+      radius: {role: quantity, ask: never}
+    receipt: {done: "已更新 {player} 附近生物的移动"}
+
+  - id: workbench.manage_followers
+    aliases: [管理附近随从, 随从, 跟班, 招募随从, 解散随从]
+    examples: ["让lcy招募附近的猪人", "解散小明的随从", "给lcy的随从回血", "喂饱lcy的跟班", "让随从永久忠诚", "管理lcy附近的随从"]
+    negatives: ["沃比饥饿回满"]
+    tier: R1
+    confirm: none
+    slots:
+      action: {role: enum}
+      radius: {role: quantity, ask: never}
+    receipt: {done: "已为 {player} 的随从执行：{action}"}
+
+  - id: workbench.relocate_players
+    aliases: [移动在线玩家, 召集玩家, 召集所有人, 集合, 交换位置, 拉到身边]
+    examples: ["把所有人召集到lcy身边", "集合到lcy这里", "把小明拉到lcy身边", "lcy和小明交换位置", "让lcy去小明那里", "召集全部玩家"]
+    negatives: ["传送到基地", "传送到地图中心"]
+    # 会移动其他玩家，按 R2。模型通道当前被禁止执行此能力（BotExecute）。
+    tier: R2
+    confirm: once
+    slots:
+      action: {role: enum}
+      other_player_id: {role: other_player, ask: never}
+    receipt: {done: "已移动玩家：{action}"}
+
+  # ───────────────────────────── 工作台：玩家状态与模式 ─────────────────────────────
+  - id: workbench.set_player_invincibility
+    aliases: [普通无敌, 仅免伤, 不补状态, invincibility]
+    examples: ["给lcy开普通无敌", "lcy只要免伤不要补状态", "关掉lcy的普通无敌", "普通无敌 lcy", "给小明开仅免伤的无敌", "工作台普通无敌开给lcy"]
+    negatives: ["开启无敌模式", "给lcy开启无敌模式", "上帝模式"]
+    tier: R1
+    confirm: none
+    slots:
+      enabled: {role: toggle}
+    receipt: {done: "已为 {player} {enabled}普通无敌"}
+
+  - id: workbench.set_player_mode
+    aliases: [设置玩家模式, 面板模式, 玩家模式, 模式开关]
+    examples: ["给lcy开穿墙模式", "给小明开超级无敌", "关闭lcy的全部面板模式", "给lcy开隐身模式", "让lcy踏水模式", "lcy开必杀模式", "解除lcy全部模式"]
+    negatives: ["lcy开了哪些模式", "模式状态"]
+    # 同一效果的兼容入口共用 Runtime 状态；prefer 只指向等价能力。
+    tier: R1
+    confirm: none
+    slots:
+      mode: {role: enum}
+      enabled: {role: toggle}
+    receipt: {done: "已为 {player} {enabled}{mode}"}
+    actions:
+      # 去掉了“无敌模式”别名：自然说法“开启无敌模式”必须落到 player.god_mode（问题 #5）。
+      invincible: {aliases: [普通无敌, 面板普通无敌], examples: ["用面板模式给lcy开普通无敌", "面板普通无敌开给lcy"], negatives: ["开启无敌模式", "给lcy开启无敌模式"], prefer: workbench.set_player_invincibility}
+      super_god: {aliases: [超级无敌, 超级上帝, 超级无敌模式], examples: ["给lcy开超级无敌", "lcy要超级上帝"], prefer: player.god_mode}
+      creative: {aliases: [统一制造模式, 统一创造模式], examples: ["用面板统一制造模式给lcy", "统一创造模式开给小明"], negatives: ["开启制作模式", "给lcy开启制作模式"], prefer: player.creative_mode}
+      health_lock: {aliases: [最低生命锁定, 锁血一滴, 留一滴血], examples: ["给lcy锁血一滴", "lcy开最低生命锁定"]}
+      one_hit: {aliases: [一击必杀, 必杀, 秒杀, 必杀模式, 一击秒杀, 秒杀模式], examples: ["给lcy开必杀模式", "lcy要一击秒杀"]}
+      invisible: {aliases: [隐身模式, 隐形模式], examples: ["给lcy开隐身模式", "让小明进入隐形模式"]}
+      water_walk: {aliases: [踏水, 水上行走, 水上走路, 踏水模式, 水上漂模式], examples: ["给lcy开踏水模式", "lcy开水上漂模式"]}
+      noclip: {aliases: [穿墙, 穿墙模式, 无碰撞], examples: ["给lcy开穿墙", "lcy开穿墙模式"]}
+      clear_all: {aliases: [解除全部模式, 关闭全部面板模式, 关掉所有模式], examples: ["解除lcy全部模式", "把小明的所有模式都关掉"]}
+
+  - id: workbench.set_mode_memory
+    aliases: [设置玩家模式记忆, 模式记忆, 记住模式, 重进保留模式]
+    examples: ["记住lcy的模式", "lcy重进也保留模式", "关闭lcy的模式记忆", "开启模式记忆", "让小明下线后保持模式", "不要记住lcy的模式"]
+    negatives: ["给lcy开穿墙模式"]
+    tier: R1
+    confirm: none
+    slots:
+      enabled: {role: toggle}
+    receipt: {done: "已为 {player} {enabled}模式记忆"}
+
+  - id: workbench.set_player_ability
+    aliases: [设置玩家能力, 玩家能力, 特殊能力, 能力开关]
+    examples: ["给lcy开无冷却", "让lcy一击必杀", "给小明开范围攻击", "lcy要水上行走", "给lcy开潜行", "给lcy解锁全部配方", "关掉lcy的免疫击退"]
+    negatives: ["设置角色专属能力"]
+    tier: R1
+    confirm: none
+    slots:
+      ability: {role: enum}
+      enabled: {role: toggle, ask: never}
+      recipe_mode: {role: enum, ask: never}
+      value: {role: quantity, ask: never}
+    receipt: {done: "已为 {player} {enabled}{ability}"}
+    actions:
+      no_cooldown: {aliases: [无冷却, 攻击无冷却, 无攻击间隔], examples: ["给lcy开攻击无冷却", "lcy打怪无冷却"]}
+      one_hit_kill: {aliases: [一击必杀, 必杀, 秒杀], examples: ["让lcy一击必杀", "lcy开秒杀"], prefer: workbench.set_player_mode}
+      aoe_attack: {aliases: [范围攻击, 群体攻击, 溅射], examples: ["给lcy开范围攻击", "让小明群体攻击"]}
+      critical_work: {aliases: [高效工作, 工作倍率, 快速砍树挖矿], examples: ["给lcy开高效工作", "lcy工作倍率调高"]}
+      water_walk: {aliases: [踏水, 水上行走, 水上走路], examples: ["让lcy水上行走", "lcy开踏水"], prefer: workbench.set_player_mode}
+      knockback_immunity: {aliases: [免疫击退, 防击退, 不被击飞], examples: ["给lcy开免疫击退", "让小明不被击飞"]}
+      no_hate: {aliases: [消除仇恨, 不被攻击, 怪不打我], examples: ["让怪不攻击lcy", "给小明开消除仇恨"]}
+      stealth: {aliases: [潜行, 隐藏模型], examples: ["给lcy开潜行", "让小明潜行"]}
+      unlock_recipes: {aliases: [解锁配方, 解锁科技, 全部配方, 全科技], examples: ["给lcy解锁全部配方", "lcy开全科技"]}
+
+  - id: workbench.set_player_lock
+    aliases: [设置玩家状态锁, 状态锁, 锁定状态, 锁定数值]
+    examples: ["给lcy锁血", "锁定lcy的体温在30度", "lcy防潮", "给小明锁定生命不低于50", "关掉lcy的锁血", "锁定lcy潮湿为0"]
+    negatives: ["锁血一滴"]
+    tier: R1
+    confirm: none
+    slots:
+      resource: {role: enum}
+      enabled: {role: toggle, ask: never}
+      value: {role: quantity}
+      value_mode: {role: enum, ask: never}
+    receipt: {done: "已为 {player} 设置状态锁：{resource}"}
+    actions:
+      health: {aliases: [锁血, 生命下限, 生命锁定], examples: ["给lcy锁血", "lcy生命锁定在一半"]}
+      moisture: {aliases: [锁定潮湿, 防潮, 湿度锁定], examples: ["lcy防潮", "锁定小明的潮湿为0"]}
+      temperature: {aliases: [锁定体温, 恒温, 温度锁定], examples: ["锁定lcy体温", "给小明恒温"]}
+
+  - id: workbench.set_player_attack_multiplier
+    aliases: [设置玩家攻击倍率, 攻击倍率, 伤害倍率, 攻击力翻倍]
+    examples: ["lcy攻击力翻倍", "把lcy的攻击倍率调成3", "小明伤害倍率改成10", "恢复lcy攻击倍率为1", "让lcy打怪伤害乘5", "设置lcy攻击倍率"]
+    negatives: ["设置时间倍率", "工作倍率"]
+    tier: R1
+    confirm: none
+    slots:
+      multiplier: {role: quantity}
+    receipt: {done: "已把 {player} 的攻击倍率设为 {multiplier}"}
+
+  - id: workbench.set_player_speed
+    aliases: [设置玩家移速, 移速, 移动速度, 跑快点, 加速]
+    examples: ["lcy移速调到2倍", "让小明跑快点", "把lcy移动速度恢复正常", "给lcy加速", "lcy移速设为1.5", "让lcy走慢点"]
+    negatives: ["设置时间倍率", "时间加速"]
+    tier: R1
+    confirm: none
+    slots:
+      multiplier: {role: quantity}
+    receipt: {done: "已把 {player} 的移速倍率设为 {multiplier}"}
+
+  - id: workbench.set_player_stat
+    aliases: [设置玩家状态, 设置饱食度, 设置理智, 设置体温, 设置潮湿]
+    examples: ["把lcy理智设为100", "lcy饥饿回满", "设置小明体温为25", "把lcy潮湿度清零", "lcy的饱食度设成50", "把lcy血量设成100"]
+    negatives: ["恢复玩家状态", "锁血"]
+    # 把生命设为极低值可能致死；仍按单人可逆的状态调整处理。
+    tier: R1
+    confirm: none
+    slots:
+      stat: {role: enum}
+      value: {role: quantity}
+    receipt: {done: "已把 {player} 的 {stat} 设为 {value}"}
+
+  - id: workbench.set_player_health_value
+    aliases: [设置玩家生命值, 生命值, 血量设为, 改血量]
+    examples: ["把lcy生命值设为200", "lcy血量设为500", "改一下小明的血量", "设置lcy生命值", "lcy的生命值改成1", "给lcy改血量到满"]
+    negatives: ["锁血", "恢复玩家状态"]
+    tier: R1
+    confirm: none
+    slots:
+      value: {role: quantity}
+    receipt: {done: "已把 {player} 的生命值设为 {value}"}
+
+  - id: workbench.set_player_hunger_rate
+    aliases: [调整饥饿消耗, 饥饿速度, 不会饿, 饿得慢]
+    examples: ["让lcy不会饿", "lcy饥饿速度减半", "恢复小明的饥饿消耗", "lcy饿得慢一点", "把lcy饥饿消耗设为0", "调整lcy的饥饿速度"]
+    negatives: ["饥饿回满"]
+    tier: R1
+    confirm: none
+    slots:
+      mode: {role: enum}
+      multiplier: {role: quantity, ask: never}
+    receipt: {done: "已调整 {player} 的饥饿消耗"}
+
+  - id: workbench.restore_player_stats
+    aliases: [恢复玩家状态, 回满状态, 三维回满, 满血满理智]
+    examples: ["给lcy回满状态", "lcy三维回满", "让小明满血满理智", "恢复lcy的状态", "lcy状态拉满", "帮阿呆回血回san"]
+    negatives: ["全员状态恢复", "复活lcy"]
+    tier: R1
+    confirm: none
+    receipt: {done: "已恢复 {player} 的状态"}
+
+  - id: workbench.clear_player_debuffs
+    aliases: [清除玩家异常状态, 清除异常, 解除负面状态, 去除debuff]
+    examples: ["清除lcy的异常状态", "去掉小明的debuff", "lcy中毒了帮忙解除", "解除lcy的负面状态", "给lcy清异常", "把lcy身上的负面效果去掉"]
+    negatives: ["清理玩家物品"]
+    tier: R1
+    confirm: none
+    receipt: {done: "已清除 {player} 的异常状态"}
+
+  - id: workbench.match_world_temperature
+    aliases: [体温设为世界温度, 体温同步, 体温正常, 体温跟环境一致]
+    examples: ["把lcy的体温设成世界温度", "lcy体温同步环境", "让小明体温正常", "lcy快冻死了把体温调成环境温度", "体温跟环境一致", "同步lcy体温"]
+    negatives: ["锁定体温", "设置世界温度"]
+    tier: R1
+    confirm: none
+    receipt: {done: "已把 {player} 的体温设为世界温度"}
+
+  - id: workbench.adjust_player_luck
+    aliases: [调整玩家幸运值, 幸运值, 加幸运, 清除幸运]
+    examples: ["给lcy加幸运值", "减少小明的幸运", "清空lcy的幸运值", "lcy幸运值加一点", "调整lcy的幸运", "把lcy的幸运清零"]
+    negatives: ["查询并公告幸运值"]
+    tier: R1
+    confirm: none
+    slots:
+      mode: {role: enum}
+    receipt: {done: "已调整 {player} 的幸运值：{mode}"}
+
+  - id: workbench.clear_player_naughtiness
+    aliases: [设置淘气值事件, 淘气值, 坎普斯, 清除淘气值]
+    examples: ["清空lcy的淘气值", "给lcy刷一只坎普斯", "lcy淘气值清零", "在lcy身边随机刷坎普斯", "重置小明的淘气值", "lcy杀兔子太多了清淘气"]
+    negatives: ["查询并公告淘气值"]
+    # 子模式包含生成敌对的坎普斯（会偷附近物品），按 R2 一次确认。
+    tier: R2
+    confirm: once
+    slots:
+      mode: {role: enum}
+    receipt: {done: "已为 {player} 执行淘气值操作：{mode}"}
+
+  - id: workbench.set_health_penalty
+    aliases: [调整生命上限惩罚, 生命上限惩罚, 血量上限, 复活惩罚]
+    examples: ["清除lcy的生命上限惩罚", "lcy血量上限恢复", "增加小明的生命上限惩罚", "减少lcy的复活惩罚", "把lcy血上限惩罚去掉", "调整lcy的生命上限惩罚"]
+    negatives: ["设置玩家生命值"]
+    tier: R1
+    confirm: none
+    slots:
+      mode: {role: enum}
+    receipt: {done: "已调整 {player} 的生命上限惩罚：{mode}"}
+
+  - id: workbench.set_monkey_curse
+    aliases: [设置猴子诅咒, 猴子诅咒, 猴化, 解除猴子诅咒]
+    examples: ["解除lcy的猴子诅咒", "给lcy加猴子诅咒", "lcy变猴子了帮忙解除", "去掉小明的猴化", "lcy猴子诅咒清掉", "设置猴子诅咒"]
+    negatives: ["鱼人王"]
+    tier: R1
+    confirm: none
+    slots:
+      mode: {role: enum}
+    receipt: {done: "已为 {player} 设置猴子诅咒：{mode}"}
+
+  - id: workbench.manage_player_skills
+    aliases: [管理玩家洞察技能, 洞察技能, 技能树, 技能点, 重置技能]
+    examples: ["给lcy加技能经验", "重置lcy的技能树", "小明技能点不够加点经验", "lcy洞察技能重置", "给lcy技能树加满经验", "管理玩家技能"]
+    negatives: ["重新同步技能数据"]
+    # reset 只清空分配，经验仍在，可重新加点，按单人可逆。
+    tier: R1
+    confirm: none
+    slots:
+      mode: {role: enum}
+    receipt: {done: "已为 {player} 执行技能操作：{mode}"}
+
+  - id: workbench.repair_skill_sync
+    aliases: [重新同步技能数据, 技能同步, 技能不同步, 修复技能]
+    examples: ["lcy的技能不同步了", "重新同步lcy的技能数据", "修复小明的技能", "lcy技能树显示不对", "技能同步一下", "帮lcy修技能数据"]
+    negatives: ["重置技能树"]
+    tier: R1
+    confirm: none
+    receipt: {done: "已重新同步 {player} 的技能数据"}
+
+  - id: workbench.reveal_player_map
+    aliases: [为玩家显示本世界地图, 开全图, 点亮地图, 地图全开]
+    examples: ["给lcy开全图", "点亮lcy的地图", "lcy地图全开", "让小明看到整个地图", "给lcy显示本世界地图", "帮lcy把地图迷雾去掉"]
+    # “查看地图”是看地图图片（待新增 room.map.view），不是给玩家开全图。
+    negatives: ["查看地图", "看地图", "发地图"]
+    tier: R1
+    confirm: none
+    receipt: {done: "已为 {player} 显示本世界地图"}
+
+  - id: workbench.toggle_player_ghost
+    aliases: [切换幽灵状态, 变成幽灵, 变鬼, 幽灵状态]
+    examples: ["把lcy变成幽灵", "lcy变鬼", "切换小明的幽灵状态", "让lcy进入幽灵状态", "lcy幽灵状态切换一下", "把lcy切成鬼魂"]
+    negatives: ["复活lcy", "全员复活"]
+    # 由活人切到幽灵等同死亡（掉落物品、不可逆），方向在执行前未知，保守按 R3。
+    tier: R3
+    confirm: typed
+    receipt: {done: "已切换 {player} 的幽灵状态"}
+
+  - id: workbench.unlock_player_recipe
+    aliases: [解锁单个配方, 解锁配方给, 学会配方, 解锁某个配方]
+    examples: ["给lcy解锁火腿棒配方", "让lcy学会暗夜剑", "解锁小明的冰箱配方", "lcy解锁一个配方", "帮lcy解锁 nightsword", "单独解锁lcy的配方"]
+    negatives: ["解锁全部配方", "全科技"]
+    tier: R1
+    confirm: none
+    slots:
+      recipe: {role: item}
+    receipt: {done: "已为 {player} 解锁配方 {recipe}"}
+
+  - id: workbench.restore_woodie_human
+    aliases: [伍迪恢复人形, 伍迪变回人, 解除变身, 伍迪人形]
+    examples: ["让伍迪恢复人形", "lcy是伍迪帮他变回人", "解除lcy的变身", "伍迪变回人形", "把小明从河狸变回来", "伍迪人形"]
+    negatives: ["伍迪变河狸", "伍迪变大鹅"]
+    tier: R1
+    confirm: none
+    receipt: {done: "已让 {player} 恢复人形"}
+
+  - id: workbench.set_wanda_age
+    aliases: [调整旺达年龄, 旺达年龄, 旺达变年轻, 旺达变老]
+    examples: ["让旺达变年轻", "lcy是旺达帮她变老", "调整旺达年龄为正常", "旺达年龄改成年轻", "让小明的旺达恢复正常年龄", "旺达变老"]
+    negatives: ["沃特形态"]
+    tier: R1
+    confirm: none
+    slots:
+      age: {role: enum}
+    receipt: {done: "已把 {player} 的年龄调整为 {age}"}
+
+  - id: workbench.set_wurt_form
+    aliases: [切换沃特形态, 沃特形态, 沃特变身, 沃特皇家]
+    examples: ["让沃特变皇家形态", "lcy的沃特切回普通形态", "切换沃特形态", "沃特变身皇家", "小明的沃特恢复普通", "沃特皇家形态"]
+    negatives: ["旺达年龄"]
+    tier: R1
+    confirm: none
+    slots:
+      form: {role: enum}
+    receipt: {done: "已切换 {player} 的沃特形态：{form}"}
+    actions:
+      normal: {aliases: [沃特普通形态, 沃特普通, 沃特恢复普通], examples: ["沃特切回普通形态", "让lcy的沃特恢复普通"]}
+      royal: {aliases: [沃特皇家形态, 沃特皇家化, 皇家沃特], examples: ["沃特变皇家形态", "让小明变皇家沃特"]}
+
+  # ───────────────────────────── 工作台：世界与时间 ─────────────────────────────
+  - id: workbench.skip_days
+    aliases: [跳过天数, 跳过一天, 跳天, 跳过几天, 快进一天, 推进一天, 直接到明天, 下一天, 跳过两天]
+    examples: ["跳过一天", "帮我跳过两天", "直接跳到明天", "快进 3 天", "跳过三天", "跳两天", "推进一天吧", "过一天"]
+    negatives: ["跳过这个话题", "跳过教程", "跳到第100天"]
+    tier: R2
+    confirm: once
+    slots:
+      days: {role: quantity, ask: if_missing}
+    receipt: {done: "已跳过 {days} 天", pending: "已提交跳过 {days} 天，等待游戏确认"}
+
+  - id: workbench.set_world_day
+    aliases: [跳到指定天数, 设置天数, 改天数, 跳到第几天]
+    examples: ["跳到第100天", "把天数改成50", "设置世界天数为20", "直接到第365天", "天数设为1", "跳到第几天都行 先到第30天"]
+    negatives: ["跳过一天", "跳过两天"]
+    tier: R2
+    confirm: once
+    slots:
+      day: {role: quantity}
+    receipt: {done: "已把世界天数设为第 {day} 天"}
+
+  - id: workbench.next_phase
+    aliases: [推进昼夜阶段, 下一个阶段, 跳到下一阶段, 快进到晚上, 天黑, 天亮]
+    examples: ["推进到下一个阶段", "直接天黑", "快点天亮", "跳到下一阶段", "现在进入下一个时段", "快进到晚上"]
+    negatives: ["跳过一天", "全天白昼"]
+    tier: R2
+    confirm: once
+    receipt: {done: "已推进到下一个昼夜阶段"}
+
+  - id: workbench.set_phase
+    aliases: [设置昼夜阶段, 设为白天, 设为黄昏, 设为夜晚, 切到白天, 变成晚上]
+    examples: ["切到白天", "现在设为黄昏", "把时间改成夜晚", "设为白天", "变成晚上", "昼夜阶段改为白天"]
+    negatives: ["全天白昼", "永夜"]
+    tier: R2
+    confirm: once
+    slots:
+      phase: {role: enum}
+    receipt: {done: "已把昼夜阶段设为 {phase}"}
+
+  - id: workbench.set_daylight_mode
+    aliases: [设置全天白昼或黑夜, 全天白昼, 全天黑夜, 永昼, 永夜]
+    examples: ["开启永昼", "全天黑夜", "恢复正常昼夜", "一直白天", "让世界一直是黑夜", "解除永夜"]
+    negatives: ["切到白天", "推进到下一个阶段"]
+    tier: R2
+    confirm: once
+    slots:
+      mode: {role: enum}
+    receipt: {done: "已设置昼夜方式：{mode}"}
+    actions:
+      day: {aliases: [全天白昼, 永昼, 一直白天], examples: ["开启永昼", "让世界一直白天"]}
+      night: {aliases: [全天黑夜, 永夜, 日食, 一直黑夜], examples: ["开启永夜", "全天都是黑夜"]}
+      restore: {aliases: [恢复昼夜, 解除永昼, 解除永夜, 正常昼夜], examples: ["恢复正常昼夜", "解除永昼"]}
+
+  - id: workbench.set_clock_segments
+    aliases: [设置昼夜时段, 昼夜时长, 白天时长, 夜晚时长, 时段分配]
+    examples: ["白天设为12段", "把夜晚缩短成1段", "昼夜时段改成10 4 2", "白天长一点", "黄昏改成2段", "设置昼夜时长"]
+    negatives: ["设置时间倍率", "全天白昼"]
+    tier: R2
+    confirm: once
+    slots:
+      day: {role: quantity, ask: never}
+      dusk: {role: quantity, ask: never}
+      night: {role: quantity, ask: never}
+    receipt: {done: "已设置昼夜时段：白天 {day} / 黄昏 {dusk} / 夜晚 {night}"}
+
+  - id: workbench.set_time_scale
+    aliases: [设置时间倍率, 时间倍率, 时间加速, 时间流速, 加快时间]
+    examples: ["时间加速到2倍", "把时间倍率设为1", "时间流速调慢一半", "加快时间", "暂停时间流逝", "时间倍率改成3"]
+    negatives: ["移速", "攻击倍率"]
+    tier: R2
+    confirm: once
+    slots:
+      multiplier: {role: quantity}
+    receipt: {done: "已把时间倍率设为 {multiplier}"}
+
+  - id: workbench.set_season
+    aliases: [设置季节, 换季, 改季节, 切换季节, 变成冬天, 变成夏天]
+    examples: ["切换到冬天", "现在改成春天", "换季到秋天", "设置季节为夏天", "直接进入冬季", "季节改成春季"]
+    negatives: ["季节还剩几天"]
+    tier: R2
+    confirm: once
+    slots:
+      season: {role: enum}
+    receipt: {done: "已把季节设为 {season}"}
+
+  - id: workbench.set_moon_phase
+    aliases: [设置月相, 月相, 满月, 新月]
+    examples: ["设为满月", "月相改成新月", "今晚满月", "月相调成半月", "设置月相为四分之三", "把月亮变成满月"]
+    negatives: ["月雹", "月球风暴"]
+    tier: R2
+    confirm: once
+    slots:
+      phase: {role: enum}
+    receipt: {done: "已把月相设为 {phase}"}
+
+  - id: workbench.set_precipitation
+    aliases: [设置降水, 下雨, 停雨, 下雪, 天气]
+    examples: ["让它下雨", "停雨", "现在下雪", "恢复自然天气", "雨停了吧", "开始降水"]
+    negatives: ["酸雨", "青蛙雨"]
+    tier: R2
+    confirm: once
+    slots:
+      mode: {role: enum}
+    receipt: {done: "已设置降水：{mode}"}
+
+  - id: workbench.set_world_temperature
+    aliases: [设置世界温度, 世界温度, 环境温度, 固定温度]
+    examples: ["世界温度固定20度", "把环境温度设为30", "恢复动态温度", "固定温度为15度", "世界温度别变", "环境温度调低"]
+    negatives: ["体温设为世界温度", "锁定体温"]
+    tier: R2
+    confirm: once
+    slots:
+      mode: {role: enum}
+      value: {role: quantity, ask: never}
+    receipt: {done: "已设置世界温度：{mode}"}
+
+  - id: workbench.set_world_wetness
+    aliases: [设置世界湿度, 世界湿度, 地面湿度, 湿度清零]
+    examples: ["世界湿度清零", "把地面湿度设为0", "世界湿度调成50", "湿度清零", "让地面干燥", "设置世界湿度"]
+    negatives: ["锁定潮湿", "防潮"]
+    tier: R2
+    confirm: once
+    slots:
+      value: {role: quantity}
+    receipt: {done: "已把世界湿度设为 {value}"}
+
+  - id: workbench.set_special_event
+    aliases: [设置特殊活动, 特殊活动, 节日活动, 万圣节, 冬季盛宴, 鸦年华]
+    examples: ["开启万圣节活动", "切换到冬季盛宴", "关闭节日活动", "开鸦年华", "设置特殊活动为猪年", "恢复默认活动"]
+    negatives: ["触发世界事件"]
+    tier: R2
+    confirm: once
+    slots:
+      event: {role: enum}
+    receipt: {done: "已设置特殊活动：{event}"}
+
+  - id: workbench.set_nightmare_segments
+    aliases: [设置远古周期时长, 远古周期, 噩梦周期, 远古时长]
+    examples: ["远古周期平静改成6段", "噩梦周期暴动缩短", "设置远古时长", "远古平静时间长一点", "调整噩梦周期", "远古周期恢复默认"]
+    negatives: ["远古暴动", "重置远古"]
+    tier: R2
+    confirm: once
+    slots:
+      calm: {role: quantity, ask: never}
+      warn: {role: quantity, ask: never}
+      wild: {role: quantity, ask: never}
+      dawn: {role: quantity, ask: never}
+    receipt: {done: "已设置远古周期时长"}
+
+  - id: workbench.trigger_world_event
+    aliases: [触发世界事件, 世界事件, 天象, 触发事件]
+    examples: ["来一场流星雨", "在lcy身边打个雷", "触发地震", "下月雹", "来场酸雨", "触发远古暴动", "重置远古"]
+    negatives: ["设置特殊活动", "设置降水"]
+    # 全部子事件都影响所选世界；重置远古是游戏内周期性事件，按 R2 一次确认。
+    tier: R2
+    confirm: once
+    slots:
+      event: {role: enum}
+      player_id: {role: target_player, ask: never}
+    receipt: {done: "已触发世界事件：{event}"}
+    actions:
+      lightning: {aliases: [闪电, 打雷, 雷击], examples: ["在lcy身边打雷", "劈个闪电"]}
+      earthquake: {aliases: [地震, 震动, 洞穴地震], examples: ["触发地震", "来一次洞穴地震"]}
+      lunar_hail: {aliases: [月雹, 月亮冰雹, 下月雹], examples: ["下月雹", "来一场月亮冰雹"]}
+      meteor_shower: {aliases: [流星雨, 陨石, 陨石雨], examples: ["来一场流星雨", "在lcy附近下陨石"]}
+      acid_rain: {aliases: [酸雨, 下酸雨], examples: ["来场酸雨", "下酸雨"]}
+      moon_storm: {aliases: [月球风暴, 月亮风暴, 月风暴], examples: ["触发月球风暴", "来一场月亮风暴"]}
+      nightmare_calm: {aliases: [远古平静, 噩梦平静], examples: ["远古切到平静", "触发噩梦平静"]}
+      nightmare_warn: {aliases: [远古警告, 噩梦警告], examples: ["远古进入警告", "触发噩梦警告"]}
+      nightmare_wild: {aliases: [远古暴动, 噩梦暴动], examples: ["触发远古暴动", "噩梦暴动开始"]}
+      nightmare_dawn: {aliases: [远古消退, 噩梦消退], examples: ["远古进入消退", "触发噩梦消退"]}
+      reset_ruins: {aliases: [重置远古, 刷新远古, 远古重置], examples: ["重置远古", "刷新一下远古遗迹"]}
+
+  - id: workbench.trigger_incident
+    aliases: [触发突发事件, 突发事件, 猎犬来袭, 放狗, 青蛙雨, 海盗]
+    examples: ["在lcy那放一波狗", "触发猎犬来袭", "下青蛙雨", "让海盗来找lcy", "在小明附近刷蠕虫", "触发巨型蠕虫"]
+    negatives: ["刷两只猎犬", "触发世界事件"]
+    tier: R2
+    confirm: once
+    slots:
+      incident: {role: enum}
+    receipt: {done: "已在 {player} 处触发突发事件：{incident}"}
+
+  - id: workbench.stop_vote
+    aliases: [停止投票, 取消投票, 结束投票, 终止投票]
+    examples: ["停止投票", "取消当前投票", "把投票结束", "有人发起踢人投票 取消掉", "终止投票", "别投了 停止投票"]
+    negatives: ["停止房间", "停服"]
+    tier: R2
+    confirm: once
+    receipt: {done: "已停止当前投票"}
+
+  - id: workbench.shutdown
+    aliases: [关闭分片, 关闭世界, 关洞穴, 停止分片]
+    examples: ["关闭洞穴分片", "把地面世界关掉", "关闭分片", "停止洞穴世界", "关洞穴", "只关闭地面"]
+    negatives: ["关服", "停止房间"]
+    tier: R2
+    confirm: once
+    receipt: {done: "已关闭分片 {world}"}
+
+  - id: workbench.regenerate
+    aliases: [重置全部世界, 重置世界, 重新生成世界, 删档重开, 重新开档, 重开世界, 世界重置]
+    examples: ["重置世界", "重新生成世界", "删档重开", "把世界重置了", "重新开一个档", "服务器重开一个新世界", "世界重置一下"]
+    negatives: ["重置玩家", "重置角色", "重置远古", "重启服务器"]
+    # 删除当前世界并重新生成，不可逆。room.reset（先备份再重置）上线后是规范能力。
+    prefer: room.reset
+    tier: R3
+    confirm: typed
+    receipt: {done: "已重置全部世界", pending: "已提交重置全部世界"}
+
+  - id: workbench.rollback
+    aliases: [回档, 回滚, 回到之前, 退回存档]
+    examples: ["回档一天", "回滚到上一个存档", "回档2个点", "退回昨天的存档", "回到之前的存档", "服务器回档"]
+    negatives: ["立即备份", "重置世界"]
+    tier: R3
+    confirm: typed
+    slots:
+      days: {role: quantity}
+    receipt: {done: "已回档 {days} 个存档点"}
+
+  - id: workbench.save_world
+    aliases: [工作台保存世界, 分片存档, 保存分片]
+    examples: ["保存地面分片", "工作台保存世界", "单独存一下洞穴", "分片存档", "保存当前分片", "只保存地面"]
+    negatives: ["保存地点"]
+    prefer: room.save
+    # 保存不改变游戏状态，直接执行。
+    tier: R1
+    confirm: none
+    receipt: {done: "已保存 {world}"}
+
+  - id: workbench.remove_world_roads
+    aliases: [移除道路, 删除道路, 去掉卵石路, 清除道路]
+    examples: ["移除世界里的道路", "把卵石路都删掉", "清除地面所有道路", "删除道路", "去掉地图上的路", "道路全拆了"]
+    negatives: ["铺设地皮"]
+    tier: R3
+    confirm: typed
+    receipt: {done: "已移除 {world} 的道路"}
+
+  - id: workbench.edit_world_tiles
+    aliases: [铺设地皮, 铺地皮, 改地皮, 地皮编辑]
+    examples: ["在坐标0,0铺一块木地板", "把这里改成草地地皮", "铺3x3的卵石路", "改地皮为沼泽", "在100,200铺地毯", "编辑世界地皮"]
+    negatives: ["给予地皮物品", "给lcy地皮"]
+    tier: R3
+    confirm: typed
+    slots:
+      tile: {role: enum}
+      x: {role: location}
+      z: {role: location}
+      size: {role: quantity, ask: never}
+    receipt: {done: "已在 ({x}, {z}) 铺设 {tile}"}
+
+  - id: workbench.remove_world_entities
+    aliases: [移除世界内同类实体, 全图删除, 删除全世界, 清除所有同类]
+    examples: ["删除全世界的蜘蛛巢", "把地图上所有猎犬丘清掉", "全图删除触手", "清除所有同类的prefab", "全世界的狗牙陷阱删掉", "移除世界里所有的海象营地"]
+    negatives: ["清理玩家附近实体", "统计全世界同类数量"]
+    tier: R3
+    confirm: typed
+    slots:
+      prefab: {role: entity}
+      include_inventory: {role: toggle, ask: never}
+    receipt: {done: "已移除 {world} 内的 {prefab}"}
+
+  # ───────────────────────────── 工作台：发放物品 ─────────────────────────────
+  - id: workbench.give_item
+    aliases: [给予玩家物品, 按代码发物品, 发整组, prefab发放]
+    examples: ["用prefab给lcy发flint", "给lcy发一整组goldnugget", "按代码给小明发10个log", "工作台给予玩家物品", "给lcy发两组cutgrass", "按堆叠发lcy石头"]
+    negatives: ["给lcy开启无敌模式"]
+    # 重复实现：规范能力是 player.give_item（中文物品名解析 + 回执）。
+    prefer: player.give_item
+    tier: R1
+    confirm: none
+    slots:
+      prefab: {role: item}
+      count: {role: quantity, ask: never}
+      quantity_mode: {role: enum, ask: never}
+    receipt: {done: "已给 {player} 发放 {prefab} ×{count}"}
+
+  - id: workbench.give_blueprint
+    aliases: [给予配方蓝图, 蓝图, 发蓝图, 给蓝图]
+    examples: ["给lcy一张冰箱蓝图", "发个暗夜剑蓝图给小明", "给lcy蓝图 icebox", "给阿呆3张蓝图", "lcy要一张蓝图", "发蓝图给lcy"]
+    negatives: ["解锁配方"]
+    tier: R1
+    confirm: none
+    slots:
+      prefab: {role: item}
+      count: {role: quantity, ask: never}
+    receipt: {done: "已给 {player} 发放 {prefab} 蓝图 ×{count}"}
+
+  - id: workbench.give_recipe_materials
+    aliases: [给予制作材料, 制作材料, 配方材料, 发材料]
+    examples: ["给lcy一份做冰箱的材料", "发两份暗夜剑材料给小明", "给lcy制作材料 icebox", "lcy要做背包 给材料", "发材料给lcy做科学机器", "给阿呆配方材料"]
+    negatives: ["给lcy蓝图"]
+    tier: R1
+    confirm: none
+    slots:
+      prefab: {role: item}
+      count: {role: quantity, ask: never}
+    receipt: {done: "已给 {player} 发放 {prefab} 的制作材料 ×{count}"}
+
+  - id: workbench.give_character_supplies
+    aliases: [发放角色用品, 角色用品, 角色专属物品, 专属道具]
+    examples: ["给薇洛发打火机", "给lcy发沃尔夫冈的哑铃", "给韦伯发蜘蛛哨", "发角色用品给小明", "给lcy来一个伍迪的斧头", "沃拓克斯要灵魂 给专属道具"]
+    negatives: ["发放基础工具"]
+    tier: R1
+    confirm: none
+    slots:
+      character: {role: enum}
+      prefab: {role: item}
+      count: {role: quantity, ask: never}
+    receipt: {done: "已给 {player} 发放角色用品 {prefab} ×{count}"}
+
+  - id: workbench.give_starter_kit
+    aliases: [发放基础工具, 新手礼包, 基础工具, 开局工具]
+    examples: ["给lcy发新手礼包", "给新人一套基础工具", "小明刚进来 发开局工具", "发放基础工具给lcy", "给阿呆斧头镐子", "给lcy来套基础工具"]
+    negatives: ["发放角色用品"]
+    tier: R1
+    confirm: none
+    receipt: {done: "已给 {player} 发放基础工具"}
+
+  - id: workbench.give_turf
+    aliases: [给予地皮物品, 地皮物品, 给地皮, 发地皮]
+    examples: ["给lcy一些木地板", "发卵石路地皮给小明", "给lcy地皮 草地", "lcy要地毯地皮", "给阿呆发几块棋盘地板", "给lcy地皮"]
+    negatives: ["铺设地皮", "在这里铺地皮"]
+    tier: R1
+    confirm: none
+    slots:
+      tile: {role: enum}
+    receipt: {done: "已给 {player} 发放地皮 {tile}"}
+
+  # ───────────────────────────── 工作台：生成 ─────────────────────────────
+  - id: workbench.spawn_entity
+    aliases: [在玩家附近生成实体, 生成实体, 按代码生成, 刷实体]
+    examples: ["在lcy附近生成一个pigman", "按代码在小明身边刷beefalo", "在lcy旁边生成3个hound", "刷实体 deerclops", "在lcy附近生成一只巨鹿", "生成实体给lcy"]
+    negatives: ["刷两只猎犬", "生成驯化皮弗娄牛"]
+    # 可生成任意实体（含 Boss），按破坏性处理。
+    tier: R3
+    confirm: typed
+    slots:
+      prefab: {role: entity}
+      count: {role: quantity}
+    receipt: {done: "已在 {player} 附近生成 {prefab} ×{count}"}
+
+  - id: workbench.spawn_near_player
+    aliases: [在玩家附近批量生成, 批量生成, 批量刷, 一次刷很多]
+    examples: ["在lcy附近批量生成20棵树", "批量刷10个兔子洞给小明", "一次刷很多浆果丛", "在lcy身边批量生成石头", "给lcy批量刷草", "批量生成40个树苗"]
+    negatives: ["生成整齐排列的实体"]
+    tier: R3
+    confirm: typed
+    slots:
+      prefab: {role: entity}
+      count: {role: quantity}
+      skin: {role: text, ask: never}
+    receipt: {done: "已在 {player} 附近批量生成 {prefab} ×{count}"}
+
+  - id: workbench.spawn_entity_at
+    aliases: [在地图选点生成, 指定坐标生成, 选点生成, 坐标刷]
+    examples: ["在坐标100,200生成一个猪王", "在地图选点刷浆果丛", "指定坐标生成箱子", "在0,0刷一个虫洞", "选点生成5个树苗", "坐标刷一个科学机器"]
+    negatives: ["在玩家附近生成"]
+    tier: R3
+    confirm: typed
+    slots:
+      prefab: {role: entity}
+      x: {role: location}
+      z: {role: location}
+      count: {role: quantity}
+      skin: {role: text, ask: never}
+    receipt: {done: "已在 ({x}, {z}) 生成 {prefab} ×{count}"}
+
+  - id: workbench.spawn_entity_array
+    aliases: [生成整齐排列的实体, 阵列, 整齐排列, 方阵]
+    examples: ["在lcy旁边生成蜂箱阵列", "给小明刷一个池塘阵列", "生成巨石树阵列一", "在lcy附近摆一排岩石树", "整齐排列4个蜂箱", "做个方阵"]
+    negatives: ["批量生成"]
+    tier: R3
+    confirm: typed
+    slots:
+      layout: {role: enum}
+      count: {role: quantity, ask: never}
+      spacing: {role: quantity, ask: never}
+    receipt: {done: "已在 {player} 附近生成 {layout} 阵列"}
+    actions:
+      rock_tree_1: {aliases: [巨石树阵列一, 岩石树阵列一], examples: ["生成巨石树阵列一", "在lcy旁边刷岩石树阵列一"]}
+      rock_tree_2: {aliases: [巨石树阵列二, 岩石树阵列二], examples: ["生成巨石树阵列二", "在lcy旁边刷岩石树阵列二"]}
+      beebox: {aliases: [蜂箱阵列, 一排蜂箱], examples: ["在lcy旁边生成蜂箱阵列", "给小明摆一排蜂箱"]}
+      pond: {aliases: [池塘阵列, 一排池塘], examples: ["给lcy刷一个池塘阵列", "生成一排池塘"]}
+
+  - id: workbench.spawn_special_structure
+    aliases: [生成特殊游戏设施, 特殊设施, 生成设施, 特殊建筑]
+    examples: ["在lcy旁边放个攻速人偶", "生成一对链接虫洞", "刷一只梦魇疯猪", "给lcy天体英雄召唤材料", "刷新拾荒疯猪", "生成特殊设施"]
+    negatives: ["生成驯化皮弗娄牛"]
+    tier: R3
+    confirm: typed
+    slots:
+      kind: {role: enum}
+      x: {role: location, ask: never}
+      z: {role: location, ask: never}
+    receipt: {done: "已生成特殊设施：{kind}"}
+    actions:
+      training_dummy: {aliases: [攻速人偶, 伤害人偶, DPS人偶, 训练假人], examples: ["在lcy旁边放个攻速人偶", "给小明一个DPS人偶"]}
+      wormhole_pair: {aliases: [链接虫洞, 成对虫洞, 一对虫洞], examples: ["生成一对链接虫洞", "在这里和100,200之间建成对虫洞"]}
+      nightmare_werepig: {aliases: [梦魇疯猪, 束缚疯猪], examples: ["刷一只梦魇疯猪", "生成束缚疯猪"]}
+      celestial_materials: {aliases: [天体英雄召唤材料, 天体祭坛, 天体材料], examples: ["给lcy天体英雄召唤材料", "生成天体祭坛"]}
+      scrap_daywalker: {aliases: [刷新拾荒疯猪, 拾荒疯猪], examples: ["刷新拾荒疯猪", "生成一只拾荒疯猪"]}
+
+  - id: workbench.spawn_player_entity
+    aliases: [受控生成玩家附近生物, 受控生成, 白名单生成, 受控刷怪]
+    examples: ["受控生成两只猎犬在lcy旁", "白名单生成蜘蛛给小明", "受控刷怪 hound", "在lcy附近受控生成兔子", "用白名单给lcy刷座狼", "受控生成3只蜜蜂"]
+    negatives: ["在玩家附近生成实体"]
+    # 与 player.spawn_entity 同一白名单；面板标 critical，策略保持 R3，并 prefer 专用接口。
+    prefer: player.spawn_entity
+    tier: R3
+    confirm: typed
+    slots:
+      prefab: {role: entity}
+      count: {role: quantity}
+    receipt: {done: "已在 {player} 附近生成 {prefab} ×{count}"}
+
+  - id: workbench.spawn_domesticated_beefalo
+    aliases: [生成驯化皮弗娄牛, 驯化牛, 皮弗娄牛, 战斗牛, 骑行牛]
+    examples: ["给lcy一头驯化好的牛", "生成一头战斗牛", "给小明刷一头骑行牛带鞍", "来一头驯化皮弗娄牛", "给lcy一头肥牛", "生成驯化牛 带牛铃"]
+    negatives: ["生成实体 beefalo"]
+    # 只在玩家身边生成一头驯化牛，影响有限。
+    tier: R1
+    confirm: none
+    slots:
+      tendency: {role: enum}
+      bell: {role: enum, ask: never}
+      saddle: {role: enum, ask: never}
+      domestication: {role: quantity, ask: never}
+      health: {role: quantity, ask: never}
+      hunger: {role: quantity, ask: never}
+      obedience: {role: quantity, ask: never}
+      ornery: {role: quantity, ask: never}
+      pudgy: {role: quantity, ask: never}
+      rider: {role: quantity, ask: never}
+    receipt: {done: "已在 {player} 附近生成驯化皮弗娄牛（{tendency}）"}
+
+  - id: workbench.ripen_giant_crops
+    aliases: [催熟巨大农作物, 巨大作物, 巨型作物, 催熟巨大作物]
+    examples: ["把lcy附近的作物催成巨大作物", "催熟巨大农作物", "让小明的农田长出巨型作物", "lcy附近作物变巨大", "催熟巨大作物", "巨大作物马上成熟"]
+    negatives: ["附近催熟"]
+    # 有界范围、只对作物有益，按单人可逆处理。
+    tier: R1
+    confirm: none
+    slots:
+      radius: {role: quantity, ask: never}
+    receipt: {done: "已催熟 {player} 附近的巨大农作物"}
+
+  - id: workbench.fertilize_farm_soil
+    aliases: [补充农田养分和水分, 农田养分, 农田浇水, 农田施肥]
+    examples: ["给lcy附近的农田补充养分", "农田浇水", "帮小明的农田施肥", "补满农田养分和水分", "lcy的田缺水了", "农田施肥"]
+    negatives: ["给植物施肥"]
+    # 有界范围、只对农田有益，按单人可逆处理。
+    tier: R1
+    confirm: none
+    slots:
+      radius: {role: quantity, ask: never}
+    receipt: {done: "已为 {player} 附近的农田补充养分和水分"}
+
+  # ───────────────────────────── 工作台：传送 ─────────────────────────────
+  - id: workbench.teleport_player
+    aliases: [传送玩家, 传送到玩家身边, 传到某人旁边, 拉到某人旁边]
+    examples: ["把lcy传送到小明身边", "lcy传到阿呆旁边", "让lcy去小明那", "传送玩家lcy到小明", "把小明传送到lcy身边", "lcy传送到我这"]
+    negatives: ["传送到基地", "召集所有人"]
+    # 只移动目标玩家本人，按 R1；模型通道当前被禁止执行此能力（BotExecute）。
+    tier: R1
+    confirm: none
+    slots:
+      destination_id: {role: other_player}
+    receipt: {done: "已把 {player} 传送到目标玩家身边"}
+
+  - id: workbench.teleport_to_nearest_entity
+    aliases: [传送到最近实体, 传送到最近的, 找最近的, 送到最近]
+    examples: ["把lcy传送到最近的猪王", "lcy去最近的虫洞", "传送小明到最近的蜂箱", "送到最近的远古祭坛", "找最近的海象营地传过去", "lcy传送到最近的牛"]
+    negatives: ["传送到下一个同类实体"]
+    tier: R1
+    confirm: none
+    slots:
+      prefab: {role: entity}
+    receipt: {done: "已把 {player} 传送到最近的 {prefab}"}
+
+  - id: workbench.cycle_entity_teleport
+    aliases: [传送到下一个同类实体, 下一个同类, 轮流传送, 逐个传送]
+    examples: ["把lcy传到下一个蜘蛛巢", "轮流传送到每个猪人房", "lcy去下一个同类实体", "逐个传送到海象营地", "下一个触手", "再传到下一个"]
+    negatives: ["传送到最近实体"]
+    tier: R1
+    confirm: none
+    slots:
+      prefab: {role: entity}
+    receipt: {done: "已把 {player} 传送到下一个 {prefab}"}
+
+  - id: workbench.teleport_world_center
+    aliases: [传送到地图中心, 地图中心, 回到中心, 世界中心]
+    examples: ["把lcy传送到地图中心", "lcy回到中心", "送小明去世界中心", "传送到地图中心", "lcy卡住了送到中间", "让lcy去地图正中"]
+    negatives: ["传送到基地"]
+    tier: R1
+    confirm: none
+    receipt: {done: "已把 {player} 传送到地图中心"}
+
+  - id: workbench.migrate_player
+    aliases: [传送到另一个世界, 去洞穴, 回地面, 跨世界传送, 换世界]
+    examples: ["把lcy送到洞穴", "让小明回地面", "lcy跨世界传送到洞穴", "把lcy传到另一个世界", "送阿呆下洞", "lcy换到地面世界"]
+    negatives: ["关闭分片"]
+    tier: R1
+    confirm: none
+    slots:
+      destination_shard: {role: world}
+      portal_id: {role: location, ask: never}
+    receipt: {done: "已把 {player} 传送到另一个世界"}
+
+  # ───────────────────────────── 工作台：公告、清理与查询 ─────────────────────────────
+  - id: workbench.announce
+    aliases: [发送公告, 发公告, 全服公告, 广播, 喊话]
+    examples: ["发公告 今晚8点维护", "全服公告：明天重置", "广播一下大家注意安全", "发个公告说服务器要重启了", "给全服喊话", "公告：猎犬要来了"]
+    negatives: ["提醒lcy", "公告全世界同类数量"]
+    # 只发送聊天文本，不改变世界，按 R1。
+    tier: R1
+    confirm: none
+    slots:
+      message: {role: text}
+    receipt: {done: "已发送公告：{message}"}
+
+  - id: workbench.announce_entity_count
+    aliases: [公告全世界同类数量, 公告数量, 播报数量, 全服报数]
+    examples: ["公告一下全世界有多少猪人", "把蜘蛛巢的数量广播出去", "全服播报牛的数量", "公告海象营地数量", "统计后公告触手数量", "播报全世界的猎犬丘有几个"]
+    negatives: ["统计全世界同类数量", "实体计数"]
+    # 只读统计 + 聊天播报，按 R1。
+    tier: R1
+    confirm: none
+    slots:
+      prefab: {role: entity}
+    receipt: {done: "已公告全世界的 {prefab} 数量"}
+
+  - id: workbench.announce_game_value
+    aliases: [查询并公告游戏数值, 公告幸运值, 公告淘气值, 播报数值]
+    examples: ["公告lcy的幸运值", "查一下小明的淘气值并播报", "播报lcy的珍珠装饰进度", "公告淘气值", "把lcy的幸运值发到聊天", "查询并公告游戏数值"]
+    negatives: ["调整玩家幸运值", "清空淘气值"]
+    tier: R1
+    confirm: none
+    slots:
+      value: {role: enum}
+    receipt: {done: "已公告 {player} 的 {value}"}
+
+  - id: workbench.count_world_entities
+    aliases: [统计全世界同类数量, 全图统计, 全世界有多少, 统计数量]
+    examples: ["统计全世界有多少蜘蛛巢", "全图统计猪人数量", "全世界有多少牛", "统计数量 含箱子里的金块", "背包和箱子里一共多少金块", "全世界有几个猎犬丘"]
+    negatives: ["公告全世界同类数量"]
+    # 以写接口实现的只读统计。规范只读入口是 world.entity_count。
+    prefer: world.entity_count
+    tier: R0
+    confirm: none
+    slots:
+      prefab: {role: entity}
+      include_inventory: {role: toggle, ask: never}
+
+  - id: workbench.list_players
+    aliases: [列出玩家, 玩家列表, 分片玩家列表, 工作台列玩家]
+    examples: ["列出地面的玩家", "工作台列出玩家", "洞穴里有哪些玩家", "分片玩家列表", "列一下当前世界的玩家", "列出玩家"]
+    negatives: ["封禁列表"]
+    # 以写接口实现的只读列表。规范只读入口是 world.online_players。
+    prefer: world.online_players
+    tier: R0
+    confirm: none
+
+  - id: workbench.world_info
+    aliases: [查询世界信息, 工作台世界信息, 分片信息, 世界详情]
+    examples: ["查询地面世界信息", "洞穴分片信息", "工作台看看世界详情", "查询世界信息", "地面现在第几天什么季节", "看看洞穴的世界详情"]
+    negatives: ["重置世界"]
+    prefer: world.world_info
+    tier: R0
+    confirm: none
+
+  - id: workbench.clear_player_inventory
+    aliases: [清理玩家物品, 清空背包, 清理背包, 没收物品]
+    examples: ["清空lcy的背包", "把小明的物品全清了", "没收lcy的东西", "清理lcy背包里的物品", "lcy背包和装备全部清掉", "清理玩家物品"]
+    negatives: ["看看lcy的背包", "查背包"]
+    tier: R3
+    confirm: typed
+    slots:
+      scope: {role: enum}
+    receipt: {done: "已清理 {player} 的物品（{scope}）"}
+
+  # ───────────────────────────── 世界查询（R0） ─────────────────────────────
+  - id: world.entity_count
+    aliases: [多少, 数量, 蜘蛛巢, 统计, 实体计数, count entity prefab]
+    examples: ["地面有多少蜘蛛巢", "统计一下猪人数量", "洞穴里有几个触手", "这个世界有多少牛", "数一下猎犬丘", "地面有多少海象营地"]
+    negatives: ["公告全世界同类数量", "在线人数多少"]
+    tier: R0
+    confirm: none
+    slots:
+      prefab: {role: entity}
+
+  - id: world.online_players
+    aliases: [分片玩家, 地面有谁, 洞穴有谁, 世界里的玩家, 哪个世界]
+    examples: ["地面有谁", "洞穴里有哪些人", "看看洞穴的在线玩家", "地面世界有几个玩家", "分片玩家", "谁在洞穴"]
+    negatives: ["封禁列表"]
+    tier: R0
+    confirm: none
+
+  - id: world.player_modes
+    aliases: [模式状态, 是否无敌, 是否开启无敌, 是否开启制造模式, 开了无敌吗, invincibility mode status]
+    examples: ["lcy开了无敌吗", "是否开启无敌", "谁开了制作模式", "lcy开了制作模式吗", "看看大家的模式状态", "有人开无敌吗"]
+    negatives: ["开启无敌模式", "给lcy开启无敌模式", "关掉lcy的无敌"]
+    tier: R0
+    confirm: none
+
+  - id: world.world_info
+    aliases: [世界信息, 第几天, 什么季节, 季节还剩几天, 世界状态]
+    examples: ["现在第几天", "现在什么季节", "季节还剩几天", "看看世界信息", "地面世界状态", "洞穴现在是白天吗"]
+    negatives: ["跳到第100天", "设置季节"]
+    tier: R0
+    confirm: none
+
+  # ───────────────────────────── 工作台：角色专属能力 ─────────────────────────────
+  - id: workbench.set_character_power
+    aliases: [设置角色专属能力, 角色专属能力, 角色能力, 专属技能]
+    examples: ["给韦伯刮胡子", "沃比喂饱", "阿比盖尔升到三级", "伍迪变河狸", "WX机器人充电", "沃姆伍德开花", "鱼人王饥饿回满"]
+    negatives: ["设置玩家能力", "伍迪恢复人形"]
+    # 只改变目标玩家自己的角色或随从状态，按单人可逆。
+    tier: R1
+    confirm: none
+    slots:
+      action: {role: enum}
+    receipt: {done: "已为 {player} 设置角色能力：{action}"}
+    actions:
+      beard_none: {aliases: [移除胡须, 刮胡子, 韦伯剃胡须, 威尔逊剃胡须], examples: ["给韦伯刮胡子", "威尔逊剃胡须"]}
+      beard_short: {aliases: [短胡须, 胡须一级, 韦伯短胡须, 威尔逊短胡须], examples: ["韦伯长出短胡须", "威尔逊胡须一级"]}
+      beard_medium: {aliases: [中胡须, 胡须二级, 韦伯中胡须, 威尔逊中胡须], examples: ["韦伯胡须二级", "威尔逊中胡须"]}
+      beard_long: {aliases: [长胡须, 胡须三级, 韦伯长胡须, 威尔逊长胡须], examples: ["韦伯长胡须", "威尔逊胡须长满"]}
+      woby_empty: {aliases: [沃比饥饿清空, 沃比饿肚子], examples: ["沃比饥饿清空", "让沃比饿着"]}
+      woby_half: {aliases: [沃比饥饿一半, 沃比半饱], examples: ["沃比饥饿一半", "沃比半饱"]}
+      woby_full: {aliases: [沃比饥饿回满, 喂饱沃比], examples: ["喂饱沃比", "沃比饥饿回满"]}
+      abigail_bond_1: {aliases: [阿比盖尔等级一, 阿比盖尔一级, 阿比盖尔等级], examples: ["阿比盖尔一级", "阿比盖尔等级设为一"]}
+      abigail_bond_2: {aliases: [阿比盖尔等级二, 阿比盖尔二级, 阿比盖尔等级], examples: ["阿比盖尔二级", "阿比盖尔等级设为二"]}
+      abigail_bond_3: {aliases: [阿比盖尔等级三, 阿比盖尔三级, 阿比盖尔等级], examples: ["阿比盖尔三级", "阿比盖尔升满级"]}
+      abigail_health_0: {aliases: [阿比盖尔生命清空, 阿比盖尔死亡], examples: ["阿比盖尔生命清空", "让阿比盖尔死亡"]}
+      abigail_health_5: {aliases: [阿比盖尔生命百分之五, 阿比盖尔残血], examples: ["阿比盖尔生命百分之五", "阿比盖尔残血"]}
+      abigail_health_50: {aliases: [阿比盖尔生命一半, 阿比盖尔半血], examples: ["阿比盖尔生命一半", "阿比盖尔半血"]}
+      abigail_health_100: {aliases: [阿比盖尔生命回满, 阿比盖尔满血], examples: ["阿比盖尔生命回满", "阿比盖尔满血"]}
+      abigail_shadow: {aliases: [阿比盖尔暗影, 暗影阿比盖尔], examples: ["阿比盖尔变暗影", "切换暗影阿比盖尔"]}
+      abigail_lunar_toggle: {aliases: [阿比盖尔月亮, 月亮阿比盖尔], examples: ["阿比盖尔切换月亮形态", "月亮阿比盖尔"]}
+      inspiration_0: {aliases: [灵感清空, 薇格弗德灵感清空], examples: ["灵感清空", "女武神灵感清零"]}
+      inspiration_50: {aliases: [灵感一半, 薇格弗德灵感一半], examples: ["灵感一半", "女武神灵感设为一半"]}
+      inspiration_100: {aliases: [灵感回满, 薇格弗德灵感回满], examples: ["灵感回满", "女武神灵感拉满"]}
+      fitness_0: {aliases: [健身值清空, 大力士健身清空], examples: ["健身值清空", "沃尔夫冈健身值清零"]}
+      fitness_50: {aliases: [健身值一半, 大力士健身一半], examples: ["健身值一半", "沃尔夫冈健身值设为一半"]}
+      fitness_100: {aliases: [健身值回满, 大力士健身回满], examples: ["健身值回满", "沃尔夫冈健身值拉满"]}
+      woody_beaver: {aliases: [伍迪变河狸, 变海狸], examples: ["伍迪变河狸", "让伍迪变海狸"]}
+      woody_goose: {aliases: [伍迪变大鹅, 变鹅], examples: ["伍迪变大鹅", "让伍迪变鹅"]}
+      woody_moose: {aliases: [伍迪变鹿, 变驼鹿], examples: ["伍迪变鹿", "让伍迪变驼鹿"]}
+      wx_charge_add: {aliases: [WX增加电能, 机器人充电, WX充电], examples: ["WX机器人充电", "给WX增加电能"]}
+      wx_charge_remove: {aliases: [WX减少电能, 机器人放电], examples: ["WX减少电能", "给机器人放电"]}
+      wormwood_bloom_0: {aliases: [沃姆伍德开花零级, 沃姆伍德不开花], examples: ["沃姆伍德开花零级", "沃姆伍德不开花"]}
+      wormwood_bloom_1: {aliases: [沃姆伍德开花一级, 植物人开花一级], examples: ["沃姆伍德开花一级", "植物人开花一级"]}
+      wormwood_bloom_2: {aliases: [沃姆伍德开花二级, 植物人开花二级], examples: ["沃姆伍德开花二级", "植物人开花二级"]}
+      wormwood_bloom_3: {aliases: [沃姆伍德开花三级, 植物人满开花], examples: ["沃姆伍德开花三级", "植物人满开花"]}
+      wormwood_bloom_progress_start: {aliases: [开花进度开始, 开花进度清零], examples: ["开花进度开始", "沃姆伍德开花进度清零"]}
+      wormwood_bloom_progress_half: {aliases: [开花进度一半, 开花进度过半], examples: ["开花进度一半", "沃姆伍德开花进度过半"]}
+      wormwood_bloom_progress_end: {aliases: [开花进度完成, 开花进度拉满], examples: ["开花进度完成", "沃姆伍德开花进度拉满"]}
+      wormwood_bloom_grow: {aliases: [开始开花, 进入开花], examples: ["沃姆伍德开始开花", "植物人进入开花"]}
+      wormwood_bloom_decay: {aliases: [开始凋谢, 花谢了], examples: ["沃姆伍德开始凋谢", "让植物人花谢了"]}
+      merm_king_hunger_0: {aliases: [鱼人王饥饿清空, 鱼人王饿肚子], examples: ["鱼人王饥饿清空", "让鱼人王饿肚子"]}
+      merm_king_hunger_50: {aliases: [鱼人王饥饿一半, 鱼人王半饱], examples: ["鱼人王饥饿一半", "鱼人王半饱"]}
+      merm_king_hunger_100: {aliases: [鱼人王饥饿回满, 喂饱鱼人王], examples: ["鱼人王饥饿回满", "喂饱鱼人王"]}
+      merm_king_health_5: {aliases: [鱼人王生命百分之五, 鱼人王残血], examples: ["鱼人王生命百分之五", "鱼人王残血"]}
+      merm_king_health_50: {aliases: [鱼人王生命一半, 鱼人王半血], examples: ["鱼人王生命一半", "鱼人王半血"]}
+      merm_king_health_100: {aliases: [鱼人王生命回满, 鱼人王满血], examples: ["鱼人王生命回满", "鱼人王满血"]}
+      merm_king_trident: {aliases: [鱼人王三叉戟, 给鱼人王三叉戟], examples: ["鱼人王三叉戟", "给鱼人王三叉戟"]}
+      merm_king_crown: {aliases: [鱼人王王冠, 给鱼人王王冠], examples: ["鱼人王王冠", "给鱼人王戴王冠"]}
+      merm_king_shoulder: {aliases: [鱼人王肩甲, 给鱼人王肩甲], examples: ["鱼人王肩甲", "给鱼人王穿肩甲"]}

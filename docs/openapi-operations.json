@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "ddd5b0fa56381efa614722b478b8b77328ee89702e7a5b4b0996b2f45d953ca6",
+  "operationsSHA256": "86e13c77a4c8cf835fd3e7463d5655fcbab680fd9831215f0d01ae45ebef6979",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -2659,6 +2659,21 @@
       "title": "Idempotently install or upgrade the managed runtime in one shard"
     },
     {
+      "operationId": "invokeCompanionGateway",
+      "method": "POST",
+      "path": "/bot/gateway",
+      "contentType": "application/json",
+      "transport": "identity",
+      "tags": [
+        "ai",
+        "system"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "可信插件通用调用"
+    },
+    {
       "operationId": "kickRoomPlayer",
       "method": "POST",
       "path": "/rooms/{roomId}/players/{playerId}/actions/kick",
@@ -3622,8 +3637,8 @@
       "tags": [
         "game"
       ],
-      "access": "write",
-      "risk": "normal",
+      "access": "read",
+      "risk": "low",
       "runtime": "any",
       "title": "Refresh affected installations and preflight every shard without stopping worlds"
     },
@@ -4199,6 +4214,22 @@
       "risk": "high",
       "runtime": "shard-ready",
       "title": "Despawn an online player so they can choose another character"
+    },
+    {
+      "operationId": "resetRoomWorlds",
+      "method": "POST",
+      "path": "/rooms/{roomId}/actions/reset-worlds",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "backup",
+        "job",
+        "room"
+      ],
+      "access": "write",
+      "risk": "high",
+      "runtime": "shard-ready",
+      "title": "Regenerate every world of the room through a persistent job, creating a protection backup first unless backup is false"
     },
     {
       "operationId": "resolveRoomPlayer",
@@ -5080,7 +5111,9 @@
       "access": "write",
       "risk": "high",
       "runtime": "any",
-      "title": "Protect managed rooms, stop running shards, update a SteamCMD-managed server, and optionally restart shards"
+      "title": "Protect managed rooms, stop running shards, update a SteamCMD-managed server, and optionally restart shards",
+      "deprecated": true,
+      "replacedBy": "publishGameRelease"
     },
     {
       "operationId": "updateMod",

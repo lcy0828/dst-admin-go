@@ -86,6 +86,10 @@ jobs:
         if: steps.reuse.outputs.reused != 'true'
       - run: go test -race ./...
         if: steps.reuse.outputs.reused != 'true'
+        env:
+          DST_GENERIC_PYTHON: python
+      - run: go run ./cmd/capability-catalog -semantics docs/ai-tool-semantics.json -check
+        if: steps.reuse.outputs.reused != 'true'
       - run: go run ./cmd/openapi-manifest -check
         if: steps.reuse.outputs.reused != 'true'
       - run: go vet ./...

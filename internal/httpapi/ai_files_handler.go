@@ -12,6 +12,11 @@ import (
 
 func (h *AIHandler) ConfigureResources(router http.Handler) { h.resourceRouter = router }
 func (h *AIHandler) principal(c *gin.Context) aicontrol.Principal {
+	if p, ok := c.Get(aiScopeKey); ok {
+		if principal, ok := p.(aicontrol.Principal); ok {
+			return principal
+		}
+	}
 	if header := c.GetHeader("Authorization"); header != "" {
 		scheme, secret, ok := strings.Cut(header, " ")
 		if !ok || !strings.EqualFold(scheme, "Bearer") {

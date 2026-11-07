@@ -12,38 +12,27 @@ const (
 	ProfilePanelManage = "panel-manage"
 )
 
-// These are executable policy, not metadata or a listing filter. Unknown
-// operations fail closed. Existing unscoped tokens retain panel administration.
-var gameReads = map[string]bool{
-	"readRoomNotificationEvents": true, "streamRoomNotifications": true, "listRoomRecentEvents": true,
-	"listRoomLocations": true, "getRoomLocation": true, "getRoomTeleportPreview": true,
-	"getRoomRuntimeOverview": true, "listBotCapabilities": true, "queryBotCapability": true, "getBotCapabilityResult": true, "listRooms": true, "listRoomWorlds": true, "listWorldStates": true,
-	"listRoomPlayers": true, "resolveRoomPlayer": true, "getRoomPlayerInventory": true,
-	"getRoomPerformanceReport": true, "listRoomMods": true, "searchWorldEntityCatalog": true,
-	"getWorldEntityArtwork": true, "getWorldStateHistory": true,
-	"queryRoomWorld": true, "getRoomWorldQueryRun": true,
-	"listRoomPlayerActivity": true, "getRoomPlayerTrajectory": true, "getRoomPlayerCombat": true,
-}
-var gameWrites = map[string]bool{
-	"createRoomLocation": true, "updateRoomLocation": true, "deleteRoomLocation": true, "prepareRoomTeleport": true, "executeRoomTeleport": true, "cancelRoomTeleport": true,
-	"runBotCapability": true, "runRoomAction": true, "createRoomBackup": true,
-	"configureRoomBackupSchedule": true, "listRoomBackupSchedules": true,
-	"kickRoomPlayer": true,
-	// Fixed player actions belong to game management, independently of which
-	// API/MCP entry point the client discovers. Raw Lua remains panel-only.
-	"setRoomPlayerGodMode": true, "setRoomPlayerCreativeMode": true,
-	"resurrectRoomPlayer": true, "killRoomPlayer": true, "resetRoomPlayerCharacter": true,
-	"banRoomPlayer": true, "unbanRoomPlayer": true, "announceToRoomPlayer": true,
-	"getRoomPlayer": true, "refreshRoomPlayers": true, "listRoomBackups": true,
-	"giveRoomPlayerItem": true, "getRoomPlayerItemGrant": true,
-	"spawnRoomPlayerEntity": true, "getRoomPlayerEntitySpawn": true,
-	"executeBuiltinRoomCommand": true, "getBuiltinRoomCommandRun": true,
+// Policies are compiled from the native API definition, not a second operation list.
+func (p Principal) operationPolicy(id string) string {
+	catalog := p.catalog
+	if catalog == nil {
+		catalog, _ = apicontract.Default()
+	}
+	if catalog != nil {
+		if op, ok := catalog.Operation(id); ok && op.Callable() {
+			return op.ExecutionPolicy().Profile
+		}
+	}
+	return ""
 }
 
 func (p Principal) Restricted() bool {
-	return p.Profile != "" && p.Profile != ProfilePanelManage || p.RoomID != "" || len(p.RoomIDs) > 0
+	return p.companionScope || p.Profile != "" && p.Profile != ProfilePanelManage || p.RoomID != "" || len(p.RoomIDs) > 0
 }
 func (p Principal) AllowsRoom(room string) bool {
+	if p.companionScope && !slices.Contains(p.RoomIDs, room) {
+		return false
+	}
 	if p.RoomID != "" && p.RoomID != room {
 		return false
 	}
@@ -63,7 +52,7 @@ func (p Principal) AllowsOperation(id, room string) bool {
 		return false
 	}
 	if p.Profile == "" || p.Profile == ProfilePanelManage {
-		return !p.Restricted() || room != "" || id == "listRooms" || id == "listBotCapabilities" || id == "getJob"
+		return !p.Restricted() || p.companionPanel || room != "" || id == "listRooms" || id == "listBotCapabilities" || id == "getJob"
 	}
 	if id == "listRooms" || id == "listBotCapabilities" {
 		return true
@@ -74,8 +63,13 @@ func (p Principal) AllowsOperation(id, room string) bool {
 	if room == "" {
 		return false
 	}
-	return gameReads[id] || p.Profile == ProfileGameManage && gameWrites[id]
+	policy := p.operationPolicy(id)
+	return policy == ProfileGameRead || p.Profile == ProfileGameManage && policy == ProfileGameManage
 }
+
+// AllowsGlobalTasks does not drop room filters for an explicitly delegated
+// panel maintainer. Ordinary scoped credentials retain their old restrictions.
+func (p Principal) AllowsGlobalTasks() bool { return !p.Restricted() || p.companionPanel }
 func (p Principal) AllowsTool(name string) bool {
 	if strings.HasPrefix(name, apicontract.ToolPrefix) {
 		id := strings.TrimPrefix(name, apicontract.ToolPrefix)
@@ -91,7 +85,8 @@ func (p Principal) AllowsTool(name string) bool {
 	}
 	if strings.HasPrefix(name, apicontract.ToolPrefix) {
 		id := strings.TrimPrefix(name, apicontract.ToolPrefix)
-		return gameReads[id] || p.Profile == ProfileGameManage && (gameWrites[id] || id == "getJob")
+		policy := p.operationPolicy(id)
+		return policy == ProfileGameRead || p.Profile == ProfileGameManage && (policy == ProfileGameManage || id == "getJob")
 	}
 	return name == discoverAPI || name == dispatchAPI || name == "list_rooms" || name == "call_result" || p.Profile == ProfileGameManage && (name == "get_job" || name == "room_control")
 }

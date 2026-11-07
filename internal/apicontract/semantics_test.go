@@ -43,7 +43,11 @@ func TestSemanticCatalogCoverageAndContractDrift(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := fresh.loadSemantics(raw); err == nil {
+			if err := fresh.loadSemantics(raw); kind == "missing" {
+				if err != nil {
+					t.Fatal("optional projection blocked native operation", err)
+				}
+			} else if err == nil {
 				t.Fatal("accepted stale or malformed metadata")
 			}
 		})

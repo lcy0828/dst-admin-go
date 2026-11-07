@@ -49,11 +49,14 @@ type TokenInput struct {
 	AdminID int      `json:"-"`
 }
 type Principal struct {
-	Profile string
-	RoomIDs []string
-	ID      string
-	AdminID int
-	RoomID  string // Optional actual credential scope; page selection is only context.
+	catalog        *apicontract.Catalog
+	companionPanel bool // Explicit trusted panel-wide delegation; keeps room filters.
+	companionScope bool // Empty delegated room lists mean no rooms, never all rooms.
+	Profile        string
+	RoomIDs        []string
+	ID             string
+	AdminID        int
+	RoomID         string // Optional actual credential scope; page selection is only context.
 }
 type Arguments struct {
 	Refresh            bool   `json:"refresh,omitempty"`

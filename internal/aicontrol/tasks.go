@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
 	"dont/internal/apicontract"
 	consoleapi "dont/internal/console"
+	"dont/internal/intent"
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
@@ -56,37 +56,6 @@ var taskNames = map[string]bool{
 	"dst_read": false, "dst_result": false, "dst_player_action": true,
 	"dst_server_action": true, "dst_run": true,
 }
-var taskTerms = map[string]string{
-	"room.locations":                     "有哪些地点 已保存地点 地点列表 基地列表 保存的位置 locations",
-	"location.save":                      "保存位置 保存地点 记录地点 标记地点 记为基地 当前位置 mark location",
-	"player.teleport":                    "传送地点 传送到地点 传送到基地 传送到 回基地 前往位置 teleport destination",
-	"workbench.set_player_invincibility": "普通无敌 仅免伤 不补状态 invincibility",
-	"world.player_modes":                 "模式状态 是否无敌 是否开启无敌 是否开启制造模式 invincibility mode status",
-	"room.status":                        "查服 房间信息 服务器状态 一服信息 server status",
-	"room.players":                       "谁在线 在线人数 名单 online players",
-	"room.network":                       "卡 延迟 网络 客户端性能 netscore ping performance",
-	"player.inventory":                   "背包 装备 物品栏 离线背包 inventory backpack",
-	"player.resolve":                     "玩家信息 查人 昵称 profile player",
-	"player.resurrect":                   "复活 救活 救人 resurrect revive",
-	"player.god_mode":                    "无敌 无敌模式 上帝模式 不死 免伤 god godmode invincible",
-	"player.creative_mode":               "制作模式 制造模式 创造模式 自由建造 免费制作 creative freebuild freecrafting",
-	"player.announce":                    "提醒玩家 通知玩家 玩家公告 announce",
-	"player.ban":                         "封禁 封号 拉黑 ban",
-	"player.unban":                       "解封 解除封禁 取消封禁 unban",
-	"player.kill":                        "杀死玩家 杀死 击杀玩家 kill",
-	"player.reset_character":             "重选角色 换人物 重置玩家 reset_character despawn",
-	"player.give_item":                   "给 发 发放 给予 物品 肉丸 give item meatballs",
-	"player.kick":                        "踢人 踢出 踢掉 kick",
-	"room.mods":                          "模组 mod 配置 设置",
-	"room.performance":                   "性能 负载 CPU 内存 报表 卡顿 performance",
-	"player.spawn_entity":                "生成 刷 生物 座狼 狗王 spawn",
-	"world.entity_count":                 "多少 数量 蜘蛛巢 统计 count entity prefab",
-	"player.activity":                    "活动 做了什么 干了什么 最近行为 activity",
-	"player.trajectory":                  "去哪 去了哪里 位置 地点 轨迹 trajectory",
-	"player.combat":                      "打了谁 打怪 打boss 战斗 combat",
-	"room.backup.create":                 "备份 快照 backup snapshot",
-	"room.backups.configure":             "每天 凌晨 自动备份 定时 schedule backup",
-}
 
 func TaskTools() []Tool {
 	selector := botString(255)
@@ -95,7 +64,7 @@ func TaskTools() []Tool {
 		return Tool{Name: name, Description: desc, Mutation: taskNames[name], InputSchema: botSchema(props, required...)}
 	}
 	return []Tool{
-		makeTool("dst_servers", "查看房间列表；指定 room 可查看房间概况、在线玩家、模组或性能。不会按列表顺序猜测一服。", nil, map[string]any{"room": selector, "view": map[string]any{"type": "string", "enum": []string{"overview", "players", "mods", "performance"}}}),
+		makeTool("dst_servers", "查看房间列表；指定 room 可查看房间概况、在线玩家、模组或性能。性能可用 parameters.window（1h/6h/24h/7d，默认 24h）或 RFC3339 from/to 指定时间范围。不会按列表顺序猜测一服。", nil, map[string]any{"room": selector, "view": map[string]any{"type": "string", "enum": []string{"overview", "players", "mods", "performance"}}, "parameters": params}),
 		makeTool("dst_player", "按昵称或 KU ID 查询玩家。重名返回候选。network 是原始网络/客户端性能档位，不等于毫秒；缺失信息不视为零。", []string{"player"}, map[string]any{"room": selector, "player": selector, "view": map[string]any{"type": "string", "enum": []string{"profile", "inventory", "network", "activity", "trajectory", "combat"}}, "parameters": params}),
 		makeTool("dst_world", "读取指定世界信息、在线玩家、玩家模式状态或实体数量。entity_count 的 parameters.prefab 是实体代码；无输出不是零。", []string{"world", "view"}, map[string]any{"room": selector, "world": selector, "view": map[string]any{"type": "string", "enum": []string{"world_info", "online_players", "entity_count", "player_modes"}}, "parameters": params}),
 		makeTool("dst_find", "按中文需求寻找已授权能力，最多返回三个候选及完整的小段参数结构。优先调用推荐的常用工具。", []string{"query"}, map[string]any{"query": botString(128), "room": selector}),
@@ -252,6 +221,13 @@ func (s *Service) InvokeTask(ctx context.Context, p Principal, name string, raw 
 		data, e := s.taskRead(ctx, p, "resolveRoomPlayer", apicontract.Input{Path: map[string]any{"roomId": room}, Query: map[string]any{"query": in.Player}})
 		if e != nil {
 			return TaskResponse{}, e
+		}
+		if data["status"] == "not_found" && strings.HasPrefix(in.Player, "玩家") {
+			if nick := strings.TrimSpace(strings.TrimPrefix(in.Player, "玩家")); nick != "" {
+				if retry, err := s.taskRead(ctx, p, "resolveRoomPlayer", apicontract.Input{Path: map[string]any{"roomId": room}, Query: map[string]any{"query": nick}}); err == nil {
+					data = retry
+				}
+			}
 		}
 		rows := taskRows(data)
 		if data["status"] != "resolved" || data["hasMore"] == true || len(rows) != 1 {
@@ -444,13 +420,8 @@ func recommendedTaskInput(c BotCapability) map[string]any {
 	return input
 }
 func (s *Service) findTasks(p Principal, in TaskInput) (TaskResponse, error) {
-	type ranked struct {
-		c      BotCapability
-		score  int
-		action *consoleapi.Action
-	}
-	rows := []ranked{}
-	query := strings.ToLower(strings.TrimSpace(in.Query))
+	byID := map[string]BotCapability{}
+	docs := []intent.CapabilityDoc{}
 	for _, c := range BotCapabilities() {
 		allowed := false
 		scope := append(append([]string{}, p.RoomIDs...), p.RoomID, "__unscoped__")
@@ -466,34 +437,92 @@ func (s *Service) findTasks(p Principal, in TaskInput) (TaskResponse, error) {
 		if !allowed {
 			continue
 		}
-		matched := false
-		for _, action := range c.Actions {
-			score := discoveryScore(query, append([]string{action.ID, action.Title}, action.SearchTerms...))
-			if score > 0 {
-				a := action
-				rows = append(rows, ranked{c, score + 100, &a})
-				matched = true
+		byID[c.ID] = c
+		actions := make([]intent.ActionDoc, len(c.Actions))
+		for i, a := range c.Actions {
+			actions[i] = intent.ActionDoc{
+				ID:          a.ID,
+				Title:       a.Title,
+				Description: a.Description,
+				SearchTerms: a.SearchTerms,
+				Parameters:  a.Parameters,
 			}
 		}
-		if !matched {
-			score := discoveryScore(query, append([]string{c.ID, c.Title}, c.SearchTerms...))
-			if score > 0 {
-				rows = append(rows, ranked{c, score, nil})
-			}
-		}
+		docs = append(docs, intent.CapabilityDoc{
+			ID:             c.ID,
+			Title:          c.Title,
+			Category:       c.Category,
+			Access:         c.Access,
+			Risk:           c.Risk,
+			Tier:           c.Tier,
+			Confirm:        c.Confirm,
+			SearchTerms:    c.SearchTerms,
+			Aliases:        c.Aliases,
+			Examples:       c.Examples,
+			Negatives:      c.Negatives,
+			Prefer:         c.Prefer,
+			Parameters:     c.Parameters,
+			ParameterHints: c.ParameterHints,
+			SlotRoles:      c.SlotRoles,
+			Actions:        actions,
+			ActionPolicies: c.ActionPolicies,
+		})
 	}
-	sort.SliceStable(rows, func(i, j int) bool { return rows[i].score > rows[j].score })
+	ranked := s.rankDiscovery(context.Background(), in.Query, docs)
+	rows := ranked.Candidates
 	items := []map[string]any{}
 	for _, v := range rows[:min(len(rows), 3)] {
-		input := recommendedTaskInput(v.c)
-		item := map[string]any{"id": v.c.ID, "title": v.c.Title, "access": v.c.Access, "risk": v.c.Risk, "parameters": v.c.Parameters, "parameterHints": v.c.ParameterHints, "tool": recommendedTask(v.c), "input": input, "schemaRevision": v.c.SchemaRevision}
-		if v.action != nil {
-			item["title"], item["actionId"], item["description"] = v.action.Title, v.action.ID, v.action.Description
-			input["parameters"] = v.action.Parameters
+		c := byID[v.Capability.ID]
+		input := recommendedTaskInput(c)
+		item := map[string]any{"id": c.ID, "title": c.Title, "access": c.Access, "risk": c.Risk, "tier": c.Tier, "confirm": c.Confirm, "parameters": modelParameters(c), "parameterHints": c.ParameterHints, "tool": recommendedTask(c), "input": input, "schemaRevision": c.SchemaRevision}
+		if v.Action != nil {
+			item["title"], item["actionId"], item["description"] = v.Action.Title, v.Action.ID, v.Action.Description
+			if policy, ok := c.ActionPolicies[v.Action.ID]; ok {
+				item["tier"], item["confirm"] = string(policy.Tier), string(policy.Confirm)
+			}
+			input["parameters"] = v.Action.Parameters
+		} else if len(v.ExtractedSlots) > 0 {
+			item["extractedParameters"] = v.ExtractedSlots
 		}
 		items = append(items, item)
 	}
 	return TaskResponse{State: "succeeded", Summary: "以下为已授权的候选；没有执行操作。需要确认的动作请在面板或可信插件中继续；不要把查询、否定或讨论当作执行请求。", Data: map[string]any{"items": items, "hasMore": len(rows) > 3}}, nil
+}
+
+// modelParameters removes internal and presentation fields (such as feedback,
+// preview_id and confirmation) from discovery cards so models do not ask the
+// user to choose panel-internal enums.
+func modelParameters(c BotCapability) map[string]any {
+	if len(c.SlotRoles) == 0 {
+		return c.Parameters
+	}
+	props, ok := c.Parameters["properties"].(map[string]any)
+	if !ok {
+		return c.Parameters
+	}
+	filteredProps := map[string]any{}
+	for k, v := range props {
+		if slot, found := c.SlotRoles[k]; found && !slot.Model {
+			continue
+		}
+		filteredProps[k] = v
+	}
+	out := map[string]any{}
+	for k, v := range c.Parameters {
+		out[k] = v
+	}
+	out["properties"] = filteredProps
+	if req, ok := c.Parameters["required"].([]string); ok {
+		filteredReq := []string{}
+		for _, k := range req {
+			if slot, found := c.SlotRoles[k]; found && !slot.Model {
+				continue
+			}
+			filteredReq = append(filteredReq, k)
+		}
+		out["required"] = filteredReq
+	}
+	return out
 }
 func validateTaskCapability(s *Service, p Principal, c BotCapability, in BotInput) error {
 	encoded, _ := json.Marshal(in.Parameters)
@@ -526,30 +555,6 @@ func validateTaskCapability(s *Service, p Principal, c BotCapability, in BotInpu
 	return e
 }
 func inputWithTask(in BotInput, id string) BotInput { in.RequestID = "task-" + id; return in }
-
-// Longest matching phrase wins; generic words cannot accumulate enough points
-// to outrank a specific action. Discovery never submits a command.
-func discoveryScore(query string, terms []string) int {
-	best := 0
-	for _, term := range terms {
-		term = strings.ToLower(strings.TrimSpace(term))
-		if term == "" {
-			continue
-		}
-		score := 0
-		if term == query {
-			score = 1000 + len([]rune(term))
-		} else if strings.Contains(query, term) {
-			score = 100 + len([]rune(term))
-		} else if len([]rune(query)) >= 2 && strings.Contains(term, query) {
-			score = len([]rune(query))
-		}
-		if score > best {
-			best = score
-		}
-	}
-	return best
-}
 
 func nearbyPreparation(c BotCapability, p map[string]any) bool {
 	if c.ID != "workbench.act_nearby_entities" {

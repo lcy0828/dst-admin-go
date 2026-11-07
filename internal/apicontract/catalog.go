@@ -43,35 +43,41 @@ type Response struct {
 	Ref         string           `yaml:"$ref"`
 }
 type Operation struct {
-	Policy      ToolPolicy          `yaml:"x-dst-tool" json:"-"`
-	ID          string              `yaml:"operationId" json:"operationId"`
-	Summary     string              `yaml:"summary" json:"summary"`
-	Description string              `yaml:"description" json:"description,omitempty"`
-	Deprecated  bool                `yaml:"deprecated" json:"deprecated,omitempty"`
-	ReplacedBy  string              `yaml:"x-dst-replaced-by" json:"replacedBy,omitempty"`
-	Tags        []string            `yaml:"tags" json:"tags"`
-	Parameters  []Parameter         `yaml:"parameters" json:"-"`
-	RequestBody Body                `yaml:"requestBody" json:"-"`
-	Responses   map[string]Response `yaml:"responses" json:"-"`
-	Transport   string              `yaml:"x-dst-transport" json:"transport"`
-	Method      string              `json:"method"`
-	Path        string              `json:"path"`
-	catalog     *Catalog
-	once        sync.Once
-	input       map[string]any
-	validator   *jsonschema.Resolved
-	err         error
-	searchText  string
-	searchID    string
-	searchTags  []string
-	aiOnce      sync.Once
-	aiSchema    map[string]any
-	aiErr       error
-	semantics   *ToolSemantics
-	searchTerms map[string]float64
-	resultOnce  sync.Once
-	result      *ResultContract
-	resultErr   error
+	Followups        []ResultLink        `yaml:"x-dst-result-reads" json:"-"`
+	Authorization    ExecutionPolicy     `yaml:"x-dst-access" json:"-"`
+	Intent           *ToolSemantics      `yaml:"x-dst-intent" json:"-"`
+	Policy           ToolPolicy          `yaml:"x-dst-tool" json:"-"`
+	ID               string              `yaml:"operationId" json:"operationId"`
+	Summary          string              `yaml:"summary" json:"summary"`
+	Description      string              `yaml:"description" json:"description,omitempty"`
+	Deprecated       bool                `yaml:"deprecated" json:"deprecated,omitempty"`
+	ReplacedBy       string              `yaml:"x-dst-replaced-by" json:"replacedBy,omitempty"`
+	Tags             []string            `yaml:"tags" json:"tags"`
+	Parameters       []Parameter         `yaml:"parameters" json:"-"`
+	RequestBody      Body                `yaml:"requestBody" json:"-"`
+	Responses        map[string]Response `yaml:"responses" json:"-"`
+	Transport        string              `yaml:"x-dst-transport" json:"transport"`
+	Method           string              `json:"method"`
+	Path             string              `json:"path"`
+	catalog          *Catalog
+	once             sync.Once
+	input            map[string]any
+	validator        *jsonschema.Resolved
+	err              error
+	searchText       string
+	searchID         string
+	searchTags       []string
+	aiOnce           sync.Once
+	aiSchema         map[string]any
+	aiErr            error
+	semantics        *ToolSemantics
+	searchTerms      map[string]float64
+	resultOnce       sync.Once
+	result           *ResultContract
+	resultErr        error
+	discoveryOnce    sync.Once
+	discoveryText    string
+	discoveryEntries []string
 }
 type Catalog struct {
 	operations map[string]*Operation
@@ -86,11 +92,7 @@ type Catalog struct {
 }
 
 var Default = sync.OnceValues(func() (*Catalog, error) {
-	c, err := Parse(apidocs.OpenAPI)
-	if err == nil {
-		err = c.loadSemantics(apidocs.AIToolSemantics)
-	}
-	return c, err
+	return Parse(apidocs.OpenAPI)
 })
 
 func Parse(data []byte) (*Catalog, error) {
@@ -168,6 +170,9 @@ func Parse(data []byte) (*Catalog, error) {
 	}
 	sort.Slice(c.ordered, func(i, j int) bool { return c.ordered[i].ID < c.ordered[j].ID })
 	for _, op := range c.ordered {
+		if err := op.Authorization.validate(); err != nil {
+			return nil, fmt.Errorf("%s: %w", op.ID, err)
+		}
 		if op.ReplacedBy != "" {
 			replacement, ok := c.operations[op.ReplacedBy]
 			if !ok || replacement == op || !replacement.Callable() || replacement.Deprecated {
@@ -175,6 +180,7 @@ func Parse(data []byte) (*Catalog, error) {
 			}
 		}
 	}
+	c.deriveSemantics()
 	return c, nil
 }
 

@@ -1,0 +1,40 @@
+{"id":"report-01a","query":"复活lcy","want_capability":"player.resurrect","want_tier":"R1","want_confirm":"none","slots":{"player_id":"lcy"}}
+{"id":"report-01b","query":"@bot 复活 lcy","want_capability":"player.resurrect","want_tier":"R1","want_confirm":"none","slots":{"player_id":"lcy"}}
+{"id":"report-01c","query":"复活玩家 lcy","want_capability":"player.resurrect","want_tier":"R1","want_confirm":"none","slots":{"player_id":"lcy"}}
+{"id":"report-01d","query":"复活玩家lcy","want_capability":"player.resurrect","want_tier":"R1","want_confirm":"none","slots":{"player_id":"lcy"}}
+{"id":"report-03a","query":"再次复活","want_capability":"player.resurrect","want_tier":"R1","want_confirm":"none"}
+{"id":"report-04a","query":"给玩家lcy 发五个草","want_capability":"player.give_item","want_tier":"R1","want_confirm":"none","slots":{"playerId":"lcy","item":"草","count":5}}
+{"id":"report-04b","query":"给玩家lcy发五个草","want_capability":"player.give_item","want_tier":"R1","want_confirm":"none","slots":{"playerId":"lcy","item":"草","count":5}}
+{"id":"report-04c","query":"给lcy发5个草","want_capability":"player.give_item","want_tier":"R1","want_confirm":"none","slots":{"playerId":"lcy","item":"草","count":5}}
+{"id":"report-04d","query":"发五个草给玩家lcy","want_capability":"player.give_item","want_tier":"R1","want_confirm":"none","slots":{"playerId":"lcy","item":"草","count":5}}
+{"id":"report-05a","query":"给玩家lcy开启无敌模式","want_capability":"player.god_mode","want_tier":"R1","want_confirm":"none","slots":{"playerId":"lcy","enabled":true}}
+{"id":"report-05b","query":"开启无敌模式","want_capability":"player.god_mode","want_tier":"R1","want_confirm":"none","slots":{"enabled":true}}
+{"id":"report-05c","query":"给lcy打开创造模式","want_capability":"player.creative_mode","want_tier":"R1","want_confirm":"none","slots":{"playerId":"lcy","enabled":true}}
+{"id":"report-05d","query":"给玩家lcy关闭无敌模式","want_capability":"player.god_mode","want_tier":"R1","want_confirm":"none","slots":{"playerId":"lcy","enabled":false}}
+{"id":"report-06a","query":"跳过一天","want_capability":"workbench.skip_days","want_tier":"R2","want_confirm":"once","slots":{"days":1}}
+{"id":"report-06b","query":"帮我跳过两天","want_capability":"workbench.skip_days","want_tier":"R2","want_confirm":"once","slots":{"days":2}}
+{"id":"report-06c","query":"快进3天","want_capability":"workbench.skip_days","want_tier":"R2","want_confirm":"once","slots":{"days":3}}
+{"id":"report-06d","query":"直接跳到明天","want_capability":"workbench.skip_days","want_tier":"R2","want_confirm":"once"}
+{"id":"report-07a","query":"重置世界","want_capability":"room.reset","want_tier":"R3","want_confirm":"typed"}
+{"id":"report-07b","query":"重置世界 不备份","want_capability":"room.reset","want_tier":"R3","want_confirm":"typed","slots":{"backup":false}}
+{"id":"report-07c","query":"重新生成世界","want_capability":"room.reset","want_tier":"R3","want_confirm":"typed"}
+{"id":"report-07d","query":"删档重开","want_capability":"room.reset","want_tier":"R3","want_confirm":"typed"}
+{"id":"report-08a","query":"查询最近一天服务器的运行状态 cpu 内存指标怎么样","want_capability":"room.performance","want_tier":"R0","want_confirm":"none","slots":{"window":"24h"}}
+{"id":"report-08b","query":"最近一天CPU内存负载怎么样","want_capability":"room.performance","want_tier":"R0","want_confirm":"none","slots":{"window":"24h"}}
+{"id":"report-08c","query":"过去7天服务器性能报表","want_capability":"room.performance","want_tier":"R0","want_confirm":"none","slots":{"window":"7d"}}
+{"id":"report-08d","query":"最近6小时服务器卡不卡","want_capability":"room.performance","want_tier":"R0","want_confirm":"none","slots":{"window":"6h"}}
+{"id":"report-09a","query":"查看地图","want_capability":"room.map","want_tier":"R0","want_confirm":"none"}
+{"id":"report-09b","query":"看看世界地图","want_capability":"room.map","want_tier":"R0","want_confirm":"none"}
+{"id":"report-12a","query":"保存存档","want_capability":"room.save","want_tier":"R1","want_confirm":"none"}
+{"id":"report-12b","query":"立即备份","want_capability":"room.backup.create","want_tier":"R1","want_confirm":"none"}
+{"id":"report-12c","query":"重启服务器","want_capability":"room.restart","want_tier":"R2","want_confirm":"once"}
+{"id":"report-12d","query":"回档2天","want_capability":"workbench.rollback","want_tier":"R3","want_confirm":"typed"}
+{"id":"report-12e","query":"重置玩家lcy","want_capability":"player.reset_character","want_tier":"R3","want_confirm":"typed"}
+{"id":"report-12f","query":"lcy开了无敌吗","want_capability":"world.player_modes","want_tier":"R0","want_confirm":"none"}
+{"id":"neg-01","query":"跳过这个话题","forbid_capability":"workbench.skip_days"}
+{"id":"neg-02","query":"查看地图","forbid_capability":"player.resolve"}
+{"id":"neg-03","query":"查看地图","forbid_capability":"workbench.reveal_player_map"}
+{"id":"neg-04","query":"重置世界","forbid_capability":"player.reset_character"}
+{"id":"neg-05","query":"开启无敌模式","forbid_capability":"workbench.set_player_invincibility"}
+{"id":"neg-06","query":"开启无敌模式","forbid_capability":"workbench.set_player_mode"}
+{"id":"neg-07","query":"最近一天服务器CPU内存怎么样","forbid_capability":"room.status"}

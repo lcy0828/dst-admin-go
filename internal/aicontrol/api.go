@@ -43,7 +43,7 @@ func apiTool(op *apicontract.Operation) (Tool, error) {
 			description += " Prefer api_" + op.ReplacedBy + " for the same behavior."
 		}
 	}
-	if op.Mutation() {
+	if op.ExecutionPolicy().Access == "write" {
 		description += ". Executes the administrator's requested operation directly. Preserve unspecified fields and revisions. Submitted tasks require checking their actual result."
 	}
 	if op.Transport == "multipart" {
@@ -147,7 +147,7 @@ func (s *Service) discoverFor(p Principal, raw json.RawMessage) (json.RawMessage
 	}
 	query := in.Query
 	items := []map[string]any{}
-	for _, op := range s.catalog.SearchFiltered(query, len(s.catalog.Operations()), in.MetadataFilter) {
+	for _, op := range s.searchNative(p, query, in.MetadataFilter) {
 		if !p.AllowsTool(op.ToolName()) {
 			continue
 		}
@@ -194,6 +194,7 @@ func (s *Service) discoverFor(p Principal, raw json.RawMessage) (json.RawMessage
 }
 
 func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw json.RawMessage) (Invocation, error) {
+	p.catalog = s.catalog
 	if len(raw) > 64<<10 {
 		return Invocation{}, ErrInvalid
 	}
@@ -299,7 +300,13 @@ func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw j
 	if err != nil {
 		return Invocation{}, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	timeout := 30 * time.Second
+	switch name {
+	case "api_previewGameRelease", "api_publishGameRelease", "api_retryGameRelease":
+		// Release preflight has a 60-second bound in the game update handler.
+		timeout = 65 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var data json.RawMessage
 	if name == discoverAPI {
@@ -319,6 +326,20 @@ func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw j
 			call.Status = "uncertain"
 		}
 		data, _ = json.Marshal(map[string]string{"error": err.Error()})
+		if generic, _ := ctx.Value(genericResultKey{}).(bool); generic {
+			failure := map[string]any{"code": "API_FAILED", "message": err.Error()}
+			var platform *PlatformError
+			if errors.As(err, &platform) {
+				failure["code"], failure["message"] = platform.Code, platform.Message
+				if len(platform.Payload) > 0 {
+					var details map[string]any
+					if json.Unmarshal(platform.Payload, &details) == nil {
+						failure = details
+					}
+				}
+			}
+			data, _ = json.Marshal(map[string]any{"error": failure, "callId": call.ID, "state": call.Status})
+		}
 	}
 	if name != discoverAPI || err != nil {
 		// Discovery contains only bundled contract text, never settings or

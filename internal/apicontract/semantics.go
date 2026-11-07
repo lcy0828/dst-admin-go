@@ -13,11 +13,11 @@ import (
 // ToolSemantics is discovery text, never an authority for parameters, runtime
 // requirements or permissions. The original English contract remains available.
 type ToolSemantics struct {
-	Purpose     string   `json:"purpose"`
-	Actions     []string `json:"actions"`
-	Queries     []string `json:"queries"`
-	Terms       []string `json:"terms"`
-	ResultNotes string   `json:"resultNotes,omitempty"`
+	Purpose     string   `json:"purpose" yaml:"purpose"`
+	Actions     []string `json:"actions" yaml:"actions"`
+	Queries     []string `json:"queries" yaml:"queries"`
+	Terms       []string `json:"terms" yaml:"terms"`
+	ResultNotes string   `json:"resultNotes,omitempty" yaml:"resultNotes,omitempty"`
 }
 
 func (op *Operation) CatalogRevision() string { return op.catalog.revision }
@@ -54,21 +54,39 @@ func (c *Catalog) loadSemantics(raw []byte) error {
 				}
 			}
 		}
-		op.semantics = entry
+		// The native contract owns discovery. This file is a legacy projection.
+		if op.Intent == nil {
+			op.semantics = entry
+		}
 	}
 	for _, op := range c.ordered {
 		if op.Callable() && op.semantics == nil {
 			if op.Deprecated && op.ReplacedBy != "" {
 				op.semantics = c.operations[op.ReplacedBy].semantics
 			}
-			if op.semantics == nil {
-				return fmt.Errorf("missing tool semantics: %s", op.ID)
-			}
 		}
 	}
 	c.indexSemantics()
 	c.revision = fmt.Sprintf("%x", sha256.Sum256(append([]byte(c.revision), raw...)))
 	return nil
+}
+
+// A new endpoint is immediately searchable without a second registration.
+func (c *Catalog) deriveSemantics() {
+	for _, op := range c.ordered {
+		if !op.Callable() {
+			continue
+		}
+		op.semantics = op.Intent
+		if op.semantics == nil && op.Deprecated && op.ReplacedBy != "" {
+			op.semantics = c.operations[op.ReplacedBy].Intent
+		}
+		if op.semantics == nil {
+			title := string([]rune(op.Summary)[:min(100, len([]rune(op.Summary)))])
+			op.semantics = &ToolSemantics{Purpose: title, Actions: []string{title}, Queries: []string{title}, Terms: append([]string{op.ID, title}, op.Tags...)}
+		}
+	}
+	c.indexSemantics()
 }
 
 // Candidate phrases are intersected with the reviewed vocabulary at indexing

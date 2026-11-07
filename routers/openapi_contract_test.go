@@ -63,7 +63,7 @@ func TestOpenAPIMatchesPublishedV2Routes(t *testing.T) {
 				// Task queries/preparation never dispatch game writes; execution
 				// uses its persisted taskRef and reauthorizes every replay.
 				// A generic HTTP response replay must not bypass that check.
-				taskIdentity := path == "/bot/tasks/queries/{tool}" || path == "/bot/tasks/preparations/{tool}" || path == "/bot/tasks/{taskRef}/execute"
+				taskIdentity := path == "/bot/gateway" || path == "/bot/tasks/queries/{tool}" || path == "/bot/tasks/preparations/{tool}" || path == "/bot/tasks/{taskRef}/execute"
 				if !taskIdentity {
 					requiredParameters = append(requiredParameters, "#/components/parameters/IdempotencyKey")
 				}

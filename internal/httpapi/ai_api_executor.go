@@ -78,7 +78,7 @@ func (b *AIBackend) InvokeAPI(ctx context.Context, p aicontrol.Principal, op *ap
 		}
 		body = bytes.NewReader(encoded)
 	}
-	request, err := http.NewRequestWithContext(ctx, op.Method, uri, body)
+	request, err := http.NewRequestWithContext(aicontrol.WithDispatchedPrincipal(ctx, p), op.Method, uri, body)
 	if err != nil {
 		return nil, err
 	}

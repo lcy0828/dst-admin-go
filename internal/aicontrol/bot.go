@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"dont/internal/apicontract"
+	"dont/internal/capreg"
 	consoleapi "dont/internal/console"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
@@ -22,23 +23,36 @@ import (
 
 // Bot capabilities are code-owned recipes. Neither metadata nor callers can
 // supply a handler, operation, script or alternate execution URL.
+//
+// Language and bot-facing policy metadata (aliases, examples, negatives, tier,
+// confirm, slot roles, receipts, prefer) come from the capreg registry. They
+// are presentation and decision inputs only and never part of SchemaRevision.
 type BotCapability struct {
-	Interaction      *consoleapi.Interaction `json:"interaction,omitempty"`
-	Actions          []consoleapi.Action     `json:"actions,omitempty"`
-	BehaviorRevision string                  `json:"behaviorRevision,omitempty"`
-	ID               string                  `json:"id"`
-	SearchTerms      []string                `json:"searchTerms,omitempty"`
-	Title            string                  `json:"title"`
-	Category         string                  `json:"category"`
-	Access           string                  `json:"access"`
-	ContractVersion  int                     `json:"contractVersion"`
-	SchemaRevision   string                  `json:"schemaRevision"`
-	Parameters       map[string]any          `json:"parameters"`
-	ParameterHints   map[string]string       `json:"parameterHints"`
-	NativeTools      []string                `json:"nativeTools"`
-	ResultKind       string                  `json:"resultKind"`
-	Risk             string                  `json:"risk,omitempty"`
-	Operation        string                  `json:"-"`
+	Interaction      *consoleapi.Interaction  `json:"interaction,omitempty"`
+	Actions          []consoleapi.Action      `json:"actions,omitempty"`
+	BehaviorRevision string                   `json:"behaviorRevision,omitempty"`
+	ID               string                   `json:"id"`
+	SearchTerms      []string                 `json:"searchTerms,omitempty"`
+	Aliases          []string                 `json:"aliases,omitempty"`
+	Examples         []string                 `json:"examples,omitempty"`
+	Negatives        []string                 `json:"negatives,omitempty"`
+	Tier             string                   `json:"tier,omitempty"`
+	Confirm          string                   `json:"confirm,omitempty"`
+	Prefer           string                   `json:"prefer,omitempty"`
+	SlotRoles        map[string]capreg.Slot   `json:"slotRoles,omitempty"`
+	Receipt          *capreg.Receipt          `json:"receipt,omitempty"`
+	ActionPolicies   map[string]capreg.Action `json:"actionPolicies,omitempty"`
+	Title            string                   `json:"title"`
+	Category         string                   `json:"category"`
+	Access           string                   `json:"access"`
+	ContractVersion  int                      `json:"contractVersion"`
+	SchemaRevision   string                   `json:"schemaRevision"`
+	Parameters       map[string]any           `json:"parameters"`
+	ParameterHints   map[string]string        `json:"parameterHints"`
+	NativeTools      []string                 `json:"nativeTools"`
+	ResultKind       string                   `json:"resultKind"`
+	Risk             string                   `json:"risk,omitempty"`
+	Operation        string                   `json:"-"`
 	build            func(string, map[string]any) apicontract.Input
 }
 type BotInput struct {
@@ -133,16 +147,32 @@ func BotCapabilities() []BotCapability {
 			return v
 		}},
 		{ID: "room.mods", Title: "模组列表", Category: "mods", Operation: "listRoomMods", build: empty},
-		{ID: "room.performance", Title: "性能报表", Category: "performance", Operation: "getRoomPerformanceReport", build: func(r string, _ map[string]any) apicontract.Input {
-			v := empty(r, nil)
-			v.Query = map[string]any{"maxPoints": 60}
-			return v
-		}},
+		{ID: "room.map", Title: "世界地图", Category: "world", Operation: "listRoomMaps", build: empty},
+		{ID: "room.performance", Title: "性能报表", Category: "performance", Operation: "getRoomPerformanceReport", Parameters: botSchema(map[string]any{
+			"window":  map[string]any{"type": "string", "enum": performanceWindowNames, "default": "24h", "description": "统计窗口：最近 1 小时、6 小时、24 小时或 7 天；同时给出 from 时以 from/to 为准。"},
+			"from":    map[string]any{"type": "string", "format": "date-time", "maxLength": 64, "description": "RFC3339 起点（可选）"},
+			"to":      map[string]any{"type": "string", "format": "date-time", "maxLength": 64, "description": "RFC3339 终点（可选，默认现在）"},
+			"worldId": botString(255),
+		}), ParameterHints: map[string]string{"worldId": "world"}, build: performanceInput},
 		{ID: "room.backups.settings", Title: "自动备份设置", Category: "backups", Operation: "listRoomBackupSchedules", build: empty},
 		{ID: "room.backups.configure", Title: "设置自动备份", Category: "management", Access: "write", Operation: "configureRoomBackupSchedule", Parameters: botSchema(map[string]any{"enabled": map[string]any{"type": "boolean"}, "schedule": botString(100), "timezone": botString(64), "mode": map[string]any{"type": "string", "enum": []string{"automatic", "hot-consistent", "cold-consistent"}}, "keep": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}, "taskId": botString(128)}, "enabled"), build: func(r string, p map[string]any) apicontract.Input { v := empty(r, nil); v.Body = p; return v }},
 		{ID: "room.backup.create", Title: "立即备份", Category: "management", Access: "write", Operation: "createRoomBackup", build: func(r string, _ map[string]any) apicontract.Input {
 			v := empty(r, nil)
 			v.Body = map[string]any{}
+			return v
+		}},
+		// Room-wide reset: the plugin fills the room-name confirmation only
+		// after the user typed the R3 confirmation phrase.
+		{ID: "room.reset", Title: "重置全部世界", Category: "management", Access: "write", Operation: "resetRoomWorlds", Parameters: botSchema(map[string]any{
+			"backup":       map[string]any{"type": "boolean", "default": true, "description": "重置前先创建保护备份；用户明确不要备份时为 false"},
+			"confirmation": map[string]any{"type": "string", "minLength": 1, "maxLength": 255, "description": "完整房间名称，由插件在用户输入确认短语后填写"},
+		}, "confirmation"), build: func(r string, p map[string]any) apicontract.Input {
+			v := empty(r, nil)
+			body := map[string]any{"confirmation": p["confirmation"]}
+			if b, ok := p["backup"]; ok {
+				body["backup"] = b
+			}
+			v.Body = body
 			return v
 		}},
 		{ID: "player.kick", Title: "踢出玩家", Category: "management", Access: "write", Operation: "kickRoomPlayer", Parameters: pSchema, ParameterHints: map[string]string{"playerId": "player"}, build: func(r string, p map[string]any) apicontract.Input {
@@ -226,19 +256,90 @@ func BotCapabilities() []BotCapability {
 		if c.ID == "location.save" || c.ID == "player.teleport" {
 			c.ResultKind = "facts"
 		}
-		c.SearchTerms = strings.Fields(taskTerms[c.ID])
-		// Old clients search only 32 terms. Keep one useful alias per action
-		// first; the complete action catalog remains available to newer clients.
-		for _, action := range c.Actions {
-			if len(c.SearchTerms) < 32 {
-				c.SearchTerms = append(c.SearchTerms, action.Title)
-			}
-		}
+		applyRegistry(c)
 		// Presentation changes do not invalidate a frozen parameter form.
 		c.SchemaRevision = botSchemaRevision(*c)
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].ID < list[j].ID })
 	return list
+}
+
+// Old clients search only 32 capability terms.
+const maxBotSearchTerms = 32
+
+// applyRegistry copies language and bot-facing policy from capreg. Search
+// terms are derived from registry aliases plus action titles. The executable
+// recipe, parameters and risk stay code-owned and untouched.
+func applyRegistry(c *BotCapability) {
+	e, ok := capreg.Lookup(c.ID)
+	terms := []string{}
+	seen := map[string]bool{}
+	add := func(v string) {
+		if v != "" && !seen[v] && len(terms) < maxBotSearchTerms {
+			seen[v] = true
+			terms = append(terms, v)
+		}
+	}
+	if ok {
+		c.Aliases, c.Examples, c.Negatives = e.Aliases, e.Examples, e.Negatives
+		c.Tier, c.Confirm, c.Prefer, c.Receipt = string(e.Tier), string(e.Confirm), e.Prefer, e.Receipt
+		for _, alias := range e.Aliases {
+			add(alias)
+		}
+		if props, _ := c.Parameters["properties"].(map[string]any); len(props) > 0 {
+			c.SlotRoles = map[string]capreg.Slot{}
+			for name := range props {
+				if slot, found := e.Slot(name); found {
+					c.SlotRoles[name] = slot
+				}
+			}
+		}
+	}
+	if len(c.Actions) > 0 {
+		// Copy before rewriting presentation data; definitions may be shared.
+		actions := append([]consoleapi.Action(nil), c.Actions...)
+		for i := range actions {
+			a := &actions[i]
+			key := strings.TrimPrefix(a.ID, strings.TrimPrefix(c.ID, "workbench.")+".")
+			if policy, found := e.Actions[key]; ok && found {
+				if c.ActionPolicies == nil {
+					c.ActionPolicies = map[string]capreg.Action{}
+				}
+				c.ActionPolicies[a.ID] = policy
+				// The registry is the language source for action discovery too.
+				a.SearchTerms = append([]string(nil), policy.Aliases...)
+			}
+			// Keep one useful alias per action for old clients.
+			add(a.Title)
+		}
+		c.Actions = actions
+	}
+	c.SearchTerms = terms
+}
+
+var performanceWindowNames = []string{"1h", "6h", "24h", "7d"}
+var performanceWindows = map[string]time.Duration{"1h": time.Hour, "6h": 6 * time.Hour, "24h": 24 * time.Hour, "7d": 7 * 24 * time.Hour}
+
+// performanceInput maps a bounded window onto the real report query. Without
+// a window or range the backend default (last 24 hours) applies unchanged.
+func performanceInput(room string, p map[string]any) apicontract.Input {
+	query := map[string]any{"maxPoints": 60}
+	if world, ok := p["worldId"]; ok {
+		query["worldId"] = world
+	}
+	to := time.Now().UTC()
+	if raw, ok := p["to"].(string); ok {
+		query["to"] = raw
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			to = parsed
+		}
+	}
+	if raw, ok := p["from"].(string); ok {
+		query["from"] = raw
+	} else if window, ok := performanceWindows[fmt.Sprint(p["window"])]; ok {
+		query["from"] = to.Add(-window).Format(time.RFC3339)
+	}
+	return apicontract.Input{Path: map[string]any{"roomId": room}, Query: query}
 }
 func botOperation(id string) bool {
 	return id == "listBotCapabilities" || id == "queryBotCapability" || id == "runBotCapability" || id == "getBotCapabilityResult"
@@ -710,6 +811,17 @@ func botProject(r BotResult, c BotCapability, d map[string]any) BotResult {
 		}
 		r.Data.(map[string]any)["shards"] = rows
 		r.ObservedAt = d["observedAt"]
+	case "room.map":
+		r.Data = botPick(d, "total", "rendererAvailable")
+		rows := []any{}
+		if items, ok := d["items"].([]any); ok {
+			for _, v := range items {
+				if item, ok := v.(map[string]any); ok {
+					rows = append(rows, botPick(item, "id", "worldId", "sessionId", "sessionLabel", "status", "stage", "layers", "width", "height", "featureCount", "warningCount", "createdAt", "finishedAt", "errorMessage"))
+				}
+			}
+		}
+		r.Data.(map[string]any)["items"] = rows
 	default:
 		r.Data = d
 	}

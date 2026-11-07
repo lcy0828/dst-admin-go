@@ -57,6 +57,7 @@ import (
 	"dont/internal/playeractivity"
 	playerapi "dont/internal/players"
 	"dont/internal/roomprovision"
+	"dont/internal/roomreset"
 	"dont/internal/rooms"
 	"dont/internal/runtimeaudit"
 	"dont/internal/runtimecpu"
@@ -878,6 +879,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 	}
 	backupService.ConfigureMutationGuard(localMutationGuard)
 	backupHandler := httpapi.NewBackupHandler(backupService, jobService)
+	roomResetHandler := httpapi.NewRoomResetHandler(roomreset.New(roomService, backupService, commandService, jobService))
 	distributedBackupStore := distributedbackup.NewStore(models.DB(), tablePrefix)
 	if err := distributedBackupStore.Migrate(); err != nil {
 		return nil, err
@@ -1715,6 +1717,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		artworkPackHandler.Register(v2)
 		containerHandler.Register(v2)
 		backupHandler.Register(v2)
+		roomResetHandler.Register(v2)
 		distributedBackupHandler.Register(v2)
 		saveImportHandler.Register(v2)
 		configurationHandler.Register(v2)

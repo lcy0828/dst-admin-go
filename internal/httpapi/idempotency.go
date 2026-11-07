@@ -71,7 +71,7 @@ func (s *IdempotencyStore) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Task execution is fenced by its persisted, caller-owned taskRef and
 		// must recheck current scope on every retry, including HTTP retries.
-		if c.FullPath() == "/api/v2/bot/tasks/queries/:tool" || c.FullPath() == "/api/v2/bot/tasks/preparations/:tool" || c.FullPath() == "/api/v2/bot/tasks/:taskRef/execute" {
+		if c.FullPath() == "/api/v2/bot/gateway" || c.FullPath() == "/api/v2/bot/tasks/queries/:tool" || c.FullPath() == "/api/v2/bot/tasks/preparations/:tool" || c.FullPath() == "/api/v2/bot/tasks/:taskRef/execute" {
 			c.Next()
 			return
 		}

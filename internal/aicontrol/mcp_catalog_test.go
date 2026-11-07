@@ -112,7 +112,7 @@ func TestMCPViewsPaginationMetadataAndDispatcher(t *testing.T) {
 
 	// Notification dependencies are available to permitted keys in the small
 	// bot view, but adding them to the view must not grant new token scope.
-	for _, name := range []string{"api_getRoom", "api_getRoomPlayer", "api_streamWorldRuntimeEvents", "api_listRoomRuntimeEvents", "api_listRoomChatLogs", "api_streamRoomChatLogs"} {
+	for _, name := range []string{"api_getRoom", "api_getRoomPlayer", "api_streamWorldRuntimeEvents", "api_listRoomRuntimeEvents", "api_listRoomChatLogs", "api_streamRoomChatLogs", "api_readRoomNotificationEvents", "api_streamRoomNotifications", "api_listRoomRecentEvents", "api_readNotificationEvents"} {
 		if !botNames[name] {
 			t.Fatal("missing unified notification dependency", name)
 		}
@@ -139,8 +139,13 @@ func TestMCPViewsPaginationMetadataAndDispatcher(t *testing.T) {
 		t.Fatal(e)
 	}
 	for _, tool := range readerView.Tools {
-		if slices.Contains([]string{"api_getRoom", "api_getRoomPlayer", "api_streamWorldRuntimeEvents", "api_listRoomRuntimeEvents", "api_listRoomChatLogs", "api_streamRoomChatLogs"}, tool.Name) {
+		if slices.Contains([]string{"api_getRoom", "api_getRoomPlayer", "api_streamWorldRuntimeEvents", "api_listRoomRuntimeEvents", "api_listRoomChatLogs", "api_streamRoomChatLogs", "api_readNotificationEvents"}, tool.Name) {
 			t.Fatal("bot view expanded game-read scope", tool.Name)
+		}
+	}
+	for _, name := range []string{"api_readRoomNotificationEvents", "api_streamRoomNotifications", "api_listRoomRecentEvents"} {
+		if !slices.ContainsFunc(readerView.Tools, func(tool *mcp.Tool) bool { return tool.Name == name }) {
+			t.Fatal("room reader cannot discover authorized notifications", name)
 		}
 	}
 	key = originalKey

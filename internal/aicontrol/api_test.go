@@ -10,11 +10,42 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"dont/internal/apicontract"
 )
 
 type apiBackendFunc func(context.Context, Principal, *apicontract.Operation, apicontract.Input) (json.RawMessage, error)
+
+func TestGameReleasePreviewGetsItsHandlerDeadline(t *testing.T) {
+	s, _ := fixture(t, apiBackendFunc(func(ctx context.Context, _ Principal, op *apicontract.Operation, _ apicontract.Input) (json.RawMessage, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("API call has no deadline")
+		}
+		remaining := time.Until(deadline)
+		if op.ID == "previewGameRelease" && remaining < 60*time.Second {
+			t.Fatalf("game release preflight deadline too short: %s", remaining)
+		}
+		if op.ID == "getSoftwareStatus" && remaining > 31*time.Second {
+			t.Fatalf("ordinary read deadline changed: %s", remaining)
+		}
+		return json.RawMessage(`{"data":{}}`), nil
+	}))
+	catalog, err := apicontract.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ConfigureAPI(catalog)
+	for _, test := range []struct{ operation, arguments string }{
+		{"previewGameRelease", `{"body":{},"requestId":"preview-deadline-test"}`},
+		{"getSoftwareStatus", `{}`},
+	} {
+		if _, err := s.Invoke(context.Background(), Principal{ID: "page"}, "api_"+test.operation, []byte(test.arguments)); err != nil {
+			t.Fatalf("%s: %v", test.operation, err)
+		}
+	}
+}
 
 func (f apiBackendFunc) Invoke(context.Context, string, Arguments, string) (json.RawMessage, error) {
 	return nil, ErrUnavailable

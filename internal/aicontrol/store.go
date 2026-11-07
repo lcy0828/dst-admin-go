@@ -46,7 +46,7 @@ func (s *Store) Migrate() error {
 	for _, t := range []struct {
 		name  string
 		model any
-	}{{s.configTable, &configRecord{}}, {s.tokenTable, &tokenRecord{}}, {s.callTable, &Call{}}, {s.taskTable, &taskRecord{}}} {
+	}{{s.configTable, &configRecord{}}, {s.tokenTable, &tokenRecord{}}, {s.callTable, &Call{}}, {s.taskTable, &taskRecord{}}, {s.genericTable(), &genericRecord{}}} {
 		if err := s.db.Table(t.name).AutoMigrate(t.model).Error; err != nil {
 			return err
 		}

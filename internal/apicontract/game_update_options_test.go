@@ -14,6 +14,10 @@ func TestGameUpdateSingleConfirmationAndLegacyMCPContracts(t *testing.T) {
 	if !ok || !op.Mutation() || op.ToolMetadata().Access != "write" {
 		t.Fatal("update lost write permissions")
 	}
+	preview, ok := c.Operation("previewGameRelease")
+	if !ok || preview.ExecutionPolicy().Access != "read" || preview.ExecutionPolicy().Confirmation != "none" || preview.ToolMetadata().Access != "read" || preview.ToolMetadata().Destructive {
+		t.Fatal("read-only update preview requires a confirmation or advertises a write")
+	}
 	validate := func(operation *Operation, raw string) error {
 		var input map[string]any
 		if err := json.Unmarshal([]byte(raw), &input); err != nil {

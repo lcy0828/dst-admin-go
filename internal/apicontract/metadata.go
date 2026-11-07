@@ -48,6 +48,9 @@ var resourceTags = map[string]string{
 
 func (op *Operation) ToolMetadata() ToolMetadata {
 	readOnly := !op.Mutation()
+	if op.Authorization.Access != "" {
+		readOnly = op.Authorization.Access == "read"
+	}
 	if op.Policy.ReadOnly != nil {
 		readOnly = *op.Policy.ReadOnly
 	}
