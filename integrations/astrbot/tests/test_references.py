@@ -168,12 +168,48 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(engine.state["references"]), 1)
         self.assertEqual(engine.state["deliveries"][-1]["status"], "unknown")
 
-    async def test_read_references_never_infer_write_targets_or_override_explicit_player(self):
+    async def test_player_actions_share_verified_selection_but_explicit_players_win(self):
         refs = self.fixture()
+        target = Target("r1", "KU_TEST123", "示例玩家")
+        self.plugin.state.associate(("adapter", "456", "adapter:GroupMessage:789"), "42", target, source="same-panel")
         for intent in (
             Intent("kick"),
             Intent("capability", capability="player.give_item"),
+            Intent("capability", capability="player.resurrect"),
+            Intent("capability", capability="workbench.set_player_mode", parameters={"mode": "invincible", "enabled": True}),
+        ):
+            self.assertEqual(await refs.resolve(self.actor, "42", intent), target)
+        for intent in (
             Intent("inventory", player="指定玩家"),
+            Intent("capability", capability="player.resurrect", parameters={"player_id": "指定玩家"}),
+            Intent("capability", capability="player.give_item", parameters={"playerId": "KU_OTHER123"}),
         ):
             self.assertIsNone(await refs.resolve(self.actor, "42", intent))
         self.actor.event.bot.call_action.assert_not_awaited()
+
+    async def test_death_respawn_join_and_leave_receipts_can_select_a_player_after_reload(self):
+        for kind in ("death", "respawn", "joined", "left"):
+            with self.subTest(kind=kind):
+                refs = self.fixture()
+                saved = self.plugin.notifications.saved["adapter:GroupMessage:789"]["state"]
+                saved["references"] = [{"messageId": "42", "selfId": "456", "at": time.time(),
+                    "related": {"roomId": "r1", "playerId": "KU_TEST123", "name": "示例玩家"}}]
+                # The identity is in a delivery receipt, independent of wording
+                # or an editable message template.
+                self.reply.message_str = "任意自定义" + kind + "模板"
+                for intent in (Intent("inventory"), Intent("capability", capability="player.resurrect")):
+                    self.assertEqual((await refs.resolve(self.actor, "42", intent)).player, "KU_TEST123")
+                self.actor.rooms = ("other",)
+                self.assertIsNone(await refs.resolve(self.actor, "42", Intent("inventory")))
+                self.actor.event.bot.call_action.assert_not_awaited()
+
+    async def test_stale_wrong_bot_or_wrong_room_persisted_references_cannot_target_writes(self):
+        for change in ({"at": time.time()-86401}, {"selfId": "other-bot"},
+                       {"related": {"roomId": "other", "playerId": "KU_TEST123"}}):
+            with self.subTest(change=change):
+                refs = self.fixture()
+                row = {"messageId": "42", "selfId": "456", "at": time.time(),
+                       "related": {"roomId": "r1", "playerId": "KU_TEST123"}, **change}
+                self.plugin.notifications.saved["adapter:GroupMessage:789"]["state"]["references"] = [row]
+                self.actor.event.get_messages = lambda: []
+                self.assertIsNone(await refs.resolve(self.actor, "42", Intent("capability", capability="player.resurrect")))

@@ -155,6 +155,10 @@ def permitted(actor, item, parameters=None):
     if item.get("category") not in KNOWN_CATEGORIES:
         return False
     if item.get("access") == "write":
+        if "*" in actor.write_allowlist:
+            # Simple policy: administrators may run every published write.
+            # How it is confirmed is decided by decision.confirmation().
+            return actor.role in {"game-manage", "panel-manage"}
         workbench = (
             item.get("resultKind") == "workbench-run"
             and (
@@ -179,6 +183,29 @@ class Directory:
         self.unsupported = OrderedDict()
         self.cache = OrderedDict()
         self.locks = weakref.WeakValueDictionary()
+        self.fetch_one = None
+        self.selected = OrderedDict()
+
+    def seed(self, actor, item):
+        if (not isinstance(item, dict) or item.get("contractVersion") != 1
+                or not isinstance(item.get("schemaRevision"), str) or not compatible(item.get("parameters"))
+                or not ID.fullmatch(str(item.get("id", "")))
+                or not isinstance(item.get("nativeTools"), list)
+                or not all(isinstance(n, str) and TOOL.fullmatch(n) for n in item["nativeTools"])):
+            raise QueryError("CAPABILITY_INCOMPATIBLE")
+        key = actor.read_projection, item["id"]
+        self.selected[key] = (self.clock()+60, copy.deepcopy(item))
+        self.selected.move_to_end(key)
+        while len(self.selected)>32:
+            self.selected.popitem(last=False)
+
+    async def get(self, actor, capability, deadline):
+        if self.fetch_one:
+            result = await self.fetch_one(actor, capability)
+            if result is not NotImplemented:
+                return result
+        rows = await self.items(actor, deadline)
+        return next((c for c in rows if c["id"] == capability), None)
 
     async def items(self, actor, deadline, ttl=None, force=False):
         ttl = actor.directory_ttl if ttl is None else ttl
@@ -273,6 +300,9 @@ class Directory:
             return copy.deepcopy(accepted)
 
     def lookup(self, actor, capability):
+        selected = self.selected.get((actor.read_projection, capability))
+        if selected and selected[0] > self.clock():
+            return copy.deepcopy(selected[1])
         entry = self.cache.get(actor.read_projection, {})
         return next(
             (copy.deepcopy(c) for c in entry.get("items", []) if c["id"] == capability), None

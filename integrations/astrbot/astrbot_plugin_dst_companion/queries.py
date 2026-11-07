@@ -19,12 +19,22 @@ class Queries:
         return [r for r in rows if r.get("id") in actor.rooms]
 
     async def resolve(self, actor, room, player, deadline):
-        return await self.gateway.call(
+        result = await self.gateway.call(
             actor,
             "api_resolveRoomPlayer",
             {"path": {"roomId": room}, "query": {"query": player}},
             deadline,
         )
+        # “玩家小明” may mean the full nickname or “the player 小明”. Never
+        # discard a real full-name match, an ambiguity, or a read failure.
+        if result.get("status") == "not_found" and isinstance(player, str) and player.startswith("玩家"):
+            nickname = player[2:].strip()
+            if nickname:
+                return await self.gateway.call(
+                    actor, "api_resolveRoomPlayer",
+                    {"path": {"roomId": room}, "query": {"query": nickname}}, deadline,
+                )
+        return result
 
     async def run(self, actor, kind, target, player, deadline, *, room=None, compact=False):
         path = {"roomId": target.room}

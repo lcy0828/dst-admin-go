@@ -55,6 +55,39 @@ def preview_seconds(batch, elapsed):
     return max(0, seconds - max(0, elapsed))
 
 
+def player_mode_request(value):
+    """Parse explicit modes without loading a directory or choosing permissions."""
+    import re
+
+    modes = {"普通无敌": "invincible", "仅免伤": "invincible", "无敌": "super_god", "上帝": "super_god", "超级无敌": "super_god",
+             "制造": "creative", "制作": "creative", "创造": "creative", "锁血": "health_lock",
+             "一击必杀": "one_hit", "一击秒杀": "one_hit", "必杀": "one_hit", "秒杀": "one_hit",
+             "隐身": "invisible", "隐形": "invisible", "踏水": "water_walk", "水上漂": "water_walk", "水上行走": "water_walk",
+             "穿墙": "noclip", "无碰撞": "noclip"}
+    clear = re.fullmatch(r"(?:给|为|让|将)?\s*(.{1,64}?)(?:的)?\s*(?:解除|关闭|关掉)全部(?:面板)?模式", value)
+    if clear:
+        return {"player_id": clear[1].strip(), "mode": "clear_all", "enabled": False}
+    clear = re.fullmatch(r"(?:解除|关闭|关掉)\s*(.{1,64}?)(?:的)?全部(?:面板)?模式", value)
+    if clear:
+        return {"player_id": clear[1].strip(), "mode": "clear_all", "enabled": False}
+    if value in {"解除全部模式", "关闭全部模式", "关掉全部模式", "解除全部面板模式", "关闭全部面板模式"}:
+        return {"mode": "clear_all", "enabled": False}
+    names = "|".join(modes)
+    verbs = "开启|打开|启用|关闭|关掉|停用|开|关"
+    on = {"开启", "打开", "启用", "开"}
+    match = re.fullmatch(rf"(?:给|为|让|将)?\s*(.{{1,64}}?)(?:的)?\s*({verbs})({names})(?:模式)?", value)
+    if match:
+        return {"player_id": match[1].strip(), "mode": modes[match[3]],
+                "enabled": match[2] in on}
+    match = re.fullmatch(rf"({verbs})\s*(.{{1,64}}?)的\s*({names})(?:模式)?", value)
+    if match:
+        return {"player_id": match[2].strip(), "mode": modes[match[3]], "enabled": match[1] in on}
+    match = re.fullmatch(rf"({verbs})({names})(?:模式)?", value)
+    if match:
+        return {"mode": modes[match[2]], "enabled": match[1] in on}
+    return None
+
+
 def direct_request(value, items, actor):
     """A small whole-message grammar; ambiguity, conditions and discussion use AI."""
     import re
@@ -77,10 +110,9 @@ def direct_request(value, items, actor):
             match=re.fullmatch(r"(?:让|把|将)?(.{1,64}?)恢复人形",value)
             if match: capability="workbench.restore_woodie_human";params={"player_id":match[1].strip()}
     if not capability:
-        modes={"无敌":"invincible","超级无敌":"super_god","制造":"creative","创造":"creative","锁血":"health_lock","一击必杀":"one_hit","隐身":"invisible","踏水":"water_walk","穿墙":"noclip"}
-        match=re.fullmatch(r"(?:给|让|将)?(.{1,64}?)(?:的)?(开启|打开|启用|关闭|关掉|停用)(超级无敌|无敌|制造|创造|锁血|一击必杀|隐身|踏水|穿墙)(?:模式)?",value)
-        if match:
-            capability="workbench.set_player_mode";params={"player_id":match[1].strip(),"mode":modes[match[3]],"enabled":match[2] in {"开启","打开","启用"}}
+        params = player_mode_request(value)
+        if params:
+            capability="workbench.set_player_mode"
         else:
             match=re.fullmatch(r"(?:给|让|将)?(.{1,64}?)(?:解除|关闭)全部(?:面板)?模式",value)
             if match:capability="workbench.set_player_mode";params={"player_id":match[1].strip(),"mode":"clear_all","enabled":False}

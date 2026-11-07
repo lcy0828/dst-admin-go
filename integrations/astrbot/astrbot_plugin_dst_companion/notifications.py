@@ -10,6 +10,7 @@ import httpx
 from .broadcast import READ_TOOLS, BroadcastEngine
 from .chat_stream import CHAT_STREAM_TOOL, NOTICE_READ_TOOLS, chat_stream_session, supports_chat_stream
 from .gateway import QueryError, unpack
+from .notice_settings import notices_enabled
 from .event_notices import BASE_TOOLS, EVENT_TOOLS, SYSTEM_TOOL, room_feed as facts_feed, platform_feed, supports as supports_events
 
 NOTICE_READ_TOOLS = NOTICE_READ_TOOLS | EVENT_TOOLS
@@ -67,7 +68,7 @@ class Notifications:
             and r.get("source") == source
             and r.get("noticeOwner", "unified") == "unified"
             and not legacy_owns(p, s)
-            and any(r.get("notices", {}).values())
+            and notices_enabled(r)
             and p.session_native_allowed(s)
         }
 

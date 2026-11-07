@@ -2,10 +2,17 @@
 
 import copy
 
-from .event_notices import BASE_TOOLS
 from .configuration import fingerprint
+from .event_notices import BASE_TOOLS
 from .formatters import safe
 from .gateway import QueryError
+from .notice_settings import (
+    default_notices,
+    notice_choices,
+    notices_enabled,
+    set_broadcast,
+    upgrade_notices,
+)
 from .sessions import group_origin
 
 
@@ -111,6 +118,7 @@ class Setup:
             await p.template_editor.handle(event, argument, reply)
             return True
         enable_flags = {}
+        enable_broadcast = None
         if command == "启用本群" and argument:
             values = argument.split()
             if (
@@ -121,15 +129,10 @@ class Setup:
                 await reply("使用 /dst 启用本群，或 /dst 启用本群 聊天播报 开/关。设置未更改。")
                 return True
             enabled = values[1] == "开"
-            enable_flags = (
-                {"chat": enabled}
-                if values[0] == "聊天播报"
-                else {
-                    "presence": enabled,
-                    "server": enabled,
-                    **({"chat": False} if not enabled else {}),
-                }
-            )
+            if values[0] == "聊天播报":
+                enable_flags = {"chat": enabled}
+            else:
+                enable_broadcast = enabled
         if command in {"设置", "禁用本群"} and argument:
             await reply("使用 /dst " + command + "，无需附加参数。设置未更改。")
             return True
@@ -207,11 +210,12 @@ class Setup:
                     "query": True,
                     "source": source,
                     "rooms": record.get("rooms", list(ceiling) or "all"),
-                    "notices": record.get(
-                        "notices", {"presence": True, "server": True, "chat": False}
-                    ),
+                    "notices": record.get("notices", default_notices()),
                 }
-                record["notices"].update(enable_flags)
+                record = upgrade_notices(record)
+                notice_choices(record).update(enable_flags)
+                if enable_broadcast is not None:
+                    set_broadcast(record, enable_broadcast)
                 if group_mode and event.is_admin():
                     record["assignedRooms"] = list(ceiling) or "all"
             elif command == "订阅房间":
@@ -235,36 +239,35 @@ class Setup:
                 if len(values) != 2 or values[0] not in categories or values[1] not in {"开", "关"}:
                     await reply("使用 /dst 通知 类别 开/关；类别：" + "、".join(categories))
                     return True
-                record.setdefault("notices", {})[categories[values[0]]] = values[1] == "开"
+                notice_choices(record)[categories[values[0]]] = values[1] == "开"
             elif command == "通知预设":
                 if argument not in {"玩家群", "管理群"}:
                     await reply("使用 /dst 通知预设 玩家群 或 管理群；已有设置只有选择后才更改。")
                     return True
-                flags = record.setdefault("notices", {})
+                flags = notice_choices(record)
                 flags.update(presence=True, server=True, maintenance=True, season=True, updates=True, players=True, boss=True, mods=False, alerts=argument == "管理群", backup=argument == "管理群", software=argument == "管理群")
             elif command in {"播报", "聊天播报"}:
                 if argument not in {"开", "关"}:
                     await reply("使用 /dst " + command + " 开 或 关。")
                     return True
-                flags = record.setdefault(
-                    "notices", {"presence": True, "server": True, "chat": False}
-                )
+                flags = notice_choices(record)
                 if command == "聊天播报":
                     flags["chat"] = argument == "开"
                 else:
-                    flags.update(presence=argument == "开", server=argument == "开")
-                    if argument == "关":
-                        flags.update({key: False for key in flags})
+                    set_broadcast(record, argument == "开")
             if command != "设置":
+                record = upgrade_notices(record)
                 await p.enrollment.update(session, record)
                 p.context.dst_companion_v1 = p
                 await p.notifications.reconcile()
             effective = p.effective(session)
             from .event_notices import LABELS
-            enabled_notices = "、".join(label for key, label in LABELS.items() if record.get("notices", {}).get(key)) or "未开启扩展通知"
+            choices = notice_choices(record)
+            enabled_notices = "、".join(label for key, label in LABELS.items() if choices.get(key)) or "未选择"
             caller = p.actor(event)
             management = (
-                "\n你的游戏管理：已授权 · 固定写能力 " + str(len(caller.write_allowlist)) + " 项"
+                ("\n你的游戏管理：已授权 · 全部管理操作（危险操作需输入确认）" if "*" in caller.write_allowlist
+                 else "\n你的游戏管理：已授权 · 固定写能力 " + str(len(caller.write_allowlist)) + " 项")
                 if caller and caller.role in {"game-manage", "panel-manage"}
                 else ("\n你的游戏管理：按本群身份与操作权限开放，可用 /dst 权限 查看。" if group_mode
                       else "\n你的游戏管理：未授权（需管理连接、管理员映射与固定操作授权同时就绪）")
@@ -283,17 +286,18 @@ class Setup:
                 + "、".join(safe(n) for n in names)
                 + ("（自动同步面板授权）" if record.get("rooms") == "all" else "")
                 + "\n播报："
-                + (notice if any(record.get("notices", {}).values()) else "关闭")
+                + (notice if notices_enabled(record) else "关闭（保留各类设置）")
                 + "\n聊天播报开关："
-                + ("开" if record.get("notices", {}).get("chat") else "关")
-                + "\n扩展通知：" + enabled_notices
+                + ("开" if choices.get("chat") else "关")
+                + "\n通知类别：" + enabled_notices
                 + "\n可用 /dst 通知预设 玩家群/管理群，或 /dst 通知 季节变化 开/关。"
                 + management
                 + (
                     f"\n聊天仅播报启用后的新公屏消息，约 {p.config.get('advanced', {}).get('chatPollInterval', 3)} 秒检查一次；连续消息会合并，不补发历史。"
-                    if record.get("notices", {}).get("chat")
+                    if notices_enabled(record) and choices.get("chat")
                     else ""
                 )
+                + ("\n当前播报已暂停；/dst 播报 开 恢复发送。" if not record.get("noticeEnabled", True) else "")
                 + "\n已开放常用只读查询（含玩家和背包）；管理仍需单独授权。\n可用：/dst 订阅房间 名称 · /dst 播报 开/关 · /dst 聊天播报 开/关 · /dst 禁用本群"
             )
         except QueryError as error:

@@ -1983,7 +1983,7 @@
     "expect": {
       "maxWrites": 0,
       "match": [
-        "没有确认|未找到"
+        "没有确认|未找到|没有找到"
       ],
       "model": false
     }
@@ -2156,7 +2156,7 @@
     "expect": {
       "maxWrites": 0,
       "match": [
-        "没有确认|未找到"
+        "没有确认|未找到|没有找到"
       ],
       "model": false
     }
@@ -4154,7 +4154,7 @@
       "maxWrites": 0,
       "model": true,
       "match": [
-        "采集|harvest|sapling",
+        "采集|收获|树苗|harvest|sapling",
         "11[:：]37|11点37"
       ],
       "apis": [
@@ -5826,7 +5826,11 @@
     "category": "M",
     "title": "启动指定房间",
     "turns": [
-      "启动1服"
+      "启动1服",
+      {
+        "text": "确认",
+        "wake": false
+      }
     ],
     "fixture": {},
     "config": {},
@@ -5834,7 +5838,8 @@
     "expect": {
       "maxWrites": 1,
       "model": false,
-      "minWrites": 1
+      "minWrites": 1,
+      "noWritesBeforeTurn": 1
     }
   },
   {
@@ -5842,7 +5847,11 @@
     "category": "M",
     "title": "停止指定房间",
     "turns": [
-      "停止1服"
+      "停止1服",
+      {
+        "text": "确认",
+        "wake": false
+      }
     ],
     "fixture": {},
     "config": {},
@@ -5850,7 +5859,8 @@
     "expect": {
       "maxWrites": 1,
       "model": false,
-      "minWrites": 1
+      "minWrites": 1,
+      "noWritesBeforeTurn": 1
     }
   },
   {
@@ -5858,7 +5868,11 @@
     "category": "M",
     "title": "重启指定房间",
     "turns": [
-      "重启1服"
+      "重启1服",
+      {
+        "text": "确认",
+        "wake": false
+      }
     ],
     "fixture": {},
     "config": {},
@@ -5866,7 +5880,8 @@
     "expect": {
       "maxWrites": 1,
       "model": false,
-      "minWrites": 1
+      "minWrites": 1,
+      "noWritesBeforeTurn": 1
     }
   },
   {
@@ -5874,7 +5889,11 @@
     "category": "M",
     "title": "保存指定房间",
     "turns": [
-      "保存1服"
+      "保存1服",
+      {
+        "text": "确认",
+        "wake": false
+      }
     ],
     "fixture": {},
     "config": {},
@@ -5882,7 +5901,8 @@
     "expect": {
       "maxWrites": 1,
       "model": false,
-      "minWrites": 1
+      "minWrites": 1,
+      "noWritesBeforeTurn": 1
     }
   },
   {
@@ -5890,7 +5910,11 @@
     "category": "M",
     "title": "创建房间备份",
     "turns": [
-      "1服立即备份"
+      "1服立即备份",
+      {
+        "text": "确认",
+        "wake": false
+      }
     ],
     "fixture": {},
     "config": {},
@@ -5898,7 +5922,8 @@
     "expect": {
       "maxWrites": 1,
       "model": false,
-      "minWrites": 1
+      "minWrites": 1,
+      "noWritesBeforeTurn": 1
     }
   },
   {
@@ -5906,7 +5931,11 @@
     "category": "M",
     "title": "踢出指定玩家",
     "turns": [
-      "踢人 阿青"
+      "踢人 阿青",
+      {
+        "text": "确认",
+        "wake": false
+      }
     ],
     "fixture": {},
     "config": {},
@@ -5914,7 +5943,8 @@
     "expect": {
       "maxWrites": 1,
       "model": false,
-      "minWrites": 1
+      "minWrites": 1,
+      "noWritesBeforeTurn": 1
     }
   },
   {
@@ -6176,10 +6206,9 @@
   {
     "id": "M22",
     "category": "M",
-    "title": "自然语言明确管理需求自动使用模型",
+    "title": "自然语言复活无需额外确认且只写一次",
     "turns": [
-      "阿青已经准备好了，请帮忙把他复活",
-      "确认"
+      "阿青已经准备好了，请帮忙把他复活"
     ],
     "fixture": {},
     "config": {},
@@ -6187,8 +6216,7 @@
     "expect": {
       "maxWrites": 1,
       "model": true,
-      "minWrites": 1,
-      "noWritesBeforeTurn": 1
+      "minWrites": 1
     }
   },
   {
@@ -6280,8 +6308,7 @@
       "apis": [
         "api_resolveRoomPlayer"
       ],
-      "minWrites": 1,
-      "noWritesBeforeTurn": 1
+      "minWrites": 1
     }
   },
   {
@@ -6304,7 +6331,6 @@
       "match": [
         "不确定|未确认|原任务"
       ],
-      "noWritesBeforeTurn": 1,
       "minWrites": 1
     }
   },
@@ -6390,7 +6416,11 @@
     "category": "R",
     "title": "QQ群管理员可踢出指定玩家",
     "turns": [
-      "踢人 阿青"
+      "踢人 阿青",
+      {
+        "text": "确认",
+        "wake": false
+      }
     ],
     "fixture": {},
     "config": {
@@ -6403,7 +6433,8 @@
     "expect": {
       "model": false,
       "minWrites": 1,
-      "maxWrites": 1
+      "maxWrites": 1,
+      "noWritesBeforeTurn": 1
     }
   },
   {
@@ -6475,7 +6506,11 @@
     "category": "R",
     "title": "QQ群主可保存授权房间",
     "turns": [
-      "保存1服"
+      "保存1服",
+      {
+        "text": "确认",
+        "wake": false
+      }
     ],
     "fixture": {},
     "config": {
@@ -6488,7 +6523,8 @@
     "expect": {
       "model": false,
       "minWrites": 1,
-      "maxWrites": 1
+      "maxWrites": 1,
+      "noWritesBeforeTurn": 1
     }
   },
   {
@@ -7867,7 +7903,8 @@
       "maxWrites": 0,
       "match": [
         "无法|未完成|失败|不可用"
-      ]
+      ],
+      "model": true
     }
   },
   {
@@ -8033,9 +8070,8 @@
       "maxWrites": 1,
       "model": true,
       "match": [
-        "未确认|不确定"
+        "未确认|不确定|无法确认|没有确认"
       ],
-      "noWritesBeforeTurn": 1,
       "minWrites": 1
     }
   },

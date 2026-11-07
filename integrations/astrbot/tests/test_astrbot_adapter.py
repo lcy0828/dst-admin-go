@@ -5,7 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 AVAILABLE = importlib.util.find_spec("astrbot") is not None
@@ -62,14 +62,42 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_fast_route_stops_event_before_panel_and_never_requests_model(self):
         bot = self.companion()
         event = self.event([C.At(qq="456"), C.Plain("帮助")])
+        event.request_llm = AsyncMock()
         self.stopped = False
         await bot.on_message(event)
         self.assertTrue(self.stopped)
-        event.bot.call_action.assert_awaited_once()
-        payload = event.bot.call_action.call_args.kwargs["message"]
+        event.request_llm.assert_not_awaited()
+        payloads = [call.kwargs["message"] for call in event.bot.call_action.await_args_list]
+        # On a loaded CI runner the genuine 1.5 s progress message can precede
+        # the final menu. Reject duplicate results, not legitimate progress.
+        self.assertIn(len(payloads), (1, 2))
+        for progress in payloads[:-1]:
+            self.assertEqual(progress[-1]["data"]["text"], "正在读取面板数据…")
+        payload = payloads[-1]
         self.assertEqual(payload[-1]["type"], "text")
         self.assertIn("可用查询", payload[-1]["data"]["text"])
         await bot.terminate()
+
+    async def test_busy_runner_progress_does_not_duplicate_help_or_request_model(self):
+        bot = self.companion()
+        event = self.event([C.At(qq="456"), C.Plain("帮助")])
+        event.request_llm = AsyncMock()
+        self.stopped = False
+
+        async def progress_due(tasks, **kwargs):
+            return set(), set(tasks)
+
+        try:
+            with patch("astrbot_plugin_dst_companion.main.asyncio.wait", side_effect=progress_due):
+                await bot.on_message(event)
+            self.assertTrue(self.stopped)
+            event.request_llm.assert_not_awaited()
+            calls = event.bot.call_action.await_args_list
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0].kwargs["message"][-1]["data"]["text"], "正在读取面板数据…")
+            self.assertIn("可用查询", calls[1].kwargs["message"][-1]["data"]["text"])
+        finally:
+            await bot.terminate()
 
     async def test_fake_at_plain_text_and_other_at_do_not_wake(self):
         bot = self.companion()
@@ -100,6 +128,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_model_view_preserves_unrelated_tools_persona_and_reduces_dst(self):
         bot = self.companion()
+        bot.config["access_policy"] = "simple"
         event = self.event([])
         unrelated = FunctionTool(
             name="unrelated",
@@ -128,11 +157,11 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("DST 当前权限", request.system_prompt)
         self.assertEqual(
             set(request.func_tool.names()),
-            {"unrelated", "dst_servers", "dst_player", "dst_find", "dst_read", "dst_result"},
+            {"unrelated", "dst_servers", "dst_player", "dst_world", "dst_find", "dst_read", "dst_result"},
         )
         # Actual AstrBot serializes the final provider tool payload.
         payload = request.func_tool.openai_schema()
-        self.assertEqual(len(payload), 6)
+        self.assertEqual(len(payload), 7)
         await bot.terminate()
 
     async def test_native_admin_guard_is_reused(self):

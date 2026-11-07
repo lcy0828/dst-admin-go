@@ -1,4 +1,7 @@
-"""Resolve read-only replies from sent receipts, never from copied chat text."""
+"""Resolve player selections from sent receipts, never from copied chat text.
+
+A reference selects an identity; it never grants permission to perform an action.
+"""
 
 import asyncio
 import re
@@ -8,13 +11,21 @@ from .broadcast import clean, timestamp
 from .sessions import group_origin
 from .state import Target
 
+PLAYER_REFERENCES = frozenset({"", "他", "她", "他的", "她的", "该玩家", "这个玩家", "此玩家"})
+
 
 def needs_reference(intent):
-    return bool(
-        intent
-        and intent.kind in {"inventory", "profile", "network"}
-        and intent.player in {"", "他", "他的"}
-    )
+    if not intent:
+        return False
+    if intent.kind in {"inventory", "profile", "network", "kick"}:
+        return intent.player in PLAYER_REFERENCES
+    if intent.kind == "capability" and intent.capability.startswith(("player.", "workbench.", "location.")):
+        parameters = intent.parameters or {}
+        return isinstance(parameters, dict) and all(
+            isinstance(parameters.get(key, ""), str) and parameters.get(key, "") in PLAYER_REFERENCES
+            for key in ("playerId", "player_id")
+        )
+    return False
 
 
 def presence_identity(text):
@@ -73,7 +84,18 @@ class References:
         event = actor.event
         from astrbot.api import message_components as C
 
-        replies = [part for part in event.get_messages() if isinstance(part, C.Reply)]
+        replies = [part for part in event.get_messages() if isinstance(part, C.Reply)] if event and hasattr(event, "get_messages") else []
+        if (
+            len(replies) == 1
+            and str(replies[0].id) == quote
+            and str(replies[0].sender_id) == bot
+            and hasattr(p.state, "quoted_text")
+        ):
+            by_text = p.state.quoted_text(actor.scope, replies[0].message_str, source=source) or p.state.quoted_text(
+                (platform, bot, group), replies[0].message_str, source=source
+            )
+            if by_text:
+                return by_text if by_text.room in actor.rooms and by_text.player else None
         if (
             saved.get("source") != source
             or len(replies) != 1

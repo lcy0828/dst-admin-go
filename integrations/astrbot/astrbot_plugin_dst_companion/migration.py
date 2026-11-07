@@ -4,6 +4,7 @@ import copy
 
 from .broadcast import READ_TOOLS
 from .connections import endpoint
+from .notice_settings import upgrade_notices
 
 
 def legacy_instance(plugin, metadata=None):
@@ -82,6 +83,7 @@ async def _migrate(plugin, metadata):
             }
         else:
             record = copy.deepcopy(existing)
+        record = upgrade_notices(record)
         record["noticeOwner"] = "pending"
         # Persist the exclusion first. A crash at any following instruction
         # leaves either the legacy owner, or a resumable pending transfer.

@@ -6,6 +6,7 @@ import time
 
 from .configuration import Effective, fingerprint, freeze
 from .gateway import QueryError
+from .notice_settings import upgrade_notices
 from .sessions import canonical_records
 
 
@@ -70,9 +71,15 @@ class Enrollment:
             self.validate(session, record)
         normalized = canonical_records(value)
         if normalized != value:
-            await self.save("sessions_v3_before_group_normalization", value)
-            await self.save("sessions_v3", normalized)
-            value = normalized
+            if await self.save("sessions_v3_before_group_normalization", value) is False:
+                raise QueryError("CONFIG_SAVE_FAILED")
+        upgraded = {session: upgrade_notices(record) for session, record in normalized.items()}
+        if upgraded != value:
+            if await self.save("sessions_v3_before_notice_defaults", value) is False:
+                raise QueryError("CONFIG_SAVE_FAILED")
+            if await self.save("sessions_v3", upgraded) is False:
+                raise QueryError("CONFIG_SAVE_FAILED")
+            value = upgraded
         self.records = copy.deepcopy(value)
         self.loaded = True
 
@@ -119,6 +126,7 @@ class Enrollment:
             or len(session.split(":")) != 3
             or not isinstance(record, dict)
             or type(record.get("enabled")) is not bool
+            or "noticeEnabled" in record and type(record["noticeEnabled"]) is not bool
         ):
             raise ValueError("invalid session")
         if not record["enabled"]:
@@ -140,13 +148,14 @@ class Enrollment:
             or len(record["source"]) > 4096
         ):
             raise ValueError("invalid session source")
-        flags = record.get("notices", {})
-        if (
-            not isinstance(flags, dict)
-            or set(flags) - {"presence", "server", "chat", "maintenance", "season", "updates", "backup", "software", "players", "boss", "mods", "alerts"}
-            or any(type(v) is not bool for v in flags.values())
-        ):
-            raise ValueError("invalid notice settings")
+        for field in ("notices", "noticeChoices"):
+            flags = record.get(field, {})
+            if (
+                not isinstance(flags, dict)
+                or set(flags) - {"presence", "server", "chat", "maintenance", "season", "updates", "backup", "software", "players", "boss", "mods", "alerts"}
+                or any(type(v) is not bool for v in flags.values())
+            ):
+                raise ValueError("invalid notice settings")
         if record.get("noticeOwner", "unified") not in {"unified", "pending"}:
             raise ValueError("invalid notice owner")
 

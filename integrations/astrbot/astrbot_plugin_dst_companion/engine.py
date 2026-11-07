@@ -5,12 +5,15 @@ import time
 from dataclasses import dataclass, replace
 
 from . import formatters as fmt
-from .capabilities import parse_parameter, permitted
+from .capabilities import permitted
 from .commands import allowed, menu_commands
 from .display import room_heading
 from .display import room_label as short_room_label
 from .display import text as display_text
 from .gateway import QueryError
+from .parameter_ui import answer as parameter_answer
+from .parameter_ui import describe as parameter_description
+from .parameter_ui import prompt as parameter_prompt
 from .presentation import business, options, render
 from .queries import Queries
 from .routing import READ_KINDS, Intent, form_reply, is_cancel_reply, parse
@@ -43,6 +46,15 @@ ERRORS = {
     "MCP_RESPONSE_INVALID": "面板返回的数据格式无法识别，本次读取失败，请检查连接或版本。",
     "WORLD_NOT_RUNNING": "该世界未运行，无法读取当前游戏数据。",
     "PANEL_DISCONNECTED": "面板连接已断开，本次没有取得查询结果。",
+}
+
+
+DIRECT_CAPABILITIES = {
+    "restart": "room.restart",
+    "start": "room.start",
+    "stop": "room.stop",
+    "backup": "room.backup.create",
+    "kick": "player.kick",
 }
 
 
@@ -133,11 +145,13 @@ class Engine:
             return Reply("handled_error", "序号不在当前页，请按最新菜单中的序号选择，或回复 取消。")
         # An unknown explicit reply must not silently select the last player.
         context = self.state.quoted(actor.scope, quote) if quote else self.state.target(actor.key)
+        if context is not None and context.player:
+            context = replace(context, source="quote" if quote else "focus")
         if reference is not None:
             from .references import needs_reference
 
-            if needs_reference(intent):
-                context = reference
+            if needs_reference(intent) and (not intent.room or intent.room == reference.room):
+                context = replace(reference, source="quote")
         if intent and intent.kind == "network" and not intent.player and (quote or reference):
             # An explicit reply asks about that player. An unverified reply
             # needs a name; it must not silently become a room-wide query.
@@ -156,6 +170,8 @@ class Engine:
             elif pending.get("mode") == "world":
                 form = pending["form"]
                 form["parameters"][form["field"]] = item["id"]
+                if form["item"].get("parameterHints", {}).get(form["field"]) == "player":
+                    form["target"] = Target(form["target"].room, item["id"], item.get("name", ""))
                 intent, target, frozen = form["intent"], form["target"], form
             elif pending["room"]:
                 target = Target(pending["room"], item["id"], item.get("name", ""))
@@ -163,32 +179,53 @@ class Engine:
             else:
                 target = Target(item["id"])
         elif form and intent is None:
-            if quote and quote != form.get("messageId"):
+            from .decision import confirmation_reply, looks_like_confirmation
+            confirming = form["type"] == "confirmation" and looks_like_confirmation(text)
+            relayed = form.get("relayed") and not form.get("messageId")
+            if confirming and quote and quote != form.get("messageId") and not relayed:
+                # A known prompt exists and the user quoted something else
+                # (a notice, another prompt): never confirm through it.
+                return Reply("handled_error", "请引用当前这条确认提示，或不引用直接回复；引用其他消息不会确认或更换已准备好的操作。尚未执行。")
+            # A prompt relayed by the model has no recorded message id; quoting
+            # it while confirming answers this user's own pending operation.
+            if quote and quote != form.get("messageId") and reference is None and not confirming:
                 return Reply("pass")
             if form.get("configRevision") != actor.config_revision:
                 self.state.clear_form(actor.key)
                 return Reply("handled_error", ERRORS["CONFIG_CHANGED"])
-            answer = form_reply(text)
+            if confirming:
+                overrides = confirmation_reply(text, form, form.get("roomName", ""))
+                if overrides is None:
+                    expected = form.get("phrase") or "确认"
+                    return Reply("needs_selection", "尚未执行。请回复「" + expected + "」执行这项操作，或回复 取消。")
+                form["parameters"].update(overrides)
+                form["userConfirmed"] = True
+                intent, target, frozen = form["intent"], form["target"], form
+                answer = text
+            else:
+                answer = form_reply(text)
             if answer is None:
                 self.state.begin(actor.key)
                 return Reply("pass")
             if form["type"] == "confirmation":
-                if text.strip() != "确认":
-                    return Reply("needs_selection", "请直接回复 确认 执行这项操作，或回复 取消。")
-                form["userConfirmed"] = True
-                intent, target, frozen = form["intent"], form["target"], form
+                if not form.get("userConfirmed"):
+                    expected = form.get("phrase") or "确认"
+                    return Reply("needs_selection", "请回复「" + expected + "」执行这项操作，或回复 取消。")
             elif form["type"] == "player":
-                intent, target = replace(form["intent"], player=answer), form["target"]
+                intent, target = replace(form["intent"], player=reference.player if reference else answer), reference or form["target"]
             else:
                 try:
                     value = (
                         form["schema"]["default"]
                         if text == "默认" and "default" in form["schema"]
-                        else parse_parameter(answer, form["schema"])
+                        else parameter_answer(reference.player if reference and form["item"].get("parameterHints", {}).get(form["field"]) == "player" else answer,
+                                              form["schema"], item=form["item"], key=form["field"])
                     )
                 except QueryError:
                     return Reply("handled_error", ERRORS["PARAMETER_INVALID"])
                 form["parameters"][form["field"]] = value
+                if reference and form["item"].get("parameterHints", {}).get(form["field"]) == "player":
+                    form["target"] = reference
                 intent, target, frozen = form["intent"], form["target"], form
         else:
             target = context
@@ -246,7 +283,7 @@ class Engine:
         if intent is None:
             return Reply("pass")
         if intent.kind == "cancel":
-            if form and quote and quote != form.get("messageId"):
+            if form and quote and quote != form.get("messageId") and reference is None:
                 return Reply("pass")
             self.state.begin(actor.key)
             if form and form.get("teleportPreview"):
@@ -279,6 +316,11 @@ class Engine:
     async def execute(self, actor, intent, target=None, *, frozen=None):
         if intent.kind != "capability" and not allowed(actor, intent.kind):
             return Reply("denied", ERRORS["PERMISSION_DENIED"])
+        if intent.kind in DIRECT_CAPABILITIES and self.directory:
+            # Shortcut words run the same published capability as AI tools, so
+            # permission, confirmation and receipts never depend on phrasing.
+            intent = replace(intent, kind="capability", capability=DIRECT_CAPABILITIES[intent.kind],
+                             parameters={"playerId": intent.player} if intent.kind == "kick" and intent.player else {})
         seq = self.state.begin(actor.key)
         config = self.config(actor)
         timeout = (
@@ -488,7 +530,8 @@ class Engine:
                         + "，请选择要查询的房间",
                     )
                 return Reply("handled_error", "没有唯一匹配的房间，请使用房间列表选择。")
-            target = Target(matches[0]["id"])
+            if target.room != matches[0]["id"]:
+                target = Target(matches[0]["id"])
         if target.room and not any(r["id"] == target.room for r in rooms):
             raise QueryError("ROOM_DENIED")
         if not target.room:
@@ -501,13 +544,16 @@ class Engine:
         room = next(r for r in rooms if r["id"] == target.room)
         title, room_label = room_heading(room, rooms, intent.kind)
         if intent.kind == "capability":
-            return await self._dynamic(actor, intent, target, seq, deadline, title, frozen)
+            return await self._dynamic(actor, intent, target, seq, deadline, title, frozen,
+                                       room_name=str(room.get("name", "")))
         if intent.kind == "network" and not intent.player:
             # General connection questions describe the room's online players,
             # even after an earlier profile/inventory query selected someone.
             target = Target(target.room)
         player = None
         if intent.kind in {"inventory", "profile", "network", "kick"}:
+            from .references import PLAYER_REFERENCES
+
             missing_binding = False
             query = intent.player
             config = self.config(actor)
@@ -520,16 +566,20 @@ class Engine:
                     target = Target(target.room)
                     intent = replace(intent, player="他")
                     missing_binding = True
-            elif query in {"他", "他的"}:
+            elif query in PLAYER_REFERENCES:
                 query = ""
             if query or target.player:
                 data = await self.queries.resolve(
                     actor, target.room, query or target.player, deadline
                 )
                 if data.get("status") in {"unavailable", "not_found"}:
+                    self.state.form(actor.key, {"type": "player", "intent": replace(intent, player=""),
+                        "target": Target(target.room), "configRevision": actor.config_revision}, sequence=seq)
                     return Reply(
-                        "handled_error",
-                        title + "：玩家目录中没有确认的匹配记录；不代表玩家从未进入。",
+                        "needs_selection",
+                        title + ("：玩家信息暂时无法读取。" if data.get("status") == "unavailable"
+                                 else "：没有找到对应的玩家；不代表玩家从未进入。")
+                        + "请回复游戏昵称或 KU ID 重试，或回复取消。",
                     )
                 items = data.get("items", [])
                 if (
@@ -542,7 +592,7 @@ class Engine:
                     raise QueryError("MCP_RESPONSE_INVALID")
                 player = items[0]
                 target = Target(target.room, player["id"], player.get("name", ""))
-            elif intent.kind != "network" or intent.player in {"他", "他的"}:
+            elif intent.kind != "network" or intent.player in PLAYER_REFERENCES - {""}:
                 self.state.form(
                     actor.key,
                     {
@@ -566,7 +616,7 @@ class Engine:
             cap = {"backup": "room.backup.create", "kick": "player.kick"}.get(
                 intent.kind, "room." + intent.kind
             )
-            if cap not in actor.write_allowlist:
+            if not actor.may_write(cap):
                 raise QueryError("PERMISSION_DENIED")
             text = await self.actions.submit(actor, intent, target, deadline)
         else:
@@ -596,15 +646,32 @@ class Engine:
             result += "\n房间 ID：" + fmt.safe(target.room)
             if target.player:
                 result += " · 玩家 ID：" + fmt.safe(target.player)
-        self.state.remember(actor.key, seq, target, result)
+        # A room-wide list with just one online player is not a personal
+        # selection. It must not become the implicit target of a later write.
+        remembered = Target(target.room) if intent.kind == "players" or intent.kind == "network" and not intent.player else target
+        self.state.remember(actor.key, seq, remembered, result)
         return Reply("matched", result, target)
 
-    async def _dynamic(self, actor, intent, target, seq, deadline, title, frozen):
+    async def _dynamic(self, actor, intent, target, seq, deadline, title, frozen, room_name=""):
         evidence = None
         if not self.directory:
             raise QueryError("CAPABILITY_MISSING")
-        items = await self.directory.items(actor, deadline)
-        item = next((c for c in items if c["id"] == intent.capability), None)
+        item = await self.directory.get(actor, intent.capability, deadline)
+        # Dedicated and workbench entries must represent the same effect.
+        # Falling back to the workbench must never turn full god mode into
+        # ordinary damage immunity merely because permissions differ.
+        if not frozen and intent.capability == "workbench.set_player_mode":
+            values = intent.parameters or {}
+            simple = {"super_god": "player.god_mode", "creative": "player.creative_mode"}.get(values.get("mode"))
+            dedicated = await self.directory.get(actor, simple, deadline) if simple else None
+            if dedicated and not permitted(actor, dedicated):
+                dedicated = None
+            if dedicated and set(values) <= {"player_id", "mode", "enabled"}:
+                mapped = {"enabled": values["enabled"]} if "enabled" in values else {}
+                if "player_id" in values:
+                    mapped["playerId"] = values["player_id"]
+                intent = replace(intent, capability=simple, parameters=mapped)
+                item = dedicated
         if not item or not permitted(actor, item):
             raise QueryError("PERMISSION_DENIED")
         if frozen and frozen.get("previewUntil", float("inf")) <= self.state.clock():
@@ -623,11 +690,13 @@ class Engine:
                 for field,value in row.get("parameters",{}).items():
                     prop=schema.get("properties",{}).get(field,{})
                     if value in prop.get("enum",[]): prop["enum"].remove(value)
-        from .interactions import interaction, effective_risk, preview_seconds
+        from .interactions import effective_risk, interaction, preview_seconds
         selector_missing=any(row.get("parameters") and any(key not in parameters for key in row["parameters"]) for row in item.get("actions",[]) if isinstance(row,dict))
         if not permitted(actor, item, parameters) and not selector_missing:
             raise QueryError("PERMISSION_DENIED")
         critical = effective_risk(item,parameters) == "critical" and item["access"] == "write"
+        from .decision import confirmation, confirmation_prompt, typed_phrase
+        policy = confirmation(item, parameters) if item["access"] == "write" else "none"
         flow = interaction(item, parameters)
         from .private_connection import LEGACY_MOVEMENT
         movement = item["id"] in LEGACY_MOVEMENT and "phase" in schema.get("properties", {})
@@ -643,6 +712,24 @@ class Engine:
         nearby_preview = bool(flow and parameters.get("phase") == "preview")
         if critical or flow:
             parameters.pop("confirmed", None)
+        from .references import PLAYER_REFERENCES
+        player_fields = [key for key, hint in item.get("parameterHints", {}).items() if hint == "player"]
+        for key in player_fields:
+            value = parameters.get(key, "")
+            if isinstance(value, str) and value in PLAYER_REFERENCES:
+                if target.player and len(player_fields) == 1:
+                    parameters[key] = target.player
+                    target = replace(target, source=target.source or "focus")
+                else:
+                    parameters.pop(key, None)
+            elif isinstance(value, str) and value in {"我", "自己"}:
+                config = self.config(actor)
+                binding = (config["bindings"] if config else self.bindings).get(actor.user, "")
+                if binding:
+                    parameters[key] = binding
+                else:
+                    parameters.pop(key, None)
+                    target = Target(target.room)
         for key, hint in item.get("parameterHints", {}).items():
             if (
                 hint == "player"
@@ -650,6 +737,12 @@ class Engine:
                 and not str(parameters[key]).startswith("KU_")
             ):
                 resolved = await self.queries.resolve(actor, target.room, parameters[key], deadline)
+                if (intent.capability == "player.resurrect" and resolved.get("status") == "not_found"
+                        and isinstance(parameters[key], str) and parameters[key].startswith("一下")
+                        and parameters[key][2:].strip()):
+                    # Preserve an actual nickname beginning with 一下; only a
+                    # definite miss permits interpreting it as politeness.
+                    resolved = await self.queries.resolve(actor, target.room, parameters[key][2:].strip(), deadline)
                 if resolved.get("status") == "ambiguous":
                     form = {
                         "type": "parameter",
@@ -672,8 +765,21 @@ class Engine:
                         form,
                     )
                 if resolved.get("status") != "resolved" or len(resolved.get("items", [])) != 1:
-                    return Reply("handled_error", "没有确认的唯一玩家，请提供更完整昵称或 KU ID。")
+                    self.state.form(actor.key, {"type": "parameter", "intent": intent,
+                        "target": Target(target.room), "item": item, "parameters": {k: v for k, v in parameters.items() if k != key},
+                        "field": key, "schema": schema["properties"][key], "configRevision": actor.config_revision}, sequence=seq)
+                    return Reply("needs_selection", ("玩家信息暂时无法读取。" if resolved.get("status") == "unavailable"
+                        else "没有确认的唯一玩家。") + "请回复更完整的游戏昵称或 KU ID，或回复取消。")
                 parameters[key] = resolved["items"][0]["id"]
+                if len(player_fields) == 1:
+                    target = Target(target.room, parameters[key], resolved["items"][0].get("name", ""), source="explicit")
+            elif hint == "player" and key in parameters and len(player_fields) == 1:
+                target = Target(
+                    target.room,
+                    parameters[key],
+                    target.name if target.player == parameters[key] else "",
+                    source=target.source if target.player == parameters[key] else "explicit",
+                )
         for key, prop in schema.get("properties", {}).items():
             if (movement or flow) and key in {"phase", "preview_id"}:
                 continue
@@ -681,7 +787,15 @@ class Engine:
                 continue
             if (critical or flow) and key == "confirmed":
                 continue
+            if key == "confirmation" and policy != "none":
+                continue
             if key in parameters or key not in schema.get("required", []) and "default" not in prop:
+                continue
+            if key not in schema.get("required", []) and "default" in prop:
+                from .capabilities import validate
+
+                validate(prop["default"], prop)
+                parameters[key] = prop["default"]
                 continue
             form = {
                 "type": "parameter",
@@ -697,43 +811,62 @@ class Engine:
                 worlds = await self.gateway.call(
                     actor, "api_listRoomWorlds", {"path": {"roomId": target.room}}, deadline
                 )
+                rows = worlds.get("items", [])
+                slot = (item.get("slotRoles") or {}).get(key) or {}
+                if (slot.get("ask") == "never" or item["id"] == "workbench.skip_days") and not item["id"].startswith("world."):
+                    masters = [r for r in rows if isinstance(r, dict) and r.get("role") == "master" and r.get("id")]
+                    chosen = masters[0] if len(masters) == 1 else (
+                        rows[0] if len(rows) == 1 and isinstance(rows[0], dict) and rows[0].get("id") else None
+                    )
+                    if chosen:
+                        parameters[key] = chosen["id"]
+                        continue
                 return self.choose(
                     actor,
                     intent,
-                    worlds.get("items", []),
+                    rows,
                     target.room,
                     seq,
                     "请选择世界",
                     "world",
                     form,
                 )
-            if "default" in prop and item["access"] == "read":
+            slot = (item.get("slotRoles") or {}).get(key) or {}
+            if "default" in prop and (item["access"] == "read" or slot.get("ask") == "never"):
                 parameters[key] = prop["default"]
                 continue
             self.state.form(actor.key, form, sequence=seq)
             if item.get("parameterHints", {}).get(key) == "player":
                 return Reply(
                     "needs_selection",
-                    fmt.safe(item["title"]) + "：请 @机器人回复玩家昵称或 KU ID。\n"
+                    fmt.safe(item["title"]) + "：请回复玩家昵称或 KU ID。\n"
                     "也可直接说“" + fmt.safe(item["title"]) + " 玩家昵称”；回复 取消 退出。",
                 )
-            hint = "；可选：" + json_values(prop["enum"]) if "enum" in prop else ""
-            if "default" in prop:
-                hint += "；默认 " + fmt.safe(prop["default"]) + "，回复 默认 使用"
             return Reply(
                 "needs_selection",
                 fmt.safe(item["title"])
-                + "：请提供 "
-                + fmt.safe(prop.get("title") or key)
-                + hint
-                + "。取消退出。",
+                + "：" + parameter_prompt(item, key, prop),
             )
-        if (critical or intent.confirm_required or flow or item["id"] in LEGACY_MOVEMENT) and not nearby_preview and not movement_preview and item["id"] != "player.teleport":
+        # The Runtime still freezes the target for a reversible player mode.
+        # The bot can submit that preview in this turn when policy needs no reply.
+        auto_mode = bool(
+            flow and policy == "none" and not critical
+            and item["id"] == "workbench.set_player_mode"
+            and parameters.get("mode") in schema.get("properties", {}).get("mode", {}).get("enum", [])
+            and type(parameters.get("enabled")) is bool and target.player
+            and (parameters.get("mode") != "clear_all" or parameters["enabled"] is False)
+        )
+        needs_confirmation = policy != "none" or (flow and not auto_mode) or item["id"] in LEGACY_MOVEMENT
+        if needs_confirmation and not nearby_preview and not movement_preview and item["id"] != "player.teleport":
             if not frozen or frozen.get("userConfirmed") is not True:
+                form_confirm = "typed" if policy == "typed" else "once"
                 self.state.form(
                     actor.key,
                     {
                         "type": "confirmation",
+                        "confirm": form_confirm,
+                        "phrase": typed_phrase(item) if form_confirm == "typed" else "确认",
+                        "roomName": room_name,
                         "intent": intent,
                         "target": target,
                         "item": item,
@@ -742,24 +875,23 @@ class Engine:
                     },
                     sequence=seq,
                 )
-                return Reply(
-                    "needs_selection",
-                    "⚠️ "
-                    + fmt.safe(item["title"])
-                    + " · "
-                    + title
-                    + "\n参数："
-                    + json_values([str(k) + "=" + str(v) for k, v in parameters.items()])
-                    + "\n请直接回复 确认，或回复 取消。尚未执行。",
-                )
+                lines = ["⚠️ " + fmt.safe(item["title"]) + " · " + title,
+                         parameter_description(item, parameters, target),
+                         confirmation_prompt(item, parameters, form_confirm)]
+                return Reply("needs_selection", "\n".join(line for line in lines if line))
             if critical or flow:
                 parameters["confirmed"] = True
+            if "confirmation" in schema.get("properties", {}) and "confirmation" not in parameters and room_name:
+                # Room-name confirmation is the panel's proof of a deliberate
+                # change; the user already confirmed this exact room above.
+                parameters["confirmation"] = room_name
         if item["access"] == "write":
             if not self.actions:
                 raise QueryError("CAPABILITY_MISSING")
             preview_started = self.state.clock()
-            text = await self.actions.submit_capability(actor, item, target, parameters, deadline)
-            evidence = await self.actions.submitted_result(actor) if nearby_preview or movement_preview or item["id"] == "player.teleport" else None
+            journal_step = "mode-preview" if auto_mode else ""
+            text = await self.actions.submit_capability(actor, item, target, parameters, deadline, journal_step=journal_step)
+            evidence = await self.actions.submitted_result(actor, journal_step=journal_step)
             move_result = evidence.get("data", {}).get("movement") if isinstance(evidence, dict) else None
             if movement_preview and isinstance(move_result, dict) and move_result.get("state") == "preview" and evidence.get("complete") is True:
                 remaining_seconds = max(0, min(60, move_result.get("expiresAt", 0) - move_result.get("observedAt", 0)) - (self.state.clock()-preview_started))
@@ -771,7 +903,7 @@ class Engine:
                 from .teleport import describe_movement
                 return Reply("needs_selection", describe_movement(move_result)+"\n请在 60 秒内回复 确认 或 取消。", target, data=evidence)
             if item["id"] == "player.teleport" and isinstance(evidence, dict):
-                from .teleport import remaining, describe
+                from .teleport import describe, remaining
                 preview = evidence.get("data", {})
                 if preview.get("state") == "prepared" and remaining(preview)>0:
                     self.state.form(actor.key, {"type":"confirmation", "intent":intent, "target":target, "item":item,
@@ -780,6 +912,13 @@ class Engine:
                     return Reply("needs_selection", describe(preview)+"\n请在 60 秒内回复 确认 或 取消。附近仍可能有危险。", target, data=evidence)
                 return Reply("handled_error", describe(preview), target, data=evidence)
             batch = evidence.get("data", {}).get("batch") if isinstance(evidence, dict) else None
+            if auto_mode and not (
+                isinstance(batch, dict) and batch.get("state") == "preview"
+                and isinstance(batch.get("previewId"), str)
+                and evidence.get("status") == "succeeded" and evidence.get("complete") is True
+            ):
+                return Reply("handled_error", "预览结果尚未确认，玩家模式尚未修改。请查询任务进度后再决定是否重试。",
+                             target, data=evidence)
             if (nearby_preview and isinstance(batch, dict) and batch.get("state") == "preview"
                     and isinstance(batch.get("previewId"), str) and evidence.get("complete") is True):
                 if flow and batch.get("version",1)!=flow["resultVersion"]:
@@ -790,9 +929,22 @@ class Engine:
                 if batch.get("matched")==0:
                     return Reply("matched",text,target,data=evidence)
                 execution = {**parameters, "phase": "execute", "preview_id": batch["previewId"]}
-                self.state.form(actor.key, {"type": "confirmation", "intent": intent, "target": target,
-                    "item": item, "parameters": execution, "configRevision": actor.config_revision, "previewUntil": preview_started + preview_seconds(batch, 0)}, sequence=seq)
-                return Reply("needs_selection", text + "\n请在 30 秒内直接回复 确认，或回复 取消。尚未修改游戏。", target, data=evidence)
+                if auto_mode:
+                    if batch.get("matched") != 1 or batch.get("detailsComplete") is not True:
+                        return Reply("handled_error", "目标范围未能确认，尚未修改游戏。", target, data=evidence)
+                    execution["confirmed"] = True
+                    text = await self.actions.submit_capability(actor, item, target, execution, deadline, journal_step="mode-execute")
+                    evidence = await self.actions.submitted_result(actor, journal_step="mode-execute")
+                    if not isinstance(evidence, dict):
+                        self.state.suspend(actor.key, seq)
+                        return Reply("handled_error", "模式操作已提交，但结果尚未确认。请查询任务进度；不要重复提交。",
+                                     target)
+                else:
+                    self.state.form(actor.key, {"type": "confirmation", "intent": intent, "target": target,
+                        "item": item, "parameters": execution, "configRevision": actor.config_revision, "previewUntil": preview_started + preview_seconds(batch, 0)}, sequence=seq)
+                    return Reply("needs_selection", text + "\n请在 30 秒内直接回复 确认，或回复 取消。尚未修改游戏。", target, data=evidence)
+            line = target_line(item, target)
+            text = line + "\n" + text if line else text
             result = self.decorate(actor, "action", title, text, room=title, player=target.name)
         else:
             data = await self.directory.execute(actor, item, target.room, parameters, deadline)
@@ -816,8 +968,30 @@ class Engine:
                 + "\n"
                 + footer
             )
-        self.state.remember(actor.key, seq, target, result)
+        if item["access"] == "write" and isinstance(evidence, dict) and (
+            evidence.get("status") != "succeeded" or evidence.get("complete") is not True
+        ):
+            self.state.suspend(actor.key, seq)
+        else:
+            self.state.remember(actor.key, seq, target, result)
         return Reply("matched", result, target, data=evidence)
+
+
+TARGET_SOURCES = {
+    "quote": "引用的消息",
+    "focus": "沿用你刚才操作的玩家",
+    "only_online": "当前唯一在线玩家",
+}
+
+
+def target_line(item, target):
+    """Every player write names who it acted on, and why that player."""
+    hints = item.get("parameterHints", {}) or {}
+    if "player" not in hints.values() or not target.player:
+        return ""
+    name = target.name or target.player
+    source = TARGET_SOURCES.get(target.source)
+    return "对象：" + fmt.safe(name) + ("（" + source + "）" if source else "")
 
 
 def json_values(values):

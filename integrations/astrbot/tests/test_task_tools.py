@@ -8,6 +8,18 @@ import test_astrbot_adapter as adapter
 
 @unittest.skipUnless(adapter.AVAILABLE, "requires real AstrBot")
 class TaskAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mistyped_result_reference_does_not_hide_original_uncertainty(self):
+        from astrbot_plugin_dst_companion.gateway import QueryError
+        bot, event = self.companion(), self.event("admin")
+        who = await bot.tasks.actor(event)
+        original = "结果尚未确认；请查询原任务 original-test-reference，不要重发。"
+        event._dst_uncertain_write = (who.projection, str(event.message_obj.message_id), original)
+        bot.tasks.result = AsyncMock(side_effect=QueryError("PERMISSION_DENIED"))
+        result = await bot.tasks.perform(event, "dst_result", task_ref="mistyped-reference")
+        self.assertEqual(result, original)
+        bot.engine.execute.assert_not_awaited()
+        await bot.terminate()
+
     async def test_world_read_discovery_and_explicit_user_shard_survive_model_omission(self):
         bot,event=self.companion(),self.event('admin')
         bot.config['public_queries'].append('world')
@@ -43,6 +55,7 @@ class TaskAdapterTests(unittest.IsolatedAsyncioTestCase):
         for action in ("god_mode", "creative_mode"):
             with self.subTest(action=action):
                 bot, event = self.companion(), self.event("admin")
+                bot.config["access_policy"] = "custom"
                 item = {"id": "player." + action, "title": "玩家模式", "category": "management", "access": "write",
                         "parameters": {"type": "object", "properties": {"playerId": {"type": "string"}, "enabled": {"type": "boolean"}},
                                        "required": ["playerId", "enabled"], "additionalProperties": False},
@@ -60,7 +73,7 @@ class TaskAdapterTests(unittest.IsolatedAsyncioTestCase):
                 actor, intent, target = bot.engine.execute.call_args.args
                 self.assertEqual(intent.parameters, {"playerId": "示例玩家", "enabled": False})
                 self.assertEqual(intent.capability, item["id"])
-                self.assertTrue(intent.confirm_required)
+                self.assertFalse(intent.confirm_required)  # R1: tier policy, same as direct commands
                 self.assertEqual(target.room, "r1")
                 bot.engine.execute.reset_mock()
                 result = await bot.tasks.perform(event, "dst_player_action", **{**values, "parameters": {"enabled": "false"}})
@@ -82,7 +95,8 @@ class TaskAdapterTests(unittest.IsolatedAsyncioTestCase):
                           "required":["playerId","enabled"], "additionalProperties":False}, "parameterHints":{"playerId":"player"}}]
         result = await bot.tasks.perform(event,"dst_run", capability_id="player.god_mode", room="r1", player="示例玩家", parameters={"enabled":True})
         self.assertIn("查询卡片",result)
-        self.assertTrue(bot.engine.execute.call_args.args[1].confirm_required)
+        # Confirmation is decided by the capability tier in the engine, not by the entry point.
+        self.assertFalse(bot.engine.execute.call_args.args[1].confirm_required)
         await bot.terminate()
 
     def companion(self):
@@ -131,7 +145,68 @@ class TaskAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(actor.group_role, "admin")
         self.assertEqual(intent.parameters, {"player_id": "示例玩家"})
         self.assertEqual(target.room, "r1")
-        self.assertTrue(intent.confirm_required)
+        self.assertFalse(intent.confirm_required)
+        await bot.terminate()
+
+    async def test_generic_model_resurrection_uses_same_no_confirmation_policy_on_older_panel(self):
+        bot, event = self.companion(), self.event("admin")
+        bot.directory.items.return_value[0]["risk"] = "high"
+        await bot.tasks.perform(event, "dst_run", capability_id="player.resurrect", room="r1", player="示例玩家")
+        intent = bot.engine.execute.call_args.args[1]
+        self.assertEqual(intent.capability, "player.resurrect")
+        self.assertEqual(intent.parameters, {"player_id": "示例玩家"})
+        self.assertFalse(intent.confirm_required)
+        await bot.terminate()
+
+    async def test_model_actions_and_queries_use_same_verified_quote_selector(self):
+        from astrbot_plugin_dst_companion.state import Target
+
+        for tool, values in (("dst_player_action", {"action": "resurrect"}),
+                             ("dst_run", {"capability_id": "player.resurrect"}),
+                             ("dst_player", {"view": "inventory"})):
+            with self.subTest(tool=tool):
+                bot, event = self.companion(), self.event("admin")
+                actor = await bot.tasks.actor(event)
+                selected = Target("r1", "KU_TEST123", "示例玩家")
+                bot.state.associate(actor.scope, "notice", selected, source=bot.connections.source())
+                bot.input = lambda event: ("请对这个玩家操作", True, "notice", "")
+                await bot.tasks.perform(event, tool, **values)
+                self.assertEqual(bot.engine.execute.call_args.args[2], selected)
+                if tool != "dst_player":
+                    self.assertFalse(bot.engine.execute.call_args.args[1].confirm_required)
+                await bot.terminate()
+
+    async def test_unknown_model_quote_and_explicit_different_player_never_reuse_old_target(self):
+        bot, event = self.companion(), self.event("admin")
+        bot.input = lambda event: ("请复活这个玩家", True, "missing-notice", "")
+        result = await bot.tasks.perform(event, "dst_player_action", action="resurrect")
+        self.assertIn("未能确认引用中的玩家", result)
+        bot.engine.execute.assert_not_awaited()
+        # A clarification is latched to this model turn. A later user message
+        # may provide an explicit target even when quoting an unrelated notice.
+        del event._dst_task_question
+        result = await bot.tasks.perform(event, "dst_player_action", action="resurrect", player="指定玩家")
+        self.assertIn("查询卡片", result)
+        self.assertEqual(bot.engine.execute.call_args.args[1].parameters, {"player_id": "指定玩家"})
+        self.assertEqual(bot.engine.execute.call_args.args[2].player, "")
+        await bot.terminate()
+
+    async def test_no_confirmation_does_not_grant_resurrection_to_members_or_cross_room(self):
+        bot, event = self.companion(), self.event("member")
+        for values in ({"room": "r1"}, {"room": "other-room"}):
+            with self.subTest(values=values):
+                result = await bot.tasks.perform(event, "dst_player_action", action="resurrect", player="示例玩家", **values)
+                self.assertNotIn("查询卡片", result)
+                bot.engine.execute.assert_not_awaited()
+        await bot.terminate()
+
+    async def test_model_write_uses_the_same_tier_policy_as_direct_commands(self):
+        bot, event = self.companion(), self.event("owner")
+        bot.directory.items.return_value = [{"id": "room.save", "title": "保存世界", "category": "management",
+            "access": "write", "risk": "low", "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            "parameterHints": {}}]
+        await bot.tasks.perform(event, "dst_server_action", action="save", room="r1")
+        self.assertFalse(bot.engine.execute.call_args.args[1].confirm_required)
         await bot.terminate()
 
     async def test_wrong_read_id_suggests_only_authorized_read_without_execution(self):
@@ -355,6 +430,7 @@ class TaskAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_tool_schema_has_available_views_and_keeps_permission_guard(self):
         from astrbot_plugin_dst_companion.task_tools import tool_view
         bot, event = self.companion(), self.event("admin")
+        bot.config["access_policy"] = "simple"
         await bot.prepare(event)
         actor = bot.actor(event)
         original = adapter.FunctionTool(name="dst_servers", description="fixture", parameters={"type":"object", "properties":{"view":{"type":"string"}}})
@@ -362,10 +438,16 @@ class TaskAdapterTests(unittest.IsolatedAsyncioTestCase):
         shown = tool_view(guarded, actor)
         self.assertIsInstance(shown, adapter._PermissionGuardedTool)
         self.assertIs(shown._wrapped, original)
-        self.assertEqual(shown.parameters["properties"]["view"]["enum"], ["overview", "players", "mods"])
+        # Simple policy: every read view is visible to everyone.
+        self.assertEqual(shown.parameters["properties"]["view"]["enum"], ["overview", "players", "mods", "performance"])
         self.assertNotIn("enum", original.parameters["properties"]["view"])
         hidden = adapter.FunctionTool(name="dst_world", description="fixture", parameters={"type":"object"})
-        self.assertIsNone(tool_view(hidden, actor))
+        self.assertIsNotNone(tool_view(hidden, actor))
+        bot.config["access_policy"] = "custom"
+        await bot.prepare(event)
+        custom = bot.actor(event)
+        self.assertEqual(tool_view(guarded, custom).parameters["properties"]["view"]["enum"], ["overview", "players", "mods"])
+        self.assertIsNone(tool_view(hidden, custom))
         await bot.terminate()
 
 

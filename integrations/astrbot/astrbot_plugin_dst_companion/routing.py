@@ -56,9 +56,83 @@ def normalize(text):
 READ_KINDS = frozenset(
     {"rooms", "status", "players", "profile", "inventory", "network", "mods", "help", "backups", "recent"}
 )
+READ_CAPABILITIES = frozenset(
+    {
+        "room.locations",
+        "room.performance",
+        "room.map",
+        "world.world_info",
+        "world.online_players",
+        "world.entity_count",
+        "world.player_modes",
+    }
+)
 READ_PREFIX = re.compile(
     r"^(?:查询一下|查看一下|查一下|看一下|查询|查看|查下|看看|看下|查)\s*(.+)$"
 )
+
+
+def is_read_intent(intent):
+    return bool(
+        intent
+        and (
+            intent.kind in READ_KINDS
+            or intent.kind == "capability"
+            and intent.capability in READ_CAPABILITIES
+        )
+    )
+
+
+def performance_window(text):
+    if re.search(r"(?:最近|近|过去)?\s*(?:1|一)\s*个?小时(?:内)?|\b1h\b", text, re.I):
+        return "1h"
+    if re.search(r"(?:最近|近|过去)?\s*(?:6|六)\s*个?小时(?:内)?|\b6h\b", text, re.I):
+        return "6h"
+    if re.search(
+        r"(?:最近|近|过去)?\s*(?:7|七)\s*天(?:内)?|(?:最近|近|过去)?\s*(?:1|一)?\s*周(?:内)?|本周|这周|\b7d\b",
+        text,
+        re.I,
+    ):
+        return "7d"
+    if re.search(
+        r"(?:最近|近|过去)?\s*(?:1|一)\s*天(?:内)?|(?:最近|近|过去)?\s*24\s*个?小时(?:内)?|今天|今日|\b24h\b",
+        text,
+        re.I,
+    ):
+        return "24h"
+    return ""
+
+
+def _performance_intent(text, room, room_name):
+    body = re.sub(r"(?:怎么样|如何|情况|报表|指标)?$", "", text.strip()).strip()
+    if not body or COMPOUND.search(body) or re.search(r"网络|延迟|ping|直说|[？?]", body, re.I):
+        return None
+    exact = {
+        "性能",
+        "性能报表",
+        "服务器性能",
+        "服务端性能",
+        "历史性能",
+        "性能指标",
+        "CPU内存",
+        "cpu内存",
+        "服务器负载",
+        "运行指标",
+    }
+    if text in exact or body in exact or re.search(
+        r"cpu|内存|性能报表|性能指标|服务器性能|服务端性能|服务器负载|历史性能|(?:最近|今天|今日).*(?:性能|负载)",
+        text,
+        re.I,
+    ):
+        window = performance_window(text)
+        return Intent(
+            "capability",
+            room=room,
+            room_name=room_name,
+            capability="room.performance",
+            parameters={"window": window} if window else {},
+        )
+    return None
 
 
 def is_cancel_reply(text):
@@ -78,11 +152,50 @@ def form_reply(text):
     return value
 
 
+def capability_terms(items):
+    """Names users say for published capabilities (registry aliases first)."""
+    terms = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        values = [item.get("title", "")]
+        for key in ("aliases", "searchTerms"):
+            if isinstance(item.get(key), list):
+                values.extend(item[key][:64])
+        for row in item.get("actions", []) or []:
+            if isinstance(row, dict):
+                values.append(row.get("title", ""))
+        terms.update(v for v in values if isinstance(v, str) and 2 <= len(v) <= 16)
+    return terms
+
+
+def interrupts_form(text, form, quote, items):
+    """True when a reply to a pending value prompt is really a new request.
+
+    A slot only consumes text that answers it. "查看地图" during a pending
+    nickname prompt is a new request, never a nickname. Quoting the prompt
+    itself always answers the prompt.
+    """
+    if not form or form.get("type") == "confirmation":
+        return False
+    if quote and quote == form.get("messageId"):
+        return False
+    value = normalize(text)
+    raw = text.strip()
+    if not value or re.search(r"[？?]", raw) or READ_PREFIX.fullmatch(value) or READ_PREFIX.fullmatch(raw):
+        return True
+    from .state import player_prompt
+
+    if not player_prompt(form):
+        return False
+    return any(term in value for term in capability_terms(items))
+
+
 def read_request_intent(text, aliases):
     """Recognize fixed read requests independently of display-card eligibility."""
     value = re.sub(r"^(?:AI(?:\s+|[：:])|问AI(?:\s+|[：:]))\s*", "", text.strip(), flags=re.I)
     intent = parse(value, aliases)
-    return intent if intent and intent.kind in READ_KINDS else None
+    return intent if is_read_intent(intent) else None
 
 
 def parse(text: str, aliases: dict[str, str]) -> Intent | None:
@@ -93,7 +206,7 @@ def parse(text: str, aliases: dict[str, str]) -> Intent | None:
     if match:
         # Prefer exact menu labels over interpreting “玩家信息” as a room name.
         candidate = _parse(match[1], aliases)
-        if candidate and candidate.kind in READ_KINDS:
+        if is_read_intent(candidate):
             return candidate
     intent = _parse(value, aliases)
     if intent is not None:
@@ -103,7 +216,7 @@ def parse(text: str, aliases: dict[str, str]) -> Intent | None:
     plain = re.sub(r"[呀啊呢吗嘛哦呗啦]{1,3}$", "", value).rstrip()
     if plain != value:
         candidate = parse(plain, aliases)
-        if candidate and candidate.kind in READ_KINDS:
+        if is_read_intent(candidate):
             return candidate
     return None
 
@@ -131,10 +244,18 @@ def _parse(text: str, aliases: dict[str, str]) -> Intent | None:
     room = ""
     room_name = ""
     for alias in sorted(aliases, key=len, reverse=True):
+        located = re.match(r"^在\s*" + re.escape(alias) + r"(?:里|中)?\s*(?=为|给|把|将)", text)
+        if located:
+            room, text = aliases[alias], text[located.end():].strip()
+            break
         if text.startswith(alias):
             room, text = aliases[alias], text[len(alias) :].strip()
             text = re.sub(r"^(?:现在|的)\s*", "", text)
             break
+    if not room and re.match(r"^在.+?(?:为|给|把|将)", text):
+        # Let the model resolve an unknown room clause. It must not become
+        # part of a player's nickname in an otherwise valid short command.
+        return None
     if not room:
         match = re.match(r"^([一二三四五六七八九十]|[1-9][0-9]?)服\s*", text)
         if match:
@@ -159,14 +280,52 @@ def _parse(text: str, aliases: dict[str, str]) -> Intent | None:
     match = READ_PREFIX.fullmatch(text)
     if match:
         candidate = _parse_command(match[1], aliases, room, room_name)
-        if candidate and candidate.kind in READ_KINDS:
+        if is_read_intent(candidate):
             return candidate
     return _parse_command(text, aliases, room, room_name)
 
 
 def _parse_command(text, aliases, room, room_name):
-    revival = re.fullmatch(r"(?:复活玩家|复活)(?:\s+(.+))?", text)
-    if revival and not COMPOUND.search(text):
+    if text in {"地图", "世界地图", "小地图", "地图概览", "查看地图", "看看地图", "看地图", "地图状态"}:
+        return Intent("capability", room=room, room_name=room_name, capability="room.map", parameters={})
+    perf = _performance_intent(text, room, room_name)
+    if perf is not None:
+        return perf
+    if not COMPOUND.search(text):
+        skip = re.fullmatch(
+            rf"(?:跳过|快进|推进|跳)\s*({QUANTITY})\s*天|跳天(?:\s*({QUANTITY}))?", text
+        )
+        if skip:
+            days = quantity(skip[1] or skip[2] or "1")
+            if 1 <= days <= 200:
+                return Intent(
+                    "capability",
+                    room=room,
+                    room_name=room_name,
+                    capability="workbench.skip_days",
+                    parameters={"days": days},
+                )
+        reset = re.fullmatch(
+            r"(?:(?:先备份再)?(?:重置|重新生成)(?:全部|整个|所有)?(?:世界|存档|地图|房间)|删档重开|重开世界)"
+            r"(?:\s*(不备份|不用备份|无需备份|不要备份|直接重置|先备份|备份))?",
+            text,
+        )
+        if reset:
+            no_backup = reset[1] in {"不备份", "不用备份", "无需备份", "不要备份", "直接重置"}
+            return Intent(
+                "capability",
+                room=room,
+                room_name=room_name,
+                capability="room.reset",
+                parameters={"backup": False} if no_backup else {},
+            )
+    if text in {"再次复活", "再复活", "再复活一次", "再次复活玩家"}:
+        return Intent("capability", room=room, room_name=room_name, capability="player.resurrect", parameters={})
+    # The short verb does not require an ASCII space before a player name.
+    # Keep names beginning with “玩家” intact unless the long command is
+    # separated from its target (or has no target yet).
+    revival = re.fullmatch(r"(?:复活玩家(?:\s+|$)|复活\s*)(.*)", text)
+    if revival and text not in {"复活玩家呀", "复活玩家啊", "复活玩家呢", "复活玩家吗"} and not COMPOUND.search(text):
         player = (revival[1] or "").strip()
         return Intent(
             "capability",
@@ -175,6 +334,13 @@ def _parse_command(text, aliases, room, room_name):
             capability="player.resurrect",
             parameters={"player_id": player} if player else {},
         )
+
+    from .interactions import player_mode_request
+
+    mode = player_mode_request(text)
+    if mode and not COMPOUND.search(text):
+        return Intent("capability", room=room, room_name=room_name,
+                      capability="workbench.set_player_mode", parameters=mode)
 
     spawn = re.fullmatch(
         rf"(?:在)?\s*(.+?)\s*(?:附近|旁边|身边)\s*(?:生成|刷出|刷)\s*({QUANTITY})\s*(?:只|头|个)\s*(.+)",
@@ -208,6 +374,21 @@ def _parse_command(text, aliases, room, room_name):
         if explicit and implicit and explicit[1].strip() != implicit[1].strip():
             return None
         grant = explicit or implicit
+    if grant is None:
+        reverse = re.fullmatch(rf"(?:再)?(?:发放|发|送)\s*({QUANTITY})\s*(?:个|份|件)\s*(.+?)\s*给\s*(.+)", text)
+        pronoun = re.fullmatch(rf"(?:再)?给\s*(这个玩家|该玩家|他|她)\s*({QUANTITY})\s*(?:个|份|件)\s*(.+)", text)
+        targetless = re.fullmatch(rf"(?:再)?(?:发放|发|送)\s*({QUANTITY})\s*(?:个|份|件)\s*(.+)", text)
+        body = text[1:] if text.startswith(("再给", "再发", "再送")) else text
+        if not COMPOUND.search(body) and (reverse or pronoun or targetless):
+            if reverse:
+                count, item, player = reverse.groups()
+            elif pronoun:
+                player, count, item = pronoun.groups()
+            else:
+                count, item = targetless.groups()
+                player = ""
+            return Intent("capability", room=room, room_name=room_name, capability="player.give_item",
+                          parameters={**({"playerId": player.strip()} if player else {}), "item": item.strip(), "count": quantity(count)})
     if grant and not COMPOUND.search(text):
         player, count, item = grant.groups()
         return Intent(

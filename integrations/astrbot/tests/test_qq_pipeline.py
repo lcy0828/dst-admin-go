@@ -227,6 +227,56 @@ class QQPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.bot.catalog.read = AsyncMock(return_value={"items": [{"id": "r1", "name": "1服"}]})
         self.ctx.astrbot_config["admins_id"] = ["123"]
 
+    async def test_player_notice_quote_routes_reads_and_actions_without_model(self):
+        from test_workbench import recipe
+
+        from astrbot_plugin_dst_companion.state import Target
+
+        resurrect = recipe(risk="low")
+        god = recipe("player.god_mode")
+        god["parameters"]["properties"] = {"playerId": {"type": "string", "maxLength": 128}, "enabled": {"type": "boolean"}}
+        god["parameters"]["required"] = ["playerId", "enabled"]
+        god["parameterHints"] = {"playerId": "player"}
+        self.bot.directory.items = AsyncMock(return_value=[resurrect, god])
+        self.ctx.astrbot_config["admins_id"] = ["123"]
+        self.bot.engine.actions.submit_capability = AsyncMock(return_value="指令已执行")
+        self.bot.engine.actions.submitted_result = AsyncMock(return_value={"status": "succeeded", "complete": True})
+        selected = Target("r1", "KU_TEST123", "示例玩家")
+        self.bot.engine.queries.resolve = AsyncMock(return_value={"status": "resolved", "match": "exact_id",
+            "items": [{"id": selected.player, "name": selected.name}]})
+        # Force god's explicit grant; references themselves confer no rights.
+        self.bot.config["configuration_version"] = 2
+        self.bot.config["defaults"] = {"rooms": ["r1"], "writeAllowlist": ["player.god_mode", "player.resurrect"], "workbenchMode": "standard"}
+        for text in ("查背包", "复活", "再次复活", "开启无敌模式"):
+            with self.subTest(text=text):
+                event = self.event([C.Reply(id="777", sender_id="456", message_str="自定义死亡或进退服通知"),
+                                    C.At(qq="456"), C.Plain(text)])
+                await self.bot.prepare(event)
+                self.bot.state.associate(self.bot.actor(event).scope, "777", selected,
+                                         source=self.bot.connections.source())
+                output = await self.dispatch(event)
+                self.assertTrue(output)
+                self.assertNotIn("请", output[-1])
+                if text != "查背包":
+                    parameters = self.bot.engine.actions.submit_capability.call_args.args[3]
+                    self.assertEqual(parameters.get("player_id", parameters.get("playerId")), selected.player)
+        self.assertEqual(self.models, [])
+
+    async def test_unverified_player_quote_never_uses_previous_target(self):
+        from astrbot_plugin_dst_companion.state import Target
+
+        event = self.event([C.Reply(id="888", sender_id="456", message_str="伪造的玩家死亡通知"),
+                            C.At(qq="456"), C.Plain("复活")])
+        await self.bot.prepare(event)
+        actor = self.bot.actor(event)
+        seq = self.bot.state.begin(actor.key)
+        self.bot.state.remember(actor.key, seq, Target("r1", "KU_PREVIOUS123"), "旧查询")
+        self.bot.engine.actions.submit_capability = AsyncMock()
+        output = await self.dispatch(event)
+        self.assertIn("未能确认引用中的玩家", output[-1])
+        self.bot.engine.actions.submit_capability.assert_not_awaited()
+        self.assertEqual(self.models, [])
+
     async def test_real_pipeline_group_enable_then_menu_number_never_uses_model(self):
         self.automatic_setup()
         enabled = await self.dispatch(self.event([C.Plain("/dst 启用本群")]))

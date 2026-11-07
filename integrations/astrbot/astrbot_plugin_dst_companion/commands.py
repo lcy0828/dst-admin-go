@@ -44,7 +44,7 @@ class Command:
                 "restart": "room.restart",
                 "kick": "player.kick",
             }
-            return self.kind not in writes or writes[self.kind] in actor.write_allowlist
+            return self.kind not in writes or actor.may_write(writes[self.kind])
         return (self.visibility or self.kind) in actor.visibility
 
 

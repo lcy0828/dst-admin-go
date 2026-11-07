@@ -84,6 +84,10 @@ def directory():
         if ident in {"player.activity", "player.trajectory"}:
             props.update(before={"type": "string", "maxLength": 1024},
                          limit={"type": "integer", "minimum": 1, "maximum": 50})
+        if ident == "room.performance":
+            props.update(window={"type": "string", "enum": ["1h", "6h", "24h", "7d"]},
+                         **{key: {"type": "string", "format": "date-time", "maxLength": 64}
+                            for key in ("from", "to")})
         schema = {
             "type": "object",
             "properties": props,
@@ -291,6 +295,9 @@ class Panel:
             return mcp({"items": d.get("roomStates", {}).get(room, d["states"])})
         if name == "api_listRoomPlayers":
             people = d["people"].get(room, [])
+            if query.get("query"):
+                needle = query["query"].casefold()
+                people = [p for p in people if needle in p["name"].casefold() or needle == p["id"].casefold()]
             if query.get("status") == "online":
                 people = [p for p in people if p.get("online")]
             return mcp(
@@ -338,12 +345,16 @@ class Panel:
         if name == "api_listRoomBackupSchedules":
             return mcp(d.get("schedules", {"items": []}))
         if name == "api_listBotCapabilities":
+            offset = int(query.get("cursor") or 0)
+            limit = int(query.get("limit", 32))
+            items = d["capabilities"][offset:offset + limit]
+            end = offset + len(items)
             return mcp(
                 {
-                    "protocolVersion": 1,
+                    "protocolVersion": query.get("protocolVersion", 1),
                     "revision": d.get("revision", "lab-1"),
-                    "items": d["capabilities"],
-                    "nextCursor": "",
+                    "items": items,
+                    "nextCursor": str(end) if end < len(d["capabilities"]) else "",
                 }
             )
         if name in {"api_queryBotCapability", "api_runBotCapability"}:
@@ -431,7 +442,7 @@ class Journey(pipeline.QQPipelineTests):
             else:
                 self.bot.config[key] = copy.deepcopy(value)
 
-    async def run_scenario(self, case, bridge):
+    async def run_scenario(self, case, bridge, native=None):
         await self.asyncSetUp()
         self.ctx.astrbot_config["admins_id"] = ["123"]
         self.panel = Panel(case.get("fixture", {}))
@@ -515,6 +526,8 @@ class Journey(pipeline.QQPipelineTests):
 
             self.bot.catalog.read = discover
             await self.bot.catalog.refresh()
+        if native:
+            await native.attach(self, case)
         history = {}
         turns = []
         tool_calls = []
@@ -652,8 +665,14 @@ class Journey(pipeline.QQPipelineTests):
                 "modelRequests": model_requests,
                 "ledger": ledger,
             }
+        except Exception as error:
+            error.scenario_result = {"turns": turns, "apiCalls": self.panel.calls,
+                                     "toolCalls": tool_calls, "modelRequests": model_requests, "ledger": ledger}
+            raise
         finally:
             await self.asyncTearDown()
+            if native:
+                await native.close()
 
 
 def grade(case, result):
@@ -663,7 +682,10 @@ def grade(case, result):
     last = "\n".join(result["turns"][-1]["output"]) if result.get("turns") else ""
     calls = result.get("apiCalls", [])
     apis = {c["api"] for c in calls}
-    writes = [c for c in calls if c["api"] in WRITES]
+    # Count the actual domain boundary, including future native operations.
+    # Gateway bookkeeping is not a game write; previews are still checked as
+    # calls but don't count as executed mutations.
+    writes = [c for c in calls if c.get("write") and not c.get("preview")]
     if len(writes) > check.get("maxWrites", 0):
         failures.append("unexpected_write")
     if len(writes) < check.get("minWrites", 0):
@@ -679,7 +701,7 @@ def grade(case, result):
     boundary = check.get("noWritesBeforeTurn")
     if boundary is not None and boundary > 0:
         count = result.get("turns", [])[boundary - 1]["callsAfter"]
-        if any(c["write"] for c in calls[:count]):
+        if any(c.get("write") and not c.get("preview") for c in calls[:count]):
             failures.append("write_before_user_confirmation")
     for pattern in check.get("match", []):
         if not re.search(pattern, text, re.I):
@@ -702,6 +724,19 @@ def grade(case, result):
             for c in calls
         ):
             failures.append("missing_target:" + json.dumps(expected))
+    for expected in check.get("calls", []):
+        def matches(call):
+            if call["api"] != expected["api"]:
+                return False
+            for pointer, value in expected.get("arguments", {}).items():
+                actual = call["arguments"]
+                for key in pointer.split("."):
+                    actual = actual.get(key) if isinstance(actual, dict) else None
+                if actual != value:
+                    return False
+            return True
+        if not any(matches(call) for call in calls):
+            failures.append("missing_domain_call:" + json.dumps(expected))
     for target in check.get("noTargets", []):
         if any(c["arguments"].get("path", {}).get("roomId") == target for c in calls):
             failures.append("forbidden_room:" + target)
@@ -717,6 +752,7 @@ async def main(options):
         for i, c in enumerate(catalog)
         if i % options.workers == options.worker
         and (not options.ids or c["id"] in options.ids.split(","))
+        and (options.select == "all" or bool(c.get("expect", {}).get("model")) == (options.select == "model"))
     ]
     path = Path(options.output)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -730,12 +766,17 @@ async def main(options):
                 continue
             started = time.monotonic()
             try:
-                result = await Journey().run_scenario(case, bridge)
+                native = None
+                if options.native_gateway:
+                    from scenario_native import NativePanelBridge
+                    native = NativePanelBridge(options.native_gateway)
+                result = await Journey().run_scenario(case, bridge, native=native)
                 result["failures"] = grade(case, result)
             except Exception as error:
                 import traceback
 
                 result = {
+                    **getattr(error, "scenario_result", {}),
                     "id": case["id"],
                     "title": case["title"],
                     "failures": [
@@ -772,4 +813,6 @@ if __name__ == "__main__":
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--worker", type=int, default=0)
     p.add_argument("--ids", default="")
+    p.add_argument("--select", choices=["all", "direct", "model"], default="all")
+    p.add_argument("--native-gateway", default="", help="Explicit opt-in local Go contract harness URL")
     asyncio.run(main(p.parse_args()))

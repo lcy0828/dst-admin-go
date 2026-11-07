@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -13,16 +15,17 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, register
 
 from .capabilities import Directory
-from .configuration import ConfigEditor, Configuration, fingerprint, migrate_v2
+from .configuration import CATEGORIES, ConfigEditor, Configuration, fingerprint, migrate_v2
 from .connections import Connections
 from .display import chat_text
 from .engine import Engine
 from .gateway import Gateway, QueryError
-from .group_permissions import GroupRoles, grants
+from .generic import GenericOperations
+from .group_permissions import ALL_WRITES, GroupRoles, grants, simple_access
 from .group_permissions import enabled as group_permissions_enabled
 from .jobs import Actions
 from .message_templates import MessageTemplates
-from .model_presentation import STYLE, ModelPresentation, content_hash
+from .model_presentation import DST_TOOLS, STYLE, ModelPresentation, content_hash
 from .model_tools import ModelTools
 from .native_permissions import check_native
 from .notifications import Notifications
@@ -33,7 +36,7 @@ from .read_receipts import ReadReceipts
 from .references import References, needs_reference
 from .sessions import group_origin
 from .setup import Setup
-from .state import State, Target
+from .state import State, Target, player_prompt
 from .task_tools import READ_TOOLS as TASK_READS
 from .task_tools import WRITE_TOOLS as TASK_WRITES
 from .task_tools import TaskTools
@@ -47,6 +50,11 @@ class DSTCompanion(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context, config)
         self.config = config
+        # AstrBot inserts schema defaults into old files before loading plugins.
+        # Its explicit first_deploy flag distinguishes a new install safely.
+        self._save_initial_access = getattr(config, "first_deploy", False) is True
+        if self._save_initial_access:
+            self.config["access_policy"] = "simple"
         self.plugin_version = VERSION
         self.updating = False
         self.updates = Updates(self)
@@ -70,6 +78,7 @@ class DSTCompanion(Star):
         self.alive = True
         self.models = ModelTools(self)
         self.tasks = TaskTools(self)
+        self.generic = GenericOperations(self)
         self.model_presentation = ModelPresentation()
         self.reconnect = asyncio.Lock()
         self.send_lock = asyncio.Semaphore(2)
@@ -81,6 +90,7 @@ class DSTCompanion(Star):
         )
         self.read_receipts = ReadReceipts(self.get_kv_data, self.put_kv_data)
         self.directory = Directory(self.gateway, version=lambda: self.private_panel.protocol if self.private_panel.configured else 1, receipts=self.read_receipts)
+        self.directory.fetch_one = self.generic.recipe
         self.policy.directory = self.directory
         self.background = asyncio.Semaphore(1)
         self.bot_ids = {}
@@ -137,6 +147,11 @@ class DSTCompanion(Star):
         writes = tuple(effective["writeAllowlist"])
         workbench = effective["workbenchMode"]
         disabled = tuple(effective["disabledCapabilities"])
+        simple = simple_access(self.config)
+        if simple:
+            # Everyone reads every category; administrators manage everything.
+            visibility = frozenset(CATEGORIES)
+            writes, workbench = (ALL_WRITES, "all") if role != "game-read" else ((), "off")
         group_role, policy_revision = "", ""
         if group_permissions_enabled(self.config):
             group_role = self.group_roles.current(event)
@@ -148,11 +163,16 @@ class DSTCompanion(Star):
             except (ValueError, TypeError, KeyError):
                 self.config_errors[session] = "群角色权限配置无效，请维护者检查。"
                 return None
-            visibility &= frozenset(rule["read"])
-            writes = tuple(rule["write"])
-            workbench = rule["workbench"]
             disabled = tuple(sorted(set(disabled) | set(rule["deny"])))
-            role = "game-manage" if writes or workbench != "off" else "game-read"
+            if simple:
+                manage = group_role in {"admin", "owner", "maintainer"}
+                writes, workbench = (ALL_WRITES, "all") if manage else ((), "off")
+                role = "game-manage" if manage else "game-read"
+            else:
+                visibility &= frozenset(rule["read"])
+                writes = tuple(rule["write"])
+                workbench = rule["workbench"]
+                role = "game-manage" if writes or workbench != "off" else "game-read"
             if group_role == "maintainer":
                 role = "panel-manage"
             if not self.server(True) or not self.group_roles.verified(event):
@@ -176,6 +196,7 @@ class DSTCompanion(Star):
             disabled,
             workbench,
             group_role,
+            simple,
         )
 
     async def ensure_enrollment(self):
@@ -191,6 +212,9 @@ class DSTCompanion(Star):
                     self.connections.selected = sources.pop()
 
     async def initialize(self):
+        if self._save_initial_access and self.config_editor.save:
+            await self.config_editor.save()
+            self._save_initial_access = False
         from .migration import migrate_broadcast
 
         await self.ensure_enrollment()
@@ -344,7 +368,7 @@ class DSTCompanion(Star):
         if group_permissions_enabled(self.config):
             # Private service calls use the panel credential, not AstrBot's raw
             # api_* tool policy. Every plugin facade still enters this policy.
-            if name in {"api_runBotCapability", "api_runRoomAction",
+            if name in {"companion_gateway_write", "api_runBotCapability", "api_runRoomAction", "api_resetRoomWorlds",
                         "api_createRoomBackup", "api_kickRoomPlayer", "api_executeRoomTeleport"}:
                 try:
                     await self.group_roles.refresh(actor.event, force=True)
@@ -372,6 +396,10 @@ class DSTCompanion(Star):
             await self.private_panel.refresh()
             if write and group_permissions_enabled(self.config) and not self.private_panel.full_access:
                 raise QueryError("PANEL_FULL_CREDENTIAL_REQUIRED")
+        if name == "companion_gateway":
+            if not self.private_panel.configured or "companion-gateway-v1" not in self.private_panel.features:
+                raise QueryError("CAPABILITY_INCOMPATIBLE")
+            return await self.private_panel.generic_request(args, timeout)
         # Management uses a separate configured credential. Session.call_tool
         # avoids the framework's unconditional ClosedResourceError replay.
         server = self.server(
@@ -453,6 +481,10 @@ class DSTCompanion(Star):
                     target_at.append(str(part.qq))
             elif isinstance(part, C.Reply):
                 quote = str(part.id)
+                # A reply to this bot is explicit addressing. Identity is still
+                # verified using source-bound delivery receipts before use.
+                if str(part.sender_id) == str(event.message_obj.self_id):
+                    woken = True
             else:
                 media = True
         value = "".join(text).strip()
@@ -547,7 +579,29 @@ class DSTCompanion(Star):
                 await event.send(MessageChain().message(text[:3500]))
         self.state.form_sent(actor.key, message_id, sent_form)
         if target:
+            group = group_origin(actor.scope[2])
+            group_scope = (actor.scope[0], actor.scope[1], group)
             self.state.associate(actor.scope, message_id, target, source=source)
+            self.state.associate(group_scope, message_id, target, source=source)
+            self.state.associate_text(actor.scope, text, target, source=source)
+            self.state.associate_text(group_scope, text, target, source=source)
+            if target.player and message_id and not isinstance(message_id, bool):
+                saved = self.notifications.saved.get(group)
+                if isinstance(saved, dict) and saved.get("source") == source:
+                    refs = saved.setdefault("state", {}).setdefault("references", [])
+                    refs.append(
+                        {
+                            "messageId": str(message_id),
+                            "selfId": str(actor.scope[1]),
+                            "at": time.time(),
+                            "related": {
+                                "roomId": target.room,
+                                "playerId": target.player,
+                                "name": target.name,
+                            },
+                        }
+                    )
+                    del refs[:-128]
         if choice and actor.key in self.state.choices:
             self.state.choice_sent(actor.key, message_id, sequence)
         return message_id
@@ -643,6 +697,21 @@ class DSTCompanion(Star):
                 event.is_at_or_wake_command = True
             return
         text, woken, quote, error = parsed
+        generic_form = self.state.pending_form(actor.key)
+        if generic_form and generic_form.get("generic"):
+            from .decision import looks_like_confirmation
+            from .routing import is_cancel_reply
+            if looks_like_confirmation(text) or is_cancel_reply(text) or self.generic.accepts(generic_form, text, woken, quote):
+                event.stop_event()
+                self.state.claim_request(actor.key, str(event.message_obj.message_id))
+                try:
+                    answer = await self.generic.continuation(actor, text)
+                except QueryError as failure:
+                    answer = failure.message or "结果尚未确认，请查询原任务，未自动重试。"
+                await self.send_reply(event, answer or "请按上一条提示填写，或回复“取消”。")
+                return
+            if woken:
+                self.state.clear_form(actor.key)
         if woken or self.state.handles(actor.key, text, quote, woken):
             self.state.claim_request(actor.key, str(event.message_obj.message_id))
         if woken and text == "迁移配置":
@@ -732,10 +801,23 @@ class DSTCompanion(Star):
             )
             return
         route = self.engine.parse(actor, text)
-        if woken and route is None and self.state.pending_form(actor.key):
+        pending = self.state.pending_form(actor.key)
+        if route is None and pending and selecting:
+            from .routing import interrupts_form
+
+            # Synchronous: only the cached directory, so the event is claimed
+            # or released before any await.
+            cached = self.directory.cache.get(actor.read_projection, {}).get("items", [])
+            if interrupts_form(text, pending, quote, cached):
+                self.state.clear_form(actor.key)
+                selecting = False
+                pending = None
+        if woken and route is None and pending:
+            from .decision import looks_like_confirmation
             from .routing import form_reply, is_cancel_reply
 
-            if not is_cancel_reply(text) and form_reply(text) is None:
+            confirming = pending.get("type") == "confirmation" and looks_like_confirmation(text)
+            if not confirming and not is_cancel_reply(text) and form_reply(text) is None:
                 # Decide before stop_event: a new natural request must reach
                 # AstrBot's normal model pipeline, not disappear in a form.
                 self.state.begin(actor.key)
@@ -759,8 +841,24 @@ class DSTCompanion(Star):
             return
 
         async def handle_request():
-            reference = await self.references.resolve(actor, quote, route)
-            if quote and needs_reference(route) and reference is None:
+            pending_form = self.state.pending_form(actor.key)
+            reference_route = route or (pending_form.get("intent") if pending_form else None)
+            if route is None and player_prompt(pending_form):
+                reference_route = replace(reference_route, player="", parameters={
+                    key: value for key, value in (reference_route.parameters or {}).items()
+                    if pending_form.get("item", {}).get("parameterHints", {}).get(key) != "player"})
+            reference = await self.references.resolve(actor, quote, reference_route)
+            if reference and reference_route and reference_route.room and reference.room != reference_route.room:
+                from .engine import Reply
+
+                return Reply("handled_error", "引用中的玩家与指定房间不一致，请明确房间和玩家。尚未执行。")
+            from .decision import looks_like_confirmation
+
+            confirming = bool(pending_form and pending_form.get("type") == "confirmation"
+                              and looks_like_confirmation(text))
+            if quote and needs_reference(reference_route) and reference is None and not confirming and not (
+                pending_form and quote == pending_form.get("messageId")
+            ):
                 from .engine import Reply
 
                 return Reply(
@@ -812,6 +910,11 @@ class DSTCompanion(Star):
         await self.prepare(event)
         actor = self.actor(event)
         tools = getattr(request, "func_tool", None)
+        initial_prompt = getattr(request, "system_prompt", "") or ""
+        try:
+            generic_mode = bool(actor and await self.generic.available())
+        except QueryError:
+            generic_mode = False
         # Fixed policy facts only: no untrusted player/chat text becomes instructions.
         grants = list(actor.write_allowlist) if actor and actor.role != "game-read" else []
         default_room = self.effective(str(event.unified_msg_origin))["defaultRoom"] if actor else ""
@@ -830,6 +933,7 @@ class DSTCompanion(Star):
             + "用户未指定房间时使用 defaultRoom（如果有）；地面/Master、洞穴/Caves 是世界名称，不是房间名称，不能填入 room。明确指定其他房间时不得改用默认房间。"
             + "常用查询使用 dst_servers、dst_player、dst_world；其他需求用 dst_find，最多三个候选。"
             + "dst_servers 的 overview 未填房间只列目录；检查运行状态必须填房间名称或真实ID，多个房间分别查询。"
+            + "涉及全部或多个房间却未给名称时，先读取房间目录；defaultRoom 不是唯一房间，不要只查默认房间就停止，也不要要求用户手抄 ID。"
             + "问一个房间的世界与玩家概况用 dst_servers(room=房间, view=overview)，它返回全部世界；只有指定分片查询或实体统计才使用 dst_world，不要为概况追问地面还是洞穴。"
             + "指定玩家是否在线请查 dst_player(view=profile)，仅在线名单不能确认某人的离线状态；背包来源也不证明是否在线。"
             + "模组配置先用 dst_servers(view=mods)查看已配置模组，未返回的详细配置不要编造。"
@@ -838,11 +942,19 @@ class DSTCompanion(Star):
             + "扩展读取用 dst_read，扩展管理用 dst_run；parameters 必须为对象。"
             + "参数校验失败且明确尚未执行的读取，可按返回schema纠正；需要用户选择或确认时必须停止并转告，不能自行选择第一个候选。"
             + "复活、发物品用 dst_player_action，房间启停备份用 dst_server_action；插件内部校验角色和范围。"
-            + "模型提出的管理操作必须等用户确认后才提交，工具返回确认提示时直接转告并停止；不能换其他操作试执行、不能代确认。结果不确定用 dst_result，不新建操作。"
+            + "allowedWrites 含 * 表示管理员可执行全部已开放的管理操作；查询对所有人开放。"
+            + "只执行用户本条消息明确要求的操作，不能因通知或查询结果自行操作。确认方式由插件按风险决定：单人可逆操作直接执行，影响全服的操作需回复确认，重置世界等高风险操作需输入确认短语；"
+            + "工具返回确认或补充提示时原样转告并停止，不能换其他操作试执行、不能代确认。重置世界用 dst_server_action(action=reset)，用户说不要备份时 parameters 填 {\"backup\": false}。结果不确定用 dst_result，不新建操作。"
             + "群权限设置以插件保存回执为准；没有实际保存结果时不能宣称已修改权限。"
             + "没有管理工具时明确说明权限未就绪，不要说即将执行或已操作。"
             + "以本次原回执为准：sent、无输出、背包总数变化均不能证明成功；结果不确定只回读，禁止重发。"
         )
+        if generic_mode:
+            from .generic import MODEL_GUIDE
+            request.system_prompt = initial_prompt + MODEL_GUIDE + json.dumps({
+                "role": actor.role, "allowedWrites": grants, "defaultRoom": default_room,
+                "workbenchMode": actor.workbench_mode,
+            }, ensure_ascii=False)
         if tools is not None:
             from astrbot.core.agent.tool import ToolSet
 
@@ -875,10 +987,15 @@ class DSTCompanion(Star):
             from .task_tools import tool_view
 
             parsed_request = self.input(event)
+            media_request = bool(parsed_request and re.search(
+                r"截图|图片|照片|图像|语音|视频|文件|发图|发文件", parsed_request[0]
+            ))
             aliases = dict(self.effective(str(event.unified_msg_origin))["roomAliases"]) if actor else {}
             read_request = bool(parsed_request and read_request_intent(parsed_request[0], aliases))
             if actor and actor.role in ("game-manage", "panel-manage") and not read_request:
                 keep |= TASK_WRITES
+            if generic_mode:
+                keep &= {"dst_find", "dst_read", "dst_run", "dst_result"}
 
             def source(tool):
                 for _ in range(4):
@@ -892,6 +1009,10 @@ class DSTCompanion(Star):
 
             selected = []
             for tool in tools:
+                # The normal model reply already delivers text. AstrBot's direct
+                # sender would publish a second, unreviewed reply mid-turn.
+                if generic_mode and actor and tool.name == "send_message_to_user" and not media_request:
+                    continue
                 if source(tool) in servers or tool.name in own and tool.name not in keep:
                     continue
                 projected = tool_view(tool, actor) if tool.name in keep and actor else tool
@@ -926,10 +1047,16 @@ class DSTCompanion(Star):
     async def on_model_response(self, event: AstrMessageEvent, response):
         if not self.config.get("enabled", False) or not self.alive:
             return
+        calls = getattr(response, "tools_call_name", None) or []
+        if self.actor(event) and any(name in DST_TOOLS for name in calls):
+            # AstrBot also publishes assistant text attached to a tool call.
+            # Keep one final answer after the DST tool chain finishes.
+            response.completion_text = ""
+            response.result_chain = None
         if (
             getattr(response, "is_chunk", False)
             or getattr(response, "role", "") != "assistant"
-            or getattr(response, "tools_call_name", None)
+            or calls
         ):
             return
         settings = getattr(self.context, "get_config", lambda **_: {})(
@@ -961,6 +1088,17 @@ class DSTCompanion(Star):
             value.original_hash = content_hash(response.completion_text or "")
             value.applied_text = text
             response.completion_text = text
+        try:
+            actor = self.actor(event)
+            src = self.connections.source()
+            remembered = self.state.target(actor.key) if actor else None
+            final_text = getattr(response, "completion_text", "") or ""
+            if actor and isinstance(remembered, Target) and remembered.player and final_text:
+                group_scope = (actor.scope[0], actor.scope[1], group_origin(actor.scope[2]))
+                self.state.associate_text(actor.scope, final_text, remembered, source=src)
+                self.state.associate_text(group_scope, final_text, remembered, source=src)
+        except Exception:
+            pass
 
     @filter.on_agent_done(priority=-100)
     async def on_model_done(self, event: AstrMessageEvent, run_context, response):
@@ -985,14 +1123,15 @@ class DSTCompanion(Star):
         return await self.models.query(event, kind, room, player)
 
     @llm_tool(name="dst_servers")
-    async def dst_servers(self, event: AstrMessageEvent, room: str = "", view: str = "overview") -> str:
+    async def dst_servers(self, event: AstrMessageEvent, room: str = "", view: str = "overview", parameters: dict = None) -> str:
         """查询服务器和在线名单。问“谁在线/多少人”使用 view=players，不要调用玩家操作工具。
 
         Args:
             room(string): 房间名称、已配置别名或真实 ID；只有 overview 留空时列出房间。
             view(string): overview=房间概况，players=在线玩家与人数，mods=模组列表，performance=服务端性能。
+            parameters(object): performance 可选填写 window（1h/6h/24h/7d，默认 24h）或时间范围；其他视图留空。
         """
-        return await self.tasks.perform(event, "dst_servers", room=room, view=view)
+        return await self.tasks.perform(event, "dst_servers", room=room, view=view, parameters=parameters)
 
     @llm_tool(name="dst_player")
     async def dst_player(self, event: AstrMessageEvent, player: str = "", room: str = "", view: str = "profile", parameters: dict = None) -> str:
@@ -1029,7 +1168,7 @@ class DSTCompanion(Star):
 
     @llm_tool(name="dst_read")
     async def dst_read(self, event: AstrMessageEvent, capability_id: str, room: str = "", player: str = "", world: str = "", parameters: dict = None) -> str:
-        """调用 dst_find 找到的只读任务；不能提交脚本或自定义操作映射。
+        """调用 dst_find 找到的只读任务。api: 开头的能力按发现结构传 path/query/body；全局查询不需要房间。
 
         Args:
             capability_id(string): dst_find 返回的能力 ID。
@@ -1057,7 +1196,7 @@ class DSTCompanion(Star):
             action(string): resurrect、give_item、spawn_entity、kick、god_mode（无敌/上帝模式）、creative_mode（制作/创造模式）、announce、ban、unban、kill 或 reset_character。先用 dst_find 查询所需参数。
             player(string): 玩家昵称或 KU ID；未指定时要求补充。
             room(string): 房间名称、别名或 ID。
-            parameters(object): 无敌或制作模式必须提供 enabled=true/false；发物品提供 item、count；生成生物提供 entity、count；复活留空。其他操作按目录结构填写。
+            parameters(object): 无敌或制作模式必须提供 enabled=true/false；发物品提供 item、count；生成生物提供 entity、count；单人复活留空，无需二次确认。其他操作按目录结构填写。
         """
         return await self.tasks.perform(event, "dst_player_action", action=action, room=room, player=player, parameters=parameters)
 
@@ -1066,22 +1205,22 @@ class DSTCompanion(Star):
         """执行已授权的房间操作，复用面板原任务与回执。
 
         Args:
-            action(string): start、stop、restart、save、backup 或 configure_backup。
+            action(string): start、stop、restart、save、backup、configure_backup 或 reset（重置全部世界）。
             room(string): 房间名称、别名或 ID。
-            parameters(object): configure_backup 的结构先用 dst_find 查询，其余留空。
+            parameters(object): configure_backup 的结构先用 dst_find 查询；reset 默认先备份，用户明确不要备份时填 {"backup": false}；其余留空。
         """
         return await self.tasks.perform(event, "dst_server_action", action=action, room=room, parameters=parameters)
 
     @llm_tool(name="dst_run")
     async def dst_run(self, event: AstrMessageEvent, capability_id: str, room: str = "", player: str = "", world: str = "", parameters: dict = None) -> str:
-        """准备 dst_find 返回的已授权管理任务。使用当前消息去重，等待用户直接确认后提交。
+        """执行 dst_find 返回的已授权管理任务。使用当前消息去重；单人复活无需二次确认，其他操作按工具返回的确认提示处理。
 
         Args:
             capability_id(string): 已授权管理能力 ID。
             room(string): 房间名称、别名或 ID。
             player(string): 玩家昵称或 KU ID，可空。
             world(string): 世界名称或 ID，可空。
-            parameters(object): 按能力结构传对象；不能代填 confirmed 或角色。
+            parameters(object): 按发现结构传对象；api: 能力使用 path/query/body。未指定的设置字段保持省略，不代填默认值或角色；publishGameRelease 的 body.confirmed=true 是必填字段，插件仍会等待用户确认。
         """
         return await self.tasks.perform(event, "dst_run", capability_id=capability_id, room=room, player=player, world=world, parameters=parameters)
 
@@ -1197,6 +1336,7 @@ class DSTCompanion(Star):
             try:
                 if (
                     not record.get("enabled")
+                    or record.get("noticeEnabled", True) is False
                     or record.get("source") != self.connections.source()
                     or not self.catalog.valid()
                 ):

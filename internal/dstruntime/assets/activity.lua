@@ -1,6 +1,6 @@
 local json = require("json")
 local M = {}
-local VERSION = "2.4.25"
+local VERSION = "2.4.26"
 local ROOT = "mod_config_data/dst-admin/"
 local MAX_PENDING, MAX_BATCH, MAX_TARGETS = 512, 128, 32
 local defaults = {enabled=true, positions=true, actions=true, combat=true, positionIntervalSeconds=15,
@@ -60,7 +60,7 @@ local function emit(player,kind,fields,critical,observedPosition,occurredAt)
         name=text(player.name,128),prefab=text(player.prefab,80),fields=fields or {}}
     if observedPosition==nil then event.position=position(player) elseif observedPosition~=false then event.position=observedPosition end
     state.pending[#state.pending+1]=event
-    schedule_flush()
+    schedule_flush(kind=="player.death" or kind=="player.respawned")
 end
 local function object_fields(e)
     local fields={}
@@ -209,9 +209,14 @@ local function has_battles()
     for _,item in pairs(state.players) do if next(item.battles) or next(item.actions) then return true end end
     return false
 end
-schedule_flush=function()
-    if not state.running or state.writing or state.draining or state.flushTask or (#state.pending==0 and not has_battles()) then return end
-    state.flushTask=clock.After(config.flushIntervalSeconds,function() state.flushTask=nil;flush();schedule_flush() end,"dst-admin-activity-flush")
+schedule_flush=function(fast)
+    if not state.running or state.writing or state.draining or (#state.pending==0 and not has_battles()) then return end
+    local urgent=fast==true and not state.commit
+    if urgent and state.flushTask and not state.fastFlush then state.flushTask:Cancel();state.flushTask=nil end
+    if state.flushTask then return end
+    state.fastFlush=urgent
+    local delay=urgent and math.min(1,config.flushIntervalSeconds) or config.flushIntervalSeconds
+    state.flushTask=clock.After(delay,function() state.flushTask=nil;state.fastFlush=false;flush();schedule_flush() end,"dst-admin-activity-flush")
 end
 schedule_positions=function(reset)
     local active=state.running and state.ready and config.enabled and config.positions and next(state.players)

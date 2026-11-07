@@ -84,6 +84,29 @@ class WorkbenchTests(unittest.IsolatedAsyncioTestCase):
         await engine.execute(manager, parse("复活 KU_TEST123", {}))
         self.assertEqual(panel.executions, 1)
 
+    async def test_compact_single_player_resurrection_executes_once_without_confirmation(self):
+        panel, engine = await self.fixture(recipe(risk="low"))
+        manager = replace(actor(role="game-manage"), workbench_mode="standard")
+        result = await engine.handle(manager, "复活KU_TEST123", woken=True, message_id="request-1")
+        self.assertEqual(result.outcome, "matched")
+        self.assertEqual(panel.executions, 1)
+        self.assertIsNone(engine.state.pending_form(manager.key))
+        await engine.handle(manager, "复活KU_TEST123", woken=True, message_id="request-1")
+        self.assertEqual(panel.executions, 1)
+
+    def test_resurrection_spacing_does_not_change_player_or_turn_discussion_into_action(self):
+        for text in ("复活KU_TEST123", "复活 KU_TEST123", "复活玩家 KU_TEST123", "帮我复活KU_TEST123"):
+            with self.subTest(text=text):
+                intent = parse(text, {})
+                self.assertEqual(intent.capability, "player.resurrect")
+                self.assertEqual(intent.parameters, {"player_id": "KU_TEST123"})
+        for text in ("复活玩家甲", "复活 玩家甲", "复活玩家 玩家甲"):
+            with self.subTest(text=text):
+                self.assertEqual(parse(text, {}).parameters, {"player_id": "玩家甲"})
+        for text in ("不要复活KU_TEST123", "如果复活KU_TEST123", "复活KU_TEST123然后重启", "复活怎么实现"):
+            with self.subTest(text=text):
+                self.assertIsNone(parse(text, {}))
+
     def test_negative_conditional_and_compound_do_not_dispatch(self):
         for text in ("不要复活玩家", "如果复活玩家", "复活 玩家然后重启", "AI:复活玩家"):
             self.assertIsNone(parse(text, {}))
@@ -105,6 +128,8 @@ class WorkbenchTests(unittest.IsolatedAsyncioTestCase):
         await engine.handle(manager, "true", woken=True)
         self.assertEqual(panel.executions, 0)
         await engine.handle(manager, "确认", woken=True)
+        self.assertEqual(panel.executions, 0, "R3 needs the typed phrase, not a bare 确认")
+        await engine.handle(manager, "确认清空", woken=True)
         self.assertEqual(panel.executions, 1)
 
     async def test_reader_off_disabled_and_native_permissions_are_enforced(self):

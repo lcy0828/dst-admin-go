@@ -74,3 +74,27 @@ python integrations/astrbot/tests/scenario_lab.py \
 每次执行保存场景哈希、原始对话、工具参数、实际 API 调用和写入台账。需要真实模型的场景未调用模型即失败；管理请求未等到用户确认、查询错误目标、未知结果冒充成功均为阻断项。验收规则误判只能在保留原结果、说明修改依据后修正，不能通过删掉失败场景或不断重试碰巧成功来验收。
 
 此测试不向真实 QQ 群发送 300 条消息，也不证明真实游戏事件的通知链路；真实群收发和通知仍按上面的独立要求核对。
+
+## 原始接口通用入口验收
+
+`native_dialogue_scenarios.json` 补充 45 个新入口场景，重点覆盖跨房间比较、活动和战斗筛选、网络与性能、实体计数、未知回执、权限、模组配置及常用管理操作。这些场景与旧场景库有交集，用于验证不同协议，不能相加宣称有 351 个不同业务目的。
+
+先启动仅监听回环地址的 Go 测试服务，再把其写入的 URL 传给对话驱动：
+
+```sh
+DST_SCENARIO_READY=/tmp/dst-dialogue-url go test ./internal/aicontrol -run '^TestCompanionDialogueServer$' -count=1 -timeout=85m
+```
+
+在另一终端读取 `/tmp/dst-dialogue-url`，运行：
+
+```sh
+python integrations/astrbot/tests/scenario_lab.py \
+  --catalog integrations/astrbot/tests/native_dialogue_scenarios.json \
+  --native-gateway http://127.0.0.1:PORT \
+  --output .local-docs/dialogue-acceptance/native.jsonl \
+  --model-command 'python /path/to/private_model_bridge.py'
+```
+
+将 `PORT` 替换为 URL 文件中的端口。结束后请求同一地址的 `/stop` 关闭服务；测试服务也有总时限。
+
+新通用路径使用真实 Go 检索、鉴权、参数校验、确认和回执持久化，以及真实 AstrBot 适配器；只有业务 API 数据和 QQ 投递使用合成替身。旧快捷路径继续使用合成的旧协议传输，协议协商由独立 HTTP 集成测试验证。测试记录同时检查原 API 参数（包括 `query.userId`）和实际写入调用次数，不依赖固定写接口名单；明确的预览单独计数。新旧场景均保留初次失败及修复后结果，不能删除失败记录冒充首次通过。

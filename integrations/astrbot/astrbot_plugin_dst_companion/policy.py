@@ -52,6 +52,13 @@ class Actor:
     disabled_capabilities: tuple = ()
     workbench_mode: str = "off"
     group_role: str = ""
+    catalog_all: bool = False
+
+    def may_write(self, capability):
+        """Administrators run every write under the simple policy ("*")."""
+        return self.role in {"game-manage", "panel-manage"} and (
+            "*" in self.write_allowlist or capability in self.write_allowlist
+        )
 
     @property
     def read_projection(self):
@@ -64,6 +71,7 @@ class Actor:
             self.workbench_mode,
             self.config_revision,
             self.group_role,
+            self.catalog_all,
             tuple(sorted(self.disabled_capabilities)),
         )
 
@@ -78,6 +86,7 @@ class Actor:
             self.workbench_mode,
             self.config_revision,
             self.group_role,
+            self.catalog_all,
             tuple(sorted(self.disabled_capabilities)),
         )
 
@@ -88,6 +97,15 @@ class Policy:
         self.directory = None
 
     async def authorize(self, actor, name, args):
+        if name == "companion_gateway":
+            from .generic import actor_envelope
+            if args.get("actor") != actor_envelope(actor):
+                raise QueryError("PERMISSION_DENIED")
+            if args.get("mode") in {"run", "execute"} and actor.role not in {"game-manage", "panel-manage"}:
+                raise QueryError("PERMISSION_DENIED")
+            if not await self.native(actor, "companion_gateway_write" if args.get("mode") in {"run", "execute"} else name):
+                raise QueryError("NATIVE_PERMISSION_DENIED")
+            return
         if (
             name not in READS
             and not (

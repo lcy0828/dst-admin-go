@@ -622,3 +622,22 @@ assert(not activity.Status().busy and activity.Status().generation==1)
 		t.Fatal(err)
 	}
 }
+
+func TestActivityLuaFastFlushForDeathAndRespawn(t *testing.T) {
+	L := activityHarness(t)
+	defer L.Close()
+	if err := L.DoString(`
+p=entity("KU_MAIN","wilson",1);AllPlayers={p};activity.Start()
+p:Push("onpickupitem",{item=entity(nil,"log",1)})
+tick(1)
+-- Ordinary action aggregation still waits for flushIntervalSeconds (5s).
+assert(activity.Status().generation==0 and activity.Status().pending==1)
+-- Critical death/respawn events upgrade the pending timer to 1s coalescing.
+p:Push("death",{})
+p:Push("ms_respawnedfromghost",{})
+tick(1)
+assert(activity.Status().generation==1 and activity.Status().pending==0)
+`); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -15,6 +15,11 @@ from astrbot_plugin_dst_companion.broadcast import READ_TOOLS, BroadcastEngine
 from astrbot_plugin_dst_companion.configuration import Configuration, migrate_v3
 from astrbot_plugin_dst_companion.connections import DISCOVERY_TOOLS, Connections
 from astrbot_plugin_dst_companion.gateway import QueryError
+from astrbot_plugin_dst_companion.notice_settings import (
+    default_notices,
+    notice_choices,
+    upgrade_notices,
+)
 from astrbot_plugin_dst_companion.onboarding import Enrollment, RoomCatalog
 from astrbot_plugin_dst_companion.sessions import canonical_records, group_origin
 from astrbot_plugin_dst_companion.streams import MCPReadError, resource_request, sse_frames
@@ -45,9 +50,9 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await enrollment.load(AsyncMock(return_value=original))
         self.assertEqual(
             enrollment.records,
-            {"adapter:GroupMessage:789": original["adapter:GroupMessage:123_789"]},
+            {"adapter:GroupMessage:789": upgrade_notices(original["adapter:GroupMessage:123_789"])},
         )
-        self.assertEqual(save.await_count, 2)
+        self.assertEqual(save.await_count, 3)
         conflict = {**original, "adapter:GroupMessage:456_789": {"enabled": False}}
         self.assertEqual(
             canonical_records(conflict), {"adapter:GroupMessage:789": {"enabled": False}}
@@ -315,6 +320,92 @@ class UnifiedAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.bot.enrollment.records), 1)
         self.assertEqual(len(self.calls), 1)
         self.assertFalse(self.bot.allowed("adapter:GroupMessage:other"))
+
+    async def test_fresh_group_defaults_common_notices_on_without_management_grant(self):
+        event = await self.enable()
+        record = self.bot.enrollment.records[event.unified_msg_origin]
+        self.assertEqual(record["notices"], default_notices())
+        self.assertTrue(record["noticeEnabled"])
+        self.assertEqual(self.bot.actor(event).role, "game-read")
+
+    async def test_master_mutes_all_delivery_and_preserves_choices_on_reenable(self):
+        event = await self.enable()
+        await self.bot.on_message(self.event("/dst 通知 Boss击杀 关"))
+        await self.bot.on_message(self.event("/dst 聊天播报 开"))
+        choices = copy.deepcopy(self.bot.enrollment.records[event.unified_msg_origin]["notices"])
+        await self.bot.on_message(self.event("/dst 播报 关"))
+        record = self.bot.enrollment.records[event.unified_msg_origin]
+        self.assertEqual(notice_choices(record), choices)
+        self.assertFalse(any(record["notices"].values()))  # Older plugins also remain muted.
+        self.assertFalse(record["noticeEnabled"])
+        self.assertEqual(self.bot.notifications.subscriptions(), {})
+        for category in ("player", "server", "chat", "maintenance", "season", "updates", "software", "boss", "alerts"):
+            self.assertFalse(self.bot.notice_allowed(event.unified_msg_origin, {"roomId": "r1", "kind": category}))
+        await self.bot.on_message(self.event("/dst 播报 开"))
+        self.assertTrue(self.bot.enrollment.records[event.unified_msg_origin]["noticeEnabled"])
+        self.assertEqual(self.bot.enrollment.records[event.unified_msg_origin]["notices"], choices)
+        self.assertTrue(self.bot.notice_allowed(event.unified_msg_origin, {"roomId": "r1", "kind": "season"}))
+        self.assertFalse(self.bot.notice_allowed(event.unified_msg_origin, {"roomId": "r1", "kind": "boss"}))
+
+    async def test_enable_group_with_broadcast_off_does_not_leave_extended_categories_running(self):
+        event = self.event("/dst 启用本群 播报 关")
+        await self.bot.on_message(event)
+        self.assertIn("已启用本群", self.output(event))
+        self.assertIn("关闭（保留各类设置）", self.output(event))
+        self.assertFalse(self.bot.enrollment.records[event.unified_msg_origin]["noticeEnabled"])
+        self.assertEqual(self.bot.notifications.subscriptions(), {})
+
+    async def test_chat_switch_and_presets_do_not_bypass_master_off(self):
+        event = await self.enable()
+        await self.bot.on_message(self.event("/dst 播报 关"))
+        await self.bot.on_message(self.event("/dst 聊天播报 开"))
+        await self.bot.on_message(self.event("/dst 通知预设 管理群"))
+        self.assertEqual(self.bot.notifications.subscriptions(), {})
+        self.assertFalse(self.bot.notice_allowed(event.unified_msg_origin, {"roomId": "r1", "kind": "chat"}))
+        self.assertTrue(notice_choices(self.bot.enrollment.records[event.unified_msg_origin])["chat"])
+        await self.bot.on_message(self.event("/dst 播报 开"))
+        self.assertTrue(self.bot.enrollment.records[event.unified_msg_origin]["notices"]["chat"])
+
+    async def test_category_edits_while_muted_apply_only_after_explicit_reenable(self):
+        event = await self.enable()
+        await self.bot.on_message(self.event("/dst 播报 关"))
+        await self.bot.on_message(self.event("/dst 通知 季节变化 关"))
+        await self.bot.on_message(self.event("/dst 通知 模组消息 开"))
+        record = self.bot.enrollment.records[event.unified_msg_origin]
+        self.assertFalse(any(record["notices"].values()))
+        self.assertFalse(notice_choices(record)["season"])
+        self.assertTrue(notice_choices(record)["mods"])
+        await self.bot.on_message(self.event("/dst 播报 开"))
+        record = self.bot.enrollment.records[event.unified_msg_origin]
+        self.assertFalse(record["notices"]["season"])
+        self.assertTrue(record["notices"]["mods"])
+
+    async def test_failed_master_save_does_not_change_effective_subscription(self):
+        event = await self.enable()
+        old = copy.deepcopy(self.bot.enrollment.records)
+        self.bot.enrollment.save = AsyncMock(return_value=False)
+        failed = self.event("/dst 播报 关")
+        await self.bot.on_message(failed)
+        self.assertIn("CONFIG_SAVE_FAILED", self.output(failed))
+        self.assertEqual(self.bot.enrollment.records, old)
+        self.assertTrue(self.bot.notice_allowed(event.unified_msg_origin, {"roomId": "r1", "kind": "season"}))
+
+    async def test_repeated_enrollment_preserves_category_and_master_opt_out(self):
+        await self.enable()
+        await self.bot.on_message(self.event("/dst 通知 季节变化 关"))
+        await self.bot.on_message(self.event("/dst 播报 关"))
+        saved = copy.deepcopy(self.bot.enrollment.records)
+        await self.enable()
+        self.assertEqual(self.bot.enrollment.records, saved)
+
+    async def test_legacy_all_off_only_reopens_after_explicit_master_on(self):
+        event = await self.enable()
+        session = event.unified_msg_origin
+        self.bot.enrollment.records[session]["notices"] = {key: False for key in default_notices()}
+        self.bot.enrollment.records[session]["noticeEnabled"] = False
+        await self.bot.on_message(self.event("/dst 播报 开"))
+        self.assertEqual(self.bot.enrollment.records[session]["notices"], default_notices())
+        self.assertTrue(self.bot.enrollment.records[session]["noticeEnabled"])
 
     async def test_isolated_member_session_enrolls_the_group_and_routes_notices_to_group(self):
         event = self.event("/dst 启用本群 聊天播报 开", session="adapter:GroupMessage:123_789")

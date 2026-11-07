@@ -4,7 +4,7 @@ import json
 import re
 import time
 from collections import OrderedDict
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 
 
 @dataclass(frozen=True)
@@ -12,6 +12,13 @@ class Target:
     room: str
     player: str = ""
     name: str = ""
+    # explicit | quote | focus | only_online — shown in receipts, not identity.
+    source: str = field(default="", compare=False)
+
+
+def player_prompt(form):
+    return bool(form and (form.get("type") == "player" or
+        form.get("type") == "parameter" and form.get("item", {}).get("parameterHints", {}).get(form.get("field")) == "player"))
 
 
 class State:
@@ -20,8 +27,9 @@ class State:
         self.users, self.messages, self.choices, self.seen = (OrderedDict() for _ in range(4))
         self.forms = OrderedDict()
         self.requests = OrderedDict()
+        self.reply_hashes = OrderedDict()
         self.tables = {
-            id(t): t for t in (self.users, self.messages, self.choices, self.seen, self.forms, self.requests)
+            id(t): t for t in (self.users, self.messages, self.choices, self.seen, self.forms, self.requests, self.reply_hashes)
         }
         self.allocations = OrderedDict()
         self.bytes = 0
@@ -113,6 +121,24 @@ class State:
 
     def quoted(self, scope, message_id, *, source=None):
         value = self.messages.get((*scope, str(message_id)))
+        return (
+            value[1]
+            if value and value[0] > self.clock() and (source is None or value[2] == source)
+            else None
+        )
+
+    def associate_text(self, scope, text, target, *, source=""):
+        if isinstance(text, str) and text.strip() and target and target.player:
+            self._put(
+                self.reply_hashes,
+                (*scope, text.strip()[:3500]),
+                (self.clock() + 86400, target, source),
+            )
+
+    def quoted_text(self, scope, text, *, source=None):
+        if not isinstance(text, str) or not text.strip():
+            return None
+        value = self.reply_hashes.get((*scope, text.strip()[:3500]))
         return (
             value[1]
             if value and value[0] > self.clock() and (source is None or value[2] == source)
@@ -231,9 +257,18 @@ class State:
         if not form:
             return False
         if quote and quote != form.get("messageId"):
-            return False
-        if form.get("type") == "confirmation" and text.strip() == "确认":
-            return True
+            from .routing import form_reply
+
+            from .decision import looks_like_confirmation
+
+            return bool(woken and (
+                form.get("type") == "confirmation" and looks_like_confirmation(text)
+                or player_prompt(form) and form_reply(text) is not None))
+        if form.get("type") == "confirmation":
+            from .decision import looks_like_confirmation
+
+            if looks_like_confirmation(text):
+                return True
         if woken or quote and quote == form.get("messageId"):
             from .routing import form_reply
 
@@ -242,12 +277,12 @@ class State:
             return False
         if is_cancel_reply(text):
             return True
-        # A short-lived read prompt can also accept a plain nickname.
+        # Supplying a player completes this user's already-requested action.
+        # The engine rechecks permissions; dangerous actions still confirm.
         from .routing import COMPOUND, DISCUSSION, explicit_ai, parse
 
         return bool(
-            form.get("type") == "player"
-            and form["intent"].kind in {"profile", "inventory", "network"}
+            player_prompt(form)
             and 0 < len(text) <= 128
             and not (DISCUSSION.search(text) or COMPOUND.search(text) or explicit_ai(text))
             and parse(text, {}) is None

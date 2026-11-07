@@ -69,6 +69,10 @@ class Actions:
 
         An uncertain send retains its claim. This never retries a game action.
         """
+        # Execution receipts do not prove resurrection. Keep the actual observed
+        # event even after a successful command; event IDs deduplicate delivery.
+        if related.get("eventKind") == "player.respawned":
+            return False
         status = related.get("status")
         if not related.get("jobId") or status not in {"succeeded", "failed", "partial", "canceled"}:
             return False
@@ -102,9 +106,9 @@ class Actions:
             return await self._submit_capability(actor, item, target, parameters, deadline)
         return await self._legacy_submit(actor, intent, target, deadline)
 
-    async def submit_capability(self, actor, item, target, parameters, deadline):
+    async def submit_capability(self, actor, item, target, parameters, deadline, *, journal_step=""):
         async with self.lock:
-            return await self._submit_capability(actor, item, target, parameters, deadline)
+            return await self._submit_capability(actor, item, target, parameters, deadline, journal_step=journal_step)
 
     async def submit_teleport(self, actor, item, target, preview, deadline):
         from .teleport import describe, envelope
@@ -133,13 +137,15 @@ class Actions:
             await self.save(records)
             return describe(data)
 
-    async def submitted_result(self, actor):
+    async def submitted_result(self, actor, *, journal_step=""):
         source = (*actor.key, str(getattr(getattr(actor.event, "message_obj", None), "message_id", "")))
+        if journal_step:
+            source += (journal_step,)
         key = hashlib.sha256(json.dumps(source).encode()).hexdigest()
         record = (await self.load()).get(key, {})
         return record.get("data") if record.get("connectionId") == actor.connection_id else None
 
-    async def _submit_capability(self, actor, item, target, parameters, deadline):
+    async def _submit_capability(self, actor, item, target, parameters, deadline, *, journal_step=""):
         # Invalid input has not crossed the send boundary. Do not reserve an
         # uncertain task or tell users it may already have executed.
         validate(parameters, item["parameters"])
@@ -149,6 +155,8 @@ class Actions:
         )
         if not source[-1]:
             raise QueryError("MESSAGE_ID_REQUIRED")
+        if journal_step:
+            source += (journal_step,)
         key = hashlib.sha256(json.dumps(source).encode()).hexdigest()
         fingerprint = hashlib.sha256(
             json.dumps(
@@ -167,6 +175,7 @@ class Actions:
             "requestId": "astrbot-" + uuid.uuid4().hex,
             "fingerprint": fingerprint,
             "roomId": target.room,
+            "playerId": str(parameters.get("playerId") or parameters.get("player_id") or target.player or ""),
             "createdAt": time.time(),
             "state": "prepared",
             "owner": hashlib.sha256(json.dumps(actor.key).encode()).hexdigest(),
@@ -235,6 +244,7 @@ class Actions:
             "requestId": "astrbot-" + uuid.uuid4().hex,
             "fingerprint": fingerprint,
             "roomId": target.room,
+            "playerId": str(target.player or ""),
             "createdAt": time.time(),
             "sessionId": group_origin(getattr(actor.event, "unified_msg_origin", "")),
             "state": "prepared",
@@ -318,8 +328,7 @@ class Actions:
                 self.directory.lookup(actor, record.get("capabilityId")) if self.directory else None
             )
             if item is None:
-                await self.directory.items(actor, deadline)
-                item = self.directory.lookup(actor, record.get("capabilityId"))
+                item = await self.directory.get(actor, record.get("capabilityId", ""), deadline)
             # Removed capability: still require the exact old category and native
             # tools plus current explicit write allowlist to read its own result.
             if item is None:

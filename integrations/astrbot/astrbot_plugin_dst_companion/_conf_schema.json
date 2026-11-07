@@ -27,6 +27,16 @@
     ],
     "hint": "推荐 group：群主、管理员和成员自动识别；旧安装切换前保留原规则。"
   },
+  "access_policy": {
+    "description": "权限策略：simple 所有人可查询全部内容、管理员可执行全部管理操作；custom 使用下方分类与授权列表",
+    "type": "string",
+    "default": "custom",
+    "options": [
+      "simple",
+      "custom"
+    ],
+    "hint": "simple 下管理员身份不变（group 模式为群主/管理员，legacy 模式为已登记的游戏管理员）；单人操作直接执行，影响全服的操作回复“确认”，重置世界等高风险操作需输入确认短语。disabledCapabilities 与群 deny 列表仍可禁用个别能力。"
+  },
   "group_permissions": {
     "description": "群角色默认权限（可选）：member/admin/owner，各支持 read、write、deny 列表和 workbench=off/standard/all",
     "type": "dict",

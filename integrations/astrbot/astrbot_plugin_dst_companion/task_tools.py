@@ -11,12 +11,21 @@ import re
 import time
 
 from .capabilities import permitted, validate
-from .discovery import actions as discover_actions, score as discovery_score
+from .discovery import (
+    actions as discover_actions,
+    example_score,
+    negated as discovery_negated,
+    score as discovery_score,
+)
 from .gateway import QueryError
 from .presentation import business
-from .routing import Intent
+from .routing import Intent, performance_window
 from .state import Target
 from .task_results import read_result
+
+INTERNAL_SLOTS = frozenset(
+    {"feedback", "phase", "preview_id", "confirmed", "confirmation", "expected_session"}
+)
 
 READ_TOOLS = {"dst_servers", "dst_player", "dst_world", "dst_find", "dst_read", "dst_result"}
 WRITE_TOOLS = {"dst_player_action", "dst_server_action", "dst_run"}
@@ -28,7 +37,7 @@ READ_VIEWS = {
 ACTION_VALUES = {
     "dst_player_action": ["resurrect", "give_item", "spawn_entity", "kick", "god_mode", "creative_mode",
                           "announce", "ban", "unban", "kill", "reset_character"],
-    "dst_server_action": ["start", "stop", "restart", "save", "backup", "configure_backup"],
+    "dst_server_action": ["start", "stop", "restart", "save", "backup", "configure_backup", "reset"],
 }
 
 
@@ -59,6 +68,18 @@ def tool_view(tool, actor):
             "type": "object", "properties": properties, "additionalProperties": False,
             "description": "只填写当前查询需要的字段；世界数量查询仅填 prefab，不需要 count。" if tool.name == "dst_world"
                            else "活动/轨迹可填写时间范围、before 和 limit；战斗仅填时间范围，普通资料/背包/网络留空。"}
+    elif tool.name == "dst_servers" and "performance" in values:
+        narrowed.parameters["properties"]["parameters"] = {
+            "type": "object",
+            "properties": {
+                "window": {"type": "string", "enum": ["1h", "6h", "24h", "7d"]},
+                "from": {"type": "string", "format": "date-time", "maxLength": 64},
+                "to": {"type": "string", "format": "date-time", "maxLength": 64},
+                "worldId": {"type": "string", "maxLength": 128},
+            },
+            "additionalProperties": False,
+            "description": "仅 performance 视图可选填写 window（1h/6h/24h/7d，默认 24h）或时间范围；其他视图留空。",
+        }
     return narrowed
 TERMS = {
     "room.status": "查服 房间 服务器 概况 status server",
@@ -121,6 +142,7 @@ def recommended(item):
         "room.save",
         "room.backup.create",
         "room.backups.configure",
+        "room.reset",
     }:
         action = {"room.backup.create": "backup", "room.backups.configure": "configure_backup"}.get(
             capability, capability.split(".")[1]
@@ -132,18 +154,40 @@ def recommended(item):
     }
 
 
+def _model_hidden_slot(field, prop, slots):
+    slot = slots.get(field) if isinstance(slots, dict) else None
+    if isinstance(slot, dict):
+        return slot.get("model") is False
+    if field == "phase":
+        enum = prop.get("enum", []) if isinstance(prop, dict) else []
+        return "preview" in enum
+    return field in INTERNAL_SLOTS
+
+
 def discover_item(item):
-    """Describe the facade's input, without leaking required native ID fields."""
+    """Describe the facade's input, without leaking required native ID or internal fields."""
     schema = copy.deepcopy(item["parameters"])
     selectors = {}
+    slots = item.get("slotRoles") if isinstance(item.get("slotRoles"), dict) else {}
     for field, hint in item.get("parameterHints", {}).items():
         if hint in {"player", "world"}:
             schema.get("properties", {}).pop(field, None)
             required = schema.get("required", [])
             selectors[hint] = {"required": field in required, "description": "填写昵称或ID" if hint == "player" else "填写地面、洞穴或世界名称/ID"}
             schema["required"] = [key for key in required if key != field]
-    return {"id": item["id"], "title": item["title"], "parameters": schema,
+    props = schema.get("properties", {})
+    hidden = {f for f, p in list(props.items()) if _model_hidden_slot(f, p, slots)}
+    for field in hidden:
+        props.pop(field, None)
+    if hidden and "required" in schema:
+        schema["required"] = [key for key in schema.get("required", []) if key not in hidden]
+    card = {"id": item["id"], "title": item["title"], "parameters": schema,
             "selectors": selectors, **recommended(item)}
+    if item.get("tier"):
+        card["tier"] = item["tier"]
+    if item.get("confirm"):
+        card["confirm"] = item["confirm"]
+    return card
 
 
 class TaskTools:
@@ -192,6 +236,7 @@ class TaskTools:
         return matches[0]["id"], None
 
     async def perform(self, event, name, **values):
+        actor, message_id = None, ""
         try:
             if name not in READ_TOOLS | WRITE_TOOLS or len(encode(values).encode()) > 12288:
                 raise QueryError("PARAMETER_INVALID")
@@ -205,6 +250,9 @@ class TaskTools:
             message_id = str(getattr(event.message_obj, "message_id", ""))
             if not self.plugin.state.current_request(actor.key, message_id):
                 return encode({"state": "superseded", "summary": "用户已发起新的请求，停止本轮工具调用；不要覆盖后续选择。"})
+            uncertain = getattr(event, "_dst_uncertain_write", None)
+            if name in WRITE_TOOLS and uncertain and uncertain[:2] == (actor.projection, message_id):
+                return uncertain[2]
             pending = getattr(event, "_dst_task_question", None)
             if pending and pending[:3] == (self, actor.projection, message_id):
                 return pending[3]
@@ -272,7 +320,13 @@ class TaskTools:
                     raise QueryError("PERMISSION_DENIED")
                 values["view"] = view
             if name == "dst_find":
+                generic = getattr(self.plugin, "generic", None)
+                if generic and await generic.available():
+                    return encode(await generic.find(actor, values.get("query", "")))
                 return await self.find(actor, values.get("query", ""))
+            if ((name in {"dst_read", "dst_run"} and values.get("capability_id", "").startswith("api:"))
+                    or name == "dst_result" and values.get("task_ref", "").startswith(("generic:", "generic-request:", "resource:"))):
+                return await self.plugin.generic.perform(event, actor, name, values)
             if name == "dst_result":
                 return await self.result(actor, values.get("task_ref", ""))
             if (
@@ -283,9 +337,28 @@ class TaskTools:
                 result = json.loads(await self.plugin.models.dst_rooms(event))
                 result["note"] = "这里只是房间目录，尚未读取运行状态。查询或比较状态时，请对所需房间逐一调用 dst_servers(room=真实ID, view=overview)。"
                 return encode(result)
-            room, question = await self.room(actor, values.get("room", ""))
+            from .references import PLAYER_REFERENCES, needs_reference
+
+            reference = None
+            selector_intent = Intent(
+                values.get("view", "profile") if name == "dst_player" else "capability",
+                player=values.get("player", ""),
+                capability=("player." + values.get("action", "")) if name == "dst_player_action" else values.get("capability_id", ""),
+                parameters=values.get("parameters") or {},
+            )
+            # A typed player always overrides a quote. Otherwise use only a
+            # receipt verified against this group, bot, panel and allowed room.
+            if parsed and len(parsed) > 2 and parsed[2] and values.get("player", "") in PLAYER_REFERENCES and needs_reference(selector_intent):
+                reference = await self.plugin.references.resolve(actor, parsed[2], selector_intent)
+                if reference is None:
+                    return self.question(event, actor, {"state": "needs_input",
+                        "summary": "未能确认引用中的玩家，请提供游戏昵称或 KU ID；不会改查上一次的玩家。"})
+            room, question = await self.room(actor, values.get("room", "") or (reference.room if reference else ""))
             if question:
                 return self.question(event, actor, question)
+            if reference and reference.room != room:
+                return self.question(event, actor, {"state": "needs_input",
+                    "summary": "引用中的玩家与指定房间不一致，请明确房间和玩家。尚未执行。"})
             view = values.get("view", "")
             player = values.get("player", "")
             params = dict(values.get("parameters") or {})
@@ -295,6 +368,10 @@ class TaskTools:
                     view, "capability"
                 )
                 capability = "room.performance" if view == "performance" else ""
+                if view == "performance" and not params.get("window") and not params.get("from"):
+                    win = performance_window(original)
+                    if win:
+                        params["window"] = win
             elif name == "dst_player":
                 if view in {"profile", "inventory", "network"}:
                     kind = view
@@ -319,15 +396,16 @@ class TaskTools:
                     "save": "room.save",
                     "backup": "room.backup.create",
                     "configure_backup": "room.backups.configure",
+                    "reset": "room.reset",
                 }.get(values.get("action"), "")
             if kind != "capability":
                 if params or kind not in actor.visibility:
                     raise QueryError("PERMISSION_DENIED")
                 intent = Intent(kind, player, room)
             else:
-                items = await self.plugin.directory.items(actor, time.monotonic() + 8)
-                item = next((c for c in items if c["id"] == capability), None)
+                item = await self.plugin.directory.get(actor, capability, time.monotonic() + 8)
                 if not item and name == "dst_read":
+                    items = await self.plugin.directory.items(actor, time.monotonic() + 8)
                     # A view name is not a capability ID. Suggest only an
                     # authorized read; never infer/execute a replacement action.
                     alternatives = [c for c in items if c["access"] == "read"
@@ -399,18 +477,45 @@ class TaskTools:
                     return encode({"state": "needs_input", "code": "PARAMETER_INVALID",
                                    "summary": "参数未通过校验，本次没有执行。请按以下结构纠正查询参数；不要猜测或改变用户指定的修改操作。",
                                    "items": [discover_item(item)]})
-                intent = Intent("capability", room=room, capability=capability, parameters=params,
-                                confirm_required=name in WRITE_TOOLS)
+                # Confirmation follows the capability's risk tier (decision.py),
+                # identically for direct commands and model tool calls.
+                intent = Intent("capability", room=room, capability=capability, parameters=params)
             if not self.plugin.state.current_request(actor.key, message_id):
                 return encode({"state": "superseded", "summary": "用户已发起新的请求，停止本轮工具调用；不要覆盖后续选择。"})
-            result = await self.plugin.engine.execute(actor, intent, Target(room))
+            from dataclasses import replace as _replace
+            remembered = self.plugin.state.target(actor.key)
+            exec_target = reference or Target(room)
+            if (
+                reference is None
+                and not (parsed and len(parsed) > 2 and parsed[2])
+                and isinstance(remembered, Target)
+                and remembered.room == room
+                and remembered.player
+            ):
+                if player in PLAYER_REFERENCES and needs_reference(intent):
+                    exec_target = _replace(remembered, source="focus")
+                elif name in {"dst_servers", "dst_world", "dst_server_action"} and view != "players":
+                    exec_target = remembered
+            result = await self.plugin.engine.execute(actor, intent, exec_target)
             if getattr(result, "outcome", "") == "needs_selection":
+                pending = self.plugin.state.pending_form(actor.key)
+                if pending is not None:
+                    # The model relays this prompt; AstrBot core sends it, so
+                    # its message id is unknown. Quoting the relay may confirm.
+                    pending["relayed"] = True
                 return self.question(event, actor, {"state": "needs_input", "summary": result.text,
                                                     "note": "等待用户回复；不得自行选择或代确认。"})
             self.plugin.model_presentation.remember(
                 event, actor, self.plugin.connection_identity(), kind, result, room
             )
             text = result.text
+            if (
+                name == "dst_servers"
+                and view == "overview"
+                and "performance" in actor.visibility
+                and re.search(r"cpu|内存|性能|负载", original, re.I)
+            ):
+                text += f"\n（提示：历史 CPU、内存与模拟评分请继续调用 dst_servers(room={room!r}, view='performance', parameters={{'window': '24h'}})）"
             if name in READ_TOOLS and isinstance(getattr(result, "data", None), dict):
                 return await self.read_evidence(actor, text, result.data, room)
             if name in WRITE_TOOLS:
@@ -421,12 +526,20 @@ class TaskTools:
                     text += (
                         "\n任务编号：" + record["requestId"] + "（使用 dst_result 查询，勿重发）"
                     )
+                    if record.get("state") == "uncertain" or record.get("data", {}).get("status") == "uncertain":
+                        event._dst_uncertain_write = (actor.projection, message_id, text)
             return text
         except QueryError as error:
             from .engine import ERRORS
-
+            # A mistyped result reference does not turn the original uncertain
+            # mutation into a permission failure or authorize a replacement.
+            if name == "dst_result" and actor is not None:
+                pending = getattr(event, "_dst_uncertain_write", None)
+                if pending and pending[:2] == (actor.projection, message_id):
+                    return pending[2]
             return encode(
-                {"state": "unavailable", "summary": ERRORS.get(error.code, "请求未完成；未自动重试。"), "code": error.code}
+                {"state": "unavailable", "summary": error.message or ERRORS.get(error.code, "请求未完成；未自动重试。"), "code": error.code,
+                 "details": error.details, "callId": error.call_id}
             )
         except (ValueError, TypeError, KeyError):
             return encode({"state": "needs_input", "summary": "参数无效，请按工具说明填写。"})
@@ -439,38 +552,56 @@ class TaskTools:
         unsupported = self.plugin.directory.unsupported.get(actor.read_projection, [])
         unavailable = [c for c in unsupported if permitted(actor, c) and c.get("title")
                        and (query in c["title"].casefold() or c["title"].casefold() in query)]
-        ranked = []
+        rows = []
         for item in items:
-            if not permitted(actor, item):
+            if not permitted(actor, item) or discovery_negated(query, item.get("negatives")):
                 continue
+            aliases = item.get("aliases") if isinstance(item.get("aliases"), list) else []
+            search_terms = item.get("searchTerms") if isinstance(item.get("searchTerms"), list) else []
+            examples = item.get("examples") if isinstance(item.get("examples"), list) else []
+            policies = item.get("actionPolicies") if isinstance(item.get("actionPolicies"), dict) else {}
             terms = [
                 item["id"],
                 item.get("title", ""),
                 *TERMS.get(item["id"], "").split(),
-                *(
-                    item.get("searchTerms", [])[:32]
-                    if isinstance(item.get("searchTerms"), list)
-                    else []
-                ),
+                *search_terms[:64],
+                *aliases[:64],
             ]
             matched = False
             for action in discover_actions(item):
-                score = discovery_score(query, [action["id"], action["title"], *action["searchTerms"]])
+                policy = policies.get(action["id"]) if isinstance(policies.get(action["id"]), dict) else {}
+                if discovery_negated(query, policy.get("negatives")):
+                    continue
+                action_terms = [action["id"], action["title"], *action["searchTerms"], *(policy.get("aliases") or [])[:64]]
+                score = max(discovery_score(query, action_terms), example_score(query, policy.get("examples")))
                 if score:
                     card = discover_item(item)
                     card.update(title=action["title"], actionId=action["id"], description=action["description"])
+                    if policy.get("tier"):
+                        card["tier"] = policy["tier"]
+                    if policy.get("confirm"):
+                        card["confirm"] = policy["confirm"]
                     card["input"].setdefault("parameters", {}).update(action["parameters"])
-                    ranked.append((score + 100, card))
+                    prefer = policy.get("prefer") or item.get("prefer") or ""
+                    rows.append({"id": item["id"], "score": score + 100, "card": card, "prefer": prefer})
                     matched = True
             if not matched:
-                score = discovery_score(query, terms)
+                score = max(discovery_score(query, terms), example_score(query, examples))
                 if score:
-                    ranked.append((score, discover_item(item)))
-        ranked.sort(key=lambda pair: (-pair[0], pair[1]["id"], pair[1].get("actionId", "")))
+                    rows.append({"id": item["id"], "score": score, "card": discover_item(item),
+                                 "prefer": item.get("prefer") or ""})
+        best = {}
+        for row in rows:
+            best[row["id"]] = max(best.get(row["id"], 0), row["score"])
+        for row in rows:
+            prefer = row["prefer"]
+            if prefer and prefer != row["id"] and prefer in best and row["score"] >= best[prefer]:
+                row["score"] = best[prefer] - 1
+        rows.sort(key=lambda r: (-r["score"], r["id"], r["card"].get("actionId", "")))
         return encode(
             {
-                "items": [] if unavailable else [c for _, c in ranked[:3]],
-                "hasMore": len(ranked) > 3,
+                "items": [] if unavailable else [r["card"] for r in rows[:3]],
+                "hasMore": len(rows) > 3,
                 "note": "仅返回候选，尚未执行。查询、否定、条件或讨论不能当作操作请求；缺少目标或开关时请询问。权限与确认沿用原能力。",
                 "needsUpdate": [
                     {"id": c["id"], "title": c["title"], "status": c["status"]}

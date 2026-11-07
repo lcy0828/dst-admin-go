@@ -154,6 +154,71 @@ class PrivatePanel:
                 )
             self.tools, self.identity, self.until = rows, identity, time.monotonic() + 60
 
+    async def generic_request(self, payload, timeout):
+        """Trusted actor envelope is constructed by plugin code, never the model."""
+        config = self._mcp_server_config
+        identity = fingerprint(config)
+        base = urlsplit(config["url"])
+        url = urlunsplit((base.scheme, base.netloc,
+                         base.path.removesuffix("/mcp") + "/api/v2/bot/gateway", "", ""))
+        if self.http is None:
+            self.http = httpx.AsyncClient(follow_redirects=False, limits=httpx.Limits(max_connections=4))
+        # No retry, including disconnects after a write might have been accepted.
+        try:
+            async with self.http.stream("POST", url, headers=config["headers"],
+                                        json=payload, timeout=timeout) as response:
+                chunks, size = [], 0
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > 256 << 10:
+                        raise QueryError("RESULT_TOO_LARGE")
+                    chunks.append(chunk)
+                value = json.loads(b"".join(chunks))
+                if not isinstance(value, dict):
+                    raise ValueError("invalid response envelope")
+                if response.status_code != 200 or value.get("error"):
+                    failure = value.get("error") or {}
+                    raise QueryError(failure.get("code", "API_FAILED"),
+                                     message=failure.get("message", ""), details=failure.get("details"))
+        except (httpx.TransportError, TimeoutError) as error:
+            raise QueryError("RESULT_UNCERTAIN" if payload.get("mode") in {"run", "execute"}
+                             else "QUERY_TIMEOUT") from error
+        except (ValueError, TypeError) as error:
+            raise QueryError("RESULT_UNCERTAIN" if payload.get("mode") in {"run", "execute"}
+                             else "MCP_RESPONSE_INVALID") from error
+        if identity != fingerprint(self._mcp_server_config):
+            raise QueryError("CONFIG_CHANGED")
+        return SimpleNamespace(isError=False, structuredContent={"status": "succeeded", "data": value.get("data")})
+
+    async def generic_resource(self, payload, timeout=15):
+        config = self._mcp_server_config
+        identity = fingerprint(config)
+        base = urlsplit(config["url"])
+        url = urlunsplit((base.scheme, base.netloc,
+                         base.path.removesuffix("/mcp") + "/api/v2/bot/gateway", "", ""))
+        if self.http is None:
+            self.http = httpx.AsyncClient(follow_redirects=False, limits=httpx.Limits(max_connections=4))
+        async with self.http.stream("POST", url, headers=config["headers"], json=payload, timeout=timeout) as response:
+            if response.status_code != 200:
+                raise QueryError("RESOURCE_UNAVAILABLE")
+            kind = response.headers.get("content-type", "").split(";", 1)[0]
+            if kind not in {"image/png", "image/jpeg", "image/webp", "application/zip", "application/octet-stream",
+                            "application/pdf", "application/json", "text/plain", "text/csv"}:
+                raise QueryError("RESOURCE_TYPE_UNSUPPORTED", message="当前聊天适配器不支持此资源类型；文件或事件流尚未下载、未发送。")
+            from email.message import Message
+            header = Message()
+            header["content-disposition"] = response.headers.get("content-disposition", "")
+            filename = header.get_filename() or "查询结果"
+            chunks, size = [], 0
+            async for chunk in response.aiter_bytes():
+                size += len(chunk)
+                if size > 4 << 20:
+                    raise QueryError("RESOURCE_TOO_LARGE")
+                chunks.append(chunk)
+        if identity != fingerprint(self._mcp_server_config):
+            raise QueryError("CONFIG_CHANGED")
+        return {"data": b"".join(chunks), "contentType": kind, "name": filename}
+
     async def confirmation_request(self, name, arguments, timeout):
         # The master credential stays in this trusted plugin transport. Models
         # only see guarded facades; native MCP cannot call this approval route.

@@ -31,6 +31,17 @@ DEFAULT_RULES = {
 LEVELS = {"off": 0, "standard": 1, "all": 2}
 
 
+ALL_WRITES = ("*",)
+
+
+def simple_access(config):
+    """Default policy: everyone reads everything; administrators manage everything.
+
+    ``custom`` keeps the older per-category and per-capability lists.
+    """
+    return config.get("access_policy") == "simple"
+
+
 def enabled(config):
     # Missing field preserves the policy of existing installations.
     return config.get("permission_mode", "legacy") == "group"

@@ -22,6 +22,99 @@ def render(template, *, title="", body="", room="", player=""):
         return (title + "\n" + body)[:2400]
 
 
+def _mib(value):
+    if type(value) not in (int, float) or value <= 0:
+        return ""
+    mib = value / (1024 * 1024)
+    return f"{mib / 1024:.2f} GiB" if mib >= 1024 else f"{mib:.0f} MiB"
+
+
+def _performance_body(data):
+    lines = ["📊 性能报表"]
+    start, end = data.get("from"), data.get("to")
+    if isinstance(start, str) and isinstance(end, str) and start and end:
+        lines.append("范围：" + time_text(start) + " — " + time_text(end))
+    worlds = [w for w in (data.get("worlds") or []) if isinstance(w, dict)]
+    items = [r for r in (data.get("items") or []) if isinstance(r, dict)]
+    if not worlds and not items:
+        lines.append("该时间段暂无性能采样记录（可能尚未开启采样或世界未运行）。")
+        return "\n".join(lines)
+    by_world = {}
+    for row in items:
+        wid = str(row.get("worldId") or "")
+        by_world.setdefault(wid, []).append(row)
+    if not worlds:
+        for wid, rows in by_world.items():
+            worlds.append({"worldId": wid, "worldName": rows[-1].get("worldName") or wid})
+    for w in worlds[:8]:
+        wid = str(w.get("worldId") or "")
+        name = fmt.world_name(w.get("worldName") or wid or "世界")
+        rows = by_world.get(wid, [])
+        parts = []
+        avg_score = w.get("averageScore")
+        min_score = w.get("minimumScore")
+        if type(avg_score) in (int, float):
+            score_text = f"模拟评分 平均 {avg_score:.1f}"
+            if type(min_score) in (int, float):
+                score_text += f"（最低 {min_score:.1f}）"
+            parts.append(score_text)
+        cpus = [r["cpuPercent"] for r in rows if type(r.get("cpuPercent")) in (int, float)]
+        peak_cpu = w.get("peakCPUPercent")
+        if type(peak_cpu) not in (int, float) and cpus:
+            peak_cpu = max(cpus)
+        if cpus and type(peak_cpu) in (int, float):
+            parts.append(f"CPU 平均 {sum(cpus) / len(cpus):.1f}% / 峰值 {peak_cpu:.1f}%")
+        elif type(peak_cpu) in (int, float):
+            parts.append(f"CPU 峰值 {peak_cpu:.1f}%")
+        rss_rows = [r["rssBytes"] for r in rows if type(r.get("rssBytes")) in (int, float) and r["rssBytes"] > 0]
+        peak_rss = w.get("peakRSSBytes")
+        if (type(peak_rss) not in (int, float) or peak_rss <= 0) and rss_rows:
+            peak_rss = max(rss_rows)
+        if rss_rows and type(peak_rss) in (int, float) and peak_rss > 0:
+            parts.append(f"内存 当前 {_mib(rss_rows[-1])} / 峰值 {_mib(peak_rss)}")
+        elif type(peak_rss) in (int, float) and peak_rss > 0:
+            parts.append(f"内存峰值 {_mib(peak_rss)}")
+        cov = w.get("coverage")
+        if type(cov) in (int, float):
+            parts.append(f"覆盖率 {round(cov * 100)}%")
+        lines.append("· " + name + "：" + (" · ".join(parts) if parts else "暂无有效采样（暂停或未运行期间不计分）"))
+    return "\n".join(lines)
+
+
+def _map_body(data):
+    lines = ["🗺️ 世界地图"]
+    rows = [r for r in (data.get("items") or []) if isinstance(r, dict)]
+    if not rows:
+        lines.append("当前房间尚未生成地图快照。")
+        if data.get("rendererAvailable") is False:
+            lines.append("当前节点未安装地图渲染器。")
+        else:
+            lines.append("可在管理面板「世界地图」中生成最新地图。")
+        return "\n".join(lines)
+    status_labels = {"succeeded": "已生成", "running": "生成中", "failed": "生成失败"}
+    seen = set()
+    for row in rows[:8]:
+        wid = str(row.get("worldId") or row.get("sessionLabel") or "世界")
+        if wid in seen:
+            continue
+        seen.add(wid)
+        name = fmt.world_name(wid)
+        status = status_labels.get(row.get("status"), fmt.safe(row.get("status") or "未知"))
+        parts = [status]
+        w, h = row.get("width"), row.get("height")
+        if type(w) is int and type(h) is int and w > 0 and h > 0:
+            parts.append(f"{w}×{h}")
+        features = row.get("featureCount")
+        if type(features) is int and features >= 0:
+            parts.append(f"标记 {features} 处")
+        stamp = row.get("finishedAt") or row.get("createdAt")
+        if isinstance(stamp, str) and stamp:
+            parts.append(time_text(stamp))
+        lines.append("· " + name + "：" + " · ".join(parts))
+    lines.append("高清图层与坐标可在管理面板「世界地图」查看。")
+    return "\n".join(lines)
+
+
 def query_body(result, data):
     """Render known fields only. New capabilities do not dump protocol objects."""
     if data is None:
@@ -29,6 +122,10 @@ def query_body(result, data):
     if not isinstance(data, dict):
         return "查询已返回，请在面板查看详细结果。"
     capability = result.get("capabilityId", "")
+    if capability == "room.performance":
+        return _performance_body(data)
+    if capability == "room.map":
+        return _map_body(data)
     if capability == "room.locations":
         rows = data.get("items", [])
         if not rows: return "当前世界还没有保存地点。"
@@ -101,10 +198,14 @@ def business(result, *, diagnostics=False):
     body = query_body(result, data)
     if result.get("resultKind") == "item-grant" and isinstance(data, dict):
         name = fmt.safe(data.get("name") or data.get("prefab"))
-        body = "物品：" + name + " · 请求 " + fmt.safe(data.get("requested")) + " 个"
-        if data.get("granted") is not None:
-            body += "\n本次回执确认发放：" + str(data["granted"]) + " 个"
-        body += "\n" + fmt.safe(data.get("message") or "结果尚未确认，请只回读原请求。")
+        granted, requested = data.get("granted"), data.get("requested")
+        if status == "succeeded" and granted is not None and granted == requested:
+            body = "已发放 " + name + " ×" + str(granted) + "\n背包满时会掉在玩家脚下。"
+        else:
+            body = "物品：" + name + " · 请求 " + fmt.safe(requested) + " 个"
+            if granted is not None:
+                body += "\n本次确认发放：" + str(granted) + " 个"
+            body += "\n" + fmt.safe(data.get("message") or "结果尚未确认，请只回读原请求。")
         if data.get("worldName"):
             body += "\n世界：" + fmt.world_name(data["worldName"])
     if result.get("resultKind") == "entity-spawn" and isinstance(data, dict):
@@ -123,7 +224,7 @@ def business(result, *, diagnostics=False):
     if result.get("resultKind") == "workbench-run" and isinstance(data, dict):
         title = "复活指令" if result.get("capabilityId") == "player.resurrect" else "操作指令"
         if status == "succeeded":
-            body = title + "已执行。\n游戏内的实际效果尚未确认，请查看玩家或世界的当前状态。"
+            body = title + "已执行；游戏内的实际效果尚未确认，以随后的玩家状态或通知为准。"
         elif status in {"pending", "running"}:
             body = title + "已提交，正在等待执行结果。"
         elif status == "uncertain":
@@ -182,7 +283,7 @@ def business(result, *, diagnostics=False):
         body += "\n" + fmt.safe(error.get("message") or error.get("code"))
     footer = labels.get(status, "结果尚未确认")
     if result.get("resultKind") == "workbench-run" and status == "succeeded":
-        footer = "指令执行完成 · 游戏内效果待确认"
+        footer = "已执行"
         if isinstance(data, dict) and isinstance(data.get("batch"), dict):
             footer = {"preview": "预览有效期 30 秒", "cancelled": "已取消", "completed": "效果已确认" if data["batch"].get("matched") else "没有执行修改"}.get(data["batch"].get("state"), "部分完成，请勿重复提交")
         if isinstance(data, dict) and isinstance(data.get("movement"), dict):

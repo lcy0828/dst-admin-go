@@ -1,4 +1,4 @@
-"""New fixed modes reuse the dynamic directory and original human confirmation."""
+"""Fixed player modes use the dynamic directory and its confirmation policy."""
 import sys
 import unittest
 from pathlib import Path
@@ -17,9 +17,9 @@ class ExpandedWorkbenchTests(unittest.TestCase):
   item['interaction']={'kind':'preview-confirm-v1','resultVersion':2,'effectVersion':'1'}
   item['behaviorRevision']='6'
   return item
- def test_each_mode_routes_without_model_but_cannot_skip_confirmation(self):
+ def test_each_mode_routes_without_model_and_leaves_confirmation_to_the_directory(self):
   user=replace(actor(role='game-manage'),workbench_mode='all');item=self.item()
-  for name,mode in [('无敌','invincible'),('超级无敌','super_god'),('制造','creative'),('锁血','health_lock'),('一击必杀','one_hit'),('隐身','invisible'),('踏水','water_walk'),('穿墙','noclip')]:
+  for name,mode in [('普通无敌','invincible'),('超级无敌','super_god'),('制造','creative'),('锁血','health_lock'),('一击必杀','one_hit'),('隐身','invisible'),('踏水','water_walk'),('穿墙','noclip')]:
    for word,enabled in [('开启',True),('关闭',False)]:
     with self.subTest(name=name,enabled=enabled):
      result=direct_request(f'给 lcy {word}{name}模式',[item],user)

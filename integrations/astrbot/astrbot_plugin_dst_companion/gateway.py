@@ -7,8 +7,9 @@ import uuid
 
 
 class QueryError(RuntimeError):
-    def __init__(self, code):
+    def __init__(self, code, *, message="", details=None, call_id=""):
         self.code = code
+        self.message, self.details, self.call_id = message, details, call_id
         super().__init__(code)
 
 
@@ -34,9 +35,7 @@ def unpack(result):
         if type(code) is not int or not 200 <= code < 300:
             raise QueryError("API_FAILED")
         data = data.get("data")
-    if not isinstance(data, dict):
-        raise QueryError("MCP_RESPONSE_INVALID")
-    if data.get("_aiTruncated"):
+    if isinstance(data, dict) and data.get("_aiTruncated"):
         raise QueryError("RESULT_TRUNCATED")
     return data
 

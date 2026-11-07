@@ -91,13 +91,15 @@ class GroupAdapterTests(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         bot, event = self.companion(), self.event()
+        bot.config["access_policy"] = "simple"
         bot.manager.host._check_tool_permission.return_value = "requires AstrBot admin"
         await bot.prepare(event)
         actor = bot.actor(event)
         self.assertEqual(actor.group_role, "admin")
         self.assertEqual(actor.role, "game-manage")
         self.assertEqual(bot.server(True), "dst-read")
-        self.assertIn("player.resurrect", actor.write_allowlist)
+        self.assertTrue(actor.may_write("player.resurrect"))
+        self.assertTrue(actor.may_write("room.reset"), "simple policy: administrators manage everything")
         self.assertTrue(await bot.native(actor, "api_runBotCapability"))
         bot.manager.host._check_tool_permission.assert_not_awaited()
         await bot.terminate()
@@ -123,6 +125,7 @@ class GroupAdapterTests(unittest.IsolatedAsyncioTestCase):
         from astrbot_plugin_dst_companion.capabilities import permitted
 
         bot, event = self.companion(), self.event("member")
+        bot.config["access_policy"] = "custom"
         bot.config["group_permissions"] = {"member": {"write": ["player.resurrect"]}}
         await bot.prepare(event)
         actor = bot.actor(event)
@@ -143,6 +146,7 @@ class GroupAdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_identity_also_blocks_explicit_member_writes(self):
         bot, event = self.companion(), self.event("member")
+        bot.config["access_policy"] = "custom"
         bot.config["group_permissions"] = {"member": {"write": ["player.resurrect"]}}
         event.bot.call_action.side_effect = TimeoutError()
         await bot.prepare(event)

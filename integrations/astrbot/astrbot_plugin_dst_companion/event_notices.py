@@ -125,12 +125,15 @@ async def accept_page(engine, room_id, page, *, platform=False, kinds=None):
                     raise MCPReadError("Invalid event facts")
                 if category in {"players", "boss", "mods"} and facts.get("worldId"):
                     body = engine.world_name(room_id, facts["worldId"]) + " · " + body
+                event_time = time_text(event.get("occurredAt"))
+                if category == "players" and age >= 15 and event_time:
+                    event_time = f"{event_time}（延迟 {int(age)} 秒送达）"
                 text = engine.message(room_id, "event_" + category, {
                     "title": title, "body": body, "result": ("已启动" if event.get("kind") == "room.operation" and status == "running" and not (event.get("facts") or {}).get("action") else RESULTS.get(status, "状态见正文")),
-                    "time": time_text(event.get("occurredAt")),
+                    "time": event_time,
                     **({"room_name": "管理程序", "room_full_name": "管理程序"} if platform else {}),
                 })
-                related = {"roomId": room_id, "kind": category, "jobId": event.get("jobId", ""), "status": status}
+                related = {"roomId": room_id, "kind": category, "eventKind": event.get("kind", ""), "jobId": event.get("jobId", ""), "status": status}
                 if category in {"players", "boss", "mods", "alerts"}:
                     related["expiresAt"] = timestamp(event.get("occurredAt")) + 600
                 if category in {"players", "boss"} and isinstance(facts.get("playerId"), str) and facts["playerId"].startswith("KU_"):

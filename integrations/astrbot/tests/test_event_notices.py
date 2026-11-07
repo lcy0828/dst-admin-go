@@ -204,7 +204,7 @@ if __name__=="__main__":unittest.main()
 
 class GameplayNoticeTests(unittest.IsolatedAsyncioTestCase):
     engine = EventNoticeTests.engine
-    async def test_new_categories_default_off_and_explicit_opt_in(self):
+    async def test_engine_requires_explicit_category_options_and_does_not_infer_subscriptions(self):
         e = self.engine()
         records = [fact(key=c, category=c) for c in ("players", "boss", "mods", "alerts")]
         await accept_page(e, "example", page(records))
