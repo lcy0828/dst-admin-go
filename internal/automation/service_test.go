@@ -9,7 +9,10 @@ import (
 	"time"
 
 	"dont/internal/jobs"
+	"dont/internal/logstream"
 	"dont/internal/rooms"
+	"dont/internal/structuredlogs"
+	"dont/internal/worldstate"
 
 	"github.com/google/uuid"
 	"github.com/jinzhu/gorm"
@@ -533,3 +536,107 @@ func waitAutomationJob(t *testing.T, service *jobs.Service, jobID string) jobs.J
 	t.Fatalf("automation job %q did not finish", jobID)
 	return jobs.Job{}
 }
+
+type fakeRuntimeErrorWorldStates struct {
+	onSample func(worldID string)
+}
+
+func (f *fakeRuntimeErrorWorldStates) WorldTargets(roomID string) ([]rooms.World, error) {
+	return []rooms.World{
+		{ID: "Master", RoomID: roomID, DirectoryName: "Master", Name: "Master"},
+	}, nil
+}
+
+func (f *fakeRuntimeErrorWorldStates) SampleWorld(_ context.Context, _, worldID string) (worldstate.RefreshResult, error) {
+	if f.onSample != nil {
+		f.onSample(worldID)
+	}
+	return worldstate.RefreshResult{}, nil
+}
+
+type fakeRuntimeErrorLogInspector struct {
+	lines []string
+}
+
+func (f *fakeRuntimeErrorLogInspector) WorldTargets(roomID string) ([]rooms.World, error) {
+	return []rooms.World{
+		{ID: "Master", RoomID: roomID, DirectoryName: "Master", Name: "Master"},
+	}, nil
+}
+
+func (f *fakeRuntimeErrorLogInspector) RefreshWorld(context.Context, string, string) (structuredlogs.RefreshResult, error) {
+	return structuredlogs.RefreshResult{}, nil
+}
+
+func (f *fakeRuntimeErrorLogInspector) Snapshot(_, _ string, _ int, _ string) (logstream.Snapshot, error) {
+	entries := make([]logstream.Line, 0, len(f.lines))
+	for index, line := range f.lines {
+		entries = append(entries, logstream.Line{
+			Cursor: int64(index + 1),
+			Text:   line,
+		})
+	}
+	return logstream.Snapshot{Lines: entries}, nil
+}
+
+func TestDomainExecutorFailsJobWhenShardOutputsRuntimeError(t *testing.T) {
+	inspector := &fakeRuntimeErrorLogInspector{
+		lines: []string{
+			`[00:10:00]: [DST-ADMIN-RUNTIME ERROR] code=OLD_BASELINE_ERROR message=old`,
+		},
+	}
+	states := &fakeRuntimeErrorWorldStates{
+		onSample: func(string) {
+			inspector.lines = append(inspector.lines,
+				`[00:25:15]: RemoteCommandInput: "print(\"[DST-ADMIN-RUNTIME ERROR] code=SNAPSHOT_BARRIER_INVALID_STATE\")"`,
+			)
+		},
+	}
+	executor := &DomainExecutor{
+		structuredLogs: inspector,
+		logInspector:   inspector,
+		worldStates:    states,
+	}
+	service, _, jobService := newAutomationTestService(t, executor)
+	_, task := createAutomationFixture(t, service)
+
+	// 1. Echoed RemoteCommandInput and pre-existing baseline errors do not fail the run.
+	firstJob, err := service.RunTask("room", task.ID, TriggerManual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstFinished := waitAutomationJob(t, jobService, firstJob.ID)
+	if firstFinished.Status != jobs.StatusSucceeded {
+		t.Fatalf("expected job to succeed when only RemoteCommandInput echoed, got status=%s error=%v", firstFinished.Status, firstFinished.Error)
+	}
+
+	// 2. A new [DST-ADMIN-RUNTIME ERROR] emitted during execution must fail the task and job.
+	states.onSample = func(string) {
+		inspector.lines = append(inspector.lines,
+			`[00:25:16]: [DST-ADMIN-RUNTIME ERROR] code=SNAPSHOT_BARRIER_INVALID_STATE barrier=b1 message=barrier_not_holding`,
+		)
+	}
+	secondJob, err := service.RunTask("room", task.ID, TriggerManual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondFinished := waitAutomationJob(t, jobService, secondJob.ID)
+	if secondFinished.Status != jobs.StatusFailed || secondFinished.Error == nil || !strings.Contains(secondFinished.Error.Message, "[DST-ADMIN-RUNTIME ERROR]") {
+		t.Fatalf("expected job to fail on runtime error output, got status=%s error=%#v", secondFinished.Status, secondFinished.Error)
+	}
+	runs, err := service.Runs("room", RunFilter{TaskID: task.ID, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secondRun *Run
+	for index := range runs.Items {
+		if runs.Items[index].JobID == secondJob.ID {
+			secondRun = &runs.Items[index]
+			break
+		}
+	}
+	if secondRun == nil || secondRun.Status != RunFailed || !strings.Contains(secondRun.Error, "[DST-ADMIN-RUNTIME ERROR]") {
+		t.Fatalf("expected second automation run to be RunFailed, got run=%#v runs=%#v", secondRun, runs)
+	}
+}
+

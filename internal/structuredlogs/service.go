@@ -90,6 +90,18 @@ func (s *Service) WorldTargets(roomID string) ([]rooms.World, error) {
 	return s.rooms.Worlds(roomID)
 }
 
+func (s *Service) Snapshot(roomID, worldID string, limit int, query string) (logstream.Snapshot, error) {
+	room, err := s.managedRoom(roomID)
+	if err != nil {
+		return logstream.Snapshot{}, err
+	}
+	world, err := s.rooms.World(room.ID, worldID)
+	if err != nil {
+		return logstream.Snapshot{}, err
+	}
+	return s.logs.Snapshot(room.ID, world.ID, limit, query)
+}
+
 func (s *Service) RefreshWorld(ctx context.Context, roomID, worldID string) (RefreshResult, error) {
 	if err := ctx.Err(); err != nil {
 		return RefreshResult{}, err

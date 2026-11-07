@@ -342,3 +342,45 @@ func TestSnapshotContainsRuntimeStatusFailureToOneWorld(t *testing.T) {
 		t.Fatalf("unexpected runtime failure summary: %#v", result.Summary)
 	}
 }
+
+func TestSnapshotDistinguishesStoppedProcessFromUnresponsiveProcess(t *testing.T) {
+	paused := true
+	target := topology.TargetSummary{ID: "local", Online: true, Configured: true, InventoryAvailable: true}
+	room := rooms.Room{ID: "room", Managed: true}
+	master := rooms.World{ID: "master", RoomID: room.ID, Role: rooms.WorldRoleMaster}
+	caves := rooms.World{ID: "caves", RoomID: room.ID, Role: rooms.WorldRoleCaves}
+	runtime := &fleetRuntime{
+		statuses: map[string]shared.ShardRuntimeStatus{
+			// Master was running in cached topology placement, but live probe says process is gone:
+			master.ID: {State: "stopped", SessionExists: false},
+			// Caves console probe returned stopped/unresponsive, but process session is still alive:
+			caves.ID: {State: "stopped", SessionExists: true, Paused: &paused, Code: "SNAPSHOT_BARRIER_FAILED"},
+		},
+	}
+	service, err := New(fleetTopologySource{snapshot: topology.FleetSnapshot{
+		Targets: []topology.TargetSummary{target}, ObservedAt: time.Now().UTC(),
+		Rooms: []topology.Snapshot{{RoomID: room.ID, Placements: []topology.Placement{
+			{WorldID: master.ID, AppliedTargetID: target.ID, DesiredTargetID: target.ID, State: topology.PlacementAligned, Running: true},
+			{WorldID: caves.ID, AppliedTargetID: target.ID, DesiredTargetID: target.ID, State: topology.PlacementAligned, Running: true},
+		}}},
+	}}, fleetRooms{rooms: []rooms.Room{room}, worlds: map[string][]rooms.World{room.ID: {master, caves}}}, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Snapshot(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotMaster := result.Rooms[0].Worlds[0]
+	gotCaves := result.Rooms[0].Worlds[1]
+	if gotMaster.SessionExists {
+		t.Fatalf("expected stopped master with SessionExists=false to clear stale Placement.Running: %#v", gotMaster)
+	}
+	if !gotCaves.SessionExists || gotCaves.StatusCode != "SNAPSHOT_BARRIER_FAILED" {
+		t.Fatalf("expected unresponsive caves to preserve SessionExists=true and barrier error code: %#v", gotCaves)
+	}
+	if result.Summary.Stopped != 1 || result.Summary.Attention != 1 {
+		t.Fatalf("expected 1 stopped and 1 attention in summary, got %#v", result.Summary)
+	}
+}
+

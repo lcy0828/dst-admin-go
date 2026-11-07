@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"dont/internal/runtimedriver"
 	"dont/internal/shards"
 	"dont/internal/topology"
+	"dont/shared"
 
 	"github.com/jinzhu/gorm"
 	_ "github.com/mattn/go-sqlite3"
@@ -57,19 +59,30 @@ type hotBarrierHarness struct {
 
 type hotBarrierDriver struct {
 	runtimedriver.Driver
-	harness        *hotBarrierHarness
-	receipt        runtimedriver.SnapshotBarrierReceipt
-	released       bool
-	stageErr       error
-	stageHook      func()
-	releaseHook    func()
-	armFailures    int
-	armCode        string
-	armCalls       int
-	prepareIDs     []string
-	cancelErr      error
-	observeErr     error
-	backupReleases int
+	harness         *hotBarrierHarness
+	receipt         runtimedriver.SnapshotBarrierReceipt
+	released        bool
+	stageErr        error
+	stageHook       func()
+	releaseHook     func()
+	releaseFailures int
+	releaseCalls    int
+	cancelCalls     int
+	commands        []string
+	armFailures     int
+	armCode         string
+	armCalls        int
+	prepareIDs      []string
+	cancelErr       error
+	observeErr      error
+	backupReleases  int
+}
+
+func (d *hotBarrierDriver) SendConsole(_ context.Context, _ runtimedriver.Target, _ runtimedriver.Operation, request shared.RuntimeConsoleRequest, _ time.Duration) (shared.RuntimeOperationResult, error) {
+	d.harness.mu.Lock()
+	defer d.harness.mu.Unlock()
+	d.commands = append(d.commands, request.Command)
+	return shared.RuntimeOperationResult{}, nil
 }
 
 func (d *hotBarrierDriver) StageBackup(ctx context.Context, target runtimedriver.Target, operation runtimedriver.Operation, backupID string) (runtimedriver.BackupDescriptor, error) {
@@ -157,6 +170,11 @@ func (d *hotBarrierDriver) SnapshotBarrier(_ context.Context, _ runtimedriver.Ta
 func (d *hotBarrierDriver) ReleaseSnapshotBarrier(_ context.Context, _ runtimedriver.Target, _ runtimedriver.Operation, barrierID string) error {
 	d.harness.mu.Lock()
 	defer d.harness.mu.Unlock()
+	d.releaseCalls++
+	if d.releaseFailures > 0 {
+		d.releaseFailures--
+		return &runtimedriver.SnapshotBarrierError{Code: "SNAPSHOT_BARRIER_INVALID_STATE", Message: "barrier_not_holding"}
+	}
 	if d.receipt.BarrierID != barrierID || d.receipt.State != "completed" {
 		return errors.New("barrier is not complete")
 	}
@@ -172,6 +190,7 @@ func (d *hotBarrierDriver) ReleaseSnapshotBarrier(_ context.Context, _ runtimedr
 func (d *hotBarrierDriver) CancelSnapshotBarrier(_ context.Context, _ runtimedriver.Target, _ runtimedriver.Operation, barrierID string) error {
 	d.harness.mu.Lock()
 	defer d.harness.mu.Unlock()
+	d.cancelCalls++
 	if d.cancelErr != nil {
 		d.observeErr = d.cancelErr
 		return d.cancelErr
@@ -884,3 +903,46 @@ func TestHotBackupRejectsProtectionLostDuringStagingOrRelease(t *testing.T) {
 		})
 	}
 }
+
+func TestHotBackupRetriesReleaseAndCompensatesWithForceRollbackOnPersistentReleaseFailure(t *testing.T) {
+	t.Run("transient release failure recovers on retry", func(t *testing.T) {
+		fixture := newDistributedBackupFixture(t)
+		drivers := installHotBarrierDrivers(t, fixture, []int64{41, 41})
+		drivers[0].releaseFailures = 1
+
+		created, err := fixture.coordinator.CreateWithMode(context.Background(), "room", "重试释放恢复", "manual", "", ModeHot)
+		if err != nil || created.Status != StatusVerified {
+			t.Fatalf("expected retry recovery, got set=%+v err=%v", created, err)
+		}
+		if drivers[0].releaseCalls != 2 || !drivers[0].released || !drivers[1].released {
+			t.Fatalf("unexpected release calls=%d released=(%v,%v)", drivers[0].releaseCalls, drivers[0].released, drivers[1].released)
+		}
+		if len(drivers[0].commands) != 0 {
+			t.Fatalf("did not expect fallback rollback command on successful retry, got %v", drivers[0].commands)
+		}
+	})
+
+	t.Run("persistent release failure forces rollback unpause and fails backup", func(t *testing.T) {
+		fixture := newDistributedBackupFixture(t)
+		drivers := installHotBarrierDrivers(t, fixture, []int64{41, 41})
+		drivers[0].releaseFailures = 5
+
+		created, err := fixture.coordinator.CreateWithMode(context.Background(), "room", "持久释放失败补偿", "manual", "", ModeHot)
+		if !errors.Is(err, ErrBarrierFailed) || created.Status == StatusVerified {
+			t.Fatalf("expected ErrBarrierFailed and non-verified status, got set=%+v err=%v", created, err)
+		}
+		if drivers[0].releaseCalls != 3 {
+			t.Fatalf("expected 3 release attempts on failing shard, got %d", drivers[0].releaseCalls)
+		}
+		if drivers[0].cancelCalls == 0 || len(drivers[0].commands) == 0 {
+			t.Fatalf("expected CancelSnapshotBarrier and ForceRollback command, got cancelCalls=%d commands=%v", drivers[0].cancelCalls, drivers[0].commands)
+		}
+		rollbackCmd := drivers[0].commands[len(drivers[0].commands)-1]
+		for _, expectedSnippet := range []string{"ForceRollback", "EndWorldSave", "SetServerPaused,false"} {
+			if !strings.Contains(rollbackCmd, expectedSnippet) {
+				t.Fatalf("fallback command %q missing %q", rollbackCmd, expectedSnippet)
+			}
+		}
+	})
+}
+

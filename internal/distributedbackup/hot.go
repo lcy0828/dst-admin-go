@@ -10,6 +10,7 @@ import (
 	"dont/internal/rooms"
 	"dont/internal/runtimedriver"
 	"dont/internal/shards"
+	"dont/shared"
 
 	"github.com/google/uuid"
 )
@@ -378,18 +379,88 @@ func (c *Coordinator) releaseHotBarriers(ctx context.Context, parts []runtimePar
 	if err := c.renewLease(releaseCtx, lease); err != nil {
 		return err
 	}
-	// Release every world before waiting for delayed writes on any one world.
+	const maxReleaseAttempts = 3
+	released := make([]bool, len(parts))
 	var failure error
-	for index, current := range parts {
-		err := current.driver.(runtimedriver.SnapshotBarrierDriver).ReleaseSnapshotBarrier(releaseCtx, current.target, c.runtimeOperation(*lease, operation.ID, "barrier-release", index, 0), barrierID)
-		if err != nil {
-			failure = errors.Join(failure, fmt.Errorf("release snapshot barrier for %s: %w", current.part.WorldName, err))
+	for attempt := 1; attempt <= maxReleaseAttempts; attempt++ {
+		failure = nil
+		sentThisAttempt := make([]bool, len(parts))
+		for index, current := range parts {
+			if released[index] {
+				continue
+			}
+			err := current.driver.(runtimedriver.SnapshotBarrierDriver).ReleaseSnapshotBarrier(releaseCtx, current.target, c.runtimeOperation(*lease, operation.ID, "barrier-release", index, int64(attempt)), barrierID)
+			if err != nil {
+				failure = errors.Join(failure, fmt.Errorf("release snapshot barrier for %s (attempt %d): %w", current.part.WorldName, attempt, err))
+			} else {
+				sentThisAttempt[index] = true
+			}
+		}
+		attemptWait := 3500 * time.Millisecond
+		if deadline, ok := releaseCtx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			remainingAttempts := time.Duration(maxReleaseAttempts - attempt + 1)
+			if remaining > 0 && remaining/remainingAttempts < attemptWait {
+				attemptWait = remaining / remainingAttempts
+			}
+		}
+		if attemptWait <= 0 {
+			attemptWait = 200 * time.Millisecond
+		}
+		waitCtx, cancelWait := context.WithTimeout(releaseCtx, attemptWait)
+		for index, current := range parts {
+			if released[index] || !sentThisAttempt[index] {
+				continue
+			}
+			if waitErr := waitHotBarrierReleased(waitCtx, current, barrierID); waitErr != nil {
+				failure = errors.Join(failure, fmt.Errorf("confirm snapshot barrier release for %s (attempt %d): %w", current.part.WorldName, attempt, waitErr))
+			} else {
+				released[index] = true
+			}
+		}
+		cancelWait()
+		if allTrue(released) {
+			return nil
+		}
+		if releaseCtx.Err() != nil {
+			break
 		}
 	}
-	for _, current := range parts {
-		failure = errors.Join(failure, waitHotBarrierReleased(releaseCtx, current, barrierID))
+	rollbackErr := c.forceRollbackHotBarriers(parts, operation, lease, barrierID, released)
+	return joinHotBackupErrors(ErrBarrierFailed, failure, rollbackErr)
+}
+
+func (c *Coordinator) forceRollbackHotBarriers(parts []runtimePart, operation Operation, lease *operationlease.Lease, barrierID string, released []bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = c.renewLease(ctx, lease)
+	command := forceRollbackBarrierCommand(barrierID)
+	var failure error
+	for index, current := range parts {
+		if index < len(released) && released[index] {
+			continue
+		}
+		if barrier, ok := current.driver.(runtimedriver.SnapshotBarrierDriver); ok {
+			if err := barrier.CancelSnapshotBarrier(ctx, current.target, c.runtimeOperation(*lease, operation.ID, "barrier-rollback-cancel", index, 0), barrierID); err != nil {
+				failure = errors.Join(failure, fmt.Errorf("rollback snapshot barrier for %s: %w", current.part.WorldName, err))
+			}
+		}
+		_, _ = current.driver.SendConsole(
+			ctx,
+			current.target,
+			c.runtimeOperation(*lease, operation.ID, "barrier-force-rollback", index, 0),
+			shared.RuntimeConsoleRequest{Mode: shared.ConsoleModeManaged, Command: command},
+			5*time.Second,
+		)
 	}
 	return failure
+}
+
+func forceRollbackBarrierCommand(barrierID string) string {
+	return fmt.Sprintf(
+		`local r=rawget(_G,"DSTAdmin"); if r~=nil and r.Barriers~=nil and type(r.Barriers.ForceRollback)=="function" then pcall(r.Barriers.ForceRollback,%q) elseif r~=nil and r.Barriers~=nil and type(r.Barriers.Cancel)=="function" then pcall(r.Barriers.Cancel,%q) end; if TheNet~=nil and type(TheNet.EndWorldSave)=="function" then pcall(TheNet.EndWorldSave,TheNet) end; if TheNet~=nil and type(TheNet.SetServerPaused)=="function" then pcall(TheNet.SetServerPaused,TheNet,false) end; if type(SetServerPaused)=="function" then pcall(SetServerPaused,false) end; print("[DST-ADMIN-RUNTIME] snapshot barrier recovered id="..%q)`,
+		barrierID, barrierID, barrierID,
+	)
 }
 
 func waitHotBarrierReleased(ctx context.Context, current runtimePart, barrierID string) error {

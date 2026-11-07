@@ -152,7 +152,7 @@ func (s *Service) Snapshot(ctx context.Context, roomID string) (Snapshot, error)
 		if shard.Runtime.State == "running" {
 			result.Summary.Running++
 		}
-		if shard.Runtime.State == "stopped" {
+		if shard.Runtime.State == "stopped" && !shard.Runtime.SessionExists && shard.Runtime.Code != savehealth.SnapshotBarrierFailedCode {
 			result.Summary.Stopped++
 		}
 		if shard.Placement.DesiredTargetID != shard.Placement.AppliedTargetID ||
@@ -211,11 +211,14 @@ func shardState(shard Shard) string {
 	if shard.Placement.State != topology.PlacementAligned {
 		return "degraded"
 	}
-	if shard.Runtime.State == "stopped" {
-		return "stopped"
-	}
-	if shard.Runtime.Code == savehealth.SaveWriteFailedCode {
+	if shard.Runtime.Code == savehealth.SaveWriteFailedCode || shard.Runtime.Code == savehealth.SnapshotBarrierFailedCode {
 		return "degraded"
+	}
+	if shard.Runtime.State == "stopped" {
+		if shard.Runtime.SessionExists {
+			return "degraded"
+		}
+		return "stopped"
 	}
 	if shard.Runtime.State != "running" {
 		return "degraded"

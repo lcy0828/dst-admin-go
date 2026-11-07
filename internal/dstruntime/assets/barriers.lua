@@ -17,6 +17,7 @@ local state = {
     holding = false,
     capturing = false,
     inFlight = 0,
+    pausedBeforeBarrier = nil,
     delayedSave = false,
     delayedShutdown = false,
     delayedCallbacks = {},
@@ -35,6 +36,22 @@ local function safe_text(value, limit)
     value = tostring(value)
     if #value > limit then return string.sub(value, 1, limit) end
     return value
+end
+
+local function restore_simulation_pause(force_unpause)
+    local should_unpause = force_unpause == true or state.pausedBeforeBarrier == false
+    if should_unpause and TheNet ~= nil and type(TheNet.EndWorldSave) == "function" then
+        pcall(TheNet.EndWorldSave, TheNet)
+    end
+    if should_unpause then
+        if TheNet ~= nil and type(TheNet.SetServerPaused) == "function" then
+            pcall(TheNet.SetServerPaused, TheNet, false)
+        end
+        if type(SetServerPaused) == "function" then
+            pcall(SetServerPaused, false)
+        end
+    end
+    state.pausedBeforeBarrier = nil
 end
 
 local function identity()
@@ -246,7 +263,9 @@ local function await_world()
         if not wrap_save_current() then return end
         state.ready = true
         state.lastError = nil
-        persist_receipt(new_receipt("runtime-start", "idle", ""))
+        if state.receipt == nil and state.pending == nil and not state.holding and not state.capturing then
+            persist_receipt(new_receipt("runtime-start", "idle", ""))
+        end
         return
     end
     state.readyAttempts = state.readyAttempts + 1
@@ -282,6 +301,7 @@ function M.Stop()
     state.running = false
     state.ready = false
     state.pending = nil
+    state.pausedBeforeBarrier = nil
     if state.readyTask ~= nil then
         state.readyTask:Cancel()
         state.readyTask = nil
@@ -306,6 +326,7 @@ function M.Prepare(barrier_id)
         persist_receipt(receipt)
         return false
     end
+    state.pausedBeforeBarrier = clock.Paused() == true
     state.pending = receipt
     schedule_timeout(barrier_id)
     persist_receipt(receipt)
@@ -355,6 +376,9 @@ function M.Commit(barrier_id)
     local active = state.pending
     if active == nil or active.barrierId ~= barrier_id or active.state ~= "armed" then return false end
     if active.commitRequested or state.capturing then return true end
+    if state.pausedBeforeBarrier == nil then
+        state.pausedBeforeBarrier = clock.Paused() == true
+    end
     active.commitRequested = true
     persist_receipt(active)
     TheWorld:PushEvent("ms_save")
@@ -363,14 +387,28 @@ end
 
 function M.Release(barrier_id)
     clock.Poll()
-    if not valid_barrier_id(barrier_id) or state.receipt == nil or state.receipt.barrierId ~= barrier_id then return false end
+    if not valid_barrier_id(barrier_id) then return false end
+    local target = state.receipt
+    if target == nil or target.barrierId ~= barrier_id then
+        if state.pending ~= nil and state.pending.barrierId == barrier_id then
+            target = state.pending
+        elseif state.pending == nil and not state.holding and state.inFlight == 0 then
+            target = new_receipt(barrier_id, "released", "")
+        else
+            return false
+        end
+    end
     state.holding = false
+    if state.inFlight == 0 then state.capturing = false end
     state.pending = nil
     cancel_timeout()
-    state.receipt.state = state.receipt.state == "completed" and "released" or state.receipt.state
-    state.receipt.releasedAtUnix = os.time()
+    restore_simulation_pause(false)
+    if target.state == "completed" or target.state == "armed" or target.state == "prepared" then
+        target.state = "released"
+    end
+    target.releasedAtUnix = os.time()
     finish_delayed_save()
-    persist_receipt(state.receipt)
+    persist_receipt(target)
     return true
 end
 
@@ -384,21 +422,53 @@ function M.Cancel(barrier_id)
         active.message = "barrier cancelled before completion"
         active.releasedAtUnix = os.time()
         cancel_timeout()
+        restore_simulation_pause(false)
         finish_delayed_save()
         persist_receipt(active)
         return true
     end
     if state.holding and state.receipt ~= nil and state.receipt.barrierId == barrier_id then return M.Release(barrier_id) end
-    if state.receipt ~= nil and state.receipt.barrierId == barrier_id then return true end
+    if state.receipt ~= nil and state.receipt.barrierId == barrier_id then
+        restore_simulation_pause(false)
+        return true
+    end
     -- A lost Prepare response may mean this node never prepared the attempt.
     -- Acknowledge cancellation only when no other attempt or write is active.
     if state.pending == nil and not state.holding and not state.capturing and state.inFlight == 0 then
+        restore_simulation_pause(false)
         local receipt = new_receipt(barrier_id, "cancelled", "")
         receipt.releasedAtUnix = os.time()
         persist_receipt(receipt)
         return true
     end
     return false
+end
+
+function M.ForceRollback(barrier_id)
+    clock.Poll()
+    cancel_timeout()
+    local target = state.pending or state.receipt
+    state.holding = false
+    state.capturing = false
+    state.pending = nil
+    state.inFlight = 0
+    restore_simulation_pause(true)
+    if valid_barrier_id(barrier_id) then
+        if target == nil or target.barrierId ~= barrier_id then
+            target = new_receipt(barrier_id, "cancelled", "barrier force-rolled back")
+        elseif target.state == "completed" then
+            target.state = "released"
+        else
+            target.state = "cancelled"
+            target.message = "barrier force-rolled back"
+        end
+        target.releasedAtUnix = os.time()
+        finish_delayed_save()
+        persist_receipt(target)
+    else
+        finish_delayed_save()
+    end
+    return true
 end
 
 function M.Status()

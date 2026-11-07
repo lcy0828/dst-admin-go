@@ -125,3 +125,34 @@ func TestSnapshotTreatsRunningSaveFailureAsDegraded(t *testing.T) {
 		t.Fatalf("snapshot=%#v", result)
 	}
 }
+
+func TestSnapshotTreatsUnresponsiveStoppedOrBarrierFailedShardAsDegraded(t *testing.T) {
+	now := time.Now().UTC()
+	paused := true
+	local := topology.TargetSummary{ID: "local", Name: "本机", Kind: agents.RuntimeKindLocal, Online: true, Configured: true}
+	service, err := New(overviewTopology{snapshot: topology.Snapshot{
+		RoomID: "room", Revision: "revision", Targets: []topology.TargetSummary{local},
+		Placements: []topology.Placement{
+			{WorldID: "master", WorldName: "Master", WorldRole: rooms.WorldRoleMaster, AppliedTargetID: "local", DesiredTargetID: "local", State: topology.PlacementAligned},
+			{WorldID: "caves", WorldName: "Caves", WorldRole: rooms.WorldRoleCaves, AppliedTargetID: "local", DesiredTargetID: "local", State: topology.PlacementAligned},
+		},
+	}}, overviewRuntime{
+		statuses: map[string]shared.ShardRuntimeStatus{
+			"master": {State: "stopped", SessionExists: true, Paused: &paused},
+			"caves":  {State: "running", Code: "SNAPSHOT_BARRIER_FAILED", SessionExists: true, Paused: &paused},
+		},
+		failures: map[string]error{},
+	}, overviewArtifacts{now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return now }
+	result, err := service.Snapshot(context.Background(), "room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Shards[0].State != "degraded" || result.Shards[1].State != "degraded" || result.Summary.Degraded != 2 || result.Summary.Stopped != 0 {
+		t.Fatalf("expected both unresponsive/barrier-failed shards to be degraded and not stopped: %#v", result)
+	}
+}
+

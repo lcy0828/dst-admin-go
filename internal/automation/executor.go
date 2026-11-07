@@ -17,6 +17,7 @@ import (
 	"dont/internal/distributedbackup"
 	"dont/internal/gameupdate"
 	"dont/internal/jobs"
+	"dont/internal/logstream"
 	"dont/internal/maintenance"
 	"dont/internal/players"
 	"dont/internal/rooms"
@@ -74,6 +75,10 @@ type StructuredLogRefresher interface {
 	RefreshWorld(context.Context, string, string) (structuredlogs.RefreshResult, error)
 }
 
+type RuntimeLogInspector interface {
+	Snapshot(string, string, int, string) (logstream.Snapshot, error)
+}
+
 type WorldStateRefresher interface {
 	WorldTargets(string) ([]rooms.World, error)
 	SampleWorld(context.Context, string, string) (worldstate.RefreshResult, error)
@@ -93,6 +98,7 @@ type DomainExecutor struct {
 	commands       CommandExecutor
 	players        PlayerRefresher
 	structuredLogs StructuredLogRefresher
+	logInspector   RuntimeLogInspector
 	worldStates    WorldStateRefresher
 	notifications  NotificationSender
 	audit          interface {
@@ -101,6 +107,10 @@ type DomainExecutor struct {
 }
 
 func (e *DomainExecutor) ConfigureObserver(observer func(jobs.Job)) { e.observer = observer }
+
+func (e *DomainExecutor) ConfigureLogInspector(inspector RuntimeLogInspector) {
+	e.logInspector = inspector
+}
 
 func (e *DomainExecutor) ConfigureGameUpdates(updater interface {
 	UpdateRoomWhenEmpty(context.Context, string, string) (bool, error)
@@ -123,6 +133,9 @@ func NewDomainExecutor(roomActions RoomActionPlanner, backupService BackupExecut
 		return nil, errors.New("automation domain executors are required")
 	}
 	executor := &DomainExecutor{roomActions: roomActions, backups: backupService, commands: commands, players: playerService, structuredLogs: logs, worldStates: states}
+	if inspector, ok := logs.(RuntimeLogInspector); ok {
+		executor.logInspector = inspector
+	}
 	if len(audits) > 0 {
 		executor.audit = audits[0]
 	}
@@ -293,6 +306,16 @@ func (e *DomainExecutor) execute(ctx context.Context, task Task, jobID string, s
 			finished := time.Now().UTC()
 			job.FinishedAt = &finished
 			e.observer(job)
+		}()
+	}
+	if baseline := e.captureRuntimeErrorBaseline(task); len(baseline) > 0 {
+		defer func() {
+			if result.Skipped {
+				return
+			}
+			if runtimeErr := e.detectNewRuntimeErrors(task, baseline, &result); runtimeErr != nil && resultErr == nil {
+				resultErr = runtimeErr
+			}
 		}()
 	}
 	switch task.Action {
@@ -612,3 +635,152 @@ func ActionDefinitions() []ActionDefinition {
 		{ID: ActionWorldStateRefresh, Name: "刷新世界状态", Description: "采样分片世界状态", Parameters: []string{}},
 	}
 }
+
+type worldRuntimeErrorBaseline struct {
+	worldID   string
+	worldName string
+	available bool
+	startedAt time.Time
+	maxCursor int64
+	count     int
+}
+
+func (e *DomainExecutor) captureRuntimeErrorBaseline(task Task) []worldRuntimeErrorBaseline {
+	if e.logInspector == nil || task.Action == ActionBackupPrune {
+		return nil
+	}
+	worlds := e.resolveTaskWorlds(task)
+	if len(worlds) == 0 {
+		return nil
+	}
+	baselines := make([]worldRuntimeErrorBaseline, 0, len(worlds))
+	for _, world := range worlds {
+		snapshot, err := e.logInspector.Snapshot(task.RoomID, world.ID, 200, "[DST-ADMIN-RUNTIME ERROR]")
+		maxCursor, count, _ := inspectRuntimeErrorLines(snapshot.Lines, -1)
+		name := strings.TrimSpace(world.Name)
+		if name == "" {
+			name = world.ID
+		}
+		baselines = append(baselines, worldRuntimeErrorBaseline{
+			worldID:   world.ID,
+			worldName: name,
+			available: err == nil,
+			startedAt: snapshot.StartedAt,
+			maxCursor: maxCursor,
+			count:     count,
+		})
+	}
+	return baselines
+}
+
+func (e *DomainExecutor) detectNewRuntimeErrors(task Task, baselines []worldRuntimeErrorBaseline, result *ExecutionResult) error {
+	if e.logInspector == nil || len(baselines) == 0 {
+		return nil
+	}
+	var messages []string
+	failedWorlds := make(map[string]string)
+	for _, base := range baselines {
+		snapshot, err := e.logInspector.Snapshot(task.RoomID, base.worldID, 200, "[DST-ADMIN-RUNTIME ERROR]")
+		if err != nil {
+			continue
+		}
+		minCursor := base.maxCursor
+		logReset := !base.available || (!base.startedAt.IsZero() && !snapshot.StartedAt.IsZero() && !snapshot.StartedAt.Equal(base.startedAt))
+		if logReset {
+			minCursor = -1
+		}
+		maxCursor, count, latestLine := inspectRuntimeErrorLines(snapshot.Lines, minCursor)
+		hasNewError := false
+		if logReset {
+			hasNewError = count > 0
+		} else if maxCursor > base.maxCursor {
+			hasNewError = true
+		} else if maxCursor == 0 && base.maxCursor == 0 && count > base.count {
+			hasNewError = true
+		}
+		if !hasNewError {
+			continue
+		}
+		summary := fmt.Sprintf("分片 %s 输出了运行时错误: %s", base.worldName, latestLine)
+		messages = append(messages, summary)
+		failedWorlds[base.worldID] = summary
+	}
+	if len(messages) == 0 {
+		return nil
+	}
+	if result != nil && len(result.targets) > 0 {
+		for index := range result.targets {
+			if detail, failed := failedWorlds[result.targets[index].TargetID]; failed {
+				result.targets[index].Status = jobs.StatusFailed
+				result.targets[index].Error = &jobs.Error{
+					Code:    "RUNTIME_ERROR_DETECTED",
+					Message: detail,
+				}
+			}
+		}
+	}
+	joined := strings.Join(messages, "；")
+	return &jobs.ResultError{
+		Result: jobs.Error{
+			Code:    "RUNTIME_ERROR_DETECTED",
+			Message: joined,
+		},
+		Cause: errors.New(joined),
+	}
+}
+
+func (e *DomainExecutor) resolveTaskWorlds(task Task) []rooms.World {
+	var worlds []rooms.World
+	if e.structuredLogs != nil {
+		worlds, _ = e.structuredLogs.WorldTargets(task.RoomID)
+	}
+	if len(worlds) == 0 && e.worldStates != nil {
+		worlds, _ = e.worldStates.WorldTargets(task.RoomID)
+	}
+	if len(task.WorldIDs) == 0 || task.Action == ActionBackupCreate || task.Action == ActionGameUpdateEmpty {
+		return worlds
+	}
+	selected := make(map[string]bool, len(task.WorldIDs))
+	for _, id := range task.WorldIDs {
+		selected[id] = true
+	}
+	filtered := make([]rooms.World, 0, len(task.WorldIDs))
+	for _, world := range worlds {
+		if selected[world.ID] {
+			filtered = append(filtered, world)
+		}
+	}
+	if len(filtered) == 0 {
+		for _, id := range task.WorldIDs {
+			filtered = append(filtered, rooms.World{ID: id, Name: id})
+		}
+	}
+	return filtered
+}
+
+func inspectRuntimeErrorLines(lines []logstream.Line, afterCursor int64) (int64, int, string) {
+	var maxCursor int64
+	count := 0
+	latestLine := ""
+	for _, line := range lines {
+		if !isRuntimeErrorLogLine(line.Text) {
+			continue
+		}
+		count++
+		if line.Cursor > maxCursor {
+			maxCursor = line.Cursor
+		}
+		if line.Cursor > afterCursor || (line.Cursor == 0 && afterCursor <= 0) {
+			latestLine = strings.TrimSpace(line.Text)
+		}
+	}
+	return maxCursor, count, latestLine
+}
+
+func isRuntimeErrorLogLine(text string) bool {
+	if strings.Contains(text, "RemoteCommandInput:") {
+		return false
+	}
+	return strings.Contains(text, "[DST-ADMIN-RUNTIME ERROR]")
+}
+

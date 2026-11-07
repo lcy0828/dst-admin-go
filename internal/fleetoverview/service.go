@@ -61,6 +61,7 @@ type World struct {
 	Status               string                        `json:"status"`
 	StatusCode           string                        `json:"statusCode,omitempty"`
 	Paused               *bool                         `json:"paused,omitempty"`
+	SessionExists        bool                          `json:"sessionExists,omitempty"`
 	ControlAvailable     bool                          `json:"controlAvailable"`
 	StatusMessage        string                        `json:"statusMessage,omitempty"`
 	Placement            topology.Placement            `json:"placement"`
@@ -188,7 +189,7 @@ func (s *Service) snapshot(ctx context.Context, targetID string, observeRuntime 
 				targetPointer = &value
 			}
 			item.Worlds = append(item.Worlds, World{
-				World: world, Status: status, ControlAvailable: available,
+				World: world, Status: status, SessionExists: placement.Running, ControlAvailable: available,
 				StatusMessage: placementMessage(placement, target), Placement: placement, Target: targetPointer,
 			})
 		}
@@ -330,6 +331,7 @@ func (s *Service) observeRuntime(ctx context.Context, roomItems []Room) error {
 				current.Status = state
 				current.StatusCode = strings.ToUpper(strings.TrimSpace(status.Code))
 				current.Paused = status.Paused
+				current.SessionExists = status.SessionExists
 				current.RuntimeMode = status.RuntimeMode
 				if message := strings.TrimSpace(status.Message); message != "" {
 					current.StatusMessage = message
@@ -355,15 +357,15 @@ func summarize(result *Snapshot) {
 		}
 		for _, world := range room.Worlds {
 			result.Summary.Worlds++
-			switch world.Status {
-			case "running":
+			switch {
+			case world.Status == "running":
 				result.Summary.Running++
-			case "stopped":
+			case world.Status == "stopped" && !world.SessionExists && world.StatusCode != savehealth.SnapshotBarrierFailedCode:
 				result.Summary.Stopped++
 			default:
 				result.Summary.Attention++
 			}
-			if world.Status == "running" && world.StatusCode == savehealth.SaveWriteFailedCode {
+			if world.Status == "running" && (world.StatusCode == savehealth.SaveWriteFailedCode || world.StatusCode == savehealth.SnapshotBarrierFailedCode) {
 				result.Summary.Attention++
 			}
 		}
