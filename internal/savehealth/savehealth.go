@@ -65,16 +65,41 @@ func lastSnapshotBarrierErrorIndex(content []byte) int {
 }
 
 func barrierFailureResolvedAfter(tail []byte) bool {
-	for _, signal := range [][]byte{
-		[]byte("Serializing world:"),
-		[]byte("Sim unpaused"),
-		[]byte("Starting Up"),
-		[]byte("[DST-ADMIN-RUNTIME] snapshot barrier recovered"),
-	} {
-		if bytes.Contains(tail, signal) {
+	lines := bytes.Split(tail, []byte{'\n'})
+	if len(lines) == 0 {
+		return false
+	}
+	attempt := barrierAttempt(lines[0])
+	for _, line := range lines[1:] {
+		if bytes.Contains(line, []byte("RemoteCommandInput:")) {
+			continue
+		}
+		message := bytes.TrimSpace(line)
+		// Native console lines have a [HH:MM:SS]: prefix. Match actual output,
+		// never a print statement embedded in echoed Lua or a transport message.
+		if bytes.HasPrefix(message, []byte{'['}) {
+			if end := bytes.Index(message, []byte("]:")); end >= 0 {
+				message = bytes.TrimSpace(message[end+2:])
+			}
+		}
+		if bytes.Equal(message, []byte("Sim unpaused")) || bytes.HasPrefix(message, []byte("Starting Up")) {
+			return true
+		}
+		if bytes.HasPrefix(message, []byte("[DST-ADMIN-RUNTIME] snapshot barrier recovered")) &&
+			(len(attempt) == 0 || bytes.Equal(attempt, barrierAttempt(message))) {
 			return true
 		}
 	}
 	return false
 }
 
+func barrierAttempt(line []byte) []byte {
+	for _, field := range bytes.Fields(line) {
+		for _, prefix := range [][]byte{[]byte("id="), []byte("barrier=")} {
+			if bytes.HasPrefix(field, prefix) {
+				return bytes.TrimPrefix(field, prefix)
+			}
+		}
+	}
+	return nil
+}

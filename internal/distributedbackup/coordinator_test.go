@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -69,6 +68,8 @@ type hotBarrierDriver struct {
 	releaseCalls    int
 	cancelCalls     int
 	commands        []string
+	consoleErr      error
+	consoleHook     func()
 	armFailures     int
 	armCode         string
 	armCalls        int
@@ -82,7 +83,10 @@ func (d *hotBarrierDriver) SendConsole(_ context.Context, _ runtimedriver.Target
 	d.harness.mu.Lock()
 	defer d.harness.mu.Unlock()
 	d.commands = append(d.commands, request.Command)
-	return shared.RuntimeOperationResult{}, nil
+	if d.consoleHook != nil {
+		d.consoleHook()
+	}
+	return shared.RuntimeOperationResult{Outcome: shared.RuntimeOutcomeSent}, d.consoleErr
 }
 
 func (d *hotBarrierDriver) StageBackup(ctx context.Context, target runtimedriver.Target, operation runtimedriver.Operation, backupID string) (runtimedriver.BackupDescriptor, error) {
@@ -922,7 +926,7 @@ func TestHotBackupRetriesReleaseAndCompensatesWithForceRollbackOnPersistentRelea
 		}
 	})
 
-	t.Run("persistent release failure forces rollback unpause and fails backup", func(t *testing.T) {
+	t.Run("persistent release failure cancels and fails backup without redundant console recovery", func(t *testing.T) {
 		fixture := newDistributedBackupFixture(t)
 		drivers := installHotBarrierDrivers(t, fixture, []int64{41, 41})
 		drivers[0].releaseFailures = 5
@@ -934,15 +938,8 @@ func TestHotBackupRetriesReleaseAndCompensatesWithForceRollbackOnPersistentRelea
 		if drivers[0].releaseCalls != 3 {
 			t.Fatalf("expected 3 release attempts on failing shard, got %d", drivers[0].releaseCalls)
 		}
-		if drivers[0].cancelCalls == 0 || len(drivers[0].commands) == 0 {
-			t.Fatalf("expected CancelSnapshotBarrier and ForceRollback command, got cancelCalls=%d commands=%v", drivers[0].cancelCalls, drivers[0].commands)
-		}
-		rollbackCmd := drivers[0].commands[len(drivers[0].commands)-1]
-		for _, expectedSnippet := range []string{"ForceRollback", "EndWorldSave", "SetServerPaused,false"} {
-			if !strings.Contains(rollbackCmd, expectedSnippet) {
-				t.Fatalf("fallback command %q missing %q", rollbackCmd, expectedSnippet)
-			}
+		if drivers[0].cancelCalls == 0 || len(drivers[0].commands) != 0 {
+			t.Fatalf("confirmed cancellation must avoid redundant recovery: cancelCalls=%d commands=%v", drivers[0].cancelCalls, drivers[0].commands)
 		}
 	})
 }
-

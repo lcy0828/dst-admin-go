@@ -433,54 +433,117 @@ func (c *Coordinator) releaseHotBarriers(ctx context.Context, parts []runtimePar
 func (c *Coordinator) forceRollbackHotBarriers(parts []runtimePart, operation Operation, lease *operationlease.Lease, barrierID string, released []bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = c.renewLease(ctx, lease)
+	if err := c.renewLease(ctx, lease); err != nil {
+		return err
+	}
 	command := forceRollbackBarrierCommand(barrierID)
-	var failure error
+	failures := make(chan error, len(parts))
 	for index, current := range parts {
 		if index < len(released) && released[index] {
 			continue
 		}
-		if barrier, ok := current.driver.(runtimedriver.SnapshotBarrierDriver); ok {
-			if err := barrier.CancelSnapshotBarrier(ctx, current.target, c.runtimeOperation(*lease, operation.ID, "barrier-rollback-cancel", index, 0), barrierID); err != nil {
-				failure = errors.Join(failure, fmt.Errorf("rollback snapshot barrier for %s: %w", current.part.WorldName, err))
+		// A disconnected shard must not consume the recovery window of another.
+		go func(index int, current runtimePart) {
+			barrier, ok := current.driver.(runtimedriver.SnapshotBarrierDriver)
+			if !ok {
+				failures <- ErrHotUnavailable
+				return
 			}
+			cancelErr := barrier.CancelSnapshotBarrier(ctx, current.target, c.runtimeOperation(*lease, operation.ID, "barrier-rollback-cancel", index, 0), barrierID)
+			if receipt, err := barrier.SnapshotBarrier(ctx, current.target, barrierID); err == nil && hotBarrierDrained(current, receipt, barrierID) {
+				failures <- nil
+				return
+			}
+			result, sendErr := current.driver.SendConsole(
+				ctx, current.target,
+				c.runtimeOperation(*lease, operation.ID, "barrier-force-rollback", index, 0),
+				shared.RuntimeConsoleRequest{Mode: shared.ConsoleModeManaged, Command: command}, 5*time.Second,
+			)
+			if sendErr == nil && result.Outcome != shared.RuntimeOutcomeSent && result.Outcome != shared.RuntimeOutcomeConfirmed {
+				sendErr = errors.New("snapshot barrier recovery command was not accepted")
+			}
+			// Sending Lua, including an accepted console delivery, is not recovery
+			// proof. Only this attempt's drained receipt resolves the incident.
+			if err := waitHotBarrierDrained(ctx, current, barrierID); err != nil {
+				failures <- fmt.Errorf("recover snapshot barrier for %s: %w", current.part.WorldName, joinHotBackupErrors(cancelErr, sendErr, err))
+				return
+			}
+			failures <- nil
+		}(index, current)
+	}
+	var failure error
+	for index := range parts {
+		if index < len(released) && released[index] {
+			continue
 		}
-		_, _ = current.driver.SendConsole(
-			ctx,
-			current.target,
-			c.runtimeOperation(*lease, operation.ID, "barrier-force-rollback", index, 0),
-			shared.RuntimeConsoleRequest{Mode: shared.ConsoleModeManaged, Command: command},
-			5*time.Second,
-		)
+		failure = joinHotBackupErrors(failure, <-failures)
 	}
 	return failure
 }
 
 func forceRollbackBarrierCommand(barrierID string) string {
 	return fmt.Sprintf(
-		`local r=rawget(_G,"DSTAdmin"); if r~=nil and r.Barriers~=nil and type(r.Barriers.ForceRollback)=="function" then pcall(r.Barriers.ForceRollback,%q) elseif r~=nil and r.Barriers~=nil and type(r.Barriers.Cancel)=="function" then pcall(r.Barriers.Cancel,%q) end; if TheNet~=nil and type(TheNet.EndWorldSave)=="function" then pcall(TheNet.EndWorldSave,TheNet) end; if TheNet~=nil and type(TheNet.SetServerPaused)=="function" then pcall(TheNet.SetServerPaused,TheNet,false) end; if type(SetServerPaused)=="function" then pcall(SetServerPaused,false) end; print("[DST-ADMIN-RUNTIME] snapshot barrier recovered id="..%q)`,
-		barrierID, barrierID, barrierID,
+		`local id=%q; local r=rawget(_G,"DSTAdmin"); local b=r~=nil and r.Barriers or nil; local ok,done=false,false; if b~=nil and type(b.ForceRollback)=="function" then ok,done=pcall(b.ForceRollback,id) elseif b~=nil and type(b.Cancel)=="function" then ok,done=pcall(b.Cancel,id) end; if ok and done==true then print("[DST-ADMIN-RUNTIME] snapshot barrier recovery requested id="..id) else print("[DST-ADMIN-RUNTIME ERROR] code=SNAPSHOT_BARRIER_RECOVERY_UNCONFIRMED id="..id) end`,
+		barrierID,
 	)
+}
+
+func hotBarrierDrained(current runtimePart, receipt runtimedriver.SnapshotBarrierReceipt, barrierID string) bool {
+	if receipt.BarrierID != barrierID || receipt.Busy || receipt.Holding || receipt.InFlight || receipt.Code == "PAUSE_RESTORE_FAILED" {
+		return false
+	}
+	if (current.part.BarrierInstance != "" && receipt.ProducerInstanceID != current.part.BarrierInstance) ||
+		(current.part.BarrierSessionID != "" && receipt.SessionID != current.part.BarrierSessionID) ||
+		(current.part.BarrierShardID != "" && receipt.ShardID != current.part.BarrierShardID) {
+		return false
+	}
+	return receipt.State == "released" || receipt.State == "cancelled" || receipt.State == "failed" || receipt.State == "conflict"
+}
+
+func waitHotBarrierDrained(ctx context.Context, current runtimePart, barrierID string) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	var observationErr error
+	for {
+		receipt, err := current.driver.(runtimedriver.SnapshotBarrierDriver).SnapshotBarrier(ctx, current.target, barrierID)
+		observationErr = err
+		if err == nil && hotBarrierDrained(current, receipt, barrierID) {
+			return nil
+		}
+		if err == nil && receipt.Code != "" {
+			observationErr = &runtimedriver.SnapshotBarrierError{Code: receipt.Code, Message: receipt.Message}
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(ErrBarrierFailed, ctx.Err(), observationErr)
+		case <-ticker.C:
+		}
+	}
 }
 
 func waitHotBarrierReleased(ctx context.Context, current runtimePart, barrierID string) error {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+	var observationErr error
 	for {
 		receipt, err := current.driver.(runtimedriver.SnapshotBarrierDriver).SnapshotBarrier(ctx, current.target, barrierID)
+		observationErr = err
 		if err == nil {
-			if receipt.State == "released" && receipt.Message == "" && receipt.Proof == "save_current_callback" &&
+			if receipt.Code != "" {
+				observationErr = &runtimedriver.SnapshotBarrierError{Code: receipt.Code, Message: receipt.Message}
+			}
+			if hotBarrierDrained(current, receipt, barrierID) && receipt.State == "released" && receipt.Message == "" && receipt.Proof == "save_current_callback" &&
 				receipt.ProducerInstanceID == current.part.BarrierInstance && receipt.SessionID == current.part.BarrierSessionID &&
 				receipt.ShardID == current.part.BarrierShardID && receipt.SnapshotAfter == current.part.SnapshotAfter && !receipt.Busy && !receipt.Holding && !receipt.InFlight {
 				return nil
 			}
 			if receipt.State != "completed" && receipt.State != "released" {
-				return ErrBarrierFailed
+				return errors.Join(ErrBarrierFailed, observationErr)
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return errors.Join(ErrBarrierFailed, ctx.Err())
+			return errors.Join(ErrBarrierFailed, ctx.Err(), observationErr)
 		case <-ticker.C:
 		}
 	}
@@ -524,7 +587,7 @@ func (c *Coordinator) cancelHotBarriers(parts []runtimePart, operation Operation
 			if err != nil {
 				return joinHotBackupErrors(failure, err)
 			}
-			if r.BarrierID != barrierID || r.Busy || r.Holding || r.InFlight || (r.State != "released" && r.State != "cancelled" && r.State != "failed" && r.State != "conflict") {
+			if !hotBarrierDrained(current, r, barrierID) {
 				all = false
 			}
 		}

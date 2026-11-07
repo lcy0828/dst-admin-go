@@ -383,4 +383,3 @@ func TestSnapshotDistinguishesStoppedProcessFromUnresponsiveProcess(t *testing.T
 		t.Fatalf("expected 1 stopped and 1 attention in summary, got %#v", result.Summary)
 	}
 }
-

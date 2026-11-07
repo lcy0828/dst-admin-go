@@ -32,9 +32,8 @@ func TestInspectLogTailDetectsAndClearsSnapshotBarrierFailure(t *testing.T) {
 
 	for _, recoveryLine := range []string{
 		"Sim unpaused\n",
-		"Serializing world: 57\n",
 		"Starting Up\n",
-		"[DST-ADMIN-RUNTIME] snapshot barrier recovered\n",
+		"[DST-ADMIN-RUNTIME] snapshot barrier recovered id=123\n",
 	} {
 		if cleared := InspectLogTail([]byte(failedLog + recoveryLine)); cleared != nil {
 			t.Fatalf("recovery line %q did not clear barrier incident: %#v", recoveryLine, cleared)
@@ -42,3 +41,31 @@ func TestInspectLogTailDetectsAndClearsSnapshotBarrierFailure(t *testing.T) {
 	}
 }
 
+func TestBarrierRecoveryRequiresActualOutputFromTheSameAttempt(t *testing.T) {
+	failure := "[00:10:00]: [DST-ADMIN-RUNTIME ERROR] code=SNAPSHOT_BARRIER_Release_FAILED id=hot-current\n"
+	for _, line := range []string{
+		`[00:10:01]: RemoteCommandInput: "print(\"[DST-ADMIN-RUNTIME] snapshot barrier recovered id=hot-current\")"`,
+		`[00:10:01]: local r=rawget(_G,"DSTAdmin"); print("[DST-ADMIN-RUNTIME] snapshot barrier recovered id=hot-current")`,
+		`[00:10:01]: RemoteCommandInput: "print(\"Sim unpaused\")"`,
+		`[00:10:01]: local s="Starting Up"`,
+		"[00:10:01]: Serializing world: 57",
+		"[00:10:01]: [DST-ADMIN-RUNTIME] snapshot barrier recovered id=hot-stale",
+		"[00:10:01]: [DST-ADMIN-RUNTIME] snapshot barrier recovered",
+		"[00:10:01]: [DST-ADMIN-RUNTIME ERROR] code=SNAPSHOT_BARRIER_RECOVERY_UNCONFIRMED id=hot-current",
+	} {
+		t.Run(line, func(t *testing.T) {
+			if incident := InspectLogTail([]byte(failure + line + "\n")); incident == nil || incident.Code != SnapshotBarrierFailedCode {
+				t.Fatalf("unresolved barrier failure was cleared by %q: %#v", line, incident)
+			}
+		})
+	}
+	for _, line := range []string{
+		"[00:10:01]: Sim unpaused",
+		"[00:10:01]: Starting Up",
+		"[00:10:01]: [DST-ADMIN-RUNTIME] snapshot barrier recovered id=hot-current",
+	} {
+		if incident := InspectLogTail([]byte(failure + line + "\n")); incident != nil {
+			t.Fatalf("verified recovery %q did not clear incident: %#v", line, incident)
+		}
+	}
+}

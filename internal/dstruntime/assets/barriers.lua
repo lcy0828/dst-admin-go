@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 2
-local PRODUCER_VERSION = "2.4.25"
+local PRODUCER_VERSION = "2.4.26"
 local OUTPUT_PATH = "mod_config_data/dst-admin/snapshot-barrier.json"
 local ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]+$"
 local BARRIER_TIMEOUT = 180
@@ -12,12 +12,17 @@ local state = {
     ready = false,
     writing = false,
     queuedReceipt = nil,
+    queuedRecovery = nil,
+    announcedRecovery = nil,
     pending = nil,
     receipt = nil,
     holding = false,
     capturing = false,
     inFlight = 0,
     pausedBeforeBarrier = nil,
+    pauseCaptured = false,
+    pauseRestorePending = false,
+    pauseFailure = nil,
     delayedSave = false,
     delayedShutdown = false,
     delayedCallbacks = {},
@@ -38,20 +43,59 @@ local function safe_text(value, limit)
     return value
 end
 
-local function restore_simulation_pause(force_unpause)
-    local should_unpause = force_unpause == true or state.pausedBeforeBarrier == false
-    if should_unpause and TheNet ~= nil and type(TheNet.EndWorldSave) == "function" then
-        pcall(TheNet.EndWorldSave, TheNet)
+local function capture_simulation_pause()
+    if state.pauseCaptured then return end
+    -- nil includes native empty-server sleep; it is not evidence that the
+    -- world was awake. Recovery must preserve the user's pause policy.
+    state.pausedBeforeBarrier = clock.Paused()
+    state.pauseCaptured = true
+    state.pauseRestorePending = true
+end
+
+local function observed_pause()
+    local known = false
+    if TheNet ~= nil and type(TheNet.IsServerPaused) == "function" then
+        local ok, paused = pcall(TheNet.IsServerPaused, TheNet)
+        if ok and type(paused) == "boolean" then
+            if paused then return true end
+            known = true
+        end
     end
-    if should_unpause then
-        if TheNet ~= nil and type(TheNet.SetServerPaused) == "function" then
+    if type(IsSimPaused) == "function" then
+        local ok, paused = pcall(IsSimPaused)
+        if ok and type(paused) == "boolean" then
+            if paused then return true end
+            known = true
+        end
+    end
+    if known then return false end
+    return nil
+end
+
+local function restore_simulation_pause()
+    if not state.pauseRestorePending then return true end
+    -- Only the native callback owns the write count. Cancellation must not
+    -- unpause a world or start a delayed save while that write is in progress.
+    if state.inFlight > 0 or state.capturing then return true end
+    local restored = true
+    if state.pausedBeforeBarrier == false and observed_pause() ~= false then
+        if TheNet ~= nil and type(TheNet.EndWorldSave) == "function" then
+            pcall(TheNet.EndWorldSave, TheNet)
+        end
+        if observed_pause() ~= false and TheNet ~= nil and type(TheNet.SetServerPaused) == "function" then
             pcall(TheNet.SetServerPaused, TheNet, false)
         end
-        if type(SetServerPaused) == "function" then
+        if observed_pause() ~= false and type(SetServerPaused) == "function" then
             pcall(SetServerPaused, false)
         end
+        -- A successful function call is not proof that the world resumed.
+        restored = observed_pause() == false
     end
+    if not restored then return false end
     state.pausedBeforeBarrier = nil
+    state.pauseCaptured = false
+    state.pauseRestorePending = false
+    return true
 end
 
 local function identity()
@@ -79,11 +123,20 @@ local flush_receipt
 flush_receipt = function()
     if state.writing or state.queuedReceipt == nil then return end
     local encoded = state.queuedReceipt
+    local recovery = state.queuedRecovery
     state.queuedReceipt = nil
+    state.queuedRecovery = nil
     state.writing = true
     TheSim:SetPersistentString(OUTPUT_PATH, encoded, false, function(written)
         state.writing = false
         if written then state.lastError = nil else state.lastError = "snapshot barrier receipt persistence failed" end
+        if written and recovery ~= nil and state.queuedReceipt == nil and state.receipt ~= nil
+            and state.receipt.barrierId == recovery and state.pending == nil and not state.holding
+            and not state.capturing and state.inFlight == 0 and not state.pauseRestorePending
+            and state.announcedRecovery ~= recovery then
+            state.announcedRecovery = recovery
+            print("[DST-ADMIN-RUNTIME] snapshot barrier recovered id=" .. recovery)
+        end
         -- Serialize writes to the same path. Older prepared/completed JSON must
         -- never finish after the latest cancellation or release acknowledgement.
         flush_receipt()
@@ -93,7 +146,7 @@ end
 local function persist_receipt(receipt)
     receipt.holding = state.holding
     receipt.inFlight = state.inFlight > 0
-    receipt.busy = state.pending ~= nil or state.holding or state.capturing or state.inFlight > 0
+    receipt.busy = state.pending ~= nil or state.holding or state.capturing or state.inFlight > 0 or state.pauseRestorePending
     receipt.currentSnapshot = current_snapshot()
     state.receipt = receipt
     local ok, encoded = pcall(json.encode_compliant, receipt)
@@ -102,6 +155,7 @@ local function persist_receipt(receipt)
         return false
     end
     state.queuedReceipt = encoded
+    state.queuedRecovery = not receipt.busy and receipt.releasedAtUnix ~= nil and receipt.barrierId or nil
     flush_receipt()
     return true
 end
@@ -124,6 +178,23 @@ end
 
 local function valid_barrier_id(value)
     return type(value) == "string" and #value >= 8 and #value <= 128 and string.match(value, ID_PATTERN) ~= nil
+end
+
+local function restore_and_report(receipt)
+    if not restore_simulation_pause() then
+        if receipt.code ~= "PAUSE_RESTORE_FAILED" then
+            state.pauseFailure = {code = receipt.code, message = receipt.message}
+        end
+        receipt.code = "PAUSE_RESTORE_FAILED"
+        receipt.message = "world pause recovery is not confirmed"
+        return false
+    end
+    if not state.pauseRestorePending and receipt.code == "PAUSE_RESTORE_FAILED" then
+        local original = state.pauseFailure or {}
+        receipt.code, receipt.message = original.code or "", original.message or ""
+        state.pauseFailure = nil
+    end
+    return true
 end
 
 local function finish_delayed_save()
@@ -198,7 +269,10 @@ local function wrap_save_current()
             active.message = "target snapshot already passed"
             persist_receipt(active)
         end
-        if capture then state.capturing = true end
+        if capture then
+            capture_simulation_pause()
+            state.capturing = true
+        end
         state.inFlight = state.inFlight + 1
         if state.receipt ~= nil and (state.receipt.busy or active ~= nil) then persist_receipt(state.receipt) end
         local callback_ran = false
@@ -225,6 +299,9 @@ local function wrap_save_current()
                     active.code = after > target and "TARGET_SNAPSHOT_PASSED" or "SAVE_WRITE_FAILED"
                     active.message = after > target and "save advanced beyond the target snapshot" or "snapshot did not advance"
                 end
+            end
+            if state.pending == nil and not state.holding and state.receipt ~= nil then
+                restore_and_report(state.receipt)
             end
             if not state.holding and not state.capturing then finish_delayed_save() end
             -- Publish after starting any delayed write. An intermediate idle
@@ -293,8 +370,10 @@ end
 function M.Stop()
     if not state.running then return true end
     if state.inFlight > 0 then return false end
-    if state.pending ~= nil or state.holding then M.Cancel(state.receipt ~= nil and state.receipt.barrierId or "") end
-    if state.inFlight > 0 then return false end
+    if state.pending ~= nil or state.holding or state.pauseRestorePending then
+        if not M.Cancel(state.receipt ~= nil and state.receipt.barrierId or "") then return false end
+    end
+    if state.inFlight > 0 or state.pauseRestorePending then return false end
     if ShardGameIndex ~= nil and ShardGameIndex.SaveCurrent == state.wrappedSaveCurrent then
         ShardGameIndex.SaveCurrent = state.originalSaveCurrent
     end
@@ -319,6 +398,7 @@ function M.Prepare(barrier_id)
         return state.receipt ~= nil and state.receipt.barrierId == barrier_id and state.receipt.state == "completed"
     end
     if state.pending ~= nil then return state.pending.barrierId == barrier_id end
+    if state.pauseRestorePending then return false end
     local receipt = new_receipt(barrier_id, "prepared", "")
     if receipt.sessionId == "" or receipt.shardId == "" or receipt.snapshotBefore < 0 then
         receipt.state = "failed"
@@ -326,7 +406,6 @@ function M.Prepare(barrier_id)
         persist_receipt(receipt)
         return false
     end
-    state.pausedBeforeBarrier = clock.Paused() == true
     state.pending = receipt
     schedule_timeout(barrier_id)
     persist_receipt(receipt)
@@ -376,111 +455,69 @@ function M.Commit(barrier_id)
     local active = state.pending
     if active == nil or active.barrierId ~= barrier_id or active.state ~= "armed" then return false end
     if active.commitRequested or state.capturing then return true end
-    if state.pausedBeforeBarrier == nil then
-        state.pausedBeforeBarrier = clock.Paused() == true
-    end
+    capture_simulation_pause()
     active.commitRequested = true
     persist_receipt(active)
     TheWorld:PushEvent("ms_save")
     return true
 end
 
-function M.Release(barrier_id)
-    clock.Poll()
-    if not valid_barrier_id(barrier_id) then return false end
-    local target = state.receipt
+local function end_barrier(barrier_id, cancel)
+    local target = state.pending or state.receipt
     if target == nil or target.barrierId ~= barrier_id then
-        if state.pending ~= nil and state.pending.barrierId == barrier_id then
-            target = state.pending
-        elseif state.pending == nil and not state.holding and state.inFlight == 0 then
-            target = new_receipt(barrier_id, "released", "")
-        else
-            return false
-        end
+        if state.pending ~= nil or state.holding or state.capturing or state.inFlight > 0 or state.pauseRestorePending then return false end
+        -- A lost Prepare may never have reached this node. An idle node can
+        -- acknowledge cleanup without touching another attempt's pause state.
+        target = new_receipt(barrier_id, cancel and "cancelled" or "released", "")
     end
     state.holding = false
-    if state.inFlight == 0 then state.capturing = false end
     state.pending = nil
     cancel_timeout()
-    restore_simulation_pause(false)
-    if target.state == "completed" or target.state == "armed" or target.state == "prepared" then
+    if target.state == "completed" then
         target.state = "released"
+    elseif target.state == "armed" or target.state == "prepared" then
+        target.state = cancel and "cancelled" or "released"
     end
     target.releasedAtUnix = os.time()
+    state.receipt = target
+    local restored = restore_and_report(target)
     finish_delayed_save()
     persist_receipt(target)
-    return true
+    return restored
+end
+
+function M.Release(barrier_id)
+    if not valid_barrier_id(barrier_id) then return false end
+    clock.Poll()
+    return end_barrier(barrier_id, false)
 end
 
 function M.Cancel(barrier_id)
-    clock.Poll()
     if not valid_barrier_id(barrier_id) then return false end
-    if state.pending ~= nil and state.pending.barrierId == barrier_id then
-        local active = state.pending
-        state.pending = nil
-        active.state = "cancelled"
-        active.message = "barrier cancelled before completion"
-        active.releasedAtUnix = os.time()
-        cancel_timeout()
-        restore_simulation_pause(false)
-        finish_delayed_save()
-        persist_receipt(active)
-        return true
-    end
-    if state.holding and state.receipt ~= nil and state.receipt.barrierId == barrier_id then return M.Release(barrier_id) end
-    if state.receipt ~= nil and state.receipt.barrierId == barrier_id then
-        restore_simulation_pause(false)
-        return true
-    end
-    -- A lost Prepare response may mean this node never prepared the attempt.
-    -- Acknowledge cancellation only when no other attempt or write is active.
-    if state.pending == nil and not state.holding and not state.capturing and state.inFlight == 0 then
-        restore_simulation_pause(false)
-        local receipt = new_receipt(barrier_id, "cancelled", "")
-        receipt.releasedAtUnix = os.time()
-        persist_receipt(receipt)
-        return true
-    end
-    return false
+    clock.Poll()
+    return end_barrier(barrier_id, true)
 end
 
 function M.ForceRollback(barrier_id)
-    clock.Poll()
-    cancel_timeout()
+    if not valid_barrier_id(barrier_id) then return false end
     local target = state.pending or state.receipt
-    state.holding = false
-    state.capturing = false
-    state.pending = nil
-    state.inFlight = 0
-    restore_simulation_pause(true)
-    if valid_barrier_id(barrier_id) then
-        if target == nil or target.barrierId ~= barrier_id then
-            target = new_receipt(barrier_id, "cancelled", "barrier force-rolled back")
-        elseif target.state == "completed" then
-            target.state = "released"
-        else
-            target.state = "cancelled"
-            target.message = "barrier force-rolled back"
-        end
-        target.releasedAtUnix = os.time()
-        finish_delayed_save()
-        persist_receipt(target)
-    else
-        finish_delayed_save()
-    end
-    return true
+    if target == nil or target.barrierId ~= barrier_id then return false end
+    clock.Poll()
+    -- The console fallback shares cancellation semantics. It never discards
+    -- native writes or resets a newer attempt when an old request arrives late.
+    return end_barrier(barrier_id, true)
 end
 
 function M.Status()
     return {
         running = state.running,
         ready = state.ready,
-        busy = state.pending ~= nil or state.holding or state.capturing or state.inFlight > 0,
+        busy = state.pending ~= nil or state.holding or state.capturing or state.inFlight > 0 or state.pauseRestorePending,
         inFlight = state.inFlight > 0,
         writing = state.writing,
         holding = state.holding,
         barrierId = state.pending ~= nil and state.pending.barrierId or (state.receipt ~= nil and state.receipt.barrierId or ""),
-        lastError = state.lastError,
+        lastError = state.pauseRestorePending and state.receipt ~= nil and state.receipt.message or state.lastError,
     }
 end
 

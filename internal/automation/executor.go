@@ -783,4 +783,3 @@ func isRuntimeErrorLogLine(text string) bool {
 	}
 	return strings.Contains(text, "[DST-ADMIN-RUNTIME ERROR]")
 }
-

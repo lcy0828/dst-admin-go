@@ -20,30 +20,44 @@ func TestSnapshotBarrierReadsActualLuaReceiptsOnBothTransports(t *testing.T) {
 	for _, scenario := range []struct {
 		name, script string
 		terminal     string
+		terminalCode string
 	}{
 		{"master completes", `
 TheWorld.ismastershard=true
 assert(B.Prepare("hot-master-round"));assert(B.Arm("hot-master-round",0))
 assert(B.Commit("hot-master-round"));assert(B.Commit("hot-master-round"));assert(saveCalls==1)
 CompleteSave();assert(B.Release("hot-master-round"));assert(not B.Status().busy)
-`, "released"},
+`, "released", ""},
 		{"master cancels during write", `
 TheWorld.ismastershard=true
 assert(B.Prepare("hot-cancel-round"));assert(B.Arm("hot-cancel-round",0))
 assert(B.Commit("hot-cancel-round"));assert(B.Cancel("hot-cancel-round"))
 assert(B.Status().inFlight);CompleteSave();assert(not B.Status().busy)
-`, "cancelled"},
+`, "cancelled", ""},
 		{"master save fails", `
 TheWorld.ismastershard=true
 assert(B.Prepare("hot-failed-round"));assert(B.Arm("hot-failed-round",0))
 assert(B.Commit("hot-failed-round"));CompleteSave(false)
 assert(B.Cancel("hot-failed-round"));assert(not B.Status().busy)
-`, "cancelled"},
+`, "failed", "SAVE_WRITE_FAILED"},
 		{"secondary completes without commit marker", `
 assert(B.Prepare("hot-caves-round"));assert(B.Arm("hot-caves-round",7187))
 ShardGameIndex:SaveCurrent();CompleteSave();assert(B.Release("hot-caves-round"))
 assert(not B.Status().busy)
-`, "released"},
+`, "released", ""},
+		{"master pause recovery fails then recovers", `
+paused=false
+TheNet.IsServerPaused=function()return paused end
+TheNet.GetClientTable=function()return {{userid="KU_EXAMPLE",name="example"}}end
+TheNet.EndWorldSave=function()error("native unpause failed")end
+TheNet.SetServerPaused=function()return true end
+TheWorld.ismastershard=true
+assert(B.Prepare("hot-pause-recovery"));assert(B.Arm("hot-pause-recovery",0))
+assert(B.Commit("hot-pause-recovery"));CompleteSave();paused=true
+assert(not B.Release("hot-pause-recovery"));assert(B.Status().busy)
+TheNet.SetServerPaused=function(self,value)paused=value end
+assert(B.Release("hot-pause-recovery"));assert(not B.Status().busy)
+`, "released", ""},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			payloads := barrierLuaReceipts(t, scenario.script)
@@ -91,6 +105,9 @@ assert(not B.Status().busy)
 					}
 					if index == len(payloads)-1 && (receipt.State != scenario.terminal || receipt.Busy || receipt.Holding || receipt.InFlight) {
 						t.Fatalf("terminal release proof lost: %+v", receipt)
+					}
+					if index == len(payloads)-1 && receipt.Code != scenario.terminalCode {
+						t.Fatalf("terminal failure evidence lost: %+v", receipt)
 					}
 				}
 			}

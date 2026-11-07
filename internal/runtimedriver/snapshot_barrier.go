@@ -115,7 +115,7 @@ func sendSnapshotBarrier(ctx context.Context, driver Driver, target Target, oper
 	if len(targetSnapshot) > 0 {
 		argument += fmt.Sprintf(",%d", targetSnapshot[0])
 	}
-	command := fmt.Sprintf(`local r=rawget(_G,"DSTAdmin"); local b=r~=nil and r.Barriers or nil; if b==nil or b.%s==nil or b.%s(%s)~=true then print("[DST-ADMIN-RUNTIME ERROR] code=SNAPSHOT_BARRIER_%s_FAILED") end`, method, method, argument, method)
+	command := fmt.Sprintf(`local r=rawget(_G,"DSTAdmin"); local b=r~=nil and r.Barriers or nil; if b==nil or b.%s==nil or b.%s(%s)~=true then print("[DST-ADMIN-RUNTIME ERROR] code=SNAPSHOT_BARRIER_%s_FAILED id="..%q) end`, method, method, argument, method, barrierID)
 	result, err := driver.SendConsole(ctx, target, operation, shared.RuntimeConsoleRequest{Mode: shared.ConsoleModeManaged, Command: command}, 30*time.Second)
 	if err != nil {
 		return err

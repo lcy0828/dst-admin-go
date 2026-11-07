@@ -155,4 +155,3 @@ func TestSnapshotTreatsUnresponsiveStoppedOrBarrierFailedShardAsDegraded(t *test
 		t.Fatalf("expected both unresponsive/barrier-failed shards to be degraded and not stopped: %#v", result)
 	}
 }
-

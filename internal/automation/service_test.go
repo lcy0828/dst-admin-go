@@ -639,4 +639,3 @@ func TestDomainExecutorFailsJobWhenShardOutputsRuntimeError(t *testing.T) {
 		t.Fatalf("expected second automation run to be RunFailed, got run=%#v runs=%#v", secondRun, runs)
 	}
 }
-
