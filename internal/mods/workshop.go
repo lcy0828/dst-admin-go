@@ -202,8 +202,8 @@ func (w *Workshop) Search(ctx context.Context, options SearchOptions) (SearchRes
 	if hasCache && time.Since(cached.result.ObservedAt) < 5*time.Minute {
 		return cloneSearch(cached.result), nil
 	}
-	value, err := w.coalesce(ctx, key, 8*time.Second, func(ctx context.Context) (any, error) {
-		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	value, err := w.coalesce(ctx, key, 15*time.Second, func(ctx context.Context) (any, error) {
+		ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 		defer cancel()
 		defer w.finish(s)
 		var result SearchResult

@@ -86,8 +86,8 @@ type workshopTransport struct {
 func newWorkshopClient(c NetworkConfig, limits *networkLimits) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConns, transport.MaxIdleConnsPerHost, transport.MaxConnsPerHost = 4, 2, 4
-	transport.IdleConnTimeout, transport.ResponseHeaderTimeout = 30*time.Second, 5*time.Second
-	transport.TLSHandshakeTimeout = 4 * time.Second
+	transport.IdleConnTimeout, transport.ResponseHeaderTimeout = 30*time.Second, 10*time.Second
+	transport.TLSHandshakeTimeout = 10 * time.Second
 	dialer := &net.Dialer{Timeout: 4 * time.Second, KeepAlive: 30 * time.Second}
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		if direct, _ := ctx.Value(directImageKey{}).(bool); direct {
@@ -118,7 +118,7 @@ func newWorkshopClient(c NetworkConfig, limits *networkLimits) *http.Client {
 		proxy, _ := url.Parse(c.ProxyURL)
 		transport.Proxy = http.ProxyURL(proxy)
 	}
-	return &http.Client{Transport: &workshopTransport{base: transport, limits: limits, scope: c.scope()}, Timeout: 8 * time.Second,
+	return &http.Client{Transport: &workshopTransport{base: transport, limits: limits, scope: c.scope()}, Timeout: 14 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 3 {
 				return &NetworkError{Code: "WORKSHOP_REDIRECT_REJECTED"}

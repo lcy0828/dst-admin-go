@@ -170,6 +170,22 @@ func TestWorkshopPublicCardsSurviveUnavailableAPI(t *testing.T) {
 	}
 }
 
+func TestWorkshopCommunitySearchSurvivesSlowProxyResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/prefix/workshop/browse/" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		time.Sleep(6 * time.Second)
+		fmt.Fprint(w, `<html><body><div>1 entries matching filters</div><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=100"><img src="https://images.steamusercontent.com/ugc/a/b/" alt="Known title"></a></body></html>`)
+	}))
+	defer server.Close()
+	w := testWorkshop(t, server, "")
+	result, err := w.Search(context.Background(), SearchOptions{Page: 1, PageSize: 20, Query: "test"})
+	if err != nil || len(result.Items) != 1 || result.Source != "community" {
+		t.Fatalf("slow Workshop search: result=%+v err=%v", result, err)
+	}
+}
+
 func TestWorkshopRejectsSteamErrorEnvelopesAndCaptcha(t *testing.T) {
 	for _, key := range []string{"", "private-key"} {
 		t.Run(key, func(t *testing.T) {
