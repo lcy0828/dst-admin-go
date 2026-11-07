@@ -8,6 +8,7 @@ local ManagedModes = (function()
     local revision,persisted=0,0
     local loadFailure=false
     local join,leave,world
+    M.InspectionVersion=2
     local function updateMarkers()
         for _,p in ipairs(AllPlayers or {})do
             p._dst_admin_mode_memory=loaded and not loadFailure and not writing and not dirty and persisted==revision and (memories[p.userid]~=nil) or nil
@@ -34,12 +35,57 @@ local ManagedModes = (function()
         local ok=pcall(TheSim.SetPersistentString,TheSim,path,encoded,false,completed)
         if not ok then completed(false)end
     end
+    local function owner(p)
+        local o=owners[p]
+        if not o then o={modes={}};owners[p]=o;p._dst_admin_managed_modes=o.modes end
+        -- Adopt identifiable panel effects left by a dedicated/older entry.
+        -- Never adopt a Mod's invincibility or free building without ownership.
+        local health=p._dst_admin_god_owner;local motion=p._dst_admin_motion_owner
+        if p._dst_admin_invincible_owned or health and health.sources.normal then o.modes.invincible=true end
+        if p._dst_admin_god_task or health and health.sources.god or motion and motion.sources.god then o.modes.super_god=true end
+        if p._dst_admin_creative_owner then o.modes.creative=true end
+        if motion and motion.sources.water then o.modes.water_walk=true end
+        if motion and motion.sources.noclip then o.modes.noclip=true end
+        if p._dst_admin_one_hit_owner then o.modes.one_hit=true end
+        local min=p._dst_admin_minhealth_owner
+        if min and min.sources.mode then o.modes.health_lock=true end
+        local tags=p._dst_admin_tag_owners
+        if tags and tags.notarget and tags.notarget.sources.invisible then o.modes.invisible=true end
+        return o
+    end
     local function cleanup(p)
-        local o=owners[p];if not o then return end
+        local o=owner(p)
         for name in pairs(names)do if o.modes[name] then pcall(M.Set,p,name,false,true) end end
         owners[p]=nil;p._dst_admin_managed_modes=nil
     end
-    function M.Status(p,name)local o=owners[p];if name=="clear_all"then return o and next(o.modes)~=nil or false end;return o and o.modes[name]==true or false end
+    function M.Status(p,name)
+        if not p or not p.components then return nil end
+        if name=="clear_all"then
+            local unknown=false
+            for key in pairs(names)do local state=M.Status(p,key);if state==true then return true elseif state==nil then unknown=true end end
+            if unknown then return nil end
+            return false
+        end
+        local m=command().ModeOwnership
+        if name=="invincible" then return m.InvincibilityStatus(p,"normal")
+        elseif name=="super_god" then
+            local h=m.InvincibilityStatus(p,"god");local motion=m.MotionStatus(p,"god")
+            if h==false and motion==false and not p._dst_admin_god_task then return false end
+            if h==true and motion==true and p._dst_admin_god_task then return true end
+        elseif name=="creative" then return m.CreativeStatus(p)
+        elseif name=="water_walk" then return m.MotionStatus(p,"water")
+        elseif name=="noclip" then return m.MotionStatus(p,"noclip")
+        elseif name=="health_lock" then return m.HealthLockStatus(p,"mode")
+        elseif name=="invisible" then return m.TagsStatus(p,"invisible",{"notarget","invisible"})
+        elseif name=="one_hit" then
+            local combat=p.components.combat
+            if combat and combat._dst_admin_calc_damage~=nil then return nil end
+            local hit=p._dst_admin_one_hit_owner
+            if not hit then return false end
+            if combat==hit.combat and combat.CalcDamage==hit.wrapper then return true end
+        end
+        return nil
+    end
     function M.Remembering(p)return memories[p.userid]~=nil end
     function M.MemoryVerified(p,enabled)return loaded and not loadFailure and not writing and not dirty and persisted==revision and M.Remembering(p)==enabled end
     function M.Busy()return loading or writing or dirty end
@@ -49,57 +95,68 @@ local ManagedModes = (function()
         if enabled then
             local count=0;for _ in pairs(memories)do count=count+1 end
             if count>=64 and not memories[p.userid] then error("MODE_MEMORY_LIMIT") end
-            local copy={};local o=owners[p];for k,v in pairs(o and o.modes or {})do if names[k] and v then copy[k]=true end end
+            local copy={};local o=owner(p)
+            for k,v in pairs(o.modes)do
+                if names[k] and v then
+                    if M.Status(p,k)~=true then error("MODE_OWNERSHIP_UNCERTAIN") end
+                    copy[k]=true
+                end
+            end
             memories[p.userid]=copy
         else memories[p.userid]=nil end
         p._dst_admin_mode_memory=nil;revision=revision+1
         write()
     end
     function M.Set(p,name,enabled,cleaning)
+        if type(enabled)~="boolean" or not p or not p.components or not p.components.health then error("MODE_ARGUMENT_INVALID") end
         if name=="clear_all" and enabled==false then
             local safe=true
             for key in pairs(names)do if not pcall(M.Set,p,key,false,cleaning)then safe=false end end
             if not safe then error("MODE_OWNERSHIP_UNCERTAIN")end
             return
         end
-        if not names[name] or type(enabled)~="boolean" or not p or not p.components or not p.components.health then error("MODE_ARGUMENT_INVALID") end
+        if not names[name] then error("MODE_ARGUMENT_INVALID") end
         local c=command();local m=c.ModeOwnership
-        local o=owners[p]
-        if not o then o={modes={}};owners[p]=o;p._dst_admin_managed_modes=o.modes end
-        if (o.modes[name]==true)==enabled then return end
-        local health,combat=p.components.health,p.components.combat
+        local o=owner(p)
+        if name=="one_hit" and p.components.combat and p.components.combat._dst_admin_calc_damage~=nil then error("MODE_LEGACY_STATE_UNCERTAIN") end
+        local observed=M.Status(p,name)
+        if observed==enabled and (o.modes[name]==true)==enabled then return end
+        if observed==nil and enabled then error("MODE_OWNERSHIP_UNCERTAIN") end
+        local combat=p.components.combat
         if name=="invincible" then m.SetInvincibility(p,enabled)
-        elseif name=="super_god" then c.SetGodMode(p,enabled)
+        elseif name=="super_god" then c.ApplyGodMode(p,enabled)
         elseif name=="creative" then m.Creative(p,enabled)
         elseif name=="water_walk" then if not m.Motion(p,"water",enabled) then error("MODE_OWNERSHIP_UNCERTAIN") end
         elseif name=="noclip" then if not m.Motion(p,"noclip",enabled) then error("MODE_OWNERSHIP_UNCERTAIN") end
         elseif name=="health_lock" then
-            if enabled then
-                o.health=health;o.minBefore=health.minhealth;health:SetMinHealth(1)
-            else
-                if health~=o.health or health.minhealth~=1 then error("MODE_OWNERSHIP_UNCERTAIN") end
-                health:SetMinHealth(o.minBefore or 0)
-            end
+            m.HealthLock(p,"mode",enabled,1)
         elseif name=="one_hit" then
             if not combat then error("COMPONENT_UNAVAILABLE") end
+            if combat._dst_admin_calc_damage~=nil then error("MODE_LEGACY_STATE_UNCERTAIN") end
             if enabled then
-                o.combat=combat;o.damageBefore=combat.CalcDamage
-                o.damage=function(self,target,...)if target and target:HasTag("player") then return o.damageBefore(self,target,...) end;return 999999999 end
-                combat.CalcDamage=o.damage
+                local hit={combat=combat,before=combat.CalcDamage}
+                hit.wrapper=function(self,target,...)
+                    if target and target:HasTag("alwaysblock") then return 0 end
+                    if target and target:HasTag("player") then return hit.before(self,target,...) end
+                    return 999999999
+                end
+                combat.CalcDamage=hit.wrapper;p._dst_admin_one_hit_owner=hit
             else
-                if combat~=o.combat or combat.CalcDamage~=o.damage then error("MODE_OWNERSHIP_UNCERTAIN") end
-                combat.CalcDamage=o.damageBefore
+                local hit=p._dst_admin_one_hit_owner
+                if not hit or combat~=hit.combat or combat.CalcDamage~=hit.wrapper then error("MODE_OWNERSHIP_UNCERTAIN") end
+                combat.CalcDamage=hit.before;p._dst_admin_one_hit_owner=nil
             end
         elseif name=="invisible" then
             if enabled then
-                o.notarget=p:HasTag("notarget");o.invisible=p:HasTag("invisible");p:AddTag("notarget");p:AddTag("invisible")
+                m.Tags(p,"invisible",{"notarget","invisible"},true)
                 local x,_,z=p.Transform:GetWorldPosition();local found=TheSim:FindEntities(x,0,z,40,nil,{"INLIMBO","FX"})
                 for i=1,math.min(#found,128)do local cc=found[i].components and found[i].components.combat;if cc and cc.target==p then cc:SetTarget(nil) end end
             else
-                if not o.notarget then p:RemoveTag("notarget") end;if not o.invisible then p:RemoveTag("invisible")end
+                m.Tags(p,"invisible",{"notarget","invisible"},false)
             end
         end
         o.modes[name]=enabled and true or nil
+        if M.Status(p,name)~=enabled then error("MODE_OWNERSHIP_UNCERTAIN") end
         if not cleaning and memories[p.userid] then
             memories[p.userid][name]=enabled and true or nil;revision=revision+1;write()
         end
@@ -109,7 +166,9 @@ local ManagedModes = (function()
         if not TheWorld or not TheWorld.ListenForEvent or not TheWorld.RemoveEventCallback then loaded=true;return end
         started=true;world=TheWorld
         join=function(_,p)
-            if not started or not loaded or not p or not memories[p.userid] then return end
+            if not started or not loaded or not p then return end
+            owner(p)
+            if not memories[p.userid] then return end
             p._dst_admin_mode_memory=persisted==revision and not writing and not dirty and true or nil
             local wanted={};for k,v in pairs(memories[p.userid])do wanted[k]=v end
             -- One event-driven attempt; never retry effects after an exception.
@@ -153,6 +212,7 @@ local ManagedModes = (function()
         started=false
         loadGeneration=loadGeneration+1;loading=false
         if world and world.RemoveEventCallback then if join then world:RemoveEventCallback("ms_playerjoined",join)end;if leave then world:RemoveEventCallback("ms_playerleft",leave)end end
+        for _,p in ipairs(AllPlayers or {})do owner(p) end
         for p in pairs(owners)do cleanup(p) end
         world=nil
     end

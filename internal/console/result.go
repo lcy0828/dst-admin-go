@@ -99,6 +99,8 @@ func receiptCompletion(receipt dstruntime.CommandReceipt) ExecutionCompletion {
 		completion.ErrorMessage = strings.TrimSpace(receipt.Message)
 		for _, v := range []struct{ code, message string }{
 			{"WORKBENCH_UPDATE_REQUIRED", "这项操作需要更新运行机器上的游戏管理脚本，请在面板更新后重试。"},
+			{"MODE_LEGACY_STATE_UNCERTAIN", "玩家仍带有旧版模式，无法安全切换。请让该玩家退出并重新进入游戏后重试。"},
+			{"MODE_OWNERSHIP_UNCERTAIN", "玩家模式已被其他功能或模组改变，本次无法确认。请查看当前状态，不要重复提交。"},
 			{"BATCH_PREVIEW_EXPIRED", "本次预览已失效或对象已变化，请重新检查后确认。"},
 			{"BATCH_PREVIOUS_UNCONFIRMED", "对象的上一次操作结果仍待确认，请先查看原任务，避免重复修改。"},
 			{"BATCH_RATE_LIMIT", "操作过于频繁，请稍等几秒再检查。"},

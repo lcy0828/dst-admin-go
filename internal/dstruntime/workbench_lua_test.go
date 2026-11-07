@@ -76,14 +76,15 @@ func TestNearbyPartialEffectsAreReportedWithoutClaimingFrozen(t *testing.T) {
 }
 func TestModeOwnershipPreservesOtherSourcesAndOnlyRemovesOwnSetter(t *testing.T) {
 	for name, scenario := range map[string]string{
-		"baseline true":        `h.invincible=true;M.Begin(p);M.Apply(p);assert(M.End(p));assert(h.invincible==true)`,
-		"baseline false":       `M.Begin(p);M.Apply(p);assert(M.End(p));assert(h.invincible==false and h.SetInvincible==original)`,
-		"external request":     `M.Begin(p);M.Apply(p);h:SetInvincible(true);assert(M.End(p));assert(h.invincible==true)`,
-		"external replacement": `M.Begin(p);M.Apply(p);local foreign=function()end;h.SetInvincible=foreign;assert(not M.End(p));assert(h.SetInvincible==foreign)`,
-		"direct off":           `h.invincible=true;M.Begin(p);M.Apply(p);h.invincible=false;assert(M.End(p));assert(h.invincible==false)`,
-		"overlapping modes":    `M.Begin(p);M.SetInvincibility(p,true);assert(M.End(p));assert(h.invincible==true);M.SetInvincibility(p,false);assert(h.invincible==false)`,
-		"reverse release":      `M.SetInvincibility(p,true);M.Begin(p);M.SetInvincibility(p,false);assert(h.invincible==true);assert(M.End(p));assert(h.invincible==false)`,
-		"repeat enable":        `M.Begin(p);M.Apply(p);M.Begin(p);assert(M.End(p));assert(h.invincible==false)`,
+		"baseline true":          `h.invincible=true;M.Begin(p);M.Apply(p);assert(M.End(p));assert(h.invincible==true)`,
+		"baseline false":         `M.Begin(p);M.Apply(p);assert(M.End(p));assert(h.invincible==false and h.SetInvincible==original)`,
+		"external request":       `M.Begin(p);M.Apply(p);h:SetInvincible(true);assert(M.End(p));assert(h.invincible==true)`,
+		"external replacement":   `M.Begin(p);M.Apply(p);local foreign=function()end;h.SetInvincible=foreign;assert(not M.End(p));assert(h.SetInvincible==foreign)`,
+		"direct off":             `h.invincible=true;M.Begin(p);M.Apply(p);h.invincible=false;assert(M.End(p));assert(h.invincible==false)`,
+		"overlapping modes":      `M.Begin(p);M.SetInvincibility(p,true);assert(M.End(p));assert(h.invincible==true);M.SetInvincibility(p,false);assert(h.invincible==false)`,
+		"reverse release":        `M.SetInvincibility(p,true);M.Begin(p);M.SetInvincibility(p,false);assert(h.invincible==true);assert(M.End(p));assert(h.invincible==false)`,
+		"repeat enable":          `M.Begin(p);M.Apply(p);M.Begin(p);assert(M.End(p));assert(h.invincible==false)`,
+		"unknown owner retained": `p._dst_admin_god_owned=true;assert(M.InvincibilityStatus(p,"god")==nil);assert(not M.End(p));assert(not M.End(p));assert(p._dst_admin_god_owned==true)`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			L := lua.NewState()
@@ -137,7 +138,7 @@ func TestCreativeOwnershipPreservesBaselineAndRejectsUnknownRelease(t *testing.T
 	L := lua.NewState()
 	defer L.Close()
 	source, _ := embeddedAssets.ReadFile("assets/mode_ownership.lua")
-	if e := L.DoString(string(source) + `;M=ModeOwnership;b={freebuildmode=true};p={components={builder=b}};M.Creative(p,true);M.Creative(p,false);assert(b.freebuildmode==true);assert(not pcall(M.Creative,p,false));b.freebuildmode=false;M.Creative(p,true);M.Creative(p,true);M.Creative(p,false);assert(b.freebuildmode==false)`); e != nil {
+	if e := L.DoString(string(source) + `;M=ModeOwnership;b={freebuildmode=true};p={components={builder=b}};M.Creative(p,true);M.Creative(p,false);assert(b.freebuildmode==true);assert(pcall(M.Creative,p,false));b.freebuildmode=false;M.Creative(p,true);M.Creative(p,true);M.Creative(p,false);assert(b.freebuildmode==false)`); e != nil {
 		t.Fatal(e)
 	}
 }

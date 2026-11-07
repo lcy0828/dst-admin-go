@@ -40,10 +40,23 @@ func TestWorkbenchValidatesCodeOwnedRecipesAndNeverTogglesLivingPlayers(t *testi
 		t.Fatal(err)
 	}
 	defs := BuiltinWorkbenchDefinitions()
+	foundResurrection := false
 	for _, d := range defs {
 		if !d.IsBuiltin || d.Script != "" {
 			t.Fatal(d)
 		}
+		if d.ID == "resurrect_player" {
+			foundResurrection = true
+			if d.Risk != RiskLow || RequiresHumanConfirmation(d.ID, map[string]interface{}{"player_id": "KU_TEST123"}) {
+				t.Fatal("single-player resurrection must not require a second confirmation", d)
+			}
+		}
+		if d.ID == "apply_all_players" && d.Risk != RiskCritical {
+			t.Fatal("bulk player actions lost critical risk", d)
+		}
+	}
+	if !foundResurrection {
+		t.Fatal("resurrection recipe missing")
 	}
 	custom, err := s.CreateDefinition(Definition{Name: "外部命令", Category: "自定义", ScriptMode: "literal", Script: "c_shutdown()", Risk: RiskCritical})
 	if err != nil {

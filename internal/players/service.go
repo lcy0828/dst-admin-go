@@ -689,7 +689,7 @@ func (s *Service) Act(ctx context.Context, jobID, roomID, playerID string, actio
 		result.Message = "玩家无敌模式已" + enabledText(enabled)
 	case ActionCreativeMode:
 		enabled := *request.Enabled
-		statement := `local r=rawget(_G,"DSTAdmin");local m=r and r.Commands and r.Commands.ModeOwnership;if not m or not m.Creative then error("WORKBENCH_UPDATE_REQUIRED")end;m.Creative(p,` + luaBoolean(enabled) + `); ` +
+		statement := `local r=rawget(_G,"DSTAdmin");local m=r and r.Commands and r.Commands.ManagedModes;if not m then error("WORKBENCH_UPDATE_REQUIRED")end;m.Set(p,"creative",` + luaBoolean(enabled) + `); ` +
 			`if p.components.talker then p.components.talker:Say(` + quoteLua(toggleMessage("制作模式", enabled)) + `) end`
 		if err := s.sendPlayerAction(ctx, room, world, runtimeRequest, runtimeSupported, playerLookupScript(player.ID, statement)); err != nil {
 			return ActionResult{}, err

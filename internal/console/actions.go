@@ -58,7 +58,7 @@ func RequiresHumanConfirmation(id string, args map[string]interface{}) bool {
 
 // WorkbenchBehaviorRevision invalidates unsubmitted tasks when fixed command
 // semantics change without changing their public parameter schema.
-const WorkbenchBehaviorRevision = "6"
+const WorkbenchBehaviorRevision = "7"
 
 func commandActions(d Definition) []Action {
 	field := map[string]string{"trigger_world_event": "event", "set_player_ability": "ability", "set_character_power": "action", "act_nearby_entities": "action", "set_player_lock": "resource", "set_player_mode": "mode", "set_daylight_mode": "mode", "spawn_special_structure": "kind", "spawn_entity_array": "layout", "set_wurt_form": "form", "apply_all_players": "action"}[d.ID]
@@ -113,7 +113,7 @@ var actionDescriptions = map[string]string{
 }
 
 var actionWords = map[string]map[string]string{
-	"set_player_mode":         {"invincible": "普通无敌 无敌模式", "super_god": "超级无敌 超级上帝", "creative": "统一制造模式 统一创造模式", "health_lock": "最低生命锁定 锁血一滴", "one_hit": "必杀模式 一击秒杀", "invisible": "隐身模式", "water_walk": "踏水模式", "noclip": "穿墙 穿墙模式", "clear_all": "解除全部模式 关闭全部面板模式"},
+	"set_player_mode":         {"invincible": "普通无敌 仅免伤", "super_god": "超级无敌 超级上帝", "creative": "统一制造模式 统一创造模式", "health_lock": "最低生命锁定 锁血一滴", "one_hit": "一击必杀 必杀模式 一击秒杀", "invisible": "隐身模式", "water_walk": "踏水模式", "noclip": "穿墙 穿墙模式", "clear_all": "解除全部模式 关闭全部面板模式"},
 	"set_daylight_mode":       {"day": "全天白昼 永昼", "night": "全天黑夜 永夜 日食", "restore": "恢复昼夜 解除永昼 解除永夜"},
 	"spawn_special_structure": {"training_dummy": "攻速人偶 伤害人偶 DPS人偶", "wormhole_pair": "链接虫洞 成对虫洞", "nightmare_werepig": "梦魇疯猪 束缚疯猪", "celestial_materials": "天体英雄召唤材料 天体祭坛", "scrap_daywalker": "刷新拾荒疯猪 拾荒疯猪"},
 	"spawn_entity_array":      {"rock_tree_1": "巨石树阵列一 岩石树阵列一", "rock_tree_2": "巨石树阵列二 岩石树阵列二", "beebox": "蜂箱阵列", "pond": "池塘阵列"},
@@ -127,7 +127,7 @@ var actionWords = map[string]map[string]string{
 	"set_player_ability": {
 		"no_cooldown": "无冷却 攻击无冷却", "one_hit_kill": "一击必杀 必杀 秒杀", "aoe_attack": "范围攻击 群体攻击",
 		"critical_work": "高效工作 工作倍率", "water_walk": "踏水 水上行走 水上走路", "knockback_immunity": "免疫击退 防击退",
-		"no_hate": "消除仇恨 不被攻击", "stealth": "隐身 潜行", "unlock_recipes": "解锁配方 解锁科技 全部配方",
+		"no_hate": "消除仇恨 不被攻击", "stealth": "潜行 隐藏模型", "unlock_recipes": "解锁配方 解锁科技 全部配方",
 	},
 	"set_player_lock": {"health": "锁血 生命下限 生命锁定", "moisture": "锁定潮湿 防潮 湿度锁定", "temperature": "锁定体温 恒温 温度锁定"},
 	"act_nearby_entities": {

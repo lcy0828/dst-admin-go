@@ -49,7 +49,7 @@ func (m *CommandManager) Initialize() error {
 
 	// 将命令添加到映射中并构建类别缓存
 	for _, dbCmd := range dbCommands {
-		cmd := dbCmd.ToTypeCommand()
+		cmd := managedModeCompatibility(dbCmd.ToTypeCommand())
 		m.commands[cmd.ID] = cmd
 
 		// 添加到类别缓存
@@ -110,7 +110,7 @@ func (m *CommandManager) registerBuiltinCommands() error {
 
 	// 将命令添加到映射中并构建类别缓存
 	for _, dbCmd := range dbCommands {
-		cmd := dbCmd.ToTypeCommand()
+		cmd := managedModeCompatibility(dbCmd.ToTypeCommand())
 		m.commands[cmd.ID] = cmd
 
 		// 添加到类别缓存
@@ -321,7 +321,7 @@ func (m *CommandManager) RefreshCommands() error {
 
 	// 将命令添加到映射中并构建类别缓存
 	for _, dbCmd := range dbCommands {
-		cmd := dbCmd.ToTypeCommand()
+		cmd := managedModeCompatibility(dbCmd.ToTypeCommand())
 		m.commands[cmd.ID] = cmd
 
 		// 添加到类别缓存
@@ -333,4 +333,17 @@ func (m *CommandManager) RefreshCommands() error {
 
 	log.Printf("[CommandManager] 已刷新 %d 个命令", len(dbCommands))
 	return nil
+}
+
+// Stored legacy builtins must use the same mode implementation as new ones.
+// Custom scripts remain administrator-owned and are never rewritten.
+func managedModeCompatibility(cmd *types.Command) *types.Command {
+	if cmd.IsBuiltin && cmd.ID == "godmode_player" {
+		for _, fixed := range builtin.GetBuiltinCommands() {
+			if fixed.ID == cmd.ID {
+				return fixed
+			}
+		}
+	}
+	return cmd
 }

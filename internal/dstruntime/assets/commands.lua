@@ -2,7 +2,7 @@ local json = require("json")
 
 local M = {}
 local SCHEMA_VERSION = 1
-local PRODUCER_VERSION = "2.4.25"
+local PRODUCER_VERSION = "2.4.26"
 local OUTPUT_ROOT = "mod_config_data/dst-admin/"
 local INPUT_ROOT = "mod_config_data/dst-admin/command-requests/"
 local RECENT_REQUEST_LIMIT = 256
@@ -587,7 +587,7 @@ handlers["player.god_mode"] = function(arguments)
     if player.components == nil or player.components.health == nil then
         return result(false, "COMPONENT_UNAVAILABLE", "player health component is unavailable")
     end
-    set_god_mode(player, arguments.enabled)
+    ManagedModes.Set(player, "super_god", arguments.enabled)
     if player.components.talker ~= nil then
         player.components.talker:Say(arguments.enabled and "无敌模式已开启" or "无敌模式已关闭")
     end
@@ -603,7 +603,7 @@ handlers["player.creative_mode"] = function(arguments)
     if player.components == nil or player.components.builder == nil then
         return result(false, "COMPONENT_UNAVAILABLE", "player builder component is unavailable")
     end
-    ModeOwnership.Creative(player, arguments.enabled)
+    ManagedModes.Set(player, "creative", arguments.enabled)
     if player.components.talker ~= nil then
         player.components.talker:Say(arguments.enabled and "制作模式已开启" or "制作模式已关闭")
     end
@@ -964,6 +964,7 @@ M.Workbench = Workbench
 M.ModeOwnership = ModeOwnership
 M.ManagedModes = ManagedModes
 M.StartModes = ManagedModes.Start
-M.SetGodMode = set_god_mode
+M.ApplyGodMode = set_god_mode
+M.SetGodMode = function(player,enabled) ManagedModes.Set(player,"super_god",enabled) end
 M.version = PRODUCER_VERSION
 return M
