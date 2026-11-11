@@ -507,7 +507,8 @@ func (s *Store) matchEvent(tx *gorm.DB, roomID, worldID, fingerprint string, occ
 	if err := tx.Table(s.eventsTable).Where(
 		"room_id = ? AND fingerprint = ? AND occurred_at BETWEEN ? AND ?",
 		roomID, fingerprint, occurredAt.Add(-window), occurredAt.Add(window),
-	).Limit(8).Find(&candidates).Error; err != nil {
+	).Where("NOT EXISTS (SELECT 1 FROM "+s.sourcesTable+" AS mirrored WHERE mirrored.event_id = "+s.eventsTable+".id AND mirrored.world_id = ?)", worldID).
+		Order("occurred_at ASC, id ASC").Limit(64).Find(&candidates).Error; err != nil {
 		return eventRecord{}, false, err
 	}
 	type match struct {
@@ -516,11 +517,7 @@ func (s *Store) matchEvent(tx *gorm.DB, roomID, worldID, fingerprint string, occ
 	}
 	matches := make([]match, 0, len(candidates))
 	for _, candidate := range candidates {
-		var count int
-		if err := tx.Table(s.sourcesTable).Where("event_id = ? AND world_id = ?", candidate.ID, worldID).Count(&count).Error; err != nil {
-			return eventRecord{}, false, err
-		}
-		if count != 0 || candidate.OccurredAt == nil {
+		if candidate.OccurredAt == nil {
 			continue
 		}
 		delta := candidate.OccurredAt.Sub(*occurredAt)
@@ -532,7 +529,8 @@ func (s *Store) matchEvent(tx *gorm.DB, roomID, worldID, fingerprint string, occ
 	if len(matches) == 0 {
 		return eventRecord{}, false, nil
 	}
-	sort.SliceStable(matches, func(i, j int) bool { return matches[i].delta < matches[j].delta })
+	// Preserve source order for repeated text. Nearest-time matching can pair
+	// the first cave copy with the second master message when clocks drift.
 	if len(matches) > 1 && matches[0].delta == matches[1].delta {
 		return eventRecord{}, false, nil
 	}

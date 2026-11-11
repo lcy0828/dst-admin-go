@@ -23,7 +23,9 @@ const (
 	defaultLimit     = 100
 	maximumLimit     = 500
 	chatSnapshotTail = 2000
-	dedupWindow      = 10
+	// Shard log clocks can drift while DST pauses/loads. Allow bounded skew
+	// only across distinct shards; same-shard repetitions retain their IDs.
+	dedupWindow      = 30
 )
 
 var chatLinePattern = regexp.MustCompile(`^\[(\d{2,}):(\d{2}):(\d{2})\]:\s+\[([^\]]+)\]\s*(.*)$`)
