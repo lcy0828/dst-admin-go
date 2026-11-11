@@ -12,7 +12,7 @@ COPY frontend/dist /src/dist
 
 FROM ${WEB_BUILD_STAGE} AS web-assets
 
-FROM --platform=$TARGETPLATFORM golang:1.26.10-bookworm AS go-build
+FROM --platform=$TARGETPLATFORM golang:1.26.11-bookworm AS go-build
 WORKDIR /src
 COPY backend/go.mod backend/go.sum ./
 RUN go mod download

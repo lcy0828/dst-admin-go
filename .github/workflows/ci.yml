@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 30
     env:
       CGO_ENABLED: 1
-      GOTOOLCHAIN: go1.26.10+auto
+      GOTOOLCHAIN: go1.26.11+auto
       DST_ADMIN_CONFIG: ${{ github.workspace }}/deploy/systemd/local.conf.example
     steps:
       - name: Reuse the same commit's master checks when available
@@ -65,7 +65,7 @@ jobs:
       - uses: actions/setup-go@v5
         if: steps.reuse.outputs.reused != 'true'
         with:
-          go-version: 1.26.10
+          go-version: 1.26.11
           cache: true
       - uses: actions/setup-python@v5
         if: steps.reuse.outputs.reused != 'true'
