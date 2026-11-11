@@ -25,9 +25,13 @@ func playerModesRuntime(t *testing.T) *lua.LState {
 		L.Push(module)
 		return 1
 	})
+	// These assertions inspect synchronous mode ownership. Use the same virtual
+	// slice clock as the workbench fixtures so host load cannot defer execution;
+	// dedicated workbench tests exercise yielding and CPU-budget exhaustion.
 	if err := L.DoString(`
 json=require("json");COLLISION={WORLD=2,GROUND=1,LIMITS=4}
 test_time=1700000000;os.time=function()return test_time end
+os.clock=function()return 0 end
 bit={bnot=function()return 11 end,band=function()return 11 end}
 TheWorld={GUID=100,meta={session_identifier="SESSION"}}
 TheNet={GetSessionIdentifier=function()return "SESSION" end}
