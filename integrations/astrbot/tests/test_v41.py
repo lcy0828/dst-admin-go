@@ -271,16 +271,18 @@ class DynamicTests(unittest.IsolatedAsyncioTestCase):
         panel.revision = "revision-2"
         clock[0] = 61
         reply = await engine.handle(a, "菜单", woken=True)
+        reply = await engine.handle(a, "面板与运行诊断", woken=True)
         while "room.added-later" not in [
             i["id"]
             for i in engine.state.choices[a.key]["candidates"][
-                engine.state.choices[a.key]["page"] * 5 : (engine.state.choices[a.key]["page"] + 1)
-                * 5
+                engine.state.choices[a.key]["page"] * engine.state.choices[a.key]["pageSize"] :
+                (engine.state.choices[a.key]["page"] + 1) * engine.state.choices[a.key]["pageSize"]
             ]
         ]:
             reply = await engine.handle(a, "下一页", woken=True)
         pending = engine.state.choices[a.key]
-        visible = pending["candidates"][pending["page"] * 5 : (pending["page"] + 1) * 5]
+        size = pending["pageSize"]
+        visible = pending["candidates"][pending["page"] * size : (pending["page"] + 1) * size]
         number = next(i + 1 for i, item in enumerate(visible) if item["id"] == "room.added-later")
         reply = await engine.handle(a, str(number), woken=True)
         self.assertIn("period", reply.text)

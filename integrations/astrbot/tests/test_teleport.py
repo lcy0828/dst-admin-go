@@ -25,6 +25,46 @@ def teleport_recipe():
 
 class TeleportTests(unittest.IsolatedAsyncioTestCase):
     fixture=test_workbench.WorkbenchTests.fixture
+
+    async def test_saved_destination_ids_survive_exact_matches_and_choice_with_old_panel_fallback(self):
+        for identified in (False, True):
+            for exact in (False, True):
+                with self.subTest(identified=identified, exact=exact):
+                    item = teleport_recipe()
+                    if identified:
+                        item['parameters']['properties'].update(
+                            worldId={'type':'string','maxLength':255},
+                            locationId={'type':'string','maxLength':36})
+                        item['actions'] = [{'id':'pig_king','parameters':{'locationName':'猪王'}}]
+                    panel, engine = await self.fixture(item)
+                    original = engine.gateway.transport
+
+                    async def transport(name, args, timeout, write):
+                        if name == 'api_listRoomLocations':
+                            if not exact and args.get('query', {}).get('search'):
+                                return mcp({'items':[], 'hasMore':False})
+                            return mcp({'items':[{'id':'saved-destination','name':'基地' if exact else '猪王','worldId':'w1'}], 'hasMore':False})
+                        return await original(name, args, timeout, write)
+
+                    engine.gateway.transport = transport
+                    manager = replace(actor(role='game-manage'), workbench_mode='standard')
+                    reply = await engine.handle(manager, '传送 KU_TEST123 到基地', woken=True, message_id='prepare')
+                    if not exact:
+                        self.assertEqual(reply.outcome, 'needs_selection', reply.text)
+                        self.assertEqual(engine.state.choices[manager.key]['mode'], 'location')
+                        manager = replace(manager, event=NS(message_obj=NS(message_id='choice')))
+                        reply = await engine.handle(manager, '1', woken=True, message_id='choice')
+                    writes = [args for name, args in panel.calls if name == 'api_runBotCapability']
+                    self.assertEqual(len(writes), 1, reply.text)
+                    parameters = writes[0]['body']['parameters']
+                    self.assertEqual(parameters['locationName'], '基地' if exact else '猪王')
+                    if identified:
+                        self.assertEqual(parameters['locationId'], 'saved-destination')
+                        self.assertEqual(parameters['worldId'], 'w1')
+                    else:
+                        self.assertNotIn('locationId', parameters)
+                        self.assertNotIn('worldId', parameters)
+
     async def flow(self):
         panel,engine=await self.fixture(teleport_recipe())
         original=engine.gateway.transport
@@ -32,6 +72,8 @@ class TeleportTests(unittest.IsolatedAsyncioTestCase):
         preview={'id':'00000000-0000-4000-8000-000000000001','roomId':'r1','worldId':'w1','state':'prepared','playerId':'KU_TEST123','playerName':'Example','locationName':'基地','x':12,'z':24,'expiresAt':(now+timedelta(seconds=60)).isoformat(),'serverTime':now.isoformat()}
         sends=[]
         async def transport(name,args,timeout,write):
+            if name=='api_listRoomLocations':
+                return mcp({'items':[{'id':'destination','name':'基地','worldId':'w1'}], 'hasMore':False})
             if name=='api_executeRoomTeleport':
                 sends.append(args)
                 return mcp({**preview,'state':'confirmed'})

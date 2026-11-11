@@ -9,7 +9,8 @@ from .routing import QUANTITY, quantity
 LABELS = {"enabled": "开关", "count": "数量", "quantity": "数量", "item": "物品名称",
           "entity": "生物名称", "prefab": "物品或生物名称", "radius": "作用范围（格）",
           "mode": "模式", "message": "消息内容", "reason": "原因", "duration": "时长",
-          "multiplier": "倍率", "name": "名称", "confirmation": "确认名称", "backup": "重置前备份"}
+          "multiplier": "倍率", "name": "名称", "confirmation": "确认名称", "backup": "重置前备份",
+          "locationName": "目的地"}
 SWITCHES = {"开启": True, "打开": True, "启用": True, "开": True, "是": True,
             "关闭": False, "关掉": False, "停用": False, "关": False, "否": False}
 
@@ -61,6 +62,10 @@ def prompt(item, key, schema):
     names = [next((title for title, value in labels.items() if value == option), str(option)) for option in values[:12]]
     options = "，可选：" + " / ".join(names) if names else ""
     return "请提供" + label + options + "。回复取消退出。"
+
+
+def invalid_prompt(item, key, schema):
+    return "这次尚未提交。" + prompt(item, key, schema)
 
 
 def describe(item, parameters, target):

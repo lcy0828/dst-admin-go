@@ -44,7 +44,8 @@ class InventoryNamesTests(unittest.TestCase):
             }
         )
         self.assertIn("肉丸 ×2 [剩余保鲜 15分58秒]", text)
-        self.assertIn("支持范围内完整", text)
+        self.assertIn("模组私有存储可能未包含", text)
+        self.assertNotIn("完整", text)
         self.assertNotIn("%", text)
         self.assertNotIn("complete", text)
 

@@ -774,7 +774,7 @@
                 "default": 60
               },
               "menuItems": {
-                "description": "菜单显示和顺序，固定命令 kind 或能力 ID；* 表示其余项，空列表隐藏菜单项（不改变授权）",
+                "description": "菜单可见项和组内顺序，固定命令 kind 或能力 ID；* 表示其余项，空列表隐藏菜单项（不改变授权）",
                 "type": "list",
                 "default": [
                   "*"

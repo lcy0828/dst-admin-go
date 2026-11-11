@@ -47,14 +47,14 @@ def explicit_ai(text):
 def normalize(text):
     text = text.strip().rstrip("。！？!?～~")
     text = re.sub(
-        r"^(?:请|麻烦|帮我|给我)(?:再)?(?:看看|看下|查一下|查询一下)?\s*", "", text, count=1
+        r"^(?:请|麻烦|帮我|给我)(?:再)?(?:看看|看下)?\s*", "", text, count=1
     )
     text = re.sub(r"^(?:看看|看下)\s*", "", text, count=1)
     return re.sub(r"(?:吧|一下|谢谢)$", "", text).strip()
 
 
 READ_KINDS = frozenset(
-    {"rooms", "status", "players", "profile", "inventory", "network", "mods", "help", "backups", "recent"}
+    {"rooms", "status", "players", "profile", "inventory", "network", "mods", "help", "backups", "recent", "activity", "trajectory", "combat"}
 )
 READ_CAPABILITIES = frozenset(
     {
@@ -199,6 +199,13 @@ def read_request_intent(text, aliases):
 
 
 def parse(text: str, aliases: dict[str, str]) -> Intent | None:
+    from .menus import request as menu_request
+
+    navigation = menu_request(text) if len(text) <= 256 else None
+    if navigation is not None:
+        group, query = navigation
+        return Intent("help", capability="menu:" + group if group else "",
+                      parameters={"search": query} if query else None)
     if len(text) > 256 or DISCUSSION.search(text) or explicit_ai(text):
         return None
     value = normalize(text)
@@ -208,16 +215,23 @@ def parse(text: str, aliases: dict[str, str]) -> Intent | None:
         candidate = _parse(match[1], aliases)
         if is_read_intent(candidate):
             return candidate
+    # Prefer a complete, target-free query with a conversational ending over
+    # treating that ending as a nickname ("查人呀"). Explicitly separated names
+    # and names with their own suffix remain literal ("查人 呀", "查人 小呀").
+    plain = re.sub(r"[呀啊呢吗嘛哦呗啦]{1,3}$", "", value).rstrip()
+    candidate = None
+    if plain != value:
+        candidate = parse(plain, aliases)
+        if (is_read_intent(candidate) and not candidate.player
+                and not re.search(r"\s+[呀啊呢吗嘛哦呗啦]{1,3}$", value)):
+            return candidate
     intent = _parse(value, aliases)
     if intent is not None:
         return intent
     # Recognise conversational endings only after an exact parse failed. Never
     # trim a supplied player name or turn a fuzzy sentence into a write action.
-    plain = re.sub(r"[呀啊呢吗嘛哦呗啦]{1,3}$", "", value).rstrip()
-    if plain != value:
-        candidate = parse(plain, aliases)
-        if is_read_intent(candidate):
-            return candidate
+    if is_read_intent(candidate):
+        return candidate
     return None
 
 
@@ -275,6 +289,8 @@ def _parse(text: str, aliases: dict[str, str]) -> Intent | None:
         if match:
             return Intent("capability", room=room, room_name=room_name, capability="location.save", parameters={"playerId": match[1].strip(), "name": match[2].strip()})
         match = re.fullmatch(r"(?:把|将)\s*(.{1,80}?)\s*传送到\s*(.{1,48})", text)
+        if match is None:
+            match = re.fullmatch(r"传送\s*(.{1,80}?)\s*到\s*(.{1,48})", text)
         if match:
             return Intent("capability", room=room, room_name=room_name, capability="player.teleport", parameters={"playerId": match[1].strip(), "locationName": match[2].strip()})
     match = READ_PREFIX.fullmatch(text)
@@ -286,6 +302,39 @@ def _parse(text: str, aliases: dict[str, str]) -> Intent | None:
 
 
 def _parse_command(text, aliases, room, room_name):
+    # Parse the complete historical read before broad “查询玩家 <nickname>”.
+    # A time clause is query context, never a player-directory search string.
+    if re.match(r"^(?:查询|查看|查)?(?:总结|梳理|回顾|解释|评估)", text) or re.search(r"(?:活动|轨迹|战斗).*(?:和|及|、).*(?:活动|轨迹|战斗)", text):
+        return None
+    history_labels = {"活动": "activity", "活动记录": "activity", "最近活动": "activity", "玩家活动": "activity",
+                      "做了什么": "activity", "干了什么": "activity", "做了啥": "activity", "干了啥": "activity",
+                      "轨迹": "trajectory", "移动轨迹": "trajectory", "战斗": "combat", "战斗记录": "combat", "战斗汇总": "combat"}
+    history_suffix = "|".join(sorted(history_labels, key=len, reverse=True))
+    activity = re.fullmatch(
+        rf"(.*?)(?:的)?(?:最近|过去|近)\s*({QUANTITY})\s*(?:个)?(天|小时|周)(?:内)?(?:的)?"
+        rf"({history_suffix})", text
+    )
+    history = None
+    if activity:
+        history = (activity[1].strip(), quantity(activity[2]) * {"天": 24, "小时": 1, "周": 168}[activity[3]], activity[4])
+    elif text in history_labels:
+        history = ("", 24, text)
+    else:
+        short = re.fullmatch(r"(.+?)(?:的)?(活动记录|最近活动|移动轨迹|战斗记录|战斗汇总)", text)
+        prefix = re.fullmatch(r"(?:查)?(活动记录|活动|轨迹|移动轨迹|战斗记录|战斗汇总)\s+(.+)", text)
+        if short:
+            history = (short[1].strip(), 24, short[2])
+        elif prefix:
+            history = (prefix[2].strip(), 24, prefix[1])
+    if history and not COMPOUND.search(text):
+        player, hours, label = history
+        all_players = player in {"所有玩家", "全部玩家", "全员", "大家", "所有人"}
+        if player in {"", "玩家", "所有玩家", "全部玩家", "全员", "大家", "所有人"}:
+            player = ""
+        if 1 <= hours <= 90 * 24:
+            return Intent(history_labels[label], player=player, room=room, room_name=room_name,
+                          parameters={"hours": hours, **({"scope": "all"} if all_players else {})})
+        return None
     if text in {"地图", "世界地图", "小地图", "地图概览", "查看地图", "看看地图", "看地图", "地图状态"}:
         return Intent("capability", room=room, room_name=room_name, capability="room.map", parameters={})
     perf = _performance_intent(text, room, room_name)
@@ -343,7 +392,7 @@ def _parse_command(text, aliases, room, room_name):
                       capability="workbench.set_player_mode", parameters=mode)
 
     spawn = re.fullmatch(
-        rf"(?:在)?\s*(.+?)\s*(?:附近|旁边|身边)\s*(?:生成|刷出|刷)\s*({QUANTITY})\s*(?:只|头|个)\s*(.+)",
+        rf"(?:在)?\s*(.+?)\s*(?:的?位置|附近|旁边|身边)\s*(?:生成|刷出|刷)\s*({QUANTITY})\s*(?:只|头|个)\s*(.+)",
         text,
     )
     if spawn and not COMPOUND.search(text):
@@ -359,6 +408,12 @@ def _parse_command(text, aliases, room, room_name):
                 "count": quantity(count),
             },
         )
+    placeholder_grant = re.fullmatch(
+        rf"给\s*玩家\s*(?:(?:发放|发|给予|给)\s*)?({QUANTITY})\s*(?:个|份|件)\s*(.+)", text
+    )
+    if placeholder_grant and not COMPOUND.search(text):
+        return Intent("capability", room=room, room_name=room_name, capability="player.give_item",
+                      parameters={"item": placeholder_grant[2].strip(), "count": quantity(placeholder_grant[1])})
     grant = re.fullmatch(
         rf"给\s*(.+?)\s+(?:发放|发|给予|给)\s*({QUANTITY})\s*(?:个|份|件)\s*(.+)", text
     )
@@ -374,6 +429,11 @@ def _parse_command(text, aliases, room, room_name):
         if explicit and implicit and explicit[1].strip() != implicit[1].strip():
             return None
         grant = explicit or implicit
+    if grant is None:
+        # A marked, nonnumeric ASCII nickname gives an unambiguous boundary
+        # for compact forms such as 给玩家Example100个木头. Numeric names and
+        # Chinese numeral boundaries still require whitespace or a verb.
+        grant = re.fullmatch(r"给\s*(玩家[A-Za-z_][A-Za-z_-]{0,63})([0-9]{1,4})\s*(?:个|份|件)\s*(.+)", text)
     if grant is None:
         reverse = re.fullmatch(rf"(?:再)?(?:发放|发|送)\s*({QUANTITY})\s*(?:个|份|件)\s*(.+?)\s*给\s*(.+)", text)
         pronoun = re.fullmatch(rf"(?:再)?给\s*(这个玩家|该玩家|他|她)\s*({QUANTITY})\s*(?:个|份|件)\s*(.+)", text)

@@ -1,6 +1,8 @@
 """Per-event display receipts for explicit single queries, never model-authored data."""
 
 import hashlib
+import weakref
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from .routing import READ_KINDS, parse, read_request_intent
@@ -35,6 +37,8 @@ class DisplayReceipt:
     original_hash: str = ""
     applied_text: str = ""
     dst_used: bool = False
+    request_bound: bool = True
+    superseded: bool = False
 
 
 def requested_intent(text, aliases):
@@ -53,6 +57,7 @@ def requested_intent(text, aliases):
 class ModelPresentation:
     def __init__(self):
         self.owner = object()
+        self.active = OrderedDict()
 
     def get(self, event):
         value = getattr(event, "_dst_display_receipt", None)
@@ -70,12 +75,77 @@ class ModelPresentation:
             kind,
             dst_used=bool(kind or parse(text, aliases)),
         )
+        message = str(getattr(getattr(event, "message_obj", None), "message_id", ""))
+        try:
+            reference = weakref.ref(event)
+        except TypeError:
+            return  # Minimal legacy adapters still use the response boundary.
+        self.active[(actor.key, message)] = reference
+        while len(self.active) > 256:
+            self.active.popitem(last=False)
+
+    def stop(self, event):
+        """Stop this model event, never its already submitted game operation."""
+        value = self.get(event)
+        if value:
+            value.superseded = True
+        event._dst_suppressed_model = self.owner
+        setter = getattr(event, "set_extra", None)
+        if callable(setter):
+            # AstrBot's existing runner watcher cancels an in-flight provider
+            # request and exits the tool loop. No session-wide cancellation.
+            setter("agent_stop_requested", True)
+        stopper = getattr(event, "stop_event", None)
+        if callable(stopper):
+            stopper()
+
+    def supersede(self, key, message):
+        for identity, reference in list(self.active.items()):
+            event = reference()
+            value = self.get(event) if event is not None else None
+            if value is None:
+                self.active.pop(identity, None)
+            elif identity[0] == key and identity[1] != message and value.request_bound:
+                self.stop(event)
+                self.active.pop(identity, None)
+
+    def obsolete(self, event, state):
+        if getattr(event, "_dst_suppressed_model", None) is self.owner:
+            return True
+        value = self.get(event)
+        if not value or not value.request_bound:
+            return False
+        message = str(getattr(getattr(event, "message_obj", None), "message_id", ""))
+        return value.superseded or not state.current_request(value.projection[0], message)
+
+    def finish(self, event):
+        value = self.get(event)
+        if value:
+            message = str(getattr(getattr(event, "message_obj", None), "message_id", ""))
+            identity = (value.projection[0], message)
+            reference = self.active.get(identity)
+            if reference and reference() is event:
+                self.active.pop(identity, None)
+
+    def close(self):
+        for reference in list(self.active.values()):
+            event = reference()
+            value = self.get(event) if event is not None else None
+            if value and value.request_bound:
+                self.stop(event)
+        self.active.clear()
 
     def tool(self, event, name):
         value = self.get(event)
         if value:
             if name in DST_TOOLS:
                 value.dst_used = True
+                value.request_bound = True
+            elif not value.dst_used:
+                # Before any tool is chosen, the model is still handling the
+                # addressed request. A foreign tool explicitly delegates the
+                # topic elsewhere; formatting still depends only on dst_used.
+                value.request_bound = False
             value.tool_count += 1
             if name not in READ_TOOLS or value.tool_count > 8:
                 value.foreign_tool = True

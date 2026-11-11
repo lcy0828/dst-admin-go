@@ -20,6 +20,35 @@ from astrbot_plugin_dst_companion.streams import (
 
 
 class NotificationRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_foreground_budget_cannot_starve_bounded_notification_reads(self):
+        from test_companion import mcp
+        active, maximum = 0, 0
+        entered, finish = asyncio.Event(), asyncio.Event()
+        async def read(*args, **kwargs):
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            if active == 2:
+                entered.set()
+            await finish.wait()
+            active -= 1
+            return mcp({'items':[]})
+        client = NS(session=NS(call_tool=read), tools=[NS(name='api_listRoomChatLogs',annotations=NS(readOnlyHint=True))])
+        plugin = NS(manager=NS(mcp_server_runtime_view={'panel':NS(client=client)}),
+                    connections=NS(broadcast=lambda _: 'panel'), connection_identity=lambda:'source',
+                    background=asyncio.Semaphore(0), gateway=NS(limit=asyncio.Semaphore(0)))
+        hub = Notifications(plugin); hub.source='source';hub.engines={'group':NS(rooms={'r1':'示例'})}
+        tasks = [asyncio.create_task(hub._read('api_listRoomChatLogs',{'path':{'roomId':'r1'}})) for _ in range(4)]
+        try:
+            await asyncio.wait_for(entered.wait(),1)
+            self.assertEqual(maximum,2)
+            finish.set()
+            await asyncio.wait_for(asyncio.gather(*tasks),1)
+            self.assertEqual(maximum,2)
+        finally:
+            for task in tasks: task.cancel()
+            await asyncio.gather(*tasks,return_exceptions=True)
+
     async def test_closed_sdk_session_recovers_without_replacing_it_or_writing(self):
         calls = []
 

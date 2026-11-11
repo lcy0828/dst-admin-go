@@ -39,6 +39,14 @@ def terminal(data):
     )
 
 
+def not_submitted(record):
+    return {"requestId": record["requestId"], "roomId": record["roomId"],
+            "capabilityId": record.get("capabilityId", ""), "status": "rejected",
+            "complete": True, "resultKind": "facts", "executionOutcome": "none",
+            "mayHaveExecuted": False,
+            "data": {"state": "cancelled", "message": "本次请求已被取消或新请求替换，尚未发送。"}}
+
+
 class Actions:
     def __init__(
         self,
@@ -128,9 +136,9 @@ class Actions:
                 data=await self.gateway.call(actor,"api_executeRoomTeleport",{"path":{"roomId":target.room,"previewId":preview["id"]},"body":{}},deadline,write=True)
                 record.update(state="terminal" if envelope(data)["complete"] else "uncertain",data=envelope(data))
             except BaseException as error:
-                record["state"]="uncertain"
-                records[key]=record
-                await self.save(records)
+                unsent = await self.failed_submission(records, key, record, error)
+                if unsent:
+                    raise
                 if isinstance(error, asyncio.CancelledError): raise
                 return "传送结果尚未确认，没有重新提交。请发送 任务进度 查询原结果。"
             records[key]=record
@@ -202,9 +210,9 @@ class Actions:
             await self.save(records)
         except BaseException as error:
             # Cancellation and process interruption also leave the prepared identity.
-            record["state"] = "uncertain"
-            records[key] = record
-            await self.save(records)
+            unsent = await self.failed_submission(records, key, record, error)
+            if unsent:
+                raise
             if isinstance(error, asyncio.CancelledError):
                 raise
             raise QueryError("RESULT_UNCERTAIN") from None
@@ -289,10 +297,10 @@ class Actions:
             # cannot prove in-game execution succeeded.
             records[key] = record
             await self.save(records)
-        except Exception:
-            record["state"] = "uncertain"
-            records[key] = record
-            await self.save(records)
+        except BaseException as error:
+            unsent = await self.failed_submission(records, key, record, error)
+            if unsent or isinstance(error, asyncio.CancelledError):
+                raise
             raise QueryError("RESULT_UNCERTAIN") from None
         if data.get("id") and data.get("status") in {"queued", "running", "canceling"}:
             self.watch(actor, key, record)
@@ -302,7 +310,21 @@ class Actions:
             else "请求已提交，游戏内结果尚未确认。"
         )
 
+    async def failed_submission(self, records, key, record, error):
+        # Only an explicit rejection at the send gate proves this was not sent.
+        # A timeout or cancelled waiter can leave an already transmitted call.
+        unsent = isinstance(error, QueryError) and error.code == "REQUEST_SUPERSEDED"
+        record["state"] = "not_submitted" if unsent else "uncertain"
+        if unsent:
+            record["data"] = not_submitted(record)
+        records[key] = record
+        await self.save(records)
+        return unsent
+
     async def read(self, actor, record, deadline):
+        if record.get("state") == "not_submitted":
+            data = await self.get_job(actor, record, deadline)
+            return data["data"]["message"]
         if record.get("previewId"):
             from .teleport import describe
             data = await self.get_job(actor, record, deadline)
@@ -347,6 +369,8 @@ class Actions:
                     await self.gateway.authorize(
                         actor, tool, {"path": {"roomId": record["roomId"]}}
                     )
+            if record.get("state") == "not_submitted":
+                return not_submitted(record)
             if record.get("previewId"):
                 from .teleport import envelope
                 data=await self.gateway.call(actor,"api_getRoomTeleportPreview",{"path":{"roomId":record["roomId"],"previewId":record["previewId"]},"query":{"refresh":True}},deadline)
@@ -357,6 +381,8 @@ class Actions:
                 {"path": {"roomId": record["roomId"], "requestId": record["requestId"]}},
                 deadline,
             )
+        if record.get("state") == "not_submitted":
+            return not_submitted(record)
         data = await self.gateway.call(
             actor, "api_getJob", {"path": {"jobId": record["jobId"]}}, deadline
         )
@@ -375,6 +401,8 @@ class Actions:
         if not candidates:
             return "没有找到你在此房间提交的任务。"
         key, record = max(candidates, key=lambda item: item[1].get("createdAt", 0))
+        if record.get("state") == "not_submitted":
+            return await self.read(actor, record, deadline)
         if record.get("protocol") == 1:
             data = await self.get_job(actor, record, deadline)
             if data.get("status") in {"pending", "running", "uncertain"}:

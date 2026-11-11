@@ -69,7 +69,7 @@ class ChatExperienceTests(unittest.IsolatedAsyncioTestCase):
             "身体：坎普斯背包",
             "物品栏",
             "└ 树枝 ×7",
-            "次数 3",
+            "剩余 3 次",
             "燃料 0%",
             "存档快照",
         ):

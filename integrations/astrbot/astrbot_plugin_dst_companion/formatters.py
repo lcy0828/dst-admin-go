@@ -118,25 +118,90 @@ def network(rows):
     )
 
 
+def activity(data, player, hours, *, view="activity", worlds=None):
+    scope = safe(player) if player else "全员"
+    title = {"activity": "活动", "trajectory": "移动轨迹", "combat": "战斗记录"}[view]
+    lines = [f"📋 {scope}{title} · 最近 {hours:g} 小时"]
+    labels = {"position": "位置采样", "player.joined": "进入游戏", "player.left": "离开游戏",
+              "player.death": "死亡", "player.respawned": "复活", "action.pickup": "拾取",
+              "action.drop": "丢弃", "action.harvest": "采集", "action.eat": "进食",
+              "action.build_item": "制作", "action.build_structure": "建造", "action.work": "工作",
+              "combat.attack": "攻击", "combat.received": "受到攻击", "combat.kill": "击杀",
+              "collection.gap": "采集缺口", "collection.instance": "运行实例变化"}
+    rows = data.get("items")
+    if not isinstance(rows, list):
+        raise ValueError("invalid activity page")
+    shown = 0
+    for row in rows[:20]:
+        if not isinstance(row, dict):
+            continue
+        kind = row.get("kind", "")
+        fields = row.get("fields") or {}
+        fields = fields if isinstance(fields, dict) else {}
+        world = row.get("worldName") or (worlds or {}).get(row.get("worldId"))
+        if not world and row.get("worldId") in {"Master", "Caves"}:
+            world = row["worldId"]
+        parts = [time_text(row.get("occurredAt") or row.get("lastAt")),
+                 safe(row.get("name") or player or row.get("userId") or "采集记录"),
+                 world_name(world) if world else "世界名称未确认"]
+        if view == "combat":
+            direction = {"incoming": "受到攻击", "outgoing": "攻击"}.get(row.get("direction"), "方向未确认")
+            damage = row.get("damage")
+            parts += [direction, safe(item_name({"prefab": row.get("targetPrefab")})),
+                      f"伤害 {damage:g}" if type(damage) in (int, float) and math.isfinite(damage) else "伤害未确认"]
+            for field, label in (("hits", "命中"), ("kills", "击杀"), ("unknownDamageHits", "伤害未知命中")):
+                value = row.get(field)
+                if type(value) is int:
+                    parts.append(f"{label} {value}")
+        elif view == "activity":
+            parts.append(labels.get(kind, safe(kind)))
+        prefab = fields.get("targetPrefab")
+        if prefab:
+            parts.append(safe(item_name({"prefab": prefab})))
+        if type(fields.get("count")) in (int, float):
+            parts.append(f"×{fields['count']:g}")
+        if (kind == "position" or view == "trajectory") and isinstance(row.get("position"), dict):
+            p = row["position"]
+            if all(type(p.get(k)) in (int, float) and math.isfinite(p[k]) for k in ("x", "z")):
+                parts.append(f"X {p['x']:.1f} / Z {p['z']:.1f}")
+        line = " · ".join(part for part in parts if part)
+        # Reserve space for coverage and truncation warnings in QQ templates.
+        if sum(len(line) + 1 for line in lines) + len(line) > 1600:
+            break
+        lines.append(line)
+        shown += 1
+    if not rows:
+        lines.append("该时间范围没有已采集的记录；不代表玩家没有活动。")
+    if data.get("hasMore") or data.get("truncated") or shown < len(rows):
+        lines.append(f"本次展示 {shown} 条，结果未完整展开；可缩小时间范围或到面板查看。")
+    if any(isinstance(c, dict) and not c.get("complete", False) for c in data.get("coverage", []) or []):
+        lines.append("⚠️ 所选范围存在采集缺口，这些记录不能代表完整活动。")
+    lines.append("离线玩家可查询已保存的活动；仅覆盖启用采集后的记录。")
+    if view == "trajectory":
+        lines.append("以上为采样坐标；不会把跨世界、运行实例变化或采集缺口连成连续路线。")
+    return "\n".join(lines)
+
+
 def inventory(data):
     source = {"live": "实时读取", "save": "存档快照"}.get(
         data.get("source"), safe(data.get("source"))
     )
-    coverage = {"complete": "支持范围内完整", "partial": "部分内容", "unavailable": "暂不可用"}.get(
+    coverage = {"complete": "", "partial": "部分内容", "unavailable": "暂不可用"}.get(
         data.get("status"), "覆盖情况未确认"
     )
-    lines = [f"🎒 背包 · {source} · {coverage}"]
+    lines = [f"🎒 背包 · {source}" + (" · " + coverage if coverage else "")]
 
     if data.get("worldName"):
         lines.append(world_name(data["worldName"]))
     truncated = False
     count = 0
+    missing_ratio = False
 
     def number(value):
         return type(value) in (int, float) and math.isfinite(value)
 
     def walk(value, depth=0, equipment=False):
-        nonlocal count, truncated
+        nonlocal count, truncated, missing_ratio
         if not isinstance(value, dict) or not value.get("prefab"):
             return
         if depth > 5 or count >= 50 or sum(map(len, lines)) > 2200:
@@ -184,6 +249,12 @@ def inventory(data):
                     )
                     duration = duration or "0秒"
                     details.append("剩余保鲜 " + duration)
+                elif key == "uses" and raw >= 0:
+                    details.append(("剩余 " if raw == int(raw) else "剩余约 ") + f"{raw:.0f} 次")
+                elif key in {"fuel", "armor"} and metric.get("unit") != "seconds":
+                    # Serialized components often save only an internal amount,
+                    # without a maximum. It is neither a percent nor seconds.
+                    missing_ratio = True
                 else:
                     details.append(
                         f"{label} {raw:g}" + ("秒" if metric.get("unit") == "seconds" else "")
@@ -225,6 +296,10 @@ def inventory(data):
         )
     elif saved:
         lines.append("存档时间未确认；本次读取时间不代表存档内容的新鲜度。")
+    if saved:
+        lines.append("这是保存时的背包，可能与下线时不同；模组私有存储可能未包含。")
+    if missing_ratio:
+        lines.append("部分物品未提供耐久比例，未显示百分比。")
     if data.get("status") != "complete":
         lines.append("部分内容未能读取，缺失处不代表没有物品。")
     return "\n".join(lines)

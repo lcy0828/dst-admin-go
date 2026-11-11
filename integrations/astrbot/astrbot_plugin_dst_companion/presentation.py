@@ -312,6 +312,10 @@ def options(pending, title="请选择"):
         text = f"{i}. {fmt.safe(row.get('name'))}"
         if "online" in row:
             text += " · " + fmt.presence(row) + " · " + fmt.safe(row.get("id"))
+        if pending.get("mode") in {"location", "landmark"}:
+            text += " · " + fmt.world_name(row.get("worldName") or row.get("worldId"))
+        if pending.get("mode") == "landmark":
+            text += f" · X {row['x']:.1f} / Z {row['z']:.1f}"
         lines.append(text)
     if pages > 1:
         lines.append("上一页 / 下一页")

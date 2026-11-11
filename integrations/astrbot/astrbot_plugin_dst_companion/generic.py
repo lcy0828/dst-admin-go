@@ -13,7 +13,7 @@ import re
 import time
 from collections import OrderedDict
 
-from .gateway import QueryError
+from .gateway import QueryError, read_result
 from .state import Target
 from .routing import Intent
 from .task_results import clip_result
@@ -84,6 +84,14 @@ class GenericOperations:
         self.release_previews = OrderedDict()
         self.journal_lock = asyncio.Lock()
 
+    def current(self, event, actor):
+        return (self.plugin.state.current_request(actor.key, str(event.message_obj.message_id))
+                and not self.plugin.model_presentation.obsolete(event, self.plugin.state))
+
+    def ensure_current(self, event, actor):
+        if not self.current(event, actor):
+            raise QueryError("REQUEST_SUPERSEDED", message="本次请求已由新请求替代，尚未发送。")
+
     @staticmethod
     def release_selection(args):
         body = args.get("body") if isinstance(args, dict) else None
@@ -126,7 +134,7 @@ class GenericOperations:
         async with self.journal_lock:
             records = await self.plugin.get_kv_data("generic_requests_v1", {})
             if request_id in records:
-                records[request_id]["state"] = "answered"
+                records[request_id]["state"] = "not_submitted" if state == "superseded" else "answered"
                 await self.plugin.put_kv_data("generic_requests_v1", records)
 
     async def available(self):
@@ -143,9 +151,33 @@ class GenericOperations:
         timeout = 70 if operation in {
             "previewGameRelease", "publishGameRelease", "retryGameRelease"
         } else 35
+        deadline = min(time.monotonic() + timeout, values.pop("_deadline", float("inf")))
+        guard = None
+        if mode in {"run", "execute"}:
+            guard = lambda: self.ensure_current(actor.event, actor)
+            guard()
         return await self.plugin.gateway.call(
             actor, "companion_gateway", {"actor": actor_envelope(actor), "mode": mode, **values},
-            time.monotonic() + timeout, write=mode in {"run", "execute"})
+            deadline, write=mode in {"run", "execute"}, guard=guard)
+
+    async def read_native(self, actor, name, arguments, deadline):
+        """Shortcuts and AI use the same scoped, contract-validated read gateway.
+
+        Only negotiated absence permits legacy transport. A rejected, timed-out
+        or uncertain request must never be resubmitted through another route.
+        """
+        try:
+            async with asyncio.timeout(max(0, deadline - time.monotonic())):
+                if not await self.available():
+                    return NotImplemented
+                operation = name.removeprefix("api_")
+                message = str(actor.event.message_obj.message_id)
+                request_id = hashlib.sha256(encode([actor.connection_id, actor.key, message, operation, arguments]).encode()).hexdigest()
+                result = await self.request(actor, "read", operationId=operation, arguments=arguments,
+                                            requestId=request_id, _deadline=deadline)
+        except TimeoutError:
+            raise QueryError("QUERY_TIMEOUT") from None
+        return read_result(result)
 
     async def find(self, actor, query):
         data = await self.request(actor, "find", query=query)
@@ -285,6 +317,8 @@ class GenericOperations:
         return args, None
 
     async def perform(self, event, actor, name, values):
+        if not self.current(event, actor):
+            return self.plugin.tasks.superseded(event)
         if name == "dst_result":
             if values["task_ref"].startswith("resource:"):
                 return await self.resource(event, actor, values["task_ref"][9:])
@@ -295,10 +329,14 @@ class GenericOperations:
                 return bounded_result(result)
             return bounded_result(await self.request(actor, "result", taskRef=values["task_ref"].removeprefix("generic:")))
         card = await self.card(actor, values["capability_id"])
+        if not self.current(event, actor):
+            return self.plugin.tasks.superseded(event)
         write = card["policy"]["access"] == "write"
         if write != (name == "dst_run"):
             raise QueryError("PERMISSION_DENIED")
         args, question = await self.parameters(actor, card, values)
+        if not self.current(event, actor):
+            return self.plugin.tasks.superseded(event)
         if question:
             self.plugin.state.form(actor.key, {"type": "generic_input", "generic": True,
                 "tool": name, "values": {**values, "parameters": args}, "question": question,
@@ -310,7 +348,7 @@ class GenericOperations:
             return self.plugin.tasks.question(event, actor, question)
         message = str(event.message_obj.message_id)
         if not self.plugin.state.current_request(actor.key, message):
-            return encode({"state": "superseded", "summary": "用户已发起新的请求，本轮未提交。"})
+            return self.plugin.tasks.superseded(event)
         player_fields = [p for p, role in card.get("selectors", {}).items() if role == "player"]
         room_fields = [p for p, role in card.get("selectors", {}).items() if role == "room"]
         if len(player_fields) == len(room_fields) == 1:
@@ -327,6 +365,10 @@ class GenericOperations:
             raise
         except Exception as error:
             raise QueryError("JOURNAL_UNAVAILABLE", message="本地操作记录无法保存，本次请求尚未发送。") from error
+        if not self.current(event, actor):
+            if write and fresh:
+                await self.finish_reservation(request_id, "superseded")
+            return self.plugin.tasks.superseded(event)
         try:
             if fresh:
                 data = await self.request(actor, "run" if write else "read", operationId=card["operationId"],
@@ -334,6 +376,10 @@ class GenericOperations:
             else:
                 data = await self.request(actor, "recover", requestId=request_id)
         except QueryError as error:
+            if error.code == "REQUEST_SUPERSEDED":
+                if write and fresh:
+                    await self.finish_reservation(request_id, "superseded")
+                return self.plugin.tasks.superseded(event)
             if write:
                 rejected = error.code in {"AI_DENIED", "AI_INVALID", "AI_AUTH_INVALID", "PERMISSION_DENIED",
                     "NATIVE_PERMISSION_DENIED", "ROOM_DENIED", "AI_BUSY", "PARAMETER_INVALID"}
@@ -344,6 +390,15 @@ class GenericOperations:
                     event._dst_uncertain_write = (actor.projection, message, reply)
                 return reply
             raise
+        if write:
+            # Preserve the original receipt even if its reply was superseded.
+            # Updating this journal must not restore any interactive form.
+            try:
+                await self.finish_reservation(request_id, data.get("state"))
+            except Exception:
+                pass
+        if not self.current(event, actor):
+            return self.plugin.tasks.superseded(event)
         if data.get("taskRef"):
             data["taskRef"] = "generic:" + data["taskRef"]
         if data.get("state") in {"failed", "uncertain"} and isinstance(data.get("result"), dict):
@@ -376,12 +431,6 @@ class GenericOperations:
         if context:
             data["context"] = context
         if write:
-            # A result is already known even if the local journal update fails;
-            # retaining its reserved marker is conservative and prevents replay.
-            try:
-                await self.finish_reservation(request_id, data.get("state"))
-            except Exception:
-                pass
             if data.get("state") in {"uncertain", "executing"}:
                 event._dst_uncertain_write = (actor.projection, message, bounded_result(data))
         resource = (data.get("result") or {}).get("resource")
@@ -440,6 +489,8 @@ class GenericOperations:
             from .generic_files import cache_file
             path, name = await asyncio.to_thread(cache_file, resource)
             message = C.File(name=name, file=str(path))
+        if not self.current(event, actor):
+            return self.plugin.tasks.superseded(event)
         try:
             await event.send(MessageChain(chain=[message]))
         except Exception as error:

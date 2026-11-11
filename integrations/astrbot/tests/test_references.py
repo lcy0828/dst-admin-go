@@ -103,7 +103,7 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
         variants = (
             {"group_id": 999},
             {"sender": {"user_id": 999}},
-            {"time": time.time() - 86401},
+            {"time": time.time() - 7 * 86400 - 1},
             {"message_id": 43},
             {"message_type": "private"},
             {"message": [{"type": "forward", "data": {}}]},
@@ -204,7 +204,7 @@ class ReferenceTests(unittest.IsolatedAsyncioTestCase):
                 self.actor.event.bot.call_action.assert_not_awaited()
 
     async def test_stale_wrong_bot_or_wrong_room_persisted_references_cannot_target_writes(self):
-        for change in ({"at": time.time()-86401}, {"selfId": "other-bot"},
+        for change in ({"at": time.time()-7*86400-1}, {"selfId": "other-bot"},
                        {"related": {"roomId": "other", "playerId": "KU_TEST123"}}):
             with self.subTest(change=change):
                 refs = self.fixture()

@@ -6,6 +6,8 @@ import time
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field, is_dataclass
 
+from .display import REFERENCE_TTL
+
 
 @dataclass(frozen=True)
 class Target:
@@ -116,7 +118,7 @@ class State:
     def associate(self, scope, message_id, target, *, source=""):
         if message_id and not isinstance(message_id, bool):
             self._put(
-                self.messages, (*scope, str(message_id)), (self.clock() + 86400, target, source)
+                self.messages, (*scope, str(message_id)), (self.clock() + REFERENCE_TTL, target, source)
             )
 
     def quoted(self, scope, message_id, *, source=None):
@@ -132,7 +134,7 @@ class State:
             self._put(
                 self.reply_hashes,
                 (*scope, text.strip()[:3500]),
-                (self.clock() + 86400, target, source),
+                (self.clock() + REFERENCE_TTL, target, source),
             )
 
     def quoted_text(self, scope, text, *, source=None):
@@ -166,6 +168,10 @@ class State:
                             "worldName",
                             "kind",
                             "capability",
+                            "worldId",
+                            "menuDescription",
+                            "x",
+                            "z",
                         )
                         if k in p
                     }
@@ -248,9 +254,11 @@ class State:
 
     def handles(self, key, text, quote, woken):
         from .routing import is_cancel_reply
+        from .menus import request as menu_request
 
         if self.choice_matches(key, quote) and (
             self.number(text) or text in {"下一页", "上一页"} or is_cancel_reply(text)
+            or self.choices[key].get("mode") == "menu" and menu_request(text) is not None
         ):
             return True
         form = self.pending_form(key)

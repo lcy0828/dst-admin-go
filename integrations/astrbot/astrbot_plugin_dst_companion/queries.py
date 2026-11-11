@@ -1,6 +1,8 @@
 """Fixed MCP read recipes, independent of chat syntax and the AstrBot framework."""
 
 import asyncio
+import time
+from datetime import datetime, timedelta, timezone
 
 from . import formatters as fmt
 from .gateway import QueryError
@@ -8,18 +10,26 @@ from .state import Target
 
 
 class Queries:
-    def __init__(self, gateway):
+    def __init__(self, gateway, reader=None):
         self.gateway = gateway
+        self.reader = reader
+
+    async def call(self, actor, name, arguments, deadline):
+        if self.reader:
+            result = await self.reader(actor, name, arguments, deadline)
+            if result is not NotImplemented:
+                return result
+        return await self.gateway.call(actor, name, arguments, deadline)
 
     async def rooms(self, actor, deadline):
-        data = await self.gateway.call(actor, "api_listRooms", {}, deadline)
+        data = await self.call(actor, "api_listRooms", {}, deadline)
         rows = data.get("items")
         if not isinstance(rows, list):
             raise QueryError("MCP_RESPONSE_INVALID")
         return [r for r in rows if r.get("id") in actor.rooms]
 
     async def resolve(self, actor, room, player, deadline):
-        result = await self.gateway.call(
+        result = await self.call(
             actor,
             "api_resolveRoomPlayer",
             {"path": {"roomId": room}, "query": {"query": player}},
@@ -30,20 +40,21 @@ class Queries:
         if result.get("status") == "not_found" and isinstance(player, str) and player.startswith("玩家"):
             nickname = player[2:].strip()
             if nickname:
-                return await self.gateway.call(
+                return await self.call(
                     actor, "api_resolveRoomPlayer",
                     {"path": {"roomId": room}, "query": {"query": nickname}}, deadline,
                 )
         return result
 
-    async def run(self, actor, kind, target, player, deadline, *, room=None, compact=False):
+    async def run(self, actor, kind, target, player, deadline, *, room=None, compact=False, parameters=None):
         path = {"roomId": target.room}
+        parameters = parameters or {}
 
         async def call(name, query=None):
             args = {"path": path}
             if query is not None:
                 args["query"] = query
-            return await self.gateway.call(actor, name, args, deadline)
+            return await self.call(actor, name, args, deadline)
 
         if kind == "recent":
             data = await call("api_listRoomRecentEvents", {"limit": 10})
@@ -128,16 +139,52 @@ class Queries:
                 + "\n所在世界以确认信息为准；未采集实时坐标时不猜测坐标。"
             ), target
         if kind == "inventory":
-            data = await self.gateway.call(
+            query = {"source": parameters.get("source", "auto"), "refresh": False}
+            for key in ("worldId", "sourceId"):
+                if key in parameters:
+                    query[key] = parameters[key]
+            data = await self.call(
                 actor,
                 "api_getRoomPlayerInventory",
                 {
                     "path": {**path, "playerId": target.player},
-                    "query": {"source": "auto", "refresh": False},
+                    "query": query,
                 },
                 deadline,
             )
             return fmt.safe(target.name) + "\n" + fmt.inventory(data), target
+        if kind in {"activity", "trajectory", "combat"}:
+            now = datetime.now(timezone.utc)
+            hours = parameters.get("hours", 24)
+            if type(hours) is not int or not 1 <= hours <= 90 * 24:
+                raise QueryError("PARAMETER_INVALID")
+            query = {"from": (now - timedelta(hours=hours)).isoformat(), "to": now.isoformat()}
+            if kind != "combat":
+                query["limit"] = 20
+            if target.player:
+                query["userId"] = target.player
+            if kind == "trajectory":
+                if not target.player:
+                    raise QueryError("PARAMETER_INVALID")
+                query["projection"] = "compact"
+            operation = {"activity": "api_listRoomPlayerActivity", "trajectory": "api_getRoomPlayerTrajectory",
+                         "combat": "api_getRoomPlayerCombat"}[kind]
+            async def world_names():
+                until = min(deadline, time.monotonic() + 1.5)
+                try:
+                    async with asyncio.timeout(max(0, until - time.monotonic())):
+                        return await self.call(actor, "api_listRoomWorlds", {"path": path}, until)
+                except (TimeoutError, QueryError):
+                    return {}
+
+            data, worlds = await asyncio.gather(call(operation, query), world_names(), return_exceptions=True)
+            if isinstance(data, BaseException):
+                raise data
+            if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+                raise QueryError("MCP_RESPONSE_INVALID")
+            names = {w["id"]: w.get("name", "") for w in worlds.get("items", [])
+                     if isinstance(w, dict) and isinstance(w.get("id"), str)} if isinstance(worlds, dict) else {}
+            return fmt.activity(data, target.name or target.player, hours, view=kind, worlds=names), target
         if kind == "mods":
             data = await call("api_listRoomMods")
             return fmt.mods(data), target

@@ -11,8 +11,10 @@ from .display import room_heading
 from .display import room_label as short_room_label
 from .display import text as display_text
 from .gateway import QueryError
+from .inventory_sources import sources as inventory_sources, unique_read_match
 from .parameter_ui import answer as parameter_answer
 from .parameter_ui import describe as parameter_description
+from .parameter_ui import invalid_prompt as invalid_parameter_prompt
 from .parameter_ui import prompt as parameter_prompt
 from .presentation import business, options, render
 from .queries import Queries
@@ -38,6 +40,7 @@ ERRORS = {
     "PANEL_BUSY": "面板查询繁忙，请稍后重试。",
     "USER_BUSY": "你已有两项查询在处理，请稍等。",
     "RESULT_UNCERTAIN": "操作结果尚未确认，请查询原任务，不要重复提交。",
+    "REQUEST_SUPERSEDED": "本次请求已被取消或新请求替换，尚未发送。",
     "CAPABILITY_MISSING": "面板缺少该能力，请检查版本和 MCP 连接。",
     "CLIENT_UPDATE_REQUIRED": "这项操作需要更新插件，其他查询可继续使用；也可先在面板操作。",
     "PARAMETER_INVALID": "参数类型或范围不正确，请按提示重新输入，或取消。",
@@ -46,6 +49,13 @@ ERRORS = {
     "MCP_RESPONSE_INVALID": "面板返回的数据格式无法识别，本次读取失败，请检查连接或版本。",
     "WORLD_NOT_RUNNING": "该世界未运行，无法读取当前游戏数据。",
     "PANEL_DISCONNECTED": "面板连接已断开，本次没有取得查询结果。",
+    "SOURCE_AMBIGUOUS": "发现多个背包存档，但未取得可选来源。请在面板选择世界后查看。",
+    "PLAYER_SNAPSHOT_NOT_FOUND": "没有找到这位玩家可读取的背包存档；离线玩家也可以查询，但需要已有存档。",
+    "SAVE_INVALID": "这份玩家背包存档暂时无法解析，请换一个存档来源或在面板查看详情。",
+    "SAVE_CHANGED": "所选存档已发生变化，请重新查询背包并选择来源。",
+    "PLAYER_LOCATION_UNCERTAIN": "玩家所在世界暂未确认，请稍后重试；这不代表玩家离线或背包为空。",
+    "INVENTORY_BUSY": "背包读取繁忙，请稍后重试。",
+    "INVENTORY_TIMEOUT": "背包读取超时，尚未取得结果。",
 }
 
 
@@ -70,11 +80,12 @@ class Engine:
         directory=None,
         settings=None,
         message_renderer=None,
+        reader=None,
     ):
         self.gateway, self.state = gateway, state
         self.aliases, self.default_room, self.bindings = aliases or {}, default_room, bindings or {}
         self.actions, self.directory, self.settings = actions, directory, settings
-        self.queries = Queries(gateway)
+        self.queries = Queries(gateway, reader)
         self.message_renderer = message_renderer
 
     def decorate(self, actor, kind, title, body, room="", player="", full_room="", legacy=None):
@@ -133,8 +144,11 @@ class Engine:
         intent = Intent("cancel") if pending and is_cancel_reply(text) else self.parse(actor, text)
         if text in {"下一页", "上一页"} and self.state.handles(actor.key, text, quote, woken):
             pending = self.state.page(actor.key, 1 if text == "下一页" else -1)
+            from .menus import render as render_menu
+
             return Reply(
-                "needs_selection", options(pending), choice=True, sequence=pending["sequence"]
+                "needs_selection", render_menu(pending) if pending.get("mode") == "menu" else options(pending),
+                choice=True, sequence=pending["sequence"]
             )
         selection = self.state.selection(actor.key, text.strip(), quote, woken)
         if (
@@ -173,6 +187,21 @@ class Engine:
                 if form["item"].get("parameterHints", {}).get(form["field"]) == "player":
                     form["target"] = Target(form["target"].room, item["id"], item.get("name", ""))
                 intent, target, frozen = form["intent"], form["target"], form
+            elif pending.get("mode") in {"location", "landmark"}:
+                form = pending["form"]
+                if pending.get("mode") == "landmark":
+                    form["parameters"]["landmarkRef"] = item["id"]
+                else:
+                    form["parameters"]["locationName"] = item["name"]
+                    if "locationId" in form["item"]["parameters"].get("properties", {}):
+                        form["parameters"]["locationId"] = item["id"]
+                if "worldId" in form["item"]["parameters"].get("properties", {}):
+                    form["parameters"]["worldId"] = item["worldId"]
+                form["locationSelected"] = True
+                intent, target, frozen = form["intent"], form["target"], form
+            elif pending.get("mode") == "inventory_source":
+                target = pending["form"]["target"]
+                intent = replace(intent, player=target.player, parameters={"source": "save", "sourceId": item["id"], "worldId": item["worldId"]})
             elif pending["room"]:
                 target = Target(pending["room"], item["id"], item.get("name", ""))
                 intent = replace(intent, player=item["id"], room=pending["room"])
@@ -222,7 +251,7 @@ class Engine:
                                               form["schema"], item=form["item"], key=form["field"])
                     )
                 except QueryError:
-                    return Reply("handled_error", ERRORS["PARAMETER_INVALID"])
+                    return Reply("needs_selection", invalid_parameter_prompt(form["item"], form["field"], form["schema"]))
                 form["parameters"][form["field"]] = value
                 if reference and form["item"].get("parameterHints", {}).get(form["field"]) == "player":
                     form["target"] = reference
@@ -372,8 +401,8 @@ class Engine:
                 "handled_error", "面板数据暂时无法识别，请运行机器人自检；本次没有重复执行。"
             )
 
-    def choose(self, actor, intent, rows, room, seq, title, mode="target", form=None):
-        if not self.state.choose(actor.key, intent, rows, room, seq, mode, actor.page_size):
+    def choose(self, actor, intent, rows, room, seq, title, mode="target", form=None, *, page_size=None):
+        if not self.state.choose(actor.key, intent, rows, room, seq, mode, actor.page_size if page_size is None else page_size):
             return Reply("matched")
         pending = self.state.choices[actor.key]
         pending["configRevision"] = actor.config_revision
@@ -385,7 +414,8 @@ class Engine:
 
     async def _menu(self, actor, intent, seq, deadline):
         rows = [
-            {"id": c.kind, "name": c.label, "kind": c.kind}
+            {"id": c.kind, "name": c.label, "kind": c.kind,
+             "searchTerms": [c.example, *c.phrases]}
             for c in menu_commands(actor)
             if c.kind != "job" or self.actions
         ]
@@ -395,6 +425,9 @@ class Engine:
             "room.network",
             "player.resolve",
             "player.inventory",
+            "player.activity",
+            "player.trajectory",
+            "player.combat",
             "room.mods",
             "room.backups.settings",
             "room.backup.create",
@@ -435,10 +468,15 @@ class Engine:
                             "name": c["title"],
                             "kind": "capability",
                             "capability": c["id"],
+                            "category": c.get("category", ""),
+                            "access": c["access"],
+                            "searchTerms": self._menu_terms(c),
+                            "parameterNames": list(c.get("parameters", {}).get("properties", {})),
+                            "playerTarget": "player" in c.get("parameterHints", {}).values(),
                         }
                     )
             except (QueryError, TimeoutError):
-                note = "\n扩展目录暂不可用；固定指令仍可使用。"
+                note = "更多功能暂时没能读取，可稍后重开菜单；常用查询仍可使用。"
         config = self.config(actor)
         if config:
             lookup = {r["id"]: r for r in rows}
@@ -449,16 +487,59 @@ class Engine:
                 elif key in lookup and lookup[key] not in ordered:
                     ordered.append(lookup[key])
             rows = ordered
-        result = self.choose(actor, intent, rows, "", seq, "可用查询与管理", "menu")
+        from . import menus
+
+        group = intent.capability.removeprefix("menu:") if intent.capability.startswith("menu:") else ""
+        query = (intent.parameters or {}).get("search", "")
+        if group and group not in menus.GROUPS:
+            return Reply("handled_error", "没有这个功能分类，请回复 菜单 重新选择。")
+        if query:
+            rows = menus.matching(rows, query)
+            title = "查找功能 · " + display_text(query, 64)
+        elif group:
+            parent = "management" if group in menus.MANAGEMENT_GROUPS else group
+            rows = [r for r in rows if r["kind"] not in menus.COMMON and menus.group(r) == parent]
+            if group == "management":
+                rows = menus.management_home(rows)
+            elif group in menus.MANAGEMENT_GROUPS:
+                rows = [r for r in rows if menus.management_group(r) == group]
+            title = menus.GROUPS[group]
+        else:
+            rows = menus.home(rows)
+            title = "可用查询与管理"
+        if not rows:
+            message = "没有找到当前可用的匹配功能。" if query else "当前没有可展示的功能。"
+            return Reply("matched", message + ("\n" + note if note else "") + "\n可换个关键词，或回复 菜单 返回；也可直接 @机器人描述需求。")
+        result = self.choose(actor, intent, rows, "", seq, title, "menu",
+                             page_size=10 if group or query else 12)
         guidance = (
             "其他问题直接 @机器人提问，会自动理解并选择可用功能。"
             if not config or config["mode"] == "mixed"
             else "当前只开启了快捷查询；需要自由提问时，请管理员开启混合模式。"
         )
-        result.text += note + "\n也可直接说：有哪些服、谁在线、查背包 昵称。" + guidance
+        if result.choice:
+            pending = self.state.choices[actor.key]
+            pending.update(title=title, menuHome=not (group or query), menuGuidance=guidance, menuNote=note,
+                           menuParent=group in menus.MANAGEMENT_GROUPS)
+            self.state._put(self.state.choices, actor.key, pending)
+            result.text = menus.render(pending)
         return result
 
+    @staticmethod
+    def _menu_terms(item):
+        from .discovery import actions
+
+        terms = []
+        for field in ("aliases", "searchTerms", "examples"):
+            values = item.get(field, [])
+            if isinstance(values, list):
+                terms.extend(t[:128] for t in values[:64] if isinstance(t, str))
+        for action in actions(item):
+            terms.extend([action["title"], *action["searchTerms"]])
+        return terms[:256]
+
     async def _perform(self, actor, intent, target, seq, deadline, frozen=None):
+        source_choices = None
         if intent.kind == "help":
             return await self._menu(actor, intent, seq, deadline)
         if intent.kind == "stop_tracking" and self.actions:
@@ -550,8 +631,14 @@ class Engine:
             # General connection questions describe the room's online players,
             # even after an earlier profile/inventory query selected someone.
             target = Target(target.room)
+        if intent.kind in {"activity", "trajectory", "combat"} and not intent.player and (
+            target.source != "quote" or (intent.parameters or {}).get("scope") == "all"
+        ):
+            # An unqualified history request is room-wide; do not silently use
+            # the player selected by an unrelated earlier query.
+            target = Target(target.room)
         player = None
-        if intent.kind in {"inventory", "profile", "network", "kick"}:
+        if intent.kind in {"inventory", "profile", "network", "kick", "activity", "trajectory", "combat"}:
             from .references import PLAYER_REFERENCES
 
             missing_binding = False
@@ -583,16 +670,19 @@ class Engine:
                     )
                 items = data.get("items", [])
                 if (
-                    data.get("status") == "ambiguous"
+                    data.get("status") == "ambiguous" and not (
+                        intent.kind in {"inventory", "profile", "network", "activity", "trajectory", "combat"}
+                        and unique_read_match(data)
+                    )
                     or intent.kind == "kick"
                     and data.get("match") not in {"exact_id", "exact_name"}
                 ):
                     return self.choose(actor, intent, items, target.room, seq, "请确认玩家")
-                if data.get("status") != "resolved" or len(items) != 1:
+                if (data.get("status") != "resolved" and not unique_read_match(data)) or len(items) != 1:
                     raise QueryError("MCP_RESPONSE_INVALID")
                 player = items[0]
                 target = Target(target.room, player["id"], player.get("name", ""))
-            elif intent.kind != "network" or intent.player in PLAYER_REFERENCES - {""}:
+            elif intent.kind not in {"network", "activity", "combat"} or intent.player in PLAYER_REFERENCES - {""}:
                 self.state.form(
                     actor.key,
                     {
@@ -607,7 +697,7 @@ class Engine:
                     "needs_selection",
                     ("尚无已验证的 QQ→玩家绑定，请使用游戏昵称。\n" if missing_binding else "")
                     + "👤 要查看哪位玩家？\n2 分钟内可直接回复玩家昵称或 KU ID；也可引用玩家进退服通知后查询。取消退出。"
-                    if intent.kind in {"profile", "inventory", "network"}
+                    if intent.kind in {"profile", "inventory", "network", "activity", "trajectory", "combat"}
                     else "请 @机器人提供玩家昵称或 KU ID；取消退出。",
                 )
         if intent.kind == "job" and self.actions:
@@ -620,9 +710,36 @@ class Engine:
                 raise QueryError("PERMISSION_DENIED")
             text = await self.actions.submit(actor, intent, target, deadline)
         else:
-            text, target = await self.queries.run(
-                actor, intent.kind, target, player, deadline, room=room
-            )
+            try:
+                text, target = await self.queries.run(
+                    actor, intent.kind, target, player, deadline, room=room,
+                    **({"parameters": intent.parameters} if intent.parameters else {}),
+                )
+            except QueryError as error:
+                if intent.kind != "inventory" or error.code != "SOURCE_AMBIGUOUS":
+                    raise
+                # A failed explicit source is never replaced or retried. The
+                # sole extra read below is a resolved auto -> exact save read.
+                if (intent.parameters or {}).get("sourceId"):
+                    raise
+                rows, newest = inventory_sources(error.details)
+                if not rows:
+                    raise
+                if newest is None:
+                    return self.choose(actor, intent, rows, target.room, seq,
+                        "🎒 多个背包存档，无法确认哪份较新，请选择\n" + fmt.safe(target.name or target.player),
+                        "inventory_source", {"target": target})
+                text, target = await self.queries.run(
+                    actor, "inventory", target, player, deadline, room=room,
+                    parameters={"source": "save", "sourceId": newest["id"], "worldId": newest["worldId"]},
+                )
+                text += "\n📂 已按文件时间读取最近存档；不代表下线时的实时背包。"
+                if len(rows) > 1:
+                    # Display the result first. The optional picker lets the
+                    # same user inspect another shard without repeating a name.
+                    source_choices = self.choose(actor, intent, rows, target.room, seq,
+                        "查看其他背包存档", "inventory_source", {"target": target})
+                    text += "\n\n" + source_choices.text
         config = self.config(actor)
         template = (
             config["templates"].get(intent.kind, "{title}\n{body}") if config else "{title}\n{body}"
@@ -650,7 +767,7 @@ class Engine:
         # selection. It must not become the implicit target of a later write.
         remembered = Target(target.room) if intent.kind == "players" or intent.kind == "network" and not intent.player else target
         self.state.remember(actor.key, seq, remembered, result)
-        return Reply("matched", result, target)
+        return Reply("matched", result, target, choice=bool(source_choices), sequence=seq)
 
     async def _dynamic(self, actor, intent, target, seq, deadline, title, frozen, room_name=""):
         evidence = None
@@ -712,6 +829,22 @@ class Engine:
         nearby_preview = bool(flow and parameters.get("phase") == "preview")
         if critical or flow:
             parameters.pop("confirmed", None)
+        # Validate supplied values before any preview, confirmation or journal
+        # reservation. Keep the other slots when the user corrects one value.
+        from .capabilities import validate
+        props = schema.get("properties", {})
+        if set(parameters) - set(props):
+            raise QueryError("PARAMETER_INVALID")
+        for key, value in parameters.items():
+            try:
+                validate(value, props[key])
+            except QueryError:
+                self.state.form(actor.key, {
+                    "type": "parameter", "intent": intent, "target": target, "item": item,
+                    "parameters": {k: v for k, v in parameters.items() if k != key},
+                    "field": key, "schema": props[key], "configRevision": actor.config_revision,
+                }, sequence=seq)
+                return Reply("needs_selection", invalid_parameter_prompt(item, key, props[key]))
         from .references import PLAYER_REFERENCES
         player_fields = [key for key, hint in item.get("parameterHints", {}).items() if hint == "player"]
         for key in player_fields:
@@ -847,6 +980,33 @@ class Engine:
                 fmt.safe(item["title"])
                 + "：" + parameter_prompt(item, key, prop),
             )
+        if item["id"] == "player.teleport" and not parameters.get("locationId") and not (frozen and frozen.get("locationSelected")):
+            from .teleport import common_destination, saved_destinations
+
+            common = common_destination(item, parameters["locationName"])
+            if common:
+                # The panel resolves saved names before common landmarks. Keep
+                # the user's exact alias so a saved "猪王村" is not rewritten.
+                destination, rows, note = {"locationName": parameters["locationName"]}, [], ""
+            else:
+                destination, rows, note = await saved_destinations(
+                    self.queries, actor, target.room, parameters, deadline,
+                    scoped="worldId" in props,
+                    identified="locationId" in props,
+                )
+            if destination:
+                parameters.update(destination)
+            elif rows:
+                form = {"type": "parameter", "intent": intent, "target": target, "item": item,
+                        "parameters": parameters, "field": "locationName", "schema": props["locationName"],
+                        "configRevision": actor.config_revision}
+                return self.choose(actor, intent, rows, target.room, seq, note, "location", form)
+            else:
+                self.state.form(actor.key, {"type": "parameter", "intent": intent, "target": target,
+                    "item": item, "parameters": {k:v for k,v in parameters.items() if k != "locationName"},
+                    "field": "locationName", "schema": props["locationName"],
+                    "configRevision": actor.config_revision}, sequence=seq)
+                return Reply("needs_selection", note + "\n" + parameter_prompt(item, "locationName", props["locationName"]))
         # The Runtime still freezes the target for a reversible player mode.
         # The bot can submit that preview in this turn when policy needs no reply.
         auto_mode = bool(
@@ -905,6 +1065,19 @@ class Engine:
             if item["id"] == "player.teleport" and isinstance(evidence, dict):
                 from .teleport import describe, remaining
                 preview = evidence.get("data", {})
+                if preview.get("state") == "needs_selection":
+                    candidates = preview.get("candidates")
+                    if ("landmarkRef" not in props or not isinstance(candidates, list) or not 1 < len(candidates) <= 48
+                            or any(not isinstance(p, dict) or not isinstance(p.get("id"), str)
+                                   or not p["id"] or len(p["id"]) > 100
+                                   or any(type(p.get(k)) not in (int, float) or not -100000 <= p[k] <= 100000 for k in ("x", "z"))
+                                   for p in candidates)):
+                        raise QueryError("MCP_RESPONSE_INVALID")
+                    rows = [{**p, "name": parameters["locationName"], "worldId": preview["worldId"]} for p in candidates]
+                    form = {"type": "parameter", "intent": intent, "target": target, "item": item,
+                            "parameters": parameters, "field": "locationName", "schema": props["locationName"],
+                            "configRevision": actor.config_revision}
+                    return self.choose(actor, intent, rows, target.room, seq, "找到多个目的地，请选择；尚未传送。", "landmark", form)
                 if preview.get("state") == "prepared" and remaining(preview)>0:
                     self.state.form(actor.key, {"type":"confirmation", "intent":intent, "target":target, "item":item,
                         "parameters":parameters, "configRevision":actor.config_revision, "teleportPreview":preview,

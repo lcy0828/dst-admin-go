@@ -14,9 +14,13 @@ READS = frozenset(
         "api_listRoomPlayers",
         "api_resolveRoomPlayer",
         "api_getRoomPlayerInventory",
+        "api_listRoomPlayerActivity",
+        "api_getRoomPlayerTrajectory",
+        "api_getRoomPlayerCombat",
         "api_getRoomPerformanceReport",
         "api_listRoomMods",
         "api_getRoomTeleportPreview",
+        "api_listRoomLocations",
     }
 )
 WRITES = frozenset(

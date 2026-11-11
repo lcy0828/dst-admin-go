@@ -8,6 +8,21 @@ import test_astrbot_adapter as adapter
 
 @unittest.skipUnless(adapter.AVAILABLE, "requires real AstrBot")
 class TaskAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_model_discovery_is_cached_and_bounded_per_message(self):
+        bot, event = self.companion(), self.event('admin')
+        bot.tasks.find = AsyncMock(return_value='{"items":[]}')
+        try:
+            for _ in range(4):
+                await bot.tasks.perform(event,'dst_find',query='未找到的地点')
+            self.assertEqual(bot.tasks.find.await_count,1)
+            reply = json.loads(await bot.tasks.perform(event,'dst_find',query='继续查地点'))
+            self.assertEqual(reply['state'],'needs_input')
+            self.assertIn('停止继续搜索',reply['summary'])
+            self.assertEqual(bot.tasks.find.await_count,1)
+            bot.engine.execute.assert_not_awaited()
+        finally:
+            await bot.terminate()
+
     async def test_mistyped_result_reference_does_not_hide_original_uncertainty(self):
         from astrbot_plugin_dst_companion.gateway import QueryError
         bot, event = self.companion(), self.event("admin")

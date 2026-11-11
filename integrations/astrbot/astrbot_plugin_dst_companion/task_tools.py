@@ -199,6 +199,10 @@ class TaskTools:
         event._dst_task_question = (self, actor.projection, str(event.message_obj.message_id), raw)
         return raw
 
+    def superseded(self, event):
+        self.plugin.model_presentation.stop(event)
+        return encode({"state": "superseded", "summary": "用户已发起新的请求，本轮已结束；不要继续调用工具或发送旧回复。"})
+
     async def actor(self, event):
         await self.plugin.prepare(event)
         actor = self.plugin.actor(event)
@@ -249,7 +253,7 @@ class TaskTools:
             actor = await self.actor(event)
             message_id = str(getattr(event.message_obj, "message_id", ""))
             if not self.plugin.state.current_request(actor.key, message_id):
-                return encode({"state": "superseded", "summary": "用户已发起新的请求，停止本轮工具调用；不要覆盖后续选择。"})
+                return self.superseded(event)
             uncertain = getattr(event, "_dst_uncertain_write", None)
             if name in WRITE_TOOLS and uncertain and uncertain[:2] == (actor.projection, message_id):
                 return uncertain[2]
@@ -297,7 +301,7 @@ class TaskTools:
                                 raise QueryError("PERMISSION_DENIED")
                             room, question = await self.room(actor, values.get("room", ""))
                             if not self.plugin.state.current_request(actor.key, message_id):
-                                return encode({"state": "superseded", "summary": "用户已发起新的请求，请以新请求为准。"})
+                                return self.superseded(event)
                             seq = self.plugin.state.begin(actor.key)
                             intent = Intent(kind, player="他", room=room)
                             if question:
@@ -320,10 +324,25 @@ class TaskTools:
                     raise QueryError("PERMISSION_DENIED")
                 values["view"] = view
             if name == "dst_find":
+                search = getattr(event, "_dst_discovery_budget", None)
+                identity = (self, actor.projection, message_id)
+                if not search or search["identity"] != identity:
+                    search = {"identity": identity, "attempts": 0, "cache": {}}
+                    event._dst_discovery_budget = search
+                search["attempts"] += 1
+                if search["attempts"] > 4:
+                    return self.question(event, actor, {"state": "needs_input",
+                        "summary": "这次还没确定应使用哪项功能，已停止继续搜索。请补充具体操作、玩家或地点；也可发送菜单选择。尚未因此提交操作。"})
+                query = values.get("query", "").strip()
+                if query in search["cache"]:
+                    return search["cache"][query]
                 generic = getattr(self.plugin, "generic", None)
                 if generic and await generic.available():
-                    return encode(await generic.find(actor, values.get("query", "")))
-                return await self.find(actor, values.get("query", ""))
+                    result = encode(await generic.find(actor, query))
+                else:
+                    result = await self.find(actor, query)
+                search["cache"][query] = result
+                return result
             if ((name in {"dst_read", "dst_run"} and values.get("capability_id", "").startswith("api:"))
                     or name == "dst_result" and values.get("task_ref", "").startswith(("generic:", "generic-request:", "resource:"))):
                 return await self.plugin.generic.perform(event, actor, name, values)
@@ -481,7 +500,7 @@ class TaskTools:
                 # identically for direct commands and model tool calls.
                 intent = Intent("capability", room=room, capability=capability, parameters=params)
             if not self.plugin.state.current_request(actor.key, message_id):
-                return encode({"state": "superseded", "summary": "用户已发起新的请求，停止本轮工具调用；不要覆盖后续选择。"})
+                return self.superseded(event)
             from dataclasses import replace as _replace
             remembered = self.plugin.state.target(actor.key)
             exec_target = reference or Target(room)

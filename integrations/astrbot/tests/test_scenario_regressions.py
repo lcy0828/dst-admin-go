@@ -13,9 +13,21 @@ class DialogueRegressions(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_quantity_does_not_reserve_uncertain_write(self):
         for count in ("0", "-3", "41"):
             result = await self.scenario([f"给 阿青 {count} 个肉丸"])
+            self.assertIn("这次尚未提交", result["turns"][0]["output"][-1])
+            self.assertIn("最多 40", result["turns"][0]["output"][-1])
             self.assertFalse(result["ledger"])
             self.assertFalse(any(c["write"] for c in result["apiCalls"]))
-            self.assertIn("参数", result["turns"][0]["output"][-1])
+
+    async def test_grant_variants_through_actual_at_handler_never_invoke_model(self):
+        capabilities = lab.directory()
+        next(c for c in capabilities if c['id']=='player.give_item')['parameters']['properties']['count']['maximum']=400
+        for turns in (["给玩家 阿青 发 100 个木头"], ["发 100 个木头给 阿青"],
+                      ["给玩家发 100 个木头", "阿青"]):
+            result=await self.scenario(turns, fixture={'capabilities':capabilities})
+            writes=[c for c in result['apiCalls'] if c['api']=='api_runBotCapability']
+            self.assertEqual(len(writes),1,result['turns'])
+            self.assertEqual(writes[0]['arguments']['body']['parameters']['count'],100)
+            self.assertFalse(result['modelRequests'])
 
     async def test_private_disabled_cannot_be_bypassed_with_prefix_and_at(self):
         result = await self.scenario([{"text": "/dst 谁在线", "private": True}], config={"allow_private": False})

@@ -7,7 +7,8 @@ import time
 
 import httpx
 
-from .broadcast import READ_TOOLS, BroadcastEngine
+from .broadcast import BroadcastEngine
+from .display import REFERENCE_LIMIT, REFERENCE_TTL
 from .chat_stream import CHAT_STREAM_TOOL, NOTICE_READ_TOOLS, chat_stream_session, supports_chat_stream
 from .gateway import QueryError, unpack
 from .notice_settings import notices_enabled
@@ -32,6 +33,9 @@ class Notifications:
         self.storage_lock = asyncio.Lock()
         self.saved = {}
         self.cache, self.read_tasks = {}, {}
+        # Notifications retain their own small budget, so two foreground
+        # queries cannot block joins/chat enrichment behind model operations.
+        self.read_limit = asyncio.Semaphore(2)
         self.source = ""
         self.status = "关闭"
         self.session_errors = {}
@@ -100,6 +104,32 @@ class Notifications:
                 raise QueryError("NOTICE_STATE_SAVE_FAILED")
             self.saved = candidate
 
+    async def remember_reference(self, session, source, row):
+        """Share the notification journal so its next save keeps query replies."""
+        async with self.lock:
+            await self._remember_reference(session, source, row)
+
+    async def _remember_reference(self, session, source, row):
+        engine = self.engines.get(session)
+        if engine:
+            async with engine.lock:
+                if (self.engines.get(session) is not engine
+                        or self.source != self.plugin.connection_identity()
+                        or self.plugin.connections.source() != source):
+                    return
+                engine.state["references"].append(row)
+                await engine.persist()
+        else:
+            saved = self.saved.get(session, {})
+            if saved.get("source") != source:
+                return
+            state = copy.deepcopy(saved.get("state", {}))
+            state["references"] = [
+                ref for ref in [*state.get("references", []), row]
+                if 0 <= time.time() - ref.get("at", 0) <= REFERENCE_TTL
+            ][-REFERENCE_LIMIT:]
+            await self.save(session, source, state)
+
     async def read(self, name, args):
         if name not in NOTICE_READ_TOOLS:
             raise QueryError("PERMISSION_DENIED")
@@ -151,7 +181,7 @@ class Notifications:
             or tool.annotations.readOnlyHint is not True
         ):
             raise QueryError("NOTICE_CAPABILITY_MISSING")
-        async with asyncio.timeout(20), p.background, p.gateway.limit:
+        async with asyncio.timeout(20), self.read_limit:
             if self.source != p.connection_identity() or name != SYSTEM_TOOL and args.get("path", {}).get("roomId") not in {
                 r for e in self.engines.values() for r in e.rooms
             }:

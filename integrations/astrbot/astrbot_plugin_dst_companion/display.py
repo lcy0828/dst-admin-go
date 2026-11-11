@@ -4,6 +4,8 @@ import re
 from datetime import datetime, timedelta, timezone
 
 BEIJING = timezone(timedelta(hours=8))
+REFERENCE_TTL = 7 * 86400
+REFERENCE_LIMIT = 256
 GAME_GLYPHS = re.compile(r"[\ue000-\uf8ff\U000f0000-\U000ffffd\U00100000-\U0010fffd]")
 
 

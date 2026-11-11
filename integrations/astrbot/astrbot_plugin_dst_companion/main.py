@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
@@ -19,7 +20,7 @@ from .configuration import CATEGORIES, ConfigEditor, Configuration, fingerprint,
 from .connections import Connections
 from .display import chat_text
 from .engine import Engine
-from .gateway import Gateway, QueryError
+from .gateway import Gateway, QueryError, check_submission
 from .generic import GenericOperations
 from .group_permissions import ALL_WRITES, GroupRoles, grants, simple_access
 from .group_permissions import enabled as group_permissions_enabled
@@ -86,7 +87,8 @@ class DSTCompanion(Star):
         self.handlers = set()
         self.policy = Policy(self.native)
         self.gateway = Gateway(
-            self.transport, self.policy.authorize, authorize_receipt=self.policy.authorize_receipt
+            self.transport, self.policy.authorize, authorize_receipt=self.policy.authorize_receipt,
+            write_guard=lambda actor: self.generic.ensure_current(actor.event, actor),
         )
         self.read_receipts = ReadReceipts(self.get_kv_data, self.put_kv_data)
         self.directory = Directory(self.gateway, version=lambda: self.private_panel.protocol if self.private_panel.configured else 1, receipts=self.read_receipts)
@@ -109,6 +111,7 @@ class DSTCompanion(Star):
             directory=self.directory,
             settings=self.effective,
             message_renderer=self.render_message,
+            reader=self.generic.read_native,
         )
 
     def actor(self, event, *, allow_stale=False):
@@ -396,6 +399,7 @@ class DSTCompanion(Star):
             await self.private_panel.refresh()
             if write and group_permissions_enabled(self.config) and not self.private_panel.full_access:
                 raise QueryError("PANEL_FULL_CREDENTIAL_REQUIRED")
+        check_submission()
         if name == "companion_gateway":
             if not self.private_panel.configured or "companion-gateway-v1" not in self.private_panel.features:
                 raise QueryError("CAPABILITY_INCOMPATIBLE")
@@ -586,22 +590,13 @@ class DSTCompanion(Star):
             self.state.associate_text(actor.scope, text, target, source=source)
             self.state.associate_text(group_scope, text, target, source=source)
             if target.player and message_id and not isinstance(message_id, bool):
-                saved = self.notifications.saved.get(group)
-                if isinstance(saved, dict) and saved.get("source") == source:
-                    refs = saved.setdefault("state", {}).setdefault("references", [])
-                    refs.append(
-                        {
-                            "messageId": str(message_id),
-                            "selfId": str(actor.scope[1]),
-                            "at": time.time(),
-                            "related": {
-                                "roomId": target.room,
-                                "playerId": target.player,
-                                "name": target.name,
-                            },
-                        }
-                    )
-                    del refs[:-128]
+                try:
+                    await self.notifications.remember_reference(group, source, {
+                        "messageId": str(message_id), "selfId": str(actor.scope[1]), "at": time.time(),
+                        "related": {"roomId": target.room, "playerId": target.player, "name": target.name},
+                    })
+                except Exception:
+                    self.logger.warning("查询已发送，引用关联暂未保存；未重发消息。")
         if choice and actor.key in self.state.choices:
             self.state.choice_sent(actor.key, message_id, sequence)
         return message_id
@@ -703,17 +698,17 @@ class DSTCompanion(Star):
             from .routing import is_cancel_reply
             if looks_like_confirmation(text) or is_cancel_reply(text) or self.generic.accepts(generic_form, text, woken, quote):
                 event.stop_event()
-                self.state.claim_request(actor.key, str(event.message_obj.message_id))
+                self.claim_request(actor, event)
                 try:
                     answer = await self.generic.continuation(actor, text)
                 except QueryError as failure:
                     answer = failure.message or "结果尚未确认，请查询原任务，未自动重试。"
-                await self.send_reply(event, answer or "请按上一条提示填写，或回复“取消”。")
+                await self.send_reply(event, answer or "请按上一条提示填写，或回复“取消”。", request_actor=actor)
                 return
             if woken:
                 self.state.clear_form(actor.key)
         if woken or self.state.handles(actor.key, text, quote, woken):
-            self.state.claim_request(actor.key, str(event.message_obj.message_id))
+            self.claim_request(actor, event)
         if woken and text == "迁移配置":
             event.stop_event()
             if not event.is_admin() or self.config_editor.save is None:
@@ -903,12 +898,40 @@ class DSTCompanion(Star):
         finally:
             self.handlers.discard(task)
 
+    def claim_request(self, actor, event):
+        message = str(event.message_obj.message_id)
+        # Setup also uses this boundary before enrollment/configuration reads.
+        # The key is adapter identity only; it grants no room or capability.
+        key = actor.key if actor else (
+            str(event.get_platform_id()), str(event.message_obj.self_id),
+            str(event.unified_msg_origin), str(event.get_sender_id()),
+        )
+        self.state.claim_request(key, message)
+        self.model_presentation.supersede(key, message)
+        return key
+
+    def stop_obsolete_model(self, event, response=None):
+        if not self.model_presentation.obsolete(event, self.state):
+            return False
+        self.model_presentation.stop(event)
+        if response is not None:
+            response.completion_text = ""
+            response.result_chain = None
+            response.reasoning_content = ""
+        return True
+
     @filter.on_llm_request(priority=-100)
     async def on_model_request(self, event: AstrMessageEvent, request):
         if not self.config.get("enabled", False):
             return
         await self.prepare(event)
         actor = self.actor(event)
+        parsed = self.input(event) if actor else None
+        if parsed:
+            self.model_presentation.begin(event, actor, self.connection_identity(), parsed[0],
+                dict(self.effective(str(event.unified_msg_origin))["roomAliases"]))
+        if self.stop_obsolete_model(event):
+            return
         tools = getattr(request, "func_tool", None)
         initial_prompt = getattr(request, "system_prompt", "") or ""
         try:
@@ -1021,15 +1044,8 @@ class DSTCompanion(Star):
             request.func_tool = ToolSet(selected)
         if actor:
             request.system_prompt += STYLE
-            parsed = self.input(event)
-            if parsed:
-                self.model_presentation.begin(
-                    event,
-                    actor,
-                    self.connection_identity(),
-                    parsed[0],
-                    dict(self.effective(str(event.unified_msg_origin))["roomAliases"]),
-                )
+        if self.stop_obsolete_model(event):
+            return
         evidence = self.state.evidence(actor.key) if actor else []
         if evidence:
             # Historical target/evidence only, not a fresh snapshot or a new
@@ -1042,10 +1058,13 @@ class DSTCompanion(Star):
     @filter.on_using_llm_tool(priority=-100)
     async def on_model_tool(self, event: AstrMessageEvent, tool, tool_args):
         self.model_presentation.tool(event, getattr(tool, "name", ""))
+        self.stop_obsolete_model(event)
 
     @filter.on_llm_response(priority=-100)
     async def on_model_response(self, event: AstrMessageEvent, response):
         if not self.config.get("enabled", False) or not self.alive:
+            return
+        if self.stop_obsolete_model(event, response):
             return
         calls = getattr(response, "tools_call_name", None) or []
         if self.actor(event) and any(name in DST_TOOLS for name in calls):
@@ -1102,6 +1121,21 @@ class DSTCompanion(Star):
 
     @filter.on_agent_done(priority=-100)
     async def on_model_done(self, event: AstrMessageEvent, run_context, response):
+        obsolete = self.stop_obsolete_model(event, response)
+        self.model_presentation.finish(event)
+        if obsolete:
+            # AstrBot appends the final answer before invoking these hooks.
+            # Retain tool call pairing but do not save stale conclusions as
+            # evidence for the next request in the conversation.
+            from astrbot.core.agent.message import TextPart, ThinkPart
+
+            messages = getattr(run_context, "messages", None)
+            if messages and messages[-1].role == "assistant" and isinstance(messages[-1].content, list):
+                messages[-1].content = [
+                    *[part for part in messages[-1].content if not isinstance(part, (TextPart, ThinkPart))],
+                    TextPart(text="本次饥荒请求已由后续请求替代，旧回复未发送；已提交的游戏操作请查看原任务结果。"),
+                ]
+            return
         value = self.model_presentation.get(event)
         if not value or not value.original_hash or value.applied_text != response.completion_text:
             return
@@ -1434,12 +1468,14 @@ class DSTCompanion(Star):
             or not str(message_id)
         ):
             raise QueryError("NOTICE_RESULT_UNCERTAIN")
+        target = Target(related["roomId"], related.get("playerId", ""), related.get("name", ""))
         self.state.associate(
             (platform_id, self_id, session),
             message_id,
-            Target(related["roomId"], related.get("playerId", ""), related.get("name", "")),
+            target,
             source=source,
         )
+        self.state.associate_text((platform_id, self_id, session), text, target, source=source)
         self.notifications.delivery_errors.pop(session, None)
         return {"messageId": str(message_id), "selfId": self_id}
 
@@ -1475,6 +1511,7 @@ class DSTCompanion(Star):
 
     async def terminate(self):
         self.alive = False
+        self.model_presentation.close()
         await self.updates.close()
         await self.group_roles.close()
         await self.notifications.close()

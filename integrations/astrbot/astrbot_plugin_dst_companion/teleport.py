@@ -1,8 +1,68 @@
 """Presentation for server-owned teleport previews; no executable templates."""
 from datetime import datetime
+import unicodedata
+
 from .formatters import safe
+from .gateway import QueryError
+
+
+def common_destination(item, name):
+    """Use the panel-owned catalog; an old panel publishes no such actions."""
+    value = name.strip().casefold()
+    for action in item.get("actions", []):
+        canonical = (action.get("parameters") or {}).get("locationName")
+        if isinstance(canonical, str) and value in {
+            v.casefold() for v in [canonical, *action.get("searchTerms", [])] if isinstance(v, str)
+        }:
+            return canonical
+    return None
+
+
+async def saved_destinations(queries, actor, room, parameters, deadline, *, scoped, identified=False):
+    """At most two reads; a miss offers real choices, never a fuzzy movement."""
+    name = parameters["locationName"]
+    query = {"search": name}
+    if parameters.get("worldId"):
+        query["worldId"] = parameters["worldId"]
+
+    async def read(values):
+        data = await queries.call(actor, "api_listRoomLocations",
+                                  {"path": {"roomId": room}, "query": values}, deadline)
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list) or len(data["items"]) > 50:
+            raise QueryError("MCP_RESPONSE_INVALID")
+        if any(not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row[k]
+               for k in ("id", "name", "worldId")) for row in data["items"]):
+            raise QueryError("MCP_RESPONSE_INVALID")
+        return data
+
+    normalized = lambda value: unicodedata.normalize("NFKC", value.strip()).lower()
+    data = await read(query)
+    exact = [row for row in data["items"] if normalized(row["name"]) == normalized(name)]
+    if len(exact) == 1 and not data.get("hasMore"):
+        chosen = {"locationName": exact[0]["name"]}
+        if identified:
+            chosen["locationId"] = exact[0]["id"]
+        if scoped:
+            chosen["worldId"] = exact[0]["worldId"]
+        return chosen, [], ""
+    if not exact:
+        data = await read({k:v for k,v in query.items() if k != "search"})
+    rows = exact or data["items"]
+    if not scoped:
+        # An older panel cannot freeze the selected world in its recipe.
+        # Never resolve duplicate destination names by guessing a world.
+        rows = [r for r in rows if sum(normalized(o["name"]) == normalized(r["name"]) for o in rows) == 1]
+        if data.get("hasMore"):
+            rows = []  # Unseen pages could contain the same name in another world.
+    note = ("存在同名地点，请选择世界与地点；尚未传送。" if exact else
+            "没有找到名称完全相同的地点，请选择已保存地点；尚未传送。")
+    if data.get("hasMore"):
+        note += "这里只列出部分地点，也可重新输入更完整的地点名称。"
+    return None, rows, note
 
 REASONS = {
+    "LANDMARK_SCAN_INCOMPLETE": "地点检查未完成，尚未传送；请稍后再试。",
+    "LANDMARK_NOT_FOUND": "玩家所在世界没有找到这个地点；尚未传送。可换一个目的地。",
     "PLAYER_OFFLINE": "玩家已离线，请等玩家进入游戏后再试。",
     "PLAYER_MOVING_WORLD": "玩家正在切换世界，请稍后重新检查。",
     "PLAYER_GHOST": "玩家目前是幽灵，请先复活。",
@@ -39,7 +99,8 @@ def describe(data):
     name = safe(data.get("playerName") or data.get("playerId") or "玩家")
     point = safe(data.get("locationName") or "选定位置")
     reason = REASONS.get(data.get("reason"))
-    return (f"{label}\n{name} → {point}\nX {safe(data.get('x'))} / Z {safe(data.get('z'))}"
+    coordinates = f"\nX {safe(data['x'])} / Z {safe(data['z'])}" if isinstance(data.get('x'), (float, int)) and isinstance(data.get('z'), (float, int)) else ""
+    return (f"{label}\n{name} → {point}" + coordinates
             + ("\n" + reason if reason else "")
             + ("\n世界存档发生过变化，请确认基地等建筑仍在原处。" if data.get("needsReview") else ""))
 

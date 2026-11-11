@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from .display import room_label, time_text
+from .display import REFERENCE_LIMIT, REFERENCE_TTL, room_label, time_text
 from .display import text as display_text
 from .message_templates import DEFINITIONS, render_text
 
@@ -138,6 +138,8 @@ class BroadcastEngine:
         self.lock = asyncio.Lock()
         self.worlds = {}
         self.cache = {}
+        self.presence_seeded = set()
+        self.presence_versions = {}
         self.grace = max(5, min(60, int(self.options.get("leave_grace_seconds", 10))))
 
     def message(self, room_id, kind, values):
@@ -168,8 +170,8 @@ class BroadcastEngine:
         self.state["seen"] = self.state["seen"][-1024:]
         self.state["deliveries"] = self.state["deliveries"][-100:]
         self.state["references"] = [
-            row for row in self.state["references"] if 0 <= self.clock() - row.get("at", 0) <= 86400
-        ][-128:]
+            row for row in self.state["references"] if 0 <= self.clock() - row.get("at", 0) <= REFERENCE_TTL
+        ][-REFERENCE_LIMIT:]
         self.state["presence_decisions"] = self.state["presence_decisions"][-100:]
         for room in self.state["rooms"].values():
             if len(room["profiles"]) > 256:
@@ -247,9 +249,11 @@ class BroadcastEngine:
                     room["online"].pop(uid, None)
 
     async def seed(self, room_id):
+        version = self.presence_versions.get(room_id, 0)
         worlds = await self.call("api_listRoomWorlds", {"path": {"roomId": room_id}})
         self.worlds[room_id] = {item["id"]: item for item in worlds.get("items", [])}
-        # Current presence replaces stale persisted membership; pending events survive.
+        # Only startup/reset establishes membership. A periodic snapshot may
+        # already contain a newcomer whose join event is still in flight.
         data = await self.call(
             "api_listRoomPlayers",
             {
@@ -259,17 +263,22 @@ class BroadcastEngine:
         )
         async with self.lock:
             room = self.room(room_id)
-            if (
+            baseline = (room_id not in self.presence_seeded or room.get("presence_reseed")) and version == self.presence_versions.get(room_id, 0)
+            healthy = (
                 not data.get("staleOnline")
                 and data.get("total", 0) <= 100
                 and all(item.get("presenceStatus") == "live" for item in data.get("items", []))
-            ):
+            )
+            if baseline and healthy:
                 room["online"].clear()
             for item in data.get("items", []):
                 self.merge_profile(room_id, item)
-                if item.get("online") and item.get("presenceStatus") == "live":
+                if baseline and healthy and item.get("online") and item.get("presenceStatus") == "live":
                     world = item.get("worldId") if item.get("worldConfirmed") else "unknown"
                     room["online"][item["id"]] = [world or "unknown"]
+            if baseline and healthy:
+                self.presence_seeded.add(room_id)
+                room.pop("presence_reseed", None)
             await self.persist()
         return list(self.worlds[room_id])
 
@@ -280,6 +289,8 @@ class BroadcastEngine:
             room = self.room(room_id)
             if event_name in ("runtime.gap", "runtime.reset"):
                 self.quiet_presence(room_id, self.grace)
+                room["presence_reseed"] = True
+                self.presence_versions[room_id] = self.presence_versions.get(room_id, 0) + 1
                 self.log(f"{self.rooms[room_id]} 事件源重置或出现缺口，抑制迁移与重放播报")
             if event_name != "runtime.event":
                 if cursor:
@@ -314,6 +325,7 @@ class BroadcastEngine:
                 room_id,
                 {"id": uid, **({"prefab": fields["prefab"]} if fields.get("prefab") else {})},
             )
+            self.presence_versions[room_id] = self.presence_versions.get(room_id, 0) + 1
             active = set(room["online"].get(uid, []))
             pending = room["pending"].get(uid)
             quiet = room["quiet_until"] > self.clock()

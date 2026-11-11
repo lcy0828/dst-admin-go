@@ -60,9 +60,13 @@ class Setup:
         }:
             return False
         event.stop_event()  # Claim before any asynchronous read or persistence.
+        key = p.claim_request(None, event)
+        p.state.begin(key)
         from astrbot.api.event import MessageChain
 
         async def reply(text):
+            if not p.state.current_request(key, str(event.message_obj.message_id)):
+                return
             try:
                 await event.send(MessageChain().message(text))
             except Exception:
