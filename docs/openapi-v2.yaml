@@ -4522,7 +4522,7 @@ paths:
       - name: queryId
         in: path
         required: true
-        schema: {type: string, enum: [world_info, online_players, entity_count, player_modes]}
+        schema: {type: string, enum: [world_info, online_players, entity_count, player_modes, landmarks]}
     get:
       tags: [WorldState, Players]
       operationId: queryRoomWorld
@@ -4531,7 +4531,7 @@ paths:
         category: world
         access: read
       x-dst-intent:
-        purpose: "为普通用户执行固定白名单只读游戏查询：世界信息、当前分片在线玩家、玩家模式状态、按 Prefab 统计实体。只接受结构化参数，不能执行自定义命令或 Lua。"
+        purpose: "为普通用户执行固定白名单只读游戏查询：世界信息、当前分片在线玩家、玩家模式状态、按 Prefab 统计实体、常见地点。只接受结构化参数，不能执行自定义命令或 Lua。"
         actions: ["查询世界信息", "查询分片在线玩家", "统计分片实体数量"]
         queries: ["地面有多少个蜘蛛巢", "普通用户查询当前季节和在线玩家", "洞穴里的模组实体有多少个"]
         terms: ["只读查询", "实体计数", "prefab", "蜘蛛巢", "AstrBot", "普通用户"]
@@ -7647,8 +7647,8 @@ paths:
         terms: ["发物品", "给物品", "肉丸", "中文物品名"]
         resultNotes: "sent、无输出、背包总数不是发放成功证据；不确定时只读原回执，不重发。"
       x-dst-tool: {readOnly: false, destructive: true, risk: high, runtime: shard-ready, tags: [player, item, grant]}
-      summary: Give 1–40 known vanilla items to a confirmed online player once
-      description: Requires game management permission. Accepts only exact vanilla inventory item name or Prefab and an integer count in units. No Lua, custom commands, animals, buildings or arbitrary Mod prefabs. Confirms the shard-local player entity before dispatch. Never retries on migration or uncertain receipt. Inspect status, complete and granted; sent or absent output is not success. Full inventory may drop items at the player. Read the original item-grant receipt rather than repeating the action.
+      summary: Give 1–400 known vanilla items to a confirmed online player once
+      description: Requires game management permission. Accepts only exact vanilla inventory item name or Prefab and an integer count in units. Batches using actual stack sizes with at most 40 spawned entities and 400 units; nonstackable items remain limited to 40. Validates and stages all stacks before delivery. No Lua, custom commands, animals, buildings or arbitrary Mod prefabs. Confirms the shard-local player entity before dispatch. Never retries on migration or uncertain receipt. Inspect status, complete and granted; sent or absent output is not success. Full inventory may drop items at the player. Read the original item-grant receipt rather than repeating the action.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -7660,7 +7660,7 @@ paths:
               required: [item, count]
               properties:
                 item: {type: string, minLength: 1, maxLength: 100}
-                count: {type: integer, minimum: 1, maximum: 40}
+                count: {type: integer, minimum: 1, maximum: 400}
       responses:
         "201": {description: Correlated item grant result; does not imply successful delivery, content: {application/json: {schema: {$ref: '#/components/schemas/ItemGrantEnvelope'}}}}
         "409": {$ref: '#/components/responses/Conflict'}
@@ -7698,14 +7698,14 @@ paths:
         category: profile
         confirmation: none
       x-dst-intent:
-        purpose: "在确认在线的玩家附近受控生成1–5只普通生物，仅固定白名单。"
+        purpose: "在确认在线的玩家附近受控生成1–5只白名单生物，仅固定白名单。"
         actions: ["生成座狼", "玩家附近刷生物"]
         queries: ["在玩家附近生成两只座狼"]
         terms: ["刷怪", "座狼", "狗王", "生成生物"]
-        resultNotes: "仅支持座狼、猎犬、蜘蛛、猪人、兔子和蜜蜂；不接受Lua、坐标或命令定义。没有输出或sent不代表成功，部分失败不自动重试，使用原requestId补读。"
+        resultNotes: "仅支持座狼、猎犬、蜘蛛、猪人、兔子、蜜蜂和独眼巨鹿；不接受Lua、坐标或命令定义。没有输出或sent不代表成功，部分失败不自动重试，使用原requestId补读。"
       x-dst-tool: {readOnly: false, destructive: true, risk: high, runtime: shard-ready, tags: [player, entity, spawn]}
       summary: Spawn 1–5 allowlisted creatures near a confirmed online player once
-      description: Game management only. Exact names or Prefabs for warg (座狼/狗王), hound, spider, pigman, rabbit and bee. Bosses, beefalo, structures and Mod constructors are not accepted. No caller Lua, coordinates, command ID or classification flags. Confirms the player's current shard and preflights up to 40 land points 6–13 units away before spawning. Does not guarantee safety from game Mod bugs. A sent command, absent output or truncated receipt is uncertain. Read the original receipt and never automatically repeat, including after migration or partial failure.
+      description: Game management only. Exact names or Prefabs for warg (座狼/狗王), hound, spider, pigman, rabbit, bee and deerclops. Other bosses, beefalo, structures and Mod constructors are not accepted. No caller Lua, coordinates, command ID or classification flags. Confirms the player's current shard and preflights up to 40 land points 6–13 units away before spawning. Does not guarantee safety from game Mod bugs. A sent command, absent output or truncated receipt is uncertain. Read the original receipt and never automatically repeat, including after migration or partial failure.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -10452,12 +10452,14 @@ paths:
         category: status
       x-dst-intent:
         purpose: "在当前授权房间内检查玩家传送目的地。地点绑定当前游戏世界，传送必须经过实时检查和用户确认。"
-        actions: ["检查玩家传送目的地"]
-        queries: ["把玩家甲传送到基地", "传送前检查落点"]
-        terms: ["地点", "传送", "基地"]
+        actions: ["传送玩家到地点", "检查玩家传送目的地"]
+        queries: ["把玩家甲传送到基地", "传送玩家甲到测试地点1", "传送前检查落点"]
+        terms: ["地点", "传送", "基地", "传送玩家", "teleport"]
         resultNotes: "prepared 仅为预检，需用户在面板或可信插件中确认。仅 confirmed 表示位置回读确认；uncertain 查询原结果，不能自动重复执行。"
       summary: 检查玩家传送目的地
-      description: Named destinations belong to one room, world and game session. Prepare checks a live
+      description: Common names (出生点, 猪王, 月岛, 绿洲, 龙蝇沙漠, 蜂后) resolve from the player's
+        current shard without saving a location. Multiple matches return needs_selection and candidates;
+        select a landmarkRef and prepare again. Saved destinations belong to one room, world and game session. Prepare checks a live
         landing point; execute requires trusted human confirmation within 60 seconds. Only confirmed movement
         evidence is success. Never replay uncertain results.
       parameters:
@@ -10974,6 +10976,11 @@ components:
       type: object
       additionalProperties: false
       properties:
+        landmarkRef:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Exact candidate ID returned by a common-destination selection; prepare checks it again.
         playerId:
           type: string
           minLength: 1
@@ -11009,6 +11016,10 @@ components:
       additionalProperties: false
       properties:
         needsReview: {type: boolean}
+        candidates:
+          type: array
+          maxItems: 48
+          items: {$ref: '#/components/schemas/WorldLandmarkPoint'}
         id:
           type: string
           minLength: 1
@@ -11050,6 +11061,7 @@ components:
           enum:
           - preparing
           - prepared
+          - needs_selection
           - dispatching
           - confirmed
           - rejected
@@ -11254,8 +11266,8 @@ components:
         playerId: {type: string}
         prefab: {type: string}
         name: {type: string}
-        requested: {type: integer, minimum: 1, maximum: 40}
-        granted: {type: integer, minimum: 0, maximum: 40}
+        requested: {type: integer, minimum: 1, maximum: 400}
+        granted: {type: integer, minimum: 0, maximum: 400}
         status: {type: string, enum: [running, succeeded, failed, uncertain]}
         complete: {type: boolean}
         executionOutcome: {type: string, enum: [unconfirmed, confirmed, rejected]}
@@ -14473,7 +14485,7 @@ components:
       required: [queryId, roomId, worldId, status, source, cached, complete, transportOutcome, executionOutcome, resultState, mayHaveExecuted, data, error]
       properties:
         queryRunId: {type: string, format: uuid}
-        queryId: {type: string, enum: [world_info, online_players, entity_count, player_modes]}
+        queryId: {type: string, enum: [world_info, online_players, entity_count, player_modes, landmarks]}
         roomId: {type: string}
         worldId: {type: string}
         status: {type: string, enum: [succeeded, partial, failed, timed_out, uncertain, unavailable]}
@@ -14495,6 +14507,7 @@ components:
             - {$ref: '#/components/schemas/WorldQueryPlayersData'}
             - {$ref: '#/components/schemas/WorldQueryWorldData'}
             - {$ref: '#/components/schemas/WorldQueryModesData'}
+            - {$ref: '#/components/schemas/WorldQueryLandmarksData'}
             - {type: 'null'}
         error:
           oneOf:
@@ -14505,6 +14518,25 @@ components:
               properties:
                 code: {type: string}
                 message: {type: string}
+    WorldLandmarkPoint:
+      type: object
+      additionalProperties: false
+      required: [id, landmarkId, x, z]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 100}
+        landmarkId: {type: string, enum: [spawn, pig_king, lunar_island, oasis, dragonfly, bee_queen]}
+        x: {type: number, minimum: -100000, maximum: 100000}
+        z: {type: number, minimum: -100000, maximum: 100000}
+    WorldQueryLandmarksData:
+      type: object
+      additionalProperties: false
+      required: [items, count]
+      properties:
+        count: {type: integer, minimum: 0, maximum: 48}
+        items:
+          type: array
+          maxItems: 48
+          items: {$ref: '#/components/schemas/WorldLandmarkPoint'}
     WorldQueryEnvelope:
       type: object
       required: [data, error, meta]

@@ -257,7 +257,7 @@ func TestGiveItemTargetsKUAndRejectsUnsafePrefab(t *testing.T) {
 	if _, err := service.Execute(context.Background(), "room", "world", request); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(sender.script, `v.userid=="KU_SAFE_PLAYER"`) || !strings.Contains(sender.script, `SpawnPrefab("goldnugget")`) || !strings.Contains(sender.script, `for i=1,3`) {
+	if !strings.Contains(sender.script, `v.userid=="KU_SAFE_PLAYER"`) || !strings.Contains(sender.script, `SpawnPrefab("goldnugget")`) || !strings.Contains(sender.script, `local requested=3`) {
 		t.Fatalf("unexpected give script: %s", sender.script)
 	}
 	if !strings.Contains(sender.script, `local mode="units"`) {
@@ -268,7 +268,7 @@ func TestGiveItemTargetsKUAndRejectsUnsafePrefab(t *testing.T) {
 	if _, err := service.Execute(context.Background(), "room", "world", request); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(sender.script, `local mode="stacks"`) || !strings.Contains(sender.script, `stack:SetStackSize(size)`) || !strings.Contains(sender.script, `for i=1,2`) {
+	if !strings.Contains(sender.script, `local mode="stacks"`) || !strings.Contains(sender.script, `stack:SetStackSize(units)`) || !strings.Contains(sender.script, `local requested=2`) {
 		t.Fatalf("stack quantity mode was not rendered: %s", sender.script)
 	}
 	request.Arguments["quantity_mode"] = "crates"

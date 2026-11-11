@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "86e13c77a4c8cf835fd3e7463d5655fcbab680fd9831215f0d01ae45ebef6979",
+  "operationsSHA256": "a810b2c1fb6dc6f15c83e1dba241ad64bf6ad4ba4dce783f7fd1f974f616926d",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -2525,7 +2525,7 @@
       "access": "write",
       "risk": "high",
       "runtime": "shard-ready",
-      "title": "Give 1–40 known vanilla items to a confirmed online player once"
+      "title": "Give 1–400 known vanilla items to a confirmed online player once"
     },
     {
       "operationId": "importArtworkPack",

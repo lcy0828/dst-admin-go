@@ -60,7 +60,7 @@ func TestFixedItemGrantHTTPValidatesBeforeDispatchAndHidesScripts(t *testing.T) 
 	router := gin.New()
 	h.Register(router.Group("/api/v2"))
 	path := "/api/v2/rooms/room/players/KU_TEST123/actions/give-item"
-	for _, body := range []string{`{"item":"meatballs","count":41}`, `{"item":"meatballs","count":1.5}`, `{"item":"beefalo","count":3}`, `{"item":"meatballs\");c_shutdown()--","count":3}`, `{"item":"meatballs","count":3,"readOnly":true}`, `{"item":"meatballs","count":3,"commandId":"custom"}`, `{"item":"meatballs","count":3,"count":4}`} {
+	for _, body := range []string{`{"item":"meatballs","count":401}`, `{"item":"meatballs","count":1.5}`, `{"item":"beefalo","count":3}`, `{"item":"meatballs\");c_shutdown()--","count":3}`, `{"item":"meatballs","count":3,"readOnly":true}`, `{"item":"meatballs","count":3,"commandId":"custom"}`, `{"item":"meatballs","count":3,"count":4}`} {
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")

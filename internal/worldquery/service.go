@@ -175,6 +175,9 @@ func (s *Service) Query(ctx context.Context, p Principal, q Request) (Result, er
 		cost := len(b) + len(cacheKey)
 		if len(s.cache) < 128 && s.cacheBytes+cost <= 2<<20 {
 			expires := s.now().Add(3 * time.Second)
+			if q.QueryID == "landmarks" {
+				expires = s.now().Add(5 * time.Second)
+			}
 			if result.Source == "snapshot" && result.ObservedAt != nil && result.ObservedAt.Add(10*time.Second).Before(expires) {
 				expires = result.ObservedAt.Add(10 * time.Second)
 			}
@@ -207,7 +210,7 @@ func (s *Service) query(ctx context.Context, p Principal, q Request, identity, w
 		}
 		return unavailable(base(q), dstruntime.ErrRuntimeUnavailable), nil
 	}
-	if q.QueryID == "entity_count" {
+	if q.QueryID == "entity_count" || q.QueryID == "landmarks" {
 		s.mu.Lock()
 		now := s.now()
 		for k, at := range s.scans {

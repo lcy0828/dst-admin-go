@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"dont/internal/console"
+	"dont/internal/landmarks"
 	"dont/internal/operationlease"
 	"dont/internal/players"
 	"dont/internal/rooms"
+	"dont/internal/worldquery"
 	"github.com/google/uuid"
 )
 
@@ -40,6 +42,9 @@ type LeaseService interface {
 var playerIDPattern = regexp.MustCompile(`^KU_[A-Za-z0-9_-]{3,64}$`)
 
 type Service struct {
+	landmarks interface {
+		Query(context.Context, worldquery.Principal, worldquery.Request) (worldquery.Result, error)
+	}
 	leases    LeaseService
 	store     *Store
 	runtime   Runtime
@@ -61,6 +66,11 @@ func (s *Service) Configure(p Players, binding func(context.Context, string, str
 	s.binding = binding
 }
 func (s *Service) ConfigureLeases(leases LeaseService) { s.leases = leases }
+func (s *Service) ConfigureLandmarks(q interface {
+	Query(context.Context, worldquery.Principal, worldquery.Request) (worldquery.Result, error)
+}) {
+	s.landmarks = q
+}
 func (s *Service) ConfigureMapSource(f func(string, string, string, string, float64, float64) (string, error)) {
 	s.mapSource = f
 }
@@ -274,6 +284,10 @@ func (s *Service) Prepare(ctx context.Context, actor, room string, in PrepareInp
 	if actor == "" {
 		return Preview{}, ErrDenied
 	}
+	landmarkID := landmarks.ID(in.LocationName)
+	if len(in.LandmarkRef) > 100 || in.LandmarkRef != "" && (landmarkID == "" || in.LocationID != "") {
+		return Preview{}, ErrInvalid
+	}
 	destinations := 0
 	for _, v := range []bool{in.LocationID != "", in.LocationName != "", in.TargetPlayerID != "", in.X != nil || in.Z != nil} {
 		if v {
@@ -301,9 +315,48 @@ func (s *Service) Prepare(ctx context.Context, actor, room string, in PrepareInp
 		return Preview{}, e
 	}
 	p := Preview{ID: uuid.NewString(), Actor: actor, RoomID: room, WorldID: world, PlayerID: id, Identity: identity.Instance, BindingRevision: binding, State: "preparing", CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(60 * time.Second)}
-	if in.LocationID != "" || in.LocationName != "" {
+	var saved *Location
+	if in.LocationID == "" && in.LocationName != "" && in.LandmarkRef == "" {
+		// Preserve saved-name semantics, including common names and aliases.
+		// Only a missing saved name permits a common landmark lookup.
+		l, err := s.store.Resolve(room, world, in.LocationName)
+		if err == nil {
+			saved = &l
+		} else if !errors.Is(err, ErrNotFound) || landmarkID == "" {
+			return Preview{}, err
+		}
+	}
+	if saved == nil && in.LocationID == "" && landmarkID != "" {
+		if s.landmarks == nil {
+			return Preview{}, ErrUnavailable
+		}
+		result, err := s.landmarks.Query(ctx, worldquery.Principal{ID: actor, RoomID: room}, worldquery.Request{RoomID: room, WorldID: world, QueryID: "landmarks"})
+		if err != nil || !result.Complete || result.Status != "succeeded" {
+			return Preview{RoomID: room, WorldID: world, PlayerID: id, State: "rejected", Reason: "LANDMARK_SCAN_INCOMPLETE"}, nil
+		}
+		var data landmarks.Data
+		if json.Unmarshal(result.Data, &data) != nil {
+			return Preview{}, ErrUnavailable
+		}
+		choices := []landmarks.Point{}
+		for _, point := range data.Items {
+			if point.Valid() && point.LandmarkID == landmarkID && (in.LandmarkRef == "" || point.ID == in.LandmarkRef) {
+				choices = append(choices, point)
+			}
+		}
+		if len(choices) == 0 {
+			return Preview{RoomID: room, WorldID: world, PlayerID: id, LocationName: landmarks.Name(landmarkID), State: "rejected", Reason: "LANDMARK_NOT_FOUND"}, nil
+		}
+		if len(choices) > 1 {
+			return Preview{RoomID: room, WorldID: world, PlayerID: id, LocationName: landmarks.Name(landmarkID), State: "needs_selection", Candidates: choices}, nil
+		}
+		p.LocationName = landmarks.Name(landmarkID)
+		p.X, p.Z = choices[0].X, choices[0].Z
+	} else if in.LocationID != "" || in.LocationName != "" {
 		var l Location
-		if in.LocationID != "" {
+		if saved != nil {
+			l = *saved
+		} else if in.LocationID != "" {
 			l, e = s.store.Get(room, in.LocationID)
 		} else {
 			l, e = s.store.Resolve(room, world, in.LocationName)

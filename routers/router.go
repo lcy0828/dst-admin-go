@@ -869,6 +869,7 @@ func initApplicationConfig(manageBackground, ownsDatabase bool, config setting.S
 		return nil, err
 	}
 	worldQueryService := worldquery.New(roomService, distributedRuntimeBridge, worldQueryStore)
+	locationService.ConfigureLandmarks(worldQueryService)
 	backupStore := backupapi.NewStore(models.DB(), tablePrefix)
 	if err := backupStore.Migrate(); err != nil {
 		return nil, err

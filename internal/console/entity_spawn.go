@@ -29,9 +29,9 @@ type SpawnEntityResult struct {
 	SpawnAudit       *SpawnAudit `json:"spawnAudit,omitempty"`
 }
 
-// Explicitly reviewed ordinary creatures only. Directory category or caller
+// Explicitly reviewed creatures only. Directory category or caller
 // metadata cannot authorize constructors that require special world setup.
-var controlledSpawnPrefabs = map[string]bool{"warg": true, "hound": true, "spider": true, "pigman": true, "rabbit": true, "bee": true}
+var controlledSpawnPrefabs = map[string]bool{"warg": true, "hound": true, "spider": true, "pigman": true, "rabbit": true, "bee": true, "deerclops": true}
 
 func ResolveSpawnEntity(name string, count int) (entitycatalog.Entity, error) {
 	if count < 1 || count > 5 || len(name) > 100 || name == "" || strings.TrimSpace(name) != name {
@@ -62,7 +62,7 @@ func spawnPlayerEntityTemplate() template {
 		Script: "仅在当前分片在线玩家附近的可通行陆地生成受控生物，并返回本次数量和位置审计",
 		Parameters: []Parameter{
 			{Name: "player_id", Label: "玩家 KU ID", Type: "string", Required: true},
-			{Name: "prefab", Label: "生物 Prefab", Type: "string", Required: true, Options: []string{"warg", "hound", "spider", "pigman", "rabbit", "bee"}},
+			{Name: "prefab", Label: "生物 Prefab", Type: "string", Required: true, Options: []string{"warg", "hound", "spider", "pigman", "rabbit", "bee", "deerclops"}},
 			{Name: "count", Label: "数量", Type: "integer", Required: true, Minimum: &min, Maximum: &max, Default: 1},
 		}},
 		render: func(args map[string]interface{}) (string, error) {

@@ -40,11 +40,32 @@ capabilities:
     aliases: [传送地点, 传送到地点, 传送到基地, 传送到, 回基地, 前往位置, 送回家, teleport destination]
     examples: ["把lcy传送到基地", "传送lcy到猪王村", "让小明回基地", "把玩家甲传送到营地", "送lcy回家", "lcy 传送到 矿区"]
     negatives: ["传送到玩家身边", "传送到地图中心"]
-    # 传送到已保存地点由可信客户端二次确认（prepareRoomTeleport），对机器人而言是单人可逆。
+    # 地点由服务端解析，再由可信客户端确认（prepareRoomTeleport）。
     tier: R1
     confirm: none
     slots:
       locationName: {role: location}
+      locationId: {role: internal}
+      landmarkRef: {role: internal}
+    actions:
+      spawn:
+        aliases: [出生点, 出生门, 绚丽之门]
+        examples: [传送玩家到出生点, 把示例玩家送到绚丽之门, 示例玩家回出生门]
+      pig_king:
+        aliases: [猪王, 猪王村, pig_king]
+        examples: [传送玩家到猪王, 把示例玩家送到猪王村, 示例玩家去猪王]
+      lunar_island:
+        aliases: [月岛, 月亮岛, lunar_island]
+        examples: [传送玩家到月岛, 把示例玩家送到月亮岛, 示例玩家去月岛]
+      oasis:
+        aliases: [绿洲, oasis]
+        examples: [传送玩家到绿洲, 把示例玩家送到绿洲, 示例玩家去绿洲]
+      dragonfly:
+        aliases: [龙蝇沙漠, 龙蝇, dragonfly]
+        examples: [传送玩家到龙蝇沙漠, 把示例玩家送到龙蝇, 示例玩家去龙蝇沙漠]
+      bee_queen:
+        aliases: [蜂后, bee_queen]
+        examples: [传送玩家到蜂后, 把示例玩家送到蜂后, 示例玩家去蜂后]
     receipt: {done: "已把 {player} 传送到「{locationName}」", pending: "已准备把 {player} 传送到「{locationName}」，等待确认"}
 
   - id: room.locations

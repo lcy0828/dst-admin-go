@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"dont/internal/dstruntime"
+	"dont/internal/landmarks"
 )
 
 func strictJSON(b []byte, v any) error {
@@ -76,6 +77,44 @@ func acceptReceipt(r Result, q Request, receipt dstruntime.CommandReceipt) Resul
 	}
 	var value any
 	switch q.QueryID {
+	case "landmarks":
+		var raw struct {
+			Items json.RawMessage `json:"items"`
+			Count *int            `json:"count"`
+		}
+		if strictJSON(wire.Data, &raw) != nil || raw.Count == nil || *raw.Count < 0 || *raw.Count > 48 || wire.Scanned == nil || *wire.Scanned < 0 || *wire.Scanned > 100000 {
+			return problem(r, "unavailable", "QUERY_OUTPUT_INVALID", "Invalid landmark scan")
+		}
+		data := landmarks.Data{Items: []landmarks.Point{}, Count: *raw.Count}
+		if string(raw.Items) != "{}" || data.Count != 0 {
+			var items []struct {
+				ID         string   `json:"id"`
+				LandmarkID string   `json:"landmarkId"`
+				X          *float64 `json:"x"`
+				Z          *float64 `json:"z"`
+			}
+			if strictJSON(raw.Items, &items) != nil || items == nil {
+				return problem(r, "unavailable", "QUERY_OUTPUT_INVALID", "Missing landmark list")
+			}
+			for _, item := range items {
+				if item.X == nil || item.Z == nil {
+					return problem(r, "unavailable", "QUERY_OUTPUT_INVALID", "Missing landmark coordinates")
+				}
+				data.Items = append(data.Items, landmarks.Point{ID: item.ID, LandmarkID: item.LandmarkID, X: *item.X, Z: *item.Z})
+			}
+		}
+		if len(data.Items) != data.Count {
+			return problem(r, "unavailable", "QUERY_OUTPUT_INVALID", "Invalid landmark count")
+		}
+		seen := map[string]bool{}
+		for _, point := range data.Items {
+			if !point.Valid() || seen[point.ID] {
+				return problem(r, "unavailable", "QUERY_OUTPUT_INVALID", "Invalid landmark point")
+			}
+			seen[point.ID] = true
+		}
+		r.ScannedEntities, r.ScanLimit = wire.Scanned, 100000
+		value = data
 	case "player_modes":
 		var data struct {
 			Kind    string          `json:"kind"`

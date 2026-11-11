@@ -6,12 +6,12 @@ import (
 )
 
 func TestControlledSpawnOnlyUsesFixedCreatureAllowlist(t *testing.T) {
-	for _, name := range []string{"座狼", "狗王", "warg", "Varg", "蜘蛛", "rabbit"} {
+	for _, name := range []string{"座狼", "狗王", "warg", "Varg", "蜘蛛", "rabbit", "独眼巨鹿", "deerclops"} {
 		if _, err := ResolveSpawnEntity(name, 2); err != nil {
 			t.Fatal(name, err)
 		}
 	}
-	for _, name := range []string{"beefalo", "deerclops", "meatballs", "spiderden", "example_mod", `warg");c_shutdown()--`, " 座狼"} {
+	for _, name := range []string{"beefalo", "dragonfly", "meatballs", "spiderden", "example_mod", `warg");c_shutdown()--`, " 座狼"} {
 		if _, err := ResolveSpawnEntity(name, 1); err == nil {
 			t.Fatal("accepted", name)
 		}

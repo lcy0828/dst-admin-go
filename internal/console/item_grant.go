@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -9,6 +10,39 @@ import (
 
 	"dont/internal/entitycatalog"
 )
+
+// Bound units separately from spawned entities. Stack batching keeps the normal
+// single-host path bounded without splitting one request into repeated writes.
+const MaxItemGrantUnits = 400
+const maxItemGrantEntities = 40
+
+func renderItemGrant(player, prefab string, count int, mode string) string {
+	return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;
+if p and p.components and p.components.inventory then
+ local mode=%s;local requested=%d;local staged={};local n=0;local total=0;
+ local ok,reason=pcall(function()
+  while n<requested do
+   if #staged>=%d then error("ITEM_ENTITY_BUDGET")end;
+   local item=SpawnPrefab(%s);if not item then error("PREFAB_NOT_FOUND")end;
+   staged[#staged+1]={item=item,units=1};
+   if not(item.components and item.components.inventoryitem)then error("PREFAB_NOT_INVENTORY_ITEM")end;
+   local stack=item.components.stackable;local size=1;
+   if stack then size=stack.maxsize;if type(size)~="number"or size~=size or size<1 or size>1000000000 or size~=math.floor(size)or type(stack.SetStackSize)~="function"or type(stack.StackSize)~="function"then error("ITEM_STACK_INVALID")end end;
+   if #staged==1 and mode=="units"and requested>size*%d then error("ITEM_ENTITY_BUDGET")end;
+   local units=mode=="stacks"and size or math.min(size,requested-n);
+   if total+units>%d then error("ITEM_UNIT_BUDGET")end;total=total+units;
+   if stack then stack:SetStackSize(units);if stack:StackSize()~=units then error("ITEM_STACK_INVALID")end end;
+   staged[#staged].units=units;n=n+(mode=="stacks"and 1 or units);
+  end
+ end);
+ if not ok then for _,entry in ipairs(staged)do entry.item:Remove()end;error(reason)end;
+ n=0;local attempted=0;local delivered,deliveryError=pcall(function()for index,entry in ipairs(staged)do attempted=index;p.components.inventory:GiveItem(entry.item);__dst_record(entry.item,p,"inventory",entry.units);n=n+entry.units end end);
+ if not delivered then for index=attempted+1,#staged do staged[index].item:Remove()end;error(deliveryError)end;
+ print("[DST-ADMIN-GIVE]",%s,%s,mode,n)
+else print("[DST-ADMIN-GIVE]","PLAYER_NOT_FOUND",%s)end`, quoteLua(player), quoteLua(mode), count,
+		maxItemGrantEntities, quoteLua(prefab), maxItemGrantEntities, MaxItemGrantUnits,
+		quoteLua(player), quoteLua(prefab), quoteLua(player))
+}
 
 // ItemGrant exposes only a fixed item operation and its correlated receipt.
 // It deliberately excludes scripts, custom commands and unrelated console output.
@@ -33,7 +67,7 @@ type ItemGrant struct {
 // ResolveGrantItem uses code-owned vanilla metadata, never editable command
 // definitions or caller-supplied classification. Animals/structures are not items.
 func ResolveGrantItem(name string, count int) (entitycatalog.Entity, error) {
-	if count < 1 || count > 40 || len(name) > 256 || utf8.RuneCountInString(name) > 100 || name == "" || strings.TrimSpace(name) != name {
+	if count < 1 || count > MaxItemGrantUnits || len(name) > 256 || utf8.RuneCountInString(name) > 100 || name == "" || strings.TrimSpace(name) != name {
 		return entitycatalog.Entity{}, ErrInvalidArguments
 	}
 	var match entitycatalog.Entity
@@ -84,7 +118,7 @@ func (s *Service) ItemGrant(ctx context.Context, room, player, runID string, ref
 		return ItemGrant{}, ErrRunNotFound
 	}
 	prefab, _ := run.Arguments["prefab"].(string)
-	count, err := intArgument(run.Arguments, "count", 1, 40)
+	count, err := intArgument(run.Arguments, "count", 1, MaxItemGrantUnits)
 	if err != nil {
 		return ItemGrant{}, ErrRunNotFound
 	}
@@ -103,7 +137,7 @@ func (s *Service) ItemGrant(ctx context.Context, room, player, runID string, ref
 func projectItemGrant(run Run) ItemGrant {
 	player, _ := run.Arguments["player_id"].(string)
 	prefab, _ := run.Arguments["prefab"].(string)
-	count, _ := intArgument(run.Arguments, "count", 1, 40)
+	count, _ := intArgument(run.Arguments, "count", 1, MaxItemGrantUnits)
 	item, _ := ResolveGrantItem(prefab, count)
 	r := ItemGrant{RunID: run.ID, RoomID: run.RoomID, WorldID: run.WorldID, PlayerID: player, Prefab: prefab, Name: item.NameZhCN, Requested: count,
 		Status: "uncertain", ExecutionOutcome: "unconfirmed", MayHaveExecuted: true, Message: "发放结果未确认；只读取原回执，不要重新发放", ObservedAt: run.ObservedAt, SpawnAudit: run.SpawnAudit}

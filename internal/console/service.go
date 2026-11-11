@@ -397,7 +397,7 @@ func (s *Service) resolve(roomID, worldID string) (rooms.Room, rooms.World, erro
 
 func builtinTemplates() map[string]template {
 	minRollback := 1
-	minCount, maxItemCount, maxEntityCount := 1, 40, 20
+	minCount, maxItemCount, maxEntityCount, maxGrantUnits := 1, 40, 20, MaxItemGrantUnits
 	minRadius, maxRadius, maxRemoveCount := 1, 30, 100
 	minSegment, maxSegment := 0, 16
 	templates := map[string]template{
@@ -453,7 +453,7 @@ func builtinTemplates() map[string]template {
 			Parameters: []Parameter{
 				{Name: "player_id", Label: "玩家 KU ID", Type: "string", Required: true, Description: "玩家必须在线且位于当前分片"},
 				{Name: "prefab", Label: "物品 Prefab", Type: "string", Required: true, Description: "例如 flint、goldnugget"},
-				{Name: "count", Label: "数量", Type: "integer", Required: true, Minimum: &minCount, Maximum: &maxItemCount, Default: 1},
+				{Name: "count", Label: "数量", Type: "integer", Required: true, Minimum: &minCount, Maximum: &maxGrantUnits, Default: 1, Description: "按个最多400个；按组最多40组，总个数最多400个；最多生成40个堆叠"},
 				{Name: "quantity_mode", Label: "数量方式", Type: "enum", Options: []string{"units", "stacks"}, Default: "units", Description: "units 按个数发放；stacks 按物品实际堆叠上限发放整组"},
 			},
 			Script: `按 KU ID 查找玩家并安全调用 SpawnPrefab 与 inventory:GiveItem`, IsBuiltin: true,
@@ -467,7 +467,7 @@ func builtinTemplates() map[string]template {
 			if err != nil {
 				return "", err
 			}
-			count, err := intArgument(arguments, "count", minCount, maxItemCount)
+			count, err := intArgument(arguments, "count", minCount, MaxItemGrantUnits)
 			if err != nil {
 				return "", err
 			}
@@ -475,7 +475,10 @@ func builtinTemplates() map[string]template {
 			if err != nil {
 				return "", err
 			}
-			return fmt.Sprintf(`local p=nil;for _,v in ipairs(AllPlayers or {})do if v.userid==%s then p=v;break end end;if p and p.components and p.components.inventory then local mode=%s;local n=0;for i=1,%d do local item=SpawnPrefab(%s);if not item then error("PREFAB_NOT_FOUND")end;if not(item.components and item.components.inventoryitem)then item:Remove();error("PREFAB_NOT_INVENTORY_ITEM")end;if item then local granted=1;local stack=item.components and item.components.stackable;if mode=="stacks"and stack then local size=stack.maxsize or 1;if type(size)~="number"or size~=size or size<1 or size>400 or n+size>400 then item:Remove();error("ITEM_UNIT_BUDGET")end;stack:SetStackSize(size);granted=stack:StackSize()end;p.components.inventory:GiveItem(item);__dst_record(item,p,"inventory",granted);n=n+granted end end;print("[DST-ADMIN-GIVE]",%s,%s,mode,n)else print("[DST-ADMIN-GIVE]","PLAYER_NOT_FOUND",%s)end`, quoteLua(playerID), quoteLua(quantityMode), count, quoteLua(prefab), quoteLua(playerID), quoteLua(prefab), quoteLua(playerID)), nil
+			if quantityMode == "stacks" && count > maxItemGrantEntities {
+				return "", ErrInvalidArguments
+			}
+			return strings.ReplaceAll(renderItemGrant(playerID, prefab, count, quantityMode), "\n", " "), nil
 		},
 	}
 	templates["give_recipe_materials"] = template{

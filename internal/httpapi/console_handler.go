@@ -56,14 +56,14 @@ func (h *ConsoleHandler) Register(v2 *gin.RouterGroup) {
 func (h *ConsoleHandler) giveItem(c *gin.Context) {
 	raw, err := io.ReadAll(io.LimitReader(c.Request.Body, 1025))
 	if err != nil || len(raw) > 1024 {
-		Failure(c, 422, "INVALID_ITEM_GRANT", "发放参数无效；仅支持已知物品和 1–40 个数量", nil)
+		Failure(c, 422, "INVALID_ITEM_GRANT", "发放参数无效；仅支持已知物品和 1–400 个数量", nil)
 		return
 	}
 	body, err := aicontrol.StrictBotJSON(raw)
 	item, _ := body["item"].(string)
 	count, numeric := body["count"].(float64)
-	if err != nil || len(body) != 2 || !numeric || count < 1 || count > 40 || count != float64(int(count)) {
-		Failure(c, 422, "INVALID_ITEM_GRANT", "仅接受 item 和整数 count（1–40）；不接受脚本或命令定义", nil)
+	if err != nil || len(body) != 2 || !numeric || count < 1 || count > consoleapi.MaxItemGrantUnits || count != float64(int(count)) {
+		Failure(c, 422, "INVALID_ITEM_GRANT", "仅接受 item 和整数 count（1–400）；不接受脚本或命令定义", nil)
 		return
 	}
 	if _, err = consoleapi.ResolveGrantItem(item, int(count)); err != nil {

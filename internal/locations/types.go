@@ -3,6 +3,7 @@
 package locations
 
 import (
+	"dont/internal/landmarks"
 	"errors"
 	"math"
 	"strings"
@@ -73,6 +74,7 @@ type PrepareInput struct {
 	WorldID        string   `json:"worldId,omitempty"`
 	LocationID     string   `json:"locationId,omitempty"`
 	LocationName   string   `json:"locationName,omitempty"`
+	LandmarkRef    string   `json:"landmarkRef,omitempty"`
 	TargetPlayerID string   `json:"targetPlayerId,omitempty"`
 	X              *float64 `json:"x,omitempty"`
 	Z              *float64 `json:"z,omitempty"`
@@ -93,29 +95,30 @@ type Effect struct {
 }
 
 type Preview struct {
-	NeedsReview      bool      `json:"needsReview"`
-	ID               string    `json:"id" gorm:"primary_key;type:varchar(36)"`
-	RoomID           string    `json:"roomId" gorm:"index"`
-	WorldID          string    `json:"worldId" gorm:"index"`
-	Actor            string    `json:"-" gorm:"index"`
-	PlayerID         string    `json:"playerId" gorm:"index"`
-	PlayerName       string    `json:"playerName"`
-	LocationID       string    `json:"locationId,omitempty"`
-	LocationName     string    `json:"locationName,omitempty"`
-	LocationRevision int64     `json:"-"`
-	Identity         string    `json:"-"`
-	BindingRevision  string    `json:"-"`
-	TargetPlayerID   string    `json:"-"`
-	X                float64   `json:"x"`
-	Z                float64   `json:"z"`
-	State            string    `json:"state" gorm:"index"`
-	Reason           string    `json:"reason,omitempty"`
-	RunID            string    `json:"runId,omitempty"`
-	CreatedAt        time.Time `json:"createdAt"`
-	ExpiresAt        time.Time `json:"expiresAt"`
-	ServerTime       time.Time `json:"serverTime" gorm:"-"`
-	Effect           *Effect   `json:"effect,omitempty" gorm:"-"`
-	EffectJSON       string    `json:"-" gorm:"type:text"`
+	Candidates       []landmarks.Point `json:"candidates,omitempty" gorm:"-"`
+	NeedsReview      bool              `json:"needsReview"`
+	ID               string            `json:"id" gorm:"primary_key;type:varchar(36)"`
+	RoomID           string            `json:"roomId" gorm:"index"`
+	WorldID          string            `json:"worldId" gorm:"index"`
+	Actor            string            `json:"-" gorm:"index"`
+	PlayerID         string            `json:"playerId" gorm:"index"`
+	PlayerName       string            `json:"playerName"`
+	LocationID       string            `json:"locationId,omitempty"`
+	LocationName     string            `json:"locationName,omitempty"`
+	LocationRevision int64             `json:"-"`
+	Identity         string            `json:"-"`
+	BindingRevision  string            `json:"-"`
+	TargetPlayerID   string            `json:"-"`
+	X                float64           `json:"x"`
+	Z                float64           `json:"z"`
+	State            string            `json:"state" gorm:"index"`
+	Reason           string            `json:"reason,omitempty"`
+	RunID            string            `json:"runId,omitempty"`
+	CreatedAt        time.Time         `json:"createdAt"`
+	ExpiresAt        time.Time         `json:"expiresAt"`
+	ServerTime       time.Time         `json:"serverTime" gorm:"-"`
+	Effect           *Effect           `json:"effect,omitempty" gorm:"-"`
+	EffectJSON       string            `json:"-" gorm:"type:text"`
 }
 
 func cleanName(name string) (string, string, error) {

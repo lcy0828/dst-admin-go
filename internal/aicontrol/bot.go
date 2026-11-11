@@ -109,7 +109,7 @@ func BotCapabilities() []BotCapability {
 	}
 	pSchema := botSchema(map[string]any{"playerId": botString(128)}, "playerId")
 	spawnEntity := botString(100)
-	spawnEntity["description"] = "仅座狼/狗王(warg)、猎犬(hound)、蜘蛛(spider)、猪人(pigman)、兔子(rabbit)、蜜蜂(bee)；不接受其他实体或Lua"
+	spawnEntity["description"] = "仅座狼/狗王(warg)、猎犬(hound)、蜘蛛(spider)、猪人(pigman)、兔子(rabbit)、蜜蜂(bee)、独眼巨鹿(deerclops)；不接受其他实体或Lua"
 	list := []BotCapability{
 		{ID: "player.spawn_entity", Title: "生成玩家附近生物（固定白名单）", Category: "management", Access: "write", Operation: "spawnRoomPlayerEntity", Parameters: botSchema(map[string]any{
 			"playerId": botString(128), "entity": spawnEntity, "count": map[string]any{"type": "integer", "minimum": 1, "maximum": 5},
@@ -119,7 +119,7 @@ func BotCapabilities() []BotCapability {
 			return v
 		}},
 		{ID: "player.give_item", Title: "发放玩家物品", Category: "management", Access: "write", Operation: "giveRoomPlayerItem", Parameters: botSchema(map[string]any{
-			"playerId": botString(128), "item": botString(100), "count": map[string]any{"type": "integer", "minimum": 1, "maximum": 40},
+			"playerId": botString(128), "item": botString(100), "count": map[string]any{"type": "integer", "minimum": 1, "maximum": consoleapi.MaxItemGrantUnits},
 		}, "playerId", "item", "count"), ParameterHints: map[string]string{"playerId": "player"}, build: func(r string, p map[string]any) apicontract.Input {
 			v := player(r, p)
 			v.Body = map[string]any{"item": p["item"], "count": p["count"]}
@@ -662,6 +662,7 @@ func botProject(r BotResult, c BotCapability, d map[string]any) BotResult {
 	}
 	if c.ID == "player.teleport" {
 		r.Data = d
+		r.MayHaveExecuted = false // This endpoint only prepares; movement has a separate confirmation endpoint.
 		r.Status = "failed"
 		r.Complete = true
 		r.ExecutionOutcome = "none"
@@ -670,6 +671,11 @@ func botProject(r BotResult, c BotCapability, d map[string]any) BotResult {
 			r.Status = "prepared"
 			r.ExecutionOutcome = "not_required"
 			r.NextAction = "confirm_in_trusted_client"
+		}
+		if d["state"] == "needs_selection" {
+			r.Status = "succeeded"
+			r.ExecutionOutcome = "not_required"
+			r.NextAction = "select_destination"
 		}
 		return r
 	}

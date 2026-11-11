@@ -20,10 +20,13 @@ func TestGrantItemDirectoryIsFixedAndInventoryOnly(t *testing.T) {
 			t.Fatal("accepted", name)
 		}
 	}
-	for _, n := range []int{0, -1, 41, 1000} {
+	for _, n := range []int{0, -1, 401, 1000} {
 		if _, err := ResolveGrantItem("肉丸", n); err == nil {
 			t.Fatal("accepted", n)
 		}
+	}
+	if item, err := ResolveGrantItem("木头", 100); err != nil || item.ID != "log" {
+		t.Fatal(item, err)
 	}
 }
 

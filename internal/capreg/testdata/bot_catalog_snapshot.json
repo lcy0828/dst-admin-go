@@ -656,12 +656,12 @@
     "category": "management",
     "access": "write",
     "contractVersion": 1,
-    "schemaRevision": "4586e0bec3b42feb75361245fd1d7c2858dabef1436ea6d4a94a050339424ddc",
+    "schemaRevision": "7f816084a702d78a72bef5bf864eb7faf8edd5d3d837a19e4d0fcd419fe4efda",
     "parameters": {
       "additionalProperties": false,
       "properties": {
         "count": {
-          "maximum": 40,
+          "maximum": 400,
           "minimum": 1,
           "type": "integer"
         },
@@ -1337,7 +1337,7 @@
     "category": "management",
     "access": "write",
     "contractVersion": 1,
-    "schemaRevision": "7c3fa0f4bf7ad274fc5be2a01a9306821298d53f85e2d4123f355eb891310bf2",
+    "schemaRevision": "ad3b05cbacb7e8e54368dc21e5487393213251eea53f04ada6197d42b5986878",
     "parameters": {
       "additionalProperties": false,
       "properties": {
@@ -1347,7 +1347,7 @@
           "type": "integer"
         },
         "entity": {
-          "description": "仅座狼/狗王(warg)、猎犬(hound)、蜘蛛(spider)、猪人(pigman)、兔子(rabbit)、蜜蜂(bee)；不接受其他实体或Lua",
+          "description": "仅座狼/狗王(warg)、猎犬(hound)、蜘蛛(spider)、猪人(pigman)、兔子(rabbit)、蜜蜂(bee)、独眼巨鹿(deerclops)；不接受其他实体或Lua",
           "maxLength": 100,
           "minLength": 1,
           "type": "string"
@@ -1375,6 +1375,84 @@
     "resultKind": "entity-spawn"
   },
   {
+    "actions": [
+      {
+        "id": "spawn",
+        "title": "传送到出生点",
+        "searchTerms": [
+          "出生点",
+          "出生门",
+          "绚丽之门"
+        ],
+        "parameters": {
+          "locationName": "出生点"
+        },
+        "risk": ""
+      },
+      {
+        "id": "pig_king",
+        "title": "传送到猪王",
+        "searchTerms": [
+          "猪王",
+          "猪王村",
+          "pig_king"
+        ],
+        "parameters": {
+          "locationName": "猪王"
+        },
+        "risk": ""
+      },
+      {
+        "id": "lunar_island",
+        "title": "传送到月岛",
+        "searchTerms": [
+          "月岛",
+          "月亮岛",
+          "lunar_island"
+        ],
+        "parameters": {
+          "locationName": "月岛"
+        },
+        "risk": ""
+      },
+      {
+        "id": "oasis",
+        "title": "传送到绿洲",
+        "searchTerms": [
+          "绿洲",
+          "oasis"
+        ],
+        "parameters": {
+          "locationName": "绿洲"
+        },
+        "risk": ""
+      },
+      {
+        "id": "dragonfly",
+        "title": "传送到龙蝇沙漠",
+        "searchTerms": [
+          "龙蝇沙漠",
+          "龙蝇",
+          "dragonfly"
+        ],
+        "parameters": {
+          "locationName": "龙蝇沙漠"
+        },
+        "risk": ""
+      },
+      {
+        "id": "bee_queen",
+        "title": "传送到蜂后",
+        "searchTerms": [
+          "蜂后",
+          "bee_queen"
+        ],
+        "parameters": {
+          "locationName": "蜂后"
+        },
+        "risk": ""
+      }
+    ],
     "id": "player.teleport",
     "searchTerms": [
       "传送地点",
@@ -1384,7 +1462,13 @@
       "回基地",
       "前往位置",
       "送回家",
-      "teleport destination"
+      "teleport destination",
+      "传送到出生点",
+      "传送到猪王",
+      "传送到月岛",
+      "传送到绿洲",
+      "传送到龙蝇沙漠",
+      "传送到蜂后"
     ],
     "aliases": [
       "传送地点",
@@ -1411,6 +1495,16 @@
     "tier": "R1",
     "confirm": "none",
     "slotRoles": {
+      "landmarkRef": {
+        "role": "internal",
+        "ask": "never",
+        "model": false
+      },
+      "locationId": {
+        "role": "internal",
+        "ask": "never",
+        "model": false
+      },
       "locationName": {
         "role": "location",
         "ask": "if_missing",
@@ -1420,27 +1514,132 @@
         "role": "target_player",
         "ask": "if_missing",
         "model": true
+      },
+      "worldId": {
+        "role": "world",
+        "ask": "never",
+        "model": true
       }
     },
     "receipt": {
       "done": "已把 {player} 传送到「{locationName}」",
       "pending": "已准备把 {player} 传送到「{locationName}」，等待确认"
     },
-    "title": "传送到已保存地点",
+    "actionPolicies": {
+      "bee_queen": {
+        "aliases": [
+          "蜂后",
+          "bee_queen"
+        ],
+        "examples": [
+          "传送玩家到蜂后",
+          "把示例玩家送到蜂后",
+          "示例玩家去蜂后"
+        ],
+        "tier": "R1",
+        "confirm": "none"
+      },
+      "dragonfly": {
+        "aliases": [
+          "龙蝇沙漠",
+          "龙蝇",
+          "dragonfly"
+        ],
+        "examples": [
+          "传送玩家到龙蝇沙漠",
+          "把示例玩家送到龙蝇",
+          "示例玩家去龙蝇沙漠"
+        ],
+        "tier": "R1",
+        "confirm": "none"
+      },
+      "lunar_island": {
+        "aliases": [
+          "月岛",
+          "月亮岛",
+          "lunar_island"
+        ],
+        "examples": [
+          "传送玩家到月岛",
+          "把示例玩家送到月亮岛",
+          "示例玩家去月岛"
+        ],
+        "tier": "R1",
+        "confirm": "none"
+      },
+      "oasis": {
+        "aliases": [
+          "绿洲",
+          "oasis"
+        ],
+        "examples": [
+          "传送玩家到绿洲",
+          "把示例玩家送到绿洲",
+          "示例玩家去绿洲"
+        ],
+        "tier": "R1",
+        "confirm": "none"
+      },
+      "pig_king": {
+        "aliases": [
+          "猪王",
+          "猪王村",
+          "pig_king"
+        ],
+        "examples": [
+          "传送玩家到猪王",
+          "把示例玩家送到猪王村",
+          "示例玩家去猪王"
+        ],
+        "tier": "R1",
+        "confirm": "none"
+      },
+      "spawn": {
+        "aliases": [
+          "出生点",
+          "出生门",
+          "绚丽之门"
+        ],
+        "examples": [
+          "传送玩家到出生点",
+          "把示例玩家送到绚丽之门",
+          "示例玩家回出生门"
+        ],
+        "tier": "R1",
+        "confirm": "none"
+      }
+    },
+    "title": "传送玩家到地点",
     "category": "management",
     "access": "write",
     "contractVersion": 1,
-    "schemaRevision": "e1da8e3fbd369d8332abacd219b8241755a44dc8c022ffe9002cf3c82151f3c1",
+    "schemaRevision": "f8b26b20215a746fee60094c027bf06a8496ac173d5796036f8cec3eb8fdefc2",
     "parameters": {
       "additionalProperties": false,
       "properties": {
+        "landmarkRef": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "locationId": {
+          "maxLength": 36,
+          "minLength": 1,
+          "type": "string"
+        },
         "locationName": {
+          "description": "可填写自己保存的地点名，也可直接填写猪王、出生点、月岛、绿洲、龙蝇沙漠、蜂后。同名时优先使用已保存地点。仅当前分片，有多个候选时先选择。",
           "maxLength": 48,
           "minLength": 1,
           "type": "string"
         },
         "playerId": {
           "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "worldId": {
+          "maxLength": 255,
           "minLength": 1,
           "type": "string"
         }
@@ -5880,14 +6079,14 @@
     "category": "management",
     "access": "write",
     "contractVersion": 1,
-    "schemaRevision": "98d9eb931084639706bb21f4f61874859fb658a189534daef07d4e197a18989d",
+    "schemaRevision": "caaf1be0bac487d85cc8d4663ba5f0112dcb942d482b31f8ee1196cfca5b6acc",
     "parameters": {
       "additionalProperties": false,
       "properties": {
         "count": {
           "default": 1,
-          "description": "",
-          "maximum": 40,
+          "description": "按个最多400个；按组最多40组，总个数最多400个；最多生成40个堆叠",
+          "maximum": 400,
           "minimum": 1,
           "title": "数量",
           "type": "integer"

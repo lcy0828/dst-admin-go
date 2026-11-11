@@ -141,7 +141,7 @@ func TestTaskValidationPermissionAndExpiry(t *testing.T) {
 		{manager, "dst_read", `{"capabilityId":"custom.anything","readOnly":true}`},
 		{manager, "dst_world", `{"world":"地面","view":"entity_count","parameters":{"prefab":"spiderden\");print(1);--"}}`},
 		{manager, "dst_run", `{"mode":"execute","taskRef":"invalid","parameters":{"count":9}}`},
-		{manager, "dst_player_action", `{"player":"示例玩家","action":"give_item","parameters":{"item":"肉丸","count":41}}`},
+		{manager, "dst_player_action", `{"player":"示例玩家","action":"give_item","parameters":{"item":"肉丸","count":401}}`},
 		{manager, "dst_find", `{"query":"a","query":"b"}`},
 	} {
 		if _, e := s.InvokeTask(context.Background(), tc.p, tc.name, json.RawMessage(tc.raw)); e == nil {
