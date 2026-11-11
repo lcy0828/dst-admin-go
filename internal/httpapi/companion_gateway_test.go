@@ -171,6 +171,50 @@ func TestCompanionGatewayRealRouterIdentityScopeAndDedup(t *testing.T) {
 			c.Status(204)
 		})
 		router.POST("/mcp", func(c *gin.Context) { service.MCP(c.Writer, c.Request) })
+		// Native history/inventory endpoints return synthetic offline data. The
+		// real API backend must preserve typed 409 details through the gateway.
+		v2.GET("/rooms", func(c *gin.Context) {
+			Success(c, 200, gin.H{"items": []gin.H{{"id": "r1", "name": "示例房间"}}})
+		})
+		v2.GET("/rooms/:roomId/worlds", func(c *gin.Context) {
+			Success(c, 200, gin.H{"items": []gin.H{{"id": "world-m", "name": "Master"}, {"id": "world-c", "name": "Caves"}}})
+		})
+		v2.GET("/rooms/:roomId/players/resolve", func(c *gin.Context) {
+			Success(c, 200, gin.H{"status": "resolved", "match": "exact_name", "items": []gin.H{{"id": "KU_SYNTH001", "name": "示例玩家", "online": false}}})
+		})
+		v2.GET("/rooms/:roomId/player-activity/events", func(c *gin.Context) {
+			from, e1 := time.Parse(time.RFC3339Nano, c.Query("from"))
+			to, e2 := time.Parse(time.RFC3339Nano, c.Query("to"))
+			if c.Query("userId") != "KU_SYNTH001" || c.Query("limit") != "20" || e1 != nil || e2 != nil || to.Sub(from) != 48*time.Hour {
+				t.Errorf("history filter lost: %s", c.Request.URL.RawQuery)
+			}
+			Success(c, 200, gin.H{"items": []gin.H{{"userId": "KU_SYNTH001", "name": "示例玩家", "kind": "action.harvest", "worldId": "world-c", "occurredAt": "2026-01-01T01:00:00Z", "fields": gin.H{"targetPrefab": "cutgrass", "count": 2}}}, "coverage": []gin.H{{"complete": false}}})
+		})
+		v2.GET("/rooms/:roomId/player-activity/trajectory", func(c *gin.Context) {
+			if c.Query("userId") != "KU_SYNTH001" || c.Query("limit") != "20" || c.Query("projection") != "compact" {
+				t.Errorf("compact trajectory filter lost: %s", c.Request.URL.RawQuery)
+			}
+			Success(c, 200, gin.H{"items": []gin.H{{"userId": "KU_SYNTH001", "worldId": "world-c", "occurredAt": "2026-01-01T01:00:00Z", "position": gin.H{"x": 12.5, "z": -3}}}, "coverage": []gin.H{{"complete": false}}})
+		})
+		v2.GET("/rooms/:roomId/player-activity/combat", func(c *gin.Context) {
+			if c.Query("userId") != "KU_SYNTH001" || c.Query("limit") != "" {
+				t.Errorf("combat accepts only its own contract fields: %s", c.Request.URL.RawQuery)
+			}
+			Success(c, 200, gin.H{"items": []gin.H{{"userId": "KU_SYNTH001", "worldId": "world-c", "lastAt": "2026-01-01T01:00:00Z", "direction": "incoming", "targetPrefab": "hound", "hits": 2, "unknownDamageHits": 2}}, "coverage": []gin.H{{"complete": false}}})
+		})
+		v2.GET("/rooms/:roomId/players/:playerId/inventory", func(c *gin.Context) {
+			if c.Query("sourceId") == "" {
+				Failure(c, 409, "SOURCE_AMBIGUOUS", "请选择存档来源", gin.H{"candidates": []gin.H{
+					{"sourceId": strings.Repeat("a", 64), "worldId": "world-m", "worldName": "Master"},
+					{"sourceId": strings.Repeat("b", 64), "worldId": "world-c", "worldName": "Caves"},
+				}})
+				return
+			}
+			if c.Query("source") != "save" || c.Query("worldId") != "world-c" || c.Query("sourceId") != strings.Repeat("b", 64) {
+				t.Errorf("source selection changed: %s", c.Request.URL.RawQuery)
+			}
+			Success(c, 200, gin.H{"source": "save", "status": "complete", "worldName": "Caves", "inventory": []gin.H{{"prefab": "cutgrass", "count": 5}}})
+		})
 		server := httptest.NewServer(router)
 		defer server.Close()
 		command := exec.Command(python, "-m", "unittest", "test_generic_live_contract", "-q")

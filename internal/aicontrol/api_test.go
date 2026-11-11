@@ -17,6 +17,42 @@ import (
 
 type apiBackendFunc func(context.Context, Principal, *apicontract.Operation, apicontract.Input) (json.RawMessage, error)
 
+func TestInventorySourceFailurePreservesTypedDetailsAndLegacyText(t *testing.T) {
+	for _, generic := range []bool{false, true} {
+		t.Run(fmt.Sprintf("generic=%v", generic), func(t *testing.T) {
+			failure := &PlatformError{Status: 409, Code: "SOURCE_AMBIGUOUS", Message: "请选择存档来源",
+				Payload: json.RawMessage(`{"code":"SOURCE_AMBIGUOUS","message":"请选择存档来源","details":{"retryable":true,"password":"synthetic-sensitive-value","candidates":[{"sourceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","worldId":"world-synthetic","worldName":"Caves"}]}}`)}
+			s, _ := fixture(t, apiBackendFunc(func(context.Context, Principal, *apicontract.Operation, apicontract.Input) (json.RawMessage, error) {
+				return nil, fmt.Errorf("inventory: %w", failure)
+			}))
+			catalog, err := apicontract.Default()
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.ConfigureAPI(catalog)
+			ctx := context.WithValue(context.Background(), genericResultKey{}, generic)
+			result, err := s.Invoke(ctx, Principal{ID: "page"}, "api_getRoomPlayerInventory", []byte(`{"path":{"roomId":"room-synthetic","playerId":"KU_SYNTH001"},"query":{"source":"auto","refresh":false}}`))
+			if err != nil || result.Status != "failed" {
+				t.Fatalf("expected failed receipt: %+v %v", result, err)
+			}
+			var data map[string]any
+			if err := json.Unmarshal(result.Data, &data); err != nil {
+				t.Fatal(err)
+			}
+			key := "platformError"
+			if generic {
+				key = "error"
+			} else if text, ok := data["error"].(string); !ok || !strings.HasPrefix(text, "inventory: HTTP 409:") {
+				t.Fatalf("legacy error string changed: %s", result.Data)
+			}
+			typed, ok := data[key].(map[string]any)
+			if !ok || typed["code"] != "SOURCE_AMBIGUOUS" || !strings.Contains(string(result.Data), `"worldId":"world-synthetic"`) || strings.Contains(string(result.Data), "synthetic-sensitive-value") {
+				t.Fatalf("selection details lost or secret leaked: %s", result.Data)
+			}
+		})
+	}
+}
+
 func TestGameReleasePreviewGetsItsHandlerDeadline(t *testing.T) {
 	s, _ := fixture(t, apiBackendFunc(func(ctx context.Context, _ Principal, op *apicontract.Operation, _ apicontract.Input) (json.RawMessage, error) {
 		deadline, ok := ctx.Deadline()

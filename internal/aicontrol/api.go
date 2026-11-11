@@ -325,19 +325,23 @@ func (s *Service) invokeAPI(ctx context.Context, p Principal, name string, raw j
 		if mutation && (errors.Is(err, ErrUncertain) || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 			call.Status = "uncertain"
 		}
-		data, _ = json.Marshal(map[string]string{"error": err.Error()})
-		if generic, _ := ctx.Value(genericResultKey{}).(bool); generic {
-			failure := map[string]any{"code": "API_FAILED", "message": err.Error()}
-			var platform *PlatformError
-			if errors.As(err, &platform) {
-				failure["code"], failure["message"] = platform.Code, platform.Message
-				if len(platform.Payload) > 0 {
-					var details map[string]any
-					if json.Unmarshal(platform.Payload, &details) == nil {
-						failure = details
-					}
+		// Keep the legacy error string while exposing typed, recoverable API
+		// failures (for example a selection of inventory save sources).
+		legacy := map[string]any{"error": err.Error()}
+		var platform *PlatformError
+		failure := map[string]any{"code": "API_FAILED", "message": err.Error()}
+		if errors.As(err, &platform) {
+			failure["code"], failure["message"] = platform.Code, platform.Message
+			if len(platform.Payload) > 0 {
+				var payload map[string]any
+				if json.Unmarshal(platform.Payload, &payload) == nil && payload != nil {
+					failure = payload
 				}
 			}
+			legacy["platformError"] = failure
+		}
+		data, _ = json.Marshal(legacy)
+		if generic, _ := ctx.Value(genericResultKey{}).(bool); generic {
 			data, _ = json.Marshal(map[string]any{"error": failure, "callId": call.ID, "state": call.Status})
 		}
 	}
