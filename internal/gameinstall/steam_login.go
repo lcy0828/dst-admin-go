@@ -28,14 +28,20 @@ func (s *Service) SteamLogin(ctx context.Context, targetID, installationID strin
 		}
 		return s.steamLogin.Manage(options(t, i).steamCMD(), input)
 	}
-	capable := false
+	capable, capableV2 := false, false
 	for _, capability := range t.Capabilities {
 		if capability == shared.SteamLoginCapability {
 			capable = true
 		}
+		if capability == shared.SteamLoginV2Capability {
+			capableV2 = true
+		}
 	}
 	if !capable {
 		return shared.SteamLoginStatus{}, errors.New("请升级该节点的 Agent 以支持 Steam 账号登录")
+	}
+	if input.RequiresV2Capability() && !capableV2 {
+		return shared.SteamLoginStatus{}, errors.New("请升级该节点的 Agent 以支持仅用户名凭据复用或一次性验证码登录")
 	}
 	action := shared.RuntimeActionSteamLoginObserve
 	if input.Action != "status" {
@@ -61,5 +67,9 @@ func (s *Service) SteamLogin(ctx context.Context, targetID, installationID strin
 	if result.Result.Outcome == shared.RuntimeOutcomeFailed {
 		return shared.SteamLoginStatus{}, errors.New(result.Result.Message)
 	}
-	return *result.Result.GameInstallation.SteamLogin, nil
+	status := *result.Result.GameInstallation.SteamLogin
+	if input.Action == "configure" && input.UseCachedCredentials && status.PasswordSet {
+		return shared.SteamLoginStatus{}, errors.New("该节点未清除已保存的密码，请升级该节点的 Agent 后重试")
+	}
+	return status, nil
 }

@@ -35,21 +35,22 @@ If a game update fails and remains retryable, its pre-update protection backups 
 
 ## Optional Steam account login
 
-Choose **Steam login** on the selected node. Anonymous is the default. Select
-**Steam account**, enter the login name and password, and choose **Save and verify login**.
-If Steam Guard requests verification, enter the current email or authenticator code,
-or approve the login in the Steam mobile app as prompted.
+Choose **Steam login** on the selected node. Anonymous is the default. When an account is needed, choose either:
+- **Steam account and password**: enter the login name and password, optionally including a current 5-character one-time Steam Guard code to bypass mobile push confirmation (or switch to a 5-character authenticator code directly if mobile approval hangs), then choose **Save and verify login**.
+- **Username only (reuse SteamCMD credentials on node)**: log in once via `steamcmd` on that runtime node under the same OS service user so SteamCMD caches credentials, then save only the login name in the panel. Saving sends only the username and removes any password stored by the panel.
+
 Once verified, install, update or retry the download.
 
 Game installation, manual and unattended game updates, and mod downloads share
 the node's login settings. Installations using the same SteamCMD executable share
 one account. Agents perform their own login and downloads; the Controller does not
-store remote passwords. Older Agents need `runtime.steam-login.v1` support.
+store remote passwords. Older Agents need `runtime.steam-login.v1` support (`runtime.steam-login.v2` for username-only cached credentials and one-time codes on `login`).
 
 Credentials are encrypted under `steam-auth/` next to the management or Agent
-configuration. Keep the encryption key and configuration together. Passwords are
-never returned to the UI or included in process arguments, task logs or Agent
-command history. Leave the password blank to retain it for the same account.
+configuration. Keep the encryption key and configuration together. Passwords and
+one-time Guard codes are never returned to the UI or included in process arguments,
+task logs or Agent command history (one-time codes are used only for that login and
+never persisted). Leave the password blank to retain it for the same account.
 Saving anonymous mode removes the panel's saved account and password.
 
 Verification lasts at most four minutes. Only active login sessions are polled.

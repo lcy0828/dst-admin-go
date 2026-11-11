@@ -115,8 +115,8 @@ func (m *Manager) Status(executable string) (shared.SteamLoginStatus, error) {
 }
 func Validate(input shared.SteamLoginRequest) error {
 	switch input.Action {
-	case "status", "login", "cancel", "reset":
-		if input.Mode != "" || input.Username != "" || input.Password != "" || input.Code != "" {
+	case "status", "cancel", "reset":
+		if input.Mode != "" || input.Username != "" || input.Password != "" || input.UseCachedCredentials || input.Code != "" {
 			return ErrInvalid
 		}
 		if input.Action == "cancel" && input.SessionID == "" {
@@ -125,12 +125,19 @@ func Validate(input shared.SteamLoginRequest) error {
 		if input.Action != "cancel" && input.SessionID != "" {
 			return ErrInvalid
 		}
+	case "login":
+		if input.Mode != "" || input.Username != "" || input.Password != "" || input.UseCachedCredentials || input.SessionID != "" {
+			return ErrInvalid
+		}
+		if input.Code != "" && !guardPattern.MatchString(input.Code) {
+			return ErrInvalid
+		}
 	case "configure":
 		if input.SessionID != "" || input.Code != "" {
 			return ErrInvalid
 		}
 		if input.Mode == "anonymous" {
-			if input.Username != "" || input.Password != "" {
+			if input.Username != "" || input.Password != "" || input.UseCachedCredentials {
 				return ErrInvalid
 			}
 			return nil
@@ -138,8 +145,11 @@ func Validate(input shared.SteamLoginRequest) error {
 		if input.Mode != "account" || !usernamePattern.MatchString(input.Username) || strings.EqualFold(input.Username, "anonymous") || len(input.Password) > 256 || strings.ContainsAny(input.Password, "\x00\r\n") {
 			return ErrInvalid
 		}
+		if input.UseCachedCredentials && input.Password != "" {
+			return ErrInvalid
+		}
 	case "code":
-		if !guardPattern.MatchString(input.Code) || input.SessionID == "" || input.Mode != "" || input.Username != "" || input.Password != "" {
+		if !guardPattern.MatchString(input.Code) || input.SessionID == "" || input.Mode != "" || input.Username != "" || input.Password != "" || input.UseCachedCredentials {
 			return ErrInvalid
 		}
 	default:
@@ -183,12 +193,15 @@ func (m *Manager) Manage(executable string, input shared.SteamLoginRequest) (sha
 		}
 		value := credentials{Mode: input.Mode}
 		if input.Mode == "account" {
-			value.Username, value.Password = input.Username, input.Password
-			if value.Password == "" && value.Username == p.credentials.Username {
-				value.Password = p.credentials.Password
-			}
-			if value.Password == "" {
-				return p.status, errors.New("请输入该 Steam 账号的密码")
+			value.Username = input.Username
+			if !input.UseCachedCredentials {
+				value.Password = input.Password
+				if value.Password == "" && value.Username == p.credentials.Username {
+					value.Password = p.credentials.Password
+				}
+				if value.Password == "" {
+					return p.status, errors.New("请输入该 Steam 账号的密码")
+				}
 			}
 		}
 		m.storeMu.Lock()
@@ -206,9 +219,12 @@ func (m *Manager) Manage(executable string, input shared.SteamLoginRequest) (sha
 		if p.credentials.Mode != "account" {
 			return p.status, ErrInvalid
 		}
+		if input.Code != "" && p.credentials.Password == "" {
+			return p.status, errors.New("仅用户名模式无法提交一次性验证码，请先保存密码或直接在运行节点通过 steamcmd 完成登录")
+		}
 		p.busy = true
 		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
-		session, err := startSession(ctx, ResolveExecutable(executable), p.credentials, io.Discard)
+		session, err := startSession(ctx, ResolveExecutable(executable), p.credentials, input.Code, io.Discard)
 		if err != nil {
 			cancel()
 			p.busy = false
@@ -314,7 +330,7 @@ func (m *Manager) runObserved(ctx context.Context, executable string, args []str
 			remaining = append(remaining, command)
 		}
 	}
-	session, err := startSession(runCtx, executable, value, output, preparation...)
+	session, err := startSession(runCtx, executable, value, "", output, preparation...)
 	if err != nil {
 		return err
 	}

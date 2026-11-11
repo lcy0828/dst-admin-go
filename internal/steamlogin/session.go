@@ -31,13 +31,20 @@ func errorCode(err error) string {
 }
 func authError(code string) error {
 	messages := map[string]string{
-		"GUARD_REQUIRED":   "该节点的 Steam 账号需要验证，请打开 Steam 登录设置完成验证后重试下载",
-		"INVALID_PASSWORD": "Steam 账号或密码错误，请检查登录设置",
-		"ACCESS_DENIED":    "Steam 拒绝访问该内容，请检查账号权限和应用 ID",
-		"STEAM_NETWORK":    "无法连接 Steam，请检查运行节点的网络后重试",
-		"LOGIN_FAILED":     "Steam 登录失败，请在登录设置中重新验证账号",
+		"GUARD_REQUIRED":     "该节点的 Steam 账号需要验证，请打开 Steam 登录设置完成验证后重试下载",
+		"PASSWORD_REQUIRED":  "未找到该账号在当前节点运行用户下的 SteamCMD 缓存凭据，请填写密码验证，或在宿主机以相同运行用户执行 steamcmd 登录后重试",
+		"INVALID_PASSWORD":   "Steam 账号或密码错误，请检查登录设置",
+		"INVALID_GUARD_CODE": "Steam Guard 验证码错误或已过期，请使用最新的 5 位验证码重试",
+		"RATE_LIMITED":       "Steam 登录尝试过于频繁，请稍后再试或复用宿主机已保存的 SteamCMD 凭据",
+		"ACCESS_DENIED":      "Steam 拒绝访问该内容，请检查账号权限和应用 ID",
+		"STEAM_NETWORK":      "无法连接 Steam，请检查运行节点的网络后重试",
+		"LOGIN_FAILED":       "Steam 登录失败，请在登录设置中重新验证账号",
 	}
-	return &loginError{code: code, message: messages[code]}
+	msg := messages[code]
+	if msg == "" {
+		msg = messages["LOGIN_FAILED"]
+	}
+	return &loginError{code: code, message: msg}
 }
 
 type loginSession struct {
@@ -58,11 +65,22 @@ type loginSession struct {
 	downloadErr    error
 }
 
-func startSession(ctx context.Context, executable string, value credentials, output io.Writer, preparation ...string) (*loginSession, error) {
+func startSession(ctx context.Context, executable string, value credentials, oneTimeCode string, output io.Writer, preparation ...string) (*loginSession, error) {
 	if output == nil {
 		output = io.Discard
 	}
-	s := &loginSession{id: uuid.NewString(), done: make(chan struct{}), wake: make(chan struct{}, 1), output: output, secrets: []string{value.Password}, state: "connecting"}
+	secrets := []string{}
+	if value.Password != "" {
+		secrets = append(secrets, value.Password)
+	}
+	normalizedCode := strings.ToUpper(strings.TrimSpace(oneTimeCode))
+	if normalizedCode != "" {
+		secrets = append(secrets, normalizedCode)
+		if oneTimeCode != normalizedCode {
+			secrets = append(secrets, oneTimeCode)
+		}
+	}
+	s := &loginSession{id: uuid.NewString(), done: make(chan struct{}), wake: make(chan struct{}, 1), output: output, secrets: secrets, state: "connecting"}
 	s.command = exec.CommandContext(ctx, executable)
 	configureProcess(s.command)
 	s.command.Stdout, s.command.Stderr = s, s
@@ -88,7 +106,14 @@ func startSession(ctx context.Context, executable string, value credentials, out
 	if len(preparation) > 0 {
 		prefix = strings.Join(preparation, "\n") + "\n"
 	}
-	if err = s.send(prefix + "login " + quote(value.Username) + " " + quote(value.Password) + "\n"); err != nil {
+	loginCommand := "login " + quote(value.Username)
+	if value.Password != "" {
+		loginCommand += " " + quote(value.Password)
+		if normalizedCode != "" {
+			loginCommand += " " + quote(normalizedCode)
+		}
+	}
+	if err = s.send(prefix + loginCommand + "\n"); err != nil {
 		s.stop()
 		return nil, err
 	}
@@ -100,11 +125,12 @@ func (s *loginSession) Write(data []byte) (int, error) {
 	defer s.mu.Unlock()
 	s.pending += string(data)
 	s.flushLocked(false)
-	// Steam Guard prompts have no newline. Parse the bounded current line, not
-	// historical output, so an old prompt cannot override later successful login.
+	// Steam Guard and password prompts have no newline. Parse the bounded
+	// current line, not historical output, so an old prompt cannot override later
+	// successful login.
 	if !s.discardLine {
 		state := classify(s.protocolLine(s.pending, true))
-		if (state == "ready" || strings.HasPrefix(state, "guard_")) && (s.state == "connecting" || strings.HasPrefix(s.state, "guard_")) {
+		if (state == "ready" || state == "PASSWORD_REQUIRED" || strings.HasPrefix(state, "guard_")) && (s.state == "connecting" || strings.HasPrefix(s.state, "guard_")) {
 			s.state = state
 		}
 	}
@@ -196,13 +222,15 @@ func (s *loginSession) parseLocked(line string) {
 	// Keep the first explicit download failure even if later commands succeed
 	// or SteamCMD exits zero. Only structured failure lines count as failures.
 	if s.downloadErr == nil {
-		if state == "ACCESS_DENIED" || state == "STEAM_NETWORK" || state == "INVALID_PASSWORD" || state == "LOGIN_FAILED" {
+		if state == "LOGIN_FAILED" && s.state == "ready" && strings.HasPrefix(value, "failed (") {
+			s.downloadErr = fmt.Errorf("SteamCMD 下载或校验失败: %s", strings.TrimSpace(s.redact(line)))
+		} else if state == "ACCESS_DENIED" || state == "STEAM_NETWORK" || state == "INVALID_PASSWORD" || state == "PASSWORD_REQUIRED" || state == "INVALID_GUARD_CODE" || state == "RATE_LIMITED" || state == "LOGIN_FAILED" {
 			s.downloadErr = authError(state)
 		} else if strings.HasPrefix(value, "error!") || strings.HasPrefix(value, "update canceled:") || strings.HasPrefix(value, "update cancelled:") {
 			s.downloadErr = fmt.Errorf("SteamCMD 下载或校验失败: %s", strings.TrimSpace(s.redact(line)))
 		}
 	}
-	if state != "" && (s.state == "" || s.state == "connecting" || strings.HasPrefix(s.state, "guard_") || s.state == "ready") {
+	if state != "" && !(state == "LOGIN_FAILED" && s.state == "ready" && strings.HasPrefix(value, "failed (")) && (s.state == "" || s.state == "connecting" || strings.HasPrefix(s.state, "guard_") || s.state == "ready") {
 		s.state = state
 	}
 }
@@ -225,24 +253,40 @@ func classify(raw string) string {
 	if strings.HasPrefix(value, "login ") {
 		return ""
 	}
-	failure := strings.HasPrefix(value, "error!") || strings.HasPrefix(value, "error:") || strings.HasPrefix(value, "failed (") || strings.HasPrefix(value, "failed to login") || strings.HasPrefix(value, "failed to logon") || strings.HasPrefix(value, "failed to connect")
+	failure := strings.HasPrefix(value, "error!") || strings.HasPrefix(value, "error:") || strings.HasPrefix(value, "failed (") || strings.HasPrefix(value, "failed to login") || strings.HasPrefix(value, "failed to logon") || strings.HasPrefix(value, "failed to connect") || strings.HasPrefix(value, "two-factor code mismatch") || strings.HasPrefix(value, "twofactor code mismatch") || strings.HasPrefix(value, "invalid login auth code")
 	if failure {
+		if strings.Contains(value, "invalid login auth code") || strings.Contains(value, "two-factor code mismatch") || strings.Contains(value, "twofactor code mismatch") || strings.Contains(value, "expired login auth code") {
+			return "INVALID_GUARD_CODE"
+		}
 		if strings.Contains(value, "invalidpassword") || strings.Contains(value, "invalid password") {
 			return "INVALID_PASSWORD"
+		}
+		if strings.Contains(value, "rate limit exceeded") || strings.Contains(value, "ratelimitexceeded") {
+			return "RATE_LIMITED"
 		}
 		if strings.Contains(value, "nosubscription") || strings.Contains(value, "no subscription") || strings.Contains(value, "access denied") {
 			return "ACCESS_DENIED"
 		}
-		if strings.Contains(value, "noconnection") || strings.Contains(value, "no connection") || strings.Contains(value, "failed to connect") || strings.Contains(value, "timeout") {
+		if strings.Contains(value, "noconnection") || strings.Contains(value, "no connection") || strings.Contains(value, "failed to connect") || strings.Contains(value, "timeout") || strings.Contains(value, "try another cm") || strings.Contains(value, "service unavailable") {
 			return "STEAM_NETWORK"
 		}
-		if strings.Contains(value, "failed to login") || strings.Contains(value, "failed to logon") {
+		if strings.Contains(value, "account logon denied") {
+			return "GUARD_REQUIRED"
+		}
+		if strings.Contains(value, "failed to login") || strings.Contains(value, "failed to logon") || strings.HasPrefix(value, "failed (") {
 			return "LOGIN_FAILED"
 		}
 		return ""
 	}
+	if strings.HasPrefix(value, "password:") {
+		return "PASSWORD_REQUIRED"
+	}
 	prompt := ""
-	if strings.HasPrefix(value, "waiting for confirmation") || strings.HasPrefix(value, "please confirm the login") {
+	delimiter := ":"
+	if strings.HasPrefix(value, "waiting for confirmation") || strings.HasPrefix(value, "use the steam mobile app to confirm") {
+		prompt = "guard_approval"
+		delimiter = "..."
+	} else if strings.HasPrefix(value, "please confirm the login") {
 		prompt = "guard_approval"
 	} else if strings.HasPrefix(value, "steam guard code:") {
 		prompt = "guard_email"
@@ -255,11 +299,11 @@ func classify(raw string) string {
 			prompt = "guard_email"
 		}
 	}
-	// Approval and readiness can be printed consecutively without a newline.
+	// Approval and readiness or failure can be printed consecutively without a newline.
 	if prompt != "" {
-		if index := strings.LastIndex(value, ":"); index >= 0 {
-			if ready := classify(value[index+1:]); ready == "ready" {
-				return ready
+		if index := strings.Index(value, delimiter); index >= 0 {
+			if next := classify(value[index+len(delimiter):]); next != "" {
+				return next
 			}
 		}
 		return prompt
@@ -290,6 +334,9 @@ func (s *loginSession) authenticate(ctx context.Context, notify func(string), in
 			}
 		}
 		if closed {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return authError("LOGIN_FAILED")
 		}
 		select {

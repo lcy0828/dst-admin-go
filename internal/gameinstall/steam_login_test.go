@@ -68,6 +68,17 @@ func TestRemoteSteamLoginKeepsExactNodeAndInstallationAndFencesChanges(t *testin
 		t.Fatal("offline target used another runtime", err)
 	}
 	f.values[0].Online = true
+	f.values[0].Capabilities = []string{shared.SteamLoginCapability}
+	f.failure = nil
+	calls = f.calls
+	for _, v2Input := range []shared.SteamLoginRequest{
+		{Action: "configure", Mode: "account", Username: "remote_user", UseCachedCredentials: true},
+		{Action: "login", Code: "ABCDE"},
+	} {
+		if _, err = s.SteamLogin(context.Background(), "agent:node", "alternate", v2Input); err == nil || f.calls != calls {
+			t.Fatalf("v1-only Agent accepted v2 Steam login payload %+v: err=%v calls=%d", v2Input, err, f.calls)
+		}
+	}
 	f.values[0].Capabilities = nil
 	if _, err = s.SteamLogin(context.Background(), "agent:node", "alternate", input); err == nil || f.calls != calls {
 		t.Fatal("old Agent accepted account settings", err)

@@ -2,7 +2,10 @@ package shared
 
 import "time"
 
-const SteamLoginCapability = "runtime.steam-login.v1"
+const (
+	SteamLoginCapability   = "runtime.steam-login.v1"
+	SteamLoginV2Capability = "runtime.steam-login.v2"
+)
 
 const (
 	RuntimeActionSteamLoginObserve RuntimeAction = "runtime.game.installation.steam-login.observe"
@@ -11,12 +14,17 @@ const (
 
 // Password and Code are write-only and must never be included in reports or jobs.
 type SteamLoginRequest struct {
-	Action    string `json:"action"`
-	Mode      string `json:"mode,omitempty"`
-	Username  string `json:"username,omitempty"`
-	Password  string `json:"password,omitempty"`
-	SessionID string `json:"sessionId,omitempty"`
-	Code      string `json:"code,omitempty"`
+	Action               string `json:"action"`
+	Mode                 string `json:"mode,omitempty"`
+	Username             string `json:"username,omitempty"`
+	Password             string `json:"password,omitempty"`
+	UseCachedCredentials bool   `json:"useCachedCredentials,omitempty"`
+	SessionID            string `json:"sessionId,omitempty"`
+	Code                 string `json:"code,omitempty"`
+}
+
+func (r SteamLoginRequest) RequiresV2Capability() bool {
+	return r.UseCachedCredentials || (r.Action == "login" && r.Code != "")
 }
 
 type SteamLoginStatus struct {

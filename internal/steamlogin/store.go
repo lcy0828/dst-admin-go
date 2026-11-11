@@ -76,7 +76,13 @@ func (m *Manager) load(id string) (credentials, error) {
 	if value.Mode != "anonymous" && value.Mode != "account" {
 		return credentials{}, ErrInvalid
 	}
-	if value.Mode == "account" && (value.Password == "" || Validate(shared.SteamLoginRequest{Action: "configure", Mode: value.Mode, Username: value.Username, Password: value.Password}) != nil) {
+	if value.Mode == "account" && Validate(shared.SteamLoginRequest{
+		Action:               "configure",
+		Mode:                 value.Mode,
+		Username:             value.Username,
+		Password:             value.Password,
+		UseCachedCredentials: value.Password == "",
+	}) != nil {
 		return credentials{}, ErrInvalid
 	}
 	return value, nil

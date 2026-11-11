@@ -52,7 +52,17 @@ func TestStructuredOutputParsingAcrossChunks(t *testing.T) {
 		{"short mobile prompt", "Two-factor code:", "guard_mobile"},
 		{"mobile", "Please enter the current auth code from your Steam Guard Mobile Authenticator app:", "guard_mobile"},
 		{"approval", "Please confirm the login in your Steam mobile app:", "guard_approval"},
+		{"modern mobile approval", "Use the Steam Mobile App to confirm your sign in...", "guard_approval"},
 		{"approval followed by ready", "Please confirm the login in your Steam mobile app:Waiting for user info...OK\n", "ready"},
+		{"modern approval followed by ready", "Use the Steam Mobile App to confirm your sign in...Waiting for user info...OK\n", "ready"},
+		{"modern approval followed by timeout", "Use the Steam Mobile App to confirm your sign in...ERROR! Failed to login: Timeout\n", "STEAM_NETWORK"},
+		{"waiting confirmation followed by colon error", "Waiting for confirmation...ERROR: InvalidPassword\n", "INVALID_PASSWORD"},
+		{"standalone repl failed line", "Logging in user 'user' to Steam Public...\nRetrying...\nFAILED (Account Disabled)\n", "LOGIN_FAILED"},
+		{"waiting confirmation followed by ready", "Waiting for confirmation...Waiting for user info...OK\n", "ready"},
+		{"password prompt without newline", "Password:", "PASSWORD_REQUIRED"},
+		{"inline password prompt", "Logging in user 'user' to Steam Public...Password:", "PASSWORD_REQUIRED"},
+		{"invalid guard code", "Logging in user 'user' to Steam Public...FAILED (Two-factor code mismatch)\n", "INVALID_GUARD_CODE"},
+		{"rate limited", "Logging in user 'user' to Steam Public...FAILED (Rate Limit Exceeded)\n", "RATE_LIMITED"},
 		{"invalid password", "ERROR! Failed to login: InvalidPassword\n", "INVALID_PASSWORD"},
 		{"inline login failure", "Logging in user 'user' to Steam Public...FAILED (InvalidPassword)\n", "INVALID_PASSWORD"},
 		{"subscription", "ERROR! Failed to install app (NoSubscription)\n", "ACCESS_DENIED"},
@@ -79,7 +89,7 @@ func TestStructuredOutputParsingAcrossChunks(t *testing.T) {
 	if s.result() == nil || !strings.Contains(s.result().Error(), "Disk write failure") || strings.Contains(s.result().Error(), "private-") || strings.Contains(output.String(), "private-") {
 		t.Fatal("failure lost or leaked secret", s.result())
 	}
-	for _, password := range []string{"OK", "Please enter the Steam Guard code from the email sent to you:", "logged in ok", "ERROR! Failed to login: InvalidPassword"} {
+	for _, password := range []string{"OK", "Password:", "Use the Steam Mobile App to confirm your sign in...", "Please enter the Steam Guard code from the email sent to you:", "logged in ok", "ERROR! Failed to login: InvalidPassword"} {
 		s := &loginSession{state: "connecting", output: io.Discard, secrets: []string{password}}
 		for _, b := range []byte(password + "\n") {
 			_, _ = s.Write([]byte{b})

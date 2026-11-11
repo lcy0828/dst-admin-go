@@ -37,6 +37,9 @@ func (s *Service) ExecuteRuntime(ctx context.Context, targetID string, request s
 	if request.Action == shared.RuntimeActionConsoleSend && request.Console != nil && request.Console.CommandDocument != nil && !containsString(agent.Capabilities, shared.RuntimeCommandDocumentCapability) {
 		return RuntimeExecutionResult{}, errors.New("Agent 不支持当前 Runtime 命令文件格式，请先升级 Agent")
 	}
+	if request.Action == shared.RuntimeActionSteamLoginManage && request.GameInstallation != nil && request.GameInstallation.SteamLogin != nil && request.GameInstallation.SteamLogin.RequiresV2Capability() && !containsString(agent.Capabilities, shared.SteamLoginV2Capability) {
+		return RuntimeExecutionResult{}, errors.New("请升级该节点的 Agent 以支持仅用户名凭据复用或一次性验证码登录")
+	}
 	registeredScope := agent.InstallationRegistrySupported && (request.Action == shared.RuntimeActionLuaEnsure || request.Action == shared.RuntimeActionPlayerInventory || strings.HasPrefix(string(request.Action), "runtime.mods.") || request.Action == shared.RuntimeActionModConfigurationWrite)
 	if registeredScope || shared.IsGameInstallationAction(request.Action) || request.Action == shared.RuntimeActionLuaJITObserve || (request.Action == shared.RuntimeActionLuaJITInstall || request.Action == shared.RuntimeActionLuaJITDownload) {
 		registered := false

@@ -8878,7 +8878,7 @@ paths:
         terms: ["Steam 登录", "Steam Guard", "令牌验证", "匿名登录", "开服节点"]
       x-dst-tool: {"openWorld": true}
       summary: Configure account login or interact with a bounded Steam Guard session on the selected node
-      description: Anonymous is the default. Credentials are encrypted on the runtime node. Installations using the same SteamCMD executable share settings. Requires runtime.steam-login.v1 on remote Agents. Verification lasts at most four minutes. Scheduled downloads needing Guard fail clearly and can be retried after verification. An explicit reset clears only the selected SteamCMD profile and switches it to anonymous, without changing other accounts or game files. Reset accepts no mode, username, password, code or sessionId and is rejected during downloads or login verification.
+      description: Anonymous is the default. Credentials are encrypted on the runtime node. Account mode supports either storing an encrypted password or setting useCachedCredentials=true to send only the username and reuse credentials already saved by SteamCMD under the node runtime user. Installations using the same SteamCMD executable share settings. Requires runtime.steam-login.v1 on remote Agents (and runtime.steam-login.v2 for useCachedCredentials=true or an inline code on action=login). Verification lasts at most four minutes; action=login accepts an optional 5-character Steam Guard code when a password is set to bypass mobile push confirmation. Scheduled downloads needing Guard fail clearly and can be retried after verification. An explicit reset clears only the selected SteamCMD profile and switches it to anonymous, without changing other accounts or game files. Reset accepts no mode, username, password, code or sessionId and is rejected during downloads or login verification.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -8894,8 +8894,9 @@ paths:
                 mode: { type: string, enum: [anonymous, account] }
                 username: { type: string, maxLength: 64 }
                 password: { type: string, maxLength: 256, writeOnly: true, description: Omit or leave blank to retain the saved password for the same account }
+                useCachedCredentials: { type: boolean, description: Configure account mode with username only to reuse node-local SteamCMD cached credentials and clear any stored password }
                 sessionId: { type: string, maxLength: 128 }
-                code: { type: string, pattern: '^[A-Za-z0-9]{5}$', writeOnly: true }
+                code: { type: string, pattern: '^[A-Za-z0-9]{5}$', writeOnly: true, description: 5-character Steam Guard code for action=code or optional one-time code for action=login }
       responses:
         "200": { description: "Sanitized login status. Verification runs asynchronously; read only while a login is active.", content: { application/json: { schema: { $ref: "#/components/schemas/SteamLoginStatusEnvelope" } } } }
         "422": { $ref: "#/components/responses/UnprocessableEntity" }
