@@ -280,3 +280,48 @@ func TestUnrelatedLegacyArchiveDoesNotBlockModernCopyReconciliation(t *testing.T
 		t.Fatalf("list=%+v err=%v", list, err)
 	}
 }
+
+func TestLegacyMigrationUpgradesMultilineSavedContent(t *testing.T) {
+	store := newChatStore(t)
+	room := rooms.Room{ID: "room", Managed: true}
+	world := rooms.World{ID: "master", Name: "Master", Role: rooms.WorldRoleMaster}
+	start := time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	legacy := shared.RuntimeChatLogGeneration{
+		ID: legacyTestID, FileName: "server_chat_log.txt", StartedAt: start, UpdatedAt: start.Add(time.Minute), Size: 150, TimeVersion: shared.ChatTimeVersion,
+	}
+	oldEntry := parsedChatEntry(t, room.ID, world, start, 60, "[00:00:01]: [Announcement] 今日播报：")
+	if _, err := store.ImportGeneration(room.ID, world, legacy, []parsedEntry{oldEntry}, 150, start); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.List(room.ID, Filter{Limit: 10})
+	if err != nil || len(before.Items) != 1 {
+		t.Fatalf("before=%+v err=%v", before, err)
+	}
+	modern := legacy
+	modern.ID = "chat-v2:" + legacyTestID + ":11111111111111111111111111111111"
+	reader := timedGenerationFixture{
+		generationReaderFixture: &generationReaderFixture{
+			worlds: map[string][]generationFixture{
+				world.ID: {{
+					generation: modern,
+					lines: []shared.RuntimeLogLine{
+						{Cursor: 60, Text: "[00:00:01]: [Announcement] 今日播报："},
+						{Cursor: 150, Text: "春季第 5 天"},
+					},
+				}},
+			},
+		},
+		at: start.Add(time.Minute),
+	}
+	svc, err := NewService(persistentChatCatalog{room: room, worlds: []rooms.World{world}}, chatSnapshots{}, WithPersistence(store, reader))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SyncRoom(context.Background(), room.ID); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.List(room.ID, Filter{Limit: 10})
+	if err != nil || after.Total != 1 || after.Items[0].ID != before.Items[0].ID || after.Items[0].Content != "今日播报：\n春季第 5 天" {
+		t.Fatalf("expected upgraded legacy event retaining ID %q, got %+v err=%v", before.Items[0].ID, after, err)
+	}
+}

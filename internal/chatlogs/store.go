@@ -65,6 +65,10 @@ type generationRecord struct {
 	LastSyncedAt       time.Time
 	ParserVersion      int `gorm:"not null;default:0"`
 	RepairCursor       int64
+	CarryCursor        int64
+	CarryState         string `gorm:"type:text"`
+	RepairCarryCursor  int64
+	RepairCarryState   string `gorm:"type:text"`
 	ParseErrors        int
 	LastParseProblem   string
 	Unavailable        bool `gorm:"not null;default:false"`
@@ -90,11 +94,15 @@ type Store struct {
 }
 
 type GenerationState struct {
-	Cursor        int64
-	Size          int64
-	CaughtUp      bool
-	ParserVersion int
-	RepairCursor  int64
+	Cursor            int64
+	Size              int64
+	CaughtUp          bool
+	ParserVersion     int
+	RepairCursor      int64
+	CarryCursor       int64
+	CarryState        string
+	RepairCarryCursor int64
+	RepairCarryState  string
 }
 
 type SyncState struct {
@@ -191,7 +199,12 @@ func (s *Store) Generation(roomID, worldID, generationID string) (GenerationStat
 	if result.Error != nil {
 		return GenerationState{}, result.Error
 	}
-	return GenerationState{Cursor: record.Cursor, Size: record.Size, CaughtUp: record.CaughtUp, ParserVersion: record.ParserVersion, RepairCursor: record.RepairCursor}, nil
+	return GenerationState{
+		Cursor: record.Cursor, Size: record.Size, CaughtUp: record.CaughtUp,
+		ParserVersion: record.ParserVersion, RepairCursor: record.RepairCursor,
+		CarryCursor: record.CarryCursor, CarryState: record.CarryState,
+		RepairCarryCursor: record.RepairCarryCursor, RepairCarryState: record.RepairCarryState,
+	}, nil
 }
 
 // ReconcileGeneration removes an older estimated identity for the same
@@ -304,6 +317,8 @@ type batchProgress struct {
 	repair           bool
 	parseErrors      int
 	lastParseProblem string
+	carryCursor      int64
+	carryState       string
 }
 
 func (s *Store) importGeneration(roomID string, world rooms.World, generation shared.RuntimeChatLogGeneration, entries []parsedEntry, cursor int64, observedAt time.Time, progress batchProgress) (int, error) {
@@ -390,7 +405,10 @@ func (s *Store) importGeneration(roomID string, world rooms.World, generation sh
 		Archived:           generation.Archived, StartedAt: startedAt, StartedAtEstimated: generation.StartedAtEstimated,
 		UpdatedAt: generation.UpdatedAt.UTC(), Size: generation.Size, Cursor: cursor,
 		CaughtUp: cursor >= generation.Size, LastSyncedAt: observedAt.UTC(),
-		ParserVersion: existing.ParserVersion, RepairCursor: existing.RepairCursor, ParseErrors: existing.ParseErrors, LastParseProblem: existing.LastParseProblem,
+		ParserVersion: existing.ParserVersion, RepairCursor: existing.RepairCursor,
+		CarryCursor: existing.CarryCursor, CarryState: existing.CarryState,
+		RepairCarryCursor: existing.RepairCarryCursor, RepairCarryState: existing.RepairCarryState,
+		ParseErrors: existing.ParseErrors, LastParseProblem: existing.LastParseProblem,
 	}
 	if progress.repair {
 		if existing.RepairCursor == 0 {
@@ -398,12 +416,22 @@ func (s *Store) importGeneration(roomID string, world rooms.World, generation sh
 			record.LastParseProblem = ""
 		}
 		record.RepairCursor = processedCursor
+		record.RepairCarryCursor = progress.carryCursor
+		record.RepairCarryState = progress.carryState
 		if processedCursor >= generation.Size {
 			record.ParserVersion = progress.version
 			record.RepairCursor = 0
+			record.RepairCarryCursor = 0
+			record.RepairCarryState = ""
 		}
-	} else if progress.version > 0 && !found {
-		record.ParserVersion = progress.version
+	} else {
+		if progress.version > 0 && !found {
+			record.ParserVersion = progress.version
+		}
+		if !found || processedCursor >= existing.Cursor {
+			record.CarryCursor = progress.carryCursor
+			record.CarryState = progress.carryState
+		}
 	}
 	record.ParseErrors += progress.parseErrors
 	if progress.lastParseProblem != "" {

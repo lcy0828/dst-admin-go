@@ -2,15 +2,17 @@ package chatlogs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"dont/internal/rooms"
 	"github.com/jinzhu/gorm"
 )
 
-const parserVersion = 1
+const parserVersion = 2
 
 var ErrSyncPending = errors.New("聊天历史正在分批补齐")
 
@@ -21,6 +23,32 @@ func sameTime(left, right *time.Time) bool {
 	return left.Equal(*right)
 }
 
+func sameEnvelope(event eventRecord, entry parsedEntry) bool {
+	return event.Kind == string(entry.Kind) &&
+		event.AnnouncementType == entry.AnnouncementType &&
+		event.PlayerID == entry.PlayerID &&
+		strings.EqualFold(event.PlayerName, entry.PlayerName)
+}
+
+func canUpgradeEventContent(event eventRecord, entry parsedEntry) (upgrade bool, keepExisting bool) {
+	if !sameEnvelope(event, entry) {
+		return false, false
+	}
+	if event.Content == "" && entry.Content != "" {
+		return true, false
+	}
+	if event.Content != "" && strings.HasPrefix(entry.Content, event.Content+"\n") {
+		return true, false
+	}
+	if entry.Content == "" && event.Content != "" {
+		return false, true
+	}
+	if entry.Content != "" && strings.HasPrefix(event.Content, entry.Content+"\n") {
+		return false, true
+	}
+	return false, false
+}
+
 // Existing source identity is stable across parser upgrades. Correct its
 // interpretation rather than inserting another copy of its text.
 func (s *Store) correctSourceTime(tx *gorm.DB, source sourceRecord, entry parsedEntry) error {
@@ -28,21 +56,101 @@ func (s *Store) correctSourceTime(tx *gorm.DB, source sourceRecord, entry parsed
 	if err := tx.Table(s.eventsTable).Where("id = ?", source.EventID).First(&event).Error; err != nil {
 		return err
 	}
+	contentUpdated := false
 	if event.Fingerprint != entryIdentity(entry) {
-		return fmt.Errorf("聊天来源 %s 正文与已保存记录冲突，保留原记录", source.ID)
+		upgrade, keepExisting := canUpgradeEventContent(event, entry)
+		if !upgrade && !keepExisting {
+			return fmt.Errorf("聊天来源 %s 正文与已保存记录冲突，保留原记录", source.ID)
+		}
+		if upgrade {
+			if err := tx.Table(s.eventsTable).Where("id = ?", event.ID).Updates(map[string]interface{}{
+				"content":     entry.Content,
+				"fingerprint": entryIdentity(entry),
+			}).Error; err != nil {
+				return err
+			}
+			contentUpdated = true
+		}
 	}
-	if source.TimeVersion > entry.timeVersion {
+	if source.TimeVersion > entry.timeVersion && !contentUpdated {
 		return nil
 	}
-	if source.TimeVersion == entry.timeVersion && sameTime(source.OccurredAt, entry.OccurredAt) && source.TimeEstimated == entry.TimeEstimated {
+	if !contentUpdated && source.TimeVersion == entry.timeVersion && sameTime(source.OccurredAt, entry.OccurredAt) && source.TimeEstimated == entry.TimeEstimated {
 		return nil
 	}
-	if err := tx.Table(s.sourcesTable).Where("id = ?", source.ID).Updates(map[string]interface{}{
-		"occurred_at": entry.OccurredAt, "time_version": entry.timeVersion, "time_estimated": entry.TimeEstimated,
-	}).Error; err != nil {
-		return err
+	if source.TimeVersion <= entry.timeVersion && (source.TimeVersion != entry.timeVersion || !sameTime(source.OccurredAt, entry.OccurredAt) || source.TimeEstimated != entry.TimeEstimated) {
+		if err := tx.Table(s.sourcesTable).Where("id = ?", source.ID).Updates(map[string]interface{}{
+			"occurred_at": entry.OccurredAt, "time_version": entry.timeVersion, "time_estimated": entry.TimeEstimated,
+		}).Error; err != nil {
+			return err
+		}
 	}
 	return s.reconcileEventSource(tx, source.EventID)
+}
+
+type carryCheckpoint struct {
+	Kind              Kind       `json:"kind"`
+	AnnouncementType  string     `json:"announcementType,omitempty"`
+	PlayerID          string     `json:"playerId,omitempty"`
+	PlayerName        string     `json:"playerName,omitempty"`
+	Content           string     `json:"content"`
+	SourceTimestamp   string     `json:"sourceTimestamp"`
+	OccurredAt        *time.Time `json:"occurredAt,omitempty"`
+	TimeEstimated     bool       `json:"timeEstimated,omitempty"`
+	SourceCursor      int64      `json:"sourceCursor"`
+	Seconds           int        `json:"seconds"`
+	TimeVersion       int        `json:"timeVersion"`
+	ContinuationLines int        `json:"continuationLines"`
+}
+
+func encodeCarryCheckpoint(entry parsedEntry, continuationLines int) string {
+	encoded, err := json.Marshal(carryCheckpoint{
+		Kind:              entry.Kind,
+		AnnouncementType:  entry.AnnouncementType,
+		PlayerID:          entry.PlayerID,
+		PlayerName:        entry.PlayerName,
+		Content:           entry.Content,
+		SourceTimestamp:   entry.SourceTimestamp,
+		OccurredAt:        entry.OccurredAt,
+		TimeEstimated:     entry.TimeEstimated,
+		SourceCursor:      entry.sourceCursor,
+		Seconds:           entry.seconds,
+		TimeVersion:       entry.timeVersion,
+		ContinuationLines: continuationLines,
+	})
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func decodeCarryCheckpoint(roomID string, world rooms.World, checkpointCursor int64, raw string, cursor int64) (*parsedEntry, int) {
+	if cursor <= 0 || checkpointCursor != cursor || strings.TrimSpace(raw) == "" {
+		return nil, 0
+	}
+	var checkpoint carryCheckpoint
+	if err := json.Unmarshal([]byte(raw), &checkpoint); err != nil {
+		return nil, 0
+	}
+	entry := parsedEntry{
+		Entry: Entry{
+			Kind:             checkpoint.Kind,
+			AnnouncementType: checkpoint.AnnouncementType,
+			PlayerID:         checkpoint.PlayerID,
+			PlayerName:       checkpoint.PlayerName,
+			Content:          checkpoint.Content,
+			SourceTimestamp:  checkpoint.SourceTimestamp,
+			OccurredAt:       checkpoint.OccurredAt,
+			TimeEstimated:    checkpoint.TimeEstimated,
+			Sources:          []Source{{WorldID: world.ID, WorldName: world.Name, WorldRole: world.Role}},
+		},
+		seconds:      checkpoint.Seconds,
+		sourceCursor: checkpoint.SourceCursor,
+		primaryRole:  world.Role,
+		timeVersion:  checkpoint.TimeVersion,
+	}
+	entry.ID = entryID(roomID, entry)
+	return &entry, checkpoint.ContinuationLines
 }
 
 type HistoryHealth struct {
@@ -97,7 +205,12 @@ func (s *Service) RepairRoom(ctx context.Context, roomID string) (SyncResult, er
 	if err != nil {
 		return SyncResult{}, err
 	}
-	err = s.store.db.Table(s.store.generationsTable).Where("room_id = ? AND parser_version >= ?", roomID, parserVersion).Updates(map[string]interface{}{"parser_version": 0, "repair_cursor": 0}).Error
+	err = s.store.db.Table(s.store.generationsTable).Where("room_id = ? AND parser_version >= ?", roomID, parserVersion).Updates(map[string]interface{}{
+		"parser_version":      0,
+		"repair_cursor":       0,
+		"repair_carry_cursor": 0,
+		"repair_carry_state":  "",
+	}).Error
 	releaseBatch()
 	if err != nil {
 		return SyncResult{}, err

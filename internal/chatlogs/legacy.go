@@ -90,7 +90,11 @@ func (s *Store) legacySourceMatches(tx *gorm.DB, source sourceRecord, entry pars
 	if err := tx.Table(s.eventsTable).Where("id = ?", source.EventID).First(&event).Error; err != nil {
 		return false, err
 	}
-	return event.Fingerprint == entryIdentity(entry), nil
+	if event.Fingerprint == entryIdentity(entry) {
+		return true, nil
+	}
+	upgrade, keepExisting := canUpgradeEventContent(event, entry)
+	return upgrade || keepExisting, nil
 }
 
 func (s *Store) adoptLegacySource(tx *gorm.DB, roomID string, world rooms.World, generationID, legacyID string, entry parsedEntry) (*sourceRecord, error) {

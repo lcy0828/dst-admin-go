@@ -20,15 +20,20 @@ import (
 )
 
 const (
-	defaultLimit     = 100
-	maximumLimit     = 500
-	chatSnapshotTail = 2000
+	defaultLimit         = 100
+	maximumLimit         = 500
+	chatSnapshotTail     = 2000
+	maxContinuationBytes = 4096
+	maxContinuationLines = 16
 	// Shard log clocks can drift while DST pauses/loads. Allow bounded skew
 	// only across distinct shards; same-shard repetitions retain their IDs.
-	dedupWindow      = 30
+	dedupWindow = 30
 )
 
-var chatLinePattern = regexp.MustCompile(`^\[(\d{2,}):(\d{2}):(\d{2})\]:\s+\[([^\]]+)\]\s*(.*)$`)
+var (
+	chatLinePattern            = regexp.MustCompile(`^\[(\d{2,}):(\d{2}):(\d{2})\]:\s+\[([^\]]+)\]\s*(.*)$`)
+	chatTimestampPrefixPattern = regexp.MustCompile(`^\[\d{2,}:\d{2}:\d{2}\]:`)
+)
 
 type RoomCatalog interface {
 	Room(string) (rooms.Room, error)
@@ -135,11 +140,28 @@ func (s *Service) List(ctx context.Context, roomID string, filter Filter) (List,
 			startedRolePriority = sourcePriority(world.WorldRole)
 		}
 		truncated = truncated || world.Snapshot.Truncated
+		continuationLines := 0
+		canContinue := false
 		for _, line := range world.Snapshot.Lines {
 			entry, ok := parseLine(room.ID, world, line)
 			if ok {
 				entries = append(entries, entry)
+				continuationLines = 0
+				canContinue = true
+				continue
 			}
+			if isModWarningChatLogLine(line.Text) {
+				continuationLines = 0
+				canContinue = false
+				continue
+			}
+			if isBlankChatLogLine(line.Text) {
+				continue
+			}
+			if canContinue && len(entries) > 0 && appendContinuationLine(room.ID, &entries[len(entries)-1], &continuationLines, line.Text) {
+				continue
+			}
+			canContinue = false
 		}
 	}
 
@@ -224,6 +246,47 @@ func normalizeFilter(filter Filter) (Filter, error) {
 	return filter, nil
 }
 
+func isBlankChatLogLine(text string) bool {
+	return strings.TrimSpace(text) == ""
+}
+
+func isModWarningChatLogLine(text string) bool {
+	return strings.Contains(strings.TrimSpace(text), "]: [Mod Warning]")
+}
+
+func isContinuationChatLine(text string) (string, bool) {
+	trimmedRight := strings.TrimRight(text, "\r\n")
+	trimmed := strings.TrimSpace(trimmedRight)
+	if trimmed == "" || !utf8.ValidString(trimmedRight) || strings.ContainsRune(trimmedRight, '\x00') {
+		return "", false
+	}
+	if chatTimestampPrefixPattern.MatchString(trimmed) {
+		return "", false
+	}
+	return trimmed, true
+}
+
+func appendContinuationLine(roomID string, entry *parsedEntry, continuationLines *int, text string) bool {
+	if entry == nil || continuationLines == nil || *continuationLines >= maxContinuationLines {
+		return false
+	}
+	continuation, ok := isContinuationChatLine(text)
+	if !ok {
+		return false
+	}
+	if len(entry.Content)+1+len(continuation) > maxContinuationBytes {
+		return false
+	}
+	if entry.Content == "" {
+		entry.Content = continuation
+	} else {
+		entry.Content = entry.Content + "\n" + continuation
+	}
+	entry.ID = entryID(roomID, *entry)
+	*continuationLines++
+	return true
+}
+
 func parseLine(roomID string, world logstream.WorldSnapshot, line logstream.Line) (parsedEntry, bool) {
 	matches := chatLinePattern.FindStringSubmatch(strings.TrimSpace(line.Text))
 	if len(matches) != 6 {
@@ -255,6 +318,9 @@ func parseLine(roomID string, world logstream.WorldSnapshot, line logstream.Line
 		entry.Kind = KindWhisper
 	case "announcement":
 		entry.Kind = KindAnnouncement
+	case "system message":
+		entry.Kind = KindAnnouncement
+		entry.AnnouncementType = "system"
 	default:
 		lower := strings.ToLower(label)
 		if !strings.HasSuffix(lower, " announcement") {
@@ -279,18 +345,21 @@ func parsePlayerMessage(value string) (string, string, string, bool) {
 		return "", "", "", false
 	}
 	closing := strings.IndexByte(value, ')')
-	if closing < 2 {
+	if closing < 1 {
 		return "", "", "", false
 	}
 	playerID := strings.TrimSpace(value[1:closing])
 	remainder := strings.TrimSpace(value[closing+1:])
 	separator := strings.Index(remainder, ":")
-	if playerID == "" || separator < 1 {
+	if separator < 0 {
 		return "", "", "", false
 	}
 	playerName := strings.TrimSpace(remainder[:separator])
 	content := strings.TrimSpace(remainder[separator+1:])
-	if playerName == "" {
+	if playerName == "" && playerID != "" {
+		playerName = playerID
+	}
+	if playerID == "" && playerName == "" && content == "" {
 		return "", "", "", false
 	}
 	return playerID, playerName, content, true

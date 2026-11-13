@@ -187,3 +187,74 @@ func TestListRequiresManagedRoom(t *testing.T) {
 		t.Fatalf("managed room error=%v", err)
 	}
 }
+
+func TestListParsesMultilineServerSayAndSystemMessages(t *testing.T) {
+	startedAt := time.Date(2026, time.August, 23, 12, 0, 0, 0, time.UTC)
+	service, err := NewService(chatCatalog{managed: true}, chatSnapshots{value: logstream.RoomSnapshot{
+		RoomID: "room", Available: 1,
+		Worlds: []logstream.WorldSnapshot{{
+			WorldID: "master", WorldName: "地面", WorldRole: rooms.WorldRoleMaster,
+			Snapshot: &logstream.Snapshot{StartedAt: startedAt, Lines: []logstream.Line{
+				{Cursor: 35, Text: "[00:00:10]: [Announcement] "},
+				{Cursor: 65, Text: "春季第 5 天"},
+				{Cursor: 95, Text: "鹿鹅巢已刷新"},
+				{Cursor: 140, Text: "[00:00:20]: [Say] () Host: 服务器将在 5 分钟后保存"},
+				{Cursor: 190, Text: "[00:00:30]: [System Message] 世界保存完成"},
+				{Cursor: 240, Text: "[00:00:40]: [Roll Announcement] (KU_ONE) Willow 1-100: 88"},
+			}},
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := service.List(context.Background(), "room", Filter{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.Total != 4 || list.Counts[KindSay] != 1 || list.Counts[KindAnnouncement] != 3 {
+		t.Fatalf("unexpected counts: %#v", list)
+	}
+	if list.Items[0].AnnouncementType != "roll" || list.Items[1].AnnouncementType != "system" || list.Items[1].Content != "世界保存完成" {
+		t.Fatalf("unexpected system/roll items: %#v", list.Items[:2])
+	}
+	if list.Items[2].Kind != KindSay || list.Items[2].PlayerName != "Host" || list.Items[2].PlayerID != "" {
+		t.Fatalf("unexpected empty-id say item: %#v", list.Items[2])
+	}
+	if list.Items[3].Content != "春季第 5 天\n鹿鹅巢已刷新" {
+		t.Fatalf("unexpected multiline announcement content: %q", list.Items[3].Content)
+	}
+}
+
+func TestListDoesNotAttachModTracebacksAndKeepsParagraphContinuations(t *testing.T) {
+	startedAt := time.Date(2026, time.August, 23, 12, 0, 0, 0, time.UTC)
+	service, err := NewService(chatCatalog{managed: true}, chatSnapshots{value: logstream.RoomSnapshot{
+		RoomID: "room", Available: 1,
+		Worlds: []logstream.WorldSnapshot{{
+			WorldID: "master", WorldName: "地面", WorldRole: rooms.WorldRoleMaster,
+			Snapshot: &logstream.Snapshot{StartedAt: startedAt, Lines: []logstream.Line{
+				{Cursor: 40, Text: "[00:00:10]: [Announcement] 今日公告"},
+				{Cursor: 42, Text: ""},
+				{Cursor: 70, Text: "欢迎光临"},
+				{Cursor: 110, Text: "[00:00:15]: [Say] (KU_ONE) Willow: hi"},
+				{Cursor: 150, Text: "[00:00:16]: [Mod Warning] lua glitch"},
+				{Cursor: 190, Text: "stack traceback: scripts/main.lua:10"},
+			}},
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := service.List(context.Background(), "room", Filter{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.Total != 2 {
+		t.Fatalf("unexpected total=%d items=%#v", list.Total, list.Items)
+	}
+	if list.Items[0].Content != "hi" {
+		t.Fatalf("mod traceback polluted previous say content: %q", list.Items[0].Content)
+	}
+	if list.Items[1].Content != "今日公告\n欢迎光临" {
+		t.Fatalf("expected paragraph continuation across blank line, got %q", list.Items[1].Content)
+	}
+}

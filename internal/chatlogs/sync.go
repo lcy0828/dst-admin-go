@@ -119,6 +119,7 @@ phases:
 	if healthErr != nil {
 		return result, true, healthErr
 	}
+	result.HistoryHealth = health
 	if health.PendingGenerations > 0 && len(result.Problems) == 0 {
 		result.Pending = true
 	}
@@ -167,6 +168,8 @@ func (s *Service) syncCurrentFallback(ctx context.Context, room rooms.Room, worl
 		}
 		entries := make([]parsedEntry, 0, len(source.Snapshot.Lines))
 		cursor := int64(0)
+		continuationLines := 0
+		canContinue := false
 		for _, line := range source.Snapshot.Lines {
 			if line.Cursor > cursor {
 				cursor = line.Cursor
@@ -176,7 +179,22 @@ func (s *Service) syncCurrentFallback(ctx context.Context, room rooms.Room, worl
 				entry.TimeEstimated = true
 				entry.OccurredAt = nil
 				entries = append(entries, entry)
+				continuationLines = 0
+				canContinue = true
+				continue
 			}
+			if isModWarningChatLogLine(line.Text) {
+				continuationLines = 0
+				canContinue = false
+				continue
+			}
+			if isBlankChatLogLine(line.Text) {
+				continue
+			}
+			if canContinue && len(entries) > 0 && appendContinuationLine(room.ID, &entries[len(entries)-1], &continuationLines, line.Text) {
+				continue
+			}
+			canContinue = false
 		}
 		if source.Snapshot.Truncated {
 			cursor = 0
@@ -235,7 +253,7 @@ func (s *Service) syncWorld(ctx context.Context, roomID string, world rooms.Worl
 		if err != nil {
 			return imported, err
 		}
-		repair := state.ParserVersion < parserVersion
+		repair := state != (GenerationState{}) && state.ParserVersion < parserVersion
 		// Fresh appends precede old replay within the current process generation.
 		if !generation.Archived && state.Cursor > 0 && state.Cursor < generation.Size {
 			repair = false
@@ -255,8 +273,10 @@ func (s *Service) syncWorld(ctx context.Context, roomID string, world rooms.Worl
 			}
 		}
 		cursor := state.Cursor
+		carryCursor, carryRaw := state.CarryCursor, state.CarryState
 		if repair {
 			cursor = state.RepairCursor
+			carryCursor, carryRaw = state.RepairCarryCursor, state.RepairCarryState
 		}
 		if cursor > generation.Size {
 			return imported, errors.New("聊天日志被截短，保留已保存记录并等待核验")
@@ -268,6 +288,7 @@ func (s *Service) syncWorld(ctx context.Context, roomID string, world rooms.Worl
 			}
 			continue
 		}
+		carryEntry, carryContinuations := decodeCarryCheckpoint(roomID, world, carryCursor, carryRaw, cursor)
 		for {
 			if ctx.Err() != nil || budget.bytes < 2 || budget.chunks >= maximumSyncChunks {
 				return imported, ErrSyncPending
@@ -301,19 +322,53 @@ func (s *Service) syncWorld(ctx context.Context, roomID string, world rooms.Worl
 			for _, stamp := range chunk.Times {
 				times[stamp.Cursor] = stamp.OccurredAt
 			}
+			activeIndex := -1
 			for _, line := range chunk.Lines {
 				entry, ok := parseLine(roomID, worldSnapshot, logstream.Line{Cursor: line.Cursor, Text: line.Text})
-				if !ok {
-					if strings.TrimSpace(line.Text) != "" && !strings.Contains(line.Text, "]: [Mod Warning]") {
-						progress.parseErrors++
-						progress.lastParseProblem = fmt.Sprintf("字节 %d：无法识别聊天行", line.Cursor)
-					}
+				if ok {
+					entry.timeVersion = parserVersion
+					entry.OccurredAt = times[line.Cursor]
+					entry.TimeEstimated = entry.OccurredAt == nil
+					parsed = append(parsed, entry)
+					activeIndex = len(parsed) - 1
+					carryEntry = nil
+					carryContinuations = 0
 					continue
 				}
-				entry.timeVersion = parserVersion
-				entry.OccurredAt = times[line.Cursor]
-				entry.TimeEstimated = entry.OccurredAt == nil
-				parsed = append(parsed, entry)
+				if isModWarningChatLogLine(line.Text) {
+					activeIndex = -1
+					carryEntry = nil
+					carryContinuations = 0
+					continue
+				}
+				if isBlankChatLogLine(line.Text) {
+					continue
+				}
+				if activeIndex >= 0 {
+					if appendContinuationLine(roomID, &parsed[activeIndex], &carryContinuations, line.Text) {
+						continue
+					}
+				} else if carryEntry != nil && appendContinuationLine(roomID, carryEntry, &carryContinuations, line.Text) {
+					parsed = append(parsed, *carryEntry)
+					activeIndex = len(parsed) - 1
+					carryEntry = nil
+					continue
+				}
+				activeIndex = -1
+				carryEntry = nil
+				carryContinuations = 0
+				progress.parseErrors++
+				progress.lastParseProblem = fmt.Sprintf("字节 %d：无法识别聊天行", line.Cursor)
+			}
+			if activeIndex >= 0 {
+				last := parsed[activeIndex]
+				carryEntry = &last
+			}
+			if carryEntry != nil {
+				progress.carryState = encodeCarryCheckpoint(*carryEntry, carryContinuations)
+				if progress.carryState != "" {
+					progress.carryCursor = chunk.Cursor
+				}
 			}
 			count, err := s.store.importGeneration(roomID, world, *chunk.Generation, parsed, chunk.Cursor, time.Now().UTC(), progress)
 			imported += count
