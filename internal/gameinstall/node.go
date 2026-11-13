@@ -251,6 +251,9 @@ func runningProcesses(ctx context.Context, root string) (int, error) {
 			}
 			args, err := p.CmdlineSliceWithContext(ctx)
 			if err != nil {
+				if processHasExited(ctx, p) {
+					continue
+				}
 				return 0, fmt.Errorf("无法确认游戏进程 %d: %w", p.Pid, err)
 			}
 			executable = ""
@@ -262,6 +265,9 @@ func runningProcesses(ctx context.Context, root string) (int, error) {
 			}
 			if executable == "" {
 				if strings.HasPrefix(name, "dontstarve_") {
+					if processHasExited(ctx, p) {
+						continue
+					}
 					return 0, errors.New("无法确认游戏进程的安装路径")
 				}
 				continue
@@ -279,6 +285,25 @@ func runningProcesses(ctx context.Context, root string) (int, error) {
 		}
 	}
 	return count, ctx.Err()
+}
+
+// A zombie has released its executable but retains its name until reaped.
+// Ignore only confirmed exits; unreadable live process identities still block
+// maintenance rather than being treated as an idle installation.
+func processHasExited(ctx context.Context, p *process.Process) bool {
+	states, err := p.StatusWithContext(ctx)
+	if errors.Is(err, process.ErrorProcessNotRunning) || os.IsNotExist(err) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	for _, state := range states {
+		if state == process.Zombie {
+			return true
+		}
+	}
+	return false
 }
 
 // EnsureStopped is the final node-local guard before SteamCMD can change an

@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -17,6 +16,7 @@ import (
 
 	"dont/internal/agents"
 	"dont/internal/dstserver"
+	"dont/internal/testprocess"
 	"dont/shared"
 )
 
@@ -160,19 +160,8 @@ func TestRunningGameProcessBlocksInstallation(t *testing.T) {
 		t.Skip("installer process detection is supported on Linux")
 	}
 	o, game := fixtureInstallation(t, true)
-	data, err := os.ReadFile("/bin/sleep")
-	if err != nil {
-		t.Skip(err)
-	}
-	if err = writeFile(game, data, 0755); err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(game, "30")
-	if err = cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-	if err = o.CheckStopped(context.Background()); !errors.Is(err, ErrRunning) {
+	testprocess.StartGame(t, game)
+	if err := o.CheckStopped(context.Background()); !errors.Is(err, ErrRunning) {
 		t.Fatalf("live process not detected: %v", err)
 	}
 }

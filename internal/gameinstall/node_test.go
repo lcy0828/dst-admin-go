@@ -3,6 +3,7 @@ package gameinstall
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -10,9 +11,11 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"dont/internal/dstserver"
 	"dont/internal/installationlock"
+	"dont/internal/testprocess"
 )
 
 func writeGame(t *testing.T, root string) {
@@ -193,24 +196,13 @@ func TestInstallRefusesRunningNativeGame(t *testing.T) {
 	}
 	o := nodeOptions(t)
 	writeGame(t, o.ServerPath)
-	data, err := os.ReadFile("/bin/sleep")
-	if err != nil {
-		t.Fatal(err)
-	}
 	binary := filepath.Join(o.ServerPath, "bin64", dstserver.BinaryX64)
-	if err = os.WriteFile(binary, data, 0755); err != nil {
-		t.Fatal(err)
-	}
-	process := exec.Command(binary, "30")
-	if err = process.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = process.Process.Kill(); _ = process.Wait() }()
+	testprocess.StartGame(t, binary)
 	o.Runner = runnerFunc(func(context.Context, string, []string, io.Writer) error {
 		t.Fatal("Steam ran while game was active")
 		return nil
 	})
-	if _, err = o.Install(context.Background()); !errors.Is(err, ErrRunning) {
+	if _, err := o.Install(context.Background()); !errors.Is(err, ErrRunning) {
 		t.Fatalf("expected running refusal, got %v", err)
 	}
 }
@@ -238,27 +230,52 @@ func TestMaintenanceDetectsUnmanagedProcess(t *testing.T) {
 	o := nodeOptions(t)
 	writeGame(t, o.ServerPath)
 	executable := filepath.Join(o.ServerPath, "bin64", dstserver.BinaryX64)
-	data, err := os.ReadFile("/bin/sleep")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(executable, data, 0755); err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(executable, "30")
-	if err = command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = command.Process.Kill(); _ = command.Wait() }()
+	testprocess.StartGame(t, executable)
 	report := o.Check(context.Background())
 	if report.UsageState != "running" || report.RunningProcesses != 1 {
 		t.Fatalf("unmanaged process missed: %+v", report)
 	}
-	if err = EnsureStopped(context.Background(), o.ServerPath); !errors.Is(err, ErrRunning) {
+	if err := EnsureStopped(context.Background(), o.ServerPath); !errors.Is(err, ErrRunning) {
 		t.Fatal("write guard missed running game", err)
 	}
 	other := nodeOptions(t)
 	if report = other.Check(context.Background()); report.UsageState != "idle" {
 		t.Fatal("unrelated installation blocked", report)
+	}
+}
+
+func TestExitedGameProcessDoesNotBlockAnotherInstallation(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux zombie process identity")
+	}
+	old := nodeOptions(t)
+	writeGame(t, old.ServerPath)
+	command := testprocess.StartGame(t, filepath.Join(old.ServerPath, "bin64", dstserver.BinaryX64))
+	if err := command.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	// Leave it unreaped until cleanup, as can happen while another Runtime is
+	// collecting the result of an exited game process.
+	statusPath := fmt.Sprintf("/proc/%d/status", command.Process.Pid)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		status, err := os.ReadFile(statusPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(status), "\nState:\tZ") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fixture did not become a zombie")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	other := nodeOptions(t)
+	if report := other.Check(context.Background()); report.UsageState != "idle" || report.RunningProcesses != 0 {
+		t.Fatalf("exited process blocked unrelated installation: %+v", report)
+	}
+	if err := EnsureStopped(context.Background(), old.ServerPath); err != nil {
+		t.Fatalf("exited process blocked its old installation: %v", err)
 	}
 }
