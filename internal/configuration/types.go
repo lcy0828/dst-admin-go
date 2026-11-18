@@ -166,6 +166,64 @@ type WorldUpdateRequest struct {
 	OverridePatch    map[string]json.RawMessage `json:"overridePatch"`
 }
 
+type FileSyntaxError struct {
+	File    string `json:"file"`
+	Line    int    `json:"line,omitempty"`
+	Column  int    `json:"column,omitempty"`
+	Message string `json:"message"`
+}
+
+func (e *FileSyntaxError) Error() string {
+	if e == nil {
+		return ErrInvalidConfiguration.Error()
+	}
+	return e.Message
+}
+
+func (e *FileSyntaxError) Unwrap() error { return ErrInvalidConfiguration }
+
+type WorldLocationMismatchError struct {
+	Expected string `json:"expected"`
+	Actual   string `json:"actual"`
+}
+
+func (e *WorldLocationMismatchError) Error() string { return ErrInvalidConfiguration.Error() }
+func (e *WorldLocationMismatchError) Unwrap() error { return ErrInvalidConfiguration }
+
+type WorldFiles struct {
+	Revision          string                 `json:"revision"`
+	WorldType         string                 `json:"worldType"`
+	ServerIni         string                 `json:"serverIni"`
+	Leveldataoverride string                 `json:"leveldataoverride"`
+	Server            WorldServerValues      `json:"server"`
+	Overrides         map[string]interface{} `json:"overrides"`
+	UnknownFieldCount int                    `json:"unknownFieldCount"`
+	ModifiedAt        time.Time              `json:"modifiedAt"`
+	Sync              SyncState              `json:"sync"`
+}
+
+type WorldFilesUpdateRequest struct {
+	ExpectedRevision  string                     `json:"expectedRevision"`
+	ServerIni         *string                    `json:"serverIni,omitempty"`
+	Leveldataoverride *string                    `json:"leveldataoverride,omitempty"`
+	Server            *WorldServerValues         `json:"server,omitempty"`
+	OverridePatch     map[string]json.RawMessage `json:"overridePatch,omitempty"`
+	Format            bool                       `json:"format,omitempty"`
+	AllowEmptyChanges bool                       `json:"allowEmptyChanges,omitempty"`
+}
+
+type WorldFilesPreview struct {
+	Revision          string                 `json:"revision"`
+	NextRevision      string                 `json:"nextRevision"`
+	Changes           []Change               `json:"changes"`
+	ServerIni         string                 `json:"serverIni"`
+	Leveldataoverride string                 `json:"leveldataoverride"`
+	Server            WorldServerValues      `json:"server"`
+	Overrides         map[string]interface{} `json:"overrides"`
+	UnknownFieldCount int                    `json:"unknownFieldCount"`
+	Notices           []string               `json:"notices,omitempty"`
+}
+
 type AccessLists struct {
 	Revision  string   `json:"revision"`
 	Admins    []string `json:"admins"`

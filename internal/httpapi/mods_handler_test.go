@@ -12,7 +12,10 @@ import (
 	"time"
 
 	"dont/internal/jobs"
+	"dont/internal/modcontrol"
+	"dont/internal/modpublication"
 	"dont/internal/mods"
+	"dont/internal/operationlease"
 	"dont/internal/operationprogress"
 	"dont/internal/runtimedriver"
 	"dont/internal/runtimeguard"
@@ -758,3 +761,158 @@ func waitForModJob(t *testing.T, service *jobs.Service, jobID string) jobs.Job {
 	t.Fatalf("Mod job %q did not finish", jobID)
 	return jobs.Job{}
 }
+
+type modConfigFilePlacementFixture struct {
+	modPlacementReaderFixture
+	missingWorkshop []string
+	previewErr      error
+	applyErr        error
+	downloadErr     error
+	downloadCalls   int
+	applyCalls      int
+}
+
+func (f *modConfigFilePlacementFixture) PreviewConfigurationFile(_ context.Context, _, _ string, req mods.ConfigurationFilePreviewRequest) (mods.ConfigurationFilePreview, error) {
+	if f.previewErr != nil {
+		return mods.ConfigurationFilePreview{}, f.previewErr
+	}
+	normalized, snap, notices, err := mods.NormalizeAndInspectModOverrides(req.Content, req.Format)
+	if err != nil {
+		return mods.ConfigurationFilePreview{}, err
+	}
+	return mods.ConfigurationFilePreview{
+		Revision:           "rev-1",
+		NextRevision:       snap.Revision,
+		NormalizedContent:  string(normalized),
+		Changes:            []mods.ConfigurationFileModChange{{ModID: "378160973", Source: "workshop", DirectoryName: "workshop-378160973", Enabled: true, Operation: "added"}},
+		MissingWorkshopIDs: append([]string(nil), f.missingWorkshop...),
+		MissingLocalModIDs: []string{},
+		Notices:            notices,
+	}, nil
+}
+
+func (f *modConfigFilePlacementFixture) ApplyConfigurationFile(_ context.Context, _, worldID string, req mods.ConfigurationFileApplyRequest) (mods.ConfigApplyResult, error) {
+	f.applyCalls++
+	if f.applyErr != nil {
+		return mods.ConfigApplyResult{}, f.applyErr
+	}
+	worldIDs := req.WorldIDs
+	if len(worldIDs) == 0 {
+		worldIDs = []string{worldID}
+	}
+	return mods.ConfigApplyResult{Revision: "rev-2", WorldIDs: worldIDs, PublishedTargets: len(worldIDs)}, nil
+}
+
+func (f *modConfigFilePlacementFixture) DownloadAndApplyConfigurationFile(_ context.Context, _, _, _ string, _ mods.ConfigurationFileApplyRequest, _ io.Writer) (mods.ActionResult, error) {
+	f.downloadCalls++
+	if f.downloadErr != nil {
+		return mods.ActionResult{}, f.downloadErr
+	}
+	return mods.ActionResult{ModIDs: append([]string(nil), f.missingWorkshop...), Message: "已下载缺失模组并保存"}, nil
+}
+
+func TestModConfigurationFileHTTPPreviewSyncAndAsyncApply(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	_, jobService := newModHandlerApp(t)
+	fixture := &modConfigFilePlacementFixture{missingWorkshop: []string{"378160973"}}
+	handler := NewModHandler(modHandlerService{}, jobService)
+	handler.ConfigurePlacementReader(fixture)
+	router := gin.New()
+	handler.Register(router.Group("/api/v2"))
+
+	// 1. Syntax error returns 422 INVALID_MOD_CONFIGURATION_SYNTAX with line number
+	resp := performJSON(router, http.MethodPost, "/api/v2/rooms/room/worlds/world/mods/configuration-file/preview", map[string]interface{}{
+		"content": "return {\n  [\"workshop-378160973\"] = {\n    enabled == true\n  }\n}\n",
+	}, nil, "")
+	assertAPIError(t, resp, http.StatusUnprocessableEntity, "INVALID_MOD_CONFIGURATION_SYNTAX")
+	if !strings.Contains(resp.Body.String(), `"line":3`) {
+		t.Fatalf("expected syntax line 3 in error details: %s", resp.Body.String())
+	}
+
+	// 2. Preview returns missingWorkshopIds
+	validLua := "KLEI     1 return {\n  [\"workshop-378160973\"] = { enabled = true }\n}\n"
+	resp = performJSON(router, http.MethodPost, "/api/v2/rooms/room/worlds/world/mods/configuration-file/preview", map[string]interface{}{
+		"content": validLua,
+	}, nil, "")
+	assertStatus(t, resp, http.StatusOK)
+	if !strings.Contains(resp.Body.String(), `"378160973"`) {
+		t.Fatalf("preview missing missingWorkshopIds: %s", resp.Body.String())
+	}
+
+	// 3. Apply with downloadMissing=false runs synchronously (200 OK)
+	resp = performJSON(router, http.MethodPost, "/api/v2/rooms/room/worlds/world/mods/configuration-file/actions/apply", map[string]interface{}{
+		"content":          validLua,
+		"expectedRevision": "rev-1",
+		"downloadMissing":  false,
+	}, nil, "")
+	assertStatus(t, resp, http.StatusOK)
+	if fixture.applyCalls != 1 || fixture.downloadCalls != 0 {
+		t.Fatalf("expected sync apply call, got apply=%d download=%d", fixture.applyCalls, fixture.downloadCalls)
+	}
+
+	// 4. Apply with downloadMissing=true submits async Job (202 Accepted)
+	resp = performJSON(router, http.MethodPost, "/api/v2/rooms/room/worlds/world/mods/configuration-file/actions/apply", map[string]interface{}{
+		"content":          validLua,
+		"expectedRevision": "rev-1",
+		"downloadMissing":  true,
+	}, nil, "")
+	assertStatus(t, resp, http.StatusAccepted)
+	job := waitForModJob(t, jobService, responseData(t, resp)["id"].(string))
+	if job.Status != jobs.StatusSucceeded || fixture.downloadCalls != 1 {
+		t.Fatalf("expected async download+apply job to succeed, got job=%#v downloadCalls=%d", job, fixture.downloadCalls)
+	}
+}
+
+func TestModConfigurationFileHTTPErrorMappings(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	_, jobService := newModHandlerApp(t)
+	fixture := &modConfigFilePlacementFixture{missingWorkshop: []string{"378160973"}}
+	handler := NewModHandler(modHandlerService{}, jobService)
+	handler.ConfigurePlacementReader(fixture)
+	router := gin.New()
+	handler.Register(router.Group("/api/v2"))
+
+	validLua := "return { [\"workshop-378160973\"] = { enabled = true } }\n"
+
+	// 1. modcontrol.ErrTopologyChanged maps to 409 TOPOLOGY_CHANGED
+	fixture.previewErr = modcontrol.ErrTopologyChanged
+	resp := performJSON(router, http.MethodPost, "/api/v2/rooms/room/worlds/world/mods/configuration-file/preview", map[string]interface{}{
+		"content": validLua,
+	}, nil, "")
+	assertAPIError(t, resp, http.StatusConflict, "TOPOLOGY_CHANGED")
+	fixture.previewErr = nil
+
+	// 2. operationlease.ErrBusy maps to 409 MOD_PUBLICATION_CONFLICT
+	fixture.applyErr = fmt.Errorf("lease busy: %w", operationlease.ErrBusy)
+	resp = performJSON(router, http.MethodPost, "/api/v2/rooms/room/worlds/world/mods/configuration-file/actions/apply", map[string]interface{}{
+		"content":          validLua,
+		"expectedRevision": "rev-1",
+		"downloadMissing":  false,
+	}, nil, "")
+	assertAPIError(t, resp, http.StatusConflict, "MOD_PUBLICATION_CONFLICT")
+
+	// 3. modcontrol.ErrInvalidRequest maps to 422 INVALID_MOD_REQUEST
+	fixture.applyErr = fmt.Errorf("local mod migration blocked: %w", modcontrol.ErrInvalidRequest)
+	resp = performJSON(router, http.MethodPost, "/api/v2/rooms/room/worlds/world/mods/configuration-file/actions/apply", map[string]interface{}{
+		"content":          validLua,
+		"expectedRevision": "rev-1",
+		"downloadMissing":  false,
+	}, nil, "")
+	assertAPIError(t, resp, http.StatusUnprocessableEntity, "INVALID_MOD_REQUEST")
+	fixture.applyErr = nil
+
+	// 4. Async download job maps modpublication.ErrTopologyChanged to TOPOLOGY_CHANGED
+	fixture.downloadErr = modpublication.ErrTopologyChanged
+	resp = performJSON(router, http.MethodPost, "/api/v2/rooms/room/worlds/world/mods/configuration-file/actions/apply", map[string]interface{}{
+		"content":          validLua,
+		"expectedRevision": "rev-1",
+		"downloadMissing":  true,
+	}, nil, "")
+	assertStatus(t, resp, http.StatusAccepted)
+	job := waitForModJob(t, jobService, responseData(t, resp)["id"].(string))
+	if job.Status != jobs.StatusFailed || job.Error == nil || job.Error.Code != "TOPOLOGY_CHANGED" {
+		t.Fatalf("expected TOPOLOGY_CHANGED job error, got %#v", job)
+	}
+}
+
+

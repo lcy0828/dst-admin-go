@@ -21,6 +21,7 @@ var (
 	ErrSteamCMDDownload    = errors.New("steamcmd workshop download failed")
 	ErrWorkshopItemMissing = errors.New("workshop download is missing")
 	ErrUnsupportedLuaValue = errors.New("Lua value is not supported")
+	ErrFileTooLarge        = errors.New("modoverrides.lua exceeds the 4 MiB limit")
 )
 
 type FieldError struct {
@@ -29,6 +30,22 @@ type FieldError struct {
 
 func (e *FieldError) Error() string { return ErrInvalidRequest.Error() }
 func (e *FieldError) Unwrap() error { return ErrInvalidRequest }
+
+type FileSyntaxError struct {
+	File    string
+	Line    int
+	Column  int
+	Message string
+}
+
+func (e *FileSyntaxError) Error() string {
+	if e == nil {
+		return ErrInvalidRequest.Error()
+	}
+	return e.Message
+}
+
+func (e *FileSyntaxError) Unwrap() error { return ErrInvalidRequest }
 
 type RevisionConflictError struct {
 	CurrentRevision string
@@ -296,13 +313,57 @@ type ModConfiguration struct {
 }
 
 type ConfigurationFile struct {
-	RoomID   string    `json:"roomId"`
-	WorldID  string    `json:"worldId"`
-	FileName string    `json:"fileName"`
-	Content  string    `json:"content"`
-	Exists   bool      `json:"exists"`
-	Revision string    `json:"revision"`
-	ReadAt   time.Time `json:"readAt"`
+	RoomID           string            `json:"roomId"`
+	WorldID          string            `json:"worldId"`
+	FileName         string            `json:"fileName"`
+	Content          string            `json:"content"`
+	Exists           bool              `json:"exists"`
+	Revision         string            `json:"revision"`
+	WorldRevisions   map[string]string `json:"worldRevisions,omitempty"`
+	TopologyRevision string            `json:"topologyRevision,omitempty"`
+	ReadAt           time.Time         `json:"readAt"`
+}
+
+type ConfigurationFilePreviewRequest struct {
+	Content                  string            `json:"content"`
+	WorldIDs                 []string          `json:"worldIds,omitempty"`
+	ExpectedRevision         string            `json:"expectedRevision,omitempty"`
+	ExpectedRevisions        map[string]string `json:"expectedRevisions,omitempty"`
+	ExpectedTopologyRevision string            `json:"expectedTopologyRevision,omitempty"`
+	Format                   bool              `json:"format,omitempty"`
+}
+
+type ConfigurationFileModChange struct {
+	ModID         string `json:"modId"`
+	Source        string `json:"source"`
+	DirectoryName string `json:"directoryName"`
+	Name          string `json:"name,omitempty"`
+	PreviewURL    string `json:"previewUrl,omitempty"`
+	Enabled       bool   `json:"enabled"`
+	Operation     string `json:"operation"`
+	Missing       bool   `json:"missing,omitempty"`
+}
+
+type ConfigurationFilePreview struct {
+	Revision           string                       `json:"revision"`
+	NextRevision       string                       `json:"nextRevision"`
+	WorldRevisions     map[string]string            `json:"worldRevisions,omitempty"`
+	TopologyRevision   string                       `json:"topologyRevision,omitempty"`
+	NormalizedContent  string                       `json:"normalizedContent"`
+	Changes            []ConfigurationFileModChange `json:"changes"`
+	MissingWorkshopIDs []string                     `json:"missingWorkshopIds"`
+	MissingLocalModIDs []string                     `json:"missingLocalModIds"`
+	Notices            []string                     `json:"notices"`
+}
+
+type ConfigurationFileApplyRequest struct {
+	Content                  string            `json:"content"`
+	WorldIDs                 []string          `json:"worldIds,omitempty"`
+	ExpectedRevision         string            `json:"expectedRevision,omitempty"`
+	ExpectedRevisions        map[string]string `json:"expectedRevisions,omitempty"`
+	ExpectedTopologyRevision string            `json:"expectedTopologyRevision,omitempty"`
+	DownloadMissing          bool              `json:"downloadMissing,omitempty"`
+	Format                   bool              `json:"format,omitempty"`
 }
 
 type ConfigUpdateRequest struct {

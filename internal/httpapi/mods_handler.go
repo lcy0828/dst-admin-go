@@ -13,13 +13,17 @@ import (
 
 	"dont/internal/agents"
 	"dont/internal/jobs"
+	"dont/internal/modcontrol"
 	"dont/internal/modmetadata"
+	"dont/internal/modpublication"
 	"dont/internal/mods"
+	"dont/internal/operationlease"
 	"dont/internal/operationprogress"
 	"dont/internal/requesttiming"
 	"dont/internal/rooms"
 	"dont/internal/runtimedriver"
 	"dont/internal/runtimeguard"
+	"dont/internal/topology"
 
 	"github.com/gin-gonic/gin"
 )
@@ -44,6 +48,15 @@ type modPlacementReader interface {
 
 type modConfigurationApplier interface {
 	ApplyConfiguration(context.Context, string, string, string, mods.ConfigUpdateRequest) (mods.ConfigApplyResult, error)
+}
+
+type modConfigurationFilePreviewer interface {
+	PreviewConfigurationFile(context.Context, string, string, mods.ConfigurationFilePreviewRequest) (mods.ConfigurationFilePreview, error)
+}
+
+type modConfigurationFileApplier interface {
+	ApplyConfigurationFile(context.Context, string, string, mods.ConfigurationFileApplyRequest) (mods.ConfigApplyResult, error)
+	DownloadAndApplyConfigurationFile(context.Context, string, string, string, mods.ConfigurationFileApplyRequest, io.Writer) (mods.ActionResult, error)
 }
 
 type modEnabledSetter interface {
@@ -137,6 +150,8 @@ func (h *ModHandler) Register(v2 *gin.RouterGroup) {
 	room.POST("/mods/:modId/actions/repair", h.repair)
 	room.POST("/mods/:modId/actions/uninstall", h.uninstall)
 	room.GET("/worlds/:worldId/mods/configuration-file", h.configurationFile)
+	room.POST("/worlds/:worldId/mods/configuration-file/preview", h.previewConfigurationFile)
+	room.POST("/worlds/:worldId/mods/configuration-file/actions/apply", h.applyConfigurationFile)
 
 	configuration := room.Group("/worlds/:worldId/mods/:modId/configuration")
 	configuration.GET("", h.configuration)
@@ -600,6 +615,66 @@ func (h *ModHandler) configurationFile(c *gin.Context) {
 	Success(c, http.StatusOK, value)
 }
 
+func (h *ModHandler) previewConfigurationFile(c *gin.Context) {
+	previewer, ok := h.placement.(modConfigurationFilePreviewer)
+	if !ok {
+		Failure(c, http.StatusServiceUnavailable, "MOD_CONFIGURATION_FILE_PREVIEW_UNAVAILABLE", "Mod 配置文件预览尚不可用", nil)
+		return
+	}
+	var request mods.ConfigurationFilePreviewRequest
+	if !bindModJSON(c, &request) {
+		return
+	}
+	preview, err := previewer.PreviewConfigurationFile(c.Request.Context(), c.Param("roomId"), c.Param("worldId"), request)
+	if err != nil {
+		modFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, preview)
+}
+
+func (h *ModHandler) applyConfigurationFile(c *gin.Context) {
+	previewer, canPreview := h.placement.(modConfigurationFilePreviewer)
+	applier, canApply := h.placement.(modConfigurationFileApplier)
+	if !canPreview || !canApply {
+		Failure(c, http.StatusServiceUnavailable, "MOD_CONFIGURATION_FILE_APPLY_UNAVAILABLE", "Mod 配置文件保存尚不可用", nil)
+		return
+	}
+	var request mods.ConfigurationFileApplyRequest
+	if !bindModJSON(c, &request) {
+		return
+	}
+	roomID, worldID := c.Param("roomId"), c.Param("worldId")
+	preview, err := previewer.PreviewConfigurationFile(c.Request.Context(), roomID, worldID, mods.ConfigurationFilePreviewRequest{
+		Content:                  request.Content,
+		WorldIDs:                 request.WorldIDs,
+		ExpectedRevision:         request.ExpectedRevision,
+		ExpectedRevisions:        request.ExpectedRevisions,
+		ExpectedTopologyRevision: request.ExpectedTopologyRevision,
+		Format:                   request.Format,
+	})
+	if err != nil {
+		modFailure(c, err)
+		return
+	}
+	if request.DownloadMissing && len(preview.MissingWorkshopIDs) > 0 {
+		if h.jobs == nil {
+			Failure(c, http.StatusServiceUnavailable, "JOB_SERVICE_UNAVAILABLE", "异步任务服务尚不可用", nil)
+			return
+		}
+		h.submit(c, "mod.configuration_file.apply", roomID, worldID, roomID, "Mod 配置文件与缺失模组下载", func(ctx context.Context, jobID string) (mods.ActionResult, error) {
+			return applier.DownloadAndApplyConfigurationFile(ctx, jobID, roomID, worldID, request, log.Writer())
+		})
+		return
+	}
+	result, err := applier.ApplyConfigurationFile(c.Request.Context(), roomID, worldID, request)
+	if err != nil {
+		modConfigurationFailure(c, result, err)
+		return
+	}
+	Success(c, http.StatusOK, result)
+}
+
 func (h *ModHandler) configuration(c *gin.Context) {
 	var value mods.ModConfiguration
 	var err error
@@ -767,11 +842,22 @@ func modJobProgress(update operationprogress.Update) int {
 
 func modJobError(err error) *jobs.Error {
 	code := "MOD_OPERATION_FAILED"
+	var fieldError *mods.FieldError
+	var syntaxError *mods.FileSyntaxError
 	message := err.Error()
 	switch {
 	case errors.Is(err, context.Canceled):
 		code = "JOB_CANCELED"
 		message = "任务已取消"
+	case errors.Is(err, mods.ErrFileTooLarge):
+		code = "CONFIGURATION_FILE_TOO_LARGE"
+		message = "modoverrides.lua 超过允许的 4 MiB 上限"
+	case errors.As(err, &syntaxError):
+		code = "INVALID_MOD_CONFIGURATION_SYNTAX"
+		message = syntaxError.Message
+	case errors.As(err, &fieldError):
+		code = "INVALID_MOD_CONFIGURATION"
+		message = "Mod 字段无效"
 	case errors.Is(err, mods.ErrSteamCMDUnavailable):
 		code = "STEAMCMD_UNAVAILABLE"
 		message = "SteamCMD 不可用，请在系统设置中检查可执行文件路径"
@@ -786,9 +872,21 @@ func modJobError(err error) *jobs.Error {
 		message = "下载目录中缺少安全可读的 modinfo.lua"
 	case errors.Is(err, mods.ErrRevisionConflict):
 		code = "CONFIG_REVISION_CONFLICT"
-	case errors.Is(err, runtimedriver.ErrTopologyChanged):
+	case errors.Is(err, runtimedriver.ErrTopologyChanged),
+		errors.Is(err, modcontrol.ErrTopologyChanged),
+		errors.Is(err, modpublication.ErrTopologyChanged),
+		errors.Is(err, topology.ErrRevisionConflict):
 		code = "TOPOLOGY_CHANGED"
 		message = "Mod 配置的运行位置已改变，请刷新后重试"
+	case errors.Is(err, modpublication.ErrConflict),
+		errors.Is(err, operationlease.ErrBusy),
+		errors.Is(err, modcontrol.ErrPublicationState):
+		code = "MOD_PUBLICATION_CONFLICT"
+		message = "另一个操作正在修改相同房间或安装，请稍后重试"
+	case errors.Is(err, mods.ErrInvalidRequest),
+		errors.Is(err, modcontrol.ErrInvalidRequest),
+		errors.Is(err, modpublication.ErrInvalidInput):
+		code = "INVALID_MOD_REQUEST"
 	case errors.Is(err, mods.ErrConfirmationNeeded):
 		code = "CONFIRMATION_REQUIRED"
 	case errors.Is(err, mods.ErrModNotConfigured):
@@ -798,6 +896,9 @@ func modJobError(err error) *jobs.Error {
 		message = "请先将 Mod 下载到当前运行节点"
 	case errors.Is(err, mods.ErrNoChanges):
 		code = "NO_CHANGES"
+	case errors.Is(err, agents.ErrUnsupportedAction), errors.Is(err, runtimedriver.ErrCapabilityMissing):
+		code = "AGENT_UPGRADE_REQUIRED"
+		message = "目标 Agent 版本过旧，缺少所需模组管理能力，请升级 Agent 后重试"
 	case errors.Is(err, runtimeguard.ErrRemoteMutationUnavailable):
 		code = runtimeguard.ErrorCode
 	}
@@ -861,6 +962,7 @@ func bindModJSON(c *gin.Context, target interface{}) bool {
 
 func modFailure(c *gin.Context, err error) {
 	var fieldError *mods.FieldError
+	var syntaxError *mods.FileSyntaxError
 	var conflict *mods.RevisionConflictError
 	var network *mods.NetworkError
 	switch {
@@ -882,16 +984,38 @@ func modFailure(c *gin.Context, err error) {
 			c.Header("Retry-After", strconv.Itoa(network.RetryAfter))
 		}
 		Failure(c, status, network.Code, "创意工坊资料暂不可用", network)
+	case errors.Is(err, mods.ErrFileTooLarge):
+		Failure(c, http.StatusRequestEntityTooLarge, "CONFIGURATION_FILE_TOO_LARGE", "modoverrides.lua 超过允许的 4 MiB 上限", nil)
+	case errors.As(err, &syntaxError):
+		details := gin.H{"file": syntaxError.File}
+		if syntaxError.Line > 0 {
+			details["line"] = syntaxError.Line
+		}
+		if syntaxError.Column > 0 {
+			details["column"] = syntaxError.Column
+		}
+		Failure(c, http.StatusUnprocessableEntity, "INVALID_MOD_CONFIGURATION_SYNTAX", syntaxError.Message, details)
 	case errors.As(err, &fieldError):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_MOD_CONFIGURATION", "Mod 字段无效", gin.H{"fields": fieldError.Fields})
 	case errors.As(err, &conflict):
 		Failure(c, http.StatusConflict, "CONFIG_REVISION_CONFLICT", "Mod 配置已被其他操作修改，请刷新后重试", gin.H{"currentRevision": conflict.CurrentRevision})
-	case errors.Is(err, runtimedriver.ErrTopologyChanged):
+	case errors.Is(err, runtimedriver.ErrTopologyChanged),
+		errors.Is(err, modcontrol.ErrTopologyChanged),
+		errors.Is(err, modpublication.ErrTopologyChanged),
+		errors.Is(err, topology.ErrRevisionConflict):
 		Failure(c, http.StatusConflict, "TOPOLOGY_CHANGED", "Mod 配置的运行位置已改变，请刷新后重试", nil)
+	case errors.Is(err, modpublication.ErrConflict),
+		errors.Is(err, operationlease.ErrBusy),
+		errors.Is(err, modcontrol.ErrPublicationState):
+		Failure(c, http.StatusConflict, "MOD_PUBLICATION_CONFLICT", "另一个操作正在修改相同房间或安装，请稍后重试", nil)
+	case errors.Is(err, agents.ErrUnsupportedAction), errors.Is(err, runtimedriver.ErrCapabilityMissing):
+		Failure(c, http.StatusConflict, "AGENT_UPGRADE_REQUIRED", "目标 Agent 版本过旧，缺少所需模组管理能力，请升级 Agent 后重试", nil)
 	case errors.Is(err, mods.ErrInvalidModID):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_MOD_ID", "Workshop ID 必须为数字", nil)
-	case errors.Is(err, mods.ErrInvalidRequest):
-		Failure(c, http.StatusUnprocessableEntity, "INVALID_MOD_REQUEST", "Mod 请求参数无效", nil)
+	case errors.Is(err, mods.ErrInvalidRequest),
+		errors.Is(err, modcontrol.ErrInvalidRequest),
+		errors.Is(err, modpublication.ErrInvalidInput):
+		Failure(c, http.StatusUnprocessableEntity, "INVALID_MOD_REQUEST", "Mod 请求参数无效", gin.H{"reason": err.Error()})
 	case errors.Is(err, mods.ErrNoChanges):
 		Failure(c, http.StatusConflict, "NO_MOD_CHANGES", "Mod 配置没有变化", nil)
 	case errors.Is(err, mods.ErrConfirmationNeeded):

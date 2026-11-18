@@ -1379,17 +1379,42 @@ func roomProfileFromContents(roomID string, worlds []rooms.World, contents map[s
 }
 
 func (s *Service) ConfigurationFile(ctx context.Context, roomID, worldID string) (mods.ConfigurationFile, error) {
-	content, err := s.worldContent(ctx, roomID, worldID)
+	prepared := proposal{roomID: roomID, roomOnly: true, action: "reconcile", worldIDs: map[string]bool{}, readOnly: true}
+	snapshotCtx := withPublicationSnapshot(ctx, prepared)
+	contents, err := s.source.Contents(snapshotCtx, roomID)
 	if err != nil {
 		return mods.ConfigurationFile{}, err
+	}
+	content, ok := contents[worldID]
+	if !ok {
+		return mods.ConfigurationFile{}, rooms.ErrWorldNotFound
 	}
 	snapshot, err := mods.InspectModOverride(content)
 	if err != nil {
 		return mods.ConfigurationFile{}, err
 	}
+	worldRevisions := make(map[string]string, len(contents))
+	for wid, raw := range contents {
+		wsnap, inspectErr := mods.InspectModOverride(raw)
+		if inspectErr != nil {
+			return mods.ConfigurationFile{}, inspectErr
+		}
+		worldRevisions[wid] = wsnap.Revision
+	}
+	var topologyRevision string
+	if placements, placeErr := s.source.AppliedPlacements(snapshotCtx); placeErr == nil {
+		topologyRevision = placements.TopologyRevision
+	}
 	return mods.ConfigurationFile{
-		RoomID: roomID, WorldID: worldID, FileName: "modoverrides.lua", Content: string(content),
-		Exists: len(content) > 0, Revision: snapshot.Revision, ReadAt: s.now().UTC(),
+		RoomID:           roomID,
+		WorldID:          worldID,
+		FileName:         "modoverrides.lua",
+		Content:          string(content),
+		Exists:           len(content) > 0,
+		Revision:         snapshot.Revision,
+		WorldRevisions:   worldRevisions,
+		TopologyRevision: topologyRevision,
+		ReadAt:           s.now().UTC(),
 	}, nil
 }
 
@@ -1436,18 +1461,6 @@ func (s *Service) ApplyConfiguration(ctx context.Context, roomID, worldID, modID
 	return s.applyPreparedOverrides(ctx, prepared, request.ExpectedTopologyRevision)
 }
 
-func (s *Service) worldContent(ctx context.Context, roomID, worldID string) ([]byte, error) {
-	prepared := proposal{roomID: roomID, roomOnly: true, action: "reconcile", worldIDs: map[string]bool{}, readOnly: true}
-	contents, err := s.source.Contents(withPublicationSnapshot(ctx, prepared), roomID)
-	if err != nil {
-		return nil, err
-	}
-	content, ok := contents[worldID]
-	if !ok {
-		return nil, rooms.ErrWorldNotFound
-	}
-	return content, nil
-}
 
 func (s *Service) prepare(ctx context.Context, roomID string, request Request) (proposal, error) {
 	roomID = strings.TrimSpace(roomID)

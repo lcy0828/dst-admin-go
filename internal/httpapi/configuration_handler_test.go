@@ -264,6 +264,66 @@ func TestConfigurationHTTPReportsAgentUpgradeRequired(t *testing.T) {
 	}
 }
 
+func TestConfigurationHTTPWorldFilesPreviewApplyAndErrors(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newConfigurationHandlerApp(t)
+
+	// Seed forest location so location mismatch guardrail is active
+	worldLuaPath := filepath.Join(app.roomPath, "Master", "leveldataoverride.lua")
+	if err := os.WriteFile(worldLuaPath, []byte("return { location = \"forest\", overrides = { day = \"default\" } }\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	response := performJSON(app.router, http.MethodGet, "/api/v2/rooms/room/worlds/world/configuration/files", nil, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	data := responseData(t, response)
+	revision, _ := data["revision"].(string)
+	if revision == "" || data["worldType"] != "forest" {
+		t.Fatalf("unexpected world files response: %s", response.Body.String())
+	}
+
+	// Syntax error returns line & file details
+	response = performJSON(app.router, http.MethodPost, "/api/v2/rooms/room/worlds/world/configuration/files/preview", map[string]interface{}{
+		"expectedRevision":  revision,
+		"leveldataoverride": "return {\n  overrides = {\n    broken =\n  }\n}\n",
+	}, nil, "")
+	assertAPIError(t, response, http.StatusUnprocessableEntity, "INVALID_CONFIGURATION_SYNTAX")
+	if !strings.Contains(response.Body.String(), `"file":"leveldataoverride.lua"`) || !strings.Contains(response.Body.String(), `"line":4`) {
+		t.Fatalf("syntax error missing file/line details: %s", response.Body.String())
+	}
+
+	// Cave pasted into forest returns WORLD_LOCATION_MISMATCH
+	response = performJSON(app.router, http.MethodPost, "/api/v2/rooms/room/worlds/world/configuration/files/preview", map[string]interface{}{
+		"expectedRevision":  revision,
+		"leveldataoverride": `return { location = "cave", overrides = { day = "default" } }`,
+	}, nil, "")
+	assertAPIError(t, response, http.StatusUnprocessableEntity, "WORLD_LOCATION_MISMATCH")
+	if !strings.Contains(response.Body.String(), `"actual":"cave"`) || !strings.Contains(response.Body.String(), `"expected":"forest"`) {
+		t.Fatalf("mismatch error missing details: %s", response.Body.String())
+	}
+
+	// Valid KLEI client paste preview + apply job
+	clientPaste := "KLEI     1 return {\n  -- preserved comment\n  location = \"forest\",\n  overrides = { day = \"onlyday\" },\n}\n"
+	response = performJSON(app.router, http.MethodPost, "/api/v2/rooms/room/worlds/world/configuration/files/preview", map[string]interface{}{
+		"expectedRevision":  revision,
+		"leveldataoverride": clientPaste,
+	}, nil, "")
+	assertStatus(t, response, http.StatusOK)
+
+	response = performJSON(app.router, http.MethodPost, "/api/v2/rooms/room/worlds/world/configuration/files/actions/apply", map[string]interface{}{
+		"expectedRevision":  revision,
+		"leveldataoverride": clientPaste,
+	}, nil, "")
+	assertStatus(t, response, http.StatusAccepted)
+	jobID, _ := responseData(t, response)["id"].(string)
+	waitForConfigurationJob(t, app.jobs, jobID)
+
+	written, err := os.ReadFile(worldLuaPath)
+	if err != nil || !strings.Contains(string(written), "-- preserved comment") || !strings.Contains(string(written), `day = "onlyday"`) {
+		t.Fatalf("world files apply did not persist comment/value: %v\n%s", err, written)
+	}
+}
+
 func cloneJSONMap(t *testing.T, value map[string]interface{}) map[string]interface{} {
 	t.Helper()
 	encoded, err := json.Marshal(value)

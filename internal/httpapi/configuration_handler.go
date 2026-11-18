@@ -40,6 +40,9 @@ func (h *ConfigurationHandler) Register(v2 *gin.RouterGroup) {
 	room.GET("/worlds/:worldId/configuration", h.worldConfiguration)
 	room.POST("/worlds/:worldId/configuration/preview", h.previewWorldConfiguration)
 	room.POST("/worlds/:worldId/configuration/actions/apply", h.applyWorldConfiguration)
+	room.GET("/worlds/:worldId/configuration/files", h.worldConfigurationFiles)
+	room.POST("/worlds/:worldId/configuration/files/preview", h.previewWorldConfigurationFiles)
+	room.POST("/worlds/:worldId/configuration/files/actions/apply", h.applyWorldConfigurationFiles)
 }
 
 func (h *ConfigurationHandler) roomConfiguration(c *gin.Context) {
@@ -113,6 +116,44 @@ func (h *ConfigurationHandler) applyWorldConfiguration(c *gin.Context) {
 	}
 	h.submitConfiguration(c, "configuration.world.apply", roomID, worldID, "server.ini + leveldataoverride.lua", func(ctx context.Context, jobID string) (configuration.ApplyResult, error) {
 		return h.configuration.ApplyWorld(ctx, jobID, roomID, worldID, request)
+	})
+}
+
+func (h *ConfigurationHandler) worldConfigurationFiles(c *gin.Context) {
+	value, err := h.configuration.WorldFilesContext(c.Request.Context(), c.Param("roomId"), c.Param("worldId"))
+	if err != nil {
+		configurationFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
+}
+
+func (h *ConfigurationHandler) previewWorldConfigurationFiles(c *gin.Context) {
+	var request configuration.WorldFilesUpdateRequest
+	if !bindConfigurationJSON(c, &request) {
+		return
+	}
+	value, err := h.configuration.PreviewWorldFilesContext(c.Request.Context(), c.Param("roomId"), c.Param("worldId"), request)
+	if err != nil {
+		configurationFailure(c, err)
+		return
+	}
+	Success(c, http.StatusOK, value)
+}
+
+func (h *ConfigurationHandler) applyWorldConfigurationFiles(c *gin.Context) {
+	var request configuration.WorldFilesUpdateRequest
+	if !bindConfigurationJSON(c, &request) {
+		return
+	}
+	request.AllowEmptyChanges = false
+	roomID, worldID := c.Param("roomId"), c.Param("worldId")
+	if _, err := h.configuration.PreviewWorldFilesContext(c.Request.Context(), roomID, worldID, request); err != nil {
+		configurationFailure(c, err)
+		return
+	}
+	h.submitConfiguration(c, "configuration.world.apply", roomID, worldID, "server.ini + leveldataoverride.lua", func(ctx context.Context, jobID string) (configuration.ApplyResult, error) {
+		return h.configuration.ApplyWorldFiles(ctx, jobID, roomID, worldID, request)
 	})
 }
 
@@ -260,9 +301,24 @@ func bindConfigurationJSON(c *gin.Context, target interface{}) bool {
 
 func configurationFailure(c *gin.Context, err error) {
 	var fieldError *configuration.FieldError
+	var syntaxError *configuration.FileSyntaxError
+	var locationMismatch *configuration.WorldLocationMismatchError
 	var conflict *configuration.RevisionConflictError
 	var accessError *configuration.AccessReadError
 	switch {
+	case errors.As(err, &locationMismatch):
+		Failure(c, http.StatusUnprocessableEntity, "WORLD_LOCATION_MISMATCH", "粘贴的世界配置类型与当前世界分片不匹配", gin.H{
+			"expected": locationMismatch.Expected,
+			"actual":   locationMismatch.Actual,
+		})
+	case errors.As(err, &syntaxError):
+		Failure(c, http.StatusUnprocessableEntity, "INVALID_CONFIGURATION_SYNTAX", syntaxError.Message, gin.H{
+			"file":   syntaxError.File,
+			"line":   syntaxError.Line,
+			"column": syntaxError.Column,
+		})
+	case errors.Is(err, configuration.ErrFileTooLarge):
+		Failure(c, http.StatusRequestEntityTooLarge, "CONFIGURATION_FILE_TOO_LARGE", "配置文件超出大小限制", nil)
 	case errors.As(err, &fieldError):
 		Failure(c, http.StatusUnprocessableEntity, "INVALID_CONFIGURATION", "配置字段无效", gin.H{"fields": fieldError.Fields})
 	case errors.As(err, &conflict):

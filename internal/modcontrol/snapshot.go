@@ -290,7 +290,34 @@ func (s *SnapshotSource) build(ctx context.Context) (runtimeSnapshot, error) {
 				request.configurationSource = append([]byte(nil), content...)
 			}
 			if next, ok := request.overrides[room.ID+"\x00"+world.ID]; ok {
+				if room.ID == request.roomID && request.worldIDs[world.ID] {
+					selectedWorlds[world.ID] = true
+				}
+				expectedRev := request.revisions[world.ID]
+				if expectedRev == "" && len(request.worldIDs) == 1 && request.worldIDs[world.ID] {
+					expectedRev = request.revision
+				}
+				if expectedRev != "" {
+					current, inspectErr := mods.InspectModOverride(content)
+					if inspectErr != nil {
+						return runtimeSnapshot{}, inspectErr
+					}
+					if expectedRev != current.Revision {
+						return runtimeSnapshot{}, &mods.RevisionConflictError{CurrentRevision: current.Revision}
+					}
+				}
 				content = append([]byte(nil), next...)
+				if execution.AppliedTargetID != "local" && !containsRuntimeCapability(execution.Target.Capabilities, shared.LocalModCapability) {
+					nextSnap, inspectErr := mods.InspectModOverride(content)
+					if inspectErr != nil {
+						return runtimeSnapshot{}, inspectErr
+					}
+					for _, item := range nextSnap.Mods {
+						if !mods.ValidID(item.ModID) {
+							return runtimeSnapshot{}, fmt.Errorf("节点 %s 需要升级后才能管理本地模组: %w", execution.AppliedTargetID, runtimedriver.ErrCapabilityMissing)
+						}
+					}
+				}
 			} else if room.ID == request.roomID && request.worldIDs[world.ID] {
 				selectedWorlds[world.ID] = true
 				content, err = s.applyProposal(ctx, request, execution, content)
