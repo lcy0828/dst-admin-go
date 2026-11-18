@@ -147,7 +147,7 @@ func RequireSession(service *authn.Service, bearer ...BearerAuthenticator) gin.H
 			Failure(c, http.StatusUnauthorized, "SESSION_INVALID", "登录状态已失效，请重新登录", nil)
 			return
 		}
-		setSessionCookie(c, rawToken, authenticated.Session.ExpiresAt)
+		setSessionCookie(c, rawToken, authenticated.Session.ExpiresAt, !authenticated.Session.SessionOnly)
 		c.Set(authn.ContextAdminKey, authenticated.Admin)
 		c.Set(authn.ContextSessionKey, authenticated.Session)
 

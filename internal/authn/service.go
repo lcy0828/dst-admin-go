@@ -47,15 +47,16 @@ type Admin struct {
 func (Admin) TableName() string { return "auth" }
 
 type Session struct {
-	ID         int       `gorm:"primary_key" json:"-"`
-	TokenHash  string    `gorm:"type:char(64);unique_index;not null" json:"-"`
-	CSRFToken  string    `gorm:"type:varchar(64);not null" json:"-"`
-	AdminID    int       `gorm:"index;not null" json:"-"`
-	ExpiresAt  time.Time `gorm:"index;not null" json:"expiresAt"`
-	CreatedAt  time.Time `json:"createdAt"`
-	LastSeenAt time.Time `gorm:"index" json:"-"`
-	IPAddress  string    `gorm:"type:varchar(64)" json:"-"`
-	UserAgent  string    `gorm:"type:varchar(512)" json:"-"`
+	ID          int       `gorm:"primary_key" json:"-"`
+	TokenHash   string    `gorm:"type:char(64);unique_index;not null" json:"-"`
+	CSRFToken   string    `gorm:"type:varchar(64);not null" json:"-"`
+	AdminID     int       `gorm:"index;not null" json:"-"`
+	ExpiresAt   time.Time `gorm:"index;not null" json:"expiresAt"`
+	CreatedAt   time.Time `json:"createdAt"`
+	LastSeenAt  time.Time `gorm:"index" json:"-"`
+	IPAddress   string    `gorm:"type:varchar(64)" json:"-"`
+	UserAgent   string    `gorm:"type:varchar(512)" json:"-"`
+	SessionOnly bool      `gorm:"not null;default:false" json:"-"`
 }
 
 func (Session) TableName() string { return "admin_session" }
@@ -171,6 +172,10 @@ func (s *Service) SetupRequired() (bool, error) {
 }
 
 func (s *Service) Setup(username, password, ipAddress, userAgent string) (*AuthenticatedSession, string, error) {
+	return s.SetupWithRemember(username, password, ipAddress, userAgent, true)
+}
+
+func (s *Service) SetupWithRemember(username, password, ipAddress, userAgent string, remember bool) (*AuthenticatedSession, string, error) {
 	username = strings.TrimSpace(username)
 	if username == "" {
 		return nil, "", ErrInvalidCredentials
@@ -214,10 +219,14 @@ func (s *Service) Setup(username, password, ipAddress, userAgent string) (*Authe
 	if err := tx.Commit().Error; err != nil {
 		return nil, "", err
 	}
-	return s.createSession(admin, ipAddress, userAgent)
+	return s.createSessionWithRemember(admin, ipAddress, userAgent, remember)
 }
 
 func (s *Service) Login(username, password, ipAddress, userAgent string) (*AuthenticatedSession, string, error) {
+	return s.LoginWithRemember(username, password, ipAddress, userAgent, true)
+}
+
+func (s *Service) LoginWithRemember(username, password, ipAddress, userAgent string, remember bool) (*AuthenticatedSession, string, error) {
 	required, err := s.SetupRequired()
 	if err != nil {
 		return nil, "", err
@@ -236,7 +245,7 @@ func (s *Service) Login(username, password, ipAddress, userAgent string) (*Authe
 	if bcrypt.CompareHashAndPassword([]byte(admin.Password), []byte(password)) != nil {
 		return nil, "", ErrInvalidCredentials
 	}
-	return s.createSession(admin, ipAddress, userAgent)
+	return s.createSessionWithRemember(admin, ipAddress, userAgent, remember)
 }
 
 func (s *Service) Authenticate(rawToken string) (*AuthenticatedSession, error) {
@@ -343,7 +352,7 @@ func (s *Service) ChangePassword(adminID int, currentPassword, newPassword strin
 	return tx.Commit().Error
 }
 
-func (s *Service) createSession(admin Admin, ipAddress, userAgent string) (*AuthenticatedSession, string, error) {
+func (s *Service) createSessionWithRemember(admin Admin, ipAddress, userAgent string, remember bool) (*AuthenticatedSession, string, error) {
 	rawToken, err := secureToken()
 	if err != nil {
 		return nil, "", err
@@ -355,14 +364,15 @@ func (s *Service) createSession(admin Admin, ipAddress, userAgent string) (*Auth
 	now := s.now()
 	policy := s.PasswordPolicy()
 	session := Session{
-		TokenHash:  digest(rawToken),
-		CSRFToken:  csrfToken,
-		AdminID:    admin.ID,
-		ExpiresAt:  now.Add(policy.SessionTTL),
-		CreatedAt:  now,
-		LastSeenAt: now,
-		IPAddress:  truncate(ipAddress, 64),
-		UserAgent:  truncate(userAgent, 512),
+		TokenHash:   digest(rawToken),
+		CSRFToken:   csrfToken,
+		AdminID:     admin.ID,
+		ExpiresAt:   now.Add(policy.SessionTTL),
+		CreatedAt:   now,
+		LastSeenAt:  now,
+		IPAddress:   truncate(ipAddress, 64),
+		UserAgent:   truncate(userAgent, 512),
+		SessionOnly: !remember,
 	}
 	if err := s.sessions().Create(&session).Error; err != nil {
 		return nil, "", err

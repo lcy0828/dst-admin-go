@@ -46,6 +46,7 @@ type loginFailure struct {
 type credentialsRequest struct {
 	Username string `json:"username" binding:"required,max=256"`
 	Password string `json:"password" binding:"required,max=1024"`
+	Remember *bool  `json:"remember,omitempty"`
 }
 
 type changePasswordRequest struct {
@@ -113,12 +114,13 @@ func (h *AuthHandler) Setup(c *gin.Context) {
 		Failure(c, http.StatusBadRequest, "INVALID_REQUEST", "用户名和密码不能为空", nil)
 		return
 	}
-	authenticated, rawToken, err := h.service.Setup(request.Username, request.Password, c.ClientIP(), c.Request.UserAgent())
+	remember := request.Remember == nil || *request.Remember
+	authenticated, rawToken, err := h.service.SetupWithRemember(request.Username, request.Password, c.ClientIP(), c.Request.UserAgent(), remember)
 	if err != nil {
 		h.writeAuthError(c, err)
 		return
 	}
-	h.writeAuthenticated(c, authenticated, rawToken, http.StatusCreated)
+	h.writeAuthenticated(c, authenticated, rawToken, http.StatusCreated, remember)
 }
 
 func (h *AuthHandler) SaveOnboarding(c *gin.Context) {
@@ -167,7 +169,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		Failure(c, http.StatusTooManyRequests, "LOGIN_RATE_LIMITED", "登录尝试过于频繁，请稍后再试", nil)
 		return
 	}
-	authenticated, rawToken, err := h.service.Login(request.Username, request.Password, c.ClientIP(), c.Request.UserAgent())
+	remember := request.Remember == nil || *request.Remember
+	authenticated, rawToken, err := h.service.LoginWithRemember(request.Username, request.Password, c.ClientIP(), c.Request.UserAgent(), remember)
 	if err != nil {
 		if errors.Is(err, authn.ErrInvalidCredentials) {
 			h.recordFailure(key)
@@ -177,7 +180,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 	h.clearFailure(key)
-	h.writeAuthenticated(c, authenticated, rawToken, http.StatusOK)
+	h.writeAuthenticated(c, authenticated, rawToken, http.StatusOK, remember)
 }
 
 func (h *AuthHandler) Logout(c *gin.Context) {
@@ -215,8 +218,8 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 	Success(c, http.StatusOK, gin.H{"authenticated": false, "setupRequired": false, "passwordChanged": true, "preferences": h.ui()})
 }
 
-func (h *AuthHandler) writeAuthenticated(c *gin.Context, authenticated *authn.AuthenticatedSession, rawToken string, status int) {
-	setSessionCookie(c, rawToken, authenticated.Session.ExpiresAt)
+func (h *AuthHandler) writeAuthenticated(c *gin.Context, authenticated *authn.AuthenticatedSession, rawToken string, status int, remember bool) {
+	setSessionCookie(c, rawToken, authenticated.Session.ExpiresAt, remember)
 	c.Header("Cache-Control", "no-store")
 	Success(c, status, gin.H{
 		"authenticated": true,
@@ -336,17 +339,20 @@ func (h *AuthHandler) clearFailure(key string) {
 	delete(h.failures, key)
 }
 
-func setSessionCookie(c *gin.Context, token string, expiresAt time.Time) {
-	http.SetCookie(c.Writer, &http.Cookie{
+func setSessionCookie(c *gin.Context, token string, expiresAt time.Time, remember bool) {
+	cookie := &http.Cookie{
 		Name:     authn.SessionCookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   requestIsHTTPS(c.Request),
 		SameSite: http.SameSiteLaxMode,
-		Expires:  expiresAt,
-		MaxAge:   int(time.Until(expiresAt).Seconds()),
-	})
+	}
+	if remember {
+		cookie.Expires = expiresAt
+		cookie.MaxAge = int(time.Until(expiresAt).Seconds())
+	}
+	http.SetCookie(c.Writer, cookie)
 }
 
 func clearSessionCookie(c *gin.Context) {

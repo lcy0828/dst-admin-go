@@ -251,3 +251,57 @@ func TestLoginRotationIsLimitedAndFailureCacheExpires(t *testing.T) {
 		t.Fatalf("expired entries remain: %d", len(app.handler.failures))
 	}
 }
+
+func TestLoginRememberCookieBehavior(t *testing.T) {
+	app := newAuthTestApp(t)
+	response := performJSON(app.router, http.MethodPost, "/api/v2/auth/setup", map[string]interface{}{
+		"username": "admin", "password": "strong-password-one",
+	}, nil, "")
+	assertStatus(t, response, http.StatusCreated)
+
+	// remember=false issues a session cookie without MaxAge/Expires and keeps it session-only on sliding refresh
+	response = performJSON(app.router, http.MethodPost, "/api/v2/auth/login", map[string]interface{}{
+		"username": "admin", "password": "strong-password-one", "remember": false,
+	}, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	cookies := response.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("expected session cookie")
+	}
+	if cookies[0].MaxAge != 0 || !cookies[0].Expires.IsZero() {
+		t.Fatalf("expected session cookie when remember=false, got MaxAge=%d Expires=%v", cookies[0].MaxAge, cookies[0].Expires)
+	}
+	refreshResp := performJSON(app.router, http.MethodGet, "/api/v2/protected", nil, cookies[0], "")
+	assertStatus(t, refreshResp, http.StatusOK)
+	refreshedCookies := refreshResp.Result().Cookies()
+	if len(refreshedCookies) == 0 || refreshedCookies[0].MaxAge != 0 || !refreshedCookies[0].Expires.IsZero() {
+		t.Fatalf("expected sliding refresh to preserve session cookie when remember=false, got %+v", refreshedCookies)
+	}
+
+	// remember=true issues a persistent cookie with MaxAge/Expires
+	response = performJSON(app.router, http.MethodPost, "/api/v2/auth/login", map[string]interface{}{
+		"username": "admin", "password": "strong-password-one", "remember": true,
+	}, nil, "")
+	assertStatus(t, response, http.StatusOK)
+	cookies = response.Result().Cookies()
+	if len(cookies) == 0 || cookies[0].MaxAge <= 0 || cookies[0].Expires.IsZero() {
+		t.Fatalf("expected persistent cookie when remember=true, got %+v", cookies)
+	}
+
+	// Setup with remember=false also issues and preserves a session-only cookie
+	setupApp := newAuthTestApp(t)
+	setupResp := performJSON(setupApp.router, http.MethodPost, "/api/v2/auth/setup", map[string]interface{}{
+		"username": "admin", "password": "strong-password-one", "remember": false,
+	}, nil, "")
+	assertStatus(t, setupResp, http.StatusCreated)
+	setupCookies := setupResp.Result().Cookies()
+	if len(setupCookies) == 0 || setupCookies[0].MaxAge != 0 || !setupCookies[0].Expires.IsZero() {
+		t.Fatalf("expected setup session cookie when remember=false, got %+v", setupCookies)
+	}
+	setupRefresh := performJSON(setupApp.router, http.MethodGet, "/api/v2/protected", nil, setupCookies[0], "")
+	assertStatus(t, setupRefresh, http.StatusOK)
+	setupRefreshedCookies := setupRefresh.Result().Cookies()
+	if len(setupRefreshedCookies) == 0 || setupRefreshedCookies[0].MaxAge != 0 || !setupRefreshedCookies[0].Expires.IsZero() {
+		t.Fatalf("expected setup sliding refresh to preserve session cookie when remember=false, got %+v", setupRefreshedCookies)
+	}
+}
