@@ -1,5 +1,5 @@
 {
-  "operationsSHA256": "a810b2c1fb6dc6f15c83e1dba241ad64bf6ad4ba4dce783f7fd1f974f616926d",
+  "operationsSHA256": "fa82aa8a13b14d7a8263dfa14ee5ff8b2dd3e041dab079eea0f993b3659a5b82",
   "operations": [
     {
       "operationId": "activateModPublication",
@@ -144,6 +144,23 @@
       "risk": "normal",
       "runtime": "any",
       "title": "Merge owned Mod fields into the latest Runtime modoverrides.lua and atomically write the selected worlds"
+    },
+    {
+      "operationId": "applyModConfigurationFile",
+      "method": "POST",
+      "path": "/rooms/{roomId}/worlds/{worldId}/mods/configuration-file/actions/apply",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "job",
+        "mod",
+        "room",
+        "world"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Apply revision-checked modoverrides.lua, optionally downloading missing Workshop files"
     },
     {
       "operationId": "applyRoomAccessLists",
@@ -301,6 +318,23 @@
       "risk": "normal",
       "runtime": "any",
       "title": "Protect the room and apply revisioned INI and Lua changes through a persistent job"
+    },
+    {
+      "operationId": "applyWorldConfigurationFiles",
+      "method": "POST",
+      "path": "/rooms/{roomId}/worlds/{worldId}/configuration/files/actions/apply",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "job",
+        "room",
+        "world"
+      ],
+      "access": "write",
+      "risk": "normal",
+      "runtime": "any",
+      "title": "Apply validated world source files through a revision-checked job"
     },
     {
       "operationId": "banRoomPlayer",
@@ -2452,6 +2486,21 @@
       "title": "Read server.ini and leveldataoverride.lua as one revisioned configuration"
     },
     {
+      "operationId": "getWorldConfigurationFiles",
+      "method": "GET",
+      "path": "/rooms/{roomId}/worlds/{worldId}/configuration/files",
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Read the selected world's revisioned INI and Lua source files"
+    },
+    {
       "operationId": "getWorldEntityArtwork",
       "method": "GET",
       "path": "/rooms/{roomId}/worlds/{worldId}/entity-catalog/artwork/{prefab}",
@@ -3689,6 +3738,22 @@
       "title": "Validate and preview a world Mod configuration patch"
     },
     {
+      "operationId": "previewModConfigurationFile",
+      "method": "POST",
+      "path": "/rooms/{roomId}/worlds/{worldId}/mods/configuration-file/preview",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "mod",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Validate a complete modoverrides.lua and preview selected-world changes"
+    },
+    {
       "operationId": "previewRoomAccessLists",
       "method": "POST",
       "path": "/rooms/{roomId}/access/preview",
@@ -3793,6 +3858,22 @@
       "risk": "low",
       "runtime": "any",
       "title": "Validate ports and Lua override patches and calculate a server-side diff"
+    },
+    {
+      "operationId": "previewWorldConfigurationFiles",
+      "method": "POST",
+      "path": "/rooms/{roomId}/worlds/{worldId}/configuration/files/preview",
+      "contentType": "application/json",
+      "transport": "json",
+      "tags": [
+        "configuration",
+        "room",
+        "world"
+      ],
+      "access": "read",
+      "risk": "low",
+      "runtime": "any",
+      "title": "Validate world configuration source and preview changes without writing"
     },
     {
       "operationId": "probeExistingGameInstallation",

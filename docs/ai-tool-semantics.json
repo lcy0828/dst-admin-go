@@ -158,6 +158,23 @@
         "原子写入"
       ]
     },
+    "applyModConfigurationFile": {
+      "purpose": "将校验后的整份模组配置写入所选世界，可选择先下载缺少的工坊模组；必须核对每个世界的配置版本，不会自动重启世界。",
+      "actions": [
+        "保存整份模组配置",
+        "应用模组配置原文"
+      ],
+      "queries": [
+        "保存粘贴的 modoverrides.lua",
+        "下载缺少的工坊模组后保存这份配置"
+      ],
+      "terms": [
+        "modoverrides.lua",
+        "配置原文",
+        "同步世界",
+        "缺失模组下载"
+      ]
+    },
     "applyRoomAccessLists": {
       "purpose": "通过后台任务原子地应用改动后的房间访问名单文件（白名单、黑名单、管理员），保护房间配置不被写坏。",
       "actions": [
@@ -343,6 +360,23 @@
         "server.ini",
         "leveldataoverride.lua",
         "地图生成"
+      ]
+    },
+    "applyWorldConfigurationFiles": {
+      "purpose": "按读取时的配置版本保存世界 INI 和 Lua 原文，通过任务写入实际运行节点并校验；不会自动重启世界，生成规则也不会改造现有地图。",
+      "actions": [
+        "保存世界配置原文",
+        "应用世界文件修改"
+      ],
+      "queries": [
+        "保存刚编辑的洞穴配置文件",
+        "把校验过的地图配置写入所选世界"
+      ],
+      "terms": [
+        "配置原文",
+        "配置版本",
+        "server.ini",
+        "leveldataoverride.lua"
       ]
     },
     "banRoomPlayer": {
@@ -2908,6 +2942,23 @@
         "端口"
       ]
     },
+    "getWorldConfigurationFiles": {
+      "purpose": "读取所选世界的 server.ini 和 leveldataoverride.lua 原文及配置版本，便于在线编辑；不会修改文件或重启世界。",
+      "actions": [
+        "读取世界配置原文",
+        "查看世界配置文件"
+      ],
+      "queries": [
+        "导出洞穴的 server.ini",
+        "查看地图生成配置文件原文"
+      ],
+      "terms": [
+        "配置原文",
+        "server.ini",
+        "leveldataoverride.lua",
+        "在线编辑"
+      ]
+    },
     "getWorldEntityArtwork": {
       "purpose": "从世界已生效的运行环境按需提取游戏或模组缩略图，限量解析图集资源，不调游戏控制台、不走本地兜底，供面板展示图标使用。",
       "actions": [
@@ -4419,6 +4470,23 @@
         "模组开关"
       ]
     },
+    "previewModConfigurationFile": {
+      "purpose": "校验整份 modoverrides.lua 原文，预览所选世界的模组变动和缺少的模组文件；不会下载、保存或重启世界。",
+      "actions": [
+        "校验模组配置原文",
+        "预览整份模组配置"
+      ],
+      "queries": [
+        "这份模组配置粘贴后会改哪些模组",
+        "检查 modoverrides.lua 的语法和缺失模组"
+      ],
+      "terms": [
+        "modoverrides.lua",
+        "配置原文",
+        "语法校验",
+        "缺失模组"
+      ]
+    },
     "previewRoomAccessLists": {
       "purpose": "预览房间白名单、黑名单与管理员名单的校验与增删差异，删除项需精确房间名，只算差异不写盘，确认后再正式提交。",
       "actions": [
@@ -4550,6 +4618,23 @@
         "端口",
         "分片",
         "Lua 补丁"
+      ]
+    },
+    "previewWorldConfigurationFiles": {
+      "purpose": "校验编辑后的世界 INI 和 Lua 原文，返回格式化内容、差异和新版本号；不会执行 Lua、写入配置或重启世界。",
+      "actions": [
+        "校验世界配置原文",
+        "预览世界文件修改"
+      ],
+      "queries": [
+        "粘贴的世界配置能保存吗，先检查语法",
+        "格式化地图配置并预览差异"
+      ],
+      "terms": [
+        "配置原文",
+        "语法校验",
+        "格式化",
+        "世界配置"
       ]
     },
     "probeExistingGameInstallation": {

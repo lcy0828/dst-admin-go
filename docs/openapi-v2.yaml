@@ -5440,6 +5440,62 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/JobEnvelope"
+  /rooms/{roomId}/worlds/{worldId}/configuration/files:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }]
+    get:
+      tags: [Configuration]
+      operationId: getWorldConfigurationFiles
+      x-dst-access: { profile: panel-manage, category: world }
+      x-dst-intent:
+        purpose: "读取所选世界的 server.ini 和 leveldataoverride.lua 原文及配置版本，便于在线编辑；不会修改文件或重启世界。"
+        actions: ["读取世界配置原文", "查看世界配置文件"]
+        queries: ["导出洞穴的 server.ini", "查看地图生成配置文件原文"]
+        terms: ["配置原文", "server.ini", "leveldataoverride.lua", "在线编辑"]
+      summary: Read the selected world's revisioned INI and Lua source files
+      responses:
+        "200": { description: Runtime configuration source and parsed values, content: { application/json: { schema: { $ref: "#/components/schemas/WorldConfigurationFilesEnvelope" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /rooms/{roomId}/worlds/{worldId}/configuration/files/preview:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }]
+    post:
+      tags: [Configuration]
+      operationId: previewWorldConfigurationFiles
+      x-dst-access: { profile: panel-manage, access: read, category: world }
+      x-dst-tool: { readOnly: true }
+      x-dst-intent:
+        purpose: "校验编辑后的世界 INI 和 Lua 原文，返回格式化内容、差异和新版本号；不会执行 Lua、写入配置或重启世界。"
+        actions: ["校验世界配置原文", "预览世界文件修改"]
+        queries: ["粘贴的世界配置能保存吗，先检查语法", "格式化地图配置并预览差异"]
+        terms: ["配置原文", "语法校验", "格式化", "世界配置"]
+      summary: Validate world configuration source and preview changes without writing
+      description: Each source is limited to 240 KiB UTF-8. Lua must return a literal table; calls and dynamic expressions are rejected. Source-only edits retain comments unless formatting or structured patches rewrite the file. Existing maps are not regenerated.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/WorldConfigurationFilesInput" } } } }
+      responses:
+        "200": { description: Validated sources and proposed changes, content: { application/json: { schema: { $ref: "#/components/schemas/WorldConfigurationFilesPreviewEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { description: Source file exceeds the size limit, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/worlds/{worldId}/configuration/files/actions/apply:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }]
+    post:
+      tags: [Configuration, Jobs]
+      operationId: applyWorldConfigurationFiles
+      x-dst-access: { profile: panel-manage, access: write, category: world }
+      x-dst-intent:
+        purpose: "按读取时的配置版本保存世界 INI 和 Lua 原文，通过任务写入实际运行节点并校验；不会自动重启世界，生成规则也不会改造现有地图。"
+        actions: ["保存世界配置原文", "应用世界文件修改"]
+        queries: ["保存刚编辑的洞穴配置文件", "把校验过的地图配置写入所选世界"]
+        terms: ["配置原文", "配置版本", "server.ini", "leveldataoverride.lua"]
+      summary: Apply validated world source files through a revision-checked job
+      description: Uses the applied Runtime placement and the existing configuration publication protocol. Stale revisions are rejected. allowEmptyChanges is always false for apply; an accepted job is not a completed write.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/WorldConfigurationFilesInput" } } } }
+      responses:
+        "202": { description: Configuration write job accepted; follow the job to completion, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { description: Source file exceeds the size limit, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/access:
     parameters:
       - $ref: "#/components/parameters/RoomID"
@@ -7190,6 +7246,48 @@ paths:
       responses:
         "200": { description: Exact modoverrides.lua content, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationFileEnvelope" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
+  /rooms/{roomId}/worlds/{worldId}/mods/configuration-file/preview:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }]
+    post:
+      tags: [Mods]
+      operationId: previewModConfigurationFile
+      x-dst-access: { profile: panel-manage, access: read, category: mods }
+      x-dst-tool: { readOnly: true }
+      x-dst-intent:
+        purpose: "校验整份 modoverrides.lua 原文，预览所选世界的模组变动和缺少的模组文件；不会下载、保存或重启世界。"
+        actions: ["校验模组配置原文", "预览整份模组配置"]
+        queries: ["这份模组配置粘贴后会改哪些模组", "检查 modoverrides.lua 的语法和缺失模组"]
+        terms: ["modoverrides.lua", "配置原文", "语法校验", "缺失模组"]
+      summary: Validate a complete modoverrides.lua and preview selected-world changes
+      description: Limited to 4 MiB UTF-8. Only literal Lua tables are accepted; Lua is never executed. Metadata uses local or cached information. Preserve returned per-world and topology revisions for apply.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationFilePreviewInput" } } } }
+      responses:
+        "200": { description: Normalized source, changes and missing files, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationFilePreviewEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { description: Source exceeds 4 MiB, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
+  /rooms/{roomId}/worlds/{worldId}/mods/configuration-file/actions/apply:
+    parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }]
+    post:
+      tags: [Mods, Jobs]
+      operationId: applyModConfigurationFile
+      x-dst-access: { profile: panel-manage, access: write, category: mods }
+      x-dst-intent:
+        purpose: "将校验后的整份模组配置写入所选世界，可选择先下载缺少的工坊模组；必须核对每个世界的配置版本，不会自动重启世界。"
+        actions: ["保存整份模组配置", "应用模组配置原文"]
+        queries: ["保存粘贴的 modoverrides.lua", "下载缺少的工坊模组后保存这份配置"]
+        terms: ["modoverrides.lua", "配置原文", "同步世界", "缺失模组下载"]
+      summary: Apply revision-checked modoverrides.lua, optionally downloading missing Workshop files
+      description: A single-world apply requires expectedRevision or the world's expectedRevisions entry; multiple worlds require each current revision. Preserve expectedTopologyRevision from read or preview. Returns 200 for direct writes or 202 when missing Workshop files must first be downloaded. Missing local Mods cannot be downloaded. Neither response proves the running game has loaded the configuration.
+      parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationFileApplyInput" } } } }
+      responses:
+        "200": { description: Configuration written and verified on selected Runtime worlds, content: { application/json: { schema: { $ref: "#/components/schemas/ModConfigurationApplyEnvelope" } } } }
+        "202": { description: Download and configuration job accepted, content: { application/json: { schema: { $ref: "#/components/schemas/JobEnvelope" } } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { description: Source exceeds 4 MiB, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } }
+        "422": { $ref: "#/components/responses/UnprocessableEntity" }
   /rooms/{roomId}/worlds/{worldId}/mods/{modId}/configuration:
     parameters: [{ $ref: "#/components/parameters/RoomID" }, { $ref: "#/components/parameters/WorldID" }, { $ref: "#/components/parameters/ModReference" }]
     get:
@@ -12737,6 +12835,10 @@ components:
         password:
           type: string
           minLength: 1
+        remember:
+          type: boolean
+          default: true
+          description: False creates a browser-session cookie; server-side expiry still applies. Omission preserves existing persistent-cookie behavior.
     SetupCredentials:
       type: object
       additionalProperties: false
@@ -12750,6 +12852,10 @@ components:
           type: string
           minLength: 6
           maxLength: 72
+        remember:
+          type: boolean
+          default: true
+          description: False creates a browser-session cookie; omission preserves existing persistent-cookie behavior.
     Admin:
       type: object
       additionalProperties: false
@@ -15926,8 +16032,9 @@ components:
           maxLength: 64
         shardId:
           type: integer
-          minimum: 1
+          minimum: 0
           maximum: 999
+          description: Master may use 0; non-master worlds require an ID from 1 to 999.
         authenticationPort:
           type: integer
           minimum: 0
@@ -16006,6 +16113,74 @@ components:
           type: "null"
         meta:
           $ref: "#/components/schemas/Meta"
+    ConfigurationSyncState:
+      type: object
+      additionalProperties: false
+      required: [status, readOnly, stale]
+      properties:
+        status: { type: string }
+        source: { type: string }
+        targetId: { type: string }
+        installationId: { type: string }
+        observedRevision: { type: string }
+        observedAt: { type: string, format: date-time }
+        readOnly: { type: boolean }
+        stale: { type: boolean }
+        lastError: { type: string }
+    WorldConfigurationFiles:
+      type: object
+      additionalProperties: false
+      required: [revision, worldType, serverIni, leveldataoverride, server, overrides, unknownFieldCount, modifiedAt, sync]
+      properties:
+        revision: { type: string }
+        worldType: { type: string }
+        serverIni: { type: string }
+        leveldataoverride: { type: string }
+        server: { $ref: "#/components/schemas/WorldServerValues" }
+        overrides: { type: object, additionalProperties: true }
+        unknownFieldCount: { type: integer, minimum: 0 }
+        modifiedAt: { type: string, format: date-time }
+        sync: { $ref: "#/components/schemas/ConfigurationSyncState" }
+    WorldConfigurationFilesEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/WorldConfigurationFiles" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    WorldConfigurationFilesInput:
+      type: object
+      additionalProperties: false
+      required: [expectedRevision]
+      properties:
+        expectedRevision: { type: string, minLength: 1 }
+        serverIni: { type: string, maxLength: 245760, description: At most 240 KiB UTF-8; omit to retain the latest source }
+        leveldataoverride: { type: string, maxLength: 245760, description: At most 240 KiB UTF-8; a literal return table or pasted Klei/bare-table source }
+        server: { $ref: "#/components/schemas/WorldServerValues" }
+        overridePatch: { type: object, maxProperties: 1000, additionalProperties: true }
+        format: { type: boolean, default: false }
+        allowEmptyChanges: { type: boolean, default: false, description: Preview only; apply always ignores this flag }
+    WorldConfigurationFilesPreview:
+      type: object
+      additionalProperties: false
+      required: [revision, nextRevision, changes, serverIni, leveldataoverride, server, overrides, unknownFieldCount]
+      properties:
+        revision: { type: string }
+        nextRevision: { type: string }
+        changes: { type: [array, "null"], items: { $ref: "#/components/schemas/ConfigurationChange" } }
+        serverIni: { type: string }
+        leveldataoverride: { type: string }
+        server: { $ref: "#/components/schemas/WorldServerValues" }
+        overrides: { type: object, additionalProperties: true }
+        unknownFieldCount: { type: integer, minimum: 0 }
+        notices: { type: array, items: { type: string } }
+    WorldConfigurationFilesPreviewEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/WorldConfigurationFilesPreview" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
     AccessLists:
       type: object
       additionalProperties: false
@@ -16397,12 +16572,71 @@ components:
         content: { type: string }
         exists: { type: boolean }
         revision: { type: string }
+        worldRevisions: { type: object, additionalProperties: { type: string } }
+        topologyRevision: { type: string }
         readAt: { type: string, format: date-time }
     ModConfigurationFileEnvelope:
       type: object
       required: [data, error, meta]
       properties:
         data: { $ref: "#/components/schemas/ModConfigurationFile" }
+        error: { type: "null" }
+        meta: { $ref: "#/components/schemas/Meta" }
+    ModConfigurationFilePreviewInput:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content: { type: string, maxLength: 4194304, description: At most 4 MiB UTF-8 of literal modoverrides.lua source }
+        worldIds: { type: array, uniqueItems: true, items: { type: string }, description: Defaults to the world in the path }
+        expectedRevision: { type: string }
+        expectedRevisions: { type: object, additionalProperties: { type: string } }
+        expectedTopologyRevision: { type: string }
+        format: { type: boolean, default: false }
+    ModConfigurationFileApplyInput:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content: { type: string, maxLength: 4194304, description: At most 4 MiB UTF-8 of literal modoverrides.lua source }
+        worldIds: { type: array, uniqueItems: true, items: { type: string }, description: Defaults to the world in the path }
+        expectedRevision: { type: string, description: Required for a single world unless expectedRevisions supplies it }
+        expectedRevisions: { type: object, additionalProperties: { type: string }, description: Required for every selected world when applying to multiple worlds }
+        expectedTopologyRevision: { type: string }
+        downloadMissing: { type: boolean, default: false }
+        format: { type: boolean, default: false }
+    ModConfigurationFileChange:
+      type: object
+      additionalProperties: false
+      required: [modId, source, directoryName, enabled, operation]
+      properties:
+        modId: { type: string }
+        source: { type: string }
+        directoryName: { type: string }
+        name: { type: string }
+        previewUrl: { type: string }
+        enabled: { type: boolean }
+        operation: { type: string }
+        missing: { type: boolean }
+    ModConfigurationFilePreview:
+      type: object
+      additionalProperties: false
+      required: [revision, nextRevision, normalizedContent, changes, missingWorkshopIds, missingLocalModIds, notices]
+      properties:
+        revision: { type: string }
+        nextRevision: { type: string }
+        worldRevisions: { type: object, additionalProperties: { type: string } }
+        topologyRevision: { type: string }
+        normalizedContent: { type: string }
+        changes: { type: [array, "null"], items: { $ref: "#/components/schemas/ModConfigurationFileChange" } }
+        missingWorkshopIds: { type: [array, "null"], items: { type: string } }
+        missingLocalModIds: { type: [array, "null"], items: { type: string } }
+        notices: { type: [array, "null"], items: { type: string } }
+    ModConfigurationFilePreviewEnvelope:
+      type: object
+      required: [data, error, meta]
+      properties:
+        data: { $ref: "#/components/schemas/ModConfigurationFilePreview" }
         error: { type: "null" }
         meta: { $ref: "#/components/schemas/Meta" }
     ModConfigurationInput:
