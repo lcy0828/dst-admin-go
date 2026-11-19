@@ -7073,7 +7073,7 @@ paths:
         terms: ["模组安装", "创意工坊", "modoverrides.lua"]
       x-dst-tool: {"openWorld": true}
       summary: Download a Mod on the selected worlds' runtime installations and add it to their room configuration
-      description: Reads each selected target installation. Workshop content is downloaded only when needed. A local Mod must already exist on every selected installation and includeDependencies must be false; no Steam download or cross-node local file copy occurs. Only selected worlds' modoverrides.lua files are changed, preserving other entries. Changes take effect on the next world start.
+      description: Reads each selected target installation. Set reuseInstalled to use ready Workshop files even if the latest version cannot be verified. Only missing Workshop files are downloaded in that mode. A local Mod must already exist on every selected installation and includeDependencies must be false. Only selected worlds' modoverrides.lua files are changed, preserving other entries. Changes take effect on the next world start.
       parameters: [{ $ref: "#/components/parameters/CSRFToken" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModInstallInput" } } } }
       responses:
@@ -16481,6 +16481,7 @@ components:
         worldIds: { type: array, items: { type: string } }
         enabled: { type: boolean }
         includeDependencies: { type: boolean, description: Must be false for an already installed local Mod; local files are never downloaded from Steam. }
+        reuseInstalled: { type: boolean, default: false, description: Reuse ready files on each selected installation without updating them. Download only confirmed missing Workshop items. }
     ModDownloadInput:
       type: object
       additionalProperties: false

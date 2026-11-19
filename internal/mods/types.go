@@ -235,6 +235,7 @@ type InstallRequest struct {
 	WorldIDs            []string `json:"worldIds"`
 	Enabled             bool     `json:"enabled"`
 	IncludeDependencies bool     `json:"includeDependencies"`
+	ReuseInstalled      bool     `json:"reuseInstalled,omitempty"`
 }
 
 type DownloadRequest struct {

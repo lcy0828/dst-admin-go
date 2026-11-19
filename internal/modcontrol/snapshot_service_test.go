@@ -112,6 +112,7 @@ type installationContentFetcherFixture struct {
 	targetID       string
 	installationID string
 	modIDs         []string
+	linkedIDs      []string
 	calls          int
 }
 
@@ -143,7 +144,8 @@ func (f *installationContentFetcherFixture) UpdateInstallationMods(_ context.Con
 	return mods.ActionResult{ModIDs: append([]string(nil), modIDs...)}, nil
 }
 
-func (f *installationContentFetcherFixture) LinkInstallationMods(context.Context, string, string, []string) error {
+func (f *installationContentFetcherFixture) LinkInstallationMods(_ context.Context, _, _ string, modIDs []string) error {
+	f.linkedIDs = append([]string(nil), modIDs...)
 	return f.err
 }
 
@@ -254,6 +256,62 @@ func TestInstallDownloadsWhenSelectedRuntimeModIsOutdated(t *testing.T) {
 	}
 	if fetcher.calls != 1 {
 		t.Fatalf("outdated Runtime Mod download calls=%d", fetcher.calls)
+	}
+}
+
+func TestRoomInstallReusesReadyFilesWithoutLatestVersionEvidence(t *testing.T) {
+	for _, state := range []shared.RuntimeModFileStatus{shared.RuntimeModFileReady, shared.RuntimeModFileMissing, ""} {
+		t.Run(string(state), func(t *testing.T) {
+			fixture := newSnapshotFixture(t)
+			fixture.mods.dependencyIDs = []string{"400", "401"}
+			fixture.mods.describeErr = errors.New("version evidence unavailable")
+			fetcher := &installationContentFetcherFixture{}
+			service, err := NewService(fixture.source, fixture.mods, &snapshotCoordinator{source: fixture.source})
+			if err != nil {
+				t.Fatal(err)
+			}
+			service.installer = fetcher
+			publisher := &modConfigurationPublisherFixture{}
+			service.configuration = publisher
+			observer := &testRuntimeFileObserver{observation: &shared.RuntimeModFilesObservation{
+				InstallationID: "install-2",
+				Mods: map[string]shared.RuntimeModFileState{
+					"400": {Status: shared.RuntimeModFileReady},
+					"401": {Status: state},
+				},
+			}}
+			service.runtimeFiles = observer
+
+			_, err = service.Install(context.Background(), "job-add", fixture.room.ID, mods.InstallRequest{
+				ModID: "400", WorldIDs: []string{fixture.caves.ID}, Enabled: true,
+				IncludeDependencies: true, ReuseInstalled: true,
+			}, io.Discard)
+			if state == "" {
+				if err == nil || fetcher.calls != 0 || len(publisher.writes) != 0 {
+					t.Fatalf("unconfirmed files dispatched work: err=%v fetch=%+v writes=%v", err, fetcher, publisher.writes)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state == shared.RuntimeModFileReady {
+				if fetcher.calls != 0 || !sameStringSet(fetcher.linkedIDs, map[string]bool{"400": true, "401": true}) {
+					t.Fatalf("ready files were not reused: %+v", fetcher)
+				}
+			} else if fetcher.calls != 1 || !sameStringSet(fetcher.modIDs, map[string]bool{"401": true}) ||
+				!sameStringSet(fetcher.linkedIDs, map[string]bool{"400": true}) {
+				t.Fatalf("only the missing dependency should download: %+v", fetcher)
+			}
+			content := publisher.writes[fixture.room.ID+"/"+fixture.caves.ID]
+			if len(publisher.writes) != 1 || !bytes.Contains(content, []byte("workshop-400")) || !bytes.Contains(content, []byte("workshop-401")) {
+				t.Fatalf("unexpected world writes: %v", publisher.writes)
+			}
+			if len(observer.requests) != 1 || observer.requests[0].TargetID != "target-2" ||
+				!sameStringSet(observer.requests[0].WorkshopIDs, map[string]bool{"400": true, "401": true}) {
+				t.Fatalf("unexpected runtime reads: %+v", observer.requests)
+			}
+		})
 	}
 }
 

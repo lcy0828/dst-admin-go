@@ -19,8 +19,9 @@ import (
 const installationDownloadConcurrency = 3
 
 type installationModDownload struct {
-	placement modpublication.AppliedPlacement
-	modIDs    []string
+	placement      modpublication.AppliedPlacement
+	modIDs         []string
+	reuseInstalled bool
 }
 
 type modDownloadOutput struct {
@@ -35,9 +36,13 @@ func (w *modDownloadOutput) Write(data []byte) (int, error) {
 }
 
 func (s *Service) downloadRoomInstallations(ctx context.Context, targets map[string]modpublication.AppliedPlacement, modIDs []string, output io.Writer) (int, int, error) {
+	return s.prepareRoomModFiles(ctx, targets, modIDs, output, false)
+}
+
+func (s *Service) prepareRoomModFiles(ctx context.Context, targets map[string]modpublication.AppliedPlacement, modIDs []string, output io.Writer, reuseInstalled bool) (int, int, error) {
 	groups := make(map[string]installationModDownload, len(targets))
 	for key, placement := range targets {
-		groups[key] = installationModDownload{placement: placement, modIDs: modIDs}
+		groups[key] = installationModDownload{placement: placement, modIDs: modIDs, reuseInstalled: reuseInstalled}
 	}
 	return s.downloadInstallationGroups(ctx, groups, output)
 }
@@ -64,6 +69,7 @@ func (s *Service) downloadInstallationGroups(ctx context.Context, targets map[st
 	download := func(index int) {
 		group := targets[keys[index]]
 		placement, modIDs := group.placement, group.modIDs
+		var reusedItems []shared.ModDownloadProgress
 		checkpoint := func(status, message string) error {
 			return mods.RecordUpdateTarget(ctx, mods.ModUpdateTarget{TargetID: placement.TargetID, InstallationID: placement.InstallationID, ModIDs: modIDs, Status: status, Message: message})
 		}
@@ -73,12 +79,16 @@ func (s *Service) downloadInstallationGroups(ctx context.Context, targets map[st
 			update.Percent = max(progress[index].Percent, min(100, max(0, update.Percent)))
 			if len(update.Items) == 0 {
 				update.Items = progress[index].Items
+			} else if len(reusedItems) > 0 {
+				update.Items = append(append([]shared.ModDownloadProgress(nil), reusedItems...), update.Items...)
 			}
 			progress[index] = update
 			// Bytes and item ordinal describe this installation's current mod, not
 			// an aggregate across differently sized downloads on other machines.
 			combined := update
-			combined.Stage = operationprogress.StageModCache
+			if combined.Stage != operationprogress.StageModInspect {
+				combined.Stage = operationprogress.StageModCache
+			}
 			combined.TargetID, combined.InstallationID = placement.TargetID, placement.InstallationID
 			combined.Message = fmt.Sprintf("%s/%s: %s", placement.TargetID, placement.InstallationID, update.Message)
 			combined.Percent = 0
@@ -95,8 +105,35 @@ func (s *Service) downloadInstallationGroups(ctx context.Context, targets map[st
 			errorsByTarget[index] = err
 			return
 		}
-		report(operationprogress.Update{Message: "正在检查已有模组"})
-		current, inspectErr := s.installationModsCurrent(childCtx, placement.TargetID, placement.InstallationID, modIDs)
+		report(operationprogress.Update{Stage: operationprogress.StageModInspect, Message: "正在检查已有模组"})
+		current := false
+		var inspectErr error
+		if group.reuseInstalled {
+			installed, missing, err := s.roomModFiles(childCtx, placement, modIDs)
+			if err != nil {
+				errorsByTarget[index] = fmt.Errorf("%s/%s 无法读取机器已有模组: %w", placement.TargetID, placement.InstallationID, err)
+				return
+			}
+			if len(missing) == 0 {
+				current = true
+			} else {
+				if len(installed) > 0 {
+					if err := s.installer.LinkInstallationMods(childCtx, placement.TargetID, placement.InstallationID, installed); err != nil {
+						errorsByTarget[index] = fmt.Errorf("%s/%s 本地模组准备失败: %w", placement.TargetID, placement.InstallationID, err)
+						return
+					}
+					items := readyModProgress(placement, installed, "使用已有文件")
+					for _, id := range missing {
+						items = append(items, shared.ModDownloadProgress{WorkshopID: id, TargetID: placement.TargetID, InstallationID: placement.InstallationID, Status: "queued"})
+					}
+					report(operationprogress.Update{Stage: operationprogress.StageModInspect, Message: "已有文件已就绪，正在准备补下载", Items: items})
+					reusedItems = items[:len(installed)]
+				}
+				modIDs = missing
+			}
+		} else {
+			current, inspectErr = s.installationModsCurrent(childCtx, placement.TargetID, placement.InstallationID, modIDs)
+		}
 		if previous := mods.PreviousUpdateTarget(ctx, placement.TargetID, placement.InstallationID); previous != nil &&
 			(previous.Status == "downloading" || previous.Status == "uncertain") {
 			verified := false
@@ -122,11 +159,15 @@ func (s *Service) downloadInstallationGroups(ctx context.Context, targets map[st
 				errorsByTarget[index] = err
 				return
 			}
-			items := make([]shared.ModDownloadProgress, len(modIDs))
-			for i, id := range modIDs {
-				items[i] = shared.ModDownloadProgress{WorkshopID: id, TargetID: placement.TargetID, InstallationID: placement.InstallationID, Status: "succeeded", Message: "已有最新文件"}
+			message := "已有最新模组，跳过下载"
+			itemMessage := "已有最新文件"
+			stage := operationprogress.StageModCache
+			if group.reuseInstalled {
+				message = "模组文件已就绪"
+				itemMessage = "使用已有文件"
+				stage = operationprogress.StageModInspect
 			}
-			report(operationprogress.Update{Percent: 100, Message: "已有最新模组，跳过下载", Items: items})
+			report(operationprogress.Update{Stage: stage, Percent: 100, Message: message, Items: readyModProgress(placement, modIDs, itemMessage)})
 			return
 		}
 		if mods.TracksUpdate(ctx) && inspectErr != nil {
@@ -193,4 +234,41 @@ func (s *Service) downloadInstallationGroups(ctx context.Context, targets map[st
 		return downloaded, current, fmt.Errorf("%d/%d 个安装实例已就绪，未修改房间配置: %w", downloaded+current, len(keys), err)
 	}
 	return downloaded, current, nil
+}
+
+func (s *Service) roomModFiles(ctx context.Context, placement modpublication.AppliedPlacement, modIDs []string) (installed, missing []string, err error) {
+	if s.runtimeFiles == nil {
+		return nil, nil, errors.New("运行机器模组清单不可用")
+	}
+	observed, err := s.runtimeFiles.ObserveRuntimeModFiles(ctx, RuntimeFileRequest{
+		TargetID: placement.TargetID, InstallationID: placement.InstallationID,
+		TopologyRevision: "room-mod-install-v1", WorkshopIDs: modIDs,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if observed == nil || observed.InstallationID != placement.InstallationID {
+		return nil, nil, errors.New("运行机器返回的 Mod 安装目录清单无效")
+	}
+	for _, id := range modIDs {
+		switch observed.Mods[id].Status {
+		case shared.RuntimeModFileReady:
+			installed = append(installed, id)
+		case shared.RuntimeModFileMissing:
+			missing = append(missing, id)
+		case shared.RuntimeModFileInvalid:
+			return nil, nil, fmt.Errorf("模组 %s 的文件不完整，请先修复机器模组", id)
+		default:
+			return nil, nil, fmt.Errorf("无法确认模组 %s 的文件可用", id)
+		}
+	}
+	return installed, missing, nil
+}
+
+func readyModProgress(placement modpublication.AppliedPlacement, ids []string, message string) []shared.ModDownloadProgress {
+	items := make([]shared.ModDownloadProgress, len(ids))
+	for i, id := range ids {
+		items[i] = shared.ModDownloadProgress{WorkshopID: id, TargetID: placement.TargetID, InstallationID: placement.InstallationID, Status: "succeeded", Message: message}
+	}
+	return items
 }

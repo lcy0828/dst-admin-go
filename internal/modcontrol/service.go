@@ -226,11 +226,15 @@ func (s *Service) Install(ctx context.Context, _ string, roomID string, request 
 		}
 		return mods.ActionResult{ModIDs: []string{ref.ID}, Message: "已将本机模组添加到所选世界；运行中的世界将在下次重启后生效"}, nil
 	}
-	downloadedTargets, readyTargets, err := s.downloadRoomInstallations(ctx, targets, prepared.modIDs, output)
+	filesCtx := ctx
+	if request.ReuseInstalled {
+		filesCtx = withPublicationSnapshot(ctx, proposal{roomID: roomID, roomOnly: true, readOnly: true})
+	}
+	downloadedTargets, readyTargets, err := s.prepareRoomModFiles(filesCtx, targets, prepared.modIDs, output, request.ReuseInstalled)
 	if err != nil {
 		return mods.ActionResult{}, err
 	}
-	operationprogress.Report(ctx, operationprogress.Update{Stage: operationprogress.StageModPrepare, Percent: 50, Message: "下载完成，正在写入房间模组配置"})
+	operationprogress.Report(ctx, operationprogress.Update{Stage: operationprogress.StageModPrepare, Percent: 50, Message: "模组文件已就绪，正在写入房间配置"})
 	currentTargets, err := s.selectedInstallationPlacements(ctx, roomID, prepared.worldIDs)
 	if err != nil {
 		return mods.ActionResult{}, err
@@ -252,6 +256,10 @@ func (s *Service) Install(ctx context.Context, _ string, roomID string, request 
 	if downloadedTargets == 0 {
 		message = fmt.Sprintf("%d 台运行机器已有最新模组，已直接添加到所选世界；运行中的世界将在下次重启后生效", readyTargets)
 		progressMessage = "运行机器已有最新模组，已直接添加到房间"
+		if request.ReuseInstalled {
+			message = "已使用运行机器上的模组文件并添加到所选世界；运行中的世界将在下次重启后生效"
+			progressMessage = "已使用机器上的模组文件，完成房间配置"
+		}
 	} else if readyTargets > 0 {
 		message = fmt.Sprintf("已在 %d 台运行机器下载模组，另有 %d 台无需重复下载，并添加到所选世界；运行中的世界将在下次重启后生效", downloadedTargets, readyTargets)
 	}
@@ -1460,7 +1468,6 @@ func (s *Service) ApplyConfiguration(ctx context.Context, roomID, worldID, modID
 	prepared.roomOnly = true
 	return s.applyPreparedOverrides(ctx, prepared, request.ExpectedTopologyRevision)
 }
-
 
 func (s *Service) prepare(ctx context.Context, roomID string, request Request) (proposal, error) {
 	roomID = strings.TrimSpace(roomID)
